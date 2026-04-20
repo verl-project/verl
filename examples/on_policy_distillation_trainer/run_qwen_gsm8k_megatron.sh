@@ -9,14 +9,14 @@ FAMILY="Qwen"
 STUDENT_MODEL=Qwen2.5-0.5B
 TEACHER_MODEL=Qwen2.5-3B-Instruct
 
-# USE_POLICY_GRADIENT=False
+USE_POLICY_GRADIENT=False
 # DISTILLATION_LOSS_MODE="k3"
-# DISTILLATION_LOSS_MODE="forward_kl_topk"
-# USE_FUSED_KERNELS=False
-
-USE_POLICY_GRADIENT=True
-DISTILLATION_LOSS_MODE="k1"
+DISTILLATION_LOSS_MODE="forward_kl_topk"
 USE_FUSED_KERNELS=False
+
+# USE_POLICY_GRADIENT=True
+# DISTILLATION_LOSS_MODE="k1"
+# USE_FUSED_KERNELS=True
 
 DISTILLATION_LOSS_MAX_CLAMP=10.0
 DISTILLATION_LOG_PROB_MIN_CLAMP=-10.0
@@ -27,19 +27,28 @@ MAX_PROMPT=256
 MAX_RESPONSE_LENGTH=512
 MAX_NUM_TOKENS=$(( MAX_PROMPT + MAX_RESPONSE_LENGTH + 1 ))
 TRAIN_PROMPT_BSZ=128
-STUDENT_MICRO_BATCH_SIZE_PER_GPU=2
+STUDENT_MICRO_BATCH_SIZE_PER_GPU=1
 STUDENT_MAX_TOKEN_LEN_PER_GPU=$(( STUDENT_MICRO_BATCH_SIZE_PER_GPU * (MAX_PROMPT + MAX_RESPONSE_LENGTH) ))
-USE_DYNAMIC_BSZ=True
+USE_DYNAMIC_BSZ=False
 
-STUDENT_WORLD_SIZE=2
+STUDENT_WORLD_SIZE=4
 
-TEACHER_WORLD_SIZE=4
+TEACHER_WORLD_SIZE=2
 
-SP=1
+TP=2
+PP=1
+CP=1
+EP=1
+ETP=1
 
-EXP_NAME="fsdp/student-${STUDENT_MODEL}/teacher-${TEACHER_MODEL}/loss-${DISTILLATION_LOSS_MODE}/pg-${USE_POLICY_GRADIENT}"
+EXP_NAME="megatron/student-${STUDENT_MODEL}/teacher-${TEACHER_MODEL}/loss-${DISTILLATION_LOSS_MODE}/pg-${USE_POLICY_GRADIENT}"
 
-ENFORCE_EAGER=True # true for faster debugging
+PARAM_OFFLOAD=True                                                                                                                                                                                                                                                                                                                                                         
+OPTIMIZER_OFFLOAD=True                                                                                                                                                                                                                                                                                                                                                          
+GRAD_OFFLOAD=False
+
+
+ENFORCE_EAGER=False # true for faster debugging
 
 ############################ Paths ############################
 
@@ -97,9 +106,20 @@ STUDENT=(
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=$STUDENT_MICRO_BATCH_SIZE_PER_GPU
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=$STUDENT_MAX_TOKEN_LEN_PER_GPU
     actor_rollout_ref.actor.use_dynamic_bsz=$USE_DYNAMIC_BSZ
-    actor_rollout_ref.actor.fsdp_config.param_offload=True
-    actor_rollout_ref.actor.fsdp_config.optimizer_offload=True
-    actor_rollout_ref.actor.ulysses_sequence_parallel_size=$SP
+    actor_rollout_ref.actor.megatron.use_mbridge=True
+    actor_rollout_ref.actor.megatron.vanilla_mbridge=False
+    actor_rollout_ref.actor.megatron.use_remove_padding=True
+    actor_rollout_ref.actor.megatron.tensor_model_parallel_size=$TP
+    actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=$PP
+    actor_rollout_ref.actor.megatron.expert_model_parallel_size=$EP
+    actor_rollout_ref.actor.megatron.context_parallel_size=$CP
+    actor_rollout_ref.actor.megatron.expert_tensor_parallel_size=$ETP
+    actor_rollout_ref.actor.megatron.param_offload=$PARAM_OFFLOAD
+    actor_rollout_ref.actor.megatron.optimizer_offload=$OPTIMIZER_OFFLOAD
+    actor_rollout_ref.actor.megatron.grad_offload=$GRAD_OFFLOAD
+    +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform
+    +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full
+    +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1
 )
 
 ROLLOUT=(
@@ -141,7 +161,7 @@ TRAINER=(
 
 python3 -m verl.trainer.main_ppo \
     --config-path=config \
-    --config-name='ppo_trainer.yaml' \
+    --config-name='ppo_megatron_trainer.yaml' \
     "${DATA[@]}" \
     "${ALGORITHM[@]}" \
     "${MODEL[@]}" \

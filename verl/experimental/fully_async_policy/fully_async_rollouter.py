@@ -89,7 +89,6 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         self.kl_ctrl_in_reward = False
 
         self.use_prefix_grouper = self.config.actor_rollout_ref.actor.get("use_prefix_grouper", False)
-        self.use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
 
         # ==================== fully async config ====================
 
@@ -245,9 +244,13 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
             # every time param change, reset staleness_samples
             self.staleness_samples = len(self.active_tasks) + await self.message_queue_client.get_queue_size()
             timing_raw = {}
-            rollout_active_time = self.idle_start_time - self.step_start_time
-            rollout_version_time = time.time() - self.step_start_time
-            idle_ratio = 1 - rollout_active_time / rollout_version_time
+            rollout_version_time = max(time.time() - self.step_start_time, 1e-6)
+            if self.idle_start_time > self.step_start_time:
+                rollout_active_time = self.idle_start_time - self.step_start_time
+                idle_ratio = 1 - rollout_active_time / rollout_version_time
+            else:
+                rollout_active_time = rollout_version_time
+                idle_ratio = 0
             timing_raw["fully_async/rollouter/active_time"] = rollout_active_time
             timing_raw["fully_async/rollouter/version_time"] = rollout_version_time
             timing_raw["fully_async/rollouter/idle_ratio"] = idle_ratio
@@ -666,7 +669,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
 
     async def _should_pause_generation(self) -> bool:
         """Determine whether the build should be paused"""
-        queue_stats = self.message_queue_client.get_statistics_sync()
+        queue_stats = await self.message_queue_client.get_statistics()
         queue_size = queue_stats["queue_size"]
 
         if queue_size >= self.max_queue_size:
@@ -689,7 +692,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         return False
 
     async def get_statistics(self) -> dict:
-        queue_stats = self.message_queue_client.get_statistics_sync()
+        queue_stats = await self.message_queue_client.get_statistics()
 
         stats = {
             # monitor stats

@@ -6,47 +6,39 @@ set -xeuo pipefail
 ROLLOUT_NAME="vllm" # sglang or vllm
 
 FAMILY="Qwen"
-STUDENT_MODEL=Qwen2.5-0.5B
-TEACHER_MODEL=Qwen2.5-3B-Instruct
+STUDENT_MODEL=Qwen3-VL-2B-Instruct
+GSM8K_TEACHER_MODEL=Qwen3-4B-Instruct-2507
+GEO3K_TEACHER_MODEL=Qwen3-VL-4B-Instruct
 
-USE_POLICY_GRADIENT=False
-# DISTILLATION_LOSS_MODE="k3"
-DISTILLATION_LOSS_MODE="forward_kl_topk"
+USE_POLICY_GRADIENT=True
+DISTILLATION_LOSS_MODE="k1"
 USE_FUSED_KERNELS=False
-
-# USE_POLICY_GRADIENT=True
-# DISTILLATION_LOSS_MODE="k1"
-# USE_FUSED_KERNELS=True
 
 DISTILLATION_LOSS_MAX_CLAMP=10.0
 DISTILLATION_LOG_PROB_MIN_CLAMP=-10.0
 
-PROJECT_NAME='verl_on_policy_distillation_example_gsm8k'
+PROJECT_NAME='verl_on_policy_distillation_example_gsm8k_geo3k'
+EXP_NAME="${FAMILY}/student-${STUDENT_MODEL}/teacher-gsm8k-${GSM8K_TEACHER_MODEL}/teacher-geo3k-${GEO3K_TEACHER_MODEL}/loss-${DISTILLATION_LOSS_MODE}-pg-${USE_POLICY_GRADIENT}"
 
-MAX_PROMPT=256
-MAX_RESPONSE_LENGTH=512
+MAX_PROMPT=1024
+MAX_RESPONSE_LENGTH=2048
 MAX_NUM_TOKENS=$(( MAX_PROMPT + MAX_RESPONSE_LENGTH + 1 ))
 TRAIN_PROMPT_BSZ=128
 STUDENT_MICRO_BATCH_SIZE_PER_GPU=1
 STUDENT_MAX_TOKEN_LEN_PER_GPU=$(( STUDENT_MICRO_BATCH_SIZE_PER_GPU * (MAX_PROMPT + MAX_RESPONSE_LENGTH) ))
 USE_DYNAMIC_BSZ=False
 
-STUDENT_WORLD_SIZE=4
+STUDENT_WORLD_SIZE=2
 
-TEACHER_WORLD_SIZE=2
+# Number of replicas per teacher. Each replica occupies
+# (inference.tensor_model_parallel_size * inference.data_parallel_size *
+# inference.pipeline_model_parallel_size) GPUs — with TP=DP=PP=1 below, that's 1 GPU per
+# replica, so the teacher pool size must equal the sum of num_replicas.
+TEACHER_NUM_REPLICAS_GSM8K=1
+TEACHER_NUM_REPLICAS_GEO3K=1
+TEACHER_POOL_WORLD_SIZE=$(( TEACHER_NUM_REPLICAS_GSM8K + TEACHER_NUM_REPLICAS_GEO3K ))
 
-TP=2
-PP=1
-CP=1
-EP=1
-ETP=1
-
-EXP_NAME="megatron/student-${STUDENT_MODEL}/teacher-${TEACHER_MODEL}/loss-${DISTILLATION_LOSS_MODE}/pg-${USE_POLICY_GRADIENT}"
-
-PARAM_OFFLOAD=True                                                                                                                                                                                                                                                                                                                                                         
-OPTIMIZER_OFFLOAD=True                                                                                                                                                                                                                                                                                                                                                          
-GRAD_OFFLOAD=False
-
+SP=1
 
 ENFORCE_EAGER=False # true for faster debugging
 
@@ -54,9 +46,11 @@ ENFORCE_EAGER=False # true for faster debugging
 
 gsm8k_train_path=$DATA_PATH/gsm8k/train.parquet
 gsm8k_test_path=$DATA_PATH/gsm8k/test.parquet
+geo3k_train_path=$DATA_PATH/geo3k/train.parquet
+geo3k_test_path=$DATA_PATH/geo3k/test.parquet
 
-TRAIN_FILES="['$gsm8k_train_path']"
-TEST_FILES="['$gsm8k_test_path']"
+TRAIN_FILES="['$gsm8k_train_path','$geo3k_train_path']"
+TEST_FILES="['$gsm8k_test_path','$geo3k_test_path']"
 
 ############################ Parameter Groups ############################
 
@@ -68,7 +62,8 @@ DATA=(
     data.train_batch_size=$TRAIN_PROMPT_BSZ
     data.filter_overlong_prompts=True
     data.truncation='error'
-    data.shuffle=False
+    data.shuffle=True
+    data.image_key=images
 )
 
 MODEL=(
@@ -80,19 +75,37 @@ MODEL=(
     actor_rollout_ref.rollout.enforce_eager=$ENFORCE_EAGER
 )
 
+# Multi-teacher: one teacher per dataset, routed by the sample's `data_source` value.
+# Each teacher has its own model_path and inference config.
 DISTILLATION=(
     distillation.enabled=True
-    distillation.num_workers=8
-    distillation.teacher_model.n_gpus_per_node=$TEACHER_WORLD_SIZE
-    distillation.teacher_model.nnodes=1
-    distillation.teacher_model.model_path="${FAMILY}/${TEACHER_MODEL}"
-    distillation.teacher_model.inference.tensor_model_parallel_size=1
-    distillation.teacher_model.inference.name=$ROLLOUT_NAME
-    distillation.teacher_model.inference.gpu_memory_utilization=0.3
-    distillation.teacher_model.inference.enforce_eager=$ENFORCE_EAGER
-    distillation.teacher_model.inference.max_model_len=$MAX_NUM_TOKENS
-    distillation.teacher_model.inference.max_num_batched_tokens=$MAX_NUM_TOKENS
-    distillation.teacher_model.inference.max_num_seqs=$MAX_NUM_TOKENS
+    distillation.teacher_key=data_source
+    distillation.n_gpus_per_node=$TEACHER_POOL_WORLD_SIZE
+    distillation.nnodes=1
+    # --- gsm8k teacher ---
+    +distillation.teacher_models.gsm8k.key="openai/gsm8k"
+    +distillation.teacher_models.gsm8k.model_path="${FAMILY}/${GSM8K_TEACHER_MODEL}"
+    +distillation.teacher_models.gsm8k.num_replicas=$TEACHER_NUM_REPLICAS_GSM8K
+    +distillation.teacher_models.gsm8k.inference.name=$ROLLOUT_NAME
+    +distillation.teacher_models.gsm8k.inference.tensor_model_parallel_size=1
+    +distillation.teacher_models.gsm8k.inference.gpu_memory_utilization=0.8
+    +distillation.teacher_models.gsm8k.inference.enforce_eager=$ENFORCE_EAGER
+    +distillation.teacher_models.gsm8k.inference.max_model_len=$MAX_NUM_TOKENS
+    +distillation.teacher_models.gsm8k.inference.max_num_batched_tokens=$MAX_NUM_TOKENS
+    +distillation.teacher_models.gsm8k.inference.max_num_seqs=$MAX_NUM_TOKENS
+    # --- geo3k teacher (VL) ---
+    +distillation.teacher_models.geo3k.key="hiyouga/geometry3k"
+    +distillation.teacher_models.geo3k.model_path="${FAMILY}/${GEO3K_TEACHER_MODEL}"
+    +distillation.teacher_models.geo3k.num_replicas=$TEACHER_NUM_REPLICAS_GEO3K
+    +distillation.teacher_models.geo3k.inference.name=$ROLLOUT_NAME
+    +distillation.teacher_models.geo3k.inference.tensor_model_parallel_size=1
+    +distillation.teacher_models.geo3k.inference.gpu_memory_utilization=0.8
+    +distillation.teacher_models.geo3k.inference.enforce_eager=$ENFORCE_EAGER
+    +distillation.teacher_models.geo3k.inference.max_model_len=$MAX_NUM_TOKENS
+    +distillation.teacher_models.geo3k.inference.max_num_batched_tokens=$MAX_NUM_TOKENS
+    +distillation.teacher_models.geo3k.inference.max_num_seqs=$MAX_NUM_TOKENS
+    +distillation.teacher_models.geo3k.inference.engine_kwargs.vllm.mm_processor_cache_gb=0
+    # --- loss ---
     distillation.distillation_loss.loss_mode=$DISTILLATION_LOSS_MODE
     distillation.distillation_loss.topk=64
     distillation.distillation_loss.use_task_rewards=False
@@ -107,20 +120,9 @@ STUDENT=(
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=$STUDENT_MICRO_BATCH_SIZE_PER_GPU
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=$STUDENT_MAX_TOKEN_LEN_PER_GPU
     actor_rollout_ref.actor.use_dynamic_bsz=$USE_DYNAMIC_BSZ
-    actor_rollout_ref.actor.megatron.use_mbridge=True
-    actor_rollout_ref.actor.megatron.vanilla_mbridge=False
-    actor_rollout_ref.actor.megatron.use_remove_padding=True
-    actor_rollout_ref.actor.megatron.tensor_model_parallel_size=$TP
-    actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=$PP
-    actor_rollout_ref.actor.megatron.expert_model_parallel_size=$EP
-    actor_rollout_ref.actor.megatron.context_parallel_size=$CP
-    actor_rollout_ref.actor.megatron.expert_tensor_parallel_size=$ETP
-    actor_rollout_ref.actor.megatron.param_offload=$PARAM_OFFLOAD
-    actor_rollout_ref.actor.megatron.optimizer_offload=$OPTIMIZER_OFFLOAD
-    actor_rollout_ref.actor.megatron.grad_offload=$GRAD_OFFLOAD
-    +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform
-    +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full
-    +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1
+    actor_rollout_ref.actor.fsdp_config.param_offload=True
+    actor_rollout_ref.actor.fsdp_config.optimizer_offload=True
+    actor_rollout_ref.actor.ulysses_sequence_parallel_size=$SP
 )
 
 ROLLOUT=(
@@ -129,12 +131,13 @@ ROLLOUT=(
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=$USE_DYNAMIC_BSZ
     actor_rollout_ref.rollout.tensor_model_parallel_size=1
     actor_rollout_ref.rollout.name=$ROLLOUT_NAME
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.3
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.8
     actor_rollout_ref.rollout.calculate_log_probs=False
     actor_rollout_ref.rollout.max_model_len=$MAX_NUM_TOKENS
     actor_rollout_ref.rollout.max_num_batched_tokens=$MAX_NUM_TOKENS
     actor_rollout_ref.rollout.max_num_seqs=$MAX_NUM_TOKENS
     actor_rollout_ref.rollout.n=1
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.mm_processor_cache_gb=0
 )
 
 ALGORITHM=(
@@ -151,8 +154,7 @@ TRAINER=(
     trainer.save_freq=200
     trainer.test_freq=5
     trainer.total_epochs=15
-    trainer.val_before_train=False
-    trainer.use_legacy_worker_impl=disable
+    trainer.val_before_train=True
     trainer.resume_mode=disable
     trainer.log_val_generations=5
 )
@@ -163,7 +165,7 @@ TRAINER=(
 
 python3 -m verl.trainer.main_ppo \
     --config-path=config \
-    --config-name='ppo_megatron_trainer.yaml' \
+    --config-name='ppo_trainer.yaml' \
     "${DATA[@]}" \
     "${ALGORITHM[@]}" \
     "${MODEL[@]}" \

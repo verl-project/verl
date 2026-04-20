@@ -264,10 +264,13 @@ class vLLMColocateWorkerExtension:
                 self.model_runner.model.load_weights(weights)
 
     def _get_zmq_handle(self) -> str:
-        """Get ZMQ handle for communication."""
-        if not hasattr(self, "device_uuid") or not self.device_uuid:
-            self.device_uuid = get_device_uuid(self.device.index)
-        return f"ipc:///tmp/rl-colocate-zmq-{self.device_uuid}.sock"
+        """Get ZMQ handle for communication.
+        Uses replica_rank + local_rank to form handle so it matches the sender side
+        regardless of CUDA_VISIBLE_DEVICES differences, and avoids collisions
+        when multiple replicas share the same node.
+        """
+        replica_rank = os.environ.get("VERL_REPLICA_RANK", "0")
+        return f"ipc:///tmp/rl-colocate-zmq-replica-{replica_rank}-rank-{self.local_rank}.sock"
 
 
 class vLLMOmniColocateWorkerExtension(_OmniWorkerBase):
@@ -330,10 +333,13 @@ class vLLMOmniColocateWorkerExtension(_OmniWorkerBase):
             self.load_weights(weights)
 
     def _get_zmq_handle(self) -> str:
-        """Get ZMQ handle for communication."""
-        if not hasattr(self, "device_uuid") or not self.device_uuid:
-            self.device_uuid = get_device_uuid(self.device.index)
-        return f"ipc:///tmp/rl-colocate-zmq-{self.device_uuid}.sock"
+        """Get ZMQ handle for communication.
+        Uses replica_rank + local_rank to form handle so it matches the sender side
+        regardless of CUDA_VISIBLE_DEVICES differences, and avoids collisions
+        when multiple replicas share the same node.
+        """
+        replica_rank = os.environ.get("VERL_REPLICA_RANK", "0")
+        return f"ipc:///tmp/rl-colocate-zmq-replica-{replica_rank}-rank-{self.local_rank}.sock"
 
 
 class SuppressSignalInThread:

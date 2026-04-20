@@ -57,7 +57,6 @@ python3 -m verl.trainer.main_flowgrpo \
     reward.reward_model.rollout.tensor_model_parallel_size=4 \
     reward.custom_reward_function.path=$reward_path \
     reward.custom_reward_function.name=compute_score_ocr \
-    trainer.use_legacy_worker_impl=disable \
     trainer.logger='["console", "wandb"]' \
     trainer.project_name=flow_grpo \
     trainer.experiment_name=qwen_image_ocr_lora \

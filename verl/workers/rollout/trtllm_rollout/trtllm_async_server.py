@@ -342,10 +342,13 @@ class TRTLLMReplica(RolloutReplica):
         gpus_per_node: int = 8,
         is_reward_model: bool = False,
         is_teacher_model: bool = False,
+        name_suffix: str = "",
     ) -> None:
         if is_teacher_model:
             raise NotImplementedError("TRTLLMReplica doesn't support teacher model yet.")
-        super().__init__(replica_rank, config, model_config, gpus_per_node, is_reward_model, is_teacher_model)
+        super().__init__(
+            replica_rank, config, model_config, gpus_per_node, is_reward_model, is_teacher_model, name_suffix
+        )
         self.node_ip = ray.util.get_node_ip_address().strip("[]")
 
     def rollout_worker_use_gpu(self) -> bool:
@@ -368,7 +371,10 @@ class TRTLLMReplica(RolloutReplica):
         else:
             local_bundle_index = self.world_size * self.replica_rank
 
-        while local_bundle_index >= self.resource_pool.pgs[start_pg_index].bundle_count:
+        while (
+            start_pg_index < len(self.resource_pool.pgs)
+            and local_bundle_index >= self.resource_pool.pgs[start_pg_index].bundle_count
+        ):
             local_bundle_index -= self.resource_pool.pgs[start_pg_index].bundle_count
             start_pg_index += 1
         assert (
@@ -421,11 +427,10 @@ class TRTLLMReplica(RolloutReplica):
 
         # TRTLLMReplica is a 1:1 map from replica to TRTLLMHttpServer.
         name = (
-            f"trtllm_server_{self.replica_rank}"
+            f"trtllm_server_{self.replica_rank}{self.name_suffix}"
             if not self.is_reward_model
-            else f"trtllm_server_reward_{self.replica_rank}"
+            else f"trtllm_server_reward_{self.replica_rank}{self.name_suffix}"
         )
-
         server = TRTLLMHttpServer.options(
             scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                 node_id=node_id,

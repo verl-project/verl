@@ -137,6 +137,7 @@ python3 -m verl.experimental.fully_async_policy.fully_async_main \
     actor_rollout_ref.rollout.val_kwargs.top_k=${top_k} \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
     actor_rollout_ref.rollout.val_kwargs.n=1 \
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.enable_expert_parallel=True \
     actor_rollout_ref.ref.fsdp_config.param_offload=${ref_offload} \
     actor_rollout_ref.ref.ulysses_sequence_parallel_size=${sp_size} \
     actor_rollout_ref.actor.fsdp_config.fsdp_size=${fsdp_size} \

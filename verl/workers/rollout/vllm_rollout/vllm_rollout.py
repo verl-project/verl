@@ -95,7 +95,14 @@ class ServerAdapter(BaseRollout):
             self.sleep_level = VLLM_SLEEP_LEVEL
 
         self.device_uuid = get_device_uuid(get_device_id())
-        self.zmq_handle = f"ipc:///tmp/rl-colocate-zmq-{self.device_uuid}.sock"
+        # Use replica_rank + node-local rank to form ZMQ handle instead of GPU UUID,
+        # because CheckpointEngineWorker and vLLM worker may see different GPU UUIDs
+        # when CUDA_VISIBLE_DEVICES differs between processes (common on ROCm/AMD).
+        # Must use node-local rank (not rollout_rank) so it matches vLLM worker's
+        # local_rank on every node. Include replica_rank to avoid collisions when
+        # multiple replicas share a node.
+        local_rank = self.rollout_rank % local_world_size
+        self.zmq_handle = f"ipc:///tmp/rl-colocate-zmq-replica-{self.replica_rank}-rank-{local_rank}.sock"
 
         self.use_shm = not is_support_ipc()
         if self.use_shm:

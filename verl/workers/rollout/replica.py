@@ -113,6 +113,7 @@ class RolloutReplica(ABC):
         gpus_per_node: int = 8,
         is_reward_model: bool = False,
         is_teacher_model: bool = False,
+        name_suffix: str = "",
     ) -> None:
         self.replica_rank = replica_rank
         self.config: RolloutConfig | DiffusionRolloutConfig = omega_conf_to_dataclass(config)
@@ -131,6 +132,7 @@ class RolloutReplica(ABC):
         self.nnodes = self.world_size // self.gpus_per_replica_node
         self.is_reward_model = is_reward_model
         self.is_teacher_model = is_teacher_model
+        self.name_suffix = f"_{name_suffix}" if name_suffix else ""
 
         self.rollout_mode: RolloutMode = None
         self.workers: list[ActorHandle] = []
@@ -182,11 +184,11 @@ class RolloutReplica(ABC):
         use_gpu = self.rollout_worker_use_gpu()
 
         if self.is_reward_model:
-            name_prefix = f"rollout_reward_colocate_{self.replica_rank}"
+            name_prefix = f"rollout_reward_colocate_{self.replica_rank}{self.name_suffix}"
         elif self.is_teacher_model:
-            name_prefix = f"rollout_teacher_colocate_{self.replica_rank}"
+            name_prefix = f"rollout_teacher_colocate_{self.replica_rank}{self.name_suffix}"
         else:
-            name_prefix = f"rollout_colocate_{self.replica_rank}"
+            name_prefix = f"rollout_colocate_{self.replica_rank}{self.name_suffix}"
 
         worker_group = RayWorkerGroup(
             resource_pool=self.resource_pool,
@@ -204,11 +206,11 @@ class RolloutReplica(ABC):
         # create resource pool for this rollout
         self.rollout_mode = RolloutMode.STANDALONE
         if self.is_reward_model:
-            resource_pool_name = f"rollout_pool_reward_{self.replica_rank}"
+            resource_pool_name = f"rollout_pool_reward_{self.replica_rank}{self.name_suffix}"
         elif self.is_teacher_model:
-            resource_pool_name = f"rollout_pool_teacher_{self.replica_rank}"
+            resource_pool_name = f"rollout_pool_teacher_{self.replica_rank}{self.name_suffix}"
         else:
-            resource_pool_name = f"rollout_pool_{self.replica_rank}"
+            resource_pool_name = f"rollout_pool_{self.replica_rank}{self.name_suffix}"
         resource_pool_spec = {
             resource_pool_name: [self.gpus_per_replica_node] * self.nnodes,
         }
@@ -219,11 +221,11 @@ class RolloutReplica(ABC):
         # create worker group for this rollout
         use_gpu = self.rollout_worker_use_gpu()
         if self.is_reward_model:
-            name_prefix = f"rollout_reward_standalone_{self.replica_rank}"
+            name_prefix = f"rollout_reward_standalone_{self.replica_rank}{self.name_suffix}"
         elif self.is_teacher_model:
-            name_prefix = f"rollout_teacher_standalone_{self.replica_rank}"
+            name_prefix = f"rollout_teacher_standalone_{self.replica_rank}{self.name_suffix}"
         else:
-            name_prefix = f"rollout_standalone_{self.replica_rank}"
+            name_prefix = f"rollout_standalone_{self.replica_rank}{self.name_suffix}"
         worker_group = RayWorkerGroup(
             resource_pool=self.resource_pool,
             ray_cls_with_init=self.get_ray_class_with_init_args(),

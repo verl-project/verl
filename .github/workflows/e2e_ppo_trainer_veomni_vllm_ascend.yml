@@ -112,7 +112,7 @@ jobs:
         run: |
           pip install -r requirements-npu.txt
           pip install --no-deps -e .
-          pip install git+https://github.com/ByteDance-Seed/VeOmni.git@v0.1.8 --ignore-requires-python --no-deps
+          pip install veomni==0.1.9a1 --ignore-requires-python --no-deps
           pip install transformers==4.57.3
       - name: Check final pip list
         run: |

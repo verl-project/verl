@@ -95,8 +95,6 @@ def main():
         "verl/utils/reward_score/__init__.py",
         "verl/trainer/ppo/core_algos.py",
         "verl/experimental/agent_loop/agent_loop.py",
-        "verl/workers/sharding_manager/fsdp_vllm.py",
-        "verl/workers/sharding_manager/fsdp_ulysses.py",
     ]
 
     script_dir = os.path.dirname(os.path.abspath(__file__))

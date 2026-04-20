@@ -68,7 +68,7 @@ The first step is to define the ``generate_sequences`` and decorate it
 with ``@register`` as it will be called in driver script.
 
 **Source:**
-`fsdp_workers.py <https://github.com/verl-project/verl/blob/c59ab2f4788f9a910836a9f2f53dcdb62dfa314e/verl/workers/fsdp_workers.py#L528>`__
+`engine_workers.py <https://github.com/verl-project/verl/blob/main/verl/workers/engine_workers.py>`__
 
 .. code:: python
 

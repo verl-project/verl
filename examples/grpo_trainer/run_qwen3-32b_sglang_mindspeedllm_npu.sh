@@ -198,7 +198,6 @@ TRAINER_CONFIG=(
     trainer.save_freq=-1
     # Checkpoint Directory
     trainer.default_local_dir="${CKPTS_DIR}"
-    trainer.use_legacy_worker_impl=disable
 )
 
 # profiling configuration

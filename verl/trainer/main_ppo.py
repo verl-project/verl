@@ -122,100 +122,35 @@ class TaskRunner:
         self.mapping = {}
 
     def add_actor_rollout_worker(self, config):
-        """Add actor rollout worker based on the actor strategy."""
+        """Add actor rollout worker using the unified model engine implementation."""
         from verl.single_controller.ray import RayWorkerGroup
         from verl.trainer.ppo.ray_trainer import Role
+        from verl.workers.engine_workers import ActorRolloutRefWorker
 
-        use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
+        actor_rollout_cls = ActorRolloutRefWorker
+        ray_worker_group_cls = RayWorkerGroup
 
-        # use new model engine implementation
-        if use_legacy_worker_impl == "disable":
-            from verl.workers.engine_workers import ActorRolloutRefWorker
-
-            actor_rollout_cls = ActorRolloutRefWorker
-            ray_worker_group_cls = RayWorkerGroup
-
-            lora_rank = config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
-            if lora_rank <= 0:
-                lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
-            ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
-            # NOTE: In new model engine, ref policy and actor rollout are in same ActorRolloutRefWorker,
-            # while in legacy model engine, ref policy is in a separate ActorRolloutRefWorker.
-            if need_reference_policy(config) and not ref_in_actor:
-                role = Role.ActorRolloutRef
-            else:
-                role = Role.ActorRollout
-            self.role_worker_mapping[role] = ray.remote(actor_rollout_cls)
-            self.mapping[role] = "global_pool"
-            return actor_rollout_cls, ray_worker_group_cls
-
-        # Note: sync mode validation is now handled in RolloutConfig.__post_init__
-        # Always use async worker since sync mode is deprecated and rejected
-        if config.actor_rollout_ref.actor.strategy in {"fsdp", "fsdp2"}:
-            from verl.workers.fsdp_workers import AsyncActorRolloutRefWorker
-
-            actor_rollout_cls = AsyncActorRolloutRefWorker
-            ray_worker_group_cls = RayWorkerGroup
-
-        elif config.actor_rollout_ref.actor.strategy == "megatron":
-            from verl.workers.megatron_workers import AsyncActorRolloutRefWorker
-
-            actor_rollout_cls = AsyncActorRolloutRefWorker
-            ray_worker_group_cls = RayWorkerGroup
-
-        elif config.actor_rollout_ref.actor.strategy in {"veomni", "torchtitan", "mindspeed"}:
-            raise NotImplementedError(
-                f"{config.actor_rollout_ref.actor.strategy} does not support legacy worker implementation"
-            )
-
+        lora_rank = config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
+        if lora_rank <= 0:
+            lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
+        ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
+        # Ref policy is fused into ActorRolloutRefWorker unless LoRA is used with a dedicated ref model.
+        if need_reference_policy(config) and not ref_in_actor:
+            role = Role.ActorRolloutRef
         else:
-            raise NotImplementedError
-
-        self.role_worker_mapping[Role.ActorRollout] = ray.remote(actor_rollout_cls)
-        self.mapping[Role.ActorRollout] = "global_pool"
+            role = Role.ActorRollout
+        self.role_worker_mapping[role] = ray.remote(actor_rollout_cls)
+        self.mapping[role] = "global_pool"
         return actor_rollout_cls, ray_worker_group_cls
 
     def add_critic_worker(self, config):
-        """Add critic worker to role mapping."""
-        use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
-        if config.critic.strategy in {"fsdp", "fsdp2"}:
-            if use_legacy_worker_impl in ["auto", "enable"]:
-                from verl.workers.fsdp_workers import CriticWorker
-            elif use_legacy_worker_impl == "disable":
-                # we don't need to specialize critic worker. Just use TrainingWorker
-                from verl.workers.engine_workers import TrainingWorker
-
-                CriticWorker = TrainingWorker
-                print("Using new worker implementation")
-            else:
-                raise ValueError(f"Invalid use_legacy_worker_impl: {use_legacy_worker_impl}")
-
-        elif config.critic.strategy == "megatron":
-            # TODO: switch this to TrainingWorker as well
-            if use_legacy_worker_impl in ["auto", "enable"]:
-                from verl.workers.megatron_workers import CriticWorker
-            elif use_legacy_worker_impl == "disable":
-                from verl.workers.engine_workers import TrainingWorker
-
-                CriticWorker = TrainingWorker
-                print("Using new worker implementation")
-        elif config.critic.strategy in {"veomni", "torchtitan", "mindspeed"}:
-            if use_legacy_worker_impl == "disable":
-                from verl.workers.engine_workers import TrainingWorker
-
-                CriticWorker = TrainingWorker
-                print(f"Using new worker implementation for {config.critic.strategy}")
-            else:
-                raise ValueError(
-                    f"Invalid use_legacy_worker_impl for {config.critic.strategy}: {use_legacy_worker_impl}"
-                )
-
-        else:
-            raise NotImplementedError
-
+        """Add critic worker to role mapping using the unified model engine implementation."""
         from verl.trainer.ppo.ray_trainer import Role
+        from verl.workers.engine_workers import TrainingWorker
 
-        self.role_worker_mapping[Role.Critic] = ray.remote(CriticWorker)
+        # The model-engine TrainingWorker handles all critic backends (fsdp/fsdp2/megatron/...)
+        # internally based on ``config.critic.strategy``.
+        self.role_worker_mapping[Role.Critic] = ray.remote(TrainingWorker)
         self.mapping[Role.Critic] = "global_pool"
 
     def init_resource_pool_mgr(self, config):
@@ -240,14 +175,12 @@ class TaskRunner:
 
         distillation_config = config.get("distillation")
         if is_distillation_enabled(distillation_config):
-            if distillation_config.teacher_model.n_gpus_per_node <= 0:
-                raise ValueError("config.distillation.teacher_model.n_gpus_per_node must be greater than 0")
-            if distillation_config.teacher_model.nnodes <= 0:
-                raise ValueError("config.distillation.teacher_model.nnodes must be greater than 0")
+            if distillation_config.n_gpus_per_node <= 0:
+                raise ValueError("config.distillation.n_gpus_per_node must be greater than 0")
+            if distillation_config.nnodes <= 0:
+                raise ValueError("config.distillation.nnodes must be greater than 0")
 
-            teacher_pool = [
-                distillation_config.teacher_model.n_gpus_per_node
-            ] * distillation_config.teacher_model.nnodes
+            teacher_pool = [distillation_config.n_gpus_per_node] * distillation_config.nnodes
             resource_pool_spec["teacher_pool"] = teacher_pool
 
         from verl.trainer.ppo.ray_trainer import ResourcePoolManager
@@ -277,18 +210,13 @@ class TaskRunner:
             self.mapping[Role.TeacherModel] = "teacher_pool"
 
     def add_ref_policy_worker(self, config, ref_policy_cls):
-        """Add reference policy worker if KL loss or KL reward is used."""
-        from verl.trainer.ppo.ray_trainer import Role
+        """Ref policy is fused into ActorRolloutRefWorker in the unified model engine.
 
-        # Ref policy has been fused into ActorRolloutRefWorker in new model engine,
-        # we don't need to add a separate ref policy worker group.
-        use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
-        if use_legacy_worker_impl == "disable":
-            return
-
-        if need_reference_policy(config):
-            self.role_worker_mapping[Role.RefPolicy] = ray.remote(ref_policy_cls)
-            self.mapping[Role.RefPolicy] = "global_pool"
+        Kept for backward compatibility with subclasses that still invoke it; the method
+        is now a no-op because the reference policy lives on the same worker group as
+        the actor/rollout.
+        """
+        return
 
     def run(self, config):
         """Execute the main PPO training workflow.

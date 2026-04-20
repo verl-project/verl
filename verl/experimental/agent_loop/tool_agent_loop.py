@@ -16,7 +16,7 @@ import json
 import logging
 import os
 from enum import Enum
-from typing import Any, Optional
+from typing import Any
 from uuid import uuid4
 
 import torch
@@ -29,8 +29,6 @@ from verl.experimental.agent_loop.agent_loop import (
 )
 from verl.experimental.agent_loop.tool_parser import FunctionCall, ToolParser
 from verl.experimental.agent_loop.utils import build_gpt_oss_tool_response_text
-from verl.interactions.base import BaseInteraction
-from verl.interactions.utils.interaction_registry import initialize_interactions_from_config
 from verl.tools.schemas import ToolResponse
 from verl.tools.utils.tool_registry import initialize_tools_from_config
 from verl.utils.profiler import simple_timer
@@ -46,7 +44,6 @@ class AgentState(Enum):
     GENERATING = "generating"
     PROCESSING_TOOLS = "processing_tools"
     TERMINATED = "terminated"
-    INTERACTING = "interacting"
 
 
 class AgentData:
@@ -61,8 +58,6 @@ class AgentData:
         metrics: dict[str, Any],
         request_id: str,
         tools_kwargs: dict[str, Any],
-        interaction: Optional[BaseInteraction] = None,
-        interaction_kwargs: Optional[dict[str, Any]] = None,
     ):
         self.messages = messages
         self.image_data = image_data
@@ -70,8 +65,6 @@ class AgentData:
         self.metrics = metrics
         self.request_id = request_id
         self.tools_kwargs = tools_kwargs
-        self.interaction = interaction
-        self.interaction_kwargs = interaction_kwargs or {}
 
         # State variables
         self.prompt_ids: list[int] = []
@@ -113,13 +106,6 @@ class ToolAgentLoop(AgentLoopBase):
         self.prompt_length = self.rollout_config.prompt_length
         self.response_length = self.rollout_config.response_length
 
-        # Initialize interactions from config file
-        self.interaction_config_file = self.rollout_config.multi_turn.interaction_config_path
-        if self.interaction_config_file:
-            self.interaction_map: dict[str, BaseInteraction] = self._initialize_interactions(
-                self.interaction_config_file
-            )
-
     @rollout_trace_op
     async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
         messages = list(kwargs["raw_prompt"])
@@ -133,22 +119,6 @@ class ToolAgentLoop(AgentLoopBase):
         request_id = uuid4().hex
         tools_kwargs = kwargs.get("tools_kwargs", {})
 
-        # Initialize interaction if needed
-        interaction = None
-        interaction_kwargs = {}
-        if self.interaction_config_file:
-            interaction_kwargs = kwargs["extra_info"]["interaction_kwargs"]
-            if "name" not in interaction_kwargs:
-                raise ValueError("'name' key is required in interaction_kwargs")
-            interaction_name = interaction_kwargs["name"]
-            if interaction_name not in self.interaction_map:
-                raise ValueError(
-                    f"Interaction '{interaction_name}' not found in interaction_map. Available interactions: "
-                    f"{list(self.interaction_map.keys())}"
-                )
-            interaction = self.interaction_map[interaction_name]
-            await interaction.start_interaction(request_id, **interaction_kwargs)
-        # Create AgentData instance to encapsulate all state
         agent_data = AgentData(
             messages=messages,
             image_data=images,
@@ -156,8 +126,6 @@ class ToolAgentLoop(AgentLoopBase):
             metrics=metrics,
             request_id=request_id,
             tools_kwargs=tools_kwargs,
-            interaction=interaction,
-            interaction_kwargs=interaction_kwargs,
         )
 
         # Per-sample tool selection: filter global tools by extra_info.tool_selection
@@ -182,8 +150,6 @@ class ToolAgentLoop(AgentLoopBase):
                 state = await self._handle_generating_state(agent_data, sampling_params)
             elif state == AgentState.PROCESSING_TOOLS:
                 state = await self._handle_processing_tools_state(agent_data)
-            elif state == AgentState.INTERACTING:
-                state = await self._handle_interacting_state(agent_data)
             else:
                 logger.error(f"Invalid state: {state}")
                 state = AgentState.TERMINATED
@@ -229,8 +195,6 @@ class ToolAgentLoop(AgentLoopBase):
         self, agent_data: AgentData, sampling_params: dict[str, Any], ignore_termination: bool = False
     ) -> AgentState:
         """Handle the generating state: generate model response and check for tool calls."""
-        add_messages: list[dict[str, Any]] = []
-
         with simple_timer("generate_sequences", agent_data.metrics):
             output: TokenOutput = await self.server_manager.generate(
                 request_id=agent_data.request_id,
@@ -277,19 +241,8 @@ class ToolAgentLoop(AgentLoopBase):
         tools = [tool.tool_schema for tool in active_tools.values()]
         _, agent_data.tool_calls = await self.tool_parser.extract_tool_calls(agent_data.response_ids, tools)
 
-        # Handle interaction if needed
-        if self.interaction_config_file:
-            assistant_message = await self.loop.run_in_executor(
-                None, lambda: self.tokenizer.decode(agent_data.response_ids, skip_special_tokens=True)
-            )
-            add_messages.append({"role": "assistant", "content": assistant_message})
-            agent_data.messages.extend(add_messages)
-
-        # Determine next state
         if agent_data.tool_calls:
             return AgentState.PROCESSING_TOOLS
-        elif self.interaction_config_file:
-            return AgentState.INTERACTING
         else:
             return AgentState.TERMINATED
 
@@ -396,43 +349,6 @@ class ToolAgentLoop(AgentLoopBase):
         agent_data.user_turns += 1
         return AgentState.GENERATING
 
-    async def _handle_interacting_state(self, agent_data: AgentData) -> AgentState:
-        """Handle the interacting state: get user input from interaction."""
-        (
-            should_terminate_sequence,
-            interaction_responses,
-            reward,
-            metrics,
-        ) = await agent_data.interaction.generate_response(
-            agent_data.request_id, agent_data.messages, **agent_data.interaction_kwargs
-        )
-        agent_data.user_turns += 1
-
-        add_messages: list[dict[str, Any]] = [{"role": "user", "content": interaction_responses}]
-        agent_data.messages.extend(add_messages)
-
-        if reward is not None:
-            agent_data.turn_scores.append(reward)
-
-        # Update prompt with user responses (similar to _handle_processing_tools_state)
-        response_ids = await self.apply_chat_template(
-            add_messages,
-            remove_system_prompt=True,
-        )
-
-        # Update prompt_ids and response_mask
-        agent_data.prompt_ids += response_ids
-        agent_data.response_mask += [0] * len(response_ids)
-        if agent_data.response_logprobs:
-            agent_data.response_logprobs += [0.0] * len(response_ids)
-
-        # double check prompt
-        # Check termination condition
-        if should_terminate_sequence:
-            return AgentState.TERMINATED
-        else:
-            return AgentState.GENERATING
-
     async def _call_tool(
         self, tool_call: FunctionCall, tools_kwargs: dict[str, Any], agent_data: AgentData
     ) -> tuple[ToolResponse, float, dict]:
@@ -483,14 +399,3 @@ class ToolAgentLoop(AgentLoopBase):
                     tool_response_kwargs[attr_name] = attr_value
 
         return ToolResponse(**tool_response_kwargs), tool_reward, res
-
-    def _initialize_interactions(self, interaction_config_file):
-        """Initialize interactions from configuration.
-        Returns:
-            dict[str, BaseInteraction]: A dictionary mapping interaction names to interaction instances.
-        """
-        if interaction_config_file is None:
-            return {}
-
-        interaction_map = initialize_interactions_from_config(interaction_config_file)
-        return interaction_map

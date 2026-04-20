@@ -133,13 +133,17 @@ verl is fast with:
 
 - [RL performance on coding, math](https://verl.readthedocs.io/en/latest/algo/baseline.html)
 
+**Algorithm recipes (`recipe/`):**
+
+- Optional workflows and baselines live under [`recipe/`](recipe/). Each recipe subdirectory includes a small **`REQUIRED_VERL.txt`** file describing the intended `verl` install: pinned recipes use a **tag or fixed git SHA**; rolling recipes record an explicit **`VERL_COMMIT`** (and related submodule / recipe-folder SHAs) so you can `pip install verl@git+…@<sha>` without guessing. See [`recipe/README.md`](recipe/README.md) for the full index and links.
+
 **For code explanation and advance usage (extension):**
 
 - PPO Trainer and Workers
 
   - [PPO Ray Trainer](https://verl.readthedocs.io/en/latest/workers/ray_trainer.html)
-  - [PyTorch FSDP Backend](https://verl.readthedocs.io/en/latest/workers/fsdp_workers.html)
-  - [Megatron-LM Backend](https://verl.readthedocs.io/en/latest/index.html)
+  - [Model Engine](https://verl.readthedocs.io/en/latest/workers/model_engine.html)
+  - [Engine Workers (FSDP / Megatron-LM / Automodel / VeOmni / TorchTitan)](https://verl.readthedocs.io/en/latest/workers/engine_workers.html)
 
 - Advanced Usage and Extension
   - [Add Models with the FSDP Backend](https://verl.readthedocs.io/en/latest/advance/fsdp_extension.html)

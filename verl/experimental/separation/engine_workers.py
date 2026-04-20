@@ -15,6 +15,7 @@
 
 import logging
 import os
+from typing import Callable
 
 from omegaconf import DictConfig
 
@@ -51,7 +52,6 @@ class DetachActorWorker(ActorRolloutRefWorker):
         """
         ActorRolloutRefWorker.__init__(self, config, role)
         self._strategy_handlers = None
-        self.copy_handler, self.restore_handler = self._get_strategy_handlers()
 
     def _get_strategy_handlers(self):
         """
@@ -86,6 +86,16 @@ class DetachActorWorker(ActorRolloutRefWorker):
             raise NotImplementedError(f"Unsupported strategy: {strategy}")
 
         return self._strategy_handlers
+
+    @property
+    def copy_handler(self) -> Callable:
+        """Get the copy handler for the strategy."""
+        return self._get_strategy_handlers()[0]
+
+    @property
+    def restore_handler(self) -> Callable:
+        """Get the restore handler for the strategy."""
+        return self._get_strategy_handlers()[1]
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def save_model_to_cpu(self, n):

@@ -39,14 +39,8 @@ ppo_mini_batch_size=3
 actor_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 2))
 infer_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 2))
 
-USE_LEGACY_WORKER_IMPL="enable" # disable, enable
-if [ "$USE_LEGACY_WORKER_IMPL" = "disable" ]; then
-    ROUTING_REPLAY_MODE_ARG="actor_rollout_ref.actor.megatron.router_replay.mode=${ROUTING_REPLAY_MODE}"
-    remove_padding=True
-else
-    ROUTING_REPLAY_MODE_ARG="actor_rollout_ref.actor.router_replay.mode=${ROUTING_REPLAY_MODE}"
-    remove_padding=False
-fi
+ROUTING_REPLAY_MODE_ARG="actor_rollout_ref.actor.megatron.router_replay.mode=${ROUTING_REPLAY_MODE}"
+remove_padding=True
 exper_name=Node${NODES}_bs${bs}_${PP}${TP}${EP}${ETP}_${SGLANG_INFER_TP}_minbs${ppo_mini_batch_size}_micro_bs${micro_bs}
 
 python3 -m verl.trainer.main_ppo --config-path=config \
@@ -122,5 +116,4 @@ python3 -m verl.trainer.main_ppo --config-path=config \
     trainer.test_freq=10 \
     trainer.total_training_steps=50000 \
     trainer.balance_batch=False \
-    trainer.use_legacy_worker_impl=${USE_LEGACY_WORKER_IMPL} \
     trainer.val_before_train=False 2>&1
