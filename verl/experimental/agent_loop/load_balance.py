@@ -162,12 +162,11 @@ class LeastKVCacheStrategy(LoadBalanceStrategy):
             try:
                 text = fetch_prometheus_text(url, self._fetch_timeout_s)
                 val = parse_prometheus_metric_value(text, metric_name)
-                recovered = self._mark_metrics_success(sid, val)
-                if recovered:
+                if self._mark_metrics_success(sid, val):
                     logger.info("KV cache metrics recovered for replica %s", sid)
             except Exception as e:
-                self._mark_metrics_failed(sid)
-                logger.warning("Failed to refresh KV metrics for %s from %s: %s", sid, url, e)
+                if self._mark_metrics_failed(sid):
+                    logger.warning("Failed to refresh KV metrics for %s from %s: %s", sid, url, e)
 
     def pick_server(
         self,
