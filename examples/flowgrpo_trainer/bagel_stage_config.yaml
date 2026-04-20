@@ -1,0 +1,25 @@
+# Single-stage Bagel config for FlowGRPO training with colocated workers.
+
+stage_args:
+
+  - stage_id: 0
+    stage_type: diffusion
+    runtime:
+      devices: "0"
+    engine_args:
+      model_stage: dit
+      max_num_seqs: 1
+      enforce_eager: true
+      trust_remote_code: true
+
+    final_output: true
+    final_output_type: image
+    is_comprehension: false
+    default_sampling_params:
+      seed: 52
+
+runtime:
+  enabled: true
+  defaults:
+    window_size: -1
+    max_inflight: 1
