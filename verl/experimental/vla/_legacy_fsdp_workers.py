@@ -35,8 +35,6 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.api import FullStateDictConfig, ShardedStateDictConfig, StateDictType
 
-from verl.utils.import_utils import deprecated
-
 try:
     # for torch 2.5+
     from torch.distributed.tensor import DTensor
@@ -90,10 +88,10 @@ from verl.utils.py_functional import convert_to_regular_types
 from verl.utils.qat import apply_qat, enable_qat_fuse
 from verl.utils.ray_utils import get_event_loop
 from verl.utils.transformers_compat import get_auto_model_for_vision2seq
+from verl.utils.ulysses import FSDPUlyssesShardingManager
 from verl.workers.config import FSDPCriticConfig, FSDPEngineConfig, HFModelConfig, RolloutConfig
 from verl.workers.config.optimizer import build_optimizer
 from verl.workers.rollout import get_rollout_class
-from verl.workers.sharding_manager.fsdp_ulysses import FSDPUlyssesShardingManager
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -143,7 +141,6 @@ def get_vl_model_vision_tower(vl_model_instance):
     return None
 
 
-@deprecated("legacy worker implementation is deprecated and will be removed in v0.8.0")
 class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     """
     This worker can be instantiated as a standalone actor or a standalone rollout or a standalone reference policy
@@ -886,7 +883,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
-        from verl.workers.actor import DataParallelPPOActor
+        from verl.experimental.vla._legacy_dp_actor import DataParallelPPOActor
 
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.get("external_lib", None))
@@ -1309,7 +1306,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 pass
 
 
-@deprecated("legacy worker implementation is deprecated and will be removed in v0.8.0")
 class CriticWorker(Worker, DistProfilerExtension):
     def __init__(self, config: FSDPCriticConfig):
         Worker.__init__(self)
@@ -1646,7 +1642,7 @@ class CriticWorker(Worker, DistProfilerExtension):
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.get("external_lib", None))
 
-        from verl.workers.critic import DataParallelPPOCritic
+        from verl.experimental.vla._legacy_dp_critic import DataParallelPPOCritic
 
         self.critic_module, self.critic_optimizer, self.critic_lr_scheduler = self._build_critic_model_optimizer(
             self.config

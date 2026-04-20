@@ -79,7 +79,6 @@ python3 -m verl.trainer.main_flowgrpo \
     reward.num_workers=1 \
     reward.reward_manager.name=visual \
     reward.reward_model.enable=False \
-    trainer.use_legacy_worker_impl=disable \
     trainer.logger=console \
     trainer.project_name=verl-test \
     trainer.experiment_name=flowgrpo-diffusion-e2e \

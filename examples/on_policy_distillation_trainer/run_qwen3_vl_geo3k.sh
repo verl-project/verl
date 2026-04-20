@@ -134,7 +134,6 @@ TRAINER=(
     trainer.test_freq=5
     trainer.total_epochs=15
     trainer.val_before_train=True
-    trainer.use_legacy_worker_impl=disable
     trainer.resume_mode=disable
     trainer.log_val_generations=5
 )

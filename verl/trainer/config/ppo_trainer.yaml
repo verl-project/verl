@@ -197,10 +197,6 @@ trainer:
   # Device to run training on (e.g., "cuda", "cpu")
   device: cuda
 
-  # whether to use legacy worker implementation
-  #  mode: "auto", "enable", or "disable"
-  use_legacy_worker_impl: disable
-
 # profiler configs
 global_profiler:
 

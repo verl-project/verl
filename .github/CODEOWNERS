@@ -17,9 +17,7 @@
 /verl/workers/engine/fsdp @eric-haibin-lin @vermouth1992 @ZihengJiang
 /verl/workers/rollout/vllm_rollout @wuxibin89 @PeterSH6 @chenhaiq
 /verl/workers/rollout/sglang_rollout @zhaochenyang20 @SwordFaith @chenhaiq
-/verl/workers/actor/megatron_actor.py @ISEEKYAN @vermouth1992
-/verl/workers/critic/megatron_critic.py @ISEEKYAN @vermouth1992
-/verl/workers/megatron_workers.py @ISEEKYAN @vermouth1992
+/verl/workers/engine/megatron @ISEEKYAN @vermouth1992
 /verl/experimental @wuxibin89 @ArronHZG
 
 /tests/single_controller @zw0610 @wuxibin89

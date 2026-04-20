@@ -46,28 +46,23 @@ See `reward functions <https://github.com/verl-project/verl/blob/main/verl/utils
 Define worker classes
 ---------------------
 
+verl ships a single, unified model-engine worker implementation. The actor/rollout/ref
+policy live in :class:`verl.workers.engine_workers.ActorRolloutRefWorker`, and the
+critic/reward-model live in :class:`verl.workers.engine_workers.TrainingWorker`.
+The underlying backend (FSDP, FSDP2, Megatron-LM, torchtitan, veomni, ...) is selected
+at runtime from ``config.actor_rollout_ref.actor.strategy`` / ``config.critic.strategy``.
+
 .. code:: python
 
-   if config.actor_rollout_ref.actor.strategy in {"fsdp", "fsdp2"}: # for FSDP backend
-       assert config.critic.strategy in {"fsdp", "fsdp2"}
-       from verl.workers.fsdp_workers import ActorRolloutRefWorker, CriticWorker
-       from verl.single_controller.ray import RayWorkerGroup
-       ray_worker_group_cls = RayWorkerGroup
-
-   elif config.actor_rollout_ref.actor.strategy == 'megatron': # for Megatron backend
-       assert config.actor_rollout_ref.actor.strategy == config.critic.strategy
-       from verl.workers.megatron_workers import ActorRolloutRefWorker, CriticWorker
-       from verl.single_controller.ray.megatron import NVMegatronRayWorkerGroup
-       ray_worker_group_cls = NVMegatronRayWorkerGroup # Ray worker class for Megatron-LM
-
-   else:
-       raise NotImplementedError
-
+   from verl.single_controller.ray import RayWorkerGroup
    from verl.trainer.ppo.ray_trainer import ResourcePoolManager, Role
+   from verl.workers.engine_workers import ActorRolloutRefWorker, TrainingWorker
+
+   ray_worker_group_cls = RayWorkerGroup
 
    role_worker_mapping = {
        Role.ActorRollout: ActorRolloutRefWorker,
-       Role.Critic: CriticWorker,
+       Role.Critic: TrainingWorker,
        Role.RefPolicy: ActorRolloutRefWorker
    }
 
@@ -106,13 +101,14 @@ Step 2: Define the worker class corresponding to this role
 
 - We have pre-implemented the ``ActorRolloutRefWorker``. Through
   different configs, it can be a standalone actor, a standalone rollout,
-  an ActorRollout HybridEngine, or an ActorRolloutRef HybridEngine
-- We also pre-implemented workers for ``Actor``, ``Rollout``,
-  ``Critic``, ``Reward Model`` and ``Reference model`` on two different
-  backend: PyTorch FSDP
-  and Megatron-LM.
-  See `FSDP Workers <https://github.com/verl-project/verl/blob/main/verl/workers/fsdp_workers.py>`_ 
-  and `Megatron-LM Workers <https://github.com/verl-project/verl/blob/main/verl/workers/megatron_workers.py>`_
+  an ActorRollout HybridEngine, or an ActorRolloutRef HybridEngine.
+- The ``TrainingWorker`` is the generic training worker used for
+  ``Critic`` and ``Reward Model`` roles.
+- Backend selection (PyTorch FSDP/FSDP2, Megatron-LM, torchtitan, veomni, ...)
+  is driven by ``config.actor_rollout_ref.actor.strategy`` and
+  ``config.critic.strategy`` and handled internally by the model engine.
+  See `engine workers <https://github.com/verl-project/verl/blob/main/verl/workers/engine_workers.py>`_
+  and the `model engine package <https://github.com/verl-project/verl/blob/main/verl/workers/engine>`_
   for more information.
 
 Step 3: Define resource pool id and resource pool spec
@@ -141,8 +137,8 @@ Defining reward model/function
    # - finally, we combine all the rewards together
    # - The reward type depends on the tag of the data
    if config.reward_model.enable:
-       from verl.workers.fsdp_workers import RewardModelWorker
-       role_worker_mapping[Role.RewardModel] = RewardModelWorker
+       from verl.workers.engine_workers import TrainingWorker
+       role_worker_mapping[Role.RewardModel] = TrainingWorker
        mapping[Role.RewardModel] = global_pool_id
     
    reward_fn = RewardManager(tokenizer=tokenizer, num_examine=0)
@@ -158,11 +154,12 @@ whether it's a model-based RM or a function-based RM
 - If it's a model-based RM, directly add the ``RewardModel`` role in the
   resource mapping and add it to the resource pool mapping.
 
-  - Note that the pre-defined ``RewardModelWorker`` only supports models
-    with the structure of huggingface
-    ``AutoModelForSequenceClassification``. If it's not this model, you
-    need to define your own RewardModelWorker in `FSDP Workers <https://github.com/verl-project/verl/blob/main/verl/workers/fsdp_workers.py>`_ 
-    and `Megatron-LM Workers <https://github.com/verl-project/verl/blob/main/verl/workers/megatron_workers.py>`_.
+  - The default ``TrainingWorker`` handles reward models through the unified
+    model engine and supports the typical huggingface
+    ``AutoModelForSequenceClassification`` layout. For custom reward models
+    you can subclass :class:`verl.workers.engine_workers.TrainingWorker`
+    or build a dedicated worker on top of the `model engine package
+    <https://github.com/verl-project/verl/blob/main/verl/workers/engine>`_.
 
 - If it's a function-based RM, the users are required to classified the
   reward function for each datasets.

@@ -24,6 +24,7 @@ from torch import nn, optim
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
 from verl import DataProto
+from verl.experimental.vla._legacy_critic_base import BasePPOCritic
 from verl.trainer.ppo import core_algos
 from verl.utils.attention_utils import index_first_axis, pad_input, rearrange, unpad_input
 from verl.utils.device import get_device_id, get_device_name
@@ -33,7 +34,6 @@ from verl.utils.py_functional import append_to_dict
 from verl.utils.seqlen_balancing import prepare_dynamic_batch, restore_dynamic_batch
 from verl.utils.torch_functional import masked_mean
 from verl.utils.ulysses import gather_outputs_and_unpad, ulysses_pad_and_slice_inputs
-from verl.workers.critic import BasePPOCritic
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))

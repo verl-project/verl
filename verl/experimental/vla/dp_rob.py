@@ -16,6 +16,7 @@ Single Process Actor
 """
 
 import logging
+from abc import ABC, abstractmethod
 
 import torch
 from tensordict.base import TensorDictBase
@@ -29,11 +30,30 @@ from verl.utils.device import get_device_id, get_device_name
 from verl.utils.py_functional import append_to_dict
 from verl.utils.seqlen_balancing import prepare_dynamic_batch, restore_dynamic_batch
 from verl.utils.torch_functional import logprobs_from_logits
-from verl.workers.actor import BasePPOActor
 
 logger = logging.getLogger(__name__)
 
 __all__ = ["RobDataParallelPPOActor"]
+
+
+class BasePPOActor(ABC):
+    """Base class for PPO actor.
+
+    Inlined from the (deleted) `verl.workers.actor` module so the VLA experimental
+    code can remain self-contained.
+    """
+
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+
+    @abstractmethod
+    def compute_log_prob(self, data: DataProto) -> torch.Tensor:
+        pass
+
+    @abstractmethod
+    def update_policy(self, data: DataProto) -> dict:
+        pass
 
 
 class RobDataParallelPPOActor(BasePPOActor):
