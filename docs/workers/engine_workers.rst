@@ -41,15 +41,15 @@ ActorRolloutRefWorker
 hybrid worker used for actor, rollout and (optional) reference policy.
 The ``role`` argument selects which sub-workers are constructed:
 
-================  ====================================================================================
-role              What is built inside ``init_model``
-================  ====================================================================================
-``actor``         ``self.actor`` (``TrainingWorker``) + checkpoint engine
-``rollout``       ``self.rollout`` (``BaseRollout``)
-``ref``           ``self.ref`` (``TrainingWorker`` with ``forward_only`` engine config)
-``actor_rollout`` actor + rollout + checkpoint engine (most common for colocated PPO)
-``actor_rollout_ref`` all three
-================  ====================================================================================
+=========================  ===========================================================================
+role                       What is built inside ``init_model``
+=========================  ===========================================================================
+``actor``                  ``self.actor`` (``TrainingWorker``) + checkpoint engine
+``rollout``                ``self.rollout`` (``BaseRollout``)
+``ref``                    ``self.ref`` (``TrainingWorker`` with ``forward_only`` engine config)
+``actor_rollout``          actor + rollout + checkpoint engine (most common for colocated PPO)
+``actor_rollout_ref``      all three
+=========================  ===========================================================================
 
 Key RPCs
 ^^^^^^^^
@@ -179,20 +179,24 @@ Set the ``strategy`` field on ``actor.engine`` / ``critic.engine`` /
          param_offload: False
          # ...
 
-The ``EngineRegistry`` dispatches on ``(model_type, backend)``:
+The ``EngineRegistry`` dispatches on ``(model_type, backend, device)`` –
+for example ``(language_model, fsdp2, cuda)`` or
+``(language_model, megatron, npu)``:
 
-=========================  ===============  ==============================================================
-model_type                 backend          Engine class
-=========================  ===============  ==============================================================
-``language_model``         ``fsdp``         ``verl.workers.engine.fsdp.FSDPEngineWithLMHead``
-``language_model``         ``fsdp2``        ``verl.workers.engine.fsdp.FSDP2EngineWithLMHead``
-``language_model``         ``megatron``     ``verl.workers.engine.megatron.MegatronEngineWithLMHead``
-``language_model``         ``automodel``    ``verl.workers.engine.automodel.AutomodelEngineWithLMHead``
-``language_model``         ``veomni``       ``verl.workers.engine.veomni.VeOmniEngineWithLMHead``
-``language_model``         ``torchtitan``   ``verl.workers.engine.torchtitan.TorchTitanEngineWithLMHead``
-``value_model``            ``fsdp`` / ``megatron`` / ...   analogous ``*EngineWithValueHead`` classes
-``diffusion_model``        ``fsdp`` / ``fsdp2``   ``verl.workers.engine.fsdp.FSDPDiffusionEngine``
-=========================  ===============  ==============================================================
+=====================  =====================  =====================  =============================================================
+model_type             backend                device                 Engine class
+=====================  =====================  =====================  =============================================================
+``language_model``     ``fsdp`` / ``fsdp2``   ``cuda`` / ``npu``     ``verl.workers.engine.fsdp.FSDPEngineWithLMHead``
+``language_model``     ``megatron``           ``cuda``               ``verl.workers.engine.megatron.MegatronEngineWithLMHead``
+``language_model``     ``megatron``           ``npu``                ``verl.workers.engine.mindspeed.MindspeedEngineWithLMHead``
+``language_model``     ``mindspeed_llm``      ``npu``                ``verl.workers.engine.mindspeed.MindSpeedLLMEngineWithLMHead``
+``language_model``     ``automodel``          ``cuda``               ``verl.workers.engine.automodel.AutomodelEngineWithLMHead``
+``language_model``     ``veomni``             ``cuda`` / ``npu``     ``verl.workers.engine.veomni.VeOmniEngineWithLMHead``
+``language_model``     ``torchtitan``         ``cuda`` / ``npu``     ``verl.workers.engine.torchtitan.TorchTitanEngineWithLMHead``
+``value_model``        ``fsdp`` / ``fsdp2``   ``cuda`` / ``npu``     ``verl.workers.engine.fsdp.FSDPEngineWithValueHead``
+``value_model``        ``megatron``           ``cuda``               ``verl.workers.engine.megatron.MegatronEngineWithValueHead``
+``diffusion_model``    ``fsdp`` / ``fsdp2``   ``cuda``               ``verl.workers.engine.fsdp.DiffusersFSDPEngine``
+=====================  =====================  =====================  =============================================================
 
 Migrating from Legacy Workers
 -----------------------------
