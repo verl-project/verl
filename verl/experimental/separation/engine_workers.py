@@ -15,7 +15,7 @@
 
 import logging
 import os
-from typing import Callable
+from typing import Callable, Optional
 
 from omegaconf import DictConfig
 
@@ -23,7 +23,7 @@ from verl.single_controller.base.decorator import Dispatch, register
 from verl.utils.device import (
     get_device_name,
 )
-from verl.workers.engine_workers import ActorRolloutRefWorker
+from verl.workers.engine_workers import ActorRolloutRefWorker, DistillationConfig
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -42,15 +42,17 @@ class DetachActorWorker(ActorRolloutRefWorker):
     FSDP, FSDP2, and Megatron strategies.
     """
 
-    def __init__(self, config: DictConfig, role: str):
+    def __init__(self, config: DictConfig, role: str, distillation_config: Optional[DistillationConfig] = None, **kwargs):
         """
         Initialize the DetachActorWorker.
 
         Args:
             config: Configuration dictionary.
             role: The role of the worker (e.g., 'actor', 'rollout', 'ref').
+            distillation_config: Optional distillation configuration for OPD support.
+            **kwargs: Additional arguments passed to ActorRolloutRefWorker.
         """
-        ActorRolloutRefWorker.__init__(self, config, role)
+        ActorRolloutRefWorker.__init__(self, config, role, distillation_config=distillation_config, **kwargs)
         self._strategy_handlers = None
 
     def _get_strategy_handlers(self):
@@ -68,7 +70,7 @@ class DetachActorWorker(ActorRolloutRefWorker):
 
         strategy = self.config.actor.strategy
 
-        if strategy in ["fsdp", "fsdp2"]:
+        if strategy in ["fsdp", "fsdp2", "veomni"]:
             from verl.utils.fsdp_utils import (
                 fsdp2_sharded_load_from_cpu,
                 fsdp2_sharded_save_to_cpu,
@@ -121,7 +123,7 @@ class DetachActorWorker(ActorRolloutRefWorker):
         if n in self.cpu_saved_models:
             strategy = self.config.actor.strategy
 
-            if strategy in ["fsdp", "fsdp2"]:
+            if strategy in ["fsdp", "fsdp2", "veomni"]:
                 cpu_sharded_state, global_spec = self.cpu_saved_models[n]
                 self.restore_handler(self.actor.engine.module, cpu_sharded_state, global_spec)
             else:
