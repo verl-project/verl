@@ -97,10 +97,10 @@ jobs:
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
-      RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES: "1"
-      ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7"
       HCCL_HOST_SOCKET_PORT_RANGE: "60000-60050"
       HCCL_NPU_SOCKET_PORT_RANGE: "61000-61050"
+      RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES: "1"
+      ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7"
     steps:
       - name: Check npu and CANN info
         run: |
