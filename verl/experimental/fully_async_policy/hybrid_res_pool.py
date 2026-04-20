@@ -153,10 +153,13 @@ def build_hybrid_res_pool_layout(config) -> HybridResPoolLayout:
     checkpoint_backend = OmegaConf.select(
         config,
         "actor_rollout_ref.rollout.checkpoint_engine.backend",
-        default="naive",
+        default="nccl",
     )
-    if checkpoint_backend != "naive":
-        raise ValueError("hybrid_res_pool requires actor_rollout_ref.rollout.checkpoint_engine.backend == 'naive'")
+    if checkpoint_backend != "nccl":
+        raise ValueError(
+            "hybrid_res_pool requires actor_rollout_ref.rollout.checkpoint_engine.backend == 'nccl' "
+            "(the NPU HCCL implementation is registered behind the 'nccl' config key)"
+        )
 
     trainer_chunks, rollout_chunks = _parse_partition(config)
     logical_gpus_per_node = reduce(gcd, trainer_chunks + rollout_chunks)

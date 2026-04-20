@@ -96,7 +96,7 @@ ROLLOUT_CONFIG="
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=16384 \
     actor_rollout_ref.rollout.max_model_len=32768 \
     actor_rollout_ref.rollout.max_num_batched_tokens=32768 \
-    actor_rollout_ref.rollout.checkpoint_engine.backend=naive \
+    actor_rollout_ref.rollout.checkpoint_engine.backend=nccl \
     +actor_rollout_ref.rollout.engine_kwargs.vllm.mm_processor_cache_gb=0"
 
 # ===================================== Algorithm =====================================

@@ -343,8 +343,10 @@ Requirements:
 * examples:
     * `8_4-4` -> logical trainer pool `[4,4,4]`, logical rollout pool `[4]`
     * `4-4_8` -> logical trainer pool `[4]`, logical rollout pool `[4,4,4]`
-* non-naive checkpoint backends are unsupported on this path, so set
-  `actor_rollout_ref.rollout.checkpoint_engine.backend=naive`
+* fully async hybrid resource pools are disaggregated, so do not use the colocated
+  `naive` checkpoint path; keep the default
+  `actor_rollout_ref.rollout.checkpoint_engine.backend=nccl`
+  (on NPU, the HCCL implementation is registered behind the `nccl` config key)
 
 Minimal runnable example:
 
@@ -354,7 +356,7 @@ python3 -m verl.experimental.fully_async_policy.fully_async_main \
     --config-name='fully_async_ppo_trainer.yaml' \
     actor_rollout_ref.rollout.mode=async \
     actor_rollout_ref.hybrid_engine=False \
-    actor_rollout_ref.rollout.checkpoint_engine.backend=naive \
+    actor_rollout_ref.rollout.checkpoint_engine.backend=nccl \
     trainer.nnodes=2 \
     trainer.n_gpus_per_node=8 \
     rollout.nnodes=1 \

@@ -286,8 +286,10 @@ python3 -m verl.experimental.fully_async_policy.fully_async_main
 * 示例：
     * `8_4-4` -> 逻辑 trainer pool `[4,4,4]`，逻辑 rollout pool `[4]`
     * `4-4_8` -> 逻辑 trainer pool `[4]`，逻辑 rollout pool `[4,4,4]`
-* 该路径不支持非 `naive` 的 checkpoint backend，需要设置
-  `actor_rollout_ref.rollout.checkpoint_engine.backend=naive`
+* fully async hybrid resource pool 是分离式权重同步路径，不要使用 colocated 的
+  `naive` checkpoint backend；保持默认的
+  `actor_rollout_ref.rollout.checkpoint_engine.backend=nccl`
+  （在 NPU 上，HCCL 实现仍然挂在 `nccl` 这个配置键下）
 
 最小可运行示例：
 
@@ -297,7 +299,7 @@ python3 -m verl.experimental.fully_async_policy.fully_async_main \
     --config-name='fully_async_ppo_trainer.yaml' \
     actor_rollout_ref.rollout.mode=async \
     actor_rollout_ref.hybrid_engine=False \
-    actor_rollout_ref.rollout.checkpoint_engine.backend=naive \
+    actor_rollout_ref.rollout.checkpoint_engine.backend=nccl \
     trainer.nnodes=2 \
     trainer.n_gpus_per_node=8 \
     rollout.nnodes=1 \

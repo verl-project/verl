@@ -32,7 +32,7 @@ def make_config(
     trainer_gpus_per_node: int = 8,
     rollout_nnodes: int = 1,
     rollout_gpus_per_node: int = 8,
-    checkpoint_backend: str = "naive",
+    checkpoint_backend: str = "nccl",
 ):
     config = {
         "async_training": {
@@ -97,10 +97,27 @@ def test_build_hybrid_res_pool_layout_requires_partition():
         build_hybrid_res_pool_layout(config)
 
 
-def test_build_hybrid_res_pool_layout_requires_naive_checkpoint_backend():
+def test_build_hybrid_res_pool_layout_allows_nccl_checkpoint_backend():
     config = make_config(hybrid_res_pool=True, partition="8_4-4", checkpoint_backend="nccl")
 
-    with pytest.raises(ValueError, match="checkpoint_engine.backend.*naive"):
+    layout = build_hybrid_res_pool_layout(config)
+
+    assert layout.trainer_pool == [4, 4, 4]
+    assert layout.rollout_pool == [4]
+    assert layout.logical_gpus_per_node == 4
+
+
+def test_build_hybrid_res_pool_layout_rejects_naive_checkpoint_backend():
+    config = make_config(hybrid_res_pool=True, partition="8_4-4", checkpoint_backend="naive")
+
+    with pytest.raises(ValueError, match="checkpoint_engine.backend == 'nccl'"):
+        build_hybrid_res_pool_layout(config)
+
+
+def test_build_hybrid_res_pool_layout_rejects_unknown_checkpoint_backend_key():
+    config = make_config(hybrid_res_pool=True, partition="8_4-4", checkpoint_backend="hccl")
+
+    with pytest.raises(ValueError, match="checkpoint_engine.backend == 'nccl'"):
         build_hybrid_res_pool_layout(config)
 
 
