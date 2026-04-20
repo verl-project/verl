@@ -52,7 +52,7 @@ def compute_total_num_group_envs(task_suite: Benchmark):
     return total_num_group_envs, cumsum_trial_id_bins
 
 
-def build_dataset_for_suite(task_suite_name: str, local_save_dir: str):
+def build_dataset_for_suite(task_suite_name: str, local_save_dir: str, target_task_ids: list = None):
     task_suite = get_benchmark(task_suite_name)()
     total_num_group_envs, cumsum_trial_id_bins = compute_total_num_group_envs(task_suite)
     print(f"\n[Suite: {task_suite_name}]")
@@ -64,7 +64,16 @@ def build_dataset_for_suite(task_suite_name: str, local_save_dir: str):
         end_id = cumsum_trial_id_bins[task_id]
         return list(range(start_id, end_id))
 
-    all_task_ids = list(range(task_suite.get_num_tasks()))
+    all_available_ids = list(range(task_suite.get_num_tasks()))
+    
+    if target_task_ids is not None:
+        all_task_ids = [tid for tid in target_task_ids if tid in all_available_ids]
+        if not all_task_ids:
+            print(f"Warning: No valid task IDs found for {task_suite_name} (Requested: {target_task_ids}, Available: {all_available_ids}). Skipping.")
+            return
+    else:
+        all_task_ids = all_available_ids
+
     if len(all_task_ids) > 1:
         train_task_num = max(1, len(all_task_ids) - 1)
         train_task_ids = sorted(random.sample(all_task_ids, train_task_num))
@@ -109,6 +118,10 @@ def build_dataset_for_suite(task_suite_name: str, local_save_dir: str):
     print(f"Generated {len(train_metadata)} training samples.")
     print(f"Generated {len(test_metadata)} testing samples.")
     print("-" * 20)
+    
+    if len(train_metadata) == 0 and len(test_metadata) == 0:
+        print("No metadata generated. Skipping parquet creation.")
+        return
 
     train_ds_meta = Dataset.from_list(train_metadata)
     test_ds_meta = Dataset.from_list(test_metadata)
@@ -137,24 +150,34 @@ def build_dataset_for_suite(task_suite_name: str, local_save_dir: str):
         }
         return data
 
-    print("Mapping and processing training dataset...")
-    train_dataset = train_ds_meta.map(map_and_process, with_indices=True, num_proc=8)
-    print("Mapping and processing test dataset...")
-    test_dataset = test_ds_meta.map(map_and_process, with_indices=True, num_proc=8)
+    if len(train_metadata) > 0:
+        print("Mapping and processing training dataset...")
+        train_dataset = train_ds_meta.map(map_and_process, with_indices=True, num_proc=8)
+    
+    if len(test_metadata) > 0:
+        print("Mapping and processing test dataset...")
+        test_dataset = test_ds_meta.map(map_and_process, with_indices=True, num_proc=8)
 
     suite_save_dir = os.path.join(local_save_dir, task_suite_name)
     os.makedirs(suite_save_dir, exist_ok=True)
-    print(f"Saving training dataset to {os.path.join(suite_save_dir, 'train.parquet')}")
-    train_dataset.to_parquet(os.path.join(suite_save_dir, "train.parquet"))
-    print(f"Saving test dataset to {os.path.join(suite_save_dir, 'test.parquet')}")
-    test_dataset.to_parquet(os.path.join(suite_save_dir, "test.parquet"))
+    
+    if len(train_metadata) > 0:
+        print(f"Saving training dataset to {os.path.join(suite_save_dir, 'train.parquet')}")
+        train_dataset.to_parquet(os.path.join(suite_save_dir, "train.parquet"))
+        
+    if len(test_metadata) > 0:
+        print(f"Saving test dataset to {os.path.join(suite_save_dir, 'test.parquet')}")
+        test_dataset.to_parquet(os.path.join(suite_save_dir, "test.parquet"))
+        
     print("\nDataset generation complete!")
 
     print("\n--- Verification ---")
-    print("Train dataset data sources:", train_dataset.unique("data_source"))
-    print("Test dataset data sources:", test_dataset.unique("data_source"))
-    print("Train dataset length:", len(train_dataset))
-    print("Test dataset length:", len(test_dataset))
+    if len(train_metadata) > 0:
+        print("Train dataset data sources:", train_dataset.unique("data_source"))
+        print("Train dataset length:", len(train_dataset))
+    if len(test_metadata) > 0:
+        print("Test dataset data sources:", test_dataset.unique("data_source"))
+        print("Test dataset length:", len(test_dataset))
 
 
 def resolve_task_suites(task_suite_name: str) -> list[str]:
@@ -187,14 +210,28 @@ if __name__ == "__main__":
     parser.add_argument(
         "--local_save_dir", default="~/data/libero_rl", help="The save directory for the preprocessed dataset."
     )
+    parser.add_argument(
+        "--task_ids", 
+        default=None, 
+        help="Specific task IDs to process (e.g., '0' or '0,1,2'). If None, processes all tasks."
+    )
     args = parser.parse_args()
 
     random.seed(42)
     np.random.seed(42)
     local_save_dir = os.path.expanduser(args.local_save_dir)
     os.makedirs(local_save_dir, exist_ok=True)
+    
+    target_task_ids = None
+    if args.task_ids is not None:
+        target_task_ids = [int(tid.strip()) for tid in args.task_ids.split(",")]
+
     task_suites = resolve_task_suites(args.task_suite_name)
     print(f"Will process task suites: {task_suites}")
 
     for task_suite_name in task_suites:
-        build_dataset_for_suite(task_suite_name=task_suite_name, local_save_dir=local_save_dir)
+        build_dataset_for_suite(
+            task_suite_name=task_suite_name, 
+            local_save_dir=local_save_dir,
+            target_task_ids=target_task_ids 
+        )

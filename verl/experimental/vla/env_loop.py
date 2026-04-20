@@ -109,7 +109,7 @@ class EnvLoop:
         async def _stage_loop(stage_id: int):
             for step_idx in range(self.max_interactions):
                 if stage_id == 0:
-                    logger.info(f"[{step_idx}/{self.max_interactions - 1}] rollout step")
+                    print(f"[{step_idx}/{self.max_interactions - 1}] rollout step")
                 action_result: DataProto = await asyncio.to_thread(rollout_futures[stage_id].get)
 
                 trajectories[stage_id][-1]["action"] = action_result

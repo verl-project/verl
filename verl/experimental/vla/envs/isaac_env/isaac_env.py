@@ -13,7 +13,10 @@
 # limitations under the License.
 
 import logging
+import math
 import os
+import re
+from pathlib import Path
 from typing import Optional
 
 import gymnasium as gym
@@ -30,6 +33,11 @@ from verl.experimental.vla.envs.action_utils import (
 
 logger = logging.getLogger(__name__)
 
+HDF5_SEARCH_PATHS = [
+    Path("/root/data/IsaacLabPlayGround_Dataset/libero/assembled_hdf5"),
+    Path("/root/RobotLearningLab/benchmarks/datasets/libero/assembled_hdf5"),
+]
+
 
 class IsaacEnv(gym.Env):
     def __init__(self, cfg, rank, world_size):
@@ -44,6 +52,7 @@ class IsaacEnv(gym.Env):
         self._generator = np.random.default_rng(seed=self.seed)
 
         self.task_suite_name = self.cfg.task_suite_name
+        self.reset_mode = self.cfg.get("reset_mode", "random")  # "hdf5" | "random"
 
         self.env = None
         self.prev_step_reward = np.zeros(self.num_envs)
@@ -57,6 +66,10 @@ class IsaacEnv(gym.Env):
         self.render_images = []
         self.video_cnt = 0
         self.camera_name = cfg.init_params.camera_names
+
+        # Set correct environment variables for RobotLearningLab paths
+        os.environ["LIBERO_CONFIG_DIR"] = "/root/RobotLearningLab/benchmarks/datasets/libero/config"
+        os.environ["LIBERO_ASSETS_DATA_DIR"] = "/root/RobotLearningLab/benchmarks/datasets/libero/USD"
 
         # sys env must be set before import isaaclab
         from isaaclab.app import AppLauncher
@@ -76,10 +89,14 @@ class IsaacEnv(gym.Env):
         if self.task_suite_name.startswith("libero"):
             os.environ["LIBERO_TASK_SUITE"] = self.task_suite_name
             os.environ["LIBERO_TASK_ID"] = str(task_id)
-            os.environ["LIBERO_OSC_TYPE"] = "pose_rel"
 
             if not self.task_name:
-                self.task_name = "Isaac-Libero-Franka-OscPose-v0"
+                self.task_name = "Isaac-Libero-Franka-IK-Abs-RL-v0"
+
+            # For OSC-based tasks, set the controller type env var that
+            # OscPoseLiberoCameraEnvCfg reads during __post_init__.
+            if "OscPose" in self.task_name:
+                os.environ.setdefault("LIBERO_OSC_TYPE", "pose_rel")
 
         from isaaclab_tasks.utils import parse_env_cfg
 
@@ -106,9 +123,6 @@ class IsaacEnv(gym.Env):
         # TODO support other task suite
         if self.task_suite_name.startswith("libero"):
             self.task_descriptions = self.env.cfg.libero_config.task_info["language_instruction"]
-            assert self.env_cfg.osc_type == "pose_rel", (
-                f"Only pose_rel osc type is supported for libero. Received: {self.env_cfg.osc_type}"
-            )
         else:
             raise ValueError(f"Task suite {self.task_suite_name} is not supported.")
         logger.info("Isaac Sim environment initialized")
@@ -134,10 +148,8 @@ class IsaacEnv(gym.Env):
     def _record_metrics(self, step_reward, terminations, infos):
         episode_info = {}
         self.returns += step_reward
-        # Ensure terminations is a numpy array before the bitwise OR
-        if isinstance(terminations, torch.Tensor):
-            terminations = terminations.cpu().numpy()
-        self.success_once = self.success_once | terminations
+        # use step reward to determine success
+        self.success_once = self.success_once | (step_reward > 0)
         episode_info["success_once"] = self.success_once.copy()
         episode_info["return"] = self.returns.copy()
         episode_info["episode_len"] = self.elapsed_steps.copy()
@@ -160,6 +172,35 @@ class IsaacEnv(gym.Env):
 
         return obs, infos
 
+    @staticmethod
+    def _quat2axisangle(quat: np.ndarray) -> np.ndarray:
+        """Convert quaternion (w, x, y, z) to axis-angle (ax, ay, az). Batched: (..., 4) -> (..., 3)."""
+        w = np.clip(quat[..., 0:1], -1.0, 1.0)
+        xyz = quat[..., 1:4]
+        angle = 2.0 * np.arccos(np.abs(w))
+        den = np.sqrt(1.0 - w * w)
+        small = (den < 1e-8)
+        axis_angle = np.where(small, np.zeros_like(xyz), xyz / den * angle * np.sign(w))
+        return axis_angle
+
+    @staticmethod
+    def _axisangle2quat(axisangle: torch.Tensor) -> torch.Tensor:
+        """Convert axis-angle (..., 3) to quaternion (..., 4) in (w, x, y, z) convention (Isaac Lab)."""
+        angle = torch.norm(axisangle, dim=-1, keepdim=True).clamp(min=1e-8)
+        axis = axisangle / angle
+        half = angle * 0.5
+        sin_half = torch.sin(half)
+        cos_half = torch.cos(half)
+        return torch.cat([cos_half, axis * sin_half], dim=-1)
+
+    def _convert_actions_for_ik_abs(self, actions: torch.Tensor) -> torch.Tensor:
+        """Convert model output (pos3 + axisangle3 + gripper1) to env input (pos3 + quat4 + gripper1)."""
+        pos = actions[..., :3]
+        axisangle = actions[..., 3:6]
+        gripper = actions[..., 6:7]
+        quat = self._axisangle2quat(axisangle)
+        return torch.cat([pos, quat, gripper], dim=-1)
+
     def step(self, actions=None, critic_values=None):
         if actions is None:
             # isaac should start with reset_envs_to_initial_state
@@ -167,10 +208,29 @@ class IsaacEnv(gym.Env):
             return (None, None, None, None, None)
 
         truncations = self.elapsed_steps >= self.max_episode_steps
-        # _actions = torch.zeros(self.action_space.shape)
 
         if isinstance(actions, np.ndarray):
             actions = torch.from_numpy(actions)
+
+        is_ik_abs = "IK-Abs" in (self.task_name or "")
+
+        if self._elapsed_steps[0] < 3:
+            logger.info(
+                f"[step {self._elapsed_steps[0]}] VLA action (pos|aa|grip): "
+                f"{actions[0, :3].tolist()} | {actions[0, 3:6].tolist()} | {actions[0, 6:].tolist()}"
+            )
+
+        if is_ik_abs:
+            actions = self._convert_actions_for_ik_abs(actions.to(self.device))
+        else:
+            actions = actions.to(self.device)
+
+        if self._elapsed_steps[0] < 3:
+            eef = self.env.unwrapped.scene["robot"].data.body_state_w[:, -1, :7]
+            logger.info(
+                f"[step {self._elapsed_steps[0]}] Current EEF pos: {eef[0, :3].tolist()}, "
+                f"Action to env: {actions[0].tolist()}"
+            )
 
         self._elapsed_steps += 1
         raw_obs, _reward, terminations, _, infos = self.env.step(actions)
@@ -181,17 +241,17 @@ class IsaacEnv(gym.Env):
 
         step_reward = self._calc_step_reward(_reward.cpu().numpy())
 
+        infos = self._record_metrics(step_reward, terminations, infos)
+
         if self.video_cfg.save_video:
             plot_infos = {
                 "rewards": step_reward,
-                "terminations": terminations,
+                "terminations": self.success_once,
                 "task": self.task_descriptions,
             }
             if critic_values is not None:
                 plot_infos["critic_value"] = np.asarray(critic_values, dtype=np.float32)
             self.add_new_frames(obs, plot_infos)
-
-        infos = self._record_metrics(step_reward, terminations, infos)
 
         return (
             obs,
@@ -209,6 +269,7 @@ class IsaacEnv(gym.Env):
 
         raw_chunk_terminations = []
         raw_chunk_truncations = []
+        ever_done = torch.zeros(self.num_envs, dtype=torch.bool)
         for i in range(chunk_size):
             actions = chunk_actions[:, i]
             step_values = None
@@ -220,8 +281,15 @@ class IsaacEnv(gym.Env):
 
             extracted_obs, step_reward, terminations, truncations, infos = self.step(actions, critic_values=step_values)
 
+            # Derive success from reward signal (since DoneTerm is disabled to
+            # prevent IsaacLab auto-reset).  Once an env succeeds, mark it as
+            # terminated for all remaining sub-steps so verl sees monotonic
+            # terminations — matching MuJoCo/LIBERO semantics.
+            reward_val = step_reward.cpu() if isinstance(step_reward, torch.Tensor) else torch.as_tensor(step_reward)
+            ever_done = ever_done | (reward_val > 0).view(-1)
+            raw_chunk_terminations.append(ever_done.clone())
+
             chunk_rewards.append(step_reward)
-            raw_chunk_terminations.append(terminations)
             raw_chunk_truncations.append(truncations)
 
         chunk_rewards = torch.stack(chunk_rewards, dim=1)  # [num_envs, chunk_steps]
@@ -256,28 +324,53 @@ class IsaacEnv(gym.Env):
         return obs
 
     def _extract_image_and_state(self, obs):
-        # TODO support multiple camera
-        camera_name = self.camera_name[0]
-        for key in self.env.unwrapped.scene.keys():
-            if key.startswith(camera_name):
-                cam = self.env.unwrapped.scene[key]
-                break
-        assert cam is not None, f"camera {camera_name} not found in scene"
+        images = {}
 
-        rgb = cam.data.output["rgb"]
+        available_cameras = list(self.env.unwrapped.scene.keys())
 
-        full_image = rgb.cpu().numpy()
-        return {
-            "full_image": full_image,
+        for camera_name in self.camera_name:
+            found = False
+            for key in available_cameras:
+                if key.startswith(camera_name):
+                    cam = self.env.unwrapped.scene[key]
+                    rgb = cam.data.output["rgb"]
+                    images[camera_name] = rgb.cpu().numpy()
+                    found = True
+                    break
+
+            if camera_name == self.camera_name[0]:
+                assert camera_name in images, f"camera {camera_name} not found in scene"
+
+        eef_pose = obs["policy"]["eef_pose"].cpu().numpy()        # (num_envs, 7): pos3 + quat_wxyz4
+        eef_pos = eef_pose[..., :3]                                  # (num_envs, 3)
+        eef_axisangle = self._quat2axisangle(eef_pose[..., 3:7])    # (num_envs, 3)
+        gripper_pos = obs["policy"]["gripper_pos"].cpu().numpy()     # (num_envs, 2)
+        gripper_state = gripper_pos[..., 0:1]                        # (num_envs, 1): first finger
+
+        output = {
+            "full_image": images[self.camera_name[0]],
             "state": np.concatenate(
-                [
-                    obs["policy"]["eef_pose"].cpu(),
-                    # quat2axisangle(obs["robot0_eef_quat"]), # isaac do not return robot0_eef_quat
-                    # obs["policy"]["gripper_pos"].cpu(),
-                ],
+                [eef_pos, eef_axisangle, gripper_state],
                 axis=-1,
             ),
         }
+
+        if "eye_in_hand_cam" in images:
+            output["wrist_image"] = images["eye_in_hand_cam"]
+        elif "robot0_eye_in_hand" in images:
+            output["wrist_image"] = images["robot0_eye_in_hand"]
+        else:
+            wrist_cam_found = False
+            for cam_key in available_cameras:
+                if "eye_in_hand" in cam_key or "wrist" in cam_key:
+                    cam = self.env.unwrapped.scene[cam_key]
+                    rgb = cam.data.output["rgb"]
+                    output["wrist_image"] = rgb.cpu().numpy()
+                    wrist_cam_found = True
+                    break
+            assert wrist_cam_found, "wrist camera not found in scene"
+
+        return output
 
     def add_new_frames(self, obs, plot_infos):
         images = []
@@ -311,24 +404,122 @@ class IsaacEnv(gym.Env):
     def get_state(self):
         return None
 
+    def _find_hdf5_file(self, task_suite_name: str, task_id: int) -> Optional[Path]:
+        """Locate the HDF5 demo file for the given task suite and task id."""
+        pattern = f"{task_suite_name}_task{task_id}_*_demo.hdf5"
+        for search_dir in HDF5_SEARCH_PATHS:
+            if not search_dir.exists():
+                continue
+            matches = list(search_dir.glob(pattern))
+            if matches:
+                logger.info(f"Found HDF5 file: {matches[0]}")
+                return matches[0]
+        logger.warning(f"No HDF5 file found for {task_suite_name} task {task_id}")
+        return None
+
+    def _load_hdf5_initial_state(self, task_id: int, episode_hint: int = 0):
+        """Load initial state from the HDF5 demo dataset.
+
+        Returns the initial_state dict (on self.device) or None if not available.
+        """
+        from isaaclab.utils.datasets import HDF5DatasetFileHandler
+
+        hdf5_path = self._find_hdf5_file(self.task_suite_name, task_id)
+        if hdf5_path is None:
+            return None
+
+        handler = HDF5DatasetFileHandler()
+        handler.open(str(hdf5_path))
+        try:
+            num_episodes = handler.get_num_episodes()
+            if num_episodes == 0:
+                return None
+
+            episode_names = list(handler.get_episode_names())
+            episode_map = {}
+            for name in episode_names:
+                m = re.search(r"(\d+)", name)
+                if m:
+                    episode_map[int(m.group(1))] = name
+
+            ep_idx = episode_hint % num_episodes
+            sorted_indices = sorted(episode_map.keys())
+            if ep_idx < len(sorted_indices):
+                ep_name = episode_map[sorted_indices[ep_idx]]
+            else:
+                ep_name = episode_names[0]
+
+            episode_data = handler.load_episode(ep_name, self.device)
+            if episode_data is None:
+                return None
+
+            initial_state = episode_data.get_initial_state()
+            if initial_state is None:
+                logger.warning(f"No initial_state in episode {ep_name}")
+            else:
+                logger.info(f"Loaded initial state from {hdf5_path.name} episode {ep_name}")
+            return initial_state
+        finally:
+            handler.close()
+
+    @staticmethod
+    def _expand_state(state, num_envs):
+        """Recursively expand all tensors with batch dim 1 to num_envs."""
+        if isinstance(state, torch.Tensor):
+            if state.shape[0] == 1:
+                return state.expand(num_envs, *state.shape[1:]).contiguous()
+            return state
+        if isinstance(state, dict):
+            return {k: IsaacEnv._expand_state(v, num_envs) for k, v in state.items()}
+        return state
+
     def reset_envs_to_state_ids(self, state_ids_list, task_ids_list):
-        logger.info(f"IsaacEnv reset_envs_to_state_ids task_ids_list: {task_ids_list}")
+        logger.info(
+            f"IsaacEnv reset_envs_to_state_ids task_ids={task_ids_list}, "
+            f"reset_mode={self.reset_mode}"
+        )
         assert len(set(task_ids_list)) == 1, "Isaac env only support single task"
 
-        self._init_env(task_ids_list[0])
+        task_id = task_ids_list[0]
+        self._init_env(task_id)
 
-        # In Isaac, reset to random status in groups to have more test coverage
-        # TODO support reset in group with options = {"group": len(set(state_ids_list))}
         raw_obs, infos = self.env.reset()
-        env_idx = np.arange(self.num_envs)
-        self._reset_metrics(env_idx)
 
+        if self.reset_mode == "hdf5":
+            raw_obs, infos = self._reset_from_hdf5(task_id, state_ids_list, raw_obs, infos)
+
+        raw_obs = self._stabilize_arm(raw_obs)
+        self._reset_metrics()
         self.elapsed_steps = np.zeros(self.num_envs, dtype=np.int32)
-
-        # stablize the environment
-        for _ in range(10):
-            zero_actions = torch.zeros((self.num_envs, self.action_dim), device=self.device)
-            raw_obs, _, _, _, infos = self.env.step(zero_actions)
 
         obs = self._wrap_obs(raw_obs)
         return obs, infos
+
+    def _reset_from_hdf5(self, task_id, state_ids_list, raw_obs, infos):
+        """Override env state with a fixed initial state loaded from HDF5 demo data."""
+        episode_hint = int(state_ids_list[0]) if state_ids_list else 0
+        initial_state = self._load_hdf5_initial_state(task_id, episode_hint=episode_hint)
+        if initial_state is None:
+            logger.warning("No HDF5 initial state available, falling back to random reset")
+            return raw_obs, infos
+
+        env_ids_tensor = torch.arange(self.num_envs, device=self.device)
+        if self.num_envs > 1:
+            initial_state = self._expand_state(initial_state, self.num_envs)
+        raw_obs, infos = self.env.reset_to(initial_state, env_ids_tensor, is_relative=True)
+        logger.info("Reset environment to HDF5 initial state")
+        return raw_obs, infos
+
+    def _stabilize_arm(self, raw_obs, steps=10):
+        """Run a few hold-position steps so the arm settles after reset."""
+        is_abs_action = "IK-Abs" in (self.task_name or "")
+        for _ in range(steps):
+            if is_abs_action:
+                eef_pose = raw_obs["policy"]["eef_pose"].to(self.device)
+                gripper_pos = raw_obs["policy"]["gripper_pos"].to(self.device)
+                hold_action = torch.cat([eef_pose, gripper_pos[..., 0:1]], dim=-1)
+            else:
+                env_action_dim = self.env.action_space.shape[-1]
+                hold_action = torch.zeros((self.num_envs, env_action_dim), device=self.device)
+            raw_obs, _, _, _, _ = self.env.step(hold_action)
+        return raw_obs

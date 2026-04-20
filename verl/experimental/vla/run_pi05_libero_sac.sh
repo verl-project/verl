@@ -1,4 +1,12 @@
 set -x
+
+# Clean up lingering processes from previous runs to free GPU memory
+ray stop --force 2>/dev/null || true
+pkill -9 -f "ray::" 2>/dev/null || true
+pkill -9 -f "omni\." 2>/dev/null || true
+pkill -9 -f "isaac_sim" 2>/dev/null || true
+sleep 2
+
 libero_train_path=$HOME/data/libero_rl/train.parquet
 libero_test_path=$HOME/data/libero_rl/test.parquet
 
@@ -10,6 +18,30 @@ VIDEO_OUTPUT=${MLP_MODEL_OUTPUT:-"$HOME"}/video
 SFT_MODEL_PATH=${SFT_MODEL_PATH:-"$HOME/data/pi05_libero_torch"}
 TOKENIZER_PATH="$SFT_MODEL_PATH"
 
+# JAX inference config (set USE_JAX_INFERENCE=true to use JAX checkpoint directly)
+USE_JAX_INFERENCE=${USE_JAX_INFERENCE:-"false"}
+JAX_CHECKPOINT_DIR=${JAX_CHECKPOINT_DIR:-"$HOME/data/pi05_libero_absik/checkpoint-30000"}
+JAX_CONFIG_NAME=${JAX_CONFIG_NAME:-"pi05_libero"}
+# When the checkpoint was trained on absolute actions (e.g. absik), the model internally
+# predicts deltas that need state added back. Set to "true" to enable, or "auto" to detect
+# from checkpoint metadata (looks for "absik"/"abs" in the training config_name).
+ABSOLUTE_ACTION_MODE=${ABSOLUTE_ACTION_MODE:-"auto"}
+
+# Environment reset mode:
+#   "hdf5"   - load fixed initial state from HDF5 demo data (reproducible, matches training demos)
+#   "random" - use Isaac Lab's built-in randomization within narrow pose ranges
+RESET_MODE=${RESET_MODE:-"random"}
+
+# LD_LIBRARY_PATH for JAX CUDA support
+NVIDIA_BASE=/workspace/isaaclab/_isaac_sim/exts/omni.isaac.ml_archive/pip_prebundle/nvidia
+CUDNN_LIB=/workspace/isaaclab/_isaac_sim/kit/python/lib/python3.11/site-packages/nvidia/cudnn/lib
+CUDA_LIBS=""
+for d in $NVIDIA_BASE/*/lib; do CUDA_LIBS="$d:$CUDA_LIBS"; done
+export LD_LIBRARY_PATH="$CUDA_LIBS$CUDNN_LIB:$LD_LIBRARY_PATH"
+
+# PYTHONPATH for openpi (JAX model source)
+export PYTHONPATH="/root/openpi/src:/root/openpi/packages/openpi-client/src:$PYTHONPATH"
+
 # Physical Node Config
 NUM_NODES=1                                    # number of nodes
 NUM_GPUS=4                                     # total number of gpus per node
@@ -20,17 +52,17 @@ NUM_ROLLOUT_GPUS=$((NUM_GPUS - NUM_ENV_GPUS))  # number of gpus for rollout work
 
 # Rollout Config
 # NOTE: TRAIN_BATCH_SIZE * ROLLOUT_N == NUM_ENV_GPUS * NUM_STAGE * NUM_ENV
-TRAIN_BATCH_SIZE=32                            # batch size for dataloaders per step
-ROLLOUT_N=1                                    # response number for each prompt (for GRPO)
+TRAIN_BATCH_SIZE=4                             # batch size for dataloaders per step
+ROLLOUT_N=8                                    # response number for each prompt (rollout.n == NUM_ENV for isaac)
 NUM_STAGE=2                                    # number of pipeline stages
 NUM_ENV=8                                      # number of envs per env worker
 
 NUM_ACTION_CHUNKS=10                           # number of action chunks
-MAX_EPISODE_STEPS=512                          # max episode steps for each env
+MAX_EPISODE_STEPS=300                          # max episode steps for each env
                                                # max_interactions = MAX_EPISODE_STEPS / num_action_chunks
 
 # Training Config
-MINI_BATCH_SIZE=1024                           # mini batch size (batch size per GPU, automatically multiplied by ROLLOUT_N)
+MINI_BATCH_SIZE=1024                           # (batch size per GPU, automatically multiplied by ROLLOUT_N)
 MICRO_BATCH_SIZE=8                             # micro batch size (per GPU, for gradient accumulation, should divide MINI_BATCH_SIZE)
 
 
@@ -38,7 +70,7 @@ MICRO_BATCH_SIZE=8                             # micro batch size (per GPU, for 
 # isaac or libero
 # libero means original libero benchmark with mujoco sim
 # isaac means libero benchmark using isaac sim
-SIM_TYPE=${SIM_TYPE:-"libero"}
+SIM_TYPE=${SIM_TYPE:-"isaac"}
 PROJECT_NAME="vla_libero_RL"
 EXPERIMENT_NAME="${SIM_TYPE}_reinforce_plus_plus"
 
@@ -78,6 +110,7 @@ $PYTHON -m verl.experimental.vla.main_sac \
     env.train.video_cfg.save_video=True \
     env.train.video_cfg.video_base_dir=${VIDEO_OUTPUT} \
     env.train.seed=42 \
+    +env.train.reset_mode=$RESET_MODE \
     actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
     actor_rollout_ref.actor.fsdp_config.wrap_policy.transformer_layer_cls_to_wrap=[SiglipEncoderLayer,GemmaDecoderLayerWithExpert] \
     actor_rollout_ref.model.path=$SFT_MODEL_PATH \
@@ -108,6 +141,10 @@ $PYTHON -m verl.experimental.vla.main_sac \
     actor_rollout_ref.rollout.free_cache_engine=False \
     actor_rollout_ref.ref.log_prob_micro_batch_size=16 \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
+    +actor_rollout_ref.model.use_jax_inference=$USE_JAX_INFERENCE \
+    +actor_rollout_ref.model.jax_checkpoint_dir=$JAX_CHECKPOINT_DIR \
+    +actor_rollout_ref.model.jax_config_name=$JAX_CONFIG_NAME \
+    +actor_rollout_ref.model.absolute_action_mode=$ABSOLUTE_ACTION_MODE \
     +actor_rollout_ref.algorithm='sac' \
     algorithm.kl_ctrl.kl_coef=0.00 \
     trainer.logger=['console'] \
