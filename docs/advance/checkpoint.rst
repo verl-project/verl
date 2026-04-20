@@ -3,7 +3,7 @@
 Using Checkpoints to Support Fault Tolerance Training
 =====================================================
 
-Last updated: 03/22/2026.
+Last updated: 04/20/2026.
 
 There could be training errors or machine failure during the whole RLHF training process, 
 so it is recommended to enable checkpoints to minimize your loss.
@@ -12,10 +12,24 @@ The API Interface has already been listed in :ref:`config-explain-page`,
 and we will not repeat them. But there are still some technique details
 we hope to clarify.
 
+The ``checkpoint.save_contents`` / ``checkpoint.load_contents`` field accepts any combination of
+``model``, ``optimizer``, ``extra`` and ``hf_model``. The semantics are aligned between FSDP and
+Megatron:
+
+- ``model`` -- the framework-native model state. For **FSDP** this is the per-rank sharded state;
+  for **Megatron** this is either the HuggingFace state (when mbridge is enabled) or the
+  Megatron ``dist_checkpointing`` shards (when mbridge is disabled).
+- ``optimizer`` -- the optimizer state (sharded for both FSDP and Megatron).
+- ``extra`` -- LR scheduler state, RNG states, and (for Megatron) the serialised
+  ``TransformerConfig``.
+- ``hf_model`` -- the full model in HuggingFace format. **Megatron requires mbridge to be
+  enabled when ``hf_model`` is in ``save_contents``** -- with mbridge, ``model`` and ``hf_model``
+  produce the same HF checkpoint and are deduplicated (saved only once).
+
 .. note:: 
 
-    Notice that the ``checkpoint.contents`` field has no effect to FSDP checkpoint except ``hf_model``, 
-    the other 3 fields are binded together to save and load. We recommend to include ``model``, ``optimizer`` and ``extra`` all.
+    For FSDP, ``checkpoint.save_contents`` other than ``hf_model`` are binded together to save and
+    load. We recommend to include ``model``, ``optimizer`` and ``extra`` all.
 
 Checkpoint Saving Directory Structure
 -------------------------------------
@@ -52,12 +66,84 @@ While **Megatron** current checkpoint structure is:
     checkpoints/${trainer.project_name}/${trainer.experiment_name}
     ├── global_steps_${i}
     │   ├── actor
-    │   │   ├── huggingface     # default save config and tokenizer, save huggingface model if include ``hf_mode`` in checkpoint.contents
-    │   │   └── dist_ckpt       # save sharded model/optimizer/rng_states, naming the same as Megatron
+    │   │   ├── huggingface     # HF config + tokenizer; also contains the HF model weights when mbridge is enabled and ``model`` (or ``hf_model``) is in save_contents
+    │   │   └── dist_ckpt       # optimizer + rng_state always; model shards only when mbridge is disabled
     │   └── critic
     │   │   ├── huggingface
     │   │   └── dist_ckpt
     └── latest_checkpointed_iteration.txt
+
+Megatron Checkpoint Manager Backends
+------------------------------------
+
+The Megatron checkpoint manager supports two model-weight backends, controlled by
+``actor_rollout_ref.actor.megatron.use_mbridge`` (and the symmetric ``critic`` / ``ref`` keys):
+
+- **mbridge (default, ``use_mbridge=True``)** -- model weights are saved/loaded in HuggingFace
+  format under ``global_step_${i}/${role}/huggingface/`` via `mbridge
+  <https://github.com/ISEEKYAN/mbridge>`_ or `Megatron-Bridge
+  <https://github.com/NVIDIA-NeMo/Megatron-Bridge>`_ (selected via ``vanilla_mbridge``).
+  No conversion step is needed after training to obtain an HF model.
+
+- **dist_checkpoint (``use_mbridge=False``)** -- model weights are saved using Megatron's native
+  ``dist_checkpointing`` (sharded across ranks) under ``global_step_${i}/${role}/dist_ckpt/``,
+  alongside the optimizer and RNG states.
+
+Optimizer, LR-scheduler and RNG (``extra``) state always go through ``dist_checkpointing``
+regardless of which model backend is used; only the model weights pick a backend.
+
+The legacy alias ``actor_rollout_ref.actor.megatron.use_dist_checkpointing=True`` is still
+accepted by both the engine config and the checkpoint manager, and is translated to
+``use_mbridge=False`` internally. New configurations should prefer ``use_mbridge``.
+
+.. note::
+
+    The combination ``use_mbridge=False`` together with ``use_dist_checkpointing=False``
+    is **not supported** -- at least one model-weight backend must be enabled.
+
+The diagram below (from `RFC #5630
+<https://github.com/verl-project/verl/issues/5630>`_) summarises how each combination of backend
+and ``save_contents`` entry is resolved:
+
+.. image:: https://github.com/user-attachments/assets/6036822e-9d8a-4c1f-bbcc-a15dcb584c1b
+   :alt: Megatron checkpoint manager backend × save_contents behaviour
+   :align: center
+
+In tabular form:
+
++----------------------+----------------+----------------------------------------------------------------+
+| Backend              | save_contents  | Behaviour                                                      |
++======================+================+================================================================+
+| ``mbridge`` (default)| ``model``      | Save HF model via mbridge into ``huggingface/``.               |
++----------------------+----------------+----------------------------------------------------------------+
+| ``mbridge``          | ``hf_model``   | Save HF model via mbridge into ``huggingface/``.               |
++----------------------+----------------+----------------------------------------------------------------+
+| ``mbridge``          | both           | Same HF model is saved **once** (deduplicated).                |
++----------------------+----------------+----------------------------------------------------------------+
+| ``dist_checkpoint``  | ``model``      | Save sharded model into ``dist_ckpt/`` via Megatron's          |
+|                      |                | ``dist_checkpointing``.                                        |
++----------------------+----------------+----------------------------------------------------------------+
+| ``dist_checkpoint``  | ``hf_model``   | **Error** -- ``hf_model`` is only supported by ``mbridge``.    |
++----------------------+----------------+----------------------------------------------------------------+
+| both disabled        | any            | **Error** -- at least one backend must be enabled.             |
++----------------------+----------------+----------------------------------------------------------------+
+
+In all rows above, ``optimizer`` and ``extra`` (when listed in ``save_contents``) are saved through
+``dist_checkpointing`` into ``dist_ckpt/``. PEFT/LoRA adapter shards are also written into
+``dist_ckpt/`` even with the mbridge backend, because mbridge handles only base-model weights.
+
+Recommended Configurations
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+- **Default / production**: keep ``use_mbridge=True`` and use ``save_contents=['model',
+  'optimizer', 'extra']``. The ``huggingface/`` folder produced by mbridge can be loaded
+  directly by HuggingFace Transformers without any further conversion step.
+- **HuggingFace-only export**: ``save_contents=['hf_model']`` (mbridge required). Useful when
+  you only need a deployable HF checkpoint and not a resumable training state.
+- **Pure Megatron sharded model**: ``use_mbridge=False`` together with
+  ``save_contents=['model', 'optimizer', 'extra']``. The model goes into ``dist_ckpt/`` and you
+  can later run ``python -m verl.model_merger merge --backend megatron ...`` (see below) to
+  produce an HF checkpoint.
 
 Convert FSDP and Megatron Checkpoints to HuggingFace Format Model
 -----------------------------------------------------------------
@@ -167,22 +253,3 @@ No need to convert the model to Megatron dist-checkpoint format.
 
     This may increase CPU memory usage and lead to OOM issues for large models.
     We recommend using the default dp-reshardable format in most cases.
-
-
-Original Checkpoint Utils
--------------------------
-
-Original Checkpoint Utils refer to original checkpoint implementation in ``verl/models/[model]/megatron/checkpoint_utils``.
-
-We only need ``[model]_loader.py`` in original checkpoint utils now, since we get rid of storing ``hf_model`` every time (which is not recommended for large model training, try only saving sharded models if you can).
-
-.. note:: 
-
-    Note that ``[model]_loader`` only support environments where **storage clusters are able to connect with every calculation nodes**. 
-    Because it utilizes **sharded load way to minimize the loading checkpoint overhead**. 
-    Every rank loads its own data from ``state_dict`` which can be accessed by all of them.
-    While there is also no need to broadcast among DP ranks, since the saved state_dict is only produced by DP rank 0.
-
-    For users who can **only place the huggingface model on one device**, we keep the original costly implementation in ``[model]_loader_deprecated``. In this implementation, rank 0 broadcast all weights to each tp and pp rank, and then dp rank 0 broadcast to all dp ranks. There may be at risks of OOM.
-
-    To use deprecated loader, change the import package of ``load_state_dict_to_megatron_llama``.
