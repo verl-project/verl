@@ -39,22 +39,6 @@ from verl.workers.config import CheckpointEngineConfig
 from verl.workers.config.rollout import KvCacheMetricsConfig, RolloutConfig
 
 
-def _adjust_trainer_gpus_to_available(config: DictConfig) -> None:
-    """Cap trainer GPU pool to visible devices (avoids failures on e.g. 4-GPU machines vs default 8)."""
-    try:
-        import torch
-
-        n = torch.cuda.device_count()
-    except Exception:
-        n = 0
-    if n <= 0:
-        return
-    desired = int(config.trainer.n_gpus_per_node) * int(config.trainer.nnodes)
-    if desired > n:
-        config.trainer.nnodes = 1
-        config.trainer.n_gpus_per_node = n
-
-
 @pytest.fixture
 def init_config() -> DictConfig:
     from hydra import compose, initialize_config_dir
@@ -74,9 +58,9 @@ def init_config() -> DictConfig:
             ],
         )
 
-    model_path = os.path.expanduser("/home/xuzhi/wuyinqi/models/Qwen2.5-1.5B-Instruct")
+    model_path = os.path.expanduser("~/models/Qwen/Qwen2.5-1.5B-Instruct")
     config.actor_rollout_ref.model.path = model_path
-    config.actor_rollout_ref.rollout.name = os.getenv("ROLLOUT_NAME", "vllm")
+    config.actor_rollout_ref.rollout.name = os.environ["ROLLOUT_NAME"]
     config.actor_rollout_ref.rollout.mode = "async"
     config.actor_rollout_ref.rollout.enforce_eager = True
     config.actor_rollout_ref.rollout.prompt_length = 4096
@@ -84,8 +68,6 @@ def init_config() -> DictConfig:
     config.actor_rollout_ref.rollout.n = 4
     config.actor_rollout_ref.rollout.agent.num_workers = 2
     config.actor_rollout_ref.rollout.skip_tokenizer_init = True
-
-    _adjust_trainer_gpus_to_available(config)
 
     return config
 
