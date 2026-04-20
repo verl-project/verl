@@ -127,6 +127,7 @@ class ToolAgentLoop(AgentLoopBase):
             request_id=request_id,
             tools_kwargs=tools_kwargs,
         )
+        agent_data.request_group_id = kwargs.get("request_group_id")
 
         # Per-sample tool selection: filter global tools by extra_info.tool_selection
         extra_info = kwargs.get("extra_info", {}) or {}
@@ -202,6 +203,7 @@ class ToolAgentLoop(AgentLoopBase):
                 sampling_params=sampling_params,
                 image_data=agent_data.image_data,
                 video_data=agent_data.video_data,
+                request_group_id=getattr(agent_data, "request_group_id", None),
             )
         # first time to set num_preempted
         if agent_data.metrics.get("num_preempted") is None:

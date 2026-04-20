@@ -204,16 +204,17 @@ AsyncLLMServerManager serve as proxy to multiple AsyncLLMServer instances, provi
 
 - load balance: pluggable strategies (see below) with default ``least_requests`` (fewest in-flight requests; deterministic tie-break).
 - sticky session: bind ``request_id`` to a server instance so the same ``request_id`` is sent to the same server on later turns (prefix caching).
-- optional **group-level** affinity: when ``rollout.group_sticky_routing`` is true, each ``AgentLoopWorker`` gets a ``group_id`` (from ``worker_index % rollout.num_load_balance_groups``); the first routing decision for that group pins later *new* ``request_id``\ s to the same server until the LRU evicts the entry. **Request-level** sticky still wins when ``request_id`` was seen before.
+- optional **GRPO / rollout-n group** affinity: set ``rollout.load_balance_sticky_mode`` to ``group``. The trainer uses ``GroupStickyLoadBalancer`` (``RequestStickyLoadBalancer`` when mode is ``request``). Routing consults ``request_id`` LRU first, then ``request_group_id`` LRU (same size as request cache): ``request_group_id`` is ``f"{global_step}:{sample_index}"`` so repeated rollouts for the same sample share one replica. Then the configured strategy picks among replicas.
 
 **Global load balancer configuration** (``rollout.*`` in Hydra, see ``verl/trainer/config/rollout/rollout.yaml``):
 
+- ``load_balance_sticky_mode``: ``request`` (default) | ``group``.
 - ``load_balance_strategy``: ``least_requests`` | ``least_kv_cache`` | ``weighted_rr`` | ``random``.
-- ``least_kv_cache``: the Ray actor ``GlobalRequestLoadBalancer`` periodically HTTP GETs each replica's Prometheus text endpoint (default path ``/metrics``), and parses ``kv_cache_metrics.metric_name`` (identifier before ``{``). If several samples share that name with different label sets, the **maximum** value is used per replica. Requires the engine to expose metrics (e.g. SGLang ``--enable-metrics``). If scraping fails, routing falls back to least in-flight behavior. This path does **not** query the cluster Prometheus server; it scrapes each replica directly.
+- ``least_kv_cache``: the global load balancer actor periodically HTTP GETs each replica's Prometheus text endpoint (default path ``/metrics``), and parses ``kv_cache_metrics.metric_name`` (identifier before ``{``). If several samples share that name with different label sets, the **maximum** value is used per replica. Requires the engine to expose metrics (e.g. SGLang ``--enable-metrics``). If scraping fails, routing falls back to least in-flight behavior. This path does **not** query the cluster Prometheus server; it scrapes each replica directly.
 - ``weighted_rr``: optional ``load_balance_weights`` (one weight per replica, same order as servers).
 - ``load_balance_random_seed``: optional seed for ``random`` strategy (reproducibility in tests).
 
-Custom strategies: subclass ``LoadBalanceStrategy`` in ``verl.experimental.agent_loop.load_balance``, implement ``pick_server`` and ``__init__(self, server_actor_ids, **kwargs)``, and register with ``@register("strategy_name")`` on the class (same pattern as ``@register("tool_agent")`` on agent loops). Alternatively call ``register_load_balance_strategy(name, YourStrategyClass)``.
+Custom strategies: subclass ``LoadBalanceStrategy`` in ``verl.experimental.agent_loop.load_balance_strategy``, implement ``pick_server`` and ``__init__(self, server_actor_ids, **kwargs)``, and register with ``@register("strategy_name")`` on the class (same pattern as ``@register("tool_agent")`` on agent loops). Alternatively call ``register_load_balance_strategy(name, YourStrategyClass)``. Custom global load balancer Ray actors: subclass ``GlobalRequestLoadBalancer`` in ``verl.experimental.agent_loop.load_balance``, decorate the subclass with ``@ray.remote``, then call ``register_load_balancer_class("your_mode", YourRemoteActorClass)`` and set ``rollout.load_balance_sticky_mode`` to ``your_mode``.
 
 AsyncLLMServerManager is passed to ``AgentLoopBase.__init__``, whenever user want to interact with LLM in agent loop,
 they can call ``AsyncLLMServerManager.generate`` to generate response_ids.

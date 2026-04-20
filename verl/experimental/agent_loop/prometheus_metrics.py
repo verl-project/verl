@@ -15,17 +15,15 @@
 HTTP /metrics scraping helpers for least_kv_cache routing.
 
 Parsing is intentionally minimal: skip # comment lines, keep lines whose metric
-identifier matches metric_name, then take the last numeric literal on the line
-(as the Prometheus sample value is typically last).
+identifier matches metric_name, then read the sample value as the first token
+after the label set (closing `}`) or after the metric name (OpenMetrics / Prometheus
+text: `name value [timestamp]`).
 """
 
 from __future__ import annotations
 
-import re
 import urllib.request
 from typing import Optional
-
-_FLOAT_RE = re.compile(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
 
 
 def build_metrics_url(server_address: str, metrics_path: str = "/metrics") -> str:
@@ -54,18 +52,28 @@ def _metric_name_prefix_match(line: str, metric_name: str) -> bool:
     return line[len(metric_name)] in "{ \t"
 
 
-def _last_float_on_line(line: str) -> Optional[float]:
-    matches = _FLOAT_RE.findall(line)
-    if not matches:
+def _sample_value_float_on_line(line: str) -> Optional[float]:
+    """Parse the Prometheus text sample value (first token after labels or after name).
+
+    Lines look like metric_name{labels} value [timestamp] or metric_name value.
+    The optional integer timestamp must not be parsed as the value.
+    """
+    if "}" in line:
+        rest = line[line.rfind("}") + 1 :]
+    else:
+        parts = line.split(None, 1)
+        rest = parts[1] if len(parts) > 1 else ""
+    tokens = rest.split()
+    if not tokens:
         return None
     try:
-        return float(matches[-1])
+        return float(tokens[0])
     except ValueError:
         return None
 
 
 def parse_prometheus_metric_value(text: str, metric_name: Optional[str] = None) -> Optional[float]:
-    """Max of last numeric literals on non-comment lines whose metric identifier is metric_name.
+    """Max of sample values on non-comment lines whose metric identifier is metric_name.
 
     Comment / metadata lines (leading # after strip) are ignored.
     """
@@ -82,7 +90,7 @@ def parse_prometheus_metric_value(text: str, metric_name: Optional[str] = None) 
             continue
         if not _metric_name_prefix_match(line, metric_name):
             continue
-        v = _last_float_on_line(line)
+        v = _sample_value_float_on_line(line)
         if v is not None:
             values.append(v)
     if not values:

@@ -65,6 +65,7 @@ class SingleTurnAgentLoop(AgentLoopBase):
                 sampling_params=sampling_params,
                 image_data=images,
                 video_data=videos,
+                request_group_id=kwargs.get("request_group_id"),
             )
         if metrics.get("num_preempted") is None:
             metrics["num_preempted"] = output.num_preempted if output.num_preempted is not None else -1
@@ -167,6 +168,7 @@ class DiffusionSingleTurnAgentLoop(AgentLoopBase):
                 image_data=images,
                 video_data=videos,
                 negative_prompt_ids=negative_prompt_ids,
+                request_group_id=kwargs.get("request_group_id"),
             )
         if metrics.get("num_preempted") is None:
             metrics["num_preempted"] = output.num_preempted if output.num_preempted is not None else -1

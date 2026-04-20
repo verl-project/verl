@@ -301,15 +301,13 @@ class RolloutConfig(BaseConfig):
     enable_sleep_mode: bool = True
 
     # --- Global agent-loop load balancer (GlobalRequestLoadBalancer) ---
-    # Strategy names are registered in ``verl.experimental.agent_loop.load_balance``.
+    # Strategy names are registered in verl.experimental.agent_loop.load_balance_strategy.
     load_balance_strategy: str = "least_requests"
-    # For ``weighted_rr``: one weight per rollout replica (same order as server addresses).
+    # request: LRU sticky by request_id only. group: also LRU by request_group_id (GRPO rollout.n repeats).
+    load_balance_sticky_mode: str = "request"
+    # For weighted_rr, one weight per rollout replica (same order as server addresses).
     load_balance_weights: Optional[list[float]] = None
     load_balance_random_seed: Optional[int] = None
-    # Opt-in: affinity by AgentLoopWorker group (see ``num_load_balance_groups``).
-    group_sticky_routing: bool = False
-    # Workers with the same ``i % num_load_balance_groups`` share one load-balance group id.
-    num_load_balance_groups: int = 1
     kv_cache_metrics: KvCacheMetricsConfig = field(default_factory=KvCacheMetricsConfig)
 
     mtp: MtpConfig = field(default_factory=MtpConfig)
@@ -363,10 +361,10 @@ class RolloutConfig(BaseConfig):
                     f"Current rollout {self.name=} not implemented pipeline_model_parallel_size > 1 yet."
                 )
 
-        if self.num_load_balance_groups < 1:
-            raise ValueError("num_load_balance_groups must be >= 1")
         if self.load_balance_weights is not None and len(self.load_balance_weights) < 1:
             raise ValueError("load_balance_weights must be non-empty when set")
+        if self.load_balance_sticky_mode not in ("request", "group"):
+            raise ValueError("load_balance_sticky_mode must be 'request' or 'group'")
 
 
 @dataclass

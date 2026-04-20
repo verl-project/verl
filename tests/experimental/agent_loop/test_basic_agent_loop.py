@@ -23,8 +23,14 @@ from omegaconf import DictConfig
 from transformers.utils import get_json_schema
 
 from tests.experimental.agent_loop.agent_utils import init_agent_loop_manager
-from verl.experimental.agent_loop.agent_loop import GlobalRequestLoadBalancer, get_trajectory_info
-from verl.experimental.agent_loop.load_balance import create_load_balance_strategy
+from verl.experimental.agent_loop.agent_loop import get_trajectory_info
+from verl.experimental.agent_loop.load_balance import (
+    GlobalRequestLoadBalancer,
+    GroupStickyLoadBalancer,
+    RequestStickyLoadBalancer,
+    load_balancer_actor_class,
+)
+from verl.experimental.agent_loop.load_balance_strategy import create_load_balance_strategy
 from verl.experimental.agent_loop.prometheus_metrics import (
     collect_matching_metric_sample_lines,
     parse_prometheus_metric_value,
@@ -314,10 +320,10 @@ async def test_get_trajectory_info():
     step = 10
     index = [1, 1, 3, 3]
     expected_info = [
-        {"step": step, "sample_index": 1, "rollout_n": 0, "validate": False},
-        {"step": step, "sample_index": 1, "rollout_n": 1, "validate": False},
-        {"step": step, "sample_index": 3, "rollout_n": 0, "validate": False},
-        {"step": step, "sample_index": 3, "rollout_n": 1, "validate": False},
+        {"step": step, "sample_index": 1, "rollout_n": 0, "validate": False, "request_group_id": "10:1"},
+        {"step": step, "sample_index": 1, "rollout_n": 1, "validate": False, "request_group_id": "10:1"},
+        {"step": step, "sample_index": 3, "rollout_n": 0, "validate": False, "request_group_id": "10:3"},
+        {"step": step, "sample_index": 3, "rollout_n": 1, "validate": False, "request_group_id": "10:3"},
     ]
 
     trajectory_info = await get_trajectory_info(step, index, validate=False)
@@ -336,6 +342,11 @@ def _rollout_for_lb(load_balance_strategy: str = "least_requests", **kwargs: Any
     return RolloutConfig(**fields)
 
 
+def _lb_remote(server_actor_ids: list[str], rollout_config: RolloutConfig):
+    cls = load_balancer_actor_class(rollout_config)
+    return cls.remote(server_actor_ids=server_actor_ids, rollout_config=rollout_config)
+
+
 @pytest.fixture(scope="module")
 def ray_for_lb():
     ray.init(ignore_reinit_error=True)
@@ -347,7 +358,7 @@ class TestLoadBalancerRouting:
     """Least-loaded selection."""
 
     def test_distributes_across_servers(self, ray_for_lb):
-        lb = GlobalRequestLoadBalancer.remote(
+        lb = _lb_remote(
             server_actor_ids=["s0", "s1", "s2"],
             rollout_config=_rollout_for_lb(),
         )
@@ -355,7 +366,7 @@ class TestLoadBalancerRouting:
         assert sorted(servers) == ["s0", "s1", "s2"]
 
     def test_new_requests_route_to_least_loaded(self, ray_for_lb):
-        lb = GlobalRequestLoadBalancer.remote(
+        lb = _lb_remote(
             server_actor_ids=["s0", "s1", "s2"],
             rollout_config=_rollout_for_lb(),
         )
@@ -370,7 +381,7 @@ class TestLoadBalancerRouting:
         assert s_new == "s2"
 
     def test_release_rebalances(self, ray_for_lb):
-        lb = GlobalRequestLoadBalancer.remote(
+        lb = _lb_remote(
             server_actor_ids=["s0", "s1"],
             rollout_config=_rollout_for_lb(),
         )
@@ -384,7 +395,7 @@ class TestLoadBalancerRouting:
         assert s2 != s3
 
     def test_release_invalid_server_raises(self, ray_for_lb):
-        lb = GlobalRequestLoadBalancer.remote(
+        lb = _lb_remote(
             server_actor_ids=["s0", "s1"],
             rollout_config=_rollout_for_lb(),
         )
@@ -393,7 +404,7 @@ class TestLoadBalancerRouting:
         assert "Invalid server_id" in str(excinfo.value)
 
     def test_release_without_inflight_raises(self, ray_for_lb):
-        lb = GlobalRequestLoadBalancer.remote(
+        lb = _lb_remote(
             server_actor_ids=["s0", "s1"],
             rollout_config=_rollout_for_lb(),
         )
@@ -406,7 +417,7 @@ class TestLoadBalancerStickySession:
     """Request-level sticky session."""
 
     def test_same_request_id_same_server(self, ray_for_lb):
-        lb = GlobalRequestLoadBalancer.remote(
+        lb = _lb_remote(
             server_actor_ids=["s0", "s1", "s2", "s3"],
             rollout_config=_rollout_for_lb(),
         )
@@ -445,6 +456,11 @@ class TestPrometheusMetricsParse:
             0.024543294222486245
         )
 
+    def test_parse_ignores_optional_prometheus_timestamp(self):
+        """Exposition format allows ``value millis_timestamp``; value must not be the timestamp."""
+        text = 'vllm:kv_cache_usage_perc{model_name="a"} 0.5 1710000000000\n'
+        assert parse_prometheus_metric_value(text, metric_name="vllm:kv_cache_usage_perc") == pytest.approx(0.5)
+
 
 class TestLoadBalanceRegistry:
     def test_unknown_strategy_raises(self):
@@ -457,10 +473,14 @@ class TestLoadBalanceStrategyPickServer:
 
     def test_least_requests_prefers_lower_inflight_tie_break_sorted_id(self):
         strat = create_load_balance_strategy("least_requests", server_actor_ids=["s2", "s0", "s1"])
-        inflight = {"s0": 1, "s1": 1, "s2": 0}
-        assert strat.pick_server(["s0", "s1", "s2"], inflight) == "s2"
-        inflight2 = {"s0": 0, "s1": 0, "s2": 0}
-        assert strat.pick_server(["s2", "s0", "s1"], inflight2) == "s0"
+        strat._inflight["s0"] = 1
+        strat._inflight["s1"] = 1
+        strat._inflight["s2"] = 0
+        assert strat.pick_server(["s0", "s1", "s2"]) == "s2"
+        strat._inflight["s0"] = 0
+        strat._inflight["s1"] = 0
+        strat._inflight["s2"] = 0
+        assert strat.pick_server(["s2", "s0", "s1"]) == "s0"
 
     def test_least_kv_cache_prefers_lowest_usage(self):
         strat = create_load_balance_strategy(
@@ -471,19 +491,18 @@ class TestLoadBalanceStrategyPickServer:
         strat._metrics_stop.set()
         if strat._metrics_thread is not None:
             strat._metrics_thread.join(timeout=5.0)
-        inflight = {"s0": 0, "s1": 0}
         with patch.object(strat, "_kv_snapshot", return_value={"s0": 0.9, "s1": 0.1}):
-            assert strat.pick_server(["s0", "s1"], inflight) == "s1"
+            assert strat.pick_server(["s0", "s1"]) == "s1"
 
     def test_least_kv_cache_unknown_kv_falls_back_to_inflight(self):
         strat = create_load_balance_strategy("least_kv_cache", server_actor_ids=["s0", "s1"])
-        inflight = {"s0": 5, "s1": 1}
-        assert strat.pick_server(["s0", "s1"], inflight) == "s1"
+        strat._inflight["s0"] = 5
+        strat._inflight["s1"] = 1
+        assert strat.pick_server(["s0", "s1"]) == "s1"
 
     def test_weighted_rr_sequence_weights_1_and_3(self):
         strat = create_load_balance_strategy("weighted_rr", server_actor_ids=["s0", "s1"], weights=[1.0, 3.0])
-        inflight = {"s0": 0, "s1": 0}
-        seq = [strat.pick_server(["s0", "s1"], inflight) for _ in range(8)]
+        seq = [strat.pick_server(["s0", "s1"]) for _ in range(8)]
         assert seq == ["s1", "s0", "s1", "s1", "s1", "s0", "s1", "s1"]
 
     def test_weighted_rr_weights_length_mismatch_raises(self):
@@ -492,30 +511,16 @@ class TestLoadBalanceStrategyPickServer:
 
 
 class TestBuildGlobalLoadBalancerRemoteKwargs:
-    def test_rollout_weighted_rr_remote_kwargs(self):
-        rc = RolloutConfig(
-            name="vllm",
-            load_balance_strategy="weighted_rr",
-            load_balance_weights=[2.0, 1.0],
-            load_balance_random_seed=99,
-            group_sticky_routing=True,
-            kv_cache_metrics=KvCacheMetricsConfig(
-                refresh_interval_s=1.5,
-                metrics_path="/custom/metrics",
-                metric_name="vllm:kv_cache_usage_perc",
-                fetch_timeout_s=3.0,
-            ),
-        )
-        kw = GlobalRequestLoadBalancer.init_bundle_from_rollout(rc)
-        assert kw["load_balance_strategy"] == "weighted_rr"
-        assert kw["strategy_init_kwargs"] == {"weights": [2.0, 1.0], "random_seed": 99}
-        assert kw["group_sticky_routing"] is True
+    def test_load_balancer_actor_class_respects_sticky_mode(self):
+        rc_req = _rollout_for_lb(load_balance_sticky_mode="request")
+        rc_grp = _rollout_for_lb(load_balance_sticky_mode="group")
+        assert load_balancer_actor_class(rc_req) is RequestStickyLoadBalancer
+        assert load_balancer_actor_class(rc_grp) is GroupStickyLoadBalancer
 
     def test_rollout_least_kv_cache_merges_kv_config_into_strategy_kwargs(self):
         rc = RolloutConfig(
             name="vllm",
             load_balance_strategy="least_kv_cache",
-            group_sticky_routing=True,
             kv_cache_metrics=KvCacheMetricsConfig(
                 refresh_interval_s=1.5,
                 metrics_path="/custom/metrics",
@@ -525,7 +530,6 @@ class TestBuildGlobalLoadBalancerRemoteKwargs:
         )
         kw = GlobalRequestLoadBalancer.init_bundle_from_rollout(rc)
         assert kw["load_balance_strategy"] == "least_kv_cache"
-        assert kw["group_sticky_routing"] is True
         assert kw["strategy_init_kwargs"] == {
             "metric_name": "vllm:kv_cache_usage_perc",
             "metrics_path": "/custom/metrics",
@@ -537,12 +541,12 @@ class TestBuildGlobalLoadBalancerRemoteKwargs:
 class TestLoadBalancerStrategies:
     def test_random_with_seed_is_deterministic(self, ray_for_lb):
         rc = _rollout_for_lb("random", load_balance_random_seed=123)
-        lb = GlobalRequestLoadBalancer.remote(
+        lb = _lb_remote(
             server_actor_ids=["s0", "s1", "s2"],
             rollout_config=rc,
         )
         out = [ray.get(lb.acquire_server.remote(request_id=f"u{i}")) for i in range(6)]
-        lb2 = GlobalRequestLoadBalancer.remote(
+        lb2 = _lb_remote(
             server_actor_ids=["s0", "s1", "s2"],
             rollout_config=rc,
         )
@@ -550,7 +554,7 @@ class TestLoadBalancerStrategies:
         assert out == out2
 
     def test_weighted_rr_returns_valid_server(self, ray_for_lb):
-        lb = GlobalRequestLoadBalancer.remote(
+        lb = _lb_remote(
             server_actor_ids=["s0", "s1"],
             rollout_config=_rollout_for_lb("weighted_rr", load_balance_weights=[1.0, 3.0]),
         )
@@ -559,7 +563,7 @@ class TestLoadBalancerStrategies:
 
     def test_least_kv_cache_routes_like_least_requests_when_metrics_disabled(self, ray_for_lb):
         """metric_name 为 None 时不拉取 HTTP，``least_kv_cache`` 在未知 KV 下退化为按 inflight + sid。"""
-        lb = GlobalRequestLoadBalancer.remote(
+        lb = _lb_remote(
             server_actor_ids=["s0", "s1", "s2"],
             rollout_config=_rollout_for_lb("least_kv_cache"),
         )
@@ -573,21 +577,21 @@ class TestLoadBalancerStrategies:
 
 class TestLoadBalancerGroupSticky:
     def test_same_group_same_server(self, ray_for_lb):
-        lb = GlobalRequestLoadBalancer.remote(
+        lb = GroupStickyLoadBalancer.remote(
             server_actor_ids=["s0", "s1", "s2"],
-            rollout_config=_rollout_for_lb(group_sticky_routing=True),
+            rollout_config=_rollout_for_lb("least_requests"),
         )
         g0 = "g0"
-        a = ray.get(lb.acquire_server.remote(request_id="req-a", group_id=g0))
-        b = ray.get(lb.acquire_server.remote(request_id="req-b", group_id=g0))
+        a = ray.get(lb.acquire_server.remote(request_id="req-a", request_group_id=g0))
+        b = ray.get(lb.acquire_server.remote(request_id="req-b", request_group_id=g0))
         assert a == b
 
     def test_request_sticky_overrides_group(self, ray_for_lb):
-        lb = GlobalRequestLoadBalancer.remote(
+        lb = GroupStickyLoadBalancer.remote(
             server_actor_ids=["s0", "s1", "s2"],
-            rollout_config=_rollout_for_lb(group_sticky_routing=True),
+            rollout_config=_rollout_for_lb("least_requests"),
         )
-        s_first = ray.get(lb.acquire_server.remote(request_id="sticky-id", group_id="g99"))
+        s_first = ray.get(lb.acquire_server.remote(request_id="sticky-id", request_group_id="g99"))
         ray.get(lb.release_server.remote(server_id=s_first))
-        s_second = ray.get(lb.acquire_server.remote(request_id="sticky-id", group_id="g100"))
+        s_second = ray.get(lb.acquire_server.remote(request_id="sticky-id", request_group_id="g100"))
         assert s_first == s_second

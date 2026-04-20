@@ -23,14 +23,13 @@ import hydra
 import numpy as np
 import ray
 import torch
-from cachetools import LRUCache
 from omegaconf import DictConfig, OmegaConf
 from PIL import Image
 from pydantic import BaseModel, ConfigDict
 from tensordict import TensorDict
 from transformers import AutoProcessor, AutoTokenizer
 
-from verl.experimental.agent_loop.load_balance import create_load_balance_strategy
+from verl.experimental.agent_loop.load_balance import load_balancer_actor_class
 from verl.experimental.agent_loop.prometheus_utils import update_prometheus_config
 from verl.experimental.agent_loop.utils import resolve_config_path
 from verl.experimental.teacher_loop import MultiTeacherModelManager
@@ -60,95 +59,6 @@ from verl.workers.rollout.replica import DiffusionOutput, TokenOutput, get_rollo
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
-DEFAULT_ROUTING_CACHE_SIZE = 10000
-
-
-@ray.remote
-class GlobalRequestLoadBalancer:
-    """Global sticky-session + in-flight load balancer shared by all AgentLoopWorkers.
-
-    Construct with (server_actor_ids, rollout_config); strategy and KV scrape settings are derived
-    from RolloutConfig inside the actor.
-    """
-
-    @staticmethod
-    def init_bundle_from_rollout(rollout_config: RolloutConfig) -> dict[str, Any]:
-        """Map RolloutConfig load-balance fields to constructor fields (for tests and internal use)."""
-        kv = rollout_config.kv_cache_metrics
-        strategy_init_kwargs: dict[str, Any] = {}
-        if rollout_config.load_balance_weights is not None:
-            strategy_init_kwargs["weights"] = list(rollout_config.load_balance_weights)
-        if rollout_config.load_balance_random_seed is not None:
-            strategy_init_kwargs["random_seed"] = rollout_config.load_balance_random_seed
-        if rollout_config.load_balance_strategy == "least_kv_cache":
-            strategy_init_kwargs["metric_name"] = kv.metric_name
-            strategy_init_kwargs["metrics_path"] = kv.metrics_path
-            strategy_init_kwargs["refresh_interval_s"] = kv.refresh_interval_s
-            strategy_init_kwargs["fetch_timeout_s"] = kv.fetch_timeout_s
-        return {
-            "max_cache_size": DEFAULT_ROUTING_CACHE_SIZE,
-            "load_balance_strategy": rollout_config.load_balance_strategy,
-            "strategy_init_kwargs": strategy_init_kwargs,
-            "group_sticky_routing": rollout_config.group_sticky_routing,
-        }
-
-    def __init__(self, server_actor_ids: list[str], rollout_config: RolloutConfig):
-        if not server_actor_ids:
-            raise ValueError("server_actor_ids must be non-empty")
-
-        bundle = GlobalRequestLoadBalancer.init_bundle_from_rollout(rollout_config)
-        load_balance_strategy = bundle["load_balance_strategy"]
-        if load_balance_strategy == "weighted_rr" and rollout_config.load_balance_weights is not None:
-            nw = len(rollout_config.load_balance_weights)
-            ns = len(server_actor_ids)
-            if nw != ns:
-                raise ValueError(f"load_balance_weights length {nw} must match number of rollout replicas {ns}")
-
-        self._server_actor_ids = list(server_actor_ids)
-        self._inflight_requests: dict[str, int] = {sid: 0 for sid in server_actor_ids}
-        self._request_id_to_server: LRUCache = LRUCache(maxsize=bundle["max_cache_size"])
-        self._group_id_to_server: LRUCache = LRUCache(maxsize=bundle["max_cache_size"])
-
-        sk = bundle["strategy_init_kwargs"] or {}
-        self._strategy = create_load_balance_strategy(
-            load_balance_strategy,
-            server_actor_ids=self._server_actor_ids,
-            **sk,
-        )
-        self._group_sticky_routing = bundle["group_sticky_routing"]
-
-    def acquire_server(self, request_id: str, group_id: str | None = None) -> str:
-        """Acquire a server for the given request, reusing the same server for multi-turn conversations."""
-        # request-level sticky (multi-turn: same conversation -> same server)
-        if request_id in self._request_id_to_server:
-            server_id = self._request_id_to_server[request_id]
-            self._inflight_requests[server_id] += 1
-            return server_id
-
-        if self._group_sticky_routing and group_id and group_id in self._group_id_to_server:
-            server_id = self._group_id_to_server[group_id]
-            self._request_id_to_server[request_id] = server_id
-            self._inflight_requests[server_id] += 1
-            return server_id
-
-        server_id = self._strategy.pick_server(
-            list(self._server_actor_ids),
-            self._inflight_requests,
-        )
-        self._request_id_to_server[request_id] = server_id
-        if self._group_sticky_routing and group_id:
-            self._group_id_to_server[group_id] = server_id
-        self._inflight_requests[server_id] += 1
-        return server_id
-
-    def release_server(self, server_id: str) -> None:
-        """Release a server after a request completes, decrementing its inflight count."""
-        if server_id not in self._inflight_requests:
-            raise ValueError(f"Invalid server_id for release: {server_id}")
-        if self._inflight_requests[server_id] <= 0:
-            raise ValueError(f"Release called with no inflight requests on server {server_id}")
-        self._inflight_requests[server_id] -= 1
-
 
 def _get_rollout_and_model_config(config: DictConfig) -> tuple[DictConfig, DictConfig]:
     # TODO: backward compatibility, remove this once we switch to new trainer.
@@ -170,7 +80,6 @@ class AsyncLLMServerManager:
         config: DictConfig,
         servers: list[tuple[str, ray.actor.ActorHandle]],
         load_balancer_handle: ray.actor.ActorHandle,
-        load_balance_group_id: str | None = None,
     ):
         """Initialize the AsyncLLMServerManager.
 
@@ -178,16 +87,17 @@ class AsyncLLMServerManager:
             config (DictConfig): whole config for main entrypoint.
             servers (list[tuple[str, ray.actor.ActorHandle]]): (address, handle) pairs for each LLM server.
             load_balancer_handle (ray.actor.ActorHandle): shared global load balancer actor.
-            load_balance_group_id: optional worker group id for group-level sticky routing.
         """
         self.config = config
         self._load_balancer = load_balancer_handle
         self._server_id_to_handle: dict[str, ray.actor.ActorHandle] = dict(servers)
-        self._load_balance_group_id = load_balance_group_id
 
-    async def _acquire_server(self, request_id: str, group_id: str | None = None) -> tuple[str, ray.actor.ActorHandle]:
-        gid = self._load_balance_group_id if group_id is None else group_id
-        server_id = await self._load_balancer.acquire_server.remote(request_id=request_id, group_id=gid)
+    async def _acquire_server(
+        self, request_id: str, request_group_id: str | None = None
+    ) -> tuple[str, ray.actor.ActorHandle]:
+        server_id = await self._load_balancer.acquire_server.remote(
+            request_id=request_id, request_group_id=request_group_id
+        )
         handle = self._server_id_to_handle.get(server_id)
         if handle is None:
             raise RuntimeError(f"Unknown server_id returned by load balancer: {server_id}")
@@ -207,7 +117,7 @@ class AsyncLLMServerManager:
         sampling_params: dict[str, Any],
         image_data: Optional[list[Any]] = None,
         video_data: Optional[list[Any]] = None,
-        group_id: str | None = None,
+        request_group_id: str | None = None,
         **kwargs: Any,
     ) -> TokenOutput | DiffusionOutput:
         """Generate tokens from prompt ids.
@@ -216,12 +126,12 @@ class AsyncLLMServerManager:
             request_id (str): request id for sticky session.
             prompt_ids (List[int]): List of prompt token ids.
             sampling_params (Dict[str, Any]): Sampling parameters for the chat completion.
-            group_id: optional override for load-balance group affinity (defaults to worker group).
+            request_group_id: optional id shared by GRPO / rollout-n repeats (same sample, same step).
 
         Returns:
             TokenOutput | DiffusionOutput: token or diffusion output
         """
-        server_id, server = await self._acquire_server(request_id, group_id=group_id)
+        server_id, server = await self._acquire_server(request_id, request_group_id=request_group_id)
         try:
             output: TokenOutput | DiffusionOutput = await server.generate.remote(
                 request_id=uuid4().hex,  # use new request_id for each turn
@@ -517,7 +427,6 @@ class AgentLoopWorker:
         teacher_servers: Optional[dict[str, list[tuple[str, ray.actor.ActorHandle]]]] = None,
         teacher_load_balancer_handle: Optional[dict[str, ray.actor.ActorHandle]] = None,
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
-        load_balance_group_id: str | None = None,
     ):
         """Initialize agent loop manager.
         Args:
@@ -558,7 +467,6 @@ class AgentLoopWorker:
                 config,
                 servers,
                 load_balancer_handle=load_balancer_handle,
-                load_balance_group_id=load_balance_group_id,
             )
 
         self.dataset_cls = get_dataset_class(config.data)
@@ -657,6 +565,7 @@ class AgentLoopWorker:
         for i in range(len(batch)):
             trace_this_sample = i in traced_indices
             kwargs = {k: v[i] for k, v in batch.non_tensor_batch.items()}
+            kwargs["request_group_id"] = trajectory_info[i]["request_group_id"]
             tasks.append(
                 asyncio.create_task(
                     self._run_agent_loop(sampling_params, trajectory_info[i], trace=trace_this_sample, **kwargs)
@@ -1088,7 +997,16 @@ async def get_trajectory_info(step, index, validate):
             rollout_n += 1
         else:
             rollout_n = 0
-        trajectory_info.append({"step": step, "sample_index": index[i], "rollout_n": rollout_n, "validate": validate})
+        trajectory_info.append(
+            {
+                "step": step,
+                "sample_index": index[i],
+                "rollout_n": rollout_n,
+                "validate": validate,
+                # Shared across rollout.n repeats for the same sample (GRPO group sticky).
+                "request_group_id": f"{step}:{index[i]}",
+            }
+        )
     return trajectory_info
 
 
@@ -1241,16 +1159,12 @@ class AgentLoopManager:
                     teacher_servers,
                     teacher_load_balancer_handle,
                     self.reward_loop_worker_handles,
-                    load_balance_group_id=(
-                        str(i % self.rollout_config.num_load_balance_groups)
-                        if self.rollout_config.group_sticky_routing
-                        else None
-                    ),
                 )
             )
 
     async def _init_global_load_balancer(self) -> None:
-        self.global_load_balancer = GlobalRequestLoadBalancer.remote(
+        lb_cls = load_balancer_actor_class(self.rollout_config)
+        self.global_load_balancer = lb_cls.remote(
             server_actor_ids=self.server_addresses,
             rollout_config=self.rollout_config,
         )

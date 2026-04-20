@@ -143,10 +143,11 @@ class TeacherModelManager:
                 )
 
     def _initialize_load_balancer_handle(self):
-        from verl.experimental.agent_loop.agent_loop import GlobalRequestLoadBalancer
+        from verl.experimental.agent_loop.load_balance import load_balancer_actor_class
 
         rollout_config = self.config.teacher_model.inference
-        self.load_balancer_handle = GlobalRequestLoadBalancer.remote(
+        lb_cls = load_balancer_actor_class(rollout_config)
+        self.load_balancer_handle = lb_cls.remote(
             server_actor_ids=self.server_addresses,
             rollout_config=rollout_config,
         )
