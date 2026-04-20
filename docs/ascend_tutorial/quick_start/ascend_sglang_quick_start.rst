@@ -20,21 +20,21 @@ Atlas 800T A3
 关键支持版本
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-+-----------+-----------------+
-| software  | version         |
-+===========+=================+
-| Python    | == 3.11         |
-+-----------+-----------------+
-| HDK       | >= 25.3.RC1     |
-+-----------+-----------------+
-| CANN      | >= 8.3.RC1      |
-+-----------+-----------------+
-| torch     | >= 2.7.1        |
-+-----------+-----------------+
-| torch_npu | >= 2.7.1.post2  |
-+-----------+-----------------+
-| sglang    | v0.5.8          |
-+-----------+-----------------+
++-----------+----------------+
+| software  | version        |
++===========+================+
+| Python    | ==3.11         |
++-----------+----------------+
+| HDK       | >=25.3.RC1     |
++-----------+----------------+
+| CANN      | >=8.3.RC1      |
++-----------+----------------+
+| torch     | >=2.7.1        |
++-----------+----------------+
+| torch_npu | >=2.7.1.post2  |
++-----------+----------------+
+| sglang    | v0.5.8         |
++-----------+----------------+
 
 从 Docker 镜像进行安装
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -47,11 +47,11 @@ Atlas 800T A3
 
 异构计算架构CANN(Compute Architecture for Neural Networks)是昇腾针对AI场景推出的异构计算架构, 为了使训练和推理引擎能够利用更好、更快的硬件支持, 我们需要安装以下 `先决条件 <https://www.hiascend.com/document/detail/zh/canncommercial/83RC1/softwareinst/instg/instg_quick.html?Mode=PmIns&InstallType=netconda&OS=openEuler&Software=cannToolKit>`_
 
-+-----------+-------------+
-| HDK       | >= 25.3.RC1 |
-+-----------+-------------+
-| CANN      | >= 8.3.RC1  |
-+-----------+-------------+
++-----------+------------+
+| HDK       | >=25.3.RC1 |
++-----------+------------+
+| CANN      | >=8.3.RC1  |
++-----------+------------+
 安装完成后请激活环境
 
 .. code-block:: bash
@@ -73,7 +73,7 @@ Atlas 800T A3
 
 .. code-block:: bash
 
-    git clone https://github.com/volcengine/verl.git  
+    git clone https://github.com/verl-project/verl.git  
     # Make sure you have activated verl conda env
     # NPU_DEVICE=A3 or A2 depends on your device
     # USE_MEGATRON=1 if you need to install megatron backend
@@ -139,14 +139,14 @@ vllm后端推理脚本转换为sglang, 需要添加修改以下参数
 .. code-block:: bash
 
     #必须
-    actor_rollout_ref.rollout.name=sglang
-    +actor_rollout_ref.rollout.engine_kwargs.sglang.attention_backend="ascend"
+    actor_rollout_ref.rollout.name=sglang \
+    +actor_rollout_ref.rollout.engine_kwargs.sglang.attention_backend="ascend" \
     #可选
     #使能推理EP，详细使用方法见 https://github.com/sgl-project/sgl-kernel-npu/blob/main/python/deep_ep/README_CN.md
-    ++actor_rollout_ref.rollout.engine_kwargs.sglang.deepep_mode="auto" 
-    ++actor_rollout_ref.rollout.engine_kwargs.sglang.moe_a2a_backend="deepep"
+    ++actor_rollout_ref.rollout.engine_kwargs.sglang.deepep_mode="auto" \
+    ++actor_rollout_ref.rollout.engine_kwargs.sglang.moe_a2a_backend="deepep" \
     #Moe模型多DP时必须设置为True
-    +actor_rollout_ref.rollout.engine_kwargs.sglang.enable_dp_attention=False
+    +actor_rollout_ref.rollout.engine_kwargs.sglang.enable_dp_attention=False \
     #chunked_prefill默认关闭
     +actor_rollout_ref.rollout.engine_kwargs.sglang.chunked_prefill_size=-1
 

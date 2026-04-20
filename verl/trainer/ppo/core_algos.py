@@ -876,6 +876,7 @@ def compute_optimal_token_baseline_advantage(
     rollout_is_weights: torch.Tensor = None,
     handle_zero_tail: bool = True,
     epsilon: float = 1e-8,
+    **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Compute advantages using Optimal Token Baseline (OTB).
@@ -994,6 +995,7 @@ def compute_multi_turn_optimal_token_baseline_advantage(
     rollout_is_weights: torch.Tensor = None,
     handle_zero_tail: bool = True,
     epsilon: float = 1e-8,
+    **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Compute advantages using Optimal Token Baseline (OTB).
@@ -2133,7 +2135,9 @@ def kl_penalty(logprob: torch.FloatTensor, ref_logprob: torch.FloatTensor, kl_pe
     Returns:
         kl_estimate
     """
-    forward_score = kl_penalty_forward(logprob, ref_logprob, kl_penalty)
+    # Strip the optional '+' suffix so e.g. "k3+" dispatches to "k3".
+    base_kl_penalty = kl_penalty[:-1] if kl_penalty.endswith("+") else kl_penalty
+    forward_score = kl_penalty_forward(logprob, ref_logprob, base_kl_penalty)
     if not kl_penalty.endswith("+") or kl_penalty in ("mse", "k2"):
         return forward_score
 

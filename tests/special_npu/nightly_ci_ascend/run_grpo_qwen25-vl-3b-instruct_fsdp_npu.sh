@@ -43,7 +43,6 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=2 \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     algorithm.use_kl_in_reward=False \
-    trainer.use_legacy_worker_impl=disable \
     trainer.critic_warmup=0 \
     trainer.logger=console \
     trainer.project_name='verl_grpo_example_geo3k' \
@@ -52,4 +51,4 @@ python3 -m verl.trainer.main_ppo \
     trainer.nnodes=1 \
     trainer.save_freq=-1 \
     trainer.test_freq=-1 \
-    trainer.total_training_steps=15  2>&1 | tee /root/.cache/grpo_qwen25-vl-3b-instruct_fsdp_npu.log
+    trainer.total_training_steps=15  2>&1 | tee /root/.cache/nightly_log/qwen25-vl-3b/grpo_qwen25-vl-3b-instruct_fsdp_npu-$(date +%Y%m%d_%H%M).log

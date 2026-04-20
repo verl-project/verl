@@ -60,7 +60,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.max_num_batched_tokens=20000 \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=2 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
-    +actor_rollout_ref.rollout.engine_kwargs.vllm.disable_mm_preprocessor_cache=True \
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.mm_processor_cache_gb=0 \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
     actor_rollout_ref.rollout.enforce_eager=False \

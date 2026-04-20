@@ -3,8 +3,8 @@
 # This demonstrates self-normalized sequence-level IS with pure policy gradient
 #
 # References:
-#   - Rollout Correction Docs: https://github.com/volcengine/verl/blob/main/docs/algo/rollout_corr.md
-#   - Rollout Correction Math: https://github.com/volcengine/verl/blob/main/docs/algo/rollout_corr_math.md
+#   - Rollout Correction Docs: https://github.com/verl-project/verl/blob/main/docs/algo/rollout_corr.md
+#   - Rollout Correction Math: https://github.com/verl-project/verl/blob/main/docs/algo/rollout_corr_math.md
 
 set -xeuo pipefail
 

@@ -1,0 +1,121 @@
+# # Tests layout
+
+# Each folder under tests/ corresponds to a test category for a sub-namespace in verl. For instance:
+# - `tests/trainer` for testing functionality related to `verl/trainer`
+# - `tests/models` for testing functionality related to `verl/models`
+# - ...
+
+# There are a few folders with `special_` prefix, created for special purposes:
+# - `special_distributed`: unit tests that must run with multiple GPUs
+# - `special_e2e`: end-to-end tests with training/generation scripts
+# - `special_npu`: tests for NPUs
+# - `special_sanity`: a suite of quick sanity tests
+# - `special_standalone`: a set of test that are designed to run in dedicated environments
+
+# Accelerators for tests
+# - By default tests are run with GPU available, except for the ones under `special_npu`, and any test script whose name ends with `on_cpu.py`.
+# - For test scripts with `on_cpu.py` name suffix would be tested on CPU resources in linux environment.
+
+# # Workflow layout
+
+# All CI tests are configured by yaml files in `.github/workflows/`. Here's an overview of all test configs:
+# 1. A list of always triggered CPU sanity tests: `check-pr-title.yml`, `secrets_scan.yml`, `check-pr-title,yml`, `pre-commit.yml`, `doc.yml`
+# 2. Some heavy multi-GPU unit tests, such as `model.yml`, `vllm.yml`, `sgl.yml`
+# 3. End-to-end tests: `e2e_*.yml`
+# 4. Unit tests
+#   - `cpu_unit_tests.yml`, run pytest on all scripts with file name pattern `tests/**/test_*_on_cpu.py`
+#   - `gpu_unit_tests.yml`, run pytest on all scripts with file without the `on_cpu.py` suffix.
+#   - Since cpu/gpu unit tests by default runs all tests under `tests`, please make sure tests are manually excluded in them when
+#     - new workflow yaml is added to `.github/workflows`
+#     - new tests are added to workflow mentioned in 2.
+
+name: vllm_ascend
+
+on:
+  # Trigger the workflow on push or pull request,
+  # but only for the main branch
+  push:
+    branches:
+      - main
+      - v0.*
+  pull_request:
+    branches:
+      - main
+      - v0.*
+    paths:
+      - "**/*.py"
+      # Other entrypoints
+      - "!examples/**"
+      - "!tests/**"
+      - "!verl/trainer/main_*.py"
+      - "!verl/trainer/fsdp_sft_trainer.py"
+      # FSDP
+      - "!verl/workers/**/*dp_*.py"
+      # Megatron
+      - "!verl/workers/**/megatron_*.py"
+      # SGLang
+      - "!**/*sglang*"
+      # Entrypoints
+      - ".github/workflows/vllm_ascend.yml"
+      - "tests/special_e2e/generation"
+      - "tests/workers/rollout"
+      - "verl/trainer/main_generation.py"
+      - "verl/trainer/config/generation.yaml"
+
+# Cancel jobs on the same ref if a new one is triggered
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+# Declare permissions just read content.
+permissions:
+  contents: read
+
+jobs:
+  vllm_ascend:
+    if: github.repository_owner == 'verl-project'
+    runs-on: linux-aarch64-a2b3-8
+    timeout-minutes: 60 # Increase this timeout value as needed
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-8.5.0-910b-ubuntu22.04-py3.11-latest
+      options: >-
+        --shm-size 16g
+    env:
+      HF_ENDPOINT: "https://hf-mirror.com"
+      HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+    steps:
+      - name: Check npu and CANN info
+        run: |
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+          npu-smi info
+      - name: Check initial pip list from image
+        run: |
+          pip list
+      - name: Checkout verl-project/verl repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          clean: true
+      - name: Install the current repository
+        run: |
+          pip3 install --no-deps -e .[test]
+          pip3 install pytest-asyncio
+      - name: Check final pip list
+        run: |
+          pip list
+      - name: Prepare weights
+        run: |
+          ln -s /root/.cache/models ~/models
+      - name: Prepare gsm8k dataset
+        run: |
+          ray stop --force
+          python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
+      - name: Test the latest vLLM Rollout async with agent loop
+        run: |
+          export HCCL_HOST_SOCKET_PORT_RANGE=auto
+          export HCCL_NPU_SOCKET_PORT_RANGE=auto
+          export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
+          ROLLOUT_NAME=vllm pytest -svvv tests/experimental/agent_loop
+      - name: Test vllm server abort functionality
+        run: |
+          pytest tests/workers/rollout/rollout_vllm/test_vllm_abort.py -v -s

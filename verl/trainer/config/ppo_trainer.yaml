@@ -28,6 +28,7 @@ defaults:
 
   # Critic model config.
   - critic@critic: ${model_engine}_critic
+  - model@critic.model: hf_model
 
   # legacy reward impl config, for backward compatibility
   - legacy_reward_impl
@@ -37,6 +38,9 @@ defaults:
 
   # Rollout correction config.
   - algorithm@algorithm.rollout_correction: rollout_correction
+
+  # distillation config
+  - distillation@distillation: distillation
 
   # load the reference default config, then apply the fields in the current yaml
   # self config override anything above
@@ -50,12 +54,6 @@ actor_rollout_ref:
 
   # Timeout for operations executed against the process group
   nccl_timeout: 600
-
-  # Rollout model config.
-  rollout:
-
-    # for huge model, layered summon can save memory (prevent OOM) but make it slower
-    layered_summon: False
 
 # config for the algorithm
 algorithm:
@@ -199,17 +197,13 @@ trainer:
   # Device to run training on (e.g., "cuda", "cpu")
   device: cuda
 
-  # whether to use legacy worker implementation
-  #  mode: "auto", "enable", or "disable"
-  use_legacy_worker_impl: auto
-
 # profiler configs
 global_profiler:
 
   # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
   _target_: verl.utils.profiler.ProfilerConfig
 
-  # Profiling tool: choose between nsys, npu, torch, torch_memory
+  # Profiling tool: choose between nsys, npu, torch, torch_memory, precision_debugger
   tool: null
 
   # profile steps
@@ -293,11 +287,46 @@ global_profiler:
       # devices, record_context etc.
       kw_args: {}
 
+    # msprobe precision debugger
+    precision_debugger:
+
+      # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+      _target_: verl.utils.profiler.config.PrecisionDebuggerToolConfig
+
+      # Path to msprobe config json
+      config_path: null
+
+      # Deprecated and ignored. Use global_profiler.steps.
+      steps: null
+
+      # Profile stages
+      # Supported stages: actor_update, actor_compute_log_prob, ref_compute_log_prob,
+      # compute_values, critic_update, compute_rm_score
+      stages: null
+
+      # Whether to fail on unknown stage or missing msprobe
+      strict: False
+
 # configs for TransferQueue
 transfer_queue:
 
-  # Whether to enable transfer queue
+  # Whether to enable TransferQueue
   enable: False
+
+  # Pluggable storage/transport backend of TransferQueue
+  backend:
+
+    # SimpleStorage with ZeroMQ
+    storage_backend: SimpleStorage
+
+    # Backend specific configs
+    SimpleStorage:
+      
+        # Maximum number of samples to hold
+        total_storage_size: 100000
+
+        # Number of distributed storage units
+        num_data_storage_units: 8
 
 # configs related to ray
 ray_kwargs:

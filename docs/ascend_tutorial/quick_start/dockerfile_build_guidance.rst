@@ -29,7 +29,7 @@ Atlas 800T A3
 ----------------
 
 ================= ============
-组件        版本
+组件               版本
 ================= ============
 基础镜像            Ubuntu 22.04
 Python             3.11
@@ -42,7 +42,7 @@ vLLM-ascend        0.13.0
 Megatron-LM        v0.12.1
 MindSpeed          2.3.0_core_r0.12.1
 triton-ascend      3.2.0
-mbridge            latest version
+mbridge            0.15.1
 SGLang             v0.5.8
 sgl-kernel-npu     (46b73de)
 ================= ============
@@ -58,10 +58,12 @@ A2              8.2.RC1        vLLM            `Dockerfile.ascend_8.2.rc1_a2 <ht
 A2              8.3.RC1        vLLM            `Dockerfile.ascend_8.3.rc1_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.3.rc1_a2>`_
 A2              8.5.0          vLLM            `Dockerfile.ascend_8.5.0_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.0_a2>`_
 A2              8.3.RC1        SGLang          `Dockerfile.ascend.sglang_8.3.rc1_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend.sglang_8.3.rc1_a2>`_
+A2              8.5.0          SGLang          `Dockerfile.ascend.sglang_8.5.0_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend.sglang_8.5.0_a2>`_
 A3              8.2.RC1        vLLM            `Dockerfile.ascend_8.2.rc1_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.2.rc1_a3>`_
 A3              8.3.RC1        vLLM            `Dockerfile.ascend_8.3.rc1_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.3.rc1_a3>`_
 A3              8.5.0          vLLM            `Dockerfile.ascend_8.5.0_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.0_a3>`_
-A3              8.3.RC1         SGLang          `Dockerfile.ascend.sglang_8.3.rc1_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend.sglang_8.3.rc1_a3>`_
+A3              8.3.RC1        SGLang          `Dockerfile.ascend.sglang_8.3.rc1_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend.sglang_8.3.rc1_a3>`_
+A3              8.5.0          SGLang          `Dockerfile.ascend.sglang_8.5.0_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend.sglang_8.5.0_a3>`_
 ============== ============== ============== ==============================================================
 
 

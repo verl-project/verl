@@ -22,14 +22,11 @@ from omegaconf import DictConfig
 from transformers.utils import get_json_schema
 
 from tests.experimental.agent_loop.agent_utils import init_agent_loop_manager
-from verl.checkpoint_engine import CheckpointEngineManager
 from verl.experimental.agent_loop.agent_loop import GlobalRequestLoadBalancer, get_trajectory_info
 from verl.protocol import DataProto
 from verl.tools.base_tool import BaseTool, OpenAIFunctionToolSchema
 from verl.tools.schemas import ToolResponse
 from verl.utils import hf_tokenizer
-from verl.utils.config import omega_conf_to_dataclass
-from verl.workers.config import CheckpointEngineConfig
 
 
 @pytest.fixture
@@ -294,140 +291,6 @@ def test_tool_agent(init_config):
         assert "</tool_response>" not in response_without_obs, (
             f"found </tool_response> in response: {response_without_obs}"
         )
-        print("=========================")
-        print(response_with_obs)
-        print("---")
-        print(response_without_obs)
-
-    print("Test passed!")
-    ray.shutdown()
-
-
-def test_tool_agent_with_interaction(init_config):
-    ray.init(
-        runtime_env={
-            "env_vars": {
-                "TOKENIZERS_PARALLELISM": "true",
-                "NCCL_DEBUG": "WARN",
-                "VLLM_LOGGING_LEVEL": "INFO",
-                "VLLM_USE_V1": "1",
-            }
-        }
-    )
-
-    # =========================== 1. Init rollout manager ===========================
-    tool_config = {
-        "tools": [
-            {
-                "class_name": "tests.experimental.agent_loop.test_basic_agent_loop.WeatherTool",
-                "config": {"type": "native"},
-            },
-            {
-                "class_name": "tests.experimental.agent_loop.test_basic_agent_loop.WeatherToolWithData",
-                "config": {"type": "native"},
-            },
-        ]
-    }
-    tool_config_path = "/tmp/tool_config.json"
-    with open(tool_config_path, "w") as f:
-        json.dump(tool_config, f)
-
-    interaction_config = {
-        "interaction": [
-            {"name": "weather", "class_name": "verl.interactions.weather_interaction.WeatherInteraction", "config": {}}
-        ]
-    }
-    interaction_config_path = "/tmp/interaction_config.json"
-    with open(interaction_config_path, "w") as f:
-        json.dump(interaction_config, f)
-
-    n = 2
-    init_config.actor_rollout_ref.rollout.n = n
-    init_config.actor_rollout_ref.rollout.multi_turn.tool_config_path = tool_config_path
-    init_config.actor_rollout_ref.rollout.multi_turn.interaction_config_path = interaction_config_path
-    init_config.actor_rollout_ref.rollout.multi_turn.max_parallel_calls = 2
-    agent_loop_manager = init_agent_loop_manager(init_config)
-    checkpoint_engine_config = omega_conf_to_dataclass(
-        init_config.actor_rollout_ref.rollout.checkpoint_engine, CheckpointEngineConfig
-    )
-    checkpoint_manager = CheckpointEngineManager(
-        config=checkpoint_engine_config,
-        trainer=agent_loop_manager.worker_group,
-        replicas=agent_loop_manager.rollout_replicas,
-    )
-    checkpoint_manager.sleep_replicas()
-    checkpoint_manager.update_weights()
-
-    # =========================== 2. Generate sequences  ===========================
-    raw_prompts = [
-        [
-            {"role": "user", "content": "How are you?"},
-        ],
-        [
-            {"role": "user", "content": "What's the temperature in Los Angeles now?"},
-        ],
-        [
-            {"role": "user", "content": "What's the temperature in New York now?"},
-        ],
-        [
-            {
-                "role": "system",
-                "content": "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\n"
-                "Current Date: 2024-09-30",
-            },
-            {"role": "user", "content": "What's the temperature in San Francisco now? How about tomorrow?"},
-        ],
-    ]
-    batch = DataProto(
-        non_tensor_batch={
-            "raw_prompt": np.array([np.array(prompt) for prompt in raw_prompts], dtype=object),
-            "agent_name": np.array(["tool_agent"] * len(raw_prompts)),
-            "data_source": np.array(["openai/gsm8k"] * len(raw_prompts)),
-            "reward_model": np.array([{"style": "rule", "ground_truth": "1.0"}] * len(raw_prompts)),
-            "extra_info": np.array(
-                [
-                    {"interaction_kwargs": {"name": "weather"}},
-                    {"interaction_kwargs": {"name": "weather"}},
-                    {"interaction_kwargs": {"name": "weather"}},
-                    {"interaction_kwargs": {"name": "weather"}},
-                ]
-            ),
-        },
-    )
-    batch = batch.repeat(n)
-    result = agent_loop_manager.generate_sequences(prompts=batch)
-    assert len(result) == len(raw_prompts) * n
-
-    # Check turns
-    num_turns = result.non_tensor_batch["__num_turns__"]
-    print(f"num_turns: {num_turns}")
-    for i in range(len(num_turns)):
-        if i // n == 0:
-            # [user, assistant, user]
-            assert num_turns[i] == 3
-        else:
-            # [user, assistant, tool, assistant, user]
-            assert num_turns[i] == 5
-
-    # Check response_mask
-    tokenizer = hf_tokenizer(init_config.actor_rollout_ref.model.path)
-    responses = result.batch["responses"]
-    response_mask = result.batch["response_mask"]
-    attention_mask = result.batch["attention_mask"]
-    assert responses.size() == response_mask.size(), f"{responses.size()} != {response_mask.size()}"
-    response_length = response_mask.size(1)
-
-    for i in range(len(responses)):
-        # response with tool response
-        valid_tokens = responses[i][attention_mask[i][-response_length:].bool()]
-        response_with_obs = tokenizer.decode(valid_tokens)
-
-        # response without tool response
-        valid_tokens = responses[i][response_mask[i].bool()]
-        response_without_obs = tokenizer.decode(valid_tokens)
-
-        assert "\udb82\udc89" not in response_without_obs, f"found \udb82\udc89 in response: {response_without_obs}"
-        assert "\udb82\udc8a" not in response_without_obs, f"found \udb82\udc8a in response: {response_without_obs}"
         print("=========================")
         print(response_with_obs)
         print("---")

@@ -71,3 +71,18 @@ tool_config:
     stack_depth: ${oc.select:global_profiler.global_tool_config.torch_memory.stack_depth,32}
 
     name: torch_memory
+
+  precision_debugger:
+    # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+    _target_: verl.utils.profiler.config.PrecisionDebuggerToolConfig
+
+    # Path to msprobe config json
+    config_path: ${oc.select:global_profiler.global_tool_config.precision_debugger.config_path,null}
+
+    # Deprecated and ignored. Use global_profiler.steps.
+    steps: null
+
+    # Profile stages
+    stages: ${oc.select:global_profiler.global_tool_config.precision_debugger.stages,null}
+
+    name: precision_debugger

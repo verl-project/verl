@@ -263,7 +263,7 @@ class FileLogger:
             directory = os.path.join(root_path, self.project_name)
             os.makedirs(directory, exist_ok=True)
             self.filepath = os.path.join(directory, f"{self.experiment_name}.jsonl")
-            print(f"Creating file logger at {self.filepath}")
+        print(f"Creating file logger at {os.path.abspath(self.filepath)}")
         self.fp = open(self.filepath, "wb", buffering=0)
 
     def log(self, data, step):
@@ -331,7 +331,18 @@ class _MlflowLoggingAdapter:
         import mlflow
 
         results = {self._sanitize_key(k): v for k, v in data.items()}
-        mlflow.log_metrics(metrics=results, step=step)
+        for _attempt in range(MLFLOW_MAX_ATTEMPTS):
+            try:
+                mlflow.log_metrics(metrics=results, step=step)
+                return
+            except Exception as error:
+                # No sleep between retries — this runs per training step, so we avoid blocking.
+                msg = "mlflow.log_metrics failed (attempt %d/%d): %s"
+                args = (_attempt + 1, MLFLOW_MAX_ATTEMPTS, error)
+                if _attempt < MLFLOW_MAX_ATTEMPTS - 1:
+                    self.logger.info(msg, *args)
+                else:
+                    self.logger.warning(msg, *args)
 
 
 def _compute_mlflow_params_from_objects(params) -> dict[str, Any]:

@@ -13,7 +13,7 @@
 # limitations under the License.
 import warnings
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 
 from omegaconf import MISSING
 
@@ -23,6 +23,7 @@ from verl.workers.config.model import MtpConfig
 
 __all__ = [
     "SamplingConfig",
+    "DiffusionSamplingConfig",
     "MultiTurnConfig",
     "CustomAsyncServerConfig",
     "AgentLoopConfig",
@@ -30,8 +31,27 @@ __all__ = [
     "ServerConfig",
     "PrometheusConfig",
     "RolloutConfig",
+    "DiffusionRolloutConfig",
     "CheckpointEngineConfig",
+    "SkipConfig",
 ]
+
+
+@dataclass
+class SkipConfig(BaseConfig):
+    """
+    Configuration for rollout skip: load/dump previously generated rollout data
+    instead of computing new rollouts (e.g. for debugging or reuse).
+    """
+
+    enable: bool = False
+    dump_dir: str = "~/.verl/rollout_dump"
+    max_dump_step: int = 1
+    action: str = "cache"  # cache | repeat | repeat_last
+
+    def get(self, key: str, default=None):
+        """Dict-like get for compatibility with code that uses skip.get('enable', False)."""
+        return getattr(self, key, default)
 
 
 @dataclass
@@ -41,6 +61,13 @@ class SamplingConfig(BaseConfig):
     top_p: float = 1.0
     do_sample: bool = True
     n: int = 1
+
+
+@dataclass
+class DiffusionSamplingConfig(SamplingConfig):
+    num_inference_steps: int = 40
+    seed: int = 42
+    extra_configs: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -54,7 +81,6 @@ class MultiTurnConfig(BaseConfig):
     max_parallel_calls: int = 1
     max_tool_response_length: int = 256
     tool_response_truncate_side: str = "middle"
-    interaction_config_path: Optional[str] = None
     use_inference_chat_template: bool = False
     tokenization_sanity_check_mode: str = "strict"
     format: str = "hermes"
@@ -132,11 +158,23 @@ class CheckpointEngineConfig(BaseConfig):
     update_weights_bucket_megabytes: int = 2048
     # Additional keyword arguments for checkpoint engine
     engine_kwargs: dict = field(default_factory=dict)
+    # If set, this Python module is imported on every worker process before the
+    # backend is instantiated, allowing custom backends to register themselves
+    # in CheckpointEngineRegistry.
+    custom_backend_module: Optional[str] = None
 
 
 @dataclass
 class RolloutConfig(BaseConfig):
-    _mutable_fields = {"max_model_len", "load_format", "expert_parallel_size", "moe_tensor_parallel_size"}
+    _mutable_fields = {
+        "max_model_len",
+        "load_format",
+        "engine_kwargs",
+        "prompt_length",
+        "response_length",
+        "expert_parallel_size",
+        "moe_tensor_parallel_size",
+    }
 
     name: Optional[str] = MISSING
     mode: str = "async"
@@ -208,12 +246,15 @@ class RolloutConfig(BaseConfig):
     # Extension point for custom configurations
     custom: Optional[dict] = None
 
+    # Fully qualified class name for a custom CheckpointEngineManager. When set, the trainer
+    # loads this class instead of the built-in CheckpointEngineManager.
+    checkpoint_manager_class: Optional[str] = None
+
     # Checkpoint Engine config for update weights from trainer to rollout
     checkpoint_engine: CheckpointEngineConfig = field(default_factory=CheckpointEngineConfig)
 
-    skip_rollout: bool = False
-
-    skip_dump_dir: str = "/tmp/rollout_dump"
+    # Rollout skip config (load/dump rollout data)
+    skip: SkipConfig = field(default_factory=SkipConfig)
 
     profiler: Optional[ProfilerConfig] = None
 
@@ -291,3 +332,28 @@ class RolloutConfig(BaseConfig):
                 raise NotImplementedError(
                     f"Current rollout {self.name=} not implemented pipeline_model_parallel_size > 1 yet."
                 )
+
+
+@dataclass
+class DiffusionRolloutConfig(RolloutConfig):
+    _mutable_fields = {"max_model_len", "load_format"}
+
+    val_kwargs: DiffusionSamplingConfig = field(default_factory=DiffusionSamplingConfig)
+
+    # diffusion use
+    height: int = 512
+
+    width: int = 512
+
+    num_inference_steps: int = 10
+
+    extra_configs: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self):
+        """Validate diffusion rollout config"""
+        super().__post_init__()
+
+        if self.pipeline_model_parallel_size > 1 and self.name == "vllm_omni":
+            raise NotImplementedError(
+                f"Current rollout {self.name=} not implemented pipeline_model_parallel_size > 1 yet."
+            )

@@ -79,7 +79,7 @@ class TestActor(Worker):
         return self._x + y + x
 
 
-@ray.remote(**get_ray_remote_options())
+@ray.remote(num_cpus=0.1)
 def remote_call_wg(worker_names):
     class_with_args = RayClassWithInitArgs(cls=TestActor, x=2)
     worker_group = RayWorkerGroup.from_detached(

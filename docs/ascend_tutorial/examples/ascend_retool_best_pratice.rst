@@ -27,10 +27,10 @@ Retool论文参考([Retool](https://arxiv.org/pdf/2504.11536))
 ============    ============================================================
 software        version 
 ============    ============================================================
-Python          ``>= 3.10, <3.12``
-CANN            ``== 8.3.RC1``
-torch           ``== 2.7.1``
-torch_npu       ``== 2.7.1``
+Python          ``>=3.10, <3.12``
+CANN            ``==8.3.RC1``
+torch           ``==2.7.1``
+torch_npu       ``==2.7.1``
 verl            ``v0.6.1 commitId=d62da4950573d7a4b7ef2362337952e7ab59e78d``
 vllm            ``v0.11.0``
 vllm-ascend     ``v0.11.0-dev``
@@ -82,8 +82,8 @@ transformers    ``4.57.6``
 .. code-block:: bash
 
   python3 -m verl.model_merger merge --backend fsdp \
-      --local_dir ${DATASETS}/checkpoint/multiturn-sft-qwen-2.5-7b-instruct/global_step_372 \
-      --target_dir ${DATASETS}/checkpoint/multiturn-sft-qwen-2.5-7b-instruct/global_step_372/huggingface
+      --local_dir /PATH/TO/checkpoint/multiturn-sft-qwen-2.5-7b-instruct/global_step_372 \
+      --target_dir /PATH/TO/checkpoint/multiturn-sft-qwen-2.5-7b-instruct/global_step_372/huggingface
 
 2.代码沙箱准备
 

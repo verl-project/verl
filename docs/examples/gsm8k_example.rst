@@ -75,11 +75,11 @@ model.
 ---------------------------------
 
 We provide a SFT Trainer using PyTorch FSDP in
-`sft_trainer.py <https://github.com/volcengine/verl/blob/main/verl/trainer/sft_trainer.py>`_. 
+`sft_trainer.py <https://github.com/verl-project/verl/blob/main/verl/trainer/sft_trainer.py>`_. 
 Users can customize their own SFT
 script using our FSDP SFT Trainer.
 
-We also provide various training scripts for SFT on GSM8K dataset in `gsm8k sft directory <https://github.com/volcengine/verl/blob/main/examples/sft/gsm8k/>`_.
+We also provide various training scripts for SFT on GSM8K dataset in `gsm8k sft directory <https://github.com/verl-project/verl/blob/main/examples/sft/gsm8k/>`_.
 
 .. code:: shell
 
@@ -164,8 +164,8 @@ The script of run_deepseek7b_llm.sh
       critic.model.path=deepseek-ai/deepseek-llm-7b-chat \
       critic.model.enable_gradient_checkpointing=True \
       critic.ppo_micro_batch_size_per_gpu=32 \
-      critic.model.fsdp_config.param_offload=False \
-      critic.model.fsdp_config.optimizer_offload=False \
+      critic.fsdp.param_offload=False \
+      critic.fsdp.optimizer_offload=False \
       algorithm.kl_ctrl.kl_coef=0.001 \
       trainer.critic_warmup=0 \
       trainer.logger='["console","wandb"]' \

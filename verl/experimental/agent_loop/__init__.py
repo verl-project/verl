@@ -12,7 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .agent_loop import AgentLoopBase, AgentLoopManager, AgentLoopWorker, AsyncLLMServerManager
+from .agent_loop import (
+    AgentLoopBase,
+    AgentLoopManager,
+    AgentLoopOutput,
+    AgentLoopWorker,
+    AsyncLLMServerManager,
+    get_trajectory_info,
+)
 from .agent_loop_with_context_management import (
     AgentLoopWithContextManagement,
     SummarizerAgentLoop,
@@ -24,20 +31,32 @@ from .context_manager import (
     SlidingWindowContextManager,
     SummarizerContextManager,
 )
+from .diffusion_agent_loop import DiffusionAgentLoopWorker
 from .single_turn_agent_loop import SingleTurnAgentLoop
 from .tool_agent_loop import ToolAgentLoop
 
-_ = [SingleTurnAgentLoop, ToolAgentLoop, SummarizerAgentLoop, ToolSlidingWindowAgentLoop]
+_ = [
+    SingleTurnAgentLoop,
+    ToolAgentLoop,
+    SummarizerAgentLoop,
+    ToolSlidingWindowAgentLoop,
+]
 
 __all__ = [
     "AgentLoopBase",
     "AgentLoopManager",
-    "AsyncLLMServerManager",
+    "AgentLoopOutput",
     "AgentLoopWorker",
+    "AsyncLLMServerManager",
+    "get_trajectory_info",
+    "DiffusionAgentLoopWorker",
     "AgentLoopWithContextManagement",
     "ContextManager",
     "ContextState",
     "SlidingWindowContextManager",
     "SummarizerContextManager",
+    "SummarizerAgentLoop",
     "ToolSlidingWindowAgentLoop",
+    "SingleTurnAgentLoop",
+    "ToolAgentLoop",
 ]

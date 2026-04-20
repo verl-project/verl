@@ -26,6 +26,7 @@ from veomni.distributed.offloading import build_activation_offloading_context
 from veomni.distributed.torch_parallelize import build_parallelize_model
 from veomni.models.auto import build_foundation_model
 from veomni.optim import build_lr_scheduler, build_optimizer
+from veomni.utils.seqlen_pos_transform_utils import prepare_fa_kwargs_from_position_ids
 
 import verl.utils.torch_functional as verl_F
 from verl.trainer.config import CheckpointConfig
@@ -102,7 +103,7 @@ class VeOmniEngine(FSDPEngine):
             dp_size=dp_size,
             dp_replicate_size=data_parallel_replicate_size,
             dp_shard_size=data_parallel_shard_size,
-            ep_size=self.engine_config.expert_parallel_size,
+            extra_parallel_sizes=(self.engine_config.expert_parallel_size,),
             ulysses_size=self.engine_config.ulysses_parallel_size,
             dp_mode=self.data_parallel_mode,
         )
@@ -195,8 +196,8 @@ class VeOmniEngine(FSDPEngine):
     def _build_model_optimizer(self):
         # Load base model with specified configuration and dtype
         module = build_foundation_model(
-            config_path=self.model_config.hf_config_path,
-            weights_path=self.model_config.path,
+            config_path=self.model_config.local_hf_config_path,
+            weights_path=self.model_config.local_path,
             torch_dtype="float32" if self.engine_config.mixed_precision else "bfloat16",
             attn_implementation=self.engine_config.attn_implementation,
             moe_implementation=self.engine_config.moe_implementation,
@@ -209,12 +210,14 @@ class VeOmniEngine(FSDPEngine):
         module = build_parallelize_model(
             module,
             init_device=self.engine_config.init_device,
-            weights_path=self.model_config.path,
+            weights_path=self.model_config.local_path,
             enable_full_shard=self.engine_config.enable_full_shard,
             enable_mixed_precision=self.engine_config.mixed_precision,
             enable_gradient_checkpointing=self.model_config.enable_gradient_checkpointing,
             enable_fsdp_offload=self.engine_config.enable_fsdp_offload,
-            basic_modules=module._no_split_modules + self.engine_config.basic_modules,
+            basic_modules=list(
+                set(getattr(module, "_no_split_modules", None) or []) | set(self.engine_config.basic_modules)
+            ),
             enable_reentrant=self.engine_config.enable_reentrant,
             enable_forward_prefetch=self.engine_config.forward_prefetch,
         )
@@ -520,13 +523,15 @@ class OmniSequenceShardCollator:
     padding_features: dict[str, int] = field(
         default_factory=lambda: {
             "pixel_values": 0,
+            "pixel_values_videos": 0,
         },
         metadata={"help": "features to padding sequence dimension."},
     )
 
     # padding scale for padding features
     padding_scale: dict[str, int] = field(
-        default_factory=lambda: {"pixel_values": 4}, metadata={"help": "padding scale for padding features."}
+        default_factory=lambda: {"pixel_values": 4, "pixel_values_videos": 4},
+        metadata={"help": "padding scale for padding features."},
     )
 
     def __post_init__(self):
@@ -575,19 +580,59 @@ class OmniSequenceShardCollator:
         return batch
 
 
+def _prepare_veomni_flash_attention_kwargs(position_ids: torch.Tensor) -> dict[str, torch.Tensor | int]:
+    """Normalize packed position_ids layout and derive varlen FlashAttention kwargs.
+
+    Supported formats for use_remove_padding=true:
+        - 2D: (1, total_nnz) - standard packed format
+        - 3D: (rope_dim, 1, total_nnz) - VeRL mRoPE packed format
+    """
+    if position_ids.dim() == 2:
+        # (1, total_nnz) - standard packed format
+        fa_position_ids = position_ids
+    elif position_ids.dim() == 3:
+        # (rope_dim, 1, total_nnz) - VeRL mRoPE packed format
+        if position_ids.shape[1] == 1:
+            fa_position_ids = position_ids[0]
+        else:
+            raise ValueError(
+                f"Unsupported 3D position_ids shape: {tuple(position_ids.shape)}, expected (rope_dim, 1, total_nnz)"
+            )
+    else:
+        raise ValueError(
+            f"Unsupported position_ids rank: {position_ids.dim()}, "
+            f"expected 2 (1, total_nnz) or 3 (rope_dim, 1, total_nnz)"
+        )
+
+    (cu_seq_lens_q, cu_seq_lens_k), (max_length_q, max_length_k) = prepare_fa_kwargs_from_position_ids(fa_position_ids)
+    return {
+        "cu_seq_lens_q": cu_seq_lens_q,
+        "cu_seq_lens_k": cu_seq_lens_k,
+        "max_length_q": max_length_q,
+        "max_length_k": max_length_k,
+    }
+
+
 @EngineRegistry.register(model_type="language_model", backend=["veomni"], device=["cuda", "npu"])
 class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
     def prepare_model_inputs(self, micro_batch: TensorDict):
-        # TODO: Cannot work properly for qwen_vl ulysses
         model_inputs, output_args = super().prepare_model_inputs(micro_batch)
         input_ids_rmpad = model_inputs["input_ids"]
+        sp_enabled = parallel_state.get_parallel_state().sp_enabled
+        sp_shard_collator = OmniSequenceShardCollator() if sp_enabled else None
+
         if self.module.config.model_type in VL_TYPE2INDEX.keys():
             image_mask = input_ids_rmpad == VL_TYPE2INDEX[self.module.config.model_type]["IMAGE_INPUT_INDEX"]
             video_mask = input_ids_rmpad == VL_TYPE2INDEX[self.module.config.model_type]["VIDEO_INPUT_INDEX"]
             model_inputs.update({"image_mask": image_mask, "video_mask": video_mask})
 
-            if parallel_state.get_parallel_state().sp_enabled:
-                omni_sequence_shard_collator = OmniSequenceShardCollator()
-                omni_sequence_shard_collator(model_inputs)
+            if sp_enabled:
+                sp_shard_collator(model_inputs)
+
+        use_remove_padding = tu.get_non_tensor_data(data=micro_batch, key="use_remove_padding", default=True)
+        if use_remove_padding and model_inputs.get("position_ids", None) is not None:
+            model_inputs.update(_prepare_veomni_flash_attention_kwargs(model_inputs["position_ids"]))
+            if sp_enabled:
+                model_inputs["position_ids"] = sp_shard_collator.sp_slice(model_inputs["position_ids"], dim=-1)
 
         return model_inputs, output_args

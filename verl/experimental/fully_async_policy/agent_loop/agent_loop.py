@@ -26,12 +26,14 @@ from verl.experimental.agent_loop.agent_loop import (
     AsyncLLMServerManager,
     TokenOutput,
 )
+from verl.experimental.teacher_loop import MultiTeacherModelManager
 from verl.protocol import DataProto
 from verl.single_controller.ray import RayResourcePool, RayWorkerGroup
 from verl.utils.ray_utils import auto_await
 from verl.utils.rollout_trace import (
     rollout_trace_op,
 )
+from verl.utils.tokenizer import normalize_token_ids
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -64,6 +66,8 @@ class FullyAsyncLLMServerManager(AsyncLLMServerManager):
         Returns:
             TokenOutput: token output
         """
+        prompt_ids = normalize_token_ids(prompt_ids)
+
         limit_key = None
         if "max_tokens" in sampling_params:
             limit_key = "max_tokens"
@@ -92,11 +96,16 @@ class FullyAsyncLLMServerManager(AsyncLLMServerManager):
             final_output.token_ids.extend(output.token_ids)
             if output.log_probs is not None:
                 final_output.log_probs.extend(output.log_probs)
-            if output.routed_experts is not None:
+            # On partial rollout resume the model version may differ, so keep
+            # existing routing and only append routing for newly generated tokens.
+            if output.routed_experts is not None and len(output.token_ids) > 0:
                 if final_output.routed_experts is None:
                     final_output.routed_experts = output.routed_experts
                 else:
-                    final_output.routed_experts = torch.cat([final_output.routed_experts, output.routed_experts], dim=0)
+                    final_output.routed_experts = torch.cat(
+                        [final_output.routed_experts, output.routed_experts[-len(output.token_ids) :]],
+                        dim=0,
+                    )
             if output.num_preempted is not None:
                 final_output.num_preempted += output.num_preempted
             final_output.stop_reason = output.stop_reason
@@ -130,10 +139,19 @@ class FullyAsyncAgentLoopWorker(AgentLoopWorker):
         config: DictConfig,
         servers: list[tuple[str, ray.actor.ActorHandle]],
         load_balancer_handle: ray.actor.ActorHandle,
+        teacher_servers: list[tuple[str, ray.actor.ActorHandle]] = None,
+        teacher_load_balancer_handle: ray.actor.ActorHandle = None,
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
         self.server_manager = FullyAsyncLLMServerManager(config, servers, load_balancer_handle)
-        super().__init__(config, servers, load_balancer_handle, reward_loop_worker_handles)
+        super().__init__(
+            config,
+            servers,
+            load_balancer_handle,
+            teacher_servers,
+            teacher_load_balancer_handle,
+            reward_loop_worker_handles,
+        )
 
 
 class FullyAsyncAgentLoopManager(AgentLoopManager):
@@ -142,10 +160,13 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
         config: DictConfig,
         worker_group: RayWorkerGroup = None,
         rollout_resource_pool: RayResourcePool = None,
+        teacher_model_manager: MultiTeacherModelManager = None,
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
         self.agent_loop_workers_class = FullyAsyncAgentLoopWorker
-        super().__init__(config, worker_group, rollout_resource_pool, reward_loop_worker_handles)
+        super().__init__(config, worker_group, rollout_resource_pool, teacher_model_manager, reward_loop_worker_handles)
+        if self.distillation_enabled:
+            raise NotImplementedError("Distillation is not implemented in FullyAsyncAgentLoopManager yet.")
 
     @auto_await
     async def generate_sequences_single(self, prompts: DataProto) -> DataProto:

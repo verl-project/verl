@@ -95,7 +95,14 @@ class ServerAdapter(BaseRollout):
             self.sleep_level = VLLM_SLEEP_LEVEL
 
         self.device_uuid = get_device_uuid(get_device_id())
-        self.zmq_handle = f"ipc:///tmp/rl-colocate-zmq-{self.device_uuid}.sock"
+        # Use replica_rank + node-local rank to form ZMQ handle instead of GPU UUID,
+        # because CheckpointEngineWorker and vLLM worker may see different GPU UUIDs
+        # when CUDA_VISIBLE_DEVICES differs between processes (common on ROCm/AMD).
+        # Must use node-local rank (not rollout_rank) so it matches vLLM worker's
+        # local_rank on every node. Include replica_rank to avoid collisions when
+        # multiple replicas share a node.
+        local_rank = self.rollout_rank % local_world_size
+        self.zmq_handle = f"ipc:///tmp/rl-colocate-zmq-replica-{self.replica_rank}-rank-{local_rank}.sock"
 
         self.use_shm = not is_support_ipc()
         if self.use_shm:
@@ -131,7 +138,8 @@ class ServerAdapter(BaseRollout):
 
         # Lazy init http server adapter because http server is launched after hybrid engine.
         if self.server_handle is None:
-            self.server_handle = ray.get_actor(f"vllm_server_{self.replica_rank}_{self.node_rank}")
+            prefix = self._get_server_name_prefix()
+            self.server_handle = ray.get_actor(f"{prefix}server_{self.replica_rank}_{self.node_rank}")
 
         future = self.server_handle.collective_rpc.remote(method, timeout=timeout, args=args, kwargs=kwargs)
         return future if non_block else await future
@@ -183,6 +191,10 @@ class ServerAdapter(BaseRollout):
         if self.replica_rank == 0 and self.rollout_rank == 0:
             logger.info(f"update_weights done, time cost: {time.time() - start_time:.2f}s")
 
+    def _get_server_name_prefix(self) -> str:
+        """Return the Ray actor name prefix matching the rollout type (e.g. 'vllm_' or 'vllm_omni_')."""
+        return f"{self.config.get('name', 'vllm')}_"
+
     def generate_sequences(self, prompts: DataProto) -> DataProto:
         """Batch generate sequences in sync mode.
 
@@ -198,5 +210,5 @@ class ServerAdapter(BaseRollout):
             "The vLLM SPMD mode was retired in PR #4411. For batch generation, "
             "please use the async server interface via vLLMReplica and AsyncLLMServerManager, "
             "or use HFRollout for synchronous generation. "
-            "See https://github.com/volcengine/verl/issues/4682 for more details."
+            "See https://github.com/verl-project/verl/issues/4682 for more details."
         )

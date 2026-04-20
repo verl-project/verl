@@ -187,10 +187,16 @@ def put_text_on_image(image: np.ndarray, lines: list[str], max_width: int = 200)
     y = -10
     for line in new_lines:
         bbox = draw.textbbox((0, 0), text=line)
+        textwidth = bbox[2] - bbox[0]
         textheight = bbox[3] - bbox[1]
         y += textheight + 10
         x = 10
-        draw.text((x, y), text=line, fill=(0, 0, 0))
+        pad = 2
+        draw.rectangle(
+            [(x - pad, y - pad), (x + textwidth + pad, y + textheight + pad)],
+            fill=(0, 0, 0),
+        )
+        draw.text((x, y), text=line, fill=(255, 255, 255))
     return np.array(image)
 
 

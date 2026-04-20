@@ -77,6 +77,7 @@ class DistProfiler:
     - npu: NPUProfiler (Ascend)
     - torch: PyTorch torch.profiler wrapper
     - torch_memory: Torch CUDA memory snapshot dump
+    - precision_debugger: msprobe precision debugger
     """
 
     def __init__(
@@ -107,6 +108,11 @@ class DistProfiler:
             # default rank 0 if enabled but ranks unspecified
             self._this_rank = (rank == 0) if self._enable else False
 
+        # precision_debugger delegates rank filtering to msprobe config.json.
+        # Keep verl-side rank gate open when profiler is enabled.
+        if self._tool == "precision_debugger" and self._enable:
+            self._this_rank = True
+
         # TorchMemoryProfiler currently do not support discrete mode.
         self._discrete = getattr(tool_config, "discrete", False) if tool_config else False
 
@@ -125,6 +131,10 @@ class DistProfiler:
             self._impl = _Torch(rank=rank, config=config, tool_config=tool_config)
         elif self._tool == "torch_memory":
             self._impl = TorchMemoryProfiler(rank=rank, config=config, tool_config=tool_config)
+        elif self._tool == "precision_debugger":
+            from .precision_debugger_profile import PrecisionDebuggerProfiler as _Precision
+
+            self._impl = _Precision(precision_cfg=tool_config, rank=rank, save_path=config.save_path)
         else:
             # Fallback to a no-op impl
             self._impl = _NoOpProfiler()

@@ -155,6 +155,12 @@ class BucketedWeightSender:
 
     def _init_socket(self):
         """Initialize ZMQ REQ socket and bind."""
+        if self.zmq_handle.startswith("ipc://"):
+            ipc_path = self.zmq_handle[len("ipc://") :]
+            try:
+                os.remove(ipc_path)
+            except OSError:
+                pass
         self.socket = self.zmq_context.socket(zmq.REQ)
         self.socket.bind(self.zmq_handle)
 
@@ -185,6 +191,12 @@ class BucketedWeightSender:
         if self.socket is not None:
             self.socket.close()
             self.socket = None
+        if self.zmq_handle.startswith("ipc://"):
+            ipc_path = self.zmq_handle[len("ipc://") :]
+            try:
+                os.remove(ipc_path)
+            except OSError:
+                pass
         del self.buffer
         self.buffer = None
         if self.shm is not None:
@@ -243,18 +255,13 @@ class BucketedWeightReceiver:
                 for name, meta in metadata["bucket_meta"].items():
                     shape, dtype, offset = meta["shape"], meta["dtype"], meta["offset"]
                     size = dtype.itemsize * shape.numel()
-                    # NOTE: we need to clone the tensor to release CUDA IPC memory
-                    # but for shared memory, it's not necessary and if we do clone,
-                    # it will cause extra memory copy overhead and slow down the process.
                     tensor = self.buffer[offset : offset + size].view(dtype=dtype).view(shape)
-                    if not self.use_shm:
-                        tensor = tensor.clone()
-                    else:
+                    if self.use_shm:
                         tensor = tensor.to(self.device)
                     weights.append((name, tensor))
+                on_bucket_received(weights)
                 get_torch_device().synchronize()
                 self.socket.send(b"")
-                on_bucket_received(weights)
                 del weights, tensor
                 if metadata["is_last"]:
                     break

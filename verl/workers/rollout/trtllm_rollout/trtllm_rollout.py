@@ -22,13 +22,19 @@ import os
 import pickle
 import threading
 from contextlib import asynccontextmanager
-from typing import Any, Generator, Optional
+from typing import Any, AsyncGenerator, Generator, Optional
 
 import aiohttp
 import pynvml
 import ray
 import torch
 import torch.distributed as dist
+
+try:
+    from tensorrt_llm.llmapi.llm_args import ExecutorMemoryType
+except (ImportError, RuntimeError):
+    # RuntimeError: FlashInfer's check_cuda_arch() crashes on CPU-only actors
+    ExecutorMemoryType = None
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.multiprocessing.reductions import reduce_tensor
 
@@ -36,6 +42,7 @@ from verl.utils.device import get_torch_device
 from verl.utils.net_utils import is_valid_ipv6_address
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.base import BaseRollout
+from verl.workers.rollout.utils import ensure_async_iterator
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -259,16 +266,23 @@ class AsyncTRTLLMHttpAdapter:
 
 
 class ServerAdapter(BaseRollout):
-    _WEIGHTS_TAGS = [
-        "sampler",
-        "drafter",
-        "guided_decoder",
-        "spec_resource_manager",
-        "model_extra",
-        "executor_extra",
-        "model",
-        "draft_model",
-    ]
+    # All releasable/resumable weight tags: every ExecutorMemoryType except kv_cache
+    # (handled separately) and internal tags prefixed with "_".
+    # Fallback to hard-coded list for trtllm versions that don't export ExecutorMemoryType.
+    _WEIGHTS_TAGS = (
+        [t.value for t in ExecutorMemoryType if t is not ExecutorMemoryType.KV_CACHE and not t.value.startswith("_")]
+        if ExecutorMemoryType is not None
+        else [
+            "sampler",
+            "drafter",
+            "guided_decoder",
+            "spec_resource_manager",
+            "model_extra",
+            "executor_extra",
+            "model",
+            "draft_model",
+        ]
+    )
 
     @staticmethod
     def get_full_tags() -> list[str]:
@@ -411,7 +425,10 @@ class ServerAdapter(BaseRollout):
         await asyncio.to_thread(dist.barrier, group=self.hybrid_device_mesh["exclude_dp"].get_group())
 
     async def update_weights(
-        self, weights: Generator[tuple[str, torch.Tensor], None, None], global_steps: int = None, **kwargs
+        self,
+        weights: Generator[tuple[str, torch.Tensor], None, None] | AsyncGenerator[tuple[str, torch.Tensor], None],
+        global_steps: int = None,
+        **kwargs,
     ):
         assert self.hybrid_device_mesh is not None, "hybrid_device_mesh is not set"
 
@@ -453,10 +470,22 @@ class ServerAdapter(BaseRollout):
             cur_available_bytes = total_available_bytes
             cur_handles = []
 
-        # Query if model supports partial loading
-        supports_partial_loading = await self.get_supports_partial_loading()
+        # For non-VLM, always use partial loading. For VLM, leader queries and broadcasts to all
+        # ranks in the DP replica; use get_global_rank(group, 0) since each replica has a different leader.
+        is_vlm = self.model_config.hf_config is not None and hasattr(self.model_config.hf_config, "vision_config")
+        if not is_vlm:
+            supports_partial_loading = True
+        else:
+            exclude_dp_group = self.hybrid_device_mesh["exclude_dp"].get_group()
+            spl_tensor = torch.zeros(1, dtype=torch.int32)
+            if self.is_leader_rank:
+                supports_partial_loading = await self.get_supports_partial_loading()
+                spl_tensor[0] = int(supports_partial_loading)
+            leader_global_rank = dist.get_global_rank(exclude_dp_group, 0)
+            await asyncio.to_thread(dist.broadcast, spl_tensor, src=leader_global_rank, group=exclude_dp_group)
+            supports_partial_loading = bool(spl_tensor.item())
 
-        for name, param in weights:
+        async for name, param in ensure_async_iterator(weights):
             if supports_partial_loading:
                 size_in_bytes = param.element_size() * param.numel()
                 if size_in_bytes > cur_available_bytes:

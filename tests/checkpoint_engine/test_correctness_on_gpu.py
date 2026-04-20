@@ -15,6 +15,7 @@ import os
 
 import pytest
 import ray
+import torch
 
 from tests.checkpoint_engine.test_utils import create_rollout_worker_group, create_trainer_worker_group
 from verl.checkpoint_engine import CheckpointEngineManager
@@ -26,17 +27,19 @@ from verl.utils.device import get_device_name
 from verl.utils.ray_utils import auto_await
 from verl.workers.config import CheckpointEngineConfig, HFModelConfig, RolloutConfig
 
+_ngpus = torch.cuda.device_count()
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("rebuild_group", [False, True])
-@pytest.mark.parametrize("num_trainer, num_rollout", [(2, 6)])
+@pytest.mark.parametrize("num_trainer, num_rollout", [(2, _ngpus - 2)])
 @auto_await
 async def test_nccl_checkpoint_engine(
     rebuild_group,
     num_trainer,
     num_rollout,
     num_nodes=1,
-    num_gpus_per_node=8,
+    num_gpus_per_node=_ngpus,
     check_allclose=True,
     model_path="~/models/Qwen/Qwen3-8B-Base",
 ):

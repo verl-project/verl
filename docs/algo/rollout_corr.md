@@ -170,7 +170,7 @@ For advanced customization or YAML-based configs:
 algorithm:
   rollout_correction:
     rollout_is: token # IS weights: "token", "sequence", or null
-    rollout_is_threshold: 2.0 # Upper threshold for IS weights
+    rollout_is_threshold: 2.0 # TIS upper bound, or "0.5_5.0" for IcePop
     rollout_is_batch_normalize: false # Batch normalize IS weights to mean=1.0
     rollout_rs: null # Rejection sampling: comma-separated canonical options (e.g. "token_k1,seq_max_k2")
     rollout_rs_threshold: null # Threshold spec: float(s) or "lower_upper" string(s)
@@ -190,7 +190,8 @@ actor_rollout_ref:
 - `verl/trainer/ppo/rollout_corr_helper.py` - Contains `compute_rollout_correction_and_rejection_mask()` and `compute_offpolicy_metrics()`
 - `verl/trainer/ppo/core_algos.py` - Rollout Correction integration with PPO and REINFORCE modes (`compute_policy_loss_bypass_mode()`, `compute_policy_loss_reinforce()`)
 - `verl/trainer/ppo/ray_trainer.py` - Bypass mode implementation (skips `old_log_prob` computation)
-- `verl/workers/actor/dp_actor.py` - Mode selection logic and metrics collection
+- `verl/workers/utils/losses.py` - `ppo_loss` loss function wired to actor `TrainingWorker` via `verl.workers.engine_workers.ActorRolloutRefWorker.init_model`
+- `verl/trainer/ppo/core_algos.py` - `@register_policy_loss("bypass_mode")` policy loss that invokes `compute_rollout_correction_and_rejection_mask` and emits off-policy metrics
 
 ### **Configuration Files**
 
@@ -234,13 +235,15 @@ Importance sampling weights aggregation level:
 
 All IS weights are safety-bounded to [exp(-20), exp(20)] ≈ [2e-9, 5e8]
 
-### `rollout_is_threshold` (float)
+### `rollout_is_threshold` (str or float)
 
-Upper threshold for IS weight truncation. Default: `2.0`
+Threshold specification for IS weighting. Default: `2.0`
 
-- Truncates IS weights via `.clamp(max=rollout_is_threshold)` (TIS: Truncated Importance Sampling)
+- Single float or float-like string: TIS via `.clamp(max=rollout_is_threshold)`
+- `"lower_upper"` string such as `"0.5_5.0"`: IcePop, zero weights outside `[lower, upper]`
 - Applied to IS weights for variance reduction
 - Separate from rejection sampling (controlled by `rollout_rs` parameters)
+- Unlike `rollout_rs`, IcePop does not modify `response_mask`; it only changes the IS coefficients
 
 ### `rollout_is_batch_normalize` (bool)
 

@@ -52,7 +52,7 @@ a PR and include a screenshot from Wandb or other verifiable evidence.
       - 116
       - fsdp
       - vllm0.8.3
-      - `qwen2-0.5b_grpo-lora_1_h100_fsdp_vllm.sh <https://github.com/volcengine/verl/blob/main/examples/tuning/0.5b/qwen2-0.5b_grpo-lora_1_h100_fsdp_vllm.sh>`_
+      - `qwen2-0.5b_grpo-lora_1_h100_fsdp_vllm.sh <https://github.com/verl-project/verl/blob/main/examples/tuning/0.5b/qwen2-0.5b_grpo-lora_1_h100_fsdp_vllm.sh>`_
       - `SimonHuang <thelongestusernameofall@gmail.com>`_
 
 1.5B
@@ -78,7 +78,7 @@ a PR and include a screenshot from Wandb or other verifiable evidence.
       - 128
       - fsdp
       - vllm0.8.3
-      - `qwen2-1.5b_grpo-lora_1_h100_fsdp_vllm.sh <https://github.com/volcengine/verl/blob/main/examples/tuning/1.5b/qwen2-1.5b_grpo-lora_1_h100_fsdp_vllm.sh>`_
+      - `qwen2-1.5b_grpo-lora_1_h100_fsdp_vllm.sh <https://github.com/verl-project/verl/blob/main/examples/tuning/1.5b/qwen2-1.5b_grpo-lora_1_h100_fsdp_vllm.sh>`_
       - `SimonHuang <thelongestusernameofall@gmail.com>`_
 
 3B
@@ -104,7 +104,7 @@ a PR and include a screenshot from Wandb or other verifiable evidence.
       - 62
       - fsdp
       - vllm0.8.3
-      - `qwen2-3b_grpo-lora_1_h100_fsdp_vllm.sh <https://github.com/volcengine/verl/blob/main/examples/tuning/3b/qwen2-3b_grpo-lora_1_h100_fsdp_vllm.sh>`_
+      - `qwen2-3b_grpo-lora_1_h100_fsdp_vllm.sh <https://github.com/verl-project/verl/blob/main/examples/tuning/3b/qwen2-3b_grpo-lora_1_h100_fsdp_vllm.sh>`_
       - `SimonHuang <thelongestusernameofall@gmail.com>`_
 
 7B
@@ -130,7 +130,7 @@ a PR and include a screenshot from Wandb or other verifiable evidence.
       - \
       - fsdp
       - vllm0.8.2
-      - `qwen2-7b_grpo_2_h800_fsdp_vllm <https://github.com/volcengine/verl/blob/main/examples/tuning/7b/qwen2-7b_grpo_2_h800_fsdp_vllm.sh>`_
+      - `qwen2-7b_grpo_2_h800_fsdp_vllm <https://github.com/verl-project/verl/blob/main/examples/tuning/7b/qwen2-7b_grpo_2_h800_fsdp_vllm.sh>`_
       - `Xiangyongan <xiangyongan@bytedance.com>`_
     * - MIN
       - Qwen2.5-7B
@@ -139,7 +139,7 @@ a PR and include a screenshot from Wandb or other verifiable evidence.
       - 16
       - fsdp
       - vllm0.8.3
-      - `qwen2-7b_grpo-lora_1_h100_fsdp_vllm.sh <https://github.com/volcengine/verl/blob/main/examples/tuning/7b/qwen2-7b_grpo-lora_1_h100_fsdp_vllm.sh>`_
+      - `qwen2-7b_grpo-lora_1_h100_fsdp_vllm.sh <https://github.com/verl-project/verl/blob/main/examples/tuning/7b/qwen2-7b_grpo-lora_1_h100_fsdp_vllm.sh>`_
       - `SimonHuang <thelongestusernameofall@gmail.com>`_
 
 14B
@@ -165,7 +165,7 @@ a PR and include a screenshot from Wandb or other verifiable evidence.
       - \
       - fsdp
       - vllm0.8.2
-      - `qwen2-14b_grpo_4_h800_fsdp_vllm <https://github.com/volcengine/verl/blob/main/examples/tuning/14b/qwen2-14b_grpo_4_h800_fsdp_vllm.sh>`_
+      - `qwen2-14b_grpo_4_h800_fsdp_vllm <https://github.com/verl-project/verl/blob/main/examples/tuning/14b/qwen2-14b_grpo_4_h800_fsdp_vllm.sh>`_
       - `Xiangyongan <xiangyongan@bytedance.com>`_
     * - MIN
       - Qwen2.5-14B
@@ -174,7 +174,7 @@ a PR and include a screenshot from Wandb or other verifiable evidence.
       - 116
       - fsdp
       - vllm0.8.3
-      - `qwen2-14b_grpo-lora_2_h100_fsdp_vllm.sh <https://github.com/volcengine/verl/blob/main/examples/tuning/14b/qwen2-14b_grpo-lora_2_h100_fsdp_vllm.sh>`_
+      - `qwen2-14b_grpo-lora_2_h100_fsdp_vllm.sh <https://github.com/verl-project/verl/blob/main/examples/tuning/14b/qwen2-14b_grpo-lora_2_h100_fsdp_vllm.sh>`_
       - `SimonHuang <thelongestusernameofall@gmail.com>`_
 
 32B
@@ -200,7 +200,7 @@ a PR and include a screenshot from Wandb or other verifiable evidence.
       - \
       - megatron
       - vllm0.8.2
-      - `qwen2-32b_grpo_8_h20_megatron_vllm <https://github.com/volcengine/verl/tree/main/examples/tuning/32b/qwen2_32B_grpo_8_h20_megatron_vllm.sh>`_
+      - `qwen2-32b_grpo_8_h20_megatron_vllm <https://github.com/verl-project/verl/tree/main/examples/tuning/32b/qwen2_32B_grpo_8_h20_megatron_vllm.sh>`_
       - `Xiangyongan <xiangyongan@bytedance.com>`_
     * - MIN
       - Qwen2.5-32B
@@ -209,7 +209,7 @@ a PR and include a screenshot from Wandb or other verifiable evidence.
       - 180
       - fsdp
       - vllm0.8.3
-      - `qwen2-32b_grpo-lora_4_h100_fsdp_vllm.sh <https://github.com/volcengine/verl/blob/main/examples/tuning/32b/qwen2-32b_grpo-lora_4_h100_fsdp_vllm.sh>`_
+      - `qwen2-32b_grpo-lora_4_h100_fsdp_vllm.sh <https://github.com/verl-project/verl/blob/main/examples/tuning/32b/qwen2-32b_grpo-lora_4_h100_fsdp_vllm.sh>`_
       - `SimonHuang <thelongestusernameofall@gmail.com>`_
 
 70B
@@ -235,7 +235,7 @@ a PR and include a screenshot from Wandb or other verifiable evidence.
       - \
       - fsdp
       - vllm0.8.2
-      - `qwen2-70b_grpo_32_h20_fsdp_vllm <https://github.com/volcengine/verl/blob/main/examples/tuning/70b/qwen2-70b_grpo_32_h20_fsdp_vllm.sh>`_
+      - `qwen2-70b_grpo_32_h20_fsdp_vllm <https://github.com/verl-project/verl/blob/main/examples/tuning/70b/qwen2-70b_grpo_32_h20_fsdp_vllm.sh>`_
       - `Xiangyongan <xiangyongan@bytedance.com>`_
     * - MIN
       - Qwen2-70B
@@ -244,7 +244,7 @@ a PR and include a screenshot from Wandb or other verifiable evidence.
       - \
       - fsdp
       - vllm0.8.3
-      - `qwen2-70b_grpo_32_h800_fsdp_vllm <https://github.com/volcengine/verl/blob/main/examples/tuning/70b/qwen2-70b_grpo_32_h800_fsdp_vllm.sh>`_
+      - `qwen2-70b_grpo_32_h800_fsdp_vllm <https://github.com/verl-project/verl/blob/main/examples/tuning/70b/qwen2-70b_grpo_32_h800_fsdp_vllm.sh>`_
       - `Xiangyongan <xiangyongan@bytedance.com>`_
     * - MIN
       - Qwen2.5-72B
@@ -253,7 +253,7 @@ a PR and include a screenshot from Wandb or other verifiable evidence.
       - 176
       - fsdp
       - vllm0.8.3
-      - `qwen2-72b_grpo-lora_8_h100_fsdp_vllm.sh <https://github.com/volcengine/verl/blob/main/examples/tuning/70b/qwen2-72b_grpo-lora_8_h100_fsdp_vllm.sh>`_
+      - `qwen2-72b_grpo-lora_8_h100_fsdp_vllm.sh <https://github.com/verl-project/verl/blob/main/examples/tuning/70b/qwen2-72b_grpo-lora_8_h100_fsdp_vllm.sh>`_
       - `SimonHuang <thelongestusernameofall@gmail.com>`_
 
 405B

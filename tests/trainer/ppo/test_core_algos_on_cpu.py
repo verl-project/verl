@@ -27,6 +27,7 @@ from verl.trainer.ppo.core_algos import (
     compute_rloo_outcome_advantage,
     compute_rloo_vectorized_outcome_advantage,
     get_adv_estimator_fn,
+    kl_penalty,
     register_adv_est,
 )
 
@@ -311,6 +312,53 @@ def test_grpo_and_vectorized_equivalence(batch_size: int, seq_len: int, num_grou
     assert ret1.shape == ret2.shape == (batch_size, seq_len)
     assert torch.allclose(adv1, adv2, rtol=1e-5, atol=1e-6)
     assert torch.allclose(ret1, ret2, rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.parametrize(
+    "name,base",
+    [
+        ("k1+", "k1"),
+        ("kl+", "kl"),
+        ("abs+", "abs"),
+        ("k3+", "k3"),
+        ("low_var_kl+", "low_var_kl"),
+    ],
+)
+def test_kl_penalty_straight_through_value_matches_base(name, base):
+    """The ``+`` suffix is a straight-through trick that swaps in the k2
+    gradient while keeping the base estimator's value. Therefore the forward
+    value of e.g. ``k3+`` must match the value of plain ``k3``.
+
+    Regression test for the bug where ``kl_penalty(..., "k3+")`` raised
+    ``NotImplementedError`` because the wrapper forwarded the ``+`` suffix to
+    ``kl_penalty_forward`` without stripping it.
+    """
+    torch.manual_seed(0)
+    logprob = torch.randn(4, 8, requires_grad=True)
+    ref_logprob = torch.randn(4, 8)
+
+    plus_value = kl_penalty(logprob, ref_logprob, name)
+    base_value = kl_penalty(logprob, ref_logprob, base)
+    assert torch.allclose(plus_value, base_value)
+
+
+def test_kl_penalty_k3_plus_uses_k2_gradient():
+    """With ``k3+`` the gradient w.r.t. ``logprob`` should equal the gradient
+    obtained from the ``k2`` (``0.5 * log_ratio**2``) estimator, since the
+    straight-through trick routes the backward pass through ``k2``.
+    """
+    torch.manual_seed(0)
+    logprob = torch.randn(4, 8, requires_grad=True)
+    ref_logprob = torch.randn(4, 8)
+
+    out_plus = kl_penalty(logprob, ref_logprob, "k3+").sum()
+    (grad_plus,) = torch.autograd.grad(out_plus, logprob)
+
+    logprob_k2 = logprob.detach().clone().requires_grad_(True)
+    out_k2 = kl_penalty(logprob_k2, ref_logprob, "k2").sum()
+    (grad_k2,) = torch.autograd.grad(out_k2, logprob_k2)
+
+    assert torch.allclose(grad_plus, grad_k2)
 
 
 if __name__ == "__main__":

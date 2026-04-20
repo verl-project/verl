@@ -92,7 +92,6 @@ jobs:
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 30 # Increase this timeout value as needed
     env:
-      HTTP_PROXY: ${{ secrets.PROXY_HTTP }}
       HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
       NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
@@ -106,7 +105,8 @@ jobs:
           pip3 install peft
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
-          pip3 install git+https://github.com/ByteDance-Seed/VeOmni.git@v0.1.4
+          pip3 install veomni==0.1.9a1 --ignore-requires-python --no-deps
+          pip3 install transformers==4.57.3
       - name: Prepare pokemon-gpt4o-captions dataset
         run: |
           ray stop --force

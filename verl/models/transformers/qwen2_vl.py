@@ -29,7 +29,7 @@ from transformers.models.qwen2_vl.modeling_qwen2_vl import (
 from transformers.utils import is_flash_attn_2_available, is_flash_attn_greater_or_equal_2_10
 
 from verl.utils.device import is_npu_available
-from verl.utils.transformers_compat import is_transformers_version_in_range
+from verl.utils.transformers_compat import is_transformers_version_in_range, unpack_visual_output
 from verl.utils.ulysses import (
     gather_heads_scatter_seq,
     gather_seq_scatter_heads,
@@ -286,9 +286,16 @@ def qwen2_vl_attn_forward(
 
     # Because the input can be padded, the absolute sequence length depends on the max position id.
     cos, sin = position_embeddings
-    query_states, key_states = apply_multimodal_rotary_pos_emb(
-        query_states, key_states, cos, sin, self.rope_scaling["mrope_section"]
-    )
+    if getattr(self, "rope_scaling", None) is not None:
+        # for transformers < 5.0.0
+        mrope_section = self.rope_scaling.get("mrope_section", None)
+    else:
+        # for transformers >= 5.0.0, only rope_parameters present in the config
+        assert getattr(self, "rope_parameters", None) is not None, (
+            "Either rope_scaling or rope_parameters should be defined in the config for Qwen2 VL."
+        )
+        mrope_section = self.rope_parameters.get("mrope_section", None)
+    query_states, key_states = apply_multimodal_rotary_pos_emb(query_states, key_states, cos, sin, mrope_section)
     key_states = repeat_kv(key_states, self.num_key_value_groups)
     value_states = repeat_kv(value_states, self.num_key_value_groups)
     dropout_rate = 0.0 if not self.training else self.attention_dropout
@@ -344,7 +351,7 @@ def _get_input_embeds(
     inputs_embeds = model.get_input_embeddings()(input_ids)
     if pixel_values is not None:
         pixel_values = pixel_values.type(model.visual.dtype)
-        image_embeds = model.visual(pixel_values, grid_thw=image_grid_thw)
+        image_embeds, _ = unpack_visual_output(model.visual(pixel_values, grid_thw=image_grid_thw))
         n_image_tokens = (input_ids == model.config.image_token_id).sum().item()
         n_image_features = image_embeds.shape[0]
         if n_image_tokens != n_image_features:
@@ -362,7 +369,7 @@ def _get_input_embeds(
 
     if pixel_values_videos is not None:
         pixel_values_videos = pixel_values_videos.type(model.visual.dtype)
-        video_embeds = model.visual(pixel_values_videos, grid_thw=video_grid_thw)
+        video_embeds, _ = unpack_visual_output(model.visual(pixel_values_videos, grid_thw=video_grid_thw))
         n_video_tokens = (input_ids == model.config.video_token_id).sum().item()
         n_video_features = video_embeds.shape[0]
         if n_video_tokens != n_video_features:
@@ -384,7 +391,7 @@ def _get_input_embeds(
         pixel_values = torch.zeros((16, patch_dim), dtype=inputs_embeds.dtype, device=inputs_embeds.device)
         image_grid_thw = torch.tensor([[1, 4, 4]], dtype=torch.long, device=inputs_embeds.device)
         image_embeds = model.visual(pixel_values, grid_thw=image_grid_thw)
-        inputs_embeds += 0.0 * image_embeds.mean()
+        inputs_embeds = inputs_embeds + 0.0 * image_embeds.mean()
 
     if attention_mask is not None:
         attention_mask = attention_mask.to(inputs_embeds.device)

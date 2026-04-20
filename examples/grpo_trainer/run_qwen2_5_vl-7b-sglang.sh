@@ -27,7 +27,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=20 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=sglang \
-    +actor_rollout_ref.rollout.engine_kwargs.vllm.disable_mm_preprocessor_cache=True \
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.mm_processor_cache_gb=0 \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.85 \
     actor_rollout_ref.rollout.multi_stage_wake_up=True \
     global_profiler.tool=torch_memory \
