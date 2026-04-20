@@ -44,20 +44,6 @@ class FullyAsyncLLMServerManager(AsyncLLMServerManager):
     invisible to the AgentLoop.
     """
 
-    def __init__(
-        self,
-        config: DictConfig,
-        servers: list[tuple[str, ray.actor.ActorHandle]],
-        load_balancer_handle: ray.actor.ActorHandle,
-        load_balance_group_id: str | None = None,
-    ):
-        super().__init__(
-            config,
-            servers,
-            load_balancer_handle,
-            load_balance_group_id=load_balance_group_id,
-        )
-
     @rollout_trace_op
     async def generate(
         self,
