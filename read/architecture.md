@@ -660,3 +660,105 @@ Engine 注册机制带来几个直接好处：
 > 一套以 RL post-training 为中心、以 Ray 单控制器为编排骨架、以多后端统一抽象为执行底座、以 agent/async 扩展为未来方向的分布式训练平台。
 
 这也是为什么它的代码体量很大，但主干思路其实非常清晰：**控制平面统一，执行平面解耦，协议层稳定，后端层可替换。**
+
+---
+
+## 附录 A：什么是 PPO / GRPO / DAPO？
+
+这三个都是用于训练 LLM 的强化学习算法，是 verl 的主要服务对象。它们都属于 policy gradient 家族，区别在于「如何估计优势 advantage」和「如何稳定训练」。
+
+### A.1 PPO（Proximal Policy Optimization，OpenAI 2017）
+
+经典 RLHF 算法。需要 4 个模型：
+
+- **actor**：策略，待训练
+- **critic**：价值网络，估计 baseline
+- **reference**：冻结快照，做 KL 约束
+- **reward**：打分模型或规则函数
+
+优势用 GAE 计算：
+
+$$\hat{A}_t = \sum_k (\gamma\lambda)^k \delta_{t+k},\quad \delta_t = r_t + \gamma V(s_{t+1}) - V(s_t)$$
+
+用 clip ratio 防止策略一步更新过大：
+
+$$\mathcal{L}^{CLIP} = \mathbb{E}_t \big[\min(\rho_t \hat{A}_t,\ \text{clip}(\rho_t, 1-\epsilon, 1+\epsilon)\hat{A}_t)\big]$$
+
+问题：critic 与 actor 同尺寸，显存开销大。
+
+### A.2 GRPO（Group Relative Policy Optimization，DeepSeek 2024）
+
+PPO 的简化版，**去掉 critic**。对每个 prompt 采样一组 $G$ 个回答，用组内 reward 的均值/方差做归一化当 advantage：
+
+$$\hat{A}_i = \frac{r_i - \text{mean}(\{r_1,\dots,r_G\})}{\text{std}(\{r_1,\dots,r_G\})}$$
+
+同一回答内所有 token 共享该 advantage。优点：少一个大模型，显存友好，特别适合可验证奖励（数学、代码）。DeepSeek-R1 的训练算法。
+
+### A.3 DAPO（Decoupled Clip and Dynamic Sampling Policy Optimization，字节 2025）
+
+GRPO 的工业级改进，针对长 CoT 推理训练做了 4 项优化：
+
+1. **Clip-Higher**：把上下 clip 阈值解耦（$\epsilon_{low}, \epsilon_{high}$），允许低概率 token 有更大上行空间，缓解熵坍缩。
+2. **Dynamic Sampling**：过滤掉一组内 reward 全 0 或全 1 的 prompt（无梯度信号），动态补样到目标 batch size。
+3. **Token-level Loss**：loss 在 token 维度而非 sequence 维度平均，避免长回答被稀释。
+4. **Overlong Reward Shaping**：对超长截断回答做软惩罚而非直接判负。
+
+在 AIME 等基准上显著超过 GRPO。
+
+### A.4 三者关系
+
+**PPO（通用 RL，重）→ GRPO（去 critic，轻，适合可验证任务）→ DAPO（GRPO + 长 CoT 工程化）**
+
+verl 三者都原生支持，分别对应 [examples/ppo_trainer/](examples/ppo_trainer/)、[examples/grpo_trainer/](examples/grpo_trainer/)、[recipe/dapo/](recipe/dapo/) 等入口，通过 `algorithm.adv_estimator` 和 actor loss 配置切换。
+
+---
+
+## 附录 B：verl 与 Ray、Kubernetes 的核心区别和价值
+
+三者处于完全不同的抽象层级，是叠加关系而不是替代关系。一句话概括：
+
+> **K8s 调度容器，Ray 调度进程/Actor，verl 调度 RL 角色与数据流。**
+
+### B.1 三层对比
+
+| 维度 | Kubernetes | Ray | **verl** |
+| --- | --- | --- | --- |
+| 抽象层级 | IaaS / 容器编排 | 通用分布式计算运行时 | **LLM RL 训练框架（领域专用）** |
+| 调度对象 | Pod（容器） | Actor / Task（Python 进程） | **WorkerGroup + 角色（actor/critic/rollout/ref/reward）** |
+| 调度粒度 | 节点级（CPU/Mem/GPU 资源请求） | 进程级（placement group + bundle） | **GPU rank 级 + SPMD 拓扑 + colocate 策略** |
+| 业务语义 | 无（通用） | 弱（通用 actor model） | **强（PPO/GRPO 多角色 DAG、hybrid engine、参数同步）** |
+| 通信感知 | 不感知 NCCL | 提供 collective group 原语 | **直接编排 NCCL/RDMA + vLLM 权重 reshard** |
+| 数据流 | 应用自理 | RPC + object store | **`DataProto` + dispatch/collect 协议统一** |
+| 训练后端 | 不知情 | 不知情 | **FSDP/Megatron/VeOmni 统一抽象** |
+| 推理后端 | 不知情 | 不知情 | **vLLM/SGLang/TRT-LLM 统一抽象** |
+
+### B.2 典型部署叠加方式
+
+```
+┌─────────────────────────────────────────────────────┐
+│  verl  ──  RL 算法编排（角色、数据流、参数同步）        │  ← 领域层
+├─────────────────────────────────────────────────────┤
+│  Ray   ──  分布式 Actor 运行时（WorkerGroup 的载体）    │  ← 运行时层
+├─────────────────────────────────────────────────────┤
+│  K8s（可选，via KubeRay）── 把 Ray 节点拉起来           │  ← 基础设施层
+├─────────────────────────────────────────────────────┤
+│  物理机 / GPU                                          │
+└─────────────────────────────────────────────────────┘
+```
+
+### B.3 verl 不可被 Ray 或 K8s 替代的核心价值
+
+Ray/K8s 完全不做的事：
+
+1. **多角色 RL 数据流编排**：知道 PPO 一步要先 rollout、再算 reward、再 ref logp、再 actor/critic update，并管理它们之间的 `DataProto` 流转。Ray 只知道「调用一个远端方法」，不知道这是 RL pipeline 的哪一步。
+2. **Hybrid Engine（训练/推理 colocate）**：把 FSDP 训练 actor 和 vLLM 推理引擎放在同一组 GPU 上分时复用显存，并在两者间做权重 reshard（FSDP shard ↔ vLLM TP shard）。这是 K8s「一卡一容器」模型完全无法表达的能力。
+3. **统一后端抽象**：通过 `BaseEngine` / `BaseRollout` 把 FSDP/Megatron/VeOmni × vLLM/SGLang/TRT-LLM 的笛卡尔积组合，配置切换即可。
+4. **参数同步 `CheckpointEngine`**：trainer 权重到 rollout server 的高效同步（NCCL/NIXL/Mooncake），是异步 RL 的关键基础设施。
+5. **Agent / 多轮 rollout**：把 rollout 从「批量生成文本」升级为「执行多轮工具调用轨迹」并回流训练。
+
+### B.4 反过来，verl 也没必要替代 Ray/K8s
+
+- K8s 解决「机器/容器从哪来、怎么扩缩容、怎么自愈」——verl 不做。
+- Ray 解决「跨进程 RPC、placement group、object store、fault tolerance」——verl 直接复用。
+
+所以三者的关系是：**K8s 提供机器，Ray 提供分布式 actor 运行时，verl 在此之上构建 LLM RL 的领域语义和高性能数据流。** 没有 verl，你能用 Ray 跑 RL，但要自己写 worker 编排、参数同步、hybrid engine、多后端适配——这正是 verl 替你做掉的部分。
