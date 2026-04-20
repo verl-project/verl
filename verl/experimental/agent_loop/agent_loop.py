@@ -15,7 +15,6 @@ import asyncio
 import logging
 import os
 import random
-import threading
 from abc import ABC, abstractmethod
 from typing import Any, Optional
 from uuid import uuid4
@@ -109,7 +108,6 @@ class GlobalRequestLoadBalancer:
         self._inflight_requests: dict[str, int] = {sid: 0 for sid in server_actor_ids}
         self._request_id_to_server: LRUCache = LRUCache(maxsize=bundle["max_cache_size"])
         self._group_id_to_server: LRUCache = LRUCache(maxsize=bundle["max_cache_size"])
-        self._lock = threading.Lock()
 
         sk = bundle["strategy_init_kwargs"] or {}
         self._strategy = create_load_balance_strategy(
@@ -121,37 +119,35 @@ class GlobalRequestLoadBalancer:
 
     def acquire_server(self, request_id: str, group_id: str | None = None) -> str:
         """Acquire a server for the given request, reusing the same server for multi-turn conversations."""
-        with self._lock:
-            # request-level sticky (multi-turn: same conversation -> same server)
-            if request_id in self._request_id_to_server:
-                server_id = self._request_id_to_server[request_id]
-                self._inflight_requests[server_id] += 1
-                return server_id
-
-            if self._group_sticky_routing and group_id and group_id in self._group_id_to_server:
-                server_id = self._group_id_to_server[group_id]
-                self._request_id_to_server[request_id] = server_id
-                self._inflight_requests[server_id] += 1
-                return server_id
-
-            server_id = self._strategy.pick_server(
-                list(self._server_actor_ids),
-                self._inflight_requests,
-            )
-            self._request_id_to_server[request_id] = server_id
-            if self._group_sticky_routing and group_id:
-                self._group_id_to_server[group_id] = server_id
+        # request-level sticky (multi-turn: same conversation -> same server)
+        if request_id in self._request_id_to_server:
+            server_id = self._request_id_to_server[request_id]
             self._inflight_requests[server_id] += 1
             return server_id
 
+        if self._group_sticky_routing and group_id and group_id in self._group_id_to_server:
+            server_id = self._group_id_to_server[group_id]
+            self._request_id_to_server[request_id] = server_id
+            self._inflight_requests[server_id] += 1
+            return server_id
+
+        server_id = self._strategy.pick_server(
+            list(self._server_actor_ids),
+            self._inflight_requests,
+        )
+        self._request_id_to_server[request_id] = server_id
+        if self._group_sticky_routing and group_id:
+            self._group_id_to_server[group_id] = server_id
+        self._inflight_requests[server_id] += 1
+        return server_id
+
     def release_server(self, server_id: str) -> None:
         """Release a server after a request completes, decrementing its inflight count."""
-        with self._lock:
-            if server_id not in self._inflight_requests:
-                raise ValueError(f"Invalid server_id for release: {server_id}")
-            if self._inflight_requests[server_id] <= 0:
-                raise ValueError(f"Release called with no inflight requests on server {server_id}")
-            self._inflight_requests[server_id] -= 1
+        if server_id not in self._inflight_requests:
+            raise ValueError(f"Invalid server_id for release: {server_id}")
+        if self._inflight_requests[server_id] <= 0:
+            raise ValueError(f"Release called with no inflight requests on server {server_id}")
+        self._inflight_requests[server_id] -= 1
 
 
 def _get_rollout_and_model_config(config: DictConfig) -> tuple[DictConfig, DictConfig]:
