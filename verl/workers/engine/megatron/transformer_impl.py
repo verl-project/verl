@@ -235,6 +235,15 @@ class MegatronEngine(BaseEngine):
             tf_config = None  # Will be set after model creation
         self.bridge = bridge
 
+        export_weight_dtype = self.engine_config.export_weight_dtype
+        if isinstance(export_weight_dtype, str):
+            export_weight_dtype = export_weight_dtype.lower()
+        if export_weight_dtype not in ("bf16", "fp16", "fp8"):
+            raise ValueError(
+                f"Invalid export_weight_dtype: {export_weight_dtype}. Must be one of: bf16, fp16, fp8"
+            )
+        self.bridge.export_weight_dtype = export_weight_dtype
+
         if not self.bridge:
             self.weight_converter = get_mcore_weight_converter(self.model_config.hf_config, self.dtype)
 
@@ -336,6 +345,15 @@ class MegatronEngine(BaseEngine):
             fp16=self.param_dtype == torch.float16,
         )
         optimizer = get_megatron_optimizer(model=self.module, config=optim_config_megatron)
+        export_weight_dtype = self.engine_config.export_weight_dtype
+        if isinstance(export_weight_dtype, str):
+            export_weight_dtype = export_weight_dtype.lower()
+        if export_weight_dtype == "fp8" and self.bridge is not None:
+            initial_state_dict = getattr(self.bridge, "unquantized_state_dict", None)
+            if initial_state_dict is not None:
+                optimizer.reload_model_params(state_dict=initial_state_dict)
+                logger.warning("[verl] Initialized optimizer main params from unquantized bf16 weights.")
+                self.bridge.unquantized_state_dict = None
         register_megatron_training_hooks(self.module, optimizer)
         return optimizer
 
