@@ -74,7 +74,7 @@ def init_config() -> DictConfig:
             ],
         )
 
-    model_path = os.path.expanduser("/home/xuzhi/wuyinqi/models/Qwen2.5-1.5B-Instruct")
+    model_path = os.path.expanduser("~/models/Qwen2.5-1.5B-Instruct")
     config.actor_rollout_ref.model.path = model_path
     config.actor_rollout_ref.rollout.name = os.getenv("ROLLOUT_NAME", "vllm")
     config.actor_rollout_ref.rollout.mode = "async"
