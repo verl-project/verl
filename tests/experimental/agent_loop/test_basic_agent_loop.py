@@ -14,6 +14,7 @@
 import json
 import os
 from typing import Any
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -25,13 +26,17 @@ from tests.experimental.agent_loop.agent_utils import init_agent_loop_manager
 from verl.checkpoint_engine import CheckpointEngineManager
 from verl.experimental.agent_loop.agent_loop import GlobalRequestLoadBalancer, get_trajectory_info
 from verl.experimental.agent_loop.load_balance import create_load_balance_strategy
-from verl.experimental.agent_loop.prometheus_metrics import parse_prometheus_metric_value
+from verl.experimental.agent_loop.prometheus_metrics import (
+    collect_matching_metric_sample_lines,
+    parse_prometheus_metric_value,
+)
 from verl.protocol import DataProto
 from verl.tools.base_tool import BaseTool, OpenAIFunctionToolSchema
 from verl.tools.schemas import ToolResponse
 from verl.utils import hf_tokenizer
 from verl.utils.config import omega_conf_to_dataclass
 from verl.workers.config import CheckpointEngineConfig
+from verl.workers.config.rollout import KvCacheMetricsConfig, RolloutConfig
 
 
 def _adjust_trainer_gpus_to_available(config: DictConfig) -> None:
@@ -69,7 +74,7 @@ def init_config() -> DictConfig:
             ],
         )
 
-    model_path = os.path.expanduser("~/models/Qwen/Qwen2.5-1.5B-Instruct")
+    model_path = os.path.expanduser("/home/xuzhi/wuyinqi/models/Qwen2.5-1.5B-Instruct")
     config.actor_rollout_ref.model.path = model_path
     config.actor_rollout_ref.rollout.name = os.getenv("ROLLOUT_NAME", "vllm")
     config.actor_rollout_ref.rollout.mode = "async"
@@ -94,64 +99,57 @@ def test_single_turn(init_config):
                 "VLLM_LOGGING_LEVEL": "INFO",
                 "VLLM_USE_V1": "1",
             }
-        },
-        ignore_reinit_error=True,
+        }
     )
-    try:
-        agent_loop_manager = init_agent_loop_manager(init_config)
 
-        raw_prompts = [
-            [
-                {
-                    "role": "user",
-                    "content": "Let's play a role playing game. Your name is Alice, your favorite color is blue.",
-                }
-            ],
-            [
-                {
-                    "role": "user",
-                    "content": "Let's play a role playing game. Your name is Bob, your favorite color is red.",
-                }
-            ],
-        ]
-        batch = DataProto(
-            non_tensor_batch={
-                "raw_prompt": np.array(raw_prompts),
-                "agent_name": np.array(["single_turn_agent"] * len(raw_prompts)),
-                "data_source": np.array(["openai/gsm8k"] * len(raw_prompts)),
-                "reward_model": np.array([{"style": "rule", "ground_truth": "1.0"}] * len(raw_prompts)),
-            },
-        )
-        n = init_config.actor_rollout_ref.rollout.n
-        batch = batch.repeat(n)
-        result = agent_loop_manager.generate_sequences(prompts=batch)
-        assert len(result) == len(raw_prompts) * n
+    agent_loop_manager = init_agent_loop_manager(init_config)
 
-        # check result
-        seq_len = result.batch["prompts"].size(1) + result.batch["responses"].size(1)
-        assert result.batch["input_ids"].size(1) == seq_len
-        assert result.batch["attention_mask"].size(1) == seq_len
-        assert result.batch["position_ids"].size(1) == seq_len
+    raw_prompts = [
+        [
+            {
+                "role": "user",
+                "content": "Let's play a role playing game. Your name is Alice, your favorite color is blue.",
+            }
+        ],
+        [{"role": "user", "content": "Let's play a role playing game. Your name is Bob, your favorite color is red."}],
+    ]
+    batch = DataProto(
+        non_tensor_batch={
+            "raw_prompt": np.array(raw_prompts),
+            "agent_name": np.array(["single_turn_agent"] * len(raw_prompts)),
+            "data_source": np.array(["openai/gsm8k"] * len(raw_prompts)),
+            "reward_model": np.array([{"style": "rule", "ground_truth": "1.0"}] * len(raw_prompts)),
+        },
+    )
+    n = init_config.actor_rollout_ref.rollout.n
+    batch = batch.repeat(n)
+    result = agent_loop_manager.generate_sequences(prompts=batch)
+    assert len(result) == len(raw_prompts) * n
 
-        if init_config.actor_rollout_ref.rollout.calculate_log_probs:
-            assert result.batch["rollout_log_probs"].size(1) == result.batch["responses"].size(1)
+    # check result
+    seq_len = result.batch["prompts"].size(1) + result.batch["responses"].size(1)
+    assert result.batch["input_ids"].size(1) == seq_len
+    assert result.batch["attention_mask"].size(1) == seq_len
+    assert result.batch["position_ids"].size(1) == seq_len
 
-        # check compute score
-        assert result.batch["rm_scores"].shape == result.batch["responses"].shape
-        reward_tensor = result.batch["rm_scores"]
-        reward_extra_keys = result.meta_info.get("reward_extra_keys", [])
-        reward_extra_info = {key: result.non_tensor_batch[key] for key in reward_extra_keys}
-        assert reward_tensor.shape == result.batch["responses"].shape
-        assert "acc" in reward_extra_info, f"reward_extra_info {reward_extra_info} should contain 'acc'"
-        assert reward_extra_info["acc"].shape == (len(result),), f"invalid acc: {reward_extra_info['acc']}"
+    if init_config.actor_rollout_ref.rollout.calculate_log_probs:
+        assert result.batch["rollout_log_probs"].size(1) == result.batch["responses"].size(1)
 
-        # check turns
-        num_turns = result.non_tensor_batch["__num_turns__"]
-        assert np.all(num_turns == 2)
+    # check compute score
+    assert result.batch["rm_scores"].shape == result.batch["responses"].shape
+    reward_tensor = result.batch["rm_scores"]
+    reward_extra_keys = result.meta_info.get("reward_extra_keys", [])
+    reward_extra_info = {key: result.non_tensor_batch[key] for key in reward_extra_keys}
+    assert reward_tensor.shape == result.batch["responses"].shape
+    assert "acc" in reward_extra_info, f"reward_extra_info {reward_extra_info} should contain 'acc'"
+    assert reward_extra_info["acc"].shape == (len(result),), f"invalid acc: {reward_extra_info['acc']}"
 
-        print("Test passed!")
-    finally:
-        ray.shutdown()
+    # check turns
+    num_turns = result.non_tensor_batch["__num_turns__"]
+    assert np.all(num_turns == 2)
+
+    print("Test passed!")
+    ray.shutdown()
 
 
 class WeatherTool(BaseTool):
@@ -228,107 +226,106 @@ def test_tool_agent(init_config):
         },
         ignore_reinit_error=True,
     )
-    try:
-        # =========================== 1. Init rollout manager ===========================
-        tool_config = {
-            "tools": [
-                {
-                    "class_name": "tests.experimental.agent_loop.test_basic_agent_loop.WeatherTool",
-                    "config": {"type": "native"},
-                },
-                {
-                    "class_name": "tests.experimental.agent_loop.test_basic_agent_loop.WeatherToolWithData",
-                    "config": {"type": "native"},
-                },
-            ]
-        }
-        tool_config_path = "/tmp/tool_config.json"
-        with open(tool_config_path, "w") as f:
-            json.dump(tool_config, f)
 
-        n = 2
-        init_config.actor_rollout_ref.rollout.n = n
-        init_config.actor_rollout_ref.rollout.multi_turn.tool_config_path = tool_config_path
-        init_config.actor_rollout_ref.rollout.multi_turn.max_parallel_calls = 2
-        init_config.actor_rollout_ref.rollout.calculate_log_probs = True
-        agent_loop_manager = init_agent_loop_manager(init_config)
-
-        # =========================== 2. Generate sequences  ===========================
-        raw_prompts = [
-            [
-                {"role": "user", "content": "How are you?"},
-            ],
-            [
-                {"role": "user", "content": "What's the temperature in Los Angeles now?"},
-            ],
-            [
-                {"role": "user", "content": "What's the temperature in New York now?"},
-            ],
-            [
-                {
-                    "role": "system",
-                    "content": "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\n"
-                    "Current Date: 2024-09-30",
-                },
-                {"role": "user", "content": "What's the temperature in San Francisco now? How about tomorrow?"},
-            ],
-        ]
-        batch = DataProto(
-            non_tensor_batch={
-                "raw_prompt": np.array([np.array(prompt) for prompt in raw_prompts], dtype=object),
-                "agent_name": np.array(["tool_agent"] * len(raw_prompts)),
-                "data_source": np.array(["openai/gsm8k"] * len(raw_prompts)),
-                "reward_model": np.array([{"style": "rule", "ground_truth": "1.0"}] * len(raw_prompts)),
+    # =========================== 1. Init rollout manager ===========================
+    tool_config = {
+        "tools": [
+            {
+                "class_name": "tests.experimental.agent_loop.test_basic_agent_loop.WeatherTool",
+                "config": {"type": "native"},
             },
+            {
+                "class_name": "tests.experimental.agent_loop.test_basic_agent_loop.WeatherToolWithData",
+                "config": {"type": "native"},
+            },
+        ]
+    }
+    tool_config_path = "/tmp/tool_config.json"
+    with open(tool_config_path, "w") as f:
+        json.dump(tool_config, f)
+
+    n = 2
+    init_config.actor_rollout_ref.rollout.n = n
+    init_config.actor_rollout_ref.rollout.multi_turn.tool_config_path = tool_config_path
+    init_config.actor_rollout_ref.rollout.multi_turn.max_parallel_calls = 2
+    init_config.actor_rollout_ref.rollout.calculate_log_probs = True
+    agent_loop_manager = init_agent_loop_manager(init_config)
+
+    # =========================== 2. Generate sequences  ===========================
+    raw_prompts = [
+        [
+            {"role": "user", "content": "How are you?"},
+        ],
+        [
+            {"role": "user", "content": "What's the temperature in Los Angeles now?"},
+        ],
+        [
+            {"role": "user", "content": "What's the temperature in New York now?"},
+        ],
+        [
+            {
+                "role": "system",
+                "content": "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\n"
+                "Current Date: 2024-09-30",
+            },
+            {"role": "user", "content": "What's the temperature in San Francisco now? How about tomorrow?"},
+        ],
+    ]
+    batch = DataProto(
+        non_tensor_batch={
+            "raw_prompt": np.array([np.array(prompt) for prompt in raw_prompts], dtype=object),
+            "agent_name": np.array(["tool_agent"] * len(raw_prompts)),
+            "data_source": np.array(["openai/gsm8k"] * len(raw_prompts)),
+            "reward_model": np.array([{"style": "rule", "ground_truth": "1.0"}] * len(raw_prompts)),
+        },
+    )
+    batch = batch.repeat(n)
+    result = agent_loop_manager.generate_sequences(prompts=batch)
+    assert len(result) == len(raw_prompts) * n
+
+    # Check turns
+    num_turns = result.non_tensor_batch["__num_turns__"]
+    print(f"num_turns: {num_turns}")
+    for i in range(len(num_turns)):
+        if i // n == 0:
+            # [user, assistant]
+            assert num_turns[i] == 2
+        else:
+            # [user, assistant, tool, assistant]
+            assert num_turns[i] == 4
+
+    # Check response_mask
+    tokenizer = hf_tokenizer(init_config.actor_rollout_ref.model.path)
+    responses = result.batch["responses"]
+    response_mask = result.batch["response_mask"]
+    attention_mask = result.batch["attention_mask"]
+    assert result.batch["rm_scores"].size(1) == responses.size(1)
+    assert responses.size() == response_mask.size(), f"{responses.size()} != {response_mask.size()}"
+    assert result.batch["rollout_log_probs"].size(1) == result.batch["responses"].size(1)
+
+    response_length = response_mask.size(1)
+    for i in range(len(responses)):
+        # response with tool response
+        valid_tokens = responses[i][attention_mask[i][-response_length:].bool()]
+        response_with_obs = tokenizer.decode(valid_tokens)
+
+        # response without tool response
+        valid_tokens = responses[i][response_mask[i].bool()]
+        response_without_obs = tokenizer.decode(valid_tokens)
+
+        assert "<tool_response>" not in response_without_obs, (
+            f"found <tool_response> in response: {response_without_obs}"
         )
-        batch = batch.repeat(n)
-        result = agent_loop_manager.generate_sequences(prompts=batch)
-        assert len(result) == len(raw_prompts) * n
+        assert "</tool_response>" not in response_without_obs, (
+            f"found </tool_response> in response: {response_without_obs}"
+        )
+        print("=========================")
+        print(response_with_obs)
+        print("---")
+        print(response_without_obs)
 
-        # Check turns
-        num_turns = result.non_tensor_batch["__num_turns__"]
-        print(f"num_turns: {num_turns}")
-        for i in range(len(num_turns)):
-            if i // n == 0:
-                # [user, assistant]
-                assert num_turns[i] == 2
-            else:
-                # [user, assistant, tool, assistant]
-                assert num_turns[i] == 4
-
-        # Check response_mask
-        tokenizer = hf_tokenizer(init_config.actor_rollout_ref.model.path)
-        responses = result.batch["responses"]
-        response_mask = result.batch["response_mask"]
-        attention_mask = result.batch["attention_mask"]
-        assert result.batch["rm_scores"].size(1) == responses.size(1)
-        assert responses.size() == response_mask.size(), f"{responses.size()} != {response_mask.size()}"
-        assert result.batch["rollout_log_probs"].size(1) == result.batch["responses"].size(1)
-
-        response_length = response_mask.size(1)
-        for i in range(len(responses)):
-            # response with tool response
-            valid_tokens = responses[i][attention_mask[i][-response_length:].bool()]
-            response_with_obs = tokenizer.decode(valid_tokens)
-
-            # response without tool response
-            valid_tokens = responses[i][response_mask[i].bool()]
-            response_without_obs = tokenizer.decode(valid_tokens)
-
-            assert "<tool_response>" not in response_without_obs, (
-                f"found <tool_response> in response: {response_without_obs}"
-            )
-            assert "</tool_response>" not in response_without_obs, (
-                f"found </tool_response> in response: {response_without_obs}"
-            )
-            print("=========================")
-            print(response_with_obs)
-            print("---")
-            print(response_without_obs)
-
-        print("Test passed!")
-    finally:
-        ray.shutdown()
+    print("Test passed!")
+    ray.shutdown()
 
 
 def test_tool_agent_with_interaction(init_config):
@@ -340,135 +337,129 @@ def test_tool_agent_with_interaction(init_config):
                 "VLLM_LOGGING_LEVEL": "INFO",
                 "VLLM_USE_V1": "1",
             }
-        },
-        ignore_reinit_error=True,
+        }
     )
-    try:
-        # =========================== 1. Init rollout manager ===========================
-        tool_config = {
-            "tools": [
-                {
-                    "class_name": "tests.experimental.agent_loop.test_basic_agent_loop.WeatherTool",
-                    "config": {"type": "native"},
-                },
-                {
-                    "class_name": "tests.experimental.agent_loop.test_basic_agent_loop.WeatherToolWithData",
-                    "config": {"type": "native"},
-                },
-            ]
-        }
-        tool_config_path = "/tmp/tool_config.json"
-        with open(tool_config_path, "w") as f:
-            json.dump(tool_config, f)
 
-        interaction_config = {
-            "interaction": [
-                {
-                    "name": "weather",
-                    "class_name": "verl.interactions.weather_interaction.WeatherInteraction",
-                    "config": {},
-                }
-            ]
-        }
-        interaction_config_path = "/tmp/interaction_config.json"
-        with open(interaction_config_path, "w") as f:
-            json.dump(interaction_config, f)
-
-        n = 2
-        init_config.actor_rollout_ref.rollout.n = n
-        init_config.actor_rollout_ref.rollout.multi_turn.tool_config_path = tool_config_path
-        init_config.actor_rollout_ref.rollout.multi_turn.interaction_config_path = interaction_config_path
-        init_config.actor_rollout_ref.rollout.multi_turn.max_parallel_calls = 2
-        agent_loop_manager = init_agent_loop_manager(init_config)
-        checkpoint_engine_config = omega_conf_to_dataclass(
-            init_config.actor_rollout_ref.rollout.checkpoint_engine, CheckpointEngineConfig
-        )
-        checkpoint_manager = CheckpointEngineManager(
-            config=checkpoint_engine_config,
-            trainer=agent_loop_manager.worker_group,
-            replicas=agent_loop_manager.rollout_replicas,
-        )
-        checkpoint_manager.sleep_replicas()
-        checkpoint_manager.update_weights()
-
-        # =========================== 2. Generate sequences  ===========================
-        raw_prompts = [
-            [
-                {"role": "user", "content": "How are you?"},
-            ],
-            [
-                {"role": "user", "content": "What's the temperature in Los Angeles now?"},
-            ],
-            [
-                {"role": "user", "content": "What's the temperature in New York now?"},
-            ],
-            [
-                {
-                    "role": "system",
-                    "content": "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\n"
-                    "Current Date: 2024-09-30",
-                },
-                {"role": "user", "content": "What's the temperature in San Francisco now? How about tomorrow?"},
-            ],
-        ]
-        batch = DataProto(
-            non_tensor_batch={
-                "raw_prompt": np.array([np.array(prompt) for prompt in raw_prompts], dtype=object),
-                "agent_name": np.array(["tool_agent"] * len(raw_prompts)),
-                "data_source": np.array(["openai/gsm8k"] * len(raw_prompts)),
-                "reward_model": np.array([{"style": "rule", "ground_truth": "1.0"}] * len(raw_prompts)),
-                "extra_info": np.array(
-                    [
-                        {"interaction_kwargs": {"name": "weather"}},
-                        {"interaction_kwargs": {"name": "weather"}},
-                        {"interaction_kwargs": {"name": "weather"}},
-                        {"interaction_kwargs": {"name": "weather"}},
-                    ]
-                ),
+    # =========================== 1. Init rollout manager ===========================
+    tool_config = {
+        "tools": [
+            {
+                "class_name": "tests.experimental.agent_loop.test_basic_agent_loop.WeatherTool",
+                "config": {"type": "native"},
             },
-        )
-        batch = batch.repeat(n)
-        result = agent_loop_manager.generate_sequences(prompts=batch)
-        assert len(result) == len(raw_prompts) * n
+            {
+                "class_name": "tests.experimental.agent_loop.test_basic_agent_loop.WeatherToolWithData",
+                "config": {"type": "native"},
+            },
+        ]
+    }
+    tool_config_path = "/tmp/tool_config.json"
+    with open(tool_config_path, "w") as f:
+        json.dump(tool_config, f)
 
-        # Check turns
-        num_turns = result.non_tensor_batch["__num_turns__"]
-        print(f"num_turns: {num_turns}")
-        for i in range(len(num_turns)):
-            if i // n == 0:
-                # [user, assistant, user]
-                assert num_turns[i] == 3
-            else:
-                # [user, assistant, tool, assistant, user]
-                assert num_turns[i] == 5
+    interaction_config = {
+        "interaction": [
+            {"name": "weather", "class_name": "verl.interactions.weather_interaction.WeatherInteraction", "config": {}}
+        ]
+    }
+    interaction_config_path = "/tmp/interaction_config.json"
+    with open(interaction_config_path, "w") as f:
+        json.dump(interaction_config, f)
 
-        # Check response_mask
-        tokenizer = hf_tokenizer(init_config.actor_rollout_ref.model.path)
-        responses = result.batch["responses"]
-        response_mask = result.batch["response_mask"]
-        attention_mask = result.batch["attention_mask"]
-        assert responses.size() == response_mask.size(), f"{responses.size()} != {response_mask.size()}"
-        response_length = response_mask.size(1)
+    n = 2
+    init_config.actor_rollout_ref.rollout.n = n
+    init_config.actor_rollout_ref.rollout.multi_turn.tool_config_path = tool_config_path
+    init_config.actor_rollout_ref.rollout.multi_turn.interaction_config_path = interaction_config_path
+    init_config.actor_rollout_ref.rollout.multi_turn.max_parallel_calls = 2
+    agent_loop_manager = init_agent_loop_manager(init_config)
+    checkpoint_engine_config = omega_conf_to_dataclass(
+        init_config.actor_rollout_ref.rollout.checkpoint_engine, CheckpointEngineConfig
+    )
+    checkpoint_manager = CheckpointEngineManager(
+        config=checkpoint_engine_config,
+        trainer=agent_loop_manager.worker_group,
+        replicas=agent_loop_manager.rollout_replicas,
+    )
+    checkpoint_manager.sleep_replicas()
+    checkpoint_manager.update_weights()
 
-        for i in range(len(responses)):
-            # response with tool response
-            valid_tokens = responses[i][attention_mask[i][-response_length:].bool()]
-            response_with_obs = tokenizer.decode(valid_tokens)
+    # =========================== 2. Generate sequences  ===========================
+    raw_prompts = [
+        [
+            {"role": "user", "content": "How are you?"},
+        ],
+        [
+            {"role": "user", "content": "What's the temperature in Los Angeles now?"},
+        ],
+        [
+            {"role": "user", "content": "What's the temperature in New York now?"},
+        ],
+        [
+            {
+                "role": "system",
+                "content": "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\n"
+                "Current Date: 2024-09-30",
+            },
+            {"role": "user", "content": "What's the temperature in San Francisco now? How about tomorrow?"},
+        ],
+    ]
+    batch = DataProto(
+        non_tensor_batch={
+            "raw_prompt": np.array([np.array(prompt) for prompt in raw_prompts], dtype=object),
+            "agent_name": np.array(["tool_agent"] * len(raw_prompts)),
+            "data_source": np.array(["openai/gsm8k"] * len(raw_prompts)),
+            "reward_model": np.array([{"style": "rule", "ground_truth": "1.0"}] * len(raw_prompts)),
+            "extra_info": np.array(
+                [
+                    {"interaction_kwargs": {"name": "weather"}},
+                    {"interaction_kwargs": {"name": "weather"}},
+                    {"interaction_kwargs": {"name": "weather"}},
+                    {"interaction_kwargs": {"name": "weather"}},
+                ]
+            ),
+        },
+    )
+    batch = batch.repeat(n)
+    result = agent_loop_manager.generate_sequences(prompts=batch)
+    assert len(result) == len(raw_prompts) * n
 
-            # response without tool response
-            valid_tokens = responses[i][response_mask[i].bool()]
-            response_without_obs = tokenizer.decode(valid_tokens)
+    # Check turns
+    num_turns = result.non_tensor_batch["__num_turns__"]
+    print(f"num_turns: {num_turns}")
+    for i in range(len(num_turns)):
+        if i // n == 0:
+            # [user, assistant, user]
+            assert num_turns[i] == 3
+        else:
+            # [user, assistant, tool, assistant, user]
+            assert num_turns[i] == 5
 
-            assert "\udb82\udc89" not in response_without_obs, f"found \udb82\udc89 in response: {response_without_obs}"
-            assert "\udb82\udc8a" not in response_without_obs, f"found \udb82\udc8a in response: {response_without_obs}"
-            print("=========================")
-            print(response_with_obs)
-            print("---")
-            print(response_without_obs)
+    # Check response_mask
+    tokenizer = hf_tokenizer(init_config.actor_rollout_ref.model.path)
+    responses = result.batch["responses"]
+    response_mask = result.batch["response_mask"]
+    attention_mask = result.batch["attention_mask"]
+    assert responses.size() == response_mask.size(), f"{responses.size()} != {response_mask.size()}"
+    response_length = response_mask.size(1)
 
-        print("Test passed!")
-    finally:
-        ray.shutdown()
+    for i in range(len(responses)):
+        # response with tool response
+        valid_tokens = responses[i][attention_mask[i][-response_length:].bool()]
+        response_with_obs = tokenizer.decode(valid_tokens)
+
+        # response without tool response
+        valid_tokens = responses[i][response_mask[i].bool()]
+        response_without_obs = tokenizer.decode(valid_tokens)
+
+        assert "\udb82\udc89" not in response_without_obs, f"found \udb82\udc89 in response: {response_without_obs}"
+        assert "\udb82\udc8a" not in response_without_obs, f"found \udb82\udc8a in response: {response_without_obs}"
+        print("=========================")
+        print(response_with_obs)
+        print("---")
+        print(response_without_obs)
+
+    print("Test passed!")
+    ray.shutdown()
 
 
 @pytest.mark.asyncio
@@ -494,6 +485,12 @@ async def test_get_trajectory_info():
 # ──────────────────────────────────────────────────────────────────────
 
 
+def _rollout_for_lb(load_balance_strategy: str = "least_requests", **kwargs: Any) -> RolloutConfig:
+    fields: dict[str, Any] = {"name": "vllm", "load_balance_strategy": load_balance_strategy}
+    fields.update(kwargs)
+    return RolloutConfig(**fields)
+
+
 @pytest.fixture(scope="module")
 def ray_for_lb():
     ray.init(ignore_reinit_error=True)
@@ -505,12 +502,18 @@ class TestLoadBalancerRouting:
     """Least-loaded selection."""
 
     def test_distributes_across_servers(self, ray_for_lb):
-        lb = GlobalRequestLoadBalancer.remote(server_actor_ids=["s0", "s1", "s2"])
+        lb = GlobalRequestLoadBalancer.remote(
+            server_actor_ids=["s0", "s1", "s2"],
+            rollout_config=_rollout_for_lb(),
+        )
         servers = [ray.get(lb.acquire_server.remote(request_id=f"r{i}")) for i in range(3)]
         assert sorted(servers) == ["s0", "s1", "s2"]
 
     def test_new_requests_route_to_least_loaded(self, ray_for_lb):
-        lb = GlobalRequestLoadBalancer.remote(server_actor_ids=["s0", "s1", "s2"])
+        lb = GlobalRequestLoadBalancer.remote(
+            server_actor_ids=["s0", "s1", "s2"],
+            rollout_config=_rollout_for_lb(),
+        )
         # Load s0 with 3 inflight requests
         ray.get(lb.acquire_server.remote(request_id="a"))  # -> s0
         ray.get(lb.acquire_server.remote(request_id="a"))  # sticky -> s0
@@ -522,7 +525,10 @@ class TestLoadBalancerRouting:
         assert s_new == "s2"
 
     def test_release_rebalances(self, ray_for_lb):
-        lb = GlobalRequestLoadBalancer.remote(server_actor_ids=["s0", "s1"])
+        lb = GlobalRequestLoadBalancer.remote(
+            server_actor_ids=["s0", "s1"],
+            rollout_config=_rollout_for_lb(),
+        )
         s0 = ray.get(lb.acquire_server.remote(request_id="r0"))
         s1 = ray.get(lb.acquire_server.remote(request_id="r1"))
         assert s0 != s1
@@ -533,13 +539,19 @@ class TestLoadBalancerRouting:
         assert s2 != s3
 
     def test_release_invalid_server_raises(self, ray_for_lb):
-        lb = GlobalRequestLoadBalancer.remote(server_actor_ids=["s0", "s1"])
+        lb = GlobalRequestLoadBalancer.remote(
+            server_actor_ids=["s0", "s1"],
+            rollout_config=_rollout_for_lb(),
+        )
         with pytest.raises(ray.exceptions.RayTaskError, match="Invalid server_id") as excinfo:
             ray.get(lb.release_server.remote(server_id="nonexistent"))
         assert "Invalid server_id" in str(excinfo.value)
 
     def test_release_without_inflight_raises(self, ray_for_lb):
-        lb = GlobalRequestLoadBalancer.remote(server_actor_ids=["s0", "s1"])
+        lb = GlobalRequestLoadBalancer.remote(
+            server_actor_ids=["s0", "s1"],
+            rollout_config=_rollout_for_lb(),
+        )
         with pytest.raises(ray.exceptions.RayTaskError, match="no inflight") as excinfo:
             ray.get(lb.release_server.remote(server_id="s1"))
         assert "no inflight" in str(excinfo.value)
@@ -549,7 +561,10 @@ class TestLoadBalancerStickySession:
     """Request-level sticky session."""
 
     def test_same_request_id_same_server(self, ray_for_lb):
-        lb = GlobalRequestLoadBalancer.remote(server_actor_ids=["s0", "s1", "s2", "s3"])
+        lb = GlobalRequestLoadBalancer.remote(
+            server_actor_ids=["s0", "s1", "s2", "s3"],
+            rollout_config=_rollout_for_lb(),
+        )
         s0 = ray.get(lb.acquire_server.remote(request_id="conv-abc"))
         ray.get(lb.release_server.remote(server_id=s0))
         s1 = ray.get(lb.acquire_server.remote(request_id="conv-abc"))
@@ -565,6 +580,26 @@ class TestPrometheusMetricsParse:
         text = 'vllm:kv_cache_usage_perc{model_name="a"} 0.2\nvllm:kv_cache_usage_perc{model_name="b"} 0.7\n'
         assert parse_prometheus_metric_value(text, metric_name="vllm:kv_cache_usage_perc") == pytest.approx(0.7)
 
+    def test_collect_matching_metric_sample_lines(self):
+        text = 'vllm:kv_cache_usage_perc{model_name="a"} 0.2\nvllm:kv_cache_usage_perc{model_name="b"} 0.7\n'
+        lines = collect_matching_metric_sample_lines(text, "vllm:kv_cache_usage_perc")
+        assert lines == [
+            'vllm:kv_cache_usage_perc{model_name="a"} 0.2',
+            'vllm:kv_cache_usage_perc{model_name="b"} 0.7',
+        ]
+
+    def test_parse_skips_hash_lines_value_is_last_token(self):
+        """Real vLLM /metrics: # HELP / # TYPE then a sample line; Ray log prefix is not in HTTP body."""
+        text = (
+            "# HELP vllm:kv_cache_usage_perc KV-cache usage. 1 means 100 percent usage.\n"
+            "# TYPE vllm:kv_cache_usage_perc gauge\n"
+            'vllm:kv_cache_usage_perc{engine="0",model_name="/home/x/models/Qwen2.5-1.5B-Instruct"} '
+            "0.024543294222486245\n"
+        )
+        assert parse_prometheus_metric_value(text, metric_name="vllm:kv_cache_usage_perc") == pytest.approx(
+            0.024543294222486245
+        )
+
 
 class TestLoadBalanceRegistry:
     def test_unknown_strategy_raises(self):
@@ -572,18 +607,99 @@ class TestLoadBalanceRegistry:
             create_load_balance_strategy("not_a_real_strategy", server_actor_ids=["a"])
 
 
+class TestLoadBalanceStrategyPickServer:
+    """直接验证 ``load_balance.py`` 中各 strategy 的 ``pick_server`` 语义（无需 Ray / GPU）。"""
+
+    def test_least_requests_prefers_lower_inflight_tie_break_sorted_id(self):
+        strat = create_load_balance_strategy("least_requests", server_actor_ids=["s2", "s0", "s1"])
+        inflight = {"s0": 1, "s1": 1, "s2": 0}
+        assert strat.pick_server(["s0", "s1", "s2"], inflight) == "s2"
+        inflight2 = {"s0": 0, "s1": 0, "s2": 0}
+        assert strat.pick_server(["s2", "s0", "s1"], inflight2) == "s0"
+
+    def test_least_kv_cache_prefers_lowest_usage(self):
+        strat = create_load_balance_strategy(
+            "least_kv_cache",
+            server_actor_ids=["s0", "s1"],
+            metric_name="dummy",
+        )
+        strat._metrics_stop.set()
+        if strat._metrics_thread is not None:
+            strat._metrics_thread.join(timeout=5.0)
+        inflight = {"s0": 0, "s1": 0}
+        with patch.object(strat, "_kv_snapshot", return_value={"s0": 0.9, "s1": 0.1}):
+            assert strat.pick_server(["s0", "s1"], inflight) == "s1"
+
+    def test_least_kv_cache_unknown_kv_falls_back_to_inflight(self):
+        strat = create_load_balance_strategy("least_kv_cache", server_actor_ids=["s0", "s1"])
+        inflight = {"s0": 5, "s1": 1}
+        assert strat.pick_server(["s0", "s1"], inflight) == "s1"
+
+    def test_weighted_rr_sequence_weights_1_and_3(self):
+        strat = create_load_balance_strategy("weighted_rr", server_actor_ids=["s0", "s1"], weights=[1.0, 3.0])
+        inflight = {"s0": 0, "s1": 0}
+        seq = [strat.pick_server(["s0", "s1"], inflight) for _ in range(8)]
+        assert seq == ["s1", "s0", "s1", "s1", "s1", "s0", "s1", "s1"]
+
+    def test_weighted_rr_weights_length_mismatch_raises(self):
+        with pytest.raises(ValueError, match="load_balance_weights length"):
+            create_load_balance_strategy("weighted_rr", server_actor_ids=["s0", "s1"], weights=[1.0])
+
+
+class TestBuildGlobalLoadBalancerRemoteKwargs:
+    def test_rollout_weighted_rr_remote_kwargs(self):
+        rc = RolloutConfig(
+            name="vllm",
+            load_balance_strategy="weighted_rr",
+            load_balance_weights=[2.0, 1.0],
+            load_balance_random_seed=99,
+            group_sticky_routing=True,
+            kv_cache_metrics=KvCacheMetricsConfig(
+                refresh_interval_s=1.5,
+                metrics_path="/custom/metrics",
+                metric_name="vllm:kv_cache_usage_perc",
+                fetch_timeout_s=3.0,
+            ),
+        )
+        kw = GlobalRequestLoadBalancer.init_bundle_from_rollout(rc)
+        assert kw["load_balance_strategy"] == "weighted_rr"
+        assert kw["strategy_init_kwargs"] == {"weights": [2.0, 1.0], "random_seed": 99}
+        assert kw["group_sticky_routing"] is True
+
+    def test_rollout_least_kv_cache_merges_kv_config_into_strategy_kwargs(self):
+        rc = RolloutConfig(
+            name="vllm",
+            load_balance_strategy="least_kv_cache",
+            group_sticky_routing=True,
+            kv_cache_metrics=KvCacheMetricsConfig(
+                refresh_interval_s=1.5,
+                metrics_path="/custom/metrics",
+                metric_name="vllm:kv_cache_usage_perc",
+                fetch_timeout_s=3.0,
+            ),
+        )
+        kw = GlobalRequestLoadBalancer.init_bundle_from_rollout(rc)
+        assert kw["load_balance_strategy"] == "least_kv_cache"
+        assert kw["group_sticky_routing"] is True
+        assert kw["strategy_init_kwargs"] == {
+            "metric_name": "vllm:kv_cache_usage_perc",
+            "metrics_path": "/custom/metrics",
+            "refresh_interval_s": 1.5,
+            "fetch_timeout_s": 3.0,
+        }
+
+
 class TestLoadBalancerStrategies:
     def test_random_with_seed_is_deterministic(self, ray_for_lb):
+        rc = _rollout_for_lb("random", load_balance_random_seed=123)
         lb = GlobalRequestLoadBalancer.remote(
             server_actor_ids=["s0", "s1", "s2"],
-            load_balance_strategy="random",
-            strategy_init_kwargs={"random_seed": 123},
+            rollout_config=rc,
         )
         out = [ray.get(lb.acquire_server.remote(request_id=f"u{i}")) for i in range(6)]
         lb2 = GlobalRequestLoadBalancer.remote(
             server_actor_ids=["s0", "s1", "s2"],
-            load_balance_strategy="random",
-            strategy_init_kwargs={"random_seed": 123},
+            rollout_config=rc,
         )
         out2 = [ray.get(lb2.acquire_server.remote(request_id=f"u{i}")) for i in range(6)]
         assert out == out2
@@ -591,20 +707,30 @@ class TestLoadBalancerStrategies:
     def test_weighted_rr_returns_valid_server(self, ray_for_lb):
         lb = GlobalRequestLoadBalancer.remote(
             server_actor_ids=["s0", "s1"],
-            load_balance_strategy="weighted_rr",
-            strategy_init_kwargs={"weights": [1.0, 3.0]},
+            rollout_config=_rollout_for_lb("weighted_rr", load_balance_weights=[1.0, 3.0]),
         )
-        for i in range(8):
-            s = ray.get(lb.acquire_server.remote(request_id=f"w{i}"))
-            assert s in ("s0", "s1")
+        seq = [ray.get(lb.acquire_server.remote(request_id=f"w{i}")) for i in range(8)]
+        assert seq == ["s1", "s0", "s1", "s1", "s1", "s0", "s1", "s1"]
+
+    def test_least_kv_cache_routes_like_least_requests_when_metrics_disabled(self, ray_for_lb):
+        """metric_name 为 None 时不拉取 HTTP，``least_kv_cache`` 在未知 KV 下退化为按 inflight + sid。"""
+        lb = GlobalRequestLoadBalancer.remote(
+            server_actor_ids=["s0", "s1", "s2"],
+            rollout_config=_rollout_for_lb("least_kv_cache"),
+        )
+        ray.get(lb.acquire_server.remote(request_id="a"))
+        ray.get(lb.acquire_server.remote(request_id="a"))
+        ray.get(lb.acquire_server.remote(request_id="a"))
+        ray.get(lb.acquire_server.remote(request_id="b"))
+        s_new = ray.get(lb.acquire_server.remote(request_id="new"))
+        assert s_new == "s2"
 
 
 class TestLoadBalancerGroupSticky:
     def test_same_group_same_server(self, ray_for_lb):
         lb = GlobalRequestLoadBalancer.remote(
             server_actor_ids=["s0", "s1", "s2"],
-            load_balance_strategy="least_requests",
-            group_sticky_routing=True,
+            rollout_config=_rollout_for_lb(group_sticky_routing=True),
         )
         g0 = "g0"
         a = ray.get(lb.acquire_server.remote(request_id="req-a", group_id=g0))
@@ -614,8 +740,7 @@ class TestLoadBalancerGroupSticky:
     def test_request_sticky_overrides_group(self, ray_for_lb):
         lb = GlobalRequestLoadBalancer.remote(
             server_actor_ids=["s0", "s1", "s2"],
-            load_balance_strategy="least_requests",
-            group_sticky_routing=True,
+            rollout_config=_rollout_for_lb(group_sticky_routing=True),
         )
         s_first = ray.get(lb.acquire_server.remote(request_id="sticky-id", group_id="g99"))
         ray.get(lb.release_server.remote(server_id=s_first))

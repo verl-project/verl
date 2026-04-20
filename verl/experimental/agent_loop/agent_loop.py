@@ -16,7 +16,6 @@ import logging
 import os
 import random
 import threading
-import time
 from abc import ABC, abstractmethod
 from typing import Any, Optional
 from uuid import uuid4
@@ -33,11 +32,6 @@ from tensordict import TensorDict
 from transformers import AutoProcessor, AutoTokenizer
 
 from verl.experimental.agent_loop.load_balance import create_load_balance_strategy
-from verl.experimental.agent_loop.prometheus_metrics import (
-    build_metrics_url,
-    fetch_prometheus_text,
-    parse_prometheus_metric_value,
-)
 from verl.experimental.agent_loop.prometheus_utils import update_prometheus_config
 from verl.experimental.agent_loop.utils import resolve_config_path
 from verl.experimental.teacher_loop import TeacherModelManager
@@ -70,90 +64,64 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 DEFAULT_ROUTING_CACHE_SIZE = 10000
 
 
-def build_global_load_balancer_remote_kwargs(rollout_config: RolloutConfig) -> dict[str, Any]:
-    """Keyword arguments for ``GlobalRequestLoadBalancer.remote`` from a :class:`RolloutConfig`."""
-    kv = rollout_config.kv_cache_metrics
-    strategy_init_kwargs: dict[str, Any] = {}
-    if rollout_config.load_balance_weights is not None:
-        strategy_init_kwargs["weights"] = list(rollout_config.load_balance_weights)
-    if rollout_config.load_balance_random_seed is not None:
-        strategy_init_kwargs["random_seed"] = rollout_config.load_balance_random_seed
-    return {
-        "max_cache_size": DEFAULT_ROUTING_CACHE_SIZE,
-        "load_balance_strategy": rollout_config.load_balance_strategy,
-        "strategy_init_kwargs": strategy_init_kwargs,
-        "group_sticky_routing": rollout_config.group_sticky_routing,
-        "kv_cache_refresh_interval_s": kv.refresh_interval_s,
-        "kv_cache_metrics_path": kv.metrics_path,
-        "kv_cache_metric_name": kv.metric_name,
-        "kv_cache_fetch_timeout_s": kv.fetch_timeout_s,
-    }
-
-
 @ray.remote
 class GlobalRequestLoadBalancer:
-    """Global sticky-session + in-flight load balancer shared by all AgentLoopWorkers."""
+    """Global sticky-session + in-flight load balancer shared by all AgentLoopWorkers.
 
-    def __init__(
-        self,
-        server_actor_ids: list[str],
-        max_cache_size: int = DEFAULT_ROUTING_CACHE_SIZE,
-        load_balance_strategy: str = "least_requests",
-        strategy_init_kwargs: dict[str, Any] | None = None,
-        group_sticky_routing: bool = False,
-        kv_cache_refresh_interval_s: float = 2.0,
-        kv_cache_metrics_path: str = "/metrics",
-        kv_cache_metric_name: str | None = None,
-        kv_cache_fetch_timeout_s: float = 2.0,
-    ):
+    Construct with (server_actor_ids, rollout_config); strategy and KV scrape settings are derived
+    from RolloutConfig inside the actor.
+    """
+
+    @staticmethod
+    def init_bundle_from_rollout(rollout_config: RolloutConfig) -> dict[str, Any]:
+        """Map RolloutConfig load-balance fields to constructor fields (for tests and internal use)."""
+        kv = rollout_config.kv_cache_metrics
+        strategy_init_kwargs: dict[str, Any] = {}
+        if rollout_config.load_balance_weights is not None:
+            strategy_init_kwargs["weights"] = list(rollout_config.load_balance_weights)
+        if rollout_config.load_balance_random_seed is not None:
+            strategy_init_kwargs["random_seed"] = rollout_config.load_balance_random_seed
+        if rollout_config.load_balance_strategy == "least_kv_cache":
+            strategy_init_kwargs["metric_name"] = kv.metric_name
+            strategy_init_kwargs["metrics_path"] = kv.metrics_path
+            strategy_init_kwargs["refresh_interval_s"] = kv.refresh_interval_s
+            strategy_init_kwargs["fetch_timeout_s"] = kv.fetch_timeout_s
+        return {
+            "max_cache_size": DEFAULT_ROUTING_CACHE_SIZE,
+            "load_balance_strategy": rollout_config.load_balance_strategy,
+            "strategy_init_kwargs": strategy_init_kwargs,
+            "group_sticky_routing": rollout_config.group_sticky_routing,
+        }
+
+    def __init__(self, server_actor_ids: list[str], rollout_config: RolloutConfig):
         if not server_actor_ids:
             raise ValueError("server_actor_ids must be non-empty")
 
+        bundle = GlobalRequestLoadBalancer.init_bundle_from_rollout(rollout_config)
+        load_balance_strategy = bundle["load_balance_strategy"]
+        if load_balance_strategy == "weighted_rr" and rollout_config.load_balance_weights is not None:
+            nw = len(rollout_config.load_balance_weights)
+            ns = len(server_actor_ids)
+            if nw != ns:
+                raise ValueError(f"load_balance_weights length {nw} must match number of rollout replicas {ns}")
+
         self._server_actor_ids = list(server_actor_ids)
         self._inflight_requests: dict[str, int] = {sid: 0 for sid in server_actor_ids}
-        self._request_id_to_server: LRUCache = LRUCache(maxsize=max_cache_size)
-        self._group_id_to_server: LRUCache = LRUCache(maxsize=max_cache_size)
+        self._request_id_to_server: LRUCache = LRUCache(maxsize=bundle["max_cache_size"])
+        self._group_id_to_server: LRUCache = LRUCache(maxsize=bundle["max_cache_size"])
         self._lock = threading.Lock()
 
-        self._strategy_name = load_balance_strategy
-        sk = strategy_init_kwargs or {}
+        sk = bundle["strategy_init_kwargs"] or {}
         self._strategy = create_load_balance_strategy(
             load_balance_strategy,
             server_actor_ids=self._server_actor_ids,
             **sk,
         )
-        self._group_sticky_routing = group_sticky_routing
-
-        self._kv_usage: dict[str, float | None] = {sid: None for sid in server_actor_ids}
-        self._last_metrics_ts = 0.0
-        self._kv_refresh_interval = kv_cache_refresh_interval_s
-        self._metrics_path = kv_cache_metrics_path
-        self._metric_name = kv_cache_metric_name
-        self._fetch_timeout = kv_cache_fetch_timeout_s
-
-    def _refresh_kv_metrics_if_needed(self) -> None:
-        if self._strategy_name != "least_kv_cache":
-            return
-        if self._metric_name is None:
-            return
-        now = time.monotonic()
-        if now - self._last_metrics_ts < self._kv_refresh_interval:
-            return
-        self._last_metrics_ts = now
-        for sid in self._server_actor_ids:
-            url = build_metrics_url(sid, self._metrics_path)
-            try:
-                text = fetch_prometheus_text(url, self._fetch_timeout)
-                val = parse_prometheus_metric_value(text, self._metric_name)
-                self._kv_usage[sid] = val
-            except Exception as e:
-                logger.warning("Failed to refresh KV metrics for %s from %s: %s", sid, url, e)
-                self._kv_usage[sid] = None
+        self._group_sticky_routing = bundle["group_sticky_routing"]
 
     def acquire_server(self, request_id: str, group_id: str | None = None) -> str:
         """Acquire a server for the given request, reusing the same server for multi-turn conversations."""
         with self._lock:
-            self._refresh_kv_metrics_if_needed()
             # request-level sticky (multi-turn: same conversation -> same server)
             if request_id in self._request_id_to_server:
                 server_id = self._request_id_to_server[request_id]
@@ -169,7 +137,6 @@ class GlobalRequestLoadBalancer:
             server_id = self._strategy.pick_server(
                 list(self._server_actor_ids),
                 self._inflight_requests,
-                self._kv_usage,
             )
             self._request_id_to_server[request_id] = server_id
             if self._group_sticky_routing and group_id:
@@ -1263,18 +1230,9 @@ class AgentLoopManager:
             )
 
     async def _init_global_load_balancer(self) -> None:
-        lb_kwargs = build_global_load_balancer_remote_kwargs(self.rollout_config)
-        if (
-            self.rollout_config.load_balance_strategy == "weighted_rr"
-            and self.rollout_config.load_balance_weights is not None
-        ):
-            nw = len(self.rollout_config.load_balance_weights)
-            ns = len(self.server_addresses)
-            if nw != ns:
-                raise ValueError(f"load_balance_weights length {nw} must match number of rollout replicas {ns}")
         self.global_load_balancer = GlobalRequestLoadBalancer.remote(
             server_actor_ids=self.server_addresses,
-            **lb_kwargs,
+            rollout_config=self.rollout_config,
         )
 
     @auto_await

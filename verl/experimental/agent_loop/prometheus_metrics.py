@@ -12,21 +12,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Lightweight Prometheus text exposition parsing for per-replica HTTP /metrics scraping.
+HTTP /metrics scraping helpers for least_kv_cache routing.
 
-Used by GlobalRequestLoadBalancer when ``load_balance_strategy`` is ``least_kv_cache``.
+Parsing is intentionally minimal: skip # comment lines, keep lines whose metric
+identifier matches metric_name, then take the last numeric literal on the line
+(as the Prometheus sample value is typically last).
 """
 
 from __future__ import annotations
 
+import re
 import urllib.request
 from typing import Optional
 
+_FLOAT_RE = re.compile(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
+
 
 def build_metrics_url(server_address: str, metrics_path: str = "/metrics") -> str:
-    """Build ``http://host:port/metrics`` from a rollout replica address string.
+    """Build http://host:port/metrics from a rollout replica address string.
 
-    ``server_address`` matches ``RolloutReplica._server_address`` (``host:port`` or ``[ipv6]:port``).
+    server_address matches RolloutReplica._server_address (host:port or [ipv6]:port).
     """
     if not metrics_path.startswith("/"):
         metrics_path = "/" + metrics_path
@@ -40,60 +45,60 @@ def fetch_prometheus_text(url: str, timeout_s: float = 2.0) -> str:
         return resp.read().decode("utf-8", errors="replace")
 
 
-def _split_metric_line(line: str) -> tuple[str, str] | None:
-    """Return (metric_with_labels, value_token) or None if not a sample line."""
-    line = line.strip()
-    if not line or line.startswith("#"):
+def _metric_name_prefix_match(line: str, metric_name: str) -> bool:
+    """True if line is a sample for metric_name (name before {{ or whitespace)."""
+    if not line.startswith(metric_name):
+        return False
+    if len(line) == len(metric_name):
+        return True
+    return line[len(metric_name)] in "{ \t"
+
+
+def _last_float_on_line(line: str) -> Optional[float]:
+    matches = _FLOAT_RE.findall(line)
+    if not matches:
         return None
-    parts = line.rsplit(None, 1)
-    if len(parts) != 2:
-        return None
-    metric_part, value_token = parts
     try:
-        float(value_token)
+        return float(matches[-1])
     except ValueError:
         return None
-    return metric_part, value_token
-
-
-def _metric_identifier(metric_with_labels: str) -> str:
-    """Metric name before labels, e.g. ``foo`` from ``foo{a="b"}``."""
-    brace = metric_with_labels.find("{")
-    if brace == -1:
-        return metric_with_labels
-    return metric_with_labels[:brace]
 
 
 def parse_prometheus_metric_value(text: str, metric_name: Optional[str] = None) -> Optional[float]:
-    """Aggregate matching samples for ``metric_name`` (identifier before ``{`` must equal ``metric_name``).
+    """Max of last numeric literals on non-comment lines whose metric identifier is metric_name.
 
-    A single scrape can expose **multiple lines** with the same metric name and different label sets, e.g.::
-
-        vllm:kv_cache_usage_perc{model_name="a"} 0.2
-        vllm:kv_cache_usage_perc{model_name="b"} 0.6
-
-    For load-aware routing we need one scalar per replica; we take the **maximum** among all matching
-    samples so that replicas with any hot partition rank as more loaded (conservative for
-    ``least_kv_cache``).
-
-    Returns ``None`` if ``metric_name`` is unset or no matching sample exists.
+    Comment / metadata lines (leading # after strip) are ignored.
     """
     if not metric_name:
         return None
 
+    if text.startswith("\ufeff"):
+        text = text[1:]
+
     values: list[float] = []
-    for line in text.splitlines():
-        parsed = _split_metric_line(line)
-        if parsed is None:
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
             continue
-        metric_part, value_token = parsed
-        ident = _metric_identifier(metric_part)
-        if ident != metric_name:
+        if not _metric_name_prefix_match(line, metric_name):
             continue
-        try:
-            values.append(float(value_token))
-        except ValueError:
-            continue
+        v = _last_float_on_line(line)
+        if v is not None:
+            values.append(v)
     if not values:
         return None
     return max(values)
+
+
+def collect_matching_metric_sample_lines(text: str, metric_name: str, max_lines: int = 50) -> list[str]:
+    """Return stripped sample lines whose metric identifier equals metric_name (debug helper)."""
+    out: list[str] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if _metric_name_prefix_match(line, metric_name):
+            out.append(line)
+            if len(out) >= max_lines:
+                break
+    return out
