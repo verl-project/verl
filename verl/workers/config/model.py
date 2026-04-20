@@ -117,6 +117,7 @@ class HFModelConfig(BaseConfig):
 
     enable_gradient_checkpointing: bool = True
     enable_activation_offload: bool = False
+    enable_checkpoint_input_offload: bool = False
 
     use_remove_padding: bool = True
 

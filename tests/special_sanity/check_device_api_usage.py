@@ -51,6 +51,7 @@ CUDA_KEYWORD_CHECK_WHITELIST = [
     "verl/workers/rollout/sglang_rollout/async_sglang_server.py",  # manually set CUDA_VISIBLE_DEVICES
     "verl/workers/rollout/trtllm_rollout/trtllm_async_server.py",  # appear in config.cudagraph_capture_sizes
     "verl/workers/rollout/replica.py",  # appear in default device_name
+    "verl/utils/checkpoint_offload.py",  # uses torch.cuda.Stream for async D2H offload
     "verl/checkpoint_engine",  # checkpoint engine backend are device specific
     "verl/utils/modelopt/megatron_qat_patch.py",  # appear in torch.cuda.empty_cache()
     "verl/models/mcore/patch.py",  # checkpoint patch only on cuda
