@@ -171,7 +171,14 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                 extra_args[k] = v
         sampling_kwargs["extra_args"] = extra_args
         if lora_request is not None:
-            sampling_kwargs["lora_request"] = lora_request
+            # vllm-omni >=0.19 renames lora_request/lora_scale to the plural
+            # lora_requests/lora_scales (list form) for multi-LoRA composition.
+            # Detect which field the installed version exposes so this adapter
+            # works on both pre- and post-rename releases.
+            if "lora_requests" in OmniDiffusionSamplingParams.__dataclass_fields__:
+                sampling_kwargs["lora_requests"] = [lora_request]
+            else:
+                sampling_kwargs["lora_request"] = lora_request
         diffusion_sampling_params = OmniDiffusionSamplingParams(**sampling_kwargs)
 
         # Call AsyncOmni.generate() with the correct API
