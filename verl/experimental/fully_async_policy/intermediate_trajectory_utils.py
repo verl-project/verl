@@ -27,6 +27,9 @@ the ``AgentLoopWorker`` core interface.
 
 from typing import Any, Optional
 
+import logging
+import os
+
 import numpy as np
 import torch
 from tensordict import TensorDict
@@ -36,6 +39,9 @@ from verl.experimental.agent_loop.multi_trajectory_agent_loop import (
     INTERMEDIATE_TRAJECTORIES_KEY,
 )
 from verl.utils.model import compute_position_id_with_mask
+
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 def _pad_to_length(
@@ -239,8 +245,10 @@ def _build_one_intermediate_row(
     }
     for k, v in traj_extra.items():
         overlay[k] = v
-    # Intermediate trajectories do not carry their own intermediate list
-    overlay[INTERMEDIATE_TRAJECTORIES_KEY] = []
+    # NB: ``intermediate_trajectories`` is intentionally NOT emitted here —
+    # the expander strips it from the main row before concat, so intermediate
+    # rows must not re-introduce it or ``DataProto.concat`` will fail on
+    # inconsistent non_tensor_batch keys.
 
     for k, v in overlay.items():
         arr = np.empty(1, dtype=object)
@@ -330,6 +338,11 @@ def expand_intermediate_trajectories(
         rows_with_interm = False
     if not rows_with_interm:
         # Strip the empty column and return as-is.
+        logger.debug(
+            "[IntermTrajExpander] no intermediate trajectories found in batch (size=%d), "
+            "stripping empty column",
+            len(data_proto),
+        )
         stripped = DataProto(
             batch=data_proto.batch,
             non_tensor_batch={k: v for k, v in nt.items() if k != INTERMEDIATE_TRAJECTORIES_KEY},
@@ -340,10 +353,12 @@ def expand_intermediate_trajectories(
     n_rows = len(interm_col)
     pieces: list[DataProto] = [data_proto]
     total_appended = 0
+    per_row_counts: list[int] = []
 
     for row_idx in range(n_rows):
         interm_list = interm_col[row_idx]
         if not interm_list:
+            per_row_counts.append(0)
             continue
         inherited_nt = _slice_parent_non_tensor(nt, row_idx)
         for traj in interm_list:
@@ -356,6 +371,7 @@ def expand_intermediate_trajectories(
             )
             pieces.append(piece)
             total_appended += 1
+        per_row_counts.append(len(interm_list))
 
     # Strip intermediate_trajectories from main data_proto so the concat is clean.
     main = DataProto(
@@ -366,8 +382,12 @@ def expand_intermediate_trajectories(
     pieces[0] = main
 
     expanded = DataProto.concat(pieces)
-    print(
-        f"[IntermTrajExpander] Expanded {n_rows} main rows → +{total_appended} intermediate rows "
-        f"(total {len(expanded)})"
+    logger.info(
+        "[IntermTrajExpander] Expanded %d main rows -> +%d intermediate rows "
+        "(total %d); per-row counts=%s",
+        n_rows,
+        total_appended,
+        len(expanded),
+        per_row_counts,
     )
     return expanded

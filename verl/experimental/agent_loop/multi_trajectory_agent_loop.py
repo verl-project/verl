@@ -48,12 +48,17 @@ Subclasses should:
    turn and return ``self.build_final_output(final_output, shared_reward)``.
 """
 
+import logging
+import os
 from abc import abstractmethod
 from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict
 
 from verl.experimental.agent_loop.agent_loop import AgentLoopBase, AgentLoopOutput
+
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 # The key under which intermediate trajectories are packed into
@@ -136,6 +141,15 @@ class MultiTrajectoryAgentLoop(AgentLoopBase):
             extra_fields=dict(extra_fields),
         )
         self._intermediate_trajectories.append(trajectory)
+        logger.debug(
+            "[MultiTrajAgentLoop] appended intermediate trajectory #%d "
+            "(prompt_len=%d, response_len=%d, num_turns=%d, buffered=%d)",
+            len(self._intermediate_trajectories),
+            len(trajectory.prompt_ids),
+            len(trajectory.response_ids),
+            num_turns,
+            len(self._intermediate_trajectories),
+        )
 
     def build_final_output(
         self,
@@ -163,6 +177,14 @@ class MultiTrajectoryAgentLoop(AgentLoopBase):
 
         # Expose the final trajectory's role explicitly.
         final_output.extra_fields.setdefault("trajectory_role", "final")
+
+        logger.info(
+            "[MultiTrajAgentLoop] built final output: reward=%.4f, "
+            "packed %d intermediate trajectories (total trajectories this rollout = %d)",
+            shared_reward,
+            len(serialized),
+            len(serialized) + 1,
+        )
 
         # Clear internal buffer to prevent cross-run pollution.
         self._intermediate_trajectories = []
