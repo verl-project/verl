@@ -237,6 +237,20 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
 
             self.max_concurrent_samples = len(self.llm_server_manager.get_replicas()) * 16
             self.max_concurrent_samples = min(self.max_concurrent_samples, self.max_required_samples)
+            # Optional user-provided hard cap on in-flight rollouts, e.g. to
+            # respect an external resource limit such as a desktop-env service
+            # that only allows N concurrent sessions. 0 or unset = no extra cap.
+            #
+            # NOTE: `max_concurrent_samples` is prompt-level (one "sample" == one
+            # RolloutSample == one prompt expanded to n rollouts), while `user_cap`
+            # is the real rollout-level concurrency the external service sees
+            # (each rollout occupies one desktop session). Convert by dividing
+            # by rollout.n so the actual in-flight rollouts stay under user_cap.
+            user_cap = int(self.config.async_training.get("max_concurrent_rollouts", 0) or 0)
+            if user_cap > 0:
+                rollout_n = int(self.config.actor_rollout_ref.rollout.get("n", 1) or 1)
+                sample_cap = max(1, user_cap // rollout_n)
+                self.max_concurrent_samples = min(self.max_concurrent_samples, sample_cap)
             self.max_queue_size = self.max_required_samples
 
             print(
@@ -246,6 +260,8 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
                 f"total_train_steps: {self.total_train_steps} "
                 f"total_rollout_steps: {self.total_rollout_steps} "
                 f"max_concurrent_samples: {self.max_concurrent_samples} "
+                f"user_cap(rollout-level): {user_cap} "
+                f"rollout.n: {int(self.config.actor_rollout_ref.rollout.get('n', 1) or 1)} "
             )
 
     def get_replicas(self):
