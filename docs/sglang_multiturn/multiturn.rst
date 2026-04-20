@@ -32,18 +32,18 @@ For custom environment interaction tools, you can implement your own tools based
 
 You may refer to GSM8KTool_example_configuration_, which is one example of the tool configurations. Its implementation can be found in gsm8k_tool.py_.
 
-Finally, set the ``tools_config_file`` in your rollout config:
+Finally, set the ``tool_config_path`` in your rollout config:
 
 .. code-block:: yaml
 
     actor_rollout_ref:
         rollout:
-            tool_kwargs:
-                tools_config_file: <path_to_tool_yaml_file>
+            multi_turn:
+                tool_config_path: <path_to_tool_yaml_file>
 
 This allows integration of customized tool behaviors during actor rollout steps.
 
-If you want rollout with simulated interaction, you can set the ``interaction_config_file`` in your rollout config:
+If you want rollout with simulated interaction, you can set the ``interaction_config_path`` in your rollout config:
 
 .. code-block:: yaml
 
@@ -55,7 +55,8 @@ If you want rollout with simulated interaction, you can set the ``interaction_co
 
     actor_rollout_ref:
         rollout:
-            interaction_config_file: <path_to_interaction_yaml_file>
+            multi_turn:
+                interaction_config_path: <path_to_interaction_yaml_file>
 
 If your tool creates multi-modal inputs, you should return a list of multi-modal inputs in your tool.execute() implementation.
 
