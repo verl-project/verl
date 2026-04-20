@@ -11,14 +11,20 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Abstract base class for agent loops that produce multiple independent trajectories per rollout.
+"""Abstract base class for agent loops that emit multiple trajectories per rollout.
 
 A *multi-trajectory* agent loop is one in which a single rollout (one call to
 ``run()``) naturally produces several independent ``(prompt, response)`` pairs
-that should each be treated as an independent training sample. The canonical
-example is :class:`GUIAgentLoop`, where each turn of a multi-turn desktop
-interaction has a different prompt (due to screenshot pruning) and therefore
-cannot be merged into a single ``AgentLoopOutput``.
+that each should be treated as an independent training sample. Concrete
+scenarios where this occurs include:
+
+* Multi-turn VLM agents whose prompt changes every turn (e.g. screenshot
+  pruning in a computer-use agent), so turns cannot be collapsed into a single
+  ``AgentLoopOutput``.
+* Multi-step reasoning agents that want each reasoning step to be trained as
+  an independent sample sharing the episode-level reward.
+* Prompt-changing multi-tool agents where intermediate tool calls materially
+  change the prompt prefix.
 
 Because ``AgentLoopBase.run()`` is contractually required to return a single
 ``AgentLoopOutput``, this base class uses the following packing protocol:
@@ -27,11 +33,12 @@ Because ``AgentLoopBase.run()`` is contractually required to return a single
   main output.
 * All intermediate turns are packed into
   ``final_output.extra_fields["intermediate_trajectories"]`` as a list of
-  serialized ``IntermediateTrajectory`` dicts.
-* The Trainer side (``expand_intermediate_trajectories``) expands these back
-  into independent DataProto rows during batch assembly — so the
-  ``AgentLoopWorker``, ``MessageQueue`` and ``FullyAsyncRollouter`` layers all
-  see a single ``AgentLoopOutput`` and do not need to be modified.
+  serialized :class:`IntermediateTrajectory` dicts.
+* The Trainer-side
+  :func:`verl.experimental.fully_async_policy.intermediate_trajectory_utils.expand_intermediate_trajectories`
+  expands these back into independent DataProto rows during batch assembly —
+  so the ``AgentLoopWorker``, ``MessageQueue`` and ``FullyAsyncRollouter``
+  layers all see a single ``AgentLoopOutput`` and do not need to be modified.
 
 Subclasses should:
 
@@ -50,9 +57,8 @@ from verl.experimental.agent_loop.agent_loop import AgentLoopBase, AgentLoopOutp
 
 
 # The key under which intermediate trajectories are packed into
-# ``AgentLoopOutput.extra_fields`` and later discovered by the
-# ``expand_intermediate_trajectories`` expander in
-# ``verl.experimental.fully_async_policy.detach_utils``.
+# ``AgentLoopOutput.extra_fields`` and later discovered by the Trainer-side
+# ``expand_intermediate_trajectories`` expander.
 INTERMEDIATE_TRAJECTORIES_KEY = "intermediate_trajectories"
 
 
@@ -119,18 +125,7 @@ class MultiTrajectoryAgentLoop(AgentLoopBase):
         num_turns: int = 0,
         **extra_fields: Any,
     ) -> None:
-        """Register a completed intermediate-turn trajectory.
-
-        Args:
-            prompt_ids: Tokenized prompt for this turn.
-            response_ids: Tokenized LLM response for this turn.
-            response_mask: Response mask aligned with ``response_ids``.
-            response_logprobs: Optional per-token logprobs.
-            multi_modal_data: Optional multi-modal payload.
-            num_turns: Number of chat turns up to and including this one.
-            **extra_fields: Arbitrary per-trajectory extra fields (will be
-                preserved and propagated into the Trainer-side DataProto).
-        """
+        """Register a completed intermediate-turn trajectory."""
         trajectory = IntermediateTrajectory(
             prompt_ids=list(prompt_ids),
             response_ids=list(response_ids),
@@ -153,33 +148,20 @@ class MultiTrajectoryAgentLoop(AgentLoopBase):
         The buffer of intermediate trajectories is cleared before returning so
         that a single :class:`MultiTrajectoryAgentLoop` instance can be reused
         for multiple ``run()`` invocations without cross-run contamination.
-
-        Args:
-            final_output: The ``AgentLoopOutput`` representing the last turn.
-            shared_reward: Scalar reward to assign to all trajectories.
-
-        Returns:
-            The ``final_output`` object with ``extra_fields`` updated to carry
-            the serialized intermediate trajectories list, and
-            ``reward_score = shared_reward``.
         """
         # Apply shared reward to the final trajectory.
         final_output.reward_score = shared_reward
 
-        # Serialize intermediate trajectories to plain dicts and stamp reward
-        # score into each trajectory's ``extra_fields`` for downstream use.
+        # Serialize intermediate trajectories to plain dicts and stamp the
+        # reward into each trajectory's extra_fields.
         serialized: list[dict[str, Any]] = []
         for traj in self._intermediate_trajectories:
             traj.extra_fields["reward_score"] = shared_reward
             serialized.append(traj.model_dump())
 
-        # Write packed trajectories into final_output's extra_fields.
-        # The Trainer-side ``expand_intermediate_trajectories`` will pick them
-        # up by key ``INTERMEDIATE_TRAJECTORIES_KEY``.
         final_output.extra_fields[INTERMEDIATE_TRAJECTORIES_KEY] = serialized
 
-        # Also expose the final trajectory's role explicitly, so downstream
-        # consumers can distinguish "final" from "intermediate" rows.
+        # Expose the final trajectory's role explicitly.
         final_output.extra_fields.setdefault("trajectory_role", "final")
 
         # Clear internal buffer to prevent cross-run pollution.

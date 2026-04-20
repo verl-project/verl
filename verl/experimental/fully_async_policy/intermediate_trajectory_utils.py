@@ -32,11 +32,10 @@ import torch
 from tensordict import TensorDict
 
 from verl import DataProto
-from verl.utils.model import compute_position_id_with_mask
-
 from verl.experimental.agent_loop.multi_trajectory_agent_loop import (
     INTERMEDIATE_TRAJECTORIES_KEY,
 )
+from verl.utils.model import compute_position_id_with_mask
 
 
 def _pad_to_length(
