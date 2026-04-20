@@ -177,6 +177,12 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             # works on both pre- and post-rename releases.
             if "lora_requests" in OmniDiffusionSamplingParams.__dataclass_fields__:
                 sampling_kwargs["lora_requests"] = [lora_request]
+                # On the post-rename API the singular "lora_scale" key from
+                # sampling_params would have fallen into extra_args above (no
+                # such field on the dataclass); lift it back out into the
+                # plural lora_scales so the scale actually takes effect.
+                if "lora_scale" in extra_args:
+                    sampling_kwargs["lora_scales"] = [extra_args.pop("lora_scale")]
             else:
                 sampling_kwargs["lora_request"] = lora_request
         diffusion_sampling_params = OmniDiffusionSamplingParams(**sampling_kwargs)
