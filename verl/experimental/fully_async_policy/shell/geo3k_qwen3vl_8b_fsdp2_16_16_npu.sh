@@ -2,10 +2,11 @@ set -x
 
 # ===================================== Environment & Paths =====================================
 export CUDA_DEVICE_MAX_CONNECTIONS=1  # For megatron communication/computation overlapping
-
-HF_MODEL_PATH=${HF_MODEL_PATH:-"${RAY_DATA_HOME}/models/Qwen3-VL-8B-Instruct"}
-train_path=$HOME/data/geo3k/train.parquet
-test_path=$HOME/data/geo3k/test.parquet
+export WANDB_BASE_URL="https://api.bandw.top"
+WANDB_API_KEY=${WANDB_API_KEY:-"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"}
+HF_MODEL_PATH=${HF_MODEL_PATH:-"/home/share/Qwen3-VL-4B-Instruct"}
+train_path=/home/chagao/data/geo3k/train.parquet
+test_path=/home/chagao/data/geo3k/test.parquet
 
 # ===================================== Rollout Mode =====================================
 rollout_mode="async"
@@ -18,8 +19,8 @@ if [ "$rollout_mode" = "async" ]; then
 fi
 
 # ===================================== GPU Allocation =====================================
-n_gpus_rollout=16
-n_gpus_training=16
+n_gpus_rollout=4
+n_gpus_training=12
 n_nodes_rollout=1
 n_nodes_train=1
 
@@ -117,7 +118,7 @@ total_rollout_steps=$(( 512 * 100 ))
 
 TRAINER_CONFIG="
     trainer.critic_warmup=0 \
-    trainer.logger='["console","wandb"]' \
+    trainer.logger='console' \
     trainer.project_name='verl_grpo_example_geo3k' \
     trainer.experiment_name='qwen3_vl_8b_fsdp2_async' \
     trainer.nnodes=${n_nodes_train} \

@@ -5,10 +5,11 @@ set -xeuo pipefail
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 
 RAY_DATA_HOME=${RAY_DATA_HOME:-"${HOME}/verl"}
-HF_MODEL_PATH=${HF_MODEL_PATH:-"${RAY_DATA_HOME}/models/Qwen3-VL-8B-Instruct"}
-TRAIN_PATH=${TRAIN_PATH:-"${HOME}/data/geo3k/train.parquet"}
-TEST_PATH=${TEST_PATH:-"${HOME}/data/geo3k/test.parquet"}
-
+export WANDB_BASE_URL="https://api.bandw.top"
+WANDB_API_KEY=${WANDB_API_KEY:-"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"}
+HF_MODEL_PATH=${HF_MODEL_PATH:-"/home/share/Qwen3-VL-4B-Instruct"}
+TRAIN_PATH="/home/chagao/data/geo3k/train.parquet"
+TEST_PATH="/home/chagao/data/geo3k/test.parquet"
 # ===================================== Hybrid Resource Pool =====================================
 physical_nnodes=${PHYSICAL_NNODES:-2}
 physical_gpus_per_node=${PHYSICAL_GPUS_PER_NODE:-8}
@@ -38,7 +39,7 @@ DATA_CONFIG="
     data.train_batch_size=${train_prompt_bsz} \
     data.gen_batch_size=${gen_prompt_bsz} \
     data.max_prompt_length=1024 \
-    data.max_response_length=2048 \
+    data.max_response_length=1024 \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
     data.image_key=images \
@@ -46,7 +47,7 @@ DATA_CONFIG="
     data.return_raw_chat=${return_raw_chat}"
 
 # ===================================== Actor Model & Optim =====================================
-train_prompt_mini_bsz=64
+train_prompt_mini_bsz=72
 
 ACTOR_CONFIG="
     actor_rollout_ref.model.path=${HF_MODEL_PATH} \
@@ -118,7 +119,7 @@ ALGORITHM_CONFIG="
 # ===================================== Trainer =====================================
 total_epochs=200
 test_freq=5
-total_rollout_steps=$((512 * 100))
+total_rollout_steps=$((144 * 100))
 
 TRAINER_CONFIG="
     trainer.critic_warmup=0 \
@@ -150,7 +151,11 @@ ASYNC_CONFIG="
     async_training.partial_rollout=${partial_rollout}"
 
 # ===================================== Launch =====================================
-python3 -m verl.experimental.fully_async_policy.fully_async_main \
+ray job submit --address="http://127.0.0.1:8265" \
+    --runtime-env=../env/disa_env.yaml \
+    --no-wait \
+    -- \
+    python3 -m verl.experimental.fully_async_policy.fully_async_main \
     --config-path=config \
     --config-name='fully_async_ppo_trainer.yaml' \
     $DATA_CONFIG \
