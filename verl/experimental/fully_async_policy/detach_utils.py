@@ -21,6 +21,9 @@ import numpy as np
 import torch
 
 from verl import DataProto
+from verl.experimental.fully_async_policy.intermediate_trajectory_utils import (
+    expand_intermediate_trajectories,
+)
 from verl.trainer.ppo.ray_trainer import compute_response_mask
 
 
@@ -91,7 +94,11 @@ def addition_process(output: DataProto):
 
 
 def assemble_batch_from_rollout_samples(
-    rollout_samples: list[RolloutSample], tokenizer, config, balance_batch=None
+    rollout_samples: list[RolloutSample],
+    tokenizer,
+    config,
+    balance_batch=None,
+    processor=None,
 ) -> DataProto:
     """
     Assemble gen_batch_output from RolloutSample objects
@@ -121,9 +128,18 @@ def assemble_batch_from_rollout_samples(
     # Add a prefix to all rollout_status keys
     rollout_status = {f"fully_async/{key}": value for key, value in rollout_status.items()}
 
+    rollout_config = config.actor_rollout_ref.rollout
     for rs in rollout_samples:
         batch = addition_process(rs.full_batch)
-        rollout_samples_batch.append(batch)
+        # Expand intermediate trajectories if present (multi-trajectory agent loops, e.g. GUI Agent).
+        # For non-multi-trajectory loops the batch is passed through unchanged.
+        expanded_batch = expand_intermediate_trajectories(
+            batch,
+            tokenizer=tokenizer,
+            processor=processor,
+            rollout_config=rollout_config,
+        )
+        rollout_samples_batch.append(expanded_batch)
     final_batch = DataProto.concat(rollout_samples_batch)
 
     # Calculate response_mask (if not present)

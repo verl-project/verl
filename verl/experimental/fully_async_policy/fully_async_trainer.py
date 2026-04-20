@@ -289,9 +289,21 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         queue_samples = [ray.cloudpickle.loads(x) for x in queue_samples]
         # Assemble batch - now working directly with RolloutSample objects
         if self.config.trainer.balance_batch:
-            batch = assemble_batch_from_rollout_samples(queue_samples, self.tokenizer, self.config, self._balance_batch)
+            batch = assemble_batch_from_rollout_samples(
+                queue_samples,
+                self.tokenizer,
+                self.config,
+                self._balance_batch,
+                processor=self.processor,
+            )
         else:
-            batch = assemble_batch_from_rollout_samples(queue_samples, self.tokenizer, self.config, None)
+            batch = assemble_batch_from_rollout_samples(
+                queue_samples,
+                self.tokenizer,
+                self.config,
+                None,
+                processor=self.processor,
+            )
 
         batch.meta_info["fully_async/total_wait_time"] = total_wait_time
         return 0, batch
