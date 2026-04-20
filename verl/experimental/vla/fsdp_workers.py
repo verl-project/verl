@@ -94,28 +94,65 @@ class RobActorRolloutRefWorker(ActorRolloutRefWorker):
         self._register_dispatch_collect_info("rollout", dp_rank=self.rank, is_collect=True)
 
         if self.config.get("algorithm", "grpo") == "sac":
-            from verl.experimental.vla.sac.naive_rollout_pi05 import PI0RolloutRob
+            use_jax = self.config.model.get("use_jax_inference", False)
+            if use_jax:
+                from verl.experimental.vla.sac.naive_rollout_jax import PI0JaxRolloutRob
+                from verl.experimental.vla.models.openpi_jax import OpenPIJaxPolicy
 
-            self.rollout = PI0RolloutRob(
-                module=self.actor_module_fsdp, model_config=self.config.model, tokenizer=self.tokenizer
-            )
+                jax_ckpt = self.config.model.get("jax_checkpoint_dir", "/root/data/pi05_libero_absik/checkpoint-30000")
+                jax_config = self.config.model.get("jax_config_name", "pi05_libero")
+                gpu_id = 0  # Ray isolates GPUs per worker via CUDA_VISIBLE_DEVICES
+                logger.info(f"Loading OpenPI JAX policy from {jax_ckpt} (config={jax_config}, gpu={gpu_id})")
+                jax_policy = OpenPIJaxPolicy.from_checkpoint(
+                    config_name=jax_config,
+                    checkpoint_dir=jax_ckpt,
+                    action_dim=self.config.model.get("action_dim", 7),
+                    action_horizon=self.config.model.get("num_action_chunks", 10),
+                    gpu_id=gpu_id,
+                )
+                self.rollout = PI0JaxRolloutRob(
+                    module=self.actor_module_fsdp,
+                    model_config=self.config.model,
+                    tokenizer=self.tokenizer,
+                    jax_policy=jax_policy,
+                )
+            else:
+                from verl.experimental.vla.sac.naive_rollout_pi05 import PI0RolloutRob
+
+                self.rollout = PI0RolloutRob(
+                    module=self.actor_module_fsdp, model_config=self.config.model, tokenizer=self.tokenizer
+                )
         else:
             from verl.experimental.vla.naive_rollout_rob import NaiveRolloutRob
 
             self.rollout = NaiveRolloutRob(module=self.actor_module_fsdp, model_config=self.config.model)
 
-        model_config: HFModelConfig = omega_conf_to_dataclass(self.config.model, dataclass_type=HFModelConfig)
+        from omegaconf import OmegaConf
+        model_cfg_for_hf = OmegaConf.to_container(self.config.model, resolve=True)
+        for k in ("use_jax_inference", "jax_checkpoint_dir", "jax_config_name", "action_dim", "num_action_chunks", "absolute_action_mode"):
+            model_cfg_for_hf.pop(k, None)
+        model_config: HFModelConfig = omega_conf_to_dataclass(
+            OmegaConf.create(model_cfg_for_hf), dataclass_type=HFModelConfig
+        )
         self.model_config = model_config
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def switch_to_rollout(self):
-        loop = asyncio.get_event_loop()
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
         loop.run_until_complete(self.rollout_mode())
         log_gpu_memory_usage("After switch to rollout mode", logger=logger)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def switch_to_train(self):
-        loop = asyncio.get_event_loop()
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
         loop.run_until_complete(self.trainer_mode())
         log_gpu_memory_usage("After switch to trainer mode", logger=logger)
 
@@ -240,9 +277,9 @@ class RobActorRolloutRefWorker(ActorRolloutRefWorker):
     def init_model(self):
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.get("external_lib", None))
-
+        
         # Initialize QAT config before _build_model_optimizer
-        self._init_qat_config()
+        #self._init_qat_config()
 
         from omegaconf import OmegaConf
 

@@ -43,7 +43,7 @@ actor_rollout_ref:
   model:
     override_config:
       sac_enable: True
-      flow_sde_enable: True
+      flow_sde_enable: False 
       flow_sde_noise_level: 0.065
       flow_sde_rollout_noise_scale: 1.0
       flow_sde_train_noise_scale: 1.0
@@ -64,7 +64,7 @@ actor_rollout_ref:
       target_entropy: -64.0
     critic_lr: 0.0001
     critic_weight_decay: 0
-    warm_rollout_steps: 23
+    warm_rollout_steps: 5
     critic_warmup_steps: 200
     actor_update_interval: 1
     actor_ema_enabled: true

@@ -1,0 +1,24 @@
+# JAX inference dependencies for OpenPI-based VLA in Isaac Lab
+# Install with: pip install -r requirements_isaac_jax.txt
+#
+# IMPORTANT:
+# - numpy MUST stay < 2.0 (isaaclab / verl / torch compatibility)
+# - jax ecosystem versions must match exactly (0.5.3)
+# - jax-cuda12-* versions must match jaxlib version
+
+numpy>=1.26.0,<2.0
+
+# JAX ecosystem (pinned for compatibility)
+jax==0.5.3
+jaxlib==0.5.3
+jax-cuda12-pjrt==0.5.3
+jax-cuda12-plugin==0.5.3
+
+# Flax / Orbax (pinned to openpi-compatible versions)
+flax==0.10.2
+orbax-checkpoint==0.11.13
+
+# Other JAX-related dependencies
+chex==0.1.90
+optax==0.2.6
+einops>=0.8.0

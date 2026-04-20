@@ -1,28 +1,24 @@
 set -x
 libero_train_path=$HOME/data/libero_rl/libero_spatial/train.parquet
 libero_test_path=$HOME/data/libero_rl/libero_spatial/test.parquet
-
 train_files=$libero_train_path
 test_files=$libero_test_path
-
-OUTPUT_DIR=${MLP_MODEL_OUTPUT:-"$HOME/models/vla_libero_grpo"}
+# [Anonymized] Removed hardcoded paths containing personal identifiers
+OUTPUT_DIR=${MLP_MODEL_OUTPUT:-"/path/to/your/output_dir/vla_libero_grpo"}
 VIDEO_OUTPUT=${MLP_MODEL_OUTPUT:-"$HOME"}/video
 SFT_MODEL_PATH=${SFT_MODEL_PATH:-"$HOME/data/pi05_libero_torch"}
 TOKENIZER_PATH="$SFT_MODEL_PATH"
-
-# Physical Node Config
-NUM_GPUS=8                                     # total number of gpus per node
-
 # Role Config
 NUM_NODES=1                                    # number of nodes for rollout
+NUM_GPUS=8                                     # number of gpus for rollout workers per node
 SIM_NODES=1                                    # number of nodes for sim                
 NUM_ENV_GPUS=4                                 # number of gpus for env workers per node
 NUM_ROLLOUT_GPUS=8                             # number of gpus for rollout workers per node
 
 # Rollout Config
 # NOTE: TRAIN_BATCH_SIZE * ROLLOUT_N == NUM_ENV_GPUS * NUM_STAGE * NUM_ENV
-TRAIN_BATCH_SIZE=64                            # batch size for dataloaders per step
-ROLLOUT_N=1                                    # response number for each prompt (for GRPO)
+TRAIN_BATCH_SIZE=8                             # batch size for dataloaders per step
+ROLLOUT_N=8                                    # response number for each prompt (for GRPO)
 NUM_STAGE=2                                    # number of pipeline stages
 NUM_ENV=8                                      # number of envs per env worker
 
@@ -31,18 +27,19 @@ MAX_EPISODE_STEPS=220                          # max episode steps for each env
                                                # max_interactions = MAX_EPISODE_STEPS / num_action_chunks
 
 # Training Config
-MINI_BATCH_SIZE=1024                           # mini batch size (batch size per GPU, automatically multiplied by ROLLOUT_N)
+MINI_BATCH_SIZE=128                            # mini batch size (batch size per GPU, automatically multiplied by ROLLOUT_N)
 MICRO_BATCH_SIZE=16                            # micro batch size (per GPU, for gradient accumulation, should divide MINI_BATCH_SIZE)
-
-
-
 # isaac or libero
 # libero means original libero benchmark with mujoco sim
 # isaac means libero benchmark using isaac sim
-SIM_TYPE=${SIM_TYPE:-"libero"}
-PROJECT_NAME="pi05-libero-sac"
-EXPERIMENT_NAME="${SIM_TYPE}_reinforce_plus_plus"
-
+SIM_TYPE=${SIM_TYPE:-"isaac"}
+# [Anonymized] Removed project name with personal identifiers, and cleared cloud platform AK/SK
+# PROJECT_NAME="pi05-libero-sac"
+PROJECT_NAME="verl_isaac_sac_example"
+EXPERIMENT_NAME="isaac"
+VOLC_ACCESS_KEY_ID='<YOUR_VOLC_ACCESS_KEY_ID>'
+VOLC_SECRET_ACCESS_KEY='<YOUR_VOLC_SECRET_ACCESS_KEY>'
+MLP_TRACKING_REGION='<YOUR_REGION>' # e.g., 'cn-beijing'
 ISSC_PYTHON="/workspace/isaaclab/_isaac_sim/python.sh"
 PYTHON=python
 if [ -f "$ISSC_PYTHON" ]; then
@@ -60,6 +57,9 @@ if echo "$gpu_name" | grep "NVIDIA H"; then
 fi
 
 export VERL_LOGGING_LEVEL=INFO
+
+
+
 
 $PYTHON -m verl.experimental.vla.main_sac \
     data.train_files="$train_files" \
@@ -97,6 +97,7 @@ $PYTHON -m verl.experimental.vla.main_sac \
     actor_rollout_ref.actor.clip_ratio_high=0.28 \
     actor_rollout_ref.actor.clip_ratio_low=0.2 \
     actor_rollout_ref.actor.num_images_in_input=1 \
+    actor_rollout_ref.actor.replay_pool_save_dir=$OUTPUT_DIR/replay_pools \
     actor_rollout_ref.model.enable_gradient_checkpointing=False \
     actor_rollout_ref.model.use_remove_padding=False \
     actor_rollout_ref.model.trust_remote_code=False \
@@ -113,7 +114,7 @@ $PYTHON -m verl.experimental.vla.main_sac \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     +actor_rollout_ref.algorithm='sac' \
     algorithm.kl_ctrl.kl_coef=0.00 \
-    trainer.logger=['console'] \
+    trainer.logger=['console','vemlp_wandb'] \
     trainer.project_name=$PROJECT_NAME \
     trainer.experiment_name=$EXPERIMENT_NAME \
     trainer.default_local_dir=$OUTPUT_DIR \
@@ -121,9 +122,12 @@ $PYTHON -m verl.experimental.vla.main_sac \
     +trainer.n_env_gpus_per_node=$NUM_ENV_GPUS \
     +trainer.n_rollout_gpus_per_node=$NUM_ROLLOUT_GPUS \
     +trainer.rollout_interval=20 \
+    ++env.ray_resource_pool_name="sim_node" \
+    ++trainer.ray_resource_pool_name="train_node" \
+    ++env.train.use_wrist_cam=True \
     trainer.nnodes=$NUM_NODES \
     trainer.save_freq=500 \
-    trainer.test_freq=10 \
+    trainer.test_freq=-1 \
     trainer.total_epochs=1000 \
     trainer.val_only=False \
     algorithm.adv_estimator=reinforce_plus_plus \

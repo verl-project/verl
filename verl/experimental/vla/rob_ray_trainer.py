@@ -149,7 +149,7 @@ class RobRayPPOTrainer(RayPPOTrainer):
         # NOTE: if you want to use a different resource pool for each role, which can support different parallel size,
         # you should not use `create_colocated_worker_cls`.
         # Instead, directly pass different resource pool to different worker groups.
-        # See https://github.com/verl-project/verl/blob/master/examples/ray/tutorial.ipynb for more information.
+        # See https://github.com/volcengine/verl/blob/master/examples/ray/tutorial.ipynb for more information.
         all_wg = {}
         wg_kwargs = {}  # Setting up kwargs for RayWorkerGroup
         if OmegaConf.select(self.config.trainer, "ray_wait_register_center_timeout") is not None:
@@ -600,10 +600,13 @@ class RobRayPPOTrainer(RayPPOTrainer):
             # pad to be divisible by dp_size
             size_divisor = self.config.env.train.num_envs * self.config.env.rollout.pipeline_stage_num
             test_gen_batch_padded, pad_size = pad_dataproto_to_divisor(test_gen_batch, size_divisor)
-            reset_future = self._reset_envs(test_gen_batch_padded)
-            test_output_gen_batch_padded = self.async_rollout_manager.generate_sequences(
-                test_gen_batch_padded, reset_future
-            )
+            if not self.async_rollout_mode:
+                test_output_gen_batch_padded = self.actor_rollout_wg.generate_sequences(test_gen_batch_padded)
+            else:
+                reset_future = self._reset_envs(test_gen_batch_padded)
+                test_output_gen_batch_padded = self.async_rollout_manager.generate_sequences(
+                    test_gen_batch_padded, reset_future
+                )
 
             # unpad
             test_output_gen_batch = unpad_dataproto(test_output_gen_batch_padded, pad_size=pad_size)
