@@ -19,6 +19,7 @@ import logging
 import random
 import threading
 from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from verl.experimental.agent_loop.prometheus_metrics import (
@@ -28,6 +29,9 @@ from verl.experimental.agent_loop.prometheus_metrics import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Cap parallel /metrics scrapes per refresh
+_MAX_KV_METRICS_SCRAPE_WORKERS = 32
 
 _LOAD_BALANCE_STRATEGY_CLASSES: dict[str, type[LoadBalanceStrategy]] = {}
 
@@ -147,21 +151,34 @@ class LeastKVCacheStrategy(LoadBalanceStrategy):
         with self._lock:
             return {sid: self._kv_usage.get(sid) for sid in server_ids}
 
+    def _refresh_one_replica(self, sid: str, metric_name: str) -> None:
+        """Fetch /metrics for one replica; safe to run concurrently (state updates use ``_lock``)."""
+        url = build_metrics_url(sid, self._metrics_path)
+        try:
+            text = fetch_prometheus_text(url, self._fetch_timeout_s)
+            val = parse_prometheus_metric_value(text, metric_name)
+            if self._mark_metrics_success(sid, val):
+                logger.info("KV cache metrics recovered for replica %s", sid)
+        except Exception as e:
+            if self._mark_metrics_failed(sid):
+                logger.warning("Failed to refresh KV metrics for %s from %s: %s", sid, url, e)
+
     def _refresh_metrics_blocking(self) -> None:
         metric_name = self._metric_name
         if not metric_name:
             return
 
-        for sid in self._server_actor_ids:
-            url = build_metrics_url(sid, self._metrics_path)
-            try:
-                text = fetch_prometheus_text(url, self._fetch_timeout_s)
-                val = parse_prometheus_metric_value(text, metric_name)
-                if self._mark_metrics_success(sid, val):
-                    logger.info("KV cache metrics recovered for replica %s", sid)
-            except Exception as e:
-                if self._mark_metrics_failed(sid):
-                    logger.warning("Failed to refresh KV metrics for %s from %s: %s", sid, url, e)
+        ids = self._server_actor_ids
+        if not ids:
+            return
+
+        max_workers = min(len(ids), _MAX_KV_METRICS_SCRAPE_WORKERS)
+
+        def worker(sid: str) -> None:
+            self._refresh_one_replica(sid, metric_name)
+
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="verl-lb-kv") as pool:
+            list(pool.map(worker, ids))
 
     def pick_server(self, server_ids: list[str]) -> str:
         if self._metric_name:
