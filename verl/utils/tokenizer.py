@@ -56,6 +56,29 @@ def normalize_token_ids(tokenized_output) -> list[int]:
     return normalized_ids
 
 
+def _fix_bytelevel_mismatch(tokenizer):
+    # transformers>=5 sets Metaspace pre_tokenizer for LLaMA-family models whose
+    # vocabulary uses the ByteLevel (Ġ) convention, silently dropping all spaces.
+    # Detect by actually encoding a space-containing string and checking the round-trip.
+    # Patch both pre_tokenizer and decoder back to ByteLevel to restore correctness.
+    try:
+        bt = tokenizer.backend_tokenizer
+        # Use type name instead of str() to avoid a Rust panic in older tokenizers
+        # when serialising pre_tokenizers with non-ASCII Unicode characters.
+        if type(bt.pre_tokenizer).__name__ != "Metaspace":
+            return
+        # Behavioural check: if a space survives encode→decode, no patch needed.
+        probe_ids = tokenizer.encode("a b", add_special_tokens=False)
+        if " " in tokenizer.decode(probe_ids):
+            return
+        from tokenizers.pre_tokenizers import ByteLevel as BLPre
+        from tokenizers.decoders import ByteLevel as BLDec
+        bt.pre_tokenizer = BLPre(add_prefix_space=False)
+        bt.decoder = BLDec()
+    except BaseException:
+        pass
+
+
 def set_pad_token_id(tokenizer):
     """Set pad_token_id to eos_token_id if it is None.
 
@@ -96,6 +119,7 @@ def hf_tokenizer(name_or_path, correct_pad_token=True, correct_gemma2=True, **kw
         kwargs["eos_token"] = "<end_of_turn>"
         kwargs["eos_token_id"] = 107
     tokenizer = AutoTokenizer.from_pretrained(name_or_path, **kwargs)
+    _fix_bytelevel_mismatch(tokenizer)
     if correct_pad_token:
         set_pad_token_id(tokenizer)
     return tokenizer
