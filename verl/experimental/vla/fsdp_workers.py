@@ -30,7 +30,6 @@ from torch.distributed.fsdp._unshard_param_utils import _get_module_fsdp_state, 
 from torch.distributed.fsdp.api import FullStateDictConfig, ShardedStateDictConfig, StateDictType
 
 from verl import DataProto
-from verl.experimental.vla._legacy_fsdp_workers import ActorRolloutRefWorker
 from verl.single_controller.base.decorator import Dispatch, make_nd_compute_dataproto_dispatch_fn, register
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
 from verl.utils.config import omega_conf_to_dataclass
@@ -42,6 +41,7 @@ from verl.utils.memory_utils import aggressive_empty_cache
 from verl.utils.profiler import DistProfiler, log_gpu_memory_usage, simple_timer
 from verl.utils.profiler.performance import reduce_timing, topk_reduce_ratio_min_max
 from verl.workers.config import HFModelConfig
+from verl.workers.fsdp_workers import ActorRolloutRefWorker
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
