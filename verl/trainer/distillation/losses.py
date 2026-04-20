@@ -135,6 +135,7 @@ def compute_topk_loss(
     - teacher_mass: (bsz, seqlen/cp_size)
     """
     match config.strategy:
+        # VeOmni uses FSDP2 internally, so its loss computation is identical to FSDP.
         case "fsdp" | "veomni":
             import verl.trainer.distillation.fsdp.losses as fsdp_losses
 

@@ -39,10 +39,12 @@ class DetachActorWorker(ActorRolloutRefWorker):
 
     This worker facilitates saving the model state to CPU and restoring it, enabling efficient
     resource management and checkpointing in distributed training. It currently supports
-    FSDP, FSDP2, and Megatron strategies.
+    FSDP, FSDP2, VeOmni, and Megatron strategies.
     """
 
-    def __init__(self, config: DictConfig, role: str, distillation_config: Optional[DistillationConfig] = None, **kwargs):
+    def __init__(
+        self, config: DictConfig, role: str, distillation_config: Optional[DistillationConfig] = None, **kwargs
+    ):
         """
         Initialize the DetachActorWorker.
 
@@ -70,6 +72,14 @@ class DetachActorWorker(ActorRolloutRefWorker):
 
         strategy = self.config.actor.strategy
 
+        # NOTE: VeOmni internally uses FSDP2 for data parallelism (VeOmniEngine inherits from
+        # FSDPEngine and sets data_parallel_mode="fsdp2"), so its model parameters are DTensors
+        # that are compatible with FSDP2's sharded save/load utilities.
+        #
+        # CAVEAT: When VeOmni's param_offload=True, parameters may reside on CPU at the time of
+        # save/restore. The current fsdp2_sharded_save_to_cpu / fsdp2_sharded_load_from_cpu
+        # assume parameters are on GPU. Callers should ensure the model is loaded back to GPU
+        # before calling save_model_to_cpu / restore_model_from_cpu in offload scenarios.
         if strategy in ["fsdp", "fsdp2", "veomni"]:
             from verl.utils.fsdp_utils import (
                 fsdp2_sharded_load_from_cpu,
@@ -104,6 +114,10 @@ class DetachActorWorker(ActorRolloutRefWorker):
         """
         Save the current model state to CPU memory.
 
+        For FSDP/FSDP2/VeOmni strategies, this uses fsdp2_sharded_save_to_cpu which
+        expects model parameters to be on GPU (as DTensors). If VeOmni param_offload
+        is enabled, ensure the model has been reloaded to GPU before calling this method.
+
         Args:
             n: Identifier/Key for the saved model state.
         """
@@ -116,6 +130,10 @@ class DetachActorWorker(ActorRolloutRefWorker):
     def restore_model_from_cpu(self, n):
         """
         Restore the model state from CPU memory.
+
+        For FSDP/FSDP2/VeOmni strategies, the saved state is a tuple of
+        (cpu_sharded_state, global_spec) produced by fsdp2_sharded_save_to_cpu.
+        For Megatron, the saved state is passed directly to the restore handler.
 
         Args:
             n: Identifier/Key for the saved model state to restore.
