@@ -1,0 +1,40 @@
+# atropos-integrated GRPO trainer configuration.
+#
+# extends verl's ppo_trainer defaults with atropos-specific settings.
+# training data comes from the atropos trajectory API instead of a dataset,
+# so total_training_steps must be set explicitly.
+#
+# Usage:
+#   python3 -m recipe.atropos.main_atropos \
+#       actor_rollout_ref.model.path=Qwen/Qwen3-1.7B \
+#       trainer.total_training_steps=50 \
+#       atropos.api_url=http://localhost:8000
+
+hydra:
+  searchpath:
+    - file://verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+# atropos trajectory API connection settings
+atropos:
+  api_url: "http://localhost:8000"   # Atropos trajectory API URL
+  poll_timeout: 300                  # Max seconds to wait for a batch
+  ready_file: null                   # Writes internal vLLM address when set (for launch scripts)
+  proxy_url: null                    # Generate proxy URL — trainer pauses/resumes before sleep/wake
+  proxy_drain_timeout: 300           # Seconds to wait for proxy to drain in-flight requests on pause
+
+# GRPO: group-based advantage estimation, no critic needed
+algorithm:
+  adv_estimator: grpo
+
+# rewards come from atropos environments, not a reward model
+reward_model:
+  enable: false
+
+trainer:
+  project_name: verl-atropos
+  val_before_train: false
+  total_training_steps: 50           # Must be set (no dataloader to infer from)
