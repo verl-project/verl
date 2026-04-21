@@ -196,8 +196,7 @@ def get_npu_versions() -> tuple[str, str]:
     # Check npu-smi software version
     try:
         result = subprocess.run(
-            ["npu-smi", "info", "-t", "board", "-i", "1"],
-            capture_output=True, text=True, check=True
+            ["npu-smi", "info", "-t", "board", "-i", "1"], capture_output=True, text=True, check=True
         )
     except subprocess.CalledProcessError:
         # Card 1 not found (common in K8s with non-consecutive device IDs)
@@ -205,17 +204,16 @@ def get_npu_versions() -> tuple[str, str]:
         visible_devices = os.environ.get("ASCEND_VISIBLE_DEVICES")
         if not visible_devices:
             raise  # Re-raise original error if env var not set
-        
+
         try:
             npu_id = int(visible_devices.split(',')[0])
         except (ValueError, IndexError):
             raise  # Re-raise original error if env var format invalid
-        
+
         # Retry with the first available device from K8s
         try:
             result = subprocess.run(
-                ["npu-smi", "info", "-t", "board", "-i", str(npu_id)],
-                capture_output=True, text=True, check=True
+                ["npu-smi", "info", "-t", "board", "-i", str(npu_id)], capture_output=True, text=True, check=True
             )
         except subprocess.CalledProcessError:
             # On A3 machines with one-card-two-die, the device ID is a die index.
@@ -223,7 +221,9 @@ def get_npu_versions() -> tuple[str, str]:
             physical_card_id = npu_id // 2
             result = subprocess.run(
                 ["npu-smi", "info", "-t", "board", "-i", str(physical_card_id)],
-                capture_output=True, text=True, check=True
+                capture_output=True,
+                text=True,
+                check=True,
             )
 
 
