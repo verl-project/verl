@@ -145,11 +145,7 @@ class FullyAsyncAgentLoopWorker(AgentLoopWorker):
         teacher_load_balancer_handle: ray.actor.ActorHandle = None,
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
-        self.server_manager = FullyAsyncLLMServerManager(
-            config,
-            servers,
-            load_balancer_handle,
-        )
+        self.server_manager = FullyAsyncLLMServerManager(config, servers, load_balancer_handle)
         super().__init__(
             config,
             servers,

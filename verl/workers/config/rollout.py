@@ -151,16 +151,16 @@ class PrometheusConfig(BaseConfig):
 @dataclass
 class KvCacheMetricsConfig(BaseConfig):
     """
-    HTTP /metrics (Prometheus text) scraping for ``load_balance_strategy: least_kv_cache``.
+    HTTP /metrics (Prometheus text) scraping for load_balance_strategy: least_kv_cache.
 
-    The load balancer GETs ``http://{replica_address}{metrics_path}`` for each replica.
-    Set ``metric_name`` to the gauge/counter identifier (before ``{``), engine-specific.
+    The load balancer GETs http://{replica_address}{metrics_path} for each replica.
+    Set metric_name to the gauge/counter identifier (before {), engine-specific.
     If multiple lines share that name with different labels, the largest value is used.
     """
 
     refresh_interval_s: float = 2.0
     metrics_path: str = "/metrics"
-    # Exact metric identifier before ``{``, e.g. ``vllm:kv_cache_usage_perc`` or ``sglang:token_usage``
+    # Exact metric identifier before {, e.g. vllm:kv_cache_usage_perc or sglang:token_usage
     metric_name: Optional[str] = None
     fetch_timeout_s: float = 2.0
 
@@ -386,7 +386,7 @@ class RolloutConfig(BaseConfig):
 
 @dataclass
 class DiffusionRolloutConfig(RolloutConfig):
-    _mutable_fields = {*RolloutConfig._mutable_fields}
+    _mutable_fields = {"max_model_len", "load_format", "load_balance_weights"}
 
     val_kwargs: DiffusionSamplingConfig = field(default_factory=DiffusionSamplingConfig)
 
