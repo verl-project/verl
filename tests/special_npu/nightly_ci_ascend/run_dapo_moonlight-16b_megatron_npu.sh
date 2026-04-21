@@ -28,8 +28,8 @@ infer_ppo_micro_batch_size_per_gpu=2
 MODEL_ID=${MODEL_ID:-moonshotai/Moonlight-16B-A3B-Instruct}
 MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/models/${MODEL_ID}}
 
-TRAIN_FILE=$HOME/data/gsm8k/train.parquet
-TEST_FILE=$HOME/data/gsm8k/test.parquet
+TRAIN_FILE=$HOME/.cache/datasets/dapo-math-17k.parquet
+TEST_FILE=$HOME/.cache/datasets/dapo-math-17k.parquet
 
 # Algorithm
 temperature=1.0
@@ -46,10 +46,10 @@ optimizer_offload_fraction=1
 
 COMMON_PP=${COMMON_PP:-4}
 COMMON_VPP=${COMMON_VPP:-null}
-COMMON_CP=${COMMON_CP:-1}
-COMMON_TP=${COMMON_TP:-2}
-COMMON_EP=${COMMON_EP:-1}
-COMMON_ETP=${COMMON_ETP:-2}
+COMMON_CP=${COMMON_CP:-2}
+COMMON_TP=${COMMON_TP:-1}
+COMMON_EP=${COMMON_EP:-2}
+COMMON_ETP=${COMMON_ETP:-1}
 
 TRAIN_TP=${TRAIN_TP:-$COMMON_TP}
 INFER_TP=${INFER_TP:-4}
@@ -91,6 +91,7 @@ python3 -m recipe.dapo.main_dapo \
     data.validation_shuffle=False \
     data.train_files="${TRAIN_FILE}" \
     data.val_files="${TEST_FILE}" \
+    data.prompt_key=prompt \
     data.truncation='left' \
     data.max_prompt_length=${max_prompt_length} \
     data.max_response_length=${max_response_length} \
@@ -132,6 +133,7 @@ python3 -m recipe.dapo.main_dapo \
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=${ACTOR_PP} \
     actor_rollout_ref.actor.megatron.virtual_pipeline_model_parallel_size=${ACTOR_VPP} \
     actor_rollout_ref.actor.megatron.context_parallel_size=${ACTOR_CP} \
+    +actor_rollout_ref.actor.megatron.override_transformer_config.context_parallel_size=${ACTOR_CP} \
     actor_rollout_ref.actor.megatron.expert_model_parallel_size=${ACTOR_EP} \
     actor_rollout_ref.actor.megatron.expert_tensor_parallel_size=${ACTOR_ETP} \
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform \
@@ -167,6 +169,7 @@ python3 -m recipe.dapo.main_dapo \
     actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=${REF_PP} \
     actor_rollout_ref.ref.megatron.virtual_pipeline_model_parallel_size=${REF_VPP} \
     actor_rollout_ref.ref.megatron.context_parallel_size=${REF_CP} \
+    ++actor_rollout_ref.ref.megatron.override_transformer_config.context_parallel_size=${REF_CP} \
     actor_rollout_ref.ref.megatron.expert_model_parallel_size=${REF_EP} \
     actor_rollout_ref.ref.megatron.expert_tensor_parallel_size=${REF_ETP} \
     reward_model.reward_manager=dapo \

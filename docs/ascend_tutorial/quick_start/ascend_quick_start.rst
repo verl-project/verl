@@ -130,6 +130,9 @@ MindSpeed 源码安装指令：
         # 安装 mbridge
         pip install mbridge
 
+        # mbridge使用提示 For CANN versions 8.5.0 and above, when using mbridge, set this ENV
+        export HCCL_OP_EXPANSION_MODE="AIV"
+
 MindSpeed 对应 Megatron-LM 后端使用场景，使用方式如下：
 
     1. 使能 verl worker 模型 ``strategy`` 配置为 ``megatron`` ，例如 ``actor_rollout_ref.actor.strategy=megatron``。
