@@ -30,7 +30,10 @@ from verl.experimental.agent_loop.load_balance import (
     RequestStickyLoadBalancer,
     load_balancer_actor_class,
 )
-from verl.experimental.agent_loop.load_balance_strategy import create_load_balance_strategy
+from verl.experimental.agent_loop.load_balance_strategy import (
+    create_load_balance_strategy,
+    host_key_for_load_balance,
+)
 from verl.experimental.agent_loop.prometheus_metrics import (
     collect_matching_metric_sample_lines,
     parse_prometheus_metric_value,
@@ -469,7 +472,7 @@ class TestLoadBalanceRegistry:
 
 
 class TestLoadBalanceStrategyPickServer:
-    """直接验证 ``load_balance.py`` 中各 strategy 的 ``pick_server`` 语义（无需 Ray / GPU）。"""
+    """Verify pick_server semantics of each strategy in load_balance.py (no Ray / GPU required)."""
 
     def test_least_requests_prefers_lower_inflight_tie_break_sorted_id(self):
         strat = create_load_balance_strategy("least_requests", server_actor_ids=["s2", "s0", "s1"])
@@ -501,13 +504,37 @@ class TestLoadBalanceStrategyPickServer:
         assert strat.pick_server(["s0", "s1"]) == "s1"
 
     def test_weighted_rr_sequence_weights_1_and_3(self):
-        strat = create_load_balance_strategy("weighted_rr", server_actor_ids=["s0", "s1"], weights=[1.0, 3.0])
+        strat = create_load_balance_strategy(
+            "weighted_rr",
+            server_actor_ids=["s0", "s1"],
+            weights={"s0": 1.0, "s1": 3.0},
+        )
         seq = [strat.pick_server(["s0", "s1"]) for _ in range(8)]
         assert seq == ["s1", "s0", "s1", "s1", "s1", "s0", "s1", "s1"]
 
-    def test_weighted_rr_weights_length_mismatch_raises(self):
-        with pytest.raises(ValueError, match="load_balance_weights length"):
-            create_load_balance_strategy("weighted_rr", server_actor_ids=["s0", "s1"], weights=[1.0])
+    def test_weighted_rr_sequence_resolves_host_port_keys(self):
+        strat = create_load_balance_strategy(
+            "weighted_rr",
+            server_actor_ids=["10.0.0.1:8000", "10.0.0.2:9000"],
+            weights={"10.0.0.1": 1.0, "10.0.0.2": 3.0},
+        )
+        a, b = "10.0.0.1:8000", "10.0.0.2:9000"
+        seq = [strat.pick_server([a, b]) for _ in range(8)]
+        assert seq == [b, a, b, b, b, a, b, b]
+
+    def test_weighted_rr_partial_weights_default_missing_host_to_one(self):
+        """Omitted hosts use weight 1.0; here only s1 is boosted to match the 1:3 two-replica pattern."""
+        strat = create_load_balance_strategy(
+            "weighted_rr",
+            server_actor_ids=["s0", "s1"],
+            weights={"s1": 3.0},
+        )
+        seq = [strat.pick_server(["s0", "s1"]) for _ in range(8)]
+        assert seq == ["s1", "s0", "s1", "s1", "s1", "s0", "s1", "s1"]
+
+    def test_host_key_for_load_balance_ipv6_bracket(self):
+        assert host_key_for_load_balance("[::1]:9090") == "::1"
+        assert host_key_for_load_balance("192.168.0.1:8000") == "192.168.0.1"
 
 
 class TestBuildGlobalLoadBalancerRemoteKwargs:
@@ -556,13 +583,13 @@ class TestLoadBalancerStrategies:
     def test_weighted_rr_returns_valid_server(self, ray_for_lb):
         lb = _lb_remote(
             server_actor_ids=["s0", "s1"],
-            rollout_config=_rollout_for_lb("weighted_rr", load_balance_weights=[1.0, 3.0]),
+            rollout_config=_rollout_for_lb("weighted_rr", load_balance_weights={"s0": 1.0, "s1": 3.0}),
         )
         seq = [ray.get(lb.acquire_server.remote(request_id=f"w{i}")) for i in range(8)]
         assert seq == ["s1", "s0", "s1", "s1", "s1", "s0", "s1", "s1"]
 
     def test_least_kv_cache_routes_like_least_requests_when_metrics_disabled(self, ray_for_lb):
-        """metric_name 为 None 时不拉取 HTTP，``least_kv_cache`` 在未知 KV 下退化为按 inflight + sid。"""
+        """metric_name is None does not scrape HTTP, least_kv_cache falls back to least in-flight + sid."""
         lb = _lb_remote(
             server_actor_ids=["s0", "s1", "s2"],
             rollout_config=_rollout_for_lb("least_kv_cache"),
@@ -586,12 +613,15 @@ class TestLoadBalancerGroupSticky:
         b = ray.get(lb.acquire_server.remote(request_id="req-b", request_group_id=g0))
         assert a == b
 
-    def test_request_sticky_overrides_group(self, ray_for_lb):
+    def test_different_groups_route_independently_same_request_id_ok(self, ray_for_lb):
+        """Group sticky uses only request_group_id; same request_id on two groups gets two LRU entries."""
         lb = GroupStickyLoadBalancer.remote(
             server_actor_ids=["s0", "s1", "s2"],
             rollout_config=_rollout_for_lb("least_requests"),
         )
-        s_first = ray.get(lb.acquire_server.remote(request_id="sticky-id", request_group_id="g99"))
-        ray.get(lb.release_server.remote(server_id=s_first))
-        s_second = ray.get(lb.acquire_server.remote(request_id="sticky-id", request_group_id="g100"))
-        assert s_first == s_second
+        s_g1 = ray.get(lb.acquire_server.remote(request_id="same-rid", request_group_id="g1"))
+        ray.get(lb.release_server.remote(server_id=s_g1))
+        s_g2 = ray.get(lb.acquire_server.remote(request_id="same-rid", request_group_id="g2"))
+        ray.get(lb.release_server.remote(server_id=s_g2))
+        assert ray.get(lb.acquire_server.remote(request_id="other", request_group_id="g1")) == s_g1
+        assert ray.get(lb.acquire_server.remote(request_id="other", request_group_id="g2")) == s_g2

@@ -216,8 +216,9 @@ calculate_log_probs: False
 # Global load balancer (agent-loop rollout). See verl.experimental.agent_loop.load_balance and load_balance_strategy.
 # least_requests | least_kv_cache | weighted_rr | random
 load_balance_strategy: least_requests
-# request: sticky LRU by request_id only. group: also sticky by request_group_id (GRPO rollout.n, same sample).
+# request: sticky LRU by request_id only. group: sticky LRU by request_group_id only (GRPO rollout.n); request_id ignored for routing.
 load_balance_sticky_mode: request
+# weighted_rr only: host id (no port) -> positive weight; unlisted replicas default to 1.0. Example: {"192.168.1.10": 2.0}
 load_balance_weights: null
 load_balance_random_seed: null
 

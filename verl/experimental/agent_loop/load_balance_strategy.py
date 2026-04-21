@@ -36,6 +36,39 @@ _MAX_KV_METRICS_SCRAPE_WORKERS = 32
 _LOAD_BALANCE_STRATEGY_CLASSES: dict[str, type[LoadBalanceStrategy]] = {}
 
 
+def host_key_for_load_balance(server_address: str) -> str:
+    """extract host part from server_address"""
+    a = server_address.strip()
+    if not a:
+        return a
+    # [IPv6 address]:port
+    if a.startswith("["):
+        rb = a.find("]")
+        if rb != -1:
+            return a[1:rb].strip()
+        return a
+    # IPv4 address:port
+    if a.count(":") == 1:
+        host, port = a.rsplit(":", 1)
+        if port.isdigit():
+            return host.strip()
+    return a
+
+
+def resolve_load_balance_weight(weights: dict[str, float], server_address: str) -> float | None:
+    """Return configured weight for server_address, or None if unset.
+
+    Tries exact server_address key first, then host_key_for_load_balance.
+    WeightedRoundRobinStrategy treats None as weight 1.0.
+    """
+    if server_address in weights:
+        return float(weights[server_address])
+    key = host_key_for_load_balance(server_address)
+    if key in weights:
+        return float(weights[key])
+    return None
+
+
 def _register(name: str, cls: type[LoadBalanceStrategy]) -> None:
     if name in _LOAD_BALANCE_STRATEGY_CLASSES:
         raise ValueError(f"Load balance strategy {name!r} is already registered")
@@ -113,8 +146,14 @@ class LeastKVCacheStrategy(LoadBalanceStrategy):
         self._metrics_thread: threading.Thread | None = None
         self._metrics_fail_warned: set[str] = set()
         self._inflight: dict[str, int] = {sid: 0 for sid in self._server_actor_ids}
+        self._metrics_executor: ThreadPoolExecutor | None = None
 
         if self._metric_name:
+            pool_workers = max(1, min(len(self._server_actor_ids), _MAX_KV_METRICS_SCRAPE_WORKERS))
+            self._metrics_executor = ThreadPoolExecutor(
+                max_workers=pool_workers,
+                thread_name_prefix="verl-lb-kv",
+            )
             self._metrics_thread = threading.Thread(
                 target=self._metrics_background_loop,
                 name="verl-lb-least-kv-cache",
@@ -123,13 +162,19 @@ class LeastKVCacheStrategy(LoadBalanceStrategy):
             self._metrics_thread.start()
 
     def _metrics_background_loop(self) -> None:
-        while not self._metrics_stop.is_set():
-            try:
-                self._refresh_metrics_blocking()
-            except Exception:
-                logger.exception("Unexpected error in KV metrics refresh loop")
-            if self._metrics_stop.wait(timeout=self._refresh_interval_s):
-                break
+        try:
+            while not self._metrics_stop.is_set():
+                try:
+                    self._refresh_metrics_blocking()
+                except Exception:
+                    logger.exception("Unexpected error in KV metrics refresh loop")
+                if self._metrics_stop.wait(timeout=self._refresh_interval_s):
+                    break
+        finally:
+            ex = self._metrics_executor
+            if ex is not None:
+                ex.shutdown(wait=True)
+                self._metrics_executor = None
 
     def _mark_metrics_failed(self, sid: str) -> bool:
         with self._lock:
@@ -172,13 +217,14 @@ class LeastKVCacheStrategy(LoadBalanceStrategy):
         if not ids:
             return
 
-        max_workers = min(len(ids), _MAX_KV_METRICS_SCRAPE_WORKERS)
+        pool = self._metrics_executor
+        if pool is None:
+            return
 
         def worker(sid: str) -> None:
             self._refresh_one_replica(sid, metric_name)
 
-        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="verl-lb-kv") as pool:
-            list(pool.map(worker, ids))
+        list(pool.map(worker, ids))
 
     def pick_server(self, server_ids: list[str]) -> str:
         if self._metric_name:
@@ -186,20 +232,27 @@ class LeastKVCacheStrategy(LoadBalanceStrategy):
         else:
             usage = {sid: None for sid in server_ids}
 
-        def key(sid: str) -> tuple[float, int, str]:
-            kv = usage.get(sid)
-            if kv is None:
-                return (float("inf"), self._inflight[sid], sid)
-            return (kv, self._inflight[sid], sid)
+        has_none = any(usage.get(sid) is None for sid in server_ids)
+        if has_none:  # fallback to least in-flight
+            return min(server_ids, key=lambda sid: self._inflight[sid])
 
-        return min(server_ids, key=key)
+        return min(server_ids, key=lambda sid: (usage[sid], self._inflight[sid], sid))
 
 
 @register("weighted_rr")
 class WeightedRoundRobinStrategy(LoadBalanceStrategy):
-    """Smooth weighted round-robin (largest-current-weight), static weights per replica order."""
+    """Smooth weighted round-robin (largest-current-weight).
 
-    def __init__(self, server_actor_ids: list[str], weights: list[float] | None = None, **kwargs: Any):
+    Optional weights maps host id (IPv4/IPv6 without port, or full server_actor_id)
+    to a positive weight. Missing keys default to 1.0. weights is None means all 1.0.
+    """
+
+    def __init__(
+        self,
+        server_actor_ids: list[str],
+        weights: dict[str, float] | None = None,
+        **kwargs: Any,
+    ):
         self._ids = list(server_actor_ids)
         n = len(self._ids)
         if n == 0:
@@ -207,22 +260,21 @@ class WeightedRoundRobinStrategy(LoadBalanceStrategy):
         if weights is None:
             w = [1.0] * n
         else:
-            if len(weights) != n:
-                raise ValueError(f"load_balance_weights length {len(weights)} != num servers {n}")
-            w = [float(x) for x in weights]
+            # if weight is not found, use 1.0 as default
+            w = [resolve_load_balance_weight(weights, sid) or 1.0 for sid in self._ids]
         self._weights = w
         self._current = [0.0] * n
         self._inflight: dict[str, int] = {sid: 0 for sid in self._ids}
         self._pos = {sid: i for i, sid in enumerate(self._ids)}
 
     def pick_server(self, server_ids: list[str]) -> str:
-        # weights define share across replicas.
+        # Smooth WRR state lives in _current
         indices = [self._pos[s] for s in server_ids]
         total = sum(self._weights[i] for i in indices)
         for i in indices:
-            self._inflight[self._ids[i]] += self._weights[i]
-        best_i = max(indices, key=lambda i: (self._inflight[self._ids[i]], -i))
-        self._inflight[self._ids[best_i]] -= total
+            self._current[i] += self._weights[i]
+        best_i = max(indices, key=lambda i: (self._current[i], -i))
+        self._current[best_i] -= total
         return self._ids[best_i]
 
 

@@ -60,7 +60,7 @@ class GlobalRequestLoadBalancer(ABC):
         kv = rollout_config.kv_cache_metrics
         strategy_init_kwargs: dict[str, Any] = {}
         if rollout_config.load_balance_weights is not None:
-            strategy_init_kwargs["weights"] = list(rollout_config.load_balance_weights)
+            strategy_init_kwargs["weights"] = dict(rollout_config.load_balance_weights)
         if rollout_config.load_balance_random_seed is not None:
             strategy_init_kwargs["random_seed"] = rollout_config.load_balance_random_seed
         if rollout_config.load_balance_strategy == "least_kv_cache":
@@ -79,11 +79,6 @@ class GlobalRequestLoadBalancer(ABC):
             raise ValueError("server_actor_ids must be non-empty")
         bundle = GlobalRequestLoadBalancer.init_bundle_from_rollout(rollout_config)
         load_balance_strategy = bundle["load_balance_strategy"]
-        if load_balance_strategy == "weighted_rr" and rollout_config.load_balance_weights is not None:
-            nw = len(rollout_config.load_balance_weights)
-            ns = len(server_actor_ids)
-            if nw != ns:
-                raise ValueError(f"load_balance_weights length {nw} must match number of rollout replicas {ns}")
         self._routing_cache_size = bundle["max_cache_size"]
         self._server_actor_ids = list(server_actor_ids)
         sk = bundle["strategy_init_kwargs"] or {}
@@ -101,7 +96,7 @@ class GlobalRequestLoadBalancer(ABC):
         """Release a server after a request completes, decrementing strategy in-flight counts."""
         inflight = getattr(self.strategy, "_inflight", None)
         if inflight is None:
-            raise ValueError("load balance strategy does not expose _inflight; cannot release_server")
+            return  # strategy does not expose _inflight; cannot release_server
         if server_id not in inflight:
             raise ValueError(f"Invalid server_id for release: {server_id}")
         if inflight[server_id] <= 0:
@@ -136,8 +131,11 @@ class RequestStickyLoadBalancer(GlobalRequestLoadBalancer):
 @ray.remote
 class GroupStickyLoadBalancer(GlobalRequestLoadBalancer):
     """
-    GRPO-style group sticky:
-    - Same request_group_id (e.g. step+sample) pins rollout-n repeats.
+    GRPO / rollout-n group sticky only: request_id is not used for routing.
+
+    An LRU maps request_group_id (e.g. f"{global_step}:{sample_index}") to a replica so
+    all repeats for that sample share one server. Unknown groups go through strategy.pick_server,
+    then the mapping is recorded.
     """
 
     def __init__(self, server_actor_ids: list[str], rollout_config: RolloutConfig):
@@ -145,13 +143,15 @@ class GroupStickyLoadBalancer(GlobalRequestLoadBalancer):
         self._request_group_to_server: LRUCache[str, str] = LRUCache(maxsize=self._routing_cache_size)
 
     def acquire_server(self, request_id: str, request_group_id: str | None = None) -> str:
-        if request_group_id and request_group_id in self._request_group_to_server:
+        _ = request_id  # API compatibility; group sticky does not route by request_id.
+        if not request_group_id:
+            raise ValueError("request_group_id is required for group sticky")
+        if request_group_id in self._request_group_to_server:
             server_id = self._request_group_to_server[request_group_id]
             self.update_inflight(server_id, 1)
             return server_id
         server_id = self.strategy.pick_server(list(self._server_actor_ids))
-        if request_group_id:
-            self._request_group_to_server[request_group_id] = server_id
+        self._request_group_to_server[request_group_id] = server_id
         self.update_inflight(server_id, 1)
         return server_id
 

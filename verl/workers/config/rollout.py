@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import math
 import warnings
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -192,6 +193,7 @@ class RolloutConfig(BaseConfig):
         "response_length",
         "expert_parallel_size",
         "moe_tensor_parallel_size",
+        "load_balance_weights",
     }
 
     name: Optional[str] = MISSING
@@ -305,8 +307,9 @@ class RolloutConfig(BaseConfig):
     load_balance_strategy: str = "least_requests"
     # request: LRU sticky by request_id only. group: also LRU by request_group_id (GRPO rollout.n repeats).
     load_balance_sticky_mode: str = "request"
-    # For weighted_rr, one weight per rollout replica (same order as server addresses).
-    load_balance_weights: Optional[list[float]] = None
+    # For weighted_rr: optional map server host id (IPv4/IPv6 without port, no scheme) -> weight.
+    # Unlisted replicas default to weight 1.0. Omit the field (null) for all 1.0.
+    load_balance_weights: Optional[dict[str, float]] = None
     load_balance_random_seed: Optional[int] = None
     kv_cache_metrics: KvCacheMetricsConfig = field(default_factory=KvCacheMetricsConfig)
 
@@ -361,15 +364,29 @@ class RolloutConfig(BaseConfig):
                     f"Current rollout {self.name=} not implemented pipeline_model_parallel_size > 1 yet."
                 )
 
-        if self.load_balance_weights is not None and len(self.load_balance_weights) < 1:
-            raise ValueError("load_balance_weights must be non-empty when set")
+        if self.load_balance_weights is not None:
+            src = self.load_balance_weights
+            if not isinstance(src, dict):
+                raise ValueError("load_balance_weights must be a dict when set")
+            if len(src) < 1:
+                raise ValueError("load_balance_weights must be non-empty when set")
+            normalized: dict[str, float] = {}
+            for k, v in src.items():
+                sk = str(k).strip()
+                if not sk:
+                    raise ValueError("load_balance_weights keys must be non-empty strings")
+                fv = float(v)
+                if not math.isfinite(fv) or fv <= 0:
+                    raise ValueError(f"load_balance_weights[{sk!r}] must be a finite positive float, got {v!r}")
+                normalized[sk] = fv
+            self.load_balance_weights = normalized
         if self.load_balance_sticky_mode not in ("request", "group"):
             raise ValueError("load_balance_sticky_mode must be 'request' or 'group'")
 
 
 @dataclass
 class DiffusionRolloutConfig(RolloutConfig):
-    _mutable_fields = {"max_model_len", "load_format"}
+    _mutable_fields = {*RolloutConfig._mutable_fields}
 
     val_kwargs: DiffusionSamplingConfig = field(default_factory=DiffusionSamplingConfig)
 

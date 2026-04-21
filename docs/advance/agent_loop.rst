@@ -202,22 +202,22 @@ AsyncLLMServerManager
 
 AsyncLLMServerManager serve as proxy to multiple AsyncLLMServer instances, provides:
 
-- load balance: pluggable strategies (see below) with default ``least_requests`` (fewest in-flight requests; deterministic tie-break).
-- sticky session: bind ``request_id`` to a server instance so the same ``request_id`` is sent to the same server on later turns (prefix caching).
-- optional **GRPO / rollout-n group** affinity: set ``rollout.load_balance_sticky_mode`` to ``group``. The trainer uses ``GroupStickyLoadBalancer`` (``RequestStickyLoadBalancer`` when mode is ``request``). Routing consults ``request_id`` LRU first, then ``request_group_id`` LRU (same size as request cache): ``request_group_id`` is ``f"{global_step}:{sample_index}"`` so repeated rollouts for the same sample share one replica. Then the configured strategy picks among replicas.
+- load balance: pluggable strategies (see below) with default `least_requests` (fewest in-flight requests; deterministic tie-break).
+- sticky session: bind `request_id` to a server instance so the same `request_id` is sent to the same server on later turns (prefix caching).
+- optional **GRPO / rollout-n group** affinity: set `rollout.load_balance_sticky_mode` to `group`. The trainer uses `GroupStickyLoadBalancer` (`RequestStickyLoadBalancer` when mode is `request`). In **group** mode, routing uses **only** an LRU on `request_group_id` (same capacity as the request-mode cache); `request_id` is not consulted. Typical id is `f"{global_step}:{sample_index}"` so repeated rollouts for the same sample share one replica. A new `request_group_id` triggers `pick_server` among replicas, then the mapping is stored.
 
-**Global load balancer configuration** (``rollout.*`` in Hydra, see ``verl/trainer/config/rollout/rollout.yaml``):
+**Global load balancer configuration** (`rollout.*` in Hydra, see `verl/trainer/config/rollout/rollout.yaml`):
 
-- ``load_balance_sticky_mode``: ``request`` (default) | ``group``.
-- ``load_balance_strategy``: ``least_requests`` | ``least_kv_cache`` | ``weighted_rr`` | ``random``.
-- ``least_kv_cache``: the global load balancer actor periodically HTTP GETs each replica's Prometheus text endpoint (default path ``/metrics``), and parses ``kv_cache_metrics.metric_name`` (identifier before ``{``). If several samples share that name with different label sets, the **maximum** value is used per replica. Requires the engine to expose metrics (e.g. SGLang ``--enable-metrics``). If scraping fails, routing falls back to least in-flight behavior. This path does **not** query the cluster Prometheus server; it scrapes each replica directly.
-- ``weighted_rr``: optional ``load_balance_weights`` (one weight per replica, same order as servers).
-- ``load_balance_random_seed``: optional seed for ``random`` strategy (reproducibility in tests).
+- `load_balance_sticky_mode`: `request` (default) | `group`.
+- `load_balance_strategy`: `least_requests` | `least_kv_cache` | `weighted_rr` | `random`.
+- `least_kv_cache`: the global load balancer actor periodically HTTP GETs each replica's Prometheus text endpoint (default path `/metrics`), and parses `kv_cache_metrics.metric_name` (identifier before `{`). If several samples share that name with different label sets, the **maximum** value is used per replica. Requires the engine to expose metrics (e.g. SGLang `--enable-metrics`). If scraping fails, routing falls back to least in-flight behavior. This path does **not** query the cluster Prometheus server; it scrapes each replica directly.
+- `weighted_rr`: optional `load_balance_weights` maps replica **host** keys (IPv4/IPv6 without port or scheme; the full `server_actor_id` string is also accepted when it has no port) to a **positive** weight. Replicas whose host is **not** listed use weight **1.0**. If the whole setting is omitted (`null`), every replica has weight 1.0.
+- `load_balance_random_seed`: optional seed for `random` strategy (reproducibility in tests).
 
-Custom strategies: subclass ``LoadBalanceStrategy`` in ``verl.experimental.agent_loop.load_balance_strategy``, implement ``pick_server`` and ``__init__(self, server_actor_ids, **kwargs)``, and register with ``@register("strategy_name")`` on the class (same pattern as ``@register("tool_agent")`` on agent loops). Alternatively call ``register_load_balance_strategy(name, YourStrategyClass)``. Custom global load balancer Ray actors: subclass ``GlobalRequestLoadBalancer`` in ``verl.experimental.agent_loop.load_balance``, decorate the subclass with ``@ray.remote``, then call ``register_load_balancer_class("your_mode", YourRemoteActorClass)`` and set ``rollout.load_balance_sticky_mode`` to ``your_mode``.
+Custom strategies: subclass `LoadBalanceStrategy` in `verl.experimental.agent_loop.load_balance_strategy`, implement `pick_server` and `__init__(self, server_actor_ids, **kwargs)`, and register with `@register("strategy_name")` on the class. Custom global load balancer Ray actors: subclass `GlobalRequestLoadBalancer` in `verl.experimental.agent_loop.load_balance`, decorate the subclass with `@ray.remote`, then call `register_load_balancer_class("your_mode", YourRemoteActorClass)` and set `rollout.load_balance_sticky_mode` to `your_mode`.
 
-AsyncLLMServerManager is passed to ``AgentLoopBase.__init__``, whenever user want to interact with LLM in agent loop,
-they can call ``AsyncLLMServerManager.generate`` to generate response_ids.
+AsyncLLMServerManager is passed to `AgentLoopBase.__init__`, whenever user want to interact with LLM in agent loop,
+they can call `AsyncLLMServerManager.generate` to generate response_ids.
 
 .. code:: python
 
@@ -228,6 +228,7 @@ they can call ``AsyncLLMServerManager.generate`` to generate response_ids.
            *,
            prompt_ids: list[int],
            sampling_params: dict[str, Any],
+           request_group_id: str | None = None,
        ) -> list[int]:
            """Generate tokens from prompt ids.
 
@@ -235,6 +236,7 @@ they can call ``AsyncLLMServerManager.generate`` to generate response_ids.
                request_id (str): request id for sticky session.
                prompt_ids (List[int]): List of prompt token ids.
                sampling_params (Dict[str, Any]): Sampling parameters for the chat completion.
+               request_group_id (str | None): optional id shared by GRPO / rollout-n repeats (same sample, same step).
 
            Returns:
                List[int]: List of generated token ids.
