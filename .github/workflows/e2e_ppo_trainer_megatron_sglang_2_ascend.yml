@@ -116,8 +116,8 @@ jobs:
           clean: true
       - name: Install the current repository
         run: |
-          pip3 install -r requirements-test.txt
-          pip3 install --no-deps -e .
+          pip3 install pytest pytest-asyncio
+          pip3 install --no-deps --no-build-isolation -e .
       - name: Check final pip list
         run: |
           pip list
