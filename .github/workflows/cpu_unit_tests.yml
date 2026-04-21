@@ -87,14 +87,18 @@ jobs:
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
       TORCH_COMPILE_DISABLE: 1
       TORCHINDUCTOR_DISABLE: 1
+      UV_NO_CACHE: 1
+      UV_SYSTEM_PYTHON: 1
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
+      - name: Install uv
+        run: pip install uv
       - name: Install the current repository
         run: |
-          pip3 install -r requirements-test.txt
-          pip3 install --no-deps -e .
+          uv pip install -r requirements-test.txt
+          uv pip install --no-deps -e .
       - name: Download datasets
         run: |
           python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k

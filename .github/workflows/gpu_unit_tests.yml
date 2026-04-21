@@ -99,18 +99,22 @@ jobs:
       HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
       NO_PROXY: "localhost,127.0.0.1"
       HF_HUB_ENABLE_HF_TRANSFER: 1
+      UV_NO_CACHE: 1
+      UV_SYSTEM_PYTHON: 1
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
+      - name: Install uv
+        run: pip install uv
       - name: Install the current repository
         run: |
-          pip3 install hf_transfer
-          pip3 install -r requirements-test.txt
-          pip3 install --no-deps -e .
-          pip3 install cupy-cuda12x==13.6.0 pytest-asyncio
-          pip3 install --ignore-installed blinker
-          pip3 install --ignore-installed mlflow "numpy<2.0"
+          uv pip install hf_transfer
+          uv pip install -r requirements-test.txt
+          uv pip install --no-deps -e .
+          uv pip install cupy-cuda12x==13.6.0 pytest-asyncio
+          uv pip install --ignore-installed blinker
+          uv pip install --ignore-installed mlflow "numpy<2.0"
       - name: Run all GPU unit tests
         run: |
           pytest -s -x --ignore-glob="*on_npu.py" --ignore-glob="*test_special_*.py" --ignore-glob='*on_cpu.py' --ignore-glob="*test_vllm*" --ignore-glob="*_sglang*" --ignore-glob="*_hf_rollout*" --ignore-glob="tests/models/" --ignore-glob='tests/special*' --ignore-glob="tests/experimental" --ignore-glob="tests/workers/reward_model" --ignore-glob="*test_shared_memory*" --ignore-glob="tests/workers/rollout/rollout_trtllm" --ignore-glob="*test_bucketed_weight_transfer*" tests/

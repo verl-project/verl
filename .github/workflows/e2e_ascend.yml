@@ -76,6 +76,8 @@ jobs:
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      UV_NO_CACHE: 1
+      UV_SYSTEM_PYTHON: 1
     steps:
       - name: Check npu and CANN info
         run: |
@@ -89,9 +91,11 @@ jobs:
         with:
           fetch-depth: 0
           clean: true
+      - name: Install uv
+        run: pip install uv
       - name: Install the current repository
         run: |
-          pip install --no-deps -e .
+          uv pip install --no-deps -e .
       - name: Check final pip list
         run: |
           pip list
@@ -146,7 +150,7 @@ jobs:
           clean: true
       - name: Install the current repository
         run: |
-          pip install --no-deps --no-build-isolation -e .
+          uv pip install --no-deps --no-build-isolation -e .
       - name: Check final pip list
         run: |
           pip list
@@ -186,6 +190,8 @@ jobs:
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      UV_NO_CACHE: 1
+      UV_SYSTEM_PYTHON: 1
     steps:
       - name: Check npu and CANN info
         run: |
@@ -199,9 +205,11 @@ jobs:
         with:
           fetch-depth: 0
           clean: true
+      - name: Install uv
+        run: pip install uv
       - name: Install the current repository
         run: |
-          pip install --no-deps -e .
+          uv pip install --no-deps -e .
       - name: Check final pip list
         run: |
           pip list
