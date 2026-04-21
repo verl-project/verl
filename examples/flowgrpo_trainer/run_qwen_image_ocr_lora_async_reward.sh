@@ -10,7 +10,8 @@ REWARD_ENGINE=vllm
 reward_path=examples/flowgrpo_trainer/reward_fn.py
 reward_model_name=$HOME/models/Qwen/Qwen3-VL-8B-Instruct
 
-NUM_GPUS_ACTOR_ROLLOUT_REWARD=4
+NUM_GPUS_ACTOR_ROLLOUT=4
+NUM_GPUS_REWARD=1
 
 
 python3 -m verl.trainer.main_flowgrpo \
@@ -37,7 +38,7 @@ python3 -m verl.trainer.main_flowgrpo \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=$ENGINE \
     actor_rollout_ref.rollout.n=16 \
-    actor_rollout_ref.rollout.agent.num_workers=$NUM_GPUS_ACTOR_ROLLOUT_REWARD \
+    actor_rollout_ref.rollout.agent.num_workers=$NUM_GPUS_ACTOR_ROLLOUT \
     actor_rollout_ref.rollout.load_format=safetensors \
     actor_rollout_ref.rollout.layered_summon=True \
     actor_rollout_ref.rollout.true_cfg_scale=4.0 \
@@ -50,20 +51,26 @@ python3 -m verl.trainer.main_flowgrpo \
     actor_rollout_ref.rollout.val_kwargs.algo.noise_level=0.0 \
     actor_rollout_ref.rollout.external_lib=examples.flowgrpo_trainer.vllm_omni_impl \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=32 \
-    reward.num_workers=$NUM_GPUS_ACTOR_ROLLOUT_REWARD \
+    reward.num_workers=$NUM_GPUS_REWARD \
     reward.reward_manager.name=visual \
     reward.reward_model.enable=True \
     reward.reward_model.model_path=$reward_model_name \
     reward.reward_model.rollout.name=$REWARD_ENGINE \
-    reward.reward_model.rollout.tensor_model_parallel_size=4 \
+    reward.reward_model.enable_resource_pool=True \
+    reward.reward_model.nnodes=1 \
+    reward.reward_model.n_gpus_per_node=$NUM_GPUS_REWARD \
+    reward.reward_model.rollout.gpu_memory_utilization=0.9 \
+    reward.reward_model.rollout.free_cache_engine=False \
+    reward.reward_model.rollout.tensor_model_parallel_size=1 \
+    reward.reward_model.rollout.enforce_eager=False \
     reward.custom_reward_function.path=$reward_path \
     reward.custom_reward_function.name=compute_score_ocr \
     trainer.logger='["console", "wandb"]' \
     trainer.project_name=flow_grpo \
-    trainer.experiment_name=qwen_image_ocr_lora \
+    trainer.experiment_name=qwen_image_ocr_lora_async_reward \
     trainer.log_val_generations=8 \
     trainer.val_before_train=False \
-    trainer.n_gpus_per_node=$NUM_GPUS_ACTOR_ROLLOUT_REWARD \
+    trainer.n_gpus_per_node=$NUM_GPUS_ACTOR_ROLLOUT \
     trainer.nnodes=1 \
     trainer.save_freq=30 \
     trainer.test_freq=30 \
