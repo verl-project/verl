@@ -234,9 +234,9 @@ class LeastKVCacheStrategy(LoadBalanceStrategy):
 
         has_none = any(usage.get(sid) is None for sid in server_ids)
         if has_none:  # fallback to least in-flight
-            return min(server_ids, key=lambda sid: self._inflight[sid])
+            return min(server_ids, key=lambda sid: (self._inflight[sid], sid))
 
-        return min(server_ids, key=lambda sid: (usage[sid], self._inflight[sid], sid))
+        return min(server_ids, key=lambda sid: (usage[sid], sid))
 
 
 @register("weighted_rr")
