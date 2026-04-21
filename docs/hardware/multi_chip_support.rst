@@ -60,11 +60,11 @@ Architecture Overview
     |  |                                                         |      |
     |  |  PlatformRegistry --auto-detect--> BasePlatform         |      |
     |  |       |                                 |               |      |
-    |  |       +-- CUDAPlatform  (nvidia/cuda)   +- is_available|      |
-    |  |       +-- NPUPlatform   (ascend/npu)    +- current_dev |      |
-    |  |       +-- MLUPlatform   (cambricon/mlu) +- device_count|      |
-    |  |       +-- MUSAPlatform  (mthreads/musa) +- empty_cache |      |
-    |  |       +-- _CPUPlatform  (fallback)      +- ...         |      |
+    |  |       +-- CUDAPlatform  (nvidia/cuda)   +- is_available |      |
+    |  |       +-- NPUPlatform   (ascend/npu)    +- current_dev  |      |
+    |  |       +-- MLUPlatform   (cambricon/mlu) +- device_count |      |
+    |  |       +-- MUSAPlatform  (mthreads/musa) +- empty_cache  |      |
+    |  |       +-- _CPUPlatform  (fallback)      +- ...          |      |
     |  |                                                         |      |
     |  +---------------------------------------------------------+      |
     |                        |                                          |
@@ -73,7 +73,7 @@ Architecture Overview
     |  |              Engine Plugin System                       |      |
     |  |            (verl.plugin.engine)                         |      |
     |  |                                                         |      |
-    |  |  EngineRegistry.get_engine_cls(model_type, backend)    |      |
+    |  |  EngineRegistry.get_engine_cls(model_type, backend)     |      |
     |  |       |                                                 |      |
     |  |       | Resolution: VERL_ENGINE_DEVICE > auto > cuda    |      |
     |  |       |                                                 |      |
@@ -88,7 +88,7 @@ Architecture Overview
     |    |                        |  |                  |               |
     |    | +------------------+   |  | +--------------+ |               |
     |    | | MegatronFLEngine |   |  | | vLLM         | |               |
-    |    | | +- TE-FL         |   |  | | + plugin-FL  | |               |
+    |    | | +- TE-FL         |   |  | | +- plugin-FL | |               |
     |    | | +- FlagGems      |   |  | | +- FlagGems  | |               |
     |    | | +- FlagCX        |   |  | | +- FlagCX    | |               |
     |    | +------------------+   |  | +--------------+ |               |
@@ -102,18 +102,17 @@ Architecture Overview
     |                                                                   |
     |  +---------------------------------------------------------+      |
     |  |                    FLEnvManager                         |      |
-    |  |  Unified env var management for training and rollout   |      |
-    |  |  Location: verl/plugin/utils/config_manager.py         |      |
+    |  |  Unified env var management for training and rollout    |      |
+    |  |  Location: verl/plugin/utils/config_manager.py          |      |
     |  +---------------------------------------------------------+      |
     |                                                                   |
     |  +---------------------------------------------------------+      |
     |  |                 External Dependencies                   |      |
     |  |                                                         |      |
-    |  |  +-----------+ +----------+ +--------+ +-------------+  |      |
-    |  |  | FlagGems  | | FlagCX   | | TE-FL  | | vllm-plugin |  |      |
-    |  |  | (Triton   | | (Comm    | | (MCore | |    -FL      |  |      |
-    |  |  |  ops)     | |  library)| | train) | | (inference) |  |      |
-    |  |  +-----------+ +----------+ +--------+ +-------------+  |      |
+    |  |  +----------+ +---------+ +--------+ +---------------+  |      |
+    |  |  | FlagGems | | FlagCX  | |  TE-FL | | vllm-plugin-FL|  |      |
+    |  |  | (Triton) | | (Comm)  | | (MCore)| | (inference)   |  |      |
+    |  |  +----------+ +---------+ +--------+ +---------------+  |      |
     |  |                                                         |      |
     |  +---------------------------------------------------------+      |
     |                                                                   |
