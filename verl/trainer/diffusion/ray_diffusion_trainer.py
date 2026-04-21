@@ -85,7 +85,7 @@ def compute_advantage(
         DataProto: The updated data with computed ``advantages`` and ``returns`` in its batch.
     """
     adv_kwargs = {
-        "sample_level_rewards": data.batch["sample_level_rewards"].clone(),
+        "sample_level_rewards": data.batch["sample_level_rewards"],
         "config": config,
     }
     if "uid" in data.non_tensor_batch:
