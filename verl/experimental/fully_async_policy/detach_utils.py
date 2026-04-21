@@ -26,6 +26,13 @@ from verl.experimental.fully_async_policy.intermediate_trajectory_utils import (
 )
 from verl.trainer.ppo.ray_trainer import compute_response_mask
 
+# Data flow logger — imported lazily to avoid hard dependency for non-GUI callers.
+try:
+    from recipe.fully_async_gui_agent.data_flow_logger import log_dataproto, log_message
+    _HAS_FLOW_LOG = True
+except ImportError:
+    _HAS_FLOW_LOG = False
+
 
 @dataclass
 class RolloutSample:
@@ -84,12 +91,32 @@ def prepare_single_generation_data(batch_dict, config) -> DataProto:
 
 
 def addition_process(output: DataProto):
-    """collect metirics"""
-    metrics = output.meta_info.pop("metrics")  # List[Dict[str, str]]
-    processing_times_list = [item["generate_sequences"] for item in metrics]
-    tool_calls_times_list = [item["tool_calls"] for item in metrics]
-    output.non_tensor_batch["processing_times"] = processing_times_list
-    output.non_tensor_batch["tool_calls_times"] = tool_calls_times_list
+    """collect metrics
+
+    Stores per-sample timing info as numpy arrays in ``non_tensor_batch`` so
+    they pass :py:meth:`DataProto.check_consistency` (which requires every
+    value in ``non_tensor_batch`` to be an ``np.ndarray``).
+
+    Some agent loops (e.g. the GUI agent) do not record a ``"tool_calls"``
+    timer; we fall back to ``0.0`` for those entries instead of raising
+    ``KeyError``.
+    """
+    if _HAS_FLOW_LOG:
+        log_dataproto(output, stage="addition_process.input")
+
+    metrics = output.meta_info.pop("metrics")  # List[Dict[str, float]]
+    processing_times_list = [item.get("generate_sequences", 0.0) for item in metrics]
+    tool_calls_times_list = [item.get("tool_calls", 0.0) for item in metrics]
+    output.non_tensor_batch["processing_times"] = np.array(
+        processing_times_list, dtype=np.float64
+    )
+    output.non_tensor_batch["tool_calls_times"] = np.array(
+        tool_calls_times_list, dtype=np.float64
+    )
+
+    if _HAS_FLOW_LOG:
+        log_dataproto(output, stage="addition_process.output")
+
     return output
 
 
@@ -139,8 +166,17 @@ def assemble_batch_from_rollout_samples(
             processor=processor,
             rollout_config=rollout_config,
         )
+        if _HAS_FLOW_LOG:
+            log_dataproto(
+                expanded_batch,
+                stage="assemble.after_expand_intermediate",
+                extra={"sample_id": rs.sample_id},
+            )
         rollout_samples_batch.append(expanded_batch)
     final_batch = DataProto.concat(rollout_samples_batch)
+
+    if _HAS_FLOW_LOG:
+        log_dataproto(final_batch, stage="assemble.after_concat")
 
     # Calculate response_mask (if not present)
     if "response_mask" not in final_batch.batch.keys():
@@ -197,6 +233,9 @@ def assemble_batch_from_rollout_samples(
     )
 
     print(f"[BatchUtils] Batch assembly completed in {time.time() - start_time:.2f}s")
+
+    if _HAS_FLOW_LOG:
+        log_dataproto(final_batch, stage="assemble.final_output")
 
     return final_batch
 

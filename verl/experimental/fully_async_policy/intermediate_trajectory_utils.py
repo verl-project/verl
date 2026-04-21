@@ -40,6 +40,13 @@ from verl.experimental.agent_loop.multi_trajectory_agent_loop import (
 )
 from verl.utils.model import compute_position_id_with_mask
 
+# Data flow logger — imported lazily to avoid hard dependency.
+try:
+    from recipe.fully_async_gui_agent.data_flow_logger import log_dataproto, log_message
+    _HAS_FLOW_LOG = True
+except ImportError:
+    _HAS_FLOW_LOG = False
+
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
@@ -390,4 +397,16 @@ def expand_intermediate_trajectories(
         len(expanded),
         per_row_counts,
     )
+
+    if _HAS_FLOW_LOG:
+        log_dataproto(
+            expanded,
+            stage="expand_intermediate_trajectories.output",
+            extra={
+                "n_main_rows": n_rows,
+                "n_intermediate_appended": total_appended,
+                "per_row_counts": per_row_counts,
+            },
+        )
+
     return expanded
