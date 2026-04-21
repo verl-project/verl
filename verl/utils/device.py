@@ -212,10 +212,20 @@ def get_npu_versions() -> tuple[str, str]:
             raise  # Re-raise original error if env var format invalid
         
         # Retry with the first available device from K8s
-        result = subprocess.run(
-            ["npu-smi", "info", "-t", "board", "-i", str(npu_id)],
-            capture_output=True, text=True, check=True
-        )
+        try:
+            result = subprocess.run(
+                ["npu-smi", "info", "-t", "board", "-i", str(npu_id)],
+                capture_output=True, text=True, check=True
+            )
+        except subprocess.CalledProcessError:
+            # On A3 machines with one-card-two-die, the device ID is a die index.
+            # Try using the physical card index (npu_id // 2) instead.
+            physical_card_id = npu_id // 2
+            result = subprocess.run(
+                ["npu-smi", "info", "-t", "board", "-i", str(physical_card_id)],
+                capture_output=True, text=True, check=True
+            )
+
 
     # Parse software version from output
     software_version = None
