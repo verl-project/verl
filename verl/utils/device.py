@@ -206,7 +206,7 @@ def get_npu_versions() -> tuple[str, str]:
             raise  # Re-raise original error if env var not set
 
         try:
-            npu_id = int(visible_devices.split(',')[0])
+            npu_id = int(visible_devices.split(",")[0])
         except (ValueError, IndexError):
             raise  # Re-raise original error if env var format invalid
 
