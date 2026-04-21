@@ -103,6 +103,13 @@ def preprocess_packed_seqs(
             start_idx = cu_seqlens_padded_cpu[i] // cp_size
             # split to 2 chunks
             d = input_ids[i, attention_mask[i]]
+            # Pad valid tokens to seqlen_padded_i so that CP chunk indices
+            # (computed in padded coordinate space) stay within bounds.
+            if d.shape[0] < seqlen_padded_i:
+                d = torch.cat(
+                    [d, torch.zeros(seqlen_padded_i - d.shape[0], dtype=d.dtype, device=d.device)],
+                    dim=0,
+                )
             first_start = half_seqlen * cp_rank
             first_end = min(half_seqlen * (cp_rank + 1), d.shape[0])
             first_len = max(first_end - first_start, 0)
