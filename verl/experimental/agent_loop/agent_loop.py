@@ -525,6 +525,14 @@ class AgentLoopWorker:
                 function_tools=FunctionToolListWrap(self.function_tools),
             )
             output: AgentLoopOutput = await agent_loop.run(sampling_params, **kwargs)
+            if output is None:
+                print(
+                    f"[AgentLoopWorker][RUN_RETURNED_NONE] agent={agent_name} "
+                    f"sample_index={trajectory.get('sample_index')} "
+                    f"step={trajectory.get('step')} rollout_n={trajectory.get('rollout_n')} "
+                    f"validate={trajectory.get('validate')}",
+                    flush=True,
+                )
             return await self._agent_loop_postprocess(output, trajectory["validate"], **kwargs)
 
     async def _agent_loop_postprocess(self, output, validate, **kwargs) -> _InternalAgentLoopOutput:
