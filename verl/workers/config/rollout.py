@@ -151,16 +151,11 @@ class PrometheusConfig(BaseConfig):
 @dataclass
 class KvCacheMetricsConfig(BaseConfig):
     """
-    HTTP /metrics (Prometheus text) scraping for load_balance_strategy: least_kv_cache.
-
-    The load balancer GETs http://{replica_address}{metrics_path} for each replica.
-    Set metric_name to the gauge/counter identifier (before {), engine-specific.
-    If multiple lines share that name with different labels, the largest value is used.
+    load_balance_strategy: least_kv_cache.
     """
 
     refresh_interval_s: float = 2.0
     metrics_path: str = "/metrics"
-    # Exact metric identifier before {, e.g. vllm:kv_cache_usage_perc or sglang:token_usage
     metric_name: Optional[str] = None
     fetch_timeout_s: float = 2.0
 
@@ -302,13 +297,8 @@ class RolloutConfig(BaseConfig):
 
     enable_sleep_mode: bool = True
 
-    # --- Global agent-loop load balancer (GlobalRequestLoadBalancer) ---
-    # Strategy names are registered in verl.experimental.agent_loop.load_balance_strategy.
     load_balance_strategy: str = "least_requests"
-    # request: LRU sticky by request_id only. group: also LRU by request_group_id (GRPO rollout.n repeats).
     load_balance_sticky_mode: str = "request"
-    # For weighted_rr: optional map server host id (IPv4/IPv6 without port, no scheme) -> weight.
-    # Unlisted replicas default to weight 1.0. Omit the field (null) for all 1.0.
     load_balance_weights: Optional[dict[str, float]] = None
     load_balance_random_seed: Optional[int] = None
     kv_cache_metrics: KvCacheMetricsConfig = field(default_factory=KvCacheMetricsConfig)
@@ -366,20 +356,13 @@ class RolloutConfig(BaseConfig):
 
         if self.load_balance_weights is not None:
             src = self.load_balance_weights
-            if not isinstance(src, dict):
-                raise ValueError("load_balance_weights must be a dict when set")
-            if len(src) < 1:
-                raise ValueError("load_balance_weights must be non-empty when set")
-            normalized: dict[str, float] = {}
-            for k, v in src.items():
-                sk = str(k).strip()
-                if not sk:
-                    raise ValueError("load_balance_weights keys must be non-empty strings")
-                fv = float(v)
-                if not math.isfinite(fv) or fv <= 0:
-                    raise ValueError(f"load_balance_weights[{sk!r}] must be a finite positive float, got {v!r}")
-                normalized[sk] = fv
-            self.load_balance_weights = normalized
+            if not isinstance(src, dict) or len(src) < 1:
+                raise ValueError("load_balance_weights must be a non-empty dict when set")
+            self.load_balance_weights = {
+                str(k).strip(): float(v) for k, v in src.items() if math.isfinite(float(v)) and float(v) > 0
+            }
+            if not self.load_balance_weights:
+                raise ValueError("the weights must be a non-empty dict when set")
         if self.load_balance_sticky_mode not in ("request", "group"):
             raise ValueError("load_balance_sticky_mode must be 'request' or 'group'")
 

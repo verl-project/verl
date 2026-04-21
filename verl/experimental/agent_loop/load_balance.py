@@ -1,4 +1,4 @@
-# Copyright 2025 Bytedance Ltd. and/or its affiliates
+# Copyright 2026 Bytedance Ltd. and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -8,15 +8,9 @@
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR ANY KIND, either express or implied.
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""
-Ray global load balancers:
-- Concrete actors use @ray.remote.
-- load_balancer_actor_class maps rollout.load_balance_sticky_mode to the actor class.
-"""
-
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -29,7 +23,6 @@ from verl.experimental.agent_loop.load_balance_strategy import create_load_balan
 from verl.workers.config import RolloutConfig
 
 DEFAULT_ROUTING_CACHE_SIZE = 10000
-
 _LOAD_BALANCER_ACTOR_CLASSES: dict[str, Any] = {}
 
 
@@ -109,8 +102,12 @@ class GlobalRequestLoadBalancer(ABC):
             inflight[server_id] += delta
 
     def close(self) -> None:
-        """Stop strategy background work (e.g. least_kv_cache metrics scraper). Safe to call multiple times."""
+        """Close the load balancer and release strategy background resources (e.g. metrics thread)."""
         self.strategy.close()
+
+    def __ray_shutdown__(self) -> None:
+        """Ray shutdown hook to close the load balancer and release background resources."""
+        self.close()
 
 
 @ray.remote
@@ -135,11 +132,7 @@ class RequestStickyLoadBalancer(GlobalRequestLoadBalancer):
 @ray.remote
 class GroupStickyLoadBalancer(GlobalRequestLoadBalancer):
     """
-    GRPO / rollout-n group sticky only: request_id is not used for routing.
-
-    An LRU maps request_group_id (e.g. f"{global_step}:{sample_index}") to a replica so
-    all repeats for that sample share one server. Unknown groups go through strategy.pick_server,
-    then the mapping is recorded.
+    GRPO / rollout-n group sticky only.
     """
 
     def __init__(self, server_actor_ids: list[str], rollout_config: RolloutConfig):
@@ -147,7 +140,6 @@ class GroupStickyLoadBalancer(GlobalRequestLoadBalancer):
         self._request_group_to_server: LRUCache[str, str] = LRUCache(maxsize=self._routing_cache_size)
 
     def acquire_server(self, request_id: str, request_group_id: str | None = None) -> str:
-        _ = request_id  # API compatibility; group sticky does not route by request_id.
         if not request_group_id:
             raise ValueError("request_group_id is required for group sticky")
         if request_group_id in self._request_group_to_server:
