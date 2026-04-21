@@ -261,7 +261,12 @@ class WeightedRoundRobinStrategy(LoadBalanceStrategy):
             w = [1.0] * n
         else:
             # if weight is not found, use 1.0 as default
-            w = [resolve_load_balance_weight(weights, sid) or 1.0 for sid in self._ids]
+            w = [
+                resolve_load_balance_weight(weights, sid)
+                if resolve_load_balance_weight(weights, sid) is not None
+                else 1.0
+                for sid in self._ids
+            ]
         self._weights = w
         self._current = [0.0] * n
         self._inflight: dict[str, int] = {sid: 0 for sid in self._ids}

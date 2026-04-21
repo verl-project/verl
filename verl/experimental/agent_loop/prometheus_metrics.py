@@ -22,8 +22,9 @@ text: `name value [timestamp]`).
 
 from __future__ import annotations
 
-import urllib.request
 from typing import Optional
+
+import requests
 
 
 def build_metrics_url(server_address: str, metrics_path: str = "/metrics") -> str:
@@ -37,10 +38,27 @@ def build_metrics_url(server_address: str, metrics_path: str = "/metrics") -> st
 
 
 def fetch_prometheus_text(url: str, timeout_s: float = 2.0) -> str:
-    """HTTP GET returning Prometheus text exposition body."""
-    req = urllib.request.Request(url, method="GET")
-    with urllib.request.urlopen(req, timeout=timeout_s) as resp:
-        return resp.read().decode("utf-8", errors="replace")
+    """HTTP GET returning Prometheus text exposition body.
+
+    Raises:
+        RuntimeError: On non-success HTTP status, with status code and optional body preview.
+        requests.RequestException: On connection errors, DNS failures, timeouts, etc.
+    """
+    try:
+        resp = requests.get(url, timeout=timeout_s)
+        resp.raise_for_status()
+        return resp.content.decode("utf-8", errors="replace")
+    except requests.HTTPError as e:
+        r = e.response
+        body_preview = ""
+        if r is not None:
+            body_preview = r.content.decode("utf-8", errors="replace").strip()[:512]
+        code = r.status_code if r is not None else "?"
+        reason = (r.reason if r is not None else "") or str(e)
+        msg = f"Prometheus scrape HTTP {code} {reason!r} for {url!r}"
+        if body_preview:
+            msg += f"; body[:512]={body_preview!r}"
+        raise RuntimeError(msg) from e
 
 
 def _metric_name_prefix_match(line: str, metric_name: str) -> bool:
