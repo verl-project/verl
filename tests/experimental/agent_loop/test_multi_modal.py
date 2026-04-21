@@ -296,6 +296,7 @@ def test_multimodal_tool_agent(init_config):
 
 def test_multimodal_single_turn_agent(init_config):
     """Test single turn agent loop with multimodal inputs using Qwen VL model."""
+    ray.shutdown()
     ray.init(
         runtime_env={
             "env_vars": {

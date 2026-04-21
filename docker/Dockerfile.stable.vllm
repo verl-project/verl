@@ -1,9 +1,16 @@
-# vllm017
+# vllm: x86_64=0.18.0, aarch64=0.17.0
 
-FROM nvidia/cuda:12.9.1-devel-ubuntu22.04
+FROM nvidia/cuda:12.9.1-devel-ubuntu24.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG PIP_NO_CACHE_DIR=1
+ARG APT_MIRROR=""
+# PEP 668: Ubuntu 24.04 blocks system-wide pip installs; override for Docker
+ENV PIP_BREAK_SYSTEM_PACKAGES=1
+
+RUN if [ -n "${APT_MIRROR}" ]; then \
+    sed -i "s@http://.*archive.ubuntu.com@${APT_MIRROR}@g" /etc/apt/sources.list.d/ubuntu.sources; \
+    fi
 
 RUN apt-get update && apt-get install -y \
     git \
@@ -15,10 +22,7 @@ RUN apt-get update && apt-get install -y \
     librdmacm-dev \
     numactl \
     software-properties-common \
-    vim && \
-    add-apt-repository ppa:deadsnakes/ppa -y && \
-    apt-get update && \
-    apt-get install -y \
+    vim \
     python3.12 \
     python3.12-dev \
     && rm -rf /var/lib/apt/lists/*
@@ -30,32 +34,35 @@ RUN wget https://bootstrap.pypa.io/get-pip.py && \
 RUN ln -sf /usr/bin/python3.12 /usr/bin/python3 && \
     ln -sf /usr/bin/python3.12 /usr/bin/python
 
-RUN pip install torch==2.10.0 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu129
+RUN pip install torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 --index-url https://download.pytorch.org/whl/cu129
 
-RUN pip install vllm==0.17.0
+RUN pip install pybind11 wheel
 
-RUN pip install pybind11
-
-RUN wget https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/cuda-keyring_1.1-1_all.deb && \
+# =========================
+# Install cuDNN
+# =========================
+RUN ARCH=$(if [ "$(uname -m)" = "aarch64" ]; then echo "sbsa"; else echo "x86_64"; fi) && \
+    wget https://developer.download.nvidia.com/compute/cuda/repos/debian12/${ARCH}/cuda-keyring_1.1-1_all.deb && \
     dpkg -i cuda-keyring_1.1-1_all.deb && \
     apt-get update && \
     apt-get -y install cudnn && \
+    rm cuda-keyring_1.1-1_all.deb && \
     rm -rf /var/lib/apt/lists/*
 
-RUN pip install nvidia-mathdx
+RUN pip install nvidia-mathdx ninja
 
-RUN MAX_JOBS=128 pip install -v --disable-pip-version-check --no-build-isolation --config-settings "--build-option=--cpp_ext" --config-settings "--build-option=--cuda_ext" git+https://github.com/NVIDIA/apex.git
+RUN MAX_JOBS=256 pip install -v --disable-pip-version-check --no-build-isolation \
+    --config-settings "--build-option=--cpp_ext" \
+    --config-settings "--build-option=--cuda_ext" \
+    git+https://github.com/NVIDIA/apex.git
 
 RUN export NVTE_FRAMEWORK=pytorch && \
-    MAX_JOBS=128 \
-    NVTE_BUILD_THREADS_PER_JOB=4 \
+    MAX_JOBS=256 NVTE_BUILD_THREADS_PER_JOB=4 \
     pip3 install --resume-retries 999 --no-build-isolation git+https://github.com/NVIDIA/TransformerEngine.git@release_v2.12
-
-# RUN pip install --upgrade transformers tokenizers
 
 RUN pip install codetiming mathruler pylatexenc qwen_vl_utils cachetools pytest-asyncio
 
-RUN export FLASH_ATTENTION_FORCE_BUILD="TRUE" && MAX_JOBS=16 pip install --no-build-isolation flash_attn==2.8.3
+RUN export FLASH_ATTENTION_FORCE_BUILD="TRUE" && MAX_JOBS=32 pip install --no-build-isolation flash_attn==2.8.3
 
 RUN NSIGHT_VERSION=2025.6.1_2025.6.1.190-1_$(if [ "$(uname -m)" = "aarch64" ]; then echo "arm64"; else echo "amd64"; fi) && \
     wget https://developer.nvidia.com/downloads/assets/tools/secure/nsight-systems/2025_6/nsight-systems-${NSIGHT_VERSION}.deb && \
@@ -69,37 +76,48 @@ RUN NSIGHT_VERSION=2025.6.1_2025.6.1.190-1_$(if [ "$(uname -m)" = "aarch64" ]; t
     rm -rf /var/lib/apt/lists/*
 
 # =========================
-# Install DeepEP
+# Install DeepEP (x86_64 only)
 # =========================
-# Clone and build deepep and deepep-nvshmem
-WORKDIR /home/dpsk_a2a
-RUN git clone -b v2.5.1 https://github.com/NVIDIA/gdrcopy.git && \
-    cd gdrcopy && \
-    make prefix=/usr/local lib_install && \
-    cd .. && rm -rf gdrcopy
+RUN if [ "$(uname -m)" = "x86_64" ]; then \
+        cd /home && mkdir -p dpsk_a2a && cd dpsk_a2a && \
+        git clone -b v2.5.1 https://github.com/NVIDIA/gdrcopy.git && \
+        cd gdrcopy && \
+        make prefix=/usr/local lib_install && \
+        cd .. && rm -rf gdrcopy && \
+        git clone -b hybrid-ep https://github.com/deepseek-ai/DeepEP.git && \
+        export NVSHMEM_DIR=/usr/local/lib/python3.12/dist-packages/nvidia/nvshmem && \
+        export LD_LIBRARY_PATH="${NVSHMEM_DIR}/lib:$LD_LIBRARY_PATH" && \
+        export PATH="${NVSHMEM_DIR}/bin:$PATH" && \
+        cd ${NVSHMEM_DIR}/lib && \
+        ln -sf libnvshmem_host.so.3 libnvshmem_host.so && \
+        cd /home/dpsk_a2a/DeepEP && \
+        export CPATH=/usr/local/cuda/targets/x86_64-linux/include/cccl:$CPATH && \
+        python setup.py install; \
+    fi
 
-ENV GDRCOPY_HOME=/usr/local
-
-RUN git clone -b hybrid-ep https://github.com/deepseek-ai/DeepEP.git && \
-    export NVSHMEM_DIR=/usr/local/lib/python3.12/dist-packages/nvidia/nvshmem && \
-    export LD_LIBRARY_PATH="${NVSHMEM_DIR}/lib:$LD_LIBRARY_PATH" && \
-    export PATH="${NVSHMEM_DIR}/bin:$PATH" && \
-    cd ${NVSHMEM_DIR}/lib && \
-    ln -sf libnvshmem_host.so.3 libnvshmem_host.so && \
-    cd /home/dpsk_a2a/DeepEP && \
-    export CPATH=/usr/local/cuda/targets/x86_64-linux/include/cccl:$CPATH && \
-    python setup.py install
+# TODO(kaixih@nvidia): revert aarch64 to vllm==0.18.0 once perf regression is fixed
+RUN if [ "$(uname -m)" = "aarch64" ]; then \
+        apt-get remove -y python3-jwt && \
+        pip install vllm==0.17.0; \
+    else \
+        pip install vllm==0.18.0; \
+    fi
 
 RUN pip3 install --no-deps trl==0.27.0
 
 RUN pip3 install nvtx matplotlib liger_kernel
 
-RUN pip install -U git+https://github.com/ISEEKYAN/mbridge.git
+RUN pip install -U git+https://github.com/ISEEKYAN/mbridge.git@641a5a0
 
 RUN pip install --no-deps git+https://github.com/NVIDIA/Megatron-LM.git@core_v0.16.0
 
-RUN pip install git+https://github.com/volcengine/verl.git@v0.7.0 && \
-    pip uninstall -y verl
+RUN if [ "$(uname -m)" = "aarch64" ]; then \
+        pip install transformers==4.57.6; \
+    else \
+        pip install transformers==5.3.0; \
+    fi
+
+RUN pip install git+https://github.com/verl-project/verl.git@v0.7.1 && pip uninstall -y verl
 
 RUN apt-get update && apt-get install -y curl \
     && rm -rf /var/lib/apt/lists/*

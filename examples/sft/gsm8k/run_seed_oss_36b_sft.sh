@@ -15,7 +15,7 @@ torchrun --standalone --nnodes=1 --nproc_per_node=$nproc_per_node \
      -m verl.trainer.sft_trainer \
     data.train_files=$HOME/data/gsm8k/train.parquet \
     data.val_files=$HOME/data/gsm8k/test.parquet \
-    data.micro_batch_size=4 \
+    data.micro_batch_size_per_gpu=4 \
     optim.lr=1e-4 \
     engine=fsdp \
     engine.ulysses_sequence_parallel_size=2 \

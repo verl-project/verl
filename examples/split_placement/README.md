@@ -32,7 +32,7 @@ mapping[Role.RewardModel] = critic_pool_id
 Based on the model placement, we need to make the models executed asynchronously.
 
 To do so, you need to turn off the `blocking` flag (i.e., `blocking=False`) in our decorator of some model operations.
-For example, we hope the actor update and critic update can be executed in parallel, then we need to make the following modification in `fsdp_workers.py`
+For example, we hope the actor update and critic update can be executed in parallel, then we need to make the following modification in `verl/workers/engine_workers.py` (the unified model-engine workers)
 
 ```
 @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO, blocking=False)

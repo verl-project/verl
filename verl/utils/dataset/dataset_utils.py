@@ -67,7 +67,18 @@ class SFTTensorCollator:
         for key in tensor_keys:
             if isinstance(batch[0][key], torch.Tensor):
                 tensors = [item[key] for item in batch]
-                final_batch[key] = torch.nested.as_nested_tensor(tensors, layout=torch.jagged)
+                if tensors[0].dim() >= 2:
+                    # For multi-dim tensors (e.g., 3D position_ids with shape (num_heads, seq_len)),
+                    # use nested_tensor_from_jagged with explicit jagged_dim to avoid ambiguity
+                    # when all samples share the same seq_len.
+                    values = torch.cat(tensors, dim=-1)
+                    lengths = torch.tensor([t.shape[-1] for t in tensors])
+                    offsets = torch.zeros(len(tensors) + 1, dtype=torch.long)
+                    torch.cumsum(lengths, dim=0, out=offsets[1:])
+                    final_batch[key] = torch.nested.nested_tensor_from_jagged(values, offsets=offsets)
+                    final_batch[key]._ragged_idx = 2
+                else:
+                    final_batch[key] = torch.nested.as_nested_tensor(tensors, layout=torch.jagged)
             else:
                 tensors = [NonTensorData(item.get(key)) for item in batch]
                 final_batch[key] = torch.stack(tensors, dim=0)

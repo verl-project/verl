@@ -59,7 +59,7 @@ Install verl Upstream
 .. code:: bash
 
    cd ~
-   git clone https://github.com/volcengine/verl.git
+   git clone https://github.com/verl-project/verl.git
    cd verl
 
    # Install verl

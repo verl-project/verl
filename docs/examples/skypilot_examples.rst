@@ -51,7 +51,7 @@ Export necessary API keys for experiment tracking:
 Examples
 --------
 
-All example configurations are available in the `examples/skypilot/ <https://github.com/volcengine/verl/tree/main/examples/skypilot>`_ directory on GitHub. See the `README <https://github.com/volcengine/verl/blob/main/examples/skypilot/README.md>`_ for additional details.
+All example configurations are available in the `examples/skypilot/ <https://github.com/verl-project/verl/tree/main/examples/skypilot>`_ directory on GitHub. See the `README <https://github.com/verl-project/verl/blob/main/examples/skypilot/README.md>`_ for additional details.
 
 PPO Training
 ~~~~~~~~~~~~
@@ -62,7 +62,7 @@ PPO Training
 
 Runs PPO training on GSM8K dataset using Qwen2.5-0.5B-Instruct model across 2 nodes with H100 GPUs. Based on examples in ``examples/ppo_trainer/``.
 
-`View verl-ppo.yaml on GitHub <https://github.com/volcengine/verl/blob/main/examples/skypilot/verl-ppo.yaml>`_
+`View verl-ppo.yaml on GitHub <https://github.com/verl-project/verl/blob/main/examples/skypilot/verl-ppo.yaml>`_
 
 GRPO Training
 ~~~~~~~~~~~~~
@@ -73,7 +73,7 @@ GRPO Training
 
 Runs GRPO (Group Relative Policy Optimization) training on MATH dataset using Qwen2.5-7B-Instruct model. Memory-optimized configuration for 2 nodes. Based on examples in ``examples/grpo_trainer/``.
 
-`View verl-grpo.yaml on GitHub <https://github.com/volcengine/verl/blob/main/examples/skypilot/verl-grpo.yaml>`_
+`View verl-grpo.yaml on GitHub <https://github.com/verl-project/verl/blob/main/examples/skypilot/verl-grpo.yaml>`_
 
 Multi-turn Tool Usage Training
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -85,7 +85,7 @@ Multi-turn Tool Usage Training
 
 Single-node training with 8xH100 GPUs for multi-turn tool usage with Qwen2.5-3B-Instruct. Includes tool and interaction configurations for GSM8K. Based on examples in ``examples/sglang_multiturn/`` but uses vLLM instead of sglang.
 
-`View verl-multiturn-tools.yaml on GitHub <https://github.com/volcengine/verl/blob/main/examples/skypilot/verl-multiturn-tools.yaml>`_
+`View verl-multiturn-tools.yaml on GitHub <https://github.com/verl-project/verl/blob/main/examples/skypilot/verl-multiturn-tools.yaml>`_
 
 Configuration
 -------------

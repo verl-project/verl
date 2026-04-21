@@ -177,7 +177,6 @@ python3 -m verl.trainer.main_ppo \
     data.filter_overlong_prompts=True \
     data.filter_overlong_prompts_workers=64 \
     data.truncation='error' \
-    trainer.use_legacy_worker_impl=disable \
     trainer.critic_warmup=$critic_warmup \
     trainer.logger=['console','wandb'] \
     trainer.project_name=$project_name \

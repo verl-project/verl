@@ -22,8 +22,8 @@ RETURN_RAW_CHAT="True"
 SKIP_TOKENIZER_INIT="True"
 
 GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.7}
-ACTOR_FSDP_PARAM_OFFLOAD=${ACTOR_FSDP_PARAM_OFFLOAD:-False}
-ACTOR_FSDP_OPTIMIZER_OFFLOAD=${ACTOR_FSDP_OPTIMIZER_OFFLOAD:-False}
+ACTOR_FSDP_PARAM_OFFLOAD=${ACTOR_FSDP_PARAM_OFFLOAD:-True}
+ACTOR_FSDP_OPTIMIZER_OFFLOAD=${ACTOR_FSDP_OPTIMIZER_OFFLOAD:-True}
 REF_FSDP_PARAM_OFFLOAD=${REF_FSDP_PARAM_OFFLOAD:-True}
 RM_PAD=${RM_PAD:-True}
 FUSED_KERNELS=${FUSED_KERNELS:-False}
@@ -64,9 +64,9 @@ fi
 train_traj_micro_bsz_per_gpu=2 # b
 n_resp_per_prompt=4 # g
 
-train_traj_micro_bsz=$((train_traj_micro_bsz_per_gpu * NUM_GPUS)) # b * n
+train_traj_micro_bsz=$((train_traj_micro_bsz_per_gpu * 1)) # b * n
 train_traj_mini_bsz=$((train_traj_micro_bsz * 2)) # 2 * b * n
-train_prompt_mini_bsz=$((train_traj_mini_bsz * n_resp_per_prompt)) # 2 * b * n / g
+train_prompt_mini_bsz=$((train_traj_mini_bsz * 2)) # 2 * b * n / g
 train_prompt_bsz=$((train_prompt_mini_bsz * 2)) # 4 * b * n / g
 
 reward_fn_name=null
@@ -117,6 +117,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.policy_loss.loss_mode="${LOSS_MODE}" \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=${train_traj_micro_bsz_per_gpu} \
     actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
+    actor_rollout_ref.rollout.n=${n_resp_per_prompt} \
     actor_rollout_ref.rollout.name="${ENGINE}" \
     actor_rollout_ref.rollout.mode="${ROLLOUT_MODE}" \
     actor_rollout_ref.rollout.load_format=${LOAD_FORMAT} \
@@ -131,8 +132,8 @@ python3 -m verl.trainer.main_ppo \
     critic.model.path="${MODEL_PATH}" \
     critic.model.enable_gradient_checkpointing=False \
     critic.ppo_micro_batch_size_per_gpu=${train_traj_micro_bsz_per_gpu} \
-    critic.model.fsdp_config.param_offload=False \
-    critic.model.fsdp_config.optimizer_offload=False \
+    critic.fsdp.param_offload=True \
+    critic.fsdp.optimizer_offload=True \
     reward.custom_reward_function.path="${reward_fn_file_path}"\
     reward.custom_reward_function.name="${reward_fn_name}"\
     algorithm.use_kl_in_reward="${USE_KL}" \

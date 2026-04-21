@@ -70,13 +70,13 @@ Option 2: Launch via SkyPilot on Kubernetes or clouds
 ------------------------------------------------------
 
 .. note::
-   Ready-to-use SkyPilot example configurations are available in the `examples/skypilot/ <https://github.com/volcengine/verl/tree/main/examples/skypilot>`_ directory:
+   Ready-to-use SkyPilot example configurations are available in the `examples/skypilot/ <https://github.com/verl-project/verl/tree/main/examples/skypilot>`_ directory:
    
    - ``verl-ppo.yaml`` - PPO training with GSM8K dataset
    - ``verl-grpo.yaml`` - GRPO training with MATH dataset  
    - ``verl-multiturn-tools.yaml`` - Multi-turn tool usage training
    
-   See the `SkyPilot examples README <https://github.com/volcengine/verl/tree/main/examples/skypilot>`_ for detailed usage instructions.
+   See the `SkyPilot examples README <https://github.com/verl-project/verl/tree/main/examples/skypilot>`_ for detailed usage instructions.
 
 Step 1: Setup SkyPilot
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -105,7 +105,7 @@ Step 2: Prepare dataset
 
 .. code-block:: bash
 
-   git clone https://github.com/volcengine/verl.git
+   git clone https://github.com/verl-project/verl.git
    cd examples/data_preprocess
    python3 gsm8k.py --local_save_dir ~/data/gsm8k
 
@@ -147,7 +147,7 @@ Step 3: Submit a job with SkyPilot
    # Commands run on each node of the remote cluster to set up the environment (e.g., install dependencies). These are run directly inside Docker.
    setup: |
      rm -rf verl
-     git clone https://github.com/volcengine/verl.git
+     git clone https://github.com/verl-project/verl.git
      cd verl
      pip3 install -v -e .[vllm]
 
@@ -288,7 +288,7 @@ manager available on your cluster or use other container runtimes (e.g. through 
 
 2. Follow :doc:`GSM8K example<../examples/gsm8k_example>` to prepare the dataset and model checkpoints.
 
-3. Modify `examples/slurm/ray_on_slurm.slurm <https://github.com/volcengine/verl/blob/main/examples/slurm/ray_on_slurm.slurm>`_ with your cluster's own information.
+3. Modify `examples/slurm/ray_on_slurm.slurm <https://github.com/verl-project/verl/blob/main/examples/slurm/ray_on_slurm.slurm>`_ with your cluster's own information.
 
 4. Submit the job script to the Slurm cluster with `sbatch`.
 
@@ -336,7 +336,7 @@ Once the fleet is created, define a Ray cluster task, e.g. in ``ray-cluster.dsta
     
     image: verlai/verl:app-verl0.6-transformers4.56.1-sglang0.5.2-mcore0.13.0-te2.2
     commands:
-        - git clone https://github.com/volcengine/verl
+        - git clone https://github.com/verl-project/verl
         - cd verl
         - pip install --no-deps -e .
         - pip install hf_transfer hf_xet
@@ -796,8 +796,8 @@ slurm_script.sh
         critic.model.path=$MODEL_PATH \
         critic.model.enable_gradient_checkpointing=False \
         critic.ppo_micro_batch_size_per_gpu=8 \
-        critic.model.fsdp_config.param_offload=False \
-        critic.model.fsdp_config.optimizer_offload=False \
+        critic.fsdp.param_offload=False \
+        critic.fsdp.optimizer_offload=False \
         algorithm.kl_ctrl.kl_coef=0.0001 \
         trainer.critic_warmup=0 \
         trainer.logger='["console","wandb"]' \

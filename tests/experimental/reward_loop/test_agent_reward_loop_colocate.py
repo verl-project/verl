@@ -28,7 +28,7 @@ from verl.trainer.ppo.ray_trainer import ResourcePoolManager
 from verl.utils import omega_conf_to_dataclass
 from verl.utils.dataset.rl_dataset import RLHFDataset, collate_fn
 from verl.utils.device import get_device_name
-from verl.workers.fsdp_workers import ActorRolloutRefWorker, AsyncActorRolloutRefWorker
+from verl.workers.engine_workers import ActorRolloutRefWorker
 
 
 def test_agent_reward_loop_standalone():
@@ -80,9 +80,8 @@ def test_agent_reward_loop_standalone():
     config.reward.custom_reward_function.name = "compute_score_gsm8k"
 
     # 1. init reward model manager
-    actor_rollout_cls = (
-        AsyncActorRolloutRefWorker if config.actor_rollout_ref.rollout.mode == "async" else ActorRolloutRefWorker
-    )
+    # The unified model-engine ActorRolloutRefWorker supports both sync and async rollout modes.
+    actor_rollout_cls = ActorRolloutRefWorker
     global_pool_id = "global_pool"
     resource_pool_spec = {
         global_pool_id: [config.trainer.n_gpus_per_node] * config.trainer.nnodes,

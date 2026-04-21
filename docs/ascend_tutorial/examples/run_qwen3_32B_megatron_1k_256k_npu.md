@@ -62,8 +62,8 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.megatron.tensor_model_parallel_size=8 \
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=1 \
     actor_rollout_ref.actor.use_dynamic_bsz=${use_dynamic_bsz} \
-    actor_rollout_ref.actor.megatron.context_parallel_size=${CP} \
-    +actor_rollout_ref.actor.megatron.override_transformer_config.context_parallel_size=${CP} \
+    actor_rollout_ref.actor.megatron.context_parallel_size=${cp_size} \
+    +actor_rollout_ref.actor.megatron.override_transformer_config.context_parallel_size=${cp_size} \
     +actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn=True \
     +actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_offload_fraction=1 \
     +actor_rollout_ref.actor.optim.override_optimizer_config.use_precision_aware_optimizer=True \

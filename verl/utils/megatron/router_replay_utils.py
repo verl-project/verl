@@ -37,9 +37,9 @@ from megatron.core.transformer.transformer_layer import get_transformer_layer_of
 
 from verl.models.mcore.util import (
     postprocess_packed_seqs,
-    postprocess_thd_no_padding,
+    postprocess_thd_engine,
     preprocess_packed_seqs,
-    preprocess_thd_no_padding,
+    preprocess_thd_engine,
 )
 from verl.utils.device import get_device_name
 from verl.utils.megatron.router_replay_patch import RouterReplay, RouterReplayAction
@@ -200,7 +200,15 @@ def get_moe_num_layers_to_build(
     """
     total_layers = get_num_layers_to_build(config, vp_stage=vp_stage, pp_rank=pp_rank)
 
-    layer_offset = get_transformer_layer_offset(config, vp_stage=vp_stage, pp_rank=pp_rank)
+    sig = inspect.signature(get_transformer_layer_offset)
+    # core 0.12.1 is not support vp_stage and pp_rank as parameters
+    if "vp_stage" in sig.parameters and "pp_rank" in sig.parameters:
+        layer_offset = get_transformer_layer_offset(config, vp_stage=vp_stage, pp_rank=pp_rank)
+    elif "pp_rank" in sig.parameters:
+        layer_offset = get_transformer_layer_offset(config, pp_rank=pp_rank)
+    else:
+        layer_offset = get_transformer_layer_offset(config)
+
     local_global_indices = range(layer_offset, layer_offset + total_layers)
 
     num_moe_layers = sum(1 for idx in local_global_indices if is_moe_layer(config, idx))
@@ -243,15 +251,22 @@ def merge_router_topk_indices(attention_mask, input_ids, mini_layer_topk_idx_lis
             .contiguous()
         )
 
+        fp8 = tf_config.fp8
+        use_fp8_padding = fp8 in ["e4m3", "hybrid"]
+
         if input_ids.is_nested:
             batch_size = input_ids.shape[0]
-            _, packed_seq_params = preprocess_thd_no_padding(input_ids, pre_process=True)
-            layers_topk_idx = postprocess_thd_no_padding(
+            _, packed_seq_params, _ = preprocess_thd_engine(
+                input_ids, pre_process=True, use_fp8_padding=use_fp8_padding
+            )
+            layers_topk_idx = postprocess_thd_engine(
                 layers_topk_idx, packed_seq_params, input_ids, batch_size, post_process=True
             )
         else:
             batch_size, seq_len = attention_mask.shape[:2]
-            _, packed_seq_params = preprocess_packed_seqs(input_ids, attention_mask, pre_process=True)
+            _, packed_seq_params = preprocess_packed_seqs(
+                input_ids, attention_mask, pre_process=True, use_fp8_padding=use_fp8_padding
+            )
             layers_topk_idx = postprocess_packed_seqs(
                 layers_topk_idx, packed_seq_params, attention_mask, batch_size, seq_len, post_process=True
             )
@@ -278,10 +293,17 @@ def set_router_replay_data(layers_topk_idx, attention_mask, tf_config, vp_rank=N
         None: The function updates internal RouterReplay instances in-place.
     """
     with torch.no_grad():
+        fp8 = tf_config.fp8
+        use_fp8_padding = fp8 in ["e4m3", "hybrid"]
+
         if layers_topk_idx.is_nested:
-            layers_topk_idx_rmpad, _, _ = preprocess_thd_no_padding(layers_topk_idx, pre_process=True)
+            layers_topk_idx_rmpad, _, _ = preprocess_thd_engine(
+                layers_topk_idx, pre_process=True, use_fp8_padding=use_fp8_padding
+            )
         else:
-            layers_topk_idx_rmpad, _ = preprocess_packed_seqs(layers_topk_idx, attention_mask, pre_process=True)
+            layers_topk_idx_rmpad, _ = preprocess_packed_seqs(
+                layers_topk_idx, attention_mask, pre_process=True, use_fp8_padding=use_fp8_padding
+            )
         layers_topk_idx_rmpad = layers_topk_idx_rmpad.contiguous()  # 1, dynamic_bs_all, layer_num, topk
 
         # 1, dynamic_bs_split, layer_num, topk

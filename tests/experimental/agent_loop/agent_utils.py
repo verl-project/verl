@@ -22,12 +22,14 @@ from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager, Role
 from verl.utils import omega_conf_to_dataclass
-from verl.workers.fsdp_workers import AsyncActorRolloutRefWorker
+from verl.utils.device import get_device_name
+from verl.workers.engine_workers import ActorRolloutRefWorker
 
 
 def init_agent_loop_manager(config: DictConfig) -> AgentLoopManager | RayWorkerGroup:
     # =========================== 1. Create hybrid ActorRollout workers ===========================
-    actor_rollout_cls = AsyncActorRolloutRefWorker
+    # The unified model-engine ActorRolloutRefWorker supports both sync and async rollout modes.
+    actor_rollout_cls = ActorRolloutRefWorker
     role_worker_mapping = {
         Role.ActorRollout: ray.remote(actor_rollout_cls),
     }
@@ -59,10 +61,13 @@ def init_agent_loop_manager(config: DictConfig) -> AgentLoopManager | RayWorkerG
     )
     resource_pool_to_cls[resource_pool]["actor_rollout"] = actor_rollout_cls
 
+    device_name = get_device_name()
     all_wg = {}
     for resource_pool, class_dict in resource_pool_to_cls.items():
         worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
-        wg_dict = RayWorkerGroup(resource_pool=resource_pool, ray_cls_with_init=worker_dict_cls)
+        wg_dict = RayWorkerGroup(
+            resource_pool=resource_pool, ray_cls_with_init=worker_dict_cls, device_name=device_name
+        )
         spawn_wg = wg_dict.spawn(prefix_set=class_dict.keys())
         all_wg.update(spawn_wg)
     actor_rollout_wg = all_wg["actor_rollout"]

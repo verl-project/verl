@@ -52,6 +52,7 @@ on:
       - "**/*.py"
       # Other entrypoints
       - "!examples/**"
+      - "!tests/special_sanity/**"
       - "!verl/trainer/main_*.py"
       - "!verl/trainer/fsdp_sft_trainer.py"
       - "!recipe/**"
@@ -90,14 +91,13 @@ jobs:
       - name: Check initial pip list from image
         run: |
           pip list
-      - name: Checkout volcengine/verl repo
+      - name: Checkout verl-project/verl repo
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           clean: true
       - name: Install the current repository
         run: |
-          pip install -r requirements-npu.txt
           pip install --no-deps -e .[test]
           pip install mlflow pytest-asyncio
       - name: Check final pip list
@@ -115,12 +115,6 @@ jobs:
       - name: Testing normalize peft param name
         run: |
           pytest -s -x tests/utils/test_normalize_peft_param_name.py
-      - name: Testing FSDP2 actor functionality
-        run: |
-          torchrun --standalone --nnodes=1 --nproc-per-node=2 tests/workers/actor/test_special_dp_actor.py
-      - name: Testing FSDP2 critic functionality
-        run: |
-          torchrun --standalone --nnodes=1 --nproc-per-node=2 tests/workers/critic/test_special_dp_critic.py
       - name: Running NPU profiling unit tests
         run: |
           pytest -s -x tests/utils/test_special_mstx_profile.py

@@ -28,7 +28,6 @@ from ray.actor import ActorHandle
 from sglang.srt.entrypoints.http_server import (
     ServerArgs,
     _GlobalState,
-    _launch_subprocesses,
     app,
     set_global_state,
 )
@@ -48,6 +47,7 @@ from verl.utils.profiler import DistProfiler, build_sglang_profiler_args
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
 from verl.workers.rollout.sglang_rollout.sglang_rollout import _set_envs_and_config
+from verl.workers.rollout.sglang_rollout.utils import SGLANG_LORA_NAME
 from verl.workers.rollout.utils import get_max_position_embeddings, run_uvicorn
 
 logger = logging.getLogger(__file__)
@@ -155,8 +155,6 @@ class SGLangHttpServer:
                 assert master_address and master_port, "non-master node should provide master address and port"
                 self._master_address = master_address
                 self._master_port = master_port
-            else:
-                self._master_sock.close()
 
         engine_kwargs = self.config.get("engine_kwargs", {}).get("sglang", {}) or {}
         attention_backend = engine_kwargs.pop("attention_backend", None)
@@ -204,6 +202,15 @@ class SGLangHttpServer:
             **engine_kwargs,
         }
 
+        # update lora-related args
+        if self.model_config.lora_rank > 0:
+            args.update(
+                {
+                    "enable_lora": True,
+                    "max_lora_rank": self.model_config.lora_rank,
+                    "lora_target_modules": self.model_config.target_modules,
+                }
+            )
         # Only set dist_init_addr for multi-node; for single-node, let SGLang
         # handle port selection internally via nccl_port to avoid conflicts.
         if self.nnodes > 1:
@@ -228,7 +235,9 @@ class SGLangHttpServer:
 
         # enable_weights_cpu_backup is supported in sglang>=0.5.3
         if "enable_weights_cpu_backup" in [f.name for f in dataclasses.fields(ServerArgs)]:
-            enable_weights_cpu_backup = True if self.rollout_mode == RolloutMode.COLOCATED else False
+            enable_weights_cpu_backup = (
+                True if self.rollout_mode == RolloutMode.COLOCATED or self.model_config.lora_rank > 0 else False
+            )
             args["enable_weights_cpu_backup"] = enable_weights_cpu_backup
 
         if self.config.enable_rollout_routing_replay:
@@ -253,7 +262,20 @@ class SGLangHttpServer:
         sglang.srt.entrypoints.engine._set_envs_and_config = _set_envs_and_config
         os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
         server_args = ServerArgs(**args)
-        if version.parse(sglang.__version__) >= version.parse("0.5.7"):
+        # For SGLang main branch or version >= 0.5.10
+        # The latest main branch of SGLang has wrapped the _launch_subprocesses function inside the Engine class
+        if version.parse(sglang.__version__) >= version.parse("0.5.10"):
+            from sglang.srt.entrypoints.http_server import Engine
+
+            self.tokenizer_manager, self.template_manager, self.scheduler_info, *_ = Engine._launch_subprocesses(
+                server_args=server_args,
+                init_tokenizer_manager_func=sglang.srt.entrypoints.engine.init_tokenizer_manager,
+                run_scheduler_process_func=sglang.srt.entrypoints.engine.run_scheduler_process,
+                run_detokenizer_process_func=sglang.srt.entrypoints.engine.run_detokenizer_process,
+            )
+        elif version.parse(sglang.__version__) >= version.parse("0.5.7"):
+            from sglang.srt.entrypoints.http_server import _launch_subprocesses
+
             self.tokenizer_manager, self.template_manager, self.scheduler_info, *_ = _launch_subprocesses(
                 server_args=server_args,
                 init_tokenizer_manager_func=sglang.srt.entrypoints.engine.init_tokenizer_manager,
@@ -261,6 +283,8 @@ class SGLangHttpServer:
                 run_detokenizer_process_func=sglang.srt.entrypoints.engine.run_detokenizer_process,
             )
         else:
+            from sglang.srt.entrypoints.http_server import _launch_subprocesses
+
             self.tokenizer_manager, self.template_manager, self.scheduler_info, *_ = _launch_subprocesses(
                 server_args=server_args
             )
@@ -311,15 +335,29 @@ class SGLangHttpServer:
             await self.tokenizer_manager.resume_memory_occupation(obj, None)
             await self.tokenizer_manager.flush_cache()
 
+    @property
+    def lora_as_adapter(self) -> bool:
+        return (
+            self.model_config.lora_rank > 0 or self.model_config.lora.get("rank", 0) > 0
+        ) and not self.model_config.lora.get("merge", False)
+
     async def sleep(self):
         if self.node_rank != 0 or not self.config.free_cache_engine:
             return
 
+        # When using LoRA as adapter (merge=False), only release kv_cache —
+        # keep base weights in GPU so we only need to sync adapter deltas.
+        # Mirrors the vLLM sleep() pattern in vllm_async_server.py.
+        if self.lora_as_adapter:
+            tags = ["kv_cache"]
+        else:
+            tags = ["kv_cache", "weights"]
+
         if self.rollout_mode == RolloutMode.HYBRID:
-            obj = ReleaseMemoryOccupationReqInput(tags=["kv_cache", "weights"])
+            obj = ReleaseMemoryOccupationReqInput(tags=tags)
             await self.tokenizer_manager.release_memory_occupation(obj, None)
         elif self.rollout_mode == RolloutMode.COLOCATED:
-            obj = ReleaseMemoryOccupationReqInput(tags=["kv_cache", "weights"])
+            obj = ReleaseMemoryOccupationReqInput(tags=tags)
             await self.tokenizer_manager.release_memory_occupation(obj, None)
         elif self.rollout_mode == RolloutMode.STANDALONE:
             # In standalone mode, resume kv_cache if free_cache_engine is enabled
@@ -340,7 +378,7 @@ class SGLangHttpServer:
     ) -> TokenOutput:
         """Generate sequence with token-in-token-out."""
         # TODO(@wuxibin): switch to `/generate` http endpoint once multi-modal support ready.
-        max_possible_tokens = self.config.max_model_len - len(prompt_ids)
+        max_possible_tokens = self.config.max_model_len - len(prompt_ids) - 1
 
         if max_possible_tokens < 0:
             raise ValueError(
@@ -384,14 +422,28 @@ class SGLangHttpServer:
 
         generate_request = GenerateReqInput(**request)
 
+        # Add lora request
+        if self.model_config.lora_rank > 0:
+            generate_request.lora_path = SGLANG_LORA_NAME
+
         output = await self.tokenizer_manager.generate_request(generate_request, None).__anext__()
-        finish_reason = output["meta_info"]["finish_reason"]
+        meta_info = output.get("meta_info", {})
+        finish_reason = meta_info.get("finish_reason")
         finish_reason = finish_reason["type"] if finish_reason else None
         if return_logprob:
-            output_token_logprobs = output["meta_info"]["output_token_logprobs"]
-            log_probs, token_ids = zip(
-                *[(log_prob, token_ids) for log_prob, token_ids, _ in output_token_logprobs], strict=True
-            )
+            token_ids = list(output.get("output_ids", []))
+            output_token_logprobs = meta_info.get("output_token_logprobs") or []
+            if output_token_logprobs and len(output_token_logprobs) == len(token_ids):
+                log_probs = [float(log_prob) for log_prob, _, _ in output_token_logprobs]
+            else:
+                # SGLang may return mismatched lengths (e.g. max_new_tokens=0
+                # produces a phantom logprob entry with empty output_ids), or
+                # an abort may leave an empty logprob payload.
+                assert not token_ids, (
+                    f"output_token_logprobs length ({len(output_token_logprobs)}) != "
+                    f"output_ids length ({len(token_ids)}) for request {request_id}"
+                )
+                log_probs = []
         else:
             token_ids = output["output_ids"]
             log_probs = None
@@ -460,8 +512,12 @@ class SGLangReplica(RolloutReplica):
         model_config: HFModelConfig,
         gpus_per_node: int = 8,
         is_reward_model: bool = False,
+        is_teacher_model: bool = False,
+        name_suffix: str = "",
     ):
-        super().__init__(replica_rank, config, model_config, gpus_per_node, is_reward_model)
+        super().__init__(
+            replica_rank, config, model_config, gpus_per_node, is_reward_model, is_teacher_model, name_suffix
+        )
         self.server_class = ray.remote(SGLangHttpServer)
 
     async def launch_servers(self):
@@ -510,12 +566,12 @@ class SGLangReplica(RolloutReplica):
             )
 
             node_id = worker_node_ids[node_rank * self.gpus_per_replica_node]
-            name = (
-                f"sglang_server_{self.replica_rank}_{node_rank}"
-                if not self.is_reward_model
-                else f"sglang_server_reward_{self.replica_rank}_{node_rank}"
-            )
-
+            if self.is_reward_model:
+                name = f"sglang_server_reward_{self.replica_rank}_{node_rank}{self.name_suffix}"
+            elif self.is_teacher_model:
+                name = f"sglang_server_teacher_{self.replica_rank}_{node_rank}{self.name_suffix}"
+            else:
+                name = f"sglang_server_{self.replica_rank}_{node_rank}{self.name_suffix}"
             server = self.server_class.options(
                 scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                     node_id=node_id,

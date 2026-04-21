@@ -48,8 +48,8 @@ python3 -m verl.trainer.main_ppo \
     critic.ppo_micro_batch_size_per_gpu=2 \
     critic.use_dynamic_bsz=True \
     critic.ppo_max_token_len_per_gpu=98304 \
-    critic.model.fsdp_config.param_offload=False \
-    critic.model.fsdp_config.optimizer_offload=False \
+    critic.fsdp.param_offload=False \
+    critic.fsdp.optimizer_offload=False \
     critic.profiler.enable=True \
     critic.profiler.ranks=$PROFILE_RANKS \
     critic.profiler.all_ranks=$PROFILE_RANKS_ALL \

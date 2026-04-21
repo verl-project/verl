@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import inspect
 import logging
 from dataclasses import dataclass, field
 from unittest.mock import patch
@@ -31,6 +32,21 @@ from verl.utils.kernel.fp8_kernel import scaled_fp8_blockwise
 
 logger = logging.getLogger(__name__)
 
+MXFP8_BLOCK_QUANT_KWARGS = {
+    "activation_scheme": "dynamic",
+    "fmt": "e4m3",
+    "quant_method": "ascend",
+    "weight_block_size": [1, 32],
+    # Enable dynamic inference mode, no need to pre-generate quant_model_description.json
+    # for each model. Just specify default_quant_type, vllm-ascend will automatically
+    # infer quant type based on layer type:
+    # - lm_head, embedding, norm layers -> FLOAT
+    # - Other Linear, MoE layers -> default_quant_type (W8A8_MXFP8)
+    "default_quant_type": "W8A8_MXFP8",
+    # group_size for MXFP8 quantization
+    "group_size": 32,
+}
+
 
 # Ref: https://github.com/NVIDIA-NeMo/RL/commit/bc24887c72a6e1b2699a228bc87c588546dfe6b7
 @dataclass()
@@ -48,8 +64,11 @@ fp8_state: FP8State = FP8State()
 def is_fp8_model(vllm_config):
     from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 
-    if hasattr(vllm_config, "quant_config") and isinstance(vllm_config.quant_config, Fp8Config):
-        return True
+    if hasattr(vllm_config, "quant_config"):
+        if isinstance(vllm_config.quant_config, Fp8Config):
+            return True
+        elif is_mxfp8_vllm_ascend(vllm_config.quant_config):
+            return True
 
     return False
 
@@ -101,6 +120,118 @@ def is_fp8_weight(name, model):
     return name in fp8_state.fp8_param_names
 
 
+def is_mxfp8_vllm_ascend(quant_config):
+    try:
+        from vllm_ascend.quantization.modelslim_config import AscendModelSlimConfig
+
+        if isinstance(quant_config, AscendModelSlimConfig):
+            quant_method = quant_config.quant_description.get("quant_method")
+            return quant_method in ["ascend"]
+        return False
+    except ImportError:
+        # vllm_ascend not installed, so this can't be an Ascend MXFP8 config
+        return False
+
+
+def restore_mxfp8_weights_for_loading(model):
+    for name, module in model.named_modules():
+        if (
+            hasattr(module, "_mxfp8_transformed")
+            and hasattr(module, "quant_method")
+            and hasattr(module.quant_method, "quant_method")
+            and hasattr(module.quant_method.quant_method, "restore_weights_for_rl_loading")
+        ):
+            module.quant_method.quant_method.restore_weights_for_rl_loading(module)
+
+
+def apply_mxfp8_transformation_after_loading(model):
+    """Re-apply MXFP8 transformations after weight loading.
+
+    This function iterates through all linear modules in the model and applies
+    the MXFP8 transformations (transpose, reshape) that are required for NPU
+    inference.
+
+    Must be called AFTER model.load_weights() in RL training loops.
+    """
+    try:
+        from vllm.model_executor.layers.linear import LinearBase
+    except ImportError:
+        logger.warning("Could not import LinearBase, skipping MXFP8 transformation")
+        return
+
+    for name, module in model.named_modules():
+        if (isinstance(module, LinearBase) or isinstance(module, FusedMoE)) and hasattr(
+            module, "_mxfp8_original_shapes"
+        ):
+            if hasattr(module, "quant_method") and hasattr(module.quant_method, "process_weights_after_loading"):
+                logger.debug(f"Applying MXFP8 transformation for module: {name}")
+                module.quant_method.process_weights_after_loading(module)
+
+
+def npu_scaled_mxfp8_blockwise(
+    data_hp,
+    weight_block_size,
+):
+    assert data_hp.dim() == 2, "Only 2D tensors supported (M, N)"
+
+    block_size = weight_block_size[1]
+
+    # Constants for MXFP8 / NPU
+    FP32_MIN_NORMAL = torch.finfo(torch.float32).tiny
+    MAX_NORM = torch.finfo(torch.float8_e4m3fn).max  # 2 ** 8 * 1.75
+    EMAX = 8  # 2 ** (4 - 1)
+    SCALE_EMAX = 127  # 2 ** (8 - 1) - 1
+
+    data_hp = data_hp.float()
+    original_shape = data_hp.shape
+    M, N = original_shape
+    assert N % block_size == 0, f"Last dimension {N} must be divisible by block_size {block_size}"
+
+    # Reshape to (M, N // block_size, block_size)
+    num_blocks_n = N // block_size
+    data_blocked = data_hp.reshape(M, num_blocks_n, block_size)
+
+    # Calculate max absolute value per block
+    max_val = torch.amax(torch.abs(data_blocked), dim=-1)
+
+    # Shared exponent calculation
+    # Handle zero/tiny values to avoid log2(0) -> -inf
+    max_val_safe = torch.where(max_val == 0, FP32_MIN_NORMAL, max_val)
+    shared_exp = torch.floor(torch.log2(max_val_safe)) - EMAX
+
+    shared_exp[shared_exp > SCALE_EMAX] = float("NaN")
+
+    shared_exp_expanded = shared_exp.unsqueeze(-1)
+    scale_factor = torch.pow(2.0, shared_exp_expanded)
+    data_normalized = data_blocked / scale_factor
+    abs_norm = torch.abs(data_normalized)
+    private_exp = torch.floor(torch.log2(abs_norm + (abs_norm == 0).float()))
+    min_exp = -6
+    private_exp = private_exp.clamp(min=min_exp)
+
+    mantissa_scale = 8.0  # 2 ** (5 - 2)
+
+    scale_private = torch.pow(2.0, private_exp)
+    scaled = data_normalized / scale_private * mantissa_scale
+
+    # Round half away from zero: sign * floor(abs + 0.5)
+    data_quant = torch.sign(scaled) * torch.floor(torch.abs(scaled) + 0.5)
+    data_quant = data_quant / mantissa_scale * scale_private
+    data_quant = torch.clamp(data_quant, min=-MAX_NORM, max=MAX_NORM)
+
+    # Restore Inf/NaN
+    data_quant = torch.where(torch.isinf(data_normalized), data_normalized, data_quant)
+    data_quant = torch.where(torch.isnan(data_normalized), data_normalized, data_quant)
+
+    fp_data = data_quant.reshape(original_shape).to(torch.float8_e4m3fn)
+
+    # Encode scale/exponent for NPU (uint8)
+    shared_exp_fixed = torch.nan_to_num(shared_exp, nan=-127.0)
+    descale_fp = torch.clamp(shared_exp_fixed + 127, 0, 255).round().to(torch.uint8)
+
+    return fp_data, descale_fp
+
+
 def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
     """Quantize weights to FP8 format using a memory-efficient generator.
 
@@ -114,8 +245,18 @@ def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
     Yields:
         Tuples of (name, tensor) for each weight and its scale
     """
-    if quant_config.weight_block_size is None:
-        raise ValueError("Currently only support blockwise quantization, please set weight_block_size in quant_config")
+
+    is_mxfp8_npu = is_mxfp8_vllm_ascend(quant_config)
+
+    weight_block_size = None
+    if is_mxfp8_npu:
+        weight_block_size = MXFP8_BLOCK_QUANT_KWARGS["weight_block_size"]
+    else:
+        if quant_config.weight_block_size is None:
+            raise ValueError(
+                "Currently only support blockwise quantization, please set weight_block_size in quant_config"
+            )
+        weight_block_size = quant_config.weight_block_size
 
     # vLLM v0.11-v0.12 renamed weight_scale_inv → weight_scale in process_weights_after_loading,
     # so load_weights expects "_scale" suffix. v0.14+ keeps weight_scale_inv, so expects "_scale_inv".
@@ -129,11 +270,16 @@ def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
         # Cast the weight into fp8 and its scale factor
         if torch.distributed.get_rank() == 0:
             logger.debug(f"Quantizing to FP8 blockwise: {k}")
-
-        param_lp, param_scale = scaled_fp8_blockwise(
-            v.to(dtype),
-            weight_block_size=quant_config.weight_block_size,
-        )
+        if is_mxfp8_npu:
+            param_lp, param_scale = npu_scaled_mxfp8_blockwise(
+                v.to(dtype),
+                weight_block_size=weight_block_size,
+            )
+        else:
+            param_lp, param_scale = scaled_fp8_blockwise(
+                v.to(dtype),
+                weight_block_size=quant_config.weight_block_size,
+            )
         param_scale = param_scale.squeeze(-1)
 
         # Yield the quantized weight
@@ -142,7 +288,7 @@ def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
         # Yield the scale with appropriate naming based on vLLM version
         if _use_scale_not_scale_inv and "expert" not in k:
             yield (k + "_scale", param_scale)
-        else:
+        elif not is_mxfp8_npu:
             yield (k + "_scale_inv", param_scale)
 
         # Explicitly delete original tensor reference to help GC
@@ -153,6 +299,15 @@ def load_quanted_weights(weights, model_runner):
     model = model_runner.model
     quant_config = model_runner.vllm_config.quant_config
     vllm_dtype = model_runner.vllm_config.model_config.dtype
+
+    is_mxfp8_npu = is_mxfp8_vllm_ascend(quant_config)
+
+    if is_mxfp8_npu:
+        # For MXFP8 on NPU, we need to restore weights to original shapes
+        # before loading, then re-apply transformation after loading.
+        # This is because process_weights_after_loading transposes the weights,
+        # but the weight_loader expects original shapes.
+        restore_mxfp8_weights_for_loading(model)
 
     weights_quantized = quant_weights(weights, model, quant_config, dtype=vllm_dtype)
 
@@ -168,6 +323,11 @@ def load_quanted_weights(weights, model_runner):
     for name, param in model.named_parameters():
         if hasattr(param, "subclass_type"):
             param.__class__ = param.orig_type
+
+    if is_mxfp8_npu:
+        # Re-apply MXFP8 transformations after weight loading
+        apply_mxfp8_transformation_after_loading(model)
+
     return loaded_params
 
 
@@ -537,14 +697,27 @@ def process_weights_after_loading_moe_for_vllm14(self, layer) -> None:
     if self.moe_quant_config:
         assert self.experts_cls is not None
 
-        self.moe_kernel = make_fp8_moe_kernel(
-            moe_quant_config=self.moe_quant_config,
-            moe_config=self.moe,
-            fp8_backend=self.fp8_backend,
-            experts_cls=self.experts_cls,
-            routing_tables=layer._maybe_init_expert_routing_tables(),
-            shared_experts=layer.shared_experts,
-        )
+        # Check for the new API by inspecting the function signature, which is more
+        # robust than version string comparison, especially for dev/pre-release versions.
+        sig = inspect.signature(make_fp8_moe_kernel)
+        if "routing_tables" in sig.parameters:
+            # vLLM >= 0.16+: routing_tables/shared_experts added, returns kernel directly
+            self.moe_kernel = make_fp8_moe_kernel(
+                moe_quant_config=self.moe_quant_config,
+                moe_config=self.moe,
+                fp8_backend=self.fp8_backend,
+                experts_cls=self.experts_cls,
+                routing_tables=layer._maybe_init_expert_routing_tables(),
+                shared_experts=layer.shared_experts,
+            )
+        else:
+            # vLLM 0.14/0.15: routing_tables/shared_experts not supported, returns (kernel, use_inplace)
+            self.kernel, self.use_inplace = make_fp8_moe_kernel(
+                moe_quant_config=self.moe_quant_config,
+                moe_config=self.moe,
+                fp8_backend=self.fp8_backend,
+                experts_cls=self.experts_cls,
+            )
 
 
 def apply_vllm_fp8_patches():

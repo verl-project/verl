@@ -87,7 +87,7 @@ permissions:
   contents: read
 
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm017.dev2"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm018.dev1"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
 
 jobs:
@@ -112,7 +112,6 @@ jobs:
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 60 # Increase this timeout value as needed
     env:
-      HTTP_PROXY: ${{ secrets.PROXY_HTTP }}
       HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
       NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
@@ -125,7 +124,8 @@ jobs:
         run: |
           pip3 install -r requirements-test.txt
           pip3 install --no-deps --force-reinstall .
-          pip3 install mbridge
+          pip3 install megatron-bridge --no-deps
+          pip3 install git+https://github.com/ISEEKYAN/mbridge.git@main --no-deps --no-build-isolation
           pip3 install math-verify
       - name: Prepare GSM8K dataset
         run: |
@@ -145,9 +145,9 @@ jobs:
       - name: clean up and install Megatron-Bridge
         run: |
           rm -rf checkpoints
-          pip3 install git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@83a7c11 --no-deps --no-build-isolation
-          pip3 install git+https://github.com/NVIDIA/Megatron-LM.git@5455f0a --no-deps --no-build-isolation
-          pip3 install "nvidia-modelopt[torch]>=0.37.0" transformers==4.57.1
+          pip3 install git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@6259ae8 --no-deps --no-build-isolation
+          pip3 install git+https://github.com/NVIDIA/Megatron-LM.git@7ca9dc5 --no-deps --no-build-isolation
+          pip3 install "nvidia-modelopt[torch]>=0.37.0"
       - name: Running GSM8K E2E training tests with 3D parallelism on 8 L20 GPUs with Megatron, use Megatron-Bridge LoRA e2e to pre-load and save (Deepseek)
         run: |
           ray stop --force
@@ -168,7 +168,6 @@ jobs:
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 60 # Increase this timeout value as needed
     env:
-      HTTP_PROXY: ${{ secrets.PROXY_HTTP }}
       HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
       NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
@@ -181,6 +180,7 @@ jobs:
         run: |
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
+          pip3 install megatron-bridge --no-deps
           pip3 install math-verify
       - name: Prepare GSM8K dataset
         run: |

@@ -34,12 +34,12 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 
 from verl import DataProto
-from verl.checkpoint_engine import CheckpointEngineManager
 from verl.experimental.dataset.sampler import AbstractCurriculumSampler
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, ResourcePoolManager
 from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.config import AlgoConfig
+from verl.trainer.distillation.losses import is_distillation_enabled
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
 from verl.trainer.ppo.metric_utils import (
@@ -50,7 +50,14 @@ from verl.trainer.ppo.metric_utils import (
     process_validation_metrics,
 )
 from verl.trainer.ppo.reward import extract_reward
-from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_reward_model
+from verl.trainer.ppo.utils import (
+    Role,
+    WorkerType,
+    need_critic,
+    need_reference_policy,
+    need_reward_model,
+    need_teacher_policy,
+)
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, should_save_ckpt_esi
 from verl.utils.config import omega_conf_to_dataclass
@@ -62,7 +69,7 @@ from verl.utils.rollout_skip import RolloutSkip
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
-from verl.workers.config import FSDPEngineConfig
+from verl.workers.config import DistillationConfig, EngineConfig
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
 
 
@@ -215,6 +222,8 @@ def compute_advantage(
                 "Please set actor.calculate_sum_pi_squared=True in config."
             )
             adv_kwargs["sum_pi_squared"] = data.batch["sum_pi_squared"]
+            # old_log_probs needed for path-variance proxy: w_t = 1 - 2*exp(old_log_probs) + sum_pi_squared
+            adv_kwargs["old_log_probs"] = data.batch["old_log_probs"]
             # Get pre-computed rollout IS weights if available
             rollout_is_weights = data.batch.get("rollout_is_weights", None)
             adv_kwargs["rollout_is_weights"] = rollout_is_weights
@@ -284,6 +293,7 @@ class RayPPOTrainer:
         self.role_worker_mapping = role_worker_mapping
         self.resource_pool_manager = resource_pool_manager
         self.use_reference_policy = need_reference_policy(self.config)
+        self.use_teacher_policy = need_teacher_policy(self.config)
 
         self.use_rm = need_reward_model(self.config)
 
@@ -307,7 +317,6 @@ class RayPPOTrainer:
             self.kl_ctrl_in_reward = core_algos.get_kl_controller(self.config.algorithm.kl_ctrl)
 
         self.use_prefix_grouper = self.config.actor_rollout_ref.actor.get("use_prefix_grouper", False)
-        self.use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
 
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
 
@@ -416,7 +425,7 @@ class RayPPOTrainer:
         lines = []
         for i in range(n):
             entry = {k: v[i] for k, v in base_data.items()}
-            lines.append(json.dumps(entry, ensure_ascii=False))
+            lines.append(json.dumps(entry, ensure_ascii=False, default=str))
 
         with open(filename, "w") as f:
             f.write("\n".join(lines) + "\n")
@@ -697,6 +706,7 @@ class RayPPOTrainer:
             actor_rollout_cls = RayClassWithInitArgs(
                 cls=self.role_worker_mapping[actor_role],
                 config=self.config.actor_rollout_ref,
+                distillation_config=self.config.get("distillation"),
                 role=str(actor_role),
             )
             self.resource_pool_to_cls[actor_rollout_resource_pool][str(actor_role)] = actor_rollout_cls
@@ -711,25 +721,21 @@ class RayPPOTrainer:
 
             critic_cfg: CriticConfig = omega_conf_to_dataclass(self.config.critic)
 
-            if self.use_legacy_worker_impl == "disable":
-                # convert critic_cfg into TrainingWorkerConfig
-                from verl.workers.engine_workers import TrainingWorkerConfig
+            # convert critic_cfg into TrainingWorkerConfig for the unified model engine worker
+            from verl.workers.engine_workers import TrainingWorkerConfig
 
-                orig_critic_cfg = critic_cfg
-                if orig_critic_cfg.strategy == "fsdp":
-                    engine_config: FSDPEngineConfig = orig_critic_cfg.model.fsdp_config
-                    engine_config.infer_max_token_len_per_gpu = critic_cfg.ppo_infer_max_token_len_per_gpu
-                    engine_config.max_token_len_per_gpu = critic_cfg.ppo_max_token_len_per_gpu
-                else:
-                    raise NotImplementedError(f"Unknown strategy {orig_critic_cfg.strategy=}")
+            orig_critic_cfg = critic_cfg
+            engine_config: EngineConfig = orig_critic_cfg.engine
+            engine_config.infer_max_token_len_per_gpu = critic_cfg.ppo_infer_max_token_len_per_gpu
+            engine_config.max_token_len_per_gpu = critic_cfg.ppo_max_token_len_per_gpu
 
-                critic_cfg = TrainingWorkerConfig(
-                    model_type="value_model",
-                    model_config=orig_critic_cfg.model_config,
-                    engine_config=engine_config,
-                    optimizer_config=orig_critic_cfg.optim,
-                    checkpoint_config=orig_critic_cfg.checkpoint,
-                )
+            critic_cfg = TrainingWorkerConfig(
+                model_type="value_model",
+                model_config=orig_critic_cfg.model,
+                engine_config=engine_config,
+                optimizer_config=orig_critic_cfg.optim,
+                checkpoint_config=orig_critic_cfg.checkpoint,
+            )
 
             critic_cls = RayClassWithInitArgs(cls=self.role_worker_mapping[Role.Critic], config=critic_cfg)
             self.resource_pool_to_cls[resource_pool][str(Role.Critic)] = critic_cls
@@ -748,7 +754,7 @@ class RayPPOTrainer:
         # NOTE: if you want to use a different resource pool for each role, which can support different parallel size,
         # you should not use `create_colocated_worker_cls`.
         # Instead, directly pass different resource pool to different worker groups.
-        # See https://github.com/volcengine/verl/blob/master/examples/ray/tutorial.ipynb for more information.
+        # See https://github.com/verl-project/verl/blob/master/examples/ray/tutorial.ipynb for more information.
         all_wg = {}
         wg_kwargs = {}  # Setting up kwargs for RayWorkerGroup
         if OmegaConf.select(self.config.trainer, "ray_wait_register_center_timeout") is not None:
@@ -780,17 +786,14 @@ class RayPPOTrainer:
 
         if self.use_critic:
             self.critic_wg = all_wg[str(Role.Critic)]
-            if self.use_legacy_worker_impl == "disable":
-                self.critic_wg.reset()
-                # assign critic loss
-                from functools import partial
+            self.critic_wg.reset()
+            # assign critic loss
+            from functools import partial
 
-                from verl.workers.utils.losses import value_loss
+            from verl.workers.utils.losses import value_loss
 
-                value_loss_ = partial(value_loss, config=orig_critic_cfg)
-                self.critic_wg.set_loss_fn(value_loss_)
-            else:
-                self.critic_wg.init_model()
+            value_loss_ = partial(value_loss, config=orig_critic_cfg)
+            self.critic_wg.set_loss_fn(value_loss_)
 
         if self.use_reference_policy and not self.ref_in_actor:
             if str(Role.RefPolicy) in all_wg:
@@ -824,6 +827,20 @@ class RayPPOTrainer:
         # Note: mode is always "async" since sync mode is deprecated
         self.async_rollout_mode = True
 
+        # initialize teacher loop manager
+        if self.use_teacher_policy:
+            from verl.experimental.teacher_loop import MultiTeacherModelManager
+
+            teacher_resource_pool = self.resource_pool_manager.get_resource_pool(Role.TeacherModel)
+            self.teacher_model_manager = MultiTeacherModelManager(
+                config=self.config,
+                resource_pool=teacher_resource_pool,
+            )
+            self.distillation_config: DistillationConfig = omega_conf_to_dataclass(self.config.distillation)
+        else:
+            self.teacher_model_manager = None
+            self.distillation_config = None
+
         # Support custom AgentLoopManager via config
         manager_class_fqn = self.config.actor_rollout_ref.rollout.get("agent", {}).get("agent_loop_manager_class")
         if manager_class_fqn:
@@ -838,14 +855,24 @@ class RayPPOTrainer:
 
         # if enable_agent_reward_loop, we directly pass reward_loop_workers to agent loop manager
         # to stream reward computation with actor rollout
+        # To stream teacher computation with actor rollout, we instead pass the full manager so that the
+        # teacher loop workers can sleep/wake together with rollout workers
         reward_loop_worker_handles = self.reward_loop_manager.reward_loop_workers if enable_agent_reward_loop else None
         self.async_rollout_manager = AgentLoopManager.create(
             config=self.config,
             worker_group=self.actor_rollout_wg,
             rollout_resource_pool=actor_rollout_resource_pool,
             reward_loop_worker_handles=reward_loop_worker_handles,
+            teacher_model_manager=self.teacher_model_manager,
         )
+
         checkpoint_engine_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
+        # Support custom CheckpointEngineManager via config
+        checkpoint_manager_class_fqn = self.config.actor_rollout_ref.rollout.get("checkpoint_manager_class")
+        if checkpoint_manager_class_fqn:
+            CheckpointEngineManager = load_class_from_fqn(checkpoint_manager_class_fqn, "CheckpointEngineManager")
+        else:
+            from verl.checkpoint_engine import CheckpointEngineManager
         self.checkpoint_manager = CheckpointEngineManager(
             config=checkpoint_engine_config,
             trainer=self.actor_rollout_wg,
@@ -976,8 +1003,18 @@ class RayPPOTrainer:
         # TODO: from remote not implemented yet
         dataloader_local_path = os.path.join(global_step_folder, "data.pt")
         if os.path.exists(dataloader_local_path):
-            dataloader_state_dict = torch.load(dataloader_local_path, weights_only=False)
-            self.train_dataloader.load_state_dict(dataloader_state_dict)
+            steps_per_epoch = len(self.train_dataloader)
+            at_epoch_boundary = steps_per_epoch > 0 and self.global_steps % steps_per_epoch == 0
+            if at_epoch_boundary:
+                print(
+                    f"Skipping dataloader state restore: global_steps={self.global_steps} "
+                    f"is at an epoch boundary (steps_per_epoch={steps_per_epoch}). "
+                    f"The saved state marks the dataloader as exhausted. "
+                    f"Next epoch will iterate from scratch."
+                )
+            else:
+                dataloader_state_dict = torch.load(dataloader_local_path, weights_only=False)
+                self.train_dataloader.load_state_dict(dataloader_state_dict)
         else:
             print(f"Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
 
@@ -1090,78 +1127,69 @@ class RayPPOTrainer:
         metrics.update(global_balance_stats)
 
     def _compute_values(self, batch: DataProto) -> DataProto:
-        if self.use_legacy_worker_impl == "disable":
-            batch_td = batch.to_tensordict()
-            # step 2: convert from padding to nopadding
-            batch_td = left_right_2_no_padding(batch_td)
-            # step 3: add meta info
-            tu.assign_non_tensor(batch_td, compute_loss=False)
-            output = self.critic_wg.infer_batch(batch_td)
-            output = output.get()
-            values = tu.get(output, "values")
-            values = no_padding_2_padding(values, batch_td)
-            values = tu.get_tensordict({"values": values.float()})
-            values = DataProto.from_tensordict(values)
-        else:
-            values = self.critic_wg.compute_values(batch)
+        batch_td = batch.to_tensordict()
+        # step 2: convert from padding to nopadding
+        batch_td = left_right_2_no_padding(batch_td)
+        # step 3: add meta info
+        tu.assign_non_tensor(batch_td, compute_loss=False)
+        output = self.critic_wg.infer_batch(batch_td)
+        output = output.get()
+        values = tu.get(output, "values")
+        values = no_padding_2_padding(values, batch_td)
+        values = tu.get_tensordict({"values": values.float()})
+        values = DataProto.from_tensordict(values)
         return values
 
     def _compute_ref_log_prob(self, batch: DataProto) -> DataProto:
-        if self.use_legacy_worker_impl == "disable":
-            # step 1: convert dataproto to tensordict.
-            batch_td = batch.to_tensordict()
-            # step 2: convert from padding to nopadding
-            batch_td = left_right_2_no_padding(batch_td)
-            # step 3: add meta info
-            metadata = {"calculate_entropy": False, "compute_loss": False}
-            if self.ref_in_actor:
-                metadata["no_lora_adapter"] = True
-            tu.assign_non_tensor(batch_td, **metadata)
-            if self.ref_in_actor:
-                output = self.actor_rollout_wg.compute_log_prob(batch_td)
-            else:
-                output = self.ref_policy_wg.compute_ref_log_prob(batch_td)
-            # gather output
-            log_probs = tu.get(output, "log_probs")
-            # step 4. No padding to padding
-            log_probs = no_padding_2_padding(log_probs, batch_td)
-            # step 5: rebuild a tensordict and convert to dataproto
-            ref_log_prob = tu.get_tensordict({"ref_log_prob": log_probs.float()})
-            ref_log_prob = DataProto.from_tensordict(ref_log_prob)
+        # step 1: convert dataproto to tensordict.
+        batch_td = batch.to_tensordict()
+        # step 2: convert from padding to nopadding
+        batch_td = left_right_2_no_padding(batch_td)
+        # step 3: add meta info
+        metadata = {"calculate_entropy": False, "compute_loss": False}
+        if self.ref_in_actor:
+            metadata["no_lora_adapter"] = True
+        tu.assign_non_tensor(batch_td, **metadata)
+        if self.ref_in_actor:
+            output = self.actor_rollout_wg.compute_log_prob(batch_td)
         else:
-            ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
+            output = self.ref_policy_wg.compute_ref_log_prob(batch_td)
+        # gather output
+        log_probs = tu.get(output, "log_probs")
+        # step 4. No padding to padding
+        log_probs = no_padding_2_padding(log_probs, batch_td)
+        # step 5: rebuild a tensordict and convert to dataproto
+        ref_log_prob = tu.get_tensordict({"ref_log_prob": log_probs.float()})
+        ref_log_prob = DataProto.from_tensordict(ref_log_prob)
 
         return ref_log_prob
 
     def _compute_old_log_prob(self, batch: DataProto):
-        if self.use_legacy_worker_impl == "disable":
-            # TODO: remove step 1, 2, 4 after we make the whole training tensordict and padding free
-            # step 1: convert dataproto to tensordict.
-            batch_td = batch.to_tensordict()
-            # step 2: convert from padding to nopadding
-            batch_td = left_right_2_no_padding(batch_td)
-            # step 3: add meta info
-            tu.assign_non_tensor(batch_td, calculate_entropy=True, compute_loss=False)
-            output = self.actor_rollout_wg.compute_log_prob(batch_td)
-            # gather output
-            entropy = tu.get(output, "entropy")
-            log_probs = tu.get(output, "log_probs")
-            routed_experts = tu.get(output, "routed_experts")
-            old_log_prob_mfu = tu.get(output, "metrics")["mfu"]
-            # step 4. No padding to padding
-            entropy = no_padding_2_padding(entropy, batch_td)
-            log_probs = no_padding_2_padding(log_probs, batch_td)
-            # step 5: rebuild a tensordict and convert to dataproto
-            if routed_experts is not None:
-                old_log_prob = tu.get_tensordict(
-                    {"old_log_probs": log_probs.float(), "entropys": entropy.float(), "routed_experts": routed_experts}
-                )
-            else:
-                old_log_prob = tu.get_tensordict({"old_log_probs": log_probs.float(), "entropys": entropy.float()})
-            old_log_prob = DataProto.from_tensordict(old_log_prob)
+        # TODO: remove step 1, 2, 4 after we make the whole training tensordict and padding free
+        # step 1: convert dataproto to tensordict.
+        batch_td = batch.to_tensordict()
+        # step 2: convert from padding to nopadding
+        batch_td = left_right_2_no_padding(batch_td)
+        # step 3: add meta info
+        tu.assign_non_tensor(batch_td, calculate_entropy=True, compute_loss=False)
+        output = self.actor_rollout_wg.compute_log_prob(batch_td)
+        # gather output
+        entropy = tu.get(output, "entropy")
+        log_probs = tu.get(output, "log_probs")
+        routed_experts = tu.get(output, "routed_experts")
+
+        old_log_prob_mfu = tu.get(output, "metrics")["mfu"]
+        # step 4. No padding to padding
+        entropy = no_padding_2_padding(entropy, batch_td)
+        log_probs = no_padding_2_padding(log_probs, batch_td)
+        # step 5: rebuild a tensordict and convert to dataproto
+        if routed_experts is not None:
+            old_log_prob = tu.get_tensordict(
+                {"old_log_probs": log_probs.float(), "entropys": entropy.float(), "routed_experts": routed_experts}
+            )
         else:
-            old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
-            old_log_prob_mfu = 0
+            old_log_prob = tu.get_tensordict({"old_log_probs": log_probs.float(), "entropys": entropy.float()})
+        old_log_prob = DataProto.from_tensordict(old_log_prob)
         return old_log_prob, old_log_prob_mfu
 
     def _update_actor(self, batch: DataProto) -> DataProto:
@@ -1170,65 +1198,67 @@ class RayPPOTrainer:
         # TODO: Make "temperature" single source of truth from generation.
         batch.meta_info["temperature"] = rollout_config.temperature
         # update actor
-        if self.use_legacy_worker_impl == "disable":
-            batch_td = batch.to_tensordict()
-            # step 2: convert from padding to no-padding
-            batch_td = left_right_2_no_padding(batch_td)
-            calculate_entropy = self.config.actor_rollout_ref.actor.entropy_coeff != 0.0
-            ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
-            ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
-            ppo_epochs = self.config.actor_rollout_ref.actor.ppo_epochs
-            seed = self.config.actor_rollout_ref.actor.data_loader_seed
-            shuffle = self.config.actor_rollout_ref.actor.shuffle
-            tu.assign_non_tensor(
-                batch_td,
-                calculate_entropy=calculate_entropy,
-                global_batch_size=ppo_mini_batch_size,
-                mini_batch_size=ppo_mini_batch_size,
-                epochs=ppo_epochs,
-                seed=seed,
-                dataloader_kwargs={"shuffle": shuffle},
-            )
-
-            actor_output = self.actor_rollout_wg.update_actor(batch_td)
-            actor_output = tu.get(actor_output, "metrics")
-            actor_output = rename_dict(actor_output, "actor/")
-            # modify key name
-            actor_output["perf/mfu/actor"] = actor_output.pop("actor/mfu")
-            actor_output = DataProto.from_single_dict(data={}, meta_info={"metrics": actor_output})
-        else:
-            actor_output = self.actor_rollout_wg.update_actor(batch)
+        batch_td = batch.to_tensordict()
+        # step 2: convert from padding to no-padding
+        batch_td = left_right_2_no_padding(batch_td)
+        calculate_entropy = self.config.actor_rollout_ref.actor.calculate_entropy or (
+            self.config.actor_rollout_ref.actor.entropy_coeff != 0.0
+        )
+        distillation_use_topk = (
+            self.distillation_config.distillation_loss.loss_settings.use_topk
+            if is_distillation_enabled(self.config.get("distillation"))
+            else False
+        )
+        ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
+        ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
+        ppo_epochs = self.config.actor_rollout_ref.actor.ppo_epochs
+        seed = self.config.actor_rollout_ref.actor.data_loader_seed
+        shuffle = self.config.actor_rollout_ref.actor.shuffle
+        tu.assign_non_tensor(
+            batch_td,
+            calculate_entropy=calculate_entropy,
+            distillation_use_topk=distillation_use_topk,
+            global_batch_size=ppo_mini_batch_size,
+            mini_batch_size=ppo_mini_batch_size,
+            epochs=ppo_epochs,
+            seed=seed,
+            dataloader_kwargs={"shuffle": shuffle},
+            compute_loss=True,
+        )
+        actor_output = self.actor_rollout_wg.update_actor(batch_td)
+        actor_output = tu.get(actor_output, "metrics")
+        actor_output = rename_dict(actor_output, "actor/")
+        # modify key name
+        actor_output["perf/mfu/actor"] = actor_output.pop("actor/mfu")
+        actor_output = DataProto.from_single_dict(data={}, meta_info={"metrics": actor_output})
 
         return actor_output
 
     def _update_critic(self, batch: DataProto) -> DataProto:
-        if self.use_legacy_worker_impl == "disable":
-            batch_td = batch.to_tensordict()
-            # step 2: convert from padding to no-padding
-            batch_td = left_right_2_no_padding(batch_td)
-            ppo_mini_batch_size = self.config.critic.ppo_mini_batch_size
-            ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
-            ppo_epochs = self.config.critic.ppo_epochs
-            seed = self.config.critic.data_loader_seed
-            shuffle = self.config.critic.shuffle
-            tu.assign_non_tensor(
-                batch_td,
-                global_batch_size=ppo_mini_batch_size,
-                mini_batch_size=ppo_mini_batch_size,
-                epochs=ppo_epochs,
-                seed=seed,
-                dataloader_kwargs={"shuffle": shuffle},
-            )
+        batch_td = batch.to_tensordict()
+        # step 2: convert from padding to no-padding
+        batch_td = left_right_2_no_padding(batch_td)
+        ppo_mini_batch_size = self.config.critic.ppo_mini_batch_size
+        ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
+        ppo_epochs = self.config.critic.ppo_epochs
+        seed = self.config.critic.data_loader_seed
+        shuffle = self.config.critic.shuffle
+        tu.assign_non_tensor(
+            batch_td,
+            global_batch_size=ppo_mini_batch_size,
+            mini_batch_size=ppo_mini_batch_size,
+            epochs=ppo_epochs,
+            seed=seed,
+            dataloader_kwargs={"shuffle": shuffle},
+        )
 
-            output = self.critic_wg.train_mini_batch(batch_td)
-            output = output.get()
-            output = tu.get(output, "metrics")
-            output = rename_dict(output, "critic/")
-            # modify key name
-            output["perf/mfu/critic"] = output.pop("critic/mfu")
-            critic_output = DataProto.from_single_dict(data={}, meta_info={"metrics": output})
-        else:
-            critic_output = self.critic_wg.update_critic(batch)
+        output = self.critic_wg.train_mini_batch(batch_td)
+        output = output.get()
+        output = tu.get(output, "metrics")
+        output = rename_dict(output, "critic/")
+        # modify key name
+        output["perf/mfu/critic"] = output.pop("critic/mfu")
+        critic_output = DataProto.from_single_dict(data={}, meta_info={"metrics": output})
         return critic_output
 
     def fit(self):
@@ -1267,7 +1297,7 @@ class RayPPOTrainer:
             if self.config.trainer.get("val_only", False):
                 return
 
-        if self.config.actor_rollout_ref.rollout.get("skip_rollout", False):
+        if self.config.actor_rollout_ref.rollout.skip.get("enable", False):
             rollout_skip = RolloutSkip(self.config, self.async_rollout_manager)
             rollout_skip.wrap_generate_sequences()
 
@@ -1505,7 +1535,10 @@ class RayPPOTrainer:
                         metrics.update(critic_output_metrics)
 
                     # implement critic warmup
-                    if self.config.trainer.critic_warmup <= self.global_steps:
+                    if self.config.trainer.critic_warmup > self.global_steps:
+                        # Still in critic warmup, only update weights to wake up rollout replicas.
+                        self.checkpoint_manager.update_weights(self.global_steps)
+                    else:
                         # update actor
                         with marked_timer("update_actor", timing_raw, color="red"):
                             actor_output = self._update_actor(batch)

@@ -4,8 +4,8 @@
 # (token_k1 + seq_max_k2) alongside optional IS metrics.
 #
 # References:
-#   - Rollout Correction Docs: https://github.com/volcengine/verl/blob/main/docs/algo/rollout_corr.md
-#   - Rollout Correction Math: https://github.com/volcengine/verl/blob/main/docs/algo/rollout_corr_math.md
+#   - Rollout Correction Docs: https://github.com/verl-project/verl/blob/main/docs/algo/rollout_corr.md
+#   - Rollout Correction Math: https://github.com/verl-project/verl/blob/main/docs/algo/rollout_corr_math.md
 
 set -xeuo pipefail
 

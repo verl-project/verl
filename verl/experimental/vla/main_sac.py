@@ -111,8 +111,6 @@ def main_task(config):
         role_worker_mapping=role_worker_mapping,
         resource_pool_manager=resource_pool_manager,
         ray_worker_group_cls=ray_worker_group_cls,
-        reward_fn=calculate_reward,
-        val_reward_fn=calculate_reward,
         train_dataset=train_dataset,
         val_dataset=val_dataset,
     )

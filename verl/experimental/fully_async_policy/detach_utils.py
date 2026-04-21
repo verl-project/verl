@@ -45,6 +45,7 @@ class ValidateMetrics:
 
     timing_raw: dict[str, Any]
     metrics: Optional[dict[str, Any]] = None
+    val_generations: Optional[list[tuple]] = None
 
 
 def prepare_single_generation_data(batch_dict, config) -> DataProto:
@@ -71,9 +72,7 @@ def prepare_single_generation_data(batch_dict, config) -> DataProto:
         )
 
     # Setting selected agent, that supports partial
-    if config.actor_rollout_ref.rollout.multi_turn.enable:
-        full_batch.non_tensor_batch["agent_name"] = np.array(["tool_agent"] * len(full_batch), dtype=object)
-    else:
+    if not config.actor_rollout_ref.rollout.multi_turn.enable:
         full_batch.non_tensor_batch["agent_name"] = np.array(["single_turn_agent"] * len(full_batch), dtype=object)
 
     # Add global step count to generated data
