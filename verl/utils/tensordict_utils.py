@@ -885,7 +885,10 @@ def maybe_fix_3d_position_ids(data: TensorDict):
     # will incur indexing error for ragged tensor. This only happens when using 3D position ids in VLMs.
     # This is likely a bug in tensordict. As a workaround, we manually set _ragged_index.
     if "position_ids" in data.keys() and data["position_ids"].dim() == 3 and data["position_ids"].is_nested:
-        data["position_ids"]._ragged_idx = 2
+        assert parse_version(tensordict.__version__) >= parse_version("0.12.2"), (
+            "_ragged_idx bugs have been fixed in tensordict version 0.12.2, please upgrade tensordict"
+        )
+        # data["position_ids"]._ragged_idx = 2
 
 
 def list_of_dict_to_tensordict(list_of_dicts: list[dict[str, Any]]) -> TensorDict:

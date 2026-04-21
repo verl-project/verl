@@ -1,7 +1,7 @@
 Frequently Asked Questions
 ====================================
 
-Last updated: 09/24/2025.
+Last updated: 04/21/2026.
 
 Ray related
 ------------
@@ -74,14 +74,14 @@ Cause of the problem: There is no suitable version of tensordict package for the
 
 .. code:: bash
 
-    pip install tensordict==0.6.2
+    pip install "tensordict>=0.12.2"
 
 Output example:
 
 .. code:: bash
 
-    ERROR: Could not find a version that satisfies the requirement tensordict==0.6.2 (from versions: 0.0.1a0, 0.0.1b0, 0.0.1rc0, 0.0.2a0, 0.0.2b0, 0.0.3, 0.1.0, 0.1.1, 0.1.2, 0.8.0, 0.8.1, 0.8.2, 0.8.3)
-    ERROR: No matching distribution found for tensordict==0.6.2
+    ERROR: Could not find a version that satisfies the requirement tensordict>=0.12.2
+    ERROR: No matching distribution found for tensordict>=0.12.2
 
 Solution 1st:
   Install tensordict from source code:
@@ -91,7 +91,7 @@ Solution 1st:
     pip uninstall tensordict
     git clone https://github.com/pytorch/tensordict.git
     cd tensordict/
-    git checkout v0.6.2
+    git checkout v0.12.2
     python setup.py develop
     pip install -v -e .
 

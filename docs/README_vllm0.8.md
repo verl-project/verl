@@ -1,6 +1,6 @@
 # Upgrading to vLLM >= 0.8
 
-Last updated: 05/04/2025.
+Last updated: 04/21/2026.
 
 ## Installation
 
@@ -49,4 +49,4 @@ When you just directly upgrade vllm>=0.8, some dependency packages may undergo v
 in <module> from torch.multiprocessing.reductions import ForkingPickler ImportError: cannot import name 'ForkingPickler' from 'torch.multiprocessing.reductions' (/opt/conda/lib/python3.11/site-packages/torch/multiprocessing/reductions.py)
 ```
 
-You need to upgrade `tensordict` to version 0.6.2 using the command `pip install tensordict==0.6.2`.
+You need to upgrade `tensordict` to at least version 0.12.2 using the command `pip install "tensordict>=0.12.2"`.
