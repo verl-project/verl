@@ -367,7 +367,6 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
         self._fit_save_checkpoint()
         self._fit_stop_profile()
         self._fit_collect_metrics(batch)
-        self._fit_torch_memory()
         self._fit_experimental(batch)
         self._fit_postprocess_step()
 
@@ -706,15 +705,6 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
         # compute variance proxy metrics
         gradient_norm = metrics.get("actor/grad_norm", None)
         metrics.update(compute_variance_proxy_metrics(batch=batch, gradient_norm=gradient_norm))
-
-    def _fit_torch_memory(self):
-        if (
-            hasattr(self.config.actor_rollout_ref.actor, "profiler")
-            and self.config.actor_rollout_ref.actor.profiler.tool == "torch_memory"
-        ):
-            self.actor_rollout_wg.dump_memory_snapshot(
-                tag=f"post_update_step{self.global_steps}", sub_dir=f"step{self.global_steps}"
-            )
 
     def _fit_experimental(self, batch):
         # this is experimental and may be changed/removed in the future in favor of a general-purpose one
