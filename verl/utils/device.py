@@ -226,7 +226,6 @@ def get_npu_versions() -> tuple[str, str]:
                 check=True,
             )
 
-
     # Parse software version from output
     software_version = None
     for line in result.stdout.split("\n"):
