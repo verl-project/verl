@@ -491,9 +491,7 @@ class TestLoadBalanceStrategyPickServer:
             server_actor_ids=["s0", "s1"],
             metric_name="dummy",
         )
-        strat._metrics_stop.set()
-        if strat._metrics_thread is not None:
-            strat._metrics_thread.join(timeout=5.0)
+        strat.close()
         with patch.object(strat, "_kv_snapshot", return_value={"s0": 0.9, "s1": 0.1}):
             assert strat.pick_server(["s0", "s1"]) == "s1"
 

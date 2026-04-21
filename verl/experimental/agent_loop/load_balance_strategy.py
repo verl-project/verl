@@ -33,11 +33,11 @@ logger = logging.getLogger(__name__)
 # Cap parallel /metrics scrapes per refresh
 _MAX_KV_METRICS_SCRAPE_WORKERS = 32
 
-_LOAD_BALANCE_STRATEGY_CLASSES: dict[str, type[LoadBalanceStrategy]] = {}
+_LOAD_BALANCE_STRATEGY_CLASSES: dict[str, type[LoadBalanceStrategyBase]] = {}
 
 
 def host_key_for_load_balance(server_address: str) -> str:
-    """extract host part from server_address"""
+    """Extract host part from server_address"""
     a = server_address.strip()
     if not a:
         return a
@@ -55,12 +55,14 @@ def host_key_for_load_balance(server_address: str) -> str:
     return a
 
 
-def resolve_load_balance_weight(weights: dict[str, float], server_address: str) -> float | None:
+def resolve_load_balance_weight(weights: dict[str, float] | None, server_address: str) -> float | None:
     """Return configured weight for server_address, or None if unset.
 
     Tries exact server_address key first, then host_key_for_load_balance.
     WeightedRoundRobinStrategy treats None as weight 1.0.
     """
+    if not weights:
+        return None
     if server_address in weights:
         return float(weights[server_address])
     key = host_key_for_load_balance(server_address)
@@ -69,28 +71,23 @@ def resolve_load_balance_weight(weights: dict[str, float], server_address: str) 
     return None
 
 
-def _register(name: str, cls: type[LoadBalanceStrategy]) -> None:
+def _register(name: str, cls: type[LoadBalanceStrategyBase]) -> None:
     if name in _LOAD_BALANCE_STRATEGY_CLASSES:
         raise ValueError(f"Load balance strategy {name!r} is already registered")
     _LOAD_BALANCE_STRATEGY_CLASSES[name] = cls
 
 
 def register(name: str):
-    """Decorator: @register("my_strategy") on a :class:`LoadBalanceStrategy` subclass."""
+    """Decorator: @register("my_strategy") on a LoadBalanceStrategyBase subclass."""
 
-    def decorator(cls: type[LoadBalanceStrategy]) -> type[LoadBalanceStrategy]:
+    def decorator(cls: type[LoadBalanceStrategyBase]) -> type[LoadBalanceStrategyBase]:
         _register(name, cls)
         return cls
 
     return decorator
 
 
-def register_load_balance_strategy(name: str, cls: type[LoadBalanceStrategy]) -> None:
-    """Register a strategy class without decorator (e.g. plugins). Same as ``@register(name)`` on ``cls``."""
-    _register(name, cls)
-
-
-def create_load_balance_strategy(name: str, server_actor_ids: list[str], **kwargs: Any) -> LoadBalanceStrategy:
+def create_load_balance_strategy(name: str, server_actor_ids: list[str], **kwargs: Any) -> LoadBalanceStrategyBase:
     """Instantiate a registered strategy by name."""
     cls = _LOAD_BALANCE_STRATEGY_CLASSES.get(name)
     if cls is None:
@@ -100,40 +97,105 @@ def create_load_balance_strategy(name: str, server_actor_ids: list[str], **kwarg
     return cls(server_actor_ids, **kwargs)
 
 
-class LoadBalanceStrategy(ABC):
-    """Strategy used when neither request nor group sticky applies (see ``load_balance`` Ray actors).
-
-    Subclasses must implement pick_server and accept
-    ``__init__(self, server_actor_ids: list[str], **kwargs)``.
-    """
-
+class LoadBalanceStrategyBase(ABC):
     @abstractmethod
     def pick_server(self, server_ids: list[str]) -> str:
         """Choose server_ids member."""
 
+    @abstractmethod
+    def close(self) -> None:
+        """Release background resources (threads, HTTP scrapers)."""
 
-@register("least_requests")
-class LeastRequestsStrategy(LoadBalanceStrategy):
+
+class InflightAwareStrategy(LoadBalanceStrategyBase):
     def __init__(self, server_actor_ids: list[str], **kwargs: Any):
+        if not server_actor_ids:
+            raise ValueError("server_actor_ids must be non-empty")
         self._inflight: dict[str, int] = {sid: 0 for sid in server_actor_ids}
 
+    def notify_request_completed(self, server_id: str) -> None:
+        """Decrement in-flight count for server_id."""
+        if server_id not in self._inflight:
+            raise ValueError(f"Invalid server_id for notify_request_completed: {server_id}")
+        if self._inflight[server_id] <= 0:
+            raise ValueError(f"notify_request_completed: no inflight on server {server_id}")
+        self._inflight[server_id] -= 1
+
+    def notify_request_started(self, server_id: str) -> None:
+        """Increment in-flight count for server_id."""
+        if server_id not in self._inflight:
+            raise ValueError(f"Invalid server_id for notify_request_started: {server_id}")
+        if self._inflight[server_id] < 0:
+            raise ValueError(f"notify_request_started: negative inflight on server {server_id}")
+        self._inflight[server_id] += 1
+
+
+@register("random")
+class RandomStrategy(LoadBalanceStrategyBase):
+    """Uniform random choice among candidates."""
+
+    def __init__(self, server_actor_ids: list[str], random_seed: int | None = None, **kwargs: Any):
+        self._rng = random.Random(random_seed)
+
     def pick_server(self, server_ids: list[str]) -> str:
-        # O(n): one pass for min inflight; ties broken by lexicographically smallest sid (same as sorted(server_ids)).
         if not server_ids:
             raise ValueError("server_ids must be non-empty")
+        return self._rng.choice(server_ids)
+
+
+@register("weighted_rr")
+class WeightedRoundRobinStrategy(LoadBalanceStrategyBase):
+    """Smooth weighted round-robin (largest-current-weight).
+
+    Optional weights maps host id (IPv4/IPv6 without port, or full server_actor_id)
+    to a positive weight. Missing keys default to 1.0. weights is None means all 1.0.
+    """
+
+    def __init__(
+        self,
+        server_actor_ids: list[str],
+        weights: dict[str, float] | None = None,
+        **kwargs: Any,
+    ):
+        self._server_actor_ids = list(server_actor_ids)
+        n = len(self._server_actor_ids)
+        if n == 0:
+            raise ValueError("server_actor_ids must be non-empty")
+        self._weights = []
+        for sid in self._server_actor_ids:
+            v = resolve_load_balance_weight(weights, sid)
+            self._weights.append(1.0 if v is None else v)
+        self._current = [0.0] * n
+        self._pos = {sid: i for i, sid in enumerate(self._server_actor_ids)}
+
+    def pick_server(self, server_ids: list[str]) -> str:
+        if not server_ids:
+            raise ValueError("server_ids must be non-empty")
+        indices = [self._pos[s] for s in server_ids]
+        total = sum(self._weights[i] for i in indices)
+        for i in indices:
+            self._current[i] += self._weights[i]
+        best_i = max(indices, key=lambda i: (self._current[i], -i))
+        self._current[best_i] -= total
+        return self._server_actor_ids[best_i]
+
+
+@register("least_requests")
+class LeastRequestsStrategy(InflightAwareStrategy):
+    def pick_server(self, server_ids: list[str]) -> str:
         return min(server_ids, key=lambda sid: (self._inflight[sid], sid))
 
 
 @register("least_kv_cache")
-class LeastKVCacheStrategy(LoadBalanceStrategy):
-    """Prefer lowest KV usage from periodic HTTP /metrics scrape; else fall back to least in-flight.
+class LeastKVCacheStrategy(InflightAwareStrategy):
+    """Prefer lowest KV usage from periodic HTTP /metrics scrape;
 
     When metric_name is set, a daemon thread scrapes each replica on refresh_interval_s and
-    pick_server uses that internal state. When metric_name is unset, no HTTP is performed and
-    all KV readings are treated as unknown (same as least in-flight, with lexicographic sid tie-break).
+    pick_server uses that internal state. If the metric is not available, we use p2c algorithm to choose the server.
     """
 
     def __init__(self, server_actor_ids: list[str], **kwargs: Any):
+        super().__init__(server_actor_ids, **kwargs)
         self._server_actor_ids = list(server_actor_ids)
         self._metric_name: str | None = kwargs.pop("metric_name", None)
         self._metrics_path: str = kwargs.pop("metrics_path", "/metrics")
@@ -145,8 +207,10 @@ class LeastKVCacheStrategy(LoadBalanceStrategy):
         self._metrics_stop = threading.Event()
         self._metrics_thread: threading.Thread | None = None
         self._metrics_fail_warned: set[str] = set()
-        self._inflight: dict[str, int] = {sid: 0 for sid in self._server_actor_ids}
         self._metrics_executor: ThreadPoolExecutor | None = None
+        self._metrics_close_lock = threading.Lock()
+        self._metrics_close_requested = False
+        self._metrics_close_join_timeout_s: float = float(kwargs.pop("metrics_close_join_timeout_s", 30.0))
 
         if self._metric_name:
             pool_workers = max(1, min(len(self._server_actor_ids), _MAX_KV_METRICS_SCRAPE_WORKERS))
@@ -161,6 +225,37 @@ class LeastKVCacheStrategy(LoadBalanceStrategy):
             )
             self._metrics_thread.start()
 
+    def close(self) -> None:
+        """Stop the metrics scrape thread and shut down its executor (idempotent)."""
+        if not self._metric_name:
+            return None
+        with self._metrics_close_lock:
+            if self._metrics_close_requested:
+                return None
+            self._metrics_close_requested = True
+        self._metrics_stop.set()
+        ex = self._metrics_executor
+        if ex is not None:
+            try:
+                ex.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                logger.exception("Error shutting down KV metrics ThreadPoolExecutor")
+        thr = self._metrics_thread
+        if thr is not None and thr.is_alive():
+            thr.join(timeout=self._metrics_close_join_timeout_s)
+            if thr.is_alive():
+                logger.warning(
+                    "LeastKVCacheStrategy metrics thread did not exit within %ss",
+                    self._metrics_close_join_timeout_s,
+                )
+        return None
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
+
     def _metrics_background_loop(self) -> None:
         try:
             while not self._metrics_stop.is_set():
@@ -173,7 +268,10 @@ class LeastKVCacheStrategy(LoadBalanceStrategy):
         finally:
             ex = self._metrics_executor
             if ex is not None:
-                ex.shutdown(wait=True)
+                try:
+                    ex.shutdown(wait=True)
+                except Exception:
+                    logger.exception("Error in KV metrics executor shutdown from background thread")
                 self._metrics_executor = None
 
     def _mark_metrics_failed(self, sid: str) -> bool:
@@ -227,67 +325,19 @@ class LeastKVCacheStrategy(LoadBalanceStrategy):
         list(pool.map(worker, ids))
 
     def pick_server(self, server_ids: list[str]) -> str:
+        if not server_ids:
+            raise ValueError("server_ids must be non-empty")
         if self._metric_name:
             usage = self._kv_snapshot(server_ids)
         else:
             usage = {sid: None for sid in server_ids}
 
-        has_none = any(usage.get(sid) is None for sid in server_ids)
-        if has_none:  # fallback to least in-flight
-            return min(server_ids, key=lambda sid: (self._inflight[sid], sid))
+        max_usage = max([v for v in usage.values() if v is not None], default=0.0)
 
-        return min(server_ids, key=lambda sid: (usage[sid], sid))
+        def key_func(sid: str) -> tuple[float, int, str]:
+            val = usage[sid]
+            if val is None:
+                return (max_usage, self._inflight[sid], sid)
+            return (val, self._inflight[sid], sid)
 
-
-@register("weighted_rr")
-class WeightedRoundRobinStrategy(LoadBalanceStrategy):
-    """Smooth weighted round-robin (largest-current-weight).
-
-    Optional weights maps host id (IPv4/IPv6 without port, or full server_actor_id)
-    to a positive weight. Missing keys default to 1.0. weights is None means all 1.0.
-    """
-
-    def __init__(
-        self,
-        server_actor_ids: list[str],
-        weights: dict[str, float] | None = None,
-        **kwargs: Any,
-    ):
-        self._ids = list(server_actor_ids)
-        n = len(self._ids)
-        if n == 0:
-            raise ValueError("server_actor_ids must be non-empty")
-        if weights is None:
-            w = [1.0] * n
-        else:
-            # if weight is not found, use 1.0 as default
-            w = [
-                resolve_load_balance_weight(weights, sid)
-                if resolve_load_balance_weight(weights, sid) is not None
-                else 1.0
-                for sid in self._ids
-            ]
-        self._weights = w
-        self._current = [0.0] * n
-        self._inflight: dict[str, int] = {sid: 0 for sid in self._ids}
-        self._pos = {sid: i for i, sid in enumerate(self._ids)}
-
-    def pick_server(self, server_ids: list[str]) -> str:
-        # Smooth WRR state lives in _current
-        indices = [self._pos[s] for s in server_ids]
-        total = sum(self._weights[i] for i in indices)
-        for i in indices:
-            self._current[i] += self._weights[i]
-        best_i = max(indices, key=lambda i: (self._current[i], -i))
-        self._current[best_i] -= total
-        return self._ids[best_i]
-
-
-@register("random")
-class RandomStrategy(LoadBalanceStrategy):
-    def __init__(self, server_actor_ids: list[str], random_seed: int | None = None, **kwargs: Any):
-        self._rng = random.Random(random_seed)
-        self._inflight: dict[str, int] = {sid: 0 for sid in server_actor_ids}
-
-    def pick_server(self, server_ids: list[str]) -> str:
-        return self._rng.choice(server_ids)
+        return min(server_ids, key=key_func)

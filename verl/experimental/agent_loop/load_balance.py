@@ -108,6 +108,10 @@ class GlobalRequestLoadBalancer(ABC):
         if inflight is not None and server_id in inflight:
             inflight[server_id] += delta
 
+    def close(self) -> None:
+        """Stop strategy background work (e.g. least_kv_cache metrics scraper). Safe to call multiple times."""
+        self.strategy.close()
+
 
 @ray.remote
 class RequestStickyLoadBalancer(GlobalRequestLoadBalancer):

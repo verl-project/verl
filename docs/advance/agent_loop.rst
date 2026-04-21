@@ -210,7 +210,13 @@ AsyncLLMServerManager serve as proxy to multiple AsyncLLMServer instances, provi
 
 - `load_balance_sticky_mode`: `request` (default) | `group`.
 - `load_balance_strategy`: `least_requests` | `least_kv_cache` | `weighted_rr` | `random`.
-- `least_kv_cache`: the global load balancer actor periodically HTTP GETs each replica's Prometheus text endpoint (default path `/metrics`), and parses `kv_cache_metrics.metric_name` (identifier before `{`). If several samples share that name with different label sets, the **maximum** value is used per replica. Requires the engine to expose metrics (e.g. SGLang `--enable-metrics`). If scraping fails, routing falls back to least in-flight behavior. This path does **not** query the cluster Prometheus server; it scrapes each replica directly.
+- `least_kv_cache`: the global load balancer actor periodically HTTP GETs each replica's Prometheus text endpoint (default path `/metrics`), and parses `kv_cache_metrics.metric_name` (identifier before `{`). If several samples share that name with different label sets, the **maximum** value is used per replica. Requires the engine to expose metrics (e.g. SGLang `--enable-metrics`). If scraping fails, we use p2c algorithm to choose the server.
+
+.. hint::
+
+    p2c algorithm is a simple algorithm. If the server has no metric, we use the worst metric value as this server's metric value.
+    The server with lowest (metric value, least request) is chosen.
+
 - `weighted_rr`: optional `load_balance_weights` maps replica **host** keys (IPv4/IPv6 without port or scheme; the full `server_actor_id` string is also accepted when it has no port) to a **positive** weight. Replicas whose host is **not** listed use weight **1.0**. If the whole setting is omitted (`null`), every replica has weight 1.0.
 - `load_balance_random_seed`: optional seed for `random` strategy (reproducibility in tests).
 
