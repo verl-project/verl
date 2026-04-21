@@ -22,7 +22,7 @@ For ``RLHFDataset`` (Default), at least 1 fields are required:
 
 We already provide some examples of processing the datasets to parquet
 files in `data_preprocess directory <https://github.com/verl-project/verl/blob/main/examples/data_preprocess>`_. Currently, we support
-preprocess of GSM8k, MATH, Hellasage, Full_hh_rlhf datasets. See :doc:`../preparation/prepare_data` for
+preprocess of GSM8k, MATH, HellaSwag, Full_hh_rlhf datasets. See :doc:`../preparation/prepare_data` for
 more information.
 
 Define the reward functions for different datasets
