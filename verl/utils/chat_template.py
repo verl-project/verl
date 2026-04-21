@@ -76,7 +76,7 @@ def apply_chat_template(
         list[int] | str: tokenized ids or text string.
     """
     try:
-        return processor.apply_chat_template(
+        output = processor.apply_chat_template(
             messages,
             tokenize=tokenize,
             add_generation_prompt=add_generation_prompt,
@@ -84,6 +84,9 @@ def apply_chat_template(
             return_dict=return_dict,
             **kwargs,
         )
+        if tokenize and not return_dict:
+            output = normalize_token_ids(output)
+        return output
     except Exception:
         # Qwen3.5 apply_chat_template needs messages with at least one user message
         dummy_user_message = [{"role": "user", "content": [{"type": "text", "text": ""}]}]
@@ -107,10 +110,15 @@ def apply_chat_template(
         if not tokenize:  # tokenize=False
             return output[len(dummy_user_prefix) :]
         elif not return_dict:  # tokenize=True and return_dict=False
-            if isinstance(output[0], list):  # transformers>=5
+            if isinstance(output, (list, tuple)) and len(output) > 0 and isinstance(output[0], list):
+                # transformers>=5 returns list[list[int]] for single-input tokenize=True
                 assert len(output) == 1, "output must be a list[int] or list[list[int]]"
                 dummy_user_prefix = dummy_user_prefix[0]
                 output = output[0]
+            else:
+                # transformers>=5 may return BatchEncoding/mapping; normalize both prefix and output
+                dummy_user_prefix = normalize_token_ids(dummy_user_prefix)
+                output = normalize_token_ids(output)
             return output[len(dummy_user_prefix) :]
         else:  # tokenize=True and return_dict=True and return_tensors="pt"
             dummy_user_prefix = dict(dummy_user_prefix)
