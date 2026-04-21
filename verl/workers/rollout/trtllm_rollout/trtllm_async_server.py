@@ -305,7 +305,9 @@ class TRTLLMHttpServer:
         )
         max_tokens = max(0, min(max_tokens, self.config.max_model_len - len(prompt_ids)))
         sampling_params["max_tokens"] = max_tokens
-        sampling_params["logprobs"] = 0 if sampling_params.pop("logprobs", False) else None  # TorchSampler
+        sampling_params["logprobs"] = (
+            1 if sampling_params.pop("logprobs", False) else None
+        )  # TorchSampler: 1=sampled-token logprob
         if sampling_params["top_k"] == -1:
             sampling_params["top_k"] = 0
         sampling_params.update(self.sampling_args)
@@ -344,17 +346,30 @@ class TRTLLMHttpServer:
                 )
             raise
         token_ids = outputs.outputs[0].token_ids
+        log_probs = None
+        if outputs.outputs[0].logprobs is not None:
+            # When logprobs=1, TRT-LLM returns only the sampled token's logprob at each position.
+            # Extract log_probs before checking finish_reason so cancelled (partial) requests also
+            # return log_probs for their already-generated tokens.
+            log_probs = [list(d.values())[0].logprob for d in outputs.outputs[0].logprobs]
         if outputs.outputs[0].finish_reason == "cancelled":
+            # TODO: remove [DEBUG]verify TRT-LLM populates logprobs for cancelled requests.
+            # Expected: n_tokens == n_logprobs (or n_logprobs <= n_tokens if cancelled mid-step).
+            # If n_logprobs == 0 when n_tokens > 0, the fix is ineffective and the
+            # response_mask workaround in detach_utils.py must be restored instead.
+            n_tokens = len(token_ids)
+            n_logprobs = len(log_probs) if log_probs is not None else 0
+            print(
+                f"[trtllm_partial_rollout] cancelled: n_tokens={n_tokens} n_logprobs={n_logprobs} "
+                f"logprobs_present={log_probs is not None} "
+                f"first3_lp={log_probs[:3] if log_probs else None}"
+            )
             return TokenOutput(
                 token_ids=token_ids,
+                log_probs=log_probs,
                 stop_reason="aborted",
                 extra_fields={"global_steps": self.global_steps},
             )
-
-        log_probs = None
-        if outputs.outputs[0].logprobs is not None:
-            # When logprobs=1, TRT-LLM returns only the sampled token's logprob at each position
-            log_probs = [list(d.values())[0].logprob for d in outputs.outputs[0].logprobs]
         return TokenOutput(token_ids=token_ids, log_probs=log_probs, extra_fields={"global_steps": self.global_steps})
 
     async def set_global_steps(self, global_steps: int):
