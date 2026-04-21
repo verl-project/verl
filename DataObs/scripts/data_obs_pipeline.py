@@ -8,6 +8,7 @@ import json
 import logging
 import sys
 from pathlib import Path
+from dotenv import load_dotenv
 from typing import Optional, List
 
 import pandas as pd
@@ -64,34 +65,31 @@ def main():
         description='DataObs Pipeline: Data analysis and training workflow'
     )
     parser.add_argument('--data_path', required=True, help='Path to dataset (parquet/jsonl/json)')
-    parser.add_argument('--data_name', default=None, help='Dataset name for output subdirectory')
-    parser.add_argument('--n_splits', type=int, default=10, help='Number of data splits')
+    parser.add_argument('--data_name', default='GSM8K', help='Dataset name for output subdirectory')
+    parser.add_argument('--model_id', required=True, help='Model ID for training')
     parser.add_argument('--output_dir', required=True, help='Output directory for experiment')
+    parser.add_argument('--splits_dir', default=None, help='Path to existing splits directory (use with --skip_split)')
+    parser.add_argument('--train_script', default='scripts/sft_dataobs.sh', help='Training script path')
+    parser.add_argument('--eval_script', default='scripts/eval_dataobs.sh', help='Evaluation script path')
+    parser.add_argument('--eval_data_path', default='/data/open_datasets/GSM8K/test.parquet', 
+                        help='Path to eval dataset (parquet)')
+    
+    parser.add_argument('--seed', type=int, default=42, help='Random seed')
     parser.add_argument('--gpu_ids', default='0,1,2,3,4,5,6,7', help='Available GPU IDs (comma-separated)')
     parser.add_argument('--gpus_per_split', type=int, default=1, help='GPUs per training split')
-    parser.add_argument('--train_script', default='scripts/sft.sh', help='Training script path')
-    parser.add_argument('--model_id', default=None, help='Model ID for training')
-    parser.add_argument('--cot_datasynth_dir', default="/home/hrh/CoT-DataSynth", help='CoT-DataSynth directory')
-    parser.add_argument('--run_training', action='store_true', help='Run training phase')
-    parser.add_argument('--run_analysis', action='store_true', help='Run analysis phase')
-    parser.add_argument('--run_evaluation', action='store_true', help='Run evaluation phase (on existing trained models)')
+    
+    parser.add_argument('--n_splits', type=int, default=10, help='Number of data splits')
+    parser.add_argument('--similarity_type', default='jaccard',
+                        help='Similarity type for diversity: jaccard, levenshtein, cosine, jaro_winkler, ngram, bertouch, bleu, rouge')
+    parser.add_argument('--compute_on', default='both', choices=['prompt', 'answer', 'both'], help='What to compute diversity on')
+    parser.add_argument('--model', default=None, help='Model for PPL and IFD computation')
+    
     parser.add_argument('--skip_split', action='store_true', help='Skip data splitting (use existing splits)')
     parser.add_argument('--skip_metrics', action='store_true', help='Skip metric computation')
     parser.add_argument('--skip_training', action='store_true', help='Skip training phase')
-    parser.add_argument('--skip_evaluation', action='store_true', help='Skip evaluation phase')
-    parser.add_argument('--seed', type=int, default=42, help='Random seed')
-    parser.add_argument('--splits_dir', default=None,
-                        help='Path to existing splits directory (use with --skip_split)')
-    parser.add_argument('--splits_format', default='parquet',
-                        choices=['jsonl', 'json', 'parquet'],
-                        help='Format for saving splits (default: parquet, for verl compatibility)')
-    parser.add_argument('--similarity_type', default='jaccard',
-                        help='Similarity type for diversity: jaccard, levenshtein, cosine, jaro_winkler, ngram, bertouch, bleu, rouge')
-    parser.add_argument('--compute_on', default='both',
-                        choices=['prompt', 'answer', 'both'],
-                        help='What to compute diversity on')
-    parser.add_argument('--model', default=None,
-                        help='Model for PPL and IFD computation')
+    parser.add_argument('--skip_analysis', action='store_true', help='Skip analysis phase')
+    parser.add_argument('--do_evaluation', action='store_true', help='Conduct separate evaluation phase')
+    parser.add_argument('--only_evaluation', action='store_true', help='Only Conduct separate evaluation phase')
 
     args = parser.parse_args()
 
@@ -102,19 +100,19 @@ def main():
     output_dir = output_dir / args.data_name
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    if args.cot_datasynth_dir is None:
-        # Try to find CoT-DataSynth directory
-        current_dir = Path(__file__).parent
-        if (current_dir.parent / 'verl').exists():
-            args.cot_datasynth_dir = str(current_dir.parent)
-        else:
-            raise ValueError("Could not find CoT-DataSynth directory. Please specify --cot_datasynth_dir")
+    # Read CoT-DataSynth directory from config/bash_config.env
+    current_script_dir = Path(__file__).resolve().parent
+    config_env_path = current_script_dir / "../../config/bash_config.env" 
+    load_dotenv(config_env_path)
+    cot_datasynth_dir = os.getenv("REPO_DIR")
+    if cot_datasynth_dir is None:
+        raise ValueError("Could not find CoT-DataSynth directory. Please specify REPO_DIR in config/bash_config.env.")        
 
     logger.info(f"Output directory: {output_dir}") 
-    logger.info(f"CoT-DataSynth directory: {args.cot_datasynth_dir}")
+    logger.info(f"CoT-DataSynth directory: {cot_datasynth_dir}")
 
     # Phase 1: Data Splitting
-    if not args.skip_split:
+    if not args.skip_split and not args.only_evaluation:
         logger.info("=" * 50)
         logger.info("Phase 1: Data Splitting")
         logger.info("=" * 50)
@@ -124,7 +122,7 @@ def main():
         splits = splitter.split_dataset(data, seed=args.seed)
 
         for split_id, split_data in enumerate(splits):
-            splitter.save_split(split_data, split_id, format=args.splits_format)
+            splitter.save_split(split_data, split_id, format="parquet")
 
         logger.info(f"Saved {args.n_splits} splits to {output_dir}/splits/")
         splits_dir = output_dir / "splits"
@@ -135,8 +133,8 @@ def main():
         if args.splits_dir:
             splits_dir = Path(args.splits_dir)
             logger.info(f"Using splits from: {splits_dir}")
-            # 自动检测 splits 数量 (支持 parquet 和 jsonl)
-            existing_splits = list(splits_dir.glob("split_*.parquet")) or list(splits_dir.glob("split_*.jsonl"))
+            # 自动检测 splits 数量 (支持 parquet)
+            existing_splits = list(splits_dir.glob("split_*.parquet"))
             if existing_splits:
                 args.n_splits = max(int(f.stem.split("_")[1]) for f in existing_splits) + 1
                 logger.info(f"Auto-detected {args.n_splits} splits")
@@ -144,7 +142,7 @@ def main():
             splits_dir = output_dir / "splits"
 
     # Phase 2: Compute Data Metrics
-    if not args.skip_metrics:
+    if not args.skip_metrics and not args.only_evaluation:
         logger.info("=" * 50)
         logger.info("Phase 2: Computing Data Metrics")
         logger.info("=" * 50)
@@ -158,16 +156,12 @@ def main():
 
         metrics_list = []
         for split_id in range(args.n_splits):
-            split_file = splits_dir / f"split_{split_id}.jsonl"
+            split_file = splits_dir / f"split_{split_id}.parquet"
             if not split_file.exists():
                 logger.warning(f"Split file not found: {split_file}")
                 continue
 
-            # Load split data
-            split_data = []
-            with open(split_file) as f:
-                for line in f:
-                    split_data.append(json.loads(line))
+            split_data = load_data(str(split_file))
 
             # Compute all metrics
             metrics = {}
@@ -231,7 +225,7 @@ def main():
         logger.info(f"Saved metrics summary to {metrics_csv}")
 
     # Phase 3: Training
-    if args.run_training and not args.skip_training:
+    if not args.skip_training and not args.only_evaluation:
         logger.info("=" * 50)
         logger.info("Phase 3: Training")
         logger.info("=" * 50)
@@ -243,8 +237,8 @@ def main():
         # 如果有 --splits_dir，自动检测 splits 数量
         if args.splits_dir:
             splits_path = Path(args.splits_dir)
-            # 自动检测 splits 数量 (支持 parquet 和 jsonl)
-            existing_splits = list(splits_path.glob("split_*.parquet")) or list(splits_path.glob("split_*.jsonl"))
+            # 自动检测 splits 数量 (支持 parquet)
+            existing_splits = list(splits_path.glob("split_*.parquet"))
             if existing_splits:
                 args.n_splits = max(int(f.stem.split("_")[1]) for f in existing_splits) + 1
                 splits_dir = splits_path
@@ -255,53 +249,45 @@ def main():
         gpu_allocations = allocator.allocate(args.n_splits)
 
         # Setup training pipeline
-        training_pipeline = TrainingPipeline(str(output_dir), args.cot_datasynth_dir)
+        training_pipeline = TrainingPipeline(str(output_dir), cot_datasynth_dir)
 
         # Prepare training configs
         base_config = {}
-        if args.model_id:
-            base_config['model.partial_pretrain'] = args.model_id
 
         configs = training_pipeline.prepare_training_configs(
             str(splits_dir),
             gpu_allocations,
             base_config,
             args.n_splits,
-            args.splits_format
+            args.model_id
         )
 
         # Run trainings
         logger.info(f"Running {len(configs)} trainings...")
-
-        # 准备评估脚本路径
-        eval_script = Path(args.cot_datasynth_dir) / "scripts" / "eval_dataobs.sh"
-        eval_data_path = "/data/open_datasets/GSM8K/test.parquet"
 
         results = training_pipeline.run_all_trainings(
             configs,
             args.train_script,
             parallel=False,
             timeout=None,
-            eval_script=str(eval_script) if eval_script.exists() else None,
-            eval_data_path=eval_data_path
+            eval_script_path=args.eval_script if Path(f"{cot_datasynth_dir}/{args.eval_script}").exists() else None,
+            eval_data_path=args.eval_data_path if Path(args.eval_data_path).exists() else None
         )
 
         logger.info(f"Training results: {results}")
 
     # Phase 3.5: Evaluation (optional, can be run independently)
-    if args.run_evaluation and not args.skip_evaluation:
+    if args.do_evaluation or args.only_evaluation:
         logger.info("=" * 50)
         logger.info("Phase 3.5: Evaluation on Test Set")
         logger.info("=" * 50)
 
-        training_pipeline = TrainingPipeline(str(output_dir), args.cot_datasynth_dir)
+        training_pipeline = TrainingPipeline(str(output_dir), cot_datasynth_dir)
 
-        # 准备评估脚本路径
-        eval_script = Path(args.cot_datasynth_dir) / "scripts" / "eval_dataobs.sh"
-        eval_data_path = "/data/open_datasets/GSM8K/test.parquet"
-
-        if not eval_script.exists():
-            logger.error(f"Evaluation script not found: {eval_script}")
+        if not Path(f"{cot_datasynth_dir}/{args.eval_script}").exists():
+            logger.error(f"Evaluation script not found: {args.eval_script}")
+        elif not Path(args.eval_data_path).exists():
+            logger.error(f"Evaluation data not found: {args.eval_data_path}")
         else:
             # 使用 GPU 分配器分配 GPU
             gpu_ids = [int(g) for g in args.gpu_ids.split(',')]
@@ -315,20 +301,26 @@ def main():
                 split_output_dir = training_pipeline.training_dir / f"split_{split_id}"
                 if split_output_dir.exists():
                     # 获取分配的 GPU
-                    gpu_id = gpu_allocations[split_id][0] if gpu_allocations[split_id] else 0
+                    gpu_id = gpu_allocations[split_id] if gpu_allocations[split_id] else [0]
                     logger.info(f"Evaluating split {split_id} on GPU {gpu_id}...")
+
+                    config = {
+                        'output_dir': str(split_output_dir),
+                        'eval_output_dir': str(training_pipeline.eval_dir / f"split_{split_id}"),
+                        'gpu_ids': gpu_id,
+                        'base_model_id': args.model_id,
+                    }
+
                     training_pipeline.run_evaluation(
-                        split_id,
-                        str(split_output_dir),
-                        str(eval_script),
-                        eval_data_path,
-                        gpu_id=gpu_id
+                        config,
+                        args.eval_script,
+                        args.eval_data_path
                     )
                 else:
                     logger.warning(f"Split {split_id} output directory not found: {split_output_dir}")
 
     # Phase 4: Analysis
-    if args.run_analysis:
+    if not args.skip_analysis and not args.only_evaluation:
         logger.info("=" * 50)
         logger.info("Phase 4: Analysis and Visualization")
         logger.info("=" * 50)
@@ -358,8 +350,8 @@ def main():
         logger.info("Collecting training results...")
 
         # 确保 training_pipeline 已初始化 (如果跳过了训练)
-        if not args.run_training:
-            training_pipeline = TrainingPipeline(str(output_dir), args.cot_datasynth_dir)
+        if args.skip_training:
+            training_pipeline = TrainingPipeline(str(output_dir), cot_datasynth_dir)
 
         training_results = training_pipeline.collect_training_results(
             args.n_splits,
@@ -375,13 +367,14 @@ def main():
             logger.info(f"Saved training results to {training_results_csv}")
         else:
             logger.warning("No training results found")
-            # 创建 dummy 数据用于演示
-            training_results_df = pd.DataFrame({
-                'split_id': range(args.n_splits),
-                'accuracy': [0.5 + 0.05 * i for i in range(args.n_splits)],
-                'loss': [1.0 - 0.05 * i for i in range(args.n_splits)]
-            })
-            training_results_df = training_results_df.set_index('split_id')
+            return
+            # # 创建 dummy 数据用于演示
+            # training_results_df = pd.DataFrame({
+            #     'split_id': range(args.n_splits),
+            #     'accuracy': [0.5 + 0.05 * i for i in range(args.n_splits)],
+            #     'loss': [1.0 - 0.05 * i for i in range(args.n_splits)]
+            # })
+            # training_results_df = training_results_df.set_index('split_id')
 
         # Compute correlations - 保存到 observation 目录
         obs_dir = output_dir / "observation"

@@ -47,7 +47,7 @@ def format_json(input_file, output_file=None, indent=2):
 # 使用示例
 if __name__ == "__main__":
     # 直接修改下面的文件路径
-    input_path = "/home/hjw/CoT-Data-verl/evals/Qwen2.5-Coder-7B--math-500--eval--0325-141549/generated/responses_labeled.json"  # 你的输入文件
-    output_path = "/home/hjw/CoT-Data-verl/evals/Qwen2.5-Coder-7B--math-500--eval--0325-141549/generated/responses_labeled_formatted.json"  # 输出文件，若为None则覆盖原文件
+    input_path = "/data/hjw/misc/incorrect.json"  # 你的输入文件
+    output_path = "/data/hjw/misc/incorrect_formatted.json"  # 输出文件，若为None则覆盖原文件
     
     format_json(input_path, output_path)

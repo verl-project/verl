@@ -10,9 +10,12 @@
 cd /home/hrh/CoT-DataSynth/DataObs
 python scripts/data_obs_pipeline.py \
   --data_path /data/open_datasets/GSM8K/train_messages.parquet \
+  --model_id /data/pretrain_models/Qwen2.5-0.5B-Instruct \
   --n_splits 10 \
   --output_dir /data/hrh/COT
 ```
+
+请务必在运行脚本前更改 `CoT-DataSynth/config/bash_config.env` 下的参数设置！
 
 ### 参数
 
@@ -20,18 +23,23 @@ python scripts/data_obs_pipeline.py \
 |------|--------|------|
 | `--data_path` | 必填 | 数据路径 (parquet/jsonl/json) |
 | `--data_name` | 自动从 data_path 提取 | 输出子目录名 |
-| `--n_splits` | 10 | 分割数量 |
+| `--model_id` | 必填 |模型路径 |
 | `--output_dir` | 必填 | 输出目录 |
+| `--splits_dir` | None | 分割目录，仅需在跳过分割时指定 |
+| `--train_script` | scripts/sft_dataobs.sh | 训练脚本 |
+| `--eval_script` | scripts/eval_dataobs.sh | 评测脚本 |
+| `--eval_data_path` | /data/open_datasets/GSM8K/test.parquet | 评测数据 |
+| `--seed` | 42 | 随机种子 |
 | `--gpu_ids` | 0,1,2,3,4,5,6,7 | GPU 列表 |
 | `--gpus_per_split` | 1 | 每个分割用多少 GPU |
-| `--train_script` | scripts/sft.sh | 训练脚本 |
-| `--model_id` | None | 模型路径 |
-| `--cot_datasynth_dir` | /home/hrh/COT-DataSynth | CoT-DataSynth 目录 |
-| `--run_training` | 否 | 运行训练 |
-| `--run_analysis` | 否 | 运行分析 |
+| `--n_splits` | 10 | 分割数量 |
+| 数据指标参数 | 略 | 见下 |
 | `--skip_split` | 否 | 跳过数据分割 |
 | `--skip_metrics` | 否 | 跳过指标计算 |
-| `--seed` | 42 | 随机种子 |
+| `--skip_training` | 否 | 跳过训练 |
+| `--skip_analysis` | 否 | 跳过分析 |
+| `--do_evaluation` | 否 | 运行单独评测 |
+| `--only_analysis` | 否 | 只运行评测，跳过所有其他阶段 |
 
 ### 输出目录结构
 

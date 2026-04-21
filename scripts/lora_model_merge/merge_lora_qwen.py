@@ -12,78 +12,90 @@ import shutil
 import argparse
 
 # 路径配置
-base_model_path = "/home/hjw/.cache/huggingface/hub/models--Qwen--Qwen2.5-0.5B/snapshots/0000000000000000000000000000000000000000"
-tokenizer_path = "/home/hjw/CoT-Data-verl/outputs/Qwen2.5-0.5B-gsm8k-sft/global_step_116"
-lora_path = "/home/hjw/CoT-Data-verl/outputs/Qwen2.5-0.5B-gsm8k-sft/global_step_116"
-save_path = "/home/hjw/CoT-Data-verl/outputs/Qwen2.5-0.5B-gsm8k-sft/checkpoint-last"
+default_base_model_path = "/data/pretrain_models/Qwen2.5-3B-Instruct/"
+default_tokenizer_path = "/data/hjw/outputs/GSM8K/training/split_0/global_step_30"
+default_lora_path = "/data/hjw/outputs/GSM8K/training/split_0/global_step_30"
+default_save_path = "/data/hjw/outputs/GSM8K/training/split_0/checkpoint-last"
 
 # Parser
 parser = argparse.ArgumentParser()
-parser.add_argument("--base", default=base_model_path, help="基础模型路径")
-parser.add_argument("--lora", default=lora_path, help="LoRA 权重路径")
-parser.add_argument("--tokenizer", default=tokenizer_path, help="Tokenizer 路径")
-parser.add_argument("--output", default=save_path, help="输出路径")
+parser.add_argument("--base", default=default_base_model_path, help="基础模型路径")
+parser.add_argument("--lora", default=default_lora_path, help="LoRA 权重路径")
+parser.add_argument("--tokenizer", default=default_tokenizer_path, help="Tokenizer 路径")
+parser.add_argument("--output", default=default_save_path, help="输出路径")
 parser.add_argument("--verify", action="store_true", help="合并后验证")
 args = parser.parse_args()
 
-def merge_lora_weights():
-    print(f"正在加载基础模型: {args.base}")
-    
-    # 加载基础模型
-    model = AutoModelForCausalLM.from_pretrained(
-        args.base,
-        torch_dtype=torch.float32,  # 可以改为 float16 或 bfloat16 节省显存
-        device_map="auto",           # 自动分配设备，单卡可改为 "cuda:0" 或 "cpu"
-        trust_remote_code=True
-    )
-    
-    # 加载 Tokenizer（从 LoRA 目录，保留训练时的 special tokens）
-    print(f"正在加载 Tokenizer: {args.tokenizer}")
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.tokenizer,
-        trust_remote_code=True,
-        padding_side="left"  # Qwen 系列通常使用 left padding
-    )
-    
-    # 确保 pad_token 存在
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    
-    # 加载 LoRA 适配器
-    print(f"正在加载 LoRA 权重: {args.lora}")
-    model = PeftModel.from_pretrained(model, args.lora)
-    
-    # 合并权重并卸载 LoRA 适配器
-    print("正在合并 LoRA 权重到基础模型...")
-    model = model.merge_and_unload()
-    
-    # 确保保存目录存在
-    os.makedirs(args.output, exist_ok=True)
-    
-    # 保存合并后的模型
-    print(f"正在保存合并后的模型到: {args.output}")
-    model.save_pretrained(args.output, safe_serialization=True)
-    
-    # 保存 Tokenizer（保留 added_tokens 等训练配置）
-    tokenizer.save_pretrained(args.output)
-    
-    # 复制其他必要的配置文件（如果 LoRA 目录中有而基础模型没有的）
-    config_files = [
-        "chat_template.jinja",
-        "added_tokens.json", 
-        "special_tokens_map.json"
-    ]
-    
-    for filename in config_files:
-        src = os.path.join(args.lora, filename)
-        dst = os.path.join(args.output, filename)
-        if os.path.exists(src) and not os.path.exists(dst):
-            print(f"复制配置文件: {filename}")
-            shutil.copy2(src, dst)
-    
-    print("✅ 合并完成！")
-    print(f"模型已保存至: {args.output}")
-    print(f"模型参数量: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M")
+def merge_lora_weights(base_path, lora_path, tokenizer_path, output_path, gpu_id):
+    original_cuda_home = os.environ.get('CUDA_HOME', None)
+
+    try:
+        # 临时指向正确的 CUDA 路径，供 DeepSpeed 检查使用
+        os.environ['CUDA_HOME'] = '/usr/local/cuda-12.6'
+        
+        print(f"正在加载基础模型: {base_path}")
+        
+        # 加载基础模型
+        model = AutoModelForCausalLM.from_pretrained(
+            base_path,
+            torch_dtype=torch.float32,
+            device_map=f"cuda:{gpu_id}",
+            trust_remote_code=True
+        )
+        
+        # 加载 Tokenizer
+        print(f"正在加载 Tokenizer: {tokenizer_path}")
+        tokenizer = AutoTokenizer.from_pretrained(
+            tokenizer_path,
+            trust_remote_code=True,
+            padding_side="left"
+        )
+        
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        
+        # 加载 LoRA 适配器
+        print(f"正在加载 LoRA 权重: {lora_path}")
+        model = PeftModel.from_pretrained(model, lora_path)
+        
+        # 合并权重
+        print("正在合并 LoRA 权重到基础模型...")
+        model = model.merge_and_unload()
+        
+        # 确保保存目录存在
+        os.makedirs(output_path, exist_ok=True)
+        
+        # 保存合并后的模型（触发点：transformers 会在这里 import deepspeed）
+        print(f"正在保存合并后的模型到: {output_path}")
+        model.save_pretrained(output_path, safe_serialization=True)
+        
+        # 保存 Tokenizer
+        tokenizer.save_pretrained(output_path)
+        
+        # 复制其他配置文件
+        config_files = [
+            "chat_template.jinja",
+            "added_tokens.json", 
+            "special_tokens_map.json"
+        ]
+        
+        for filename in config_files:
+            src = os.path.join(lora_path, filename)
+            dst = os.path.join(output_path, filename)
+            if os.path.exists(src) and not os.path.exists(dst):
+                print(f"复制配置文件: {filename}")
+                shutil.copy2(src, dst)
+        
+        print("✅ 合并完成！")
+        print(f"模型已保存至: {output_path}")
+        print(f"模型参数量: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M")
+        
+    finally:
+        # 恢复原始 CUDA_HOME
+        if original_cuda_home is None:
+            os.environ.pop('CUDA_HOME', None)  # 原来没有就删除
+        else:
+            os.environ['CUDA_HOME'] = original_cuda_home
 
 def verify_model():
     """简单验证合并后的模型可以正常加载和推理"""
@@ -93,7 +105,7 @@ def verify_model():
     model = AutoModelForCausalLM.from_pretrained(
         args.output, 
         torch_dtype=torch.float16,
-        device_map="auto",
+        device_map="cuda:6",
         trust_remote_code=True
     )
     
@@ -111,7 +123,7 @@ def verify_model():
 
 if __name__ == "__main__":
     # 执行合并
-    merge_lora_weights()
+    merge_lora_weights(args.base, args.lora, args.tokenizer, args.output, 6)
     
     # 可选：验证（需要 GPU 资源，如果显存不足可注释掉）
     if args.verify:

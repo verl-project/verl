@@ -26,13 +26,13 @@ STORE_DIR="${STORE_DIR:-/data/hjw}"
 
 
 # ============================ Configurations ===========================
-MODEL_NAME="${MODEL_NAME:-Llama-3.1-8B-Instruct}"
+MODEL_NAME="${MODEL_NAME:-Qwen2.5-3B-Instruct}"
 
 # Model Path Config:
 # 1. Use specific checkpoints if specified by CLI param / environment variable.
 # 2. Otherwise use the cached base model.
 CHECKPOINT_PATH="${CHECKPOINT_PATH:-}"
-BASE_MODEL="${BASE_MODEL:-meta-llama/Llama-3.1-8B-Instruct}"
+BASE_MODEL="${BASE_MODEL:-Qwen2.5-3B-Instruct}"
 IS_BASE_MODEL="${IS_BASE_MODEL:-False}"     # Whether the model is a base model (without a chat template)
 
 # Generation Params

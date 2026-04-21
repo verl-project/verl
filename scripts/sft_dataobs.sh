@@ -1,5 +1,5 @@
 #!/bin/bash
-# SFT training script for JSONL format data
+# SFT training script for DataObs
 
 # =========================== Load User Configs =========================
 # Find & Load Config File
@@ -27,27 +27,26 @@ STORE_DIR="${STORE_DIR:-/data/hjw}"
 
 # ============================ Configurations ===========================
 MODEL_NAME="Qwen2.5-0.5B-Instruct"
-MODEL_ID="/data/pretrain_models/Qwen2.5-0.5B-Instruct"
 DATA_NAME="gsm8k"
-DATA_DIR="/data/open_datasets/GSM8K"
-
-SAVE_PATH="${STORE_DIR}/outputs/${MODEL_NAME}--${DATA_NAME}--sft"
-LOG_PATH="${PROJECT_DIR}/wandb_logs"
 LOG_NAME="${MODEL_NAME}--${DATA_NAME}--sft--$(date +%Y%m%d-%H%M%S)"
 # =======================================================================
 
-if [ "$#" -lt 1 ]; then
-    echo "Usage: bash $0 <gpu_ids> [other_configs...]"
-    echo "Example: bash $0 0,1,2,3,4,5,6,7"
-    echo "         bash $0 0,1,2,3      # 使用4卡"
-    echo "         bash $0 4,5,6,7      # 使用后4张卡"
+if [ "$#" -lt 5 ]; then
+    echo "Usage: bash $0 <base_model> <data_path> <val_data_path> <output_dir> <gpu_ids> [other_configs...]"
+    echo "Example: bash $0 <base_model> <data_path> <output_dir> 0"
     exit 1
 fi
 
-gpu_ids=$1
+MODEL_ID="$1"
+DATA_DIR="$2"
+VAL_DATA_DIR="$3"
+SAVE_PATH="$4"
+gpu_ids=$5
+
+LOG_PATH="${SAVE_PATH}"
 
 # Shift the arguments so $@ refers to the rest
-shift 1
+shift 5
 
 # Limit the visible GPUs
 export CUDA_VISIBLE_DEVICES=$gpu_ids
@@ -69,6 +68,8 @@ export WANDB_RUN_ID="exp-${MODEL_NAME}-${DATA_NAME}-sft"
 
 torchrun --standalone --nnodes=1 --nproc_per_node=$nproc_per_node \
      -m verl.trainer.fsdp_sft_trainer \
+    data.train_files=${DATA_DIR} \
+    data.val_files=${VAL_DATA_DIR} \
     data.prompt_key=extra_info \
     data.response_key=extra_info \
     data.prompt_dict_keys=['question'] \
@@ -81,11 +82,9 @@ torchrun --standalone --nnodes=1 --nproc_per_node=$nproc_per_node \
     model.lora_alpha=16 \
     model.enable_gradient_checkpointing=true \
     model.use_liger=true \
+    trainer.default_local_dir=${SAVE_PATH} \
     trainer.project_name=${DATA_NAME}-sft \
     trainer.experiment_name=${LOG_NAME} \
-    trainer.total_epochs=1 \
+    trainer.total_epochs=15 \
     trainer.logger='["console","wandb"]' \
     trainer.default_hdfs_dir=null $@
-
-
-        # model.local_files_only=true \

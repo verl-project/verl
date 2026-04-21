@@ -151,7 +151,7 @@ class DataSplitter:
         )
         return dataset_metrics
 
-    def save_split(self, split_data: List[Dict], split_id: int, format: str = "jsonl"):
+    def save_split(self, split_data: List[Dict], split_id: int, format: str = "parquet"):
         """Save a split to disk"""
         serializable_data = [_make_serializable(item) for item in split_data]
 

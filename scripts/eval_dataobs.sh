@@ -1,15 +1,18 @@
 #!/bin/bash
 # DataObs 专用评估脚本
-# 用法: bash eval_dataobs.sh <checkpoint_path> <gpu_id>
+# 用法: bash eval_dataobs.sh <checkpoint_path> <base_model> <data_path> <output_path> <gpu_id>
 
-if [ "$#" -lt 2 ]; then
-    echo "Usage: bash $0 <checkpoint_path> <gpu_id>"
-    echo "Example: bash $0 /data/hrh/COT/GSM8K/training/split_0/global_step_2 0"
+if [ "$#" -lt 5 ]; then
+    echo "Usage: bash $0 <checkpoint_path> <base_model> <data_path> <output_path> <gpu_id>"
+    echo "Example: bash $0 /data/hrh/COT/GSM8K/training/split_0/global_step_2 /data/pretrain_models/Qwen2.5-0.5B-Instruct /data/open_datasets/GSM8K/test.parquet /data/hrh/COT/GSM8K/eval/split_0 0"
     exit 1
 fi
 
 CHECKPOINT_PATH="$1"
-GPU_ID="${2:-0}"
+BASE_MODEL="$2"
+EVAL_DATA="$3"
+EVAL_OUTPUT_DIR="$4"
+GPU_ID="${5:-0}"
 
 # =========================== Load User Configs =========================
 # Find & Load Config File
@@ -35,13 +38,13 @@ STORE_DIR="${STORE_DIR:-/data/hjw}"
 # =======================================================================
 
 # 配置
-EVAL_DATA="/data/open_datasets/GSM8K/test.parquet"
-BASE_MODEL="/data/pretrain_models/Qwen2.5-0.5B-Instruct"
-
 export CUDA_VISIBLE_DEVICES=$GPU_ID
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export WANDB_MODE=offline
+
+n_gpus_per_node=$(echo $GPU_ID | tr ',' ' ' | wc -w)
+tp_size=$n_gpus_per_node
 
 echo "=========================================="
 echo "DataObs Evaluation"
@@ -65,9 +68,7 @@ if [ ! -d "$CONFIG_DIR" ]; then
 fi
 
 # Stage 1: Generation
-EVAL_OUTPUT_DIR="${PROJECT_DIR}/evals/gsm8k-dataobs-$(date +%m%d-%H%M%S)"
 mkdir -p ${EVAL_OUTPUT_DIR}/{generated,logs}
-
 GENERATION_OUTPUT="${EVAL_OUTPUT_DIR}/generated/responses.parquet"
 
 echo ""
@@ -96,7 +97,7 @@ if [ -f "$CHECKPOINT_PATH/adapter_model.safetensors" ]; then
         rollout.prompt_length=512 \
         rollout.response_length=1024 \
         rollout.gpu_memory_utilization=0.8 \
-        trainer.n_gpus_per_node=1 \
+        trainer.n_gpus_per_node=${n_gpus_per_node} \
         trainer.nnodes=1 \
         trainer.device=cuda \
         ray_init.num_cpus=48 \
@@ -118,7 +119,7 @@ else
         rollout.prompt_length=512 \
         rollout.response_length=1024 \
         rollout.gpu_memory_utilization=0.8 \
-        trainer.n_gpus_per_node=1 \
+        trainer.n_gpus_per_node=${n_gpus_per_node} \
         trainer.nnodes=1 \
         trainer.device=cuda \
         ray_init.num_cpus=48 \
@@ -150,7 +151,6 @@ python3 -m verl.trainer.main_eval \
     data.data_source_key=data_source \
     data.reward_model_key=reward_model \
     custom_reward_function.path=${REWARD_FUNCTION_PATH} \
-    +data.problem_key=prompt \
     ray_init.num_cpus=48 \
     2>&1 | tee ${EVAL_OUTPUT_DIR}/logs/evaluation.log
 

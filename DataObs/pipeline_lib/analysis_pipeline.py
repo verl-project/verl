@@ -48,12 +48,24 @@ class CorrelationAnalyzer:
         data_metrics_df = data_metrics_df.loc[common_splits]
         training_results_df = training_results_df.loc[common_splits]
 
+        # Drop non-numerical columns
+        numeric_data_cols = data_metrics_df.select_dtypes(include=[np.number]).columns
+        numeric_result_cols = training_results_df.select_dtypes(include=[np.number]).columns
+        
+        # Record dropped columns
+        dropped_data = set(data_metrics_df.columns) - set(numeric_data_cols)
+        dropped_result = set(training_results_df.columns) - set(numeric_result_cols)
+        if dropped_data:
+            logger.warning(f"Skipped non-numeric data metric columns: {dropped_data}")
+        if dropped_result:
+            logger.warning(f"Skipped non-numeric training result columns: {dropped_result}")
+
         logger.info(f"Computing {method} correlations for {len(common_splits)} splits")
 
         # Compute correlations
         correlations = {}
-        for data_col in data_metrics_df.columns:
-            for result_col in training_results_df.columns:
+        for data_col in numeric_data_cols:
+            for result_col in numeric_result_cols:
                 try:
                     # Remove NaN values and align indices
                     data_vals = data_metrics_df[data_col].dropna()
@@ -66,6 +78,11 @@ class CorrelationAnalyzer:
 
                     data_vals = data_vals.loc[common_idx]
                     result_vals = result_vals.loc[common_idx]
+
+                    # Skip constant columns (0 std)
+                    if data_vals.std() == 0 or result_vals.std() == 0:
+                        logger.debug(f"Skipping {data_col} vs {result_col}: constant column (std=0)")
+                        continue
 
                     if method == 'pearson':
                         corr = data_vals.corr(result_vals)

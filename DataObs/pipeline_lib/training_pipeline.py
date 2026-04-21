@@ -32,6 +32,8 @@ class TrainingPipeline:
         self.cot_datasynth_dir = Path(cot_datasynth_dir)
         self.training_dir = self.output_dir / "training"
         self.training_dir.mkdir(exist_ok=True)
+        self.eval_dir = self.output_dir / "eval"
+        self.eval_dir.mkdir(exist_ok=True)
         self.config_file = self.output_dir / "training_configs.json"
         self.log_file = self.training_dir / "training_log.json"
         logger.info(f"TrainingPipeline initialized: {self.output_dir}")
@@ -42,7 +44,7 @@ class TrainingPipeline:
         gpu_allocations: List[List[int]],
         base_config: Dict[str, Any],
         n_splits: int,
-        splits_format: str = 'parquet'
+        base_model_id: str
     ) -> List[Dict[str, Any]]:
         """
         Prepare training configurations for all splits
@@ -52,21 +54,13 @@ class TrainingPipeline:
             gpu_allocations: GPU allocation for each split
             base_config: Base training configuration
             n_splits: Number of splits
-            splits_format: Format of split files ('jsonl', 'json', 'parquet')
 
         Returns:
             List of training configurations
         """
         configs = []
         for split_id in range(n_splits):
-            # 根据格式生成文件名
-            if splits_format == 'parquet':
-                split_data_path = Path(splits_dir) / f"split_{split_id}.parquet"
-            elif splits_format == 'json':
-                split_data_path = Path(splits_dir) / f"split_{split_id}.json"
-            else:
-                split_data_path = Path(splits_dir) / f"split_{split_id}.jsonl"
-
+            split_data_path = Path(splits_dir) / f"split_{split_id}.parquet"
             if not split_data_path.exists():
                 logger.warning(f"Split data not found: {split_data_path}")
                 continue
@@ -74,11 +68,16 @@ class TrainingPipeline:
             split_output_dir = self.training_dir / f"split_{split_id}"
             split_output_dir.mkdir(exist_ok=True)
 
+            eval_output_dir = self.eval_dir / f"split_{split_id}"
+            eval_output_dir.mkdir(exist_ok=True)
+
             config = {
                 'split_id': split_id,
                 'data_path': str(split_data_path),
                 'output_dir': str(split_output_dir),
+                'eval_output_dir': str(eval_output_dir),
                 'gpu_ids': gpu_allocations[split_id] if split_id < len(gpu_allocations) else [],
+                'base_model_id': base_model_id,
                 **base_config
             }
             configs.append(config)
@@ -94,6 +93,7 @@ class TrainingPipeline:
         self,
         config: Dict[str, Any],
         script_path: str,
+        eval_data_path: Optional[str] = '/data/open_datasets/GSM8K/test.parquet',
         timeout: Optional[int] = None
     ) -> bool:
         """
@@ -111,6 +111,7 @@ class TrainingPipeline:
         gpu_ids = config['gpu_ids']
         data_path = config['data_path']
         output_dir = config['output_dir']
+        base_model_id = config['base_model_id']
 
         # Prepare GPU string
         gpu_str = ','.join(map(str, gpu_ids)) if gpu_ids else '0'
@@ -123,14 +124,16 @@ class TrainingPipeline:
         cmd = [
             'bash',
             str(script_path),
-            gpu_str,
-            f'data.train_files={data_path}',
-            f'trainer.default_local_dir={output_dir}',
+            str(base_model_id), # model id (param 1)
+            str(data_path),     # data path (param 2)
+            eval_data_path,     # val data path(param 3)
+            str(output_dir),    # save path (param 4)
+            gpu_str,            # gpu_id (param 5)
         ]
 
         # Add extra config parameters
         for key, value in config.items():
-            if key not in ['split_id', 'gpu_ids', 'data_path', 'output_dir']:
+            if key not in ['split_id', 'gpu_ids', 'data_path', 'output_dir', 'eval_output_dir', 'base_model_id']:
                 cmd.append(f'{key}={value}')
 
         logger.info(f"Running training for split {split_id}: {' '.join(cmd)}")
@@ -170,8 +173,7 @@ class TrainingPipeline:
         parallel: bool = False,
         timeout: Optional[int] = None,
         skip_completed: bool = True,
-        resume_from_failed: bool = False,
-        eval_script: Optional[str] = None,
+        eval_script_path: Optional[str] = None,
         eval_data_path: Optional[str] = None
     ) -> Dict[int, bool]:
         """
@@ -183,8 +185,7 @@ class TrainingPipeline:
             parallel: Whether to run trainings in parallel (not implemented yet)
             timeout: Timeout per training in seconds
             skip_completed: Skip splits that already have training_results.json
-            resume_from_failed: Re-run splits that failed (no results file but have log)
-            eval_script: Path to evaluation script (optional)
+            eval_script_path: Path to evaluation script (optional)
             eval_data_path: Path to evaluation data (optional)
 
         Returns:
@@ -192,7 +193,6 @@ class TrainingPipeline:
         """
         results = {}
         skipped = []
-        log_data = self._load_log()
 
         if parallel:
             logger.warning("Parallel training not implemented yet, running sequentially")
@@ -210,7 +210,7 @@ class TrainingPipeline:
 
             # Update status to running
             self._update_split_log(split_id, "running")
-            success = self.run_training(config, script_path, timeout)
+            success = self.run_training(config, script_path, eval_data_path, timeout)
             results[split_id] = success
 
             # Update status based on result
@@ -218,12 +218,11 @@ class TrainingPipeline:
                 self._update_split_log(split_id, "completed", "Training succeeded")
 
                 # Run evaluation if script provided
-                if eval_script and eval_data_path:
+                if eval_script_path and eval_data_path:
                     logger.info(f"Running evaluation for split {split_id}...")
                     eval_success = self.run_evaluation(
-                        split_id,
-                        config['output_dir'],
-                        eval_script,
+                        config,
+                        eval_script_path,
                         eval_data_path
                     )
                     if eval_success:
@@ -242,63 +241,70 @@ class TrainingPipeline:
 
     def run_evaluation(
         self,
-        split_id: int,
-        output_dir: str,
-        eval_script: str,
+        config: Dict[str, Any],
+        eval_script_path: str,
         eval_data_path: str,
-        gpu_id: int = 0
     ) -> bool:
         """
         Run evaluation on a trained split
 
         Args:
-            split_id: Split ID
-            output_dir: Training output directory
-            eval_script: Path to evaluation script
+            config: Training configuration
+            eval_script_path: Path to evaluation script
             eval_data_path: Path to evaluation data
-            gpu_id: GPU ID to use (default: 0)
 
         Returns:
             True if evaluation succeeded, False otherwise
         """
+        gpu_ids = config['gpu_ids']
+        output_dir = config['output_dir']
+        eval_output_dir = config['eval_output_dir']
+        base_model_id = config['base_model_id']
+
+        # 查找最新的 checkpoint (global_step_*)
+        output_path = Path(output_dir)
+        checkpoints = list(output_path.glob("global_step_*"))
+        if not checkpoints:
+            logger.warning(f"No checkpoints found in {output_dir}")
+            return False
+
+        latest_checkpoint = sorted(checkpoints, key=lambda x: int(x.name.split('_')[2]))[-1]
+        logger.info(f"Using checkpoint: {latest_checkpoint}")
+
+        # Prepare GPU string
+        gpu_str = ','.join(map(str, gpu_ids)) if gpu_ids else '0'
+        
+        # Prepare command
+        eval_script_path = Path(eval_script_path)
+        if not eval_script_path.is_absolute():
+            eval_script_path = self.cot_datasynth_dir / eval_script_path
+
+        cmd = [
+            'bash',
+            str(eval_script_path),
+            str(latest_checkpoint),     # checkpoint path (param 1)
+            str(base_model_id),         # base model (param 2)
+            str(eval_data_path),        # eval data path (param 3)
+            str(eval_output_dir),       # eval output dir (param 4)
+            str(gpu_str),               # gpu_id (param 5)
+        ]
+
+        logger.info(f"Running evaluation: {' '.join(cmd)}")
+        logger.info(f"Working directory: {self.cot_datasynth_dir}")
+
         try:
-            # 查找最新的 checkpoint (global_step_*)
-            output_path = Path(output_dir)
-            checkpoints = list(output_path.glob("global_step_*"))
-            if not checkpoints:
-                logger.warning(f"No checkpoints found in {output_dir}")
-                return False
-
-            latest_checkpoint = sorted(checkpoints, key=lambda x: int(x.name.split('_')[2]))[-1]
-            logger.info(f"Using checkpoint: {latest_checkpoint}")
-
-            # 构建评估命令，从 CoT-DataSynth 目录运行
-            cmd = [
-                'bash',
-                str(eval_script),
-                str(latest_checkpoint),  # checkpoint path (第一个参数)
-                str(gpu_id),              # gpu_id (第二个参数)
-            ]
-
-            logger.info(f"Running evaluation: {' '.join(cmd)}")
-            logger.info(f"Working directory: {self.cot_datasynth_dir}")
-
-            # 设置环境变量
-            env = os.environ.copy()
-            env['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
-
             result = subprocess.run(
                 cmd,
                 cwd=str(self.cot_datasynth_dir),
                 timeout=3600,  # 1 hour timeout for evaluation
                 capture_output=True,
                 text=True,
-                env=env
             )
 
             if result.returncode == 0:
                 # 尝试从评估输出中提取准确率
-                output = result.stdout + result.stderr
+                with open(f'{eval_output_dir}/logs/evaluation.log', 'r', encoding='utf-8') as f:
+                    output = f.read()
                 import re
 
                 # 尝试多种模式匹配准确率
