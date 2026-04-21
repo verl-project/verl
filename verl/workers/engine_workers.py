@@ -44,6 +44,7 @@ from verl.utils.tensordict_utils import maybe_fix_3d_position_ids
 from verl.utils.torch_functional import allgather_dict_into_dict
 from verl.workers.config import (
     ActorConfig,
+    DiffusionActorConfig,
     DiffusionModelConfig,
     DistillationConfig,
     HFModelConfig,
@@ -510,7 +511,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     self.config.ref.ppo_max_token_len_per_gpu = self.config.ref.pop(
                         "log_prob_max_token_len_per_gpu", None
                     )
-            ref_config: ActorConfig = omega_conf_to_dataclass(self.config.ref)
+            ref_config: ActorConfig | DiffusionActorConfig = omega_conf_to_dataclass(self.config.ref)
 
             # The ref model does not need to enable MTP; force it to false.
             ref_config.model_config = deepcopy(model_config)
