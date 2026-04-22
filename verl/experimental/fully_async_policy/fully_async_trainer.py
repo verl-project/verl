@@ -554,32 +554,147 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         batch: DataProto,
         extra: dict[str, Any] | None = None,
     ) -> None:
-        """Print a compact, easy-to-grep snapshot of training data for eyeballing.
+        """Dump a FULL per-field snapshot of the batch for eyeballing.
 
-        All numbers are scalars or short lists — no per-token dumps. Triggered
-        at key hand-off points in fit_step so you can paste the log back and
-        verify the pipeline is behaving as designed.
+        For every entry in ``batch.batch`` (tensors), ``batch.non_tensor_batch``
+        (numpy object arrays / lists) and ``batch.meta_info``, one line is
+        emitted with:
+          * value type,
+          * shape / length / dtype when applicable,
+          * full content if the element count fits within a small threshold,
+          * otherwise a head/tail preview.
 
-        The snapshot is written both to stdout (for Ray log aggregation) and
-        appended to a per-run log file at
-        ``<trainer.default_local_dir>/training_diagnostics.log``; override via
-        env var ``FULLY_ASYNC_DIAG_LOG`` to redirect the path.
+        A few derived summaries (role distribution, rollout-group sizes,
+        advantage distribution per role, masked-mean of log_probs) are
+        appended at the end because they are not readable from the raw
+        per-field dump.
+
+        Output goes only to a per-run log file (``FULLY_ASYNC_DIAG_LOG`` or
+        ``<trainer.default_local_dir>/training_diagnostics.log``).
         """
         import numpy as np
 
-        nt = batch.non_tensor_batch or {}
-        n = len(batch)
+        # ---------------- configurable thresholds ----------------
+        # Max number of elements printed in full for a tensor / ndarray /
+        # sequence. Beyond this we only show shape + head preview.
+        MAX_ELEMS_FULL = 64
+        # Max length of a repr preview string (per field).
+        MAX_PREVIEW_LEN = 240
 
+        def _fmt_tensor(t: torch.Tensor) -> str:
+            shape = tuple(t.shape)
+            numel = t.numel()
+            head = f"shape={shape} dtype={t.dtype} device={t.device}"
+            try:
+                if numel == 0:
+                    return head + " value=<empty>"
+                if numel <= MAX_ELEMS_FULL:
+                    return head + f" value={t.detach().cpu().tolist()}"
+                flat = t.detach().reshape(-1).cpu()
+                head_preview = flat[: min(8, numel)].tolist()
+                tail_preview = flat[-min(4, numel) :].tolist()
+                return head + f" head={head_preview} tail={tail_preview}"
+            except Exception as exc:
+                return head + f" <repr failed: {exc!r}>"
+
+        def _fmt_ndarray(a: np.ndarray) -> str:
+            shape = tuple(a.shape)
+            numel = int(a.size)
+            head = f"shape={shape} dtype={a.dtype}"
+            try:
+                if numel == 0:
+                    return head + " value=<empty>"
+                if numel <= MAX_ELEMS_FULL:
+                    return (
+                        head
+                        + " value="
+                        + np.array2string(a, threshold=MAX_ELEMS_FULL)[:MAX_PREVIEW_LEN]
+                    )
+                flat = a.reshape(-1)
+                return (
+                    head
+                    + " head="
+                    + np.array2string(flat[:8], threshold=MAX_ELEMS_FULL)[:MAX_PREVIEW_LEN]
+                    + " tail="
+                    + np.array2string(flat[-4:], threshold=MAX_ELEMS_FULL)[:MAX_PREVIEW_LEN]
+                )
+            except Exception as exc:
+                return head + f" <repr failed: {exc!r}>"
+
+        def _fmt_sequence(v) -> str:
+            try:
+                ln = len(v)
+            except TypeError:
+                return f"type={type(v).__name__} value={repr(v)[:MAX_PREVIEW_LEN]}"
+            head = f"len={ln} type={type(v).__name__}"
+            if ln == 0:
+                return head + " value=[]"
+            if ln <= MAX_ELEMS_FULL:
+                return head + f" value={repr(v)[:MAX_PREVIEW_LEN]}"
+            # dump first 3 + last 2 to show schema without flooding
+            preview = list(v[:3]) + ["..."] + list(v[-2:])
+            return head + f" preview={repr(preview)[:MAX_PREVIEW_LEN]}"
+
+        def _fmt_any(v) -> str:
+            if isinstance(v, torch.Tensor):
+                return _fmt_tensor(v)
+            if isinstance(v, np.ndarray):
+                return _fmt_ndarray(v)
+            if isinstance(v, (list, tuple)):
+                return _fmt_sequence(v)
+            if isinstance(v, dict):
+                keys = list(v.keys())
+                preview_keys = keys[:10]
+                return (
+                    f"type=dict len={len(keys)} "
+                    f"keys[:10]={preview_keys} "
+                    f"repr={repr(v)[:MAX_PREVIEW_LEN]}"
+                )
+            if isinstance(v, (int, float, bool, str)) or v is None:
+                return f"type={type(v).__name__} value={repr(v)[:MAX_PREVIEW_LEN]}"
+            return f"type={type(v).__name__} repr={repr(v)[:MAX_PREVIEW_LEN]}"
+
+        # ==================== build the dump ====================
+        n = len(batch)
         lines: list[str] = [f"[FullyAsyncTrainer][DIAG][{stage}] batch_size={n}"]
 
+        # --- batch.batch (tensors) ---
+        tensor_keys = sorted(batch.batch.keys()) if batch.batch is not None else []
+        lines.append(f"  [batch.batch] num_keys={len(tensor_keys)}")
+        for k in tensor_keys:
+            try:
+                v = batch.batch[k]
+            except Exception as exc:
+                lines.append(f"    - {k!r}: <fetch failed: {exc!r}>")
+                continue
+            lines.append(f"    - {k!r}: {_fmt_any(v)}")
+
+        # --- batch.non_tensor_batch ---
+        nt = batch.non_tensor_batch or {}
+        lines.append(f"  [batch.non_tensor_batch] num_keys={len(nt)}")
+        for k in sorted(nt.keys()):
+            v = nt[k]
+            lines.append(f"    - {k!r}: {_fmt_any(v)}")
+
+        # --- batch.meta_info ---
+        meta = batch.meta_info or {}
+        lines.append(f"  [batch.meta_info] num_keys={len(meta)}")
+        for k in sorted(meta.keys(), key=lambda x: str(x)):
+            v = meta[k]
+            lines.append(f"    - {k!r}: {_fmt_any(v)}")
+
+        # ============ derived summaries (not in raw dump) ============
+        lines.append("  [summary]")
+
         roles = nt.get("trajectory_role")
+        role_arr = None
         if roles is not None:
             role_arr = np.asarray(roles)
             n_final = int((role_arr == "final").sum())
             n_inter = int((role_arr == "intermediate").sum())
             n_other = n - n_final - n_inter
             lines.append(
-                f"  roles: final={n_final} intermediate={n_inter} other={n_other}"
+                f"    roles: final={n_final} intermediate={n_inter} other={n_other}"
             )
 
         gids = nt.get("rollout_group_id")
@@ -587,7 +702,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             gids_np = np.asarray(gids, dtype=np.int64)
             unique_gids, counts = np.unique(gids_np, return_counts=True)
             lines.append(
-                f"  rollout_groups: n_groups={len(unique_gids)} "
+                f"    rollout_groups: n_groups={len(unique_gids)} "
                 f"rows_per_group(min/median/max)="
                 f"{int(counts.min())}/{int(np.median(counts))}/{int(counts.max())}"
             )
@@ -595,10 +710,9 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         if "response_mask" in batch.batch.keys():
             rm = batch.batch["response_mask"]
             per_row = rm.to(torch.float32).sum(dim=-1)
-            total_valid = float(per_row.sum().item())
             lines.append(
-                f"  response_mask: total_valid_tokens={total_valid:.0f} "
-                f"per_row_tokens(min/mean/max)="
+                f"    response_mask: total_valid_tokens={float(per_row.sum()):.0f} "
+                f"per_row(min/mean/max)="
                 f"{float(per_row.min()):.0f}/{float(per_row.mean()):.2f}/{float(per_row.max()):.0f}"
             )
 
@@ -607,15 +721,13 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             rs_row = rs.to(torch.float32).sum(dim=-1)
             nonzero = int((rs_row != 0).sum().item())
             lines.append(
-                f"  rm_scores: rows_with_nonzero={nonzero}/{n} "
+                f"    rm_scores: rows_with_nonzero={nonzero}/{n} "
                 f"per_row_sum(min/mean/max)="
                 f"{float(rs_row.min()):.4f}/{float(rs_row.mean()):.4f}/{float(rs_row.max()):.4f}"
             )
 
         if "advantages" in batch.batch.keys():
             adv = batch.batch["advantages"].to(torch.float32)
-            # advantage is broadcast across response_length; reduce to scalar per row
-            # by taking the first non-zero position or just the mean over masked tokens.
             if "response_mask" in batch.batch.keys():
                 mask = batch.batch["response_mask"].to(torch.float32)
                 denom = mask.sum(dim=-1).clamp_min(1.0)
@@ -624,52 +736,41 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
                 adv_scalar = adv.mean(dim=-1)
             n_zero_adv = int((adv_scalar.abs() < 1e-12).sum().item())
             lines.append(
-                f"  advantages(per_row_masked_mean): "
+                f"    advantages(per_row_masked_mean): "
                 f"min/mean/max={float(adv_scalar.min()):.6f}/"
                 f"{float(adv_scalar.mean()):.6f}/{float(adv_scalar.max()):.6f} "
                 f"nonzero_rows={n - n_zero_adv}/{n}"
             )
-            # Split by role if available
-            if roles is not None:
-                role_arr = np.asarray(roles)
+            if role_arr is not None:
                 for role_name in ("final", "intermediate"):
                     idx = np.where(role_arr == role_name)[0]
                     if len(idx) == 0:
                         continue
                     sub = adv_scalar[torch.as_tensor(idx, dtype=torch.long)]
                     lines.append(
-                        f"    {role_name}: advantages "
+                        f"      {role_name}: advantages "
                         f"min/mean/max={float(sub.min()):.6f}/"
                         f"{float(sub.mean()):.6f}/{float(sub.max()):.6f}"
                     )
 
-        if "old_log_probs" in batch.batch.keys():
-            olp = batch.batch["old_log_probs"].to(torch.float32)
-            if "response_mask" in batch.batch.keys():
-                mask = batch.batch["response_mask"].to(torch.float32)
-                denom = mask.sum().clamp_min(1.0)
-                mean_olp = float((olp * mask).sum() / denom)
-            else:
-                mean_olp = float(olp.mean())
-            lines.append(f"  old_log_probs(masked_mean): {mean_olp:.4f}")
-
-        if "ref_log_prob" in batch.batch.keys():
-            rlp = batch.batch["ref_log_prob"].to(torch.float32)
-            if "response_mask" in batch.batch.keys():
-                mask = batch.batch["response_mask"].to(torch.float32)
-                denom = mask.sum().clamp_min(1.0)
-                mean_rlp = float((rlp * mask).sum() / denom)
-            else:
-                mean_rlp = float(rlp.mean())
-            lines.append(f"  ref_log_prob(masked_mean): {mean_rlp:.4f}")
+        for lp_key in ("old_log_probs", "ref_log_prob"):
+            if lp_key in batch.batch.keys():
+                lp = batch.batch[lp_key].to(torch.float32)
+                if "response_mask" in batch.batch.keys():
+                    mask = batch.batch["response_mask"].to(torch.float32)
+                    denom = mask.sum().clamp_min(1.0)
+                    masked_mean = float((lp * mask).sum() / denom)
+                else:
+                    masked_mean = float(lp.mean())
+                lines.append(f"    {lp_key}(masked_mean): {masked_mean:.4f}")
 
         n_pad = batch.meta_info.get("fully_async/pad/num_padding_rows")
         if n_pad is not None:
-            lines.append(f"  pad: num_padding_rows={int(n_pad)}")
+            lines.append(f"    pad: num_padding_rows={int(n_pad)}")
 
         if extra:
             for k, v in extra.items():
-                lines.append(f"  {k}: {v}")
+                lines.append(f"    {k}: {v}")
 
         msg = "\n".join(lines)
 
@@ -732,10 +833,16 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
                 rollout_n=rollout_n,
             )
 
+        # Dump the full batch (tensors + non_tensor + meta_info) BEFORE pad so
+        # that if ``pad_dataproto_to_divisor`` (which internally calls
+        # ``DataProto.concat``) hits a conflicting meta_info key, the offending
+        # field is already captured in ``training_diagnostics.log``.
+        self._log_training_diagnostics("pre_pad", batch)
+
         # Pad to actor mini-batch multiple. ``train_mini_batch`` requires
         # ``mini_batch_size = ppo_mini_batch_size * rollout.n`` to evenly
-        # divide the per-DP batch; pad_dataproto_to_divisor on the global
-        # batch guarantees that dispatching by DP size preserves divisibility.
+        # divide the per-DP batch; padding the global batch guarantees that
+        # dispatching by DP size preserves divisibility.
         ppo_mini_batch_size = int(self.config.actor_rollout_ref.actor.ppo_mini_batch_size)
         global_mini_batch = ppo_mini_batch_size * rollout_n
         if global_mini_batch > 0 and len(batch) % global_mini_batch != 0:
