@@ -17,7 +17,7 @@ Contain small torch utilities
 
 import math
 from contextlib import contextmanager
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 import torch.distributed
@@ -44,6 +44,79 @@ try:
     NPU_CROSS_ENTROPY_LOSS_AVAILABLE = hasattr(torch_npu, "npu_cross_entropy_loss")
 except ImportError:
     NPU_CROSS_ENTROPY_LOSS_AVAILABLE = False
+
+
+def prescale_hidden_by_per_sample_temperature(
+    hidden: torch.Tensor, temperature: torch.Tensor
+) -> torch.Tensor:
+    """Pre-scale ``hidden`` by ``1/temperature`` per token in fp32 and cast back
+    to the hidden dtype.
+
+    This turns ``f(hidden, weight, labels, T_tensor)`` (with a fused
+    linear + softmax kernel that only supports a scalar temperature) into
+    ``f(hidden_scaled, weight, labels, 1.0)`` with the same mathematical
+    meaning, by using the identity
+
+        (h @ W^T) / T_i  ==  (h / T_i) @ W^T   for each token i
+
+    valid because row-vector scalar multiplication commutes with matmul. The
+    backward is propagated automatically by autograd through the ``hidden /
+    T`` node, so no custom backward is needed.
+
+    Numerical properties: the only extra floating-point noise compared to a
+    kernel that natively accepts per-sample temperature is one bf16 rounding
+    on the scaled hidden. Empirically this is smaller than the error of the
+    ``use_fused_kernels=False`` reference path because the ``sqrt(D)``-scale
+    matmul accumulation averages it out.
+
+    Args:
+        hidden: ``(num_tokens, D)`` or ``(B, S, D)``.
+        temperature: 1-D tensor of shape ``(num_tokens,)`` aligned with
+            ``hidden.flatten(0, -2)``. Gradients w.r.t. ``temperature`` are
+            not computed.
+
+    Returns:
+        ``hidden`` with the same shape/dtype, scaled row-wise by ``1/T``.
+    """
+    if temperature.dim() != 1:
+        raise ValueError(
+            f"per-sample temperature must be 1D, got shape {tuple(temperature.shape)}"
+        )
+    original_shape = hidden.shape
+    hidden_flat = hidden.reshape(-1, hidden.shape[-1]) if hidden.dim() > 2 else hidden
+    num_tokens = hidden_flat.shape[0]
+    if temperature.shape[0] != num_tokens:
+        raise ValueError(
+            f"per-sample temperature length {temperature.shape[0]} does not match "
+            f"num_tokens {num_tokens}"
+        )
+    inv_t = (1.0 / temperature.to(torch.float32)).unsqueeze(-1)
+    hidden_scaled = (hidden_flat.to(torch.float32) * inv_t).to(hidden.dtype)
+    if hidden.dim() > 2:
+        hidden_scaled = hidden_scaled.reshape(original_shape)
+    return hidden_scaled
+
+
+def resolve_temperature_for_fused_kernel(
+    hidden: torch.Tensor, temperature: Union[float, torch.Tensor]
+) -> tuple[torch.Tensor, float]:
+    """Dispatcher helper shared by fused linear + cross-entropy kernels.
+
+    Returns ``(hidden_out, scalar_temperature)`` such that any downstream fused
+    kernel that only accepts a ``float`` temperature can still implement
+    per-sample temperature semantics:
+
+    - If ``temperature`` is a 1-D tensor with more than one element, pre-scale
+      ``hidden`` via :func:`prescale_hidden_by_per_sample_temperature` and
+      return ``scalar_temperature == 1.0``.
+    - Otherwise (Python float or 0-/1-element tensor), pass ``hidden`` through
+      and return ``float(temperature)``.
+    """
+    if isinstance(temperature, torch.Tensor) and temperature.dim() > 0 and temperature.numel() > 1:
+        return prescale_hidden_by_per_sample_temperature(hidden, temperature), 1.0
+    if isinstance(temperature, torch.Tensor):
+        return hidden, float(temperature.item())
+    return hidden, float(temperature)
 
 
 def gather_from_labels(data: torch.Tensor, label: torch.Tensor) -> torch.Tensor:
