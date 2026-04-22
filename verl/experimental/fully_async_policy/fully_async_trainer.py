@@ -839,6 +839,20 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         # field is already captured in ``training_diagnostics.log``.
         self._log_training_diagnostics("pre_pad", batch)
 
+        # Temporarily move meta_info fields that are per-row ndarrays out of
+        # ``batch.meta_info`` before pad. ``DataProto.concat`` inside
+        # ``pad_dataproto_to_divisor`` asserts equality (``==``) on
+        # overlapping meta_info values, and an ndarray value raises
+        # "truth value of an array is ambiguous". We stash the offending
+        # values aside and restore them after pad so downstream consumers
+        # (e.g. ``_collect_metrics_from_samples``, which reads
+        # ``trajectory_param_versions``) keep working unchanged.
+        _NDARRAY_META_KEYS = ("trajectory_param_versions",)
+        _stashed_meta: dict[str, Any] = {}
+        for _bad_key in _NDARRAY_META_KEYS:
+            if _bad_key in batch.meta_info:
+                _stashed_meta[_bad_key] = batch.meta_info.pop(_bad_key)
+
         # Pad to actor mini-batch multiple. ``train_mini_batch`` requires
         # ``mini_batch_size = ppo_mini_batch_size * rollout.n`` to evenly
         # divide the per-DP batch; padding the global batch guarantees that
@@ -852,6 +866,12 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
                 batch.meta_info["fully_async/pad/num_padding_rows"] = int(pad_size)
         else:
             batch.meta_info["fully_async/pad/num_padding_rows"] = 0
+
+        # Restore stashed ndarray meta_info fields onto the (possibly new)
+        # batch object. These are batch-global monitoring arrays (one entry
+        # per rollout), so they stay valid across pad.
+        if _stashed_meta:
+            batch.meta_info.update(_stashed_meta)
 
         return batch
 
