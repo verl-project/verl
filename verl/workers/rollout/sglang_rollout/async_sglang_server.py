@@ -479,9 +479,13 @@ class SGLangHttpServer:
         self.global_steps = global_steps
 
     async def abort_all_requests(self):
+        if self.node_rank != 0:
+            return
         await self.tokenizer_manager.pause_generation(PauseGenerationReqInput(mode="abort"))
 
     async def resume_generation(self):
+        if self.node_rank != 0:
+            return
         await self.tokenizer_manager.continue_generation(ContinueGenerationReqInput())
 
     async def start_profile(self, **kwargs):
@@ -612,3 +616,15 @@ class SGLangReplica(RolloutReplica):
             if is_valid_ipv6_address(server_address)
             else f"{server_address}:{server_port}"
         )
+
+    async def abort_all_requests(self):
+        """Abort all ongoing generation requests on the primary server.
+
+        SGLang control RPCs are only served by the node-rank 0 server for a
+        multi-node replica, so avoid broadcasting this call to every server.
+        """
+        await self.servers[0].abort_all_requests.remote()
+
+    async def resume_generation(self):
+        """Resume generation on the primary server after abort_all_requests."""
+        await self.servers[0].resume_generation.remote()
