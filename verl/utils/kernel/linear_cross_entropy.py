@@ -34,6 +34,8 @@ import typing
 import torch
 import torch.distributed as dist
 
+from verl.utils.torch_functional import resolve_temperature_for_fused_kernel
+
 
 class LinearCrossEntropy(torch.autograd.Function):
     @staticmethod
@@ -116,4 +118,24 @@ class LinearCrossEntropy(torch.autograd.Function):
         return (d_hidden, d_weight, None, None, None, None)
 
 
-linear_cross_entropy = LinearCrossEntropy.apply
+def linear_cross_entropy(
+    hidden: torch.Tensor,
+    weight: torch.Tensor,
+    labels: torch.Tensor,
+    temperature: typing.Union[float, torch.Tensor] = 1.0,
+    reduction: typing.Optional[str] = "none",
+    dist_process_group: typing.Optional[dist.ProcessGroup] = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fused linear + cross-entropy with optional per-sample temperature.
+
+    ``temperature`` may be a Python float / 0-dim tensor (applied globally inside
+    the Triton kernel) or a 1-D tensor of shape ``(num_tokens,)`` (per-token
+    temperature scaling). In the per-token case we pre-scale ``hidden`` by
+    ``1/temperature`` in fp32, then call the underlying kernel with
+    ``temperature=1.0``; this is mathematically equivalent to native per-token
+    scaling and the autograd graph propagates gradients correctly.
+    """
+    hidden, temperature_scalar = resolve_temperature_for_fused_kernel(hidden, temperature)
+    return LinearCrossEntropy.apply(
+        hidden, weight, labels, temperature_scalar, reduction, dist_process_group
+    )

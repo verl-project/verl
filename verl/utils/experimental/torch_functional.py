@@ -12,9 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional
+from typing import Optional, Union
 
 import torch
+
+from verl.utils.torch_functional import resolve_temperature_for_fused_kernel
 
 try:
     from flash_attn.ops.triton.cross_entropy import cross_entropy_loss
@@ -217,13 +219,18 @@ class FusedLinearForPPO(torch.nn.Module):
         hidden_states: torch.FloatTensor,
         vocab_weights: torch.FloatTensor,
         input_ids: torch.LongTensor,
-        temperature: float = 1.0,
+        temperature: Union[float, torch.Tensor] = 1.0,
     ) -> tuple[torch.FloatTensor, torch.FloatTensor]:
         input_ids = input_ids.to(torch.int64)
+        # Per-sample temperature: prescale hidden by 1/T outside the
+        # ``Function`` so autograd handles the extra op automatically.
+        hidden_states, scalar_temperature = resolve_temperature_for_fused_kernel(
+            hidden_states, temperature
+        )
         return FusedLinearForPPOFunction.apply(
             hidden_states,
             vocab_weights,
             input_ids,
-            temperature,
+            scalar_temperature,
             self.chunk_size,
         )
