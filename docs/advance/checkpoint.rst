@@ -3,7 +3,7 @@
 Using Checkpoints to Support Fault Tolerance Training
 =====================================================
 
-Last updated: 03/22/2026.
+Last updated: 04/22/2026.
 
 There could be training errors or machine failure during the whole RLHF training process, 
 so it is recommended to enable checkpoints to minimize your loss.
@@ -168,6 +168,9 @@ No need to convert the model to Megatron dist-checkpoint format.
     This may increase CPU memory usage and lead to OOM issues for large models.
     We recommend using the default dp-reshardable format in most cases.
 
+    If you experience CPU OOM during checkpoint loading with ``fully_reshardable`` checkpoints,
+    setting ``checkpoint.fully_parallel_load=False`` can significantly reduce peak CPU memory
+    usage during load, at the cost of less I/O parallelism.
 
 Original Checkpoint Utils
 -------------------------

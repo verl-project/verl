@@ -449,6 +449,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         state_dict = load_dist_checkpointing(
             sharded_state_dict=sharded_state_dict,
             ckpt_dir=dist_checkpoint_path,
+            fully_parallel_load=self.checkpoint_config.fully_parallel_load,
         )
 
         if should_load_dist_model:
@@ -551,6 +552,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                 ckpt_path=dist_checkpoint_path,
                 async_save=self.checkpoint_config.async_save,
                 content_metadata=sharded_sd_metadata,
+                fully_parallel_save=self.checkpoint_config.fully_parallel_save,
             )
 
             # Synchronize all async save requests
@@ -575,6 +577,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                 ckpt_path=dist_checkpoint_path,
                 async_save=self.checkpoint_config.async_save,
                 content_metadata=sharded_sd_metadata,
+                fully_parallel_save=self.checkpoint_config.fully_parallel_save,
             )
 
             # Synchronize all async save requests
