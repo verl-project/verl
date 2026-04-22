@@ -955,12 +955,19 @@ class PPOTrainer:
         # dump to local dir
         val_data_dir = self.config.trainer.get("validation_data_dir", None)
         if val_data_dir:
+            sorted_indices = sorted(range(len(sample_uids)), key=lambda i: sample_uids[i])
+            dump_inputs = [sample_inputs[i] for i in sorted_indices]
+            dump_outputs = [sample_outputs[i] for i in sorted_indices]
+            dump_gts = [sample_gts[i] for i in sorted_indices]
+            dump_scores = [sample_scores[i] for i in sorted_indices]
+            dump_extra = {k: [v[i] for i in sorted_indices] for k, v in reward_extra_infos_dict.items()}
+            dump_extra["uid"] = [sample_uids[i] for i in sorted_indices]
             self._dump_generations(
-                inputs=sample_inputs,
-                outputs=sample_outputs,
-                gts=sample_gts,
-                scores=sample_scores,
-                reward_extra_infos_dict=reward_extra_infos_dict,
+                inputs=dump_inputs,
+                outputs=dump_outputs,
+                gts=dump_gts,
+                scores=dump_scores,
+                reward_extra_infos_dict=dump_extra,
                 dump_path=val_data_dir,
             )
 
