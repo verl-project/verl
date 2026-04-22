@@ -12,8 +12,8 @@ export CUDA_VISIBLE_DEVICES=4,5,6,7
 export HYDRA_FULL_ERROR=1
 
 # ============ FlagCX Communication Library ============
-# export FLAGCX_PATH=/share/project/lizhiyu/FlagCX
-# export PYTHONPATH=/share/project/gzy/FlagCX/plugin/torch:${PYTHONPATH}
+# export FLAGCX_PATH=/path/to/FlagCX
+# export PYTHONPATH=/path/to/FlagCX/plugin/torch:${PYTHONPATH}
 
 # ============ FL Configuration via verl fl_config ============
 # Note: Environment variables below are for reference only.
@@ -42,20 +42,20 @@ export USE_FLAGGEMS=true
 export VLLM_FL_OOT_ENABLED=1
 export USE_FLAGCX=1
 # unset FLAGCX_PATH
-export FLAGCX_PATH=/share/project/lizhiyu/FlagCX
+export FLAGCX_PATH=/path/to/FlagCX
 
 export FLAGCX_LOG_LEVEL=DEBUG
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
-    data.train_files=/share/project/lizhiyu/data/rl/gsm8k/train.parquet \
-    data.val_files=/share/project/lizhiyu/data/rl/gsm8k/test.parquet \
+    data.train_files=~/data/rl/gsm8k/train.parquet \
+    data.val_files=~/data/rl/gsm8k/test.parquet \
     data.train_batch_size=64 \
     data.max_prompt_length=512 \
     data.max_response_length=1024 \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
-    actor_rollout_ref.model.path=/share/project/lizhiyu/data/Qwen/Qwen3-0.6B \
+    actor_rollout_ref.model.path=~/models/Qwen/Qwen3-0.6B \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.ppo_mini_batch_size=64 \
