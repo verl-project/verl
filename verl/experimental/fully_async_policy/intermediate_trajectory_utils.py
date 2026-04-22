@@ -178,6 +178,7 @@ def _build_one_intermediate_row(
     response_ids = traj["response_ids"]
     response_mask_raw = traj["response_mask"]
     response_logprobs_raw = traj.get("response_logprobs")
+    routed_experts_raw = traj.get("routed_experts")
     multi_modal_data = traj.get("multi_modal_data")
 
     prompt_input_ids, prompt_attn = _pad_to_length(
@@ -205,6 +206,36 @@ def _build_one_intermediate_row(
             list(response_logprobs_raw) + [0.0] * pad_size, dtype=torch.float32
         ).unsqueeze(0)
 
+    # routed_experts: pad to full (prompt_length + response_length) like
+    # AgentLoopWorker._agent_loop_postprocess does for the main trajectory.
+    routed_experts_padded: Optional[torch.Tensor] = None
+    if routed_experts_raw is not None:
+        if isinstance(routed_experts_raw, np.ndarray):
+            arr = routed_experts_raw
+            if not arr.flags.writeable:
+                arr = arr.copy()
+            experts_tensor = torch.from_numpy(arr)
+        elif isinstance(routed_experts_raw, torch.Tensor):
+            experts_tensor = routed_experts_raw
+        else:
+            raise TypeError(
+                f"Unsupported type for routed_experts: {type(routed_experts_raw)}"
+            )
+        length, layer_num, topk_num = experts_tensor.shape
+        total_length = input_ids.shape[1]
+        routed_experts_padded = torch.zeros(
+            1, total_length, layer_num, topk_num, dtype=experts_tensor.dtype
+        )
+        # Left-padded prompt: original prompt starts at (prompt_length - len(prompt_ids))
+        start_pos = prompt_input_ids.shape[1] - len(prompt_ids)
+        end_pos = min(start_pos + length, total_length)
+        if start_pos < 0 or end_pos > total_length:
+            raise ValueError(
+                f"Invalid routed_experts position range: start_pos={start_pos}, "
+                f"end_pos={end_pos}, total_length={total_length}"
+            )
+        routed_experts_padded[:, start_pos:end_pos] = experts_tensor[: end_pos - start_pos].unsqueeze(0)
+
     multi_modal_inputs = _compute_multi_modal_inputs(
         processor, tokenizer, multi_modal_data, input_ids
     )
@@ -223,9 +254,15 @@ def _build_one_intermediate_row(
     }
     if rollout_log_probs is not None:
         tensor_batch["rollout_log_probs"] = rollout_log_probs
+    if routed_experts_padded is not None:
+        tensor_batch["routed_experts"] = routed_experts_padded
 
     # rm_scores: set the last response token's score to the shared reward.
-    reward_score = traj.get("extra_fields", {}).get("reward_score")
+    # Prefer the top-level ``reward_score`` field (AgentLoopOutput schema);
+    # fall back to ``extra_fields.reward_score`` for backward compatibility.
+    reward_score = traj.get("reward_score")
+    if reward_score is None:
+        reward_score = traj.get("extra_fields", {}).get("reward_score")
     if reward_score is not None:
         rm_scores = torch.zeros_like(response_mask, dtype=torch.float32)
         # Place reward at last attended response position; fallback to last index
@@ -244,18 +281,22 @@ def _build_one_intermediate_row(
     for k, v in inherited_non_tensor.items():
         non_tensor_batch[k] = v
 
+    # Overlay only the keys that the main row also carries in its
+    # ``non_tensor_batch`` (populated by ``_combine_agent_loop_outputs``).
+    # Adding extra keys here (e.g. from ``traj_extra``) would cause
+    # ``DataProto.concat`` to fail because the main row would be missing
+    # those keys.  Fields like ``reward_score`` are already expressed via
+    # the ``rm_scores`` tensor and do not need a non_tensor duplicate.
     traj_extra = traj.get("extra_fields", {}) or {}
-    # Store trajectory_role / turn_number as np.ndarray object of length 1
+    # Only forward extra_fields keys that the parent (main) row already has.
+    parent_keys = set(inherited_non_tensor.keys())
     overlay = {
         "trajectory_role": "intermediate",
         "turn_number": int(traj.get("num_turns", 0)),
     }
     for k, v in traj_extra.items():
-        overlay[k] = v
-    # NB: ``intermediate_trajectories`` is intentionally NOT emitted here —
-    # the expander strips it from the main row before concat, so intermediate
-    # rows must not re-introduce it or ``DataProto.concat`` will fail on
-    # inconsistent non_tensor_batch keys.
+        if k in parent_keys or k in ("trajectory_role", "turn_number"):
+            overlay[k] = v
 
     for k, v in overlay.items():
         arr = np.empty(1, dtype=object)
@@ -263,16 +304,11 @@ def _build_one_intermediate_row(
         non_tensor_batch[k] = arr
 
     # Multi-modal inputs attached as object array, matching AgentLoopWorker convention.
-    if multi_modal_inputs:
-        mm_arr = np.empty(1, dtype=object)
-        mm_arr[0] = multi_modal_inputs
-        non_tensor_batch["multi_modal_inputs"] = mm_arr
-
-    # Multi-modal data preserved as object array (used for teacher distillation etc.)
-    if multi_modal_data is not None:
-        md_arr = np.empty(1, dtype=object)
-        md_arr[0] = multi_modal_data
-        non_tensor_batch["multi_modal_data"] = md_arr
+    # Always emit this key (with an empty dict if needed) so that the schema
+    # stays consistent with the main row produced by ``_combine_agent_loop_outputs``.
+    mm_arr = np.empty(1, dtype=object)
+    mm_arr[0] = multi_modal_inputs if multi_modal_inputs else {}
+    non_tensor_batch["multi_modal_inputs"] = mm_arr
 
     return DataProto(batch=td, non_tensor_batch=non_tensor_batch)
 

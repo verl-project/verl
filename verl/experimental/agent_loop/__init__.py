@@ -22,7 +22,6 @@ from .agent_loop import (
 from .diffusion_agent_loop import DiffusionAgentLoopWorker
 from .multi_trajectory_agent_loop import (
     INTERMEDIATE_TRAJECTORIES_KEY,
-    IntermediateTrajectory,
     MultiTrajectoryAgentLoop,
 )
 from .single_turn_agent_loop import SingleTurnAgentLoop
@@ -38,6 +37,5 @@ __all__ = [
     "get_trajectory_info",
     "DiffusionAgentLoopWorker",
     "MultiTrajectoryAgentLoop",
-    "IntermediateTrajectory",
     "INTERMEDIATE_TRAJECTORIES_KEY",
 ]

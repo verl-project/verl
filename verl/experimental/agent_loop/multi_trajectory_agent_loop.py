@@ -31,9 +31,10 @@ Because ``AgentLoopBase.run()`` is contractually required to return a single
 
 * The subclass's ``run()`` returns the *last* turn's ``AgentLoopOutput`` as the
   main output.
-* All intermediate turns are packed into
+* All intermediate turns are represented as standalone :class:`AgentLoopOutput`
+  instances (same schema as the final turn) and packed into
   ``final_output.extra_fields["intermediate_trajectories"]`` as a list of
-  serialized :class:`IntermediateTrajectory` dicts.
+  serialized dicts.
 * The Trainer-side
   :func:`verl.experimental.fully_async_policy.intermediate_trajectory_utils.expand_intermediate_trajectories`
   expands these back into independent DataProto rows during batch assembly —
@@ -53,9 +54,11 @@ import os
 from abc import abstractmethod
 from typing import Any, Optional
 
-from pydantic import BaseModel, ConfigDict
-
-from verl.experimental.agent_loop.agent_loop import AgentLoopBase, AgentLoopOutput
+from verl.experimental.agent_loop.agent_loop import (
+    AgentLoopBase,
+    AgentLoopMetrics,
+    AgentLoopOutput,
+)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -67,40 +70,6 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 INTERMEDIATE_TRAJECTORIES_KEY = "intermediate_trajectories"
 
 
-class IntermediateTrajectory(BaseModel):
-    """Serialized representation of a single intermediate-turn trajectory.
-
-    This schema intentionally mirrors the subset of ``AgentLoopOutput`` fields
-    that the Trainer-side expander needs in order to rebuild a standalone
-    DataProto row. Keeping this as a concrete Pydantic model (rather than a
-    free-form dict) guarantees that all multi-trajectory agent loops agree on
-    the field names and types.
-    """
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    prompt_ids: list[int]
-    """Token ids of the prompt for this turn (already tokenized by the subclass)."""
-
-    response_ids: list[int]
-    """Token ids of the LLM response for this turn."""
-
-    response_mask: list[int]
-    """Response mask (1 = LLM generated token, 0 = tool/observation token)."""
-
-    response_logprobs: Optional[list[float]] = None
-    """Per-token log probabilities for the response, if available."""
-
-    multi_modal_data: Optional[dict[str, Any]] = None
-    """Multi-modal payload (e.g., images/videos) for this turn's prompt."""
-
-    num_turns: int = 0
-    """Number of chat turns seen up to and including this intermediate turn."""
-
-    extra_fields: dict[str, Any] = {}
-    """Per-trajectory extra fields (e.g., ``min_global_steps``, ``turn_number``)."""
-
-
 class MultiTrajectoryAgentLoop(AgentLoopBase):
     """Base class for agent loops that emit multiple trajectories per rollout.
 
@@ -110,6 +79,13 @@ class MultiTrajectoryAgentLoop(AgentLoopBase):
     * :meth:`build_final_output` — call once at the end of ``run()`` with the
       final-turn ``AgentLoopOutput`` and the shared reward.
 
+    Intermediate trajectories are stored as full :class:`AgentLoopOutput`
+    instances so the schema matches the final trajectory exactly (including
+    ``routed_experts`` for MoE models). The ``metrics`` field on intermediate
+    trajectories is set to an empty :class:`AgentLoopMetrics` (all defaults)
+    because only rollout-level timing aggregates are meaningful, and they are
+    already carried by the final trajectory.
+
     Subclasses must still implement ``run()`` (inherited abstract method from
     :class:`AgentLoopBase`).
     """
@@ -118,7 +94,7 @@ class MultiTrajectoryAgentLoop(AgentLoopBase):
         super().__init__(*args, **kwargs)
         # Per-instance buffer of registered intermediate trajectories.
         # Cleared automatically by ``build_final_output`` before returning.
-        self._intermediate_trajectories: list[IntermediateTrajectory] = []
+        self._intermediate_trajectories: list[AgentLoopOutput] = []
 
     def append_intermediate_trajectory(
         self,
@@ -126,18 +102,29 @@ class MultiTrajectoryAgentLoop(AgentLoopBase):
         response_ids: list[int],
         response_mask: list[int],
         response_logprobs: Optional[list[float]] = None,
+        routed_experts: Optional[Any] = None,
         multi_modal_data: Optional[dict[str, Any]] = None,
         num_turns: int = 0,
         **extra_fields: Any,
     ) -> None:
-        """Register a completed intermediate-turn trajectory."""
-        trajectory = IntermediateTrajectory(
+        """Register a completed intermediate-turn trajectory.
+
+        The trajectory is stored as a full :class:`AgentLoopOutput` so the
+        schema matches the final trajectory emitted by ``build_final_output``.
+        ``metrics`` is set to an empty :class:`AgentLoopMetrics` — intermediate
+        turn timings do not contribute to rollout-level aggregates.
+        ``reward_score`` is left ``None`` here and stamped later by
+        :meth:`build_final_output` with the shared episode reward.
+        """
+        trajectory = AgentLoopOutput(
             prompt_ids=list(prompt_ids),
             response_ids=list(response_ids),
             response_mask=list(response_mask),
             response_logprobs=list(response_logprobs) if response_logprobs is not None else None,
+            routed_experts=routed_experts,
             multi_modal_data=multi_modal_data,
             num_turns=num_turns,
+            metrics=AgentLoopMetrics(),
             extra_fields=dict(extra_fields),
         )
         self._intermediate_trajectories.append(trajectory)
@@ -166,11 +153,12 @@ class MultiTrajectoryAgentLoop(AgentLoopBase):
         # Apply shared reward to the final trajectory.
         final_output.reward_score = shared_reward
 
-        # Serialize intermediate trajectories to plain dicts and stamp the
-        # reward into each trajectory's extra_fields.
+        # Stamp the shared reward onto every intermediate trajectory via the
+        # first-class ``reward_score`` field (same path as the final trajectory),
+        # then serialize to plain dicts for packing into ``extra_fields``.
         serialized: list[dict[str, Any]] = []
         for traj in self._intermediate_trajectories:
-            traj.extra_fields["reward_score"] = shared_reward
+            traj.reward_score = shared_reward
             serialized.append(traj.model_dump())
 
         final_output.extra_fields[INTERMEDIATE_TRAJECTORIES_KEY] = serialized
