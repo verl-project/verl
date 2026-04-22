@@ -297,7 +297,6 @@ actor_rollout_ref:
       max_parallel_calls: 1
       max_tool_response_length: 256
       tool_response_truncate_side: middle
-      interaction_config_path: null
       use_inference_chat_template: false
       tokenization_sanity_check_mode: strict
       format: hermes
@@ -676,7 +675,6 @@ trainer:
   max_critic_ckpt_to_keep: null
   ray_wait_register_center_timeout: 300
   device: cuda
-  use_legacy_worker_impl: disable
 ray_kwargs:
   ray_init:
     num_cpus: null

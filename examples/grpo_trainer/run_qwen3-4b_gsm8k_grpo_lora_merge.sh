@@ -56,7 +56,6 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.strategy=fsdp2 \
     actor_rollout_ref.ref.fsdp_config.model_dtype=bf16 \
     algorithm.use_kl_in_reward=False \
-    trainer.use_legacy_worker_impl=disable \
     trainer.critic_warmup=0 \
     trainer.logger='["console","tensorboard","file"]' \
     trainer.project_name=$project_name \

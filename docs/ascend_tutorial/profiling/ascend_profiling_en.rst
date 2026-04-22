@@ -268,23 +268,28 @@ For vLLM or SGLang inference engines, we can control the ``schedule`` parameter 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 This phase computes probability distributions for new and old policies.
+With the unified model engine, both actor and reference log-prob
+computation go through ``TrainingWorker.infer_batch`` which dispatches
+to ``BaseEngine.infer_batch`` on the underlying backend engine.
 
 **FSDP Backend**
 
 The FSDP backend allows fine-grained control at the Micro-Batch level.
+Instrument the micro-batch loop inside the FSDP engine's forward pass.
 
-- **Modified File**: ``verl/workers/actor/dp_actor.py``
+- **Modified File**: ``verl/workers/engine/fsdp/transformer_impl.py``
+  (``FSDPEngineWithLMHead.forward_backward_batch`` / ``forward_step``)
 
 .. code-block:: diff
 
       # ... import dependencies ...
   +   import torch_npu
 
-      class DataParallelPPOActor(BasePPOActor):
+      class FSDPEngineWithLMHead(FSDPEngine):
 
-          def compute_log_prob(self, data: DataProto, calculate_entropy=False) -> torch.Tensor:
+          def forward_backward_batch(self, data: TensorDict, loss_function, forward_only=False):
 
-  +           role = "Ref" if self.actor_optimizer is None else "Actor"
+  +           role = "Ref" if forward_only and not self.optimizer_config else "Actor"
   +           # Prepare profiler (same configuration as above, omitted)
   +           experimental_config = torch_npu.profiler._ExperimentalConfig(...)
   +           self.prof_npu = torch_npu.profiler.profile(
@@ -294,19 +299,19 @@ The FSDP backend allows fine-grained control at the Micro-Batch level.
   +               on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(f"./outputs/{role}_compute_log_prob", analyse_flag=True)
   +           )
 
-
-  +           # This function is shared by ref and actor, set role flag to distinguish. If you want to collect actor_compute_log_prob, set if role=="Actor":
-  +           if role=="Ref":
+  +           # forward_backward_batch is shared by ref and actor. Use the role flag to
+  +           # distinguish; to collect actor_compute_log_prob instead, switch to role=="Actor":
+  +           if role == "Ref":
   +               self.prof_npu.start()
 
               for micro_batch in micro_batches:
 
                   # ... original computation logic ...
                   with torch.no_grad():
-                      entropy, log_probs = self._forward_micro_batch(...)
+                      output = self.forward_step(micro_batch, loss_function, forward_only=True)
 
   +                   # Drive schedule to collect micro batch
-  +                   if role=="Ref":
+  +                   if role == "Ref":
   +                       self.prof_npu.step()
 
                   # ...
@@ -314,27 +319,40 @@ The FSDP backend allows fine-grained control at the Micro-Batch level.
 
 **Megatron Backend**
 
-The Micro-Batch scheduling in the Megatron backend is managed internally by the framework and does not currently support fine-grained collection at the Micro-Batch level through simple code instrumentation. It is recommended to use global configuration for collection.
+The Micro-Batch scheduling in the Megatron backend is managed internally
+by Megatron's pipeline-parallel ``forward_backward_func`` and does not
+currently support fine-grained collection at the Micro-Batch level
+through simple code instrumentation. It is recommended to use the global
+profiler configuration for collection.
 
 3. Fine-grained Collection in update_policy (Actor & Critic) Phase
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The Update phase includes forward and backward propagation.
+The Update phase includes forward and backward propagation. In the
+unified engine, mini-batch iteration is driven by
+``TrainingWorker.train_mini_batch`` in ``verl/workers/engine_workers.py``,
+which then calls ``train_batch`` for each mini-batch.
 
 **FSDP Backend**
 
-The FSDP backend supports collection at both Mini-Batch and Micro-Batch granularities.
+The FSDP backend supports collection at both Mini-Batch and Micro-Batch
+granularities. For Mini-Batch scope, instrument ``train_mini_batch`` in
+``TrainingWorker``; for Micro-Batch scope, instrument the per-micro-batch
+loop inside the FSDP engine's ``forward_backward_batch``.
 
-- **Modified File**: ``verl/workers/actor/dp_actor.py``
+- **Modified File**: ``verl/workers/engine_workers.py``
+  (``TrainingWorker.train_mini_batch``) for Mini-Batch granularity, or
+  ``verl/workers/engine/fsdp/transformer_impl.py``
+  (``FSDPEngineWithLMHead.forward_backward_batch`` for Micro-Batch)
 
 .. code-block:: diff
 
       # ... import dependencies ...
   +   import torch_npu
 
-      class DataParallelPPOActor(BasePPOActor):
+      class TrainingWorker(Worker, DistProfilerExtension):
 
-          def update_policy(self, data: DataProto):
+          def train_mini_batch(self, data: TensorDict) -> TensorDict:
 
   +           # Prepare profiler (same configuration as above, omitted)
   +           experimental_config = torch_npu.profiler._ExperimentalConfig(...)
@@ -346,50 +364,27 @@ The FSDP backend supports collection at both Mini-Batch and Micro-Batch granular
   +           )
   +           self.prof_npu.start()
 
-              # ... PPO Epochs loop ...
-              for _ in range(self.config.ppo_epochs):
-                  # ... Mini Batch loop ...
-                  for batch_idx, mini_batch in enumerate(mini_batches):
-                      # ... mini_batches split ...
+              # ... Mini Batch loop over the dataloader ...
+              for batch_idx, mini_batch_td in enumerate(dataloader):
+                  # ... calls self.train_batch(mini_batch_td), which in turn runs
+                  # Forward & Backward on every micro-batch and a single optimizer step
+                  # inside the engine ...
+                  actor_output = self.train_batch(mini_batch_td)
 
-                      for i, micro_batch in enumerate(micro_batches):
-                          # ... Original Forward & Backward logic ...
-                          # ... loss.backward() ...
-                          pass
-
-                      grad_norm = self._optimizer_step()
-
-  +                   # Drive schedule to collect mini batch, if you want micro batch collection, move self.prof_npu.step() inside the micro_batch loop
-  +                   self.prof_npu.step()
+  +               # Drive schedule to collect mini batch; for micro-batch granularity, move
+  +               # self.prof_npu.step() into the micro-batch loop inside
+  +               # FSDPEngineWithLMHead.forward_backward_batch.
+  +               self.prof_npu.step()
 
 
 **Megatron Backend**
 
 The Megatron backend supports collection at the Mini-Batch granularity.
+The same ``TrainingWorker.train_mini_batch`` entry point applies – the
+Megatron engine internally runs Megatron's pipeline-parallel forward /
+backward schedule and the optimizer step.
 
-- **Modified File**: ``verl/workers/actor/megatron_actor.py``
-
-.. code-block:: diff
-
-      class MegatronPPOActor(BasePPOActor):
-
-          def update_policy(self, dataloader: Iterable[DataProto]) -> dict:
-              # ...
-  +           # Prepare profiler (same configuration as above, omitted)
-  +           experimental_config = torch_npu.profiler._ExperimentalConfig(...)
-  +           self.prof_npu = torch_npu.profiler.profile(
-  +               # ...
-  +               # Only collect computation of first Mini Batch (including all Micro-Batches) and one optimizer update
-  +               schedule=torch_npu.profiler.schedule(wait=0, warmup=0, active=1, repeat=1),
-  +               on_trace_ready=torch_npu.profiler.tensorboard_trace_handler("./outputs/megatron_actor_update_profile", analyse_flag=True)
-  +           )
-  +           self.prof_npu.start()
-
-              for data in dataloader:
-                  # ... internally calls self.forward_backward_batch for computation ...
-                  # ... metric_micro_batch = self.forward_backward_batch(...)
-
-                  # ... self.actor_optimizer.step() ...
-
-  +               # Drive schedule to collect mini batch
-  +               self.prof_npu.step()
+- **Modified File**: ``verl/workers/engine_workers.py``
+  (``TrainingWorker.train_mini_batch``) — identical to the FSDP snippet
+  above; the output path should be renamed (e.g. ``./outputs/megatron_actor_update_profile``)
+  to distinguish traces from different backends.

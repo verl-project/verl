@@ -100,7 +100,6 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             self.kl_ctrl_in_reward = core_algos.get_kl_controller(self.config.algorithm.kl_ctrl)
 
         self.use_prefix_grouper = self.config.actor_rollout_ref.actor.get("use_prefix_grouper", False)
-        self.use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
 
         # ==================== SeparateRayPPOTrainer config ====================
         self.global_steps = 0
@@ -408,6 +407,14 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
 
         self.global_steps += 1
 
+        self.prev_step_profile = False
+        self.curr_step_profile = (
+            self.global_steps in self.config.global_profiler.steps
+            if self.config.global_profiler.steps is not None
+            else False
+        )
+        self.next_step_profile = False
+
         # Use queue mode, no need for traditional dataloader iterator
         # Initialize to get the first batch of data
         while True:
@@ -461,7 +468,6 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         self._fit_save_checkpoint()
         self._fit_stop_profile()
         self._fit_collect_metrics(batch)
-        self._fit_torch_memory()
         self._fit_postprocess_step()
 
     async def _fit_generate(self, batch: DataProto = None) -> DataProto | None:

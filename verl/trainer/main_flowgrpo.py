@@ -98,16 +98,9 @@ class TaskRunner:
         self.mapping = {}
 
     def add_actor_rollout_worker(self, config):
-        """Add actor rollout worker based on the actor strategy."""
+        """Add actor rollout worker using the unified model engine implementation."""
         from verl.single_controller.ray import RayWorkerGroup
         from verl.trainer.ppo.ray_trainer import Role
-
-        use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
-        if use_legacy_worker_impl != "disable":
-            raise NotImplementedError(
-                "FlowGRPO only supports the new engine path (trainer.use_legacy_worker_impl=disable)."
-            )
-
         from verl.workers.engine_workers import ActorRolloutRefWorker
 
         actor_rollout_cls = ActorRolloutRefWorker

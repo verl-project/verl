@@ -70,7 +70,6 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.enable_prefix_caching=False \
     actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=6144 \
     algorithm.use_kl_in_reward=False \
-    trainer.use_legacy_worker_impl=auto \
     trainer.critic_warmup=0 \
     trainer.logger=['console','tensorboard'] \
     trainer.project_name="${project_name}" \

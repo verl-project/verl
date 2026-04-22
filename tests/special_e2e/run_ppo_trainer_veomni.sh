@@ -70,7 +70,6 @@ common_params=(
     actor_rollout_ref.rollout.n=2 \
     actor_rollout_ref.ref.veomni.optimizer_offload=True \
     algorithm.kl_ctrl.kl_coef=0.001 \
-    trainer.use_legacy_worker_impl=disable \
     trainer.critic_warmup=0 \
     trainer.logger=console \
     trainer.project_name='verl_veomni_test' \

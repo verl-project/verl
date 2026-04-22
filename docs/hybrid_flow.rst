@@ -126,9 +126,9 @@ The worker group will be constructed on the resource pool it designates. The res
 Worker definition
 ~~~~~~~~~~~~~~~~~~~~
 
-.. _ActorRolloutRefWorker: https://github.com/verl-project/verl/blob/main/verl/workers/fsdp_workers.py
+.. _ActorRolloutRefWorker: https://github.com/verl-project/verl/blob/main/verl/workers/engine_workers.py
 
-We take `ActorRolloutRefWorker <https://github.com/verl-project/verl/blob/main/verl/workers/fsdp_workers.py>`_ for an example.
+We take `ActorRolloutRefWorker <https://github.com/verl-project/verl/blob/main/verl/workers/engine_workers.py>`_ for an example.
 The APIs it should expose to the controller process are:
 
 - init_model: build the underlying model
@@ -223,25 +223,18 @@ Important code files in the repository are organized as below:
        ppo_trainer.yaml  # configuration template for the RL trainer
      workers
        protocol.py  # the interface of DataProto
-       fsdp_workers.py   # the FSDP worker interfaces: ActorRolloutRefWorker, CriticWorker, RewardModelWorker
-       megatron_workers.py  # the Megatron worker interfaces: ActorRolloutRefWorker, CriticWorker, RewardModelWorker
-       actor
-         dp_actor.py  #  data parallel actor with FSDP backend
-         megatron_actor.py  # nD parallel actor with Megatron backend
-       critic
-         dp_critic.py  # data parallel critic with FSDP backend
-         megatron_critic.py  # nD parallel critic with FSDP backend
-       reward_model
-         megatron
-           reward_model.py  # reward model with Megatron backend
+       engine_workers.py  # unified ActorRolloutRefWorker / TrainingWorker implementations
+       engine
+         fsdp                  # FSDP / FSDP2 actor+critic engine implementations
+         megatron              # Megatron-LM actor+critic engine implementations
+         torchtitan            # torchtitan engine implementation
+         veomni                # veomni engine implementation
+         mcore                 # shared mcore helpers
        rollout
          vllm
            vllm_rollout.py  # rollout with vllm backend
          hf_rollout.py  # rollout with huggingface TGI backend
-       sharding_manager
-         fsdp_ulysses.py  # data and model resharding when using FSDP + ulysses
-         fsdp_vllm.py  # data and model resharding when using FSDP + ulysses + vllm
-         megatron_vllm.py  # data and model resharding when using Megatron + vllm
+         sglang_rollout        # rollout with SGLang backend
      utils
        dataset  # datasets for SFT/RM/RL
        reward_score  # function based reward

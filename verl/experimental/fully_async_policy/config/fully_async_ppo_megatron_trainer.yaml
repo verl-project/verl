@@ -6,9 +6,6 @@ defaults:
   - ppo_megatron_trainer
   - _self_
 
-trainer:
-  use_legacy_worker_impl: disable
-
 async_training:
 
   # Maximum samples staleness threshold

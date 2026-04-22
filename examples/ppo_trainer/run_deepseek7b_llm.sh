@@ -38,5 +38,4 @@ python3 -m verl.trainer.main_ppo \
     trainer.nnodes=1 \
     trainer.save_freq=20 \
     trainer.test_freq=1 \
-    trainer.use_legacy_worker_impl=auto \
     trainer.total_epochs=15 $@

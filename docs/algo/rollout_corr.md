@@ -190,7 +190,8 @@ actor_rollout_ref:
 - `verl/trainer/ppo/rollout_corr_helper.py` - Contains `compute_rollout_correction_and_rejection_mask()` and `compute_offpolicy_metrics()`
 - `verl/trainer/ppo/core_algos.py` - Rollout Correction integration with PPO and REINFORCE modes (`compute_policy_loss_bypass_mode()`, `compute_policy_loss_reinforce()`)
 - `verl/trainer/ppo/ray_trainer.py` - Bypass mode implementation (skips `old_log_prob` computation)
-- `verl/workers/actor/dp_actor.py` - Mode selection logic and metrics collection
+- `verl/workers/utils/losses.py` - `ppo_loss` loss function wired to actor `TrainingWorker` via `verl.workers.engine_workers.ActorRolloutRefWorker.init_model`
+- `verl/trainer/ppo/core_algos.py` - `@register_policy_loss("bypass_mode")` policy loss that invokes `compute_rollout_correction_and_rejection_mask` and emits off-policy metrics
 
 ### **Configuration Files**
 

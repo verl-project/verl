@@ -43,20 +43,6 @@ Finally, set the ``tools_config_file`` in your rollout config:
 
 This allows integration of customized tool behaviors during actor rollout steps.
 
-If you want rollout with simulated interaction, you can set the ``interaction_config_file`` in your rollout config:
-
-.. code-block:: yaml
-
-    interaction:
-      - class_name: ""
-        config: {}
-
-.. code-block:: yaml
-
-    actor_rollout_ref:
-        rollout:
-            interaction_config_file: <path_to_interaction_yaml_file>
-
 If your tool creates multi-modal inputs, you should return a list of multi-modal inputs in your tool.execute() implementation.
 
 Image and video should be processed before returning. For example, if you are using Qwen2.5-VL, you can use the following code to get the representations:
@@ -330,16 +316,6 @@ See the training performance of multi-turn rollout on the GSM8K task HERE_.
 .. _mcp_search_tool.py: https://github.com/verl-project/verl/blob/main/verl/tools/mcp_search_tool.py
 
 .. _mcp_tool_config.yaml: https://github.com/verl-project/verl/blob/main/examples/sglang_multiturn/config/tool_config/mcp_tool_config.yaml
-
-Interaction System
-~~~~~~~~~~~~~~~~~~
-
-For dynamic conversational feedback during RL training, see:
-
-.. toctree::
-   :maxdepth: 1
-
-   interaction_system
 
 Search Tool Integration
 ~~~~~~~~~~~~~~~~~~~~~~~
