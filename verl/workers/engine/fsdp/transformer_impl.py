@@ -875,10 +875,11 @@ class FSDPEngineWithLMHead(FSDPEngine):
         pad_mode = tu.get_non_tensor_data(data=micro_batch, key="pad_mode", default=DatasetPadMode.NO_PADDING)
         use_fused_kernels = tu.get_non_tensor_data(data=micro_batch, key="use_fused_kernels", default=False)
         temperature = micro_batch["temperature"]
-        temperature_item = temperature
-        if use_fused_kernels:
-            assert not isinstance(temperature, torch.Tensor), (
-                "use_fused_kernels does not support per sample temperature yet"
+        # Fused kernels + remove_padding accept per-token temperature via
+        # prescaling; the padded path still requires a scalar.
+        if use_fused_kernels and not use_remove_padding:
+            assert not isinstance(temperature, torch.Tensor) or temperature.numel() == 1, (
+                "use_fused_kernels without remove_padding only supports scalar temperature"
             )
         assert pad_mode == DatasetPadMode.NO_PADDING, f"pad_mode {pad_mode} not supported"
 
@@ -1002,7 +1003,16 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
         extra_args = {}
         if use_fused_kernels:
-            extra_args["temperature"] = temperature_item
+            if use_remove_padding:
+                # 1-D per-token tensor, aligned with the flattened hidden states.
+                extra_args["temperature"] = temperature_rmpad
+            else:
+                # Uniformity is enforced by the assertion above, so take any entry.
+                extra_args["temperature"] = (
+                    float(temperature.view(-1)[0].item())
+                    if isinstance(temperature, torch.Tensor)
+                    else float(temperature)
+                )
             extra_args["return_dict"] = True
 
         model_inputs.update(multi_modal_inputs)
