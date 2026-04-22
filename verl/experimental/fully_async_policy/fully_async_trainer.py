@@ -486,19 +486,23 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         with marked_timer("step", self.timing_raw):
             batch = await self._fit_generate(None)
             batch = self._fit_compute_reward(batch)
+            self._log_training_diagnostics("after_reward", batch)
             # Expand intermediate trajectories (and pad to actor mini-batch
             # multiple) BEFORE any per-token forward pass, so that
             # log_prob / ref_log_prob / critic are computed over every
             # trajectory row that will participate in the actor update.
             batch = self._fit_expand_and_pad(batch)
+            self._log_training_diagnostics("after_expand_and_pad", batch)
             batch = self._fit_compute_log_prob(batch)
             batch = self._fit_compute_ref_log_prob(batch)
             batch = self._fit_compute_critic(batch)
+            self._log_training_diagnostics("after_log_prob_and_ref", batch)
             # Advantage is computed on the FINAL subset only (GRPO group
             # stats must not see intermediate rows), then the scalar is
             # broadcast to sibling intermediate rows and scaled by 1/T_rollout
             # so that every rollout contributes equally under token-mean.
             batch = self._fit_compute_advantage(batch)
+            self._log_training_diagnostics("after_advantage_scatter_normalize", batch)
             batch = self._fit_update_critic(batch)
             batch = self._fit_update_actor(batch)
             self._fit_update_local_step()
@@ -543,6 +547,159 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             self.actor_rollout_wg.restore_model_from_cpu(self.local_trigger_step)
             self.actor_rollout_wg.clear_cpu_model(self.local_trigger_step)
         return old_log_prob, old_log_prob_mfu
+
+    def _log_training_diagnostics(
+        self,
+        stage: str,
+        batch: DataProto,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        """Print a compact, easy-to-grep snapshot of training data for eyeballing.
+
+        All numbers are scalars or short lists — no per-token dumps. Triggered
+        at key hand-off points in fit_step so you can paste the log back and
+        verify the pipeline is behaving as designed.
+
+        The snapshot is written both to stdout (for Ray log aggregation) and
+        appended to a per-run log file at
+        ``<trainer.default_local_dir>/training_diagnostics.log``; override via
+        env var ``FULLY_ASYNC_DIAG_LOG`` to redirect the path.
+        """
+        import numpy as np
+
+        nt = batch.non_tensor_batch or {}
+        n = len(batch)
+
+        lines: list[str] = [f"[FullyAsyncTrainer][DIAG][{stage}] batch_size={n}"]
+
+        roles = nt.get("trajectory_role")
+        if roles is not None:
+            role_arr = np.asarray(roles)
+            n_final = int((role_arr == "final").sum())
+            n_inter = int((role_arr == "intermediate").sum())
+            n_other = n - n_final - n_inter
+            lines.append(
+                f"  roles: final={n_final} intermediate={n_inter} other={n_other}"
+            )
+
+        gids = nt.get("rollout_group_id")
+        if gids is not None:
+            gids_np = np.asarray(gids, dtype=np.int64)
+            unique_gids, counts = np.unique(gids_np, return_counts=True)
+            lines.append(
+                f"  rollout_groups: n_groups={len(unique_gids)} "
+                f"rows_per_group(min/median/max)="
+                f"{int(counts.min())}/{int(np.median(counts))}/{int(counts.max())}"
+            )
+
+        if "response_mask" in batch.batch.keys():
+            rm = batch.batch["response_mask"]
+            per_row = rm.to(torch.float32).sum(dim=-1)
+            total_valid = float(per_row.sum().item())
+            lines.append(
+                f"  response_mask: total_valid_tokens={total_valid:.0f} "
+                f"per_row_tokens(min/mean/max)="
+                f"{float(per_row.min()):.0f}/{float(per_row.mean()):.2f}/{float(per_row.max()):.0f}"
+            )
+
+        if "rm_scores" in batch.batch.keys():
+            rs = batch.batch["rm_scores"]
+            rs_row = rs.to(torch.float32).sum(dim=-1)
+            nonzero = int((rs_row != 0).sum().item())
+            lines.append(
+                f"  rm_scores: rows_with_nonzero={nonzero}/{n} "
+                f"per_row_sum(min/mean/max)="
+                f"{float(rs_row.min()):.4f}/{float(rs_row.mean()):.4f}/{float(rs_row.max()):.4f}"
+            )
+
+        if "advantages" in batch.batch.keys():
+            adv = batch.batch["advantages"].to(torch.float32)
+            # advantage is broadcast across response_length; reduce to scalar per row
+            # by taking the first non-zero position or just the mean over masked tokens.
+            if "response_mask" in batch.batch.keys():
+                mask = batch.batch["response_mask"].to(torch.float32)
+                denom = mask.sum(dim=-1).clamp_min(1.0)
+                adv_scalar = (adv * mask).sum(dim=-1) / denom
+            else:
+                adv_scalar = adv.mean(dim=-1)
+            n_zero_adv = int((adv_scalar.abs() < 1e-12).sum().item())
+            lines.append(
+                f"  advantages(per_row_masked_mean): "
+                f"min/mean/max={float(adv_scalar.min()):.6f}/"
+                f"{float(adv_scalar.mean()):.6f}/{float(adv_scalar.max()):.6f} "
+                f"nonzero_rows={n - n_zero_adv}/{n}"
+            )
+            # Split by role if available
+            if roles is not None:
+                role_arr = np.asarray(roles)
+                for role_name in ("final", "intermediate"):
+                    idx = np.where(role_arr == role_name)[0]
+                    if len(idx) == 0:
+                        continue
+                    sub = adv_scalar[torch.as_tensor(idx, dtype=torch.long)]
+                    lines.append(
+                        f"    {role_name}: advantages "
+                        f"min/mean/max={float(sub.min()):.6f}/"
+                        f"{float(sub.mean()):.6f}/{float(sub.max()):.6f}"
+                    )
+
+        if "old_log_probs" in batch.batch.keys():
+            olp = batch.batch["old_log_probs"].to(torch.float32)
+            if "response_mask" in batch.batch.keys():
+                mask = batch.batch["response_mask"].to(torch.float32)
+                denom = mask.sum().clamp_min(1.0)
+                mean_olp = float((olp * mask).sum() / denom)
+            else:
+                mean_olp = float(olp.mean())
+            lines.append(f"  old_log_probs(masked_mean): {mean_olp:.4f}")
+
+        if "ref_log_prob" in batch.batch.keys():
+            rlp = batch.batch["ref_log_prob"].to(torch.float32)
+            if "response_mask" in batch.batch.keys():
+                mask = batch.batch["response_mask"].to(torch.float32)
+                denom = mask.sum().clamp_min(1.0)
+                mean_rlp = float((rlp * mask).sum() / denom)
+            else:
+                mean_rlp = float(rlp.mean())
+            lines.append(f"  ref_log_prob(masked_mean): {mean_rlp:.4f}")
+
+        n_pad = batch.meta_info.get("fully_async/pad/num_padding_rows")
+        if n_pad is not None:
+            lines.append(f"  pad: num_padding_rows={int(n_pad)}")
+
+        if extra:
+            for k, v in extra.items():
+                lines.append(f"  {k}: {v}")
+
+        msg = "\n".join(lines)
+
+        # Write diagnostics ONLY to a per-run log file (not stdout) to avoid
+        # spamming Ray's log aggregation when the batch is large.
+        try:
+            log_path = os.environ.get("FULLY_ASYNC_DIAG_LOG")
+            if not log_path:
+                default_dir = self.config.trainer.get(
+                    "default_local_dir", "outputs/fully_async"
+                )
+                log_path = os.path.join(default_dir, "training_diagnostics.log")
+            os.makedirs(os.path.dirname(log_path), exist_ok=True)
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+            header = (
+                f"[{ts}] step={self.global_steps} "
+                f"local_trigger_step={self.local_trigger_step}"
+            )
+            with open(log_path, "a", encoding="utf-8") as fh:
+                fh.write(header + "\n")
+                fh.write(msg + "\n")
+                fh.write("-" * 80 + "\n")
+        except Exception as exc:
+            # Diagnostic logging must never crash training. Fall back to a
+            # SINGLE terminal line so the failure is visible without dumping
+            # the whole snapshot to console.
+            print(
+                f"[FullyAsyncTrainer][DIAG] failed to write log file: {exc!r}",
+                flush=True,
+            )
 
     def _fit_expand_and_pad(self, batch: DataProto) -> DataProto:
         """Expand intermediate trajectories and pad the batch.
