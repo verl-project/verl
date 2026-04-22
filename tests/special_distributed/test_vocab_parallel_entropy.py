@@ -172,7 +172,11 @@ class _VocabParallelEntropyChunked(torch.autograd.Function):
         return grad, None
 
 
-def vocab_parallel_entropy(vocab_parallel_logits: torch.Tensor, chunk_size: Optional[int] = None) -> torch.Tensor:
+def vocab_parallel_entropy(
+    vocab_parallel_logits: torch.Tensor,
+    entropy_from_logits_with_chunking: Optional[bool] = False,
+    chunk_size: Optional[int] = 2048,
+) -> torch.Tensor:
     """Compute entropy when the logits are sharded in tp ranks.
 
     Args:
@@ -181,7 +185,7 @@ def vocab_parallel_entropy(vocab_parallel_logits: torch.Tensor, chunk_size: Opti
 
     Returns: (total_nnz,)
     """
-    if chunk_size is not None and vocab_parallel_logits.shape[0] > chunk_size:
+    if entropy_from_logits_with_chunking and vocab_parallel_logits.shape[0] > chunk_size:
         return _VocabParallelEntropyChunked.apply(vocab_parallel_logits, chunk_size)
     return _VocabParallelEntropy.apply(vocab_parallel_logits)
 

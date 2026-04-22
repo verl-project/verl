@@ -281,7 +281,7 @@ def vocab_parallel_entropy(
     Returns: (total_nnz,)
 
     """
-    if entropy_from_logits_with_chunking:
+    if entropy_from_logits_with_chunking and vocab_parallel_logits.shape[0] > chunk_size:
         return _VocabParallelEntropyChunked.apply(vocab_parallel_logits, chunk_size)
     return _VocabParallelEntropy.apply(vocab_parallel_logits)
 
