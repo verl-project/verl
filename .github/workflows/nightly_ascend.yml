@@ -219,4 +219,5 @@ jobs:
       - name: Running nightlyCI_dapo-moonlight-16b-megatron-vllm_ascend
         run: |
           ray stop --force
+          export HCCL_OP_EXPANSION_MODE="AIV"
           bash tests/special_npu/nightly_ci_ascend/run_dapo_moonlight-16b_megatron_npu.sh
