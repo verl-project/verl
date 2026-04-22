@@ -133,7 +133,6 @@ class AsyncLLMServerManager:
         try:
             output: TokenOutput | DiffusionOutput = await server.generate.remote(
                 request_id=uuid4().hex,  # use new request_id for each turn
-                request_group_id=request_group_id,
                 prompt_ids=prompt_ids,
                 sampling_params=sampling_params,
                 image_data=image_data,
