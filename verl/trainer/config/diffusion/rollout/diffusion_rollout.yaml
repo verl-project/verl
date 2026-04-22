@@ -217,7 +217,7 @@ width: 512
 num_inference_steps: 10
 
 # Classifier-free guidance scale (true CFG); values > 1.0 enable CFG with negative prompt
-true_cfg_scale: 4.0
+true_cfg_scale: 1.0
 
 # Maximum text-encoder token sequence length for prompt encoding
 max_sequence_length: 512
