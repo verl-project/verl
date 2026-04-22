@@ -105,6 +105,7 @@ def main():
     config_env_path = current_script_dir / "../../config/bash_config.env" 
     load_dotenv(config_env_path)
     cot_datasynth_dir = os.getenv("REPO_DIR")
+    print(f"cot_datasynth_dir: {cot_datasynth_dir}")
     if cot_datasynth_dir is None:
         raise ValueError("Could not find CoT-DataSynth directory. Please specify REPO_DIR in config/bash_config.env.")        
 
@@ -270,7 +271,7 @@ def main():
             args.train_script,
             parallel=False,
             timeout=None,
-            eval_script_path=args.eval_script if Path(f"{cot_datasynth_dir}/{args.eval_script}").exists() else None,
+            eval_script_path={cot_datasynth_dir}/args.eval_script if Path(f"{cot_datasynth_dir}/{args.eval_script}").exists() else None,
             eval_data_path=args.eval_data_path if Path(args.eval_data_path).exists() else None
         )
 
@@ -283,9 +284,10 @@ def main():
         logger.info("=" * 50)
 
         training_pipeline = TrainingPipeline(str(output_dir), cot_datasynth_dir)
-
-        if not Path(f"{cot_datasynth_dir}/{args.eval_script}").exists():
-            logger.error(f"Evaluation script not found: {args.eval_script}")
+        
+        eval_script_full_path = Path(cot_datasynth_dir) / args.eval_script
+        if not eval_script_full_path.exists():
+            logger.error(f"Evaluation script not found: {eval_script_full_path}")
         elif not Path(args.eval_data_path).exists():
             logger.error(f"Evaluation data not found: {args.eval_data_path}")
         else:
