@@ -15,7 +15,6 @@
 The abstract base class defining the interface for model training engines.
 """
 
-import os
 from abc import abstractmethod
 from contextlib import nullcontext
 from typing import Any, Callable, ContextManager, Generator, Optional
@@ -304,8 +303,7 @@ class EngineRegistry:
                 for current_device in devices:
                     if current_backend not in cls._engines[model_type]:
                         cls._engines[model_type][current_backend] = {}
-                    if current_device not in cls._engines[model_type][current_backend]:
-                        cls._engines[model_type][current_backend][current_device] = engine_class
+                    cls._engines[model_type][current_backend][current_device] = engine_class
 
             return engine_class
 
@@ -315,7 +313,7 @@ class EngineRegistry:
     def get_engine_cls(cls, model_type: str, backend: str):
         assert model_type in cls._engines, f"Unknown model_type: {model_type}"
         assert backend in cls._engines[model_type], f"Unknown backend: {backend}"
-        device = os.getenv("VERL_ENGINE_DEVICE", "").lower() or get_device_name()
+        device = get_device_name()
         assert device in cls._engines[model_type][backend], (
             f"Unknown device: {device} for model_type: {model_type} and backend: {backend}"
         )

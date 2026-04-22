@@ -38,8 +38,9 @@ Design Principles
 
 4. **Auto-Detection + Manual Override**: The platform auto-detects hardware
    type by priority, and can be explicitly overridden via the
-   ``VERL_DEVICE_BACKEND`` environment variable. Engine selection follows a
-   similar pattern, supporting ``VERL_ENGINE_DEVICE`` for explicit override.
+   ``VERL_DEVICE_BACKEND`` environment variable. Engine selection uses
+   ``get_device_name()`` for auto-detection; plugins override default engines
+   via "last writer wins" registration.
 
 5. **Backward Compatibility**: The legacy ``verl.utils.device`` API is
    preserved as a thin re-export wrapper over the new platform plugin system.
@@ -75,10 +76,10 @@ Architecture Overview
     |  |                                                         |      |
     |  |  EngineRegistry.get_engine_cls(model_type, backend)     |      |
     |  |       |                                                 |      |
-    |  |       | Resolution: VERL_ENGINE_DEVICE > auto > cuda    |      |
+    |  |       | Resolution: get_device_name() auto-detect     |      |
     |  |       |                                                 |      |
     |  |       +-- "cuda"   -> FSDPEngine / MegatronEngine       |      |
-    |  |       +-- "flagos" -> FSDPFLEngine / MegatronFLEngine   |      |
+    |  |       |               (or plugin override)               |      |
     |  |       +-- "npu"    -> FSDPNPUEngine                     |      |
     |  |                                                         |      |
     |  +---------------------------------------------------------+      |
@@ -141,17 +142,17 @@ Engine Plugin System
 --------------------
 
 The engine plugin system extends existing FSDP and Megatron engines with
-chip-specific optimizations. Engine plugins auto-configure device selection
-on import via ``os.environ.setdefault("VERL_ENGINE_DEVICE", "<device>")``.
+chip-specific optimizations. Plugins call ``get_device_name()`` at import time
+and register with the detected device key using a "last writer wins" pattern —
+the last ``@EngineRegistry.register()`` call for a given
+``(model_type, backend, device)`` tuple wins.
 
-Engine resolution follows this order:
+Engine resolution uses the same ``get_device_name()`` to auto-detect the
+hardware type (e.g. ``"cuda"``, ``"npu"``), so the plugin's registration
+automatically matches the lookup key.
 
-1. ``VERL_ENGINE_DEVICE`` environment variable (explicit override or plugin auto-set)
-2. Platform auto-detection
-3. ``"cuda"`` as fallback
-
-**Usage**: Only ``custom_engine_module`` needs to be configured. Device selection
-happens automatically when the plugin is loaded.
+**Usage**: Only ``custom_engine_module`` needs to be configured. No environment
+variables are needed for engine selection.
 
 FLEnvManager
 ------------

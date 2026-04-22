@@ -20,7 +20,8 @@ export HYDRA_FULL_ERROR=1
 # In verl FL architecture, these are set dynamically by FLEnvManager
 # based on fl_config YAML configuration.
 export RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0
-# VERL_ENGINE_DEVICE is auto-set by verl_plugin_fl.engine on import
+# Engine selection: plugin overrides default CUDA engines via "last writer wins" registration.
+# No VERL_ENGINE_DEVICE needed — just configure custom_engine_module in the command below.
 # Training phase environment variables:
 export TE_FL_PREFER=flagos	#flagos / vendor / reference	flagos
 export TE_FL_PREFER_VENDOR=0	# Prefer vendor (legacy)	1 / 0	0
