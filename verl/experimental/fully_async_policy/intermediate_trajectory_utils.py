@@ -763,12 +763,20 @@ def expand_intermediate_trajectories_pre_log_prob(
 def zero_out_padding_rows(data_proto: DataProto, pad_size: int) -> DataProto:
     """Zero out the training signal on the last ``pad_size`` rows.
 
-    ``pad_dataproto_to_divisor`` pads a DataProto by repeating the tail rows,
-    which is fine to satisfy shape constraints and pass a forward pass, but
-    those rows must not contribute to the actor loss. We zero out
-    ``response_mask`` (makes token-mean ignore them) and, as a belt-and-braces,
-    also zero ``advantages``/``returns``/``rm_scores``/``token_level_rewards``
-    on the padded tail.
+    ``pad_dataproto_to_divisor`` pads a DataProto by repeating rows (head
+    slice), which is fine to satisfy shape constraints and pass a forward
+    pass, but those rows must not contribute to the actor loss AND must not
+    be mistaken for real final/intermediate rows during advantage compute.
+
+    We therefore:
+      * zero ``response_mask`` (so token-mean ignores them),
+      * zero ``advantages`` / ``returns`` / ``rm_scores`` /
+        ``token_level_{rewards,scores}`` (belt-and-braces), and
+      * relabel ``trajectory_role`` -> ``"padding"`` and
+        ``rollout_group_id`` -> ``-1`` on the padded tail, so downstream
+        role-aware logic (``_fit_compute_advantage`` slicing by
+        ``role == "final"``, ``scatter_advantage_to_intermediate_and_normalize``
+        grouping by ``rollout_group_id``) skips them cleanly.
     """
     if pad_size <= 0:
         return data_proto
@@ -786,6 +794,19 @@ def zero_out_padding_rows(data_proto: DataProto, pad_size: int) -> DataProto:
     for k in fields_to_zero:
         if k in data_proto.batch.keys():
             data_proto.batch[k][start:total] = 0
+
+    # Relabel role/group on the padded tail so role-aware stages do not
+    # misinterpret the repeated head rows.
+    nt = data_proto.non_tensor_batch or {}
+    if "trajectory_role" in nt:
+        roles = np.asarray(nt["trajectory_role"], dtype=object).copy()
+        roles[start:total] = "padding"
+        nt["trajectory_role"] = roles
+    if "rollout_group_id" in nt:
+        gids = np.asarray(nt["rollout_group_id"], dtype=np.int64).copy()
+        gids[start:total] = -1
+        nt["rollout_group_id"] = gids
+
     return data_proto
 
 
