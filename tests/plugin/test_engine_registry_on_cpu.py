@@ -101,10 +101,7 @@ class TestEngineRegistryGetEngineCls:
         class TestEngine(DummyEngine):
             pass
 
-        with (
-            patch("verl.workers.engine.base.get_device_name", return_value="cuda"),
-            patch.dict(os.environ, {"VERL_ENGINE_DEVICE": "0"}, clear=False),
-        ):
+        with patch("verl.workers.engine.base.get_device_name", return_value="cuda"):
             cls = EngineRegistry.get_engine_cls("get_test", "fsdp")
             assert cls is TestEngine
 
@@ -134,10 +131,7 @@ class TestEngineRegistryGetEngineCls:
         class TestEngine(DummyEngine):
             pass
 
-        with (
-            patch("verl.workers.engine.base.get_device_name", return_value="npu"),
-            patch.dict(os.environ, {"VERL_ENGINE_DEVICE": "0"}, clear=False),
-        ):
+        with patch("verl.workers.engine.base.get_device_name", return_value="npu"):
             with pytest.raises(AssertionError, match="Unknown device"):
                 EngineRegistry.get_engine_cls("get_test_dev", "fsdp")
 
@@ -151,10 +145,7 @@ class TestEngineRegistryNew:
             def __init__(self, some_param=None):
                 self.some_param = some_param
 
-        with (
-            patch("verl.workers.engine.base.get_device_name", return_value="cuda"),
-            patch.dict(os.environ, {"VERL_ENGINE_DEVICE": "0"}, clear=False),
-        ):
+        with patch("verl.workers.engine.base.get_device_name", return_value="cuda"):
             engine = EngineRegistry.new("new_test", "fsdp", some_param="hello")
             assert isinstance(engine, TestEngine)
             assert engine.some_param == "hello"

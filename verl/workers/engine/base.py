@@ -315,10 +315,7 @@ class EngineRegistry:
     def get_engine_cls(cls, model_type: str, backend: str):
         assert model_type in cls._engines, f"Unknown model_type: {model_type}"
         assert backend in cls._engines[model_type], f"Unknown backend: {backend}"
-        device = get_device_name()
-        # TODO: use a more robust way to determine device type when multiple devices platform are supported.
-        if os.getenv("VERL_ENGINE_DEVICE", "0").lower() == "flagos":
-            device = "flagos"
+        device = os.getenv("VERL_ENGINE_DEVICE", "").lower() or get_device_name()
         assert device in cls._engines[model_type][backend], (
             f"Unknown device: {device} for model_type: {model_type} and backend: {backend}"
         )
