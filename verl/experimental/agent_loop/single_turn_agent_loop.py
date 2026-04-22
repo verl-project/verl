@@ -58,7 +58,7 @@ class SingleTurnAgentLoop(AgentLoopBase):
 
         # 3. generate sequences
         metrics = {}
-        request_group_id = kwargs.get("uid")
+        request_group_id = kwargs.get("uid", None)
         with simple_timer("generate_sequences", metrics):
             output: TokenOutput = await self.server_manager.generate(
                 request_id=uuid4().hex,
@@ -161,7 +161,7 @@ class DiffusionSingleTurnAgentLoop(AgentLoopBase):
 
         # 3. generate sequences
         metrics = {}
-        request_group_id = kwargs.get("uid")
+        request_group_id = kwargs.get("uid", None)
         with simple_timer("generate_sequences", metrics):
             output = await self.server_manager.generate(
                 request_id=uuid4().hex,

@@ -120,7 +120,7 @@ class ToolAgentLoop(AgentLoopBase):
         metrics = {}
         request_id = uuid4().hex
         tools_kwargs = kwargs.get("tools_kwargs", {})
-        request_group_id = kwargs.get("uid")
+        request_group_id = kwargs.get("uid", None)
 
         agent_data = AgentData(
             messages=messages,

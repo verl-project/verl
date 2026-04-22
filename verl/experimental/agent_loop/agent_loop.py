@@ -111,7 +111,7 @@ class AsyncLLMServerManager:
         self,
         request_id,
         *,
-        request_group_id: str | None = None,
+        request_group_id: str | None,
         prompt_ids: list[int],
         sampling_params: dict[str, Any],
         image_data: Optional[list[Any]] = None,
@@ -122,7 +122,7 @@ class AsyncLLMServerManager:
 
         Args:
             request_id (str): request id for sticky session.
-            request_group_id (str | None): request group id for group-level sticky routing. Required non-None
+            request_group_id (str | None): request group id for group-level sticky routing.
             prompt_ids (List[int]): List of prompt token ids.
             sampling_params (Dict[str, Any]): Sampling parameters for the chat completion.
 
@@ -994,14 +994,7 @@ async def get_trajectory_info(step, index, validate):
             rollout_n += 1
         else:
             rollout_n = 0
-        trajectory_info.append(
-            {
-                "step": step,
-                "sample_index": index[i],
-                "rollout_n": rollout_n,
-                "validate": validate,
-            }
-        )
+        trajectory_info.append({"step": step, "sample_index": index[i], "rollout_n": rollout_n, "validate": validate})
     return trajectory_info
 
 
