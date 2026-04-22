@@ -21,6 +21,7 @@ from pprint import pprint
 from typing import Any
 
 import ray
+import torch
 from omegaconf import OmegaConf, open_dict
 from tqdm import tqdm
 
@@ -31,8 +32,14 @@ from verl.experimental.fully_async_policy.detach_utils import (
     ValidateMetrics,
     assemble_batch_from_rollout_samples,
 )
+from verl.experimental.fully_async_policy.intermediate_trajectory_utils import (
+    expand_intermediate_trajectories_pre_log_prob,
+    scatter_advantage_to_intermediate_and_normalize,
+    zero_out_padding_rows,
+)
 from verl.experimental.fully_async_policy.message_queue import MessageQueueClient
 from verl.experimental.separation.ray_trainer import SeparateRayPPOTrainer
+from verl.protocol import pad_dataproto_to_divisor
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager
@@ -479,9 +486,18 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         with marked_timer("step", self.timing_raw):
             batch = await self._fit_generate(None)
             batch = self._fit_compute_reward(batch)
+            # Expand intermediate trajectories (and pad to actor mini-batch
+            # multiple) BEFORE any per-token forward pass, so that
+            # log_prob / ref_log_prob / critic are computed over every
+            # trajectory row that will participate in the actor update.
+            batch = self._fit_expand_and_pad(batch)
             batch = self._fit_compute_log_prob(batch)
             batch = self._fit_compute_ref_log_prob(batch)
             batch = self._fit_compute_critic(batch)
+            # Advantage is computed on the FINAL subset only (GRPO group
+            # stats must not see intermediate rows), then the scalar is
+            # broadcast to sibling intermediate rows and scaled by 1/T_rollout
+            # so that every rollout contributes equally under token-mean.
             batch = self._fit_compute_advantage(batch)
             batch = self._fit_update_critic(batch)
             batch = self._fit_update_actor(batch)
@@ -527,6 +543,166 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             self.actor_rollout_wg.restore_model_from_cpu(self.local_trigger_step)
             self.actor_rollout_wg.clear_cpu_model(self.local_trigger_step)
         return old_log_prob, old_log_prob_mfu
+
+    def _fit_expand_and_pad(self, batch: DataProto) -> DataProto:
+        """Expand intermediate trajectories and pad the batch.
+
+        This runs between ``_fit_compute_reward`` and ``_fit_compute_log_prob``
+        so that log_prob / ref_log_prob / critic are computed on every row
+        (final + intermediate) with their own independent forward passes.
+
+        Steps:
+          1. Expand cached intermediate trajectories into independent DataProto
+             rows matching the final rows' tensor schema (via
+             ``expand_intermediate_trajectories_pre_log_prob``). Each row is
+             tagged with ``trajectory_role`` and ``rollout_group_id`` in the
+             non-tensor batch for later advantage scatter / normalization.
+          2. Pad the expanded batch to a multiple of the global actor
+             mini-batch size (``ppo_mini_batch_size * rollout.n``) and zero
+             out the training signal on the padded tail so padding rows do
+             not contribute to the actor loss.
+        """
+        timing_raw = self.timing_raw
+        with marked_timer("expand_intermediate", timing_raw, color="magenta"):
+            rollout_n = int(self.config.actor_rollout_ref.rollout.get("n", 1) or 1)
+            rollout_cfg = self.config.actor_rollout_ref.rollout
+
+            batch = expand_intermediate_trajectories_pre_log_prob(
+                batch,
+                tokenizer=self.tokenizer,
+                processor=self.processor,
+                rollout_config=rollout_cfg,
+                rollout_n=rollout_n,
+            )
+
+        # Pad to actor mini-batch multiple. ``train_mini_batch`` requires
+        # ``mini_batch_size = ppo_mini_batch_size * rollout.n`` to evenly
+        # divide the per-DP batch; pad_dataproto_to_divisor on the global
+        # batch guarantees that dispatching by DP size preserves divisibility.
+        ppo_mini_batch_size = int(self.config.actor_rollout_ref.actor.ppo_mini_batch_size)
+        global_mini_batch = ppo_mini_batch_size * rollout_n
+        if global_mini_batch > 0 and len(batch) % global_mini_batch != 0:
+            with marked_timer("pad_mini_batch", timing_raw, color="magenta"):
+                batch, pad_size = pad_dataproto_to_divisor(batch, global_mini_batch)
+                zero_out_padding_rows(batch, pad_size)
+                batch.meta_info["fully_async/pad/num_padding_rows"] = int(pad_size)
+        else:
+            batch.meta_info["fully_async/pad/num_padding_rows"] = 0
+
+        return batch
+
+    def _fit_compute_advantage(self, batch: DataProto) -> DataProto:
+        """Compute GRPO advantage on the final subset only, then scatter.
+
+        The batch at this point is the expanded+padded batch with mixed
+        ``trajectory_role`` rows. Running GRPO on the whole thing would
+        pollute group mean/std statistics with intermediate rows (which
+        share the same ``uid`` and ``reward`` as their final siblings),
+        collapsing advantage to zero.
+
+        We therefore:
+          1. Slice out the ``trajectory_role == "final"`` subset and run
+             the standard ``_fit_compute_advantage`` (parent class) on it.
+          2. Copy the resulting advantages/returns back into the full batch
+             at the same indices.
+          3. Scatter final-row advantages to sibling intermediate rows
+             (grouped by ``rollout_group_id``) and apply ``1 / T_rollout``
+             normalization so every rollout contributes equally to the loss.
+        """
+        import numpy as np  # local import to avoid polluting top-level namespace
+
+        nt = batch.non_tensor_batch or {}
+        roles = nt.get("trajectory_role")
+
+        # Fast path: no intermediate rows (e.g. rollouts all finished in one
+        # turn). Fall back to the standard advantage pipeline, followed only
+        # by the optional 1/T_rollout normalization.
+        if roles is None:
+            batch = super()._fit_compute_advantage(batch)
+            if bool(self.config.async_training.get("normalize_rollout_weight", True)):
+                batch = scatter_advantage_to_intermediate_and_normalize(
+                    batch, normalize_rollout_weight=True
+                )
+            return batch
+
+        final_idx = np.where(np.asarray(roles) == "final")[0]
+        if len(final_idx) == 0:
+            # Degenerate case: pad-only batch. Skip advantage.
+            return batch
+
+        # ------------------------------------------------------------------
+        # (1) Slice the final-only subset while keeping row order stable.
+        # ------------------------------------------------------------------
+        final_subset = batch.select_idxs(torch.as_tensor(final_idx, dtype=torch.long))
+
+        # Transfer reward tensors the parent expects. ``_fit_compute_advantage``
+        # reads ``self.reward_tensor`` (set by ``_fit_compute_reward``) which
+        # has shape (len(batch_before_expand), response_length). We need to
+        # re-align it to the final subset: the first ``n_final`` rows of the
+        # expanded batch are exactly the original (pre-expansion) final rows,
+        # in the same order. ``final_idx`` recovers them.
+        saved_reward_tensor = self.reward_tensor
+        if self.reward_tensor is not None:
+            # reward_tensor was produced before expansion, so its rows align
+            # with the final rows now sitting at positions [0, n_final).
+            # ``final_idx`` should therefore be ``arange(n_final)`` in the
+            # canonical pipeline; we still index defensively in case
+            # expander reorders in the future.
+            if self.reward_tensor.shape[0] == len(final_subset):
+                reward_tensor_final = self.reward_tensor
+            else:
+                reward_tensor_final = self.reward_tensor[: len(final_subset)]
+            self.reward_tensor = reward_tensor_final
+
+        # ------------------------------------------------------------------
+        # (2) Run the standard advantage pipeline on the final subset.
+        # ------------------------------------------------------------------
+        final_subset = super()._fit_compute_advantage(final_subset)
+
+        # Restore original reward_tensor reference for any downstream hooks.
+        self.reward_tensor = saved_reward_tensor
+
+        # ------------------------------------------------------------------
+        # (3) Write the computed advantages/returns back into the full batch
+        #     (only on final rows). Intermediate rows remain untouched here;
+        #     ``scatter_advantage_to_intermediate_and_normalize`` will copy
+        #     from the final rows in the next step.
+        # ------------------------------------------------------------------
+        if "advantages" in final_subset.batch.keys():
+            if "advantages" not in batch.batch.keys():
+                batch.batch["advantages"] = torch.zeros(
+                    (len(batch), final_subset.batch["advantages"].shape[-1]),
+                    dtype=final_subset.batch["advantages"].dtype,
+                )
+            batch.batch["advantages"][final_idx] = final_subset.batch["advantages"]
+        if "returns" in final_subset.batch.keys():
+            if "returns" not in batch.batch.keys():
+                batch.batch["returns"] = torch.zeros_like(batch.batch["advantages"])
+            batch.batch["returns"][final_idx] = final_subset.batch["returns"]
+        # Bring along any other token-level fields the parent may have added
+        # (e.g. ``token_level_rewards``) so downstream metrics are consistent.
+        for extra_key in ("token_level_rewards", "token_level_scores"):
+            if extra_key in final_subset.batch.keys():
+                if extra_key not in batch.batch.keys():
+                    batch.batch[extra_key] = torch.zeros(
+                        (len(batch), final_subset.batch[extra_key].shape[-1]),
+                        dtype=final_subset.batch[extra_key].dtype,
+                    )
+                batch.batch[extra_key][final_idx] = final_subset.batch[extra_key]
+
+        # ------------------------------------------------------------------
+        # (4) Scatter final advantages to intermediate siblings and apply
+        #     1 / T_rollout normalization so every rollout contributes
+        #     equally under loss_agg_mode="token-mean".
+        # ------------------------------------------------------------------
+        normalize_rollout_weight = bool(
+            self.config.async_training.get("normalize_rollout_weight", True)
+        )
+        batch = scatter_advantage_to_intermediate_and_normalize(
+            batch, normalize_rollout_weight=normalize_rollout_weight
+        )
+
+        return batch
 
     def _fit_update_local_step(self):
         time_str = datetime.now().strftime("%H:%M:%S.%f")[:-3]

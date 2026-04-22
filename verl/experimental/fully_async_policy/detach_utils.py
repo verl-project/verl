@@ -22,7 +22,7 @@ import torch
 
 from verl import DataProto
 from verl.experimental.fully_async_policy.intermediate_trajectory_utils import (
-    expand_intermediate_trajectories,
+    strip_intermediate_trajectories_column,
 )
 from verl.trainer.ppo.ray_trainer import compute_response_mask
 
@@ -156,24 +156,57 @@ def assemble_batch_from_rollout_samples(
     rollout_status = {f"fully_async/{key}": value for key, value in rollout_status.items()}
 
     rollout_config = config.actor_rollout_ref.rollout
+    # Cache-keyed intermediate payloads, one per RolloutSample. We keep them in
+    # a side list (instead of inside per-sample meta_info) because
+    # ``DataProto.concat`` only keeps meta_info from the first piece. After the
+    # final concat we merge them onto the combined batch's meta_info as a list
+    # aligned with the final-row order.
+    cache_key = "__intermediate_trajectories_cache__"
+    per_sample_caches: list[Any] = []
     for rs in rollout_samples:
         batch = addition_process(rs.full_batch)
-        # Expand intermediate trajectories if present (multi-trajectory agent loops, e.g. GUI Agent).
-        # For non-multi-trajectory loops the batch is passed through unchanged.
-        expanded_batch = expand_intermediate_trajectories(
-            batch,
-            tokenizer=tokenizer,
-            processor=processor,
-            rollout_config=rollout_config,
-        )
+        # Strip ``intermediate_trajectories`` from ``non_tensor_batch`` and
+        # move the payload into a side cache. This defers intermediate
+        # expansion to the post-advantage stage so that GRPO group statistics
+        # are computed on final rows only (see ``fully_async_trainer``).
+        stripped = strip_intermediate_trajectories_column(batch, cache_key=cache_key)
+        per_sample_caches.append(stripped.meta_info.pop(cache_key, None))
         if _HAS_FLOW_LOG:
             log_dataproto(
-                expanded_batch,
-                stage="assemble.after_expand_intermediate",
+                stripped,
+                stage="assemble.after_strip_intermediate",
                 extra={"sample_id": rs.sample_id},
             )
-        rollout_samples_batch.append(expanded_batch)
+        rollout_samples_batch.append(stripped)
     final_batch = DataProto.concat(rollout_samples_batch)
+
+    # Stitch per-sample intermediate caches back onto the combined batch in
+    # the same row order as the concat: sample_0 had rollout.n final rows,
+    # then sample_1, etc. Each RolloutSample contributes ``len(stripped)``
+    # final rows, so the merged list length must equal ``len(final_batch)``.
+    merged_intermediate_col: list = []
+    has_any_intermediate = False
+    for stripped, cache in zip(rollout_samples_batch, per_sample_caches, strict=True):
+        n = len(stripped)
+        if cache is None or cache.get("intermediate_col") is None:
+            merged_intermediate_col.extend([[] for _ in range(n)])
+            continue
+        col = list(cache["intermediate_col"])
+        if len(col) != n:
+            # Defensive: shouldn't happen, but keep alignment 1:1 with final rows.
+            if len(col) < n:
+                col = col + [[] for _ in range(n - len(col))]
+            else:
+                col = col[:n]
+        merged_intermediate_col.extend(col)
+        if any(bool(x) for x in col):
+            has_any_intermediate = True
+
+    if has_any_intermediate:
+        final_batch.meta_info[cache_key] = {
+            "intermediate_col": merged_intermediate_col,
+            "main_batch_size": len(final_batch),
+        }
 
     if _HAS_FLOW_LOG:
         log_dataproto(final_batch, stage="assemble.after_concat")
