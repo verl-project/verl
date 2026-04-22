@@ -12,9 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import base64
 import contextlib
 import functools
 import inspect
+import io
 import os
 from contextvars import ContextVar
 from typing import Optional
@@ -179,6 +181,35 @@ def rollout_trace_attr(
         yield
 
 
+def _serialize_for_trace(obj, _depth=0):
+    """Recursively convert PIL.Image objects to base64 data URIs for MLflow tracing.
+
+    MLflow cannot serialize PIL.Image natively and only stores the repr string,
+    which cannot be displayed. This converts images to ``data:image/png;base64,…``
+    strings so the MLflow UI can render them inline.
+    """
+    if _depth > 10:
+        return repr(obj)
+
+    try:
+        from PIL import Image as _PILImage
+
+        if isinstance(obj, _PILImage.Image):
+            buf = io.BytesIO()
+            obj.save(buf, format="PNG")
+            b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+            return f"data:image/png;base64,{b64}"
+    except ImportError:
+        pass
+
+    if isinstance(obj, dict):
+        return {k: _serialize_for_trace(v, _depth + 1) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        serialized = [_serialize_for_trace(v, _depth + 1) for v in obj]
+        return type(obj)(serialized) if isinstance(obj, tuple) else serialized
+    return obj
+
+
 def rollout_trace_op(func):
     @functools.wraps(func)
     async def async_wrapper(self, *args, **kwargs):
@@ -240,13 +271,13 @@ def rollout_trace_op(func):
             import mlflow
 
             with mlflow.start_span(name=func.__qualname__) as span:
-                span.set_inputs(inputs)
+                span.set_inputs(_serialize_for_trace(inputs))
                 result = await func(self, *args, **kwargs)
                 if enable_token2text:
                     _result = await add_token2text(self, result)
-                    span.set_outputs(_result)
+                    span.set_outputs(_serialize_for_trace(_result))
                 else:
-                    span.set_outputs(result)
+                    span.set_outputs(_serialize_for_trace(result))
 
             return result
 

@@ -487,8 +487,42 @@ class AgentLoopWorker:
             )
         outputs = await asyncio.gather(*tasks)
 
+        # Filter out rollouts that the agent loop discarded (returned None).
+        # See ``_run_agent_loop`` above; failing rollouts (fatal tool error,
+        # env crash, etc.) intentionally short-circuit there, so downstream
+        # batching must tolerate a shrunken ``inputs`` list.
+        n_total = len(outputs)
+        valid_indices = [i for i, o in enumerate(outputs) if o is not None]
+        valid_outputs = [outputs[i] for i in valid_indices]
+        n_valid = len(valid_outputs)
+        n_dropped = n_total - n_valid
+        if n_dropped > 0:
+            print(
+                f"[AgentLoopWorker][DROPPED_ROLLOUTS] "
+                f"dropped={n_dropped}/{n_total} "
+                f"(fatal errors / agent-requested abort)",
+                flush=True,
+            )
+        if n_valid == 0:
+            # Every rollout in this batch failed. Returning an empty
+            # DataProto (or raising) would hide the issue; re-raise a
+            # descriptive error so the caller can decide how to react.
+            raise RuntimeError(
+                f"All {n_total} rollouts in this generate_sequences batch "
+                f"were discarded. Check rollout-side logs for fatal errors."
+            )
+
+        # Re-slice the input non_tensor_batch to keep row alignment with the
+        # surviving outputs. Without this, ``_postprocess`` would mix
+        # position-0 non_tensor fields with a position-2 output.
+        filtered_non_tensor_batch = {
+            k: v[valid_indices] for k, v in batch.non_tensor_batch.items()
+        }
+
         output = self._postprocess(
-            outputs, input_non_tensor_batch=batch.non_tensor_batch, validate=batch.meta_info.get("validate", False)
+            valid_outputs,
+            input_non_tensor_batch=filtered_non_tensor_batch,
+            validate=batch.meta_info.get("validate", False),
         )
         return output
 
@@ -533,6 +567,13 @@ class AgentLoopWorker:
                     f"validate={trajectory.get('validate')}",
                     flush=True,
                 )
+                # The agent loop explicitly discarded this rollout (e.g.
+                # fatal tool error, environment crash). Short-circuit here
+                # instead of feeding ``None`` into ``_agent_loop_postprocess``
+                # which would dereference ``output.extra_fields`` and raise
+                # ``AttributeError: 'NoneType' object has no attribute ...``.
+                # ``_postprocess`` below filters these out before batching.
+                return None
             return await self._agent_loop_postprocess(output, trajectory["validate"], **kwargs)
 
     async def _agent_loop_postprocess(self, output, validate, **kwargs) -> _InternalAgentLoopOutput:

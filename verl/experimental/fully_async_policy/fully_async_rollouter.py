@@ -632,7 +632,22 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
     async def _process_single_sample_streaming(self, rollout_sample: RolloutSample):
         """Process a single sample streamingly"""
         # Calling asynchronous generation methods
-        ret = await self.async_rollout_manager.generate_sequences_single(rollout_sample.full_batch)
+        try:
+            ret = await self.async_rollout_manager.generate_sequences_single(rollout_sample.full_batch)
+        except Exception as exc:
+            # Entire sample failed (e.g. every rollout hit a fatal tool error
+            # and was discarded). Skip put_sample so the downstream trainer
+            # does not see an empty/inconsistent batch. Do NOT re-raise: a
+            # single failed sample must not kill the whole rollouter.
+            print(
+                f"[FullyAsyncRollouter] _process_single_sample_streaming dropped "
+                f"sample_id={rollout_sample.sample_id} due to "
+                f"generate_sequences_single failure: {exc!r}",
+                flush=True,
+            )
+            self.dropped_stale_samples += 1
+            self.processed_sample_count += 1
+            return
         rollout_sample.full_batch = ret
         rollout_sample.full_batch.non_tensor_batch["uid"] = np.array(
             [f"uid_{rollout_sample.sample_id}"] * len(rollout_sample.full_batch), dtype=object
