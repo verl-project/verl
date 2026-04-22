@@ -771,6 +771,7 @@ trainer:
   resume_from_path: null
   val_before_train: true
   val_only: false
+  skip_train: false
   test_freq: -1
   critic_warmup: 0
   default_hdfs_dir: null

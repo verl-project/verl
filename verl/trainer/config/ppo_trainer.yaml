@@ -170,6 +170,9 @@ trainer:
   # Whether to run validation only
   val_only: False
 
+  # Whether to skip actor/critic parameter updates while keeping rollout and validation
+  skip_train: False
+
   # Validation frequency (in training iterations)
   test_freq: -1
 

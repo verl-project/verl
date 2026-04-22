@@ -575,6 +575,7 @@ Trainer
      n_gpus_per_node: 8
      save_freq: -1
      val_before_train: True
+     skip_train: False
      test_freq: 2
      critic_warmup: 0
      default_hdfs_dir: null # hdfs checkpoint path
@@ -595,6 +596,8 @@ Trainer
 - ``trainer.save_freq``: The frequency (by iteration) to save checkpoint
   of the actor and critic model.
 - ``trainer.val_before_train``: Whether to run validation before training.
+- ``trainer.skip_train``: Whether to skip actor/critic parameter updates for
+  debugging while keeping rollout, validation, checkpointing, and weight sync.
 - ``trainer.test_freq``: The validation frequency (by iteration).
 - ``trainer.critic_warmup``: The number of iteration to train the critic
   model before actual policy learning.
