@@ -687,6 +687,52 @@ def expand_intermediate_trajectories_pre_log_prob(
             _stamp_role_and_group(p, roles_p, gids_p)
             piece_idx += 1
 
+    # --------------------------------------------------------------
+    # Align tensor schema across pieces BEFORE concat.
+    #
+    # Intermediate rows are built from a minimal tensor schema, but the
+    # (final) base batch may have already accumulated extra per-token tensors
+    # from earlier stages of fit_step (e.g. ``rm_scores`` written by
+    # ``_fit_compute_reward``, or leftover bookkeeping fields). ``torch.cat``
+    # via tensordict requires identical key sets, so we fill any missing
+    # tensor on intermediate pieces with a zero-valued tensor of matching
+    # shape/dtype. These zero fills are never treated as training signal:
+    # advantage is computed on the FINAL subset only, and padding /
+    # response_mask guards any downstream aggregation.
+    # --------------------------------------------------------------
+    base_keys = set(base.batch.keys())
+    for p in pieces[1:]:
+        piece_keys = set(p.batch.keys())
+        # (a) fields present in base but missing on intermediate piece: fill 0
+        for k in base_keys - piece_keys:
+            ref = base.batch[k]
+            # shape: keep everything except batch dim, which is 1 for a piece
+            shape = (1,) + tuple(ref.shape[1:])
+            p.batch[k] = torch.zeros(shape, dtype=ref.dtype)
+        # (b) fields present on piece but missing in base: fill 0 on base.
+        # This should be rare, but keeps the contract symmetric.
+        extra = piece_keys - base_keys
+        if extra:
+            for k in extra:
+                ref = p.batch[k]
+                shape = (len(base),) + tuple(ref.shape[1:])
+                base.batch[k] = torch.zeros(shape, dtype=ref.dtype)
+            base_keys = set(base.batch.keys())
+
+    # Same alignment for non_tensor_batch, since DataProto.concat runs a
+    # plain np.concatenate over each key and will blow up if any key is
+    # missing on any piece.
+    base_nt_keys = set(base.non_tensor_batch.keys())
+    for p in pieces[1:]:
+        piece_nt_keys = set(p.non_tensor_batch.keys())
+        for k in base_nt_keys - piece_nt_keys:
+            p.non_tensor_batch[k] = np.array([None], dtype=object)
+        extra_nt = piece_nt_keys - base_nt_keys
+        if extra_nt:
+            for k in extra_nt:
+                base.non_tensor_batch[k] = np.array([None] * len(base), dtype=object)
+            base_nt_keys = set(base.non_tensor_batch.keys())
+
     expanded = DataProto.concat(pieces)
     expanded.meta_info["fully_async/intermediate/num_final_rows"] = int(n_rows)
     expanded.meta_info["fully_async/intermediate/num_intermediate_rows"] = int(total_appended)
