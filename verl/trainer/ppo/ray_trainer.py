@@ -70,6 +70,7 @@ from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.config import DistillationConfig, EngineConfig
+from verl.workers.rollout.llm_server import LLMServerManager
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
 
 
@@ -851,6 +852,10 @@ class RayPPOTrainer:
         # two conditions satisfied: (1) no reward model, or (2) reward model with extra resource pool
         enable_agent_reward_loop = not self.use_rm or self.config.reward.reward_model.enable_resource_pool
 
+        self.llm_server_manager = LLMServerManager.create(
+            config=self.config, worker_group=self.actor_rollout_wg, rollout_resource_pool=actor_rollout_resource_pool
+        )
+
         # if enable_agent_reward_loop, we directly pass reward_loop_workers to agent loop manager
         # to stream reward computation with actor rollout
         # To stream teacher computation with actor rollout, we instead pass the full manager so that the
@@ -858,10 +863,9 @@ class RayPPOTrainer:
         reward_loop_worker_handles = self.reward_loop_manager.reward_loop_workers if enable_agent_reward_loop else None
         self.async_rollout_manager = AgentLoopManager.create(
             config=self.config,
-            worker_group=self.actor_rollout_wg,
-            rollout_resource_pool=actor_rollout_resource_pool,
+            llm_client=self.llm_server_manager.get_client(),
+            teacher_client=self.teacher_model_manager.get_client() if self.use_teacher_policy else None,
             reward_loop_worker_handles=reward_loop_worker_handles,
-            teacher_model_manager=self.teacher_model_manager,
         )
 
         checkpoint_engine_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
@@ -874,7 +878,7 @@ class RayPPOTrainer:
         self.checkpoint_manager = CheckpointEngineManager(
             config=checkpoint_engine_config,
             trainer=self.actor_rollout_wg,
-            replicas=self.async_rollout_manager.rollout_replicas,
+            replicas=self.llm_server_manager.get_replicas(),
         )
 
         # sleep all replicas to load checkpoint
@@ -1358,11 +1362,11 @@ class RayPPOTrainer:
                     # generate a batch
                     with marked_timer("gen", timing_raw, color="red"):
                         if curr_step_profile:
-                            self.async_rollout_manager.start_profile()
+                            self.llm_server_manager.start_profile()
                         gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
                         self.checkpoint_manager.sleep_replicas()
                         if curr_step_profile:
-                            self.async_rollout_manager.stop_profile()
+                            self.llm_server_manager.stop_profile()
 
                         timing_raw.update(gen_batch_output.meta_info["timing"])
                         gen_batch_output.meta_info.pop("timing", None)
@@ -1372,11 +1376,11 @@ class RayPPOTrainer:
                             gen_baseline_batch = deepcopy(gen_batch)
                             gen_baseline_batch.meta_info["do_sample"] = False
                             if curr_step_profile:
-                                self.async_rollout_manager.start_profile()
+                                self.llm_server_manager.start_profile()
                             gen_baseline_output = self.async_rollout_manager.generate_sequences(gen_baseline_batch)
                             self.checkpoint_manager.sleep_replicas()
                             if curr_step_profile:
-                                self.async_rollout_manager.stop_profile()
+                                self.llm_server_manager.stop_profile()
                             batch = batch.union(gen_baseline_output)
                             # compute reward model score on batch
                             rm_scores = None

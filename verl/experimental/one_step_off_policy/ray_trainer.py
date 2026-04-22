@@ -44,6 +44,7 @@ from verl.utils.debug import marked_timer
 from verl.utils.import_utils import load_class_from_fqn
 from verl.utils.rollout_skip import RolloutSkip
 from verl.utils.tracking import ValidationGenerationsLogger
+from verl.workers.rollout.llm_server import LLMServerManager
 
 
 class OneStepOffRayTrainer(SeparateRayPPOTrainer):
@@ -186,9 +187,12 @@ class OneStepOffRayTrainer(SeparateRayPPOTrainer):
         else:
             from verl.experimental.agent_loop import AgentLoopManager
 
+        self.llm_server_manager = LLMServerManager.create(config=self.config)
         self.async_rollout_mode = True
         self.async_rollout_manager = AgentLoopManager.create(
-            config=self.config, reward_loop_worker_handles=reward_loop_worker_handles
+            config=self.config,
+            llm_client=self.llm_server_manager.get_client(),
+            reward_loop_worker_handles=reward_loop_worker_handles,
         )
 
     def _create_continuous_iterator(self):
@@ -398,7 +402,7 @@ class OneStepOffRayTrainer(SeparateRayPPOTrainer):
         # sync weights from actor to rollout
         with marked_timer("sync_rollout_weights", timing_raw, color="purple"):
             self._fit_update_weights()
-            await self.async_rollout_manager.clear_kv_cache()
+            await self.llm_server_manager.clear_kv_cache()
 
         # async next generation
         if not self.is_last_step:

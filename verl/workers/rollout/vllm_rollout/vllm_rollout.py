@@ -208,7 +208,7 @@ class ServerAdapter(BaseRollout):
         raise NotImplementedError(
             "ServerAdapter does not support synchronous generate_sequences(). "
             "The vLLM SPMD mode was retired in PR #4411. For batch generation, "
-            "please use the async server interface via vLLMReplica and AsyncLLMServerManager, "
+            "please use the async server interface via vLLMReplica and LLMServerClient, "
             "or use HFRollout for synchronous generation. "
             "See https://github.com/verl-project/verl/issues/4682 for more details."
         )

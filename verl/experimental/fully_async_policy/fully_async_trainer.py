@@ -41,6 +41,7 @@ from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, shou
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
 from verl.utils.tracking import Tracking, ValidationGenerationsLogger
+from verl.workers.rollout.llm_server import LLMServerManager
 
 logger = logging.getLogger(__name__)
 
@@ -356,9 +357,12 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             self.async_rollout_mode = True
             from verl.experimental.agent_loop import AgentLoopManager
 
+            self.llm_server_manager = await LLMServerManager.create(
+                config=self.config, worker_group=self.actor_rollout_wg
+            )
             self.async_rollout_manager = await AgentLoopManager.create(
                 config=self.config,
-                worker_group=self.actor_rollout_wg,
+                llm_client=self.llm_server_manager.get_client(),
                 reward_loop_worker_handles=reward_loop_worker_handles,
             )
             print("[FullyAsyncTrainer] async_rollout_manager initialized")
@@ -375,7 +379,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             self.colocate_checkpoint_manager = CheckpointEngineManager(
                 config=checkpoint_engine_config,
                 trainer=self.actor_rollout_wg,
-                replicas=self.async_rollout_manager.rollout_replicas,
+                replicas=self.llm_server_manager.get_replicas(),
             )
 
             # sleep all replicas to load checkpoint

@@ -129,7 +129,7 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
         self.checkpoint_manager = CheckpointEngineManager(
             config=omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine),
             trainer=self.actor_rollout_wg,
-            replicas=self.async_rollout_manager.rollout_replicas,
+            replicas=self.llm_server_manager.get_replicas(),
         )
 
     def _init_resource_pools(self):
@@ -412,7 +412,7 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
             gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
             self.checkpoint_manager.sleep_replicas()
             if self.curr_step_profile:
-                self.async_rollout_manager.stop_profile()
+                self.llm_server_manager.stop_profile()
 
             timing_raw.update(gen_batch_output.meta_info["timing"])
             gen_batch_output.meta_info.pop("timing", None)
@@ -422,11 +422,11 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
                 gen_baseline_batch = deepcopy(gen_batch)
                 gen_baseline_batch.meta_info["do_sample"] = False
                 if self.curr_step_profile:
-                    self.async_rollout_manager.start_profile()
+                    self.llm_server_manager.start_profile()
                 gen_baseline_output = self.async_rollout_manager.generate_sequences(gen_baseline_batch)
                 self.checkpoint_manager.sleep_replicas()
                 if self.curr_step_profile:
-                    self.async_rollout_manager.stop_profile()
+                    self.llm_server_manager.stop_profile()
                 batch = batch.union(gen_baseline_output)
                 # compute reward model score on batch
                 rm_scores = None

@@ -11,6 +11,22 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""
+Agent framework for multi-turn rollout and agentic reinforcement learning.
+- AgentLoopBase: coroutine based abstract base class for agent loop.
+  - SingleTurnAgentLoop: single turn agent loop.
+  - ToolAgentLoop: ReAct agent loop with tool calling, with user defined tools.
+- AgentLoopWorker: worker class for running agent loop coroutines in parallel.
+- AgentLoopManager: manager class for running agent loop workers in parallel.
+
+AgentLoopManager is one specific agent-framework implementation in verl,
+and is designed to be fully replaceable by other agent frameworks such as:
+- NVIDIA Nemo-Gym
+- AWS Bedrock AgentCore
+- SWE-agent
+- ...
+"""
+
 import asyncio
 import logging
 import os
@@ -23,18 +39,14 @@ import hydra
 import numpy as np
 import ray
 import torch
-from cachetools import LRUCache
 from omegaconf import DictConfig, OmegaConf
 from PIL import Image
 from pydantic import BaseModel, ConfigDict
 from tensordict import TensorDict
 from transformers import AutoProcessor, AutoTokenizer
 
-from verl.experimental.agent_loop.prometheus_utils import update_prometheus_config
 from verl.experimental.agent_loop.utils import resolve_config_path
-from verl.experimental.teacher_loop import MultiTeacherModelManager
 from verl.protocol import DataProto
-from verl.single_controller.ray.base import RayResourcePool, RayWorkerGroup
 from verl.trainer.distillation import is_distillation_enabled
 from verl.utils.chat_template import apply_chat_template, initialize_system_prompt
 from verl.utils.config import omega_conf_to_dataclass
@@ -45,135 +57,18 @@ from verl.utils.ray_utils import auto_await, get_event_loop
 from verl.utils.rollout_trace import (
     RolloutTraceConfig,
     rollout_trace_attr,
-    rollout_trace_op,
 )
 from verl.utils.tokenizer import normalize_token_ids
 from verl.workers.config import (
-    DistillationConfig,
-    DistillationLossConfig,
     HFModelConfig,
     RolloutConfig,
 )
-from verl.workers.rollout.replica import TokenOutput, get_rollout_replica_class
+from verl.workers.rollout.llm_server import LLMServerClient
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 DEFAULT_ROUTING_CACHE_SIZE = 10000
-
-
-@ray.remote
-class GlobalRequestLoadBalancer:
-    """Global sticky-session + in-flight load balancer shared by all AgentLoopWorkers."""
-
-    def __init__(self, server_actor_ids: list[str], max_cache_size: int = DEFAULT_ROUTING_CACHE_SIZE):
-        if not server_actor_ids:
-            raise ValueError("server_actor_ids must be non-empty")
-
-        self._inflight_requests: dict[str, int] = {sid: 0 for sid in server_actor_ids}
-        self._request_id_to_server: LRUCache = LRUCache(maxsize=max_cache_size)
-
-    def acquire_server(self, request_id: str) -> str:
-        """Acquire a server for the given request, reusing the same server for multi-turn conversations."""
-        # request-level sticky (multi-turn: same conversation -> same server)
-        if request_id in self._request_id_to_server:
-            server_id = self._request_id_to_server[request_id]
-            self._inflight_requests[server_id] += 1
-            return server_id
-
-        # new request: route to least loaded server
-        server_id = min(self._inflight_requests, key=self._inflight_requests.get)
-        self._request_id_to_server[request_id] = server_id
-        self._inflight_requests[server_id] += 1
-        return server_id
-
-    def release_server(self, server_id: str) -> None:
-        """Release a server after a request completes, decrementing its inflight count."""
-        if server_id not in self._inflight_requests:
-            raise ValueError(f"Invalid server_id for release: {server_id}")
-        if self._inflight_requests[server_id] <= 0:
-            raise ValueError(f"Release called with no inflight requests on server {server_id}")
-        self._inflight_requests[server_id] -= 1
-
-
-def _get_rollout_and_model_config(config: DictConfig) -> tuple[DictConfig, DictConfig]:
-    # TODO: backward compatibility, remove this once we switch to new trainer.
-    if config.get("actor_rollout_ref"):
-        return config.actor_rollout_ref.rollout, config.actor_rollout_ref.model
-    else:
-        return config.rollout, config.model
-
-
-class AsyncLLMServerManager:
-    """
-    A class to manage multiple OpenAI compatible LLM servers. This class provides
-    - Load balance: least in-flight requests load balancing via global coordination
-    - Sticky session: send multi-turn chat completions to same server for automatic prefix caching
-    """
-
-    def __init__(
-        self,
-        config: DictConfig,
-        servers: list[tuple[str, ray.actor.ActorHandle]],
-        load_balancer_handle: ray.actor.ActorHandle,
-    ):
-        """Initialize the AsyncLLMServerManager.
-
-        Args:
-            config (DictConfig): whole config for main entrypoint.
-            servers (list[tuple[str, ray.actor.ActorHandle]]): (address, handle) pairs for each LLM server.
-            load_balancer_handle (ray.actor.ActorHandle): shared global load balancer actor.
-        """
-        self.config = config
-        self._load_balancer = load_balancer_handle
-        self._server_id_to_handle: dict[str, ray.actor.ActorHandle] = dict(servers)
-
-    async def _acquire_server(self, request_id: str) -> tuple[str, ray.actor.ActorHandle]:
-        server_id = await self._load_balancer.acquire_server.remote(request_id=request_id)
-        handle = self._server_id_to_handle.get(server_id)
-        if handle is None:
-            raise RuntimeError(f"Unknown server_id returned by load balancer: {server_id}")
-        return server_id, handle
-
-    def _release_server(self, server_id: str) -> None:
-        # Fire-and-forget: release is just a counter decrement, no need to await.
-        # Awaiting here risks blocking the finally clause if the LB actor is unresponsive.
-        self._load_balancer.release_server.remote(server_id=server_id)
-
-    @rollout_trace_op
-    async def generate(
-        self,
-        request_id,
-        *,
-        prompt_ids: list[int],
-        sampling_params: dict[str, Any],
-        image_data: Optional[list[Any]] = None,
-        video_data: Optional[list[Any]] = None,
-        **kwargs: Any,
-    ) -> TokenOutput:
-        """Generate tokens from prompt ids.
-
-        Args:
-            request_id (str): request id for sticky session.
-            prompt_ids (List[int]): List of prompt token ids.
-            sampling_params (Dict[str, Any]): Sampling parameters for the chat completion.
-
-        Returns:
-            TokenOutput: token output
-        """
-        server_id, server = await self._acquire_server(request_id)
-        try:
-            output: TokenOutput = await server.generate.remote(
-                request_id=uuid4().hex,  # use new request_id for each turn
-                prompt_ids=prompt_ids,
-                sampling_params=sampling_params,
-                image_data=image_data,
-                video_data=video_data,
-                **kwargs,
-            )
-            return output
-        finally:
-            self._release_server(server_id)
 
 
 class AgentLoopMetrics(BaseModel):
@@ -287,7 +182,7 @@ class AgentLoopBase(ABC):
 
     Args:
         trainer_config (DictConfig): whole config for main entrypoint.
-        server_manager (AsyncLLMServerManager): OpenAI compatible LLM server manager.
+        server_manager (LLMServerClient): OpenAI compatible LLM server manager.
         tokenizer (AutoTokenizer): Tokenizer for tokenize messages.
         processor (AutoProcessor): Processor for process messages.
         dataset_cls (type[Dataset]): Dataset class for creating dataset, Defaults to RLHFDataset.
@@ -297,7 +192,7 @@ class AgentLoopBase(ABC):
     def __init__(
         self,
         trainer_config: DictConfigWrap,
-        server_manager: AsyncLLMServerManager,
+        server_manager: LLMServerClient,
         tokenizer: AutoTokenizer,
         processor: AutoProcessor,
         dataset_cls: type[RLHFDataset],
@@ -305,7 +200,7 @@ class AgentLoopBase(ABC):
         **kwargs,
     ):
         self.config = trainer_config.config
-        self.rollout_config, _ = _get_rollout_and_model_config(self.config)
+        self.rollout_config = self.config.actor_rollout_ref.rollout
         self.server_manager = server_manager
         self.tokenizer = tokenizer
         self.processor = processor
@@ -442,69 +337,43 @@ class AgentLoopWorker:
 
     Args:
         config (DictConfig): whole config for main entrypoint.
-        servers (list[tuple[str, ray.actor.ActorHandle]]): (address, handle) pairs for each LLM server.
-        load_balancer_handle (ray.actor.ActorHandle): shared global load balancer actor.
-        teacher_servers (list[tuple[str, ray.actor.ActorHandle]]): (address, handle) pairs for each teacher LLM server.
-        teacher_load_balancer_handle (ray.actor.ActorHandle): global load balancer actor for teacher servers.
+        llm_client (LLMServerClient): Client for the LLM server.
+        teacher_client (dict[str, LLMServerClient]): Client for multiple teacher servers.
         reward_loop_worker_handles (List[ray.actor.ActorHandle]): Actor handles for streaming reward computation.
     """
 
     def __init__(
         self,
         config: DictConfig,
-        servers: list[tuple[str, ray.actor.ActorHandle]],
-        load_balancer_handle: ray.actor.ActorHandle,
-        teacher_servers: Optional[dict[str, list[tuple[str, ray.actor.ActorHandle]]]] = None,
-        teacher_load_balancer_handle: Optional[dict[str, ray.actor.ActorHandle]] = None,
+        llm_client: LLMServerClient,
+        teacher_client: dict[str, LLMServerClient] = None,
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
-        """Initialize agent loop manager.
-        Args:
-            config (DictConfig): YAML config.
-            servers (list[tuple[str, ray.actor.ActorHandle]]): (address, handle) pairs for each LLM server.
-            load_balancer_handle (ray.actor.ActorHandle): shared global load balancer actor.
-            reward_loop_worker_handles (list[ray.actor.ActorHandle]): Actor handles for streaming reward computation.
-            teacher_servers: for each teacher key, the (address, handle) pairs of its LLM servers.
-            teacher_load_balancer_handle: for each teacher key, the shared load balancer actor.
-        """
         self.config = config
-        rollout_config, model_config = _get_rollout_and_model_config(config)
-        self.rollout_config: RolloutConfig = omega_conf_to_dataclass(rollout_config)
-        self.model_config: HFModelConfig = omega_conf_to_dataclass(model_config)
-        self.distillation_config = config.get("distillation", None)
-        self.distillation_enabled = is_distillation_enabled(self.distillation_config)
-        if self.distillation_enabled:
-            self.distillation_config: DistillationConfig = omega_conf_to_dataclass(self.distillation_config)
-            self.distillation_loss_config: DistillationLossConfig = self.distillation_config.distillation_loss
-            self.teacher_key: str = self.distillation_config.teacher_key
-
-            if not teacher_servers:
-                raise ValueError("Distillation is enabled but no teacher servers were provided.")
-            if not teacher_load_balancer_handle:
-                raise ValueError("Distillation is enabled but no teacher load balancer was provided.")
-            if not hasattr(self, "teacher_server_manager"):
-                from verl.experimental.teacher_loop.teacher_manager import AsyncTeacherLLMServerManager
-
-                self.teacher_server_manager = AsyncTeacherLLMServerManager(
-                    config=config,
-                    servers=teacher_servers,
-                    load_balancer_handle=teacher_load_balancer_handle,
-                )
-
-        # for recipe to change
-        if not hasattr(self, "server_manager"):
-            self.server_manager = AsyncLLMServerManager(
-                config,
-                servers,
-                load_balancer_handle=load_balancer_handle,
-            )
-
-        self.dataset_cls = get_dataset_class(config.data)
+        self.llm_client = llm_client
+        self.teacher_client = teacher_client
         self.reward_loop_worker_handles = reward_loop_worker_handles
 
+        rollout_config, model_config = config.actor_rollout_ref.rollout, config.actor_rollout_ref.model
+        self.rollout_config: RolloutConfig = omega_conf_to_dataclass(rollout_config)
+        self.model_config: HFModelConfig = omega_conf_to_dataclass(model_config)
+
+        self.dataset_cls = get_dataset_class(config.data)
         self.tokenizer = self.model_config.tokenizer
         self.processor = self.model_config.processor
 
+        # Online policy distillation
+        self.distillation_enabled = is_distillation_enabled(config.distillation)
+        if self.distillation_enabled:
+            from verl.experimental.teacher_loop.teacher_manager import AsyncTeacherLLMServerManager
+
+            self.teacher_key: str = config.distillation.teacher_key
+            self.teacher_server_manager = AsyncTeacherLLMServerManager(
+                config=config,
+                teacher_client=teacher_client,
+            )
+
+        # Load custom agent loop implementations from config path
         agent_loop_config_path = self.rollout_config.agent.agent_loop_config_path
         if agent_loop_config_path:
             resolved_path = resolve_config_path(agent_loop_config_path)
@@ -632,7 +501,7 @@ class AgentLoopWorker:
             agent_loop = hydra.utils.instantiate(
                 config=agent_loop_config,
                 trainer_config=DictConfigWrap(config=self.config),
-                server_manager=self.server_manager,
+                server_manager=self.llm_client,
                 tokenizer=self.tokenizer,
                 processor=self.processor,
                 dataset_cls=self.dataset_cls,
@@ -1033,129 +902,41 @@ async def get_trajectory_info(step, index, validate):
 class AgentLoopManager:
     """Agent loop manager that manages a group of agent loop workers.
 
-    - if worker_group is not None, rollout server is in hybrid mode, share GPUs with training engine.
-    - otherwise, rollout server is in standalone mode, use separate GPUs, e.g., one-step-off/fully async training.
-
     Args:
         config (DictConfig): whole config for main entrypoint.
-        worker_group (RayWorkerGroup): ActorRolloutRef worker group for hybrid mode; None for standalone mode.
-        rollout_resource_pool (RayResourcePool): Resource pool for hybrid mode, only used by TensorRT-LLM.
-        teacher_model_manager (MultiTeacherModelManager): Manager for streaming teacher computation, used for
-        distillation.
+        llm_client (LLMServerClient): Client for the LLM server.
+        teacher_client (dict[str, LLMServerClient]): Client for multiple teacher servers.
         reward_loop_worker_handles (List[ray.actor.ActorHandle]): Actor handles for streaming reward computation.
     """
 
     def __init__(
         self,
         config: DictConfig,
-        worker_group: RayWorkerGroup = None,
-        rollout_resource_pool: RayResourcePool = None,
-        teacher_model_manager: MultiTeacherModelManager = None,
+        llm_client: LLMServerClient,
+        teacher_client: dict[str, LLMServerClient] = None,
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
         self.config = config
-        self.rollout_config, self.model_config = _get_rollout_and_model_config(config)
-        self.worker_group = worker_group
-        self.rollout_resource_pool = rollout_resource_pool
+        self.rollout_config = config.actor_rollout_ref.rollout
+        self.model_config = config.actor_rollout_ref.model
+        self.llm_client = llm_client
+        self.teacher_client = teacher_client
         self.reward_loop_worker_handles = reward_loop_worker_handles
 
-        self.teacher_model_manager = teacher_model_manager
-        self.distillation_enabled = is_distillation_enabled(self.config.get("distillation", None))
-
-        assert worker_group is not None or self.rollout_config.nnodes > 0, "nnodes must be > 0 in standalone mode"
-
-        # for recipe to change
-        if not hasattr(self, "rollout_replica_class"):
-            self.rollout_replica_class = get_rollout_replica_class(self.rollout_config.name)
         if not hasattr(self, "agent_loop_workers_class"):
             self.agent_loop_workers_class = ray.remote(AgentLoopWorker)
 
     @classmethod
     @auto_await
-    async def create(
-        cls,
-        config: DictConfig,
-        worker_group: RayWorkerGroup = None,
-        rollout_resource_pool: RayResourcePool = None,
-        reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
-        teacher_model_manager: MultiTeacherModelManager = None,
-    ):
+    async def create(cls, *args, **kwargs):
         """Create agent loop manager."""
-        instance = cls(config, worker_group, rollout_resource_pool, teacher_model_manager, reward_loop_worker_handles)
-        await instance._initialize_llm_servers()
-        await instance._init_global_load_balancer()
+        instance = cls(*args, **kwargs)
         await instance._init_agent_loop_workers()
         return instance
-
-    async def _initialize_llm_servers(self):
-        rollout_world_size = (
-            self.rollout_config.tensor_model_parallel_size
-            * self.rollout_config.data_parallel_size
-            * self.rollout_config.pipeline_model_parallel_size
-        )
-        world_size = (
-            self.worker_group.world_size
-            if self.worker_group
-            else self.rollout_config.n_gpus_per_node * self.rollout_config.nnodes
-        )
-        num_replicas = world_size // rollout_world_size
-
-        self.rollout_replicas = [
-            self.rollout_replica_class(
-                replica_rank=replica_rank,
-                config=self.rollout_config,
-                model_config=self.model_config,
-                gpus_per_node=self.rollout_config.n_gpus_per_node,
-            )
-            for replica_rank in range(num_replicas)
-        ]
-
-        if self.worker_group and self.rollout_config.name != "trtllm":
-            await asyncio.gather(*[server.init_hybrid(self.worker_group) for server in self.rollout_replicas])
-        # TODO: unify trtllm to init_hybrid
-        elif self.worker_group and self.rollout_config.name == "trtllm":
-            await asyncio.gather(
-                *[
-                    server.init_hybrid_colocated(self.worker_group, self.rollout_resource_pool)
-                    for server in self.rollout_replicas
-                ]
-            )
-        else:
-            await asyncio.gather(*[server.init_standalone() for server in self.rollout_replicas])
-
-        self.server_handles = [server._server_handle for server in self.rollout_replicas]
-        self.server_addresses = [server._server_address for server in self.rollout_replicas]
-
-        print(f"AgentLoopManager: {self.server_addresses}")
-
-        # Update Prometheus configuration with server addresses
-        if self.rollout_config.prometheus.enable:
-            if self.rollout_config.disable_log_stats:
-                raise ValueError("PROMETHEUS needs disable_log_stats==False, but it is currently True.")
-            update_prometheus_config(self.rollout_config.prometheus, self.server_addresses, self.rollout_config.name)
 
     async def _init_agent_loop_workers(self):
         self.agent_loop_workers = []
         num_workers = self.rollout_config.agent.num_workers
-        load_balancer_handle = self.global_load_balancer
-        servers = list(zip(self.server_addresses, self.server_handles, strict=True))
-
-        if self.distillation_enabled:
-            # teacher_model_manager exposes per-teacher dicts keyed by teacher key.
-            teacher_servers = {
-                key: list(
-                    zip(
-                        self.teacher_model_manager.server_addresses[key],
-                        self.teacher_model_manager.server_handles[key],
-                        strict=True,
-                    )
-                )
-                for key in self.teacher_model_manager.server_addresses
-            }
-            teacher_load_balancer_handle = dict(self.teacher_model_manager.load_balancer_handle)
-        else:
-            teacher_servers = None
-            teacher_load_balancer_handle = None
 
         node_ids = [node["NodeID"] for node in ray.nodes() if node["Alive"] and node["Resources"].get("CPU", 0) > 0]
         for i in range(num_workers):
@@ -1169,19 +950,11 @@ class AgentLoopManager:
                     ),
                 ).remote(
                     self.config,
-                    servers,
-                    load_balancer_handle,
-                    teacher_servers,
-                    teacher_load_balancer_handle,
+                    self.llm_client,
+                    self.teacher_client,
                     self.reward_loop_worker_handles,
                 )
             )
-
-    async def _init_global_load_balancer(self) -> None:
-        self.global_load_balancer = GlobalRequestLoadBalancer.remote(
-            server_actor_ids=self.server_addresses,
-            max_cache_size=DEFAULT_ROUTING_CACHE_SIZE,
-        )
 
     @auto_await
     async def generate_sequences(self, prompts: DataProto) -> DataProto:
@@ -1242,18 +1015,3 @@ class AgentLoopManager:
             timing["agent_loop/slowest/response_length"] = attention_mask[prompt_length:].sum().item()
 
         return timing
-
-    @auto_await
-    async def clear_kv_cache(self):
-        """Clear all rollout kv cache, but don`t sleep."""
-        await asyncio.gather(*[replica.clear_kv_cache() for replica in self.rollout_replicas])
-
-    @auto_await
-    async def start_profile(self, **kwargs):
-        """Start profiling on all rollout replicas."""
-        await asyncio.gather(*[replica.start_profile(**kwargs) for replica in self.rollout_replicas])
-
-    @auto_await
-    async def stop_profile(self):
-        """Stop profiling on all rollout replicas."""
-        await asyncio.gather(*[replica.stop_profile() for replica in self.rollout_replicas])
