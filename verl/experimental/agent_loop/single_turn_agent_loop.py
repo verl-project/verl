@@ -58,9 +58,11 @@ class SingleTurnAgentLoop(AgentLoopBase):
 
         # 3. generate sequences
         metrics = {}
+        request_group_id = kwargs.get("uid")
         with simple_timer("generate_sequences", metrics):
             output: TokenOutput = await self.server_manager.generate(
                 request_id=uuid4().hex,
+                request_group_id=request_group_id,
                 prompt_ids=prompt_ids,
                 sampling_params=sampling_params,
                 image_data=images,
@@ -159,15 +161,16 @@ class DiffusionSingleTurnAgentLoop(AgentLoopBase):
 
         # 3. generate sequences
         metrics = {}
+        request_group_id = kwargs.get("uid")
         with simple_timer("generate_sequences", metrics):
             output = await self.server_manager.generate(
                 request_id=uuid4().hex,
+                request_group_id=request_group_id,
                 prompt_ids=prompt_ids,
                 sampling_params=sampling_params,
                 image_data=images,
                 video_data=videos,
                 negative_prompt_ids=negative_prompt_ids,
-                request_group_id=kwargs.get("request_group_id"),
             )
         if metrics.get("num_preempted") is None:
             metrics["num_preempted"] = output.num_preempted if output.num_preempted is not None else -1

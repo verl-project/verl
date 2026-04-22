@@ -92,8 +92,10 @@ class AsyncLLMServerManager:
         self._load_balancer = load_balancer_handle
         self._server_id_to_handle: dict[str, ray.actor.ActorHandle] = dict(servers)
 
-    async def _acquire_server(self, request_id: str, group_id: str) -> tuple[str, ray.actor.ActorHandle]:
-        server_id = await self._load_balancer.acquire_server.remote(request_id=request_id, group_id=group_id)
+    async def _acquire_server(self, request_id: str, request_group_id: str | None) -> tuple[str, ray.actor.ActorHandle]:
+        server_id = await self._load_balancer.acquire_server.remote(
+            request_id=request_id, request_group_id=request_group_id
+        )
         handle = self._server_id_to_handle.get(server_id)
         if handle is None:
             raise RuntimeError(f"Unknown server_id returned by load balancer: {server_id}")
@@ -109,27 +111,29 @@ class AsyncLLMServerManager:
         self,
         request_id,
         *,
+        request_group_id: str | None = None,
         prompt_ids: list[int],
         sampling_params: dict[str, Any],
         image_data: Optional[list[Any]] = None,
         video_data: Optional[list[Any]] = None,
-        group_id: str = None,
         **kwargs: Any,
     ) -> TokenOutput | DiffusionOutput:
         """Generate tokens from prompt ids.
 
         Args:
             request_id (str): request id for sticky session.
+            request_group_id (str | None): request group id for group-level sticky routing. Required non-None
             prompt_ids (List[int]): List of prompt token ids.
             sampling_params (Dict[str, Any]): Sampling parameters for the chat completion.
 
         Returns:
             TokenOutput | DiffusionOutput: token or diffusion output
         """
-        server_id, server = await self._acquire_server(request_id, group_id)
+        server_id, server = await self._acquire_server(request_id, request_group_id)
         try:
             output: TokenOutput | DiffusionOutput = await server.generate.remote(
                 request_id=uuid4().hex,  # use new request_id for each turn
+                request_group_id=request_group_id,
                 prompt_ids=prompt_ids,
                 sampling_params=sampling_params,
                 image_data=image_data,
@@ -997,7 +1001,6 @@ async def get_trajectory_info(step, index, validate):
                 "sample_index": index[i],
                 "rollout_n": rollout_n,
                 "validate": validate,
-                "request_group_id": f"{step}_{index[i]}",
             }
         )
     return trajectory_info

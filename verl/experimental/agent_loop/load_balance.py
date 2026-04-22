@@ -37,9 +37,9 @@ class GlobalRequestLoadBalancer:
         self._server_actor_ids = server_actor_ids
         self._inflight_requests: dict[str, int] = {sid: 0 for sid in server_actor_ids}
 
-    def acquire_server(self, request_id: str, group_id: str) -> str:
+    def acquire_server(self, request_id: str, request_group_id: str | None = None) -> str:
         """Acquire a server for the given request, reusing the same server for multi-turn conversations."""
-        pass
+        raise NotImplementedError("Subclasses must implement this method")
 
     def release_server(self, server_id: str) -> None:
         """Release a server after a request completes"""
@@ -58,7 +58,7 @@ class RequestStickyLoadBalancer(GlobalRequestLoadBalancer):
         super().__init__(server_actor_ids=server_actor_ids)
         self._request_id_to_server: LRUCache[str, str] = LRUCache(maxsize=DEFAULT_ROUTING_CACHE_SIZE)
 
-    def acquire_server(self, request_id: str, group_id: str) -> str:
+    def acquire_server(self, request_id: str, request_group_id: str | None = None) -> str:
         if request_id in self._request_id_to_server:
             server_id = self._request_id_to_server[request_id]
             self._inflight_requests[server_id] += 1
@@ -76,16 +76,20 @@ class GroupStickyLoadBalancer(GlobalRequestLoadBalancer):
 
     def __init__(self, server_actor_ids: list[str]) -> None:
         super().__init__(server_actor_ids=server_actor_ids)
-        self._group_id_to_server: LRUCache[str, str] = LRUCache(maxsize=DEFAULT_ROUTING_CACHE_SIZE)
+        self._request_group_id_to_server: LRUCache[str, str] = LRUCache(maxsize=DEFAULT_ROUTING_CACHE_SIZE)
 
-    def acquire_server(self, request_id: str, group_id: str) -> str:
-        if group_id in self._group_id_to_server:
-            server_id = self._group_id_to_server[group_id]
+    def acquire_server(self, request_id: str, request_group_id: str | None = None) -> str:
+        if request_group_id is None:
+            raise ValueError(
+                "request_group_id is required when using GroupStickyLoadBalancer (load_balance_sticky_mode='group')"
+            )
+        if request_group_id in self._request_group_id_to_server:
+            server_id = self._request_group_id_to_server[request_group_id]
             self._inflight_requests[server_id] += 1
             return server_id
 
         server_id = min(self._inflight_requests, key=self._inflight_requests.get)
-        self._group_id_to_server[group_id] = server_id
+        self._request_group_id_to_server[request_group_id] = server_id
         self._inflight_requests[server_id] += 1
         return server_id
 
