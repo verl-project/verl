@@ -181,32 +181,82 @@ def rollout_trace_attr(
         yield
 
 
-def _serialize_for_trace(obj, _depth=0):
-    """Recursively convert PIL.Image objects to base64 data URIs for MLflow tracing.
+def _is_pil_image(obj) -> bool:
+    """Check whether ``obj`` is a PIL.Image.Image without requiring PIL imported eagerly."""
+    try:
+        from PIL import Image as _PILImage
 
-    MLflow cannot serialize PIL.Image natively and only stores the repr string,
-    which cannot be displayed. This converts images to ``data:image/png;base64,…``
-    strings so the MLflow UI can render them inline.
+        return isinstance(obj, _PILImage.Image)
+    except ImportError:
+        return False
+
+
+def _serialize_for_trace(obj, _depth=0, *, keep_pil: bool = False):
+    """Recursively prepare ``obj`` for tracing backends.
+
+    Two transformations happen here:
+
+    1. ``PIL.Image.Image`` objects — MLflow cannot serialize them and only
+       stores the ``repr`` string. We convert to ``data:image/png;base64,…``
+       data URIs by default. Weave's native type handler DOES render PIL
+       images inline, so pass ``keep_pil=True`` on the weave backend.
+
+    2. Lists/tuples containing PIL images — Weave's auto-renderer is
+       documented only for plain PIL values, not "list of PIL inside a dict".
+       To maximise the chance the UI shows them inline, we split any such
+       container into flat ``image_0 / image_1 / ...`` keys when it lives
+       inside a dict, and fall back to a dict with the same shape otherwise.
+
+    Args:
+        obj: The object to serialize.
+        _depth: Recursion depth (internal guard).
+        keep_pil: If True, leave PIL images as raw objects (weave backend).
+            If False, convert to base64 data URI strings (mlflow backend).
     """
     if _depth > 10:
         return repr(obj)
 
-    try:
-        from PIL import Image as _PILImage
-
-        if isinstance(obj, _PILImage.Image):
-            buf = io.BytesIO()
-            obj.save(buf, format="PNG")
-            b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-            return f"data:image/png;base64,{b64}"
-    except ImportError:
-        pass
+    # Scalar PIL image.
+    if _is_pil_image(obj):
+        if keep_pil:
+            return obj
+        buf = io.BytesIO()
+        obj.save(buf, format="PNG")
+        b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+        return f"data:image/png;base64,{b64}"
 
     if isinstance(obj, dict):
-        return {k: _serialize_for_trace(v, _depth + 1) for k, v in obj.items()}
+        out: dict = {}
+        for k, v in obj.items():
+            if (
+                isinstance(v, (list, tuple))
+                and v
+                and any(_is_pil_image(x) for x in v)
+            ):
+                # Flatten ``list[PIL | other]`` into ``{k}_0, {k}_1, ...``
+                # so that Weave's UI renders each element as an image slot.
+                non_image_items: list = []
+                for i, item in enumerate(v):
+                    if _is_pil_image(item):
+                        out[f"{k}_{i}"] = _serialize_for_trace(
+                            item, _depth + 1, keep_pil=keep_pil
+                        )
+                    else:
+                        non_image_items.append(
+                            _serialize_for_trace(item, _depth + 1, keep_pil=keep_pil)
+                        )
+                if non_image_items:
+                    out[f"{k}_other"] = non_image_items
+            else:
+                out[k] = _serialize_for_trace(v, _depth + 1, keep_pil=keep_pil)
+        return out
+
     if isinstance(obj, (list, tuple)):
-        serialized = [_serialize_for_trace(v, _depth + 1) for v in obj]
+        serialized = [
+            _serialize_for_trace(v, _depth + 1, keep_pil=keep_pil) for v in obj
+        ]
         return type(obj)(serialized) if isinstance(obj, tuple) else serialized
+
     return obj
 
 
@@ -228,39 +278,52 @@ def rollout_trace_op(func):
         del inputs["self"]
 
         async def add_token2text(self, result):
-            if hasattr(result, "prompt_ids") and hasattr(self, "tokenizer") and hasattr(self.tokenizer, "decode"):
-                # Use model_dump() for Pydantic models to get a proper copy,
-                # otherwise vars() returns a reference to internal __dict__ which
-                # can cause serialization issues with MLflow
-                if isinstance(result, BaseModel):
-                    _result = result.model_dump()
-                else:
-                    _result = dict(vars(result))
-                loop = get_event_loop()
-                if hasattr(result, "prompt_ids"):
-                    prompt_text = await loop.run_in_executor(None, self.tokenizer.decode, result.prompt_ids)
-                    _result["prompt_text"] = prompt_text
+            tokenizer = getattr(self, "tokenizer", None)
+            if tokenizer is None or not hasattr(tokenizer, "decode"):
+                return result
 
-                if hasattr(result, "response_ids"):
-                    response_text = await loop.run_in_executor(None, self.tokenizer.decode, result.response_ids)
-                    _result["response_text"] = response_text
-                return _result
-            return result
+            if isinstance(result, BaseModel):
+                _result = result.model_dump()
+            elif hasattr(result, "__dict__"):
+                _result = dict(vars(result))
+            else:
+                return result
+
+            loop = get_event_loop()
+
+            # AgentLoopOutput: prompt_ids + response_ids
+            if hasattr(result, "prompt_ids"):
+                prompt_text = await loop.run_in_executor(None, tokenizer.decode, result.prompt_ids)
+                _result["prompt_text"] = prompt_text
+            if hasattr(result, "response_ids"):
+                response_text = await loop.run_in_executor(None, tokenizer.decode, result.response_ids)
+                _result["response_text"] = response_text
+
+            # TokenOutput (generate): token_ids holds the response tokens
+            if hasattr(result, "token_ids") and not hasattr(result, "prompt_ids"):
+                response_text = await loop.run_in_executor(None, tokenizer.decode, result.token_ids)
+                _result["response_text"] = response_text
+
+            return _result
 
         if backend == "weave":
             tracer = RolloutTraceConfig.get_client()
             from weave.trace.context import call_context
 
             cur_attributes = {**call_context.call_attributes.get()}
-            call = tracer.create_call(op=func.__qualname__, inputs=inputs, attributes=cur_attributes)
+            # Keep PIL.Image objects intact so Weave auto-renders them as
+            # inline images in the trace UI (base64 strings would display
+            # as raw text only).
+            weave_inputs = _serialize_for_trace(inputs, keep_pil=True)
+            call = tracer.create_call(op=func.__qualname__, inputs=weave_inputs, attributes=cur_attributes)
             try:
                 result = await func(self, *args, **kwargs)
 
                 if enable_token2text:
                     _result = await add_token2text(self, result)
-                    tracer.finish_call(call, output=_result)
+                    tracer.finish_call(call, output=_serialize_for_trace(_result, keep_pil=True))
                 else:
-                    tracer.finish_call(call, output=result)
+                    tracer.finish_call(call, output=_serialize_for_trace(result, keep_pil=True))
 
                 return result
 
