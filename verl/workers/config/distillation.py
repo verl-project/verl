@@ -194,6 +194,12 @@ class DistillationTeacherModelConfig(BaseConfig):
                         f"({topk}) to enable distillation loss computation."
                     )
                 engine_kwargs["vllm"] = vllm_engine_kwargs
+            case "sglang":
+                # SGLang's top_logprobs_num is a per-request parameter, so there is no
+                # engine-boot cap to align (unlike vLLM's max_logprobs). The async
+                # server translates sampling_params["prompt_logprobs"] into
+                # return_logprob + logprob_start_len=0 + top_logprobs_num at call time.
+                pass
             case _:
                 raise NotImplementedError(
                     f"DistillationTeacherModelConfig does not support inference engine {engine_name}"
