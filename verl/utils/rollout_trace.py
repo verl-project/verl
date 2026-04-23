@@ -191,6 +191,95 @@ def _is_pil_image(obj) -> bool:
         return False
 
 
+def _pil_to_data_uri(img) -> str:
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+    return f"data:image/png;base64,{b64}"
+
+
+def _collect_images_as_content_parts(obj, _depth=0, _parts=None):
+    """Walk ``obj`` and collect every PIL image as an OpenAI ``image_url`` part.
+
+    MLflow's trace UI renders images inline only in the "Chat tab" and only
+    when inputs/outputs follow the OpenAI chat-messages schema with
+    ``{"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}``
+    content parts (see
+    https://mlflow.org/docs/latest/genai/tracing/observe-with-traces/multimodal/).
+
+    We do a *shallow flatten*: any PIL image encountered at any depth is
+    turned into one ``image_url`` content part, in traversal order. Scalar
+    PIL inputs also work thanks to the initial scalar branch.
+    """
+    if _parts is None:
+        _parts = []
+    if _depth > 10:
+        return _parts
+    if _is_pil_image(obj):
+        _parts.append(
+            {
+                "type": "image_url",
+                "image_url": {"url": _pil_to_data_uri(obj)},
+            }
+        )
+        return _parts
+    if isinstance(obj, dict):
+        for v in obj.values():
+            _collect_images_as_content_parts(v, _depth + 1, _parts)
+        return _parts
+    if isinstance(obj, (list, tuple)):
+        for v in obj:
+            _collect_images_as_content_parts(v, _depth + 1, _parts)
+        return _parts
+    return _parts
+
+
+def _to_mlflow_chat_messages(
+    payload: dict, *, role: str, default_name: str = "payload"
+) -> dict:
+    """Convert a free-form dict payload into MLflow's OpenAI-style chat schema.
+
+    The resulting ``{"messages": [...]}`` structure is rendered in the MLflow
+    trace UI's Chat tab with images shown inline. Non-image content is kept
+    as a single JSON text part so nothing is lost.
+
+    Args:
+        payload: Serialized dict payload (PIL images already converted to
+            data URIs by :func:`_serialize_for_trace`, OR still raw PIL —
+            both are handled).
+        role: ``"user"`` for inputs, ``"assistant"`` for outputs.
+        default_name: Fallback top-level field name when images are attached
+            directly (not inside a dict).
+    """
+    image_parts = _collect_images_as_content_parts(payload)
+
+    # Text part: everything except PIL images (stripped) rendered as JSON.
+    def _strip_images(obj, _depth=0):
+        if _depth > 10:
+            return repr(obj)
+        if _is_pil_image(obj):
+            return None
+        if isinstance(obj, dict):
+            return {k: _strip_images(v, _depth + 1) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            stripped = [_strip_images(v, _depth + 1) for v in obj]
+            return type(obj)(stripped) if isinstance(obj, tuple) else stripped
+        return obj
+
+    stripped = _strip_images(payload)
+    try:
+        import json as _json
+
+        text = _json.dumps(stripped, default=repr, ensure_ascii=False, indent=2)
+    except Exception:
+        text = repr(stripped)
+
+    content_parts: list = [{"type": "text", "text": text}]
+    content_parts.extend(image_parts)
+
+    return {"messages": [{"role": role, "content": content_parts}]}
+
+
 def _serialize_for_trace(obj, _depth=0, *, keep_pil: bool = False):
     """Recursively prepare ``obj`` for tracing backends.
 
@@ -334,13 +423,27 @@ def rollout_trace_op(func):
             import mlflow
 
             with mlflow.start_span(name=func.__qualname__) as span:
-                span.set_inputs(_serialize_for_trace(inputs))
+                # MLflow renders images inline only when inputs/outputs follow
+                # the OpenAI chat-messages schema. Wrap our structured payload
+                # into a single chat message whose content parts include one
+                # ``image_url`` per PIL image plus a JSON text blob for the
+                # rest of the fields.
+                span.set_inputs(
+                    _to_mlflow_chat_messages(inputs, role="user")
+                )
                 result = await func(self, *args, **kwargs)
                 if enable_token2text:
                     _result = await add_token2text(self, result)
-                    span.set_outputs(_serialize_for_trace(_result))
+                    span.set_outputs(
+                        _to_mlflow_chat_messages(_result, role="assistant")
+                    )
                 else:
-                    span.set_outputs(_serialize_for_trace(result))
+                    span.set_outputs(
+                        _to_mlflow_chat_messages(
+                            result if isinstance(result, dict) else {"output": result},
+                            role="assistant",
+                        )
+                    )
 
             return result
 
