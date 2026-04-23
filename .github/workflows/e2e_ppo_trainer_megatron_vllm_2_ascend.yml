@@ -191,6 +191,7 @@ jobs:
         run: |
           pip install --no-deps -e .
           pip install trl==0.26.0
+          pip install --index-url https://pypi.org/simple "tensordict>=0.12.2"
       - name: Check final pip list
         run: |
           pip list

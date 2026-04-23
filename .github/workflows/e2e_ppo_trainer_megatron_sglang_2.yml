@@ -148,6 +148,7 @@ jobs:
         run: |
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
+          pip3 install --index-url https://pypi.org/simple "tensordict>=0.12.2"
       # Geo3k
       - name: Prepare GEO3K dataset
         run: |
