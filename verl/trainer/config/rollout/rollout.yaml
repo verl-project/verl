@@ -444,12 +444,26 @@ mtp: ${oc.select:actor_rollout_ref.model.mtp, null}
 # QAT configuration (inherited from actor's engine config)
 qat: ${oc.select:actor_rollout_ref.actor.fsdp_config.qat,${oc.select:actor_rollout_ref.actor.megatron.qat,null}}
 
-# Prefill-Decode disaggregation (SGLang only; rollout.name=sglang_pd).
+# Prefill-Decode disaggregation (SGLang only; use rollout.name=sglang_pd).
 disaggregation:
+
+  # Master switch for PD disaggregation.
   enabled: False
+
+  # Number of prefill replicas (each uses tensor_model_parallel_size GPUs).
   prefill_replicas: 1
+
+  # Number of decode replicas.
   decode_replicas: 1
+
+  # Decode TP override; null = same as tensor_model_parallel_size.
   decode_tensor_model_parallel_size: null
+
+  # KV cache transport: nixl | mooncake | ascend | mori | fake.
   transfer_backend: nixl
+
+  # Bootstrap server port on prefill side; null = auto-assign.
   bootstrap_port: null
+
+  # InfiniBand device (required for mooncake over RDMA).
   ib_device: null

@@ -139,10 +139,12 @@ class ServerAdapter(BaseRollout):
                 else prefill_tp
             )
             rollout_world_size = (
-                prefill_tp * disagg.prefill_replicas + decode_tp * disagg.decode_replicas
-            ) * self.config.data_parallel_size
+                (prefill_tp * disagg.prefill_replicas + decode_tp * disagg.decode_replicas)
+                * self.config.data_parallel_size
+                * self.config.pipeline_model_parallel_size
+            )
         else:
-            rollout_world_size = prefill_tp * self.config.data_parallel_size
+            rollout_world_size = prefill_tp * self.config.data_parallel_size * self.config.pipeline_model_parallel_size
         if replica_rank == -1:
             self.replica_rank = rank // rollout_world_size
         else:
@@ -164,20 +166,19 @@ class ServerAdapter(BaseRollout):
                 if disagg.decode_tensor_model_parallel_size is not None
                 else prefill_tp
             )
-            if self.rollout_rank < prefill_tp:
+            # Modulo by single-group footprint so if DP>1 is ever enabled,
+            # each DP group's ranks resolve to the same role offsets.
+            footprint = prefill_tp + disagg.decode_replicas * decode_tp
+            local = self.rollout_rank % footprint
+            if local < prefill_tp:
                 self._pd_role = "prefill"
                 self._pd_server_index = 0
-                self._pd_tp_local_rank = self.rollout_rank
+                self._pd_tp_local_rank = local
             else:
-                off = self.rollout_rank - prefill_tp
-                if off < disagg.decode_replicas * decode_tp:
-                    self._pd_role = "decode"
-                    self._pd_server_index = off // decode_tp
-                    self._pd_tp_local_rank = off % decode_tp
-            assert self._pd_role is not None, (
-                f"rollout_rank={self.rollout_rank} outside PD footprint "
-                f"[0:{prefill_tp + disagg.decode_replicas * decode_tp})"
-            )
+                off = local - prefill_tp
+                self._pd_role = "decode"
+                self._pd_server_index = off // decode_tp
+                self._pd_tp_local_rank = off % decode_tp
         self._has_server = (disagg is None or not getattr(disagg, "enabled", False)) or (self._pd_role is not None)
 
         # sleep_level controls what gets released during sleep/release:
