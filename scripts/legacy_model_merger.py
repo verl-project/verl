@@ -103,10 +103,15 @@ class BaseModelMerger(ABC):
             )
             self.hf_model_config_path = config.hf_model_path
 
-        # Auto-detect huggingface subdirectory if it exists
-        huggingface_subdir = os.path.join(self.hf_model_config_path, "huggingface")
-        if os.path.isdir(huggingface_subdir):
-            self.hf_model_config_path = huggingface_subdir
+        # Auto-detect the huggingface subdirectory.  v2 Megatron layout
+        # nests it under model/huggingface; v1 (FSDP or pre-refactor
+        # Megatron) places it directly under the checkpoint root.
+        v2_subdir = os.path.join(self.hf_model_config_path, "model", "huggingface")
+        v1_subdir = os.path.join(self.hf_model_config_path, "huggingface")
+        if os.path.isdir(v2_subdir):
+            self.hf_model_config_path = v2_subdir
+        elif os.path.isdir(v1_subdir):
+            self.hf_model_config_path = v1_subdir
 
         self.model_config = AutoConfig.from_pretrained(self.hf_model_config_path)
 

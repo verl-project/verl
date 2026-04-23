@@ -273,6 +273,19 @@ class TestBuilders:
 # ===========================================================================
 
 
+def _collect_save_calls(mock_save_dc):
+    """Return {relative_subdir: sharded_state_dict} for each save_dist_checkpointing call."""
+    out = {}
+    for call in mock_save_dc.call_args_list:
+        kwargs = call.kwargs
+        # Path format:   <root>/global_step_N/{model|optimizer|extra}/dist_ckpt
+        ckpt_path = kwargs["ckpt_path"]
+        normalized = os.path.normpath(ckpt_path)
+        subdir = os.path.basename(os.path.dirname(normalized))
+        out[subdir] = kwargs["sharded_state_dict"]
+    return out
+
+
 class TestSaveCheckpointDispatch:
     @pytest.fixture(autouse=True)
     def _tmpdir(self):
@@ -284,17 +297,18 @@ class TestSaveCheckpointDispatch:
         return os.path.join(self.test_dir, f"global_step_{step}")
 
     @patch("verl.utils.checkpoint.megatron_checkpoint_manager.save_dist_checkpointing", return_value=None)
-    def test_mbridge_optimizer_extra_goes_through_dist_ckpt(self, mock_save_dc):
-        """With mbridge, optimizer + extra go through dist_checkpointing; model via bridge."""
+    def test_mbridge_split_optimizer_extra(self, mock_save_dc):
+        """With mbridge, optimizer and extra go to SEPARATE dist_ckpt directories; model via bridge."""
         mgr = _make_manager(save_contents=["model", "optimizer", "extra"])
         with patch.object(mgr, "_save_transformer_config"):
             mgr.save_checkpoint(self._save_path(), global_step=1)
 
-        mock_save_dc.assert_called_once()
-        saved_sd = mock_save_dc.call_args[1]["sharded_state_dict"]
-        assert "optimizer" in saved_sd
-        assert "rng_state" in saved_sd
-        assert "model" not in saved_sd
+        calls = _collect_save_calls(mock_save_dc)
+        assert set(calls) == {"optimizer", "extra"}
+        assert "optimizer" in calls["optimizer"]
+        assert "rng_state" in calls["extra"]
+        # model must NOT be in any dist_ckpt tree (it lives under model/huggingface/)
+        assert all("model" not in sd for sd in calls.values())
         mgr.bridge.save_weights.assert_called_once()
 
     @patch("verl.utils.checkpoint.megatron_checkpoint_manager.save_dist_checkpointing", return_value=None)
@@ -307,43 +321,42 @@ class TestSaveCheckpointDispatch:
         mgr.bridge.save_weights.assert_called_once()
 
     @patch("verl.utils.checkpoint.megatron_checkpoint_manager.save_dist_checkpointing", return_value=None)
-    def test_optimizer_only_without_model(self, mock_save_dc):
-        """save_contents=['optimizer'] saves optimizer via dist_ckpt, no model persisted."""
+    def test_optimizer_only_writes_only_optimizer_subdir(self, mock_save_dc):
+        """save_contents=['optimizer'] writes ONLY the optimizer/ subtree."""
         mgr = _make_manager(save_contents=["optimizer"])
         mgr.save_checkpoint(self._save_path(), global_step=1)
 
-        mock_save_dc.assert_called_once()
-        saved_sd = mock_save_dc.call_args[1]["sharded_state_dict"]
-        assert "optimizer" in saved_sd
-        assert "model" not in saved_sd
+        calls = _collect_save_calls(mock_save_dc)
+        assert set(calls) == {"optimizer"}
+        assert "optimizer" in calls["optimizer"]
+        assert "model" not in calls["optimizer"]
         mgr.bridge.save_weights.assert_not_called()
 
     @patch("verl.utils.checkpoint.megatron_checkpoint_manager.save_dist_checkpointing", return_value=None)
     def test_extra_only(self, mock_save_dc):
-        """save_contents=['extra'] saves only RNG states; model sharded SD not built."""
+        """save_contents=['extra'] writes ONLY the extra/ subtree; model sharded SD not built."""
         mgr = _make_manager(save_contents=["extra"])
         with patch.object(mgr, "_save_transformer_config"):
             mgr.save_checkpoint(self._save_path(), global_step=1)
 
-        mock_save_dc.assert_called_once()
-        saved_sd = mock_save_dc.call_args[1]["sharded_state_dict"]
-        assert "rng_state" in saved_sd
-        assert "optimizer" not in saved_sd
-        assert "model" not in saved_sd
+        calls = _collect_save_calls(mock_save_dc)
+        assert set(calls) == {"extra"}
+        assert "rng_state" in calls["extra"]
+        assert "optimizer" not in calls["extra"]
         mgr.model[0].sharded_state_dict.assert_not_called()
 
     @patch("verl.utils.checkpoint.megatron_checkpoint_manager.save_dist_checkpointing", return_value=None)
-    def test_dist_ckpt_backend_includes_model(self, mock_save_dc):
-        """With dist_ckpt backend, model shards go into dist_checkpoint."""
+    def test_dist_ckpt_backend_splits_into_three(self, mock_save_dc):
+        """With dist_ckpt backend, model/optimizer/extra go to three separate directories."""
         mgr = _make_manager(save_contents=["model", "optimizer", "extra"], use_mbridge=False)
         with patch.object(mgr, "_save_transformer_config"):
             mgr.save_checkpoint(self._save_path(), global_step=1)
 
-        mock_save_dc.assert_called_once()
-        saved_sd = mock_save_dc.call_args[1]["sharded_state_dict"]
-        assert "model" in saved_sd
-        assert "optimizer" in saved_sd
-        assert "rng_state" in saved_sd
+        calls = _collect_save_calls(mock_save_dc)
+        assert set(calls) == {"model", "optimizer", "extra"}
+        assert "model" in calls["model"]
+        assert "optimizer" in calls["optimizer"]
+        assert "rng_state" in calls["extra"]
 
     @patch("verl.utils.checkpoint.megatron_checkpoint_manager.save_dist_checkpointing", return_value=None)
     def test_hf_model_with_mbridge_deduplicates(self, mock_save_dc):
@@ -355,16 +368,17 @@ class TestSaveCheckpointDispatch:
         mock_save_dc.assert_not_called()
 
     @patch("verl.utils.checkpoint.megatron_checkpoint_manager.save_dist_checkpointing", return_value=None)
-    def test_peft_adapters_in_dist_ckpt(self, mock_save_dc):
-        """PEFT adapter shards go into dist_checkpoint even with mbridge."""
+    def test_peft_adapters_under_model_subdir(self, mock_save_dc):
+        """PEFT adapter shards live under model/dist_ckpt/ even with mbridge; optimizer stays separate."""
         mgr = _make_manager(save_contents=["model", "optimizer"], peft_cls=MagicMock())
 
         with patch.object(mgr, "_maybe_filter_peft_state_dict", side_effect=lambda sd: sd):
             mgr.save_checkpoint(self._save_path(), global_step=1)
 
-        mock_save_dc.assert_called_once()
-        saved_sd = mock_save_dc.call_args[1]["sharded_state_dict"]
-        assert "optimizer" in saved_sd
+        calls = _collect_save_calls(mock_save_dc)
+        assert "model" in calls
+        assert "optimizer" in calls
+        assert "optimizer" in calls["optimizer"]
 
     @patch("verl.utils.checkpoint.megatron_checkpoint_manager.save_dist_checkpointing", return_value=None)
     def test_empty_save_contents(self, mock_save_dc):
@@ -383,84 +397,141 @@ class TestSaveCheckpointDispatch:
 _PATCH_LOAD_META = "megatron.core.dist_checkpointing.load_content_metadata"
 
 
+def _make_v2_layout(ckpt_path: str, *subdirs: str) -> None:
+    """Create the v2 split layout with the given subdirs non-empty.
+
+    ``subdirs`` is a subset of ``{"model", "optimizer", "extra"}``.  For each,
+    we create ``<ckpt_path>/<sub>/dist_ckpt`` and put a sentinel file in it so
+    ``_has_checkpoint_files`` returns True.
+    """
+    for sub in subdirs:
+        dpath = os.path.join(ckpt_path, sub, "dist_ckpt")
+        os.makedirs(dpath, exist_ok=True)
+        # dist_checkpointing writes arbitrary per-shard files; a dummy
+        # sentinel is enough for our in-repo _has_checkpoint_files gate.
+        sentinel = os.path.join(dpath, "common.pt")
+        with open(sentinel, "w") as f:
+            f.write("")
+
+
+def _load_calls_by_subdir(mock_load_dc):
+    """Return {subdir: sharded_state_dict} from load_dist_checkpointing invocations."""
+    out = {}
+    for call in mock_load_dc.call_args_list:
+        kwargs = call.kwargs
+        subdir = os.path.basename(os.path.dirname(os.path.normpath(kwargs["ckpt_dir"])))
+        out[subdir] = kwargs["sharded_state_dict"]
+    return out
+
+
 class TestLoadCheckpointDispatch:
     @pytest.fixture(autouse=True)
     def _tmpdir(self):
         self.test_dir = tempfile.mkdtemp()
         self.ckpt_path = os.path.join(self.test_dir, "global_step_1")
-        os.makedirs(os.path.join(self.ckpt_path, "dist_ckpt"), exist_ok=True)
+        os.makedirs(self.ckpt_path, exist_ok=True)
         yield
         shutil.rmtree(self.test_dir, ignore_errors=True)
 
     @patch(_PATCH_LOAD_META, return_value=None)
     @patch("verl.utils.checkpoint.megatron_checkpoint_manager.load_dist_checkpointing")
     def test_mbridge_load_model_via_bridge(self, mock_load_dc, _mock_meta):
-        """With mbridge, model loads via bridge; optimizer/extra via dist_ckpt."""
-        mock_load_dc.return_value = {
-            "optimizer": {"step": 1},
-            "lr_scheduler": {"last_epoch": 5},
-            "rng_state": [{"random_rng_state": None}],
-        }
+        """With mbridge: model loads via bridge; optimizer/extra come from separate dist_ckpt dirs."""
+        _make_v2_layout(self.ckpt_path, "optimizer", "extra")
+
+        def fake_load(sharded_state_dict, ckpt_dir):
+            if "optimizer" in sharded_state_dict:
+                return {"optimizer": {"step": 1}, "lr_scheduler": {"last_epoch": 5}}
+            if "rng_state" in sharded_state_dict:
+                return {"rng_state": [{"random_rng_state": None}]}
+            return {}
+
+        mock_load_dc.side_effect = fake_load
         mgr = _make_manager(load_contents=["model", "optimizer", "extra"])
 
         with patch.object(mgr, "_load_model_via_bridge") as mock_bridge_load, patch.object(mgr, "load_rng_states"):
             mgr.load_checkpoint(self.ckpt_path)
             mock_bridge_load.assert_called_once()
 
-        mock_load_dc.assert_called_once()
-        loaded_sd = mock_load_dc.call_args[1]["sharded_state_dict"]
-        assert "optimizer" in loaded_sd
-        assert "rng_state" in loaded_sd
-        assert "model" not in loaded_sd
+        calls = _load_calls_by_subdir(mock_load_dc)
+        assert set(calls) == {"optimizer", "extra"}
+        assert "optimizer" in calls["optimizer"]
+        assert "rng_state" in calls["extra"]
+        assert "model" not in calls["optimizer"]
 
     @patch(_PATCH_LOAD_META, return_value=None)
     @patch("verl.utils.checkpoint.megatron_checkpoint_manager.load_dist_checkpointing")
-    def test_dist_ckpt_load_model_from_dist_ckpt(self, mock_load_dc, _mock_meta):
-        """With dist_ckpt backend, model loads from dist_checkpoint."""
-        mock_load_dc.return_value = {
-            "model": {"layer.weight": torch.zeros(1)},
-            "optimizer": {"step": 1},
-            "rng_state": [{"random_rng_state": None}],
-        }
+    def test_dist_ckpt_load_model_from_each_subdir(self, mock_load_dc, _mock_meta):
+        """With dist_ckpt backend, all three subtrees are loaded independently."""
+        _make_v2_layout(self.ckpt_path, "model", "optimizer", "extra")
+
+        def fake_load(sharded_state_dict, ckpt_dir):
+            if "model" in sharded_state_dict:
+                return {"model": {"layer.weight": torch.zeros(1)}}
+            if "optimizer" in sharded_state_dict:
+                return {"optimizer": {"step": 1}}
+            if "rng_state" in sharded_state_dict:
+                return {"rng_state": [{"random_rng_state": None}]}
+            return {}
+
+        mock_load_dc.side_effect = fake_load
         mgr = _make_manager(load_contents=["model", "optimizer", "extra"], use_mbridge=False)
 
         with patch.object(mgr, "load_rng_states"):
             mgr.load_checkpoint(self.ckpt_path)
 
-        loaded_sd = mock_load_dc.call_args[1]["sharded_state_dict"]
-        assert "model" in loaded_sd
-        assert "optimizer" in loaded_sd
+        calls = _load_calls_by_subdir(mock_load_dc)
+        assert set(calls) == {"model", "optimizer", "extra"}
+        assert "model" in calls["model"]
+        assert "optimizer" in calls["optimizer"]
+        assert "rng_state" in calls["extra"]
         mgr.model[0].load_state_dict.assert_called_once()
 
     @patch(_PATCH_LOAD_META, return_value=None)
     @patch("verl.utils.checkpoint.megatron_checkpoint_manager.load_dist_checkpointing")
     def test_load_optimizer_only(self, mock_load_dc, _mock_meta):
-        """load_contents=['optimizer'] loads only optimizer via dist_ckpt."""
+        """load_contents=['optimizer'] touches only the optimizer subtree."""
+        _make_v2_layout(self.ckpt_path, "optimizer")
         mock_load_dc.return_value = {"optimizer": {"step": 1}}
         mgr = _make_manager(load_contents=["optimizer"])
         mgr.load_checkpoint(self.ckpt_path)
 
-        loaded_sd = mock_load_dc.call_args[1]["sharded_state_dict"]
-        assert "optimizer" in loaded_sd
-        assert "model" not in loaded_sd
-        assert "rng_state" not in loaded_sd
+        calls = _load_calls_by_subdir(mock_load_dc)
+        assert set(calls) == {"optimizer"}
+        assert "optimizer" in calls["optimizer"]
+        assert "rng_state" not in calls["optimizer"]
         mgr.optimizer.load_state_dict.assert_called_once()
 
     @patch(_PATCH_LOAD_META, return_value=None)
     @patch("verl.utils.checkpoint.megatron_checkpoint_manager.load_dist_checkpointing")
     def test_load_extra_only(self, mock_load_dc, _mock_meta):
-        """load_contents=['extra'] loads only RNG states; model SD not built."""
+        """load_contents=['extra'] loads only RNG states from the extra subtree."""
+        _make_v2_layout(self.ckpt_path, "extra")
         mock_load_dc.return_value = {"rng_state": [{"random_rng_state": None}]}
         mgr = _make_manager(load_contents=["extra"])
 
         with patch.object(mgr, "load_rng_states"):
             mgr.load_checkpoint(self.ckpt_path)
 
-        loaded_sd = mock_load_dc.call_args[1]["sharded_state_dict"]
-        assert "rng_state" in loaded_sd
-        assert "optimizer" not in loaded_sd
-        assert "model" not in loaded_sd
+        calls = _load_calls_by_subdir(mock_load_dc)
+        assert set(calls) == {"extra"}
+        assert "rng_state" in calls["extra"]
         mgr.model[0].sharded_state_dict.assert_not_called()
+
+    @patch(_PATCH_LOAD_META, return_value=None)
+    @patch("verl.utils.checkpoint.megatron_checkpoint_manager.load_dist_checkpointing")
+    def test_load_rejects_legacy_layout(self, mock_load_dc, _mock_meta):
+        """Loading a pre-v2 checkpoint (bare dist_ckpt/ or huggingface/ at root) must fail fast."""
+        # Legacy layout: dist_ckpt/ directly at the root, NO model/optimizer/extra.
+        legacy_dir = os.path.join(self.ckpt_path, "dist_ckpt")
+        os.makedirs(legacy_dir, exist_ok=True)
+        with open(os.path.join(legacy_dir, "common.pt"), "w") as f:
+            f.write("")
+
+        mgr = _make_manager(load_contents=["optimizer"])
+        with pytest.raises(RuntimeError, match="deprecated Megatron checkpoint layout"):
+            mgr.load_checkpoint(self.ckpt_path)
+        mock_load_dc.assert_not_called()
 
 
 # ===========================================================================
@@ -547,7 +618,7 @@ class TestModelShardedStateDictNotBuiltUnnecessarily:
         mock_load_dc.return_value = {"rng_state": [{"random_rng_state": None}]}
         mgr = _make_manager(load_contents=["extra"])
         ckpt_path = os.path.join(self.test_dir, "step_1")
-        os.makedirs(os.path.join(ckpt_path, "dist_ckpt"), exist_ok=True)
+        _make_v2_layout(ckpt_path, "extra")
 
         with patch.object(mgr, "load_rng_states"):
             mgr.load_checkpoint(ckpt_path)
@@ -560,7 +631,7 @@ class TestModelShardedStateDictNotBuiltUnnecessarily:
         mock_load_dc.return_value = {"optimizer": {"step": 1}}
         mgr = _make_manager(load_contents=["optimizer"])
         ckpt_path = os.path.join(self.test_dir, "step_1")
-        os.makedirs(os.path.join(ckpt_path, "dist_ckpt"), exist_ok=True)
+        _make_v2_layout(ckpt_path, "optimizer")
 
         mgr.load_checkpoint(ckpt_path)
         mgr.model[0].sharded_state_dict.assert_called_once()

@@ -336,10 +336,10 @@ Actor/Rollout/Reference Policy
     (``actor.megatron.use_mbridge``):
 
     - With ``use_mbridge=True`` (default): both ``model`` and ``hf_model`` save the full model
-      in HuggingFace format under ``${ckpt_path}/huggingface/`` via mbridge; if both are
+      in HuggingFace format under ``${ckpt_path}/model/huggingface/`` via mbridge; if both are
       listed, the model is saved once (deduplicated).
     - With ``use_mbridge=False``: ``model`` saves Megatron sharded weights via
-      ``dist_checkpointing`` under ``${ckpt_path}/dist_ckpt/``; ``hf_model`` is **not**
+      ``dist_checkpointing`` under ``${ckpt_path}/model/dist_ckpt/``; ``hf_model`` is **not**
       supported in this mode -- use ``python -m verl.model_merger merge --backend megatron``
       to convert sharded checkpoints to HF format after training.
 

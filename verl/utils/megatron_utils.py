@@ -746,21 +746,147 @@ def load_megatron_optimizer(optimizers):
         get_torch_device().empty_cache()
 
 
-def get_dist_checkpoint_path(checkpoint_path):
+# ---------------------------------------------------------------------------
+# Megatron checkpoint layout
+# ---------------------------------------------------------------------------
+#
+# Each Megatron checkpoint directory (``local_path``) has the following shape::
+#
+#     local_path/
+#     ├── ckpt_contents.json           # manifest (authoritative mapping)
+#     ├── transformer_config.json      # rank-0, when 'extra' is saved
+#     ├── model/
+#     │   ├── huggingface/             # mbridge-saved HF weights + config + tokenizer
+#     │   └── dist_ckpt/               # Megatron sharded model shards (mbridge off or PEFT)
+#     ├── optimizer/
+#     │   └── dist_ckpt/               # optimizer state + lr_scheduler
+#     └── extra/
+#         └── dist_ckpt/               # rng_state
+#
+# All helpers below return the canonical path for a given component.  They
+# do not check whether the directory contains data — callers decide whether
+# to read it based on the manifest / save_contents.
+
+
+_MODEL_SUBDIR = "model"
+_OPTIMIZER_SUBDIR = "optimizer"
+_EXTRA_SUBDIR = "extra"
+_DIST_CKPT_SUBDIR = "dist_ckpt"
+_HUGGINGFACE_SUBDIR = "huggingface"
+
+
+def get_model_checkpoint_path(checkpoint_path):
+    """Directory holding model-weight artifacts (HF and/or Megatron shards)."""
     local_mkdir_safe(checkpoint_path)
-    local_mkdir_safe(os.path.join(checkpoint_path, "dist_ckpt"))
-    return os.path.join(checkpoint_path, "dist_ckpt")
+    p = os.path.join(checkpoint_path, _MODEL_SUBDIR)
+    local_mkdir_safe(p)
+    return p
+
+
+def get_optimizer_checkpoint_path(checkpoint_path):
+    """Directory holding optimizer + lr_scheduler dist_checkpointing shards."""
+    local_mkdir_safe(checkpoint_path)
+    p = os.path.join(checkpoint_path, _OPTIMIZER_SUBDIR)
+    local_mkdir_safe(p)
+    return p
+
+
+def get_extra_checkpoint_path(checkpoint_path):
+    """Directory holding 'extra' artifacts (rng_state)."""
+    local_mkdir_safe(checkpoint_path)
+    p = os.path.join(checkpoint_path, _EXTRA_SUBDIR)
+    local_mkdir_safe(p)
+    return p
+
+
+def get_model_dist_checkpoint_path(checkpoint_path):
+    """``model/dist_ckpt/`` — used when mbridge is disabled or for PEFT adapter shards."""
+    p = os.path.join(get_model_checkpoint_path(checkpoint_path), _DIST_CKPT_SUBDIR)
+    local_mkdir_safe(p)
+    return p
+
+
+def get_optimizer_dist_checkpoint_path(checkpoint_path):
+    """``optimizer/dist_ckpt/`` — optimizer + lr_scheduler dist_checkpointing directory."""
+    p = os.path.join(get_optimizer_checkpoint_path(checkpoint_path), _DIST_CKPT_SUBDIR)
+    local_mkdir_safe(p)
+    return p
+
+
+def get_extra_dist_checkpoint_path(checkpoint_path):
+    """``extra/dist_ckpt/`` — rng_state dist_checkpointing directory."""
+    p = os.path.join(get_extra_checkpoint_path(checkpoint_path), _DIST_CKPT_SUBDIR)
+    local_mkdir_safe(p)
+    return p
 
 
 def get_hf_model_checkpoint_path(checkpoint_path):
-    local_mkdir_safe(checkpoint_path)
-    local_mkdir_safe(os.path.join(checkpoint_path, "huggingface"))
-    return os.path.join(checkpoint_path, "huggingface")
+    """``model/huggingface/`` — HuggingFace-format weights, config, and tokenizer.
+
+    Historically this lived at ``<checkpoint>/huggingface``; as of layout
+    schema v2 it is nested under ``model/``.  See
+    :py:func:`verl.utils.checkpoint.megatron_checkpoint_manager.MegatronCheckpointManager._raise_for_old_layout`
+    for old-layout detection.
+    """
+    p = os.path.join(get_model_checkpoint_path(checkpoint_path), _HUGGINGFACE_SUBDIR)
+    local_mkdir_safe(p)
+    return p
 
 
 def get_transformer_config_checkpoint_path(checkpoint_path):
+    """``transformer_config.json`` at the checkpoint root (written by rank 0)."""
     os.makedirs(checkpoint_path, exist_ok=True)
     return os.path.join(checkpoint_path, "transformer_config.json")
+
+
+def get_checkpoint_contents_manifest_path(checkpoint_path):
+    """Path to the ``ckpt_contents.json`` manifest describing saved contents.
+
+    The manifest is a human- and tool-readable mapping from logical content
+    (e.g. ``model``, ``optimizer``, ``hf_model``) to its on-disk location
+    inside ``checkpoint_path``.  Users looking for a specific artifact in a
+    Megatron checkpoint should consult this file first — see
+    ``docs/advance/checkpoint.rst`` ("Locating saved contents") for the
+    schema, and
+    :py:meth:`verl.utils.checkpoint.megatron_checkpoint_manager.MegatronCheckpointManager._build_checkpoint_manifest`
+    for the implementation.
+    """
+    os.makedirs(checkpoint_path, exist_ok=True)
+    return os.path.join(checkpoint_path, "ckpt_contents.json")
+
+
+# --- Legacy (pre-v2) helpers ------------------------------------------------
+#
+# Old layouts put ``dist_ckpt/`` and ``huggingface/`` directly at the
+# checkpoint root.  These helpers are retained **only** so that the
+# migration script (``scripts/migrate_megatron_checkpoint_layout.py``) and
+# the old-layout detector can address those paths without hardcoding
+# literals.  New code must not call them.
+
+
+def get_legacy_dist_checkpoint_path(checkpoint_path):
+    return os.path.join(checkpoint_path, _DIST_CKPT_SUBDIR)
+
+
+def get_legacy_hf_model_checkpoint_path(checkpoint_path):
+    return os.path.join(checkpoint_path, _HUGGINGFACE_SUBDIR)
+
+
+def get_dist_checkpoint_path(checkpoint_path):  # pragma: no cover - back-compat shim
+    """Deprecated — kept only so stale imports fail loudly via the layout detector.
+
+    In the v2 layout there is no longer a single ``dist_ckpt/`` directory;
+    optimizer, extra, and (optionally) model live in separate subtrees.
+    Use the explicit ``get_{model,optimizer,extra}_dist_checkpoint_path``
+    helpers instead.
+    """
+    raise RuntimeError(
+        "get_dist_checkpoint_path is deprecated. The Megatron checkpoint layout "
+        "now splits optimizer/extra/(model) into separate directories. Use the "
+        "explicit helpers: get_model_dist_checkpoint_path, "
+        "get_optimizer_dist_checkpoint_path, get_extra_dist_checkpoint_path. "
+        "To migrate an old checkpoint, run scripts/migrate_megatron_checkpoint_layout.py."
+    )
 
 
 def convert_megatron_model_to_transformers_model(
