@@ -126,6 +126,12 @@ actor_rollout_ref:
           _target_: verl.utils.profiler.config.TorchMemoryToolConfig
           trace_alloc_max_entries: ${oc.select:global_profiler.global_tool_config.torch_memory.trace_alloc_max_entries,100000}
           stack_depth: ${oc.select:global_profiler.global_tool_config.torch_memory.stack_depth,32}
+        precision_debugger:
+          _target_: verl.utils.profiler.config.PrecisionDebuggerToolConfig
+          config_path: ${oc.select:global_profiler.global_tool_config.precision_debugger.config_path,null}
+          steps: null
+          stages: ${oc.select:global_profiler.global_tool_config.precision_debugger.stages,null}
+          strict: ${oc.select:global_profiler.global_tool_config.precision_debugger.strict,False}
     router_replay:
       _target_: verl.workers.config.RouterReplayConfig
       mode: disabled
@@ -181,6 +187,12 @@ actor_rollout_ref:
           _target_: verl.utils.profiler.config.TorchMemoryToolConfig
           trace_alloc_max_entries: ${oc.select:global_profiler.global_tool_config.torch_memory.trace_alloc_max_entries,100000}
           stack_depth: ${oc.select:global_profiler.global_tool_config.torch_memory.stack_depth,32}
+        precision_debugger:
+          _target_: verl.utils.profiler.config.PrecisionDebuggerToolConfig
+          config_path: ${oc.select:global_profiler.global_tool_config.precision_debugger.config_path,null}
+          steps: null
+          stages: ${oc.select:global_profiler.global_tool_config.precision_debugger.stages,null}
+          strict: ${oc.select:global_profiler.global_tool_config.precision_debugger.strict,False}
     router_replay:
       _target_: verl.workers.config.RouterReplayConfig
       mode: disabled
@@ -274,8 +286,8 @@ actor_rollout_ref:
       'n': 1
       do_sample: false
       num_inference_steps: 40
-      noise_level: 0.0
       seed: 42
+      extra_configs: {}
     multi_turn:
       _target_: verl.workers.config.MultiTurnConfig
       enable: false
@@ -285,7 +297,6 @@ actor_rollout_ref:
       max_parallel_calls: 1
       max_tool_response_length: 256
       tool_response_truncate_side: middle
-      interaction_config_path: null
       use_inference_chat_template: false
       tokenization_sanity_check_mode: strict
       format: hermes
@@ -339,6 +350,12 @@ actor_rollout_ref:
           _target_: verl.utils.profiler.config.TorchProfilerToolConfig
           contents: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.torch.contents,[]}
           discrete: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.torch.discrete,false}
+        precision_debugger:
+          _target_: verl.utils.profiler.config.PrecisionDebuggerToolConfig
+          config_path: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.precision_debugger.config_path,${oc.select:global_profiler.global_tool_config.precision_debugger.config_path,null}}
+          steps: null
+          stages: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.precision_debugger.stages,${oc.select:global_profiler.global_tool_config.precision_debugger.stages,null}}
+          strict: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.precision_debugger.strict,${oc.select:global_profiler.global_tool_config.precision_debugger.strict,False}}
     prometheus:
       _target_: verl.workers.config.PrometheusConfig
       enable: false
@@ -352,6 +369,7 @@ actor_rollout_ref:
     height: 512
     width: 512
     num_inference_steps: 10
+    extra_configs: {}
   model:
     _target_: verl.workers.config.DiffusionModelConfig
     path: ~/models/Qwen/Qwen-Image
@@ -371,7 +389,7 @@ actor_rollout_ref:
     height: ${oc.select:actor_rollout_ref.rollout.height,512}
     width: ${oc.select:actor_rollout_ref.rollout.width,512}
     num_inference_steps: ${oc.select:actor_rollout_ref.rollout.num_inference_steps,10}
-    extra_configs: {}
+    extra_configs: ${oc.select:actor_rollout_ref.rollout.extra_configs,{}}
     model_type: diffusion_model
   hybrid_engine: true
   nccl_timeout: 600
@@ -415,7 +433,6 @@ data:
     path: null
     name: null
   apply_chat_template_kwargs: {}
-  data_source: prompt
 critic:
   optim:
     _target_: verl.workers.config.FSDPOptimizerConfig
@@ -517,6 +534,12 @@ critic:
         _target_: verl.utils.profiler.config.TorchMemoryToolConfig
         trace_alloc_max_entries: ${oc.select:global_profiler.global_tool_config.torch_memory.trace_alloc_max_entries,100000}
         stack_depth: ${oc.select:global_profiler.global_tool_config.torch_memory.stack_depth,32}
+      precision_debugger:
+        _target_: verl.utils.profiler.config.PrecisionDebuggerToolConfig
+        config_path: ${oc.select:global_profiler.global_tool_config.precision_debugger.config_path,null}
+        steps: null
+        stages: ${oc.select:global_profiler.global_tool_config.precision_debugger.stages,null}
+        strict: ${oc.select:global_profiler.global_tool_config.precision_debugger.strict,False}
   forward_micro_batch_size: ${oc.select:.ppo_micro_batch_size,null}
   forward_micro_batch_size_per_gpu: ${oc.select:.ppo_micro_batch_size_per_gpu,null}
   ulysses_sequence_parallel_size: 1
@@ -619,8 +642,10 @@ algorithm:
     bypass_mode: false
     loss_type: ppo_clip
     rollout_is_batch_normalize: false
-  _target_: verl.trainer.config.AlgoConfig
+  _target_: verl.trainer.config.DiffusionAlgoConfig
+  adv_estimator: flow_grpo
   norm_adv_by_std_in_grpo: true
+  global_std: true
 trainer:
   balance_batch: true
   total_epochs: 30
@@ -650,7 +675,6 @@ trainer:
   max_critic_ckpt_to_keep: null
   ray_wait_register_center_timeout: 300
   device: cuda
-  use_legacy_worker_impl: auto
 ray_kwargs:
   ray_init:
     num_cpus: null

@@ -141,6 +141,9 @@ class RLHFDataset(Dataset):
         self.shuffle = config.get("shuffle", False)
         self.seed = config.get("seed")
 
+        # For diffusion model training only
+        self.negative_prompt_key = config.get("negative_prompt_key", "negative_prompt")
+
         self._download()
         self._read_files_and_tokenize()
 
@@ -193,7 +196,7 @@ class RLHFDataset(Dataset):
 
                 def doc2len(doc) -> int:
                     try:
-                        messages = self._build_messages(doc)
+                        messages = self._build_messages(doc, key=self.prompt_key)
                         # pass tool schemas if available so the processor can format prompts
                         apply_kwargs = dict(**self.apply_chat_template_kwargs)
                         if self.tool_schemas is not None:
@@ -300,7 +303,7 @@ class RLHFDataset(Dataset):
     def __len__(self):
         return len(self.dataframe)
 
-    def _build_messages(self, example: dict):
+    def _build_messages(self, example: dict, key: str):
         """Replace <image> and <video> placeholder in messages with corresponding image and video
         which is required by processor.apply_chat_template.
         - <image>: {"type": "image", **image}
@@ -312,10 +315,10 @@ class RLHFDataset(Dataset):
         Returns:
             messages: List of messages with replaced placeholder.
         """
-        messages: list = example[self.prompt_key]
-        # When concatenating image and video datasets, pop will return None for image or video sample
-        images = example.pop(self.image_key, None) or []
-        videos = example.pop(self.video_key, None) or []
+        messages: list = example[key]
+        # When concatenating image and video datasets, get will return None for image or video sample
+        images = example.get(self.image_key, None) or []
+        videos = example.get(self.video_key, None) or []
 
         image_offset, video_offset = 0, 0
         for message in messages:
@@ -359,7 +362,12 @@ class RLHFDataset(Dataset):
     def __getitem__(self, item):
         """For rollout, apply_chat_template has been moved to AgentLoop, so we only return raw_prompt here."""
         row_dict: dict = self.dataframe[item]
-        row_dict["raw_prompt"] = self._build_messages(row_dict)
+        row_dict["raw_prompt"] = self._build_messages(row_dict, key=self.prompt_key)
+        if self.negative_prompt_key in row_dict:
+            row_dict["raw_negative_prompt"] = self._build_messages(row_dict, key=self.negative_prompt_key)
+
+        row_dict.pop(self.image_key, None)
+        row_dict.pop(self.video_key, None)
 
         # TODO(wuxibin): We still need a dummy tensor to make sure DataProto.batch is not empty.
         # Remove this after deprecate DataProto by TensorDict.
@@ -370,13 +378,11 @@ class RLHFDataset(Dataset):
             row_dict["extra_info"] = dict()
         index = row_dict.get("extra_info", {}).get("index", 0)
         tools_kwargs = row_dict.get("extra_info", {}).get("tools_kwargs", {})
-        interaction_kwargs = row_dict.get("extra_info", {}).get("interaction_kwargs", {})
         need_tools_kwargs = row_dict.get("extra_info", {}).get("need_tools_kwargs", self.need_tools_kwargs)
         if need_tools_kwargs and not tools_kwargs:
             logger.warning("tools_kwargs is empty for index %s, data source: %s", index, row_dict["data_source"])
         row_dict["index"] = index
         row_dict["tools_kwargs"] = tools_kwargs
-        row_dict["interaction_kwargs"] = interaction_kwargs
         return row_dict
 
     @classmethod

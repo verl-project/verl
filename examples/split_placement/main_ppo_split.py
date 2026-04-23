@@ -127,29 +127,27 @@ def main_task(config):
 
     tokenizer = hf_tokenizer(local_path)
 
-    # define worker classes
-    if config.actor_rollout_ref.actor.strategy in {"fsdp", "fsdp2"}:
-        assert config.critic.strategy in {"fsdp", "fsdp2"}
-        from verl.single_controller.ray import RayWorkerGroup
-        from verl.workers.fsdp_workers import ActorRolloutRefWorker, CriticWorker
+    # Use the unified model-engine workers. The underlying backend
+    # (fsdp / fsdp2 / megatron / ...) is selected from
+    # ``config.actor_rollout_ref.actor.strategy`` and ``config.critic.strategy``.
+    from verl.single_controller.ray import RayWorkerGroup
+    from verl.workers.engine_workers import ActorRolloutRefWorker, TrainingWorker
 
-        ray_worker_group_cls = RayWorkerGroup
-
-    elif config.actor_rollout_ref.actor.strategy == "megatron":
-        assert config.actor_rollout_ref.actor.strategy == config.critic.strategy
-        from verl.single_controller.ray import RayWorkerGroup
-        from verl.workers.megatron_workers import ActorRolloutRefWorker, CriticWorker
-
-        ray_worker_group_cls = RayWorkerGroup
-
-    else:
-        raise NotImplementedError
+    ray_worker_group_cls = RayWorkerGroup
 
     from verl.trainer.ppo.ray_trainer import ResourcePoolManager, Role
 
+    # Ref policy is fused into ActorRolloutRefWorker unless LoRA is used with a
+    # dedicated ref model. Mirror ``main_ppo.py::add_actor_rollout_worker``.
+    lora_rank = config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
+    if lora_rank <= 0:
+        lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
+    ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
+    actor_role = Role.ActorRolloutRef if (need_reference_policy(config) and not ref_in_actor) else Role.ActorRollout
+
     role_worker_mapping = {
-        Role.ActorRollout: ray.remote(ActorRolloutRefWorker),
-        Role.Critic: ray.remote(CriticWorker),
+        actor_role: ray.remote(ActorRolloutRefWorker),
+        Role.Critic: ray.remote(TrainingWorker),
     }
 
     # NOTE: initialze two resource pool
@@ -167,14 +165,9 @@ def main_task(config):
         }
     print(f"resource_pool_spec: {resource_pool_spec}")
     mapping = {
-        Role.ActorRollout: actor_rollout_ref_pool_id,
+        actor_role: actor_rollout_ref_pool_id,
         Role.Critic: critic_pool_id,
     }
-
-    # use reference model
-    if need_reference_policy(config):
-        role_worker_mapping[Role.RefPolicy] = ray.remote(ActorRolloutRefWorker)
-        mapping[Role.RefPolicy] = actor_rollout_ref_pool_id
 
     reward_fn = RewardManager(tokenizer=tokenizer, num_examine=0)
 

@@ -513,8 +513,11 @@ class SGLangReplica(RolloutReplica):
         gpus_per_node: int = 8,
         is_reward_model: bool = False,
         is_teacher_model: bool = False,
+        name_suffix: str = "",
     ):
-        super().__init__(replica_rank, config, model_config, gpus_per_node, is_reward_model, is_teacher_model)
+        super().__init__(
+            replica_rank, config, model_config, gpus_per_node, is_reward_model, is_teacher_model, name_suffix
+        )
         self.server_class = ray.remote(SGLangHttpServer)
 
     async def launch_servers(self):
@@ -564,11 +567,11 @@ class SGLangReplica(RolloutReplica):
 
             node_id = worker_node_ids[node_rank * self.gpus_per_replica_node]
             if self.is_reward_model:
-                name = f"sglang_server_reward_{self.replica_rank}_{node_rank}"
+                name = f"sglang_server_reward_{self.replica_rank}_{node_rank}{self.name_suffix}"
             elif self.is_teacher_model:
-                name = f"sglang_server_teacher_{self.replica_rank}_{node_rank}"
+                name = f"sglang_server_teacher_{self.replica_rank}_{node_rank}{self.name_suffix}"
             else:
-                name = f"sglang_server_{self.replica_rank}_{node_rank}"
+                name = f"sglang_server_{self.replica_rank}_{node_rank}{self.name_suffix}"
             server = self.server_class.options(
                 scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                     node_id=node_id,

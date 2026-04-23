@@ -127,9 +127,14 @@ class TRTLLMHttpServer:
         assert self.config.pipeline_model_parallel_size == 1, "pipeline_model_parallel_size > 1 is not supported yet"
 
         engine_kwargs = self.config.get("engine_kwargs", {}).get("trtllm", {}) or {}
+        # Pop kv_cache_config from engine_kwargs to merge into KvCacheConfig constructor,
+        # otherwise **engine_kwargs unpacking in llm_kwargs would overwrite the entire
+        # KvCacheConfig object, losing free_gpu_memory_fraction and enable_block_reuse.
+        kv_cache_overrides = engine_kwargs.pop("kv_cache_config", {})
         kv_cache_config = KvCacheConfig(
             enable_block_reuse=self.config.enable_prefix_caching,
             free_gpu_memory_fraction=self.config.gpu_memory_utilization,
+            **kv_cache_overrides,
         )
 
         per_worker_gpu_share = 1.0 / self.max_colocate_count
@@ -337,10 +342,13 @@ class TRTLLMReplica(RolloutReplica):
         gpus_per_node: int = 8,
         is_reward_model: bool = False,
         is_teacher_model: bool = False,
+        name_suffix: str = "",
     ) -> None:
         if is_teacher_model:
             raise NotImplementedError("TRTLLMReplica doesn't support teacher model yet.")
-        super().__init__(replica_rank, config, model_config, gpus_per_node, is_reward_model, is_teacher_model)
+        super().__init__(
+            replica_rank, config, model_config, gpus_per_node, is_reward_model, is_teacher_model, name_suffix
+        )
         self.node_ip = ray.util.get_node_ip_address().strip("[]")
 
     def rollout_worker_use_gpu(self) -> bool:
@@ -363,7 +371,10 @@ class TRTLLMReplica(RolloutReplica):
         else:
             local_bundle_index = self.world_size * self.replica_rank
 
-        while local_bundle_index >= self.resource_pool.pgs[start_pg_index].bundle_count:
+        while (
+            start_pg_index < len(self.resource_pool.pgs)
+            and local_bundle_index >= self.resource_pool.pgs[start_pg_index].bundle_count
+        ):
             local_bundle_index -= self.resource_pool.pgs[start_pg_index].bundle_count
             start_pg_index += 1
         assert (
@@ -416,11 +427,10 @@ class TRTLLMReplica(RolloutReplica):
 
         # TRTLLMReplica is a 1:1 map from replica to TRTLLMHttpServer.
         name = (
-            f"trtllm_server_{self.replica_rank}"
+            f"trtllm_server_{self.replica_rank}{self.name_suffix}"
             if not self.is_reward_model
-            else f"trtllm_server_reward_{self.replica_rank}"
+            else f"trtllm_server_reward_{self.replica_rank}{self.name_suffix}"
         )
-
         server = TRTLLMHttpServer.options(
             scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                 node_id=node_id,

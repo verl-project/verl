@@ -23,6 +23,7 @@ from verl.experimental.agent_loop.agent_loop import AgentLoopBase, AgentLoopOutp
 from verl.experimental.agent_loop.diffusion_agent_loop import DiffusionAgentLoopOutput
 from verl.utils.chat_template import apply_chat_template
 from verl.utils.profiler import simple_timer
+from verl.utils.rollout_trace import rollout_trace_op
 from verl.utils.tokenizer import normalize_token_ids
 from verl.workers.rollout.replica import TokenOutput
 
@@ -39,6 +40,7 @@ class SingleTurnAgentLoop(AgentLoopBase):
         self.prompt_length = self.rollout_config.prompt_length
         self.response_length = self.rollout_config.response_length
 
+    @rollout_trace_op
     async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
         messages = list(kwargs["raw_prompt"])
 
@@ -94,19 +96,6 @@ class SingleTurnAgentLoop(AgentLoopBase):
 class DiffusionSingleTurnAgentLoop(AgentLoopBase):
     """Agent loop for diffusion model serving."""
 
-    # Keys from non_tensor_batch that are pipeline/dataset metadata and must
-    # NOT be forwarded to server_manager.generate() (which passes **kwargs
-    # down to the vllm-omni server that has a fixed signature).
-    _KEYS_EXCLUDED_FROM_GENERATE = frozenset(
-        {
-            "raw_prompt",
-            "raw_negative_prompt",
-            "data_source",
-            "reward_model",
-            "index",
-        }
-    )
-
     async def apply_chat_template(
         self,
         messages: list[dict],
@@ -152,10 +141,8 @@ class DiffusionSingleTurnAgentLoop(AgentLoopBase):
         )
 
     async def run(self, sampling_params: dict[str, Any], **kwargs) -> DiffusionAgentLoopOutput:
-        raw_prompt = kwargs.pop("raw_prompt")
-        raw_negative_prompt = kwargs.pop("raw_negative_prompt", None)
-        for key in self._KEYS_EXCLUDED_FROM_GENERATE:
-            kwargs.pop(key, None)
+        raw_prompt = kwargs["raw_prompt"]
+        raw_negative_prompt = kwargs.get("raw_negative_prompt")
 
         # 1. extract images and videos from messages
         multi_modal_data = await self.process_vision_info(raw_prompt)
@@ -180,7 +167,6 @@ class DiffusionSingleTurnAgentLoop(AgentLoopBase):
                 image_data=images,
                 video_data=videos,
                 negative_prompt_ids=negative_prompt_ids,
-                **kwargs,
             )
         if metrics.get("num_preempted") is None:
             metrics["num_preempted"] = output.num_preempted if output.num_preempted is not None else -1
@@ -189,7 +175,6 @@ class DiffusionSingleTurnAgentLoop(AgentLoopBase):
             prompt_ids=prompt_ids,
             response_diffusion_output=output.diffusion_output,
             response_logprobs=output.log_probs,
-            multi_modal_data=multi_modal_data,
             num_turns=2,
             metrics=metrics,
             extra_fields=output.extra_fields,

@@ -161,13 +161,13 @@ val_kwargs:
   # Whether to sample during training rollout. False uses greedy sampling.
   do_sample: False
 
-# Multi-turn interaction config for tools or chat.
+# Multi-turn tool config.
 multi_turn:
 
   # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
   _target_: verl.workers.config.MultiTurnConfig
 
-  # set to True for multi-turn tool interaction tasks; should set rollout.name to sglang as well
+  # set to True for multi-turn tool tasks; should set rollout.name to sglang as well
   enable: False
 
   # null for no limit (default max_length // 3)
@@ -188,9 +188,6 @@ multi_turn:
   # truncate side of tool response: left, middle, right
   tool_response_truncate_side: middle
 
-  # null for no interaction
-  interaction_config_path: null
-
   # - When set to True, the model's default chat template is used for multi-turn rollout, which typically matches production behavior.
   # - When set to False, the token ids recorded for training are used instead; unlike the default chat template, these always include the model's full output,
   #   which may contain additional content such as reasoning content. This maintains the consistency between training and rollout, but it will lead to longer prompts.
@@ -206,10 +203,10 @@ multi_turn:
   # - ignore_strippable: ignore strippable tokens when checking tokenization sanity
   tokenization_sanity_check_mode: strict
 
-  # Format of the multi-turn interaction. Options: hermes, llama3_json, ...
+  # Format of the multi-turn rollout. Options: hermes, llama3_json, ...
   format: hermes
 
-  # Number of repeat rollouts for each interaction
+  # Number of repeat rollouts for each sample
   num_repeat_rollouts: null
 
 # support logging rollout prob for debugging purpose
@@ -263,7 +260,7 @@ checkpoint_engine:
 
   # Specifies the tensor bucket size (in megabytes) for batch weight updates during rollout operations.
   # This parameter controls the maximum payload size for a single weight update request.
-  # Reference: https://github.com/volcengine/verl/pull/2418
+  # Reference: https://github.com/verl-project/verl/pull/2418
   # Currently only supported in SGLang rollout implementations
   # Larger values may improve throughput but increase memory overhead
   # Detailed performance comparison:
@@ -396,6 +393,26 @@ profiler:
 
       # True for each task has its own database, False for all tasks in one training step share one database.
       discrete: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.torch.discrete,false}
+
+    # msprobe precision debugger config
+    precision_debugger:
+
+      # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+      _target_: verl.utils.profiler.config.PrecisionDebuggerToolConfig
+
+      # Path to msprobe config json
+      config_path: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.precision_debugger.config_path,${oc.select:global_profiler.global_tool_config.precision_debugger.config_path,null}}
+
+      # Deprecated and ignored. Use global_profiler.steps.
+      steps: null
+
+      # Profile stages
+      # Supported stages: actor_update, actor_compute_log_prob, ref_compute_log_prob,
+      # compute_values, critic_update, compute_rm_score
+      stages: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.precision_debugger.stages,${oc.select:global_profiler.global_tool_config.precision_debugger.stages,null}}
+
+      # Whether to fail on unknown stage or missing msprobe
+      strict: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.precision_debugger.strict,${oc.select:global_profiler.global_tool_config.precision_debugger.strict,False}}
 
 # prometheus configuration for vllm/sglang server mode
 prometheus:

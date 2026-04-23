@@ -1,13 +1,10 @@
 hydra:
   searchpath:
-    - file://verl/trainer/config
+    - pkg://verl.trainer.config
 
 defaults:
   - ppo_trainer
   - _self_
-
-trainer:
-  use_legacy_worker_impl: disable
 
 async_training:
 

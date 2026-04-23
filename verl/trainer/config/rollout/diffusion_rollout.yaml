@@ -23,6 +23,11 @@ width: 512
 # number of inference steps for diffusion model rollout
 num_inference_steps: 10
 
+# extra configs for algorithm specific features.
+# Model-specific diffusion sampling params (e.g. true_cfg_scale, guidance_scale,
+# max_sequence_length, noise_level)
+extra_configs: {}
+
 # Extra inference engine arguments: add vllm_omni for diffusion
 engine_kwargs:
 
@@ -38,14 +43,11 @@ val_kwargs:
   # whether to repeat n times for validation
   n: 1
 
-  # Whether to sample during training rollout. False uses greedy sampling.
-  do_sample: False
-
   # number of inference steps for diffusion model rollout
   num_inference_steps: 40
 
-  # noise level for diffusion model rollout
-  noise_level: 0.0
-
   # random seed for validation
   seed: 42
+
+  # extra configs for algorithm specific features during validation.
+  extra_configs: {}

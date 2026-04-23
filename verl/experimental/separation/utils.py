@@ -64,12 +64,7 @@ def create_role_worker_mapping(config):
     Returns:
         dict: Mapping from roles to worker classes
     """
-    # Select worker class based on strategy
-    if config.trainer.get("use_legacy_worker_impl", "auto") != "disable":
-        raise NotImplementedError(
-            "Fully async policy or One step off policy does not support legacy worker implementation"
-        )
-
+    # Always use the unified model engine worker implementation.
     from verl.experimental.separation.engine_workers import DetachActorWorker
     from verl.single_controller.ray import RayWorkerGroup
     from verl.workers.engine_workers import TrainingWorker

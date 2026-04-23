@@ -17,7 +17,7 @@ from typing import Any, Optional
 
 from verl.base_config import BaseConfig
 
-__all__ = ["AlgoConfig", "FilterGroupsConfig", "KLControlConfig", "RolloutCorrectionConfig"]
+__all__ = ["AlgoConfig", "DiffusionAlgoConfig", "FilterGroupsConfig", "KLControlConfig", "RolloutCorrectionConfig"]
 
 
 @dataclass
@@ -667,3 +667,13 @@ class AlgoConfig(BaseConfig):
     # gdpo_reward_weights: per-dimension weights for aggregation (default: equal weights).
     gdpo_reward_keys: Optional[list[str]] = None
     gdpo_reward_weights: Optional[list[float]] = None
+
+
+@dataclass
+class DiffusionAlgoConfig(BaseConfig):
+    """Diffusion-specific algorithm config."""
+
+    adv_estimator: str = "flow_grpo"
+    norm_adv_by_std_in_grpo: bool = True
+    rollout_correction: Optional[RolloutCorrectionConfig] = None
+    global_std: bool = True

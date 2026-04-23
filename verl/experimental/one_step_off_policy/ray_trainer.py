@@ -115,7 +115,6 @@ class OneStepOffRayTrainer(SeparateRayPPOTrainer):
             self.kl_ctrl_in_reward = core_algos.get_kl_controller(self.config.algorithm.kl_ctrl)
 
         self.use_prefix_grouper = self.config.actor_rollout_ref.actor.get("use_prefix_grouper", False)
-        self.use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
 
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
 
@@ -372,7 +371,6 @@ class OneStepOffRayTrainer(SeparateRayPPOTrainer):
         await asyncio.sleep(0)
         self._fit_stop_profile()
         self._fit_collect_metrics(batch)
-        self._fit_torch_memory()
         self._fit_experimental(batch)
         self._fit_postprocess_step()
 

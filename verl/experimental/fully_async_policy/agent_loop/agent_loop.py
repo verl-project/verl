@@ -26,7 +26,7 @@ from verl.experimental.agent_loop.agent_loop import (
     AsyncLLMServerManager,
     TokenOutput,
 )
-from verl.experimental.teacher_loop import TeacherModelManager
+from verl.experimental.teacher_loop import MultiTeacherModelManager
 from verl.protocol import DataProto
 from verl.single_controller.ray import RayResourcePool, RayWorkerGroup
 from verl.utils.ray_utils import auto_await
@@ -96,11 +96,16 @@ class FullyAsyncLLMServerManager(AsyncLLMServerManager):
             final_output.token_ids.extend(output.token_ids)
             if output.log_probs is not None:
                 final_output.log_probs.extend(output.log_probs)
-            if output.routed_experts is not None:
+            # On partial rollout resume the model version may differ, so keep
+            # existing routing and only append routing for newly generated tokens.
+            if output.routed_experts is not None and len(output.token_ids) > 0:
                 if final_output.routed_experts is None:
                     final_output.routed_experts = output.routed_experts
                 else:
-                    final_output.routed_experts = torch.cat([final_output.routed_experts, output.routed_experts], dim=0)
+                    final_output.routed_experts = torch.cat(
+                        [final_output.routed_experts, output.routed_experts[-len(output.token_ids) :]],
+                        dim=0,
+                    )
             if output.num_preempted is not None:
                 final_output.num_preempted += output.num_preempted
             final_output.stop_reason = output.stop_reason
@@ -155,7 +160,7 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
         config: DictConfig,
         worker_group: RayWorkerGroup = None,
         rollout_resource_pool: RayResourcePool = None,
-        teacher_model_manager: TeacherModelManager = None,
+        teacher_model_manager: MultiTeacherModelManager = None,
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
         self.agent_loop_workers_class = FullyAsyncAgentLoopWorker

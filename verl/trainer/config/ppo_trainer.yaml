@@ -197,10 +197,6 @@ trainer:
   # Device to run training on (e.g., "cuda", "cpu")
   device: cuda
 
-  # whether to use legacy worker implementation
-  #  mode: "auto", "enable", or "disable"
-  use_legacy_worker_impl: disable
-
 # profiler configs
 global_profiler:
 
@@ -297,16 +293,10 @@ global_profiler:
       # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
       _target_: verl.utils.profiler.config.PrecisionDebuggerToolConfig
 
-      # Enable msprobe precision debugger
-      enable: False
-
       # Path to msprobe config json
       config_path: null
 
-      # Data directory for msprobe dumps
-      data_dir: "outputs/precision_debug"
-
-      # Profile steps
+      # Deprecated and ignored. Use global_profiler.steps.
       steps: null
 
       # Profile stages

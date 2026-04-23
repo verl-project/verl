@@ -60,7 +60,7 @@ Below are key factors for tuning vLLM-based rollout. Before tuning, we recommend
 More tuning details such as dealing with Preemption and Chunked-prefill
 can be found in `vLLM official tuning guide <https://docs.vllm.ai/en/latest/performance/optimization.html>`_ 
 
-For optimal performance, we recommend using vLLM v0.8.3 or later. See https://github.com/volcengine/verl/blob/main/docs/README_vllm0.8.md for details.
+For optimal performance, we recommend using vLLM v0.8.3 or later. See https://github.com/verl-project/verl/blob/main/docs/README_vllm0.8.md for details.
 
 Enable remove padding (sequence packing)
 -----------------------------------------
@@ -69,14 +69,14 @@ Currently, for llama, mistral, gemma1 and qwen based models, users can enable `u
 sequence packing implementation provided by transformers library.
 
 For other models, transformers library may also support it but we haven't tested it yet.
-Users can add the desired model config to the  `test_transformer.py <https://github.com/volcengine/verl/blob/main/tests/models/test_transformer.py#L24>`_ file.
+Users can add the desired model config to the  `test_transformer.py <https://github.com/verl-project/verl/blob/main/tests/models/test_transformer.py#L24>`_ file.
 And test its functionality by running the following command:
 
 .. code-block:: bash
 
   pytest -s tests/models/test_transformer.py
 
-If the test passes, you can add your desired model into the model `registry.py <https://github.com/volcengine/verl/blob/main/verl/models/registry.py#L24>`_ file.
+If the test passes, you can add your desired model into the model `registry.py <https://github.com/verl-project/verl/blob/main/verl/models/registry.py#L24>`_ file.
 Then, you can enjoy the performance boost of sequence packing
 and welcome to PR your tested model to verl!
 
@@ -90,10 +90,10 @@ users may need to tune the ``*micro_batch_size_per_gpu`` for different computati
 In verl, the core principle for setting batch sizes is:
 
 - **Algorithmic metrics** (train batch size, PPO mini-batch size) are *global* (from a single-controller perspective), 
-  normalized in each worker. See the `normalization code <https://github.com/volcengine/verl/blob/main/verl/workers/fsdp_workers.py#L120-L122>`_.
+  normalized in each worker. See the `normalization code <https://github.com/verl-project/verl/blob/main/verl/workers/engine_workers.py>`_.
 
 - **Performance-related parameters** (micro batch size, max token length for dynamic batch size) are *local* parameters that define the per-GPU data allocations. 
-  See the `normalization code <https://github.com/volcengine/verl/blob/main/verl/workers/fsdp_workers.py#L127>`_.
+  See the `normalization code <https://github.com/verl-project/verl/blob/main/verl/workers/engine_workers.py>`_.
 
 .. note:: In your training script, please use ``*micro_batch_size_per_gpu`` instead of ``*micro_batch_size``. 
   So that you don't need to consider the normalization of the ``micro_batch_size`` and ``micro_batch_size`` will be deprecated.
@@ -146,7 +146,7 @@ Dynamic Batch Size Tuning tips
 Here're some tips to tune the above parameters:
 
 1. **Increase** ``actor_rollout_ref.actor.ppo_max_token_len_per_gpu``  
-   Make it at least 2 x (max_prompt_length + max_response_length). We set it to 3x in `run_qwen2-7b_rm_seq_balance.sh <https://github.com/volcengine/verl/blob/main/examples/ppo_trainer/run_qwen2-7b_rm_seq_balance.sh#L25>`_.
+   Make it at least 2 x (max_prompt_length + max_response_length). We set it to 3x in `run_qwen2-7b_rm_seq_balance.sh <https://github.com/verl-project/verl/blob/main/examples/ppo_trainer/run_qwen2-7b_rm_seq_balance.sh#L25>`_.
    Try to increase it to get higher throughput.
 
 2. **Forward-only parameters can be larger**: 
@@ -154,7 +154,7 @@ Here're some tips to tune the above parameters:
  
 3. **Use larger limits for Critic and Reward models**:
    Critic and Reward parameters can be set at least 2× the Actor’s limits. For instance, we set them to 4× here:  
-   `run_qwen2-7b_rm_seq_balance.sh <https://github.com/volcengine/verl/blob/main/examples/ppo_trainer/run_qwen2-7b_rm_seq_balance.sh#L40>`_
+   `run_qwen2-7b_rm_seq_balance.sh <https://github.com/verl-project/verl/blob/main/examples/ppo_trainer/run_qwen2-7b_rm_seq_balance.sh#L40>`_
    
 .. :math:`\text{critic.ppo_max_token_len_per_gpu}  = 2 \times  \text{actor.ppo_max_token_len_per_gpu})`.
 

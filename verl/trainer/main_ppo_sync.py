@@ -22,7 +22,9 @@ Differs from original PPO trainer in main_ppo.py:
 """
 
 import asyncio
+import json
 import logging
+import math
 import os
 import threading
 import time
@@ -52,7 +54,7 @@ from tqdm import tqdm
 from verl.checkpoint_engine import CheckpointEngineManager
 from verl.experimental.agent_loop import AgentLoopManager, AgentLoopOutput, AgentLoopWorker, get_trajectory_info
 from verl.experimental.reward_loop import RewardLoopManager
-from verl.experimental.teacher_loop import TeacherModelManager
+from verl.experimental.teacher_loop import MultiTeacherModelManager
 from verl.protocol import DataProto, DataProtoFuture
 from verl.single_controller.ray import (
     RayClassWithInitArgs,
@@ -61,6 +63,7 @@ from verl.single_controller.ray import (
     ResourcePoolManager,
     create_colocated_worker_cls,
 )
+from verl.trainer.distillation import is_distillation_enabled
 from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler, run_ppo
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import agg_loss
@@ -71,6 +74,7 @@ from verl.trainer.ppo.metric_utils import (
     compute_variance_proxy_metrics,
     process_validation_metrics,
 )
+from verl.trainer.ppo.padding_utils import upsample_batch_to_divisible_size
 from verl.trainer.ppo.ray_trainer import apply_kl_penalty, compute_advantage
 from verl.trainer.ppo.rollout_corr_helper import compute_rollout_correction_and_add_to_batch
 from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_teacher_policy
@@ -90,7 +94,7 @@ from verl.utils.ray_utils import auto_await
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.tensordict_utils import list_of_dict_to_tensordict
 from verl.utils.tracking import Tracking, ValidationGenerationsLogger
-from verl.workers.config import CriticConfig
+from verl.workers.config import CriticConfig, DistillationConfig
 from verl.workers.engine_workers import ActorRolloutRefWorker, TrainingWorker, TrainingWorkerConfig
 from verl.workers.utils.losses import value_loss
 from verl.workers.utils.padding import response_from_nested, response_to_nested
@@ -372,6 +376,15 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
             kwargs=kwargs,
         )
 
+        # TODO: Support output:list[AgentLoopOutput]
+        await self._compute_teacher_logprobs(
+            output,
+            prompt_ids=output.prompt_ids,
+            response_ids=output.response_ids,
+            validate=validate,
+            sample_kwargs=kwargs,
+        )
+
         if final_output.reward_score is not None:
             for output in outputs[:-1]:
                 output.reward_score = final_output.reward_score
@@ -437,7 +450,7 @@ class AgentLoopManagerTQ(AgentLoopManager):
         worker_group: RayWorkerGroup = None,
         rollout_resource_pool: RayResourcePool = None,
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
-        teacher_model_manager: TeacherModelManager = None,
+        teacher_model_manager: MultiTeacherModelManager = None,
         replay_buffer: ReplayBuffer = None,
     ):
         """Create agent loop manager."""
@@ -593,6 +606,7 @@ class PPOTrainer:
         actor_rollout_cls = RayClassWithInitArgs(
             cls=self.role_worker_mapping[actor_role],
             config=self.config.actor_rollout_ref,
+            distillation_config=self.config.get("distillation"),
             role=str(actor_role),
         )
         self.resource_pool_to_cls[actor_rollout_resource_pool][str(actor_role)] = actor_rollout_cls
@@ -631,6 +645,8 @@ class PPOTrainer:
         logger.info(f"worker group kwargs: {wg_kwargs}")
 
         for resource_pool, class_dict in self.resource_pool_to_cls.items():
+            if not class_dict:
+                continue
             worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
             wg_dict = RayWorkerGroup(
                 resource_pool=resource_pool,
@@ -674,16 +690,19 @@ class PPOTrainer:
         )
         logger.info("reward loop manager initialized")
 
-        # TODO: Support OPD
+        # 8. initialize teacher loop manager
         if self.use_teacher_policy:
-            logger.info("OPD is not supported in `main_ppo_sync.py` yet.")
-            self.teacher_model_manager = None
-            self.distillation_config = None
+            teacher_resource_pool = self.resource_pool_manager.get_resource_pool(Role.TeacherModel)
+            self.teacher_model_manager = MultiTeacherModelManager(
+                config=self.config,
+                resource_pool=teacher_resource_pool,
+            )
+            self.distillation_config: DistillationConfig = omega_conf_to_dataclass(self.config.distillation)
         else:
             self.teacher_model_manager = None
             self.distillation_config = None
 
-        # 8. initialize agent loop manager
+        # 9. initialize agent loop manager
         manager_class_fqn = self.config.actor_rollout_ref.rollout.get("agent", {}).get("agent_loop_manager_class")
         if manager_class_fqn:
             agent_loop_manager_cls = load_class_from_fqn(manager_class_fqn, "AgentLoopManager")
@@ -699,7 +718,7 @@ class PPOTrainer:
         )
         logger.info("agent loop manager initialized")
 
-        # 9. initialize checkpoint engine manager
+        # 10. initialize checkpoint engine manager
         checkpoint_engine_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
         self.checkpoint_manager = CheckpointEngineManager(
             config=checkpoint_engine_config,
@@ -858,8 +877,33 @@ class PPOTrainer:
                 self.checkpoint_manager.update_weights()
 
             # 4. collect necessary data for logging
-            fields = ["uid", "prompts", "responses", "rm_scores", "num_turns", "reward_model", "data_source"]
-            data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=fields)
+            # For multi-output agent loops, only use the final output per session for metrics.
+            # Keys have format {uid}_{session_id}_{index}; keep only the highest index per session.
+            final_indices = []
+            session_max: dict[str, tuple[int, int]] = {}  # session_key -> (max_index, position)
+            for pos, key in enumerate(batch.keys):
+                parts = key.rsplit("_", 2)
+                if len(parts) == 3:
+                    session_key = f"{parts[0]}_{parts[1]}"
+                    index = int(parts[2])
+                    if session_key not in session_max or index > session_max[session_key][0]:
+                        session_max[session_key] = (index, pos)
+                else:
+                    session_max[key] = (0, pos)
+            final_indices = sorted(pos for _, pos in session_max.values())
+            final_keys = [batch.keys[i] for i in final_indices]
+
+            fields = [
+                "uid",
+                "prompts",
+                "responses",
+                "rm_scores",
+                "num_turns",
+                "reward_model",
+                "data_source",
+                "extra_fields",
+            ]
+            data = tq.kv_batch_get(keys=final_keys, partition_id=batch.partition_id, select_fields=fields)
             data["prompts"] = data["prompts"].to_padded_tensor(padding=self.tokenizer.pad_token_id)
             data["responses"] = data["responses"].to_padded_tensor(padding=self.tokenizer.pad_token_id)
 
@@ -872,6 +916,22 @@ class PPOTrainer:
             sample_scores.extend(scores)
             sample_turns.extend(data.pop("num_turns").tolist())
             reward_extra_infos_dict["reward"].extend(scores)
+
+            extra_fields_list = data.pop("extra_fields", None)
+            if extra_fields_list is not None:
+                n_prior = len(reward_extra_infos_dict["reward"]) - len(extra_fields_list.tolist())
+                for extra_field in extra_fields_list.tolist():
+                    reward_extra_info = (
+                        extra_field.get("reward_extra_info", {}) if isinstance(extra_field, dict) else {}
+                    )
+                    for key in reward_extra_infos_dict:
+                        if key != "reward" and key not in reward_extra_info:
+                            reward_extra_infos_dict[key].append(None)
+                    for key, value in reward_extra_info.items():
+                        if key not in reward_extra_infos_dict:
+                            reward_extra_infos_dict[key] = [None] * n_prior
+                        reward_extra_infos_dict[key].append(value)
+                    n_prior += 1
 
             reward_model = data.pop("reward_model", None)
             if reward_model is not None:
@@ -895,12 +955,19 @@ class PPOTrainer:
         # dump to local dir
         val_data_dir = self.config.trainer.get("validation_data_dir", None)
         if val_data_dir:
+            sorted_indices = sorted(range(len(sample_uids)), key=lambda i: sample_uids[i])
+            dump_inputs = [sample_inputs[i] for i in sorted_indices]
+            dump_outputs = [sample_outputs[i] for i in sorted_indices]
+            dump_gts = [sample_gts[i] for i in sorted_indices]
+            dump_scores = [sample_scores[i] for i in sorted_indices]
+            dump_extra = {k: [v[i] for i in sorted_indices] for k, v in reward_extra_infos_dict.items()}
+            dump_extra["uid"] = [sample_uids[i] for i in sorted_indices]
             self._dump_generations(
-                inputs=sample_inputs,
-                outputs=sample_outputs,
-                gts=sample_gts,
-                scores=sample_scores,
-                reward_extra_infos_dict=reward_extra_infos_dict,
+                inputs=dump_inputs,
+                outputs=dump_outputs,
+                gts=dump_gts,
+                scores=dump_scores,
+                reward_extra_infos_dict=dump_extra,
                 dump_path=val_data_dir,
             )
 
@@ -925,6 +992,90 @@ class PPOTrainer:
 
         # Log to each configured logger
         self.validation_generations_logger.log(self.config.trainer.logger, samples, self.global_steps)
+
+    def _dump_generations(self, inputs, outputs, gts, scores, reward_extra_infos_dict, dump_path):
+        """Dump rollout/validation samples as JSONL."""
+        os.makedirs(dump_path, exist_ok=True)
+        filename = os.path.join(dump_path, f"{self.global_steps}.jsonl")
+
+        n = len(inputs)
+        base_data = {
+            "input": inputs,
+            "output": outputs,
+            "gts": gts,
+            "score": scores,
+            "step": [self.global_steps] * n,
+        }
+
+        for k, v in reward_extra_infos_dict.items():
+            if len(v) == n:
+                base_data[k] = v
+
+        def json_encode_default(obj):
+            if isinstance(obj, np.integer):
+                return int(obj)
+            elif isinstance(obj, np.floating):
+                return float(obj)
+            elif isinstance(obj, np.bool_):
+                return bool(obj)
+            elif isinstance(obj, np.ndarray):
+                return obj.tolist()
+            raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+        lines = []
+        for i in range(n):
+            entry = {k: v[i] for k, v in base_data.items()}
+            lines.append(json.dumps(entry, ensure_ascii=False, default=json_encode_default))
+
+        with open(filename, "w") as f:
+            f.write("\n".join(lines) + "\n")
+
+        print(f"Dumped generations to {filename}")
+
+    def _log_rollout_data(self, batch: KVBatchMeta, timing_raw: dict, rollout_data_dir: str):
+        """Fetch rollout data from TransferQueue and dump sorted by uid."""
+        with marked_timer("dump_rollout_generations", timing_raw, color="green"):
+            fields = ["uid", "prompts", "responses", "rm_scores", "reward_model"]
+            data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=fields)
+            data["prompts"] = data["prompts"].to_padded_tensor(padding=self.tokenizer.pad_token_id)
+            data["responses"] = data["responses"].to_padded_tensor(padding=self.tokenizer.pad_token_id)
+
+            uids = data.pop("uid").tolist()
+            inputs = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in data["prompts"]]
+            outputs = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in data["responses"]]
+            scores = data["rm_scores"].sum(dim=1).tolist()
+
+            reward_model = data.pop("reward_model", None)
+            if reward_model is not None:
+                gts = [item.get("ground_truth", None) for item in reward_model.tolist()]
+            else:
+                gts = [None] * len(uids)
+
+            # Sort by uid key ({sample}_{rollout}_{output})
+            sort_keys = []
+            for key in batch.keys:
+                parts = key.rsplit("_", 2)
+                if len(parts) == 3:
+                    sort_keys.append((parts[0], int(parts[1]), int(parts[2])))
+                else:
+                    sort_keys.append((key, 0, 0))
+            sorted_indices = sorted(range(len(sort_keys)), key=lambda i: sort_keys[i])
+
+            inputs = [inputs[i] for i in sorted_indices]
+            outputs = [outputs[i] for i in sorted_indices]
+            gts = [gts[i] for i in sorted_indices]
+            scores = [scores[i] for i in sorted_indices]
+
+            reward_extra_infos_dict = {"uid": [batch.keys[i] for i in sorted_indices]}
+
+            self._dump_generations(
+                inputs=inputs,
+                outputs=outputs,
+                gts=gts,
+                scores=scores,
+                reward_extra_infos_dict=reward_extra_infos_dict,
+                dump_path=rollout_data_dir,
+            )
 
     def _val_metrics_update(self, data_sources, sample_uids, reward_extra_infos_dict, sample_turns) -> dict[str, float]:
         data_src2var2metric2val = process_validation_metrics(data_sources, sample_uids, reward_extra_infos_dict)
@@ -995,11 +1146,27 @@ class PPOTrainer:
         # TODO: add reward model
         raise NotImplementedError
 
+    def _get_required_batch_multiple(self, dp_size: int) -> int:
+        """Return the global batch multiple required by downstream train steps(e.g. critics, actors)."""
+        required_multiple = dp_size
+
+        # If enabled with critic training, the batch should align with critic PPO mini-batches.
+        if self.use_critic:
+            critic_global_mini_batch_size = self.config.critic.ppo_mini_batch_size
+            critic_global_mini_batch_size *= self.config.actor_rollout_ref.rollout.n
+            required_multiple = math.lcm(required_multiple, critic_global_mini_batch_size)
+
+        # If there is an actor update, the batch should align with actor PPO mini-batches too.
+        if self.config.trainer.critic_warmup <= self.global_steps:
+            actor_global_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
+            actor_global_mini_batch_size *= self.config.actor_rollout_ref.rollout.n
+            required_multiple = math.lcm(required_multiple, actor_global_mini_batch_size)
+
+        # Notice lcm(a, b, c) == lcm(lcm(a, b), c), so it is optimal.
+        return required_multiple
+
     def _balance_batch(self, batch: KVBatchMeta, metrics, logging_prefix="global_seqlen", keep_minibatch=False):
         """Reorder the data on single controller such that each dp rank gets similar total tokens."""
-        global_seqlen_lst = torch.tensor([tag["seq_len"] for tag in batch.tags], dtype=torch.int64)
-        workload_lst = calculate_workload(global_seqlen_lst)
-
         # get actor dp size
         role, worker_group = "actor", self.actor_rollout_wg
         if role not in worker_group._dispatch_info:
@@ -1009,9 +1176,11 @@ class PPOTrainer:
             dp_rank_mapping = worker_group._dispatch_info[role]
         dp_size = max(dp_rank_mapping) + 1
 
-        # TODO: up sampling if batch is not divisible by dp_size
-        if len(batch) % dp_size != 0:
-            raise ValueError(f"Batch size {len(batch)} is not divisible by dp_size {dp_size}")
+        # Upsampling the batch with padding sequences
+        batch_multiple = self._get_required_batch_multiple(dp_size)
+        batch = upsample_batch_to_divisible_size(batch, batch_multiple, self.tokenizer.eos_token_id)
+        global_seqlen_lst = torch.tensor([tag["seq_len"] for tag in batch.tags], dtype=torch.int64)
+        workload_lst = calculate_workload(global_seqlen_lst)
 
         # reorder based on index. The data will be automatically equally partitioned by dispatch function
         global_partition_lst = get_seqlen_balanced_partitions(workload_lst, k_partitions=dp_size, equal_size=True)
@@ -1020,6 +1189,7 @@ class PPOTrainer:
             seqlen_list=global_seqlen_lst.tolist(), partitions=global_partition_lst, prefix=logging_prefix
         )
         metrics.update(global_balance_stats)
+        return batch
 
     def _compute_old_log_prob(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
         """Compute the old log prob of the batch."""
@@ -1038,7 +1208,13 @@ class PPOTrainer:
             return
 
         # 1. compute log probs
-        batch.extra_info.update({"calculate_entropy": True, "compute_loss": False})
+        batch.extra_info.update(
+            {
+                "calculate_entropy": True,
+                "compute_loss": False,
+                "temperature": self.config.actor_rollout_ref.rollout.temperature,
+            }
+        )
         output: KVBatchMeta = self.actor_rollout_wg.compute_log_prob(batch)
         assert len(output) == len(batch)
 
@@ -1054,7 +1230,7 @@ class PPOTrainer:
         data["old_log_probs"] = response_from_nested(data.pop("log_probs"), data["response_mask"])
         data["entropy"] = response_from_nested(data.pop("entropy"), data["response_mask"])
         t_start = time.time()
-        tq.kv_batch_put(
+        batch = tq.kv_batch_put(
             keys=batch.keys, partition_id=batch.partition_id, fields=data.select("old_log_probs", "entropy")
         )
         t_end = time.time()
@@ -1085,7 +1261,11 @@ class PPOTrainer:
     def _compute_ref_log_prob(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
         """Compute the reference log prob of the batch."""
         # 1. compute log probs
-        metadata = {"calculate_entropy": False, "compute_loss": False}
+        metadata = {
+            "calculate_entropy": False,
+            "compute_loss": False,
+            "temperature": self.config.actor_rollout_ref.rollout.temperature,
+        }
         if self.ref_in_actor:
             metadata["no_lora_adapter"] = True
         batch.extra_info.update(metadata)
@@ -1191,7 +1371,7 @@ class PPOTrainer:
             output[field] = response_to_nested(data.batch[field], response_mask)
         output = TensorDict(output, batch_size=len(batch))
         t_start = time.time()
-        tq.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=output)
+        batch = tq.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=output)
         t_end = time.time()
         print(f"[DEBUG] _compute_advantage time to put data: {t_end - t_start:.2f}", flush=True)
 
@@ -1223,14 +1403,23 @@ class PPOTrainer:
         """Update the actor network."""
         ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
         ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
-        calculate_entropy = self.config.actor_rollout_ref.actor.entropy_coeff != 0.0
+        calculate_entropy = self.config.actor_rollout_ref.actor.calculate_entropy or (
+            self.config.actor_rollout_ref.actor.entropy_coeff != 0.0
+        )
+        distillation_use_topk = (
+            self.distillation_config.distillation_loss.loss_settings.use_topk
+            if is_distillation_enabled(self.config.get("distillation"))
+            else False
+        )
         extra_info = {
             "calculate_entropy": calculate_entropy,
+            "distillation_use_topk": distillation_use_topk,
             "global_batch_size": ppo_mini_batch_size,
             "mini_batch_size": ppo_mini_batch_size,
             "epochs": self.config.actor_rollout_ref.actor.ppo_epochs,
             "seed": self.config.actor_rollout_ref.actor.data_loader_seed,
             "dataloader_kwargs": {"shuffle": self.config.actor_rollout_ref.actor.shuffle},
+            "temperature": self.config.actor_rollout_ref.rollout.temperature,
         }
         batch.extra_info.update(extra_info)
 
@@ -1244,6 +1433,7 @@ class PPOTrainer:
 
     def _compute_metrics(self, batch: KVBatchMeta, metrics, timing_raw, global_steps, epoch):
         # 1. collect necessary fields from TransferQueue for computing metrics
+        non_padding_mask = np.array([not tag.get("is_padding", False) for tag in batch.tags], dtype=bool)
         fields = [
             "prompts",
             "responses",
@@ -1256,6 +1446,7 @@ class PPOTrainer:
             "num_turns",
         ]
         data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=fields)
+        num_turns = np.array(data.pop("num_turns").tolist())
         prompt_length = data["prompts"].offsets().diff()
         response_length = data["responses"].offsets().diff()
         global_token_num = (prompt_length + response_length).tolist()
@@ -1266,18 +1457,20 @@ class PPOTrainer:
         data["prompt_length"] = prompt_length.float()
         data["response_length"] = response_length.float()
         batch = DataProto(batch=data, meta_info={"global_token_num": global_token_num})
+        metrics_batch = batch.select_idxs(non_padding_mask) if non_padding_mask.any() else batch
 
         # 2. compute metrics
         metrics.update({"training/global_step": global_steps, "training/epoch": epoch})
-        metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
+        metrics.update(compute_data_metrics(batch=metrics_batch, use_critic=self.use_critic))
         metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
         n_gpus = self.resource_pool_manager.get_n_gpus()
         metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
         gradient_norm = metrics.get("actor/grad_norm", None)
-        metrics.update(compute_variance_proxy_metrics(batch=batch, gradient_norm=gradient_norm))
+        metrics.update(compute_variance_proxy_metrics(batch=metrics_batch, gradient_norm=gradient_norm))
 
         # 3. other auxiliary metrics
-        num_turns = np.array(data.pop("num_turns").tolist())
+        if non_padding_mask.any():
+            num_turns = num_turns[non_padding_mask]
         metrics.update(
             {
                 "training/num_turns/mean": num_turns.mean(),
@@ -1360,7 +1553,12 @@ class PPOTrainer:
                 # 5. record metrics
                 self._compute_metrics(batch, metrics, timing_raw, global_steps=self.global_steps, epoch=epoch)
 
-                # 6. cleanup transfer queue and replay buffer
+                # 6. dump rollout generations if enabled
+                rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
+                if rollout_data_dir:
+                    self._log_rollout_data(batch, timing_raw, rollout_data_dir)
+
+                # 7. cleanup transfer queue and replay buffer
                 tq.kv_clear(keys=batch.keys, partition_id=batch.partition_id)
                 self.replay_buffer.remove(batch.partition_id, batch.keys)
 
@@ -1391,7 +1589,7 @@ class PPOTrainer:
                 batch = self._compute_reward_colocate(batch)
 
         # 4. balance batch across data parallel groups
-        self._balance_batch(batch, metrics=metrics)
+        batch = self._balance_batch(batch, metrics=metrics)
 
         # 5. compute old_log_prob
         with marked_timer("old_log_prob", timing_raw, color="blue"):
@@ -1472,6 +1670,17 @@ class TaskRunner:
             config.reward.reward_model.nnodes = config.trainer.nnodes
             config.reward.reward_model.n_gpus_per_node = config.trainer.n_gpus_per_node
             self.mapping[Role.RewardModel] = "global_pool"
+
+        distillation_config = config.get("distillation")
+        if is_distillation_enabled(distillation_config):
+            if distillation_config.n_gpus_per_node <= 0:
+                raise ValueError("config.distillation.n_gpus_per_node must be greater than 0")
+            if distillation_config.nnodes <= 0:
+                raise ValueError("config.distillation.nnodes must be greater than 0")
+
+            teacher_pool = [distillation_config.n_gpus_per_node] * distillation_config.nnodes
+            resource_pool_spec["teacher_pool"] = teacher_pool
+            self.mapping[Role.TeacherModel] = "teacher_pool"
 
         self.resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=self.mapping)
 

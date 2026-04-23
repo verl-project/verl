@@ -13,7 +13,7 @@
 # limitations under the License.
 import warnings
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 
 from omegaconf import MISSING
 
@@ -65,9 +65,9 @@ class SamplingConfig(BaseConfig):
 
 @dataclass
 class DiffusionSamplingConfig(SamplingConfig):
-    noise_level: float = 0.0
     num_inference_steps: int = 40
     seed: int = 42
+    extra_configs: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -81,7 +81,6 @@ class MultiTurnConfig(BaseConfig):
     max_parallel_calls: int = 1
     max_tool_response_length: int = 256
     tool_response_truncate_side: str = "middle"
-    interaction_config_path: Optional[str] = None
     use_inference_chat_template: bool = False
     tokenization_sanity_check_mode: str = "strict"
     format: str = "hermes"
@@ -349,6 +348,8 @@ class DiffusionRolloutConfig(RolloutConfig):
     width: int = 512
 
     num_inference_steps: int = 10
+
+    extra_configs: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
         """Validate diffusion rollout config"""

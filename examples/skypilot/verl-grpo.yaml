@@ -12,7 +12,7 @@ secrets:
 
 setup: |  
   rm -rf verl
-  git clone https://github.com/volcengine/verl.git
+  git clone https://github.com/verl-project/verl.git
   cd verl
   pip3 install -v -e .[vllm]
   pip3 install flashinfer-python

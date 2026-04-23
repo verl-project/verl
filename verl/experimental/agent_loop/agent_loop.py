@@ -32,7 +32,7 @@ from transformers import AutoProcessor, AutoTokenizer
 
 from verl.experimental.agent_loop.prometheus_utils import update_prometheus_config
 from verl.experimental.agent_loop.utils import resolve_config_path
-from verl.experimental.teacher_loop import TeacherModelManager
+from verl.experimental.teacher_loop import MultiTeacherModelManager
 from verl.protocol import DataProto
 from verl.single_controller.ray.base import RayResourcePool, RayWorkerGroup
 from verl.trainer.distillation import is_distillation_enabled
@@ -40,6 +40,7 @@ from verl.utils.chat_template import apply_chat_template, initialize_system_prom
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.dataset.rl_dataset import RLHFDataset, get_dataset_class
 from verl.utils.model import compute_position_id_with_mask
+from verl.utils.profiler import simple_timer
 from verl.utils.ray_utils import auto_await, get_event_loop
 from verl.utils.rollout_trace import (
     RolloutTraceConfig,
@@ -180,6 +181,7 @@ class AgentLoopMetrics(BaseModel):
 
     generate_sequences: float = 0.0
     tool_calls: float = 0.0
+    compute_score: float = 0.0
     num_preempted: int = -1  # -1 means not available
 
 
@@ -230,6 +232,14 @@ class AgentLoopOutput(BaseModel):
             rm_scores[-1] = reward_score
             output["rm_scores"] = rm_scores
 
+        teacher_ids, teacher_logprobs = (
+            output["extra_fields"].pop("teacher_ids", None),
+            output["extra_fields"].pop("teacher_logprobs", None),
+        )
+        if teacher_ids is not None:
+            output["teacher_ids"] = teacher_ids
+        if teacher_logprobs is not None:
+            output["teacher_logprobs"] = teacher_logprobs
         return output
 
 
@@ -444,8 +454,8 @@ class AgentLoopWorker:
         config: DictConfig,
         servers: list[tuple[str, ray.actor.ActorHandle]],
         load_balancer_handle: ray.actor.ActorHandle,
-        teacher_servers: list[tuple[str, ray.actor.ActorHandle]] = None,
-        teacher_load_balancer_handle: ray.actor.ActorHandle = None,
+        teacher_servers: Optional[dict[str, list[tuple[str, ray.actor.ActorHandle]]]] = None,
+        teacher_load_balancer_handle: Optional[dict[str, ray.actor.ActorHandle]] = None,
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
         """Initialize agent loop manager.
@@ -454,7 +464,8 @@ class AgentLoopWorker:
             servers (list[tuple[str, ray.actor.ActorHandle]]): (address, handle) pairs for each LLM server.
             load_balancer_handle (ray.actor.ActorHandle): shared global load balancer actor.
             reward_loop_worker_handles (list[ray.actor.ActorHandle]): Actor handles for streaming reward computation.
-            teacher_servers (list[tuple[str, ray.actor.ActorHandle]]): (address, handle) pairs for each teacher server.
+            teacher_servers: for each teacher key, the (address, handle) pairs of its LLM servers.
+            teacher_load_balancer_handle: for each teacher key, the shared load balancer actor.
         """
         self.config = config
         rollout_config, model_config = _get_rollout_and_model_config(config)
@@ -465,27 +476,20 @@ class AgentLoopWorker:
         if self.distillation_enabled:
             self.distillation_config: DistillationConfig = omega_conf_to_dataclass(self.distillation_config)
             self.distillation_loss_config: DistillationLossConfig = self.distillation_config.distillation_loss
-            self.stream_teacher_with_rollout = self.distillation_config.teacher_model.enable_resource_pool
+            self.teacher_key: str = self.distillation_config.teacher_key
 
-            if self.stream_teacher_with_rollout:
-                if teacher_servers is None:
-                    raise ValueError("Distillation streaming is enabled but no teacher servers were provided.")
-                if teacher_load_balancer_handle is None:
-                    raise ValueError("Distillation streaming is enabled but no teacher load balancer was provided.")
-                if not hasattr(self, "teacher_server_manager"):
-                    from verl.experimental.teacher_loop.teacher_manager import AsyncTeacherLLMServerManager
+            if not teacher_servers:
+                raise ValueError("Distillation is enabled but no teacher servers were provided.")
+            if not teacher_load_balancer_handle:
+                raise ValueError("Distillation is enabled but no teacher load balancer was provided.")
+            if not hasattr(self, "teacher_server_manager"):
+                from verl.experimental.teacher_loop.teacher_manager import AsyncTeacherLLMServerManager
 
-                    self.teacher_server_manager = AsyncTeacherLLMServerManager(
-                        config,
-                        teacher_servers,
-                        load_balancer_handle=teacher_load_balancer_handle,
-                        distillation_config=self.distillation_config,
-                        pad_token_id=self.model_config.tokenizer.pad_token_id,
-                    )
-            else:
-                self.teacher_server_manager = None
-        else:
-            self.stream_teacher_with_rollout = False
+                self.teacher_server_manager = AsyncTeacherLLMServerManager(
+                    config=config,
+                    servers=teacher_servers,
+                    load_balancer_handle=teacher_load_balancer_handle,
+                )
 
         # for recipe to change
         if not hasattr(self, "server_manager"):
@@ -748,6 +752,7 @@ class AgentLoopWorker:
             prompt_ids=output.prompt_ids,
             response_ids=output.response_ids,
             validate=validate,
+            sample_kwargs=kwargs,
         )
         teacher_ids, teacher_logprobs = (
             output.extra_fields.pop("teacher_ids", None),
@@ -857,37 +862,54 @@ class AgentLoopWorker:
         enable_async_reward = self.reward_loop_worker_handles is not None
 
         if output.reward_score is None and enable_async_reward:
-            batch = TensorDict(
-                {
-                    "prompts": prompts,  # [1, prompt_length]
-                    "responses": responses,  # [1, response_length]
-                    "attention_mask": attention_mask,  # [1, prompt_length + response_length]
-                    "input_ids": input_ids,  # [1, prompt_length + response_length]
-                    "position_ids": position_ids,
-                },
-                batch_size=1,
-            )
-            non_tensor_batch = {
-                **{k: np.array([v]) for k, v in kwargs.items()},
-                "__num_turns__": np.array([output.num_turns]),
-                "tool_extra_fields": np.array([output.extra_fields], dtype=object),
-            }
+            timing = {}
+            with simple_timer("compute_score", timing):
+                batch = TensorDict(
+                    {
+                        "prompts": prompts,  # [1, prompt_length]
+                        "responses": responses,  # [1, response_length]
+                        "attention_mask": attention_mask,  # [1, prompt_length + response_length]
+                        "input_ids": input_ids,  # [1, prompt_length + response_length]
+                        "position_ids": position_ids,
+                    },
+                    batch_size=1,
+                )
+                non_tensor_batch = {
+                    **{k: np.array([v]) for k, v in kwargs.items()},
+                    "__num_turns__": np.array([output.num_turns]),
+                    "tool_extra_fields": np.array([output.extra_fields], dtype=object),
+                }
 
-            data = DataProto(
-                batch=batch,
-                non_tensor_batch=non_tensor_batch,
-            )
-            selected_reward_loop_worker_handle = random.choice(self.reward_loop_worker_handles)
-            result = await selected_reward_loop_worker_handle.compute_score.remote(data)
-            output.reward_score = result["reward_score"]
-            output.extra_fields["reward_extra_info"] = result["reward_extra_info"]
+                data = DataProto(
+                    batch=batch,
+                    non_tensor_batch=non_tensor_batch,
+                )
+                selected_reward_loop_worker_handle = random.choice(self.reward_loop_worker_handles)
+                result = await selected_reward_loop_worker_handle.compute_score.remote(data)
+                output.reward_score = result["reward_score"]
+                output.extra_fields["reward_extra_info"] = result["reward_extra_info"]
+            output.metrics.compute_score = timing["compute_score"]
 
-    async def _compute_teacher_logprobs(self, output: AgentLoopOutput, prompt_ids, response_ids, validate):
+    async def _compute_teacher_logprobs(
+        self,
+        output: AgentLoopOutput,
+        prompt_ids: list[int],
+        response_ids: list[int],
+        validate: bool,
+        sample_kwargs: Optional[dict[str, Any]] = None,
+    ) -> None:
         """Compute teacher logprobs for single sample."""
-        if self.stream_teacher_with_rollout and not validate:
+        if self.distillation_enabled and not validate:
+            routing_key = None
+            if sample_kwargs is not None:
+                routing_value = sample_kwargs.get(self.teacher_key)
+                if routing_value is not None:
+                    # Non-tensor batch values arrive as 0-d numpy objects / arrays; normalize to Python.
+                    routing_key = routing_value.item() if hasattr(routing_value, "item") else routing_value
             teacher_ids, teacher_logprobs = await self.teacher_server_manager.compute_teacher_logprobs_single(
                 sequence_ids=prompt_ids + response_ids,
                 multi_modal_data=output.multi_modal_data,
+                routing_key=routing_key,
             )
             output.extra_fields["teacher_ids"] = teacher_ids
             output.extra_fields["teacher_logprobs"] = teacher_logprobs
@@ -952,12 +974,6 @@ class AgentLoopWorker:
         multi_modal_inputs_list = [input.multi_modal_inputs for input in inputs]
         if any(mmi is not None for mmi in multi_modal_inputs_list):
             non_tensor_batch["multi_modal_inputs"] = np.array(multi_modal_inputs_list, dtype=object)
-
-        # if distillation is enabled but not streaming teacher with rollout, store multi-modal data for
-        # batched teacher logprob computation.
-        if self.distillation_enabled and not self.stream_teacher_with_rollout:
-            teacher_multi_modal_data = [input.multi_modal_data for input in inputs]
-            non_tensor_batch["teacher_multi_modal_data"] = np.array(teacher_multi_modal_data, dtype=object)
 
         metrics = [input.metrics.model_dump() for input in inputs]
         # Collect extra fields from all inputs and convert them to np.ndarray
@@ -1024,7 +1040,8 @@ class AgentLoopManager:
         config (DictConfig): whole config for main entrypoint.
         worker_group (RayWorkerGroup): ActorRolloutRef worker group for hybrid mode; None for standalone mode.
         rollout_resource_pool (RayResourcePool): Resource pool for hybrid mode, only used by TensorRT-LLM.
-        teacher_model_manager (TeacherModelManager): Manager for streaming teacher computation, used for distillation.
+        teacher_model_manager (MultiTeacherModelManager): Manager for streaming teacher computation, used for
+        distillation.
         reward_loop_worker_handles (List[ray.actor.ActorHandle]): Actor handles for streaming reward computation.
     """
 
@@ -1033,7 +1050,7 @@ class AgentLoopManager:
         config: DictConfig,
         worker_group: RayWorkerGroup = None,
         rollout_resource_pool: RayResourcePool = None,
-        teacher_model_manager: TeacherModelManager = None,
+        teacher_model_manager: MultiTeacherModelManager = None,
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
         self.config = config
@@ -1044,9 +1061,6 @@ class AgentLoopManager:
 
         self.teacher_model_manager = teacher_model_manager
         self.distillation_enabled = is_distillation_enabled(self.config.get("distillation", None))
-        self.stream_teacher_with_rollout = (
-            self.distillation_enabled and self.config.distillation.teacher_model.enable_resource_pool
-        )
 
         assert worker_group is not None or self.rollout_config.nnodes > 0, "nnodes must be > 0 in standalone mode"
 
@@ -1069,7 +1083,7 @@ class AgentLoopManager:
         worker_group: RayWorkerGroup = None,
         rollout_resource_pool: RayResourcePool = None,
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
-        teacher_model_manager: TeacherModelManager = None,
+        teacher_model_manager: MultiTeacherModelManager = None,
     ):
         """Create agent loop manager."""
         instance = cls(config, worker_group, rollout_resource_pool, teacher_model_manager, reward_loop_worker_handles)
@@ -1131,11 +1145,19 @@ class AgentLoopManager:
         load_balancer_handle = self.global_load_balancer
         servers = list(zip(self.server_addresses, self.server_handles, strict=True))
 
-        if self.stream_teacher_with_rollout:
-            teacher_server_handles = self.teacher_model_manager.server_handles
-            teacher_server_addresses = self.teacher_model_manager.server_addresses
-            teacher_servers = list(zip(teacher_server_addresses, teacher_server_handles, strict=True))
-            teacher_load_balancer_handle = self.teacher_model_manager.load_balancer_handle
+        if self.distillation_enabled:
+            # teacher_model_manager exposes per-teacher dicts keyed by teacher key.
+            teacher_servers = {
+                key: list(
+                    zip(
+                        self.teacher_model_manager.server_addresses[key],
+                        self.teacher_model_manager.server_handles[key],
+                        strict=True,
+                    )
+                )
+                for key in self.teacher_model_manager.server_addresses
+            }
+            teacher_load_balancer_handle = dict(self.teacher_model_manager.load_balancer_handle)
         else:
             teacher_servers = None
             teacher_load_balancer_handle = None
@@ -1176,8 +1198,6 @@ class AgentLoopManager:
         Returns:
             DataProto: Output batch.
         """
-        if self.stream_teacher_with_rollout:
-            await self.teacher_model_manager.wake_up()
         chunkes = prompts.chunk(len(self.agent_loop_workers))
         outputs = await asyncio.gather(
             *[
@@ -1185,8 +1205,6 @@ class AgentLoopManager:
                 for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=True)
             ]
         )
-        if self.stream_teacher_with_rollout:
-            await self.teacher_model_manager.sleep()
         output = DataProto.concat(outputs)
 
         # calculate performance metrics
@@ -1200,6 +1218,7 @@ class AgentLoopManager:
         timing = {}
         t_generate_sequences = np.array([metric["generate_sequences"] for chunk in metrics for metric in chunk])
         t_tool_calls = np.array([metric["tool_calls"] for chunk in metrics for metric in chunk])
+        t_compute_score = np.array([metric["compute_score"] for chunk in metrics for metric in chunk])
         num_preempted = np.array([metric["num_preempted"] for chunk in metrics for metric in chunk])
         timing["agent_loop/num_preempted/min"] = num_preempted.min()
         timing["agent_loop/num_preempted/max"] = num_preempted.max()
@@ -1210,12 +1229,16 @@ class AgentLoopManager:
         timing["agent_loop/tool_calls/min"] = t_tool_calls.min()
         timing["agent_loop/tool_calls/max"] = t_tool_calls.max()
         timing["agent_loop/tool_calls/mean"] = t_tool_calls.mean()
+        timing["agent_loop/compute_score/min"] = t_compute_score.min()
+        timing["agent_loop/compute_score/max"] = t_compute_score.max()
+        timing["agent_loop/compute_score/mean"] = t_compute_score.mean()
 
         # batch sequence generation is bounded by the slowest sample
-        slowest = np.argmax(t_generate_sequences + t_tool_calls)
+        slowest = np.argmax(t_generate_sequences + t_tool_calls + t_compute_score)
         prompt_length = output.batch["prompts"].shape[1]
         timing["agent_loop/slowest/generate_sequences"] = t_generate_sequences[slowest]
         timing["agent_loop/slowest/tool_calls"] = t_tool_calls[slowest]
+        timing["agent_loop/slowest/compute_score"] = t_compute_score[slowest]
         timing["agent_loop/slowest/num_preempted"] = num_preempted[slowest]
 
         if "attention_mask" in output.batch:

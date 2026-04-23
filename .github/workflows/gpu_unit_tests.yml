@@ -120,12 +120,6 @@ jobs:
       - name: Testing Megatron KL Loss TP Correctness
         run: |
           torchrun --standalone --nnodes=1 --nproc-per-node=2 tests/utils/test_special_megatron_kl_loss_tp.py
-      - name: Testing FSDP2 actor functionality
-        run: |
-          torchrun --standalone --nnodes=1 --nproc-per-node=2 tests/workers/actor/test_special_dp_actor.py
-      - name: Testing FSDP2 critic functionality
-        run: |
-          torchrun --standalone --nnodes=1 --nproc-per-node=2 tests/workers/critic/test_special_dp_critic.py
 
   cleanup:
     runs-on: ubuntu-latest

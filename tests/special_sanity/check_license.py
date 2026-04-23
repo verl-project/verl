@@ -92,6 +92,10 @@ if __name__ == "__main__":
         # because path is object not string
         path_in_str = str(path.absolute())
         print(path_in_str)
+        # ``git ls-files`` may return paths that were deleted in the working tree
+        # but not yet staged. Skip them so pre-commit keeps working for devs mid-refactor.
+        if not path.exists():
+            continue
         with open(path_in_str, encoding="utf-8") as f:
             file_content = f.read()
 

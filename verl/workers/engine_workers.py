@@ -51,7 +51,7 @@ from verl.workers.config import (
     TrainingWorkerConfig,
 )
 from verl.workers.rollout.base import BaseRollout, get_rollout_class
-from verl.workers.utils.losses import ppo_loss
+from verl.workers.utils.losses import diffusion_loss, ppo_loss
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -513,7 +513,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
             # construct TrainingWorkerConfig
             ref_training_config = TrainingWorkerConfig(
-                model_type="language_model",
+                model_type=ref_config.model_config.get("model_type", "language_model"),
                 model_config=ref_config.model_config,
                 engine_config=ref_config.engine,
                 optimizer_config=ref_config.optim,
@@ -526,7 +526,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             ref_training_config.engine_config.infer_micro_batch_size_per_gpu = (
                 self.config.ref.ppo_micro_batch_size_per_gpu
             )
-            ref_training_config.engine_config.use_remove_padding = model_config.use_remove_padding
+            ref_training_config.engine_config.use_remove_padding = model_config.get("use_remove_padding", False)
 
             self.ref = TrainingWorker(config=ref_training_config)
             self.ref.reset()
@@ -541,7 +541,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             )
 
             actor_training_config = TrainingWorkerConfig(
-                model_type="language_model",
+                model_type=actor_config.model_config.get("model_type", "language_model"),
                 model_config=actor_config.model_config,
                 engine_config=actor_config.engine,
                 optimizer_config=actor_config.optim,
@@ -562,7 +562,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             actor_training_config.engine_config.micro_batch_size_per_gpu = (
                 self.config.actor.ppo_micro_batch_size_per_gpu
             )
-            actor_training_config.engine_config.use_remove_padding = model_config.use_remove_padding
+            actor_training_config.engine_config.use_remove_padding = model_config.get("use_remove_padding", False)
 
             if self.config.actor.use_dynamic_bsz:
                 assert self.config.rollout.log_prob_max_token_len_per_gpu is not None
@@ -574,6 +574,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 self.loss_fn = partial(
                     distillation_ppo_loss, config=actor_config, distillation_config=distillation_config
                 )
+            elif model_config.get("model_type", "language_model") == "diffusion_model":
+                self.loss_fn = partial(diffusion_loss, config=actor_config)
             else:
                 self.loss_fn = partial(ppo_loss, config=actor_config)
             self.actor = TrainingWorker(config=actor_training_config)

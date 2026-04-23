@@ -42,9 +42,9 @@ RUN pip3 install --no-cache-dir --no-deps trl==0.27.0 && \
 # ==============================================================================
 # Install verl dependencies
 # ==============================================================================
-RUN pip install git+https://github.com/volcengine/verl.git@v0.7.0
+RUN pip install git+https://github.com/verl-project/verl.git@v0.7.0
 RUN pip uninstall -y verl
-RUN pip install "verl[mcore] @ git+https://github.com/volcengine/verl.git@v0.7.0"
+RUN pip install "verl[mcore] @ git+https://github.com/verl-project/verl.git@v0.7.0"
 RUN pip uninstall -y verl
 
 

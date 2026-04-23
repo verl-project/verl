@@ -89,7 +89,6 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         self.kl_ctrl_in_reward = False
 
         self.use_prefix_grouper = self.config.actor_rollout_ref.actor.get("use_prefix_grouper", False)
-        self.use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
 
         # ==================== fully async config ====================
 
@@ -182,13 +181,11 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
 
     def _init_async_objects(self):
         # Initialize asyncio synchronization primitives.
-        # We let asyncio.Condition create the Lock internally to ensure they share the same Event Loop.
-        # This avoids 'ValueError: loop argument must agree with lock' which can occur in Ray environments
-        # where the lock's captured loop (get_running_loop) differs from Condition's default loop check.
-        # Explicitly passing the loop is deprecated/removed in Python 3.10+, so this reverse-initialization
-        # is the most robust workaround.
-        self.condition = asyncio.Condition()
-        self.lock = self.condition._lock
+        # `lock` protects shared state: paused / active_tasks / staleness_samples / timing fields.
+        self.lock = asyncio.Lock()
+        # `_resume_event` signals that the rollouter is currently running (paused == False).
+        self._resume_event = asyncio.Event()
+        self._resume_event.set()
 
     async def set_message_queue_client(self, message_queue_client: MessageQueueClient):
         """Set message queue client"""
@@ -241,13 +238,19 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         """
         async with self.lock:
             self.paused = False
-            self.condition.notify_all()
+            # Wake the drain loop in _processor_worker so it can exit early and resume submitting
+            # new samples to idle replicas instead of waiting for long-tail in-flight tasks.
+            self._resume_event.set()
             # every time param change, reset staleness_samples
             self.staleness_samples = len(self.active_tasks) + await self.message_queue_client.get_queue_size()
             timing_raw = {}
-            rollout_active_time = self.idle_start_time - self.step_start_time
-            rollout_version_time = time.time() - self.step_start_time
-            idle_ratio = 1 - rollout_active_time / rollout_version_time
+            rollout_version_time = max(time.time() - self.step_start_time, 1e-6)
+            if self.idle_start_time > self.step_start_time:
+                rollout_active_time = self.idle_start_time - self.step_start_time
+                idle_ratio = 1 - rollout_active_time / rollout_version_time
+            else:
+                rollout_active_time = rollout_version_time
+                idle_ratio = 0
             timing_raw["fully_async/rollouter/active_time"] = rollout_active_time
             timing_raw["fully_async/rollouter/version_time"] = rollout_version_time
             timing_raw["fully_async/rollouter/idle_ratio"] = idle_ratio
@@ -258,14 +261,39 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
                 f"idle_ratio: {timing_raw['fully_async/rollouter/idle_ratio']:.4f}"
             )
             self.step_start_time = time.time()
+
         return timing_raw
+
+    def _maybe_log_val_generations(self, inputs, outputs, scores):
+        """Capture validation generations to send back to trainer instead of logging directly.
+
+        The rollouter process does not have an active wandb session, so we capture the
+        sampled generations and return them via ValidateMetrics to the trainer for logging.
+        """
+        generations_to_log = self.config.trainer.log_val_generations
+        if generations_to_log == 0:
+            self._captured_val_generations = []
+            return
+
+        samples = list(zip(inputs, outputs, scores, strict=True))
+        samples.sort(key=lambda x: x[0])
+
+        rng = np.random.RandomState(42)
+        rng.shuffle(samples)
+
+        self._captured_val_generations = samples[:generations_to_log]
 
     def do_validate(self) -> ValidateMetrics:
         """Run validation and return metrics"""
         timing_raw = {}
+        self._captured_val_generations = []
         with marked_timer("rollouter/validate_time", timing_raw, color="green"):
             val_metrics: dict = self._validate()
-        return ValidateMetrics(timing_raw=timing_raw, metrics=val_metrics)
+        return ValidateMetrics(
+            timing_raw=timing_raw,
+            metrics=val_metrics,
+            val_generations=self._captured_val_generations,
+        )
 
     async def save_checkpoint(self, local_global_step_folder: str):
         # WARNING!: Due to the asynchronous nature, there are some in-flight samples
@@ -441,20 +469,40 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
                 )
                 async with self.lock:
                     self.paused = True
-                while self.active_tasks:
-                    async with self.lock:
-                        # After acquiring the lock, the number of active_tasks may change, need to be verified again
-                        if self.active_tasks:
-                            done_tasks, self.active_tasks = await asyncio.wait(
-                                self.active_tasks, return_when=asyncio.FIRST_COMPLETED
-                            )
-                            for task in done_tasks:
-                                await task
+                    self._resume_event.clear()
 
-                async with self.lock:
-                    while self.paused:
+                resume_future = asyncio.ensure_future(self._resume_event.wait())
+                try:
+                    # Drain: wait for either (a) at least one active task to finish, or
+                    # (b) a resume signal (reset_staleness / monitor flipping paused=False) to
+                    # break the drain early so new samples can be submitted to free replicas.
+                    # We do NOT hold the lock during the wait, so publishers can acquire it to
+                    # update paused / staleness_samples concurrently.
+                    while self.active_tasks and not resume_future.done():
+                        wait_set = set(self.active_tasks) | {resume_future}
+                        done, _pending = await asyncio.wait(wait_set, return_when=asyncio.FIRST_COMPLETED)
+                        actual_done = done - {resume_future}
+                        if actual_done:
+                            async with self.lock:
+                                for task in actual_done:
+                                    self.active_tasks.discard(task)
+                                    await task
+                        if resume_future in done:
+                            print(
+                                "[FullyAsyncRollouter][Processor] "
+                                "Drain interrupted by resume signal, resuming generation early "
+                                f"(active tasks remaining: {len(self.active_tasks)})"
+                            )
+                            break
+
+                    # block until resuming
+                    if not resume_future.done():
                         self.idle_start_time = time.time()
-                        await self.condition.wait()
+                        await resume_future
+                finally:
+                    if not resume_future.done():
+                        resume_future.cancel()
+                        await asyncio.gather(resume_future, return_exceptions=True)
                 continue
             # Get sample from appropriate queue and immediately mark task as done
             rollout_sample = await self.pending_queue.get()
@@ -486,11 +534,9 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
                             await task
 
             # Submit single sample processing
+            if self.paused:
+                await self._resume_event.wait()
             async with self.lock:
-                # After the pause is over, the lock is acquired and it is necessary
-                # to determine whether it is the pause phase, otherwise continue to wait
-                while self.paused:
-                    await self.condition.wait()
                 task = safe_create_task(
                     self._process_single_sample_streaming(rollout_sample),
                     name=rollout_sample.sample_id,
@@ -572,8 +618,8 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
             # Send a finish signal
             await self.message_queue_client.put_sample(sample=None)
 
-        async with self.lock:
-            self.running = False
+            async with self.lock:
+                self.running = False
 
     async def fit(self):
         """
@@ -590,6 +636,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         async with self.lock:
             self.paused = False
             self.running = True
+            self._resume_event.set()
 
         # Create the main asynchronous task
         generation_task = safe_create_task(self._streaming_generation_main(), name="generation_task")
@@ -637,12 +684,12 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
             if self.paused and not await self._should_pause_generation():
                 async with self.lock:
                     self.paused = False
-                    print("[FullyAsyncRollouter][ShouldPause] notify all wait tasks.")
-                    self.condition.notify_all()
+                    print("[FullyAsyncRollouter][ShouldPause] resume rollouter.")
+                    self._resume_event.set()
 
     async def _should_pause_generation(self) -> bool:
         """Determine whether the build should be paused"""
-        queue_stats = self.message_queue_client.get_statistics_sync()
+        queue_stats = await self.message_queue_client.get_statistics()
         queue_size = queue_stats["queue_size"]
 
         if queue_size >= self.max_queue_size:
@@ -665,7 +712,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         return False
 
     async def get_statistics(self) -> dict:
-        queue_stats = self.message_queue_client.get_statistics_sync()
+        queue_stats = await self.message_queue_client.get_statistics()
 
         stats = {
             # monitor stats

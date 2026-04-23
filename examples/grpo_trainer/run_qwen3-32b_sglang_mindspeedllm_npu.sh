@@ -15,6 +15,9 @@ export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
 export DISABLE_L2_CACHE=1
 export TASK_QUEUE_ENABLE=1
 
+#For CANN versions 8.5.0 and above, using mbridge, set this ENV
+export HCCL_OP_EXPANSION_MODE="AIV"
+
 # Node Info
 NNODES=${NNODES:-1}
 NPUS_PER_NODE=${NPUS_PER_NODE:-16}
@@ -198,7 +201,6 @@ TRAINER_CONFIG=(
     trainer.save_freq=-1
     # Checkpoint Directory
     trainer.default_local_dir="${CKPTS_DIR}"
-    trainer.use_legacy_worker_impl=disable
 )
 
 # profiling configuration

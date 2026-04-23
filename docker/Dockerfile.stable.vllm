@@ -117,7 +117,7 @@ RUN if [ "$(uname -m)" = "aarch64" ]; then \
         pip install transformers==5.3.0; \
     fi
 
-RUN pip install git+https://github.com/volcengine/verl.git@v0.7.1 && pip uninstall -y verl
+RUN pip install git+https://github.com/verl-project/verl.git@v0.7.1 && pip uninstall -y verl
 
 RUN apt-get update && apt-get install -y curl \
     && rm -rf /var/lib/apt/lists/*

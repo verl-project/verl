@@ -1,5 +1,15 @@
 # [WIP] Experimental VLA RL Support
 
+> **⚠️ Temporary breakage (CI disabled)** — `verl.experimental.vla` has not yet
+> been ported to the unified model engine (`verl/workers/engine_workers.py`).
+> The module still imports from the removed legacy worker modules
+> (`verl.workers.fsdp_workers`, `verl.workers.actor`, `verl.workers.critic`,
+> `verl.workers.sharding_manager`) and therefore fails at import time on the
+> main tree. Its CI is disabled (pre-commit `compileall` excludes this
+> directory; `tests/experimental/vla/` skips itself unless
+> `VERL_RUN_VLA_TESTS=1`). A follow-up PR will migrate VLA to the new engine
+> and re-enable CI.
+
 This recipe introduces experimental support for training SimpleVLA-OFT, a VLA model.
 
 A key challenge in VLA RL training, which differs from standard LLM RL training, is that the environment/simulation phase has a higher computational overhead than the generation phase. To achieve high efficiency, RL in this context requires an effective environment scheduling mechanism in addition to verl's existing efficient training and inference scheduling. The goal is to reduce the inefficiency caused by the environment and the model's generation process waiting on each other.

@@ -155,6 +155,12 @@ class BucketedWeightSender:
 
     def _init_socket(self):
         """Initialize ZMQ REQ socket and bind."""
+        if self.zmq_handle.startswith("ipc://"):
+            ipc_path = self.zmq_handle[len("ipc://") :]
+            try:
+                os.remove(ipc_path)
+            except OSError:
+                pass
         self.socket = self.zmq_context.socket(zmq.REQ)
         self.socket.bind(self.zmq_handle)
 
@@ -185,6 +191,12 @@ class BucketedWeightSender:
         if self.socket is not None:
             self.socket.close()
             self.socket = None
+        if self.zmq_handle.startswith("ipc://"):
+            ipc_path = self.zmq_handle[len("ipc://") :]
+            try:
+                os.remove(ipc_path)
+            except OSError:
+                pass
         del self.buffer
         self.buffer = None
         if self.shm is not None:

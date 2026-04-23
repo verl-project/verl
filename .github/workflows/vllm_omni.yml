@@ -61,7 +61,12 @@ on:
       - ".github/workflows/vllm_omni.yml"
       - "tests/workers/rollout/rollout_vllm/test_vllm_omni_generate.py"
       - "tests/experimental/agent_loop/test_diffusion_agent_loop.py"
+      - "tests/special_e2e/run_flowgrpo_trainer_diffusers.sh"
+      - "tests/special_e2e/create_dummy_diffusion_data.py"
       - "verl/workers/rollout/vllm_rollout/vllm_omni_async_server.py"
+      - "verl/trainer/diffusion/ray_diffusion_trainer.py"
+      - "verl/trainer/main_flowgrpo.py"
+      - "verl/trainer/config/diffusion_trainer.yaml"
 
 # Cancel jobs on the same ref if a new one is triggered
 concurrency:
@@ -95,7 +100,7 @@ jobs:
   vllm_omni:
     needs: setup
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
-    timeout-minutes: 35 # Increase this timeout value as needed
+    timeout-minutes: 50 # Increased to accommodate e2e FlowGRPO training
     env:
       HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
       NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
@@ -111,7 +116,7 @@ jobs:
           pip3 install --no-deps -e .
       - name: Install vllm-omni
         run: |
-          pip3 install git+https://github.com/vllm-project/vllm-omni.git@a90a769
+          pip3 install 'vllm-omni==0.18.0'
       - name: Test vLLM Omni generate
         run: |
           ray stop --force
@@ -120,6 +125,16 @@ jobs:
         run: |
           ray stop --force
           pytest tests/experimental/agent_loop/test_diffusion_agent_loop.py -v -s
+      - name: Install diffusers for e2e training
+        run: |
+          pip3 install diffusers==0.37.0
+      - name: Prepare dummy diffusion dataset
+        run: |
+          python3 tests/special_e2e/create_dummy_diffusion_data.py
+      - name: E2E FlowGRPO diffusion training
+        run: |
+          ray stop --force
+          bash tests/special_e2e/run_flowgrpo_trainer_diffusers.sh
 
   cleanup:
     runs-on: ubuntu-latest

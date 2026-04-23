@@ -15,7 +15,7 @@ defaults:
   # data: trainer/config/data/legacy_data.yaml
   - data@data: legacy_data
 
-  # Reference model will be enabled when actor.use_kl_loss or/and algorithm.use_kl_in_reward is/are True.
+  # Reference model will be enabled when actor.use_kl_loss is True.
   - ref@actor_rollout_ref.ref: ${model_engine}_ref
 
   # Rollout model config (vLLM-Omni diffusion rollout).
@@ -39,12 +39,6 @@ defaults:
   # load the reference default config, then apply the fields in the current yaml
   # self config override anything above
   - _self_
-
-# Dataset config (merges with legacy_data from defaults)
-data:
-
-  # get ground-truth based on data_source, now support ["ocr", "prompt"]
-  data_source: "prompt"
 
 # config for actor, rollout and reference model
 actor_rollout_ref:
@@ -80,10 +74,16 @@ actor_rollout_ref:
 algorithm:
 
   # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
-  _target_: verl.trainer.config.AlgoConfig
+  _target_: verl.trainer.config.DiffusionAlgoConfig
+
+  # Advantage estimator type: "flow_grpo"
+  adv_estimator: flow_grpo
 
   # Whether to normalize advantages by std (specific to GRPO)
   norm_adv_by_std_in_grpo: True
+
+  # Whether to normalize advantages using global standard deviation
+  global_std: True
 
 # config for the trainer
 trainer:
@@ -172,10 +172,6 @@ trainer:
 
   # Device to run training on (e.g., "cuda", "cpu")
   device: cuda
-
-  # whether to use legacy worker implementation
-  #  mode: "auto", "enable", or "disable"
-  use_legacy_worker_impl: auto
 
 # configs related to ray
 ray_kwargs:

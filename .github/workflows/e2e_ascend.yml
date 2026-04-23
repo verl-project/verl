@@ -67,10 +67,10 @@ jobs:
   llm_rl_job:
     if: github.repository_owner == 'verl-project'
     name: E2E Ascend testing for RL training scenarios of LLM models
-    runs-on: linux-aarch64-a2b3-8
+    runs-on: linux-aarch64-a3-8
     timeout-minutes: 120
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-8.5.0-910b-ubuntu22.04-py3.11-latest
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-8.5.0-a3-ubuntu22.04-py3.11-latest
       options: >-
         --shm-size 16g
     env:
@@ -84,7 +84,7 @@ jobs:
       - name: Check initial pip list from image
         run: |
           pip list
-      - name: Checkout volcengine/verl repo
+      - name: Checkout verl-project/verl repo
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -122,10 +122,10 @@ jobs:
   engine_mindspeed_llm_rl_job:
     if: github.repository_owner == 'verl-project'
     name: E2E Ascend testing for RL training scenarios of LLM models using MindSpeed_LLM engine
-    runs-on: linux-aarch64-a2b3-8
+    runs-on: linux-aarch64-a3-8
     timeout-minutes: 120
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-sglang-8.3.rc1-910b-ubuntu22.04-py3.11-latest
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-sglang-8.3.rc1-a3-ubuntu22.04-py3.11-latest
       options: >-
         --shm-size 16g
     env:
@@ -139,7 +139,7 @@ jobs:
       - name: Check initial pip list from image
         run: |
           pip list
-      - name: Checkout volcengine/verl repo
+      - name: Checkout verl-project/verl repo
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -177,10 +177,10 @@ jobs:
   vlm_rl_job:
     if: github.repository_owner == 'verl-project'
     name: E2E Ascend testing for RL training scenarios of VLM models
-    runs-on: linux-aarch64-a2b3-8
+    runs-on: linux-aarch64-a3-16
     timeout-minutes: 120
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-8.5.0-910b-ubuntu22.04-py3.11-latest
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-8.5.0-a3-ubuntu22.04-py3.11-latest
       options: >-
         --shm-size 16g
     env:
@@ -194,7 +194,7 @@ jobs:
       - name: Check initial pip list from image
         run: |
           pip list
-      - name: Checkout volcengine/verl repo
+      - name: Checkout verl-project/verl repo
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
