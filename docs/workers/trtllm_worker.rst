@@ -54,4 +54,4 @@ Using TensorRT-LLM as the Rollout Engine for DAPO
 .. code-block:: bash
 
     # For Megatron-Core training engine with FP8 rollout
-    bash examples/grpo_trainer/run_qwen3-30b_dapo_megatron_fp8_trtllm.sh
+    bash examples/grpo_trainer/run_qwen3_30b_a3b_trtllm_megatron_fp8.sh

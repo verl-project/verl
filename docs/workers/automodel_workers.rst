@@ -47,9 +47,9 @@ no parallelism:
 
 .. code:: shell
 
-   bash examples/sft/gsm8k/run_qwen_05_automodel.sh 4 /tmp/automodel_sft_test
+   bash examples/sft/gsm8k/run_qwen2_5_0_5b_automodel.sh 4 /tmp/automodel_sft_test
 
-See `run_qwen_05_automodel.sh <https://github.com/verl-project/verl/blob/main/examples/sft/gsm8k/run_qwen_05_automodel.sh>`_.
+See `run_qwen2_5_0_5b_automodel.sh <https://github.com/verl-project/verl/blob/main/examples/sft/gsm8k/run_qwen2_5_0_5b_automodel.sh>`_.
 
 Advanced: Qwen3-30B MoE with Expert Parallelism
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

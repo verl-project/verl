@@ -95,7 +95,7 @@ verl is fast with:
   - Support vision-language models (VLMs) and [multi-modal RL](examples/grpo_trainer/run_qwen2_5_vl-7b.sh) with Qwen2.5-vl, Kimi-VL
   - [Multi-turn with tool calling](https://github.com/verl-project/verl/tree/main/examples/sglang_multiturn)
 - LLM alignment recipes such as [Self-play preference optimization (SPPO)](https://github.com/verl-project/verl-recipe/tree/main/sppo)
-- Flash attention 2, [sequence packing](examples/ppo_trainer/run_qwen2-7b_seq_balance.sh), [sequence parallelism](examples/ppo_trainer/run_deepseek7b_llm_sp2.sh) support via DeepSpeed Ulysses, [LoRA](examples/sft/gsm8k/run_qwen_05_peft.sh), [Liger-kernel](examples/sft/gsm8k/run_qwen_05_sp2_liger.sh).
+- Flash attention 2, sequence packing, sequence parallelism via DeepSpeed Ulysses, [LoRA](examples/tuning/lora/run_qwen3_8b_vllm_fsdp.sh), [Liger-kernel](examples/sft/gsm8k/run_qwen2_5_0_5b_fsdp.sh) (`USE_LIGER=1`).
 - Scales up to 671B models and hundreds of GPUs with [expert parallelism](https://github.com/verl-project/verl/pull/1467)
 - Multi-gpu [LoRA RL](https://verl.readthedocs.io/en/latest/advance/ppo_lora.html) support to save memory.
 - Experiment tracking with wandb, swanlab, mlflow and tensorboard.
@@ -151,7 +151,6 @@ verl is fast with:
   - [Multi-turn Rollout Support](https://verl.readthedocs.io/en/latest/sglang_multiturn/multiturn.html)
   - [Search Tool Integration](https://verl.readthedocs.io/en/latest/sglang_multiturn/search_tool_example.html)
   - [Sandbox Fusion Integration](https://verl.readthedocs.io/en/latest/examples/sandbox_fusion_example.html)
-  - [Deployment using Separate GPU Resources](https://github.com/verl-project/verl/tree/main/examples/split_placement)
   - [Extend to Other RL(HF) algorithms](https://verl.readthedocs.io/en/latest/advance/dpo_extension.html)
   - [Ray API design tutorial](https://verl.readthedocs.io/en/latest/advance/placement.html)
 

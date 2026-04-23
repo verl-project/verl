@@ -98,7 +98,7 @@ Taking the mimo-7B model deployed separately on H20 hardware using SGLang as an 
 
 The SFT training with MTP is supported, using the same MTP training configuration as RL training.
 
-An example configuration for running SFT can be found in `examples/sft/gsm8k/run_mimo_megatron_mtp.sh`
+An example configuration for running SFT can be found in `examples/sft/gsm8k/run_mimo_7b_mtp_megatron.sh`
 
 **SFT result**
 

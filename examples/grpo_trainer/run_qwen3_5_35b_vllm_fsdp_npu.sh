@@ -48,13 +48,13 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.entropy_from_logits_with_chunking=True \
     actor_rollout_ref.actor.fsdp_config.offload_policy=True \
     actor_rollout_ref.actor.use_dynamic_bsz=False \
-    actor_rollout_ref.actor.ulysses_sequence_parallel_size=$sp_size \
+    actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size=$sp_size \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     actor_rollout_ref.ref.entropy_from_logits_with_chunking=True \
-    actor_rollout_ref.ref.ulysses_sequence_parallel_size=$sp_size \
+    actor_rollout_ref.ref.fsdp_config.ulysses_sequence_parallel_size=$sp_size \
     actor_rollout_ref.ref.use_torch_compile=False \
     actor_rollout_ref.ref.fsdp_config.offload_policy=True \
     actor_rollout_ref.rollout.name=$ENGINE \
@@ -71,7 +71,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=6144 \
     algorithm.use_kl_in_reward=False \
     trainer.critic_warmup=0 \
-    trainer.logger=['console','tensorboard'] \
+    trainer.logger=['console','wandb'] \
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${exp_name}" \
     trainer.n_gpus_per_node=16 \

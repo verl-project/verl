@@ -20,7 +20,7 @@ Use the standard 8-GPU script:
 
 ```bash
 cd your_verl_root_dir
-bash examples/sglang_multiturn/run_qwen2.5-3b_gsm8k_multiturn.sh
+bash examples/sglang_multiturn/run_qwen2_5_3b_gsm8k_multiturn_sglang_fsdp.sh
 ```
 
 If you have only 4 GPUs
@@ -28,7 +28,8 @@ Use the fallback 4-GPU script:
 
 ```bash
 cd your_verl_root_dir
-bash examples/sglang_multiturn/run_qwen2.5-3b_gsm8k_multiturn_4xgpu.sh 
+NGPUS_PER_NODE=4 ROLLOUT_TP=2 ROLLOUT_GPU_MEM_UTIL=0.5 \
+    bash examples/sglang_multiturn/run_qwen2_5_3b_gsm8k_multiturn_sglang_fsdp.sh 
 ```
 
 ## Notes

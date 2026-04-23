@@ -431,7 +431,7 @@ verl 中昇腾暂不支持生态库如下：
       - Qwen3-8B
       - `8B <https://huggingface.co/Qwen/Qwen3-8B>`_
       - FSDP
-      - `sft_peft_sp2_npu <https://github.com/verl-project/verl/blob/main/examples/sft/gsm8k/run_qwen3_8b_sft_peft_sp2_npu.sh>`_
+      - `sft_peft_sp2_npu <https://github.com/verl-project/verl/blob/main/examples/sft/gsm8k/run_qwen3_8b_fsdp_npu.sh>`_ (run with ``SP_SIZE=2 USE_PEFT=1``)
       - Atlas 900 A2 PODc
     * - ReTool-SFT
       - Qwen2-7B-instruct

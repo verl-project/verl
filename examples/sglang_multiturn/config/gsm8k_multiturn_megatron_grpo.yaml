@@ -3,7 +3,8 @@ hydra:
     - file://verl/trainer/config
 
 defaults:
-  - ppo_megatron_trainer
+  - ppo_trainer
+  - override model_engine: megatron
   - _self_
 
 data:
