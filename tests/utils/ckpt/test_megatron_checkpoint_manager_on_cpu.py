@@ -105,10 +105,9 @@ def _make_mock_model():
 def _make_manager(
     save_contents=None,
     load_contents=None,
-    use_mbridge=True,
+    use_dist_checkpointing=False,
     bridge="auto",
     peft_cls=None,
-    use_dist_checkpointing=None,
     use_distributed_optimizer=False,
 ):
     if save_contents is None:
@@ -129,7 +128,7 @@ def _make_manager(
     lr_scheduler.state_dict.return_value = {"last_epoch": 10}
 
     if bridge == "auto":
-        bridge = MagicMock() if use_mbridge else None
+        bridge = None if use_dist_checkpointing else MagicMock()
 
     return MegatronCheckpointManager(
         config=_MinimalConfig(),
@@ -146,10 +145,9 @@ def _make_manager(
         optimizer=optimizer,
         optimizer_scheduler=lr_scheduler,
         use_distributed_optimizer=use_distributed_optimizer,
-        use_mbridge=use_mbridge,
+        use_dist_checkpointing=use_dist_checkpointing,
         bridge=bridge,
         peft_cls=peft_cls,
-        use_dist_checkpointing=use_dist_checkpointing,
     )
 
 
@@ -159,63 +157,51 @@ def _make_manager(
 
 
 class TestInitFlagResolution:
-    def test_mbridge_default_flags(self):
+    def test_hf_path_default(self):
         mgr = _make_manager(save_contents=["model", "optimizer", "extra"])
-        assert mgr.use_mbridge is True
         assert mgr.use_dist_checkpointing is False
-        assert mgr._save_model_via_mbridge is True
-        assert mgr._save_model_via_dist_ckpt is False
-        assert mgr._save_peft_adapters_in_dist_ckpt is False
+        assert mgr.should_save_hf_model is True
+        assert mgr.should_save_dist_ckpt_model is False
 
-    def test_dist_ckpt_flags(self):
-        mgr = _make_manager(save_contents=["model", "optimizer", "extra"], use_mbridge=False)
-        assert mgr.use_mbridge is False
+    def test_dist_ckpt_path(self):
+        mgr = _make_manager(
+            save_contents=["model", "optimizer", "extra"],
+            use_dist_checkpointing=True,
+        )
         assert mgr.use_dist_checkpointing is True
-        assert mgr._save_model_via_mbridge is False
-        assert mgr._save_model_via_dist_ckpt is True
+        assert mgr.should_save_hf_model is False
+        assert mgr.should_save_dist_ckpt_model is True
 
-    def test_legacy_use_dist_checkpointing_translates(self):
-        mgr = _make_manager(save_contents=["model"], use_mbridge=True, use_dist_checkpointing=True)
-        assert mgr.use_mbridge is False
-        assert mgr.use_dist_checkpointing is True
-
-    def test_mbridge_requires_bridge_instance(self):
-        with pytest.raises(ValueError, match="use_mbridge=True requires a bridge"):
-            _make_manager(use_mbridge=True, bridge=None)
-
-    def test_hf_model_without_mbridge_raises(self):
-        with pytest.raises(ValueError, match="hf_model.*mbridge"):
-            _make_manager(save_contents=["hf_model"], use_mbridge=False)
-
-    def test_mbridge_model_and_hf_model_deduplicated(self):
-        mgr = _make_manager(save_contents=["model", "hf_model"])
-        assert mgr._save_model_via_mbridge is True
-        assert mgr._save_model_via_dist_ckpt is False
-
-    def test_mbridge_hf_model_only(self):
+    def test_hf_model_only_in_save_contents(self):
         mgr = _make_manager(save_contents=["hf_model"])
-        assert mgr._save_model_via_mbridge is True
-
-    def test_peft_with_mbridge(self):
-        mgr = _make_manager(save_contents=["model", "optimizer"], peft_cls=MagicMock())
-        assert mgr._save_peft_adapters_in_dist_ckpt is True
-        assert mgr._load_model_via_mbridge is False
-        assert mgr._load_model_via_dist_ckpt is True
-
-    def test_load_flags_mbridge(self):
-        mgr = _make_manager(load_contents=["model", "optimizer", "extra"])
-        assert mgr._load_model_via_mbridge is True
-        assert mgr._load_model_via_dist_ckpt is False
-
-    def test_load_flags_dist_ckpt(self):
-        mgr = _make_manager(load_contents=["model", "optimizer", "extra"], use_mbridge=False)
-        assert mgr._load_model_via_mbridge is False
-        assert mgr._load_model_via_dist_ckpt is True
+        assert mgr.should_save_hf_model is True
+        assert mgr.should_save_dist_ckpt_model is False
 
     def test_no_model_in_save_contents(self):
         mgr = _make_manager(save_contents=["optimizer", "extra"])
-        assert mgr._save_model_via_mbridge is False
-        assert mgr._save_model_via_dist_ckpt is False
+        assert mgr.should_save_hf_model is False
+        assert mgr.should_save_dist_ckpt_model is False
+
+    def test_load_flags_hf_path(self):
+        mgr = _make_manager(load_contents=["model", "optimizer", "extra"])
+        assert mgr.should_load_hf_model is True
+        assert mgr.should_load_dist_ckpt_model is False
+
+    def test_load_dist_ckpt_path(self):
+        mgr = _make_manager(
+            load_contents=["model", "optimizer", "extra"],
+            use_dist_checkpointing=True,
+        )
+        assert mgr.should_load_hf_model is False
+        assert mgr.should_load_dist_ckpt_model is True
+
+    def test_hf_path_requires_bridge_instance(self):
+        with pytest.raises(ValueError, match="HF-format model weights require"):
+            _make_manager(use_dist_checkpointing=False, bridge=None)
+
+    def test_hf_model_without_hf_path_raises(self):
+        with pytest.raises(ValueError, match="'hf_model'"):
+            _make_manager(save_contents=["hf_model"], use_dist_checkpointing=True)
 
 
 # ===========================================================================
@@ -348,7 +334,10 @@ class TestSaveCheckpointDispatch:
     @patch("verl.utils.checkpoint.megatron_checkpoint_manager.save_dist_checkpointing", return_value=None)
     def test_dist_ckpt_backend_splits_into_three(self, mock_save_dc):
         """With dist_ckpt backend, model/optimizer/extra go to three separate directories."""
-        mgr = _make_manager(save_contents=["model", "optimizer", "extra"], use_mbridge=False)
+        mgr = _make_manager(
+            save_contents=["model", "optimizer", "extra"],
+            use_dist_checkpointing=True,
+        )
         with patch.object(mgr, "_save_transformer_config"):
             mgr.save_checkpoint(self._save_path(), global_step=1)
 
@@ -435,8 +424,8 @@ class TestLoadCheckpointDispatch:
 
     @patch(_PATCH_LOAD_META, return_value=None)
     @patch("verl.utils.checkpoint.megatron_checkpoint_manager.load_dist_checkpointing")
-    def test_mbridge_load_model_via_bridge(self, mock_load_dc, _mock_meta):
-        """With mbridge: model loads via bridge; optimizer/extra come from separate dist_ckpt dirs."""
+    def test_hf_weight_load_model_via_bridge(self, mock_load_dc, _mock_meta):
+        """On the HF path: model loads via bridge; optimizer/extra come from separate dist_ckpt dirs."""
         _make_v2_layout(self.ckpt_path, "optimizer", "extra")
 
         def fake_load(sharded_state_dict, ckpt_dir):
@@ -449,7 +438,10 @@ class TestLoadCheckpointDispatch:
         mock_load_dc.side_effect = fake_load
         mgr = _make_manager(load_contents=["model", "optimizer", "extra"])
 
-        with patch.object(mgr, "_load_model_via_bridge") as mock_bridge_load, patch.object(mgr, "load_rng_states"):
+        with (
+            patch.object(mgr, "_load_model_as_hf_via_bridge") as mock_bridge_load,
+            patch.object(mgr, "load_rng_states"),
+        ):
             mgr.load_checkpoint(self.ckpt_path)
             mock_bridge_load.assert_called_once()
 
@@ -475,7 +467,10 @@ class TestLoadCheckpointDispatch:
             return {}
 
         mock_load_dc.side_effect = fake_load
-        mgr = _make_manager(load_contents=["model", "optimizer", "extra"], use_mbridge=False)
+        mgr = _make_manager(
+            load_contents=["model", "optimizer", "extra"],
+            use_dist_checkpointing=True,
+        )
 
         with patch.object(mgr, "load_rng_states"):
             mgr.load_checkpoint(self.ckpt_path)

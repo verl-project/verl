@@ -115,29 +115,32 @@ def _config_to_shallow_dict(config):
 class MegatronCheckpointManager(BaseCheckpointManager):
     """Checkpoint manager for Megatron-LM distributed training.
 
-    Two model-checkpoint backends are supported, controlled by ``use_mbridge``:
+    Model weights are saved/loaded in exactly one format, selected by a
+    single flag that matches the user-facing YAML config (
+    ``*.megatron.use_dist_checkpointing``):
 
-    * **mbridge (default)** -- saves / loads model weights in HuggingFace format
-      via megatron-bridge.  Both ``"model"`` and ``"hf_model"`` in
-      ``save_contents`` produce the same HF checkpoint (saved only once).
-
-    * **dist_checkpoint** -- saves model weights using Megatron's native
-      ``dist_checkpointing`` (sharded across ranks).  ``"hf_model"`` in
-      ``save_contents`` is **not** supported with this backend (raises error).
+    * ``use_dist_checkpointing=False`` (default) -- HuggingFace format via
+      megatron-bridge, under ``model/huggingface/``. Requires a ``bridge``.
+    * ``use_dist_checkpointing=True`` -- Megatron native sharded format via
+      ``dist_checkpointing``, under ``model/dist_ckpt/``.
 
     Optimizer, LR-scheduler, and RNG states always go through
-    ``dist_checkpointing`` regardless of the model backend.
+    ``dist_checkpointing`` regardless of the model format.
+
+    Interaction with ``save_contents``:
+
+    * ``model`` -- saved via the selected format.
+    * ``hf_model`` -- requires ``use_dist_checkpointing=False`` (i.e. the HF
+      path); deduplicated against ``model`` when both are present.
 
     Args:
         model: The Megatron model instance to checkpoint.
         optimizer: The optimizer instance.
         lr_scheduler: The learning rate scheduler instance.
-        use_mbridge: If ``True`` (default), model weights are saved/loaded via
-            megatron-bridge in HuggingFace format.  Requires ``bridge`` to be
-            provided.  If ``False``, ``dist_checkpointing`` is used for model
-            weights.
-        use_dist_checkpointing: Legacy alias -- when provided, it sets
-            ``use_mbridge = not use_dist_checkpointing``.
+        use_dist_checkpointing: If ``True``, save/load model weights via
+            Megatron's native ``dist_checkpointing``. If ``False`` (default),
+            save/load HuggingFace weights via ``bridge``. Mirrors the
+            ``*.megatron.use_dist_checkpointing`` YAML field.
     """
 
     def __init__(
@@ -157,8 +160,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         optimizer_scheduler,
         use_distributed_optimizer: bool,
         use_checkpoint_opt_param_scheduler: bool = False,
-        use_dist_checkpointing: bool | None = None,
-        use_mbridge: bool = True,
+        use_dist_checkpointing: bool = False,
         use_megatron_fsdp: bool = False,
         bridge=None,
         provider=None,
@@ -191,56 +193,65 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         self.use_megatron_fsdp = use_megatron_fsdp
         self.rank = torch.distributed.get_rank()
 
-        # --- Resolve backend ---------------------------------------------------
-        # Legacy callers may still pass ``use_dist_checkpointing``; translate it.
-        if use_dist_checkpointing is not None:
-            use_mbridge = not use_dist_checkpointing
+        # One flag, one source of truth.  Mirrors the user-facing YAML key
+        # ``*.megatron.use_dist_checkpointing``. Every save/load branch below
+        # is expressed via the ``should_{save,load}_{hf,dist_ckpt}_model``
+        # properties, which fold this flag with
+        # ``checkpoint_{save,load}_contents`` into a single boolean each.
+        self.use_dist_checkpointing = use_dist_checkpointing
 
-        if use_mbridge and self.bridge is None:
+        if self.should_save_hf_model and self.bridge is None:
             raise ValueError(
-                "MegatronCheckpointManager: use_mbridge=True requires a bridge "
-                "instance. Either pass `bridge=...` or set `use_mbridge=False` "
-                "to use dist_checkpointing for model weights."
+                "MegatronCheckpointManager: HF-format model weights require "
+                "a bridge instance. Either pass `bridge=...` or set "
+                "`use_dist_checkpointing=True` to use dist_checkpointing."
             )
 
-        self.use_mbridge = use_mbridge
-        # Aliases kept so the rest of the codebase can read them without change.
-        self.use_dist_checkpointing = not self.use_mbridge
-        self.use_hf_checkpoint = self.use_mbridge
-
-        # --- Validate & resolve save_contents vs backend ----------------------
-        # Per the RFC:
-        #   mbridge   + model    → save HF model via bridge
-        #   mbridge   + hf_model → same as model (deduplicated, save once)
-        #   dist_ckpt + model    → save via mcore dist_checkpointing
-        #   dist_ckpt + hf_model → ERROR (not supported)
-        #   both backends False  → ERROR
-        if not self.use_mbridge and not self.use_dist_checkpointing:
+        # 'hf_model' is produced only via bridge; rejecting it explicitly here
+        # (vs. the derived ``should_save_hf_model`` override below) keeps the
+        # error message tied to the user's raw input.
+        if "hf_model" in self.checkpoint_save_contents and use_dist_checkpointing:
             raise ValueError(
-                "MegatronCheckpointManager: at least one model-weight backend "
-                "must be enabled (use_mbridge or dist_checkpointing)."
+                "`save_contents` contains 'hf_model' but "
+                "`use_dist_checkpointing=True` selects the dist_checkpointing "
+                "path; 'hf_model' is only produced via bridge. Either drop "
+                "'hf_model' from `save_contents` or set "
+                "`use_dist_checkpointing=False`."
             )
 
-        if self.should_save_hf_model and not self.use_mbridge:
-            raise ValueError(
-                "save_contents contains 'hf_model' but mbridge is disabled. "
-                "'hf_model' is only supported with mbridge. Either enable "
-                "mbridge or remove 'hf_model' from save_contents."
-            )
+    # ------------------------------------------------------------------
+    # Backend-aware specialisations of ``should_{save,load}_{hf,dist_ckpt}_model``.
+    # Each property is the *single expression* guarding one dispatch
+    # branch, so save/load code never re-derives the same boolean.
+    # ------------------------------------------------------------------
 
-        # Whether we actually need to write model weights via each backend.
-        # When mbridge is active, both 'model' and 'hf_model' resolve to a
-        # single HF save (deduplicated).
-        self._save_model_via_mbridge = self.use_mbridge and (self.should_save_model or self.should_save_hf_model)
-        self._save_model_via_dist_ckpt = self.use_dist_checkpointing and self.should_save_model
+    @property
+    def should_save_hf_model(self) -> bool:
+        """True when this save must emit HF-format model weights via bridge.
 
-        # PEFT adapter shards always live in dist_checkpoint even with mbridge,
-        # because bridge handles only the base model.
-        self._save_peft_adapters_in_dist_ckpt = self._save_model_via_mbridge and self.peft_cls is not None
+        Fires when ``save_contents`` asks for ``hf_model`` OR when it asks
+        for ``model`` and the backend is HF (``use_dist_checkpointing=False``).
+        """
+        return "hf_model" in self.checkpoint_save_contents or (
+            "model" in self.checkpoint_save_contents and not self.use_dist_checkpointing
+        )
 
-        self._load_model_via_mbridge = self.use_mbridge and self.should_load_model and self.peft_cls is None
-        # PEFT adapters always live in the dist_checkpoint directory.
-        self._load_model_via_dist_ckpt = self.should_load_model and (not self.use_mbridge or self.peft_cls is not None)
+    @property
+    def should_save_dist_ckpt_model(self) -> bool:
+        """True when this save must emit Megatron sharded model weights."""
+        return "model" in self.checkpoint_save_contents and self.use_dist_checkpointing
+
+    @property
+    def should_load_hf_model(self) -> bool:
+        """True when model weights must be loaded from an HF-format checkpoint via bridge."""
+        return "hf_model" in self.checkpoint_load_contents or (
+            "model" in self.checkpoint_load_contents and not self.use_dist_checkpointing
+        )
+
+    @property
+    def should_load_dist_ckpt_model(self) -> bool:
+        """True when model weights must be loaded from a Megatron sharded checkpoint."""
+        return "model" in self.checkpoint_load_contents and self.use_dist_checkpointing
 
     def get_rng_state(self, use_dist_ckpt: bool = True, data_parallel_random_init: bool = False):
         """collect rng state across data parallel ranks"""
@@ -473,7 +484,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
 
         contents: dict[str, dict] = {}
 
-        if self._save_model_via_mbridge:
+        if self.should_save_hf_model:
             model_entry: dict = {
                 "path": hf_rel,
                 "format": "huggingface",
@@ -482,21 +493,21 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             if self.peft_cls is not None:
                 model_entry["peft_adapter_path"] = os.path.join(hf_rel, "adapter")
             contents["model"] = model_entry
-            if self.should_save_hf_model:
+            if "hf_model" in self.checkpoint_save_contents:
                 contents["hf_model"] = {
                     "path": hf_rel,
                     "format": "huggingface",
-                    "note": "deduplicated with 'model' when mbridge is enabled",
+                    "note": "deduplicated with 'model' on the HF path",
                 }
 
-        if self._save_model_via_dist_ckpt:
+        if self.should_save_dist_ckpt_model:
             contents["model"] = {
                 "path": model_dist_rel,
                 "format": "megatron_dist_checkpoint",
                 "backend": "dist_checkpointing",
             }
 
-        if self._save_peft_adapters_in_dist_ckpt:
+        if self.should_save_hf_model and self.peft_cls is not None:
             contents["peft_adapters"] = {
                 "path": model_dist_rel,
                 "format": "megatron_dist_checkpoint",
@@ -526,7 +537,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                 "format": "json",
             }
 
-        if self._save_model_via_mbridge:
+        if self.should_save_hf_model:
             contents["hf_config"] = {
                 "path": hf_rel,
                 "format": "huggingface",
@@ -539,12 +550,12 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                 }
 
         directories: dict[str, str] = {}
-        if self._save_model_via_mbridge:
+        if self.should_save_hf_model:
             directories[hf_rel] = (
                 "HuggingFace-format artifacts written via mbridge: model weights, "
                 "config.json, tokenizer files, and optional generation_config.json."
             )
-        if self._save_model_via_dist_ckpt or self._save_peft_adapters_in_dist_ckpt:
+        if self.should_save_dist_ckpt_model or (self.should_save_hf_model and self.peft_cls is not None):
             directories[model_dist_rel] = (
                 "Megatron dist_checkpointing shards for model weights (or PEFT adapter shards when mbridge is enabled)."
             )
@@ -563,7 +574,6 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             "global_step": int(global_step),
             "world_size": self.world_size,
             "backend": {
-                "use_mbridge": self.use_mbridge,
                 "use_dist_checkpointing": self.use_dist_checkpointing,
                 "peft": self.peft_cls is not None,
             },
@@ -604,7 +614,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
 
     # -- Load ------------------------------------------------------------------
 
-    def _load_model_via_bridge(self, hf_model_path: str):
+    def _load_model_as_hf_via_bridge(self, hf_model_path: str):
         """Load model weights through megatron-bridge."""
         if self.vanilla_bridge:
             self.bridge.load_weights(self.model, hf_model_path)
@@ -871,13 +881,18 @@ class MegatronCheckpointManager(BaseCheckpointManager):
 
         # Model sharded state dict is shared across the model-load and
         # optimizer-load metadata inputs, so build it once when either path
-        # needs it.
+        # needs it. The dist_ckpt model load and the HF+PEFT load both read
+        # Megatron shards, so either branch requires the sharded SD.
         model_sharded_state_dict = None
-        if self.should_load_optimizer or self._load_model_via_dist_ckpt:
+        if (
+            self.should_load_optimizer
+            or self.should_load_dist_ckpt_model
+            or (self.should_load_hf_model and self.peft_cls is not None)
+        ):
             model_sharded_state_dict = self._build_model_sharded_state_dict(metadata)
 
         # ── Load model weights ──────────────────────────────────────────────
-        if self._load_model_via_dist_ckpt:
+        if self.should_load_dist_ckpt_model or (self.should_load_hf_model and self.peft_cls is not None):
             model_sd = self._maybe_filter_peft_state_dict(dict(model_sharded_state_dict))
             loaded_model = load_dist_checkpointing(
                 sharded_state_dict=model_sd,
@@ -899,9 +914,9 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             else:
                 log_with_rank(f"Loaded sharded model checkpoint from {model_dist_path}", rank=self.rank, logger=logger)
 
-        elif self._load_model_via_mbridge:
+        elif self.should_load_hf_model and self.peft_cls is None:
             hf_model_path = get_hf_model_checkpoint_path(local_path)
-            self._load_model_via_bridge(hf_model_path)
+            self._load_model_as_hf_via_bridge(hf_model_path)
             log_with_rank(f"Loaded HF model checkpoint from {hf_model_path} with bridge", rank=self.rank, logger=logger)
 
         # ── Load optimizer / LR scheduler ───────────────────────────────────
@@ -965,7 +980,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                 extended_args[sig] = mbridge_config[sig]
         return extended_args
 
-    def _save_model_via_bridge(self, hf_ckpt_path: str):
+    def _save_model_as_hf_via_bridge(self, hf_ckpt_path: str):
         """Save model weights through megatron-bridge."""
         if self.vanilla_bridge:
             self.bridge.save_weights(self.model, hf_ckpt_path, **self._get_bridge_extended_args())
@@ -1144,8 +1159,8 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             ├── ckpt_contents.json       # manifest (read first to locate any piece)
             ├── transformer_config.json  # when 'extra' is in save_contents
             ├── model/
-            │   ├── huggingface/         # mbridge HF weights + config + tokenizer
-            │   └── dist_ckpt/           # Megatron model shards (mbridge off / PEFT)
+            │   ├── huggingface/         # HF weights via bridge (default) + config + tokenizer
+            │   └── dist_ckpt/           # Megatron shards (use_dist_checkpointing=True / PEFT)
             ├── optimizer/dist_ckpt/     # optimizer + lr_scheduler shards
             └── extra/dist_ckpt/         # rng_state shards
 
@@ -1174,11 +1189,11 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         # * Otherwise we use Megatron dist_checkpointing per-content (model /
         #   optimizer / extra) so each piece can be independently located,
         #   GC'd, or uploaded.  Model weights only go into dist_ckpt when
-        #   mbridge is disabled (or for PEFT adapters which bridge doesn't
-        #   handle).  The model sharded state dict is built once as a shared
-        #   dependency: Megatron's optimizer.sharded_state_dict() reads it as
-        #   metadata, and we may additionally persist it (or a PEFT-filtered
-        #   subset) as the model content itself.
+        #   ``use_dist_checkpointing=True`` (or for PEFT adapters which
+        #   bridge doesn't handle).  The model sharded state dict is built
+        #   once as a shared dependency: Megatron's optimizer.sharded_state_dict()
+        #   reads it as metadata, and we may additionally persist it (or a
+        #   PEFT-filtered subset) as the model content itself.
         model_state_dict: dict = {}
         optimizer_state_dict: dict = {}
         extra_state_dict: dict = {}
@@ -1193,19 +1208,19 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             model_sharded_state_dict = None
             if (
                 self.should_save_optimizer
-                or self._save_model_via_dist_ckpt
-                or self._save_peft_adapters_in_dist_ckpt
+                or self.should_save_dist_ckpt_model
+                or (self.should_save_hf_model and self.peft_cls is not None)
             ):
                 model_sharded_state_dict = self._build_model_sharded_state_dict(metadata)
 
-            if self._save_model_via_dist_ckpt:
+            if self.should_save_dist_ckpt_model:
                 model_state_dict.update(model_sharded_state_dict)
                 log_with_rank(
                     f"model/dist_ckpt will save model shards: {model_sharded_state_dict.keys()}",
                     rank=self.rank,
                     logger=logger,
                 )
-            if self._save_peft_adapters_in_dist_ckpt:
+            if self.should_save_hf_model and self.peft_cls is not None:
                 peft_state = self._maybe_filter_peft_state_dict(dict(model_sharded_state_dict))
                 model_state_dict.update(peft_state)
 
@@ -1230,15 +1245,15 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             ]
         )
 
-        # ── 2. Save model weights via mbridge (HF format) ───────────────────
-        if self._save_model_via_mbridge:
+        # ── 2. Save model weights in HF format via bridge ───────────────────
+        if self.should_save_hf_model:
             hf_ckpt_path = get_hf_model_checkpoint_path(local_path)
             log_with_rank(f"Saving HF model checkpoint to {hf_ckpt_path} with bridge", rank=self.rank, logger=logger)
-            self._save_model_via_bridge(hf_ckpt_path)
+            self._save_model_as_hf_via_bridge(hf_ckpt_path)
             log_with_rank(f"Saved bridge checkpoint to {hf_ckpt_path}", rank=self.rank, logger=logger)
 
         # ── 3. HF config / tokenizer (rank 0) ───────────────────────────────
-        if self._save_model_via_mbridge:
+        if self.should_save_hf_model:
             self._save_hf_config_and_tokenizer(local_path)
 
         # ── 4. Transformer config (rank 0, at checkpoint root) ──────────────
