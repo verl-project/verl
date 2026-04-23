@@ -31,7 +31,7 @@ def get_global_load_balancer(mode: str) -> Any:
 class GlobalRequestLoadBalancer:
     """Global sticky-session + in-flight load balancer shared by all AgentLoopWorkers."""
 
-    def __init__(self, server_actor_ids: list[str], max_cache_size: int = DEFAULT_ROUTING_CACHE_SIZE) -> None:
+    def __init__(self, server_actor_ids: list[str]) -> None:
         if not server_actor_ids:
             raise ValueError("server_actor_ids must be non-empty")
         self._server_actor_ids = server_actor_ids
@@ -55,7 +55,7 @@ class RequestStickyLoadBalancer(GlobalRequestLoadBalancer):
     """Request-level sticky session + in-flight load balancer shared by each AgentLoopWorker."""
 
     def __init__(self, server_actor_ids: list[str], max_cache_size: int = DEFAULT_ROUTING_CACHE_SIZE) -> None:
-        super().__init__(server_actor_ids=server_actor_ids, max_cache_size=max_cache_size)
+        super().__init__(server_actor_ids=server_actor_ids)
         self._request_id_to_server: LRUCache[str, str] = LRUCache(maxsize=max_cache_size)
 
     def acquire_server(self, request_id: str, request_group_id: str | None = None) -> str:
@@ -75,14 +75,12 @@ class GroupStickyLoadBalancer(GlobalRequestLoadBalancer):
     """Group-level sticky session + in-flight load balancer shared by all AgentLoopWorkers."""
 
     def __init__(self, server_actor_ids: list[str], max_cache_size: int = DEFAULT_ROUTING_CACHE_SIZE) -> None:
-        super().__init__(server_actor_ids=server_actor_ids, max_cache_size=max_cache_size)
+        super().__init__(server_actor_ids=server_actor_ids)
         self._request_group_id_to_server: LRUCache[str, str] = LRUCache(maxsize=max_cache_size)
 
     def acquire_server(self, request_id: str, request_group_id: str | None = None) -> str:
         if request_group_id is None:
-            server_id = min(self._inflight_requests, key=self._inflight_requests.get)
-            self._inflight_requests[server_id] += 1
-            return server_id
+            raise ValueError("request_group_id is required when using GroupStickyLoadBalancer")
         if request_group_id in self._request_group_id_to_server:
             server_id = self._request_group_id_to_server[request_group_id]
             self._inflight_requests[server_id] += 1
