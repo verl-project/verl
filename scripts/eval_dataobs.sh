@@ -76,55 +76,55 @@ echo ">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"
 echo "Stage 1: Generation"
 echo ">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"
 
-# 如果 checkpoint 中有 adapter_model.safetensors，说明是 LoRA 模型，需要指定基础模型
+# 如果 checkpoint 中有 adapter_model.safetensors，说明是 LoRA 模型，需要 merge
 if [ -f "$CHECKPOINT_PATH/adapter_model.safetensors" ]; then
-    echo "[INFO] Detected LoRA adapter, using base model: $BASE_MODEL"
-    MODEL_PATH="$BASE_MODEL"
+    echo "[INFO] Detected LoRA adapter, merging with base model: $BASE_MODEL"
 
-    python3 -m verl.trainer.main_generation \
-        --config-path=${CONFIG_DIR} \
-        --config-name=generation \
-        model.path=${MODEL_PATH} \
-        +model.lora_path=${CHECKPOINT_PATH} \
-        model.no_chat=false \
-        data.path=${EVAL_DATA} \
-        data.output_path=${GENERATION_OUTPUT} \
-        data.prompt_key=prompt \
-        data.n_samples=1 \
-        data.batch_size=32 \
-        rollout.temperature=0.6 \
-        rollout.seed=42 \
-        rollout.prompt_length=512 \
-        rollout.response_length=1024 \
-        rollout.gpu_memory_utilization=0.8 \
-        trainer.n_gpus_per_node=${n_gpus_per_node} \
-        trainer.nnodes=1 \
-        trainer.device=cuda \
-        ray_init.num_cpus=48 \
-        2>&1 | tee ${EVAL_OUTPUT_DIR}/logs/generation.log
+    # 创建临时目录存放 merged 模型
+    MERGED_MODEL_PATH="${EVAL_OUTPUT_DIR}/merged_model"
+    mkdir -p ${MERGED_MODEL_PATH}
+
+    # 调用 merge 脚本
+    MERGE_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/scripts/lora_model_merge/merge_lora_qwen.py"
+
+    python3 ${MERGE_SCRIPT} \
+        --base ${BASE_MODEL} \
+        --lora ${CHECKPOINT_PATH} \
+        --tokenizer ${CHECKPOINT_PATH} \
+        --output ${MERGED_MODEL_PATH}
+
+    if [ $? -ne 0 ]; then
+        echo "[ERROR] LoRA merge failed!"
+        exit 1
+    fi
+
+    MODEL_PATH=${MERGED_MODEL_PATH}
+    echo "[INFO] LoRA merge completed, using merged model: $MODEL_PATH"
 else
     echo "[INFO] Using checkpoint as full model: $CHECKPOINT_PATH"
-    python3 -m verl.trainer.main_generation \
-        --config-path=${CONFIG_DIR} \
-        --config-name=generation \
-        model.path=${CHECKPOINT_PATH} \
-        model.no_chat=false \
-        data.path=${EVAL_DATA} \
-        data.output_path=${GENERATION_OUTPUT} \
-        data.prompt_key=prompt \
-        data.n_samples=1 \
-        data.batch_size=32 \
-        rollout.temperature=0.6 \
-        rollout.seed=42 \
-        rollout.prompt_length=512 \
-        rollout.response_length=1024 \
-        rollout.gpu_memory_utilization=0.8 \
-        trainer.n_gpus_per_node=${n_gpus_per_node} \
-        trainer.nnodes=1 \
-        trainer.device=cuda \
-        ray_init.num_cpus=48 \
-        2>&1 | tee ${EVAL_OUTPUT_DIR}/logs/generation.log
+    MODEL_PATH="$CHECKPOINT_PATH"
 fi
+
+python3 -m verl.trainer.main_generation \
+    --config-path=${CONFIG_DIR} \
+    --config-name=generation \
+    model.path=${MODEL_PATH} \
+    model.no_chat=false \
+    data.path=${EVAL_DATA} \
+    data.output_path=${GENERATION_OUTPUT} \
+    data.prompt_key=prompt \
+    data.n_samples=1 \
+    data.batch_size=32 \
+    rollout.temperature=0.6 \
+    rollout.seed=42 \
+    rollout.prompt_length=512 \
+    rollout.response_length=1024 \
+    rollout.gpu_memory_utilization=0.8 \
+    trainer.n_gpus_per_node=${n_gpus_per_node} \
+    trainer.nnodes=1 \
+    trainer.device=cuda \
+    ray_init.num_cpus=48 \
+    2>&1 | tee ${EVAL_OUTPUT_DIR}/logs/generation.log
 
 if [ ${PIPESTATUS[0]} -ne 0 ] || [ ! -f "${GENERATION_OUTPUT}" ]; then
     echo "[ERROR] Generation Failed!"

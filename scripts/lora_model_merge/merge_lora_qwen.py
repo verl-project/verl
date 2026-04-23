@@ -26,20 +26,20 @@ parser.add_argument("--output", default=default_save_path, help="输出路径")
 parser.add_argument("--verify", action="store_true", help="合并后验证")
 args = parser.parse_args()
 
-def merge_lora_weights(base_path, lora_path, tokenizer_path, output_path, gpu_id):
+def merge_lora_weights(base_path, lora_path, tokenizer_path, output_path):
     original_cuda_home = os.environ.get('CUDA_HOME', None)
 
     try:
         # 临时指向正确的 CUDA 路径，供 DeepSpeed 检查使用
         os.environ['CUDA_HOME'] = '/usr/local/cuda-12.6'
-        
+
         print(f"正在加载基础模型: {base_path}")
-        
-        # 加载基础模型
+
+        # 加载基础模型，使用逻辑 GPU ID 0（CUDA_VISIBLE_DEVICES 已设置）
         model = AutoModelForCausalLM.from_pretrained(
             base_path,
             torch_dtype=torch.float32,
-            device_map=f"cuda:{gpu_id}",
+            device_map="cuda:0",
             trust_remote_code=True
         )
         
@@ -123,8 +123,8 @@ def verify_model():
 
 if __name__ == "__main__":
     # 执行合并
-    merge_lora_weights(args.base, args.lora, args.tokenizer, args.output, 6)
-    
+    merge_lora_weights(args.base, args.lora, args.tokenizer, args.output)
+
     # 可选：验证（需要 GPU 资源，如果显存不足可注释掉）
     if args.verify:
         verify_model()
