@@ -90,8 +90,7 @@ def _extract_prompt_logprobs_sglang(
             ids = [int(tok_id) for _, tok_id, _ in top_entries]
             logprobs = [float(logprob) for logprob, _, _ in top_entries]
             assert len(ids) == num_prompt_logprobs, (
-                f"SGLang returned {len(ids)} top logprobs at position {position}, "
-                f"expected {num_prompt_logprobs}."
+                f"SGLang returned {len(ids)} top logprobs at position {position}, expected {num_prompt_logprobs}."
             )
             prompt_ids_ls.append(ids)
             prompt_logprobs_ls.append(logprobs)
