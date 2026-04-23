@@ -19,6 +19,7 @@ from omegaconf import MISSING
 
 from verl.base_config import BaseConfig
 from verl.utils.profiler import ProfilerConfig
+from verl.workers.config.disaggregation import DisaggregationConfig
 from verl.workers.config.model import MtpConfig
 
 __all__ = [
@@ -286,6 +287,8 @@ class RolloutConfig(BaseConfig):
 
     qat: Optional[dict] = None
 
+    disaggregation: DisaggregationConfig = field(default_factory=DisaggregationConfig)
+
     def __post_init__(self):
         """Validate the rollout config"""
         # Deprecation warning for mode field - only async mode is supported
@@ -332,6 +335,32 @@ class RolloutConfig(BaseConfig):
                 raise NotImplementedError(
                     f"Current rollout {self.name=} not implemented pipeline_model_parallel_size > 1 yet."
                 )
+
+        # Hydra passes this as dict/DictConfig; coerce to dataclass so
+        # downstream .enabled etc. work. BaseConfig is frozen, hence object.__setattr__.
+        if isinstance(self.disaggregation, dict):
+            object.__setattr__(self, "disaggregation", DisaggregationConfig(**self.disaggregation))
+        elif not isinstance(self.disaggregation, DisaggregationConfig):
+            from omegaconf import DictConfig, OmegaConf
+
+            if not isinstance(self.disaggregation, DictConfig):
+                raise TypeError(
+                    f"rollout.disaggregation must be dict, DictConfig, or DisaggregationConfig; "
+                    f"got {type(self.disaggregation).__name__}."
+                )
+            object.__setattr__(
+                self,
+                "disaggregation",
+                DisaggregationConfig(**OmegaConf.to_container(self.disaggregation, resolve=True)),
+            )
+
+        if self.disaggregation.enabled and self.name not in ("sglang_pd", "vllm_pd"):
+            raise ValueError(
+                f"rollout.disaggregation.enabled=True requires rollout.name in "
+                f"{{'sglang_pd', 'vllm_pd'}}; got {self.name!r}. Plain "
+                f"'sglang'/'vllm' resolve to the non-PD replica and would "
+                f"silently ignore disaggregation settings."
+            )
 
 
 @dataclass

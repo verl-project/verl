@@ -387,9 +387,24 @@ def _load_trtllm():
     return TRTLLMReplica
 
 
+def _load_sglang_pd():
+    _load_sglang()  # side-effect: installs vllm mocks needed by SGLang
+    from verl.workers.rollout.sglang_rollout.sglang_pd_replica import SGLangPDReplica
+
+    return SGLangPDReplica
+
+
+def _load_vllm_pd():
+    from verl.workers.rollout.vllm_rollout.vllm_pd_replica import vLLMPDReplica
+
+    return vLLMPDReplica
+
+
 # Register built-in types
 RolloutReplicaRegistry.register("vllm", _load_vllm)
 RolloutReplicaRegistry.register("sglang", _load_sglang)
+RolloutReplicaRegistry.register("sglang_pd", _load_sglang_pd)
+RolloutReplicaRegistry.register("vllm_pd", _load_vllm_pd)
 RolloutReplicaRegistry.register("trtllm", _load_trtllm)
 RolloutReplicaRegistry.register("vllm_omni", _load_vllm_omni)
 

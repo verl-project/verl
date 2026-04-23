@@ -1098,6 +1098,22 @@ class AgentLoopManager:
             * self.rollout_config.data_parallel_size
             * self.rollout_config.pipeline_model_parallel_size
         )
+        # PD inflates per-replica footprint; miss this and init_hybrid slices
+        # past worker_group → empty workers on replica_rank>=1.
+        disagg = getattr(self.rollout_config, "disaggregation", None)
+        if disagg is not None and getattr(disagg, "enabled", False):
+            prefill_tp = self.rollout_config.tensor_model_parallel_size
+            # Inline decode_tp default: OmegaConf/Ray serialization drops dataclass methods.
+            decode_tp = (
+                disagg.decode_tensor_model_parallel_size
+                if disagg.decode_tensor_model_parallel_size is not None
+                else prefill_tp
+            )
+            rollout_world_size = (
+                (prefill_tp * disagg.prefill_replicas + decode_tp * disagg.decode_replicas)
+                * self.rollout_config.data_parallel_size
+                * self.rollout_config.pipeline_model_parallel_size
+            )
         world_size = (
             self.worker_group.world_size
             if self.worker_group

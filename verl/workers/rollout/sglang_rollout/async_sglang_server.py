@@ -17,6 +17,8 @@ import dataclasses
 import json
 import logging
 import os
+import secrets
+from pathlib import Path
 from typing import Any, Optional
 
 import ray
@@ -82,9 +84,20 @@ class SGLangHttpServer:
         nnodes: int,
         cuda_visible_devices: str,
         base_gpu_id: int,
+        disaggregation_role: str = "null",
+        disaggregation_bootstrap_port: Optional[int] = None,
     ):
-        print(f"SGLang http server: {rollout_mode=}, {replica_rank=}, {node_rank=}, {nnodes=}, {cuda_visible_devices=}")
+        print(
+            f"SGLang http server: {rollout_mode=}, {replica_rank=}, {node_rank=}, "
+            f"{nnodes=}, {cuda_visible_devices=}, role={disaggregation_role}"
+        )
         os.environ[visible_devices_keyword] = cuda_visible_devices
+
+        assert disaggregation_role in ("null", "prefill", "decode"), (
+            f"disaggregation_role must be 'null'|'prefill'|'decode', got {disaggregation_role!r}"
+        )
+        self._disaggregation_role = disaggregation_role
+        self._disaggregation_bootstrap_port = disaggregation_bootstrap_port
 
         self.config: RolloutConfig = omega_conf_to_dataclass(config)
         self.model_config: HFModelConfig = omega_conf_to_dataclass(model_config, dataclass_type=HFModelConfig)
@@ -106,6 +119,10 @@ class SGLangHttpServer:
         self.base_gpu_id = base_gpu_id
         # model weights version, set by ServerAdapter when update weights.
         self.global_steps = None
+
+        # PD peer linkage populated post-launch by SGLangPDReplica.set_pd_peer.
+        self._pd_decode_peers: list[ActorHandle] = []
+        self._pd_bootstrap_host: Optional[str] = None
 
         if self.rollout_mode != RolloutMode.HYBRID and self.config.load_format == "dummy":
             logger.warning(f"rollout mode is {self.rollout_mode}, load_format is dummy, set to auto")
@@ -149,7 +166,36 @@ class SGLangHttpServer:
         assert self._server_port is not None, "http server is not launched, port is None"
         return self._server_address, self._server_port
 
+    async def set_pd_peer(self, decode_peers: list, bootstrap_host: str):
+        assert isinstance(decode_peers, list) and decode_peers
+        self._pd_decode_peers = list(decode_peers)
+        self._pd_bootstrap_host = bootstrap_host
+
+    def _prepend_cu12_lib_to_ld_library_path(self) -> None:
+        """Ray runtime_env.pip installs cu12 into a transient venv, not the usual
+        site-packages. NIXL's UCX plugin dlopens libcudart.so.12 from
+        LD_LIBRARY_PATH; wrong path ⇒ scheduler subprocess dies with SIGABRT."""
+        try:
+            import nvidia.cuda_runtime as cu12_mod
+        except ImportError as e:
+            logger.warning(
+                f"nvidia.cuda_runtime not importable: {e}. "
+                f"NIXL may fail with 'libcudart.so.12: cannot open shared object'."
+            )
+            return
+        cu12_lib = str(Path(cu12_mod.__file__).parent / "lib")
+        if not os.path.isdir(cu12_lib):
+            return
+        existing = os.environ.get("LD_LIBRARY_PATH", "")
+        if cu12_lib in existing.split(":"):
+            return
+        os.environ["LD_LIBRARY_PATH"] = f"{cu12_lib}:{existing}" if existing else cu12_lib
+        logger.info(f"Prepended {cu12_lib} to LD_LIBRARY_PATH for NIXL/UCX dlopen.")
+
     async def launch_server(self, master_address: str = None, master_port: int = None):
+        if self._disaggregation_role != "null":
+            self._prepend_cu12_lib_to_ld_library_path()
+
         if self.nnodes > 1:
             if self.node_rank != 0:
                 assert master_address and master_port, "non-master node should provide master address and port"
@@ -239,6 +285,20 @@ class SGLangHttpServer:
                 True if self.rollout_mode == RolloutMode.COLOCATED or self.model_config.lora_rank > 0 else False
             )
             args["enable_weights_cpu_backup"] = enable_weights_cpu_backup
+
+        if self._disaggregation_role != "null":
+            disagg = self.config.disaggregation
+            args["disaggregation_mode"] = self._disaggregation_role
+            args["disaggregation_transfer_backend"] = disagg.transfer_backend
+            # Bind HTTP + bootstrap to the routable node IP; default 127.0.0.1
+            # makes decode-to-prefill bootstrap connection fail across nodes.
+            args["host"] = self._server_address
+            if self._disaggregation_bootstrap_port is not None:
+                args["disaggregation_bootstrap_port"] = self._disaggregation_bootstrap_port
+            if disagg.decode_tensor_model_parallel_size is not None:
+                args["disaggregation_decode_tp"] = disagg.decode_tensor_model_parallel_size
+            if disagg.ib_device is not None:
+                args["disaggregation_ib_device"] = disagg.ib_device
 
         if self.config.enable_rollout_routing_replay:
             args.update({"enable_return_routed_experts": True})
@@ -375,8 +435,40 @@ class SGLangHttpServer:
         request_id: str,
         image_data: Optional[list[Any]] = None,
         video_data: Optional[list[Any]] = None,
+        bootstrap_host: Optional[str] = None,
+        bootstrap_port: Optional[int] = None,
+        bootstrap_room: Optional[int] = None,
     ) -> TokenOutput:
-        """Generate sequence with token-in-token-out."""
+        # PD top-level dispatch: prefill mints a bootstrap_room and fans out
+        # paired local-prefill + remote-decode calls; decode returns the tokens
+        # (prefill only materialises KV and pushes via NIXL). Random peer
+        # choice avoids systematic skew from heavy-tailed RL prompt lengths.
+        if self._disaggregation_role == "prefill" and self._pd_decode_peers and bootstrap_room is None:
+            room = secrets.randbits(63)
+            decode_peer = self._pd_decode_peers[secrets.randbelow(len(self._pd_decode_peers))]
+            prefill_coro = self.generate(
+                prompt_ids,
+                dict(sampling_params),
+                f"{request_id}_P",
+                image_data=image_data,
+                video_data=video_data,
+                bootstrap_host=self._pd_bootstrap_host,
+                bootstrap_port=self._disaggregation_bootstrap_port,
+                bootstrap_room=room,
+            )
+            decode_coro = decode_peer.generate.remote(
+                prompt_ids,
+                dict(sampling_params),
+                f"{request_id}_D",
+                image_data=image_data,
+                video_data=video_data,
+                bootstrap_host=self._pd_bootstrap_host,
+                bootstrap_port=self._disaggregation_bootstrap_port,
+                bootstrap_room=room,
+            )
+            _, decode_output = await asyncio.gather(prefill_coro, decode_coro)
+            return decode_output
+
         # TODO(@wuxibin): switch to `/generate` http endpoint once multi-modal support ready.
         max_possible_tokens = self.config.max_model_len - len(prompt_ids) - 1
 
@@ -419,6 +511,12 @@ class SGLangHttpServer:
 
         if self.config.enable_rollout_routing_replay:
             request.update({"return_routed_experts": True})
+
+        # SGLang's scheduler rejects disagg-mode requests without bootstrap_room.
+        if bootstrap_room is not None:
+            request["bootstrap_host"] = bootstrap_host
+            request["bootstrap_port"] = bootstrap_port
+            request["bootstrap_room"] = bootstrap_room
 
         generate_request = GenerateReqInput(**request)
 
