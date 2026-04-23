@@ -115,7 +115,7 @@ jobs:
           export HCCL_HOST_SOCKET_PORT_RANGE=auto
           export HCCL_NPU_SOCKET_PORT_RANGE=auto
           export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
-          ROLLOUT_NAME=vllm pytest -svvv tests/experimental/agent_loop
+          ROLLOUT_NAME=vllm coverage run --data-file=/root/.cache/.coverage.agent_loop --source=verl -m pytest -svvv tests/experimental/agent_loop
       - name: Test vllm server abort functionality
         run: |
-          pytest tests/workers/rollout/rollout_vllm/test_vllm_abort.py -v -s
+          coverage run --data-file=/root/.cache/.coverage.test_vllm_abort --source=verl -m pytest tests/workers/rollout/rollout_vllm/test_vllm_abort.py -v -s

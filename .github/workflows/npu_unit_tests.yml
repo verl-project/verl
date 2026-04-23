@@ -98,6 +98,7 @@ jobs:
           clean: true
       - name: Install the current repository
         run: |
+          pip install pytest pytest-cov coverage
           pip install --no-deps -e .[test]
           pip install mlflow pytest-asyncio
       - name: Check final pip list
@@ -108,13 +109,13 @@ jobs:
           ln -s /root/.cache/models ~/models
       - name: Run all NPU unit tests
         run: |
-          pytest -s -x --ignore-glob="*test_special_*.py" --ignore-glob="*on_cpu.py" --ignore-glob="*test_vllm*" --ignore-glob="*_sglang*" --ignore-glob="*_hf_rollout*" --ignore-glob="tests/models/" --ignore-glob="tests/special*" --ignore-glob="tests/experimental" --ignore-glob="tests/workers/reward_model" --ignore-glob="*test_rvdz*" --ignore-glob="*test_ray_collectives*" --ignore-glob="*test_nvtx_profile*" --ignore-glob="tests/checkpoint_engine" --ignore-glob="*test_shared_memory*" --ignore-glob="tests/workers/rollout/rollout_trtllm" --ignore-glob="*test_fsdp_lora_merge*" --ignore-glob="*test_activation_offload*" --ignore-glob="*test_normalize_peft_param_name.py*" tests/
+          coverage run --data-file=/root/.cache/.coverage.npu_unit_tests --source=verl -m pytest -s -x --ignore-glob="*test_special_*.py" --ignore-glob="*on_cpu.py" --ignore-glob="*test_vllm*" --ignore-glob="*_sglang*" --ignore-glob="*_hf_rollout*" --ignore-glob="tests/models/" --ignore-glob="tests/special*" --ignore-glob="tests/experimental" --ignore-glob="tests/workers/reward_model" --ignore-glob="*test_rvdz*" --ignore-glob="*test_ray_collectives*" --ignore-glob="*test_nvtx_profile*" --ignore-glob="tests/checkpoint_engine" --ignore-glob="*test_shared_memory*" --ignore-glob="tests/workers/rollout/rollout_trtllm" --ignore-glob="*test_fsdp_lora_merge*" --ignore-glob="*test_activation_offload*" --ignore-glob="*test_normalize_peft_param_name.py*" tests/
       - name: Testing activation offload
         run: |
-          pytest -s -x tests/utils/test_activation_offload.py
+          coverage run --data-file=/root/.cache/.coverage.activateion --source=verl -m pytest -s -x tests/utils/test_activation_offload.py
       - name: Testing normalize peft param name
         run: |
-          pytest -s -x tests/utils/test_normalize_peft_param_name.py
+          coverage run --data-file=/root/.cache/.coverage.normalize --source=verl -m pytest -s -x tests/utils/test_normalize_peft_param_name.py
       - name: Running NPU profiling unit tests
         run: |
-          pytest -s -x tests/utils/test_special_mstx_profile.py
+          coverage run --data-file=/root/.cache/.coverage.profiling_unit_tests --source=verl -m pytest -s -x tests/utils/test_special_mstx_profile.py

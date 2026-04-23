@@ -14,7 +14,7 @@ PROFILE_RANKS_ALL=False
 PROFILE_RANKS=[0]
 DISCRETE=True
 
-python3 -m verl.trainer.main_ppo \
+coverage run --data-file=/root/.cache/.coverage.run_qwen2_5_05b_grpo --source=verl -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
     data.train_files=$HOME/data/gsm8k/train.parquet \
     data.val_files=$HOME/data/gsm8k/test.parquet \

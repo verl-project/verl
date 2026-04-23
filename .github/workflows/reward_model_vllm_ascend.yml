@@ -85,6 +85,7 @@ jobs:
           clean: true
       - name: Install the current repository
         run: |
+          pip install pytest pytest-cov coverage
           pip install --no-deps -e .[test]
       - name: Check final pip list
         run: |
@@ -98,15 +99,15 @@ jobs:
           python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k --local_dir ${HOME}/data/gsm8k
       - name: Running vllm generative reward model tests on 8 NPUs
         run: |
-          ROLLOUT_NAME=vllm pytest -s -x tests/experimental/reward_loop/test_reward_model_genrm.py
+          ROLLOUT_NAME=vllm coverage run --data-file=/root/.cache/.coverage.test_reward_model_genrm --source=verl -m pytest -s -x tests/experimental/reward_loop/test_reward_model_genrm.py
       - name: Running vllm discriminative reward model tests on 8 NPUs
         run: |
-          ROLLOUT_NAME=vllm pytest -s -x tests/experimental/reward_loop/test_reward_model_disrm.py
+          ROLLOUT_NAME=vllm coverage run --data-file=/root/.cache/.coverage.test_reward_model_disrm --source=verl -m pytest -s -x tests/experimental/reward_loop/test_reward_model_disrm.py
       - name: Running vllm agent loop with reward manager tests on 8 NPUs
         run: |
-          ROLLOUT_NAME=vllm pytest -s -x tests/experimental/reward_loop/test_agent_reward_loop_standalone.py
+          ROLLOUT_NAME=vllm coverage run --data-file=/root/.cache/.coverage.test_agent_reward_loop_standalone --source=verl -m pytest -s -x tests/experimental/reward_loop/test_agent_reward_loop_standalone.py
       - name: Running vllm agent loop with reward model colocate tests on 8 NPUs
         run: |
           export HCCL_HOST_SOCKET_PORT_RANGE=auto
           export HCCL_NPU_SOCKET_PORT_RANGE=auto
-          ROLLOUT_NAME=vllm pytest -s -x tests/experimental/reward_loop/test_agent_reward_loop_colocate.py
+          ROLLOUT_NAME=vllm coverage run --data-file=/root/.cache/.coverage.test_agent_reward_loop_colocate --source=verl -m pytest -s -x tests/experimental/reward_loop/test_agent_reward_loop_colocate.py

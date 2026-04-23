@@ -105,7 +105,7 @@ if [ -n "$device_name" ] && [ "$device_name" == "cuda" ]; then
     
 elif [ -n "$device_name" ] && [ "$device_name" == "npu" ]; then
     CONTENTS=['npu','cpu']
-    python3 -m verl.trainer.main_ppo \
+    coverage run --data-file=/root/.cache/.coverage.run_ppo_trainer_veomni --source=verl -m verl.trainer.main_ppo \
         "${common_params[@]}" \
         actor_rollout_ref.actor.profiler.tool_config.npu.discrete=$DISCRETE \
         actor_rollout_ref.actor.profiler.tool_config.npu.contents=$CONTENTS \

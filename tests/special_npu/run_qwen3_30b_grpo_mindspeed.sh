@@ -56,7 +56,7 @@ train_prompt_bsz=16
 actor_ppo_max_token_len=$(((max_prompt_length + max_response_length)))
 infer_ppo_max_token_len=$(((max_prompt_length + max_response_length)))
 
-python3 -m verl.trainer.main_ppo --config-path=config \
+coverage run --data-file=/root/.cache/.coverage.run_qwen3_30b_grpo_mindspeed --source=verl -m verl.trainer.main_ppo --config-path=config \
     --config-name='ppo_megatron_trainer.yaml' \
     data.train_files=${HOME}/data/gsm8k/train.parquet \
     data.val_files=${HOME}/data/gsm8k/test.parquet \

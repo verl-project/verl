@@ -157,7 +157,7 @@ else
     ENABLE_ROLLOUT_ROUTING_REPLAY=False
 fi
 
-python3 -m verl.trainer.main_ppo --config-path=config \
+coverage run --data-file=/root/.cache/.coverage.run_ppo_trainer_megatron --source=verl -m verl.trainer.main_ppo --config-path=config \
     --config-name='ppo_megatron_trainer.yaml'\
     algorithm.adv_estimator="${ADV_ESTIMATOR}" \
     data.train_files="${TRAIN_FILES}" \

@@ -109,6 +109,7 @@ jobs:
           clean: true
       - name: Install the current repository
         run: |
+          pip install pytest pytest-cov coverage
           pip install --no-deps -e .
       - name: Check final pip list
         run: |
@@ -153,6 +154,7 @@ jobs:
           clean: true
       - name: Install the current repository
         run: |
+          pip install pytest pytest-cov coverage
           pip install --no-deps -e .
       - name: Check final pip list
         run: |

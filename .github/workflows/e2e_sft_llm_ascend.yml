@@ -95,6 +95,7 @@ jobs:
           clean: true
       - name: Install the current repository
         run: |
+          pip install pytest pytest-cov coverage
           pip install --no-deps -e .
           pip install veomni==0.1.9a1 --ignore-requires-python --no-deps
           pip install transformers==4.57.3

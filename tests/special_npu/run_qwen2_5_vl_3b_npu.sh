@@ -9,7 +9,7 @@ export USE_OPTIMIZED_MODEL=0
 MODEL_ID=${MODEL_ID:-Qwen/Qwen2.5-VL-3B-Instruct}
 MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/models/${MODEL_ID}}
 
-python3 -m verl.trainer.main_ppo \
+coverage run --data-file=/root/.cache/.coverage.run_qwen2_5_vl_3b_npu --source=verl -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
     data.train_files=$HOME/data/geo3k/train.parquet \
     data.val_files=$HOME/data/geo3k/test.parquet \

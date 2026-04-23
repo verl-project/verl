@@ -163,7 +163,7 @@ if [ "${ACTOR_STRATEGY}" == "fsdp2" ]; then
         )
         actor_offload=True
     fi
-    python3 -m verl.experimental.fully_async_policy.fully_async_main \
+    coverage run --data-file=/root/.cache/.coverage.run_fully_async_policy_fsdp2 --source=verl -m verl.experimental.fully_async_policy.fully_async_main \
         "${common_params[@]}" \
         actor_rollout_ref.model.enable_gradient_checkpointing=True \
         actor_rollout_ref.actor.fsdp_config.strategy=fsdp2 \
@@ -193,7 +193,7 @@ elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
         actor_rollout_ref.rollout.gpu_memory_utilization=0.60
     )
 
-    python3 -m verl.experimental.fully_async_policy.fully_async_main \
+    coverage run --data-file=/root/.cache/.coverage.run_fully_async_policy_megatron --source=verl -m verl.experimental.fully_async_policy.fully_async_main \
         --config-path=config \
         --config-name='fully_async_ppo_megatron_trainer.yaml' \
         "${common_params[@]}" \

@@ -139,7 +139,7 @@ if [ "${ACTOR_STRATEGY}" == "fsdp2" ]; then
         actor_offload=True
     fi
 
-    python3 -m verl.experimental.one_step_off_policy.main_ppo \
+    coverage run --data-file=/root/.cache/.coverage.run_one_step_off_policy_fsdp2 --source=verl -m verl.experimental.one_step_off_policy.main_ppo \
         "${common_params[@]}" \
         actor_rollout_ref.actor.fsdp_config.strategy=fsdp2 \
         actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
@@ -184,7 +184,7 @@ elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
         actor_offload=True
     fi
 
-    python3 -m verl.experimental.one_step_off_policy.main_ppo \
+    coverage run --data-file=/root/.cache/.coverage.run_one_step_off_policy_megatron --source=verl -m verl.experimental.one_step_off_policy.main_ppo \
         --config-path=config \
         --config-name='one_step_off_ppo_megatron_trainer.yaml' \
         "${common_params[@]}" \

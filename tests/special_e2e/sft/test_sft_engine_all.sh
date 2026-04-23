@@ -54,6 +54,6 @@ BACKEND=megatron TP_SIZE=2 PP_SIZE=2 VPP_SIZE=${VPP_SIZE} CP_SIZE=2 NUM_GPUS=8 m
 # echo "run with automodel tp2 pp1 cp1 dp2 num_gpus4"
 # BACKEND=automodel TP_SIZE=2 PP_SIZE=1 CP_SIZE=1 FSDP_SIZE=2 NUM_GPUS=4 bash tests/special_e2e/sft/run_sft_engine.sh
 
-python3 tests/special_e2e/sft/compare_sft_engine_results.py
+coverage run --data-file=/root/.cache/.coverage.test_sft_engine_all --source=verl tests/special_e2e/sft/compare_sft_engine_results.py
 
 rm -rf ~/verl/test/log

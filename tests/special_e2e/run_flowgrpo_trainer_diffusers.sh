@@ -20,7 +20,7 @@ ENGINE=vllm_omni
 max_prompt_length=256
 
 if [ ! -f "${dummy_train_path}" ] || [ ! -f "${dummy_test_path}" ]; then
-    python3 tests/special_e2e/create_dummy_diffusion_data.py \
+    coverage run --data-file=/root/.cache/.coverage.run_flowgrpo_trainer_diffusers --source=verl tests/special_e2e/create_dummy_diffusion_data.py \
         --local_save_dir "${DATA_DIR}" \
         --train_size 8 \
         --val_size 4
@@ -32,7 +32,7 @@ micro_bsz=$((micro_bsz_per_gpu * NUM_GPUS))
 mini_bsz=${micro_bsz}
 train_batch_size=$((mini_bsz * n_resp_per_prompt))
 
-python3 -m verl.trainer.main_flowgrpo \
+coverage run --data-file=/root/.cache/.coverage.run_flowgrpo_trainer_diffusers --source=verl -m verl.trainer.main_flowgrpo \
     algorithm.adv_estimator=flow_grpo \
     data.train_files=${dummy_train_path} \
     data.val_files=${dummy_test_path} \

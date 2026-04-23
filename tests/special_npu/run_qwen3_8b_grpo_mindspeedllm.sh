@@ -207,7 +207,7 @@ PROF_CONFIG=(
     actor_rollout_ref.rollout.profiler.all_ranks=False
 )
 
-python3 -m verl.trainer.main_ppo \
+coverage run --data-file=/root/.cache/.coverage.run_qwen3_8b_grpo_mindspeedllm --source=verl -m verl.trainer.main_ppo \
     --config-path=config \
     --config-name='ppo_trainer.yaml' \
     model_engine=mindspeed \

@@ -3,7 +3,7 @@ set -x
 MODEL_ID=${MODEL_ID:-Qwen/Qwen2.5-0.5B-Instruct}  # TODO: change to Qwen3-0.6B when CI server is ready
 MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/models/${MODEL_ID}}
 
-python3 -m verl.trainer.main_ppo \
+coverage run --data-file=/root/.cache/.coverage.run_qwen3_06b_ppo --source=verl -m verl.trainer.main_ppo \
     algorithm.adv_estimator=gae \
     data.train_files=$HOME/data/gsm8k/train.parquet \
     data.val_files=$HOME/data/gsm8k/test.parquet \
