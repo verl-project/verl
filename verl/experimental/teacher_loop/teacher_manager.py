@@ -116,6 +116,7 @@ class AsyncTeacherLLMServerManager:
         sequence_ids: list[int],
         multi_modal_data: Optional[dict[str, Any]] = None,
         routing_key: Optional[str] = None,
+        request_group_id: Optional[str] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute teacher log probabilities for a single unpadded sequence."""
         multi_modal_data = multi_modal_data or {}
@@ -125,7 +126,7 @@ class AsyncTeacherLLMServerManager:
         request_id = uuid4().hex
         teacher_output = await server_manager.generate(
             request_id=request_id,
-            request_group_id=request_id,
+            request_group_id=request_group_id,
             prompt_ids=sequence_ids,
             sampling_params=_get_teacher_sampling_params(teacher_model_config, self.distillation_loss_config),
             image_data=multi_modal_data.get("images"),
