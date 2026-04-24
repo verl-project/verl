@@ -487,9 +487,8 @@ class AgentLoopWorker:
         # Training rollouts are gated by FullyAsyncRollouter.max_concurrent_samples,
         # but generate_sequences (used by validation) launches all samples at once.
         # The semaphore caps the number of concurrent agent loops (each holds an
-        # env session) to num_workers * 4 by default, or the user-configured
-        # async_training.max_concurrent_rollouts if available.
-        max_concurrent = len(self.agent_loop_workers) * 4
+        # env session). Falls back to batch size when running on a single worker.
+        max_concurrent = len(batch)
         try:
             user_cap = int(self.config.async_training.get("max_concurrent_rollouts", 0) or 0)
             if user_cap > 0:
