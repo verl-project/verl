@@ -383,6 +383,18 @@ def rollout_trace_op(func):
 
             return _result
 
+        async def add_token2text_to_inputs(self, inputs_dict):
+            """Decode prompt_ids in the inputs dict so the trace shows readable text."""
+            tokenizer = getattr(self, "tokenizer", None)
+            if tokenizer is None or not hasattr(tokenizer, "decode"):
+                return inputs_dict
+            prompt_ids = inputs_dict.get("prompt_ids")
+            if prompt_ids is not None and isinstance(prompt_ids, (list, tuple)) and len(prompt_ids) > 0:
+                loop = get_event_loop()
+                prompt_text = await loop.run_in_executor(None, tokenizer.decode, prompt_ids)
+                inputs_dict = {**inputs_dict, "prompt_text": prompt_text}
+            return inputs_dict
+
         if backend == "weave":
             tracer = RolloutTraceConfig.get_client()
             from weave.trace.context import call_context
@@ -391,6 +403,8 @@ def rollout_trace_op(func):
             # Keep PIL.Image objects intact so Weave auto-renders them as
             # inline images in the trace UI (base64 strings would display
             # as raw text only).
+            if enable_token2text:
+                inputs = await add_token2text_to_inputs(self, inputs)
             weave_inputs = _serialize_for_trace(inputs, keep_pil=True)
             call = tracer.create_call(op=func.__qualname__, inputs=weave_inputs, attributes=cur_attributes)
             try:
@@ -416,6 +430,8 @@ def rollout_trace_op(func):
                 # into a single chat message whose content parts include one
                 # ``image_url`` per PIL image plus a JSON text blob for the
                 # rest of the fields.
+                if enable_token2text:
+                    inputs = await add_token2text_to_inputs(self, inputs)
                 span.set_inputs(_to_mlflow_chat_messages(inputs, role="user"))
                 result = await func(self, *args, **kwargs)
                 if enable_token2text:

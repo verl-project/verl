@@ -51,6 +51,144 @@ logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
+# ---------------------------------------------------------------------------
+# Batch schema assertion utility
+# ---------------------------------------------------------------------------
+def assert_batch_schema(
+    data_proto: "DataProto",
+    stage: str,
+    *,
+    expected_tensor_keys: set[str] | None = None,
+    require_position_ids_ndim: int | None = None,
+    has_processor: bool | None = None,
+) -> None:
+    """Assert structural invariants on a DataProto batch.
+
+    Raises ``AssertionError`` with a precise diagnostic message on violation.
+    Intended to be called at every major data-flow checkpoint so that shape /
+    dtype / key-set mismatches surface immediately instead of propagating to
+    a cryptic ``torch.cat`` or CUDA error many steps later.
+
+    Args:
+        data_proto: the batch to check.
+        stage: human-readable label for the checkpoint (used in error messages).
+        expected_tensor_keys: if given, assert these keys exist in ``batch.batch``.
+        require_position_ids_ndim: if given, assert ``position_ids`` has this ndim
+            on every row (catches the 2D-vs-3D mismatch for VL models).
+        has_processor: if True, assert every intermediate trajectory carries
+            non-empty ``multi_modal_data`` (VL model invariant).
+    """
+    n = len(data_proto)
+    batch = data_proto.batch
+
+    # 1. Basic non-empty check
+    assert batch is not None, f"[{stage}] batch.batch is None (batch_size={n})"
+
+    # 2. Batch-dim consistency: all tensors must have the same leading dim
+    for k in batch.keys():
+        t = batch[k]
+        assert t.shape[0] == n, (
+            f"[{stage}] tensor {k!r} has batch dim {t.shape[0]}, expected {n}"
+        )
+
+    # 3. Required keys
+    if expected_tensor_keys:
+        missing = expected_tensor_keys - set(batch.keys())
+        assert not missing, f"[{stage}] missing tensor keys: {missing}"
+
+    # 4. position_ids ndim consistency (critical for VL models)
+    if require_position_ids_ndim is not None and "position_ids" in batch.keys():
+        pos = batch["position_ids"]
+        assert pos.ndim == require_position_ids_ndim, (
+            f"[{stage}] position_ids.ndim={pos.ndim}, expected {require_position_ids_ndim}, "
+            f"shape={tuple(pos.shape)}"
+        )
+
+    # 5. Seq-length consistency: input_ids, attention_mask, position_ids
+    #    should share the same seq_len dimension.
+    if "input_ids" in batch.keys() and "attention_mask" in batch.keys():
+        seq_len = batch["input_ids"].shape[-1]
+        am_len = batch["attention_mask"].shape[-1]
+        assert seq_len == am_len, (
+            f"[{stage}] input_ids seq_len={seq_len} != attention_mask seq_len={am_len}"
+        )
+        if "position_ids" in batch.keys():
+            pos_seq = batch["position_ids"].shape[-1]
+            assert pos_seq == seq_len, (
+                f"[{stage}] position_ids seq_len={pos_seq} != input_ids seq_len={seq_len}, "
+                f"position_ids.shape={tuple(batch['position_ids'].shape)}"
+            )
+
+    # 6. response_mask shape consistency
+    if "response_mask" in batch.keys() and "responses" in batch.keys():
+        rm_len = batch["response_mask"].shape[-1]
+        resp_len = batch["responses"].shape[-1]
+        assert rm_len == resp_len, (
+            f"[{stage}] response_mask seq_len={rm_len} != responses seq_len={resp_len}"
+        )
+
+    # 7. non_tensor_batch length consistency
+    nt = data_proto.non_tensor_batch or {}
+    for k, v in nt.items():
+        if hasattr(v, "__len__"):
+            assert len(v) == n, (
+                f"[{stage}] non_tensor_batch[{k!r}] length={len(v)}, expected {n}"
+            )
+
+    # 8. Intermediate trajectories cache validation
+    meta = data_proto.meta_info or {}
+    cache_key = "__intermediate_trajectories_cache__"
+    cache = meta.get(cache_key)
+    if cache is not None and isinstance(cache, dict):
+        interm_col = cache.get("intermediate_col")
+        main_bsz = cache.get("main_batch_size")
+
+        # 8a. Cache main_batch_size must match actual batch size
+        if main_bsz is not None:
+            assert main_bsz == n, (
+                f"[{stage}] intermediate cache main_batch_size={main_bsz} != batch_size={n}"
+            )
+
+        # 8b. intermediate_col length must match batch size
+        if interm_col is not None:
+            assert len(interm_col) == n, (
+                f"[{stage}] intermediate_col length={len(interm_col)} != batch_size={n}"
+            )
+
+            # 8c. Each intermediate trajectory dict must have required keys
+            #     and multi_modal_data when a VL processor is present
+            for row_idx, row_list in enumerate(interm_col):
+                if not row_list:
+                    continue
+                for traj_idx, traj in enumerate(row_list):
+                    assert isinstance(traj, dict), (
+                        f"[{stage}] intermediate_col[{row_idx}][{traj_idx}] "
+                        f"is {type(traj).__name__}, expected dict"
+                    )
+                    for required_key in ("prompt_ids", "response_ids", "response_mask"):
+                        assert required_key in traj, (
+                            f"[{stage}] intermediate_col[{row_idx}][{traj_idx}] "
+                            f"missing required key {required_key!r}"
+                        )
+
+                    # VL model: warn (but don't fail) if an intermediate
+                    # trajectory has no images/videos. This can happen
+                    # legitimately (e.g. text-only turn after a tool failure).
+                    # _compute_position_ids handles this correctly.
+                    if has_processor:
+                        mm = traj.get("multi_modal_data")
+                        _has_vision = bool(
+                            mm and (mm.get("images") or mm.get("videos"))
+                        )
+                        if not _has_vision:
+                            logger.warning(
+                                "[%s] intermediate_col[%d][%d] has no "
+                                "multi_modal_data (got %r). num_turns=%s",
+                                stage, row_idx, traj_idx, mm,
+                                traj.get("num_turns", "?"),
+                            )
+
+
 def _pad_to_length(
     tokenizer,
     ids: list[int],
@@ -199,21 +337,22 @@ def _build_one_intermediate_row(
     routed_experts_raw = traj.get("routed_experts")
     multi_modal_data = traj.get("multi_modal_data")
 
-    # Guard: when a VL processor is present, every intermediate trajectory
-    # MUST carry multi_modal_data with at least one image or video.
-    # An empty/None multi_modal_data means the agent loop failed to attach
-    # vision data for this turn — this will cause position_ids ndim mismatch
-    # during DataProto.concat downstream. Fail early with a clear message.
+    # Note: it is valid for an intermediate trajectory to have no
+    # multi_modal_data (e.g. a text-only turn after a tool failure that
+    # returned no screenshot). The _compute_position_ids function handles
+    # this correctly by always producing 3D position_ids when a processor
+    # is present, even without multi_modal_inputs. We log a warning so the
+    # situation is visible but do NOT raise.
     if processor is not None:
         _has_images = bool(multi_modal_data and multi_modal_data.get("images"))
         _has_videos = bool(multi_modal_data and multi_modal_data.get("videos"))
         if not _has_images and not _has_videos:
-            raise ValueError(
-                f"[_build_one_intermediate_row] processor is present but intermediate "
-                f"trajectory has no multi_modal_data (got {multi_modal_data!r}). "
-                f"Every turn in a VL agent must carry at least one image or video. "
-                f"prompt_ids_len={len(prompt_ids)}, response_ids_len={len(response_ids)}, "
-                f"num_turns={traj.get('num_turns', '?')}"
+            logger.warning(
+                "[_build_one_intermediate_row] processor is present but intermediate "
+                "trajectory has no multi_modal_data (got %r). "
+                "prompt_ids_len=%d, response_ids_len=%d, num_turns=%s",
+                multi_modal_data, len(prompt_ids), len(response_ids),
+                traj.get("num_turns", "?"),
             )
 
     prompt_input_ids, prompt_attn = _pad_to_length(
@@ -640,6 +779,10 @@ def expand_intermediate_trajectories_pre_log_prob(
     )
     n_rows = len(base)
 
+    # --- Assert: validate base batch schema before expansion ---
+    _pos_ndim = base.batch["position_ids"].ndim if "position_ids" in base.batch.keys() else None
+    assert_batch_schema(base, "expand_pre_logprob.base_before_expand", require_position_ids_ndim=_pos_ndim)
+
     # Group ids for the final rows (uid-based; falls back to positional buckets).
     group_ids = _compute_rollout_group_ids(base, rollout_n=rollout_n)
 
@@ -682,6 +825,14 @@ def expand_intermediate_trajectories_pre_log_prob(
                 inherited_tensors=None,
                 emit_rm_scores=False,
             )
+            # --- Assert: each intermediate piece must match base position_ids ndim ---
+            if _pos_ndim is not None and "position_ids" in piece.batch.keys():
+                piece_pos_ndim = piece.batch["position_ids"].ndim
+                assert piece_pos_ndim == _pos_ndim, (
+                    f"[expand_pre_logprob] intermediate piece position_ids.ndim={piece_pos_ndim} "
+                    f"!= base ndim={_pos_ndim}, piece position_ids.shape="
+                    f"{tuple(piece.batch['position_ids'].shape)}, row_idx={row_idx}"
+                )
             pieces.append(piece)
         per_row_counts.append(len(raw_list))
 
@@ -755,32 +906,30 @@ def expand_intermediate_trajectories_pre_log_prob(
             base_nt_keys = set(base.non_tensor_batch.keys())
 
     # Pre-concat sanity check: every shared tensor key must have matching
-    # ndim / trailing shape across all pieces, otherwise ``torch.cat`` inside
-    # ``DataProto.concat`` raises a generic "Tensors must have same number
-    # of dimensions" that does not say which key is broken. Emit a precise
-    # diagnostic before letting the error propagate.
+    # ndim / trailing shape / dtype across all pieces. Fail immediately with
+    # a precise diagnostic instead of letting ``torch.cat`` raise a generic
+    # "Tensors must have same number of dimensions".
     for k in base.batch.keys():
         ref = base.batch[k]
         for pi, p in enumerate(pieces[1:], start=1):
             if k not in p.batch:
                 continue
             got = p.batch[k]
-            mismatch = (
-                got.dim() != ref.dim()
-                or tuple(got.shape[1:]) != tuple(ref.shape[1:])
-                or got.dtype != ref.dtype
+            assert got.dim() == ref.dim() and tuple(got.shape[1:]) == tuple(ref.shape[1:]) and got.dtype == ref.dtype, (
+                f"[expand_pre_logprob] tensor schema mismatch for key={k!r} "
+                f"between base and piece[{pi}]: "
+                f"base.shape={tuple(ref.shape)} base.dtype={ref.dtype} vs "
+                f"piece.shape={tuple(got.shape)} piece.dtype={got.dtype}"
             )
-            if mismatch:
-                logger.error(
-                    "[IntermTrajExpander.pre_logprob] tensor schema mismatch "
-                    "for key=%r between base and piece[%d]: "
-                    "base.shape=%s base.dtype=%s vs piece.shape=%s piece.dtype=%s",
-                    k, pi,
-                    tuple(ref.shape), ref.dtype,
-                    tuple(got.shape), got.dtype,
-                )
 
     expanded = DataProto.concat(pieces)
+
+    # --- Assert: validate expanded batch schema ---
+    assert_batch_schema(
+        expanded, "expand_pre_logprob.after_concat",
+        require_position_ids_ndim=_pos_ndim,
+    )
+
     expanded.meta_info["fully_async/intermediate/num_final_rows"] = int(n_rows)
     expanded.meta_info["fully_async/intermediate/num_intermediate_rows"] = int(total_appended)
 

@@ -22,6 +22,7 @@ import torch
 
 from verl import DataProto
 from verl.experimental.fully_async_policy.intermediate_trajectory_utils import (
+    assert_batch_schema,
     strip_intermediate_trajectories_column,
 )
 from verl.trainer.ppo.ray_trainer import compute_response_mask
@@ -160,8 +161,21 @@ def assemble_batch_from_rollout_samples(
     # aligned with the final-row order.
     cache_key = "__intermediate_trajectories_cache__"
     per_sample_caches: list[Any] = []
-    for rs in rollout_samples:
+    _ref_pos_ndim = None  # track position_ids ndim for cross-sample consistency
+    for rs_idx, rs in enumerate(rollout_samples):
         batch = addition_process(rs.full_batch)
+        # --- Assert: validate each rollout sample before assembly ---
+        assert_batch_schema(batch, f"assemble.sample[{rs_idx}]")
+        # Track position_ids ndim across samples
+        if "position_ids" in batch.batch.keys():
+            pos_ndim = batch.batch["position_ids"].ndim
+            if _ref_pos_ndim is None:
+                _ref_pos_ndim = pos_ndim
+            else:
+                assert pos_ndim == _ref_pos_ndim, (
+                    f"[assemble] sample[{rs_idx}] position_ids.ndim={pos_ndim} "
+                    f"!= sample[0] ndim={_ref_pos_ndim}"
+                )
         # Strip ``intermediate_trajectories`` from ``non_tensor_batch`` and
         # move the payload into a side cache. This defers intermediate
         # expansion to the post-advantage stage so that GRPO group statistics
@@ -176,6 +190,11 @@ def assemble_batch_from_rollout_samples(
             )
         rollout_samples_batch.append(stripped)
     final_batch = DataProto.concat(rollout_samples_batch)
+
+    # --- Assert: validate assembled batch ---
+    assert_batch_schema(final_batch, "assemble.after_concat",
+                        require_position_ids_ndim=_ref_pos_ndim,
+                        has_processor=processor is not None)
 
     # Stitch per-sample intermediate caches back onto the combined batch in
     # the same row order as the concat: sample_0 had rollout.n final rows,

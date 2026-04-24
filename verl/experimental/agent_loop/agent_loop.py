@@ -391,6 +391,11 @@ class AgentLoopWorker:
             self.function_tools = []
 
         # Load custom agent loop implementations from config path
+        # Expose tokenizer on server_manager so that @rollout_trace_op's
+        # add_token2text can decode prompt_ids / token_ids into readable text.
+        if hasattr(self, "server_manager") and self.server_manager is not None:
+            self.server_manager.tokenizer = self.tokenizer
+
         agent_loop_config_path = self.rollout_config.agent.agent_loop_config_path
         if agent_loop_config_path:
             resolved_path = resolve_config_path(agent_loop_config_path)
@@ -478,12 +483,33 @@ class AgentLoopWorker:
         )
 
         tasks = []
+        # Limit concurrency to avoid exhausting desktop-env container pools.
+        # Training rollouts are gated by FullyAsyncRollouter.max_concurrent_samples,
+        # but generate_sequences (used by validation) launches all samples at once.
+        # The semaphore caps the number of concurrent agent loops (each holds an
+        # env session) to num_workers * 4 by default, or the user-configured
+        # async_training.max_concurrent_rollouts if available.
+        max_concurrent = len(self.agent_loop_workers) * 4
+        try:
+            user_cap = int(self.config.async_training.get("max_concurrent_rollouts", 0) or 0)
+            if user_cap > 0:
+                max_concurrent = min(max_concurrent, user_cap)
+        except Exception:
+            pass
+        sem = asyncio.Semaphore(max_concurrent)
+
+        async def _run_with_semaphore(coro):
+            async with sem:
+                return await coro
+
         for i in range(len(batch)):
             trace_this_sample = i in traced_indices
             kwargs = {k: v[i] for k, v in batch.non_tensor_batch.items()}
             tasks.append(
                 asyncio.create_task(
-                    self._run_agent_loop(sampling_params, trajectory_info[i], trace=trace_this_sample, **kwargs)
+                    _run_with_semaphore(
+                        self._run_agent_loop(sampling_params, trajectory_info[i], trace=trace_this_sample, **kwargs)
+                    )
                 )
             )
         # ``return_exceptions=True``: a bug in a single rollout task must not

@@ -539,7 +539,8 @@ class RayPPOTrainer:
             ground_truths = [
                 item.non_tensor_batch.get("reward_model", {}).get("ground_truth", None) for item in test_batch
             ]
-            sample_gts.extend(ground_truths)
+            # NOTE: ground_truths will be extended AFTER rollout-drop alignment
+            # below, so that it stays consistent with test_batch row count.
 
             test_gen_batch = self._get_gen_batch(test_batch)
             test_gen_batch.meta_info = {
@@ -579,6 +580,32 @@ class RayPPOTrainer:
 
             # unpad
             test_output_gen_batch = unpad_dataproto(test_output_gen_batch_padded, pad_size=pad_size)
+
+            # Some rollouts may have been dropped (e.g. env creation failures).
+            # Align test_batch to the surviving rows so union() does not crash.
+            actual_output_size = len(test_output_gen_batch)
+            if actual_output_size != len(test_batch):
+                print(
+                    f"[RayPPOTrainer._validate] output size ({actual_output_size}) != "
+                    f"input size ({len(test_batch)}), aligning input to match "
+                    f"surviving rollouts",
+                    flush=True,
+                )
+                out_uids = set()
+                if "uid" in test_output_gen_batch.non_tensor_batch:
+                    out_uids = set(test_output_gen_batch.non_tensor_batch["uid"])
+                if out_uids and "uid" in test_batch.non_tensor_batch:
+                    keep_idx = [
+                        i for i, u in enumerate(test_batch.non_tensor_batch["uid"])
+                        if u in out_uids
+                    ]
+                else:
+                    keep_idx = list(range(actual_output_size))
+                idx_tensor = torch.tensor(keep_idx, dtype=torch.long)
+                test_batch = test_batch.select_idxs(idx_tensor)
+                ground_truths = [ground_truths[i] for i in keep_idx]
+
+            sample_gts.extend(ground_truths)
 
             print("validation generation end")
 

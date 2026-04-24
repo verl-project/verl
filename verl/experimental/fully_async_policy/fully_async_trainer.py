@@ -33,6 +33,7 @@ from verl.experimental.fully_async_policy.detach_utils import (
     assemble_batch_from_rollout_samples,
 )
 from verl.experimental.fully_async_policy.intermediate_trajectory_utils import (
+    assert_batch_schema,
     expand_intermediate_trajectories_pre_log_prob,
     scatter_advantage_to_intermediate_and_normalize,
     zero_out_padding_rows,
@@ -483,25 +484,49 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
 
         self._fit_start_profile()
 
+        _CORE_KEYS = {"input_ids", "attention_mask", "position_ids", "responses", "response_mask"}
+
         with marked_timer("step", self.timing_raw):
             batch = await self._fit_generate(None)
+
+            # Detect position_ids ndim from the assembled batch for consistent
+            # assertion throughout the pipeline.
+            _pos_ndim = (
+                batch.batch["position_ids"].ndim
+                if batch.batch is not None and "position_ids" in batch.batch.keys()
+                else None
+            )
+
             batch = self._fit_compute_reward(batch)
+            assert_batch_schema(batch, "fit_step.after_reward",
+                                expected_tensor_keys=_CORE_KEYS,
+                                require_position_ids_ndim=_pos_ndim,
+                                has_processor=self.processor is not None)
             self._log_training_diagnostics("after_reward", batch)
             # Expand intermediate trajectories (and pad to actor mini-batch
             # multiple) BEFORE any per-token forward pass, so that
             # log_prob / ref_log_prob / critic are computed over every
             # trajectory row that will participate in the actor update.
             batch = self._fit_expand_and_pad(batch)
+            assert_batch_schema(batch, "fit_step.after_expand_and_pad",
+                                expected_tensor_keys=_CORE_KEYS,
+                                require_position_ids_ndim=_pos_ndim)
             self._log_training_diagnostics("after_expand_and_pad", batch)
             batch = self._fit_compute_log_prob(batch)
+            assert_batch_schema(batch, "fit_step.after_log_prob",
+                                require_position_ids_ndim=_pos_ndim)
             batch = self._fit_compute_ref_log_prob(batch)
             batch = self._fit_compute_critic(batch)
+            assert_batch_schema(batch, "fit_step.after_critic",
+                                require_position_ids_ndim=_pos_ndim)
             self._log_training_diagnostics("after_log_prob_and_ref", batch)
             # Advantage is computed on the FINAL subset only (GRPO group
             # stats must not see intermediate rows), then the scalar is
             # broadcast to sibling intermediate rows and scaled by 1/T_rollout
             # so that every rollout contributes equally under token-mean.
             batch = self._fit_compute_advantage(batch)
+            assert_batch_schema(batch, "fit_step.after_advantage",
+                                require_position_ids_ndim=_pos_ndim)
             self._log_training_diagnostics("after_advantage_scatter_normalize", batch)
             batch = self._fit_update_critic(batch)
             batch = self._fit_update_actor(batch)
@@ -812,10 +837,11 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             os.makedirs(os.path.dirname(log_path), exist_ok=True)
             ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
             header = f"[{ts}] step={self.global_steps} local_trigger_step={self.local_trigger_step}"
-            with open(log_path, "w", encoding="utf-8") as fh:
+            with open(log_path, "a" if getattr(self, "_diag_file_initialized", False) else "w", encoding="utf-8") as fh:
                 fh.write(header + "\n")
                 fh.write(msg + "\n")
                 fh.write("-" * 80 + "\n")
+            self._diag_file_initialized = True
         except Exception as exc:
             # Diagnostic logging must never crash training. Fall back to a
             # SINGLE terminal line so the failure is visible without dumping
