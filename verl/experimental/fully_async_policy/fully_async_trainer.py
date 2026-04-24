@@ -671,9 +671,46 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         # --- batch.meta_info ---
         meta = batch.meta_info or {}
         lines.append(f"  [batch.meta_info] num_keys={len(meta)}")
+        cache_key = "__intermediate_trajectories_cache__"
         for k in sorted(meta.keys(), key=lambda x: str(x)):
             v = meta[k]
-            lines.append(f"    - {k!r}: {_fmt_any(v)}")
+            if k == cache_key and isinstance(v, dict):
+                # Expand intermediate trajectories cache with per-row detail.
+                interm_col = v.get("intermediate_col")
+                main_bsz = v.get("main_batch_size")
+                n_rows_with = 0
+                total_trajs = 0
+                per_row_counts = []
+                per_traj_mm_status: list[str] = []
+                if interm_col is not None:
+                    for row_idx, row_list in enumerate(interm_col):
+                        cnt = len(row_list) if row_list else 0
+                        per_row_counts.append(cnt)
+                        if cnt > 0:
+                            n_rows_with += 1
+                            total_trajs += cnt
+                        for traj in (row_list or []):
+                            mm = traj.get("multi_modal_data") if isinstance(traj, dict) else None
+                            if mm is None:
+                                per_traj_mm_status.append("None")
+                            elif not mm:
+                                per_traj_mm_status.append("empty")
+                            else:
+                                img_count = len(mm.get("images") or [])
+                                vid_count = len(mm.get("videos") or [])
+                                per_traj_mm_status.append(f"img={img_count},vid={vid_count}")
+                lines.append(
+                    f"    - {k!r}: main_batch_size={main_bsz} "
+                    f"rows_with_intermediates={n_rows_with}/{len(interm_col) if interm_col else 0} "
+                    f"total_intermediate_trajs={total_trajs} "
+                    f"per_row_counts={per_row_counts}"
+                )
+                if per_traj_mm_status:
+                    lines.append(
+                        f"      multi_modal_data_per_traj: [{', '.join(per_traj_mm_status)}]"
+                    )
+            else:
+                lines.append(f"    - {k!r}: {_fmt_any(v)}")
 
         # ============ derived summaries (not in raw dump) ============
         lines.append("  [summary]")
@@ -766,6 +803,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
 
         # Write diagnostics ONLY to a per-run log file (not stdout) to avoid
         # spamming Ray's log aggregation when the batch is large.
+        # First write of each run truncates the file; subsequent writes append.
         try:
             log_path = os.environ.get("FULLY_ASYNC_DIAG_LOG")
             if not log_path:
@@ -774,7 +812,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             os.makedirs(os.path.dirname(log_path), exist_ok=True)
             ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
             header = f"[{ts}] step={self.global_steps} local_trigger_step={self.local_trigger_step}"
-            with open(log_path, "a", encoding="utf-8") as fh:
+            with open(log_path, "w", encoding="utf-8") as fh:
                 fh.write(header + "\n")
                 fh.write(msg + "\n")
                 fh.write("-" * 80 + "\n")

@@ -127,15 +127,23 @@ def _compute_position_ids(
     attention_mask: torch.Tensor,
     multi_modal_inputs: dict,
 ) -> torch.Tensor:
-    """Re-compute position_ids for one trajectory (mirrors AgentLoopWorker)."""
-    if processor is None or not multi_modal_inputs:
+    """Re-compute position_ids for one trajectory (mirrors AgentLoopWorker).
+
+    When ``processor`` is not None, always produces 3D position_ids
+    ``(1, num_rope_axes+1, seq_len)`` — even when ``multi_modal_inputs`` is
+    empty — so that the tensor schema is consistent with the main (final)
+    trajectory rows produced by ``AgentLoopWorker._compute_position_ids``.
+    This prevents ``torch.cat`` from failing with a "Tensors must have same
+    number of dimensions" error during ``DataProto.concat``.
+    """
+    if processor is None:
         return compute_position_id_with_mask(attention_mask)
 
     mm_kwargs: dict[str, Any] = {
-        "image_grid_thw": multi_modal_inputs.get("image_grid_thw"),
-        "video_grid_thw": multi_modal_inputs.get("video_grid_thw"),
+        "image_grid_thw": multi_modal_inputs.get("image_grid_thw") if multi_modal_inputs else None,
+        "video_grid_thw": multi_modal_inputs.get("video_grid_thw") if multi_modal_inputs else None,
     }
-    if multi_modal_inputs.pop("mm_token_type_ids", None) is not None:
+    if multi_modal_inputs and multi_modal_inputs.pop("mm_token_type_ids", None) is not None:
         mm_token_type_ids = torch.zeros_like(input_ids)
         mm_token_type_ids[0][input_ids[0] == processor.image_token_id] = 1
         mm_token_type_ids[0][input_ids[0] == processor.video_token_id] = 2
@@ -191,6 +199,23 @@ def _build_one_intermediate_row(
     routed_experts_raw = traj.get("routed_experts")
     multi_modal_data = traj.get("multi_modal_data")
 
+    # Guard: when a VL processor is present, every intermediate trajectory
+    # MUST carry multi_modal_data with at least one image or video.
+    # An empty/None multi_modal_data means the agent loop failed to attach
+    # vision data for this turn — this will cause position_ids ndim mismatch
+    # during DataProto.concat downstream. Fail early with a clear message.
+    if processor is not None:
+        _has_images = bool(multi_modal_data and multi_modal_data.get("images"))
+        _has_videos = bool(multi_modal_data and multi_modal_data.get("videos"))
+        if not _has_images and not _has_videos:
+            raise ValueError(
+                f"[_build_one_intermediate_row] processor is present but intermediate "
+                f"trajectory has no multi_modal_data (got {multi_modal_data!r}). "
+                f"Every turn in a VL agent must carry at least one image or video. "
+                f"prompt_ids_len={len(prompt_ids)}, response_ids_len={len(response_ids)}, "
+                f"num_turns={traj.get('num_turns', '?')}"
+            )
+
     prompt_input_ids, prompt_attn = _pad_to_length(
         tokenizer, prompt_ids, rollout_config.prompt_length, "left", return_attention_mask=True
     )
@@ -244,6 +269,15 @@ def _build_one_intermediate_row(
 
     multi_modal_inputs = _compute_multi_modal_inputs(processor, tokenizer, multi_modal_data, input_ids)
     position_ids = _compute_position_ids(processor, input_ids, attention_mask, multi_modal_inputs)
+
+    logger.info(
+        "[_build_one_intermediate_row] multi_modal_data=%s, "
+        "multi_modal_inputs_keys=%s, position_ids.shape=%s",
+        "None" if multi_modal_data is None
+        else ("empty" if not multi_modal_data else f"keys={list(multi_modal_data.keys())}"),
+        list(multi_modal_inputs.keys()) if multi_modal_inputs else "empty",
+        tuple(position_ids.shape),
+    )
 
     # Build tensor batch
     tensor_batch: dict[str, torch.Tensor] = {
@@ -719,6 +753,32 @@ def expand_intermediate_trajectories_pre_log_prob(
             for k in extra_nt:
                 base.non_tensor_batch[k] = np.array([None] * len(base), dtype=object)
             base_nt_keys = set(base.non_tensor_batch.keys())
+
+    # Pre-concat sanity check: every shared tensor key must have matching
+    # ndim / trailing shape across all pieces, otherwise ``torch.cat`` inside
+    # ``DataProto.concat`` raises a generic "Tensors must have same number
+    # of dimensions" that does not say which key is broken. Emit a precise
+    # diagnostic before letting the error propagate.
+    for k in base.batch.keys():
+        ref = base.batch[k]
+        for pi, p in enumerate(pieces[1:], start=1):
+            if k not in p.batch:
+                continue
+            got = p.batch[k]
+            mismatch = (
+                got.dim() != ref.dim()
+                or tuple(got.shape[1:]) != tuple(ref.shape[1:])
+                or got.dtype != ref.dtype
+            )
+            if mismatch:
+                logger.error(
+                    "[IntermTrajExpander.pre_logprob] tensor schema mismatch "
+                    "for key=%r between base and piece[%d]: "
+                    "base.shape=%s base.dtype=%s vs piece.shape=%s piece.dtype=%s",
+                    k, pi,
+                    tuple(ref.shape), ref.dtype,
+                    tuple(got.shape), got.dtype,
+                )
 
     expanded = DataProto.concat(pieces)
     expanded.meta_info["fully_async/intermediate/num_final_rows"] = int(n_rows)
