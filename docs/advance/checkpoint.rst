@@ -187,14 +187,15 @@ In tabular form:
 +-----------------------------+----------------+----------------------------------------------------------+
 | mbridge only                | ``hf_model``   | Same (HF tree); ``model`` / ``hf_model`` deduplicated.   |
 +-----------------------------+----------------+----------------------------------------------------------+
-| mbridge only                | both           | Same HF checkpoint saved **once** (deduplicated).       |
+| mbridge only                | both           | Same HF checkpoint saved **once** (deduplicated).        |
 +-----------------------------+----------------+----------------------------------------------------------+
 | dist_ckpt only              | ``model``      | Sharded weights under ``model/dist_ckpt/``.              |
 +-----------------------------+----------------+----------------------------------------------------------+
-| dist_ckpt only              | ``hf_model``   | **Error** -- ``hf_model`` needs a ``bridge`` (enable mbridge in engine). |
+| dist_ckpt only              | ``hf_model``   | **Error** -- ``hf_model`` needs a ``bridge``             |
+|                             |                | (enable mbridge in engine).                              |
 +-----------------------------+----------------+----------------------------------------------------------+
-| mbridge + dist_ckpt         | ``model``      | Sharded weights under ``model/dist_ckpt/`` only (no HF  |
-|                             |                | weight export unless ``hf_model`` is also listed).     |
+| mbridge + dist_ckpt         | ``model``      | Sharded weights under ``model/dist_ckpt/`` only (no HF   |
+|                             |                | weight export unless ``hf_model`` is also listed).       |
 +-----------------------------+----------------+----------------------------------------------------------+
 | mbridge + dist_ckpt         | ``model`` +    | Megatron shards **and** HF export (two on-disk trees).   |
 |                             | ``hf_model``   |                                                          |
