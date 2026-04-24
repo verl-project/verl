@@ -128,7 +128,9 @@ def _make_manager(
     lr_scheduler.state_dict.return_value = {"last_epoch": 10}
 
     if bridge == "auto":
-        bridge = None if use_dist_checkpointing else MagicMock()
+        save_c = list(save_contents)
+        would_save_hf = "hf_model" in save_c or ("model" in save_c and not use_dist_checkpointing)
+        bridge = MagicMock() if would_save_hf else (None if use_dist_checkpointing else MagicMock())
 
     return MegatronCheckpointManager(
         config=_MinimalConfig(),
@@ -199,9 +201,17 @@ class TestInitFlagResolution:
         with pytest.raises(ValueError, match="HF-format model weights require"):
             _make_manager(use_dist_checkpointing=False, bridge=None)
 
-    def test_hf_model_without_hf_path_raises(self):
+    def test_hf_model_requires_bridge(self):
         with pytest.raises(ValueError, match="'hf_model'"):
-            _make_manager(save_contents=["hf_model"], use_dist_checkpointing=True)
+            _make_manager(save_contents=["hf_model"], bridge=None)
+
+    def test_hf_model_with_dist_ckpt_when_mbridge(self):
+        mgr = _make_manager(
+            save_contents=["model", "hf_model", "optimizer", "extra"],
+            use_dist_checkpointing=True,
+        )
+        assert mgr.should_save_hf_model is True
+        assert mgr.should_save_dist_ckpt_model is True
 
 
 # ===========================================================================
@@ -355,6 +365,21 @@ class TestSaveCheckpointDispatch:
 
         mgr.bridge.save_weights.assert_called_once()
         mock_save_dc.assert_not_called()
+
+    @patch("verl.utils.checkpoint.megatron_checkpoint_manager.save_dist_checkpointing", return_value=None)
+    def test_hf_model_and_dist_ckpt_saves_both(self, mock_save_dc):
+        """With mbridge + dist_checkpointing, ``model`` and ``hf_model`` write shards and HF tree."""
+        mgr = _make_manager(
+            save_contents=["model", "hf_model", "optimizer", "extra"],
+            use_dist_checkpointing=True,
+        )
+        with patch.object(mgr, "_save_transformer_config"):
+            mgr.save_checkpoint(self._save_path(), global_step=1)
+
+        mgr.bridge.save_weights.assert_called_once()
+        mock_save_dc.assert_called()
+        calls = _collect_save_calls(mock_save_dc)
+        assert "model" in calls and "optimizer" in calls and "extra" in calls
 
     @patch("verl.utils.checkpoint.megatron_checkpoint_manager.save_dist_checkpointing", return_value=None)
     def test_peft_adapters_under_model_subdir(self, mock_save_dc):
