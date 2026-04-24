@@ -234,9 +234,7 @@ def _collect_images_as_content_parts(obj, _depth=0, _parts=None):
     return _parts
 
 
-def _to_mlflow_chat_messages(
-    payload: dict, *, role: str, default_name: str = "payload"
-) -> dict:
+def _to_mlflow_chat_messages(payload: dict, *, role: str, default_name: str = "payload") -> dict:
     """Convert a free-form dict payload into MLflow's OpenAI-style chat schema.
 
     The resulting ``{"messages": [...]}`` structure is rendered in the MLflow
@@ -317,23 +315,15 @@ def _serialize_for_trace(obj, _depth=0, *, keep_pil: bool = False):
     if isinstance(obj, dict):
         out: dict = {}
         for k, v in obj.items():
-            if (
-                isinstance(v, (list, tuple))
-                and v
-                and any(_is_pil_image(x) for x in v)
-            ):
+            if isinstance(v, (list, tuple)) and v and any(_is_pil_image(x) for x in v):
                 # Flatten ``list[PIL | other]`` into ``{k}_0, {k}_1, ...``
                 # so that Weave's UI renders each element as an image slot.
                 non_image_items: list = []
                 for i, item in enumerate(v):
                     if _is_pil_image(item):
-                        out[f"{k}_{i}"] = _serialize_for_trace(
-                            item, _depth + 1, keep_pil=keep_pil
-                        )
+                        out[f"{k}_{i}"] = _serialize_for_trace(item, _depth + 1, keep_pil=keep_pil)
                     else:
-                        non_image_items.append(
-                            _serialize_for_trace(item, _depth + 1, keep_pil=keep_pil)
-                        )
+                        non_image_items.append(_serialize_for_trace(item, _depth + 1, keep_pil=keep_pil))
                 if non_image_items:
                     out[f"{k}_other"] = non_image_items
             else:
@@ -341,9 +331,7 @@ def _serialize_for_trace(obj, _depth=0, *, keep_pil: bool = False):
         return out
 
     if isinstance(obj, (list, tuple)):
-        serialized = [
-            _serialize_for_trace(v, _depth + 1, keep_pil=keep_pil) for v in obj
-        ]
+        serialized = [_serialize_for_trace(v, _depth + 1, keep_pil=keep_pil) for v in obj]
         return type(obj)(serialized) if isinstance(obj, tuple) else serialized
 
     return obj
@@ -428,15 +416,11 @@ def rollout_trace_op(func):
                 # into a single chat message whose content parts include one
                 # ``image_url`` per PIL image plus a JSON text blob for the
                 # rest of the fields.
-                span.set_inputs(
-                    _to_mlflow_chat_messages(inputs, role="user")
-                )
+                span.set_inputs(_to_mlflow_chat_messages(inputs, role="user"))
                 result = await func(self, *args, **kwargs)
                 if enable_token2text:
                     _result = await add_token2text(self, result)
-                    span.set_outputs(
-                        _to_mlflow_chat_messages(_result, role="assistant")
-                    )
+                    span.set_outputs(_to_mlflow_chat_messages(_result, role="assistant"))
                 else:
                     span.set_outputs(
                         _to_mlflow_chat_messages(

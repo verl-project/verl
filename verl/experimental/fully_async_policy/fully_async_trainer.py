@@ -605,11 +605,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
                 if numel == 0:
                     return head + " value=<empty>"
                 if numel <= MAX_ELEMS_FULL:
-                    return (
-                        head
-                        + " value="
-                        + np.array2string(a, threshold=MAX_ELEMS_FULL)[:MAX_PREVIEW_LEN]
-                    )
+                    return head + " value=" + np.array2string(a, threshold=MAX_ELEMS_FULL)[:MAX_PREVIEW_LEN]
                 flat = a.reshape(-1)
                 return (
                     head
@@ -645,11 +641,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             if isinstance(v, dict):
                 keys = list(v.keys())
                 preview_keys = keys[:10]
-                return (
-                    f"type=dict len={len(keys)} "
-                    f"keys[:10]={preview_keys} "
-                    f"repr={repr(v)[:MAX_PREVIEW_LEN]}"
-                )
+                return f"type=dict len={len(keys)} keys[:10]={preview_keys} repr={repr(v)[:MAX_PREVIEW_LEN]}"
             if isinstance(v, (int, float, bool, str)) or v is None:
                 return f"type={type(v).__name__} value={repr(v)[:MAX_PREVIEW_LEN]}"
             return f"type={type(v).__name__} repr={repr(v)[:MAX_PREVIEW_LEN]}"
@@ -693,9 +685,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             n_final = int((role_arr == "final").sum())
             n_inter = int((role_arr == "intermediate").sum())
             n_other = n - n_final - n_inter
-            lines.append(
-                f"    roles: final={n_final} intermediate={n_inter} other={n_other}"
-            )
+            lines.append(f"    roles: final={n_final} intermediate={n_inter} other={n_other}")
 
         gids = nt.get("rollout_group_id")
         if gids is not None:
@@ -779,16 +769,11 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         try:
             log_path = os.environ.get("FULLY_ASYNC_DIAG_LOG")
             if not log_path:
-                default_dir = self.config.trainer.get(
-                    "default_local_dir", "outputs/fully_async"
-                )
+                default_dir = self.config.trainer.get("default_local_dir", "outputs/fully_async")
                 log_path = os.path.join(default_dir, "training_diagnostics.log")
             os.makedirs(os.path.dirname(log_path), exist_ok=True)
             ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-            header = (
-                f"[{ts}] step={self.global_steps} "
-                f"local_trigger_step={self.local_trigger_step}"
-            )
+            header = f"[{ts}] step={self.global_steps} local_trigger_step={self.local_trigger_step}"
             with open(log_path, "a", encoding="utf-8") as fh:
                 fh.write(header + "\n")
                 fh.write(msg + "\n")
@@ -904,9 +889,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         if roles is None:
             batch = super()._fit_compute_advantage(batch)
             if bool(self.config.async_training.get("normalize_rollout_weight", True)):
-                batch = scatter_advantage_to_intermediate_and_normalize(
-                    batch, normalize_rollout_weight=True
-                )
+                batch = scatter_advantage_to_intermediate_and_normalize(batch, normalize_rollout_weight=True)
             return batch
 
         final_idx = np.where(np.asarray(roles) == "final")[0]
@@ -979,9 +962,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         #     1 / T_rollout normalization so every rollout contributes
         #     equally under loss_agg_mode="token-mean".
         # ------------------------------------------------------------------
-        normalize_rollout_weight = bool(
-            self.config.async_training.get("normalize_rollout_weight", True)
-        )
+        normalize_rollout_weight = bool(self.config.async_training.get("normalize_rollout_weight", True))
         batch = scatter_advantage_to_intermediate_and_normalize(
             batch, normalize_rollout_weight=normalize_rollout_weight
         )

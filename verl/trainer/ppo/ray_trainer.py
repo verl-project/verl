@@ -557,6 +557,16 @@ class RayPPOTrainer:
             test_gen_batch_padded, pad_size = pad_dataproto_to_divisor(test_gen_batch, size_divisor)
             test_output_gen_batch_padded = self.async_rollout_manager.generate_sequences(test_gen_batch_padded)
 
+            if test_output_gen_batch_padded.meta_info.get("all_rollouts_failed", False):
+                # Every rollout worker reported a fully-failed chunk (e.g.
+                # desktop-env pool exhausted). Skip this validation batch
+                # rather than crashing training on a transient env issue.
+                print(
+                    "[RayPPOTrainer._validate] skipping validation batch: all rollouts failed (see rollout-side logs)",
+                    flush=True,
+                )
+                continue
+
             if self.use_rm and "rm_scores" not in test_output_gen_batch_padded.batch.keys():
                 # for colocate reward models, we need to sleep rollout model
                 # to spare GPU memory for reward model

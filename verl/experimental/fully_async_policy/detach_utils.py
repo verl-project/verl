@@ -29,6 +29,7 @@ from verl.trainer.ppo.ray_trainer import compute_response_mask
 # Data flow logger — imported lazily to avoid hard dependency for non-GUI callers.
 try:
     from recipe.fully_async_gui_agent.data_flow_logger import log_dataproto, log_message
+
     _HAS_FLOW_LOG = True
 except ImportError:
     _HAS_FLOW_LOG = False
@@ -107,12 +108,8 @@ def addition_process(output: DataProto):
     metrics = output.meta_info.pop("metrics")  # List[Dict[str, float]]
     processing_times_list = [item.get("generate_sequences", 0.0) for item in metrics]
     tool_calls_times_list = [item.get("tool_calls", 0.0) for item in metrics]
-    output.non_tensor_batch["processing_times"] = np.array(
-        processing_times_list, dtype=np.float64
-    )
-    output.non_tensor_batch["tool_calls_times"] = np.array(
-        tool_calls_times_list, dtype=np.float64
-    )
+    output.non_tensor_batch["processing_times"] = np.array(processing_times_list, dtype=np.float64)
+    output.non_tensor_batch["tool_calls_times"] = np.array(tool_calls_times_list, dtype=np.float64)
 
     if _HAS_FLOW_LOG:
         log_dataproto(output, stage="addition_process.output")

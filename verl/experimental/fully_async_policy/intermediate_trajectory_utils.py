@@ -25,10 +25,9 @@ utility (rather than reused from the worker) so that we do not need to modify
 the ``AgentLoopWorker`` core interface.
 """
 
-from typing import Any, Optional
-
 import logging
 import os
+from typing import Any, Optional
 
 import numpy as np
 import torch
@@ -43,6 +42,7 @@ from verl.utils.model import compute_position_id_with_mask
 # Data flow logger — imported lazily to avoid hard dependency.
 try:
     from recipe.fully_async_gui_agent.data_flow_logger import log_dataproto, log_message
+
     _HAS_FLOW_LOG = True
 except ImportError:
     _HAS_FLOW_LOG = False
@@ -116,9 +116,7 @@ def _compute_multi_modal_inputs(
 
     image_grid_thw = mm.get("image_grid_thw")
     if image_grid_thw is not None:
-        images_seqlens = torch.repeat_interleave(
-            image_grid_thw[:, 1] * image_grid_thw[:, 2], image_grid_thw[:, 0]
-        )
+        images_seqlens = torch.repeat_interleave(image_grid_thw[:, 1] * image_grid_thw[:, 2], image_grid_thw[:, 0])
         mm["images_seqlens"] = images_seqlens
     return mm
 
@@ -214,9 +212,9 @@ def _build_one_intermediate_row(
     rollout_log_probs: Optional[torch.Tensor] = None
     if response_logprobs_raw is not None:
         pad_size = rollout_config.response_length - len(response_logprobs_raw)
-        rollout_log_probs = torch.tensor(
-            list(response_logprobs_raw) + [0.0] * pad_size, dtype=torch.float32
-        ).unsqueeze(0)
+        rollout_log_probs = torch.tensor(list(response_logprobs_raw) + [0.0] * pad_size, dtype=torch.float32).unsqueeze(
+            0
+        )
 
     # routed_experts: pad to full (prompt_length + response_length) like
     # AgentLoopWorker._agent_loop_postprocess does for the main trajectory.
@@ -230,14 +228,10 @@ def _build_one_intermediate_row(
         elif isinstance(routed_experts_raw, torch.Tensor):
             experts_tensor = routed_experts_raw
         else:
-            raise TypeError(
-                f"Unsupported type for routed_experts: {type(routed_experts_raw)}"
-            )
+            raise TypeError(f"Unsupported type for routed_experts: {type(routed_experts_raw)}")
         length, layer_num, topk_num = experts_tensor.shape
         total_length = input_ids.shape[1]
-        routed_experts_padded = torch.zeros(
-            1, total_length, layer_num, topk_num, dtype=experts_tensor.dtype
-        )
+        routed_experts_padded = torch.zeros(1, total_length, layer_num, topk_num, dtype=experts_tensor.dtype)
         # Left-padded prompt: original prompt starts at (prompt_length - len(prompt_ids))
         start_pos = prompt_input_ids.shape[1] - len(prompt_ids)
         end_pos = min(start_pos + length, total_length)
@@ -248,12 +242,8 @@ def _build_one_intermediate_row(
             )
         routed_experts_padded[:, start_pos:end_pos] = experts_tensor[: end_pos - start_pos].unsqueeze(0)
 
-    multi_modal_inputs = _compute_multi_modal_inputs(
-        processor, tokenizer, multi_modal_data, input_ids
-    )
-    position_ids = _compute_position_ids(
-        processor, input_ids, attention_mask, multi_modal_inputs
-    )
+    multi_modal_inputs = _compute_multi_modal_inputs(processor, tokenizer, multi_modal_data, input_ids)
+    position_ids = _compute_position_ids(processor, input_ids, attention_mask, multi_modal_inputs)
 
     # Build tensor batch
     tensor_batch: dict[str, torch.Tensor] = {
@@ -296,8 +286,7 @@ def _build_one_intermediate_row(
                 v = v.unsqueeze(0)
             if v.shape[-1] != expected_resp_len:
                 raise ValueError(
-                    f"Inherited tensor {k!r} has response length {v.shape[-1]}, "
-                    f"expected {expected_resp_len}."
+                    f"Inherited tensor {k!r} has response length {v.shape[-1]}, expected {expected_resp_len}."
                 )
             # Clone so that later in-place ops on the parent row do not mutate
             # the inherited copy (and vice versa).
@@ -414,8 +403,7 @@ def expand_intermediate_trajectories(
     if not rows_with_interm:
         # Strip the empty column and return as-is.
         logger.debug(
-            "[IntermTrajExpander] no intermediate trajectories found in batch (size=%d), "
-            "stripping empty column",
+            "[IntermTrajExpander] no intermediate trajectories found in batch (size=%d), stripping empty column",
             len(data_proto),
         )
         stripped = DataProto(
@@ -458,8 +446,7 @@ def expand_intermediate_trajectories(
 
     expanded = DataProto.concat(pieces)
     logger.info(
-        "[IntermTrajExpander] Expanded %d main rows -> +%d intermediate rows "
-        "(total %d); per-row counts=%s",
+        "[IntermTrajExpander] Expanded %d main rows -> +%d intermediate rows (total %d); per-row counts=%s",
         n_rows,
         total_appended,
         len(expanded),
@@ -896,10 +883,7 @@ def scatter_advantage_to_intermediate_and_normalize(
     # ------------------------------------------------------------------
     if normalize_rollout_weight:
         if "response_mask" not in data_proto.batch.keys():
-            logger.warning(
-                "[scatter_advantage] response_mask missing; skipping "
-                "1/T_rollout normalization"
-            )
+            logger.warning("[scatter_advantage] response_mask missing; skipping 1/T_rollout normalization")
         else:
             response_mask = data_proto.batch["response_mask"]
             per_row_tokens = response_mask.to(torch.float32).sum(dim=-1)
@@ -925,10 +909,6 @@ def scatter_advantage_to_intermediate_and_normalize(
                 data_proto.batch["returns"] = data_proto.batch["returns"] * scale
 
             data_proto.meta_info["fully_async/rollout_weight/num_groups"] = len(group_tokens)
-            data_proto.meta_info["fully_async/rollout_weight/total_tokens"] = float(
-                sum(group_tokens.values())
-            )
+            data_proto.meta_info["fully_async/rollout_weight/total_tokens"] = float(sum(group_tokens.values()))
 
     return data_proto
-
-

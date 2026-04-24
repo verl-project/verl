@@ -504,20 +504,24 @@ class AgentLoopWorker:
                 flush=True,
             )
         if n_valid == 0:
-            # Every rollout in this batch failed. Returning an empty
-            # DataProto (or raising) would hide the issue; re-raise a
-            # descriptive error so the caller can decide how to react.
-            raise RuntimeError(
-                f"All {n_total} rollouts in this generate_sequences batch "
-                f"were discarded. Check rollout-side logs for fatal errors."
+            # Every rollout in this batch failed. Return an empty DataProto
+            # so the caller can skip this chunk instead of crashing training
+            # on transient env-side issues (e.g. desktop-env pool exhaustion).
+            print(
+                f"[AgentLoopWorker][ALL_ROLLOUTS_FAILED] "
+                f"all {n_total} rollouts discarded in this batch; "
+                f"returning empty DataProto",
+                flush=True,
             )
+            empty = DataProto()
+            empty.meta_info["metrics"] = []
+            empty.meta_info["all_rollouts_failed"] = True
+            return empty
 
         # Re-slice the input non_tensor_batch to keep row alignment with the
         # surviving outputs. Without this, ``_postprocess`` would mix
         # position-0 non_tensor fields with a position-2 output.
-        filtered_non_tensor_batch = {
-            k: v[valid_indices] for k, v in batch.non_tensor_batch.items()
-        }
+        filtered_non_tensor_batch = {k: v[valid_indices] for k, v in batch.non_tensor_batch.items()}
 
         output = self._postprocess(
             valid_outputs,
@@ -1049,13 +1053,33 @@ class AgentLoopManager:
                 for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=True)
             ]
         )
-        output = DataProto.concat(outputs)
+        if self.stream_teacher_with_rollout:
+            await self.teacher_model_manager.sleep()
+
+        # Filter out chunks in which every rollout failed (env-level).
+        # Workers signal this with ``all_rollouts_failed`` + empty batch.
+        non_empty_outputs = [o for o in outputs if not o.meta_info.get("all_rollouts_failed", False)]
+        n_failed_chunks = len(outputs) - len(non_empty_outputs)
+        if n_failed_chunks > 0:
+            print(
+                f"[AgentLoopManager] skipped {n_failed_chunks}/{len(outputs)} chunks where all rollouts failed",
+                flush=True,
+            )
+        if not non_empty_outputs:
+            # Every worker's chunk failed. Return an empty DataProto so the
+            # caller (e.g. validator) can decide to skip this step instead
+            # of crashing the whole training run.
+            empty = DataProto()
+            empty.meta_info = {"timing": {}, "all_rollouts_failed": True}
+            return empty
+
+        output = DataProto.concat(non_empty_outputs)
 
         # calculate performance metrics
-        metrics = [output.meta_info.pop("metrics") for output in outputs]  # List[List[Dict[str, str]]]
+        metrics = [o.meta_info.pop("metrics") for o in non_empty_outputs]  # List[List[Dict[str, str]]]
         timing = self._performance_metrics(metrics, output)
 
-        output.meta_info = {"timing": timing, **outputs[0].meta_info}
+        output.meta_info = {"timing": timing, **non_empty_outputs[0].meta_info}
         return output
 
     def _performance_metrics(self, metrics: list[list[dict[str, str]]], output: DataProto) -> dict[str, float]:
