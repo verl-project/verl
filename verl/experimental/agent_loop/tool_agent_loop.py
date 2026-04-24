@@ -174,7 +174,7 @@ class ToolAgentLoop(AgentLoopBase):
             num_turns=agent_data.user_turns + agent_data.assistant_turns + 1,
             metrics=agent_data.metrics,
             routed_experts=(
-                agent_data.routed_experts[: self.response_length]
+                agent_data.routed_experts[: len(prompt_ids) + self.response_length]
                 if agent_data.routed_experts is not None
                 else None
             ),
