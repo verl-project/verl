@@ -98,6 +98,7 @@ jobs:
           pip3 install --no-deps -e .
       - name: Download datasets
         run: |
+          cp -r ./verl /root/.cache/
           python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
           python3 examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/models/hf_data/hiyouga/geometry3k
       - name: Running CPU unit tests
