@@ -32,6 +32,7 @@ import logging
 import os
 import random
 from abc import ABC, abstractmethod
+from datetime import datetime
 from typing import Any, Optional
 from uuid import uuid4
 
@@ -485,7 +486,40 @@ class AgentLoopWorker:
                     self._run_agent_loop(sampling_params, trajectory_info[i], trace=trace_this_sample, **kwargs)
                 )
             )
-        outputs = await asyncio.gather(*tasks)
+        # ``return_exceptions=True``: a bug in a single rollout task must not
+        # abort the whole batch. Individual exceptions are logged (with
+        # traceback + timestamp) and treated as a failed rollout so the
+        # filtering logic below can drop them like any other ``None`` result.
+        raw_outputs = await asyncio.gather(*tasks, return_exceptions=True)
+
+        outputs = []
+        n_exceptions = 0
+        for idx, o in enumerate(raw_outputs):
+            if isinstance(o, BaseException):
+                n_exceptions += 1
+                # Extract just the innermost frame (file:line) where the
+                # exception was actually raised, enough to locate real bugs
+                # without dumping the full stack.
+                tb = o.__traceback__
+                while tb is not None and tb.tb_next is not None:
+                    tb = tb.tb_next
+                if tb is not None:
+                    where = f"{os.path.basename(tb.tb_frame.f_code.co_filename)}:{tb.tb_lineno}"
+                else:
+                    where = "unknown"
+                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+                print(
+                    f"[{ts}] [AgentLoopWorker][ROLLOUT_EXCEPTION] "
+                    f"sample_index={trajectory_info[idx].get('sample_index')} "
+                    f"step={trajectory_info[idx].get('step')} "
+                    f"rollout_n={trajectory_info[idx].get('rollout_n')} "
+                    f"validate={trajectory_info[idx].get('validate')} "
+                    f"at={where} err={o!r}",
+                    flush=True,
+                )
+                outputs.append(None)
+            else:
+                outputs.append(o)
 
         # Filter out rollouts that the agent loop discarded (returned None).
         # See ``_run_agent_loop`` above; failing rollouts (fatal tool error,
@@ -497,10 +531,12 @@ class AgentLoopWorker:
         n_valid = len(valid_outputs)
         n_dropped = n_total - n_valid
         if n_dropped > 0:
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
             print(
-                f"[AgentLoopWorker][DROPPED_ROLLOUTS] "
+                f"[{ts}] [AgentLoopWorker][DROPPED_ROLLOUTS] "
                 f"dropped={n_dropped}/{n_total} "
-                f"(fatal errors / agent-requested abort)",
+                f"(exceptions={n_exceptions}, "
+                f"agent_returned_none={n_dropped - n_exceptions})",
                 flush=True,
             )
         if n_valid == 0:

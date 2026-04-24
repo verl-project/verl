@@ -643,6 +643,16 @@ class RayPPOTrainer:
                 "sample_turns": sample_turns,
                 "reward_extra_infos_dict": reward_extra_infos_dict,
             }
+        if not data_source_lst:
+            # Every validation iteration was skipped (e.g. desktop-env pool
+            # exhausted for the entire val set). Return empty metrics so the
+            # caller can log that validation was skipped without crashing.
+            print(
+                "[RayPPOTrainer._validate] all validation iterations were skipped; "
+                "returning empty metrics",
+                flush=True,
+            )
+            return {}
         data_sources = np.concatenate(data_source_lst, axis=0)
         return self._val_metrics_update(data_sources, sample_uids, reward_extra_infos_dict, sample_turns)
 
