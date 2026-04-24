@@ -3,8 +3,8 @@ Ascend SGLang Best Practice
 
 Last updated: 01/27/2026.
 
-.. _Qwen3-30B: https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3moe-30b_sglang_megatron_npu.sh
-.. _Qwen2.5-32B: https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen2-32b_sglang_fsdp_npu.sh
+.. _Qwen3-30B: https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3_30b_a3b_sglang_mindspeed_npu.sh
+.. _Qwen2.5-32B: https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3_8b_sglang_fsdp_npu.sh
 引言
 ----------------------------------
 
@@ -104,7 +104,7 @@ DAPO-Math-17k: https://huggingface.co/datasets/BytedTsinghua-SIA/DAPO-Math-17k
 
 .. code-block:: bash 
 
-  bash examples/grpo_trainer/run_qwen3moe-30b_sglang_megatron_npu.sh
+  bash examples/grpo_trainer/run_qwen3_30b_a3b_sglang_mindspeed_npu.sh
 对于多节点任务 `Qwen2.5-32B`_ ，我们推荐使用以下脚本进行大规模多节点训练拉起
 
 .. code-block:: bash

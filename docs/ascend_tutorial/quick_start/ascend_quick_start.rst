@@ -275,81 +275,60 @@ verl 中昇腾暂不支持生态库如下：
       - shell location
       - hardware
     * - GRPO
-      - Qwen2.5-7B-instruct
-      - `7B <https://huggingface.co/Qwen/Qwen2.5-7B-Instruct>`_
-      - FSDP
-      - vllm-ascend
-      - `qwen2_5_7b_grpo_npu <https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen2_5_7b_grpo_npu.sh>`_
-      - Atlas 200T A2 Box16
-    * - GRPO
-      - Qwen2.5-32B-instruct
-      - `32B <https://huggingface.co/Qwen/Qwen2.5-32B-Instruct>`_
-      - FSDP
-      - vllm-ascend
-      - `qwen2_5_32b_grpo_npu <https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen2_5_32b_grpo_npu.sh>`_
-      - Atlas 200T A2 Box16
-    * - GRPO
-      - Qwen2.5-VL-3B-instruct
-      - `3B <https://huggingface.co/Qwen/Qwen2.5-VL-3B-Instruct>`_
-      - FSDP
-      - vllm-ascend
-      - `qwen2_5_vl_3b_npu <https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen2_5_vl_3b_npu.sh>`_
-      - Atlas 200T A2 Box16
-    * - GRPO
-      - Qwen2.5-VL-7B-instruct
-      - `7B <https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct>`_
-      - FSDP
-      - vllm-ascend
-      - `qwen2_5_vl_7b_npu <https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen2_5_vl_7b_npu.sh>`_
-      - Atlas 200T A2 Box16
-    * - GRPO
-      - Qwen2.5-VL-32B-instruct
-      - `32B <https://huggingface.co/Qwen/Qwen2.5-VL-32B-Instruct>`_
-      - FSDP
-      - vllm-ascend
-      - `qwen2_5_vl_32b_npu <https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen2_5_vl_32b_npu.sh>`_
-      - Atlas 200T A2 Box16
-    * - GRPO
-      - Qwen3-4B
-      - `4B <https://huggingface.co/Qwen/Qwen3-4B>`_
-      - FSDP
-      - vllm-ascend
-      - `qwen3-4B_npu <https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3_4b_grpo_vllm_1k_npu.sh>`_
-      - Atlas 800T A3
-    * - GRPO
       - Qwen3-8B
       - `8B <https://huggingface.co/Qwen/Qwen3-8B>`_
       - FSDP
       - vllm-ascend
-      - `qwen3_8b_vllm_npu <https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3-8b_npu.sh>`_
+      - `qwen3_8b_vllm_npu <https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3_8b_vllm_fsdp_npu.sh>`_
       - Atlas 200T A2 Box16
     * - GRPO
       - Qwen3-8B
       - `8B <https://huggingface.co/Qwen/Qwen3-8B>`_
       - FSDP
       - sglang
-      - `qwen3_8b_sglang_npu <https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3_8b_grpo_sglang_32k_spmd_npu.sh>`_
+      - `qwen3_8b_sglang_npu <https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3_8b_sglang_fsdp_npu.sh>`_
       - Atlas 200T A2 Box16
     * - GRPO
-      - Qwen3-32B
-      - `32B <https://huggingface.co/Qwen/Qwen3-32B>`_
+      - Qwen3-8B
+      - `8B <https://huggingface.co/Qwen/Qwen3-8B>`_
+      - MindSpeed_LLM
+      - sglang
+      - `qwen3_8b_sglang_mindspeed_npu <https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3_8b_sglang_mindspeed_npu.sh>`_
+      - Atlas 800T A3
+    * - GRPO
+      - Qwen3-VL-8B
+      - `8B <https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct>`_
       - FSDP
       - vllm-ascend
-      - `qwen3-32B_npu <https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3-32b_npu.sh>`_
+      - `qwen3_vl_8b_npu <https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3_vl_8b_vllm_fsdp_npu.sh>`_
       - Atlas 200T A2 Box16
+    * - GRPO
+      - Qwen3-VL-30B-A3B
+      - `30B <https://huggingface.co/Qwen/Qwen3-VL-30B-A3B-Instruct>`_
+      - FSDP
+      - vllm-ascend
+      - `qwen3_vl_30b_a3b_npu <https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3_vl_30b_a3b_vllm_fsdp_npu.sh>`_
+      - Atlas 800T A3
     * - GRPO
       - Qwen3-30B-A3B
       - `30B <https://huggingface.co/Qwen/Qwen3-30B-A3B>`_
       - MindSpeed_LLM
       - sglang
-      - `qwen3_30b_mindspeedllm_npu <https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3moe-30b_sglang_mindspeedllm_npu.sh>`_
+      - `qwen3_30b_a3b_sglang_mindspeed_npu <https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3_30b_a3b_sglang_mindspeed_npu.sh>`_
       - Atlas 800T A3
     * - GRPO
-      - Qwen3-32B
-      - `32B <https://huggingface.co/Qwen/Qwen3-32B>`_
-      - MindSpeed_LLM
-      - sglang
-      - `qwen3_32b_mindspeedllm_npu <https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3-32b_sglang_mindspeedllm_npu.sh>`_
+      - Qwen3-Next-80B-A3B
+      - `80B <https://huggingface.co/Qwen/Qwen3-Next-80B-A3B-Instruct>`_
+      - FSDP
+      - vllm-ascend
+      - `qwen3_next_80b_a3b_npu <https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3_next_80b_a3b_vllm_fsdp_npu.sh>`_
+      - Atlas 800T A3
+    * - GRPO
+      - Qwen3-235B-A22B
+      - `235B <https://huggingface.co/Qwen/Qwen3-235B-A22B>`_
+      - Megatron
+      - vllm-ascend
+      - `qwen3_235b_a22b_megatron_npu <https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3_235b_a22b_vllm_megatron_npu.sh>`_
       - Atlas 800T A3
     * - GRPO
       - DeepSeekv3-671B
@@ -405,7 +384,7 @@ verl 中昇腾暂不支持生态库如下：
       - `8B <https://huggingface.co/Qwen/Qwen3-8B>`_
       - FSDP
       - vllm-ascend
-      - `qwen3_8b_ppo_npu <https://github.com/verl-project/verl/blob/main/examples/ppo_trainer/run_qwen3-8b_npu.sh>`_
+      - `qwen3_8b_ppo_npu <https://github.com/verl-project/verl/blob/main/examples/ppo_trainer/run_qwen3_8b_vllm_fsdp_npu.sh>`_
       - Atlas 900 A2 PODc
     * - One_Step_Off_Policy
       - Qwen3-8B

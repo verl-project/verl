@@ -69,7 +69,7 @@ This example uses the sglang inference engine by default, and you can also modif
 
 .. code-block:: bash
 
-    bash examples/grpo_trainer/run_qwen2-7b_seq_balance.sh
+    bash examples/grpo_trainer/run_qwen3_8b_vllm_fsdp.sh
 
 
 Multi-turn Conversations and Tool Calls

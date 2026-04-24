@@ -66,7 +66,6 @@ There're three ways to prepare the model checkpoints for post-training:
   deepseek-ai/deepseek-math-7b-instruct) in
   ``actor_rollout_ref.model.path`` and ``critic.model.path`` field in
   the run script. You can also download models from modelscope by setting environmental variable ``VERL_USE_MODELSCOPE=True``.
-  See examples/ppo_trainer/run_deepseek7b_llm_modelscope.sh for example.
 
 Noted that users should prepare checkpoints for actor, critic and reward
 model.

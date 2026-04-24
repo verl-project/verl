@@ -38,7 +38,7 @@ LOSS_MODE=dppo_tv bash examples/dppo_trainer/run_qwen3_30b_a3b_vllm_megatron.sh
 # run GRPO baseline
 LOSS_MODE=vanilla CLIP_LOW=0.2 CLIP_HIGH=0.2 bash examples/dppo_trainer/run_qwen3_30b_a3b_vllm_megatron.sh
 # or GRPO with clip higher
-LOSS_MODE=vanilla CLIP_LOW=0.2 CLIP_HIGH=0.28 bash examples/dppo_trainer/run_qwen30b_dppo.sh
+LOSS_MODE=vanilla CLIP_LOW=0.2 CLIP_HIGH=0.28 bash examples/dppo_trainer/run_qwen3_30b_a3b_vllm_megatron.sh
 ```
 
 ## 📖Introduction
