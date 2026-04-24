@@ -691,8 +691,16 @@ class RayPPOTrainer:
         1. Ray resource pools from configuration
         2. Worker groups for each role (actor, critic, etc.)
         """
+    
+        # trainer->ResourcePoolManager有三个成员变量，前两个都是init_workers的时候传入的
+        # resource_pool_spec ["global_pool": [process num per node * nodes], "critic_pool": [process num per node * nodes], ...]
+        # mapping [Role.Critic(enum) : "global_pool"]
+        # resource_pool_dict ["global_pool" : RayResourcePool(process_on_nodes=[process num per node * nodes], use_gpu=True, max_colocate_count=3, name_prefix=resource_pool_name)]
+        # 初始化第三个成员变量
         self.resource_pool_manager.create_resource_pool()
 
+        # [RayResourcePool : {"global_pool" : rollout init args}, "critic_pool" : critic init args}, ...]
+        # 存在一个resource pool可能对应多个角色，例如global_pool可能同时有rollout和critic，所以是一个dict of dict
         self.resource_pool_to_cls = {pool: {} for pool in self.resource_pool_manager.resource_pool_dict.values()}
 
         # create actor and rollout
