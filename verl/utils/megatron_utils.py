@@ -1554,6 +1554,8 @@ def copy_megatron_model_to_cpu(models):
                     # Copy parameter data to CPU
                     if buffer.param_data.storage().size() > 0:
                         buffer_state["param_data"] = buffer.param_data.data.cpu().clone().pin_memory()
+                    else:
+                        buffer_state["param_data"] = buffer.param_data.cpu_data.clone().pin_memory()
 
                     buffer_list.append(buffer_state)
                 buffer_states.append(buffer_list)
@@ -1596,7 +1598,10 @@ def restore_megatron_model_from_cpu(models, cpu_state):
                 for buffer, buffer_state in zip(buffers, buffer_list, strict=False):
                     # Restore parameter data
                     if "param_data" in buffer_state:
-                        buffer.param_data.data.copy_(buffer_state["param_data"].to(buffer.param_data.device))
+                        if buffer.param_data.storage().size() > 0:
+                            buffer.param_data.data.copy_(buffer_state["param_data"].to(buffer.param_data.device))
+                        else:
+                            buffer.param_data.cpu_data.copy_(buffer_state["param_data"])
 
         elif not chunk_state["is_ddp"] and not isinstance(model_chunk, DDP):
             # Restore non-DDP models

@@ -128,6 +128,27 @@ def test_index_select_tensor_dict():
     tu.assert_tensordict_eq(selected_data, target_select_data)
 
 
+def test_index_select_tensor_dict_preserves_3d_nested_tensor_layout_with_equal_seq_len():
+    position_ids = tu.nested_tensor_from_tensor_list(
+        [
+            torch.arange(2).expand(4, 2),
+            torch.arange(5).expand(4, 5),
+            (torch.arange(5) + 10).expand(4, 5),
+            torch.arange(3).expand(4, 3),
+        ]
+    )
+    data = tu.get_tensordict({"position_ids": position_ids})
+
+    selected = tu.index_select_tensor_dict(data, torch.tensor([1, 2]))
+    expected = tu.nested_tensor_from_tensor_list([position_ids[1], position_ids[2]], ragged_idx=2)
+
+    assert selected["position_ids"]._ragged_idx == 2
+    assert selected["position_ids"].values().shape == torch.Size([4, 10])
+    assert torch.equal(selected["position_ids"].values(), expected.values())
+    assert torch.equal(selected["position_ids"].offsets(), expected.offsets())
+    tu.assert_tensordict_eq(selected, tu.get_tensordict({"position_ids": expected}))
+
+
 def test_tensordict_with_images():
     # each sample contains a sequence with multiple images of different sizes
     vocab_size = 128
@@ -835,6 +856,33 @@ def test_chunk_tensordict():
                         assert expect is None
                     else:
                         assert torch.all(torch.eq(tensor.data["pixel_values"], expect["pixel_values"])).item()
+
+
+def test_chunk_tensordict_preserves_3d_nested_tensor_layout_with_equal_seq_len_per_chunk():
+    position_ids = tu.nested_tensor_from_tensor_list(
+        [
+            torch.arange(2).expand(4, 2),
+            (torch.arange(2) + 10).expand(4, 2),
+            torch.arange(5).expand(4, 5),
+            (torch.arange(5) + 20).expand(4, 5),
+        ]
+    )
+    input_ids = torch.nested.as_nested_tensor(
+        [torch.arange(2), torch.arange(2) + 10, torch.arange(5), torch.arange(5) + 20], layout=torch.jagged
+    )
+    td = tu.get_tensordict({"input_ids": input_ids, "position_ids": position_ids})
+
+    chunks = tu.chunk_tensordict(td, chunks=2)
+
+    expected_chunk_0 = tu.nested_tensor_from_tensor_list([position_ids[0], position_ids[1]], ragged_idx=2)
+    expected_chunk_1 = tu.nested_tensor_from_tensor_list([position_ids[2], position_ids[3]], ragged_idx=2)
+
+    assert chunks[0]["position_ids"]._ragged_idx == 2
+    assert chunks[1]["position_ids"]._ragged_idx == 2
+    assert torch.equal(chunks[0]["position_ids"].values(), expected_chunk_0.values())
+    assert torch.equal(chunks[1]["position_ids"].values(), expected_chunk_1.values())
+    assert torch.equal(chunks[0]["position_ids"].offsets(), expected_chunk_0.offsets())
+    assert torch.equal(chunks[1]["position_ids"].offsets(), expected_chunk_1.offsets())
 
 
 def test_assign_non_tensor_stack_with_nested_lists():

@@ -56,6 +56,56 @@ logger.setLevel(logging.INFO)
 visible_devices_keyword = get_visible_devices_keyword()
 
 
+def _extract_prompt_logprobs_sglang(
+    meta_info: dict,
+    num_prompt_logprobs: int,
+    sequence_length: int,
+    result_dict: dict[str, list],
+) -> None:
+    """Shape SGLang input-logprobs into the vLLM ``extract_prompt_logprobs`` contract.
+    Populates ``result_dict`` with two ``[sequence_length, max(num_prompt_logprobs, 1)]``
+    lists — ``prompt_ids`` and ``prompt_logprobs`` — so the distillation teacher
+    consumer in ``teacher_manager.AsyncTeacherLLMServerManager`` can treat vLLM and
+    SGLang teachers interchangeably.
+    SGLang returns input logprobs with length ``S == len(input_ids)`` whose first
+    entry has ``logprob=None`` (no predicting context). That matches the vLLM
+    convention, so we skip entry 0 and append a trailing dummy row to keep the
+    total length equal to the consumer's ``len(sequence_ids)`` assertion.
+    """
+    input_token_logprobs = meta_info.get("input_token_logprobs") or []
+    if num_prompt_logprobs > 0:
+        input_top_logprobs = meta_info.get("input_top_logprobs") or []
+    prompt_ids_ls: list[list[int]] = []
+    prompt_logprobs_ls: list[list[float]] = []
+    # Entry 0 has logprob=None (no predicting context); skip it, matching vLLM.
+    for position in range(1, len(input_token_logprobs)):
+        if num_prompt_logprobs == 0:
+            logprob, token_id, _ = input_token_logprobs[position]
+            prompt_ids_ls.append([int(token_id)])
+            prompt_logprobs_ls.append([float(logprob)])
+        else:
+            top_entries = input_top_logprobs[position]
+            # SGLang returns ranked best-first; we preserve that ordering so rank
+            # 0 is the top-1 token, matching the vLLM extractor's rank-1 slot.
+            ids = [int(tok_id) for _, tok_id, _ in top_entries]
+            logprobs = [float(logprob) for logprob, _, _ in top_entries]
+            assert len(ids) == num_prompt_logprobs, (
+                f"SGLang returned {len(ids)} top logprobs at position {position}, expected {num_prompt_logprobs}."
+            )
+            prompt_ids_ls.append(ids)
+            prompt_logprobs_ls.append(logprobs)
+    # Trailing dummy row so total length == len(sequence_ids), matching vLLM.
+    pad_width = max(num_prompt_logprobs, 1)
+    prompt_ids_ls.append([0] * pad_width)
+    prompt_logprobs_ls.append([0.0] * pad_width)
+    assert len(prompt_ids_ls) == sequence_length, (
+        f"SGLang prompt_logprobs length ({len(prompt_ids_ls)}) does not match "
+        f"sequence length ({sequence_length}); check logprob_start_len=0 invariant."
+    )
+    result_dict["prompt_ids"] = prompt_ids_ls
+    result_dict["prompt_logprobs"] = prompt_logprobs_ls
+
+
 class SGLangHttpServer:
     """SGLang http server in single node, this is equivalent to launch server with command line:
     ```
@@ -407,6 +457,13 @@ class SGLangHttpServer:
         sampling_params["max_new_tokens"] = max_new_tokens
         return_logprob = sampling_params.pop("logprobs", False)
 
+        # vLLM-style "prompt_logprobs=K" from the distillation teacher: request
+        # input-token logprobs for every position (top-K when K>0, sampled-token
+        # logprob only when K==0). Translate to SGLang's per-request logprob API.
+        prompt_logprobs = sampling_params.pop("prompt_logprobs", None)
+        if prompt_logprobs is not None:
+            return_logprob = True
+
         request = {
             "rid": request_id,
             "input_ids": prompt_ids,
@@ -416,6 +473,11 @@ class SGLangHttpServer:
             # TODO: support video input for sglang
             # video_data=video_data,
         }
+
+        if prompt_logprobs is not None:
+            request["logprob_start_len"] = 0
+            if prompt_logprobs > 0:
+                request["top_logprobs_num"] = prompt_logprobs
 
         if self.config.enable_rollout_routing_replay:
             request.update({"return_routed_experts": True})
@@ -466,12 +528,21 @@ class SGLangHttpServer:
                     -1, hf_config.num_hidden_layers, hf_config.num_experts_per_tok
                 )
 
+        extra_fields = {"global_steps": self.global_steps}
+        if prompt_logprobs is not None:
+            _extract_prompt_logprobs_sglang(
+                meta_info=meta_info,
+                num_prompt_logprobs=prompt_logprobs,
+                sequence_length=len(prompt_ids),
+                result_dict=extra_fields,
+            )
+
         return TokenOutput(
             token_ids=token_ids,
             log_probs=log_probs,
             routed_experts=routed_experts,
             stop_reason=finish_reason,
-            extra_fields={"global_steps": self.global_steps},
+            extra_fields=extra_fields,
         )
 
     async def set_global_steps(self, global_steps: int):
@@ -479,9 +550,13 @@ class SGLangHttpServer:
         self.global_steps = global_steps
 
     async def abort_all_requests(self):
+        if self.node_rank != 0:
+            return
         await self.tokenizer_manager.pause_generation(PauseGenerationReqInput(mode="abort"))
 
     async def resume_generation(self):
+        if self.node_rank != 0:
+            return
         await self.tokenizer_manager.continue_generation(ContinueGenerationReqInput())
 
     async def start_profile(self, **kwargs):
@@ -612,3 +687,15 @@ class SGLangReplica(RolloutReplica):
             if is_valid_ipv6_address(server_address)
             else f"{server_address}:{server_port}"
         )
+
+    async def abort_all_requests(self):
+        """Abort all ongoing generation requests on the primary server.
+
+        SGLang control RPCs are only served by the node-rank 0 server for a
+        multi-node replica, so avoid broadcasting this call to every server.
+        """
+        await self.servers[0].abort_all_requests.remote()
+
+    async def resume_generation(self):
+        """Resume generation on the primary server after abort_all_requests."""
+        await self.servers[0].resume_generation.remote()
