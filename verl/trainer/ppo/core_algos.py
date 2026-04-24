@@ -301,16 +301,16 @@ def compute_grpo_outcome_advantage(
         Returns: `(torch.Tensor)`
             shape is (bs, response_length)
     """
-    scores = token_level_rewards.sum(dim=-1)
+    raw_scores = token_level_rewards.sum(dim=-1)
 
     id2score = defaultdict(list)
     id2mean = {}
     id2std = {}
 
     with torch.no_grad():
-        bsz = scores.shape[0]
+        bsz = raw_scores.shape[0]
         for i in range(bsz):
-            id2score[index[i]].append(scores[i])
+            id2score[index[i]].append(raw_scores[i])
         for idx in id2score:
             if len(id2score[idx]) == 1:
                 id2mean[idx] = torch.tensor(0.0)
@@ -321,14 +321,16 @@ def compute_grpo_outcome_advantage(
                 id2std[idx] = torch.std(scores_tensor)
             else:
                 raise ValueError(f"no score in prompt index: {idx}")
+        advantages = raw_scores.clone()
         for i in range(bsz):
             if norm_adv_by_std_in_grpo:
-                scores[i] = (scores[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
+                advantages[i] = (advantages[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
             else:
-                scores[i] = scores[i] - id2mean[index[i]]
-        scores = scores.unsqueeze(-1) * response_mask
+                advantages[i] = advantages[i] - id2mean[index[i]]
+        returns = raw_scores.unsqueeze(-1) * response_mask
+        advantages = advantages.unsqueeze(-1) * response_mask
 
-    return scores, scores
+    return advantages, returns
 
 
 @register_adv_est(AdvantageEstimator.GRPO_VECTORIZED)
