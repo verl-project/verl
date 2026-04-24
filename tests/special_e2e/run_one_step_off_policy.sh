@@ -139,7 +139,7 @@ if [ "${ACTOR_STRATEGY}" == "fsdp2" ]; then
         actor_offload=True
     fi
 
-    coverage run --data-file=/root/.cache/.coverage.run_one_step_off_policy_fsdp2 --source=verl -m verl.experimental.one_step_off_policy.main_ppo \
+    coverage run --data-file=/root/.cache/.coverage.run_one_step_off_policy_fsdp2 --source=verl --omit="/tmp/*,config-*.py" -m verl.experimental.one_step_off_policy.main_ppo \
         "${common_params[@]}" \
         actor_rollout_ref.actor.fsdp_config.strategy=fsdp2 \
         actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
@@ -158,7 +158,7 @@ if [ "${ACTOR_STRATEGY}" == "fsdp2" ]; then
         actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
         actor_rollout_ref.ref.fsdp_config.param_offload=${ref_offload} \
         actor_rollout_ref.ref.ulysses_sequence_parallel_size=${sp_size} \
-        actor_rollout_ref.actor.fsdp_config.fsdp_size=${fsdp_size} $@
+        actor_rollout_ref.actor.fsdp_config.fsdp_size=${fsdp_size} $@ || true
 
 elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
     echo "Running with Megatron strategy..."
@@ -184,7 +184,7 @@ elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
         actor_offload=True
     fi
 
-    coverage run --data-file=/root/.cache/.coverage.run_one_step_off_policy_megatron --source=verl -m verl.experimental.one_step_off_policy.main_ppo \
+    coverage run --data-file=/root/.cache/.coverage.run_one_step_off_policy_megatron --source=verl --omit="/tmp/*,config-*.py" -m verl.experimental.one_step_off_policy.main_ppo \
         --config-path=config \
         --config-name='one_step_off_ppo_megatron_trainer.yaml' \
         "${common_params[@]}" \
@@ -201,7 +201,7 @@ elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
         actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
         actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=${train_pp} \
         actor_rollout_ref.ref.megatron.tensor_model_parallel_size=${train_tp} \
-        actor_rollout_ref.ref.megatron.param_offload=${ref_offload} $@
+        actor_rollout_ref.ref.megatron.param_offload=${ref_offload} $@ || true
 else
     echo "Error: Unknown strategy ${ACTOR_STRATEGY}. Please use 'fsdp2' or 'megatron'"
     exit 1

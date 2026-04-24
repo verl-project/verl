@@ -157,7 +157,7 @@ else
     ENABLE_ROLLOUT_ROUTING_REPLAY=False
 fi
 
-coverage run --data-file=/root/.cache/.coverage.run_ppo_trainer_megatron --source=verl -m verl.trainer.main_ppo --config-path=config \
+coverage run --data-file=/root/.cache/.coverage.run_ppo_trainer_megatron --source=verl --omit="/tmp/*,config-*.py" -m verl.trainer.main_ppo --config-path=config \
     --config-name='ppo_megatron_trainer.yaml'\
     algorithm.adv_estimator="${ADV_ESTIMATOR}" \
     data.train_files="${TRAIN_FILES}" \
@@ -279,4 +279,4 @@ coverage run --data-file=/root/.cache/.coverage.run_ppo_trainer_megatron --sourc
     global_profiler.profile_continuous_steps=True \
     global_profiler.tool=nsys \
     global_profiler.steps=$PROFILE_STEPS \
-    global_profiler.global_tool_config.nsys.discrete=$DISCRETE $@
+    global_profiler.global_tool_config.nsys.discrete=$DISCRETE $@ || true

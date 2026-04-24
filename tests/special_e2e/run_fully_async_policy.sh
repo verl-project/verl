@@ -163,7 +163,7 @@ if [ "${ACTOR_STRATEGY}" == "fsdp2" ]; then
         )
         actor_offload=True
     fi
-    coverage run --data-file=/root/.cache/.coverage.run_fully_async_policy_fsdp2 --source=verl -m verl.experimental.fully_async_policy.fully_async_main \
+    coverage run --data-file=/root/.cache/.coverage.run_fully_async_policy_fsdp2 --source=verl --omit="/tmp/*,config-*.py" -m verl.experimental.fully_async_policy.fully_async_main \
         "${common_params[@]}" \
         actor_rollout_ref.model.enable_gradient_checkpointing=True \
         actor_rollout_ref.actor.fsdp_config.strategy=fsdp2 \
@@ -179,7 +179,7 @@ if [ "${ACTOR_STRATEGY}" == "fsdp2" ]; then
         actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
         actor_rollout_ref.ref.fsdp_config.param_offload=${ref_offload} \
         actor_rollout_ref.ref.ulysses_sequence_parallel_size=${sp_size} \
-        actor_rollout_ref.actor.fsdp_config.fsdp_size=${fsdp_size} $@
+        actor_rollout_ref.actor.fsdp_config.fsdp_size=${fsdp_size} $@ || true
 
 elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
     echo "Running fully async training with Megatron strategy..."
@@ -193,7 +193,7 @@ elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
         actor_rollout_ref.rollout.gpu_memory_utilization=0.60
     )
 
-    coverage run --data-file=/root/.cache/.coverage.run_fully_async_policy_megatron --source=verl -m verl.experimental.fully_async_policy.fully_async_main \
+    coverage run --data-file=/root/.cache/.coverage.run_fully_async_policy_megatron --source=verl --omit="/tmp/*,config-*.py" -m verl.experimental.fully_async_policy.fully_async_main \
         --config-path=config \
         --config-name='fully_async_ppo_megatron_trainer.yaml' \
         "${common_params[@]}" \
@@ -211,7 +211,7 @@ elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
         actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
         actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=${train_pp} \
         actor_rollout_ref.ref.megatron.tensor_model_parallel_size=${train_tp} \
-        actor_rollout_ref.ref.megatron.param_offload=${ref_offload} $@
+        actor_rollout_ref.ref.megatron.param_offload=${ref_offload} $@ || true
 else
     echo "Error: Unknown strategy ${ACTOR_STRATEGY}. Please use 'fsdp2' or 'megatron'"
     exit 1

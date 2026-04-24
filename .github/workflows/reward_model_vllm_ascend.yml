@@ -99,6 +99,7 @@ jobs:
           python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k --local_dir ${HOME}/data/gsm8k
       - name: Running vllm generative reward model tests on 8 NPUs
         run: |
+          cp -r ../verl /root/.cache/
           ROLLOUT_NAME=vllm coverage run --data-file=/root/.cache/.coverage.test_reward_model_genrm --source=verl -m pytest -s -x tests/experimental/reward_loop/test_reward_model_genrm.py
       - name: Running vllm discriminative reward model tests on 8 NPUs
         run: |
