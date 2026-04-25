@@ -551,6 +551,14 @@ def calc_maj_val(data: list[dict[str, Any]], vote_key: str, val_key: str) -> flo
     return maj_val
 
 
+def should_keep_validation_metric(metric_name: str, enabled_metrics: set[str] | None) -> bool:
+    """Return whether a validation metric should be logged."""
+    if enabled_metrics is None:
+        return True
+    metric_prefix = metric_name.split("@", 1)[0]
+    return metric_prefix in enabled_metrics
+
+
 def process_validation_metrics(
     data_sources: list[str], sample_uids: list[str], infos_dict: dict[str, list[Any]], seed: int = 42
 ) -> dict[str, dict[str, dict[str, float]]]:

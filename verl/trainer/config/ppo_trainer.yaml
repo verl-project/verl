@@ -133,6 +133,10 @@ trainer:
   # Number of generations to log during validation
   log_val_generations: 0
 
+  # Optional validation metric filter. Keep null to preserve current behavior.
+  metrics:
+    enabled_metrics: null
+
   # Directory for logging rollout data; no dump if null
   rollout_data_dir: null
 

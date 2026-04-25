@@ -48,6 +48,7 @@ from verl.trainer.ppo.metric_utils import (
     compute_timing_metrics,
     compute_variance_proxy_metrics,
     process_validation_metrics,
+    should_keep_validation_metric,
 )
 from verl.trainer.ppo.reward import extract_reward
 from verl.trainer.ppo.utils import (
@@ -635,12 +636,20 @@ class RayPPOTrainer:
 
     def _val_metrics_update(self, data_sources, sample_uids, reward_extra_infos_dict, sample_turns):
         data_src2var2metric2val = process_validation_metrics(data_sources, sample_uids, reward_extra_infos_dict)
+
+        metrics_cfg = getattr(self.config.trainer, "metrics", None)
+        enabled_metrics = None if metrics_cfg is None else getattr(metrics_cfg, "enabled_metrics", None)
+        enabled_metrics = set(enabled_metrics) if enabled_metrics is not None else None
+
         metric_dict = {}
         for data_source, var2metric2val in data_src2var2metric2val.items():
             core_var = "acc" if "acc" in var2metric2val else "reward"
             for var_name, metric2val in var2metric2val.items():
                 n_max = max([int(name.split("@")[-1].split("/")[0]) for name in metric2val.keys()])
                 for metric_name, metric_val in metric2val.items():
+                    if not should_keep_validation_metric(metric_name, enabled_metrics):
+                        continue
+
                     if (
                         (var_name == core_var)
                         and any(metric_name.startswith(pfx) for pfx in ["mean", "maj", "best"])

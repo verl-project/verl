@@ -785,6 +785,8 @@ trainer:
   - console
   - wandb
   log_val_generations: 0
+  metrics:
+    enabled_metrics: null
   rollout_data_dir: null
   validation_data_dir: null
   nnodes: 1
