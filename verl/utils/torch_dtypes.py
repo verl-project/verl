@@ -16,18 +16,20 @@ Adapted from Cruise.
 """
 
 import torch
+from enum import Enum
 
 HALF_LIST = [16, "16", "fp16", "float16", torch.float16]
 FLOAT_LIST = [32, "32", "fp32", "float32", torch.float32]
 BFLOAT_LIST = ["bf16", "bfloat16", torch.bfloat16]
 
-
-class PrecisionType:
+class PrecisionType(str, Enum):
     """Type of precision used.
 
-    >>> PrecisionType.HALF == 16
+    >>> PrecisionType.HALF == "16"
     True
-    >>> PrecisionType.HALF in (16, "16")
+    >>> PrecisionType.HALF in ("16", "32")
+    True
+    >>> PrecisionType.HALF.value == "16"
     True
     """
 
@@ -37,13 +39,18 @@ class PrecisionType:
     BFLOAT = "bf16"
     MIXED = "mixed"
 
-    @staticmethod
-    def supported_type(precision: str | int) -> bool:
-        return any(x == precision for x in PrecisionType)
+    @classmethod
+    def supported_type(cls, precision: str | int) -> bool:
+        return (
+            precision in HALF_LIST
+            or precision in FLOAT_LIST
+            or precision in BFLOAT_LIST
+            or precision in (item.value for item in cls)
+        )
 
-    @staticmethod
-    def supported_types() -> list[str]:
-        return [x.value for x in PrecisionType]
+    @classmethod
+    def supported_types(cls) -> list[str]:
+        return [item.value for item in cls]
 
     @staticmethod
     def is_fp16(precision):
