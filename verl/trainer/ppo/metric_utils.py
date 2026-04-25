@@ -19,7 +19,7 @@ import logging
 from collections import defaultdict
 from functools import partial
 from typing import Any, Callable
-
+from omegaconf import OmegaConf
 import numpy as np
 import torch
 
@@ -549,6 +549,12 @@ def calc_maj_val(data: list[dict[str, Any]], vote_key: str, val_key: str) -> flo
     maj_val = vote2vals[maj_vote][0]
 
     return maj_val
+
+
+def get_enabled_metrics(config) -> set[str] | None:
+    """Extract and convert enabled_metrics from trainer config to a set."""
+    enabled_metrics = OmegaConf.select(config, "trainer.metrics.enabled_metrics", default=None)
+    return set(enabled_metrics) if enabled_metrics is not None else None
 
 
 def should_keep_validation_metric(metric_name: str, enabled_metrics: set[str] | None) -> bool:

@@ -39,6 +39,7 @@ from verl.trainer.ppo.metric_utils import (
     compute_throughout_metrics,
     compute_timing_metrics,
     process_validation_metrics,
+    get_enabled_metrics,
     should_keep_validation_metric,
 )
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer, apply_kl_penalty, compute_advantage
@@ -642,9 +643,7 @@ class RobRayPPOTrainer(RayPPOTrainer):
 
         data_src2var2metric2val = process_validation_metrics(data_sources, sample_uids, reward_extra_infos_dict)
 
-        metrics_cfg = getattr(self.config.trainer, "metrics", None)
-        enabled_metrics = None if metrics_cfg is None else getattr(metrics_cfg, "enabled_metrics", None)
-        enabled_metrics = set(enabled_metrics) if enabled_metrics is not None else None
+        enabled_metrics = get_enabled_metrics(self.config)
 
         metric_dict = {}
         for data_source, var2metric2val in data_src2var2metric2val.items():
