@@ -449,3 +449,69 @@ def test_per_tensor_generator(world_size, tmp_path, config, strategy):
         nprocs=world_size,
         join=True,
     )
+
+
+def _autocast_dtype_worker(rank: int, world_size: int, rendezvous_file: str, model_path: str):
+    # Regression test for #5932: FSDP engine must resolve autocast dtype from
+    # mixed_precision.param_dtype rather than hardcoding bfloat16.
+    torch.cuda.set_device(rank)
+    dist.init_process_group(
+        backend="nccl",
+        init_method=f"file://{rendezvous_file}",
+        rank=rank,
+        world_size=world_size,
+    )
+
+    from verl.workers.engine import BaseEngine, EngineRegistry
+
+    model_config = HFModelConfig(path=model_path, load_tokenizer=False)
+
+    def build_engine(mixed_precision):
+        engine_config = FSDPEngineConfig(
+            forward_only=False,
+            fsdp_size=world_size,
+            strategy="fsdp2",
+            ulysses_sequence_parallel_size=1,
+            mixed_precision=mixed_precision,
+        )
+        engine: BaseEngine = EngineRegistry.new(
+            model_type="language_model",
+            backend=engine_config.strategy,
+            model_config=model_config,
+            engine_config=engine_config,
+            optimizer_config=FSDPOptimizerConfig(),
+            checkpoint_config=CheckpointConfig(),
+        )
+        engine.initialize()
+        return engine
+
+    # bf16 (default) resolves to torch.bfloat16
+    engine = build_engine({"param_dtype": "bf16", "reduce_dtype": "fp32", "buffer_dtype": "fp32"})
+    assert engine._autocast_dtype == torch.bfloat16, f"expected bf16, got {engine._autocast_dtype}"
+
+    # fp32 resolves to torch.float32 (forward_step will use nullcontext)
+    engine = build_engine({"param_dtype": "fp32", "reduce_dtype": "fp32", "buffer_dtype": "fp32"})
+    assert engine._autocast_dtype == torch.float32, f"expected fp32, got {engine._autocast_dtype}"
+
+    # fp16 is rejected until ShardedGradScaler is integrated
+    import pytest as _pytest
+
+    with _pytest.raises(NotImplementedError, match="fp16"):
+        build_engine({"param_dtype": "fp16", "reduce_dtype": "fp32", "buffer_dtype": "fp32"})
+
+    dist.barrier()
+    dist.destroy_process_group()
+
+
+@pytest.mark.parametrize("world_size", [8])
+@pytest.mark.parametrize("config", [Qwen3Config(num_hidden_layers=2)])
+def test_fsdp2_autocast_dtype_honors_mixed_precision(world_size, tmp_path, config):
+    rendezvous_file = str(tmp_path / "rdzv_autocast")
+    os.makedirs(os.path.dirname(rendezvous_file), exist_ok=True)
+    model_path = create_actor_model(tmp_path, config)
+    mp.spawn(
+        fn=_autocast_dtype_worker,
+        args=(world_size, rendezvous_file, model_path),
+        nprocs=world_size,
+        join=True,
+    )

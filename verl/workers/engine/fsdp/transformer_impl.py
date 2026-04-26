@@ -340,6 +340,15 @@ class FSDPEngine(BaseEngine):
 
         mixed_precision = MixedPrecision(param_dtype=param_dtype, reduce_dtype=reduce_dtype, buffer_dtype=buffer_dtype)
 
+        # fp16 requires ShardedGradScaler (see #4036 for the legacy dp_actor pattern) which is
+        # not yet plumbed into this engine. Fail fast rather than silently producing bad grads.
+        if param_dtype == torch.float16:
+            raise NotImplementedError(
+                "mixed_precision.param_dtype=fp16 is not yet supported by this engine; "
+                "ShardedGradScaler integration is pending. Use bf16 or fp32."
+            )
+        self._autocast_dtype = param_dtype
+
         auto_wrap_policy = get_fsdp_wrap_policy(
             module=module,
             config=self.engine_config.wrap_policy,
@@ -1139,7 +1148,14 @@ class FSDPEngineWithLMHead(FSDPEngine):
         micro_batch = micro_batch.to(get_device_id())
         model_inputs, output_args = self.prepare_model_inputs(micro_batch=micro_batch)
 
-        with torch.autocast(device_type=device_name, dtype=torch.bfloat16):
+        # Honor mixed_precision.param_dtype resolved during FSDP setup. When dtype is fp32,
+        # autocast is a no-op at best and a footgun at worst, so skip it entirely.
+        autocast_ctx: ContextManager = (
+            nullcontext()
+            if self._autocast_dtype == torch.float32
+            else torch.autocast(device_type=device_name, dtype=self._autocast_dtype)
+        )
+        with autocast_ctx:
             raw_output = self.module(
                 **model_inputs,
                 use_cache=False,
