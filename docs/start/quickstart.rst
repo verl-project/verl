@@ -48,6 +48,27 @@ We preprocess the dataset in parquet format so that (1) it contains necessary fi
 
    python3 examples/data_preprocess/gsm8k.py --local_save_dir ~/data/gsm8k
 
+.. note::
+
+   The ``data_source`` column in the generated parquet is used to select the
+   rule-based reward function. For the built-in GSM8K reward, keep this value
+   as ``openai/gsm8k`` even if the raw dataset was loaded from a local path or
+   mirror. If you use a custom dataset identifier, configure
+   ``reward.custom_reward_function.path`` and
+   ``reward.custom_reward_function.name``.
+
+   To inspect the generated parquet:
+
+   .. code-block:: python
+
+      import os
+      import pandas as pd
+
+      path = os.path.expanduser("~/data/gsm8k/train.parquet")
+      df = pd.read_parquet(path)
+      print(df["data_source"].drop_duplicates().head())
+      print(df[["data_source", "reward_model"]].head(1).to_dict("records"))
+
 Step 2: Download a model for post-training
 -------------------------------------------
 
@@ -70,7 +91,7 @@ answer from both the solution and model's output using regular
 expression matching. We assign a reward of 1 to correct
 answer, 0.0 to incorrect answer and 0 to no answer. 
 
-For more details, please refer to `verl/utils/reward_score/gsm8k.py <https://github.com/verl-project/verl/blob/v0.4.1/verl/utils/reward_score/gsm8k.py>`_.
+For more details, please refer to `verl/utils/reward_score/gsm8k.py <https://github.com/verl-project/verl/blob/main/verl/utils/reward_score/gsm8k.py>`_.
 
 **Training Script**
 

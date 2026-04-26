@@ -15,6 +15,75 @@
 
 from verl.utils.import_utils import deprecated
 
+_GSM8K_DATA_SOURCE = "openai/gsm8k"
+_GSM8K_PREPROCESS_CMD = "python3 examples/data_preprocess/gsm8k.py --local_save_dir ~/data/gsm8k"
+
+_SUPPORTED_REWARD_DATA_SOURCES = {
+    _GSM8K_DATA_SOURCE: "GSM8K rule reward",
+    "lighteval/MATH": "MATH rule reward",
+    "DigitalLearningGmbH/MATH-lighteval": "MATH rule reward",
+    "HuggingFaceH4/MATH-500": "MATH rule reward",
+    "math_dapo": "DAPO math rule reward",
+    "math": "DAPO math rule reward",
+    "math_dapo_reasoning": "DAPO math rule reward",
+    "aime*": "AIME-style math rule reward",
+    "numina_aops_forum": "Prime math reward",
+    "numina_synthetic_math": "Prime math reward",
+    "numina_amc_aime": "Prime math reward",
+    "numina_synthetic_amc": "Prime math reward",
+    "numina_cn_k12": "Prime math reward",
+    "numina_olympiads": "Prime math reward",
+    "codecontests": "Code reward",
+    "apps": "Code reward",
+    "codeforces": "Code reward",
+    "taco": "Code reward",
+    "hiyouga/geometry3k": "Geo3K rule reward",
+    "searchR1_nq": "SearchR1 QA reward",
+    "searchR1_triviaqa": "SearchR1 QA reward",
+    "searchR1_popqa": "SearchR1 QA reward",
+    "searchR1_hotpotqa": "SearchR1 QA reward",
+    "searchR1_2wikimultihopqa": "SearchR1 QA reward",
+    "searchR1_musique": "SearchR1 QA reward",
+    "searchR1_bamboogle": "SearchR1 QA reward",
+}
+
+
+def _format_supported_data_sources() -> str:
+    return ", ".join(sorted(_SUPPORTED_REWARD_DATA_SOURCES))
+
+
+def _looks_like_gsm8k_or_path(data_source) -> bool:
+    if data_source is None:
+        return True
+    data_source_str = str(data_source).strip()
+    if not data_source_str:
+        return True
+    normalized = data_source_str.lower()
+    return "gsm8k" in normalized or data_source_str.startswith(("/", "./", "../", "~")) or "\\" in data_source_str
+
+
+def _raise_unsupported_data_source(data_source):
+    message_parts = [
+        f"Reward function is not implemented for data_source={data_source!r}.",
+        f"Supported built-in reward data sources include: {_format_supported_data_sources()}.",
+    ]
+    if _looks_like_gsm8k_or_path(data_source):
+        message_parts.append(
+            "If you are running the GSM8K quickstart, regenerate the parquet files with "
+            f"`{_GSM8K_PREPROCESS_CMD}` and keep the emitted "
+            f"`data_source` value as `{_GSM8K_DATA_SOURCE}`. Do not replace it with a local dataset path "
+            "or mirror name."
+        )
+    message_parts.append(
+        "For custom datasets or custom data_source values, configure "
+        "`reward.custom_reward_function.path` and `reward.custom_reward_function.name`."
+    )
+    raise NotImplementedError(" ".join(message_parts))
+
+
+def _is_aime_data_source(data_source) -> bool:
+    return isinstance(data_source, str) and data_source.startswith("aime")
+
 
 def default_compute_score(
     data_source,
@@ -41,7 +110,7 @@ def default_compute_score(
     Raises:
         NotImplementedError: If the reward function is not implemented for the given data source.
     """
-    if data_source == "openai/gsm8k":
+    if data_source == _GSM8K_DATA_SOURCE:
         from . import gsm8k
 
         res = gsm8k.compute_score(solution_str, ground_truth)
@@ -56,7 +125,7 @@ def default_compute_score(
 
         # from . import math_verify
         # res = math_verify.compute_score(solution_str, ground_truth)
-    elif data_source in ["math_dapo", "math", "math_dapo_reasoning"] or data_source.startswith("aime"):
+    elif data_source in ["math_dapo", "math", "math_dapo_reasoning"] or _is_aime_data_source(data_source):
         from . import math_dapo
 
         res = math_dapo.compute_score(solution_str, ground_truth)
@@ -104,7 +173,7 @@ def default_compute_score(
         res = search_r1_like_qa_em.compute_score(solution_str, ground_truth)
 
     else:
-        raise NotImplementedError(f"Reward function is not implemented for {data_source=}")
+        _raise_unsupported_data_source(data_source)
 
     if isinstance(res, dict):
         return res

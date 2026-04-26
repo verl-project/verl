@@ -57,7 +57,7 @@ class DAPORewardManager(RewardManagerBase):
         valid_response_length = data_item.batch["attention_mask"][-response_length:].sum()
         valid_response_ids = response_ids[:valid_response_length]
 
-        data_source = data_item.non_tensor_batch["data_source"]
+        data_source = self._require_data_source(data_item)
         ground_truth = data_item.non_tensor_batch["reward_model"]["ground_truth"]
         extra_info = data_item.non_tensor_batch.get("extra_info", {})
 

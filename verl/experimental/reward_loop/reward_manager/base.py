@@ -53,6 +53,36 @@ class RewardManagerBase(ABC):
             return
         cls._class_initialized = True
 
+    def _require_data_source(self, data_item: Any) -> Any:
+        non_tensor_batch = data_item.non_tensor_batch or {}
+        if "data_source" not in non_tensor_batch:
+            self._raise_data_source_error("missing", data_item)
+
+        data_source = non_tensor_batch["data_source"]
+        if data_source is None or (isinstance(data_source, str) and data_source.strip() == ""):
+            self._raise_data_source_error("empty", data_item)
+        return data_source
+
+    def _raise_data_source_error(self, reason: str, data_item: Any):
+        non_tensor_batch = data_item.non_tensor_batch or {}
+        extra_info = non_tensor_batch.get("extra_info", {})
+        context = []
+        if isinstance(extra_info, dict):
+            for key in ("split", "index"):
+                if key in extra_info:
+                    context.append(f"{key}={extra_info[key]!r}")
+
+        message = (
+            f"Reward data source is {reason}. The non-tensor batch field `data_source` selects the rule-based "
+            "reward function. For the GSM8K quickstart, regenerate the parquet files with "
+            "`python3 examples/data_preprocess/gsm8k.py --local_save_dir ~/data/gsm8k` and keep "
+            "`data_source` as `openai/gsm8k`. For custom datasets, configure "
+            "`reward.custom_reward_function.path` and `reward.custom_reward_function.name`."
+        )
+        if context:
+            message += f" Sample context: {', '.join(context)}."
+        raise ValueError(message)
+
     @abstractmethod
     async def run_single(self, data: DataProto):
         raise NotImplementedError

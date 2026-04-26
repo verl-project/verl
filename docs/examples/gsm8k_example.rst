@@ -48,6 +48,14 @@ Step 1: Prepare dataset
    cd examples/data_preprocess
    python3 gsm8k.py --local_save_dir ~/data/gsm8k
 
+.. note::
+
+   The generated parquet uses ``data_source = "openai/gsm8k"`` to select the
+   built-in GSM8K reward function. Keep this value even if the raw dataset was
+   downloaded from a local path or mirror. If you use another source name,
+   configure ``reward.custom_reward_function.path`` and
+   ``reward.custom_reward_function.name``.
+
 Step 2: Download Model
 ----------------------
 

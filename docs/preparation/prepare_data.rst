@@ -86,6 +86,15 @@ In the ``make_map_fn``, each data field should consist of the following
 5. ``extra_info``: Record some information of the current prompt. Not
    use for now.
 
+.. note::
+
+   ``data_source`` is a logical reward-function key, not necessarily the
+   physical dataset path. For the built-in GSM8K reward function, keep
+   ``data_source`` as ``openai/gsm8k`` even if the raw dataset was loaded from a
+   local directory or mirror. If you use a custom source name, configure
+   ``reward.custom_reward_function.path`` and
+   ``reward.custom_reward_function.name``.
+
 .. code:: python
 
    def extract_solution(solution_str):

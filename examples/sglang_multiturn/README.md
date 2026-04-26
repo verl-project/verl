@@ -13,6 +13,12 @@ python3 gsm8k_multiturn_w_tool.py
 
 This will download and preprocess the GSM8K dataset into ~/data/gsm8k/.
 
+The generated parquet keeps `data_source` as `openai/gsm8k`, which is the
+logical key used by the built-in GSM8K reward function. Keep that value even if
+the raw dataset comes from a local path or mirror. If you use another
+`data_source`, configure `reward.custom_reward_function.path` and
+`reward.custom_reward_function.name`.
+
 ### Step 2: Run Multi-Turn Rollout
 
 If you have 8 GPUs
