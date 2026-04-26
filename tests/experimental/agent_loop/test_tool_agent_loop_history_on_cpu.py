@@ -95,8 +95,9 @@ class FakeTokenizer:
 
 
 class FakeServerManager:
-    def __init__(self, response_texts: list[str]):
+    def __init__(self, response_texts: list[str], extra_fields: list[dict[str, Any]] | None = None):
         self.response_texts = list(response_texts)
+        self.extra_fields = list(extra_fields) if extra_fields is not None else None
         self.prompt_ids_history: list[list[int]] = []
 
     async def generate(
@@ -112,10 +113,15 @@ class FakeServerManager:
         self.prompt_ids_history.append(list(prompt_ids))
         response_text = self.response_texts.pop(0)
         token_ids = [ord(char) for char in response_text]
+        extra_fields = (
+            self.extra_fields.pop(0)
+            if self.extra_fields is not None
+            else {"global_steps": len(self.prompt_ids_history)}
+        )
         return TokenOutput(
             token_ids=token_ids,
             log_probs=[0.0] * len(token_ids),
-            extra_fields={"global_steps": len(self.prompt_ids_history)},
+            extra_fields=extra_fields,
         )
 
 
@@ -176,10 +182,14 @@ def _make_config(use_inference_chat_template: bool):
     )
 
 
-def _make_tool_agent_loop(use_inference_chat_template: bool, response_texts: list[str]):
+def _make_tool_agent_loop(
+    use_inference_chat_template: bool,
+    response_texts: list[str],
+    extra_fields: list[dict[str, Any]] | None = None,
+):
     config = _make_config(use_inference_chat_template)
     tokenizer = FakeTokenizer()
-    server_manager = FakeServerManager(response_texts)
+    server_manager = FakeServerManager(response_texts, extra_fields=extra_fields)
     loop = ToolAgentLoop(
         trainer_config=DictConfigWrap(config),
         server_manager=server_manager,
@@ -243,6 +253,24 @@ async def test_inference_chat_template_uses_generation_messages_without_previous
     assert output.extra_fields["use_inference_chat_template"] is True
     assert output.extra_fields["max_generation_prompt_length"] == len(server_manager.prompt_ids_history[1])
     assert raw_prompt == [{"role": "user", "content": "hello"}]
+
+
+@pytest.mark.asyncio
+async def test_multi_round_generation_keeps_max_global_steps():
+    first_response = 'visible answer<tool_call>{"name":"calculator","arguments":{"a":3}}</tool_call>'
+    second_response = "final response"
+    loop, _, _ = _make_tool_agent_loop(
+        use_inference_chat_template=True,
+        response_texts=[first_response, second_response],
+        extra_fields=[
+            {"max_global_steps": 7, "min_global_steps": 7},
+            {"max_global_steps": 3, "min_global_steps": 3},
+        ],
+    )
+
+    output = await loop.run({}, raw_prompt=[{"role": "user", "content": "hello"}])
+
+    assert output.extra_fields["max_global_steps"] == 7
 
 
 @pytest.mark.asyncio

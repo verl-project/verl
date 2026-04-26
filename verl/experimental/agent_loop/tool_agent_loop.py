@@ -283,8 +283,13 @@ class ToolAgentLoop(AgentLoopBase):
         elif output.extra_fields:
             # Multi-round calls, only update the maximum max_global_steps.
             max_global_steps = output.extra_fields.get("max_global_steps", None)
-            if max_global_steps:
-                agent_data.extra_fields["max_global_steps"] = max_global_steps
+            if max_global_steps is not None:
+                current_max_global_steps = agent_data.extra_fields.get("max_global_steps", None)
+                agent_data.extra_fields["max_global_steps"] = (
+                    max_global_steps
+                    if current_max_global_steps is None
+                    else max(current_max_global_steps, max_global_steps)
+                )
         self._record_generation_prompt_diagnostics(agent_data, generation_prompt_ids)
 
         agent_data.assistant_turns += 1
