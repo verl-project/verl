@@ -84,6 +84,7 @@ class HFModelConfig(BaseConfig):
         "local_hf_config_path",
         "local_tokenizer_path",
         "mtp",
+        "attn_implementation",
     }
 
     path: str = MISSING
@@ -92,7 +93,7 @@ class HFModelConfig(BaseConfig):
     local_hf_config_path: Optional[str] = None
     tokenizer_path: Optional[str] = None
     local_tokenizer_path: Optional[str] = None
-
+    attn_implementation: Optional[str] = None
     # model type, e.g., "language_model", "value_model", "diffusion_model"
     model_type: str = "language_model"
 
