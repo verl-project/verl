@@ -517,11 +517,13 @@ rollout_correction:
 
 - Set `actor_rollout_ref.rollout.calculate_log_probs: true`
 
-**Additional requirements for bypass mode:**
+**Synchronous PPO behavior:**
 
-- Set `actor_rollout_ref.actor.use_rollout_log_probs: true`
-- Set `actor_rollout_ref.actor.policy_loss.loss_mode: bypass_mode`
-- Set rollout correction config via `actor_rollout_ref.actor.policy_loss.rollout_correction`
+- No actor-side `policy_loss` override is required in the user config.
+- The trainer copies rollout-produced `rollout_log_probs` into `old_log_probs`.
+- The trainer wires `actor_rollout_ref.actor.policy_loss.loss_mode=bypass_mode` internally for the actor update.
+- The actor update still computes current actor log-probs for gradients.
+- This is not identical to decoupled PPO, where `old_log_probs` are recomputed by the actor before the update.
 
 **Theory:** See [rollout_corr_math.md §3.1.2](rollout_corr_math.md#312-bypass-mode-two-policies)
 
@@ -790,11 +792,22 @@ actor_rollout_ref:
     calculate_log_probs: true # Required!
 ```
 
-### Additional Configurations for Bypass Mode
+### Skipping Actor Old-Log-Prob Recomputation
 
-- Set `actor_rollout_ref.actor.use_rollout_log_probs: true`
-- Set `actor_rollout_ref.actor.policy_loss.loss_mode: bypass_mode`
-- Set rollout correction config via `actor_rollout_ref.actor.policy_loss.rollout_correction`
+To skip the trainer-side actor `compute_log_prob` pass, use bypass mode:
+
+```yaml
+algorithm:
+  rollout_correction:
+    bypass_mode: true
+    loss_type: ppo_clip
+
+actor_rollout_ref:
+  rollout:
+    calculate_log_probs: true
+```
+
+This copies rollout-produced `rollout_log_probs` into `old_log_probs`. It does not skip the actor update forward/backward pass, which still computes current actor log-probs for gradients.
 
 ### Metrics
 

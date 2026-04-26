@@ -1198,14 +1198,16 @@ class PPOTrainer:
         # - Decoupled mode: Recomputes old_log_probs as proximal anchor (3 policies: π_rollout, π_old, π_θ)
         #   Note: π_old computed once per data batch, serves as stable reference during mini-batch updates
         rollout_corr_config = self.config.algorithm.get("rollout_correction", None)
-        bypass_recomputing_logprobs = rollout_corr_config and rollout_corr_config.get("bypass_mode", False)
+        bypass_recomputing_logprobs = bool(rollout_corr_config and rollout_corr_config.get("bypass_mode", False))
+        metrics["trainer/old_log_prob_bypassed"] = int(bypass_recomputing_logprobs)
+        metrics["trainer/old_log_prob_recomputed"] = int(not bypass_recomputing_logprobs)
         if bypass_recomputing_logprobs:  # Use `rollout_log_probs`
             data = tq.kv_batch_get(
                 keys=batch.keys, partition_id=batch.partition_id, select_fields=["rollout_log_probs"]
             )
             data["old_log_probs"] = data.pop("rollout_log_probs")
             tq.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=data)
-            return
+            return batch
 
         # 1. compute log probs
         batch.extra_info.update(

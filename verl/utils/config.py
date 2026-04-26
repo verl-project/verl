@@ -71,6 +71,19 @@ def update_dict_with_config(dictionary: dict, config: DictConfig):
             dictionary[key] = getattr(config, key)
 
 
+def _validate_rollout_log_probs_for_bypass(config: DictConfig) -> None:
+    rollout_corr_config = config.algorithm.get("rollout_correction", None)
+    if not rollout_corr_config or not rollout_corr_config.get("bypass_mode", False):
+        return
+
+    if not config.actor_rollout_ref.rollout.calculate_log_probs:
+        raise ValueError(
+            "algorithm.rollout_correction.bypass_mode=true requires "
+            "actor_rollout_ref.rollout.calculate_log_probs=true because old_log_probs "
+            "are sourced from rollout_log_probs and actor old-log-prob recomputation is skipped."
+        )
+
+
 def validate_config(
     config: DictConfig,
     use_reference_policy: bool,
@@ -168,6 +181,8 @@ def validate_config(
 
     if config.algorithm.get("use_kl_in_reward", False) and config.actor_rollout_ref.actor.use_kl_loss:
         print("NOTICE: You have both enabled in-reward kl and kl loss.")
+
+    _validate_rollout_log_probs_for_bypass(config)
 
     # critic
     if use_critic:
