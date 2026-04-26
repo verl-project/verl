@@ -1,3 +1,8 @@
+import transformers.utils.import_utils as import_utils
+import_utils.is_flash_attn_2_available = lambda: False
+import_utils.is_flash_attn_available = lambda: False
+import os
+os.environ["VLLM_ATTENTION_BACKEND"] = "XFORMERS"
 # Copyright 2024 Bytedance Ltd. and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");

@@ -1018,7 +1018,7 @@ def merged_lora_context(actor, backup_adapters=False):
 
 def fsdp2_sharded_save_to_cpu(
     model: torch.nn.Module,
-) -> tuple[dict[str, tuple[torch.Tensor, DTensorSpec]], DTensorSpec]:
+) -> tuple[dict[str, tuple[torch.Tensor, object]], object]:
     """
     Sharded Save: Each process only saves the local DTensor shard from its own GPU to CPU memory.
 
@@ -1027,8 +1027,8 @@ def fsdp2_sharded_save_to_cpu(
 
     Returns:
         cpu_sharded_state: Dictionary of CPU shards for the current process.
-                          Key = parameter name, Value = (CPU shard tensor, original DTensorSpec)
-        global_spec: DTensorSpec of the first parameter (used to verify global rules during loading)
+                          Key = parameter name, Value = (CPU shard tensor, original object)
+        global_spec: object of the first parameter (used to verify global rules during loading)
     """
     cpu_sharded_state = {}
     global_spec = None  # Record global sharding rules (all parameters follow the same spec)
@@ -1044,14 +1044,14 @@ def fsdp2_sharded_save_to_cpu(
         # Record global sharding rules (take spec of the first DTensor to ensure consistency)
         if global_spec is None:
             global_spec = param._spec
-            assert hasattr(global_spec, "device_mesh"), "DTensorSpec must contain 'device_mesh' attribute"
-            assert hasattr(global_spec, "placements"), "DTensorSpec must contain 'placements' attribute"
+            assert hasattr(global_spec, "device_mesh"), "object must contain 'device_mesh' attribute"
+            assert hasattr(global_spec, "placements"), "object must contain 'placements' attribute"
 
         # 1. Extract local shard data from the current GPU (_local_tensor)
         local_gpu_tensor = param._local_tensor  # Local shard attribute defined in your DTensor class
         # 2. Move to CPU memory and detach from computation graph
         local_cpu_tensor = local_gpu_tensor.detach().cpu()
-        # 3. Save CPU shard + original DTensorSpec (ensure sharding rules remain unchanged)
+        # 3. Save CPU shard + original object (ensure sharding rules remain unchanged)
         cpu_sharded_state[param_name] = (local_cpu_tensor, param._spec)
 
     assert global_spec is not None, "No DTensor-type parameters found in the model. FSDP2 sharding may not be enabled."
@@ -1060,8 +1060,8 @@ def fsdp2_sharded_save_to_cpu(
 
 def fsdp2_sharded_load_from_cpu(
     model: torch.nn.Module,
-    cpu_sharded_state: dict[str, tuple[torch.Tensor, Optional[DTensorSpec]]],
-    target_spec: DTensorSpec,
+    cpu_sharded_state: dict[str, tuple[torch.Tensor, Optional[object]]],
+    target_spec: object,
 ) -> None:
     """
     Sharded Load: Each process only loads the CPU shard it is responsible for to the GPU,
@@ -1071,7 +1071,7 @@ def fsdp2_sharded_load_from_cpu(
         model: FSDP2 model to be restored (must have the same structure as when saved)
         cpu_sharded_state: Shard data read from CPU memory by the current process
                           (from fsdp2_sharded_save_to_cpu)
-        target_spec: Global DTensorSpec from saving (used to verify sharding rule consistency)
+        target_spec: Global object from saving (used to verify sharding rule consistency)
     """
     # Verify device_mesh consistency (core: ensure loaded shards map to original GPUs)
     current_device_mesh = None
@@ -1095,7 +1095,7 @@ def fsdp2_sharded_load_from_cpu(
         # Handle different parameter types: DTensor sharded parameters vs. regular parameters
         if isinstance(param, DTensor):
             # 1. Verify sharding rule consistency (placements must match original Spec)
-            assert saved_spec is not None, f"DTensorSpec missing in saved state for parameter {param_name}"
+            assert saved_spec is not None, f"object missing in saved state for parameter {param_name}"
             assert saved_spec.placements == target_spec.placements, (
                 f"Sharding strategy mismatch for parameter {param_name} (conflicts with global rules)!"
             )
