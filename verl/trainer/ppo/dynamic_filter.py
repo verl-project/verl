@@ -71,6 +71,18 @@ def validate_filter_groups_config(filter_groups_config: Any, adv_estimator: Any)
         raise ValueError("algorithm.filter_groups is not supported with REMAX in the first implementation.")
 
 
+def profile_state_after_dynamic_filter_skip(
+    *,
+    completed_step_profile: bool,
+    next_step_profile: bool,
+    retry_step_profile: bool,
+    profile_continuous_steps: bool,
+) -> tuple[bool, bool]:
+    """Return profiler state for retrying the same global step after a backfill skip."""
+    profile_still_active = profile_continuous_steps and completed_step_profile and next_step_profile
+    return profile_still_active, retry_step_profile
+
+
 @dataclass
 class DynamicFilterResult:
     batch: Optional[DataProto]

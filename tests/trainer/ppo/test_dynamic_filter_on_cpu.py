@@ -30,6 +30,7 @@ try:
         DynamicFilterState,
         apply_dynamic_filter,
         get_reward_extra_infos_from_batch,
+        profile_state_after_dynamic_filter_skip,
         resolve_filter_metric,
         validate_filter_groups_config,
     )
@@ -46,6 +47,7 @@ except ModuleNotFoundError:
     DynamicFilterState = dynamic_filter.DynamicFilterState
     apply_dynamic_filter = dynamic_filter.apply_dynamic_filter
     get_reward_extra_infos_from_batch = dynamic_filter.get_reward_extra_infos_from_batch
+    profile_state_after_dynamic_filter_skip = dynamic_filter.profile_state_after_dynamic_filter_skip
     resolve_filter_metric = dynamic_filter.resolve_filter_metric
     validate_filter_groups_config = dynamic_filter.validate_filter_groups_config
 
@@ -266,3 +268,27 @@ def test_filter_groups_config_validation_rejects_remax():
 
     with pytest.raises(ValueError, match="not supported with REMAX"):
         validate_filter_groups_config(config.algorithm.filter_groups, "remax")
+
+
+def test_profile_state_after_dynamic_filter_skip_preserves_active_continuous_profile():
+    prev_step_profile, curr_step_profile = profile_state_after_dynamic_filter_skip(
+        completed_step_profile=True,
+        next_step_profile=True,
+        retry_step_profile=True,
+        profile_continuous_steps=True,
+    )
+
+    assert prev_step_profile is True
+    assert curr_step_profile is True
+
+
+def test_profile_state_after_dynamic_filter_skip_restarts_when_profile_was_stopped():
+    prev_step_profile, curr_step_profile = profile_state_after_dynamic_filter_skip(
+        completed_step_profile=True,
+        next_step_profile=False,
+        retry_step_profile=True,
+        profile_continuous_steps=True,
+    )
+
+    assert prev_step_profile is False
+    assert curr_step_profile is True

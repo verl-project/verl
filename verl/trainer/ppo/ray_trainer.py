@@ -47,6 +47,7 @@ from verl.trainer.ppo.dynamic_filter import (
     apply_dynamic_filter,
     get_reward_extra_infos_from_batch,
     is_filter_groups_enabled,
+    profile_state_after_dynamic_filter_skip,
     validate_filter_groups_config,
 )
 from verl.trainer.ppo.metric_utils import (
@@ -1662,11 +1663,16 @@ class RayPPOTrainer:
                 if dynamic_filter_skip_step:
                     assert self.dynamic_filter_state is not None
                     self.dynamic_filter_state.add_timing(timing_raw)
-                    prev_step_profile = False
-                    curr_step_profile = (
+                    retry_step_profile = (
                         self.global_steps in self.config.global_profiler.steps
                         if self.config.global_profiler.steps is not None
                         else False
+                    )
+                    prev_step_profile, curr_step_profile = profile_state_after_dynamic_filter_skip(
+                        completed_step_profile=prev_step_profile,
+                        next_step_profile=curr_step_profile,
+                        retry_step_profile=retry_step_profile,
+                        profile_continuous_steps=self.config.global_profiler.profile_continuous_steps,
                     )
                     continue
 
