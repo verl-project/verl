@@ -76,7 +76,10 @@ from verl.trainer.ppo.metric_utils import (
 )
 from verl.trainer.ppo.padding_utils import upsample_batch_to_divisible_size
 from verl.trainer.ppo.ray_trainer import apply_kl_penalty, compute_advantage
-from verl.trainer.ppo.rollout_corr_helper import compute_rollout_correction_and_add_to_batch
+from verl.trainer.ppo.rollout_corr_helper import (
+    apply_bypass_mode_to_tq_batch,
+    compute_rollout_correction_and_add_to_batch,
+)
 from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_teacher_policy
 from verl.utils import hf_processor, hf_tokenizer
 from verl.utils import tensordict_utils as tu
@@ -1202,12 +1205,7 @@ class PPOTrainer:
         metrics["trainer/old_log_prob_bypassed"] = int(bypass_recomputing_logprobs)
         metrics["trainer/old_log_prob_recomputed"] = int(not bypass_recomputing_logprobs)
         if bypass_recomputing_logprobs:  # Use `rollout_log_probs`
-            data = tq.kv_batch_get(
-                keys=batch.keys, partition_id=batch.partition_id, select_fields=["rollout_log_probs"]
-            )
-            data["old_log_probs"] = data.pop("rollout_log_probs")
-            tq.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=data)
-            return batch
+            return apply_bypass_mode_to_tq_batch(batch, tq)
 
         # 1. compute log probs
         batch.extra_info.update(

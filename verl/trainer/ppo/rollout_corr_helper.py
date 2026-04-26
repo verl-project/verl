@@ -1135,3 +1135,10 @@ def apply_bypass_mode(
         policy_loss_config["rollout_correction"] = rollout_corr_config
         # Always use bypass_mode loss function which handles both loss_types
         policy_loss_config["loss_mode"] = "bypass_mode"
+
+
+def apply_bypass_mode_to_tq_batch(batch: Any, tq_module: Any) -> Any:
+    """Set old_log_probs from rollout_log_probs in TransferQueue and return updated metadata."""
+    data = tq_module.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=["rollout_log_probs"])
+    data["old_log_probs"] = data.pop("rollout_log_probs")
+    return tq_module.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=data)

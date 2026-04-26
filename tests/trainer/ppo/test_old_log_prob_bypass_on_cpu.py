@@ -12,12 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 from omegaconf import OmegaConf
+from tensordict import TensorDict
 
 from verl import DataProto
-from verl.trainer.ppo.rollout_corr_helper import apply_bypass_mode
+from verl.trainer.ppo.rollout_corr_helper import apply_bypass_mode, apply_bypass_mode_to_tq_batch
 from verl.utils import config as config_utils
 from verl.utils.config import _validate_rollout_log_probs_for_bypass, validate_config
 
@@ -64,6 +67,39 @@ def test_apply_bypass_mode_requires_rollout_log_probs():
             rollout_corr_config=OmegaConf.create({"bypass_mode": True}),
             policy_loss_config=policy_loss_config,
         )
+
+
+def test_tq_bypass_returns_updated_kv_batch_meta():
+    rollout_log_probs = torch.tensor([[-1.0, -2.0]])
+    input_batch = SimpleNamespace(keys=["sample-0"], partition_id="train")
+    updated_batch = SimpleNamespace(
+        keys=input_batch.keys,
+        partition_id=input_batch.partition_id,
+        fields=["rollout_log_probs", "old_log_probs"],
+    )
+    put_calls = []
+
+    class FakeTQ:
+        @staticmethod
+        def kv_batch_get(keys, partition_id, select_fields):
+            assert keys == input_batch.keys
+            assert partition_id == input_batch.partition_id
+            assert select_fields == ["rollout_log_probs"]
+            return TensorDict({"rollout_log_probs": rollout_log_probs.clone()}, batch_size=[1])
+
+        @staticmethod
+        def kv_batch_put(keys, partition_id, fields):
+            assert keys == input_batch.keys
+            assert partition_id == input_batch.partition_id
+            assert "rollout_log_probs" not in fields
+            assert torch.equal(fields["old_log_probs"], rollout_log_probs)
+            put_calls.append(fields.clone())
+            return updated_batch
+
+    result = apply_bypass_mode_to_tq_batch(input_batch, FakeTQ)
+
+    assert result is updated_batch
+    assert len(put_calls) == 1
 
 
 def test_validate_bypass_mode_requires_rollout_log_probs():
