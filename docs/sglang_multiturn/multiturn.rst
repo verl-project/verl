@@ -302,6 +302,17 @@ We are still evaluating the impact of these issues. If you experience context le
 
 ``actor_rollout_ref.rollout.multi_turn.use_inference_chat_template = True``
 
+When using the experimental ``ToolAgentLoop``, this option controls the prompt
+ids sent to the rollout server for later turns. The loop keeps a structured
+generation message history and renders that history with the model chat
+template when this option is enabled. The recorded training trajectory remains
+the flat token sequence of generated assistant tokens and tool observation
+tokens, with ``response_mask`` set to ``1`` for assistant-generated tokens and
+``0`` for tool observations. Exact training where later turns cannot attend to
+previous hidden reasoning while those reasoning tokens are still trained would
+require a turn-segmented training representation or an equivalent attention-mask
+design.
+
 GSM8K Multi-turn Training Performance  
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

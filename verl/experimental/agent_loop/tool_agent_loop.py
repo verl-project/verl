@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import copy
 import json
 import logging
 import os
@@ -60,6 +61,7 @@ class AgentData:
         tools_kwargs: dict[str, Any],
     ):
         self.messages = messages
+        self.generation_messages = list(messages)
         self.image_data = image_data
         self.video_data = video_data
         self.metrics = metrics
@@ -73,6 +75,7 @@ class AgentData:
         self.response_logprobs: list[float] = []
         self.turn_scores: list[float] = []
         self.tool_rewards: list[float] = []
+        self.seen_output_extra_fields = False
         self.user_turns = 0
         self.assistant_turns = 0
 
@@ -195,14 +198,74 @@ class ToolAgentLoop(AgentLoopBase):
         agent_data.prompt_ids = prompt_ids
         return AgentState.GENERATING
 
+    async def _get_generation_prompt_ids(self, agent_data: AgentData) -> list[int]:
+        """Return the prompt ids that should be sent to the rollout server for this turn."""
+        if not self.rollout_config.multi_turn.use_inference_chat_template:
+            return agent_data.prompt_ids
+
+        schemas = getattr(agent_data, "_active_tool_schemas", self.tool_schemas)
+        return await self.apply_chat_template(
+            agent_data.generation_messages,
+            tools=schemas,
+            images=agent_data.image_data,
+            videos=agent_data.video_data,
+        )
+
+    def _record_generation_prompt_diagnostics(self, agent_data: AgentData, generation_prompt_ids: list[int]) -> None:
+        generation_prompt_length = len(generation_prompt_ids)
+        flat_token_history_length = len(agent_data.prompt_ids)
+        agent_data.extra_fields["use_inference_chat_template"] = (
+            self.rollout_config.multi_turn.use_inference_chat_template
+        )
+        agent_data.extra_fields["last_generation_prompt_length"] = generation_prompt_length
+        agent_data.extra_fields["max_generation_prompt_length"] = max(
+            agent_data.extra_fields.get("max_generation_prompt_length", 0),
+            generation_prompt_length,
+        )
+        agent_data.extra_fields["flat_token_history_length"] = flat_token_history_length
+        agent_data.extra_fields["generation_vs_flat_prompt_delta"] = (
+            generation_prompt_length - flat_token_history_length
+        )
+
+    def _build_assistant_tool_calls(
+        self, agent_data: AgentData, tool_calls: list[FunctionCall]
+    ) -> list[dict[str, Any]]:
+        """Convert parsed tool calls to the OpenAI-style shape expected by chat templates."""
+        formatted_tool_calls = []
+        for idx, tool_call in enumerate(tool_calls):
+            try:
+                arguments = json.loads(tool_call.arguments)
+            except (json.JSONDecodeError, TypeError):
+                arguments = tool_call.arguments
+            formatted_tool_calls.append(
+                {
+                    "id": f"call_{agent_data.request_id}_{agent_data.assistant_turns}_{idx}",
+                    "type": "function",
+                    "function": {
+                        "name": tool_call.name,
+                        "arguments": arguments,
+                    },
+                }
+            )
+        return formatted_tool_calls
+
+    def _append_generation_assistant_message(
+        self, agent_data: AgentData, content: str, tool_calls: list[FunctionCall]
+    ) -> None:
+        message: dict[str, Any] = {"role": "assistant", "content": content}
+        if tool_calls:
+            message["tool_calls"] = self._build_assistant_tool_calls(agent_data, tool_calls)
+        agent_data.generation_messages.append(message)
+
     async def _handle_generating_state(
         self, agent_data: AgentData, sampling_params: dict[str, Any], ignore_termination: bool = False
     ) -> AgentState:
         """Handle the generating state: generate model response and check for tool calls."""
+        generation_prompt_ids = await self._get_generation_prompt_ids(agent_data)
         with simple_timer("generate_sequences", agent_data.metrics):
             output: TokenOutput = await self.server_manager.generate(
                 request_id=agent_data.request_id,
-                prompt_ids=agent_data.prompt_ids,
+                prompt_ids=generation_prompt_ids,
                 sampling_params=sampling_params,
                 image_data=agent_data.image_data,
                 video_data=agent_data.video_data,
@@ -214,13 +277,15 @@ class ToolAgentLoop(AgentLoopBase):
         else:
             agent_data.metrics["num_preempted"] += output.num_preempted if output.num_preempted is not None else 0
 
-        if not agent_data.extra_fields:
+        if output.extra_fields and not agent_data.seen_output_extra_fields:
             agent_data.extra_fields.update(output.extra_fields)
-        else:
+            agent_data.seen_output_extra_fields = True
+        elif output.extra_fields:
             # Multi-round calls, only update the maximum max_global_steps.
             max_global_steps = output.extra_fields.get("max_global_steps", None)
             if max_global_steps:
                 agent_data.extra_fields["max_global_steps"] = max_global_steps
+        self._record_generation_prompt_diagnostics(agent_data, generation_prompt_ids)
 
         agent_data.assistant_turns += 1
         agent_data.response_ids = output.token_ids
@@ -243,7 +308,8 @@ class ToolAgentLoop(AgentLoopBase):
         # Extract tool calls (use per-sample tools if routed)
         active_tools = getattr(agent_data, "_active_tools", self.tools)
         tools = [tool.tool_schema for tool in active_tools.values()]
-        _, agent_data.tool_calls = await self.tool_parser.extract_tool_calls(agent_data.response_ids, tools)
+        content, agent_data.tool_calls = await self.tool_parser.extract_tool_calls(agent_data.response_ids, tools)
+        self._append_generation_assistant_message(agent_data, content, agent_data.tool_calls)
 
         if agent_data.tool_calls:
             return AgentState.PROCESSING_TOOLS
@@ -315,6 +381,7 @@ class ToolAgentLoop(AgentLoopBase):
                 agent_data.tool_rewards.append(tool_reward)
 
         agent_data.messages.extend(add_messages)
+        agent_data.generation_messages.extend(copy.deepcopy(add_messages))
 
         if self.tool_parser_name == "gpt-oss":
             logger.info("manually format tool responses for gpt-oss")

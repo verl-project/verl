@@ -181,6 +181,26 @@ This inconsistency is not a big problem for serving/agent system, but is critica
 It causes the trajectory deviate from the policy model distribution. We have observed that apply_chat_template
 to the final chat history messages make PPO training not even converged in single-turn.
 
+Reasoning model history in tool agent loops
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+For reasoning models, users may want later tool-agent turns to see previous
+assistant answers without previous hidden reasoning content. ``ToolAgentLoop``
+uses the flat token history by default, so rollout generation and training
+log-prob recomputation share the same causal context. This keeps the strict
+token-in/token-out behavior described above, but it can make long reasoning
+traces accumulate in later prompts.
+
+To match production-style chat-template behavior for later rollout turns, set
+``actor_rollout_ref.rollout.multi_turn.use_inference_chat_template=True``.
+With this option, ``ToolAgentLoop`` renders a structured generation message
+history through the model chat template for the prompt sent to the rollout
+server. The returned training trajectory remains the flat token sequence with
+``response_mask`` marking assistant-generated tokens as ``1`` and tool
+observations as ``0``. Exact training where later turns cannot attend to
+previous hidden reasoning while those reasoning tokens are still trained would
+require turn-segmented training or an equivalent attention-mask design.
+
 vLLM
 ^^^^
 

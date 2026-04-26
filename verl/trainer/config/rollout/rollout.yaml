@@ -188,7 +188,9 @@ multi_turn:
   # truncate side of tool response: left, middle, right
   tool_response_truncate_side: middle
 
-  # - When set to True, the model's default chat template is used for multi-turn rollout, which typically matches production behavior.
+  # - When set to True, the model's default chat template is used for multi-turn rollout,
+  #   including ToolAgentLoop generation prompts. This typically matches production behavior
+  #   and may omit previous hidden reasoning content for reasoning-model templates.
   # - When set to False, the token ids recorded for training are used instead; unlike the default chat template, these always include the model's full output,
   #   which may contain additional content such as reasoning content. This maintains the consistency between training and rollout, but it will lead to longer prompts.
   use_inference_chat_template: False

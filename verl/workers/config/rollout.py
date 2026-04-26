@@ -81,6 +81,8 @@ class MultiTurnConfig(BaseConfig):
     max_parallel_calls: int = 1
     max_tool_response_length: int = 256
     tool_response_truncate_side: str = "middle"
+    # Use rendered inference chat history for multi-turn generation prompts.
+    # Default keeps flat training-token history as generation context.
     use_inference_chat_template: bool = False
     tokenization_sanity_check_mode: str = "strict"
     format: str = "hermes"
