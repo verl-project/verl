@@ -20,8 +20,10 @@ import pytest
 import torch
 
 import verl.trainer.ppo.core_algos
+import verl.utils.torch_functional as verl_F
 from verl.trainer.ppo.core_algos import (
     compute_gae_advantage_return,
+    compute_gdpo_outcome_advantage,
     compute_grpo_outcome_advantage,
     compute_grpo_vectorized_outcome_advantage,
     compute_rloo_outcome_advantage,
@@ -218,6 +220,164 @@ def _rand_mask(batch_size: int, seq_len: int) -> torch.Tensor:
     if len(rows_without_one) > 0:
         mask[rows_without_one, -1] = 1.0
     return mask
+
+
+def _make_gdpo_inputs(
+    component_rewards: dict[str, object],
+    response_lengths: list[int],
+    response_len: int = 4,
+    prompt_len: int = 2,
+) -> tuple[torch.Tensor, torch.Tensor, dict, dict]:
+    batch_size = len(response_lengths)
+    response_mask = torch.zeros(batch_size, response_len, dtype=torch.float32)
+    for row, length in enumerate(response_lengths):
+        response_mask[row, :length] = 1.0
+
+    token_level_rewards = torch.zeros(batch_size, response_len, dtype=torch.float32)
+    batch = {
+        "prompts": torch.ones(batch_size, prompt_len, dtype=torch.long),
+        "attention_mask": torch.cat(
+            [torch.ones(batch_size, prompt_len, dtype=torch.long), response_mask.to(torch.long)], dim=1
+        ),
+    }
+    non_tensor_batch = {key: np.asarray(value) for key, value in component_rewards.items()}
+    return token_level_rewards, response_mask, non_tensor_batch, batch
+
+
+def _manual_gdpo_advantage(
+    component_rewards: dict[str, object],
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    response_lengths: list[int],
+    weights: list[float] | None = None,
+    epsilon: float = 1e-6,
+) -> torch.Tensor:
+    response_lengths_tensor = torch.tensor(response_lengths, dtype=torch.long)
+    aggregate = torch.zeros_like(response_mask, dtype=torch.float32)
+    if weights is None:
+        weights = [1.0] * len(component_rewards)
+
+    for reward_weight, values in zip(weights, component_rewards.values(), strict=True):
+        scores = torch.tensor(np.asarray(values, dtype=np.float32), dtype=torch.float32)
+        scores = torch.where(response_lengths_tensor > 0, scores, torch.zeros_like(scores))
+        normalized_scores = torch.empty_like(scores)
+        for group_id in np.unique(index):
+            group_mask = torch.tensor(index == group_id, dtype=torch.bool)
+            group_scores = scores[group_mask]
+            if group_scores.numel() == 1:
+                group_mean = torch.tensor(0.0)
+                group_std = torch.tensor(1.0)
+            else:
+                group_mean = torch.mean(group_scores)
+                group_std = torch.std(group_scores)
+            normalized_scores[group_mask] = (scores[group_mask] - group_mean) / (group_std + epsilon)
+        aggregate += reward_weight * normalized_scores.unsqueeze(-1) * response_mask
+
+    return verl_F.masked_whiten(aggregate, response_mask) * response_mask
+
+
+def test_gdpo_supports_three_reward_components_with_weights():
+    component_rewards = {
+        "format_reward": [0.0, 1.0, 0.5, 1.5],
+        "accuracy_reward": [1.0, 0.0, 3.0, 1.0],
+        "length_reward": [-1.0, 2.0, 0.0, 1.0],
+    }
+    response_lengths = [3, 2, 4, 1]
+    index = np.array(["prompt-a", "prompt-a", "prompt-b", "prompt-b"], dtype=object)
+    weights = [1.0, 0.5, -0.25]
+    token_level_rewards, response_mask, non_tensor_batch, batch = _make_gdpo_inputs(
+        component_rewards, response_lengths
+    )
+
+    advantages, returns = compute_gdpo_outcome_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+        config={"gdpo_reward_keys": list(component_rewards), "gdpo_reward_weights": weights},
+        non_tensor_batch=non_tensor_batch,
+        batch=batch,
+    )
+
+    expected = _manual_gdpo_advantage(component_rewards, response_mask, index, response_lengths, weights)
+    assert torch.allclose(advantages, expected, rtol=1e-5, atol=1e-6)
+    assert torch.equal(returns, advantages)
+
+
+def test_gdpo_fully_padded_response_does_not_affect_group_statistics():
+    component_rewards = {"accuracy_reward": [1.0, 1000.0, 0.0, 2.0]}
+    response_lengths = [2, 0, 2, 2]
+    index = np.array(["prompt-a", "prompt-a", "prompt-b", "prompt-b"], dtype=object)
+    token_level_rewards, response_mask, non_tensor_batch, batch = _make_gdpo_inputs(
+        component_rewards, response_lengths
+    )
+
+    advantages, _ = compute_gdpo_outcome_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+        config={"gdpo_reward_keys": ["accuracy_reward"]},
+        non_tensor_batch=non_tensor_batch,
+        batch=batch,
+    )
+
+    expected = _manual_gdpo_advantage(component_rewards, response_mask, index, response_lengths)
+    assert torch.allclose(advantages, expected, rtol=1e-5, atol=1e-6)
+    assert torch.equal(advantages[1], torch.zeros_like(advantages[1]))
+
+
+def test_gdpo_missing_reward_key_raises_clear_error():
+    token_level_rewards, response_mask, non_tensor_batch, batch = _make_gdpo_inputs(
+        {"format_reward": [0.0, 1.0]}, [1, 1]
+    )
+
+    with pytest.raises(KeyError, match="GDPO reward key 'accuracy_reward' not found"):
+        compute_gdpo_outcome_advantage(
+            token_level_rewards=token_level_rewards,
+            response_mask=response_mask,
+            index=np.array([0, 0]),
+            config={"gdpo_reward_keys": ["format_reward", "accuracy_reward"]},
+            non_tensor_batch=non_tensor_batch,
+            batch=batch,
+        )
+
+
+def test_gdpo_reward_weight_length_mismatch_raises_clear_error():
+    component_rewards = {"format_reward": [0.0, 1.0], "accuracy_reward": [1.0, 0.0]}
+    token_level_rewards, response_mask, non_tensor_batch, batch = _make_gdpo_inputs(component_rewards, [1, 1])
+
+    with pytest.raises(ValueError, match="gdpo_reward_weights' length must match"):
+        compute_gdpo_outcome_advantage(
+            token_level_rewards=token_level_rewards,
+            response_mask=response_mask,
+            index=np.array([0, 0]),
+            config={"gdpo_reward_keys": list(component_rewards), "gdpo_reward_weights": [1.0]},
+            non_tensor_batch=non_tensor_batch,
+            batch=batch,
+        )
+
+
+@pytest.mark.parametrize(
+    "bad_values,match",
+    [
+        (np.ones((2, 1), dtype=np.float32), "must have shape"),
+        ([1.0, np.nan], "contains NaN or infinite"),
+        (["yes", "no"], "must contain numeric"),
+    ],
+)
+def test_gdpo_rejects_malformed_reward_components(bad_values, match):
+    token_level_rewards, response_mask, non_tensor_batch, batch = _make_gdpo_inputs(
+        {"format_reward": bad_values}, [1, 1]
+    )
+
+    with pytest.raises(ValueError, match=match):
+        compute_gdpo_outcome_advantage(
+            token_level_rewards=token_level_rewards,
+            response_mask=response_mask,
+            index=np.array([0, 0]),
+            config={"gdpo_reward_keys": ["format_reward"]},
+            non_tensor_batch=non_tensor_batch,
+            batch=batch,
+        )
 
 
 @pytest.mark.parametrize(

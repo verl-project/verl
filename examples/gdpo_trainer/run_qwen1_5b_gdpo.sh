@@ -18,6 +18,8 @@ PROJECT_DIR="$(pwd)"
 trainer_n_gpus_per_node=8
 trainer_nnodes=1
 
+# GDPO reward keys must be finite scalar fields returned by the custom reward function.
+# Add more keys, and optional matching algorithm.gdpo_reward_weights, for N-component GDPO.
 python3 -u -m verl.trainer.main_ppo \
     algorithm.adv_estimator=gdpo \
     +algorithm.gdpo_reward_keys='["accuracy_reward", "format_reward"]' \

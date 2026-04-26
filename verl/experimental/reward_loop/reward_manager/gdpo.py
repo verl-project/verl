@@ -80,6 +80,10 @@ class GDPORewardManager(RewardManagerBase):
 
         score: float
         if isinstance(result, dict):
+            if "score" not in result:
+                raise KeyError(
+                    "GDPO reward functions returning a dict must include a scalar 'score' entry for rm_scores."
+                )
             score = result["score"]
             for key, value in result.items():
                 reward_extra_info[key] = value

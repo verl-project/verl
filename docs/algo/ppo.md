@@ -45,7 +45,7 @@ Most critic configs are similar to those of actors. Note that the critic model i
 
 - `algorithm.lam`: The lambda term that trades off between bias and variance in the GAE estimator
 
-- `algorithm.adv_estimator`: Support gae, grpo, reinforce_plus_plus, reinforce_plus_plus_baseline, rloo
+- `algorithm.adv_estimator`: Support gae, grpo, gdpo, reinforce_plus_plus, reinforce_plus_plus_baseline, rloo
 
 ## Advanced Extensions
 

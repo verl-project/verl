@@ -523,6 +523,8 @@ Algorithm
      gamma: 1.0
      lam: 1.0
      adv_estimator: gae
+     gdpo_reward_keys: null
+     gdpo_reward_weights: null
      use_kl_in_reward: False
      kl_penalty: kl  # how to estimate kl divergence
      kl_ctrl:
@@ -539,7 +541,9 @@ Algorithm
 
 - ``gamma``: discount factor
 - ``lam``: Trade-off between bias and variance in the GAE estimator
-- ``adv_estimator``: Support ``gae``, ``grpo``, ``reinforce_plus_plus``, ``reinforce_plus_plus_baseline``, ``rloo``, ``rloo_vectorized``, ``grpo_vectorized``
+- ``adv_estimator``: Support ``gae``, ``grpo``, ``gdpo``, ``reinforce_plus_plus``, ``reinforce_plus_plus_baseline``, ``rloo``, ``rloo_vectorized``, ``grpo_vectorized``
+- ``gdpo_reward_keys``: Reward component keys used by GDPO when ``adv_estimator`` is ``gdpo``. These keys must be returned by the configured reward function as finite numeric scalar values, for example ``["format_reward", "accuracy_reward"]``.
+- ``gdpo_reward_weights``: Optional per-component weights for ``gdpo_reward_keys``. If unset, every GDPO component uses weight ``1.0``.
 - ``use_kl_in_reward``: Whether to enable in-reward kl penalty. Default is False.
 - ``kl_penalty``: Support ``kl``, ``abs``, ``mse``, ``low_var_kl`` and ``full``. How to
   calculate the kl divergence between actor and reference policy. For

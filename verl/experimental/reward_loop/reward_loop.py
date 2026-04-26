@@ -362,16 +362,42 @@ class RewardLoopManager:
             prompt_length = data.batch["prompts"].size(1)
             valid_response_length = data.batch["attention_mask"][:, prompt_length:].sum(dim=1)
             rm_scores = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
-            rm_scores[torch.arange(rm_scores.size(0)), valid_response_length - 1] = torch.tensor(
-                scores, dtype=torch.float32
-            )
+            valid_rows = valid_response_length > 0
+            if valid_rows.any():
+                row_indices = torch.arange(rm_scores.size(0), device=rm_scores.device)
+                score_tensor = torch.tensor(scores, dtype=torch.float32, device=rm_scores.device)
+                rm_scores[row_indices[valid_rows], valid_response_length[valid_rows] - 1] = score_tensor[valid_rows]
         batch = TensorDict({"rm_scores": rm_scores}, batch_size=len(data))
 
         reward_extra_infos = [output.get("reward_extra_info", {}) for output in outputs_flat]
+        algorithm_config = self.config.get("algorithm", {})
+        adv_estimator = algorithm_config.get("adv_estimator", None)
+        gdpo_reward_keys = []
+        if adv_estimator == "gdpo":
+            gdpo_reward_keys = list(algorithm_config.get("gdpo_reward_keys", []) or [])
+
         reward_extra_keys = list(reward_extra_infos[0].keys())
+        for key in gdpo_reward_keys:
+            if key not in reward_extra_keys:
+                reward_extra_keys.append(key)
+
         non_tensor_batch = {}
         for key in reward_extra_keys:
-            non_tensor_batch[key] = np.array([info[key] for info in reward_extra_infos])
+            values = []
+            for index, info in enumerate(reward_extra_infos):
+                if key not in info:
+                    if key in gdpo_reward_keys:
+                        raise KeyError(
+                            f"GDPO reward key '{key}' is missing from reward_extra_info for sample {index}."
+                        )
+                    raise KeyError(f"Reward extra info key '{key}' is missing from sample {index}.")
+                else:
+                    values.append(info[key])
+            non_tensor_batch[key] = np.array(values)
+
+        for key in gdpo_reward_keys:
+            if key not in non_tensor_batch:
+                raise KeyError(f"GDPO reward key '{key}' was not returned by any reward function output.")
 
         if self.reward_model_manager is not None:
             self.reward_model_manager.sleep()

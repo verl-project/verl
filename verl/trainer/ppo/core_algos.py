@@ -358,6 +358,113 @@ def compute_grpo_vectorized_outcome_advantage(
         return advantages, advantages
 
 
+def _get_config_value(config: Optional[AlgoConfig], key: str, default: Any = None) -> Any:
+    if config is None:
+        return default
+    return config.get(key, default)
+
+
+def _validate_gdpo_reward_keys(gdpo_reward_keys: Any) -> list[str]:
+    if gdpo_reward_keys is None:
+        raise ValueError(
+            "GDPO requires 'algorithm.gdpo_reward_keys' listing the individual reward "
+            "component keys returned by compute_score, e.g. ['format_reward', 'accuracy_reward']."
+        )
+    if isinstance(gdpo_reward_keys, str):
+        raise ValueError("GDPO 'algorithm.gdpo_reward_keys' must be a non-empty list of strings, not a string.")
+
+    reward_keys = list(gdpo_reward_keys)
+    if not reward_keys:
+        raise ValueError("GDPO 'algorithm.gdpo_reward_keys' must be a non-empty list of strings.")
+    invalid_keys = [key for key in reward_keys if not isinstance(key, str) or not key]
+    if invalid_keys:
+        raise ValueError(f"GDPO reward keys must be non-empty strings, got invalid entries: {invalid_keys}.")
+    return reward_keys
+
+
+def _as_gdpo_component_array(component: Any, key: str, batch_size: int) -> np.ndarray:
+    try:
+        values = np.asarray(component, dtype=np.float32)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"GDPO reward key '{key}' must contain numeric scalar values.") from exc
+
+    if values.shape != (batch_size,):
+        raise ValueError(
+            f"GDPO reward key '{key}' must have shape ({batch_size},), got {values.shape}. "
+            "Each sample should provide one scalar component reward."
+        )
+    if not np.all(np.isfinite(values)):
+        raise ValueError(f"GDPO reward key '{key}' contains NaN or infinite values.")
+    return values
+
+
+def _build_gdpo_component_scores(
+    response_mask: torch.Tensor,
+    non_tensor_batch: dict,
+    batch: dict,
+    gdpo_reward_keys: list[str],
+) -> list[torch.Tensor]:
+    required_batch_keys = {"prompts", "attention_mask"}
+    missing_batch_keys = sorted(required_batch_keys - set(batch.keys()))
+    if missing_batch_keys:
+        raise KeyError(f"GDPO requires batch keys {missing_batch_keys} to place component rewards.")
+
+    batch_size = response_mask.size(0)
+    device = response_mask.device
+    prompt_length = batch["prompts"].size(1)
+    response_lengths = batch["attention_mask"][:, prompt_length:].sum(dim=1).to(device=device, dtype=torch.long)
+    valid_rows = response_lengths > 0
+    row_indices = torch.arange(batch_size, device=device)
+
+    score_list = []
+    for key in gdpo_reward_keys:
+        if key not in non_tensor_batch:
+            raise KeyError(
+                f"GDPO reward key '{key}' not found in non_tensor_batch. "
+                f"Available keys: {list(non_tensor_batch.keys())}. "
+                f"Make sure your compute_score returns a dict containing '{key}'."
+            )
+
+        values = _as_gdpo_component_array(non_tensor_batch[key], key, batch_size)
+        rm_score = torch.as_tensor(values, dtype=torch.float32, device=device)
+        rm_scores = torch.zeros_like(response_mask, dtype=torch.float32)
+        if valid_rows.any():
+            reward_positions = response_lengths[valid_rows] - 1
+            rm_scores[row_indices[valid_rows], reward_positions] = rm_score[valid_rows]
+        score_list.append(rm_scores)
+
+    return score_list
+
+
+def _build_gdpo_reward_weights(
+    gdpo_reward_weights: Any,
+    num_scores: int,
+    device: torch.device,
+) -> torch.Tensor:
+    if gdpo_reward_weights is None:
+        return torch.ones(num_scores, dtype=torch.float32, device=device)
+    if isinstance(gdpo_reward_weights, (str, bytes)):
+        raise ValueError("GDPO 'algorithm.gdpo_reward_weights' must be a list of numeric weights, not a string.")
+
+    try:
+        weight_values = list(gdpo_reward_weights)
+    except TypeError as exc:
+        raise ValueError("GDPO 'algorithm.gdpo_reward_weights' must be a list of numeric weights.") from exc
+
+    if len(weight_values) != num_scores:
+        raise ValueError(
+            "GDPO 'algorithm.gdpo_reward_weights' length must match 'algorithm.gdpo_reward_keys' length: "
+            f"got {len(weight_values)} weights for {num_scores} reward keys."
+        )
+    try:
+        weights = np.asarray(weight_values, dtype=np.float32)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("GDPO 'algorithm.gdpo_reward_weights' must contain numeric weights.") from exc
+    if not np.all(np.isfinite(weights)):
+        raise ValueError("GDPO 'algorithm.gdpo_reward_weights' contains NaN or infinite values.")
+    return torch.as_tensor(weights, dtype=torch.float32, device=device)
+
+
 @register_adv_est(AdvantageEstimator.GDPO)  # or simply: @register_adv_est("gdpo")
 def compute_gdpo_outcome_advantage(
     token_level_rewards: torch.Tensor,
@@ -406,45 +513,31 @@ def compute_gdpo_outcome_advantage(
         advantages: (bs, response_length)
         returns: (bs, response_length) – same as advantages (outcome-only).
     """
-    score_list = None
-    reward_weights = None
+    gdpo_reward_keys = _get_config_value(config, "gdpo_reward_keys", None)
+    gdpo_reward_weights = _get_config_value(config, "gdpo_reward_weights", None)
 
-    if config is not None and non_tensor_batch is not None and batch is not None:
-        gdpo_reward_keys = config.get("gdpo_reward_keys", None)
-        assert gdpo_reward_keys, (
-            "GDPO requires 'algorithm.gdpo_reward_keys' listing the individual reward "
-            "component keys returned by compute_score (e.g. ['format_reward', 'accuracy_reward'])."
-        )
-        device = token_level_rewards.device
-        prompt_length = batch["prompts"].size(1)
-        valid_response_length = batch["attention_mask"][:, prompt_length:].sum(dim=1) - 1
-
-        score_list = []
-        for key in gdpo_reward_keys:
-            assert key in non_tensor_batch, (
-                f"GDPO reward key '{key}' not found in non_tensor_batch. "
-                f"Available keys: {list(non_tensor_batch.keys())}. "
-                f"Make sure your compute_score returns a dict containing '{key}'."
-            )
-            comp = non_tensor_batch[key]
-            rm_score = torch.tensor(np.asarray(comp, dtype=np.float32), device=device)
-            rm_scores = torch.zeros_like(response_mask, dtype=torch.float32)
-            rm_scores[torch.arange(rm_scores.size(0), device=device), valid_response_length] = rm_score
-            score_list.append(rm_scores)
-
-        gdpo_weights = config.get("gdpo_reward_weights", None)
-        if gdpo_weights is not None:
-            reward_weights = list(gdpo_weights)
-
-    if score_list is None:
+    if gdpo_reward_keys is None and non_tensor_batch is None and batch is None:
         score_list = [token_level_rewards]
+    else:
+        reward_keys = _validate_gdpo_reward_keys(gdpo_reward_keys)
+        if non_tensor_batch is None or batch is None:
+            raise ValueError(
+                "GDPO requires non_tensor_batch and batch data so configured reward components can be placed "
+                "at the final valid response token."
+            )
+        score_list = _build_gdpo_component_scores(
+            response_mask=response_mask,
+            non_tensor_batch=non_tensor_batch,
+            batch=batch,
+            gdpo_reward_keys=reward_keys,
+        )
 
     num_scores = len(score_list)
-
-    if reward_weights is not None:
-        weights = torch.tensor(reward_weights, dtype=torch.float32, device=token_level_rewards.device)
-    else:
-        weights = torch.ones(num_scores, dtype=torch.float32, device=token_level_rewards.device)
+    weights = _build_gdpo_reward_weights(
+        gdpo_reward_weights=gdpo_reward_weights,
+        num_scores=num_scores,
+        device=token_level_rewards.device,
+    )
 
     new_advantage = None
 

@@ -1314,6 +1314,12 @@ class PPOTrainer:
 
     def _compute_advantage(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
         """Compute the advantage of the batch."""
+        if self.config.algorithm.adv_estimator in (core_algos.AdvantageEstimator.GDPO, "gdpo"):
+            raise NotImplementedError(
+                "GDPO is not supported in the TransferQueue trainer yet because configured "
+                "algorithm.gdpo_reward_keys are not preserved as non_tensor_batch component rewards. "
+                "Use verl.trainer.main_ppo for GDPO or add explicit TransferQueue component plumbing first."
+            )
         fields = ["uid", "response_mask", "rm_scores", "rollout_log_probs", "old_log_probs", "ref_log_prob", "values"]
         t_start = time.time()
         data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=fields)
