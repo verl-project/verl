@@ -49,11 +49,18 @@ class FilterGroupsConfig(BaseConfig):
         enable (bool): Whether to enable filter groups.
         metric (Optional[str]): Metric to use for filtering: "acc", "score", "seq_reward", "seq_final_reward", etc.
         max_num_gen_batches (int): Non-positive values mean no upper limit.
+        filter_type (str): Filtering strategy. "same_value" keeps the original DAPO behavior; "band_pass" keeps
+            prompt groups whose mean metric falls within the configured bounds.
+        lower_bound (Optional[float]): Inclusive lower bound for "band_pass" filtering.
+        upper_bound (Optional[float]): Inclusive upper bound for "band_pass" filtering.
     """
 
     enable: bool = False
     metric: Optional[str] = None
     max_num_gen_batches: int = 0
+    filter_type: str = "same_value"
+    lower_bound: Optional[float] = None
+    upper_bound: Optional[float] = None
 
 
 @dataclass

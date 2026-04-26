@@ -1,0 +1,27 @@
+# Format checks enforced on CI:
+# 1. Comments must appear above each field.
+# 2. There must be a blank line between each field.
+# 3. Inline comments (after a field on the same line) are not allowed.
+# 4. Indentation level is respected for nested fields.
+
+# Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs.
+_target_: verl.trainer.config.FilterGroupsConfig
+
+# Whether to enable DAPO-style prompt group filtering.
+enable: False
+
+# Metric used for filtering. Common values are "acc", "score", and "seq_reward".
+metric: seq_reward
+
+# Maximum number of generation batches to backfill a training step.
+# Non-positive values mean no upper limit.
+max_num_gen_batches: 10
+
+# Filtering strategy. "same_value" preserves original DAPO behavior; "band_pass" keeps medium-difficulty groups.
+filter_type: same_value
+
+# Inclusive lower bound used by "band_pass" filtering. Null means no lower bound.
+lower_bound: null
+
+# Inclusive upper bound used by "band_pass" filtering. Null means no upper bound.
+upper_bound: null

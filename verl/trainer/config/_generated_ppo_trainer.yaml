@@ -731,6 +731,14 @@ algorithm:
     bypass_mode: false
     loss_type: ppo_clip
     rollout_is_batch_normalize: false
+  filter_groups:
+    _target_: verl.trainer.config.FilterGroupsConfig
+    enable: false
+    metric: seq_reward
+    max_num_gen_batches: 10
+    filter_type: same_value
+    lower_bound: null
+    upper_bound: null
   _target_: verl.trainer.config.AlgoConfig
   gamma: 1.0
   lam: 1.0

@@ -39,6 +39,9 @@ defaults:
   # Rollout correction config.
   - algorithm@algorithm.rollout_correction: rollout_correction
 
+  # Algorithm filter groups config.
+  - algorithm/filter_groups@algorithm.filter_groups
+
   # distillation config
   - distillation@distillation: distillation
 

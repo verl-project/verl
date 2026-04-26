@@ -79,9 +79,14 @@ algorithm:
     enable: True
     metric: acc # score / seq_reward / seq_final_reward / ...
     max_num_gen_batches: 10 # Non-positive values mean no upper limit
+    filter_type: same_value # same_value / band_pass
+    lower_bound: 0.2 # Used by band_pass; null means no lower bound
+    upper_bound: 0.8 # Used by band_pass; null means no upper bound
 ```
 
-Setting `filter_groups.enable` to `True` will filter out groups whose outputs' `metric` are all the same, e.g., for `acc`, groups whose outputs' accuracies are all 1 or 0.
+Setting `filter_groups.enable` to `True` will filter prompt groups before advantage computation. The default `filter_type: same_value` preserves the original DAPO behavior: it filters out groups whose outputs' `metric` are all the same, e.g., for `acc`, groups whose outputs' accuracies are all 1 or 0.
+
+To focus training on medium-difficulty prompt groups, set `filter_type: band_pass` and configure one or both inclusive bounds. For example, `lower_bound: 0.2` and `upper_bound: 0.8` keeps prompt groups whose mean metric is in `[0.2, 0.8]` and discards groups that are too easy or too hard. The metric can come from reward-function extra info, a one-dimensional tensor in the batch, or the built-in `seq_reward`, which sums `token_level_scores` per response.
 
 The trainer will repeat sampling with `gen_batch_size` until there are enough qualified groups for `train_batch_size` or reaching the upper limit specified by `max_num_gen_batches`.
 
