@@ -17,6 +17,7 @@ import torch
 from omegaconf import DictConfig
 
 from verl import DataProto
+from verl.experimental.reward_loop.reward_loop import _build_reward_extra_info_batch
 from verl.experimental.reward_loop.reward_manager.gdpo import GDPORewardManager
 
 
@@ -83,3 +84,37 @@ async def test_gdpo_reward_manager_requires_score_for_dict_results():
     with pytest.raises(KeyError, match="must include a scalar 'score'"):
         await manager.run_single(_make_data_proto())
 
+
+def test_reward_extra_info_batch_pads_missing_non_gdpo_metadata():
+    non_tensor_batch, reward_extra_keys = _build_reward_extra_info_batch(
+        [
+            {"score": 1.0, "format_reward": 0.5},
+            {"score": 2.0, "accuracy_reward": 1.0},
+            {"score": 3.0, "format_reward": 0.75, "length_reward": -0.25},
+        ],
+        gdpo_reward_keys=[],
+    )
+
+    assert reward_extra_keys == ["score", "format_reward", "accuracy_reward", "length_reward"]
+    assert non_tensor_batch["score"].tolist() == [1.0, 2.0, 3.0]
+    assert non_tensor_batch["format_reward"].tolist() == [0.5, None, 0.75]
+    assert non_tensor_batch["accuracy_reward"].tolist() == [None, 1.0, None]
+    assert non_tensor_batch["length_reward"].tolist() == [None, None, -0.25]
+
+
+def test_reward_extra_info_batch_keeps_gdpo_keys_strict():
+    with pytest.raises(KeyError, match="GDPO reward key 'accuracy_reward' is missing"):
+        _build_reward_extra_info_batch(
+            [
+                {"score": 1.0, "format_reward": 0.5, "accuracy_reward": 1.0},
+                {"score": 2.0, "format_reward": 0.5},
+            ],
+            gdpo_reward_keys=["format_reward", "accuracy_reward"],
+        )
+
+
+def test_reward_extra_info_batch_handles_empty_outputs():
+    non_tensor_batch, reward_extra_keys = _build_reward_extra_info_batch([], gdpo_reward_keys=["format_reward"])
+
+    assert reward_extra_keys == ["format_reward"]
+    assert non_tensor_batch["format_reward"].shape == (0,)

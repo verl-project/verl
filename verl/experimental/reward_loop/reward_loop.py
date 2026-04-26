@@ -39,6 +39,39 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
+def _build_reward_extra_info_batch(
+    reward_extra_infos: list[dict],
+    gdpo_reward_keys: list[str],
+) -> tuple[dict[str, np.ndarray], list[str]]:
+    """Collect reward metadata while keeping GDPO component rewards strict."""
+    reward_extra_keys = []
+    seen_keys = set()
+    for info in reward_extra_infos:
+        for key in info:
+            if key not in seen_keys:
+                reward_extra_keys.append(key)
+                seen_keys.add(key)
+
+    for key in gdpo_reward_keys:
+        if key not in seen_keys:
+            reward_extra_keys.append(key)
+            seen_keys.add(key)
+
+    non_tensor_batch = {}
+    for key in reward_extra_keys:
+        values = []
+        for index, info in enumerate(reward_extra_infos):
+            if key not in info:
+                if key in gdpo_reward_keys:
+                    raise KeyError(f"GDPO reward key '{key}' is missing from reward_extra_info for sample {index}.")
+                values.append(None)
+            else:
+                values.append(info[key])
+        non_tensor_batch[key] = np.array(values)
+
+    return non_tensor_batch, reward_extra_keys
+
+
 def migrate_legacy_reward_impl(config):
     """
     Migrate the legacy reward model implementation to the new one.
@@ -376,28 +409,7 @@ class RewardLoopManager:
         if adv_estimator == "gdpo":
             gdpo_reward_keys = list(algorithm_config.get("gdpo_reward_keys", []) or [])
 
-        reward_extra_keys = list(reward_extra_infos[0].keys())
-        for key in gdpo_reward_keys:
-            if key not in reward_extra_keys:
-                reward_extra_keys.append(key)
-
-        non_tensor_batch = {}
-        for key in reward_extra_keys:
-            values = []
-            for index, info in enumerate(reward_extra_infos):
-                if key not in info:
-                    if key in gdpo_reward_keys:
-                        raise KeyError(
-                            f"GDPO reward key '{key}' is missing from reward_extra_info for sample {index}."
-                        )
-                    raise KeyError(f"Reward extra info key '{key}' is missing from sample {index}.")
-                else:
-                    values.append(info[key])
-            non_tensor_batch[key] = np.array(values)
-
-        for key in gdpo_reward_keys:
-            if key not in non_tensor_batch:
-                raise KeyError(f"GDPO reward key '{key}' was not returned by any reward function output.")
+        non_tensor_batch, reward_extra_keys = _build_reward_extra_info_batch(reward_extra_infos, gdpo_reward_keys)
 
         if self.reward_model_manager is not None:
             self.reward_model_manager.sleep()
