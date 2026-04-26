@@ -20,8 +20,9 @@ This trainer supports model-agonistic model initialization with huggingface
 
 import asyncio
 import uuid
+from dataclasses import dataclass
 from pprint import pprint
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 import ray
@@ -41,8 +42,15 @@ from verl.trainer.ppo.ray_trainer import (
 from verl.trainer.ppo.reward import extract_reward
 from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_reward_model
 from verl.utils.debug import marked_timer
+from verl.utils.filtering import DynamicSamplingAccumulator
 from verl.utils.rollout_skip import RolloutSkip
 from verl.utils.tracking import ValidationGenerationsLogger
+
+
+@dataclass
+class PrecomputedReward:
+    tensor: torch.Tensor
+    extra_infos: dict[str, Any]
 
 
 class OneStepOffRayTrainer(SeparateRayPPOTrainer):
@@ -136,6 +144,7 @@ class OneStepOffRayTrainer(SeparateRayPPOTrainer):
         self.future_reward = None
         self.reward_tensor = None
         self.reward_extra_infos_dict = {}
+        self.enable_dynamic_sampling = self._is_dynamic_sampling_enabled()
 
     def _create_actor_rollout_classes(self):
         for role in [Role.Actor]:
@@ -193,7 +202,16 @@ class OneStepOffRayTrainer(SeparateRayPPOTrainer):
             for batch_dict in iterator:
                 yield epoch, batch_dict
 
+    def _is_dynamic_sampling_enabled(self) -> bool:
+        filter_groups_config = self.config.algorithm.get("filter_groups", None)
+        return bool(filter_groups_config and filter_groups_config.get("enable", False))
+
     async def _async_gen_next_batch(self, continuous_iterator):
+        if self.enable_dynamic_sampling:
+            return await self._async_gen_next_dynamic_batch(continuous_iterator)
+        return await self._async_gen_next_single_batch(continuous_iterator)
+
+    async def _async_gen_next_single_batch(self, continuous_iterator):
         """
         Call parameter synchronization and asynchronous sequence generation.
         """
@@ -246,6 +264,106 @@ class OneStepOffRayTrainer(SeparateRayPPOTrainer):
         # Return the original, now-modified `batch` and the `future_reward`
         return metrics, timing_raw, epoch, batch, future_reward
 
+    async def _async_gen_next_dynamic_batch(self, continuous_iterator):
+        """Generate, filter, and backfill candidate batches for one training step."""
+        metrics = {}
+        timing_raw = {}
+        epoch = None
+        rollout_n = self.config.actor_rollout_ref.rollout.n
+        dynamic_sampler = DynamicSamplingAccumulator(
+            self.config.algorithm.filter_groups,
+            train_prompt_bsz=self.config.data.train_batch_size,
+            rollout_n=rollout_n,
+        )
+
+        while True:
+            try:
+                epoch, batch_dict = next(continuous_iterator)
+            except StopIteration:
+                if dynamic_sampler.num_gen_batches == 0:
+                    return None
+                raise ValueError(
+                    "Train dataloader exhausted before dynamic sampling collected enough prompt groups. "
+                    f"num_prompt_in_batch={dynamic_sampler.num_prompt_in_batch}, "
+                    f"train_batch_size={self.config.data.train_batch_size}"
+                ) from None
+            except Exception as e:
+                print(f"Error in async_gen_next_dynamic_batch: {e}")
+                return None
+
+            batch = DataProto.from_single_dict(batch_dict)
+            batch.non_tensor_batch["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object)
+
+            gen_batch = self._get_gen_batch(batch)
+            gen_batch.meta_info["global_steps"] = self.global_steps
+            gen_batch.meta_info["dynamic_sampling_gen_batch"] = dynamic_sampler.num_gen_batches
+            gen_batch_output = gen_batch.repeat(repeat_times=rollout_n, interleave=True)
+
+            with marked_timer("generate_async", timing_raw, color="purple"):
+                gen_batch_output = await self.async_rollout_manager.generate_sequences(gen_batch_output)
+
+            batch = batch.repeat(repeat_times=rollout_n, interleave=True)
+            batch = batch.union(gen_batch_output)
+            self._merge_dynamic_sampling_timing(timing_raw, batch.meta_info.pop("timing", {}))
+
+            if "response_mask" not in batch.batch.keys():
+                batch.batch["response_mask"] = compute_response_mask(batch)
+
+            batch, reward_tensor, reward_extra_infos_dict = self._compute_or_extract_reward_for_filtering(batch)
+            result = dynamic_sampler.add_candidate(batch, reward_tensor, reward_extra_infos_dict)
+            metrics.update(result.metrics)
+
+            if result.ready:
+                break
+            if not dynamic_sampler.should_continue():
+                raise ValueError(
+                    f"num_prompt_in_batch={dynamic_sampler.num_prompt_in_batch} "
+                    f"< train_batch_size={self.config.data.train_batch_size}. "
+                    f"num_gen_batches={dynamic_sampler.num_gen_batches} "
+                    f">= max_num_gen_batches={dynamic_sampler.max_num_gen_batches}. "
+                    "Generated too many batches. Please check whether the data are too difficult, "
+                    "or set max_num_gen_batches=0 to allow unlimited trials."
+                )
+
+        batch, reward_tensor, reward_extra_infos_dict, filter_metrics = dynamic_sampler.finalize()
+        metrics.update(filter_metrics)
+
+        if self.config.trainer.balance_batch:
+            self._balance_batch(batch, metrics=metrics)
+
+        batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
+        batch.meta_info["timing"] = {}
+        self._attach_images_seqlens_if_present(batch)
+        return metrics, timing_raw, epoch, batch, PrecomputedReward(reward_tensor, reward_extra_infos_dict)
+
+    @staticmethod
+    def _merge_dynamic_sampling_timing(timing_raw: dict, candidate_timing: dict):
+        for key, value in candidate_timing.items():
+            timing_raw[key] = timing_raw.get(key, 0.0) + value
+
+    @staticmethod
+    def _attach_images_seqlens_if_present(batch: DataProto):
+        if "multi_modal_inputs" not in batch.non_tensor_batch:
+            return
+        images_seqlens_all = []
+        for multi_modal_input in batch.non_tensor_batch["multi_modal_inputs"]:
+            if multi_modal_input is None or "image_grid_thw" not in multi_modal_input:
+                continue
+            images_seqlens_all.extend(multi_modal_input["images_seqlens"].tolist())
+        batch.meta_info["images_seqlens"] = images_seqlens_all
+
+    def _compute_or_extract_reward_for_filtering(self, batch: DataProto):
+        if "rm_scores" not in batch.batch.keys():
+            if not self.use_rm:
+                raise ValueError(
+                    "Dynamic sampling requires rm_scores from AgentLoop reward computation or a reward model. "
+                    "No rm_scores were found in the generated batch."
+                )
+            batch_reward = self._compute_reward_colocate(batch)
+            batch = batch.union(batch_reward)
+        reward_tensor, reward_extra_infos_dict = extract_reward(batch)
+        return batch, reward_tensor, reward_extra_infos_dict
+
     @staticmethod
     @ray.remote
     def _launch_individual_rewards(batch, config, tokenizer):
@@ -286,6 +404,8 @@ class OneStepOffRayTrainer(SeparateRayPPOTrainer):
                 return
 
         if self.config.actor_rollout_ref.rollout.get("skip_rollout", False):
+            if self.enable_dynamic_sampling:
+                raise ValueError("rollout.skip_rollout is not supported with algorithm.filter_groups.enable=True")
             rollout_skip = RolloutSkip(self.config, self.actor_rollout_wg)
             rollout_skip.wrap_generate_sequences()
 
@@ -383,10 +503,13 @@ class OneStepOffRayTrainer(SeparateRayPPOTrainer):
         with marked_timer("gen", timing_raw, color="red"):
             _metrics, _timing_raw, epoch, batch, future_reward = await batch_data_future
             batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
-            timing_raw.update(batch.meta_info["timing"])
+            timing_raw.update(batch.meta_info.get("timing", {}))
             timing_raw.update(_timing_raw)
             metrics.update(_metrics)
             batch.meta_info.pop("timing", None)
+            if isinstance(future_reward, PrecomputedReward):
+                self.reward_tensor = future_reward.tensor
+                self.reward_extra_infos_dict = future_reward.extra_infos
 
         # sync weights from actor to rollout
         with marked_timer("sync_rollout_weights", timing_raw, color="purple"):
@@ -401,3 +524,8 @@ class OneStepOffRayTrainer(SeparateRayPPOTrainer):
             batch_data_future = None
 
         return batch, batch_data_future
+
+    def _fit_compute_reward(self, batch: DataProto) -> DataProto:
+        if self.reward_tensor is not None:
+            return batch
+        return super()._fit_compute_reward(batch)

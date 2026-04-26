@@ -85,6 +85,8 @@ Setting `filter_groups.enable` to `True` will filter out groups whose outputs' `
 
 The trainer will repeat sampling with `gen_batch_size` until there are enough qualified groups for `train_batch_size` or reaching the upper limit specified by `max_num_gen_batches`.
 
+The one-step-off policy trainer supports the same opt-in group filtering path. In that mode the trainer filters each candidate generation batch before launching the next training update, and all backfill attempts for the final training batch use the same rollout weight snapshot.
+
 Core relevant code:
 
 ```python

@@ -231,6 +231,37 @@ The default mode is `bypass_ppo_clip`, but other modification strategies can als
 In the current implementation, we no longer provide SPMD model rollout mode.
 Instead, we have switched to AgentLoop mode, which also supports multi-turn tool calling.
 
+### DAPO Dynamic Sampling
+
+One-step-off DAPO supports opt-in dynamic sampling with `algorithm.filter_groups`.
+When enabled, each candidate rollout batch is grouped by prompt `uid`, prompt
+groups whose configured metric is constant across responses are filtered out,
+and more `data.gen_batch_size` prompts are generated until
+`data.train_batch_size` prompt groups are available. The final training batch is
+then aligned to `data.train_batch_size * actor_rollout_ref.rollout.n`
+trajectories.
+
+All backfill attempts for one final training batch run inside the same
+asynchronous generation future, before the next actor-to-rollout weight sync.
+This preserves the one-step-off policy relationship while restoring DAPO group
+filtering behavior.
+
+Example overrides:
+
+```shell
++data.gen_batch_size=1536 \
+data.train_batch_size=512 \
++algorithm.filter_groups.enable=True \
++algorithm.filter_groups.metric=acc \
++algorithm.filter_groups.max_num_gen_batches=10
+```
+
+`algorithm.filter_groups.metric=seq_final_reward` requires `token_level_rewards`
+to already exist, so one-step-off DAPO should use `acc`, `score`, `seq_reward`,
+or another reward extra key unless the reward/log-prob ordering is changed.
+`actor_rollout_ref.rollout.skip_rollout=True` is not supported together with
+dynamic sampling.
+
 ## Usage
 
 ### FSDP2 Configuration Example

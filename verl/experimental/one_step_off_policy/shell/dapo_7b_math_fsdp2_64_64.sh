@@ -59,8 +59,12 @@ NNODES_TRAIN=${NNODES_TRAIN:-8}
 NGPUS_PER_NODE=${NGPUS_PER_NODE:-8}
 
 train_prompt_bsz=512
+gen_prompt_bsz=${gen_prompt_bsz:-1536}
 n_resp_per_prompt=16
 train_prompt_mini_bsz=32
+enable_filter_groups=${enable_filter_groups:-True}
+filter_groups_metric=${filter_groups_metric:-acc}
+max_num_gen_batches=${max_num_gen_batches:-10}
 test_freq=20
 
 python -m verl.experimental.one_step_off_policy.main_ppo \
@@ -71,8 +75,12 @@ python -m verl.experimental.one_step_off_policy.main_ppo \
     data.max_prompt_length=${max_prompt_length} \
     data.max_response_length=${max_response_length} \
     data.train_batch_size=${train_prompt_bsz} \
+    +data.gen_batch_size=${gen_prompt_bsz} \
     actor_rollout_ref.rollout.n=${n_resp_per_prompt} \
     algorithm.adv_estimator=${adv_estimator} \
+    +algorithm.filter_groups.enable=${enable_filter_groups} \
+    +algorithm.filter_groups.metric=${filter_groups_metric} \
+    +algorithm.filter_groups.max_num_gen_batches=${max_num_gen_batches} \
     algorithm.use_kl_in_reward=${use_kl_in_reward} \
     algorithm.kl_ctrl.kl_coef=${kl_coef} \
     actor_rollout_ref.actor.fsdp_config.strategy=fsdp2 \
