@@ -36,7 +36,7 @@ Despite that many configurations start with the `ppo_` prefix, they work across 
 
 - `algorithm.adv_estimator`: Default is gae. Please set it to grpo instead
 
-- `actor_rollout_ref.actor.loss_agg_mode`: Default is "token-mean". Options include "token-mean", "seq-mean-token-sum", "seq-mean-token-mean". The original GRPO paper takes the sample-level loss (seq-mean-token-mean), which may be unstable in long-CoT scenarios. All GRPO example scripts provided in verl uses the default configuration "token-mean" for loss aggregation instead.
+- `actor_rollout_ref.actor.loss_agg_mode`: Default is "token-mean". Options include "token-mean", "seq-mean-token-sum", "seq-mean-token-mean", and "seq-mean-token-sum-norm". The original GRPO paper takes the sample-level loss (seq-mean-token-mean), which may be unstable in long-CoT scenarios. All GRPO example scripts provided in verl uses the default configuration "token-mean" for loss aggregation instead.
 
 Instead of adding KL penalty in the reward, GRPO regularizes by directly adding the KL divergence between the trained policy and the reference policy to the loss:
 
@@ -54,7 +54,7 @@ The work [Understanding R1-Zero-Like Training: A Critical Perspective](https://a
 
 Configure the following to enable DrGRPO, with all other parameters the same as GRPO's:
 
-- `actor_rollout_ref.actor.loss_agg_mode`: "seq-mean-token-sum-norm", which turns off seq-dim averaging
+- `actor_rollout_ref.actor.loss_agg_mode`: "seq-mean-token-sum-norm", which sums token losses per response, averages those response-level sums over the global PPO mini-batch, and divides by a response-length normalizer. In formula form, this is `L = (1 / B) * sum_i [sum_t L_it * mask_it] / C`, where `B` is the global PPO mini-batch sequence count and `C` is the normalizer.
 - `actor_rollout_ref.actor.loss_scale_factor`: (Optional) Set to a constant integer (e.g., max response length) to ensure consistent normalization throughout training. If not set, uses the current batch's response length.
 - `actor_rollout_ref.actor.use_kl_loss`: Please set it to False for DrGRPO
 - `algorithm.norm_adv_by_std_in_grpo`: False, which turns off standard deviation norm

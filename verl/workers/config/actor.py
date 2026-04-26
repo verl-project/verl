@@ -118,7 +118,8 @@ class ActorConfig(BaseConfig):
         clip_ratio_high (float): Upper bound for PPO clipping ratio.
         policy_loss (PolicyLossConfig): Configuration for policy loss computation.
         clip_ratio_c (float): Clipping ratio for critic loss.
-        loss_agg_mode (str): Loss aggregation mode. Options: 'token-mean', 'sample-mean'.
+        loss_agg_mode (str): Loss aggregation mode. Options: 'token-mean', 'seq-mean-token-sum',
+            'seq-mean-token-mean', 'seq-mean-token-sum-norm'.
         loss_scale_factor (Optional[int]): Scale factor for 'seq-mean-token-sum-norm' loss aggregation mode.
             If None, uses response_length. Set to a constant to ensure consistent normalization.
         entropy_coeff (float): Entropy coefficient for regularization.

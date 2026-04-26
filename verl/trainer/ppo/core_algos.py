@@ -1154,7 +1154,9 @@ def agg_loss(
     Args:
         loss_mat: micro batch loss matrix, (bs, response_length)
         loss_mask: micro batch loss mask, (bs, response_length)
-        loss_agg_mode: method to aggregate the loss matrix into a scalar
+        loss_agg_mode: method to aggregate the loss matrix into a scalar. "seq-mean-token-sum-norm"
+            sums token losses per sequence, averages those sums over the global batch, then divides by
+            loss_scale_factor or the response horizon.
         dp_size: data parallel size
         batch_num_tokens: number of valid tokens in global batch
         global_batch_size: global batch size
