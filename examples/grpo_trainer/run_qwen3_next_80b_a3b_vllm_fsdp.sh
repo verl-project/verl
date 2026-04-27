@@ -1,52 +1,74 @@
 #!/usr/bin/env bash
 set -xeuo pipefail
 
-project_name="verl_grpo_qwen3-next-80b"
-experiment_name="Qwen3_Next_80B_Instruct"
+# ---- user-adjustable ----
+DEVICE=${DEVICE:-gpu}
+project_name=${PROJECT_NAME:-"verl_grpo_qwen3-next-80b"}
+experiment_name=${EXPERIMENT_NAME:-}
 
 # Paths
 WORK_DIR=${WORK_DIR:-"${HOME}/verl"}
-MODEL_PATH=${WORK_DIR}/Qwen3-Next-80B-A3B-Instruct
-TRAIN_FILE=${WORK_DIR}/datasets/dapo-math-17k/dapo-math-17k.parquet
-TEST_FILE=${WORK_DIR}/datasets/aime/aime-2024.parquet
+MODEL_PATH=${MODEL_PATH:-"${WORK_DIR}/Qwen3-Next-80B-A3B-Instruct"}
+TRAIN_FILE=${TRAIN_FILE:-"${WORK_DIR}/datasets/dapo-math-17k/dapo-math-17k.parquet"}
+TEST_FILE=${TEST_FILE:-"${WORK_DIR}/datasets/aime/aime-2024.parquet"}
+NNODES=${NNODES:-4}
+NDEVICES_PER_NODE=${NDEVICES_PER_NODE:-}
 
 # algorithm
-adv_estimator=grpo
+adv_estimator=${ADV_ESTIMATOR:-grpo}
+use_kl_in_reward=${USE_KL_IN_REWARD:-False}
+kl_coef=${KL_COEF:-0.0}
+use_kl_loss=${USE_KL_LOSS:-True}
+kl_loss_coef=${KL_LOSS_COEF:-0.001}
+clip_ratio_low=${CLIP_RATIO_LOW:-0.2}
+clip_ratio_high=${CLIP_RATIO_HIGH:-0.28}
 
-use_kl_in_reward=False
-kl_coef=0.0
-use_kl_loss=True
-kl_loss_coef=0.001
-
-clip_ratio_low=0.2
-clip_ratio_high=0.28
-
-temperature=1.0
-top_p=1.0
-top_k=-1 # 0 for HF rollout, -1 for vLLM rollout
-val_top_p=0.7
+temperature=${TEMPERATURE:-1.0}
+top_p=${TOP_P:-1.0}
+top_k=${TOP_K:--1} # 0 for HF rollout, -1 for vLLM rollout
+val_top_p=${VAL_TOP_P:-0.7}
 
 # batch
-train_batch_size=16
-rollout_n=16
-ppo_mini_batch_size=8
+train_batch_size=${TRAIN_BATCH_SIZE:-16}
+rollout_n=${ROLLOUT_N:-16}
+ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE:-8}
 
 # length
-max_prompt_length=$((1024 * 2))
-max_response_length=$((1024 * 20))
+max_prompt_length=${MAX_PROMPT_LENGTH:-$((1024 * 2))}
+max_response_length=${MAX_RESPONSE_LENGTH:-$((1024 * 20))}
 
-# algorithm
-learning_rate=1e-6
-warmup_steps=0
-# enable_filter_groups=True
+# optimizer
+learning_rate=${ACTOR_LR:-1e-6}
+warmup_steps=${WARMUP_STEPS:-0}
 
 # performance
-sp_size=8
-gen_tp=4
-use_dynamic_bsz=True
+sp_size=${SP_SIZE:-8}
+gen_tp=${ROLLOUT_TP:-4}
+use_dynamic_bsz=${USE_DYNAMIC_BSZ:-True}
+offload=${OFFLOAD:-True}
+# ---- end user-adjustable ----
+
+# ---- no user adjustment needed below ----
+device_trainer_args=()
+
+case "${DEVICE}" in
+    gpu)
+        n_devices_per_node=${NDEVICES_PER_NODE:-${NGPUS_PER_NODE:-8}}
+        experiment_name=${EXPERIMENT_NAME:-"Qwen3_Next_80B_Instruct"}
+        ;;
+    npu)
+        n_devices_per_node=${NDEVICES_PER_NODE:-${NPUS_PER_NODE:-16}}
+        experiment_name=${EXPERIMENT_NAME:-"Qwen3_Next_80B_Instruct_npu"}
+        device_trainer_args+=("trainer.device=npu")
+        ;;
+    *)
+        echo "Unsupported DEVICE=${DEVICE}. Expected 'gpu' or 'npu'." >&2
+        exit 1
+        ;;
+esac
+
 actor_ppo_max_token_len=$(((max_prompt_length + max_response_length) / sp_size))
 infer_ppo_max_token_len=$(((max_prompt_length + max_response_length) / sp_size))
-offload=True
 
 DATA=(
     data.train_files="${TRAIN_FILE}"
@@ -138,13 +160,13 @@ TRAINER=(
     trainer.logger='["console","wandb"]'
     trainer.project_name="${project_name}"
     trainer.experiment_name="${experiment_name}"
-    trainer.n_gpus_per_node=16
-    trainer.nnodes=4
+    trainer.n_gpus_per_node=${n_devices_per_node}
+    trainer.nnodes=${NNODES}
     trainer.val_before_train=False
     trainer.save_freq=5
     trainer.test_freq=-1
     trainer.total_epochs=1
-    trainer.device=npu
+    "${device_trainer_args[@]}"
 )
 
 MODEL=(
@@ -159,11 +181,9 @@ ALGORITHM=(
     algorithm.kl_ctrl.kl_coef=${kl_coef}
 )
 
-# =========================================================
 echo "Starting Training with:"
 echo "Project: ${project_name}, Exp: ${experiment_name}"
 echo "Rollout N: ${rollout_n}, Batch Size: ${train_batch_size}, LR: ${learning_rate}"
-
 
 python3 -m verl.trainer.main_ppo \
     "${DATA[@]}" \
@@ -172,4 +192,4 @@ python3 -m verl.trainer.main_ppo \
     "${REF[@]}" \
     "${TRAINER[@]}" \
     "${ALGORITHM[@]}" \
-    "${MODEL[@]}" \
+    "${MODEL[@]}"

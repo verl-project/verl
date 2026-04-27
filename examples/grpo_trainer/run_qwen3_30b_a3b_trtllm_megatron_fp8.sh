@@ -10,6 +10,7 @@ export RAY_DEDUP_LOGS=0
 # ----------------------
 # Config for GB200 node
 # ----------------------
+# ---- user-adjustable ----
 TP=${INFER_TP:-4}
 ACTOR_TP=${ACTOR_TP:-4}
 ACTOR_PP=${ACTOR_PP:-2}
@@ -46,7 +47,9 @@ DATA_DIR=${DATA_DIR:-"$PWD"}
 DAPO_MATH_TRAIN=${DAPO_MATH_TRAIN:-"${DATA_DIR}/data/DAPO-Math-17k/data/dapo-math-17k.parquet"}
 AIME_VAL=${AIME_VAL:-"${DATA_DIR}/data/AIME-2024/data/aime-2024.parquet"}
 MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen3-30B-A3B-Base"}
+# ---- end user-adjustable ----
 
+# ---- no user adjustment needed below ----
 # When PP=1, Megatron interleaved schedule is invalid; pass null so PP=1 works (e.g. 2-node)
 [ "${ACTOR_PP}" -gt 1 ] && ACTOR_VPP_OVERRIDE=${ACTOR_VPP} || ACTOR_VPP_OVERRIDE=null
 [ "${REF_PP}" -gt 1 ] && REF_VPP_OVERRIDE=${REF_VPP} || REF_VPP_OVERRIDE=null

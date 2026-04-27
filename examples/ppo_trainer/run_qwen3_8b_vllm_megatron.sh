@@ -36,13 +36,14 @@ test_freq=${TEST_FREQ:-5}
 
 project_name=${PROJECT_NAME:-verl_ppo_gsm8k_math}
 experiment_name=${EXPERIMENT_NAME:-qwen3_8b_vllm_megatron}
+
+gsm8k_train=${GSM8K_TRAIN_FILE:-$HOME/data/gsm8k/train.parquet}
+gsm8k_test=${GSM8K_TEST_FILE:-$HOME/data/gsm8k/test.parquet}
+math_train=${MATH_TRAIN_FILE:-$HOME/data/math/train.parquet}
+math_test=${MATH_TEST_FILE:-$HOME/data/math/test.parquet}
 # ---- end user-adjustable ----
 
-gsm8k_train=$HOME/data/gsm8k/train.parquet
-gsm8k_test=$HOME/data/gsm8k/test.parquet
-math_train=$HOME/data/math/train.parquet
-math_test=$HOME/data/math/test.parquet
-
+# ---- no user adjustment needed below ----
 train_files="['$gsm8k_train', '$math_train']"
 val_files="['$gsm8k_test', '$math_test']"
 

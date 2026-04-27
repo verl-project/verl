@@ -12,6 +12,7 @@
 
 set -xeuo pipefail
 
+# ---- user-adjustable ----
 data_path=${data_path:-$HOME/data/geo3k}
 model_path=${model_path:-$HOME/model/Qwen3.5-35B-A3B}
 usp_size=${usp_size:-2}
@@ -71,7 +72,9 @@ ACTOR_VEOMNI_CONFIG="
     actor_rollout_ref.actor.veomni.ulysses_parallel_size=$usp_size \
     actor_rollout_ref.actor.veomni.expert_parallel_size=1 \
     actor_rollout_ref.actor.veomni.attn_implementation=flash_attention_2"
+# ---- end user-adjustable ----
 
+# ---- no user adjustment needed below ----
 # Actor model config
 ACTOR_CONFIG="
     actor_rollout_ref.actor.optim.lr=$actor_lr \

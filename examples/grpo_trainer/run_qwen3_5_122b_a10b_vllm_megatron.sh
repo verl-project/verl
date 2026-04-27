@@ -34,6 +34,7 @@ unset https_proxy
 # download geo3k dataset
 hf download tyzhu/geo3k --repo-type dataset --local-dir $HOME/data/geo3k
 
+# ---- user-adjustable ----
 test_files=${test_files:-$HOME/data/geo3k/test.parquet}
 train_files=${train_files:-$HOME/data/geo3k/train.parquet}
 HF_MODEL_PATH=${HF_MODEL_PATH:-"Qwen/Qwen3.5-122B-A10B"}
@@ -64,7 +65,9 @@ ALL_OFFLOAD=${ALL_OFFLOAD:-True}
 
 NODE_GPU_NUM=${NODE_GPU_NUM:-8}
 NODES_NUM=${NODES_NUM:-4}
+# ---- end user-adjustable ----
 
+# ---- no user adjustment needed below ----
 ########################### Parameter Arrays ###########################
 
 ACTOR=(

@@ -38,6 +38,7 @@ set -xeuo pipefail
 
 ########################### Quick Config ###########################
 
+# ---- user-adjustable ----
 TP=${TP:-2}
 PP=${PP:-1}
 CP=${CP:-1}
@@ -55,7 +56,9 @@ adv_estimator=grpo
 HF_MODEL_PATH=${HF_MODEL_PATH:-"Qwen3.5-35B-A3B"}
 train_path=${train_path:-$HOME/data/geo3k/train.parquet}
 test_path=${test_path:-$HOME/data/geo3k/test.parquet}
+# ---- end user-adjustable ----
 
+# ---- no user adjustment needed below ----
 ########################### Parameter Arrays ###########################
 
 DATA=(

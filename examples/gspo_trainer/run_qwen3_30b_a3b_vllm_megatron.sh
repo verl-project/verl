@@ -39,11 +39,12 @@ test_freq=${TEST_FREQ:-10}
 
 project_name=${PROJECT_NAME:-verl_gspo_qwen3_moe}
 experiment_name=${EXPERIMENT_NAME:-qwen3_30b_a3b_vllm_megatron}
-# ---- end user-adjustable ----
 
 train_file=${TRAIN_FILE:-$HOME/data/dapo-math-17k/train.parquet}
 val_file=${VAL_FILE:-$HOME/data/aime-2024/test.parquet}
+# ---- end user-adjustable ----
 
+# ---- no user adjustment needed below ----
 python3 -m verl.trainer.main_ppo \
     model_engine=megatron \
     algorithm.adv_estimator=grpo \

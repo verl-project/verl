@@ -13,6 +13,7 @@ set -xeuo pipefail
 
 ################################################### quick config ###################################################
 
+# ---- user-adjustable ----
 rollout_mode="async"
 return_raw_chat="False"
 rollout_name="vllm" # sglang or vllm
@@ -74,7 +75,9 @@ train_tp=8
 train_pp=1
 EP=8
 ETP=1
+# ---- end user-adjustable ----
 
+# ---- no user adjustment needed below ----
 ################################################### start of config ###################################################
 
 FP8=(
