@@ -20,11 +20,6 @@ from functools import partial
 from itertools import chain
 from typing import Optional
 
-try:
-    from verl.workers.engine.mindspeed.transformer_impl import repatch
-except ImportError:
-    repatch = None
-
 import torch
 from codetiming import Timer
 from omegaconf import DictConfig, open_dict
