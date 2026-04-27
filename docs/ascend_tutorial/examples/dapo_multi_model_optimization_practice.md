@@ -70,7 +70,7 @@ reward_model.overlong_buffer.penalty_factor=${overlong_penalty_factor}   #惩罚
 | CANN         | ==8.5                                                  |
 | torch        | ==2.8.0                                                    |
 | torch_npu    | ==2.8.0                                                    |
-| verl         | v0.7.1 commitId=252d76908b903ad8fb6969eb3a5e5f873c95ea2b |
+| verl         | v0.7.1 commitId=02e059ea18f5adf9768c5d9c280456cdfdfeda01 |
 | vllm         | v0.13.0                                                    |
 | vllm-ascend  | v0.13.0                                                |
 | transformers | 4.57.6                                                     |
