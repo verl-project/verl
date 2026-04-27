@@ -91,7 +91,7 @@ git checkout main
 
 Geometry3k 数据集是由加利福尼亚大学洛杉矶分校与浙江大学联合研发的几何领域专用数据集，核心面向视觉问答（VQA）任务展开研究与模型训练。该数据集总计包含 3002 个样本，采用图像和文本两种模态数据形式构建，其中文本模态涵盖各类几何问题描述，图像则以可视化图表呈现问题中的几何图形信息，包括三角形、圆形、四边形等基础几何形状，以及不同图形间的位置、嵌套、相交等关联关系。可以从Hugging Face库下载对应的原始数据集：[Geometry3k ](https://huggingface.co/datasets/hiyouga/geometry3k)
 
-```python
+```shell
 # 下载原始数据并预处理
 python ./examples/data_preprocess/geo3k.py --local_dir=./data/geo3k
 ```
@@ -124,7 +124,7 @@ export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2
 
 #### OpenEuler 操作系统
 
-执行如下命令重操作系统源安装jemalloc
+执行如下命令通过操作系统源安装jemalloc
 
 ```shell
 yum install jemalloc
@@ -188,12 +188,7 @@ TEST_FILE=$RAY_DATA_HOME/datasets/geo3k/test.parquet
 trainer.save_freq=-1
 ```
 
-对于单机任务 Qwen3-VL-30B , 修改脚本中参数`trainer.nnodes`为 1， `trainer.n_gpus_per_node` 为16，然后直接bash执行verl仓上示例脚本
-
-```
-bash recipe/dapo/run_dapo_qwen3_vl_30b_fsdp2_npu.sh
-```
-对于多节点任务 Qwen3-VL-30B ，我们推荐使用以下脚本进行大规模多节点训练拉起
+- 对于单机任务 Qwen3-VL-30B ，可以使用以下脚本将训练拉起。
 
 ```
 pkill -9 python
@@ -208,6 +203,32 @@ export LD_PRELOAD=/usr/local/lib/libjemalloc.so.2
 export USE_OPTIMIZED_MODEL=0
 export CPU_AFFINITY_CONF=2
 export HCCL_OP_EXPANSION_MODE="AIV"
+export VLLM_VERSION="0.13.0"
+
+# 修改为对应主节点IP
+MASTER_ADDR="IP FOR MASTER NODE"
+# 每个节点中 NPU 数
+NPUS_PER_NODE=16
+ray start --head --port 6766 --dashboard-host=$MASTER_ADDR --dashboard-port=8260 --resources='{"NPU": '$NPUS_PER_NODE'}'
+
+bash recipe/dapo/run_dapo_qwen3_vl_30b_fsdp2_npu.sh
+```
+- 对于多节点任务 Qwen3-VL-30B ，我们推荐使用以下脚本进行大规模多节点训练拉起，根据实际需要修改`NNODES`与`NPUS_PER_NODE` ，并修改配置脚本中参数`trainer.nnodes`和`trainer.n_gpus_per_node`与之相对应。
+
+```
+pkill -9 python
+ray stop --force
+rm -rf /tmp/ray
+export VLLM_USE_V1=1
+export HCCL_CONNECT_TIMEOUT=5400
+export VLLM_ASCEND_ENABLE_NZ=0
+export LD_PRELOAD=/usr/local/lib/libjemalloc.so.2
+# Some models are optimized by vllm ascend. While in some case, e.g. rlhf training, 
+# the optimized model may not be suitable. In this case, set this value to 0 to disable the optimized model.
+export USE_OPTIMIZED_MODEL=0
+export CPU_AFFINITY_CONF=2
+export HCCL_OP_EXPANSION_MODE="AIV"
+export VLLM_VERSION="0.13.0"
 
 # 修改为当前需要跑的用例路径
 DEFAULT_SH="./run_*.sh"
@@ -216,7 +237,9 @@ echo "Use $DEFAULT_SH"
 ulimit -n 32768
 mkdir logs
 
+# 集群中计算节点数
 NNODES=2
+# 每个节点中 NPU 数
 NPUS_PER_NODE=8
 # 修改为对应主节点IP
 MASTER_ADDR="IP FOR MASTER NODE"
