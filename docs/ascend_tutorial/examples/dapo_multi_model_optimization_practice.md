@@ -203,6 +203,7 @@ export LD_PRELOAD=/usr/local/lib/libjemalloc.so.2
 export USE_OPTIMIZED_MODEL=0
 export CPU_AFFINITY_CONF=2
 export HCCL_OP_EXPANSION_MODE="AIV"
+export VLLM_VERSION="0.13.0"
 
 # 修改为对应主节点IP
 MASTER_ADDR="IP FOR MASTER NODE"
@@ -227,6 +228,7 @@ export LD_PRELOAD=/usr/local/lib/libjemalloc.so.2
 export USE_OPTIMIZED_MODEL=0
 export CPU_AFFINITY_CONF=2
 export HCCL_OP_EXPANSION_MODE="AIV"
+export VLLM_VERSION="0.13.0"
 
 # 修改为当前需要跑的用例路径
 DEFAULT_SH="./run_*.sh"
