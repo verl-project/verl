@@ -427,6 +427,9 @@ def apply_monkey_patch(
             forward_with_normal_backend,
             patch_qwen3_vl_moe_sparse_moe_block_forward,
             qwen3_vl_base_forward,
+        )
+
+        from verl.models.transformers.qwen3_5 import (
             fast_pos_embed_interpolate,
         )
 
