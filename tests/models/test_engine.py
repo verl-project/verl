@@ -485,19 +485,22 @@ def _autocast_dtype_worker(rank: int, world_size: int, rendezvous_file: str, mod
         engine.initialize()
         return engine
 
-    # bf16 (default) resolves to torch.bfloat16
+    from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
+
+    # bf16 (default) resolves to torch.bfloat16, no scaler needed
     engine = build_engine({"param_dtype": "bf16", "reduce_dtype": "fp32", "buffer_dtype": "fp32"})
     assert engine._autocast_dtype == torch.bfloat16, f"expected bf16, got {engine._autocast_dtype}"
+    assert engine.scaler is None, "bf16 should not create a scaler"
 
-    # fp32 resolves to torch.float32 (forward_step will use nullcontext)
+    # fp32 resolves to torch.float32 (forward_step will use nullcontext), no scaler
     engine = build_engine({"param_dtype": "fp32", "reduce_dtype": "fp32", "buffer_dtype": "fp32"})
     assert engine._autocast_dtype == torch.float32, f"expected fp32, got {engine._autocast_dtype}"
+    assert engine.scaler is None, "fp32 should not create a scaler"
 
-    # fp16 is rejected until ShardedGradScaler is integrated
-    import pytest as _pytest
-
-    with _pytest.raises(NotImplementedError, match="fp16"):
-        build_engine({"param_dtype": "fp16", "reduce_dtype": "fp32", "buffer_dtype": "fp32"})
+    # fp16 gets a ShardedGradScaler for loss scaling during backward
+    engine = build_engine({"param_dtype": "fp16", "reduce_dtype": "fp32", "buffer_dtype": "fp32"})
+    assert engine._autocast_dtype == torch.float16, f"expected fp16, got {engine._autocast_dtype}"
+    assert isinstance(engine.scaler, ShardedGradScaler), "fp16 must create a ShardedGradScaler"
 
     dist.barrier()
     dist.destroy_process_group()

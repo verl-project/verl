@@ -340,14 +340,15 @@ class FSDPEngine(BaseEngine):
 
         mixed_precision = MixedPrecision(param_dtype=param_dtype, reduce_dtype=reduce_dtype, buffer_dtype=buffer_dtype)
 
-        # fp16 requires ShardedGradScaler (see #4036 for the legacy dp_actor pattern) which is
-        # not yet plumbed into this engine. Fail fast rather than silently producing bad grads.
-        if param_dtype == torch.float16:
-            raise NotImplementedError(
-                "mixed_precision.param_dtype=fp16 is not yet supported by this engine; "
-                "ShardedGradScaler integration is pending. Use bf16 or fp32."
-            )
         self._autocast_dtype = param_dtype
+        # fp16 training requires loss scaling to avoid gradient underflow. Mirror the pattern
+        # landed in #4036 for the legacy dp_actor path. bf16 / fp32 do not need a scaler.
+        if param_dtype == torch.float16:
+            from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
+
+            self.scaler = ShardedGradScaler(growth_interval=400)
+        else:
+            self.scaler = None
 
         auto_wrap_policy = get_fsdp_wrap_policy(
             module=module,
@@ -622,7 +623,10 @@ class FSDPEngine(BaseEngine):
                 loss, meta_info = self.forward_step(micro_batch, loss_function=loss_function, forward_only=forward_only)
 
                 if not forward_only:
-                    loss.backward()
+                    if self.scaler is not None:
+                        self.scaler.scale(loss).backward()
+                    else:
+                        loss.backward()
 
             output_lst.append(meta_info)
 
@@ -647,6 +651,11 @@ class FSDPEngine(BaseEngine):
         """
         assert self.optimizer_config.clip_grad is not None
 
+        # Unscale gradients before clip so the clip threshold is applied to true gradient
+        # magnitudes, not scaled ones. scaler.step() will skip the update if any grad is inf/nan.
+        if self.scaler is not None:
+            self.scaler.unscale_(self.optimizer)
+
         if isinstance(self.module, FSDP):
             grad_norm = self.module.clip_grad_norm_(self.optimizer_config.clip_grad)
         elif isinstance(self.module, FSDPModule):
@@ -659,12 +668,17 @@ class FSDPEngine(BaseEngine):
         if isinstance(grad_norm, DTensor):
             grad_norm = grad_norm.full_tensor()
 
-        # if grad_norm is not finite, skip the update
-        if not torch.isfinite(grad_norm):
-            print(f"WARN: grad_norm is not finite: {grad_norm}")
-            self.optimizer.zero_grad()
+        if self.scaler is not None:
+            # scaler handles inf/nan skipping internally via _check_inf_per_device.
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
         else:
-            self.optimizer.step()
+            # if grad_norm is not finite, skip the update
+            if not torch.isfinite(grad_norm):
+                print(f"WARN: grad_norm is not finite: {grad_norm}")
+                self.optimizer.zero_grad()
+            else:
+                self.optimizer.step()
 
         if self._qat_enabled:
             from verl.utils.qat.core import invalidate_all_scales
