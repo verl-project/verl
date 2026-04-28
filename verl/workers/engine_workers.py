@@ -451,6 +451,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self.actor: TrainingWorker = None
         self.ref: TrainingWorker = None
         self.rollout: BaseRollout = None
+        self._teacher_unembed: torch.Tensor | None = None
         assert self.role in ["actor", "rollout", "ref", "actor_rollout", "actor_rollout_ref"]
         self._is_actor = self.role in ["actor", "actor_rollout", "actor_rollout_ref"]
         self._is_rollout = self.role in ["rollout", "actor_rollout", "actor_rollout_ref"]
@@ -642,10 +643,32 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         return output.cpu() if output is not None else None
 
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def set_teacher_unembed(self, W: torch.Tensor) -> None:
+        """Store teacher lm_head.weight for Nitrobrew loss. TP ranks take their vocab shard."""
+        assert "actor" in self.role, "set_teacher_unembed is only valid for actor workers"
+        strategy = self.config.actor.get("strategy", "fsdp")
+        if strategy == "megatron":
+            from megatron.core.parallel_state import (
+                get_tensor_model_parallel_rank,
+                get_tensor_model_parallel_world_size,
+            )
+
+            tp_rank = get_tensor_model_parallel_rank()
+            tp_size = get_tensor_model_parallel_world_size()
+            V = W.shape[0]
+            shard = V // tp_size
+            W_local = W[tp_rank * shard : (tp_rank + 1) * shard]
+        else:
+            W_local = W
+        self._teacher_unembed = W_local.cuda()
+
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @DistProfiler.annotate(color="red", role="actor_update")
     @_with_routing_replay_flag(enabled=True)
     def update_actor(self, data: TensorDict) -> TensorDict:
+        if self._teacher_unembed is not None:
+            data["teacher_unembed"] = NonTensorData(self._teacher_unembed)
         output = self.actor.train_mini_batch(data=data)
         return output.cpu() if output is not None else None
 

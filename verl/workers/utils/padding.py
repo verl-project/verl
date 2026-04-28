@@ -93,6 +93,13 @@ def left_right_2_no_padding(data: TensorDict) -> TensorDict:
         data["teacher_logprobs"] = teacher_logprobs_nested
         data["teacher_ids"] = teacher_ids_nested
 
+    # (bsz, seqlen, D_t) -- Nitrobrew teacher hidden states
+    teacher_hidden_states = data.get("teacher_hidden_states", None)
+    if teacher_hidden_states is not None:
+        ths_rmpad = index_first_axis(teacher_hidden_states.unsqueeze(-1).flatten(0, 1), indices)
+        ths_nested = torch.nested.nested_tensor_from_jagged(ths_rmpad.squeeze(-1), offsets=cu_seqlens)
+        data["teacher_hidden_states"] = ths_nested
+
     return data
 
 

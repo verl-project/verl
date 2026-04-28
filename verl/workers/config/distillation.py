@@ -64,6 +64,7 @@ class DistillationLossConfig(BaseConfig):
 
     loss_mode: str = "k3"
     topk: Optional[int] = 128
+    kd_temperature: float = 1.0
     use_task_rewards: bool = True
     distillation_loss_coef: float = 1.0
     loss_max_clamp: Optional[float] = 10.0
@@ -157,7 +158,9 @@ class DistillationTeacherModelConfig(BaseConfig):
         if self.num_replicas is None:
             raise ValueError("num_replicas must be specified for distillation teacher model config.")
 
-    def validate_and_prepare_for_distillation(self, use_topk: bool, topk: Optional[int]) -> None:
+    def validate_and_prepare_for_distillation(
+        self, use_topk: bool, topk: Optional[int], use_hidden_states: bool = False
+    ) -> None:
         # Prompt + Response from student are fed into teacher as context
         max_model_len = self.inference.max_model_len
         student_prompt_length = self.inference.prompt_length
@@ -171,7 +174,8 @@ class DistillationTeacherModelConfig(BaseConfig):
             )
         self.inference.prompt_length = self.inference.prompt_length + self.inference.response_length
         self.inference.response_length = 1
-        self._validate_topk_logprobs(use_topk=use_topk, topk=topk)
+        if not use_hidden_states:
+            self._validate_topk_logprobs(use_topk=use_topk, topk=topk)
 
     def _validate_topk_logprobs(self, use_topk: bool, topk: Optional[int]) -> None:
         if not use_topk:
@@ -264,6 +268,7 @@ class DistillationConfig(BaseConfig):
             teacher_model.validate_and_prepare_for_distillation(
                 use_topk=self.distillation_loss.loss_settings.use_topk,
                 topk=self.distillation_loss.topk,
+                use_hidden_states=self.distillation_loss.loss_settings.use_hidden_states,
             )
             teacher_world_size_sum += teacher_model.world_size
         total_pool_size = self.n_gpus_per_node * self.nnodes
