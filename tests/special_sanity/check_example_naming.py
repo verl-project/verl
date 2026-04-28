@@ -16,14 +16,17 @@
 
 The current convention (see ``examples/README.md``) is::
 
-    run_<model>_<train-backend>[_<suffix>...].sh
+    run_<model>_<train-backend>.sh
 
 Where ``<train-backend>`` is one of ``fsdp``, ``fsdp2``, ``megatron``,
-``mindspeed``, ``automodel`` or ``veomni``. The legacy convention used to embed
-the inference backend (``vllm``/``sglang``/``trtllm``) and the platform suffix
-(``_npu``/``_amd``) into the filename. Those are merged into a single canonical
-script and exposed as env-var toggles, so embedding them in filenames is no
-longer allowed.
+``mindspeed``, ``automodel`` or ``veomni``, and **must be the last
+underscore-separated token before** ``.sh`` — nothing follows it. The legacy
+convention used to embed the inference backend (``vllm``/``sglang``/``trtllm``),
+platform tokens (``_npu``/``_amd``), machine-type tokens (``_gb200``,
+``_blackwell``), quantization variants (``_fp8``), and ad-hoc trailing
+suffixes into the filename. All of those are now merged into a single
+canonical script and selected at runtime via env-var toggles
+(``INFER_BACKEND``, ``DEVICE``, ``MACHINE``, ``QUANT``, ...).
 
 Usage::
 
@@ -42,20 +45,30 @@ import sys
 from pathlib import Path
 
 # Tokens that may NOT appear as a word in the filename. They used to be
-# embedded as ``_vllm_fsdp``/``_sglang_fsdp``/``_trtllm_fsdp``/``_npu`` etc.;
-# the active convention exposes them via env-var toggles instead.
+# embedded as ``_vllm_fsdp``/``_sglang_fsdp``/``_trtllm_fsdp``/``_npu``/
+# ``_gb200``/``_fp8`` etc.; the active convention exposes them via env-var
+# toggles instead.
 FORBIDDEN_TOKENS = (
+    # Inference backends.
     "vllm",
     "sglang",
     "trtllm",
+    # Platform / accelerator vendors.
     "npu",
     "amd",
+    # Specific GPU machine types — selected at runtime via ``MACHINE`` env
+    # var, never embedded in filenames.
+    "gb200",
+    "b200",
+    "blackwell",
+    # Quantization variants.
+    "fp8",
 )
 
-# Recognised train-backend / engine markers. At least one of these must be
-# present somewhere in the filename (after the model identifier). Generation
-# scripts that do not run a trainer are listed in ``DEFAULT_IGNORE_FILES``
-# instead.
+# Recognised train-backend / engine markers. The filename must end with
+# ``_<one of these>.sh`` (i.e. the train-backend is the LAST underscore-
+# separated token). Generation-only scripts that do not run a trainer are
+# listed in ``DEFAULT_IGNORE_FILES`` instead.
 ALLOWED_BACKENDS = (
     "fsdp",
     "fsdp2",
@@ -72,6 +85,9 @@ DEFAULT_IGNORE_DIRS = (
     "examples/profile",
     "examples/tutorial",
     "examples/vllm_omni",
+    # MTP scripts encode async/multinode dispatch in the filename; they pre-
+    # date this convention. Migrate separately rather than block this hook.
+    "examples/mtp_trainer",
 )
 
 # Individual files that are exempt. Use sparingly and document why.
@@ -82,6 +98,11 @@ DEFAULT_IGNORE_FILES = (
     # token in the name refers to that rollout variant rather than a train
     # backend, and this is the only example in flowgrpo_trainer/.
     "examples/flowgrpo_trainer/run_qwen_image_omni_lora.sh",
+    # Sibling of run_qwen2_5_7b_fsdp.sh that adds a multi-rollout-server
+    # dispatch flavour the canonical script does not yet expose. Migrate by
+    # folding ``_multi_rs`` into a ROLLOUT_SERVER env-var toggle rather than
+    # in this PR.
+    "examples/rollout_correction/run_qwen2_5_7b_fsdp_multi_rs.sh",
 )
 
 
@@ -113,7 +134,7 @@ def check_filename(path: Path, display: str | None = None) -> list[str]:
     shown = display if display is not None else str(path)
 
     if not name.startswith("run_"):
-        errors.append(f"{shown}: example script must be named 'run_<model>_<backend>[_<suffix>].sh'")
+        errors.append(f"{shown}: example script must be named 'run_<model>_<train-backend>.sh'")
         return errors
 
     if not name.endswith(".sh"):
@@ -126,17 +147,20 @@ def check_filename(path: Path, display: str | None = None) -> list[str]:
     if found_forbidden:
         errors.append(
             f"{shown}: filename contains forbidden token(s) {found_forbidden}. "
-            f"Inference-backend ({{vllm,sglang,trtllm}}) and platform ({{npu,amd}}) "
-            f"selections must be exposed as env-var toggles inside the script, "
-            f"not embedded in the filename."
+            f"Inference-backend ({{vllm,sglang,trtllm}}), platform ({{npu,amd}}), "
+            f"machine-type ({{gb200,b200,blackwell}}), and quantization "
+            f"({{fp8}}) selections must be exposed as env-var toggles inside "
+            f"the script, not embedded in the filename."
         )
 
-    if not any(t in ALLOWED_BACKENDS for t in tokens):
+    if not tokens or tokens[-1] not in ALLOWED_BACKENDS:
         errors.append(
-            f"{shown}: filename must include exactly one train-backend token from "
-            f"{list(ALLOWED_BACKENDS)} (e.g. 'run_qwen3_8b_fsdp.sh'). If this is an "
-            f"intentional exception, add it to DEFAULT_IGNORE_FILES or pass "
-            f"'--ignore-files {shown}'."
+            f"{shown}: filename must end with '_<train-backend>.sh' where "
+            f"train-backend ∈ {list(ALLOWED_BACKENDS)} "
+            f"(e.g. 'run_qwen3_8b_fsdp.sh'). Anything after the train-backend "
+            f"(e.g. '_fp8', '_gb200', '_multi_rs') must be folded into an "
+            f"env-var toggle. If this is an intentional exception, add it to "
+            f"DEFAULT_IGNORE_FILES or pass '--ignore-files {shown}'."
         )
 
     return errors
@@ -208,9 +232,9 @@ def main(argv: list[str] | None = None) -> int:
             print("  - " + err, file=sys.stderr)
         print(
             "\nNaming convention (see examples/README.md):\n"
-            "  run_<model>_<train-backend>[_<suffix>].sh\n"
+            "  run_<model>_<train-backend>.sh   (train-backend is the LAST token)\n"
             f"  train-backend ∈ {list(ALLOWED_BACKENDS)}\n"
-            f"  must NOT contain {list(FORBIDDEN_TOKENS)} as a word.\n",
+            f"  must NOT contain any of {list(FORBIDDEN_TOKENS)} as a word.\n",
             file=sys.stderr,
         )
         return 1

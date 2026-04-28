@@ -13,26 +13,27 @@ All run scripts follow the same shape:
 1. Canonical filename:
 
    ```
-   run_<model>_<train-backend>[_<suffix>].sh
+   run_<model>_<train-backend>.sh
    ```
 
    - `<model>`: a single canonical size per model family. E.g.
      `qwen3_8b`, `qwen3_30b_a3b`, `qwen3_235b_a22b`, `qwen3_vl_8b`,
      `deepseek_v3`, `mimo_7b`, `nemotron_nano_v3`.
    - `<train-backend>`: one of `fsdp`, `fsdp2`, `megatron`, `mindspeed`,
-     `automodel`, or `veomni`.
-   - `<suffix>` (optional): one or more tokens describing a meaningful
-     variation that cannot be expressed via env vars (e.g. `_lora`,
-     `_merge`, `_from_adapter`, `_multi_rs`, `_fp8`, `_gb200`).
+     `automodel`, or `veomni`. **Must be the last underscore-separated
+     token before `.sh`**.
 
-   Per-example *features* — including the inference backend
-   (`vllm`/`sglang`/`trtllm`), the platform (`npu`/`amd` vs CUDA), Liger
-   kernel, LoRA, sequence parallel size, server vs sync rollout, etc. — do
-   **not** show up in filenames. They are exposed as env-var toggles inside
-   the one canonical script. For example, `sft/gsm8k/run_qwen2_5_0_5b_fsdp.sh`
+   Nothing follows `<train-backend>`. Per-example *features* — including
+   the inference backend (`vllm`/`sglang`/`trtllm`), the platform
+   (`npu`/`amd` vs CUDA), the GPU machine type (`gb200`/`b200`/`blackwell`,
+   selected with `MACHINE=`), Liger kernel, LoRA, FP8 quantization,
+   sequence parallel size, server vs sync rollout, etc. — do **not** show
+   up in filenames. They are exposed as env-var toggles inside the one
+   canonical script. For example, `sft/gsm8k/run_qwen2_5_0_5b_fsdp.sh`
    covers plain SFT and its `USE_LIGER=1`, `SP_SIZE=2`, `USE_PEFT=1`
    variants via env vars; `grpo_trainer/run_qwen3_8b_fsdp.sh` covers vLLM,
-   SGLang, and TRT-LLM rollouts and CUDA/NPU platforms via toggles.
+   SGLang, and TRT-LLM rollouts, CUDA/NPU platforms, and `MACHINE=gb200`
+   (Blackwell) via toggles.
 
    This naming rule is enforced by the `check-example-naming` pre-commit
    hook (see `tests/special_sanity/check_example_naming.py`).

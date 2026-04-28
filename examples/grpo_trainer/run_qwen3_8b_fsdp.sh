@@ -3,12 +3,20 @@
 #
 # INFER_BACKEND controls rollout backend: vllm, sglang, or trtllm.
 # DEVICE controls hardware path: gpu or npu. TensorRT-LLM is GPU-only.
+# MACHINE is a free-form tag for machine-type tweaks (e.g. gb200, b200, h200).
+# Unknown values are accepted and only affect the experiment_name; add an
+# `if [ "${MACHINE}" = <tag> ]` block below to bundle hardware-specific
+# overrides. Bundled today:
+#   - gb200: Blackwell SM100 — enforce_eager=True, FSDP model_dtype=bfloat16,
+#     SGLang attention_backend=flashinfer (FA3 unsupported on SM>90),
+#     ray_init.num_gpus pinned (Docker --privileged bypasses GPU autodetect).
 
 set -xeuo pipefail
 
 # ---- user-adjustable ----
 DEVICE=${DEVICE:-gpu}
 INFER_BACKEND=${INFER_BACKEND:-vllm}
+MACHINE=${MACHINE:-}    # special for "gb200"
 
 MODEL_PATH=${MODEL_PATH:-Qwen/Qwen3-8B}
 NNODES=${NNODES:-1}
@@ -94,16 +102,35 @@ if [ "${DEVICE}" = npu ]; then
         optional_ppo_args+=(+actor_rollout_ref.rollout.engine_kwargs.sglang.attention_backend=ascend)
     fi
 else
-    NGPUS_PER_NODE=${NGPUS_PER_NODE:-8}
+    if [ "${MACHINE}" = gb200 ]; then
+        NGPUS_PER_NODE=${NGPUS_PER_NODE:-4}
+    else
+        NGPUS_PER_NODE=${NGPUS_PER_NODE:-8}
+    fi
     n_trainer_devices=${NGPUS_PER_NODE}
     rollout_tp=${rollout_tp:-2}
     rollout_gpu_mem_util=${rollout_gpu_mem_util:-0.6}
-    experiment_name=${experiment_name:-qwen3_8b_${INFER_BACKEND}_fsdp}
+    experiment_name=${experiment_name:-qwen3_8b_${INFER_BACKEND}_fsdp${MACHINE:+_${MACHINE}}}
 
     if [ "${INFER_BACKEND}" = trtllm ]; then
         optional_ppo_args+=(actor_rollout_ref.hybrid_engine=True)
     else
         optional_ppo_args+=(actor_rollout_ref.rollout.mode=async)
+    fi
+
+    if [ "${MACHINE}" = gb200 ]; then
+        # Blackwell SM100: see header comment for rationale of each override.
+        optional_ppo_args+=(
+            actor_rollout_ref.rollout.enforce_eager=True
+            actor_rollout_ref.rollout.free_cache_engine=True
+            actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16
+            "+ray_kwargs.ray_init.num_gpus=${NGPUS_PER_NODE}"
+        )
+        if [ "${INFER_BACKEND}" = sglang ]; then
+            optional_ppo_args+=(
+                "+actor_rollout_ref.rollout.engine_kwargs.sglang.attention_backend=flashinfer"
+            )
+        fi
     fi
 fi
 # ---- end device / backend defaults ----

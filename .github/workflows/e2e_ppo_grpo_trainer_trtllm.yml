@@ -77,7 +77,7 @@ on:
       - "examples/data_preprocess/aime2024_multiturn_w_tool.py"
       - "examples/grpo_trainer/run_qwen3_8b_fsdp.sh"
       - "examples/grpo_trainer/run_qwen3_8b_megatron.sh"
-      - "examples/grpo_trainer/run_qwen3_30b_a3b_megatron_fp8.sh"
+      - "examples/grpo_trainer/run_qwen3_30b_a3b_megatron.sh"
       # add back when ppo flow is ready
       # - "tests/special_e2e/run_ppo_trainer_megatron.sh"
       # - "verl/trainer/main_ppo.py"
@@ -305,7 +305,7 @@ jobs:
           export INFER_TP=2 ACTOR_TP=2 ACTOR_PP=2 ACTOR_VPP=2 ACTOR_EP=1 ACTOR_CP=2 REF_TP=2 REF_PP=2 REF_VPP=2 REF_EP=1 REF_CP=2 GEN_MOE_TP=null GEN_MOE_EP=null
           export NNODES=1 GPUS_PER_NODE=8 TRTLLM_MOE_BACKEND=TRITON
           export DATA_DIR=${PWD} DAPO_MATH_TRAIN=${PWD}/data/dapo-math-17k/train.parquet AIME_VAL=${PWD}/data/aime-2024/train.parquet MODEL_PATH=${HOME}/models/Qwen/Qwen3-0.6B
-          bash examples/grpo_trainer/run_qwen3_30b_a3b_megatron_fp8.sh \
+          INFER_BACKEND=trtllm ROLLOUT_QUANTIZATION=fp8 bash examples/grpo_trainer/run_qwen3_30b_a3b_megatron.sh \
             reward_model.reward_kwargs.overlong_buffer_cfg.len=258 \
             reward_model.reward_kwargs.max_resp_len=512 \
             data.max_prompt_length=128 \

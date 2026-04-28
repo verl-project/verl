@@ -34,10 +34,11 @@ def test_canonical_name_passes():
     assert _violations("run_qwen3_8b_fsdp.sh") == []
 
 
-def test_canonical_name_with_suffix_passes():
-    assert _violations("run_qwen3_8b_fsdp_gb200.sh") == []
-    assert _violations("run_qwen3_30b_a3b_megatron_fp8.sh") == []
+def test_pre_backend_suffix_passes():
+    # Tokens before the train-backend are part of <model>; only the trailing
+    # token is constrained.
     assert _violations("run_qwen3_8b_from_adapter_fsdp.sh") == []
+    assert _violations("run_qwen3_8b_merge_fsdp.sh") == []
 
 
 def test_all_train_backends_accepted():
@@ -47,12 +48,32 @@ def test_all_train_backends_accepted():
 
 def test_forbidden_engine_token_rejected():
     errs = _violations("run_qwen3_8b_vllm_fsdp.sh")
-    assert errs and "vllm" in errs[0]
+    # `vllm` is both a forbidden token AND occupies the last-token slot
+    # (`fsdp` is no longer last). Ensure at least one error mentions vllm.
+    assert errs and any("vllm" in e for e in errs)
 
 
 def test_forbidden_platform_token_rejected():
     errs = _violations("run_qwen3_8b_fsdp_npu.sh")
-    assert errs and "npu" in errs[0]
+    assert errs and any("npu" in e for e in errs)
+
+
+def test_forbidden_quantization_token_rejected():
+    errs = _violations("run_qwen3_30b_a3b_megatron_fp8.sh")
+    assert errs and any("fp8" in e for e in errs)
+
+
+def test_forbidden_machine_token_rejected():
+    errs = _violations("run_qwen3_8b_fsdp_gb200.sh")
+    assert errs and any("gb200" in e for e in errs)
+
+
+def test_trailing_suffix_after_backend_rejected():
+    # Even if no token is in FORBIDDEN_TOKENS, anything after the train-
+    # backend is a violation: the train-backend MUST be the last token.
+    errs = _violations("run_qwen3_8b_fsdp_extra.sh")
+    assert errs
+    assert any("must end with '_<train-backend>.sh'" in e for e in errs)
 
 
 def test_missing_train_backend_rejected():
@@ -66,11 +87,11 @@ def test_non_run_prefix_rejected():
 
 
 def test_forbidden_tokens_kept_in_sync_with_legacy_pattern():
-    # If we ever forget to forbid one of the deprecated infer-backend tokens,
-    # this test would also start failing because at least one filename in
-    # the pre-refactor era used each of these.
-    for tok in ("vllm", "sglang", "trtllm"):
-        assert tok in FORBIDDEN_TOKENS
+    # If we ever forget to forbid one of the deprecated tokens, this test
+    # would also start failing because at least one filename in the pre-
+    # refactor era used each of these.
+    for tok in ("vllm", "sglang", "trtllm", "npu", "gb200", "fp8"):
+        assert tok in FORBIDDEN_TOKENS, tok
 
 
 def test_repo_tree_passes(tmp_path):
