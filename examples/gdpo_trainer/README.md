@@ -6,7 +6,7 @@ GDPO is a multi-reward, rubric-style variant whose advantage estimator aggregate
 
 | Script                               | Infer | Train | Platform |
 |--------------------------------------|-------|-------|----------|
-| `run_qwen3_8b_vllm_fsdp.sh`          | vLLM  | FSDP  | NVIDIA   |
+| `run_qwen3_8b_fsdp.sh`          | vLLM  | FSDP  | NVIDIA   |
 
 Prepare a rubric-style dataset (e.g. `rlla_4k`) and point `DATA_DIR` to it.
 

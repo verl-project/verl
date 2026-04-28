@@ -80,14 +80,14 @@ The Dual-Clip PPO introduces a approach by applying a lower bound to the policy 
 
 ## Canonical Scripts
 
-All scripts follow the `run_<model>_<infer-backend>_<train-backend>[_<platform>].sh` naming convention, use `MODEL_PATH` as an env var (override like `MODEL_PATH=Qwen/Qwen3-14B bash run_qwen3_8b_vllm_fsdp.sh`), enable dynamic batch size and batch balancing by default, and only use current-API Hydra overrides.
+All scripts follow the `run_<model>_<infer-backend>_<train-backend>[_<platform>].sh` naming convention, use `MODEL_PATH` as an env var (override like `MODEL_PATH=Qwen/Qwen3-14B bash run_qwen3_8b_fsdp.sh`), enable dynamic batch size and batch balancing by default, and only use current-API Hydra overrides.
 
 | Script                                  | Infer  | Train    | Platform |
 |-----------------------------------------|--------|----------|----------|
-| `run_qwen3_8b_vllm_fsdp.sh`             | vLLM   | FSDP     | NVIDIA   |
-| `run_qwen3_8b_sglang_fsdp.sh`           | SGLang | FSDP     | NVIDIA   |
-| `run_qwen3_8b_vllm_megatron.sh`         | vLLM   | Megatron | NVIDIA   |
-| `run_qwen3_8b_vllm_fsdp_npu.sh`         | vLLM   | FSDP     | Ascend   |
+| `run_qwen3_8b_fsdp.sh`             | vLLM   | FSDP     | NVIDIA   |
+| `run_qwen3_8b_fsdp.sh`           | SGLang | FSDP     | NVIDIA   |
+| `run_qwen3_8b_megatron.sh`         | vLLM   | Megatron | NVIDIA   |
+| `run_qwen3_8b_fsdp.sh`         | vLLM   | FSDP     | Ascend   |
 
 Default dataset: GSM8K + MATH. Override `TRAIN_BATCH_SIZE`, `PPO_MINI_BATCH_SIZE`, `ACTOR_LR`, `CRITIC_LR`, `ROLLOUT_TP`, `NNODES`, `NGPUS_PER_NODE`, etc. via env vars listed at the top of each script.
 

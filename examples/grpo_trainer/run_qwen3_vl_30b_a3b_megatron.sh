@@ -4,7 +4,7 @@ export CUDA_DEVICE_MAX_CONNECTIONS=1 # For megatron communication/computation ov
 export VLLM_ALLREDUCE_USE_SYMM_MEM=0 # for vllm0.11.0 with TP
 
 # ---- user-adjustable ----
-ENGINE=${ENGINE:-${1:-vllm}}
+INFER_BACKEND=${INFER_BACKEND:-vllm}
 HF_MODEL_PATH=${HF_MODEL_PATH:-"${RAY_DATA_HOME}/models/Qwen3-VL-30B-A3B-Instruct"}
 TRAIN_FILE=${TRAIN_FILE:-$HOME/data/geo3k/train.parquet}
 TEST_FILE=${TEST_FILE:-$HOME/data/geo3k/test.parquet}
@@ -73,7 +73,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU} \
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU} \
-    actor_rollout_ref.rollout.name=$ENGINE \
+    actor_rollout_ref.rollout.name=${INFER_BACKEND} \
     +actor_rollout_ref.rollout.engine_kwargs.vllm.mm_processor_cache_gb=0 \
     actor_rollout_ref.rollout.gpu_memory_utilization=${ROLLOUT_GPU_MEM_UTIL} \
     actor_rollout_ref.rollout.n=${ROLLOUT_N} \

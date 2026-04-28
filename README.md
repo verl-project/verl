@@ -88,14 +88,14 @@ verl is fast with:
 
 - **FSDP**, **FSDP2** and **Megatron-LM** for training.
 - **vLLM**, **SGLang** and **HF Transformers** for rollout generation.
-- Compatible with Hugging Face Transformers and Modelscope Hub: [Qwen-3](https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3_8b_vllm_fsdp.sh), Qwen-2.5, Llama3.1, Gemma2, DeepSeek-LLM, etc
+- Compatible with Hugging Face Transformers and Modelscope Hub: [Qwen-3](https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3_8b_fsdp.sh), Qwen-2.5, Llama3.1, Gemma2, DeepSeek-LLM, etc
 - Supervised fine-tuning.
 - Reinforcement learning with [PPO](examples/ppo_trainer/), [GRPO](examples/grpo_trainer/), [GSPO](https://github.com/verl-project/verl-recipe/tree/main/gspo/), [ReMax](examples/remax_trainer/), [REINFORCE++](https://verl.readthedocs.io/en/latest/examples/config.html#algorithm), [RLOO](examples/rloo_trainer/), [PRIME](https://github.com/verl-project/verl-recipe/tree/main/prime/), [DAPO](https://github.com/verl-project/verl-recipe/tree/main/dapo/), [DrGRPO](https://github.com/verl-project/verl-recipe/tree/main/drgrpo), [KL_Cov & Clip_Cov](https://github.com/verl-project/verl-recipe/tree/main/entropy) etc.
   - Support model-based reward and function-based reward (verifiable reward) for math, [coding](https://github.com/verl-project/verl-recipe/tree/main/dapo), etc
-  - Support vision-language models (VLMs) and [multi-modal RL](examples/grpo_trainer/run_qwen2_5_vl_7b_vllm_fsdp.sh) with Qwen2.5-vl, Kimi-VL
+  - Support vision-language models (VLMs) and [multi-modal RL](examples/grpo_trainer/run_qwen2_5_vl_7b_fsdp.sh) with Qwen2.5-vl, Kimi-VL
   - [Multi-turn with tool calling](https://github.com/verl-project/verl/tree/main/examples/sglang_multiturn)
 - LLM alignment recipes such as [Self-play preference optimization (SPPO)](https://github.com/verl-project/verl-recipe/tree/main/sppo)
-- Flash attention 2, sequence packing, sequence parallelism via DeepSpeed Ulysses, [LoRA](examples/tuning/lora/run_qwen3_8b_vllm_fsdp.sh), [Liger-kernel](examples/sft/gsm8k/run_qwen2_5_0_5b_fsdp.sh) (`USE_LIGER=1`).
+- Flash attention 2, sequence packing, sequence parallelism via DeepSpeed Ulysses, [LoRA](examples/tuning/lora/run_qwen3_8b_fsdp.sh), [Liger-kernel](examples/sft/gsm8k/run_qwen2_5_0_5b_fsdp.sh) (`USE_LIGER=1`).
 - Scales up to 671B models and hundreds of GPUs with [expert parallelism](https://github.com/verl-project/verl/pull/1467)
 - Multi-gpu [LoRA RL](https://verl.readthedocs.io/en/latest/advance/ppo_lora.html) support to save memory.
 - Experiment tracking with wandb, swanlab, mlflow and tensorboard.

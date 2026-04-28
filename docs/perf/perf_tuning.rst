@@ -146,7 +146,7 @@ Dynamic Batch Size Tuning tips
 Here're some tips to tune the above parameters:
 
 1. **Increase** ``actor_rollout_ref.actor.ppo_max_token_len_per_gpu``  
-   Make it at least 2 x (max_prompt_length + max_response_length). See `run_qwen3_8b_vllm_fsdp.sh <https://github.com/verl-project/verl/blob/main/examples/ppo_trainer/run_qwen3_8b_vllm_fsdp.sh>`_ for an example.
+   Make it at least 2 x (max_prompt_length + max_response_length). See `run_qwen3_8b_fsdp.sh <https://github.com/verl-project/verl/blob/main/examples/ppo_trainer/run_qwen3_8b_fsdp.sh>`_ for an example.
    Try to increase it to get higher throughput.
 
 2. **Forward-only parameters can be larger**: 
@@ -154,7 +154,7 @@ Here're some tips to tune the above parameters:
  
 3. **Use larger limits for Critic and Reward models**:
    Critic and Reward parameters can be set at least 2× the Actor’s limits. See  
-   `run_qwen3_8b_vllm_fsdp.sh <https://github.com/verl-project/verl/blob/main/examples/ppo_trainer/run_qwen3_8b_vllm_fsdp.sh>`_ for an example.
+   `run_qwen3_8b_fsdp.sh <https://github.com/verl-project/verl/blob/main/examples/ppo_trainer/run_qwen3_8b_fsdp.sh>`_ for an example.
    
 .. :math:`\text{critic.ppo_max_token_len_per_gpu}  = 2 \times  \text{actor.ppo_max_token_len_per_gpu})`.
 

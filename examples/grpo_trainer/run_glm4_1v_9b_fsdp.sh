@@ -1,7 +1,7 @@
 set -x
 
 # ---- user-adjustable ----
-ENGINE=${ENGINE:-${1:-vllm}}
+INFER_BACKEND=${INFER_BACKEND:-vllm}
 MODEL_PATH=${MODEL_PATH:-zai-org/GLM-4.1V-9B-Thinking}
 TRAIN_FILE=${TRAIN_FILE:-$HOME/data/geo3k/train.parquet}
 TEST_FILE=${TEST_FILE:-$HOME/data/geo3k/test.parquet}
@@ -56,7 +56,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=${LOG_PROB_MICRO_BATCH_SIZE_PER_GPU} \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${ROLLOUT_TP} \
-    actor_rollout_ref.rollout.name=$ENGINE \
+    actor_rollout_ref.rollout.name=${INFER_BACKEND} \
     +actor_rollout_ref.rollout.engine_kwargs.vllm.mm_processor_cache_gb=0 \
     actor_rollout_ref.rollout.gpu_memory_utilization=${ROLLOUT_GPU_MEM_UTIL} \
     actor_rollout_ref.rollout.enable_chunked_prefill=False \

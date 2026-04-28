@@ -3,11 +3,11 @@
 #
 # Topologies (examples):
 #   # 8xGPU (default)
-#   bash run_qwen2_5_3b_geo3k_multiturn_sglang_fsdp.sh
+#   bash run_qwen2_5_3b_geo3k_multiturn_fsdp.sh
 #
 #   # 4xGPU
 #   NGPUS_PER_NODE=4 ROLLOUT_TP=2 ROLLOUT_GPU_MEM_UTIL=0.5 \
-#       bash run_qwen2_5_3b_geo3k_multiturn_sglang_fsdp.sh
+#       bash run_qwen2_5_3b_geo3k_multiturn_fsdp.sh
 
 set -xeuo pipefail
 

@@ -6,7 +6,7 @@ OTB uses a token-wise optimal variance-reduction baseline derived from the per-p
 
 | Script                               | Infer | Train | Platform |
 |--------------------------------------|-------|-------|----------|
-| `run_qwen3_8b_vllm_fsdp.sh`          | vLLM  | FSDP  | NVIDIA   |
+| `run_qwen3_8b_fsdp.sh`          | vLLM  | FSDP  | NVIDIA   |
 
 Set `ADV_ESTIMATOR=tir_optimal_token_baseline` for the TIR variant.
 

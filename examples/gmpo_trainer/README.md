@@ -34,7 +34,7 @@ We observed that using a large clip ratio during Mixture-of-Experts (MoE) model 
 To get started quickly:
 
 ```bash
-bash examples/gmpo_trainer/run_qwen3_8b_vllm_fsdp.sh
+bash examples/gmpo_trainer/run_qwen3_8b_fsdp.sh
 # override any of MODEL_PATH, CLIP_RATIO, ROLLOUT_N, etc. via env vars
 ```
 

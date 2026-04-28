@@ -8,9 +8,9 @@ Reference: [Group Sequence Policy Optimization](https://arxiv.org/abs/2507.18071
 
 | Script                                      | Infer | Train    | Platform |
 |---------------------------------------------|-------|----------|----------|
-| `run_qwen3_8b_vllm_fsdp.sh`                 | vLLM  | FSDP     | NVIDIA   |
-| `run_qwen3_8b_vllm_fsdp_npu.sh`             | vLLM  | FSDP     | Ascend   |
-| `run_qwen3_30b_a3b_vllm_megatron.sh`        | vLLM  | Megatron | NVIDIA   |
+| `run_qwen3_8b_fsdp.sh`                 | vLLM  | FSDP     | NVIDIA   |
+| `run_qwen3_8b_fsdp.sh`             | vLLM  | FSDP     | Ascend   |
+| `run_qwen3_30b_a3b_megatron.sh`        | vLLM  | Megatron | NVIDIA   |
 
 ## Key Flags
 

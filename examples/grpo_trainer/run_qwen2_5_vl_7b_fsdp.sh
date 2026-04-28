@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
-# GRPO | vision | SGLang rollout | FSDP training | NVIDIA GPUs
+# GRPO | Qwen2.5-VL-7B | FSDP training | NVIDIA GPUs
+#
+# INFER_BACKEND controls rollout backend: vllm, sglang, or trtllm.
 
 set -xeuo pipefail
 
 # ---- user-adjustable ----
+INFER_BACKEND=${INFER_BACKEND:-vllm}
+
 MODEL_PATH=${MODEL_PATH:-Qwen/Qwen2.5-VL-7B-Instruct}
 NNODES=${NNODES:-1}
 NGPUS_PER_NODE=${NGPUS_PER_NODE:-8}
@@ -18,8 +22,8 @@ actor_lr=${ACTOR_LR:-1e-6}
 kl_loss_coef=${KL_LOSS_COEF:-0.01}
 entropy_coeff=${ENTROPY_COEFF:-0}
 
-rollout_tp=${ROLLOUT_TP:-1}
-rollout_gpu_mem_util=${ROLLOUT_GPU_MEM_UTIL:-0.85}
+rollout_tp=${ROLLOUT_TP:-}
+rollout_gpu_mem_util=${ROLLOUT_GPU_MEM_UTIL:-}
 rollout_n=${ROLLOUT_N:-5}
 
 total_epochs=${TOTAL_EPOCHS:-15}
@@ -27,8 +31,48 @@ save_freq=${SAVE_FREQ:-20}
 test_freq=${TEST_FREQ:-5}
 
 project_name=${PROJECT_NAME:-verl_grpo_geo3k}
-experiment_name=${EXPERIMENT_NAME:-qwen2_5_vl_7b_sglang_fsdp}
+experiment_name=${EXPERIMENT_NAME:-qwen2_5_vl_7b_${INFER_BACKEND}_fsdp}
 # ---- end user-adjustable ----
+
+# ---- backend defaults (normally leave as-is) ----
+case "${INFER_BACKEND}" in
+    vllm | sglang | trtllm) ;;
+    *)
+        echo "INFER_BACKEND must be vllm, sglang, or trtllm, got: ${INFER_BACKEND}" >&2
+        exit 1
+        ;;
+esac
+
+optional_ppo_args=()
+actor_strategy_args=()
+if [ "${INFER_BACKEND}" = sglang ]; then
+    rollout_tp=${rollout_tp:-1}
+    rollout_gpu_mem_util=${rollout_gpu_mem_util:-0.85}
+    optional_ppo_args+=(
+        actor_rollout_ref.rollout.mode=async
+        actor_rollout_ref.rollout.multi_stage_wake_up=True
+        actor_rollout_ref.rollout.enable_chunked_prefill=False
+        actor_rollout_ref.rollout.enforce_eager=False
+        actor_rollout_ref.rollout.free_cache_engine=True
+    )
+elif [ "${INFER_BACKEND}" = trtllm ]; then
+    rollout_tp=${rollout_tp:-2}
+    rollout_gpu_mem_util=${rollout_gpu_mem_util:-0.6}
+    actor_strategy_args+=(actor_rollout_ref.actor.strategy=fsdp2)
+    optional_ppo_args+=(actor_rollout_ref.hybrid_engine=True)
+else
+    rollout_tp=${rollout_tp:-2}
+    rollout_gpu_mem_util=${rollout_gpu_mem_util:-0.6}
+    optional_ppo_args+=(
+        actor_rollout_ref.model.use_fused_kernels=True
+        actor_rollout_ref.rollout.mode=async
+        +actor_rollout_ref.rollout.engine_kwargs.vllm.mm_processor_cache_gb=0
+        actor_rollout_ref.rollout.enable_chunked_prefill=False
+        actor_rollout_ref.rollout.enforce_eager=False
+        actor_rollout_ref.rollout.free_cache_engine=True
+    )
+fi
+# ---- end backend defaults ----
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
@@ -54,14 +98,9 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.entropy_coeff=${entropy_coeff} \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
-    actor_rollout_ref.rollout.name=sglang \
-    actor_rollout_ref.rollout.mode=async \
-    actor_rollout_ref.rollout.multi_stage_wake_up=True \
+    actor_rollout_ref.rollout.name=${INFER_BACKEND} \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${rollout_tp} \
     actor_rollout_ref.rollout.gpu_memory_utilization=${rollout_gpu_mem_util} \
-    actor_rollout_ref.rollout.enable_chunked_prefill=False \
-    actor_rollout_ref.rollout.enforce_eager=False \
-    actor_rollout_ref.rollout.free_cache_engine=True \
     actor_rollout_ref.rollout.n=${rollout_n} \
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${ppo_max_token_len_per_gpu} \
@@ -76,4 +115,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.nnodes=${NNODES} \
     trainer.save_freq=${save_freq} \
     trainer.test_freq=${test_freq} \
-    trainer.total_epochs=${total_epochs} "$@"
+    trainer.total_epochs=${total_epochs} \
+    "${actor_strategy_args[@]}" \
+    "${optional_ppo_args[@]}" \
+    "$@"

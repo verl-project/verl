@@ -151,7 +151,7 @@ Make sure you use Megatron-Bridge later than 0.2.0, and we recommended using `th
         freeze_vision_projection: True
         freeze_language_model: True
 
-LoRA training experiment with Qwen3-8B on 8 * H200 single node comparing FSDP and Megatron backend (script adapted from examples/tuning/lora/run_qwen3_8b_vllm_fsdp.sh):
+LoRA training experiment with Qwen3-8B on 8 * H200 single node comparing FSDP and Megatron backend (script adapted from examples/tuning/lora/run_qwen3_8b_fsdp.sh):
 
 .. image:: https://github.com/user-attachments/assets/0482f423-01a3-4e52-a7ee-8b9cd79b7b1a
 .. image:: https://github.com/user-attachments/assets/6ce10400-8164-47d8-90a6-c1bf002fb9e8
@@ -206,10 +206,10 @@ For end-to-end examples, refer to the scripts below:
 
 **FSDP Examples:**
 
-- LoRA training from scratch: examples/tuning/lora/run_qwen3_8b_vllm_fsdp.sh
-- LoRA training from adapter path: examples/tuning/lora/run_qwen3_8b_from_adapter_vllm_fsdp.sh
-- LoRA training for VLMs: examples/tuning/lora/run_qwen2_5_vl_7b_vllm_fsdp.sh
+- LoRA training from scratch: examples/tuning/lora/run_qwen3_8b_fsdp.sh
+- LoRA training from adapter path: examples/tuning/lora/run_qwen3_8b_from_adapter_fsdp.sh
+- LoRA training for VLMs: examples/tuning/lora/run_qwen2_5_vl_7b_fsdp.sh
 
 **Megatron Examples:**
 
-- LoRA training with MoE: examples/tuning/lora/run_qwen3_30b_a3b_vllm_megatron.sh
+- LoRA training with MoE: examples/tuning/lora/run_qwen3_30b_a3b_megatron.sh

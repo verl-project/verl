@@ -1,25 +1,21 @@
 #!/usr/bin/env bash
-# GRPO | MoE text | SGLang rollout | MindSpeed-LLM training | Ascend NPU
+# GRPO | text | MindSpeed-LLM training | Ascend NPU
+#
+# Set INFER_BACKEND=sglang (default).
 
 set -xeuo pipefail
 
-export HCCL_CONNECT_TIMEOUT=1500
-export HCCL_HOST_SOCKET_PORT_RANGE=60000-60050
-export HCCL_NPU_SOCKET_PORT_RANGE=61000-61050
-export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
-export DISABLE_L2_CACHE=1
-export TASK_QUEUE_ENABLE=1
-export HCCL_OP_EXPANSION_MODE=AIV
-
 # ---- user-adjustable ----
-MODEL_PATH=${MODEL_PATH:-Qwen/Qwen3-30B-A3B}
+INFER_BACKEND=${INFER_BACKEND:-sglang}
+
+MODEL_PATH=${MODEL_PATH:-Qwen/Qwen3-8B}
 NNODES=${NNODES:-1}
 NPUS_PER_NODE=${NPUS_PER_NODE:-16}
 
 train_batch_size=${TRAIN_BATCH_SIZE:-16}
 ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE:-16}
 max_prompt_length=${MAX_PROMPT_LENGTH:-2048}
-max_response_length=${MAX_RESPONSE_LENGTH:-4096}
+max_response_length=${MAX_RESPONSE_LENGTH:-2048}
 micro_bsz=${MICRO_BSZ:-1}
 
 actor_lr=${ACTOR_LR:-1e-6}
@@ -27,8 +23,8 @@ kl_loss_coef=${KL_LOSS_COEF:-0.001}
 entropy_coeff=${ENTROPY_COEFF:-0}
 
 actor_tp=${ACTOR_TP:-4}
-actor_pp=${ACTOR_PP:-2}
-actor_ep=${ACTOR_EP:-4}
+actor_pp=${ACTOR_PP:-4}
+actor_cp=${ACTOR_CP:-1}
 all_offload=${ALL_OFFLOAD:-True}
 
 rollout_tp=${ROLLOUT_TP:-4}
@@ -41,9 +37,28 @@ save_freq=${SAVE_FREQ:--1}
 test_freq=${TEST_FREQ:--1}
 
 project_name=${PROJECT_NAME:-verl_grpo_gsm8k_math}
-experiment_name=${EXPERIMENT_NAME:-qwen3_30b_a3b_sglang_mindspeed_npu}
+experiment_name=${EXPERIMENT_NAME:-qwen3_8b_mindspeed}
 CKPTS_DIR=${CKPTS_DIR:-"${HOME}/verl/ckpts/${project_name}/${experiment_name}"}
 # ---- end user-adjustable ----
+
+# ---- system defaults (normally leave as-is) ----
+case "${INFER_BACKEND}" in
+    sglang) ;;
+    *)
+        echo "MindSpeed recipe currently supports INFER_BACKEND=sglang only, got: ${INFER_BACKEND}" >&2
+        exit 1
+        ;;
+esac
+
+export HCCL_CONNECT_TIMEOUT=1500
+export HCCL_HOST_SOCKET_PORT_RANGE=60000-60050
+export HCCL_NPU_SOCKET_PORT_RANGE=61000-61050
+export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
+export DISABLE_L2_CACHE=1
+export TASK_QUEUE_ENABLE=1
+# For CANN 8.5.0+, when using mbridge:
+export HCCL_OP_EXPANSION_MODE=AIV
+# ---- end system defaults ----
 
 gsm8k_train=$HOME/data/gsm8k/train.parquet
 gsm8k_test=$HOME/data/gsm8k/test.parquet
@@ -80,13 +95,13 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.entropy_coeff=${entropy_coeff} \
     actor_rollout_ref.actor.mindspeed.tensor_model_parallel_size=${actor_tp} \
     actor_rollout_ref.actor.mindspeed.pipeline_model_parallel_size=${actor_pp} \
-    actor_rollout_ref.actor.mindspeed.expert_model_parallel_size=${actor_ep} \
+    actor_rollout_ref.actor.mindspeed.context_parallel_size=${actor_cp} \
     actor_rollout_ref.actor.mindspeed.param_offload=${all_offload} \
     actor_rollout_ref.actor.mindspeed.optimizer_offload=${all_offload} \
     actor_rollout_ref.actor.mindspeed.grad_offload=${all_offload} \
     actor_rollout_ref.actor.mindspeed.use_mbridge=True \
     actor_rollout_ref.actor.mindspeed.vanilla_mbridge=True \
-    actor_rollout_ref.actor.mindspeed.llm_kwargs.spec='[mindspeed_llm.tasks.models.spec.qwen3_moe_spec, layer_spec]' \
+    actor_rollout_ref.actor.mindspeed.llm_kwargs.spec='[mindspeed_llm.tasks.models.spec.qwen3_spec, layer_spec]' \
     actor_rollout_ref.actor.mindspeed.llm_kwargs.seq_length=${max_model_len} \
     actor_rollout_ref.actor.mindspeed.llm_kwargs.micro_batch_size=${micro_bsz} \
     +actor_rollout_ref.actor.mindspeed.llm_kwargs.num_query_groups=8 \
@@ -100,11 +115,11 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${max_model_len} \
     actor_rollout_ref.ref.mindspeed.tensor_model_parallel_size=${actor_tp} \
     actor_rollout_ref.ref.mindspeed.pipeline_model_parallel_size=${actor_pp} \
-    actor_rollout_ref.ref.mindspeed.expert_model_parallel_size=${actor_ep} \
+    actor_rollout_ref.ref.mindspeed.context_parallel_size=${actor_cp} \
     actor_rollout_ref.ref.mindspeed.param_offload=${all_offload} \
     actor_rollout_ref.ref.mindspeed.use_mbridge=True \
     actor_rollout_ref.ref.mindspeed.vanilla_mbridge=True \
-    actor_rollout_ref.rollout.name=sglang \
+    actor_rollout_ref.rollout.name=${INFER_BACKEND} \
     +actor_rollout_ref.rollout.engine_kwargs.sglang.attention_backend=ascend \
     +actor_rollout_ref.rollout.engine_kwargs.sglang.chunked_prefill_size=-1 \
     actor_rollout_ref.rollout.n=${rollout_n} \

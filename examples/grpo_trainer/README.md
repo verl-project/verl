@@ -42,24 +42,27 @@ algorithm.norm_adv_by_std_in_grpo=False
 All scripts in this directory follow the naming convention:
 
 ```
-run_<model>_<infer-backend>_<train-backend>[_<platform>].sh
+run_<model>_<train-backend>[_<platform-or-variant>].sh
 ```
 
 Where:
 - `<model>` is the canonical size for a model family
   (`qwen3_8b` for dense text, `qwen3_30b_a3b` for MoE, `qwen2_5_vl_7b` / `qwen3_vl_8b` for vision,
   `qwen3_235b_a22b` / `deepseek_v3_671b` for scale demos).
-- `<infer-backend>` ∈ {`vllm`, `sglang`, `trtllm`}.
 - `<train-backend>` ∈ {`fsdp`, `megatron`, `mindspeed`}.
-- `<platform>` is omitted for NVIDIA GPUs, `npu` for Ascend NPUs.
+- `<platform-or-variant>` is used only for hardware-specific variants such as `gb200`, `fp8`, `veomni`,
+  or MindSpeed NPU scripts.
+- `INFER_BACKEND` selects rollout backend inside scripts that support multiple choices
+  (`vllm`, `sglang`, or `trtllm`).
+- `DEVICE` selects GPU/NPU paths inside scripts that support both platforms.
 
 Every script exposes the commonly tuned knobs as environment variables at the top, so you can run:
 
 ```bash
 MODEL_PATH=Qwen/Qwen3-14B \
 NNODES=2 NGPUS_PER_NODE=8 \
-ROLLOUT_N=8 TRAIN_BATCH_SIZE=2048 \
-bash examples/grpo_trainer/run_qwen3_8b_vllm_fsdp.sh
+INFER_BACKEND=sglang ROLLOUT_N=8 TRAIN_BATCH_SIZE=2048 \
+bash examples/grpo_trainer/run_qwen3_8b_fsdp.sh
 ```
 
 ### Defaults
@@ -94,7 +97,7 @@ bash examples/grpo_trainer/run_qwen3_8b_vllm_fsdp.sh
 | Mistral-Nemo-12B (RM demo) | ✓ |          |          | FSDP            | nvidia    |
 
 LoRA variants live in `examples/tuning/lora/`, profiling variants in `examples/profile/`.
-Scale / hardware-specific demos (e.g. `run_qwen3_8b_sglang_fsdp_gb200.sh`, FP8 variants, VeOmni) keep a trailing suffix to stay discoverable.
+Scale / hardware-specific demos (e.g. `run_qwen3_8b_fsdp_gb200.sh`, FP8 variants, VeOmni) keep a trailing suffix to stay discoverable.
 
 ## Reference
 

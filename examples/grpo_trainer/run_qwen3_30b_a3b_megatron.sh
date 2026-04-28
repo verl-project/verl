@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
-# GRPO | MoE text | vLLM rollout | Megatron training | NVIDIA GPUs
+# GRPO | Qwen3-30B-A3B | Megatron training | NVIDIA GPUs
 # DAPO-style recipe on DAPO-Math-17k / AIME-2024.
+#
+# INFER_BACKEND controls rollout backend: vllm or sglang.
 
 set -xeuo pipefail
 
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 
 # ---- user-adjustable ----
+INFER_BACKEND=${INFER_BACKEND:-vllm}
+
 MODEL_PATH=${MODEL_PATH:-Qwen/Qwen3-30B-A3B}
 MCORE_MODEL_PATH=${MCORE_MODEL_PATH:-}   # optional dist-checkpoint path
 NNODES=${NNODES:-1}
@@ -36,8 +40,23 @@ save_freq=${SAVE_FREQ:-50}
 test_freq=${TEST_FREQ:-10}
 
 project_name=${PROJECT_NAME:-verl_grpo_dapo_math}
-experiment_name=${EXPERIMENT_NAME:-qwen3_30b_a3b_vllm_megatron}
+experiment_name=${EXPERIMENT_NAME:-qwen3_30b_a3b_${INFER_BACKEND}_megatron}
 # ---- end user-adjustable ----
+
+# ---- backend defaults (normally leave as-is) ----
+case "${INFER_BACKEND}" in
+    vllm | sglang) ;;
+    *)
+        echo "INFER_BACKEND must be vllm or sglang, got: ${INFER_BACKEND}" >&2
+        exit 1
+        ;;
+esac
+
+optional_ppo_args=(actor_rollout_ref.rollout.mode=async)
+if [ "${INFER_BACKEND}" = vllm ]; then
+    optional_ppo_args+=(actor_rollout_ref.rollout.enable_chunked_prefill=True)
+fi
+# ---- end backend defaults ----
 
 train_files=$HOME/data/dapo-math-17k.parquet
 val_files=$HOME/data/aime-2024.parquet
@@ -82,14 +101,12 @@ python3 -m verl.trainer.main_ppo \
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform \
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full \
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1 \
-    actor_rollout_ref.rollout.name=vllm \
-    actor_rollout_ref.rollout.mode=async \
+    actor_rollout_ref.rollout.name=${INFER_BACKEND} \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${rollout_tp} \
     actor_rollout_ref.rollout.gpu_memory_utilization=${rollout_gpu_mem_util} \
     actor_rollout_ref.rollout.n=${rollout_n} \
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${ppo_max_token_len_per_gpu} \
-    actor_rollout_ref.rollout.enable_chunked_prefill=True \
     actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True \
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${ppo_max_token_len_per_gpu} \
     actor_rollout_ref.ref.megatron.tensor_model_parallel_size=${actor_tp} \
@@ -106,4 +123,6 @@ python3 -m verl.trainer.main_ppo \
     trainer.nnodes=${NNODES} \
     trainer.save_freq=${save_freq} \
     trainer.test_freq=${test_freq} \
-    trainer.total_epochs=${total_epochs} "$@"
+    trainer.total_epochs=${total_epochs} \
+    "${optional_ppo_args[@]}" \
+    "$@"

@@ -8,9 +8,9 @@ Reference: [Back to Basics: Revisiting REINFORCE Style Optimization for Learning
 
 | Script                               | Infer | Train | Platform |
 |--------------------------------------|-------|-------|----------|
-| `run_qwen3_8b_vllm_fsdp.sh`          | vLLM  | FSDP  | NVIDIA   |
+| `run_qwen3_8b_fsdp.sh`          | vLLM  | FSDP  | NVIDIA   |
 
-Override any argument via env vars at the top of the script (e.g. `MODEL_PATH=Qwen/Qwen3-14B bash run_qwen3_8b_vllm_fsdp.sh`).
+Override any argument via env vars at the top of the script (e.g. `MODEL_PATH=Qwen/Qwen3-14B bash run_qwen3_8b_fsdp.sh`).
 
 ## Key Flags
 

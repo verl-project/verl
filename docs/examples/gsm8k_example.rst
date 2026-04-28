@@ -130,9 +130,9 @@ The training script example for FSDP and Megatron-LM backend are stored in examp
 .. code:: bash
 
    cd ../ppo_trainer
-   bash run_deepseek_llm_7b_vllm_fsdp.sh
+   bash run_deepseek_llm_7b_fsdp.sh
 
-The script of run_deepseek_llm_7b_vllm_fsdp.sh
+The script of run_deepseek_llm_7b_fsdp.sh
 
 .. code:: bash
 

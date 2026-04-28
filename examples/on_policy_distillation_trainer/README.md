@@ -6,9 +6,9 @@ This trainer jointly trains a student model with policy-gradient on-policy rollo
 
 | Script                                                | Infer | Train    | Platform |
 |-------------------------------------------------------|-------|----------|----------|
-| `run_qwen3_8b_vllm_fsdp.sh`                           | vLLM  | FSDP     | NVIDIA   |
-| `run_qwen3_8b_vllm_megatron.sh`                       | vLLM  | Megatron | NVIDIA   |
-| `run_qwen3_vl_8b_vllm_fsdp.sh`                        | vLLM  | FSDP     | NVIDIA   |
+| `run_qwen3_8b_fsdp.sh`                           | vLLM  | FSDP     | NVIDIA   |
+| `run_qwen3_8b_megatron.sh`                       | vLLM  | Megatron | NVIDIA   |
+| `run_qwen3_vl_8b_fsdp.sh`                        | vLLM  | FSDP     | NVIDIA   |
 
 Override `STUDENT_MODEL` and `TEACHER_MODEL` via env vars to swap model pairs.
 

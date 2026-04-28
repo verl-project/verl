@@ -8,7 +8,7 @@ Reference: [MiniMax-M1: Scaling Test-Time Compute Efficiently with Lightning Att
 
 | Script                               | Infer | Train | Platform |
 |--------------------------------------|-------|-------|----------|
-| `run_qwen3_8b_vllm_fsdp.sh`          | vLLM  | FSDP  | NVIDIA   |
+| `run_qwen3_8b_fsdp.sh`          | vLLM  | FSDP  | NVIDIA   |
 
 ## Key Flags
 

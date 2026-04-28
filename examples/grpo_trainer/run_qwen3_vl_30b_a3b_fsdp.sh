@@ -5,7 +5,7 @@ set -xeuo pipefail
 DEVICE=${DEVICE:-gpu}
 PROJECT_NAME=${PROJECT_NAME:-GRPO-Qwen3_vl}
 EXPERIMENT_NAME=${EXPERIMENT_NAME:-}
-ENGINE=${ENGINE:-${1:-vllm}}
+INFER_BACKEND=${INFER_BACKEND:-vllm}
 RAY_DATA_HOME=${RAY_DATA_HOME:-"${HOME}/verl"}
 MODEL_PATH=${MODEL_PATH:-"${RAY_DATA_HOME}/models/Qwen3-VL-30B-A3B-Instruct"}
 CKPTS_DIR=${CKPTS_DIR:-}
@@ -115,7 +115,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     actor_rollout_ref.ref.entropy_from_logits_with_chunking=True \
     actor_rollout_ref.ref.fsdp_config.ulysses_sequence_parallel_size=${SP_SIZE} \
-    actor_rollout_ref.rollout.name=${ENGINE} \
+    actor_rollout_ref.rollout.name=${INFER_BACKEND} \
     actor_rollout_ref.rollout.max_num_batched_tokens=${ROLLOUT_MAX_NUM_BATCHED_TOKENS} \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=${LOG_PROB_MICRO_BATCH_SIZE_PER_GPU} \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${rollout_tp} \

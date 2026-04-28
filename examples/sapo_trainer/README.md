@@ -8,8 +8,8 @@ Reference: [Revisiting Policy Gradient Methods for Large Language Models](https:
 
 | Script                                      | Infer | Train | Platform |
 |---------------------------------------------|-------|-------|----------|
-| `run_qwen3_8b_vllm_fsdp_npu.sh`             | vLLM  | FSDP2 | Ascend   |
-| `run_qwen3_30b_a3b_vllm_fsdp.sh`            | vLLM  | FSDP2 | NVIDIA   |
+| `run_qwen3_8b_fsdp.sh`             | vLLM  | FSDP2 | Ascend   |
+| `run_qwen3_30b_a3b_fsdp.sh`            | vLLM  | FSDP2 | NVIDIA   |
 
 ## Key Flags
 

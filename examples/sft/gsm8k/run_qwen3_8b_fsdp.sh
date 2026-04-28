@@ -4,15 +4,15 @@
 #
 # Examples:
 #   # plain SFT
-#   bash run_qwen3_8b_fsdp_npu.sh 8 /tmp/sft-ckpt
+#   bash run_qwen3_8b_fsdp.sh 8 /tmp/sft-ckpt
 #
-#   # sequence-parallel (Ulysses) = 2 + LoRA (the default NPU demo)
-#   SP_SIZE=2 USE_PEFT=1 bash run_qwen3_8b_fsdp_npu.sh 8 /tmp/sft-ckpt
+#   # sequence-parallel (Ulysses) = 2 + LoRA (the default demo)
+#   SP_SIZE=2 USE_PEFT=1 bash run_qwen3_8b_fsdp.sh 8 /tmp/sft-ckpt
 
 set -xeuo pipefail
 
 if [ "$#" -lt 2 ]; then
-    echo "Usage: run_qwen3_8b_fsdp_npu.sh <nproc_per_node> <save_path> [other_configs...]"
+    echo "Usage: run_qwen3_8b_fsdp.sh <nproc_per_node> <save_path> [other_configs...]"
     echo "  Env: SP_SIZE (default 2), USE_PEFT (0|1, default 1)"
     exit 1
 fi

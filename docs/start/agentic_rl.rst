@@ -69,7 +69,7 @@ This example uses the sglang inference engine by default, and you can also modif
 
 .. code-block:: bash
 
-    bash examples/grpo_trainer/run_qwen3_8b_vllm_fsdp.sh
+    bash examples/grpo_trainer/run_qwen3_8b_fsdp.sh
 
 
 Multi-turn Conversations and Tool Calls
@@ -91,7 +91,7 @@ Usage Example
     python examples/data_preprocess/gsm8k_tool_agent_loop.py
 
     # Start training with tool calls and enabled mlflow based trace helping to debug the rollout details
-    bash examples/sglang_multiturn/run_qwen2_5_3b_gsm8k_tool_agent_mlflow_sglang_fsdp.sh
+    bash examples/sglang_multiturn/run_qwen2_5_3b_gsm8k_tool_agent_mlflow_fsdp.sh
 
     # When training is done, start a mlflow server to view trace
     mlflow ui -h 0.0.0.0 -p 5000 --backend-store-uri sqlite:////tmp/mlruns.db

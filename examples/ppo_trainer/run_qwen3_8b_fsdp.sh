@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# PPO | text | vLLM rollout | FSDP training | GPU/NPU
+# PPO | text | FSDP training | GPU/NPU
 # Canonical PPO (actor + critic) baseline on GSM8K + MATH.
 
 set -xeuo pipefail
 
 # ---- user-adjustable ----
 DEVICE=${DEVICE:-gpu}
+INFER_BACKEND=${INFER_BACKEND:-vllm}
 MODEL_PATH=${MODEL_PATH:-Qwen/Qwen3-8B}
 CRITIC_MODEL_PATH=${CRITIC_MODEL_PATH:-$MODEL_PATH}
 NNODES=${NNODES:-1}
@@ -41,11 +42,19 @@ MATH_TEST_FILE=${MATH_TEST_FILE:-$HOME/data/math/test.parquet}
 # ---- no user adjustment needed below ----
 device_trainer_args=()
 
+case "${INFER_BACKEND}" in
+    vllm | sglang) ;;
+    *)
+        echo "Unsupported INFER_BACKEND=${INFER_BACKEND}. Expected 'vllm' or 'sglang'." >&2
+        exit 1
+        ;;
+esac
+
 case "${DEVICE}" in
     gpu)
         n_devices_per_node=${NDEVICES_PER_NODE:-${NGPUS_PER_NODE:-8}}
         project_name=${PROJECT_NAME:-verl_ppo_gsm8k_math}
-        experiment_name=${EXPERIMENT_NAME:-qwen3_8b_vllm_fsdp}
+        experiment_name=${EXPERIMENT_NAME:-qwen3_8b_${INFER_BACKEND}_fsdp}
         ;;
     npu)
         export HCCL_CONNECT_TIMEOUT=2400
@@ -55,7 +64,7 @@ case "${DEVICE}" in
 
         n_devices_per_node=${NDEVICES_PER_NODE:-${NPUS_PER_NODE:-${NGPUS_PER_NODE:-8}}}
         project_name=${PROJECT_NAME:-verl_ppo_gsm8k_math_npu}
-        experiment_name=${EXPERIMENT_NAME:-qwen3_8b_vllm_fsdp_npu}
+        experiment_name=${EXPERIMENT_NAME:-qwen3_8b_${INFER_BACKEND}_fsdp_npu}
         device_trainer_args+=("trainer.device=npu")
         ;;
     *)
@@ -86,7 +95,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.entropy_coeff=${ENTROPY_COEFF} \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
-    actor_rollout_ref.rollout.name=vllm \
+    actor_rollout_ref.rollout.name=${INFER_BACKEND} \
     actor_rollout_ref.rollout.mode=async \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${ROLLOUT_TP} \
     actor_rollout_ref.rollout.gpu_memory_utilization=${ROLLOUT_GPU_MEM_UTIL} \

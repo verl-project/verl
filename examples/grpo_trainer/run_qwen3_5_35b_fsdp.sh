@@ -6,9 +6,9 @@ set -xeuo pipefail
 
 # ---- user-adjustable ----
 DEVICE=${DEVICE:-gpu}
-ENGINE=${ENGINE:-${1:-vllm}}
+INFER_BACKEND=${INFER_BACKEND:-vllm}
 PROJECT_NAME=${PROJECT_NAME:-GRPO-Qwen3_5}
-EXPERIMENT_NAME=${EXPERIMENT_NAME:-GRPO-Qwen3_5-27B}
+EXPERIMENT_NAME=${EXPERIMENT_NAME:-GRPO-Qwen3_5-35B}
 NDEVICES_PER_NODE=${NDEVICES_PER_NODE:-}
 NNODES=${NNODES:-1}
 
@@ -18,7 +18,7 @@ FSDP_SIZE=${FSDP_SIZE:-}
 ROLLOUT_GPU_MEM_UTIL=${ROLLOUT_GPU_MEM_UTIL:-0.6}
 
 RAY_DATA_HOME=${RAY_DATA_HOME:-"${HOME}/verl"}
-MODEL_PATH=${MODEL_PATH:-"${RAY_DATA_HOME}/models/Qwen3.5-27B"}
+MODEL_PATH=${MODEL_PATH:-"${RAY_DATA_HOME}/models/Qwen3.5-35B-A3B"}
 CKPTS_DIR=${CKPTS_DIR:-"${RAY_DATA_HOME}/ckpts/${PROJECT_NAME}/${EXPERIMENT_NAME}"}
 TRAIN_FILE=${TRAIN_FILE:-"${RAY_DATA_HOME}/data/geo3k/train.parquet"}
 TEST_FILE=${TEST_FILE:-"${RAY_DATA_HOME}/data/geo3k/test.parquet"}
@@ -93,7 +93,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.fsdp_config.ulysses_sequence_parallel_size=${SP_SIZE} \
     actor_rollout_ref.ref.use_torch_compile=False \
     actor_rollout_ref.ref.fsdp_config.offload_policy=True \
-    actor_rollout_ref.rollout.name=${ENGINE} \
+    actor_rollout_ref.rollout.name=${INFER_BACKEND} \
     actor_rollout_ref.rollout.ignore_eos=False \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${GEN_TP} \
@@ -118,4 +118,4 @@ python3 -m verl.trainer.main_ppo \
     trainer.val_before_train=True \
     trainer.save_freq=5 \
     trainer.test_freq=5 \
-    trainer.total_epochs=15 "$@" 2>&1 | tee logs/qwen3_5-27b-${start_time}.log
+    trainer.total_epochs=15 "$@" 2>&1 | tee logs/qwen3_5-35b-${start_time}.log

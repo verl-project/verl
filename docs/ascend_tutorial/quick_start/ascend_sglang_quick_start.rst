@@ -93,9 +93,9 @@ Atlas 800T A3
 
 **1.当前NPU sglang脚本一览**
 
-.. _Qwen3-30B: https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3_30b_a3b_sglang_mindspeed_npu.sh
-.. _Qwen3-8B-fsdp: https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3_8b_sglang_fsdp_npu.sh
-.. _Qwen3-8B-mindspeed: https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3_8b_sglang_mindspeed_npu.sh
+.. _Qwen3-30B: https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3_30b_a3b_mindspeed.sh
+.. _Qwen3-8B-fsdp: https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3_8b_fsdp.sh
+.. _Qwen3-8B-mindspeed: https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3_8b_mindspeed.sh
 
    +-----------------------+----------------+----------+--------------------+
    | 模型                  | 推荐NPU型号    | 节点数量 | 训推后端           |

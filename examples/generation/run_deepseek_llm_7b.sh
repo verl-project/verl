@@ -3,10 +3,10 @@
 # Rollout-only generation with DeepSeek-LLM-7B-Chat.
 #
 # Single-node (default):
-#   bash run_deepseek_llm_7b_vllm.sh
+#   bash run_deepseek_llm_7b.sh
 #
 # Multi-node (e.g. 2 nodes, rollout_tp=16):
-#   NNODES=2 ROLLOUT_TP=16 bash run_deepseek_llm_7b_vllm.sh
+#   NNODES=2 ROLLOUT_TP=16 bash run_deepseek_llm_7b.sh
 
 set -xeuo pipefail
 

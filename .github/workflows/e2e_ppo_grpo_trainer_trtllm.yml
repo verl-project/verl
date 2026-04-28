@@ -75,9 +75,9 @@ on:
       - "examples/data_preprocess/geo3k.py"
       - "examples/data_preprocess/dapo_multiturn_w_tool.py"
       - "examples/data_preprocess/aime2024_multiturn_w_tool.py"
-      - "examples/grpo_trainer/run_qwen3_8b_trtllm_fsdp.sh"
-      - "examples/grpo_trainer/run_qwen3_8b_trtllm_megatron.sh"
-      - "examples/grpo_trainer/run_qwen3_30b_a3b_trtllm_megatron_fp8.sh"
+      - "examples/grpo_trainer/run_qwen3_8b_fsdp.sh"
+      - "examples/grpo_trainer/run_qwen3_8b_megatron.sh"
+      - "examples/grpo_trainer/run_qwen3_30b_a3b_megatron_fp8.sh"
       # add back when ppo flow is ready
       # - "tests/special_e2e/run_ppo_trainer_megatron.sh"
       # - "verl/trainer/main_ppo.py"
@@ -178,8 +178,9 @@ jobs:
           export TRTLLM_ENABLE_PDL=0  # Disable Programmatic Dependent Launch (uses SM 9.0 griddepcontrol)
           ray stop --force
           ROLLOUT_TP=2 \
+          INFER_BACKEND=trtllm \
           MODEL_PATH="${HOME}/models/Qwen/Qwen2.5-0.5B-Instruct" \
-            bash examples/grpo_trainer/run_qwen3_8b_trtllm_fsdp.sh \
+            bash examples/grpo_trainer/run_qwen3_8b_fsdp.sh \
             trainer.total_training_steps=1 \
             data.train_batch_size=32 \
             data.max_prompt_length=128 \
@@ -232,8 +233,9 @@ jobs:
           ACTOR_TP=2 \
           ACTOR_PP=1 \
           ROLLOUT_TP=2 \
+          INFER_BACKEND=trtllm \
           MODEL_PATH="${HOME}/models/Qwen/Qwen2.5-0.5B-Instruct" \
-            bash examples/grpo_trainer/run_qwen3_8b_trtllm_megatron.sh \
+            bash examples/grpo_trainer/run_qwen3_8b_megatron.sh \
             trainer.total_training_steps=1 \
             data.train_batch_size=32 \
             data.max_prompt_length=128 \
@@ -281,8 +283,9 @@ jobs:
       #   run: |
       #     ray stop --force
       #     ROLLOUT_TP=2 \
+      #     INFER_BACKEND=trtllm \
       #     MODEL_PATH="${HOME}/models/Qwen/Qwen3-VL-2B-Instruct" \
-      #       bash examples/grpo_trainer/run_qwen2_5_vl_7b_trtllm_fsdp.sh \
+      #       bash examples/grpo_trainer/run_qwen2_5_vl_7b_fsdp.sh \
       #       trainer.total_training_steps=1 \
       #       data.train_files="['${PWD}/data/geo3k/train.parquet']" \
       #       data.val_files="['${PWD}/data/geo3k/test.parquet']" \
@@ -302,7 +305,7 @@ jobs:
           export INFER_TP=2 ACTOR_TP=2 ACTOR_PP=2 ACTOR_VPP=2 ACTOR_EP=1 ACTOR_CP=2 REF_TP=2 REF_PP=2 REF_VPP=2 REF_EP=1 REF_CP=2 GEN_MOE_TP=null GEN_MOE_EP=null
           export NNODES=1 GPUS_PER_NODE=8 TRTLLM_MOE_BACKEND=TRITON
           export DATA_DIR=${PWD} DAPO_MATH_TRAIN=${PWD}/data/dapo-math-17k/train.parquet AIME_VAL=${PWD}/data/aime-2024/train.parquet MODEL_PATH=${HOME}/models/Qwen/Qwen3-0.6B
-          bash examples/grpo_trainer/run_qwen3_30b_a3b_trtllm_megatron_fp8.sh \
+          bash examples/grpo_trainer/run_qwen3_30b_a3b_megatron_fp8.sh \
             reward_model.reward_kwargs.overlong_buffer_cfg.len=258 \
             reward_model.reward_kwargs.max_resp_len=512 \
             data.max_prompt_length=128 \

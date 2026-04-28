@@ -10,11 +10,11 @@ Canonical LoRA GRPO scripts (training only adapters, rollout still serves the ad
 
 | Script                                         | Model             | Infer | Train    | Notes                       |
 |------------------------------------------------|-------------------|-------|----------|-----------------------------|
-| `run_qwen3_8b_vllm_fsdp.sh`               | Qwen3-8B          | vLLM  | FSDP     | text, GSM8K                 |
-| `run_qwen3_8b_from_adapter_vllm_fsdp.sh`  | Qwen3-8B          | vLLM  | FSDP     | start from existing adapter |
-| `run_qwen3_8b_merge_vllm_fsdp.sh`         | Qwen3-8B          | vLLM  | FSDP     | merge adapter into base     |
-| `run_qwen2_5_vl_7b_vllm_fsdp.sh`          | Qwen2.5-VL-7B     | vLLM  | FSDP     | vision, Geo3K               |
-| `run_qwen3_30b_a3b_vllm_megatron.sh`      | Qwen3-30B-A3B     | vLLM  | Megatron | MoE                         |
+| `run_qwen3_8b_fsdp.sh`               | Qwen3-8B          | vLLM  | FSDP     | text, GSM8K                 |
+| `run_qwen3_8b_from_adapter_fsdp.sh`  | Qwen3-8B          | vLLM  | FSDP     | start from existing adapter |
+| `run_qwen3_8b_merge_fsdp.sh`         | Qwen3-8B          | vLLM  | FSDP     | merge adapter into base     |
+| `run_qwen2_5_vl_7b_fsdp.sh`          | Qwen2.5-VL-7B     | vLLM  | FSDP     | vision, Geo3K               |
+| `run_qwen3_30b_a3b_megatron.sh`      | Qwen3-30B-A3B     | vLLM  | Megatron | MoE                         |
 
 Key flags:
 - `actor_rollout_ref.model.lora_rank`, `actor_rollout_ref.model.lora_alpha`
@@ -27,8 +27,8 @@ Single/multi-node tuning recipes for large dense models; geared to practitioners
 
 | Script                                    | Model           | Infer | Train    | Hardware                 |
 |-------------------------------------------|-----------------|-------|----------|--------------------------|
-| `run_qwen2_5_32b_vllm_megatron.sh`        | Qwen2.5-32B     | vLLM  | Megatron | 1×8 GPUs (TP=8)          |
-| `run_qwen2_5_72b_vllm_fsdp.sh`            | Qwen2.5-72B     | vLLM  | FSDP     | 4×8 GPUs (TP=16, offload)|
+| `run_qwen2_5_32b_megatron.sh`        | Qwen2.5-32B     | vLLM  | Megatron | 1×8 GPUs (TP=8)          |
+| `run_qwen2_5_72b_fsdp.sh`            | Qwen2.5-72B     | vLLM  | FSDP     | 4×8 GPUs (TP=16, offload)|
 
 ## Conventions
 
