@@ -4,7 +4,7 @@
 
 set -xeuo pipefail
 
-# ---- user-adjustable ----
+########################### user-adjustable ###########################
 DEVICE=${DEVICE:-gpu}
 MODEL_PATH=${MODEL_PATH:-Qwen/Qwen3-VL-8B-Instruct}
 NNODES=${NNODES:-1}
@@ -34,31 +34,14 @@ EXPERIMENT_NAME=${EXPERIMENT_NAME:-}
 
 TRAIN_FILE=${TRAIN_FILE:-$HOME/data/geo3k/train.parquet}
 TEST_FILE=${TEST_FILE:-$HOME/data/geo3k/test.parquet}
-# ---- end user-adjustable ----
+########################### end user-adjustable ###########################
 
-# ---- no user adjustment needed below ----
-device_model_args=()
-device_actor_args=()
-device_rollout_args=()
-device_ref_args=()
-device_trainer_args=()
-
+########################### derived defaults ###########################
 case "${DEVICE}" in
     gpu)
         n_devices_per_node=${NDEVICES_PER_NODE:-${NGPUS_PER_NODE:-8}}
         rollout_gpu_mem_util=${ROLLOUT_GPU_MEM_UTIL:-0.6}
         experiment_name=${EXPERIMENT_NAME:-qwen3_vl_8b_vllm_fsdp}
-        device_model_args+=("actor_rollout_ref.model.use_fused_kernels=True")
-        device_actor_args+=(
-            "actor_rollout_ref.actor.fsdp_config.param_offload=False"
-            "actor_rollout_ref.actor.fsdp_config.optimizer_offload=False"
-        )
-        device_rollout_args+=(
-            "actor_rollout_ref.rollout.mode=async"
-            "+actor_rollout_ref.rollout.engine_kwargs.vllm.mm_processor_cache_gb=0"
-            "actor_rollout_ref.rollout.enforce_eager=False"
-            "actor_rollout_ref.rollout.free_cache_engine=True"
-        )
         ;;
     npu)
         export HCCL_CONNECT_TIMEOUT=1500
@@ -69,14 +52,6 @@ case "${DEVICE}" in
         n_devices_per_node=${NDEVICES_PER_NODE:-${NPUS_PER_NODE:-8}}
         rollout_gpu_mem_util=${ROLLOUT_GPU_MEM_UTIL:-0.5}
         experiment_name=${EXPERIMENT_NAME:-qwen3_vl_8b_vllm_fsdp_npu}
-        device_actor_args+=(
-            "actor_rollout_ref.actor.use_torch_compile=False"
-            "actor_rollout_ref.actor.fsdp_config.param_offload=True"
-            "actor_rollout_ref.actor.fsdp_config.optimizer_offload=True"
-            "actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size=${SP_SIZE}"
-        )
-        device_ref_args+=("actor_rollout_ref.ref.fsdp_config.ulysses_sequence_parallel_size=${SP_SIZE}")
-        device_trainer_args+=("trainer.device=npu")
         ;;
     *)
         echo "Unsupported DEVICE=${DEVICE}. Expected 'gpu' or 'npu'." >&2
@@ -84,50 +59,96 @@ case "${DEVICE}" in
         ;;
 esac
 
+########################### parameter arrays ###########################
+
+DATA=(
+    algorithm.adv_estimator=grpo
+    algorithm.use_kl_in_reward=False
+    data.train_files=${TRAIN_FILE}
+    data.val_files=${TEST_FILE}
+    data.image_key=images
+    data.train_batch_size=${TRAIN_BATCH_SIZE}
+    data.max_prompt_length=${MAX_PROMPT_LENGTH}
+    data.max_response_length=${MAX_RESPONSE_LENGTH}
+    data.filter_overlong_prompts=True
+    data.truncation='error'
+)
+
+MODEL=(
+    actor_rollout_ref.model.path="$MODEL_PATH"
+    actor_rollout_ref.model.use_remove_padding=True
+    actor_rollout_ref.model.enable_gradient_checkpointing=True
+)
+
+ACTOR=(
+    actor_rollout_ref.actor.strategy=fsdp2
+    actor_rollout_ref.actor.optim.lr=${ACTOR_LR}
+    actor_rollout_ref.actor.ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE}
+    actor_rollout_ref.actor.use_dynamic_bsz=True
+    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU}
+    actor_rollout_ref.actor.use_kl_loss=True
+    actor_rollout_ref.actor.kl_loss_coef=${KL_LOSS_COEF}
+    actor_rollout_ref.actor.kl_loss_type=low_var_kl
+    actor_rollout_ref.actor.entropy_coeff=${ENTROPY_COEFF}
+)
+
+ROLLOUT=(
+    actor_rollout_ref.rollout.name=vllm
+    actor_rollout_ref.rollout.tensor_model_parallel_size=${ROLLOUT_TP}
+    actor_rollout_ref.rollout.gpu_memory_utilization=${rollout_gpu_mem_util}
+    actor_rollout_ref.rollout.enable_chunked_prefill=False
+    actor_rollout_ref.rollout.n=${ROLLOUT_N}
+    actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True
+    actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU}
+)
+
+REF=(
+    actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True
+    actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU}
+    actor_rollout_ref.ref.fsdp_config.param_offload=True
+)
+
+TRAINER=(
+    trainer.balance_batch=True
+    trainer.logger='["console","wandb"]'
+    trainer.project_name=${PROJECT_NAME}
+    trainer.experiment_name=${experiment_name}
+    trainer.n_gpus_per_node=${n_devices_per_node}
+    trainer.nnodes=${NNODES}
+    trainer.save_freq=${SAVE_FREQ}
+    trainer.test_freq=${TEST_FREQ}
+    trainer.total_epochs=${TOTAL_EPOCHS}
+)
+
+# Per-device extras (single trailing array, never empty).
+if [ "${DEVICE}" = npu ]; then
+    EXTRA=(
+        trainer.device=npu
+        actor_rollout_ref.actor.use_torch_compile=False
+        actor_rollout_ref.actor.fsdp_config.param_offload=True
+        actor_rollout_ref.actor.fsdp_config.optimizer_offload=True
+        actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size=${SP_SIZE}
+        actor_rollout_ref.ref.fsdp_config.ulysses_sequence_parallel_size=${SP_SIZE}
+    )
+else
+    EXTRA=(
+        actor_rollout_ref.model.use_fused_kernels=True
+        actor_rollout_ref.actor.fsdp_config.param_offload=False
+        actor_rollout_ref.actor.fsdp_config.optimizer_offload=False
+        actor_rollout_ref.rollout.mode=async
+        +actor_rollout_ref.rollout.engine_kwargs.vllm.mm_processor_cache_gb=0
+        actor_rollout_ref.rollout.enforce_eager=False
+        actor_rollout_ref.rollout.free_cache_engine=True
+    )
+fi
+
+########################### launch ###########################
 python3 -m verl.trainer.main_ppo \
-    algorithm.adv_estimator=grpo \
-    algorithm.use_kl_in_reward=False \
-    data.train_files=${TRAIN_FILE} \
-    data.val_files=${TEST_FILE} \
-    data.image_key=images \
-    data.train_batch_size=${TRAIN_BATCH_SIZE} \
-    data.max_prompt_length=${MAX_PROMPT_LENGTH} \
-    data.max_response_length=${MAX_RESPONSE_LENGTH} \
-    data.filter_overlong_prompts=True \
-    data.truncation='error' \
-    actor_rollout_ref.model.path="$MODEL_PATH" \
-    actor_rollout_ref.model.use_remove_padding=True \
-    actor_rollout_ref.model.enable_gradient_checkpointing=True \
-    "${device_model_args[@]}" \
-    actor_rollout_ref.actor.strategy=fsdp2 \
-    actor_rollout_ref.actor.optim.lr=${ACTOR_LR} \
-    actor_rollout_ref.actor.ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE} \
-    actor_rollout_ref.actor.use_dynamic_bsz=True \
-    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU} \
-    actor_rollout_ref.actor.use_kl_loss=True \
-    actor_rollout_ref.actor.kl_loss_coef=${KL_LOSS_COEF} \
-    actor_rollout_ref.actor.kl_loss_type=low_var_kl \
-    actor_rollout_ref.actor.entropy_coeff=${ENTROPY_COEFF} \
-    "${device_actor_args[@]}" \
-    actor_rollout_ref.rollout.name=vllm \
-    actor_rollout_ref.rollout.tensor_model_parallel_size=${ROLLOUT_TP} \
-    actor_rollout_ref.rollout.gpu_memory_utilization=${rollout_gpu_mem_util} \
-    actor_rollout_ref.rollout.enable_chunked_prefill=False \
-    actor_rollout_ref.rollout.n=${ROLLOUT_N} \
-    actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True \
-    actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU} \
-    "${device_rollout_args[@]}" \
-    actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True \
-    actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU} \
-    actor_rollout_ref.ref.fsdp_config.param_offload=True \
-    "${device_ref_args[@]}" \
-    trainer.balance_batch=True \
-    trainer.logger='["console","wandb"]' \
-    trainer.project_name=${PROJECT_NAME} \
-    trainer.experiment_name=${experiment_name} \
-    trainer.n_gpus_per_node=${n_devices_per_node} \
-    trainer.nnodes=${NNODES} \
-    "${device_trainer_args[@]}" \
-    trainer.save_freq=${SAVE_FREQ} \
-    trainer.test_freq=${TEST_FREQ} \
-    trainer.total_epochs=${TOTAL_EPOCHS} "$@"
+    "${DATA[@]}" \
+    "${MODEL[@]}" \
+    "${ACTOR[@]}" \
+    "${ROLLOUT[@]}" \
+    "${REF[@]}" \
+    "${TRAINER[@]}" \
+    "${EXTRA[@]}" \
+    "$@"

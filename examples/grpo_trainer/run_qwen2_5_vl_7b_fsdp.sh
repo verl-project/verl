@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # GRPO | Qwen2.5-VL-7B | FSDP training | NVIDIA GPUs
 #
-# INFER_BACKEND controls rollout backend: vllm, sglang, or trtllm.
+# INFER_BACKEND controls rollout backend: vllm | sglang | trtllm.
 
 set -xeuo pipefail
 
-# ---- user-adjustable ----
+########################### user-adjustable ###########################
 INFER_BACKEND=${INFER_BACKEND:-vllm}
 
 MODEL_PATH=${MODEL_PATH:-Qwen/Qwen2.5-VL-7B-Instruct}
@@ -32,9 +32,9 @@ test_freq=${TEST_FREQ:-5}
 
 project_name=${PROJECT_NAME:-verl_grpo_geo3k}
 experiment_name=${EXPERIMENT_NAME:-qwen2_5_vl_7b_${INFER_BACKEND}_fsdp}
-# ---- end user-adjustable ----
+########################### end user-adjustable ###########################
 
-# ---- backend defaults (normally leave as-is) ----
+########################### derived defaults ###########################
 case "${INFER_BACKEND}" in
     vllm | sglang | trtllm) ;;
     *)
@@ -43,79 +43,114 @@ case "${INFER_BACKEND}" in
         ;;
 esac
 
-optional_ppo_args=()
-actor_strategy_args=()
-if [ "${INFER_BACKEND}" = sglang ]; then
-    rollout_tp=${rollout_tp:-1}
-    rollout_gpu_mem_util=${rollout_gpu_mem_util:-0.85}
-    optional_ppo_args+=(
-        actor_rollout_ref.rollout.mode=async
-        actor_rollout_ref.rollout.multi_stage_wake_up=True
-        actor_rollout_ref.rollout.enable_chunked_prefill=False
-        actor_rollout_ref.rollout.enforce_eager=False
-        actor_rollout_ref.rollout.free_cache_engine=True
-    )
-elif [ "${INFER_BACKEND}" = trtllm ]; then
-    rollout_tp=${rollout_tp:-2}
-    rollout_gpu_mem_util=${rollout_gpu_mem_util:-0.6}
-    actor_strategy_args+=(actor_rollout_ref.actor.strategy=fsdp2)
-    optional_ppo_args+=(actor_rollout_ref.hybrid_engine=True)
-else
-    rollout_tp=${rollout_tp:-2}
-    rollout_gpu_mem_util=${rollout_gpu_mem_util:-0.6}
-    optional_ppo_args+=(
-        actor_rollout_ref.model.use_fused_kernels=True
-        actor_rollout_ref.rollout.mode=async
-        +actor_rollout_ref.rollout.engine_kwargs.vllm.mm_processor_cache_gb=0
-        actor_rollout_ref.rollout.enable_chunked_prefill=False
-        actor_rollout_ref.rollout.enforce_eager=False
-        actor_rollout_ref.rollout.free_cache_engine=True
-    )
-fi
-# ---- end backend defaults ----
+case "${INFER_BACKEND}" in
+    sglang)
+        rollout_tp=${rollout_tp:-1}
+        rollout_gpu_mem_util=${rollout_gpu_mem_util:-0.85}
+        ;;
+    *)
+        rollout_tp=${rollout_tp:-2}
+        rollout_gpu_mem_util=${rollout_gpu_mem_util:-0.6}
+        ;;
+esac
 
+########################### parameter arrays ###########################
+
+DATA=(
+    algorithm.adv_estimator=grpo
+    algorithm.use_kl_in_reward=False
+    data.train_files=$HOME/data/geo3k/train.parquet
+    data.val_files=$HOME/data/geo3k/test.parquet
+    data.image_key=images
+    data.train_batch_size=${train_batch_size}
+    data.max_prompt_length=${max_prompt_length}
+    data.max_response_length=${max_response_length}
+    data.filter_overlong_prompts=True
+    data.truncation='error'
+)
+
+MODEL=(
+    actor_rollout_ref.model.path="$MODEL_PATH"
+    actor_rollout_ref.model.use_remove_padding=True
+    actor_rollout_ref.model.enable_gradient_checkpointing=True
+)
+
+ACTOR=(
+    actor_rollout_ref.actor.optim.lr=${actor_lr}
+    actor_rollout_ref.actor.ppo_mini_batch_size=${ppo_mini_batch_size}
+    actor_rollout_ref.actor.use_dynamic_bsz=True
+    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=${ppo_max_token_len_per_gpu}
+    actor_rollout_ref.actor.use_kl_loss=True
+    actor_rollout_ref.actor.kl_loss_coef=${kl_loss_coef}
+    actor_rollout_ref.actor.kl_loss_type=low_var_kl
+    actor_rollout_ref.actor.entropy_coeff=${entropy_coeff}
+    actor_rollout_ref.actor.fsdp_config.param_offload=False
+    actor_rollout_ref.actor.fsdp_config.optimizer_offload=False
+)
+
+ROLLOUT=(
+    actor_rollout_ref.rollout.name=${INFER_BACKEND}
+    actor_rollout_ref.rollout.tensor_model_parallel_size=${rollout_tp}
+    actor_rollout_ref.rollout.gpu_memory_utilization=${rollout_gpu_mem_util}
+    actor_rollout_ref.rollout.n=${rollout_n}
+    actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True
+    actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${ppo_max_token_len_per_gpu}
+)
+
+REF=(
+    actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True
+    actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${ppo_max_token_len_per_gpu}
+    actor_rollout_ref.ref.fsdp_config.param_offload=True
+)
+
+TRAINER=(
+    trainer.balance_batch=True
+    trainer.logger='["console","wandb"]'
+    trainer.project_name=${project_name}
+    trainer.experiment_name=${experiment_name}
+    trainer.n_gpus_per_node=${NGPUS_PER_NODE}
+    trainer.nnodes=${NNODES}
+    trainer.save_freq=${save_freq}
+    trainer.test_freq=${test_freq}
+    trainer.total_epochs=${total_epochs}
+)
+
+# Backend-specific extras (single trailing array, never empty).
+case "${INFER_BACKEND}" in
+    sglang)
+        EXTRA=(
+            actor_rollout_ref.rollout.mode=async
+            actor_rollout_ref.rollout.multi_stage_wake_up=True
+            actor_rollout_ref.rollout.enable_chunked_prefill=False
+            actor_rollout_ref.rollout.enforce_eager=False
+            actor_rollout_ref.rollout.free_cache_engine=True
+        )
+        ;;
+    trtllm)
+        EXTRA=(
+            actor_rollout_ref.actor.strategy=fsdp2
+            actor_rollout_ref.hybrid_engine=True
+        )
+        ;;
+    *)
+        EXTRA=(
+            actor_rollout_ref.model.use_fused_kernels=True
+            actor_rollout_ref.rollout.mode=async
+            +actor_rollout_ref.rollout.engine_kwargs.vllm.mm_processor_cache_gb=0
+            actor_rollout_ref.rollout.enable_chunked_prefill=False
+            actor_rollout_ref.rollout.enforce_eager=False
+            actor_rollout_ref.rollout.free_cache_engine=True
+        )
+        ;;
+esac
+
+########################### launch ###########################
 python3 -m verl.trainer.main_ppo \
-    algorithm.adv_estimator=grpo \
-    algorithm.use_kl_in_reward=False \
-    data.train_files=$HOME/data/geo3k/train.parquet \
-    data.val_files=$HOME/data/geo3k/test.parquet \
-    data.image_key=images \
-    data.train_batch_size=${train_batch_size} \
-    data.max_prompt_length=${max_prompt_length} \
-    data.max_response_length=${max_response_length} \
-    data.filter_overlong_prompts=True \
-    data.truncation='error' \
-    actor_rollout_ref.model.path="$MODEL_PATH" \
-    actor_rollout_ref.model.use_remove_padding=True \
-    actor_rollout_ref.model.enable_gradient_checkpointing=True \
-    actor_rollout_ref.actor.optim.lr=${actor_lr} \
-    actor_rollout_ref.actor.ppo_mini_batch_size=${ppo_mini_batch_size} \
-    actor_rollout_ref.actor.use_dynamic_bsz=True \
-    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=${ppo_max_token_len_per_gpu} \
-    actor_rollout_ref.actor.use_kl_loss=True \
-    actor_rollout_ref.actor.kl_loss_coef=${kl_loss_coef} \
-    actor_rollout_ref.actor.kl_loss_type=low_var_kl \
-    actor_rollout_ref.actor.entropy_coeff=${entropy_coeff} \
-    actor_rollout_ref.actor.fsdp_config.param_offload=False \
-    actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
-    actor_rollout_ref.rollout.name=${INFER_BACKEND} \
-    actor_rollout_ref.rollout.tensor_model_parallel_size=${rollout_tp} \
-    actor_rollout_ref.rollout.gpu_memory_utilization=${rollout_gpu_mem_util} \
-    actor_rollout_ref.rollout.n=${rollout_n} \
-    actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True \
-    actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${ppo_max_token_len_per_gpu} \
-    actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True \
-    actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${ppo_max_token_len_per_gpu} \
-    actor_rollout_ref.ref.fsdp_config.param_offload=True \
-    trainer.balance_batch=True \
-    trainer.logger='["console","wandb"]' \
-    trainer.project_name=${project_name} \
-    trainer.experiment_name=${experiment_name} \
-    trainer.n_gpus_per_node=${NGPUS_PER_NODE} \
-    trainer.nnodes=${NNODES} \
-    trainer.save_freq=${save_freq} \
-    trainer.test_freq=${test_freq} \
-    trainer.total_epochs=${total_epochs} \
-    "${actor_strategy_args[@]}" \
-    "${optional_ppo_args[@]}" \
+    "${DATA[@]}" \
+    "${MODEL[@]}" \
+    "${ACTOR[@]}" \
+    "${ROLLOUT[@]}" \
+    "${REF[@]}" \
+    "${TRAINER[@]}" \
+    "${EXTRA[@]}" \
     "$@"

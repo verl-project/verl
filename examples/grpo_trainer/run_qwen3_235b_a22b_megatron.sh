@@ -4,10 +4,10 @@
 
 set -xeuo pipefail
 
-# ---- user-adjustable ----
+########################### user-adjustable ###########################
 DEVICE=${DEVICE:-gpu}
 MODEL_PATH=${MODEL_PATH:-Qwen/Qwen3-235B-A22B}
-MCORE_MODEL_PATH=${MCORE_MODEL_PATH:-}   # path to Megatron dist checkpoint
+MCORE_MODEL_PATH=${MCORE_MODEL_PATH:-}
 NNODES=${NNODES:-8}
 NDEVICES_PER_NODE=${NDEVICES_PER_NODE:-}
 
@@ -45,50 +45,22 @@ CKPTS_DIR=${CKPTS_DIR:-.ckpt}
 
 TRAIN_FILE=${TRAIN_FILE:-$HOME/data/gsm8k/train.parquet}
 TEST_FILE=${TEST_FILE:-$HOME/data/gsm8k/test.parquet}
-# ---- end user-adjustable ----
+########################### end user-adjustable ###########################
 
-# ---- no user adjustment needed below ----
-device_rollout_args=()
-device_trainer_args=()
-device_actor_megatron_args=()
-device_ref_megatron_args=()
-
+########################### derived defaults ###########################
 case "${DEVICE}" in
     gpu)
         export CUDA_DEVICE_MAX_CONNECTIONS=1
-
         n_devices_per_node=${NDEVICES_PER_NODE:-${NGPUS_PER_NODE:-8}}
         experiment_name=${EXPERIMENT_NAME:-qwen3_235b_a22b_vllm_megatron}
-        device_rollout_args+=("actor_rollout_ref.rollout.mode=async")
-        if [ -n "${ROLLOUT_DP}" ]; then
-            device_rollout_args+=("actor_rollout_ref.rollout.data_parallel_size=${ROLLOUT_DP}")
-        fi
         ;;
     npu)
         export HCCL_CONNECT_TIMEOUT=1500
         export HCCL_HOST_SOCKET_PORT_RANGE=60000-60050
         export HCCL_NPU_SOCKET_PORT_RANGE=61000-61050
         export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
-
         n_devices_per_node=${NDEVICES_PER_NODE:-${NPUS_PER_NODE:-16}}
-        rollout_dp=${ROLLOUT_DP:-8}
         experiment_name=${EXPERIMENT_NAME:-qwen3_235b_a22b_vllm_megatron_npu}
-        device_rollout_args+=(
-            "actor_rollout_ref.rollout.data_parallel_size=${rollout_dp}"
-            "actor_rollout_ref.rollout.enforce_eager=False"
-            "+actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_capture_sizes=[8,16,32,64,128]"
-            "+actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode=FULL_DECODE_ONLY"
-        )
-        device_trainer_args+=("trainer.device=npu")
-        # MindSpeed's TransformerConfig still accepts `use_flash_attn`; upstream
-        # Megatron-Core (used on GPU) removed it in favor of `attention_backend`,
-        # so only inject this override on NPU runs.
-        device_actor_megatron_args+=(
-            "+actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn=True"
-        )
-        device_ref_megatron_args+=(
-            "+actor_rollout_ref.ref.megatron.override_transformer_config.use_flash_attn=True"
-        )
         ;;
     *)
         echo "Unsupported DEVICE=${DEVICE}. Expected 'gpu' or 'npu'." >&2
@@ -96,80 +68,127 @@ case "${DEVICE}" in
         ;;
 esac
 
-dist_ckpt_args=()
+########################### parameter arrays ###########################
+
+ALGORITHM=(
+    algorithm.adv_estimator=grpo
+    algorithm.use_kl_in_reward=False
+)
+
+DATA=(
+    data.train_files="$TRAIN_FILE"
+    data.val_files="$TEST_FILE"
+    data.train_batch_size=${TRAIN_BATCH_SIZE}
+    data.max_prompt_length=${MAX_PROMPT_LENGTH}
+    data.max_response_length=${MAX_RESPONSE_LENGTH}
+    data.filter_overlong_prompts=False
+    data.truncation='error'
+)
+
+MODEL=(
+    actor_rollout_ref.model.path="$MODEL_PATH"
+)
+
+ACTOR=(
+    actor_rollout_ref.actor.optim.lr=${ACTOR_LR}
+    actor_rollout_ref.actor.ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE}
+    actor_rollout_ref.actor.use_dynamic_bsz=True
+    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU}
+    actor_rollout_ref.actor.use_kl_loss=True
+    actor_rollout_ref.actor.kl_loss_coef=${KL_LOSS_COEF}
+    actor_rollout_ref.actor.kl_loss_type=low_var_kl
+    actor_rollout_ref.actor.entropy_coeff=${ENTROPY_COEFF}
+    actor_rollout_ref.actor.clip_ratio_low=${CLIP_RATIO_LOW}
+    actor_rollout_ref.actor.clip_ratio_high=${CLIP_RATIO_HIGH}
+    actor_rollout_ref.actor.megatron.tensor_model_parallel_size=${ACTOR_TP}
+    actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=${ACTOR_PP}
+    actor_rollout_ref.actor.megatron.expert_model_parallel_size=${ACTOR_EP}
+    actor_rollout_ref.actor.megatron.param_offload=${ALL_OFFLOAD}
+    actor_rollout_ref.actor.megatron.optimizer_offload=${ALL_OFFLOAD}
+    actor_rollout_ref.actor.megatron.grad_offload=${ALL_OFFLOAD}
+    +actor_rollout_ref.actor.megatron.override_transformer_config.num_layers_in_first_pipeline_stage=11
+    +actor_rollout_ref.actor.megatron.override_transformer_config.num_layers_in_last_pipeline_stage=11
+    +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform
+    +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full
+    +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1
+)
+
+ROLLOUT=(
+    actor_rollout_ref.rollout.name=vllm
+    actor_rollout_ref.rollout.tensor_model_parallel_size=${ROLLOUT_TP}
+    actor_rollout_ref.rollout.expert_parallel_size=${ROLLOUT_EP}
+    actor_rollout_ref.rollout.gpu_memory_utilization=${ROLLOUT_GPU_MEM_UTIL}
+    actor_rollout_ref.rollout.n=${ROLLOUT_N}
+    actor_rollout_ref.rollout.max_num_batched_tokens=${ROLLOUT_MAX_NUM_BATCHED_TOKENS}
+    actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True
+    actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU}
+    actor_rollout_ref.rollout.enable_chunked_prefill=True
+    actor_rollout_ref.rollout.enable_prefix_caching=True
+    actor_rollout_ref.rollout.free_cache_engine=True
+)
+
+REF=(
+    actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True
+    actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU}
+    actor_rollout_ref.ref.megatron.tensor_model_parallel_size=${ACTOR_TP}
+    actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=${ACTOR_PP}
+    actor_rollout_ref.ref.megatron.expert_model_parallel_size=${ACTOR_EP}
+    actor_rollout_ref.ref.megatron.param_offload=${ALL_OFFLOAD}
+)
+
+TRAINER=(
+    actor_rollout_ref.nccl_timeout=7200
+    trainer.balance_batch=True
+    trainer.logger='["console","wandb"]'
+    trainer.project_name=${PROJECT_NAME}
+    trainer.experiment_name=${experiment_name}
+    trainer.n_gpus_per_node=${n_devices_per_node}
+    trainer.nnodes=${NNODES}
+    trainer.val_before_train=False
+    trainer.save_freq=${SAVE_FREQ}
+    trainer.test_freq=${TEST_FREQ}
+    trainer.total_epochs=${TOTAL_EPOCHS}
+    trainer.default_local_dir="${CKPTS_DIR}"
+)
+
+# ---- conditional / per-device extras (rolled into a single trailing array) ----
+# Seed with the always-present rollout mode so the array is never empty (Bash 3.x + set -u safe).
+EXTRA=(actor_rollout_ref.rollout.mode=async)
+
+if [ "${DEVICE}" = npu ]; then
+    EXTRA+=(
+        trainer.device=npu
+        actor_rollout_ref.rollout.data_parallel_size=${ROLLOUT_DP:-8}
+        actor_rollout_ref.rollout.enforce_eager=False
+        +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_capture_sizes=[8,16,32,64,128]
+        +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode=FULL_DECODE_ONLY
+        # MindSpeed's TransformerConfig still accepts `use_flash_attn`; upstream
+        # Megatron-Core (used on GPU) removed it in favor of `attention_backend`.
+        +actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn=True
+        +actor_rollout_ref.ref.megatron.override_transformer_config.use_flash_attn=True
+    )
+elif [ -n "${ROLLOUT_DP}" ]; then
+    EXTRA+=(actor_rollout_ref.rollout.data_parallel_size=${ROLLOUT_DP})
+fi
+
 if [ -n "$MCORE_MODEL_PATH" ]; then
-    dist_ckpt_args+=(
-        "actor_rollout_ref.actor.megatron.dist_checkpointing_path=${MCORE_MODEL_PATH}"
-        "actor_rollout_ref.actor.megatron.use_dist_checkpointing=True"
-        "actor_rollout_ref.ref.megatron.dist_checkpointing_path=${MCORE_MODEL_PATH}"
-        "actor_rollout_ref.ref.megatron.use_dist_checkpointing=True"
+    EXTRA+=(
+        actor_rollout_ref.actor.megatron.dist_checkpointing_path=${MCORE_MODEL_PATH}
+        actor_rollout_ref.actor.megatron.use_dist_checkpointing=True
+        actor_rollout_ref.ref.megatron.dist_checkpointing_path=${MCORE_MODEL_PATH}
+        actor_rollout_ref.ref.megatron.use_dist_checkpointing=True
     )
 fi
 
+########################### launch ###########################
 python3 -m verl.trainer.main_ppo \
     model_engine=megatron \
-    algorithm.adv_estimator=grpo \
-    algorithm.use_kl_in_reward=False \
-    data.train_files="$TRAIN_FILE" \
-    data.val_files="$TEST_FILE" \
-    data.train_batch_size=${TRAIN_BATCH_SIZE} \
-    data.max_prompt_length=${MAX_PROMPT_LENGTH} \
-    data.max_response_length=${MAX_RESPONSE_LENGTH} \
-    data.filter_overlong_prompts=False \
-    data.truncation='error' \
-    actor_rollout_ref.model.path="$MODEL_PATH" \
-    actor_rollout_ref.actor.optim.lr=${ACTOR_LR} \
-    actor_rollout_ref.actor.ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE} \
-    actor_rollout_ref.actor.use_dynamic_bsz=True \
-    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU} \
-    actor_rollout_ref.actor.use_kl_loss=True \
-    actor_rollout_ref.actor.kl_loss_coef=${KL_LOSS_COEF} \
-    actor_rollout_ref.actor.kl_loss_type=low_var_kl \
-    actor_rollout_ref.actor.entropy_coeff=${ENTROPY_COEFF} \
-    actor_rollout_ref.actor.clip_ratio_low=${CLIP_RATIO_LOW} \
-    actor_rollout_ref.actor.clip_ratio_high=${CLIP_RATIO_HIGH} \
-    actor_rollout_ref.actor.megatron.tensor_model_parallel_size=${ACTOR_TP} \
-    actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=${ACTOR_PP} \
-    actor_rollout_ref.actor.megatron.expert_model_parallel_size=${ACTOR_EP} \
-    actor_rollout_ref.actor.megatron.param_offload=${ALL_OFFLOAD} \
-    actor_rollout_ref.actor.megatron.optimizer_offload=${ALL_OFFLOAD} \
-    actor_rollout_ref.actor.megatron.grad_offload=${ALL_OFFLOAD} \
-    +actor_rollout_ref.actor.megatron.override_transformer_config.num_layers_in_first_pipeline_stage=11 \
-    +actor_rollout_ref.actor.megatron.override_transformer_config.num_layers_in_last_pipeline_stage=11 \
-    +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform \
-    +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full \
-    +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1 \
-    "${device_actor_megatron_args[@]}" \
-    actor_rollout_ref.rollout.name=vllm \
-    actor_rollout_ref.rollout.tensor_model_parallel_size=${ROLLOUT_TP} \
-    actor_rollout_ref.rollout.expert_parallel_size=${ROLLOUT_EP} \
-    actor_rollout_ref.rollout.gpu_memory_utilization=${ROLLOUT_GPU_MEM_UTIL} \
-    actor_rollout_ref.rollout.n=${ROLLOUT_N} \
-    actor_rollout_ref.rollout.max_num_batched_tokens=${ROLLOUT_MAX_NUM_BATCHED_TOKENS} \
-    actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True \
-    actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU} \
-    actor_rollout_ref.rollout.enable_chunked_prefill=True \
-    actor_rollout_ref.rollout.enable_prefix_caching=True \
-    actor_rollout_ref.rollout.free_cache_engine=True \
-    "${device_rollout_args[@]}" \
-    actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True \
-    actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU} \
-    actor_rollout_ref.ref.megatron.tensor_model_parallel_size=${ACTOR_TP} \
-    actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=${ACTOR_PP} \
-    actor_rollout_ref.ref.megatron.expert_model_parallel_size=${ACTOR_EP} \
-    actor_rollout_ref.ref.megatron.param_offload=${ALL_OFFLOAD} \
-    "${device_ref_megatron_args[@]}" \
-    "${dist_ckpt_args[@]}" \
-    actor_rollout_ref.nccl_timeout=7200 \
-    trainer.balance_batch=True \
-    trainer.logger='["console","wandb"]' \
-    trainer.project_name=${PROJECT_NAME} \
-    trainer.experiment_name=${experiment_name} \
-    trainer.n_gpus_per_node=${n_devices_per_node} \
-    trainer.nnodes=${NNODES} \
-    "${device_trainer_args[@]}" \
-    trainer.val_before_train=False \
-    trainer.save_freq=${SAVE_FREQ} \
-    trainer.test_freq=${TEST_FREQ} \
-    trainer.total_epochs=${TOTAL_EPOCHS} \
-    trainer.default_local_dir="${CKPTS_DIR}" "$@"
+    "${ALGORITHM[@]}" \
+    "${DATA[@]}" \
+    "${MODEL[@]}" \
+    "${ACTOR[@]}" \
+    "${ROLLOUT[@]}" \
+    "${REF[@]}" \
+    "${TRAINER[@]}" \
+    "${EXTRA[@]}" \
+    "$@"

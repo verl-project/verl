@@ -4,7 +4,7 @@
 
 set -xeuo pipefail
 
-# ---- user-adjustable ----
+########################### user-adjustable ###########################
 DEVICE=${DEVICE:-gpu}
 INFER_BACKEND=${INFER_BACKEND:-vllm}
 PROJECT_NAME=${PROJECT_NAME:-GRPO-Qwen3_5}
@@ -24,11 +24,9 @@ TRAIN_FILE=${TRAIN_FILE:-"${RAY_DATA_HOME}/data/geo3k/train.parquet"}
 TEST_FILE=${TEST_FILE:-"${RAY_DATA_HOME}/data/geo3k/test.parquet"}
 WORKING_DIR=${WORKING_DIR:-"${PWD}"}
 RUNTIME_ENV=${RUNTIME_ENV:-"${WORKING_DIR}/verl/trainer/runtime_env.yaml"}
-# ---- end user-adjustable ----
+########################### end user-adjustable ###########################
 
-# ---- no user adjustment needed below ----
-device_trainer_args=()
-
+########################### derived defaults ###########################
 case "${DEVICE}" in
     gpu)
         n_devices_per_node=${NDEVICES_PER_NODE:-${NGPUS_PER_NODE:-8}}
@@ -42,7 +40,6 @@ case "${DEVICE}" in
 
         n_devices_per_node=${NDEVICES_PER_NODE:-${NPUS_PER_NODE:-16}}
         fsdp_size=${FSDP_SIZE:-16}
-        device_trainer_args+=("trainer.device=npu")
         ;;
     *)
         echo "Unsupported DEVICE=${DEVICE}. Expected 'gpu' or 'npu'." >&2
@@ -51,71 +48,105 @@ case "${DEVICE}" in
 esac
 
 start_time=$(date +%Y%m%d)_$(date +%H%M%S)
-
 mkdir -p logs
+
+########################### parameter arrays ###########################
+
+DATA=(
+    algorithm.adv_estimator=grpo
+    algorithm.use_kl_in_reward=False
+    data.train_files="${TRAIN_FILE}"
+    data.val_files="${TEST_FILE}"
+    data.train_batch_size=64
+    data.max_prompt_length=1024
+    data.max_response_length=2048
+    data.filter_overlong_prompts=True
+    data.truncation='error'
+    data.image_key=images
+    data.shuffle=False
+)
+
+MODEL=(
+    actor_rollout_ref.model.path=${MODEL_PATH}
+    actor_rollout_ref.model.use_remove_padding=True
+    actor_rollout_ref.model.enable_gradient_checkpointing=True
+)
+
+ACTOR=(
+    actor_rollout_ref.actor.optim.lr=1e-6
+    actor_rollout_ref.actor.ppo_mini_batch_size=16
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1
+    actor_rollout_ref.actor.use_kl_loss=True
+    actor_rollout_ref.actor.entropy_coeff=0
+    actor_rollout_ref.actor.kl_loss_coef=0.01
+    actor_rollout_ref.actor.kl_loss_type=low_var_kl
+    actor_rollout_ref.actor.use_torch_compile=False
+    actor_rollout_ref.actor.strategy=fsdp2
+    actor_rollout_ref.actor.use_dynamic_bsz=False
+    actor_rollout_ref.actor.fsdp_config.fsdp_size=${fsdp_size}
+    actor_rollout_ref.actor.fsdp_config.reshard_after_forward=True
+    actor_rollout_ref.actor.fsdp_config.entropy_checkpointing=True
+    actor_rollout_ref.actor.entropy_from_logits_with_chunking=True
+    actor_rollout_ref.actor.fsdp_config.offload_policy=True
+    actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size=${SP_SIZE}
+    actor_rollout_ref.actor.fsdp_config.param_offload=True
+    actor_rollout_ref.actor.fsdp_config.optimizer_offload=True
+)
+
+REF=(
+    actor_rollout_ref.ref.strategy=fsdp2
+    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1
+    actor_rollout_ref.ref.fsdp_config.param_offload=True
+    actor_rollout_ref.ref.fsdp_config.reshard_after_forward=True
+    actor_rollout_ref.ref.entropy_from_logits_with_chunking=True
+    actor_rollout_ref.ref.fsdp_config.ulysses_sequence_parallel_size=${SP_SIZE}
+    actor_rollout_ref.ref.use_torch_compile=False
+    actor_rollout_ref.ref.fsdp_config.offload_policy=True
+)
+
+ROLLOUT=(
+    actor_rollout_ref.rollout.name=${INFER_BACKEND}
+    actor_rollout_ref.rollout.ignore_eos=False
+    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1
+    actor_rollout_ref.rollout.tensor_model_parallel_size=${GEN_TP}
+    actor_rollout_ref.rollout.gpu_memory_utilization=${ROLLOUT_GPU_MEM_UTIL}
+    actor_rollout_ref.rollout.n=5
+    actor_rollout_ref.rollout.enable_chunked_prefill=True
+    actor_rollout_ref.rollout.max_num_batched_tokens=8192
+    actor_rollout_ref.rollout.free_cache_engine=True
+    actor_rollout_ref.rollout.enforce_eager=False
+    actor_rollout_ref.rollout.enable_prefix_caching=False
+    actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=6144
+)
+
+TRAINER=(
+    trainer.critic_warmup=0
+    trainer.logger=['console','wandb']
+    trainer.project_name="${PROJECT_NAME}"
+    trainer.experiment_name="${EXPERIMENT_NAME}"
+    trainer.n_gpus_per_node=${n_devices_per_node}
+    trainer.nnodes=${NNODES}
+    trainer.balance_batch=False
+    trainer.resume_from_path=checkpoints/
+    trainer.val_before_train=True
+    trainer.save_freq=5
+    trainer.test_freq=5
+    trainer.total_epochs=15
+)
+
+# Per-device extras (single trailing array, never empty under set -u).
+EXTRA=(actor_rollout_ref.rollout.mode=async)
+if [ "${DEVICE}" = npu ]; then
+    EXTRA+=(trainer.device=npu)
+fi
+
+########################### launch ###########################
 python3 -m verl.trainer.main_ppo \
-    algorithm.adv_estimator=grpo \
-    data.train_files="${TRAIN_FILE}" \
-    data.val_files="${TEST_FILE}" \
-    data.train_batch_size=64 \
-    data.max_prompt_length=1024 \
-    data.max_response_length=2048 \
-    data.filter_overlong_prompts=True \
-    data.truncation='error' \
-    data.image_key=images \
-    data.shuffle=False \
-    actor_rollout_ref.model.path=${MODEL_PATH} \
-    actor_rollout_ref.model.use_remove_padding=True \
-    actor_rollout_ref.model.enable_gradient_checkpointing=True \
-    actor_rollout_ref.actor.optim.lr=1e-6 \
-    actor_rollout_ref.actor.ppo_mini_batch_size=16 \
-    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
-    actor_rollout_ref.actor.use_kl_loss=True \
-    actor_rollout_ref.actor.entropy_coeff=0 \
-    actor_rollout_ref.actor.kl_loss_coef=0.01 \
-    actor_rollout_ref.actor.kl_loss_type=low_var_kl \
-    actor_rollout_ref.actor.use_torch_compile=False \
-    actor_rollout_ref.actor.strategy=fsdp2 \
-    actor_rollout_ref.ref.strategy=fsdp2 \
-    actor_rollout_ref.actor.fsdp_config.fsdp_size=${fsdp_size} \
-    actor_rollout_ref.actor.fsdp_config.reshard_after_forward=True \
-    actor_rollout_ref.ref.fsdp_config.reshard_after_forward=True \
-    actor_rollout_ref.actor.fsdp_config.entropy_checkpointing=True \
-    actor_rollout_ref.actor.entropy_from_logits_with_chunking=True \
-    actor_rollout_ref.actor.fsdp_config.offload_policy=True \
-    actor_rollout_ref.actor.use_dynamic_bsz=False \
-    actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size=${SP_SIZE} \
-    actor_rollout_ref.actor.fsdp_config.param_offload=True \
-    actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
-    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
-    actor_rollout_ref.ref.fsdp_config.param_offload=True \
-    actor_rollout_ref.ref.entropy_from_logits_with_chunking=True \
-    actor_rollout_ref.ref.fsdp_config.ulysses_sequence_parallel_size=${SP_SIZE} \
-    actor_rollout_ref.ref.use_torch_compile=False \
-    actor_rollout_ref.ref.fsdp_config.offload_policy=True \
-    actor_rollout_ref.rollout.name=${INFER_BACKEND} \
-    actor_rollout_ref.rollout.ignore_eos=False \
-    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
-    actor_rollout_ref.rollout.tensor_model_parallel_size=${GEN_TP} \
-    actor_rollout_ref.rollout.gpu_memory_utilization=${ROLLOUT_GPU_MEM_UTIL} \
-    actor_rollout_ref.rollout.n=5 \
-    actor_rollout_ref.rollout.enable_chunked_prefill=True \
-    actor_rollout_ref.rollout.max_num_batched_tokens=8192 \
-    actor_rollout_ref.rollout.free_cache_engine=True \
-    actor_rollout_ref.rollout.enforce_eager=False \
-    actor_rollout_ref.rollout.enable_prefix_caching=False \
-    actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=6144 \
-    algorithm.use_kl_in_reward=False \
-    trainer.critic_warmup=0 \
-    trainer.logger=['console','wandb'] \
-    trainer.project_name="${PROJECT_NAME}" \
-    trainer.experiment_name="${EXPERIMENT_NAME}" \
-    trainer.n_gpus_per_node=${n_devices_per_node} \
-    trainer.nnodes=${NNODES} \
-    "${device_trainer_args[@]}" \
-    trainer.balance_batch=False \
-    trainer.resume_from_path=checkpoints/ \
-    trainer.val_before_train=True \
-    trainer.save_freq=5 \
-    trainer.test_freq=5 \
-    trainer.total_epochs=15 "$@" 2>&1 | tee logs/qwen3_5-35b-${start_time}.log
+    "${DATA[@]}" \
+    "${MODEL[@]}" \
+    "${ACTOR[@]}" \
+    "${REF[@]}" \
+    "${ROLLOUT[@]}" \
+    "${TRAINER[@]}" \
+    "${EXTRA[@]}" \
+    "$@" 2>&1 | tee logs/qwen3_5-35b-${start_time}.log
