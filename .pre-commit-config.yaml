@@ -58,7 +58,7 @@ repos:
 
       - id: check-naming-conventions
         name: Check naming conventions
-        entry: sh -c 'fail=0; if grep -rIn --exclude-dir=.git --exclude-dir=.github --exclude-dir=venv --exclude-dir=__pycache__ --exclude=.pre-commit-config.yaml "veRL" .; then echo "Please use verl instead of veRL"; fail=1; fi; if grep -rIn --exclude-dir=.git --exclude-dir=.github --exclude-dir=venv --exclude-dir=__pycache__ --exclude=ascend_sglang_best_practices.rst --exclude=.pre-commit-config.yaml -E "Sglang|sgLang|sglAng|sglaNg|sglanG" .; then echo "Please use SGLang or sglang"; fail=1; fi; exit $fail'
+        entry: sh -c 'fail=0; if grep -rIn --exclude-dir=.git --exclude-dir=.github --exclude-dir=venv --exclude-dir=.venv --exclude-dir=__pycache__ --exclude=.pre-commit-config.yaml "veRL" .; then echo "Please use verl instead of veRL"; fail=1; fi; if grep -rIn --exclude-dir=.git --exclude-dir=.github --exclude-dir=venv --exclude-dir=.venv --exclude-dir=__pycache__ --exclude=ascend_sglang_best_practices.rst --exclude=.pre-commit-config.yaml -E "Sglang|sgLang|sglAng|sglaNg|sglanG" .; then echo "Please use SGLang or sglang"; fail=1; fi; exit $fail'
         language: system
         pass_filenames: false
 

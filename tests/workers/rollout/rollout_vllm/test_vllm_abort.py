@@ -120,13 +120,13 @@ def test_vllm_abort():
             "Write about the French Revolution and its consequences.",
         ]
 
-        all_prompt_ids = []
+        all_prompt_token_ids = []
         for prompt in prompts[:NUM_PROMPTS]:
             messages = [{"role": "user", "content": prompt}]
-            prompt_ids = normalize_token_ids(
+            prompt_token_ids = normalize_token_ids(
                 tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=True)
             )
-            all_prompt_ids.append(prompt_ids)
+            all_prompt_token_ids.append(prompt_token_ids)
         print(f"Prepared {NUM_PROMPTS} prompts")
 
         # ==================== Start Generations and Abort ====================
@@ -141,11 +141,11 @@ def test_vllm_abort():
         # Start all generations concurrently
         print(f"\n   Starting {NUM_PROMPTS} generations...")
         generate_refs = []
-        for i, prompt_ids in enumerate(all_prompt_ids):
+        for i, prompt_token_ids in enumerate(all_prompt_token_ids):
             request_id = f"abort_test_{i}_{uuid4().hex[:8]}"
             ref = server_handle.generate.remote(
                 request_id=request_id,
-                prompt_ids=prompt_ids,
+                prompt_token_ids=prompt_token_ids,
                 sampling_params=sampling_params,
                 image_data=None,
             )
