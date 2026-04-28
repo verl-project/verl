@@ -31,11 +31,17 @@ class CheckpointConfig(BaseConfig):
             Options: 'model', 'optimizer', 'extra', 'hf_model'.
         load_contents (list[str]): Contents to load from checkpoint. Defaults to same as save_contents.
         async_save (bool): Whether to save checkpoints asynchronously. Only implemented for Megatron as of now.
+        fully_parallel_save (bool): Whether to wrap Megatron distributed checkpoint saves with
+            ``FullyParallelSaveStrategyWrapper``.
+        fully_parallel_load (bool): Whether to wrap Megatron distributed checkpoint loads with
+            ``FullyParallelLoadStrategyWrapper``.
     """
 
     save_contents: list[str] = field(default_factory=lambda: ["model", "optimizer", "extra"])
     load_contents: list[str] = field(default_factory=lambda: ["model", "optimizer", "extra"])
     async_save: bool = False
+    fully_parallel_save: bool = True
+    fully_parallel_load: bool = True
     mbridge_config: dict[str, Any] = field(default_factory=dict)
 
 

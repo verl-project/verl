@@ -136,7 +136,11 @@ checkpoint:
 
   # Whether to save checkpoints asynchronously. Only effective for Megatron as of now.
   async_save: False
-  
+
+  # Whether to wrap Megatron distributed checkpoint saves/loads with the fully-parallel checkpoint strategy wrappers
+  fully_parallel_save: True
+  fully_parallel_load: True
+
   # Mbridge config extension.
   # when vanilla_mbridge=True, and your filesystem is a distributed filesystem,(which means you write a file in node A
   # and you can read the file in node B immediately)
