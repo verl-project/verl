@@ -70,6 +70,4 @@ python3 -m verl.trainer.main_ppo \
     trainer.default_local_dir=$CKPT_DIR \
     trainer.test_freq=-1 \
     trainer.total_training_steps=100 \
-    +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_capture_sizes="[1, 8, 16, 32, 64, 128, 256, 512]" \
-    +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode="FULL_DECODE_ONLY" \
     2>&1 | tee "logs/veomni-30b_$(date +%Y%m%d_%H%M).log" \ 
