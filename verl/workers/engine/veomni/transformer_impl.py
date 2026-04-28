@@ -558,9 +558,8 @@ class OmniSequenceShardCollator:
         pad_shape[dim] = pad_size
         pad = torch.full(pad_shape, fill_value=pad_value, dtype=tensor.dtype, device=tensor.device)
         return torch.cat((tensor, pad), dim=dim)
-    
+
     def __call__(self, batch: Sequence[dict[str, "torch.Tensor"]]) -> dict[str, "torch.Tensor"]:
-        breakpoint()
         for key in batch.keys():
             if key in self.padding_features.keys():
                 batch[key] = self.sp_padding(
