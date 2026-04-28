@@ -563,7 +563,7 @@ class RayPPOTrainer:
                 # desktop-env pool exhausted). Skip this validation batch
                 # rather than crashing training on a transient env issue.
                 print(
-                    "[RayPPOTrainer._validate] skipping validation batch: all rollouts failed (see rollout-side logs)",
+                    "[POTENTIAL ERROR][RayPPOTrainer._validate] skipping validation batch: all rollouts failed (see rollout-side logs)",
                     flush=True,
                 )
                 continue
@@ -586,7 +586,7 @@ class RayPPOTrainer:
             actual_output_size = len(test_output_gen_batch)
             if actual_output_size != len(test_batch):
                 print(
-                    f"[RayPPOTrainer._validate] output size ({actual_output_size}) != "
+                    f"[POTENTIAL ERROR][RayPPOTrainer._validate] output size ({actual_output_size}) != "
                     f"input size ({len(test_batch)}), aligning input to match "
                     f"surviving rollouts",
                     flush=True,

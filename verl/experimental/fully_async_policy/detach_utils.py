@@ -163,6 +163,14 @@ def assemble_batch_from_rollout_samples(
     per_sample_caches: list[Any] = []
     _ref_pos_ndim = None  # track position_ids ndim for cross-sample consistency
     for rs_idx, rs in enumerate(rollout_samples):
+        # Skip empty batches (all rollouts in this sample were discarded).
+        if rs.full_batch is None or len(rs.full_batch) == 0 or rs.full_batch.batch is None:
+            print(
+                f"[POTENTIAL ERROR][BatchUtils] Skipping empty sample[{rs_idx}] "
+                f"(sample_id={rs.sample_id}, all rollouts discarded)",
+                flush=True,
+            )
+            continue
         batch = addition_process(rs.full_batch)
         # --- Assert: validate each rollout sample before assembly ---
         assert_batch_schema(batch, f"assemble.sample[{rs_idx}]")

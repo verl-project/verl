@@ -534,7 +534,7 @@ class AgentLoopWorker:
                     where = "unknown"
                 ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
                 print(
-                    f"[{ts}] [AgentLoopWorker][ROLLOUT_EXCEPTION] "
+                    f"[{ts}] [POTENTIAL ERROR][AgentLoopWorker][ROLLOUT_EXCEPTION] "
                     f"sample_index={trajectory_info[idx].get('sample_index')} "
                     f"step={trajectory_info[idx].get('step')} "
                     f"rollout_n={trajectory_info[idx].get('rollout_n')} "
@@ -558,7 +558,7 @@ class AgentLoopWorker:
         if n_dropped > 0:
             ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
             print(
-                f"[{ts}] [AgentLoopWorker][DROPPED_ROLLOUTS] "
+                f"[{ts}] [POTENTIAL ERROR][AgentLoopWorker][DROPPED_ROLLOUTS] "
                 f"dropped={n_dropped}/{n_total} "
                 f"(exceptions={n_exceptions}, "
                 f"agent_returned_none={n_dropped - n_exceptions})",
@@ -569,7 +569,7 @@ class AgentLoopWorker:
             # so the caller can skip this chunk instead of crashing training
             # on transient env-side issues (e.g. desktop-env pool exhaustion).
             print(
-                f"[AgentLoopWorker][ALL_ROLLOUTS_FAILED] "
+                f"[POTENTIAL ERROR][AgentLoopWorker][ALL_ROLLOUTS_FAILED] "
                 f"all {n_total} rollouts discarded in this batch; "
                 f"returning empty DataProto",
                 flush=True,
@@ -626,7 +626,7 @@ class AgentLoopWorker:
             output: AgentLoopOutput = await agent_loop.run(sampling_params, **kwargs)
             if output is None:
                 print(
-                    f"[AgentLoopWorker][RUN_RETURNED_NONE] agent={agent_name} "
+                    f"[POTENTIAL ERROR][AgentLoopWorker][RUN_RETURNED_NONE] agent={agent_name} "
                     f"sample_index={trajectory.get('sample_index')} "
                     f"step={trajectory.get('step')} rollout_n={trajectory.get('rollout_n')} "
                     f"validate={trajectory.get('validate')}",

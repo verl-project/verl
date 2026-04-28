@@ -640,7 +640,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
             # does not see an empty/inconsistent batch. Do NOT re-raise: a
             # single failed sample must not kill the whole rollouter.
             print(
-                f"[FullyAsyncRollouter] _process_single_sample_streaming dropped "
+                f"[POTENTIAL ERROR][FullyAsyncRollouter] _process_single_sample_streaming dropped "
                 f"sample_id={rollout_sample.sample_id} due to "
                 f"generate_sequences_single failure: {exc!r}",
                 flush=True,
@@ -649,6 +649,19 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
             self.processed_sample_count += 1
             return
         rollout_sample.full_batch = ret
+
+        # If all rollouts in this sample were discarded (e.g. env creation
+        # failures), do not put the empty batch into the message queue.
+        if ret.batch is None or len(ret) == 0 or ret.meta_info.get("all_rollouts_failed", False):
+            print(
+                f"[POTENTIAL ERROR][FullyAsyncRollouter] _process_single_sample_streaming dropped "
+                f"sample_id={rollout_sample.sample_id}: empty batch (all rollouts failed)",
+                flush=True,
+            )
+            self.dropped_stale_samples += 1
+            self.processed_sample_count += 1
+            return
+
         rollout_sample.full_batch.non_tensor_batch["uid"] = np.array(
             [f"uid_{rollout_sample.sample_id}"] * len(rollout_sample.full_batch), dtype=object
         )
