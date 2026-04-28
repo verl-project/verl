@@ -65,7 +65,7 @@ Architecture Overview
     |  |       +-- NPUPlatform   (ascend/npu)    +- current_dev  |      |
     |  |       +-- MLUPlatform   (cambricon/mlu) +- device_count |      |
     |  |       +-- MUSAPlatform  (mthreads/musa) +- empty_cache  |      |
-    |  |       +-- _CPUPlatform  (fallback)      +- ...          |      |
+    |  |       +-- ...                           +- ...          |      |
     |  |                                                         |      |
     |  +---------------------------------------------------------+      |
     |                        |                                          |

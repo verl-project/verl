@@ -57,17 +57,18 @@ class TestPlatformDetection:
             name = _detect_platform_name()
             assert name == "npu", f"Expected 'npu', got '{name}'"
 
-    def test_verl_platform_env_override_cpu(self):
-        """Test VERL_PLATFORM environment variable override for CPU."""
+    def test_verl_platform_env_override_cpu_rejected(self):
+        """Test that VERL_PLATFORM=cpu is rejected (CPU backend not supported)."""
         with mock.patch.dict(os.environ, {"VERL_PLATFORM": "cpu"}):
+            # "cpu" is not in _BUILTIN_PLATFORMS, so it falls back to auto-detection
             name = _detect_platform_name()
-            assert name == "cpu", f"Expected 'cpu', got '{name}'"
+            assert name in ("cuda", "npu"), f"Expected 'cuda' or 'npu', got '{name}'"
 
     def test_verl_platform_invalid_value(self):
         """Test that invalid VERL_PLATFORM values fall back to auto-detection."""
         with mock.patch.dict(os.environ, {"VERL_PLATFORM": "invalid"}):
             name = _detect_platform_name()
-            assert name in ("cuda", "npu", "cpu"), f"Got invalid platform name: {name}"
+            assert name in ("cuda", "npu"), f"Got invalid platform name: {name}"
 
     def test_verl_platform_case_insensitive(self):
         """Test that VERL_PLATFORM is case-insensitive."""
@@ -85,17 +86,11 @@ class TestPlatformCreation:
 
         pm._current_platform = None
 
-    def test_create_cpu_platform(self):
-        """Test creating CPU platform."""
-        platform = _create_platform("cpu")
-        assert platform.device_name == "cpu"
-        assert platform.is_available() is True
-
-    def test_create_cuda_platform_fallback(self):
-        """Test that CUDA platform falls back to CPU if not available."""
+    def test_create_cuda_platform_raises_if_unavailable(self):
+        """Test that CUDA platform raises RuntimeError if not available."""
         with mock.patch("torch.cuda.is_available", return_value=False):
-            platform = _create_platform("cuda")
-            assert platform.device_name == "cpu"
+            with pytest.raises(RuntimeError):
+                _create_platform("cuda")
 
     def test_create_invalid_platform(self):
         """Test that invalid platform name raises ValueError."""
@@ -118,95 +113,6 @@ class TestPlatformInterface:
         platform2 = get_platform()
         assert platform1 is platform2, "get_platform() should return the same instance"
 
-    def test_set_platform_overrides(self):
-        """Test that set_platform() overrides the singleton."""
-        from verl.plugin.platform.platform_cpu import PlatformCPU
-
-        custom_platform = PlatformCPU()
-        set_platform(custom_platform)
-
-        retrieved = get_platform()
-        assert retrieved is custom_platform, "set_platform() should override the singleton"
-
-    def test_manual_seed_cpu(self):
-        """Test manual_seed on CPU platform."""
-        from verl.plugin.platform.platform_cpu import PlatformCPU
-
-        platform = PlatformCPU()
-
-        platform.manual_seed(42)
-        platform.manual_seed_all(42)
-
-    def test_device_capability_cpu(self):
-        """Test get_device_capability on CPU platform returns (None, None)."""
-        from verl.plugin.platform.platform_cpu import PlatformCPU
-
-        platform = PlatformCPU()
-
-        major, minor = platform.get_device_capability()
-        assert major is None and minor is None
-
-    def test_communication_backend_cpu(self):
-        """Test communication_backend_name on CPU platform returns 'gloo'."""
-        from verl.plugin.platform.platform_cpu import PlatformCPU
-
-        platform = PlatformCPU()
-
-        backend = platform.communication_backend_name()
-        assert backend == "gloo"
-
-    def test_nvtx_range_context_manager(self):
-        """Test that nvtx_range works as context manager."""
-        from verl.plugin.platform.platform_cpu import PlatformCPU
-
-        platform = PlatformCPU()
-
-        with platform.nvtx_range("test_range"):
-            pass
-
-
-class TestCPUPlatformDeviceCount:
-    """Test PlatformCPU.device_count() bug fix."""
-
-    def test_device_count_with_local_size(self):
-        """Test device_count when LOCAL_SIZE is set."""
-        from verl.plugin.platform.platform_cpu import PlatformCPU
-
-        with mock.patch.dict(os.environ, {"LOCAL_SIZE": "4"}):
-            platform = PlatformCPU()
-            count = platform.device_count()
-            assert count == 4, f"Expected 4, got {count}"
-
-    def test_device_count_without_local_size(self):
-        """Test device_count falls back to os.cpu_count() when LOCAL_SIZE is not set."""
-        from verl.plugin.platform.platform_cpu import PlatformCPU
-
-        with mock.patch.dict(os.environ, {}, clear=True):
-            with mock.patch("os.cpu_count", return_value=8):
-                platform = PlatformCPU()
-                count = platform.device_count()
-                assert count == 8, f"Expected 8, got {count}"
-
-    def test_device_count_fallback_to_one(self):
-        """Test device_count falls back to 1 when os.cpu_count() returns None."""
-        from verl.plugin.platform.platform_cpu import PlatformCPU
-
-        with mock.patch.dict(os.environ, {}, clear=True):
-            with mock.patch("os.cpu_count", return_value=None):
-                platform = PlatformCPU()
-                count = platform.device_count()
-                assert count >= 1, f"Expected at least 1, got {count}"
-
-    def test_device_count_no_default_zero(self):
-        """Test that device_count never returns 0."""
-        from verl.plugin.platform.platform_cpu import PlatformCPU
-
-        with mock.patch.dict(os.environ, {}, clear=True):
-            with mock.patch("os.cpu_count", return_value=None):
-                platform = PlatformCPU()
-                count = platform.device_count()
-                assert count != 0, "device_count should never return 0"
-
 
 class TestEnvironmentVariableValidation:
     """Test VERL_PLATFORM environment variable validation."""
@@ -223,13 +129,13 @@ class TestEnvironmentVariableValidation:
             name = _detect_platform_name()
             # Should fall back, not return "opencl"
             assert name != "opencl"
-            assert name in ("cuda", "npu", "cpu")
+            assert name in ("cuda", "npu")
 
     def test_empty_platform_triggers_auto_detection(self):
         """Test that empty VERL_PLATFORM triggers auto-detection."""
         with mock.patch.dict(os.environ, {"VERL_PLATFORM": ""}):
             name = _detect_platform_name()
-            assert name in ("cuda", "npu", "cpu")
+            assert name in ("cuda", "npu")
 
 
 if __name__ == "__main__":
