@@ -11,8 +11,10 @@ import torch
 import torch.cuda
 
 from .platform_base import PlatformBase
+from .platform_manager import PlatformRegistry
 
 
+@PlatformRegistry.register(platform="cuda")
 class PlatformCUDA(PlatformBase):
     """Platform backend for NVIDIA CUDA GPUs."""
 

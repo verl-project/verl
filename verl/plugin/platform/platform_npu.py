@@ -10,10 +10,12 @@ from typing import Any, Optional
 import torch
 
 from .platform_base import PlatformBase
+from .platform_manager import PlatformRegistry
 
 logger = logging.getLogger(__name__)
 
 
+@PlatformRegistry.register(platform="npu")
 class PlatformNPU(PlatformBase):
     """Platform backend for Huawei Ascend NPU."""
 

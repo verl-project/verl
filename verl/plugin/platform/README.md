@@ -27,17 +27,17 @@ VERL_PLATFORM=npu python train.py    # force NPU
 
 ```
 verl/plugin/platform/
-├── __init__.py            # Public API: get_platform, set_platform, PlatformBase
+├── __init__.py            # Public API: get_platform, set_platform, PlatformRegistry, PlatformBase
 ├── platform_base.py       # ABC – all methods a backend must implement
 ├── platform_cuda.py       # NVIDIA CUDA implementation
 ├── platform_npu.py        # Huawei Ascend NPU implementation
-├── platform_manager.py    # Singleton manager with auto-detection
+├── platform_manager.py    # PlatformRegistry + singleton manager with auto-detection
 └── README.md              # This file
 ```
 
 ## Adding a New Chip / Accelerator
 
-New hardware backends should be added via **external plugins** — no changes to
+New hardware backends are added via **`@PlatformRegistry.register()`** — no changes to
 the verl source tree are required.
 
 ### Step 1 — Create a platform class in your plugin package
@@ -51,9 +51,10 @@ from typing import Any, Optional
 
 import torch
 
-from verl.plugin.platform import PlatformBase, set_platform
+from verl.plugin.platform import PlatformBase, PlatformRegistry
 
 
+@PlatformRegistry.register(platform="xpu")
 class PlatformXPU(PlatformBase):
     """Platform backend for Intel XPU."""
 
@@ -113,12 +114,6 @@ class PlatformXPU(PlatformBase):
 
     def cudart(self) -> Any:
         return None
-
-
-# Import-time injection: set_platform() is called before get_platform()
-# because VERL_USE_EXTERNAL_MODULES runs in verl/__init__.py before any
-# worker code.
-set_platform(PlatformXPU())
 ```
 
 ### Step 2 — Load via `VERL_USE_EXTERNAL_MODULES`
@@ -127,8 +122,9 @@ set_platform(PlatformXPU())
 export VERL_USE_EXTERNAL_MODULES=my_plugin.platform
 ```
 
-That's it. `set_platform()` injects the custom platform singleton before any
-verl code calls `get_platform()`. All downstream code (`get_device_name()`,
+That's it. The `@PlatformRegistry.register()` decorator registers the platform class
+at import time. When `get_platform()` runs auto-detection, it iterates all registered
+platforms and picks the first available one. All downstream code (`get_device_name()`,
 `get_torch_device()`, etc.) automatically uses the new backend.
 
 ## PlatformBase Interface Summary

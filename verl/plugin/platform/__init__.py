@@ -14,6 +14,6 @@ Set ``VERL_PLATFORM=cuda`` (or ``npu``) to override auto-detection.
 """
 
 from .platform_base import PlatformBase
-from .platform_manager import get_platform, set_platform
+from .platform_manager import PlatformRegistry, get_platform, set_platform
 
-__all__ = ["PlatformBase", "get_platform", "set_platform"]
+__all__ = ["PlatformBase", "PlatformRegistry", "get_platform", "set_platform"]
