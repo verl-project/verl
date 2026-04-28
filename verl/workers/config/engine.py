@@ -11,7 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+import logging
+import os
 import warnings
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal, Optional
@@ -34,7 +35,8 @@ __all__ = [
     "QATEngineConfig",
 ]
 
-
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 # TODO: rename to RouterReplayConfig after removing the legacy implementation
 @dataclass
 class EngineRouterReplayConfig(BaseConfig):
@@ -303,7 +305,7 @@ class VeOmniEngineConfig(EngineConfig):
         mixed_precision (Optional[dict[str, Any]]): Mixed precision configuration for FSDP, default None
 
     """
-
+    _mutable_fields = EngineConfig._mutable_fields | {"attn_implementation"}
     wrap_policy: dict[str, Any] = field(default_factory=dict)
     offload_policy: bool = False
     reshard_after_forward: bool = True
@@ -334,6 +336,16 @@ class VeOmniEngineConfig(EngineConfig):
     def __post_init__(self):
         super().__post_init__()
         assert self.strategy in ["veomni"], f"strategy {self.strategy} not supported"
+        
+        replacements = {
+            "flash_attention_2": "veomni_flash_attention_2_with_sp",
+            "flash_attention_3": "veomni_flash_attention_3_with_sp",
+            "flash_attention_4": "veomni_flash_attention_4_with_sp",
+        }
+        if self.attn_implementation in replacements:
+            new_impl = replacements[self.attn_implementation]
+            logger.info(f"Replacing attn_implementation from '{self.attn_implementation}' to '{new_impl}'")
+            self.attn_implementation = new_impl
 
 
 @dataclass
@@ -367,7 +379,6 @@ class TorchtitanEngineConfig(EngineConfig):
             debugging.
 
     """
-
     wrap_policy: dict[str, Any] = field(default_factory=dict)
     reshard_after_forward: Literal["default", "always", "never"] = "default"
     forward_prefetch: bool = False
