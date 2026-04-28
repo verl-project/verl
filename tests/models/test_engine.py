@@ -464,7 +464,11 @@ def _autocast_dtype_worker(rank: int, world_size: int, rendezvous_file: str, mod
 
     from verl.workers.engine import BaseEngine, EngineRegistry
 
-    model_config = HFModelConfig(path=model_path, load_tokenizer=False)
+    model_config = HFModelConfig(
+        path=model_path,
+        load_tokenizer=False,
+        override_config={"attn_implementation": "sdpa"},
+    )
 
     def build_engine(mixed_precision):
         engine_config = FSDPEngineConfig(
