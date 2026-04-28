@@ -5,7 +5,7 @@ The platform is resolved **once** on first call to :func:`get_platform` and
 cached for the rest of the process lifetime.  Users can override auto-detection
 by either:
 
-* Setting the ``VERL_PLATFORM`` environment variable (e.g. ``cuda``, ``cpu``).
+* Setting the ``VERL_PLATFORM`` environment variable (e.g. ``cuda``, ``npu``).
 * Calling :func:`set_platform` before any other code touches the platform.
 """
 
@@ -20,7 +20,7 @@ _current_platform: PlatformBase | None = None
 
 # Built-in platform names that are auto-detected.  Third-party backends can
 # be added via ``set_platform()`` without modifying this list.
-_BUILTIN_PLATFORMS = ("cuda", "npu", "cpu")
+_BUILTIN_PLATFORMS = ("cuda", "npu")
 
 
 def _detect_platform_name() -> str:
@@ -58,8 +58,11 @@ def _detect_platform_name() -> str:
     except (ImportError, RuntimeError):
         pass
 
-    # 4. Fallback – CPU
-    return "cpu"
+    # 4. No accelerator found
+    raise RuntimeError(
+        "No supported accelerator detected (checked CUDA and NPU). "
+        "Set VERL_PLATFORM to one of %s if detection is incorrect." % (_BUILTIN_PLATFORMS,)
+    )
 
 
 def _create_platform(name: str) -> PlatformBase:
@@ -69,10 +72,7 @@ def _create_platform(name: str) -> PlatformBase:
 
         platform = PlatformCUDA()
         if not platform.is_available():
-            logger.warning("CUDA platform specified but not available. Falling back to CPU.")
-            from .platform_cpu import PlatformCPU
-
-            return PlatformCPU()
+            raise RuntimeError("CUDA platform specified but not available.")
         return platform
 
     if name == "npu":
@@ -80,16 +80,8 @@ def _create_platform(name: str) -> PlatformBase:
 
         platform = PlatformNPU()
         if not platform.is_available():
-            logger.warning("NPU platform specified but not available. Falling back to CPU.")
-            from .platform_cpu import PlatformCPU
-
-            return PlatformCPU()
+            raise RuntimeError("NPU platform specified but not available.")
         return platform
-
-    if name == "cpu":
-        from .platform_cpu import PlatformCPU
-
-        return PlatformCPU()
 
     raise ValueError(
         f"Unknown platform '{name}'.  Built-in platforms are {_BUILTIN_PLATFORMS}.  "

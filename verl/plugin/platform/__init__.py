@@ -10,7 +10,7 @@ Usage::
     with platform.nvtx_range("train"):
         ...
 
-Set ``VERL_PLATFORM=cpu`` (or ``cuda``, ``npu``, …) to override auto-detection.
+Set ``VERL_PLATFORM=cuda`` (or ``npu``) to override auto-detection.
 """
 
 from .platform_base import PlatformBase

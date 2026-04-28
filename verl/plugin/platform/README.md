@@ -16,11 +16,11 @@ with platform.nvtx_range("train"):
     ...
 ```
 
-The platform is **auto-detected** on first call (CUDA → NPU → CPU fallback).
+The platform is **auto-detected** on first call (CUDA → NPU).
 Override with the `VERL_PLATFORM` environment variable:
 
 ```bash
-VERL_PLATFORM=cpu python train.py    # force CPU even if GPU is present
+VERL_PLATFORM=npu python train.py    # force NPU
 ```
 
 ## Package Structure
@@ -31,7 +31,6 @@ verl/plugin/platform/
 ├── platform_base.py       # ABC – all methods a backend must implement
 ├── platform_cuda.py       # NVIDIA CUDA implementation
 ├── platform_npu.py        # Huawei Ascend NPU implementation
-├── platform_cpu.py        # CPU-only fallback (no-ops for GPU features)
 ├── platform_manager.py    # Singleton manager with auto-detection
 └── README.md              # This file
 ```
