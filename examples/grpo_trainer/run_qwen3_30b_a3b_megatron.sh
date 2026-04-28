@@ -197,7 +197,6 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.megatron.optimizer_offload=${all_offload} \
     actor_rollout_ref.actor.megatron.grad_offload=${all_offload} \
     actor_rollout_ref.actor.megatron.use_mbridge=True \
-    +actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn=True \
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform \
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full \
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1 \

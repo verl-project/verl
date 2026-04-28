@@ -50,6 +50,8 @@ TEST_FILE=${TEST_FILE:-$HOME/data/gsm8k/test.parquet}
 # ---- no user adjustment needed below ----
 device_rollout_args=()
 device_trainer_args=()
+device_actor_megatron_args=()
+device_ref_megatron_args=()
 
 case "${DEVICE}" in
     gpu)
@@ -78,6 +80,15 @@ case "${DEVICE}" in
             "+actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode=FULL_DECODE_ONLY"
         )
         device_trainer_args+=("trainer.device=npu")
+        # MindSpeed's TransformerConfig still accepts `use_flash_attn`; upstream
+        # Megatron-Core (used on GPU) removed it in favor of `attention_backend`,
+        # so only inject this override on NPU runs.
+        device_actor_megatron_args+=(
+            "+actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn=True"
+        )
+        device_ref_megatron_args+=(
+            "+actor_rollout_ref.ref.megatron.override_transformer_config.use_flash_attn=True"
+        )
         ;;
     *)
         echo "Unsupported DEVICE=${DEVICE}. Expected 'gpu' or 'npu'." >&2
@@ -125,10 +136,10 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.megatron.grad_offload=${ALL_OFFLOAD} \
     +actor_rollout_ref.actor.megatron.override_transformer_config.num_layers_in_first_pipeline_stage=11 \
     +actor_rollout_ref.actor.megatron.override_transformer_config.num_layers_in_last_pipeline_stage=11 \
-    +actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn=True \
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform \
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full \
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1 \
+    "${device_actor_megatron_args[@]}" \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${ROLLOUT_TP} \
     actor_rollout_ref.rollout.expert_parallel_size=${ROLLOUT_EP} \
@@ -147,7 +158,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=${ACTOR_PP} \
     actor_rollout_ref.ref.megatron.expert_model_parallel_size=${ACTOR_EP} \
     actor_rollout_ref.ref.megatron.param_offload=${ALL_OFFLOAD} \
-    actor_rollout_ref.ref.megatron.override_transformer_config.use_flash_attn=True \
+    "${device_ref_megatron_args[@]}" \
     "${dist_ckpt_args[@]}" \
     actor_rollout_ref.nccl_timeout=7200 \
     trainer.balance_batch=True \
