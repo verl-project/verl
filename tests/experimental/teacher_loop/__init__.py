@@ -1,4 +1,4 @@
-# Copyright 2024 Bytedance Ltd. and/or its affiliates
+# Copyright 2026 Tilde Research
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,8 +11,3 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-from .nitrobrew_teacher import NitrobrewTeacherModelManager
-from .teacher_model import MultiTeacherModelManager
-
-__all__ = ["MultiTeacherModelManager", "NitrobrewTeacherModelManager"]

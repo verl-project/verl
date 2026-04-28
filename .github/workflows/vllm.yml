@@ -59,6 +59,9 @@ on:
       - ".github/workflows/vllm.yml"
       - "tests/special_e2e/generation"
       - "tests/workers/rollout"
+      - "tests/experimental/teacher_loop"
+      - "verl/experimental/teacher_loop/**"
+      - "verl/trainer/distillation/**"
       - "verl/trainer/main_generation.py"
       - "verl/trainer/config/generation.yaml"
 
@@ -125,6 +128,9 @@ jobs:
       - name: Test vllm server abort functionality
         run: |
           pytest tests/workers/rollout/rollout_vllm/test_vllm_abort.py -v -s
+      - name: Test nitrobrew vLLM teacher (AsyncLLM pooling)
+        run: |
+          pytest tests/experimental/teacher_loop/test_nitrobrew_async_llm.py -v -s
 
   vllm_checkpoint_engine:
     needs: setup

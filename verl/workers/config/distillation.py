@@ -15,7 +15,6 @@
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Optional
 
 from verl.base_config import BaseConfig
 from verl.utils.config import omega_conf_to_dataclass
@@ -63,12 +62,12 @@ class DistillationLossConfig(BaseConfig):
     """
 
     loss_mode: str = "k3"
-    topk: Optional[int] = 128
+    topk: int | None = 128
     kd_temperature: float = 1.0
     use_task_rewards: bool = True
     distillation_loss_coef: float = 1.0
-    loss_max_clamp: Optional[float] = 10.0
-    log_prob_min_clamp: Optional[float] = -10.0
+    loss_max_clamp: float | None = 10.0
+    log_prob_min_clamp: float | None = -10.0
 
     use_policy_gradient: bool = True
     policy_loss_mode: str = "vanilla"
@@ -84,7 +83,7 @@ class DistillationLossConfig(BaseConfig):
 
     # Store distillation loss settings for computing the specified loss_mode
     # Not set by user, populated at runtime
-    loss_settings: Optional[dict] = None
+    loss_settings: dict | None = None
 
     def __post_init__(self):
         self._mutable_fields.add("loss_settings")
@@ -133,10 +132,13 @@ class DistillationTeacherModelConfig(BaseConfig):
 
     _mutable_fields = BaseConfig._mutable_fields | {"num_replicas", "key"}
 
-    key: Optional[str] = None
-    model_path: Optional[str] = None
+    key: str | None = None
+    model_path: str | None = None
     inference: RolloutConfig = field(default_factory=RolloutConfig)
-    num_replicas: Optional[int] = 0
+    num_replicas: int | None = 0
+    # PCA rank used by the nitrobrew loss to compress this teacher's hidden
+    # states. Required when distillation_loss.loss_mode == "nitrobrew".
+    nitrobrew_d_comp: int | None = None
 
     @property
     def per_replica_world_size(self) -> int:
@@ -159,7 +161,7 @@ class DistillationTeacherModelConfig(BaseConfig):
             raise ValueError("num_replicas must be specified for distillation teacher model config.")
 
     def validate_and_prepare_for_distillation(
-        self, use_topk: bool, topk: Optional[int], use_hidden_states: bool = False
+        self, use_topk: bool, topk: int | None, use_hidden_states: bool = False
     ) -> None:
         # Prompt + Response from student are fed into teacher as context
         max_model_len = self.inference.max_model_len
@@ -177,7 +179,7 @@ class DistillationTeacherModelConfig(BaseConfig):
         if not use_hidden_states:
             self._validate_topk_logprobs(use_topk=use_topk, topk=topk)
 
-    def _validate_topk_logprobs(self, use_topk: bool, topk: Optional[int]) -> None:
+    def _validate_topk_logprobs(self, use_topk: bool, topk: int | None) -> None:
         if not use_topk:
             return
         if topk is None:
