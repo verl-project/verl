@@ -387,11 +387,18 @@ def _load_trtllm():
     return TRTLLMReplica
 
 
+def _load_dynamo():
+    from recipe.dynamo.dynamo_async_server import DynamoReplica
+
+    return DynamoReplica
+
+
 # Register built-in types
 RolloutReplicaRegistry.register("vllm", _load_vllm)
 RolloutReplicaRegistry.register("sglang", _load_sglang)
 RolloutReplicaRegistry.register("trtllm", _load_trtllm)
 RolloutReplicaRegistry.register("vllm_omni", _load_vllm_omni)
+RolloutReplicaRegistry.register("dynamo", _load_dynamo)
 
 
 # Original function for backward compatibility
