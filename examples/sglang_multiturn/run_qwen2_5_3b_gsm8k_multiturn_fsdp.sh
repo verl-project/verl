@@ -158,10 +158,14 @@ case "${INFER_BACKEND}" in
         ;;
 esac
 
+CONFIG=(
+    --config-path="$CONFIG_PATH"
+    --config-name="$CONFIG_NAME"
+)
+
 ########################### launch ###########################
 python3 -m verl.trainer.main_ppo \
-    --config-path="$CONFIG_PATH" \
-    --config-name="$CONFIG_NAME" \
+    "${CONFIG[@]}" \
     "${DATA[@]}" \
     "${MODEL[@]}" \
     "${ACTOR[@]}" \

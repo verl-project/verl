@@ -153,7 +153,9 @@ TRAINER=(
 
 # ---- conditional / per-device extras (rolled into a single trailing array) ----
 # Seed with the always-present rollout mode so the array is never empty (Bash 3.x + set -u safe).
-EXTRA=()
+EXTRA=(
+    model_engine=megatron
+)
 
 if [ "${DEVICE}" = npu ]; then
     EXTRA+=(
@@ -181,7 +183,6 @@ fi
 
 ########################### launch ###########################
 python3 -m verl.trainer.main_ppo \
-    model_engine=megatron \
     "${ALGORITHM[@]}" \
     "${DATA[@]}" \
     "${MODEL[@]}" \

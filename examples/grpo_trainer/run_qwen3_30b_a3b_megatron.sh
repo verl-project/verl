@@ -227,7 +227,9 @@ TRAINER=(
 )
 
 # ---- conditional extras (rolled into a single trailing array) ----
-EXTRA=()
+EXTRA=(
+    model_engine=megatron
+)
 
 if [ "${INFER_BACKEND}" = vllm ]; then
     EXTRA+=(actor_rollout_ref.rollout.enable_chunked_prefill=True)
@@ -262,7 +264,6 @@ fi
 
 ########################### launch ###########################
 python3 -m verl.trainer.main_ppo \
-    model_engine=megatron \
     "${ALGORITHM[@]}" \
     "${REWARD[@]}" \
     "${DATA[@]}" \

@@ -64,46 +64,77 @@ python get_model.py
 # recommend to use same value for train_batch_size and ppo_mini_batch_size
 # to avoid MOE training instability
 # use large value for max_response_length if you want to use reasoning effort high.
+########################### parameter arrays ###########################
 
+DATA=(
+    algorithm.adv_estimator=grpo
+    data.train_files="${TRAIN_FILE}"
+    data.val_files="${TEST_FILE}"
+    data.train_batch_size=${TRAIN_BATCH_SIZE}
+    data.max_prompt_length=${MAX_PROMPT_LENGTH}
+    data.max_response_length=${MAX_RESPONSE_LENGTH}
+    data.filter_overlong_prompts=True
+    data.truncation='error'
+    +data.apply_chat_template_kwargs.reasoning_effort=${REASONING_EFFORT}
+    algorithm.use_kl_in_reward=False
+)
+
+MODEL=(
+    actor_rollout_ref.model.path=${MODEL_DIR}
+    actor_rollout_ref.model.use_remove_padding=True
+    actor_rollout_ref.model.enable_gradient_checkpointing=True
+)
+
+ACTOR=(
+    actor_rollout_ref.actor.optim.lr=${ACTOR_LR}
+    actor_rollout_ref.actor.ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE}
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=${PPO_MICRO_BATCH_SIZE_PER_GPU}
+    actor_rollout_ref.actor.use_kl_loss=True
+    actor_rollout_ref.actor.kl_loss_coef=${KL_LOSS_COEF}
+    actor_rollout_ref.actor.kl_loss_type=low_var_kl
+    actor_rollout_ref.actor.entropy_coeff=${ENTROPY_COEFF}
+    actor_rollout_ref.actor.fsdp_config.param_offload=False
+    actor_rollout_ref.actor.fsdp_config.optimizer_offload=False
+    +actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16
+)
+
+ROLLOUT=(
+    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=${LOG_PROB_MICRO_BATCH_SIZE_PER_GPU}
+    actor_rollout_ref.rollout.tensor_model_parallel_size=${ROLLOUT_TP}
+    actor_rollout_ref.rollout.name=sglang
+    actor_rollout_ref.rollout.engine_kwargs.sglang.attention_backend=triton
+    actor_rollout_ref.rollout.gpu_memory_utilization=${ROLLOUT_GPU_MEM_UTIL}
+    actor_rollout_ref.rollout.n=${ROLLOUT_N}
+    actor_rollout_ref.rollout.load_format=safetensors
+)
+
+REF=(
+    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=${LOG_PROB_MICRO_BATCH_SIZE_PER_GPU}
+    actor_rollout_ref.ref.fsdp_config.param_offload=True
+)
+
+TRAINER=(
+    trainer.critic_warmup=0
+    trainer.logger='["console","wandb"]'
+    trainer.project_name=${PROJECT_NAME}
+    trainer.experiment_name=${EXPERIMENT_NAME}
+    trainer.n_gpus_per_node=${NGPUS_PER_NODE}
+    trainer.nnodes=${NNODES}
+    trainer.save_freq=${SAVE_FREQ}
+    trainer.test_freq=${TEST_FREQ}
+    trainer.total_epochs=${TOTAL_EPOCHS}
+)
+
+EXTRA=(
+)
+
+########################### launch ###########################
 python3 -m verl.trainer.main_ppo \
-    algorithm.adv_estimator=grpo \
-    data.train_files="${TRAIN_FILE}" \
-    data.val_files="${TEST_FILE}" \
-    data.train_batch_size=${TRAIN_BATCH_SIZE} \
-    data.max_prompt_length=${MAX_PROMPT_LENGTH} \
-    data.max_response_length=${MAX_RESPONSE_LENGTH} \
-    data.filter_overlong_prompts=True \
-    data.truncation='error' \
-    +data.apply_chat_template_kwargs.reasoning_effort=${REASONING_EFFORT} \
-    actor_rollout_ref.model.path=${MODEL_DIR} \
-    actor_rollout_ref.actor.optim.lr=${ACTOR_LR} \
-    actor_rollout_ref.model.use_remove_padding=True \
-    actor_rollout_ref.actor.ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE} \
-    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=${PPO_MICRO_BATCH_SIZE_PER_GPU} \
-    actor_rollout_ref.actor.use_kl_loss=True \
-    actor_rollout_ref.actor.kl_loss_coef=${KL_LOSS_COEF} \
-    actor_rollout_ref.actor.kl_loss_type=low_var_kl \
-    actor_rollout_ref.actor.entropy_coeff=${ENTROPY_COEFF} \
-    actor_rollout_ref.model.enable_gradient_checkpointing=True \
-    actor_rollout_ref.actor.fsdp_config.param_offload=False \
-    actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
-    +actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
-    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=${LOG_PROB_MICRO_BATCH_SIZE_PER_GPU} \
-    actor_rollout_ref.rollout.tensor_model_parallel_size=${ROLLOUT_TP} \
-    actor_rollout_ref.rollout.name=sglang \
-    actor_rollout_ref.rollout.engine_kwargs.sglang.attention_backend=triton \
-    actor_rollout_ref.rollout.gpu_memory_utilization=${ROLLOUT_GPU_MEM_UTIL} \
-    actor_rollout_ref.rollout.n=${ROLLOUT_N} \
-    actor_rollout_ref.rollout.load_format=safetensors \
-    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=${LOG_PROB_MICRO_BATCH_SIZE_PER_GPU} \
-    actor_rollout_ref.ref.fsdp_config.param_offload=True \
-    algorithm.use_kl_in_reward=False \
-    trainer.critic_warmup=0 \
-    trainer.logger='["console","wandb"]' \
-    trainer.project_name=${PROJECT_NAME} \
-    trainer.experiment_name=${EXPERIMENT_NAME} \
-    trainer.n_gpus_per_node=${NGPUS_PER_NODE} \
-    trainer.nnodes=${NNODES} \
-    trainer.save_freq=${SAVE_FREQ} \
-    trainer.test_freq=${TEST_FREQ} \
-    trainer.total_epochs=${TOTAL_EPOCHS} "$@"
+    "${DATA[@]}" \
+    "${MODEL[@]}" \
+    "${ACTOR[@]}" \
+    "${ROLLOUT[@]}" \
+    "${REF[@]}" \
+    "${TRAINER[@]}" \
+    "${EXTRA[@]}" \
+    "$@"

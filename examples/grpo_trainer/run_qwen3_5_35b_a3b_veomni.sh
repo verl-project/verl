@@ -114,37 +114,56 @@ ROLLOUT_CONFIG="
     actor_rollout_ref.rollout.val_kwargs.n=$n_resp_per_prompt_val \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=False"
+########################### parameter arrays ###########################
 
-python -m verl.trainer.main_ppo \
-    --config-path=./config \
-    --config-name=$CONFIG_NAME \
-    model_engine=$model_engine \
-    algorithm.adv_estimator=$adv_estimator \
-    algorithm.use_kl_in_reward=$use_kl_in_reward \
-    algorithm.kl_ctrl.kl_coef=$kl_coef \
-    algorithm.gamma=$gae_gamma \
-    algorithm.lam=$gae_lam \
-    data.train_files="$train_files" \
-    data.val_files="$test_files" \
-    data.return_raw_chat=True \
-    data.train_batch_size=$train_batch_size \
-    data.max_prompt_length=$max_prompt_length \
-    data.max_response_length=$max_response_length \
-    data.filter_overlong_prompts=True \
-    data.filter_overlong_prompts_workers=64 \
-    data.truncation='error' \
-    trainer.critic_warmup=$critic_warmup \
-    trainer.logger=['console','wandb'] \
-    trainer.project_name=$project_name \
-    trainer.experiment_name=$exp_name \
-    trainer.n_gpus_per_node=8 \
-    trainer.nnodes=$nnodes \
-    trainer.val_before_train=False \
-    trainer.log_val_generations=100 \
-    trainer.save_freq=-1 \
-    trainer.test_freq=10 \
-    trainer.total_epochs=10 \
-    trainer.total_training_steps=500 \
-    $ACTOR_CONFIG \
-    $CIRITC_CONFIG \
+CONFIG=(
+    --config-path=./config
+    --config-name=$CONFIG_NAME
+)
+
+DATA=(
+    algorithm.adv_estimator=$adv_estimator
+    algorithm.use_kl_in_reward=$use_kl_in_reward
+    algorithm.kl_ctrl.kl_coef=$kl_coef
+    algorithm.gamma=$gae_gamma
+    algorithm.lam=$gae_lam
+    data.train_files="$train_files"
+    data.val_files="$test_files"
+    data.return_raw_chat=True
+    data.train_batch_size=$train_batch_size
+    data.max_prompt_length=$max_prompt_length
+    data.max_response_length=$max_response_length
+    data.filter_overlong_prompts=True
+    data.filter_overlong_prompts_workers=64
+    data.truncation='error'
+)
+
+TRAINER=(
+    trainer.critic_warmup=$critic_warmup
+    trainer.logger=['console','wandb']
+    trainer.project_name=$project_name
+    trainer.experiment_name=$exp_name
+    trainer.n_gpus_per_node=8
+    trainer.nnodes=$nnodes
+    trainer.val_before_train=False
+    trainer.log_val_generations=100
+    trainer.save_freq=-1
+    trainer.test_freq=10
+    trainer.total_epochs=10
+    trainer.total_training_steps=500
+)
+
+EXTRA=(
+    model_engine=$model_engine
+    $ACTOR_CONFIG
+    $CIRITC_CONFIG
     $ROLLOUT_CONFIG
+)
+
+########################### launch ###########################
+python -m verl.trainer.main_ppo \
+    "${CONFIG[@]}" \
+    "${DATA[@]}" \
+    "${TRAINER[@]}" \
+    "${EXTRA[@]}" \
+    "$@"

@@ -69,74 +69,105 @@ train_files="['$gsm8k_train', '$math_train']"
 val_files="['$gsm8k_test', '$math_test']"
 
 max_model_len=$((max_prompt_length + max_response_length))
+########################### parameter arrays ###########################
 
+DATA=(
+    algorithm.adv_estimator=grpo
+    algorithm.use_kl_in_reward=False
+    algorithm.kl_ctrl.kl_coef=0.0
+    data.train_files="$train_files"
+    data.val_files="$val_files"
+    data.train_batch_size=${train_batch_size}
+    data.max_prompt_length=${max_prompt_length}
+    data.max_response_length=${max_response_length}
+    data.filter_overlong_prompts=False
+    data.truncation=left
+)
+
+MODEL=(
+    actor_rollout_ref.model.path="$MODEL_PATH"
+    actor_rollout_ref.model.use_remove_padding=True
+)
+
+ACTOR=(
+    actor_rollout_ref.actor.use_torch_compile=False
+    actor_rollout_ref.actor.use_dynamic_bsz=True
+    actor_rollout_ref.actor.ppo_mini_batch_size=${ppo_mini_batch_size}
+    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=${max_model_len}
+    actor_rollout_ref.actor.ppo_epochs=1
+    actor_rollout_ref.actor.optim.lr=${actor_lr}
+    actor_rollout_ref.actor.use_kl_loss=True
+    actor_rollout_ref.actor.kl_loss_coef=${kl_loss_coef}
+    actor_rollout_ref.actor.entropy_coeff=${entropy_coeff}
+    actor_rollout_ref.actor.mindspeed.tensor_model_parallel_size=${actor_tp}
+    actor_rollout_ref.actor.mindspeed.pipeline_model_parallel_size=${actor_pp}
+    actor_rollout_ref.actor.mindspeed.context_parallel_size=${actor_cp}
+    actor_rollout_ref.actor.mindspeed.param_offload=${all_offload}
+    actor_rollout_ref.actor.mindspeed.optimizer_offload=${all_offload}
+    actor_rollout_ref.actor.mindspeed.grad_offload=${all_offload}
+    actor_rollout_ref.actor.mindspeed.use_mbridge=True
+    actor_rollout_ref.actor.mindspeed.vanilla_mbridge=True
+    actor_rollout_ref.actor.mindspeed.llm_kwargs.spec='[mindspeed_llm.tasks.models.spec.qwen3_spec, layer_spec]'
+    actor_rollout_ref.actor.mindspeed.llm_kwargs.seq_length=${max_model_len}
+    actor_rollout_ref.actor.mindspeed.llm_kwargs.micro_batch_size=${micro_bsz}
+    +actor_rollout_ref.actor.mindspeed.llm_kwargs.num_query_groups=8
+    +actor_rollout_ref.actor.mindspeed.llm_kwargs.recompute_method=uniform
+    +actor_rollout_ref.actor.mindspeed.llm_kwargs.recompute_granularity=full
+    +actor_rollout_ref.actor.mindspeed.llm_kwargs.recompute_num_layers=1
+    +actor_rollout_ref.actor.mindspeed.llm_kwargs.overlap_grad_reduce=True
+    +actor_rollout_ref.actor.mindspeed.llm_kwargs.overlap_param_gather=True
+)
+
+ROLLOUT=(
+    actor_rollout_ref.rollout.name=${INFER_BACKEND}
+    +actor_rollout_ref.rollout.engine_kwargs.sglang.attention_backend=ascend
+    +actor_rollout_ref.rollout.engine_kwargs.sglang.chunked_prefill_size=-1
+    actor_rollout_ref.rollout.n=${rollout_n}
+    actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True
+    actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${max_model_len}
+    actor_rollout_ref.rollout.gpu_memory_utilization=${rollout_gpu_mem_util}
+    actor_rollout_ref.rollout.tensor_model_parallel_size=${rollout_tp}
+    actor_rollout_ref.rollout.data_parallel_size=${rollout_dp}
+    actor_rollout_ref.rollout.enforce_eager=False
+)
+
+REF=(
+    actor_rollout_ref.ref.use_torch_compile=False
+    actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True
+    actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${max_model_len}
+    actor_rollout_ref.ref.mindspeed.tensor_model_parallel_size=${actor_tp}
+    actor_rollout_ref.ref.mindspeed.pipeline_model_parallel_size=${actor_pp}
+    actor_rollout_ref.ref.mindspeed.context_parallel_size=${actor_cp}
+    actor_rollout_ref.ref.mindspeed.param_offload=${all_offload}
+    actor_rollout_ref.ref.mindspeed.use_mbridge=True
+    actor_rollout_ref.ref.mindspeed.vanilla_mbridge=True
+)
+
+TRAINER=(
+    trainer.balance_batch=True
+    trainer.logger='["console","wandb"]'
+    trainer.project_name=${project_name}
+    trainer.experiment_name=${experiment_name}
+    trainer.nnodes=${NNODES}
+    trainer.n_gpus_per_node=${NPUS_PER_NODE}
+    trainer.val_before_train=False
+    trainer.test_freq=${test_freq}
+    trainer.save_freq=${save_freq}
+    trainer.total_epochs=${total_epochs}
+    trainer.default_local_dir="${CKPTS_DIR}"
+)
+
+EXTRA=(
+    model_engine=mindspeed
+)
+
+########################### launch ###########################
 python3 -m verl.trainer.main_ppo \
-    model_engine=mindspeed \
-    algorithm.adv_estimator=grpo \
-    algorithm.use_kl_in_reward=False \
-    algorithm.kl_ctrl.kl_coef=0.0 \
-    data.train_files="$train_files" \
-    data.val_files="$val_files" \
-    data.train_batch_size=${train_batch_size} \
-    data.max_prompt_length=${max_prompt_length} \
-    data.max_response_length=${max_response_length} \
-    data.filter_overlong_prompts=False \
-    data.truncation=left \
-    actor_rollout_ref.model.path="$MODEL_PATH" \
-    actor_rollout_ref.model.use_remove_padding=True \
-    actor_rollout_ref.actor.use_torch_compile=False \
-    actor_rollout_ref.actor.use_dynamic_bsz=True \
-    actor_rollout_ref.actor.ppo_mini_batch_size=${ppo_mini_batch_size} \
-    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=${max_model_len} \
-    actor_rollout_ref.actor.ppo_epochs=1 \
-    actor_rollout_ref.actor.optim.lr=${actor_lr} \
-    actor_rollout_ref.actor.use_kl_loss=True \
-    actor_rollout_ref.actor.kl_loss_coef=${kl_loss_coef} \
-    actor_rollout_ref.actor.entropy_coeff=${entropy_coeff} \
-    actor_rollout_ref.actor.mindspeed.tensor_model_parallel_size=${actor_tp} \
-    actor_rollout_ref.actor.mindspeed.pipeline_model_parallel_size=${actor_pp} \
-    actor_rollout_ref.actor.mindspeed.context_parallel_size=${actor_cp} \
-    actor_rollout_ref.actor.mindspeed.param_offload=${all_offload} \
-    actor_rollout_ref.actor.mindspeed.optimizer_offload=${all_offload} \
-    actor_rollout_ref.actor.mindspeed.grad_offload=${all_offload} \
-    actor_rollout_ref.actor.mindspeed.use_mbridge=True \
-    actor_rollout_ref.actor.mindspeed.vanilla_mbridge=True \
-    actor_rollout_ref.actor.mindspeed.llm_kwargs.spec='[mindspeed_llm.tasks.models.spec.qwen3_spec, layer_spec]' \
-    actor_rollout_ref.actor.mindspeed.llm_kwargs.seq_length=${max_model_len} \
-    actor_rollout_ref.actor.mindspeed.llm_kwargs.micro_batch_size=${micro_bsz} \
-    +actor_rollout_ref.actor.mindspeed.llm_kwargs.num_query_groups=8 \
-    +actor_rollout_ref.actor.mindspeed.llm_kwargs.recompute_method=uniform \
-    +actor_rollout_ref.actor.mindspeed.llm_kwargs.recompute_granularity=full \
-    +actor_rollout_ref.actor.mindspeed.llm_kwargs.recompute_num_layers=1 \
-    +actor_rollout_ref.actor.mindspeed.llm_kwargs.overlap_grad_reduce=True \
-    +actor_rollout_ref.actor.mindspeed.llm_kwargs.overlap_param_gather=True \
-    actor_rollout_ref.ref.use_torch_compile=False \
-    actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True \
-    actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${max_model_len} \
-    actor_rollout_ref.ref.mindspeed.tensor_model_parallel_size=${actor_tp} \
-    actor_rollout_ref.ref.mindspeed.pipeline_model_parallel_size=${actor_pp} \
-    actor_rollout_ref.ref.mindspeed.context_parallel_size=${actor_cp} \
-    actor_rollout_ref.ref.mindspeed.param_offload=${all_offload} \
-    actor_rollout_ref.ref.mindspeed.use_mbridge=True \
-    actor_rollout_ref.ref.mindspeed.vanilla_mbridge=True \
-    actor_rollout_ref.rollout.name=${INFER_BACKEND} \
-    +actor_rollout_ref.rollout.engine_kwargs.sglang.attention_backend=ascend \
-    +actor_rollout_ref.rollout.engine_kwargs.sglang.chunked_prefill_size=-1 \
-    actor_rollout_ref.rollout.n=${rollout_n} \
-    actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True \
-    actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${max_model_len} \
-    actor_rollout_ref.rollout.gpu_memory_utilization=${rollout_gpu_mem_util} \
-    actor_rollout_ref.rollout.tensor_model_parallel_size=${rollout_tp} \
-    actor_rollout_ref.rollout.data_parallel_size=${rollout_dp} \
-    actor_rollout_ref.rollout.enforce_eager=False \
-    trainer.balance_batch=True \
-    trainer.logger='["console","wandb"]' \
-    trainer.project_name=${project_name} \
-    trainer.experiment_name=${experiment_name} \
-    trainer.nnodes=${NNODES} \
-    trainer.n_gpus_per_node=${NPUS_PER_NODE} \
-    trainer.val_before_train=False \
-    trainer.test_freq=${test_freq} \
-    trainer.save_freq=${save_freq} \
-    trainer.total_epochs=${total_epochs} \
-    trainer.default_local_dir="${CKPTS_DIR}" "$@"
+    "${DATA[@]}" \
+    "${MODEL[@]}" \
+    "${ACTOR[@]}" \
+    "${ROLLOUT[@]}" \
+    "${REF[@]}" \
+    "${TRAINER[@]}" \
+    "${EXTRA[@]}" \
+    "$@"

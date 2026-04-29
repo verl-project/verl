@@ -204,10 +204,13 @@ ALGORITHM=(
     algorithm.use_kl_in_reward=${use_kl_in_reward}
     algorithm.kl_ctrl.kl_coef=${kl_coef}
 )
+EXTRA=(
+    model_engine=megatron
+)
+
 ################################################### start script ###################################################
 
 python3 -m verl.trainer.main_ppo \
-    model_engine=megatron \
     "${DATA[@]}" \
     "${ALGORITHM[@]}" \
     "${MODEL[@]}" \
@@ -218,3 +221,5 @@ python3 -m verl.trainer.main_ppo \
     "${PERF_OPT[@]}" \
     "${TRAINER[@]}" \
     "${FORWARD_ONLY_SETS[@]}" \
+    "${EXTRA[@]}" \
+    "$@"

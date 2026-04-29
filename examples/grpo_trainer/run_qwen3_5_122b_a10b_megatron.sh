@@ -175,10 +175,13 @@ TRAINER=(
     trainer.total_epochs=20
 )
 
+EXTRA=(
+    model_engine=megatron
+)
+
 ########################### Launch ###########################
 export HYDRA_FULL_ERROR=1
 PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
-    model_engine=megatron \
     "${ALGORITHM[@]}" \
     "${DATA[@]}" \
     "${MODEL[@]}" \
@@ -187,4 +190,5 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
     "${ROLLOUT[@]}" \
     "${ACTOR[@]}" \
     "${REF[@]}" \
-    "$@" 
+    "${EXTRA[@]}" \
+    "$@"

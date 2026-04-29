@@ -107,17 +107,12 @@ TRAINER=(
     trainer.total_epochs=${total_epochs}
 )
 
-# Seed with the always-present rollout mode (or hybrid_engine for trtllm) so the
-# array is never empty (Bash 3.x + set -u safe).
-if [ "${INFER_BACKEND}" = trtllm ]; then
-    EXTRA=()
-else
-    EXTRA=()
-fi
+EXTRA=(
+    model_engine=megatron
+)
 
 ########################### launch ###########################
 python3 -m verl.trainer.main_ppo \
-    model_engine=megatron \
     "${DATA[@]}" \
     "${MODEL[@]}" \
     "${ACTOR[@]}" \

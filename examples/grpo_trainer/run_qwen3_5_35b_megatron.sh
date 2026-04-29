@@ -152,10 +152,13 @@ TRAINER=(
     trainer.total_epochs=15
 )
 
+EXTRA=(
+    model_engine=megatron
+)
+
 ########################### Launch ###########################
 
 python3 -m verl.trainer.main_ppo \
-    model_engine=megatron \
     "${DATA[@]}" \
     "${ALGORITHM[@]}" \
     "${MODEL[@]}" \
@@ -163,4 +166,5 @@ python3 -m verl.trainer.main_ppo \
     "${ACTOR[@]}" \
     "${REF[@]}" \
     "${TRAINER[@]}" \
+    "${EXTRA[@]}" \
     "$@"

@@ -55,35 +55,62 @@ gamma=1.0
 # ==============================================================================
 # Launch Training
 # ==============================================================================
+########################### parameter arrays ###########################
 
-python3 -m verl.trainer.main_ppo \
-    data.train_files="${TRAIN_FILE}" \
-    data.val_files="${TEST_FILE}" \
-    data.max_prompt_length=${max_prompt_length} \
-    data.max_response_length=${max_response_length} \
-    data.train_batch_size=${train_batch_size} \
-    data.truncation='left' \
-    algorithm.adv_estimator=${adv_estimator} \
-    algorithm.gamma=${gamma} \
-    algorithm.rollout_correction.rollout_is=${rollout_is} \
-    algorithm.rollout_correction.rollout_is_threshold=${rollout_is_threshold} \
-    algorithm.rollout_correction.rollout_is_batch_normalize=${rollout_is_batch_normalize} \
-    algorithm.rollout_correction.rollout_rs=${rollout_rs} \
-    algorithm.rollout_correction.rollout_rs_threshold=${rollout_rs_threshold} \
-    algorithm.rollout_correction.bypass_mode=${bypass_mode} \
-    algorithm.rollout_correction.loss_type=${loss_type} \
-    actor_rollout_ref.model.path="${MODEL_PATH}" \
-    actor_rollout_ref.actor.optim.lr=${learning_rate} \
-    actor_rollout_ref.actor.ppo_mini_batch_size=${ppo_mini_batch_size} \
-    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=8 \
-    actor_rollout_ref.actor.ppo_epochs=${ppo_epochs} \
-    actor_rollout_ref.rollout.calculate_log_probs=True \
-    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=8 \
-    actor_rollout_ref.rollout.name=vllm \
-    trainer.logger='["console","wandb"]' \
-    trainer.project_name="rollout_corr_rloo_example" \
-    trainer.experiment_name="rloo_seq_is_pure" \
+DATA=(
+    data.train_files="${TRAIN_FILE}"
+    data.val_files="${TEST_FILE}"
+    data.max_prompt_length=${max_prompt_length}
+    data.max_response_length=${max_response_length}
+    data.train_batch_size=${train_batch_size}
+    data.truncation='left'
+    algorithm.adv_estimator=${adv_estimator}
+    algorithm.gamma=${gamma}
+    algorithm.rollout_correction.rollout_is=${rollout_is}
+    algorithm.rollout_correction.rollout_is_threshold=${rollout_is_threshold}
+    algorithm.rollout_correction.rollout_is_batch_normalize=${rollout_is_batch_normalize}
+    algorithm.rollout_correction.rollout_rs=${rollout_rs}
+    algorithm.rollout_correction.rollout_rs_threshold=${rollout_rs_threshold}
+    algorithm.rollout_correction.bypass_mode=${bypass_mode}
+    algorithm.rollout_correction.loss_type=${loss_type}
+)
+
+MODEL=(
+    actor_rollout_ref.model.path="${MODEL_PATH}"
+)
+
+ACTOR=(
+    actor_rollout_ref.actor.optim.lr=${learning_rate}
+    actor_rollout_ref.actor.ppo_mini_batch_size=${ppo_mini_batch_size}
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=8
+    actor_rollout_ref.actor.ppo_epochs=${ppo_epochs}
+)
+
+ROLLOUT=(
+    actor_rollout_ref.rollout.calculate_log_probs=True
+    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=8
+    actor_rollout_ref.rollout.name=vllm
+)
+
+TRAINER=(
+    trainer.logger='["console","wandb"]'
+    trainer.project_name="rollout_corr_rloo_example"
+    trainer.experiment_name="rloo_seq_is_pure"
     trainer.total_epochs=10
+)
+
+EXTRA=(
+)
+
+########################### launch ###########################
+python3 -m verl.trainer.main_ppo \
+    "${DATA[@]}" \
+    "${MODEL[@]}" \
+    "${ACTOR[@]}" \
+    "${ROLLOUT[@]}" \
+    "${TRAINER[@]}" \
+    "${EXTRA[@]}" \
+    "$@"
 
 echo "Training completed!"
 echo ""
