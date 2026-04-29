@@ -336,6 +336,13 @@ skip_tokenizer_init: True
 # When enabled (True), the rollout will record the routing decisions.
 enable_rollout_routing_replay: False
 
+# In multi-turn agent loops, when True (default) accumulate per-turn routed_experts
+# by injecting routed_experts_prompt_start = cum_so_far into vllm SamplingParams so
+# each turn returns only newly-covered positions; verl-side np.concatenate joins them.
+# When False, fall back to legacy overwrite (last turn's cumulative routing replaces
+# prior turns). Has no effect when enable_rollout_routing_replay is False.
+enable_per_turn_routing_concat: True
+
 
 # profile the rollout model in `generate_sequence`
 profiler:

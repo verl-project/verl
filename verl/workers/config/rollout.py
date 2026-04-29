@@ -280,6 +280,14 @@ class RolloutConfig(BaseConfig):
 
     enable_rollout_routing_replay: bool = False
 
+    # In multi-turn agent loops, when True (default) accumulate per-turn routed_experts
+    # by injecting `routed_experts_prompt_start = cum_so_far` into vllm SamplingParams so
+    # each turn returns only newly-covered positions; verl-side np.concatenate joins them.
+    # When False, fall back to legacy overwrite (last turn's cumulative routing replaces
+    # prior turns) — single-turn correct, multi-turn loses earlier turns' routings if a
+    # late turn aborts. Has no effect when enable_rollout_routing_replay is False.
+    enable_per_turn_routing_concat: bool = True
+
     enable_sleep_mode: bool = True
 
     mtp: MtpConfig = field(default_factory=MtpConfig)

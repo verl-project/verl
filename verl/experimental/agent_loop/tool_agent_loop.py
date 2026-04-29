@@ -19,6 +19,7 @@ from enum import Enum
 from typing import Any
 from uuid import uuid4
 
+import numpy as np
 import torch
 from PIL import Image
 
@@ -80,6 +81,9 @@ class AgentData:
         self.tool_calls: list[FunctionCall] = []
 
         self.routed_experts = None
+        # cum_so_far for routed_experts_prompt_start (per-turn cumulative routing rows).
+        # Each turn injects this value, then increments by len(returned routing).
+        self.routing_emitted_count = 0
 
         # Extra fields for dynamic addition, e.g., tool session data
         self.extra_fields: dict[str, Any] = {}
@@ -163,6 +167,15 @@ class ToolAgentLoop(AgentLoopBase):
         if agent_data.video_data is not None:
             multi_modal_data["videos"] = agent_data.video_data
 
+        routed_experts_out = agent_data.routed_experts
+        if routed_experts_out is not None:
+            # cum-based array ends at L_K+R_K-1 (last sampled token was never forwarded
+            # so has no captured routing); pad 1 zero to align with prompt+response.
+            if self.rollout_config.enable_per_turn_routing_concat:
+                pad = np.zeros((1, *routed_experts_out.shape[1:]), dtype=routed_experts_out.dtype)
+                routed_experts_out = np.concatenate([routed_experts_out, pad], axis=0)
+            routed_experts_out = routed_experts_out[: len(prompt_ids) + self.response_length]
+
         output: AgentLoopOutput = AgentLoopOutput(
             prompt_ids=prompt_ids,
             response_ids=response_ids[: self.response_length],
@@ -173,11 +186,7 @@ class ToolAgentLoop(AgentLoopBase):
             else None,
             num_turns=agent_data.user_turns + agent_data.assistant_turns + 1,
             metrics=agent_data.metrics,
-            routed_experts=(
-                agent_data.routed_experts[: len(prompt_ids) + self.response_length]
-                if agent_data.routed_experts is not None
-                else None
-            ),
+            routed_experts=routed_experts_out,
             extra_fields=agent_data.extra_fields,
         )
         output.extra_fields.update({"turn_scores": agent_data.turn_scores, "tool_rewards": agent_data.tool_rewards})
@@ -199,6 +208,18 @@ class ToolAgentLoop(AgentLoopBase):
         self, agent_data: AgentData, sampling_params: dict[str, Any], ignore_termination: bool = False
     ) -> AgentState:
         """Handle the generating state: generate model response and check for tool calls."""
+        # When per-turn routing concat is enabled, inject cumulative routing offset so
+        # vllm engine emits only positions [cum_so_far, num_prompt_tokens-1] from prefill
+        # plus 1 row per decode step. cum=0 in single-turn or first turn ⇒ default behavior.
+        if (
+            self.rollout_config.enable_rollout_routing_replay
+            and self.rollout_config.enable_per_turn_routing_concat
+        ):
+            sampling_params = {
+                **sampling_params,
+                "routed_experts_prompt_start": agent_data.routing_emitted_count,
+            }
+
         with simple_timer("generate_sequences", agent_data.metrics):
             output: TokenOutput = await self.server_manager.generate(
                 request_id=agent_data.request_id,
@@ -229,8 +250,22 @@ class ToolAgentLoop(AgentLoopBase):
         if output.log_probs:
             agent_data.response_logprobs += output.log_probs
 
-        if output.routed_experts is not None:
-            agent_data.routed_experts = output.routed_experts
+        if self.rollout_config.enable_per_turn_routing_concat:
+            # cum-based concat: each turn returns only newly-covered positions; the next
+            # turn's prompt_start covers any gap left by an aborted/zero-token turn.
+            if output.routed_experts is not None:
+                new_re = output.routed_experts
+                if isinstance(new_re, torch.Tensor):
+                    new_re = new_re.detach().cpu().numpy()
+                if agent_data.routed_experts is None:
+                    agent_data.routed_experts = new_re
+                else:
+                    agent_data.routed_experts = np.concatenate([agent_data.routed_experts, new_re], axis=0)
+                agent_data.routing_emitted_count += new_re.shape[0]
+        else:
+            # Legacy: overwrite each turn (pre-PR behavior).
+            if output.routed_experts is not None:
+                agent_data.routed_experts = output.routed_experts
 
         # Check termination conditions
         if not ignore_termination and len(agent_data.response_mask) >= self.response_length:
