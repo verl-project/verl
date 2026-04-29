@@ -491,8 +491,44 @@ def offload_megatron_model_to_cpu(models):
                 for buffer in buffers:
                     # offload parameters
                     if buffer.param_data.storage().size() > 0:
-                        buffer.param_data.cpu_data = buffer.param_data.data.cpu().pin_memory()
-                        buffer.param_data_size = buffer.param_data.storage().size()
+                        # Reuse a single pinned cpu_data buffer per DDP buffer.
+                        # The previous implementation reallocated cpu_data via
+                        # `.cpu().pin_memory()` on every offload. Python evaluates
+                        # the RHS before the assignment, so the new pinned block is
+                        # allocated while the old cpu_data is still referenced --
+                        # peak host memory at the moment of allocation is 2x
+                        # param_data size. On large Megatron models this transient
+                        # peak exceeds the cgroup limit and OOMKills the pod even
+                        # though steady-state usage would be 1x. Reallocating here
+                        # would re-trigger the same 2x peak, so we allocate at most
+                        # once per buffer and assert shape/dtype invariance on
+                        # subsequent calls -- a mismatch means a caller rebuilt
+                        # param_data under us, which is a bug we want surfaced
+                        # rather than silently worked around.
+                        existing = getattr(buffer.param_data, "cpu_data", None)
+                        if existing is None:
+                            buffer.param_data.cpu_data = torch.empty(
+                                buffer.param_data.size(),
+                                dtype=buffer.param_data.dtype,
+                                device="cpu",
+                                pin_memory=True,
+                            )
+                            buffer.param_data_size = buffer.param_data.storage().size()
+                        else:
+                            assert existing.shape == buffer.param_data.shape, (
+                                f"cpu_data shape {tuple(existing.shape)} != "
+                                f"param_data shape {tuple(buffer.param_data.shape)}; "
+                                "reallocating would reintroduce the 2x peak."
+                            )
+                            assert existing.dtype == buffer.param_data.dtype, (
+                                f"cpu_data dtype {existing.dtype} != "
+                                f"param_data dtype {buffer.param_data.dtype}; "
+                                "reallocating would reintroduce the 2x peak."
+                            )
+                        # Synchronous D2H copy into the preexisting pinned
+                        # buffer; must complete before resize_(0) frees the
+                        # GPU storage.
+                        buffer.param_data.cpu_data.copy_(buffer.param_data.data, non_blocking=False)
                         buffer.param_data.storage().resize_(0)
 
                     assert buffer.param_data_size == buffer.param_data.cpu_data.storage().size()
