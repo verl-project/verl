@@ -43,42 +43,19 @@ experiment_name=${EXPERIMENT_NAME:-}
 ########################### end user-adjustable ###########################
 
 ########################### derived defaults ###########################
-case "${INFER_BACKEND}" in
-    vllm)
-        NNODES=${NNODES:-1}
-        train_batch_size=${train_batch_size:-8}
-        ppo_mini_batch_size=${ppo_mini_batch_size:-8}
-        max_prompt_length=${max_prompt_length:-1024}
-        max_response_length=${max_response_length:-1024}
-        actor_pp=${actor_pp:-1}
-        actor_tp=${actor_tp:-2}
-        rollout_tp=${rollout_tp:-2}
-        actor_use_dynamic_bsz=True
-        rollout_log_prob_use_dynamic_bsz=True
-        ref_log_prob_use_dynamic_bsz=True
-        moe_permute_fusion=True
-        trainer_balance_batch=True
-        ;;
-    sglang)
-        NNODES=${NNODES:-6}
-        train_batch_size=${train_batch_size:-3}
-        ppo_mini_batch_size=${ppo_mini_batch_size:-3}
-        max_prompt_length=${max_prompt_length:-512}
-        max_response_length=${max_response_length:-512}
-        actor_pp=${actor_pp:-6}
-        actor_tp=${actor_tp:-1}
-        rollout_tp=${rollout_tp:-4}
-        actor_use_dynamic_bsz=False
-        rollout_log_prob_use_dynamic_bsz=False
-        ref_log_prob_use_dynamic_bsz=False
-        moe_permute_fusion=False
-        trainer_balance_batch=False
-        ;;
-    *)
-        echo "INFER_BACKEND must be vllm or sglang, got: ${INFER_BACKEND}" >&2
-        exit 1
-        ;;
-esac
+NNODES=${NNODES:-6}
+train_batch_size=${train_batch_size:-3}
+ppo_mini_batch_size=${ppo_mini_batch_size:-3}
+max_prompt_length=${max_prompt_length:-512}
+max_response_length=${max_response_length:-512}
+actor_pp=${actor_pp:-6}
+actor_tp=${actor_tp:-1}
+rollout_tp=${rollout_tp:-4}
+actor_use_dynamic_bsz=False
+rollout_log_prob_use_dynamic_bsz=False
+ref_log_prob_use_dynamic_bsz=False
+moe_permute_fusion=False
+trainer_balance_batch=False
 
 if [ -z "$ENABLE_ROLLOUT_ROUTING_REPLAY" ]; then
     if [ "$ROUTING_REPLAY_MODE" = "R3" ]; then
@@ -149,6 +126,7 @@ ROLLOUT=(
     actor_rollout_ref.rollout.tensor_model_parallel_size=${rollout_tp}
     actor_rollout_ref.rollout.gpu_memory_utilization=${rollout_gpu_mem_util}
     actor_rollout_ref.rollout.n=${rollout_n}
+    actor_rollout_ref.rollout.calculate_log_probs=True
     actor_rollout_ref.rollout.enable_chunked_prefill=True
     actor_rollout_ref.rollout.max_num_batched_tokens=$((max_prompt_length + max_response_length))
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=${micro_bs}
@@ -182,15 +160,10 @@ TRAINER=(
     trainer.val_before_train=False
 )
 
-# Backend-specific extras (single trailing array, never empty).
-case "${INFER_BACKEND}" in
-    vllm)
-        EXTRA=(actor_rollout_ref.rollout.calculate_log_probs=True)
-        ;;
-    sglang)
-        EXTRA=(actor_rollout_ref.rollout.skip_tokenizer_init=True)
-        ;;
-esac
+# Conservative rollout extras shared by all inference backends.
+EXTRA=(
+    actor_rollout_ref.rollout.skip_tokenizer_init=True
+)
 
 ########################### launch ###########################
 python3 -m verl.trainer.main_ppo \

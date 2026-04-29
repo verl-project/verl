@@ -35,24 +35,8 @@ experiment_name=${EXPERIMENT_NAME:-qwen2_5_vl_7b_${INFER_BACKEND}_fsdp}
 ########################### end user-adjustable ###########################
 
 ########################### derived defaults ###########################
-case "${INFER_BACKEND}" in
-    vllm | sglang | trtllm) ;;
-    *)
-        echo "INFER_BACKEND must be vllm, sglang, or trtllm, got: ${INFER_BACKEND}" >&2
-        exit 1
-        ;;
-esac
-
-case "${INFER_BACKEND}" in
-    sglang)
-        rollout_tp=${rollout_tp:-1}
-        rollout_gpu_mem_util=${rollout_gpu_mem_util:-0.85}
-        ;;
-    *)
-        rollout_tp=${rollout_tp:-2}
-        rollout_gpu_mem_util=${rollout_gpu_mem_util:-0.6}
-        ;;
-esac
+rollout_tp=${rollout_tp:-2}
+rollout_gpu_mem_util=${rollout_gpu_mem_util:-0.6}
 
 ########################### parameter arrays ###########################
 
@@ -115,31 +99,19 @@ TRAINER=(
     trainer.total_epochs=${total_epochs}
 )
 
-# Backend-specific extras (single trailing array, never empty).
-case "${INFER_BACKEND}" in
-    sglang)
-        EXTRA=(
-            actor_rollout_ref.rollout.multi_stage_wake_up=True
-            actor_rollout_ref.rollout.enable_chunked_prefill=False
-            actor_rollout_ref.rollout.enforce_eager=False
-            actor_rollout_ref.rollout.free_cache_engine=True
-        )
-        ;;
-    trtllm)
-        EXTRA=(
-            actor_rollout_ref.actor.strategy=fsdp2
-        )
-        ;;
-    *)
-        EXTRA=(
-            actor_rollout_ref.model.use_fused_kernels=True
-            +actor_rollout_ref.rollout.engine_kwargs.vllm.mm_processor_cache_gb=0
-            actor_rollout_ref.rollout.enable_chunked_prefill=False
-            actor_rollout_ref.rollout.enforce_eager=False
-            actor_rollout_ref.rollout.free_cache_engine=True
-        )
-        ;;
-esac
+# Conservative rollout extras shared by all inference backends.
+EXTRA=(
+    actor_rollout_ref.actor.strategy=fsdp2
+    actor_rollout_ref.model.use_fused_kernels=True
+    actor_rollout_ref.rollout.multi_stage_wake_up=True
+    actor_rollout_ref.rollout.enable_chunked_prefill=False
+    actor_rollout_ref.rollout.enforce_eager=False
+    actor_rollout_ref.rollout.free_cache_engine=True
+)
+
+if [ "${INFER_BACKEND}" = vllm ]; then
+    EXTRA+=(+actor_rollout_ref.rollout.engine_kwargs.vllm.mm_processor_cache_gb=0)
+fi
 
 ########################### launch ###########################
 python3 -m verl.trainer.main_ppo \

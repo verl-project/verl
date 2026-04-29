@@ -127,7 +127,6 @@ ROLLOUT=(
     actor_rollout_ref.rollout.max_num_batched_tokens=${ROLLOUT_MAX_NUM_BATCHED_TOKENS}
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=${LOG_PROB_MICRO_BATCH_SIZE_PER_GPU}
     actor_rollout_ref.rollout.tensor_model_parallel_size=${rollout_tp}
-    +actor_rollout_ref.rollout.engine_kwargs.vllm.mm_processor_cache_gb=0
     actor_rollout_ref.rollout.gpu_memory_utilization=${rollout_gpu_mem_util}
     actor_rollout_ref.rollout.enable_chunked_prefill=True
     actor_rollout_ref.rollout.enforce_eager=False
@@ -160,6 +159,11 @@ TRAINER=(
     trainer.total_epochs=${TOTAL_EPOCHS}
 )
 
+EXTRA=()
+if [ "${INFER_BACKEND}" = vllm ]; then
+    EXTRA+=(+actor_rollout_ref.rollout.engine_kwargs.vllm.mm_processor_cache_gb=0)
+fi
+
 ########################### launch ###########################
 python3 -m verl.trainer.main_ppo \
     "${DATA[@]}" \
@@ -168,4 +172,5 @@ python3 -m verl.trainer.main_ppo \
     "${ROLLOUT[@]}" \
     "${REF[@]}" \
     "${TRAINER[@]}" \
+    "${EXTRA[@]}" \
     "$@"

@@ -81,14 +81,6 @@ experiment_name=${EXPERIMENT_NAME:-qwen3_30b_a3b_${INFER_BACKEND}_megatron${ROLL
 ########################### end user-adjustable ###########################
 
 ########################### derived defaults ###########################
-case "${INFER_BACKEND}" in
-    vllm | sglang | trtllm) ;;
-    *)
-        echo "INFER_BACKEND must be vllm, sglang, or trtllm, got: ${INFER_BACKEND}" >&2
-        exit 1
-        ;;
-esac
-
 if [ -n "${ROLLOUT_QUANTIZATION}" ] && [ "${INFER_BACKEND}" != trtllm ]; then
     echo "ROLLOUT_QUANTIZATION is only supported with INFER_BACKEND=trtllm, got: ${INFER_BACKEND}" >&2
     exit 1
@@ -182,6 +174,7 @@ ROLLOUT=(
     actor_rollout_ref.rollout.gpu_memory_utilization=${rollout_gpu_mem_util}
     actor_rollout_ref.rollout.n=${rollout_n}
     actor_rollout_ref.rollout.calculate_log_probs=True
+    actor_rollout_ref.rollout.enable_chunked_prefill=True
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${rollout_log_prob_max_token_len_per_gpu}
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=${rollout_log_prob_micro_batch_size_per_gpu}
@@ -229,18 +222,14 @@ TRAINER=(
 # ---- conditional extras (rolled into a single trailing array) ----
 EXTRA=(
     model_engine=megatron
+    actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=${TRTLLM_UPDATE_WEIGHTS_BUCKET_MEGABYTES:-4096}
+    +actor_rollout_ref.rollout.moe_tensor_parallel_size=${gen_moe_tp}
+    actor_rollout_ref.rollout.expert_parallel_size=${gen_moe_ep}
 )
 
-if [ "${INFER_BACKEND}" = vllm ]; then
-    EXTRA+=(actor_rollout_ref.rollout.enable_chunked_prefill=True)
-elif [ "${INFER_BACKEND}" = trtllm ]; then
+if [ "${INFER_BACKEND}" = trtllm ]; then
     EXTRA+=(
-        actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=${TRTLLM_UPDATE_WEIGHTS_BUCKET_MEGABYTES:-4096}
-        +actor_rollout_ref.rollout.engine_kwargs.trtllm.batch_wait_timeout_iters=${TRTLLM_BATCH_WAIT_TIMEOUT_ITERS:-32}
-        +actor_rollout_ref.rollout.engine_kwargs.trtllm.batch_wait_max_tokens_ratio=${TRTLLM_BATCH_WAIT_MAX_TOKENS_RATIO:-0.5}
         +actor_rollout_ref.rollout.engine_kwargs.trtllm.moe_config.backend=${trtllm_moe_backend}
-        +actor_rollout_ref.rollout.moe_tensor_parallel_size=${gen_moe_tp}
-        actor_rollout_ref.rollout.expert_parallel_size=${gen_moe_ep}
     )
 fi
 

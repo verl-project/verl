@@ -38,15 +38,6 @@ project_name=${PROJECT_NAME:-verl_grpo_gsm8k_math}
 experiment_name=${EXPERIMENT_NAME:-qwen3_8b_${INFER_BACKEND}_megatron}
 ########################### end user-adjustable ###########################
 
-########################### derived defaults ###########################
-case "${INFER_BACKEND}" in
-    vllm | sglang | trtllm) ;;
-    *)
-        echo "INFER_BACKEND must be vllm, sglang, or trtllm, got: ${INFER_BACKEND}" >&2
-        exit 1
-        ;;
-esac
-
 ########################### parameter arrays ###########################
 
 DATA=(

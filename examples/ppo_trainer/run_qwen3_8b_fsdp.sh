@@ -41,14 +41,6 @@ MATH_TEST_FILE=${MATH_TEST_FILE:-$HOME/data/math/test.parquet}
 ########################### end user-adjustable ###########################
 
 ########################### derived defaults ###########################
-case "${INFER_BACKEND}" in
-    vllm | sglang) ;;
-    *)
-        echo "Unsupported INFER_BACKEND=${INFER_BACKEND}. Expected 'vllm' or 'sglang'." >&2
-        exit 1
-        ;;
-esac
-
 case "${DEVICE}" in
     gpu)
         n_devices_per_node=${NDEVICES_PER_NODE:-${NGPUS_PER_NODE:-8}}

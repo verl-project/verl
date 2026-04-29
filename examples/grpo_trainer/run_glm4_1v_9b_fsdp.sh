@@ -66,7 +66,6 @@ ROLLOUT=(
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=${LOG_PROB_MICRO_BATCH_SIZE_PER_GPU}
     actor_rollout_ref.rollout.tensor_model_parallel_size=${ROLLOUT_TP}
     actor_rollout_ref.rollout.name=${INFER_BACKEND}
-    +actor_rollout_ref.rollout.engine_kwargs.vllm.mm_processor_cache_gb=0
     actor_rollout_ref.rollout.gpu_memory_utilization=${ROLLOUT_GPU_MEM_UTIL}
     actor_rollout_ref.rollout.enable_chunked_prefill=False
     actor_rollout_ref.rollout.enforce_eager=False
@@ -93,6 +92,9 @@ TRAINER=(
 
 EXTRA=(
 )
+if [ "${INFER_BACKEND}" = vllm ]; then
+    EXTRA+=(+actor_rollout_ref.rollout.engine_kwargs.vllm.mm_processor_cache_gb=0)
+fi
 
 ########################### launch ###########################
 python3 -m verl.trainer.main_ppo \

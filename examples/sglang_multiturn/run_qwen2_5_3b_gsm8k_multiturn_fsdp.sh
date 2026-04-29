@@ -37,41 +37,21 @@ EXPERIMENT_NAME=${EXPERIMENT_NAME:-}
 ########################### end user-adjustable ###########################
 
 ########################### derived defaults ###########################
-case "${INFER_BACKEND}" in
-    sglang)
-        NGPUS_PER_NODE=${NGPUS_PER_NODE:-8}
-        ROLLOUT_TP=${ROLLOUT_TP:-1}
-        ROLLOUT_GPU_MEM_UTIL=${ROLLOUT_GPU_MEM_UTIL:-0.85}
-        ROLLOUT_N=${ROLLOUT_N:-16}
-        TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-256}
-        PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-256}
-        PPO_MICRO_BATCH_SIZE_PER_GPU=${PPO_MICRO_BATCH_SIZE_PER_GPU:-32}
-        PROJECT_NAME=${PROJECT_NAME:-multi-turn-grpo-qwen2_5_3b-sglang}
-        EXPERIMENT_NAME=${EXPERIMENT_NAME:-qwen2_5_3b_gsm8k_multiturn_$(date '+%d-%H-%M')}
-        if [ "${ROLLOUT_MODE}" = "server" ]; then
-            CONFIG_NAME=gsm8k_multiturn_grpo_server
-        else
-            CONFIG_NAME=gsm8k_multiturn_grpo
-        fi
-        ;;
-    vllm)
-        export VLLM_USE_V1=1
-        NGPUS_PER_NODE=${NGPUS_PER_NODE:-16}
-        ROLLOUT_TP=${ROLLOUT_TP:-2}
-        ROLLOUT_GPU_MEM_UTIL=${ROLLOUT_GPU_MEM_UTIL:-0.9}
-        ROLLOUT_N=${ROLLOUT_N:-8}
-        TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-32}
-        PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-${TRAIN_BATCH_SIZE}}
-        PPO_MICRO_BATCH_SIZE_PER_GPU=${PPO_MICRO_BATCH_SIZE_PER_GPU:-8}
-        PROJECT_NAME=${PROJECT_NAME:-gsm8k_async_rl}
-        EXPERIMENT_NAME=${EXPERIMENT_NAME:-qwen2.5-3b_function_rm-gsm8k-sgl-multi-w-tool-verify-n16}
-        CONFIG_NAME=gsm8k_multiturn_grpo
-        ;;
-    *)
-        echo "INFER_BACKEND must be sglang or vllm, got: ${INFER_BACKEND}" >&2
-        exit 1
-        ;;
-esac
+export VLLM_USE_V1=1
+NGPUS_PER_NODE=${NGPUS_PER_NODE:-8}
+ROLLOUT_TP=${ROLLOUT_TP:-2}
+ROLLOUT_GPU_MEM_UTIL=${ROLLOUT_GPU_MEM_UTIL:-0.85}
+ROLLOUT_N=${ROLLOUT_N:-8}
+TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-32}
+PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-${TRAIN_BATCH_SIZE}}
+PPO_MICRO_BATCH_SIZE_PER_GPU=${PPO_MICRO_BATCH_SIZE_PER_GPU:-8}
+PROJECT_NAME=${PROJECT_NAME:-multi-turn-grpo-qwen2_5_3b}
+EXPERIMENT_NAME=${EXPERIMENT_NAME:-qwen2_5_3b_gsm8k_multiturn_${INFER_BACKEND}_$(date '+%d-%H-%M')}
+if [ "${ROLLOUT_MODE}" = "server" ]; then
+    CONFIG_NAME=gsm8k_multiturn_grpo_server
+else
+    CONFIG_NAME=gsm8k_multiturn_grpo
+fi
 
 ########################### parameter arrays ###########################
 
@@ -140,23 +120,15 @@ TRAINER=(
     trainer.total_epochs=${TOTAL_EPOCHS}
 )
 
-# Backend-specific extras (single trailing array, never empty).
-case "${INFER_BACKEND}" in
-    sglang)
-        EXTRA=(
-            actor_rollout_ref.rollout.multi_stage_wake_up=True
-            actor_rollout_ref.rollout.over_sample_rate=${OVER_SAMPLE_RATE}
-        )
-        ;;
-    vllm)
-        EXTRA=(
-            actor_rollout_ref.actor.use_torch_compile=False
-            actor_rollout_ref.rollout.trace.token2text=False
-            actor_rollout_ref.rollout.enforce_eager=True
-            actor_rollout_ref.rollout.free_cache_engine=True
-        )
-        ;;
-esac
+# Conservative rollout extras shared by all inference backends.
+EXTRA=(
+    actor_rollout_ref.actor.use_torch_compile=False
+    actor_rollout_ref.rollout.multi_stage_wake_up=True
+    actor_rollout_ref.rollout.over_sample_rate=${OVER_SAMPLE_RATE}
+    actor_rollout_ref.rollout.trace.token2text=False
+    actor_rollout_ref.rollout.enforce_eager=True
+    actor_rollout_ref.rollout.free_cache_engine=True
+)
 
 CONFIG=(
     --config-path="$CONFIG_PATH"

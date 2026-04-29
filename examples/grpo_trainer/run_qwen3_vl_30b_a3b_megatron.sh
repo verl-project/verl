@@ -99,7 +99,6 @@ ROLLOUT=(
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU}
     actor_rollout_ref.rollout.name=${INFER_BACKEND}
-    +actor_rollout_ref.rollout.engine_kwargs.vllm.mm_processor_cache_gb=0
     actor_rollout_ref.rollout.gpu_memory_utilization=${ROLLOUT_GPU_MEM_UTIL}
     actor_rollout_ref.rollout.n=${ROLLOUT_N}
 )
@@ -126,6 +125,9 @@ TRAINER=(
 EXTRA=(
     model_engine=megatron
 )
+if [ "${INFER_BACKEND}" = vllm ]; then
+    EXTRA+=(+actor_rollout_ref.rollout.engine_kwargs.vllm.mm_processor_cache_gb=0)
+fi
 
 ########################### launch ###########################
 python3 -m verl.trainer.main_ppo \

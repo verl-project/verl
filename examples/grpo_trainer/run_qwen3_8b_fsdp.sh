@@ -57,14 +57,6 @@ case "${DEVICE}" in
         ;;
 esac
 
-case "${INFER_BACKEND}" in
-    vllm | sglang | trtllm) ;;
-    *)
-        echo "INFER_BACKEND must be vllm, sglang, or trtllm, got: ${INFER_BACKEND}" >&2
-        exit 1
-        ;;
-esac
-
 if [ "${DEVICE}" = npu ] && [ "${INFER_BACKEND}" = trtllm ]; then
     echo "INFER_BACKEND=trtllm is only supported with DEVICE=gpu" >&2
     exit 1
@@ -90,11 +82,9 @@ case "${DEVICE}" in
                     actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16
                     "+ray_kwargs.ray_init.num_gpus=${NGPUS_PER_NODE}"
                 )
-                case "${INFER_BACKEND}" in
-                    sglang)
-                        EXTRA+=(+actor_rollout_ref.rollout.engine_kwargs.sglang.attention_backend=flashinfer)
-                        ;;
-                esac
+                if [ "${INFER_BACKEND}" = sglang ]; then
+                    EXTRA+=(+actor_rollout_ref.rollout.engine_kwargs.sglang.attention_backend=flashinfer)
+                fi
                 ;;
             *)
                 NGPUS_PER_NODE=${NGPUS_PER_NODE:-8}
@@ -113,22 +103,17 @@ case "${DEVICE}" in
         actor_param_offload=True
         actor_optimizer_offload=True
         rollout_tp=${rollout_tp:-4}
+        rollout_gpu_mem_util=${rollout_gpu_mem_util:-0.3}
         EXTRA+=(
             actor_rollout_ref.actor.use_torch_compile=False
             "actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size=${sp_size}"
             "actor_rollout_ref.ref.fsdp_config.ulysses_sequence_parallel_size=${sp_size}"
             actor_rollout_ref.rollout.enable_chunked_prefill=False
+            actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=4096
         )
-        case "${INFER_BACKEND}" in
-            vllm)
-                rollout_gpu_mem_util=${rollout_gpu_mem_util:-0.5}
-                EXTRA+=(actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=4096)
-                ;;
-            sglang)
-                rollout_gpu_mem_util=${rollout_gpu_mem_util:-0.3}
-                EXTRA+=(+actor_rollout_ref.rollout.engine_kwargs.sglang.attention_backend=ascend)
-                ;;
-        esac
+        if [ "${INFER_BACKEND}" = sglang ]; then
+            EXTRA+=(+actor_rollout_ref.rollout.engine_kwargs.sglang.attention_backend=ascend)
+        fi
         ;;
 esac
 

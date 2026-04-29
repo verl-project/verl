@@ -42,14 +42,6 @@ CKPTS_DIR=${CKPTS_DIR:-"${HOME}/verl/ckpts/${project_name}/${experiment_name}"}
 # ---- end user-adjustable ----
 
 # ---- system defaults (normally leave as-is) ----
-case "${INFER_BACKEND}" in
-    sglang) ;;
-    *)
-        echo "MindSpeed recipe currently supports INFER_BACKEND=sglang only, got: ${INFER_BACKEND}" >&2
-        exit 1
-        ;;
-esac
-
 export HCCL_CONNECT_TIMEOUT=1500
 export HCCL_HOST_SOCKET_PORT_RANGE=60000-60050
 export HCCL_NPU_SOCKET_PORT_RANGE=61000-61050
@@ -120,8 +112,6 @@ ACTOR=(
 
 ROLLOUT=(
     actor_rollout_ref.rollout.name=${INFER_BACKEND}
-    +actor_rollout_ref.rollout.engine_kwargs.sglang.attention_backend=ascend
-    +actor_rollout_ref.rollout.engine_kwargs.sglang.chunked_prefill_size=-1
     actor_rollout_ref.rollout.n=${rollout_n}
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${max_model_len}
@@ -160,6 +150,13 @@ TRAINER=(
 EXTRA=(
     model_engine=mindspeed
 )
+
+if [ "${INFER_BACKEND}" = sglang ]; then
+    EXTRA+=(
+        +actor_rollout_ref.rollout.engine_kwargs.sglang.attention_backend=ascend
+        +actor_rollout_ref.rollout.engine_kwargs.sglang.chunked_prefill_size=-1
+    )
+fi
 
 ########################### launch ###########################
 python3 -m verl.trainer.main_ppo \
