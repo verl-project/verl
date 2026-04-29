@@ -287,7 +287,30 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                 # https://github.com/NVIDIA/Megatron-LM/blob/core_v0.14.0/megatron/core/optimizer/distrib_optimizer.py#L1109-L1123
                 if mcore_ge_014:
                     sharded_state_dict_kwargs["metadata"] = base_metadata
-            optimizer_sharded_states = self.optimizer.sharded_state_dict(state_dict, **sharded_state_dict_kwargs)
+            try:
+                optimizer_sharded_states = self.optimizer.sharded_state_dict(state_dict, **sharded_state_dict_kwargs)
+            except NotImplementedError as e:
+                # Some Megatron-LM builds (e.g. MindSpeed on Ascend NPUs) only implement
+                # "fully_sharded_model_space". Fall back to it when the configured sharding type
+                # is rejected so save/resume still succeeds.
+                requested = base_metadata.get("distrib_optim_sharding_type") if base_metadata else None
+                if (
+                    "Unknown sharding_type" in str(e)
+                    and base_metadata is not None
+                    and requested != "fully_sharded_model_space"
+                ):
+                    logger.warning(
+                        "Optimizer rejected sharding_type=%r (%s); retrying with 'fully_sharded_model_space'.",
+                        requested,
+                        e,
+                    )
+                    base_metadata["distrib_optim_sharding_type"] = "fully_sharded_model_space"
+                    base_metadata.pop("distrib_optim_fully_reshardable_mem_efficient", None)
+                    optimizer_sharded_states = self.optimizer.sharded_state_dict(
+                        state_dict, **sharded_state_dict_kwargs
+                    )
+                else:
+                    raise
             state_dict["optimizer"] = optimizer_sharded_states
 
             if self.lr_scheduler is not None:
@@ -334,12 +357,12 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                 megatron_config.distrib_optim_fully_reshardable_mem_efficient
             )
             if dist_ckpt_optim_fully_reshardable:
-                metadata["distrib_optim_sharding_type"] = "fully_sharded_model_space"
+                metadata["distrib_optim_sharding_type"] = "fully_reshardable"
                 metadata["distrib_optim_fully_reshardable_mem_efficient"] = (
                     distrib_optim_fully_reshardable_mem_efficient
                 )
             else:
-                metadata["distrib_optim_sharding_type"] = "fully_sharded_model_space"
+                metadata["distrib_optim_sharding_type"] = "dp_reshardable"
 
         metadata["singleton_local_shards"] = False
         metadata["chained_optim_avoid_prefix"] = True
@@ -421,10 +444,11 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             # For backward compatibility
             sharded_sd_metadata = None
         else:
-           try:
+            try:
                 from mindspeed.core.optimizer.adamw import AdamW as MindSpeedAdamW
+
                 torch.serialization.add_safe_globals([MindSpeedAdamW])
-            except ImportError:
+            except Exception:
                 pass
             sharded_sd_metadata = load_content_metadata(checkpoint_dir=dist_checkpoint_path)
         if sharded_sd_metadata is None:
