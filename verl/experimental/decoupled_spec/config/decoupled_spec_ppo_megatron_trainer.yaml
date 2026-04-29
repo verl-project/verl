@@ -1,0 +1,23 @@
+hydra:
+  searchpath:
+    - file://verl/trainer/config
+
+defaults:
+  - ppo_megatron_trainer
+  - _self_
+
+trainer:
+  use_legacy_worker_impl: disable
+
+actor_rollout_ref:
+  rollout:
+    enable_decoupled_spec: true
+
+draft:
+  enable: true
+  model_path: null
+  tokenizer_path: null
+  load_format: auto
+  nnodes: 1
+  ngpus: 8
+  tp_size: 2

@@ -149,6 +149,7 @@ class SGLangHttpServer:
                 )
         self.rollout_mode = rollout_mode
         self.workers = workers
+        self.draft_server_handles = []
 
         self.replica_rank = replica_rank
         self.node_rank = node_rank
@@ -189,6 +190,9 @@ class SGLangHttpServer:
                 f"SGLangHttpServer, replica_rank: {self.replica_rank}, "
                 f"master address: {self._master_address}, port: {self._master_port}"
             )
+
+    def set_draft_server_handles(self, draft_server_handles: Optional[list[ActorHandle]] = None):
+        self.draft_server_handles = draft_server_handles or []
 
     def get_master_address(self):
         """Get master address and port for init NCCL process group."""
@@ -667,6 +671,14 @@ class SGLangReplica(RolloutReplica):
                 base_gpu_id=base_gpu_id,
             )
             self.servers.append(server)
+
+        if getattr(self, "draft_server_handles", None):
+            await asyncio.gather(
+                *[
+                    server.set_draft_server_handles.remote(self.draft_server_handles)
+                    for server in self.servers
+                ]
+            )
 
         # launch http server in each node
         master_address, master_port = None, None
