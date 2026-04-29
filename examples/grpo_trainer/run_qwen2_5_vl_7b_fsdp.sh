@@ -109,10 +109,6 @@ EXTRA=(
     actor_rollout_ref.rollout.free_cache_engine=True
 )
 
-if [ "${INFER_BACKEND}" = vllm ]; then
-    EXTRA+=(+actor_rollout_ref.rollout.engine_kwargs.vllm.mm_processor_cache_gb=0)
-fi
-
 ########################### launch ###########################
 python3 -m verl.trainer.main_ppo \
     "${DATA[@]}" \

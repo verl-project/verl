@@ -133,7 +133,6 @@ else
         actor_rollout_ref.model.use_fused_kernels=True
         actor_rollout_ref.actor.fsdp_config.param_offload=False
         actor_rollout_ref.actor.fsdp_config.optimizer_offload=False
-        +actor_rollout_ref.rollout.engine_kwargs.vllm.mm_processor_cache_gb=0
         actor_rollout_ref.rollout.enforce_eager=False
         actor_rollout_ref.rollout.free_cache_engine=True
     )
