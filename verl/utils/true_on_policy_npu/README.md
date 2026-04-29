@@ -133,7 +133,6 @@ python -m verl.trainer.main_ppo ...
 - Model: `Qwen3-4B`
 - Train dataset: `dapo-math-17k.parquet`
 - Validation dataset: `dapo-math-17k.parquet`
-- Experiment name: `GSPO-Qwen3-30B-megatron`
 
 ### Runtime Topology (from test script)
 
@@ -145,10 +144,10 @@ python -m verl.trainer.main_ppo ...
 
 ### Dependency Revisions
 
-- `vllm`: `72506c9`
-- `vllm-ascend`: `1dee1509`
-- `Megatron-LM`: `a845aa7`
-- `MindSpeed`: `674226a1`
+- `vllm`: release `v0.13.0` (commit `72506c9`)
+- `vllm-ascend`: release `v0.13.0rc3` (commit `1dee1509`)
+- `Megatron-LM`: release `core_v0.12.1` (commit `a845aa7`)
+- `MindSpeed`: release `v2.3.0_core_r0.12.1` (commit `674226a1`)
 
 ## Complete File Modification Checklist
 
