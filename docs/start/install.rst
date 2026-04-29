@@ -223,7 +223,7 @@ The packages worth checking are:
 - **SGLang**
 - **pyarrow**
 - **tensordict**
-- **nvidia-cudnn-cu12**: For Magetron backend
+- **nvidia-cudnn-cu12**: For Megatron backend
 
 If you encounter issues about package versions during running verl, please update the outdated ones.
 
