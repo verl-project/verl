@@ -624,13 +624,17 @@ class FSDPEngine(BaseEngine):
 
         ctx = torch.no_grad() if forward_only else nullcontext()
 
+        # getattr fallback: some subclasses (e.g. VeOmniEngine) bypass FSDPEngine.__init__
+        # and _build_fsdp_module, so self.scaler may not be set.
+        scaler = getattr(self, "scaler", None)
+
         for micro_batch in micro_batches:
             with ctx:
                 loss, meta_info = self.forward_step(micro_batch, loss_function=loss_function, forward_only=forward_only)
 
                 if not forward_only:
-                    if self.scaler is not None:
-                        self.scaler.scale(loss).backward()
+                    if scaler is not None:
+                        scaler.scale(loss).backward()
                     else:
                         loss.backward()
 
@@ -657,10 +661,13 @@ class FSDPEngine(BaseEngine):
         """
         assert self.optimizer_config.clip_grad is not None
 
+        # getattr fallback: some subclasses (e.g. VeOmniEngine) bypass FSDPEngine.__init__.
+        scaler = getattr(self, "scaler", None)
+
         # Unscale gradients before clip so the clip threshold is applied to true gradient
         # magnitudes, not scaled ones. scaler.step() will skip the update if any grad is inf/nan.
-        if self.scaler is not None:
-            self.scaler.unscale_(self.optimizer)
+        if scaler is not None:
+            scaler.unscale_(self.optimizer)
 
         if isinstance(self.module, FSDP):
             grad_norm = self.module.clip_grad_norm_(self.optimizer_config.clip_grad)
@@ -674,10 +681,10 @@ class FSDPEngine(BaseEngine):
         if isinstance(grad_norm, DTensor):
             grad_norm = grad_norm.full_tensor()
 
-        if self.scaler is not None:
+        if scaler is not None:
             # scaler handles inf/nan skipping internally via _check_inf_per_device.
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
+            scaler.step(self.optimizer)
+            scaler.update()
         else:
             # if grad_norm is not finite, skip the update
             if not torch.isfinite(grad_norm):
@@ -1170,10 +1177,13 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
         # Honor mixed_precision.param_dtype resolved during FSDP setup. When dtype is fp32,
         # autocast is a no-op at best and a footgun at worst, so skip it entirely.
+        # getattr fallback: some subclasses (e.g. VeOmniEngine) bypass FSDPEngine.__init__
+        # and _build_fsdp_module, so self._autocast_dtype may not be set.
+        autocast_dtype = getattr(self, "_autocast_dtype", torch.bfloat16)
         autocast_ctx: ContextManager = (
             nullcontext()
-            if self._autocast_dtype == torch.float32
-            else torch.autocast(device_type=device_name, dtype=self._autocast_dtype)
+            if autocast_dtype == torch.float32
+            else torch.autocast(device_type=device_name, dtype=autocast_dtype)
         )
         with autocast_ctx:
             raw_output = self.module(
