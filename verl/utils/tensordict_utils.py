@@ -194,11 +194,9 @@ def _get_nested_tensor_ragged_idx(tensor: torch.Tensor) -> int:
         if (sym_int_type is not None and isinstance(size, sym_int_type)) or not isinstance(size, int):
             return dim
 
-    ragged_size = tensor.offsets()[-1].item()
-    candidate_dims = [dim + 1 for dim, size in enumerate(tensor.values().shape) if size == ragged_size]
-    if len(candidate_dims) == 1:
-        return candidate_dims[0]
-
+    # Locally constructed jagged tensors carry _ragged_idx. When metadata from
+    # torch.shape is not enough, avoid inspecting offset values since that can
+    # synchronize CUDA tensors.
     return tensor.dim() - 1
 
 
@@ -519,7 +517,7 @@ def index_select_tensor_dict(batch: TensorDict, indices: torch.Tensor | list[int
                 except (AttributeError, RuntimeError, NotImplementedError):
                     tensor_lst = tensor.unbind()  # for performance
                     ragged_idx = _get_nested_tensor_ragged_idx(tensor)
-                selected_tensors = [tensor_lst[idx] for idx in indices.tolist()]
+                selected_tensors = [tensor_lst[idx] for idx in indices]
                 data_dict[key] = nested_tensor_from_tensor_list(selected_tensors, ragged_idx=ragged_idx)
             else:
                 # This handles NonTensorStack (indexable by batch dim) and NonTensorData (scalar metadata).
