@@ -81,6 +81,9 @@ class FullyAsyncLLMServerManager(AsyncLLMServerManager):
             num_preempted=0,
         )
         min_global_steps, max_global_steps = None, None
+        first_token_latency = None
+        first_token_ts = None
+        last_token_ts = None
 
         while True:
             # 1. generate tokens
@@ -116,6 +119,12 @@ class FullyAsyncLLMServerManager(AsyncLLMServerManager):
                 min_global_steps = global_steps
             max_global_steps = global_steps
 
+            # track latency metrics across resume turns
+            if first_token_latency is None:
+                first_token_latency = output.extra_fields.get("first_token_latency")
+                first_token_ts = output.extra_fields.get("first_token_ts")
+            last_token_ts = output.extra_fields.get("last_token_ts", last_token_ts)
+
             # 3. update max_new_tokens
             if original_max_tokens is not None:
                 sampling_params[limit_key] = original_max_tokens - len(final_output.token_ids)
@@ -129,6 +138,12 @@ class FullyAsyncLLMServerManager(AsyncLLMServerManager):
         final_output.extra_fields["global_steps"] = global_steps
         final_output.extra_fields["min_global_steps"] = min_global_steps
         final_output.extra_fields["max_global_steps"] = max_global_steps
+        if first_token_latency is not None:
+            final_output.extra_fields["first_token_latency"] = first_token_latency
+        if first_token_ts is not None:
+            final_output.extra_fields["first_token_ts"] = first_token_ts
+        if last_token_ts is not None:
+            final_output.extra_fields["last_token_ts"] = last_token_ts
         return final_output
 
 
