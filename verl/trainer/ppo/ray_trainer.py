@@ -827,14 +827,30 @@ class RayPPOTrainer:
 
         # initialize teacher loop manager
         if self.use_teacher_policy:
-            from verl.experimental.teacher_loop import MultiTeacherModelManager
-
-            teacher_resource_pool = self.resource_pool_manager.get_resource_pool(Role.TeacherModel)
-            self.teacher_model_manager = MultiTeacherModelManager(
-                config=self.config,
-                resource_pool=teacher_resource_pool,
-            )
             self.distillation_config: DistillationConfig = omega_conf_to_dataclass(self.config.distillation)
+            use_hidden_states = self.distillation_config.distillation_loss.loss_settings.use_hidden_states
+
+            if use_hidden_states:
+                from verl.experimental.teacher_loop.nitrobrew_teacher import NitrobrewTeacherModelManager
+
+                teacher_resource_pool = self.resource_pool_manager.get_resource_pool(Role.TeacherModel)
+                gpus_per_replica = self.distillation_config.teacher_models[
+                    next(iter(self.distillation_config.teacher_models))
+                ].per_replica_world_size
+
+                self.teacher_model_manager = NitrobrewTeacherModelManager(
+                    teacher_model_configs=self.distillation_config.teacher_models,
+                    gpus_per_replica=gpus_per_replica,
+                )
+                self.actor_rollout_wg.set_teacher_unembed(self.teacher_model_manager.w_up)
+            else:
+                from verl.experimental.teacher_loop import MultiTeacherModelManager
+
+                teacher_resource_pool = self.resource_pool_manager.get_resource_pool(Role.TeacherModel)
+                self.teacher_model_manager = MultiTeacherModelManager(
+                    config=self.config,
+                    resource_pool=teacher_resource_pool,
+                )
         else:
             self.teacher_model_manager = None
             self.distillation_config = None
@@ -1211,11 +1227,11 @@ class RayPPOTrainer:
         calculate_entropy = self.config.actor_rollout_ref.actor.calculate_entropy or (
             self.config.actor_rollout_ref.actor.entropy_coeff != 0.0
         )
-        distillation_use_topk = (
-            self.distillation_config.distillation_loss.loss_settings.use_topk
-            if is_distillation_enabled(self.config.get("distillation"))
-            else False
-        )
+        if is_distillation_enabled(self.config.get("distillation")):
+            _ls = self.distillation_config.distillation_loss.loss_settings
+            distillation_use_topk = _ls.use_topk or _ls.use_hidden_states
+        else:
+            distillation_use_topk = False
         ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
         ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
         ppo_epochs = self.config.actor_rollout_ref.actor.ppo_epochs

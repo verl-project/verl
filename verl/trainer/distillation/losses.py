@@ -57,14 +57,16 @@ class DistillationLossSettings(BaseConfig):
     names: str | list[str] = field(default_factory=list)
     use_topk: bool = False
     use_estimator: bool = False
+    use_hidden_states: bool = False
 
     _mutable_fields = {"names"}
 
     def __post_init__(self):
         self.names = [self.names] if isinstance(self.names, str) else self.names
-        if sum([self.use_topk, self.use_estimator]) != 1:
+        if sum([self.use_topk, self.use_estimator, self.use_hidden_states]) != 1:
             raise ValueError(
-                f"Expected only one of use_estimator, use_topk, but got {self.use_estimator=}, {self.use_topk=}."
+                f"Expected exactly one of use_estimator, use_topk, use_hidden_states, "
+                f"but got {self.use_estimator=}, {self.use_topk=}, {self.use_hidden_states=}."
             )
 
 
@@ -127,33 +129,59 @@ def compute_topk_loss(
     student_logits: torch.Tensor,
     data_format: str,
 ) -> torch.Tensor:
-    """Compute the topk loss in logit processor.
+    """Compute per-token distillation loss in the logits processor.
 
-    Returns:
-    - distillation_losses: (bsz, seqlen/cp_size)
-    - student_mass: (bsz, seqlen/cp_size)
-    - teacher_mass: (bsz, seqlen/cp_size)
+    Dispatches to top-k or Nitrobrew (hidden-state) loss based on loss_mode.
     """
-    match config.strategy:
-        # VeOmni uses FSDP2 internally, so its loss computation is identical to FSDP.
-        case "fsdp" | "veomni":
-            import verl.trainer.distillation.fsdp.losses as fsdp_losses
+    loss_settings = distillation_config.distillation_loss.loss_settings
 
-            distillation_loss_fn = fsdp_losses.compute_forward_kl_topk
-        case "megatron":
-            import verl.trainer.distillation.megatron.losses as megatron_losses
+    if loss_settings.use_hidden_states:
+        loss_mode = distillation_config.distillation_loss.loss_mode
+        use_reverse = loss_mode == "nitrobrew_reverse_kl"
+        match config.strategy:
+            case "fsdp" | "veomni":
+                import verl.trainer.distillation.fsdp.nitrobrew_loss as fsdp_nb
 
-            distillation_loss_fn = megatron_losses.compute_forward_kl_topk
-        case _:
-            raise NotImplementedError(f"Unsupported strategy: {config.strategy=}")
+                distillation_loss_fn = fsdp_nb.compute_nitrobrew_reverse_kl if use_reverse else fsdp_nb.compute_nitrobrew_kl
+            case "megatron":
+                import verl.trainer.distillation.megatron.nitrobrew_loss as megatron_nb
 
-    outputs = distillation_loss_fn(
-        student_logits=student_logits,
-        teacher_topk_log_probs=data["teacher_logprobs"],
-        teacher_topk_ids=data["teacher_ids"],
-        config=distillation_config,
-        data_format=data_format,
-    )
+                distillation_loss_fn = megatron_nb.compute_nitrobrew_kl
+                if use_reverse:
+                    raise NotImplementedError("Nitrobrew reverse KL not yet implemented for Megatron")
+            case _:
+                raise NotImplementedError(f"Nitrobrew not implemented for strategy: {config.strategy=}")
+
+        teacher_unembed = data["teacher_unembed"]
+        if hasattr(teacher_unembed, "data"):
+            teacher_unembed = teacher_unembed.data
+        outputs = distillation_loss_fn(
+            student_logits=student_logits,
+            teacher_hidden_states=data["teacher_hidden_states"],
+            teacher_unembed=teacher_unembed,
+            config=distillation_config,
+            data_format=data_format,
+        )
+    else:
+        match config.strategy:
+            case "fsdp" | "veomni":
+                import verl.trainer.distillation.fsdp.losses as fsdp_losses
+
+                distillation_loss_fn = fsdp_losses.compute_forward_kl_topk
+            case "megatron":
+                import verl.trainer.distillation.megatron.losses as megatron_losses
+
+                distillation_loss_fn = megatron_losses.compute_forward_kl_topk
+            case _:
+                raise NotImplementedError(f"Unsupported strategy: {config.strategy=}")
+
+        outputs = distillation_loss_fn(
+            student_logits=student_logits,
+            teacher_topk_log_probs=data["teacher_logprobs"],
+            teacher_topk_ids=data["teacher_ids"],
+            config=distillation_config,
+            data_format=data_format,
+        )
 
     expected_shape = student_logits.shape[:2]
     for k, v in outputs.items():
@@ -329,6 +357,32 @@ def compute_forward_kl_topk(
     # Due to use of top-k, student and teacher distributions don't sum to 1 -> divergences can be negative.
     distillation_losses = distillation_losses.clamp_min(0.0)
 
+    return distillation_losses, distillation_metrics
+
+
+@register_distillation_loss(
+    DistillationLossSettings(names=["nitrobrew", "nitrobrew_reverse_kl"], use_hidden_states=True)
+)  # type: ignore[arg-type]
+def compute_nitrobrew_loss(
+    config: ActorConfig,
+    distillation_config: DistillationConfig,
+    model_output: dict,
+    data: TensorDict,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """Aggregate Nitrobrew per-token KL (computed in logits processor)."""
+    distillation_losses = no_padding_2_padding(model_output["distillation_losses"], data)
+    if data["response_mask"].is_nested:
+        response_mask_bool = data["response_mask"].bool().to_padded_tensor(False)
+    else:
+        response_mask_bool = data["response_mask"].bool()
+    assert distillation_losses.shape == response_mask_bool.shape
+
+    # log_prob_min_clamp makes the computed KL no longer a true divergence -- it
+    # can go negative where the student locally outperforms the teacher on
+    # clamped tokens.  Floor at zero to prevent negative losses acting as reward.
+    distillation_losses = distillation_losses.clamp_min(0.0)
+
+    distillation_metrics: dict[str, Any] = {}
     return distillation_losses, distillation_metrics
 
 

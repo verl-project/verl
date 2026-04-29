@@ -240,6 +240,9 @@ class AgentLoopOutput(BaseModel):
             output["teacher_ids"] = teacher_ids
         if teacher_logprobs is not None:
             output["teacher_logprobs"] = teacher_logprobs
+        teacher_hidden_states = output["extra_fields"].pop("teacher_hidden_states", None)
+        if teacher_hidden_states is not None:
+            output["teacher_hidden_states"] = teacher_hidden_states
         return output
 
 
@@ -266,6 +269,8 @@ class _InternalAgentLoopOutput(AgentLoopOutput):
     """Padded log probabilities from teacher model for prompt/response tokens."""
     teacher_ids: Optional[torch.Tensor] = None
     """Padded token ids corresponding to the teacher log probabilities."""
+    teacher_hidden_states: torch.Tensor | None = None
+    """Padded teacher hidden states [1, S_padded, D_t] for Nitrobrew."""
     routed_experts: Optional[torch.Tensor] = None
     """Padded routed experts for the total tokens."""
     multi_modal_inputs: Optional[dict[str, torch.Tensor]] = None
@@ -457,6 +462,7 @@ class AgentLoopWorker:
         teacher_servers: Optional[dict[str, list[tuple[str, ray.actor.ActorHandle]]]] = None,
         teacher_load_balancer_handle: Optional[dict[str, ray.actor.ActorHandle]] = None,
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
+        nitrobrew_worker_handles: dict[str, list] | None = None,
     ):
         """Initialize agent loop manager.
         Args:
@@ -466,6 +472,7 @@ class AgentLoopWorker:
             reward_loop_worker_handles (list[ray.actor.ActorHandle]): Actor handles for streaming reward computation.
             teacher_servers: for each teacher key, the (address, handle) pairs of its LLM servers.
             teacher_load_balancer_handle: for each teacher key, the shared load balancer actor.
+            nitrobrew_worker_handles: for each teacher key, the Ray actor handles of NitrobrewTeacherWorkers.
         """
         self.config = config
         rollout_config, model_config = _get_rollout_and_model_config(config)
@@ -478,18 +485,29 @@ class AgentLoopWorker:
             self.distillation_loss_config: DistillationLossConfig = self.distillation_config.distillation_loss
             self.teacher_key: str = self.distillation_config.teacher_key
 
-            if not teacher_servers:
-                raise ValueError("Distillation is enabled but no teacher servers were provided.")
-            if not teacher_load_balancer_handle:
-                raise ValueError("Distillation is enabled but no teacher load balancer was provided.")
             if not hasattr(self, "teacher_server_manager"):
-                from verl.experimental.teacher_loop.teacher_manager import AsyncTeacherLLMServerManager
+                if self.distillation_loss_config.loss_settings.use_hidden_states:
+                    from verl.experimental.teacher_loop.nitrobrew_teacher import NitrobrewAsyncTeacherManager
 
-                self.teacher_server_manager = AsyncTeacherLLMServerManager(
-                    config=config,
-                    servers=teacher_servers,
-                    load_balancer_handle=teacher_load_balancer_handle,
-                )
+                    if not nitrobrew_worker_handles:
+                        raise ValueError(
+                            "Nitrobrew distillation requires nitrobrew_worker_handles but none were provided."
+                        )
+                    self.teacher_server_manager = NitrobrewAsyncTeacherManager(
+                        worker_handles=nitrobrew_worker_handles,
+                    )
+                else:
+                    if not teacher_servers:
+                        raise ValueError("Distillation is enabled but no teacher servers were provided.")
+                    if not teacher_load_balancer_handle:
+                        raise ValueError("Distillation is enabled but no teacher load balancer was provided.")
+                    from verl.experimental.teacher_loop.teacher_manager import AsyncTeacherLLMServerManager
+
+                    self.teacher_server_manager = AsyncTeacherLLMServerManager(
+                        config=config,
+                        servers=teacher_servers,
+                        load_balancer_handle=teacher_load_balancer_handle,
+                    )
 
         # for recipe to change
         if not hasattr(self, "server_manager"):
@@ -772,6 +790,17 @@ class AgentLoopWorker:
                 pad_token_id=self.tokenizer.pad_token_id,
             )
 
+        # Nitrobrew: pad teacher_hidden_states [S, D_t] to [1, S_padded, D_t].
+        teacher_hidden_states = output.extra_fields.pop("teacher_hidden_states", None)
+        if teacher_hidden_states is not None:
+            from torch.nn import functional as _F
+
+            prompt_width = prompt_output["input_ids"].shape[1]
+            response_width = response_output["input_ids"].shape[1]
+            left_pad = prompt_width - len(output.prompt_ids)
+            right_pad = response_width - len(output.response_ids)
+            teacher_hidden_states = _F.pad(teacher_hidden_states, (0, 0, left_pad, right_pad), value=0.0).unsqueeze(0)
+
         return _InternalAgentLoopOutput(
             prompt_ids=prompt_output["input_ids"],
             response_ids=response_output["input_ids"],
@@ -785,6 +814,7 @@ class AgentLoopWorker:
             multi_modal_data=output.multi_modal_data,
             teacher_logprobs=teacher_logprobs,
             teacher_ids=teacher_ids,
+            teacher_hidden_states=teacher_hidden_states,
             reward_score=output.reward_score,
             num_turns=output.num_turns,
             metrics=output.metrics,
@@ -898,7 +928,7 @@ class AgentLoopWorker:
         validate: bool,
         sample_kwargs: Optional[dict[str, Any]] = None,
     ) -> None:
-        """Compute teacher logprobs for single sample."""
+        """Compute teacher signal for single sample (top-k logprobs or hidden states)."""
         if self.distillation_enabled and not validate:
             routing_key = None
             if sample_kwargs is not None:
@@ -906,13 +936,21 @@ class AgentLoopWorker:
                 if routing_value is not None:
                     # Non-tensor batch values arrive as 0-d numpy objects / arrays; normalize to Python.
                     routing_key = routing_value.item() if hasattr(routing_value, "item") else routing_value
-            teacher_ids, teacher_logprobs = await self.teacher_server_manager.compute_teacher_logprobs_single(
-                sequence_ids=prompt_ids + response_ids,
-                multi_modal_data=output.multi_modal_data,
-                routing_key=routing_key,
-            )
-            output.extra_fields["teacher_ids"] = teacher_ids
-            output.extra_fields["teacher_logprobs"] = teacher_logprobs
+
+            if self.distillation_loss_config.loss_settings.use_hidden_states:
+                teacher_hidden_states = await self.teacher_server_manager.compute_teacher_hidden_states_single(
+                    sequence_ids=prompt_ids + response_ids,
+                    routing_key=routing_key,
+                )
+                output.extra_fields["teacher_hidden_states"] = teacher_hidden_states
+            else:
+                teacher_ids, teacher_logprobs = await self.teacher_server_manager.compute_teacher_logprobs_single(
+                    sequence_ids=prompt_ids + response_ids,
+                    multi_modal_data=output.multi_modal_data,
+                    routing_key=routing_key,
+                )
+                output.extra_fields["teacher_ids"] = teacher_ids
+                output.extra_fields["teacher_logprobs"] = teacher_logprobs
 
     def _postprocess(
         self,
@@ -936,6 +974,10 @@ class AgentLoopWorker:
         if inputs[0].teacher_logprobs is not None and inputs[0].teacher_ids is not None:
             optional_outputs["teacher_logprobs"] = torch.cat([input.teacher_logprobs for input in inputs], dim=0)
             optional_outputs["teacher_ids"] = torch.cat([input.teacher_ids for input in inputs], dim=0)
+        if inputs[0].teacher_hidden_states is not None:
+            optional_outputs["teacher_hidden_states"] = torch.cat(
+                [input.teacher_hidden_states for input in inputs], dim=0
+            )
         batch = TensorDict(
             {
                 "prompts": prompt_ids,  # [bsz, prompt_length]
@@ -1062,6 +1104,14 @@ class AgentLoopManager:
         self.teacher_model_manager = teacher_model_manager
         self.distillation_enabled = is_distillation_enabled(self.config.get("distillation", None))
 
+        self.use_hidden_states = False
+        if self.distillation_enabled:
+            from verl.utils.config import omega_conf_to_dataclass
+            from verl.workers.config import DistillationConfig as _DC
+
+            _dc: _DC = omega_conf_to_dataclass(self.config.get("distillation"))
+            self.use_hidden_states = _dc.distillation_loss.loss_settings.use_hidden_states
+
         assert worker_group is not None or self.rollout_config.nnodes > 0, "nnodes must be > 0 in standalone mode"
 
         # for recipe to change
@@ -1140,19 +1190,24 @@ class AgentLoopManager:
         load_balancer_handle = self.global_load_balancer
         servers = list(zip(self.server_addresses, self.server_handles, strict=True))
 
+        nitrobrew_worker_handles = None
         if self.distillation_enabled:
-            # teacher_model_manager exposes per-teacher dicts keyed by teacher key.
-            teacher_servers = {
-                key: list(
-                    zip(
-                        self.teacher_model_manager.server_addresses[key],
-                        self.teacher_model_manager.server_handles[key],
-                        strict=True,
+            if self.use_hidden_states:
+                nitrobrew_worker_handles = dict(self.teacher_model_manager.worker_handles)
+                teacher_servers = None
+                teacher_load_balancer_handle = None
+            else:
+                teacher_servers = {
+                    key: list(
+                        zip(
+                            self.teacher_model_manager.server_addresses[key],
+                            self.teacher_model_manager.server_handles[key],
+                            strict=True,
+                        )
                     )
-                )
-                for key in self.teacher_model_manager.server_addresses
-            }
-            teacher_load_balancer_handle = dict(self.teacher_model_manager.load_balancer_handle)
+                    for key in self.teacher_model_manager.server_addresses
+                }
+                teacher_load_balancer_handle = dict(self.teacher_model_manager.load_balancer_handle)
         else:
             teacher_servers = None
             teacher_load_balancer_handle = None
@@ -1174,6 +1229,7 @@ class AgentLoopManager:
                     teacher_servers,
                     teacher_load_balancer_handle,
                     self.reward_loop_worker_handles,
+                    nitrobrew_worker_handles,
                 )
             )
 
