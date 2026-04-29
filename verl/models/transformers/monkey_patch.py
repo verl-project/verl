@@ -137,6 +137,7 @@ def _ulysses_flash_attention_forward(
         # https://github.com/huggingface/transformers/pull/33932
 
         # (bsz, seq_len/n) -> (bsz, seq_len)
+        position_ids = position_ids.contiguous()
         position_ids_list = [torch.empty_like(position_ids) for _ in range(ulysses_sp_size)]
         torch.distributed.all_gather(position_ids_list, position_ids, group=get_ulysses_sequence_parallel_group())
         position_ids = torch.concat(position_ids_list, dim=-1)
@@ -494,11 +495,13 @@ def apply_monkey_patch(
         from transformers.models.qwen3_5.modeling_qwen3_5 import (
             Qwen3_5ForConditionalGeneration,
             Qwen3_5Model,
+            Qwen3_5TextModel,
             Qwen3_5VisionModel,
         )
         from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
             Qwen3_5MoeForConditionalGeneration,
             Qwen3_5MoeModel,
+            Qwen3_5MoeTextModel,
             Qwen3_5MoeVisionModel,
         )
 
@@ -517,6 +520,11 @@ def apply_monkey_patch(
         # Step 2: patch vision model to fix fsdp2 cpu_offload bug.
         Qwen3_5VisionModel.fast_pos_embed_interpolate = fast_pos_embed_interpolate
         Qwen3_5MoeVisionModel.fast_pos_embed_interpolate = fast_pos_embed_interpolate
+
+        # Step 3: patch input for multimodal sequence parallelism
+        if ulysses_sp_size > 1:
+            patch_vlm_for_ulysses_input_slicing(Qwen3_5TextModel)
+            patch_vlm_for_ulysses_input_slicing(Qwen3_5MoeTextModel)
 
     if use_remove_padding or ulysses_sp_size > 1:
         if hasattr(module, "_flash_attention_forward"):  # transformers <= 4.47.1 or legacy models
