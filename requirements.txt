@@ -18,7 +18,7 @@ torchdata
 transformers
 # vllm==0.8.4
 wandb
-packaging>=20.0
+packaging>=26.2
 uvicorn
 fastapi
 latex2sympy2_extended
