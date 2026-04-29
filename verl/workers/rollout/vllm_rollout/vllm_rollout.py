@@ -192,7 +192,7 @@ class ServerAdapter(BaseRollout):
             logger.info(f"update_weights done, time cost: {time.time() - start_time:.2f}s")
 
     def _get_server_name_prefix(self) -> str:
-        """Return the Ray actor name prefix matching the rollout type (e.g. 'vllm_' or 'vllm_omni_')."""
+        """Return the Ray actor name prefix matching the rollout type (e.g. 'vllm_')."""
         return f"{self.config.get('name', 'vllm')}_"
 
     def generate_sequences(self, prompts: DataProto) -> DataProto:

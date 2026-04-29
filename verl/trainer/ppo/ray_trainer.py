@@ -444,7 +444,9 @@ class RayPPOTrainer:
             scores = batch.batch["token_level_scores"].sum(-1).cpu().tolist()
             sample_gts = [item.non_tensor_batch.get("reward_model", {}).get("ground_truth", None) for item in batch]
 
-            reward_extra_infos_to_dump = reward_extra_infos_dict.copy()
+            reward_extra_infos_to_dump = {
+                k: (v.tolist() if isinstance(v, np.ndarray) else v) for k, v in reward_extra_infos_dict.items()
+            }
             if "request_id" in batch.non_tensor_batch:
                 reward_extra_infos_dict.setdefault(
                     "request_id",
@@ -1167,24 +1169,33 @@ class RayPPOTrainer:
         # step 2: convert from padding to nopadding
         batch_td = left_right_2_no_padding(batch_td)
         # step 3: add meta info
-        tu.assign_non_tensor(batch_td, calculate_entropy=True, compute_loss=False)
+        calculate_sum_pi_squared = self.config.actor_rollout_ref.actor.get("calculate_sum_pi_squared", False)
+        tu.assign_non_tensor(
+            batch_td,
+            calculate_entropy=True,
+            calculate_sum_pi_squared=calculate_sum_pi_squared,
+            compute_loss=False,
+        )
         output = self.actor_rollout_wg.compute_log_prob(batch_td)
         # gather output
         entropy = tu.get(output, "entropy")
         log_probs = tu.get(output, "log_probs")
         routed_experts = tu.get(output, "routed_experts")
+        sum_pi_squared = tu.get(output, "sum_pi_squared") if calculate_sum_pi_squared else None
 
         old_log_prob_mfu = tu.get(output, "metrics")["mfu"]
         # step 4. No padding to padding
         entropy = no_padding_2_padding(entropy, batch_td)
         log_probs = no_padding_2_padding(log_probs, batch_td)
+        if sum_pi_squared is not None:
+            sum_pi_squared = no_padding_2_padding(sum_pi_squared, batch_td)
         # step 5: rebuild a tensordict and convert to dataproto
+        result = {"old_log_probs": log_probs.float(), "entropys": entropy.float()}
         if routed_experts is not None:
-            old_log_prob = tu.get_tensordict(
-                {"old_log_probs": log_probs.float(), "entropys": entropy.float(), "routed_experts": routed_experts}
-            )
-        else:
-            old_log_prob = tu.get_tensordict({"old_log_probs": log_probs.float(), "entropys": entropy.float()})
+            result["routed_experts"] = routed_experts
+        if sum_pi_squared is not None:
+            result["sum_pi_squared"] = sum_pi_squared.float()
+        old_log_prob = tu.get_tensordict(result)
         old_log_prob = DataProto.from_tensordict(old_log_prob)
         return old_log_prob, old_log_prob_mfu
 
@@ -1637,14 +1648,6 @@ class RayPPOTrainer:
 
                 progress_bar.update(1)
                 self.global_steps += 1
-
-                if (
-                    hasattr(self.config.actor_rollout_ref.actor, "profiler")
-                    and self.config.actor_rollout_ref.actor.profiler.tool == "torch_memory"
-                ):
-                    self.actor_rollout_wg.dump_memory_snapshot(
-                        tag=f"post_update_step{self.global_steps}", sub_dir=f"step{self.global_steps}"
-                    )
 
                 if is_last_step:
                     if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):

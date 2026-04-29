@@ -885,6 +885,41 @@ def test_chunk_tensordict_preserves_3d_nested_tensor_layout_with_equal_seq_len_p
     assert torch.equal(chunks[1]["position_ids"].offsets(), expected_chunk_1.offsets())
 
 
+def test_chunk_tensordict_preserves_3d_nested_tensor_layout_with_non_last_ragged_idx():
+    """Regression test: chunk_tensordict must handle nested tensors where the ragged dimension is not the last one."""
+    topk = 64
+    elements = [torch.randn(5, topk), torch.randn(8, topk), torch.randn(3, topk), torch.randn(7, topk)]
+    teacher_logprobs = tu.nested_tensor_from_tensor_list(elements, ragged_idx=1)
+
+    input_ids = torch.nested.as_nested_tensor(
+        [torch.arange(5), torch.arange(8), torch.arange(3), torch.arange(7)], layout=torch.jagged
+    )
+    td = tu.get_tensordict({"input_ids": input_ids, "teacher_logprobs": teacher_logprobs})
+
+    chunks = tu.chunk_tensordict(td, chunks=2)
+
+    assert chunks[0]["teacher_logprobs"]._ragged_idx == 1
+    assert torch.equal(chunks[0]["teacher_logprobs"].unbind(0)[0], elements[0])
+    assert torch.equal(chunks[0]["teacher_logprobs"].unbind(0)[1], elements[1])
+    assert chunks[1]["teacher_logprobs"]._ragged_idx == 1
+    assert torch.equal(chunks[1]["teacher_logprobs"].unbind(0)[0], elements[2])
+    assert torch.equal(chunks[1]["teacher_logprobs"].unbind(0)[1], elements[3])
+
+
+def test_index_select_tensor_dict_preserves_3d_nested_tensor_layout_with_non_last_ragged_idx():
+    """Regression test: index_select_tensor_dict must handle nested tensors where the ragged dim is not the last."""
+    topk = 64
+    elements = [torch.randn(5, topk), torch.randn(8, topk), torch.randn(3, topk), torch.randn(7, topk)]
+    teacher_logprobs = tu.nested_tensor_from_tensor_list(elements, ragged_idx=1)
+    td = tu.get_tensordict({"teacher_logprobs": teacher_logprobs})
+
+    selected = tu.index_select_tensor_dict(td, torch.tensor([1, 3]))
+
+    assert selected["teacher_logprobs"]._ragged_idx == 1
+    assert torch.equal(selected["teacher_logprobs"].unbind(0)[0], elements[1])
+    assert torch.equal(selected["teacher_logprobs"].unbind(0)[1], elements[3])
+
+
 def test_assign_non_tensor_stack_with_nested_lists():
     """Test assign_non_tensor_stack with lists of lists."""
     td = tu.get_tensordict({"obs": torch.randn(3, 4)}, non_tensor_dict={})

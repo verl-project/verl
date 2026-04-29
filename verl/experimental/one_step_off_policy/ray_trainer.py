@@ -41,6 +41,7 @@ from verl.trainer.ppo.ray_trainer import (
 from verl.trainer.ppo.reward import extract_reward
 from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_reward_model
 from verl.utils.debug import marked_timer
+from verl.utils.import_utils import load_class_from_fqn
 from verl.utils.rollout_skip import RolloutSkip
 from verl.utils.tracking import ValidationGenerationsLogger
 
@@ -177,7 +178,13 @@ class OneStepOffRayTrainer(SeparateRayPPOTrainer):
 
         # create async rollout manager and request scheduler
         assert self.config.actor_rollout_ref.rollout.mode == "async"
-        from verl.experimental.agent_loop import AgentLoopManager
+
+        # Support custom AgentLoopManager via config
+        manager_class_fqn = self.config.actor_rollout_ref.rollout.get("agent", {}).get("agent_loop_manager_class")
+        if manager_class_fqn:
+            AgentLoopManager = load_class_from_fqn(manager_class_fqn, "AgentLoopManager")
+        else:
+            from verl.experimental.agent_loop import AgentLoopManager
 
         self.async_rollout_mode = True
         self.async_rollout_manager = AgentLoopManager.create(

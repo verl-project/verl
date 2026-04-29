@@ -298,6 +298,10 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             )
             self.resource_pool_to_cls[resource_pool][str(role)] = role_cls
 
+    def _create_reward_model_class(self):
+        # In fully async mode, RM is managed by RewardLoopManager (standalone). Skip worker group creation for RM.
+        pass
+
     def _init_models(self):
         if self.use_critic:
             self.critic_wg = self.all_wg[str(Role.Critic)]
@@ -306,10 +310,6 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         if self.use_reference_policy and not self.ref_in_actor:
             self.ref_policy_wg = self.all_wg[str(Role.RefPolicy)]
             self.ref_policy_wg.init_model()
-
-        if self.use_rm:
-            self.rm_wg = self.all_wg[str(Role.RewardModel)]
-            self.rm_wg.init_model()
 
         self.actor_wg = self.all_wg[str(self.train_role)]
         self.actor_wg.init_model()

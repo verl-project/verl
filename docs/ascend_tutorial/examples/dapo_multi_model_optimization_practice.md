@@ -60,25 +60,25 @@ reward_model.overlong_buffer.penalty_factor=${overlong_penalty_factor}   #惩罚
 
 ## 硬件要求
 
-当前支持Atlas 800T A3 与 Atlas 900 A3 SuperPoD。完成跑完本次最佳实践需要 2台Atlas 800T A3。关键软件版本可以参考：[Ascend Quickstart](https://github.com/verl-project/verl/blob/main/docs/ascend_tutorial/quick_start/ascend_quick_start.rst)
+当前支持Atlas 800T A3 与 Atlas 900 A3 SuperPoD。完成跑完本次最佳实践需要 1 台 Atlas 900 A3 SuperPoD。关键软件版本可以参考：[Ascend Quickstart](https://github.com/verl-project/verl/blob/main/docs/ascend_tutorial/quick_start/ascend_quick_start.rst)
 
 ## 安装基础环境
 
 | software     | version                                                    |
 | ------------ | ---------------------------------------------------------- |
 | Python       | >=3.10, <3.12                                              |
-| CANN         | ==8.3.RC1                                                  |
-| torch        | ==2.7.1                                                    |
-| torch_npu    | ==2.7.1                                                    |
-| verl         | main分支 commitId=252d76908b903ad8fb6969eb3a5e5f873c95ea2b |
-| vllm         | v0.11.0                                                    |
-| vllm-ascend  | v0.11.0-dev                                                |
-| transformers | 4.57.3                                                     |
+| CANN         | ==8.5                                                  |
+| torch        | ==2.8.0                                                    |
+| torch_npu    | ==2.8.0                                                    |
+| verl         | v0.7.1 commitId=02e059ea18f5adf9768c5d9c280456cdfdfeda01 |
+| vllm         | v0.13.0                                                    |
+| vllm-ascend  | v0.13.0                                                |
+| transformers | 4.57.6                                                     |
 
 在本实践中, 我们通过指定 verl 的commit id 以避免引入其他问题
 ```
 cd verl
-git checkout 252d76908b903ad8fb6969eb3a5e5f873c95ea2b
+git checkout release/v0.7.1
 # 指定相应的recipe版本
 git submodule update --init --recursive recipe
 cd recipe
@@ -188,12 +188,7 @@ TEST_FILE=$RAY_DATA_HOME/datasets/geo3k/test.parquet
 trainer.save_freq=-1
 ```
 
-对于单机任务 Qwen3-VL-30B , 修改脚本中参数`trainer.nnodes`为 1， `trainer.n_gpus_per_node` 为16，然后直接bash执行verl仓上示例脚本
-
-```
-bash recipe/dapo/run_dapo_qwen3_vl_30b_fsdp2_npu.sh
-```
-对于多节点任务 Qwen3-VL-30B ，我们推荐使用以下脚本进行大规模多节点训练拉起
+- 对于单机任务 Qwen3-VL-30B ，可以使用以下脚本将训练拉起。
 
 ```
 pkill -9 python
@@ -206,6 +201,34 @@ export LD_PRELOAD=/usr/local/lib/libjemalloc.so.2
 # Some models are optimized by vllm ascend. While in some case, e.g. rlhf training, 
 # the optimized model may not be suitable. In this case, set this value to 0 to disable the optimized model.
 export USE_OPTIMIZED_MODEL=0
+export CPU_AFFINITY_CONF=2
+export HCCL_OP_EXPANSION_MODE="AIV"
+export VLLM_VERSION="0.13.0"
+
+# 修改为对应主节点IP
+MASTER_ADDR="IP FOR MASTER NODE"
+# 每个节点中 NPU 数
+NPUS_PER_NODE=16
+ray start --head --port 6766 --dashboard-host=$MASTER_ADDR --dashboard-port=8260 --resources='{"NPU": '$NPUS_PER_NODE'}'
+
+bash recipe/dapo/run_dapo_qwen3_vl_30b_fsdp2_npu.sh
+```
+- 对于多节点任务 Qwen3-VL-30B ，我们推荐使用以下脚本进行大规模多节点训练拉起，根据实际需要修改`NNODES`与`NPUS_PER_NODE` ，并修改配置脚本中参数`trainer.nnodes`和`trainer.n_gpus_per_node`与之相对应。
+
+```
+pkill -9 python
+ray stop --force
+rm -rf /tmp/ray
+export VLLM_USE_V1=1
+export HCCL_CONNECT_TIMEOUT=5400
+export VLLM_ASCEND_ENABLE_NZ=0
+export LD_PRELOAD=/usr/local/lib/libjemalloc.so.2
+# Some models are optimized by vllm ascend. While in some case, e.g. rlhf training, 
+# the optimized model may not be suitable. In this case, set this value to 0 to disable the optimized model.
+export USE_OPTIMIZED_MODEL=0
+export CPU_AFFINITY_CONF=2
+export HCCL_OP_EXPANSION_MODE="AIV"
+export VLLM_VERSION="0.13.0"
 
 # 修改为当前需要跑的用例路径
 DEFAULT_SH="./run_*.sh"
@@ -214,7 +237,9 @@ echo "Use $DEFAULT_SH"
 ulimit -n 32768
 mkdir logs
 
+# 集群中计算节点数
 NNODES=2
+# 每个节点中 NPU 数
 NPUS_PER_NODE=8
 # 修改为对应主节点IP
 MASTER_ADDR="IP FOR MASTER NODE"
@@ -265,7 +290,7 @@ fi
 
 sleep 600
 ```
-DEFAULT_SH: 修改为训练所用配置 sh 文件路径。在此案例中修改为 [Qwen3_VL_30B](https://github.com/verl-project/verl-recipe/blob/main/dapo/run%20dapo_qwen3_vl_30b_fsdp2_npu.sh) 路径。
+DEFAULT_SH: 修改为训练所用配置 sh 文件路径。在此案例中修改为 [Qwen3_VL_30B](https://github.com/verl-project/verl-recipe/blob/main/dapo/run_dapo_qwen3_vl_30b_fsdp2_npu.sh) 路径。
 
 NNODES 和 NPUS_PER_NODE: 修改为使用节点数量和每个节点 NPU 数量。在此案例中分别为2和8。
 

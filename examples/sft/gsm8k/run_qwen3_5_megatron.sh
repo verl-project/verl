@@ -20,6 +20,12 @@
 #   format will be supported and engine.use_remove_padding can be set to True
 #   for better performance.
 #
+# MTP (Multi-Token Prediction) notes:
+#   - model.mtp.enable=True               enables MTP module
+#   - model.mtp.enable_train=True         enables MTP training loss
+#   - model.mtp.detach_encoder=True       detaches encoder gradients for MTP
+#   - model.mtp.mtp_loss_scaling_factor   weight of MTP auxiliary loss (e.g. 0.1)
+#
 # Tested parallelism config (128 GPUs / 16 nodes):
 #   TP=2 PP=4 EP=32 CP=1
 
@@ -72,6 +78,14 @@ project_name=verl_sft_qwen3_5
 exp_name=qwen3_5-${BACKEND}-tp${TP_SIZE}-pp${PP_SIZE}-cp${CP_SIZE}-ep${EP_SIZE}
 ckpts_home=${ckpts_home:-~/verl/checkpoints/${project_name}/${exp_name}}
 mkdir -p "${ckpts_home}"
+
+# ============================================================
+# MTP hyper-parameters
+# ============================================================
+MTP_ENABLE=${MTP_ENABLE:-True}
+MTP_ENABLE_TRAIN=${MTP_ENABLE_TRAIN:-True}
+MTP_DETACH_ENCODER=${MTP_DETACH_ENCODER:-True}
+MTP_LOSS_SCALING_FACTOR=${MTP_LOSS_SCALING_FACTOR:-0.1}
 
 # ============================================================
 # Engine config
@@ -131,6 +145,10 @@ torchrun \
     model.path=${MODEL_PATH} \
     model.use_remove_padding=False \
     model.trust_remote_code=True \
+    model.mtp.enable=${MTP_ENABLE} \
+    model.mtp.enable_train=${MTP_ENABLE_TRAIN} \
+    model.mtp.detach_encoder=${MTP_DETACH_ENCODER} \
+    model.mtp.mtp_loss_scaling_factor=${MTP_LOSS_SCALING_FACTOR} \
     ${ENGINE_CONFIG} \
     trainer.test_freq=-1 \
     trainer.save_freq=500 \
@@ -139,4 +157,4 @@ torchrun \
     trainer.experiment_name="${exp_name}" \
     trainer.total_epochs=1 \
     trainer.default_local_dir="${ckpts_home}" \
-    trainer.resume_mode=${RESUME_MODE}
+    trainer.resume_mode=${RESUME_MODE} 

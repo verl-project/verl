@@ -291,6 +291,7 @@ Welcome to register your awesome project build with `verl` for other developers'
 - [SPEAR](https://github.com/TencentYoutuResearch/SPEAR): **Self-imitation** with **Progressive Exploration** for Agentic Reinforcement Learning (ICLR 2026) ![GitHub Repo stars](https://img.shields.io/github/stars/TencentYoutuResearch/SPEAR)
 - [RuleReasoner](https://github.com/bigai-nlco/RuleReasoner): **RuleReasoner:** Reinforced Rule-based Reasoning via **Domain-aware Dynamic Sampling** (ICLR 2026) ![GitHub Repo stars](https://img.shields.io/github/stars/bigai-nlco/RuleReasoner)
 - [MetaphorStar](https://metaphorstar.github.io/): **Image Metaphor** Understanding and Reasoning with End-to-End **Visual Reinforcement Learning** ![GitHub Repo stars](https://img.shields.io/github/stars/MING-ZCH/MetaphorStar)
+- [DART-GUI](https://github.com/Computer-use-agents/dart-gui): a decoupled agentic RL framework for Computer Use Agents, achieving ~2× training speedup and ~5× environment utilization! ![GitHub Repo stars](https://img.shields.io/github/stars/Computer-use-agents/dart-gui)
 
 ## Contribution Guide
 

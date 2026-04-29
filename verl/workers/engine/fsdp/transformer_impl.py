@@ -1015,7 +1015,16 @@ class FSDPEngineWithLMHead(FSDPEngine):
         pad_mode = tu.get_non_tensor_data(data=micro_batch, key="pad_mode", default=DatasetPadMode.NO_PADDING)
         use_fused_kernels = tu.get_non_tensor_data(data=micro_batch, key="use_fused_kernels", default=False)
         calculate_entropy = tu.get_non_tensor_data(data=micro_batch, key="calculate_entropy", default=False)
+        calculate_sum_pi_squared = tu.get_non_tensor_data(
+            data=micro_batch, key="calculate_sum_pi_squared", default=False
+        )
         distillation_use_topk = tu.get_non_tensor_data(data=micro_batch, key="distillation_use_topk", default=False)
+
+        if calculate_sum_pi_squared and use_fused_kernels:
+            raise NotImplementedError(
+                "calculate_sum_pi_squared=True is not supported with use_fused_kernels=True: "
+                "fused kernels do not materialize the full logits tensor needed for Σπ²."
+            )
 
         model_output = {}
 
@@ -1052,6 +1061,10 @@ class FSDPEngineWithLMHead(FSDPEngine):
                             self.compute_entropy_from_logits, logits_rmpad
                         )
 
+                # compute sum_pi_squared (Σπ²) for optimal-baseline advantage estimators
+                if calculate_sum_pi_squared:
+                    sum_pi_squared_rmpad = verl_F.calculate_sum_pi_squared_from_logits(logits_rmpad)
+
                 # logits_processor_func return tensors with shape (1, total_nnz/sp_size)
                 if distillation_use_topk:
                     outputs = logits_processor_func(student_logits=logits_rmpad.unsqueeze(0), data=micro_batch)
@@ -1082,6 +1095,13 @@ class FSDPEngineWithLMHead(FSDPEngine):
                         unpad_dim=0,
                         padding_size=pad_size,
                     )
+                if calculate_sum_pi_squared:
+                    sum_pi_squared_rmpad = gather_outputs_and_unpad(
+                        sum_pi_squared_rmpad,
+                        gather_dim=0,
+                        unpad_dim=0,
+                        padding_size=pad_size,
+                    )
 
             if pad_mode == DatasetPadMode.NO_PADDING:
                 cu_seqlens = input_ids.offsets()
@@ -1089,6 +1109,8 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 log_probs = torch.nested.nested_tensor_from_jagged(log_probs, cu_seqlens)
                 if calculate_entropy:
                     entropy = torch.nested.nested_tensor_from_jagged(entropy_rmpad, cu_seqlens)
+                if calculate_sum_pi_squared:
+                    sum_pi_squared = torch.nested.nested_tensor_from_jagged(sum_pi_squared_rmpad, cu_seqlens)
             else:
                 raise NotImplementedError(f"pad_mode {pad_mode} not implemented")
 
@@ -1110,6 +1132,9 @@ class FSDPEngineWithLMHead(FSDPEngine):
                     else:
                         entropy = torch.utils.checkpoint.checkpoint(verl_F.entropy_from_logits, logits)
 
+                if calculate_sum_pi_squared:
+                    sum_pi_squared = verl_F.calculate_sum_pi_squared_from_logits(logits)
+
                 if pad_mode == DatasetPadMode.NO_PADDING:
                     cu_seqlens = input_ids.offsets()
                     seq_lengths = cu_seqlens.diff()
@@ -1124,12 +1149,20 @@ class FSDPEngineWithLMHead(FSDPEngine):
                         entropy = torch.nested.narrow(entropy, 1, starts, seq_lengths, layout=torch.jagged)
                         entropy_rmpad = torch.cat([t for t in entropy.unbind()])
                         entropy = torch.nested.nested_tensor_from_jagged(entropy_rmpad, cu_seqlens)
+                    if calculate_sum_pi_squared:
+                        sum_pi_squared = torch.nested.narrow(
+                            sum_pi_squared, 1, starts, seq_lengths, layout=torch.jagged
+                        )
+                        sum_pi_squared_rmpad = torch.cat([t for t in sum_pi_squared.unbind()])
+                        sum_pi_squared = torch.nested.nested_tensor_from_jagged(sum_pi_squared_rmpad, cu_seqlens)
                 else:
                     raise NotImplementedError(f"pad_mode {pad_mode} not implemented")
 
         model_output["log_probs"] = log_probs
         if calculate_entropy:
             model_output["entropy"] = entropy
+        if calculate_sum_pi_squared:
+            model_output["sum_pi_squared"] = sum_pi_squared
 
         return model_output
 

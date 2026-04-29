@@ -54,7 +54,7 @@ from verl.workers.config import (
     HFModelConfig,
     RolloutConfig,
 )
-from verl.workers.rollout.replica import DiffusionOutput, TokenOutput, get_rollout_replica_class
+from verl.workers.rollout.replica import TokenOutput, get_rollout_replica_class
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -117,7 +117,7 @@ class AsyncLLMServerManager:
         image_data: Optional[list[Any]] = None,
         video_data: Optional[list[Any]] = None,
         **kwargs: Any,
-    ) -> TokenOutput | DiffusionOutput:
+    ) -> TokenOutput:
         """Generate tokens from prompt ids.
 
         Args:
@@ -127,11 +127,11 @@ class AsyncLLMServerManager:
             sampling_params (Dict[str, Any]): Sampling parameters for the chat completion.
 
         Returns:
-            TokenOutput | DiffusionOutput: token or diffusion output
+            TokenOutput: token output
         """
         server_id, server = await self._acquire_server(request_id, request_group_id)
         try:
-            output: TokenOutput | DiffusionOutput = await server.generate.remote(
+            output: TokenOutput = await server.generate.remote(
                 request_id=uuid4().hex,  # use new request_id for each turn
                 prompt_ids=prompt_ids,
                 sampling_params=sampling_params,
@@ -1039,12 +1039,7 @@ class AgentLoopManager:
         if not hasattr(self, "rollout_replica_class"):
             self.rollout_replica_class = get_rollout_replica_class(self.rollout_config.name)
         if not hasattr(self, "agent_loop_workers_class"):
-            if OmegaConf.select(self.config, "actor_rollout_ref.model.model_type", default=None) == "diffusion_model":
-                from verl.experimental.agent_loop.diffusion_agent_loop import DiffusionAgentLoopWorker
-
-                self.agent_loop_workers_class = ray.remote(DiffusionAgentLoopWorker)
-            else:
-                self.agent_loop_workers_class = ray.remote(AgentLoopWorker)
+            self.agent_loop_workers_class = ray.remote(AgentLoopWorker)
 
     @classmethod
     @auto_await

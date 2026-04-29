@@ -33,7 +33,7 @@ from verl.experimental.fully_async_policy.message_queue import MessageQueueClien
 from verl.experimental.separation.ray_trainer import SeparateRayPPOTrainer
 from verl.single_controller.ray import RayWorkerGroup
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager
-from verl.trainer.ppo.utils import Role, WorkerType
+from verl.trainer.ppo.utils import Role, WorkerType, need_reward_model
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.profiler import marked_timer
 from verl.utils.tracking import ValidationGenerationsLogger
@@ -75,7 +75,12 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         self.resource_pool_manager = resource_pool_manager
         self.use_reference_policy = False
 
-        self.use_rm = False
+        self.use_rm = need_reward_model(self.config)
+        if self.use_rm:
+            assert self.config.reward.reward_model.enable_resource_pool, (
+                "GenRM/DisRM in fully async mode requires standalone mode (enable_resource_pool=True). "
+                "Colocate mode is not supported because async rollout never pauses."
+            )
 
         self.use_critic = False
         self.ray_worker_group_cls = ray_worker_group_cls
@@ -384,11 +389,32 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         """
         self._init_async_objects()
         self._create_worker_classes()
-        self._init_reward_loop()
+        await self._create_reward_loop_manager()
         await self._init_async_rollout_manager()
+
+    async def _create_reward_loop_manager(self):
+        """Create RewardLoopManager for the rollouter.
+
+        TODO: RewardModelManager.__init__ uses asyncio.run() which forces us to use
+        run_in_executor here. Upstream should provide an async init method so this
+        can be a simple await call instead.
+        """
+        import asyncio
+
+        from verl.experimental.reward_loop import RewardLoopManager
+
+        loop = asyncio.get_running_loop()
+        self.reward_loop_manager = await loop.run_in_executor(
+            None,
+            lambda: RewardLoopManager(config=self.config, rm_resource_pool=None),
+        )
 
     def _create_actor_rollout_classes(self):
         # Skip rollout creation and let agentloop handle it
+        pass
+
+    def _create_reward_model_class(self):
+        # In fully async mode, RM is managed by RewardLoopManager (standalone). Skip worker group creation for RM.
         pass
 
     def _init_models(self):
