@@ -133,6 +133,12 @@ class FSDPEngine(BaseEngine):
         self._is_offload_optimizer = self.engine_config.optimizer_offload
         self._is_lora = self.model_config.lora_rank > 0
 
+        # Defaults for mixed-precision state. _build_fsdp_module overrides these when it
+        # runs; subclasses that bypass _build_fsdp_module (e.g. VeOmniEngine) keep the
+        # defaults so forward_step / optimizer_step can still read them safely.
+        self._autocast_dtype = torch.bfloat16
+        self.scaler = None
+
         # QAT (Quantization-Aware Training)
         self._qat_config = getattr(self.engine_config, "qat", None)
         self._qat_enabled = self._qat_config is not None and getattr(self._qat_config, "enable", False)
