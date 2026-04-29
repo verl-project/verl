@@ -104,7 +104,7 @@ class ServerAdapter(BaseRollout):
         local_rank = self.rollout_rank % local_world_size
         self.zmq_handle = f"ipc:///tmp/rl-colocate-zmq-replica-{self.replica_rank}-rank-{local_rank}.sock"
 
-        self.use_shm = not is_support_ipc()
+        self.use_shm = not is_support_ipc() or not self.config.get("engine_kwargs", {}).get("enable_ipc", True)
         if self.use_shm:
             logger.warning(
                 "IPC is not supported on your devices. Falling back to shared memory for weight transfer, "
