@@ -50,8 +50,14 @@ class SingleTurnAgentLoop(AgentLoopBase):
         videos = multi_modal_data.get("videos")
 
         # 2. apply chat template and tokenize
-        prompt_ids = await self.apply_chat_template(
+        prompt_ids, model_inputs = await self.apply_chat_template(
             messages,
+            images=images,
+            videos=videos,
+            return_model_inputs=True,
+        )
+        vllm_multi_modal_data = self.maybe_build_vllm_mm_processor_data(
+            model_inputs=model_inputs,
             images=images,
             videos=videos,
         )
@@ -59,13 +65,16 @@ class SingleTurnAgentLoop(AgentLoopBase):
         # 3. generate sequences
         metrics = {}
         with simple_timer("generate_sequences", metrics):
-            output: TokenOutput = await self.server_manager.generate(
+            generate_kwargs = dict(
                 request_id=uuid4().hex,
                 prompt_ids=prompt_ids,
                 sampling_params=sampling_params,
                 image_data=images,
                 video_data=videos,
             )
+            if vllm_multi_modal_data is not None:
+                generate_kwargs["vllm_multi_modal_data"] = vllm_multi_modal_data
+            output: TokenOutput = await self.server_manager.generate(**generate_kwargs)
         if metrics.get("num_preempted") is None:
             metrics["num_preempted"] = output.num_preempted if output.num_preempted is not None else -1
         response_mask = [1] * len(output.token_ids)

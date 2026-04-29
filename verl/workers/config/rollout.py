@@ -272,6 +272,8 @@ class RolloutConfig(BaseConfig):
 
     limit_images: Optional[int] = None
 
+    use_vllm_mm_processor_output: bool = False
+
     skip_tokenizer_init: bool = False
 
     quantization: Optional[str] = None

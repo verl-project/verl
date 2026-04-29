@@ -332,6 +332,9 @@ skip:
 # When enabled (True), the rollout assume token in token out for generation
 skip_tokenizer_init: True
 
+# When enabled for vLLM rollout, send HF processor outputs instead of raw image/video media.
+use_vllm_mm_processor_output: False
+
 # Whether to enable rollout routing replay for MoE models
 # When enabled (True), the rollout will record the routing decisions.
 enable_rollout_routing_replay: False
