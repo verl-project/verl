@@ -3,8 +3,8 @@
 #
 # Knobs:
 #   INFER_BACKEND   rollout backend: vllm | sglang | trtllm        (default: vllm)
-#   DEVICE          hardware path: gpu | npu                        (default: gpu)
 #   MACHINE         free-form tag for hardware tweaks (e.g. gb200)  (default: unset)
+# (DEVICE is auto-detected from torch_npu; export DEVICE=gpu|npu only to override.)
 #
 # TensorRT-LLM is GPU-only.
 # `MACHINE=gb200` (Blackwell SM100) bundles: enforce_eager=True, FSDP
@@ -15,7 +15,8 @@
 set -xeuo pipefail
 
 ########################### user-adjustable ###########################
-DEVICE=${DEVICE:-gpu}
+# DEVICE is auto-detected by probing torch_npu; override only for special cases.
+DEVICE=${DEVICE:-$(python3 -c 'import torch_npu' 2>/dev/null && echo npu || echo gpu)}
 INFER_BACKEND=${INFER_BACKEND:-vllm}
 MACHINE=${MACHINE:-}
 
@@ -43,8 +44,8 @@ total_epochs=${TOTAL_EPOCHS:-15}
 save_freq=${SAVE_FREQ:-20}
 test_freq=${TEST_FREQ:-5}
 
-project_name=${PROJECT_NAME:-verl_grpo_gsm8k_math}
-experiment_name=${EXPERIMENT_NAME:-}
+PROJECT_NAME=${PROJECT_NAME:-verl_grpo_gsm8k_math}
+EXPERIMENT_NAME=${EXPERIMENT_NAME:-qwen3_8b_grpo_${INFER_BACKEND}_fsdp_$(date +%Y%m%d_%H%M)}
 ########################### end user-adjustable ###########################
 
 ########################### derived defaults ###########################
@@ -69,32 +70,67 @@ if [ "${DEVICE}" = npu ] && [ "${INFER_BACKEND}" = trtllm ]; then
     exit 1
 fi
 
-# Defaults that depend on device/machine.
-if [ "${DEVICE}" = npu ]; then
-    NPUS_PER_NODE=${NPUS_PER_NODE:-8}
-    n_trainer_devices=${NPUS_PER_NODE}
-    actor_param_offload=True
-    actor_optimizer_offload=True
-    rollout_tp=${rollout_tp:-4}
-    if [ "${INFER_BACKEND}" = vllm ]; then
-        rollout_gpu_mem_util=${rollout_gpu_mem_util:-0.5}
-    else
-        rollout_gpu_mem_util=${rollout_gpu_mem_util:-0.3}
-    fi
-    experiment_name=${experiment_name:-qwen3_8b_${INFER_BACKEND}_fsdp_npu}
-else
-    if [ "${MACHINE}" = gb200 ]; then
-        NGPUS_PER_NODE=${NGPUS_PER_NODE:-4}
-    else
-        NGPUS_PER_NODE=${NGPUS_PER_NODE:-8}
-    fi
-    n_trainer_devices=${NGPUS_PER_NODE}
-    actor_param_offload=False
-    actor_optimizer_offload=False
-    rollout_tp=${rollout_tp:-2}
-    rollout_gpu_mem_util=${rollout_gpu_mem_util:-0.6}
-    experiment_name=${experiment_name:-qwen3_8b_${INFER_BACKEND}_fsdp${MACHINE:+_${MACHINE}}}
-fi
+# Defaults and extras grouped by device. Backend / machine refinements stay
+# nested in the device branch they apply to.
+EXTRA=()
+case "${DEVICE}" in
+    gpu)
+        actor_param_offload=False
+        actor_optimizer_offload=False
+        rollout_tp=${rollout_tp:-2}
+        rollout_gpu_mem_util=${rollout_gpu_mem_util:-0.6}
+
+        case "${MACHINE}" in
+            gb200)
+                NGPUS_PER_NODE=${NGPUS_PER_NODE:-4}
+                # Blackwell SM100: see header comment for rationale of each override.
+                EXTRA+=(
+                    actor_rollout_ref.rollout.enforce_eager=True
+                    actor_rollout_ref.rollout.free_cache_engine=True
+                    actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16
+                    "+ray_kwargs.ray_init.num_gpus=${NGPUS_PER_NODE}"
+                )
+                case "${INFER_BACKEND}" in
+                    sglang)
+                        EXTRA+=(+actor_rollout_ref.rollout.engine_kwargs.sglang.attention_backend=flashinfer)
+                        ;;
+                esac
+                ;;
+            *)
+                NGPUS_PER_NODE=${NGPUS_PER_NODE:-8}
+                ;;
+        esac
+        n_trainer_devices=${NGPUS_PER_NODE}
+        ;;
+    npu)
+        export HCCL_CONNECT_TIMEOUT=1500
+        export HCCL_HOST_SOCKET_PORT_RANGE=60000-60050
+        export HCCL_NPU_SOCKET_PORT_RANGE=61000-61050
+        export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
+
+        NPUS_PER_NODE=${NPUS_PER_NODE:-8}
+        n_trainer_devices=${NPUS_PER_NODE}
+        actor_param_offload=True
+        actor_optimizer_offload=True
+        rollout_tp=${rollout_tp:-4}
+        EXTRA+=(
+            actor_rollout_ref.actor.use_torch_compile=False
+            "actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size=${sp_size}"
+            "actor_rollout_ref.ref.fsdp_config.ulysses_sequence_parallel_size=${sp_size}"
+            actor_rollout_ref.rollout.enable_chunked_prefill=False
+        )
+        case "${INFER_BACKEND}" in
+            vllm)
+                rollout_gpu_mem_util=${rollout_gpu_mem_util:-0.5}
+                EXTRA+=(actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=4096)
+                ;;
+            sglang)
+                rollout_gpu_mem_util=${rollout_gpu_mem_util:-0.3}
+                EXTRA+=(+actor_rollout_ref.rollout.engine_kwargs.sglang.attention_backend=ascend)
+                ;;
+        esac
+        ;;
+esac
 
 ########################### parameter arrays ###########################
 
@@ -147,53 +183,14 @@ REF=(
 TRAINER=(
     trainer.balance_batch=True
     trainer.logger='["console","wandb"]'
-    trainer.project_name=${project_name}
-    trainer.experiment_name=${experiment_name}
+    trainer.project_name=${PROJECT_NAME}
+    trainer.experiment_name=${EXPERIMENT_NAME}
     trainer.n_gpus_per_node=${n_trainer_devices}
     trainer.nnodes=${NNODES}
     trainer.save_freq=${save_freq}
     trainer.test_freq=${test_freq}
     trainer.total_epochs=${total_epochs}
 )
-
-# ---- conditional / per-device extras (single trailing array) ----
-# Seed picked so the array is non-empty in every branch (Bash 3.x + set -u safe).
-if [ "${DEVICE}" = npu ]; then
-    export HCCL_CONNECT_TIMEOUT=1500
-    export HCCL_HOST_SOCKET_PORT_RANGE=60000-60050
-    export HCCL_NPU_SOCKET_PORT_RANGE=61000-61050
-    export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
-
-    EXTRA=(
-        trainer.device=npu
-        actor_rollout_ref.actor.use_torch_compile=False
-        actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size="${sp_size}"
-        actor_rollout_ref.ref.fsdp_config.ulysses_sequence_parallel_size="${sp_size}"
-        actor_rollout_ref.rollout.enable_chunked_prefill=False
-    )
-    if [ "${INFER_BACKEND}" = vllm ]; then
-        EXTRA+=(actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=4096)
-    else
-        EXTRA+=(+actor_rollout_ref.rollout.engine_kwargs.sglang.attention_backend=ascend)
-    fi
-elif [ "${INFER_BACKEND}" = trtllm ]; then
-    EXTRA=(actor_rollout_ref.hybrid_engine=True)
-else
-    EXTRA=(actor_rollout_ref.rollout.mode=async)
-fi
-
-if [ "${DEVICE}" = gpu ] && [ "${MACHINE}" = gb200 ]; then
-    # Blackwell SM100: see header comment for rationale of each override.
-    EXTRA+=(
-        actor_rollout_ref.rollout.enforce_eager=True
-        actor_rollout_ref.rollout.free_cache_engine=True
-        actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16
-        "+ray_kwargs.ray_init.num_gpus=${NGPUS_PER_NODE}"
-    )
-    if [ "${INFER_BACKEND}" = sglang ]; then
-        EXTRA+=("+actor_rollout_ref.rollout.engine_kwargs.sglang.attention_backend=flashinfer")
-    fi
-fi
 
 ########################### launch ###########################
 python3 -m verl.trainer.main_ppo \

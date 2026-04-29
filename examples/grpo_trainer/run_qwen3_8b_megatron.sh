@@ -110,9 +110,9 @@ TRAINER=(
 # Seed with the always-present rollout mode (or hybrid_engine for trtllm) so the
 # array is never empty (Bash 3.x + set -u safe).
 if [ "${INFER_BACKEND}" = trtllm ]; then
-    EXTRA=(actor_rollout_ref.hybrid_engine=True)
+    EXTRA=()
 else
-    EXTRA=(actor_rollout_ref.rollout.mode=async)
+    EXTRA=()
 fi
 
 ########################### launch ###########################

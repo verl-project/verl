@@ -73,7 +73,6 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.megatron.param_offload=True \
     actor_rollout_ref.actor.megatron.optimizer_offload=True \
     actor_rollout_ref.rollout.name=vllm \
-    actor_rollout_ref.rollout.mode=async \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${rollout_tp} \
     actor_rollout_ref.rollout.gpu_memory_utilization=${rollout_gpu_mem_util} \
     actor_rollout_ref.rollout.n=1 \

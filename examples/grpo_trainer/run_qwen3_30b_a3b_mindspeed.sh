@@ -134,7 +134,6 @@ python3 -m verl.trainer.main_ppo \
     trainer.experiment_name=${experiment_name} \
     trainer.nnodes=${NNODES} \
     trainer.n_gpus_per_node=${NPUS_PER_NODE} \
-    trainer.device=npu \
     trainer.val_before_train=False \
     trainer.test_freq=${test_freq} \
     trainer.save_freq=${save_freq} \

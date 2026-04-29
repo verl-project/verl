@@ -5,7 +5,8 @@
 set -xeuo pipefail
 
 ########################### user-adjustable ###########################
-DEVICE=${DEVICE:-gpu}
+# DEVICE is auto-detected by probing torch_npu; override only for special cases.
+DEVICE=${DEVICE:-$(python3 -c 'import torch_npu' 2>/dev/null && echo npu || echo gpu)}
 MODEL_PATH=${MODEL_PATH:-Qwen/Qwen3-VL-8B-Instruct}
 NNODES=${NNODES:-1}
 NDEVICES_PER_NODE=${NDEVICES_PER_NODE:-}
@@ -30,7 +31,7 @@ SAVE_FREQ=${SAVE_FREQ:-20}
 TEST_FREQ=${TEST_FREQ:-5}
 
 PROJECT_NAME=${PROJECT_NAME:-verl_grpo_geo3k}
-EXPERIMENT_NAME=${EXPERIMENT_NAME:-}
+EXPERIMENT_NAME=${EXPERIMENT_NAME:-qwen3_vl_8b_grpo_vllm_fsdp_$(date +%Y%m%d_%H%M)}
 
 TRAIN_FILE=${TRAIN_FILE:-$HOME/data/geo3k/train.parquet}
 TEST_FILE=${TEST_FILE:-$HOME/data/geo3k/test.parquet}
@@ -41,7 +42,6 @@ case "${DEVICE}" in
     gpu)
         n_devices_per_node=${NDEVICES_PER_NODE:-${NGPUS_PER_NODE:-8}}
         rollout_gpu_mem_util=${ROLLOUT_GPU_MEM_UTIL:-0.6}
-        experiment_name=${EXPERIMENT_NAME:-qwen3_vl_8b_vllm_fsdp}
         ;;
     npu)
         export HCCL_CONNECT_TIMEOUT=1500
@@ -51,7 +51,6 @@ case "${DEVICE}" in
 
         n_devices_per_node=${NDEVICES_PER_NODE:-${NPUS_PER_NODE:-8}}
         rollout_gpu_mem_util=${ROLLOUT_GPU_MEM_UTIL:-0.5}
-        experiment_name=${EXPERIMENT_NAME:-qwen3_vl_8b_vllm_fsdp_npu}
         ;;
     *)
         echo "Unsupported DEVICE=${DEVICE}. Expected 'gpu' or 'npu'." >&2
@@ -112,7 +111,7 @@ TRAINER=(
     trainer.balance_batch=True
     trainer.logger='["console","wandb"]'
     trainer.project_name=${PROJECT_NAME}
-    trainer.experiment_name=${experiment_name}
+    trainer.experiment_name=${EXPERIMENT_NAME}
     trainer.n_gpus_per_node=${n_devices_per_node}
     trainer.nnodes=${NNODES}
     trainer.save_freq=${SAVE_FREQ}
@@ -123,7 +122,6 @@ TRAINER=(
 # Per-device extras (single trailing array, never empty).
 if [ "${DEVICE}" = npu ]; then
     EXTRA=(
-        trainer.device=npu
         actor_rollout_ref.actor.use_torch_compile=False
         actor_rollout_ref.actor.fsdp_config.param_offload=True
         actor_rollout_ref.actor.fsdp_config.optimizer_offload=True
@@ -135,7 +133,6 @@ else
         actor_rollout_ref.model.use_fused_kernels=True
         actor_rollout_ref.actor.fsdp_config.param_offload=False
         actor_rollout_ref.actor.fsdp_config.optimizer_offload=False
-        actor_rollout_ref.rollout.mode=async
         +actor_rollout_ref.rollout.engine_kwargs.vllm.mm_processor_cache_gb=0
         actor_rollout_ref.rollout.enforce_eager=False
         actor_rollout_ref.rollout.free_cache_engine=True

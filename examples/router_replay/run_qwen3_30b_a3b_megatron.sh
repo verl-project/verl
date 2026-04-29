@@ -146,7 +146,6 @@ ACTOR=(
 
 ROLLOUT=(
     actor_rollout_ref.rollout.name=${INFER_BACKEND}
-    actor_rollout_ref.rollout.mode=async
     actor_rollout_ref.rollout.tensor_model_parallel_size=${rollout_tp}
     actor_rollout_ref.rollout.gpu_memory_utilization=${rollout_gpu_mem_util}
     actor_rollout_ref.rollout.n=${rollout_n}

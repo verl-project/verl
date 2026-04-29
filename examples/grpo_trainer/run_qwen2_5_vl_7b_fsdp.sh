@@ -119,7 +119,6 @@ TRAINER=(
 case "${INFER_BACKEND}" in
     sglang)
         EXTRA=(
-            actor_rollout_ref.rollout.mode=async
             actor_rollout_ref.rollout.multi_stage_wake_up=True
             actor_rollout_ref.rollout.enable_chunked_prefill=False
             actor_rollout_ref.rollout.enforce_eager=False
@@ -129,13 +128,11 @@ case "${INFER_BACKEND}" in
     trtllm)
         EXTRA=(
             actor_rollout_ref.actor.strategy=fsdp2
-            actor_rollout_ref.hybrid_engine=True
         )
         ;;
     *)
         EXTRA=(
             actor_rollout_ref.model.use_fused_kernels=True
-            actor_rollout_ref.rollout.mode=async
             +actor_rollout_ref.rollout.engine_kwargs.vllm.mm_processor_cache_gb=0
             actor_rollout_ref.rollout.enable_chunked_prefill=False
             actor_rollout_ref.rollout.enforce_eager=False

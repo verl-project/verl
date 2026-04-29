@@ -38,8 +38,8 @@ total_epochs=${TOTAL_EPOCHS:-10}
 save_freq=${SAVE_FREQ:-100}
 test_freq=${TEST_FREQ:--1}
 
-project_name=${PROJECT_NAME:-verl_sapo_gsm8k_math_npu}
-experiment_name=${EXPERIMENT_NAME:-qwen3_8b_vllm_fsdp_npu}
+project_name=${PROJECT_NAME:-verl_sapo_gsm8k_math}
+experiment_name=${EXPERIMENT_NAME:-qwen3_8b_vllm_fsdp}
 # ---- end user-adjustable ----
 
 gsm8k_train=$HOME/data/gsm8k/train.parquet
@@ -76,7 +76,6 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
     actor_rollout_ref.rollout.name=vllm \
-    actor_rollout_ref.rollout.mode=async \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${rollout_tp} \
     actor_rollout_ref.rollout.gpu_memory_utilization=${rollout_gpu_mem_util} \
     actor_rollout_ref.rollout.n=${rollout_n} \
@@ -86,7 +85,6 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True \
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${ppo_max_token_len_per_gpu} \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
-    trainer.device=npu \
     trainer.balance_batch=True \
     trainer.critic_warmup=0 \
     trainer.logger='["console","wandb"]' \

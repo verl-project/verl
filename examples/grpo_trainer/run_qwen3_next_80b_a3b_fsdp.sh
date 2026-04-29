@@ -2,9 +2,10 @@
 set -xeuo pipefail
 
 # ---- user-adjustable ----
-DEVICE=${DEVICE:-gpu}
-project_name=${PROJECT_NAME:-"verl_grpo_qwen3-next-80b"}
-experiment_name=${EXPERIMENT_NAME:-}
+# DEVICE is auto-detected by probing torch_npu; override only for special cases.
+DEVICE=${DEVICE:-$(python3 -c 'import torch_npu' 2>/dev/null && echo npu || echo gpu)}
+PROJECT_NAME=${PROJECT_NAME:-verl_grpo_qwen3-next-80b}
+EXPERIMENT_NAME=${EXPERIMENT_NAME:-qwen3_next_80b_a3b_grpo_vllm_fsdp_$(date +%Y%m%d_%H%M)}
 
 # Paths
 WORK_DIR=${WORK_DIR:-"${HOME}/verl"}
@@ -49,17 +50,12 @@ offload=${OFFLOAD:-True}
 # ---- end user-adjustable ----
 
 # ---- no user adjustment needed below ----
-device_trainer_args=()
-
 case "${DEVICE}" in
     gpu)
         n_devices_per_node=${NDEVICES_PER_NODE:-${NGPUS_PER_NODE:-8}}
-        experiment_name=${EXPERIMENT_NAME:-"Qwen3_Next_80B_Instruct"}
         ;;
     npu)
         n_devices_per_node=${NDEVICES_PER_NODE:-${NPUS_PER_NODE:-16}}
-        experiment_name=${EXPERIMENT_NAME:-"Qwen3_Next_80B_Instruct_npu"}
-        device_trainer_args+=("trainer.device=npu")
         ;;
     *)
         echo "Unsupported DEVICE=${DEVICE}. Expected 'gpu' or 'npu'." >&2
@@ -158,15 +154,14 @@ REF=(
 
 TRAINER=(
     trainer.logger='["console","wandb"]'
-    trainer.project_name="${project_name}"
-    trainer.experiment_name="${experiment_name}"
+    trainer.project_name="${PROJECT_NAME}"
+    trainer.experiment_name="${EXPERIMENT_NAME}"
     trainer.n_gpus_per_node=${n_devices_per_node}
     trainer.nnodes=${NNODES}
     trainer.val_before_train=False
     trainer.save_freq=5
     trainer.test_freq=-1
     trainer.total_epochs=1
-    "${device_trainer_args[@]}"
 )
 
 MODEL=(
@@ -182,7 +177,7 @@ ALGORITHM=(
 )
 
 echo "Starting Training with:"
-echo "Project: ${project_name}, Exp: ${experiment_name}"
+echo "Project: ${PROJECT_NAME}, Exp: ${EXPERIMENT_NAME}"
 echo "Rollout N: ${rollout_n}, Batch Size: ${train_batch_size}, LR: ${learning_rate}"
 
 python3 -m verl.trainer.main_ppo \

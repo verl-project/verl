@@ -116,7 +116,6 @@ ROLLOUT=(
     actor_rollout_ref.rollout.tensor_model_parallel_size=${GEN_TP}
     actor_rollout_ref.rollout.gpu_memory_utilization=0.6
     actor_rollout_ref.rollout.n=5
-    actor_rollout_ref.rollout.mode=async
     actor_rollout_ref.rollout.dtype=bfloat16
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=False

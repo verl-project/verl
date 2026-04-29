@@ -227,13 +227,12 @@ TRAINER=(
 )
 
 # ---- conditional extras (rolled into a single trailing array) ----
-EXTRA=(actor_rollout_ref.rollout.mode=async)
+EXTRA=()
 
 if [ "${INFER_BACKEND}" = vllm ]; then
     EXTRA+=(actor_rollout_ref.rollout.enable_chunked_prefill=True)
 elif [ "${INFER_BACKEND}" = trtllm ]; then
     EXTRA+=(
-        actor_rollout_ref.hybrid_engine=True
         actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=${TRTLLM_UPDATE_WEIGHTS_BUCKET_MEGABYTES:-4096}
         +actor_rollout_ref.rollout.engine_kwargs.trtllm.batch_wait_timeout_iters=${TRTLLM_BATCH_WAIT_TIMEOUT_ITERS:-32}
         +actor_rollout_ref.rollout.engine_kwargs.trtllm.batch_wait_max_tokens_ratio=${TRTLLM_BATCH_WAIT_MAX_TOKENS_RATIO:-0.5}

@@ -91,7 +91,6 @@ python3 -m verl.trainer.main_ppo \
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full \
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1 \
     actor_rollout_ref.rollout.name=vllm \
-    actor_rollout_ref.rollout.mode=async \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${rollout_tp} \
     actor_rollout_ref.rollout.gpu_memory_utilization=${rollout_gpu_mem_util} \
     actor_rollout_ref.rollout.n=${rollout_n} \

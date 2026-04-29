@@ -94,7 +94,6 @@ python3 -m verl.trainer.main_ppo \
     trainer.experiment_name=${experiment_name} \
     trainer.n_gpus_per_node=${NPUS_PER_NODE} \
     trainer.nnodes=${NNODES} \
-    trainer.device=npu \
     trainer.save_freq=-1 \
     trainer.test_freq=5 \
     trainer.total_epochs=5 "$@"

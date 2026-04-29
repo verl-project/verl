@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # GRPO scale demo | Qwen3-235B-A22B | vLLM rollout | Megatron training | GPU/NPU
-# Requires multi-node clusters. Use DEVICE=gpu or DEVICE=npu to select hardware-specific defaults.
+# Requires multi-node clusters. DEVICE is auto-detected from torch_npu; override
+# with DEVICE=gpu|npu only when the auto-detection is wrong.
 
 set -xeuo pipefail
 
 ########################### user-adjustable ###########################
-DEVICE=${DEVICE:-gpu}
+# DEVICE is auto-detected by probing torch_npu; override only for special cases.
+DEVICE=${DEVICE:-$(python3 -c 'import torch_npu' 2>/dev/null && echo npu || echo gpu)}
 MODEL_PATH=${MODEL_PATH:-Qwen/Qwen3-235B-A22B}
 MCORE_MODEL_PATH=${MCORE_MODEL_PATH:-}
 NNODES=${NNODES:-8}
@@ -40,7 +42,7 @@ SAVE_FREQ=${SAVE_FREQ:-100}
 TEST_FREQ=${TEST_FREQ:--1}
 
 PROJECT_NAME=${PROJECT_NAME:-verl_grpo_scale_demo}
-EXPERIMENT_NAME=${EXPERIMENT_NAME:-}
+EXPERIMENT_NAME=${EXPERIMENT_NAME:-qwen3_235b_a22b_grpo_vllm_megatron_$(date +%Y%m%d_%H%M)}
 CKPTS_DIR=${CKPTS_DIR:-.ckpt}
 
 TRAIN_FILE=${TRAIN_FILE:-$HOME/data/gsm8k/train.parquet}
@@ -52,7 +54,6 @@ case "${DEVICE}" in
     gpu)
         export CUDA_DEVICE_MAX_CONNECTIONS=1
         n_devices_per_node=${NDEVICES_PER_NODE:-${NGPUS_PER_NODE:-8}}
-        experiment_name=${EXPERIMENT_NAME:-qwen3_235b_a22b_vllm_megatron}
         ;;
     npu)
         export HCCL_CONNECT_TIMEOUT=1500
@@ -60,7 +61,6 @@ case "${DEVICE}" in
         export HCCL_NPU_SOCKET_PORT_RANGE=61000-61050
         export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
         n_devices_per_node=${NDEVICES_PER_NODE:-${NPUS_PER_NODE:-16}}
-        experiment_name=${EXPERIMENT_NAME:-qwen3_235b_a22b_vllm_megatron_npu}
         ;;
     *)
         echo "Unsupported DEVICE=${DEVICE}. Expected 'gpu' or 'npu'." >&2
@@ -141,7 +141,7 @@ TRAINER=(
     trainer.balance_batch=True
     trainer.logger='["console","wandb"]'
     trainer.project_name=${PROJECT_NAME}
-    trainer.experiment_name=${experiment_name}
+    trainer.experiment_name=${EXPERIMENT_NAME}
     trainer.n_gpus_per_node=${n_devices_per_node}
     trainer.nnodes=${NNODES}
     trainer.val_before_train=False
@@ -153,11 +153,10 @@ TRAINER=(
 
 # ---- conditional / per-device extras (rolled into a single trailing array) ----
 # Seed with the always-present rollout mode so the array is never empty (Bash 3.x + set -u safe).
-EXTRA=(actor_rollout_ref.rollout.mode=async)
+EXTRA=()
 
 if [ "${DEVICE}" = npu ]; then
     EXTRA+=(
-        trainer.device=npu
         actor_rollout_ref.rollout.data_parallel_size=${ROLLOUT_DP:-8}
         actor_rollout_ref.rollout.enforce_eager=False
         +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_capture_sizes=[8,16,32,64,128]

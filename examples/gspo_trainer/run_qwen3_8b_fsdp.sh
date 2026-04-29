@@ -5,7 +5,8 @@
 set -xeuo pipefail
 
 ########################### user-adjustable ###########################
-DEVICE=${DEVICE:-gpu}
+# DEVICE is auto-detected by probing torch_npu; override only for special cases.
+DEVICE=${DEVICE:-$(python3 -c 'import torch_npu' 2>/dev/null && echo npu || echo gpu)}
 MODEL_PATH=${MODEL_PATH:-Qwen/Qwen3-8B}
 NNODES=${NNODES:-1}
 NDEVICES_PER_NODE=${NDEVICES_PER_NODE:-}
@@ -31,8 +32,8 @@ TOTAL_EPOCHS=${TOTAL_EPOCHS:-10}
 SAVE_FREQ=${SAVE_FREQ:-}
 TEST_FREQ=${TEST_FREQ:-}
 
-PROJECT_NAME=${PROJECT_NAME:-}
-EXPERIMENT_NAME=${EXPERIMENT_NAME:-}
+PROJECT_NAME=${PROJECT_NAME:-verl_gspo_gsm8k_math}
+EXPERIMENT_NAME=${EXPERIMENT_NAME:-qwen3_8b_vllm_fsdp}
 
 GSM8K_TRAIN_FILE=${GSM8K_TRAIN_FILE:-$HOME/data/gsm8k/train.parquet}
 GSM8K_TEST_FILE=${GSM8K_TEST_FILE:-$HOME/data/gsm8k/test.parquet}
@@ -51,8 +52,6 @@ case "${DEVICE}" in
         rollout_gpu_mem_util=${ROLLOUT_GPU_MEM_UTIL:-0.6}
         save_freq=${SAVE_FREQ:-20}
         test_freq=${TEST_FREQ:-10}
-        project_name=${PROJECT_NAME:-verl_gspo_gsm8k_math}
-        experiment_name=${EXPERIMENT_NAME:-qwen3_8b_vllm_fsdp}
         ;;
     npu)
         ulimit -n 32768
@@ -73,8 +72,6 @@ case "${DEVICE}" in
         rollout_gpu_mem_util=${ROLLOUT_GPU_MEM_UTIL:-0.7}
         save_freq=${SAVE_FREQ:-100}
         test_freq=${TEST_FREQ:--1}
-        project_name=${PROJECT_NAME:-verl_gspo_gsm8k_math_npu}
-        experiment_name=${EXPERIMENT_NAME:-qwen3_8b_vllm_fsdp_npu}
         ;;
     *)
         echo "Unsupported DEVICE=${DEVICE}. Expected 'gpu' or 'npu'." >&2
@@ -137,8 +134,8 @@ TRAINER=(
     trainer.balance_batch=True
     trainer.critic_warmup=0
     trainer.logger='["console","wandb"]'
-    trainer.project_name=${project_name}
-    trainer.experiment_name=${experiment_name}
+    trainer.project_name=${PROJECT_NAME}
+    trainer.experiment_name=${EXPERIMENT_NAME}
     trainer.n_gpus_per_node=${n_devices_per_node}
     trainer.nnodes=${NNODES}
     trainer.save_freq=${save_freq}
@@ -147,7 +144,7 @@ TRAINER=(
 )
 
 # Per-device extras (single trailing array, never empty under set -u).
-EXTRA=(actor_rollout_ref.rollout.mode=async)
+EXTRA=()
 if [ "${DEVICE}" = npu ]; then
     EXTRA+=(
         actor_rollout_ref.actor.strategy=fsdp2
@@ -162,7 +159,6 @@ if [ "${DEVICE}" = npu ]; then
         actor_rollout_ref.ref.strategy=fsdp2
         actor_rollout_ref.ref.use_torch_compile=False
         actor_rollout_ref.ref.fsdp_config.ulysses_sequence_parallel_size=${sp_size}
-        trainer.device=npu
         trainer.val_before_train=False
     )
 fi

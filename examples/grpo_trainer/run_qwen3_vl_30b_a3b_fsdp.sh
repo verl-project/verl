@@ -3,9 +3,10 @@
 set -xeuo pipefail
 
 ########################### user-adjustable ###########################
-DEVICE=${DEVICE:-gpu}
-PROJECT_NAME=${PROJECT_NAME:-GRPO-Qwen3_vl}
-EXPERIMENT_NAME=${EXPERIMENT_NAME:-}
+# DEVICE is auto-detected by probing torch_npu; override only for special cases.
+DEVICE=${DEVICE:-$(python3 -c 'import torch_npu' 2>/dev/null && echo npu || echo gpu)}
+PROJECT_NAME=${PROJECT_NAME:-verl_grpo_geo3k}
+EXPERIMENT_NAME=${EXPERIMENT_NAME:-qwen3_vl_30b_a3b_grpo_${INFER_BACKEND}_fsdp_$(date +%Y%m%d_%H%M)}
 INFER_BACKEND=${INFER_BACKEND:-vllm}
 RAY_DATA_HOME=${RAY_DATA_HOME:-"${HOME}/verl"}
 MODEL_PATH=${MODEL_PATH:-"${RAY_DATA_HOME}/models/Qwen3-VL-30B-A3B-Instruct"}
@@ -54,7 +55,6 @@ case "${DEVICE}" in
         fsdp_size=${FSDP_SIZE:-8}
         rollout_tp=${ROLLOUT_TP:-4}
         rollout_gpu_mem_util=${ROLLOUT_GPU_MEM_UTIL:-0.6}
-        experiment_name=${EXPERIMENT_NAME:-GRPO-Qwen3_vl-30B}
         ;;
     npu)
         export HCCL_CONNECT_TIMEOUT=1500
@@ -67,7 +67,6 @@ case "${DEVICE}" in
         fsdp_size=${FSDP_SIZE:-32}
         rollout_tp=${ROLLOUT_TP:-8}
         rollout_gpu_mem_util=${ROLLOUT_GPU_MEM_UTIL:-0.8}
-        experiment_name=${EXPERIMENT_NAME:-GRPO-Qwen3_vl-30B-npu}
         ;;
     *)
         echo "Unsupported DEVICE=${DEVICE}. Expected 'gpu' or 'npu'." >&2
@@ -75,7 +74,7 @@ case "${DEVICE}" in
         ;;
 esac
 
-ckpts_dir=${CKPTS_DIR:-"${RAY_DATA_HOME}/ckpts/${PROJECT_NAME}/${experiment_name}"}
+ckpts_dir=${CKPTS_DIR:-"${RAY_DATA_HOME}/ckpts/${PROJECT_NAME}/${EXPERIMENT_NAME}"}
 
 ########################### parameter arrays ###########################
 
@@ -150,7 +149,7 @@ TRAINER=(
     trainer.critic_warmup=0
     trainer.logger='["console", "wandb"]'
     trainer.project_name="${PROJECT_NAME}"
-    trainer.experiment_name="${experiment_name}"
+    trainer.experiment_name="${EXPERIMENT_NAME}"
     trainer.n_gpus_per_node=${n_devices_per_node}
     trainer.nnodes=${nnodes}
     trainer.default_local_dir=${ckpts_dir}
@@ -161,14 +160,6 @@ TRAINER=(
     trainer.total_epochs=${TOTAL_EPOCHS}
 )
 
-# Per-device extras (single trailing array, never empty under set -u).
-# `actor_rollout_ref.rollout.mode=async` is harmless on both devices and matches
-# upstream defaults; use it as a stable seed.
-EXTRA=(actor_rollout_ref.rollout.mode=async)
-if [ "${DEVICE}" = npu ]; then
-    EXTRA+=(trainer.device=npu)
-fi
-
 ########################### launch ###########################
 python3 -m verl.trainer.main_ppo \
     "${DATA[@]}" \
@@ -177,5 +168,4 @@ python3 -m verl.trainer.main_ppo \
     "${ROLLOUT[@]}" \
     "${REF[@]}" \
     "${TRAINER[@]}" \
-    "${EXTRA[@]}" \
     "$@"

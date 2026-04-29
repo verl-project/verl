@@ -5,7 +5,8 @@
 set -xeuo pipefail
 
 ########################### user-adjustable ###########################
-DEVICE=${DEVICE:-gpu}
+# DEVICE is auto-detected by probing torch_npu; override only for special cases.
+DEVICE=${DEVICE:-$(python3 -c 'import torch_npu' 2>/dev/null && echo npu || echo gpu)}
 INFER_BACKEND=${INFER_BACKEND:-vllm}
 PROJECT_NAME=${PROJECT_NAME:-GRPO-Qwen3_5}
 EXPERIMENT_NAME=${EXPERIMENT_NAME:-GRPO-Qwen3_5-35B}
@@ -134,12 +135,6 @@ TRAINER=(
     trainer.total_epochs=15
 )
 
-# Per-device extras (single trailing array, never empty under set -u).
-EXTRA=(actor_rollout_ref.rollout.mode=async)
-if [ "${DEVICE}" = npu ]; then
-    EXTRA+=(trainer.device=npu)
-fi
-
 ########################### launch ###########################
 python3 -m verl.trainer.main_ppo \
     "${DATA[@]}" \
@@ -148,5 +143,4 @@ python3 -m verl.trainer.main_ppo \
     "${REF[@]}" \
     "${ROLLOUT[@]}" \
     "${TRAINER[@]}" \
-    "${EXTRA[@]}" \
     "$@" 2>&1 | tee logs/qwen3_5-35b-${start_time}.log
