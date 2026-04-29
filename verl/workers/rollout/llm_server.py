@@ -33,7 +33,7 @@ from verl.single_controller.ray.base import RayResourcePool, RayWorkerGroup
 from verl.utils.ray_utils import auto_await
 from verl.utils.rollout_trace import rollout_trace_op
 from verl.utils.tokenizer import normalize_token_ids
-from verl.workers.rollout.replica import DiffusionOutput, RolloutReplica, TokenOutput, get_rollout_replica_class
+from verl.workers.rollout.replica import RolloutReplica, TokenOutput, get_rollout_replica_class
 from verl.workers.rollout.utils import update_prometheus_config
 
 logger = logging.getLogger(__file__)
@@ -131,7 +131,7 @@ class LLMServerClient:
         image_data: Optional[list[Any]] = None,
         video_data: Optional[list[Any]] = None,
         **kwargs: Any,
-    ) -> TokenOutput | DiffusionOutput:
+    ) -> TokenOutput:
         """Generate tokens from prompt ids.
 
         Args:
@@ -144,7 +144,7 @@ class LLMServerClient:
         """
         server_id, server = await self._acquire_server(request_id)
         try:
-            output: TokenOutput | DiffusionOutput = await server.generate.remote(
+            output: TokenOutput = await server.generate.remote(
                 request_id=uuid4().hex,  # use new request_id for each turn
                 prompt_ids=prompt_ids,
                 sampling_params=sampling_params,
