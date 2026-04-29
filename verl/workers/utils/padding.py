@@ -167,9 +167,13 @@ def embeds_padding_2_no_padding(data: TensorDict) -> TensorDict:
             curr_mask = mask[i].bool()
             embeds_list.append(embeds[i, curr_mask, :])
             mask_list.append(curr_mask[curr_mask])
+        embeds_nt = torch.nested.as_nested_tensor(embeds_list, layout=torch.jagged)
+        mask_nt = torch.nested.as_nested_tensor(mask_list, layout=torch.jagged)
+        embeds_nt._ragged_idx = 1
+        mask_nt._ragged_idx = 1
         return (
-            torch.nested.as_nested_tensor(embeds_list, layout=torch.jagged),
-            torch.nested.as_nested_tensor(mask_list, layout=torch.jagged),
+            embeds_nt,
+            mask_nt,
         )
 
     data["prompt_embeds"], data["prompt_embeds_mask"] = _to_nested(data["prompt_embeds"], data["prompt_embeds_mask"])

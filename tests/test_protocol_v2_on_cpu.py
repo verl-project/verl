@@ -906,6 +906,24 @@ def test_chunk_tensordict_preserves_3d_nested_tensor_layout_with_non_last_ragged
     assert torch.equal(chunks[1]["teacher_logprobs"].unbind(0)[1], elements[3])
 
 
+def test_chunk_tensordict_handles_nested_embeddings_with_empty_rows():
+    elements = [torch.randn(4, 32), torch.empty(0, 32), torch.randn(7, 32), torch.empty(0, 32)]
+    prompt_embeds = torch.nested.as_nested_tensor(elements, layout=torch.jagged)
+    td = tu.get_tensordict({"prompt_embeds": prompt_embeds})
+
+    chunks = tu.chunk_tensordict(td, chunks=2)
+
+    expected_chunk_0 = tu.nested_tensor_from_tensor_list(elements[:2], ragged_idx=1)
+    expected_chunk_1 = tu.nested_tensor_from_tensor_list(elements[2:], ragged_idx=1)
+
+    assert chunks[0]["prompt_embeds"]._ragged_idx == 1
+    assert chunks[1]["prompt_embeds"]._ragged_idx == 1
+    assert torch.equal(chunks[0]["prompt_embeds"].values(), expected_chunk_0.values())
+    assert torch.equal(chunks[1]["prompt_embeds"].values(), expected_chunk_1.values())
+    assert torch.equal(chunks[0]["prompt_embeds"].offsets(), expected_chunk_0.offsets())
+    assert torch.equal(chunks[1]["prompt_embeds"].offsets(), expected_chunk_1.offsets())
+
+
 def test_index_select_tensor_dict_preserves_3d_nested_tensor_layout_with_non_last_ragged_idx():
     """Regression test: index_select_tensor_dict must handle nested tensors where the ragged dim is not the last."""
     topk = 64

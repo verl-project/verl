@@ -169,7 +169,9 @@ def nested_tensor_from_tensor_list(tensors: list[torch.Tensor], ragged_idx: int 
     )
 
     if sample_dim == 1:
-        return torch.nested.as_nested_tensor(tensors, layout=torch.jagged)
+        nested_tensor = torch.nested.as_nested_tensor(tensors, layout=torch.jagged)
+        nested_tensor._ragged_idx = 1
+        return nested_tensor
 
     cat_dim = ragged_idx - 1
     values = torch.cat(tensors, dim=cat_dim)
@@ -180,6 +182,40 @@ def nested_tensor_from_tensor_list(tensors: list[torch.Tensor], ragged_idx: int 
     nested_tensor = torch.nested.nested_tensor_from_jagged(values=values, offsets=offsets)
     nested_tensor._ragged_idx = ragged_idx
     return nested_tensor
+
+
+def _get_nested_tensor_ragged_idx(tensor: torch.Tensor) -> int:
+    ragged_idx = getattr(tensor, "_ragged_idx", None)
+    if ragged_idx is not None:
+        return ragged_idx
+
+    sym_int_type = getattr(torch, "SymInt", None)
+    for dim, size in enumerate(tensor.shape[1:], start=1):
+        if (sym_int_type is not None and isinstance(size, sym_int_type)) or not isinstance(size, int):
+            return dim
+
+    ragged_size = tensor.offsets()[-1].item()
+    candidate_dims = [dim + 1 for dim, size in enumerate(tensor.values().shape) if size == ragged_size]
+    if len(candidate_dims) == 1:
+        return candidate_dims[0]
+
+    return tensor.dim() - 1
+
+
+def _unbind_jagged_nested_tensor(tensor: torch.Tensor) -> tuple[list[torch.Tensor], int]:
+    """Split a jagged NestedTensor by batch using values/offsets instead of PyTorch unbind."""
+    ragged_idx = _get_nested_tensor_ragged_idx(tensor)
+    cat_dim = ragged_idx - 1
+    values = tensor.values()
+    offsets = tensor.offsets().tolist()
+    tensors = []
+
+    for start, end in zip(offsets[:-1], offsets[1:], strict=True):
+        slices = [slice(None)] * values.dim()
+        slices[cat_dim] = slice(start, end)
+        tensors.append(values[tuple(slices)])
+
+    return tensors, ragged_idx
 
 
 def concat_nested_tensors(tensors: list[torch.Tensor]) -> torch.Tensor:
@@ -209,12 +245,20 @@ def concat_nested_tensors(tensors: list[torch.Tensor]) -> torch.Tensor:
     for tensor in tensors:
         assert tensor.is_nested and tensor.is_contiguous()
     unbind_tensors = []
+    ragged_idx = None
     for tensor in tensors:
         assert len(tensor.shape) >= 2, f"nested tensor must have 2 or more dimensions. Got {tensor.shape}"
-        unbind_tensor = tensor.unbind(0)
+        try:
+            unbind_tensor, current_ragged_idx = _unbind_jagged_nested_tensor(tensor)
+        except (AttributeError, RuntimeError, NotImplementedError):
+            unbind_tensor = tensor.unbind(0)
+            current_ragged_idx = _get_nested_tensor_ragged_idx(tensor)
+        if ragged_idx is None:
+            ragged_idx = current_ragged_idx
+        else:
+            assert ragged_idx == current_ragged_idx, "All nested tensors must have the same ragged dimension."
         unbind_tensors.extend(list(unbind_tensor))
 
-    ragged_idx = getattr(tensors[0], "_ragged_idx", tensors[0].dim() - 1)
     return nested_tensor_from_tensor_list(unbind_tensors, ragged_idx=ragged_idx)
 
 
@@ -318,23 +362,10 @@ def chunk_tensordict(td: TensorDict, chunks: int) -> list[TensorDict]:
             evenly divisible by chunks.
 
     Note:
-        PyTorch ``unbind(dim=0)`` on 3D+ jagged NestedTensors has a bug where
-        ``split_with_sizes`` is applied to the wrong dimension of the internal
-        ``_values`` tensor.  For example, mRoPE ``position_ids`` with per-sample
-        shape ``(4, seq_len)`` becomes a 3D jagged NestedTensor
-        ``[B, *(ragged=4), seq_len]``; ``_values`` is ``[B*4, seq_len]`` and
-        ``unbind`` erroneously splits dimension 1 (``seq_len``) instead of
-        dimension 0, causing::
-
-            RuntimeError: split_with_sizes expects split_sizes to sum exactly
-            to <seq_len>, but got split_sizes=[4, 4, ...]
-
-        2D jagged NestedTensors (e.g. ``input_ids``, ``loss_mask``) are
-        unaffected — ``unbind(dim=0)`` works correctly for them.
-
-        The workaround: try ``unbind`` first (fast path for 2D); on failure,
-        fall back to ``to_padded_tensor`` → ``chunk`` → reconstruct per-chunk
-        NestedTensors using the original ragged lengths from ``offsets``.
+        PyTorch ``unbind(dim=0)`` and ``to_padded_tensor`` can fail on 3D+
+        jagged NestedTensors, especially when empty rows are present.  The
+        workaround splits directly from ``values`` and ``offsets`` and then
+        reconstructs per-chunk NestedTensors.
 
         See https://github.com/pytorch/pytorch/issues/153238
     """
@@ -351,24 +382,15 @@ def chunk_tensordict(td: TensorDict, chunks: int) -> list[TensorDict]:
     for key in nested_keys:
         nt = td[key]
         try:
+            tensors, ragged_idx = _unbind_jagged_nested_tensor(nt)
+        except (AttributeError, RuntimeError, NotImplementedError):
             tensors = nt.unbind(dim=0)
-        except RuntimeError:
-            padded = nt.to_padded_tensor(0)
-            padded_chunks = padded.chunk(chunks, dim=0)
-            offsets = nt.offsets()
-            lengths = offsets.diff().tolist()
-            for i, chunk_td in enumerate(tds):
-                chunk_lengths = lengths[i * chunk_size : (i + 1) * chunk_size]
-                chunk_tensors = [padded_chunks[i][j, :seq_len] for j, seq_len in enumerate(chunk_lengths)]
-                chunk_td[key] = nested_tensor_from_tensor_list(
-                    chunk_tensors, ragged_idx=getattr(nt, "_ragged_idx", nt.dim() - 1)
-                )
-            continue
+            ragged_idx = _get_nested_tensor_ragged_idx(nt)
 
         for i, chunk_td in enumerate(tds):
             chunk_td[key] = nested_tensor_from_tensor_list(
                 list(tensors[i * chunk_size : (i + 1) * chunk_size]),
-                ragged_idx=getattr(nt, "_ragged_idx", nt.dim() - 1),
+                ragged_idx=ragged_idx,
             )
 
     return tds
@@ -492,11 +514,13 @@ def index_select_tensor_dict(batch: TensorDict, indices: torch.Tensor | list[int
             if isinstance(tensor, torch.Tensor) and not tensor.is_nested:
                 data_dict[key] = tensor[indices]
             elif isinstance(tensor, torch.Tensor) and tensor.is_nested:
-                tensor_lst = tensor.unbind()  # for performance
-                selected_tensors = [tensor_lst[idx] for idx in indices]
-                data_dict[key] = nested_tensor_from_tensor_list(
-                    selected_tensors, ragged_idx=getattr(tensor, "_ragged_idx", tensor.dim() - 1)
-                )
+                try:
+                    tensor_lst, ragged_idx = _unbind_jagged_nested_tensor(tensor)
+                except (AttributeError, RuntimeError, NotImplementedError):
+                    tensor_lst = tensor.unbind()  # for performance
+                    ragged_idx = _get_nested_tensor_ragged_idx(tensor)
+                selected_tensors = [tensor_lst[idx] for idx in indices.tolist()]
+                data_dict[key] = nested_tensor_from_tensor_list(selected_tensors, ragged_idx=ragged_idx)
             else:
                 # This handles NonTensorStack (indexable by batch dim) and NonTensorData (scalar metadata).
                 if tensor.shape:

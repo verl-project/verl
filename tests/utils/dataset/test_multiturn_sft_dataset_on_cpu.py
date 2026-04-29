@@ -363,9 +363,12 @@ def test_multiturn_sft_vlm_dataset_on_cpu(model_path, vlm_data_file):
         image_grid_thw = item.get("multi_modal_inputs", {}).get("image_grid_thw")
 
         assert input_ids.shape == loss_mask.shape, "Shapes of input_ids and loss_mask must be equal"
-        assert position_ids.dim() == 2, "position_ids must be 2-dimensional"
-        assert position_ids.shape[0] == 4, f"position_ids[0] should be 4: {position_ids[0]}"
-        assert position_ids.shape[1] == input_ids.shape[0]
+        if processor is not None:
+            assert position_ids.dim() == 2, "position_ids must be 2-dimensional"
+            assert position_ids.shape[0] == 4, f"position_ids[0] should be 4: {position_ids[0]}"
+            assert position_ids.shape[1] == input_ids.shape[0]
+        else:
+            assert position_ids.shape == input_ids.shape
 
         # 1. verify input_ids without assistant text
         text = tokenizer.decode(input_ids[loss_mask == 0], skip_special_tokens=True)
@@ -384,7 +387,7 @@ def test_multiturn_sft_vlm_dataset_on_cpu(model_path, vlm_data_file):
                 assert "assistant" not in text, f"Assistant token should not be in the input_ids: {text}"
 
         # 3. verify image token match with image_grid_thw
-        if len(df["images"][i]) > 0:
+        if processor is not None and len(df["images"][i]) > 0:
             patch_size = processor.image_processor.patch_size
             temporal_patch_size = processor.image_processor.temporal_patch_size
             merge_size = processor.image_processor.merge_size
@@ -397,8 +400,8 @@ def test_multiturn_sft_vlm_dataset_on_cpu(model_path, vlm_data_file):
             )
             assert (input_ids == processor.image_token_id).sum() == num_patches // (merge_size**2)
         else:
-            assert pixel_values is None, "pixel_values should be None when no image is provided"
-            assert image_grid_thw is None, "image_grid_thw should be None when no image is provided"
+            assert pixel_values is None, "pixel_values should be None when no image is processed"
+            assert image_grid_thw is None, "image_grid_thw should be None when no image is processed"
 
 
 @pytest.mark.parametrize(

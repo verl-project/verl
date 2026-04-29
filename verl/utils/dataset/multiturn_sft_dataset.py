@@ -253,6 +253,9 @@ class MultiTurnSFTDataset(Dataset):
         messages: list = convert_nested_value_to_list_recursive(example[self.messages_key])
         images = example[self.image_key] if self.image_key in example else []
         videos = example[self.video_key] if self.video_key in example else []
+        if self.processor is None:
+            # Text-only tokenizers cannot consume structured image/video parts.
+            return messages
 
         image_offset, video_offset = 0, 0
         for message in messages:
@@ -261,10 +264,8 @@ class MultiTurnSFTDataset(Dataset):
                 continue
 
             if self.image_key not in example and self.video_key not in example:
-                if self.processor is not None:
-                    message["content"] = [{"type": "text", "text": content}]
+                message["content"] = [{"type": "text", "text": content}]
                 continue
-            assert self.processor is not None, "processor is needed to process image and video"
 
             content_list = []
             segments = re.split("(<image>|<video>)", content)
