@@ -49,6 +49,7 @@ class FullyAsyncLLMServerManager(AsyncLLMServerManager):
         self,
         request_id,
         *,
+        request_group_id: str | None,
         prompt_ids: list[int],
         sampling_params: dict[str, Any],
         image_data: Optional[list[Any]] = None,
@@ -58,6 +59,7 @@ class FullyAsyncLLMServerManager(AsyncLLMServerManager):
 
         Args:
             request_id (str): request id for sticky session.
+            request_group_id (str | None): group id for group-level sticky; may be None if not using group routing.
             prompt_ids (List[int]): List of prompt token ids.
             sampling_params (Dict[str, Any]): Sampling parameters for the chat completion.
             image_data (Optional[List[Any]]): Image data for the chat completion.
@@ -86,6 +88,7 @@ class FullyAsyncLLMServerManager(AsyncLLMServerManager):
             # 1. generate tokens
             output = await super().generate(
                 request_id=request_id,
+                request_group_id=request_group_id,
                 prompt_ids=prompt_ids + final_output.token_ids,
                 sampling_params=sampling_params,
                 image_data=image_data,

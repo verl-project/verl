@@ -23,13 +23,13 @@ import hydra
 import numpy as np
 import ray
 import torch
-from cachetools import LRUCache
 from omegaconf import DictConfig, OmegaConf
 from PIL import Image
 from pydantic import BaseModel, ConfigDict
 from tensordict import TensorDict
 from transformers import AutoProcessor, AutoTokenizer
 
+from verl.experimental.agent_loop.load_balance import get_global_load_balancer
 from verl.experimental.agent_loop.prometheus_utils import update_prometheus_config
 from verl.experimental.agent_loop.utils import resolve_config_path
 from verl.experimental.teacher_loop import MultiTeacherModelManager
@@ -58,42 +58,6 @@ from verl.workers.rollout.replica import TokenOutput, get_rollout_replica_class
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
-
-DEFAULT_ROUTING_CACHE_SIZE = 10000
-
-
-@ray.remote
-class GlobalRequestLoadBalancer:
-    """Global sticky-session + in-flight load balancer shared by all AgentLoopWorkers."""
-
-    def __init__(self, server_actor_ids: list[str], max_cache_size: int = DEFAULT_ROUTING_CACHE_SIZE):
-        if not server_actor_ids:
-            raise ValueError("server_actor_ids must be non-empty")
-
-        self._inflight_requests: dict[str, int] = {sid: 0 for sid in server_actor_ids}
-        self._request_id_to_server: LRUCache = LRUCache(maxsize=max_cache_size)
-
-    def acquire_server(self, request_id: str) -> str:
-        """Acquire a server for the given request, reusing the same server for multi-turn conversations."""
-        # request-level sticky (multi-turn: same conversation -> same server)
-        if request_id in self._request_id_to_server:
-            server_id = self._request_id_to_server[request_id]
-            self._inflight_requests[server_id] += 1
-            return server_id
-
-        # new request: route to least loaded server
-        server_id = min(self._inflight_requests, key=self._inflight_requests.get)
-        self._request_id_to_server[request_id] = server_id
-        self._inflight_requests[server_id] += 1
-        return server_id
-
-    def release_server(self, server_id: str) -> None:
-        """Release a server after a request completes, decrementing its inflight count."""
-        if server_id not in self._inflight_requests:
-            raise ValueError(f"Invalid server_id for release: {server_id}")
-        if self._inflight_requests[server_id] <= 0:
-            raise ValueError(f"Release called with no inflight requests on server {server_id}")
-        self._inflight_requests[server_id] -= 1
 
 
 def _get_rollout_and_model_config(config: DictConfig) -> tuple[DictConfig, DictConfig]:
@@ -128,8 +92,10 @@ class AsyncLLMServerManager:
         self._load_balancer = load_balancer_handle
         self._server_id_to_handle: dict[str, ray.actor.ActorHandle] = dict(servers)
 
-    async def _acquire_server(self, request_id: str) -> tuple[str, ray.actor.ActorHandle]:
-        server_id = await self._load_balancer.acquire_server.remote(request_id=request_id)
+    async def _acquire_server(self, request_id: str, request_group_id: str | None) -> tuple[str, ray.actor.ActorHandle]:
+        server_id = await self._load_balancer.acquire_server.remote(
+            request_id=request_id, request_group_id=request_group_id
+        )
         handle = self._server_id_to_handle.get(server_id)
         if handle is None:
             raise RuntimeError(f"Unknown server_id returned by load balancer: {server_id}")
@@ -145,6 +111,7 @@ class AsyncLLMServerManager:
         self,
         request_id,
         *,
+        request_group_id: str | None,
         prompt_ids: list[int],
         sampling_params: dict[str, Any],
         image_data: Optional[list[Any]] = None,
@@ -155,13 +122,14 @@ class AsyncLLMServerManager:
 
         Args:
             request_id (str): request id for sticky session.
+            request_group_id (str | None): request group id for group-level sticky routing.
             prompt_ids (List[int]): List of prompt token ids.
             sampling_params (Dict[str, Any]): Sampling parameters for the chat completion.
 
         Returns:
             TokenOutput: token output
         """
-        server_id, server = await self._acquire_server(request_id)
+        server_id, server = await self._acquire_server(request_id, request_group_id)
         try:
             output: TokenOutput = await server.generate.remote(
                 request_id=uuid4().hex,  # use new request_id for each turn
@@ -901,15 +869,18 @@ class AgentLoopWorker:
         """Compute teacher logprobs for single sample."""
         if self.distillation_enabled and not validate:
             routing_key = None
+            request_group_id = None
             if sample_kwargs is not None:
                 routing_value = sample_kwargs.get(self.teacher_key)
                 if routing_value is not None:
                     # Non-tensor batch values arrive as 0-d numpy objects / arrays; normalize to Python.
                     routing_key = routing_value.item() if hasattr(routing_value, "item") else routing_value
+                request_group_id = sample_kwargs.get("uid", None)
             teacher_ids, teacher_logprobs = await self.teacher_server_manager.compute_teacher_logprobs_single(
                 sequence_ids=prompt_ids + response_ids,
                 multi_modal_data=output.multi_modal_data,
                 routing_key=routing_key,
+                request_group_id=request_group_id,
             )
             output.extra_fields["teacher_ids"] = teacher_ids
             output.extra_fields["teacher_logprobs"] = teacher_logprobs
@@ -1178,10 +1149,8 @@ class AgentLoopManager:
             )
 
     async def _init_global_load_balancer(self) -> None:
-        self.global_load_balancer = GlobalRequestLoadBalancer.remote(
-            server_actor_ids=self.server_addresses,
-            max_cache_size=DEFAULT_ROUTING_CACHE_SIZE,
-        )
+        cls = get_global_load_balancer(self.rollout_config.load_balance_sticky_mode)
+        self.global_load_balancer = cls.remote(server_actor_ids=self.server_addresses)
 
     @auto_await
     async def generate_sequences(self, prompts: DataProto) -> DataProto:

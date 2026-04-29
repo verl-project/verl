@@ -64,6 +64,7 @@ async def _run_update_weights_with_global_steps_none(
     prompt_ids = tokenizer.apply_chat_template(prompt, add_generation_prompt=True, tokenize=True)
     output = await server_manager.generate(
         request_id="test_0",
+        request_group_id="test_0",
         prompt_ids=prompt_ids,
         sampling_params={
             "temperature": 1.0,
@@ -96,6 +97,7 @@ async def _run_server_manager_without_resume(
                 asyncio.create_task(
                     server_manager.generate(
                         request_id=f"test_{global_steps}_{i}",
+                        request_group_id=f"test_{global_steps}_{i}",
                         prompt_ids=prompt_ids,
                         sampling_params={
                             "temperature": 1.0,
@@ -137,6 +139,7 @@ async def _run_server_manager_with_resume(
             asyncio.create_task(
                 server_manager.generate(
                     request_id=f"test_{initial_steps}_{i}",
+                    request_group_id=f"test_{initial_steps}_{i}",
                     prompt_ids=prompt_ids,
                     sampling_params={
                         "temperature": 1.0,

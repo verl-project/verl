@@ -57,6 +57,7 @@ class AgentData:
         video_data: list[tuple[torch.Tensor, dict[str, Any]]],
         metrics: dict[str, Any],
         request_id: str,
+        request_group_id: str | None,
         tools_kwargs: dict[str, Any],
     ):
         self.messages = messages
@@ -64,6 +65,7 @@ class AgentData:
         self.video_data = video_data
         self.metrics = metrics
         self.request_id = request_id
+        self.request_group_id = request_group_id
         self.tools_kwargs = tools_kwargs
 
         # State variables
@@ -118,6 +120,7 @@ class ToolAgentLoop(AgentLoopBase):
         metrics = {}
         request_id = uuid4().hex
         tools_kwargs = kwargs.get("tools_kwargs", {})
+        request_group_id = kwargs.get("uid", None)
 
         agent_data = AgentData(
             messages=messages,
@@ -125,6 +128,7 @@ class ToolAgentLoop(AgentLoopBase):
             video_data=videos,
             metrics=metrics,
             request_id=request_id,
+            request_group_id=request_group_id,
             tools_kwargs=tools_kwargs,
         )
 
@@ -206,6 +210,7 @@ class ToolAgentLoop(AgentLoopBase):
                 sampling_params=sampling_params,
                 image_data=agent_data.image_data,
                 video_data=agent_data.video_data,
+                request_group_id=agent_data.request_group_id,
             )
         # first time to set num_preempted
         if agent_data.metrics.get("num_preempted") is None:

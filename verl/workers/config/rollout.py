@@ -277,6 +277,8 @@ class RolloutConfig(BaseConfig):
 
     qat: Optional[dict] = None
 
+    load_balance_sticky_mode: str = "request"
+
     def __post_init__(self):
         """Validate the rollout config"""
         # Deprecation warning for mode field - only async mode is supported
@@ -323,3 +325,6 @@ class RolloutConfig(BaseConfig):
                 raise NotImplementedError(
                     f"Current rollout {self.name=} not implemented pipeline_model_parallel_size > 1 yet."
                 )
+
+        if self.load_balance_sticky_mode not in ("request", "group"):
+            raise ValueError("load_balance_sticky_mode must be 'request' or 'group'")
