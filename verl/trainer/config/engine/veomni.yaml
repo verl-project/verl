@@ -48,7 +48,12 @@ enable_reentrant: false
 # veomni_flash_attention_3_with_sp and native-sparse
 attn_implementation: flash_attention_2
 
-# eager or fused
+# MoE experts forward kernel. `fused` is a back-compat alias auto-resolved
+# by VeOmni at config-parse time to `fused_quack` on GPU / `fused_npu` on
+# NPU (with a one-time deprecation warning). On hardware that does not
+# satisfy `fused_quack`'s SM90+ requirement (e.g. L20), set this to
+# `fused_triton` explicitly. Other valid values: `eager`, `fused_triton`,
+# `fused_quack`, `fused_npu`.
 moe_implementation: fused
 
 force_use_huggingface: false

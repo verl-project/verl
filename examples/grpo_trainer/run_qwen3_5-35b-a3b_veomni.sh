@@ -5,7 +5,7 @@
 #   - transformers==5.3.0
 #   - sglang==0.5.9
 #   - flash-linear-attention==0.4.1
-#   - veomni==0.1.9a1
+#   - veomni==0.1.9a3
 # Tested configuration:
 #   - Model: Qwen3.5-35B-A3B
 #   - Sequence Parallel (SP): Tested with sp=1 and sp=2 (ulysses_parallel_size).

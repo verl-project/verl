@@ -297,11 +297,17 @@ class VeOmniEngineConfig(EngineConfig):
             7. `native-sparse`
             default "flash_attention_2"
             Note: In case VeOmni add more attn_implementation, please check https://github.com/ByteDance-Seed/VeOmni/
-        moe_implementation (str): MoE implementation to use.
-            1. `eager`
-            2. `fused`
-            default "fused"
-            Note: In case VeOmni add more moe_implementation, please check https://github.com/ByteDance-Seed/VeOmni/
+        moe_implementation (str): MoE experts forward kernel selected through
+            `OpsImplementationConfig.moe_implementation`. Known values:
+            1. `eager`        — reference PyTorch loop (debug only)
+            2. `fused_triton` — Triton group-gemm (GPU, SM70+)
+            3. `fused_quack`  — Quack CUTLASS/CuTe (GPU, SM90+)
+            4. `fused_npu`    — NPU group-gemm (Ascend, requires torch_npu)
+            5. `fused`        — back-compat alias auto-resolved at config-parse
+                                time to `fused_quack` on GPU / `fused_npu` on NPU
+                                (with a one-time deprecation warning); default.
+            On hardware that does not satisfy `fused_quack`'s SM90+ requirement
+            (e.g. L20), set `moe_implementation=fused_triton` explicitly.
         force_use_huggingface (bool): Force loading model from huggingface, default False
         activation_gpu_limit (float): When enabling activation offload, `activation_gpu_limit` GB
             activations are allowed to reserve on GPU, default 0.0

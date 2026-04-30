@@ -21,6 +21,7 @@ import torch
 import torch.distributed as dist
 from tensordict import TensorDict
 from torch.distributed.tensor import DTensor
+from veomni.arguments.arguments_types import OpsImplementationConfig
 from veomni.distributed import parallel_state
 from veomni.distributed.offloading import build_activation_offloading_context
 from veomni.distributed.torch_parallelize import build_parallelize_model
@@ -194,14 +195,24 @@ class VeOmniEngine(FSDPEngine):
         return lr_scheduler
 
     def _build_model_optimizer(self):
-        # Load base model with specified configuration and dtype
+        # Load base model with specified configuration and dtype.
+        # `build_foundation_model` owns the call to `apply_ops_config` when
+        # `ops_implementation=` is provided, so kernel selection (attn / MoE /
+        # CE / load-balancing) flows through `OpsImplementationConfig` rather
+        # than per-kwarg arguments. `cross_entropy_loss_implementation` is left
+        # at VeOmni's default (`chunk_loss`), which is hardware-agnostic
+        # (CUDA + NPU) and avoids the full [bsz × seq × vocab] logits tensor
+        # that the eager CE materializes. See VeOmni's
+        # `docs/design/kernel_selection.md` §2.
         module = build_foundation_model(
             config_path=self.model_config.local_hf_config_path,
             weights_path=self.model_config.local_path,
             torch_dtype="float32" if self.engine_config.mixed_precision else "bfloat16",
-            attn_implementation=self.engine_config.attn_implementation,
-            moe_implementation=self.engine_config.moe_implementation,
             init_device=self.engine_config.init_device,
+            ops_implementation=OpsImplementationConfig(
+                attn_implementation=self.engine_config.attn_implementation,
+                moe_implementation=self.engine_config.moe_implementation,
+            ),
         )
         log_gpu_memory_usage("After load base model", logger=logger)
 

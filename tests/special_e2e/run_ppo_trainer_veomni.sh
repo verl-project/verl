@@ -105,8 +105,15 @@ if [ -n "$device_name" ] && [ "$device_name" == "cuda" ]; then
     
 elif [ -n "$device_name" ] && [ "$device_name" == "npu" ]; then
     CONTENTS=['npu','cpu']
+    # NPU kernel override: pin MoE explicitly to fused_npu. The default
+    # `moe_implementation=fused` already auto-resolves to `fused_npu` on
+    # NPU hosts inside VeOmni, but keeping the explicit value here silences
+    # the deprecation warning. CE stays at VeOmni's hardware-agnostic
+    # `chunk_loss` default (no per-host override needed). veomni_ref.yaml
+    # inherits from actor via oc.select, so setting actor is enough.
     python3 -m verl.trainer.main_ppo \
         "${common_params[@]}" \
+        actor_rollout_ref.actor.veomni.moe_implementation=fused \
         actor_rollout_ref.actor.profiler.tool_config.npu.discrete=$DISCRETE \
         actor_rollout_ref.actor.profiler.tool_config.npu.contents=$CONTENTS \
         actor_rollout_ref.ref.profiler.tool_config.npu.discrete=$DISCRETE \
