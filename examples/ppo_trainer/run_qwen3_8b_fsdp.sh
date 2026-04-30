@@ -41,17 +41,16 @@ MATH_TEST_FILE=${MATH_TEST_FILE:-$HOME/data/math/test.parquet}
 ########################### end user-adjustable ###########################
 
 ########################### derived defaults ###########################
+n_devices_per_node=${NDEVICES_PER_NODE:-8}
+
 case "${DEVICE}" in
     gpu)
-        n_devices_per_node=${NDEVICES_PER_NODE:-${NGPUS_PER_NODE:-8}}
         ;;
     npu)
         export HCCL_CONNECT_TIMEOUT=2400
         export HCCL_EXEC_TIMEOUT=2400
         export HCCL_OP_EXPANSION_MODE=AIV
         export CLOSE_MATMUL_K_SHIFT=1
-
-        n_devices_per_node=${NDEVICES_PER_NODE:-${NPUS_PER_NODE:-${NGPUS_PER_NODE:-8}}}
         ;;
     *)
         echo "Unsupported DEVICE=${DEVICE}. Expected 'gpu' or 'npu'." >&2

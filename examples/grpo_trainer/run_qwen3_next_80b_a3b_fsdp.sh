@@ -50,12 +50,12 @@ offload=${OFFLOAD:-True}
 # ---- end user-adjustable ----
 
 # ---- no user adjustment needed below ----
+n_devices_per_node=${NDEVICES_PER_NODE:-8}
+
 case "${DEVICE}" in
     gpu)
-        n_devices_per_node=${NDEVICES_PER_NODE:-${NGPUS_PER_NODE:-8}}
         ;;
     npu)
-        n_devices_per_node=${NDEVICES_PER_NODE:-${NPUS_PER_NODE:-16}}
         ;;
     *)
         echo "Unsupported DEVICE=${DEVICE}. Expected 'gpu' or 'npu'." >&2

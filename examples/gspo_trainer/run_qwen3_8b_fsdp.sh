@@ -29,8 +29,8 @@ ROLLOUT_GPU_MEM_UTIL=${ROLLOUT_GPU_MEM_UTIL:-}
 ROLLOUT_N=${ROLLOUT_N:-16}
 
 TOTAL_EPOCHS=${TOTAL_EPOCHS:-10}
-SAVE_FREQ=${SAVE_FREQ:-}
-TEST_FREQ=${TEST_FREQ:-}
+SAVE_FREQ=${SAVE_FREQ:-20}
+TEST_FREQ=${TEST_FREQ:-10}
 
 PROJECT_NAME=${PROJECT_NAME:-verl_gspo_gsm8k_math}
 EXPERIMENT_NAME=${EXPERIMENT_NAME:-qwen3_8b_vllm_fsdp}
@@ -42,16 +42,17 @@ MATH_TEST_FILE=${MATH_TEST_FILE:-$HOME/data/math/test.parquet}
 ########################### end user-adjustable ###########################
 
 ########################### derived defaults ###########################
+n_devices_per_node=${NDEVICES_PER_NODE:-8}
+save_freq=${SAVE_FREQ}
+test_freq=${TEST_FREQ}
+
 case "${DEVICE}" in
     gpu)
-        n_devices_per_node=${NDEVICES_PER_NODE:-${NGPUS_PER_NODE:-8}}
         train_batch_size=${TRAIN_BATCH_SIZE:-512}
         ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE:-128}
         sp_size=${SP_SIZE:-1}
         rollout_tp=${ROLLOUT_TP:-2}
         rollout_gpu_mem_util=${ROLLOUT_GPU_MEM_UTIL:-0.6}
-        save_freq=${SAVE_FREQ:-20}
-        test_freq=${TEST_FREQ:-10}
         ;;
     npu)
         ulimit -n 32768
@@ -64,14 +65,11 @@ case "${DEVICE}" in
         export CPU_AFFINITY_CONF=1
         export VLLM_USE_V1=1
 
-        n_devices_per_node=${NDEVICES_PER_NODE:-${NPUS_PER_NODE:-${NGPUS_PER_NODE:-8}}}
         train_batch_size=${TRAIN_BATCH_SIZE:-256}
         ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE:-64}
         sp_size=${SP_SIZE:-4}
         rollout_tp=${ROLLOUT_TP:-4}
         rollout_gpu_mem_util=${ROLLOUT_GPU_MEM_UTIL:-0.7}
-        save_freq=${SAVE_FREQ:-100}
-        test_freq=${TEST_FREQ:--1}
         ;;
     *)
         echo "Unsupported DEVICE=${DEVICE}. Expected 'gpu' or 'npu'." >&2

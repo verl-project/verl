@@ -48,10 +48,11 @@ TOTAL_EPOCHS=${TOTAL_EPOCHS:-15}
 ########################### end user-adjustable ###########################
 
 ########################### derived defaults ###########################
+n_devices_per_node=${NDEVICES_PER_NODE:-8}
+
 case "${DEVICE}" in
     gpu)
         nnodes=${NNODES:-1}
-        n_devices_per_node=${NDEVICES_PER_NODE:-${NGPUS_PER_NODE:-8}}
         fsdp_size=${FSDP_SIZE:-8}
         rollout_tp=${ROLLOUT_TP:-4}
         rollout_gpu_mem_util=${ROLLOUT_GPU_MEM_UTIL:-0.6}
@@ -63,8 +64,7 @@ case "${DEVICE}" in
         export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
 
         nnodes=${NNODES:-2}
-        n_devices_per_node=${NDEVICES_PER_NODE:-${NPUS_PER_NODE:-16}}
-        fsdp_size=${FSDP_SIZE:-32}
+        fsdp_size=${FSDP_SIZE:-16}
         rollout_tp=${ROLLOUT_TP:-8}
         rollout_gpu_mem_util=${ROLLOUT_GPU_MEM_UTIL:-0.8}
         ;;

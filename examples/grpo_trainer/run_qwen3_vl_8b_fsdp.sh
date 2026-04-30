@@ -38,9 +38,10 @@ TEST_FILE=${TEST_FILE:-$HOME/data/geo3k/test.parquet}
 ########################### end user-adjustable ###########################
 
 ########################### derived defaults ###########################
+n_devices_per_node=${NDEVICES_PER_NODE:-8}
+
 case "${DEVICE}" in
     gpu)
-        n_devices_per_node=${NDEVICES_PER_NODE:-${NGPUS_PER_NODE:-8}}
         rollout_gpu_mem_util=${ROLLOUT_GPU_MEM_UTIL:-0.6}
         ;;
     npu)
@@ -49,7 +50,6 @@ case "${DEVICE}" in
         export HCCL_NPU_SOCKET_PORT_RANGE=61000-61050
         export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
 
-        n_devices_per_node=${NDEVICES_PER_NODE:-${NPUS_PER_NODE:-8}}
         rollout_gpu_mem_util=${ROLLOUT_GPU_MEM_UTIL:-0.5}
         ;;
     *)
