@@ -26,6 +26,7 @@ from ray.util.placement_group import PlacementGroup
 from verl.single_controller.ray import SubRayResourcePool
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.net_utils import is_valid_ipv6_address
+from verl.utils.profiler import DistProfiler
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
 from verl.workers.rollout.utils import get_max_position_embeddings, qwen2_5_vl_dedup_image_tokens, run_uvicorn
@@ -34,7 +35,6 @@ logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
 
 
-# TODO: refactor
 def _resolve_chat_stop_tokens(model_config) -> tuple[int, list[int]]:
     """Return (end_id, stop_token_ids) for TorchSampler.
 
@@ -126,6 +126,11 @@ class TRTLLMHttpServer:
         self.bundle_indices = bundle_indices
         # model weights version, set by ServerAdapter when update weights.
         self.global_steps = None
+        # Set when generation is allowed; cleared during weight sync to block new requests.
+        self._generation_allowed = asyncio.Event()
+        self._generation_allowed.set()
+
+        self.profiler_controller = self._init_profiler_controller()
 
         if self.rollout_mode != RolloutMode.HYBRID and self.config.load_format == "dummy":
             logger.warning(f"rollout mode is {self.rollout_mode}, load_format is dummy, set to auto")
@@ -144,13 +149,18 @@ class TRTLLMHttpServer:
         _end_id, _stop_ids = _resolve_chat_stop_tokens(self.model_config)
 
         self.sampling_args = {
-            "detokenize": True,
-            "end_id": _end_id,
-            "stop_token_ids": _stop_ids,
-            # "end_id": self.model_config.hf_config.eos_token_id,
-            # "stop_token_ids": None,
+            # TRTLLMSampler
+            "detokenize": False,
+            "end_id": -1,
             "pad_id": self.model_config.hf_config.pad_token_id,
+            "stop_token_ids": [self.model_config.hf_config.eos_token_id],
             "include_stop_str_in_output": True,
+            # TorchSampler
+            # "detokenize": True,
+            # "end_id": _end_id,
+            # "stop_token_ids": _stop_ids,
+            # "pad_id": self.model_config.hf_config.pad_token_id,
+            # "include_stop_str_in_output": True,
         }
 
     def get_server_address(self):
@@ -228,7 +238,8 @@ class TRTLLMHttpServer:
             if self.config.enable_sleep_mode and SleepConfig is not None
             else None,
             "allreduce_strategy": "NCCL",
-            "sampler_type": "TorchSampler",
+            "sampler_type": "TRTLLMSampler",
+            # "sampler_type": "TorchSampler",
             **engine_kwargs,
         }
 
@@ -305,46 +316,37 @@ class TRTLLMHttpServer:
         )
         max_tokens = max(0, min(max_tokens, self.config.max_model_len - len(prompt_ids)))
         sampling_params["max_tokens"] = max_tokens
-        sampling_params["logprobs"] = (
-            1 if sampling_params.pop("logprobs", False) else None
-        )  # TorchSampler: 1=sampled-token logprob
+        sampling_params["logprobs"] = 1 if sampling_params.pop("logprobs", False) else None  # TRTLLMSampler
+        # TorchSampler uses same value (1=sampled-token logprob)
+        # sampling_params["logprobs"] = 0 if sampling_params.pop("logprobs", False) else None
         if sampling_params["top_k"] == -1:
             sampling_params["top_k"] = 0
         sampling_params.update(self.sampling_args)
 
         trt_llm_sampling_params = SamplingParams(**sampling_params)
-        try:
-            if self.is_vlm_model and (image_data or video_data):
-                deduped_ids = qwen2_5_vl_dedup_image_tokens(prompt_ids, self.model_config.processor)
-                org_prompt = self.llm.tokenizer.decode(deduped_ids)
-                input_dict = {
-                    "prompt": org_prompt,
-                    "multi_modal_data": {},
-                    "mm_processor_kwargs": {},
-                }
-                if image_data:
-                    input_dict["multi_modal_data"]["image"] = image_data
-                if video_data:
-                    input_dict["multi_modal_data"]["video"] = video_data
+        await self._generation_allowed.wait()
+        if self.is_vlm_model and (image_data or video_data):
+            deduped_ids = qwen2_5_vl_dedup_image_tokens(prompt_ids, self.model_config.processor)
+            org_prompt = self.llm.tokenizer.decode(deduped_ids)
+            input_dict = {
+                "prompt": org_prompt,
+                "multi_modal_data": {},
+                "mm_processor_kwargs": {},
+            }
+            if image_data:
+                input_dict["multi_modal_data"]["image"] = image_data
+            if video_data:
+                input_dict["multi_modal_data"]["video"] = video_data
 
-                outputs = await self.llm.generate_async(
-                    inputs=input_dict,
-                    sampling_params=trt_llm_sampling_params,
-                )
-            else:
-                outputs = await self.llm.generate_async(
-                    inputs=prompt_ids,
-                    sampling_params=trt_llm_sampling_params,
-                )
-        except RuntimeError as e:
-            if "AsyncLLM is paused" in str(e):
-                await asyncio.sleep(0.1)
-                return TokenOutput(
-                    token_ids=[],
-                    stop_reason="aborted",
-                    extra_fields={"global_steps": self.global_steps},
-                )
-            raise
+            outputs = await self.llm.generate_async(
+                inputs=input_dict,
+                sampling_params=trt_llm_sampling_params,
+            )
+        else:
+            outputs = await self.llm.generate_async(
+                inputs=prompt_ids,
+                sampling_params=trt_llm_sampling_params,
+            )
         token_ids = outputs.outputs[0].token_ids
         log_probs = None
         if outputs.outputs[0].logprobs is not None:
@@ -357,13 +359,13 @@ class TRTLLMHttpServer:
             # Expected: n_tokens == n_logprobs (or n_logprobs <= n_tokens if cancelled mid-step).
             # If n_logprobs == 0 when n_tokens > 0, the fix is ineffective and the
             # response_mask workaround in detach_utils.py must be restored instead.
-            n_tokens = len(token_ids)
-            n_logprobs = len(log_probs) if log_probs is not None else 0
-            print(
-                f"[trtllm_partial_rollout] cancelled: n_tokens={n_tokens} n_logprobs={n_logprobs} "
-                f"logprobs_present={log_probs is not None} "
-                f"first3_lp={log_probs[:3] if log_probs else None}"
-            )
+            # n_tokens = len(token_ids)
+            # n_logprobs = len(log_probs) if log_probs is not None else 0
+            # print(
+            #     f"[trtllm_partial_rollout] cancelled: n_tokens={n_tokens} n_logprobs={n_logprobs} "
+            #     f"logprobs_present={log_probs is not None} "
+            #     f"first3_lp={log_probs[:3] if log_probs else None}"
+            # )
             return TokenOutput(
                 token_ids=token_ids,
                 log_probs=log_probs,
@@ -378,11 +380,15 @@ class TRTLLMHttpServer:
 
     async def abort_all_requests(self):
         """Abort all in-flight requests and block new ones. Call resume_generation() to unblock."""
+        self._generation_allowed.clear()
         await self.llm.pause_generation()
+        if self.config.enable_prefix_caching:
+            await self.llm.collective_rpc("reset_prefix_cache")
 
     async def resume_generation(self):
         """Unblock new generation requests after abort_all_requests()."""
         await self.llm.resume_generation()
+        self._generation_allowed.set()
 
     async def clear_kv_cache(self):
         """Invalidate prefix cache entries after weight update."""
@@ -418,6 +424,31 @@ class TRTLLMHttpServer:
             "report_device_id",
             unique_reply_rank=0,
         )
+
+    async def start_profile(self, **kwargs):
+        if self.profiler_controller.check_enable() and self.profiler_controller.check_this_rank():
+            await self.llm.collective_rpc("start_profile")
+
+    async def stop_profile(self):
+        if self.profiler_controller.check_enable() and self.profiler_controller.check_this_rank():
+            await self.llm.collective_rpc("stop_profile")
+
+    def _init_profiler_controller(self) -> DistProfiler:
+        profiler_config = self.config.profiler
+        tool_config = None
+        if profiler_config is not None:
+            if profiler_config.tool in ["torch", "npu"]:
+                tool_config = omega_conf_to_dataclass((profiler_config.tool_config or {}).get(profiler_config.tool))
+            elif profiler_config.tool == "nsys":
+                # nsys config lives in global_tool_config, not tool_config
+                from verl.utils.profiler.config import NsightToolConfig
+
+                raw = (profiler_config.global_tool_config or {}).get("nsys")
+                tool_config = omega_conf_to_dataclass(raw) if raw is not None else NsightToolConfig()
+            elif profiler_config.tool is not None:
+                logger.warning(f"trtllm rollout: unsupported profiler tool '{profiler_config.tool}', disabling")
+                profiler_config = None
+        return DistProfiler(self.replica_rank, config=profiler_config, tool_config=tool_config)
 
 
 class TRTLLMReplica(RolloutReplica):
@@ -532,12 +563,21 @@ class TRTLLMReplica(RolloutReplica):
             if not self.is_reward_model
             else f"trtllm_server_reward_{self.replica_rank}{self.name_suffix}"
         )
+        _server_env_vars = {"RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1"}
+        # Propagate profiling env vars to the Ray actor so that RayExecutor
+        # (instantiated inside TRTLLMHttpServer) picks them up for inner workers.
+        for _prof_var in (
+            "TLLM_ENABLE_NSYS",
+            "TLLM_NSYS_OUTPUT_DIR",
+        ):
+            if _val := os.environ.get(_prof_var):
+                _server_env_vars[_prof_var] = _val
         server = TRTLLMHttpServer.options(
             scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                 node_id=node_id,
                 soft=False,
             ),
-            runtime_env={"env_vars": {"RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1"}},
+            runtime_env={"env_vars": _server_env_vars},
             name=name,
             max_concurrency=self.max_concurrency,
         ).remote(

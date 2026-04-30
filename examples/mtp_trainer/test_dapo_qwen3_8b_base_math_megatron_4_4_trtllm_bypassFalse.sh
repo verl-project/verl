@@ -4,7 +4,7 @@
 set -xeuo pipefail
 
 project_name='DAPO_fully_async_erinh'
-exp_name='DAPO-qwen3-8b-base-rl-megatron-trtllm-n2-bypassFalse-bwt-torchsampler'
+exp_name='DAPO-qwen3-8b-base-rl-megatron-trtllm-n2-bypassFalse'
 
 adv_estimator=grpo
 
@@ -33,6 +33,7 @@ MODEL_PATH=${MODEL_PATH:-"/lustre/fsw/coreai_comparch_trtllm/erinh/llm-models/Qw
 CKPTS_DIR=${CKPTS_DIR:-"${RAY_DATA_HOME}/ckpts/${project_name}/${exp_name}"}
 TRAIN_FILE=${TRAIN_FILE:-"${RAY_DATA_HOME}/data/DAPO-Math-17k/data/dapo-math-17k.parquet"}
 TEST_FILE=${TEST_FILE:-"${RAY_DATA_HOME}/data/AIME-2024/data/aime-2024.parquet"}
+# To run nsys profiling, set TLLM_NSYS_OUTPUT_DIR to a directory.
 
 # Algorithm
 temperature=1.0
@@ -60,7 +61,7 @@ train_prompt_mini_bsz=32
 fully_async=(
   data.train_batch_size=0
   data.gen_batch_size=1
-  trainer.test_freq=10
+  trainer.test_freq=-1
   actor_rollout_ref.hybrid_engine=False
   actor_rollout_ref.rollout.calculate_log_probs=True
   actor_rollout_ref.actor.optim.lr_decay_steps=51200
@@ -112,10 +113,12 @@ python -m verl.experimental.fully_async_policy.fully_async_main \
     actor_rollout_ref.actor.entropy_coeff=0 \
     actor_rollout_ref.actor.optim.clip_grad=1.0 \
     actor_rollout_ref.actor.loss_agg_mode=${loss_agg_mode} \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.80 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.7 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
     actor_rollout_ref.rollout.max_model_len=32768 \
-    actor_rollout_ref.rollout.max_num_batched_tokens=$((max_prompt_length + max_response_length)) \
+    actor_rollout_ref.rollout.max_num_batched_tokens=32768 \
+    actor_rollout_ref.rollout.max_num_seqs=2048 \
+    actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=8192 \
     actor_rollout_ref.rollout.temperature=${temperature} \
     actor_rollout_ref.rollout.top_p=${top_p} \
     actor_rollout_ref.rollout.top_k=${top_k} \
@@ -123,7 +126,7 @@ python -m verl.experimental.fully_async_policy.fully_async_main \
     actor_rollout_ref.rollout.val_kwargs.top_p=${val_top_p} \
     actor_rollout_ref.rollout.val_kwargs.top_k=${top_k} \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
-    actor_rollout_ref.rollout.val_kwargs.n=1 \
+    actor_rollout_ref.rollout.val_kwargs.n=4 \
     actor_rollout_ref.rollout.name=trtllm \
     actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=${train_pp} \
     actor_rollout_ref.ref.megatron.tensor_model_parallel_size=${train_tp} \
@@ -149,7 +152,5 @@ python -m verl.experimental.fully_async_policy.fully_async_main \
     trainer.total_epochs=10 \
     algorithm.rollout_correction.bypass_mode=False \
     algorithm.rollout_correction.rollout_is=token \
-    +actor_rollout_ref.rollout.engine_kwargs.trtllm.batch_wait_timeout_iters=32 \
-    +actor_rollout_ref.rollout.engine_kwargs.trtllm.batch_wait_max_tokens_ratio=0.5 \
     "${fully_async[@]}" \
     "$@"
