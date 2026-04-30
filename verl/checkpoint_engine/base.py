@@ -24,6 +24,7 @@ from verl.single_controller.base.decorator import Dispatch, register
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.utils.distributed import initialize_global_process_group_ray
 from verl.utils.import_utils import import_external_libs
+from verl.utils.profiler import simple_timer
 from verl.utils.ray_utils import auto_await
 from verl.workers.config import CheckpointEngineConfig, HFModelConfig, RolloutConfig
 from verl.workers.rollout import BaseRollout, RolloutReplica, get_rollout_class
@@ -407,21 +408,30 @@ class CheckpointEngineManager:
         self.replicas = [r for r in self.replicas if r not in replicas_set]
 
     @auto_await
-    async def sleep_replicas(self):
+    async def sleep_replicas(self, timing_raw: dict[str, float] | None = None):
         """Sleep all rollout replicas: free weight and kv_cache device memory."""
-        await asyncio.gather(*[r.sleep() for r in self.replicas])
+        if timing_raw is None:
+            await asyncio.gather(*[r.sleep() for r in self.replicas])
+        else:
+            with simple_timer("checkpoint_manager/sleep_replicas", timing_raw):
+                await asyncio.gather(*[r.sleep() for r in self.replicas])
 
     @auto_await
-    async def wake_up_replicas(self):
+    async def wake_up_replicas(self, timing_raw: dict[str, float] | None = None):
         """Resume all rollout replicas: recover kv_cache and weights device memory."""
-        await asyncio.gather(*[r.wake_up() for r in self.replicas])
+        if timing_raw is None:
+            await asyncio.gather(*[r.wake_up() for r in self.replicas])
+        else:
+            with simple_timer("checkpoint_manager/wake_up_replicas", timing_raw):
+                await asyncio.gather(*[r.wake_up() for r in self.replicas])
 
     @auto_await
-    async def update_weights(self, global_steps: int = None):
+    async def update_weights(self, global_steps: int = None, timing_raw: dict[str, float] | None = None):
         """Update weights from trainer to rollout replicas.
 
         Args:
             global_steps: The global steps of the trainer.
+            timing_raw: Optional timing dictionary for rollout sleep/wake metrics.
         """
 
         # 0. update weights for sync training with colocated trainer and rollout
@@ -440,7 +450,7 @@ class CheckpointEngineManager:
         trainer = self.trainer
 
         # 3. sleep replicas to free kv_cache before weight sync (if free_cache_engine is enabled)
-        await self.sleep_replicas()
+        await self.sleep_replicas(timing_raw)
 
         # 4. build process group
         self.build_process_group(rollout)
@@ -455,7 +465,7 @@ class CheckpointEngineManager:
         )
 
         # 7. resume replicas to recover kv_cache (for free_cache_engine scenarios)
-        await self.wake_up_replicas()
+        await self.wake_up_replicas(timing_raw)
 
         # 8. resume all unfinished requests for partial rollout
         await asyncio.gather(*[r.resume_generation() for r in self.replicas])
