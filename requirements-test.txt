@@ -3,4 +3,3 @@ pre-commit
 py-spy
 pytest-asyncio
 pytest-rerunfailures
-pyext
