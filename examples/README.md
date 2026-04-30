@@ -25,11 +25,12 @@ All run scripts follow the same shape:
 
    Nothing follows `<train-backend>`. Per-example *features* — including
    the inference backend (`vllm`/`sglang`/`trtllm`), the platform
-   (`npu`/`amd` vs CUDA), the GPU machine type (`gb200`/`b200`/`blackwell`,
-   selected with `MACHINE=`), Liger kernel, LoRA, FP8 quantization,
-   sequence parallel size, server vs sync rollout, etc. — do **not** show
-   up in filenames. They are exposed as env-var toggles inside the one
-   canonical script. For example, `sft/gsm8k/run_qwen2_5_0_5b_fsdp.sh`
+   (`DEVICE=gpu|npu`), the GPU machine type (`MACHINE=gb200`/`b200`/
+   `blackwell`), Liger kernel, LoRA, FP8 quantization, sequence parallel
+   size, server vs sync rollout, etc. — do **not** show up in filenames.
+   They are exposed as env-var toggles inside the one canonical script.
+   Do not add `_npu`, `_amd`, `_vllm`, `_sglang`, `_trtllm`, or `_fp8`
+   script variants. For example, `sft/gsm8k/run_qwen2_5_0_5b_fsdp.sh`
    covers plain SFT and its `USE_LIGER=1`, `SP_SIZE=2`, `USE_PEFT=1`
    variants via env vars; `grpo_trainer/run_qwen3_8b_fsdp.sh` covers vLLM,
    SGLang, and TRT-LLM rollouts, CUDA/NPU platforms, and `MACHINE=gb200`
@@ -38,23 +39,36 @@ All run scripts follow the same shape:
    This naming rule is enforced by the `check-example-naming` pre-commit
    hook (see `tests/special_sanity/check_example_naming.py`).
 
-2. Every script exposes its important knobs as env vars at the top, e.g.
+2. Every script exposes its important knobs in a user-adjustable region near
+   the top. Derived defaults and device/backend-specific details belong below
+   the "no user adjustment needed below" / "derived defaults" boundary.
+   Use uppercase env vars for user-facing knobs, e.g.
 
    ```bash
+   # ---- user-adjustable ----
+   DEVICE=${DEVICE:-gpu}
+   INFER_BACKEND=${INFER_BACKEND:-vllm}
    MODEL_PATH=${MODEL_PATH:-Qwen/Qwen3-8B}
    NNODES=${NNODES:-1}
-   NGPUS_PER_NODE=${NGPUS_PER_NODE:-8}
+   NDEVICES_PER_NODE=${NDEVICES_PER_NODE:-}
    TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-1024}
    ROLLOUT_TP=${ROLLOUT_TP:-2}
    ROLLOUT_N=${ROLLOUT_N:-5}
+   PROJECT_NAME=${PROJECT_NAME:-verl_grpo_gsm8k_math}
+   EXPERIMENT_NAME=${EXPERIMENT_NAME:-qwen3_8b_grpo_vllm_fsdp}
+   # ---- end user-adjustable ----
    ...
    ```
 
    Override anything you care about on the command line:
 
    ```bash
-   MODEL_PATH=/my/local/qwen3-8b NGPUS_PER_NODE=4 bash examples/grpo_trainer/run_qwen3_8b_fsdp.sh
+   DEVICE=npu MODEL_PATH=/my/local/qwen3-8b NDEVICES_PER_NODE=4 bash examples/grpo_trainer/run_qwen3_8b_fsdp.sh
    ```
+
+   GPU and NPU paths should share the same `PROJECT_NAME` /
+   `EXPERIMENT_NAME` form. Do not append `_npu` to project or experiment
+   names just because `DEVICE=npu` is selected.
 
 3. Defaults (unless a directory explicitly documents otherwise):
 
@@ -68,6 +82,10 @@ All run scripts follow the same shape:
 4. No deprecated Hydra knobs:
 
    - `ppo_megatron_trainer.yaml` → use `actor_rollout_ref.actor.model_engine=megatron`.
+   - `actor_rollout_ref.rollout.mode=async` → removed; async rollout is no
+     longer selected this way in example scripts.
+   - `actor_rollout_ref.hybrid_engine=True` → removed; the trainer now
+     enforces the supported hybrid-engine path internally.
    - `ppo_micro_batch_size` / `log_prob_micro_batch_size` → use the
      `_per_gpu` suffix.
    - `data.val_batch_size` → removed.
