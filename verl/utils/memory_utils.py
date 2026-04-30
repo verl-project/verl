@@ -22,7 +22,7 @@ from pathlib import Path
 
 import torch
 
-from verl.utils.device import get_torch_device, is_cuda_available
+from verl.utils.device import get_torch_device
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -152,9 +152,9 @@ def enable_memory_visualize(
     record_context: bool = True,
 ):
     """
-    Enables memory history recording for CUDA allocations. This function
-    should be called before any large-scale CUDA allocations. For DDP or
-    multi-process setups, it must be called on each rank.
+    Enables memory history recording for accelerator (CUDA/NPU) allocations.
+    This function should be called before any large-scale allocations. For DDP
+    or multi-process setups, it must be called on each rank.
 
     Args:
         trace_alloc_max_entries (int): Maximum number of allocation entries
@@ -174,12 +174,13 @@ def enable_memory_visualize(
         record_context (bool): Whether to record context information for
             allocations. Required by older PyTorch versions.
     """
-    # Memory history recording is CUDA-specific functionality
-    if not is_cuda_available:
-        logger.warning("[memory_visualize] Memory history recording is only available on CUDA devices")
+    # Memory history recording is accelerator-specific functionality
+    device = get_torch_device()
+    if not device.is_available():
+        logger.warning("[memory_visualize] Memory history recording is only available on accelerator devices")
         return
 
-    f = get_torch_device().memory._record_memory_history
+    f = device.memory._record_memory_history
     params = set(inspect.signature(f).parameters.keys())
 
     def _one_call(dev_kw=None):
