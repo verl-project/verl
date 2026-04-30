@@ -104,11 +104,12 @@ def _detect_platform_name() -> str:
         except Exception:
             continue
 
-    # 3. No accelerator found
-    raise RuntimeError(
-        f"No supported accelerator detected. Registered platforms: {registered}. "
-        "Set VERL_PLATFORM to override, or register a new platform via @PlatformRegistry.register()."
+    # 3. No accelerator found – fall back to CPU with a warning
+    logger.warning(
+        "No supported accelerator detected. Registered platforms: %s. Falling back to 'cuda' (CPU-only mode).",
+        registered,
     )
+    return "cuda"
 
 
 def _create_platform(name: str) -> PlatformBase:
@@ -121,7 +122,7 @@ def _create_platform(name: str) -> PlatformBase:
         )
     platform = platform_cls()
     if not platform.is_available():
-        raise RuntimeError(f"Platform '{name}' ({platform_cls.__name__}) is registered but not available.")
+        logger.warning("Platform '%s' (%s) is registered but not available.", name, platform_cls.__name__)
     return platform
 
 

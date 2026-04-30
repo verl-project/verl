@@ -100,6 +100,7 @@ def test_group_mean_std_default_device_no_force_env(monkeypatch):
 
     monkeypatch.setattr(device_mod, "is_cuda_available", False)
     monkeypatch.setattr(device_mod, "is_npu_available", False)
+    monkeypatch.setattr(device_mod, "get_device_name", lambda: "cpu")
 
     scores = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float32)
     gidx = torch.tensor([0, 1, 0], dtype=torch.long)
