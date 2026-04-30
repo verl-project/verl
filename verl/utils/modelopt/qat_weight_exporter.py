@@ -21,12 +21,15 @@ from typing import Any, Iterator, Optional
 
 import torch
 from modelopt.torch.export.quant_utils import (
+    QUANTIZATION_FP8_PB_REAL,
+    QUANTIZATION_FP8_PB_WO,
     QUANTIZATION_NONE,
     QUANTIZATION_NVFP4,
     get_quantization_format,
     get_weight_block_size,
     to_quantized_weight,
 )
+from modelopt.torch.quantization.qtensor.fp8_tensor import FP8QTensor
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
 
 from verl.utils.megatron_utils import unwrap_model
@@ -41,13 +44,14 @@ class _QuantMeta:
 
     qformat: str
     block_size: int
+    block_sizes: Optional[dict[int, int]]
     weight_amax: Optional[torch.Tensor]
     input_amax: Optional[torch.Tensor] = None
     input_quantizer: Any = None
 
 
 class QATWeightExporter:
-    """Export QAT-trained bf16 weights as quantized weights (e.g. NVFP4)."""
+    """Export QAT-trained weights in the format expected by rollout workers."""
 
     def __init__(
         self,
@@ -96,8 +100,12 @@ class QATWeightExporter:
             if meta is None:
                 yield (hf_name, weight)
             else:
-                assert meta.qformat == QUANTIZATION_NVFP4, f"Unsupported qformat: {meta.qformat}"
-                yield from self._quantize_nvfp4(hf_name, weight, meta)
+                if meta.qformat == QUANTIZATION_NVFP4:
+                    yield from self._quantize_nvfp4(hf_name, weight, meta)
+                elif meta.qformat in {QUANTIZATION_FP8_PB_REAL, QUANTIZATION_FP8_PB_WO}:
+                    yield from self._quantize_fp8_blockwise(hf_name, weight, meta)
+                else:
+                    raise AssertionError(f"Unsupported qformat: {meta.qformat}")
 
     @staticmethod
     def _get_mapping_registry(bridge):
@@ -134,10 +142,12 @@ class QATWeightExporter:
                 i_q = getattr(submodule, "input_quantizer", None)
                 w_amax = w_q._amax.clone().cpu() if w_q and getattr(w_q, "_amax", None) is not None else None
                 i_amax = i_q._amax.clone().cpu() if i_q and getattr(i_q, "_amax", None) is not None else None
+                block_sizes = dict(w_q.block_sizes) if w_q and getattr(w_q, "block_sizes", None) else None
 
                 meta = _QuantMeta(
                     qformat=qformat,
                     block_size=block_size,
+                    block_sizes=block_sizes,
                     weight_amax=w_amax,
                     input_amax=i_amax,
                     input_quantizer=i_q,
@@ -178,6 +188,7 @@ class QATWeightExporter:
             name: {
                 "qformat": m.qformat,
                 "block_size": m.block_size,
+                "block_sizes": m.block_sizes,
                 "weight_amax": m.weight_amax,
                 "input_amax": m.input_amax,
             }
@@ -196,6 +207,7 @@ class QATWeightExporter:
                 self._metadata[name] = _QuantMeta(
                     qformat=info["qformat"],
                     block_size=info["block_size"],
+                    block_sizes=info["block_sizes"],
                     weight_amax=info["weight_amax"],
                     input_amax=info["input_amax"],
                     input_quantizer=None,
@@ -245,6 +257,30 @@ class QATWeightExporter:
         if input_scale is not None:
             yield (_derive_scale_name(name, "input_scale"), input_scale)
 
+    def _quantize_fp8_blockwise(
+        self,
+        name: str,
+        weight: torch.Tensor,
+        meta: _QuantMeta,
+    ) -> Iterator[tuple[str, torch.Tensor]]:
+        """Export FP8 QAT weights for vLLM rollout.
+
+        W8A8 rollout consumes serialized FP8 blockwise weights and scales.
+        W8A16 rollout stays BF16 and consumes the dequantized fake-quant weight
+        so rollout matches the actor-side QAT numerics without FP8 activation
+        quantization.
+        """
+        if meta.block_sizes is None:
+            raise ValueError(f"FP8 blockwise export requires block_sizes for {name}")
+
+        quantized, scale = FP8QTensor.quantize(weight, block_sizes=meta.block_sizes)
+        if str(getattr(self, "qat_mode", "")).lower() == "w8a16":
+            yield (name, _dequantize_fp8_blockwise(quantized._quantized_data, scale, meta.block_sizes, weight.dtype))
+            return
+
+        yield (name, quantized._quantized_data)
+        yield (_derive_scale_name(name, "weight_scale_inv"), scale)
+
 
 def _iter_hf_to_megatron_matches(registry, hf_name: str):
     """Yield all resolved mappings whose HF pattern matches *hf_name*."""
@@ -273,6 +309,23 @@ def _iter_hf_to_megatron_matches(registry, hf_name: str):
 def _derive_scale_name(weight_name: str, suffix: str) -> str:
     result = weight_name.replace(".weight", f".{suffix}")
     return result if result != weight_name else f"{weight_name}_{suffix}"
+
+
+def _dequantize_fp8_blockwise(
+    quantized_weight: torch.Tensor,
+    scale: torch.Tensor,
+    block_sizes: dict[int, int],
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    block_m = int(block_sizes[-2])
+    block_n = int(block_sizes[-1])
+    if scale.dim() == 3 and scale.shape[-1] == 1:
+        scale = scale.squeeze(-1)
+
+    expanded_scale = scale.to(device=quantized_weight.device, dtype=torch.float32)
+    expanded_scale = expanded_scale.repeat_interleave(block_m, dim=0).repeat_interleave(block_n, dim=1)
+    expanded_scale = expanded_scale[: quantized_weight.shape[0], : quantized_weight.shape[1]]
+    return (quantized_weight.to(torch.float32) * expanded_scale).to(dtype)
 
 
 def _compute_input_scale(meta: _QuantMeta) -> Optional[torch.Tensor]:

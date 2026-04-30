@@ -12,9 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""QAT FakeQuantized Linear module for NVFP4 (W4A4/W4A16) with FSDP compatibility.
+"""QAT FakeQuantized Linear module for NVFP4 and FP8 with FSDP compatibility.
 
-Includes Triton kernels for high-performance FP4 quantization.
+Includes Triton kernels for high-performance FP4 and FP8 quantization.
 """
 
 from enum import Enum
@@ -30,6 +30,8 @@ __all__ = ["QATLinear", "QATMode"]
 import triton
 import triton.language as tl
 
+from verl.utils.kernel.fp8_kernel import scaled_fp8_blockwise
+
 _TORCH_TO_TL_DTYPE = {
     torch.float32: tl.float32,
     torch.float16: tl.float16,
@@ -37,6 +39,7 @@ _TORCH_TO_TL_DTYPE = {
 }
 FP4_E2M1_MAX: float = 6.0
 FP8_E4M3_MAX: float = 448.0
+DEFAULT_FP8_WEIGHT_BLOCK_SIZE: tuple[int, int] = (128, 128)
 
 
 @triton.jit
@@ -185,11 +188,52 @@ class STEFP4QuantTriton(torch.autograd.Function):
         return grad_output, None, None
 
 
+def _dequantize_blockwise_fp8(
+    q: torch.Tensor,
+    descale: torch.Tensor,
+    block_size: tuple[int, int],
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Dequantize blockwise FP8 output from ``scaled_fp8_blockwise``."""
+    block_m, block_n = block_size
+    descale = descale.squeeze(-1)
+    descale = descale.to(torch.float32).repeat_interleave(block_m, dim=0).repeat_interleave(block_n, dim=1)
+    descale = descale[: q.shape[0], : q.shape[1]]
+    return (q.to(torch.float32) * descale).to(dtype)
+
+
+def fp8_fake_quant_blockwise(
+    x: torch.Tensor,
+    block_size: tuple[int, int],
+) -> torch.Tensor:
+    """Apply blockwise FP8 fake quantization and dequantize to the original dtype.
+
+    ``scaled_fp8_blockwise`` dispatches to Triton for CUDA tensors and uses its
+    PyTorch fallback otherwise.
+    """
+    q, descale = scaled_fp8_blockwise(x, weight_block_size=block_size)
+    return _dequantize_blockwise_fp8(q, descale, block_size, x.dtype)
+
+
+class STEFP8Quant(torch.autograd.Function):
+    """Straight-Through Estimator wrapper for FP8 blockwise fake quantization."""
+
+    @staticmethod
+    def forward(ctx, x: torch.Tensor, block_m: int, block_n: int) -> torch.Tensor:
+        return fp8_fake_quant_blockwise(x, (block_m, block_n))
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor) -> tuple:
+        return grad_output, None, None
+
+
 class QATMode(str, Enum):
     """QAT quantization mode."""
 
     W4A4 = "w4a4"  # Weight 4-bit, Activation 4-bit (dynamic)
     W4A16 = "w4a16"  # Weight 4-bit, Activation 16-bit (weight only)
+    W8A8 = "w8a8"  # Weight 8-bit FP8, Activation 8-bit FP8 (dynamic)
+    W8A16 = "w8a16"  # Weight 8-bit FP8, Activation 16-bit (weight only)
 
 
 class QATLinear(nn.Linear):
@@ -204,6 +248,7 @@ class QATLinear(nn.Linear):
         bias: bool = True,
         mode: QATMode = QATMode.W4A4,
         group_size: int = 16,
+        weight_block_size: Optional[list[int] | tuple[int, int]] = None,
         activation_observer: str = "static_minmax",  # Observer strategy for activation global_scale
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
@@ -212,6 +257,9 @@ class QATLinear(nn.Linear):
 
         self.mode = mode
         self.group_size = group_size
+        self.weight_block_size = (
+            tuple(weight_block_size or DEFAULT_FP8_WEIGHT_BLOCK_SIZE) if self._is_fp8_mode() else None
+        )
         self.activation_observer = activation_observer
 
         self._weight_blockwise_scale: Optional[torch.Tensor] = None
@@ -238,6 +286,7 @@ class QATLinear(nn.Linear):
         linear: nn.Linear,
         mode: QATMode = QATMode.W4A4,
         group_size: int = 16,
+        weight_block_size: Optional[list[int] | tuple[int, int]] = None,
         activation_observer: str = "static_minmax",
     ) -> "QATLinear":
         """Create QATLinear from an existing nn.Linear."""
@@ -249,6 +298,7 @@ class QATLinear(nn.Linear):
             bias=has_bias,
             mode=mode,
             group_size=group_size,
+            weight_block_size=weight_block_size,
             activation_observer=activation_observer,
             device=linear.weight.device,
             dtype=linear.weight.dtype,
@@ -260,6 +310,9 @@ class QATLinear(nn.Linear):
                 new_linear.bias = nn.Parameter(linear.bias.clone())
 
         return new_linear
+
+    def _is_fp8_mode(self) -> bool:
+        return self.mode in {QATMode.W8A8, QATMode.W8A16}
 
     def _is_amax_initialized(self) -> bool:
         """Check if input_amax has been initialized."""
@@ -309,6 +362,10 @@ class QATLinear(nn.Linear):
 
     def _fake_quantize_weight(self, weight: torch.Tensor) -> torch.Tensor:
         """Apply fake quantization to weight tensor using Triton kernel."""
+        if self._is_fp8_mode():
+            block_m, block_n = self.weight_block_size or DEFAULT_FP8_WEIGHT_BLOCK_SIZE
+            return STEFP8Quant.apply(weight, block_m, block_n)
+
         with torch.no_grad():
             if self._cached_weight_amax is not None:
                 global_amax = self._cached_weight_amax
@@ -345,13 +402,18 @@ class QATLinear(nn.Linear):
         return result
 
     def _fake_quantize_activation(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply fake quantization to activation tensor (W4A4 mode only)."""
+        """Apply fake quantization to activation tensor."""
         original_shape = x.shape
 
         if x.dim() == 3:
             x_2d = x.view(-1, x.shape[-1])
         else:
             x_2d = x
+
+        if self.mode == QATMode.W8A8:
+            _, block_n = self.weight_block_size or DEFAULT_FP8_WEIGHT_BLOCK_SIZE
+            result = STEFP8Quant.apply(x_2d, 1, block_n)
+            return result.view(original_shape)
 
         if self.training:
             self._update_input_global_scale(x_2d)
@@ -370,7 +432,7 @@ class QATLinear(nn.Linear):
 
         weight_fq = self._fake_quantize_weight(self.weight)
 
-        if self.mode == QATMode.W4A4:
+        if self.mode in {QATMode.W4A4, QATMode.W8A8}:
             x_fq = self._fake_quantize_activation(x)
         else:
             x_fq = x
@@ -381,5 +443,6 @@ class QATLinear(nn.Linear):
         return (
             f"in_features={self.in_features}, out_features={self.out_features}, "
             f"bias={self.bias is not None}, mode={self.mode.value}, "
-            f"group_size={self.group_size}, fake_quant_enabled={self.fake_quant_enabled}"
+            f"group_size={self.group_size}, weight_block_size={self.weight_block_size}, "
+            f"fake_quant_enabled={self.fake_quant_enabled}"
         )

@@ -19,11 +19,11 @@
 def patch_provider_for_qat(provider):
     """Patch the Megatron-Bridge provider to support QAT quantized layers."""
     from megatron.bridge.models.conversion.param_mapping import AutoMapping
-    from megatron.bridge.models.gpt_provider import quantization_layer_spec
+    from megatron.bridge.models.gpt_provider import modelopt_transformer_layer_spec
 
     from verl.utils.modelopt.megatron_qat_patch import apply_qat_patch
 
-    provider.transformer_layer_spec = quantization_layer_spec
+    provider.transformer_layer_spec = modelopt_transformer_layer_spec
     apply_qat_patch()
     AutoMapping.register_module_type("QuantColumnParallelLinear", "column")
     AutoMapping.register_module_type("QuantRowParallelLinear", "row")
@@ -41,12 +41,18 @@ def apply_qat_to_modules(modules, qat_config):
     from verl.utils.modelopt.quantize import apply_qat
 
     qat_mode = _get_qat_field(qat_config, "mode", "w4a16")
+    weight_block_size = _get_qat_field(qat_config, "weight_block_size", None)
     ignore_patterns = _get_qat_field(qat_config, "ignore_patterns", None)
     if ignore_patterns is not None:
         ignore_patterns = list(ignore_patterns)
 
     for i in range(len(modules)):
-        modules[i] = apply_qat(modules[i], qat_mode, ignore_patterns=ignore_patterns)
+        modules[i] = apply_qat(
+            modules[i],
+            qat_mode,
+            ignore_patterns=ignore_patterns,
+            weight_block_size=weight_block_size,
+        )
     return modules
 
 

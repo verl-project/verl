@@ -734,7 +734,7 @@ class MegatronEngine(BaseEngine):
                 )
 
         # QAT: process weights through QATWeightExporter for quantized weight sync to vLLM
-        if self._qat_enabled:
+        if self._qat_enabled and not adapter_only:
             from verl.utils.modelopt import export_qat_weights
 
             per_tensor_param = export_qat_weights(per_tensor_param, self.module, self._qat_config.mode, self.bridge)

@@ -219,9 +219,8 @@ def scaled_fp8_blockwise_triton(
     if pad_dim0 > 0 or pad_dim1 > 0:
         fp_data = fp_data[: original_shape[0], : original_shape[1]].contiguous()
 
-    # Return scale as descale (the Triton kernel returns scale, we need to return it as-is
-    # since it's already the inverse scale format expected by vLLM/SGLang)
-    return fp_data, scale
+    # Keep the public scale layout consistent with the PyTorch fallback.
+    return fp_data, scale.unsqueeze(-1)
 
 
 def _scaled_fp8_blockwise_pytorch(
@@ -246,7 +245,6 @@ def _scaled_fp8_blockwise_pytorch(
     """
     block_size0 = weight_block_size[0]
     block_size1 = weight_block_size[1]
-    assert block_size0 == block_size1, "Block sizes must be equal"
 
     # Save unpadded shape for later cropping
     original_shape = data_hp.shape
@@ -274,7 +272,7 @@ def _scaled_fp8_blockwise_pytorch(
     data_hp = data_hp.permute(0, 2, 1, 3).contiguous()
 
     # Flatten to (BLK_M, BLK_N, BLOCK_SIZE_M * BLOCK_SIZE_N) in float32 for precision
-    data_hp = data_hp.to(torch.float32).flatten(start_dim=2)
+    data_hp = data_hp.to(dtype=torch.float32, copy=True).flatten(start_dim=2)
 
     # Calculate max absolute value per block - use fused abs+amax
     max_abs = data_hp.abs().amax(dim=-1, keepdim=True)
@@ -334,7 +332,7 @@ def scaled_fp8_blockwise(
     assert len(data_hp.shape) == 2, "Only 2d input tensor is supported"
 
     # Use Triton kernel if available and not disabled
-    if _TRITON_AVAILABLE and not _DISABLE_TRITON_FP8:
+    if _TRITON_AVAILABLE and data_hp.is_cuda and not _DISABLE_TRITON_FP8:
         return scaled_fp8_blockwise_triton(data_hp, weight_block_size)
 
     # PyTorch fallback implementation (memory-optimized)

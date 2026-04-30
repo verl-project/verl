@@ -13,11 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""ModelOpt NVFP4 quantization config and application for Megatron QAT."""
+"""ModelOpt quantization config and application for Megatron QAT."""
+
+import copy
 
 import modelopt.torch.quantization as mtq
 import torch.nn as nn
-from modelopt.torch.quantization.config import _default_disabled_quantizer_cfg
+from modelopt.torch.quantization.config import FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG, _default_disabled_quantizer_cfg
+
+from verl.utils.qat.core import get_fp8_weight_block_size, is_fp8_qat_mode, normalize_qat_mode
 
 _NVFP4_W4A16_QUANTIZER_CFG = {
     "*weight_quantizer": {
@@ -31,7 +35,10 @@ _NVFP4_W4A16_QUANTIZER_CFG = {
 
 
 def _ignore_patterns_to_quant_cfg(ignore_patterns: list[str]) -> dict:
-    cfg = {}
+    cfg = {
+        "*adapter*": {"enable": False},
+        "*lora*": {"enable": False},
+    }
     mapping = {
         "lm_head": "*output_layer*",
         "*mlp.gate": "*router*",
@@ -48,21 +55,35 @@ def _ignore_patterns_to_quant_cfg(ignore_patterns: list[str]) -> dict:
 def build_quantize_config(
     qat_mode: str,
     ignore_patterns: list[str] | None = None,
+    weight_block_size: list[int] | None = None,
 ) -> dict:
     """Build a complete ModelOpt quantization config for ``mtq.quantize``."""
-    if qat_mode != "w4a16":
-        raise ValueError(f"Only 'w4a16' is supported, got: {qat_mode}")
-
     if ignore_patterns is None:
         ignore_patterns = []
 
     ignore_cfg = _ignore_patterns_to_quant_cfg(ignore_patterns)
 
-    quant_cfg = {
-        **_NVFP4_W4A16_QUANTIZER_CFG,
-        **_default_disabled_quantizer_cfg,
-        **ignore_cfg,
-    }
+    qat_mode = normalize_qat_mode(qat_mode)
+    if qat_mode == "w4a16":
+        quant_cfg = {
+            **_NVFP4_W4A16_QUANTIZER_CFG,
+            **_default_disabled_quantizer_cfg,
+            **ignore_cfg,
+        }
+    elif is_fp8_qat_mode(qat_mode):
+        fp8_cfg = copy.deepcopy(FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG["quant_cfg"])
+        fp8_block_m, fp8_block_n = get_fp8_weight_block_size(weight_block_size)
+        fp8_cfg["*weight_quantizer"]["block_sizes"] = {-1: fp8_block_n, -2: fp8_block_m}
+        if qat_mode == "w8a8":
+            fp8_cfg["*input_quantizer"] = {"num_bits": (4, 3), "axis": None, "enable": True}
+        quant_cfg = {
+            **fp8_cfg,
+            **_default_disabled_quantizer_cfg,
+            **ignore_cfg,
+        }
+    else:
+        raise ValueError(f"Unsupported QAT mode for Megatron ModelOpt: {qat_mode}")
+
     return {"quant_cfg": quant_cfg, "algorithm": "max"}
 
 
@@ -70,8 +91,9 @@ def apply_qat(
     model: nn.Module,
     qat_mode: str,
     ignore_patterns: list[str] | None = None,
+    weight_block_size: list[int] | None = None,
 ) -> nn.Module:
     """Apply Quantization-Aware Training to a Megatron model."""
-    config = build_quantize_config(qat_mode, ignore_patterns)
+    config = build_quantize_config(qat_mode, ignore_patterns, weight_block_size)
     mtq.quantize(model, config)
     return model

@@ -85,8 +85,7 @@ def get_module_from_param_name(model, name: str):
         for fused_name, original_names_list in packed_modules_mapping.items()
         for original_name in original_names_list
     }
-    if module_path[-1] in reversed_mapping.keys():
-        module_path[-1] = reversed_mapping[module_path[-1]]
+    module_path = [reversed_mapping.get(part, part) for part in module_path]
 
     current_module = model
     try:
@@ -94,6 +93,11 @@ def get_module_from_param_name(model, name: str):
         for part in module_path:
             if isinstance(current_module, FusedMoE):
                 return current_module
+            base_layer = getattr(current_module, "base_layer", None)
+            if current_module.__class__.__name__ in {"FusedMoEWithLoRA", "FusedMoE3DWithLoRA"} and isinstance(
+                base_layer, FusedMoE
+            ):
+                return base_layer
             elif isinstance(current_module, torch.nn.ModuleList):
                 current_module = current_module[int(part)]
             else:
@@ -331,6 +335,23 @@ def load_quanted_weights(weights, model_runner):
     return loaded_params
 
 
+def load_serialized_fp8_weights(weights, model_runner):
+    """Load already-serialized FP8 weights produced by QAT export."""
+    model = model_runner.model
+
+    swapped_params = []
+    for _, param in model.named_parameters():
+        if hasattr(param, "subclass_type"):
+            swapped_params.append((param, param.__class__))
+            param.__class__ = param.subclass_type
+
+    try:
+        return model.load_weights(weights)
+    finally:
+        for param, orig_type in swapped_params:
+            param.__class__ = orig_type
+
+
 def process_weights_after_loading_for_vllm10(self, layer) -> None:
     """This function is used to process the weights after loading for a Linear layer, it is used for vllm v0.10
 
@@ -457,20 +478,11 @@ def process_weights_after_loading_for_vllm14(self, layer) -> None:
     `subclass_type` attributes so that refit (repeated weight sync) works.
     """
     from torch.nn import Parameter
-    from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-        maybe_post_process_fp8_weight_block,
-        process_fp8_weight_block_strategy,
-    )
-    from vllm.model_executor.parameter import (
-        BlockQuantScaleParameter,
-        ModelWeightParameter,
-    )
 
     assert self.block_quant and self.quant_config.is_checkpoint_fp8_serialized
     assert self.quant_config.activation_scheme == "dynamic"
 
-    def _create_param_from_subclass_attributes(custom_param):
-        param = Parameter(custom_param.data, requires_grad=False)
+    def _copy_param_metadata(param, custom_param):
         base_param_dir = dir(torch.nn.Parameter)
         custom_param_dir = dir(custom_param)
         custom_attributes = [
@@ -480,7 +492,38 @@ def process_weights_after_loading_for_vllm14(self, layer) -> None:
             setattr(param, attr, getattr(custom_param, attr))
 
         param.subclass_type = type(custom_param)
+
+    def _create_param_from_subclass_attributes(custom_param):
+        param = Parameter(custom_param.data, requires_grad=False)
+        _copy_param_metadata(param, custom_param)
         return param
+
+    def _restore_param_metadata(param_name, custom_param):
+        param = getattr(layer, param_name, None)
+        if isinstance(param, torch.nn.Parameter):
+            _copy_param_metadata(param, custom_param)
+
+    # vLLM 0.19 moved block-FP8 post-processing behind the selected linear
+    # kernel and removed maybe_post_process_fp8_weight_block.
+    if hasattr(self, "fp8_linear") and hasattr(self.fp8_linear, "process_weights_after_loading"):
+        weight = layer.weight
+        weight_scale_inv = layer.weight_scale_inv
+        if not hasattr(layer, "input_scale"):
+            layer.input_scale = None
+
+        self.fp8_linear.process_weights_after_loading(layer)
+        _restore_param_metadata("weight", weight)
+        _restore_param_metadata("weight_scale_inv", weight_scale_inv)
+        return
+
+    from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+        maybe_post_process_fp8_weight_block,
+        process_fp8_weight_block_strategy,
+    )
+    from vllm.model_executor.parameter import (
+        BlockQuantScaleParameter,
+        ModelWeightParameter,
+    )
 
     weight, weight_scale_inv = process_fp8_weight_block_strategy(layer.weight, layer.weight_scale_inv)
 

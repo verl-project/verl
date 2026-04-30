@@ -34,22 +34,72 @@ class QATConfig(BaseConfig):
     enable: bool = False
     mode: str = "w4a16"
     group_size: int = 16
+    weight_block_size: Optional[list[int]] = None
     ignore_patterns: list[str] = field(default_factory=lambda: ["lm_head", "embed_tokens", "re:.*mlp.gate$"])
     activation_observer: str = "static_minmax"
     quantization_config_path: Optional[str] = None
 
 
+FP8_QAT_MODES = {"fp8", "w8a8", "w8a16"}
+FP4_QAT_MODES = {"w4a4", "w4a16"}
+DEFAULT_FP8_WEIGHT_BLOCK_SIZE = [128, 128]
+
+
+def normalize_qat_mode(mode: str) -> str:
+    """Normalize user-facing QAT mode aliases."""
+    mode = mode.lower()
+    if mode == "fp8":
+        return "w8a8"
+    return mode
+
+
+def is_fp8_qat_mode(mode: str) -> bool:
+    """Return True when *mode* is an FP8 QAT mode."""
+    return mode.lower() in FP8_QAT_MODES
+
+
+def is_fp4_qat_mode(mode: str) -> bool:
+    """Return True when *mode* is an NVFP4 QAT mode."""
+    return mode.lower() in FP4_QAT_MODES
+
+
+def get_fp8_weight_block_size(weight_block_size: Optional[list[int]] = None) -> list[int]:
+    """Return the 2D FP8 block size used by vLLM blockwise FP8."""
+    if weight_block_size is None:
+        return list(DEFAULT_FP8_WEIGHT_BLOCK_SIZE)
+    if len(weight_block_size) != 2:
+        raise ValueError(f"FP8 weight_block_size must have two entries, got: {weight_block_size}")
+    return [int(weight_block_size[0]), int(weight_block_size[1])]
+
+
+def build_fp8_quantization_config(weight_block_size: Optional[list[int]] = None) -> dict[str, Any]:
+    """Build the vLLM quantization config for FP8 QAT rollout."""
+    return {
+        "activation_scheme": "dynamic",
+        "fmt": "e4m3",
+        "quant_method": "fp8",
+        "weight_block_size": get_fp8_weight_block_size(weight_block_size),
+    }
+
+
 def load_quantization_config(qat_config: QATConfig) -> dict[str, Any]:
     """Load quantization config JSON file from QATConfig."""
     if not qat_config.quantization_config_path:
-        raise ValueError("quantization_config_path is required when QAT is enabled")
+        if is_fp8_qat_mode(qat_config.mode):
+            return build_fp8_quantization_config(qat_config.weight_block_size)
+        raise ValueError("quantization_config_path is required when NVFP4 QAT is enabled")
 
     logger.info(f"Loading QAT quantization config from: {qat_config.quantization_config_path}")
 
     with open(qat_config.quantization_config_path) as f:
         quant_config = json.load(f)
 
-    if qat_config.ignore_patterns:
+    if quant_config.get("quant_method") == "fp8":
+        quant_config["weight_block_size"] = get_fp8_weight_block_size(
+            quant_config.get("weight_block_size") or qat_config.weight_block_size
+        )
+
+    if qat_config.ignore_patterns and quant_config.get("quant_method") in {"compressed-tensors", "modelopt"}:
         original_ignore = quant_config.get("ignore", [])
         quant_config["ignore"] = qat_config.ignore_patterns
         if original_ignore != qat_config.ignore_patterns:
@@ -64,6 +114,9 @@ def _should_quantize(name: str, module: nn.Module, config: QATConfig) -> bool:
     if not isinstance(module, nn.Linear):
         return False
 
+    if "lora_" in name or ".lora_" in name:
+        return False
+
     for pattern in config.ignore_patterns:
         if pattern.startswith("re:"):
             regex = pattern[3:]
@@ -75,7 +128,7 @@ def _should_quantize(name: str, module: nn.Module, config: QATConfig) -> bool:
                 logger.debug(f"Ignoring {name} due to pattern: {pattern}")
                 return False
 
-    if module.in_features % config.group_size != 0:
+    if is_fp4_qat_mode(config.mode) and module.in_features % config.group_size != 0:
         logger.warning(
             f"Skipping {name}: in_features={module.in_features} not divisible by group_size={config.group_size}"
         )
@@ -98,7 +151,7 @@ def apply_qat(
         logger.info("QAT is disabled, returning original model")
         return model
 
-    mode = QATMode(config.mode.lower())
+    mode = QATMode(normalize_qat_mode(config.mode))
     logger.info(f"Applying QAT with mode={mode.value}, group_size={config.group_size}")
 
     modules_to_replace = []
@@ -117,6 +170,7 @@ def apply_qat(
             module,
             mode=mode,
             group_size=config.group_size,
+            weight_block_size=config.weight_block_size,
             activation_observer=config.activation_observer,
         )
 

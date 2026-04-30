@@ -25,7 +25,7 @@ import re
 from typing import Generator, Iterable, Optional
 
 import torch
-from compressed_tensors.compressors.quantized_compressors.fp4_quantized import NVFP4PackedCompressor
+from compressed_tensors.compressors.nvfp4.base import NVFP4PackedCompressor
 from compressed_tensors.quantization.quant_args import (
     FP4_E2M1_DATA,
     FP8_E4M3_DATA,
@@ -36,6 +36,7 @@ from compressed_tensors.quantization.quant_args import (
 from compressed_tensors.quantization.utils.helpers import generate_gparam
 
 from verl.utils.device import get_device_name, get_torch_device
+from verl.utils.qat.core import is_fp8_qat_mode
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -131,6 +132,7 @@ class QATQuantizer:
     ):
         self.mode = mode.lower()
         self._is_w4a4 = self.mode == "w4a4"  # W4A4 needs input_global_scale
+        self._is_fp8 = is_fp8_qat_mode(self.mode)
         self.group_size = group_size
         self.ignore_patterns = ignore_patterns or ["lm_head", "embed_tokens", "re:.*mlp.gate$"]
         self.device = device or torch.device(get_device_name())
@@ -150,7 +152,11 @@ class QATQuantizer:
         """Check if parameter should be quantized."""
         if not name.endswith(".weight"):
             return False
+        if "lora_" in name or ".lora_" in name:
+            return False
         if tensor.dim() != 2:
+            return False
+        if self._is_fp8:
             return False
         if tensor.shape[1] % self.group_size != 0:
             return False

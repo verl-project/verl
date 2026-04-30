@@ -286,9 +286,9 @@ router_replay:
 # QAT (Quantization-Aware Training) configuration
 # When enabled:
 #   - QAT is automatically applied to actor model during training
-#   - Fused scales (QKV/GateUp) are automatically enabled for training-inference consistency
-#   - Fast quantization is used when syncing weights to vLLM rollout
-# Supported modes: "w4a16" (NVFP4 weight-only)
+#   - Fused scales (QKV/GateUp) are automatically enabled for NVFP4 training-inference consistency
+#   - Fast quantization is used when syncing NVFP4 weights to vLLM rollout
+# Supported modes: "w4a16", "w4a4", "fp8"/"w8a8", and "w8a16"
 # Note: "w4a4" mode is included in the code but currently has KL divergence issues and is NOT recommended for use.
 # For usage examples, see: https://github.com/verl-project/verl-recipe/blob/main/qat/README.md
 qat:
@@ -296,11 +296,15 @@ qat:
   # Whether to enable QAT
   enable: false
 
-  # Quantization mode: "w4a16" (weight-only). "w4a4" is experimental and not recommended.
+  # Quantization mode: "w4a16" (weight-only FP4), "w4a4" (FP4 weight + activation),
+  # "fp8"/"w8a8" (FP8 weight + activation), or "w8a16" (weight-only FP8).
   mode: "w4a16"
 
   # Quantization group size (NVFP4 requires 16)
   group_size: 16
+
+  # 2D FP8 weight block size. Defaults to [128, 128] when mode is FP8.
+  weight_block_size: null
 
   # Patterns to ignore (e.g., lm_head, embed_tokens)
   ignore_patterns:

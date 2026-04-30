@@ -126,10 +126,13 @@ qat:
   _target_: verl.workers.config.QATEngineConfig
   # Whether to enable QAT
   enable: false
-  # Quantization mode: "w4a16" (weight-only FP4) or "w4a4" (weight + activation FP4)
+  # Quantization mode: "w4a16" (weight-only FP4) or "w4a4" (weight + activation FP4),
+  # "fp8"/"w8a8" (FP8 weight + activation), or "w8a16" (weight-only FP8)
   mode: "w4a16"
   # Group size for blockwise quantization (NVFP4 requires 16)
   group_size: 16
+  # 2D FP8 weight block size. Defaults to [128, 128] when mode is FP8.
+  weight_block_size: null
   # Module name patterns to exclude from quantization (fnmatch style for Megatron)
   ignore_patterns:
     - "lm_head"

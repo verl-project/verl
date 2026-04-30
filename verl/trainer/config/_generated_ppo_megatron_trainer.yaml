@@ -71,6 +71,7 @@ actor_rollout_ref:
         enable: false
         mode: w4a16
         group_size: 16
+        weight_block_size: null
         ignore_patterns:
         - lm_head
         - '*mlp.gate'
@@ -162,6 +163,7 @@ actor_rollout_ref:
       enable: false
       mode: w4a16
       group_size: 16
+      weight_block_size: null
       ignore_patterns:
       - lm_head
       - embed_tokens
@@ -252,6 +254,7 @@ actor_rollout_ref:
         enable: false
         mode: w4a16
         group_size: 16
+        weight_block_size: null
         ignore_patterns:
         - lm_head
         - '*mlp.gate'
@@ -560,6 +563,7 @@ critic:
       enable: false
       mode: w4a16
       group_size: 16
+      weight_block_size: null
       ignore_patterns:
       - lm_head
       - '*mlp.gate'

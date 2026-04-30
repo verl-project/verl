@@ -131,8 +131,9 @@ class QATEngineConfig(BaseConfig):
 
     Args:
         enable (bool): Whether to enable QAT, default False
-        mode (str): Quantization mode, "w4a16" or "w4a4", default "w4a16"
+        mode (str): Quantization mode, "w4a16", "w4a4", "fp8", "w8a8", or "w8a16", default "w4a16"
         group_size (int): Group size for blockwise quantization, default 16
+        weight_block_size (Optional[list[int]]): 2D FP8 block size for rollout quantization
         ignore_patterns (list[str]): Module name patterns to exclude from quantization
         activation_observer (str): Observer strategy for activation global_scale (W4A4 only)
         quantization_config_path (Optional[str]): Path to quantization config JSON for vLLM
@@ -141,6 +142,7 @@ class QATEngineConfig(BaseConfig):
     enable: bool = False
     mode: str = "w4a16"
     group_size: int = 16
+    weight_block_size: Optional[list[int]] = None
     ignore_patterns: list[str] = field(default_factory=lambda: ["lm_head", "embed_tokens", "re:.*mlp.gate$"])
     activation_observer: str = "static_minmax"
     quantization_config_path: Optional[str] = None

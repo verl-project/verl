@@ -480,21 +480,25 @@ class FSDPEngine(BaseEngine):
 
     def _apply_qat(self, module):
         """Apply QAT transformations to the model before FSDP wrapping."""
-        from verl.utils.qat.core import apply_qat, enable_qat_fuse
+        from verl.utils.qat.core import apply_qat, enable_qat_fuse, is_fp4_qat_mode, normalize_qat_mode
+
+        qat_mode = normalize_qat_mode(self._qat_config.mode)
 
         module = apply_qat(
             module,
             {
                 "enable": self._qat_config.enable,
-                "mode": self._qat_config.mode,
+                "mode": qat_mode,
                 "group_size": self._qat_config.group_size,
+                "weight_block_size": getattr(self._qat_config, "weight_block_size", None),
                 "ignore_patterns": list(self._qat_config.ignore_patterns),
                 "activation_observer": self._qat_config.activation_observer,
             },
         )
-        enable_qat_fuse(module)
+        if is_fp4_qat_mode(qat_mode):
+            enable_qat_fuse(module)
 
-        if self._qat_config.mode == "w4a4":
+        if qat_mode == "w4a4":
             self._restore_w4a4_input_scales(module, self.model_config.local_path)
 
         return module
@@ -832,6 +836,16 @@ class FSDPEngine(BaseEngine):
             )
 
         if self._qat_enabled:
+            from verl.utils.qat import is_fp8_qat_mode
+
+            if peft_config is not None and base_sync_done:
+                peft_config_dict = peft_config.to_dict()
+                return per_tensor_param, peft_config_dict
+
+            if is_fp8_qat_mode(self._qat_config.mode):
+                peft_config_dict = peft_config.to_dict() if peft_config is not None else None
+                return per_tensor_param, peft_config_dict
+
             from verl.utils.qat.quantizer import QATQuantizer
             from verl.utils.torch_dtypes import PrecisionType
 

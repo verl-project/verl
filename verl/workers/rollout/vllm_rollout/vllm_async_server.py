@@ -787,10 +787,17 @@ class vLLMHttpServer:
 
             check_vllm_ascend_before_server_launch()
 
+        os.environ.pop("VERL_VLLM_FP8_QUANT_ENABLED", None)
+
         # Handle QAT (Quantization-Aware Training) configuration
         qat_config_dict = getattr(self.config, "qat", {}) or {}
         if qat_config_dict.get("enable", False):
-            from verl.utils.qat import QATConfig, load_quantization_config
+            from verl.utils.qat import (
+                QATConfig,
+                get_fp8_weight_block_size,
+                load_quantization_config,
+                normalize_qat_mode,
+            )
 
             qat_config = QATConfig(**qat_config_dict)
             quantization_config_dict = load_quantization_config(qat_config)
@@ -806,11 +813,30 @@ class vLLMHttpServer:
 
                 apply_qat_patches()
                 quantization = "compressed-tensors"
+            elif quant_method == "fp8":
+                qat_mode = normalize_qat_mode(qat_config.mode)
+                if qat_mode == "w8a16":
+                    logger.info("FP8 w8a16 QAT uses BF16 rollout with dequantized fake-quant weights")
+                    quantization = None
+                else:
+                    quantization_config_dict.setdefault("activation_scheme", "dynamic")
+                    quantization_config_dict.setdefault("fmt", "e4m3")
+                    quantization_config_dict.setdefault(
+                        "weight_block_size", get_fp8_weight_block_size(qat_config.weight_block_size)
+                    )
+                    self._validate_fp8_weight_block_size(quantization_config_dict["weight_block_size"])
+                    quantization_config_dict.setdefault("ignored_layers", self._build_fp8_ignored_layers())
+                    apply_vllm_fp8_patches()
+                    os.environ["VERL_VLLM_FP8_QUANT_ENABLED"] = "1"
+                    quantization = "fp8"
             else:
                 raise ValueError(f"Unsupported quant_method: {quant_method}")
 
-            logger.info(f"QAT quantization config injected (quant_method={quant_method})")
-            hf_overrides["quantization_config"] = quantization_config_dict
+            if quantization is not None:
+                logger.info(f"QAT quantization config injected (quant_method={quant_method})")
+                hf_overrides["quantization_config"] = quantization_config_dict
+            else:
+                logger.info(f"QAT enabled without rollout quantization config (quant_method={quant_method})")
         elif quantization is not None:
             # Handle other quantization methods (fp8, torchao)
             _SUPPORTED_QUANTIZATION = ["fp8", "torchao", "ascend"]
@@ -819,16 +845,12 @@ class vLLMHttpServer:
 
             if quantization == "fp8":
                 # Ignore MoE router layers for FP8 quantization
-                all_mlp_gate_layers = []
-                for layer in range(self.model_config.hf_config.num_hidden_layers):
-                    all_mlp_gate_layers.append(f"model.layers.{layer}.mlp.gate")
-
                 FP8_BLOCK_QUANT_KWARGS = {
                     "activation_scheme": "dynamic",
                     "fmt": "e4m3",
                     "quant_method": "fp8",
                     "weight_block_size": [128, 128],
-                    "ignored_layers": all_mlp_gate_layers,
+                    "ignored_layers": self._build_fp8_ignored_layers(),
                 }
                 hf_overrides["quantization_config"] = dict(FP8_BLOCK_QUANT_KWARGS)
                 # Apply vllm fp8 patches
@@ -841,6 +863,33 @@ class vLLMHttpServer:
             hf_overrides["quantization_config_file"] = self.config.quantization_config_file
 
         return quantization, hf_overrides
+
+    def _build_fp8_ignored_layers(self) -> list[str]:
+        """Return vLLM FP8 ignored layer names for router/gate modules."""
+        return [
+            f"model.layers.{layer}.mlp.gate"
+            for layer in range(getattr(self.model_config.hf_config, "num_hidden_layers", 0))
+        ]
+
+    def _validate_fp8_weight_block_size(self, weight_block_size: list[int]) -> None:
+        """Validate FP8 block size against tensor-parallel MoE expert shards."""
+        if len(weight_block_size) != 2:
+            raise ValueError(f"FP8 weight_block_size must have two entries, got: {weight_block_size}")
+
+        hf_config = self.model_config.hf_config
+        moe_intermediate_size = getattr(hf_config, "moe_intermediate_size", None)
+        if moe_intermediate_size is None:
+            return
+
+        tp_size = int(getattr(self.config, "tensor_model_parallel_size", 1) or 1)
+        intermediate_size_per_partition = int(moe_intermediate_size) // tp_size
+        block_n = int(weight_block_size[1])
+        if intermediate_size_per_partition % block_n != 0:
+            raise ValueError(
+                "FP8 weight_block_size is incompatible with MoE expert tensor-parallel shards: "
+                f"intermediate_size_per_partition={intermediate_size_per_partition}, block_n={block_n}. "
+                "Set qat.weight_block_size so block_n divides the per-partition MoE intermediate size."
+            )
 
     def _get_worker_extension_cls(self) -> str:
         """Return the fully-qualified colocate worker extension class name."""

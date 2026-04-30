@@ -23,6 +23,10 @@ from typing import Optional
 import torch
 
 
+def _is_modelopt_quantizer_param_name(param_name: str) -> bool:
+    return "_quantizer" in param_name
+
+
 def apply_swiglu_sharded_factory_patch():
     """Patch ``apply_swiglu_sharded_factory`` to support ``singleton_local_shards``."""
     import megatron.core.transformer.mlp as mlp_module
@@ -282,6 +286,9 @@ def apply_local_name_to_global_patch():
     _orig_fn = bridge_module._megatron_local_name_to_global
 
     def _patched_megatron_local_name_to_global(models, config, param_name, vp_stage=None):
+        if _is_modelopt_quantizer_param_name(param_name):
+            return param_name
+
         param_name = _orig_fn(models, config, param_name, vp_stage)
 
         ep_group = parallel_state.get_expert_model_parallel_group()
@@ -326,7 +333,7 @@ def apply_skip_quantizer_params_patch():
     def _patched_is_adapter_param_name(self, param_name: str) -> bool:
         if _orig(self, param_name):
             return True
-        return "_quantizer" in param_name
+        return _is_modelopt_quantizer_param_name(param_name)
 
     MegatronModelBridge._is_adapter_param_name = _patched_is_adapter_param_name
 
@@ -353,6 +360,8 @@ def apply_detect_parallelism_type_patch():
 
     def _patched_detect_parallelism_type(self, module):
         module_type = type(module).__name__
+        if module_type == "Linear" and type(module).__module__ == "megatron.core.post_training.modelopt.layers":
+            return "replicated"
         if "LayerNormColumnParallelLinear" in module_type:
             if self.megatron_param and (
                 self.megatron_param.endswith("layer_norm_weight") or self.megatron_param.endswith("layer_norm_bias")
@@ -374,6 +383,59 @@ def revert_detect_parallelism_type_patch():
     AutoMapping._detect_parallelism_patched = False
 
 
+def apply_te_grouped_weight_calibration_patch():
+    """Patch ModelOpt weight-only calibration for TE grouped linear weights."""
+    import modelopt.torch.quantization.model_calib as model_calib
+
+    if getattr(model_calib, "_te_grouped_weight_calib_patched", False):
+        return
+    model_calib._te_grouped_weight_calib_patched = True
+    model_calib._original_weight_only_quantize = model_calib.weight_only_quantize
+
+    def _te_grouped_weight_names(module):
+        if not hasattr(module, "weight_quantizer"):
+            return []
+        if not hasattr(module, "num_gemms"):
+            return []
+        weight_names = [name for name, _ in module.named_parameters(recurse=False) if re.fullmatch(r"weight\d+", name)]
+        return sorted(weight_names, key=lambda name: int(name.removeprefix("weight")))
+
+    def _patched_weight_only_quantize(model):
+        for _, module in model.named_modules():
+            grouped_weight_names = _te_grouped_weight_names(module)
+            if not grouped_weight_names:
+                continue
+
+            with model_calib.enable_weight_access_and_writeback(module, model):
+                for weight_name in grouped_weight_names:
+                    module.weight_quantizer(getattr(module, weight_name))
+
+        original_weight_attr_names = model_calib.weight_attr_names
+
+        def _skip_te_grouped_weight_names(module):
+            if _te_grouped_weight_names(module):
+                return
+            yield from original_weight_attr_names(module)
+
+        try:
+            model_calib.weight_attr_names = _skip_te_grouped_weight_names
+            model_calib._original_weight_only_quantize(model)
+        finally:
+            model_calib.weight_attr_names = original_weight_attr_names
+
+    model_calib.weight_only_quantize = _patched_weight_only_quantize
+
+
+def revert_te_grouped_weight_calibration_patch():
+    """Revert the TE grouped linear weight-only calibration patch."""
+    import modelopt.torch.quantization.model_calib as model_calib
+
+    if not getattr(model_calib, "_te_grouped_weight_calib_patched", False):
+        return
+    model_calib.weight_only_quantize = model_calib._original_weight_only_quantize
+    model_calib._te_grouped_weight_calib_patched = False
+
+
 def apply_qat_patch():
     """Apply all QAT-related patches."""
     apply_swiglu_sharded_factory_patch()
@@ -382,6 +444,7 @@ def apply_qat_patch():
     apply_local_name_to_global_patch()
     apply_skip_quantizer_params_patch()
     apply_detect_parallelism_type_patch()
+    apply_te_grouped_weight_calibration_patch()
 
 
 def revert_qat_patch():
@@ -392,3 +455,4 @@ def revert_qat_patch():
     revert_local_name_to_global_patch()
     revert_skip_quantizer_params_patch()
     revert_detect_parallelism_type_patch()
+    revert_te_grouped_weight_calibration_patch()

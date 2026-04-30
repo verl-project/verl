@@ -27,7 +27,12 @@ from vllm.outputs import RequestOutput
 from verl.utils.device import is_npu_available
 from verl.utils.vllm import TensorLoRARequest, VLLMHijack
 from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
-from verl.utils.vllm.vllm_fp8_utils import apply_vllm_fp8_patches, is_fp8_model, load_quanted_weights
+from verl.utils.vllm.vllm_fp8_utils import (
+    apply_vllm_fp8_patches,
+    is_fp8_model,
+    load_quanted_weights,
+    load_serialized_fp8_weights,
+)
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -38,6 +43,14 @@ VLLM_LORA_NAME = "123"
 VLLM_LORA_PATH = "simon_lora_path"
 
 VLLM_ASCEND_REQUIRED_ENV_VARS = {"VLLM_ALL2ALL_BACKEND": "flashinfer_all2allv", "VLLM_ASCEND_ENABLE_NZ": "0"}
+
+
+def _contains_serialized_fp8_weights(weights: list[tuple[str, torch.Tensor]]) -> bool:
+    """Return true when a bucket already contains vLLM FP8 checkpoint tensors."""
+    return any(
+        tensor.dtype == torch.float8_e4m3fn or name.endswith((".weight_scale", ".weight_scale_inv", "_scale_inv"))
+        for name, tensor in weights
+    )
 
 
 def set_death_signal():
@@ -169,21 +182,21 @@ class vLLMColocateWorkerExtension:
         if current_platform.device_type == "npu" and self.device is None:
             self.device = torch.device(f"npu:{self.local_rank}")
 
+        adapter_only = bool(peft_config and base_sync_done)
+
         # In async mode, make sure the old lora is removed before adding the new one
-        if peft_config and base_sync_done:
+        if adapter_only:
             self.remove_lora(VLLM_LORA_INT_ID)
 
-        use_standard_weight_load = not (peft_config and base_sync_done) and not is_fp8_model(
-            self.model_runner.vllm_config
-        )
+        use_standard_weight_load = not adapter_only and not is_fp8_model(self.model_runner.vllm_config)
 
-        if self._is_qat_model:
+        if self._is_qat_model and not adapter_only:
             # QAT (compressed-tensors): Prepare for weight loading BEFORE receiving any buckets
             from verl.utils.qat import prepare_qat_for_load_weights
 
             prepare_qat_for_load_weights(self.model_runner.model, device=self.device)
             logger.info("QAT: prepare_qat_for_load_weights completed")
-        elif self._is_modelopt_qat:
+        elif self._is_modelopt_qat and not adapter_only:
             from verl.utils.modelopt.vllm_modelopt_patch import prepare_modelopt_for_weight_reload
 
             prepare_modelopt_for_weight_reload(self.model_runner.model, device=self.device)
@@ -204,13 +217,13 @@ class vLLMColocateWorkerExtension:
             )
         )
 
-        if self._is_qat_model:
+        if self._is_qat_model and not adapter_only:
             # QAT (compressed-tensors): call process_weights_after_loading AFTER all buckets are received
             from verl.utils.qat import manual_process_weights_after_loading
 
             manual_process_weights_after_loading(self.model_runner.model)
             logger.info("QAT: process_weights_after_loading completed")
-        elif self._is_modelopt_qat:
+        elif self._is_modelopt_qat and not adapter_only:
             from verl.utils.modelopt.vllm_modelopt_patch import modelopt_process_weights_after_loading
 
             modelopt_process_weights_after_loading(self.model_runner.model)
@@ -240,8 +253,12 @@ class vLLMColocateWorkerExtension:
             # Check if FP8 quantization is enabled and apply appropriate weight loading
             if is_fp8_model(self.model_runner.vllm_config):
                 logger.info(f"FP8 model detected (async): {self.model_runner.vllm_config.quant_config}")
-                # Convert bf16 weights to fp8 format before loading
-                loaded_params = load_quanted_weights(weights, self.model_runner)
+                if _contains_serialized_fp8_weights(weights):
+                    # FP8 QAT exports fake-quantized weights and scales directly.
+                    loaded_params = load_serialized_fp8_weights(weights, self.model_runner)
+                else:
+                    # Online FP8 rollout quantization converts bf16 weights before loading.
+                    loaded_params = load_quanted_weights(weights, self.model_runner)
                 logger.info(f"FP8 weights loaded (async), loaded_params: {len(loaded_params)}")
             else:
                 logger.info("Loading standard weights (non-FP8, async)")
