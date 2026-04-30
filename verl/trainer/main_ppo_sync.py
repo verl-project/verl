@@ -52,13 +52,17 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 
 from verl.checkpoint_engine import CheckpointEngineManager
-from verl.experimental.agent_loop import AgentLoopManager, AgentLoopOutput, AgentLoopWorker, get_trajectory_info
+from verl.experimental.agent_loop import (
+    AgentLoopManager,
+    AgentLoopOutput,
+    AgentLoopWorker,
+    get_trajectory_info,
+)
 from verl.experimental.reward_loop import RewardLoopManager
 from verl.experimental.teacher_loop import MultiTeacherModelManager
 from verl.protocol import DataProto, DataProtoFuture
 from verl.single_controller.ray import (
     RayClassWithInitArgs,
-    RayResourcePool,
     RayWorkerGroup,
     ResourcePoolManager,
     create_colocated_worker_cls,
@@ -96,6 +100,7 @@ from verl.utils.tensordict_utils import list_of_dict_to_tensordict
 from verl.utils.tracking import Tracking, ValidationGenerationsLogger
 from verl.workers.config import CriticConfig, DistillationConfig
 from verl.workers.engine_workers import ActorRolloutRefWorker, TrainingWorker, TrainingWorkerConfig
+from verl.workers.rollout.llm_server import LLMServerManager
 from verl.workers.utils.losses import value_loss
 from verl.workers.utils.padding import response_from_nested, response_to_nested
 
@@ -446,24 +451,16 @@ class AgentLoopManagerTQ(AgentLoopManager):
     @auto_await
     async def create(
         cls,
-        config: DictConfig,
-        worker_group: RayWorkerGroup = None,
-        rollout_resource_pool: RayResourcePool = None,
-        reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
-        teacher_model_manager: MultiTeacherModelManager = None,
+        *args,
         replay_buffer: ReplayBuffer = None,
+        **kwargs,
     ):
         """Create agent loop manager."""
         instance = cls(
-            config,
-            worker_group,
-            rollout_resource_pool,
-            teacher_model_manager,
-            reward_loop_worker_handles,
+            *args,
+            **kwargs,
             replay_buffer=replay_buffer,
         )
-        await instance._initialize_llm_servers()
-        await instance._init_global_load_balancer()
         await instance._init_agent_loop_workers()
         return instance
 
@@ -703,6 +700,10 @@ class PPOTrainer:
             self.distillation_config = None
 
         # 9. initialize agent loop manager
+        self.llm_server_manager = LLMServerManager.create(
+            config=self.config, worker_group=self.actor_rollout_wg, rollout_resource_pool=actor_rollout_resource_pool
+        )
+
         manager_class_fqn = self.config.actor_rollout_ref.rollout.get("agent", {}).get("agent_loop_manager_class")
         if manager_class_fqn:
             agent_loop_manager_cls = load_class_from_fqn(manager_class_fqn, "AgentLoopManager")
@@ -710,10 +711,9 @@ class PPOTrainer:
             agent_loop_manager_cls = AgentLoopManagerTQ
         self.async_rollout_manager = agent_loop_manager_cls.create(
             config=self.config,
-            worker_group=self.actor_rollout_wg,
-            rollout_resource_pool=actor_rollout_resource_pool,
+            llm_client=self.llm_server_manager.get_client(),
+            teacher_client=self.teacher_model_manager.get_client() if self.use_teacher_policy else None,
             reward_loop_worker_handles=self.reward_loop_manager.reward_loop_workers,
-            teacher_model_manager=self.teacher_model_manager,
             replay_buffer=self.replay_buffer,
         )
         logger.info("agent loop manager initialized")
@@ -723,7 +723,7 @@ class PPOTrainer:
         self.checkpoint_manager = CheckpointEngineManager(
             config=checkpoint_engine_config,
             trainer=self.actor_rollout_wg,
-            replicas=self.async_rollout_manager.rollout_replicas,
+            replicas=self.llm_server_manager.get_replicas(),
         )
         logger.info("checkpoint engine manager initialized")
 

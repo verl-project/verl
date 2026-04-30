@@ -22,7 +22,7 @@ from verl.base_config import BaseConfig
 from verl.trainer.config import CheckpointConfig
 
 from ...utils.profiler import ProfilerConfig
-from .model import DiffusionModelConfig, HFModelConfig
+from .model import HFModelConfig
 from .optimizer import OptimizerConfig
 
 __all__ = [
@@ -569,7 +569,7 @@ class MindSpeedEngineConfig(McoreEngineConfig):
 @dataclass
 class TrainingWorkerConfig(BaseConfig):
     model_type: str = None  # model type (language_model/value_model)
-    model_config: HFModelConfig | DiffusionModelConfig = None
+    model_config: HFModelConfig = None
     engine_config: EngineConfig = None
     optimizer_config: OptimizerConfig = None
     checkpoint_config: CheckpointConfig = None

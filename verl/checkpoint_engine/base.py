@@ -13,7 +13,8 @@
 # limitations under the License.
 import asyncio
 from abc import ABC, abstractmethod
-from typing import Any, Generator, TypedDict
+from dataclasses import dataclass
+from typing import Any, AsyncGenerator, Generator
 
 import ray
 import torch
@@ -26,13 +27,23 @@ from verl.utils.import_utils import import_external_libs
 from verl.utils.ray_utils import auto_await
 from verl.workers.config import CheckpointEngineConfig, HFModelConfig, RolloutConfig
 from verl.workers.rollout import BaseRollout, RolloutReplica, get_rollout_class
+from verl.workers.rollout.utils import ensure_async_iterator
 
 
-class TensorMeta(TypedDict):
+@dataclass
+class TensorMeta:
     name: str
+    """The name of the weight tensor."""
     shape: torch.Size
+    """The shape of the weight tensor."""
     dtype: torch.dtype
+    """The dtype of the weight tensor."""
+    chunk_offset: int
+    """The chunk offset of the weight tensor."""
+    chunk_size: int
+    """The chunk size of the weight tensor."""
     offset: int
+    """The offset of the weight tensor in the bucket."""
 
 
 class CheckpointEngineRegistry:
@@ -448,3 +459,74 @@ class CheckpointEngineManager:
 
         # 8. resume all unfinished requests for partial rollout
         await asyncio.gather(*[r.resume_generation() for r in self.replicas])
+
+
+async def split_weight_chunks(
+    weights: Generator[tuple[str, torch.Tensor], None, None], bucket_size: int
+) -> AsyncGenerator[tuple[TensorMeta, torch.Tensor], None]:
+    """Split the weight into chunks.
+
+    Args:
+        weights: The weights generator.
+        bucket_size: Max bucket size in bytes.
+
+    Yields:
+        A tuple of the weight chunk metadata and the buffer.
+    """
+    async for name, weight in ensure_async_iterator(weights):
+        buffer = weight.view(-1).view(torch.uint8)
+        chunk_offset = 0
+        while chunk_offset < weight.nbytes:
+            chunk_size = min(bucket_size, weight.nbytes - chunk_offset)
+            tensor_meta = TensorMeta(
+                name=name,
+                shape=weight.shape,
+                dtype=weight.dtype,
+                chunk_offset=chunk_offset,
+                chunk_size=chunk_size,
+                offset=None,
+            )
+            yield (tensor_meta, buffer[chunk_offset : chunk_offset + chunk_size])
+            chunk_offset += chunk_size
+
+
+async def merge_weight_chunks(
+    chunks: Generator[tuple[TensorMeta, torch.Tensor], None, None], bucket_size: int
+) -> AsyncGenerator[tuple[str, torch.Tensor], None]:
+    """Merge the weight chunks into the original weight.
+
+    Args:
+        chunks: The chunks generator.
+        bucket_size: Max bucket size in bytes.
+
+    Yields:
+        A tuple of the name of the weight tensor and the tensor itself.
+    """
+    merge_name, merge_weight, merge_buffer, merge_offset = None, None, None, 0
+    async for tensor_meta, chunk in chunks:
+        assert chunk.dtype == torch.uint8, f"Chunk dtype must be uint8, but got {chunk.dtype}"
+        nbytes = tensor_meta.shape.numel() * tensor_meta.dtype.itemsize
+
+        # weight is small enough to fit in one bucket
+        if nbytes <= bucket_size:
+            assert merge_weight is None, f"Weight must be None, but got {merge_name}"
+            name, weight = tensor_meta.name, chunk.view(tensor_meta.dtype).view(tensor_meta.shape)
+            yield (name, weight)
+            continue
+
+        if merge_weight is None:
+            assert tensor_meta.chunk_offset == 0, f"Chunk offset must be 0, but got {tensor_meta}"
+            merge_name, merge_weight = (
+                tensor_meta.name,
+                torch.empty(tensor_meta.shape, dtype=tensor_meta.dtype, device=chunk.device),
+            )
+            merge_buffer = merge_weight.view(-1).view(torch.uint8)
+            merge_offset = 0
+
+        assert tensor_meta.name == merge_name
+        assert merge_offset == tensor_meta.chunk_offset
+        merge_buffer[tensor_meta.chunk_offset : tensor_meta.chunk_offset + tensor_meta.chunk_size] = chunk
+        merge_offset += tensor_meta.chunk_size
+        if tensor_meta.chunk_offset + tensor_meta.chunk_size == nbytes:
+            yield (merge_name, merge_weight)
+            merge_name, merge_weight, merge_buffer, merge_offset = None, None, None, 0

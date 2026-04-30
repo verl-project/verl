@@ -115,11 +115,6 @@ jobs:
       - name: Running vllm agent loop with reward model colocate tests on 8 L20 GPUs
         run: |
           ROLLOUT_NAME=vllm pytest -s -x tests/experimental/reward_loop/test_agent_reward_loop_colocate.py
-      - name: Running vllm agent loop with image reward manager tests on 2 L20 GPUs
-        run: |
-          pip3 install python-Levenshtein
-          unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
-          ROLLOUT_NAME=vllm pytest -s -x tests/experimental/reward_loop/test_visual_reward_manager.py
 
   cleanup:
     runs-on: ubuntu-latest

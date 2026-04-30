@@ -38,7 +38,7 @@ System Components
 +==========================+============================================================================+
 | AgentLoop                | Client, implements Agent functions                                         |
 +--------------------------+----------------------------------------------------------------------------+
-| AsyncLLMServerManager    | Inference gateway, provides generate interface for AgentLoop               |
+| LLMServerClient          | Inference gateway, provides generate interface for AgentLoop               |
 +--------------------------+----------------------------------------------------------------------------+
 | AsyncServer              | Server, each instance is connected to one DP group of the inference engine |
 +--------------------------+----------------------------------------------------------------------------+
@@ -120,7 +120,7 @@ System Components
 +--------------------------+-----------------------------------------------------------------------------------------------+
 | Component                | Role                                                                                          |
 +==========================+===============================================================================================+
-| ChatModel                | LLM object of LangChain, used to adapt to the “generate” api provided by AsyncLLMServerManager|
+| ChatModel                | LLM object of LangChain, used to adapt to the “generate” api provided by LLMServerClient      |
 +--------------------------+-----------------------------------------------------------------------------------------------+
 | ReactAgentLoop           | Agent adaptation layer, which by default supports a naive LangGraph Agentic.                  |
 |                          | New classes can be derived to support user-defined Agents, and the run function needs to be   |

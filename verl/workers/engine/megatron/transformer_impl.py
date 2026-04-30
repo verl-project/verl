@@ -42,7 +42,11 @@ from verl.utils.megatron.router_replay_utils import (
     reorder_and_merge_vpp_layers,
     set_router_replay_data,
 )
-from verl.utils.megatron.tensor_parallel import vocab_parallel_entropy, vocab_parallel_log_probs_from_logits
+from verl.utils.megatron.tensor_parallel import (
+    vocab_parallel_entropy,
+    vocab_parallel_log_probs_from_logits,
+    vocab_parallel_sum_pi_squared,
+)
 from verl.utils.megatron_peft_utils import add_base_layer_suffix, build_peft_config_for_vllm
 from verl.utils.megatron_utils import (
     check_mtp_config,
@@ -818,7 +822,14 @@ class MegatronEngineWithLMHead(MegatronEngine):
         batch = batch.to(get_device_id())
         use_fused_kernels = tu.get_non_tensor_data(batch, key="use_fused_kernels", default=False)
         calculate_entropy = tu.get_non_tensor_data(batch, key="calculate_entropy", default=False)
+        calculate_sum_pi_squared = tu.get_non_tensor_data(batch, key="calculate_sum_pi_squared", default=False)
         distillation_use_topk = tu.get_non_tensor_data(batch, key="distillation_use_topk", default=False)
+
+        if calculate_sum_pi_squared and use_fused_kernels:
+            raise NotImplementedError(
+                "calculate_sum_pi_squared=True is not supported with use_fused_kernels=True: "
+                "fused kernels do not materialize the full logits tensor needed for Σπ²."
+            )
         pad_mode = tu.get_non_tensor_data(batch, key="pad_mode", default=DatasetPadMode.NO_PADDING)
         temperature = batch["temperature"]
         model_inputs = self.prepare_model_inputs(batch)
@@ -896,6 +907,9 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 assert torch.all(temperature > 0).item(), f"temperature tensor must be positive. Got {temperature}"
                 logits.div_(temperature.unsqueeze(dim=-1).to(logits.dtype))
                 ret = {}
+                # sum_pi_squared is non-destructive — must run before vocab_parallel_entropy.
+                if calculate_sum_pi_squared:
+                    ret["sum_pi_squared"] = vocab_parallel_sum_pi_squared(logits)
                 if calculate_entropy:
                     logits_bak = logits.clone()
                     # # disable the hint until the fused_kernel is optimized for triton>=3.3

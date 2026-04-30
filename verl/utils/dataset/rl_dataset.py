@@ -141,9 +141,6 @@ class RLHFDataset(Dataset):
         self.shuffle = config.get("shuffle", False)
         self.seed = config.get("seed")
 
-        # For diffusion model training only
-        self.negative_prompt_key = config.get("negative_prompt_key", "negative_prompt")
-
         self._download()
         self._read_files_and_tokenize()
 
@@ -363,8 +360,6 @@ class RLHFDataset(Dataset):
         """For rollout, apply_chat_template has been moved to AgentLoop, so we only return raw_prompt here."""
         row_dict: dict = self.dataframe[item]
         row_dict["raw_prompt"] = self._build_messages(row_dict, key=self.prompt_key)
-        if self.negative_prompt_key in row_dict:
-            row_dict["raw_negative_prompt"] = self._build_messages(row_dict, key=self.negative_prompt_key)
 
         row_dict.pop(self.image_key, None)
         row_dict.pop(self.video_key, None)
