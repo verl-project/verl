@@ -278,18 +278,17 @@ jobs:
       - name: Prepare GEO3K dataset
         run: |
           python3 examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/models/hf_data/hiyouga/geometry3k --local_save_dir ${PWD}/data/geo3k
-      # FIXME: timeout in 30 minutes
-      # - name: Running GEO3K E2E training tests with FSDP on 8 L20 GPUs (VLM)
-      #   run: |
-      #     ray stop --force
-      #     ROLLOUT_TP=2 \
-      #     INFER_BACKEND=trtllm \
-      #     MODEL_PATH="${HOME}/models/Qwen/Qwen3-VL-2B-Instruct" \
-      #       bash examples/grpo_trainer/run_qwen2_5_vl_7b_fsdp.sh \
-      #       trainer.total_training_steps=1 \
-      #       data.train_files="['${PWD}/data/geo3k/train.parquet']" \
-      #       data.val_files="['${PWD}/data/geo3k/test.parquet']" \
-      #       trainer.logger='["console"]'
+      - name: Running GEO3K E2E training tests with FSDP on 8 L20 GPUs (VLM)
+        run: |
+          ray stop --force
+          ROLLOUT_TP=2 \
+          INFER_BACKEND=trtllm \
+          MODEL_PATH="${HOME}/models/Qwen/Qwen3-VL-2B-Instruct" \
+            bash examples/grpo_trainer/run_qwen2_5_vl_7b_fsdp.sh \
+            trainer.total_training_steps=1 \
+            data.train_files="['${PWD}/data/geo3k/train.parquet']" \
+            data.val_files="['${PWD}/data/geo3k/test.parquet']" \
+            trainer.logger='["console"]'
       - name: clean up
         run: |
           rm -rf checkpoints

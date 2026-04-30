@@ -229,6 +229,8 @@ EXTRA=(
 
 if [ "${INFER_BACKEND}" = trtllm ]; then
     EXTRA+=(
+        +actor_rollout_ref.rollout.engine_kwargs.trtllm.batch_wait_timeout_iters=32
+        +actor_rollout_ref.rollout.engine_kwargs.trtllm.batch_wait_max_tokens_ratio=0.5
         +actor_rollout_ref.rollout.engine_kwargs.trtllm.moe_config.backend=${trtllm_moe_backend}
     )
 fi
