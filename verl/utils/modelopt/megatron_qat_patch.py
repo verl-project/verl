@@ -27,6 +27,22 @@ def _is_modelopt_quantizer_param_name(param_name: str) -> bool:
     return "_quantizer" in param_name
 
 
+def _module_matches_class(module, expected_cls: type) -> bool:
+    if isinstance(module, expected_cls):
+        return True
+
+    get_original_cls = getattr(module, "get_original_cls_by_level", None)
+    if not callable(get_original_cls):
+        return False
+
+    try:
+        original_cls = get_original_cls(level=0)
+    except TypeError:
+        original_cls = get_original_cls(0)
+
+    return isinstance(original_cls, type) and issubclass(original_cls, expected_cls)
+
+
 def apply_swiglu_sharded_factory_patch():
     """Patch ``apply_swiglu_sharded_factory`` to support ``singleton_local_shards``."""
     import megatron.core.transformer.mlp as mlp_module
@@ -353,6 +369,11 @@ def apply_detect_parallelism_type_patch():
     ``LayerNormColumnParallelLinear`` variants via substring matching."""
     from megatron.bridge.models.conversion.param_mapping import AutoMapping
 
+    try:
+        from megatron.core.post_training.modelopt.layers import Linear as ModelOptLinear
+    except ImportError:
+        ModelOptLinear = None
+
     if getattr(AutoMapping, "_detect_parallelism_patched", False):
         return
     AutoMapping._detect_parallelism_patched = True
@@ -360,7 +381,7 @@ def apply_detect_parallelism_type_patch():
 
     def _patched_detect_parallelism_type(self, module):
         module_type = type(module).__name__
-        if module_type == "Linear" and type(module).__module__ == "megatron.core.post_training.modelopt.layers":
+        if ModelOptLinear is not None and _module_matches_class(module, ModelOptLinear):
             return "replicated"
         if "LayerNormColumnParallelLinear" in module_type:
             if self.megatron_param and (

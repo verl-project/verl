@@ -14,7 +14,8 @@
 
 import asyncio
 import os
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 
 import pytest
 import torch
@@ -378,6 +379,63 @@ def test_te_grouped_weight_calibration_skips_original_plain_weight_lookup(monkey
 
     assert [id(weight) for weight in grouped.quantized_weights] == [id(grouped.weight0), id(grouped.weight1)]
     assert model_calib.weight_attr_names is _bad_weight_attr_names
+
+
+def test_detect_parallelism_patch_uses_modelopt_linear_class(monkeypatch):
+    from verl.utils.modelopt.megatron_qat_patch import (
+        apply_detect_parallelism_type_patch,
+        revert_detect_parallelism_type_patch,
+    )
+
+    class AutoMapping:
+        def __init__(self, megatron_param="linear.weight"):
+            self.megatron_param = megatron_param
+
+        def _detect_parallelism_type(self, module):
+            return "original"
+
+    class Linear(torch.nn.Module):
+        pass
+
+    Linear.__module__ = "renamed.modelopt.layers"
+
+    class DynamicLinear(torch.nn.Module):
+        def get_original_cls_by_level(self, level=0):
+            assert level == 0
+            return Linear
+
+    def package(name):
+        module = ModuleType(name)
+        module.__path__ = []
+        return module
+
+    fake_modules = {
+        "megatron": package("megatron"),
+        "megatron.bridge": package("megatron.bridge"),
+        "megatron.bridge.models": package("megatron.bridge.models"),
+        "megatron.bridge.models.conversion": package("megatron.bridge.models.conversion"),
+        "megatron.core": package("megatron.core"),
+        "megatron.core.post_training": package("megatron.core.post_training"),
+        "megatron.core.post_training.modelopt": package("megatron.core.post_training.modelopt"),
+    }
+    param_mapping = ModuleType("megatron.bridge.models.conversion.param_mapping")
+    param_mapping.AutoMapping = AutoMapping
+    layers = ModuleType("megatron.core.post_training.modelopt.layers")
+    layers.Linear = Linear
+    fake_modules[param_mapping.__name__] = param_mapping
+    fake_modules[layers.__name__] = layers
+
+    for name, module in fake_modules.items():
+        monkeypatch.setitem(sys.modules, name, module)
+
+    try:
+        apply_detect_parallelism_type_patch()
+
+        assert AutoMapping()._detect_parallelism_type(Linear()) == "replicated"
+        assert AutoMapping()._detect_parallelism_type(DynamicLinear()) == "replicated"
+        assert AutoMapping()._detect_parallelism_type(torch.nn.Module()) == "original"
+    finally:
+        revert_detect_parallelism_type_patch()
 
 
 def test_fp8_module_lookup_unwraps_lora_fused_moe(monkeypatch):

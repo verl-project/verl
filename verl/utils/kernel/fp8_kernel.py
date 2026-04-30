@@ -271,8 +271,14 @@ def _scaled_fp8_blockwise_pytorch(
     data_hp = data_hp.reshape(blk_m, block_size0, blk_n, block_size1)
     data_hp = data_hp.permute(0, 2, 1, 3).contiguous()
 
-    # Flatten to (BLK_M, BLK_N, BLOCK_SIZE_M * BLOCK_SIZE_N) in float32 for precision
-    data_hp = data_hp.to(dtype=torch.float32, copy=True).flatten(start_dim=2)
+    # Flatten to (BLK_M, BLK_N, BLOCK_SIZE_M * BLOCK_SIZE_N) in float32 for precision.
+    # Float32 inputs need an explicit clone because the in-place scale/clamp below
+    # must not mutate the caller tensor when contiguous() can keep a view.
+    if data_hp.dtype == torch.float32:
+        data_hp = data_hp.clone()
+    else:
+        data_hp = data_hp.to(dtype=torch.float32)
+    data_hp = data_hp.flatten(start_dim=2)
 
     # Calculate max absolute value per block - use fused abs+amax
     max_abs = data_hp.abs().amax(dim=-1, keepdim=True)
