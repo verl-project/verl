@@ -109,6 +109,13 @@ class vLLMHttpServer:
         """
         os.environ[get_visible_devices_keyword()] = cuda_visible_devices
         os.environ["VERL_REPLICA_RANK"] = str(replica_rank)
+        # Forward the Ray job id into the vLLM worker subprocess so the
+        # colocated weight-transfer IPC socket path is unique per Ray job.
+        # Without this, two concurrent verl jobs on the same node both bind
+        # the same /tmp/rl-colocate-zmq-replica-0-rank-0.sock and one fails
+        # with EADDRINUSE; a stale socket from a crashed run trips the same
+        # error on restart.
+        os.environ["VERL_RAY_JOB_ID"] = ray.get_runtime_context().get_job_id()
 
         self.config = self._init_config(config)
         self.model_config = self._init_model_config(model_config)
