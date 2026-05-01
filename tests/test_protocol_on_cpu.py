@@ -1232,3 +1232,98 @@ def test_serialize_dataproto_with_empty_tensordict():
     deserialized_data = pickle.loads(serialized_data)
     assert len(deserialized_data.batch.keys()) == 0
     assert deserialized_data.batch.batch_size == torch.Size([10])
+
+
+# --- DataProtoFuture Tests ---
+
+import ray  # noqa: E402
+
+from verl.protocol import DataProtoFuture  # noqa: E402
+
+
+@pytest.fixture(scope="module", autouse=True)
+def setup_ray():
+    ray.init(ignore_reinit_error=True)
+    yield
+    ray.shutdown()
+
+
+def test_data_proto_future_chunk_even():
+    # Create 2 DataProtos of size 4 each
+    dp1 = DataProto.from_dict({"a": torch.arange(0, 4)})
+    dp2 = DataProto.from_dict({"a": torch.arange(4, 8)})
+
+    ref1 = ray.put(dp1)
+    ref2 = ray.put(dp2)
+
+    future = DataProtoFuture.concat([ref1, ref2])
+
+    # Chunk into 4 pieces. Each piece should have size 2
+    chunks = future.chunk(4)
+    assert len(chunks) == 4
+
+    res0 = chunks[0].get()
+    assert torch.equal(res0.batch["a"], torch.tensor([0, 1]))
+
+    res1 = chunks[1].get()
+    assert torch.equal(res1.batch["a"], torch.tensor([2, 3]))
+
+    res2 = chunks[2].get()
+    assert torch.equal(res2.batch["a"], torch.tensor([4, 5]))
+
+    res3 = chunks[3].get()
+    assert torch.equal(res3.batch["a"], torch.tensor([6, 7]))
+
+
+def test_data_proto_future_chunk_uneven_overlap():
+    # Create 3 DataProtos of size 4 each
+    dp1 = DataProto.from_dict({"a": torch.arange(0, 4)})
+    dp2 = DataProto.from_dict({"a": torch.arange(4, 8)})
+    dp3 = DataProto.from_dict({"a": torch.arange(8, 12)})
+
+    refs = [ray.put(dp) for dp in [dp1, dp2, dp3]]
+    future = DataProtoFuture.concat(refs)
+
+    chunks = future.chunk(2)
+    assert len(chunks) == 2
+
+    res0 = chunks[0].get()
+    assert len(res0) == 6
+    assert torch.equal(res0.batch["a"], torch.arange(0, 6))
+
+    res1 = chunks[1].get()
+    assert len(res1) == 6
+    assert torch.equal(res1.batch["a"], torch.arange(6, 12))
+
+
+def test_data_proto_future_nested_chunk():
+    dp1 = DataProto.from_dict({"a": torch.arange(0, 4)})
+    dp2 = DataProto.from_dict({"a": torch.arange(4, 8)})
+    future = DataProtoFuture.concat([ray.put(dp1), ray.put(dp2)])
+
+    # First chunk into 2 pieces (size 4 each)
+    first_chunks = future.chunk(2)
+    # Then chunk the first piece into 2 more pieces (size 2 each)
+    second_chunks = first_chunks[0].chunk(2)
+
+    res0 = second_chunks[0].get()
+    assert len(res0) == 2
+    assert torch.equal(res0.batch["a"], torch.tensor([0, 1]))
+
+    res1 = second_chunks[1].get()
+    assert len(res1) == 2
+    assert torch.equal(res1.batch["a"], torch.tensor([2, 3]))
+
+
+def test_data_proto_future_tensordict():
+    td1 = TensorDict({"a": torch.arange(0, 4)}, batch_size=[4])
+    td2 = TensorDict({"a": torch.arange(4, 8)}, batch_size=[4])
+    future = DataProtoFuture.concat([ray.put(td1), ray.put(td2)])
+
+    chunks = future.chunk(2)
+    res0 = chunks[0].get()
+    assert isinstance(res0, TensorDict)
+    assert torch.equal(res0["a"], torch.arange(0, 4))
+
+    res1 = chunks[1].get()
+    assert torch.equal(res1["a"], torch.arange(4, 8))
