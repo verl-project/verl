@@ -113,31 +113,10 @@ def calculate_debug_metrics(data: DataProto) -> dict:
     pearson_corrcoef = pearson_correlation_coefficient(actor_probs, rollout_probs, response_mask_bool)
     rollout_probs_diff = calculate_log_prob_diff(actor_probs, rollout_probs, response_mask_bool)
 
-    # token_mult_prob_error: NeMo RL numerical accuracy metric
-    # Computed here (not in megatron_actor) because both logprob sets are guaranteed to be at
-    # the same model checkpoint — old_log_probs is Megatron's recompute at the same weights
-    # TRT-LLM used for rollout, before any gradient update.
-    # Formula: (1/N) * sum_i( m_i * exp(|g_i - p_i|) ),  threshold < 1.05
-    #
-    # NeMo RL applies mask_out_neg_inf_logprobs upstream: positions where logprobs are -inf
-    # (top-k/p sampling mismatch) have their logprob values replaced with 0.0, but the
-    # original response mask is kept — those positions still contribute to the metric with
-    # lp_error = |rollout_logprob - 0.0|.  We replicate that: zero the values, keep the mask.
-    SAFETY_BOUND = 20.0
-    actor_lp = torch.where(torch.isinf(actor_old_log_probs), torch.zeros_like(actor_old_log_probs), actor_old_log_probs)
-    rollout_lp = torch.where(
-        torch.isinf(rollout_old_log_probs), torch.zeros_like(rollout_old_log_probs), rollout_old_log_probs
-    )
-    lp_error = torch.abs(rollout_lp - actor_lp)
-    lp_error_safe = torch.clamp(lp_error, max=SAFETY_BOUND)
-    mask_float = response_mask_bool.float()
-    token_mult_prob_error = ((torch.exp(lp_error_safe) * mask_float).sum() / (mask_float.sum() + 1e-8)).detach().item()
-
     return {
         "training/rollout_probs_diff_valid": 1,
         "training/rollout_probs_diff_max": torch.max(rollout_probs_diff).detach().item(),
         "training/rollout_probs_diff_mean": torch.mean(rollout_probs_diff).detach().item(),
         "training/rollout_probs_diff_std": torch.std(rollout_probs_diff).detach().item(),
         "training/rollout_actor_probs_pearson_corr": pearson_corrcoef,
-        "training/token_mult_prob_error": token_mult_prob_error,
     }

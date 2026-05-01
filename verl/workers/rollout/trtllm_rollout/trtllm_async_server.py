@@ -355,17 +355,6 @@ class TRTLLMHttpServer:
             # return log_probs for their already-generated tokens.
             log_probs = [list(d.values())[0].logprob for d in outputs.outputs[0].logprobs]
         if outputs.outputs[0].finish_reason == "cancelled":
-            # TODO: remove [DEBUG]verify TRT-LLM populates logprobs for cancelled requests.
-            # Expected: n_tokens == n_logprobs (or n_logprobs <= n_tokens if cancelled mid-step).
-            # If n_logprobs == 0 when n_tokens > 0, the fix is ineffective and the
-            # response_mask workaround in detach_utils.py must be restored instead.
-            # n_tokens = len(token_ids)
-            # n_logprobs = len(log_probs) if log_probs is not None else 0
-            # print(
-            #     f"[trtllm_partial_rollout] cancelled: n_tokens={n_tokens} n_logprobs={n_logprobs} "
-            #     f"logprobs_present={log_probs is not None} "
-            #     f"first3_lp={log_probs[:3] if log_probs else None}"
-            # )
             return TokenOutput(
                 token_ids=token_ids,
                 log_probs=log_probs,

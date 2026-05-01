@@ -515,8 +515,8 @@ class ServerAdapter(BaseRollout):
                 )
                 cur_available_bytes -= size_in_bytes
 
-            # Clone so TRT-LLM's IPC handle owns the data — without it, the NCCL send
-            # buffer gets reused before TRT-LLM reads it, silently corrupting weights.
+            # Clone so the IPC handle owns the data to avoid buffer reuse
+            # before TRT-LLM reads it, which will silently corrupt weights.
             handle = reduce_tensor(param.detach().clone())
             cur_handles.append((name, handle))
 

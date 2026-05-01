@@ -141,14 +141,6 @@ common_params=(
     actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=1024
 )
 
-# TRT-LLM specific perf flags
-if [ "${rollout_name}" = "trtllm" ]; then
-    common_params+=(
-        +actor_rollout_ref.rollout.engine_kwargs.trtllm.batch_wait_timeout_iters=32
-        +actor_rollout_ref.rollout.engine_kwargs.trtllm.batch_wait_max_tokens_ratio=0.5
-    )
-fi
-
     # Detect device
     device_name=$(python3 - <<'EOF'
 from verl.utils.device import get_device_name
