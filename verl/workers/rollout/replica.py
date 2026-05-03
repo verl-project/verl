@@ -369,6 +369,22 @@ RolloutReplicaRegistry.register("sglang", _load_sglang)
 RolloutReplicaRegistry.register("trtllm", _load_trtllm)
 
 
+def _load_vllm_omni():
+    from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import vLLMOmniReplica
+
+    return vLLMOmniReplica
+
+
+def _load_vllm_omni_ar():
+    from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import vLLMOmniARReplica
+
+    return vLLMOmniARReplica
+
+
+RolloutReplicaRegistry.register("vllm_omni", _load_vllm_omni)
+RolloutReplicaRegistry.register("vllm_omni_ar", _load_vllm_omni_ar)
+
+
 # Original function for backward compatibility
 def get_rollout_replica_class(rollout: str) -> type[RolloutReplica]:
     return RolloutReplicaRegistry.get(rollout)
