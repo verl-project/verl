@@ -19,15 +19,17 @@ from pathlib import Path
 import pandas as pd
 
 
-TEMPLATES = [
-    "Generate an image that clearly displays the text: '{text}'",
-    "Create a picture with the word '{text}' written on it",
-    "Produce an image containing the text '{text}' in a readable font",
-    "Design an image where the text '{text}' is prominently shown",
-    "Make an image with '{text}' written clearly in the center",
-    "Generate a clean image that shows the text: '{text}'",
-    "Create a visually clear image displaying '{text}'",
-    "Render an image with the following text: '{text}'",
+SYSTEM_PROMPT = (
+    "Describe the image by detailing the color, shape, size, "
+    "texture, quantity, text, spatial relationships of the objects and background:"
+)
+
+TEMPLATES_WORD = [
+    "Create a picture with the word '{text}' written on it.",
+]
+
+TEMPLATES_PHRASE = [
+    "Create a picture with the sentence '{text}' written on it.",
 ]
 
 # Simple words/phrases of varying difficulty
@@ -81,12 +83,20 @@ def generate_samples(n: int, seed: int = 42) -> list[dict]:
         else:
             text = random_alphanum(rng)
 
-        template = rng.choice(TEMPLATES)
+        is_phrase = " " in text
+        template = rng.choice(TEMPLATES_PHRASE if is_phrase else TEMPLATES_WORD)
         prompt_text = template.format(text=text)
 
         sample = {
             "data_source": "ocr",
-            "prompt": [{"role": "user", "content": prompt_text}],
+            "prompt": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt_text},
+            ],
+            "negative_prompt": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": " "},
+            ],
             "reward_model": {"style": "rule", "ground_truth": text},
         }
         samples.append(sample)

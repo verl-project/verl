@@ -45,11 +45,13 @@ from ..scheduler import FlowMatchSDEDiscreteScheduler
 logger = logging.getLogger(__name__)
 
 
-def _maybe_to_cpu(v):
+def _to_cpu_tensor(v):
+    """Convert to a single CPU tensor, stacking a list of tensors if needed."""
     if isinstance(v, torch.Tensor):
         return v.detach().cpu()
     if isinstance(v, list):
-        return [_maybe_to_cpu(x) for x in v]
+        tensors = [x.detach().cpu() if isinstance(x, torch.Tensor) else torch.tensor(x) for x in v]
+        return torch.stack(tensors) if tensors else None
     return v
 
 
@@ -134,14 +136,14 @@ class BagelPipelineWithLogProb(BagelPipeline):
 
         output = super().forward(req)
 
-        # Enrich custom_output with RL-specific fields
+        # Enrich custom_output with RL-specific fields (must be tensors for batch stacking)
         custom = output.custom_output or {}
         if output.trajectory_latents is not None:
-            custom["all_latents"] = _maybe_to_cpu(output.trajectory_latents)
+            custom["all_latents"] = _to_cpu_tensor(output.trajectory_latents)
         if output.trajectory_timesteps is not None:
-            custom["all_timesteps"] = _maybe_to_cpu(output.trajectory_timesteps)
+            custom["all_timesteps"] = _to_cpu_tensor(output.trajectory_timesteps)
         if output.trajectory_log_probs is not None:
-            custom["all_log_probs"] = _maybe_to_cpu(output.trajectory_log_probs)
+            custom["all_log_probs"] = _to_cpu_tensor(output.trajectory_log_probs)
         output.custom_output = custom
 
         return output

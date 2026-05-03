@@ -177,6 +177,89 @@ trainer:
   #  mode: "auto", "enable", or "disable"
   use_legacy_worker_impl: disable
 
+# profiler configs
+global_profiler:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.utils.profiler.ProfilerConfig
+
+  # Profiling tool: choose between nsys, npu, torch, torch_memory, precision_debugger
+  tool: null
+
+  # profile steps
+  steps: null
+
+  # Whether to combine continuous steps into one database.
+  profile_continuous_steps: False
+
+  # Path to save profiling contents
+  save_path: "outputs/profile"
+
+  # Specific tool configs
+  global_tool_config:
+
+    # nsys config
+    nsys:
+
+      # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+      _target_: verl.utils.profiler.config.NsightToolConfig
+
+      # True for each task has its own database, False for all tasks in one training step share one database.
+      discrete: False
+
+      # controller Nvidia Nsight Systems Options.
+      controller_nsight_options:
+
+        trace: "cuda,nvtx,cublas,ucx"
+
+        cuda-memory-usage: "true"
+
+        cuda-graph-trace: "graph"
+
+      # worker Nvidia Nsight Systems Options.
+      worker_nsight_options:
+
+        trace: "cuda,nvtx,cublas,ucx"
+
+        cuda-memory-usage: "true"
+
+        cuda-graph-trace: "graph"
+
+        capture-range: "cudaProfilerApi"
+
+        capture-range-end: null
+
+        kill: none
+
+    # enable memory visualization for debugging memory usage
+    torch_memory:
+
+      _target_: verl.utils.profiler.config.TorchMemoryToolConfig
+
+      trace_alloc_max_entries: 100_000
+
+      stack_depth: 32
+
+      context: "all"
+
+      stacks: "all"
+
+      kw_args: {}
+
+    # msprobe precision debugger
+    precision_debugger:
+
+      # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+      _target_: verl.utils.profiler.config.PrecisionDebuggerToolConfig
+
+      config_path: null
+
+      steps: null
+
+      stages: null
+
+      strict: False
+
 # configs related to ray
 ray_kwargs:
 

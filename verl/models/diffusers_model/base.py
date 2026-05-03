@@ -86,6 +86,16 @@ class DiffusionModelBase(ABC):
             ) from None
 
     @classmethod
+    def build_module(cls, model_config: DiffusionModelConfig, torch_dtype: torch.dtype) -> Optional[torch.nn.Module]:
+        """Optional hook for custom model loading.
+
+        Override this to load non-standard models (e.g. models not loadable
+        via ``diffusers.AutoModel``).  Return ``None`` to fall back to the
+        default ``AutoModel.from_pretrained`` path in the FSDP engine.
+        """
+        return None
+
+    @classmethod
     @abstractmethod
     def build_scheduler(cls, model_config: DiffusionModelConfig) -> SchedulerMixin:
         """Build and configure the diffusion scheduler for this model.

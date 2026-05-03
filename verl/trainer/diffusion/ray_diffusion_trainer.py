@@ -588,6 +588,16 @@ class RayFlowGRPOTrainer:
         wg_kwargs = {}  # Setting up kwargs for RayWorkerGroup
         if OmegaConf.select(self.config.trainer, "ray_wait_register_center_timeout") is not None:
             wg_kwargs["ray_wait_register_center_timeout"] = self.config.trainer.ray_wait_register_center_timeout
+        if OmegaConf.select(self.config, "global_profiler.steps") is not None:
+            wg_kwargs["profile_steps"] = OmegaConf.select(self.config, "global_profiler.steps")
+            if OmegaConf.select(self.config, "global_profiler.tool") == "nsys":
+                assert (
+                    OmegaConf.select(self.config.global_profiler.global_tool_config.nsys, "worker_nsight_options")
+                    is not None
+                ), "worker_nsight_options must be set when using nsys with profile_steps"
+                wg_kwargs["worker_nsight_options"] = OmegaConf.to_container(
+                    OmegaConf.select(self.config.global_profiler.global_tool_config.nsys, "worker_nsight_options")
+                )
         wg_kwargs["device_name"] = self.device_name
 
         for resource_pool, class_dict in self.resource_pool_to_cls.items():
@@ -665,6 +675,20 @@ class RayFlowGRPOTrainer:
 
         # sleep all replicas to load checkpoint
         self.checkpoint_manager.sleep_replicas()
+
+    def _start_profiling(self, do_profile: bool) -> None:
+        """Start profiling for all worker groups if profiling is enabled."""
+        if do_profile:
+            self.actor_rollout_wg.start_profile(role="e2e", profile_step=self.global_steps)
+            if self.use_reference_policy:
+                self.ref_policy_wg.start_profile(profile_step=self.global_steps)
+
+    def _stop_profiling(self, do_profile: bool) -> None:
+        """Stop profiling for all worker groups if profiling is enabled."""
+        if do_profile:
+            self.actor_rollout_wg.stop_profile()
+            if self.use_reference_policy:
+                self.ref_policy_wg.stop_profile()
 
     def _save_checkpoint(self):
         from verl.utils.fs import local_mkdir_safe
@@ -879,6 +903,7 @@ class RayFlowGRPOTrainer:
         self.global_steps += 1
         last_val_metrics = None
         self.max_steps_duration = 0
+        prev_step_profile = False
 
         for epoch in range(current_epoch, self.config.trainer.total_epochs):
             for batch_dict in self.train_dataloader:
@@ -903,7 +928,21 @@ class RayFlowGRPOTrainer:
                 )
 
                 is_last_step = self.global_steps >= self.total_training_steps
+
+                profile_steps = (
+                    self.config.global_profiler.steps
+                    if OmegaConf.select(self.config, "global_profiler.steps") is not None
+                    else None
+                )
+                curr_step_profile = self.global_steps in profile_steps if profile_steps else False
+                profile_continuous = OmegaConf.select(self.config, "global_profiler.profile_continuous_steps") or False
+
                 with marked_timer("step", timing_raw):
+                    with marked_timer("start_profile", timing_raw):
+                        self._start_profiling(
+                            not prev_step_profile and curr_step_profile if profile_continuous else curr_step_profile
+                        )
+
                     # generate a batch
                     with marked_timer("gen", timing_raw, color="red"):
                         gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
@@ -1015,6 +1054,15 @@ class RayFlowGRPOTrainer:
                     # update weights from trainer to rollout
                     with marked_timer("update_weights", timing_raw, color="red"):
                         self.checkpoint_manager.update_weights(self.global_steps)
+
+                    with marked_timer("stop_profile", timing_raw):
+                        next_step_profile = (
+                            self.global_steps + 1 in profile_steps if profile_steps else False
+                        )
+                        self._stop_profiling(
+                            curr_step_profile and not next_step_profile if profile_continuous else curr_step_profile
+                        )
+                        prev_step_profile = curr_step_profile
 
                     actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                     metrics.update(actor_output_metrics)
