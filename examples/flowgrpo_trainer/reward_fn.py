@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import json
 import os
 from typing import Optional
@@ -27,14 +28,20 @@ from transformers import PreTrainedTokenizer
 async def chat_complete(router_address: str, chat_complete_request: dict):
     url = f"http://{router_address}/v1/chat/completions"
     try:
-        timeout = aiohttp.ClientTimeout(total=None)
+        timeout = aiohttp.ClientTimeout(total=120)
         session = aiohttp.ClientSession(timeout=timeout)
         async with session.post(url, json=chat_complete_request) as resp:
             output = await resp.text()
+            if not output or not output.strip():
+                return None
             output = json.loads(output)
             return ChatCompletion(**output)
+    except (json.JSONDecodeError, aiohttp.ClientError, asyncio.TimeoutError) as e:
+        print(f"[reward_fn] chat_complete failed: {type(e).__name__}: {e}")
+        return None
     except Exception as e:
-        raise e
+        print(f"[reward_fn] chat_complete unexpected error: {type(e).__name__}: {e}")
+        return None
     finally:
         await session.close()
 
@@ -127,7 +134,11 @@ async def compute_score_ocr(
             router_address=reward_router_address,
             chat_complete_request=chat_complete_request,
         )
+        if result is None or not result.choices:
+            return 0.0
         grm_response = result.choices[0].message.content
+        if not grm_response:
+            return 0.0
 
         # compute OCR score
         text = grm_response

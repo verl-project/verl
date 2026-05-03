@@ -173,7 +173,8 @@ def embeds_padding_2_no_padding(data: TensorDict) -> TensorDict:
             torch.nested.as_nested_tensor(mask_list, layout=torch.jagged),
         )
 
-    data["prompt_embeds"], data["prompt_embeds_mask"] = _to_nested(data["prompt_embeds"], data["prompt_embeds_mask"])
+    if isinstance(data.get("prompt_embeds", None), torch.Tensor):
+        data["prompt_embeds"], data["prompt_embeds_mask"] = _to_nested(data["prompt_embeds"], data["prompt_embeds_mask"])
 
     if isinstance(data.get("negative_prompt_embeds", None), torch.Tensor):
         data["negative_prompt_embeds"], data["negative_prompt_embeds_mask"] = _to_nested(

@@ -51,6 +51,14 @@ class FlowMatchSDEDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
     and diffusers v0.37 branch.
     """
 
+    def index_for_timestep(self, timestep, schedule_timesteps=None):
+        if schedule_timesteps is None:
+            schedule_timesteps = self.timesteps
+        # Use nearest-neighbor matching to avoid float32/float64 precision mismatch
+        # between timesteps stored during rollout and scheduler's internal timesteps.
+        diffs = (schedule_timesteps - timestep).abs()
+        return diffs.argmin().item()
+
     def step(
         self,
         model_output: torch.FloatTensor,
@@ -169,11 +177,14 @@ class FlowMatchSDEDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
                 sigma = self.sigmas[sigma_idx]
                 sigma_prev = self.sigmas[sigma_idx + 1]
             else:
-                sigma_idx = torch.tensor([self.index_for_timestep(t) for t in timestep])
+                sigma_idx = torch.tensor([self.index_for_timestep(t.cpu()) for t in timestep])
                 sigma = self.sigmas[sigma_idx].view(-1, *([1] * (len(sample.shape) - 1)))
                 sigma_prev = self.sigmas[sigma_idx + 1].view(-1, *([1] * (len(sample.shape) - 1)))
 
-            sigma_max = self.sigmas[1]
+            # Move scheduler tensors to the same device as sample
+            sigma = sigma.to(device=sample.device, dtype=sample.dtype)
+            sigma_prev = sigma_prev.to(device=sample.device, dtype=sample.dtype)
+            sigma_max = self.sigmas[1].to(device=sample.device, dtype=sample.dtype)
             dt = sigma_prev - sigma
 
         if sde_type == "sde":

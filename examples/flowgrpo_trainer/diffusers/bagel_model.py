@@ -58,6 +58,14 @@ class BagelTrainingConfig:
     def patch_latent_dim(self) -> int:
         return self.latent_patch_size ** 2 * self.latent_channel
 
+    def save_pretrained(self, save_directory: str):
+        """Save config as JSON (compatible with diffusers checkpoint manager)."""
+        from dataclasses import asdict
+        output_path = os.path.join(save_directory, "config.json")
+        os.makedirs(save_directory, exist_ok=True)
+        with open(output_path, "w") as f:
+            json.dump(asdict(self), f, indent=4, sort_keys=True)
+
     @classmethod
     def from_model_path(cls, model_path: str) -> "BagelTrainingConfig":
         cfg_path = os.path.join(model_path, "config.json")
@@ -750,6 +758,16 @@ class BagelForTraining(nn.Module):
         velocity = self.llm2vae(latent_output)
 
         return (velocity,)
+
+    # ------------------------------------------------------------------
+    #  PEFT / LoRA compatibility
+    # ------------------------------------------------------------------
+
+    def add_adapter(self, adapter_config, adapter_name: str = "default"):
+        """Add a PEFT LoRA adapter (matches diffusers.ModelMixin API)."""
+        from peft import inject_adapter_in_model
+
+        inject_adapter_in_model(adapter_config, self, adapter_name)
 
     # ------------------------------------------------------------------
     #  Checkpoint loading
