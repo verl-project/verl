@@ -148,20 +148,27 @@ class TRTLLMHttpServer:
 
         _end_id, _stop_ids = _resolve_chat_stop_tokens(self.model_config)
 
-        self.sampling_args = {
-            # TRTLLMSampler
-            "detokenize": False,
-            "end_id": -1,
-            "pad_id": self.model_config.hf_config.pad_token_id,
-            "stop_token_ids": [self.model_config.hf_config.eos_token_id],
-            "include_stop_str_in_output": True,
-            # TorchSampler
-            # "detokenize": True,
-            # "end_id": _end_id,
-            # "stop_token_ids": _stop_ids,
-            # "pad_id": self.model_config.hf_config.pad_token_id,
-            # "include_stop_str_in_output": True,
-        }
+        logger.info(f"TRT-LLM resolved end_id={_end_id}, stop_ids={_stop_ids}")
+
+        self._use_torch_sampler = bool(int(os.environ.get("TLLM_USE_TORCHSAMPLER", "0")))
+
+        if self._use_torch_sampler:
+            self.sampling_args = {
+                "detokenize": True,
+                "end_id": _end_id,
+                "stop_token_ids": _stop_ids,
+                "pad_id": self.model_config.hf_config.pad_token_id,
+                "include_stop_str_in_output": True,
+            }
+        else:
+            self.sampling_args = {
+                "detokenize": False,
+                "end_id": -1,
+                "pad_id": self.model_config.hf_config.pad_token_id,
+                "stop_token_ids": _stop_ids,
+                "include_stop_str_in_output": True,
+            }
+        logger.info(f"use_torch_sampler={self._use_torch_sampler}, sampling_args={self.sampling_args}")
 
     def get_server_address(self):
         """Get http server address and port."""
@@ -238,8 +245,7 @@ class TRTLLMHttpServer:
             if self.config.enable_sleep_mode and SleepConfig is not None
             else None,
             "allreduce_strategy": "NCCL",
-            "sampler_type": "TRTLLMSampler",
-            # "sampler_type": "TorchSampler",
+            "sampler_type": "TorchSampler" if self._use_torch_sampler else "TRTLLMSampler",
             **engine_kwargs,
         }
 
@@ -316,9 +322,12 @@ class TRTLLMHttpServer:
         )
         max_tokens = max(0, min(max_tokens, self.config.max_model_len - len(prompt_ids)))
         sampling_params["max_tokens"] = max_tokens
-        sampling_params["logprobs"] = 1 if sampling_params.pop("logprobs", False) else None  # TRTLLMSampler
-        # TorchSampler uses same value (1=sampled-token logprob)
-        # sampling_params["logprobs"] = 0 if sampling_params.pop("logprobs", False) else None
+        # TorchSampler: logprobs=0 means sampled-token logprob; TRTLLMSampler: logprobs=1
+        _want_logprobs = sampling_params.pop("logprobs", False)
+        if self._use_torch_sampler:
+            sampling_params["logprobs"] = 0 if _want_logprobs else None
+        else:
+            sampling_params["logprobs"] = 1 if _want_logprobs else None
         if sampling_params["top_k"] == -1:
             sampling_params["top_k"] = 0
         sampling_params.update(self.sampling_args)
@@ -558,6 +567,7 @@ class TRTLLMReplica(RolloutReplica):
         for _prof_var in (
             "TLLM_ENABLE_NSYS",
             "TLLM_NSYS_OUTPUT_DIR",
+            "TLLM_USE_TORCHSAMPLER",
         ):
             if _val := os.environ.get(_prof_var):
                 _server_env_vars[_prof_var] = _val

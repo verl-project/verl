@@ -41,10 +41,6 @@ top_p=1.0
 top_k=-1
 val_top_p=0.7
 
-# Performance Related Parameter
-# Qwen3-8B-Base: 8B params, same size class as Qwen2.5-7B
-# Single node (4x GB200) is sufficient: TP=2 each for train+rollout
-# max_position_embeddings=32768 (32K context, vs Qwen2.5's 128K)
 use_dynamic_bsz=True
 actor_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 2))
 infer_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 3))
@@ -61,7 +57,7 @@ train_prompt_mini_bsz=32
 fully_async=(
   data.train_batch_size=0
   data.gen_batch_size=1
-  trainer.test_freq=-1
+  trainer.test_freq=10
   actor_rollout_ref.hybrid_engine=False
   actor_rollout_ref.rollout.calculate_log_probs=True
   actor_rollout_ref.actor.optim.lr_decay_steps=51200
@@ -116,9 +112,9 @@ python -m verl.experimental.fully_async_policy.fully_async_main \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.7 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
     actor_rollout_ref.rollout.max_model_len=32768 \
-    actor_rollout_ref.rollout.max_num_batched_tokens=32768 \
+    actor_rollout_ref.rollout.max_num_batched_tokens=$((max_prompt_length + max_response_length)) \
     actor_rollout_ref.rollout.max_num_seqs=2048 \
-    actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=8192 \
+    actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=4096 \
     actor_rollout_ref.rollout.temperature=${temperature} \
     actor_rollout_ref.rollout.top_p=${top_p} \
     actor_rollout_ref.rollout.top_k=${top_k} \
