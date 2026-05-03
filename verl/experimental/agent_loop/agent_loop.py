@@ -623,7 +623,9 @@ class AgentLoopWorker:
                 data_config=DictConfigWrap(self.config.data),
                 function_tools=FunctionToolListWrap(self.function_tools),
             )
-            output: AgentLoopOutput = await agent_loop.run(sampling_params, **kwargs)
+            output: AgentLoopOutput = await agent_loop.run(
+                sampling_params, trajectory_info=trajectory, **kwargs
+            )
             if output is None:
                 print(
                     f"[POTENTIAL ERROR][AgentLoopWorker][RUN_RETURNED_NONE] agent={agent_name} "
