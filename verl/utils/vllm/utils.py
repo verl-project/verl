@@ -60,7 +60,10 @@ class VLLMHijack:
                 lora_tensors = None
                 from vllm.lora.peft_helper import PEFTHelper
 
-                if isinstance(lora_request, TensorLoRARequest):
+                _has_tensor_lora = hasattr(lora_request, "peft_config") and hasattr(
+                    lora_request, "lora_tensors"
+                )
+                if isinstance(lora_request, TensorLoRARequest) or _has_tensor_lora:
                     peft_config = lora_request.peft_config
                     lora_tensors = lora_request.lora_tensors
                     peft_helper = PEFTHelper.from_dict(peft_config)
@@ -96,7 +99,7 @@ class VLLMHijack:
                     lora_request_kwargs["target_embedding_padding"] = (
                         self.vocab_size + self.lora_config.lora_extra_vocab_size
                     )
-                if isinstance(lora_request, TensorLoRARequest):
+                if isinstance(lora_request, TensorLoRARequest) or _has_tensor_lora:
                     lora = self._lora_model_cls.from_lora_tensors(
                         tensors=lora_tensors,
                         **lora_request_kwargs,

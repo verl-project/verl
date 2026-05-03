@@ -246,6 +246,18 @@ class FSDPEngine(BaseEngine):
                     config=self.model_config.hf_config,
                     trust_remote_code=self.model_config.trust_remote_code,
                 )
+
+                _strip_list = getattr(module, '_verl_strip_modules', [])
+                print(f"[STRIP DEBUG] module class: {type(module).__name__}, "
+                      f"_verl_strip_modules: {_strip_list}, "
+                      f"children: {[n for n, _ in module.named_children()]}")
+                for attr in _strip_list:
+                    if hasattr(module, attr):
+                        delattr(module, attr)
+                        print(f"[STRIP DEBUG] Stripped '{attr}'")
+                        logger.info(f"Stripped unused sub-module '{attr}' to reduce memory")
+                    else:
+                        print(f"[STRIP DEBUG] '{attr}' not found on module")
             else:
                 from verl.utils.model import load_valuehead_model
 
@@ -325,6 +337,14 @@ class FSDPEngine(BaseEngine):
                 "bias": "none",
             }
             module = get_peft_model(module, LoraConfig(**lora_config))
+
+        # Cast LoRA params to match base model dtype so FSDP can flatten
+        # all params in the same unit into a single contiguous tensor.
+        base_dtype = next((p.dtype for p in module.parameters() if not p.requires_grad), None)
+        if base_dtype is not None:
+            for param in module.parameters():
+                if param.requires_grad and param.dtype != base_dtype:
+                    param.data = param.data.to(base_dtype)
 
         return module
 

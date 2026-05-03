@@ -42,9 +42,9 @@ def default_compute_score(
         NotImplementedError: If the reward function is not implemented for the given data source.
     """
     if data_source == "openai/gsm8k":
-        from . import gsm8k
+        from . import gsm8k_thinker
 
-        res = gsm8k.compute_score(solution_str, ground_truth)
+        res = gsm8k_thinker.compute_score(solution_str, ground_truth)
     elif data_source in ["lighteval/MATH", "DigitalLearningGmbH/MATH-lighteval", "HuggingFaceH4/MATH-500"]:
         from . import math_reward
 
