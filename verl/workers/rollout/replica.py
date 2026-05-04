@@ -363,10 +363,17 @@ def _load_trtllm():
     return TRTLLMReplica
 
 
+def _load_vllm_pd():
+    from verl.workers.rollout.vllm_rollout.vllm_pd_replica import vLLMPDReplica
+
+    return vLLMPDReplica
+
+
 # Register built-in types
 RolloutReplicaRegistry.register("vllm", _load_vllm)
 RolloutReplicaRegistry.register("sglang", _load_sglang)
 RolloutReplicaRegistry.register("trtllm", _load_trtllm)
+RolloutReplicaRegistry.register("vllm_pd", _load_vllm_pd)
 
 
 # Original function for backward compatibility

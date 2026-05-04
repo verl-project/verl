@@ -15,10 +15,11 @@ import warnings
 from dataclasses import dataclass, field
 from typing import Optional
 
-from omegaconf import MISSING
+from omegaconf import MISSING, DictConfig, OmegaConf
 
 from verl.base_config import BaseConfig
 from verl.utils.profiler import ProfilerConfig
+from verl.workers.config.disaggregation import DisaggregationConfig
 from verl.workers.config.model import MtpConfig
 
 __all__ = [
@@ -277,6 +278,10 @@ class RolloutConfig(BaseConfig):
 
     qat: Optional[dict] = None
 
+    # Prefill-Decode disaggregated rollout config. Active only when
+    # ``rollout.name`` is ``sglang_pd`` or ``vllm_pd``.
+    disaggregation: DisaggregationConfig = field(default_factory=DisaggregationConfig)
+
     def __post_init__(self):
         """Validate the rollout config"""
         # Deprecation warning for mode field - only async mode is supported
@@ -323,3 +328,27 @@ class RolloutConfig(BaseConfig):
                 raise NotImplementedError(
                     f"Current rollout {self.name=} not implemented pipeline_model_parallel_size > 1 yet."
                 )
+
+        # OmegaConf hands us either a dict, DictConfig, or already-coerced dataclass
+        # depending on call site; normalize so downstream code can treat
+        # ``self.disaggregation`` as a DisaggregationConfig uniformly.
+        if isinstance(self.disaggregation, dict):
+            object.__setattr__(self, "disaggregation", DisaggregationConfig(**self.disaggregation))
+        elif not isinstance(self.disaggregation, DisaggregationConfig):
+            if not isinstance(self.disaggregation, DictConfig):
+                raise TypeError(
+                    f"rollout.disaggregation must be dict, DictConfig, or DisaggregationConfig; "
+                    f"got {type(self.disaggregation).__name__}."
+                )
+            object.__setattr__(
+                self,
+                "disaggregation",
+                DisaggregationConfig(**OmegaConf.to_container(self.disaggregation, resolve=True)),
+            )
+
+        if self.disaggregation.enabled and self.name not in ("sglang_pd", "vllm_pd"):
+            raise ValueError(
+                f"rollout.disaggregation.enabled=True requires rollout.name in "
+                f"('sglang_pd', 'vllm_pd'); got {self.name!r}. Other rollout backends "
+                f"silently ignore disaggregation settings."
+            )
