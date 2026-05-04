@@ -27,6 +27,16 @@ _QWEN3_TIMESTAMP_MODEL_TYPES = {
     "qwen3_5_moe",
 }
 
+# HF Qwen3 VL processors (Qwen3VLProcessor / Qwen3VLVideoProcessor / Qwen3_5*) do NOT expose
+# `model_type` or `.config` attributes, so the class name is the only reliable identifier in
+# practice. The `_QWEN3_TIMESTAMP_MODEL_TYPES` set is kept as a defense for processors that do
+# expose a config (e.g. wrappers, dummies in tests).
+_QWEN3_TIMESTAMP_CLASS_MARKERS = (
+    "Qwen3VL",
+    "Qwen3VLMoe",
+    "Qwen3_5",
+)
+
 
 def _is_qwen3_timestamp_processor(processor: Any) -> bool:
     for obj in (
@@ -37,6 +47,9 @@ def _is_qwen3_timestamp_processor(processor: Any) -> bool:
     ):
         if obj is None:
             continue
+        cls_name = obj.__class__.__name__
+        if any(marker in cls_name for marker in _QWEN3_TIMESTAMP_CLASS_MARKERS):
+            return True
         config = getattr(obj, "config", obj)
         if str(getattr(config, "model_type", "") or "").lower() in _QWEN3_TIMESTAMP_MODEL_TYPES:
             return True
