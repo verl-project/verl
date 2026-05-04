@@ -21,11 +21,7 @@ import torch
 from verl.experimental.agent_loop.preprocessed_multimodal import (
     _qwen3_video_replacement,
     build_vllm_preprocessed_multimodal_input,
-)
-from verl.experimental.agent_loop.rollout_mm_processor import (
-    append_preprocessed_multimodal_input_kwargs,
-    build_rollout_preprocessed_multimodal_input,
-    refresh_preprocessed_multimodal_input_prompt_ids,
+    refresh_vllm_preprocessed_multimodal_prompt_ids,
 )
 
 
@@ -74,6 +70,7 @@ class DummyQwen2VLImageProcessor:
 
 
 class DummyQwen3VLProcessor:
+    model_type = "qwen3_vl"
     image_processor = DummyQwen3VLImageProcessor()
     video_processor = DummyQwen3VLVideoProcessor()
     tokenizer = DummyTokenizer()
@@ -83,7 +80,7 @@ class DummyQwen3VLProcessor:
 
 
 class DummyQwen3_5Processor(DummyQwen3VLProcessor):
-    pass
+    model_type = "qwen3_5"
 
 
 class DummyQwen3_5MoeConfig:
@@ -350,82 +347,23 @@ def test_build_image_direct_input(fake_vllm_modules):
     assert direct_input["mm_placeholders"]["image"][0].length == 4
 
 
-def test_rollout_preprocessed_multimodal_wrapper_respects_config_flag(monkeypatch):
-    payload = object()
-    from verl.experimental.agent_loop import rollout_mm_processor
-
-    monkeypatch.setitem(
-        rollout_mm_processor._PREPROCESSED_MULTIMODAL_BUILDERS,
-        "test_backend",
-        ("enabled", lambda **kwargs: payload),
-    )
-
-    disabled = build_rollout_preprocessed_multimodal_input(
-        rollout_name="test_backend",
-        rollout_config={"enabled": False},
-        processor=DummyQwen2VLProcessor(),
-        prompt_ids=[1],
-        model_inputs={},
-        images=[object()],
-    )
-    assert disabled is None
-
-    enabled = build_rollout_preprocessed_multimodal_input(
-        rollout_name="test_backend",
-        rollout_config={"enabled": True},
-        processor=DummyQwen2VLProcessor(),
-        prompt_ids=[1],
-        model_inputs={},
-        images=[object()],
-    )
-    assert enabled is payload
-
-
-def test_rollout_preprocessed_multimodal_wrapper_adds_backend_generate_kwarg():
-    payload = object()
-    generate_kwargs = {"request_id": "request"}
-
-    append_preprocessed_multimodal_input_kwargs(
-        generate_kwargs,
-        rollout_name="vllm",
-        preprocessed_multimodal_input=payload,
-    )
-
-    assert generate_kwargs["preprocessed_multimodal_input"] is payload
-
-
-def test_rollout_preprocessed_multimodal_wrapper_refreshes_prompt_ids():
+def test_refresh_vllm_preprocessed_multimodal_prompt_ids_mutates_in_place():
+    mm_kwargs_obj = object()
     payload = {
         "type": "multimodal",
         "prompt_token_ids": [1],
-        "mm_kwargs": object(),
+        "mm_kwargs": mm_kwargs_obj,
         "mm_hashes": object(),
         "mm_placeholders": object(),
     }
 
-    refreshed = refresh_preprocessed_multimodal_input_prompt_ids(
-        rollout_name="vllm",
-        preprocessed_multimodal_input=payload,
-        prompt_ids=[1, 2, 3],
-    )
+    refreshed = refresh_vllm_preprocessed_multimodal_prompt_ids(payload, prompt_ids=[1, 2, 3])
 
-    assert refreshed is not payload
-    assert refreshed["prompt_token_ids"] == [1, 2, 3]
-    assert refreshed["mm_kwargs"] is payload["mm_kwargs"]
+    assert refreshed is payload
+    assert payload["prompt_token_ids"] == [1, 2, 3]
+    assert payload["mm_kwargs"] is mm_kwargs_obj
 
-    unsupported = refresh_preprocessed_multimodal_input_prompt_ids(
-        rollout_name="unknown",
-        preprocessed_multimodal_input=payload,
-        prompt_ids=[4],
-    )
-    assert unsupported is payload
-
-    with pytest.raises(ValueError, match="prompt_token_ids"):
-        refresh_preprocessed_multimodal_input_prompt_ids(
-            rollout_name="vllm",
-            preprocessed_multimodal_input={"type": "multimodal"},
-            prompt_ids=[4],
-        )
+    assert refresh_vllm_preprocessed_multimodal_prompt_ids(None, prompt_ids=[1]) is None
 
 
 def test_real_vllm_direct_multimodal_contract_when_available():

@@ -20,11 +20,6 @@ from typing import Any, Optional
 import numpy as np
 import torch
 
-
-def _class_name(obj: Any) -> str:
-    return obj.__class__.__name__ if obj is not None else ""
-
-
 _QWEN3_TIMESTAMP_MODEL_TYPES = {
     "qwen3_vl",
     "qwen3_vl_moe",
@@ -32,47 +27,27 @@ _QWEN3_TIMESTAMP_MODEL_TYPES = {
     "qwen3_5_moe",
 }
 
-_QWEN3_TIMESTAMP_CLASS_MARKERS = (
-    "Qwen3VL",
-    "Qwen3VLMoe",
-    "Qwen3_5",
-)
-
-
-def _model_type(obj: Any) -> str:
-    config = getattr(obj, "config", obj)
-    return str(getattr(config, "model_type", "") or "").lower()
-
 
 def _is_qwen3_timestamp_processor(processor: Any) -> bool:
-    candidates = (
+    for obj in (
         processor,
         getattr(processor, "image_processor", None),
         getattr(processor, "video_processor", None),
         getattr(processor, "config", None),
-    )
-    return any(
-        _model_type(obj) in _QWEN3_TIMESTAMP_MODEL_TYPES
-        or any(marker in _class_name(obj) for marker in _QWEN3_TIMESTAMP_CLASS_MARKERS)
-        for obj in candidates
-        if obj is not None
-    )
+    ):
+        if obj is None:
+            continue
+        config = getattr(obj, "config", obj)
+        if str(getattr(config, "model_type", "") or "").lower() in _QWEN3_TIMESTAMP_MODEL_TYPES:
+            return True
+    return False
 
 
-def _as_mapping(model_inputs: Any) -> dict[str, Any]:
-    if model_inputs is None:
-        return {}
-    return dict(model_inputs)
-
-
-def _extract_video_metadata(videos: Any) -> Optional[list[dict[str, Any]]]:
-    if videos is None:
-        return None
-
+def _extract_video_metadata(videos: Sequence[Any]) -> list[dict[str, Any]]:
     metadata = []
-    for item in videos:
+    for idx, item in enumerate(videos):
         if not isinstance(item, tuple) or len(item) != 2:
-            return None
+            raise TypeError(f"video item {idx} must be a (tensor, metadata) tuple, got {type(item).__name__}")
         metadata.append(dict(item[1]))
     return metadata
 
@@ -111,6 +86,9 @@ def calculate_qwen3_timestamps(
         num_frames = min(num_frames, total_num_frames)
         indices = np.linspace(0, total_num_frames - 1, num_frames).round().astype(int).tolist()
 
+    # Qwen3-VL groups frames into temporal patches of size `temporal_patch_size` and emits one
+    # timestamp per patch (the patch midpoint, computed below). Pad with the final frame so the
+    # frame count is a multiple of the patch size; otherwise the patch loop drops a tail patch.
     if len(indices) % temporal_patch_size != 0:
         pad_count = temporal_patch_size - len(indices) % temporal_patch_size
         indices.extend([indices[-1]] * pad_count)
@@ -210,9 +188,12 @@ def _find_subsequence(prompt_ids: Sequence[int], target: Sequence[int], *, start
     if not target:
         raise ValueError("Cannot locate an empty multimodal placeholder")
 
-    max_start = len(prompt_ids) - len(target)
+    target_list = list(target)
+    target_len = len(target_list)
+    first = target_list[0]
+    max_start = len(prompt_ids) - target_len
     for idx in range(start, max_start + 1):
-        if list(prompt_ids[idx : idx + len(target)]) == list(target):
+        if prompt_ids[idx] == first and list(prompt_ids[idx : idx + target_len]) == target_list:
             return idx
     raise ValueError("Unable to locate a preprocessed multimodal placeholder in prompt ids")
 
@@ -284,6 +265,9 @@ def _build_qwen3_video_placeholders(
             video_token_id=video_token_id,
         )
         offset = _find_subsequence(prompt_ids, replacement, start=start)
+        # is_embed marks positions consumed by video patch embeddings vs. surrounding text-only
+        # tokens (vision_start/end and "<seconds>" timestamp text). vLLM only routes embed-mask
+        # positions to the vision encoder; getting this wrong corrupts the prompt.
         is_embed = torch.tensor([token_id == video_token_id for token_id in replacement], dtype=torch.bool)
         placeholders.append(
             placeholder_cls(
@@ -320,6 +304,8 @@ def _hash_value(hasher: Any, value: Any) -> None:
 
 
 def _hash_mm_item(item: Any) -> str:
+    # Must use SHA-256 to match vLLM's mm prefix-cache hash function. Switching to a different
+    # algorithm silently breaks cache hits without raising — observed only as a perf regression.
     hasher = hashlib.sha256()
     _hash_value(hasher, item.get_data())
     return hasher.hexdigest()
@@ -374,16 +360,17 @@ def build_vllm_preprocessed_multimodal_input(
     images: Any = None,
     videos: Any = None,
 ) -> Any | None:
-    """Build a vLLM direct MultiModalInput from HF processor outputs.
+    """Construct a vLLM ``MultiModalInput`` payload from HF processor outputs.
 
-    The caller owns the model-specific prompt contract. This builder supports
-    the Qwen VL contracts used by verl: Qwen2/Qwen2.5 token-run placeholders
-    and Qwen3/Qwen3.5 timestamp-aware video placeholders.
+    vLLM normally re-runs the HF processor inside the engine. This bypass lets verl reuse
+    the processor outputs already computed during chat-template application, avoiding the
+    redundant pass per turn in multi-turn rollouts. Returns ``None`` when there is no
+    multimodal payload, so callers can fall back to the legacy raw-media path.
     """
     from vllm.inputs import mm_input
     from vllm.multimodal.inputs import PlaceholderRange
 
-    inputs = _as_mapping(model_inputs)
+    inputs: dict[str, Any] = dict(model_inputs) if model_inputs else {}
     has_images = (
         images is not None and "image_grid_thw" in inputs and ("pixel_values" in inputs or "image_embeds" in inputs)
     )
@@ -397,13 +384,12 @@ def build_vllm_preprocessed_multimodal_input(
 
     merge_length = _merge_length(processor)
     tokenizer = _get_tokenizer(processor)
+    is_qwen3_ts = _is_qwen3_timestamp_processor(processor)
 
     if has_videos:
         timestamps = inputs.get("timestamps")
-        video_metadata = _extract_video_metadata(videos)
-        if timestamps is None and _is_qwen3_timestamp_processor(processor):
-            if video_metadata is None:
-                raise ValueError("Qwen3-style VL direct video input requires video metadata for timestamps")
+        if timestamps is None and is_qwen3_ts:
+            video_metadata = _extract_video_metadata(videos)
             timestamps = [
                 calculate_qwen3_timestamps(
                     processor=processor,
@@ -438,7 +424,7 @@ def build_vllm_preprocessed_multimodal_input(
         )
 
     if has_videos:
-        if _is_qwen3_timestamp_processor(processor) and "timestamps" in inputs:
+        if is_qwen3_ts and "timestamps" in inputs:
             mm_placeholders["video"] = _build_qwen3_video_placeholders(
                 prompt_ids=prompt_ids,
                 processor=processor,
@@ -471,16 +457,9 @@ def refresh_vllm_preprocessed_multimodal_prompt_ids(
     *,
     prompt_ids: Sequence[int],
 ) -> Any | None:
+    """Update ``prompt_token_ids`` in place between turns. mm_kwargs/hashes/placeholders are
+    keyed by position+modality and remain valid as long as the prompt structure is preserved."""
     if preprocessed_multimodal_input is None:
         return None
-    if not isinstance(preprocessed_multimodal_input, Mapping):
-        raise TypeError(
-            "vLLM preprocessed multimodal input must be a mapping with prompt_token_ids, "
-            f"got {type(preprocessed_multimodal_input).__name__}"
-        )
-    if "prompt_token_ids" not in preprocessed_multimodal_input:
-        raise ValueError("vLLM preprocessed multimodal input is missing prompt_token_ids")
-
-    refreshed = dict(preprocessed_multimodal_input)
-    refreshed["prompt_token_ids"] = list(prompt_ids)
-    return refreshed
+    preprocessed_multimodal_input["prompt_token_ids"] = list(prompt_ids)
+    return preprocessed_multimodal_input

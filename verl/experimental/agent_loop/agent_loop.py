@@ -30,12 +30,11 @@ from pydantic import BaseModel, ConfigDict
 from tensordict import TensorDict
 from transformers import AutoProcessor, AutoTokenizer
 
-from verl.experimental.agent_loop.prometheus_utils import update_prometheus_config
-from verl.experimental.agent_loop.rollout_mm_processor import (
-    append_preprocessed_multimodal_input_kwargs,
-    build_rollout_preprocessed_multimodal_input,
-    refresh_preprocessed_multimodal_input_prompt_ids,
+from verl.experimental.agent_loop.preprocessed_multimodal import (
+    build_vllm_preprocessed_multimodal_input,
+    refresh_vllm_preprocessed_multimodal_prompt_ids,
 )
+from verl.experimental.agent_loop.prometheus_utils import update_prometheus_config
 from verl.experimental.agent_loop.utils import resolve_config_path
 from verl.experimental.teacher_loop import MultiTeacherModelManager
 from verl.protocol import DataProto
@@ -179,16 +178,9 @@ class AsyncLLMServerManager:
                 video_data=video_data,
                 **kwargs,
             )
-            preprocessed_multimodal_input = refresh_preprocessed_multimodal_input_prompt_ids(
-                rollout_name=self.rollout_name,
-                preprocessed_multimodal_input=preprocessed_multimodal_input,
-                prompt_ids=prompt_ids,
-            )
-            append_preprocessed_multimodal_input_kwargs(
-                generate_kwargs,
-                rollout_name=self.rollout_name,
-                preprocessed_multimodal_input=preprocessed_multimodal_input,
-            )
+            if self.rollout_name == "vllm" and preprocessed_multimodal_input is not None:
+                refresh_vllm_preprocessed_multimodal_prompt_ids(preprocessed_multimodal_input, prompt_ids=prompt_ids)
+                generate_kwargs["preprocessed_multimodal_input"] = preprocessed_multimodal_input
             output: TokenOutput | DiffusionOutput = await server.generate.remote(**generate_kwargs)
             return output
         finally:
@@ -436,11 +428,13 @@ class AgentLoopBase(ABC):
         images: list[Image.Image] = None,
         videos: list[tuple[torch.Tensor, dict]] = None,
     ) -> Any | None:
-        return build_rollout_preprocessed_multimodal_input(
-            rollout_name=self.rollout_config.get("name", None),
-            rollout_config=self.rollout_config,
-            processor=self.processor,
+        if self.rollout_config.get("name", None) != "vllm":
+            return None
+        if not self.rollout_config.get("use_preprocessed_multimodal_input", False):
+            return None
+        return build_vllm_preprocessed_multimodal_input(
             prompt_ids=prompt_ids,
+            processor=self.processor,
             model_inputs=model_inputs,
             images=images,
             videos=videos,
