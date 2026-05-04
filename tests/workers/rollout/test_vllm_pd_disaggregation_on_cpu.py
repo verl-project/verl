@@ -26,6 +26,7 @@ vLLM-engine tests behind ``@pytest.mark.skipif(not CUDA_AVAILABLE)``.
 
 from __future__ import annotations
 
+from collections import Counter
 from unittest.mock import patch
 
 import pytest
@@ -379,6 +380,20 @@ def test_select_decode_peer_single_peer_returns_same():
     server_cls = _import_http_server()
     stub = _DispatchStub(decode_peers=["only_peer"])
     assert all(server_cls._select_decode_peer(stub) == "only_peer" for _ in range(5))
+
+
+def test_select_decode_peer_distribution_balanced_at_32_with_3_peers():
+    """Lock in the empirical Phase-3a observation: 32 sequential dispatches
+    across 3 decode peers land in an exact (floor, ceil) split of (10, 11),
+    spread of 1. Catches accidental drift away from strict cycle (e.g., a
+    future change that randomizes for cache-locality but loses balance)."""
+    server_cls = _import_http_server()
+    stub = _DispatchStub(decode_peers=["peer0", "peer1", "peer2"])
+    counts = Counter(server_cls._select_decode_peer(stub) for _ in range(32))
+    assert sorted(counts.values()) == [10, 11, 11], (
+        f"expected (10, 11, 11) hit counts under strict round-robin, got {dict(counts)}"
+    )
+    assert max(counts.values()) - min(counts.values()) <= 1
 
 
 @pytest.mark.asyncio
