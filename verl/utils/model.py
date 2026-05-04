@@ -675,7 +675,7 @@ def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_cod
 
 _architecture_to_auto_class = {
     "ForCausalLM": AutoModelForCausalLM,
-    "ForConditionalGeneration": AutoModelForCausalLM,
+    "Qwen3OmniMoeForConditionalGeneration": AutoModelForCausalLM,
     "ForVision2Seq": AutoModelForVision2Seq,
     "ForTokenClassification": AutoModelForTokenClassification,
     "ForSequenceClassification": AutoModelForSequenceClassification,
@@ -733,7 +733,7 @@ try:
             pass
     Qwen3OmniMoeConfig.tie_word_embeddings = _FalseTieDescriptor()
     AutoModelForCausalLM.register(Qwen3OmniMoeConfig, Qwen3OmniMoeForConditionalGeneration)
-except Exception:
+except ImportError:
     pass
 
 

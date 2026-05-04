@@ -85,7 +85,6 @@ _ROLLOUT_REGISTRY = {
     ("sglang", "async"): "verl.workers.rollout.sglang_rollout.sglang_rollout.ServerAdapter",
     ("trtllm", "async"): "verl.workers.rollout.trtllm_rollout.trtllm_rollout.ServerAdapter",
     ("vllm_omni", "async"): "verl.workers.rollout.vllm_rollout.ServerAdapter",
-    ("vllm_omni_ar", "async"): "verl.workers.rollout.vllm_rollout.ServerAdapter",
 }
 
 
