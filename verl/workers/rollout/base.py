@@ -82,6 +82,11 @@ class BaseRollout(ABC):
 
 _ROLLOUT_REGISTRY = {
     ("vllm", "async"): "verl.workers.rollout.vllm_rollout.ServerAdapter",
+    # vLLMPDReplica._server_handle points at the prefill vLLMHttpServer actor,
+    # which exposes the same generate() interface as the colocated server, so
+    # the trainer-facing adapter is identical. The PD-specific dispatch fans
+    # out internally (vllm_async_server.vLLMHttpServer._pd_dispatch).
+    ("vllm_pd", "async"): "verl.workers.rollout.vllm_rollout.ServerAdapter",
     ("sglang", "async"): "verl.workers.rollout.sglang_rollout.sglang_rollout.ServerAdapter",
     ("trtllm", "async"): "verl.workers.rollout.trtllm_rollout.trtllm_rollout.ServerAdapter",
 }

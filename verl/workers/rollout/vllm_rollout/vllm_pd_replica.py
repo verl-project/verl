@@ -160,7 +160,12 @@ class vLLMPDReplica(vLLMReplica):
                     kv_transfer_config=prefill_kv_cfg,
                     side_channel_host=prefill_host_ip,
                     side_channel_port=prefill_side_channel_port,
-                    actor_name=f"vllm_server_{self.replica_rank}_prefill{self.name_suffix}",
+                    # Naming aligns with SGLang PR #6117 so vllm_rollout.ServerAdapter's
+                    # PD-aware actor lookup can resolve `(role, server_index)` →
+                    # `{prefix}server_{R}_0` / `{prefix}server_decode_{R}_{i}` without any
+                    # role-specific knowledge in the adapter beyond the role flag.
+                    # `node_rank=0` because this PR is single-node only.
+                    actor_name=f"vllm_pd_server_{self.replica_rank}_0{self.name_suffix}",
                 )
             ]
         finally:
@@ -196,7 +201,7 @@ class vLLMPDReplica(vLLMReplica):
                         kv_transfer_config=decode_kv_cfg,
                         side_channel_host=prefill_host_ip,
                         side_channel_port=decode_side_channel_port,
-                        actor_name=f"vllm_server_{self.replica_rank}_decode_{i}{self.name_suffix}",
+                        actor_name=f"vllm_pd_server_decode_{self.replica_rank}_{i}{self.name_suffix}",
                     )
                 )
             finally:

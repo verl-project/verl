@@ -297,6 +297,41 @@ class LLMServerManager:
             * self.rollout_config.data_parallel_size
             * self.rollout_config.pipeline_model_parallel_size
         )
+        # Under PD disaggregation, one replica owns 1 prefill + N decode
+        # engines, so the effective per-replica world size is the sum of
+        # both legs. Without this override, the colocated formula above
+        # yields TP=1 → 1 GPU/replica, the trainer slices N replicas of
+        # 1 worker each, and vLLMPDReplica.launch_servers fails the
+        # `len(self.workers) == self.world_size` assertion.
+        # `self.rollout_config` is still a raw DictConfig here (the
+        # dataclass conversion happens inside RolloutReplica.__init__),
+        # so use `in` membership against DictConfig.keys() rather than
+        # getattr — DictConfig.__getattr__ raises ConfigAttributeError on
+        # missing keys instead of returning the default.
+        from omegaconf import DictConfig, OmegaConf
+        if isinstance(self.rollout_config, DictConfig):
+            disagg_enabled = bool(OmegaConf.select(self.rollout_config, "disaggregation.enabled", default=False))
+        else:
+            disagg = getattr(self.rollout_config, "disaggregation", None)
+            disagg_enabled = bool(disagg and getattr(disagg, "enabled", False))
+        if disagg_enabled:
+            # Use OmegaConf.select for ALL disaggregation keys: the user's
+            # Hydra `+disaggregation.X=Y` overrides only seed the keys they
+            # explicitly named. Anything else (e.g. decode_tp default)
+            # raises ConfigAttributeError under DictConfig struct mode.
+            tp = self.rollout_config.tensor_model_parallel_size
+            decode_tp = OmegaConf.select(
+                self.rollout_config, "disaggregation.decode_tensor_model_parallel_size", default=None
+            ) or tp
+            prefill_replicas = OmegaConf.select(
+                self.rollout_config, "disaggregation.prefill_replicas", default=1
+            )
+            decode_replicas = OmegaConf.select(
+                self.rollout_config, "disaggregation.decode_replicas", default=1
+            )
+            rollout_world_size = (
+                prefill_replicas * tp + decode_replicas * decode_tp
+            ) * self.rollout_config.data_parallel_size * self.rollout_config.pipeline_model_parallel_size
         world_size = (
             self.worker_group.world_size
             if self.worker_group

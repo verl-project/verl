@@ -76,17 +76,85 @@ class ServerAdapter(BaseRollout):
 
         rank = int(os.environ["RANK"])
         local_world_size = int(os.environ["RAY_LOCAL_WORLD_SIZE"])
-        rollout_world_size = (
-            self.config.tensor_model_parallel_size
-            * self.config.data_parallel_size
-            * self.config.pipeline_model_parallel_size
-        )
+        # PD asymmetric layout inflates per-replica footprint; must match
+        # llm_server.py:_initialize_llm_servers' rollout_world_size override
+        # or trainer-to-replica mapping breaks. See SGLang PR #6117 for the
+        # equivalent change on the SGLang ServerAdapter.
+        prefill_tp = self.config.tensor_model_parallel_size
+        disagg = getattr(self.config, "disaggregation", None)
+        disagg_enabled = disagg is not None and getattr(disagg, "enabled", False)
+        if disagg_enabled:
+            decode_tp = (
+                disagg.decode_tensor_model_parallel_size
+                if disagg.decode_tensor_model_parallel_size is not None
+                else prefill_tp
+            )
+            rollout_world_size = (
+                (prefill_tp * disagg.prefill_replicas + decode_tp * disagg.decode_replicas)
+                * self.config.data_parallel_size
+                * self.config.pipeline_model_parallel_size
+            )
+        else:
+            rollout_world_size = (
+                prefill_tp * self.config.data_parallel_size * self.config.pipeline_model_parallel_size
+            )
         if replica_rank == -1:
             self.replica_rank = rank // rollout_world_size
         else:
             self.replica_rank = replica_rank
         self.rollout_rank = rank % rollout_world_size
         self.node_rank = self.rollout_rank // local_world_size
+
+        # Map each trainer rank to its co-located vLLM server so weight-update
+        # IPC handles stay on the GPU where they were created. Mirrors SGLang
+        # PR #6117. Offset math assumes prefill_replicas == 1 (enforced by
+        # vLLMPDReplica); if that ever lifts, update both this block and
+        # vLLMPDReplica.launch_servers.
+        self._pd_role: Optional[str] = None
+        self._pd_server_index: Optional[int] = None
+        self._pd_tp_local_rank: Optional[int] = None
+        if disagg_enabled:
+            decode_tp = (
+                disagg.decode_tensor_model_parallel_size
+                if disagg.decode_tensor_model_parallel_size is not None
+                else prefill_tp
+            )
+            footprint = prefill_tp + disagg.decode_replicas * decode_tp
+            local = self.rollout_rank % footprint
+            if local < prefill_tp:
+                self._pd_role = "prefill"
+                self._pd_server_index = 0
+                self._pd_tp_local_rank = local
+            else:
+                off = local - prefill_tp
+                self._pd_role = "decode"
+                self._pd_server_index = off // decode_tp
+                self._pd_tp_local_rank = off % decode_tp
+        # Colocated path: every rollout_rank=0 owns the adapter.
+        # PD path: each role's TP-rank-0 owns its own adapter.
+        if disagg_enabled:
+            self._has_server = self._pd_tp_local_rank == 0
+        else:
+            self._has_server = self.rollout_rank == 0
+        # Log PD role assignment so deadlocks can be traced back to the
+        # rank → role mapping. Every rank emits one line at startup.
+        logger.info(
+            "[PD-trace] vllm ServerAdapter init: rank=%d replica_rank=%d rollout_rank=%d "
+            "node_rank=%d local_rank=%d role=%s server_idx=%s tp_local=%s has_server=%s "
+            "rollout_world_size=%d footprint=%s",
+            rank,
+            self.replica_rank,
+            self.rollout_rank,
+            self.node_rank,
+            self.rollout_rank % local_world_size,
+            self._pd_role,
+            self._pd_server_index,
+            self._pd_tp_local_rank,
+            self._has_server,
+            rollout_world_size,
+            (prefill_tp + disagg.decode_replicas * (disagg.decode_tensor_model_parallel_size or prefill_tp))
+            if disagg_enabled else None,
+        )
 
         if config.layered_summon or (config.expert_parallel_size > 1 and not _check_vllm_version_for_sleep_level()):
             logger.warning("Setting the sleep level to 1 may cause a memory overflow.")
@@ -133,13 +201,23 @@ class ServerAdapter(BaseRollout):
         Returns:
             The result of the method execution, or None if non_block=True.
         """
-        if self.rollout_rank != 0:
+        if not self._has_server:
             return None
 
         # Lazy init http server adapter because http server is launched after hybrid engine.
         if self.server_handle is None:
             prefix = self._get_server_name_prefix()
-            self.server_handle = ray.get_actor(f"{prefix}server_{self.replica_rank}_{self.node_rank}")
+            # PD: each role's TP-rank-0 finds its own actor. Naming aligns with
+            # SGLang PR #6117 (`{prefix}server_{R}_0` for prefill,
+            # `{prefix}server_decode_{R}_{i}` for decode i). Colocated path
+            # falls back to the original `{prefix}server_{R}_{node_rank}`.
+            if self._pd_role == "prefill":
+                actor_name = f"{prefix}server_{self.replica_rank}_0"
+            elif self._pd_role == "decode":
+                actor_name = f"{prefix}server_decode_{self.replica_rank}_{self._pd_server_index}"
+            else:
+                actor_name = f"{prefix}server_{self.replica_rank}_{self.node_rank}"
+            self.server_handle = ray.get_actor(actor_name)
 
         future = self.server_handle.collective_rpc.remote(method, timeout=timeout, args=args, kwargs=kwargs)
         return future if non_block else await future
@@ -150,13 +228,23 @@ class ServerAdapter(BaseRollout):
         Args:
             tags: weights or kv_cache.
         """
+        logger.info(
+            "[PD-trace] resume: rollout_rank=%d role=%s tags=%s has_server=%s",
+            self.rollout_rank, self._pd_role, tags, self._has_server,
+        )
         if self.config.free_cache_engine:
             await self._execute_method("wake_up", kwargs={"tags": tags})
+        logger.info("[PD-trace] resume DONE: rollout_rank=%d", self.rollout_rank)
 
     async def release(self):
         """Release weights and kv cache in GPU memory."""
+        logger.info(
+            "[PD-trace] release: rollout_rank=%d role=%s has_server=%s",
+            self.rollout_rank, self._pd_role, self._has_server,
+        )
         if self.config.free_cache_engine:
             await self._execute_method("sleep", kwargs={"level": self.sleep_level})
+        logger.info("[PD-trace] release DONE: rollout_rank=%d", self.rollout_rank)
 
     @torch.no_grad()
     async def update_weights(
@@ -164,11 +252,19 @@ class ServerAdapter(BaseRollout):
     ):
         """Update model weights via CUDA IPC (fallback to shared memory if IPC not supported) to inference workers."""
         start_time = time.time()
+        logger.info(
+            "[PD-trace] update_weights ENTER: rollout_rank=%d role=%s zmq=%s has_server=%s",
+            self.rollout_rank, self._pd_role, self.zmq_handle, self._has_server,
+        )
 
         future = await self._execute_method(
             "update_weights_from_ipc",
             non_block=True,
             kwargs={**kwargs, "use_shm": self.use_shm},
+        )
+        logger.info(
+            "[PD-trace] update_weights _execute_method returned: rollout_rank=%d future=%s",
+            self.rollout_rank, "<set>" if future else "None",
         )
 
         bucket_size_mb = self.config.checkpoint_engine.update_weights_bucket_megabytes
@@ -177,13 +273,18 @@ class ServerAdapter(BaseRollout):
             bucket_size_mb=bucket_size_mb,
             use_shm=self.use_shm,
         )
+        logger.info("[PD-trace] sender.send_weights START: rollout_rank=%d", self.rollout_rank)
         await sender.async_send_weights(weights)
+        logger.info("[PD-trace] sender.send_weights DONE: rollout_rank=%d", self.rollout_rank)
 
         if future is not None:
+            logger.info("[PD-trace] awaiting engine future: rollout_rank=%d", self.rollout_rank)
             await future
+            logger.info("[PD-trace] engine future DONE: rollout_rank=%d", self.rollout_rank)
 
-        # reset prefix cache after updating weights
-        if self.rollout_rank == 0:
+        # Reset prefix cache after weight swap. Under PD, every rank that
+        # owns an engine (each role's TP-rank-0) must flush its own KV cache.
+        if self._has_server:
             await self.server_handle.clear_kv_cache.remote()
             if global_steps is not None:
                 await self.server_handle.set_global_steps.remote(global_steps)
