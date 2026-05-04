@@ -112,7 +112,6 @@ def calculate_debug_metrics(data: DataProto) -> dict:
 
     pearson_corrcoef = pearson_correlation_coefficient(actor_probs, rollout_probs, response_mask_bool)
     rollout_probs_diff = calculate_log_prob_diff(actor_probs, rollout_probs, response_mask_bool)
-
     return {
         "training/rollout_probs_diff_valid": 1,
         "training/rollout_probs_diff_max": torch.max(rollout_probs_diff).detach().item(),

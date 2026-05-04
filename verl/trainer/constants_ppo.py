@@ -17,13 +17,18 @@ import os
 
 from ray._private.runtime_env.constants import RAY_JOB_CONFIG_JSON_ENV_VAR
 
+from verl.utils.device import get_device_capability
+
+_major, _ = get_device_capability()
+# WAR: GB200 nodes without IMEX channel support raise ncclUnhandledCudaError 801 during
+# Megatron all_gather (mbridge export_weights) when NCCL tries to use NVLS/MNNVL.
+# Disable both on Blackwell (SM 10.x); non-Blackwell GPUs don't have MNNVL.
+_gb200_nccl_env = {"NCCL_NVLS_ENABLE": "0", "NCCL_MNNVL_ENABLE": "0"} if (_major or 0) >= 10 else {}
+
 PPO_RAY_RUNTIME_ENV = {
     "env_vars": {
         "TOKENIZERS_PARALLELISM": "true",
-        # "NCCL_DEBUG": "INFO",
-        # TODO: Need to set this on Lyris clusters for now. Remove this from the MR.
-        "NCCL_NVLS_ENABLE": "0",
-        "NCCL_MNNVL_ENABLE": "0",
+        "NCCL_DEBUG": "WARN",
         "VLLM_LOGGING_LEVEL": "WARN",
         "VLLM_ALLOW_RUNTIME_LORA_UPDATING": "true",
         "CUDA_DEVICE_MAX_CONNECTIONS": "1",
@@ -35,6 +40,7 @@ PPO_RAY_RUNTIME_ENV = {
         "HCCL_HOST_SOCKET_PORT_RANGE": "auto",
         "HCCL_NPU_SOCKET_PORT_RANGE": "auto",
         "HSA_NO_SCRATCH_RECLAIM": "1",
+        **_gb200_nccl_env,
     },
 }
 
