@@ -136,25 +136,15 @@ class ServerAdapter(BaseRollout):
             self._has_server = self._pd_tp_local_rank == 0
         else:
             self._has_server = self.rollout_rank == 0
-        # Log PD role assignment so deadlocks can be traced back to the
-        # rank → role mapping. Every rank emits one line at startup.
-        logger.info(
-            "[PD-trace] vllm ServerAdapter init: rank=%d replica_rank=%d rollout_rank=%d "
-            "node_rank=%d local_rank=%d role=%s server_idx=%s tp_local=%s has_server=%s "
-            "rollout_world_size=%d footprint=%s",
-            rank,
-            self.replica_rank,
-            self.rollout_rank,
-            self.node_rank,
-            self.rollout_rank % local_world_size,
-            self._pd_role,
-            self._pd_server_index,
-            self._pd_tp_local_rank,
-            self._has_server,
-            rollout_world_size,
-            (prefill_tp + disagg.decode_replicas * (disagg.decode_tensor_model_parallel_size or prefill_tp))
-            if disagg_enabled else None,
-        )
+        if disagg_enabled:
+            # One line per PD rank at startup so a deadlock report can be
+            # traced back to the role/server-index/TP-local mapping.
+            logger.info(
+                "vllm PD ServerAdapter: rank=%d replica=%d rollout=%d role=%s "
+                "server_idx=%s tp_local=%s has_server=%s",
+                rank, self.replica_rank, self.rollout_rank, self._pd_role,
+                self._pd_server_index, self._pd_tp_local_rank, self._has_server,
+            )
 
         if config.layered_summon or (config.expert_parallel_size > 1 and not _check_vllm_version_for_sleep_level()):
             logger.warning("Setting the sleep level to 1 may cause a memory overflow.")
@@ -228,23 +218,13 @@ class ServerAdapter(BaseRollout):
         Args:
             tags: weights or kv_cache.
         """
-        logger.info(
-            "[PD-trace] resume: rollout_rank=%d role=%s tags=%s has_server=%s",
-            self.rollout_rank, self._pd_role, tags, self._has_server,
-        )
         if self.config.free_cache_engine:
             await self._execute_method("wake_up", kwargs={"tags": tags})
-        logger.info("[PD-trace] resume DONE: rollout_rank=%d", self.rollout_rank)
 
     async def release(self):
         """Release weights and kv cache in GPU memory."""
-        logger.info(
-            "[PD-trace] release: rollout_rank=%d role=%s has_server=%s",
-            self.rollout_rank, self._pd_role, self._has_server,
-        )
         if self.config.free_cache_engine:
             await self._execute_method("sleep", kwargs={"level": self.sleep_level})
-        logger.info("[PD-trace] release DONE: rollout_rank=%d", self.rollout_rank)
 
     @torch.no_grad()
     async def update_weights(
@@ -252,19 +232,11 @@ class ServerAdapter(BaseRollout):
     ):
         """Update model weights via CUDA IPC (fallback to shared memory if IPC not supported) to inference workers."""
         start_time = time.time()
-        logger.info(
-            "[PD-trace] update_weights ENTER: rollout_rank=%d role=%s zmq=%s has_server=%s",
-            self.rollout_rank, self._pd_role, self.zmq_handle, self._has_server,
-        )
 
         future = await self._execute_method(
             "update_weights_from_ipc",
             non_block=True,
             kwargs={**kwargs, "use_shm": self.use_shm},
-        )
-        logger.info(
-            "[PD-trace] update_weights _execute_method returned: rollout_rank=%d future=%s",
-            self.rollout_rank, "<set>" if future else "None",
         )
 
         bucket_size_mb = self.config.checkpoint_engine.update_weights_bucket_megabytes
@@ -273,14 +245,10 @@ class ServerAdapter(BaseRollout):
             bucket_size_mb=bucket_size_mb,
             use_shm=self.use_shm,
         )
-        logger.info("[PD-trace] sender.send_weights START: rollout_rank=%d", self.rollout_rank)
         await sender.async_send_weights(weights)
-        logger.info("[PD-trace] sender.send_weights DONE: rollout_rank=%d", self.rollout_rank)
 
         if future is not None:
-            logger.info("[PD-trace] awaiting engine future: rollout_rank=%d", self.rollout_rank)
             await future
-            logger.info("[PD-trace] engine future DONE: rollout_rank=%d", self.rollout_rank)
 
         # Reset prefix cache after weight swap. Under PD, every rank that
         # owns an engine (each role's TP-rank-0) must flush its own KV cache.

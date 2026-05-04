@@ -684,6 +684,13 @@ class vLLMHttpServer:
         prefill_sp.pop("max_new_tokens", None)
         prefill_sp["max_tokens"] = 1
         prefill_kv_params = {"do_remote_decode": True, "do_remote_prefill": False}
+        # MooncakeConnector schema requires `transfer_id` on both legs (per
+        # vllm/distributed/.../mooncake/mooncake_connector.py:547 — "Missing
+        # transfer_id in kv_transfer_params from router!"). NixlConnector
+        # tolerates it being absent. We always populate it; harmless under
+        # NIXL (extra params just ignored).
+        import uuid as _uuid
+        prefill_kv_params["transfer_id"] = _uuid.uuid4().hex
 
         prefill_out = await self.generate(
             prompt_ids,
@@ -698,15 +705,21 @@ class vLLMHttpServer:
         if decode_kv_params is None:
             raise RuntimeError(
                 f"PD prefill leg returned no kv_transfer_params (request_id={request_id}); "
-                f"NixlConnector likely failed to register — check the prefill engine's "
-                f"VLLM_NIXL_SIDE_CHANNEL_HOST/PORT and kv_transfer_config"
+                f"the KV connector failed to register — check the prefill engine's "
+                f"side-channel env (VLLM_NIXL_SIDE_CHANNEL_* or VLLM_MOONCAKE_BOOTSTRAP_*) "
+                f"and kv_transfer_config."
             )
 
-        # Decode leg — full sampling_params, decode peer pulls KV via NIXL on
-        # first read using the prefill's coordinates encoded in decode_kv_params.
+        # Decode leg — full sampling_params, decode peer pulls KV from the
+        # prefill engine on first read using the coordinates encoded in
+        # decode_kv_params (NIXL: remote_host/port; Mooncake:
+        # remote_bootstrap_addr).
+        # Defensive copy: `generate()` mutates sampling_params via .pop on
+        # entry; passing the caller's dict directly would corrupt it for
+        # retries / multi-turn workflows that reuse the same params.
         return await decode_peer.generate.remote(
             prompt_ids,
-            sampling_params,
+            dict(sampling_params),
             f"{request_id}_D",
             image_data=image_data,
             video_data=video_data,

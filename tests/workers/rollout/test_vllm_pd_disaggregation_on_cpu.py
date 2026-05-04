@@ -171,12 +171,14 @@ def test_registry_knows_vllm_pd():
 # ---------------------------------------------------------------------------
 
 
-def _build_kv_cfg(*, role: str, engine_id: str = "test-eid", ib_device=None):
+def _build_kv_cfg(*, role: str, engine_id: str = "test-eid", ib_device=None, transfer_backend: str = "nixl"):
     # Lazy import: only meaningful when vllm-rollout deps are importable.
     pytest.importorskip("vllm")
     from verl.workers.rollout.vllm_rollout.vllm_pd_replica import vLLMPDReplica
 
-    return vLLMPDReplica._build_kv_transfer_config(role=role, engine_id=engine_id, ib_device=ib_device)
+    return vLLMPDReplica._build_kv_transfer_config(
+        role=role, engine_id=engine_id, ib_device=ib_device, transfer_backend=transfer_backend
+    )
 
 
 def test_build_kv_transfer_config_prefill_role_maps_to_kv_producer():
@@ -197,6 +199,17 @@ def test_build_kv_transfer_config_decode_role_maps_to_kv_consumer():
 def test_build_kv_transfer_config_forwards_ib_device():
     cfg = _build_kv_cfg(role="prefill", ib_device="mlx5_roce0")
     assert cfg["kv_connector_extra_config"] == {"ib_device": "mlx5_roce0"}
+
+
+@pytest.mark.parametrize("role,expected_role", [("prefill", "kv_producer"), ("decode", "kv_consumer")])
+def test_build_kv_transfer_config_mooncake_backend(role, expected_role):
+    """Under transfer_backend='mooncake' the connector name must be
+    'MooncakeConnector' on both prefill and decode legs. Earlier rev had a
+    bug where decode silently fell back to NixlConnector because the
+    decode call site forgot to pass transfer_backend through."""
+    cfg = _build_kv_cfg(role=role, transfer_backend="mooncake")
+    assert cfg["kv_connector"] == "MooncakeConnector"
+    assert cfg["kv_role"] == expected_role
 
 
 # ---------------------------------------------------------------------------
@@ -284,26 +297,30 @@ def test_pd_replica_init_happy_path_1p3d(patched_replica_cls):
     assert replica.world_size == 4
 
 
-def test_pd_replica_init_asymmetric_tp(patched_replica_cls):
+def test_pd_replica_init_rejects_tp_gt_1(patched_replica_cls):
+    """TP>1 per PD engine needs per-worker zmq_rank_override which the
+    current revision doesn't wire (single per-actor env covers TP-rank-0
+    only). Until that lands, reject explicitly."""
     cfg = _make_pd_config(
         tensor_model_parallel_size=2,
         decode_tensor_model_parallel_size=1,
         decode_replicas=2,
     )
-    replica = patched_replica_cls(
-        replica_rank=0,
-        config=cfg,
-        model_config=None,
-        gpus_per_node=8,
-    )
-    assert replica._prefill_tp == 2
-    assert replica._decode_tp == 1
-    assert replica.world_size == 4  # 2 prefill TP + 2 decode replicas * 1 decode TP
+    with pytest.raises(NotImplementedError, match="TP=1 per engine"):
+        patched_replica_cls(replica_rank=0, config=cfg, model_config=None, gpus_per_node=8)
 
 
-def test_pd_replica_init_rejects_mooncake_in_phase1(patched_replica_cls):
+def test_pd_replica_init_accepts_mooncake(patched_replica_cls):
+    """Mooncake is now an accepted transfer_backend (requires
+    `mooncake-transfer-engine` pip pkg at runtime in the engine actor)."""
     cfg = _make_pd_config(transfer_backend="mooncake")
-    with pytest.raises(NotImplementedError, match="transfer_backend='nixl' only"):
+    replica = patched_replica_cls(replica_rank=0, config=cfg, model_config=None, gpus_per_node=8)
+    assert replica.config.disaggregation.transfer_backend == "mooncake"
+
+
+def test_pd_replica_init_rejects_unsupported_backend(patched_replica_cls):
+    cfg = _make_pd_config(transfer_backend="mori")
+    with pytest.raises(NotImplementedError, match="transfer_backend in"):
         patched_replica_cls(replica_rank=0, config=cfg, model_config=None, gpus_per_node=8)
 
 
@@ -448,10 +465,11 @@ async def test_pd_dispatch_routes_prefill_leg_then_decode_peer():
     pcall = captured_prefill_calls[0]
     assert pcall["request_id"] == "req-foo_P"
     assert pcall["sampling_params"]["max_tokens"] == 1
-    assert pcall["kv_transfer_params"] == {
-        "do_remote_decode": True,
-        "do_remote_prefill": False,
-    }
+    # `transfer_id` is added unconditionally (Mooncake requires it; NIXL
+    # ignores it). Check the other two flags but allow the extra field.
+    assert pcall["kv_transfer_params"]["do_remote_decode"] is True
+    assert pcall["kv_transfer_params"]["do_remote_prefill"] is False
+    assert "transfer_id" in pcall["kv_transfer_params"]
 
     # Decode peer was called with full sampling_params + the prefill's kv_transfer_params.
     decode_peer.generate.remote.assert_called_once()

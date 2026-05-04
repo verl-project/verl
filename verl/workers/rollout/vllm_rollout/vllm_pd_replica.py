@@ -73,10 +73,10 @@ class vLLMPDReplica(vLLMReplica):
         disagg = self.config.disaggregation
         assert disagg.enabled, "vLLMPDReplica requires rollout.disaggregation.enabled=True"
 
-        if disagg.transfer_backend != "nixl":
+        if disagg.transfer_backend not in ("nixl", "mooncake"):
             raise NotImplementedError(
-                f"vLLMPDReplica supports transfer_backend='nixl' only in this revision; "
-                f"got {disagg.transfer_backend!r}. mooncake/mori/ascend/fake are reserved "
+                f"vLLMPDReplica supports transfer_backend in ('nixl', 'mooncake') in this "
+                f"revision; got {disagg.transfer_backend!r}. mori/ascend/fake are reserved "
                 f"in DisaggregationConfig and will land in follow-ups."
             )
         if disagg.prefill_replicas != 1:
@@ -101,6 +101,16 @@ class vLLMPDReplica(vLLMReplica):
             )
         if self.config.data_parallel_size != 1:
             raise NotImplementedError(f"data_parallel_size=1 only (got {self.config.data_parallel_size})")
+        # TP>1 per PD engine needs per-worker `VERL_ZMQ_RANK_OVERRIDE` (each
+        # TP rank within an engine has its own IPC sender on the trainer
+        # side). The single per-actor env we set covers TP-rank-0 only;
+        # raising here keeps the failure mode explicit until that's wired.
+        if self._prefill_tp != 1 or self._decode_tp != 1:
+            raise NotImplementedError(
+                f"PD requires TP=1 per engine in this revision (got prefill_tp={self._prefill_tp}, "
+                f"decode_tp={self._decode_tp}). TP>1 needs per-worker zmq_rank_override; "
+                f"see vllm_pd_replica.py docstring for the follow-up."
+            )
 
         # Override the values RolloutReplica.__init__ computed from a colocated
         # topology — under PD the world is asymmetric.
@@ -133,7 +143,18 @@ class vLLMPDReplica(vLLMReplica):
             ]
         )
 
+        # Side-channel host must be the prefill WORKER's node IP, not the
+        # replica actor's. They're the same in our enforced single-node
+        # topology (the `pd_world_size > gpus_per_node` guard in __init__
+        # rules out multi-node) but assert it loudly so multi-node lands
+        # don't silently bind the wrong IP.
         prefill_host_ip = ray.util.get_node_ip_address().strip("[]")
+        replica_node_id = ray.get_runtime_context().get_node_id()
+        assert worker_infos[0][0] == replica_node_id, (
+            f"single-node MVP: prefill worker node_id {worker_infos[0][0]!r} must match "
+            f"replica actor node_id {replica_node_id!r}; multi-node PD requires deriving "
+            f"prefill_host_ip from the worker, not the replica"
+        )
         self._prefill_engine_id = uuid.uuid4().hex
 
         # Launch prefill (tp first slice of workers).
@@ -149,6 +170,7 @@ class vLLMPDReplica(vLLMReplica):
                 role="prefill",
                 engine_id=self._prefill_engine_id,
                 ib_device=self.config.disaggregation.ib_device,
+                transfer_backend=self.config.disaggregation.transfer_backend,
             )
             self._prefill_servers = [
                 self._spawn_pd_server(
@@ -193,6 +215,7 @@ class vLLMPDReplica(vLLMReplica):
                     role="decode",
                     engine_id=uuid.uuid4().hex,
                     ib_device=self.config.disaggregation.ib_device,
+                    transfer_backend=self.config.disaggregation.transfer_backend,
                 )
                 self._decode_servers.append(
                     self._spawn_pd_server(
@@ -265,23 +288,20 @@ class vLLMPDReplica(vLLMReplica):
         role: str,
         engine_id: str,
         ib_device: Optional[str],
+        transfer_backend: str = "nixl",
     ) -> dict:
         """Assemble the JSON payload for vLLM's ``--kv-transfer-config``.
 
         See ``vllm/config/kv_transfer.py`` for the full schema. ``kv_role`` maps
         verl's ``"prefill"|"decode"`` 1:1 to vLLM's ``"kv_producer"|"kv_consumer"``.
         """
-        # PD_DEBUG_KV_ROLE_BOTH=1 forces both prefill and decode to declare
-        # `kv_role=kv_both`, which is the symmetric mode the toy_proxy
-        # smoke uses. Probe for whether the wake_up hang is specific to
-        # producer/consumer asymmetry.
-        import os as _os
-        if _os.getenv("PD_DEBUG_KV_ROLE_BOTH") == "1":
-            kv_role = "kv_both"
+        kv_role = "kv_producer" if role == "prefill" else "kv_consumer"
+        if transfer_backend == "mooncake":
+            connector = "MooncakeConnector"
         else:
-            kv_role = "kv_producer" if role == "prefill" else "kv_consumer"
+            connector = "NixlConnector"
         cfg: dict = {
-            "kv_connector": "NixlConnector",
+            "kv_connector": connector,
             "kv_role": kv_role,
             "engine_id": engine_id,
             "kv_buffer_device": "cuda",
@@ -319,6 +339,13 @@ class vLLMPDReplica(vLLMReplica):
             # connector reads these on import (nixl_connector.py:556-558).
             "VLLM_NIXL_SIDE_CHANNEL_HOST": side_channel_host,
             "VLLM_NIXL_SIDE_CHANNEL_PORT": str(side_channel_port),
+            # Mooncake reuses the side-channel host/port: prefill runs the
+            # MooncakeBootstrapServer on side_channel_port; decoders connect
+            # via the per-request kv_transfer_params.remote_bootstrap_addr
+            # the prefill returns. Setting per-actor unique env keeps multiple
+            # PD actors on the same host from colliding.
+            "VLLM_MOONCAKE_BOOTSTRAP_HOST": side_channel_host,
+            "VLLM_MOONCAKE_BOOTSTRAP_PORT": str(side_channel_port),
             # Each PD engine actor has TP=1 → its worker's local_rank is
             # always 0, so without this override every PD engine binds the
             # same `replica-{R}-rank-0.sock` and update_weights_from_ipc
@@ -327,13 +354,6 @@ class vLLMPDReplica(vLLMReplica):
             # use the paired trainer rank instead of self.local_rank.
             "VERL_ZMQ_RANK_OVERRIDE": str(zmq_rank_override),
         }
-        # Pass-through debug env vars so the wake_up trace patches inside
-        # vLLM source see them on each Ray-actor process.
-        import os as _pd_os
-        for _pdk in ("PD_TRACE", "PD_DEBUG_KV_ROLE_BOTH"):
-            _pdv = _pd_os.getenv(_pdk)
-            if _pdv:
-                env_vars[_pdk] = _pdv
 
         prefix = self._get_server_name_prefix()
         if not actor_name.startswith(prefix):
