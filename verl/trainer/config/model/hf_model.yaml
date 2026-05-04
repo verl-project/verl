@@ -36,6 +36,9 @@ enable_gradient_checkpointing: True
 # whether to enable activation offload. Only valid when we use hf model definition
 enable_activation_offload: False
 
+# whether to offload gradient-checkpoint inputs to CPU. Requires enable_gradient_checkpointing=True and is mutually exclusive with enable_activation_offload.
+enable_checkpoint_input_offload: False
+
 # whether to use remove padding. Only valid when we use hf model definition
 use_remove_padding: True
 

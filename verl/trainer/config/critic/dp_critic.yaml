@@ -40,6 +40,9 @@ model:
   # Offload activations to CPU to reduce GPU memory usage
   enable_activation_offload: False
 
+  # Offload gradient-checkpoint inputs to CPU. Requires enable_gradient_checkpointing=True and is mutually exclusive with enable_activation_offload.
+  enable_checkpoint_input_offload: False
+
   # Use remove padding optimization (saves compute)
   use_remove_padding: False
 

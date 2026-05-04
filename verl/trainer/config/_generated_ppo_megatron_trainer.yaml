@@ -347,6 +347,7 @@ actor_rollout_ref:
         freeze_moe_router: false
     enable_gradient_checkpointing: true
     enable_activation_offload: false
+    enable_checkpoint_input_offload: false
     use_remove_padding: false
     lora_rank: 0
     lora_alpha: 16
