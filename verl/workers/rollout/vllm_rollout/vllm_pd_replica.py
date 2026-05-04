@@ -166,6 +166,9 @@ class vLLMPDReplica(vLLMReplica):
                     # role-specific knowledge in the adapter beyond the role flag.
                     # `node_rank=0` because this PR is single-node only.
                     actor_name=f"vllm_pd_server_{self.replica_rank}_0{self.name_suffix}",
+                    # Prefill is sliced from worker_group at offset 0 → its
+                    # paired trainer rank is 0 → ZMQ socket `rank-0`.
+                    zmq_rank_override=0,
                 )
             ]
         finally:
@@ -202,6 +205,14 @@ class vLLMPDReplica(vLLMReplica):
                         side_channel_host=prefill_host_ip,
                         side_channel_port=decode_side_channel_port,
                         actor_name=f"vllm_pd_server_decode_{self.replica_rank}_{i}{self.name_suffix}",
+                        # Decode i is sliced from worker_group at offset
+                        # `prefill_tp + i*decode_tp` → its paired trainer rank
+                        # range is [start, start+decode_tp). With TP=1 the
+                        # engine has 1 worker, so use `start` directly. For
+                        # TP>1 (future), each decode actor still spans
+                        # decode_tp ranks; this single override covers TP-rank
+                        # 0; if TP>1 we'd need per-worker overrides.
+                        zmq_rank_override=start,
                     )
                 )
             finally:
@@ -260,7 +271,15 @@ class vLLMPDReplica(vLLMReplica):
         See ``vllm/config/kv_transfer.py`` for the full schema. ``kv_role`` maps
         verl's ``"prefill"|"decode"`` 1:1 to vLLM's ``"kv_producer"|"kv_consumer"``.
         """
-        kv_role = "kv_producer" if role == "prefill" else "kv_consumer"
+        # PD_DEBUG_KV_ROLE_BOTH=1 forces both prefill and decode to declare
+        # `kv_role=kv_both`, which is the symmetric mode the toy_proxy
+        # smoke uses. Probe for whether the wake_up hang is specific to
+        # producer/consumer asymmetry.
+        import os as _os
+        if _os.getenv("PD_DEBUG_KV_ROLE_BOTH") == "1":
+            kv_role = "kv_both"
+        else:
+            kv_role = "kv_producer" if role == "prefill" else "kv_consumer"
         cfg: dict = {
             "kv_connector": "NixlConnector",
             "kv_role": kv_role,
@@ -282,6 +301,7 @@ class vLLMPDReplica(vLLMReplica):
         side_channel_host: str,
         side_channel_port: int,
         actor_name: str,
+        zmq_rank_override: int = 0,
     ) -> ActorHandle:
         """Construct one ``vLLMHttpServer`` Ray actor pinned to ``node_id`` with
         the right NIXL env vars and TP override. Mirrors the surrounding
@@ -299,7 +319,21 @@ class vLLMPDReplica(vLLMReplica):
             # connector reads these on import (nixl_connector.py:556-558).
             "VLLM_NIXL_SIDE_CHANNEL_HOST": side_channel_host,
             "VLLM_NIXL_SIDE_CHANNEL_PORT": str(side_channel_port),
+            # Each PD engine actor has TP=1 → its worker's local_rank is
+            # always 0, so without this override every PD engine binds the
+            # same `replica-{R}-rank-0.sock` and update_weights_from_ipc
+            # never receives weights from trainer-rank-N's sender.
+            # Setting `VERL_ZMQ_RANK_OVERRIDE` forces _get_zmq_handle to
+            # use the paired trainer rank instead of self.local_rank.
+            "VERL_ZMQ_RANK_OVERRIDE": str(zmq_rank_override),
         }
+        # Pass-through debug env vars so the wake_up trace patches inside
+        # vLLM source see them on each Ray-actor process.
+        import os as _pd_os
+        for _pdk in ("PD_TRACE", "PD_DEBUG_KV_ROLE_BOTH"):
+            _pdv = _pd_os.getenv(_pdk)
+            if _pdv:
+                env_vars[_pdk] = _pdv
 
         prefix = self._get_server_name_prefix()
         if not actor_name.startswith(prefix):

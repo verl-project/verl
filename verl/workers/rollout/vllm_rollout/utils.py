@@ -252,9 +252,20 @@ class vLLMColocateWorkerExtension:
         Uses replica_rank + local_rank to form handle so it matches the sender side
         regardless of CUDA_VISIBLE_DEVICES differences, and avoids collisions
         when multiple replicas share the same node.
+
+        PD path override: under PD disaggregation each engine is its own
+        Ray actor with TP=1, so every engine's worker has local_rank=0 →
+        all PD engines collide on `replica-{R}-rank-0.sock`. The matching
+        trainer-rank-N sender uses `rank-{rollout_rank % local_world_size}`,
+        which has rank 0 for prefill, 1+i for decode-i. We expose
+        `VERL_ZMQ_RANK_OVERRIDE` on each PD actor so the engine binds the
+        socket the trainer pair sender writes to.
         """
         replica_rank = os.environ.get("VERL_REPLICA_RANK", "0")
-        return f"ipc:///tmp/rl-colocate-zmq-replica-{replica_rank}-rank-{self.local_rank}.sock"
+        rank_for_zmq = os.environ.get("VERL_ZMQ_RANK_OVERRIDE")
+        if rank_for_zmq is None:
+            rank_for_zmq = self.local_rank
+        return f"ipc:///tmp/rl-colocate-zmq-replica-{replica_rank}-rank-{rank_for_zmq}.sock"
 
 
 class SuppressSignalInThread:
