@@ -19,14 +19,13 @@ import os
 import aiohttp
 import numpy as np
 import ray
-import torch
 from omegaconf import DictConfig, open_dict
 from ray.actor import ActorHandle
 from tensordict import TensorDict
 
 from verl.protocol import DataProto
 from verl.single_controller.ray.base import RayResourcePool
-from verl.trainer.ppo.reward import load_reward_manager
+from verl.trainer.ppo.reward import load_reward_manager, resolve_reward_manager_cls
 from verl.utils import hf_tokenizer
 from verl.utils.fs import copy_to_local
 from verl.utils.ray_utils import get_event_loop
@@ -288,6 +287,7 @@ class RewardLoopManager:
             self.reward_router_address = None
 
         self.reward_loop_workers_class = ray.remote(RewardLoopWorker)
+        self.reward_manager_cls = resolve_reward_manager_cls(config)
         self._init_reward_loop_workers()
 
     @property
@@ -336,12 +336,7 @@ class RewardLoopManager:
 
         # compute rm score
         scores = [item["reward_score"] for item in outputs_flat]
-        prompt_length = data.batch["prompts"].size(1)
-        valid_response_length = data.batch["attention_mask"][:, prompt_length:].sum(dim=1)
-        rm_scores = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
-        rm_scores[torch.arange(rm_scores.size(0)), valid_response_length - 1] = torch.tensor(
-            scores, dtype=torch.float32
-        )
+        rm_scores = self.reward_manager_cls.assemble_rm_scores(data, scores)
         batch = TensorDict({"rm_scores": rm_scores}, batch_size=len(data))
 
         reward_extra_infos = [output.get("reward_extra_info", {}) for output in outputs_flat]
