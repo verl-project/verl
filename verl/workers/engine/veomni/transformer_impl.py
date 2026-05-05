@@ -21,6 +21,7 @@ import torch
 import torch.distributed as dist
 from tensordict import TensorDict
 from torch.distributed.tensor import DTensor
+from veomni.arguments import OpsImplementationConfig
 from veomni.distributed import parallel_state
 from veomni.distributed.offloading import build_activation_offloading_context
 from veomni.distributed.torch_parallelize import build_parallelize_model
@@ -194,13 +195,26 @@ class VeOmniEngine(FSDPEngine):
         return lr_scheduler
 
     def _build_model_optimizer(self):
+        # build_foundation_model runs apply_ops_config(ops_implementation)
+        # before constructing the model, so per-model device_patch files see
+        # the resolved kernel backends.
+        ops_implementation = OpsImplementationConfig(
+            attn_implementation=self.engine_config.attn_implementation,
+            moe_implementation=self.engine_config.moe_implementation,
+            cross_entropy_loss_implementation=self.engine_config.cross_entropy_loss_implementation,
+            rms_norm_implementation=self.engine_config.rms_norm_implementation,
+            swiglu_mlp_implementation=self.engine_config.swiglu_mlp_implementation,
+            rotary_pos_emb_implementation=self.engine_config.rotary_pos_emb_implementation,
+            load_balancing_loss_implementation=self.engine_config.load_balancing_loss_implementation,
+        )
+
         # Load base model with specified configuration and dtype
         module = build_foundation_model(
             config_path=self.model_config.local_hf_config_path,
             weights_path=self.model_config.local_path,
             torch_dtype="float32" if self.engine_config.mixed_precision else "bfloat16",
             attn_implementation=self.engine_config.attn_implementation,
-            moe_implementation=self.engine_config.moe_implementation,
+            ops_implementation=ops_implementation,
             init_device=self.engine_config.init_device,
         )
         log_gpu_memory_usage("After load base model", logger=logger)

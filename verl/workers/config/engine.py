@@ -302,6 +302,20 @@ class VeOmniEngineConfig(EngineConfig):
             2. `fused`
             default "fused"
             Note: In case VeOmni add more moe_implementation, please check https://github.com/ByteDance-Seed/VeOmni/
+        cross_entropy_loss_implementation (str): Cross-entropy kernel selected via VeOmni's
+            ``OpsImplementationConfig``. Common values: ``"eager"`` (default), ``"liger_kernel"``,
+            ``"npu"``. See VeOmni docs for the full registry.
+        rms_norm_implementation (str): RMSNorm kernel. ``"eager"`` (HF default),
+            ``"triton"`` (batch-invariant Triton kernel — required to keep vexact's rollout
+            and the FSDP actor bitwise-aligned on DeepSeek-V3 / Moonlight), ``"liger_kernel"``,
+            ``"npu"``.
+        swiglu_mlp_implementation (str): SwiGLU MLP kernel. ``"eager"`` (default) or
+            ``"liger_kernel"``.
+        rotary_pos_emb_implementation (str): RoPE kernel. ``"eager"`` (default), ``"triton"``
+            (deterministic Triton bmm — required for bitwise-aligned RoPE on DeepSeek-V3 /
+            Moonlight), ``"liger_kernel"``, ``"npu"``.
+        load_balancing_loss_implementation (str): MoE load-balancing loss kernel.
+            ``"eager"`` (default) or ``"triton"``.
         force_use_huggingface (bool): Force loading model from huggingface, default False
         activation_gpu_limit (float): When enabling activation offload, `activation_gpu_limit` GB
             activations are allowed to reserve on GPU, default 0.0
@@ -342,6 +356,15 @@ class VeOmniEngineConfig(EngineConfig):
     enable_reentrant: bool = False
     attn_implementation: str = "flash_attention_2"
     moe_implementation: str = "fused"
+    # Kernel-backend selectors for VeOmni's per-model patches; passed into
+    # OpsImplementationConfig and consumed by apply_per_model_patches in each
+    # model's device_patch.py. Defaults match VeOmni's OpsImplementationConfig
+    # defaults so existing configs see no change.
+    cross_entropy_loss_implementation: str = "eager"
+    rms_norm_implementation: str = "eager"
+    swiglu_mlp_implementation: str = "eager"
+    rotary_pos_emb_implementation: str = "eager"
+    load_balancing_loss_implementation: str = "eager"
     force_use_huggingface: bool = False
     activation_gpu_limit: float = 0.0
     basic_modules: Optional[list[str]] = field(default_factory=list)
