@@ -102,6 +102,15 @@ class vLLMPDReplica(vLLMReplica):
             )
         if self.config.data_parallel_size != 1:
             raise NotImplementedError(f"data_parallel_size=1 only (got {self.config.data_parallel_size})")
+        # PP>1 would inflate per-replica footprint by the PP factor, but
+        # _pd_world_size below counts only PD engines. Without rejecting it
+        # here, ServerAdapter slices too few workers while the extra
+        # trainer ranks still map to the same PD actors → weight-IPC hang.
+        if self.config.pipeline_model_parallel_size != 1:
+            raise NotImplementedError(
+                f"pipeline_model_parallel_size=1 only "
+                f"(got {self.config.pipeline_model_parallel_size}); PD path does not model PP yet"
+            )
         # TP>1 per PD engine needs per-worker `VERL_ZMQ_RANK_OVERRIDE` (each
         # TP rank within an engine has its own IPC sender on the trainer
         # side). The single per-actor env we set covers TP-rank-0 only;
@@ -138,24 +147,20 @@ class vLLMPDReplica(vLLMReplica):
                     lambda self: (
                         ray.get_runtime_context().get_node_id(),
                         ray.get_runtime_context().get_accelerator_ids()[get_resource_name()][0],
+                        ray.util.get_node_ip_address().strip("[]"),
                     )
                 )
                 for worker in self.workers
             ]
         )
 
-        # Side-channel host must be the prefill WORKER's node IP, not the
-        # replica actor's. They're the same in our enforced single-node
-        # topology (the `pd_world_size > gpus_per_node` guard in __init__
-        # rules out multi-node) but assert it loudly so multi-node lands
-        # don't silently bind the wrong IP.
-        prefill_host_ip = ray.util.get_node_ip_address().strip("[]")
-        replica_node_id = ray.get_runtime_context().get_node_id()
-        assert worker_infos[0][0] == replica_node_id, (
-            f"single-node MVP: prefill worker node_id {worker_infos[0][0]!r} must match "
-            f"replica actor node_id {replica_node_id!r}; multi-node PD requires deriving "
-            f"prefill_host_ip from the worker, not the replica"
-        )
+        # Side-channel host comes from the prefill WORKER itself, not the
+        # replica actor. In multi-node setups (CPU head node, or replica
+        # actor scheduled away from the GPU worker) `ray.util.get_node_ip_address`
+        # in the driver returns the driver's IP. Reading it via the worker's
+        # __ray_call__ guarantees we bind the side-channel on the same node
+        # the prefill engine actually runs on.
+        prefill_host_ip = worker_infos[0][2]
         self._prefill_engine_id = uuid.uuid4().hex
 
         # Launch prefill (tp first slice of workers).
@@ -163,9 +168,14 @@ class vLLMPDReplica(vLLMReplica):
         prefill_node_id = worker_infos[0][0]
         prefill_devs = ",".join(worker_infos[0 + i][1] for i in range(self._prefill_tp))
 
-        # Hold the bootstrap socket open until the prefill actor binds it; closing
-        # earlier opens a TOCTOU window for another process to grab the port.
+        # Hold ALL reserved sockets open until every actor has called
+        # launch_server and bound its side-channel port. Closing earlier
+        # opens a TOCTOU window where another get_free_port (or a different
+        # process) can grab the port we just allocated. The cleanup happens
+        # in the `finally` after the launch_server gather below.
+        reserved_socks = []
         prefill_side_channel_port, prefill_sock = get_free_port(prefill_host_ip, with_alive_sock=True)
+        reserved_socks.append(prefill_sock)
         try:
             prefill_kv_cfg = self._build_kv_transfer_config(
                 role="prefill",
@@ -196,24 +206,22 @@ class vLLMPDReplica(vLLMReplica):
                     zmq_rank_override=0,
                 )
             ]
-        finally:
-            prefill_sock.close()
 
-        self._prefill_side_channel_host = prefill_host_ip
-        self._prefill_side_channel_port = prefill_side_channel_port
+            self._prefill_side_channel_host = prefill_host_ip
+            self._prefill_side_channel_port = prefill_side_channel_port
 
-        # Launch N decode replicas.
-        for i in range(self._n_decode):
-            start = self._prefill_tp + i * self._decode_tp
-            end = start + self._decode_tp
-            workers_i = self.workers[start:end]
-            node_id_i = worker_infos[start][0]
-            devs_i = ",".join(worker_infos[start + j][1] for j in range(self._decode_tp))
+            # Launch N decode replicas.
+            for i in range(self._n_decode):
+                start = self._prefill_tp + i * self._decode_tp
+                end = start + self._decode_tp
+                workers_i = self.workers[start:end]
+                node_id_i = worker_infos[start][0]
+                devs_i = ",".join(worker_infos[start + j][1] for j in range(self._decode_tp))
 
-            # Single-node MVP: every actor's side channel binds the same host as
-            # prefill. Multi-node will need per-node IP discovery.
-            decode_side_channel_port, decode_sock = get_free_port(prefill_host_ip, with_alive_sock=True)
-            try:
+                # Single-node MVP: every actor's side channel binds the same host as
+                # prefill. Multi-node will need per-node IP discovery.
+                decode_side_channel_port, decode_sock = get_free_port(prefill_host_ip, with_alive_sock=True)
+                reserved_socks.append(decode_sock)
                 decode_kv_cfg = self._build_kv_transfer_config(
                     role="decode",
                     engine_id=uuid.uuid4().hex,
@@ -245,18 +253,21 @@ class vLLMPDReplica(vLLMReplica):
                         zmq_rank_override=start,
                     )
                 )
-            finally:
-                decode_sock.close()
 
-        # Boot every actor's HTTP server. ``vLLMHttpServer.launch_server`` inherits
-        # the colocated path here; PD-only pieces (kv_transfer_config injection)
-        # are already wired through the actor kwargs.
-        await asyncio.gather(
-            *[
-                server.launch_server.remote(master_address=None, master_port=None, dp_rpc_port=None)
-                for server in self._prefill_servers + self._decode_servers
-            ]
-        )
+            # Boot every actor's HTTP server. ``vLLMHttpServer.launch_server`` inherits
+            # the colocated path here; PD-only pieces (kv_transfer_config injection)
+            # are already wired through the actor kwargs. Sockets stay reserved
+            # until launch_server returns, eliminating the TOCTOU window where
+            # someone else could grab a freed port between get_free_port and bind.
+            await asyncio.gather(
+                *[
+                    server.launch_server.remote(master_address=None, master_port=None, dp_rpc_port=None)
+                    for server in self._prefill_servers + self._decode_servers
+                ]
+            )
+        finally:
+            for sock in reserved_socks:
+                sock.close()
 
         # Wire the prefill server with its decode peers so vLLMHttpServer.generate
         # can fan out per request. NIXL is pull-mode: only the decode side reads
