@@ -649,4 +649,16 @@ class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
             if sp_enabled:
                 model_inputs["position_ids"] = sp_shard_collator.sp_slice(model_inputs["position_ids"], dim=-1)
 
+        # Activate VeOmni's chunk_logprobs path: ForCausalLMLoss short-circuits
+        # to per-token log_probs/entropy on return_log_probs=True. Pass the
+        # already-rolled labels as shift_labels so chunk_logprobs skips its
+        # internal causal shift and the output seq length matches the input —
+        # prepare_model_outputs().squeeze(0) then lands at (total_nnz,).
+        use_fused_kernels = tu.get_non_tensor_data(data=micro_batch, key="use_fused_kernels", default=False)
+        if use_fused_kernels and use_remove_padding:
+            shift_labels = output_args["input_ids_rmpad_rolled"].unsqueeze(0)
+            model_inputs["labels"] = input_ids_rmpad
+            model_inputs["shift_labels"] = shift_labels
+            model_inputs["return_log_probs"] = True
+
         return model_inputs, output_args
