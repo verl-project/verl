@@ -182,6 +182,8 @@ class vLLMPDReplica(vLLMReplica):
                     kv_transfer_config=prefill_kv_cfg,
                     side_channel_host=prefill_host_ip,
                     side_channel_port=prefill_side_channel_port,
+                    # Prefill self-hosts the bootstrap server on its own port.
+                    mooncake_bootstrap_port=prefill_side_channel_port,
                     # Naming aligns with SGLang PR #6117 so vllm_rollout.ServerAdapter's
                     # PD-aware actor lookup can resolve `(role, server_index)` →
                     # `{prefix}server_{R}_0` / `{prefix}server_decode_{R}_{i}` without any
@@ -227,6 +229,10 @@ class vLLMPDReplica(vLLMReplica):
                         kv_transfer_config=decode_kv_cfg,
                         side_channel_host=prefill_host_ip,
                         side_channel_port=decode_side_channel_port,
+                        # Decoders register against the prefill's bootstrap
+                        # server; they must point at prefill's port, not their
+                        # own NIXL side-channel port.
+                        mooncake_bootstrap_port=prefill_side_channel_port,
                         actor_name=f"vllm_pd_server_decode_{self.replica_rank}_{i}{self.name_suffix}",
                         # Decode i is sliced from worker_group at offset
                         # `prefill_tp + i*decode_tp` → its paired trainer rank
@@ -320,6 +326,7 @@ class vLLMPDReplica(vLLMReplica):
         kv_transfer_config: dict,
         side_channel_host: str,
         side_channel_port: int,
+        mooncake_bootstrap_port: int,
         actor_name: str,
         zmq_rank_override: int = 0,
     ) -> ActorHandle:
@@ -339,13 +346,16 @@ class vLLMPDReplica(vLLMReplica):
             # connector reads these on import (nixl_connector.py:556-558).
             "VLLM_NIXL_SIDE_CHANNEL_HOST": side_channel_host,
             "VLLM_NIXL_SIDE_CHANNEL_PORT": str(side_channel_port),
-            # Mooncake reuses the side-channel host/port: prefill runs the
-            # MooncakeBootstrapServer on side_channel_port; decoders connect
-            # via the per-request kv_transfer_params.remote_bootstrap_addr
-            # the prefill returns. Setting per-actor unique env keeps multiple
-            # PD actors on the same host from colliding.
-            "VLLM_MOONCAKE_BOOTSTRAP_HOST": side_channel_host,
-            "VLLM_MOONCAKE_BOOTSTRAP_PORT": str(side_channel_port),
+            # Mooncake bootstrap: only the prefill runs MooncakeBootstrapServer;
+            # decoders register against it. So every actor's
+            # VLLM_MOONCAKE_BOOTSTRAP_PORT must equal the prefill's bootstrap
+            # port, not the actor's own NIXL side-channel port. (Setting
+            # decoders to their own port made them call /register on a port
+            # nobody was listening to and the prefill leg silently returned no
+            # kv_transfer_params.) Host is hardcoded "127.0.0.1" by Mooncake
+            # in non-LB mode (mooncake_connector.py::get_mooncake_bootstrap_addr)
+            # — there is no VLLM_MOONCAKE_BOOTSTRAP_HOST env to set.
+            "VLLM_MOONCAKE_BOOTSTRAP_PORT": str(mooncake_bootstrap_port),
             # Each PD engine actor has TP=1 → its worker's local_rank is
             # always 0, so without this override every PD engine binds the
             # same `replica-{R}-rank-0.sock` and update_weights_from_ipc

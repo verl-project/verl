@@ -676,6 +676,8 @@ class vLLMHttpServer:
         from this server's NIXL side-channel.
         """
         decode_peer = self._select_decode_peer()
+        connector = (self._disaggregation_kv_transfer_config or {}).get("kv_connector", "")
+        is_mooncake = connector == "MooncakeConnector"
 
         # Prefill leg — only needs to materialise KV; we discard its single
         # generated token.
@@ -683,14 +685,16 @@ class vLLMHttpServer:
         prefill_sp.pop("max_tokens", None)
         prefill_sp.pop("max_new_tokens", None)
         prefill_sp["max_tokens"] = 1
-        prefill_kv_params = {"do_remote_decode": True, "do_remote_prefill": False}
-        # MooncakeConnector schema requires `transfer_id` on both legs (per
-        # vllm/distributed/.../mooncake/mooncake_connector.py:547 — "Missing
-        # transfer_id in kv_transfer_params from router!"). NixlConnector
-        # tolerates it being absent. We always populate it; harmless under
-        # NIXL (extra params just ignored).
+        # Both connectors accept transfer_id; Mooncake requires it on both legs
+        # (mooncake_connector.py:608 logs "Missing transfer_id in
+        # kv_transfer_params from router!"), NIXL ignores it.
         import uuid as _uuid
-        prefill_kv_params["transfer_id"] = _uuid.uuid4().hex
+        transfer_id = _uuid.uuid4().hex
+        prefill_kv_params = {
+            "do_remote_decode": True,
+            "do_remote_prefill": False,
+            "transfer_id": transfer_id,
+        }
 
         prefill_out = await self.generate(
             prompt_ids,
@@ -701,14 +705,34 @@ class vLLMHttpServer:
             priority=priority,
             kv_transfer_params=prefill_kv_params,
         )
-        decode_kv_params = prefill_out.extra_fields.get("kv_transfer_params")
-        if decode_kv_params is None:
-            raise RuntimeError(
-                f"PD prefill leg returned no kv_transfer_params (request_id={request_id}); "
-                f"the KV connector failed to register — check the prefill engine's "
-                f"side-channel env (VLLM_NIXL_SIDE_CHANNEL_* or VLLM_MOONCAKE_BOOTSTRAP_*) "
-                f"and kv_transfer_config."
-            )
+        if is_mooncake:
+            # Mooncake's request_finished returns (delay_free_blocks, None)
+            # — the proxy is expected to construct the decode params itself
+            # from prefill state it already knows (engine_id + bootstrap addr;
+            # see vllm/examples/.../mooncake_connector_proxy.py:299-304).
+            # Mooncake hardcodes the bootstrap host to "127.0.0.1" outside
+            # external/hybrid LB mode (mooncake_connector.py:1789), and decoders
+            # registered with that local address at startup, so the bootstrap
+            # URL the prefill should hand to decode is on localhost too.
+            decode_kv_params = {
+                "do_remote_decode": False,
+                "do_remote_prefill": True,
+                "remote_engine_id": self._pd_prefill_engine_id,
+                # Must include http:// scheme — decoder appends "/query" and
+                # passes to httpx.AsyncClient, which rejects scheme-less URLs.
+                # See mooncake_connector.py:1568 + mooncake_connector_proxy.py
+                # make_http_path() helper for the canonical shape.
+                "remote_bootstrap_addr": f"http://127.0.0.1:{self._pd_prefill_side_channel_port}",
+                "transfer_id": transfer_id,
+            }
+        else:
+            decode_kv_params = prefill_out.extra_fields.get("kv_transfer_params")
+            if decode_kv_params is None:
+                raise RuntimeError(
+                    f"PD prefill leg returned no kv_transfer_params (request_id={request_id}); "
+                    f"the NIXL connector failed to register — check the prefill engine's "
+                    f"VLLM_NIXL_SIDE_CHANNEL_HOST/PORT and kv_transfer_config."
+                )
 
         # Decode leg — full sampling_params, decode peer pulls KV from the
         # prefill engine on first read using the coordinates encoded in

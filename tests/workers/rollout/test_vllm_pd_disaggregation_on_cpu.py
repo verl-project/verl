@@ -364,9 +364,16 @@ def test_pd_replica_init_requires_disaggregation_enabled(patched_replica_cls):
 class _DispatchStub:
     """Minimal vLLMHttpServer-like instance for unbound-method tests."""
 
-    def __init__(self, decode_peers, role="prefill"):
+    def __init__(self, decode_peers, role="prefill", connector="NixlConnector"):
         self._disaggregation_role = role
         self._pd_decode_peers = list(decode_peers)
+        # Used by _pd_dispatch to branch between NIXL (read kv_transfer_params
+        # back from prefill) and Mooncake (construct it locally from prefill
+        # engine_id + bootstrap addr).
+        self._disaggregation_kv_transfer_config = {"kv_connector": connector}
+        self._pd_prefill_engine_id = "eid-prefill"
+        self._pd_prefill_side_channel_host = "127.0.0.1"
+        self._pd_prefill_side_channel_port = 5559
 
     def _select_decode_peer(self):
         # Borrow the real implementation to keep the stub aligned with
@@ -482,6 +489,53 @@ async def test_pd_dispatch_routes_prefill_leg_then_decode_peer():
     assert dkw.kwargs["priority"] == 0
 
     assert result.token_ids == expected_decode_token_ids
+
+
+@pytest.mark.asyncio
+async def test_pd_dispatch_mooncake_constructs_decode_kv_params_locally():
+    """Under Mooncake, prefill's request_finished returns (_, None) — no
+    kv_transfer_params come back. _pd_dispatch must instead construct decode
+    kv_transfer_params from the prefill state set by set_pd_peer (engine_id +
+    bootstrap addr), preserving transfer_id across the two legs."""
+    from unittest.mock import MagicMock
+
+    server_cls = _import_http_server()
+
+    decode_peer = MagicMock()
+    decode_peer.generate.remote = MagicMock(return_value=_make_awaitable_token_output([7]))
+    captured_prefill = []
+
+    async def fake_generate(prompt_ids, sampling_params, request_id, **kw):
+        captured_prefill.append(kw["kv_transfer_params"])
+        from verl.workers.rollout.replica import TokenOutput
+
+        # Mooncake's prefill response carries no kv_transfer_params.
+        return TokenOutput(token_ids=[42], stop_reason="completed", extra_fields={})
+
+    stub = _DispatchStub(decode_peers=[decode_peer], connector="MooncakeConnector")
+    stub.generate = fake_generate
+
+    await server_cls._pd_dispatch(
+        stub,
+        prompt_ids=[1, 2],
+        sampling_params={"max_tokens": 16, "temperature": 0.0},
+        request_id="req-mc",
+    )
+
+    assert len(captured_prefill) == 1
+    pkv = captured_prefill[0]
+    assert pkv["do_remote_decode"] is True
+    transfer_id = pkv["transfer_id"]
+
+    decode_peer.generate.remote.assert_called_once()
+    dkw = decode_peer.generate.remote.call_args
+    dkv = dkw.kwargs["kv_transfer_params"]
+    assert dkv["do_remote_prefill"] is True
+    assert dkv["do_remote_decode"] is False
+    assert dkv["remote_engine_id"] == stub._pd_prefill_engine_id
+    assert dkv["remote_bootstrap_addr"] == f"http://127.0.0.1:{stub._pd_prefill_side_channel_port}"
+    # transfer_id must match across legs so prefill and decode rendezvous.
+    assert dkv["transfer_id"] == transfer_id
 
 
 @pytest.mark.asyncio
