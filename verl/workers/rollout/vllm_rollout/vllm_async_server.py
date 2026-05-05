@@ -17,6 +17,7 @@ import inspect
 import json
 import logging
 import os
+import uuid
 from pprint import pprint
 from typing import Any, Callable, Optional
 
@@ -124,14 +125,14 @@ class vLLMHttpServer:
             )
         self._disaggregation_role = disaggregation_role
         self._disaggregation_kv_transfer_config = disaggregation_kv_transfer_config
-        # PD peer linkage populated post-launch by vLLMPDReplica.set_pd_peer.
-        # Wired up in the dispatch override (Phase 2 of the verl-vllm-pd-disagg
-        # series); kept as plain attributes here so set_pd_peer is callable
-        # immediately after launch_servers.
+        # PD peer linkage populated post-launch by vLLMPDReplica.set_pd_peer
+        # (no-op for colocated). _pd_peer_idx drives the round-robin in
+        # _select_decode_peer.
         self._pd_decode_peers: list[ActorHandle] = []
         self._pd_prefill_side_channel_host: Optional[str] = None
         self._pd_prefill_side_channel_port: Optional[int] = None
         self._pd_prefill_engine_id: Optional[str] = None
+        self._pd_peer_idx: int = 0
 
         os.environ[get_visible_devices_keyword()] = cuda_visible_devices
         os.environ["VERL_REPLICA_RANK"] = str(replica_rank)
@@ -652,9 +653,8 @@ class vLLMHttpServer:
 
     def _select_decode_peer(self) -> ActorHandle:
         """Round-robin across decode peers (matches vllm-project/router default)."""
-        idx = getattr(self, "_pd_peer_idx", 0)
-        peer = self._pd_decode_peers[idx % len(self._pd_decode_peers)]
-        self._pd_peer_idx = idx + 1
+        peer = self._pd_decode_peers[self._pd_peer_idx % len(self._pd_decode_peers)]
+        self._pd_peer_idx += 1
         return peer
 
     async def _pd_dispatch(
@@ -688,8 +688,7 @@ class vLLMHttpServer:
         # Both connectors accept transfer_id; Mooncake requires it on both legs
         # (mooncake_connector.py:608 logs "Missing transfer_id in
         # kv_transfer_params from router!"), NIXL ignores it.
-        import uuid as _uuid
-        transfer_id = _uuid.uuid4().hex
+        transfer_id = uuid.uuid4().hex
         prefill_kv_params = {
             "do_remote_decode": True,
             "do_remote_prefill": False,

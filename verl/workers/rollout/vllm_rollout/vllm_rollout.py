@@ -84,20 +84,16 @@ class ServerAdapter(BaseRollout):
         disagg = getattr(self.config, "disaggregation", None)
         disagg_enabled = disagg is not None and getattr(disagg, "enabled", False)
         if disagg_enabled:
-            decode_tp = (
-                disagg.decode_tensor_model_parallel_size
-                if disagg.decode_tensor_model_parallel_size is not None
-                else prefill_tp
-            )
-            rollout_world_size = (
-                (prefill_tp * disagg.prefill_replicas + decode_tp * disagg.decode_replicas)
-                * self.config.data_parallel_size
-                * self.config.pipeline_model_parallel_size
-            )
+            decode_tp = disagg.decode_tensor_model_parallel_size or prefill_tp
+            per_replica = prefill_tp * disagg.prefill_replicas + decode_tp * disagg.decode_replicas
         else:
-            rollout_world_size = (
-                prefill_tp * self.config.data_parallel_size * self.config.pipeline_model_parallel_size
-            )
+            decode_tp = prefill_tp
+            per_replica = prefill_tp
+        rollout_world_size = (
+            per_replica
+            * self.config.data_parallel_size
+            * self.config.pipeline_model_parallel_size
+        )
         if replica_rank == -1:
             self.replica_rank = rank // rollout_world_size
         else:
@@ -114,11 +110,6 @@ class ServerAdapter(BaseRollout):
         self._pd_server_index: Optional[int] = None
         self._pd_tp_local_rank: Optional[int] = None
         if disagg_enabled:
-            decode_tp = (
-                disagg.decode_tensor_model_parallel_size
-                if disagg.decode_tensor_model_parallel_size is not None
-                else prefill_tp
-            )
             footprint = prefill_tp + disagg.decode_replicas * decode_tp
             local = self.rollout_rank % footprint
             if local < prefill_tp:
@@ -130,21 +121,18 @@ class ServerAdapter(BaseRollout):
                 self._pd_role = "decode"
                 self._pd_server_index = off // decode_tp
                 self._pd_tp_local_rank = off % decode_tp
-        # Colocated path: every rollout_rank=0 owns the adapter.
-        # PD path: each role's TP-rank-0 owns its own adapter.
-        if disagg_enabled:
+            # Each role's TP-rank-0 owns the adapter (vs colocated where every
+            # rollout_rank=0 owns it). One log line per PD rank at startup so
+            # a deadlock report can be traced back to the role mapping.
             self._has_server = self._pd_tp_local_rank == 0
-        else:
-            self._has_server = self.rollout_rank == 0
-        if disagg_enabled:
-            # One line per PD rank at startup so a deadlock report can be
-            # traced back to the role/server-index/TP-local mapping.
             logger.info(
                 "vllm PD ServerAdapter: rank=%d replica=%d rollout=%d role=%s "
                 "server_idx=%s tp_local=%s has_server=%s",
                 rank, self.replica_rank, self.rollout_rank, self._pd_role,
                 self._pd_server_index, self._pd_tp_local_rank, self._has_server,
             )
+        else:
+            self._has_server = self.rollout_rank == 0
 
         if config.layered_summon or (config.expert_parallel_size > 1 and not _check_vllm_version_for_sleep_level()):
             logger.warning("Setting the sleep level to 1 may cause a memory overflow.")
@@ -160,12 +148,7 @@ class ServerAdapter(BaseRollout):
         # local_rank on every node. Include replica_rank to avoid collisions when
         # multiple replicas share a node.
         local_rank = self.rollout_rank % local_world_size
-        # Optional run-label prefix mirrors utils.py::_get_zmq_handle so that
-        # multiple parallel PD smokes on the same host can use distinct IPC
-        # socket paths. Empty / unset → original path.
-        _zmq_label = os.environ.get("VERL_ZMQ_LABEL", "")
-        _zmq_label = f"{_zmq_label}-" if _zmq_label else ""
-        self.zmq_handle = f"ipc:///tmp/rl-colocate-zmq-{_zmq_label}replica-{self.replica_rank}-rank-{local_rank}.sock"
+        self.zmq_handle = f"ipc:///tmp/rl-colocate-zmq-replica-{self.replica_rank}-rank-{local_rank}.sock"
 
         self.use_shm = not is_support_ipc()
         if self.use_shm:

@@ -367,6 +367,7 @@ class _DispatchStub:
     def __init__(self, decode_peers, role="prefill", connector="NixlConnector"):
         self._disaggregation_role = role
         self._pd_decode_peers = list(decode_peers)
+        self._pd_peer_idx = 0
         # Used by _pd_dispatch to branch between NIXL (read kv_transfer_params
         # back from prefill) and Mooncake (construct it locally from prefill
         # engine_id + bootstrap addr).
