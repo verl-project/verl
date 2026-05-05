@@ -85,6 +85,7 @@ class MockServerAdapter(BaseRollout):
             received = self.received_weights[name]
             assert torch.allclose(weight.to(received.device), received), f"weight {name} not equal"
         self.received_weights.clear()
+        print("Check passed, all weights are equal!")
 
 
 class MockReplica(RolloutReplica):

@@ -283,7 +283,6 @@ class vLLMHttpServer:
                     served_model_name = served_model_name.split("/")[-1]
                 args["served_model_name"] = served_model_name
 
-        # mtp (None for diffusion models; only LLM models use speculative decoding)
         if self.config.mtp is not None and self.config.mtp.enable and self.config.mtp.enable_rollout:
             speculative_config = {
                 "method": self.config.mtp.method,
@@ -856,7 +855,8 @@ class vLLMHttpServer:
         """HYBRID sleep: lora adapters only need level=1; full weights need level=2."""
         # Don't use engine.sleep(level=2) here
         # lora only update adapter weights, so set sleep level to 1
-        if self.lora_as_adapter:
+        # vllm_ascend not support sleep_level now. Enabling EP during training may lead to accuracy issues.
+        if self.lora_as_adapter or is_torch_npu_available(check_device=False):
             sleep_level = 1
         else:
             sleep_level = 2
@@ -1031,5 +1031,5 @@ class vLLMReplica(RolloutReplica):
             )
 
     def _get_server_name_prefix(self) -> str:
-        """Return the Ray actor name prefix (e.g. 'vllm_' or 'vllm_omni_')."""
+        """Return the Ray actor name prefix (e.g. 'vllm_')."""
         return "vllm_"

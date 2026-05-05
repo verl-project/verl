@@ -13,7 +13,7 @@
 # limitations under the License.
 import warnings
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Optional
 
 from omegaconf import MISSING
 
@@ -24,7 +24,6 @@ from verl.workers.config.model import MtpConfig
 
 __all__ = [
     "SamplingConfig",
-    "DiffusionSamplingConfig",
     "MultiTurnConfig",
     "CustomAsyncServerConfig",
     "AgentLoopConfig",
@@ -32,7 +31,6 @@ __all__ = [
     "ServerConfig",
     "PrometheusConfig",
     "RolloutConfig",
-    "DiffusionRolloutConfig",
     "CheckpointEngineConfig",
     "SkipConfig",
 ]
@@ -62,13 +60,6 @@ class SamplingConfig(BaseConfig):
     top_p: float = 1.0
     do_sample: bool = True
     n: int = 1
-
-
-@dataclass
-class DiffusionSamplingConfig(SamplingConfig):
-    num_inference_steps: int = 40
-    seed: int = 42
-    extra_configs: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -360,29 +351,4 @@ class RolloutConfig(BaseConfig):
                 f"{{'sglang_pd', 'vllm_pd'}}; got {self.name!r}. Plain "
                 f"'sglang'/'vllm' resolve to the non-PD replica and would "
                 f"silently ignore disaggregation settings."
-            )
-
-
-@dataclass
-class DiffusionRolloutConfig(RolloutConfig):
-    _mutable_fields = {"max_model_len", "load_format"}
-
-    val_kwargs: DiffusionSamplingConfig = field(default_factory=DiffusionSamplingConfig)
-
-    # diffusion use
-    height: int = 512
-
-    width: int = 512
-
-    num_inference_steps: int = 10
-
-    extra_configs: dict[str, Any] = field(default_factory=dict)
-
-    def __post_init__(self):
-        """Validate diffusion rollout config"""
-        super().__post_init__()
-
-        if self.pipeline_model_parallel_size > 1 and self.name == "vllm_omni":
-            raise NotImplementedError(
-                f"Current rollout {self.name=} not implemented pipeline_model_parallel_size > 1 yet."
             )

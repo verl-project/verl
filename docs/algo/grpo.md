@@ -66,7 +66,7 @@ Configure the following to enable DrGRPO, with all other parameters the same as 
 Qwen2.5 GRPO training log and commands: [link](https://github.com/eric-haibin-lin/verl-data/blob/experiments/gsm8k/qwen2-7b-fsdp2.log)
 
 ```bash
-bash examples/grpo_trainer/run_qwen3-8b.sh
+bash examples/grpo_trainer/run_qwen3_8b_fsdp.sh
 ```
 
 For more reference performance, please see https://verl.readthedocs.io/en/latest/algo/baseline.html

@@ -176,8 +176,8 @@ class BaseEngine:
             optimizer: If True, move the optimizer states.
             grad: If True, move the gradient buffer.
         """
-        if not model:
-            assert not optimizer and not grad, "Model must be moved to device along with optimizer and grad"
+        if grad:
+            assert model, "Gradient buffers must be moved to device along with model parameters"
 
     def save_checkpoint(
         self,
@@ -242,6 +242,9 @@ class BaseEngineCtx:
     def _context_switch(self, device):
         if self.disable_auto_offload:
             return
+        if device != "cpu":
+            if not self.engine.is_param_offload_enabled and not self.engine.is_optimizer_offload_enabled:
+                return
         if self.mode == "eval":
             self.engine.to(device=device, model=self.engine.is_param_offload_enabled, optimizer=False, grad=False)
         elif self.mode == "train":

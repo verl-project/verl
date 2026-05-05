@@ -44,9 +44,9 @@ We provide the following GRPO recipe scripts for you to test the performance and
 .. code-block:: bash
 
     ## For FSDP training engine
-    bash examples/grpo_trainer/run_qwen2-7b_math_trtllm.sh
+    INFER_BACKEND=trtllm bash examples/grpo_trainer/run_qwen3_8b_fsdp.sh
     ## For Megatron-Core training engine
-    bash examples/grpo_trainer/run_qwen2-7b_math_megatron_trtllm.sh
+    INFER_BACKEND=trtllm bash examples/grpo_trainer/run_qwen3_8b_megatron.sh
 
 Using TensorRT-LLM as the Rollout Engine for DAPO
 -------------------------------------------------
@@ -54,4 +54,4 @@ Using TensorRT-LLM as the Rollout Engine for DAPO
 .. code-block:: bash
 
     # For Megatron-Core training engine with FP8 rollout
-    bash examples/grpo_trainer/run_qwen3-30b_dapo_megatron_fp8_trtllm.sh
+    INFER_BACKEND=trtllm ROLLOUT_QUANTIZATION=fp8 bash examples/grpo_trainer/run_qwen3_30b_a3b_megatron.sh

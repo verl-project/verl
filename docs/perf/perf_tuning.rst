@@ -146,15 +146,15 @@ Dynamic Batch Size Tuning tips
 Here're some tips to tune the above parameters:
 
 1. **Increase** ``actor_rollout_ref.actor.ppo_max_token_len_per_gpu``  
-   Make it at least 2 x (max_prompt_length + max_response_length). We set it to 3x in `run_qwen2-7b_rm_seq_balance.sh <https://github.com/verl-project/verl/blob/main/examples/ppo_trainer/run_qwen2-7b_rm_seq_balance.sh#L25>`_.
+   Make it at least 2 x (max_prompt_length + max_response_length). See `run_qwen3_8b_fsdp.sh <https://github.com/verl-project/verl/blob/main/examples/ppo_trainer/run_qwen3_8b_fsdp.sh>`_ for an example.
    Try to increase it to get higher throughput.
 
 2. **Forward-only parameters can be larger**: 
    Similar to the non-dynamic-batch scenario, forward-only token limits can exceed those used in forward/backward operations.
  
 3. **Use larger limits for Critic and Reward models**:
-   Critic and Reward parameters can be set at least 2× the Actor’s limits. For instance, we set them to 4× here:  
-   `run_qwen2-7b_rm_seq_balance.sh <https://github.com/verl-project/verl/blob/main/examples/ppo_trainer/run_qwen2-7b_rm_seq_balance.sh#L40>`_
+   Critic and Reward parameters can be set at least 2× the Actor’s limits. See  
+   `run_qwen3_8b_fsdp.sh <https://github.com/verl-project/verl/blob/main/examples/ppo_trainer/run_qwen3_8b_fsdp.sh>`_ for an example.
    
 .. :math:`\text{critic.ppo_max_token_len_per_gpu}  = 2 \times  \text{actor.ppo_max_token_len_per_gpu})`.
 

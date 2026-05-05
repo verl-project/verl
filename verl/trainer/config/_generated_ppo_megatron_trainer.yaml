@@ -103,6 +103,7 @@ actor_rollout_ref:
     loss_scale_factor: null
     entropy_coeff: 0
     calculate_entropy: false
+    calculate_sum_pi_squared: false
     use_kl_loss: false
     use_prefix_grouper: false
     use_torch_compile: true

@@ -192,7 +192,7 @@ class ServerAdapter(BaseRollout):
             logger.info(f"update_weights done, time cost: {time.time() - start_time:.2f}s")
 
     def _get_server_name_prefix(self) -> str:
-        """Return the Ray actor name prefix matching the rollout type (e.g. 'vllm_' or 'vllm_omni_')."""
+        """Return the Ray actor name prefix matching the rollout type (e.g. 'vllm_')."""
         return f"{self.config.get('name', 'vllm')}_"
 
     def generate_sequences(self, prompts: DataProto) -> DataProto:
@@ -208,7 +208,7 @@ class ServerAdapter(BaseRollout):
         raise NotImplementedError(
             "ServerAdapter does not support synchronous generate_sequences(). "
             "The vLLM SPMD mode was retired in PR #4411. For batch generation, "
-            "please use the async server interface via vLLMReplica and AsyncLLMServerManager, "
+            "please use the async server interface via vLLMReplica and LLMServerClient, "
             "or use HFRollout for synchronous generation. "
             "See https://github.com/verl-project/verl/issues/4682 for more details."
         )

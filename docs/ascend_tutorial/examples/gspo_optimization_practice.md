@@ -2,7 +2,7 @@
 
 Last updated: 02/26/2026.
 
-本文章对应脚本地址：[qwen3_32b_gspo_npu](https://github.com/verl-project/verl/blob/main/examples/gspo_trainer/run_qwen3_32b_gspo_npu.sh)
+本文章对应脚本地址：[qwen3_8b_gspo_npu](https://github.com/verl-project/verl/blob/main/examples/gspo_trainer/run_qwen3_8b_fsdp.sh)
 
 ## 算法适配
 
@@ -198,7 +198,7 @@ fi
 sleep 600
 ```
 
-DEFAULT_SH:修改为训练所用配置 sh 文件路径。在此案例中修改为 [Qwen3-32B](https://github.com/verl-project/verl/blob/main/examples/gspo_trainer/run_qwen3_32b_gspo_npu.sh) 路径。
+DEFAULT_SH:修改为训练所用配置 sh 文件路径。在此案例中修改为 [Qwen3-8B](https://github.com/verl-project/verl/blob/main/examples/gspo_trainer/run_qwen3_8b_fsdp.sh) 路径。
 
 NNODES 和 NPUS_PER_NODE:修改为使用节点数量和每个节点 NPU 数量。在此案例中分别为4和16。
 
