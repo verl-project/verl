@@ -265,7 +265,13 @@ class vLLMColocateWorkerExtension:
         rank_for_zmq = os.environ.get("VERL_ZMQ_RANK_OVERRIDE")
         if rank_for_zmq is None:
             rank_for_zmq = self.local_rank
-        return f"ipc:///tmp/rl-colocate-zmq-replica-{replica_rank}-rank-{rank_for_zmq}.sock"
+        # Optional run-label prefix lets multiple parallel PD smokes on the
+        # same host share /tmp without IPC socket path collisions. Sender side
+        # (BucketedWeightSender constructed in vllm_rollout.py:163) reads the
+        # same env. Empty / unset → original path, fully back-compatible.
+        prefix = os.environ.get("VERL_ZMQ_LABEL", "")
+        prefix = f"{prefix}-" if prefix else ""
+        return f"ipc:///tmp/rl-colocate-zmq-{prefix}replica-{replica_rank}-rank-{rank_for_zmq}.sock"
 
 
 class SuppressSignalInThread:

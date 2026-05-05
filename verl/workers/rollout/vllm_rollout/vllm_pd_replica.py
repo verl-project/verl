@@ -31,6 +31,7 @@ config validation and server launch.
 
 import asyncio
 import logging
+import os
 import uuid
 from dataclasses import replace as _dc_replace
 from typing import Optional
@@ -356,6 +357,27 @@ class vLLMPDReplica(vLLMReplica):
             # in non-LB mode (mooncake_connector.py::get_mooncake_bootstrap_addr)
             # — there is no VLLM_MOONCAKE_BOOTSTRAP_HOST env to set.
             "VLLM_MOONCAKE_BOOTSTRAP_PORT": str(mooncake_bootstrap_port),
+            # Mooncake debugging knobs (read from trainer env, propagated to
+            # the actor's runtime env so 4 parallel smokes can run different
+            # hypotheses on different GPU pairs):
+            #
+            # MC_TCP_ENABLE_CONNECTION_POOL: defaults to "1" if unset. Without
+            #   the pool, every transfer opens a fresh TCP socket; on same-host
+            #   PD with 20 concurrent senders this can exhaust ephemeral
+            #   5-tuples to (routable_ip:worker_port) and EADDRNOTAVAIL.
+            # MC_TCP_BIND_ADDRESS: optional override for the source IP Mooncake
+            #   binds at register time (transfer_engine_impl.cpp:151).
+            # MC_FORCE_TCP / MC_FORCE_HCA: protocol selection knobs.
+            #
+            # Each is forwarded if and only if set in the trainer env, so
+            # parallel smokes don't step on one another.
+            "MC_TCP_ENABLE_CONNECTION_POOL": os.environ.get("MC_TCP_ENABLE_CONNECTION_POOL", "1"),
+            **({"MC_TCP_BIND_ADDRESS": os.environ["MC_TCP_BIND_ADDRESS"]} if os.environ.get("MC_TCP_BIND_ADDRESS") else {}),
+            **({"VLLM_HOST_IP": os.environ["VLLM_HOST_IP"]} if os.environ.get("VLLM_HOST_IP") else {}),
+            # Pass through the ZMQ label so all engines on this run share a
+            # unique IPC socket prefix (utils.py::_get_zmq_handle reads it).
+            # Empty when not set — same path as before.
+            **({"VERL_ZMQ_LABEL": os.environ["VERL_ZMQ_LABEL"]} if os.environ.get("VERL_ZMQ_LABEL") else {}),
             # Each PD engine actor has TP=1 → its worker's local_rank is
             # always 0, so without this override every PD engine binds the
             # same `replica-{R}-rank-0.sock` and update_weights_from_ipc

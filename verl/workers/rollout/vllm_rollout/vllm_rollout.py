@@ -160,7 +160,12 @@ class ServerAdapter(BaseRollout):
         # local_rank on every node. Include replica_rank to avoid collisions when
         # multiple replicas share a node.
         local_rank = self.rollout_rank % local_world_size
-        self.zmq_handle = f"ipc:///tmp/rl-colocate-zmq-replica-{self.replica_rank}-rank-{local_rank}.sock"
+        # Optional run-label prefix mirrors utils.py::_get_zmq_handle so that
+        # multiple parallel PD smokes on the same host can use distinct IPC
+        # socket paths. Empty / unset → original path.
+        _zmq_label = os.environ.get("VERL_ZMQ_LABEL", "")
+        _zmq_label = f"{_zmq_label}-" if _zmq_label else ""
+        self.zmq_handle = f"ipc:///tmp/rl-colocate-zmq-{_zmq_label}replica-{self.replica_rank}-rank-{local_rank}.sock"
 
         self.use_shm = not is_support_ipc()
         if self.use_shm:
