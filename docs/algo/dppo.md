@@ -32,15 +32,15 @@ hf download Qwen/Qwen3-30B-A3B-Base --local-dir ${HOME}/verl/models/Qwen3-30B-A3
 
 ```bash
 # run DPPO-Binary-KL
-LOSS_MODE=dppo_kl bash examples/dppo_trainer/run_qwen30b_dppo.sh
+LOSS_MODE=dppo_kl bash examples/dppo_trainer/run_qwen3_30b_a3b_megatron.sh
 
 # run DPPO-Binary-TV
-LOSS_MODE=dppo_tv bash examples/dppo_trainer/run_qwen30b_dppo.sh
+LOSS_MODE=dppo_tv bash examples/dppo_trainer/run_qwen3_30b_a3b_megatron.sh
 
 # run GRPO baseline
-LOSS_MODE=vanilla CLIP_LOW=0.2 CLIP_HIGH=0.2 bash examples/dppo_trainer/run_qwen30b_dppo.sh
+LOSS_MODE=vanilla CLIP_LOW=0.2 CLIP_HIGH=0.2 bash examples/dppo_trainer/run_qwen3_30b_a3b_megatron.sh
 # or GRPO with clip higher
-LOSS_MODE=vanilla CLIP_LOW=0.2 CLIP_HIGH=0.28 bash examples/dppo_trainer/run_qwen30b_dppo.sh
+LOSS_MODE=vanilla CLIP_LOW=0.2 CLIP_HIGH=0.28 bash examples/dppo_trainer/run_qwen3_30b_a3b_megatron.sh
 ```
 
 ## 📖Introduction

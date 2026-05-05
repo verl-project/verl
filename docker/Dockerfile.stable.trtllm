@@ -1,7 +1,7 @@
 # Base image from NGC TensorRT-LLM, which includes a pre-installed TensorRT-LLM.
 # For available images, visit: https://nvidia.github.io/TensorRT-LLM/installation/containers.html
 # Use TRTLLM_BASE_IMAGE to specify the base image (default: release:1.2.0rc6)
-ARG TRTLLM_BASE_IMAGE=nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10
+ARG TRTLLM_BASE_IMAGE=nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc13
 FROM ${TRTLLM_BASE_IMAGE}
 
 # Clear TORCH_CUDA_ARCH_LIST inherited from the base image so that
@@ -42,9 +42,9 @@ RUN pip3 install --no-cache-dir --no-deps trl==0.27.0 && \
 # ==============================================================================
 # Install verl dependencies
 # ==============================================================================
-RUN pip install git+https://github.com/verl-project/verl.git@v0.7.0
+RUN pip install git+https://github.com/verl-project/verl.git@v0.7.1
 RUN pip uninstall -y verl
-RUN pip install "verl[mcore] @ git+https://github.com/verl-project/verl.git@v0.7.0"
+RUN pip install "verl[mcore] @ git+https://github.com/verl-project/verl.git@v0.7.1"
 RUN pip uninstall -y verl
 
 

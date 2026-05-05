@@ -22,6 +22,7 @@ from verl.single_controller.ray.base import RayResourcePool, split_resource_pool
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.ray_utils import auto_await
 from verl.workers.config import DistillationConfig, DistillationTeacherModelConfig, HFModelConfig
+from verl.workers.rollout.llm_server import LLMServerClient
 from verl.workers.rollout.replica import get_rollout_replica_class
 
 logger = logging.getLogger(__file__)
@@ -143,10 +144,10 @@ class TeacherModelManager:
                 )
 
     def _initialize_load_balancer_handle(self):
-        from verl.experimental.agent_loop.agent_loop import GlobalRequestLoadBalancer
+        from verl.workers.rollout.llm_server import GlobalRequestLoadBalancer
 
         self.load_balancer_handle = GlobalRequestLoadBalancer.remote(
-            server_actor_ids=self.server_addresses,
+            servers=dict(zip(self.server_addresses, self.server_handles, strict=True))
         )
 
 
@@ -191,3 +192,13 @@ class MultiTeacherModelManager:
             self.server_addresses[key] = manager.server_addresses
             self.server_handles[key] = manager.server_handles
             self.load_balancer_handle[key] = manager.load_balancer_handle
+
+    def get_client(self) -> dict[str, LLMServerClient]:
+        """Get the LLMServerClient for each teacher model."""
+        teacher_clients = {}
+        for key, manager in self.teacher_model_managers.items():
+            servers = dict(zip(manager.server_addresses, manager.server_handles, strict=True))
+            teacher_clients[key] = LLMServerClient(
+                config=self.config, servers=servers, load_balancer_handle=manager.load_balancer_handle
+            )
+        return teacher_clients

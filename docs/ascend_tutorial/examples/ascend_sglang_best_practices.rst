@@ -3,27 +3,30 @@ Ascend SGLang Best Practice
 
 Last updated: 01/27/2026.
 
-.. _Qwen3-30B: https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3moe-30b_sglang_megatron_npu.sh
-.. _Qwen2.5-32B: https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen2-32b_sglang_fsdp_npu.sh
+.. _Qwen3-30B: https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3_30b_a3b_mindspeed.sh
+.. _Qwen2.5-32B-FSDP: https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen2_5_32b_grpo_npu.sh
+.. _Qwen2.5-32B-Megatron: https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen2_5-32b_grpo_megatron_vllm_npu.sh
 引言
 ----------------------------------
 
-SGLang 是当前主流的高性能开源推理引擎, 昇腾已经全面原生支持该推理引擎在verl中使用,
-仅需简单的构建流程，开发者即可完成环境构建，本文将提供两个经典用例来帮助开发者了解以下内容：
+SGLang 和 vLLM 是当前主流的高性能开源推理引擎, 昇腾已经全面原生支持这些推理引擎在verl中使用,
+仅需简单的构建流程，开发者即可完成环境构建，本文将提供以下经典用例来帮助开发者了解以下内容：
 
 1. 环境构建
 2. 模型训练与评估
 3. 性能采集
 
-两个用例模型脚本以及其需要的硬件条件各自如下：
+用例模型脚本以及其需要的硬件条件各自如下：
 
-+----------------------+---------------------+----------+------------------------+
-| 模型                 | NPU型号             | 节点数量 | 训推后端               |
-+======================+=====================+==========+========================+
-| `Qwen3-30B`_         | Atlas 800T A3       | 1        | SGLang + Megatron      |
-+----------------------+---------------------+----------+------------------------+
-| `Qwen2.5-32B`_       | Atlas 900 A2        | 2        | SGLang + FSDP          |
-+----------------------+---------------------+----------+------------------------+
++----------------------------+---------------------+----------+------------------------+
+| 模型                       | NPU型号             | 节点数量 | 训推后端               |
++============================+=====================+==========+========================+
+| `Qwen3-30B`_               | Atlas 800T A3       | 1        | SGLang + Megatron      |
++----------------------------+---------------------+----------+------------------------+
+| `Qwen2.5-32B-FSDP`_        | Atlas 900 A2        | 2        | vLLM + FSDP            |
++----------------------------+---------------------+----------+------------------------+
+| `Qwen2.5-32B-Megatron`_    | Atlas 900 A2        | 1        | vLLM + Megatron        |
++----------------------------+---------------------+----------+------------------------+
 
 环境构建
 -----------------------------------
@@ -63,7 +66,7 @@ DAPO-Math-17k: https://huggingface.co/datasets/BytedTsinghua-SIA/DAPO-Math-17k
     actor_rollout_ref.actor.megatron.use_dist_checkpointing=False \
     actor_rollout_ref.actor.megatron.use_mbridge=True
 
-`Qwen2.5-32B`_
+`Qwen2.5-32B-FSDP`_
 ^^^^^^^^^^^
 **下载模型权重**
 
@@ -104,8 +107,9 @@ DAPO-Math-17k: https://huggingface.co/datasets/BytedTsinghua-SIA/DAPO-Math-17k
 
 .. code-block:: bash 
 
-  bash examples/grpo_trainer/run_qwen3moe-30b_sglang_megatron_npu.sh
-对于多节点任务 `Qwen2.5-32B`_ ，我们推荐使用以下脚本进行大规模多节点训练拉起
+  bash examples/grpo_trainer/run_qwen3_30b_a3b_mindspeed.sh
+对于多节点任务 `Qwen2.5-32B-FSDP`_ ，我们推荐使用以下脚本进行大规模多节点训练拉起。
+Megatron 训练可参考 `Qwen2.5-32B-Megatron`_。
 
 .. code-block:: bash
 
@@ -125,7 +129,7 @@ DAPO-Math-17k: https://huggingface.co/datasets/BytedTsinghua-SIA/DAPO-Math-17k
   export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
   export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
   # 修改为当前需要跑的用例路径
-  DEFAULT_SH="./run_*.sh"
+  DEFAULT_SH="./run_qwen2_5_32b_grpo_npu.sh"
   echo "Use $DEFAULT_SH"
   
   ulimit -n 32768
@@ -182,7 +186,7 @@ DAPO-Math-17k: https://huggingface.co/datasets/BytedTsinghua-SIA/DAPO-Math-17k
   
   sleep 600
 
-DEFAULT_SH:修改为训练所用配置 sh 文件路径。在此案例中修改为 `Qwen2.5-32B`_ 路径。
+DEFAULT_SH:修改为训练所用配置 sh 文件路径。在此案例中修改为 `Qwen2.5-32B-FSDP`_ 路径。
           
 NNODES 和 NPUS_PER_NODE:修改为使用节点数量和每个节点 NPU 数量。在此案例中分别为2和8。
           

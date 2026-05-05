@@ -49,6 +49,6 @@ To further reduce code verification time, enable parallel processing with:
 
 For a practical implementation, refer to the example script:  
 
-``examples/ppo_trainer/run_deepseek7b_llm_sandbox_fusion.sh``
+``examples/sglang_multiturn/run_qwen3_4b_dapo_multiturn_fsdp.sh``
 
 Once you’ve set your API endpoint in the script, you can start the training job.

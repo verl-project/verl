@@ -31,7 +31,6 @@ from torch.utils.data import Dataset, Sampler
 from tqdm import tqdm
 
 from verl import DataProto
-from verl.checkpoint_engine import CheckpointEngineManager
 from verl.experimental.dataset.sampler import AbstractCurriculumSampler
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, ResourcePoolManager
 from verl.single_controller.ray.base import create_colocated_worker_cls
@@ -48,6 +47,7 @@ from verl.trainer.ppo.utils import Role, WorkerType
 from verl.utils.checkpoint.checkpoint_manager import should_save_ckpt_esi
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
+from verl.utils.import_utils import load_class_from_fqn
 from verl.utils.metric import reduce_metrics
 from verl.utils.rollout_skip import RolloutSkip
 
@@ -119,10 +119,17 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
         self._init_reward_loop()
         self._init_async_rollout_manager()
 
+        # Support custom CheckpointEngineManager via config
+        checkpoint_manager_class_fqn = self.config.actor_rollout_ref.rollout.get("checkpoint_manager_class")
+        if checkpoint_manager_class_fqn:
+            CheckpointEngineManager = load_class_from_fqn(checkpoint_manager_class_fqn, "CheckpointEngineManager")
+        else:
+            from verl.checkpoint_engine import CheckpointEngineManager
+
         self.checkpoint_manager = CheckpointEngineManager(
             config=omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine),
             trainer=self.actor_rollout_wg,
-            replicas=self.async_rollout_manager.rollout_replicas,
+            replicas=self.llm_server_manager.get_replicas(),
         )
 
     def _init_resource_pools(self):
@@ -194,7 +201,8 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
         # NOTE: if you want to use a different resource pool for each role, which can support different parallel size,
         # you should not use `create_colocated_worker_cls`.
         # Instead, directly pass different resource pool to different worker groups.
-        # See https://github.com/verl-project/verl/blob/master/examples/ray/tutorial.ipynb for more information.
+        # See https://github.com/verl-project/verl/blob/master/examples/tutorial/ray/tutorial.ipynb
+        # for more information.
         all_wg = {}
         wg_kwargs = {}  # Setting up kwargs for RayWorkerGroup
         if OmegaConf.select(self.config.trainer, "ray_wait_register_center_timeout") is not None:
@@ -405,7 +413,7 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
             gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
             self.checkpoint_manager.sleep_replicas()
             if self.curr_step_profile:
-                self.async_rollout_manager.stop_profile()
+                self.llm_server_manager.stop_profile()
 
             timing_raw.update(gen_batch_output.meta_info["timing"])
             gen_batch_output.meta_info.pop("timing", None)
@@ -415,11 +423,11 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
                 gen_baseline_batch = deepcopy(gen_batch)
                 gen_baseline_batch.meta_info["do_sample"] = False
                 if self.curr_step_profile:
-                    self.async_rollout_manager.start_profile()
+                    self.llm_server_manager.start_profile()
                 gen_baseline_output = self.async_rollout_manager.generate_sequences(gen_baseline_batch)
                 self.checkpoint_manager.sleep_replicas()
                 if self.curr_step_profile:
-                    self.async_rollout_manager.stop_profile()
+                    self.llm_server_manager.stop_profile()
                 batch = batch.union(gen_baseline_output)
                 # compute reward model score on batch
                 rm_scores = None

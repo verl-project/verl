@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from .base import BaseEngine, EngineRegistry
-from .fsdp import DiffusersFSDPEngine, FSDPEngine, FSDPEngineWithLMHead
+from .fsdp import FSDPEngine, FSDPEngineWithLMHead
 
 __all__ = [
     "BaseEngine",
@@ -20,9 +20,6 @@ __all__ = [
     "FSDPEngine",
     "FSDPEngineWithLMHead",
 ]
-
-if DiffusersFSDPEngine is not None:
-    __all__.append("DiffusersFSDPEngine")
 
 try:
     from .torchtitan import TorchTitanEngine, TorchTitanEngineWithLMHead

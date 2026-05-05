@@ -95,8 +95,8 @@ Key RPCs
 
    ``train_mini_batch`` splits the batch into mini-batches, iterates
    over PPO epochs, and calls ``TrainingWorker.train_batch`` for each
-   mini-batch (one optimizer step per mini-batch). The PPO loss,
-   diffusion loss, or distillation loss is wired by ``init_model`` via
+   mini-batch (one optimizer step per mini-batch). The PPO loss
+   or distillation loss is wired by ``init_model`` via
    ``TrainingWorker.set_loss_fn``.
 
 4. ``update_weights``
@@ -150,7 +150,7 @@ Key RPCs
    load/offload control. ``device`` must be either ``"cpu"`` or
    ``"device"`` (which is mapped to the actual accelerator name).
 -  ``set_loss_fn(loss_fn)`` – install the loss closure (PPO loss,
-   diffusion loss, distillation loss, or any custom callable that
+   distillation loss, or any custom callable that
    accepts ``(model_output, batch)``).
 -  ``train_mini_batch(data)`` – mini-batch + PPO-epoch loop; one
    optimizer step per mini-batch; allgather metrics across DP.
@@ -195,7 +195,6 @@ model_type             backend                device                 Engine clas
 ``language_model``     ``torchtitan``         ``cuda`` / ``npu``     ``verl.workers.engine.torchtitan.TorchTitanEngineWithLMHead``
 ``value_model``        ``fsdp`` / ``fsdp2``   ``cuda`` / ``npu``     ``verl.workers.engine.fsdp.FSDPEngineWithValueHead``
 ``value_model``        ``megatron``           ``cuda``               ``verl.workers.engine.megatron.MegatronEngineWithValueHead``
-``diffusion_model``    ``fsdp`` / ``fsdp2``   ``cuda``               ``verl.workers.engine.fsdp.DiffusersFSDPEngine``
 =====================  =====================  =====================  =============================================================
 
 Migrating from Legacy Workers

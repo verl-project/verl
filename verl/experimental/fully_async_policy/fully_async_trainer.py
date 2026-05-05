@@ -41,6 +41,7 @@ from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, shou
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
 from verl.utils.tracking import Tracking, ValidationGenerationsLogger
+from verl.workers.rollout.llm_server import LLMServerManager
 
 logger = logging.getLogger(__name__)
 
@@ -298,6 +299,10 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             )
             self.resource_pool_to_cls[resource_pool][str(role)] = role_cls
 
+    def _create_reward_model_class(self):
+        # In fully async mode, RM is managed by RewardLoopManager (standalone). Skip worker group creation for RM.
+        pass
+
     def _init_models(self):
         if self.use_critic:
             self.critic_wg = self.all_wg[str(Role.Critic)]
@@ -306,10 +311,6 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         if self.use_reference_policy and not self.ref_in_actor:
             self.ref_policy_wg = self.all_wg[str(Role.RefPolicy)]
             self.ref_policy_wg.init_model()
-
-        if self.use_rm:
-            self.rm_wg = self.all_wg[str(Role.RewardModel)]
-            self.rm_wg.init_model()
 
         self.actor_wg = self.all_wg[str(self.train_role)]
         self.actor_wg.init_model()
@@ -356,9 +357,12 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             self.async_rollout_mode = True
             from verl.experimental.agent_loop import AgentLoopManager
 
+            self.llm_server_manager = await LLMServerManager.create(
+                config=self.config, worker_group=self.actor_rollout_wg
+            )
             self.async_rollout_manager = await AgentLoopManager.create(
                 config=self.config,
-                worker_group=self.actor_rollout_wg,
+                llm_client=self.llm_server_manager.get_client(),
                 reward_loop_worker_handles=reward_loop_worker_handles,
             )
             print("[FullyAsyncTrainer] async_rollout_manager initialized")
@@ -375,7 +379,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             self.colocate_checkpoint_manager = CheckpointEngineManager(
                 config=checkpoint_engine_config,
                 trainer=self.actor_rollout_wg,
-                replicas=self.async_rollout_manager.rollout_replicas,
+                replicas=self.llm_server_manager.get_replicas(),
             )
 
             # sleep all replicas to load checkpoint
