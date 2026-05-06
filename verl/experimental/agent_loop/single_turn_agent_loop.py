@@ -21,6 +21,9 @@ from PIL import Image
 
 from verl.experimental.agent_loop.agent_loop import AgentLoopBase, AgentLoopOutput, register
 from verl.experimental.agent_loop.diffusion_agent_loop import DiffusionAgentLoopOutput
+from verl.experimental.agent_loop.preprocessed_multimodal_dispatch import (
+    build_preprocessed_multimodal_input,
+)
 from verl.utils.chat_template import apply_chat_template
 from verl.utils.profiler import simple_timer
 from verl.utils.rollout_trace import rollout_trace_op
@@ -50,13 +53,15 @@ class SingleTurnAgentLoop(AgentLoopBase):
         videos = multi_modal_data.get("videos")
 
         # 2. apply chat template and tokenize
-        prompt_ids, model_inputs = await self.apply_chat_template(
+        prompt_ids, model_inputs = await self.apply_chat_template_with_model_inputs(
             messages,
             images=images,
             videos=videos,
-            return_model_inputs=True,
         )
-        preprocessed_multimodal_input = self.maybe_build_preprocessed_multimodal_input(
+        preprocessed_multimodal_input = build_preprocessed_multimodal_input(
+            rollout_name=self.rollout_config.get("name", None),
+            rollout_config=self.rollout_config,
+            processor=self.processor,
             prompt_ids=prompt_ids,
             model_inputs=model_inputs,
             images=images,

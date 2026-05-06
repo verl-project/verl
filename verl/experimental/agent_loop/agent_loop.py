@@ -32,7 +32,6 @@ from transformers import AutoProcessor, AutoTokenizer
 
 from verl.experimental.agent_loop.preprocessed_multimodal_dispatch import (
     attach_preprocessed_multimodal_input_to_kwargs,
-    build_preprocessed_multimodal_input,
     refresh_preprocessed_multimodal_prompt_ids,
 )
 from verl.experimental.agent_loop.prometheus_utils import update_prometheus_config
@@ -362,20 +361,32 @@ class AgentLoopBase(ABC):
         images: list[Image.Image] = None,
         videos: list[tuple[torch.Tensor, dict]] = None,
         remove_system_prompt: bool = False,
-        return_model_inputs: bool = False,
-    ):
-        """Apply chat template to messages with optional tools, images, and videos.
+    ) -> list[int]:
+        """Apply chat template to messages and return prompt token ids.
 
-        Args:
-            messages (list[dict]): Input messages.
-            tools (list[dict], optional): Tools schemas. Defaults to None.
-            images (list[Image.Image], optional): Input images. Defaults to None.
-            videos (list[tuple[torch.Tensor, dict]], optional): Input videos. Defaults to None.
-            remove_system_prompt (bool, optional): Whether to remove system prompt. Defaults to False.
-            return_model_inputs (bool, optional): Whether to also return processor model inputs.
+        Use ``apply_chat_template_with_model_inputs`` when the caller also needs the HF
+        processor outputs (e.g. to build a direct preprocessed multimodal payload).
+        """
+        prompt_ids, _ = await self.apply_chat_template_with_model_inputs(
+            messages,
+            tools=tools,
+            images=images,
+            videos=videos,
+            remove_system_prompt=remove_system_prompt,
+        )
+        return prompt_ids
 
-        Returns:
-            list[int] | tuple[list[int], Any]: Prompt token ids, plus model inputs when requested.
+    async def apply_chat_template_with_model_inputs(
+        self,
+        messages: list[dict],
+        tools: list[dict] = None,
+        images: list[Image.Image] = None,
+        videos: list[tuple[torch.Tensor, dict]] = None,
+        remove_system_prompt: bool = False,
+    ) -> tuple[list[int], Any]:
+        """Apply chat template and also return the HF processor outputs.
+
+        ``model_inputs`` is ``None`` on the text-only path (no processor configured).
         """
         model_inputs = None
         if self.processor is not None:
@@ -406,7 +417,7 @@ class AgentLoopBase(ABC):
                 return_tensors="pt",
                 do_sample_frames=False,
             )
-            prompt_ids = normalize_token_ids(model_inputs["input_ids"])
+            prompt_ids = normalize_token_ids(model_inputs.pop("input_ids"))
         else:
             tokenized_prompt = await self.loop.run_in_executor(
                 None,
@@ -424,27 +435,7 @@ class AgentLoopBase(ABC):
         if remove_system_prompt:
             prompt_ids = prompt_ids[len(self.system_prompt) :]
 
-        if return_model_inputs:
-            return prompt_ids, model_inputs
-        return prompt_ids
-
-    def maybe_build_preprocessed_multimodal_input(
-        self,
-        *,
-        prompt_ids: list[int],
-        model_inputs: Any,
-        images: list[Image.Image] = None,
-        videos: list[tuple[torch.Tensor, dict]] = None,
-    ) -> Any | None:
-        return build_preprocessed_multimodal_input(
-            rollout_name=self.rollout_config.get("name", None),
-            rollout_config=self.rollout_config,
-            processor=self.processor,
-            prompt_ids=prompt_ids,
-            model_inputs=model_inputs,
-            images=images,
-            videos=videos,
-        )
+        return prompt_ids, model_inputs
 
     @abstractmethod
     async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
