@@ -297,17 +297,22 @@ def test_pd_replica_init_happy_path_1p3d(patched_replica_cls):
     assert replica.world_size == 4
 
 
-def test_pd_replica_init_rejects_tp_gt_1(patched_replica_cls):
-    """TP>1 per PD engine needs per-worker zmq_rank_override which the
-    current revision doesn't wire (single per-actor env covers TP-rank-0
-    only). Until that lands, reject explicitly."""
+def test_pd_replica_init_accepts_tp_gt_1(patched_replica_cls):
+    """TP>1 per PD engine works as long as the worker_group footprint adds
+    up. Each worker independently computes its socket key as
+    base + self.local_rank (see utils.py::_get_zmq_handle), so the single
+    per-actor VERL_ZMQ_BASE_TRAINER_RANK env covers all TP-ranks of that
+    actor."""
     cfg = _make_pd_config(
         tensor_model_parallel_size=2,
-        decode_tensor_model_parallel_size=1,
+        decode_tensor_model_parallel_size=2,
         decode_replicas=2,
     )
-    with pytest.raises(NotImplementedError, match="TP=1 per engine"):
-        patched_replica_cls(replica_rank=0, config=cfg, model_config=None, gpus_per_node=8)
+    replica = patched_replica_cls(replica_rank=0, config=cfg, model_config=None, gpus_per_node=8)
+    # prefill_tp=2 + decode_replicas=2 * decode_tp=2 = 6 GPUs
+    assert replica.world_size == 6
+    assert replica._prefill_tp == 2
+    assert replica._decode_tp == 2
 
 
 def test_pd_replica_init_accepts_mooncake(patched_replica_cls):

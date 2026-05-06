@@ -254,15 +254,18 @@ class vLLMColocateWorkerExtension:
         when multiple replicas share the same node.
 
         PD path override: under PD disaggregation each engine is its own
-        Ray actor with TP=1, so every engine's worker has local_rank=0 →
-        all PD engines collide on `replica-{R}-rank-0.sock`. The matching
-        trainer-rank-N sender uses `rank-{rollout_rank % local_world_size}`,
-        which has rank 0 for prefill, 1+i for decode-i. We expose
-        `VERL_ZMQ_RANK_OVERRIDE` on each PD actor so the engine binds the
-        socket the trainer pair sender writes to.
+        Ray actor, so worker `local_rank` resets per actor (e.g. with TP=1
+        every actor's only worker has local_rank=0; with TP>1 every actor
+        has workers 0..TP-1). To avoid socket collisions across actors we
+        let the spawner set `VERL_ZMQ_BASE_TRAINER_RANK` to the *first*
+        global trainer rank that this actor's worker slice was sliced from
+        (prefill: 0; decode-i: prefill_tp + i*decode_tp). Each worker then
+        binds `rank-{base + self.local_rank}.sock`, matching the trainer
+        rank-N IPC sender 1:1 across the whole replica regardless of TP.
         """
         replica_rank = os.environ.get("VERL_REPLICA_RANK", "0")
-        rank_for_zmq = os.environ.get("VERL_ZMQ_RANK_OVERRIDE", self.local_rank)
+        base = os.environ.get("VERL_ZMQ_BASE_TRAINER_RANK")
+        rank_for_zmq = int(base) + self.local_rank if base is not None else self.local_rank
         return f"ipc:///tmp/rl-colocate-zmq-replica-{replica_rank}-rank-{rank_for_zmq}.sock"
 
 

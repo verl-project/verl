@@ -111,16 +111,10 @@ class vLLMPDReplica(vLLMReplica):
                 f"pipeline_model_parallel_size=1 only "
                 f"(got {self.config.pipeline_model_parallel_size}); PD path does not model PP yet"
             )
-        # TP>1 per PD engine needs per-worker `VERL_ZMQ_RANK_OVERRIDE` (each
-        # TP rank within an engine has its own IPC sender on the trainer
-        # side). The single per-actor env we set covers TP-rank-0 only;
-        # raising here keeps the failure mode explicit until that's wired.
-        if self._prefill_tp != 1 or self._decode_tp != 1:
-            raise NotImplementedError(
-                f"PD requires TP=1 per engine in this revision (got prefill_tp={self._prefill_tp}, "
-                f"decode_tp={self._decode_tp}). TP>1 needs per-worker zmq_rank_override; "
-                f"see vllm_pd_replica.py docstring for the follow-up."
-            )
+        # ZMQ socket key is per-worker — each worker binds
+        # `rank-{base + self.local_rank}.sock` where base is the first
+        # global trainer rank that this actor's worker slice was sliced
+        # from. See utils.py::_get_zmq_handle. Works for any TP value.
 
         # Override the values RolloutReplica.__init__ computed from a colocated
         # topology — under PD the world is asymmetric.
@@ -202,8 +196,9 @@ class vLLMPDReplica(vLLMReplica):
                     # `node_rank=0` because this PR is single-node only.
                     actor_name=f"vllm_pd_server_{self.replica_rank}_0{self.name_suffix}",
                     # Prefill is sliced from worker_group at offset 0 → its
-                    # paired trainer rank is 0 → ZMQ socket `rank-0`.
-                    zmq_rank_override=0,
+                    # paired trainer rank range is [0, prefill_tp). Worker
+                    # k binds `rank-{0+k}.sock` (utils.py::_get_zmq_handle).
+                    zmq_base_trainer_rank=0,
                 )
             ]
 
@@ -243,14 +238,12 @@ class vLLMPDReplica(vLLMReplica):
                         # own NIXL side-channel port.
                         mooncake_bootstrap_port=prefill_side_channel_port,
                         actor_name=f"vllm_pd_server_decode_{self.replica_rank}_{i}{self.name_suffix}",
-                        # Decode i is sliced from worker_group at offset
+                        # Decode-i is sliced from worker_group at offset
                         # `prefill_tp + i*decode_tp` → its paired trainer rank
-                        # range is [start, start+decode_tp). With TP=1 the
-                        # engine has 1 worker, so use `start` directly. For
-                        # TP>1 (future), each decode actor still spans
-                        # decode_tp ranks; this single override covers TP-rank
-                        # 0; if TP>1 we'd need per-worker overrides.
-                        zmq_rank_override=start,
+                        # range is [start, start+decode_tp). Worker k inside
+                        # the actor binds `rank-{start+k}.sock`, covering all
+                        # decode_tp workers regardless of TP.
+                        zmq_base_trainer_rank=start,
                     )
                 )
 
@@ -340,7 +333,7 @@ class vLLMPDReplica(vLLMReplica):
         side_channel_port: int,
         mooncake_bootstrap_port: int,
         actor_name: str,
-        zmq_rank_override: int = 0,
+        zmq_base_trainer_rank: int = 0,
     ) -> ActorHandle:
         """Construct one ``vLLMHttpServer`` Ray actor pinned to ``node_id`` with
         the right NIXL env vars and TP override. Mirrors the surrounding
@@ -377,13 +370,13 @@ class vLLMPDReplica(vLLMReplica):
             # regressions ever bite. See agent_run/results/mooncake_bringup/
             # for the full bisect.
             "MC_TCP_ENABLE_CONNECTION_POOL": os.environ.get("MC_TCP_ENABLE_CONNECTION_POOL", "1"),
-            # Each PD engine actor has TP=1 → its worker's local_rank is
-            # always 0, so without this override every PD engine binds the
-            # same `replica-{R}-rank-0.sock` and update_weights_from_ipc
-            # never receives weights from trainer-rank-N's sender.
-            # Setting `VERL_ZMQ_RANK_OVERRIDE` forces _get_zmq_handle to
-            # use the paired trainer rank instead of self.local_rank.
-            "VERL_ZMQ_RANK_OVERRIDE": str(zmq_rank_override),
+            # PD actors share `local_rank=0..TP-1` per actor; without this
+            # base, all actors collide on `replica-{R}-rank-{0..TP-1}.sock`
+            # and update_weights_from_ipc hangs on trainer ranks not paired
+            # with the actor that won the bind. Each worker computes its
+            # socket key as `base + self.local_rank` (utils.py::_get_zmq_handle),
+            # giving a 1:1 trainer-rank ↔ engine-worker mapping for any TP.
+            "VERL_ZMQ_BASE_TRAINER_RANK": str(zmq_base_trainer_rank),
         }
 
         prefix = self._get_server_name_prefix()
