@@ -63,16 +63,16 @@ def test_disaggregation_disabled_skips_validation():
     assert cfg.enabled is False
 
 
-def test_rollout_config_sglang_pd_enabled_ok():
+def test_rollout_config_sglang_with_disagg_enabled_ok():
     cfg = RolloutConfig(
-        name="sglang_pd",
+        name="sglang",
         disaggregation=DisaggregationConfig(enabled=True),
     )
     assert cfg.disaggregation.enabled is True
 
 
-@pytest.mark.parametrize("name", ["sglang", "vllm", "trtllm"])
-def test_rollout_config_non_pd_name_rejects_pd(name):
+@pytest.mark.parametrize("name", ["vllm", "trtllm"])
+def test_rollout_config_non_sglang_rejects_pd(name):
     with pytest.raises(ValueError, match="disaggregation.enabled=True"):
         RolloutConfig(
             name=name,
@@ -96,20 +96,38 @@ def test_effective_decode_tp_respects_override():
     assert cfg.effective_decode_tp(prefill_tp=4) == 2
 
 
-def test_registry_knows_pd_replicas():
+def test_registry_no_pd_aliases():
+    """``sglang_pd``/``vllm_pd`` were dropped: PD is selected via the disaggregation flag."""
     from verl.workers.rollout.replica import RolloutReplicaRegistry
 
-    assert "sglang_pd" in RolloutReplicaRegistry._registry
-    assert "vllm_pd" in RolloutReplicaRegistry._registry
     assert "sglang" in RolloutReplicaRegistry._registry
     assert "vllm" in RolloutReplicaRegistry._registry
+    assert "sglang_pd" not in RolloutReplicaRegistry._registry
+    assert "vllm_pd" not in RolloutReplicaRegistry._registry
 
 
-def test_vllm_pd_replica_raises_at_instantiation():
-    from verl.workers.rollout.vllm_rollout.vllm_pd_replica import vLLMPDReplica
+def _sglang_available() -> bool:
+    import importlib.util
 
-    with pytest.raises(NotImplementedError, match="vLLMPDReplica is not implemented"):
-        vLLMPDReplica()
+    return importlib.util.find_spec("sglang") is not None
+
+
+@pytest.mark.skipif(not _sglang_available(), reason="sglang not installed")
+def test_dispatch_sglang_returns_pd_replica_when_flag_set():
+    from verl.workers.rollout.replica import get_rollout_replica_class
+
+    plain_cls = get_rollout_replica_class("sglang", disaggregation_enabled=False)
+    pd_cls = get_rollout_replica_class("sglang", disaggregation_enabled=True)
+    assert plain_cls.__name__ == "SGLangReplica"
+    assert pd_cls.__name__ == "SGLangPDReplica"
+    assert issubclass(pd_cls, plain_cls)
+
+
+def test_dispatch_non_sglang_with_flag_raises():
+    from verl.workers.rollout.replica import get_rollout_replica_class
+
+    with pytest.raises(NotImplementedError, match="PD disaggregation"):
+        get_rollout_replica_class("vllm", disaggregation_enabled=True)
 
 
 def _assign_pd_role(rollout_rank: int, prefill_tp: int, decode_replicas: int, decode_tp: int):

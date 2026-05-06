@@ -363,27 +363,29 @@ def _load_trtllm():
     return TRTLLMReplica
 
 
-def _load_sglang_pd():
-    _load_sglang()  # side-effect: installs vllm mocks needed by SGLang
-    from verl.workers.rollout.sglang_rollout.sglang_pd_replica import SGLangPDReplica
-
-    return SGLangPDReplica
-
-
-def _load_vllm_pd():
-    from verl.workers.rollout.vllm_rollout.vllm_pd_replica import vLLMPDReplica
-
-    return vLLMPDReplica
-
-
 # Register built-in types
 RolloutReplicaRegistry.register("vllm", _load_vllm)
 RolloutReplicaRegistry.register("sglang", _load_sglang)
-RolloutReplicaRegistry.register("sglang_pd", _load_sglang_pd)
-RolloutReplicaRegistry.register("vllm_pd", _load_vllm_pd)
 RolloutReplicaRegistry.register("trtllm", _load_trtllm)
 
 
-# Original function for backward compatibility
-def get_rollout_replica_class(rollout: str) -> type[RolloutReplica]:
+def get_rollout_replica_class(rollout: str, disaggregation_enabled: bool = False) -> type[RolloutReplica]:
+    """Resolve a replica class by backend name.
+
+    PD-disaggregated SGLang reuses the ``sglang`` backend name; the dispatch
+    here picks ``SGLangPDReplica`` only when the caller asserts
+    ``disaggregation_enabled=True`` (sourced from
+    ``RolloutConfig.disaggregation.enabled``). Validation in
+    ``RolloutConfig.__post_init__`` blocks the flag for non-SGLang names, so
+    this function only has to handle the SGLang fork.
+    """
+    if disaggregation_enabled:
+        if rollout != "sglang":
+            raise NotImplementedError(f"PD disaggregation is only supported with rollout='sglang'; got {rollout!r}.")
+        # _load_sglang side-effect: installs vllm mocks needed by SGLangPDReplica's
+        # transitive imports. Cheap if already installed.
+        RolloutReplicaRegistry.get("sglang")
+        from verl.workers.rollout.sglang_rollout.sglang_pd_replica import SGLangPDReplica
+
+        return SGLangPDReplica
     return RolloutReplicaRegistry.get(rollout)

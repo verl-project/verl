@@ -279,7 +279,10 @@ class LLMServerManager:
 
         # for recipe to change
         if not hasattr(self, "rollout_replica_class"):
-            self.rollout_replica_class = get_rollout_replica_class(self.rollout_config.name)
+            self.rollout_replica_class = get_rollout_replica_class(
+                self.rollout_config.name,
+                disaggregation_enabled=self.rollout_config.disaggregation.enabled,
+            )
 
     @classmethod
     @auto_await

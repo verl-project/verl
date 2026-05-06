@@ -23,7 +23,7 @@ _ALLOWED_BACKENDS = ("nixl", "mooncake", "ascend", "mori", "fake")
 
 @dataclass
 class DisaggregationConfig(BaseConfig):
-    """Prefill-Decode disaggregation knobs (SGLang only; see ``sglang_pd`` replica)."""
+    """Prefill-Decode disaggregation knobs (SGLang only)."""
 
     enabled: bool = False
     prefill_replicas: int = 1

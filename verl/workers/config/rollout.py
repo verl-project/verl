@@ -345,10 +345,8 @@ class RolloutConfig(BaseConfig):
                 DisaggregationConfig(**OmegaConf.to_container(self.disaggregation, resolve=True)),
             )
 
-        if self.disaggregation.enabled and self.name not in ("sglang_pd", "vllm_pd"):
+        if self.disaggregation.enabled and self.name != "sglang":
             raise ValueError(
-                f"rollout.disaggregation.enabled=True requires rollout.name in "
-                f"{{'sglang_pd', 'vllm_pd'}}; got {self.name!r}. Plain "
-                f"'sglang'/'vllm' resolve to the non-PD replica and would "
-                f"silently ignore disaggregation settings."
+                f"rollout.disaggregation.enabled=True is currently only supported with "
+                f"rollout.name='sglang'; got {self.name!r}. (vLLM PD is a tracked follow-up.)"
             )

@@ -444,7 +444,7 @@ mtp: ${oc.select:actor_rollout_ref.model.mtp, null}
 # QAT configuration (inherited from actor's engine config)
 qat: ${oc.select:actor_rollout_ref.actor.fsdp_config.qat,${oc.select:actor_rollout_ref.actor.megatron.qat,null}}
 
-# Prefill-Decode disaggregation (SGLang only; use rollout.name=sglang_pd).
+# Prefill-Decode disaggregation (SGLang only; keep rollout.name=sglang and toggle enabled=True).
 disaggregation:
 
   # Master switch for PD disaggregation.
