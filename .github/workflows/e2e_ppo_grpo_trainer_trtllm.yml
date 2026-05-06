@@ -290,6 +290,15 @@ jobs:
           MODEL_PATH="${HOME}/models/Qwen/Qwen3-VL-2B-Instruct" \
             bash examples/grpo_trainer/run_qwen2_5_vl_7b_fsdp.sh \
             trainer.total_training_steps=1 \
+            data.train_batch_size=8 \
+            data.max_response_length=64 \
+            actor_rollout_ref.actor.ppo_mini_batch_size=8 \
+            actor_rollout_ref.actor.ppo_max_token_len_per_gpu=2048 \
+            actor_rollout_ref.rollout.n=2 \
+            actor_rollout_ref.rollout.gpu_memory_utilization=0.35 \
+            actor_rollout_ref.rollout.max_model_len=2048 \
+            actor_rollout_ref.rollout.max_num_seqs=16 \
+            actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=2048 \
             data.train_files="['${PWD}/data/geo3k/train.parquet']" \
             data.val_files="['${PWD}/data/geo3k/test.parquet']" \
             trainer.logger='["console"]'
