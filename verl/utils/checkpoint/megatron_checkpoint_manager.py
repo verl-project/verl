@@ -337,20 +337,15 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         """
         metadata: dict = {}
 
-        if self.use_megatron_fsdp:
-            if self.use_distributed_optimizer:
-                metadata["distrib_optim_sharding_type"] = "fsdp_dtensor"
-            metadata["singleton_local_shards"] = False
-            metadata["chained_optim_avoid_prefix"] = True
-            return metadata
-
         if not mcore_ge_014:
             # For backward compatibility with Megatron core < v0.14.0
             if self.use_distributed_optimizer:
                 metadata["distrib_optim_sharding_type"] = "fully_sharded_model_space"
             return metadata
 
-        if self.use_distributed_optimizer:
+        if self.use_megatron_fsdp and self.use_distributed_optimizer:
+            metadata["distrib_optim_sharding_type"] = "fsdp_dtensor"
+        elif self.use_distributed_optimizer:
             megatron_config = getattr(self.config, self.role, self.config).megatron
             dist_ckpt_optim_fully_reshardable = megatron_config.dist_ckpt_optim_fully_reshardable
             distrib_optim_fully_reshardable_mem_efficient = (

@@ -328,7 +328,6 @@ def make_megatron_module(
                 fp16=provider.fp16,
                 bf16=provider.bf16,
                 use_megatron_fsdp=wrap_config.use_megatron_fsdp,
-                data_parallel_random_init=False,
             )
 
             # Extract TransformerConfig from the created model

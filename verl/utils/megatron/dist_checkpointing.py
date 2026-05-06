@@ -47,7 +47,6 @@ def save_dist_checkpointing(
         async_sharded_save=async_save,
         validate_access_integrity=validate_sharding_integrity,
     )
-
     if content_metadata is not None:
         if mcore_ge_014:
             save_kwargs["content_metadata"] = content_metadata
