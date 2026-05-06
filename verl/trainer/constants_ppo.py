@@ -32,6 +32,8 @@ PPO_RAY_RUNTIME_ENV = {
         "HCCL_HOST_SOCKET_PORT_RANGE": "auto",
         "HCCL_NPU_SOCKET_PORT_RANGE": "auto",
         "HSA_NO_SCRATCH_RECLAIM": "1",
+        "VERL_DYNAMO_ENABLE_RUNTIME": "1",
+        "VERL_DYNAMO_ENABLE_FRONTEND": "1",
     },
 }
 
