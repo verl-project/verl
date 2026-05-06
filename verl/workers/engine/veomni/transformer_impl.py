@@ -27,6 +27,7 @@ from veomni.distributed.torch_parallelize import build_parallelize_model
 from veomni.models.auto import build_foundation_model
 from veomni.optim import build_lr_scheduler, build_optimizer
 from veomni.utils.seqlen_pos_transform_utils import prepare_fa_kwargs_from_position_ids
+
 import verl.utils.torch_functional as verl_F
 from verl.trainer.config import CheckpointConfig
 from verl.utils import tensordict_utils as tu
@@ -176,6 +177,7 @@ class VeOmniEngine(FSDPEngine):
             optimizer.register_step_pre_hook(optimizer_pre_hook)
 
         return optimizer
+
 
     def _build_lr_scheduler(self, optimizer):
         optim_config = self.optimizer_config
@@ -437,7 +439,7 @@ class VeOmniEngine(FSDPEngine):
 
                 if is_expert_layer and is_proj and ps.ep_enabled:
                     output_shape = list(unsharded_tensor.shape)
-                    output_shape[0] *= ps.extra_parallel_sizes['ep']
+                    output_shape[0] *= ps.extra_parallel_sizes["ep"]
                     stacked_tensor = torch.empty(output_shape, dtype=unsharded_tensor.dtype, device=device)
 
                     # all gather expert tensors [32, H, I] -> [128, H, I]
@@ -607,6 +609,7 @@ def _prepare_veomni_flash_attention_kwargs(position_ids: torch.Tensor) -> dict[s
         "max_length_q": max_length_q,
         "max_length_k": max_length_k,
     }
+
 
 @EngineRegistry.register(model_type="language_model", backend=["veomni"], device=["cuda", "npu"])
 class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
