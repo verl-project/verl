@@ -107,6 +107,7 @@ class WorkerExtension(TrtllmWorkerExtension):
                             "device",
                             "float32",
                             "float16",
+                            "bfloat16",
                             "int32",
                             "int64",
                             "int16",
