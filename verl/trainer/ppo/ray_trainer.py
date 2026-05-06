@@ -1365,7 +1365,7 @@ class RayPPOTrainer:
                         if curr_step_profile:
                             self.llm_server_manager.start_profile()
                         gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
-                        self.checkpoint_manager.sleep_replicas()
+                        self.checkpoint_manager.sleep_replicas(timing_raw)
                         if curr_step_profile:
                             self.llm_server_manager.stop_profile()
 
@@ -1379,7 +1379,7 @@ class RayPPOTrainer:
                             if curr_step_profile:
                                 self.llm_server_manager.start_profile()
                             gen_baseline_output = self.async_rollout_manager.generate_sequences(gen_baseline_batch)
-                            self.checkpoint_manager.sleep_replicas()
+                            self.checkpoint_manager.sleep_replicas(timing_raw)
                             if curr_step_profile:
                                 self.llm_server_manager.stop_profile()
                             batch = batch.union(gen_baseline_output)
@@ -1549,7 +1549,7 @@ class RayPPOTrainer:
                     # implement critic warmup
                     if self.config.trainer.critic_warmup > self.global_steps:
                         # Still in critic warmup, only update weights to wake up rollout replicas.
-                        self.checkpoint_manager.update_weights(self.global_steps)
+                        self.checkpoint_manager.update_weights(self.global_steps, timing_raw)
                     else:
                         # update actor
                         with marked_timer("update_actor", timing_raw, color="red"):
@@ -1579,7 +1579,7 @@ class RayPPOTrainer:
 
                         # update weights from trainer to rollout
                         with marked_timer("update_weights", timing_raw, color="red"):
-                            self.checkpoint_manager.update_weights(self.global_steps)
+                            self.checkpoint_manager.update_weights(self.global_steps, timing_raw)
 
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
