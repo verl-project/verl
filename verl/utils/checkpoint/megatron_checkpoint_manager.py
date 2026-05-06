@@ -433,104 +433,6 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             raise KeyError
         tensor_parallel.get_cuda_rng_tracker().set_states(rng_states["rng_tracker_states"])
 
-    def _load_model_sections_from_state_dict(self, state_dict: dict):
-        assert "model" in state_dict or any(f"model{vpp_rank}" in state_dict for vpp_rank in range(len(self.model))), (
-            f"Model state dict not found in {state_dict.keys()}."
-        )
-        for vpp_rank, model in enumerate(self.model):
-            if len(self.model) == 1:
-                model_state_dict = state_dict["model"]
-            else:
-                assert f"model{vpp_rank}" in state_dict, f"model{vpp_rank} not found in state_dict"
-                model_state_dict = state_dict[f"model{vpp_rank}"]
-            mpu.set_virtual_pipeline_model_parallel_rank(vpp_rank)
-            self.model[vpp_rank].load_state_dict(model_state_dict, strict=self.peft_cls is None)
-
-    def _load_megatron_fsdp_checkpoint(self, local_path: str, dist_checkpoint_path: str):
-        if not os.path.isfile(os.path.join(dist_checkpoint_path, ".metadata")):
-            raise FileNotFoundError(
-                f"Megatron-FSDP checkpoint metadata not found at {dist_checkpoint_path}/.metadata. "
-                "Expected a fsdp_dtensor PyTorch DCP checkpoint."
-            )
-
-        sharded_sd_metadata = self._build_sharded_state_dict_metadata()
-        sharded_state_dict = self.generate_state_dict(
-            self.should_load_model,
-            self.should_load_optimizer,
-            self.should_load_extra,
-            is_loading=True,
-            metadata=sharded_sd_metadata,
-        )
-        log_with_rank(
-            f"Generated Megatron-FSDP DTensor state dict for loading: {sharded_state_dict.keys()}",
-            rank=self.rank,
-            logger=logger,
-        )
-
-        # Keep the original outer mappings for load_state_dict(); DCP fills the shared tensor
-        # objects in place after FSDP preprocessing rewrites the checkpoint layout.
-        model_state_dict_keys = ["model"] if len(self.model) == 1 else [f"model{i}" for i in range(len(self.model))]
-        raw_model_state_dicts = {
-            key: sharded_state_dict[key].copy() for key in model_state_dict_keys if key in sharded_state_dict
-        }
-        raw_optimizer_state_dict = sharded_state_dict["optimizer"].copy() if "optimizer" in sharded_state_dict else None
-
-        state_dict = preprocess_fsdp_dtensor_state_dict(self.transformer_config, sharded_state_dict, self.model[0])
-        state_dict = load_fsdp_dtensor_checkpointing(state_dict, dist_checkpoint_path)
-
-        for key, raw_model_state_dict in raw_model_state_dicts.items():
-            state_dict[key] = raw_model_state_dict
-        if raw_optimizer_state_dict is not None:
-            state_dict["optimizer"] = raw_optimizer_state_dict
-
-        if self.should_load_model:
-            self._load_model_sections_from_state_dict(state_dict)
-            log_with_rank(
-                f"Loaded Megatron-FSDP DTensor model checkpoint from {local_path}", rank=self.rank, logger=logger
-            )
-
-        if self.should_load_optimizer:
-            assert "optimizer" in state_dict, (
-                f"Optimizer state dict not found in {state_dict.keys()}. Please check the checkpoint file {local_path}."
-            )
-            self.optimizer.load_state_dict(state_dict["optimizer"])
-            log_with_rank(
-                f"Loaded Megatron-FSDP DTensor optimizer checkpoint from {local_path}", rank=self.rank, logger=logger
-            )
-            if self.use_checkpoint_opt_param_scheduler:
-                assert "lr_scheduler" in state_dict, (
-                    f"LR scheduler state dict not found in {state_dict.keys()}. Please check the checkpoint file "
-                    f"{local_path}."
-                )
-                if self.lr_scheduler is not None:
-                    self.lr_scheduler.load_state_dict(state_dict["lr_scheduler"])
-                    log_with_rank(f"Loaded LR scheduler checkpoint from {local_path}", rank=self.rank, logger=logger)
-
-        if self.should_load_extra:
-            assert "rng_state" in state_dict, (
-                f"RNG state dict not found in {state_dict.keys()}. Please check the checkpoint file {local_path}."
-            )
-            self.load_rng_states(state_dict["rng_state"])
-            log_with_rank(f"Loaded Megatron-FSDP DTensor RNG states from {local_path}", rank=self.rank, logger=logger)
-
-    def _save_megatron_fsdp_checkpoint(self, dist_checkpoint_path: str):
-        sharded_sd_metadata = self._build_sharded_state_dict_metadata()
-        state_dict = self.generate_state_dict(
-            self.should_save_model,
-            self.should_save_optimizer,
-            self.should_save_extra,
-            metadata=sharded_sd_metadata,
-        )
-        log_with_rank(
-            f"Generated Megatron-FSDP DTensor state dict for saving: {state_dict.keys()}",
-            rank=self.rank,
-            logger=logger,
-        )
-
-        state_dict = preprocess_fsdp_dtensor_state_dict(self.transformer_config, state_dict, self.model[0])
-        save_fsdp_dtensor_checkpointing(state_dict, dist_checkpoint_path)
-        torch.distributed.barrier()
-
     def load_checkpoint(self, local_path: str, hdfs_path: str = None, del_local_after_load=False):
         if local_path is not None:
             assert os.path.exists(local_path), f"Checkpoint path {local_path} does not exist."
@@ -547,39 +449,35 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         dist_checkpoint_path = get_dist_checkpoint_path(local_path)
 
         if self.use_megatron_fsdp:
-            self._load_megatron_fsdp_checkpoint(local_path, dist_checkpoint_path)
-            if del_local_after_load:
-                try:
-                    os.remove(local_path) if is_non_local(local_path) else None
-                except Exception as e:
-                    log_with_rank(
-                        f"remove local resume ckpt file after loading failed, exception {e} will be ignored",
-                        rank=self.rank,
-                        logger=logger,
-                    )
-            return
-
-        self._raise_for_unsupported_peft_checkpoint_layout(local_path, dist_checkpoint_path)
-
-        load_content_metadata = getattr(dist_checkpointing, "load_content_metadata", None)
-        if load_content_metadata is None:
-            # For backward compatibility
-            sharded_sd_metadata = None
+            if not os.path.isfile(os.path.join(dist_checkpoint_path, ".metadata")):
+                raise FileNotFoundError(
+                    f"Megatron-FSDP checkpoint metadata not found at {dist_checkpoint_path}/.metadata."
+                )
+            sharded_sd_metadata = self._build_sharded_state_dict_metadata()
         else:
-            sharded_sd_metadata = load_content_metadata(checkpoint_dir=dist_checkpoint_path)
-        if sharded_sd_metadata is None:
-            if self.use_distributed_optimizer:
-                # Backward-compatibility with old checkpoints which don't have content versioning
-                # Can be removed after ending support for MLM optimizer checkpoints with MCore < v0.13
-                # (for MCore v0.13+ checkpoints `sharded_sd_metadata is not None`)
-                sharded_sd_metadata = {
-                    "distrib_optim_sharding_type": "fully_sharded_model_space",
-                }
+            self._raise_for_unsupported_peft_checkpoint_layout(local_path, dist_checkpoint_path)
+
+            load_content_metadata = getattr(dist_checkpointing, "load_content_metadata", None)
+            if load_content_metadata is None:
+                # For backward compatibility
+                sharded_sd_metadata = None
             else:
-                sharded_sd_metadata = self._build_sharded_state_dict_metadata()
+                sharded_sd_metadata = load_content_metadata(checkpoint_dir=dist_checkpoint_path)
+            if sharded_sd_metadata is None:
+                if self.use_distributed_optimizer:
+                    # Backward-compatibility with old checkpoints which don't have content versioning
+                    # Can be removed after ending support for MLM optimizer checkpoints with MCore < v0.13
+                    # (for MCore v0.13+ checkpoints `sharded_sd_metadata is not None`)
+                    sharded_sd_metadata = {
+                        "distrib_optim_sharding_type": "fully_sharded_model_space",
+                    }
+                else:
+                    sharded_sd_metadata = self._build_sharded_state_dict_metadata()
 
         # Get State Dict for loading
-        should_load_dist_model = self.should_load_model and (self.use_dist_checkpointing or self.peft_cls is not None)
+        should_load_dist_model = self.should_load_model and (
+            self.use_megatron_fsdp or self.use_dist_checkpointing or self.peft_cls is not None
+        )
         sharded_state_dict = self.generate_state_dict(
             should_load_dist_model,
             self.should_load_optimizer,
@@ -590,11 +488,30 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         sharded_state_dict = self._maybe_filter_peft_state_dict(sharded_state_dict)
         log_with_rank(f"Generated state dict for loading: {sharded_state_dict.keys()}", rank=self.rank, logger=logger)
 
-        # Load Dist Checkpointing
-        state_dict = load_dist_checkpointing(
-            sharded_state_dict=sharded_state_dict,
-            ckpt_dir=dist_checkpoint_path,
-        )
+        if self.use_megatron_fsdp:
+            # Keep the original outer mappings for load_state_dict(); DCP fills the shared tensor
+            # objects in place after FSDP preprocessing rewrites the checkpoint layout.
+            model_state_dict_keys = ["model"] if len(self.model) == 1 else [f"model{i}" for i in range(len(self.model))]
+            raw_model_state_dicts = {
+                key: sharded_state_dict[key].copy() for key in model_state_dict_keys if key in sharded_state_dict
+            }
+            raw_optimizer_state_dict = (
+                sharded_state_dict["optimizer"].copy() if "optimizer" in sharded_state_dict else None
+            )
+
+            state_dict = preprocess_fsdp_dtensor_state_dict(self.transformer_config, sharded_state_dict, self.model[0])
+            state_dict = load_fsdp_dtensor_checkpointing(state_dict, dist_checkpoint_path)
+
+            for key, raw_model_state_dict in raw_model_state_dicts.items():
+                state_dict[key] = raw_model_state_dict
+            if raw_optimizer_state_dict is not None:
+                state_dict["optimizer"] = raw_optimizer_state_dict
+        else:
+            # Load Dist Checkpointing
+            state_dict = load_dist_checkpointing(
+                sharded_state_dict=sharded_state_dict,
+                ckpt_dir=dist_checkpoint_path,
+            )
 
         if should_load_dist_model:
             assert "model" in state_dict or any(
@@ -672,10 +589,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
 
         # Note that model weights, optimizer states, and extra states are generated
         # together in a state dict, we save them in one time
-        if self.use_megatron_fsdp:
-            self._save_megatron_fsdp_checkpoint(dist_checkpoint_path)
-            async_save_request = None
-        elif self.use_dist_checkpointing:
+        if self.use_megatron_fsdp or self.use_dist_checkpointing:
             # Generate state dict for saving
             sharded_sd_metadata = self._build_sharded_state_dict_metadata()
             state_dict = self.generate_state_dict(
@@ -686,26 +600,35 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             )
             state_dict = self._maybe_filter_peft_state_dict(state_dict)
             log_with_rank(f"Generated state dict for saving: {state_dict.keys()}", rank=self.rank, logger=logger)
-            for vpp_rank, model in enumerate(self.model):
-                if len(self.model) > 1:
-                    model_i_keys = state_dict[f"model{vpp_rank}"].keys()
-                    log_with_rank(f"Generated state dict for saving: {model_i_keys}", rank=self.rank, logger=logger)
-                else:
-                    log_with_rank(
-                        f"Generated state dict for saving: {state_dict['model'].keys()}", rank=self.rank, logger=logger
-                    )
-            # Start Async save if enabled
-            async_save_request = save_dist_checkpointing(
-                sharded_state_dict=state_dict,
-                ckpt_path=dist_checkpoint_path,
-                async_save=self.checkpoint_config.async_save,
-                content_metadata=sharded_sd_metadata,
-            )
 
-            # Synchronize all async save requests
-            if not self.checkpoint_config.async_save:
-                assert async_save_request is None, "Async save request should be None when not using async save."
+            if self.use_megatron_fsdp:
+                state_dict = preprocess_fsdp_dtensor_state_dict(self.transformer_config, state_dict, self.model[0])
+                save_fsdp_dtensor_checkpointing(state_dict, dist_checkpoint_path)
+                async_save_request = None
                 torch.distributed.barrier()
+            else:
+                for vpp_rank, model in enumerate(self.model):
+                    if len(self.model) > 1:
+                        model_i_keys = state_dict[f"model{vpp_rank}"].keys()
+                        log_with_rank(f"Generated state dict for saving: {model_i_keys}", rank=self.rank, logger=logger)
+                    else:
+                        log_with_rank(
+                            f"Generated state dict for saving: {state_dict['model'].keys()}",
+                            rank=self.rank,
+                            logger=logger,
+                        )
+                # Start Async save if enabled
+                async_save_request = save_dist_checkpointing(
+                    sharded_state_dict=state_dict,
+                    ckpt_path=dist_checkpoint_path,
+                    async_save=self.checkpoint_config.async_save,
+                    content_metadata=sharded_sd_metadata,
+                )
+
+                # Synchronize all async save requests
+                if not self.checkpoint_config.async_save:
+                    assert async_save_request is None, "Async save request should be None when not using async save."
+                    torch.distributed.barrier()
         else:
             assert self.use_hf_checkpoint, "When not using distributed checkpointing, use_hf_checkpoint should be True."
             # Generate optimizer and exra state dicts
