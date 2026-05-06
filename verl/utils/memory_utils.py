@@ -22,7 +22,7 @@ from pathlib import Path
 
 import torch
 
-from verl.utils.device import get_torch_device, is_cuda_available
+from verl.utils.device import get_torch_device
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -237,6 +237,7 @@ def enable_memory_visualize(
     rank = int(os.environ.get("RANK", "0") or 0)
     logger.info(f"[memory_visualize][rank {rank}] recording enabled ({mode}); args={used}")
 
+
 def clear_memory_history(trace_alloc_max_entries: int = 200_000, stack_depth: int = 32):
     device = get_torch_device()
     if not device.is_available():
@@ -247,6 +248,7 @@ def clear_memory_history(trace_alloc_max_entries: int = 200_000, stack_depth: in
         enable_memory_visualize(trace_alloc_max_entries=trace_alloc_max_entries, stack_depth=stack_depth)
     except Exception as e:
         logger.warning(f"[memory_visualize] Failed to reset memory history: {e}")
+
 
 class MemorySnapshotSampler:
     """

@@ -15,7 +15,7 @@
 import functools
 from typing import Callable, Optional
 
-from ..memory_utils import MemorySnapshotSampler, enable_memory_visualize, clear_memory_history
+from ..memory_utils import MemorySnapshotSampler, clear_memory_history, enable_memory_visualize
 from .config import ProfilerConfig, TorchMemoryToolConfig
 
 
@@ -243,7 +243,9 @@ class TorchMemoryProfiler:
         # Best-effort enable memory history once
         if not TorchMemoryProfiler._memory_history_enabled:
             try:
-                enable_memory_visualize(trace_alloc_max_entries=self.trace_alloc_max_entries, stack_depth=self.stack_depth)
+                enable_memory_visualize(
+                    trace_alloc_max_entries=self.trace_alloc_max_entries, stack_depth=self.stack_depth
+                )
             except Exception:
                 # silently ignore if not supported
                 pass
