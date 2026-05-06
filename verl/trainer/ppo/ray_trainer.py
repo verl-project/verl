@@ -435,7 +435,13 @@ class RayPPOTrainer:
         global_steps = self.global_steps
         future = self._dump_executor.submit(
             self._write_generations,
-            inputs, outputs, gts, scores, reward_extra_infos_dict, dump_path, global_steps,
+            inputs,
+            outputs,
+            gts,
+            scores,
+            reward_extra_infos_dict,
+            dump_path,
+            global_steps,
         )
         self._dump_futures.append(future)
         # Clean up completed futures and surface any exceptions early
