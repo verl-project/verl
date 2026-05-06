@@ -43,16 +43,43 @@ def is_torch_npu_available(check_device=True) -> bool:
         return False
 
 
+def is_torch_xpu_available() -> bool:
+    """Check the availability of XPU"""
+    try:
+        return torch.xpu.is_available()
+    except (ImportError, AttributeError):
+        return False
+
+
 is_cuda_available = torch.cuda.is_available()
 is_npu_available = is_torch_npu_available()
+is_xpu_available = is_torch_xpu_available()
+
+
+def get_default_attention_implementation() -> str:
+    """Get default attention implementation for current device.
+
+    Returns:
+        str: "eager" for XPU (flash_attn unavailable), "flash_attention_2" otherwise
+    """
+    if is_xpu_available:
+        return "eager"  # XPU doesn't support flash_attn
+    else:
+        return "flash_attention_2"  # Default for CUDA/NPU
 
 
 def get_resource_name() -> str:
     """Function that return ray resource name based on the device type.
     Returns:
-        ray resource name string, either "GPU" or "NPU".
+        ray resource name string, either "GPU", "NPU", or "xpu".
     """
-    return "GPU" if is_cuda_available else "NPU"
+    if is_cuda_available:
+        return "GPU"
+    elif is_npu_available:
+        return "NPU"
+    elif is_xpu_available:
+        return "xpu"
+    return "GPU"
 
 
 def get_visible_devices_keyword() -> str:
@@ -65,7 +92,13 @@ def get_visible_devices_keyword() -> str:
         str: 'CUDA_VISIBLE_DEVICES' if CUDA is available,
             'ASCEND_RT_VISIBLE_DEVICES' otherwise.
     """
-    return "CUDA_VISIBLE_DEVICES" if not is_torch_npu_available(check_device=False) else "ASCEND_RT_VISIBLE_DEVICES"
+    if is_cuda_available:
+        return "CUDA_VISIBLE_DEVICES"
+    elif is_npu_available:
+        return "ASCEND_RT_VISIBLE_DEVICES"
+    elif is_xpu_available:
+        return "ONEAPI_DEVICE_SELECTOR"
+    return "CUDA_VISIBLE_DEVICES"
 
 
 def get_device_name() -> str:
@@ -81,6 +114,8 @@ def get_device_name() -> str:
         device = "cuda"
     elif is_npu_available:
         device = "npu"
+    elif is_xpu_available:
+        device = "xpu"
     else:
         device = "cpu"
     return device
@@ -99,9 +134,11 @@ def get_torch_device():
     device_name = get_device_name()
     try:
         return getattr(torch, device_name)
-    except AttributeError:
-        logger.warning(f"Device namespace '{device_name}' not found in torch, try to load torch.cuda.")
-        return torch.cuda
+    except AttributeError as err:
+        raise RuntimeError(
+            f"Device namespace 'torch.{device_name}' not found. "
+            f"Ensure the correct PyTorch build is installed for device '{device_name}'."
+        ) from err
 
 
 def get_device_id() -> int:
@@ -124,6 +161,8 @@ def get_nccl_backend() -> str:
     """
     if is_npu_available:
         return "hccl"
+    elif is_xpu_available:
+        return "xccl"
     else:
         # default to nccl
         return "nccl"
@@ -164,6 +203,14 @@ def auto_set_device(config) -> None:
                 )
 
             config.trainer.device = "npu"
+        elif is_torch_xpu_available():
+            if config.trainer.device not in ["cpu", "xpu"]:
+                logger.warning(
+                    f"Detect setting config.trainer.device to {config.trainer.device} for Intel XPU, maybe"
+                    f"from default value in config file, automatically set to `xpu` instead."
+                )
+
+            config.trainer.device = "xpu"
         # Other cases: set device to "cuda" via config file, no need to change.
 
 
