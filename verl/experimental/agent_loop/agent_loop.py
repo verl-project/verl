@@ -30,9 +30,10 @@ from pydantic import BaseModel, ConfigDict
 from tensordict import TensorDict
 from transformers import AutoProcessor, AutoTokenizer
 
-from verl.experimental.agent_loop.preprocessed_multimodal import (
-    build_vllm_preprocessed_multimodal_input,
-    refresh_vllm_preprocessed_multimodal_prompt_ids,
+from verl.experimental.agent_loop.preprocessed_multimodal_dispatch import (
+    attach_preprocessed_multimodal_input_to_kwargs,
+    build_preprocessed_multimodal_input,
+    refresh_preprocessed_multimodal_prompt_ids,
 )
 from verl.experimental.agent_loop.prometheus_utils import update_prometheus_config
 from verl.experimental.agent_loop.utils import resolve_config_path
@@ -178,9 +179,16 @@ class AsyncLLMServerManager:
                 video_data=video_data,
                 **kwargs,
             )
-            if self.rollout_name == "vllm" and preprocessed_multimodal_input is not None:
-                refresh_vllm_preprocessed_multimodal_prompt_ids(preprocessed_multimodal_input, prompt_ids=prompt_ids)
-                generate_kwargs["preprocessed_multimodal_input"] = preprocessed_multimodal_input
+            refresh_preprocessed_multimodal_prompt_ids(
+                preprocessed_multimodal_input,
+                rollout_name=self.rollout_name,
+                prompt_ids=prompt_ids,
+            )
+            attach_preprocessed_multimodal_input_to_kwargs(
+                generate_kwargs,
+                rollout_name=self.rollout_name,
+                preprocessed_multimodal_input=preprocessed_multimodal_input,
+            )
             output: TokenOutput | DiffusionOutput = await server.generate.remote(**generate_kwargs)
             return output
         finally:
@@ -428,13 +436,11 @@ class AgentLoopBase(ABC):
         images: list[Image.Image] = None,
         videos: list[tuple[torch.Tensor, dict]] = None,
     ) -> Any | None:
-        if self.rollout_config.get("name", None) != "vllm":
-            return None
-        if not self.rollout_config.get("use_preprocessed_multimodal_input", False):
-            return None
-        return build_vllm_preprocessed_multimodal_input(
-            prompt_ids=prompt_ids,
+        return build_preprocessed_multimodal_input(
+            rollout_name=self.rollout_config.get("name", None),
+            rollout_config=self.rollout_config,
             processor=self.processor,
+            prompt_ids=prompt_ids,
             model_inputs=model_inputs,
             images=images,
             videos=videos,
@@ -683,8 +689,8 @@ class AgentLoopWorker:
 
         # Some AgentLoop may have already computed the reward score, e.g SWE-agent.
 
-        # NOTE: consistent with the legacy batch version of generate_sequences
-        # that existed in the deprecated SPMD rollout implementation.
+        # NOTE: consistent with the legacy batch version of generate_sequences that existed in the
+        # deprecated vLLM SPMD rollout implementation.
         # prompt_ids: left padded with zeros (e.g., [0,0,0,0,1,2,3,4])
         # response_ids: right padded with zeros (e.g., [5,6,7,8,0,0,0,0])
         # input_ids: concatenation of prompt + response
