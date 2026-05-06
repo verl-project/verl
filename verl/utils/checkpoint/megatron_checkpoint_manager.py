@@ -28,6 +28,7 @@ from megatron.core import dist_checkpointing, mpu, tensor_parallel
 from megatron.core.dist_checkpointing.mapping import ShardedObject
 from megatron.core.transformer.enums import AttnBackend
 from packaging import version
+from torch.distributed.checkpoint import FileSystemReader, FileSystemWriter, default_planner
 from transformers import GenerationConfig
 
 from verl.models.weight_loader_registry import get_weight_saver
@@ -35,11 +36,6 @@ from verl.utils.device import get_device_name, get_torch_device
 from verl.utils.fs import is_non_local, local_mkdir_safe
 from verl.utils.logger import log_with_rank
 from verl.utils.megatron.dist_checkpointing import load_dist_checkpointing, save_dist_checkpointing
-from verl.utils.megatron.fsdp_dtensor_checkpointing import (
-    load_fsdp_dtensor_checkpointing,
-    preprocess_fsdp_dtensor_state_dict,
-    save_fsdp_dtensor_checkpointing,
-)
 from verl.utils.megatron_utils import (
     get_dist_checkpoint_path,
     get_hf_model_checkpoint_path,
@@ -499,8 +495,29 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                 sharded_state_dict["optimizer"].copy() if "optimizer" in sharded_state_dict else None
             )
 
-            state_dict = preprocess_fsdp_dtensor_state_dict(self.transformer_config, sharded_state_dict, self.model[0])
-            state_dict = load_fsdp_dtensor_checkpointing(state_dict, dist_checkpoint_path)
+            from megatron.bridge.training.checkpointing import (
+                preprocess_fsdp_dtensor_state_dict as bridge_preprocess_fsdp_dtensor_state_dict,
+            )
+
+            checkpoint_model = getattr(self.model[0], "module", self.model[0])
+            state_dict = bridge_preprocess_fsdp_dtensor_state_dict(
+                self.transformer_config, sharded_state_dict, checkpoint_model
+            )
+
+            from megatron.core.transformer.fsdp_dtensor_checkpoint import print_diff_in_state_dicts
+
+            storage_reader = FileSystemReader(dist_checkpoint_path)
+            metadata = storage_reader.read_metadata().state_dict_metadata
+            rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+            if rank == 0:
+                logger.info("Loading Megatron-FSDP DTensor checkpoint with partial-load diagnostics enabled.")
+            print_diff_in_state_dicts(metadata, state_dict)
+            planner = default_planner.DefaultLoadPlanner(allow_partial_load=True)
+            torch.distributed.checkpoint.load_state_dict(
+                state_dict=state_dict,
+                storage_reader=storage_reader,
+                planner=planner,
+            )
 
             for key, raw_model_state_dict in raw_model_state_dicts.items():
                 state_dict[key] = raw_model_state_dict
@@ -602,8 +619,16 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             log_with_rank(f"Generated state dict for saving: {state_dict.keys()}", rank=self.rank, logger=logger)
 
             if self.use_megatron_fsdp:
-                state_dict = preprocess_fsdp_dtensor_state_dict(self.transformer_config, state_dict, self.model[0])
-                save_fsdp_dtensor_checkpointing(state_dict, dist_checkpoint_path)
+                from megatron.bridge.training.checkpointing import (
+                    preprocess_fsdp_dtensor_state_dict as bridge_preprocess_fsdp_dtensor_state_dict,
+                )
+
+                checkpoint_model = getattr(self.model[0], "module", self.model[0])
+                state_dict = bridge_preprocess_fsdp_dtensor_state_dict(
+                    self.transformer_config, state_dict, checkpoint_model
+                )
+                storage_writer = FileSystemWriter(dist_checkpoint_path)
+                torch.distributed.checkpoint.save(state_dict=state_dict, storage_writer=storage_writer)
                 async_save_request = None
                 torch.distributed.barrier()
             else:
