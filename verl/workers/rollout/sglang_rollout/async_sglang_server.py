@@ -568,7 +568,10 @@ class SGLangHttpServer:
             profile_args = build_sglang_profiler_args(
                 self.profiler_controller.config, self.profiler_controller.tool_config, self.replica_rank
             )
-            await self.tokenizer_manager.start_profile(**profile_args)
+            tokenizer_manager = getattr(self, "tokenizer_manager", None)
+            if tokenizer_manager is None:
+                return
+            await tokenizer_manager.start_profile(**profile_args)
 
     async def stop_profile(self):
         if (
@@ -576,7 +579,10 @@ class SGLangHttpServer:
             and self.profiler_controller.check_this_rank()
             and self.profiler_controller.is_discrete_mode()
         ):
-            await self.tokenizer_manager.stop_profile()
+            tokenizer_manager = getattr(self, "tokenizer_manager", None)
+            if tokenizer_manager is None:
+                return
+            await tokenizer_manager.stop_profile()
 
 
 class SGLangReplica(RolloutReplica):
