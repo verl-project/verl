@@ -449,7 +449,7 @@ class RayPPOTrainer:
                 k: (v.tolist() if isinstance(v, np.ndarray) else v) for k, v in reward_extra_infos_dict.items()
             }
             if "request_id" in batch.non_tensor_batch:
-                reward_extra_infos_dict.setdefault(
+                reward_extra_infos_to_dump.setdefault(
                     "request_id",
                     batch.non_tensor_batch["request_id"].tolist(),
                 )
