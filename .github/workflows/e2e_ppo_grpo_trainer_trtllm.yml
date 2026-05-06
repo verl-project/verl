@@ -93,7 +93,7 @@ permissions:
   contents: read
 
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:trtllm1.3.0rc13"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:trtllm1.3.0rc13-20250504"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
 
 jobs:
