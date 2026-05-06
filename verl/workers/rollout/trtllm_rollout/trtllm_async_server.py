@@ -255,9 +255,13 @@ class TRTLLMHttpServer:
         if self.is_vlm_model:
             llm_kwargs.update(self_defined_extension)
         else:
+            # TODO: once TRT-LLM WorkerExtension includes wait_for_engine_idle,
+            # replace with "tensorrt_llm.llmapi.rlhf_utils.WorkerExtension" directly.
             llm_kwargs.update(
                 {
-                    "ray_worker_extension_cls": "tensorrt_llm.llmapi.rlhf_utils.WorkerExtension",
+                    "ray_worker_extension_cls": (
+                        "verl.workers.rollout.trtllm_rollout.trtllm_worker_extension.RlhfWorkerExtension"
+                    ),
                 }
             )
 
@@ -380,6 +384,9 @@ class TRTLLMHttpServer:
         """Abort all in-flight requests and block new ones. Call resume_generation() to unblock."""
         self._generation_allowed.clear()
         await self.llm.pause_generation()
+        # TODO: remove once TRT-LLM is upgraded to a version where pause_generation()
+        # drains internally (https://github.com/NVIDIA/TensorRT-LLM/pull/13784).
+        await self.llm.collective_rpc("wait_for_engine_idle")
         if self.config.enable_prefix_caching:
             await self.llm.collective_rpc("reset_prefix_cache")
 

@@ -184,3 +184,15 @@ class WorkerExtension(TrtllmWorkerExtension):
     def reset_prefix_cache(self) -> None:
         """Invalidate the KV cache prefix reuse state after weight updates."""
         self.engine.reset_prefix_cache()
+
+
+# TODO: remove this class and revert the non-VLM path in trtllm_async_server.py
+# to use "tensorrt_llm.llmapi.rlhf_utils.WorkerExtension" once verl's TRT-LLM version
+# is bumped to include https://github.com/NVIDIA/TensorRT-LLM/pull/13784.
+class RlhfWorkerExtension(TrtllmWorkerExtension):
+    """Minimal extension of TRT-LLM's WorkerExtension for non-VLM RLHF models."""
+
+    @control_action_decorator
+    def wait_for_engine_idle(self) -> None:
+        """Block until the engine has no active or queued requests."""
+        pass

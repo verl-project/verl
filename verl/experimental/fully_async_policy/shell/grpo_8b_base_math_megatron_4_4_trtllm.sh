@@ -4,7 +4,7 @@
 set -xeuo pipefail
 
 project_name='DAPO_fully_async_erinh'
-exp_name='DAPO-qwen3-8b-base-rl-megatron-trtllm-n2-bypassFalse'
+exp_name='DAPO-Qwen3-8b-Base-MATH-megatron-fully-async-trtllm-gb200-4-4-bypassFalse'
 
 adv_estimator=grpo
 
@@ -18,21 +18,18 @@ clip_ratio_high=0.28
 
 max_prompt_length=$((1024 * 2))
 max_response_length=$((1024 * 8))
-enable_overlong_buffer=True
-overlong_buffer_len=$((1024 * 4))
-overlong_penalty_factor=1.0
 
 loss_agg_mode="token-mean"
 
-# Ray
+
 NNODES=${NNODES:-16}
 NGPUS_PER_NODE=${NGPUS_PER_NODE:-4}
-# Paths
+
 RAY_DATA_HOME=${RAY_DATA_HOME:-"${PWD}"}
-MODEL_PATH=${MODEL_PATH:-"/lustre/fsw/coreai_comparch_trtllm/erinh/llm-models/Qwen3/Qwen3-8B-Base"}
+MODEL_PATH=${MODEL_PATH:-"${RAY_DATA_HOME}/models/Qwen3/Qwen3-8B-Base"}
 CKPTS_DIR=${CKPTS_DIR:-"${RAY_DATA_HOME}/ckpts/${project_name}/${exp_name}"}
-TRAIN_FILE=${TRAIN_FILE:-"${RAY_DATA_HOME}/data/DAPO-Math-17k/data/dapo-math-17k.parquet"}
-TEST_FILE=${TEST_FILE:-"${RAY_DATA_HOME}/data/AIME-2024/data/aime-2024.parquet"}
+TRAIN_FILE=${TRAIN_FILE:-"${RAY_DATA_HOME}/data/dapo-math-17k.parquet"}
+TEST_FILE=${TEST_FILE:-"${RAY_DATA_HOME}/data/aime-2024.parquet"}
 # To run nsys profiling, set TLLM_NSYS_OUTPUT_DIR to a directory.
 
 # Algorithm
@@ -128,12 +125,7 @@ python -m verl.experimental.fully_async_policy.fully_async_main \
     actor_rollout_ref.ref.megatron.tensor_model_parallel_size=${train_tp} \
     actor_rollout_ref.ref.megatron.context_parallel_size=${train_cp} \
     actor_rollout_ref.ref.megatron.param_offload=${offload} \
-    reward_model.reward_manager=dapo \
-    +reward_model.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer} \
-    +reward_model.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len} \
-    +reward_model.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor} \
-    +reward_model.reward_kwargs.overlong_buffer_cfg.log=False \
-    +reward_model.reward_kwargs.max_resp_len=${max_response_length} \
+    reward.reward_manager.name=naive \
     actor_rollout_ref.rollout.disable_log_stats=False \
     actor_rollout_ref.model.trust_remote_code=True \
     data.trust_remote_code=True \
