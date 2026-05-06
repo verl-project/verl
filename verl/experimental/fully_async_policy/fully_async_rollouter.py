@@ -630,7 +630,17 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
                 )
 
     async def _process_single_sample_streaming(self, rollout_sample: RolloutSample):
-        """Process a single sample streamingly"""
+        """Process a single sample streamingly.
+
+        ``staleness_samples`` is incremented in ``_processor_worker`` the moment
+        a sample is taken off ``pending_queue``. Its physical meaning is
+        "samples currently in flight or sitting in the MQ for the trainer".
+        So whenever this coroutine ends WITHOUT the sample reaching the MQ
+        (env failure, all rollouts discarded, MQ put rejected, ...), we must
+        decrement ``staleness_samples`` immediately. Otherwise dropped
+        samples accumulate against ``max_required_samples`` and the rollouter
+        can wedge into ``paused`` even though no real samples are in flight.
+        """
         # Calling asynchronous generation methods
         try:
             ret = await self.async_rollout_manager.generate_sequences_single(rollout_sample.full_batch)
@@ -647,6 +657,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
             )
             self.dropped_stale_samples += 1
             self.processed_sample_count += 1
+            self.staleness_samples = max(0, self.staleness_samples - 1)
             return
         rollout_sample.full_batch = ret
 
@@ -660,6 +671,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
             )
             self.dropped_stale_samples += 1
             self.processed_sample_count += 1
+            self.staleness_samples = max(0, self.staleness_samples - 1)
             return
 
         rollout_sample.full_batch.non_tensor_batch["uid"] = np.array(
@@ -673,7 +685,11 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         if success:
             self.total_generated_samples += 1
         else:
+            # MQ rejected the sample (e.g. queue full + reject policy). The
+            # sample never reaches the trainer, so it must not keep occupying
+            # a staleness slot.
             self.dropped_stale_samples += 1
+            self.staleness_samples = max(0, self.staleness_samples - 1)
         self.processed_sample_count += 1
 
     async def _streaming_generation_main(self):
