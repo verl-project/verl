@@ -339,10 +339,6 @@ class ServerAdapter(BaseRollout):
                 weights = weights
 
             async for params_batch in get_named_tensor_buckets(weights, update_weights_bucket_bytes):
-                # Non-TP-leader ranks have no adapter; the async-for iteration
-                # already triggered the FSDP all_gather above.
-                if self._engine is None:
-                    continue
                 await sgl_update_weights(
                     engine=self._engine,
                     params_batch=params_batch,
