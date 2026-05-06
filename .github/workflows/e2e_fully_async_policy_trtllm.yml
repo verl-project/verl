@@ -152,7 +152,11 @@ jobs:
       - name: Running TRT-LLM fully-async E2E test (FSDP2)
         run: |
           ray stop --force
-          bash tests/special_e2e/run_fully_async_policy.sh
+          bash tests/special_e2e/run_fully_async_policy.sh \
+            data.max_response_length=128 \
+            actor_rollout_ref.rollout.n=2 \
+            actor_rollout_ref.actor.ppo_mini_batch_size=4 \
+            actor_rollout_ref.actor.ppo_max_token_len_per_gpu=1536
 
   # Megatron single replica: all 4 rollout GPUs form one TP=4 group.
   e2e_fully_async_policy_trtllm_megatron_single_replica:
@@ -185,7 +189,11 @@ jobs:
       - name: Running TRT-LLM fully-async E2E test with Megatron (single replica, TP=4)
         run: |
           ray stop --force
-          bash tests/special_e2e/run_fully_async_policy.sh
+          bash tests/special_e2e/run_fully_async_policy.sh \
+            data.max_response_length=128 \
+            actor_rollout_ref.rollout.n=2 \
+            actor_rollout_ref.actor.ppo_mini_batch_size=4 \
+            actor_rollout_ref.actor.ppo_max_token_len_per_gpu=1536
 
   # Megatron multi-replica: 4 rollout GPUs split into 2 replicas × TP=2.
   e2e_fully_async_policy_trtllm_megatron_multi_replica:
@@ -218,7 +226,11 @@ jobs:
       - name: Running TRT-LLM fully-async E2E test with Megatron (multi-replica, 2×TP=2)
         run: |
           ray stop --force
-          bash tests/special_e2e/run_fully_async_policy.sh
+          bash tests/special_e2e/run_fully_async_policy.sh \
+            data.max_response_length=128 \
+            actor_rollout_ref.rollout.n=2 \
+            actor_rollout_ref.actor.ppo_mini_batch_size=4 \
+            actor_rollout_ref.actor.ppo_max_token_len_per_gpu=1536
 
   cleanup:
     runs-on: ubuntu-latest
