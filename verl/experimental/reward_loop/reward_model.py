@@ -60,6 +60,11 @@ class RewardModelManager:
             else self.config.n_gpus_per_node * self.config.nnodes  # standalone mode
         )
         num_replicas = world_size // rollout_world_size
+        assert num_replicas > 0, (
+            f"Not enough GPUs to run the reward model. "
+            f"world_size ({world_size}) < rollout_world_size ({rollout_world_size}). "
+            f"Check your resource pool or standalone config (n_gpus_per_node, nnodes)."
+        )
 
         rollout_replica_class = get_rollout_replica_class(rollout_config.name)
         model_config = HFModelConfig(path=self.config.model_path)
