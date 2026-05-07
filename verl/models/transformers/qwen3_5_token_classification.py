@@ -35,6 +35,11 @@ class Qwen3_5ForTokenClassification(Qwen2PreTrainedModel):
         sequence_output = self.dropout(sequence_output)
         logits = self.classifier(sequence_output)
 
+        if not return_dict:
+            # We take our logits and add them to the rest of the outputs from the backbone
+            output = (logits,) + outputs[2:]
+            return output
+
         return TokenClassifierOutput(
             loss=None,
             logits=logits,
