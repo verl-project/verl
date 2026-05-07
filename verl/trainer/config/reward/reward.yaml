@@ -35,7 +35,7 @@ reward_model:
   nnodes: 0
 
   model_path: null
-  inference:
+  rollout:
     _target_: verl.workers.config.RolloutConfig
     name: ???
     dtype: bfloat16

@@ -70,11 +70,11 @@ def migrate_legacy_reward_impl(config):
     if config.reward_model.get("reward_kwargs") is not None:
         with open_dict(config.reward):
             config.reward["reward_kwargs"] = config.reward_model["reward_kwargs"]
-    # config.reward_model.rollout -> config.reward.reward_model.inference
+    # config.reward_model.rollout -> config.reward.reward_model.rollout
     legacy_rollout = config.reward_model.rollout
     for key in legacy_rollout.keys():
         if legacy_rollout[key] is not None:
-            config.reward.reward_model.inference[key] = legacy_rollout[key]
+            config.reward.reward_model.rollout[key] = legacy_rollout[key]
 
     # 5. sandbox_fusion migration
     # config.sandbox_fusion -> reward.sandbox_fusion
@@ -231,7 +231,7 @@ class RewardLoopWorker:
 
     async def compute_score_disrm(self, data: DataProto) -> dict:
         disrm_prompt = await self._preprocess_reward_inputs(data)
-        engine_name = self.config.reward.reward_model.inference.name
+        engine_name = self.config.reward.reward_model.rollout.name
         model_name = self.config.reward.reward_model.model_path
         if engine_name == "vllm":
             payloads = {

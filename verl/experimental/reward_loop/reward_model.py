@@ -43,12 +43,12 @@ class RewardModelManager:
         self.resource_pool = resource_pool
         self._initialize_llm_servers()
         self._initialize_router()
-        assert self.config.inference.skip_tokenizer_init is False, "Reward model should not skip tokenizer init."
-        if self.config.inference.free_cache_engine:
+        assert self.config.rollout.skip_tokenizer_init is False, "Reward model should not skip tokenizer init."
+        if self.config.rollout.free_cache_engine:
             self.sleep()
 
     def _initialize_llm_servers(self):
-        rollout_config = self.config.inference
+        rollout_config = self.config.rollout
         rollout_world_size = (
             rollout_config.tensor_model_parallel_size
             * rollout_config.data_parallel_size
@@ -92,7 +92,7 @@ class RewardModelManager:
         worker_urls = [f"http://{server_address}" for server_address in self.server_addresses]
 
         # TODO (dyy): sglang router is not ready yet.
-        # if self.config.inference.name == "sglang":
+        # if self.config.rollout.name == "sglang":
         #     from .router.inner_sglang_router import launch_router_process
         # else:
         #     from .router.naive_router import launch_router_process
