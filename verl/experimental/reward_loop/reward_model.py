@@ -48,11 +48,7 @@ class RewardModelManager:
             self.sleep()
 
     def _initialize_llm_servers(self):
-        rollout_world_size = (
-            self.config.rollout.tensor_model_parallel_size
-            * self.config.rollout.data_parallel_size
-            * self.config.rollout.pipeline_model_parallel_size
-        )
+        rollout_world_size = self.config.rollout.tensor_model_parallel_size
         world_size = (
             self.resource_pool.world_size
             if self.resource_pool  # colocate mode
