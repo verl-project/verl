@@ -518,6 +518,15 @@ class PPOTrainer:
         self._init_tokenizer()
         self._init_dataloader()
 
+    @property
+    def is_last_step(self) -> bool:
+        """True iff ``global_steps`` has reached the configured training budget.
+
+        Mirrors :py:attr:`RayPPOTrainer.is_last_step` for the sync trainer
+        hierarchy; ``PPOTrainer`` does not inherit from ``RayPPOTrainer``.
+        """
+        return self.global_steps >= self.total_training_steps
+
     def _init_tokenizer(self):
         """Initialize tokenizer."""
         # Download the checkpoint from HDFS to the local machine.
@@ -1528,6 +1537,15 @@ class PPOTrainer:
         current_epoch = self.global_steps // len(self.train_dataloader)
         progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
 
+        # Resume guard: exit before any setup if the checkpoint already finished.
+        if self.is_last_step:
+            pprint(
+                f"Skipping training: resumed global_steps={self.global_steps} "
+                f"already reached total_training_steps={self.total_training_steps}."
+            )
+            progress_bar.close()
+            return
+
         # we start from step 1
         self.global_steps += 1
         self.prev_step_profile = False
@@ -1541,7 +1559,6 @@ class PPOTrainer:
         last_val_metrics = None
         for epoch in range(current_epoch, self.config.trainer.total_epochs):
             for batch_dict in self.train_dataloader:
-                is_last_step = self.global_steps >= self.total_training_steps
                 metrics, timing_raw = {}, {}
 
                 # 1. perform rollout and actor/critic training
@@ -1551,7 +1568,7 @@ class PPOTrainer:
 
                     # 2. save checkpoint
                     if self.config.trainer.save_freq > 0 and (
-                        is_last_step or self.global_steps % self.config.trainer.save_freq == 0
+                        self.is_last_step or self.global_steps % self.config.trainer.save_freq == 0
                     ):
                         with marked_timer("save_checkpoint", timing_raw, color="green"):
                             self._save_checkpoint()
@@ -1563,11 +1580,11 @@ class PPOTrainer:
 
                 # 4. validate
                 if self.config.trainer.test_freq > 0 and (
-                    is_last_step or self.global_steps % self.config.trainer.test_freq == 0
+                    self.is_last_step or self.global_steps % self.config.trainer.test_freq == 0
                 ):
                     with marked_timer("testing", timing_raw, color="green"):
                         val_metrics: dict = self._validate()
-                        if is_last_step:
+                        if self.is_last_step:
                             last_val_metrics = val_metrics
                     metrics.update(val_metrics)
 
@@ -1585,11 +1602,11 @@ class PPOTrainer:
 
                 self.logger.log(data=metrics, step=self.global_steps)
                 progress_bar.update(1)
-                self.global_steps += 1
-                if is_last_step:
+                if self.is_last_step:
                     pprint(f"Final validation metrics: {last_val_metrics}")
                     progress_bar.close()
                     return
+                self.global_steps += 1
 
     def step(self, batch_dict: dict, metrics: dict, timing_raw: dict) -> KVBatchMeta:
         # 1. put batch to agent loop manager

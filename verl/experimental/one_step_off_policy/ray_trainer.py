@@ -127,7 +127,6 @@ class OneStepOffRayTrainer(SeparateRayPPOTrainer):
         self.max_steps_duration = 0
         self.progress_bar = None
         self.logger = None
-        self.is_last_step = False
         self.prev_step_profile = False
         self.curr_step_profile = False
         self.next_step_profile = False
@@ -303,6 +302,15 @@ class OneStepOffRayTrainer(SeparateRayPPOTrainer):
         # add tqdm
         self.progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
 
+        # Resume guard: exit before any setup if the checkpoint already finished.
+        if self.is_last_step:
+            pprint(
+                f"Skipping training: resumed global_steps={self.global_steps} "
+                f"already reached total_training_steps={self.total_training_steps}."
+            )
+            self.progress_bar.close()
+            return
+
         # we start from step 1
         self.global_steps += 1
         self.last_val_metrics = None
@@ -321,8 +329,9 @@ class OneStepOffRayTrainer(SeparateRayPPOTrainer):
         # Start the first asynchronous generation task.
         batch_data_future = asyncio.create_task(self._async_gen_next_batch(continuous_iterator))
         while batch_data_future is not None:
+            is_last_step = self.is_last_step
             batch_data_future = await self.fit_step(batch_data_future, continuous_iterator)
-            if self.is_last_step:
+            if is_last_step:
                 return
 
     async def fit_step(self, batch_data_future, continuous_iterator):

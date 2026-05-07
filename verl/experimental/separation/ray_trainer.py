@@ -93,7 +93,6 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
         self.max_steps_duration = 0
         self.progress_bar = None
         self.logger = None
-        self.is_last_step = False
         self.prev_step_profile = False
         self.curr_step_profile = False
         self.next_step_profile = False
@@ -317,6 +316,15 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
         # add tqdm
         self.progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
 
+        # Resume guard: exit before any setup if the checkpoint already finished.
+        if self.is_last_step:
+            pprint(
+                f"Skipping training: resumed global_steps={self.global_steps} "
+                f"already reached total_training_steps={self.total_training_steps}."
+            )
+            self.progress_bar.close()
+            return
+
         # we start from step 1
         self.global_steps += 1
         self.last_val_metrics = None
@@ -333,8 +341,9 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
         for epoch in range(current_epoch, self.config.trainer.total_epochs):
             for batch_dict in self.train_dataloader:
                 self.epoch = epoch
+                is_last_step = self.is_last_step
                 self.fit_step(batch_dict)
-                if self.is_last_step:
+                if is_last_step:
                     return
 
     def fit_step(self, batch_dict: Any = None):
@@ -381,7 +390,6 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
     def _fit_prepare_step(self):
         if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):
             self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=False)
-        self.is_last_step = self.global_steps >= self.total_training_steps
 
     def _fit_start_profile(self):
         timing_raw = self.timing_raw
@@ -735,9 +743,10 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
         # TODO: make a canonical logger that supports various backend
         self.logger.log(data=metrics, step=self.global_steps)
         self.progress_bar.update(1)
-        self.global_steps += 1
         if self.is_last_step:
             if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):
                 self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=True)
             pprint(f"Final validation metrics: {self.last_val_metrics}")
             self.progress_bar.close()
+            return
+        self.global_steps += 1
