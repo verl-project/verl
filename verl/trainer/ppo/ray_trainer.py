@@ -20,6 +20,7 @@ This trainer supports model-agonistic model initialization with huggingface
 
 import json
 import os
+import random
 import uuid
 from collections import defaultdict
 from copy import deepcopy
@@ -607,7 +608,6 @@ class RayPPOTrainer:
                 sample_turns.append(test_batch.non_tensor_batch["__num_turns__"])
 
             data_source_lst.append(test_batch.non_tensor_batch.get("data_source", ["unknown"] * reward_tensor.shape[0]))
-
         self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
 
         # dump generations
@@ -637,6 +637,12 @@ class RayPPOTrainer:
         return self._val_metrics_update(data_sources, sample_uids, reward_extra_infos_dict, sample_turns)
 
     def _val_metrics_update(self, data_sources, sample_uids, reward_extra_infos_dict, sample_turns):
+        # Count reward values per group
+        reward_counts_per_group = defaultdict(lambda: defaultdict(int))
+        for data_source, reward in zip(data_sources, reward_extra_infos_dict["reward"]):
+            rounded_reward = round(float(reward), 2)
+            reward_counts_per_group[data_source][rounded_reward] += 1
+
         data_src2var2metric2val = process_validation_metrics(data_sources, sample_uids, reward_extra_infos_dict)
         metric_dict = {}
         for data_source, var2metric2val in data_src2var2metric2val.items():
@@ -654,12 +660,21 @@ class RayPPOTrainer:
                         metric_sec = "val-aux"
                     pfx = f"{metric_sec}/{data_source}/{var_name}/{metric_name}"
                     metric_dict[pfx] = metric_val
+            
+            # Add reward counts for this data source
+            for reward_val, count in reward_counts_per_group[data_source].items():
+                metric_dict[f"val-aux/{data_source}/reward/count_{reward_val}"] = count
 
         if len(sample_turns) > 0:
             sample_turns = np.concatenate(sample_turns)
             metric_dict["val-aux/num_turns/min"] = sample_turns.min()
             metric_dict["val-aux/num_turns/max"] = sample_turns.max()
             metric_dict["val-aux/num_turns/mean"] = sample_turns.mean()
+            metric_dict["val-aux/num_turns/total"] = sample_turns.sum()
+
+            multi_turn_steps = np.maximum(sample_turns - 1, 0)
+            metric_dict["val-aux/multi_turn_steps/mean"] = multi_turn_steps.mean()
+            metric_dict["val-aux/multi_turn_steps/total"] = multi_turn_steps.sum()
 
         return metric_dict
 
@@ -1354,6 +1369,7 @@ class RayPPOTrainer:
 
                 # pass global_steps to trace
                 gen_batch.meta_info["global_steps"] = self.global_steps
+                gen_batch.meta_info["total_steps"] = self.total_training_steps
                 gen_batch_output = gen_batch.repeat(
                     repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True
                 )

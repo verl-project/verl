@@ -31,6 +31,21 @@ logger = logging.getLogger(__name__)
 MLFLOW_MAX_ATTEMPTS = 3
 MLFLOW_SLEEP_SECONDS = 5
 
+import re
+
+_ALLOWED = re.compile(r"[^A-Za-z0-9_\-./ ]+")
+
+def _sanitize_mlflow_key(key: str) -> str:
+    k = _ALLOWED.sub("_", key)
+    k = re.sub(r"^[^A-Za-z0-9]+", "", k)
+    return k or "param"
+
+def _sanitize_dict_keys(d: dict) -> dict:
+    out = {}
+    for k, v in d.items():
+        sk = _sanitize_mlflow_key(str(k))
+        out[sk] = v
+    return out
 
 class Tracking:
     """A unified tracking interface for logging experiment data to multiple backends.
@@ -109,7 +124,9 @@ class Tracking:
                         experiment = mlflow.set_experiment(project_name)
                         mlflow.start_run(experiment_id=experiment.experiment_id, run_name=experiment_name)
 
-                    mlflow.log_params(_compute_mlflow_params_from_objects(config))
+                    params = _compute_mlflow_params_from_objects(config)
+                    params = _sanitize_dict_keys(params)
+                    mlflow.log_params(params)
                     self.logger["mlflow"] = _MlflowLoggingAdapter()
                     break  # Success
                 except Exception as e:

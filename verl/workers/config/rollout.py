@@ -174,6 +174,9 @@ class RolloutConfig(BaseConfig):
     n_gpus_per_node: int = 8
 
     temperature: float = 1.0
+    # Optional cosine schedule for the train rollout temperature. Active when both are set.
+    temperature_start: Optional[float] = None
+    temperature_end: Optional[float] = None
     top_k: int = -1
     top_p: float = 1.0
     do_sample: bool = True

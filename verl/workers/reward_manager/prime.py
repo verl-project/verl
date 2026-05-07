@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import asyncio
+from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 from typing import Any, Callable, Optional
@@ -81,6 +82,8 @@ async def parallel_compute_score_async(
         if isinstance(result, Exception) or result is None:
             # Handle failed or timed-out tasks
             scores.append(0.0)
+        elif isinstance(result, dict):
+            scores.append(result)
         elif isinstance(result, int | float | bool):
             scores.append(float(result))
         else:
@@ -146,7 +149,8 @@ class PrimeRewardManager(AbstractRewardManager):
         except Exception as e:
             print(f"[Error] Unexpected error during scoring. Setting all as 0. {e}")
             scores = [0.0 for _ in range(len(sequences_str))]
-        data.batch["acc"] = torch.tensor(scores, dtype=torch.float32, device=prompt_ids.device)
+        acc_values = [s["score"] if isinstance(s, dict) else float(s) for s in scores]
+        data.batch["acc"] = torch.tensor(acc_values, dtype=torch.float32, device=prompt_ids.device)
         return scores
 
     def __call__(self, data: DataProto, return_dict: bool = False) -> torch.Tensor | dict[str, Any]:
@@ -158,6 +162,7 @@ class PrimeRewardManager(AbstractRewardManager):
             return reward_from_rm_scores
 
         reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
+        reward_extra_info = defaultdict(list)
 
         already_print_data_sources = {}
 
@@ -174,16 +179,30 @@ class PrimeRewardManager(AbstractRewardManager):
 
         for i in range(len(data)):
             data_source = data_sources[i]
-            reward_tensor[i, valid_response_length[i].item() - 1] = scores[i]
+            score_item = scores[i]
+
+            if isinstance(score_item, dict):
+                reward = score_item["score"]
+                for key, value in score_item.items():
+                    reward_extra_info[key].append(value)
+            else:
+                reward = score_item
+
+            reward_tensor[i, valid_response_length[i].item() - 1] = reward
 
             if data_source not in already_print_data_sources:
                 already_print_data_sources[data_source] = 0
 
             if already_print_data_sources[data_source] < self.num_examine:
                 already_print_data_sources[data_source] += 1
-                print(sequences_str)
+                if isinstance(score_item, dict):
+                    for key, value in score_item.items():
+                        print(f"[{key}]", value)
+                else:
+                    print("[score]", score_item)
+                print(sequences_str[i])
 
         if return_dict:
-            return {"reward_tensor": reward_tensor}
+            return {"reward_tensor": reward_tensor, "reward_extra_info": reward_extra_info}
         else:
             return reward_tensor

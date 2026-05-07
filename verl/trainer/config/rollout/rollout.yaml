@@ -16,6 +16,10 @@ n_gpus_per_node: ${oc.select:trainer.n_gpus_per_node,8}
 # Sampling temperature for rollout.
 temperature: 1.0
 
+# Optional cosine schedule for the train rollout temperature when both are set
+temperature_start: null
+temperature_end: null
+
 # Top-k sampling parameter. -1 for vLLM rollout, 0 for HF rollout.
 top_k: -1
 

@@ -146,6 +146,14 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
     else:
         logger.warning("All samples are aborted, returning default reward metrics")
         reward_mean = reward_max = reward_min = float("nan")
+    
+    # Count occurrences of reward values rounded to 2 decimals for stable logging keys.
+    rounded_sequence_reward = torch.round(non_aborted_sequence_reward * 100) / 100
+    unique_rewards, reward_counts = torch.unique(rounded_sequence_reward, return_counts=True)
+    reward_counts_dict = {
+        f"critic/rewards/count_{float(reward.item())}": count.item()
+        for reward, count in zip(unique_rewards, reward_counts)
+    }
 
     valid_adv = torch.masked_select(advantages, response_mask)
     valid_returns = torch.masked_select(returns, response_mask)
@@ -220,10 +228,14 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
         "critic/rewards/mean": reward_mean,
         "critic/rewards/max": reward_max,
         "critic/rewards/min": reward_min,
+        **reward_counts_dict,
         # adv
         "critic/advantages/mean": adv_mean,
         "critic/advantages/max": adv_max,
         "critic/advantages/min": adv_min,
+        "critic/advantages/num_zero": num_zero_adv,
+        "critic/advantages/num_zero_tokens": num_zero_adv_tokens,
+        "critic/advantages/avg_reward_num_zero": avg_reward_zero_adv_seq,
         # returns
         "critic/returns/mean": returns_mean,
         "critic/returns/max": returns_max,
@@ -683,6 +695,20 @@ def process_validation_metrics(
                             )
                             metric[f"maj@{n}/mean"] = maj_n_mean
                             metric[f"maj@{n}/std"] = maj_n_std
+
+                # pass@k: computed for binary variables (values in {0, 1})
+                unique_vals = set(var_vals)
+                if n_resps > 1 and unique_vals <= {0, 0.0, 1, 1.0}:
+                    c = sum(1 for v in var_vals if v == 1 or v == 1.0)
+                    ns = []
+                    n = 1
+                    while n < n_resps:
+                        ns.append(n)
+                        n *= 2
+                    ns.append(n_resps)
+                    for k in ns:
+                        if k <= n_resps:
+                            metric[f"pass@{k}"] = _pass_at_k(n_resps, c, k)
 
                 var_dict[var_name] = metric
 
