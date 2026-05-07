@@ -155,8 +155,11 @@ jobs:
           bash tests/special_e2e/run_fully_async_policy.sh \
             data.max_response_length=128 \
             actor_rollout_ref.rollout.n=2 \
+            actor_rollout_ref.rollout.gpu_memory_utilization=0.1 \
             actor_rollout_ref.actor.ppo_mini_batch_size=4 \
-            actor_rollout_ref.actor.ppo_max_token_len_per_gpu=1536
+            actor_rollout_ref.actor.ppo_max_token_len_per_gpu=1536 \
+            actor_rollout_ref.actor.fsdp_config.param_offload=True \
+            actor_rollout_ref.actor.fsdp_config.optimizer_offload=True
 
   # Megatron single replica: all 4 rollout GPUs form one TP=4 group.
   e2e_fully_async_policy_trtllm_megatron_single_replica:
@@ -192,6 +195,7 @@ jobs:
           bash tests/special_e2e/run_fully_async_policy.sh \
             data.max_response_length=128 \
             actor_rollout_ref.rollout.n=2 \
+            actor_rollout_ref.rollout.gpu_memory_utilization=0.1 \
             actor_rollout_ref.actor.ppo_mini_batch_size=4 \
             actor_rollout_ref.actor.ppo_max_token_len_per_gpu=1536
 
@@ -229,6 +233,7 @@ jobs:
           bash tests/special_e2e/run_fully_async_policy.sh \
             data.max_response_length=128 \
             actor_rollout_ref.rollout.n=2 \
+            actor_rollout_ref.rollout.gpu_memory_utilization=0.1 \
             actor_rollout_ref.actor.ppo_mini_batch_size=4 \
             actor_rollout_ref.actor.ppo_max_token_len_per_gpu=1536
 
