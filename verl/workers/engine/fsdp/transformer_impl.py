@@ -57,6 +57,7 @@ from verl.utils.fsdp_utils import (
     normalize_peft_param_name,
     offload_fsdp_model_to_cpu,
     offload_fsdp_optimizer,
+    register_filtered_forward_input_cast_hooks,
     replace_lora_wrapper,
 )
 from verl.utils.model import convert_weight_keys, extract_multi_modal_inputs
@@ -348,7 +349,17 @@ class FSDPEngine(BaseEngine):
             reduce_dtype = torch.float32
             buffer_dtype = torch.float32
 
-        mixed_precision = MixedPrecision(param_dtype=param_dtype, reduce_dtype=reduce_dtype, buffer_dtype=buffer_dtype)
+        # Disable FSDP's blanket forward-input cast. verl installs a filtered
+        # replacement hook below so coordinate-like inputs (e.g. Qwen3-Omni
+        # fractional position_ids) can stay in fp32 while regular floating
+        # inputs are still cast to the parameter compute dtype.
+        mixed_precision = MixedPrecision(
+            param_dtype=param_dtype,
+            reduce_dtype=reduce_dtype,
+            buffer_dtype=buffer_dtype,
+            cast_forward_inputs=False,
+            cast_root_forward_inputs=False,
+        )
 
         auto_wrap_policy = get_fsdp_wrap_policy(
             module=module,
@@ -393,7 +404,7 @@ class FSDPEngine(BaseEngine):
             # - ref: CPUOffloadPolicy(pin_memory=True)
             assert CPUOffloadPolicy is not None, "PyTorch version >= 2.4 is required for using fully_shard API (FSDP2)"
             mp_policy = MixedPrecisionPolicy(
-                param_dtype=param_dtype, reduce_dtype=reduce_dtype, cast_forward_inputs=True
+                param_dtype=param_dtype, reduce_dtype=reduce_dtype, cast_forward_inputs=False
             )
             offload_policy = None
             # ``forward_only`` (ref) previously forced FSDP2 ``CPUOffloadPolicy``
@@ -439,6 +450,10 @@ class FSDPEngine(BaseEngine):
             fsdp2_load_full_state_dict(module, full_state, fsdp_mesh, offload_policy)
         else:
             raise NotImplementedError(f"Unknown strategy {self.engine_config.strategy}")
+
+        self._filtered_forward_input_cast_hook_handles = register_filtered_forward_input_cast_hooks(
+            module, param_dtype, self.engine_config.strategy
+        )
 
         if self.model_config.enable_activation_offload:
             enable_gradient_checkpointing = self.model_config.enable_gradient_checkpointing
@@ -996,7 +1011,6 @@ class FSDPEngineWithLMHead(FSDPEngine):
             output_args["temperature_rmpad"] = temperature_rmpad
 
             # only pass input_ids and position_ids to enable flash_attn_varlen
-
             model_inputs = {
                 "input_ids": input_ids_rmpad,
                 "attention_mask": None,
@@ -1057,7 +1071,13 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
         return model_inputs, output_args
 
-    def prepare_model_outputs(self, output, output_args, micro_batch: TensorDict, logits_processor_func):
+    def prepare_model_outputs(
+        self,
+        output,
+        output_args,
+        micro_batch: TensorDict,
+        logits_processor_func,
+    ):
         use_remove_padding = tu.get_non_tensor_data(data=micro_batch, key="use_remove_padding", default=True)
         pad_mode = tu.get_non_tensor_data(data=micro_batch, key="pad_mode", default=DatasetPadMode.NO_PADDING)
         use_fused_kernels = tu.get_non_tensor_data(data=micro_batch, key="use_fused_kernels", default=False)
@@ -1185,7 +1205,6 @@ class FSDPEngineWithLMHead(FSDPEngine):
         # actually, we should avoid assigning like this...
         micro_batch = micro_batch.to(get_device_id())
         model_inputs, output_args = self.prepare_model_inputs(micro_batch=micro_batch)
-
         with torch.autocast(device_type=device_name, dtype=torch.bfloat16):
             raw_output = self.module(
                 **model_inputs,
@@ -1193,7 +1212,10 @@ class FSDPEngineWithLMHead(FSDPEngine):
             )  # prevent model thinks we are generating
 
             model_output = self.prepare_model_outputs(
-                output=raw_output, output_args=output_args, micro_batch=micro_batch, logits_processor_func=loss_function
+                output=raw_output,
+                output_args=output_args,
+                micro_batch=micro_batch,
+                logits_processor_func=loss_function,
             )
 
             if loss_function is not None:

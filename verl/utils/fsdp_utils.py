@@ -20,7 +20,7 @@ import os
 from abc import ABC
 from collections import OrderedDict
 from contextlib import contextmanager, nullcontext
-from typing import Optional, cast
+from typing import Any, Optional, cast
 
 import torch
 import torch.distributed as dist
@@ -30,6 +30,7 @@ from torch.distributed import DeviceMesh
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp._runtime_utils import _lazy_init
 from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy, transformer_auto_wrap_policy
+from torch.distributed.utils import _apply_to_tensors
 from transformers.trainer_pt_utils import get_module_class_from_name
 
 from verl.utils.device import get_device_id, get_device_name, get_torch_device
@@ -48,6 +49,80 @@ elif version.parse(torch.__version__) >= version.parse("2.4"):
     fully_shard_module = torch.distributed._composable.fsdp
 else:
     fully_shard, MixedPrecisionPolicy, FSDPModule, CPUOffloadPolicy, fully_shard_module = None, None, None, None, None
+
+
+try:
+    from torch.distributed.fsdp._fully_shard._fsdp_common import (
+        _cast_fp_tensor as _torch_fsdp_cast_fp_tensor,
+    )
+except (ImportError, ModuleNotFoundError):
+
+    def _torch_fsdp_cast_fp_tensor(dtype: torch.dtype, x: torch.Tensor) -> torch.Tensor:
+        if not isinstance(x, torch.Tensor) or not torch.is_floating_point(x) or x.dtype == dtype:
+            return x
+        return x.to(dtype)
+
+
+# For some multi-modal model such as qwen3-omni, `position_ids` has type float,
+# which will be auto-cast to half by FSDP on default, so we need to skip it.
+_FSDP_FORWARD_INPUT_CAST_SKIP_NAMES = frozenset({"position_ids"})
+
+
+def _fsdp_forward_input_cast_skip_names() -> frozenset[str]:
+    raw = os.environ.get("VERL_FSDP_FORWARD_INPUT_CAST_SKIP_NAMES")
+    if raw is None:
+        return _FSDP_FORWARD_INPUT_CAST_SKIP_NAMES
+    return frozenset(name.strip() for name in raw.split(",") if name.strip())
+
+
+def _cast_fsdp_forward_input(
+    value: Any, dtype: torch.dtype, skip_names: frozenset[str], path: tuple[str, ...] = ()
+) -> Any:
+    if path and path[-1] in skip_names:
+        return value
+    cast_fn = functools.partial(_torch_fsdp_cast_fp_tensor, dtype)
+    if not skip_names:
+        return _apply_to_tensors(cast_fn, value)
+    if isinstance(value, dict):
+        return {
+            key: _cast_fsdp_forward_input(item, dtype, skip_names, (*path, str(key))) for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_cast_fsdp_forward_input(item, dtype, skip_names, (*path, str(idx))) for idx, item in enumerate(value)]
+    if isinstance(value, tuple):
+        return tuple(
+            _cast_fsdp_forward_input(item, dtype, skip_names, (*path, str(idx))) for idx, item in enumerate(value)
+        )
+    return _apply_to_tensors(cast_fn, value)
+
+
+def _register_filtered_forward_input_cast_hook(
+    module: torch.nn.Module, dtype: torch.dtype
+) -> torch.utils.hooks.RemovableHandle:
+    skip_names = _fsdp_forward_input_cast_skip_names()
+
+    def _pre_forward_cast_hook(_module: torch.nn.Module, args: tuple[Any, ...], kwargs: dict[str, Any]):
+        with torch.profiler.record_function("verl::fsdp_filtered_cast_forward_inputs"):
+            return (
+                _cast_fsdp_forward_input(args, dtype, skip_names),
+                _cast_fsdp_forward_input(kwargs, dtype, skip_names),
+            )
+
+    return module.register_forward_pre_hook(_pre_forward_cast_hook, with_kwargs=True)
+
+
+def register_filtered_forward_input_cast_hooks(
+    module: torch.nn.Module, dtype: torch.dtype, strategy: str
+) -> list[torch.utils.hooks.RemovableHandle]:
+    if dtype is None:
+        return []
+    if strategy == "fsdp2":
+        return [
+            _register_filtered_forward_input_cast_hook(submodule, dtype)
+            for submodule in module.modules()
+            if isinstance(submodule, FSDPModule)
+        ]
+    return [_register_filtered_forward_input_cast_hook(module, dtype)]
 
 
 def init_fn(x: torch.nn.Module):

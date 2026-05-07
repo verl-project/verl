@@ -26,7 +26,10 @@ from vllm.outputs import RequestOutput
 
 from verl.utils.device import is_npu_available
 from verl.utils.vllm import TensorLoRARequest, VLLMHijack
-from verl.utils.vllm.patch import apply_qwen3_omni_thinker_patches, patch_vllm_moe_model_weight_loader
+from verl.utils.vllm.patch import (
+    apply_qwen3_omni_thinker_patches,
+    patch_vllm_moe_model_weight_loader,
+)
 from verl.utils.vllm.vllm_fp8_utils import apply_vllm_fp8_patches, is_fp8_model, load_quanted_weights
 
 try:
@@ -138,7 +141,7 @@ class vLLMColocateWorkerExtension:
 
         # 1. patch for Lora
         VLLMHijack.hijack()
-        # 2. extend Qwen3-Omni thinker weight key mapper for standalone thinker state_dicts
+        # 2. patch Qwen3-Omni thinker weight loading for standalone thinker state_dicts
         apply_qwen3_omni_thinker_patches()
         # 3. patch online fp8 quant
         if os.environ.get("VERL_VLLM_FP8_QUANT_ENABLED", "0") == "1":
@@ -262,6 +265,7 @@ class vLLMColocateWorkerExtension:
                 logger.info(f"FP8 weights loaded (async), loaded_params: {len(loaded_params)}")
             else:
                 logger.info("Loading standard weights (non-FP8, async)")
+                apply_qwen3_omni_thinker_patches()
                 self.model_runner.model.load_weights(weights)
 
     def _get_zmq_handle(self) -> str:

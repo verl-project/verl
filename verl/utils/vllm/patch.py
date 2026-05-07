@@ -15,7 +15,6 @@
 import re
 from collections.abc import Iterable
 from functools import wraps
-from typing import Any
 
 import torch
 
@@ -154,31 +153,6 @@ _QWEN3_OMNI_PACKED_EXPERT_RE = re.compile(
     r"(?P<kind>gate_up_proj|down_proj)(?:\.weight)?$"
 )
 _QWEN3_OMNI_THINKER_MAPPER_PATCHED = False
-
-
-def is_qwen3_omni_thinker_model(model: Any) -> bool:
-    names = {type(model).__name__, type(model).__module__}
-    for attr in ("language_model", "model", "visual", "audio_tower"):
-        child = getattr(model, attr, None)
-        if child is not None:
-            names.add(type(child).__name__)
-            names.add(type(child).__module__)
-    config = getattr(model, "config", None)
-    model_type = getattr(config, "model_type", None)
-    if model_type is not None:
-        names.add(str(model_type))
-    return any("Qwen3Omni" in name or "qwen3_omni" in name for name in names)
-
-
-def stabilize_qwen3_omni_ipc_weights(
-    model: Any, weights: list[tuple[str, torch.Tensor]]
-) -> list[tuple[str, torch.Tensor]]:
-    if not is_qwen3_omni_thinker_model(model):
-        return weights
-    # Qwen3-Omni's vLLM loader may keep tensor storage from the incoming
-    # weight object for packed/MoE parameters. CUDA IPC buckets are reused
-    # immediately after each load call, so pass stable per-bucket tensors.
-    return [(name, tensor.clone()) for name, tensor in weights]
 
 
 def _expand_qwen3_omni_packed_moe_weights(
