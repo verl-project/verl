@@ -28,7 +28,7 @@ from megatron.core import dist_checkpointing, mpu, tensor_parallel
 from megatron.core.dist_checkpointing.mapping import ShardedObject
 from megatron.core.transformer.enums import AttnBackend
 from packaging import version
-from torch.distributed.checkpoint import FileSystemReader, FileSystemWriter, default_planner
+from torch.distributed.checkpoint import FileSystemWriter
 from transformers import GenerationConfig
 
 from verl.models.weight_loader_registry import get_weight_saver
@@ -396,61 +396,35 @@ class MegatronCheckpointManager(BaseCheckpointManager):
 
         return apply_peft_adapter_filter_to_state_dict(state_dict, self.peft_cls)
 
-    def _generate_megatron_fsdp_checkpoint_state_dict(
-        self,
-        *,
-        generate_model: bool,
-        generate_optimizer: bool,
-        generate_extra: bool,
-        is_loading: bool = False,
-    ):
-        state_dict = self.generate_state_dict(
-            generate_model=generate_model,
-            generate_optimizer=generate_optimizer,
-            generate_extra=generate_extra,
-            is_loading=is_loading,
-            metadata=self._build_sharded_state_dict_metadata(),
-        )
-        checkpoint_model = getattr(self.model[0], "module", self.model[0])
-        return state_dict, checkpoint_model
-
-    def _preprocess_megatron_fsdp_checkpoint_state_dict(self, state_dict, checkpoint_model):
-        from megatron.bridge.training.checkpointing import (
-            preprocess_fsdp_dtensor_state_dict as bridge_preprocess_fsdp_dtensor_state_dict,
-        )
-
-        return bridge_preprocess_fsdp_dtensor_state_dict(self.transformer_config, state_dict, checkpoint_model)
-
     def _load_megatron_fsdp_checkpoint(self, local_path: str, del_local_after_load=False):
         dist_checkpoint_path = get_dist_checkpoint_path(local_path)
         if not os.path.isfile(os.path.join(dist_checkpoint_path, ".metadata")):
             raise FileNotFoundError(f"Megatron-FSDP checkpoint metadata not found at {dist_checkpoint_path}/.metadata.")
 
-        sharded_state_dict, checkpoint_model = self._generate_megatron_fsdp_checkpoint_state_dict(
+        sharded_state_dict = self.generate_state_dict(
             generate_model=True,
             generate_optimizer=True,
             generate_extra=True,
             is_loading=True,
+            metadata=self._build_sharded_state_dict_metadata(),
         )
 
-        raw_optimizer_state_dict = sharded_state_dict["optimizer"].copy() if "optimizer" in sharded_state_dict else None
-        raw_model_state_dict = sharded_state_dict["model"].copy() if "model" in sharded_state_dict else None
-        state_dict = self._preprocess_megatron_fsdp_checkpoint_state_dict(sharded_state_dict, checkpoint_model)
-
-        storage_reader = FileSystemReader(dist_checkpoint_path)
-        planner = default_planner.DefaultLoadPlanner(
-            allow_partial_load=not getattr(self.checkpoint_config, "strict_fsdp_dtensor_load", False)
-        )
-        torch.distributed.checkpoint.load_state_dict(
-            state_dict=state_dict,
-            storage_reader=storage_reader,
-            planner=planner,
+        from megatron.bridge.training.checkpointing import (
+            _load_fsdp_dtensor_base_checkpoint as bridge_load_fsdp_dtensor_base_checkpoint,
         )
 
-        if raw_optimizer_state_dict is not None:
-            state_dict["optimizer"] = raw_optimizer_state_dict
-        if raw_model_state_dict is not None:
-            state_dict["model"] = raw_model_state_dict
+        checkpoint_model = getattr(self.model[0], "module", self.model[0])
+        sharded_state_dict["_model"] = [checkpoint_model]
+        state_dict, _, _, _ = bridge_load_fsdp_dtensor_base_checkpoint(
+            load_dir=dist_checkpoint_path,
+            ckpt_cfg=self.checkpoint_config,
+            rank0=False,
+            sharded_state_dict=sharded_state_dict,
+            iteration=None,
+            release=False,
+            checkpoint_path_override=dist_checkpoint_path,
+            cfg=self.transformer_config,
+        )
 
         if self.should_load_model:
             self.model[0].load_state_dict(state_dict["model"], strict=True)
@@ -482,13 +456,19 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                 )
 
     def _save_megatron_fsdp_checkpoint(self, dist_checkpoint_path: str):
-        state_dict, checkpoint_model = self._generate_megatron_fsdp_checkpoint_state_dict(
+        state_dict = self.generate_state_dict(
             generate_model=self.should_save_model,
             generate_optimizer=self.should_save_optimizer,
             generate_extra=self.should_save_extra,
+            metadata=self._build_sharded_state_dict_metadata(),
         )
 
-        state_dict = self._preprocess_megatron_fsdp_checkpoint_state_dict(state_dict, checkpoint_model)
+        from megatron.bridge.training.checkpointing import (
+            preprocess_fsdp_dtensor_state_dict as bridge_preprocess_fsdp_dtensor_state_dict,
+        )
+
+        checkpoint_model = getattr(self.model[0], "module", self.model[0])
+        state_dict = bridge_preprocess_fsdp_dtensor_state_dict(self.transformer_config, state_dict, checkpoint_model)
         storage_writer = FileSystemWriter(dist_checkpoint_path)
         torch.distributed.checkpoint.save(state_dict=state_dict, storage_writer=storage_writer)
         torch.distributed.barrier()
