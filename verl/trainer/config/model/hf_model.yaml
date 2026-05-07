@@ -39,6 +39,11 @@ enable_activation_offload: False
 # whether to use remove padding. Only valid when we use hf model definition
 use_remove_padding: True
 
+# Whether to use length-grouped micro-batches in FSDP training,
+# greedily packing similar-length sequences to reduce per-micro-batch padding.
+# Mutually exclusive with use_remove_padding and Ulysses SP.
+use_length_grouped_bsz: false
+
 # Set to positive value to enable LoRA (e.g., 32)
 lora_rank: 0
 
