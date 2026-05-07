@@ -53,6 +53,7 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 from verl.models.registry import ModelRegistry
 from verl.utils.import_utils import is_trl_available
 from verl.utils.transformers_compat import get_auto_model_for_vision2seq
+from verl.models.transformers import Qwen3_5ForTokenClassification
 
 AutoModelForVision2Seq = get_auto_model_for_vision2seq()
 
@@ -636,13 +637,22 @@ def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_cod
     from transformers import AutoModelForCausalLM, AutoModelForTokenClassification
 
     try:
-        model = AutoModelForTokenClassification.from_pretrained(
-            pretrained_model_name_or_path=local_path,
-            torch_dtype=torch_dtype,
-            config=model_config,
-            attn_implementation="flash_attention_2",
-            trust_remote_code=trust_remote_code,
-        )
+        if "Qwen2" in model_config.architectures[0] or "Qwen3" in model_config.architectures[0]:
+            model = Qwen3_5ForTokenClassification.from_pretrained(
+                pretrained_model_name_or_path=local_path,
+                torch_dtype=torch_dtype,
+                config=model_config,
+                attn_implementation="flash_attention_2",
+                trust_remote_code=trust_remote_code,
+                )
+        else:
+            model = AutoModelForTokenClassification.from_pretrained(
+                pretrained_model_name_or_path=local_path,
+                torch_dtype=torch_dtype,
+                config=model_config,
+                attn_implementation="flash_attention_2",
+                trust_remote_code=trust_remote_code,
+                )
         return model
     except BaseException as e:
         if not is_trl_available():
