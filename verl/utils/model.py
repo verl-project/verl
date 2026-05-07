@@ -637,14 +637,15 @@ def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_cod
     from transformers import AutoModelForCausalLM, AutoModelForTokenClassification
 
     try:
-        if "Qwen2" in model_config.architectures[0] or "Qwen3" in model_config.architectures[0]:
+        architectures = getattr(model_config, "architectures", [])
+        if architectures and any(name in architectures[0] for name in ["Qwen2", "Qwen3"]):
             model = Qwen3_5ForTokenClassification.from_pretrained(
                 pretrained_model_name_or_path=local_path,
                 torch_dtype=torch_dtype,
                 config=model_config,
                 attn_implementation="flash_attention_2",
                 trust_remote_code=trust_remote_code,
-                )
+            )
         else:
             model = AutoModelForTokenClassification.from_pretrained(
                 pretrained_model_name_or_path=local_path,
@@ -652,7 +653,7 @@ def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_cod
                 config=model_config,
                 attn_implementation="flash_attention_2",
                 trust_remote_code=trust_remote_code,
-                )
+            )
         return model
     except BaseException as e:
         if not is_trl_available():
