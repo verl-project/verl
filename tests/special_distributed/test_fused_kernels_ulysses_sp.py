@@ -135,9 +135,10 @@ def test_fused_kernels_log_probs_match_under_sp():
         input_ids_rmpad = input_ids  # (1, total_nnz), already "rmpadded"
         input_ids_rmpad_rolled = torch.roll(input_ids_rmpad, shifts=-1, dims=1)
         # Slice both inputs and rolled labels exactly like the engine.
+        # `position_ids` is already (1, total_nnz); helper expects 2D, not 3D.
         sliced_input, sliced_pos, pad_size = ulysses_pad_and_slice_inputs(
             input_ids_rmpad,
-            position_ids_rmpad=position_ids.unsqueeze(0),
+            position_ids_rmpad=position_ids,
             sp_size=sp_size,
         )
         sliced_rolled, _, _ = ulysses_pad_and_slice_inputs(
