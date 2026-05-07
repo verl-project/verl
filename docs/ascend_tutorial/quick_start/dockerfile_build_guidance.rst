@@ -82,6 +82,46 @@ A3              8.5.0          SGLang          `Dockerfile.ascend.sglang_8.5.0_a
    docker build -f Dockerfile.ascend.sglang_8.3.rc1_a2 -t verl-ascend-sglang:8.3.rc1-a2 .
 
 
+容器启动命令模板
+--------
+
+.. code:: bash
+
+   docker run -dit \
+       --ipc=host \
+       --network host \
+       --name your_docker_name \
+       --privileged \
+       -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+       -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware \
+       -v /usr/local/sbin:/usr/local/sbin \
+       -v /usr/sbin:/usr/sbin \
+       -v /home:/home \
+       -v /data:/data \
+       镜像名称:标签 \
+       /bin/bash
+
+**说明：**
+
+* 如需挂载其他本地路径到容器，请自行添加 ``-v <宿主机路径>:<容器内路径>``
+* 建议将 ``your_docker_name`` 替换为具有实际意义的容器名称
+* ``--privileged`` 参数授予容器扩展权限，请根据实际安全需求评估是否必要
+
+启动容器
+--------
+
+.. code:: bash
+
+   docker start your_docker_name
+
+进入正在运行的容器
+------------------
+
+.. code:: bash
+
+   docker exec -it your_docker_name bash
+
+
 声明
 --------------------
 verl中提供的ascend相关Dockerfile、镜像皆为参考样例，可用于尝鲜体验，如在生产环境中使用请通过官方正式途径沟通，谢谢。
