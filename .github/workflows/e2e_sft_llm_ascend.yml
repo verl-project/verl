@@ -96,7 +96,7 @@ jobs:
       - name: Install the current repository
         run: |
           pip install --no-deps -e .
-          pip install veomni==0.1.9a4 --ignore-requires-python --no-deps --index-url https://pypi.org/simple/
+          pip install veomni==0.1.9a5 --ignore-requires-python --no-deps --index-url https://pypi.org/simple/
           pip install transformers==4.57.3
           pip install pandas==2.3.3
           pip uninstall -y mbridge

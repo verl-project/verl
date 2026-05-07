@@ -1,27 +1,31 @@
 #!/usr/bin/env bash
-# This script is a demo for GRPO training of Qwen3.5-35B-A3B using VeOmniEngine.
+# This script is a demo for GRPO training of Qwen3.5-122B-A10B using VeOmniEngine.
 #
 # Environment:
 #   - transformers==5.3.0
 #   - sglang==0.5.9
 #   - flash-linear-attention==0.4.1
-#   - veomni==0.1.9a1
+#   - veomni==0.1.9a5
 # Tested configuration:
-#   - Model: Qwen3.5-35B-A3B
+#   - Model: Qwen3.5-122B-A10B
 #   - Sequence Parallel (SP): Tested with sp=1 and sp=2 (ulysses_parallel_size).
+#   - Expert Parallel: Tested with ep=8 (expert_parallel_size).
 
 set -xeuo pipefail
 
-# ---- user-adjustable ----
 data_path=${data_path:-$HOME/data/geo3k}
-model_path=${model_path:-$HOME/model/Qwen3.5-35B-A3B}
+model_path=${model_path:-$HOME/model/Qwen3.5-122B-A10B}
+output_path=${output_path:-$HOME/output}
+
 usp_size=${usp_size:-2}
-nnodes=${nnodes:-2}
+expert_size=${expert_size:-8}
+nnodes=${nnodes:-8}
 
 backend=fsdp2
 model_engine=veomni
-project_name='verl_grpo_qwen3_5_35b_a3b_geo3k'
-exp_name='qwen3_5_35b_a3b_veomni_sp2'
+project_name='verl_grpo_qwen3_5_122b_a10b_geo3k'
+exp_name='qwen3_5_122b_a10b_veomni_sp2_ep8'
+default_local_dir=$output_path/$project_name/$exp_name
 
 
 # ===================================== Algorithm =====================================
@@ -70,11 +74,11 @@ ACTOR_VEOMNI_CONFIG="
     actor_rollout_ref.actor.veomni.optimizer_offload=True \
     actor_rollout_ref.actor.veomni.enable_full_shard=True \
     actor_rollout_ref.actor.veomni.ulysses_parallel_size=$usp_size \
-    actor_rollout_ref.actor.veomni.expert_parallel_size=1 \
-    actor_rollout_ref.actor.veomni.attn_implementation=flash_attention_2"
-# ---- end user-adjustable ----
+    actor_rollout_ref.actor.veomni.expert_parallel_size=$expert_size \
+    actor_rollout_ref.actor.veomni.attn_implementation=flash_attention_2 \
+    actor_rollout_ref.actor.veomni.moe_implementation=fused_triton \
+    actor_rollout_ref.actor.veomni.cross_entropy_loss_implementation=liger_kernel"
 
-# ---- no user adjustment needed below ----
 # Actor model config
 ACTOR_CONFIG="
     actor_rollout_ref.actor.optim.lr=$actor_lr \
@@ -96,13 +100,14 @@ ACTOR_CONFIG="$ACTOR_CONFIG $ACTOR_VEOMNI_CONFIG"
 
 # ===================================== Inference =====================================
 rollout_name=sglang
-infer_tp=4
+infer_tp=8
 infer_dp=1
-infer_ep=1
+infer_ep=8
 gpu_memory_utilization=0.6
 
 ROLLOUT_CONFIG="
     actor_rollout_ref.rollout.name=$rollout_name \
+    actor_rollout_ref.rollout.mode=async \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$infer_tp \
     actor_rollout_ref.rollout.data_parallel_size=$infer_dp \
     actor_rollout_ref.rollout.expert_parallel_size=$infer_ep \
@@ -165,3 +170,4 @@ python -m verl.trainer.main_ppo \
     "${TRAINER[@]}" \
     "${EXTRA[@]}" \
     "$@"
+
