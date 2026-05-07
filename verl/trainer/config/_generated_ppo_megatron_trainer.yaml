@@ -728,12 +728,13 @@ sandbox_fusion:
   max_concurrent: null
   memory_limit_mb: null
 reward:
+  _target_: verl.workers.config.RewardConfig
   num_workers: 8
   custom_reward_function:
     path: null
     name: compute_score
   reward_manager:
-    _target_: verl.workers.config.reward_model.RewardManagerConfig
+    _target_: verl.workers.config.reward.RewardManagerConfig
     source: register
     name: naive
     module:
@@ -741,12 +742,13 @@ reward:
       path: null
       name: custom_reward_manager
   reward_model:
+    _target_: verl.workers.config.RewardModelConfig
     enable: false
     enable_resource_pool: false
     n_gpus_per_node: 8
     nnodes: 0
     model_path: null
-    rollout:
+    inference:
       _target_: verl.workers.config.RolloutConfig
       name: ???
       dtype: bfloat16
@@ -770,6 +772,7 @@ reward:
       prompt_length: 2048
       response_length: 2048
   sandbox_fusion:
+    _target_: verl.workers.config.SandboxFusionConfig
     url: null
     max_concurrent: 64
     memory_limit_mb: 1024
