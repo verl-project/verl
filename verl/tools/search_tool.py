@@ -78,8 +78,20 @@ class SearchExecutionWorker:
         self.rate_limit_worker = self._init_rate_limit(rate_limit) if enable_global_rate_limit else None
 
     def _init_rate_limit(self, rate_limit):
-        """Initialize singleton rate limiter."""
-        return TokenBucketWorker.options(name="rate-limiter", get_if_exists=True).remote(rate_limit)
+        """Initialize singleton rate limiter as a detached actor."""
+        namespace = ray.get_runtime_context().namespace
+        try:
+            actor = ray.get_actor("rate-limiter", namespace=namespace)
+            logger.info("Reusing existing detached rate-limiter actor.")
+            return actor
+        except ValueError:
+            logger.info("Creating new detached rate-limiter actor.")
+            return TokenBucketWorker.options(
+                name="rate-limiter",
+                lifetime="detached",
+                namespace=namespace,
+                get_if_exists=True
+            ).remote(rate_limit)
 
     def ping(self):
         """Health check method."""
