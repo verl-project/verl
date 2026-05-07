@@ -12,6 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import re
+from collections.abc import Iterable
+from functools import wraps
+from typing import Any
+
+import torch
+
 # To support different vLLM versions, we add the model into SUPPORTED_MOE_MODELS separately to avoid triggering
 # unsupported issues.
 SUPPORTED_MOE_MODELS = []
@@ -142,24 +149,90 @@ def patch_vllm_moe_model_weight_loader(model):
                 param.weight_loader = experts.weight_loader
 
 
+_QWEN3_OMNI_PACKED_EXPERT_RE = re.compile(
+    r"^(?P<prefix>(?:(?:thinker|language_model)\.)?model\.layers\.\d+\.mlp\.experts)\."
+    r"(?P<kind>gate_up_proj|down_proj)(?:\.weight)?$"
+)
 _QWEN3_OMNI_THINKER_MAPPER_PATCHED = False
+
+
+def is_qwen3_omni_thinker_model(model: Any) -> bool:
+    names = {type(model).__name__, type(model).__module__}
+    for attr in ("language_model", "model", "visual", "audio_tower"):
+        child = getattr(model, attr, None)
+        if child is not None:
+            names.add(type(child).__name__)
+            names.add(type(child).__module__)
+    config = getattr(model, "config", None)
+    model_type = getattr(config, "model_type", None)
+    if model_type is not None:
+        names.add(str(model_type))
+    return any("Qwen3Omni" in name or "qwen3_omni" in name for name in names)
+
+
+def stabilize_qwen3_omni_ipc_weights(
+    model: Any, weights: list[tuple[str, torch.Tensor]]
+) -> list[tuple[str, torch.Tensor]]:
+    if not is_qwen3_omni_thinker_model(model):
+        return weights
+    # Qwen3-Omni's vLLM loader may keep tensor storage from the incoming
+    # weight object for packed/MoE parameters. CUDA IPC buckets are reused
+    # immediately after each load call, so pass stable per-bucket tensors.
+    return [(name, tensor.clone()) for name, tensor in weights]
+
+
+def _expand_qwen3_omni_packed_moe_weights(
+    weights: Iterable[tuple[str, torch.Tensor]],
+) -> Iterable[tuple[str, torch.Tensor]]:
+    for name, tensor in weights:
+        match = _QWEN3_OMNI_PACKED_EXPERT_RE.match(name)
+        if match is None or tensor.dim() != 3:
+            yield name, tensor
+            continue
+
+        prefix = match.group("prefix")
+        if match.group("kind") == "gate_up_proj":
+            gate_proj, up_proj = tensor.chunk(2, dim=1)
+            for expert_idx in range(tensor.shape[0]):
+                yield f"{prefix}.{expert_idx}.gate_proj.weight", gate_proj[expert_idx]
+                yield f"{prefix}.{expert_idx}.up_proj.weight", up_proj[expert_idx]
+        else:
+            for expert_idx in range(tensor.shape[0]):
+                yield f"{prefix}.{expert_idx}.down_proj.weight", tensor[expert_idx]
+
+
+def _patch_qwen3_omni_thinker_load_weights(model_cls: type) -> None:
+    if getattr(model_cls, "_verl_packed_moe_load_weights_patched", False):
+        return
+
+    original_load_weights = model_cls.load_weights
+
+    @wraps(original_load_weights)
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+        return original_load_weights(self, _expand_qwen3_omni_packed_moe_weights(weights))
+
+    model_cls.load_weights = load_weights
+    model_cls._verl_packed_moe_load_weights_patched = True
 
 
 def apply_qwen3_omni_thinker_patches() -> None:
     # The training-side standalone thinker state_dict emits bare keys
-    # (``audio_tower.*``, ``model.*``, ``lm_head.*``), while vLLM's
-    # ``Qwen3OmniMoeThinkerForConditionalGeneration.hf_to_vllm_mapper`` only
-    # rewrites ``thinker.*`` prefixes. Extend the class-level mapper so bare
-    # keys are rewritten to the vLLM nested names expected by ``AutoWeightsLoader``.
+    # (``audio_tower.*``, ``model.*``, ``lm_head.*``), while vLLM's mapper
+    # only rewrites ``thinker.*`` prefixes. It also emits packed HF expert
+    # tensors that vLLM's generic Omni loader does not unpack itself. Patch
+    # both surfaces before rollout weight sync calls ``load_weights``.
     global _QWEN3_OMNI_THINKER_MAPPER_PATCHED
-    if _QWEN3_OMNI_THINKER_MAPPER_PATCHED:
-        return
 
     try:
         from vllm.model_executor.models.qwen3_omni_moe_thinker import (
             Qwen3OmniMoeThinkerForConditionalGeneration,
         )
     except ImportError:
+        return
+
+    _patch_qwen3_omni_thinker_load_weights(Qwen3OmniMoeThinkerForConditionalGeneration)
+
+    if _QWEN3_OMNI_THINKER_MAPPER_PATCHED:
         return
 
     mapper = getattr(Qwen3OmniMoeThinkerForConditionalGeneration, "hf_to_vllm_mapper", None)

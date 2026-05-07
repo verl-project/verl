@@ -469,18 +469,11 @@ def apply_monkey_patch(
         if ulysses_sp_size > 1:
             patch_vlm_for_ulysses_input_slicing(Glm4vTextModel)
 
-    elif model.config.model_type == "qwen3_omni_moe_thinker":
-        # Qwen3-Omni Thinker (and Talker) experts carry ``@use_experts_implementation``
-        # in transformers>=5.3 but default to ``_experts_implementation=None``, which
-        # falls back to the sparse ``for expert_idx in expert_hit`` loop. That forward
-        # builds a different autograd graph per FSDP2 rank whenever the set of hit
-        # experts differs, so FSDP2 launches mismatched ReduceScatters and gradient
-        # checkpointing later raises ``CheckpointError: A different number of tensors
-        # was saved during the original forward and recomputation`` (see verl#3258,
-        # pytorch/pytorch#171355). Flip ``_experts_implementation=batched_mm`` so
-        # experts dispatch through the batched MM forward, which touches every
-        # expert's 3D weight slice each step — keeping the autograd graph identical
-        # across ranks. This mirrors how Qwen3.5-MoE and other modern MoEs run.
+    elif model.config.model_type in ["qwen3_omni_moe", "qwen3_omni_moe_thinker"]:
+        # Qwen3-Omni's concrete HF config reports ``model_type=qwen3_omni_moe``
+        # even for the Thinker model. Keep the historical thinker name here for
+        # compatibility with remote-code variants, but match the real config
+        # value as well so the Qwen3-Omni MoE patch is not silently skipped.
         from verl.models.transformers.qwen3_omni_moe import patch_qwen3_omni_moe_sparse_moe_block_forward
 
         patch_qwen3_omni_moe_sparse_moe_block_forward(model=model)

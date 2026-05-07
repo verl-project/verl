@@ -14,27 +14,11 @@
 """Monkey patches for the Qwen3-Omni MoE model family.
 
 Upstream ``Qwen3OmniMoeThinkerTextExperts.forward`` (and the Talker
-variant) iterates only over experts that actually received tokens on the
-current rank (``for expert_idx in expert_hit``). Under FSDP2 this produces
-a *different* autograd graph on each rank whenever the set of activated
-experts differs between ranks. FSDP2 only queues a ReduceScatter for
-parameters that received gradients, so ranks end up launching
-ReduceScatters with incompatible inputs. The gradients get silently
-corrupted and the symptom surfaces later as
-
-    torch.utils.checkpoint.CheckpointError: A different number of tensors
-    was saved during the original forward and recomputation.
-
-See verl-project/verl#3258 and pytorch/pytorch#171355 for the full
-discussion.
-
-The classes already carry ``@use_experts_implementation`` in transformers
->=5.3, which dispatches to ``batched_mm_experts_forward`` /
-``grouped_mm_experts_forward`` when ``config._experts_implementation`` is
-set. Those implementations touch every expert's 3D weight slice every
-step via ``bmm``, so the autograd graph is identical across ranks. We
-just need to force the non-default value on Qwen3-Omni thinker/talker
-configs (they default to ``None``, i.e. fall back to the sparse loop).
+variant) can dispatch through different expert implementations depending on
+``config._experts_implementation``. The training monkey patch routes the real
+Qwen3-Omni model type here so configs that still have that value unset can opt
+into the configured implementation, while user- or transformers-provided
+values are left untouched.
 """
 
 from __future__ import annotations
@@ -210,14 +194,16 @@ def get_rope_index(
     return _assert_shape(position_ids), mrope_position_deltas
 
 
-def _force_experts_implementation(config, implementation: str) -> None:
+def _force_experts_implementation(config, implementation: str) -> str:
     """Set ``config._experts_implementation`` if it is not already configured.
 
     ``PreTrainedConfig._experts_implementation`` has a setter that walks
     ``sub_configs`` for us, so assigning on the outer composite config is
     enough — both ``thinker_config`` and ``talker_config`` pick up the value.
-    If the user has already set it explicitly (via ``override_config`` or a
-    ``config.json`` field), we leave it alone.
+    If the user or transformers has already set it explicitly, we leave it
+    alone. In particular, forcing HF ``batched_mm`` on Qwen3-Omni long
+    sequences can materialize huge selected-weight tensors during actor
+    logprob forward.
     """
     current = getattr(config, "_experts_implementation", None)
     if current is not None:
@@ -226,22 +212,23 @@ def _force_experts_implementation(config, implementation: str) -> None:
             type(config).__name__,
             current,
         )
-        return
+        return current
     config._experts_implementation = implementation
+
+    return getattr(config, "_experts_implementation", implementation)
 
 
 def patch_qwen3_omni_moe_sparse_moe_block_forward(
     model: Optional[torch.nn.Module] = None,
     implementation: str = _DEFAULT_EXPERTS_IMPLEMENTATION,
 ) -> None:
-    """Dispatch Qwen3-Omni experts through the batched/grouped MM forward.
+    """Configure Qwen3-Omni expert dispatch when it is still unset.
 
     Both ``Qwen3OmniMoeThinkerTextExperts`` and ``Qwen3OmniMoeTalkerTextExperts``
     already carry ``@use_experts_implementation`` in transformers >=5.3, so the
     only thing we need is to flip ``config._experts_implementation`` away from
-    its ``None`` default. When ``model`` is provided we also set the flag on
-    the already-instantiated config so the dispatch takes effect without
-    re-loading the model.
+    its ``None`` default. Already-instantiated models can carry a concrete
+    value such as ``eager``; this helper does not override those values.
     """
     if model is None:
         logger.debug(
@@ -255,10 +242,8 @@ def patch_qwen3_omni_moe_sparse_moe_block_forward(
         logger.warning("Qwen3-Omni experts dispatch: model has no .config attribute; skipping.")
         return
 
-    _force_experts_implementation(config, implementation)
+    applied_implementation = _force_experts_implementation(config, implementation)
     logger.info(
-        "Set Qwen3-Omni config._experts_implementation=%s so MoE experts run "
-        "through the batched MM forward (every expert's 3D weight slice is "
-        "touched on every step, keeping FSDP2 gradient sets aligned).",
-        implementation,
+        "Qwen3-Omni config._experts_implementation=%s after sparse MoE patch.",
+        applied_implementation,
     )
