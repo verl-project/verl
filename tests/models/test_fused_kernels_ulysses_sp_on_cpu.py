@@ -11,58 +11,64 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Regression test for issue #6068.
+"""Regression test for issue #6068 (use_fused_kernels=True + ulysses_sp>1).
 
-When `use_fused_kernels=True` is combined with `ulysses_sequence_parallel_size > 1`,
-the fused-forward functions in `verl/models/transformers/*.py` were computing
+Under Ulysses sequence parallelism, the fused-kernel forward functions in
+`verl/models/transformers/*.py` were computing
 `rolled_labels = torch.roll(input_ids, shifts=-1, dims=-1)` *after* Ulysses had
-already SP-sliced the input. `torch.roll` wraps around the local-shard boundary
-rather than the global sequence, so the last position on every SP rank ended up
-predicting the wrong label (the first token of the rank's local shard instead of
-the global next-token). This biased ~1 position per rank per micro-batch and
-manifested as a slow training-quality regression at SP > 1 (issue #6068).
-
-The non-fused path was always correct because the FSDP engine pre-computes a
-globally-rolled `input_ids_rmpad_rolled`, then SP-slices *that* (see
-`verl/workers/engine/fsdp/transformer_impl.py:951-984`), and feeds it to
-`logprobs_from_logits` directly.
+already SP-sliced the input. `torch.roll` wraps around the local-shard
+boundary rather than the global sequence, so the last position on every SP
+rank ended up predicting the wrong label. This biased ~1 position per rank
+per micro-batch and manifested as a slow training-quality regression at
+SP > 1 (issue #6068).
 
 The fix plumbs the engine's pre-rolled `input_ids_rmpad_rolled` into the fused
-forward functions via a new `shift_labels` kwarg, mirroring what the veomni
-engine already does (see `verl/workers/engine/veomni/transformer_impl.py:659`).
+forwards via a new `shift_labels` kwarg, mirroring what the veomni engine
+already does at `verl/workers/engine/veomni/transformer_impl.py:659`.
 
-These tests run on CPU and do not require any GPUs.
+These tests:
+  1. Demonstrate the root cause directly (no model needed) — slice-then-roll
+     diverges from roll-then-slice at every shard boundary.
+  2. Verify each adapter's fused-forward (torch + triton backends) honors
+     the new `shift_labels` kwarg — i.e., the *routing* fix.
+
+The fused kernels themselves are Triton + CUDA only, so we patch them out
+for the CPU tests; their numerical correctness is covered by
+`tests/utils/test_linear_cross_entropy.py`. The end-to-end SP=2 integration
+test in `tests/special_distributed/test_fused_kernels_ulysses_sp.py`
+exercises the full path on 2 GPUs.
 """
 
+import contextlib
+from unittest import mock
+
+import pytest
 import torch
 
-from verl.models.transformers import dense_common, qwen2_vl, qwen3_5, qwen3_vl
+from verl.models.transformers import dense_common, glm4v, qwen2_vl, qwen3_5, qwen3_vl
+
+
+# ---------------------------------------------------------------------------
+# 1. Root-cause demonstration: slice-then-local-roll != global-roll-then-slice.
+# ---------------------------------------------------------------------------
 
 
 def _global_then_slice(input_ids: torch.Tensor, sp_size: int) -> list[torch.Tensor]:
-    """The correct behavior: roll on the full sequence, then SP-slice.
-
-    Mirrors the engine's `input_ids_rmpad_rolled` -> `ulysses_pad_and_slice_inputs`
-    pipeline in `verl/workers/engine/fsdp/transformer_impl.py`.
+    """Correct behavior: roll on the full sequence, then SP-slice. Mirrors the
+    engine's `input_ids_rmpad_rolled` -> `ulysses_pad_and_slice_inputs` path.
     """
     rolled = torch.roll(input_ids, shifts=-1, dims=-1)
     return list(torch.chunk(rolled, sp_size, dim=-1))
 
 
 def _slice_then_local_roll(input_ids: torch.Tensor, sp_size: int) -> list[torch.Tensor]:
-    """The buggy behavior: SP-slice first, then roll on the local shard.
-
-    Reproduces what `torch.roll(input_ids, shifts=-1, dims=-1)` did inside the
-    fused-forward functions when SP > 1.
-    """
+    """Buggy behavior: SP-slice first, then roll on the local shard."""
     sliced = list(torch.chunk(input_ids, sp_size, dim=-1))
     return [torch.roll(s, shifts=-1, dims=-1) for s in sliced]
 
 
 def test_local_roll_diverges_from_global_roll_under_sp():
-    """Demonstrates the root cause of #6068.
-
-    For SP > 1, slice-then-local-roll produces different labels than
+    """For SP > 1, slice-then-local-roll produces different labels than
     global-roll-then-slice at exactly the shard-boundary position on every rank.
     """
     torch.manual_seed(0)
@@ -72,136 +78,204 @@ def test_local_roll_diverges_from_global_roll_under_sp():
     correct_shards = _global_then_slice(input_ids, sp_size)
     buggy_shards = _slice_then_local_roll(input_ids, sp_size)
 
-    # Assertion 1: every interior position matches.
+    # Interior positions match — the bug is only at the shard boundary.
     for correct, buggy in zip(correct_shards, buggy_shards, strict=True):
         torch.testing.assert_close(correct[..., :-1], buggy[..., :-1])
 
-    # Assertion 2: the last position of every shard is wrong under buggy.
-    # On every rank the buggy version wraps to its local shard's first token;
-    # the correct version uses the next shard's first token (or the global
-    # first token on the final rank).
+    # Last position of every shard differs — that's the bias term that
+    # accumulates across training steps.
     for rank in range(sp_size):
         correct_last = correct_shards[rank][..., -1]
         buggy_last = buggy_shards[rank][..., -1]
         assert not torch.equal(correct_last, buggy_last), (
-            f"rank {rank}: expected divergence at shard boundary but got {correct_last}=={buggy_last}"
+            f"rank {rank}: expected divergence at shard boundary but got "
+            f"{correct_last}=={buggy_last}"
         )
 
 
-def _make_fake_lm(hidden_size: int, vocab_size: int):
-    """Minimal stand-in for the language-model wrapper expected by the fused forwards.
+# ---------------------------------------------------------------------------
+# 2. Adapter routing tests: each fused-forward (torch + triton) must use
+#    `shift_labels` verbatim when the engine passes it, and must fall back to
+#    local roll when it's absent (preserves SP=1 behavior).
+# ---------------------------------------------------------------------------
 
-    The fused forward functions only touch `self.model(...)` (returns hidden states)
-    and `self.lm_head.weight`, so we don't need a real transformer here.
+
+HIDDEN_SIZE = 8
+VOCAB_SIZE = 64
+
+
+class _FakeConfig:
+    """Minimal stand-in for `model.config` used by `forward_base_model`."""
+
+    output_attentions = False
+    output_hidden_states = False
+
+
+class _FakeBaseOutput:
+    """Mimics the HF model output: tuple-indexable and attribute-accessible."""
+
+    def __init__(self, hidden: torch.Tensor):
+        self._hidden = hidden
+        self.hidden_states = None
+        self.past_key_values = None
+        self.attentions = None
+
+    def __getitem__(self, idx):
+        if idx == 0:
+            return self._hidden
+        raise IndexError(idx)
+
+
+def _make_fake_lm() -> torch.nn.Module:
+    """Minimal stand-in for the language-model wrapper used by every adapter.
+
+    Provides `self.config`, `self.model(...)`, and `self.lm_head`. The fake
+    base model accepts the full kwarg set that `forward_base_model` passes.
     """
 
     class FakeBaseModel(torch.nn.Module):
-        def __init__(self, hidden):
+        def __init__(self):
             super().__init__()
-            self.embed = torch.nn.Embedding(vocab_size, hidden)
+            self.embed = torch.nn.Embedding(VOCAB_SIZE, HIDDEN_SIZE)
 
-        def forward(self, input_ids, **kwargs):
-            # Return a tuple so `outputs[0]` works (mirrors HF convention).
-            hidden_states = self.embed(input_ids).to(torch.float32)
-            return (hidden_states,)
+        def forward(self, input_ids=None, **_kwargs):
+            hidden = self.embed(input_ids).to(torch.float32)
+            return _FakeBaseOutput(hidden)
 
     class FakeLM(torch.nn.Module):
         def __init__(self):
             super().__init__()
-            self.model = FakeBaseModel(hidden_size)
-            self.lm_head = torch.nn.Linear(hidden_size, vocab_size, bias=False)
+            self.config = _FakeConfig()
+            self.model = FakeBaseModel()
+            self.lm_head = torch.nn.Linear(HIDDEN_SIZE, VOCAB_SIZE, bias=False)
 
     torch.manual_seed(42)
     return FakeLM()
 
 
-def _run_fused_forward(forward_fn, model, input_ids, shift_labels):
-    """Invoke a fused forward, passing both `input_ids` and the new `shift_labels`."""
-    return forward_fn(
-        model,
-        input_ids=input_ids,
-        labels=None,
-        temperature=1.0,
-        shift_labels=shift_labels,
-        return_dict=True,
-    )
-
-
-def _assert_fused_forward_uses_shift_labels(forward_fn):
-    """Contract: when `shift_labels` is provided, the fused forward must use it
-    verbatim (i.e. not re-roll). We verify by feeding `shift_labels` that point
-    to a deliberately wrong vocab id and checking the resulting log-prob
-    matches what the kernel would produce for that wrong id, not for the
-    locally-rolled id.
+@contextlib.contextmanager
+def _patch_fused_kernels():
+    """Patch the fused kernels (Triton, CUDA-only) and the VLM body wrappers
+    so the CPU test exercises only the routing layer. Yields a dict that
+    captures the `input_ids` arg the kernel would have received.
     """
-    hidden_size, vocab_size = 8, 64
-    seq_len = 4
-    model = _make_fake_lm(hidden_size, vocab_size)
+    captured: dict[str, torch.Tensor] = {}
 
-    # Pick input_ids and a `shift_labels` that disagrees with torch.roll(input_ids).
-    # If the fix is in place, log_probs target `shift_labels`. If not, they target
-    # torch.roll(input_ids), which differs on the last position.
-    input_ids = torch.tensor([[10, 20, 30, 40]], dtype=torch.long)
-    shift_labels = torch.tensor([[20, 30, 40, 50]], dtype=torch.long)  # != torch.roll(input_ids)
+    def _fake_log_probs_and_entropy(input_ids: torch.Tensor):
+        if input_ids.dim() == 1:
+            shape = input_ids.shape
+        else:
+            shape = input_ids.shape  # already (B, T)
+        log_probs = torch.zeros(shape, dtype=torch.float32)
+        entropy = torch.zeros(shape, dtype=torch.float32)
+        return log_probs, entropy
 
-    out_with_shift = _run_fused_forward(forward_fn, model, input_ids, shift_labels)
+    def fake_fused_linear_forward(self, hidden_states, vocab_weights, input_ids, temperature=1.0):
+        captured["input_ids"] = input_ids.detach().clone()
+        return _fake_log_probs_and_entropy(input_ids)
 
-    # Recompute log_probs "by hand" using the same fused kernel against the
-    # explicit labels to nail down the expected value.
-    from verl.utils.experimental.torch_functional import FusedLinearForPPO
+    def fake_linear_ce(hidden_states, vocab_weights, input_ids, temperature, reduction):
+        captured["input_ids"] = input_ids.detach().clone()
+        return _fake_log_probs_and_entropy(input_ids)
 
-    with torch.no_grad():
-        hidden = model.model(input_ids)[0]
-        ref_log_probs, _ = FusedLinearForPPO().forward(
-            hidden_states=hidden,
-            vocab_weights=model.lm_head.weight,
-            input_ids=shift_labels,
-            temperature=1.0,
+    def fake_qwen2_vl_forward(self, input_ids, **_kwargs):
+        # Bypass `process_position_ids` and the real VLM body; we only care
+        # about the routing layer that runs *after* the model forward.
+        return _FakeBaseOutput(
+            torch.zeros(1, input_ids.shape[-1], self.lm_head.weight.shape[1])
         )
 
-    torch.testing.assert_close(out_with_shift.log_probs, ref_log_probs, atol=1e-5, rtol=1e-5)
+    def fake_glm4v_forward(self, input_ids, **_kwargs):
+        return _FakeBaseOutput(
+            torch.zeros(1, input_ids.shape[-1], self.lm_head.weight.shape[1])
+        )
+
+    with (
+        mock.patch(
+            "verl.utils.experimental.torch_functional.FusedLinearForPPO.forward",
+            new=fake_fused_linear_forward,
+        ),
+        mock.patch(
+            "verl.utils.kernel.linear_cross_entropy.linear_cross_entropy",
+            new=fake_linear_ce,
+        ),
+        mock.patch(
+            "verl.models.transformers.qwen2_vl.qwen2_vl_forward",
+            new=fake_qwen2_vl_forward,
+        ),
+        mock.patch(
+            "verl.models.transformers.glm4v.glm4v_forward",
+            new=fake_glm4v_forward,
+        ),
+    ):
+        yield captured
 
 
-def test_dense_common_torch_backend_honors_shift_labels():
-    _assert_fused_forward_uses_shift_labels(dense_common.forward_with_torch_backend)
+ALL_ADAPTERS = [
+    dense_common.forward_with_torch_backend,
+    dense_common.forward_with_triton_backend,
+    qwen3_5.forward_with_torch_backend,
+    qwen3_5.forward_with_triton_backend,
+    qwen3_vl.forward_with_torch_backend,
+    qwen3_vl.forward_with_triton_backend,
+    qwen2_vl.forward_with_torch_backend,
+    qwen2_vl.forward_with_triton_backend,
+    glm4v.forward_with_torch_backend,
+    glm4v.forward_with_triton_backend,
+]
 
 
-def test_qwen3_5_torch_backend_honors_shift_labels():
-    _assert_fused_forward_uses_shift_labels(qwen3_5.forward_with_torch_backend)
+def _adapter_id(forward_fn) -> str:
+    return f"{forward_fn.__module__.rsplit('.', 1)[-1]}.{forward_fn.__name__}"
 
 
-def test_qwen2_vl_torch_backend_honors_shift_labels():
-    _assert_fused_forward_uses_shift_labels(qwen2_vl.forward_with_torch_backend)
-
-
-def test_qwen3_vl_torch_backend_honors_shift_labels():
-    _assert_fused_forward_uses_shift_labels(qwen3_vl.forward_with_torch_backend)
-
-
-def test_dense_common_falls_back_to_local_roll_when_shift_labels_absent():
-    """Backward-compat: callers that don't pass `shift_labels` see unchanged behavior
-    (local roll over the input). This preserves the SP=1 path and any non-engine callers.
+@pytest.mark.parametrize("forward_fn", ALL_ADAPTERS, ids=_adapter_id)
+def test_adapter_honors_shift_labels(forward_fn):
+    """When `shift_labels` is provided, every fused adapter must pass it
+    through to the kernel verbatim — no local re-rolling.
     """
-    hidden_size, vocab_size = 8, 64
-    model = _make_fake_lm(hidden_size, vocab_size)
+    model = _make_fake_lm()
     input_ids = torch.tensor([[10, 20, 30, 40]], dtype=torch.long)
+    # Deliberately != torch.roll(input_ids); the only way these labels reach
+    # the kernel is if the adapter honors `shift_labels`.
+    shift_labels = torch.tensor([[20, 30, 40, 50]], dtype=torch.long)
 
-    out_no_shift = dense_common.forward_with_torch_backend(
-        model,
-        input_ids=input_ids,
-        labels=None,
-        temperature=1.0,
-        return_dict=True,
+    with _patch_fused_kernels() as captured:
+        forward_fn(
+            model,
+            input_ids=input_ids,
+            labels=None,
+            temperature=1.0,
+            shift_labels=shift_labels,
+            return_dict=True,
+        )
+
+    assert "input_ids" in captured, "fused kernel was never called"
+    assert torch.equal(captured["input_ids"], shift_labels), (
+        f"{_adapter_id(forward_fn)}: expected kernel to see {shift_labels.tolist()}, "
+        f"got {captured['input_ids'].tolist()}"
     )
 
-    # Equivalent: explicit shift_labels = torch.roll(input_ids, -1).
-    out_explicit = dense_common.forward_with_torch_backend(
-        model,
-        input_ids=input_ids,
-        labels=None,
-        temperature=1.0,
-        shift_labels=torch.roll(input_ids, shifts=-1, dims=-1),
-        return_dict=True,
-    )
 
-    torch.testing.assert_close(out_no_shift.log_probs, out_explicit.log_probs, atol=1e-5, rtol=1e-5)
+@pytest.mark.parametrize("forward_fn", ALL_ADAPTERS, ids=_adapter_id)
+def test_adapter_falls_back_to_local_roll_when_shift_labels_absent(forward_fn):
+    """Backward-compat: callers that don't pass `shift_labels` (e.g. the SP=1
+    code path or any non-engine consumer) see unchanged behavior.
+    """
+    model = _make_fake_lm()
+    input_ids = torch.tensor([[10, 20, 30, 40]], dtype=torch.long)
+    expected = torch.roll(input_ids, shifts=-1, dims=-1)
+
+    with _patch_fused_kernels() as captured:
+        forward_fn(
+            model,
+            input_ids=input_ids,
+            labels=None,
+            temperature=1.0,
+            return_dict=True,
+        )
+
+    assert torch.equal(captured["input_ids"], expected), (
+        f"{_adapter_id(forward_fn)}: expected fallback to torch.roll(input_ids), "
+        f"got {captured['input_ids'].tolist()}"
+    )
