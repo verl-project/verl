@@ -798,7 +798,11 @@ def extract_multi_modal_inputs(
             # so we need to pad them manually.
             multi_modal_inputs[key] = _pad_last_dim_and_cat(values, key)
         else:
-            multi_modal_inputs[key] = torch.cat(values, dim=0)
+            try:
+                multi_modal_inputs[key] = torch.cat(values, dim=0)
+            except RuntimeError as e:
+                shapes = ", ".join(str(tuple(value.shape)) for value in values)
+                raise RuntimeError(f"Failed to concatenate multi-modal input {key!r}; shapes: {shapes}") from e
 
     return multi_modal_inputs
 

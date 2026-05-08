@@ -68,7 +68,6 @@ class AsyncRolloutRequestStateEnum(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     TOOL_CALLING = "tool_calling"
-    INTERACTING = "interacting"
 
 
 class TokenizationSanityCheckModeEnum(str, Enum):
@@ -95,7 +94,6 @@ class AsyncRolloutRequest(BaseModel):
     mm_processor_kwargs: Optional[dict[str, Any]] = None
     tool_schemas: Optional[list[OpenAIFunctionToolSchema]] = None
     tools_kwargs: dict[str, Any] = {}
-    interaction_kwargs: dict[str, Any] = {}
     input_ids: Optional[torch.Tensor] = None
     prompt_ids: Optional[torch.Tensor] = None
     response_ids: Optional[torch.Tensor] = None

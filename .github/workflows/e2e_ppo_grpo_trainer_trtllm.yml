@@ -75,9 +75,9 @@ on:
       - "examples/data_preprocess/geo3k.py"
       - "examples/data_preprocess/dapo_multiturn_w_tool.py"
       - "examples/data_preprocess/aime2024_multiturn_w_tool.py"
-      - "examples/grpo_trainer/run_qwen2-7b_math_trtllm.sh"
-      - "examples/grpo_trainer/run_qwen2-7b_math_megatron_trtllm.sh"
-      - "examples/grpo_trainer/run_qwen3-30b_dapo_megatron_fp8_trtllm.sh"
+      - "examples/grpo_trainer/run_qwen3_8b_fsdp.sh"
+      - "examples/grpo_trainer/run_qwen3_8b_megatron.sh"
+      - "examples/grpo_trainer/run_qwen3_30b_a3b_megatron.sh"
       # add back when ppo flow is ready
       # - "tests/special_e2e/run_ppo_trainer_megatron.sh"
       # - "verl/trainer/main_ppo.py"
@@ -93,7 +93,7 @@ permissions:
   contents: read
 
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:trtllm1.3.0rc10"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:trtllm1.3.0rc13-20250504"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
 
 jobs:
@@ -144,6 +144,7 @@ jobs:
           pytest -v -s --durations=20 \
             tests/workers/rollout/rollout_trtllm/test_adapter.py \
             tests/workers/rollout/rollout_trtllm/test_async_server.py \
+            tests/workers/rollout/rollout_trtllm/test_inter_node_rollout.py \
             tests/workers/rollout/rollout_trtllm/test_trtllm_rollout_utils.py
 
   e2e_grpo_trainer_fsdp-qwen2:
@@ -176,8 +177,10 @@ jobs:
           unset TORCH_CUDA_ARCH_LIST  # Let TRT-LLM CUTLASS DSL auto-detect runtime GPU arch
           export TRTLLM_ENABLE_PDL=0  # Disable Programmatic Dependent Launch (uses SM 9.0 griddepcontrol)
           ray stop --force
-          DATADIR=${HOME}/data \
-            bash examples/grpo_trainer/run_qwen2-7b_math_trtllm.sh 2 \
+          ROLLOUT_TP=2 \
+          INFER_BACKEND=trtllm \
+          MODEL_PATH="${HOME}/models/Qwen/Qwen2.5-0.5B-Instruct" \
+            bash examples/grpo_trainer/run_qwen3_8b_fsdp.sh \
             trainer.total_training_steps=1 \
             data.train_batch_size=32 \
             data.max_prompt_length=128 \
@@ -192,8 +195,7 @@ jobs:
             actor_rollout_ref.rollout.max_model_len=256 \
             data.train_files="['${PWD}/data/gsm8k/train.parquet']" \
             data.val_files="['${PWD}/data/gsm8k/test.parquet']" \
-            trainer.logger='["console"]' \
-            actor_rollout_ref.model.path="${HOME}/models/Qwen/Qwen2.5-0.5B-Instruct"
+            trainer.logger='["console"]'
       - name: clean up
         run: |
           rm -rf checkpoints
@@ -220,6 +222,8 @@ jobs:
         run: |
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
+          # WAR: CI image predates mbridge cf71117 (removes `imp` for Python 3.12). Drop this line after CI image is refreshed.
+          pip3 install --force-reinstall --no-deps --no-build-isolation git+https://github.com/ISEEKYAN/mbridge.git
       - name: Prepare GSM8K dataset
         run: |
           python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k --local_save_dir ${PWD}/data/gsm8k
@@ -228,9 +232,12 @@ jobs:
           unset TORCH_CUDA_ARCH_LIST  # Let TRT-LLM CUTLASS DSL auto-detect runtime GPU arch
           export TRTLLM_ENABLE_PDL=0  # Disable Programmatic Dependent Launch (uses SM 9.0 griddepcontrol)
           ray stop --force
-          DATADIR=${HOME}/data \
           ACTOR_TP=2 \
-            bash examples/grpo_trainer/run_qwen2-7b_math_megatron_trtllm.sh 2 \
+          ACTOR_PP=1 \
+          ROLLOUT_TP=2 \
+          INFER_BACKEND=trtllm \
+          MODEL_PATH="${HOME}/models/Qwen/Qwen2.5-0.5B-Instruct" \
+            bash examples/grpo_trainer/run_qwen3_8b_megatron.sh \
             trainer.total_training_steps=1 \
             data.train_batch_size=32 \
             data.max_prompt_length=128 \
@@ -242,8 +249,7 @@ jobs:
             actor_rollout_ref.rollout.max_model_len=256 \
             data.train_files="['${PWD}/data/gsm8k/train.parquet']" \
             data.val_files="['${PWD}/data/gsm8k/test.parquet']" \
-            trainer.logger='["console"]' \
-            actor_rollout_ref.model.path="${HOME}/models/Qwen/Qwen2.5-0.5B-Instruct"
+            trainer.logger='["console"]'
       - name: clean up
         run: |
           rm -rf checkpoints
@@ -269,22 +275,33 @@ jobs:
         run: |
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
-          pip3 install qwen_vl_utils 
+          pip3 install qwen_vl_utils
           pip3 install mathruler
+          # WAR: CI image predates mbridge cf71117 (removes `imp` for Python 3.12). Drop this line after CI image is refreshed.
+          pip3 install --force-reinstall --no-deps --no-build-isolation git+https://github.com/ISEEKYAN/mbridge.git
       - name: Prepare GEO3K dataset
         run: |
           python3 examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/models/hf_data/hiyouga/geometry3k --local_save_dir ${PWD}/data/geo3k
-      # FIXME: timeout in 30 minutes
-      # - name: Running GEO3K E2E training tests with FSDP on 8 L20 GPUs (VLM)
-      #   run: |
-      #     ray stop --force
-      #     DATADIR=${HOME}/data \
-      #       bash examples/grpo_trainer/run_qwen2_5_vl_3b_trtllm.sh 2 \
-      #       trainer.total_training_steps=1 \
-      #       data.train_files="['${PWD}/data/geo3k/train.parquet']" \
-      #       data.val_files="['${PWD}/data/geo3k/test.parquet']" \
-      #       trainer.logger='["console"]' \
-      #       actor_rollout_ref.model.path="${HOME}/models/Qwen/Qwen3-VL-2B-Instruct"
+      - name: Running GEO3K E2E training tests with FSDP on 8 L20 GPUs (VLM)
+        run: |
+          ray stop --force
+          ROLLOUT_TP=2 \
+          INFER_BACKEND=trtllm \
+          MODEL_PATH="${HOME}/models/Qwen/Qwen3-VL-2B-Instruct" \
+            bash examples/grpo_trainer/run_qwen2_5_vl_7b_fsdp.sh \
+            trainer.total_training_steps=1 \
+            data.train_batch_size=8 \
+            data.max_response_length=64 \
+            actor_rollout_ref.actor.ppo_mini_batch_size=8 \
+            actor_rollout_ref.actor.ppo_max_token_len_per_gpu=2048 \
+            actor_rollout_ref.rollout.n=2 \
+            actor_rollout_ref.rollout.gpu_memory_utilization=0.35 \
+            actor_rollout_ref.rollout.max_model_len=2048 \
+            actor_rollout_ref.rollout.max_num_seqs=16 \
+            actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=2048 \
+            data.train_files="['${PWD}/data/geo3k/train.parquet']" \
+            data.val_files="['${PWD}/data/geo3k/test.parquet']" \
+            trainer.logger='["console"]'
       - name: clean up
         run: |
           rm -rf checkpoints
@@ -300,7 +317,7 @@ jobs:
           export INFER_TP=2 ACTOR_TP=2 ACTOR_PP=2 ACTOR_VPP=2 ACTOR_EP=1 ACTOR_CP=2 REF_TP=2 REF_PP=2 REF_VPP=2 REF_EP=1 REF_CP=2 GEN_MOE_TP=null GEN_MOE_EP=null
           export NNODES=1 GPUS_PER_NODE=8 TRTLLM_MOE_BACKEND=TRITON
           export DATA_DIR=${PWD} DAPO_MATH_TRAIN=${PWD}/data/dapo-math-17k/train.parquet AIME_VAL=${PWD}/data/aime-2024/train.parquet MODEL_PATH=${HOME}/models/Qwen/Qwen3-0.6B
-          bash examples/grpo_trainer/run_qwen3-30b_dapo_megatron_fp8_trtllm.sh \
+          INFER_BACKEND=trtllm ROLLOUT_QUANTIZATION=fp8 bash examples/grpo_trainer/run_qwen3_30b_a3b_megatron.sh \
             reward_model.reward_kwargs.overlong_buffer_cfg.len=258 \
             reward_model.reward_kwargs.max_resp_len=512 \
             data.max_prompt_length=128 \

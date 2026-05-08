@@ -64,7 +64,7 @@ Features we invite the community to contribute:
 - support llama4
 - support qwen2.5-vl
 
-To track the progress of verl mcore integration, please refer to the [mcore integration issue](https://github.com/volcengine/verl/issues/1033).
+To track the progress of verl mcore integration, please refer to the [mcore integration issue](https://github.com/verl-project/verl/issues/1033).
 
 ## How things work now
 To engage the community in contributing, here are the key steps in our mcore integration process and features under development. 

@@ -147,7 +147,6 @@ class TrainingWorker(Worker, DistProfilerExtension):
         if hasattr(self.model_config, "hf_config"):
             self.flops_counter = FlopsCounter(self.model_config.hf_config)
         else:
-            # for Diffusion models, FlopsCounter is not supported yet.
             self.flops_counter = None
 
         self.loss_fn = None
@@ -200,6 +199,8 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
         # For grad_norm, we do not perform all reduce because it is already been done when clipping grad
         grad_norm = metrics.pop("grad_norm", None)
+        if isinstance(grad_norm, torch.Tensor):
+            grad_norm = grad_norm.detach().item()
         lr = metrics.pop("lr", None)
 
         # For other metrics, we perform all gather in dp group (only if DP > 1)
@@ -513,7 +514,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
             # construct TrainingWorkerConfig
             ref_training_config = TrainingWorkerConfig(
-                model_type="language_model",
+                model_type=ref_config.model_config.get("model_type", "language_model"),
                 model_config=ref_config.model_config,
                 engine_config=ref_config.engine,
                 optimizer_config=ref_config.optim,
@@ -526,7 +527,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             ref_training_config.engine_config.infer_micro_batch_size_per_gpu = (
                 self.config.ref.ppo_micro_batch_size_per_gpu
             )
-            ref_training_config.engine_config.use_remove_padding = model_config.use_remove_padding
+            ref_training_config.engine_config.use_remove_padding = model_config.get("use_remove_padding", False)
 
             self.ref = TrainingWorker(config=ref_training_config)
             self.ref.reset()
@@ -541,7 +542,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             )
 
             actor_training_config = TrainingWorkerConfig(
-                model_type="language_model",
+                model_type=actor_config.model_config.get("model_type", "language_model"),
                 model_config=actor_config.model_config,
                 engine_config=actor_config.engine,
                 optimizer_config=actor_config.optim,
@@ -562,7 +563,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             actor_training_config.engine_config.micro_batch_size_per_gpu = (
                 self.config.actor.ppo_micro_batch_size_per_gpu
             )
-            actor_training_config.engine_config.use_remove_padding = model_config.use_remove_padding
+            actor_training_config.engine_config.use_remove_padding = model_config.get("use_remove_padding", False)
 
             if self.config.actor.use_dynamic_bsz:
                 assert self.config.rollout.log_prob_max_token_len_per_gpu is not None

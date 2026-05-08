@@ -23,6 +23,7 @@ import numpy as np
 import ray
 import torch
 
+from verl.experimental.agent_loop.agent_loop import AgentLoopManager
 from verl.experimental.fully_async_policy.detach_utils import (
     RolloutSample,
     ValidateMetrics,
@@ -31,12 +32,37 @@ from verl.experimental.fully_async_policy.detach_utils import (
 )
 from verl.experimental.fully_async_policy.message_queue import MessageQueueClient
 from verl.experimental.separation.ray_trainer import SeparateRayPPOTrainer
+from verl.protocol import DataProto
 from verl.single_controller.ray import RayWorkerGroup
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager
-from verl.trainer.ppo.utils import Role, WorkerType
+from verl.trainer.ppo.utils import Role, WorkerType, need_reward_model
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.profiler import marked_timer
 from verl.utils.tracking import ValidationGenerationsLogger
+from verl.workers.rollout.llm_server import LLMServerManager
+
+
+class FullyAsyncAgentLoopManager(AgentLoopManager):
+    async def generate_sequences_single(self, prompts: DataProto) -> DataProto:
+        """Split input batch and dispatch to agent loop workers.
+
+        Args:
+            prompts (DataProto): Input batch. Single sample data
+        Returns:
+            DataProto: Output batch.
+        """
+        worker = self._select_best_worker()
+        output_future = worker.generate_sequences.remote(prompts)
+        return await asyncio.wrap_future(output_future.future())
+
+    def _select_best_worker(self):
+        """Select the best worker, simple round-robin load balancing"""
+        if not hasattr(self, "_worker_index"):
+            self._worker_index = 0
+
+        worker = self.agent_loop_workers[self._worker_index]
+        self._worker_index = (self._worker_index + 1) % len(self.agent_loop_workers)
+        return worker
 
 
 @ray.remote(num_cpus=10, max_concurrency=100)
@@ -75,7 +101,12 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         self.resource_pool_manager = resource_pool_manager
         self.use_reference_policy = False
 
-        self.use_rm = False
+        self.use_rm = need_reward_model(self.config)
+        if self.use_rm:
+            assert self.config.reward.reward_model.enable_resource_pool, (
+                "GenRM/DisRM in fully async mode requires standalone mode (enable_resource_pool=True). "
+                "Colocate mode is not supported because async rollout never pauses."
+            )
 
         self.use_critic = False
         self.ray_worker_group_cls = ray_worker_group_cls
@@ -89,7 +120,6 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         self.kl_ctrl_in_reward = False
 
         self.use_prefix_grouper = self.config.actor_rollout_ref.actor.get("use_prefix_grouper", False)
-        self.use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
 
         # ==================== fully async config ====================
 
@@ -182,13 +212,11 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
 
     def _init_async_objects(self):
         # Initialize asyncio synchronization primitives.
-        # We let asyncio.Condition create the Lock internally to ensure they share the same Event Loop.
-        # This avoids 'ValueError: loop argument must agree with lock' which can occur in Ray environments
-        # where the lock's captured loop (get_running_loop) differs from Condition's default loop check.
-        # Explicitly passing the loop is deprecated/removed in Python 3.10+, so this reverse-initialization
-        # is the most robust workaround.
-        self.condition = asyncio.Condition()
-        self.lock = self.condition._lock
+        # `lock` protects shared state: paused / active_tasks / staleness_samples / timing fields.
+        self.lock = asyncio.Lock()
+        # `_resume_event` signals that the rollouter is currently running (paused == False).
+        self._resume_event = asyncio.Event()
+        self._resume_event.set()
 
     async def set_message_queue_client(self, message_queue_client: MessageQueueClient):
         """Set message queue client"""
@@ -207,7 +235,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
                 / (self.required_samples * self.config.async_training.trigger_parameter_sync_step)
             )
 
-            self.max_concurrent_samples = len(self.async_rollout_manager.server_handles) * 16
+            self.max_concurrent_samples = len(self.llm_server_manager.get_replicas()) * 16
             self.max_concurrent_samples = min(self.max_concurrent_samples, self.max_required_samples)
             self.max_queue_size = self.max_required_samples
 
@@ -220,13 +248,9 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
                 f"max_concurrent_samples: {self.max_concurrent_samples} "
             )
 
-    def get_rollout_wg(self):
-        """Get rollout worker group"""
-        return self.rollout_wg
-
     def get_replicas(self):
         """Get rollout worker group"""
-        return self.async_rollout_manager.rollout_replicas
+        return self.llm_server_manager.get_replicas()
 
     def get_max_queue_size(self):
         return self.max_queue_size
@@ -241,13 +265,19 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         """
         async with self.lock:
             self.paused = False
-            self.condition.notify_all()
+            # Wake the drain loop in _processor_worker so it can exit early and resume submitting
+            # new samples to idle replicas instead of waiting for long-tail in-flight tasks.
+            self._resume_event.set()
             # every time param change, reset staleness_samples
             self.staleness_samples = len(self.active_tasks) + await self.message_queue_client.get_queue_size()
             timing_raw = {}
-            rollout_active_time = self.idle_start_time - self.step_start_time
-            rollout_version_time = time.time() - self.step_start_time
-            idle_ratio = 1 - rollout_active_time / rollout_version_time
+            rollout_version_time = max(time.time() - self.step_start_time, 1e-6)
+            if self.idle_start_time > self.step_start_time:
+                rollout_active_time = self.idle_start_time - self.step_start_time
+                idle_ratio = 1 - rollout_active_time / rollout_version_time
+            else:
+                rollout_active_time = rollout_version_time
+                idle_ratio = 0
             timing_raw["fully_async/rollouter/active_time"] = rollout_active_time
             timing_raw["fully_async/rollouter/version_time"] = rollout_version_time
             timing_raw["fully_async/rollouter/idle_ratio"] = idle_ratio
@@ -258,6 +288,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
                 f"idle_ratio: {timing_raw['fully_async/rollouter/idle_ratio']:.4f}"
             )
             self.step_start_time = time.time()
+
         return timing_raw
 
     def _maybe_log_val_generations(self, inputs, outputs, scores):
@@ -380,17 +411,57 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         """
         self._init_async_objects()
         self._create_worker_classes()
-        self._init_reward_loop()
+        await self._create_reward_loop_manager()
+        await self._create_teacher_model_manager()
         await self._init_async_rollout_manager()
+
+    async def _create_reward_loop_manager(self):
+        """Create RewardLoopManager for the rollouter.
+
+        TODO: RewardModelManager.__init__ uses asyncio.run() which forces us to use
+        run_in_executor here. Upstream should provide an async init method so this
+        can be a simple await call instead.
+        """
+        import asyncio
+
+        from verl.experimental.reward_loop import RewardLoopManager
+
+        loop = asyncio.get_running_loop()
+        self.reward_loop_manager = await loop.run_in_executor(
+            None,
+            lambda: RewardLoopManager(config=self.config, rm_resource_pool=None),
+        )
+
+    async def _create_teacher_model_manager(self):
+        """Create MultiTeacherModelManager for distillation if enabled.
+
+        Allocates a big resource pool for all teachers and passes it to
+        MultiTeacherModelManager, which splits it internally per teacher.
+
+        NOTE: MultiTeacherModelManager.__init__ calls _run_all internally which uses
+        asyncio.run(), conflicting with the already-running event loop. Run in a thread executor.
+        """
+        from verl.trainer.distillation.losses import is_distillation_enabled
+        from verl.trainer.ppo.utils import Role
+
+        self.teacher_model_manager = None
+        if is_distillation_enabled(self.config.get("distillation")):
+            from verl.experimental.teacher_loop import MultiTeacherModelManager
+
+            teacher_resource_pool = self.resource_pool_manager.get_resource_pool(Role.TeacherModel)
+            loop = asyncio.get_running_loop()
+            self.teacher_model_manager = await loop.run_in_executor(
+                None,
+                lambda: MultiTeacherModelManager(config=self.config, resource_pool=teacher_resource_pool),
+            )
 
     def _create_actor_rollout_classes(self):
         # Skip rollout creation and let agentloop handle it
         pass
 
-    def _init_models(self):
-        self.rollout_wg = self.all_wg[str(Role.Rollout)]
-        self.rollout_wg.init_model()
-        self.actor_rollout_wg = self.rollout_wg
+    def _create_reward_model_class(self):
+        # In fully async mode, RM is managed by RewardLoopManager (standalone). Skip worker group creation for RM.
+        pass
 
     def _create_continuous_iterator(self):
         """
@@ -413,11 +484,14 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
 
         # create async rollout manager and request scheduler
         assert self.config.actor_rollout_ref.rollout.mode == "async"
-        from verl.experimental.fully_async_policy.agent_loop import FullyAsyncAgentLoopManager
 
         self.async_rollout_mode = True
+        self.llm_server_manager = await LLMServerManager.create(config=self.config)
         self.async_rollout_manager = await FullyAsyncAgentLoopManager.create(
-            config=self.config, worker_group=self.rollout_wg, reward_loop_worker_handles=reward_loop_worker_handles
+            config=self.config,
+            llm_client=self.llm_server_manager.get_client(fully_async=True),
+            reward_loop_worker_handles=reward_loop_worker_handles,
+            teacher_client=self.teacher_model_manager.get_client() if self.teacher_model_manager else None,
         )
 
     # Add samples to the pending_queue
@@ -465,20 +539,40 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
                 )
                 async with self.lock:
                     self.paused = True
-                while self.active_tasks:
-                    async with self.lock:
-                        # After acquiring the lock, the number of active_tasks may change, need to be verified again
-                        if self.active_tasks:
-                            done_tasks, self.active_tasks = await asyncio.wait(
-                                self.active_tasks, return_when=asyncio.FIRST_COMPLETED
-                            )
-                            for task in done_tasks:
-                                await task
+                    self._resume_event.clear()
 
-                async with self.lock:
-                    while self.paused:
+                resume_future = asyncio.ensure_future(self._resume_event.wait())
+                try:
+                    # Drain: wait for either (a) at least one active task to finish, or
+                    # (b) a resume signal (reset_staleness / monitor flipping paused=False) to
+                    # break the drain early so new samples can be submitted to free replicas.
+                    # We do NOT hold the lock during the wait, so publishers can acquire it to
+                    # update paused / staleness_samples concurrently.
+                    while self.active_tasks and not resume_future.done():
+                        wait_set = set(self.active_tasks) | {resume_future}
+                        done, _pending = await asyncio.wait(wait_set, return_when=asyncio.FIRST_COMPLETED)
+                        actual_done = done - {resume_future}
+                        if actual_done:
+                            async with self.lock:
+                                for task in actual_done:
+                                    self.active_tasks.discard(task)
+                                    await task
+                        if resume_future in done:
+                            print(
+                                "[FullyAsyncRollouter][Processor] "
+                                "Drain interrupted by resume signal, resuming generation early "
+                                f"(active tasks remaining: {len(self.active_tasks)})"
+                            )
+                            break
+
+                    # block until resuming
+                    if not resume_future.done():
                         self.idle_start_time = time.time()
-                        await self.condition.wait()
+                        await resume_future
+                finally:
+                    if not resume_future.done():
+                        resume_future.cancel()
+                        await asyncio.gather(resume_future, return_exceptions=True)
                 continue
             # Get sample from appropriate queue and immediately mark task as done
             rollout_sample = await self.pending_queue.get()
@@ -510,11 +604,9 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
                             await task
 
             # Submit single sample processing
+            if self.paused:
+                await self._resume_event.wait()
             async with self.lock:
-                # After the pause is over, the lock is acquired and it is necessary
-                # to determine whether it is the pause phase, otherwise continue to wait
-                while self.paused:
-                    await self.condition.wait()
                 task = safe_create_task(
                     self._process_single_sample_streaming(rollout_sample),
                     name=rollout_sample.sample_id,
@@ -614,6 +706,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         async with self.lock:
             self.paused = False
             self.running = True
+            self._resume_event.set()
 
         # Create the main asynchronous task
         generation_task = safe_create_task(self._streaming_generation_main(), name="generation_task")
@@ -661,12 +754,12 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
             if self.paused and not await self._should_pause_generation():
                 async with self.lock:
                     self.paused = False
-                    print("[FullyAsyncRollouter][ShouldPause] notify all wait tasks.")
-                    self.condition.notify_all()
+                    print("[FullyAsyncRollouter][ShouldPause] resume rollouter.")
+                    self._resume_event.set()
 
     async def _should_pause_generation(self) -> bool:
         """Determine whether the build should be paused"""
-        queue_stats = self.message_queue_client.get_statistics_sync()
+        queue_stats = await self.message_queue_client.get_statistics()
         queue_size = queue_stats["queue_size"]
 
         if queue_size >= self.max_queue_size:
@@ -689,7 +782,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         return False
 
     async def get_statistics(self) -> dict:
-        queue_stats = self.message_queue_client.get_statistics_sync()
+        queue_stats = await self.message_queue_client.get_statistics()
 
         stats = {
             # monitor stats

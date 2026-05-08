@@ -23,12 +23,14 @@ from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager, Role
 from verl.utils import omega_conf_to_dataclass
 from verl.utils.device import get_device_name
-from verl.workers.fsdp_workers import AsyncActorRolloutRefWorker
+from verl.workers.engine_workers import ActorRolloutRefWorker
+from verl.workers.rollout.llm_server import LLMServerManager
 
 
 def init_agent_loop_manager(config: DictConfig) -> AgentLoopManager | RayWorkerGroup:
     # =========================== 1. Create hybrid ActorRollout workers ===========================
-    actor_rollout_cls = AsyncActorRolloutRefWorker
+    # The unified model-engine ActorRolloutRefWorker supports both sync and async rollout modes.
+    actor_rollout_cls = ActorRolloutRefWorker
     role_worker_mapping = {
         Role.ActorRollout: ray.remote(actor_rollout_cls),
     }
@@ -83,15 +85,16 @@ def init_agent_loop_manager(config: DictConfig) -> AgentLoopManager | RayWorkerG
         config=config,
         rm_resource_pool=rm_resource_pool,
     )
+    llm_server_manager = LLMServerManager.create(config=config, worker_group=actor_rollout_wg)
     agent_loop_manager = AgentLoopManager.create(
         config=config,
-        worker_group=actor_rollout_wg,
+        llm_client=llm_server_manager.get_client(),
         reward_loop_worker_handles=reward_loop_manager.reward_loop_workers,
     )
     checkpoint_manager = CheckpointEngineManager(
         config=omega_conf_to_dataclass(config.actor_rollout_ref.rollout.checkpoint_engine),
         trainer=actor_rollout_wg,
-        replicas=agent_loop_manager.rollout_replicas,
+        replicas=llm_server_manager.get_replicas(),
     )
     checkpoint_manager.sleep_replicas()
     checkpoint_manager.update_weights()

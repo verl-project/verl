@@ -22,10 +22,16 @@ from verl.single_controller.ray.base import RayResourcePool, split_resource_pool
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.ray_utils import auto_await
 from verl.workers.config import DistillationConfig, DistillationTeacherModelConfig, HFModelConfig
+from verl.workers.rollout.llm_server import LLMServerClient
 from verl.workers.rollout.replica import get_rollout_replica_class
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+
+@auto_await
+async def _run_all(tasks: list[asyncio.Task]):
+    await asyncio.gather(*tasks)
 
 
 class TeacherModelManager:
@@ -33,120 +39,166 @@ class TeacherModelManager:
 
     def __init__(
         self,
-        config: DictConfig,
-        resource_pool: RayResourcePool = None,
+        distillation_config: DistillationConfig,
+        teacher_model_config: DistillationTeacherModelConfig,
+        resource_pool: RayResourcePool,
     ):
         """
         Initialize the teacher model manager.
 
         Args:
-            config (DictConfig): Teacher model configuration.
-            resource_pool (RayResourcePool, optional): Resource pool. Defaults to None.
+            distillation_config (DistillationConfig): Distillation configuration.
+            teacher_model_config (DistillationTeacherModelConfig): Teacher model configuration.
+            resource_pool (RayResourcePool): Dedicated teacher resource pool.
         """
 
         # Need dataclass conversion for max_logprobs handling in post_init
-        self.config: DistillationConfig = omega_conf_to_dataclass(config)
+        self.distillation_config = distillation_config
+        self.teacher_model_config = teacher_model_config
         self.resource_pool = resource_pool
         self._initialize_llm_servers()
-        self._initialize_async_server_manager()
-        self._initialize_router()
-
-        self.sleep()
+        self._initialize_load_balancer_handle()
 
     def _initialize_llm_servers(self):
-        teacher_model_config: DistillationTeacherModelConfig = self.config.teacher_model
-        teacher_world_size = (
-            teacher_model_config.inference.tensor_model_parallel_size
-            * teacher_model_config.inference.data_parallel_size
-            * teacher_model_config.inference.pipeline_model_parallel_size
-        )
-        world_size = (
-            self.resource_pool.world_size
-            if self.resource_pool  # colocate mode
-            else teacher_model_config.n_gpus_per_node * teacher_model_config.nnodes  # standalone mode
-        )
-        num_replicas = world_size // teacher_world_size
+        teacher_model_config = self.teacher_model_config
+        per_replica_world_size = teacher_model_config.per_replica_world_size
+        num_replicas = teacher_model_config.num_replicas
+        expected_pool_size = num_replicas * per_replica_world_size
+        if self.resource_pool.world_size != expected_pool_size:
+            raise ValueError(
+                f"Teacher {teacher_model_config.key!r} expected sub-pool of size "
+                f"{expected_pool_size} (num_replicas={num_replicas} * "
+                f"per_replica_world_size={per_replica_world_size}), but got "
+                f"{self.resource_pool.world_size}."
+            )
 
+        gpus_per_node = self.distillation_config.n_gpus_per_node
         rollout_replica_class = get_rollout_replica_class(teacher_model_config.inference.name)
         rollout_config = teacher_model_config.inference
         model_config = HFModelConfig(path=teacher_model_config.model_path)
-        self.tokenizer = model_config.get_processor()
-        text_tokenizer = model_config.tokenizer
-        if model_config.tokenizer is None:
-            raise ValueError(f"Tokenizer is required for teacher model {teacher_model_config.model_path}")
-        self.pad_token_id = text_tokenizer.pad_token_id
+        name_suffix = (teacher_model_config.key or "").replace("/", "_")
         self.rollout_replicas = [
             rollout_replica_class(
                 replica_rank=replica_rank,
                 config=rollout_config,
                 model_config=model_config,
-                gpus_per_node=teacher_model_config.n_gpus_per_node,
+                gpus_per_node=gpus_per_node,
                 is_teacher_model=True,
+                name_suffix=name_suffix,
             )
             for replica_rank in range(num_replicas)
         ]
-        if self.resource_pool:
-            split_resource_pools = split_resource_pool(self.resource_pool, split_size=teacher_world_size)
-            assert len(split_resource_pools) == len(self.rollout_replicas)
-            self._run_all(
-                [
-                    server.init_colocated(resource_pool)
-                    for server, resource_pool in zip(self.rollout_replicas, split_resource_pools, strict=True)
-                ]
-            )
-        else:
-            self._run_all([server.init_standalone() for server in self.rollout_replicas])
+        split_resource_pools = split_resource_pool(self.resource_pool, split_size=per_replica_world_size)
+        assert len(split_resource_pools) == len(self.rollout_replicas)
+        self._validate_replica_node_alignment(split_resource_pools, per_replica_world_size, gpus_per_node)
+        _run_all(
+            [
+                server.init_colocated(resource_pool)
+                for server, resource_pool in zip(self.rollout_replicas, split_resource_pools, strict=True)
+            ]
+        )
         self.server_handles = [server._server_handle for server in self.rollout_replicas]
         self.server_addresses = [server._server_address for server in self.rollout_replicas]
 
-    def _initialize_async_server_manager(self):
-        from verl.experimental.agent_loop.agent_loop import GlobalRequestLoadBalancer
-        from verl.experimental.teacher_loop.teacher_manager import AsyncTeacherLLMServerManager
+    def _validate_replica_node_alignment(self, replica_pools, per_replica_world_size, gpus_per_node):
+        """Verify that each replica occupies the expected number of nodes.
+
+        `per_replica_world_size` (W below) is the GPU count of a *single* inference
+        replica — the product of the replica's inference-time parallelism
+        (tensor_model_parallel_size * data_parallel_size * pipeline_model_parallel_size).
+        It is not the teacher's total GPU footprint (`num_replicas * W`).
+
+        `split_resource_pool` walks bundles linearly and is oblivious to node
+        boundaries, so a replica's sub-pool can end up touching more nodes than W
+        implies when W does not divide the node layout cleanly.
+
+        Example (P = n_gpus_per_node = 4, two teachers with W=3 and W=4):
+
+                node 0                  node 1
+                [0 1 2 3]               [4 5 6 7]         ← bundle idx
+
+            teacher A (W=3):
+                [A A A .]               [. . . .]          expected span 1, observed 1  ✓
+            teacher B (W=4):
+                [. . . B]               [B B B .]          expected span 1, observed 2  ✗
+
+        Teacher B's one replica (W=4) is expected to stay on a single node, but the
+        linear split dropped it on bundles 3-6 — straddling nodes 0 and 1.
+        """
+        key = self.teacher_model_config.key
+        P = gpus_per_node
+        W = per_replica_world_size
+        expected_span = (W + P - 1) // P
+        for i, sub_pool in enumerate(replica_pools):
+            start = sub_pool.start_bundle_index
+            first_node = start // P
+            last_node = (start + W - 1) // P
+            observed_span = last_node - first_node + 1
+            if observed_span != expected_span:
+                raise ValueError(
+                    f"Teacher {key!r} replica {i} sub-pool bundles [{start}, {start + W}) "
+                    f"span {observed_span} node(s) but per_replica_world_size {W} with "
+                    f"n_gpus_per_node {P} expects {expected_span}. Reorder teachers or "
+                    f"adjust num_replicas / inference parallelism so each replica sub-pool "
+                    f"aligns to node boundaries."
+                )
+
+    def _initialize_load_balancer_handle(self):
+        from verl.workers.rollout.llm_server import GlobalRequestLoadBalancer
 
         self.load_balancer_handle = GlobalRequestLoadBalancer.remote(
-            server_actor_ids=self.server_addresses,
-        )
-        self.server_manager = AsyncTeacherLLMServerManager(
-            config=self.config,
-            servers=list(zip(self.server_addresses, self.server_handles, strict=True)),
-            load_balancer_handle=self.load_balancer_handle,
-            distillation_config=self.config,
-            pad_token_id=self.pad_token_id,
+            servers=dict(zip(self.server_addresses, self.server_handles, strict=True))
         )
 
-    def _initialize_router(self):
-        worker_urls = [f"http://{server_address}" for server_address in self.server_addresses]
 
-        from ..reward_loop.router.naive_router import launch_router_process
+class MultiTeacherModelManager:
+    """Manages one inner `TeacherModelManager` per teacher model, keyed by each teacher's `key`."""
 
-        self.router_address, _ = launch_router_process(worker_urls=worker_urls)
+    def __init__(
+        self,
+        config: DictConfig,
+        resource_pool: RayResourcePool,
+    ):
+        """
+        Initialize the multi-teacher model manager.
 
-    def get_router_address(self):
-        return self.router_address
+        Args:
+            config (DictConfig): Full configuration.
+            resource_pool (RayResourcePool): Combined resource pool for all teachers.
+        """
+        self.config = config
+        self.distillation_config: DistillationConfig = omega_conf_to_dataclass(config.distillation)
 
-    def compute_logprobs(self, data):
-        self.wake_up()
-        try:
-            return self._run_single(self.server_manager.compute_teacher_logprobs_batch(data))
-        finally:
-            self.sleep()
+        self.resource_pool = resource_pool
+        self.teacher_model_managers: dict[str, TeacherModelManager] = {}
+        self.server_addresses: dict[str, list[str]] = {}
+        self.server_handles: dict[str, list] = {}
+        self.load_balancer_handle: dict[str, object] = {}
 
-    @auto_await
-    async def wake_up(self):
-        """Wake up all rollout replica instances."""
-        await self._run_all([replica.wake_up() for replica in self.rollout_replicas])
+        self._initialize_teacher_model_managers()
 
-    @auto_await
-    async def sleep(self):
-        """Sleep all rollout replica instances."""
-        await self._run_all([replica.sleep() for replica in self.rollout_replicas])
+    def _initialize_teacher_model_managers(self):
+        teacher_models = self.distillation_config.teacher_models
+        split_sizes = [teacher.world_size for teacher in teacher_models.values()]
+        split_pools = split_resource_pool(self.resource_pool, split_size=split_sizes)
 
-    @auto_await
-    async def _run_all(self, tasks: list[asyncio.Task]):
-        await asyncio.gather(*tasks)
+        for (key, teacher_model_config), teacher_pool in zip(teacher_models.items(), split_pools, strict=True):
+            manager = TeacherModelManager(
+                distillation_config=self.distillation_config,
+                teacher_model_config=teacher_model_config,
+                resource_pool=teacher_pool,
+            )
+            self.teacher_model_managers[key] = manager
+            self.server_addresses[key] = manager.server_addresses
+            self.server_handles[key] = manager.server_handles
+            self.load_balancer_handle[key] = manager.load_balancer_handle
 
-    def _run_single(self, task):
-        async def run():
-            return await task
-
-        return asyncio.run(run())
+    def get_client(self) -> dict[str, LLMServerClient]:
+        """Get the LLMServerClient for each teacher model."""
+        teacher_clients = {}
+        for key, manager in self.teacher_model_managers.items():
+            servers = dict(zip(manager.server_addresses, manager.server_handles, strict=True))
+            teacher_clients[key] = LLMServerClient(
+                config=self.config, servers=servers, load_balancer_handle=manager.load_balancer_handle
+            )
+        return teacher_clients

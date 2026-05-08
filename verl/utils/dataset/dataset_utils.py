@@ -18,6 +18,8 @@ from enum import Enum
 import torch
 from tensordict.tensorclass import NonTensorData
 
+from verl.utils.tensordict_utils import nested_tensor_from_tensor_list
+
 
 class DatasetPadMode(str, Enum):
     """Padding mode for dataset"""
@@ -68,15 +70,7 @@ class SFTTensorCollator:
             if isinstance(batch[0][key], torch.Tensor):
                 tensors = [item[key] for item in batch]
                 if tensors[0].dim() >= 2:
-                    # For multi-dim tensors (e.g., 3D position_ids with shape (num_heads, seq_len)),
-                    # use nested_tensor_from_jagged with explicit jagged_dim to avoid ambiguity
-                    # when all samples share the same seq_len.
-                    values = torch.cat(tensors, dim=-1)
-                    lengths = torch.tensor([t.shape[-1] for t in tensors])
-                    offsets = torch.zeros(len(tensors) + 1, dtype=torch.long)
-                    torch.cumsum(lengths, dim=0, out=offsets[1:])
-                    final_batch[key] = torch.nested.nested_tensor_from_jagged(values, offsets=offsets)
-                    final_batch[key]._ragged_idx = 2
+                    final_batch[key] = nested_tensor_from_tensor_list(tensors)
                 else:
                     final_batch[key] = torch.nested.as_nested_tensor(tensors, layout=torch.jagged)
             else:

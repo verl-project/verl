@@ -17,9 +17,7 @@ Choices of Backend Engines
 
 1. Training:
 
-We recommend using **FSDP** backend to investigate, research and prototype different models, datasets and RL algorithms. The guide for using FSDP backend can be found in :doc:`FSDP Workers<../workers/fsdp_workers>`.
-
-For users who pursue better scalability, we recommend using **Megatron-LM** backend. Currently, we support `Megatron-LM v0.13.1 <https://github.com/NVIDIA/Megatron-LM/tree/core_v0.13.1>`_. The guide for using Megatron-LM backend can be found in :doc:`Megatron-LM Workers<../workers/megatron_workers>`.
+We recommend using the **FSDP / FSDP2** backend to investigate, research and prototype different models, datasets and RL algorithms. For users who pursue better scalability, we recommend the **Megatron-LM** backend. Currently, we support `Megatron-LM v0.13.1 <https://github.com/NVIDIA/Megatron-LM/tree/core_v0.13.1>`_. Both backends are served through the same unified worker layer – see :doc:`Engine Workers<../workers/engine_workers>` for the worker-level API and :doc:`Model Engine<../workers/model_engine>` for the engine-level design.
 
 
 2. Inference:
@@ -54,15 +52,15 @@ Upon base image, the following packages are added:
 
 Latest docker file:
 
-- `Dockerfile.stable.vllm <https://github.com/volcengine/verl/blob/main/docker/Dockerfile.stable.vllm>`_
-- `Dockerfile.stable.sglang <https://github.com/volcengine/verl/blob/main/docker/Dockerfile.stable.sglang>`_
+- `Dockerfile.stable.vllm <https://github.com/verl-project/verl/blob/main/docker/Dockerfile.stable.vllm>`_
+- `Dockerfile.stable.sglang <https://github.com/verl-project/verl/blob/main/docker/Dockerfile.stable.sglang>`_
 
 All pre-built images are available in dockerhub: `verlai/verl <https://hub.docker.com/r/verlai/verl>`_. For example, ``verlai/verl:sgl055.latest``, ``verlai/verl:vllm011.latest``.
 
 You can find the latest images used for development and ci in our github workflows:
 
-- `.github/workflows/vllm.yml <https://github.com/volcengine/verl/blob/main/.github/workflows/vllm.yml>`_
-- `.github/workflows/sgl.yml <https://github.com/volcengine/verl/blob/main/.github/workflows/sgl.yml>`_
+- `.github/workflows/vllm.yml <https://github.com/verl-project/verl/blob/main/.github/workflows/vllm.yml>`_
+- `.github/workflows/sgl.yml <https://github.com/verl-project/verl/blob/main/.github/workflows/sgl.yml>`_
 
 
 Installation from Docker
@@ -84,7 +82,7 @@ After pulling the desired Docker image and installing desired inference and trai
 .. code:: bash
 
     # install the nightly version (recommended)
-    git clone https://github.com/volcengine/verl && cd verl
+    git clone https://github.com/verl-project/verl && cd verl
     pip3 install --no-deps -e .
 
 [Optional] If you hope to switch between different frameworks, you can install verl with the following command:
@@ -92,7 +90,7 @@ After pulling the desired Docker image and installing desired inference and trai
 .. code:: bash
 
     # install the nightly version (recommended)
-    git clone https://github.com/volcengine/verl && cd verl
+    git clone https://github.com/verl-project/verl && cd verl
     pip3 install -e ".[vllm]"
     pip3 install -e ".[sglang]"
 
@@ -104,7 +102,7 @@ We recommend to use docker images for convenience. However, if your environment 
 
 .. note::
 
-    - Dockerfile provides more details than this installation instructions. You can find examples in each Dockerfile, for example `verl0.6-cu128-torch2.8.0-fa2.7.4 Dockerfile.base <https://github.com/volcengine/verl/blob/v0.6.0/docker/verl0.6-cu128-torch2.8.0-fa2.7.4/Dockerfile.base>`_ .
+    - Dockerfile provides more details than this installation instructions. You can find examples in each Dockerfile, for example `verl0.6-cu128-torch2.8.0-fa2.7.4 Dockerfile.base <https://github.com/verl-project/verl/blob/v0.6.0/docker/verl0.6-cu128-torch2.8.0-fa2.7.4/Dockerfile.base>`_ .
 
 
 Pre-requisites
@@ -208,7 +206,7 @@ own post-training jobs.
 
 .. code:: bash
 
-   git clone https://github.com/volcengine/verl.git
+   git clone https://github.com/verl-project/verl.git
    cd verl
    pip install --no-deps -e .
 
@@ -236,7 +234,7 @@ Install with AMD GPUs - ROCM kernel support
 When you run on AMD GPUs (MI300) with ROCM platform, you cannot use the previous quickstart to run verl. You should follow the following steps to build a docker and run it.
 If you encounter any issues in using AMD GPUs running verl, feel free to contact me - `Yusheng Su <https://yushengsu-thu.github.io/>`_.
 
-Find the docker for AMD ROCm: `docker/Dockerfile.rocm <https://github.com/volcengine/verl/blob/main/docker/Dockerfile.rocm>`_
+Find the docker for AMD ROCm: `docker/Dockerfile.rocm <https://github.com/verl-project/verl/blob/main/docker/Dockerfile.rocm>`_
 ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
 
 .. code-block:: bash

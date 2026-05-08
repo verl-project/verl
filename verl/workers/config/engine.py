@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
+import os
 import warnings
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal, Optional
@@ -20,7 +22,7 @@ from verl.base_config import BaseConfig
 from verl.trainer.config import CheckpointConfig
 
 from ...utils.profiler import ProfilerConfig
-from .model import DiffusionModelConfig, HFModelConfig
+from .model import HFModelConfig
 from .optimizer import OptimizerConfig
 
 __all__ = [
@@ -35,6 +37,10 @@ __all__ = [
     "QATEngineConfig",
     "MindSpeedEngineConfig",
 ]
+
+
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 # TODO: rename to RouterReplayConfig after removing the legacy implementation
@@ -296,6 +302,20 @@ class VeOmniEngineConfig(EngineConfig):
             2. `fused`
             default "fused"
             Note: In case VeOmni add more moe_implementation, please check https://github.com/ByteDance-Seed/VeOmni/
+        cross_entropy_loss_implementation (str): Cross-entropy kernel selected via VeOmni's
+            ``OpsImplementationConfig``. Common values: ``"eager"`` (default), ``"liger_kernel"``,
+            ``"npu"``. See VeOmni docs for the full registry.
+        rms_norm_implementation (str): RMSNorm kernel. ``"eager"`` (HF default),
+            ``"triton"`` (batch-invariant Triton kernel — required to keep vexact's rollout
+            and the FSDP actor bitwise-aligned on DeepSeek-V3 / Moonlight), ``"liger_kernel"``,
+            ``"npu"``.
+        swiglu_mlp_implementation (str): SwiGLU MLP kernel. ``"eager"`` (default) or
+            ``"liger_kernel"``.
+        rotary_pos_emb_implementation (str): RoPE kernel. ``"eager"`` (default), ``"triton"``
+            (deterministic Triton bmm — required for bitwise-aligned RoPE on DeepSeek-V3 /
+            Moonlight), ``"liger_kernel"``, ``"npu"``.
+        load_balancing_loss_implementation (str): MoE load-balancing loss kernel.
+            ``"eager"`` (default) or ``"triton"``.
         force_use_huggingface (bool): Force loading model from huggingface, default False
         activation_gpu_limit (float): When enabling activation offload, `activation_gpu_limit` GB
             activations are allowed to reserve on GPU, default 0.0
@@ -310,6 +330,8 @@ class VeOmniEngineConfig(EngineConfig):
         mixed_precision (Optional[dict[str, Any]]): Mixed precision configuration for FSDP, default None
 
     """
+
+    _mutable_fields = EngineConfig._mutable_fields | {"attn_implementation"}
 
     wrap_policy: dict[str, Any] = field(default_factory=dict)
     offload_policy: bool = False
@@ -334,6 +356,15 @@ class VeOmniEngineConfig(EngineConfig):
     enable_reentrant: bool = False
     attn_implementation: str = "flash_attention_2"
     moe_implementation: str = "fused"
+    # Kernel-backend selectors for VeOmni's per-model patches; passed into
+    # OpsImplementationConfig and consumed by apply_per_model_patches in each
+    # model's device_patch.py. Defaults match VeOmni's OpsImplementationConfig
+    # defaults so existing configs see no change.
+    cross_entropy_loss_implementation: str = "eager"
+    rms_norm_implementation: str = "eager"
+    swiglu_mlp_implementation: str = "eager"
+    rotary_pos_emb_implementation: str = "eager"
+    load_balancing_loss_implementation: str = "eager"
     force_use_huggingface: bool = False
     activation_gpu_limit: float = 0.0
     basic_modules: Optional[list[str]] = field(default_factory=list)
@@ -341,6 +372,16 @@ class VeOmniEngineConfig(EngineConfig):
     def __post_init__(self):
         super().__post_init__()
         assert self.strategy in ["veomni"], f"strategy {self.strategy} not supported"
+
+        replacements = {
+            "flash_attention_2": "veomni_flash_attention_2_with_sp",
+            "flash_attention_3": "veomni_flash_attention_3_with_sp",
+            "flash_attention_4": "veomni_flash_attention_4_with_sp",
+        }
+        if self.attn_implementation in replacements:
+            new_impl = replacements[self.attn_implementation]
+            logger.info(f"Replacing attn_implementation from '{self.attn_implementation}' to '{new_impl}'")
+            self.attn_implementation = new_impl
 
 
 @dataclass
@@ -551,7 +592,7 @@ class MindSpeedEngineConfig(McoreEngineConfig):
 @dataclass
 class TrainingWorkerConfig(BaseConfig):
     model_type: str = None  # model type (language_model/value_model)
-    model_config: HFModelConfig | DiffusionModelConfig = None
+    model_config: HFModelConfig = None
     engine_config: EngineConfig = None
     optimizer_config: OptimizerConfig = None
     checkpoint_config: CheckpointConfig = None

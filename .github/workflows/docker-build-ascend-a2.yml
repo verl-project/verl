@@ -6,20 +6,43 @@ on:
     branches: ["main"]
     paths:
       - "docker/ascend/Dockerfile.ascend_8.5.0_a2"
-      - ".github/workflows/docker-build-ascend-a2.yml"
       - "docker/ascend/Dockerfile.ascend_8.5.0_a2_v0.7.1"
+      - ".github/workflows/docker-build-ascend-a2.yml"
+
   release:
     types: [published]
   schedule:
     - cron: "0 16 * * *"
 
+env:
+  QUAY_REPO: quay.io/ascend/verl
+
 jobs:
-  build-ascend-image-a2:
+  # ============================================================
+  # 第一阶段：分架构构建并推送 digest（main 镜像）
+  # ============================================================
+  build-push-digest:
+    name: build-${{ matrix.tag }}
     if: ${{ github.event_name != 'pull_request' && github.repository_owner == 'verl-project' }}
-    runs-on: ubuntu-latest
     concurrency:
-      group: ${{ github.workflow }}-${{ github.ref }}-build-ascend-image-a2
+      group: ${{ github.workflow }}-${{ github.ref }}-${{ matrix.tag }}
       cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      packages: write
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: linux/amd64
+            runner: ubuntu-latest
+            tag: amd64
+          - arch: linux/arm64
+            runner: ubuntu-22.04-arm
+            tag: arm64
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       - name: Remove unnecessary parts in github actions runners to free up disk space
         uses: jlumbroso/free-disk-space@v1.3.1
@@ -58,6 +81,10 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+        with:
+          install: true
+          driver: docker-container
+          use: true
 
       - name: Login to Quay.io
         uses: docker/login-action@v3
@@ -70,31 +97,185 @@ jobs:
         run: |
           docker system prune -a -f --volumes || true
 
-      - name: Build and push images Quay
+      - name: Build and push by digest (main image)
         uses: docker/build-push-action@v6
+        id: build_main
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ matrix.arch }}
           file: ./docker/ascend/Dockerfile.ascend_8.5.0_a2
           push: true
-          tags: |
-            quay.io/ascend/verl:${{ steps.version.outputs.tag }}
+          outputs: type=image,name=${{ env.QUAY_REPO }},push-by-digest=true,name-canonical=true,push=true
+          provenance: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: |
             BUILDKIT_INLINE_CACHE=1
 
-      - name: Build and push v0.7.1 image to Quay
-        # if: ${{ github.event_name == 'schedule' }}
+      - name: Export digest (main image)
+        run: |
+          mkdir -p ${{ runner.temp }}/digests
+          digest="${{ steps.build_main.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/main-${digest#sha256:}"
+
+      - name: Upload digest (main image)
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-main-${{ matrix.tag }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # ============================================================
+  # 第一阶段（v0.7.1）：分架构构建并推送 digest
+  # ============================================================
+  build-push-digest-v071:
+    name: build-v0.7.1-${{ matrix.tag }}
+    if: ${{ github.event_name != 'pull_request' && github.repository_owner == 'verl-project' }}
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-v0.7.1-${{ matrix.tag }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      packages: write
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: linux/amd64
+            runner: ubuntu-latest
+            tag: amd64
+          - arch: linux/arm64
+            runner: ubuntu-22.04-arm
+            tag: arm64
+    steps:
+      - name: Remove unnecessary parts in github actions runners to free up disk space
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: true
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          install: true
+          driver: docker-container
+          use: true
+
+      - name: Login to Quay.io
+        uses: docker/login-action@v3
+        with:
+          registry: quay.io
+          username: ${{ secrets.QUAY_USERNAME }}
+          password: ${{ secrets.QUAY_PASSWORD }}
+
+      - name: Clean Docker cache before build
+        run: |
+          docker system prune -a -f --volumes || true
+
+      - name: Build and push by digest (v0.7.1 image)
         uses: docker/build-push-action@v6
+        id: build_v071
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ matrix.arch }}
           file: ./docker/ascend/Dockerfile.ascend_8.5.0_a2_v0.7.1
           push: true
-          tags: |
-            quay.io/ascend/verl:verl-8.5.0-910b-ubuntu22.04-py3.11-v0.7.1
+          outputs: type=image,name=${{ env.QUAY_REPO }},push-by-digest=true,name-canonical=true,push=true
+          provenance: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: |
             BUILDKIT_INLINE_CACHE=1
+
+      - name: Export digest (v0.7.1 image)
+        run: |
+          mkdir -p ${{ runner.temp }}/digests-v071
+          digest="${{ steps.build_v071.outputs.digest }}"
+          touch "${{ runner.temp }}/digests-v071/v071-${digest#sha256:}"
+
+      - name: Upload digest (v0.7.1 image)
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-v071-${{ matrix.tag }}
+          path: ${{ runner.temp }}/digests-v071/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # ============================================================
+  # 第二阶段：合并多架构 manifest（main 镜像）
+  # ============================================================
+  merge-image:
+    name: merge
+    runs-on: ubuntu-latest
+    needs: build-push-digest
+    steps:
+      - name: Download digests (main image)
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests-main
+          pattern: digests-main-*
+          merge-multiple: true
+
+      - name: Login to Quay.io
+        uses: docker/login-action@v3
+        with:
+          registry: quay.io
+          username: ${{ secrets.QUAY_USERNAME }}
+          password: ${{ secrets.QUAY_PASSWORD }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Merge and push multi-arch image (main)
+        env:
+          IMAGE: ${{ env.QUAY_REPO }}
+        run: |
+          DIGESTS=$(printf "$IMAGE@sha256:%s " $(ls ${{ runner.temp }}/digests-main | sed 's/^main-//'))
+          echo "Main image digests: $DIGESTS"
+          docker buildx imagetools create \
+            -t "$IMAGE:${{ needs.build-push-digest.outputs.tag }}" \
+            $DIGESTS
+
+  # ============================================================
+  # 第二阶段（v0.7.1）：合并多架构 manifest
+  # ============================================================
+  merge-image-v071:
+    name: merge-v0.7.1
+    runs-on: ubuntu-latest
+    needs: build-push-digest-v071
+    steps:
+      - name: Download digests (v0.7.1 image)
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests-v071
+          pattern: digests-v071-*
+          merge-multiple: true
+
+      - name: Login to Quay.io
+        uses: docker/login-action@v3
+        with:
+          registry: quay.io
+          username: ${{ secrets.QUAY_USERNAME }}
+          password: ${{ secrets.QUAY_PASSWORD }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Merge and push multi-arch image (v0.7.1)
+        env:
+          IMAGE: ${{ env.QUAY_REPO }}
+        run: |
+          DIGESTS=$(printf "$IMAGE@sha256:%s " $(ls ${{ runner.temp }}/digests-v071 | sed 's/^v071-//'))
+          echo "v0.7.1 image digests: $DIGESTS"
+          docker buildx imagetools create \
+            -t "$IMAGE:verl-8.5.0-910b-ubuntu22.04-py3.11-v0.7.1" \
+            $DIGESTS

@@ -1,25 +1,31 @@
 # Precision Debugger (msprobe) in verl
 
-Last updated: 03/28/2026.
+Last updated: 04/13/2026.
 
 This guide explains how to collect precision data in verl using the
 `msprobe` PrecisionDebugger.
 
 ## Prerequisites
 
-* Install `msprobe` in the training environment.
+* Install `msprobe` in the training environment:
+
+```bash
+pip install mindstudio-probe
+```
+
 * Prepare a `config.json` for msprobe (see examples below).
-* Enable profiler for the roles you want to collect. PrecisionDebugger only
-  runs on roles whose `profiler.enable=True` and whose rank matches
-  `profiler.ranks`.
+* Enable profiler for the roles you want to collect.
+
+Reference:
+* `https://gitcode.com/Ascend/msprobe.git`
 
 ## Configuration
 
 PrecisionDebugger is integrated through verl's unified profiler interface.
-You configure it in two places:
+Use a minimal two-part setup:
 
-* **Global profiling control** via `global_profiler` in the trainer config.
-* **Role profiling control** via each role's `profiler` block.
+* `global_profiler` selects the tool and config file.
+* role `profiler.enable=True` turns on profiling for that role.
 
 ### Global profiling control
 
@@ -30,14 +36,11 @@ configure the msprobe-specific options under `global_tool_config`.
 global_profiler:
   tool: precision_debugger
   steps: [1, 2, 5]
-  save_path: "outputs/profile" # optional, not used by msprobe
+  save_path: "outputs/profile"
   global_tool_config:
     precision_debugger:
       _target_: verl.utils.profiler.config.PrecisionDebuggerToolConfig
-      enable: True
       config_path: /path/to/config.json
-      data_dir: outputs/precision_debug
-      steps: [1, 2, 5]
       stages:
         - actor_update
         - actor_compute_log_prob
@@ -50,12 +53,10 @@ global_profiler:
 
 Notes:
 
-* `steps` in `global_profiler` controls the step window for start/stop.
-* `precision_debugger.steps` provides an extra filter. If both are set,
-  the intersection is applied.
-* `data_dir` is the root directory for dumps. The actual path is
-  `{data_dir}/step_{global_step}/{stage}`.
-* `save_path` is ignored by msprobe.
+* `global_profiler.steps` is the only step filter for PrecisionDebugger.
+* Dumps are written under `global_profiler.save_path`.
+* Actual dump path is `{global_profiler.save_path}/step_{global_step}/{stage}`.
+* Do not set `dump_path` in `config.json`; output path is controlled by verl.
 
 ### Role profiling control
 
@@ -66,29 +67,13 @@ actor_rollout_ref:
   actor:
     profiler:
       enable: True
-      all_ranks: False
-      ranks: [0]
   ref:
     profiler:
       enable: True
-      all_ranks: False
-      ranks: [0]
 critic:
   profiler:
     enable: True
-    all_ranks: False
-    ranks: [0]
 ```
-
-If you want to provide an explicit per-role msprobe config, add
-`profiler.tool_config.precision_debugger` for each enabled role. In practice,
-the most important fields are:
-
-* `config_path`
-* `data_dir`
-* `steps`
-* `stages`
-* `strict`
 
 ## Supported stages
 
@@ -112,14 +97,13 @@ run, the most common useful combinations are:
   `actor_compute_log_prob`, `ref_compute_log_prob`, `compute_values`,
   `critic_update`, `actor_update`
 
-## msprobe config.json examples
+## msprobe config.json common examples
 
-Example for `task: statistics`:
+### `statistics` mode
 
 ```json
 {
   "task": "statistics",
-  "dump_path": "/home/data_dump",
   "rank": [],
   "step": [],
   "level": "L1",
@@ -134,12 +118,11 @@ Example for `task: statistics`:
 }
 ```
 
-Example for `task: tensor`:
+### `tensor` mode
 
 ```json
 {
   "task": "tensor",
-  "dump_path": "/home/data_dump",
   "rank": [],
   "step": [],
   "level": "L1",
@@ -148,17 +131,15 @@ Example for `task: tensor`:
     "scope": [],
     "list": [],
     "data_mode": ["all"],
-    "bench_path": "/home/bench_data_dump",
-    "summary_mode": "md5",
-    "diff_nums": 5
+    "summary_mode": "statistics"
   }
 }
 ```
 
 ## Minimal example
 
-The following example enables PrecisionDebugger on steps `1` and `2` for rank
-`0`:
+The following example enables PrecisionDebugger on steps `1` and `2`.
+If you need rank filtering, configure it only in msprobe `config.json`.
 
 ```yaml
 global_profiler:
@@ -167,10 +148,7 @@ global_profiler:
   global_tool_config:
     precision_debugger:
       _target_: verl.utils.profiler.config.PrecisionDebuggerToolConfig
-      enable: True
       config_path: /path/to/dump_config.json
-      data_dir: outputs/precision_debug
-      steps: [1, 2]
       stages:
         - actor_compute_log_prob
         - ref_compute_log_prob
@@ -181,11 +159,29 @@ actor_rollout_ref:
   actor:
     profiler:
       enable: True
-      ranks: [0]
   ref:
     profiler:
       enable: True
-      ranks: [0]
+```
+
+## Minimal CLI example
+
+Use only the required flags:
+
+```bash
+python3 -m verl.trainer.main_ppo \
+  global_profiler.tool=precision_debugger \
+  global_profiler.steps='[1,2]' \
+  global_profiler.save_path=outputs/profile \
+  +global_profiler.global_tool_config.precision_debugger.config_path=/path/to/config.json \
+  actor_rollout_ref.actor.profiler.enable=True \
+  actor_rollout_ref.ref.profiler.enable=True
+```
+
+Optional stage filter:
+
+```bash
++global_profiler.global_tool_config.precision_debugger.stages='[actor_compute_log_prob,ref_compute_log_prob,actor_update]'
 ```
 
 ## Output layout
@@ -196,7 +192,7 @@ Inside each stage directory, msprobe creates its own `step*/rank*` layout.
 Example:
 
 ```text
-outputs/precision_debug/
+outputs/profile/
   step_1/
     actor_compute_log_prob/step0/rank0/dump.json
     actor_update/step0/rank0/dump.json
@@ -336,6 +332,17 @@ documentation for compare and visualization commands.
 * Because dump cost is high, prefer collecting a small number of representative
   steps first, then narrow the stage set if necessary.
 
+## Quality checklist
+
+Use this checklist to verify your setup is complete and reproducible:
+
+* `global_profiler.tool=precision_debugger`
+* `global_profiler.steps` includes the target step
+* `+global_profiler.global_tool_config.precision_debugger.config_path=...` is set
+* role `profiler.enable=True` is set for the stages you need
+* `msprobe` is importable in the runtime environment
+* output exists under `{global_profiler.save_path}/step_<global_step>/<stage>/...`
+
 ## Troubleshooting
 
 ### No dump directory is generated
@@ -345,7 +352,6 @@ Check:
 * `global_profiler.tool=precision_debugger`
 * `global_profiler.steps` contains the target step
 * role profiler is enabled for the target role
-* current rank is included in `profiler.ranks`
 * msprobe is installed in the training environment
 
 ### `PrecisionDebugger model not resolved`

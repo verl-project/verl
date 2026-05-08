@@ -52,7 +52,7 @@ RUN ARCH=$(uname -m) && \
 ENV PYTHONPATH="/Megatron-LM${PYTHONPATH:+:${PYTHONPATH}}"
 
 # Prepare and install verl (update frequently)
-RUN git clone --depth 1 https://github.com/volcengine/verl.git && \
+RUN git clone --depth 1 https://github.com/verl-project/verl.git && \
     cd verl && pip install -r requirements-npu.txt && pip install -v -e . && cd .. && \
     # Clear extra files
     rm -rf /tmp/* /var/tmp/* && \

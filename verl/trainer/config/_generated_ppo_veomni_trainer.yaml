@@ -43,6 +43,11 @@ actor_rollout_ref:
       enable_reentrant: false
       attn_implementation: flash_attention_2
       moe_implementation: fused
+      cross_entropy_loss_implementation: eager
+      rms_norm_implementation: eager
+      swiglu_mlp_implementation: eager
+      rotary_pos_emb_implementation: eager
+      load_balancing_loss_implementation: eager
       force_use_huggingface: false
       activation_gpu_limit: 0.0
     _target_: verl.workers.config.VeOmniActorConfig
@@ -72,6 +77,7 @@ actor_rollout_ref:
     loss_scale_factor: null
     entropy_coeff: 0
     calculate_entropy: false
+    calculate_sum_pi_squared: false
     use_kl_loss: false
     use_prefix_grouper: false
     use_torch_compile: true
@@ -115,6 +121,12 @@ actor_rollout_ref:
           _target_: verl.utils.profiler.config.TorchMemoryToolConfig
           trace_alloc_max_entries: ${oc.select:global_profiler.global_tool_config.torch_memory.trace_alloc_max_entries,100000}
           stack_depth: ${oc.select:global_profiler.global_tool_config.torch_memory.stack_depth,32}
+        precision_debugger:
+          _target_: verl.utils.profiler.config.PrecisionDebuggerToolConfig
+          config_path: ${oc.select:global_profiler.global_tool_config.precision_debugger.config_path,null}
+          steps: null
+          stages: ${oc.select:global_profiler.global_tool_config.precision_debugger.stages,null}
+          strict: ${oc.select:global_profiler.global_tool_config.precision_debugger.strict,False}
     router_replay:
       _target_: verl.workers.config.RouterReplayConfig
       mode: disabled
@@ -163,6 +175,12 @@ actor_rollout_ref:
           _target_: verl.utils.profiler.config.TorchMemoryToolConfig
           trace_alloc_max_entries: ${oc.select:global_profiler.global_tool_config.torch_memory.trace_alloc_max_entries,100000}
           stack_depth: ${oc.select:global_profiler.global_tool_config.torch_memory.stack_depth,32}
+        precision_debugger:
+          _target_: verl.utils.profiler.config.PrecisionDebuggerToolConfig
+          config_path: ${oc.select:global_profiler.global_tool_config.precision_debugger.config_path,null}
+          steps: null
+          stages: ${oc.select:global_profiler.global_tool_config.precision_debugger.stages,null}
+          strict: ${oc.select:global_profiler.global_tool_config.precision_debugger.strict,False}
     router_replay:
       _target_: verl.workers.config.RouterReplayConfig
       mode: disabled
@@ -189,6 +207,11 @@ actor_rollout_ref:
       enable_reentrant: false
       attn_implementation: ${oc.select:actor_rollout_ref.actor.veomni.attn_implementation,flash_attention_2}
       moe_implementation: ${oc.select:actor_rollout_ref.actor.veomni.moe_implementation,fused}
+      cross_entropy_loss_implementation: ${oc.select:actor_rollout_ref.actor.veomni.cross_entropy_loss_implementation,eager}
+      rms_norm_implementation: ${oc.select:actor_rollout_ref.actor.veomni.rms_norm_implementation,eager}
+      swiglu_mlp_implementation: ${oc.select:actor_rollout_ref.actor.veomni.swiglu_mlp_implementation,eager}
+      rotary_pos_emb_implementation: ${oc.select:actor_rollout_ref.actor.veomni.rotary_pos_emb_implementation,eager}
+      load_balancing_loss_implementation: ${oc.select:actor_rollout_ref.actor.veomni.load_balancing_loss_implementation,eager}
       force_use_huggingface: false
       activation_gpu_limit: 0.0
     _target_: verl.workers.config.VeOmniActorConfig
@@ -247,11 +270,11 @@ actor_rollout_ref:
       enable: false
       max_assistant_turns: null
       tool_config_path: null
+      function_tool_path: null
       max_user_turns: null
       max_parallel_calls: 1
       max_tool_response_length: 256
       tool_response_truncate_side: middle
-      interaction_config_path: null
       use_inference_chat_template: false
       tokenization_sanity_check_mode: strict
       format: hermes
@@ -305,6 +328,12 @@ actor_rollout_ref:
           _target_: verl.utils.profiler.config.TorchProfilerToolConfig
           contents: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.torch.contents,[]}
           discrete: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.torch.discrete,false}
+        precision_debugger:
+          _target_: verl.utils.profiler.config.PrecisionDebuggerToolConfig
+          config_path: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.precision_debugger.config_path,${oc.select:global_profiler.global_tool_config.precision_debugger.config_path,null}}
+          steps: null
+          stages: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.precision_debugger.stages,${oc.select:global_profiler.global_tool_config.precision_debugger.stages,null}}
+          strict: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.precision_debugger.strict,${oc.select:global_profiler.global_tool_config.precision_debugger.strict,False}}
     prometheus:
       _target_: verl.workers.config.PrometheusConfig
       enable: false
@@ -315,6 +344,14 @@ actor_rollout_ref:
     quantization_config_file: null
     mtp: ${oc.select:actor_rollout_ref.model.mtp, null}
     qat: ${oc.select:actor_rollout_ref.actor.fsdp_config.qat,${oc.select:actor_rollout_ref.actor.megatron.qat,null}}
+    disaggregation:
+      enabled: false
+      prefill_replicas: 1
+      decode_replicas: 1
+      decode_tensor_model_parallel_size: null
+      transfer_backend: nixl
+      bootstrap_port: null
+      ib_device: null
   model:
     _target_: verl.workers.config.HFModelConfig
     path: ~/models/deepseek-llm-7b-chat
@@ -457,6 +494,11 @@ critic:
     enable_reentrant: false
     attn_implementation: flash_attention_2
     moe_implementation: fused
+    cross_entropy_loss_implementation: eager
+    rms_norm_implementation: eager
+    swiglu_mlp_implementation: eager
+    rotary_pos_emb_implementation: eager
+    load_balancing_loss_implementation: eager
     force_use_huggingface: false
     activation_gpu_limit: 0.0
   _target_: verl.workers.config.VeOmniCriticConfig
@@ -508,6 +550,12 @@ critic:
         _target_: verl.utils.profiler.config.TorchMemoryToolConfig
         trace_alloc_max_entries: ${oc.select:global_profiler.global_tool_config.torch_memory.trace_alloc_max_entries,100000}
         stack_depth: ${oc.select:global_profiler.global_tool_config.torch_memory.stack_depth,32}
+      precision_debugger:
+        _target_: verl.utils.profiler.config.PrecisionDebuggerToolConfig
+        config_path: ${oc.select:global_profiler.global_tool_config.precision_debugger.config_path,null}
+        steps: null
+        stages: ${oc.select:global_profiler.global_tool_config.precision_debugger.stages,null}
+        strict: ${oc.select:global_profiler.global_tool_config.precision_debugger.strict,False}
   model:
     _target_: verl.workers.config.HFModelConfig
     path: ~/models/deepseek-llm-7b-chat
@@ -685,7 +733,6 @@ algorithm:
 distillation:
   _target_: verl.workers.config.DistillationConfig
   enabled: false
-  num_workers: 8
   distillation_loss:
     _target_: verl.workers.config.DistillationLossConfig
     loss_mode: k3
@@ -699,36 +746,39 @@ distillation:
     clip_ratio: 0.2
     clip_ratio_low: 0.2
     clip_ratio_high: 0.2
-  teacher_model:
-    _target_: verl.workers.config.DistillationTeacherModelConfig
-    enable_resource_pool: false
-    n_gpus_per_node: 8
-    nnodes: 0
-    model_path: null
-    inference:
-      _target_: verl.workers.config.RolloutConfig
-      name: ${oc.select:actor_rollout_ref.rollout.name}
-      dtype: ${oc.select:actor_rollout_ref.rollout.dtype}
-      gpu_memory_utilization: 0.5
-      enforce_eager: true
-      cudagraph_capture_sizes: null
-      free_cache_engine: true
-      data_parallel_size: 1
-      expert_parallel_size: 1
-      tensor_model_parallel_size: 2
-      max_num_batched_tokens: 8192
-      max_model_len: null
-      max_num_seqs: 1024
-      load_format: auto
-      engine_kwargs: {}
-      limit_images: null
-      enable_chunked_prefill: true
-      enable_prefix_caching: true
-      disable_log_stats: true
-      skip_tokenizer_init: false
-      prompt_length: ${oc.select:actor_rollout_ref.rollout.prompt_length}
-      response_length: ${oc.select:actor_rollout_ref.rollout.response_length}
-      temperature: ${oc.select:actor_rollout_ref.rollout.temperature}
+  n_gpus_per_node: 8
+  nnodes: 0
+  teacher_models:
+    teacher_model:
+      _target_: verl.workers.config.DistillationTeacherModelConfig
+      key: null
+      model_path: null
+      num_replicas: 0
+      inference:
+        _target_: verl.workers.config.RolloutConfig
+        name: ${oc.select:actor_rollout_ref.rollout.name}
+        dtype: ${oc.select:actor_rollout_ref.rollout.dtype}
+        gpu_memory_utilization: 0.5
+        enforce_eager: true
+        cudagraph_capture_sizes: null
+        free_cache_engine: true
+        data_parallel_size: 1
+        expert_parallel_size: 1
+        tensor_model_parallel_size: 2
+        max_num_batched_tokens: 8192
+        max_model_len: null
+        max_num_seqs: 1024
+        load_format: auto
+        engine_kwargs: {}
+        limit_images: null
+        enable_chunked_prefill: true
+        enable_prefix_caching: true
+        disable_log_stats: true
+        skip_tokenizer_init: false
+        prompt_length: ${oc.select:actor_rollout_ref.rollout.prompt_length}
+        response_length: ${oc.select:actor_rollout_ref.rollout.response_length}
+        temperature: ${oc.select:actor_rollout_ref.rollout.temperature}
+  teacher_key: data_source
 trainer:
   balance_batch: true
   total_epochs: 30
@@ -758,7 +808,6 @@ trainer:
   max_critic_ckpt_to_keep: null
   ray_wait_register_center_timeout: 300
   device: cuda
-  use_legacy_worker_impl: disable
 global_profiler:
   _target_: verl.utils.profiler.ProfilerConfig
   tool: null
@@ -788,9 +837,7 @@ global_profiler:
       kw_args: {}
     precision_debugger:
       _target_: verl.utils.profiler.config.PrecisionDebuggerToolConfig
-      enable: false
       config_path: null
-      data_dir: outputs/precision_debug
       steps: null
       stages: null
       strict: false

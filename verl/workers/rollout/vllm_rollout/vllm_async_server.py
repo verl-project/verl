@@ -109,6 +109,14 @@ class vLLMHttpServer:
             cuda_visible_devices (str): cuda visible devices.
         """
         os.environ[get_visible_devices_keyword()] = cuda_visible_devices
+        os.environ["VERL_REPLICA_RANK"] = str(replica_rank)
+        # Forward the Ray job id into the vLLM worker subprocess so the
+        # colocated weight-transfer IPC socket path is unique per Ray job.
+        # Without this, two concurrent verl jobs on the same node both bind
+        # the same /tmp/rl-colocate-zmq-replica-0-rank-0.sock and one fails
+        # with EADDRINUSE; a stale socket from a crashed run trips the same
+        # error on restart.
+        os.environ["VERL_RAY_JOB_ID"] = ray.get_runtime_context().get_job_id()
 
         self.config = self._init_config(config)
         self.model_config = self._init_model_config(model_config)
@@ -283,7 +291,6 @@ class vLLMHttpServer:
                     served_model_name = served_model_name.split("/")[-1]
                 args["served_model_name"] = served_model_name
 
-        # mtp (None for diffusion models; only LLM models use speculative decoding)
         if self.config.mtp is not None and self.config.mtp.enable and self.config.mtp.enable_rollout:
             speculative_config = {
                 "method": self.config.mtp.method,
@@ -866,7 +873,8 @@ class vLLMHttpServer:
         """HYBRID sleep: lora adapters only need level=1; full weights need level=2."""
         # Don't use engine.sleep(level=2) here
         # lora only update adapter weights, so set sleep level to 1
-        if self.lora_as_adapter:
+        # vllm_ascend not support sleep_level now. Enabling EP during training may lead to accuracy issues.
+        if self.lora_as_adapter or is_torch_npu_available(check_device=False):
             sleep_level = 1
         else:
             sleep_level = 2
@@ -884,8 +892,11 @@ class vLLMReplica(RolloutReplica):
         gpus_per_node: int = 8,
         is_reward_model: bool = False,
         is_teacher_model: bool = False,
+        name_suffix: str = "",
     ):
-        super().__init__(replica_rank, config, model_config, gpus_per_node, is_reward_model, is_teacher_model)
+        super().__init__(
+            replica_rank, config, model_config, gpus_per_node, is_reward_model, is_teacher_model, name_suffix
+        )
         self.server_class = ray.remote(vLLMHttpServer)
 
     async def launch_servers(self):
@@ -921,11 +932,11 @@ class vLLMReplica(RolloutReplica):
             node_id = worker_node_ids[node_rank * gpus_per_replica_node]
             prefix = self._get_server_name_prefix()
             if self.is_reward_model:
-                name = f"{prefix}server_reward_{self.replica_rank}_{node_rank}"
+                name = f"{prefix}server_reward_{self.replica_rank}_{node_rank}{self.name_suffix}"
             elif self.is_teacher_model:
-                name = f"{prefix}server_teacher_{self.replica_rank}_{node_rank}"
+                name = f"{prefix}server_teacher_{self.replica_rank}_{node_rank}{self.name_suffix}"
             else:
-                name = f"{prefix}server_{self.replica_rank}_{node_rank}"
+                name = f"{prefix}server_{self.replica_rank}_{node_rank}{self.name_suffix}"
             server = self.server_class.options(
                 scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                     node_id=node_id,
@@ -1038,5 +1049,5 @@ class vLLMReplica(RolloutReplica):
             )
 
     def _get_server_name_prefix(self) -> str:
-        """Return the Ray actor name prefix (e.g. 'vllm_' or 'vllm_omni_')."""
+        """Return the Ray actor name prefix (e.g. 'vllm_')."""
         return "vllm_"

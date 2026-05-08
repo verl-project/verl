@@ -20,13 +20,13 @@ from typing import Any, Callable, Optional
 
 import ray
 from omegaconf import DictConfig
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel
 from ray.actor import ActorHandle
 
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup, ResourcePoolManager
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import is_torch_npu_available
-from verl.workers.config import DiffusionRolloutConfig, HFModelConfig, RolloutConfig
+from verl.workers.config import HFModelConfig, RolloutConfig
 
 logger = logging.getLogger(__file__)
 
@@ -43,21 +43,6 @@ class TokenOutput(BaseModel):
     """logprobs of response token ids"""
     routed_experts: Optional[Any] = None
     """routed experts of response token ids"""
-    stop_reason: Optional[str] = None
-    """stop reason: 'completed', 'aborted', or None for unknown"""
-    num_preempted: Optional[int] = None
-    """number of preempted times for metric calculation"""
-    extra_fields: dict[str, Any] = {}
-    """Extra fields for dynamic addition."""
-
-
-class DiffusionOutput(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    diffusion_output: Any
-    """generated image tensor (CHW format) / video tensor (TCHW format)"""
-    log_probs: Optional[Any] = None
-    """logprobs of generated image/video"""
     stop_reason: Optional[str] = None
     """stop reason: 'completed', 'aborted', or None for unknown"""
     num_preempted: Optional[int] = None
@@ -108,14 +93,15 @@ class RolloutReplica(ABC):
     def __init__(
         self,
         replica_rank: int,
-        config: RolloutConfig | DiffusionRolloutConfig,
+        config: RolloutConfig,
         model_config: DictConfig,
         gpus_per_node: int = 8,
         is_reward_model: bool = False,
         is_teacher_model: bool = False,
+        name_suffix: str = "",
     ) -> None:
         self.replica_rank = replica_rank
-        self.config: RolloutConfig | DiffusionRolloutConfig = omega_conf_to_dataclass(config)
+        self.config: RolloutConfig = omega_conf_to_dataclass(config)
         self.model_config: HFModelConfig = model_config
 
         self.world_size = (
@@ -131,6 +117,7 @@ class RolloutReplica(ABC):
         self.nnodes = self.world_size // self.gpus_per_replica_node
         self.is_reward_model = is_reward_model
         self.is_teacher_model = is_teacher_model
+        self.name_suffix = f"_{name_suffix}" if name_suffix else ""
 
         self.rollout_mode: RolloutMode = None
         self.workers: list[ActorHandle] = []
@@ -182,11 +169,11 @@ class RolloutReplica(ABC):
         use_gpu = self.rollout_worker_use_gpu()
 
         if self.is_reward_model:
-            name_prefix = f"rollout_reward_colocate_{self.replica_rank}"
+            name_prefix = f"rollout_reward_colocate_{self.replica_rank}{self.name_suffix}"
         elif self.is_teacher_model:
-            name_prefix = f"rollout_teacher_colocate_{self.replica_rank}"
+            name_prefix = f"rollout_teacher_colocate_{self.replica_rank}{self.name_suffix}"
         else:
-            name_prefix = f"rollout_colocate_{self.replica_rank}"
+            name_prefix = f"rollout_colocate_{self.replica_rank}{self.name_suffix}"
 
         worker_group = RayWorkerGroup(
             resource_pool=self.resource_pool,
@@ -204,32 +191,35 @@ class RolloutReplica(ABC):
         # create resource pool for this rollout
         self.rollout_mode = RolloutMode.STANDALONE
         if self.is_reward_model:
-            resource_pool_name = f"rollout_pool_reward_{self.replica_rank}"
+            resource_pool_name = f"rollout_pool_reward_{self.replica_rank}{self.name_suffix}"
         elif self.is_teacher_model:
-            resource_pool_name = f"rollout_pool_teacher_{self.replica_rank}"
+            resource_pool_name = f"rollout_pool_teacher_{self.replica_rank}{self.name_suffix}"
         else:
-            resource_pool_name = f"rollout_pool_{self.replica_rank}"
+            resource_pool_name = f"rollout_pool_{self.replica_rank}{self.name_suffix}"
         resource_pool_spec = {
             resource_pool_name: [self.gpus_per_replica_node] * self.nnodes,
         }
-        resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=None)
+        resource_pool_manager = ResourcePoolManager(
+            resource_pool_spec=resource_pool_spec,
+            mapping=None,
+            max_colocate_count=2,
+        )
         resource_pool_manager.create_resource_pool()
         self.resource_pool = resource_pool_manager.resource_pool_dict[resource_pool_name]
 
         # create worker group for this rollout
-        use_gpu = self.rollout_worker_use_gpu()
         if self.is_reward_model:
-            name_prefix = f"rollout_reward_standalone_{self.replica_rank}"
+            name_prefix = f"rollout_reward_standalone_{self.replica_rank}{self.name_suffix}"
         elif self.is_teacher_model:
-            name_prefix = f"rollout_teacher_standalone_{self.replica_rank}"
+            name_prefix = f"rollout_teacher_standalone_{self.replica_rank}{self.name_suffix}"
         else:
-            name_prefix = f"rollout_standalone_{self.replica_rank}"
+            name_prefix = f"rollout_standalone_{self.replica_rank}{self.name_suffix}"
         worker_group = RayWorkerGroup(
             resource_pool=self.resource_pool,
             ray_cls_with_init=self.get_ray_class_with_init_args(),
             bin_pack=False,
             name_prefix=name_prefix,
-            use_gpu=use_gpu,
+            use_gpu=True,
             device_name="cuda" if not is_torch_npu_available(check_device=False) else "npu",
         )
         self.workers = worker_group.workers
@@ -326,15 +316,6 @@ def _load_vllm():
     return vLLMReplica
 
 
-def _load_vllm_omni():
-    try:
-        from verl.workers.rollout.vllm_rollout.vllm_omni_async_server import vLLMOmniReplica
-    except ImportError as err:
-        raise ImportError("vllm-omni rollout requires vllm-omni to be installed.") from err
-
-    return vLLMOmniReplica
-
-
 def _load_sglang():
     os.environ["SGLANG_USE_CPU_ENGINE"] = "1"
 
@@ -389,9 +370,25 @@ def _load_trtllm():
 RolloutReplicaRegistry.register("vllm", _load_vllm)
 RolloutReplicaRegistry.register("sglang", _load_sglang)
 RolloutReplicaRegistry.register("trtllm", _load_trtllm)
-RolloutReplicaRegistry.register("vllm_omni", _load_vllm_omni)
 
 
-# Original function for backward compatibility
-def get_rollout_replica_class(rollout: str) -> type[RolloutReplica]:
+def get_rollout_replica_class(rollout: str, disaggregation_enabled: bool = False) -> type[RolloutReplica]:
+    """Resolve a replica class by backend name.
+
+    PD-disaggregated SGLang reuses the ``sglang`` backend name; the dispatch
+    here picks ``SGLangPDReplica`` only when the caller asserts
+    ``disaggregation_enabled=True`` (sourced from
+    ``RolloutConfig.disaggregation.enabled``). Validation in
+    ``RolloutConfig.__post_init__`` blocks the flag for non-SGLang names, so
+    this function only has to handle the SGLang fork.
+    """
+    if disaggregation_enabled:
+        if rollout != "sglang":
+            raise NotImplementedError(f"PD disaggregation is only supported with rollout='sglang'; got {rollout!r}.")
+        # _load_sglang side-effect: installs vllm mocks needed by SGLangPDReplica's
+        # transitive imports. Cheap if already installed.
+        RolloutReplicaRegistry.get("sglang")
+        from verl.workers.rollout.sglang_rollout.sglang_pd_replica import SGLangPDReplica
+
+        return SGLangPDReplica
     return RolloutReplicaRegistry.get(rollout)

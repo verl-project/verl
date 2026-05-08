@@ -294,7 +294,7 @@ docker/Dockerfile.rocm
         pybind11
         
     WORKDIR /workspace/
-    RUN git clone https://github.com/volcengine/verl.git && \
+    RUN git clone https://github.com/verl-project/verl.git && \
         cd verl && \
         pip install -e . 
     ##########################################

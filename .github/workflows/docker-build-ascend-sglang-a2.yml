@@ -5,7 +5,7 @@ on:
   push:
     branches: ["main"]
     paths:
-      - "docker/ascend/Dockerfile.ascend.sglang_8.3.rc1_a2"
+      - "docker/ascend/Dockerfile.ascend.sglang_8.5.0_a2"
       - ".github/workflows/docker-build-ascend-sglang-a2.yml"
   release:
     types: [published]
@@ -36,7 +36,7 @@ jobs:
       - name: Get base image name and tag
         id: base_image
         run: |
-          BASE_IMAGE_FULL=$(grep '^FROM' ./docker/ascend/Dockerfile.ascend.sglang_8.3.rc1_a2 | head -1 | cut -d' ' -f2)
+          BASE_IMAGE_FULL=$(grep '^FROM' ./docker/ascend/Dockerfile.ascend.sglang_8.5.0_a2 | head -1 | cut -d' ' -f2)
           echo "Base image full: $BASE_IMAGE_FULL" 
           BASE_IMAGE_TAG=$(echo "$BASE_IMAGE_FULL" | cut -d':' -f2)
           echo "Base image tag: $BASE_IMAGE_TAG"
@@ -74,7 +74,7 @@ jobs:
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          file: ./docker/ascend/Dockerfile.ascend.sglang_8.3.rc1_a2
+          file: ./docker/ascend/Dockerfile.ascend.sglang_8.5.0_a2
           push: true
           tags: |
             quay.io/ascend/verl:${{ steps.version.outputs.tag }}

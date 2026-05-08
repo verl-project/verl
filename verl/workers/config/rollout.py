@@ -19,11 +19,11 @@ from omegaconf import MISSING
 
 from verl.base_config import BaseConfig
 from verl.utils.profiler import ProfilerConfig
+from verl.workers.config.disaggregation import DisaggregationConfig
 from verl.workers.config.model import MtpConfig
 
 __all__ = [
     "SamplingConfig",
-    "DiffusionSamplingConfig",
     "MultiTurnConfig",
     "CustomAsyncServerConfig",
     "AgentLoopConfig",
@@ -31,7 +31,6 @@ __all__ = [
     "ServerConfig",
     "PrometheusConfig",
     "RolloutConfig",
-    "DiffusionRolloutConfig",
     "CheckpointEngineConfig",
     "SkipConfig",
 ]
@@ -64,24 +63,17 @@ class SamplingConfig(BaseConfig):
 
 
 @dataclass
-class DiffusionSamplingConfig(SamplingConfig):
-    noise_level: float = 0.0
-    num_inference_steps: int = 40
-    seed: int = 42
-
-
-@dataclass
 class MultiTurnConfig(BaseConfig):
     _mutable_fields = {"max_assistant_turns", "max_user_turns"}
 
     enable: bool = False
     max_assistant_turns: Optional[int] = None
     tool_config_path: Optional[str] = None
+    function_tool_path: Optional[str] = None
     max_user_turns: Optional[int] = None
     max_parallel_calls: int = 1
     max_tool_response_length: int = 256
     tool_response_truncate_side: str = "middle"
-    interaction_config_path: Optional[str] = None
     use_inference_chat_template: bool = False
     tokenization_sanity_check_mode: str = "strict"
     format: str = "hermes"
@@ -287,6 +279,8 @@ class RolloutConfig(BaseConfig):
 
     qat: Optional[dict] = None
 
+    disaggregation: DisaggregationConfig = field(default_factory=DisaggregationConfig)
+
     def __post_init__(self):
         """Validate the rollout config"""
         # Deprecation warning for mode field - only async mode is supported
@@ -334,25 +328,26 @@ class RolloutConfig(BaseConfig):
                     f"Current rollout {self.name=} not implemented pipeline_model_parallel_size > 1 yet."
                 )
 
+        # Hydra passes this as dict/DictConfig; coerce to dataclass so
+        # downstream .enabled etc. work. BaseConfig is frozen, hence object.__setattr__.
+        if isinstance(self.disaggregation, dict):
+            object.__setattr__(self, "disaggregation", DisaggregationConfig(**self.disaggregation))
+        elif not isinstance(self.disaggregation, DisaggregationConfig):
+            from omegaconf import DictConfig, OmegaConf
 
-@dataclass
-class DiffusionRolloutConfig(RolloutConfig):
-    _mutable_fields = {"max_model_len", "load_format"}
+            if not isinstance(self.disaggregation, DictConfig):
+                raise TypeError(
+                    f"rollout.disaggregation must be dict, DictConfig, or DisaggregationConfig; "
+                    f"got {type(self.disaggregation).__name__}."
+                )
+            object.__setattr__(
+                self,
+                "disaggregation",
+                DisaggregationConfig(**OmegaConf.to_container(self.disaggregation, resolve=True)),
+            )
 
-    val_kwargs: DiffusionSamplingConfig = field(default_factory=DiffusionSamplingConfig)
-
-    # diffusion use
-    height: int = 512
-
-    width: int = 512
-
-    num_inference_steps: int = 10
-
-    def __post_init__(self):
-        """Validate diffusion rollout config"""
-        super().__post_init__()
-
-        if self.pipeline_model_parallel_size > 1 and self.name == "vllm_omni":
-            raise NotImplementedError(
-                f"Current rollout {self.name=} not implemented pipeline_model_parallel_size > 1 yet."
+        if self.disaggregation.enabled and self.name != "sglang":
+            raise ValueError(
+                f"rollout.disaggregation.enabled=True is currently only supported with "
+                f"rollout.name='sglang'; got {self.name!r}. (vLLM PD is a tracked follow-up.)"
             )

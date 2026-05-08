@@ -28,7 +28,8 @@ from verl.trainer.ppo.ray_trainer import ResourcePoolManager
 from verl.utils import omega_conf_to_dataclass
 from verl.utils.dataset.rl_dataset import RLHFDataset, collate_fn
 from verl.utils.device import get_device_name
-from verl.workers.fsdp_workers import ActorRolloutRefWorker, AsyncActorRolloutRefWorker
+from verl.workers.engine_workers import ActorRolloutRefWorker
+from verl.workers.rollout.llm_server import LLMServerManager
 
 
 def test_agent_reward_loop_standalone():
@@ -80,9 +81,8 @@ def test_agent_reward_loop_standalone():
     config.reward.custom_reward_function.name = "compute_score_gsm8k"
 
     # 1. init reward model manager
-    actor_rollout_cls = (
-        AsyncActorRolloutRefWorker if config.actor_rollout_ref.rollout.mode == "async" else ActorRolloutRefWorker
-    )
+    # The unified model-engine ActorRolloutRefWorker supports both sync and async rollout modes.
+    actor_rollout_cls = ActorRolloutRefWorker
     global_pool_id = "global_pool"
     resource_pool_spec = {
         global_pool_id: [config.trainer.n_gpus_per_node] * config.trainer.nnodes,
@@ -98,15 +98,16 @@ def test_agent_reward_loop_standalone():
     )
     actor_rollout_wg.init_model()
 
+    llm_server_manager = LLMServerManager.create(config=config, worker_group=actor_rollout_wg)
     agent_loop_manager = AgentLoopManager.create(
         config=config,
-        worker_group=actor_rollout_wg,
+        llm_client=llm_server_manager.get_client(),
     )
     # sleep rollout replicas
     checkpoint_manager = CheckpointEngineManager(
         config=omega_conf_to_dataclass(config.actor_rollout_ref.rollout.checkpoint_engine),
         trainer=actor_rollout_wg,
-        replicas=agent_loop_manager.rollout_replicas,
+        replicas=llm_server_manager.get_replicas(),
     )
     checkpoint_manager.sleep_replicas()
     reward_loop_manager = RewardLoopManager(config, rm_resource_pool=resource_pool)

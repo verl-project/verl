@@ -159,20 +159,30 @@ def get_non_tensor_data(data: TensorDict, key: str, default):
     return unwrap_non_tensor_data(output)
 
 
-def _as_nested_tensor_for_key(tensors: list[torch.Tensor], key: str | None = None) -> torch.Tensor:
-    """Build a jagged NestedTensor, preserving the sequence ragged axis for mRoPE position IDs."""
-    if key == "position_ids" and tensors and tensors[0].dim() == 2:
-        values = torch.cat(tensors, dim=-1)
-        lengths = [tensor.shape[-1] for tensor in tensors]
-        offsets = torch.zeros(len(lengths) + 1, dtype=torch.long, device=values.device)
-        offsets[1:] = torch.cumsum(torch.tensor(lengths, dtype=torch.long, device=values.device), dim=0)
-        nested = torch.nested.nested_tensor_from_jagged(values, offsets=offsets)
-        nested._ragged_idx = 2
-        return nested
-    return torch.nested.as_nested_tensor(tensors, layout=torch.jagged)
+def nested_tensor_from_tensor_list(tensors: list[torch.Tensor], ragged_idx: int | None = None) -> torch.Tensor:
+    assert len(tensors) > 0, "Must provide at least one tensor"
+    sample_dim = tensors[0].dim()
+    if ragged_idx is None:
+        ragged_idx = sample_dim
+    assert 1 <= ragged_idx <= sample_dim, (
+        f"ragged_idx must be in [1, {sample_dim}]. Got {ragged_idx=} and {sample_dim=}"
+    )
+
+    if sample_dim == 1:
+        return torch.nested.as_nested_tensor(tensors, layout=torch.jagged)
+
+    cat_dim = ragged_idx - 1
+    values = torch.cat(tensors, dim=cat_dim)
+    lengths = torch.tensor([tensor.shape[cat_dim] for tensor in tensors], dtype=torch.long, device=values.device)
+    offsets = torch.zeros(len(tensors) + 1, dtype=torch.long, device=values.device)
+    torch.cumsum(lengths, dim=0, out=offsets[1:])
+
+    nested_tensor = torch.nested.nested_tensor_from_jagged(values=values, offsets=offsets)
+    nested_tensor._ragged_idx = ragged_idx
+    return nested_tensor
 
 
-def concat_nested_tensors(tensors: list[torch.Tensor], key: str | None = None) -> torch.Tensor:
+def concat_nested_tensors(tensors: list[torch.Tensor]) -> torch.Tensor:
     """Concatenate multiple nested tensors along the batch dimension.
 
     Takes a list of nested tensors with jagged layout and concatenates them
@@ -204,8 +214,8 @@ def concat_nested_tensors(tensors: list[torch.Tensor], key: str | None = None) -
         unbind_tensor = tensor.unbind(0)
         unbind_tensors.extend(list(unbind_tensor))
 
-    tensor = _as_nested_tensor_for_key(unbind_tensors, key=key)
-    return tensor
+    ragged_idx = getattr(tensors[0], "_ragged_idx", tensors[0].dim() - 1)
+    return nested_tensor_from_tensor_list(unbind_tensors, ragged_idx=ragged_idx)
 
 
 def concat_tensordict_with_none_bsz(data: list[TensorDict]):
@@ -284,7 +294,7 @@ def concat_tensordict(data: list[TensorDict]) -> TensorDict:
     # Concatenate and add nested tensors to the output
     for key in nested_tensor_keys:
         nested_tensors_to_concat = [td[key] for td in data]
-        output[key] = concat_nested_tensors(nested_tensors_to_concat, key=key)
+        output[key] = concat_nested_tensors(nested_tensors_to_concat)
 
     return output
 
@@ -349,15 +359,17 @@ def chunk_tensordict(td: TensorDict, chunks: int) -> list[TensorDict]:
             lengths = offsets.diff().tolist()
             for i, chunk_td in enumerate(tds):
                 chunk_lengths = lengths[i * chunk_size : (i + 1) * chunk_size]
-                if key == "position_ids":
-                    chunk_tensors = [padded_chunks[i][j, :, :seq_len] for j, seq_len in enumerate(chunk_lengths)]
-                else:
-                    chunk_tensors = [padded_chunks[i][j, :seq_len] for j, seq_len in enumerate(chunk_lengths)]
-                chunk_td[key] = _as_nested_tensor_for_key(chunk_tensors, key=key)
+                chunk_tensors = [padded_chunks[i][j, :seq_len] for j, seq_len in enumerate(chunk_lengths)]
+                chunk_td[key] = nested_tensor_from_tensor_list(
+                    chunk_tensors, ragged_idx=getattr(nt, "_ragged_idx", nt.dim() - 1)
+                )
             continue
 
         for i, chunk_td in enumerate(tds):
-            chunk_td[key] = _as_nested_tensor_for_key(tensors[i * chunk_size : (i + 1) * chunk_size], key=key)
+            chunk_td[key] = nested_tensor_from_tensor_list(
+                list(tensors[i * chunk_size : (i + 1) * chunk_size]),
+                ragged_idx=getattr(nt, "_ragged_idx", nt.dim() - 1),
+            )
 
     return tds
 
@@ -481,7 +493,10 @@ def index_select_tensor_dict(batch: TensorDict, indices: torch.Tensor | list[int
                 data_dict[key] = tensor[indices]
             elif isinstance(tensor, torch.Tensor) and tensor.is_nested:
                 tensor_lst = tensor.unbind()  # for performance
-                data_dict[key] = _as_nested_tensor_for_key([tensor_lst[idx] for idx in indices], key=key)
+                selected_tensors = [tensor_lst[idx] for idx in indices]
+                data_dict[key] = nested_tensor_from_tensor_list(
+                    selected_tensors, ragged_idx=getattr(tensor, "_ragged_idx", tensor.dim() - 1)
+                )
             else:
                 # This handles NonTensorStack (indexable by batch dim) and NonTensorData (scalar metadata).
                 if tensor.shape:
@@ -896,8 +911,24 @@ def maybe_fix_3d_position_ids(data: TensorDict):
     # note for tensordict with pickle/unpickle. nested tensor in tensordict after consolidate and pickle/unpickle
     # will incur indexing error for ragged tensor. This only happens when using 3D position ids in VLMs.
     # This is likely a bug in tensordict. As a workaround, we manually set _ragged_index.
-    if "position_ids" in data.keys() and data["position_ids"].dim() == 3 and data["position_ids"].is_nested:
-        data["position_ids"]._ragged_idx = 2
+    if "position_ids" not in data.keys():
+        return
+
+    position_ids = data["position_ids"]
+    if not (isinstance(position_ids, torch.Tensor) and position_ids.dim() == 3 and position_ids.is_nested):
+        return
+
+    input_ids = data.get("input_ids", None)
+    if isinstance(input_ids, torch.Tensor) and input_ids.is_nested:
+        total_seq_len = int(input_ids.offsets().diff().sum().item())
+        values_shape = tuple(position_ids.values().shape)
+        if total_seq_len not in values_shape:
+            raise RuntimeError(
+                "Invalid 3D nested position_ids storage: expected values shape to contain "
+                f"total sequence length {total_seq_len}, got {values_shape}."
+            )
+
+    position_ids._ragged_idx = 2
 
 
 def list_of_dict_to_tensordict(list_of_dicts: list[dict[str, Any]]) -> TensorDict:

@@ -91,6 +91,10 @@ entropy_coeff: 0
 # When true, the actor forward will request entropy from the model
 calculate_entropy: false
 
+# This computes Σπ² needed for the Logit-Gradient Norm proxy W(τ) = Σ_t[1 - 2π_t + Σπ²]
+# c.f. https://yingru.notion.site/The-Optimal-Token-Baseline-399211a558b782cfa936014c0d42dfb8
+calculate_sum_pi_squared: false
+
 # Whether to use KL loss instead of KL reward penalty. True for GRPO
 use_kl_loss: false
 
@@ -239,6 +243,26 @@ profiler:
 
       # Stack trace depth for memory allocations
       stack_depth: ${oc.select:global_profiler.global_tool_config.torch_memory.stack_depth,32}
+
+    # msprobe precision debugger config
+    precision_debugger:
+
+      # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+      _target_: verl.utils.profiler.config.PrecisionDebuggerToolConfig
+
+      # Path to msprobe config json
+      config_path: ${oc.select:global_profiler.global_tool_config.precision_debugger.config_path,null}
+
+      # Deprecated and ignored. Use global_profiler.steps.
+      steps: null
+
+      # Profile stages
+      # Supported stages: actor_update, actor_compute_log_prob, ref_compute_log_prob,
+      # compute_values, critic_update, compute_rm_score
+      stages: ${oc.select:global_profiler.global_tool_config.precision_debugger.stages,null}
+
+      # Whether to fail on unknown stage or missing msprobe
+      strict: ${oc.select:global_profiler.global_tool_config.precision_debugger.strict,False}
 
 # Router replay configuration for MoE models
 router_replay:

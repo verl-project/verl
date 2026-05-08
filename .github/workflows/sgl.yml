@@ -63,7 +63,6 @@ on:
       - ".github/workflows/sgl.yml"
       - "tests/rollout/*sglang*"
       - "tests/rollout/async_rollout_utils.py"
-      - "tests/workers/rollout/*interaction*"
 
 # Cancel jobs on the same ref if a new one is triggered
 concurrency:
@@ -113,7 +112,7 @@ jobs:
       - name: Install the current repository
         run: |
           pip3 install cupy-cuda12x==13.6.0 pytest-asyncio
-          pip3 install hf_transfer fastmcp pytest-asyncio
+          pip3 install hf_transfer pytest-asyncio
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
       - name: Prepare gsm8k dataset
@@ -143,7 +142,7 @@ jobs:
       - name: Install the current repository
         run: |
           pip3 install cupy-cuda12x==13.6.0 pytest-asyncio
-          pip3 install hf_transfer fastmcp pytest-asyncio
+          pip3 install hf_transfer pytest-asyncio
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
       - name: Test SGLang ServerAdapter with Checkpoint Engine (NCCL)

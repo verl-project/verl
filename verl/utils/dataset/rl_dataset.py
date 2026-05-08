@@ -192,7 +192,7 @@ class RLHFDataset(Dataset):
 
                 def doc2len(doc) -> int:
                     try:
-                        messages = self._build_messages(doc)
+                        messages = self._build_messages(doc, key=self.prompt_key)
                         # pass tool schemas if available so the processor can format prompts
                         apply_kwargs = dict(**self.apply_chat_template_kwargs)
                         if self.tool_schemas is not None:
@@ -283,7 +283,7 @@ class RLHFDataset(Dataset):
     def __len__(self):
         return len(self.dataframe)
 
-    def _build_messages(self, example: dict):
+    def _build_messages(self, example: dict, key: str):
         """Replace multimodal placeholders in messages with structured content.
 
         This is required by processor.apply_chat_template.
@@ -297,11 +297,11 @@ class RLHFDataset(Dataset):
         Returns:
             messages: List of messages with replaced placeholder.
         """
-        messages: list = example[self.prompt_key]
-        # When concatenating image and video datasets, pop will return None for image or video sample
-        images = example.pop(self.image_key, None) or []
-        videos = example.pop(self.video_key, None) or []
-        audios = example.pop(self.audio_key, None) or []
+        messages: list = example[key]
+        # When concatenating multimodal datasets, get will return None for samples without a modality column.
+        images = example.get(self.image_key, None) or []
+        videos = example.get(self.video_key, None) or []
+        audios = example.get(self.audio_key, None) or []
 
         image_offset, video_offset, audio_offset = 0, 0, 0
         for message in messages:
@@ -358,7 +358,11 @@ class RLHFDataset(Dataset):
     def __getitem__(self, item):
         """For rollout, apply_chat_template has been moved to AgentLoop, so we only return raw_prompt here."""
         row_dict: dict = self.dataframe[item]
-        row_dict["raw_prompt"] = self._build_messages(row_dict)
+        row_dict["raw_prompt"] = self._build_messages(row_dict, key=self.prompt_key)
+
+        row_dict.pop(self.image_key, None)
+        row_dict.pop(self.video_key, None)
+        row_dict.pop(self.audio_key, None)
 
         # TODO(wuxibin): We still need a dummy tensor to make sure DataProto.batch is not empty.
         # Remove this after deprecate DataProto by TensorDict.

@@ -188,7 +188,6 @@ TRAINER_CONFIG=(
     trainer.test_freq=-1
     trainer.save_freq=-1
     trainer.total_training_steps=1
-    trainer.use_legacy_worker_impl=disable
 )
 
 # profiling configuration

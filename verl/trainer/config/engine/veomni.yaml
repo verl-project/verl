@@ -51,6 +51,17 @@ attn_implementation: flash_attention_2
 # eager or fused
 moe_implementation: fused
 
+# Kernel backends consumed by VeOmni's per-model device_patch
+# (apply_per_model_patches → OpsImplementationConfig). Defaults match VeOmni's
+# defaults; set rms_norm_implementation=triton + rotary_pos_emb_implementation=triton
+# on DeepSeek-V3 / Moonlight to keep the FSDP actor bitwise-aligned with vexact's
+# rollout. See VeOmni docs/design/kernel_selection.md for the full backend matrix.
+cross_entropy_loss_implementation: eager
+rms_norm_implementation: eager
+swiglu_mlp_implementation: eager
+rotary_pos_emb_implementation: eager
+load_balancing_loss_implementation: eager
+
 force_use_huggingface: false
 
 activation_gpu_limit: 0.0

@@ -29,6 +29,14 @@ VL_TYPE2INDEX = {
         "IMAGE_INPUT_INDEX": 151655,
         "VIDEO_INPUT_INDEX": 151656,
     },
+    "qwen3_5": {
+        "IMAGE_INPUT_INDEX": 248056,
+        "VIDEO_INPUT_INDEX": 248057,
+    },
+    "qwen3_5_moe": {
+        "IMAGE_INPUT_INDEX": 248056,
+        "VIDEO_INPUT_INDEX": 248057,
+    },
 }
 
 
@@ -108,4 +116,5 @@ def _map_moe_params_qwen3_moe(name, tensor):
 
 MOE_PARAM_HANDERS = {
     "qwen3_moe": _map_moe_params_qwen3_moe,
+    "deepseek_v3": _map_moe_params_qwen3_moe,
 }
