@@ -409,7 +409,7 @@ def preprocess_thd_engine(
                 ]
                 # Build position_ids for the remaining chunk: use remain_start as base,
                 # clamped to original seqlen to avoid exceeding seqlen-1 for padded positions
-                pos_end = min(remain_start + remain_len, seqlen_orig_i)
+                pos_end = min(remain_end, seqlen_orig_i)
                 valid_pos_len = pos_end - remain_start
                 if valid_pos_len > 0:
                     position_ids_rmpad[start_idx + half_seqlen : start_idx + half_seqlen + valid_pos_len] = (
