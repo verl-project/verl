@@ -454,12 +454,14 @@ data:
   truncation: error
   image_key: images
   video_key: videos
+  audio_key: audios
   trust_remote_code: false
   custom_cls:
     path: null
     name: null
   return_multi_modal_inputs: true
   apply_chat_template_kwargs: {}
+  mm_processor_kwargs: {}
 critic:
   optim:
     _target_: verl.workers.config.TorchtitanOptimizerConfig

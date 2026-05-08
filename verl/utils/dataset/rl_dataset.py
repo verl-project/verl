@@ -21,7 +21,7 @@ import re
 import traceback
 from collections import defaultdict
 from io import BytesIO
-from typing import Optional
+from typing import Any, Optional
 
 import datasets
 import numpy as np
@@ -32,7 +32,7 @@ from torch.utils.data import Dataset
 from transformers import PreTrainedTokenizer, ProcessorMixin
 
 from verl.utils.import_utils import load_extern_object
-from verl.utils.tokenizer import normalize_token_ids
+from verl.utils.tokenizer import build_multimodal_processor_inputs, normalize_token_ids
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +107,7 @@ class RLHFDataset(Dataset):
         self.prompt_key = config.get("prompt_key", "prompt")
         self.image_key = config.get("image_key", "images")
         self.video_key = config.get("video_key", "videos")
+        self.audio_key = config.get("audio_key", "audios")
         self.image_patch_size = config.get("image_patch_size", 14)
         self.max_prompt_length = config.get("max_prompt_length", 1024)
         self.return_raw_chat = config.get("return_raw_chat", False)
@@ -114,6 +115,7 @@ class RLHFDataset(Dataset):
         self.truncation = config.get("truncation", "error")
         self.filter_overlong_prompts = config.get("filter_overlong_prompts", True)
         self.apply_chat_template_kwargs = config.get("apply_chat_template_kwargs", {})
+        self.mm_processor_kwargs = config.get("mm_processor_kwargs", {})
 
         # Mirror AgentLoopWorker's tool loading so length filtering sees the
         # same schemas the rollout will.
@@ -195,11 +197,8 @@ class RLHFDataset(Dataset):
             tokenizer = self.tokenizer
             processor = self.processor
             prompt_key = self.prompt_key
-            image_key = self.image_key
-            video_key = self.video_key
 
             if processor is not None:
-                from verl.utils.dataset.vision_utils import process_image, process_video
 
                 def doc2len(doc) -> int:
                     try:
@@ -212,31 +211,10 @@ class RLHFDataset(Dataset):
                         raw_prompt = self.processor.apply_chat_template(
                             messages, add_generation_prompt=True, tokenize=False, **apply_kwargs
                         )
-                        if image_key in doc and doc[image_key]:
-                            images = [
-                                process_image(image, image_patch_size=self.image_patch_size) for image in doc[image_key]
-                            ]
-                        else:
-                            images = None
-
-                        if video_key in doc and doc[video_key]:
-                            videos, video_metadata = zip(
-                                *[
-                                    process_video(
-                                        video, image_patch_size=self.image_patch_size, return_video_metadata=True
-                                    )
-                                    for video in doc[video_key]
-                                ],
-                                strict=True,
-                            )
-                            videos = list(videos)
-                            video_metadata = list(video_metadata)
-                            videos_kwargs = {"video_metadata": video_metadata, "do_sample_frames": False}
-                        else:
-                            videos = None
-                            videos_kwargs = {}
-
-                        if images is None and videos is None:
+                        images, videos, audios = self._process_multi_modal_info(
+                            messages, self.image_patch_size, self.config
+                        )
+                        if images is None and videos is None and audios is None:
                             # only text prompt
                             return len(
                                 processor.tokenizer(
@@ -248,9 +226,14 @@ class RLHFDataset(Dataset):
                         else:
                             # multi-modal prompt
                             return len(
-                                processor(text=[raw_prompt], images=images, videos=videos, videos_kwargs=videos_kwargs)[
-                                    "input_ids"
-                                ][0]
+                                build_multimodal_processor_inputs(
+                                    processor,
+                                    text=[raw_prompt],
+                                    images=images,
+                                    videos=videos,
+                                    audio=audios,
+                                    mm_processor_kwargs=self.mm_processor_kwargs,
+                                )["input_ids"][0]
                             )
                     except Exception:
                         print("Error processing one of the samples, skipping...")
@@ -311,10 +294,12 @@ class RLHFDataset(Dataset):
         return len(self.dataframe)
 
     def _build_messages(self, example: dict, key: str):
-        """Replace <image> and <video> placeholder in messages with corresponding image and video
-        which is required by processor.apply_chat_template.
+        """Replace multimodal placeholders in messages with structured content.
+
+        This is required by processor.apply_chat_template.
         - <image>: {"type": "image", **image}
         - <video>: {"type": "video", **video}
+        - <audio>: {"type": "audio", **audio}
 
         Args:
             example: Row dictionary from dataframe.
@@ -323,22 +308,23 @@ class RLHFDataset(Dataset):
             messages: List of messages with replaced placeholder.
         """
         messages: list = example[key]
-        # When concatenating image and video datasets, get will return None for image or video sample
+        # When concatenating multimodal datasets, get will return None for samples without a modality column.
         images = example.get(self.image_key, None) or []
         videos = example.get(self.video_key, None) or []
+        audios = example.get(self.audio_key, None) or []
 
-        image_offset, video_offset = 0, 0
+        image_offset, video_offset, audio_offset = 0, 0, 0
         for message in messages:
-            if not images and not videos:
+            if not images and not videos and not audios:
                 continue
-            assert self.processor is not None, "processor is needed to process image and video"
+            assert self.processor is not None, "processor is needed to process multimodal data"
 
             content = message["content"]
             if not isinstance(content, str):
                 continue
 
             content_list = []
-            segments = re.split("(<image>|<video>)", content)
+            segments = re.split("(<image>|<video>|<audio>)", content)
             segments = [item for item in segments if item != ""]
             for segment in segments:
                 if segment == "<image>":
@@ -358,12 +344,25 @@ class RLHFDataset(Dataset):
                     assert video_offset < len(videos), f"video_offset {video_offset} >= len(videos) {len(videos)}"
                     content_list.append({"type": "video", **videos[video_offset]})
                     video_offset += 1
+                elif segment == "<audio>":
+                    assert audio_offset < len(audios), f"audio_offset {audio_offset} >= len(audios) {len(audios)}"
+                    audio = audios[audio_offset]
+                    if isinstance(audio, dict):
+                        payload = dict(audio)
+                        payload["type"] = "audio"
+                        if "audio" not in payload and "audio_url" not in payload:
+                            payload = {"type": "audio", "audio": audio}
+                        content_list.append(payload)
+                    else:
+                        content_list.append({"type": "audio", "audio": audio})
+                    audio_offset += 1
                 else:
                     content_list.append({"type": "text", "text": segment})
             message["content"] = content_list
 
         assert image_offset == len(images), f"image_offset {image_offset} != len(images) {len(images)}"
         assert video_offset == len(videos), f"video_offset {video_offset} != len(videos) {len(videos)}"
+        assert audio_offset == len(audios), f"audio_offset {audio_offset} != len(audios) {len(audios)}"
         return messages
 
     def __getitem__(self, item):
@@ -373,6 +372,7 @@ class RLHFDataset(Dataset):
 
         row_dict.pop(self.image_key, None)
         row_dict.pop(self.video_key, None)
+        row_dict.pop(self.audio_key, None)
 
         # TODO(wuxibin): We still need a dummy tensor to make sure DataProto.batch is not empty.
         # Remove this after deprecate DataProto by TensorDict.
@@ -383,11 +383,13 @@ class RLHFDataset(Dataset):
             row_dict["extra_info"] = dict()
         index = row_dict.get("extra_info", {}).get("index", 0)
         tools_kwargs = row_dict.get("extra_info", {}).get("tools_kwargs", {})
+        interaction_kwargs = row_dict.get("extra_info", {}).get("interaction_kwargs", {})
         need_tools_kwargs = row_dict.get("extra_info", {}).get("need_tools_kwargs", self.need_tools_kwargs)
         if need_tools_kwargs and not tools_kwargs:
             logger.warning("tools_kwargs is empty for index %s, data source: %s", index, row_dict["data_source"])
         row_dict["index"] = index
         row_dict["tools_kwargs"] = tools_kwargs
+        row_dict["interaction_kwargs"] = interaction_kwargs
         return row_dict
 
     @classmethod
@@ -423,6 +425,56 @@ class RLHFDataset(Dataset):
 
         images, videos = process_vision_info(messages, image_patch_size=image_patch_size, return_video_metadata=True)
         return images, videos
+
+    @classmethod
+    def _extract_audio_info(cls, messages: list[dict]) -> list[Any]:
+        audios = []
+        for message in messages:
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for item in content:
+                if not isinstance(item, dict) or item.get("type") != "audio":
+                    continue
+                if "audio" in item:
+                    audios.append(item["audio"])
+                elif "audio_url" in item:
+                    audios.append(item["audio_url"])
+                else:
+                    audios.append({k: v for k, v in item.items() if k != "type"})
+        return audios or None
+
+    @classmethod
+    def _process_multi_modal_info(
+        cls,
+        messages: list[dict],
+        image_patch_size,
+        config: DictConfig,
+    ) -> tuple[list[Image.Image], list[Any], list[Any]]:
+        has_visual = any(
+            isinstance(message.get("content"), list)
+            and any(isinstance(item, dict) and item.get("type") in {"image", "video"} for item in message["content"])
+            for message in messages
+        )
+        if has_visual:
+            from qwen_vl_utils import process_vision_info
+
+            images, videos = process_vision_info(
+                messages, image_patch_size=image_patch_size, return_video_metadata=True
+            )
+        else:
+            images, videos = None, None
+        audios = cls._extract_audio_info(messages)
+        return images, videos, audios
+
+    @classmethod
+    async def process_multi_modal_info(
+        cls,
+        messages: list[dict],
+        image_patch_size,
+        config: DictConfig,
+    ) -> tuple[list[Image.Image], list[Any], list[Any]]:
+        return cls._process_multi_modal_info(messages, image_patch_size=image_patch_size, config=config)
 
     def split(self, num_splits: int):
         """

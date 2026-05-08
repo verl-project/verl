@@ -56,6 +56,8 @@ from verl.utils.transformers_compat import get_auto_model_for_vision2seq
 
 AutoModelForVision2Seq = get_auto_model_for_vision2seq()
 
+_VARLEN_MULTI_MODAL_KEYS = {"input_features", "feature_attention_mask"}
+
 
 class LambdaLayer(nn.Module):
     def __init__(self, fn):
@@ -710,6 +712,43 @@ def get_hf_auto_model_class(hf_config):
     return actor_module_class
 
 
+def _pad_last_dim_and_cat(values: list[torch.Tensor], key: str) -> torch.Tensor:
+    if not values:
+        raise ValueError(f"Cannot merge empty multi-modal input list for key {key!r}.")
+
+    def _format_tensor_shapes(values: list[torch.Tensor]) -> str:
+        return ", ".join(str(tuple(value.shape)) for value in values)
+
+    rank = values[0].dim()
+    if rank < 2:
+        raise RuntimeError(
+            f"Cannot pad multi-modal input {key!r} with rank {rank}; shapes: {_format_tensor_shapes(values)}"
+        )
+
+    middle_shape = values[0].shape[1:-1]
+    for value in values:
+        if value.dim() != rank or value.shape[1:-1] != middle_shape:
+            raise RuntimeError(
+                f"Cannot pad multi-modal input {key!r}; expected matching rank and non-batch/non-time "
+                f"dimensions, got shapes: {_format_tensor_shapes(values)}"
+            )
+
+    max_len = max(value.shape[-1] for value in values)
+    if all(value.shape[-1] == max_len for value in values):
+        return torch.cat(values, dim=0)
+
+    padded_values = []
+    for value in values:
+        if value.shape[-1] == max_len:
+            padded_values.append(value)
+            continue
+        padded_value = value.new_zeros((*value.shape[:-1], max_len))
+        padded_value[..., : value.shape[-1]] = value
+        padded_values.append(padded_value)
+
+    return torch.cat(padded_values, dim=0)
+
+
 def extract_multi_modal_inputs(
     batch_data: list[dict[str, torch.Tensor]],
     indices: Optional[list[int]] = None,
@@ -749,8 +788,16 @@ def extract_multi_modal_inputs(
     for key, values in multi_modal_inputs_collected.items():
         if has_image_bound:  # minicpm-o logic
             multi_modal_inputs[key] = values
+        elif key in _VARLEN_MULTI_MODAL_KEYS:
+            # some multi-modal keys with variable length are put in non-tensor batch,
+            # so we need to pad them manually.
+            multi_modal_inputs[key] = _pad_last_dim_and_cat(values, key)
         else:
-            multi_modal_inputs[key] = torch.cat(values, dim=0)
+            try:
+                multi_modal_inputs[key] = torch.cat(values, dim=0)
+            except RuntimeError as e:
+                shapes = ", ".join(str(tuple(value.shape)) for value in values)
+                raise RuntimeError(f"Failed to concatenate multi-modal input {key!r}; shapes: {shapes}") from e
 
     return multi_modal_inputs
 

@@ -62,6 +62,8 @@ class FullyAsyncLLMServerClient(LLMServerClient):
         sampling_params: dict[str, Any],
         image_data: Optional[list[Any]] = None,
         video_data: Optional[list[Any]] = None,
+        audio_data: Optional[list[Any]] = None,
+        mm_processor_kwargs: Optional[dict[str, Any]] = None,
     ) -> TokenOutput:
         """Generate tokens from prompt ids.
 
@@ -71,6 +73,8 @@ class FullyAsyncLLMServerClient(LLMServerClient):
             sampling_params (Dict[str, Any]): Sampling parameters for the chat completion.
             image_data (Optional[List[Any]]): Image data for the chat completion.
             video_data (Optional[List[Any]]): Video data for the chat completion.
+            audio_data (Optional[List[Any]]): Audio data for the chat completion.
+            mm_processor_kwargs (Optional[Dict[str, Any]]): Multimodal processor kwargs.
 
         Returns:
             TokenOutput: token output
@@ -99,6 +103,8 @@ class FullyAsyncLLMServerClient(LLMServerClient):
                 sampling_params=sampling_params,
                 image_data=image_data,
                 video_data=video_data,
+                audio_data=audio_data,
+                mm_processor_kwargs=mm_processor_kwargs,
             )
 
             # 2. merge output into final_output
