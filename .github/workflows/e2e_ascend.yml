@@ -177,7 +177,7 @@ jobs:
   vlm_rl_job:
     if: github.repository_owner == 'verl-project'
     name: E2E Ascend testing for RL training scenarios of VLM models
-    runs-on: linux-aarch64-a3-16
+    runs-on: linux-aarch64-a3-8
     timeout-minutes: 120
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-8.5.0-a3-ubuntu22.04-py3.11-latest
@@ -212,4 +212,38 @@ jobs:
         run: |
           ray stop --force
           bash tests/special_npu/run_qwen2_5_vl_3b_npu.sh
+          rm -rf $HOME/ckpts
+
+  gspo_30b:
+    if: github.repository_owner == 'verl-project'
+    name: E2E Ascend testing for RL training scenarios of VLM models
+    runs-on: linux-aarch64-a3-16
+    timeout-minutes: 120
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-8.5.0-a3-ubuntu22.04-py3.11-latest
+      options: >-
+        --shm-size 16g
+    env:
+      HF_ENDPOINT: "https://hf-mirror.com"
+      HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+    steps:
+      - name: Check npu and CANN info
+        run: |
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+          npu-smi info
+      - name: Check initial pip list from image
+        run: |
+          pip list
+      - name: Checkout verl-project/verl repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          clean: true
+      - name: Preprocess geo3k dataset
+        run: |
+          python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
+      - name: Running geo3k e2e training tests with GRPO on ASCEND NPU
+        run: |
+          ray stop --force
+          bash tests/special_npu/nightly_ci_ascend/run_gspo_qwen3_30b_megatron_npu.sh
           rm -rf $HOME/ckpts
