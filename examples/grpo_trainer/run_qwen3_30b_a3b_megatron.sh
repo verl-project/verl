@@ -160,6 +160,7 @@ case "${DEVICE}" in
                 +actor_rollout_ref.actor.optim.override_optimizer_config.use_precision_aware_optimizer=True
                 +actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_cpu_offload=True
             )
+        fi
         ;;
     *)
         echo "Unsupported DEVICE=${DEVICE}. Expected 'gpu' or 'npu'." >&2
