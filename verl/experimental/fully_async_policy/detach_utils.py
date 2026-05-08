@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import logging
+import os
 import time
 from collections import defaultdict
 from dataclasses import dataclass
@@ -34,6 +36,9 @@ try:
     _HAS_FLOW_LOG = True
 except ImportError:
     _HAS_FLOW_LOG = False
+
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 @dataclass
@@ -146,7 +151,7 @@ def assemble_batch_from_rollout_samples(
     if not rollout_samples:
         raise ValueError("Empty rollout_samples provided for batch assembly")
 
-    print(f"[BatchUtils] Assembling batch from {len(rollout_samples)} RolloutSample objects")
+    logger.info("[BatchUtils] Assembling batch from %d RolloutSample objects", len(rollout_samples))
 
     rollout_samples_batch = []
     rollout_status = rollout_samples[0].rollout_status
@@ -164,10 +169,10 @@ def assemble_batch_from_rollout_samples(
     for rs_idx, rs in enumerate(rollout_samples):
         # Skip empty batches (all rollouts in this sample were discarded).
         if rs.full_batch is None or len(rs.full_batch) == 0 or rs.full_batch.batch is None:
-            print(
-                f"[POTENTIAL ERROR][BatchUtils] Skipping empty sample[{rs_idx}] "
-                f"(sample_id={rs.sample_id}, all rollouts discarded)",
-                flush=True,
+            logger.error(
+                "[POTENTIAL ERROR][BatchUtils] Skipping empty sample[%d] (sample_id=%s, all rollouts discarded)",
+                rs_idx,
+                rs.sample_id,
             )
             continue
         batch = addition_process(rs.full_batch)
@@ -290,7 +295,7 @@ def assemble_batch_from_rollout_samples(
         }
     )
 
-    print(f"[BatchUtils] Batch assembly completed in {time.time() - start_time:.2f}s")
+    logger.info("[BatchUtils] Batch assembly completed in %.2fs", time.time() - start_time)
 
     if _HAS_FLOW_LOG:
         log_dataproto(final_batch, stage="assemble.final_output")
@@ -426,7 +431,7 @@ class MetricsAggregator:
         # Aggregate special metrics
         aggregated = self._special_metrics_aggergate(aggregated)
 
-        print(f"aggregated metrics done. cost {time.time() - t:.4f} seconds.")
+        logger.info("aggregated metrics done. cost %.4f seconds.", time.time() - t)
 
         return aggregated
 
@@ -473,9 +478,9 @@ def task_exception_handler(task: asyncio.Task):
         task.result()
     except asyncio.CancelledError:
         pass  # Task was cancelled, this is expected
-    except Exception as e:
-        print(f"Task {task.get_name()} failed with exception: {e}")
-        raise e
+    except Exception:
+        logger.exception("Task %s failed", task.get_name())
+        raise
 
 
 def safe_create_task(coro, name: str, task_set: set = None):

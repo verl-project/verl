@@ -396,15 +396,6 @@ def _build_one_intermediate_row(
     multi_modal_inputs = _compute_multi_modal_inputs(processor, tokenizer, multi_modal_data, input_ids)
     position_ids = _compute_position_ids(processor, input_ids, attention_mask, multi_modal_inputs)
 
-    logger.info(
-        "[_build_one_intermediate_row] multi_modal_data=%s, multi_modal_inputs_keys=%s, position_ids.shape=%s",
-        "None"
-        if multi_modal_data is None
-        else ("empty" if not multi_modal_data else f"keys={list(multi_modal_data.keys())}"),
-        list(multi_modal_inputs.keys()) if multi_modal_inputs else "empty",
-        tuple(position_ids.shape),
-    )
-
     # Build tensor batch
     tensor_batch: dict[str, torch.Tensor] = {
         "prompts": prompt_input_ids,

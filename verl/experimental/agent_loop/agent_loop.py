@@ -32,7 +32,6 @@ import logging
 import os
 import random
 from abc import ABC, abstractmethod
-from datetime import datetime
 from typing import Any, Optional
 from uuid import uuid4
 
@@ -532,15 +531,15 @@ class AgentLoopWorker:
                     where = f"{os.path.basename(tb.tb_frame.f_code.co_filename)}:{tb.tb_lineno}"
                 else:
                     where = "unknown"
-                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-                print(
-                    f"[{ts}] [POTENTIAL ERROR][AgentLoopWorker][ROLLOUT_EXCEPTION] "
-                    f"sample_index={trajectory_info[idx].get('sample_index')} "
-                    f"step={trajectory_info[idx].get('step')} "
-                    f"rollout_n={trajectory_info[idx].get('rollout_n')} "
-                    f"validate={trajectory_info[idx].get('validate')} "
-                    f"at={where} err={o!r}",
-                    flush=True,
+                logger.error(
+                    "[POTENTIAL ERROR][AgentLoopWorker][ROLLOUT_EXCEPTION] "
+                    "sample_index=%s step=%s rollout_n=%s validate=%s at=%s err=%r",
+                    trajectory_info[idx].get("sample_index"),
+                    trajectory_info[idx].get("step"),
+                    trajectory_info[idx].get("rollout_n"),
+                    trajectory_info[idx].get("validate"),
+                    where,
+                    o,
                 )
                 outputs.append(None)
             else:
@@ -556,23 +555,22 @@ class AgentLoopWorker:
         n_valid = len(valid_outputs)
         n_dropped = n_total - n_valid
         if n_dropped > 0:
-            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-            print(
-                f"[{ts}] [POTENTIAL ERROR][AgentLoopWorker][DROPPED_ROLLOUTS] "
-                f"dropped={n_dropped}/{n_total} "
-                f"(exceptions={n_exceptions}, "
-                f"agent_returned_none={n_dropped - n_exceptions})",
-                flush=True,
+            logger.error(
+                "[POTENTIAL ERROR][AgentLoopWorker][DROPPED_ROLLOUTS] "
+                "dropped=%d/%d (exceptions=%d, agent_returned_none=%d)",
+                n_dropped,
+                n_total,
+                n_exceptions,
+                n_dropped - n_exceptions,
             )
         if n_valid == 0:
             # Every rollout in this batch failed. Return an empty DataProto
             # so the caller can skip this chunk instead of crashing training
             # on transient env-side issues (e.g. desktop-env pool exhaustion).
-            print(
-                f"[POTENTIAL ERROR][AgentLoopWorker][ALL_ROLLOUTS_FAILED] "
-                f"all {n_total} rollouts discarded in this batch; "
-                f"returning empty DataProto",
-                flush=True,
+            logger.error(
+                "[POTENTIAL ERROR][AgentLoopWorker][ALL_ROLLOUTS_FAILED] "
+                "all %d rollouts discarded in this batch; returning empty DataProto",
+                n_total,
             )
             empty = DataProto()
             empty.meta_info["metrics"] = []
@@ -625,12 +623,14 @@ class AgentLoopWorker:
             )
             output: AgentLoopOutput = await agent_loop.run(sampling_params, trajectory_info=trajectory, **kwargs)
             if output is None:
-                print(
-                    f"[POTENTIAL ERROR][AgentLoopWorker][RUN_RETURNED_NONE] agent={agent_name} "
-                    f"sample_index={trajectory.get('sample_index')} "
-                    f"step={trajectory.get('step')} rollout_n={trajectory.get('rollout_n')} "
-                    f"validate={trajectory.get('validate')}",
-                    flush=True,
+                logger.error(
+                    "[POTENTIAL ERROR][AgentLoopWorker][RUN_RETURNED_NONE] agent=%s "
+                    "sample_index=%s step=%s rollout_n=%s validate=%s",
+                    agent_name,
+                    trajectory.get("sample_index"),
+                    trajectory.get("step"),
+                    trajectory.get("rollout_n"),
+                    trajectory.get("validate"),
                 )
                 # The agent loop explicitly discarded this rollout (e.g.
                 # fatal tool error, environment crash). Short-circuit here
@@ -795,15 +795,10 @@ class AgentLoopWorker:
         """Compute multi-modal inputs with image and video."""
         multi_modal_inputs = {}
         if self.processor is None:
-            logger.info("[_compute_multi_modal_inputs] processor is None, skipping multi-modal inputs")
             return multi_modal_inputs
 
         images = output.multi_modal_data.get("images")
         videos = output.multi_modal_data.get("videos")
-        logger.info(
-            f"[_compute_multi_modal_inputs] images={type(images).__name__}(len={len(images) if images else 0}), "
-            f"videos={type(videos).__name__}(len={len(videos) if videos else 0})"
-        )
         # split the videos and according metadatas
         if videos is not None:
             videos, video_metadatas = zip(*videos, strict=False)
@@ -829,12 +824,6 @@ class AgentLoopWorker:
         if image_grid_thw is not None:
             images_seqlens = torch.repeat_interleave(image_grid_thw[:, 1] * image_grid_thw[:, 2], image_grid_thw[:, 0])
             multi_modal_inputs["images_seqlens"] = images_seqlens
-        pixel_values_shape = multi_modal_inputs["pixel_values"].shape if "pixel_values" in multi_modal_inputs else "N/A"
-        logger.info(
-            f"[_compute_multi_modal_inputs] output keys: {list(multi_modal_inputs.keys())}, "
-            f"pixel_values shape: {pixel_values_shape}, "
-            f"image_grid_thw: {image_grid_thw}"
-        )
         return multi_modal_inputs
 
     def _compute_position_ids(self, input_ids, attention_mask, multi_modal_inputs) -> torch.Tensor:
@@ -1115,17 +1104,16 @@ class AgentLoopManager:
                 for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=True)
             ]
         )
-        if self.stream_teacher_with_rollout:
-            await self.teacher_model_manager.sleep()
 
         # Filter out chunks in which every rollout failed (env-level).
         # Workers signal this with ``all_rollouts_failed`` + empty batch.
         non_empty_outputs = [o for o in outputs if not o.meta_info.get("all_rollouts_failed", False)]
         n_failed_chunks = len(outputs) - len(non_empty_outputs)
         if n_failed_chunks > 0:
-            print(
-                f"[AgentLoopManager] skipped {n_failed_chunks}/{len(outputs)} chunks where all rollouts failed",
-                flush=True,
+            logger.warning(
+                "[AgentLoopManager] skipped %d/%d chunks where all rollouts failed",
+                n_failed_chunks,
+                len(outputs),
             )
         if not non_empty_outputs:
             # Every worker's chunk failed. Return an empty DataProto so the
