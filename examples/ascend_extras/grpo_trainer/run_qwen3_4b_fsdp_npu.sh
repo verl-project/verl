@@ -18,7 +18,7 @@ export LD_PRELOAD="/usr/lib/aarch64-linux-gnu/libjemalloc.so.2${LD_PRELOAD:+:$LD
 trainer_n_gpus_per_node=16
 trainer_nnodes=1
 trainer_project_name='verl_grpo_example_gsm8k'
-trainer_experiment_name="qwen3_4b_grpo_8npu}"
+trainer_experiment_name="qwen3_4b_grpo_8npu"
 
 RAY_DATA_HOME=${RAY_DATA_HOME:-"${HOME}/verl"}
 MODEL_PATH=${MODEL_PATH:-"${RAY_DATA_HOME}/models/Qwen3-4B"}

@@ -153,7 +153,7 @@ case "${DEVICE}" in
             rollout_max_model_len=$((max_prompt_length + max_response_length))
             rollout_max_num_batched_tokens=$(((max_prompt_length + max_response_length) * 1))
             EXTRA+=(
-                actor_rollout_ref.actor.megatron.expert_tensor_parallel_size=${train_etp}
+                actor_rollout_ref.actor.megatron.expert_tensor_parallel_size=${actor_etp}
                 actor_rollout_ref.rollout.expert_parallel_size=${gen_moe_ep}
                 actor_rollout_ref.rollout.data_parallel_size=${gen_dp}
                 +actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_offload_fraction=1
