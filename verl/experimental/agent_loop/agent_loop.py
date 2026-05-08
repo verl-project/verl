@@ -623,9 +623,7 @@ class AgentLoopWorker:
                 data_config=DictConfigWrap(self.config.data),
                 function_tools=FunctionToolListWrap(self.function_tools),
             )
-            output: AgentLoopOutput = await agent_loop.run(
-                sampling_params, trajectory_info=trajectory, **kwargs
-            )
+            output: AgentLoopOutput = await agent_loop.run(sampling_params, trajectory_info=trajectory, **kwargs)
             if output is None:
                 print(
                     f"[POTENTIAL ERROR][AgentLoopWorker][RUN_RETURNED_NONE] agent={agent_name} "
@@ -831,9 +829,10 @@ class AgentLoopWorker:
         if image_grid_thw is not None:
             images_seqlens = torch.repeat_interleave(image_grid_thw[:, 1] * image_grid_thw[:, 2], image_grid_thw[:, 0])
             multi_modal_inputs["images_seqlens"] = images_seqlens
+        pixel_values_shape = multi_modal_inputs["pixel_values"].shape if "pixel_values" in multi_modal_inputs else "N/A"
         logger.info(
             f"[_compute_multi_modal_inputs] output keys: {list(multi_modal_inputs.keys())}, "
-            f"pixel_values shape: {multi_modal_inputs['pixel_values'].shape if 'pixel_values' in multi_modal_inputs else 'N/A'}, "
+            f"pixel_values shape: {pixel_values_shape}, "
             f"image_grid_thw: {image_grid_thw}"
         )
         return multi_modal_inputs

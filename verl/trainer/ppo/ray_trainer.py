@@ -563,7 +563,8 @@ class RayPPOTrainer:
                 # desktop-env pool exhausted). Skip this validation batch
                 # rather than crashing training on a transient env issue.
                 print(
-                    "[POTENTIAL ERROR][RayPPOTrainer._validate] skipping validation batch: all rollouts failed (see rollout-side logs)",
+                    "[POTENTIAL ERROR][RayPPOTrainer._validate] skipping validation batch: "
+                    "all rollouts failed (see rollout-side logs)",
                     flush=True,
                 )
                 continue
@@ -595,10 +596,7 @@ class RayPPOTrainer:
                 if "uid" in test_output_gen_batch.non_tensor_batch:
                     out_uids = set(test_output_gen_batch.non_tensor_batch["uid"])
                 if out_uids and "uid" in test_batch.non_tensor_batch:
-                    keep_idx = [
-                        i for i, u in enumerate(test_batch.non_tensor_batch["uid"])
-                        if u in out_uids
-                    ]
+                    keep_idx = [i for i, u in enumerate(test_batch.non_tensor_batch["uid"]) if u in out_uids]
                 else:
                     keep_idx = list(range(actual_output_size))
                 idx_tensor = torch.tensor(keep_idx, dtype=torch.long)
@@ -675,8 +673,7 @@ class RayPPOTrainer:
             # exhausted for the entire val set). Return empty metrics so the
             # caller can log that validation was skipped without crashing.
             print(
-                "[RayPPOTrainer._validate] all validation iterations were skipped; "
-                "returning empty metrics",
+                "[RayPPOTrainer._validate] all validation iterations were skipped; returning empty metrics",
                 flush=True,
             )
             return {}

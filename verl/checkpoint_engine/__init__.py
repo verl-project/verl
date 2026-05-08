@@ -40,7 +40,7 @@ try:
 
     __all__ += ["NCCLCheckpointEngine"]
 except Exception as e:
-    warnings.warn(f"NCCLCheckpointEngine not available: {e}")
+    warnings.warn(f"NCCLCheckpointEngine not available: {e}", stacklevel=2)
     NCCLCheckpointEngine = None
 
 try:

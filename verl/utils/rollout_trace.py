@@ -227,7 +227,7 @@ def _collect_images_as_content_parts(obj, _depth=0, _parts=None):
         for v in obj.values():
             _collect_images_as_content_parts(v, _depth + 1, _parts)
         return _parts
-    if isinstance(obj, (list, tuple)):
+    if isinstance(obj, list | tuple):
         for v in obj:
             _collect_images_as_content_parts(v, _depth + 1, _parts)
         return _parts
@@ -259,7 +259,7 @@ def _to_mlflow_chat_messages(payload: dict, *, role: str, default_name: str = "p
             return None
         if isinstance(obj, dict):
             return {k: _strip_images(v, _depth + 1) for k, v in obj.items()}
-        if isinstance(obj, (list, tuple)):
+        if isinstance(obj, list | tuple):
             stripped = [_strip_images(v, _depth + 1) for v in obj]
             return type(obj)(stripped) if isinstance(obj, tuple) else stripped
         return obj
@@ -315,7 +315,7 @@ def _serialize_for_trace(obj, _depth=0, *, keep_pil: bool = False):
     if isinstance(obj, dict):
         out: dict = {}
         for k, v in obj.items():
-            if isinstance(v, (list, tuple)) and v and any(_is_pil_image(x) for x in v):
+            if isinstance(v, list | tuple) and v and any(_is_pil_image(x) for x in v):
                 # Flatten ``list[PIL | other]`` into ``{k}_0, {k}_1, ...``
                 # so that Weave's UI renders each element as an image slot.
                 non_image_items: list = []
@@ -330,7 +330,7 @@ def _serialize_for_trace(obj, _depth=0, *, keep_pil: bool = False):
                 out[k] = _serialize_for_trace(v, _depth + 1, keep_pil=keep_pil)
         return out
 
-    if isinstance(obj, (list, tuple)):
+    if isinstance(obj, list | tuple):
         serialized = [_serialize_for_trace(v, _depth + 1, keep_pil=keep_pil) for v in obj]
         return type(obj)(serialized) if isinstance(obj, tuple) else serialized
 
@@ -389,7 +389,7 @@ def rollout_trace_op(func):
             if tokenizer is None or not hasattr(tokenizer, "decode"):
                 return inputs_dict
             prompt_ids = inputs_dict.get("prompt_ids")
-            if prompt_ids is not None and isinstance(prompt_ids, (list, tuple)) and len(prompt_ids) > 0:
+            if prompt_ids is not None and isinstance(prompt_ids, list | tuple) and len(prompt_ids) > 0:
                 loop = get_event_loop()
                 prompt_text = await loop.run_in_executor(None, tokenizer.decode, prompt_ids)
                 inputs_dict = {**inputs_dict, "prompt_text": prompt_text}

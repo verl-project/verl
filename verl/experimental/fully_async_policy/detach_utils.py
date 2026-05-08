@@ -29,7 +29,7 @@ from verl.trainer.ppo.ray_trainer import compute_response_mask
 
 # Data flow logger — imported lazily to avoid hard dependency for non-GUI callers.
 try:
-    from recipe.fully_async_gui_agent.data_flow_logger import log_dataproto, log_message
+    from recipe.fully_async_gui_agent.data_flow_logger import log_dataproto
 
     _HAS_FLOW_LOG = True
 except ImportError:
@@ -153,7 +153,6 @@ def assemble_batch_from_rollout_samples(
     # Add a prefix to all rollout_status keys
     rollout_status = {f"fully_async/{key}": value for key, value in rollout_status.items()}
 
-    rollout_config = config.actor_rollout_ref.rollout
     # Cache-keyed intermediate payloads, one per RolloutSample. We keep them in
     # a side list (instead of inside per-sample meta_info) because
     # ``DataProto.concat`` only keeps meta_info from the first piece. After the
@@ -181,8 +180,7 @@ def assemble_batch_from_rollout_samples(
                 _ref_pos_ndim = pos_ndim
             else:
                 assert pos_ndim == _ref_pos_ndim, (
-                    f"[assemble] sample[{rs_idx}] position_ids.ndim={pos_ndim} "
-                    f"!= sample[0] ndim={_ref_pos_ndim}"
+                    f"[assemble] sample[{rs_idx}] position_ids.ndim={pos_ndim} != sample[0] ndim={_ref_pos_ndim}"
                 )
         # Strip ``intermediate_trajectories`` from ``non_tensor_batch`` and
         # move the payload into a side cache. This defers intermediate
@@ -200,9 +198,12 @@ def assemble_batch_from_rollout_samples(
     final_batch = DataProto.concat(rollout_samples_batch)
 
     # --- Assert: validate assembled batch ---
-    assert_batch_schema(final_batch, "assemble.after_concat",
-                        require_position_ids_ndim=_ref_pos_ndim,
-                        has_processor=processor is not None)
+    assert_batch_schema(
+        final_batch,
+        "assemble.after_concat",
+        require_position_ids_ndim=_ref_pos_ndim,
+        has_processor=processor is not None,
+    )
 
     # Stitch per-sample intermediate caches back onto the combined batch in
     # the same row order as the concat: sample_0 had rollout.n final rows,

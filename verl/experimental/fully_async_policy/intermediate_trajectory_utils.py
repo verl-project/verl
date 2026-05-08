@@ -41,7 +41,7 @@ from verl.utils.model import compute_position_id_with_mask
 
 # Data flow logger — imported lazily to avoid hard dependency.
 try:
-    from recipe.fully_async_gui_agent.data_flow_logger import log_dataproto, log_message
+    from recipe.fully_async_gui_agent.data_flow_logger import log_dataproto
 
     _HAS_FLOW_LOG = True
 except ImportError:
@@ -87,9 +87,7 @@ def assert_batch_schema(
     # 2. Batch-dim consistency: all tensors must have the same leading dim
     for k in batch.keys():
         t = batch[k]
-        assert t.shape[0] == n, (
-            f"[{stage}] tensor {k!r} has batch dim {t.shape[0]}, expected {n}"
-        )
+        assert t.shape[0] == n, f"[{stage}] tensor {k!r} has batch dim {t.shape[0]}, expected {n}"
 
     # 3. Required keys
     if expected_tensor_keys:
@@ -100,8 +98,7 @@ def assert_batch_schema(
     if require_position_ids_ndim is not None and "position_ids" in batch.keys():
         pos = batch["position_ids"]
         assert pos.ndim == require_position_ids_ndim, (
-            f"[{stage}] position_ids.ndim={pos.ndim}, expected {require_position_ids_ndim}, "
-            f"shape={tuple(pos.shape)}"
+            f"[{stage}] position_ids.ndim={pos.ndim}, expected {require_position_ids_ndim}, shape={tuple(pos.shape)}"
         )
 
     # 5. Seq-length consistency: input_ids, attention_mask, position_ids
@@ -109,9 +106,7 @@ def assert_batch_schema(
     if "input_ids" in batch.keys() and "attention_mask" in batch.keys():
         seq_len = batch["input_ids"].shape[-1]
         am_len = batch["attention_mask"].shape[-1]
-        assert seq_len == am_len, (
-            f"[{stage}] input_ids seq_len={seq_len} != attention_mask seq_len={am_len}"
-        )
+        assert seq_len == am_len, f"[{stage}] input_ids seq_len={seq_len} != attention_mask seq_len={am_len}"
         if "position_ids" in batch.keys():
             pos_seq = batch["position_ids"].shape[-1]
             assert pos_seq == seq_len, (
@@ -123,17 +118,13 @@ def assert_batch_schema(
     if "response_mask" in batch.keys() and "responses" in batch.keys():
         rm_len = batch["response_mask"].shape[-1]
         resp_len = batch["responses"].shape[-1]
-        assert rm_len == resp_len, (
-            f"[{stage}] response_mask seq_len={rm_len} != responses seq_len={resp_len}"
-        )
+        assert rm_len == resp_len, f"[{stage}] response_mask seq_len={rm_len} != responses seq_len={resp_len}"
 
     # 7. non_tensor_batch length consistency
     nt = data_proto.non_tensor_batch or {}
     for k, v in nt.items():
         if hasattr(v, "__len__"):
-            assert len(v) == n, (
-                f"[{stage}] non_tensor_batch[{k!r}] length={len(v)}, expected {n}"
-            )
+            assert len(v) == n, f"[{stage}] non_tensor_batch[{k!r}] length={len(v)}, expected {n}"
 
     # 8. Intermediate trajectories cache validation
     meta = data_proto.meta_info or {}
@@ -145,15 +136,11 @@ def assert_batch_schema(
 
         # 8a. Cache main_batch_size must match actual batch size
         if main_bsz is not None:
-            assert main_bsz == n, (
-                f"[{stage}] intermediate cache main_batch_size={main_bsz} != batch_size={n}"
-            )
+            assert main_bsz == n, f"[{stage}] intermediate cache main_batch_size={main_bsz} != batch_size={n}"
 
         # 8b. intermediate_col length must match batch size
         if interm_col is not None:
-            assert len(interm_col) == n, (
-                f"[{stage}] intermediate_col length={len(interm_col)} != batch_size={n}"
-            )
+            assert len(interm_col) == n, f"[{stage}] intermediate_col length={len(interm_col)} != batch_size={n}"
 
             # 8c. Each intermediate trajectory dict must have required keys
             #     and multi_modal_data when a VL processor is present
@@ -162,13 +149,11 @@ def assert_batch_schema(
                     continue
                 for traj_idx, traj in enumerate(row_list):
                     assert isinstance(traj, dict), (
-                        f"[{stage}] intermediate_col[{row_idx}][{traj_idx}] "
-                        f"is {type(traj).__name__}, expected dict"
+                        f"[{stage}] intermediate_col[{row_idx}][{traj_idx}] is {type(traj).__name__}, expected dict"
                     )
                     for required_key in ("prompt_ids", "response_ids", "response_mask"):
                         assert required_key in traj, (
-                            f"[{stage}] intermediate_col[{row_idx}][{traj_idx}] "
-                            f"missing required key {required_key!r}"
+                            f"[{stage}] intermediate_col[{row_idx}][{traj_idx}] missing required key {required_key!r}"
                         )
 
                     # VL model: warn (but don't fail) if an intermediate
@@ -177,14 +162,14 @@ def assert_batch_schema(
                     # _compute_position_ids handles this correctly.
                     if has_processor:
                         mm = traj.get("multi_modal_data")
-                        _has_vision = bool(
-                            mm and (mm.get("images") or mm.get("videos"))
-                        )
+                        _has_vision = bool(mm and (mm.get("images") or mm.get("videos")))
                         if not _has_vision:
                             logger.warning(
-                                "[%s] intermediate_col[%d][%d] has no "
-                                "multi_modal_data (got %r). num_turns=%s",
-                                stage, row_idx, traj_idx, mm,
+                                "[%s] intermediate_col[%d][%d] has no multi_modal_data (got %r). num_turns=%s",
+                                stage,
+                                row_idx,
+                                traj_idx,
+                                mm,
                                 traj.get("num_turns", "?"),
                             )
 
@@ -351,7 +336,9 @@ def _build_one_intermediate_row(
                 "[_build_one_intermediate_row] processor is present but intermediate "
                 "trajectory has no multi_modal_data (got %r). "
                 "prompt_ids_len=%d, response_ids_len=%d, num_turns=%s",
-                multi_modal_data, len(prompt_ids), len(response_ids),
+                multi_modal_data,
+                len(prompt_ids),
+                len(response_ids),
                 traj.get("num_turns", "?"),
             )
 
@@ -410,9 +397,9 @@ def _build_one_intermediate_row(
     position_ids = _compute_position_ids(processor, input_ids, attention_mask, multi_modal_inputs)
 
     logger.info(
-        "[_build_one_intermediate_row] multi_modal_data=%s, "
-        "multi_modal_inputs_keys=%s, position_ids.shape=%s",
-        "None" if multi_modal_data is None
+        "[_build_one_intermediate_row] multi_modal_data=%s, multi_modal_inputs_keys=%s, position_ids.shape=%s",
+        "None"
+        if multi_modal_data is None
         else ("empty" if not multi_modal_data else f"keys={list(multi_modal_data.keys())}"),
         list(multi_modal_inputs.keys()) if multi_modal_inputs else "empty",
         tuple(position_ids.shape),
@@ -926,7 +913,8 @@ def expand_intermediate_trajectories_pre_log_prob(
 
     # --- Assert: validate expanded batch schema ---
     assert_batch_schema(
-        expanded, "expand_pre_logprob.after_concat",
+        expanded,
+        "expand_pre_logprob.after_concat",
         require_position_ids_ndim=_pos_ndim,
     )
 

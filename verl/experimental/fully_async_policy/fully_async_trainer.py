@@ -498,35 +498,38 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             )
 
             batch = self._fit_compute_reward(batch)
-            assert_batch_schema(batch, "fit_step.after_reward",
-                                expected_tensor_keys=_CORE_KEYS,
-                                require_position_ids_ndim=_pos_ndim,
-                                has_processor=self.processor is not None)
+            assert_batch_schema(
+                batch,
+                "fit_step.after_reward",
+                expected_tensor_keys=_CORE_KEYS,
+                require_position_ids_ndim=_pos_ndim,
+                has_processor=self.processor is not None,
+            )
             self._log_training_diagnostics("after_reward", batch)
             # Expand intermediate trajectories (and pad to actor mini-batch
             # multiple) BEFORE any per-token forward pass, so that
             # log_prob / ref_log_prob / critic are computed over every
             # trajectory row that will participate in the actor update.
             batch = self._fit_expand_and_pad(batch)
-            assert_batch_schema(batch, "fit_step.after_expand_and_pad",
-                                expected_tensor_keys=_CORE_KEYS,
-                                require_position_ids_ndim=_pos_ndim)
+            assert_batch_schema(
+                batch,
+                "fit_step.after_expand_and_pad",
+                expected_tensor_keys=_CORE_KEYS,
+                require_position_ids_ndim=_pos_ndim,
+            )
             self._log_training_diagnostics("after_expand_and_pad", batch)
             batch = self._fit_compute_log_prob(batch)
-            assert_batch_schema(batch, "fit_step.after_log_prob",
-                                require_position_ids_ndim=_pos_ndim)
+            assert_batch_schema(batch, "fit_step.after_log_prob", require_position_ids_ndim=_pos_ndim)
             batch = self._fit_compute_ref_log_prob(batch)
             batch = self._fit_compute_critic(batch)
-            assert_batch_schema(batch, "fit_step.after_critic",
-                                require_position_ids_ndim=_pos_ndim)
+            assert_batch_schema(batch, "fit_step.after_critic", require_position_ids_ndim=_pos_ndim)
             self._log_training_diagnostics("after_log_prob_and_ref", batch)
             # Advantage is computed on the FINAL subset only (GRPO group
             # stats must not see intermediate rows), then the scalar is
             # broadcast to sibling intermediate rows and scaled by 1/T_rollout
             # so that every rollout contributes equally under token-mean.
             batch = self._fit_compute_advantage(batch)
-            assert_batch_schema(batch, "fit_step.after_advantage",
-                                require_position_ids_ndim=_pos_ndim)
+            assert_batch_schema(batch, "fit_step.after_advantage", require_position_ids_ndim=_pos_ndim)
             self._log_training_diagnostics("after_advantage_scatter_normalize", batch)
             batch = self._fit_update_critic(batch)
             batch = self._fit_update_actor(batch)
@@ -661,13 +664,13 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
                 return _fmt_tensor(v)
             if isinstance(v, np.ndarray):
                 return _fmt_ndarray(v)
-            if isinstance(v, (list, tuple)):
+            if isinstance(v, list | tuple):
                 return _fmt_sequence(v)
             if isinstance(v, dict):
                 keys = list(v.keys())
                 preview_keys = keys[:10]
                 return f"type=dict len={len(keys)} keys[:10]={preview_keys} repr={repr(v)[:MAX_PREVIEW_LEN]}"
-            if isinstance(v, (int, float, bool, str)) or v is None:
+            if isinstance(v, int | float | bool | str) or v is None:
                 return f"type={type(v).__name__} value={repr(v)[:MAX_PREVIEW_LEN]}"
             return f"type={type(v).__name__} repr={repr(v)[:MAX_PREVIEW_LEN]}"
 
@@ -714,7 +717,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
                         if cnt > 0:
                             n_rows_with += 1
                             total_trajs += cnt
-                        for traj in (row_list or []):
+                        for traj in row_list or []:
                             mm = traj.get("multi_modal_data") if isinstance(traj, dict) else None
                             if mm is None:
                                 per_traj_mm_status.append("None")
@@ -731,9 +734,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
                     f"per_row_counts={per_row_counts}"
                 )
                 if per_traj_mm_status:
-                    lines.append(
-                        f"      multi_modal_data_per_traj: [{', '.join(per_traj_mm_status)}]"
-                    )
+                    lines.append(f"      multi_modal_data_per_traj: [{', '.join(per_traj_mm_status)}]")
             else:
                 lines.append(f"    - {k!r}: {_fmt_any(v)}")
 
