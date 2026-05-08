@@ -684,6 +684,11 @@ _architecture_to_auto_class = {
 
 
 def get_hf_auto_model_class(hf_config):
+    if getattr(hf_config, "model_type", None) == "qwen3_omni_moe":
+        from transformers.models.qwen3_omni_moe import Qwen3OmniMoeThinkerForConditionalGeneration
+
+        return Qwen3OmniMoeThinkerForConditionalGeneration
+
     has_remote_code = hasattr(hf_config, "auto_map") and any(
         hf_config.architectures[0] in val for val in hf_config.auto_map.values()
     )

@@ -307,7 +307,7 @@ class RLHFDataset(Dataset):
         for message in messages:
             if not images and not videos and not audios:
                 continue
-            assert self.processor is not None, "processor is needed to process multimodal data"
+            assert self.processor is not None, "processor is needed to process image and video"
 
             content = message["content"]
             if not isinstance(content, str):
@@ -435,17 +435,82 @@ class RLHFDataset(Dataset):
         return audios or None
 
     @classmethod
+    def _extract_image_info(cls, messages: list[dict]) -> list[Image.Image] | None:
+        """Load image payloads from messages as raw PIL images, skipping any
+        pre-resize.
+
+        Mirrors ``_build_messages``' image cases — dict with ``image`` pointing
+        at a filesystem path / PIL object / bytes — but returns the PIL object
+        straight through without calling ``qwen_omni_utils.fetch_image`` or
+        ``qwen_vl_utils.fetch_image``. Those helpers compute
+        ``smart_resize(...)`` and call ``PIL.Image.resize(...)`` *before* the
+        HF processor runs its own resize pass; the double pass can perturb
+        ``pixel_values`` and inflate rollout/actor logprob differences on
+        mixed image+audio samples.
+        """
+        images: list[Image.Image] = []
+        for message in messages:
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for item in content:
+                if not isinstance(item, dict) or item.get("type") != "image":
+                    continue
+                payload = item.get("image")
+                if payload is None:
+                    payload = item.get("image_url") or item.get("path")
+                if isinstance(payload, Image.Image):
+                    images.append(payload.convert("RGB"))
+                elif isinstance(payload, str):
+                    images.append(Image.open(payload).convert("RGB"))
+                elif isinstance(payload, (bytes | bytearray)):
+                    images.append(Image.open(BytesIO(payload)).convert("RGB"))
+                elif isinstance(payload, dict) and "bytes" in payload:
+                    images.append(Image.open(BytesIO(payload["bytes"])).convert("RGB"))
+                else:
+                    return None  # unknown shape → let the legacy helper handle it
+        return images or None
+
+    @classmethod
     def _process_multi_modal_info(
         cls,
         messages: list[dict],
         image_patch_size,
         config: DictConfig,
     ) -> tuple[list[Image.Image], list[Any], list[Any]]:
+        use_audio_in_video = bool((config.get("mm_processor_kwargs", {}) or {}).get("use_audio_in_video", False))
+        has_audio = any(
+            isinstance(message.get("content"), list)
+            and any(isinstance(item, dict) and item.get("type") == "audio" for item in message["content"])
+            for message in messages
+        )
         has_visual = any(
             isinstance(message.get("content"), list)
             and any(isinstance(item, dict) and item.get("type") in {"image", "video"} for item in message["content"])
             for message in messages
         )
+        if has_audio or use_audio_in_video:
+            try:
+                from qwen_omni_utils import process_mm_info
+
+                audios, images, videos = process_mm_info(messages, use_audio_in_video=use_audio_in_video)
+                has_video = any(
+                    isinstance(m.get("content"), list)
+                    and any(isinstance(it, dict) and it.get("type") == "video" for it in m["content"])
+                    for m in messages
+                )
+                # ``qwen_omni_utils.fetch_image`` pre-resizes the image before
+                # the processor; the processor then resizes again. Skip the
+                # pre-resized images in favour of raw PIL objects when we have
+                # no video (video still needs fetch_video's frame-extraction).
+                if not has_video and not use_audio_in_video:
+                    raw_images = cls._extract_image_info(messages)
+                    if raw_images is not None:
+                        images = raw_images
+                return images, videos, audios
+            except Exception as e:
+                logger.warning("Failed to process audio inputs with qwen_omni_utils, fallback to generic path: %s", e)
+
         if has_visual:
             from qwen_vl_utils import process_vision_info
 

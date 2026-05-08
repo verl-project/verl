@@ -469,6 +469,15 @@ def apply_monkey_patch(
         if ulysses_sp_size > 1:
             patch_vlm_for_ulysses_input_slicing(Glm4vTextModel)
 
+    elif model.config.model_type in ["qwen3_omni_moe", "qwen3_omni_moe_thinker"]:
+        # Qwen3-Omni's concrete HF config reports ``model_type=qwen3_omni_moe``
+        # even for the Thinker model. Keep the historical thinker name here for
+        # compatibility with remote-code variants, but match the real config
+        # value as well so the Qwen3-Omni MoE patch is not silently skipped.
+        from verl.models.transformers.qwen3_omni_moe import patch_qwen3_omni_moe_sparse_moe_block_forward
+
+        patch_qwen3_omni_moe_sparse_moe_block_forward(model=model)
+
     elif model.config.model_type == "kimi_vl":
         if use_remove_padding or ulysses_sp_size > 1:
             # TODO: Changes need to be made when transformers are adapted.

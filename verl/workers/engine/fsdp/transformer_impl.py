@@ -57,6 +57,7 @@ from verl.utils.fsdp_utils import (
     normalize_peft_param_name,
     offload_fsdp_model_to_cpu,
     offload_fsdp_optimizer,
+    register_filtered_forward_input_cast_hooks,
     replace_lora_wrapper,
 )
 from verl.utils.model import convert_weight_keys, extract_multi_modal_inputs
@@ -230,8 +231,18 @@ class FSDPEngine(BaseEngine):
 
         torch_dtype = PrecisionType.to_dtype(torch_dtype)
 
+        # For composite configs like Qwen3-Omni (`model_type="qwen3_omni_moe"`), the
+        # outer config is only a container of sub-configs and does not expose common
+        # fields such as `tie_word_embeddings` (transformers>=5.3). Resolve the
+        # effective text/decoder config up-front so it is used both for meta-init
+        # gating and for `from_pretrained(config=...)`.
+        hf_effective_config = self.model_config.hf_config
+        if getattr(self.model_config.hf_config, "model_type", None) == "qwen3_omni_moe":
+            hf_effective_config = self.model_config.hf_config.thinker_config
+
         init_context = get_init_weight_context_manager(
-            use_meta_tensor=not self.model_config.hf_config.tie_word_embeddings, mesh=self.device_mesh
+            use_meta_tensor=not getattr(hf_effective_config, "tie_word_embeddings", False),
+            mesh=self.device_mesh,
         )
 
         with init_context(), warnings.catch_warnings():
@@ -243,7 +254,7 @@ class FSDPEngine(BaseEngine):
                 module = auto_class.from_pretrained(
                     pretrained_model_name_or_path=self.model_config.local_path,
                     torch_dtype=torch_dtype,
-                    config=self.model_config.hf_config,
+                    config=hf_effective_config,
                     trust_remote_code=self.model_config.trust_remote_code,
                 )
             else:
@@ -344,7 +355,17 @@ class FSDPEngine(BaseEngine):
             reduce_dtype = torch.float32
             buffer_dtype = torch.float32
 
-        mixed_precision = MixedPrecision(param_dtype=param_dtype, reduce_dtype=reduce_dtype, buffer_dtype=buffer_dtype)
+        # Disable FSDP's blanket forward-input cast. verl installs a filtered
+        # replacement hook below so coordinate-like inputs (e.g. Qwen3-Omni
+        # fractional position_ids) can stay in fp32 while regular floating
+        # inputs are still cast to the parameter compute dtype.
+        mixed_precision = MixedPrecision(
+            param_dtype=param_dtype,
+            reduce_dtype=reduce_dtype,
+            buffer_dtype=buffer_dtype,
+            cast_forward_inputs=False,
+            cast_root_forward_inputs=False,
+        )
 
         self._autocast_dtype = param_dtype
         # fp16 training requires loss scaling to avoid gradient underflow. Mirror the pattern
@@ -399,7 +420,7 @@ class FSDPEngine(BaseEngine):
             # - ref: CPUOffloadPolicy(pin_memory=True)
             assert CPUOffloadPolicy is not None, "PyTorch version >= 2.4 is required for using fully_shard API (FSDP2)"
             mp_policy = MixedPrecisionPolicy(
-                param_dtype=param_dtype, reduce_dtype=reduce_dtype, cast_forward_inputs=True
+                param_dtype=param_dtype, reduce_dtype=reduce_dtype, cast_forward_inputs=False
             )
             offload_policy = None
             if self.engine_config.offload_policy or self.engine_config.forward_only:
@@ -418,6 +439,10 @@ class FSDPEngine(BaseEngine):
             fsdp2_load_full_state_dict(module, full_state, fsdp_mesh, offload_policy)
         else:
             raise NotImplementedError(f"Unknown strategy {self.engine_config.strategy}")
+
+        self._filtered_forward_input_cast_hook_handles = register_filtered_forward_input_cast_hooks(
+            module, param_dtype, self.engine_config.strategy
+        )
 
         if self.model_config.enable_activation_offload:
             enable_gradient_checkpointing = self.model_config.enable_gradient_checkpointing
@@ -784,7 +809,17 @@ class FSDPEngine(BaseEngine):
     def get_per_tensor_param(self, layered_summon=False, base_sync_done=False, **kwargs):
         log_gpu_memory_usage("Before load_fsdp_model_to_gpu", logger=logger)
 
-        load_fsdp_model_to_gpu(self.module)
+        # When FSDP2 is wrapped with CPUOffloadPolicy (engine_config.offload_policy=True),
+        # params are pinned on CPU and FSDP2 itself streams them to GPU during forward.
+        # Manually calling load_fsdp_model_to_gpu breaks that invariant: the next
+        # state_dict() triggers DTensor dispatch + return_and_correct_aliasing, which
+        # in torch>=2.4 strictly checks that local-tensor device matches DTensor metadata
+        # and raises "Attempted to set the storage of a tensor on device cpu to a storage
+        # on different device cuda:0". The per-param .to(device).full_tensor() below
+        # already all-gathers correctly, so only manually load when params were manually
+        # offloaded (mirrors the offload_fsdp_model_to_cpu gate below).
+        if self._is_offload_param:
+            load_fsdp_model_to_gpu(self.module)
 
         log_gpu_memory_usage("After load_fsdp_model_to_gpu", logger=logger)
 
@@ -985,7 +1020,6 @@ class FSDPEngineWithLMHead(FSDPEngine):
             output_args["temperature_rmpad"] = temperature_rmpad
 
             # only pass input_ids and position_ids to enable flash_attn_varlen
-
             model_inputs = {
                 "input_ids": input_ids_rmpad,
                 "attention_mask": None,
@@ -1046,7 +1080,13 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
         return model_inputs, output_args
 
-    def prepare_model_outputs(self, output, output_args, micro_batch: TensorDict, logits_processor_func):
+    def prepare_model_outputs(
+        self,
+        output,
+        output_args,
+        micro_batch: TensorDict,
+        logits_processor_func,
+    ):
         use_remove_padding = tu.get_non_tensor_data(data=micro_batch, key="use_remove_padding", default=True)
         pad_mode = tu.get_non_tensor_data(data=micro_batch, key="pad_mode", default=DatasetPadMode.NO_PADDING)
         use_fused_kernels = tu.get_non_tensor_data(data=micro_batch, key="use_fused_kernels", default=False)
@@ -1225,7 +1265,10 @@ class FSDPEngineWithLMHead(FSDPEngine):
             )  # prevent model thinks we are generating
 
             model_output = self.prepare_model_outputs(
-                output=raw_output, output_args=output_args, micro_batch=micro_batch, logits_processor_func=loss_function
+                output=raw_output,
+                output_args=output_args,
+                micro_batch=micro_batch,
+                logits_processor_func=loss_function,
             )
 
             if loss_function is not None:

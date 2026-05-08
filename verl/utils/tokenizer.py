@@ -13,6 +13,7 @@
 # limitations under the License.
 """Utils for tokenization."""
 
+import json
 import types
 import warnings
 
@@ -20,6 +21,7 @@ __all__ = [
     "hf_tokenizer",
     "hf_processor",
     "normalize_token_ids",
+    "is_qwen3_omni_processor",
     "build_multimodal_processor_inputs",
     "get_processor_token_id",
 ]
@@ -62,6 +64,11 @@ def normalize_token_ids(tokenized_output) -> list[int]:
     return normalized_ids
 
 
+def is_qwen3_omni_processor(processor) -> bool:
+    """Return True when ``processor`` is a Qwen3-Omni processor."""
+    return processor is not None and processor.__class__.__name__ == "Qwen3OmniMoeProcessor"
+
+
 def get_processor_token_id(processor, token_name: str) -> int | None:
     """Resolve a multimodal special token id from a processor.
 
@@ -89,6 +96,64 @@ def get_processor_token_id(processor, token_name: str) -> int | None:
     return None
 
 
+def _ensure_qwen3_omni_processor_attrs(processor):
+    """Populate processor attributes expected by Qwen3-Omni helper methods.
+
+    The bound ``get_rope_index`` implementation expects these values on the
+    processor instance. Treat the model config as the single source of truth and
+    fail fast when it does not expose the required fields.
+    """
+
+    if not is_qwen3_omni_processor(processor):
+        return processor
+
+    config = getattr(processor, "config", None)
+    thinker_config = getattr(config, "thinker_config", None)
+    talker_config = getattr(config, "talker_config", None)
+    vision_config = getattr(thinker_config, "vision_config", None) or getattr(config, "vision_config", None)
+
+    def _get_config_attr(attr_name: str, sources):
+        for source in sources:
+            if source is None:
+                continue
+            value = getattr(source, attr_name, None)
+            if value is not None:
+                return value
+        return None
+
+    required_config_attrs = {
+        "image_token_id": (config, thinker_config, talker_config),
+        "video_token_id": (config, thinker_config, talker_config),
+        "audio_token_id": (config, thinker_config, talker_config),
+        "vision_start_token_id": (config, talker_config, thinker_config),
+        "vision_end_token_id": (config, talker_config, thinker_config),
+        "audio_start_token_id": (config, talker_config, thinker_config),
+        "audio_end_token_id": (config, talker_config, thinker_config),
+        "position_id_per_seconds": (config, talker_config, thinker_config),
+    }
+    missing_attrs = []
+    for attr_name, sources in required_config_attrs.items():
+        value = _get_config_attr(attr_name, sources=sources)
+        if value is None:
+            missing_attrs.append(attr_name)
+        else:
+            setattr(processor, attr_name, value)
+
+    if missing_attrs:
+        raise ValueError(
+            "Qwen3-Omni processor is missing required config attributes: "
+            f"{', '.join(missing_attrs)}. Please use a model config that exposes these fields."
+        )
+
+    if vision_config is not None:
+        for attr_name in ("spatial_merge_size", "tokens_per_second"):
+            value = getattr(vision_config, attr_name, None)
+            if value is not None:
+                setattr(processor, attr_name, value)
+
+    return processor
+
+
 def _split_videos_and_metadata(videos):
     if videos is None:
         return None, None
@@ -112,7 +177,7 @@ def build_multimodal_processor_inputs(
     """Build kwargs for multimodal processor calls.
 
     This keeps the existing VL flow intact while extending it with audio-aware
-    paths for processors that accept audio inputs.
+    paths needed by Qwen3-Omni and generic audio-input processors.
     """
     processor_kwargs = dict(mm_processor_kwargs or {})
     if audio is not None and "sampling_rate" not in processor_kwargs:
@@ -123,15 +188,14 @@ def build_multimodal_processor_inputs(
     videos, video_metadata = _split_videos_and_metadata(videos)
     processor_kwargs.setdefault("return_tensors", return_tensors)
 
+    if is_qwen3_omni_processor(processor):
+        return processor(text=text, images=images, videos=videos, audio=audio, **processor_kwargs)
+
     if video_metadata is not None:
         processor_kwargs.setdefault("video_metadata", video_metadata)
         processor_kwargs.setdefault("do_sample_frames", False)
 
-    processor_inputs = {"text": text, "images": images, "videos": videos, **processor_kwargs}
-    if audio is not None:
-        processor_inputs["audio"] = audio
-
-    return processor(**processor_inputs)
+    return processor(text=text, images=images, videos=videos, **processor_kwargs)
 
 
 def set_pad_token_id(tokenizer):
@@ -147,6 +211,42 @@ def set_pad_token_id(tokenizer):
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
         warnings.warn(f"tokenizer.pad_token is None. Now set to {tokenizer.eos_token}", stacklevel=1)
+
+
+def _load_external_chat_template(name_or_path, **kwargs):
+    # Some HF model repos (e.g. Qwen3-Omni) keep ``chat_template`` in a
+    # standalone ``chat_template.json`` rather than ``tokenizer_config.json``.
+    # ``AutoTokenizer`` does not consume that file, so the resulting tokenizer
+    # has ``chat_template is None``. Load it here as a fallback.
+    try:
+        from transformers.utils import cached_file
+    except ImportError:
+        return None
+
+    cached_file_kwargs = {
+        k: kwargs[k]
+        for k in ("cache_dir", "revision", "token", "proxies", "local_files_only", "trust_remote_code")
+        if k in kwargs
+    }
+    try:
+        resolved = cached_file(
+            name_or_path,
+            "chat_template.json",
+            _raise_exceptions_for_missing_entries=False,
+            _raise_exceptions_for_connection_errors=False,
+            **cached_file_kwargs,
+        )
+    except Exception:
+        return None
+
+    if not resolved:
+        return None
+
+    try:
+        with open(resolved) as f:
+            return json.load(f).get("chat_template")
+    except (OSError, ValueError):
+        return None
 
 
 def hf_tokenizer(name_or_path, correct_pad_token=True, correct_gemma2=True, **kwargs):
@@ -174,6 +274,10 @@ def hf_tokenizer(name_or_path, correct_pad_token=True, correct_gemma2=True, **kw
         kwargs["eos_token"] = "<end_of_turn>"
         kwargs["eos_token_id"] = 107
     tokenizer = AutoTokenizer.from_pretrained(name_or_path, **kwargs)
+    if getattr(tokenizer, "chat_template", None) is None:
+        external_template = _load_external_chat_template(name_or_path, **kwargs)
+        if external_template:
+            tokenizer.chat_template = external_template
     if correct_pad_token:
         set_pad_token_id(tokenizer)
     return tokenizer
@@ -203,7 +307,25 @@ def hf_processor(name_or_path, **kwargs):
         config = AutoConfig.from_pretrained(name_or_path, **kwargs)
 
         # Bind vlm model's get_rope_index method to processor.
-        processor.config = config
+        #
+        # For Qwen3-Omni, the bound ``get_rope_index`` is
+        # ``Qwen3OmniMoeThinkerForConditionalGeneration.get_rope_index`` and it
+        # reads ``self.config.vision_start_token_id`` / ``image_token_id`` /
+        # ``audio_start_token_id`` / ``position_id_per_seconds``. These attrs
+        # live on ``thinker_config``; the outer ``Qwen3OmniMoeConfig`` has
+        # ``im_start_token_id=151644`` which shadows ``vision_start_token_id``
+        # (151652) when used here. Binding the outer config makes the image
+        # branch of ``get_rope_index`` silently drop to the 1D-cumsum
+        # fallback: ``vision_start_indices`` points at ``<|im_start|>`` tokens
+        # instead of ``<|vision_start|>``, so ``image_nums`` evaluates to 0
+        # and 3D MRope for the image block is never applied. This leaves the
+        # actor forward disagreeing with the vLLM rollout (which uses the
+        # thinker config) and inflates ``rollout_probs_diff`` on image+audio
+        # samples by ~10x.
+        if processor.__class__.__name__ == "Qwen3OmniMoeProcessor":
+            processor.config = getattr(config, "thinker_config", config)
+        else:
+            processor.config = config
         model_class = None
         match processor.__class__.__name__:
             case "Qwen2VLProcessor":
@@ -218,6 +340,10 @@ def hf_processor(name_or_path, **kwargs):
                 from transformers.models.qwen3_vl import Qwen3VLModel
 
                 model_class = Qwen3VLModel
+            case "Qwen3OmniMoeProcessor":
+                from transformers.models.qwen3_omni_moe import Qwen3OmniMoeThinkerForConditionalGeneration
+
+                model_class = Qwen3OmniMoeThinkerForConditionalGeneration
             case "Glm4vImageProcessor":
                 from transformers.models.glm4v import Glm4vModel
 
@@ -229,8 +355,14 @@ def hf_processor(name_or_path, **kwargs):
 
         if model_class is not None:
             processor.get_rope_index = types.MethodType(model_class.get_rope_index, processor)
-            if hasattr(model_class, "get_vision_position_ids"):
-                processor.get_vision_position_ids = types.MethodType(model_class.get_vision_position_ids, processor)
+            # Qwen3-Omni's get_rope_index internally calls
+            # self.get_llm_pos_ids_for_vision when images/videos are present;
+            # bind it so mixed audio+vision batches don't AttributeError.
+            for helper_name in ("get_vision_position_ids", "get_llm_pos_ids_for_vision"):
+                helper = getattr(model_class, helper_name, None)
+                if helper is not None:
+                    setattr(processor, helper_name, types.MethodType(helper, processor))
+            _ensure_qwen3_omni_processor_attrs(processor)
     except Exception as e:
         processor = None
         # TODO(haibin.lin): try-catch should be removed after adding transformer version req to setup.py to avoid
@@ -240,5 +372,10 @@ def hf_processor(name_or_path, **kwargs):
     # https://github.com/huggingface/transformers/blob/v4.49.0/src/transformers/models/auto/processing_auto.py#L344
     if processor is not None and "Processor" not in processor.__class__.__name__:
         processor = None
+
+    if processor is not None and getattr(processor, "chat_template", None) is None:
+        external_template = _load_external_chat_template(name_or_path, **kwargs)
+        if external_template:
+            processor.chat_template = external_template
 
     return processor

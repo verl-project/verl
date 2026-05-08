@@ -24,7 +24,7 @@ from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast, Processor
 
 from verl.tools.schemas import OpenAIFunctionToolCall, OpenAIFunctionToolSchema, ToolResponse
 from verl.utils.model import compute_position_id_with_mask
-from verl.utils.tokenizer import build_multimodal_processor_inputs
+from verl.utils.tokenizer import build_multimodal_processor_inputs, is_qwen3_omni_processor
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -286,6 +286,7 @@ class AsyncRolloutRequest(BaseModel):
         multi_modal_inputs: Optional[dict[str, torch.Tensor]] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
     ) -> torch.Tensor:
+        mm_processor_kwargs = mm_processor_kwargs or {}
         # special case for qwen2vl
         is_qwen2vl = (
             hasattr(processing_class, "image_processor")
@@ -315,6 +316,39 @@ class AsyncRolloutRequest(BaseModel):
                 attention_mask=attention_mask.squeeze(0),
             )
             return new_position_ids  # (3, seq_len)
+        elif is_qwen3_omni_processor(processing_class):
+            from verl.models.transformers.qwen3_omni_moe import get_rope_index as qwen3_omni_get_rope_index
+
+            image_grid_thw = video_grid_thw = video_second_per_grid = feature_attention_mask = None
+            if multi_modal_inputs:
+                image_grid_thw = multi_modal_inputs.get("image_grid_thw")
+                video_grid_thw = multi_modal_inputs.get("video_grid_thw")
+                video_second_per_grid = multi_modal_inputs.get("video_second_per_grid")
+                feature_attention_mask = multi_modal_inputs.get("feature_attention_mask")
+
+            audio_seqlens = None
+            if feature_attention_mask is not None:
+                audio_seqlens = feature_attention_mask.sum(dim=-1)
+
+            new_position_ids, _ = qwen3_omni_get_rope_index(
+                processing_class,
+                input_ids=input_ids,
+                image_grid_thw=image_grid_thw,
+                video_grid_thw=video_grid_thw,
+                attention_mask=attention_mask,
+                use_audio_in_video=bool(mm_processor_kwargs.get("use_audio_in_video", False)),
+                audio_seqlens=audio_seqlens,
+                second_per_grids=video_second_per_grid,
+            )
+            # vLLM's Qwen3-Omni MRope consumes ``(3, seq_len)`` directly — do
+            # NOT prepend a text axis here. The training-side counterpart
+            # (``AgentLoopWorker._compute_position_ids``) adds the text axis so
+            # HF's ``Qwen3OmniMoeThinkerTextModel`` sees ``(4, bs, seq)``.
+            return (
+                new_position_ids.squeeze(1)
+                if new_position_ids.dim() == 3 and new_position_ids.shape[1] == 1
+                else new_position_ids
+            )
         else:
             return compute_position_id_with_mask(attention_mask)  # (1, seq_len)
 

@@ -330,10 +330,10 @@ def chunk_tensordict(td: TensorDict, chunks: int) -> list[TensorDict]:
             to <seq_len>, but got split_sizes=[4, 4, ...]
 
         2D jagged NestedTensors (e.g. ``input_ids``, ``loss_mask``) are
-        unaffected — ``unbind(dim=0)`` works correctly for them.
+        unaffected: ``unbind(dim=0)`` works correctly for them.
 
         The workaround: try ``unbind`` first (fast path for 2D); on failure,
-        fall back to ``to_padded_tensor`` → ``chunk`` → reconstruct per-chunk
+        fall back to ``to_padded_tensor`` -> ``chunk`` -> reconstruct per-chunk
         NestedTensors using the original ragged lengths from ``offsets``.
 
         See https://github.com/pytorch/pytorch/issues/153238
@@ -911,8 +911,24 @@ def maybe_fix_3d_position_ids(data: TensorDict):
     # note for tensordict with pickle/unpickle. nested tensor in tensordict after consolidate and pickle/unpickle
     # will incur indexing error for ragged tensor. This only happens when using 3D position ids in VLMs.
     # This is likely a bug in tensordict. As a workaround, we manually set _ragged_index.
-    if "position_ids" in data.keys() and data["position_ids"].dim() == 3 and data["position_ids"].is_nested:
-        data["position_ids"]._ragged_idx = 2
+    if "position_ids" not in data.keys():
+        return
+
+    position_ids = data["position_ids"]
+    if not (isinstance(position_ids, torch.Tensor) and position_ids.dim() == 3 and position_ids.is_nested):
+        return
+
+    input_ids = data.get("input_ids", None)
+    if isinstance(input_ids, torch.Tensor) and input_ids.is_nested:
+        total_seq_len = int(input_ids.offsets().diff().sum().item())
+        values_shape = tuple(position_ids.values().shape)
+        if total_seq_len not in values_shape:
+            raise RuntimeError(
+                "Invalid 3D nested position_ids storage: expected values shape to contain "
+                f"total sequence length {total_seq_len}, got {values_shape}."
+            )
+
+    position_ids._ragged_idx = 2
 
 
 def list_of_dict_to_tensordict(list_of_dicts: list[dict[str, Any]]) -> TensorDict:

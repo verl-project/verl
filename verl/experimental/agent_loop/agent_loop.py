@@ -62,6 +62,7 @@ from verl.utils.rollout_trace import (
 from verl.utils.tokenizer import (
     build_multimodal_processor_inputs,
     get_processor_token_id,
+    is_qwen3_omni_processor,
     normalize_token_ids,
 )
 from verl.workers.config import (
@@ -757,6 +758,42 @@ class AgentLoopWorker:
         """Compute position ids for multi-modal inputs."""
         if self.processor is None:
             return compute_position_id_with_mask(attention_mask)  # (1, seq_len)
+
+        mm_processor_kwargs = mm_processor_kwargs or {}
+        if is_qwen3_omni_processor(self.processor):
+            from verl.models.transformers.qwen3_omni_moe import get_rope_index as qwen3_omni_get_rope_index
+
+            audio_seqlens = None
+            feature_attention_mask = multi_modal_inputs.get("feature_attention_mask")
+            if feature_attention_mask is not None:
+                audio_seqlens = feature_attention_mask.sum(dim=-1)
+
+            position_ids, _ = qwen3_omni_get_rope_index(
+                self.processor,
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                image_grid_thw=multi_modal_inputs.get("image_grid_thw"),
+                video_grid_thw=multi_modal_inputs.get("video_grid_thw"),
+                use_audio_in_video=bool(mm_processor_kwargs.get("use_audio_in_video", False)),
+                audio_seqlens=audio_seqlens,
+                second_per_grids=multi_modal_inputs.get("video_second_per_grid"),
+            )
+            # HF ``Qwen3OmniMoeThinkerTextModel.forward`` expects a 4-axis
+            # position_ids tensor ``(text, T, H, W, bs, seq)``. Without the
+            # leading text axis it falls through the ``shape[0] == 4`` guard
+            # and feeds the 3-axis tensor straight into ``rotary_emb``,
+            # producing cos/sin whose seq dim ends up collapsing to
+            # ``mrope_section[0]`` and blowing up ``apply_rotary_pos_emb``.
+            # Mirror the Qwen3-VL rollout path (the ``multi_modal_kwargs``
+            # branch below) which prepends a cumsum-over-mask text row to
+            # reach the ``(1, 4, seq)`` layout verl's
+            # ``FSDPEngine.prepare_model_inputs`` expects.
+            vision_position_ids = position_ids.transpose(0, 1)  # (3, 1, S) -> (1, 3, S)
+            valid_mask = attention_mask[0].bool()
+            text_position_ids = torch.ones((1, input_ids.shape[1]), dtype=torch.long, device=input_ids.device)
+            text_position_ids[0, valid_mask] = torch.arange(int(valid_mask.sum().item()), device=input_ids.device)
+            text_position_ids = text_position_ids.unsqueeze(0)  # (1, 1, S)
+            return torch.cat((text_position_ids, vision_position_ids), dim=1)  # (1, 4, S)
 
         multi_modal_kwargs = {
             "image_grid_thw": multi_modal_inputs.get("image_grid_thw"),

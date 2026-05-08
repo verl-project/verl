@@ -29,7 +29,7 @@ from verl.utils.net_utils import is_valid_ipv6_address
 from verl.utils.profiler import DistProfiler
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
-from verl.workers.rollout.utils import get_max_position_embeddings, qwen2_5_vl_dedup_image_tokens, run_uvicorn
+from verl.workers.rollout.utils import dedup_mm_placeholder_tokens, get_max_position_embeddings, run_uvicorn
 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
@@ -344,7 +344,7 @@ class TRTLLMHttpServer:
 
         await self._generation_allowed.wait()
         if self.is_vlm_model and (image_data or video_data):
-            deduped_ids = qwen2_5_vl_dedup_image_tokens(prompt_ids, self.model_config.processor)
+            deduped_ids = dedup_mm_placeholder_tokens(prompt_ids, self.model_config.processor)
             org_prompt = self.llm.tokenizer.decode(deduped_ids)
             input_dict = {
                 "prompt": org_prompt,

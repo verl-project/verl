@@ -26,7 +26,10 @@ from vllm.outputs import RequestOutput
 
 from verl.utils.device import is_npu_available
 from verl.utils.vllm import TensorLoRARequest, VLLMHijack
-from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
+from verl.utils.vllm.patch import (
+    apply_qwen3_omni_thinker_patches,
+    patch_vllm_moe_model_weight_loader,
+)
 from verl.utils.vllm.vllm_fp8_utils import apply_vllm_fp8_patches, is_fp8_model, load_quanted_weights
 
 logger = logging.getLogger(__file__)
@@ -122,10 +125,12 @@ class vLLMColocateWorkerExtension:
 
         # 1. patch for Lora
         VLLMHijack.hijack()
-        # 2. patch online fp8 quant
+        # 2. patch Qwen3-Omni thinker weight loading for standalone thinker state_dicts
+        apply_qwen3_omni_thinker_patches()
+        # 3. patch online fp8 quant
         if os.environ.get("VERL_VLLM_FP8_QUANT_ENABLED", "0") == "1":
             apply_vllm_fp8_patches()
-        # 3. patch QAT (compressed-tensors NVFP4) for dynamic weight loading
+        # 4. patch QAT (compressed-tensors NVFP4) for dynamic weight loading
         vllm_config = kwargs.get("vllm_config")
         quant_config = getattr(vllm_config, "quant_config", None) if vllm_config else None
         _is_qat_model = getattr(quant_config, "quant_format", None) == "nvfp4-pack-quantized"
@@ -219,9 +224,8 @@ class vLLMColocateWorkerExtension:
             # Some post-load transforms are non-idempotent; run once after all buckets.
             from vllm.model_executor.model_loader.utils import process_weights_after_loading
 
-            model = self.model_runner.model
             model_config = self.model_runner.vllm_config.model_config
-            process_weights_after_loading(model, model_config, self.device)
+            process_weights_after_loading(self.model_runner.model, model_config, self.device)
 
     def _update_weights(self, weights: list[tuple[str, torch.Tensor]], peft_config: dict, base_sync_done: bool):
         if peft_config and base_sync_done:
@@ -245,6 +249,7 @@ class vLLMColocateWorkerExtension:
                 logger.info(f"FP8 weights loaded (async), loaded_params: {len(loaded_params)}")
             else:
                 logger.info("Loading standard weights (non-FP8, async)")
+                apply_qwen3_omni_thinker_patches()
                 self.model_runner.model.load_weights(weights)
 
     def _get_zmq_handle(self) -> str:

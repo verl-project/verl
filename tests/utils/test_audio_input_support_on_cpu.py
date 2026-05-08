@@ -51,7 +51,7 @@ def test_build_messages_replaces_audio_placeholder() -> None:
 def test_build_multimodal_processor_inputs_includes_audio_sampling_rate() -> None:
     captured = {}
 
-    class AudioProcessor:
+    class Qwen3OmniMoeProcessor:
         def __init__(self):
             self.feature_extractor = types.SimpleNamespace(sampling_rate=16000)
 
@@ -59,7 +59,7 @@ def test_build_multimodal_processor_inputs_includes_audio_sampling_rate() -> Non
             captured.update(kwargs)
             return {"input_ids": torch.tensor([[1, 2, 3]])}
 
-    processor = AudioProcessor()
+    processor = Qwen3OmniMoeProcessor()
     output = build_multimodal_processor_inputs(
         processor,
         text=["hello"],
@@ -75,7 +75,40 @@ def test_build_multimodal_processor_inputs_includes_audio_sampling_rate() -> Non
     assert captured["use_audio_in_video"] is True
 
 
-def test_extract_multi_modal_inputs_merges_variable_audio_fields() -> None:
+def test_qwen3_omni_position_ids_use_audio_feature_lengths() -> None:
+    pytest.importorskip("codetiming")
+    from verl.workers.rollout.schemas import AsyncRolloutRequest
+
+    captured = {}
+
+    class Qwen3OmniMoeProcessor:
+        def get_rope_index(self, **kwargs):
+            captured.update(kwargs)
+            return torch.arange(12, dtype=torch.long).view(3, 1, 4), torch.tensor([[0]])
+
+    processor = Qwen3OmniMoeProcessor()
+    multi_modal_inputs = {
+        "image_grid_thw": torch.tensor([[1, 1, 1]]),
+        "video_grid_thw": torch.tensor([[2, 1, 1]]),
+        "video_second_per_grid": torch.tensor([0.5]),
+        "feature_attention_mask": torch.tensor([[1, 1, 0], [1, 1, 1]], dtype=torch.long),
+    }
+
+    position_ids = AsyncRolloutRequest._get_position_ids(
+        processor,
+        input_ids=torch.tensor([[1, 2, 3, 4]], dtype=torch.long),
+        attention_mask=torch.tensor([[1, 1, 1, 1]], dtype=torch.long),
+        multi_modal_inputs=multi_modal_inputs,
+        mm_processor_kwargs={"use_audio_in_video": True},
+    )
+
+    assert position_ids.shape == (3, 4)
+    assert captured["use_audio_in_video"] is True
+    assert torch.equal(captured["audio_seqlens"], torch.tensor([2, 3]))
+    assert torch.equal(captured["second_per_grids"], torch.tensor([0.5]))
+
+
+def test_extract_multi_modal_inputs_merges_qwen3_omni_fields() -> None:
     first_features = torch.arange(6, dtype=torch.float32).view(1, 2, 3)
     second_features = torch.arange(10, dtype=torch.float32).view(1, 2, 5)
 
