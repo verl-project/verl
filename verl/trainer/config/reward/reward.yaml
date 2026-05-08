@@ -73,7 +73,6 @@ reward_model:
     quantization: null
     quantization_config_file: null
     mtp: null
-    qat: null
     disaggregation:
       enabled: false
       prefill_replicas: 1

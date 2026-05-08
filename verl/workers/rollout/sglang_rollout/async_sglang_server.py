@@ -354,7 +354,7 @@ class SGLangHttpServer:
             args.update({"enable_return_routed_experts": True})
 
         # mtp
-        if self.config.mtp.enable and self.config.mtp.enable_rollout:
+        if self.config.mtp is not None and self.config.mtp.enable and self.config.mtp.enable_rollout:
             # Enable weights CPU backup for sglang >= 0.5.6
             if sglang.__version__ < "0.5.6":
                 raise ValueError(f"sglang version {sglang.__version__} is not supported for MTP rollout")
