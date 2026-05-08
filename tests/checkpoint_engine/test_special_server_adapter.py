@@ -16,7 +16,6 @@ import os
 
 import pytest
 import ray
-import torch
 from omegaconf import DictConfig
 from transformers import PreTrainedTokenizer
 
@@ -48,7 +47,7 @@ def init_config() -> DictConfig:
     config.actor_rollout_ref.rollout.response_length = 4096
     config.actor_rollout_ref.rollout.checkpoint_engine.backend = "nccl"
     config.actor_rollout_ref.rollout.nnodes = 1
-    config.trainer.n_gpus_per_node = max(2, torch.cuda.device_count() - 2)
+    config.trainer.n_gpus_per_node = 4
     config.trainer.nnodes = 1
 
     return config
@@ -174,7 +173,6 @@ async def _run_server_manager_with_resume(
 @pytest.mark.asyncio
 async def test_server_adapter(init_config):
     ray.init(
-        address="auto",
         runtime_env={
             "env_vars": {
                 "TOKENIZERS_PARALLELISM": "true",
