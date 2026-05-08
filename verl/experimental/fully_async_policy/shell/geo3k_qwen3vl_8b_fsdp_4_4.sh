@@ -1,7 +1,5 @@
 set -x
 ENGINE=${1:-vllm}
-export WANDB_API_KEY=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
-
 
 HF_MODEL_PATH=${HF_MODEL_PATH:-"Qwen/Qwen3-VL-8B-Instruct"}
 
