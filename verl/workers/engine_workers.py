@@ -471,9 +471,35 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         else:
             tool_config = None
 
-        self.enable_routing_replay = (
-            self.config.actor.strategy == "megatron" and self.config.actor.megatron.router_replay.mode != "disabled"
-        )
+        # Router replay is supported on the megatron engine and on the veomni
+        # engine. Both expose `router_replay` on their per-strategy engine
+        # config (the field lives on the shared `EngineConfig` base).
+        actor_strategy = self.config.actor.strategy
+        if actor_strategy == "megatron":
+            rr_mode = self.config.actor.megatron.router_replay.mode
+        elif actor_strategy == "veomni":
+            rr_mode = self.config.actor.veomni.router_replay.mode
+        else:
+            rr_mode = "disabled"
+        self.enable_routing_replay = rr_mode != "disabled"
+
+        # Fail fast on the (router_replay enabled) + (use_remove_padding=False)
+        # combination for the veomni engine. We do this here, at config-
+        # coherence-check time, rather than inside the engine's initialize()
+        # so the user gets the error before any expensive model build.
+        if (
+            self.enable_routing_replay
+            and actor_strategy == "veomni"
+            and not self.config.model.get("use_remove_padding", False)
+        ):
+            raise RuntimeError(
+                "router_replay requires use_remove_padding=True. In VeOmni engine, "
+                "the non-remove-padding path also disables Ulysses SP slicing and "
+                "the fused-kernel log_probs path, and is not a tested production "
+                "configuration for MoE routing replay. Set "
+                "actor.model.use_remove_padding=True or "
+                "router_replay.mode='disabled'."
+            )
 
         DistProfilerExtension.__init__(
             self, DistProfiler(rank=self.rank, config=profiler_config, tool_config=tool_config)

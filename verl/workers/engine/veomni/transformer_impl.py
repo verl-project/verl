@@ -41,6 +41,7 @@ from verl.utils.ulysses import (
     get_ulysses_sequence_parallel_group,
     set_ulysses_sequence_parallel_group,
 )
+from verl.utils.veomni.router_replay import RouterReplayAction, VeOmniRouterReplay
 from verl.workers.config import HFModelConfig, VeOmniEngineConfig, VeOmniOptimizerConfig
 
 from ..base import BaseEngineCtx, EngineRegistry
@@ -163,6 +164,14 @@ class VeOmniEngine(FSDPEngine):
             else entropy_from_logits
         )
 
+        # Router replay (R2 / R3) for MoE models. Controller is attached in
+        # initialize() after the model is built; here we only record intent.
+        self._router_replay_mode: str = self.engine_config.router_replay.mode
+        self.enable_routing_replay: bool = self._router_replay_mode != "disabled"
+        self._router_replay: VeOmniRouterReplay | None = None
+        if self.enable_routing_replay:
+            logger.info("VeOmniEngine: router_replay enabled, mode=%s", self._router_replay_mode)
+
     def initialize(self):
         """
         Build the model, optimizer, and learning rate scheduler under VeOmni.
@@ -175,6 +184,31 @@ class VeOmniEngine(FSDPEngine):
 
         self._build_model_optimizer()
         self._init_moe_monitor()
+
+        if self.enable_routing_replay:
+            # Defense in depth: the worker-side check at
+            # ``ActorRolloutRefWorker.__init__`` is the primary fail-fast
+            # point and runs *before* engine init. By the time we get here,
+            # ``_build_model_optimizer()`` has already finished — this
+            # second check exists to catch direct ``VeOmniEngine``
+            # instantiation paths that bypass the worker (e.g. unit tests,
+            # standalone debug scripts) so the user gets a typed config
+            # error instead of an opaque mid-step ``AttributeError`` on
+            # ``input_ids.offsets()``.
+            if not self.engine_config.use_remove_padding:
+                raise RuntimeError(
+                    "router_replay requires use_remove_padding=True. In VeOmni engine, "
+                    "the non-remove-padding path also disables Ulysses SP slicing and "
+                    "the fused-kernel log_probs path, and is not a tested production "
+                    "configuration for MoE routing replay. Set "
+                    "actor.model.use_remove_padding=True or "
+                    "router_replay.mode='disabled'."
+                )
+            self._router_replay = VeOmniRouterReplay(sp_group=self.ulysses_parallel_group)
+            # Fails loudly if the VeOmni build in the environment does not
+            # export `set_active_replay` yet (plan requires upgrading VeOmni
+            # or disabling router_replay).
+            self._router_replay.install(self.module)
 
         self.checkpoint_manager = FSDPCheckpointManager(
             model=self.module,
@@ -395,26 +429,97 @@ class VeOmniEngine(FSDPEngine):
             data=data, dp_group=self.get_data_parallel_group(), same_micro_num_in_dp=True
         )
 
-        output_lst = []
+        # Router replay state machine: decide RECORD vs REPLAY for this step.
+        # RECORD: R2 compute_log_prob (forward_only=True).
+        # REPLAY: R2 actor update, or R3 always (forward_only=True and False).
+        rr_active = self.enable_routing_replay and tu.get_non_tensor_data(data, "enable_routing_replay", default=False)
+        if rr_active:
+            assert self._router_replay is not None
+            if self._router_replay_mode == "R2" and forward_only:
+                self._router_replay.begin_record()
+            else:
+                self._router_replay.begin_replay()
 
-        for micro_batch in micro_batches:
-            with self.model_fwd_context:
-                loss, meta_info = self.forward_step(micro_batch, loss_function=loss_function, forward_only=forward_only)
-            if not forward_only:
-                with self.model_bwd_context:
-                    loss.backward()
+        # Wrap the per-step body in try/finally so the controller is always
+        # reset to DISABLED even if forward / backward / postprocess raises.
+        # Without this, an exception leaves _recorded / _targets pinned
+        # (GPU memory) until the next successful step's begin_record/replay
+        # clears them, which may never happen if the caller (Ray actor) tears
+        # down the worker after the failure.
+        try:
+            output_lst = []
+            # Per-microbatch metadata for RECORD aggregation (pad_size for SP pad trim,
+            # cu_seqlens for per-sample split). Collected via side-channel on the
+            # micro_batch TensorDict during prepare_model_inputs.
+            pad_size_per_mb: list[int] = []
+            cu_seqlens_per_mb: list[torch.Tensor] = []
 
-            output_lst.append(meta_info)
+            for micro_batch in micro_batches:
+                if rr_active:
+                    # Singular form: stash the entire list as one NonTensorData.
+                    # The plural ``assign_non_tensor`` auto-dispatches lists to a
+                    # NonTensorStack (batch_size=[len(list)]), which mutates the
+                    # lazy-stacked micro_batch's batch_size and is rejected.
+                    tu.assign_non_tensor_data(micro_batch, "_router_replay_pad_size_out", pad_size_per_mb)
+                    tu.assign_non_tensor_data(micro_batch, "_router_replay_cu_seqlens_out", cu_seqlens_per_mb)
 
-        result = postprocess_batch_func(output_lst=output_lst, indices=indices, data=data)
+                with self.model_fwd_context:
+                    loss, meta_info = self.forward_step(
+                        micro_batch, loss_function=loss_function, forward_only=forward_only
+                    )
+                if not forward_only:
+                    with self.model_bwd_context:
+                        loss.backward()
 
-        if not forward_only and self._moe_monitor is not None:
-            self._moe_monitor_step += 1
-            interval = self.engine_config.moe_load_balance_monitor_interval
-            if interval > 0 and self._moe_monitor_step % interval == 0:
-                self._log_moe_metrics(result)
+                output_lst.append(meta_info)
 
-        return result
+                # Advance the per-mb counter on the controller. RECORD bumps
+                # ``_mb_index`` so the next micro-batch's first router fire writes
+                # into the next slot (recompute-in-backward of *this* mb has
+                # already finished by here, so its detection window is closed).
+                # Skip the bump after the last micro-batch: collect_recorded
+                # cross-checks that every layer has exactly num_micro_batches
+                # entries, so we must not advance past the last one.
+                if rr_active and self._router_replay.action is RouterReplayAction.RECORD:
+                    if len(output_lst) < len(micro_batches):
+                        self._router_replay.advance_record_microbatch()
+
+            if rr_active and self._router_replay.action is RouterReplayAction.RECORD:
+                # ``collect_recorded`` already checks pad_size_per_mb internally;
+                # cu_seqlens_per_mb is engine-local, so we cross-check here for
+                # a clear error if anything (e.g. a deep-copying TD op) breaks
+                # the by-reference side-channel contract.
+                n_mb = len(micro_batches)
+                if not (len(pad_size_per_mb) == len(cu_seqlens_per_mb) == n_mb):
+                    raise RuntimeError(
+                        f"router_replay RECORD aggregation: side-channel lengths "
+                        f"diverge — pad_size_per_mb={len(pad_size_per_mb)}, "
+                        f"cu_seqlens_per_mb={len(cu_seqlens_per_mb)}, "
+                        f"num_micro_batches={n_mb}."
+                    )
+                # Per-microbatch recorded indices -> per-sample nested tensors,
+                # attached to each output_lst entry so postprocess_batch_func can
+                # unbind + restore the original batch order, matching log_probs /
+                # entropy flow.
+                per_mb_flat = self._router_replay.collect_recorded(
+                    pad_size_per_mb=pad_size_per_mb,
+                    num_micro_batches=n_mb,
+                )
+                for i, (flat, cu) in enumerate(zip(per_mb_flat, cu_seqlens_per_mb, strict=True)):
+                    output_lst[i].setdefault("model_output", {})["routed_experts"] = (
+                        torch.nested.nested_tensor_from_jagged(flat, offsets=cu)
+                    )
+
+            result = postprocess_batch_func(output_lst=output_lst, indices=indices, data=data)
+            if not forward_only and self._moe_monitor is not None:
+                self._moe_monitor_step += 1
+                interval = self.engine_config.moe_load_balance_monitor_interval
+                if interval > 0 and self._moe_monitor_step % interval == 0:
+                    self._log_moe_metrics(result)
+            return result
+        finally:
+            if rr_active:
+                self._router_replay.clear()
 
     def get_data_parallel_rank(self):
         return parallel_state.get_parallel_state().device_mesh.get_local_rank("dp")
@@ -749,7 +854,148 @@ class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
             model_inputs["shift_labels"] = shift_labels
             model_inputs["return_log_probs"] = True
 
+        # Router replay plumbing. Two responsibilities:
+        #   (1) snapshot the ulysses pad_size for this micro-batch so
+        #       forward_backward_batch can trim it during RECORD aggregation;
+        #   (2) during REPLAY, slice this micro-batch's routed_experts along
+        #       the same pad+SP rule that super().prepare_model_inputs used
+        #       for input_ids, then feed per-layer targets to the controller.
+        self._maybe_push_router_replay_state(micro_batch, output_args)
+
         return model_inputs, output_args
+
+    def _maybe_push_router_replay_state(self, micro_batch: TensorDict, output_args: dict) -> None:
+        rr = self._router_replay
+        if rr is None:
+            return
+
+        # RR's pack/unpack rule assumes ``input_ids`` is a jagged NestedTensor
+        # built by ``left_right_2_no_padding`` — both the cu_seqlens snapshot
+        # below and ``slice_microbatch_replay_targets`` rely on the same
+        # pad+slice rule that ``super().prepare_model_inputs`` applies to it.
+        # The engine-init guard already rejects ``use_remove_padding=False``,
+        # but this check defends against future callers that bypass the guard
+        # (debug tools, sub-engine instantiations) and converts an opaque
+        # ``AttributeError: 'Tensor' object has no attribute 'offsets'`` into
+        # a clear invariant failure.
+        input_ids = micro_batch["input_ids"]
+        if not (isinstance(input_ids, torch.Tensor) and input_ids.is_nested):
+            raise RuntimeError(
+                "router_replay: micro_batch['input_ids'] must be a jagged "
+                "NestedTensor (produced by left_right_2_no_padding). Got "
+                f"type={type(input_ids).__name__}, is_nested="
+                f"{getattr(input_ids, 'is_nested', False)}. RR currently "
+                "supports only the use_remove_padding=True data path."
+            )
+
+        pad_sink = tu.get_non_tensor_data(micro_batch, "_router_replay_pad_size_out", default=None)
+        if pad_sink is not None:
+            pad_sink.append(int(output_args.get("pad_size", 0)))
+
+        # Snapshot cu_seqlens for per-sample split during RECORD aggregation.
+        cu_sink = tu.get_non_tensor_data(micro_batch, "_router_replay_cu_seqlens_out", default=None)
+        if cu_sink is not None:
+            cu_sink.append(input_ids.offsets().clone())
+
+        if rr.action is RouterReplayAction.REPLAY:
+            routed = micro_batch.get("routed_experts", None)
+            if routed is None:
+                # Strict: no silent fallback. A missing routed_experts in
+                # REPLAY means the trainer-side plumbing (compute_log_prob ->
+                # update_actor for R2, or rollout -> compute_log_prob for R3)
+                # has dropped the field somewhere upstream — silently running
+                # the actor update on native router decisions would re-introduce
+                # exactly the floating-point divergence RR is meant to remove.
+                raise RuntimeError(
+                    "router_replay REPLAY: micro_batch missing 'routed_experts'. "
+                    "Verify that compute_log_prob (R2) or the rollout path (R3) "
+                    "attached routed_experts to the batch before this engine "
+                    "call, and that left_right_2_no_padding preserved it."
+                )
+            # Nested-jagged [bs, seq, L, topk] → rmpad values [mb_nnz, L, topk].
+            # slice_microbatch_replay_targets reuses slice_input_tensor to
+            # mirror the exact pad+slice rule super().prepare_model_inputs
+            # already applied to input_ids.
+            flat = routed.values() if hasattr(routed, "values") else routed
+            per_layer = rr.slice_microbatch_replay_targets(flat)
+
+            # Per-token replay mask — R3 only.
+            #
+            # R2 RECORD captures the actor's full-sequence routing
+            # (prompt + response) in compute_log_prob, so REPLAY
+            # substitutes uniformly. Applying a response-only mask
+            # would let prompt tokens fall through to a fresh native
+            # call — atomic-add nondeterminism in the fused MoE
+            # experts means that call may pick different indices than
+            # RECORD, breaking the bit-equal forward guarantee R2
+            # exists for. The divergence then propagates through
+            # attention KV into response logits and gradients.
+            #
+            # R3 RECORD runs at the rollout backend, which only
+            # captures response-token routing during generation;
+            # prefill is not instrumented and prompt-token positions
+            # carry zero placeholders. Substituting those zeros sends
+            # every prompt token's topk slots to expert 0, corrupting
+            # the EP all-to-all token distribution. R3 must mask
+            # prompt tokens out and let them go through native routing.
+            replay_mask = None
+            if self._router_replay_mode == "R3":
+                response_mask = micro_batch.get("response_mask", None)
+                if response_mask is None:
+                    raise RuntimeError(
+                        "router_replay R3: micro_batch missing 'response_mask'. "
+                        "R3 needs the response_mask to know which tokens have "
+                        "real recorded routing (response) vs. zero placeholders "
+                        "(prompt). Verify left_right_2_no_padding preserved it."
+                    )
+                # Build a per-rmpad-token bool mask in the SAME [total_nnz]
+                # layout as ``input_ids.values()`` (also matches
+                # ``routed_experts.values()`` since they share the same
+                # ``index_first_axis(unpad_input(input_ids).indices)``
+                # transform): per sample i, ``prompt_lens[i]`` zeros
+                # followed by ``response_lens[i]`` ones.
+                #
+                # We CANNOT use ``micro_batch['loss_mask']`` directly —
+                # after ``left_right_2_no_padding`` it's still a strided
+                # ``(bs, max_response_len)`` tensor (not nested), which
+                # neither has the right shape nor a valid ``.values()``
+                # for a strided layout.
+                total_lens = input_ids.offsets().diff()  # (bs,)
+                response_lens = response_mask.sum(dim=-1).to(total_lens.dtype)  # (bs,)
+                prompt_lens = total_lens - response_lens  # (bs,)
+                # Defensive: response_lens > total_lens means the
+                # response_mask describes more tokens than the input has,
+                # which is data corruption. Failing here surfaces a clear
+                # message instead of letting repeat_interleave silently
+                # produce a malformed mask.
+                if torch.any(prompt_lens < 0):
+                    raise RuntimeError(
+                        f"router_replay R3: response_mask sum exceeds total token "
+                        f"count for some samples — prompt_lens={prompt_lens.tolist()}. "
+                        "Likely cause: response_mask was not aligned with the "
+                        "input_ids the actor sees (rollout/trainer plumbing bug)."
+                    )
+                bs = total_lens.size(0)
+                # values=[0, 1, 0, 1, ...] (length 2*bs), counts=[p_0, r_0, p_1, r_1, ...]
+                values = torch.tensor([False, True], dtype=torch.bool, device=total_lens.device).repeat(bs)
+                counts = torch.stack([prompt_lens, response_lens], dim=1).flatten()
+                mask_flat = torch.repeat_interleave(values, counts)
+                # Defensive: the constructed mask must align with
+                # routed_experts at the rmpad layer, otherwise the
+                # downstream ``torch.where(mask, target, native)`` would
+                # silently misalign and the EP all-to-all would still
+                # blow up. Fail-fast here with a clearer message.
+                if mask_flat.numel() != flat.size(0):
+                    raise RuntimeError(
+                        f"router_replay R3: constructed replay_mask has "
+                        f"{mask_flat.numel()} entries but routed_experts.values() "
+                        f"has {flat.size(0)}. response_mask + input_ids.offsets() "
+                        "do not describe the same total token count."
+                    )
+                # Mirror the same pad+slice rule used for routed_experts.
+                replay_mask = rr.slice_microbatch_replay_mask(mask_flat)
+
+            rr.set_microbatch_targets(per_layer, replay_mask=replay_mask)
 
 
 @EngineRegistry.register(model_type="value_model", backend=["veomni"], device=["cuda", "npu"])
