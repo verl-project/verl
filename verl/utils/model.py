@@ -663,18 +663,33 @@ def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_cod
     is_qwen = False
     if architectures:
         is_qwen = any(name in architectures[0] for name in ["Qwen2", "Qwen3"])
-    
-    ori_model = module_class.from_pretrained(
+    if is_qwen:
+        # For Qwen, we explicitly load via the TRL wrapper as requested by the maintainers
+        ori_model = module_class.from_pretrained(
+            pretrained_model_name_or_path=local_path,
+            torch_dtype=torch_dtype,
+            config=model_config,
+            attn_implementation="flash_attention_2",
+            trust_remote_code=trust_remote_code,
+        )
+        
+        # Handle hidden_size for VLM versions of Qwen
+        if hasattr(model_config, "text_config"):
+            ori_model.config.hidden_size = model_config.text_config.hidden_size
+        
+        model = AutoModelForCausalLMWithValueHead.from_pretrained(ori_model)
+    else:
+        ori_model = module_class.from_pretrained(
         pretrained_model_name_or_path=local_path,
         torch_dtype=torch_dtype,
         config=model_config,
         attn_implementation="flash_attention_2",
         trust_remote_code=trust_remote_code,
-    )
-    # vlm models
-    if hasattr(model_config, "text_config"):
-        ori_model.config.hidden_size = model_config.text_config.hidden_size
-    model = AutoModelForCausalLMWithValueHead.from_pretrained(ori_model)
+        )
+        # vlm models
+        if hasattr(model_config, "text_config"):
+            ori_model.config.hidden_size = model_config.text_config.hidden_size
+        model = AutoModelForCausalLMWithValueHead.from_pretrained(ori_model)
     patch_valuehead_model(model)
     return model
 
