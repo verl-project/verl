@@ -19,6 +19,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 LLM_SERVER_SOURCE = REPO_ROOT / "verl/workers/rollout/llm_server.py"
+FULLY_ASYNC_ROLLOUTER_SOURCE = REPO_ROOT / "verl/experimental/fully_async_policy/fully_async_rollouter.py"
 VLLM_SERVER_SOURCE = REPO_ROOT / "verl/workers/rollout/vllm_rollout/vllm_async_server.py"
 
 
@@ -45,6 +46,12 @@ def test_async_server_manager_generate_accepts_audio_and_mm_kwargs() -> None:
 
 def test_async_server_manager_generate_forwards_audio_and_mm_kwargs() -> None:
     source = LLM_SERVER_SOURCE.read_text(encoding="utf-8")
+    assert 'multimodal_kwargs["audio_data"] = audio_data' in source
+    assert 'multimodal_kwargs["mm_processor_kwargs"] = mm_processor_kwargs' in source
+
+
+def test_fully_async_server_manager_generate_forwards_audio_and_mm_kwargs() -> None:
+    source = FULLY_ASYNC_ROLLOUTER_SOURCE.read_text(encoding="utf-8")
     assert "audio_data=audio_data" in source
     assert "mm_processor_kwargs=mm_processor_kwargs" in source
 

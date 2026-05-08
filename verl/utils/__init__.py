@@ -16,6 +16,7 @@ from . import config, tokenizer
 from .config import omega_conf_to_dataclass, validate_config
 from .groupwise import as_torch_index, group_mean_std
 from .tokenizer import (
+    build_multimodal_processor_inputs,
     get_processor_token_id,
     hf_processor,
     hf_tokenizer,
@@ -26,6 +27,7 @@ __all__ = (
     tokenizer.__all__
     + config.__all__
     + [
+        "build_multimodal_processor_inputs",
         "get_processor_token_id",
         "hf_processor",
         "hf_tokenizer",

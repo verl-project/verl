@@ -396,6 +396,7 @@ class AgentLoopWorker:
         self.dataset_cls = get_dataset_class(config.data)
         self.tokenizer = self.model_config.tokenizer
         self.processor = self.model_config.processor
+        self.mm_processor_kwargs = config.data.get("mm_processor_kwargs", {})
 
         # Online policy distillation
         self.distillation_enabled = is_distillation_enabled(config.distillation)
@@ -436,6 +437,15 @@ class AgentLoopWorker:
             trace_config.get("token2text", False),
             trace_config.get("max_samples_per_step_per_worker", None),
         )
+
+    def _get_mm_processor_kwargs(self, audio_data: Optional[list[Any]] = None) -> dict[str, Any]:
+        """Return multimodal processor kwargs with audio sampling-rate defaults."""
+        mm_processor_kwargs = dict(self.mm_processor_kwargs or {})
+        if audio_data is not None and "sampling_rate" not in mm_processor_kwargs:
+            sampling_rate = getattr(getattr(self.processor, "feature_extractor", None), "sampling_rate", None)
+            if sampling_rate is not None:
+                mm_processor_kwargs["sampling_rate"] = int(sampling_rate)
+        return mm_processor_kwargs
 
     async def generate_sequences(self, batch: DataProto) -> DataProto:
         """Generate sequences from agent loop.

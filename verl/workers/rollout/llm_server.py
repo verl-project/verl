@@ -218,6 +218,7 @@ class LLMServerClient:
         finally:
             self._release_server(server_id)
 
+
 class LLMServerManager:
     """LLMServerManager is responsible for:
     - Launch server replicas

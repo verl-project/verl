@@ -39,7 +39,7 @@ def test_build_messages_replaces_audio_placeholder() -> None:
         "audios": ["/tmp/example.wav"],
     }
 
-    messages = dataset._build_messages(example)
+    messages = dataset._build_messages(example, key=dataset.prompt_key)
     content = messages[0]["content"]
     assert content == [
         {"type": "text", "text": "Listen to this: "},
