@@ -12,8 +12,6 @@
 # limitations under the License.
 
 import logging
-import os
-from pathlib import Path
 
 import torch
 
@@ -22,20 +20,16 @@ from verl.protocol import DataProto
 logger = logging.getLogger(__file__)
 
 
-# Module-level counter so consecutive invocations of ``calculate_debug_metrics``
-# in the same training step produce distinct dump filenames. Gated entirely by
-# the ``VERL_DUMP_DEBUG_METRICS_DIR`` env var, so the default training path
-# pays zero cost.
-_DUMP_STATE = {"counter": 0}
-
-
 def calculate_token_list_diff(tensor1: torch.Tensor, tensor2: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     # verify inputs
     if tensor1.numel() == 0 or tensor2.numel() == 0:
         return torch.zeros(tensor1.shape[0], dtype=torch.long, device=tensor1.device)
     if tensor1.shape != tensor2.shape or mask.shape != tensor1.shape or mask.shape != tensor2.shape:
-        print(
-            f"<WARN> dim of tensor1, tensor2, mask is not equal, {(tensor1.shape)=},{(tensor2.shape)=}, {(mask.shape)=}"
+        logger.warning(
+            "dim of tensor1, tensor2, mask is not equal, tensor1.shape=%s, tensor2.shape=%s, mask.shape=%s",
+            tensor1.shape,
+            tensor2.shape,
+            mask.shape,
         )
         return torch.ones_like(tensor1)
     # transfer to same device
@@ -67,111 +61,6 @@ def pearson_correlation_coefficient(tensor1: torch.Tensor, tensor2: torch.Tensor
 def calculate_log_prob_diff(log_probs1: torch.Tensor, log_probs2: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     full_diff = torch.abs(log_probs1 - log_probs2)
     return torch.masked_select(full_diff, mask)
-
-
-def _maybe_dump_debug_metrics(
-    data: DataProto,
-    rollout_old_log_probs: torch.Tensor,
-    actor_old_log_probs: torch.Tensor,
-    response_mask: torch.Tensor,
-) -> None:
-    """Persist per-batch tensors to disk when ``VERL_DUMP_DEBUG_METRICS_DIR``
-    is set.
-
-    This is intended for targeted debugging of the
-    ``training/rollout_probs_diff_*`` series — in particular, to let an
-    offline clean-room actor/vLLM probe re-score the **same** ``input_ids``
-    + ``multi_modal_inputs`` the live FSDP2/vLLM stack just saw. Disabled
-    by default (env-gated) so zero cost is paid in normal training.
-
-    Controls (env vars):
-      - ``VERL_DUMP_DEBUG_METRICS_DIR`` — output directory (must be a
-        shared path if worker & driver run on different nodes).
-      - ``VERL_DUMP_DEBUG_METRICS_MAX_CALLS`` — stop after this many calls
-        (default: 4). Caps disk usage during long runs that accidentally
-        leave the env var set.
-      - ``VERL_DUMP_DEBUG_METRICS_STEP`` — optional step tag to embed in
-        filenames when ``data.meta_info["global_step"]`` is unavailable.
-    """
-    dump_dir = os.environ.get("VERL_DUMP_DEBUG_METRICS_DIR")
-    if not dump_dir:
-        return
-
-    try:
-        max_calls = int(os.environ.get("VERL_DUMP_DEBUG_METRICS_MAX_CALLS", "4"))
-    except ValueError:
-        max_calls = 4
-    if _DUMP_STATE["counter"] >= max_calls:
-        return
-
-    try:
-        Path(dump_dir).mkdir(parents=True, exist_ok=True)
-
-        meta = getattr(data, "meta_info", None) or {}
-        step_tag = meta.get("global_step") or meta.get("global_steps")
-        if step_tag is None:
-            step_tag = os.environ.get("VERL_DUMP_DEBUG_METRICS_STEP", "x")
-
-        call_idx = _DUMP_STATE["counter"]
-        _DUMP_STATE["counter"] += 1
-
-        payload: dict = {
-            "rollout_log_probs": rollout_old_log_probs.detach().cpu().contiguous(),
-            "actor_old_log_probs": actor_old_log_probs.detach().cpu().contiguous(),
-            "response_mask": response_mask.detach().cpu().contiguous(),
-            "responses": data.batch["responses"].detach().cpu().contiguous(),
-            "meta_info": dict(meta),
-        }
-        for key in ("input_ids", "attention_mask", "position_ids", "prompts"):
-            if key in data.batch.keys():
-                payload[key] = data.batch[key].detach().cpu().contiguous()
-
-        nt = getattr(data, "non_tensor_batch", None) or {}
-        if "multi_modal_inputs" in nt:
-            mmi_raw = nt["multi_modal_inputs"]
-            mmi_out = []
-            for entry in mmi_raw:
-                if isinstance(entry, dict):
-                    cleaned: dict = {}
-                    for k, v in entry.items():
-                        if hasattr(v, "detach"):
-                            cleaned[k] = v.detach().cpu().contiguous()
-                        else:
-                            cleaned[k] = v
-                    mmi_out.append(cleaned)
-                else:
-                    mmi_out.append(entry)
-            payload["multi_modal_inputs"] = mmi_out
-        if "uid" in nt:
-            try:
-                payload["uid"] = list(nt["uid"])
-            except Exception:
-                pass
-        # raw_prompt + index are the dataset-side handles that map each row
-        # back to its source parquet record (see ``RLHFDataset.__getitem__``).
-        # Offline probes need these to re-open the original audio/image files
-        # for the vLLM clean-room forward (vLLM's ``multi_modal_data`` expects
-        # raw audio arrays, not the pre-processed mel features we've already
-        # captured in ``multi_modal_inputs``).
-        for handle in ("raw_prompt", "index", "data_source"):
-            if handle in nt:
-                try:
-                    payload[handle] = list(nt[handle])
-                except Exception:
-                    pass
-
-        file_path = Path(dump_dir) / f"step_{step_tag}_call_{call_idx:03d}.pt"
-        torch.save(payload, file_path)
-        logger.warning(
-            "[VERL_DUMP_DEBUG_METRICS_DIR] wrote %s (rollout=%s, actor=%s, batch_keys=%s, nt_keys=%s)",
-            file_path,
-            tuple(rollout_old_log_probs.shape),
-            tuple(actor_old_log_probs.shape),
-            list(data.batch.keys())[:8],
-            list(nt.keys())[:8],
-        )
-    except Exception as exc:  # keep training running even if the dump fails
-        logger.warning("[VERL_DUMP_DEBUG_METRICS_DIR] dump failed: %r", exc)
 
 
 def calculate_debug_metrics(data: DataProto) -> dict:
@@ -226,13 +115,6 @@ def calculate_debug_metrics(data: DataProto) -> dict:
 
     pearson_corrcoef = pearson_correlation_coefficient(actor_probs, rollout_probs, response_mask_bool)
     rollout_probs_diff = calculate_log_prob_diff(actor_probs, rollout_probs, response_mask_bool)
-
-    # Env-gated: persist the exact tensors we just compared so an offline
-    # single-process probe can re-score the same inputs without FSDP2 /
-    # multi-node NCCL noise. See ``_maybe_dump_debug_metrics`` for the
-    # controlling env vars. No-op when ``VERL_DUMP_DEBUG_METRICS_DIR`` is
-    # unset, so normal training is unaffected.
-    _maybe_dump_debug_metrics(data, rollout_old_log_probs, actor_old_log_probs, response_mask)
 
     return {
         "training/rollout_probs_diff_valid": 1,
