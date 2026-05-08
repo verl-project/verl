@@ -658,6 +658,12 @@ def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_cod
         module_class = AutoModelForVision2Seq
     else:
         module_class = AutoModelForCausalLM
+    # Safely check for Qwen architectures
+    architectures = getattr(model_config, "architectures", [])
+    is_qwen = False
+    if architectures:
+        is_qwen = any(name in architectures[0] for name in ["Qwen2", "Qwen3"])
+    
     ori_model = module_class.from_pretrained(
         pretrained_model_name_or_path=local_path,
         torch_dtype=torch_dtype,

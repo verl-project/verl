@@ -230,13 +230,16 @@ def make_megatron_module(
         override_model_config = {}
 
     if bridge is not None:
+        architectures = getattr(hf_config, "architectures", [])
+        is_qwen = False
+        if architectures:
+            is_qwen = any(name in architectures[0] for name in ["Qwen2", "Qwen3"])
+
         if provider is None:
             from verl.models.mcore.mbridge import freeze_moe_router, make_value_model
-
             value_model_hook = make_value_model
         else:
             from verl.models.mcore.bridge import freeze_moe_router, make_value_model
-
             hidden_size = (
                 hf_config.text_config.hidden_size if hasattr(hf_config, "text_config") else hf_config.hidden_size
             )
