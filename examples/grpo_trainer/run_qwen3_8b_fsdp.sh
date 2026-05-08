@@ -103,12 +103,19 @@ case "${DEVICE}" in
         actor_param_offload=True
         actor_optimizer_offload=True
         rollout_tp=${rollout_tp:-4}
+        sp_size=4
+        train_batch_size=16
+        max_prompt_length=$((1024 * 2))
+        max_response_length=$((1024 * 32))
+        train_prompt_mini_bsz=16
         rollout_gpu_mem_util=${rollout_gpu_mem_util:-0.3}
         EXTRA+=(
             actor_rollout_ref.actor.use_torch_compile=False
             "actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size=${sp_size}"
             "actor_rollout_ref.ref.fsdp_config.ulysses_sequence_parallel_size=${sp_size}"
             actor_rollout_ref.rollout.enable_chunked_prefill=False
+            actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1
+            actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1
             actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=4096
         )
         if [ "${INFER_BACKEND}" = sglang ]; then
