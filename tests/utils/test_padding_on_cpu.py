@@ -134,6 +134,50 @@ def test_padding_conversion_without_log_probs():
     assert "ref_log_prob" not in data_converted
 
 
+def test_left_right_2_no_padding_keeps_equal_length_3d_position_ids_seq_ragged(monkeypatch):
+    def fake_unpad_input(hidden_states, attention_mask):
+        valid_mask = attention_mask.bool()
+        indices = valid_mask.flatten().nonzero(as_tuple=False).flatten()
+        unpadded = hidden_states.reshape(-1, *hidden_states.shape[2:])[indices]
+        lengths = valid_mask.sum(dim=1, dtype=torch.long)
+        cu_seqlens = torch.zeros(lengths.numel() + 1, dtype=torch.long, device=hidden_states.device)
+        cu_seqlens[1:] = torch.cumsum(lengths, dim=0)
+        return unpadded, indices, cu_seqlens, int(lengths.max().item())
+
+    monkeypatch.setattr("verl.workers.utils.padding.unpad_input", fake_unpad_input)
+
+    batch_size = 8
+    max_seq_len = 1283
+    max_response_len = 64
+
+    input_ids = torch.arange(batch_size * max_seq_len, dtype=torch.long).view(batch_size, max_seq_len)
+    attention_mask = torch.ones(batch_size, max_seq_len, dtype=torch.long)
+    response_mask = torch.ones(batch_size, max_response_len, dtype=torch.long)
+    position_ids = torch.arange(batch_size * 4 * max_seq_len, dtype=torch.long).view(batch_size, 4, max_seq_len)
+
+    data = TensorDict(
+        {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "response_mask": response_mask,
+            "position_ids": position_ids,
+        },
+        batch_size=[batch_size],
+    )
+
+    data_converted = left_right_2_no_padding(data)
+    position_ids_nested = data_converted["position_ids"]
+
+    assert position_ids_nested.is_nested
+    assert position_ids_nested._ragged_idx == 2
+    assert position_ids_nested.offsets().diff().tolist() == [max_seq_len] * batch_size
+    assert position_ids_nested.values().shape == (4, batch_size * max_seq_len)
+    assert position_ids_nested.values().unsqueeze(1).shape == (4, 1, batch_size * max_seq_len)
+
+    expected_values = torch.cat([position_ids[i] for i in range(batch_size)], dim=-1)
+    torch.testing.assert_close(position_ids_nested.values(), expected_values)
+
+
 def test_padding_roundtrip():
     """Test that converting from padding to nested and back preserves values in the response region"""
     batch_size = 2

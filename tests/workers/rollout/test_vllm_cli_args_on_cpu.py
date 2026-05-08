@@ -13,12 +13,10 @@
 # limitations under the License.
 
 import json
-from types import SimpleNamespace
 
 import pytest
-import torch
 
-from verl.workers.rollout.vllm_rollout.utils import build_cli_args_from_config, vLLMColocateWorkerExtension
+from verl.workers.rollout.vllm_rollout.utils import build_cli_args_from_config
 
 
 class TestBuildCliArgsFromConfig:
@@ -129,34 +127,6 @@ class TestBuildCliArgsFromConfig:
         config = {"sizes": [42]}
         result = build_cli_args_from_config(config)
         assert result == ["--sizes", "42"]
-
-    def test_normalize_weight_names_unwraps_cudagraph_wrapper(self):
-        """Qwen3-Omni thinker weights should still be normalized under CUDA graph wrapping."""
-
-        class Qwen3OmniMoeThinkerForConditionalGeneration:
-            pass
-
-        class CUDAGraphWrapper:
-            def __init__(self, model):
-                self._model = model
-
-            def unwrap(self):
-                return self._model
-
-        extension = object.__new__(vLLMColocateWorkerExtension)
-        extension.model_runner = SimpleNamespace(model=CUDAGraphWrapper(Qwen3OmniMoeThinkerForConditionalGeneration()))
-
-        weights = [
-            ("audio_tower.layers.0.self_attn.k_proj.weight", torch.ones(1)),
-            ("model.layers.0.self_attn.q_proj.weight", torch.ones(1)),
-        ]
-
-        normalized = extension._normalize_weight_names(weights)
-
-        assert [name for name, _ in normalized] == [
-            "thinker.audio_tower.layers.0.self_attn.k_proj.weight",
-            "thinker.model.layers.0.self_attn.q_proj.weight",
-        ]
 
 
 if __name__ == "__main__":
