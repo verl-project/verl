@@ -125,7 +125,7 @@ def get_rope_index(
     if audio_token_id is None or audio_start_token_id is None or audio_end_token_id is None:
         raise RuntimeError(
             "Qwen3-Omni audio MRope requires audio_token_id / audio_start_token_id / "
-            "audio_end_token_id on the processor; did you forget ensure_qwen3_omni_processor_attrs?"
+            "audio_end_token_id on the processor; did hf_processor fail to initialize Qwen3-Omni attrs?"
         )
 
     if attention_mask is None:

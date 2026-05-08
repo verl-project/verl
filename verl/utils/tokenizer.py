@@ -23,7 +23,6 @@ __all__ = [
     "normalize_token_ids",
     "is_qwen3_omni_processor",
     "build_multimodal_processor_inputs",
-    "ensure_qwen3_omni_processor_attrs",
     "get_processor_token_id",
 ]
 
@@ -97,13 +96,12 @@ def get_processor_token_id(processor, token_name: str) -> int | None:
     return None
 
 
-def ensure_qwen3_omni_processor_attrs(processor):
+def _ensure_qwen3_omni_processor_attrs(processor):
     """Populate processor attributes expected by Qwen3-Omni helper methods.
 
-    ``Qwen3OmniMoeProcessor`` exposes some multimodal metadata on nested config
-    or token-string fields rather than direct ``*_token_id`` attributes. The
-    bound ``get_rope_index`` implementation expects these attributes on the
-    processor instance, so mirror them when missing.
+    The bound ``get_rope_index`` implementation expects these values on the
+    processor instance. Treat the model config as the single source of truth and
+    fail fast when it does not expose the required fields.
     """
 
     if not is_qwen3_omni_processor(processor):
@@ -113,103 +111,45 @@ def ensure_qwen3_omni_processor_attrs(processor):
     thinker_config = getattr(config, "thinker_config", None)
     talker_config = getattr(config, "talker_config", None)
     vision_config = getattr(thinker_config, "vision_config", None) or getattr(config, "vision_config", None)
-    # Fallbacks when processor/config does not expose *_token_id directly.
-    # Values verified against Qwen/Qwen3-Omni-30B-A3B-Instruct tokenizer_config.json
-    # (added_tokens_decoder). `audio_token_id` = <|audio_pad|> = 151675 (NOT 151646).
-    default_token_ids = {
-        "audio_token_id": 151675,
-        "image_token_id": 151655,
-        "video_token_id": 151656,
-        "vision_start_token_id": 151652,
-        "vision_end_token_id": 151653,
-        "audio_start_token_id": 151669,
-        "audio_end_token_id": 151670,
-        "position_id_per_seconds": 25,
-    }
 
-    def _get_config_attr(*names, sources=None):
-        search_sources = sources or (config, thinker_config, talker_config)
-        for source in search_sources:
+    def _get_config_attr(attr_name: str, sources):
+        for source in sources:
             if source is None:
                 continue
-            for name in names:
-                value = getattr(source, name, None)
-                if value is not None:
-                    return value
+            value = getattr(source, attr_name, None)
+            if value is not None:
+                return value
         return None
 
-    def _set_if_missing(attr_name: str, value):
-        if value is not None and not hasattr(processor, attr_name):
+    required_config_attrs = {
+        "image_token_id": (config, thinker_config, talker_config),
+        "video_token_id": (config, thinker_config, talker_config),
+        "audio_token_id": (config, thinker_config, talker_config),
+        "vision_start_token_id": (config, talker_config, thinker_config),
+        "vision_end_token_id": (config, talker_config, thinker_config),
+        "audio_start_token_id": (config, talker_config, thinker_config),
+        "audio_end_token_id": (config, talker_config, thinker_config),
+        "position_id_per_seconds": (config, talker_config, thinker_config),
+    }
+    missing_attrs = []
+    for attr_name, sources in required_config_attrs.items():
+        value = _get_config_attr(attr_name, sources=sources)
+        if value is None:
+            missing_attrs.append(attr_name)
+        else:
             setattr(processor, attr_name, value)
 
-    def _set_config_if_missing(attr_name: str, value):
-        if config is not None and value is not None and not hasattr(config, attr_name):
-            setattr(config, attr_name, value)
+    if missing_attrs:
+        raise ValueError(
+            "Qwen3-Omni processor is missing required config attributes: "
+            f"{', '.join(missing_attrs)}. Please use a model config that exposes these fields."
+        )
 
-    _set_if_missing(
-        "image_token_id",
-        _get_config_attr("image_token_id", sources=(config, thinker_config, talker_config))
-        or default_token_ids["image_token_id"],
-    )
-    _set_if_missing(
-        "video_token_id",
-        _get_config_attr("video_token_id", sources=(config, thinker_config, talker_config))
-        or default_token_ids["video_token_id"],
-    )
-    _set_if_missing(
-        "audio_token_id",
-        _get_config_attr("audio_token_id", sources=(config, thinker_config, talker_config))
-        or default_token_ids["audio_token_id"],
-    )
-    _set_if_missing(
-        "vision_start_token_id",
-        _get_config_attr("vision_start_token_id", "im_start_token_id", sources=(config, talker_config, thinker_config))
-        or default_token_ids["vision_start_token_id"],
-    )
-    _set_if_missing(
-        "vision_end_token_id",
-        _get_config_attr("vision_end_token_id", "im_end_token_id", sources=(config, talker_config, thinker_config))
-        or default_token_ids["vision_end_token_id"],
-    )
-    _set_if_missing(
-        "audio_start_token_id",
-        _get_config_attr("audio_start_token_id", sources=(config, talker_config, thinker_config))
-        or default_token_ids["audio_start_token_id"],
-    )
-    _set_if_missing(
-        "audio_end_token_id",
-        _get_config_attr("audio_end_token_id", sources=(config, talker_config, thinker_config))
-        or default_token_ids["audio_end_token_id"],
-    )
-    _set_if_missing(
-        "position_id_per_seconds",
-        _get_config_attr("position_id_per_seconds", sources=(config, talker_config, thinker_config))
-        or default_token_ids["position_id_per_seconds"],
-    )
-    _set_if_missing("spatial_merge_size", getattr(vision_config, "spatial_merge_size", None))
-    _set_if_missing("tokens_per_second", getattr(vision_config, "tokens_per_second", None))
-
-    if not hasattr(processor, "spatial_merge_size"):
-        merge_size = getattr(getattr(processor, "image_processor", None), "merge_size", None)
-        _set_if_missing("spatial_merge_size", merge_size)
-
-    for token_name in ("image", "video", "audio"):
-        token_id_attr = f"{token_name}_token_id"
-        if not hasattr(processor, token_id_attr):
-            token_id = get_processor_token_id(processor, token_name)
-            _set_if_missing(token_id_attr, token_id or default_token_ids.get(token_id_attr))
-
-    for attr_name in (
-        "image_token_id",
-        "video_token_id",
-        "audio_token_id",
-        "vision_start_token_id",
-        "vision_end_token_id",
-        "audio_start_token_id",
-        "audio_end_token_id",
-        "position_id_per_seconds",
-    ):
-        _set_config_if_missing(attr_name, getattr(processor, attr_name, None))
+    if vision_config is not None:
+        for attr_name in ("spatial_merge_size", "tokens_per_second"):
+            value = getattr(vision_config, attr_name, None)
+            if value is not None:
+                setattr(processor, attr_name, value)
 
     return processor
 
@@ -422,7 +362,7 @@ def hf_processor(name_or_path, **kwargs):
                 helper = getattr(model_class, helper_name, None)
                 if helper is not None:
                     setattr(processor, helper_name, types.MethodType(helper, processor))
-            ensure_qwen3_omni_processor_attrs(processor)
+            _ensure_qwen3_omni_processor_attrs(processor)
     except Exception as e:
         processor = None
         # TODO(haibin.lin): try-catch should be removed after adding transformer version req to setup.py to avoid

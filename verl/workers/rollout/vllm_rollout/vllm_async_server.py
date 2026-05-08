@@ -38,11 +38,7 @@ from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import get_resource_name, get_visible_devices_keyword, is_torch_npu_available
 from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
 from verl.utils.profiler import DistProfiler, build_vllm_profiler_args
-from verl.utils.tokenizer import (
-    get_processor_token_id,
-    is_qwen3_omni_processor,
-    normalize_token_ids,
-)
+from verl.utils.tokenizer import normalize_token_ids
 from verl.utils.vllm.vllm_fp8_utils import apply_vllm_fp8_patches
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
@@ -58,40 +54,6 @@ from verl.workers.rollout.vllm_rollout.utils import (
 )
 
 _VLLM_VERSION = version.parse(vllm.__version__)
-
-
-# Multimodal placeholder token names on the Qwen3-Omni processor whose ids
-# must never appear in a response sampled from the actor — see the long
-# comment at the call site in ``AsyncvLLMServer._generate`` for context.
-_QWEN3_OMNI_MM_PLACEHOLDER_TOKEN_NAMES = (
-    "audio",
-    "audio_start",
-    "audio_end",
-    "image",
-    "image_start",
-    "image_end",
-    "vision_start",
-    "vision_end",
-    "video",
-    "video_start",
-    "video_end",
-)
-
-
-def _qwen3_omni_mm_placeholder_ids(processor) -> list[int]:
-    """Return multimodal placeholder token ids to forbid during Qwen3-Omni rollout.
-
-    Only returns a non-empty list for Qwen3-Omni processors; for any other
-    model family the caller sees ``[]`` and the sampling path is left as-is.
-    """
-    if not is_qwen3_omni_processor(processor):
-        return []
-    ids: set[int] = set()
-    for name in _QWEN3_OMNI_MM_PLACEHOLDER_TOKEN_NAMES:
-        token_id = get_processor_token_id(processor, name)
-        if token_id is not None:
-            ids.add(int(token_id))
-    return sorted(ids)
 
 
 if _VLLM_VERSION > version.parse("0.11.0"):
@@ -520,32 +482,6 @@ class vLLMHttpServer:
         )
         sampling_params["logprobs"] = 0 if sampling_params.pop("logprobs", False) else None
         sampling_params.setdefault("repetition_penalty", self.config.get("repetition_penalty", 1.0))
-        # Qwen3-Omni Thinker is the only model family currently wired into
-        # verl whose vocabulary exposes multimodal placeholder tokens
-        # (``<|audio_start|>``, ``<|audio_pad|>``, ``<|audio_end|>``,
-        # ``<|vision_start|>``, ``<|vision_end|>``, ``<|IMAGE|>``,
-        # ``<|VIDEO|>``) as *regular* ids an unconstrained sampler can emit
-        # as response tokens. When the actor spuriously generates one of
-        # these ids during rollout, the training forward rebuilds
-        # ``input_ids`` whose audio / image placeholder counts no longer
-        # match the processor-produced ``audio_seqlens`` / ``image_grid_thw``
-        # (the processor was only given the original prompt-side media).
-        # HF's ``Qwen3OmniMoeThinkerForConditionalGeneration.get_rope_index``
-        # then indexes ``audio_seqlens[audio_idx]`` past the end and raises
-        # ``IndexError: index 1 is out of bounds for dimension 0 with size 1``
-        # (or its cos/sin cousin ``The size of tensor a (N) must match the
-        # size of tensor b (32) at non-singleton dimension 2``). Forbid the
-        # sampler from emitting these ids via ``logit_bias=-inf`` so the
-        # rollout prompt_ids and the training input_ids stay structurally
-        # equivalent.
-        _qwen3_omni_bad_ids = _qwen3_omni_mm_placeholder_ids(self.model_config.processor)
-        if _qwen3_omni_bad_ids:
-            existing_bias = dict(sampling_params.get("logit_bias") or {})
-            for tid in _qwen3_omni_bad_ids:
-                # ``-inf`` is clamped by vLLM; a very large negative value is
-                # effectively absorbing while staying float-representable.
-                existing_bias.setdefault(int(tid), -1e9)
-            sampling_params["logit_bias"] = existing_bias
         sampling_params = SamplingParams(max_tokens=max_tokens, **sampling_params)
         prompt_ids = dedup_mm_placeholder_tokens(prompt_ids, self.model_config.processor)
         multi_modal_data = {}

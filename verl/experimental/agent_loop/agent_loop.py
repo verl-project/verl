@@ -49,7 +49,6 @@ from verl.utils.rollout_trace import (
 )
 from verl.utils.tokenizer import (
     build_multimodal_processor_inputs,
-    ensure_qwen3_omni_processor_attrs,
     get_processor_token_id,
     is_qwen3_omni_processor,
     normalize_token_ids,
@@ -877,7 +876,6 @@ class AgentLoopWorker:
 
         mm_processor_kwargs = mm_processor_kwargs or {}
         if is_qwen3_omni_processor(self.processor):
-            ensure_qwen3_omni_processor_attrs(self.processor)
             from verl.models.transformers.qwen3_omni_moe import get_rope_index as qwen3_omni_get_rope_index
 
             audio_seqlens = None

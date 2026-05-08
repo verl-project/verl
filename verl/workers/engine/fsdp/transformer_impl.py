@@ -407,37 +407,10 @@ class FSDPEngine(BaseEngine):
                 param_dtype=param_dtype, reduce_dtype=reduce_dtype, cast_forward_inputs=False
             )
             offload_policy = None
-            # ``forward_only`` (ref) previously forced FSDP2 ``CPUOffloadPolicy``
-            # unconditionally. That breaks models whose forward inspects
-            # ``.weight.device`` before FSDP2 unshards (e.g. Qwen3-Omni's
-            # ``Qwen3OmniMoeVisionModel.fast_pos_embed_interpolate`` builds an
-            # index tensor on ``self.pos_embed.weight.device`` — pinned CPU
-            # under CPUOffloadPolicy — then calls ``self.pos_embed(idx)``:
-            # FSDP2 all-gathers the weight to GPU and ``F.embedding`` errors
-            # with "index is on cpu, ... other tensors on cuda:0"). Opt into
-            # CPUOffloadPolicy only when the user explicitly asks for it;
-            # ``forward_only`` paths (ref) can still save memory through
-            # ``param_offload=True`` (verl manages the CPU<->GPU swap around
-            # each forward, so ``.weight.device`` is consistent during
-            # forward itself).
-            if self.engine_config.offload_policy:
+            if self.engine_config.offload_policy or self.engine_config.forward_only:
                 self._is_offload_param = False
                 self._is_offload_optimizer = False
                 offload_policy = CPUOffloadPolicy(pin_memory=True)
-            elif (
-                self.engine_config.forward_only
-                and not self.engine_config.param_offload
-                and torch.distributed.get_rank() == 0
-            ):
-                logger.warning(
-                    "FSDP2 forward_only engines (ref policy) no longer auto-offload "
-                    "parameters via CPUOffloadPolicy; the model will stay on GPU. Set "
-                    "`ref.fsdp_config.param_offload=True` to let verl manage the "
-                    "CPU<->GPU swap, or `ref.fsdp_config.offload_policy=True` to opt "
-                    "back into FSDP2 CPUOffloadPolicy (note: the latter breaks models "
-                    "whose forward inspects .weight.device before FSDP2 unshards, e.g. "
-                    "Qwen3-Omni / Qwen3-VL vision towers)."
-                )
 
             fsdp_kwargs = {
                 "mesh": fsdp_mesh,
