@@ -28,7 +28,7 @@ RUN git clone -b v2.5.1 https://github.com/NVIDIA/gdrcopy.git && \
     popd && \
     git clone -b hybrid-ep https://github.com/deepseek-ai/DeepEP.git && \
     pushd DeepEP && \
-    export CPATH=/usr/local/cuda/targets/x86_64-linux/include/cccl:$CPATH && \
+    export CPATH=/usr/local/cuda/targets/$(uname -m | sed 's/aarch64/sbsa-linux/;s/x86_64/x86_64-linux/')/include/cccl:$CPATH && \
     TORCH_CUDA_ARCH_LIST="9.0 10.0 12.0" python setup.py install && \
     popd && rm -rf deepep
 
