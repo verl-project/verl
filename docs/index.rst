@@ -170,6 +170,7 @@ verl is fast with:
    ascend_tutorial/examples/ascend_sglang_best_practices.rst
    ascend_tutorial/examples/ascend_retool_best_pratice.rst
    ascend_tutorial/examples/run_qwen3_32B_megatron_1k_256k_npu.md
+   ascend_tutorial/dev_guide/model_dev/parameter_and_metrics.md
    ascend_tutorial/faq/faq.rst
 
 .. toctree::
