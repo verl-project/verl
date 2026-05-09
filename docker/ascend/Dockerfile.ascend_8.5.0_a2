@@ -19,8 +19,8 @@ RUN ARCH=$(uname -m) && \
         pip config set global.extra-index-url "https://download.pytorch.org/whl/cpu/"; \
     fi && \
     # Clone libs
-    git clone --depth 1 --branch v0.13.0 https://github.com/vllm-project/vllm.git && \
-    git clone -b releases/v0.13.0 https://github.com/vllm-project/vllm-ascend.git && \
+    git clone --depth 1 --branch v0.18.0 https://github.com/vllm-project/vllm.git && \
+    git clone -b releases/v0.18.0 https://github.com/vllm-project/vllm-ascend.git && \
     git clone https://gitcode.com/Ascend/MindSpeed.git && \
     cd MindSpeed && git checkout 2.3.0_core_r0.12.1 && cd .. && \
     git clone --depth 1 --branch core_v0.12.1 https://github.com/NVIDIA/Megatron-LM.git
@@ -49,7 +49,7 @@ RUN ARCH=$(uname -m) && \
     # Remove existing triton installed by some third-party packages
     pip uninstall -y triton && \
     # Install mbridge
-    pip install mbridge torch_npu==2.8.0 && \
+    pip install mbridge && \
     # Clear extra files
     rm -rf /tmp/* /var/tmp/* && \
     pip cache purge
