@@ -94,71 +94,39 @@ case "${DEVICE}" in
         )
         ;;
     npu)
-        if [ "${INFER_BACKEND}" = vllm ]; then
-            max_prompt_length=$((1024 * 1))
-            max_response_length=$((1024 * 1))
-            train_prompt_bsz=128
-            train_prompt_mini_bsz=32
-            n_resp_per_prompt=16
-            # Megatron Configuration
-            actor_tp=2
-            actor_ep=8
-            actor_pp=2
-            actor_cp=1
-            ref_tp=${actor_tp}
-            ref_pp=${actor_pp}
-            ref_ep=${actor_ep}
-            ref_cp=${actor_cp}
-            infer_tp=2
-            gen_dp=1
-            gen_moe_ep=1
-            gpu_memory_utilization=0.8
-            actor_ppo_micro_batch_size_per_gpu=1
+        # Necessary env
+        export HCCL_CONNECT_TIMEOUT=1500
+        export HCCL_HOST_SOCKET_PORT_RANGE=60000-60050
+        export HCCL_NPU_SOCKET_PORT_RANGE=61000-61050
+        export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
+        export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+        export DISABLE_L2_CACHE=1
+        export TASK_QUEUE_ENABLE=1
+        train_batch_size=16
+        # Megatron Configuration
+        actor_ep=4
+        actor_etp=4
+        actor_pp=1
+        ref_tp=${actor_tp}
+        ref_pp=${actor_pp}
+        ref_ep=${actor_ep}
+        gen_dp=1
+        gen_moe_ep=1
+        rollout_gpu_mem_util=0.5
+        actor_ppo_micro_batch_size_per_gpu=1
+        rollout_max_model_len=$((max_prompt_length + max_response_length))
+        rollout_max_num_batched_tokens=$(((max_prompt_length + max_response_length) * 1))
+        EXTRA+=(
+            actor_rollout_ref.actor.megatron.expert_tensor_parallel_size=${actor_etp}
+            actor_rollout_ref.rollout.expert_parallel_size=${gen_moe_ep}
+            actor_rollout_ref.rollout.data_parallel_size=${gen_dp}
+            +actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_offload_fraction=1
+            +actor_rollout_ref.actor.optim.override_optimizer_config.use_precision_aware_optimizer=True
+            +actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_cpu_offload=True
+        )
+        if [ "${INFER_BACKEND}" = sglang ]; then
             EXTRA+=(
-                actor_rollout_ref.rollout.expert_parallel_size=${gen_moe_ep}
-                actor_rollout_ref.rollout.data_parallel_size=${gen_dp}
-                +actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_offload_fraction=1
-                +actor_rollout_ref.actor.optim.override_optimizer_config.use_precision_aware_optimizer=True
-                +actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_cpu_offload=True
-            )
-        else # sglang
-            # Necessary env
-            export HCCL_CONNECT_TIMEOUT=1500
-            export HCCL_HOST_SOCKET_PORT_RANGE=60000-60050
-            export HCCL_NPU_SOCKET_PORT_RANGE=61000-61050
-            export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
-            export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
-            export DISABLE_L2_CACHE=1
-            export TASK_QUEUE_ENABLE=1
-            max_prompt_length=$((1024 * 2))
-            max_response_length=$((1024 * 8))
-            train_prompt_bsz=16
-            train_prompt_mini_bsz=16
-            rollout_n=8
-            # Megatron Configuration
-            actor_tp=4
-            actor_ep=4
-            actor_etp=4
-            actor_pp=1
-            actor_cp=1
-            ref_tp=${actor_tp}
-            ref_pp=${actor_pp}
-            ref_ep=${actor_ep}
-            ref_cp=${actor_cp}
-            infer_tp=4
-            gen_dp=1
-            gen_moe_ep=1
-            rollout_gpu_mem_util=0.5
-            actor_ppo_micro_batch_size_per_gpu=1
-            rollout_max_model_len=$((max_prompt_length + max_response_length))
-            rollout_max_num_batched_tokens=$(((max_prompt_length + max_response_length) * 1))
-            EXTRA+=(
-                actor_rollout_ref.actor.megatron.expert_tensor_parallel_size=${actor_etp}
-                actor_rollout_ref.rollout.expert_parallel_size=${gen_moe_ep}
-                actor_rollout_ref.rollout.data_parallel_size=${gen_dp}
-                +actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_offload_fraction=1
-                +actor_rollout_ref.actor.optim.override_optimizer_config.use_precision_aware_optimizer=True
-                +actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_cpu_offload=True
+                +actor_rollout_ref.rollout.engine_kwargs.sglang.attention_backend="ascend"
             )
         fi
         ;;
