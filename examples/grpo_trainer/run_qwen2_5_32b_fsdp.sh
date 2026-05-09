@@ -1,4 +1,9 @@
-set -x
+#!/usr/bin/env bash
+# GRPO | Qwen2.5-32B | FSDP training | NVIDIA GPUs or Ascend NPUs
+#
+# INFER_BACKEND controls rollout backend: vllm
+
+set -xeuo pipefail
 
 # ---- user-adjustable ----
 INFER_BACKEND=${INFER_BACKEND:-vllm}

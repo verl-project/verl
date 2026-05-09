@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# GRPO | Qwen2.5-VL-7B | FSDP training | NVIDIA GPUs
+# GRPO | Qwen2.5-VL-7B | FSDP training | NVIDIA GPUs or Ascend NPUs
 #
 # INFER_BACKEND controls rollout backend: vllm | sglang | trtllm.
 
