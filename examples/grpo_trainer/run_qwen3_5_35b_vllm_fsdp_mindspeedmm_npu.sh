@@ -55,6 +55,11 @@ MODEL_CONFIG=(
 
 ACTOR_CONFIG=(
     actor_rollout_ref.actor.optim.lr=1e-6
+    actor_rollout_ref.actor.optim.lr_decay_style=constant
+    actor_rollout_ref.actor.optim.lr_warmup_ratio=-1
+    actor_rollout_ref.actor.optim.weight_decay=0.01
+    actor_rollout_ref.actor.optim.clip_grad=1.0
+    actor_rollout_ref.actor.optim.optimizer=adamw
     actor_rollout_ref.actor.ppo_mini_batch_size=16
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1
     actor_rollout_ref.actor.use_kl_loss=True
@@ -91,6 +96,7 @@ MINDSPEED_CONFIG=(
     +actor_rollout_ref.actor.mindspeed.fsdp_kwargs.model.model_id=qwen3_5_moe
     +actor_rollout_ref.actor.mindspeed.fsdp_kwargs.model.use_triton_gdn=True
     +actor_rollout_ref.actor.mindspeed.fsdp_kwargs.model.freeze='[model.visual]'
+    +actor_rollout_ref.actor.mindspeed.fsdp_kwargs.model.use_grouped_expert_matmul=True
     +actor_rollout_ref.actor.mindspeed.fsdp_kwargs.parallel.fsdp_plan.apply_modules="['model.visual.blocks.{*}', \
         'model.visual', 'model.language_model.layers.{*}.linear_attn', 'model.language_model.layers.{*}.mlp', 'model.language_model.layers.{*}', \
         'model.language_model.embed_tokens', 'model.language_model.norm', 'model.language_model.rotary_emb', 'model.language_model', 'lm_head']"
@@ -115,6 +121,7 @@ MINDSPEED_CONFIG=(
 REF_CONFIG=(
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1
     actor_rollout_ref.ref.use_torch_compile=False
+    actor_rollout_ref.ref.optim.optimizer=adamw
 )
 
 

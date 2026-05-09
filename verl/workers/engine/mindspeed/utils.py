@@ -239,7 +239,7 @@ def get_fsdp_trainer(model_config: HFModelConfig, engine_config: MindSpeedEngine
                      optim_config: MindSpeedOptimizerConfig):
     from mindspeed_mm.fsdp.train.trainer import Trainer
     from mindspeed_mm.fsdp.params.argument import Arguments
-    from mindspeed_mm.fsdp.params.utils import instantiate_dataclass
+    from mindspeed_mm.config.config_manager import ConfigManager
 
     # default data config
     engine_config.fsdp_kwargs["data"] = {
@@ -258,7 +258,7 @@ def get_fsdp_trainer(model_config: HFModelConfig, engine_config: MindSpeedEngine
         },
     }
 
-    mm_args = instantiate_dataclass(Arguments, engine_config.fsdp_kwargs)
+    mm_args = ConfigManager(config_class=Arguments, additional_args=engine_config.fsdp_kwargs).load_and_parse()
     if engine_config.offload_policy or engine_config.forward_only:
         mm_args.parallel.fsdp_plan.cpu_offload = True
     else:
