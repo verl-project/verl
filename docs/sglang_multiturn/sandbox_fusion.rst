@@ -80,6 +80,34 @@ Configuration Parameters
 +----------------------------+--------------------------------------------------------------+
 | `sandbox_fusion_url`       | URL for the veFaas sandbox execution service                 |
 +----------------------------+--------------------------------------------------------------+
+| `use_ray_execution_pool`   | Use Ray actor pool for tool execution. When set to False,    |
+|                            | uses a local thread pool with asyncio instead. Default: False|
++----------------------------+--------------------------------------------------------------+
+| `memory_limit_mb`          | Memory limit (in MB) for each code execution. Default: 1024  |
++----------------------------+--------------------------------------------------------------+
+
+Execution Mode
+-----------------
+
+``SandboxFusionTool`` supports two execution modes controlled by the ``use_ray_execution_pool`` configuration:
+
+- **Ray Execution Pool** (``use_ray_execution_pool: true``): The default mode in previous versions.
+  Uses a Ray actor-based execution pool with a distributed rate limiter (``TokenBucketWorker``).
+  This mode supports distributed rate limiting across multiple nodes and is suitable for
+  multi-node training setups.
+
+- **Local Thread Pool** (``use_ray_execution_pool: false``): Uses ``asyncio.run_in_executor``
+  with a local ``threading.Semaphore`` for concurrency control. This mode bypasses Ray actor
+  IPC serialization overhead and can significantly reduce tool-call latency, especially on
+  AMD ROCm platforms where Ray's pickle serialization for GPU tensors may introduce higher
+  overhead. This mode is recommended for single-node training.
+
+.. note::
+
+   On AMD GPUs (e.g., MI300X/MI308X) with ROCm, the Ray actor-based execution pool may
+   exhibit noticeably higher latency compared to NVIDIA GPUs due to differences in IPC
+   communication patterns and the HIP compatibility layer. If you observe slow tool-call
+   performance on AMD platforms, set ``use_ray_execution_pool: false`` in your tool config.
 
 Rate Limiting Design
 -----------------------
