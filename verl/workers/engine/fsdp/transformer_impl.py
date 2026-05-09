@@ -1191,6 +1191,14 @@ class FSDPEngineWithLMHead(FSDPEngine):
                         )
                         sum_pi_squared_rmpad = torch.cat([t for t in sum_pi_squared.unbind()])
                         sum_pi_squared = torch.nested.nested_tensor_from_jagged(sum_pi_squared_rmpad, cu_seqlens)
+
+                    # compute distillation top-k when use_remove_padding=False
+                    if distillation_use_topk:
+                        outputs = logits_processor_func(student_logits=logits_rmpad.unsqueeze(0), data=micro_batch)
+                        for k, v in outputs.items():
+                            v = v.squeeze(0)
+                            assert v.shape == log_probs.shape, f"log_probs shape: {log_probs.shape}, {k} shape: {v.shape}"
+                            model_output[k] = torch.nested.nested_tensor_from_jagged(v, cu_seqlens)
                 else:
                     raise NotImplementedError(f"pad_mode {pad_mode} not implemented")
 
