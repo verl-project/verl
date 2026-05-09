@@ -109,27 +109,27 @@ class MegatronCheckpointManager(BaseCheckpointManager):
     """
 
     def __init__(
-        self,
-        config,
-        checkpoint_config,
-        model_config,
-        transformer_config,
-        role,
-        model: torch.nn.ModuleList,
-        arch: str,
-        hf_config,
-        param_dtype: torch.dtype,
-        share_embeddings_and_output_weights: bool,
-        processing_class,
-        optimizer,
-        optimizer_scheduler,
-        use_distributed_optimizer: bool,
-        use_checkpoint_opt_param_scheduler: bool = False,
-        use_dist_checkpointing: bool = True,
-        bridge=None,
-        provider=None,
-        peft_cls=None,
-        **kwargs,
+            self,
+            config,
+            checkpoint_config,
+            model_config,
+            transformer_config,
+            role,
+            model: torch.nn.ModuleList,
+            arch: str,
+            hf_config,
+            param_dtype: torch.dtype,
+            share_embeddings_and_output_weights: bool,
+            processing_class,
+            optimizer,
+            optimizer_scheduler,
+            use_distributed_optimizer: bool,
+            use_checkpoint_opt_param_scheduler: bool = False,
+            use_dist_checkpointing: bool = True,
+            bridge=None,
+            provider=None,
+            peft_cls=None,
+            **kwargs,
     ):
         super().__init__(
             model,
@@ -159,7 +159,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         self.rank = torch.distributed.get_rank()
         # Megatron-Bridge is Okay to load/save HF checkpoint for value model as well
         self.use_dist_checkpointing = (
-            use_dist_checkpointing or not self.bridge or (self.vanilla_bridge and self.is_value_model)
+                use_dist_checkpointing or not self.bridge or (self.vanilla_bridge and self.is_value_model)
         )
         self.use_hf_checkpoint = not self.use_dist_checkpointing
 
@@ -202,16 +202,16 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         return rng_state_list
 
     def get_checkpoint_name(
-        self,
-        checkpoints_path,
-        pipeline_parallel=None,
-        tensor_rank=None,
-        pipeline_rank=None,
-        cp_rank=None,
-        expert_parallel=None,
-        expert_rank=None,
-        return_base_dir=True,
-        basename="model.pt",
+            self,
+            checkpoints_path,
+            pipeline_parallel=None,
+            tensor_rank=None,
+            pipeline_rank=None,
+            cp_rank=None,
+            expert_parallel=None,
+            expert_rank=None,
+            return_base_dir=True,
+            basename="model.pt",
     ):
         """Determine the directory name for this rank's checkpoint."""
         # Use both the tensor and pipeline MP rank.
@@ -248,12 +248,12 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         return os.path.join(common_path, basename)
 
     def generate_state_dict(
-        self,
-        generate_model: bool = True,
-        generate_optimizer: bool = True,
-        generate_extra: bool = True,
-        is_loading: bool = False,
-        metadata: dict | None = None,
+            self,
+            generate_model: bool = True,
+            generate_optimizer: bool = True,
+            generate_extra: bool = True,
+            is_loading: bool = False,
+            metadata: dict | None = None,
     ):
         # For save dist checkpointing
         state_dict = {}
@@ -669,7 +669,8 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                     transformer_config_dict.pop(key)
                 transformer_config_path = get_transformer_config_checkpoint_path(local_path)
                 with open(transformer_config_path, "w") as f:
-                    json.dump(transformer_config_dict, f, indent=2)
+                    json.dump(transformer_config_dict, f, indent=2,
+                              default=lambda o: o.to_dict() if hasattr(o, "to_dict") else o)
 
         if self.should_save_hf_model and not self.use_hf_checkpoint:
             # wait for everyone to dump to local
