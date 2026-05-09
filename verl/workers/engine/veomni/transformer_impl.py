@@ -178,7 +178,6 @@ class VeOmniEngine(FSDPEngine):
 
         return optimizer
 
-
     def _build_lr_scheduler(self, optimizer):
         optim_config = self.optimizer_config
         lr_scheduler = build_lr_scheduler(
@@ -577,6 +576,7 @@ class OmniSequenceShardCollator:
                 batch[key] = self.sp_slice(batch[key], dim=self.sp_slice_features[key])
 
         return batch
+
 
 def _prepare_veomni_flash_attention_kwargs(position_ids: torch.Tensor) -> dict[str, torch.Tensor | int]:
     """Normalize packed position_ids layout and derive varlen FlashAttention kwargs.
