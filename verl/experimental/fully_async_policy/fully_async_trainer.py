@@ -15,10 +15,13 @@
 import asyncio
 import logging
 import os
+import sys
 import time
 from datetime import datetime
 from typing import Any
 
+import numpy as np
+import psutil
 import ray
 import torch
 from omegaconf import OmegaConf, open_dict
@@ -58,6 +61,113 @@ class TrainingStopException(Exception):
     """Exception raised to signal training should stop"""
 
     pass
+
+
+def _bytes_to_gb(n: int | float) -> float:
+    return float(n) / (1024**3)
+
+
+def _tensor_bytes(obj: Any) -> int:
+    if isinstance(obj, torch.Tensor):
+        return int(obj.numel() * obj.element_size())
+    if isinstance(obj, np.ndarray) and obj.dtype != object:
+        return int(obj.nbytes)
+    if isinstance(obj, dict):
+        return sum(_tensor_bytes(v) for v in obj.values())
+    if isinstance(obj, list | tuple):
+        return sum(_tensor_bytes(v) for v in obj)
+    if isinstance(obj, np.ndarray) and obj.dtype == object:
+        return sum(_tensor_bytes(v) for v in obj.flat)
+    return 0
+
+
+def _object_bytes(obj: Any, *, _seen: set[int] | None = None, _depth: int = 0) -> int:
+    """Best-effort recursive host-memory estimator for Python/numpy/torch objects."""
+    if _seen is None:
+        _seen = set()
+    obj_id = id(obj)
+    if obj_id in _seen:
+        return 0
+    _seen.add(obj_id)
+
+    if isinstance(obj, torch.Tensor):
+        return int(obj.numel() * obj.element_size())
+    if isinstance(obj, np.ndarray):
+        total = int(obj.nbytes)
+        if obj.dtype == object and _depth < 8:
+            total += sum(_object_bytes(v, _seen=_seen, _depth=_depth + 1) for v in obj.flat)
+        return total
+
+    size = sys.getsizeof(obj, 0)
+    if _depth >= 8:
+        return size
+
+    # PIL.Image does not expose nbytes, but raw RGB/RGBA storage dominates.
+    if hasattr(obj, "size") and hasattr(obj, "mode"):
+        try:
+            width, height = obj.size
+            channels = len(obj.getbands()) if hasattr(obj, "getbands") else 3
+            size += int(width) * int(height) * int(channels)
+        except Exception:
+            pass
+
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            size += _object_bytes(k, _seen=_seen, _depth=_depth + 1)
+            size += _object_bytes(v, _seen=_seen, _depth=_depth + 1)
+    elif isinstance(obj, list | tuple | set | frozenset):
+        for v in obj:
+            size += _object_bytes(v, _seen=_seen, _depth=_depth + 1)
+    return int(size)
+
+
+def _intermediate_summary(batch: DataProto) -> dict[str, Any]:
+    cache_key = "__intermediate_trajectories_cache__"
+    cache = (batch.meta_info or {}).get(cache_key)
+    interm_col = None
+    if isinstance(cache, dict):
+        interm_col = cache.get("intermediate_col")
+    elif batch.non_tensor_batch and "intermediate_trajectories" in batch.non_tensor_batch:
+        interm_col = batch.non_tensor_batch["intermediate_trajectories"]
+
+    if interm_col is None:
+        return {"rows_with_intermediate": 0, "num_intermediate": 0, "per_row_counts": []}
+    counts = [len(x) if x else 0 for x in interm_col]
+    return {
+        "rows_with_intermediate": sum(1 for c in counts if c),
+        "num_intermediate": int(sum(counts)),
+        "per_row_counts": counts,
+        "payload_gb": _bytes_to_gb(_object_bytes(interm_col)),
+    }
+
+
+def _dataproto_storage_summary(batch: DataProto | None) -> dict[str, Any]:
+    if batch is None:
+        return {"batch_len": 0}
+    tensor_bytes = 0
+    tensor_shapes: dict[str, tuple[int, ...]] = {}
+    if batch.batch is not None:
+        for k, v in batch.batch.items():
+            tensor_bytes += _tensor_bytes(v)
+            if isinstance(v, torch.Tensor):
+                tensor_shapes[k] = tuple(v.shape)
+
+    non_tensor_bytes = _object_bytes(batch.non_tensor_batch or {})
+    meta_bytes = _object_bytes(batch.meta_info or {})
+    mm_bytes = 0
+    nt = batch.non_tensor_batch or {}
+    if "multi_modal_inputs" in nt:
+        mm_bytes = _object_bytes(nt["multi_modal_inputs"])
+
+    return {
+        "batch_len": len(batch),
+        "tensor_gb": _bytes_to_gb(tensor_bytes),
+        "non_tensor_gb": _bytes_to_gb(non_tensor_bytes),
+        "meta_gb": _bytes_to_gb(meta_bytes),
+        "multi_modal_inputs_gb": _bytes_to_gb(mm_bytes),
+        "tensor_shapes": tensor_shapes,
+        **_intermediate_summary(batch),
+    }
 
 
 @ray.remote(num_cpus=10)
@@ -472,6 +582,33 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             await self._fit_validate()
         self._fit_save_checkpoint(force=True)
 
+    def _log_batch_storage(self, stage: str, batch: DataProto | None) -> None:
+        summary = _dataproto_storage_summary(batch)
+        rss_gb = _bytes_to_gb(psutil.Process(os.getpid()).memory_info().rss)
+        logger.info(
+            "[FullyAsyncTrainer][Storage][%s] "
+            "rss=%.3fGB batch_len=%s tensor=%.3fGB non_tensor=%.3fGB "
+            "meta=%.3fGB multi_modal_inputs=%.3fGB intermediate_rows=%s "
+            "rows_with_intermediate=%s per_row_counts=%s tensor_shapes=%s",
+            stage,
+            rss_gb,
+            summary.get("batch_len"),
+            summary.get("tensor_gb", 0.0),
+            summary.get("non_tensor_gb", 0.0),
+            summary.get("meta_gb", 0.0),
+            summary.get("multi_modal_inputs_gb", 0.0),
+            summary.get("num_intermediate", 0),
+            summary.get("rows_with_intermediate", 0),
+            summary.get("per_row_counts", []),
+            summary.get("tensor_shapes", {}),
+        )
+        if "payload_gb" in summary:
+            logger.info(
+                "[FullyAsyncTrainer][Storage][%s] intermediate_payload=%.3fGB",
+                stage,
+                summary["payload_gb"],
+            )
+
     async def fit_step(self, batch_dict: dict = None):
         """
         Single-step training template method. Handles all logic for one training step.
@@ -497,6 +634,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
 
         with marked_timer("step", self.timing_raw):
             batch = await self._fit_generate(None)
+            self._log_batch_storage("after_generate", batch)
 
             # Detect position_ids ndim from the assembled batch for consistent
             # assertion throughout the pipeline.
@@ -507,6 +645,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             )
 
             batch = self._fit_compute_reward(batch)
+            self._log_batch_storage("after_reward", batch)
             assert_batch_schema(
                 batch,
                 "fit_step.after_reward",
@@ -519,6 +658,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             # log_prob / ref_log_prob / critic are computed over every
             # trajectory row that will participate in the actor update.
             batch = self._fit_expand_and_pad(batch)
+            self._log_batch_storage("after_expand_and_pad", batch)
             assert_batch_schema(
                 batch,
                 "fit_step.after_expand_and_pad",
@@ -526,8 +666,11 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
                 require_position_ids_ndim=_pos_ndim,
             )
             batch = self._fit_compute_log_prob(batch)
+            self._log_batch_storage("after_log_prob", batch)
             assert_batch_schema(batch, "fit_step.after_log_prob", require_position_ids_ndim=_pos_ndim)
+            self._log_batch_storage("before_ref_log_prob", batch)
             batch = self._fit_compute_ref_log_prob(batch)
+            self._log_batch_storage("after_ref_log_prob", batch)
             batch = self._fit_compute_critic(batch)
             assert_batch_schema(batch, "fit_step.after_critic", require_position_ids_ndim=_pos_ndim)
             # Advantage is computed on the FINAL subset only (GRPO group
@@ -535,6 +678,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             # broadcast to sibling intermediate rows and scaled by 1/T_rollout
             # so that every rollout contributes equally under token-mean.
             batch = self._fit_compute_advantage(batch)
+            self._log_batch_storage("after_advantage", batch)
             assert_batch_schema(batch, "fit_step.after_advantage", require_position_ids_ndim=_pos_ndim)
             batch = self._fit_update_critic(batch)
             batch = self._fit_update_actor(batch)
@@ -600,6 +744,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
              not contribute to the actor loss.
         """
         timing_raw = self.timing_raw
+        self._log_batch_storage("expand.before", batch)
         with marked_timer("expand_intermediate", timing_raw, color="magenta"):
             rollout_n = int(self.config.actor_rollout_ref.rollout.get("n", 1) or 1)
             rollout_cfg = self.config.actor_rollout_ref.rollout
@@ -611,6 +756,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
                 rollout_config=rollout_cfg,
                 rollout_n=rollout_n,
             )
+        self._log_batch_storage("expand.after_expand", batch)
 
         # Temporarily move meta_info fields that are per-row ndarrays out of
         # ``batch.meta_info`` before pad. ``DataProto.concat`` inside
@@ -637,6 +783,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
                 batch, pad_size = pad_dataproto_to_divisor(batch, global_mini_batch)
                 zero_out_padding_rows(batch, pad_size)
                 batch.meta_info["fully_async/pad/num_padding_rows"] = int(pad_size)
+                self._log_batch_storage("expand.after_pad", batch)
         else:
             batch.meta_info["fully_async/pad/num_padding_rows"] = 0
 
