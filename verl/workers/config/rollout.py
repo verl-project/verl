@@ -272,7 +272,7 @@ class RolloutConfig(BaseConfig):
 
     limit_images: Optional[int] = None
 
-    use_preprocessed_multimodal_input: bool = False
+    use_preprocessed_multimodal_input: bool = True
 
     skip_tokenizer_init: bool = False
 

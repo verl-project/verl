@@ -332,8 +332,12 @@ skip:
 # When enabled (True), the rollout assume token in token out for generation
 skip_tokenizer_init: True
 
-# When enabled, send backend-ready preprocessed multimodal inputs instead of raw image/video media.
-use_preprocessed_multimodal_input: False
+# Send backend-ready preprocessed multimodal inputs instead of raw image/video media.
+# Default True: avoids retokenization drift between trainer and rollout (the canonical
+# RL token-in-token-out contract). Set to False to fall back to the legacy raw-media path.
+# Has no effect on rollouts whose backend doesn't support a preprocessed contract
+# (e.g., today only "vllm"; sglang/trtllm fall through to raw media regardless).
+use_preprocessed_multimodal_input: True
 
 # Whether to enable rollout routing replay for MoE models
 # When enabled (True), the rollout will record the routing decisions.
