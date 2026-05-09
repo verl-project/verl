@@ -1,7 +1,7 @@
 Ascend Dockerfile Build Guidance
 ===================================
 
-Last updated: 03/03/2025.
+Last updated: 05/09/2025.
 
 
 镜像获取 & 公开镜像地址
@@ -34,11 +34,11 @@ Atlas 800T A3
 基础镜像            Ubuntu 22.04
 Python             3.11
 CANN               8.5.0
-torch              2.8.0
-torch_npu          2.8.0
-torchvision        0.22.1
-vLLM               0.13.0
-vLLM-ascend        0.13.0
+torch              2.9.0
+torch_npu          2.9.0
+torchvision        0.24.0
+vLLM               0.18.0
+vLLM-ascend        0.18.0
 Megatron-LM        v0.12.1
 MindSpeed          2.3.0_core_r0.12.1
 triton-ascend      3.2.0
@@ -98,7 +98,7 @@ A3              8.5.0          SGLang          `Dockerfile.ascend.sglang_8.5.0_a
        -v /usr/sbin:/usr/sbin \
        -v /home:/home \
        -v /data:/data \
-       镜像名称:标签 \
+       image_name:tag \
        /bin/bash
 
 **说明：**
@@ -106,6 +106,7 @@ A3              8.5.0          SGLang          `Dockerfile.ascend.sglang_8.5.0_a
 * 如需挂载其他本地路径到容器，请自行添加 ``-v <宿主机路径>:<容器内路径>``
 * 建议将 ``your_docker_name`` 替换为具有实际意义的容器名称
 * ``--privileged`` 参数授予容器扩展权限，请根据实际安全需求评估是否必要
+* ``image_name:tag``请换成自定义的镜像名称与标签
 
 启动容器
 --------

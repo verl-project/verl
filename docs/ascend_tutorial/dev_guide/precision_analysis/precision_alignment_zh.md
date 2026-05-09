@@ -4,7 +4,7 @@
 
 本文档总结了在 VeRL 上对NPU和GPU进行精度对齐的方法以供参考。
 
-Last updated: 05/07/2026.
+Last updated: 05/09/2026.
 
 ## 1. 环境与权重对齐
 
@@ -101,7 +101,7 @@ NPU上开启如下参数，复用上一步生成的序列，端到端运行：
 
 ```bash
 actor_rollout_ref.rollout.skip_rollout=True \
-actor_rollout_ref.rollout.skip_dump_dir="/tmp/rollout_dump" \
+actor_rollout_ref.rollout.skip_dump_dir="/path/dump/data_json" \
 ```
 
 **第三步：对比指标**
@@ -130,9 +130,9 @@ trainer.rollout_data_dir='/path/dump/data_json'
 在dump推理数据之前，若复现推理精度问题占用的资源较多，可以先尝试缩小推理精度问题复现成本，减少复现的规模，减少需要dump和对比的数据。在多batch、长序列的场景下，可以通过发送单batch请求，减少序列长度尝试复现。
 
 
-## 7 dump对比
+## 7. dump对比
 
-[精度调试工具](./precision_debugger.md)，定位到问题出现的阶段之后，可以通过msprobe工具进行数据dump来细致定位。
+[精度调试工具](./precision_debugger_zh.md)，定位到问题出现的阶段之后，可以通过msprobe工具进行数据dump来细致定位。
 
 在推理或训练过程中，模型可能出现输出偏离预期、生成异常、甚至产生 NaN/Inf 等数值不稳定问题。要定位根因，需要对模型执行路径进行精细化监控，采集中间特征、权重、激活值以及各关键层的输入输出，并记录提示词、张量 dtype、硬件配置等上下文信息。通过捕获这些核心张量及元数据，可以系统性地追踪精度退化或数值错误的来源。
 
