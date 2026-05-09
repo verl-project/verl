@@ -51,7 +51,7 @@ opencode
 使用主 Skill 一键拉起训练：
 
 ```bash
-# 启动 opencode 后，告诉 AI 您要使用verl做训练， ai会给出可选参数以及配置示例，想AI提供配置示例，即可开始训练流程：
+# 启动 opencode 后，告诉agent您要使用verl做训练， agent会给出可选参数以及配置示例，向agent提供配置示例，即可开始训练流程：
 开发者：您好，我想使用verl做训练
 
 agent：下面是需要收集的参数配置，以及配置示例：XXXX
