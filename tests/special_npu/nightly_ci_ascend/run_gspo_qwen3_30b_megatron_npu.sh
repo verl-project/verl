@@ -34,7 +34,7 @@ rollout_n=${ROLLOUT_N:-4}
 
 total_epochs=${TOTAL_EPOCHS:-10}
 save_freq=${SAVE_FREQ:-50}
-test_freq=${TEST_FREQ:-20}
+test_freq=${TEST_FREQ:--1}
 
 project_name=${PROJECT_NAME:-verl_gspo_qwen3_moe}
 experiment_name=${EXPERIMENT_NAME:-qwen3_30b_a3b_vllm_megatron}
