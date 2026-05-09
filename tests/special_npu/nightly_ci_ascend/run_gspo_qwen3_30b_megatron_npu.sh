@@ -125,7 +125,7 @@ TRAINER=(
     trainer.save_freq=${save_freq}
     trainer.test_freq=${test_freq}
     trainer.total_epochs=${total_epochs}
-    trainer.total_training_steps=1
+    trainer.total_training_steps=15
 )
 
 EXTRA=(
