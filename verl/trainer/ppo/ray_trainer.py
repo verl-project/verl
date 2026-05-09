@@ -61,6 +61,7 @@ from verl.trainer.ppo.utils import (
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, should_save_ckpt_esi
 from verl.utils.config import omega_conf_to_dataclass
+from verl.utils.dataloader import shutdown_dataloaders
 from verl.utils.debug import marked_timer
 from verl.utils.import_utils import load_class_from_fqn
 from verl.utils.metric import reduce_metrics
@@ -400,6 +401,9 @@ class RayPPOTrainer:
                     self.config.critic.optim.total_training_steps = total_training_steps
         except Exception as e:
             print(f"Warning: Could not set total_training_steps in config. Structure missing? Error: {e}")
+
+    def _shutdown_dataloaders(self):
+        shutdown_dataloaders(getattr(self, "train_dataloader", None), getattr(self, "val_dataloader", None))
 
     def _dump_generations(self, inputs, outputs, gts, scores, reward_extra_infos_dict, dump_path):
         """Dump rollout/validation samples as JSONL."""
@@ -1307,6 +1311,7 @@ class RayPPOTrainer:
             pprint(f"Initial validation metrics: {val_metrics}")
             logger.log(data=val_metrics, step=self.global_steps)
             if self.config.trainer.get("val_only", False):
+                self._shutdown_dataloaders()
                 return
 
         if self.config.actor_rollout_ref.rollout.skip.get("enable", False):
@@ -1659,6 +1664,7 @@ class RayPPOTrainer:
                         self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=True)
                     pprint(f"Final validation metrics: {last_val_metrics}")
                     progress_bar.close()
+                    self._shutdown_dataloaders()
                     return
 
                 # this is experimental and may be changed/removed in the future
@@ -1666,3 +1672,6 @@ class RayPPOTrainer:
                 if hasattr(self.train_dataset, "on_batch_end"):
                     # The dataset may be changed after each training batch
                     self.train_dataset.on_batch_end(batch=batch)
+
+        progress_bar.close()
+        self._shutdown_dataloaders()
