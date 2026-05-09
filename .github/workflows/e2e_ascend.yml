@@ -91,7 +91,8 @@ jobs:
           clean: true
       - name: Install the current repository
         run: |
-          pip install --no-deps -e .
+          pip install uv
+          uv pip install --system --no-deps -e .
       - name: Check final pip list
         run: |
           pip list
@@ -146,7 +147,8 @@ jobs:
           clean: true
       - name: Install the current repository
         run: |
-          pip install --no-deps --no-build-isolation -e .
+          pip install uv
+          uv pip install --system --no-deps --no-build-isolation -e .
       - name: Check final pip list
         run: |
           pip list
@@ -201,7 +203,8 @@ jobs:
           clean: true
       - name: Install the current repository
         run: |
-          pip install --no-deps -e .
+          pip install uv
+          uv pip install --system --no-deps -e .
       - name: Check final pip list
         run: |
           pip list

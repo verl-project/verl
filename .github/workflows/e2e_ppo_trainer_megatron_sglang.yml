@@ -121,10 +121,11 @@ jobs:
           fetch-depth: 0
       - name: Install the current repository
         run: |
-          pip3 install -r requirements-test.txt
-          pip3 install megatron-bridge --no-deps
-          pip3 install git+https://github.com/ISEEKYAN/mbridge.git@main --no-deps --no-build-isolation
-          pip3 install --no-deps -e .
+          pip3 install uv
+          uv pip install --system -r requirements-test.txt
+          uv pip install --system megatron-bridge --no-deps
+          uv pip install --system git+https://github.com/ISEEKYAN/mbridge.git@main --no-deps --no-build-isolation
+          uv pip install --system --no-deps -e .
       - name: Prepare GSM8K dataset
         run: |
           python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
@@ -169,9 +170,10 @@ jobs:
           fetch-depth: 0
       - name: Install the current repository
         run: |
-          pip3 install -r requirements-test.txt
-          pip3 install --no-deps -e .
-          pip3 install megatron-bridge --no-deps
+          pip3 install uv
+          uv pip install --system -r requirements-test.txt
+          uv pip install --system --no-deps -e .
+          uv pip install --system megatron-bridge --no-deps
       - name: Prepare GSM8K dataset
         run: |
           python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k

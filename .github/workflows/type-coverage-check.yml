@@ -20,9 +20,10 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-          pip3 install -r requirements.txt
-          pip3 install --no-deps -e .
+          pip3 install uv
+          uv pip install --system torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          uv pip install --system -r requirements.txt
+          uv pip install --system --no-deps -e .
       - name: Run type annotation coverage check
         run: |
           python3 tests/special_sanity/type_coverage_check.py

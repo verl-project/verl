@@ -115,10 +115,11 @@ jobs:
           fetch-depth: 0
       - name: Install the current repository
         run: |
-          pip3 install -r requirements-test.txt
-          pip3 install --no-deps -e .
-          pip3 install veomni==0.1.9a5 --ignore-requires-python --no-deps --index-url https://pypi.org/simple/
-          pip3 install transformers==4.57.3
+          pip3 install uv
+          uv pip install --system -r requirements-test.txt
+          uv pip install --system --no-deps -e .
+          uv pip install --system veomni==0.1.9a5 --ignore-requires-python --no-deps --index-url https://pypi.org/simple/
+          uv pip install --system transformers==4.57.3
       - name: Prepare GSM8K dataset
         run: |
           ray stop --force

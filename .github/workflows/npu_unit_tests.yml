@@ -98,8 +98,9 @@ jobs:
           clean: true
       - name: Install the current repository
         run: |
-          pip install --no-deps -e .[test]
-          pip install mlflow pytest-asyncio
+          pip install uv
+          uv pip install --system --no-deps -e .[test]
+          uv pip install --system mlflow pytest-asyncio
       - name: Check final pip list
         run: |
           pip list

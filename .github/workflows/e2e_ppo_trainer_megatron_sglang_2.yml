@@ -120,8 +120,9 @@ jobs:
           fetch-depth: 0
       - name: Install the current repository
         run: |
-          pip3 install -r requirements-test.txt
-          pip3 install --no-deps -e .
+          pip3 install uv
+          uv pip install --system -r requirements-test.txt
+          uv pip install --system --no-deps -e .
       - name: Prepare gsm8k dataset
         run: |
           ray stop --force
@@ -146,8 +147,9 @@ jobs:
           fetch-depth: 0
       - name: Install the current repository
         run: |
-          pip3 install -r requirements-test.txt
-          pip3 install --no-deps -e .
+          pip3 install uv
+          uv pip install --system -r requirements-test.txt
+          uv pip install --system --no-deps -e .
       # Geo3k
       - name: Prepare GEO3K dataset
         run: |

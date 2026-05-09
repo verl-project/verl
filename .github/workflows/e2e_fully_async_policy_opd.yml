@@ -79,10 +79,11 @@ jobs:
           fetch-depth: 0
       - name: Install the current repository
         run: |
-          pip3 install -r requirements-test.txt
-          pip3 install --no-deps -e .
-          pip3 install cupy-cuda12x==13.6.0
-          pip3 install --force-reinstall --no-deps --no-build-isolation git+https://github.com/ISEEKYAN/mbridge.git@main
+          pip3 install uv
+          uv pip install --system -r requirements-test.txt
+          uv pip install --system --no-deps -e .
+          uv pip install --system cupy-cuda12x==13.6.0
+          uv pip install --system --force-reinstall --no-deps --no-build-isolation git+https://github.com/ISEEKYAN/mbridge.git@main
       - name: Prepare datasets
         run: |
           python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k

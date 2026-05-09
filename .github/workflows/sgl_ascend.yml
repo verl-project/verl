@@ -105,10 +105,11 @@ jobs:
           clean: true
       - name: Install the current repository
         run: |
-          pip3 install pytest pytest-asyncio
-          pip3 install megatron-bridge --no-deps
-          pip3 install git+https://github.com/ISEEKYAN/mbridge.git@main --no-deps --no-build-isolation
-          pip3 install --no-deps --no-build-isolation -e .
+          pip3 install uv
+          uv pip install --system pytest pytest-asyncio
+          uv pip install --system megatron-bridge --no-deps
+          uv pip install --system git+https://github.com/ISEEKYAN/mbridge.git@main --no-deps --no-build-isolation
+          uv pip install --system --no-deps --no-build-isolation -e .
       - name: Check final pip list
         run: |
           pip list

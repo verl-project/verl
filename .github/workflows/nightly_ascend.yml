@@ -71,7 +71,8 @@ jobs:
           clean: true
       - name: Install the current repository
         run: |
-          pip install --no-deps -e .
+          pip install uv
+          uv pip install --system --no-deps -e .
       - name: Check final pip list
         run: |
           pip list
@@ -113,7 +114,8 @@ jobs:
           clean: true
       - name: Install the current repository
         run: |
-          pip install --no-deps -e .
+          pip install uv
+          uv pip install --system --no-deps -e .
       - name: Check final pip list
         run: |
           pip list
@@ -155,7 +157,8 @@ jobs:
           clean: true
       - name: Install the current repository
         run: |
-          pip install --no-deps -e .
+          pip install uv
+          uv pip install --system --no-deps -e .
       - name: Check final pip list
         run: |
           pip list
@@ -198,8 +201,9 @@ jobs:
           clean: true
       - name: Install the current repository
         run: |
-          pip install -r requirements-npu.txt
-          pip install --no-deps -e .
+          pip install uv
+          uv pip install --system -r requirements-npu.txt
+          uv pip install --system --no-deps -e .
       - name: Check final pip list
         run: |
           pip list

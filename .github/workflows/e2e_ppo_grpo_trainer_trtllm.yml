@@ -128,12 +128,14 @@ jobs:
       - name: Reinstall FlashInfer for runtime GPU arch
         run: |
           unset TORCH_CUDA_ARCH_LIST
-          pip3 install --force-reinstall --no-deps flashinfer-python
+          pip3 install uv
+          uv pip install --system --force-reinstall --no-deps flashinfer-python
       - name: Install the current repository
         run: |
-          pip3 install pytest-asyncio
-          pip3 install -r requirements-test.txt
-          pip3 install --no-deps -e .
+          pip3 install uv
+          uv pip install --system pytest-asyncio
+          uv pip install --system -r requirements-test.txt
+          uv pip install --system --no-deps -e .
       - name: Run TRTLLM unit tests
         run: |
           unset TORCH_CUDA_ARCH_LIST  # Let TRT-LLM CUTLASS DSL auto-detect runtime GPU arch
@@ -166,13 +168,15 @@ jobs:
       - name: Reinstall FlashInfer for runtime GPU arch
         run: |
           unset TORCH_CUDA_ARCH_LIST
-          pip3 install --force-reinstall --no-deps flashinfer-python
+          pip3 install uv
+          uv pip install --system --force-reinstall --no-deps flashinfer-python
       - name: Install the current repository
         run: |
-          pip3 install -r requirements-test.txt
-          pip3 install --no-deps -e .
+          pip3 install uv
+          uv pip install --system -r requirements-test.txt
+          uv pip install --system --no-deps -e .
           # WAR: CI image predates mbridge cf71117 (removes `imp` for Python 3.12). Drop this line after CI image is refreshed.
-          pip3 install --force-reinstall --no-deps --no-build-isolation git+https://github.com/ISEEKYAN/mbridge.git
+          uv pip install --system --force-reinstall --no-deps --no-build-isolation git+https://github.com/ISEEKYAN/mbridge.git
       - name: Prepare GSM8K dataset
         run: |
           python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k --local_save_dir ${PWD}/data/gsm8k
@@ -219,15 +223,17 @@ jobs:
       - name: Reinstall FlashInfer for runtime GPU arch
         run: |
           unset TORCH_CUDA_ARCH_LIST
-          pip3 install --force-reinstall --no-deps flashinfer-python
+          pip3 install uv
+          uv pip install --system --force-reinstall --no-deps flashinfer-python
       - name: Install the current repository
         run: |
-          pip3 install -r requirements-test.txt
-          pip3 install --no-deps -e .
-          pip3 install qwen_vl_utils
-          pip3 install mathruler
+          pip3 install uv
+          uv pip install --system -r requirements-test.txt
+          uv pip install --system --no-deps -e .
+          uv pip install --system qwen_vl_utils
+          uv pip install --system mathruler
           # WAR: CI image predates mbridge cf71117 (removes `imp` for Python 3.12). Drop this line after CI image is refreshed.
-          pip3 install --force-reinstall --no-deps --no-build-isolation git+https://github.com/ISEEKYAN/mbridge.git
+          uv pip install --system --force-reinstall --no-deps --no-build-isolation git+https://github.com/ISEEKYAN/mbridge.git
       - name: Prepare GEO3K dataset
         run: |
           python3 examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/models/hf_data/hiyouga/geometry3k --local_save_dir ${PWD}/data/geo3k

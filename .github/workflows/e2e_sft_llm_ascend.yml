@@ -95,12 +95,13 @@ jobs:
           clean: true
       - name: Install the current repository
         run: |
-          pip install --no-deps -e .
-          pip install veomni==0.1.9a5 --ignore-requires-python --no-deps --index-url https://pypi.org/simple/
-          pip install transformers==4.57.3
-          pip install pandas==2.3.3
-          pip uninstall -y mbridge
-          pip install git+https://github.com/ISEEKYAN/mbridge.git@89eb10
+          pip install uv
+          uv pip install --system --no-deps -e .
+          uv pip install --system veomni==0.1.9a5 --ignore-requires-python --no-deps --index-url https://pypi.org/simple/
+          uv pip install --system transformers==4.57.3
+          uv pip install --system pandas==2.3.3
+          uv pip uninstall mbridge
+          uv pip install --system git+https://github.com/ISEEKYAN/mbridge.git@89eb10
       - name: Check final pip list
         run: |
           pip list

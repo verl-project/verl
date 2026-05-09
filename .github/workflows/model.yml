@@ -96,8 +96,9 @@ jobs:
           fetch-depth: 0
       - name: Install the current repository and upgrade to latest transformers
         run: |
-          pip3 install -r requirements-test.txt
-          pip3 install --no-deps -e .
+          pip3 install uv
+          uv pip install --system -r requirements-test.txt
+          uv pip install --system --no-deps -e .
       - name: Running rmpad model tests on 8 L20 GPUs + flash_attn 2.5.8
         run: |
           pytest -s tests/models/test_transformer.py
@@ -112,14 +113,16 @@ jobs:
           torchrun --nproc_per_node=8 -m pytest tests/models/test_transformers_ulysses.py
       - name: Running transformers ulysses tests on 8 L20 GPUs + transformers 4.54.1
         run: |
-          pip3 install transformers==4.54.1
+          pip3 install uv
+          uv pip install --system transformers==4.54.1
           torchrun --nproc_per_node=8 -m pytest tests/models/test_transformers_ulysses.py
       - name: Run distributed test
         run: |
           bash tests/special_distributed/run_all.sh
       - name: Clean up and recover transformers
         run: |
-          pip3 install --upgrade "transformers==5.3.0"
+          pip3 install uv
+          uv pip install --system --upgrade "transformers==5.3.0"
 
   # TODO: Move this back to model_rmpad once FSDP2 is stable.
   # NOTE: List as an independent job to make rerun easier.
@@ -138,8 +141,9 @@ jobs:
           fetch-depth: 0
       - name: Install the current repository and upgrade to latest transformers/flash_attn
         run: |
-          pip3 install -r requirements-test.txt
-          pip3 install --no-deps -e .
+          pip3 install uv
+          uv pip install --system -r requirements-test.txt
+          uv pip install --system --no-deps -e .
       - name: Running FSDP2 rmpad model tests on 8 L20 GPUs + latest flash_attn
         run: |
           STRATEGY=fsdp2 torchrun --nproc_per_node=8 tests/special_distributed/test_fsdp_ckpt.py
@@ -159,9 +163,10 @@ jobs:
           fetch-depth: 0
       - name: Install the current repository
         run: |
-          pip3 install -r requirements-test.txt
-          pip3 install --no-deps -e .
-          pip3 install --upgrade "accelerate>=1.13.0"
+          pip3 install uv
+          uv pip install --system -r requirements-test.txt
+          uv pip install --system --no-deps -e .
+          uv pip install --system --upgrade "accelerate>=1.13.0"
       - name: Download model config files
         run: |
           hf download Qwen/Qwen2.5-0.5B-Instruct --local-dir $HOME/models/Qwen/Qwen2.5-0.5B-Instruct
