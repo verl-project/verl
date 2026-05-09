@@ -33,7 +33,7 @@ rollout_gpu_mem_util=${ROLLOUT_GPU_MEM_UTIL:-0.7}
 rollout_n=${ROLLOUT_N:-4}
 
 total_epochs=${TOTAL_EPOCHS:-10}
-save_freq=${SAVE_FREQ:-50}
+save_freq=${SAVE_FREQ:--1}
 test_freq=${TEST_FREQ:--1}
 
 project_name=${PROJECT_NAME:-verl_gspo_qwen3_moe}
