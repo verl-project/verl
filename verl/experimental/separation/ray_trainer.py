@@ -437,22 +437,21 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
             gen_batch_output.pop(non_tensor_batch_keys=["__do_sample__"])
 
         if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
-            with marked_timer("gen_max", timing_raw, color="purple"):
-                gen_baseline_output = combined_gen_output.slice(num_sampled_prompts, None)
-                if "__do_sample__" in gen_baseline_output.non_tensor_batch:
-                    gen_baseline_output.pop(non_tensor_batch_keys=["__do_sample__"])
+            gen_baseline_output = combined_gen_output.slice(num_sampled_prompts, None)
+            if "__do_sample__" in gen_baseline_output.non_tensor_batch:
+                gen_baseline_output.pop(non_tensor_batch_keys=["__do_sample__"])
 
-                # REMAX only needs one scalar baseline reward per original prompt.
-                # Agent-loop rollout outputs contain sample-specific non-tensor fields
-                # such as turns, tool rewards and extras; keep the baseline path isolated.
-                if self.use_rm and "rm_scores" not in gen_baseline_output.batch.keys():
-                    baseline_reward = self._compute_reward_colocate(gen_baseline_output)
-                    gen_baseline_output = gen_baseline_output.union(baseline_reward)
+            # REMAX only needs one scalar baseline reward per original prompt.
+            # Agent-loop rollout outputs contain sample-specific non-tensor fields
+            # such as turns, tool rewards and extras; keep the baseline path isolated.
+            if self.use_rm and "rm_scores" not in gen_baseline_output.batch.keys():
+                baseline_reward = self._compute_reward_colocate(gen_baseline_output)
+                gen_baseline_output = gen_baseline_output.union(baseline_reward)
 
-                reward_baseline_tensor = gen_baseline_output.batch["rm_scores"].sum(dim=-1)
-                batch.batch["reward_baselines"] = reward_baseline_tensor
+            reward_baseline_tensor = gen_baseline_output.batch["rm_scores"].sum(dim=-1)
+            batch.batch["reward_baselines"] = reward_baseline_tensor
 
-                del gen_baseline_output
+            del gen_baseline_output
         del combined_gen_batch, combined_gen_output
         # repeat to align with repeated responses in rollout
         batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
