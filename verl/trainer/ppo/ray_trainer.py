@@ -1362,7 +1362,7 @@ class RayPPOTrainer:
                     # rollout after replicas have been put to sleep, which can leave async vLLM
                     # engines in an invalid state for multi-turn agent workloads.
                     gen_batch_output.non_tensor_batch["__do_sample__"] = np.ones(len(gen_batch_output), dtype=bool)
-                    gen_baseline_batch = deepcopy(gen_batch)
+                    gen_baseline_batch = gen_batch.slice(0, None)
                     gen_baseline_batch.non_tensor_batch["__do_sample__"] = np.zeros(len(gen_baseline_batch), dtype=bool)
                     combined_gen_batch = DataProto.concat([gen_batch_output, gen_baseline_batch])
                     num_sampled_prompts = len(gen_batch_output)
