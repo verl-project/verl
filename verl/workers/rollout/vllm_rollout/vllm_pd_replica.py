@@ -176,6 +176,7 @@ class vLLMPDReplica(vLLMReplica):
                 engine_id=self._prefill_engine_id,
                 ib_device=self.config.disaggregation.ib_device,
                 transfer_backend=self.config.disaggregation.transfer_backend,
+                mooncake_protocol=self.config.disaggregation.mooncake_protocol,
             )
             self._prefill_servers = [
                 self._spawn_pd_server(
@@ -222,6 +223,7 @@ class vLLMPDReplica(vLLMReplica):
                     engine_id=uuid.uuid4().hex,
                     ib_device=self.config.disaggregation.ib_device,
                     transfer_backend=self.config.disaggregation.transfer_backend,
+                    mooncake_protocol=self.config.disaggregation.mooncake_protocol,
                 )
                 self._decode_servers.append(
                     self._spawn_pd_server(
@@ -300,11 +302,18 @@ class vLLMPDReplica(vLLMReplica):
         engine_id: str,
         ib_device: Optional[str],
         transfer_backend: str = "nixl",
+        mooncake_protocol: Optional[str] = None,
     ) -> dict:
         """Assemble the JSON payload for vLLM's ``--kv-transfer-config``.
 
         See ``vllm/config/kv_transfer.py`` for the full schema. ``kv_role`` maps
         verl's ``"prefill"|"decode"`` 1:1 to vLLM's ``"kv_producer"|"kv_consumer"``.
+
+        Mooncake-specific: ``mooncake_protocol`` controls the transport
+        Mooncake's TransferEngine initializes with (mooncake_connector.py:737).
+        vLLM's upstream default is ``"rdma"`` which silently falls back to TCP
+        on hosts without an RDMA NIC — pinning to ``"nvlink"`` keeps same-host
+        KV transfer on the NVLink fabric instead of the kernel net stack.
         """
         kv_role = "kv_producer" if role == "prefill" else "kv_consumer"
         if transfer_backend == "mooncake":
@@ -317,8 +326,13 @@ class vLLMPDReplica(vLLMReplica):
             "engine_id": engine_id,
             "kv_buffer_device": "cuda",
         }
+        extra: dict = {}
         if ib_device:
-            cfg["kv_connector_extra_config"] = {"ib_device": ib_device}
+            extra["ib_device"] = ib_device
+        if transfer_backend == "mooncake" and mooncake_protocol:
+            extra["mooncake_protocol"] = mooncake_protocol
+        if extra:
+            cfg["kv_connector_extra_config"] = extra
         return cfg
 
     def _spawn_pd_server(

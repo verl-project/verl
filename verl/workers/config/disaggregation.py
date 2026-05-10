@@ -19,6 +19,7 @@ from verl.base_config import BaseConfig
 __all__ = ["DisaggregationConfig"]
 
 _ALLOWED_BACKENDS = ("nixl", "mooncake", "ascend", "mori", "fake")
+_ALLOWED_MOONCAKE_PROTOCOLS = ("nvlink", "local", "rdma", "tcp")
 
 
 @dataclass
@@ -37,6 +38,14 @@ class DisaggregationConfig(BaseConfig):
     transfer_backend: str = "nixl"
     bootstrap_port: Optional[int] = None
     ib_device: Optional[str] = None
+    # Mooncake transport protocol. vLLM's MooncakeConnector defaults this to
+    # ``"rdma"`` (mooncake_connector.py:737); on hosts without an RDMA NIC
+    # Mooncake silently falls back to TCP (``topology.cpp`` "No RDMA devices
+    # found" → ``tcp_transport.cpp:541`` listener). On a single-node H100/H200
+    # rack this routes same-host KV through the kernel net stack instead of
+    # NVLink. Default to ``"nvlink"`` so single-node PD uses cuMemcpy P2P.
+    # Multi-node deployments should override to ``"rdma"``.
+    mooncake_protocol: str = "nvlink"
 
     def __post_init__(self) -> None:
         if not self.enabled:
@@ -50,6 +59,11 @@ class DisaggregationConfig(BaseConfig):
             )
         if self.bootstrap_port is not None and not (0 < self.bootstrap_port < 65536):
             raise ValueError(f"bootstrap_port out of range: {self.bootstrap_port}")
+        if self.mooncake_protocol not in _ALLOWED_MOONCAKE_PROTOCOLS:
+            raise ValueError(
+                f"disaggregation.mooncake_protocol={self.mooncake_protocol!r} not in "
+                f"{_ALLOWED_MOONCAKE_PROTOCOLS}"
+            )
 
     def effective_decode_tp(self, prefill_tp: int) -> int:
         """Resolve decode TP (defaults to ``prefill_tp``). Test-only helper; runtime paths

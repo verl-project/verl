@@ -175,13 +175,24 @@ def test_dispatcher_vllm_with_flag_returns_pd_replica():
 # ---------------------------------------------------------------------------
 
 
-def _build_kv_cfg(*, role: str, engine_id: str = "test-eid", ib_device=None, transfer_backend: str = "nixl"):
+def _build_kv_cfg(
+    *,
+    role: str,
+    engine_id: str = "test-eid",
+    ib_device=None,
+    transfer_backend: str = "nixl",
+    mooncake_protocol=None,
+):
     # Lazy import: only meaningful when vllm-rollout deps are importable.
     pytest.importorskip("vllm")
     from verl.workers.rollout.vllm_rollout.vllm_pd_replica import vLLMPDReplica
 
     return vLLMPDReplica._build_kv_transfer_config(
-        role=role, engine_id=engine_id, ib_device=ib_device, transfer_backend=transfer_backend
+        role=role,
+        engine_id=engine_id,
+        ib_device=ib_device,
+        transfer_backend=transfer_backend,
+        mooncake_protocol=mooncake_protocol,
     )
 
 
@@ -214,6 +225,61 @@ def test_build_kv_transfer_config_mooncake_backend(role, expected_role):
     cfg = _build_kv_cfg(role=role, transfer_backend="mooncake")
     assert cfg["kv_connector"] == "MooncakeConnector"
     assert cfg["kv_role"] == expected_role
+
+
+def test_build_kv_transfer_config_mooncake_protocol_pinned():
+    """``mooncake_protocol`` lands in ``kv_connector_extra_config`` so vLLM's
+    MooncakeConnector pins the requested transport instead of taking the
+    upstream default ``"rdma"`` (which silently falls back to TCP on hosts
+    without an RDMA NIC)."""
+    cfg = _build_kv_cfg(role="prefill", transfer_backend="mooncake", mooncake_protocol="nvlink")
+    assert cfg["kv_connector_extra_config"] == {"mooncake_protocol": "nvlink"}
+
+
+def test_build_kv_transfer_config_mooncake_protocol_omitted_when_none():
+    """When ``mooncake_protocol`` is not supplied, the field is absent so vLLM
+    keeps its own default. Useful for the NIXL path where the field is moot."""
+    cfg = _build_kv_cfg(role="prefill", transfer_backend="mooncake", mooncake_protocol=None)
+    assert "kv_connector_extra_config" not in cfg
+
+
+def test_build_kv_transfer_config_mooncake_protocol_with_ib_device():
+    """Both keys must coexist in ``kv_connector_extra_config`` when supplied
+    together — earlier rev clobbered the dict by overwriting it per key."""
+    cfg = _build_kv_cfg(
+        role="prefill",
+        transfer_backend="mooncake",
+        mooncake_protocol="rdma",
+        ib_device="mlx5_roce0",
+    )
+    assert cfg["kv_connector_extra_config"] == {
+        "ib_device": "mlx5_roce0",
+        "mooncake_protocol": "rdma",
+    }
+
+
+def test_build_kv_transfer_config_mooncake_protocol_ignored_for_nixl():
+    """``mooncake_protocol`` is meaningful only for the Mooncake connector;
+    the NIXL connector ignores it (UCX picks transport on its own)."""
+    cfg = _build_kv_cfg(role="prefill", transfer_backend="nixl", mooncake_protocol="nvlink")
+    assert "kv_connector_extra_config" not in cfg
+
+
+@pytest.mark.parametrize("protocol", ["nvlink", "local", "rdma", "tcp"])
+def test_disagg_config_accepts_known_mooncake_protocols(protocol):
+    DisaggregationConfig(enabled=True, transfer_backend="mooncake", mooncake_protocol=protocol)
+
+
+def test_disagg_config_rejects_unknown_mooncake_protocol():
+    with pytest.raises(ValueError, match="mooncake_protocol"):
+        DisaggregationConfig(enabled=True, transfer_backend="mooncake", mooncake_protocol="bogus")
+
+
+def test_disagg_config_default_mooncake_protocol_is_nvlink():
+    """Default to ``nvlink`` so single-node PD on H100/H200 actually uses the
+    NVLink fabric. vLLM's upstream Mooncake default is ``rdma``, which on a
+    no-RDMA rack silently falls back to TCP loopback."""
+    assert DisaggregationConfig().mooncake_protocol == "nvlink"
 
 
 # ---------------------------------------------------------------------------
