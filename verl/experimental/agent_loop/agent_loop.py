@@ -433,6 +433,7 @@ class AgentLoopWorker:
             response_mask: | 1, 1, 1, ..., 1, 1 | 0, 0, .., 0, 0 | 1, 1, 1, ..., 1, 1 | 0, 0, ..., 0|
         """
         config = self.rollout_config
+        validate = batch.meta_info.get("validate", False)
         sampling_params = dict(
             temperature=config.temperature,
             top_p=config.top_p,
@@ -441,8 +442,13 @@ class AgentLoopWorker:
             logprobs=config.calculate_log_probs,
         )
 
+        def apply_greedy_sampling_params(params: dict[str, Any]) -> None:
+            params["top_p"] = 1.0
+            params["top_k"] = -1
+            params["temperature"] = 0
+
         # override sampling params for validation
-        if batch.meta_info.get("validate", False):
+        if validate:
             sampling_params["top_p"] = config.val_kwargs.top_p
             sampling_params["top_k"] = config.val_kwargs.top_k
             sampling_params["temperature"] = config.val_kwargs.temperature
@@ -477,13 +483,19 @@ class AgentLoopWorker:
             batch.meta_info.get("global_steps", -1), index.tolist(), batch.meta_info.get("validate", False)
         )
 
+        # NOTE: __do_sample__ is an internal per-sample override used by REMAX combined rollout.
+        # Do not forward it to concrete agent loops, which may reject unknown kwargs.
+        per_sample_do_sample = batch.non_tensor_batch.get("__do_sample__")
         tasks = []
         for i in range(len(batch)):
             trace_this_sample = i in traced_indices
-            kwargs = {k: v[i] for k, v in batch.non_tensor_batch.items()}
+            kwargs = {k: v[i] for k, v in batch.non_tensor_batch.items() if k != "__do_sample__"}
+            sample_sampling_params = dict(sampling_params)
+            if not validate and per_sample_do_sample is not None and not bool(per_sample_do_sample[i]):
+                apply_greedy_sampling_params(sample_sampling_params)
             tasks.append(
                 asyncio.create_task(
-                    self._run_agent_loop(sampling_params, trajectory_info[i], trace=trace_this_sample, **kwargs)
+                    self._run_agent_loop(sample_sampling_params, trajectory_info[i], trace=trace_this_sample, **kwargs)
                 )
             )
         outputs = await asyncio.gather(*tasks)

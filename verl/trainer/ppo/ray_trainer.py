@@ -1353,9 +1353,22 @@ class RayPPOTrainer:
 
                 # pass global_steps to trace
                 gen_batch.meta_info["global_steps"] = self.global_steps
-                gen_batch_output = gen_batch.repeat(
-                    repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True
-                )
+                rollout_n = self.config.actor_rollout_ref.rollout.n
+                gen_batch_output = gen_batch.repeat(repeat_times=rollout_n, interleave=True)
+
+                if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
+                    # NOTE: REMAX needs one sampled rollout plus one greedy baseline per prompt.
+                    # Keep them in a single agent-loop/vLLM request to avoid sending a second
+                    # rollout after replicas have been put to sleep, which can leave async vLLM
+                    # engines in an invalid state for multi-turn agent workloads.
+                    gen_batch_output.non_tensor_batch["__do_sample__"] = np.ones(len(gen_batch_output), dtype=bool)
+                    gen_baseline_batch = deepcopy(gen_batch)
+                    gen_baseline_batch.non_tensor_batch["__do_sample__"] = np.zeros(len(gen_baseline_batch), dtype=bool)
+                    combined_gen_batch = DataProto.concat([gen_batch_output, gen_baseline_batch])
+                    num_sampled_prompts = len(gen_batch_output)
+                else:
+                    combined_gen_batch = gen_batch_output
+                    num_sampled_prompts = len(gen_batch_output)
 
                 is_last_step = self.global_steps >= self.total_training_steps
                 with marked_timer("step", timing_raw):
@@ -1363,42 +1376,32 @@ class RayPPOTrainer:
                     with marked_timer("gen", timing_raw, color="red"):
                         if curr_step_profile:
                             self.llm_server_manager.start_profile()
-                        gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
+                        combined_gen_output = self.async_rollout_manager.generate_sequences(combined_gen_batch)
                         self.checkpoint_manager.sleep_replicas()
                         if curr_step_profile:
                             self.llm_server_manager.stop_profile()
 
-                        timing_raw.update(gen_batch_output.meta_info["timing"])
-                        gen_batch_output.meta_info.pop("timing", None)
+                        timing_raw.update(combined_gen_output.meta_info["timing"])
+                        combined_gen_output.meta_info.pop("timing", None)
+
+                    gen_batch_output = combined_gen_output.slice(0, num_sampled_prompts)
+                    if "__do_sample__" in gen_batch_output.non_tensor_batch:
+                        gen_batch_output.pop(non_tensor_batch_keys=["__do_sample__"])
 
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
-                        with marked_timer("gen_max", timing_raw, color="purple"):
-                            gen_baseline_batch = deepcopy(gen_batch)
-                            gen_baseline_batch.meta_info["do_sample"] = False
-                            if curr_step_profile:
-                                self.llm_server_manager.start_profile()
-                            gen_baseline_output = self.async_rollout_manager.generate_sequences(gen_baseline_batch)
-                            self.checkpoint_manager.sleep_replicas()
-                            if curr_step_profile:
-                                self.llm_server_manager.stop_profile()
-                            batch = batch.union(gen_baseline_output)
-                            # compute reward model score on batch
-                            rm_scores = None
-                            if self.use_rm and "rm_scores" not in batch.batch.keys():
-                                batch_reward = self._compute_reward_colocate(batch)
-                                batch = batch.union(batch_reward)
+                        gen_baseline_output = combined_gen_output.slice(num_sampled_prompts, None)
+                        if "__do_sample__" in gen_baseline_output.non_tensor_batch:
+                            gen_baseline_output.pop(non_tensor_batch_keys=["__do_sample__"])
 
-                            # Compute or extract reward for REMAX baseline
-                            reward_baseline_tensor = batch.batch["rm_scores"].sum(dim=-1)
+                        if self.use_rm and "rm_scores" not in gen_baseline_output.batch.keys():
+                            baseline_reward = self._compute_reward_colocate(gen_baseline_output)
+                            gen_baseline_output = gen_baseline_output.union(baseline_reward)
 
-                            keys_to_pop = set(gen_baseline_output.batch.keys())
-                            if rm_scores is not None:
-                                keys_to_pop.update(rm_scores.batch.keys())
-                            batch.pop(batch_keys=list(keys_to_pop))
+                        reward_baseline_tensor = gen_baseline_output.batch["rm_scores"].sum(dim=-1)
+                        batch.batch["reward_baselines"] = reward_baseline_tensor
 
-                            batch.batch["reward_baselines"] = reward_baseline_tensor
-
-                            del rm_scores, gen_baseline_batch, gen_baseline_output
+                        del gen_baseline_output
+                    del combined_gen_batch, combined_gen_output
                     # repeat to align with repeated responses in rollout
                     batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                     batch = batch.union(gen_batch_output)
