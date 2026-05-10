@@ -355,7 +355,7 @@ class ToolAgentLoop(AgentLoopBase):
                 remove_system_prompt=True,
             )
 
-        if len(agent_data.response_mask) + len(response_ids) >= self.response_length:
+        if len(agent_data.response_mask) + len(response_ids) > self.response_length:
             return AgentState.TERMINATED
         # Update prompt_ids and response_mask
 
@@ -372,6 +372,8 @@ class ToolAgentLoop(AgentLoopBase):
         if agent_data.response_logprobs:
             agent_data.response_logprobs += [0.0] * len(response_ids)
         agent_data.user_turns += 1
+        if len(agent_data.response_mask) >= self.response_length:
+            return AgentState.TERMINATED
         return AgentState.GENERATING
 
     async def _call_tool(
