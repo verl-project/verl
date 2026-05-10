@@ -81,12 +81,14 @@ class BaseRollout(ABC):
 
 
 _ROLLOUT_REGISTRY = {
-    ("vllm", "async"): "verl.workers.rollout.vllm_rollout.ServerAdapter",
+    # The vLLM adapter is shared between colocated and PD modes:
     # vLLMPDReplica._server_handle points at the prefill vLLMHttpServer actor,
-    # which exposes the same generate() interface as the colocated server, so
-    # the trainer-facing adapter is identical. The PD-specific dispatch fans
-    # out internally (vllm_async_server.vLLMHttpServer._pd_dispatch).
-    ("vllm_pd", "async"): "verl.workers.rollout.vllm_rollout.ServerAdapter",
+    # which exposes the same generate() interface as the colocated server.
+    # PD-specific dispatch fans out internally
+    # (vllm_async_server.vLLMHttpServer._pd_dispatch); selection between the
+    # two is via ``rollout.disaggregation.enabled``, mirroring the SGLang
+    # pattern landed in PR #6117.
+    ("vllm", "async"): "verl.workers.rollout.vllm_rollout.ServerAdapter",
     ("sglang", "async"): "verl.workers.rollout.sglang_rollout.sglang_rollout.ServerAdapter",
     ("trtllm", "async"): "verl.workers.rollout.trtllm_rollout.trtllm_rollout.ServerAdapter",
 }

@@ -87,7 +87,7 @@ class RewardModelConfig(BaseConfig):
     n_gpus_per_node: int = 0
     nnodes: int = 0
     model_path: Optional[str] = None
-    inference: RolloutConfig = field(default_factory=RolloutConfig)
+    rollout: RolloutConfig = field(default_factory=RolloutConfig)
 
 
 @dataclass

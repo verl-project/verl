@@ -2,7 +2,7 @@
 
 **Author:**  `https://github.com/meituan-search`
 
-Last updated: 02/05/2026.
+Last updated: 05/09/2026.
 
 本文档介绍了完全异步PPO训练系统，该系统实现了 Trainer 和 Rollouter 的完全解耦，支持异步样本生成和训练。
 在该系统下，我们使用128卡训练qwen2.5-7B模型取得了2.35x-2.67x的性能提升,同时效果没有显著受到影响。
@@ -241,7 +241,7 @@ trigger_parameter_sync_step=16
 partial_rollout=False
 
 
-python -m recipe.fully_async_policy.fully_async_main \
+python -m verl.experimental.fully_async_policy.fully_async_main \
 	train_batch_size=${train_prompt_bsz} \
     data.gen_batch_size=${gen_prompt_bsz} \
     data.return_raw_chat=${return_raw_chat} \

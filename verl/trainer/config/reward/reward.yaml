@@ -1,4 +1,5 @@
 # configs for the reward computation
+_target_: verl.workers.config.RewardConfig
 
 # we launch num_workers reward managers to parallelize the reward computation
 num_workers: 8
@@ -13,7 +14,7 @@ custom_reward_function:
 
 # reward manager, see `verl/trainer/config/reward_manager.yaml` for details.
 reward_manager:
-  _target_: verl.workers.config.reward_model.RewardManagerConfig
+  _target_: verl.workers.config.reward.RewardManagerConfig
   source: register
   name: naive
   module:
@@ -24,6 +25,7 @@ reward_manager:
 # Inference config for reward models,
 # support both discriminative and generative models
 reward_model:
+  _target_: verl.workers.config.RewardModelConfig
   enable: False
 
   # Whether to deploy the model to a separate resource pool.
@@ -44,22 +46,45 @@ reward_model:
     data_parallel_size: 1
     expert_parallel_size: 1
     tensor_model_parallel_size: 2
+    pipeline_model_parallel_size: 1
     max_num_batched_tokens: 8192
     max_model_len: null
     max_num_seqs: 1024
     load_format: auto
+    layered_summon: false
+    scheduling_policy: fcfs
+    multi_stage_wake_up: false
     engine_kwargs: {}
     limit_images: null
     enable_chunked_prefill: true
     enable_prefix_caching: true
     disable_log_stats: true
     skip_tokenizer_init: false
+    ignore_eos: false
+    temperature: 1.0
+    top_k: -1
+    top_p: 1
+    do_sample: true
+    n: 1
 
     prompt_length: 2048
     response_length: 2048
 
+    quantization: null
+    quantization_config_file: null
+    mtp: null
+    disaggregation:
+      enabled: false
+      prefill_replicas: 1
+      decode_replicas: 1
+      decode_tensor_model_parallel_size: null
+      transfer_backend: nixl
+      bootstrap_port: null
+      ib_device: null
+
 # Cloud/local sandbox fusion configuration for custom reward logic
 sandbox_fusion:
+  _target_: verl.workers.config.SandboxFusionConfig
   # Cloud /local function URL for sandbox execution
   url: null
   # Max concurrent requests allowed to sandbox

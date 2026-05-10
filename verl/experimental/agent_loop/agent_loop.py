@@ -47,6 +47,7 @@ from transformers import AutoProcessor, AutoTokenizer
 
 from verl.experimental.agent_loop.utils import resolve_config_path
 from verl.protocol import DataProto
+from verl.tools.tool_registry import load_all_tools
 from verl.trainer.distillation import is_distillation_enabled
 from verl.utils.chat_template import apply_chat_template, initialize_system_prompt
 from verl.utils.config import omega_conf_to_dataclass
@@ -174,6 +175,14 @@ class DictConfigWrap:
 
     def __init__(self, config: DictConfig):
         self.config = config
+
+
+class ToolListWrap:
+    """Wraps a tool list so ``hydra.utils.instantiate`` doesn't recursively
+    resolve its elements (which would demote them to ``DictConfig``)."""
+
+    def __init__(self, tools: list):
+        self.tools = tools
 
 
 class AgentLoopBase(ABC):
@@ -373,6 +382,14 @@ class AgentLoopWorker:
                 teacher_client=teacher_client,
             )
 
+        # Load tools once per worker; each trajectory just reuses self.tools.
+        tool_config_path = self.rollout_config.multi_turn.tool_config_path
+        function_tool_path = self.rollout_config.multi_turn.function_tool_path
+        self.tools = load_all_tools(
+            tool_config_path=resolve_config_path(tool_config_path) if tool_config_path else None,
+            function_tool_path=resolve_config_path(function_tool_path) if function_tool_path else None,
+        )
+
         # Load custom agent loop implementations from config path
         agent_loop_config_path = self.rollout_config.agent.agent_loop_config_path
         if agent_loop_config_path:
@@ -506,6 +523,7 @@ class AgentLoopWorker:
                 processor=self.processor,
                 dataset_cls=self.dataset_cls,
                 data_config=DictConfigWrap(self.config.data),
+                tools=ToolListWrap(self.tools),
             )
             output: AgentLoopOutput = await agent_loop.run(sampling_params, **kwargs)
             return await self._agent_loop_postprocess(output, trajectory["validate"], **kwargs)
@@ -607,15 +625,7 @@ class AgentLoopWorker:
 
         multi_modal_inputs = self._compute_multi_modal_inputs(output, input_ids)
         position_ids = self._compute_position_ids(input_ids, attention_mask, multi_modal_inputs)
-        await self._compute_score(
-            output,
-            prompts=prompt_output["input_ids"],
-            responses=response_output["input_ids"],
-            attention_mask=attention_mask,
-            input_ids=input_ids,
-            position_ids=position_ids,
-            kwargs=kwargs,
-        )
+        await self._compute_score([output], kwargs=kwargs)
         await self._compute_teacher_logprobs(
             output,
             prompt_ids=output.prompt_ids,
@@ -726,27 +736,51 @@ class AgentLoopWorker:
         position_ids = torch.cat((text_position_ids, vision_position_ids), dim=1)  # (1, 4, seq_length)
         return position_ids
 
-    async def _compute_score(self, output, prompts, responses, attention_mask, input_ids, position_ids, kwargs):
-        """Compute reward score for single sample."""
+    async def _compute_score(self, outputs: list[AgentLoopOutput], kwargs: dict) -> None:
+        """Compute reward score for all outputs in a trajectory; assigns result to outputs[-1]."""
         enable_async_reward = self.reward_loop_worker_handles is not None
 
-        if output.reward_score is None and enable_async_reward:
+        final_output = outputs[-1]
+        if final_output.reward_score is None and enable_async_reward:
             timing = {}
             with simple_timer("compute_score", timing):
+                all_prompts, all_responses, all_input_ids, all_attention_mask, all_position_ids = [], [], [], [], []
+                for output in outputs:
+                    prompts = torch.tensor(output.prompt_ids, dtype=torch.int64)
+                    responses = torch.tensor(output.response_ids, dtype=torch.int64)
+                    input_ids = torch.cat([prompts, responses], dim=0)
+                    attention_mask = torch.ones_like(input_ids, dtype=torch.int64)
+                    multi_modal_inputs = self._compute_multi_modal_inputs(output, input_ids)
+                    position_ids = self._compute_position_ids(
+                        input_ids.unsqueeze(0), attention_mask.unsqueeze(0), multi_modal_inputs
+                    ).squeeze(0)
+                    all_prompts.append(prompts)
+                    all_responses.append(responses)
+                    all_input_ids.append(input_ids)
+                    all_attention_mask.append(attention_mask)
+                    all_position_ids.append(position_ids)
+
+                n = len(outputs)
                 batch = TensorDict(
                     {
-                        "prompts": prompts,  # [1, prompt_length]
-                        "responses": responses,  # [1, response_length]
-                        "attention_mask": attention_mask,  # [1, prompt_length + response_length]
-                        "input_ids": input_ids,  # [1, prompt_length + response_length]
-                        "position_ids": position_ids,
+                        "prompts": torch.nn.utils.rnn.pad_sequence(all_prompts, batch_first=True, padding_value=0),
+                        "responses": torch.nn.utils.rnn.pad_sequence(all_responses, batch_first=True, padding_value=0),
+                        "attention_mask": torch.nn.utils.rnn.pad_sequence(
+                            all_attention_mask, batch_first=True, padding_value=0
+                        ),
+                        "input_ids": torch.nn.utils.rnn.pad_sequence(all_input_ids, batch_first=True, padding_value=0),
+                        "position_ids": torch.nn.utils.rnn.pad_sequence(
+                            all_position_ids, batch_first=True, padding_value=0
+                        ),
                     },
-                    batch_size=1,
+                    batch_size=n,
                 )
                 non_tensor_batch = {
-                    **{k: np.array([v]) for k, v in kwargs.items()},
-                    "__num_turns__": np.array([output.num_turns]),
-                    "tool_extra_fields": np.array([output.extra_fields], dtype=object),
+                    **{k: np.array([v] * n) for k, v in kwargs.items()},
+                    "__num_turns__": np.array([o.num_turns for o in outputs]),
+                    "tool_extra_fields": np.array([o.extra_fields for o in outputs], dtype=object),
+                    "prompt_len": np.array([len(o.prompt_ids) for o in outputs]),
+                    "response_len": np.array([len(o.response_ids) for o in outputs]),
                 }
 
                 data = DataProto(
@@ -755,9 +789,9 @@ class AgentLoopWorker:
                 )
                 selected_reward_loop_worker_handle = random.choice(self.reward_loop_worker_handles)
                 result = await selected_reward_loop_worker_handle.compute_score.remote(data)
-                output.reward_score = result["reward_score"]
-                output.extra_fields["reward_extra_info"] = result["reward_extra_info"]
-            output.metrics.compute_score = timing["compute_score"]
+                final_output.reward_score = result["reward_score"]
+                final_output.extra_fields["reward_extra_info"] = result["reward_extra_info"]
+            final_output.metrics.compute_score = timing["compute_score"]
 
     async def _compute_teacher_logprobs(
         self,

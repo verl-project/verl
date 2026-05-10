@@ -23,7 +23,12 @@ _ALLOWED_BACKENDS = ("nixl", "mooncake", "ascend", "mori", "fake")
 
 @dataclass
 class DisaggregationConfig(BaseConfig):
-    """Prefill-Decode disaggregation knobs (used by ``sglang_pd`` and ``vllm_pd`` replicas)."""
+    """Prefill-Decode disaggregation knobs.
+
+    Activated by setting ``rollout.name`` to ``sglang`` or ``vllm`` and
+    ``rollout.disaggregation.enabled=True``. The dispatch in
+    ``get_rollout_replica_class`` returns the PD-aware class for those
+    backends; other backends are rejected by config validation."""
 
     enabled: bool = False
     prefill_replicas: int = 1

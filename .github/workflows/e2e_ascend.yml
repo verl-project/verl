@@ -177,7 +177,7 @@ jobs:
   vlm_rl_job:
     if: github.repository_owner == 'verl-project'
     name: E2E Ascend testing for RL training scenarios of VLM models
-    runs-on: linux-aarch64-a3-16
+    runs-on: linux-aarch64-a3-8
     timeout-minutes: 120
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-8.5.0-a3-ubuntu22.04-py3.11-latest

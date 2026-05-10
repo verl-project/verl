@@ -118,11 +118,20 @@ class FullyAsyncTaskRunner:
 
     def _create_rollouter(self, config) -> None:
         print("[ASYNC MAIN] Starting create rollouter...")
+        from verl.trainer.distillation.losses import is_distillation_enabled
+
+        rollouter_roles = [Role.Rollout]
+        if is_distillation_enabled(config.get("distillation")):
+            rollouter_roles.append(Role.TeacherModel)
+
+        resource_pool_manager = create_resource_pool_manager(config, roles=rollouter_roles)
+        resource_pool_manager.create_resource_pool()
+
         rollouter = FullyAsyncRollouter.remote(
             config=config,
             tokenizer=self.components["tokenizer"],
             role_worker_mapping=None,
-            resource_pool_manager=create_resource_pool_manager(config, roles=[Role.Rollout]),
+            resource_pool_manager=resource_pool_manager,
             ray_worker_group_cls=self.components["ray_worker_group_cls"],
             processor=self.components["processor"],
             device_name=config.trainer.device,

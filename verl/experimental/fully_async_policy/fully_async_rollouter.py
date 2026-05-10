@@ -412,6 +412,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         self._init_async_objects()
         self._create_worker_classes()
         await self._create_reward_loop_manager()
+        await self._create_teacher_model_manager()
         await self._init_async_rollout_manager()
 
     async def _create_reward_loop_manager(self):
@@ -430,6 +431,29 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
             None,
             lambda: RewardLoopManager(config=self.config, rm_resource_pool=None),
         )
+
+    async def _create_teacher_model_manager(self):
+        """Create MultiTeacherModelManager for distillation if enabled.
+
+        Allocates a big resource pool for all teachers and passes it to
+        MultiTeacherModelManager, which splits it internally per teacher.
+
+        NOTE: MultiTeacherModelManager.__init__ calls _run_all internally which uses
+        asyncio.run(), conflicting with the already-running event loop. Run in a thread executor.
+        """
+        from verl.trainer.distillation.losses import is_distillation_enabled
+        from verl.trainer.ppo.utils import Role
+
+        self.teacher_model_manager = None
+        if is_distillation_enabled(self.config.get("distillation")):
+            from verl.experimental.teacher_loop import MultiTeacherModelManager
+
+            teacher_resource_pool = self.resource_pool_manager.get_resource_pool(Role.TeacherModel)
+            loop = asyncio.get_running_loop()
+            self.teacher_model_manager = await loop.run_in_executor(
+                None,
+                lambda: MultiTeacherModelManager(config=self.config, resource_pool=teacher_resource_pool),
+            )
 
     def _create_actor_rollout_classes(self):
         # Skip rollout creation and let agentloop handle it
@@ -467,6 +491,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
             config=self.config,
             llm_client=self.llm_server_manager.get_client(fully_async=True),
             reward_loop_worker_handles=reward_loop_worker_handles,
+            teacher_client=self.teacher_model_manager.get_client() if self.teacher_model_manager else None,
         )
 
     # Add samples to the pending_queue

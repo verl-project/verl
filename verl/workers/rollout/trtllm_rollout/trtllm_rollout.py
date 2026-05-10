@@ -22,7 +22,7 @@ import os
 import pickle
 import threading
 from contextlib import asynccontextmanager
-from typing import Any, AsyncGenerator, Generator, Optional
+from typing import Any, AsyncGenerator, Optional
 
 import aiohttp
 import pynvml
@@ -332,6 +332,9 @@ class ServerAdapter(BaseRollout):
             rank = int(os.environ["RANK"])
             self.replica_rank = replica_rank
             self.is_leader_rank = rank == 0
+            # Required for CUDA IPC handle creation during weight sync for Async RL.
+            # Reward/ref models skip weight sync so this can be None.
+            self.gpu_id = ray.get_gpu_ids()[0]
 
         # Below is required for all modes.
         assert self.replica_rank >= 0, "replica_rank is not set"
@@ -358,6 +361,21 @@ class ServerAdapter(BaseRollout):
         if self._adapter is not None:
             return
 
+        # Standalone mode: lazily build the CPU device mesh from the gloo process group
+        # (initialized by initialize_global_process_group_ray before ServerAdapter construction).
+        # Reward/ref models that never call resume(), release(), or update_weights() will never build the mesh.
+        if self.hybrid_device_mesh is None and self.device_mesh is None:
+            assert dist.is_initialized(), "gloo process group must be initialized before building device mesh"
+            infer_tp = self.config.tensor_model_parallel_size
+            infer_pp = getattr(self.config, "pipeline_model_parallel_size", 1)
+            world_size = dist.get_world_size()
+            dp = world_size // (infer_tp * infer_pp)
+            self.hybrid_device_mesh = init_device_mesh(
+                "cpu", mesh_shape=(dp, infer_tp, infer_pp), mesh_dim_names=["dp", "infer_tp", "infer_pp"]
+            )
+            self.hybrid_device_mesh[self.hybrid_device_mesh.mesh_dim_names[1:]]._flatten(mesh_dim_name="exclude_dp")
+            self.is_leader_rank = self.hybrid_device_mesh["exclude_dp"].get_local_rank() == 0
+
         # Lazy init http server adapter because http server is launched after hybrid engine.
         self.server_actor = ray.get_actor(f"trtllm_server_{self.replica_rank}")
         server_address, server_port = await self.server_actor.get_server_address.remote()
@@ -383,7 +401,8 @@ class ServerAdapter(BaseRollout):
         # Synchronize all ranks before resuming KV cache to ensure non-leader ranks
         # have completed actor offloading to CPU, preventing OOM issue.
         if "kv_cache" in tags and self.config.free_cache_engine:
-            await asyncio.to_thread(dist.barrier, group=self.hybrid_device_mesh["exclude_dp"].get_group())
+            group = self.hybrid_device_mesh["exclude_dp"].get_group() if self.hybrid_device_mesh is not None else None
+            await asyncio.to_thread(dist.barrier, group=group)
         if self.is_leader_rank and self.config.free_cache_engine:
             if "weights" in tags:
                 tags = self._WEIGHTS_TAGS
@@ -402,11 +421,16 @@ class ServerAdapter(BaseRollout):
             await self._adapter.release_memory_occupation(tags=tags)
 
     async def update_weights_from_ipc_handles(self, device_handles):
-        assert self.hybrid_device_mesh is not None, "hybrid_device_mesh is not set"
-
         """Update weights from IPC handles."""
+        if self.hybrid_device_mesh is not None:
+            world_size = self.hybrid_device_mesh["exclude_dp"].size()
+            group = self.hybrid_device_mesh["exclude_dp"].get_group()
+        else:
+            world_size = dist.get_world_size()
+            group = None
+
         if self.is_leader_rank:
-            gathered_handles = [None for _ in range(self.hybrid_device_mesh["exclude_dp"].size())]
+            gathered_handles = [None for _ in range(world_size)]
         else:
             gathered_handles = None
 
@@ -415,23 +439,18 @@ class ServerAdapter(BaseRollout):
             obj=device_handles,
             object_gather_list=gathered_handles,
             group_dst=0,
-            group=self.hybrid_device_mesh["exclude_dp"].get_group(),
+            group=group,
         )
 
         if self.is_leader_rank:
             all_handles = {k: v for d in gathered_handles for k, v in d.items()}
             await self._adapter.update_weights(all_handles)
 
-        await asyncio.to_thread(dist.barrier, group=self.hybrid_device_mesh["exclude_dp"].get_group())
+        await asyncio.to_thread(dist.barrier, group=group)
 
     async def update_weights(
-        self,
-        weights: Generator[tuple[str, torch.Tensor], None, None] | AsyncGenerator[tuple[str, torch.Tensor], None],
-        global_steps: int = None,
-        **kwargs,
+        self, weights: AsyncGenerator[tuple[str, torch.Tensor], None], global_steps: int = None, **kwargs
     ):
-        assert self.hybrid_device_mesh is not None, "hybrid_device_mesh is not set"
-
         """Update the weights of the rollout model.
 
         Args:
@@ -496,7 +515,9 @@ class ServerAdapter(BaseRollout):
                 )
                 cur_available_bytes -= size_in_bytes
 
-            handle = reduce_tensor(param.detach())
+            # Clone so the IPC handle owns the data to avoid buffer reuse
+            # before TRT-LLM reads it, which will silently corrupt weights.
+            handle = reduce_tensor(param.detach().clone())
             cur_handles.append((name, handle))
 
         await flush()
@@ -506,7 +527,8 @@ class ServerAdapter(BaseRollout):
             await self._adapter.update_weights(None)
             if global_steps is not None:
                 await self.server_actor.set_global_steps.remote(global_steps)
-        await asyncio.to_thread(dist.barrier, group=self.hybrid_device_mesh["exclude_dp"].get_group())
+        group = self.hybrid_device_mesh["exclude_dp"].get_group() if self.hybrid_device_mesh is not None else None
+        await asyncio.to_thread(dist.barrier, group=group)
 
         del weights
         gc.collect()

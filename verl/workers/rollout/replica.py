@@ -199,12 +199,15 @@ class RolloutReplica(ABC):
         resource_pool_spec = {
             resource_pool_name: [self.gpus_per_replica_node] * self.nnodes,
         }
-        resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=None)
+        resource_pool_manager = ResourcePoolManager(
+            resource_pool_spec=resource_pool_spec,
+            mapping=None,
+            max_colocate_count=2,
+        )
         resource_pool_manager.create_resource_pool()
         self.resource_pool = resource_pool_manager.resource_pool_dict[resource_pool_name]
 
         # create worker group for this rollout
-        use_gpu = self.rollout_worker_use_gpu()
         if self.is_reward_model:
             name_prefix = f"rollout_reward_standalone_{self.replica_rank}{self.name_suffix}"
         elif self.is_teacher_model:
@@ -216,7 +219,7 @@ class RolloutReplica(ABC):
             ray_cls_with_init=self.get_ray_class_with_init_args(),
             bin_pack=False,
             name_prefix=name_prefix,
-            use_gpu=use_gpu,
+            use_gpu=True,
             device_name="cuda" if not is_torch_npu_available(check_device=False) else "npu",
         )
         self.workers = worker_group.workers
@@ -363,19 +366,35 @@ def _load_trtllm():
     return TRTLLMReplica
 
 
-def _load_vllm_pd():
-    from verl.workers.rollout.vllm_rollout.vllm_pd_replica import vLLMPDReplica
-
-    return vLLMPDReplica
-
-
 # Register built-in types
 RolloutReplicaRegistry.register("vllm", _load_vllm)
 RolloutReplicaRegistry.register("sglang", _load_sglang)
 RolloutReplicaRegistry.register("trtllm", _load_trtllm)
-RolloutReplicaRegistry.register("vllm_pd", _load_vllm_pd)
 
 
-# Original function for backward compatibility
-def get_rollout_replica_class(rollout: str) -> type[RolloutReplica]:
+def get_rollout_replica_class(rollout: str, disaggregation_enabled: bool = False) -> type[RolloutReplica]:
+    """Resolve a replica class by backend name.
+
+    PD-disaggregated rollouts reuse the base backend name (``sglang`` /
+    ``vllm``); the dispatch here picks the PD class only when the caller
+    asserts ``disaggregation_enabled=True`` (sourced from
+    ``RolloutConfig.disaggregation.enabled``). Validation in
+    ``RolloutConfig.__post_init__`` rejects the flag for backends without a
+    PD class.
+    """
+    if disaggregation_enabled:
+        if rollout == "sglang":
+            # _load_sglang side-effect: installs vllm mocks needed by SGLangPDReplica's
+            # transitive imports. Cheap if already installed.
+            RolloutReplicaRegistry.get("sglang")
+            from verl.workers.rollout.sglang_rollout.sglang_pd_replica import SGLangPDReplica
+
+            return SGLangPDReplica
+        if rollout == "vllm":
+            from verl.workers.rollout.vllm_rollout.vllm_pd_replica import vLLMPDReplica
+
+            return vLLMPDReplica
+        raise NotImplementedError(
+            f"PD disaggregation is only supported with rollout in ('sglang', 'vllm'); got {rollout!r}."
+        )
     return RolloutReplicaRegistry.get(rollout)

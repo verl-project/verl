@@ -377,6 +377,11 @@ class vLLMPDReplica(vLLMReplica):
             # socket key as `base + self.local_rank` (utils.py::_get_zmq_handle),
             # giving a 1:1 trainer-rank ↔ engine-worker mapping for any TP.
             "VERL_ZMQ_BASE_TRAINER_RANK": str(zmq_base_trainer_rank),
+            # Ray job id, forwarded so the PD worker's ipc handle includes the
+            # same `{job_id}-` prefix as the trainer-side sender (PR #6117);
+            # without this the receiver computes the default "0" prefix and
+            # the trainer connects to a path no worker is bound to.
+            "VERL_RAY_JOB_ID": ray.get_runtime_context().get_job_id(),
         }
 
         prefix = self._get_server_name_prefix()

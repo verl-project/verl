@@ -31,7 +31,6 @@ from torch.utils.data import Dataset, Sampler
 from tqdm import tqdm
 
 from verl import DataProto
-from verl.experimental.dataset.sampler import AbstractCurriculumSampler
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, ResourcePoolManager
 from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
@@ -715,10 +714,6 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
         metrics.update(compute_variance_proxy_metrics(batch=batch, gradient_norm=gradient_norm))
 
     def _fit_experimental(self, batch):
-        # this is experimental and may be changed/removed in the future in favor of a general-purpose one
-        if isinstance(self.train_dataloader.sampler, AbstractCurriculumSampler):
-            self.train_dataloader.sampler.update(batch=batch)
-
         # this is experimental and may be changed/removed in the future
         # in favor of a general-purpose data buffer pool
         if hasattr(self.train_dataset, "on_batch_end"):

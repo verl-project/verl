@@ -16,7 +16,7 @@
 Covers Phase 1 of the verl-vllm-pd-disagg series:
   * ``DisaggregationConfig`` validation rules
   * ``RolloutConfig`` post_init coercion + name-vs-disagg.enabled gate
-  * ``RolloutReplicaRegistry`` has ``vllm_pd`` registered
+  * ``get_rollout_replica_class("vllm", disaggregation_enabled=True)`` resolves to ``vLLMPDReplica``
   * ``vLLMPDReplica`` config validation paths (NIXL-only, single-node MVP)
   * ``vLLMPDReplica._build_kv_transfer_config`` JSON shape
 
@@ -100,27 +100,25 @@ def test_effective_decode_tp_respects_override():
 
 def test_rollout_config_vllm_pd_enabled_ok():
     cfg = RolloutConfig(
-        name="vllm_pd",
+        name="vllm",
         disaggregation=DisaggregationConfig(enabled=True),
     )
     assert cfg.disaggregation.enabled is True
     assert cfg.disaggregation.transfer_backend == "nixl"
 
 
-def test_rollout_config_sglang_pd_enabled_passes_name_gate():
-    """RolloutConfig accepts both ``vllm_pd`` and ``sglang_pd`` as PD-enabled names.
-
-    The ``sglang_pd`` registry entry is added by the SGLang PD PR (verl#6117);
-    config validation here intentionally allows the name regardless so the two
-    PRs can land independently in either order without churning this gate."""
+@pytest.mark.parametrize("name", ["sglang", "vllm"])
+def test_rollout_config_pd_enabled_passes_name_gate(name):
+    """RolloutConfig accepts ``sglang`` / ``vllm`` when
+    ``disaggregation.enabled=True`` — the canonical post-#6117 pattern."""
     cfg = RolloutConfig(
-        name="sglang_pd",
+        name=name,
         disaggregation=DisaggregationConfig(enabled=True),
     )
     assert cfg.disaggregation.enabled is True
 
 
-@pytest.mark.parametrize("name", ["sglang", "vllm", "trtllm"])
+@pytest.mark.parametrize("name", ["trtllm"])
 def test_rollout_config_non_pd_name_rejects_pd(name):
     with pytest.raises(ValueError, match="disaggregation.enabled=True"):
         RolloutConfig(
@@ -138,7 +136,7 @@ def test_rollout_config_disabled_pd_works_on_any_backend():
 def test_rollout_config_accepts_dict_disaggregation():
     """Hydra/OmegaConf hands the field as a plain dict; post_init must coerce."""
     cfg = RolloutConfig(
-        name="vllm_pd",
+        name="vllm",
         disaggregation={"enabled": True, "decode_replicas": 3},
     )
     assert isinstance(cfg.disaggregation, DisaggregationConfig)
@@ -149,21 +147,27 @@ def test_rollout_config_accepts_dictconfig_disaggregation():
     from omegaconf import OmegaConf
 
     dc = OmegaConf.create({"enabled": True, "transfer_backend": "nixl", "decode_replicas": 2})
-    cfg = RolloutConfig(name="vllm_pd", disaggregation=dc)
+    cfg = RolloutConfig(name="vllm", disaggregation=dc)
     assert isinstance(cfg.disaggregation, DisaggregationConfig)
     assert cfg.disaggregation.decode_replicas == 2
 
 
 # ---------------------------------------------------------------------------
-# Replica registry
+# Replica dispatcher
 # ---------------------------------------------------------------------------
 
 
-def test_registry_knows_vllm_pd():
-    from verl.workers.rollout.replica import RolloutReplicaRegistry
+def test_dispatcher_vllm_with_flag_returns_pd_replica():
+    """``get_rollout_replica_class('vllm', disaggregation_enabled=True)``
+    resolves to ``vLLMPDReplica``; the same name without the flag resolves to
+    the colocated ``vLLMReplica``. Mirrors the SGLang dispatch from PR #6117."""
+    from verl.workers.rollout.replica import get_rollout_replica_class
 
-    assert "vllm_pd" in RolloutReplicaRegistry._registry
-    assert "vllm" in RolloutReplicaRegistry._registry
+    plain_cls = get_rollout_replica_class("vllm", disaggregation_enabled=False)
+    pd_cls = get_rollout_replica_class("vllm", disaggregation_enabled=True)
+    assert plain_cls.__name__ == "vLLMReplica"
+    assert pd_cls.__name__ == "vLLMPDReplica"
+    assert issubclass(pd_cls, plain_cls)
 
 
 # ---------------------------------------------------------------------------
@@ -231,7 +235,7 @@ def _make_pd_config(**overrides) -> RolloutConfig:
         ib_device=overrides.pop("ib_device", None),
     )
     return RolloutConfig(
-        name="vllm_pd",
+        name="vllm",
         tensor_model_parallel_size=overrides.pop("tensor_model_parallel_size", 1),
         data_parallel_size=overrides.pop("data_parallel_size", 1),
         disaggregation=disagg,
@@ -349,9 +353,9 @@ def test_pd_replica_init_rejects_oversized_world(patched_replica_cls):
 
 def test_pd_replica_init_requires_disaggregation_enabled(patched_replica_cls):
     cfg = _make_pd_config(enabled=False)
-    # RolloutConfig validation: enabled=False is OK; vllm_pd name doesn't
-    # require enabled. But constructing the replica without disagg.enabled is
-    # invalid — we assert at the class level.
+    # RolloutConfig validation lets `name='vllm'` + `enabled=False` through
+    # (that's the colocated path). But constructing vLLMPDReplica directly
+    # without disagg.enabled is invalid — class-level assertion guards.
     with pytest.raises(AssertionError, match="disaggregation.enabled=True"):
         patched_replica_cls(replica_rank=0, config=cfg, model_config=None, gpus_per_node=8)
 

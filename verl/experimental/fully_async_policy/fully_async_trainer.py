@@ -85,6 +85,14 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
 
         self.use_rm = need_reward_model(self.config)
 
+        # distillation config needed by _update_actor in ray_trainer.py
+        from verl.trainer.distillation.losses import is_distillation_enabled
+
+        if is_distillation_enabled(self.config.get("distillation")):
+            self.distillation_config = omega_conf_to_dataclass(self.config.distillation)
+        else:
+            self.distillation_config = None
+
         self.use_critic = need_critic(self.config)
         self.ray_worker_group_cls = ray_worker_group_cls
         self.device_name = device_name if device_name else self.config.trainer.device
@@ -295,6 +303,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             role_cls = RayClassWithInitArgs(
                 cls=self.role_worker_mapping[role],
                 config=self.config.actor_rollout_ref,
+                distillation_config=self.config.get("distillation"),
                 role=str(role),
             )
             self.resource_pool_to_cls[resource_pool][str(role)] = role_cls

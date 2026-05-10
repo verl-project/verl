@@ -69,6 +69,7 @@ class MultiTurnConfig(BaseConfig):
     enable: bool = False
     max_assistant_turns: Optional[int] = None
     tool_config_path: Optional[str] = None
+    function_tool_path: Optional[str] = None
     max_user_turns: Optional[int] = None
     max_parallel_calls: int = 1
     max_tool_response_length: int = 256
@@ -278,8 +279,8 @@ class RolloutConfig(BaseConfig):
 
     qat: Optional[dict] = None
 
-    # Prefill-Decode disaggregated rollout config. Active only when
-    # ``rollout.name`` is ``sglang_pd`` or ``vllm_pd``.
+    # Prefill-Decode disaggregated rollout config. Active when ``rollout.name``
+    # is ``sglang`` or ``vllm`` and ``disaggregation.enabled=True``.
     disaggregation: DisaggregationConfig = field(default_factory=DisaggregationConfig)
 
     def __post_init__(self):
@@ -346,9 +347,8 @@ class RolloutConfig(BaseConfig):
                 DisaggregationConfig(**OmegaConf.to_container(self.disaggregation, resolve=True)),
             )
 
-        if self.disaggregation.enabled and self.name not in ("sglang_pd", "vllm_pd"):
+        if self.disaggregation.enabled and self.name not in ("sglang", "vllm"):
             raise ValueError(
                 f"rollout.disaggregation.enabled=True requires rollout.name in "
-                f"('sglang_pd', 'vllm_pd'); got {self.name!r}. Other rollout backends "
-                f"silently ignore disaggregation settings."
+                f"('sglang', 'vllm'); got {self.name!r}."
             )
