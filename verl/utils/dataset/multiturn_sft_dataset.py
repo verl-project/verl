@@ -402,8 +402,11 @@ class MultiTurnSFTDataset(Dataset):
         elif self.pad_mode == DatasetPadMode.NO_PADDING:
             if sequence_length > self.max_length and self.truncation == "error":
                 raise ValueError(f"{sequence_length=} is larger than {self.max_length=}")
-            # truncate input_ids if it is longer than max_length
-            if len(input_ids) > self.max_length:
+            if sequence_length > self.max_length and self.truncation == "left":
+                input_ids = input_ids[-self.max_length :]
+                loss_mask = loss_mask[-self.max_length :]
+                position_ids = position_ids[..., -self.max_length :]
+            elif sequence_length > self.max_length and self.truncation == "right":
                 input_ids = input_ids[: self.max_length]
                 loss_mask = loss_mask[: self.max_length]
                 position_ids = position_ids[..., : self.max_length]

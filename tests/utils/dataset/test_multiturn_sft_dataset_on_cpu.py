@@ -249,6 +249,109 @@ def generate_image(description: str, size: str = "256x256"):
     ...
 
 
+class ToyChatTokenizer:
+    pad_token_id = 0
+
+    def apply_chat_template(
+        self,
+        messages,
+        *,
+        add_generation_prompt=False,
+        tokenize=True,
+        return_dict=False,
+        return_tensors=None,
+        tools=None,
+        **kwargs,
+    ):
+        role_tokens = {"user": 10, "assistant": 20, "tool": 30, "system": 40}
+        ids = []
+        for message in messages:
+            role = message["role"]
+            ids.append(role_tokens[role])
+            content = message.get("content", "")
+            if isinstance(content, str) and content:
+                ids.extend(int(token) for token in content.split())
+            ids.append(99)
+        if add_generation_prompt:
+            ids.append(role_tokens["assistant"])
+
+        if not tokenize:
+            return " ".join(map(str, ids))
+        if return_dict:
+            input_ids = torch.tensor([ids], dtype=torch.long)
+            return {"input_ids": input_ids, "attention_mask": torch.ones_like(input_ids)}
+        return ids
+
+    def decode(self, ids, *args, **kwargs):
+        if isinstance(ids, torch.Tensor):
+            ids = ids.tolist()
+        return " ".join(map(str, ids))
+
+
+def test_no_padding_sft_left_truncation_preserves_tail_supervision(tmp_path):
+    test_file = tmp_path / "toy_sft.parquet"
+    pd.DataFrame(
+        {
+            "messages": [
+                [
+                    {"role": "user", "content": "1 2 3"},
+                    {"role": "assistant", "content": "4 5 6 7"},
+                ]
+            ]
+        }
+    ).to_parquet(test_file)
+
+    dataset = MultiTurnSFTDataset(
+        parquet_files=str(test_file),
+        tokenizer=ToyChatTokenizer(),
+        processor=None,
+        config={
+            "max_length": 5,
+            "pad_mode": "no_padding",
+            "truncation": "left",
+            "messages_key": "messages",
+        },
+    )
+
+    item = dataset[0]
+
+    assert item["input_ids"].tolist() == [4, 5, 6, 7, 99]
+    assert item["loss_mask"].tolist() == [1, 1, 1, 1, 1]
+    assert item["position_ids"].tolist() == [6, 7, 8, 9, 10]
+
+
+def test_no_padding_sft_right_truncation_preserves_prefix_context(tmp_path):
+    test_file = tmp_path / "toy_sft.parquet"
+    pd.DataFrame(
+        {
+            "messages": [
+                [
+                    {"role": "user", "content": "1 2 3"},
+                    {"role": "assistant", "content": "4 5 6 7"},
+                ]
+            ]
+        }
+    ).to_parquet(test_file)
+
+    dataset = MultiTurnSFTDataset(
+        parquet_files=str(test_file),
+        tokenizer=ToyChatTokenizer(),
+        processor=None,
+        config={
+            "max_length": 5,
+            "pad_mode": "no_padding",
+            "truncation": "right",
+            "messages_key": "messages",
+        },
+    )
+
+    item = dataset[0]
+
+    assert item["input_ids"].tolist() == [10, 1, 2, 3, 99]
+    assert item["loss_mask"].tolist() == [0, 0, 0, 0, 0]
+    assert item["position_ids"].tolist() == [0, 1, 2, 3, 4]
+
+
 @pytest.fixture
 def vlm_data_file():
     test_data = [
