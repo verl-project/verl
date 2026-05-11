@@ -101,6 +101,7 @@ verl is fast with:
    perf/best_practices
    perf/perf_tuning
    perf/perf_tuning_on_ascend.rst
+   perf/rollout_kv_offload.md
    README_vllm0.8.md
    perf/device_tuning
    perf/verl_profiler_system.md
@@ -143,7 +144,6 @@ verl is fast with:
    examples/sandbox_fusion_example
    advance/rollout_trace.rst
    advance/rollout_skip.rst
-   advance/rollout_kv_offload.md
    advance/agent_loop
    advance/reward_loop
    data/transfer_queue.md

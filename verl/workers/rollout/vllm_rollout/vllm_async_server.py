@@ -665,16 +665,15 @@ class vLLMHttpServer:
                 # 2. Abort all in-flight requests
                 # 3. Wait for requests to drain
                 # 4. Clear prefix and mm caches if clear_cache=True
+                # reset_connector=True (when an external KV store is attached)
+                # extends step 4 to also clear the external store, e.g. the
+                # Mooncake master, so post-update requests can't read KV
+                # computed against the previous model weights.
                 await self.engine.pause_generation(
                     wait_for_inflight_requests=False,
                     clear_cache=reset_prefix_cache,
+                    reset_connector=reset_prefix_cache and self._kv_store_enabled,
                 )
-                # AsyncLLM.pause_generation's internal cache flush does not
-                # propagate reset_connector through; do an explicit one when
-                # an external KV store is attached so the Mooncake master is
-                # cleared along with the in-engine prefix cache.
-                if reset_prefix_cache and self._kv_store_enabled:
-                    await self.engine.reset_prefix_cache(reset_connector=True)
             else:
                 # Take an atomic snapshot to avoid race conditions with the vLLM engine thread
                 request_states_snapshot = list(self.engine.output_processor.request_states.items())
