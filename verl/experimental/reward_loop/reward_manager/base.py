@@ -76,7 +76,8 @@ class RewardManagerBase(ABC):
         prompt_length = data.batch["prompts"].size(1)
         valid_response_length = data.batch["attention_mask"][:, prompt_length:].sum(dim=1)
         rm_scores = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
-        rm_scores[torch.arange(rm_scores.size(0), device=rm_scores.device), valid_response_length - 1] = (
-            rm_scores.new_tensor(scores)
-        )
+        has_response = valid_response_length > 0
+        if has_response.any():
+            batch_idx = torch.arange(rm_scores.size(0), device=rm_scores.device)[has_response]
+            rm_scores[batch_idx, valid_response_length[has_response] - 1] = rm_scores.new_tensor(scores)[has_response]
         return rm_scores

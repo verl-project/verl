@@ -521,10 +521,11 @@ class RateLimitedRewardManager(RewardManagerBase):
             data_item = data[i]
             response_ids = data_item.batch["responses"]
             response_length = response_ids.shape[-1]
-            valid_response_length = data_item.batch["attention_mask"][-response_length:].sum()
+            valid_response_length = int(data_item.batch["attention_mask"][-response_length:].sum().item())
 
             reward = result["reward_score"]
-            reward_tensor[i, valid_response_length - 1] = reward
+            if valid_response_length > 0:
+                reward_tensor[i, valid_response_length - 1] = reward
 
             # Collect extra info
             if "reward_extra_info" in result:

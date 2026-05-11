@@ -79,7 +79,7 @@ class DAPORewardManager(AbstractRewardManager):
             valid_prompt_ids = prompt_ids[-valid_prompt_length:]
 
             response_ids = data_item.batch["responses"]
-            valid_response_length = data_item.batch["attention_mask"][prompt_length:].sum()
+            valid_response_length = int(data_item.batch["attention_mask"][prompt_length:].sum().item())
             valid_response_ids = response_ids[:valid_response_length]
 
             # decode
@@ -129,7 +129,8 @@ class DAPORewardManager(AbstractRewardManager):
                     reward_extra_info["overlong_reward"].append(overlong_reward)
                     reward_extra_info["overlong"].append(overlong_reward < 0)
 
-            reward_tensor[i, valid_response_length - 1] = reward
+            if valid_response_length > 0:
+                reward_tensor[i, valid_response_length - 1] = reward
 
             if data_source not in already_print_data_sources:
                 already_print_data_sources[data_source] = 0

@@ -22,8 +22,10 @@ import torch
 import verl.trainer.ppo.core_algos
 from verl.trainer.ppo.core_algos import (
     compute_gae_advantage_return,
+    compute_gdpo_outcome_advantage,
     compute_grpo_outcome_advantage,
     compute_grpo_vectorized_outcome_advantage,
+    compute_opo_outcome_advantage,
     compute_rloo_outcome_advantage,
     compute_rloo_vectorized_outcome_advantage,
     get_adv_estimator_fn,
@@ -312,6 +314,64 @@ def test_grpo_and_vectorized_equivalence(batch_size: int, seq_len: int, num_grou
     assert ret1.shape == ret2.shape == (batch_size, seq_len)
     assert torch.allclose(adv1, adv2, rtol=1e-5, atol=1e-6)
     assert torch.allclose(ret1, ret2, rtol=1e-5, atol=1e-6)
+
+
+def test_grpo_ignores_rewards_on_masked_response_positions():
+    token_level_rewards = torch.tensor([[0.0, 0.0, 10.0], [0.0, 0.0, 0.0]])
+    response_mask = torch.tensor([[0, 0, 0], [1, 1, 0]], dtype=torch.float32)
+    index = np.array(["prompt", "prompt"], dtype=object)
+
+    adv, ret = compute_grpo_outcome_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+    )
+    adv_vec, ret_vec = compute_grpo_vectorized_outcome_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+    )
+
+    assert torch.equal(adv, torch.zeros_like(adv))
+    assert torch.equal(ret, torch.zeros_like(ret))
+    assert torch.equal(adv_vec, torch.zeros_like(adv_vec))
+    assert torch.equal(ret_vec, torch.zeros_like(ret_vec))
+
+
+def test_gdpo_ignores_zero_length_component_rewards():
+    token_level_rewards = torch.zeros(2, 3, dtype=torch.float32)
+    response_mask = torch.tensor([[0, 0, 0], [1, 1, 0]], dtype=torch.float32)
+    batch = {
+        "prompts": torch.tensor([[11, 12], [11, 12]], dtype=torch.long),
+        "attention_mask": torch.tensor([[1, 1, 0, 0, 0], [1, 1, 1, 1, 0]], dtype=torch.long),
+    }
+    non_tensor_batch = {"accuracy_reward": np.array([10.0, 0.0], dtype=np.float32)}
+
+    adv, ret = compute_gdpo_outcome_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=np.array(["prompt", "prompt"], dtype=object),
+        config={"gdpo_reward_keys": ["accuracy_reward"]},
+        non_tensor_batch=non_tensor_batch,
+        batch=batch,
+    )
+
+    assert torch.equal(adv, torch.zeros_like(adv))
+    assert torch.equal(ret, torch.zeros_like(ret))
+
+
+def test_opo_all_zero_length_group_is_finite():
+    token_level_rewards = torch.tensor([[0.0, 10.0, 0.0], [0.0, 5.0, 0.0]])
+    response_mask = torch.zeros_like(token_level_rewards)
+
+    adv, ret = compute_opo_outcome_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=np.array(["prompt", "prompt"], dtype=object),
+    )
+
+    assert torch.equal(adv, torch.zeros_like(adv))
+    assert torch.equal(ret, torch.zeros_like(ret))
 
 
 @pytest.mark.parametrize(
