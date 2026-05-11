@@ -20,16 +20,23 @@ import pytest
 import torch
 
 import verl.trainer.ppo.core_algos
+from verl.protocol import DataProto
+from verl.trainer.config.algorithm import RolloutCorrectionConfig
 from verl.trainer.ppo.core_algos import (
     compute_gae_advantage_return,
+    compute_gpg_outcome_advantage,
     compute_grpo_outcome_advantage,
+    compute_grpo_passk_outcome_advantage,
     compute_grpo_vectorized_outcome_advantage,
+    compute_opo_outcome_advantage,
+    compute_reinforce_plus_plus_baseline_outcome_advantage,
     compute_rloo_outcome_advantage,
     compute_rloo_vectorized_outcome_advantage,
     get_adv_estimator_fn,
     kl_penalty,
     register_adv_est,
 )
+from verl.trainer.ppo.rollout_corr_helper import compute_rollout_correction_and_add_to_batch
 
 
 def mock_test_fn():
@@ -196,6 +203,60 @@ def test_multi_turn_compute_gae_advantage_return():
     assert torch.equal(adv1, adv2), f"{adv1=}, {adv2=}"
     assert torch.equal(ret1, ret2), f"{ret1=}, {ret2=}"
     print(f" [CORRECT] \n\n{adv1=}, \n\n{ret1=}")
+
+
+@pytest.mark.parametrize(
+    "adv_fn,kwargs",
+    [
+        (compute_grpo_outcome_advantage, {"norm_adv_by_std_in_grpo": False}),
+        (compute_grpo_vectorized_outcome_advantage, {"norm_adv_by_std_in_grpo": False}),
+        (compute_grpo_passk_outcome_advantage, {"config": {"norm_adv_by_std_in_grpo": False}}),
+        (compute_reinforce_plus_plus_baseline_outcome_advantage, {}),
+        (compute_rloo_outcome_advantage, {}),
+        (compute_opo_outcome_advantage, {}),
+        (compute_gpg_outcome_advantage, {}),
+        (compute_rloo_vectorized_outcome_advantage, {}),
+    ],
+)
+def test_outcome_advantage_estimators_ignore_masked_rewards(adv_fn, kwargs):
+    response_mask = torch.tensor([[1.0, 0.0], [1.0, 1.0]])
+    token_level_rewards = torch.tensor([[0.0, 1.0], [0.0, 0.0]])
+    index = np.array(["prompt", "prompt"], dtype=object)
+
+    advantages, returns = adv_fn(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+        **kwargs,
+    )
+
+    assert torch.count_nonzero(advantages).item() == 0
+    assert torch.count_nonzero(returns).item() == 0
+
+
+def test_rollout_rejection_masks_reward_before_grpo_advantage():
+    batch = DataProto.from_dict(
+        tensors={
+            "response_mask": torch.ones(2, 2),
+            "old_log_probs": torch.tensor([[-1.0, -6.0], [-1.0, -1.0]]),
+            "rollout_log_probs": torch.tensor([[-1.0, -1.0], [-1.0, -1.0]]),
+            "token_level_rewards": torch.tensor([[0.0, 1.0], [0.0, 0.0]]),
+        },
+        non_tensors={"uid": np.array(["prompt", "prompt"], dtype=object)},
+    )
+    config = RolloutCorrectionConfig(rollout_rs="token_k1", rollout_rs_threshold="0.8_1.25")
+
+    batch, _ = compute_rollout_correction_and_add_to_batch(batch, config)
+    advantages, returns = compute_grpo_outcome_advantage(
+        token_level_rewards=batch.batch["token_level_rewards"],
+        response_mask=batch.batch["response_mask"],
+        index=batch.non_tensor_batch["uid"],
+        norm_adv_by_std_in_grpo=False,
+    )
+
+    assert torch.equal(batch.batch["response_mask"], torch.tensor([[1.0, 0.0], [1.0, 1.0]]))
+    assert torch.count_nonzero(advantages).item() == 0
+    assert torch.count_nonzero(returns).item() == 0
 
 
 def _make_group_index(batch_size: int, num_groups: int) -> np.ndarray:

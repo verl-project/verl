@@ -212,6 +212,10 @@ def get_kl_controller(kl_ctrl):
         raise NotImplementedError
 
 
+def _masked_reward_sum(token_level_rewards: torch.Tensor, response_mask: torch.Tensor) -> torch.Tensor:
+    return (token_level_rewards * response_mask.to(dtype=token_level_rewards.dtype)).sum(dim=-1)
+
+
 @register_adv_est(AdvantageEstimator.GAE)  # or simply: @register_adv_est("gae")
 def compute_gae_advantage_return(
     token_level_rewards: torch.Tensor,
@@ -301,7 +305,7 @@ def compute_grpo_outcome_advantage(
         Returns: `(torch.Tensor)`
             shape is (bs, response_length)
     """
-    scores = token_level_rewards.sum(dim=-1)
+    scores = _masked_reward_sum(token_level_rewards, response_mask)
 
     id2score = defaultdict(list)
     id2mean = {}
@@ -347,7 +351,7 @@ def compute_grpo_vectorized_outcome_advantage(
       then broadcast the scalar across the token dimension (multiplied by response_mask).。
     """
     with torch.no_grad():
-        scores = token_level_rewards.sum(dim=-1)
+        scores = _masked_reward_sum(token_level_rewards, response_mask)
         g = as_torch_index(index, device=scores.device)
         mean_g, std_g, _ = group_mean_std(scores, g, eps=epsilon, device=scores.device)
         if norm_adv_by_std_in_grpo:
@@ -498,7 +502,7 @@ def compute_grpo_passk_outcome_advantage(
     assert config is not None
     # if True, normalize advantage by std within group
     norm_adv_by_std_in_grpo = config.get("norm_adv_by_std_in_grpo", True)
-    scores = token_level_rewards.sum(dim=-1)  # (bs,)
+    scores = _masked_reward_sum(token_level_rewards, response_mask)  # (bs,)
     advantages = torch.zeros_like(scores)
 
     id2scores = defaultdict(list)
@@ -559,7 +563,7 @@ def compute_reinforce_plus_plus_baseline_outcome_advantage(
             shape: (bs, response_length)
     """
     response_length = token_level_rewards.shape[-1]
-    scores = token_level_rewards.sum(dim=-1)
+    scores = _masked_reward_sum(token_level_rewards, response_mask)
 
     id2score = defaultdict(list)
     id2mean = {}
@@ -609,7 +613,7 @@ def compute_rloo_outcome_advantage(
         Returns: `(torch.Tensor)`
             shape: (bs, response_length)
     """
-    scores = token_level_rewards.sum(dim=-1)
+    scores = _masked_reward_sum(token_level_rewards, response_mask)
 
     id2score = defaultdict(list)
     id2mean = {}
@@ -662,7 +666,7 @@ def compute_opo_outcome_advantage(
             shape: (bs, response_length)
     """
     response_length = response_mask.sum(dim=-1)
-    scores = token_level_rewards.sum(dim=-1)
+    scores = _masked_reward_sum(token_level_rewards, response_mask)
 
     id2score = defaultdict(list)
     id2len = defaultdict(list)
@@ -797,7 +801,7 @@ def compute_gpg_outcome_advantage(
         Returns: `(torch.Tensor)`
             shape: (bs, response_length)
     """
-    scores = token_level_rewards.sum(dim=-1)
+    scores = _masked_reward_sum(token_level_rewards, response_mask)
 
     id2score = defaultdict(list)
     id2mean = {}
@@ -853,7 +857,7 @@ def compute_rloo_vectorized_outcome_advantage(
         Returns: `(torch.Tensor)`
             shape: (bs, response_length)
     """
-    scores = token_level_rewards.sum(dim=-1)
+    scores = _masked_reward_sum(token_level_rewards, response_mask)
 
     with torch.no_grad():
         inv = torch.from_numpy(np.unique(index, return_inverse=True)[1]).to(scores.device)
