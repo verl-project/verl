@@ -40,6 +40,7 @@ from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from verl.utils.net_utils import is_valid_ipv6_address
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.base import BaseRollout
+from verl.workers.rollout.weight_sync_kv_cache import should_flush_kv_cache_after_weight_sync
 from verl.workers.rollout.sglang_rollout.http_server_engine import AsyncHttpServerAdapter
 from verl.workers.rollout.sglang_rollout.utils import (
     SGLANG_LORA_NAME,
@@ -347,7 +348,8 @@ class ServerAdapter(BaseRollout):
                 )
 
         if self._engine is not None and self._is_server_tp_leader():
-            await self._engine.flush_cache()
+            if should_flush_kv_cache_after_weight_sync(self.config):
+                await self._engine.flush_cache()
             if global_steps is not None:
                 await self.server_actor.set_global_steps.remote(global_steps)
 

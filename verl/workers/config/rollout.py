@@ -194,6 +194,9 @@ class RolloutConfig(BaseConfig):
     enforce_eager: bool = True
     cudagraph_capture_sizes: Optional[list] = None
     free_cache_engine: bool = True
+    # If True, skip SGLang flush_cache after weight sync (PipelineRL-style: keep KV from prior
+    # model state while weights update; logits can be inconsistent—experimental).
+    allow_stale_kv_cache_after_weight_sync: bool = False
     data_parallel_size: int = 1
     expert_parallel_size: int = 1
     tensor_model_parallel_size: int = 2

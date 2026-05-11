@@ -52,6 +52,9 @@ cudagraph_capture_sizes: null
 # Whether to free engine KVCache after generation.
 free_cache_engine: True
 
+# If true, skip SGLang flush_cache after weight sync (PipelineRL-style stale KV; experimental).
+allow_stale_kv_cache_after_weight_sync: false
+
 # TP size for rollout. Not effective for hf
 tensor_model_parallel_size: 2
 
