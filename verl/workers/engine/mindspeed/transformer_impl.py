@@ -40,6 +40,13 @@ from .utils import (
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
+def _mindspeed_repatch(engine_config):
+    if repatch is not None:
+        repatch_config = dict(engine_config.get("override_transformer_config", {}))
+        repatch_config.setdefault("use_flash_attn", True)
+        if engine_config.context_parallel_size > 1:
+            repatch_config["context_parallel_size"] = engine_config.context_parallel_size
+        repatch(repatch_config)
 
 @EngineRegistry.register(model_type="language_model", backend="megatron", device="npu")
 class MindspeedEngineWithLMHead(MegatronEngineWithLMHead):
@@ -58,12 +65,7 @@ class MindspeedEngineWithLMHead(MegatronEngineWithLMHead):
         # The initial MindSpeed patch pass sees context_parallel_size=1 (default) because
         # verl passes CP size via hydra config rather than --context-parallel-size CLI arg,
         # so the CP ring-rank initialization wrapper is not registered on the first pass.
-        if repatch is not None:
-            repatch_config = dict(self.engine_config.get("override_transformer_config", {}))
-            repatch_config.setdefault("use_flash_attn", True)
-            if self.engine_config.context_parallel_size > 1:
-                repatch_config["context_parallel_size"] = self.engine_config.context_parallel_size
-            repatch(repatch_config)
+        _mindspeed_repatch(self.engine_config)
         super()._init_device_mesh()
 
 @EngineRegistry.register(model_type="value_model", backend="megatron", device="npu")
@@ -83,12 +85,7 @@ class MindspeedEngineWithValueHead(MegatronEngineWithValueHead):
         # The initial MindSpeed patch pass sees context_parallel_size=1 (default) because
         # verl passes CP size via hydra config rather than --context-parallel-size CLI arg,
         # so the CP ring-rank initialization wrapper is not registered on the first pass.
-        if repatch is not None:
-            repatch_config = dict(self.engine_config.get("override_transformer_config", {}))
-            repatch_config.setdefault("use_flash_attn", True)
-            if self.engine_config.context_parallel_size > 1:
-                repatch_config["context_parallel_size"] = self.engine_config.context_parallel_size
-            repatch(repatch_config)
+        _mindspeed_repatch(self.engine_config)
         super()._init_device_mesh()
 
 @EngineRegistry.register(model_type="language_model", backend="mindspeed_llm", device="npu")
