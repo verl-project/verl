@@ -49,6 +49,7 @@ def _mindspeed_repatch(engine_config):
             repatch_config["context_parallel_size"] = engine_config.context_parallel_size
         repatch(repatch_config)
 
+
 @EngineRegistry.register(model_type="language_model", backend="megatron", device="npu")
 class MindspeedEngineWithLMHead(MegatronEngineWithLMHead):
     def __init__(
