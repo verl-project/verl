@@ -40,6 +40,7 @@ from .utils import (
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
+
 def _mindspeed_repatch(engine_config):
     if repatch is not None:
         repatch_config = dict(engine_config.get("override_transformer_config", {}))
@@ -68,6 +69,7 @@ class MindspeedEngineWithLMHead(MegatronEngineWithLMHead):
         _mindspeed_repatch(self.engine_config)
         super()._init_device_mesh()
 
+
 @EngineRegistry.register(model_type="value_model", backend="megatron", device="npu")
 class MindspeedEngineWithValueHead(MegatronEngineWithValueHead):
     def __init__(
@@ -87,6 +89,7 @@ class MindspeedEngineWithValueHead(MegatronEngineWithValueHead):
         # so the CP ring-rank initialization wrapper is not registered on the first pass.
         _mindspeed_repatch(self.engine_config)
         super()._init_device_mesh()
+
 
 @EngineRegistry.register(model_type="language_model", backend="mindspeed_llm", device="npu")
 class MindSpeedLLMEngineWithLMHead(MegatronEngineWithLMHead):
