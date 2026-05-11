@@ -14,6 +14,7 @@
 
 import random
 import unittest
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -24,6 +25,7 @@ from verl.trainer.ppo.core_algos import (
     compute_gae_advantage_return,
     compute_grpo_outcome_advantage,
     compute_grpo_vectorized_outcome_advantage,
+    compute_reinforce_plus_plus_outcome_advantage,
     compute_rloo_outcome_advantage,
     compute_rloo_vectorized_outcome_advantage,
     get_adv_estimator_fn,
@@ -196,6 +198,21 @@ def test_multi_turn_compute_gae_advantage_return():
     assert torch.equal(adv1, adv2), f"{adv1=}, {adv2=}"
     assert torch.equal(ret1, ret2), f"{ret1=}, {ret2=}"
     print(f" [CORRECT] \n\n{adv1=}, \n\n{ret1=}")
+
+
+def test_multi_turn_reinforce_plus_plus_returns_skip_observation_tokens():
+    """REINFORCE++ should not treat tool observation mask gaps as EOS."""
+    rewards = torch.tensor([[0.0, 0.0, 1.0]], dtype=torch.float)
+    response_mask = torch.tensor([[1.0, 0.0, 1.0]], dtype=torch.float)
+
+    _, returns = compute_reinforce_plus_plus_outcome_advantage(
+        token_level_rewards=rewards,
+        response_mask=response_mask,
+        config=SimpleNamespace(gamma=0.5),
+    )
+
+    expected_returns = torch.tensor([[0.5, 1.0, 1.0]], dtype=torch.float)
+    torch.testing.assert_close(returns, expected_returns)
 
 
 def _make_group_index(batch_size: int, num_groups: int) -> np.ndarray:
