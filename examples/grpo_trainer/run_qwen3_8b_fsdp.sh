@@ -98,21 +98,29 @@ case "${DEVICE}" in
         export HCCL_NPU_SOCKET_PORT_RANGE=61000-61050
         export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
 
-        NPUS_PER_NODE=${NPUS_PER_NODE:-8}
+        NPUS_PER_NODE=8
         n_trainer_devices=${NPUS_PER_NODE}
         actor_param_offload=True
         actor_optimizer_offload=True
         rollout_tp=${rollout_tp:-4}
-        rollout_gpu_mem_util=${rollout_gpu_mem_util:-0.3}
+        sp_size=4
+        train_batch_size=16
+        max_prompt_length=$((1024 * 2))
+        max_response_length=$((1024 * 32))
+        ppo_mini_batch_size=16
+        rollout_gpu_mem_util=0.3
         EXTRA+=(
             actor_rollout_ref.actor.use_torch_compile=False
-            "actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size=${sp_size}"
-            "actor_rollout_ref.ref.fsdp_config.ulysses_sequence_parallel_size=${sp_size}"
-            actor_rollout_ref.rollout.enable_chunked_prefill=False
+            actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size=${sp_size}
+            actor_rollout_ref.ref.fsdp_config.ulysses_sequence_parallel_size=${sp_size}
+            actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1
+            actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1
             actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=4096
         )
         if [ "${INFER_BACKEND}" = sglang ]; then
-            EXTRA+=(+actor_rollout_ref.rollout.engine_kwargs.sglang.attention_backend=ascend)
+            EXTRA+=(
+                +actor_rollout_ref.rollout.engine_kwargs.sglang.attention_backend=ascend
+            )
         fi
         ;;
 esac

@@ -173,8 +173,19 @@ multi_turn:
   # null for no limit (default max_length // 3)
   max_assistant_turns: null
 
-  # null for no tool
+  # YAML config for stateful tools that subclass ``BaseTool``.
+  # Use this when a tool needs per-trajectory state, async ``create``/``release``
+  # lifecycle hooks, or custom rewards.
+  # null disables this code path.
   tool_config_path: null
+
+  # Path to a Python file with ``@function_tool``-decorated functions, loaded
+  # once per ``AgentLoopWorker``. Use this for stateless tools where the
+  # OpenAI-compatible JSON schema can be inferred from the function signature
+  # and Google-style docstring. Coexists with ``tool_config_path``; name
+  # collisions across the two raise an error.
+  # null disables this code path.
+  function_tool_path: null
 
   # null for no limit (default max_length // 3)
   max_user_turns: null

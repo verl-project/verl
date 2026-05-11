@@ -69,6 +69,7 @@ class MultiTurnConfig(BaseConfig):
     enable: bool = False
     max_assistant_turns: Optional[int] = None
     tool_config_path: Optional[str] = None
+    function_tool_path: Optional[str] = None
     max_user_turns: Optional[int] = None
     max_parallel_calls: int = 1
     max_tool_response_length: int = 256

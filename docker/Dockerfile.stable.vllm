@@ -1,4 +1,4 @@
-# vllm: x86_64=0.18.0, aarch64=0.17.0
+# vllm: x86_64=0.18.0, aarch64=0.18.0
 
 FROM nvidia/cuda:12.9.1-devel-ubuntu24.04
 
@@ -95,13 +95,8 @@ RUN if [ "$(uname -m)" = "x86_64" ]; then \
         python setup.py install; \
     fi
 
-# TODO(kaixih@nvidia): revert aarch64 to vllm==0.18.0 once perf regression is fixed
-RUN if [ "$(uname -m)" = "aarch64" ]; then \
-        apt-get remove -y python3-jwt && \
-        pip install vllm==0.17.0; \
-    else \
-        pip install vllm==0.18.0; \
-    fi
+RUN if [ "$(uname -m)" = "aarch64" ]; then apt-get remove -y python3-jwt; fi && \
+    pip install vllm==0.18.0
 
 RUN pip3 install --no-deps trl==0.27.0
 
@@ -111,11 +106,7 @@ RUN pip install -U git+https://github.com/ISEEKYAN/mbridge.git@641a5a0
 
 RUN pip install --no-deps git+https://github.com/NVIDIA/Megatron-LM.git@core_v0.16.0
 
-RUN if [ "$(uname -m)" = "aarch64" ]; then \
-        pip install transformers==4.57.6; \
-    else \
-        pip install transformers==5.3.0; \
-    fi
+RUN pip install transformers==5.3.0
 
 RUN pip install git+https://github.com/verl-project/verl.git@v0.7.1 && pip uninstall -y verl
 

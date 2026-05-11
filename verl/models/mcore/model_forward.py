@@ -284,7 +284,7 @@ def gptmodel_forward_model_engine(
         output_orig = model(
             input_ids=input_ids_rmpad,
             attention_mask=attention_mask,
-            position_ids=position_ids_rmpad if not vision_model else None,  # vision models will calculate position_ids
+            position_ids=position_ids_rmpad if mtp_enable_train else None,  # position_ids is only needed for MTP
             packed_seq_params=packed_seq_params,
             **model_kwargs,
         )

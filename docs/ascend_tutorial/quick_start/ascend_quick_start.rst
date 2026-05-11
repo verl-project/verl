@@ -98,7 +98,7 @@ Dockerfile镜像构建 & 获取 & 使用
 
     .. code-block:: bash
 
-        git clone --depth 1 --branch v0.13.0 https://github.com/vllm-project/vllm.git
+        git clone --depth 1 --branch v0.18.0 https://github.com/vllm-project/vllm.git
         cd vllm && pip install -r requirements/build.txt
         VLLM_TARGET_DEVICE=empty pip install -v -e . && cd ..
 
@@ -106,7 +106,7 @@ Dockerfile镜像构建 & 获取 & 使用
 
     .. code-block:: bash
 
-        git clone -b releases/v0.13.0 https://github.com/vllm-project/vllm-ascend.git
+        git clone -b releases/v0.18.0 https://github.com/vllm-project/vllm-ascend.git
         cd vllm-ascend && pip install -r requirements.txt    
         export COMPILE_CUSTOM_KERNELS=1 && pip install -v -e . && cd ..
 

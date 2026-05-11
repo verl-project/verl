@@ -301,6 +301,92 @@ def test_tool_agent(init_config):
     ray.shutdown()
 
 
+def test_function_tool_agent(init_config):
+    """End-to-end coverage for ``rollout.multi_turn.function_tool_path``."""
+    ray.init(
+        runtime_env={
+            "env_vars": {
+                "TOKENIZERS_PARALLELISM": "true",
+                "NCCL_DEBUG": "WARN",
+                "VLLM_LOGGING_LEVEL": "INFO",
+                "VLLM_USE_V1": "1",
+            }
+        },
+        ignore_reinit_error=True,
+    )
+
+    function_tool_path = os.path.join(os.path.dirname(__file__), "function_tool_examples.py")
+
+    n = 2
+    init_config.actor_rollout_ref.rollout.n = n
+    init_config.actor_rollout_ref.rollout.multi_turn.function_tool_path = function_tool_path
+    init_config.actor_rollout_ref.rollout.multi_turn.max_parallel_calls = 2
+    agent_loop_manager = init_agent_loop_manager(init_config)
+
+    raw_prompts = [
+        [{"role": "user", "content": "Hi! Please reply with a one-word greeting."}],
+        [{"role": "user", "content": "What is the current temperature in Tokyo, in celsius?"}],
+    ]
+    batch = DataProto(
+        non_tensor_batch={
+            "raw_prompt": np.array([np.array(prompt) for prompt in raw_prompts], dtype=object),
+            "agent_name": np.array(["tool_agent"] * len(raw_prompts)),
+            "data_source": np.array(["openai/gsm8k"] * len(raw_prompts)),
+            "reward_model": np.array([{"style": "rule", "ground_truth": "1.0"}] * len(raw_prompts)),
+        },
+    )
+    batch = batch.repeat(n)
+    result = agent_loop_manager.generate_sequences(prompts=batch)
+    assert len(result) == len(raw_prompts) * n
+
+    num_turns = result.non_tensor_batch["__num_turns__"]
+    print(f"num_turns: {num_turns}")
+    greeting_idx = list(range(0, n))
+    weather_idx = list(range(n, 2 * n))
+    assert all(num_turns[i] == 2 for i in greeting_idx), (
+        f"greeting prompt should not trigger a tool: {num_turns[greeting_idx]}"
+    )
+    assert any(num_turns[i] == 4 for i in weather_idx), (
+        f"expected at least one weather prompt to trigger a tool call (==4 turns); got {num_turns[weather_idx]}"
+    )
+
+    tokenizer = hf_tokenizer(init_config.actor_rollout_ref.model.path)
+    responses = result.batch["responses"]
+    response_mask = result.batch["response_mask"]
+    attention_mask = result.batch["attention_mask"]
+    response_length = response_mask.size(1)
+    saw_stub_value = False
+    for i in weather_idx:
+        if num_turns[i] != 4:
+            continue
+        valid_with_obs = responses[i][attention_mask[i][-response_length:].bool()]
+        full_response = tokenizer.decode(valid_with_obs)
+        if "17.3" in full_response:
+            saw_stub_value = True
+            break
+    assert saw_stub_value, (
+        "expected the stub temperature '17.3' to appear in at least one "
+        "weather rollout that triggered a tool call; this is the only "
+        "value that proves the tool was actually invoked rather than "
+        "hallucinated by the model."
+    )
+
+    # Tool responses must not leak into the masked-for-loss response stream
+    # (same invariant ``test_tool_agent`` checks for native tools).
+    for i in range(len(responses)):
+        valid_tokens = responses[i][response_mask[i].bool()]
+        response_without_obs = tokenizer.decode(valid_tokens)
+        assert "<tool_response>" not in response_without_obs, (
+            f"found <tool_response> in response: {response_without_obs}"
+        )
+        assert "</tool_response>" not in response_without_obs, (
+            f"found </tool_response> in response: {response_without_obs}"
+        )
+
+    print("Test passed!")
+    ray.shutdown()
+
+
 @pytest.mark.asyncio
 async def test_get_trajectory_info():
     """Tests the get_trajectory_info method."""

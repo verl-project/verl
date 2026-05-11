@@ -360,32 +360,14 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
             logger.warning(f"Empty output for prompt {uid}_{session_id}")
             return
 
-        # NOTE: only use the last output to compute reward score, then assign reward score to all agent loop outputs.
-        # User can customize the reward score assignment strategy.
-        final_output = outputs[-1]
-        final_prompts = torch.tensor(final_output.prompt_ids, dtype=torch.int64)
-        final_responses = torch.tensor(final_output.response_ids, dtype=torch.int64)
-        final_input_ids = torch.cat([final_prompts, final_responses], dim=0)
-        final_attention_mask = torch.ones_like(final_input_ids, dtype=torch.int64)
-        final_multi_modal_inputs = self._compute_multi_modal_inputs(final_output, final_input_ids)
-        final_position_ids = self._compute_position_ids(
-            final_input_ids.unsqueeze(0), final_attention_mask.unsqueeze(0), final_multi_modal_inputs
-        ).squeeze(0)
-        await self._compute_score(
-            final_output,
-            prompts=final_prompts.unsqueeze(0),  # [1, prompt_length]
-            responses=final_responses.unsqueeze(0),  # [1, response_length]
-            attention_mask=final_attention_mask.unsqueeze(0),  # [1, seq_len]
-            input_ids=final_input_ids.unsqueeze(0),  # [1, seq_len]
-            position_ids=final_position_ids.unsqueeze(0),  # [1, seq_len] or [1, 4, seq_len]
-            kwargs=kwargs,
-        )
+        await self._compute_score(outputs, kwargs=kwargs)
 
+        final_output = outputs[-1]
         # TODO: Support output:list[AgentLoopOutput]
         await self._compute_teacher_logprobs(
-            output,
-            prompt_ids=output.prompt_ids,
-            response_ids=output.response_ids,
+            final_output,
+            prompt_ids=final_output.prompt_ids,
+            response_ids=final_output.response_ids,
             validate=validate,
             sample_kwargs=kwargs,
         )

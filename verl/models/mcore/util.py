@@ -396,6 +396,7 @@ def preprocess_thd_engine(
                 continue
 
             seqlen_padded_i = seqlens_in_batch_padded_cpu[i]
+            seqlen_orig_i = seqlens_in_batch_cpu[i]
             seqlen = seqlen_padded_i // cp_size
             half_seqlen = seqlen // 2
             start_idx = cu_seqlens_padded_cpu[i] // cp_size
@@ -431,10 +432,14 @@ def preprocess_thd_engine(
                 input_ids_rmpad[start_idx + half_seqlen : start_idx + half_seqlen + remain_len] = d[
                     remain_start:remain_end
                 ]
-                # Build position_ids for the remaining chunk
-                position_ids_rmpad[start_idx + half_seqlen : start_idx + half_seqlen + remain_len] = torch.arange(
-                    seqlen_padded_i - remain_len, seqlen_padded_i, dtype=torch.long, device=input_ids.device
-                )
+                # Build position_ids for the remaining chunk: use remain_start as base,
+                # clamped to original seqlen to avoid exceeding seqlen-1 for padded positions
+                pos_end = min(remain_end, seqlen_orig_i)
+                valid_pos_len = pos_end - remain_start
+                if valid_pos_len > 0:
+                    position_ids_rmpad[start_idx + half_seqlen : start_idx + half_seqlen + valid_pos_len] = (
+                        torch.arange(remain_start, pos_end, dtype=torch.long, device=input_ids.device)
+                    )
 
             if need_roll:
                 # Handle roll for cp_size > 1 case

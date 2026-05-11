@@ -115,19 +115,29 @@ class RLHFDataset(Dataset):
         self.filter_overlong_prompts = config.get("filter_overlong_prompts", True)
         self.apply_chat_template_kwargs = config.get("apply_chat_template_kwargs", {})
 
+        # Mirror AgentLoopWorker's tool loading so length filtering sees the
+        # same schemas the rollout will.
         self.tool_config_path = config.get("tool_config_path", None)
+        self.function_tool_path = config.get("function_tool_path", None)
         self.tool_schemas = None
-        if self.tool_config_path:
+        if self.tool_config_path or self.function_tool_path:
             try:
-                from verl.tools.utils.tool_registry import initialize_tools_from_config
+                from verl.tools.tool_registry import load_all_tools
 
-                tool_list = initialize_tools_from_config(self.tool_config_path)
-                # match ToolAgentLoop behaviour: model_dump to plain dicts
+                tool_list = load_all_tools(
+                    tool_config_path=self.tool_config_path,
+                    function_tool_path=self.function_tool_path,
+                )
                 self.tool_schemas = [
                     tool.tool_schema.model_dump(exclude_unset=True, exclude_none=True) for tool in tool_list
                 ]
             except Exception as e:
-                logger.warning("Failed to initialize tools from %s: %s", self.tool_config_path, e)
+                logger.warning(
+                    "Failed to initialize tools (tool_config_path=%s, function_tool_path=%s): %s",
+                    self.tool_config_path,
+                    self.function_tool_path,
+                    e,
+                )
                 self.tool_schemas = None
 
         self.num_workers = config.get("filter_overlong_prompts_workers", max(1, os.cpu_count() // 4))
