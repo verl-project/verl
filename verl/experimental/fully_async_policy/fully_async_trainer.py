@@ -15,12 +15,15 @@
 import asyncio
 import logging
 import os
+import sys
 import time
 from datetime import datetime
-from pprint import pprint
 from typing import Any
 
+import numpy as np
+import psutil
 import ray
+import torch
 from omegaconf import OmegaConf, open_dict
 from tqdm import tqdm
 
@@ -31,8 +34,15 @@ from verl.experimental.fully_async_policy.detach_utils import (
     ValidateMetrics,
     assemble_batch_from_rollout_samples,
 )
+from verl.experimental.fully_async_policy.intermediate_trajectory_utils import (
+    assert_batch_schema,
+    expand_intermediate_trajectories_pre_log_prob,
+    scatter_advantage_to_intermediate_and_normalize,
+    zero_out_padding_rows,
+)
 from verl.experimental.fully_async_policy.message_queue import MessageQueueClient
 from verl.experimental.separation.ray_trainer import SeparateRayPPOTrainer
+from verl.protocol import pad_dataproto_to_divisor
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager
@@ -44,12 +54,120 @@ from verl.utils.tracking import Tracking, ValidationGenerationsLogger
 from verl.workers.rollout.llm_server import LLMServerManager
 
 logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 class TrainingStopException(Exception):
     """Exception raised to signal training should stop"""
 
     pass
+
+
+def _bytes_to_gb(n: int | float) -> float:
+    return float(n) / (1024**3)
+
+
+def _tensor_bytes(obj: Any) -> int:
+    if isinstance(obj, torch.Tensor):
+        return int(obj.numel() * obj.element_size())
+    if isinstance(obj, np.ndarray) and obj.dtype != object:
+        return int(obj.nbytes)
+    if isinstance(obj, dict):
+        return sum(_tensor_bytes(v) for v in obj.values())
+    if isinstance(obj, list | tuple):
+        return sum(_tensor_bytes(v) for v in obj)
+    if isinstance(obj, np.ndarray) and obj.dtype == object:
+        return sum(_tensor_bytes(v) for v in obj.flat)
+    return 0
+
+
+def _object_bytes(obj: Any, *, _seen: set[int] | None = None, _depth: int = 0) -> int:
+    """Best-effort recursive host-memory estimator for Python/numpy/torch objects."""
+    if _seen is None:
+        _seen = set()
+    obj_id = id(obj)
+    if obj_id in _seen:
+        return 0
+    _seen.add(obj_id)
+
+    if isinstance(obj, torch.Tensor):
+        return int(obj.numel() * obj.element_size())
+    if isinstance(obj, np.ndarray):
+        total = int(obj.nbytes)
+        if obj.dtype == object and _depth < 8:
+            total += sum(_object_bytes(v, _seen=_seen, _depth=_depth + 1) for v in obj.flat)
+        return total
+
+    size = sys.getsizeof(obj, 0)
+    if _depth >= 8:
+        return size
+
+    # PIL.Image does not expose nbytes, but raw RGB/RGBA storage dominates.
+    if hasattr(obj, "size") and hasattr(obj, "mode"):
+        try:
+            width, height = obj.size
+            channels = len(obj.getbands()) if hasattr(obj, "getbands") else 3
+            size += int(width) * int(height) * int(channels)
+        except Exception:
+            pass
+
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            size += _object_bytes(k, _seen=_seen, _depth=_depth + 1)
+            size += _object_bytes(v, _seen=_seen, _depth=_depth + 1)
+    elif isinstance(obj, list | tuple | set | frozenset):
+        for v in obj:
+            size += _object_bytes(v, _seen=_seen, _depth=_depth + 1)
+    return int(size)
+
+
+def _intermediate_summary(batch: DataProto) -> dict[str, Any]:
+    cache_key = "__intermediate_trajectories_cache__"
+    cache = (batch.meta_info or {}).get(cache_key)
+    interm_col = None
+    if isinstance(cache, dict):
+        interm_col = cache.get("intermediate_col")
+    elif batch.non_tensor_batch and "intermediate_trajectories" in batch.non_tensor_batch:
+        interm_col = batch.non_tensor_batch["intermediate_trajectories"]
+
+    if interm_col is None:
+        return {"rows_with_intermediate": 0, "num_intermediate": 0, "per_row_counts": []}
+    counts = [len(x) if x else 0 for x in interm_col]
+    return {
+        "rows_with_intermediate": sum(1 for c in counts if c),
+        "num_intermediate": int(sum(counts)),
+        "per_row_counts": counts,
+        "payload_gb": _bytes_to_gb(_object_bytes(interm_col)),
+    }
+
+
+def _dataproto_storage_summary(batch: DataProto | None) -> dict[str, Any]:
+    if batch is None:
+        return {"batch_len": 0}
+    tensor_bytes = 0
+    tensor_shapes: dict[str, tuple[int, ...]] = {}
+    if batch.batch is not None:
+        for k, v in batch.batch.items():
+            tensor_bytes += _tensor_bytes(v)
+            if isinstance(v, torch.Tensor):
+                tensor_shapes[k] = tuple(v.shape)
+
+    non_tensor_bytes = _object_bytes(batch.non_tensor_batch or {})
+    meta_bytes = _object_bytes(batch.meta_info or {})
+    mm_bytes = 0
+    nt = batch.non_tensor_batch or {}
+    if "multi_modal_inputs" in nt:
+        mm_bytes = _object_bytes(nt["multi_modal_inputs"])
+
+    return {
+        "batch_len": len(batch),
+        "tensor_gb": _bytes_to_gb(tensor_bytes),
+        "non_tensor_gb": _bytes_to_gb(non_tensor_bytes),
+        "meta_gb": _bytes_to_gb(meta_bytes),
+        "multi_modal_inputs_gb": _bytes_to_gb(mm_bytes),
+        "tensor_shapes": tensor_shapes,
+        **_intermediate_summary(batch),
+    }
 
 
 @ray.remote(num_cpus=10)
@@ -169,13 +287,13 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
 
             val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor)
             rollout_gpus = config.rollout.nnodes * config.rollout.n_gpus_per_node
-            print(f"[FullyAsyncTrainer] split before val_dataset total len: {len(val_dataset)}")
+            logger.info("[FullyAsyncTrainer] split before val_dataset total len: %d", len(val_dataset))
             split_dataset = val_dataset.split(total_gpus)
             rollout_val_dataset0 = split_dataset[rollout_gpus:]
             from torch.utils.data import ConcatDataset
 
             val_dataset = ConcatDataset(rollout_val_dataset0)
-            print(f"[FullyAsyncTrainer] split after val_dataset total len: {len(val_dataset)}")
+            logger.info("[FullyAsyncTrainer] split after val_dataset total len: %d", len(val_dataset))
             self.val_dataset = val_dataset
             # update val_dataloader
             val_batch_size = self.config.data.val_batch_size  # Prefer config value if set
@@ -183,7 +301,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
                 val_batch_size = len(val_dataset)
             from torchdata.stateful_dataloader import StatefulDataLoader
 
-            print(f"[FullyAsyncTrainer] create val_dataloader with batch_size: {val_batch_size}")
+            logger.info("[FullyAsyncTrainer] create val_dataloader with batch_size: %s", val_batch_size)
             self.val_dataloader = StatefulDataLoader(
                 dataset=val_dataset,
                 batch_size=val_batch_size,
@@ -206,7 +324,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         self.checkpoint_manager = CheckpointEngineManager(
             config=checkpoint_engine_config, trainer=self.actor_wg, replicas=replicas
         )
-        print("[FullyAsyncTrainer] Checkpoint manager initialized")
+        logger.info("[FullyAsyncTrainer] Checkpoint manager initialized")
 
     def set_message_queue_client(self, message_queue_client: MessageQueueClient):
         """Set message queue client"""
@@ -229,7 +347,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
                 if OmegaConf.select(self.config, "critic.optim"):
                     self.config.critic.optim.total_training_steps = total_training_steps
         except Exception as e:
-            print(f"Warning: Could not set total_training_steps in config. Structure missing? Error: {e}")
+            logger.warning("Could not set total_training_steps in config. Structure missing? Error: %r", e)
 
         self.progress_bar = tqdm(total=self.total_train_steps, initial=0, desc="Training Progress")
 
@@ -245,9 +363,9 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         Returns:
             tuple: (epoch, batch_dict, gen_batch_output)
         """
-        print(
-            f"[FullyAsyncTrainer] Requesting {self.required_samples} samples from queue",
-            flush=True,
+        logger.info(
+            "[FullyAsyncTrainer] Requesting %d samples from queue",
+            self.required_samples,
         )
 
         # Collect samples using a simple loop calling get_sample
@@ -259,39 +377,57 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             sample, queue_len = await self.message_queue_client.get_sample()
 
             if sample is None:
-                print(
-                    f"[FullyAsyncTrainer] Detected termination signal (None), stopping sample collection. "
-                    f"Collected {len(queue_samples)}/{self.required_samples} samples"
+                logger.info(
+                    "[FullyAsyncTrainer] Detected termination signal (None), stopping sample collection. "
+                    "Collected %d/%d samples",
+                    len(queue_samples),
+                    self.required_samples,
                 )
                 break
 
             queue_samples.append(sample)
 
             if len(queue_samples) % 64 == 0:
-                print(
-                    f"[FullyAsyncTrainer] Collected {len(queue_samples)}/{self.required_samples} samples. "
-                    f"mq_len: {queue_len}"
+                logger.info(
+                    "[FullyAsyncTrainer] Collected %d/%d samples. mq_len: %s",
+                    len(queue_samples),
+                    self.required_samples,
+                    queue_len,
                 )
 
         consumer_end = time.time()
 
         if not queue_samples or len(queue_samples) < self.required_samples:
-            print("[FullyAsyncTrainer] not enough samples collected after loop")
+            logger.warning("[FullyAsyncTrainer] not enough samples collected after loop")
             return None, None
         total_wait_time = consumer_end - consumer_start
 
-        print(
-            f"[FullyAsyncTrainer] Loop collection completed: {len(queue_samples)}/{self.required_samples} samples, "
-            f"total wait time: {total_wait_time:.2f} seconds. "
-            f"mq_len: {queue_len}"
+        logger.info(
+            "[FullyAsyncTrainer] Loop collection completed: %d/%d samples, total wait time: %.2f seconds. mq_len: %s",
+            len(queue_samples),
+            self.required_samples,
+            total_wait_time,
+            queue_len,
         )
 
         queue_samples = [ray.cloudpickle.loads(x) for x in queue_samples]
         # Assemble batch - now working directly with RolloutSample objects
         if self.config.trainer.balance_batch:
-            batch = assemble_batch_from_rollout_samples(queue_samples, self.tokenizer, self.config, self._balance_batch)
+            batch = assemble_batch_from_rollout_samples(
+                queue_samples,
+                self.tokenizer,
+                self.config,
+                self._balance_batch,
+                processor=self.processor,
+            )
         else:
-            batch = assemble_batch_from_rollout_samples(queue_samples, self.tokenizer, self.config, None)
+            batch = assemble_batch_from_rollout_samples(
+                queue_samples,
+                self.tokenizer,
+                self.config,
+                None,
+                processor=self.processor,
+            )
 
         batch.meta_info["fully_async/total_wait_time"] = total_wait_time
         return 0, batch
@@ -340,14 +476,17 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
 
     def _init_reward_loop(self):
         if self.config.async_training.use_trainer_do_validate:
-            print("[FullyAsyncTrainer] Init reward loop")
+            logger.info("[FullyAsyncTrainer] Init reward loop")
             super()._init_reward_loop()
 
     async def _init_async_rollout_manager(self):
         # use async rollout do validate
-        print(f"[FullyAsyncTrainer] use_trainer_do_validate: {self.config.async_training.use_trainer_do_validate}")
+        logger.info(
+            "[FullyAsyncTrainer] use_trainer_do_validate: %s",
+            self.config.async_training.use_trainer_do_validate,
+        )
         if self.config.async_training.use_trainer_do_validate:
-            print("[FullyAsyncTrainer] Init async rollout manager")
+            logger.info("[FullyAsyncTrainer] Init async rollout manager")
 
             # infrastructure overview: https://verl.readthedocs.io/en/latest/advance/reward_loop.html#architecture-design
             # agent_reward_loop: streaming reward computation with actor rollout
@@ -374,7 +513,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
                 llm_client=self.llm_server_manager.get_client(),
                 reward_loop_worker_handles=reward_loop_worker_handles,
             )
-            print("[FullyAsyncTrainer] async_rollout_manager initialized")
+            logger.info("[FullyAsyncTrainer] async_rollout_manager initialized")
 
             # Modify checkpoint_engine config to use naive backend
             checkpoint_engine_cfg = self.config.actor_rollout_ref.rollout.checkpoint_engine
@@ -383,7 +522,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
                 checkpoint_engine_cfg.backend = "naive"
             checkpoint_engine_config = omega_conf_to_dataclass(checkpoint_engine_cfg)
 
-            print(f"[FullyAsyncTrainer] checkpoint_engine_config: {checkpoint_engine_config}")
+            logger.info("[FullyAsyncTrainer] checkpoint_engine_config: %s", checkpoint_engine_config)
 
             self.colocate_checkpoint_manager = CheckpointEngineManager(
                 config=checkpoint_engine_config,
@@ -398,10 +537,10 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             with open_dict(checkpoint_engine_cfg):
                 checkpoint_engine_cfg.backend = original_backend
 
-            print("[FullyAsyncTrainer] colocate_checkpoint_manager initialized")
+            logger.info("[FullyAsyncTrainer] colocate_checkpoint_manager initialized")
 
         else:
-            print("[FullyAsyncTrainer] Skip async rollout manager (use_trainer_do_validate=False)")
+            logger.info("[FullyAsyncTrainer] Skip async rollout manager (use_trainer_do_validate=False)")
 
     async def fit(self):
         """
@@ -410,7 +549,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         to construct the PPO dataflow.
         The light-weight advantage computation is done on the driver process.
         """
-        print("[FullyAsyncTrainer] Starting FullyAsyncTrainer...")
+        logger.info("[FullyAsyncTrainer] Starting FullyAsyncTrainer...")
         if self.message_queue_client is None:
             raise ValueError("MessageQueue client not set. Call set_message_queue_client() first.")
         if self.rollouter is None:
@@ -434,7 +573,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             try:
                 await self.fit_step()
             except TrainingStopException:
-                print("[FullyAsyncTrainer] Training stopped by queue termination signal")
+                logger.info("[FullyAsyncTrainer] Training stopped by queue termination signal")
                 break
 
         self.progress_bar.close()
@@ -442,6 +581,33 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             await self._fit_update_weights()
             await self._fit_validate()
         self._fit_save_checkpoint(force=True)
+
+    def _log_batch_storage(self, stage: str, batch: DataProto | None) -> None:
+        summary = _dataproto_storage_summary(batch)
+        rss_gb = _bytes_to_gb(psutil.Process(os.getpid()).memory_info().rss)
+        logger.info(
+            "[FullyAsyncTrainer][Storage][%s] "
+            "rss=%.3fGB batch_len=%s tensor=%.3fGB non_tensor=%.3fGB "
+            "meta=%.3fGB multi_modal_inputs=%.3fGB intermediate_rows=%s "
+            "rows_with_intermediate=%s per_row_counts=%s tensor_shapes=%s",
+            stage,
+            rss_gb,
+            summary.get("batch_len"),
+            summary.get("tensor_gb", 0.0),
+            summary.get("non_tensor_gb", 0.0),
+            summary.get("meta_gb", 0.0),
+            summary.get("multi_modal_inputs_gb", 0.0),
+            summary.get("num_intermediate", 0),
+            summary.get("rows_with_intermediate", 0),
+            summary.get("per_row_counts", []),
+            summary.get("tensor_shapes", {}),
+        )
+        if "payload_gb" in summary:
+            logger.info(
+                "[FullyAsyncTrainer][Storage][%s] intermediate_payload=%.3fGB",
+                stage,
+                summary["payload_gb"],
+            )
 
     async def fit_step(self, batch_dict: dict = None):
         """
@@ -464,13 +630,56 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
 
         self._fit_start_profile()
 
+        _CORE_KEYS = {"input_ids", "attention_mask", "position_ids", "responses", "response_mask"}
+
         with marked_timer("step", self.timing_raw):
             batch = await self._fit_generate(None)
+            self._log_batch_storage("after_generate", batch)
+
+            # Detect position_ids ndim from the assembled batch for consistent
+            # assertion throughout the pipeline.
+            _pos_ndim = (
+                batch.batch["position_ids"].ndim
+                if batch.batch is not None and "position_ids" in batch.batch.keys()
+                else None
+            )
+
             batch = self._fit_compute_reward(batch)
+            self._log_batch_storage("after_reward", batch)
+            assert_batch_schema(
+                batch,
+                "fit_step.after_reward",
+                expected_tensor_keys=_CORE_KEYS,
+                require_position_ids_ndim=_pos_ndim,
+                has_processor=self.processor is not None,
+            )
+            # Expand intermediate trajectories (and pad to actor mini-batch
+            # multiple) BEFORE any per-token forward pass, so that
+            # log_prob / ref_log_prob / critic are computed over every
+            # trajectory row that will participate in the actor update.
+            batch = self._fit_expand_and_pad(batch)
+            self._log_batch_storage("after_expand_and_pad", batch)
+            assert_batch_schema(
+                batch,
+                "fit_step.after_expand_and_pad",
+                expected_tensor_keys=_CORE_KEYS,
+                require_position_ids_ndim=_pos_ndim,
+            )
             batch = self._fit_compute_log_prob(batch)
+            self._log_batch_storage("after_log_prob", batch)
+            assert_batch_schema(batch, "fit_step.after_log_prob", require_position_ids_ndim=_pos_ndim)
+            self._log_batch_storage("before_ref_log_prob", batch)
             batch = self._fit_compute_ref_log_prob(batch)
+            self._log_batch_storage("after_ref_log_prob", batch)
             batch = self._fit_compute_critic(batch)
+            assert_batch_schema(batch, "fit_step.after_critic", require_position_ids_ndim=_pos_ndim)
+            # Advantage is computed on the FINAL subset only (GRPO group
+            # stats must not see intermediate rows), then the scalar is
+            # broadcast to sibling intermediate rows and scaled by 1/T_rollout
+            # so that every rollout contributes equally under token-mean.
             batch = self._fit_compute_advantage(batch)
+            self._log_batch_storage("after_advantage", batch)
+            assert_batch_schema(batch, "fit_step.after_advantage", require_position_ids_ndim=_pos_ndim)
             batch = self._fit_update_critic(batch)
             batch = self._fit_update_actor(batch)
             self._fit_update_local_step()
@@ -516,13 +725,193 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             self.actor_rollout_wg.clear_cpu_model(self.local_trigger_step)
         return old_log_prob, old_log_prob_mfu
 
+    def _fit_expand_and_pad(self, batch: DataProto) -> DataProto:
+        """Expand intermediate trajectories and pad the batch.
+
+        This runs between ``_fit_compute_reward`` and ``_fit_compute_log_prob``
+        so that log_prob / ref_log_prob / critic are computed on every row
+        (final + intermediate) with their own independent forward passes.
+
+        Steps:
+          1. Expand cached intermediate trajectories into independent DataProto
+             rows matching the final rows' tensor schema (via
+             ``expand_intermediate_trajectories_pre_log_prob``). Each row is
+             tagged with ``trajectory_role`` and ``rollout_group_id`` in the
+             non-tensor batch for later advantage scatter / normalization.
+          2. Pad the expanded batch to a multiple of the global actor
+             mini-batch size (``ppo_mini_batch_size * rollout.n``) and zero
+             out the training signal on the padded tail so padding rows do
+             not contribute to the actor loss.
+        """
+        timing_raw = self.timing_raw
+        self._log_batch_storage("expand.before", batch)
+        with marked_timer("expand_intermediate", timing_raw, color="magenta"):
+            rollout_n = int(self.config.actor_rollout_ref.rollout.get("n", 1) or 1)
+            rollout_cfg = self.config.actor_rollout_ref.rollout
+
+            batch = expand_intermediate_trajectories_pre_log_prob(
+                batch,
+                tokenizer=self.tokenizer,
+                processor=self.processor,
+                rollout_config=rollout_cfg,
+                rollout_n=rollout_n,
+            )
+        self._log_batch_storage("expand.after_expand", batch)
+
+        # Temporarily move meta_info fields that are per-row ndarrays out of
+        # ``batch.meta_info`` before pad. ``DataProto.concat`` inside
+        # ``pad_dataproto_to_divisor`` asserts equality (``==``) on
+        # overlapping meta_info values, and an ndarray value raises
+        # "truth value of an array is ambiguous". We stash the offending
+        # values aside and restore them after pad so downstream consumers
+        # (e.g. ``_collect_metrics_from_samples``, which reads
+        # ``trajectory_param_versions``) keep working unchanged.
+        _NDARRAY_META_KEYS = ("trajectory_param_versions",)
+        _stashed_meta: dict[str, Any] = {}
+        for _bad_key in _NDARRAY_META_KEYS:
+            if _bad_key in batch.meta_info:
+                _stashed_meta[_bad_key] = batch.meta_info.pop(_bad_key)
+
+        # Pad to actor mini-batch multiple. ``train_mini_batch`` requires
+        # ``mini_batch_size = ppo_mini_batch_size * rollout.n`` to evenly
+        # divide the per-DP batch; padding the global batch guarantees that
+        # dispatching by DP size preserves divisibility.
+        ppo_mini_batch_size = int(self.config.actor_rollout_ref.actor.ppo_mini_batch_size)
+        global_mini_batch = ppo_mini_batch_size * rollout_n
+        if global_mini_batch > 0 and len(batch) % global_mini_batch != 0:
+            with marked_timer("pad_mini_batch", timing_raw, color="magenta"):
+                batch, pad_size = pad_dataproto_to_divisor(batch, global_mini_batch)
+                zero_out_padding_rows(batch, pad_size)
+                batch.meta_info["fully_async/pad/num_padding_rows"] = int(pad_size)
+                self._log_batch_storage("expand.after_pad", batch)
+        else:
+            batch.meta_info["fully_async/pad/num_padding_rows"] = 0
+
+        # Restore stashed ndarray meta_info fields onto the (possibly new)
+        # batch object. These are batch-global monitoring arrays (one entry
+        # per rollout), so they stay valid across pad.
+        if _stashed_meta:
+            batch.meta_info.update(_stashed_meta)
+
+        return batch
+
+    def _fit_compute_advantage(self, batch: DataProto) -> DataProto:
+        """Compute GRPO advantage on the final subset only, then scatter.
+
+        The batch at this point is the expanded+padded batch with mixed
+        ``trajectory_role`` rows. Running GRPO on the whole thing would
+        pollute group mean/std statistics with intermediate rows (which
+        share the same ``uid`` and ``reward`` as their final siblings),
+        collapsing advantage to zero.
+
+        We therefore:
+          1. Slice out the ``trajectory_role == "final"`` subset and run
+             the standard ``_fit_compute_advantage`` (parent class) on it.
+          2. Copy the resulting advantages/returns back into the full batch
+             at the same indices.
+          3. Scatter final-row advantages to sibling intermediate rows
+             (grouped by ``rollout_group_id``) and apply ``1 / T_rollout``
+             normalization so every rollout contributes equally to the loss.
+        """
+        import numpy as np  # local import to avoid polluting top-level namespace
+
+        nt = batch.non_tensor_batch or {}
+        roles = nt.get("trajectory_role")
+
+        # Fast path: no intermediate rows (e.g. rollouts all finished in one
+        # turn). Fall back to the standard advantage pipeline, followed only
+        # by the optional 1/T_rollout normalization.
+        if roles is None:
+            batch = super()._fit_compute_advantage(batch)
+            if bool(self.config.async_training.get("normalize_rollout_weight", True)):
+                batch = scatter_advantage_to_intermediate_and_normalize(batch, normalize_rollout_weight=True)
+            return batch
+
+        final_idx = np.where(np.asarray(roles) == "final")[0]
+        if len(final_idx) == 0:
+            # Degenerate case: pad-only batch. Skip advantage.
+            return batch
+
+        # ------------------------------------------------------------------
+        # (1) Slice the final-only subset while keeping row order stable.
+        # ------------------------------------------------------------------
+        final_subset = batch.select_idxs(torch.as_tensor(final_idx, dtype=torch.long))
+
+        # Transfer reward tensors the parent expects. ``_fit_compute_advantage``
+        # reads ``self.reward_tensor`` (set by ``_fit_compute_reward``) which
+        # has shape (len(batch_before_expand), response_length). We need to
+        # re-align it to the final subset: the first ``n_final`` rows of the
+        # expanded batch are exactly the original (pre-expansion) final rows,
+        # in the same order. ``final_idx`` recovers them.
+        saved_reward_tensor = self.reward_tensor
+        if self.reward_tensor is not None:
+            # reward_tensor was produced before expansion, so its rows align
+            # with the final rows now sitting at positions [0, n_final).
+            # ``final_idx`` should therefore be ``arange(n_final)`` in the
+            # canonical pipeline; we still index defensively in case
+            # expander reorders in the future.
+            if self.reward_tensor.shape[0] == len(final_subset):
+                reward_tensor_final = self.reward_tensor
+            else:
+                reward_tensor_final = self.reward_tensor[: len(final_subset)]
+            self.reward_tensor = reward_tensor_final
+
+        # ------------------------------------------------------------------
+        # (2) Run the standard advantage pipeline on the final subset.
+        # ------------------------------------------------------------------
+        final_subset = super()._fit_compute_advantage(final_subset)
+
+        # Restore original reward_tensor reference for any downstream hooks.
+        self.reward_tensor = saved_reward_tensor
+
+        # ------------------------------------------------------------------
+        # (3) Write the computed advantages/returns back into the full batch
+        #     (only on final rows). Intermediate rows remain untouched here;
+        #     ``scatter_advantage_to_intermediate_and_normalize`` will copy
+        #     from the final rows in the next step.
+        # ------------------------------------------------------------------
+        if "advantages" in final_subset.batch.keys():
+            if "advantages" not in batch.batch.keys():
+                batch.batch["advantages"] = torch.zeros(
+                    (len(batch), final_subset.batch["advantages"].shape[-1]),
+                    dtype=final_subset.batch["advantages"].dtype,
+                )
+            batch.batch["advantages"][final_idx] = final_subset.batch["advantages"]
+        if "returns" in final_subset.batch.keys():
+            if "returns" not in batch.batch.keys():
+                batch.batch["returns"] = torch.zeros_like(batch.batch["advantages"])
+            batch.batch["returns"][final_idx] = final_subset.batch["returns"]
+        # Bring along any other token-level fields the parent may have added
+        # (e.g. ``token_level_rewards``) so downstream metrics are consistent.
+        for extra_key in ("token_level_rewards", "token_level_scores"):
+            if extra_key in final_subset.batch.keys():
+                if extra_key not in batch.batch.keys():
+                    batch.batch[extra_key] = torch.zeros(
+                        (len(batch), final_subset.batch[extra_key].shape[-1]),
+                        dtype=final_subset.batch[extra_key].dtype,
+                    )
+                batch.batch[extra_key][final_idx] = final_subset.batch[extra_key]
+
+        # ------------------------------------------------------------------
+        # (4) Scatter final advantages to intermediate siblings and apply
+        #     1 / T_rollout normalization so every rollout contributes
+        #     equally under loss_agg_mode="token-mean".
+        # ------------------------------------------------------------------
+        normalize_rollout_weight = bool(self.config.async_training.get("normalize_rollout_weight", True))
+        batch = scatter_advantage_to_intermediate_and_normalize(
+            batch, normalize_rollout_weight=normalize_rollout_weight
+        )
+
+        return batch
+
     def _fit_update_local_step(self):
         time_str = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-        print(
-            f"[FullyAsyncTrainer] global_steps: {self.global_steps} "
-            f"local_trigger_step: {self.local_trigger_step} "
-            f"trigger_parameter_sync_step: {self.trigger_parameter_sync_step} "
-            f"{time_str}"
+        logger.info(
+            "[FullyAsyncTrainer] global_steps: %d local_trigger_step: %d trigger_parameter_sync_step: %s %s",
+            self.global_steps,
+            self.local_trigger_step,
+            self.trigger_parameter_sync_step,
+            time_str,
         )
         if self.local_trigger_step < self.trigger_parameter_sync_step:
             self.local_trigger_step += 1
@@ -536,10 +925,10 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
 
         with marked_timer("timing_s/param_sync", self.timing_raw):
             await self.checkpoint_manager.update_weights(global_steps=self.current_param_version)
-        print(
-            f"[FullyAsyncTrainer] _fit_update_weights, "
-            f"timing_s/param_sync: {self.timing_raw['timing_s/param_sync']:.4f} seconds "
-            f"self.current_param_version: {self.current_param_version}"
+        logger.info(
+            "[FullyAsyncTrainer] _fit_update_weights, timing_s/param_sync: %.4f seconds self.current_param_version: %s",
+            self.timing_raw["timing_s/param_sync"],
+            self.current_param_version,
         )
 
         # Reset staleness in rollouter
@@ -581,24 +970,27 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
     async def _validate_process(self):
         """Run trainer-side validation using async rollout manager"""
         if self.config.async_training.use_trainer_do_validate:
-            print("[FullyAsyncTrainer] _validate_process")
+            logger.info("[FullyAsyncTrainer] _validate_process")
             from verl.utils.profiler import marked_timer
 
             # Wake up rollouter replicas and sync weights
-            print("[FullyAsyncTrainer] wake up replicas before validation")
+            logger.info("[FullyAsyncTrainer] wake up replicas before validation")
             await self.colocate_checkpoint_manager.update_weights(global_steps=self.current_param_version)
 
             with marked_timer("trainer/validate_time", self.timing_raw):
                 train_val_metrics = self._validate(True)
 
             # Sleep rollouter replicas to free GPU memory for validation
-            print("[FullyAsyncTrainer] sleep replicas after validation")
+            logger.info("[FullyAsyncTrainer] sleep replicas after validation")
             await self.colocate_checkpoint_manager.sleep_replicas()
 
-            print(f"[FullyAsyncTrainer] validate timing: {self.timing_raw['trainer/validate_time']}")
+            logger.info(
+                "[FullyAsyncTrainer] validate timing: %s",
+                self.timing_raw["trainer/validate_time"],
+            )
             return train_val_metrics
         else:
-            print("[FullyAsyncTrainer] _validate_process without async_rollout_manager")
+            logger.info("[FullyAsyncTrainer] _validate_process without async_rollout_manager")
             return None
 
     async def _fit_validate(self, val_before_train=False):
@@ -630,16 +1022,19 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
                 new_metrics = self._merge_validation_results(train_val_metrics, val_metrics.metrics)
             if new_metrics:
                 self.logger.log(data=new_metrics, step=self.current_param_version)
-                pprint(
-                    f"[FullyAsyncTrainer] parameter version: {self.current_param_version} "
-                    f"Validation metrics: {new_metrics}, timing: {self.timing_raw['timing_s/merge_val']}"
+                logger.info(
+                    "[FullyAsyncTrainer] parameter version: %s Validation metrics: %s, timing: %s",
+                    self.current_param_version,
+                    new_metrics,
+                    self.timing_raw["timing_s/merge_val"],
                 )
         else:
             if val_metrics.metrics:
                 self.logger.log(data=val_metrics.metrics, step=self.current_param_version)
-                pprint(
-                    f"[FullyAsyncTrainer] parameter version: {self.current_param_version} "
-                    f"Validation metrics: {val_metrics.metrics}"
+                logger.info(
+                    "[FullyAsyncTrainer] parameter version: %s Validation metrics: %s",
+                    self.current_param_version,
+                    val_metrics.metrics,
                 )
         self.logger.log(data=val_metrics.timing_raw, step=self.current_param_version)
 
@@ -681,7 +1076,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             force or self.current_param_version % self.config.trainer.save_freq == 0 or esi_close_to_expiration
         ):
             if esi_close_to_expiration:
-                print("Force saving checkpoint: ESI instance expiration approaching.")
+                logger.info("Force saving checkpoint: ESI instance expiration approaching.")
             with marked_timer("save_checkpoint", timing_raw, color="green"):
                 # sleep replicas to avoid OOM during checkpoint saving
                 self._save_checkpoint()
@@ -709,7 +1104,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             self.config.trainer.default_local_dir, f"global_step_{self.current_param_version}"
         )
 
-        print(f"[FullyAsyncTrainer] local_global_step_folder: {local_global_step_folder}")
+        logger.info("[FullyAsyncTrainer] local_global_step_folder: %s", local_global_step_folder)
         actor_local_path = os.path.join(local_global_step_folder, "actor")
 
         actor_remote_path = (
@@ -722,9 +1117,9 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
 
         remove_previous_ckpt_in_save = self.config.trainer.get("remove_previous_ckpt_in_save", False)
         if remove_previous_ckpt_in_save:
-            print(
-                "[FullyAsyncTrainer] Warning: remove_previous_ckpt_in_save is deprecated,"
-                + " set max_actor_ckpt_to_keep=1 and max_critic_ckpt_to_keep=1 instead"
+            logger.warning(
+                "[FullyAsyncTrainer] remove_previous_ckpt_in_save is deprecated, "
+                "set max_actor_ckpt_to_keep=1 and max_critic_ckpt_to_keep=1 instead"
             )
         max_actor_ckpt_to_keep = (
             self.config.trainer.get("max_actor_ckpt_to_keep", None) if not remove_previous_ckpt_in_save else 1
@@ -788,16 +1183,17 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
                 if not os.path.isabs(global_step_folder):
                     working_dir = os.getcwd()
                     global_step_folder = os.path.join(working_dir, global_step_folder)
-        print(f"[FullyAsyncTrainer] Load from checkpoint folder: {global_step_folder}")
+        logger.info("[FullyAsyncTrainer] Load from checkpoint folder: %s", global_step_folder)
         # set global step
         self.current_param_version = int(global_step_folder.split("global_step_")[-1])
         self.global_steps = self.current_param_version * self.trigger_parameter_sync_step + 1
         self.last_ckpt_version = self.current_param_version
-        print(
-            f"[FullyAsyncTrainer] Setting global step to {self.global_steps}, "
-            f"current_param_version to {self.current_param_version}"
+        logger.info(
+            "[FullyAsyncTrainer] Setting global step to %d, current_param_version to %s",
+            self.global_steps,
+            self.current_param_version,
         )
-        print(f"[FullyAsyncTrainer] Resuming from  {global_step_folder}")
+        logger.info("[FullyAsyncTrainer] Resuming from %s", global_step_folder)
 
         actor_path = os.path.join(global_step_folder, "actor")
         critic_path = os.path.join(global_step_folder, str(Role.Critic))

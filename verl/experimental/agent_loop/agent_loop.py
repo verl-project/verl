@@ -391,6 +391,11 @@ class AgentLoopWorker:
         )
 
         # Load custom agent loop implementations from config path
+        # Expose tokenizer on server_manager so that @rollout_trace_op's
+        # add_token2text can decode prompt_ids / token_ids into readable text.
+        if hasattr(self, "server_manager") and self.server_manager is not None:
+            self.server_manager.tokenizer = self.tokenizer
+
         agent_loop_config_path = self.rollout_config.agent.agent_loop_config_path
         if agent_loop_config_path:
             resolved_path = resolve_config_path(agent_loop_config_path)
@@ -478,18 +483,110 @@ class AgentLoopWorker:
         )
 
         tasks = []
+        # Limit concurrency to avoid exhausting desktop-env container pools.
+        # Training rollouts are gated by FullyAsyncRollouter.max_concurrent_samples,
+        # but generate_sequences (used by validation) launches all samples at once.
+        # The semaphore caps the number of concurrent agent loops (each holds an
+        # env session). Falls back to batch size when running on a single worker.
+        max_concurrent = len(batch)
+        try:
+            user_cap = int(self.config.async_training.get("max_concurrent_rollouts", 0) or 0)
+            if user_cap > 0:
+                max_concurrent = min(max_concurrent, user_cap)
+        except Exception:
+            pass
+        sem = asyncio.Semaphore(max_concurrent)
+
+        async def _run_with_semaphore(coro):
+            async with sem:
+                return await coro
+
         for i in range(len(batch)):
             trace_this_sample = i in traced_indices
             kwargs = {k: v[i] for k, v in batch.non_tensor_batch.items()}
             tasks.append(
                 asyncio.create_task(
-                    self._run_agent_loop(sampling_params, trajectory_info[i], trace=trace_this_sample, **kwargs)
+                    _run_with_semaphore(
+                        self._run_agent_loop(sampling_params, trajectory_info[i], trace=trace_this_sample, **kwargs)
+                    )
                 )
             )
-        outputs = await asyncio.gather(*tasks)
+        # ``return_exceptions=True``: a bug in a single rollout task must not
+        # abort the whole batch. Individual exceptions are logged (with
+        # traceback + timestamp) and treated as a failed rollout so the
+        # filtering logic below can drop them like any other ``None`` result.
+        raw_outputs = await asyncio.gather(*tasks, return_exceptions=True)
+
+        outputs = []
+        n_exceptions = 0
+        for idx, o in enumerate(raw_outputs):
+            if isinstance(o, BaseException):
+                n_exceptions += 1
+                # Extract just the innermost frame (file:line) where the
+                # exception was actually raised, enough to locate real bugs
+                # without dumping the full stack.
+                tb = o.__traceback__
+                while tb is not None and tb.tb_next is not None:
+                    tb = tb.tb_next
+                if tb is not None:
+                    where = f"{os.path.basename(tb.tb_frame.f_code.co_filename)}:{tb.tb_lineno}"
+                else:
+                    where = "unknown"
+                logger.error(
+                    "[POTENTIAL ERROR][AgentLoopWorker][ROLLOUT_EXCEPTION] "
+                    "sample_index=%s step=%s rollout_n=%s validate=%s at=%s err=%r",
+                    trajectory_info[idx].get("sample_index"),
+                    trajectory_info[idx].get("step"),
+                    trajectory_info[idx].get("rollout_n"),
+                    trajectory_info[idx].get("validate"),
+                    where,
+                    o,
+                )
+                outputs.append(None)
+            else:
+                outputs.append(o)
+
+        # Filter out rollouts that the agent loop discarded (returned None).
+        # See ``_run_agent_loop`` above; failing rollouts (fatal tool error,
+        # env crash, etc.) intentionally short-circuit there, so downstream
+        # batching must tolerate a shrunken ``inputs`` list.
+        n_total = len(outputs)
+        valid_indices = [i for i, o in enumerate(outputs) if o is not None]
+        valid_outputs = [outputs[i] for i in valid_indices]
+        n_valid = len(valid_outputs)
+        n_dropped = n_total - n_valid
+        if n_dropped > 0:
+            logger.error(
+                "[POTENTIAL ERROR][AgentLoopWorker][DROPPED_ROLLOUTS] "
+                "dropped=%d/%d (exceptions=%d, agent_returned_none=%d)",
+                n_dropped,
+                n_total,
+                n_exceptions,
+                n_dropped - n_exceptions,
+            )
+        if n_valid == 0:
+            # Every rollout in this batch failed. Return an empty DataProto
+            # so the caller can skip this chunk instead of crashing training
+            # on transient env-side issues (e.g. desktop-env pool exhaustion).
+            logger.error(
+                "[POTENTIAL ERROR][AgentLoopWorker][ALL_ROLLOUTS_FAILED] "
+                "all %d rollouts discarded in this batch; returning empty DataProto",
+                n_total,
+            )
+            empty = DataProto()
+            empty.meta_info["metrics"] = []
+            empty.meta_info["all_rollouts_failed"] = True
+            return empty
+
+        # Re-slice the input non_tensor_batch to keep row alignment with the
+        # surviving outputs. Without this, ``_postprocess`` would mix
+        # position-0 non_tensor fields with a position-2 output.
+        filtered_non_tensor_batch = {k: v[valid_indices] for k, v in batch.non_tensor_batch.items()}
 
         output = self._postprocess(
-            outputs, input_non_tensor_batch=batch.non_tensor_batch, validate=batch.meta_info.get("validate", False)
+            valid_outputs,
+            input_non_tensor_batch=filtered_non_tensor_batch,
+            validate=batch.meta_info.get("validate", False),
         )
         return output
 
@@ -525,7 +622,24 @@ class AgentLoopWorker:
                 data_config=DictConfigWrap(self.config.data),
                 tools=ToolListWrap(self.tools),
             )
-            output: AgentLoopOutput = await agent_loop.run(sampling_params, **kwargs)
+            output: AgentLoopOutput = await agent_loop.run(sampling_params, trajectory_info=trajectory, **kwargs)
+            if output is None:
+                logger.error(
+                    "[POTENTIAL ERROR][AgentLoopWorker][RUN_RETURNED_NONE] agent=%s "
+                    "sample_index=%s step=%s rollout_n=%s validate=%s",
+                    agent_name,
+                    trajectory.get("sample_index"),
+                    trajectory.get("step"),
+                    trajectory.get("rollout_n"),
+                    trajectory.get("validate"),
+                )
+                # The agent loop explicitly discarded this rollout (e.g.
+                # fatal tool error, environment crash). Short-circuit here
+                # instead of feeding ``None`` into ``_agent_loop_postprocess``
+                # which would dereference ``output.extra_fields`` and raise
+                # ``AttributeError: 'NoneType' object has no attribute ...``.
+                # ``_postprocess`` below filters these out before batching.
+                return None
             return await self._agent_loop_postprocess(output, trajectory["validate"], **kwargs)
 
     async def _agent_loop_postprocess(self, output, validate, **kwargs) -> _InternalAgentLoopOutput:
@@ -1007,13 +1121,32 @@ class AgentLoopManager:
                 for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=True)
             ]
         )
-        output = DataProto.concat(outputs)
+
+        # Filter out chunks in which every rollout failed (env-level).
+        # Workers signal this with ``all_rollouts_failed`` + empty batch.
+        non_empty_outputs = [o for o in outputs if not o.meta_info.get("all_rollouts_failed", False)]
+        n_failed_chunks = len(outputs) - len(non_empty_outputs)
+        if n_failed_chunks > 0:
+            logger.warning(
+                "[AgentLoopManager] skipped %d/%d chunks where all rollouts failed",
+                n_failed_chunks,
+                len(outputs),
+            )
+        if not non_empty_outputs:
+            # Every worker's chunk failed. Return an empty DataProto so the
+            # caller (e.g. validator) can decide to skip this step instead
+            # of crashing the whole training run.
+            empty = DataProto()
+            empty.meta_info = {"timing": {}, "all_rollouts_failed": True}
+            return empty
+
+        output = DataProto.concat(non_empty_outputs)
 
         # calculate performance metrics
-        metrics = [output.meta_info.pop("metrics") for output in outputs]  # List[List[Dict[str, str]]]
+        metrics = [o.meta_info.pop("metrics") for o in non_empty_outputs]  # List[List[Dict[str, str]]]
         timing = self._performance_metrics(metrics, output)
 
-        output.meta_info = {"timing": timing, **outputs[0].meta_info}
+        output.meta_info = {"timing": timing, **non_empty_outputs[0].meta_info}
         return output
 
     def _performance_metrics(self, metrics: list[list[dict[str, str]]], output: DataProto) -> dict[str, float]:

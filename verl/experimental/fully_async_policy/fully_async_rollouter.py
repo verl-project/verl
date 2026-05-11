@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import asyncio
+import logging
 import multiprocessing
 import os
 import time
@@ -40,6 +41,9 @@ from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.profiler import marked_timer
 from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.rollout.llm_server import LLMServerManager
+
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 class FullyAsyncAgentLoopManager(AgentLoopManager):
@@ -123,7 +127,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
 
         # ==================== fully async config ====================
 
-        print("[FullyAsyncRollouter] Creating datasets...")
+        logger.info("[FullyAsyncRollouter] Creating datasets...")
         from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler
         from verl.utils.dataset.rl_dataset import collate_fn
 
@@ -148,21 +152,25 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
             rollout_gpus = config.rollout.nnodes * config.rollout.n_gpus_per_node
             train_gpus = config.trainer.nnodes * config.trainer.n_gpus_per_node
             total_gpus = rollout_gpus + train_gpus
-            print(f"[FullyAsyncRollouter] split before val_dataset total len: {len(val_dataset)}")
+            logger.info("[FullyAsyncRollouter] split before val_dataset total len: %d", len(val_dataset))
             split_dataset = val_dataset.split(total_gpus)
             rollout_val_dataset0 = split_dataset[:rollout_gpus]
             from torch.utils.data import ConcatDataset
 
             val_dataset = ConcatDataset(rollout_val_dataset0)
-            print(f"[FullyAsyncRollouter] split after val_dataset total len: {len(val_dataset)}")
-        print(f"[FullyAsyncRollouter] Rollouter _create_dataloader...\n{train_dataset}\n{val_dataset}")
+            logger.info("[FullyAsyncRollouter] split after val_dataset total len: %d", len(val_dataset))
+        logger.info(
+            "[FullyAsyncRollouter] Rollouter _create_dataloader...\n%s\n%s",
+            train_dataset,
+            val_dataset,
+        )
 
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
 
         self.total_rollout_steps = len(self.train_dataloader) * self.config.trainer.total_epochs
         if self.config.rollout.total_rollout_steps is not None:
             self.total_rollout_steps = min(self.config.rollout.total_rollout_steps, self.total_rollout_steps)
-        print(f"[FullyAsyncRollouter] Total rollout steps: {self.total_rollout_steps}")
+        logger.info("[FullyAsyncRollouter] Total rollout steps: %d", self.total_rollout_steps)
         self.total_train_steps = None
 
         # Rollouter parameter configuration
@@ -237,15 +245,39 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
 
             self.max_concurrent_samples = len(self.llm_server_manager.get_replicas()) * 16
             self.max_concurrent_samples = min(self.max_concurrent_samples, self.max_required_samples)
+            # Optional user-provided hard cap on in-flight rollouts, e.g. to
+            # respect an external resource limit such as a desktop-env service
+            # that only allows N concurrent sessions. 0 or unset = no extra cap.
+            #
+            # NOTE: `max_concurrent_samples` is prompt-level (one "sample" == one
+            # RolloutSample == one prompt expanded to n rollouts), while `user_cap`
+            # is the real rollout-level concurrency the external service sees
+            # (each rollout occupies one desktop session). Convert by dividing
+            # by rollout.n so the actual in-flight rollouts stay under user_cap.
+            user_cap = int(self.config.async_training.get("max_concurrent_rollouts", 0) or 0)
+            if user_cap > 0:
+                rollout_n = int(self.config.actor_rollout_ref.rollout.get("n", 1) or 1)
+                sample_cap = max(1, user_cap // rollout_n)
+                self.max_concurrent_samples = min(self.max_concurrent_samples, sample_cap)
             self.max_queue_size = self.max_required_samples
 
-            print(
-                f"[FullyAsyncRollouter] required_samples : {self.required_samples} "
-                f"max_required_samples: {self.max_required_samples} "
-                f"max_queue_size: {self.max_queue_size} "
-                f"total_train_steps: {self.total_train_steps} "
-                f"total_rollout_steps: {self.total_rollout_steps} "
-                f"max_concurrent_samples: {self.max_concurrent_samples} "
+            logger.info(
+                "[FullyAsyncRollouter] required_samples : %d "
+                "max_required_samples: %s "
+                "max_queue_size: %s "
+                "total_train_steps: %s "
+                "total_rollout_steps: %s "
+                "max_concurrent_samples: %s "
+                "user_cap(rollout-level): %d "
+                "rollout.n: %d ",
+                self.required_samples,
+                self.max_required_samples,
+                self.max_queue_size,
+                self.total_train_steps,
+                self.total_rollout_steps,
+                self.max_concurrent_samples,
+                user_cap,
+                int(self.config.actor_rollout_ref.rollout.get("n", 1) or 1),
             )
 
     def get_replicas(self):
@@ -282,10 +314,10 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
             timing_raw["fully_async/rollouter/version_time"] = rollout_version_time
             timing_raw["fully_async/rollouter/idle_ratio"] = idle_ratio
 
-            print(
-                f"[FullyAsyncRollouter][Public][reset_staleness] "
-                f"reset staleness_samples to: {self.staleness_samples} "
-                f"idle_ratio: {timing_raw['fully_async/rollouter/idle_ratio']:.4f}"
+            logger.info(
+                "[FullyAsyncRollouter][Public][reset_staleness] reset staleness_samples to: %d idle_ratio: %.4f",
+                self.staleness_samples,
+                timing_raw["fully_async/rollouter/idle_ratio"],
             )
             self.step_start_time = time.time()
 
@@ -336,13 +368,13 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         async with self.dataloader_lock:
             dataloader_state_dict = self.train_dataloader.state_dict()
         torch.save(dataloader_state_dict, dataloader_local_path)
-        print(f"[FullyAsyncRollouter] Saved dataloader checkpoint to {dataloader_local_path}")
+        logger.info("[FullyAsyncRollouter] Saved dataloader checkpoint to %s", dataloader_local_path)
 
     def load_checkpoint(self):
         """Load checkpoint including dataloader state based on resume mode"""
 
         if self.config.trainer.resume_mode == "disable":
-            print("[FullyAsyncRollouter] Resume mode is disabled, starting from scratch")
+            logger.info("[FullyAsyncRollouter] Resume mode is disabled, starting from scratch")
             return 0
 
         # Determine checkpoint folder path
@@ -359,7 +391,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         # Find and validate global_step_folder based on resume mode
         if self.config.trainer.resume_mode == "auto":
             if global_step_folder is None:
-                print("[FullyAsyncRollouter] Training from scratch (no checkpoint found)")
+                logger.info("[FullyAsyncRollouter] Training from scratch (no checkpoint found)")
                 return 0
         elif self.config.trainer.resume_mode == "resume_path":
             assert isinstance(self.config.trainer.resume_from_path, str), (
@@ -375,25 +407,25 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         else:
             raise ValueError(f"[FullyAsyncRollouter] Unknown resume_mode: {self.config.trainer.resume_mode}")
 
-        print(f"[FullyAsyncRollouter] Loading checkpoint from: {global_step_folder}")
+        logger.info("[FullyAsyncRollouter] Loading checkpoint from: %s", global_step_folder)
 
         # Extract and set global step
         trainer_global_steps = int(global_step_folder.split("global_step_")[-1])
         self.global_steps = (
             trainer_global_steps * self.required_samples * self.config.async_training.trigger_parameter_sync_step + 1
         )
-        print(f"[FullyAsyncRollouter] Setting global_steps to {self.global_steps}")
+        logger.info("[FullyAsyncRollouter] Setting global_steps to %d", self.global_steps)
 
         # Load dataloader state
         dataloader_local_path = os.path.join(global_step_folder, "data.pt")
         if os.path.exists(dataloader_local_path):
             dataloader_state_dict = torch.load(dataloader_local_path, weights_only=False)
             self.train_dataloader.load_state_dict(dataloader_state_dict)
-            print(f"[FullyAsyncRollouter] Loaded dataloader state from {dataloader_local_path}")
+            logger.info("[FullyAsyncRollouter] Loaded dataloader state from %s", dataloader_local_path)
         else:
-            print(
-                f"[FullyAsyncRollouter] Warning: No dataloader state found at {dataloader_local_path}, "
-                f"will start from scratch"
+            logger.warning(
+                "[FullyAsyncRollouter] No dataloader state found at %s, will start from scratch",
+                dataloader_local_path,
             )
 
     def _validate_config(self):
@@ -515,10 +547,10 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
 
             # Check if have reached the last step
             if self.global_steps >= self.total_rollout_steps:
-                print(
-                    f"[FullyAsyncRollouter][Feed] "
-                    f"Maximum count has been reached, stop adding new samples: "
-                    f"{self.global_steps} >= {self.total_rollout_steps}"
+                logger.info(
+                    "[FullyAsyncRollouter][Feed] Maximum count has been reached, stop adding new samples: %d >= %d",
+                    self.global_steps,
+                    self.total_rollout_steps,
                 )
                 break
 
@@ -526,7 +558,10 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
 
         # End signal
         await self.pending_queue.put(None)
-        print(f"[FullyAsyncRollouter][Feed] Sample addition is complete, {self.global_steps} samples have been added")
+        logger.info(
+            "[FullyAsyncRollouter][Feed] Sample addition is complete, %d samples have been added",
+            self.global_steps,
+        )
 
     async def _processor_worker(self):
         """
@@ -534,7 +569,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         """
         while True:
             if self.paused or await self._should_pause_generation():
-                print(
+                logger.info(
                     "[FullyAsyncRollouter][Processor] Received pause signal, waiting for remaining tasks to return..."
                 )
                 async with self.lock:
@@ -558,10 +593,11 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
                                     self.active_tasks.discard(task)
                                     await task
                         if resume_future in done:
-                            print(
+                            logger.info(
                                 "[FullyAsyncRollouter][Processor] "
                                 "Drain interrupted by resume signal, resuming generation early "
-                                f"(active tasks remaining: {len(self.active_tasks)})"
+                                "(active tasks remaining: %d)",
+                                len(self.active_tasks),
                             )
                             break
 
@@ -580,7 +616,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
             self.staleness_samples += 1
 
             if rollout_sample is None:
-                print(
+                logger.info(
                     "[FullyAsyncRollouter][Processor] Received end signal, waiting for remaining tasks to complete..."
                 )
                 while self.active_tasks:
@@ -614,10 +650,50 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
                 )
 
     async def _process_single_sample_streaming(self, rollout_sample: RolloutSample):
-        """Process a single sample streamingly"""
+        """Process a single sample streamingly.
+
+        ``staleness_samples`` is incremented in ``_processor_worker`` the moment
+        a sample is taken off ``pending_queue``. Its physical meaning is
+        "samples currently in flight or sitting in the MQ for the trainer".
+        So whenever this coroutine ends WITHOUT the sample reaching the MQ
+        (env failure, all rollouts discarded, MQ put rejected, ...), we must
+        decrement ``staleness_samples`` immediately. Otherwise dropped
+        samples accumulate against ``max_required_samples`` and the rollouter
+        can wedge into ``paused`` even though no real samples are in flight.
+        """
         # Calling asynchronous generation methods
-        ret = await self.async_rollout_manager.generate_sequences_single(rollout_sample.full_batch)
+        try:
+            ret = await self.async_rollout_manager.generate_sequences_single(rollout_sample.full_batch)
+        except Exception as exc:
+            # Entire sample failed (e.g. every rollout hit a fatal tool error
+            # and was discarded). Skip put_sample so the downstream trainer
+            # does not see an empty/inconsistent batch. Do NOT re-raise: a
+            # single failed sample must not kill the whole rollouter.
+            logger.error(
+                "[POTENTIAL ERROR][FullyAsyncRollouter] _process_single_sample_streaming dropped "
+                "sample_id=%s due to generate_sequences_single failure: %r",
+                rollout_sample.sample_id,
+                exc,
+            )
+            self.dropped_stale_samples += 1
+            self.processed_sample_count += 1
+            self.staleness_samples = max(0, self.staleness_samples - 1)
+            return
         rollout_sample.full_batch = ret
+
+        # If all rollouts in this sample were discarded (e.g. env creation
+        # failures), do not put the empty batch into the message queue.
+        if ret.batch is None or len(ret) == 0 or ret.meta_info.get("all_rollouts_failed", False):
+            logger.error(
+                "[POTENTIAL ERROR][FullyAsyncRollouter] _process_single_sample_streaming dropped "
+                "sample_id=%s: empty batch (all rollouts failed)",
+                rollout_sample.sample_id,
+            )
+            self.dropped_stale_samples += 1
+            self.processed_sample_count += 1
+            self.staleness_samples = max(0, self.staleness_samples - 1)
+            return
+
         rollout_sample.full_batch.non_tensor_batch["uid"] = np.array(
             [f"uid_{rollout_sample.sample_id}"] * len(rollout_sample.full_batch), dtype=object
         )
@@ -629,7 +705,11 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         if success:
             self.total_generated_samples += 1
         else:
+            # MQ rejected the sample (e.g. queue full + reject policy). The
+            # sample never reaches the trainer, so it must not keep occupying
+            # a staleness slot.
             self.dropped_stale_samples += 1
+            self.staleness_samples = max(0, self.staleness_samples - 1)
         self.processed_sample_count += 1
 
     async def _streaming_generation_main(self):
@@ -639,7 +719,10 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
             await self._init_async_rollout_manager()
 
         # Start the streaming loop
-        print(f"[FullyAsyncRollouter] Start streaming mode, maximum concurrent samples: {self.max_concurrent_samples}")
+        logger.info(
+            "[FullyAsyncRollouter] Start streaming mode, maximum concurrent samples: %s",
+            self.max_concurrent_samples,
+        )
 
         # Start sample feed coroutine, streaming process coroutine
         self.feed_task = safe_create_task(self._feed_samples(), name="feed_task")
@@ -660,18 +743,18 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
             if self.feed_task not in done:
                 raise RuntimeError("Processor task exited prematurely")
 
-            print("[FullyAsyncRollouter] Sample feed completed")
+            logger.info("[FullyAsyncRollouter] Sample feed completed")
 
             # Wait for streaming to complete
             await self.processor_task
-            print("[FullyAsyncRollouter] Streaming process completed")
+            logger.info("[FullyAsyncRollouter] Streaming process completed")
 
             await self.pending_queue.join()
-            print("[FullyAsyncRollouter] pending_queue joined")
+            logger.info("[FullyAsyncRollouter] pending_queue joined")
 
-        except Exception as e:
-            print(f"[FullyAsyncRollouter] Streaming process exception: {e}")
-            raise e
+        except Exception:
+            logger.exception("[FullyAsyncRollouter] Streaming process exception")
+            raise
 
         finally:
             if self.feed_task and not self.feed_task.done():
@@ -697,7 +780,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         Main async fit method that coordinates all coroutines
         """
 
-        print("[FullyAsyncRollouter] Starting FullyAsyncRollouter...")
+        logger.info("[FullyAsyncRollouter] Starting FullyAsyncRollouter...")
 
         if self.message_queue_client is None:
             raise ValueError("MessageQueue client not set. Call set_message_queue_client() first.")
@@ -715,8 +798,8 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         try:
             # Run build and monitoring tasks concurrently
             await asyncio.gather(generation_task, monitor_task, return_exceptions=True)
-        except Exception as e:
-            print(f"[FullyAsyncRollouter] Asynchronous task execution error: {e}")
+        except Exception:
+            logger.exception("[FullyAsyncRollouter] Asynchronous task execution error")
         finally:
             if not generation_task.done():
                 generation_task.cancel()
@@ -726,7 +809,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
             # Wait for the task to complete
             await asyncio.gather(generation_task, monitor_task, return_exceptions=True)
 
-        print("[FullyAsyncRollouter] Rollouter fit completed")
+        logger.info("[FullyAsyncRollouter] Rollouter fit completed")
 
     async def _async_monitor_loop(self):
         """
@@ -747,14 +830,14 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
             current_time = time.time()
             if current_time - last_stats_time >= stats_interval:
                 stats = await self.get_statistics()
-                print(f"[FullyAsyncRollouter][MonitorLoop][Statistics] {pformat(stats)}")
+                logger.info("[FullyAsyncRollouter][MonitorLoop][Statistics] %s", pformat(stats))
                 last_stats_time = current_time
 
             # Trigger rollout recovery
             if self.paused and not await self._should_pause_generation():
                 async with self.lock:
                     self.paused = False
-                    print("[FullyAsyncRollouter][ShouldPause] resume rollouter.")
+                    logger.info("[FullyAsyncRollouter][ShouldPause] resume rollouter.")
                     self._resume_event.set()
 
     async def _should_pause_generation(self) -> bool:
@@ -764,18 +847,19 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
 
         if queue_size >= self.max_queue_size:
             if not self.paused:
-                print(
-                    f"[FullyAsyncRollouter][ShouldPause]  "
-                    f"due to full queue: size={queue_size}, max={self.max_queue_size}"
+                logger.info(
+                    "[FullyAsyncRollouter][ShouldPause] due to full queue: size=%d, max=%s",
+                    queue_size,
+                    self.max_queue_size,
                 )
             return True
 
         if self.staleness_samples >= self.max_required_samples:
             if not self.paused:
-                print(
-                    "[FullyAsyncRollouter][ShouldPause] "
-                    f"due to "
-                    f"staleness_samples {self.staleness_samples} >= max_required_samples {self.max_required_samples} "
+                logger.info(
+                    "[FullyAsyncRollouter][ShouldPause] due to staleness_samples %d >= max_required_samples %s ",
+                    self.staleness_samples,
+                    self.max_required_samples,
                 )
             return True
 

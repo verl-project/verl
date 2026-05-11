@@ -19,6 +19,7 @@ This trainer supports model-agonistic model initialization with huggingface
 """
 
 import json
+import logging
 import os
 import uuid
 from collections import defaultdict
@@ -71,6 +72,9 @@ from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.config import DistillationConfig, EngineConfig
 from verl.workers.rollout.llm_server import LLMServerManager
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
+
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, kl_penalty="kl"):
@@ -538,7 +542,8 @@ class RayPPOTrainer:
             ground_truths = [
                 item.non_tensor_batch.get("reward_model", {}).get("ground_truth", None) for item in test_batch
             ]
-            sample_gts.extend(ground_truths)
+            # NOTE: ground_truths will be extended AFTER rollout-drop alignment
+            # below, so that it stays consistent with test_batch row count.
 
             test_gen_batch = self._get_gen_batch(test_batch)
             test_gen_batch.meta_info = {
@@ -556,6 +561,16 @@ class RayPPOTrainer:
             test_gen_batch_padded, pad_size = pad_dataproto_to_divisor(test_gen_batch, size_divisor)
             test_output_gen_batch_padded = self.async_rollout_manager.generate_sequences(test_gen_batch_padded)
 
+            if test_output_gen_batch_padded.meta_info.get("all_rollouts_failed", False):
+                # Every rollout worker reported a fully-failed chunk (e.g.
+                # desktop-env pool exhausted). Skip this validation batch
+                # rather than crashing training on a transient env issue.
+                logger.warning(
+                    "[POTENTIAL ERROR][RayPPOTrainer._validate] skipping validation batch: "
+                    "all rollouts failed (see rollout-side logs)"
+                )
+                continue
+
             if self.use_rm and "rm_scores" not in test_output_gen_batch_padded.batch.keys():
                 # for colocate reward models, we need to sleep rollout model
                 # to spare GPU memory for reward model
@@ -568,6 +583,29 @@ class RayPPOTrainer:
 
             # unpad
             test_output_gen_batch = unpad_dataproto(test_output_gen_batch_padded, pad_size=pad_size)
+
+            # Some rollouts may have been dropped (e.g. env creation failures).
+            # Align test_batch to the surviving rows so union() does not crash.
+            actual_output_size = len(test_output_gen_batch)
+            if actual_output_size != len(test_batch):
+                logger.warning(
+                    "[POTENTIAL ERROR][RayPPOTrainer._validate] output size (%d) != "
+                    "input size (%d), aligning input to match surviving rollouts",
+                    actual_output_size,
+                    len(test_batch),
+                )
+                out_uids = set()
+                if "uid" in test_output_gen_batch.non_tensor_batch:
+                    out_uids = set(test_output_gen_batch.non_tensor_batch["uid"])
+                if out_uids and "uid" in test_batch.non_tensor_batch:
+                    keep_idx = [i for i, u in enumerate(test_batch.non_tensor_batch["uid"]) if u in out_uids]
+                else:
+                    keep_idx = list(range(actual_output_size))
+                idx_tensor = torch.tensor(keep_idx, dtype=torch.long)
+                test_batch = test_batch.select_idxs(idx_tensor)
+                ground_truths = [ground_truths[i] for i in keep_idx]
+
+            sample_gts.extend(ground_truths)
 
             print("validation generation end")
 
@@ -632,6 +670,12 @@ class RayPPOTrainer:
                 "sample_turns": sample_turns,
                 "reward_extra_infos_dict": reward_extra_infos_dict,
             }
+        if not data_source_lst:
+            # Every validation iteration was skipped (e.g. desktop-env pool
+            # exhausted for the entire val set). Return empty metrics so the
+            # caller can log that validation was skipped without crashing.
+            logger.warning("[RayPPOTrainer._validate] all validation iterations were skipped; returning empty metrics")
+            return {}
         data_sources = np.concatenate(data_source_lst, axis=0)
         return self._val_metrics_update(data_sources, sample_uids, reward_extra_infos_dict, sample_turns)
 
@@ -856,10 +900,8 @@ class RayPPOTrainer:
             config=self.config, worker_group=self.actor_rollout_wg, rollout_resource_pool=actor_rollout_resource_pool
         )
 
-        # if enable_agent_reward_loop, we directly pass reward_loop_workers to agent loop manager
-        # to stream reward computation with actor rollout
-        # To stream teacher computation with actor rollout, we instead pass the full manager so that the
-        # teacher loop workers can sleep/wake together with rollout workers
+        # If enable_agent_reward_loop, pass reward_loop_workers to the agent loop manager
+        # so reward computation can stream alongside actor rollout.
         reward_loop_worker_handles = self.reward_loop_manager.reward_loop_workers if enable_agent_reward_loop else None
         self.async_rollout_manager = AgentLoopManager.create(
             config=self.config,

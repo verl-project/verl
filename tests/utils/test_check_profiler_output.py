@@ -69,7 +69,7 @@ class ProfilerChecker:
                 # NPU search pattern: match ascend subdirectory under stage
                 search_pattern=os.path.join(self.profiler_dir, "{stage}", "*_ascend_*"),
                 # NPU: rollout requires >1 dir, others require exactly 1 dir
-                dir_count_validator=lambda stage, dirs: (len(dirs) > 1 if stage == "*_rollout_*" else len(dirs) == 1),
+                dir_count_validator=lambda stage, dirs: len(dirs) > 1 if stage == "*_rollout_*" else len(dirs) == 1,
                 # NPU: PROF_* subdirectory must exist and be a valid directory
                 prof_validator=lambda d: (
                     len(glob.glob(os.path.join(d, "PROF_*"))) > 0

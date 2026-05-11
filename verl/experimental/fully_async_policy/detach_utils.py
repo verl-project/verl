@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import logging
+import os
 import time
 from collections import defaultdict
 from dataclasses import dataclass
@@ -21,7 +23,22 @@ import numpy as np
 import torch
 
 from verl import DataProto
+from verl.experimental.fully_async_policy.intermediate_trajectory_utils import (
+    assert_batch_schema,
+    strip_intermediate_trajectories_column,
+)
 from verl.trainer.ppo.ray_trainer import compute_response_mask
+
+# Data flow logger — imported lazily to avoid hard dependency for non-GUI callers.
+try:
+    from recipe.fully_async_gui_agent.data_flow_logger import log_dataproto
+
+    _HAS_FLOW_LOG = True
+except ImportError:
+    _HAS_FLOW_LOG = False
+
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 @dataclass
@@ -81,17 +98,37 @@ def prepare_single_generation_data(batch_dict, config) -> DataProto:
 
 
 def addition_process(output: DataProto):
-    """collect metirics"""
-    metrics = output.meta_info.pop("metrics")  # List[Dict[str, str]]
-    processing_times_list = [item["generate_sequences"] for item in metrics]
-    tool_calls_times_list = [item["tool_calls"] for item in metrics]
-    output.non_tensor_batch["processing_times"] = processing_times_list
-    output.non_tensor_batch["tool_calls_times"] = tool_calls_times_list
+    """collect metrics
+
+    Stores per-sample timing info as numpy arrays in ``non_tensor_batch`` so
+    they pass :py:meth:`DataProto.check_consistency` (which requires every
+    value in ``non_tensor_batch`` to be an ``np.ndarray``).
+
+    Some agent loops (e.g. the GUI agent) do not record a ``"tool_calls"``
+    timer; we fall back to ``0.0`` for those entries instead of raising
+    ``KeyError``.
+    """
+    if _HAS_FLOW_LOG:
+        log_dataproto(output, stage="addition_process.input")
+
+    metrics = output.meta_info.pop("metrics")  # List[Dict[str, float]]
+    processing_times_list = [item.get("generate_sequences", 0.0) for item in metrics]
+    tool_calls_times_list = [item.get("tool_calls", 0.0) for item in metrics]
+    output.non_tensor_batch["processing_times"] = np.array(processing_times_list, dtype=np.float64)
+    output.non_tensor_batch["tool_calls_times"] = np.array(tool_calls_times_list, dtype=np.float64)
+
+    if _HAS_FLOW_LOG:
+        log_dataproto(output, stage="addition_process.output")
+
     return output
 
 
 def assemble_batch_from_rollout_samples(
-    rollout_samples: list[RolloutSample], tokenizer, config, balance_batch=None
+    rollout_samples: list[RolloutSample],
+    tokenizer,
+    config,
+    balance_batch=None,
+    processor=None,
 ) -> DataProto:
     """
     Assemble gen_batch_output from RolloutSample objects
@@ -114,17 +151,95 @@ def assemble_batch_from_rollout_samples(
     if not rollout_samples:
         raise ValueError("Empty rollout_samples provided for batch assembly")
 
-    print(f"[BatchUtils] Assembling batch from {len(rollout_samples)} RolloutSample objects")
+    logger.info("[BatchUtils] Assembling batch from %d RolloutSample objects", len(rollout_samples))
 
     rollout_samples_batch = []
     rollout_status = rollout_samples[0].rollout_status
     # Add a prefix to all rollout_status keys
     rollout_status = {f"fully_async/{key}": value for key, value in rollout_status.items()}
 
-    for rs in rollout_samples:
+    # Cache-keyed intermediate payloads, one per RolloutSample. We keep them in
+    # a side list (instead of inside per-sample meta_info) because
+    # ``DataProto.concat`` only keeps meta_info from the first piece. After the
+    # final concat we merge them onto the combined batch's meta_info as a list
+    # aligned with the final-row order.
+    cache_key = "__intermediate_trajectories_cache__"
+    per_sample_caches: list[Any] = []
+    _ref_pos_ndim = None  # track position_ids ndim for cross-sample consistency
+    for rs_idx, rs in enumerate(rollout_samples):
+        # Skip empty batches (all rollouts in this sample were discarded).
+        if rs.full_batch is None or len(rs.full_batch) == 0 or rs.full_batch.batch is None:
+            logger.error(
+                "[POTENTIAL ERROR][BatchUtils] Skipping empty sample[%d] (sample_id=%s, all rollouts discarded)",
+                rs_idx,
+                rs.sample_id,
+            )
+            continue
         batch = addition_process(rs.full_batch)
-        rollout_samples_batch.append(batch)
+        # --- Assert: validate each rollout sample before assembly ---
+        assert_batch_schema(batch, f"assemble.sample[{rs_idx}]")
+        # Track position_ids ndim across samples
+        if "position_ids" in batch.batch.keys():
+            pos_ndim = batch.batch["position_ids"].ndim
+            if _ref_pos_ndim is None:
+                _ref_pos_ndim = pos_ndim
+            else:
+                assert pos_ndim == _ref_pos_ndim, (
+                    f"[assemble] sample[{rs_idx}] position_ids.ndim={pos_ndim} != sample[0] ndim={_ref_pos_ndim}"
+                )
+        # Strip ``intermediate_trajectories`` from ``non_tensor_batch`` and
+        # move the payload into a side cache. This defers intermediate
+        # expansion to the post-advantage stage so that GRPO group statistics
+        # are computed on final rows only (see ``fully_async_trainer``).
+        stripped = strip_intermediate_trajectories_column(batch, cache_key=cache_key)
+        per_sample_caches.append(stripped.meta_info.pop(cache_key, None))
+        if _HAS_FLOW_LOG:
+            log_dataproto(
+                stripped,
+                stage="assemble.after_strip_intermediate",
+                extra={"sample_id": rs.sample_id},
+            )
+        rollout_samples_batch.append(stripped)
     final_batch = DataProto.concat(rollout_samples_batch)
+
+    # --- Assert: validate assembled batch ---
+    assert_batch_schema(
+        final_batch,
+        "assemble.after_concat",
+        require_position_ids_ndim=_ref_pos_ndim,
+        has_processor=processor is not None,
+    )
+
+    # Stitch per-sample intermediate caches back onto the combined batch in
+    # the same row order as the concat: sample_0 had rollout.n final rows,
+    # then sample_1, etc. Each RolloutSample contributes ``len(stripped)``
+    # final rows, so the merged list length must equal ``len(final_batch)``.
+    merged_intermediate_col: list = []
+    has_any_intermediate = False
+    for stripped, cache in zip(rollout_samples_batch, per_sample_caches, strict=True):
+        n = len(stripped)
+        if cache is None or cache.get("intermediate_col") is None:
+            merged_intermediate_col.extend([[] for _ in range(n)])
+            continue
+        col = list(cache["intermediate_col"])
+        if len(col) != n:
+            # Defensive: shouldn't happen, but keep alignment 1:1 with final rows.
+            if len(col) < n:
+                col = col + [[] for _ in range(n - len(col))]
+            else:
+                col = col[:n]
+        merged_intermediate_col.extend(col)
+        if any(bool(x) for x in col):
+            has_any_intermediate = True
+
+    if has_any_intermediate:
+        final_batch.meta_info[cache_key] = {
+            "intermediate_col": merged_intermediate_col,
+            "main_batch_size": len(final_batch),
+        }
+
+    if _HAS_FLOW_LOG:
+        log_dataproto(final_batch, stage="assemble.after_concat")
 
     # Calculate response_mask (if not present)
     if "response_mask" not in final_batch.batch.keys():
@@ -180,7 +295,10 @@ def assemble_batch_from_rollout_samples(
         }
     )
 
-    print(f"[BatchUtils] Batch assembly completed in {time.time() - start_time:.2f}s")
+    logger.info("[BatchUtils] Batch assembly completed in %.2fs", time.time() - start_time)
+
+    if _HAS_FLOW_LOG:
+        log_dataproto(final_batch, stage="assemble.final_output")
 
     return final_batch
 
@@ -313,7 +431,7 @@ class MetricsAggregator:
         # Aggregate special metrics
         aggregated = self._special_metrics_aggergate(aggregated)
 
-        print(f"aggregated metrics done. cost {time.time() - t:.4f} seconds.")
+        logger.info("aggregated metrics done. cost %.4f seconds.", time.time() - t)
 
         return aggregated
 
@@ -360,9 +478,9 @@ def task_exception_handler(task: asyncio.Task):
         task.result()
     except asyncio.CancelledError:
         pass  # Task was cancelled, this is expected
-    except Exception as e:
-        print(f"Task {task.get_name()} failed with exception: {e}")
-        raise e
+    except Exception:
+        logger.exception("Task %s failed", task.get_name())
+        raise
 
 
 def safe_create_task(coro, name: str, task_set: set = None):

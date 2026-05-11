@@ -19,6 +19,10 @@ from .agent_loop import (
     AgentLoopWorker,
     get_trajectory_info,
 )
+from .multi_trajectory_agent_loop import (
+    INTERMEDIATE_TRAJECTORIES_KEY,
+    MultiTrajectoryAgentLoop,
+)
 from .single_turn_agent_loop import SingleTurnAgentLoop
 from .tool_agent_loop import ToolAgentLoop
 
@@ -30,4 +34,6 @@ __all__ = [
     "AgentLoopWorker",
     "AgentLoopOutput",
     "get_trajectory_info",
+    "MultiTrajectoryAgentLoop",
+    "INTERMEDIATE_TRAJECTORIES_KEY",
 ]
