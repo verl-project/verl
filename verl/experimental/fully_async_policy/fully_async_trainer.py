@@ -15,7 +15,10 @@
 import asyncio
 import logging
 import os
+import threading
 import time
+from collections import deque
+from dataclasses import dataclass
 from datetime import datetime
 from pprint import pprint
 from typing import Any
@@ -44,6 +47,15 @@ from verl.utils.tracking import Tracking, ValidationGenerationsLogger
 from verl.workers.rollout.llm_server import LLMServerManager
 
 logger = logging.getLogger(__name__)
+
+_PREFETCH_STREAM_STOP = object()
+
+
+@dataclass
+class _PrefetchThreadErrorBox:
+    """Carries an exception from the prefetch worker to the training thread."""
+
+    exc: BaseException
 
 
 class TrainingStopException(Exception):
@@ -162,6 +174,12 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         )
         self.metrics_aggregator = MetricsAggregator(total_gpus=total_gpus)
 
+        self._prefetch_depth = int(OmegaConf.select(config, "async_training.prefetch_queue_depth", default=0) or 0)
+        self._prefetch_deque: deque | None = deque(maxlen=self._prefetch_depth) if self._prefetch_depth > 0 else None
+        self._prefetch_cv = threading.Condition()
+        self._prefetch_stop = threading.Event()
+        self._prefetch_thread: threading.Thread | None = None
+
         # use trainer to do validation
         if self.config.async_training.use_trainer_do_validate:
             from verl.trainer.main_ppo import create_rl_dataset
@@ -237,45 +255,34 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         """Get actor worker group"""
         return self.actor_wg
 
-    async def _get_samples_from_queue(self) -> tuple[None, None] | tuple[int, Any]:
-        """
-        Get samples from message queue and compose gen_batch_output
-        Uses a loop to continuously collect samples until enough are gathered
+    def _finalize_batch_from_raw_mq_entries(
+        self, queue_samples: list, queue_len: int, total_wait_time: float
+    ) -> tuple[None, None] | tuple[int, Any]:
+        queue_samples = [ray.cloudpickle.loads(x) for x in queue_samples]
+        if self.config.trainer.balance_batch:
+            batch = assemble_batch_from_rollout_samples(queue_samples, self.tokenizer, self.config, self._balance_batch)
+        else:
+            batch = assemble_batch_from_rollout_samples(queue_samples, self.tokenizer, self.config, None)
+        batch.meta_info["fully_async/total_wait_time"] = total_wait_time
+        return 0, batch
 
-        Returns:
-            tuple: (epoch, batch_dict, gen_batch_output)
-        """
+    async def _materialize_batch_from_mq(self) -> tuple[None, None] | tuple[int, Any]:
+        """Blocking MQ fetch (one batched RPC) + deserialize + batch assembly."""
         print(
             f"[FullyAsyncTrainer] Requesting {self.required_samples} samples from queue",
             flush=True,
         )
-
-        # Collect samples using a simple loop calling get_sample
         consumer_start = time.time()
-        queue_samples = []
-        queue_len = 0
-        while len(queue_samples) < self.required_samples:
-            # Get a single sample and wait until there is a sample or None is received
-            sample, queue_len = await self.message_queue_client.get_sample()
-
-            if sample is None:
-                print(
-                    f"[FullyAsyncTrainer] Detected termination signal (None), stopping sample collection. "
-                    f"Collected {len(queue_samples)}/{self.required_samples} samples"
-                )
-                break
-
-            queue_samples.append(sample)
-
-            if len(queue_samples) % 64 == 0:
-                print(
-                    f"[FullyAsyncTrainer] Collected {len(queue_samples)}/{self.required_samples} samples. "
-                    f"mq_len: {queue_len}"
-                )
-
+        queue_samples, queue_len = await self.message_queue_client.get_samples(self.required_samples)
         consumer_end = time.time()
 
         if not queue_samples or len(queue_samples) < self.required_samples:
+            if queue_samples:
+                print(
+                    f"[FullyAsyncTrainer] Short batch from queue (shutdown or sentinel): "
+                    f"{len(queue_samples)}/{self.required_samples}, mq_len={queue_len}",
+                    flush=True,
+                )
             print("[FullyAsyncTrainer] not enough samples collected after loop")
             return None, None
         total_wait_time = consumer_end - consumer_start
@@ -283,17 +290,124 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         print(
             f"[FullyAsyncTrainer] Loop collection completed: {len(queue_samples)}/{self.required_samples} samples, "
             f"total wait time: {total_wait_time:.2f} seconds. "
-            f"mq_len: {queue_len}"
+            f"mq_len: {queue_len}",
+            flush=True,
         )
+        return self._finalize_batch_from_raw_mq_entries(queue_samples, queue_len, total_wait_time)
 
-        queue_samples = [ray.cloudpickle.loads(x) for x in queue_samples]
-        # Assemble batch - now working directly with RolloutSample objects
-        if self.config.trainer.balance_batch:
-            batch = assemble_batch_from_rollout_samples(queue_samples, self.tokenizer, self.config, self._balance_batch)
-        else:
-            batch = assemble_batch_from_rollout_samples(queue_samples, self.tokenizer, self.config, None)
+    def _materialize_batch_from_mq_sync(self) -> tuple[None, None] | tuple[int, Any]:
+        """Sync variant for the prefetch worker thread (uses ``get_samples_sync``)."""
+        print(
+            f"[FullyAsyncTrainer] Requesting {self.required_samples} samples from queue",
+            flush=True,
+        )
+        consumer_start = time.time()
+        queue_samples, queue_len = self.message_queue_client.get_samples_sync(self.required_samples)
+        consumer_end = time.time()
 
-        batch.meta_info["fully_async/total_wait_time"] = total_wait_time
+        if not queue_samples or len(queue_samples) < self.required_samples:
+            if queue_samples:
+                print(
+                    f"[FullyAsyncTrainer] Short batch from queue (shutdown or sentinel): "
+                    f"{len(queue_samples)}/{self.required_samples}, mq_len={queue_len}",
+                    flush=True,
+                )
+            print("[FullyAsyncTrainer] not enough samples collected after loop")
+            return None, None
+        total_wait_time = consumer_end - consumer_start
+
+        print(
+            f"[FullyAsyncTrainer] Loop collection completed: {len(queue_samples)}/{self.required_samples} samples, "
+            f"total wait time: {total_wait_time:.2f} seconds. "
+            f"mq_len: {queue_len}",
+            flush=True,
+        )
+        return self._finalize_batch_from_raw_mq_entries(queue_samples, queue_len, total_wait_time)
+
+    def _prefetch_worker_loop(self) -> None:
+        assert self._prefetch_deque is not None
+        while not self._prefetch_stop.is_set():
+            with self._prefetch_cv:
+                while (
+                    len(self._prefetch_deque) >= self._prefetch_depth and not self._prefetch_stop.is_set()
+                ):
+                    self._prefetch_cv.wait(timeout=0.5)
+                if self._prefetch_stop.is_set():
+                    break
+            try:
+                out = self._materialize_batch_from_mq_sync()
+            except Exception as e:
+                print(f"[FullyAsyncTrainer] Prefetch thread error: {e}", flush=True)
+                with self._prefetch_cv:
+                    self._prefetch_deque.append(_PrefetchThreadErrorBox(exc=e))
+                    self._prefetch_cv.notify_all()
+                break
+            with self._prefetch_cv:
+                if self._prefetch_stop.is_set():
+                    break
+                if out[1] is None:
+                    self._prefetch_deque.append(_PREFETCH_STREAM_STOP)
+                else:
+                    self._prefetch_deque.append(out[1])
+                self._prefetch_cv.notify_all()
+            if out[1] is None:
+                break
+
+    def _start_prefetch_if_needed(self) -> None:
+        if self._prefetch_depth <= 0 or self._prefetch_thread is not None:
+            return
+        self._prefetch_stop.clear()
+        self._prefetch_thread = threading.Thread(
+            target=self._prefetch_worker_loop,
+            name="fully_async_mq_prefetch",
+            daemon=True,
+        )
+        self._prefetch_thread.start()
+        print(f"[FullyAsyncTrainer] Started MQ prefetch thread (depth={self._prefetch_depth})", flush=True)
+
+    def _stop_prefetch_if_needed(self) -> None:
+        if self._prefetch_depth <= 0:
+            return
+        self._prefetch_stop.set()
+        with self._prefetch_cv:
+            self._prefetch_cv.notify_all()
+        if self._prefetch_thread is not None:
+            self._prefetch_thread.join(timeout=30.0)
+            if self._prefetch_thread.is_alive():
+                print("[FullyAsyncTrainer] Prefetch thread did not exit within 30s", flush=True)
+            self._prefetch_thread = None
+        with self._prefetch_cv:
+            if self._prefetch_deque is not None:
+                self._prefetch_deque.clear()
+
+    async def _get_samples_from_queue(self) -> tuple[None, None] | tuple[int, Any]:
+        """
+        Get samples from message queue and compose gen_batch_output.
+
+        With ``prefetch_queue_depth > 0``, pops a ready ``DataProto`` filled by the prefetch thread.
+        """
+        if self._prefetch_depth <= 0:
+            return await self._materialize_batch_from_mq()
+
+        assert self._prefetch_deque is not None
+        with self._prefetch_cv:
+            while len(self._prefetch_deque) == 0 and not self._prefetch_stop.is_set():
+                self._prefetch_cv.wait(timeout=1.0)
+            if len(self._prefetch_deque) == 0:
+                print("[FullyAsyncTrainer] Prefetch buffer empty after wait", flush=True)
+                return None, None
+            item = self._prefetch_deque.popleft()
+            buf_len = len(self._prefetch_deque)
+            self._prefetch_cv.notify_all()
+
+        if item is _PREFETCH_STREAM_STOP:
+            return None, None
+        if isinstance(item, _PrefetchThreadErrorBox):
+            print(f"[FullyAsyncTrainer] Prefetch worker failed: {item.exc!r}", flush=True)
+            return None, None
+
+        batch = item
+        batch.meta_info["fully_async/prefetch_buffer_len_after_pop"] = float(buf_len)
         return 0, batch
 
     def _create_actor_rollout_classes(self):
@@ -428,14 +542,18 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         )
         self.next_step_profile = False
 
-        # Use queue mode, no need for traditional dataloader iterator
-        # Initialize to get the first batch of data
-        while True:
-            try:
-                await self.fit_step()
-            except TrainingStopException:
-                print("[FullyAsyncTrainer] Training stopped by queue termination signal")
-                break
+        self._start_prefetch_if_needed()
+        try:
+            # Use queue mode, no need for traditional dataloader iterator
+            # Initialize to get the first batch of data
+            while True:
+                try:
+                    await self.fit_step()
+                except TrainingStopException:
+                    print("[FullyAsyncTrainer] Training stopped by queue termination signal")
+                    break
+        finally:
+            self._stop_prefetch_if_needed()
 
         self.progress_bar.close()
         if self.current_param_version % self.config.trainer.test_freq != 0 or self.local_trigger_step > 1:

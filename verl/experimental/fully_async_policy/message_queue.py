@@ -102,6 +102,33 @@ class MessageQueue:
             self.total_consumed += 1
             return data, len(self.queue)
 
+    async def get_samples(self, n: int) -> tuple[list[Any], int]:
+        """Pop up to ``n`` samples in one lock hold (single Ray RPC from the trainer).
+
+        If the next head item is the shutdown sentinel ``None`` (peeked, not consumed),
+        returns the partial list collected so far and the current queue length.
+        """
+        if n <= 0:
+            async with self._lock:
+                return [], len(self.queue)
+
+        async with self._lock:
+            out: list[Any] = []
+            while len(out) < n:
+                while len(self.queue) == 0 and self.running:
+                    await self._consumer_condition.wait()
+                if len(self.queue) == 0:
+                    if not self.running:
+                        return out, len(self.queue)
+                    continue
+                if self.queue[0] is None:
+                    return out, len(self.queue)
+                data = self.queue.popleft()
+                self.total_consumed += 1
+                out.append(data)
+                self._consumer_condition.notify_all()
+            return out, len(self.queue)
+
     async def get_queue_size(self) -> int:
         """Get current queue length"""
         async with self._lock:
@@ -200,6 +227,10 @@ class MessageQueueClient:
         future = self.queue_actor.get_sample.remote()
         return await asyncio.wrap_future(future.future())
 
+    async def get_samples(self, n: int) -> tuple[list[Any], int]:
+        future = self.queue_actor.get_samples.remote(n)
+        return await asyncio.wrap_future(future.future())
+
     async def get_queue_size(self) -> int:
         """Get queue size (async)"""
         future = self.queue_actor.get_queue_size.remote()
@@ -228,6 +259,10 @@ class MessageQueueClient:
     def get_sample_sync(self) -> Any | None:
         """Get single sample from queue (sync - deprecated, use get_sample instead)"""
         return ray.get(self.queue_actor.get_sample.remote())
+
+    def get_samples_sync(self, n: int) -> tuple[list[Any], int]:
+        """Pop up to ``n`` samples via one Ray call (for prefetch / sync contexts)."""
+        return ray.get(self.queue_actor.get_samples.remote(n))
 
     def get_statistics_sync(self) -> dict[str, Any]:
         """Get statistics (sync - deprecated, use get_statistics instead)"""

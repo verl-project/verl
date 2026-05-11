@@ -25,6 +25,9 @@ async_training:
   # whether to use trainer do_validate
   use_trainer_do_validate: False
 
+  # Prefetch ready DataProto batches on a background thread (0 = disabled).
+  prefetch_queue_depth: 0
+
 # Rollout config
 rollout:
 
