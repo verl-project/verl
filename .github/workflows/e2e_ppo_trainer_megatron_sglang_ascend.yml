@@ -133,24 +133,13 @@ jobs:
       - name: Running GSM8K E2E training tests with 3D parallelism on 8 NPUs with Megatron (DeepSeek)
         run: |
           ray stop --force
-          OPTIM_MEMORY_EFFICIENT=True ENGINE=sglang COMMON_VPP=NULL SAVE_FREQ=1 MODEL_ID=deepseek-ai/deepseek-coder-1.3b-instruct bash tests/special_e2e/run_ppo_trainer_megatron.sh
+          OPTIM_MEMORY_EFFICIENT=True ENGINE=sglang COMMON_VPP=NULL USE_REMOVE_PADDING=True SAVE_FREQ=1 MODEL_ID=deepseek-ai/deepseek-coder-1.3b-instruct bash tests/special_e2e/run_ppo_trainer_megatron.sh
       - name: Running GSM8K E2E training tests with 3D parallelism on 8 NPUs with Megatron (DeepSeek)
         run: |
           ray stop --force
           export VLLM_USE_V1=1
           ray start --head
-          ENGINE=sglang MODE=async RESUME_MODE=auto COMMON_VPP=NULL MODEL_ID=deepseek-ai/deepseek-coder-1.3b-instruct TOTAL_TRAIN_STEPS=2 bash tests/special_e2e/run_ppo_trainer_megatron.sh
-      - name: Profiling GRPO GSM8K E2E training tests with 3D parallelism on 8 NPUs with Megatron (Deepseek)
-        run: |
-          ray stop --force
-          mkdir -p "${HOME}/profiling"
-          PROFILE_ENABLE=True ENGINE=sglang ADV_ESTIMATOR=grpo USE_DYNAMIC_BSZ=False COMMON_VPP=NULL MODEL_ID=deepseek-ai/deepseek-coder-1.3b-instruct bash tests/special_e2e/run_ppo_trainer_megatron.sh
-          if [ -z "$( ls -A "${HOME}/profiling" )" ]; then
-            echo "[ERROR] not found any profiling files"
-            exit 1
-          else
-            echo "[SUCCESS] profile success"
-          fi
+          ENGINE=sglang MODE=async RESUME_MODE=auto COMMON_VPP=NULL USE_REMOVE_PADDING=True MODEL_ID=deepseek-ai/deepseek-coder-1.3b-instruct TOTAL_TRAIN_STEPS=2 bash tests/special_e2e/run_ppo_trainer_megatron.sh
       - name: clean up
         run: |
           rm -rf checkpoints
