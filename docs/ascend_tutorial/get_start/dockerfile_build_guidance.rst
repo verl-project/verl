@@ -87,6 +87,9 @@ A3              8.5.0          SGLang          `Dockerfile.ascend.sglang_8.5.0_a
    # SGLang
    docker build -f Dockerfile.ascend.sglang_8.3.rc1_a2 -t verl-ascend-sglang:8.3.rc1-a2 .
 
+**说明：**
+
+* 以VLLM的镜像为例，``Dockerfile.ascend_8.3.rc1_a2`` 为 Dockerfile 文件名，``verl-ascend:8.3.rc1-a2`` 中， verl-ascend 为自定义的镜像名称，8.3.rc1-a2 为自定义的镜像标签
 
 容器启动命令模板
 --------
@@ -112,7 +115,7 @@ A3              8.5.0          SGLang          `Dockerfile.ascend.sglang_8.5.0_a
 * 如需挂载其他本地路径到容器，请自行添加 ``-v <宿主机路径>:<容器内路径>``
 * 建议将 ``your_docker_name`` 替换为具有实际意义的容器名称
 * ``--privileged`` 参数授予容器扩展权限，请根据实际安全需求评估是否必要
-* ``image_name:tag`` 请换成自定义的镜像名称与标签
+* ``image_name:tag`` 请换成容器构建时对应的镜像名称与标签
 
 启动容器
 --------
