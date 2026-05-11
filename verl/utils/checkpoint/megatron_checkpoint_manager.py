@@ -163,6 +163,23 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         )
         self.use_hf_checkpoint = not self.use_dist_checkpointing
 
+        if self.use_hf_checkpoint and self.should_save_hf_model:
+            if not self.should_save_model:
+                logger.warning(
+                    "checkpoint.save_contents contains 'hf_model' but not 'model'. When mbridge is "
+                    "enabled (use_hf_checkpoint=True), 'hf_model' is ignored and 'model' is what "
+                    "actually saves HF-format weights via bridge.save_weights(). Without 'model' in "
+                    "save_contents, NO model weights will be saved. Adding 'model' to save_contents "
+                    "automatically to prevent data loss."
+                )
+                self.checkpoint_save_contents.append("model")
+            else:
+                logger.warning(
+                    "'hf_model' in checkpoint.save_contents is redundant when mbridge is enabled "
+                    "(use_hf_checkpoint=True). In mbridge mode, 'model' already saves weights in "
+                    "HF format via bridge.save_weights(). The 'hf_model' option will be ignored."
+                )
+
         self.weight_saver = None
         if self.bridge is None:
             self.weight_saver = get_weight_saver(self.arch)
