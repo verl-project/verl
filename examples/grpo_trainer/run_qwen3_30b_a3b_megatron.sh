@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# GRPO | Qwen3-30B-A3B (MoE) | Megatron training | NVIDIA GPUs or Ascend NPUs
+# GRPO | Qwen3-30B-A3B (MoE) | Megatron training | NVIDIA GPUs
 # DAPO-style recipe on DAPO-Math-17k / AIME-2024.
 #
 # Knobs:
@@ -7,7 +7,7 @@
 #   ROLLOUT_QUANTIZATION   fp8 to enable TRT-LLM FP8 rollout         (default: unset)
 #
 # Ascend NPU users: see run_qwen3_30b_a3b_mindspeed.sh.
-DEVICE=${DEVICE:-$(python3 -c 'import torch_npu' 2>/dev/null && echo npu || echo gpu)}
+
 set -xeuo pipefail
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 
@@ -79,63 +79,6 @@ test_freq=${TEST_FREQ:-5}
 project_name=${PROJECT_NAME:-verl_grpo_dapo_math}
 experiment_name=${EXPERIMENT_NAME:-qwen3_30b_a3b_${INFER_BACKEND}_megatron${ROLLOUT_QUANTIZATION:+_${ROLLOUT_QUANTIZATION}}}
 ########################### end user-adjustable ###########################
-
-# ---- conditional extras (rolled into a single trailing array) ----
-EXTRA=(
-    model_engine=megatron
-    actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=${TRTLLM_UPDATE_WEIGHTS_BUCKET_MEGABYTES:-4096}
-)
-
-case "${DEVICE}" in
-    gpu)
-        EXTRA+=(
-            +actor_rollout_ref.rollout.moe_tensor_parallel_size=${gen_moe_tp}
-            actor_rollout_ref.rollout.expert_parallel_size=${gen_moe_ep}
-        )
-        ;;
-    npu)
-        # Necessary env
-        export HCCL_CONNECT_TIMEOUT=1500
-        export HCCL_HOST_SOCKET_PORT_RANGE=60000-60050
-        export HCCL_NPU_SOCKET_PORT_RANGE=61000-61050
-        export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
-        export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
-        export DISABLE_L2_CACHE=1
-        export TASK_QUEUE_ENABLE=1
-        train_batch_size=16
-        # Megatron Configuration
-        actor_ep=4
-        actor_etp=4
-        actor_pp=1
-        ref_tp=${actor_tp}
-        ref_pp=${actor_pp}
-        ref_ep=${actor_ep}
-        gen_dp=1
-        gen_moe_ep=1
-        rollout_gpu_mem_util=0.5
-        actor_ppo_micro_batch_size_per_gpu=1
-        rollout_max_model_len=$((max_prompt_length + max_response_length))
-        rollout_max_num_batched_tokens=$(((max_prompt_length + max_response_length) * 1))
-        EXTRA+=(
-            actor_rollout_ref.actor.megatron.expert_tensor_parallel_size=${actor_etp}
-            actor_rollout_ref.rollout.expert_parallel_size=${gen_moe_ep}
-            actor_rollout_ref.rollout.data_parallel_size=${gen_dp}
-            +actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_offload_fraction=1
-            +actor_rollout_ref.actor.optim.override_optimizer_config.use_precision_aware_optimizer=True
-            +actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_cpu_offload=True
-        )
-        if [ "${INFER_BACKEND}" = sglang ]; then
-            EXTRA+=(
-                +actor_rollout_ref.rollout.engine_kwargs.sglang.attention_backend="ascend"
-            )
-        fi
-        ;;
-    *)
-        echo "Unsupported DEVICE=${DEVICE}. Expected 'gpu' or 'npu'." >&2
-        exit 1
-        ;;
-esac
-
 
 ########################### derived defaults ###########################
 if [ -n "${ROLLOUT_QUANTIZATION}" ] && [ "${INFER_BACKEND}" != trtllm ]; then
@@ -276,6 +219,13 @@ TRAINER=(
     trainer.log_val_generations=${log_val_generations}
 )
 
+# ---- conditional extras (rolled into a single trailing array) ----
+EXTRA=(
+    model_engine=megatron
+    actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=${TRTLLM_UPDATE_WEIGHTS_BUCKET_MEGABYTES:-4096}
+    +actor_rollout_ref.rollout.moe_tensor_parallel_size=${gen_moe_tp}
+    actor_rollout_ref.rollout.expert_parallel_size=${gen_moe_ep}
+)
 
 if [ "${INFER_BACKEND}" = trtllm ]; then
     EXTRA+=(
