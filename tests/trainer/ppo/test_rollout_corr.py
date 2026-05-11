@@ -191,6 +191,67 @@ def test_rollout_rs_multiple_options():
         assert key in metrics, f"Metrics missing for chained option {option}"
 
 
+def test_token_k1_respects_non_reciprocal_ratio_bounds():
+    """K1 rejection thresholds are ratio bounds, not raw -log(ratio) bounds."""
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    ratios = torch.tensor([[0.55, 0.65, 1.0, 1.35, 1.5]], device=device)
+    old_log_prob = torch.zeros_like(ratios)
+    rollout_log_prob = -torch.log(ratios)
+    response_mask = torch.ones_like(ratios)
+
+    _, modified_response_mask, metrics = compute_rollout_correction_and_rejection_mask(
+        old_log_prob=old_log_prob,
+        rollout_log_prob=rollout_log_prob,
+        response_mask=response_mask,
+        rollout_is=None,
+        rollout_rs="token_k1",
+        rollout_rs_threshold="0.6_1.4",
+    )
+
+    expected_mask = torch.tensor([[0.0, 1.0, 1.0, 1.0, 0.0]], device=device)
+    torch.testing.assert_close(modified_response_mask, expected_mask)
+    assert metrics["rollout_corr/rollout_rs_masked_fraction"] == pytest.approx(0.4, abs=1e-6)
+    assert metrics["rollout_corr/rollout_rs_token_k1_fraction_low"] == pytest.approx(0.2, abs=1e-6)
+    assert metrics["rollout_corr/rollout_rs_token_k1_fraction_high"] == pytest.approx(0.2, abs=1e-6)
+
+
+def test_seq_mean_k1_respects_non_reciprocal_geometric_ratio_bounds():
+    """Sequence K1 rejection should preserve the requested geometric ratio interval."""
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    ratios = torch.tensor(
+        [
+            [1.5, 1.5],
+            [0.65, 0.65],
+        ],
+        device=device,
+    )
+    old_log_prob = torch.zeros_like(ratios)
+    rollout_log_prob = -torch.log(ratios)
+    response_mask = torch.ones_like(ratios)
+
+    _, modified_response_mask, metrics = compute_rollout_correction_and_rejection_mask(
+        old_log_prob=old_log_prob,
+        rollout_log_prob=rollout_log_prob,
+        response_mask=response_mask,
+        rollout_is=None,
+        rollout_rs="seq_mean_k1",
+        rollout_rs_threshold="0.6_1.4",
+    )
+
+    expected_mask = torch.tensor(
+        [
+            [0.0, 0.0],
+            [1.0, 1.0],
+        ],
+        device=device,
+    )
+    torch.testing.assert_close(modified_response_mask, expected_mask)
+    assert metrics["rollout_corr/rollout_rs_masked_fraction"] == pytest.approx(0.5, abs=1e-6)
+    assert metrics["rollout_corr/rollout_rs_seq_mean_k1_seq_fraction_low"] == pytest.approx(0.5, abs=1e-6)
+
+
 def test_metrics_completeness():
     """Test that all expected metrics are returned."""
     print("\nTesting metrics completeness...")

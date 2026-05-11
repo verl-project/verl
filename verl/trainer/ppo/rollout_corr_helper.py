@@ -192,6 +192,11 @@ def _parse_rollout_rs_thresholds(
     return thresholds
 
 
+def _k1_stat_bounds_from_ratio_bounds(lower_ratio: float, upper_ratio: float) -> tuple[float, float]:
+    """Convert K1 ratio bounds to bounds for the -log(ratio) statistic."""
+    return -math.log(upper_ratio), -math.log(lower_ratio)
+
+
 def compute_rollout_rejection_mask(
     log_ratio: torch.Tensor,
     response_mask: torch.Tensor,
@@ -287,16 +292,15 @@ def compute_rollout_rejection_mask(
         upper_value = thresholds_info["upper"]
         lower_value = thresholds_info["lower"]
         apply_lower_threshold = is_k1_option
-        lower_log: Optional[float] = None
-        upper_log: Optional[float] = None
+        lower_stat_threshold: Optional[float] = None
+        upper_stat_threshold: Optional[float] = None
 
         if is_k1_option:
             if lower_value is None or upper_value is None:
                 raise ValueError(
                     f"rollout_rs_threshold for option '{option_name}' must specify both lower and upper bounds."
                 )
-            lower_log = math.log(lower_value)
-            upper_log = math.log(upper_value)
+            lower_stat_threshold, upper_stat_threshold = _k1_stat_bounds_from_ratio_bounds(lower_value, upper_value)
         else:
             if upper_value is None:
                 raise ValueError(f"rollout_rs_threshold for option '{option_name}' must specify an upper bound.")
@@ -308,10 +312,10 @@ def compute_rollout_rejection_mask(
         token_keep_bool: torch.Tensor
 
         if option_name == "token_k1":
-            if lower_log is None:
+            if lower_stat_threshold is None or upper_stat_threshold is None:
                 raise ValueError("Threshold specification for token_k1 must include lower and upper bounds.")
             per_token_stat = token_k1
-            token_keep_bool = (per_token_stat >= lower_log) & (per_token_stat <= upper_log)
+            token_keep_bool = (per_token_stat >= lower_stat_threshold) & (per_token_stat <= upper_stat_threshold)
         elif option_name == "token_k2":
             per_token_stat = token_k2
             token_keep_bool = per_token_stat <= upper_value
@@ -320,12 +324,12 @@ def compute_rollout_rejection_mask(
             token_keep_bool = per_token_stat <= upper_value
         elif option_name.startswith("seq_sum"):
             if option_name.endswith("k1"):
-                if lower_log is None:
+                if lower_stat_threshold is None or upper_stat_threshold is None:
                     raise ValueError(
                         f"Threshold specification for option '{option_name}' must include lower and upper bounds."
                     )
                 seq_stat = _sequence_sum(token_k1)
-                seq_keep_bool_direct = (seq_stat >= lower_log) & (seq_stat <= upper_log)
+                seq_keep_bool_direct = (seq_stat >= lower_stat_threshold) & (seq_stat <= upper_stat_threshold)
             elif option_name.endswith("k2"):
                 seq_stat = _sequence_sum(token_k2)
                 seq_keep_bool_direct = seq_stat <= upper_value
@@ -339,12 +343,12 @@ def compute_rollout_rejection_mask(
             per_token_stat = seq_stat.unsqueeze(-1).expand_as(response_mask)
         elif option_name.startswith("seq_mean"):
             if option_name.endswith("k1"):
-                if lower_log is None:
+                if lower_stat_threshold is None or upper_stat_threshold is None:
                     raise ValueError(
                         f"Threshold specification for option '{option_name}' must include lower and upper bounds."
                     )
                 seq_stat = _sequence_mean(token_k1)
-                seq_keep_bool_direct = (seq_stat >= lower_log) & (seq_stat <= upper_log)
+                seq_keep_bool_direct = (seq_stat >= lower_stat_threshold) & (seq_stat <= upper_stat_threshold)
             elif option_name.endswith("k2"):
                 seq_stat = _sequence_mean(token_k2)
                 seq_keep_bool_direct = seq_stat <= upper_value
@@ -371,8 +375,8 @@ def compute_rollout_rejection_mask(
         else:
             raise ValueError(f"Unsupported rollout_rs option: {option_name}.")
 
-        metrics_upper_threshold = upper_log if is_k1_option else upper_value
-        metrics_lower_threshold = lower_log if (is_k1_option and lower_log is not None) else 0.0
+        metrics_upper_threshold = upper_stat_threshold if is_k1_option else upper_value
+        metrics_lower_threshold = lower_stat_threshold if is_k1_option and lower_stat_threshold is not None else 0.0
 
         token_keep_mask = token_keep_bool.to(dtype=log_ratio.dtype)
         combined_mask = combined_mask * token_keep_mask
