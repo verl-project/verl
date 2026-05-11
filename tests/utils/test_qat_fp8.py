@@ -20,10 +20,9 @@ from types import ModuleType, SimpleNamespace
 import pytest
 import torch
 
+from verl.utils.device import is_torch_npu_available
 from verl.utils.fp8_utils import FP8QuantizerHelper
 from verl.utils.kernel.fp8_kernel import scaled_fp8_blockwise
-from verl.utils.modelopt.qat_weight_exporter import QATWeightExporter, _QuantMeta
-from verl.utils.modelopt.quantize import build_quantize_config
 from verl.utils.qat import QATConfig, is_fp8_qat_mode, load_quantization_config
 from verl.utils.qat.linear import QATLinear, QATMode, fp8_fake_quant_blockwise
 from verl.utils.qat.quantizer import QATQuantizer
@@ -32,6 +31,26 @@ from verl.utils.qat.quantizer import QATQuantizer
 class _FakeModel:
     def load_weights(self, weights):
         return [name for name, _ in weights]
+
+
+def _import_modelopt_quantize():
+    pytest.importorskip("modelopt.torch.quantization.config")
+    from verl.utils.modelopt.quantize import build_quantize_config
+
+    return build_quantize_config
+
+
+def _import_modelopt_exporter():
+    for module in (
+        "modelopt.torch.export.quant_utils",
+        "modelopt.torch.quantization.qtensor.fp8_tensor",
+        "modelopt.torch.quantization.qtensor.nvfp4_tensor",
+    ):
+        pytest.importorskip(module)
+
+    from verl.utils.modelopt.qat_weight_exporter import QATWeightExporter, _QuantMeta
+
+    return QATWeightExporter, _QuantMeta
 
 
 def _make_worker(model):
@@ -150,7 +169,10 @@ def test_fp8_quantizer_helper_preserves_2d_scale_with_single_column(monkeypatch)
     assert output["model.layers.0.self_attn.q_proj.weight_scale_inv"].shape == (1, 1)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA for Triton FP8 path")
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or is_torch_npu_available(check_device=False),
+    reason="requires CUDA for Triton FP8 path",
+)
 def test_fp8_fake_quant_uses_cuda_path_backward():
     x = torch.randn(9, 17, device="cuda", dtype=torch.bfloat16)
 
@@ -167,6 +189,8 @@ def test_fp8_fake_quant_uses_cuda_path_backward():
 
 
 def test_modelopt_fp8_config_uses_weight_block_size():
+    build_quantize_config = _import_modelopt_quantize()
+
     config = build_quantize_config("fp8", weight_block_size=[64, 128])
     weight_quantizer = config["quant_cfg"]["*weight_quantizer"]
 
@@ -176,8 +200,10 @@ def test_modelopt_fp8_config_uses_weight_block_size():
 
 
 def test_modelopt_fp8_qat_disables_lora_adapter_quantizers():
-    import modelopt.torch.quantization as mtq
     import torch.nn as nn
+
+    mtq = pytest.importorskip("modelopt.torch.quantization")
+    build_quantize_config = _import_modelopt_quantize()
 
     class AdapterModel(nn.Module):
         def __init__(self):
@@ -224,6 +250,8 @@ def test_qat_local_name_patch_skips_modelopt_quantizer_params(monkeypatch):
 
 
 def test_qat_weight_exporter_serializes_fp8_from_qat_metadata():
+    QATWeightExporter, _QuantMeta = _import_modelopt_exporter()
+
     exporter = QATWeightExporter.__new__(QATWeightExporter)
     exporter.qat_mode = "w8a8"
     weight = torch.randn(3, 5)
@@ -242,6 +270,8 @@ def test_qat_weight_exporter_serializes_fp8_from_qat_metadata():
 
 
 def test_qat_weight_exporter_dequantizes_fp8_for_w8a16_rollout():
+    QATWeightExporter, _QuantMeta = _import_modelopt_exporter()
+
     exporter = QATWeightExporter.__new__(QATWeightExporter)
     exporter.qat_mode = "w8a16"
     weight = torch.randn(3, 5, dtype=torch.bfloat16)
@@ -339,7 +369,7 @@ def test_vllm19_fp8_linear_processing_preserves_refit_param_metadata():
 def test_te_grouped_weight_calibration_skips_original_plain_weight_lookup(monkeypatch):
     import contextlib
 
-    import modelopt.torch.quantization.model_calib as model_calib
+    model_calib = pytest.importorskip("modelopt.torch.quantization.model_calib")
 
     from verl.utils.modelopt.megatron_qat_patch import (
         apply_te_grouped_weight_calibration_patch,

@@ -22,18 +22,10 @@ Includes scale computation utilities for weight quantization.
 import logging
 import os
 import re
+from functools import cache
 from typing import Generator, Iterable, Optional
 
 import torch
-from compressed_tensors.compressors.nvfp4.base import NVFP4PackedCompressor
-from compressed_tensors.quantization.quant_args import (
-    FP4_E2M1_DATA,
-    FP8_E4M3_DATA,
-    QuantizationArgs,
-    QuantizationStrategy,
-    QuantizationType,
-)
-from compressed_tensors.quantization.utils.helpers import generate_gparam
 
 from verl.utils.device import get_device_name, get_torch_device
 from verl.utils.qat.core import is_fp8_qat_mode
@@ -42,6 +34,46 @@ logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 _LAYER_IDX_RE = re.compile(r"layers\.(\d+)\.")
+_COMPRESSED_TENSORS_ERROR = (
+    "NVFP4 QAT weight quantization requires a compressed-tensors installation with NVFP4 support. "
+    "Install or upgrade compressed-tensors before syncing NVFP4 QAT weights to rollout."
+)
+
+
+@cache
+def _load_quant_args():
+    """Load compressed-tensors quantization helpers only when the NVFP4 path needs them."""
+    try:
+        from compressed_tensors.quantization.quant_args import (
+            FP4_E2M1_DATA,
+            FP8_E4M3_DATA,
+            QuantizationArgs,
+            QuantizationStrategy,
+            QuantizationType,
+        )
+        from compressed_tensors.quantization.utils.helpers import generate_gparam
+    except ImportError as exc:
+        raise ImportError(_COMPRESSED_TENSORS_ERROR) from exc
+
+    return (
+        FP4_E2M1_DATA,
+        FP8_E4M3_DATA,
+        QuantizationArgs,
+        QuantizationStrategy,
+        QuantizationType,
+        generate_gparam,
+    )
+
+
+@cache
+def _load_nvfp4_compressor():
+    """Load the NVFP4 compressor lazily so FP8-only tests do not require it at import time."""
+    try:
+        from compressed_tensors.compressors.nvfp4.base import NVFP4PackedCompressor
+    except ImportError as exc:
+        raise ImportError(_COMPRESSED_TENSORS_ERROR) from exc
+
+    return NVFP4PackedCompressor
 
 
 def compute_blockwise_scale(
@@ -52,6 +84,8 @@ def compute_blockwise_scale(
     """Compute blockwise scale using pre-computed global_scale (for fusion).
     Returns FP8 E4M3 blockwise scale tensor.
     """
+    FP4_E2M1_DATA, FP8_E4M3_DATA, _, _, _, _ = _load_quant_args()
+
     out_features, in_features = weight.shape
     num_groups = in_features // group_size
     weight_reshaped = weight.view(out_features, num_groups, group_size)
@@ -137,6 +171,16 @@ class QATQuantizer:
         self.ignore_patterns = ignore_patterns or ["lm_head", "embed_tokens", "re:.*mlp.gate$"]
         self.device = device or torch.device(get_device_name())
         self.param_dtype = param_dtype
+        self._compressor = None
+        self._quant_args = None
+
+    def _ensure_nvfp4_quantizer(self) -> None:
+        """Initialize compressed-tensors objects once the NVFP4 path is actually used."""
+        if self._compressor is not None and self._quant_args is not None:
+            return
+
+        _, FP8_E4M3_DATA, QuantizationArgs, QuantizationStrategy, QuantizationType, _ = _load_quant_args()
+        NVFP4PackedCompressor = _load_nvfp4_compressor()
 
         self._compressor = NVFP4PackedCompressor()
         self._quant_args = QuantizationArgs(
@@ -144,7 +188,7 @@ class QATQuantizer:
             type=QuantizationType.FLOAT,
             symmetric=True,
             strategy=QuantizationStrategy.TENSOR_GROUP,
-            group_size=group_size,
+            group_size=self.group_size,
             scale_dtype=FP8_E4M3_DATA.dtype,
         )
 
@@ -209,6 +253,9 @@ class QATQuantizer:
 
         if not layer_weights:
             return [(name, tensor.to(output_device)) for name, tensor in layer_passthrough.items()]
+
+        self._ensure_nvfp4_quantizer()
+        FP4_E2M1_DATA, FP8_E4M3_DATA, _, _, _, generate_gparam = _load_quant_args()
 
         # Move weights to GPU, compute global scales
         weights_on_gpu = {}

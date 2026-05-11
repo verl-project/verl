@@ -11,10 +11,26 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import argparse
+import sys
+
 try:
     import hydra
 except ImportError as e:
     raise ImportError("Please install hydra-core via 'pip install hydra-core' and retry.") from e
+
+
+if sys.version_info >= (3, 14):
+    # Hydra 1.3 passes a lazy help object; Python 3.14 argparse validates help
+    # strings during add_argument and expects a real string.
+    original_expand_help = argparse.HelpFormatter._expand_help
+
+    def _expand_help(self, action):
+        if action.help is not None and not isinstance(action.help, str):
+            action.help = repr(action.help)
+        return original_expand_help(self, action)
+
+    argparse.HelpFormatter._expand_help = _expand_help
 
 
 @hydra.main(config_path="../verl/trainer/config", config_name="ppo_trainer", version_base=None)

@@ -17,9 +17,7 @@
 
 import copy
 
-import modelopt.torch.quantization as mtq
 import torch.nn as nn
-from modelopt.torch.quantization.config import FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG, _default_disabled_quantizer_cfg
 
 from verl.utils.qat.core import get_fp8_weight_block_size, is_fp8_qat_mode, normalize_qat_mode
 
@@ -58,6 +56,8 @@ def build_quantize_config(
     weight_block_size: list[int] | None = None,
 ) -> dict:
     """Build a complete ModelOpt quantization config for ``mtq.quantize``."""
+    from modelopt.torch.quantization.config import FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG, _default_disabled_quantizer_cfg
+
     if ignore_patterns is None:
         ignore_patterns = []
 
@@ -94,6 +94,8 @@ def apply_qat(
     weight_block_size: list[int] | None = None,
 ) -> nn.Module:
     """Apply Quantization-Aware Training to a Megatron model."""
+    import modelopt.torch.quantization as mtq
+
     config = build_quantize_config(qat_mode, ignore_patterns, weight_block_size)
     mtq.quantize(model, config)
     return model

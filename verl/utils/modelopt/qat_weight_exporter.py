@@ -20,19 +20,6 @@ from dataclasses import dataclass
 from typing import Any, Iterator, Optional
 
 import torch
-from modelopt.torch.export.quant_utils import (
-    QUANTIZATION_FP8_PB_REAL,
-    QUANTIZATION_FP8_PB_WO,
-    QUANTIZATION_NONE,
-    QUANTIZATION_NVFP4,
-    get_quantization_format,
-    get_weight_block_size,
-    to_quantized_weight,
-)
-from modelopt.torch.quantization.qtensor.fp8_tensor import FP8QTensor
-from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
-
-from verl.utils.megatron_utils import unwrap_model
 
 # NVFP4 two-level scaling denominator: FP4_MAX (6.0) * FP8_MAX (448.0).
 _NVFP4_AMAX_DENOMINATOR = 6.0 * 448.0
@@ -95,14 +82,19 @@ class QATWeightExporter:
         quantized weight plus its scaling factors when the parameter is
         quantized, or the original tensor unchanged otherwise.
         """
+        from modelopt.torch.export import quant_utils
+
         for hf_name, weight in per_tensor_param:
             meta = self._resolve_quant_metadata(hf_name)
             if meta is None:
                 yield (hf_name, weight)
             else:
-                if meta.qformat == QUANTIZATION_NVFP4:
+                if meta.qformat == quant_utils.QUANTIZATION_NVFP4:
                     yield from self._quantize_nvfp4(hf_name, weight, meta)
-                elif meta.qformat in {QUANTIZATION_FP8_PB_REAL, QUANTIZATION_FP8_PB_WO}:
+                elif meta.qformat in {
+                    quant_utils.QUANTIZATION_FP8_PB_REAL,
+                    quant_utils.QUANTIZATION_FP8_PB_WO,
+                }:
                     yield from self._quantize_fp8_blockwise(hf_name, weight, meta)
                 else:
                     raise AssertionError(f"Unsupported qformat: {meta.qformat}")
@@ -113,11 +105,15 @@ class QATWeightExporter:
 
     @staticmethod
     def _get_model_config(actor_module):
+        from verl.utils.megatron_utils import unwrap_model
+
         model = unwrap_model(actor_module[0])
         return getattr(model, "config", None)
 
     @staticmethod
     def _count_local_experts(actor_module) -> int:
+        from verl.utils.megatron_utils import unwrap_model
+
         indices: set[int] = set()
         for module in actor_module:
             model = unwrap_model(module)
@@ -128,13 +124,17 @@ class QATWeightExporter:
         return max(indices) + 1 if indices else 0
 
     def _collect_metadata(self, actor_module: list) -> None:
+        from modelopt.torch.export import quant_utils
+
+        from verl.utils.megatron_utils import unwrap_model
+
         for vpp_idx, module in enumerate(actor_module):
             model = unwrap_model(module)
             for name, submodule in model.named_modules():
-                qformat = get_quantization_format(submodule)
-                if qformat == QUANTIZATION_NONE:
+                qformat = quant_utils.get_quantization_format(submodule)
+                if qformat == quant_utils.QUANTIZATION_NONE:
                     continue
-                block_size = get_weight_block_size(submodule)
+                block_size = quant_utils.get_weight_block_size(submodule)
                 if block_size == 0:
                     continue
 
@@ -238,6 +238,9 @@ class QATWeightExporter:
           ``(weight_scale_2, global_scale_from_amax)``
           ``(input_scale, activation_scale)`` -- only when available
         """
+        from modelopt.torch.export.quant_utils import to_quantized_weight
+        from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
+
         w_amax = meta.weight_amax.to(weight.device)
         w_scale_2 = w_amax.float() / _NVFP4_AMAX_DENOMINATOR
 
@@ -272,6 +275,8 @@ class QATWeightExporter:
         """
         if meta.block_sizes is None:
             raise ValueError(f"FP8 blockwise export requires block_sizes for {name}")
+
+        from modelopt.torch.quantization.qtensor.fp8_tensor import FP8QTensor
 
         quantized, scale = FP8QTensor.quantize(weight, block_sizes=meta.block_sizes)
         if str(getattr(self, "qat_mode", "")).lower() == "w8a16":
@@ -329,6 +334,8 @@ def _dequantize_fp8_blockwise(
 
 
 def _compute_input_scale(meta: _QuantMeta) -> Optional[torch.Tensor]:
+    from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
+
     if meta.input_quantizer is not None:
         if hasattr(NVFP4QTensor, "get_activation_scaling_factor"):
             return NVFP4QTensor.get_activation_scaling_factor(meta.input_quantizer)
