@@ -583,30 +583,36 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         self._fit_save_checkpoint(force=True)
 
     def _log_batch_storage(self, stage: str, batch: DataProto | None) -> None:
-        summary = _dataproto_storage_summary(batch)
-        rss_gb = _bytes_to_gb(psutil.Process(os.getpid()).memory_info().rss)
-        logger.info(
-            "[FullyAsyncTrainer][Storage][%s] "
-            "rss=%.3fGB batch_len=%s tensor=%.3fGB non_tensor=%.3fGB "
-            "meta=%.3fGB multi_modal_inputs=%.3fGB intermediate_rows=%s "
-            "rows_with_intermediate=%s per_row_counts=%s tensor_shapes=%s",
-            stage,
-            rss_gb,
-            summary.get("batch_len"),
-            summary.get("tensor_gb", 0.0),
-            summary.get("non_tensor_gb", 0.0),
-            summary.get("meta_gb", 0.0),
-            summary.get("multi_modal_inputs_gb", 0.0),
-            summary.get("num_intermediate", 0),
-            summary.get("rows_with_intermediate", 0),
-            summary.get("per_row_counts", []),
-            summary.get("tensor_shapes", {}),
-        )
-        if "payload_gb" in summary:
-            logger.info(
-                "[FullyAsyncTrainer][Storage][%s] intermediate_payload=%.3fGB",
-                stage,
-                summary["payload_gb"],
+        try:
+            summary = _dataproto_storage_summary(batch)
+            rss_gb = _bytes_to_gb(psutil.Process(os.getpid()).memory_info().rss)
+            ts = datetime.now().isoformat(timespec="milliseconds")
+            message = (
+                f"[FullyAsyncTrainer][Storage][{stage}] "
+                f"ts={ts} pid={os.getpid()} global_step={getattr(self, 'global_steps', None)} "
+                f"local_trigger_step={getattr(self, 'local_trigger_step', None)} "
+                f"param_version={getattr(self, 'current_param_version', None)} "
+                f"rss={rss_gb:.3f}GB batch_len={summary.get('batch_len')} "
+                f"tensor={summary.get('tensor_gb', 0.0):.3f}GB "
+                f"non_tensor={summary.get('non_tensor_gb', 0.0):.3f}GB "
+                f"meta={summary.get('meta_gb', 0.0):.3f}GB "
+                f"multi_modal_inputs={summary.get('multi_modal_inputs_gb', 0.0):.3f}GB "
+                f"intermediate_rows={summary.get('num_intermediate', 0)} "
+                f"rows_with_intermediate={summary.get('rows_with_intermediate', 0)} "
+                f"per_row_counts={summary.get('per_row_counts', [])} "
+                f"tensor_shapes={summary.get('tensor_shapes', {})}"
+            )
+            print(message, flush=True)
+            if "payload_gb" in summary:
+                print(
+                    f"[FullyAsyncTrainer][Storage][{stage}] ts={ts} intermediate_payload={summary['payload_gb']:.3f}GB",
+                    flush=True,
+                )
+        except Exception as exc:
+            logger.exception("[FullyAsyncTrainer][Storage][%s] failed to collect storage log", stage)
+            print(
+                f"[FullyAsyncTrainer][Storage][{stage}] failed to collect storage log: {exc!r}",
+                flush=True,
             )
 
     async def fit_step(self, batch_dict: dict = None):
