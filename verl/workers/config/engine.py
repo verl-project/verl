@@ -308,6 +308,7 @@ class VeOmniEngineConfig(EngineConfig):
         mixed_precision (Optional[dict[str, Any]]): Mixed precision configuration for FSDP, default None
 
     """
+
     _mutable_fields = EngineConfig._mutable_fields | {"attn_implementation"}
     wrap_policy: dict[str, Any] = field(default_factory=dict)
     offload_policy: bool = False
