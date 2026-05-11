@@ -14,6 +14,7 @@
 import functools
 import logging
 import os
+import time
 from contextlib import nullcontext
 from copy import deepcopy
 from functools import partial
@@ -55,6 +56,62 @@ from verl.workers.utils.losses import ppo_loss
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+
+def _debug_shape(value):
+    try:
+        shape = getattr(value, "shape", None)
+        if shape is not None:
+            return tuple(shape)
+    except Exception:
+        pass
+    return type(value).__name__
+
+
+def _debug_sum(value):
+    try:
+        total = value.sum()
+        if isinstance(total, torch.Tensor):
+            return total.detach().item()
+        return total
+    except Exception as exc:
+        return f"<sum_failed:{type(exc).__name__}>"
+
+
+def _debug_tensordict_summary(data: TensorDict) -> dict:
+    try:
+        keys = list(data.keys())
+    except Exception as exc:
+        keys = [f"<keys_failed:{type(exc).__name__}>"]
+
+    shapes = {}
+    for key in (
+        "input_ids",
+        "attention_mask",
+        "position_ids",
+        "responses",
+        "response_mask",
+        "loss_mask",
+        "image_grid_thw",
+    ):
+        if key in keys:
+            try:
+                shapes[key] = _debug_shape(data[key])
+            except Exception as exc:
+                shapes[key] = f"<shape_failed:{type(exc).__name__}>"
+
+    loss_mask_sum = None
+    for key in ("loss_mask", "response_mask"):
+        if key in keys:
+            loss_mask_sum = _debug_sum(data[key])
+            break
+
+    return {
+        "batch_shape": _debug_shape(data),
+        "keys": keys,
+        "tensor_shapes": shapes,
+        "loss_mask_sum": loss_mask_sum,
+    }
 
 
 def _with_routing_replay_flag(enabled: bool):
@@ -387,6 +444,17 @@ class TrainingWorker(Worker, DistProfilerExtension):
         disable_auto_offload = tu.get(data, key="disable_auto_offload", default=False)
         no_lora_adapter = tu.pop(data, key="no_lora_adapter", default=False)
         images_seqlens = tu.get(data, key="images_seqlens", default=None)
+        print(
+            "[TrainingWorker][infer_batch][enter] "
+            f"ts={time.time():.3f} rank={torch.distributed.get_rank()} "
+            f"dp_rank={self.engine.get_data_parallel_rank()} "
+            f"dp_size={self.engine.get_data_parallel_size()} "
+            f"world_size={torch.distributed.get_world_size()} "
+            f"compute_loss={compute_loss} no_lora_adapter={no_lora_adapter} "
+            f"disable_auto_offload={disable_auto_offload} "
+            f"summary={_debug_tensordict_summary(data)}",
+            flush=True,
+        )
 
         default_keys = dict(
             use_remove_padding=self.model_config.get("use_remove_padding", False),
@@ -409,7 +477,19 @@ class TrainingWorker(Worker, DistProfilerExtension):
         ):
             adapter_ctx = self.engine.disable_adapter() if no_lora_adapter else nullcontext()
             with adapter_ctx:
+                print(
+                    "[TrainingWorker][infer_batch][before_engine_infer] "
+                    f"ts={time.time():.3f} rank={torch.distributed.get_rank()} "
+                    f"summary={_debug_tensordict_summary(data)}",
+                    flush=True,
+                )
                 output = self.engine.infer_batch(data, loss_function=loss_function)
+                print(
+                    "[TrainingWorker][infer_batch][after_engine_infer] "
+                    f"ts={time.time():.3f} rank={torch.distributed.get_rank()} "
+                    f"output_none={output is None}",
+                    flush=True,
+                )
         delta_time = timer.last
 
         if self.engine.is_mp_src_rank_with_outputs():
@@ -630,7 +710,19 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @DistProfiler.annotate(color="olive", role="ref_compute_log_prob")
     @_with_routing_replay_flag(enabled=False)
     def compute_ref_log_prob(self, data: TensorDict) -> TensorDict:
+        print(
+            "[ActorRolloutRefWorker][compute_ref_log_prob][enter] "
+            f"ts={time.time():.3f} rank={torch.distributed.get_rank()} role={self.role} "
+            f"summary={_debug_tensordict_summary(data)}",
+            flush=True,
+        )
         output = self.ref.infer_batch(data=data)
+        print(
+            "[ActorRolloutRefWorker][compute_ref_log_prob][exit] "
+            f"ts={time.time():.3f} rank={torch.distributed.get_rank()} "
+            f"output_none={output is None}",
+            flush=True,
+        )
         return output.cpu() if output is not None else None
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
