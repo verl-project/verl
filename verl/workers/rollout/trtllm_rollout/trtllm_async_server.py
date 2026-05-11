@@ -320,6 +320,7 @@ class TRTLLMHttpServer:
     ) -> TokenOutput:
         from tensorrt_llm.llmapi import SamplingParams
 
+        sampling_params = dict(sampling_params)
         max_tokens = min(
             self.config.response_length,
             self.config.prompt_length + self.config.response_length - len(prompt_ids),

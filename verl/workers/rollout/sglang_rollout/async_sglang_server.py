@@ -519,6 +519,8 @@ class SGLangHttpServer:
             _, decode_output = await asyncio.gather(prefill_coro, decode_coro)
             return decode_output
 
+        sampling_params = dict(sampling_params)
+
         # TODO(@wuxibin): switch to `/generate` http endpoint once multi-modal support ready.
         max_possible_tokens = self.config.max_model_len - len(prompt_ids) - 1
 
