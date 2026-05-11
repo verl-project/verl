@@ -1,7 +1,7 @@
 Ascend Dockerfile Build Guidance
 ===================================
 
-Last updated: 05/09/2025.
+Last updated: 05/09/2026.
 
 
 镜像获取 & 公开镜像地址
@@ -43,9 +43,10 @@ Megatron-LM        v0.12.1
 MindSpeed          2.3.0_core_r0.12.1
 triton-ascend      3.2.0
 mbridge            0.15.1
-SGLang             v0.5.8
-sgl-kernel-npu     (46b73de)
+SGLang             v0.5.10
+sgl-kernel-npu     2026.02.01
 ================= ============
+
 
 
 Dockerfile构建镜像脚本清单
@@ -65,6 +66,11 @@ A3              8.5.0          vLLM            `Dockerfile.ascend_8.5.0_a3 <http
 A3              8.3.RC1        SGLang          `Dockerfile.ascend.sglang_8.3.rc1_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend.sglang_8.3.rc1_a3>`_
 A3              8.5.0          SGLang          `Dockerfile.ascend.sglang_8.5.0_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend.sglang_8.5.0_a3>`_
 ============== ============== ============== ==============================================================
+
+**说明：**
+
+* 推理后端为 ``vLLM`` 镜像中，vLLM、vLLM-ascend、MindSpeed、Megatron-LM、verl 为源码安装，源码位于镜像根目录 ``/`` 下。
+* 推理后端为 ``SGLang`` 镜像中，SGLang、MindSpeed、verl 为源码安装，源码位于镜像根目录 ``/`` 下。
 
 
 镜像构建命令示例
@@ -106,7 +112,7 @@ A3              8.5.0          SGLang          `Dockerfile.ascend.sglang_8.5.0_a
 * 如需挂载其他本地路径到容器，请自行添加 ``-v <宿主机路径>:<容器内路径>``
 * 建议将 ``your_docker_name`` 替换为具有实际意义的容器名称
 * ``--privileged`` 参数授予容器扩展权限，请根据实际安全需求评估是否必要
-* ``image_name:tag``请换成自定义的镜像名称与标签
+* ``image_name:tag`` 请换成自定义的镜像名称与标签
 
 启动容器
 --------
