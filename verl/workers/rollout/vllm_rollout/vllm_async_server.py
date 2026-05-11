@@ -123,6 +123,11 @@ class vLLMHttpServer:
         self.nnodes = nnodes
         # model weights version, set by ServerAdapter when update weights.
         self.global_steps = None
+        # Whether the engine was launched with an external KV store (Mooncake)
+        # connector. Set inside launch_server() once kv_transfer_config is
+        # built; gates reset_connector=True on cache resets so we do not
+        # serve KV computed against previous weights from the external pool.
+        self._kv_store_enabled = False
 
         if self.rollout_mode != RolloutMode.HYBRID and self.config.load_format == "dummy":
             logger.warning(f"rollout mode is {self.rollout_mode}, load_format is dummy, set to auto")
@@ -346,6 +351,30 @@ class vLLMHttpServer:
         if self.config.enable_rollout_routing_replay:
             args.update({"enable_return_routed_experts": True})
 
+        # External Mooncake KV store offload: forward kv_transfer_config to
+        # vLLM if rollout.kv_store.enable is set. The connector itself decides
+        # how to talk to the Mooncake master (config_path / env). On every
+        # weight update we drive a hard reset via reset_prefix_cache(
+        # reset_connector=True), which makes vLLM call
+        # MooncakeStoreConnector.reset_cache() -> store.remove_all(force=True).
+        kv_store_cfg = getattr(self.config, "kv_store", None)
+        self._kv_store_enabled = bool(kv_store_cfg and kv_store_cfg.get("enable", False))
+        if self._kv_store_enabled:
+            extra_config = dict(kv_store_cfg.get("extra_config", {}) or {})
+            config_path = kv_store_cfg.get("config_path")
+            if config_path:
+                # MooncakeStoreWorker reads MOONCAKE_CONFIG_PATH from env;
+                # vLLM serve also accepts kv_connector_extra_config so we
+                # pass both for clarity. The env var is set by the per-run
+                # master wrapper script before `ray job submit`.
+                extra_config.setdefault("mooncake_config_path", config_path)
+            kv_transfer_config = {
+                "kv_connector": kv_store_cfg.get("kv_connector", "MooncakeStoreConnector"),
+                "kv_role": kv_store_cfg.get("kv_role", "kv_both"),
+                "kv_connector_extra_config": extra_config,
+            }
+            args["kv_transfer_config"] = json.dumps(kv_transfer_config)
+
         server_args = ["serve", self.model_config.local_path] + build_cli_args_from_config(args)
 
         if self.replica_rank == 0:
@@ -561,7 +590,9 @@ class vLLMHttpServer:
         elif self.rollout_mode == RolloutMode.COLOCATED:
             # Directly call engine to wake up without sync weights.
             await self.engine.wake_up(tags=self._get_wake_up_tags())
-            await self.engine.reset_prefix_cache()
+            await self.engine.reset_prefix_cache(
+                reset_connector=self._kv_store_enabled,
+            )
         elif self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip wake_up in standalone mode")
 
@@ -594,7 +625,13 @@ class vLLMHttpServer:
 
     async def clear_kv_cache(self):
         if self.node_rank == 0:
-            await self.engine.reset_prefix_cache()
+            # When kv_store is enabled, propagate reset_connector=True so the
+            # external Mooncake store (whose entries were computed against the
+            # previous model weights) is also dropped before any new request
+            # can read stale KV via vLLM's external prefix cache path.
+            await self.engine.reset_prefix_cache(
+                reset_connector=self._kv_store_enabled,
+            )
 
     async def set_global_steps(self, global_steps: int):
         """Set the global steps of the model weights."""
@@ -632,6 +669,12 @@ class vLLMHttpServer:
                     wait_for_inflight_requests=False,
                     clear_cache=reset_prefix_cache,
                 )
+                # AsyncLLM.pause_generation's internal cache flush does not
+                # propagate reset_connector through; do an explicit one when
+                # an external KV store is attached so the Mooncake master is
+                # cleared along with the in-engine prefix cache.
+                if reset_prefix_cache and self._kv_store_enabled:
+                    await self.engine.reset_prefix_cache(reset_connector=True)
             else:
                 # Take an atomic snapshot to avoid race conditions with the vLLM engine thread
                 request_states_snapshot = list(self.engine.output_processor.request_states.items())

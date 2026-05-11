@@ -31,8 +31,46 @@ __all__ = [
     "PrometheusConfig",
     "RolloutConfig",
     "CheckpointEngineConfig",
+    "KVStoreConfig",
     "SkipConfig",
 ]
+
+
+@dataclass
+class KVStoreConfig(BaseConfig):
+    """External KV cache store configuration for the vLLM rollout engine.
+
+    When ``enable`` is true, verl asks vLLM to attach a
+    ``MooncakeStoreConnector`` so that prefix KV blocks are offloaded to a
+    shared Mooncake master. On every weight update verl drives a hard reset
+    (``engine.reset_prefix_cache(reset_connector=True)``) so the master's
+    stale entries are dropped before any new rollout reads them.
+
+    See ``mooncake-integration/`` for the per-run master start/stop wrapper.
+    """
+
+    # Enable external KV store offload.
+    enable: bool = False
+
+    # KVConnector class name forwarded to ``--kv-transfer-config``.
+    kv_connector: str = "MooncakeStoreConnector"
+
+    # vLLM kv_role. ``kv_both`` lets the rollout engine both put and get.
+    kv_role: str = "kv_both"
+
+    # Path to Mooncake client config JSON (``master_server_address``,
+    # ``global_segment_size``, ``protocol``, ...). Falls back to the
+    # ``MOONCAKE_CONFIG_PATH`` env var when None.
+    config_path: Optional[str] = None
+
+    # Optional extra dict merged into vLLM's
+    # ``kv_connector_extra_config``. Use sparingly.
+    extra_config: dict = field(default_factory=dict)
+
+    # Behavior when the Mooncake master is unreachable at engine launch:
+    # ``fallback`` (default) -> log a warning, drop the connector, keep
+    # training; ``crash`` -> let the engine start fail and propagate.
+    on_failure: str = "fallback"
 
 
 @dataclass
@@ -243,6 +281,9 @@ class RolloutConfig(BaseConfig):
 
     # Checkpoint Engine config for update weights from trainer to rollout
     checkpoint_engine: CheckpointEngineConfig = field(default_factory=CheckpointEngineConfig)
+
+    # External Mooncake KV store offload (RL-correct hard-reset path).
+    kv_store: KVStoreConfig = field(default_factory=KVStoreConfig)
 
     # Rollout skip config (load/dump rollout data)
     skip: SkipConfig = field(default_factory=SkipConfig)
