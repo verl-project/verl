@@ -40,6 +40,8 @@ Below are key factors for tuning vLLM-based rollout. Before tuning, we recommend
 
   Note: since the definition of ``gpu_memory_utilization`` varies across inference engines, a value that works well for one engine may cause OOM for another.
 
+  For **SGLang** rollout with weight sync, ``actor_rollout_ref.rollout.allow_stale_kv_cache_after_weight_sync`` (default ``False``) can skip ``flush_cache`` after updating weights for experimental PipelineRL-style runs; logits may be inconsistent when enabled.
+
 - Adjust ``max_num_seqs`` or ``max_num_batched_tokens``.
   If the GPU cache utilization is relatively low in the log, increase ``max_num_seqs`` or ``max_num_batched_tokens`` 
   can enlarge the effective batch size in the decoding stage, allowing more concurrent requests per batch. 
