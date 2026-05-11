@@ -20,7 +20,6 @@ This trainer supports model-agonistic model initialization with huggingface
 """
 
 import uuid
-from copy import deepcopy
 from pprint import pprint
 from typing import Any, Optional
 
