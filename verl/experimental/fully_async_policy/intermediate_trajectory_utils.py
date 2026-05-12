@@ -1,4 +1,4 @@
-# Copyright 2025 Bytedance Ltd. and/or its affiliates
+# Copyright 2026 Tencent Ltd. and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 """Trainer-side expansion of ``intermediate_trajectories`` into DataProto rows.
 
 This module implements the consumer end of the :class:`MultiTrajectoryAgentLoop`
@@ -37,6 +38,7 @@ from verl import DataProto
 from verl.experimental.agent_loop.multi_trajectory_agent_loop import (
     INTERMEDIATE_TRAJECTORIES_KEY,
 )
+from verl.experimental.fully_async_policy.image_refs import MULTI_MODAL_REFS_KEY
 from verl.utils.model import compute_position_id_with_mask
 
 # Data flow logger — imported lazily to avoid hard dependency.
@@ -162,14 +164,20 @@ def assert_batch_schema(
                     # _compute_position_ids handles this correctly.
                     if has_processor:
                         mm = traj.get("multi_modal_data")
-                        _has_vision = bool(mm and (mm.get("images") or mm.get("videos")))
+                        refs = traj.get(MULTI_MODAL_REFS_KEY)
+                        _has_vision = bool(
+                            (mm and (mm.get("images") or mm.get("videos")))
+                            or (refs and (refs.get("image_ids") or refs.get("video_ids")))
+                        )
                         if not _has_vision:
                             logger.warning(
-                                "[%s] intermediate_col[%d][%d] has no multi_modal_data (got %r). num_turns=%s",
+                                "[%s] intermediate_col[%d][%d] has no multi_modal_data/image_refs "
+                                "(multi_modal_data=%r, refs=%r). num_turns=%s",
                                 stage,
                                 row_idx,
                                 traj_idx,
                                 mm,
+                                refs,
                                 traj.get("num_turns", "?"),
                             )
 
@@ -321,6 +329,8 @@ def _build_one_intermediate_row(
     response_logprobs_raw = traj.get("response_logprobs")
     routed_experts_raw = traj.get("routed_experts")
     multi_modal_data = traj.get("multi_modal_data")
+    multi_modal_refs = traj.get(MULTI_MODAL_REFS_KEY)
+    image_ref_mode = multi_modal_refs is not None
 
     # Note: it is valid for an intermediate trajectory to have no
     # multi_modal_data (e.g. a text-only turn after a tool failure that
@@ -328,7 +338,7 @@ def _build_one_intermediate_row(
     # this correctly by always producing 3D position_ids when a processor
     # is present, even without multi_modal_inputs. We log a warning so the
     # situation is visible but do NOT raise.
-    if processor is not None:
+    if processor is not None and not image_ref_mode:
         _has_images = bool(multi_modal_data and multi_modal_data.get("images"))
         _has_videos = bool(multi_modal_data and multi_modal_data.get("videos"))
         if not _has_images and not _has_videos:
@@ -393,7 +403,10 @@ def _build_one_intermediate_row(
             )
         routed_experts_padded[:, start_pos:end_pos] = experts_tensor[: end_pos - start_pos].unsqueeze(0)
 
-    multi_modal_inputs = _compute_multi_modal_inputs(processor, tokenizer, multi_modal_data, input_ids)
+    if image_ref_mode:
+        multi_modal_inputs = {}
+    else:
+        multi_modal_inputs = _compute_multi_modal_inputs(processor, tokenizer, multi_modal_data, input_ids)
     position_ids = _compute_position_ids(processor, input_ids, attention_mask, multi_modal_inputs)
 
     # Build tensor batch
@@ -475,12 +488,17 @@ def _build_one_intermediate_row(
         arr[0] = v
         non_tensor_batch[k] = arr
 
-    # Multi-modal inputs attached as object array, matching AgentLoopWorker convention.
-    # Always emit this key (with an empty dict if needed) so that the schema
-    # stays consistent with the main row produced by ``_combine_agent_loop_outputs``.
-    mm_arr = np.empty(1, dtype=object)
-    mm_arr[0] = multi_modal_inputs if multi_modal_inputs else {}
-    non_tensor_batch["multi_modal_inputs"] = mm_arr
+    if image_ref_mode:
+        refs_arr = np.empty(1, dtype=object)
+        refs_arr[0] = multi_modal_refs
+        non_tensor_batch[MULTI_MODAL_REFS_KEY] = refs_arr
+    else:
+        # Multi-modal inputs attached as object array, matching AgentLoopWorker convention.
+        # Always emit this key (with an empty dict if needed) so that the schema
+        # stays consistent with the main row produced by ``_combine_agent_loop_outputs``.
+        mm_arr = np.empty(1, dtype=object)
+        mm_arr[0] = multi_modal_inputs if multi_modal_inputs else {}
+        non_tensor_batch["multi_modal_inputs"] = mm_arr
 
     return DataProto(batch=td, non_tensor_batch=non_tensor_batch)
 

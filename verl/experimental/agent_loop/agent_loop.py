@@ -46,6 +46,7 @@ from tensordict import TensorDict
 from transformers import AutoProcessor, AutoTokenizer
 
 from verl.experimental.agent_loop.utils import resolve_config_path
+from verl.experimental.fully_async_policy.image_refs import MULTI_MODAL_DATA_KEY, image_refs_enabled
 from verl.protocol import DataProto
 from verl.tools.utils.function_tool import FunctionTool, load_function_tools_from_path
 from verl.trainer.distillation import is_distillation_enabled
@@ -370,6 +371,7 @@ class AgentLoopWorker:
         self.dataset_cls = get_dataset_class(config.data)
         self.tokenizer = self.model_config.tokenizer
         self.processor = self.model_config.processor
+        self.image_refs_enabled = image_refs_enabled(config)
 
         # Online policy distillation
         self.distillation_enabled = is_distillation_enabled(config.distillation)
@@ -736,8 +738,12 @@ class AgentLoopWorker:
 
             routed_experts[:, start_pos:end_pos] = experts_tensor.unsqueeze(0)
 
-        multi_modal_inputs = self._compute_multi_modal_inputs(output, input_ids)
-        position_ids = self._compute_position_ids(input_ids, attention_mask, multi_modal_inputs)
+        if self.image_refs_enabled:
+            multi_modal_inputs = None
+            position_ids = self._compute_position_ids(input_ids, attention_mask, {})
+        else:
+            multi_modal_inputs = self._compute_multi_modal_inputs(output, input_ids)
+            position_ids = self._compute_position_ids(input_ids, attention_mask, multi_modal_inputs)
         await self._compute_score(
             output,
             prompts=prompt_output["input_ids"],
@@ -970,10 +976,15 @@ class AgentLoopWorker:
         for key in reward_extra_keys:
             non_tensor_batch[key] = np.array([info[key] for info in reward_extra_infos])
 
-        # Add multi_modal_inputs to non_tensor_batch if any samples have them
-        multi_modal_inputs_list = [input.multi_modal_inputs for input in inputs]
-        if any(mmi is not None for mmi in multi_modal_inputs_list):
-            non_tensor_batch["multi_modal_inputs"] = np.array(multi_modal_inputs_list, dtype=object)
+        if self.image_refs_enabled:
+            multi_modal_data_arr = np.empty(len(inputs), dtype=object)
+            multi_modal_data_arr[:] = [input.multi_modal_data or {} for input in inputs]
+            non_tensor_batch[MULTI_MODAL_DATA_KEY] = multi_modal_data_arr
+        else:
+            # Add multi_modal_inputs to non_tensor_batch if any samples have them
+            multi_modal_inputs_list = [input.multi_modal_inputs for input in inputs]
+            if any(mmi is not None for mmi in multi_modal_inputs_list):
+                non_tensor_batch["multi_modal_inputs"] = np.array(multi_modal_inputs_list, dtype=object)
 
         metrics = [input.metrics.model_dump() for input in inputs]
         # Collect extra fields from all inputs and convert them to np.ndarray

@@ -50,7 +50,7 @@ from verl.utils.fsdp_utils import (
     offload_fsdp_model_to_cpu,
     offload_fsdp_optimizer,
 )
-from verl.utils.model import extract_multi_modal_inputs
+from verl.utils.model import resolve_multi_modal_refs
 from verl.utils.torch_functional import logprobs_from_logits
 from verl.workers.config import HFModelConfig, TorchtitanEngineConfig, TorchtitanOptimizerConfig
 from verl.workers.engine.torchtitan.utils import (
@@ -579,7 +579,15 @@ class TorchTitanEngineWithLMHead(TorchTitanEngine):
         pad_mode = tu.get_non_tensor_data(data=micro_batch, key="pad_mode", default=DatasetPadMode.NO_PADDING)
         assert pad_mode == DatasetPadMode.NO_PADDING, f"pad_mode {pad_mode} not supported"
 
-        multi_modal_inputs = extract_multi_modal_inputs(micro_batch.get("multi_modal_inputs", []))
+        bank_cache = getattr(self, "_image_ref_bank_cache", None)
+        if bank_cache is None:
+            bank_cache = self._image_ref_bank_cache = {}
+        multi_modal_inputs = resolve_multi_modal_refs(
+            micro_batch,
+            self.model_config.tokenizer,
+            self.model_config.processor,
+            bank_cache=bank_cache,
+        )
         input_ids = micro_batch["input_ids"]
         position_ids = micro_batch["position_ids"]
         output_args = {}

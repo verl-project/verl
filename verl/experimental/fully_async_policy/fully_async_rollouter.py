@@ -31,6 +31,11 @@ from verl.experimental.fully_async_policy.detach_utils import (
     prepare_single_generation_data,
     safe_create_task,
 )
+from verl.experimental.fully_async_policy.image_refs import (
+    attach_image_bank_ref,
+    attach_image_refs_to_dataproto,
+    image_refs_enabled,
+)
 from verl.experimental.fully_async_policy.message_queue import MessageQueueClient
 from verl.experimental.separation.ray_trainer import SeparateRayPPOTrainer
 from verl.protocol import DataProto
@@ -91,6 +96,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         self.tokenizer = tokenizer
         self.processor = processor
         self.config = config
+        self.image_refs_enabled = image_refs_enabled(config)
         self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
 
         assert not self.hybrid_engine
@@ -697,10 +703,31 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         rollout_sample.full_batch.non_tensor_batch["uid"] = np.array(
             [f"uid_{rollout_sample.sample_id}"] * len(rollout_sample.full_batch), dtype=object
         )
+        if self.image_refs_enabled:
+            image_ref_start = time.time()
+            rollout_sample.full_batch, image_bank, image_bank_stats = attach_image_refs_to_dataproto(
+                rollout_sample.full_batch,
+                processor=self.processor,
+                sample_id=rollout_sample.sample_id,
+            )
+            image_bank_ref = ray.put(image_bank) if image_bank else None
+            rollout_sample.full_batch = attach_image_bank_ref(rollout_sample.full_batch, image_bank_ref)
+            image_bank_stats["bank_ref_put_ms"] = (time.time() - image_ref_start) * 1000.0
+            rollout_sample.image_bank_ref = image_bank_ref
+            rollout_sample.image_bank_stats = image_bank_stats
+            print(
+                "[ImageRefs][rollouter] "
+                f"sample_id={rollout_sample.sample_id} bank_ref_set={image_bank_ref is not None} "
+                f"unique_images={image_bank_stats.get('unique_images', 0)} "
+                f"processed_bytes={image_bank_stats.get('processed_bytes', 0)} "
+                f"bank_ref_put_ms={image_bank_stats['bank_ref_put_ms']:.2f}",
+                flush=True,
+            )
         rollout_sample.rollout_status = await self.get_statistics()
 
+        sample_ref = ray.put(rollout_sample)
         success = await self.message_queue_client.put_sample(
-            sample=ray.cloudpickle.dumps(rollout_sample),
+            sample=sample_ref,
         )
         if success:
             self.total_generated_samples += 1

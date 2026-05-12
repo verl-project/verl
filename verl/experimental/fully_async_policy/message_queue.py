@@ -54,10 +54,13 @@ class MessageQueue:
 
     async def put_sample(self, sample: Any) -> bool:
         """
-        Put a batch sample into the queue
+        Put a batch sample into the queue.
+
+        In fully async image-ref mode, ``sample`` is a Ray ObjectRef pointing to
+        a RolloutSample. ``None`` is still used as the termination sentinel.
 
         Args:
-            sample: Sample data
+            sample: Sample ObjectRef/data or termination sentinel.
 
         Returns:
             bool: Whether the sample was successfully put into the queue

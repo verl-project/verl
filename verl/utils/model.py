@@ -20,11 +20,12 @@ import os
 import re
 import warnings
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
+import ray
 import torch
-from tensordict.tensorclass import NonTensorData
+from tensordict.tensorclass import NonTensorData, NonTensorStack
 from torch import nn
 from transformers import (
     AutoConfig,
@@ -753,6 +754,218 @@ def extract_multi_modal_inputs(
             multi_modal_inputs[key] = torch.cat(values, dim=0)
 
     return multi_modal_inputs
+
+
+def _unwrap_non_tensor_column(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, NonTensorData):
+        value = value.data
+    if isinstance(value, NonTensorStack):
+        value = value.tolist()
+    if isinstance(value, np.ndarray):
+        value = list(value)
+    if isinstance(value, list | tuple):
+        return [item.data if isinstance(item, NonTensorData) else item for item in value]
+    return [value]
+
+
+def _tensor_row_to_token_list(row: torch.Tensor) -> list[int]:
+    if row.is_nested:
+        raise ValueError("Expected a single non-nested row tensor, got nested tensor")
+    return row.detach().to("cpu", non_blocking=False).reshape(-1).tolist()
+
+
+def _move_tensor_dict(data: dict[str, Any], device: torch.device | str) -> dict[str, Any]:
+    output = {}
+    for key, value in data.items():
+        output[key] = value.to(device) if isinstance(value, torch.Tensor) else value
+    return output
+
+
+def _processed_payload_inputs(payload: Any) -> dict[str, Any]:
+    if isinstance(payload, NonTensorData):
+        payload = payload.data
+    if isinstance(payload, dict) and "inputs" in payload:
+        return payload["inputs"]
+    if isinstance(payload, dict):
+        return payload
+    raise TypeError(f"Unsupported processed image payload type: {type(payload)!r}")
+
+
+def _merge_processed_image_inputs(inputs_list: list[dict[str, Any]]) -> dict[str, Any]:
+    collected: dict[str, list[Any]] = {}
+    for inputs in inputs_list:
+        for key, value in inputs.items():
+            if value is None or key in ("input_ids", "attention_mask"):
+                continue
+            collected.setdefault(key, []).append(value)
+
+    merged: dict[str, Any] = {}
+    for key, values in collected.items():
+        if values and all(isinstance(value, torch.Tensor) for value in values):
+            merged[key] = torch.cat(values, dim=0)
+        else:
+            flattened = []
+            for value in values:
+                if isinstance(value, list):
+                    flattened.extend(value)
+                else:
+                    flattened.append(value)
+            merged[key] = flattened
+
+    image_grid_thw = merged.get("image_grid_thw")
+    if isinstance(image_grid_thw, torch.Tensor) and "images_seqlens" not in merged:
+        merged["images_seqlens"] = torch.repeat_interleave(
+            image_grid_thw[:, 1] * image_grid_thw[:, 2], image_grid_thw[:, 0]
+        )
+    return merged
+
+
+def _compute_vlm_position_ids(
+    processor, input_ids: torch.Tensor, attention_mask: torch.Tensor, multi_modal_inputs: dict
+) -> torch.Tensor:
+    if processor is None:
+        return compute_position_id_with_mask(attention_mask)
+
+    mm_kwargs: dict[str, Any] = {
+        "image_grid_thw": multi_modal_inputs.get("image_grid_thw") if multi_modal_inputs else None,
+        "video_grid_thw": multi_modal_inputs.get("video_grid_thw") if multi_modal_inputs else None,
+    }
+    image_token_id = getattr(processor, "image_token_id", None)
+    video_token_id = getattr(processor, "video_token_id", None)
+    needs_token_type_ids = bool(multi_modal_inputs and multi_modal_inputs.get("mm_token_type_ids") is not None)
+    needs_token_type_ids = needs_token_type_ids or bool(
+        (image_token_id is not None and torch.any(input_ids == image_token_id))
+        or (video_token_id is not None and torch.any(input_ids == video_token_id))
+    )
+    if needs_token_type_ids:
+        mm_token_type_ids = torch.zeros_like(input_ids)
+        if image_token_id is not None:
+            mm_token_type_ids[0][input_ids[0] == image_token_id] = 1
+        if video_token_id is not None:
+            mm_token_type_ids[0][input_ids[0] == video_token_id] = 2
+        mm_kwargs["mm_token_type_ids"] = mm_token_type_ids
+
+    try:
+        vision_position_ids, _ = processor.get_rope_index(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            **mm_kwargs,
+        )
+    except TypeError:
+        if "mm_token_type_ids" not in mm_kwargs:
+            raise
+        mm_kwargs.pop("mm_token_type_ids")
+        vision_position_ids, _ = processor.get_rope_index(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            **mm_kwargs,
+        )
+    vision_position_ids = vision_position_ids.transpose(0, 1)
+    valid_mask = attention_mask[0].bool()
+    text_position_ids = torch.ones((1, input_ids.shape[-1]), dtype=torch.long)
+    text_position_ids[0, valid_mask] = torch.arange(valid_mask.sum().item())
+    text_position_ids = text_position_ids.unsqueeze(0)
+    return torch.cat((text_position_ids, vision_position_ids), dim=1)
+
+
+def resolve_multi_modal_refs(
+    micro_batch,
+    tokenizer,
+    processor,
+    *,
+    bank_cache: dict[Any, Any] | None = None,
+) -> dict[str, torch.Tensor | list[torch.Tensor]]:
+    """Resolve row-level image ids from a processed image bank.
+
+    If the micro-batch does not carry ``multi_modal_refs`` this falls back to
+    the legacy ``multi_modal_inputs`` column. When refs are present, this also
+    overwrites ``micro_batch["position_ids"]`` with position ids recomputed from
+    the resolved image grids.
+    """
+    del tokenizer  # kept in the signature for caller compatibility.
+    refs_col = _unwrap_non_tensor_column(micro_batch.get("multi_modal_refs", None))
+    if not refs_col:
+        return extract_multi_modal_inputs(micro_batch.get("multi_modal_inputs", []))
+
+    bank_refs = _unwrap_non_tensor_column(micro_batch.get("image_bank_ref", None))
+    input_ids = micro_batch["input_ids"]
+    attention_mask = micro_batch.get("attention_mask", None)
+    device = input_ids.device if isinstance(input_ids, torch.Tensor) else torch.device("cpu")
+    input_rows = list(input_ids.unbind()) if input_ids.is_nested else [row for row in input_ids]
+    attention_rows = []
+    if attention_mask is not None:
+        attention_rows = list(attention_mask.unbind()) if attention_mask.is_nested else [row for row in attention_mask]
+    else:
+        attention_rows = [None] * len(input_rows)
+    if len(refs_col) != len(input_rows):
+        raise ValueError(f"multi_modal_refs rows={len(refs_col)} != input_ids rows={len(input_rows)}")
+    if len(attention_rows) != len(input_rows):
+        raise ValueError(f"attention_mask rows={len(attention_rows)} != input_ids rows={len(input_rows)}")
+    if len(bank_refs) < len(refs_col):
+        bank_refs.extend([None] * (len(refs_col) - len(bank_refs)))
+    elif len(bank_refs) > len(refs_col):
+        bank_refs = bank_refs[: len(refs_col)]
+
+    bank_cache = bank_cache if bank_cache is not None else {}
+    row_multi_modal_inputs: list[dict[str, torch.Tensor]] = []
+    position_rows: list[torch.Tensor] = []
+    rows_with_images = 0
+    total_image_refs = 0
+    bank_cache_misses = 0
+
+    for row_idx, (refs, bank_ref, row_input_ids, row_attention) in enumerate(
+        zip(refs_col, bank_refs, input_rows, attention_rows, strict=True)
+    ):
+        refs = refs or {"image_ids": [], "video_ids": []}
+        image_ids = list(refs.get("image_ids") or [])
+        token_ids = _tensor_row_to_token_list(row_input_ids)
+        row_input_ids_2d = torch.tensor(token_ids, dtype=torch.long).unsqueeze(0)
+        if row_attention is None:
+            row_attention_mask = torch.ones_like(row_input_ids_2d)
+        else:
+            row_attention_mask = torch.tensor(_tensor_row_to_token_list(row_attention), dtype=torch.long).unsqueeze(0)
+        if row_attention_mask.shape != row_input_ids_2d.shape:
+            raise ValueError(
+                f"attention_mask shape {tuple(row_attention_mask.shape)} != "
+                f"input_ids shape {tuple(row_input_ids_2d.shape)} for multi_modal_refs row {row_idx}"
+            )
+
+        mm_cpu: dict[str, Any] = {}
+        if image_ids:
+            rows_with_images += 1
+            total_image_refs += len(image_ids)
+            if processor is None:
+                raise ValueError(f"multi_modal_refs row {row_idx} has images but processor is None")
+            if bank_ref is None:
+                raise ValueError(f"multi_modal_refs row {row_idx} has images but image_bank_ref is None")
+            bank_cache_key = str(bank_ref)
+            if bank_cache_key not in bank_cache:
+                bank_cache[bank_cache_key] = ray.get(bank_ref)
+                bank_cache_misses += 1
+            image_bank = bank_cache[bank_cache_key]
+            processed_inputs = []
+            for image_id in image_ids:
+                if image_id not in image_bank:
+                    raise KeyError(f"image_id {image_id[:20]} missing from processed image bank for row {row_idx}")
+                processed_inputs.append(_processed_payload_inputs(image_bank[image_id]))
+            mm_cpu = _merge_processed_image_inputs(processed_inputs)
+
+        pos = _compute_vlm_position_ids(processor, row_input_ids_2d, row_attention_mask, dict(mm_cpu))
+        position_rows.append(pos.squeeze(0))
+        if mm_cpu:
+            row_multi_modal_inputs.append(_move_tensor_dict(mm_cpu, device))
+
+    if position_rows:
+        micro_batch["position_ids"] = torch.nested.as_nested_tensor(position_rows, layout=torch.jagged).to(device)
+    print(
+        "[ImageRefs][resolve] "
+        f"rows={len(refs_col)} rows_with_images={rows_with_images} total_image_refs={total_image_refs} "
+        f"bank_cache_misses={bank_cache_misses} bank_cache_size={len(bank_cache)} device={device}",
+        flush=True,
+    )
+    return extract_multi_modal_inputs(row_multi_modal_inputs)
 
 
 def get_lora_rank_from_adapter(adapter_path: str | os.PathLike) -> int:

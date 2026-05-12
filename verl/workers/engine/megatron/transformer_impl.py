@@ -60,7 +60,7 @@ from verl.utils.megatron_utils import (
     register_megatron_training_hooks,
     unwrap_model,
 )
-from verl.utils.model import extract_multi_modal_inputs, load_mcore_dist_weights
+from verl.utils.model import load_mcore_dist_weights, resolve_multi_modal_refs
 from verl.utils.seqlen_balancing import restore_dynamic_batch
 from verl.workers.config import HFModelConfig, McoreEngineConfig, McoreOptimizerConfig
 
@@ -789,7 +789,15 @@ class MegatronEngineWithLMHead(MegatronEngine):
     def prepare_model_inputs(self, batch: TensorDict):
         input_ids = batch["input_ids"]
         loss_mask = batch["loss_mask"].to(bool)
-        multi_modal_inputs = extract_multi_modal_inputs(batch.get("multi_modal_inputs", []))
+        bank_cache = getattr(self, "_image_ref_bank_cache", None)
+        if bank_cache is None:
+            bank_cache = self._image_ref_bank_cache = {}
+        multi_modal_inputs = resolve_multi_modal_refs(
+            batch,
+            self.model_config.tokenizer,
+            self.model_config.processor,
+            bank_cache=bank_cache,
+        )
 
         routed_experts = batch.get("routed_experts", None)
 

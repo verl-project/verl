@@ -374,7 +374,11 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         queue_len = 0
         while len(queue_samples) < self.required_samples:
             # Get a single sample and wait until there is a sample or None is received
-            sample, queue_len = await self.message_queue_client.get_sample()
+            queue_result = await self.message_queue_client.get_sample()
+            if queue_result is None:
+                sample, queue_len = None, 0
+            else:
+                sample, queue_len = queue_result
 
             if sample is None:
                 logger.info(
@@ -410,7 +414,11 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             queue_len,
         )
 
-        queue_samples = [ray.cloudpickle.loads(x) for x in queue_samples]
+        if queue_samples and all(isinstance(x, bytes | bytearray) for x in queue_samples):
+            # Backward-compatible path for samples produced by older rollouters.
+            queue_samples = [ray.cloudpickle.loads(x) for x in queue_samples]
+        else:
+            queue_samples = ray.get(queue_samples)
         # Assemble batch - now working directly with RolloutSample objects
         if self.config.trainer.balance_batch:
             batch = assemble_batch_from_rollout_samples(

@@ -44,7 +44,7 @@ from verl.utils import tensordict_utils as tu
 from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.utils.debug import log_gpu_memory_usage
 from verl.utils.device import get_device_id, get_device_name
-from verl.utils.model import convert_weight_keys, extract_multi_modal_inputs
+from verl.utils.model import convert_weight_keys, resolve_multi_modal_refs
 from verl.utils.torch_functional import logprobs_from_logits
 from verl.workers.config import AutomodelEngineConfig, AutomodelOptimizerConfig, HFModelConfig
 
@@ -485,7 +485,15 @@ class AutomodelEngineWithLMHead(AutomodelEngine):
             )
         assert pad_mode == DatasetPadMode.NO_PADDING, f"pad_mode {pad_mode} not supported"
 
-        multi_modal_inputs = extract_multi_modal_inputs(micro_batch.get("multi_modal_inputs", []))
+        bank_cache = getattr(self, "_image_ref_bank_cache", None)
+        if bank_cache is None:
+            bank_cache = self._image_ref_bank_cache = {}
+        multi_modal_inputs = resolve_multi_modal_refs(
+            micro_batch,
+            self.model_config.tokenizer,
+            self.model_config.processor,
+            bank_cache=bank_cache,
+        )
         input_ids = micro_batch["input_ids"]
         position_ids = micro_batch["position_ids"]
 

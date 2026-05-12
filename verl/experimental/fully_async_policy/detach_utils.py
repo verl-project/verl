@@ -1,4 +1,4 @@
-# Copyright 2025 Meituan Ltd. and/or its affiliates
+# Copyright 2026 Tencent Ltd. and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,12 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 import asyncio
 import logging
 import os
 import time
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 import numpy as np
@@ -43,9 +44,9 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 @dataclass
 class RolloutSample:
-    """Enhanced rollout sample containing both original batch info and AgentLoopOutput"""
+    """Enhanced rollout sample containing generated DataProto and metadata."""
 
-    # Original batch information
+    # Original/generation batch information
     full_batch: Any
 
     # Metadata
@@ -54,6 +55,10 @@ class RolloutSample:
 
     # Processing metadata
     rollout_status: dict[str, Any]
+
+    # Optional sample-level processed image bank stored in the Ray object store.
+    image_bank_ref: Any | None = None
+    image_bank_stats: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -271,6 +276,23 @@ def assemble_batch_from_rollout_samples(
             "timing_s/agent_loop/tool_calls/mean": np.mean(tool_calls),
         }
     processing_time_stats = {f"fully_async/{key}": value for key, value in processing_time_stats.items()}
+    image_bank_stats = {
+        "image_refs/unique_images": sum(
+            int(getattr(rs, "image_bank_stats", {}).get("unique_images", 0)) for rs in rollout_samples
+        ),
+        "image_refs/raw_bytes": sum(
+            int(getattr(rs, "image_bank_stats", {}).get("raw_bytes", 0)) for rs in rollout_samples
+        ),
+        "image_refs/processed_bytes": sum(
+            int(getattr(rs, "image_bank_stats", {}).get("processed_bytes", 0)) for rs in rollout_samples
+        ),
+        "image_refs/row_image_refs": sum(
+            int(getattr(rs, "image_bank_stats", {}).get("row_image_refs", 0)) for rs in rollout_samples
+        ),
+    }
+    image_bank_stats["image_refs/dedup_ratio"] = image_bank_stats["image_refs/row_image_refs"] / max(
+        image_bank_stats["image_refs/unique_images"], 1
+    )
 
     param_version_start = final_batch.non_tensor_batch["min_global_steps"]
     param_version_end = final_batch.non_tensor_batch["max_global_steps"]
@@ -292,6 +314,7 @@ def assemble_batch_from_rollout_samples(
             **rollout_status,
             **partial_stats,
             **tool_calls_stats,
+            **image_bank_stats,
         }
     )
 
