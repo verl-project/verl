@@ -16,6 +16,7 @@
 
 import copy
 import logging
+import math
 import os
 import re
 import traceback
@@ -107,7 +108,11 @@ class RLHFDataset(Dataset):
         self.prompt_key = config.get("prompt_key", "prompt")
         self.image_key = config.get("image_key", "images")
         self.video_key = config.get("video_key", "videos")
-        self.image_patch_size = config.get("image_patch_size", 14)
+
+        image_processor = getattr(self.processor, "image_processor", None)
+        self.spatial_merge_size = getattr(image_processor, "merge_size", 1)
+        self.temporal_patch_size = getattr(image_processor, "temporal_patch_size", 1)
+        self.image_patch_size = config.get("image_patch_size", getattr(image_processor, "patch_size", 14))
         self.max_prompt_length = config.get("max_prompt_length", 1024)
         self.return_raw_chat = config.get("return_raw_chat", False)
         self.return_full_prompt = config.get("return_full_prompt", False)
@@ -189,6 +194,64 @@ class RLHFDataset(Dataset):
 
         self.dataframe = self.maybe_filter_out_long_prompts(self.dataframe)
 
+    def _estimate_multimodal_prompt_tokens(
+        self, raw_prompt: str, images: list[Image.Image] | None = None, videos: list[torch.Tensor] | None = None
+    ) -> int:
+        def _estimate_qwen_image_tokens_from_size(
+            images: list[Image.Image] | None, patch_size: int = 14, merge_size: int = 2
+        ) -> int:
+            if images is None:
+                return 0
+            total = 0
+            for img in images:
+                w, h = img.size
+                total += math.ceil(w / (patch_size * merge_size)) * math.ceil(h / (patch_size * merge_size))
+            return total
+
+        def _estimate_qwen_video_tokens_from_shape(
+            videos: list[torch.Tensor] | None,
+            patch_size: int = 14,
+            merge_size: int = 2,
+            temporal_patch_size: int = 2,
+        ) -> int:
+            if videos is None:
+                return 0
+            total = 0
+            for video in videos:
+                if not hasattr(video, "shape") or len(video.shape) != 4:
+                    raise ValueError(f"video must have shape [frames, channels, height, width], got {type(video)}")
+                frames, _, height, width = video.shape
+                total += (
+                    math.ceil(frames / temporal_patch_size)
+                    * math.ceil(height / (patch_size * merge_size))
+                    * math.ceil(width / (patch_size * merge_size))
+                )
+            return total
+
+        num_text_tokens = len(
+            normalize_token_ids(
+                self.processor.tokenizer(
+                    text=raw_prompt,
+                    add_special_tokens=False,  # avoid adding special tokens
+                    return_attention_mask=False,
+                )["input_ids"]
+            )
+        )
+        return (
+            num_text_tokens
+            + _estimate_qwen_image_tokens_from_size(
+                images=images,
+                patch_size=self.image_patch_size,
+                merge_size=self.spatial_merge_size,
+            )
+            + _estimate_qwen_video_tokens_from_shape(
+                videos=videos,
+                patch_size=self.image_patch_size,
+                merge_size=self.spatial_merge_size,
+                temporal_patch_size=self.temporal_patch_size,
+            )
+        )
+
     def maybe_filter_out_long_prompts(self, dataframe: datasets.Dataset = None):
         # filter out too long prompts
         if self.filter_overlong_prompts:
@@ -236,22 +299,25 @@ class RLHFDataset(Dataset):
                             videos = None
                             videos_kwargs = {}
 
+                        estimated_num_tokens = self._estimate_multimodal_prompt_tokens(
+                            raw_prompt=raw_prompt,
+                            images=images,
+                            videos=videos,
+                        )
+
                         if images is None and videos is None:
                             # only text prompt
-                            return len(
-                                processor.tokenizer(
-                                    text=raw_prompt,
-                                    add_special_tokens=False,  # avoid adding special tokens
-                                    return_attention_mask=False,
-                                )["input_ids"]
-                            )
+                            return estimated_num_tokens
                         else:
                             # multi-modal prompt
-                            return len(
-                                processor(text=[raw_prompt], images=images, videos=videos, videos_kwargs=videos_kwargs)[
-                                    "input_ids"
-                                ][0]
-                            )
+                            if estimated_num_tokens < 0.9 * self.max_prompt_length:
+                                return estimated_num_tokens
+                            else:
+                                return len(
+                                    processor(
+                                        text=[raw_prompt], images=images, videos=videos, videos_kwargs=videos_kwargs
+                                    )["input_ids"][0]
+                                )
                     except Exception:
                         print("Error processing one of the samples, skipping...")
                         traceback.print_exc()
