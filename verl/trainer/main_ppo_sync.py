@@ -52,13 +52,17 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 
 from verl.checkpoint_engine import CheckpointEngineManager
-from verl.experimental.agent_loop import AgentLoopManager, AgentLoopOutput, AgentLoopWorker, get_trajectory_info
+from verl.experimental.agent_loop import (
+    AgentLoopManager,
+    AgentLoopOutput,
+    AgentLoopWorker,
+    get_trajectory_info,
+)
 from verl.experimental.reward_loop import RewardLoopManager
 from verl.experimental.teacher_loop import MultiTeacherModelManager
 from verl.protocol import DataProto, DataProtoFuture
 from verl.single_controller.ray import (
     RayClassWithInitArgs,
-    RayResourcePool,
     RayWorkerGroup,
     ResourcePoolManager,
     create_colocated_worker_cls,
@@ -96,6 +100,7 @@ from verl.utils.tensordict_utils import list_of_dict_to_tensordict
 from verl.utils.tracking import Tracking, ValidationGenerationsLogger
 from verl.workers.config import CriticConfig, DistillationConfig
 from verl.workers.engine_workers import ActorRolloutRefWorker, TrainingWorker, TrainingWorkerConfig
+from verl.workers.rollout.llm_server import LLMServerManager
 from verl.workers.utils.losses import value_loss
 from verl.workers.utils.padding import response_from_nested, response_to_nested
 
@@ -355,32 +360,14 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
             logger.warning(f"Empty output for prompt {uid}_{session_id}")
             return
 
-        # NOTE: only use the last output to compute reward score, then assign reward score to all agent loop outputs.
-        # User can customize the reward score assignment strategy.
-        final_output = outputs[-1]
-        final_prompts = torch.tensor(final_output.prompt_ids, dtype=torch.int64)
-        final_responses = torch.tensor(final_output.response_ids, dtype=torch.int64)
-        final_input_ids = torch.cat([final_prompts, final_responses], dim=0)
-        final_attention_mask = torch.ones_like(final_input_ids, dtype=torch.int64)
-        final_multi_modal_inputs = self._compute_multi_modal_inputs(final_output, final_input_ids)
-        final_position_ids = self._compute_position_ids(
-            final_input_ids.unsqueeze(0), final_attention_mask.unsqueeze(0), final_multi_modal_inputs
-        ).squeeze(0)
-        await self._compute_score(
-            final_output,
-            prompts=final_prompts.unsqueeze(0),  # [1, prompt_length]
-            responses=final_responses.unsqueeze(0),  # [1, response_length]
-            attention_mask=final_attention_mask.unsqueeze(0),  # [1, seq_len]
-            input_ids=final_input_ids.unsqueeze(0),  # [1, seq_len]
-            position_ids=final_position_ids.unsqueeze(0),  # [1, seq_len] or [1, 4, seq_len]
-            kwargs=kwargs,
-        )
+        await self._compute_score(outputs, kwargs=kwargs)
 
+        final_output = outputs[-1]
         # TODO: Support output:list[AgentLoopOutput]
         await self._compute_teacher_logprobs(
-            output,
-            prompt_ids=output.prompt_ids,
-            response_ids=output.response_ids,
+            final_output,
+            prompt_ids=final_output.prompt_ids,
+            response_ids=final_output.response_ids,
             validate=validate,
             sample_kwargs=kwargs,
         )
@@ -446,24 +433,16 @@ class AgentLoopManagerTQ(AgentLoopManager):
     @auto_await
     async def create(
         cls,
-        config: DictConfig,
-        worker_group: RayWorkerGroup = None,
-        rollout_resource_pool: RayResourcePool = None,
-        reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
-        teacher_model_manager: MultiTeacherModelManager = None,
+        *args,
         replay_buffer: ReplayBuffer = None,
+        **kwargs,
     ):
         """Create agent loop manager."""
         instance = cls(
-            config,
-            worker_group,
-            rollout_resource_pool,
-            teacher_model_manager,
-            reward_loop_worker_handles,
+            *args,
+            **kwargs,
             replay_buffer=replay_buffer,
         )
-        await instance._initialize_llm_servers()
-        await instance._init_global_load_balancer()
         await instance._init_agent_loop_workers()
         return instance
 
@@ -703,6 +682,10 @@ class PPOTrainer:
             self.distillation_config = None
 
         # 9. initialize agent loop manager
+        self.llm_server_manager = LLMServerManager.create(
+            config=self.config, worker_group=self.actor_rollout_wg, rollout_resource_pool=actor_rollout_resource_pool
+        )
+
         manager_class_fqn = self.config.actor_rollout_ref.rollout.get("agent", {}).get("agent_loop_manager_class")
         if manager_class_fqn:
             agent_loop_manager_cls = load_class_from_fqn(manager_class_fqn, "AgentLoopManager")
@@ -710,10 +693,9 @@ class PPOTrainer:
             agent_loop_manager_cls = AgentLoopManagerTQ
         self.async_rollout_manager = agent_loop_manager_cls.create(
             config=self.config,
-            worker_group=self.actor_rollout_wg,
-            rollout_resource_pool=actor_rollout_resource_pool,
+            llm_client=self.llm_server_manager.get_client(),
+            teacher_client=self.teacher_model_manager.get_client() if self.use_teacher_policy else None,
             reward_loop_worker_handles=self.reward_loop_manager.reward_loop_workers,
-            teacher_model_manager=self.teacher_model_manager,
             replay_buffer=self.replay_buffer,
         )
         logger.info("agent loop manager initialized")
@@ -723,7 +705,7 @@ class PPOTrainer:
         self.checkpoint_manager = CheckpointEngineManager(
             config=checkpoint_engine_config,
             trainer=self.actor_rollout_wg,
-            replicas=self.async_rollout_manager.rollout_replicas,
+            replicas=self.llm_server_manager.get_replicas(),
         )
         logger.info("checkpoint engine manager initialized")
 
@@ -856,6 +838,10 @@ class PPOTrainer:
         sample_turns = []
         data_sources = []
         reward_extra_infos_dict: dict[str, list] = defaultdict(list)
+        dump_all_inputs: list[str] = []
+        dump_all_outputs: list[str] = []
+        dump_all_keys: list[str] = []
+        session_to_sample_idx: dict[str, int] = {}
 
         for batch_dict in self.val_dataloader:
             # 1. put batch to agent loop manager
@@ -879,7 +865,6 @@ class PPOTrainer:
             # 4. collect necessary data for logging
             # For multi-output agent loops, only use the final output per session for metrics.
             # Keys have format {uid}_{session_id}_{index}; keep only the highest index per session.
-            final_indices = []
             session_max: dict[str, tuple[int, int]] = {}  # session_key -> (max_index, position)
             for pos, key in enumerate(batch.keys):
                 parts = key.rsplit("_", 2)
@@ -890,28 +875,28 @@ class PPOTrainer:
                         session_max[session_key] = (index, pos)
                 else:
                     session_max[key] = (0, pos)
-            final_indices = sorted(pos for _, pos in session_max.values())
+            sorted_sessions = sorted(session_max.items(), key=lambda x: x[1][1])
+            final_indices = [pos for _, (_, pos) in sorted_sessions]
             final_keys = [batch.keys[i] for i in final_indices]
+            base_offset = len(sample_scores)
+            session_to_sample_idx.update(
+                {session_key: base_offset + j for j, (session_key, _) in enumerate(sorted_sessions)}
+            )
 
-            fields = [
-                "uid",
-                "prompts",
-                "responses",
-                "rm_scores",
-                "num_turns",
-                "reward_model",
-                "data_source",
-                "extra_fields",
-            ]
+            text_data = tq.kv_batch_get(
+                keys=batch.keys, partition_id=batch.partition_id, select_fields=["prompts", "responses"]
+            )
+            text_data["prompts"] = text_data["prompts"].to_padded_tensor(padding=self.tokenizer.pad_token_id)
+            text_data["responses"] = text_data["responses"].to_padded_tensor(padding=self.tokenizer.pad_token_id)
+            all_inputs = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in text_data["prompts"]]
+            all_outputs = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in text_data["responses"]]
+
+            fields = ["uid", "rm_scores", "num_turns", "reward_model", "data_source", "extra_fields"]
             data = tq.kv_batch_get(keys=final_keys, partition_id=batch.partition_id, select_fields=fields)
-            data["prompts"] = data["prompts"].to_padded_tensor(padding=self.tokenizer.pad_token_id)
-            data["responses"] = data["responses"].to_padded_tensor(padding=self.tokenizer.pad_token_id)
 
             sample_uids.extend(data.pop("uid").tolist())
-            output_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in data["responses"]]
-            sample_outputs.extend(output_texts)
-            input_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in data["prompts"]]
-            sample_inputs.extend(input_texts)
+            sample_outputs.extend(all_outputs[i] for i in final_indices)
+            sample_inputs.extend(all_inputs[i] for i in final_indices)
             scores = data["rm_scores"].sum(dim=1).tolist()
             sample_scores.extend(scores)
             sample_turns.extend(data.pop("num_turns").tolist())
@@ -937,13 +922,17 @@ class PPOTrainer:
             if reward_model is not None:
                 sample_gts.extend([item.get("ground_truth", None) for item in reward_model.tolist()])
             else:
-                sample_gts.extend([None] * len(batch))
+                sample_gts.extend([None] * len(final_indices))
 
             data_source = data.pop("data_source", None)
             if data_source is not None:
                 data_sources.extend(data_source.tolist())
             else:
-                data_sources.extend(["unknown"] * len(batch))
+                data_sources.extend(["unknown"] * len(final_indices))
+
+            dump_all_inputs.extend(all_inputs)
+            dump_all_outputs.extend(all_outputs)
+            dump_all_keys.extend(batch.keys)
 
             # 5. cleanup transfer queue and replay buffer
             tq.kv_clear(keys=batch.keys, partition_id=batch.partition_id)
@@ -955,19 +944,33 @@ class PPOTrainer:
         # dump to local dir
         val_data_dir = self.config.trainer.get("validation_data_dir", None)
         if val_data_dir:
-            sorted_indices = sorted(range(len(sample_uids)), key=lambda i: sample_uids[i])
-            dump_inputs = [sample_inputs[i] for i in sorted_indices]
-            dump_outputs = [sample_outputs[i] for i in sorted_indices]
-            dump_gts = [sample_gts[i] for i in sorted_indices]
-            dump_scores = [sample_scores[i] for i in sorted_indices]
-            dump_extra = {k: [v[i] for i in sorted_indices] for k, v in reward_extra_infos_dict.items()}
-            dump_extra["uid"] = [sample_uids[i] for i in sorted_indices]
+            # Sort according to uid (so that generations in the same rollout are together)
+            sort_keys = []
+            for key in dump_all_keys:
+                parts = key.rsplit("_", 2)
+                sort_keys.append((parts[0], int(parts[1]), int(parts[2])) if len(parts) == 3 else (key, 0, 0))
+            sorted_indices = sorted(range(len(dump_all_keys)), key=lambda i: sort_keys[i])
+            dump_all_inputs = [dump_all_inputs[i] for i in sorted_indices]
+            dump_all_outputs = [dump_all_outputs[i] for i in sorted_indices]
+            dump_all_keys = [dump_all_keys[i] for i in sorted_indices]
+
+            # For ground truths, scores and reward extra infos, find the values in the
+            # lists for the final samples of each session
+            dump_all_sessions = [
+                f"{parts[0]}_{parts[1]}" if len(parts) == 3 else key
+                for key in dump_all_keys
+                for parts in [key.rsplit("_", 2)]
+            ]
+            session_final_indices = [session_to_sample_idx[session] for session in dump_all_sessions]
             self._dump_generations(
-                inputs=dump_inputs,
-                outputs=dump_outputs,
-                gts=dump_gts,
-                scores=dump_scores,
-                reward_extra_infos_dict=dump_extra,
+                inputs=dump_all_inputs,
+                outputs=dump_all_outputs,
+                gts=[sample_gts[i] for i in session_final_indices],
+                scores=[sample_scores[i] for i in session_final_indices],
+                reward_extra_infos_dict={
+                    k: [v[i] for i in session_final_indices] for k, v in reward_extra_infos_dict.items()
+                }
+                | {"uid": dump_all_keys},
                 dump_path=val_data_dir,
             )
 

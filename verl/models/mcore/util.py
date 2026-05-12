@@ -396,6 +396,7 @@ def preprocess_thd_engine(
                 continue
 
             seqlen_padded_i = seqlens_in_batch_padded_cpu[i]
+            seqlen_orig_i = seqlens_in_batch_cpu[i]
             seqlen = seqlen_padded_i // cp_size
             half_seqlen = seqlen // 2
             start_idx = cu_seqlens_padded_cpu[i] // cp_size
@@ -431,10 +432,14 @@ def preprocess_thd_engine(
                 input_ids_rmpad[start_idx + half_seqlen : start_idx + half_seqlen + remain_len] = d[
                     remain_start:remain_end
                 ]
-                # Build position_ids for the remaining chunk
-                position_ids_rmpad[start_idx + half_seqlen : start_idx + half_seqlen + remain_len] = torch.arange(
-                    seqlen_padded_i - remain_len, seqlen_padded_i, dtype=torch.long, device=input_ids.device
-                )
+                # Build position_ids for the remaining chunk: use remain_start as base,
+                # clamped to original seqlen to avoid exceeding seqlen-1 for padded positions
+                pos_end = min(remain_end, seqlen_orig_i)
+                valid_pos_len = pos_end - remain_start
+                if valid_pos_len > 0:
+                    position_ids_rmpad[start_idx + half_seqlen : start_idx + half_seqlen + valid_pos_len] = (
+                        torch.arange(remain_start, pos_end, dtype=torch.long, device=input_ids.device)
+                    )
 
             if need_roll:
                 # Handle roll for cp_size > 1 case
@@ -570,8 +575,11 @@ def preprocess_bshd_engine(
     seqlens_in_batch = input_ids.offsets().diff()
     max_seqlen = seqlens_in_batch.max().item()
     tp_size = mpu.get_tensor_model_parallel_world_size()
-    # For CP, sequence length must be divisible by (2 * cp_size), and for SP by tp_size.
-    align_size = math.lcm(tp_size, 2 * cp_size) if cp_size > 1 else tp_size
+    # For CP (zigzag), sequence length must be divisible by (2 * cp_size).
+    # After zigzag-CP split each rank holds s/cp_size tokens, which must also be
+    # divisible by tp_size for sequence-parallel scatter.  Therefore the total
+    # sequence length must be divisible by tp_size * cp_size * 2.
+    align_size = tp_size * cp_size * 2 if cp_size > 1 else tp_size
     if align_size > 1:
         pad_size = (align_size - max_seqlen % align_size) % align_size
         max_seqlen += pad_size
@@ -748,10 +756,13 @@ def build_vlm_attn_mask_bshd(input_ids: torch.Tensor, batch_size: int, pad_token
     seqlens_in_batch = input_ids.offsets().diff()
     max_seqlen = seqlens_in_batch.max().item()
 
-    # For CP, sequence length must be divisible by (2 * cp_size), and for SP by tp_size.
+    # For CP (zigzag), sequence length must be divisible by (2 * cp_size).
+    # After zigzag-CP split each rank holds s/cp_size tokens, which must also be
+    # divisible by tp_size for sequence-parallel scatter.  Therefore the total
+    # sequence length must be divisible by tp_size * cp_size * 2.
     tp_size = mpu.get_tensor_model_parallel_world_size()
     cp_size = mpu.get_context_parallel_world_size()
-    align_size = math.lcm(tp_size, 2 * cp_size) if cp_size > 1 else tp_size
+    align_size = tp_size * cp_size * 2 if cp_size > 1 else tp_size
     if align_size > 1:
         pad_size = (align_size - max_seqlen % align_size) % align_size
         max_seqlen += pad_size

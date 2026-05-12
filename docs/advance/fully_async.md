@@ -2,7 +2,7 @@
 
 **Author:** `https://github.com/meituan-search`
 
-Last updated: 02/05/2026.
+Last updated: 05/09/2026.
 
 This document introduces a fully asynchronous PPO training system that completely decouples the Trainer and Rollouter,
 supporting asynchronous sample generation and training.
@@ -299,7 +299,7 @@ trigger_parameter_sync_step=16
 partial_rollout=False
 
 
-python -m recipe.fully_async_policy.fully_async_main \
+python -m verl.experimental.fully_async_policy.fully_async_main \
 	train_batch_size=${train_prompt_bsz} \
     data.gen_batch_size=${gen_prompt_bsz} \
     data.return_raw_chat=${return_raw_chat} \

@@ -22,7 +22,6 @@ import hydra
 import ray
 from omegaconf import OmegaConf
 
-from verl.experimental.dataset.sampler import AbstractSampler
 from verl.experimental.reward_loop import migrate_legacy_reward_impl
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 from verl.trainer.distillation import is_distillation_enabled
@@ -30,7 +29,6 @@ from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 from verl.trainer.ppo.utils import need_critic, need_reference_policy
 from verl.utils.config import validate_config
 from verl.utils.device import auto_set_device, is_cuda_available
-from verl.utils.import_utils import load_extern_object
 
 
 @hydra.main(config_path="config", config_name="ppo_trainer", version_base=None)
@@ -359,25 +357,9 @@ def create_rl_sampler(data_config, dataset):
     # torch.utils.data.RandomSampler could not recover properly
     from torchdata.stateful_dataloader.sampler import RandomSampler
 
-    if data_config.sampler is not None and data_config.sampler.get("class_path", None) is not None:
-        curriculum_class = load_extern_object(
-            data_config.sampler.class_path,
-            data_config.sampler.class_name,
-        )
-        sampler = curriculum_class(
-            data_source=dataset,
-            data_config=data_config,
-        )
-        assert isinstance(sampler, AbstractSampler)
-        assert data_config.get("dataloader_num_workers", 8) == 0, (
-            "If using curriculum, num_workers must be 0 to prevent data caching. "
-            "If the dataloader caches data before the batch is done the "
-            "curriculum sampler won't have the opportunity to reorder it. "
-        )
-
     # Use a sampler to facilitate checkpoint resumption.
     # If shuffling is enabled in the data configuration, create a random sampler.
-    elif data_config.shuffle:
+    if data_config.shuffle:
         train_dataloader_generator = torch.Generator()
         seed = data_config.get("seed")
         if seed is not None:

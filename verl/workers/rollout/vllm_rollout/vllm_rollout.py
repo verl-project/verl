@@ -100,9 +100,12 @@ class ServerAdapter(BaseRollout):
         # when CUDA_VISIBLE_DEVICES differs between processes (common on ROCm/AMD).
         # Must use node-local rank (not rollout_rank) so it matches vLLM worker's
         # local_rank on every node. Include replica_rank to avoid collisions when
-        # multiple replicas share a node.
+        # multiple replicas share a node, and the Ray job id so two independent
+        # verl jobs on the same host (or a new run after a crashed one with a
+        # stale socket file) cannot collide on the shared /tmp namespace.
         local_rank = self.rollout_rank % local_world_size
-        self.zmq_handle = f"ipc:///tmp/rl-colocate-zmq-replica-{self.replica_rank}-rank-{local_rank}.sock"
+        job_id = ray.get_runtime_context().get_job_id()
+        self.zmq_handle = f"ipc:///tmp/rl-colocate-zmq-{job_id}-replica-{self.replica_rank}-rank-{local_rank}.sock"
 
         self.use_shm = not is_support_ipc()
         if self.use_shm:
@@ -192,7 +195,7 @@ class ServerAdapter(BaseRollout):
             logger.info(f"update_weights done, time cost: {time.time() - start_time:.2f}s")
 
     def _get_server_name_prefix(self) -> str:
-        """Return the Ray actor name prefix matching the rollout type (e.g. 'vllm_' or 'vllm_omni_')."""
+        """Return the Ray actor name prefix matching the rollout type (e.g. 'vllm_')."""
         return f"{self.config.get('name', 'vllm')}_"
 
     def generate_sequences(self, prompts: DataProto) -> DataProto:
@@ -208,7 +211,7 @@ class ServerAdapter(BaseRollout):
         raise NotImplementedError(
             "ServerAdapter does not support synchronous generate_sequences(). "
             "The vLLM SPMD mode was retired in PR #4411. For batch generation, "
-            "please use the async server interface via vLLMReplica and AsyncLLMServerManager, "
+            "please use the async server interface via vLLMReplica and LLMServerClient, "
             "or use HFRollout for synchronous generation. "
             "See https://github.com/verl-project/verl/issues/4682 for more details."
         )

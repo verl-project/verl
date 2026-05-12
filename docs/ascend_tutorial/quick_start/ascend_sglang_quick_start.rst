@@ -93,26 +93,23 @@ Atlas 800T A3
 
 **1.当前NPU sglang脚本一览**
 
-.. _Qwen3-30B: https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3moe-30b_sglang_megatron_npu.sh
-.. _Qwen2.5-32B: https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen2-32b_sglang_fsdp_npu.sh
-.. _Qwen3-8B-1k: https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3_8b_grpo_sglang_1k_spmd_npu.sh
-.. _Qwen3-8B-32k: https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3_8b_grpo_sglang_32k_spmd_npu.sh
+.. _Qwen3-30B: https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3_30b_a3b_mindspeed.sh
+.. _Qwen3-8B-fsdp: https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3_8b_fsdp.sh
+.. _Qwen3-8B-mindspeed: https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3_8b_mindspeed.sh
 
-   +-----------------+----------------+----------+-------------------+
-   | 模型            | 推荐NPU型号    | 节点数量 | 训推后端          |
-   +=================+================+==========+===================+
-   | `Qwen3-30B`_    | Atlas 800T A3  | 1        | SGLang + Megatron |
-   +-----------------+----------------+----------+-------------------+
-   | `Qwen2.5-32B`_  | Atlas 900 A2   | 2        | SGLang + FSDP     |
-   +-----------------+----------------+----------+-------------------+
-   | `Qwen3-8B-1k`_  | Atlas A3/A2    | 1        | SGLang + FSDP     |
-   +-----------------+----------------+----------+-------------------+
-   | `Qwen3-8B-32k`_ | Atlas A3/A2    | 1        | SGLang + FSDP     |
-   +-----------------+----------------+----------+-------------------+
+   +-----------------------+----------------+----------+--------------------+
+   | 模型                  | 推荐NPU型号    | 节点数量 | 训推后端           |
+   +=======================+================+==========+====================+
+   | `Qwen3-30B`_          | Atlas 800T A3  | 1        | SGLang + MindSpeed |
+   +-----------------------+----------------+----------+--------------------+
+   | `Qwen3-8B-fsdp`_      | Atlas A3/A2    | 1        | SGLang + FSDP      |
+   +-----------------------+----------------+----------+--------------------+
+   | `Qwen3-8B-mindspeed`_ | Atlas A3/A2    | 1        | SGLang + MindSpeed |
+   +-----------------------+----------------+----------+--------------------+
 
 **2.最佳实践**
 
-我们提供基于verl+sglang `Qwen3-30B`_ 以及 `Qwen2.5-32B`_ 的 `最佳实践 <https://github.com/verl-project/verl/blob/main/docs/ascend_tutorial/examples/ascend_sglang_best_practices.rst>`_ 作为参考
+我们提供基于verl+sglang `Qwen3-30B`_ 以及 `Qwen3-8B-fsdp`_ 的 `最佳实践 <https://github.com/verl-project/verl/blob/main/docs/ascend_tutorial/examples/ascend_sglang_best_practices.rst>`_ 作为参考
 
 **3.环境变量与参数**
 

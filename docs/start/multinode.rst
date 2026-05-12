@@ -70,13 +70,13 @@ Option 2: Launch via SkyPilot on Kubernetes or clouds
 ------------------------------------------------------
 
 .. note::
-   Ready-to-use SkyPilot example configurations are available in the `examples/skypilot/ <https://github.com/verl-project/verl/tree/main/examples/skypilot>`_ directory:
+   Ready-to-use SkyPilot example configurations are available in the `examples/tutorial/skypilot/ <https://github.com/verl-project/verl/tree/main/examples/tutorial/skypilot>`_ directory:
    
    - ``verl-ppo.yaml`` - PPO training with GSM8K dataset
    - ``verl-grpo.yaml`` - GRPO training with MATH dataset  
    - ``verl-multiturn-tools.yaml`` - Multi-turn tool usage training
    
-   See the `SkyPilot examples README <https://github.com/verl-project/verl/tree/main/examples/skypilot>`_ for detailed usage instructions.
+   See the `SkyPilot examples README <https://github.com/verl-project/verl/tree/main/examples/tutorial/skypilot>`_ for detailed usage instructions.
 
 Step 1: Setup SkyPilot
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -288,7 +288,7 @@ manager available on your cluster or use other container runtimes (e.g. through 
 
 2. Follow :doc:`GSM8K example<../examples/gsm8k_example>` to prepare the dataset and model checkpoints.
 
-3. Modify `examples/slurm/ray_on_slurm.slurm <https://github.com/verl-project/verl/blob/main/examples/slurm/ray_on_slurm.slurm>`_ with your cluster's own information.
+3. Modify `examples/tutorial/slurm/ray_on_slurm.slurm <https://github.com/verl-project/verl/blob/main/examples/tutorial/slurm/ray_on_slurm.slurm>`_ with your cluster's own information.
 
 4. Submit the job script to the Slurm cluster with `sbatch`.
 

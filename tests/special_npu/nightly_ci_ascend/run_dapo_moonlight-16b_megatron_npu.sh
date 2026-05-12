@@ -169,7 +169,6 @@ python3 -m recipe.dapo.main_dapo \
     actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=${REF_PP} \
     actor_rollout_ref.ref.megatron.virtual_pipeline_model_parallel_size=${REF_VPP} \
     actor_rollout_ref.ref.megatron.context_parallel_size=${REF_CP} \
-    ++actor_rollout_ref.ref.megatron.override_transformer_config.context_parallel_size=${REF_CP} \
     actor_rollout_ref.ref.megatron.expert_model_parallel_size=${REF_EP} \
     actor_rollout_ref.ref.megatron.expert_tensor_parallel_size=${REF_ETP} \
     reward_model.reward_manager=dapo \

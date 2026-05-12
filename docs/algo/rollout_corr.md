@@ -207,8 +207,8 @@ actor_rollout_ref:
 ### **Example Scripts**
 
 - `recipe/dapo/run_dapo_qwen2.5_32b_rollout_corr.sh` - DAPO example with Rollout Correction
-- `examples/rollout_correction/run_with_rollout_corr.sh` - Basic example
-- `examples/rollout_correction/run_with_rollout_corr_multi_rs.sh` - Multi-RS example
+- `examples/rollout_correction/run_qwen2_5_7b_fsdp.sh` - Basic example
+- `examples/rollout_correction/run_qwen2_5_7b_fsdp_multi_rs.sh` - Multi-RS example
 
 ### **Tests**
 
@@ -1094,7 +1094,7 @@ if not is_healthy:
 Start with the basic token-level truncate configuration:
 
 ```bash
-bash examples/rollout_correction/run_with_rollout_corr.sh
+bash examples/rollout_correction/run_qwen2_5_7b_fsdp.sh
 ```
 
 Monitor metrics for 1-2 epochs before adjusting parameters.

@@ -22,7 +22,6 @@ import json
 import os
 import uuid
 from collections import defaultdict
-from copy import deepcopy
 from pprint import pprint
 from typing import Any, Optional
 
@@ -34,7 +33,6 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 
 from verl import DataProto
-from verl.experimental.dataset.sampler import AbstractCurriculumSampler
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, ResourcePoolManager
 from verl.single_controller.ray.base import create_colocated_worker_cls
@@ -70,6 +68,7 @@ from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.config import DistillationConfig, EngineConfig
+from verl.workers.rollout.llm_server import LLMServerManager
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
 
 
@@ -444,9 +443,11 @@ class RayPPOTrainer:
             scores = batch.batch["token_level_scores"].sum(-1).cpu().tolist()
             sample_gts = [item.non_tensor_batch.get("reward_model", {}).get("ground_truth", None) for item in batch]
 
-            reward_extra_infos_to_dump = reward_extra_infos_dict.copy()
+            reward_extra_infos_to_dump = {
+                k: (v.tolist() if isinstance(v, np.ndarray) else v) for k, v in reward_extra_infos_dict.items()
+            }
             if "request_id" in batch.non_tensor_batch:
-                reward_extra_infos_dict.setdefault(
+                reward_extra_infos_to_dump.setdefault(
                     "request_id",
                     batch.non_tensor_batch["request_id"].tolist(),
                 )
@@ -750,7 +751,8 @@ class RayPPOTrainer:
         # NOTE: if you want to use a different resource pool for each role, which can support different parallel size,
         # you should not use `create_colocated_worker_cls`.
         # Instead, directly pass different resource pool to different worker groups.
-        # See https://github.com/verl-project/verl/blob/master/examples/ray/tutorial.ipynb for more information.
+        # See https://github.com/verl-project/verl/blob/master/examples/tutorial/ray/tutorial.ipynb
+        # for more information.
         all_wg = {}
         wg_kwargs = {}  # Setting up kwargs for RayWorkerGroup
         if OmegaConf.select(self.config.trainer, "ray_wait_register_center_timeout") is not None:
@@ -849,6 +851,10 @@ class RayPPOTrainer:
         # two conditions satisfied: (1) no reward model, or (2) reward model with extra resource pool
         enable_agent_reward_loop = not self.use_rm or self.config.reward.reward_model.enable_resource_pool
 
+        self.llm_server_manager = LLMServerManager.create(
+            config=self.config, worker_group=self.actor_rollout_wg, rollout_resource_pool=actor_rollout_resource_pool
+        )
+
         # if enable_agent_reward_loop, we directly pass reward_loop_workers to agent loop manager
         # to stream reward computation with actor rollout
         # To stream teacher computation with actor rollout, we instead pass the full manager so that the
@@ -856,10 +862,9 @@ class RayPPOTrainer:
         reward_loop_worker_handles = self.reward_loop_manager.reward_loop_workers if enable_agent_reward_loop else None
         self.async_rollout_manager = AgentLoopManager.create(
             config=self.config,
-            worker_group=self.actor_rollout_wg,
-            rollout_resource_pool=actor_rollout_resource_pool,
+            llm_client=self.llm_server_manager.get_client(),
+            teacher_client=self.teacher_model_manager.get_client() if self.use_teacher_policy else None,
             reward_loop_worker_handles=reward_loop_worker_handles,
-            teacher_model_manager=self.teacher_model_manager,
         )
 
         checkpoint_engine_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
@@ -872,7 +877,7 @@ class RayPPOTrainer:
         self.checkpoint_manager = CheckpointEngineManager(
             config=checkpoint_engine_config,
             trainer=self.actor_rollout_wg,
-            replicas=self.async_rollout_manager.rollout_replicas,
+            replicas=self.llm_server_manager.get_replicas(),
         )
 
         # sleep all replicas to load checkpoint
@@ -1167,24 +1172,33 @@ class RayPPOTrainer:
         # step 2: convert from padding to nopadding
         batch_td = left_right_2_no_padding(batch_td)
         # step 3: add meta info
-        tu.assign_non_tensor(batch_td, calculate_entropy=True, compute_loss=False)
+        calculate_sum_pi_squared = self.config.actor_rollout_ref.actor.get("calculate_sum_pi_squared", False)
+        tu.assign_non_tensor(
+            batch_td,
+            calculate_entropy=True,
+            calculate_sum_pi_squared=calculate_sum_pi_squared,
+            compute_loss=False,
+        )
         output = self.actor_rollout_wg.compute_log_prob(batch_td)
         # gather output
         entropy = tu.get(output, "entropy")
         log_probs = tu.get(output, "log_probs")
         routed_experts = tu.get(output, "routed_experts")
+        sum_pi_squared = tu.get(output, "sum_pi_squared") if calculate_sum_pi_squared else None
 
         old_log_prob_mfu = tu.get(output, "metrics")["mfu"]
         # step 4. No padding to padding
         entropy = no_padding_2_padding(entropy, batch_td)
         log_probs = no_padding_2_padding(log_probs, batch_td)
+        if sum_pi_squared is not None:
+            sum_pi_squared = no_padding_2_padding(sum_pi_squared, batch_td)
         # step 5: rebuild a tensordict and convert to dataproto
+        result = {"old_log_probs": log_probs.float(), "entropys": entropy.float()}
         if routed_experts is not None:
-            old_log_prob = tu.get_tensordict(
-                {"old_log_probs": log_probs.float(), "entropys": entropy.float(), "routed_experts": routed_experts}
-            )
-        else:
-            old_log_prob = tu.get_tensordict({"old_log_probs": log_probs.float(), "entropys": entropy.float()})
+            result["routed_experts"] = routed_experts
+        if sum_pi_squared is not None:
+            result["sum_pi_squared"] = sum_pi_squared.float()
+        old_log_prob = tu.get_tensordict(result)
         old_log_prob = DataProto.from_tensordict(old_log_prob)
         return old_log_prob, old_log_prob_mfu
 
@@ -1338,52 +1352,55 @@ class RayPPOTrainer:
 
                 # pass global_steps to trace
                 gen_batch.meta_info["global_steps"] = self.global_steps
-                gen_batch_output = gen_batch.repeat(
-                    repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True
-                )
+                rollout_n = self.config.actor_rollout_ref.rollout.n
+                gen_batch_output = gen_batch.repeat(repeat_times=rollout_n, interleave=True)
+
+                if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
+                    # NOTE: REMAX needs one sampled rollout plus one greedy baseline per prompt.
+                    # Keep them in a single agent-loop/vLLM request to avoid sending a second
+                    # rollout after replicas have been put to sleep, which can leave async vLLM
+                    # engines in an invalid state for multi-turn agent workloads.
+                    gen_batch_output.non_tensor_batch["__do_sample__"] = np.ones(len(gen_batch_output), dtype=bool)
+                    gen_baseline_batch = gen_batch.slice(0, None)
+                    gen_baseline_batch.non_tensor_batch["__do_sample__"] = np.zeros(len(gen_baseline_batch), dtype=bool)
+                    combined_gen_batch = DataProto.concat([gen_batch_output, gen_baseline_batch])
+                    num_sampled_prompts = len(gen_batch_output)
+                else:
+                    combined_gen_batch = gen_batch_output
+                    num_sampled_prompts = len(gen_batch_output)
 
                 is_last_step = self.global_steps >= self.total_training_steps
                 with marked_timer("step", timing_raw):
                     # generate a batch
                     with marked_timer("gen", timing_raw, color="red"):
                         if curr_step_profile:
-                            self.async_rollout_manager.start_profile()
-                        gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
+                            self.llm_server_manager.start_profile()
+                        combined_gen_output = self.async_rollout_manager.generate_sequences(combined_gen_batch)
                         self.checkpoint_manager.sleep_replicas()
                         if curr_step_profile:
-                            self.async_rollout_manager.stop_profile()
+                            self.llm_server_manager.stop_profile()
 
-                        timing_raw.update(gen_batch_output.meta_info["timing"])
-                        gen_batch_output.meta_info.pop("timing", None)
+                        timing_raw.update(combined_gen_output.meta_info["timing"])
+                        combined_gen_output.meta_info.pop("timing", None)
+
+                    gen_batch_output = combined_gen_output.slice(0, num_sampled_prompts)
+                    if "__do_sample__" in gen_batch_output.non_tensor_batch:
+                        gen_batch_output.pop(non_tensor_batch_keys=["__do_sample__"])
 
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
-                        with marked_timer("gen_max", timing_raw, color="purple"):
-                            gen_baseline_batch = deepcopy(gen_batch)
-                            gen_baseline_batch.meta_info["do_sample"] = False
-                            if curr_step_profile:
-                                self.async_rollout_manager.start_profile()
-                            gen_baseline_output = self.async_rollout_manager.generate_sequences(gen_baseline_batch)
-                            self.checkpoint_manager.sleep_replicas()
-                            if curr_step_profile:
-                                self.async_rollout_manager.stop_profile()
-                            batch = batch.union(gen_baseline_output)
-                            # compute reward model score on batch
-                            rm_scores = None
-                            if self.use_rm and "rm_scores" not in batch.batch.keys():
-                                batch_reward = self._compute_reward_colocate(batch)
-                                batch = batch.union(batch_reward)
+                        gen_baseline_output = combined_gen_output.slice(num_sampled_prompts, None)
+                        if "__do_sample__" in gen_baseline_output.non_tensor_batch:
+                            gen_baseline_output.pop(non_tensor_batch_keys=["__do_sample__"])
 
-                            # Compute or extract reward for REMAX baseline
-                            reward_baseline_tensor = batch.batch["rm_scores"].sum(dim=-1)
+                        if self.use_rm and "rm_scores" not in gen_baseline_output.batch.keys():
+                            baseline_reward = self._compute_reward_colocate(gen_baseline_output)
+                            gen_baseline_output = gen_baseline_output.union(baseline_reward)
 
-                            keys_to_pop = set(gen_baseline_output.batch.keys())
-                            if rm_scores is not None:
-                                keys_to_pop.update(rm_scores.batch.keys())
-                            batch.pop(batch_keys=list(keys_to_pop))
+                        reward_baseline_tensor = gen_baseline_output.batch["rm_scores"].sum(dim=-1)
+                        batch.batch["reward_baselines"] = reward_baseline_tensor
 
-                            batch.batch["reward_baselines"] = reward_baseline_tensor
-
-                            del rm_scores, gen_baseline_batch, gen_baseline_output
+                        del gen_baseline_output
+                    del combined_gen_batch, combined_gen_output
                     # repeat to align with repeated responses in rollout
                     batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                     batch = batch.union(gen_batch_output)
@@ -1628,23 +1645,11 @@ class RayPPOTrainer:
                 metrics.update(compute_variance_proxy_metrics(batch=batch, gradient_norm=gradient_norm))
                 # Note: mismatch metrics (KL, PPL, etc.) are collected at line 1179 after advantage computation
 
-                # this is experimental and may be changed/removed in the future in favor of a general-purpose one
-                if isinstance(self.train_dataloader.sampler, AbstractCurriculumSampler):
-                    self.train_dataloader.sampler.update(batch=batch)
-
                 # TODO: make a canonical logger that supports various backend
                 logger.log(data=metrics, step=self.global_steps)
 
                 progress_bar.update(1)
                 self.global_steps += 1
-
-                if (
-                    hasattr(self.config.actor_rollout_ref.actor, "profiler")
-                    and self.config.actor_rollout_ref.actor.profiler.tool == "torch_memory"
-                ):
-                    self.actor_rollout_wg.dump_memory_snapshot(
-                        tag=f"post_update_step{self.global_steps}", sub_dir=f"step{self.global_steps}"
-                    )
 
                 if is_last_step:
                     if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):

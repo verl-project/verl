@@ -164,15 +164,16 @@ def nested_tensor_from_tensor_list(tensors: list[torch.Tensor], ragged_idx: int 
     sample_dim = tensors[0].dim()
     if ragged_idx is None:
         ragged_idx = sample_dim
-    assert ragged_idx == sample_dim, (
-        f"Only last-dimension ragged tensors are supported. Got {ragged_idx=} and {sample_dim=}"
+    assert 1 <= ragged_idx <= sample_dim, (
+        f"ragged_idx must be in [1, {sample_dim}]. Got {ragged_idx=} and {sample_dim=}"
     )
 
     if sample_dim == 1:
         return torch.nested.as_nested_tensor(tensors, layout=torch.jagged)
 
-    values = torch.cat(tensors, dim=-1)
-    lengths = torch.tensor([tensor.shape[-1] for tensor in tensors], dtype=torch.long, device=values.device)
+    cat_dim = ragged_idx - 1
+    values = torch.cat(tensors, dim=cat_dim)
+    lengths = torch.tensor([tensor.shape[cat_dim] for tensor in tensors], dtype=torch.long, device=values.device)
     offsets = torch.zeros(len(tensors) + 1, dtype=torch.long, device=values.device)
     torch.cumsum(lengths, dim=0, out=offsets[1:])
 
@@ -213,7 +214,8 @@ def concat_nested_tensors(tensors: list[torch.Tensor]) -> torch.Tensor:
         unbind_tensor = tensor.unbind(0)
         unbind_tensors.extend(list(unbind_tensor))
 
-    return nested_tensor_from_tensor_list(unbind_tensors, ragged_idx=tensors[0].dim() - 1)
+    ragged_idx = getattr(tensors[0], "_ragged_idx", tensors[0].dim() - 1)
+    return nested_tensor_from_tensor_list(unbind_tensors, ragged_idx=ragged_idx)
 
 
 def concat_tensordict_with_none_bsz(data: list[TensorDict]):
@@ -358,12 +360,15 @@ def chunk_tensordict(td: TensorDict, chunks: int) -> list[TensorDict]:
             for i, chunk_td in enumerate(tds):
                 chunk_lengths = lengths[i * chunk_size : (i + 1) * chunk_size]
                 chunk_tensors = [padded_chunks[i][j, :seq_len] for j, seq_len in enumerate(chunk_lengths)]
-                chunk_td[key] = nested_tensor_from_tensor_list(chunk_tensors, ragged_idx=nt.dim() - 1)
+                chunk_td[key] = nested_tensor_from_tensor_list(
+                    chunk_tensors, ragged_idx=getattr(nt, "_ragged_idx", nt.dim() - 1)
+                )
             continue
 
         for i, chunk_td in enumerate(tds):
             chunk_td[key] = nested_tensor_from_tensor_list(
-                list(tensors[i * chunk_size : (i + 1) * chunk_size]), ragged_idx=nt.dim() - 1
+                list(tensors[i * chunk_size : (i + 1) * chunk_size]),
+                ragged_idx=getattr(nt, "_ragged_idx", nt.dim() - 1),
             )
 
     return tds
@@ -489,7 +494,9 @@ def index_select_tensor_dict(batch: TensorDict, indices: torch.Tensor | list[int
             elif isinstance(tensor, torch.Tensor) and tensor.is_nested:
                 tensor_lst = tensor.unbind()  # for performance
                 selected_tensors = [tensor_lst[idx] for idx in indices]
-                data_dict[key] = nested_tensor_from_tensor_list(selected_tensors, ragged_idx=tensor.dim() - 1)
+                data_dict[key] = nested_tensor_from_tensor_list(
+                    selected_tensors, ragged_idx=getattr(tensor, "_ragged_idx", tensor.dim() - 1)
+                )
             else:
                 # This handles NonTensorStack (indexable by batch dim) and NonTensorData (scalar metadata).
                 if tensor.shape:

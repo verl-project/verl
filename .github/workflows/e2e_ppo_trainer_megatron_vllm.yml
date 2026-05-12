@@ -194,6 +194,21 @@ jobs:
           ray stop --force
           export VLLM_USE_V1=1
           ROLLOUT_QUANTIZATION=fp8 TOTAL_TRAIN_STEPS=2 MODEL_ID=Qwen/Qwen3-0.6B bash tests/special_e2e/run_ppo_trainer_megatron.sh
+      - name: Install Megatron-LM and Megatron-Bridge for Megatron-FSDP
+        run: |
+          pip3 install --no-deps --no-build-isolation git+https://github.com/NVIDIA/Megatron-LM.git@d4cacef87
+          pip3 install --no-deps --no-build-isolation git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@6fea5bb
+          pip3 install "nvidia-modelopt[torch]>=0.37.0"
+      - name: Running GSM8K E2E PPO training tests on 8 L20 GPUs with Megatron-FSDP (Qwen3)
+        run: |
+          ray stop --force
+          ALL_OFFLOAD=False USE_MBRIDGE=True VANILLA_MBRIDGE=False USE_MEGATRON_FSDP=True \
+          TOTAL_TRAIN_STEPS=2 MODEL_ID=Qwen/Qwen3-0.6B \
+          COMMON_PP=1 COMMON_VPP=null COMMON_CP=1 COMMON_TP=1 INFER_TP=1 \
+          bash tests/special_e2e/run_ppo_trainer_megatron.sh \
+            ++actor_rollout_ref.actor.megatron.override_transformer_config.gradient_accumulation_fusion=False \
+            ++actor_rollout_ref.ref.megatron.override_transformer_config.gradient_accumulation_fusion=False \
+            ++critic.megatron.override_transformer_config.gradient_accumulation_fusion=False
       - name: clean up
         run: |
           rm -rf checkpoints
