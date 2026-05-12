@@ -1,35 +1,26 @@
-#!/bin/bash
-set -xeuo pipefail
+set -x
+
 # Project Configuration
-project_name='GRPO-Qwen3-30b-A3B-BASE-MATH'
-exp_name='GRPO-Qwen3-30B-A3B-BASE-MindSpeedLLM-SGLang'
+project_name='GRPO-Qwen3-8B-BASE-TEST'
+exp_name='GRPO-Qwen3-8B-BASE-MindSpeedLLM-SGLang'
 
 # Necessary env
-export HCCL_CONNECT_TIMEOUT=1500
-export HCCL_HOST_SOCKET_PORT_RANGE=60000-60050
-export HCCL_NPU_SOCKET_PORT_RANGE=61000-61050
-
 export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
-
-export DISABLE_L2_CACHE=1
-export TASK_QUEUE_ENABLE=1
-
-#For CANN versions 8.5.0 and above, using mbridge, set this ENV
-export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_HOST_SOCKET_PORT_RANGE=60000-60050
+export HCCL_NPU_SOCKET_PORT_RANGE=61000-61050
 
 # Node Info
 NNODES=${NNODES:-1}
 NPUS_PER_NODE=${NPUS_PER_NODE:-16}
 
 # Model Weights Paths
-MODEL_PATH=Qwen/Qwen3-30B-A3B
-RAY_DATA_HOME=${RAY_DATA_HOME:-"${HOME}/verl"}
-CKPTS_DIR=${CKPTS_DIR:-"${RAY_DATA_HOME}/ckpts/${project_name}/${exp_name}"}
+MODEL_ID=${MODEL_ID:-Qwen/Qwen3-8B}
+MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/models/${MODEL_ID}}
 
 # File System Paths
-TRAIN_FILE=$RAY_DATA_HOME/gsm8k/train.parquet
-TEST_FILE=$RAY_DATA_HOME/gsm8k/test.parquet
+TRAIN_FILE=$HOME/data/gsm8k/train.parquet
+TEST_FILE=$HOME/data/gsm8k/test.parquet
 # Data Length Configuration
 max_prompt_length=$((1024 * 2))
 max_response_length=$((1024 * 2))
@@ -55,15 +46,11 @@ infer_ppo_max_token_len=$(((max_prompt_length + max_response_length)))
 
 # Megatron Parallelism Configuration
 train_tp=4
-train_ep=4
-train_etp=1
 train_pp=4
-train_cp=1
 
 # SGLang Generation Configuration
 gen_tp=4
 gen_dp=1
-gen_ep=1
 gpu_memory_utilization=0.5
 max_model_len=$((max_prompt_length + max_response_length))
 max_num_batched_tokens=$(((max_prompt_length + max_response_length) * 1))
@@ -80,7 +67,7 @@ DATA_CONFIG=(
     data.max_prompt_length=${max_prompt_length}
     data.max_response_length=${max_response_length}
     # Preprocessing
-    data.filter_overlong_prompts=False
+    data.filter_overlong_prompts=True
     data.truncation='left'
 )
 
@@ -119,9 +106,6 @@ ACTOR_CONFIG=(
     # Megatron Parallelism Strategy
     actor_rollout_ref.actor.mindspeed.tensor_model_parallel_size=${train_tp}
     actor_rollout_ref.actor.mindspeed.pipeline_model_parallel_size=${train_pp}
-    actor_rollout_ref.actor.mindspeed.context_parallel_size=${train_cp}
-    actor_rollout_ref.actor.mindspeed.expert_model_parallel_size=${train_ep}
-    actor_rollout_ref.actor.mindspeed.expert_tensor_parallel_size=${train_etp}
     # Memory Optimization
     actor_rollout_ref.actor.mindspeed.param_offload=${all_offload}
     actor_rollout_ref.actor.mindspeed.optimizer_offload=${all_offload}
@@ -134,16 +118,12 @@ ACTOR_CONFIG=(
     actor_rollout_ref.actor.mindspeed.mcore_kwargs.spec='[mindspeed_llm.tasks.models.spec.qwen3_spec, layer_spec]'
     actor_rollout_ref.actor.mindspeed.mcore_kwargs.seq_length=${max_model_len}
     actor_rollout_ref.actor.mindspeed.mcore_kwargs.micro_batch_size=${micro_batch_size}
-    +actor_rollout_ref.actor.mindspeed.mcore_kwargs.num_query_groups=4
+    +actor_rollout_ref.actor.mindspeed.mcore_kwargs.num_query_groups=8
     +actor_rollout_ref.actor.mindspeed.mcore_kwargs.recompute_method=uniform
     +actor_rollout_ref.actor.mindspeed.mcore_kwargs.recompute_granularity=full
     +actor_rollout_ref.actor.mindspeed.mcore_kwargs.recompute_num_layers=1
-    # MOE
-    +actor_rollout_ref.actor.mindspeed.mcore_kwargs.moe_router_load_balancing_type=aux_loss
-    +actor_rollout_ref.actor.mindspeed.mcore_kwargs.moe_permutation_async_comm=True
-    +actor_rollout_ref.actor.mindspeed.mcore_kwargs.moe_token_dispatcher_type=alltoall
-    +actor_rollout_ref.actor.mindspeed.mcore_kwargs.moe_aux_loss_coeff=0.001
-    +actor_rollout_ref.actor.mindspeed.mcore_kwargs.moe_grouped_gemm=True
+    +actor_rollout_ref.actor.mindspeed.mcore_kwargs.overlap_grad_reduce=True
+    +actor_rollout_ref.actor.mindspeed.mcore_kwargs.overlap_param_gather=True
 )
 
 REF_CONFIG=(
@@ -156,9 +136,6 @@ REF_CONFIG=(
     # Megatron Parallelism Strategy
     actor_rollout_ref.ref.mindspeed.tensor_model_parallel_size=${train_tp}
     actor_rollout_ref.ref.mindspeed.pipeline_model_parallel_size=${train_pp}
-    actor_rollout_ref.ref.mindspeed.context_parallel_size=${train_cp}
-    actor_rollout_ref.ref.mindspeed.expert_model_parallel_size=${train_ep}
-    actor_rollout_ref.ref.mindspeed.expert_tensor_parallel_size=${train_etp}
     # Memory Optimization
     actor_rollout_ref.ref.mindspeed.param_offload=${all_offload}
     # Model Weights Management
@@ -184,7 +161,6 @@ ROLLOUT_CONFIG=(
     # Parallelism Strategy
     actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp}
     actor_rollout_ref.rollout.data_parallel_size=${gen_dp}
-    actor_rollout_ref.rollout.expert_parallel_size=${gen_ep}
     +actor_rollout_ref.rollout.engine_kwargs.sglang.enable_dp_attention=False
     # Performance Optimization
     +actor_rollout_ref.rollout.engine_kwargs.sglang.chunked_prefill_size=-1
@@ -208,29 +184,28 @@ TRAINER_CONFIG=(
     trainer.n_gpus_per_node="${NPUS_PER_NODE}"
     trainer.device='npu'
     # Training Schedule
-    trainer.total_epochs=15
+    trainer.total_epochs=1
     trainer.val_before_train=False
     trainer.test_freq=-1
     trainer.save_freq=-1
-    # Checkpoint Directory
-    trainer.default_local_dir="${CKPTS_DIR}"
+    trainer.total_training_steps=50
 )
 
 # profiling configuration
 PROF_CONFIG=(
-    global_profiler.tool=npu 
-    global_profiler.steps=null 
-    global_profiler.save_path=/profpath 
-    actor_rollout_ref.actor.profiler.enable=True 
-    actor_rollout_ref.actor.profiler.ranks="[0]" 
-    actor_rollout_ref.actor.profiler.all_ranks=False 
-    actor_rollout_ref.actor.profiler.tool_config.npu.discrete=True 
-    actor_rollout_ref.actor.profiler.tool_config.npu.contents=['npu','cpu'] 
-    actor_rollout_ref.actor.profiler.tool_config.npu.level=level0 
-    actor_rollout_ref.actor.profiler.tool_config.npu.analysis=True 
-    actor_rollout_ref.rollout.profiler.enable=True 
+    global_profiler.tool=npu
+    global_profiler.steps=null
+    global_profiler.save_path=/profpath
+    actor_rollout_ref.actor.profiler.enable=True
+    actor_rollout_ref.actor.profiler.ranks="[0]"
+    actor_rollout_ref.actor.profiler.all_ranks=False
+    actor_rollout_ref.actor.profiler.tool_config.npu.discrete=True
+    actor_rollout_ref.actor.profiler.tool_config.npu.contents=['npu','cpu']
+    actor_rollout_ref.actor.profiler.tool_config.npu.level=level0
+    actor_rollout_ref.actor.profiler.tool_config.npu.analysis=True
+    actor_rollout_ref.rollout.profiler.enable=True
     actor_rollout_ref.rollout.profiler.ranks="[0]"
-    actor_rollout_ref.rollout.profiler.all_ranks=False 
+    actor_rollout_ref.rollout.profiler.all_ranks=False
 )
 
 python3 -m verl.trainer.main_ppo \

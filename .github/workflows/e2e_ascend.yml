@@ -165,6 +165,7 @@ jobs:
           export PYTHONPATH=$PYTHONPATH:/Megatron-LM
           export PYTHONPATH=$PYTHONPATH:/MindSpeed
           export PYTHONPATH=$PYTHONPATH:/MindSpeed-LLM
+          rm -rf /root/.cache/torch_extensions/py311_cpu/npu_rotary_position_embedding
           bash tests/special_npu/run_qwen3_8b_grpo_mindspeedllm.sh
       - name: Running gsm8k e2e training tests with GRPO on ASCEND NPU (MindSpeedLLM backend, MoE Model)
         run: |
@@ -172,7 +173,9 @@ jobs:
           export PYTHONPATH=$PYTHONPATH:/Megatron-LM
           export PYTHONPATH=$PYTHONPATH:/MindSpeed
           export PYTHONPATH=$PYTHONPATH:/MindSpeed-LLM
-          USE_DIST_CKPT=True USE_DUMMY_MODEL=True DUMMY_MODEL_CONFIG_PATH=tests/special_e2e/ppo_trainer/expert_parallel/qwen3moe_minimal.json DUMMY_MODEL_PATH=$HOME/dist_ckpt/qwen3_30b_grpo_mindspeedllm bash tests/special_npu/run_qwen3_30b_grpo_mindspeedllm.sh
+          rm -rf /root/.cache/torch_extensions/py311_cpu/npu_rotary_position_embedding
+          USE_DUMMY_MODEL=True DUMMY_MODEL_CONFIG_PATH=tests/special_e2e/ppo_trainer/expert_parallel/qwen3moe_minimal.json DUMMY_MODEL_PATH=$HOME/dist_ckpt/qwen3_30b_grpo_mindspeedllm bash tests/special_npu/run_qwen3_30b_grpo_mindspeedllm.sh
+          rm -rf $HOME/dist_ckpt/qwen3_30b_grpo_mindspeedllm
 
   vlm_rl_job:
     if: github.repository_owner == 'verl-project'
