@@ -563,13 +563,14 @@ def apply_fsdp2(model, fsdp_kwargs, config):
     # Honor `forward_prefetch` config to match the FSDP1 path. Depth=1 mirrors
     # PyTorch FSDP1's hardcoded `forward_prefetch_limit=1`. Static-graph models
     # only (see PyTorch FSDP1's docstring on `forward_prefetch`).
+    # `set_modules_to_forward_prefetch` was introduced in PyTorch 2.5; guard with
+    # `hasattr` so users on PyTorch 2.4 silently fall back to the no-prefetch
+    # behavior (same as before this PR — no regression).
     if config.get("forward_prefetch", False):
-        from torch.distributed.fsdp import FSDPModule
-
         fsdp_modules = [m for m in modules if isinstance(m, FSDPModule)]
         for i, m in enumerate(fsdp_modules):
             next_targets = fsdp_modules[i + 1 : i + 2]  # depth=1, mirrors FSDP1's forward_prefetch_limit=1
-            if next_targets:
+            if next_targets and hasattr(m, "set_modules_to_forward_prefetch"):
                 m.set_modules_to_forward_prefetch(next_targets)
 
 
