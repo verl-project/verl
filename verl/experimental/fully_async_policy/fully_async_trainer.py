@@ -293,7 +293,9 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             f"mq_len: {queue_len}",
             flush=True,
         )
-        return self._finalize_batch_from_raw_mq_entries(queue_samples, queue_len, total_wait_time)
+        return await asyncio.to_thread(
+            self._finalize_batch_from_raw_mq_entries, queue_samples, queue_len, total_wait_time
+        )
 
     def _materialize_batch_from_mq_sync(self) -> tuple[None, None] | tuple[int, Any]:
         """Sync variant for the prefetch worker thread (uses ``get_samples_sync``)."""
@@ -328,9 +330,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         assert self._prefetch_deque is not None
         while not self._prefetch_stop.is_set():
             with self._prefetch_cv:
-                while (
-                    len(self._prefetch_deque) >= self._prefetch_depth and not self._prefetch_stop.is_set()
-                ):
+                while len(self._prefetch_deque) >= self._prefetch_depth and not self._prefetch_stop.is_set():
                     self._prefetch_cv.wait(timeout=0.5)
                 if self._prefetch_stop.is_set():
                     break
@@ -365,14 +365,14 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         self._prefetch_thread.start()
         print(f"[FullyAsyncTrainer] Started MQ prefetch thread (depth={self._prefetch_depth})", flush=True)
 
-    def _stop_prefetch_if_needed(self) -> None:
+    async def _stop_prefetch_if_needed(self) -> None:
         if self._prefetch_depth <= 0:
             return
         self._prefetch_stop.set()
         with self._prefetch_cv:
             self._prefetch_cv.notify_all()
         if self._prefetch_thread is not None:
-            self._prefetch_thread.join(timeout=30.0)
+            await asyncio.to_thread(self._prefetch_thread.join, 30.0)
             if self._prefetch_thread.is_alive():
                 print("[FullyAsyncTrainer] Prefetch thread did not exit within 30s", flush=True)
             self._prefetch_thread = None
@@ -390,21 +390,28 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             return await self._materialize_batch_from_mq()
 
         assert self._prefetch_deque is not None
-        with self._prefetch_cv:
-            while len(self._prefetch_deque) == 0 and not self._prefetch_stop.is_set():
-                self._prefetch_cv.wait(timeout=1.0)
-            if len(self._prefetch_deque) == 0:
-                print("[FullyAsyncTrainer] Prefetch buffer empty after wait", flush=True)
-                return None, None
-            item = self._prefetch_deque.popleft()
-            buf_len = len(self._prefetch_deque)
-            self._prefetch_cv.notify_all()
 
+        def _pop_prefetched_item():
+            with self._prefetch_cv:
+                while len(self._prefetch_deque) == 0 and not self._prefetch_stop.is_set():
+                    self._prefetch_cv.wait(timeout=1.0)
+                if len(self._prefetch_deque) == 0:
+                    print("[FullyAsyncTrainer] Prefetch buffer empty after wait", flush=True)
+                    return None
+                item = self._prefetch_deque.popleft()
+                buf_len = len(self._prefetch_deque)
+                self._prefetch_cv.notify_all()
+            return (item, buf_len)
+
+        popped = await asyncio.to_thread(_pop_prefetched_item)
+        if popped is None:
+            return None, None
+        item, buf_len = popped
         if item is _PREFETCH_STREAM_STOP:
             return None, None
         if isinstance(item, _PrefetchThreadErrorBox):
             print(f"[FullyAsyncTrainer] Prefetch worker failed: {item.exc!r}", flush=True)
-            return None, None
+            raise item.exc
 
         batch = item
         batch.meta_info["fully_async/prefetch_buffer_len_after_pop"] = float(buf_len)
@@ -553,7 +560,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
                     print("[FullyAsyncTrainer] Training stopped by queue termination signal")
                     break
         finally:
-            self._stop_prefetch_if_needed()
+            await self._stop_prefetch_if_needed()
 
         self.progress_bar.close()
         if self.current_param_version % self.config.trainer.test_freq != 0 or self.local_trigger_step > 1:
