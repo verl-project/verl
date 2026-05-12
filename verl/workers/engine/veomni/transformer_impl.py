@@ -178,6 +178,7 @@ class VeOmniEngine(FSDPEngine):
 
         return optimizer
 
+
     def _build_lr_scheduler(self, optimizer):
         optim_config = self.optimizer_config
         lr_scheduler = build_lr_scheduler(
@@ -224,7 +225,9 @@ class VeOmniEngine(FSDPEngine):
         log_gpu_memory_usage("After parallelize model", logger=logger)
 
         if not self.engine_config.forward_only:
+            # Initialize optimizer with model parameters and config settings
             optimizer = self._build_optimizer(module)
+            # Create learning rate scheduler with warmup and decay settings
             lr_scheduler = self._build_lr_scheduler(optimizer)
         else:
             optimizer = None
@@ -439,6 +442,7 @@ class VeOmniEngine(FSDPEngine):
                     output_shape[0] *= ps.extra_parallel_sizes["ep"]
                     stacked_tensor = torch.empty(output_shape, dtype=unsharded_tensor.dtype, device=device)
 
+                    # all gather expert tensors [32, H, I] -> [128, H, I]
                     torch.distributed.all_gather_into_tensor(stacked_tensor, unsharded_tensor, group=ps.ep_group)
                     yield from process_func(name, stacked_tensor)
 
@@ -567,12 +571,12 @@ class OmniSequenceShardCollator:
                     pad_scale=self.padding_scale.get(key, 1),
                 )
 
+        # sp slice
         for key in batch.keys():
             if key in self.sp_slice_features.keys():
                 batch[key] = self.sp_slice(batch[key], dim=self.sp_slice_features[key])
 
         return batch
-
 
 def _prepare_veomni_flash_attention_kwargs(position_ids: torch.Tensor) -> dict[str, torch.Tensor | int]:
     """Normalize packed position_ids layout and derive varlen FlashAttention kwargs.
@@ -582,8 +586,10 @@ def _prepare_veomni_flash_attention_kwargs(position_ids: torch.Tensor) -> dict[s
         - 3D: (rope_dim, 1, total_nnz) - VeRL mRoPE packed format
     """
     if position_ids.dim() == 2:
+        # (1, total_nnz) - standard packed format
         fa_position_ids = position_ids
     elif position_ids.dim() == 3:
+        # (rope_dim, 1, total_nnz) - VeRL mRoPE packed format
         if position_ids.shape[1] == 1:
             fa_position_ids = position_ids[0]
         else:
