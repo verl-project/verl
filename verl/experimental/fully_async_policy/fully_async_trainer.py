@@ -414,11 +414,30 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             queue_len,
         )
 
-        if queue_samples and all(isinstance(x, bytes | bytearray) for x in queue_samples):
-            # Backward-compatible path for samples produced by older rollouters.
-            queue_samples = [ray.cloudpickle.loads(x) for x in queue_samples]
-        else:
-            queue_samples = ray.get(queue_samples)
+        materialized_samples = []
+        sample_refs = []
+        sample_ref_positions = []
+        for sample in queue_samples:
+            if isinstance(sample, bytes | bytearray):
+                # Backward-compatible path for samples produced by older rollouters.
+                materialized_samples.append(ray.cloudpickle.loads(sample))
+            elif isinstance(sample, ray.ObjectRef):
+                sample_ref_positions.append(len(materialized_samples))
+                materialized_samples.append(None)
+                sample_refs.append(sample)
+            elif isinstance(sample, list | tuple) and len(sample) == 1 and isinstance(sample[0], ray.ObjectRef):
+                sample_ref_positions.append(len(materialized_samples))
+                materialized_samples.append(None)
+                sample_refs.append(sample[0])
+            else:
+                # Compatibility for queues populated by code that passed ObjectRef
+                # as a top-level actor argument and was auto-dereferenced by Ray.
+                materialized_samples.append(sample)
+        if sample_refs:
+            resolved_samples = ray.get(sample_refs)
+            for position, resolved_sample in zip(sample_ref_positions, resolved_samples, strict=True):
+                materialized_samples[position] = resolved_sample
+        queue_samples = materialized_samples
         # Assemble batch - now working directly with RolloutSample objects
         if self.config.trainer.balance_batch:
             batch = assemble_batch_from_rollout_samples(

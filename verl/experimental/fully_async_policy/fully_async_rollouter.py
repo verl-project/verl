@@ -726,8 +726,10 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         rollout_sample.rollout_status = await self.get_statistics()
 
         sample_ref = ray.put(rollout_sample)
+        # Wrap the ObjectRef so Ray does not auto-dereference it when passing it
+        # as a top-level actor method argument to MessageQueue.put_sample.
         success = await self.message_queue_client.put_sample(
-            sample=sample_ref,
+            sample=[sample_ref],
         )
         if success:
             self.total_generated_samples += 1
