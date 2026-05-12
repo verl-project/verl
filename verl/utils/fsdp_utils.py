@@ -560,6 +560,18 @@ def apply_fsdp2(model, fsdp_kwargs, config):
     with maybe_patch_fsdp_module(model):
         fully_shard(model, **fsdp_kwargs)  # fsdp2 will not reshard_after_forward for root module
 
+    # Honor `forward_prefetch` config to match the FSDP1 path. Depth=1 mirrors
+    # PyTorch FSDP1's hardcoded `forward_prefetch_limit=1`. Static-graph models
+    # only (see PyTorch FSDP1's docstring on `forward_prefetch`).
+    if config.get("forward_prefetch", False):
+        from torch.distributed.fsdp import FSDPModule
+
+        fsdp_modules = [m for m in modules if isinstance(m, FSDPModule)]
+        for i, m in enumerate(fsdp_modules):
+            next_targets = fsdp_modules[i + 1 : i + 2]  # depth=1, mirrors FSDP1's forward_prefetch_limit=1
+            if next_targets:
+                m.set_modules_to_forward_prefetch(next_targets)
+
 
 def get_shard_placement_fn(fsdp_size):
     """Choose the dimension that can divide fsdp_size to avoid padding"""
