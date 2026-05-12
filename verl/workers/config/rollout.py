@@ -162,6 +162,16 @@ class CheckpointEngineConfig(BaseConfig):
     # backend is instantiated, allowing custom backends to register themselves
     # in CheckpointEngineRegistry.
     custom_backend_module: Optional[str] = None
+    # If True, CheckpointEngineManager.update_weights() returns early without
+    # touching the rollout backend (no abort / sleep / process-group build /
+    # weight transfer / wake-up). The rollout backend keeps serving with the
+    # weights it was initialized with; the trainer-side actor still advances
+    # its own weights. Effectively turns the run into off-policy training with
+    # a frozen behavior policy. Mirrors NeMo-RL PR #2222's NEED_REFIT=False
+    # pattern (nemo_rl/algorithms/grpo.py:2494) used to enable e2e runs on
+    # backends that have not implemented weight refit yet (dynamo), and to
+    # form an apples-to-apples baseline by forcing vllm into the same mode.
+    skip_refit: bool = False
 
 
 @dataclass
