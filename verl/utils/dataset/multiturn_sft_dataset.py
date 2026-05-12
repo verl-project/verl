@@ -106,6 +106,8 @@ class MultiTurnSFTDataset(Dataset):
         self.image_patch_size = config.get(
             "image_patch_size", processor.image_processor.patch_size if processor else None
         )
+        self.max_pixels = config.get("max_pixels", None)
+        self.min_pixels = config.get("min_pixels", None)
         self.tools_key = config.get("tools_key", "tools")
         self.enable_thinking_key = config.get("enable_thinking_key", "enable_thinking")
         self.enable_thinking_default = config.get("enable_thinking_default", None)
@@ -271,7 +273,7 @@ class MultiTurnSFTDataset(Dataset):
             segments = [item for item in segments if item != ""]
             for segment in segments:
                 if segment == "<image>":
-                    image = process_image(images[image_offset], image_patch_size=self.image_patch_size)
+                    image = process_image(images[image_offset], image_patch_size=self.image_patch_size, max_pixels=self.max_pixels, min_pixels=self.min_pixels)
                     content_list.append({"type": "image", "image": image})
                     image_offset += 1
                 elif segment == "<video>":

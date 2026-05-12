@@ -108,6 +108,8 @@ class RLHFDataset(Dataset):
         self.image_key = config.get("image_key", "images")
         self.video_key = config.get("video_key", "videos")
         self.image_patch_size = config.get("image_patch_size", 14)
+        self.max_pixels = config.get("max_pixels", None)
+        self.min_pixels = config.get("min_pixels", None)
         self.max_prompt_length = config.get("max_prompt_length", 1024)
         self.return_raw_chat = config.get("return_raw_chat", False)
         self.return_full_prompt = config.get("return_full_prompt", False)
@@ -214,7 +216,7 @@ class RLHFDataset(Dataset):
                         )
                         if image_key in doc and doc[image_key]:
                             images = [
-                                process_image(image, image_patch_size=self.image_patch_size) for image in doc[image_key]
+                                process_image(image, image_patch_size=self.image_patch_size, max_pixels=self.max_pixels, min_pixels=self.min_pixels) for image in doc[image_key]
                             ]
                         else:
                             images = None
@@ -420,6 +422,21 @@ class RLHFDataset(Dataset):
             videos: List of videos, each video is a tuple of (video_tensor, video_metadata).
         """
         from qwen_vl_utils import process_vision_info
+
+        # Inject max_pixels/min_pixels from config into image dicts within messages
+        max_pixels = config.get("max_pixels", None)
+        min_pixels = config.get("min_pixels", None)
+        if max_pixels is not None or min_pixels is not None:
+            import copy
+            messages = copy.deepcopy(messages)
+            for msg in messages:
+                if isinstance(msg.get("content"), list):
+                    for item in msg["content"]:
+                        if isinstance(item, dict) and ("image" in item or "image_url" in item):
+                            if max_pixels is not None and "max_pixels" not in item:
+                                item["max_pixels"] = max_pixels
+                            if min_pixels is not None and "min_pixels" not in item:
+                                item["min_pixels"] = min_pixels
 
         images, videos = process_vision_info(messages, image_patch_size=image_patch_size, return_video_metadata=True)
         return images, videos

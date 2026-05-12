@@ -19,15 +19,24 @@ import torch
 from PIL import Image
 
 
-def process_image(image: dict | Image.Image, image_patch_size: int = 14) -> Image.Image:
+def process_image(image: dict | Image.Image, image_patch_size: int = 14, max_pixels: int | None = None, min_pixels: int | None = None) -> Image.Image:
     from qwen_vl_utils import fetch_image
 
     if isinstance(image, Image.Image):
         return image.convert("RGB")
 
+    if not isinstance(image, dict):
+        image = {"image": image}
+
     if "bytes" in image:
         assert "image" not in image, "Cannot have both `bytes` and `image`"
         image["image"] = Image.open(BytesIO(image["bytes"]))
+
+    # Inject max_pixels/min_pixels from config if not already set in the image dict
+    if max_pixels is not None and "max_pixels" not in image:
+        image["max_pixels"] = max_pixels
+    if min_pixels is not None and "min_pixels" not in image:
+        image["min_pixels"] = min_pixels
 
     try:
         ans = fetch_image(image, image_patch_size=image_patch_size)
