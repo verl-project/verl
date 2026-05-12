@@ -121,7 +121,7 @@ jobs:
           python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
       - name: Test the latest vLLM Rollout async with agent loop
         run: |
-          ROLLOUT_NAME=vllm pytest -svvv tests/experimental/agent_loop -m "not vllm_omni"
+          ROLLOUT_NAME=vllm pytest -svvv tests/experimental/agent_loop
       - name: Test vllm server abort functionality
         run: |
           pytest tests/workers/rollout/rollout_vllm/test_vllm_abort.py -v -s

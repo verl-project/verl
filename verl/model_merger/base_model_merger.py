@@ -21,12 +21,7 @@ from typing import Optional
 
 import torch
 from accelerate import init_empty_weights
-from transformers import (
-    AutoConfig,
-    AutoModelForCausalLM,
-    AutoModelForTokenClassification,
-    GenerationConfig,
-)
+from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForTokenClassification, GenerationConfig
 
 from verl.utils import hf_processor, hf_tokenizer
 from verl.utils.transformers_compat import get_auto_model_for_vision2seq
@@ -223,7 +218,7 @@ class BaseModelMerger(ABC):
     def patch_model_generation_config(self, model):
         """
         The generation_config created from model config may be different to the pretrained model,
-        this may lead to error when generating: https://github.com/volcengine/verl/issues/1246
+        this may lead to error when generating: https://github.com/verl-project/verl/issues/1246
 
         This function patch the generation_config created from model config to the pretrained model.
         """

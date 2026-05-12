@@ -110,7 +110,10 @@ def compute_distillation_loss_range(
     distillation_losses: torch.Tensor, response_mask: torch.Tensor
 ) -> dict[str, Metric]:
     """Compute min and max distillation loss over valid response tokens."""
-    distillation_losses_response = distillation_losses[response_mask.bool()]
+    if response_mask.is_nested:
+        distillation_losses_response = distillation_losses[response_mask.bool().to_padded_tensor(False)]
+    else:
+        distillation_losses_response = distillation_losses[response_mask.bool()]
     return {
         "distillation/loss_min": Metric(AggregationType.MIN, distillation_losses_response.min()),
         "distillation/loss_max": Metric(AggregationType.MAX, distillation_losses_response.max()),
@@ -132,7 +135,8 @@ def compute_topk_loss(
     - teacher_mass: (bsz, seqlen/cp_size)
     """
     match config.strategy:
-        case "fsdp":
+        # VeOmni uses FSDP2 internally, so its loss computation is identical to FSDP.
+        case "fsdp" | "veomni":
             import verl.trainer.distillation.fsdp.losses as fsdp_losses
 
             distillation_loss_fn = fsdp_losses.compute_forward_kl_topk
@@ -257,6 +261,10 @@ def distillation_loss(
             loss_config.global_batch_info[k] = v
         log_prob = no_padding_2_padding(model_output["log_probs"], data)
         old_log_prob = data["old_log_probs"]
+        if old_log_prob.is_nested:
+            old_log_prob = data["old_log_probs"].to_padded_tensor(0.0)
+        if response_mask.is_nested:
+            response_mask = response_mask.to_padded_tensor(False)
         rollout_is_weights = data.get("rollout_is_weights", None)
         distillation_loss, pg_metrics = policy_loss_fn(
             old_log_prob=old_log_prob,
@@ -271,6 +279,8 @@ def distillation_loss(
         distillation_metrics.update(pg_metrics)
     else:
         # Directly backpropagate distillation loss as a supervised loss, as in https://arxiv.org/abs/2306.13649.
+        if response_mask.is_nested:
+            response_mask = response_mask.to_padded_tensor(False)
         distillation_loss = agg_loss(
             loss_mat=distillation_losses,
             loss_mask=response_mask,
@@ -298,7 +308,10 @@ def compute_forward_kl_topk(
     distillation_losses = no_padding_2_padding(model_output["distillation_losses"], data)
     student_mass = no_padding_2_padding(model_output["student_mass"], data)
     teacher_mass = no_padding_2_padding(model_output["teacher_mass"], data)
-    response_mask_bool = data["response_mask"].bool()
+    if data["response_mask"].is_nested:
+        response_mask_bool = data["response_mask"].bool().to_padded_tensor(False)
+    else:
+        response_mask_bool = data["response_mask"].bool()
     assert distillation_losses.shape == student_mass.shape == teacher_mass.shape == response_mask_bool.shape
 
     # Log amount of mass in the top-k log probabilities for both student and teacher.
@@ -340,7 +353,10 @@ def compute_distillation_loss_reverse_kl_estimator(
     """
     student_log_probs = no_padding_2_padding(model_output["log_probs"], data)
     teacher_log_probs = no_padding_2_padding(data["teacher_logprobs"], data).squeeze(-1)
-    response_mask_bool = data["response_mask"].bool()
+    if data["response_mask"].is_nested:
+        response_mask_bool = data["response_mask"].bool().to_padded_tensor(False)
+    else:
+        response_mask_bool = data["response_mask"].bool()
     assert teacher_log_probs.shape == student_log_probs.shape == response_mask_bool.shape
 
     loss_config: DistillationLossConfig = distillation_config.distillation_loss

@@ -217,3 +217,12 @@ class TestBucketedWeightTransferIPC:
         numel = (1 << 20) // 4
         specs = [("exact_fit", (numel,), torch.float32)]
         _transfer_and_validate(specs, bucket_size_mb=1, use_shm=False)
+
+    def test_large_weight(self):
+        specs = [("embedding", (1024, 1024), torch.float32)]  # 4MB
+        specs.extend([(f"layer{i}.weight", (128,), torch.bfloat16) for i in range(5)])
+        specs.append(("gate_up_proj", (1024, 1024), torch.float32))  # 4MB
+        specs.extend([(f"layer{i}.weight", (128,), torch.bfloat16) for i in range(20)])
+        specs.append(("lm_head", (1024, 1024), torch.float32))  # 4MB
+
+        _transfer_and_validate(specs, bucket_size_mb=1, use_shm=False)

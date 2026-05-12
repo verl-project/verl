@@ -258,24 +258,28 @@ Last updated: 12/20/2025.
 2. compute_log_prob (Actor & Ref) 阶段精细化采集
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-该阶段计算新旧策略的概率分布。
+该阶段计算新旧策略的概率分布。统一模型引擎下，actor 和 ref 的 log-prob
+计算都走 ``TrainingWorker.infer_batch``，最终分发到对应后端引擎的
+``BaseEngine.infer_batch`` 上。
 
 **FSDP 后端**
 
-FSDP 后端允许在 Micro-Batch 级别进行精细控制。
+FSDP 后端允许在 Micro-Batch 级别进行精细控制，可在 FSDP 引擎 forward 过程
+的 micro-batch 循环内插桩。
 
-- **修改文件**：``verl/workers/actor/dp_actor.py``
+- **修改文件**：``verl/workers/engine/fsdp/transformer_impl.py``
+  （``FSDPEngineWithLMHead.forward_backward_batch`` / ``forward_step``）
 
 .. code-block:: diff
 
       # ... 引入依赖 ...
   +   import torch_npu
-  
-      class DataParallelPPOActor(BasePPOActor):
-  
-          def compute_log_prob(self, data: DataProto, calculate_entropy=False) -> torch.Tensor:
 
-  +           role = "Ref" if self.actor_optimizer is None else "Actor"
+      class FSDPEngineWithLMHead(FSDPEngine):
+
+          def forward_backward_batch(self, data: TensorDict, loss_function, forward_only=False):
+
+  +           role = "Ref" if forward_only and not self.optimizer_config else "Actor"
   +           # 准备 profiler (配置同上，略)
   +           experimental_config = torch_npu.profiler._ExperimentalConfig(...)
   +           self.prof_npu = torch_npu.profiler.profile(
@@ -285,48 +289,58 @@ FSDP 后端允许在 Micro-Batch 级别进行精细控制。
   +               on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(f"./outputs/{role}_compute_log_prob", analyse_flag=True)
   +           )
 
-
-  +           # 此函数ref和actor共用，设置role标志位来区分。如果想采集actor_compute_log_prob，可设置if role=="Actor":
-  +           if role=="Ref":
+  +           # forward_backward_batch 被 ref 和 actor 共用，通过 role 标志位区分；
+  +           # 如需采集 actor_compute_log_prob，可改为 role == "Actor":
+  +           if role == "Ref":
   +               self.prof_npu.start()
-  
+
               for micro_batch in micro_batches:
-  
+
                   # ... 原始计算逻辑 ...
                   with torch.no_grad():
-                      entropy, log_probs = self._forward_micro_batch(...)
-                      
+                      output = self.forward_step(micro_batch, loss_function, forward_only=True)
+
   +                   # 驱动 schedule，对micro batch进行采集
-  +                   if role=="Ref":
+  +                   if role == "Ref":
   +                       self.prof_npu.step()
-                  
+
                   # ...
 
 
 **Megatron 后端**
 
-Megatron 后端的 Micro-Batch 调度由框架内部管理，暂不支持通过简单的代码插桩进行 Micro-Batch 级别的精细化采集。建议使用全局配置进行采集。
+Megatron 后端的 Micro-Batch 调度由 Megatron 的流水并行
+``forward_backward_func`` 内部管理，暂不支持通过简单的代码插桩进行
+Micro-Batch 级别的精细化采集。建议使用全局 profiler 配置进行采集。
 
 3. update_policy (Actor & Critic) 阶段精细化采集
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Update 阶段包含前向和反向传播。
+Update 阶段包含前向和反向传播。统一模型引擎下，mini-batch 循环由
+``verl/workers/engine_workers.py`` 中的 ``TrainingWorker.train_mini_batch``
+驱动，它会对每个 mini-batch 调用 ``train_batch``。
 
 **FSDP 后端**
 
 FSDP 后端支持设置对 Mini-Batch 和 Micro-Batch 的粒度进行采集。
+Mini-Batch 级别请插桩 ``TrainingWorker.train_mini_batch``；
+Micro-Batch 级别请插桩 FSDP 引擎的 ``forward_backward_batch`` 中的
+micro-batch 循环。
 
-- **修改文件**：``verl/workers/actor/dp_actor.py``
+- **修改文件**：``verl/workers/engine_workers.py``
+  （``TrainingWorker.train_mini_batch``，Mini-Batch 粒度）或
+  ``verl/workers/engine/fsdp/transformer_impl.py``
+  （``FSDPEngineWithLMHead.forward_backward_batch``，Micro-Batch 粒度）
 
 .. code-block:: diff
 
       # ... 引入依赖 ...
   +   import torch_npu
-  
-      class DataParallelPPOActor(BasePPOActor):
-  
-          def update_policy(self, data: DataProto):
-              
+
+      class TrainingWorker(Worker, DistProfilerExtension):
+
+          def train_mini_batch(self, data: TensorDict) -> TensorDict:
+
   +           # 准备 profiler (配置同上，略)
   +           experimental_config = torch_npu.profiler._ExperimentalConfig(...)
   +           self.prof_npu = torch_npu.profiler.profile(
@@ -336,51 +350,26 @@ FSDP 后端支持设置对 Mini-Batch 和 Micro-Batch 的粒度进行采集。
   +               on_trace_ready=torch_npu.profiler.tensorboard_trace_handler("./outputs/fsdp_actor_update_profile", analyse_flag=True)
   +           )
   +           self.prof_npu.start()
-              
-              # ... PPO Epochs 循环 ...
-              for _ in range(self.config.ppo_epochs):
-                  # ... Mini Batch 循环 ...
-                  for batch_idx, mini_batch in enumerate(mini_batches):
-                      # ... mini_batches 切分 ...
-  
-                      for i, micro_batch in enumerate(micro_batches):
-                          # ... 原始 Forward & Backward 逻辑 ...
-                          # ... loss.backward() ...
-                          pass
-      
-                      grad_norm = self._optimizer_step()
-                      
-  +                   # 驱动 schedule，对mini batch进行采集，如果想对micro batch进行，则将self.prof_npu.step()移动到micro_batch的循环内
-  +                   self.prof_npu.step()
-  
+
+              # ... Mini Batch 循环（遍历 dataloader） ...
+              for batch_idx, mini_batch_td in enumerate(dataloader):
+                  # ... 内部调用 self.train_batch(mini_batch_td)，后者在引擎内部
+                  # 对每个 micro-batch 执行 Forward & Backward，并完成一次优化器更新 ...
+                  actor_output = self.train_batch(mini_batch_td)
+
+  +               # 驱动 schedule，对 mini batch 进行采集；如需 micro-batch 粒度，
+  +               # 请将 self.prof_npu.step() 移动到
+  +               # FSDPEngineWithLMHead.forward_backward_batch 中的 micro-batch 循环内。
+  +               self.prof_npu.step()
+
 
 **Megatron 后端**
 
-Megatron 后端支持以 Mini-Batch 的粒度进行采集。
+Megatron 后端支持以 Mini-Batch 的粒度进行采集，入口同样是
+``TrainingWorker.train_mini_batch``：Megatron 引擎内部会调用 Megatron 的
+流水并行 forward/backward 调度并执行一次优化器 step。
 
-- **修改文件**：``verl/workers/actor/megatron_actor.py``
-
-.. code-block:: diff
-
-      class MegatronPPOActor(BasePPOActor):
-          
-          def update_policy(self, dataloader: Iterable[DataProto]) -> dict:
-              # ...
-  +           # 准备 profiler (配置同上，略)
-  +           experimental_config = torch_npu.profiler._ExperimentalConfig(...)
-  +           self.prof_npu = torch_npu.profiler.profile(
-  +               # ...
-  +               # 仅采集第一个 Mini Batch 的计算（含所有 Micro-Batch）和一次优化器更新
-  +               schedule=torch_npu.profiler.schedule(wait=0, warmup=0, active=1, repeat=1),
-  +               on_trace_ready=torch_npu.profiler.tensorboard_trace_handler("./outputs/megatron_actor_update_profile", analyse_flag=True)
-  +           )
-  +           self.prof_npu.start()
-              
-              for data in dataloader:
-                  # ... 内部会调用 self.forward_backward_batch 进行计算 ...
-                  # ... metric_micro_batch = self.forward_backward_batch(...)
-                  
-                  # ... self.actor_optimizer.step() ...
-                  
-  +               # 驱动 schedule，对mini batch进行采集
-  +               self.prof_npu.step()
+- **修改文件**：``verl/workers/engine_workers.py``
+  （``TrainingWorker.train_mini_batch``）—— 与上方 FSDP 代码片段完全一致，
+  建议将输出目录改名（例如 ``./outputs/megatron_actor_update_profile``）
+  以区分不同后端的 trace。

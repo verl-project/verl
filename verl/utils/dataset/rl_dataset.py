@@ -115,19 +115,29 @@ class RLHFDataset(Dataset):
         self.filter_overlong_prompts = config.get("filter_overlong_prompts", True)
         self.apply_chat_template_kwargs = config.get("apply_chat_template_kwargs", {})
 
+        # Mirror AgentLoopWorker's tool loading so length filtering sees the
+        # same schemas the rollout will.
         self.tool_config_path = config.get("tool_config_path", None)
+        self.function_tool_path = config.get("function_tool_path", None)
         self.tool_schemas = None
-        if self.tool_config_path:
+        if self.tool_config_path or self.function_tool_path:
             try:
-                from verl.tools.utils.tool_registry import initialize_tools_from_config
+                from verl.tools.tool_registry import load_all_tools
 
-                tool_list = initialize_tools_from_config(self.tool_config_path)
-                # match ToolAgentLoop behaviour: model_dump to plain dicts
+                tool_list = load_all_tools(
+                    tool_config_path=self.tool_config_path,
+                    function_tool_path=self.function_tool_path,
+                )
                 self.tool_schemas = [
                     tool.tool_schema.model_dump(exclude_unset=True, exclude_none=True) for tool in tool_list
                 ]
             except Exception as e:
-                logger.warning("Failed to initialize tools from %s: %s", self.tool_config_path, e)
+                logger.warning(
+                    "Failed to initialize tools (tool_config_path=%s, function_tool_path=%s): %s",
+                    self.tool_config_path,
+                    self.function_tool_path,
+                    e,
+                )
                 self.tool_schemas = None
 
         self.num_workers = config.get("filter_overlong_prompts_workers", max(1, os.cpu_count() // 4))
@@ -193,7 +203,7 @@ class RLHFDataset(Dataset):
 
                 def doc2len(doc) -> int:
                     try:
-                        messages = self._build_messages(doc)
+                        messages = self._build_messages(doc, key=self.prompt_key)
                         # pass tool schemas if available so the processor can format prompts
                         apply_kwargs = dict(**self.apply_chat_template_kwargs)
                         if self.tool_schemas is not None:
@@ -300,7 +310,7 @@ class RLHFDataset(Dataset):
     def __len__(self):
         return len(self.dataframe)
 
-    def _build_messages(self, example: dict):
+    def _build_messages(self, example: dict, key: str):
         """Replace <image> and <video> placeholder in messages with corresponding image and video
         which is required by processor.apply_chat_template.
         - <image>: {"type": "image", **image}
@@ -312,10 +322,10 @@ class RLHFDataset(Dataset):
         Returns:
             messages: List of messages with replaced placeholder.
         """
-        messages: list = example[self.prompt_key]
-        # When concatenating image and video datasets, pop will return None for image or video sample
-        images = example.pop(self.image_key, None) or []
-        videos = example.pop(self.video_key, None) or []
+        messages: list = example[key]
+        # When concatenating image and video datasets, get will return None for image or video sample
+        images = example.get(self.image_key, None) or []
+        videos = example.get(self.video_key, None) or []
 
         image_offset, video_offset = 0, 0
         for message in messages:
@@ -359,7 +369,10 @@ class RLHFDataset(Dataset):
     def __getitem__(self, item):
         """For rollout, apply_chat_template has been moved to AgentLoop, so we only return raw_prompt here."""
         row_dict: dict = self.dataframe[item]
-        row_dict["raw_prompt"] = self._build_messages(row_dict)
+        row_dict["raw_prompt"] = self._build_messages(row_dict, key=self.prompt_key)
+
+        row_dict.pop(self.image_key, None)
+        row_dict.pop(self.video_key, None)
 
         # TODO(wuxibin): We still need a dummy tensor to make sure DataProto.batch is not empty.
         # Remove this after deprecate DataProto by TensorDict.
@@ -370,13 +383,11 @@ class RLHFDataset(Dataset):
             row_dict["extra_info"] = dict()
         index = row_dict.get("extra_info", {}).get("index", 0)
         tools_kwargs = row_dict.get("extra_info", {}).get("tools_kwargs", {})
-        interaction_kwargs = row_dict.get("extra_info", {}).get("interaction_kwargs", {})
         need_tools_kwargs = row_dict.get("extra_info", {}).get("need_tools_kwargs", self.need_tools_kwargs)
         if need_tools_kwargs and not tools_kwargs:
             logger.warning("tools_kwargs is empty for index %s, data source: %s", index, row_dict["data_source"])
         row_dict["index"] = index
         row_dict["tools_kwargs"] = tools_kwargs
-        row_dict["interaction_kwargs"] = interaction_kwargs
         return row_dict
 
     @classmethod

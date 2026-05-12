@@ -1,13 +1,10 @@
 hydra:
   searchpath:
-    - file://verl/trainer/config
+    - pkg://verl.trainer.config
 
 defaults:
   - ppo_trainer
   - _self_
-
-trainer:
-  use_legacy_worker_impl: disable
 
 async_training:
 
@@ -22,7 +19,7 @@ async_training:
   require_batches: 1
 
   # When synchronizing parameters, Whether to resume generation when rollout is interrupted.
-  # If True, AsyncLLMServerManager auto resume generation, making rollout interruption invisible to the AgentLoop.
+  # If True, LLMServerClient auto resume generation, making rollout interruption invisible to the AgentLoop.
   partial_rollout: True
 
   # whether to use trainer do_validate

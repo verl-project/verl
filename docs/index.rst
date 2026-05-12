@@ -61,6 +61,7 @@ verl is fast with:
 
    examples/ppo_code_architecture
    examples/gsm8k_example
+   examples/megatron_fsdp_example
    examples/multi_modal_example
    examples/skypilot_examples
 
@@ -70,7 +71,6 @@ verl is fast with:
 
    algo/ppo.md
    algo/grpo.md
-   algo/collabllm.md
    algo/dapo.md
    algo/spin.md
    algo/sppo.md
@@ -88,12 +88,11 @@ verl is fast with:
    :caption: PPO Trainer and Workers
 
    workers/ray_trainer
-   workers/fsdp_workers
-   workers/megatron_workers
+   workers/model_engine
+   workers/engine_workers
    workers/automodel_workers
    workers/sglang_worker
    workers/trtllm_worker
-   workers/model_engine
 
 .. toctree::
    :maxdepth: 1
@@ -140,7 +139,6 @@ verl is fast with:
    advance/attention_implementation
    advance/ppo_lora.rst
    sglang_multiturn/multiturn.rst
-   sglang_multiturn/interaction_system.rst
    advance/placement
    advance/dpo_extension
    examples/sandbox_fusion_example
@@ -213,9 +211,9 @@ Contribution
 
 verl is free software; you can redistribute it and/or modify it under the terms
 of the Apache License 2.0. We welcome contributions.
-Join us on `GitHub <https://github.com/volcengine/verl>`_, `Slack <https://join.slack.com/t/verlgroup/shared_invite/zt-2w5p9o4c3-yy0x2Q56s_VlGLsJ93A6vA>`_ and `Wechat <https://raw.githubusercontent.com/eric-haibin-lin/verl-community/refs/heads/main/WeChat.JPG>`_ for discussions.
+Join us on `GitHub <https://github.com/verl-project/verl>`_, `Slack <https://join.slack.com/t/verlgroup/shared_invite/zt-2w5p9o4c3-yy0x2Q56s_VlGLsJ93A6vA>`_ and `Wechat <https://raw.githubusercontent.com/eric-haibin-lin/verl-community/refs/heads/main/WeChat.JPG>`_ for discussions.
 
-Contributions from the community are welcome! Please check out our `project roadmap <https://github.com/volcengine/verl/issues/710>`_ and `good first issues <https://github.com/volcengine/verl/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22good%20first%20issue%22>`_ to see where you can contribute.
+Contributions from the community are welcome! Please check out our `project roadmap <https://github.com/verl-project/verl/issues/710>`_ and `good first issues <https://github.com/verl-project/verl/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22good%20first%20issue%22>`_ to see where you can contribute.
 
 Code Linting and Formatting
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^

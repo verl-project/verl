@@ -20,5 +20,10 @@ veomni:
   param_offload: ${oc.select:actor_rollout_ref.actor.veomni.param_offload,False}
   attn_implementation: ${oc.select:actor_rollout_ref.actor.veomni.attn_implementation,flash_attention_2}
   moe_implementation: ${oc.select:actor_rollout_ref.actor.veomni.moe_implementation,fused}
+  cross_entropy_loss_implementation: ${oc.select:actor_rollout_ref.actor.veomni.cross_entropy_loss_implementation,eager}
+  rms_norm_implementation: ${oc.select:actor_rollout_ref.actor.veomni.rms_norm_implementation,eager}
+  swiglu_mlp_implementation: ${oc.select:actor_rollout_ref.actor.veomni.swiglu_mlp_implementation,eager}
+  rotary_pos_emb_implementation: ${oc.select:actor_rollout_ref.actor.veomni.rotary_pos_emb_implementation,eager}
+  load_balancing_loss_implementation: ${oc.select:actor_rollout_ref.actor.veomni.load_balancing_loss_implementation,eager}
   forward_only: True
 
