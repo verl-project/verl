@@ -725,7 +725,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                             log_only_rank_0=True,
                         )
                     else:
-                        self.bridge.save_hf_weights(self.model, hf_ckpt_path)
+                        self.bridge.save_hf_weights(self.model, hf_ckpt_path, strict=self.checkpoint_config.strict)
 
                 log_with_rank(f"Saved bridge checkpoint to {hf_ckpt_path}", rank=self.rank, logger=logger)
 
@@ -785,8 +785,14 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                 for key in pop_keys:
                     transformer_config_dict.pop(key)
                 transformer_config_path = get_transformer_config_checkpoint_path(local_path)
+                # NOTE: With Megatron-Bridge backend, a circular import issue occurs when transformers version >= 5.4.0.
                 with open(transformer_config_path, "w") as f:
-                    json.dump(transformer_config_dict, f, indent=2)
+                    json.dump(
+                        transformer_config_dict,
+                        f,
+                        indent=2,
+                        default=lambda o: o.to_dict() if hasattr(o, "to_dict") else o,
+                    )
 
         if self.should_save_hf_model and not self.use_hf_checkpoint:
             # wait for everyone to dump to local
