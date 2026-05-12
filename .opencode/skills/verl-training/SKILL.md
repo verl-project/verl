@@ -253,9 +253,9 @@ todowrite: content="Step 6.3: 创建ckpts目录" status="in_progress"
 
 - 1. 提取project_name（如有）
 ```bash
-if cat $SCRIPT_PATH | grep -q "project_name="; then
-    PROJECT_NAME=$(cat $SCRIPT_PATH | grep "project_name=" | head -1 | cut -d"'" -f2)
-    EXP_NAME=$(cat $SCRIPT_PATH | grep "exp_name=" | head -1 | cut -d"'" -f2)
+if docker exec $VERL_CONTAINER cat $SCRIPT_PATH | grep -q "project_name="; then
+    PROJECT_NAME=$(docker exec $VERL_CONTAINER cat $SCRIPT_PATH | grep "project_name=" | head -1 | cut -d"'" -f2)
+    EXP_NAME=$(docker exec $VERL_CONTAINER cat $SCRIPT_PATH | grep "exp_name=" | head -1 | cut -d"'" -f2)
 fi
 ```
 - 2.根据 PROJECT_NAME、EXP_NAME创建ckpts目录（如需要）
