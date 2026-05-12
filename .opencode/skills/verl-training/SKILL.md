@@ -445,7 +445,7 @@ todowrite: content="Step 6.7: 启动Ray" status="in_progress"
 
 **STRICT_RULE**: 严格按照下面命令执行，如果需要ray则启用，否则禁止启用
 ```bash
-if cat $SCRIPT_PATH | grep -q "ray job submit\|ray start"; then
+if docker exec $VERL_CONTAINER cat $SCRIPT_PATH | grep -q "ray job submit\|ray start"; then
     $DOCKER_CMD "ray start --head --port=6379 --dashboard-host=0.0.0.0 --dashboard-port=8265 --dashboard-agent-listen-port 51365"
     $DOCKER_CMD "for i in {1..30}; do ray status > /dev/null 2>&1 && break || sleep 2; done"
 fi
