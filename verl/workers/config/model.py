@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -72,6 +71,7 @@ class MtpConfig(BaseConfig):
 class HFModelConfig(BaseConfig):
     # note that we separate model_path, model_config_path and tokenizer_path in case they are different
     _mutable_fields = {
+        "model_type",
         "hf_config_path",
         "tokenizer_path",
         "hf_config",
@@ -82,6 +82,7 @@ class HFModelConfig(BaseConfig):
         "architectures",
         "local_hf_config_path",
         "local_tokenizer_path",
+        "mtp",
     }
 
     path: str = MISSING
@@ -90,6 +91,9 @@ class HFModelConfig(BaseConfig):
     local_hf_config_path: Optional[str] = None
     tokenizer_path: Optional[str] = None
     local_tokenizer_path: Optional[str] = None
+
+    # model type, e.g., "language_model", "value_model"
+    model_type: str = "language_model"
 
     # whether to load tokenizer. This is useful when we only want to load model config
     load_tokenizer: bool = True
@@ -157,6 +161,15 @@ class HFModelConfig(BaseConfig):
             self.tokenizer = hf_tokenizer(self.local_tokenizer_path, trust_remote_code=self.trust_remote_code)
             self.processor = hf_processor(self.local_tokenizer_path, trust_remote_code=self.trust_remote_code)
 
+        # For base models (e.g. Qwen3.5-2b-Base), the processor may not have a chat_template
+        # while the tokenizer does. Sync it so that processor.apply_chat_template() works.
+        if (
+            self.processor is not None
+            and not getattr(self.processor, "chat_template", None)
+            and getattr(self.tokenizer, "chat_template", None)
+        ):
+            self.processor.chat_template = self.tokenizer.chat_template
+
         if self.custom_chat_template is not None:
             if self.processor is not None:
                 self.processor.chat_template = self.custom_chat_template
@@ -203,6 +216,18 @@ class HFModelConfig(BaseConfig):
         # per model patch
         if getattr(self.hf_config, "model_type", None) == "kimi_vl":
             self.hf_config.text_config.topk_method = "greedy"
+
+        # When MTP is disabled, zero out MTP layer counts from hf_config so that
+        # downstream engine/worker code does not need to handle each MTP field format
+        # individually. Supports both DeepSeek-style (num_nextn_predict_layers) and
+        # Qwen3.5-style (mtp_num_hidden_layers, possibly nested under text_config).
+        if not self.mtp.enable:
+            if hasattr(self.hf_config, "num_nextn_predict_layers"):
+                self.hf_config.num_nextn_predict_layers = 0
+            if hasattr(self.hf_config, "mtp_num_hidden_layers"):
+                self.hf_config.mtp_num_hidden_layers = 0
+            if hasattr(self.hf_config, "text_config") and hasattr(self.hf_config.text_config, "mtp_num_hidden_layers"):
+                self.hf_config.text_config.mtp_num_hidden_layers = 0
 
         # Ensure target_modules is a str or list[str] (only if not None)
         if self.target_modules is not None:

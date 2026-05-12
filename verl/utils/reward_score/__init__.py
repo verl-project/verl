@@ -132,4 +132,9 @@ def _default_compute_score(
     )
 
 
+def get_default_compute_score(reward_name: str | None):
+    """Get the default compute_score function based on the reward manager type."""
+    return default_compute_score
+
+
 __all__ = ["default_compute_score"]

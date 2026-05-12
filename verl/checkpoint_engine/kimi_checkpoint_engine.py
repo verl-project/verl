@@ -181,7 +181,7 @@ class MasterMetadata:
 
 
 class BroadcastOperation:
-    """Async broadcast operation with NCCL in separate thread.
+    """Async broadcast operation in separate thread.
 
     Args:
         rank (int): The rank of the current process.
@@ -221,12 +221,12 @@ class BroadcastOperation:
 
 @CheckpointEngineRegistry.register("kimi_ckpt_engine")
 class KIMICheckpointEngine(CheckpointEngine):
-    """NCCL checkpoint engine with collective communication.
+    """kimi checkpoint engine with collective communication.
 
     Args:
         bucket_size (int): Bucket size in bytes to transfer multiple weights at one time. Note that we use
             two buffer to send and recv weights at same time, so the device memory overhead is 2 * bucket_size.
-        rebuild_group (bool): Whether to rebuild the NCCL process group in each update. Defaults to False.
+        rebuild_group (bool): Whether to rebuild the process group in each update. Defaults to False.
         is_master (bool): Whether the current process is the master process. Defaults to False.
         rollout_dtype (torch.dtype): The dtype of the weights received from rollout workers. Defaults to torch.bfloat16.
     """

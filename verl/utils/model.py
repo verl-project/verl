@@ -30,7 +30,6 @@ from transformers import (
     AutoConfig,
     AutoModel,
     AutoModelForCausalLM,
-    AutoModelForImageTextToText,
     AutoModelForSequenceClassification,
     AutoModelForTokenClassification,
     GenerationConfig,
@@ -38,6 +37,17 @@ from transformers import (
     PretrainedConfig,
     PreTrainedModel,
 )
+
+try:
+    from transformers import AutoModelForVision2Seq
+except ImportError:
+    AutoModelForVision2Seq = None
+
+try:
+    from transformers import AutoModelForImageTextToText
+except ImportError:
+    AutoModelForImageTextToText = AutoModelForVision2Seq
+
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from verl.models.registry import ModelRegistry
@@ -560,6 +570,8 @@ def get_parallel_gptmodel_from_config(
     from megatron.core.models.gpt.gpt_layer_specs import get_gpt_decoder_block_spec
     from megatron.core.models.gpt.gpt_model import GPTModel
 
+    from verl.models.mcore.config_converter import get_hf_rope_theta
+
     use_te = True
     assert tfconfig.normalization == "RMSNorm", "only RMSNorm is supported for now"
     transformer_layer_spec = get_gpt_decoder_block_spec(tfconfig, use_transformer_engine=use_te)
@@ -576,16 +588,16 @@ def get_parallel_gptmodel_from_config(
         post_process=post_process,
         share_embeddings_and_output_weights=share_embeddings_and_output_weights,
         position_embedding_type="rope",
-        rotary_base=hf_config.rope_theta,
+        rotary_base=get_hf_rope_theta(hf_config),
         **rope_scaling_args,
     )
     # # for layer in parallel_model.decoder.layers:
     # layer.self_attention.core_attention.flash_attention.softmax_scale = None
     if post_process and value:
-        from verl.models.llama.megatron.layers.parallel_linear import LinearForLastLayer
+        from verl.models.mcore.bridge import LinearForLastLayer
 
         parallel_model.output_layer = LinearForLastLayer(
-            input_size=tfconfig.hidden_size, output_size=1, config=tfconfig
+            input_size=tfconfig.hidden_size, output_size=1, sequence_parallel=tfconfig.sequence_parallel
         )
     return parallel_model
 
@@ -653,6 +665,9 @@ def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_cod
         attn_implementation="flash_attention_2",
         trust_remote_code=trust_remote_code,
     )
+    # vlm models
+    if hasattr(model_config, "text_config"):
+        ori_model.config.hidden_size = model_config.text_config.hidden_size
     model = AutoModelForCausalLMWithValueHead.from_pretrained(ori_model)
     patch_valuehead_model(model)
     return model

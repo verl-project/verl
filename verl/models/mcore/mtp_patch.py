@@ -20,7 +20,18 @@ from typing import Callable
 import torch
 from megatron.core import parallel_state
 from megatron.core.models.gpt.gpt_model import GPTModel
-from megatron.core.transformer.multi_token_prediction import MTPLossAutoScaler, MTPLossLoggingHelper, roll_tensor
+from megatron.core.transformer.multi_token_prediction import (
+    MTPLossAutoScaler,
+    MTPLossLoggingHelper,
+    roll_tensor,
+)
+
+try:
+    from megatron.core.transformer.multi_token_prediction import process_mtp_loss as _process_mtp_loss
+
+    _HAS_PROCESS_MTP_LOSS = True
+except ImportError:
+    _HAS_PROCESS_MTP_LOSS = False
 
 try:
     from megatron.core.utils import unwrap_model
@@ -74,45 +85,20 @@ def _megatron_gptmodel_postprocess(
     runtime_gather_output=None,
     extra_block_kwargs=None,
     inference_context=None,
-    **kwargs,
+    is_spec_decode=None,
 ):
-    """Compatibility patch for GPTModel._postprocess.
+    """Postprocesses decoder hidden states to generate logits or compute loss.
 
-    For inference (`labels is None`), delegate to the upstream implementation to stay
-    aligned with Megatron-Core updates.
-
-    For training (`labels is not None`), keep VERL's MTP behavior and always return
-    logits (instead of CE loss) so PPO paths can compute custom losses from logits.
+    Applies Multi-Token Prediction if enabled, generates output logits through
+    the output layer, and computes language model loss when labels are provided.
     """
-    # Keep inference path aligned with whatever upstream Megatron currently expects.
-    if labels is None:
-        return self._postprocess_backup(
-            hidden_states=hidden_states,
-            input_ids=input_ids,
-            position_ids=position_ids,
-            labels=labels,
-            rotary_pos_emb=rotary_pos_emb,
-            rotary_pos_cos=rotary_pos_cos,
-            rotary_pos_sin=rotary_pos_sin,
-            mtp_in_postprocess=mtp_in_postprocess,
-            loss_mask=loss_mask,
-            decoder_input=decoder_input,
-            attention_mask=attention_mask,
-            inference_params=inference_params,
-            packed_seq_params=packed_seq_params,
-            sequence_len_offset=sequence_len_offset,
-            runtime_gather_output=runtime_gather_output,
-            extra_block_kwargs=extra_block_kwargs,
-            inference_context=inference_context,
-            **kwargs,
-        )
 
-    # Training path: keep logits for external loss computation.
+    # logits and loss
     output_weight = None
     if self.share_embeddings_and_output_weights:
         output_weight = self.shared_embedding_or_output_weight()
 
-    if mtp_in_postprocess:
+    if mtp_in_postprocess and labels is not None:
         hidden_states = self.mtp(
             input_ids=input_ids,
             position_ids=position_ids,
@@ -131,19 +117,16 @@ def _megatron_gptmodel_postprocess(
     if not self.post_process:
         return hidden_states
 
-    # Skip when mtp_num_layers is None or 0.
-    if self.config.mtp_num_layers:
-        cp_group = None
-        if getattr(self, "pg_collection", None) is not None:
-            cp_group = self.pg_collection.cp
-        elif hasattr(self, "cp_group"):
-            cp_group = self.cp_group
-
-        # Prefer upstream helper when available (newer Megatron-LM).
-        try:
-            from megatron.core.transformer.multi_token_prediction import process_mtp_loss
-
-            hidden_states = process_mtp_loss(
+    # Skip when mtp_num_layers is None or 0
+    if self.config.mtp_num_layers and labels is not None:
+        if _HAS_PROCESS_MTP_LOSS:
+            # New Megatron API (>= verl megatron fork with process_mtp_loss):
+            # process_mtp_loss handles chunking, rolling, loss scaling all internally.
+            cp_group = getattr(self, "cp_group", None) or (
+                self.pg_collection.cp if hasattr(self, "pg_collection") else None
+            )
+            scale_logits_fn = self._scale_logits if (hasattr(self, "_scale_logits") and self.config.use_mup) else None
+            hidden_states = _process_mtp_loss(
                 hidden_states=hidden_states,
                 labels=labels,
                 loss_mask=loss_mask,
@@ -155,34 +138,31 @@ def _megatron_gptmodel_postprocess(
                 config=self.config,
                 cp_group=cp_group,
                 packed_seq_params=packed_seq_params,
+                scale_logits_fn=scale_logits_fn,
             )
-        except (ImportError, AttributeError, TypeError):
-            # Fallback for older Megatron-LM versions without process_mtp_loss API.
+        else:
+            # Legacy Megatron API: manual rolling + compute_output_layer_and_language_model_loss.
             mtp_labels = labels.clone()
-
             hidden_states_list = torch.chunk(hidden_states, 1 + self.config.mtp_num_layers, dim=0)
             hidden_states = hidden_states_list[0]
             if loss_mask is None:
-                # if loss_mask is not provided, use all ones as loss_mask
                 loss_mask = torch.ones_like(mtp_labels)
+            cp_group = getattr(self, "cp_group", None)
             for mtp_layer_number in range(self.config.mtp_num_layers):
-                # Calc loss for the current Multi-Token Prediction (MTP) layers.
                 mtp_labels, _ = roll_tensor(
                     mtp_labels,
                     shifts=-1,
                     dims=-1,
-                    cp_group=self.cp_group,
+                    cp_group=cp_group,
                     packed_seq_params=packed_seq_params,
                 )
                 loss_mask, num_tokens = roll_tensor(
                     loss_mask,
                     shifts=-1,
                     dims=-1,
-                    cp_group=self.cp_group,
+                    cp_group=cp_group,
                     packed_seq_params=packed_seq_params,
                 )
-
-                # Compute mtp loss without storing logits to save memory.
                 mtp_loss = self.compute_output_layer_and_language_model_loss(
                     hidden_states_list[mtp_layer_number + 1],
                     labels=mtp_labels,
@@ -194,11 +174,8 @@ def _megatron_gptmodel_postprocess(
                         "runtime_gather_output": runtime_gather_output,
                     },
                 )
-
                 mtp_loss = loss_mask * mtp_loss
                 if self.training:
-                    # TODO(shifangx): remove the use of parallel_state here
-                    # after moving loss logging to loss_func in pretrain_gpt.py
                     MTPLossLoggingHelper.save_loss_to_tracker(
                         torch.sum(mtp_loss) / num_tokens,
                         mtp_layer_number,

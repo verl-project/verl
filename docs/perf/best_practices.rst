@@ -10,7 +10,7 @@ This guide uses DAPO training on Qwen3-235B as a concrete example. We unpack eve
 
 .. note::
 
-   1. The guide only covers the subset of parameters required to reproduce the DAPO experiments discussed here. For the full list, refer to the ``config`` components in the Verl source tree: https://github.com/volcengine/verl/tree/main/verl/trainer/config
+   1. The guide only covers the subset of parameters required to reproduce the DAPO experiments discussed here. For the full list, refer to the ``config`` components in the Verl source tree: https://github.com/verl-project/verl/tree/main/verl/trainer/config
    2. PPO and GRPO introduce KL-constrained policies. We therefore include that setup in the explanations below. You can treat all configurations mentioned here as a DAPO pipeline augmented with a KL penalty.
 
 Optimization Objectives

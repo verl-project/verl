@@ -126,27 +126,33 @@ def hf_processor(name_or_path, **kwargs):
 
         # Bind vlm model's get_rope_index method to processor
         processor.config = config
+        model_class = None
         match processor.__class__.__name__:
             case "Qwen2VLProcessor":
                 from transformers.models.qwen2_vl import Qwen2VLModel
 
-                processor.get_rope_index = types.MethodType(Qwen2VLModel.get_rope_index, processor)
+                model_class = Qwen2VLModel
             case "Qwen2_5_VLProcessor":
                 from transformers.models.qwen2_5_vl import Qwen2_5_VLModel
 
-                processor.get_rope_index = types.MethodType(Qwen2_5_VLModel.get_rope_index, processor)
+                model_class = Qwen2_5_VLModel
             case "Qwen3VLProcessor":
                 from transformers.models.qwen3_vl import Qwen3VLModel
 
-                processor.get_rope_index = types.MethodType(Qwen3VLModel.get_rope_index, processor)
+                model_class = Qwen3VLModel
             case "Glm4vImageProcessor":
                 from transformers.models.glm4v import Glm4vModel
 
-                processor.get_rope_index = types.MethodType(Glm4vModel.get_rope_index, processor)
+                model_class = Glm4vModel
             case "MllamaProcessor":
                 pass  # MllamaProcessor and MllamaModel doesn't have get_rope_index property
             case _:
                 raise ValueError(f"Unsupported processor type: {processor.__class__.__name__}")
+
+        if model_class is not None:
+            processor.get_rope_index = types.MethodType(model_class.get_rope_index, processor)
+            if hasattr(model_class, "get_vision_position_ids"):
+                processor.get_vision_position_ids = types.MethodType(model_class.get_vision_position_ids, processor)
     except Exception as e:
         processor = None
         # TODO(haibin.lin): try-catch should be removed after adding transformer version req to setup.py to avoid
