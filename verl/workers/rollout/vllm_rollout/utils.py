@@ -24,7 +24,7 @@ from typing import Any, Literal, Optional, get_args
 import torch
 from vllm.outputs import RequestOutput
 
-from verl.utils.device import is_npu_available
+from verl.utils.device import is_npu_available, is_mlu_available
 from verl.utils.vllm import TensorLoRARequest, VLLMHijack
 from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
 from verl.utils.vllm.vllm_fp8_utils import apply_vllm_fp8_patches, is_fp8_model, load_quanted_weights
@@ -61,6 +61,13 @@ def get_device_uuid(device_id: int) -> str:
             return "NPU-" + npu_visible_devices[device_id]
         else:
             return f"NPU-{device_id}"
+    if is_mlu_available:
+        if os.getenv("MLU_VISIBLE_DEVICES") is not None:
+            mlu_visible_devices = os.environ["MLU_VISIBLE_DEVICES"].split(",")
+            assert device_id < len(mlu_visible_devices), f"device_id {device_id} must less than {mlu_visible_devices}"
+            return "MLU-" + mlu_visible_devices[device_id]
+        else:
+            return f"MLU-{device_id}"
     else:
         return current_platform.get_device_uuid(device_id)
 

@@ -45,6 +45,13 @@ except ImportError:
     HCCLCheckpointEngine = None
 
 try:
+    from .cncl_checkpoint_engine import CNCLCheckpointEngine
+
+    __all__ += ["CNCLCheckpointEngine"]
+except ImportError:
+    CNCLCheckpointEngine = None
+
+try:
     from .nixl_checkpoint_engine import NIXLCheckpointEngine
 
     __all__ += ["NIXLCheckpointEngine"]

@@ -786,7 +786,7 @@ class EngineTrainModeCtx(BaseEngineCtx):
         super().__exit__(exc_type, exc_value, traceback)
 
 
-@EngineRegistry.register(model_type="language_model", backend="megatron")
+@EngineRegistry.register(model_type="language_model", backend="megatron", device=["mlu"])
 class MegatronEngineWithLMHead(MegatronEngine):
     def prepare_model_inputs(self, batch: TensorDict):
         input_ids = batch["input_ids"]
@@ -1001,7 +1001,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
         return scaled_loss, output
 
 
-@EngineRegistry.register(model_type="value_model", backend="megatron")
+@EngineRegistry.register(model_type="value_model", backend="megatron", device=["mlu"])
 class MegatronEngineWithValueHead(MegatronEngineWithLMHead):
     # for value head
     def forward_step(self, batch_iter, model, logits_processor_func, postprocess_micro_batch_func):
