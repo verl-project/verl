@@ -137,10 +137,14 @@ class TestPlatformDetection:
 class TestPlatformCreation:
     """Test platform creation."""
 
-    def test_cuda_raises_if_unavailable(self):
+    def test_cuda_warns_if_unavailable(self):
         with mock.patch("torch.cuda.is_available", return_value=False):
-            with pytest.raises(RuntimeError):
-                _create_platform("cuda")
+            import logging
+
+            with mock.patch("verl.plugin.platform.platform_manager.logger") as mock_logger:
+                platform = _create_platform("cuda")
+                mock_logger.warning.assert_called_once()
+                assert platform is not None
 
     def test_invalid_platform_raises(self):
         with pytest.raises(ValueError):
