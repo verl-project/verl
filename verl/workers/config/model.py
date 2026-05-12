@@ -113,6 +113,7 @@ class HFModelConfig(BaseConfig):
     external_lib: Optional[str] = None
 
     override_config: dict = field(default_factory=dict)
+    freeze_module_pattern: Optional[str] = None
 
     enable_gradient_checkpointing: bool = True
     enable_activation_offload: bool = False

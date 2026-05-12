@@ -237,6 +237,15 @@ class VeOmniEngine(FSDPEngine):
         )
         log_gpu_memory_usage("After parallelize model", logger=logger)
 
+        # Freeze policy (after model build, before optimizer)
+        if self.model_config.freeze_module_pattern:
+            from verl.utils.freeze_utils import apply_freeze_to_module
+
+            apply_freeze_to_module(
+                module,
+                self.model_config.freeze_module_pattern,
+            )
+
         if not self.engine_config.forward_only:
             # Initialize optimizer with model parameters and config settings
             optimizer = self._build_optimizer(module)

@@ -377,6 +377,15 @@ class MegatronEngine(BaseEngine):
 
             self.module = apply_qat_to_modules(self.module, self._qat_config)
 
+        # Freeze policy (after model build, before optimizer)
+        if self.model_config.freeze_module_pattern:
+            from verl.utils.freeze_utils import apply_freeze_to_module
+            for model in self.module:
+                apply_freeze_to_module(
+                    model,
+                    self.model_config.freeze_module_pattern,
+                )
+
         self._maybe_enable_fused_kernels()
 
         if self.model_config.mtp.enable:
