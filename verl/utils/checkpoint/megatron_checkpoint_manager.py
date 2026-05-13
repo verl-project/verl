@@ -723,9 +723,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         sharded_state_dict = {}
         model_sharded_state_dict = self._build_model_sharded_state_dict(metadata)
         sharded_state_dict.update(model_sharded_state_dict)
-        sharded_state_dict.update(
-            self._build_optimizer_state_dict(model_sharded_state_dict, metadata, is_loading=True)
-        )
+        sharded_state_dict.update(self._build_optimizer_state_dict(model_sharded_state_dict, metadata, is_loading=True))
         sharded_state_dict.update(self._build_extra_state_dict())
 
         from megatron.bridge.training.checkpointing import load_fsdp_dtensor_checkpoint
@@ -1287,9 +1285,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         # FSDP saves synchronously and produces no async request, so the
         # finalize callback fires immediately for that path even though we
         # still need to record that a dist_ckpt was written.
-        saved_any_dist_ckpt = fsdp_saved or bool(
-            model_state_dict or optimizer_state_dict or extra_state_dict
-        )
+        saved_any_dist_ckpt = fsdp_saved or bool(model_state_dict or optimizer_state_dict or extra_state_dict)
         self._dispatch_finalize(
             async_requests,
             lambda: self._finalize_save(
