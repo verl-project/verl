@@ -97,7 +97,7 @@ def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, 
     kld = core_algos.kl_penalty(
         data.batch["old_log_probs"], data.batch["ref_log_prob"], kl_penalty=kl_penalty
     )  # (batch_size, response_length)
-    kld = kld * response_mask
+    kld = torch.where(response_mask.bool(), kld, torch.zeros_like(kld))
     beta = kl_ctrl.value
 
     token_level_rewards = token_level_scores - beta * kld
