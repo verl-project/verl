@@ -423,7 +423,7 @@ def apply_monkey_patch(
             Qwen3VLMoeVisionModel,
         )
 
-        from verl.models.transformers.qwen3_5 import (
+        from verl.models.transformers.qwen3_vl import (
             fast_pos_embed_interpolate,
         )
         from verl.models.transformers.qwen3_vl import (
