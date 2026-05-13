@@ -356,14 +356,15 @@ def _estimate_qwen2_moe_flops(config, tokens_sum, batch_seqlens, delta_time):
 
 
 def _estimate_gemma3_flops(config, tokens_sum, batch_seqlens, delta_time):
-    hidden_size = config.hidden_size
-    vocab_size = config.vocab_size
-    num_hidden_layers = config.num_hidden_layers
-    num_key_value_heads = config.num_key_value_heads
-    num_attention_heads = config.num_attention_heads
-    intermediate_size = config.intermediate_size
+    cfg = getattr(config, "text_config", config)
+    hidden_size = cfg.hidden_size
+    vocab_size = cfg.vocab_size
+    num_hidden_layers = cfg.num_hidden_layers
+    num_key_value_heads = cfg.num_key_value_heads
+    num_attention_heads = cfg.num_attention_heads
+    intermediate_size = cfg.intermediate_size
 
-    head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
+    head_dim = getattr(cfg, "head_dim", cfg.hidden_size // cfg.num_attention_heads)
     q_size = num_attention_heads * head_dim
     k_size = num_key_value_heads * head_dim
     v_size = num_key_value_heads * head_dim
@@ -382,10 +383,10 @@ def _estimate_gemma3_flops(config, tokens_sum, batch_seqlens, delta_time):
     # Gemma3 alternates between full and sliding window attention based on layer_types
     seqlen_square_sum = 0
 
-    layer_types = getattr(config, "layer_types", None)
-    sliding_window = getattr(config, "sliding_window", 1024)  # default 1024
+    layer_types = getattr(cfg, "layer_types", None)
+    sliding_window = getattr(cfg, "sliding_window", 1024)  # default 1024
     # default pattern: every 6th layer is full
-    sliding_window_pattern = getattr(config, "sliding_window_pattern", 6)
+    sliding_window_pattern = getattr(cfg, "sliding_window_pattern", 6)
 
     # If layer_types is not provided, generate it based on sliding_window_pattern
     if layer_types is None and sliding_window is not None and sliding_window_pattern is not None:
@@ -553,6 +554,7 @@ ESTIMATE_FUNC = {
     "minicpmo": _estimate_qwen2_flops,
     "mistral": _estimate_qwen2_flops,
     "gemma3_text": _estimate_gemma3_flops,
+    "gemma4": _estimate_gemma3_flops,
     "seed_oss": _estimate_qwen2_flops,
     "apertus": _estimate_apertus_flops,
     "glm4v": _estimate_qwen2_flops,

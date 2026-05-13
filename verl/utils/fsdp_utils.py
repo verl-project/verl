@@ -124,18 +124,31 @@ def get_fsdp_wrap_policy(module, config=None, is_lora=False):
         policies.append(size_policy)
     elif fsdp_transformer_layer_cls_to_wrap is not None:
         transformer_cls_to_wrap = set()
+        unresolved_layer_cls_names = set()
         for layer_class in fsdp_transformer_layer_cls_to_wrap:
             transformer_cls = get_module_class_from_name(module, layer_class)
             if transformer_cls is None:
-                raise Exception("Could not find the transformer layer class to wrap in the model.")
+                unresolved_layer_cls_names.add(layer_class)
             else:
                 transformer_cls_to_wrap.add(transformer_cls)
 
-        transformer_policy = functools.partial(
-            transformer_auto_wrap_policy,
-            transformer_layer_cls=transformer_cls_to_wrap,
-        )
-        policies.append(transformer_policy)
+        if transformer_cls_to_wrap:
+            transformer_policy = functools.partial(
+                transformer_auto_wrap_policy,
+                transformer_layer_cls=transformer_cls_to_wrap,
+            )
+            policies.append(transformer_policy)
+
+        if unresolved_layer_cls_names:
+
+            def lambda_policy_fn(submodule):
+                return submodule.__class__.__name__ in unresolved_layer_cls_names
+
+            lambda_policy = functools.partial(lambda_auto_wrap_policy, lambda_fn=lambda_policy_fn)
+            policies.append(lambda_policy)
+
+        if not transformer_cls_to_wrap and not unresolved_layer_cls_names:
+            raise Exception("Could not find the transformer layer class to wrap in the model.")
 
     if len(policies) > 0:
         auto_wrap_policy = functools.partial(_or_policy, policies=policies)
