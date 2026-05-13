@@ -857,21 +857,11 @@ class AgentLoopWorker:
             multi_modal_kwargs["mm_token_type_ids"] = mm_token_type_ids
 
         # Model's get_rope_index has been dynamically bind to the processor.
-        try:
-            vision_position_ids, _ = self.processor.get_rope_index(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                **multi_modal_kwargs,
-            )
-        except TypeError:
-            if "mm_token_type_ids" not in multi_modal_kwargs:
-                raise
-            multi_modal_kwargs.pop("mm_token_type_ids")
-            vision_position_ids, _ = self.processor.get_rope_index(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                **multi_modal_kwargs,
-            )
+        vision_position_ids, _ = self.processor.get_rope_index(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            **multi_modal_kwargs,
+        )
         vision_position_ids = vision_position_ids.transpose(0, 1)  # (3, 1, seq_len) => (1, 3, seq_len)
 
         valid_mask = attention_mask[0].bool()

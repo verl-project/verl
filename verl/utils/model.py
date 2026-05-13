@@ -846,21 +846,11 @@ def _compute_vlm_position_ids(
             mm_token_type_ids[0][input_ids[0] == video_token_id] = 2
         mm_kwargs["mm_token_type_ids"] = mm_token_type_ids
 
-    try:
-        vision_position_ids, _ = processor.get_rope_index(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            **mm_kwargs,
-        )
-    except TypeError:
-        if "mm_token_type_ids" not in mm_kwargs:
-            raise
-        mm_kwargs.pop("mm_token_type_ids")
-        vision_position_ids, _ = processor.get_rope_index(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            **mm_kwargs,
-        )
+    vision_position_ids, _ = processor.get_rope_index(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        **mm_kwargs,
+    )
     vision_position_ids = vision_position_ids.transpose(0, 1)
     valid_mask = attention_mask[0].bool()
     text_position_ids = torch.ones((1, input_ids.shape[-1]), dtype=torch.long)
