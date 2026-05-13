@@ -13,10 +13,11 @@
 # limitations under the License.
 
 from types import SimpleNamespace  # Or use a mock object library
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from verl.utils.model import update_model_config
+from verl.utils.model import load_valuehead_model, update_model_config
 
 
 # Parametrize with different override scenarios
@@ -50,3 +51,107 @@ def test_update_model_config(override_kwargs):
         assert mock_config.nested_params.sub_param_x == "original_x", "Nested sub_param_x should be unchanged"
         assert mock_config.nested_params.sub_param_y == 100, "Nested sub_param_y should be unchanged"
         assert not hasattr(mock_config.nested_params, "sub_param_z"), "Nested sub_param_z should not exist"
+
+
+# ---------------------------------------------------------------------------
+# load_valuehead_model: attn_implementation precedence
+# ---------------------------------------------------------------------------
+# These tests pin down the attention-implementation selection contract so the
+# documented ``critic.model.override_config.attn_implementation`` knob keeps
+# working on hardware that cannot run ``flash_attention_2`` (e.g. Turing T4
+# and other pre-Ampere GPUs).
+#
+# Resolution order inside ``load_valuehead_model``:
+#   1. explicit ``attn_implementation`` kwarg
+#   2. ``getattr(model_config, "_attn_implementation", None)``
+#   3. ``"flash_attention_2"`` (historical default)
+
+
+def _make_model_config(_attn_implementation=None):
+    """Build a minimal stand-in for a ``transformers`` ``PretrainedConfig``.
+
+    Only ``_attn_implementation`` is populated, mimicking what
+    ``AutoConfig.from_pretrained(..., attn_implementation=...)`` (and verl's
+    ``HFModelConfig``) would bake in.
+    """
+    cfg = SimpleNamespace()
+    if _attn_implementation is not None:
+        cfg._attn_implementation = _attn_implementation
+    return cfg
+
+
+@pytest.fixture
+def mock_token_classification_from_pretrained():
+    """Patch ``AutoModelForTokenClassification.from_pretrained`` so the test stays CPU-only."""
+    with patch("transformers.AutoModelForTokenClassification.from_pretrained") as mocked:
+        mocked.return_value = MagicMock(name="fake-valuehead-model")
+        yield mocked
+
+
+def test_load_valuehead_model_explicit_attn_implementation_wins(mock_token_classification_from_pretrained):
+    """An explicit ``attn_implementation`` argument must override the config default."""
+    model_config = _make_model_config(_attn_implementation="flash_attention_2")
+
+    load_valuehead_model(
+        local_path="/tmp/fake",
+        torch_dtype="float32",
+        model_config=model_config,
+        trust_remote_code=False,
+        attn_implementation="sdpa",
+    )
+
+    assert mock_token_classification_from_pretrained.call_count == 1
+    kwargs = mock_token_classification_from_pretrained.call_args.kwargs
+    assert kwargs["attn_implementation"] == "sdpa"
+    assert kwargs["pretrained_model_name_or_path"] == "/tmp/fake"
+    assert kwargs["config"] is model_config
+    assert kwargs["trust_remote_code"] is False
+
+
+@pytest.mark.parametrize("impl", ["sdpa", "eager", "flash_attention_2"])
+def test_load_valuehead_model_falls_back_to_model_config(mock_token_classification_from_pretrained, impl):
+    """When no explicit value is given, honour ``model_config._attn_implementation``.
+
+    Regression guard for the documented
+    ``critic.model.override_config.attn_implementation`` override: previously
+    ``load_valuehead_model`` hard-coded ``"flash_attention_2"`` and silently
+    ignored whatever the caller had baked into ``model_config``.
+    """
+    model_config = _make_model_config(_attn_implementation=impl)
+
+    load_valuehead_model(
+        local_path="/tmp/fake",
+        torch_dtype="float32",
+        model_config=model_config,
+        trust_remote_code=False,
+    )
+
+    assert mock_token_classification_from_pretrained.call_args.kwargs["attn_implementation"] == impl
+
+
+def test_load_valuehead_model_defaults_to_flash_attention_2(mock_token_classification_from_pretrained):
+    """Preserve the historical default for callers that pre-date the knob."""
+    model_config = _make_model_config(_attn_implementation=None)
+
+    load_valuehead_model(
+        local_path="/tmp/fake",
+        torch_dtype="float32",
+        model_config=model_config,
+        trust_remote_code=False,
+    )
+
+    assert mock_token_classification_from_pretrained.call_args.kwargs["attn_implementation"] == "flash_attention_2"
+
+
+def test_load_valuehead_model_explicit_none_attr_falls_back(mock_token_classification_from_pretrained):
+    """``_attn_implementation`` explicitly set to ``None`` must still fall back to FA2."""
+    model_config = SimpleNamespace(_attn_implementation=None)
+
+    load_valuehead_model(
+        local_path="/tmp/fake",
+        torch_dtype="float32",
+        model_config=model_config,
+        trust_remote_code=False,
+    )
+
+    assert mock_token_classification_from_pretrained.call_args.kwargs["attn_implementation"] == "flash_attention_2"

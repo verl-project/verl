@@ -634,15 +634,38 @@ def patch_valuehead_model(model) -> None:
     model._no_split_modules = getattr(model.pretrained_model, "_no_split_modules", [])
 
 
-def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_code):
+def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_code, attn_implementation=None):
+    """Load a value-head model (used by critic / reward).
+
+    Args:
+        local_path: Path to the pretrained model.
+        torch_dtype: Target torch dtype.
+        model_config: A ``transformers`` config whose ``_attn_implementation`` will be used
+            as the default when ``attn_implementation`` is not provided.
+        trust_remote_code: Whether to trust remote code in the hub repo.
+        attn_implementation: Explicit attention implementation override
+            (e.g. ``"flash_attention_2"``, ``"sdpa"``, ``"eager"``). When ``None``, this
+            function falls back to ``getattr(model_config, "_attn_implementation", None)``
+            and finally to ``"flash_attention_2"`` to preserve the historical default.
+
+    Note:
+        Older versions of this function hard-coded ``attn_implementation="flash_attention_2"``
+        and ignored the ``_attn_implementation`` baked into ``model_config``, which broke the
+        documented ``critic.model.override_config.attn_implementation`` override on hardware
+        without FA2 support (e.g. Turing T4, pre-Ampere). See
+        https://verl.readthedocs.io/en/latest/advance/attention_implementation.html.
+    """
     from transformers import AutoModelForCausalLM, AutoModelForTokenClassification
+
+    if attn_implementation is None:
+        attn_implementation = getattr(model_config, "_attn_implementation", None) or "flash_attention_2"
 
     try:
         model = AutoModelForTokenClassification.from_pretrained(
             pretrained_model_name_or_path=local_path,
             torch_dtype=torch_dtype,
             config=model_config,
-            attn_implementation="flash_attention_2",
+            attn_implementation=attn_implementation,
             trust_remote_code=trust_remote_code,
         )
         return model
@@ -664,7 +687,7 @@ def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_cod
         pretrained_model_name_or_path=local_path,
         torch_dtype=torch_dtype,
         config=model_config,
-        attn_implementation="flash_attention_2",
+        attn_implementation=attn_implementation,
         trust_remote_code=trust_remote_code,
     )
     # vlm models
