@@ -48,7 +48,7 @@ verl is fast with:
 </p>
 
 ## News
-
+- [2026/05] verl's zero-mismatch HuggingFace rollout [vexact](https://github.com/verl-project/vexact) is released: with batch-invariant kernels, shared model definition with FSDP, and out-of-box examples compatible with VeOmni.
 - [2026/04] verl's Megatron backend LoRA and router replay support is showcased at [PyTorch Conference Europe 2026](https://pytorchconferenceeu2026.sched.com/event/2Juce/optimizing-reinforcement-learning-at-trillion-parameter-scale-songlin-jiang-aalto-university-mind-lab).
 - [2026/03] verl is presented at NVIDIA GTC26: [session#1](https://www.nvidia.com/en-us/on-demand/session/gtc26-S81829/), [session#2](https://www.nvidia.com/en-us/on-demand/session/gtc26-S81620/)
 - [2026/01] verl has been migrated to the [verl-project](https://github.com/verl-project)
@@ -88,7 +88,7 @@ verl is fast with:
 
 - **FSDP**, **FSDP2** and **Megatron-LM** for training.
 - **vLLM**, **SGLang** and **HF Transformers** for rollout generation.
-- Compatible with Hugging Face Transformers and Modelscope Hub: [Qwen-3](https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3_8b_fsdp.sh), Qwen-2.5, Llama3.1, Gemma2, DeepSeek-LLM, etc
+- Compatible with Hugging Face Transformers and Modelscope Hub: Qwen3.5, Qwen3, Qwen-2.5, Llama3.1, Gemma2, DeepSeek-LLM, etc
 - Supervised fine-tuning.
 - Reinforcement learning with [PPO](examples/ppo_trainer/), [GRPO](examples/grpo_trainer/), [GSPO](https://github.com/verl-project/verl-recipe/tree/main/gspo/), [ReMax](examples/remax_trainer/), [REINFORCE++](https://verl.readthedocs.io/en/latest/examples/config.html#algorithm), [RLOO](examples/rloo_trainer/), [PRIME](https://github.com/verl-project/verl-recipe/tree/main/prime/), [DAPO](https://github.com/verl-project/verl-recipe/tree/main/dapo/), [DrGRPO](https://github.com/verl-project/verl-recipe/tree/main/drgrpo), [KL_Cov & Clip_Cov](https://github.com/verl-project/verl-recipe/tree/main/entropy) etc.
   - Support model-based reward and function-based reward (verifiable reward) for math, [coding](https://github.com/verl-project/verl-recipe/tree/main/dapo), etc
@@ -100,15 +100,6 @@ verl is fast with:
 - Multi-gpu [LoRA RL](https://verl.readthedocs.io/en/latest/advance/ppo_lora.html) support to save memory.
 - Experiment tracking with wandb, swanlab, mlflow and tensorboard.
 - Hardware Support: Supports NVIDIA, AMD, [Ascend](https://github.com/verl-project/verl/blob/main/docs/ascend_tutorial/quick_start/ascend_quick_start.rst)
-
-## Upcoming Features and Changes
-
-- Q3 Roadmap https://github.com/verl-project/verl/issues/2388
-- DeepSeek 671b optimizations with Megatron https://github.com/verl-project/verl/issues/1033
-- Multi-turn rollout and tools using optimizations https://github.com/verl-project/verl/issues/1882
-- [Agent integration](https://github.com/verl-project/verl/tree/main/verl/experimental/agent_loop)
-- Async and off-policy architecture https://github.com/verl-project/verl/pull/2231
-- List of breaking changes since v0.4 https://github.com/verl-project/verl/discussions/2270
 
 ## Getting Started
 
