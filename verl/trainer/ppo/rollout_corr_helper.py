@@ -1052,6 +1052,9 @@ def compute_rollout_correction_and_add_to_batch(
 
     # ALWAYS update response_mask with rejection applied
     batch.batch["response_mask"] = modified_response_mask
+    for reward_key in ("token_level_scores", "token_level_rewards"):
+        if reward_key in batch.batch:
+            batch.batch[reward_key] = batch.batch[reward_key] * modified_response_mask
 
     # Add IS weights to batch if computed
     if rollout_is_weights is not None:

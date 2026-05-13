@@ -16,10 +16,13 @@
 import pytest
 import torch
 
+from verl import DataProto
 from verl.trainer.config.algorithm import RolloutCorrectionConfig
-from verl.trainer.ppo.core_algos import compute_policy_loss_vanilla
+from verl.trainer.ppo.core_algos import AdvantageEstimator, compute_policy_loss_vanilla
+from verl.trainer.ppo.ray_trainer import compute_advantage
 from verl.trainer.ppo.rollout_corr_helper import (
     compute_offpolicy_metrics,
+    compute_rollout_correction_and_add_to_batch,
     compute_rollout_correction_and_rejection_mask,
 )
 from verl.workers.config.actor import ActorConfig
@@ -267,6 +270,44 @@ class TestRolloutISIntegration:
         assert metrics["rollout_corr/rollout_is_oob_ratio"] == pytest.approx(1.0 / 3.0, abs=1e-6)
         torch.testing.assert_close(rollout_is_weights, expected_weights, atol=1e-6, rtol=1e-6)
         torch.testing.assert_close(pg_loss, expected_loss, atol=1e-6, rtol=1e-6)
+
+    def test_rejected_sequences_do_not_pollute_group_advantage(self):
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        seq_length = 3
+        old_log_prob = torch.tensor([[-2.0] * seq_length, [-2.0] * seq_length], device=device)
+        rollout_log_prob = torch.tensor(
+            [
+                [-1.0] * seq_length,  # ratio below lower threshold, rejected
+                [-2.5] * seq_length,  # ratio inside threshold, accepted
+            ],
+            device=device,
+        )
+        response_mask = torch.ones(2, seq_length, device=device)
+        token_level_rewards = torch.tensor([[0.0, 0.0, 100.0], [0.0, 0.0, 1.0]], device=device)
+
+        batch = DataProto.from_dict(
+            tensors={
+                "old_log_probs": old_log_prob,
+                "rollout_log_probs": rollout_log_prob,
+                "response_mask": response_mask,
+                "token_level_scores": token_level_rewards.clone(),
+                "token_level_rewards": token_level_rewards.clone(),
+            },
+            non_tensors={"uid": ["same_prompt", "same_prompt"]},
+        )
+        config = RolloutCorrectionConfig(rollout_rs="token_k1", rollout_rs_threshold="0.5_2.0")
+
+        batch, _ = compute_rollout_correction_and_add_to_batch(batch, config)
+        batch = compute_advantage(
+            batch,
+            adv_estimator=AdvantageEstimator.GRPO,
+            norm_adv_by_std_in_grpo=False,
+        )
+
+        assert torch.all(batch.batch["response_mask"][0] == 0)
+        assert torch.all(batch.batch["token_level_rewards"][0] == 0)
+        torch.testing.assert_close(batch.batch["advantages"][0], torch.zeros(seq_length, device=device))
+        torch.testing.assert_close(batch.batch["advantages"][1], torch.ones(seq_length, device=device))
 
 
 class TestRolloutCorrectionConfigNormalization:

@@ -132,6 +132,19 @@ def compute_response_mask(data: DataProto):
     return attention_mask[:, -response_length:]
 
 
+def _isolate_fully_masked_response_groups(index: np.ndarray, response_mask: torch.Tensor) -> np.ndarray:
+    """Keep rollout-rejected samples out of prompt-level advantage baselines."""
+    valid_response = response_mask.sum(dim=-1) > 0
+    if torch.all(valid_response):
+        return index
+
+    isolated_index = np.asarray(index, dtype=object).copy()
+    invalid_positions = (~valid_response).nonzero(as_tuple=False).flatten().cpu().tolist()
+    for pos in invalid_positions:
+        isolated_index[pos] = f"__fully_masked_response_{pos}_{isolated_index[pos]}"
+    return isolated_index
+
+
 def compute_advantage(
     data: DataProto,
     adv_estimator: AdvantageEstimator,
@@ -183,12 +196,13 @@ def compute_advantage(
     elif adv_estimator == AdvantageEstimator.GRPO:
         # Initialize the mask for GRPO calculation
         grpo_calculation_mask = data.batch["response_mask"]
+        index = _isolate_fully_masked_response_groups(data.non_tensor_batch["uid"], grpo_calculation_mask)
 
         # Call compute_grpo_outcome_advantage with parameters matching its definition
         advantages, returns = core_algos.compute_grpo_outcome_advantage(
             token_level_rewards=data.batch["token_level_rewards"],
             response_mask=grpo_calculation_mask,
-            index=data.non_tensor_batch["uid"],
+            index=index,
             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
         )
         data.batch["advantages"] = advantages
@@ -202,7 +216,9 @@ def compute_advantage(
             "config": config,
         }
         if "uid" in data.non_tensor_batch:  # optional
-            adv_kwargs["index"] = data.non_tensor_batch["uid"]
+            adv_kwargs["index"] = _isolate_fully_masked_response_groups(
+                data.non_tensor_batch["uid"], data.batch["response_mask"]
+            )
         if "reward_baselines" in data.batch:  # optional
             adv_kwargs["reward_baselines"] = data.batch["reward_baselines"]
         # GDPO: pass raw data for per-dimension reward extraction
