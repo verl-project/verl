@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import functools
 import logging
 import os
 from dataclasses import dataclass
@@ -23,73 +24,64 @@ from transformers.models.qwen3_5.modeling_qwen3_5 import (
     Qwen3_5ForConditionalGeneration,
 )
 
+from .common.vision_pos_embed_utils import (
+    build_bilinear_interpolation_tensors,
+    merge_bilinear_interpolated_pos_embeds,
+)
+
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
-def fast_pos_embed_interpolate(self, grid_thw):
-    grid_thw_list = grid_thw.tolist()
-    grid_ts = [row[0] for row in grid_thw_list]
-    grid_hs = [row[1] for row in grid_thw_list]
-    grid_ws = [row[2] for row in grid_thw_list]
-    # Modification: # Get device from grid_thw to avoid self.pos_embed being on CPU when FSDP2 enables cpu_offload
-    device = grid_thw.device
+def _is_sharded_tensor(tensor: Optional[torch.Tensor]) -> bool:
+    return tensor is not None and hasattr(tensor, "full_tensor")
 
-    idx_list = [[] for _ in range(4)]
-    weight_list = [[] for _ in range(4)]
 
-    for t, h, w in grid_thw_list:
-        h_idxs = torch.linspace(0, self.num_grid_per_side - 1, h)
-        w_idxs = torch.linspace(0, self.num_grid_per_side - 1, w)
+def _patch_qwen3_5_vision_fast_pos_embed_interpolate(vision_model_cls, model_name: str):
+    if getattr(vision_model_cls.fast_pos_embed_interpolate, "_verl_device_safe_patch", False):
+        return
 
-        h_idxs_floor = h_idxs.int()
-        w_idxs_floor = w_idxs.int()
-        h_idxs_ceil = (h_idxs.int() + 1).clip(max=self.num_grid_per_side - 1)
-        w_idxs_ceil = (w_idxs.int() + 1).clip(max=self.num_grid_per_side - 1)
+    original_fast_pos_embed_interpolate = vision_model_cls.fast_pos_embed_interpolate
 
-        dh = h_idxs - h_idxs_floor
-        dw = w_idxs - w_idxs_floor
-
-        base_h = h_idxs_floor * self.num_grid_per_side
-        base_h_ceil = h_idxs_ceil * self.num_grid_per_side
-
-        indices = [
-            (base_h[None].T + w_idxs_floor[None]).flatten(),
-            (base_h[None].T + w_idxs_ceil[None]).flatten(),
-            (base_h_ceil[None].T + w_idxs_floor[None]).flatten(),
-            (base_h_ceil[None].T + w_idxs_ceil[None]).flatten(),
-        ]
-
-        weights = [
-            ((1 - dh)[None].T * (1 - dw)[None]).flatten(),
-            ((1 - dh)[None].T * dw[None]).flatten(),
-            (dh[None].T * (1 - dw)[None]).flatten(),
-            (dh[None].T * dw[None]).flatten(),
-        ]
-
-        for i in range(4):
-            idx_list[i].extend(indices[i].tolist())
-            weight_list[i].extend(weights[i].tolist())
-
-    idx_tensor = torch.tensor(idx_list, dtype=torch.long, device=device)
-    weight_tensor = torch.tensor(weight_list, dtype=self.pos_embed.weight.dtype, device=device)
-    pos_embeds = self.pos_embed(idx_tensor).to(device) * weight_tensor[:, :, None]
-    patch_pos_embeds = pos_embeds[0] + pos_embeds[1] + pos_embeds[2] + pos_embeds[3]
-
-    patch_pos_embeds = patch_pos_embeds.split([h * w for h, w in zip(grid_hs, grid_ws, strict=False)])
-
-    patch_pos_embeds_permute = []
-    merge_size = self.config.spatial_merge_size
-    for pos_embed, t, h, w in zip(patch_pos_embeds, grid_ts, grid_hs, grid_ws, strict=False):
-        pos_embed = pos_embed.repeat(t, 1)
-        pos_embed = (
-            pos_embed.view(t, h // merge_size, merge_size, w // merge_size, merge_size, -1)
-            .permute(0, 1, 3, 2, 4, 5)
-            .flatten(0, 4)
+    @functools.wraps(original_fast_pos_embed_interpolate)
+    def patched_fast_pos_embed_interpolate(self, grid_thw):
+        interpolation_tensors = build_bilinear_interpolation_tensors(
+            grid_thw=grid_thw,
+            num_grid_per_side=self.num_grid_per_side,
+            weight_dtype=self.pos_embed.weight.dtype,
         )
-        patch_pos_embeds_permute.append(pos_embed)
-    patch_pos_embeds = torch.cat(patch_pos_embeds_permute)
-    return patch_pos_embeds
+        pos_embed_weight = self.pos_embed.weight
+        if _is_sharded_tensor(pos_embed_weight):
+            # FSDP2 may wrap the embedding weight as a DTensor and route nn.Embedding
+            # indices through a CPU path. Materialize the small position embedding
+            # table locally on the active device so lookup stays device-consistent.
+            pos_embed_weight = pos_embed_weight.full_tensor().to(device=interpolation_tensors.device)
+            pos_embeds = torch.nn.functional.embedding(interpolation_tensors.idx_tensor, pos_embed_weight)
+        else:
+            pos_embeds = self.pos_embed(interpolation_tensors.idx_tensor).to(interpolation_tensors.device)
+        return merge_bilinear_interpolated_pos_embeds(
+            pos_embeds=pos_embeds,
+            weight_tensor=interpolation_tensors.weight_tensor,
+            grid_ts=interpolation_tensors.grid_ts,
+            grid_hs=interpolation_tensors.grid_hs,
+            grid_ws=interpolation_tensors.grid_ws,
+            merge_size=self.config.spatial_merge_size,
+        )
+
+    patched_fast_pos_embed_interpolate._verl_device_safe_patch = True
+    vision_model_cls.fast_pos_embed_interpolate = patched_fast_pos_embed_interpolate
+    logger.warning("Monkey patched %s.fast_pos_embed_interpolate for device-safe vision position embedding", model_name)
+
+
+def patch_qwen3_5_vision_fast_pos_embed_interpolate():
+    try:
+        from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5VisionModel
+        from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeVisionModel
+    except ImportError:
+        return
+
+    _patch_qwen3_5_vision_fast_pos_embed_interpolate(Qwen3_5VisionModel, "Qwen3_5VisionModel")
+    _patch_qwen3_5_vision_fast_pos_embed_interpolate(Qwen3_5MoeVisionModel, "Qwen3_5MoeVisionModel")
 
 
 def _get_input_embeds(
@@ -102,8 +94,13 @@ def _get_input_embeds(
     video_grid_thw: Optional[torch.LongTensor] = None,
 ):
     inputs_embeds = model.get_input_embeddings()(input_ids)
+    device = inputs_embeds.device
+    if image_grid_thw is not None:
+        image_grid_thw = image_grid_thw.to(device)
+    if video_grid_thw is not None:
+        video_grid_thw = video_grid_thw.to(device)
     if pixel_values is not None:
-        pixel_values = pixel_values.type(model.visual.dtype)
+        pixel_values = pixel_values.to(device=device, dtype=model.visual.dtype)
         image_embeds = model.visual(pixel_values, grid_thw=image_grid_thw).pooler_output
         n_image_tokens = (input_ids == model.config.image_token_id).sum().item()
         n_image_features = image_embeds.shape[0]
@@ -121,7 +118,7 @@ def _get_input_embeds(
         inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
 
     if pixel_values_videos is not None:
-        pixel_values_videos = pixel_values_videos.type(model.visual.dtype)
+        pixel_values_videos = pixel_values_videos.to(device=device, dtype=model.visual.dtype)
         video_embeds = model.visual(pixel_values_videos, grid_thw=video_grid_thw).pooler_output
         n_video_tokens = (input_ids == model.config.video_token_id).sum().item()
         n_video_features = video_embeds.shape[0]
@@ -208,7 +205,7 @@ def forward_with_torch_backend(
 
     # Loss calculations
     if labels is not None:
-        rolled_labels = torch.roll(labels, shifts=-1, dims=-1)
+        rolled_labels = labels
     elif input_ids is not None:
         rolled_labels = torch.roll(input_ids, shifts=-1, dims=-1)
     else:
@@ -242,7 +239,7 @@ def forward_with_triton_backend(
 
     # Loss calculations
     if labels is not None:
-        rolled_labels = torch.roll(labels, shifts=-1, dims=-1)
+        rolled_labels = labels
     elif input_ids is not None:
         rolled_labels = torch.roll(input_ids, shifts=-1, dims=-1)
     else:

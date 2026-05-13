@@ -858,6 +858,32 @@ def test_chunk_tensordict():
                         assert torch.all(torch.eq(tensor.data["pixel_values"], expect["pixel_values"])).item()
 
 
+@pytest.mark.parametrize("rope_dim", [3, 4])
+def test_maybe_fix_3d_position_ids_broken_equal_length_layout(rope_dim: int):
+    batch_num = 2
+    seq_len = 7
+    samples = [
+        torch.arange(i * rope_dim * seq_len, (i + 1) * rope_dim * seq_len).view(rope_dim, seq_len)
+        for i in range(batch_num)
+    ]
+    broken_position_ids = torch.nested.as_nested_tensor(samples, layout=torch.jagged)
+    td = tu.get_tensordict({"position_ids": broken_position_ids})
+
+    tu.maybe_fix_3d_position_ids(td)
+
+    fixed_position_ids = td["position_ids"]
+    expected_offsets = torch.arange(
+        0,
+        (batch_num + 1) * seq_len,
+        seq_len,
+        dtype=fixed_position_ids.offsets().dtype,
+        device=fixed_position_ids.offsets().device,
+    )
+    torch.testing.assert_close(fixed_position_ids.offsets(), expected_offsets)
+    for idx, sample in enumerate(samples):
+        torch.testing.assert_close(fixed_position_ids[idx], sample)
+
+
 def test_chunk_tensordict_preserves_3d_nested_tensor_layout_with_equal_seq_len_per_chunk():
     position_ids = tu.nested_tensor_from_tensor_list(
         [

@@ -16,6 +16,7 @@ import random
 import torch
 from tensordict import TensorDict
 
+from verl.utils.tensordict_utils import maybe_fix_3d_position_ids
 from verl.workers.utils.padding import (
     embeds_padding_2_no_padding,
     left_right_2_no_padding,
@@ -316,6 +317,135 @@ def test_response_to_nested():
         torch.testing.assert_close(tensor, expected)
 
 
+def _build_broken_3d_position_ids(batch_size: int, rope_dim: int, max_seq_len: int):
+    samples = [
+        torch.arange(i * rope_dim * max_seq_len, (i + 1) * rope_dim * max_seq_len).view(rope_dim, max_seq_len)
+        for i in range(batch_size)
+    ]
+    return samples, torch.nested.as_nested_tensor(samples, layout=torch.jagged)
+
+
+def _nested_1d_from_offsets(offsets: torch.Tensor):
+    values = torch.arange(offsets[-1].item(), dtype=torch.long)
+    return torch.nested.nested_tensor_from_jagged(values=values, offsets=offsets)
+
+
+class _FakeNestedOffsets:
+    def __init__(self, offsets: torch.Tensor):
+        self.is_nested = True
+        self._offsets = offsets
+
+    def offsets(self):
+        return self._offsets
+
+
+class _FakeNestedTensor:
+    def __init__(self, shape: tuple[int, ...], offsets: torch.Tensor, values: torch.Tensor):
+        self.shape = shape
+        self._offsets = offsets
+        self._values = values
+        self.is_nested = True
+        self._ragged_idx = None
+
+    def dim(self):
+        return len(self.shape)
+
+    def offsets(self):
+        return self._offsets
+
+    def values(self):
+        return self._values
+
+
+def test_maybe_fix_3d_position_ids_repairs_broken_layout():
+    batch_size = 2
+    rope_dim = 3
+    max_seq_len = 4
+    seq_lens = [2, 3]
+
+    samples, broken_position_ids = _build_broken_3d_position_ids(
+        batch_size=batch_size, rope_dim=rope_dim, max_seq_len=max_seq_len
+    )
+
+    input_offsets = torch.tensor([0, 2, 5], dtype=torch.int64)
+    input_ids = _nested_1d_from_offsets(input_offsets)
+
+    data = TensorDict({"input_ids": input_ids, "position_ids": broken_position_ids}, batch_size=[batch_size])
+    maybe_fix_3d_position_ids(data)
+    fixed_position_ids = data["position_ids"]
+
+    expected_values = torch.cat([sample[:, :seq_len] for sample, seq_len in zip(samples, seq_lens, strict=True)], dim=1)
+    torch.testing.assert_close(fixed_position_ids.offsets(), input_offsets)
+    torch.testing.assert_close(fixed_position_ids.values(), expected_values)
+    assert fixed_position_ids._ragged_idx == 2
+
+
+def test_maybe_fix_3d_position_ids_skips_repair_on_invalid_input_offsets():
+    batch_size = 2
+    rope_dim = 3
+    max_seq_len = 4
+
+    _, broken_position_ids = _build_broken_3d_position_ids(
+        batch_size=batch_size, rope_dim=rope_dim, max_seq_len=max_seq_len
+    )
+    broken_offsets = broken_position_ids.offsets()
+    broken_values = broken_position_ids.values()
+
+    # Use a mismatched batch size for input_ids so offsets are ignored.
+    invalid_input_offsets = torch.tensor([0, 1, 3, 6], dtype=torch.int64)
+    invalid_input_ids = _FakeNestedOffsets(invalid_input_offsets)
+    data = {"input_ids": invalid_input_ids, "position_ids": broken_position_ids}
+    maybe_fix_3d_position_ids(data)
+    fixed_position_ids = data["position_ids"]
+
+    torch.testing.assert_close(fixed_position_ids.offsets(), broken_offsets)
+    torch.testing.assert_close(fixed_position_ids.values(), broken_values)
+    assert fixed_position_ids._ragged_idx == 2
+
+
+def test_maybe_fix_3d_position_ids_warns_on_invalid_target_seq_lens(caplog):
+    batch_size = 2
+    rope_dim = 3
+    max_seq_len = 4
+
+    _, broken_position_ids = _build_broken_3d_position_ids(
+        batch_size=batch_size, rope_dim=rope_dim, max_seq_len=max_seq_len
+    )
+    broken_offsets = broken_position_ids.offsets()
+    broken_values = broken_position_ids.values()
+
+    invalid_target_offsets = torch.tensor([0, 5, 6], dtype=torch.int64)
+    invalid_input_ids = _nested_1d_from_offsets(invalid_target_offsets)
+
+    data = TensorDict({"input_ids": invalid_input_ids, "position_ids": broken_position_ids}, batch_size=[batch_size])
+    with caplog.at_level("WARNING"):
+        maybe_fix_3d_position_ids(data)
+
+    fixed_position_ids = data["position_ids"]
+    torch.testing.assert_close(fixed_position_ids.offsets(), broken_offsets)
+    torch.testing.assert_close(fixed_position_ids.values(), broken_values)
+    assert fixed_position_ids._ragged_idx == 2
+    assert "Skip repairing broken 3D position_ids due to invalid target offsets" in caplog.text
+
+
+def test_maybe_fix_3d_position_ids_handles_empty_batch():
+    data = {
+        "input_ids": _FakeNestedTensor(
+            shape=(0,),
+            offsets=torch.tensor([0], dtype=torch.int64),
+            values=torch.empty((0,), dtype=torch.long),
+        ),
+        "position_ids": _FakeNestedTensor(
+            shape=(0, 3, 0),
+            offsets=torch.tensor([0], dtype=torch.int64),
+            values=torch.empty((0, 0), dtype=torch.long),
+        ),
+    }
+
+    maybe_fix_3d_position_ids(data)
+    assert data["position_ids"]._ragged_idx == 2
+
+
 if __name__ == "__main__":
     test_padding_conversion_with_log_probs()
     test_padding_conversion_without_log_probs()
@@ -324,4 +454,7 @@ if __name__ == "__main__":
     test_embeds_padding_2_no_padding_varying_lengths()
     test_response_from_nested()
     test_response_to_nested()
+    test_maybe_fix_3d_position_ids_repairs_broken_layout()
+    test_maybe_fix_3d_position_ids_skips_repair_on_invalid_input_offsets()
+    test_maybe_fix_3d_position_ids_handles_empty_batch()
     print("All padding conversion tests passed!")
