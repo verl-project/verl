@@ -139,8 +139,6 @@ class TestPlatformCreation:
 
     def test_cuda_warns_if_unavailable(self):
         with mock.patch("torch.cuda.is_available", return_value=False):
-            import logging
-
             with mock.patch("verl.plugin.platform.platform_manager.logger") as mock_logger:
                 platform = _create_platform("cuda")
                 mock_logger.warning.assert_called_once()
