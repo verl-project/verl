@@ -41,24 +41,9 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
-def _drop_tied_target_keys(state_dict: dict, model, model_config) -> None:
-    """Drop tied alias keys (e.g. ``lm_head.weight``) from ``state_dict``.
-
-    FSDP gather produces independent CPU tensors per state_dict key, which
-    defeats ``save_pretrained``'s storage-pointer-based dedup. When both keys
-    end up in safetensors, ``transformers>=5`` silently refuses to re-tie on
-    reload. Detects aliases by ``Parameter`` identity after ``tie_weights()``.
-    """
-    if not getattr(model_config, "tie_word_embeddings", False):
-        return
-    model.tie_weights()
-    seen: dict[int, str] = {}
-    for name, param in model.named_parameters(remove_duplicate=False):
-        pid = id(param)
-        if pid in seen:
-            state_dict.pop(name, None)
-        else:
-            seen[pid] = name
+# Re-export so existing callers that previously imported the symbol from this
+# module continue to work.
+from verl.utils.transformers_compat import drop_tied_target_keys as _drop_tied_target_keys  # noqa: E402
 
 
 @dataclass
