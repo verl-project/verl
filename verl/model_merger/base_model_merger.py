@@ -29,6 +29,26 @@ from verl.utils.transformers_compat import get_auto_model_for_vision2seq
 AutoModelForVision2Seq = get_auto_model_for_vision2seq()
 
 
+def _drop_tied_target_keys(state_dict: dict, model, model_config) -> None:
+    """Drop tied alias keys (e.g. ``lm_head.weight``) from ``state_dict``.
+
+    The merger materialises one independent CPU tensor per state_dict key,
+    which defeats ``save_pretrained``'s storage-pointer-based dedup. When both
+    keys end up in safetensors, ``transformers>=5`` silently refuses to re-tie
+    on reload. Detects aliases by ``Parameter`` identity after ``tie_weights()``.
+    """
+    if not getattr(model_config, "tie_word_embeddings", False):
+        return
+    model.tie_weights()
+    seen: dict[int, str] = {}
+    for name, param in model.named_parameters(remove_duplicate=False):
+        pid = id(param)
+        if pid in seen:
+            state_dict.pop(name, None)
+        else:
+            seen[pid] = name
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="verl model merger")
     subparsers = parser.add_subparsers(dest="operation", required=True, help="Specify 'merge' or 'test' operation.")
@@ -384,6 +404,8 @@ class BaseModelMerger(ABC):
         lora_path = self.save_lora_adapter(state_dict)
         if lora_path:
             print(f"Saving lora adapter to {lora_path}")
+
+        _drop_tied_target_keys(state_dict, model, self.model_config)
 
         print(f"Saving model to {self.config.target_dir}")
         model.save_pretrained(self.config.target_dir, state_dict=state_dict)
