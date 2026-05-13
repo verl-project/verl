@@ -274,17 +274,33 @@ def _compute_position_ids(
         "image_grid_thw": multi_modal_inputs.get("image_grid_thw") if multi_modal_inputs else None,
         "video_grid_thw": multi_modal_inputs.get("video_grid_thw") if multi_modal_inputs else None,
     }
-    if multi_modal_inputs and multi_modal_inputs.pop("mm_token_type_ids", None) is not None:
+    image_token_id = getattr(processor, "image_token_id", None)
+    video_token_id = getattr(processor, "video_token_id", None)
+    needs_token_type_ids = bool(multi_modal_inputs and multi_modal_inputs.pop("mm_token_type_ids", None) is not None)
+    needs_token_type_ids = needs_token_type_ids or image_token_id is not None or video_token_id is not None
+    if needs_token_type_ids:
         mm_token_type_ids = torch.zeros_like(input_ids)
-        mm_token_type_ids[0][input_ids[0] == processor.image_token_id] = 1
-        mm_token_type_ids[0][input_ids[0] == processor.video_token_id] = 2
+        if image_token_id is not None:
+            mm_token_type_ids[0][input_ids[0] == image_token_id] = 1
+        if video_token_id is not None:
+            mm_token_type_ids[0][input_ids[0] == video_token_id] = 2
         mm_kwargs["mm_token_type_ids"] = mm_token_type_ids
 
-    vision_position_ids, _ = processor.get_rope_index(
-        input_ids=input_ids,
-        attention_mask=attention_mask,
-        **mm_kwargs,
-    )
+    try:
+        vision_position_ids, _ = processor.get_rope_index(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            **mm_kwargs,
+        )
+    except TypeError:
+        if "mm_token_type_ids" not in mm_kwargs:
+            raise
+        mm_kwargs.pop("mm_token_type_ids")
+        vision_position_ids, _ = processor.get_rope_index(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            **mm_kwargs,
+        )
     vision_position_ids = vision_position_ids.transpose(0, 1)
 
     valid_mask = attention_mask[0].bool()

@@ -835,10 +835,9 @@ def _compute_vlm_position_ids(
     image_token_id = getattr(processor, "image_token_id", None)
     video_token_id = getattr(processor, "video_token_id", None)
     needs_token_type_ids = bool(multi_modal_inputs and multi_modal_inputs.get("mm_token_type_ids") is not None)
-    needs_token_type_ids = needs_token_type_ids or bool(
-        (image_token_id is not None and torch.any(input_ids == image_token_id))
-        or (video_token_id is not None and torch.any(input_ids == video_token_id))
-    )
+    # Qwen3-VL's HF get_rope_index requires mm_token_type_ids; pass a zero/1/2
+    # tensor whenever the processor exposes vision token ids.
+    needs_token_type_ids = needs_token_type_ids or image_token_id is not None or video_token_id is not None
     if needs_token_type_ids:
         mm_token_type_ids = torch.zeros_like(input_ids)
         if image_token_id is not None:

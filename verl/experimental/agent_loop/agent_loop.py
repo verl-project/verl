@@ -842,18 +842,36 @@ class AgentLoopWorker:
             "video_grid_thw": multi_modal_inputs.get("video_grid_thw"),
         }
         # For transformers>=5.3.0, mm_token_type_ids is only used to calculate position ids.
-        if multi_modal_inputs.pop("mm_token_type_ids", None) is not None:
+        image_token_id = getattr(self.processor, "image_token_id", None)
+        video_token_id = getattr(self.processor, "video_token_id", None)
+        needs_token_type_ids = multi_modal_inputs.pop("mm_token_type_ids", None) is not None
+        # Qwen3-VL's HF get_rope_index requires mm_token_type_ids even when
+        # we are only building placeholder position_ids before image refs are resolved.
+        needs_token_type_ids = needs_token_type_ids or image_token_id is not None or video_token_id is not None
+        if needs_token_type_ids:
             mm_token_type_ids = torch.zeros_like(input_ids)
-            mm_token_type_ids[0][input_ids[0] == self.processor.image_token_id] = 1
-            mm_token_type_ids[0][input_ids[0] == self.processor.video_token_id] = 2
+            if image_token_id is not None:
+                mm_token_type_ids[0][input_ids[0] == image_token_id] = 1
+            if video_token_id is not None:
+                mm_token_type_ids[0][input_ids[0] == video_token_id] = 2
             multi_modal_kwargs["mm_token_type_ids"] = mm_token_type_ids
 
         # Model's get_rope_index has been dynamically bind to the processor.
-        vision_position_ids, _ = self.processor.get_rope_index(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            **multi_modal_kwargs,
-        )
+        try:
+            vision_position_ids, _ = self.processor.get_rope_index(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                **multi_modal_kwargs,
+            )
+        except TypeError:
+            if "mm_token_type_ids" not in multi_modal_kwargs:
+                raise
+            multi_modal_kwargs.pop("mm_token_type_ids")
+            vision_position_ids, _ = self.processor.get_rope_index(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                **multi_modal_kwargs,
+            )
         vision_position_ids = vision_position_ids.transpose(0, 1)  # (3, 1, seq_len) => (1, 3, seq_len)
 
         valid_mask = attention_mask[0].bool()
