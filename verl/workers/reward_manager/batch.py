@@ -20,6 +20,7 @@ import torch
 from verl import DataProto
 from verl.workers.reward_manager import register
 from verl.workers.reward_manager.abstract import AbstractRewardManager, RawRewardFn
+from verl.workers.reward_manager.response_utils import select_response_ids_for_reward
 
 
 @register("batch")
@@ -50,12 +51,15 @@ class BatchRewardManager(AbstractRewardManager):
         attention_mask = data.batch["attention_mask"]
 
         prompt_len = prompt_ids.shape[-1]
-        valid_response_lengths = attention_mask[:, prompt_len:].sum(dim=-1)
+        response_mask = data.batch.get("response_mask", None)
 
         responses_str = []
         for i in range(len(data)):
-            valid_len = valid_response_lengths[i]
-            valid_response_ids = response_ids[i][:valid_len]
+            valid_response_ids, _ = select_response_ids_for_reward(
+                response_ids=response_ids[i],
+                response_attention_mask=attention_mask[i, prompt_len:],
+                response_mask=response_mask[i] if response_mask is not None else None,
+            )
             response_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
             responses_str.append(response_str)
 
@@ -66,6 +70,8 @@ class BatchRewardManager(AbstractRewardManager):
 
         for i in range(len(data)):
             extras[i]["rollout_reward_scores"] = rollout_reward_scores[i]
+            full_response_ids = response_ids[i][: int(attention_mask[i, prompt_len:].sum().item())]
+            extras[i]["full_response_str"] = self.tokenizer.decode(full_response_ids, skip_special_tokens=True)
 
         scores = self.compute_score(
             data_sources=data_sources,
@@ -89,6 +95,7 @@ class BatchRewardManager(AbstractRewardManager):
         prompt_len = prompt_ids.shape[-1]
         attention_mask = data.batch["attention_mask"]
         valid_response_lengths = attention_mask[:, prompt_len:].sum(dim=-1)
+        response_mask = data.batch.get("response_mask", None)
         data_sources = data.non_tensor_batch[self.reward_fn_key]
 
         scores = self.verify(data)
@@ -97,6 +104,11 @@ class BatchRewardManager(AbstractRewardManager):
 
         for i in range(len(data)):
             length = valid_response_lengths[i].item()
+            _, reward_index = select_response_ids_for_reward(
+                response_ids=data.batch["responses"][i],
+                response_attention_mask=attention_mask[i, prompt_len:],
+                response_mask=response_mask[i] if response_mask is not None else None,
+            )
             score = scores[i]
 
             if isinstance(score, dict):
@@ -107,7 +119,7 @@ class BatchRewardManager(AbstractRewardManager):
                 reward = score
 
             rewards.append(reward)
-            reward_tensor[i, length - 1] = reward
+            reward_tensor[i, reward_index] = reward
 
             data_source = data_sources[i]
             if already_printed.get(data_source, 0) < self.num_examine:

@@ -20,6 +20,7 @@ from verl import DataProto
 from verl.utils.reward_score import default_compute_score
 from verl.workers.reward_manager import register
 from verl.workers.reward_manager.abstract import AbstractRewardManager
+from verl.workers.reward_manager.response_utils import select_response_ids_for_reward
 
 
 @register("dapo")
@@ -79,12 +80,19 @@ class DAPORewardManager(AbstractRewardManager):
             valid_prompt_ids = prompt_ids[-valid_prompt_length:]
 
             response_ids = data_item.batch["responses"]
-            valid_response_length = data_item.batch["attention_mask"][prompt_length:].sum()
-            valid_response_ids = response_ids[:valid_response_length]
+            response_attention_mask = data_item.batch["attention_mask"][prompt_length:]
+            response_mask = data_item.batch.get("response_mask", None)
+            valid_response_ids, reward_index = select_response_ids_for_reward(
+                response_ids=response_ids,
+                response_attention_mask=response_attention_mask,
+                response_mask=response_mask,
+            )
 
             # decode
             prompt_str = self.tokenizer.decode(valid_prompt_ids, skip_special_tokens=True)
             response_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
+            full_response_ids = response_ids[: int(response_attention_mask.sum().item())]
+            full_response_str = self.tokenizer.decode(full_response_ids, skip_special_tokens=True)
             eos_token = self.tokenizer.eos_token
             if response_str.endswith(eos_token):
                 response_str = response_str[: -len(eos_token)]
@@ -98,6 +106,7 @@ class DAPORewardManager(AbstractRewardManager):
             rollout_reward_scores = data_item.non_tensor_batch.get("reward_scores", {})
 
             extra_info["rollout_reward_scores"] = rollout_reward_scores
+            extra_info["full_response_str"] = full_response_str
 
             result = self.compute_score(
                 data_source=data_source,
@@ -121,6 +130,7 @@ class DAPORewardManager(AbstractRewardManager):
             if self.overlong_buffer_cfg.enable:
                 overlong_buffer_len = self.overlong_buffer_cfg.len
                 expected_len = self.max_resp_len - overlong_buffer_len
+                valid_response_length = int(response_attention_mask.sum().item())
                 exceed_len = valid_response_length - expected_len
                 overlong_penalty_factor = self.overlong_buffer_cfg.penalty_factor
                 overlong_reward = min(-exceed_len / overlong_buffer_len * overlong_penalty_factor, 0)
@@ -129,7 +139,7 @@ class DAPORewardManager(AbstractRewardManager):
                     reward_extra_info["overlong_reward"].append(overlong_reward)
                     reward_extra_info["overlong"].append(overlong_reward < 0)
 
-            reward_tensor[i, valid_response_length - 1] = reward
+            reward_tensor[i, reward_index] = reward
 
             if data_source not in already_print_data_sources:
                 already_print_data_sources[data_source] = 0
