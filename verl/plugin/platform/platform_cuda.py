@@ -70,6 +70,8 @@ class PlatformCUDA(PlatformBase):
     # ------------------------------------------------------------------
 
     def get_device_capability(self, device_index: int = 0) -> tuple[Optional[int], Optional[int]]:
+        if not torch.cuda.is_available():
+            return None, None
         return torch.cuda.get_device_capability(device_index)
 
     # ------------------------------------------------------------------
