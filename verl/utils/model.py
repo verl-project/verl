@@ -822,15 +822,29 @@ def _merge_processed_image_inputs(inputs_list: list[dict[str, Any]]) -> dict[str
     return merged
 
 
+def _compute_text_position_ids_3d(
+    input_ids: torch.Tensor, attention_mask: torch.Tensor, num_axes: int = 4
+) -> torch.Tensor:
+    valid_mask = attention_mask[0].bool()
+    text_position_ids = torch.ones((1, input_ids.shape[-1]), dtype=torch.long, device=input_ids.device)
+    text_position_ids[0, valid_mask] = torch.arange(valid_mask.sum().item(), device=input_ids.device)
+    return text_position_ids.unsqueeze(0).expand(-1, num_axes, -1).clone()
+
+
 def _compute_vlm_position_ids(
     processor, input_ids: torch.Tensor, attention_mask: torch.Tensor, multi_modal_inputs: dict
 ) -> torch.Tensor:
     if processor is None:
         return compute_position_id_with_mask(attention_mask)
 
+    image_grid_thw = multi_modal_inputs.get("image_grid_thw") if multi_modal_inputs else None
+    video_grid_thw = multi_modal_inputs.get("video_grid_thw") if multi_modal_inputs else None
+    if image_grid_thw is None and video_grid_thw is None:
+        return _compute_text_position_ids_3d(input_ids, attention_mask)
+
     mm_kwargs: dict[str, Any] = {
-        "image_grid_thw": multi_modal_inputs.get("image_grid_thw") if multi_modal_inputs else None,
-        "video_grid_thw": multi_modal_inputs.get("video_grid_thw") if multi_modal_inputs else None,
+        "image_grid_thw": image_grid_thw,
+        "video_grid_thw": video_grid_thw,
     }
     image_token_id = getattr(processor, "image_token_id", None)
     video_token_id = getattr(processor, "video_token_id", None)

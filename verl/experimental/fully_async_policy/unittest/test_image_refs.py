@@ -18,6 +18,7 @@ from PIL import Image
 from tensordict import TensorDict
 
 from verl import DataProto
+from verl.experimental.agent_loop.agent_loop import AgentLoopWorker
 from verl.experimental.fully_async_policy.image_refs import (
     IMAGE_BANK_REF_KEY,
     MULTI_MODAL_DATA_KEY,
@@ -26,6 +27,7 @@ from verl.experimental.fully_async_policy.image_refs import (
     attach_image_bank_ref,
     attach_image_refs_to_dataproto,
 )
+from verl.experimental.fully_async_policy.intermediate_trajectory_utils import _compute_position_ids
 from verl.utils.model import resolve_multi_modal_refs
 
 
@@ -54,6 +56,13 @@ class DummyProcessor:
         seq_len = input_ids.shape[-1]
         position_ids = torch.arange(seq_len, dtype=torch.long).view(1, 1, seq_len).expand(3, 1, seq_len)
         return position_ids, None
+
+
+class StrictDummyProcessor(DummyProcessor):
+    def get_rope_index(self, input_ids, attention_mask, **kwargs):
+        if kwargs.get("image_grid_thw") is None and torch.any(input_ids == self.image_token_id):
+            raise TypeError("image_grid_thw is required when image tokens are present")
+        return super().get_rope_index(input_ids, attention_mask, **kwargs)
 
 
 def _object_array(values):
@@ -164,3 +173,44 @@ def test_resolve_multi_modal_refs_uses_processed_bank_without_ray_get():
     assert resolved["pixel_values"].shape == (1, 3, 2, 2)
     assert resolved["image_grid_thw"].tolist() == [[1, 2, 2]]
     assert micro_batch["position_ids"].dim() == 3
+
+
+def test_resolve_multi_modal_refs_uses_placeholder_position_ids_without_image_grid():
+    micro_batch = {
+        "input_ids": torch.tensor([[1, 42, 2]], dtype=torch.long),
+        "attention_mask": torch.tensor([[1, 1, 1]], dtype=torch.long),
+        "position_ids": torch.arange(3).unsqueeze(0),
+        MULTI_MODAL_REFS_KEY: _object_array([{"image_ids": [], "video_ids": []}]),
+        IMAGE_BANK_REF_KEY: _object_array([None]),
+    }
+
+    resolved = resolve_multi_modal_refs(
+        micro_batch,
+        tokenizer=None,
+        processor=StrictDummyProcessor(),
+        bank_cache={},
+    )
+
+    assert resolved == {}
+    assert micro_batch["position_ids"].dim() == 3
+    assert micro_batch["position_ids"][0].shape == (4, 3)
+
+
+def test_agent_loop_position_ids_skip_rope_without_image_grid():
+    worker = object.__new__(AgentLoopWorker)
+    worker.processor = StrictDummyProcessor()
+    input_ids = torch.tensor([[1, 42, 2]], dtype=torch.long)
+    attention_mask = torch.ones_like(input_ids)
+
+    position_ids = worker._compute_position_ids(input_ids, attention_mask, {})
+
+    assert position_ids.shape == (1, 4, 3)
+
+
+def test_intermediate_position_ids_skip_rope_without_image_grid():
+    input_ids = torch.tensor([[1, 42, 2]], dtype=torch.long)
+    attention_mask = torch.ones_like(input_ids)
+
+    position_ids = _compute_position_ids(StrictDummyProcessor(), input_ids, attention_mask, {})
+
+    assert position_ids.shape == (1, 4, 3)

@@ -832,14 +832,27 @@ class AgentLoopWorker:
             multi_modal_inputs["images_seqlens"] = images_seqlens
         return multi_modal_inputs
 
+    @staticmethod
+    def _compute_text_position_ids_3d(input_ids, attention_mask, num_axes: int = 4) -> torch.Tensor:
+        """Return text-only VL position ids with a stable 3D schema."""
+        valid_mask = attention_mask[0].bool()
+        text_position_ids = torch.ones((1, input_ids.shape[-1]), dtype=torch.long, device=input_ids.device)
+        text_position_ids[0, valid_mask] = torch.arange(valid_mask.sum().item(), device=input_ids.device)
+        return text_position_ids.unsqueeze(0).expand(-1, num_axes, -1).clone()
+
     def _compute_position_ids(self, input_ids, attention_mask, multi_modal_inputs) -> torch.Tensor:
         """Compute position ids for multi-modal inputs."""
         if self.processor is None:
             return compute_position_id_with_mask(attention_mask)  # (1, seq_len)
 
+        image_grid_thw = multi_modal_inputs.get("image_grid_thw")
+        video_grid_thw = multi_modal_inputs.get("video_grid_thw")
+        if image_grid_thw is None and video_grid_thw is None:
+            return self._compute_text_position_ids_3d(input_ids, attention_mask)
+
         multi_modal_kwargs = {
-            "image_grid_thw": multi_modal_inputs.get("image_grid_thw"),
-            "video_grid_thw": multi_modal_inputs.get("video_grid_thw"),
+            "image_grid_thw": image_grid_thw,
+            "video_grid_thw": video_grid_thw,
         }
         # For transformers>=5.3.0, mm_token_type_ids is only used to calculate position ids.
         image_token_id = getattr(self.processor, "image_token_id", None)
