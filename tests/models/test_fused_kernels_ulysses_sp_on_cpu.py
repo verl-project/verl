@@ -47,7 +47,6 @@ import torch
 
 from verl.models.transformers import dense_common, glm4v, qwen2_vl, qwen3_5, qwen3_vl
 
-
 # ---------------------------------------------------------------------------
 # 1. Root-cause demonstration: slice-then-local-roll != global-roll-then-slice.
 # ---------------------------------------------------------------------------
@@ -88,8 +87,7 @@ def test_local_roll_diverges_from_global_roll_under_sp():
         correct_last = correct_shards[rank][..., -1]
         buggy_last = buggy_shards[rank][..., -1]
         assert not torch.equal(correct_last, buggy_last), (
-            f"rank {rank}: expected divergence at shard boundary but got "
-            f"{correct_last}=={buggy_last}"
+            f"rank {rank}: expected divergence at shard boundary but got {correct_last}=={buggy_last}"
         )
 
 
@@ -181,14 +179,10 @@ def _patch_fused_kernels():
     def fake_qwen2_vl_forward(self, input_ids, **_kwargs):
         # Bypass `process_position_ids` and the real VLM body; we only care
         # about the routing layer that runs *after* the model forward.
-        return _FakeBaseOutput(
-            torch.zeros(1, input_ids.shape[-1], self.lm_head.weight.shape[1])
-        )
+        return _FakeBaseOutput(torch.zeros(1, input_ids.shape[-1], self.lm_head.weight.shape[1]))
 
     def fake_glm4v_forward(self, input_ids, **_kwargs):
-        return _FakeBaseOutput(
-            torch.zeros(1, input_ids.shape[-1], self.lm_head.weight.shape[1])
-        )
+        return _FakeBaseOutput(torch.zeros(1, input_ids.shape[-1], self.lm_head.weight.shape[1]))
 
     with (
         mock.patch(
@@ -276,6 +270,5 @@ def test_adapter_falls_back_to_local_roll_when_shift_labels_absent(forward_fn):
         )
 
     assert torch.equal(captured["input_ids"], expected), (
-        f"{_adapter_id(forward_fn)}: expected fallback to torch.roll(input_ids), "
-        f"got {captured['input_ids'].tolist()}"
+        f"{_adapter_id(forward_fn)}: expected fallback to torch.roll(input_ids), got {captured['input_ids'].tolist()}"
     )

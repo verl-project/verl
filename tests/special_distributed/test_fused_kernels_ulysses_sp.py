@@ -27,8 +27,6 @@ Run on 2 GPUs:
         tests/special_distributed/test_fused_kernels_ulysses_sp.py
 """
 
-import os
-
 import pytest
 import torch
 import torch.distributed
