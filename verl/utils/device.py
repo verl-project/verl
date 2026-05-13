@@ -66,7 +66,10 @@ def get_resource_name() -> str:
     Returns:
         ray resource name string, either "GPU" or "NPU".
     """
-    return "GPU" if is_cuda_available else "NPU"
+    if is_npu_available:
+        return "NPU"
+    else:
+        return "GPU"
 
 
 def get_visible_devices_keyword() -> str:
