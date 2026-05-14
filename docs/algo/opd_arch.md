@@ -96,3 +96,18 @@ rollouts on other samples.
     in `output.extra_fields["teacher_ids"]` / `["teacher_logprobs"]` and later
     concatenated into the per-batch `DataProto` in `_postprocess` for the
     student optimization step.
+
+
+## Student Optimization
+
+Using the `DataProto` with teacher logprobs, optimization procedes as follows:
+
+1. In TrainingWorker.train_batch, we call self.engine.train_batch using self.loss_fn, which is distillation_ppo_loss. 
+
+2. In the forward_step method of the transformer_impl, we collect the inputs needed for the distillation loss computation (student logprobs and potentially full logits, depending on the distillation loss mode) and then calls distillation_ppo_loss to compute the distillation loss.
+
+3. In distillation_ppo_loss: 
+- We compute the distillation loss and optionally the policy loss, if task rewards are enabled
+- The distillation loss goes thru a registry; it supports a variety of losses:
+- top-k 
+- estimator
