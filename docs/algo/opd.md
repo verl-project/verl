@@ -84,8 +84,6 @@ D_{\mathrm{KL}}\!\left(\nu \,\|\, \pi_{\theta}\right)
 
 The distillation loss is optimized directly by backpropagating through this divergence.
 
-**Implementation note:** as of May 14, 2026, the implementation only supports computing this loss over the teacher top-\(k\) logits. Thus, the implemented objective is a top-\(k\) approximation to forward KL. Earlier implementations attempted reverse KL using the student top-\(k\) logits, but this was unstable for Qwen2.5-0.5B.
-
 #### PG OPD
 
 Following [3], PG OPD treats a negative reverse-KL estimate as a reward and optimizes it with a policy-gradient objective. Since tokens are sampled from the student policy, the per-token Monte Carlo estimator of reverse KL is
@@ -114,7 +112,6 @@ r_t
 \right).
 \]
 
-This estimator is valid for reverse KL because samples are drawn from the student distribution. Estimating forward KL would instead require samples from the teacher distribution. The stop-gradient is required so that the reward is treated as fixed under the policy-gradient update; otherwise, the optimization no longer corresponds to the intended score-function estimator.
 
 ### Multi-Teacher OPD
 
@@ -309,3 +306,75 @@ Using the `DataProto` produced by the Agent Loop (rollouts + teacher logprobs in
       `policy_loss + distillation_loss_coef * distill_loss`.
 
 The returned scalar loss is what `engine.train_batch` backpropagates.
+
+## Usage
+
+We have example scripts in the directory `examples/on_policy_distillation_trainer`. Now we show some basics for adapting a script to OPD.
+
+### Quick start
+
+This shows the minimal setup for single teacher OPD. Enable distillation and specify resources for the teacher servers:
+
+```yaml
+distillation.enabled=True
+distillation.n_gpus_per_node=2
+distillation.nnodes=1
+```
+
+Specify the teacher model name and server settings. 
+
+**NOTE**: the teacher model must have the same vocab as the student model, e.g., Qwen3-8B student and Qwen3-32B teacher. This is usually true if models are in the same family as each other. It can be verified by comparing tokenizers. Note that the model heads might have slightly different output dimensions due to padding, although this is not an issue. 
+
+```bash
+distillation.teacher_models.teacher_model.model_path=Qwen/Qwen3-32B
+distillation.teacher_models.teacher_model.inference.name=vllm
+distillation.teacher_models.teacher_model.inference.gpu_memory_utilization=0.8
+```
+
+Note that the reference policy in GRPO/PPO applies a reverse KL distillation loss to the student policy to distill it from the reference policy. In most cases, this should be disabled by ensuring that
+
+```bash
+actor_rollout_ref.actor.use_kl_loss=False
+algorithm.use_kl_in_reward=False
+```
+
+### GKD OPD
+
+As of May 14, 2026, the implementation only supports computing of the GKD OPD loss over the teacher top-\(k\) logits. Thus, the implemented objective is a top-\(k\) approximation to forward KL. Earlier implementations attempted reverse KL using the student top-\(k\) logits, but this was unstable for Qwen2.5-0.5B. Additionally, the current implementation does not allow for computing the student top-\(k\) logits because the teacher server does not allow for gathering at specified token IDs, only the sampled token and the top-\(k\) tokens.  
+
+To use GKD OPD, set the loss mode, the top-\(k\) value, and disable policy gradient. 
+
+```bash
+distillation.distillation_loss.loss_mode=forward_kl_topk
+distillation.distillation_loss.topk=128
+distillation.distillation_loss.use_policy_gradient=False
+```
+
+**Note**: It is also important to not use policy gradient, since policy gradient only directly influences increases/decreases the logprob of the sampled token to match the teacher logprob, whereas the top-\(k\) loss includes signal for at least \(k-1\) other tokens. Using policy gradient is therefore not only computationally wasteful, but also adds noise to the reward. For example, consider the case where the student has perfectly matched the logprob of the sampled token relative to the teacher, but for all other tokens in the top-\(k\), it has overestimated. The forward KL is therefore positive, so policy gradient will decrease the logprob of the sampled token, despite already matching.
+
+**TODO: add a math eqn summarizing this**
+
+### PG OPD
+
+To use PG OPD, set the loss mode and enable policy gradient:
+
+
+
+
+**Note**: When using the k1 estimator, the stop-gradient is required so that the reward is treated as fixed under the policy-gradient update; otherwise, the loss will not depend on the teacher logprob due to differentiation with respect to student parameters.
+
+**Note**: Computing the distillation loss using KL estimator is valid for reverse KL because samples are drawn from the student distribution. Estimating forward KL would instead require samples from the teacher distribution, which is just conventional (off-policy) KD. 
+
+### Task rewards
+
+Show how to enable 
+
+### Metrics
+
+Use topk mass, max distillation loss
+
+### Multi-teacher OPD
+
+Add a note about how to specify teachers 
+
+Add a note about shuffling data
