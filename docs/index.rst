@@ -174,6 +174,7 @@ verl is fast with:
    ascend_tutorial/examples/run_qwen3_32B_megatron_1k_256k_npu.md
    ascend_tutorial/dev_guide/model_dev/parameter_and_metrics.md
    ascend_tutorial/faq/faq.rst
+   ascend_tutorial/model_support/model_and_algorithm_support.md
 
 .. toctree::
    :maxdepth: 1
