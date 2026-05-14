@@ -160,11 +160,12 @@ verl is fast with:
    ascend_tutorial/dev_guide/precision_analysis/precision_alignment_zh.md
    ascend_tutorial/dev_guide/precision_analysis/precision_debugger_zh.md
    ascend_tutorial/dev_guide/model_dev/transfer_to_npu_guide.md
-   ascend_tutorial/quick_start/ascend_quick_start.rst
-   ascend_tutorial/quick_start/ascend_sglang_quick_start.rst
    ascend_tutorial/get_start/dockerfile_build_guidance.rst
-   ascend_tutorial/features/ascend_consistency.rst
-   ascend_tutorial/features/ascend_backend_features.md
+   ascend_tutorial/feature_support/ascend_consistency.rst
+   ascend_tutorial/feature_support/ascend_backend_features.md
+   ascend_tutorial/feature_support/npu_advance_features.md
+   ascend_tutorial/get_start/install_guidance.rst
+   ascend_tutorial/get_start/quick_start.rst
    ascend_tutorial/profiling/ascend_profiling_zh.rst
    ascend_tutorial/profiling/ascend_profiling_en.rst
    ascend_tutorial/examples/gspo_optimization_practice.md
@@ -173,7 +174,9 @@ verl is fast with:
    ascend_tutorial/examples/ascend_sglang_best_practices.rst
    ascend_tutorial/examples/ascend_retool_best_pratice.rst
    ascend_tutorial/examples/run_qwen3_32B_megatron_1k_256k_npu.md
+   ascend_tutorial/dev_guide/model_dev/parameter_and_metrics.md
    ascend_tutorial/faq/faq.rst
+   ascend_tutorial/model_support/model_and_algorithm_support.md
 
 .. toctree::
    :maxdepth: 1

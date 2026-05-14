@@ -29,6 +29,11 @@ from verl.utils.transformers_compat import get_auto_model_for_vision2seq
 AutoModelForVision2Seq = get_auto_model_for_vision2seq()
 
 
+# Re-export so existing callers that previously imported the symbol from this
+# module continue to work.
+from verl.utils.transformers_compat import drop_tied_target_keys as _drop_tied_target_keys  # noqa: E402
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="verl model merger")
     subparsers = parser.add_subparsers(dest="operation", required=True, help="Specify 'merge' or 'test' operation.")
@@ -384,6 +389,8 @@ class BaseModelMerger(ABC):
         lora_path = self.save_lora_adapter(state_dict)
         if lora_path:
             print(f"Saving lora adapter to {lora_path}")
+
+        _drop_tied_target_keys(state_dict, model, self.model_config)
 
         print(f"Saving model to {self.config.target_dir}")
         model.save_pretrained(self.config.target_dir, state_dict=state_dict)

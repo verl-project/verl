@@ -45,7 +45,7 @@ actor_rollout_ref.actor.megatron.use_mbridge=True
 actor_rollout_ref.actor.megatron.vanilla_mbridge=False \
 ```
 
-Megatron-Bridge已在社区原生适配大量主流模型结构，支持列表可参考：[supported model](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/docs/models/README.md)，在昇腾 NPU 环境开展模型迁移适配时，可基于社区现有能力完成基础配置，但仍有部分模型特殊结构与场景需要补充定制化适配，​DSA 稀疏注意力结构为典型示例*。
+Megatron-Bridge已在社区原生适配大量主流模型结构，支持列表可参考：[supported model](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/docs/models/README.md)，在昇腾 NPU 环境开展模型迁移适配时，可基于社区现有能力完成基础配置，但仍有部分模型特殊结构与场景需要补充定制化适配，​DSA 稀疏注意力结构为典型示例。
 
 昇腾 MindSpeed 支持基于吸收矩阵的 DSA（DeepSeek Sparse Attention）能力，该特性要求将 Megatron 中原有的 `linear_kv_up_proj` 算子拆分为 `linear_k_up_proj` 与 `linear_v_up_proj` 两个独立算子。拆分所需权重需从 HuggingFace 格式的 `self_attn.kv_b_proj.weight` 转换生成，而上述原生 PR 并未适配该算子拆分逻辑。
 
