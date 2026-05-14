@@ -1311,6 +1311,10 @@ class RayPPOTrainer:
         to construct the PPO dataflow.
         The light-weight advantage computation is done on the driver process.
         """
+        if self._dump_executor._shutdown:
+            self._dump_executor = ThreadPoolExecutor(max_workers=1)
+            self._dump_futures = []
+
         from omegaconf import OmegaConf
 
         from verl.utils.tracking import Tracking
