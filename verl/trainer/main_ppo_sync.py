@@ -104,6 +104,13 @@ from verl.workers.rollout.llm_server import LLMServerManager
 from verl.workers.utils.losses import value_loss
 from verl.workers.utils.padding import response_from_nested, response_to_nested
 
+
+def apply_greedy_sampling_params(params: dict[str, Any]) -> None:
+    params["top_p"] = 1.0
+    params["top_k"] = -1
+    params["temperature"] = 0
+
+
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
@@ -336,12 +343,19 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
         try:
             # NOTE: user can dynamically adjust n for each sample here, e.g according to task difficulty.
             config = self.config.actor_rollout_ref.rollout
-            n = config.n if not trajectory["validate"] else config.val_kwargs.n
+            n = prompt.pop("__rollout_n__", config.n if not trajectory["validate"] else config.val_kwargs.n)
+            do_sample = prompt.pop("__do_sample__", True)
+
+            run_sampling_params = dict(sampling_params)
+            if not trajectory["validate"] and not do_sample:
+                apply_greedy_sampling_params(run_sampling_params)
 
             tasks = []
             for i in range(n):
                 task = asyncio.create_task(
-                    self._run_agent_loop(sampling_params, trajectory=trajectory, trace=trace, session_id=i, **prompt)
+                    self._run_agent_loop(
+                        run_sampling_params, trajectory=trajectory, trace=trace, session_id=i, **prompt
+                    )
                 )
                 tasks.append(task)
             await asyncio.gather(*tasks)
@@ -1149,6 +1163,51 @@ class PPOTrainer:
         # TODO: add reward model
         raise NotImplementedError
 
+    def _add_remax_reward_baselines(self, batch: KVBatchMeta) -> KVBatchMeta:
+        """Attach one greedy baseline reward to every sampled ReMax trajectory."""
+        baseline_prefix = "remax_baseline_"
+        sampled_keys, sampled_tags = [], []
+        all_baseline_keys = []
+        final_baseline_key_by_uid: dict[str, tuple[int, str]] = {}
+        for key, tag in zip(batch.keys, batch.tags, strict=True):
+            uid, _, index = key.rsplit("_", 2)
+            if uid.startswith(baseline_prefix):
+                all_baseline_keys.append(key)
+                output_index = int(index)
+                if uid not in final_baseline_key_by_uid or final_baseline_key_by_uid[uid][0] < output_index:
+                    final_baseline_key_by_uid[uid] = (output_index, key)
+            else:
+                sampled_keys.append(key)
+                sampled_tags.append(tag)
+
+        assert final_baseline_key_by_uid, "ReMax requires greedy baseline rollout outputs, but none were found."
+        baseline_keys = [key for _, key in final_baseline_key_by_uid.values()]
+        baseline_data = tq.kv_batch_get(
+            keys=baseline_keys, partition_id=batch.partition_id, select_fields=["uid", "rm_scores"]
+        )
+        baseline_scores = baseline_data["rm_scores"].sum(dim=-1)
+        baseline_by_uid = {
+            uid.removeprefix(baseline_prefix): score
+            for uid, score in zip(list(baseline_data["uid"]), baseline_scores, strict=True)
+        }
+
+        sampled_data = tq.kv_batch_get(keys=sampled_keys, partition_id=batch.partition_id, select_fields=["uid"])
+        reward_baselines = torch.stack([baseline_by_uid[uid] for uid in list(sampled_data["uid"])])
+        tq.kv_batch_put(
+            keys=sampled_keys,
+            partition_id=batch.partition_id,
+            fields=TensorDict({"reward_baselines": reward_baselines}, batch_size=len(sampled_keys)),
+        )
+        tq.kv_clear(keys=all_baseline_keys, partition_id=batch.partition_id)
+        self.replay_buffer.remove(batch.partition_id, all_baseline_keys)
+        return KVBatchMeta(
+            keys=sampled_keys,
+            tags=sampled_tags,
+            partition_id=batch.partition_id,
+            fields=batch.fields,
+            extra_info=batch.extra_info,
+        )
+
     def _get_required_batch_multiple(self, dp_size: int) -> int:
         """Return the global batch multiple required by downstream train steps(e.g. critics, actors)."""
         required_multiple = dp_size
@@ -1318,6 +1377,8 @@ class PPOTrainer:
     def _compute_advantage(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
         """Compute the advantage of the batch."""
         fields = ["uid", "response_mask", "rm_scores", "rollout_log_probs", "old_log_probs", "ref_log_prob", "values"]
+        if self.config.algorithm.adv_estimator == core_algos.AdvantageEstimator.REMAX:
+            fields.append("reward_baselines")
         t_start = time.time()
         data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=fields)
         response_mask = data["response_mask"]
@@ -1576,7 +1637,20 @@ class PPOTrainer:
     def step(self, batch_dict: dict, metrics: dict, timing_raw: dict) -> KVBatchMeta:
         # 1. put batch to agent loop manager
         batch_dict["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch_dict["raw_prompt"]))], dtype=object)
-        batch = tu.get_tensordict(batch_dict)
+        if self.config.algorithm.adv_estimator == core_algos.AdvantageEstimator.REMAX:
+            rollout_n = self.config.actor_rollout_ref.rollout.n
+            sampled_batch_dict = batch_dict.copy()
+            sampled_batch_dict["__do_sample__"] = np.ones(len(batch_dict["raw_prompt"]), dtype=bool)
+            sampled_batch_dict["__rollout_n__"] = np.full(len(batch_dict["raw_prompt"]), rollout_n, dtype=np.int64)
+
+            baseline_batch_dict = batch_dict.copy()
+            baseline_batch_dict["uid"] = np.array([f"remax_baseline_{uid}" for uid in batch_dict["uid"]], dtype=object)
+            baseline_batch_dict["__do_sample__"] = np.zeros(len(batch_dict["raw_prompt"]), dtype=bool)
+            baseline_batch_dict["__rollout_n__"] = np.ones(len(batch_dict["raw_prompt"]), dtype=np.int64)
+
+            batch = torch.cat([tu.get_tensordict(sampled_batch_dict), tu.get_tensordict(baseline_batch_dict)], dim=0)
+        else:
+            batch = tu.get_tensordict(batch_dict)
         tu.assign_non_tensor_data(batch, "global_steps", self.global_steps)
         self.async_rollout_manager.generate_sequences(batch)
 
@@ -1590,6 +1664,9 @@ class PPOTrainer:
         if self.reward_loop_manager.reward_loop_worker_handles is None:
             with marked_timer("reward", timing_raw, color="yellow"):
                 batch = self._compute_reward_colocate(batch)
+
+        if self.config.algorithm.adv_estimator == core_algos.AdvantageEstimator.REMAX:
+            batch = self._add_remax_reward_baselines(batch)
 
         # 4. balance batch across data parallel groups
         batch = self._balance_batch(batch, metrics=metrics)
