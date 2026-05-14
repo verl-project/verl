@@ -14,10 +14,10 @@ Last updated: 05/14/2026.
 
 ---
 
-# Background
+## Background
 
 
-# Architecture
+## Architecture
 
 OPD has two components, mirroring RL:
 
@@ -27,14 +27,14 @@ OPD has two components, mirroring RL:
 2. **Student optimization** — runs on the train workers, the same actor workers
    that handle PPO/GRPO updates.
 
-## Teacher logprob computation
+### Teacher logprob computation
 
 Teacher logprob computation is interleaved with rollouts inside the **Agent
 Loop**. Each sample's teacher call fires as soon as its rollout finishes — there
 is no batch-wide barrier — so teacher work overlaps with the still-running
 rollouts on other samples.
 
-### Step-by-step
+#### Step-by-step
 
 1. **Input.** `AgentLoopManager.generate_sequences(prompts: DataProto)` receives
    a batch of prompts
@@ -117,12 +117,12 @@ rollouts on other samples.
     student optimization step.
 
 
-## Student Optimization
+### Student Optimization
 
 Using the `DataProto` produced by the Agent Loop (rollouts + teacher logprobs in
 `teacher_ids` / `teacher_logprobs`), the student step proceeds as follows.
 
-### Step-by-step
+#### Step-by-step
 
 1. **Train entry.** `TrainingWorker.train_batch`
    ([`verl/workers/engine_workers.py`](../../verl/workers/engine_workers.py))
