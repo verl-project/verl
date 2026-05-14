@@ -15,6 +15,7 @@
 import functools
 import itertools
 import json
+import logging
 import math
 import os
 from abc import ABC
@@ -34,6 +35,8 @@ from transformers.trainer_pt_utils import get_module_class_from_name
 
 from verl.utils.device import get_device_id, get_device_name, get_torch_device
 from verl.utils.model import check_exclude_modules, check_target_modules
+
+logger = logging.getLogger(__name__)
 
 if version.parse(torch.__version__) >= version.parse("2.6"):
     from torch.distributed.fsdp import CPUOffloadPolicy, FSDPModule, MixedPrecisionPolicy, fully_shard
@@ -124,12 +127,29 @@ def get_fsdp_wrap_policy(module, config=None, is_lora=False):
         policies.append(size_policy)
     elif fsdp_transformer_layer_cls_to_wrap is not None:
         transformer_cls_to_wrap = set()
+        missing_classes = []
         for layer_class in fsdp_transformer_layer_cls_to_wrap:
             transformer_cls = get_module_class_from_name(module, layer_class)
             if transformer_cls is None:
-                raise Exception("Could not find the transformer layer class to wrap in the model.")
+                # Some HF transformers releases expose names in `_no_split_modules` that are not
+                # (yet) concrete classes -- e.g. Qwen3.5 lists `Qwen3_5TextDecoderLayer` alongside
+                # the real `Qwen3_5DecoderLayer`. Skip such names and only fail if none resolve,
+                # so a single forward-compat name does not break the whole FSDP wrap policy.
+                missing_classes.append(layer_class)
             else:
                 transformer_cls_to_wrap.add(transformer_cls)
+
+        if not transformer_cls_to_wrap:
+            raise Exception(
+                f"Could not find any of the transformer layer classes to wrap in the model: "
+                f"{list(fsdp_transformer_layer_cls_to_wrap)}"
+            )
+        if missing_classes:
+            logger.warning(
+                "FSDP wrap policy: skipped missing layer class names %s, wrapping %s",
+                missing_classes,
+                sorted(c.__name__ for c in transformer_cls_to_wrap),
+            )
 
         transformer_policy = functools.partial(
             transformer_auto_wrap_policy,

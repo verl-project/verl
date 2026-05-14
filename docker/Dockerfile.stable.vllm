@@ -76,24 +76,24 @@ RUN NSIGHT_VERSION=2025.6.1_2025.6.1.190-1_$(if [ "$(uname -m)" = "aarch64" ]; t
     rm -rf /var/lib/apt/lists/*
 
 # =========================
-# Install DeepEP (x86_64 only)
+# Install DeepEP
 # =========================
-RUN if [ "$(uname -m)" = "x86_64" ]; then \
-        cd /home && mkdir -p dpsk_a2a && cd dpsk_a2a && \
-        git clone -b v2.5.1 https://github.com/NVIDIA/gdrcopy.git && \
-        cd gdrcopy && \
-        make prefix=/usr/local lib_install && \
-        cd .. && rm -rf gdrcopy && \
-        git clone -b hybrid-ep https://github.com/deepseek-ai/DeepEP.git && \
-        export NVSHMEM_DIR=/usr/local/lib/python3.12/dist-packages/nvidia/nvshmem && \
-        export LD_LIBRARY_PATH="${NVSHMEM_DIR}/lib:$LD_LIBRARY_PATH" && \
-        export PATH="${NVSHMEM_DIR}/bin:$PATH" && \
-        cd ${NVSHMEM_DIR}/lib && \
-        ln -sf libnvshmem_host.so.3 libnvshmem_host.so && \
-        cd /home/dpsk_a2a/DeepEP && \
-        export CPATH=/usr/local/cuda/targets/x86_64-linux/include/cccl:$CPATH && \
-        python setup.py install; \
-    fi
+RUN cd /home && mkdir -p dpsk_a2a && cd dpsk_a2a && \
+    git clone -b v2.5.1 https://github.com/NVIDIA/gdrcopy.git && \
+    cd gdrcopy && \
+    make prefix=/usr/local lib_install && \
+    cd .. && rm -rf gdrcopy && \
+    git clone -b hybrid-ep https://github.com/deepseek-ai/DeepEP.git && \
+    export NVSHMEM_DIR=/usr/local/lib/python3.12/dist-packages/nvidia/nvshmem && \
+    export LD_LIBRARY_PATH="${NVSHMEM_DIR}/lib:$LD_LIBRARY_PATH" && \
+    export PATH="${NVSHMEM_DIR}/bin:$PATH" && \
+    cd ${NVSHMEM_DIR}/lib && \
+    ln -sf libnvshmem_host.so.3 libnvshmem_host.so && \
+    cd /home/dpsk_a2a/DeepEP && \
+    git checkout 3f601f7ac1c062c46502646ff04c535013bfca00 && \
+    CUDA_TARGET=$(uname -m | sed 's/aarch64/sbsa-linux/;s/x86_64/x86_64-linux/') && \
+    export CPATH=/usr/local/cuda/targets/${CUDA_TARGET}/include/cccl:$CPATH && \
+    TORCH_CUDA_ARCH_LIST="9.0;10.0" python setup.py install
 
 RUN if [ "$(uname -m)" = "aarch64" ]; then apt-get remove -y python3-jwt; fi && \
     pip install vllm==0.18.0

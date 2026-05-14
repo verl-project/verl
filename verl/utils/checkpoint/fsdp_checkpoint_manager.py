@@ -41,6 +41,11 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
+# Re-export so existing callers that previously imported the symbol from this
+# module continue to work.
+from verl.utils.transformers_compat import drop_tied_target_keys as _drop_tied_target_keys  # noqa: E402
+
+
 @dataclass
 class FSDPConfig:
     """Configuration for FSDP checkpointing.
@@ -338,6 +343,8 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                             f"Warning: {self.__class__.__name__}.save_checkpoint: Generation config file not found "
                             f"in, using a generation config created from the model config when saving hf_model."
                         )
+
+                _drop_tied_target_keys(state_dict, save_model, model_config)
 
                 save_model.save_pretrained(hf_local_path, state_dict=state_dict)
                 log_with_rank(

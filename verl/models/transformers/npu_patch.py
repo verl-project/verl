@@ -281,8 +281,7 @@ class NPUQwen3VLMoeTextSparseMoeBlock(nn.Module):
         routing_weights = routing_weights / routing_weights.sum(dim=-1, keepdim=True)
         routing_weights = routing_weights.to(router_logits.dtype)
         hidden_states = hidden_states.reshape(batch_size, -1, self.hidden_size)
-        if not self.training:
-            routing_weights = torch.zeros_like(router_logits).scatter_(1, router_indices, routing_weights)
+        routing_weights = torch.zeros_like(router_logits).scatter_(1, router_indices, routing_weights)
         routed_out = self.experts(hidden_states, routing_weights, router_indices)
         return routed_out
 
