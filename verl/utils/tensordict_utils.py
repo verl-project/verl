@@ -177,7 +177,7 @@ def nested_tensor_from_tensor_list(tensors: list[torch.Tensor], ragged_idx: int 
     offsets = torch.zeros(len(tensors) + 1, dtype=torch.long, device=values.device)
     torch.cumsum(lengths, dim=0, out=offsets[1:])
 
-    nested_tensor = torch.nested.nested_tensor_from_jagged(values=values, offsets=offsets)
+    nested_tensor = torch.nested.nested_tensor_from_jagged(values=values, offsets=offsets, jagged_dim=ragged_idx)
     nested_tensor._ragged_idx = ragged_idx
     return nested_tensor
 

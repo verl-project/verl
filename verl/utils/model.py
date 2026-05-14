@@ -54,6 +54,7 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from verl.models.registry import ModelRegistry
 from verl.utils.import_utils import is_trl_available
+from verl.utils.tensordict_utils import nested_tensor_from_tensor_list
 from verl.utils.transformers_compat import get_auto_model_for_vision2seq
 
 AutoModelForVision2Seq = get_auto_model_for_vision2seq()
@@ -869,6 +870,14 @@ def _append_text_axis_if_needed(
     return torch.cat((text_position_ids, position_ids), dim=1)
 
 
+def _nested_position_ids_from_rows(position_rows: list[torch.Tensor], device: torch.device) -> torch.Tensor:
+    """Build a stable nested tensor with the last row dimension ragged."""
+    if not position_rows:
+        raise ValueError("position_rows must not be empty")
+    ragged_idx = position_rows[0].dim()
+    return nested_tensor_from_tensor_list([row.to(device) for row in position_rows], ragged_idx=ragged_idx)
+
+
 def compute_vlm_position_ids(
     processor, input_ids: torch.Tensor, attention_mask: torch.Tensor, multi_modal_inputs: dict
 ) -> torch.Tensor:
@@ -1009,7 +1018,7 @@ def resolve_multi_modal_refs(
             row_multi_modal_inputs.append(_move_tensor_dict(mm_cpu, device))
 
     if position_rows:
-        micro_batch["position_ids"] = torch.nested.as_nested_tensor(position_rows, layout=torch.jagged).to(device)
+        micro_batch["position_ids"] = _nested_position_ids_from_rows(position_rows, device)
     print(
         "[ImageRefs][resolve] "
         f"rows={len(refs_col)} rows_with_images={rows_with_images} total_image_refs={total_image_refs} "

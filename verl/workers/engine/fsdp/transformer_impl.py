@@ -1055,7 +1055,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
             if pad_mode == DatasetPadMode.NO_PADDING:
                 input_ids_rmpad = input_ids.values().unsqueeze(0)  # (1, total_nnz)
                 if position_ids.dim() == 3:
-                    position_ids_rmpad = position_ids.values().unsqueeze(1)  # (4, 1, total_nnz)
+                    position_ids_rmpad = position_ids.values().unsqueeze(1)  # (rope_axes, 1, total_nnz)
                 else:
                     position_ids_rmpad = position_ids.values().unsqueeze(0)  # (1, total_nnz)
             else:
@@ -1127,9 +1127,10 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 )
 
                 if position_ids.dim() == 3:
+                    rope_axes = position_ids.size(1)
                     position_ids = torch.nested.to_padded_tensor(
-                        position_ids, padding=0, output_size=(batch_size, 4, max_seq_len)
-                    ).transpose(0, 1)  # (4, batch_size, max_seq_len)
+                        position_ids, padding=0, output_size=(batch_size, rope_axes, max_seq_len)
+                    ).transpose(0, 1)  # (rope_axes, batch_size, max_seq_len)
                 else:
                     position_ids = torch.nested.to_padded_tensor(
                         position_ids, padding=0, output_size=(batch_size, max_seq_len)

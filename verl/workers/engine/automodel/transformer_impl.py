@@ -559,8 +559,9 @@ class AutomodelEngineWithLMHead(AutomodelEngine):
                 )
 
                 if position_ids.dim() == 3:
+                    rope_axes = position_ids.size(1)
                     position_ids = torch.nested.to_padded_tensor(
-                        position_ids, padding=0, output_size=(batch_size, 4, max_seq_len)
+                        position_ids, padding=0, output_size=(batch_size, rope_axes, max_seq_len)
                     ).transpose(0, 1)
                 else:
                     position_ids = torch.nested.to_padded_tensor(

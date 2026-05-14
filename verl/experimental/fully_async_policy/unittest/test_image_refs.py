@@ -29,6 +29,7 @@ from verl.experimental.fully_async_policy.image_refs import (
 )
 from verl.experimental.fully_async_policy.intermediate_trajectory_utils import _compute_position_ids
 from verl.utils.model import compute_vlm_position_ids, resolve_multi_modal_refs
+from verl.utils.tensordict_utils import nested_tensor_from_tensor_list
 
 
 class DummyImageProcessor:
@@ -230,6 +231,54 @@ def test_resolve_multi_modal_refs_handles_unpadded_input_with_padded_attention_m
     assert resolved["pixel_values"].shape == (1, 3, 2, 2)
     assert micro_batch["position_ids"][0].shape == (3, 3)
     assert micro_batch["position_ids"].values().shape[0] == 3
+
+
+def test_nested_tensor_from_tensor_list_keeps_last_dim_ragged_for_2d_rows():
+    rows = [torch.arange(15).view(3, 5), torch.arange(15).view(3, 5)]
+
+    nested = nested_tensor_from_tensor_list(rows, ragged_idx=2)
+
+    assert nested.shape[1] == 3
+    assert nested.values().shape == (3, 10)
+    assert nested.values().unsqueeze(1).shape == (3, 1, 10)
+
+
+def test_resolve_multi_modal_refs_keeps_rope_axis_first_for_equal_length_rows():
+    image_bank = {
+        "sha1:image": {
+            "inputs": {
+                "pixel_values": torch.ones(1, 3, 2, 2),
+                "image_grid_thw": torch.tensor([[1, 2, 2]], dtype=torch.long),
+                "images_seqlens": torch.tensor([4], dtype=torch.long),
+            }
+        }
+    }
+    micro_batch = {
+        "input_ids": torch.nested.as_nested_tensor(
+            [torch.tensor([1, 42, 2]), torch.tensor([3, 42, 4])], layout=torch.jagged
+        ),
+        "attention_mask": torch.tensor([[1, 1, 1], [1, 1, 1]], dtype=torch.long),
+        "position_ids": torch.arange(3).repeat(2, 1),
+        MULTI_MODAL_REFS_KEY: _object_array(
+            [
+                {"image_ids": ["sha1:image"], "video_ids": []},
+                {"image_ids": ["sha1:image"], "video_ids": []},
+            ]
+        ),
+        IMAGE_BANK_REF_KEY: _object_array(["bank-ref", "bank-ref"]),
+    }
+
+    resolve_multi_modal_refs(
+        micro_batch,
+        tokenizer=None,
+        processor=StrictDummyProcessor(),
+        bank_cache={"bank-ref": image_bank},
+    )
+
+    position_ids = micro_batch["position_ids"]
+    assert position_ids.shape[1] == 3
+    assert position_ids.values().shape == (3, 6)
+    assert position_ids.values().unsqueeze(1).shape == (3, 1, 6)
 
 
 def test_compute_vlm_position_ids_adds_text_axis_for_legacy_vl_models():
