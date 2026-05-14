@@ -1,20 +1,34 @@
 set -x
 ENGINE=${1:-vllm}
-
-export TASK_QUEUE_ENABLE=1
-export HCCL_OP_EXPANSION_MODE="AIV"
-export VLLM_USE_V1=1
-export VLLM_VERSION=0.13.0
-export VLLM_ASCEND_ENABLE_NZ=0
-export HCCL_BUFFSIZE=610
-export CKPT_DIR="./ckpt30b"
+DEVICE=${DEVICE:-$(python3 -c 'import torch_npu' 2>/dev/null && echo npu || echo gpu)}
 
 TRAIN_FILE=dapo-math-17k.parquet
 TEST_FILE=aime-2024.parquet
 max_prompt_length=$((1024 * 2))
 max_response_length=$((1024 * 8))
 rollout_max_num_seqs=$((128))
+n_devices_per_node=$((8))
+trainer_device=$((cuda))
 
+case "${DEVICE}" in
+    gpu)
+        ;;
+    npu)
+        export TASK_QUEUE_ENABLE=1
+        export HCCL_OP_EXPANSION_MODE="AIV"
+        export VLLM_USE_V1=1
+        export VLLM_VERSION=0.13.0
+        export VLLM_ASCEND_ENABLE_NZ=0
+        export HCCL_BUFFSIZE=610
+        export CKPT_DIR="./ckpt30b"
+        n_devices_per_node=16
+        trainer_device=npu
+        ;;
+    *)
+        echo "Unsupported DEVICE=${DEVICE}. Expected 'gpu' or 'npu'." >&2
+        exit 1
+        ;;
+esac
 
 python3 -m verl.trainer.main_ppo \
     model_engine=veomni \
@@ -64,9 +78,9 @@ python3 -m verl.trainer.main_ppo \
     trainer.logger=console \
     trainer.project_name='verl_qwen3_veomni' \
     trainer.experiment_name='qwen3_30b_veomni' \
-    trainer.n_gpus_per_node=16 \
+    trainer.n_gpus_per_node=${n_devices_per_node} \
     trainer.nnodes=1 \
-    trainer.device=npu \
+    trainer.device=${trainer_device} \
     trainer.save_freq=100 \
     trainer.default_local_dir=$CKPT_DIR \
     trainer.test_freq=-1 \
