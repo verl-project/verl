@@ -162,9 +162,9 @@ verl is fast with:
    ascend_tutorial/quick_start/ascend_quick_start.rst
    ascend_tutorial/quick_start/ascend_sglang_quick_start.rst
    ascend_tutorial/get_start/dockerfile_build_guidance.rst
-   ascend_tutorial/features/ascend_consistency.rst
-   ascend_tutorial/features/ascend_backend_features.md
-   ascend_tutorial/features/npu_advance_features.md
+   ascend_tutorial/feature_support/ascend_consistency.rst
+   ascend_tutorial/feature_support/ascend_backend_features.md
+   ascend_tutorial/feature_support/npu_advance_features.md
    ascend_tutorial/profiling/ascend_profiling_zh.rst
    ascend_tutorial/profiling/ascend_profiling_en.rst
    ascend_tutorial/examples/gspo_optimization_practice.md
