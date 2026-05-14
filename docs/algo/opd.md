@@ -1,4 +1,23 @@
-# On-Policy Distillation Architecture
+# On-Policy Distillation
+
+**Author:** [Jacob Helwig](https://jacobhelwig.github.io/)
+
+Last updated: 05/14/2026.
+
+---
+
+> **Contents**
+>
+> - **Background** - Introduction to On-Policy Distillation
+> - **Architecture** - Implementation and control flow of OPD 
+> - **Usage** - Configuring OPD runs
+
+---
+
+# Background
+
+
+# Architecture
 
 OPD has two components, mirroring RL:
 
