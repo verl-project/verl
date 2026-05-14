@@ -100,14 +100,70 @@ rollouts on other samples.
 
 ## Student Optimization
 
-Using the `DataProto` with teacher logprobs, optimization procedes as follows:
+Using the `DataProto` produced by the Agent Loop (rollouts + teacher logprobs in
+`teacher_ids` / `teacher_logprobs`), the student step proceeds as follows.
 
-1. In TrainingWorker.train_batch, we call self.engine.train_batch using self.loss_fn, which is distillation_ppo_loss. 
+### Step-by-step
 
-2. In the forward_step method of the transformer_impl, we collect the inputs needed for the distillation loss computation (student logprobs and potentially full logits, depending on the distillation loss mode) and then calls distillation_ppo_loss to compute the distillation loss.
+1. **Train entry.** `TrainingWorker.train_batch`
+   ([`verl/workers/engine_workers.py`](../../verl/workers/engine_workers.py))
+   invokes `self.engine.train_batch(data, loss_function=self.loss_fn)`. When
+   distillation is enabled, `self.loss_fn` is bound to
+   `distillation_ppo_loss` at worker init
+   (`partial(distillation_ppo_loss, config=actor_config, distillation_config=…)`);
+   otherwise it is the standard `ppo_loss`.
 
-3. In distillation_ppo_loss: 
-- We compute the distillation loss and optionally the policy loss, if task rewards are enabled
-- The distillation loss goes thru a registry; it supports a variety of losses:
-- top-k 
-- estimator
+2. **Forward pass and (optional) inline top-k loss.**
+   `FSDPEngineWithLMHead.forward_step`
+   ([`verl/workers/engine/fsdp/transformer_impl.py`](../../verl/workers/engine/fsdp/transformer_impl.py))
+   runs the model forward, then calls `prepare_model_outputs(...,
+   logits_processor_func=loss_function)`. If the active loss mode requires
+   top-k (`distillation_use_topk=True`), `prepare_model_outputs` invokes
+   `distillation_ppo_loss(student_logits=…, data=…)` **as a logits processor**
+   while the full logits tensor is still in memory. This is the
+   `student_logits is not None` branch in `distillation_ppo_loss`
+   ([`verl/trainer/distillation/losses.py`](../../verl/trainer/distillation/losses.py)),
+   which dispatches to a backend-specific `compute_forward_kl_topk` (FSDP /
+   Megatron). Per-token `distillation_losses`, `student_mass`, and
+   `teacher_mass` tensors are written back into `model_output` so the full
+   logits can be freed before the final loss step.
+
+3. **Final loss.** `forward_step` then calls `loss_function(model_output=…,
+   data=…, dp_group=…)` — this is the `student_logits is None` branch of
+   `distillation_ppo_loss`, where:
+
+   1. **Per-token distillation loss** is produced by `distillation_loss(...)`,
+      which dispatches via `get_distillation_loss_fn(loss_mode)` to one of
+      two registered families
+      ([`losses.py`](../../verl/trainer/distillation/losses.py)):
+
+      - **Top-k** (`forward_kl_topk`, `use_topk=True`): reads the pre-computed
+        per-token tensors from `model_output` (populated by the logits
+        processor in step 2) and logs `student_mass` / `teacher_mass`
+        diagnostics. Negative divergences (a top-k truncation artifact) are
+        clamped to 0.
+      - **Single-sample KL estimators** (`kl`, `k1`, `abs`, `mse`, `k2`,
+        `low_var_kl`, `k3`, `use_estimator=True`): compares the student's
+        per-token `log_probs` (from the forward pass) directly against the
+        teacher's single log-prob in `data["teacher_logprobs"]` via
+        `kl_penalty`. No logits-processor pass is needed.
+
+   2. **Optional clamp.** If `loss_max_clamp` is set, per-token losses are
+      clamped to `[-clamp, +clamp]` (k1 in particular can be negative).
+
+   3. **Aggregation mode** — controlled by `use_policy_gradient`:
+
+      - `False` (supervised): aggregate per-token losses via `agg_loss` over
+        the response mask — straight backprop, as in
+        [arxiv 2306.13649](https://arxiv.org/abs/2306.13649).
+      - `True` (on-policy distillation): treat `-distillation_losses` as
+        advantages and run PPO-style clipped importance sampling against
+        `data["old_log_probs"]`, as in
+        [Thinking Machines' on-policy distillation post](https://thinkingmachines.ai/blog/on-policy-distillation/).
+
+   4. **Combine with task rewards.** A standard PPO policy loss is computed
+      from the rollout's task rewards via `ppo_loss(...)`. If
+      `use_task_rewards=False` it is zeroed; otherwise the final loss is
+      `policy_loss + distillation_loss_coef * distill_loss`.
+
+The returned scalar loss is what `engine.train_batch` backpropagates.
