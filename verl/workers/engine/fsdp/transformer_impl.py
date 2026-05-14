@@ -59,7 +59,12 @@ from verl.utils.fsdp_utils import (
     offload_fsdp_optimizer,
     replace_lora_wrapper,
 )
-from verl.utils.model import convert_weight_keys, extract_multi_modal_inputs, split_fused_moe_experts
+from verl.utils.model import (
+    convert_weight_keys,
+    extract_multi_modal_inputs,
+    resolve_hidden_and_moe_intermediate_sizes,
+    split_fused_moe_experts,
+)
 from verl.utils.py_functional import convert_to_regular_types
 from verl.utils.torch_functional import logprobs_from_logits
 from verl.utils.ulysses import (
@@ -830,7 +835,9 @@ class FSDPEngine(BaseEngine):
                 )
                 for name, param in params.items()
             )
-            per_tensor_param = split_fused_moe_experts(per_tensor_param)
+            per_tensor_param = split_fused_moe_experts(
+                per_tensor_param, *resolve_hidden_and_moe_intermediate_sizes(self.module)
+            )
 
         if self._qat_enabled:
             from verl.utils.qat.quantizer import QATQuantizer

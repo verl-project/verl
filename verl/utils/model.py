@@ -285,10 +285,24 @@ def check_exclude_modules(config, key: str) -> bool:
     return False
 
 
+def resolve_hidden_and_moe_intermediate_sizes(model: nn.Module) -> tuple[Optional[int], Optional[int]]:
+    """Return ``(hidden_size, moe_intermediate_size)`` from config or ``text_config``."""
+    cfg = getattr(getattr(model, "_fsdp_wrapped_module", model), "config", None)
+    if cfg is None:
+        return None, None
+    tc = getattr(cfg, "text_config", None)
+    h = getattr(cfg, "hidden_size", None) or (getattr(tc, "hidden_size", None) if tc else None)
+    m = getattr(cfg, "moe_intermediate_size", None) or (getattr(tc, "moe_intermediate_size", None) if tc else None)
+    return h, m
+
+
 def split_fused_moe_experts(
     weights: "Iterable[tuple[str, torch.Tensor]]",
+    hidden_size: Optional[int] = None,
+    moe_intermediate_size: Optional[int] = None,
 ) -> "Iterator[tuple[str, torch.Tensor]]":
-    """Stream-split HF "native fused" MoE expert tensors into per-expert tensors."""
+    """Split fused MoE tensors for vLLM"""
+    ti = 2 * moe_intermediate_size if moe_intermediate_size else None
     for name, tensor in weights:
         if not isinstance(tensor, torch.Tensor) or tensor.dim() != 3:
             yield name, tensor
@@ -296,16 +310,36 @@ def split_fused_moe_experts(
 
         if name.endswith(".experts.gate_up_proj"):
             base = name[: -len(".gate_up_proj")]
-            num_experts, two_inter, _hidden = tensor.shape
-            inter = two_inter // 2
-            for i in range(num_experts):
-                gate_up = tensor[i]
-                yield f"{base}.{i}.gate_proj.weight", gate_up[:inter].contiguous()
-                yield f"{base}.{i}.up_proj.weight", gate_up[inter:].contiguous()
+            e, d1, d2 = tensor.shape
+            bmm = bool(ti and hidden_size and d1 == hidden_size and d2 == ti)
+            stacked = bool(ti and hidden_size and d1 == ti and d2 == hidden_size)
+            if not bmm and not stacked and d1 % 2:
+                yield name, tensor
+                continue
+            for i in range(e):
+                gu = tensor[i]
+                if bmm:
+                    h = d2 // 2
+                    g, u = gu[:, :h].T.contiguous(), gu[:, h:].T.contiguous()
+                else:
+                    h = d1 // 2
+                    g, u = gu[:h].contiguous(), gu[h:].contiguous()
+                yield f"{base}.{i}.gate_proj.weight", g
+                yield f"{base}.{i}.up_proj.weight", u
         elif name.endswith(".experts.down_proj"):
             base = name[: -len(".down_proj")]
-            for i in range(tensor.shape[0]):
-                yield f"{base}.{i}.down_proj.weight", tensor[i].contiguous()
+            e, d1, d2 = tensor.shape
+            mi = moe_intermediate_size
+
+            if mi and hidden_size and d1 == mi and d2 == hidden_size:
+                transp = True
+            elif mi and hidden_size and d1 == hidden_size and d2 == mi:
+                transp = False
+            else:
+                transp = d1 < d2
+            for i in range(e):
+                sl = tensor[i]
+                yield f"{base}.{i}.down_proj.weight", (sl.T if transp else sl).contiguous()
         else:
             yield name, tensor
 
