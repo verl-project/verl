@@ -143,6 +143,17 @@ def no_padding_2_padding(tensor: torch.Tensor, data: TensorDict) -> torch.Tensor
     return output
 
 
+def build_attention_mask_from_nested(input_ids: torch.Tensor, max_seq_len: int | None = None) -> torch.Tensor:
+    """Build a padded full-sequence attention mask from nested input ids."""
+    assert input_ids.is_nested, "input_ids must be a nested tensor"
+    device = input_ids.values().device
+    seq_lens = input_ids.offsets().diff().to(device=device)
+    if max_seq_len is None:
+        max_seq_len = int(seq_lens.max().item())
+    positions = torch.arange(max_seq_len, device=device).unsqueeze(0)
+    return (positions < seq_lens.unsqueeze(1)).to(torch.int32)
+
+
 def embeds_padding_2_no_padding(data: TensorDict) -> TensorDict:
     """
     Convert TensorDict from prompt embeds with padding to no-padding format.

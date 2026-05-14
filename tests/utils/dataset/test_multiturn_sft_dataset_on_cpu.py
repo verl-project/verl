@@ -239,7 +239,7 @@ def test_multiturn_sft_dataset(model_path: str, ignore_input_ids_mismatch: bool)
 @pytest.mark.parametrize(
     "model_path, apply_chat_template_kwargs",
     [
-        ("openai/gpt-oss-20b", {"model_identity": "You are a helpful assistant."}),
+        (f"{custom_model_prefix}/openai/gpt-oss-20b", {"model_identity": "You are a helpful assistant."}),
     ],
 )
 def test_multiturn_sft_dataset_with_chat_template_kwargs(model_path: str, apply_chat_template_kwargs: dict):
