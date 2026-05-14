@@ -20,6 +20,7 @@ import logging
 import os
 import time
 import warnings
+from collections import OrderedDict
 from contextlib import nullcontext
 from typing import Callable, ContextManager, Optional
 
@@ -804,12 +805,24 @@ class FSDPEngine(BaseEngine):
             flush=True,
         )
         result = postprocess_batch_func(output_lst=output_lst, indices=indices, data=data)
+        bank_cache = getattr(self, "_image_ref_bank_cache", None)
+        if bank_cache is not None:
+            cleared_bank_cache_size = len(bank_cache)
+            bank_cache.clear()
+        else:
+            cleared_bank_cache_size = 0
         print(
             "[FSDPEngine][forward_backward_batch][exit] "
-            f"ts={time.time():.3f} rank={rank} dp_rank={dp_rank} result_none={result is None}",
+            f"ts={time.time():.3f} rank={rank} dp_rank={dp_rank} result_none={result is None} "
+            f"cleared_image_bank_cache={cleared_bank_cache_size}",
             flush=True,
         )
-        _log_memory("forward_backward.exit", rank=rank, dp_rank=dp_rank, extra=f"result_none={result is None}")
+        _log_memory(
+            "forward_backward.exit",
+            rank=rank,
+            dp_rank=dp_rank,
+            extra=f"result_none={result is None} cleared_image_bank_cache={cleared_bank_cache_size}",
+        )
         return result
 
     def forward_step(self, micro_batch: TensorDict, loss_function, forward_only):
@@ -1089,13 +1102,16 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
         bank_cache = getattr(self, "_image_ref_bank_cache", None)
         if bank_cache is None:
-            bank_cache = self._image_ref_bank_cache = {}
+            bank_cache = self._image_ref_bank_cache = OrderedDict()
         multi_modal_inputs = resolve_multi_modal_refs(
             micro_batch,
             self.model_config.tokenizer,
             self.model_config.processor,
             bank_cache=bank_cache,
         )
+        max_bank_cache_size = int(os.getenv("VERL_IMAGE_REF_BANK_CACHE_SIZE", "8"))
+        while max_bank_cache_size >= 0 and len(bank_cache) > max_bank_cache_size:
+            bank_cache.popitem(last=False)
         input_ids = micro_batch["input_ids"]
         position_ids = micro_batch["position_ids"]
 

@@ -710,9 +710,12 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
                 processor=self.processor,
                 sample_id=rollout_sample.sample_id,
             )
+            image_bank_stats["build_ms"] = (time.time() - image_ref_start) * 1000.0
+            bank_put_start = time.time()
             image_bank_ref = ray.put(image_bank) if image_bank else None
+            image_bank_stats["bank_ref_put_ms"] = (time.time() - bank_put_start) * 1000.0
             rollout_sample.full_batch = attach_image_bank_ref(rollout_sample.full_batch, image_bank_ref)
-            image_bank_stats["bank_ref_put_ms"] = (time.time() - image_ref_start) * 1000.0
+            image_bank_stats["total_ms"] = (time.time() - image_ref_start) * 1000.0
             rollout_sample.image_bank_ref = image_bank_ref
             rollout_sample.image_bank_stats = image_bank_stats
             print(
@@ -720,7 +723,9 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
                 f"sample_id={rollout_sample.sample_id} bank_ref_set={image_bank_ref is not None} "
                 f"unique_images={image_bank_stats.get('unique_images', 0)} "
                 f"processed_bytes={image_bank_stats.get('processed_bytes', 0)} "
-                f"bank_ref_put_ms={image_bank_stats['bank_ref_put_ms']:.2f}",
+                f"build_ms={image_bank_stats['build_ms']:.2f} "
+                f"bank_ref_put_ms={image_bank_stats['bank_ref_put_ms']:.2f} "
+                f"total_ms={image_bank_stats['total_ms']:.2f}",
                 flush=True,
             )
         rollout_sample.rollout_status = await self.get_statistics()

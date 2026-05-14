@@ -19,6 +19,7 @@ import json
 import os
 import re
 import sys
+import time
 import warnings
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -966,6 +967,7 @@ def resolve_multi_modal_refs(
     rows_with_images = 0
     total_image_refs = 0
     bank_cache_misses = 0
+    ray_get_ms_total = 0.0
 
     for row_idx, (refs, bank_ref, row_input_ids, row_attention) in enumerate(
         zip(refs_col, bank_refs, input_rows, attention_rows, strict=True)
@@ -1002,9 +1004,27 @@ def resolve_multi_modal_refs(
                 raise ValueError(f"multi_modal_refs row {row_idx} has images but image_bank_ref is None")
             bank_cache_key = str(bank_ref)
             if bank_cache_key not in bank_cache:
-                bank_cache[bank_cache_key] = ray.get(bank_ref)
+                ray_get_start = time.time()
+                image_bank = ray.get(bank_ref)
+                ray_get_ms = (time.time() - ray_get_start) * 1000.0
+                ray_get_ms_total += ray_get_ms
+                bank_cache[bank_cache_key] = image_bank
                 bank_cache_misses += 1
-            image_bank = bank_cache[bank_cache_key]
+                processed_bytes = 0
+                try:
+                    processed_bytes = sum(int(payload.get("processed_bytes", 0)) for payload in image_bank.values())
+                except Exception:
+                    pass
+                print(
+                    "[ImageRefs][ray_get] "
+                    f"row={row_idx} refs={len(image_ids)} bank_cache_size={len(bank_cache)} "
+                    f"processed_bytes={processed_bytes} ray_get_ms={ray_get_ms:.2f}",
+                    flush=True,
+                )
+            else:
+                if hasattr(bank_cache, "move_to_end"):
+                    bank_cache.move_to_end(bank_cache_key)
+                image_bank = bank_cache[bank_cache_key]
             processed_inputs = []
             for image_id in image_ids:
                 if image_id not in image_bank:
@@ -1022,7 +1042,8 @@ def resolve_multi_modal_refs(
     print(
         "[ImageRefs][resolve] "
         f"rows={len(refs_col)} rows_with_images={rows_with_images} total_image_refs={total_image_refs} "
-        f"bank_cache_misses={bank_cache_misses} bank_cache_size={len(bank_cache)} device={device}",
+        f"bank_cache_misses={bank_cache_misses} ray_get_ms={ray_get_ms_total:.2f} "
+        f"bank_cache_size={len(bank_cache)} device={device}",
         flush=True,
     )
     return extract_multi_modal_inputs(row_multi_modal_inputs)
