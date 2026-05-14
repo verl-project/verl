@@ -209,6 +209,7 @@ class McoreModuleWrapperConfig:
     share_embeddings_and_output_weights: bool = False
     wrap_with_ddp: bool = True
     use_distributed_optimizer: bool = True
+    use_megatron_fsdp: bool = False
 
 
 def make_megatron_module(
@@ -306,6 +307,12 @@ def make_megatron_module(
                 ddp_config_dict = {
                     "use_distributed_optimizer": wrap_config.use_distributed_optimizer,
                 }
+                if wrap_config.use_megatron_fsdp:
+                    ddp_config_dict["use_distributed_optimizer"] = True
+                    ddp_config_dict.setdefault("check_for_nan_in_grad", True)
+                    ddp_config_dict.setdefault("use_megatron_fsdp", True)
+                    ddp_config_dict.setdefault("data_parallel_sharding_strategy", "optim_grads_params")
+                    ddp_config_dict.setdefault("overlap_grad_reduce", True)
                 # Apply any DDP config overrides
                 if override_ddp_config is not None:
                     ddp_config_dict.update(override_ddp_config)
@@ -320,6 +327,7 @@ def make_megatron_module(
                 ddp_config=ddp_config,
                 fp16=provider.fp16,
                 bf16=provider.bf16,
+                use_megatron_fsdp=wrap_config.use_megatron_fsdp,
             )
 
             # Extract TransformerConfig from the created model
@@ -375,7 +383,13 @@ def make_megatron_module(
     return model, tf_config
 
 
-ALL_MODULE_WRAPPER_CLASSNAMES = (DDP, Float16Module)
+try:
+    from megatron.core.distributed.fsdp.mcore_fsdp_adapter import FullyShardedDataParallel as _MegatronFSDP
+    from megatron.core.distributed.fsdp.src.megatron_fsdp.megatron_fsdp import MegatronFSDP
+
+    ALL_MODULE_WRAPPER_CLASSNAMES = (DDP, Float16Module, _MegatronFSDP, MegatronFSDP)
+except ImportError:
+    ALL_MODULE_WRAPPER_CLASSNAMES = (DDP, Float16Module)
 
 
 def unwrap_model(model, module_instances=ALL_MODULE_WRAPPER_CLASSNAMES):
@@ -1419,9 +1433,10 @@ def get_megatron_module_device(models: list[Any]) -> str:
         return "cpu"
 
     model_chunk = models[0]
-    if not model_chunk.buffers:
+    if not model_chunk.buffers or not isinstance(model_chunk.buffers, list):
         try:
-            return next(model_chunk.module.parameters()).device.type
+            module = getattr(model_chunk, "module", model_chunk)
+            return next(module.parameters()).device.type
         except StopIteration:
             return "cpu"
 

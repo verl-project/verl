@@ -100,9 +100,12 @@ class ServerAdapter(BaseRollout):
         # when CUDA_VISIBLE_DEVICES differs between processes (common on ROCm/AMD).
         # Must use node-local rank (not rollout_rank) so it matches vLLM worker's
         # local_rank on every node. Include replica_rank to avoid collisions when
-        # multiple replicas share a node.
+        # multiple replicas share a node, and the Ray job id so two independent
+        # verl jobs on the same host (or a new run after a crashed one with a
+        # stale socket file) cannot collide on the shared /tmp namespace.
         local_rank = self.rollout_rank % local_world_size
-        self.zmq_handle = f"ipc:///tmp/rl-colocate-zmq-replica-{self.replica_rank}-rank-{local_rank}.sock"
+        job_id = ray.get_runtime_context().get_job_id()
+        self.zmq_handle = f"ipc:///tmp/rl-colocate-zmq-{job_id}-replica-{self.replica_rank}-rank-{local_rank}.sock"
 
         self.use_shm = not is_support_ipc()
         if self.use_shm:

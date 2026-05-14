@@ -177,7 +177,9 @@ class MultiTurnSFTDataset(Dataset):
 
         # system prompt: <|im_start|>system\nYou are a helpful assistant.<|im_end|>\n
         # generation prompt: <|im_start|>assistant\n
-        self.system_prompt, self.generation_prompt = extract_system_prompt_and_generation(self.tokenizer)
+        self.system_prompt, self.generation_prompt = extract_system_prompt_and_generation(
+            self.tokenizer, **self.apply_chat_template_kwargs
+        )
 
     def __len__(self):
         return len(self.messages)

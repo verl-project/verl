@@ -221,3 +221,40 @@ jobs:
           ray stop --force
           export HCCL_OP_EXPANSION_MODE="AIV"
           bash tests/special_npu/nightly_ci_ascend/run_dapo_moonlight-16b_megatron_npu.sh
+
+  # Test gspo qwen3-30b megatron vllm
+  nightlyCI_gspo-qwen3-30b-megatron-vllm_ascend:
+    if: github.repository_owner == 'verl-project'
+    runs-on: linux-aarch64-a3-16
+    timeout-minutes: 180 # Increase this timeout value as needed
+    container:
+      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:verl-8.5.0-a3-ubuntu22.04-py3.11-latest
+      options: >-
+        --shm-size 60g
+    env:
+      HF_ENDPOINT: "https://hf-mirror.com"
+      HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+    steps:
+      - name: Check npu and CANN info
+        run: |
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+          npu-smi info
+      - name: Check initial pip list from image
+        run: |
+          pip list
+      - name: Checkout verl-project/verl repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+          clean: true
+      - name: Prepare weights
+        run: |
+          ln -s /root/.cache/models ~/models
+      - name: Preprocess geo3k dataset
+        run: |
+          python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
+      - name: Running nightlyCI_gspo-qwen3-30b-megatron-vllm_ascend
+        run: |
+          ray stop --force
+          bash tests/special_npu/nightly_ci_ascend/run_gspo_qwen3_30b_megatron_npu.sh

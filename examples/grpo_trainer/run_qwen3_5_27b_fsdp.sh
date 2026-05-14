@@ -39,6 +39,8 @@ case "${DEVICE}" in
         export HCCL_HOST_SOCKET_PORT_RANGE=60000-60050
         export HCCL_NPU_SOCKET_PORT_RANGE=61000-61050
         export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
+        n_devices_per_node=16
+        fsdp_size=16
         ;;
     *)
         echo "Unsupported DEVICE=${DEVICE}. Expected 'gpu' or 'npu'." >&2

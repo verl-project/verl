@@ -402,7 +402,6 @@ class OneStepOffRayTrainer(SeparateRayPPOTrainer):
         # sync weights from actor to rollout
         with marked_timer("sync_rollout_weights", timing_raw, color="purple"):
             self._fit_update_weights()
-            await self.llm_server_manager.clear_kv_cache()
 
         # async next generation
         if not self.is_last_step:

@@ -17,6 +17,8 @@ import dataclasses
 import json
 import logging
 import os
+import secrets
+from pathlib import Path
 from typing import Any, Optional
 
 import ray
@@ -132,9 +134,20 @@ class SGLangHttpServer:
         nnodes: int,
         cuda_visible_devices: str,
         base_gpu_id: int,
+        disaggregation_role: str = "null",
+        disaggregation_bootstrap_port: Optional[int] = None,
     ):
-        print(f"SGLang http server: {rollout_mode=}, {replica_rank=}, {node_rank=}, {nnodes=}, {cuda_visible_devices=}")
+        print(
+            f"SGLang http server: {rollout_mode=}, {replica_rank=}, {node_rank=}, "
+            f"{nnodes=}, {cuda_visible_devices=}, role={disaggregation_role}"
+        )
         os.environ[visible_devices_keyword] = cuda_visible_devices
+
+        assert disaggregation_role in ("null", "prefill", "decode"), (
+            f"disaggregation_role must be 'null'|'prefill'|'decode', got {disaggregation_role!r}"
+        )
+        self._disaggregation_role = disaggregation_role
+        self._disaggregation_bootstrap_port = disaggregation_bootstrap_port
 
         self.config: RolloutConfig = omega_conf_to_dataclass(config)
         self.model_config: HFModelConfig = omega_conf_to_dataclass(model_config, dataclass_type=HFModelConfig)
@@ -156,6 +169,10 @@ class SGLangHttpServer:
         self.base_gpu_id = base_gpu_id
         # model weights version, set by ServerAdapter when update weights.
         self.global_steps = None
+
+        # PD peer linkage populated post-launch by SGLangPDReplica.set_pd_peer.
+        self._pd_decode_peers: list[ActorHandle] = []
+        self._pd_bootstrap_host: Optional[str] = None
 
         if self.rollout_mode != RolloutMode.HYBRID and self.config.load_format == "dummy":
             logger.warning(f"rollout mode is {self.rollout_mode}, load_format is dummy, set to auto")
@@ -199,7 +216,36 @@ class SGLangHttpServer:
         assert self._server_port is not None, "http server is not launched, port is None"
         return self._server_address, self._server_port
 
+    async def set_pd_peer(self, decode_peers: list, bootstrap_host: str):
+        assert isinstance(decode_peers, list) and decode_peers
+        self._pd_decode_peers = list(decode_peers)
+        self._pd_bootstrap_host = bootstrap_host
+
+    def _prepend_cu12_lib_to_ld_library_path(self) -> None:
+        """Ray runtime_env.pip installs cu12 into a transient venv, not the usual
+        site-packages. NIXL's UCX plugin dlopens libcudart.so.12 from
+        LD_LIBRARY_PATH; wrong path ⇒ scheduler subprocess dies with SIGABRT."""
+        try:
+            import nvidia.cuda_runtime as cu12_mod
+        except ImportError as e:
+            logger.warning(
+                f"nvidia.cuda_runtime not importable: {e}. "
+                f"NIXL may fail with 'libcudart.so.12: cannot open shared object'."
+            )
+            return
+        cu12_lib = str(Path(cu12_mod.__file__).parent / "lib")
+        if not os.path.isdir(cu12_lib):
+            return
+        existing = os.environ.get("LD_LIBRARY_PATH", "")
+        if cu12_lib in existing.split(":"):
+            return
+        os.environ["LD_LIBRARY_PATH"] = f"{cu12_lib}:{existing}" if existing else cu12_lib
+        logger.info(f"Prepended {cu12_lib} to LD_LIBRARY_PATH for NIXL/UCX dlopen.")
+
     async def launch_server(self, master_address: str = None, master_port: int = None):
+        if self._disaggregation_role != "null":
+            self._prepend_cu12_lib_to_ld_library_path()
+
         if self.nnodes > 1:
             if self.node_rank != 0:
                 assert master_address and master_port, "non-master node should provide master address and port"
@@ -290,11 +336,25 @@ class SGLangHttpServer:
             )
             args["enable_weights_cpu_backup"] = enable_weights_cpu_backup
 
+        if self._disaggregation_role != "null":
+            disagg = self.config.disaggregation
+            args["disaggregation_mode"] = self._disaggregation_role
+            args["disaggregation_transfer_backend"] = disagg.transfer_backend
+            # Bind HTTP + bootstrap to the routable node IP; default 127.0.0.1
+            # makes decode-to-prefill bootstrap connection fail across nodes.
+            args["host"] = self._server_address
+            if self._disaggregation_bootstrap_port is not None:
+                args["disaggregation_bootstrap_port"] = self._disaggregation_bootstrap_port
+            if disagg.decode_tensor_model_parallel_size is not None:
+                args["disaggregation_decode_tp"] = disagg.decode_tensor_model_parallel_size
+            if disagg.ib_device is not None:
+                args["disaggregation_ib_device"] = disagg.ib_device
+
         if self.config.enable_rollout_routing_replay:
             args.update({"enable_return_routed_experts": True})
 
         # mtp
-        if self.config.mtp.enable and self.config.mtp.enable_rollout:
+        if self.config.mtp is not None and self.config.mtp.enable and self.config.mtp.enable_rollout:
             # Enable weights CPU backup for sglang >= 0.5.6
             if sglang.__version__ < "0.5.6":
                 raise ValueError(f"sglang version {sglang.__version__} is not supported for MTP rollout")
@@ -418,6 +478,21 @@ class SGLangHttpServer:
         if self.node_rank == 0:
             await self.tokenizer_manager.flush_cache()
 
+    async def release_kv_cache(self):
+        """Release only kv_cache GPU memory, keeping model weights intact."""
+        if self.node_rank != 0 or not self.config.free_cache_engine:
+            return
+        obj = ReleaseMemoryOccupationReqInput(tags=["kv_cache"])
+        await self.tokenizer_manager.release_memory_occupation(obj, None)
+
+    async def resume_kv_cache(self):
+        """Restore kv_cache GPU memory after a weight sync. Counterpart to release_kv_cache()."""
+        if self.node_rank != 0:
+            return
+        obj = ResumeMemoryOccupationReqInput(tags=["kv_cache"])
+        await self.tokenizer_manager.resume_memory_occupation(obj, None)
+        await self.tokenizer_manager.flush_cache()
+
     async def generate(
         self,
         prompt_ids: torch.Tensor,
@@ -425,8 +500,40 @@ class SGLangHttpServer:
         request_id: str,
         image_data: Optional[list[Any]] = None,
         video_data: Optional[list[Any]] = None,
+        bootstrap_host: Optional[str] = None,
+        bootstrap_port: Optional[int] = None,
+        bootstrap_room: Optional[int] = None,
     ) -> TokenOutput:
-        """Generate sequence with token-in-token-out."""
+        # PD top-level dispatch: prefill mints a bootstrap_room and fans out
+        # paired local-prefill + remote-decode calls; decode returns the tokens
+        # (prefill only materialises KV and pushes via NIXL). Random peer
+        # choice avoids systematic skew from heavy-tailed RL prompt lengths.
+        if self._disaggregation_role == "prefill" and self._pd_decode_peers and bootstrap_room is None:
+            room = secrets.randbits(63)
+            decode_peer = self._pd_decode_peers[secrets.randbelow(len(self._pd_decode_peers))]
+            prefill_coro = self.generate(
+                prompt_ids,
+                dict(sampling_params),
+                f"{request_id}_P",
+                image_data=image_data,
+                video_data=video_data,
+                bootstrap_host=self._pd_bootstrap_host,
+                bootstrap_port=self._disaggregation_bootstrap_port,
+                bootstrap_room=room,
+            )
+            decode_coro = decode_peer.generate.remote(
+                prompt_ids,
+                dict(sampling_params),
+                f"{request_id}_D",
+                image_data=image_data,
+                video_data=video_data,
+                bootstrap_host=self._pd_bootstrap_host,
+                bootstrap_port=self._disaggregation_bootstrap_port,
+                bootstrap_room=room,
+            )
+            _, decode_output = await asyncio.gather(prefill_coro, decode_coro)
+            return decode_output
+
         # TODO(@wuxibin): switch to `/generate` http endpoint once multi-modal support ready.
         max_possible_tokens = self.config.max_model_len - len(prompt_ids) - 1
 
@@ -482,6 +589,12 @@ class SGLangHttpServer:
         if self.config.enable_rollout_routing_replay:
             request.update({"return_routed_experts": True})
 
+        # SGLang's scheduler rejects disagg-mode requests without bootstrap_room.
+        if bootstrap_room is not None:
+            request["bootstrap_host"] = bootstrap_host
+            request["bootstrap_port"] = bootstrap_port
+            request["bootstrap_room"] = bootstrap_room
+
         generate_request = GenerateReqInput(**request)
 
         # Add lora request
@@ -501,10 +614,12 @@ class SGLangHttpServer:
                 # SGLang may return mismatched lengths (e.g. max_new_tokens=0
                 # produces a phantom logprob entry with empty output_ids), or
                 # an abort may leave an empty logprob payload.
-                assert not token_ids, (
-                    f"output_token_logprobs length ({len(output_token_logprobs)}) != "
-                    f"output_ids length ({len(token_ids)}) for request {request_id}"
-                )
+                if len(output_token_logprobs) != len(token_ids):
+                    logger.error(
+                        f"output_token_logprobs length ({len(output_token_logprobs)}) != "
+                        f"output_ids length ({len(token_ids)}) for request {request_id}"
+                    )
+                token_ids = []
                 log_probs = []
         else:
             token_ids = output["output_ids"]
@@ -568,7 +683,10 @@ class SGLangHttpServer:
             profile_args = build_sglang_profiler_args(
                 self.profiler_controller.config, self.profiler_controller.tool_config, self.replica_rank
             )
-            await self.tokenizer_manager.start_profile(**profile_args)
+            tokenizer_manager = getattr(self, "tokenizer_manager", None)
+            if tokenizer_manager is None:
+                return
+            await tokenizer_manager.start_profile(**profile_args)
 
     async def stop_profile(self):
         if (
@@ -576,7 +694,10 @@ class SGLangHttpServer:
             and self.profiler_controller.check_this_rank()
             and self.profiler_controller.is_discrete_mode()
         ):
-            await self.tokenizer_manager.stop_profile()
+            tokenizer_manager = getattr(self, "tokenizer_manager", None)
+            if tokenizer_manager is None:
+                return
+            await tokenizer_manager.stop_profile()
 
 
 class SGLangReplica(RolloutReplica):

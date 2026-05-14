@@ -112,7 +112,7 @@ jobs:
         run: |
           pip install -r requirements-npu.txt
           pip install --no-deps -e .
-          pip install veomni==0.1.9a4 --ignore-requires-python --no-deps --index-url https://pypi.org/simple/
+          pip install veomni==0.1.9a5 --ignore-requires-python --no-deps --index-url https://pypi.org/simple/
           pip install transformers==4.57.3
       - name: Check final pip list
         run: |

@@ -29,6 +29,7 @@ from tensordict import TensorDict
 from torch.distributed.checkpoint.state_dict import get_model_state_dict
 from torch.distributed.tensor import DTensor
 from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
@@ -107,12 +108,7 @@ class TorchTitanEngine(BaseEngine):
 
         # Get ModelSpec from model registry
         model_module = importlib.import_module(f"torchtitan.models.{torchtitan_name}")
-        model_spec = model_module.model_registry(torchtitan_flavor)
-
-        # Override attn_backend on the model config if needed
-        attn_type = self.engine_config.attn_type
-        if hasattr(model_spec.model, "layer") and hasattr(model_spec.model.layer, "attention"):
-            model_spec.model.layer.attention.attn_backend = attn_type
+        model_spec = model_module.model_registry(torchtitan_flavor, attn_backend=self.engine_config.attn_type)
 
         optimizer = OptimizersContainer.Config(
             name=self.optimizer_config.name,
@@ -141,7 +137,6 @@ class TorchTitanEngine(BaseEngine):
             pipeline_parallel_degree=self.engine_config.pipeline_parallel_size,
             context_parallel_degree=self.engine_config.context_parallel_size,
             expert_parallel_degree=self.engine_config.expert_parallel_size,
-            expert_tensor_parallel_degree=self.engine_config.expert_tensor_parallel_size,
         )
         checkpoint = CheckpointManager.Config(
             enable=True,
@@ -170,6 +165,9 @@ class TorchTitanEngine(BaseEngine):
             training=training,
             # Use a no-op dataloader since verl has its own data loading
             dataloader=NoOpDataLoader.Config(),
+            # Provide a concrete loss so Trainer.__init__ can build it;
+            # verl uses its own loss function and ignores this one.
+            loss=CrossEntropyLoss.Config(),
         )
         self.trainer = Trainer(self.config)
 
@@ -266,7 +264,6 @@ class TorchTitanEngine(BaseEngine):
             tp=self.engine_config.tensor_parallel_size,
             pp=self.engine_config.pipeline_parallel_size,
             ep=self.engine_config.expert_parallel_size,
-            etp=self.engine_config.expert_tensor_parallel_size,
             world_size=world_size,
         )
         self.device_mesh = self.parallel_dims.build_mesh()
@@ -366,8 +363,7 @@ class TorchTitanEngine(BaseEngine):
             # Non-PP forward
             assert len(model_parts) == 1
             with self.trainer.train_context():
-                with self.trainer.maybe_enable_amp:
-                    pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+                pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
 
         if isinstance(pred, DTensor):
             pred = pred.full_tensor()
@@ -596,7 +592,7 @@ class TorchTitanEngineWithLMHead(TorchTitanEngine):
                 position_ids = position_ids.values().unsqueeze(0)
 
             labels = torch.roll(input_ids, shifts=-1, dims=1)
-            attn_type = self.trainer.model_config.layer.attention.attn_backend
+            attn_type = self.engine_config.attn_type
             attention_mask = get_attention_masks(
                 input_batch=input_ids,
                 positions=position_ids,

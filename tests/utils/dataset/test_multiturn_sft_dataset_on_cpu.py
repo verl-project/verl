@@ -236,6 +236,78 @@ def test_multiturn_sft_dataset(model_path: str, ignore_input_ids_mismatch: bool)
     print("Starting test...")
 
 
+@pytest.mark.parametrize(
+    "model_path, apply_chat_template_kwargs",
+    [
+        ("openai/gpt-oss-20b", {"model_identity": "You are a helpful assistant."}),
+    ],
+)
+def test_multiturn_sft_dataset_with_chat_template_kwargs(model_path: str, apply_chat_template_kwargs: dict):
+    """Test that custom apply_chat_template_kwargs are forwarded to system prompt
+    measurement so the loss mask is not shifted when kwargs change tokenization.
+
+    Some chat templates embed configurable fields (e.g. model_identity) in the
+    system prompt. If these kwargs are not forwarded to system prompt length
+    measurement, the per-turn strip length is wrong, causing role markers to be
+    removed and the loss mask to shift.
+    """
+    test_data = {
+        "messages": [
+            [
+                {"role": "user", "content": "What is 2+2?"},
+                {"role": "assistant", "content": "2+2 equals 4."},
+            ],
+            [
+                {"role": "user", "content": "Tell me a joke."},
+                {"role": "assistant", "content": "Why did the chicken cross the road?"},
+            ],
+        ]
+    }
+
+    os.makedirs("test_data", exist_ok=True)
+    test_file = "test_data/test_kwargs.parquet"
+    df = pd.DataFrame(test_data)
+    df.to_parquet(test_file)
+
+    tokenizer = hf_tokenizer(model_path)
+
+    config = {
+        "max_length": 1024,
+        "truncation": "error",
+        "pad_mode": "no_padding",
+        "apply_chat_template_kwargs": apply_chat_template_kwargs,
+    }
+    dataset = MultiTurnSFTDataset(parquet_files=test_file, tokenizer=tokenizer, processor=None, config=config)
+
+    for idx in range(len(dataset)):
+        item = dataset[idx]
+        input_ids = item["input_ids"]
+        loss_mask = item["loss_mask"]
+
+        assistant_text = tokenizer.decode(input_ids[loss_mask == 1])
+        non_assistant_text = tokenizer.decode(input_ids[loss_mask == 0])
+
+        for msg in test_data["messages"][idx]:
+            if msg["role"] == "assistant":
+                assert msg["content"] in assistant_text, (
+                    f"Assistant message '{msg['content']}' not found in masked text. "
+                    f"This may indicate system prompt length mismatch when using "
+                    f"custom chat_template_kwargs."
+                )
+                assert msg["content"] not in non_assistant_text, (
+                    f"Assistant message '{msg['content']}' found in non-assistant text"
+                )
+            elif msg["role"] in ["system", "user"]:
+                assert msg["content"] in non_assistant_text, (
+                    f"{msg['role'].title()} message '{msg['content']}' not found in non-assistant text"
+                )
+                assert msg["content"] not in assistant_text, (
+                    f"{msg['role'].title()} message '{msg['content']}' found in assistant text"
+                )
+
+    print("All chat_template_kwargs tests passed!")
+
+
 def generate_image(description: str, size: str = "256x256"):
     """Generate a simple image based on description.
 

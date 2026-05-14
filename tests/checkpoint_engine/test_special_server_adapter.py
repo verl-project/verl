@@ -21,12 +21,13 @@ from transformers import PreTrainedTokenizer
 
 from tests.checkpoint_engine.test_utils import create_trainer_worker_group
 from verl.checkpoint_engine import CheckpointEngineManager
+from verl.experimental.fully_async_policy.fully_async_rollouter import FullyAsyncLLMServerClient
 from verl.single_controller.ray import (
     RayResourcePool,
 )
 from verl.utils.config import omega_conf_to_dataclass
 from verl.workers.config import CheckpointEngineConfig, HFModelConfig
-from verl.workers.rollout.llm_server import FullyLLMServerClient, LLMServerClient, LLMServerManager
+from verl.workers.rollout.llm_server import LLMServerClient, LLMServerManager
 
 
 @pytest.fixture
@@ -123,7 +124,7 @@ async def _run_server_manager_without_resume(
 async def _run_server_manager_with_resume(
     initial_steps: int,
     train_steps: int,
-    server_manager: FullyLLMServerClient,
+    server_manager: FullyAsyncLLMServerClient,
     checkpoint_manager: CheckpointEngineManager,
     prompts: list[list[dict]],
     tokenizer: PreTrainedTokenizer,
@@ -231,7 +232,7 @@ async def test_server_adapter(init_config):
     await _run_server_manager_with_resume(
         initial_steps=4,
         train_steps=3,
-        server_manager=llm_server_manager.get_client(fully_async=True),
+        server_manager=llm_server_manager.get_client(client_cls=FullyAsyncLLMServerClient),
         checkpoint_manager=checkpoint_manager,
         prompts=prompts,
         tokenizer=model_config.tokenizer,

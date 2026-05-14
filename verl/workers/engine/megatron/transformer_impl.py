@@ -274,6 +274,7 @@ class MegatronEngine(BaseEngine):
             is_value_model=self.is_value_model,
             wrap_with_ddp=wrap_with_ddp,
             use_distributed_optimizer=self.engine_config.use_distributed_optimizer,
+            use_megatron_fsdp=self.engine_config.use_megatron_fsdp,
         )
         if self.is_value_model:
             self.model_config.hf_config.tie_word_embeddings = False
@@ -427,6 +428,7 @@ class MegatronEngine(BaseEngine):
             provider=self.provider,
             peft_cls=self.peft_cls,
             use_dist_checkpointing=self.engine_config.use_dist_checkpointing,
+            use_megatron_fsdp=self.engine_config.use_megatron_fsdp,
         )
 
         self.to(
