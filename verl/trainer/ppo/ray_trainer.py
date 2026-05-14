@@ -319,8 +319,7 @@ class RayPPOTrainer:
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
 
         self.checkpoint_manager = None
-        self._dump_executor = ThreadPoolExecutor(max_workers=1)
-        self._dump_futures = []  # track pending async dump tasks
+        self._init_dump_executor()
 
     def _create_dataloader(self, train_dataset, val_dataset, collate_fn, train_sampler: Optional[Sampler]):
         """
@@ -452,6 +451,11 @@ class RayPPOTrainer:
             else:
                 still_pending.append(f)
         self._dump_futures = still_pending
+
+    def _init_dump_executor(self):
+        """Create or recreate the dump executor and futures list."""
+        self._dump_executor = ThreadPoolExecutor(max_workers=1)
+        self._dump_futures = []
 
     def _shutdown_dump_executor(self):
         """Drain pending dump futures and shut down the executor."""
@@ -1312,8 +1316,7 @@ class RayPPOTrainer:
         The light-weight advantage computation is done on the driver process.
         """
         if self._dump_executor._shutdown:
-            self._dump_executor = ThreadPoolExecutor(max_workers=1)
-            self._dump_futures = []
+            self._init_dump_executor()
 
         from omegaconf import OmegaConf
 
