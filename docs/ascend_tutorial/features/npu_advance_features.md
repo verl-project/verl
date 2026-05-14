@@ -1,6 +1,6 @@
 # NPU 高级特性指南
 
-> 本文档整理自 [verl-project/verl 昇腾后端特性指南](https://github.com/verl-project/verl/blob/main/docs/ascend_tutorial/features/ascend_backend_features.md)，提取昇腾 NPU 在 verl 生态中的高级特性与优化能力，供开发者参考。
+> 本文档介绍昇腾 NPU 在 verl 生态中的高级特性与优化能力，供开发者参考。
 >
 Last updated: 05/13/2026.
 
@@ -31,29 +31,6 @@ Last updated: 05/13/2026.
 
 昇腾通过 **vllm-ascend 插件** 支持 vLLM 推理后端。该插件遵循 [RFC](https://github.com/vllm-project/vllm/issues/11162)，提供可插拔接口将 Ascend NPU 与 vLLM 解耦。
 
-#### 高级参数配置
-
-| vLLM 参数 | verl 对应通用参数 | 功能说明 |
-|:---|:---|:---|
-| `enable_chunked_prefill` | `actor_rollout_ref.rollout.enable_chunked_prefill` | **分块预填充** — 将大预填充分割为更小的块，并与解码请求一起批处理，提升吞吐 |
-| `enable_prefix_caching` | `actor_rollout_ref.rollout.enable_prefix_caching` | **前缀缓存** — 自动缓存共享前缀，减少重复计算，加速多轮对话场景 |
-| `quantization` | `actor_rollout_ref.rollout.quantization` | **量化支持** — 支持多种量化方法，降低显存占用与提升推理速度 |
-| `free_cache_engine` | `actor_rollout_ref.rollout.free_cache_engine` | **KV Cache 动态释放** — 在生成阶段后卸载 KV Cache，默认 `True`，节省显存 |
-| `enforce_eager` | `actor_rollout_ref.rollout.enforce_eager` | **执行模式切换** — 强制使用 PyTorch Eager 模式（默认图模式），verl 默认 `False` |
-| `max_num_batched_tokens` | `actor_rollout_ref.rollout.max_num_batched_tokens` | **批处理 Token 上限** — 单次 batch 可处理的最大总 Token 数，用于控制 batch size |
-| `max_num_seqs` | `actor_rollout_ref.rollout.max_num_seqs` | **最大并发序列数** — 同时运行的最大请求数量，控制并发度 |
-| `skip_tokenizer_init` | `actor_rollout_ref.rollout.skip_tokenizer_init` | **跳过分词器初始化** — 直接将 `input_ids` 传入推理请求，减少初始化开销 |
-| `trust_remote_code` | `actor_rollout_ref.model.trust_remote_code` | **远程代码信任** — 允许加载 Hub 上的自定义模型定义 |
-
-#### 并行配置
-
-| vLLM 参数 | verl 对应通用参数 | 功能说明 |
-|:---|:---|:---|
-| `tp_size` | `actor_rollout_ref.rollout.tensor_model_parallel_size * data_parallel_size` | **张量并行 (TP)** 并行度 |
-| `dp_size` | `actor_rollout_ref.rollout.data_parallel_size` | **数据并行 (DP)** 并行度 |
-| `ep_size` | `actor_rollout_ref.rollout.expert_parallel_size` | **专家并行 (EP)** 并行度 |
-| `gpu_memory_utilization` | `actor_rollout_ref.rollout.gpu_memory_utilization` | **显存利用率控制** — 取值 0.0~1.0，建议 0.8 预留缓冲 |
-
 ---
 
 ### 1.2 SGLang 推理后端
@@ -69,22 +46,9 @@ Last updated: 05/13/2026.
 
 | SGLang 参数 | verl 对应通用参数 | 功能说明 |
 |:---|:---|:---|
-| `enable_memory_saver` | 无（verl 默认 `True`） | **内存节省模式** — 支持 `release_memory_occupation` 和 `resume_memory_occupation` 动态释放/恢复显存 |
 | `attention_backend` | `actor_rollout_ref.rollout.engine_kwargs.sglang.attention_backend` | **注意力后端选择** — NPU 上应设置为 `ascend` 以调用昇腾优化内核 |
-| `disable_cuda_graph` | `actor_rollout_ref.rollout.enforce_eager` | **禁用图模式** — verl 默认 `False` |
 | `quantization` | `actor_rollout_ref.rollout.quantization` | **量化支持** — 支持模型量化加载与推理 |
-| `skip_tokenizer_init` | `actor_rollout_ref.rollout.skip_tokenizer_init` | **跳过分词器初始化** — 直接传入 `input_ids` |
-| `skip_server_warmup` | 无（verl 默认 `True`） | **跳过预热** — 加速服务启动 |
-| `max_running_requests` | `actor_rollout_ref.rollout.max_num_seqs` | **最大并发请求数** |
-| `mem_fraction_static` | `actor_rollout_ref.rollout.gpu_memory_utilization` | **静态内存分配比例** — 控制模型权重与 KV Cache 内存池的分配比例 |
 
-#### 资源调度参数
-
-| SGLang 参数 | 功能说明 |
-|:---|:---|
-| `base_gpu_id` | 每个实例计算卡资源的初始分配 ID（自动计算） |
-| `gpu_id_step` | 连续计算卡 ID 之间的差值（默认 1） |
-| `dist_init_addr` | 分布式后端初始化主机地址（自动计算） |
 
 > 更多 SGLang NPU 特性参数请参考 [sglang 社区 NPU 特性支持文档](https://docs.sglang.io/platforms/ascend_npu_support_features.html)
 
@@ -95,28 +59,6 @@ Last updated: 05/13/2026.
 ### 2.1 FSDP 训练后端
 
 昇腾通过 `torch_npu` 提供 FSDP 相关支持能力。
-
-#### FSDP1 专属高级特性
-
-| verl 参数 | 功能说明 |
-|:---|:---|
-| `actor_rollout_ref.actor.fsdp_config.forward_prefetch` | **前向预取** — 在当前前向计算完成前预取下一次前向的 all-gather，减少通信等待，默认 `False` |
-| `actor_rollout_ref.actor.fsdp_config.use_orig_params` | **原始参数初始化** — FSDP 使用 module 的原始参数进行初始化，默认 `False` |
-
-#### FSDP1/FSDP2 通用高级特性
-
-| verl 参数 | 功能说明 |
-|:---|:---|
-| `actor_rollout_ref.actor.fsdp_config.param_offload` | **参数 CPU 卸载** — 将模型权重卸载到 CPU，降低显存占用，默认 `False` |
-| `actor_rollout_ref.actor.fsdp_config.optimizer_offload` | **优化器状态 CPU 卸载** — 将优化器状态卸载到 CPU，默认 `False` |
-| `actor_rollout_ref.actor.fsdp_config.reshard_after_forward` | **动态重分片** — 前向计算后重新分片参数，反向时重新全收集，平衡内存与通信，默认 `True` |
-| `actor_rollout_ref.actor.fsdp_config.fsdp_size` | **FSDP 分片组大小** — 每个 FSDP 分片组中的 NPU 数量，`-1` 表示自动，默认 `-1` |
-| `actor_rollout_ref.actor.ulysses_sequence_parallel_size` | **Ulysses 序列并行** — 序列并行大小，用于长序列训练场景 |
-| `actor_rollout_ref.actor.entropy_from_logits_with_chunking` | **分块熵计算** — 通过分块计算熵值以降低显存峰值，默认 `False` |
-| `actor_rollout_ref.actor.fsdp_config.entropy_checkpointing` | **熵计算重计算** — 训练时对熵计算启用重计算 (recompute)，降低显存峰值，默认 `False` |
-| `actor_rollout_ref.actor.fsdp_config.forward_only` | **纯前向模式** — 仅进行前向计算（适用于推理评估场景），默认 `False` |
-
----
 
 ### 2.2 Megatron 训练后端
 
@@ -155,8 +97,6 @@ repatch
 
 | verl 参数 | 功能说明 |
 |:---|:---|
-| `actor_rollout_ref.actor.megatron.optimizer_offload` | **优化器 CPU 卸载** — 将优化器状态卸载到 CPU，默认 `False` |
-| `actor_rollout_ref.actor.megatron.param_offload` | **参数 CPU 卸载** — 将模型权重卸载到 CPU，默认 `False` |
 | `actor_rollout_ref.actor.megatron.override_transformer_config.deallocate_pipeline_outputs` | **流水线输出释放** — 张量发送到下一 PP stage 后释放输出数据，降低显存峰值，默认 `False` |
 | `actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity` | **重计算粒度控制** — 可选 `full` / `selective` / `none`。`full` 重算整个 Transformer 层，`selective` 仅重算注意力核心部分，默认 `none` |
 | `actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method` | **重计算方法** — 需 `recompute_granularity=full`，可选 `uniform` / `block`，默认 `None` |
@@ -179,16 +119,6 @@ repatch
 | `actor_rollout_ref.actor.megatron.override_transformer_config.account_for_embedding_in_pipeline_split` | **Embedding 层流水线划分** — 将输入 embedding 层视为标准 Transformer 层参与划分，默认 `False` |
 | `actor_rollout_ref.actor.megatron.override_transformer_config.num_layers_in_first_pipeline_stage` | **首 stage 层数** — 指定第一个 pipeline stage 的层数，默认 `none` |
 | `actor_rollout_ref.actor.megatron.override_transformer_config.num_layers_in_last_pipeline_stage` | **末 stage 层数** — 指定最后一个 pipeline stage 的层数，默认 `none` |
-
-##### 并行配置
-
-| verl 参数 | 功能说明 |
-|:---|:---|
-| `actor_rollout_ref.actor.megatron.tensor_model_parallel_size` | **张量并行 (TP)** 大小，默认 `1` |
-| `actor_rollout_ref.actor.megatron.pipeline_model_parallel_size` | **流水线并行 (PP)** 大小，默认 `1` |
-| `actor_rollout_ref.actor.megatron.expert_model_parallel_size` | **专家并行 (EP)** 大小，默认 `1` |
-| `actor_rollout_ref.actor.megatron.expert_tensor_parallel_size` | **TP 拓展 EP** 大小，默认 `null` |
-| `actor_rollout_ref.actor.context_parallel_size` | **上下文/序列并行** 大小，默认 `False` |
 
 ##### 权重管理
 
@@ -235,8 +165,8 @@ repatch
 | 张量并行 (TP) | ✅ | ✅ | — | ✅ | 层内张量切分 |
 | 流水线并行 (PP) | — | — | — | ✅ | 层间流水线切分 |
 | 专家并行 (EP) | ✅ | ✅ | — | ✅ | MoE 专家维度并行 |
-| 序列并行 (SP/Ulysses) | — | — | ✅ | ✅ | 序列维度切分，支持长序列 |
-| 上下文并行 (CP) | — | — | — | ✅ | 上下文并行处理 |
+| 序列并行 (SP/Ulysses) | ✅ | ✅ | ✅ | ✅ | 序列维度切分，支持长序列 |
+| 上下文并行 (CP) | ✅ | — | — | ✅ | 上下文并行处理 |
 
 ---
 
