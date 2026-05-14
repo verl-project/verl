@@ -196,6 +196,35 @@ def test_resolve_multi_modal_refs_uses_placeholder_position_ids_without_image_gr
     assert micro_batch["position_ids"][0].shape == (4, 3)
 
 
+def test_resolve_multi_modal_refs_handles_unpadded_input_with_padded_attention_mask():
+    image_bank = {
+        "sha1:image": {
+            "inputs": {
+                "pixel_values": torch.ones(1, 3, 2, 2),
+                "image_grid_thw": torch.tensor([[1, 2, 2]], dtype=torch.long),
+                "images_seqlens": torch.tensor([4], dtype=torch.long),
+            }
+        }
+    }
+    micro_batch = {
+        "input_ids": torch.nested.as_nested_tensor([torch.tensor([1, 42, 2])], layout=torch.jagged),
+        "attention_mask": torch.tensor([[0, 0, 1, 1, 1]], dtype=torch.long),
+        "position_ids": torch.arange(3).unsqueeze(0),
+        MULTI_MODAL_REFS_KEY: _object_array([{"image_ids": ["sha1:image"], "video_ids": []}]),
+        IMAGE_BANK_REF_KEY: _object_array(["bank-ref"]),
+    }
+
+    resolved = resolve_multi_modal_refs(
+        micro_batch,
+        tokenizer=None,
+        processor=StrictDummyProcessor(),
+        bank_cache={"bank-ref": image_bank},
+    )
+
+    assert resolved["pixel_values"].shape == (1, 3, 2, 2)
+    assert micro_batch["position_ids"][0].shape == (4, 3)
+
+
 def test_agent_loop_position_ids_skip_rope_without_image_grid():
     worker = object.__new__(AgentLoopWorker)
     worker.processor = StrictDummyProcessor()

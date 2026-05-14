@@ -867,8 +867,8 @@ def _compute_vlm_position_ids(
     )
     vision_position_ids = vision_position_ids.transpose(0, 1)
     valid_mask = attention_mask[0].bool()
-    text_position_ids = torch.ones((1, input_ids.shape[-1]), dtype=torch.long)
-    text_position_ids[0, valid_mask] = torch.arange(valid_mask.sum().item())
+    text_position_ids = torch.ones((1, input_ids.shape[-1]), dtype=torch.long, device=input_ids.device)
+    text_position_ids[0, valid_mask] = torch.arange(valid_mask.sum().item(), device=input_ids.device)
     text_position_ids = text_position_ids.unsqueeze(0)
     return torch.cat((text_position_ids, vision_position_ids), dim=1)
 
@@ -928,12 +928,20 @@ def resolve_multi_modal_refs(
         if row_attention is None:
             row_attention_mask = torch.ones_like(row_input_ids_2d)
         else:
-            row_attention_mask = torch.tensor(_tensor_row_to_token_list(row_attention), dtype=torch.long).unsqueeze(0)
-        if row_attention_mask.shape != row_input_ids_2d.shape:
-            raise ValueError(
-                f"attention_mask shape {tuple(row_attention_mask.shape)} != "
-                f"input_ids shape {tuple(row_input_ids_2d.shape)} for multi_modal_refs row {row_idx}"
-            )
+            attention_tokens = _tensor_row_to_token_list(row_attention)
+            if len(attention_tokens) == len(token_ids):
+                row_attention_mask = torch.tensor(attention_tokens, dtype=torch.long).unsqueeze(0)
+            elif sum(int(x) for x in attention_tokens) == len(token_ids):
+                # ``left_right_2_no_padding`` strips input_ids/position_ids into jagged rows
+                # but keeps the original padded attention_mask for later padding recovery.
+                # In that state the unpadded input row is already all valid tokens.
+                row_attention_mask = torch.ones_like(row_input_ids_2d)
+            else:
+                raise ValueError(
+                    f"attention_mask length {len(attention_tokens)} with valid tokens "
+                    f"{sum(int(x) for x in attention_tokens)} != input_ids length {len(token_ids)} "
+                    f"for multi_modal_refs row {row_idx}"
+                )
 
         mm_cpu: dict[str, Any] = {}
         if image_ids:
