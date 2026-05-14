@@ -30,7 +30,7 @@ requires-python = ">=3.10"
 # Note: While the formatter will attempt to format lines such that they remain within the line-length,
 # it isn't a hard upper bound, and formatted lines may exceed the line-length.
 line-length = 120
-exclude = ["scripts/legacy_model_merger.py"]
+exclude = ["tests/workers/rollout/test_sglang_async_rollout_sf_tools.py", "scripts/legacy_model_merger.py"]
 
 [tool.ruff.lint]
 isort = {known-first-party = ["verl"]}
@@ -66,28 +66,6 @@ ignore = [
 ]
 
 # -------------------------------
-# tool.mypy - typechecking config
-# -------------------------------
-[tool.mypy]
-pretty            = true
-ignore_missing_imports = true
-explicit_package_bases = true
-follow_imports = "skip"
-
-# Blanket silence
-ignore_errors = true
-
-[[tool.mypy.overrides]]
-module = [
-"verl.trainer.config.algorithm",
-"verl.trainer.ppo.core_algos",
-"verl.trainer.ppo.reward",
-"verl.workers.reward_manager",
-"verl.workers.reward_manager.*",
-]
-ignore_errors = false
-
-# -------------------------------
 # tool.setuptools - Additional config
 # -------------------------------
 [tool.setuptools]
@@ -110,5 +88,4 @@ verl = [
   "version/*",
   "trainer/config/*.yaml",
   "trainer/config/*/*.yaml",
-  "experimental/*/config/*.yaml",
 ]

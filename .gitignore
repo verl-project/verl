@@ -1,3 +1,4 @@
+
 **/*.pt
 **/checkpoints
 **/wget-log
@@ -7,8 +8,6 @@
 **/*.tar.gz
 **/playground
 **/wandb
-
-/pyrightconfig.json
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -22,7 +21,7 @@ tensorflow/my_graph/*
 
 # Distribution / packaging
 .Python
-# env/
+env/
 build/
 develop-eggs/
 dist/
@@ -59,8 +58,6 @@ nosetests.xml
 coverage.xml
 *,cover
 .hypothesis/
-pytest.ini
-output.txt
 
 # Translations
 *.mo
@@ -99,7 +96,6 @@ celerybeat-schedule
 venv/
 .venv/
 ENV/
-!**/workers/env/
 
 # Spyder project settings
 .spyderproject
@@ -115,9 +111,6 @@ ENV/
 
 # vim
 *.swp
-
-# emacs
-*~
 
 # ckpt
 *.lock
