@@ -149,7 +149,12 @@ class SGLangHttpServer:
         assert self._server_port is not None, "http server is not launched, port is None"
         return self._server_address, self._server_port
 
-    async def launch_server(self, master_address: str = None, master_port: int = None):
+    async def launch_server(
+        self,
+        master_address: str = None,
+        master_port: int = None,
+        decoupled_spec_config: Optional[dict[str, Any]] = None,
+    ):
         if self.nnodes > 1:
             if self.node_rank != 0:
                 assert master_address and master_port, "non-master node should provide master address and port"
@@ -158,7 +163,7 @@ class SGLangHttpServer:
             else:
                 self._master_sock.close()
 
-        engine_kwargs = self.config.get("engine_kwargs", {}).get("sglang", {}) or {}
+        engine_kwargs = dict(self.config.get("engine_kwargs", {}).get("sglang", {}) or {})
         attention_backend = engine_kwargs.pop("attention_backend", None)
         quantization = self.config.get("quantization", None)
         if quantization is not None:
@@ -247,6 +252,21 @@ class SGLangHttpServer:
 
             args["enable_weights_cpu_backup"] = True
             args["enable_draft_weights_cpu_backup"] = True
+
+        if decoupled_spec_config is not None:
+            algorithm = decoupled_spec_config["algorithm"]
+            speculative_num_steps = int(decoupled_spec_config["speculative_num_steps"])
+            args.update(
+                {
+                    "speculative_algorithm": algorithm,
+                    "speculative_num_steps": speculative_num_steps,
+                    "speculative_num_draft_tokens": speculative_num_steps + 1,
+                    "speculative_eagle_topk": 1,
+                    "decoupled_spec_bind_endpoint": decoupled_spec_config["bind_endpoint"],
+                    "decoupled_spec_connect_endpoints": list(decoupled_spec_config["connect_endpoints"]),
+                    "decoupled_spec_rank": int(decoupled_spec_config["rank"]),
+                }
+            )
 
         # NOTE: We can't directly call SGLang's launch_server since it's not an async function.
         # https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/entrypoints/http_server.py
@@ -463,12 +483,19 @@ class SGLangReplica(RolloutReplica):
     ):
         super().__init__(replica_rank, config, model_config, gpus_per_node, is_reward_model)
         self.server_class = ray.remote(SGLangHttpServer)
+        self.decoupled_spec_config: Optional[dict[str, Any]] = None
+        self.server_name_prefix = "sglang_server_reward" if is_reward_model else "sglang_server"
 
-    async def launch_servers(self):
-        """Launch http server in each node."""
+    def set_decoupled_spec_config(self, decoupled_spec_config: Optional[dict[str, Any]]):
+        self.decoupled_spec_config = decoupled_spec_config
+
+    async def prepare_server_actors(self):
+        """Create SGLang server actors in each node without launching SGLang."""
         assert len(self.workers) == self.world_size, (
             f"worker number {len(self.workers)} not equal to world size {self.world_size}"
         )
+        if self.servers:
+            return None
 
         # get (node_id, CUDA_VISIBLE_DEVICES) of all workers
         worker_infos = await asyncio.gather(
@@ -481,6 +508,7 @@ class SGLangReplica(RolloutReplica):
         )
         worker_cuda_visible_devices = [worker_info[1] for worker_info in worker_infos]
         worker_node_ids = [worker_info[0] for worker_info in worker_infos]
+        entry_runtime_info = {"node_id": worker_node_ids[0]}
         base_gpu_id = 0
         infer_tp = self.config.tensor_model_parallel_size * self.config.data_parallel_size
         replica_world_size = infer_tp * self.config.pipeline_model_parallel_size
@@ -510,11 +538,7 @@ class SGLangReplica(RolloutReplica):
             )
 
             node_id = worker_node_ids[node_rank * self.gpus_per_replica_node]
-            name = (
-                f"sglang_server_{self.replica_rank}_{node_rank}"
-                if not self.is_reward_model
-                else f"sglang_server_reward_{self.replica_rank}_{node_rank}"
-            )
+            name = f"{self.server_name_prefix}_{self.replica_rank}_{node_rank}"
 
             server = self.server_class.options(
                 scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
@@ -536,6 +560,12 @@ class SGLangReplica(RolloutReplica):
                 base_gpu_id=base_gpu_id,
             )
             self.servers.append(server)
+        return entry_runtime_info
+
+    async def launch_prepared_servers(self, decoupled_spec_config: Optional[dict[str, Any]] = None):
+        """Launch already-created server actors."""
+        await self.prepare_server_actors()
+        decoupled_spec_config = decoupled_spec_config or self.decoupled_spec_config
 
         # launch http server in each node
         master_address, master_port = None, None
@@ -543,7 +573,11 @@ class SGLangReplica(RolloutReplica):
             master_address, master_port = await self.servers[0].get_master_address.remote()
         await asyncio.gather(
             *[
-                server.launch_server.remote(master_address=master_address, master_port=master_port)
+                server.launch_server.remote(
+                    master_address=master_address,
+                    master_port=master_port,
+                    decoupled_spec_config=decoupled_spec_config,
+                )
                 for server in self.servers
             ]
         )
@@ -556,3 +590,8 @@ class SGLangReplica(RolloutReplica):
             if is_valid_ipv6_address(server_address)
             else f"{server_address}:{server_port}"
         )
+
+    async def launch_servers(self):
+        """Launch http server in each node."""
+        await self.prepare_server_actors()
+        await self.launch_prepared_servers()

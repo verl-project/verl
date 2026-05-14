@@ -396,6 +396,10 @@ quantization: null
 # extra quantization information serialized in a config file, e.g. torchao_config.json
 quantization_config_file: null
 
+# Whether to enable experimental SGLang decoupled speculative decoding.
+# Drafter configuration is provided by experimental decoupled-spec configs.
+enable_decoupled_spec: False
+
 # MTP configuration, reuse model configuration
 mtp: ${oc.select:actor_rollout_ref.model.mtp, null}
 

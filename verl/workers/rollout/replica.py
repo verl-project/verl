@@ -123,6 +123,7 @@ class RolloutReplica(ABC):
         self.servers: list[ActorHandle] = []
         self._server_address: str = None
         self._server_handle: ActorHandle = None
+        self.worker_name_prefix = "rollout_reward" if self.is_reward_model else "rollout"
 
     async def init_hybrid(self, worker_group: RayWorkerGroup):
         """Init hybrid rollout server, rollout engine and training engine(fsdp/megatron) fused in same process.
@@ -130,11 +131,15 @@ class RolloutReplica(ABC):
         Args:
             worker_group: RayWorkerGroup, fused workers where training engine(fsdp/megatron) have been initialized.
         """
+        await self.setup_hybrid(worker_group)
+        await self.launch_servers()
+
+    async def setup_hybrid(self, worker_group: RayWorkerGroup):
+        """Set up hybrid rollout workers without launching servers."""
         self.rollout_mode = RolloutMode.HYBRID
         self.workers = worker_group.workers[
             self.world_size * self.replica_rank : self.world_size * (self.replica_rank + 1)
         ]
-        await self.launch_servers()
 
     async def init_hybrid_colocated(self, worker_group: RayWorkerGroup, resource_pool: RayResourcePool):
         """Init hybrid rollout server, rollout engine and training engine(fsdp/megatron) fused in same process.
@@ -144,13 +149,17 @@ class RolloutReplica(ABC):
             resource_pool: RayResourcePool, ray placement group where hybrid engine processes have been launched.
             bundle_indices: list[int], bundle indices for this rollout replica.
         """
+        await self.setup_hybrid_colocated(worker_group, resource_pool)
+        await self.launch_servers()
+
+    async def setup_hybrid_colocated(self, worker_group: RayWorkerGroup, resource_pool: RayResourcePool):
+        """Set up hybrid-colocated rollout workers without launching servers."""
         self.rollout_mode = RolloutMode.HYBRID
         self.workers = worker_group.workers[
             self.world_size * self.replica_rank : self.world_size * (self.replica_rank + 1)
         ]
         self.resource_pool = resource_pool
         self.bundle_indices = [self.replica_rank * self.world_size + idx for idx in range(self.world_size)]
-        await self.launch_servers()
 
     # TODO(sgm): this should be the default solution, but need to make the RolloutMode more clear.
     async def init_colocated(self, resource_pool: RayResourcePool):
@@ -160,6 +169,11 @@ class RolloutReplica(ABC):
         Args:
             resource_pool: RayResourcePool, ray placement group where hybrid engine processes have been launched.
         """
+        await self.setup_colocated(resource_pool)
+        await self.launch_servers()
+
+    async def setup_colocated(self, resource_pool: RayResourcePool):
+        """Set up colocated rollout workers without launching servers."""
         self.rollout_mode = RolloutMode.COLOCATED
         self.resource_pool = resource_pool
         use_gpu = self.rollout_worker_use_gpu()
@@ -168,17 +182,19 @@ class RolloutReplica(ABC):
             resource_pool=self.resource_pool,
             ray_cls_with_init=self.get_ray_class_with_init_args(),
             bin_pack=False,
-            name_prefix=f"rollout_colocate_{self.replica_rank}"
-            if not self.is_reward_model
-            else f"rollout_reward_colocate_{self.replica_rank}",
+            name_prefix=f"{self.worker_name_prefix}_colocate_{self.replica_rank}",
             use_gpu=use_gpu,
             device_name="cuda" if not is_torch_npu_available(check_device=False) else "npu",
         )
         self.workers = worker_group.workers
-        await self.launch_servers()
 
     async def init_standalone(self):
         """Init standalone rollout server, create new resource pool for this rollout."""
+        await self.setup_standalone()
+        await self.launch_servers()
+
+    async def setup_standalone(self):
+        """Set up standalone rollout workers without launching servers."""
         # create resource pool for this rollout
         self.rollout_mode = RolloutMode.STANDALONE
         resource_pool_name = (
@@ -199,14 +215,27 @@ class RolloutReplica(ABC):
             resource_pool=self.resource_pool,
             ray_cls_with_init=self.get_ray_class_with_init_args(),
             bin_pack=False,
-            name_prefix=f"rollout_standalone_{self.replica_rank}"
-            if not self.is_reward_model
-            else f"rollout_reward_standalone_{self.replica_rank}",
+            name_prefix=f"{self.worker_name_prefix}_standalone_{self.replica_rank}",
             use_gpu=use_gpu,
             device_name="cuda" if not is_torch_npu_available(check_device=False) else "npu",
         )
         self.workers = worker_group.workers
-        await self.launch_servers()
+
+    async def setup_standalone_with_resource_pool(self, resource_pool: RayResourcePool):
+        """Set up standalone rollout workers on a pre-created resource pool."""
+        self.rollout_mode = RolloutMode.STANDALONE
+        self.resource_pool = resource_pool
+
+        use_gpu = self.rollout_worker_use_gpu()
+        worker_group = RayWorkerGroup(
+            resource_pool=self.resource_pool,
+            ray_cls_with_init=self.get_ray_class_with_init_args(),
+            bin_pack=False,
+            name_prefix=f"{self.worker_name_prefix}_standalone_{self.replica_rank}",
+            use_gpu=use_gpu,
+            device_name="cuda" if not is_torch_npu_available(check_device=False) else "npu",
+        )
+        self.workers = worker_group.workers
 
     def get_ray_class_with_init_args(self) -> RayClassWithInitArgs:
         """Get rollout worker actor class for colocated and standalone mode."""

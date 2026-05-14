@@ -1,0 +1,37 @@
+hydra:
+  searchpath:
+    - file://verl/trainer/config
+
+defaults:
+  - ppo_megatron_trainer
+  - _self_
+
+actor_rollout_ref:
+  rollout:
+    enable_decoupled_spec: true
+
+draft:
+  # Whether to launch decoupled-spec drafter replicas.
+  enable: true
+
+  # Path to the drafter model.
+  model_path: null
+
+  # Path to the drafter tokenizer. Defaults to model_path when null.
+  tokenizer_path: null
+
+  # Drafter model load format.
+  load_format: auto
+
+  # Number of nodes used by drafter replicas.
+  nnodes: 1
+
+  # Total number of GPUs used by all drafter replicas.
+  ngpus: 8
+
+  # Tensor parallel size of each drafter replica.
+  tp_size: 2
+
+  # Number of speculative draft steps.
+  speculative_num_steps: 3
+

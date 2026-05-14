@@ -962,6 +962,32 @@ class AgentLoopManager:
         )
         num_replicas = world_size // rollout_world_size
 
+        if self.rollout_config.get("enable_decoupled_spec", False):
+            from verl.experimental.decoupled_spec.initializer import initialize_decoupled_spec_rollout_servers
+
+            self.rollout_replicas, self.decoupled_spec_draft_replicas = (
+                await initialize_decoupled_spec_rollout_servers(
+                    config=self.config,
+                    rollout_config=self.rollout_config,
+                    model_config=self.model_config,
+                    rollout_replica_class=self.rollout_replica_class,
+                    num_replicas=num_replicas,
+                    worker_group=self.worker_group,
+                    rollout_resource_pool=self.rollout_resource_pool,
+                )
+            )
+            self.server_handles = [server._server_handle for server in self.rollout_replicas]
+            self.server_addresses = [server._server_address for server in self.rollout_replicas]
+            print(f"AgentLoopManager: {self.server_addresses}")
+
+            if self.rollout_config.prometheus.enable:
+                if self.rollout_config.disable_log_stats:
+                    raise ValueError("PROMETHEUS needs disable_log_stats==False, but it is currently True.")
+                update_prometheus_config(
+                    self.rollout_config.prometheus, self.server_addresses, self.rollout_config.name
+                )
+            return
+
         self.rollout_replicas = [
             self.rollout_replica_class(
                 replica_rank=replica_rank,
