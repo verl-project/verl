@@ -7,41 +7,18 @@
 #   - Runtime Python packages, if the container does not include them:
 #       python3 -m pip install -q "nvidia-modelopt[torch]>=0.37.0"
 #       python3 -m pip install -q "flash-linear-attention==0.4.1"
-#   - Megatron-Bridge with https://github.com/NVIDIA-NeMo/Megatron-Bridge/pull/3746
-#   - Megatron-LM dev branch with https://github.com/NVIDIA/Megatron-LM/pull/4799
+#       python3 -m pip install -U "git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@refs/pull/3746/head"
+#       python3 -m pip install -U "git+https://github.com/NVIDIA/Megatron-LM.git@refs/pull/4799/head"
 set -xeuo pipefail
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VERL_DIR=${VERL_DIR:-"$(cd "${SCRIPT_DIR}/../../.." && pwd)"}
-ROOT=${ROOT:-"$(cd "${VERL_DIR}/.." && pwd)"}
 
 # ============================================================
 # Distributed
 # ============================================================
 NUM_GPUS=${NUM_GPUS:-8}
-NNODES=${NNODES:-${SLURM_NNODES:-4}}
-NODE_RANK=${NODE_RANK:-${SLURM_NODEID:-0}}
+MASTER_ADDR=${MASTER_ADDR:-localhost}
 MASTER_PORT=${MASTER_PORT:-29500}
-
-if [ -z "${MASTER_ADDR:-}" ] || { [ "${NNODES}" -gt 1 ] && { [ "${MASTER_ADDR}" = "localhost" ] || [ "${MASTER_ADDR}" = "127.0.0.1" ]; }; }; then
-    if [ -n "${SLURM_JOB_NODELIST:-}" ] && command -v scontrol >/dev/null 2>&1; then
-        MASTER_ADDR="$(scontrol show hostnames "${SLURM_JOB_NODELIST}" | head -n 1)"
-    elif [ -n "${SLURM_JOB_NODELIST:-}" ]; then
-        NODELIST="${SLURM_JOB_NODELIST}"
-        if [[ "${NODELIST}" == *"["* ]]; then
-            NODE_PREFIX="${NODELIST%%[*}"
-            NODE_RANGE="${NODELIST#*[}"
-            NODE_RANGE="${NODE_RANGE%%]*}"
-            FIRST_NODE="${NODE_RANGE%%,*}"
-            FIRST_NODE="${FIRST_NODE%%-*}"
-            MASTER_ADDR="${NODE_PREFIX}${FIRST_NODE}"
-        else
-            MASTER_ADDR="${NODELIST%%,*}"
-        fi
-    else
-        MASTER_ADDR=localhost
-    fi
-fi
+NNODES=${NNODES:-4}
+NODE_RANK=${NODE_RANK:-0}
 
 # ============================================================
 # Data
@@ -82,7 +59,7 @@ RESUME_MODE=${RESUME_MODE:-disable}
 
 project_name=${PROJECT_NAME:-verl_sft_qwen35_mfsdp_example}
 exp_name=${EXP_NAME:-qwen3_5_35b_a3b-mfsdp-tp${TP_SIZE}-pp${PP_SIZE}-cp${CP_SIZE}-ep${EP_SIZE}-gbs${TRAIN_BATCH_SIZE}-seq${MAX_LENGTH}}
-ckpts_home=${ckpts_home:-${ROOT}/checkpoints/${project_name}/${exp_name}}
+ckpts_home=${ckpts_home:-~/verl/checkpoints/${project_name}/${exp_name}}
 mkdir -p "${ckpts_home}"
 
 # ============================================================
@@ -93,22 +70,6 @@ MTP_ENABLE_TRAIN=${MTP_ENABLE_TRAIN:-False}
 MTP_NUM_LAYERS=${MTP_NUM_LAYERS:-null}
 MTP_DETACH_ENCODER=${MTP_DETACH_ENCODER:-True}
 MTP_LOSS_SCALING_FACTOR=${MTP_LOSS_SCALING_FACTOR:-0.1}
-
-# ============================================================
-# Environment
-# ============================================================
-export HYDRA_FULL_ERROR=1
-export HF_HOME=${HF_HOME:-/root/models}
-export PYTHONPATH="${VERL_DIR}:${ROOT}/Megatron-LM:${ROOT}/Megatron-Bridge/src:${PYTHONPATH:-}"
-export CUDA_DEVICE_MAX_CONNECTIONS=${CUDA_DEVICE_MAX_CONNECTIONS:-8}
-export NCCL_IB_SL=${NCCL_IB_SL:-1}
-export NCCL_NVLS_ENABLE=${NCCL_NVLS_ENABLE:-1}
-export NVTE_FUSED_ATTN=${NVTE_FUSED_ATTN:-1}
-export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
-export TORCH_NCCL_AVOID_RECORD_STREAMS=${TORCH_NCCL_AVOID_RECORD_STREAMS:-1}
-unset ROCR_VISIBLE_DEVICES
-
-cd "${VERL_DIR}"
 
 # ============================================================
 # Engine config
