@@ -39,7 +39,7 @@ from verl.experimental.agent_loop.multi_trajectory_agent_loop import (
     INTERMEDIATE_TRAJECTORIES_KEY,
 )
 from verl.experimental.fully_async_policy.image_refs import MULTI_MODAL_REFS_KEY
-from verl.utils.model import compute_position_id_with_mask
+from verl.utils.model import compute_vlm_position_ids
 
 # Data flow logger — imported lazily to avoid hard dependency.
 try:
@@ -252,66 +252,14 @@ def _compute_multi_modal_inputs(
     return mm
 
 
-def _compute_text_position_ids_3d(
-    input_ids: torch.Tensor, attention_mask: torch.Tensor, num_axes: int = 4
-) -> torch.Tensor:
-    valid_mask = attention_mask[0].bool()
-    text_position_ids = torch.ones((1, input_ids.shape[-1]), dtype=torch.long, device=input_ids.device)
-    text_position_ids[0, valid_mask] = torch.arange(valid_mask.sum().item(), device=input_ids.device)
-    return text_position_ids.unsqueeze(0).expand(-1, num_axes, -1).clone()
-
-
 def _compute_position_ids(
     processor,
     input_ids: torch.Tensor,
     attention_mask: torch.Tensor,
     multi_modal_inputs: dict,
 ) -> torch.Tensor:
-    """Re-compute position_ids for one trajectory (mirrors AgentLoopWorker).
-
-    When ``processor`` is not None, always produces 3D position_ids
-    ``(1, num_rope_axes+1, seq_len)`` — even when ``multi_modal_inputs`` is
-    empty — so that the tensor schema is consistent with the main (final)
-    trajectory rows produced by ``AgentLoopWorker._compute_position_ids``.
-    This prevents ``torch.cat`` from failing with a "Tensors must have same
-    number of dimensions" error during ``DataProto.concat``.
-    """
-    if processor is None:
-        return compute_position_id_with_mask(attention_mask)
-
-    image_grid_thw = multi_modal_inputs.get("image_grid_thw") if multi_modal_inputs else None
-    video_grid_thw = multi_modal_inputs.get("video_grid_thw") if multi_modal_inputs else None
-    if image_grid_thw is None and video_grid_thw is None:
-        return _compute_text_position_ids_3d(input_ids, attention_mask)
-
-    mm_kwargs: dict[str, Any] = {
-        "image_grid_thw": image_grid_thw,
-        "video_grid_thw": video_grid_thw,
-    }
-    image_token_id = getattr(processor, "image_token_id", None)
-    video_token_id = getattr(processor, "video_token_id", None)
-    needs_token_type_ids = bool(multi_modal_inputs and multi_modal_inputs.pop("mm_token_type_ids", None) is not None)
-    needs_token_type_ids = needs_token_type_ids or image_token_id is not None or video_token_id is not None
-    if needs_token_type_ids:
-        mm_token_type_ids = torch.zeros_like(input_ids)
-        if image_token_id is not None:
-            mm_token_type_ids[0][input_ids[0] == image_token_id] = 1
-        if video_token_id is not None:
-            mm_token_type_ids[0][input_ids[0] == video_token_id] = 2
-        mm_kwargs["mm_token_type_ids"] = mm_token_type_ids
-
-    vision_position_ids, _ = processor.get_rope_index(
-        input_ids=input_ids,
-        attention_mask=attention_mask,
-        **mm_kwargs,
-    )
-    vision_position_ids = vision_position_ids.transpose(0, 1)
-
-    valid_mask = attention_mask[0].bool()
-    text_position_ids = torch.ones((1, len(input_ids[0])), dtype=torch.long)
-    text_position_ids[0, valid_mask] = torch.arange(valid_mask.sum().item())
-    text_position_ids = text_position_ids.unsqueeze(0)
-    return torch.cat((text_position_ids, vision_position_ids), dim=1)
+    """Re-compute model-specific position_ids for one trajectory."""
+    return compute_vlm_position_ids(processor, input_ids, attention_mask, multi_modal_inputs)
 
 
 def _build_one_intermediate_row(

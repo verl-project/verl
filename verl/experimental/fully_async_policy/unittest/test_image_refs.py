@@ -28,7 +28,7 @@ from verl.experimental.fully_async_policy.image_refs import (
     attach_image_refs_to_dataproto,
 )
 from verl.experimental.fully_async_policy.intermediate_trajectory_utils import _compute_position_ids
-from verl.utils.model import resolve_multi_modal_refs
+from verl.utils.model import compute_vlm_position_ids, resolve_multi_modal_refs
 
 
 class DummyImageProcessor:
@@ -63,6 +63,10 @@ class StrictDummyProcessor(DummyProcessor):
         if kwargs.get("image_grid_thw") is None and torch.any(input_ids == self.image_token_id):
             raise TypeError("image_grid_thw is required when image tokens are present")
         return super().get_rope_index(input_ids, attention_mask, **kwargs)
+
+
+class TextAxisDummyProcessor(StrictDummyProcessor):
+    position_ids_need_text_axis = True
 
 
 def _object_array(values):
@@ -173,6 +177,8 @@ def test_resolve_multi_modal_refs_uses_processed_bank_without_ray_get():
     assert resolved["pixel_values"].shape == (1, 3, 2, 2)
     assert resolved["image_grid_thw"].tolist() == [[1, 2, 2]]
     assert micro_batch["position_ids"].dim() == 3
+    assert micro_batch["position_ids"][0].shape == (3, 3)
+    assert micro_batch["position_ids"].values().shape[0] == 3
 
 
 def test_resolve_multi_modal_refs_uses_placeholder_position_ids_without_image_grid():
@@ -193,7 +199,7 @@ def test_resolve_multi_modal_refs_uses_placeholder_position_ids_without_image_gr
 
     assert resolved == {}
     assert micro_batch["position_ids"].dim() == 3
-    assert micro_batch["position_ids"][0].shape == (4, 3)
+    assert micro_batch["position_ids"][0].shape == (3, 3)
 
 
 def test_resolve_multi_modal_refs_handles_unpadded_input_with_padded_attention_mask():
@@ -222,7 +228,16 @@ def test_resolve_multi_modal_refs_handles_unpadded_input_with_padded_attention_m
     )
 
     assert resolved["pixel_values"].shape == (1, 3, 2, 2)
-    assert micro_batch["position_ids"][0].shape == (4, 3)
+    assert micro_batch["position_ids"][0].shape == (3, 3)
+    assert micro_batch["position_ids"].values().shape[0] == 3
+
+
+def test_compute_vlm_position_ids_adds_text_axis_for_legacy_vl_models():
+    input_ids = torch.tensor([[1, 42, 2]], dtype=torch.long)
+    attention_mask = torch.ones_like(input_ids)
+    position_ids = compute_vlm_position_ids(TextAxisDummyProcessor(), input_ids, attention_mask, {})
+
+    assert position_ids.shape == (1, 4, 3)
 
 
 def test_agent_loop_position_ids_skip_rope_without_image_grid():
@@ -233,7 +248,7 @@ def test_agent_loop_position_ids_skip_rope_without_image_grid():
 
     position_ids = worker._compute_position_ids(input_ids, attention_mask, {})
 
-    assert position_ids.shape == (1, 4, 3)
+    assert position_ids.shape == (1, 3, 3)
 
 
 def test_intermediate_position_ids_skip_rope_without_image_grid():
@@ -242,4 +257,4 @@ def test_intermediate_position_ids_skip_rope_without_image_grid():
 
     position_ids = _compute_position_ids(StrictDummyProcessor(), input_ids, attention_mask, {})
 
-    assert position_ids.shape == (1, 4, 3)
+    assert position_ids.shape == (1, 3, 3)

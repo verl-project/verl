@@ -53,7 +53,7 @@ from verl.trainer.distillation import is_distillation_enabled
 from verl.utils.chat_template import apply_chat_template, initialize_system_prompt
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.dataset.rl_dataset import RLHFDataset, get_dataset_class
-from verl.utils.model import compute_position_id_with_mask
+from verl.utils.model import compute_vlm_position_ids
 from verl.utils.profiler import simple_timer
 from verl.utils.ray_utils import auto_await, get_event_loop
 from verl.utils.rollout_trace import (
@@ -832,57 +832,9 @@ class AgentLoopWorker:
             multi_modal_inputs["images_seqlens"] = images_seqlens
         return multi_modal_inputs
 
-    @staticmethod
-    def _compute_text_position_ids_3d(input_ids, attention_mask, num_axes: int = 4) -> torch.Tensor:
-        """Return text-only VL position ids with a stable 3D schema."""
-        valid_mask = attention_mask[0].bool()
-        text_position_ids = torch.ones((1, input_ids.shape[-1]), dtype=torch.long, device=input_ids.device)
-        text_position_ids[0, valid_mask] = torch.arange(valid_mask.sum().item(), device=input_ids.device)
-        return text_position_ids.unsqueeze(0).expand(-1, num_axes, -1).clone()
-
     def _compute_position_ids(self, input_ids, attention_mask, multi_modal_inputs) -> torch.Tensor:
-        """Compute position ids for multi-modal inputs."""
-        if self.processor is None:
-            return compute_position_id_with_mask(attention_mask)  # (1, seq_len)
-
-        image_grid_thw = multi_modal_inputs.get("image_grid_thw")
-        video_grid_thw = multi_modal_inputs.get("video_grid_thw")
-        if image_grid_thw is None and video_grid_thw is None:
-            return self._compute_text_position_ids_3d(input_ids, attention_mask)
-
-        multi_modal_kwargs = {
-            "image_grid_thw": image_grid_thw,
-            "video_grid_thw": video_grid_thw,
-        }
-        # For transformers>=5.3.0, mm_token_type_ids is only used to calculate position ids.
-        image_token_id = getattr(self.processor, "image_token_id", None)
-        video_token_id = getattr(self.processor, "video_token_id", None)
-        needs_token_type_ids = multi_modal_inputs.pop("mm_token_type_ids", None) is not None
-        # Qwen3-VL's HF get_rope_index requires mm_token_type_ids even when
-        # we are only building placeholder position_ids before image refs are resolved.
-        needs_token_type_ids = needs_token_type_ids or image_token_id is not None or video_token_id is not None
-        if needs_token_type_ids:
-            mm_token_type_ids = torch.zeros_like(input_ids)
-            if image_token_id is not None:
-                mm_token_type_ids[0][input_ids[0] == image_token_id] = 1
-            if video_token_id is not None:
-                mm_token_type_ids[0][input_ids[0] == video_token_id] = 2
-            multi_modal_kwargs["mm_token_type_ids"] = mm_token_type_ids
-
-        # Model's get_rope_index has been dynamically bind to the processor.
-        vision_position_ids, _ = self.processor.get_rope_index(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            **multi_modal_kwargs,
-        )
-        vision_position_ids = vision_position_ids.transpose(0, 1)  # (3, 1, seq_len) => (1, 3, seq_len)
-
-        valid_mask = attention_mask[0].bool()
-        text_position_ids = torch.ones((1, len(input_ids[0])), dtype=torch.long)
-        text_position_ids[0, valid_mask] = torch.arange(valid_mask.sum().item())
-        text_position_ids = text_position_ids.unsqueeze(0)
-        position_ids = torch.cat((text_position_ids, vision_position_ids), dim=1)  # (1, 4, seq_length)
-        return position_ids
+        """Compute model-specific multi-modal position ids."""
+        return compute_vlm_position_ids(self.processor, input_ids, attention_mask, multi_modal_inputs)
 
     async def _compute_score(self, output, prompts, responses, attention_mask, input_ids, position_ids, kwargs):
         """Compute reward score for single sample."""

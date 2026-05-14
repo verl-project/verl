@@ -18,6 +18,7 @@ Utilities to create common models from huggingface
 import json
 import os
 import re
+import sys
 import warnings
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -822,25 +823,69 @@ def _merge_processed_image_inputs(inputs_list: list[dict[str, Any]]) -> dict[str
     return merged
 
 
-def _compute_text_position_ids_3d(
-    input_ids: torch.Tensor, attention_mask: torch.Tensor, num_axes: int = 4
-) -> torch.Tensor:
+def _compute_text_position_ids_1d(input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
     valid_mask = attention_mask[0].bool()
     text_position_ids = torch.ones((1, input_ids.shape[-1]), dtype=torch.long, device=input_ids.device)
     text_position_ids[0, valid_mask] = torch.arange(valid_mask.sum().item(), device=input_ids.device)
-    return text_position_ids.unsqueeze(0).expand(-1, num_axes, -1).clone()
+    return text_position_ids.unsqueeze(0)
 
 
-def _compute_vlm_position_ids(
+def _compute_text_position_ids_3d(input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+    return _compute_text_position_ids_1d(input_ids, attention_mask).expand(-1, 3, -1).clone()
+
+
+def _normalize_vlm_position_ids(position_ids: torch.Tensor) -> torch.Tensor:
+    """Normalize get_rope_index output to (1, rope_axes, seq_len)."""
+    if position_ids.dim() == 2:
+        return position_ids.unsqueeze(0)
+    if position_ids.dim() == 3 and position_ids.shape[0] != 1:
+        return position_ids.transpose(0, 1)
+    return position_ids
+
+
+def _vlm_position_ids_need_text_axis(processor: Any) -> bool:
+    """Return whether model forward expects text axis + 3 vision axes.
+
+    Qwen2-VL/GLM4V wrappers expose ``process_position_ids`` and expect 4 axes.
+    Current Qwen3-VL rotary embedding consumes only the 3 THW axes.
+    """
+    override = getattr(processor, "position_ids_need_text_axis", None)
+    if override is not None:
+        return bool(override)
+    fn = getattr(processor, "get_rope_index", None)
+    raw_fn = getattr(fn, "__func__", fn)
+    module_name = getattr(raw_fn, "__module__", "")
+    module = sys.modules.get(module_name)
+    return bool(module is not None and hasattr(module, "process_position_ids"))
+
+
+def _append_text_axis_if_needed(
+    processor: Any, position_ids: torch.Tensor, input_ids: torch.Tensor, attention_mask: torch.Tensor
+) -> torch.Tensor:
+    position_ids = _normalize_vlm_position_ids(position_ids)
+    if not _vlm_position_ids_need_text_axis(processor):
+        return position_ids
+    text_position_ids = _compute_text_position_ids_1d(input_ids, attention_mask)
+    return torch.cat((text_position_ids, position_ids), dim=1)
+
+
+def compute_vlm_position_ids(
     processor, input_ids: torch.Tensor, attention_mask: torch.Tensor, multi_modal_inputs: dict
 ) -> torch.Tensor:
+    """Compute model-specific VLM position ids.
+
+    Some wrappers (Qwen2-VL/GLM4V) expect 4 axes: text + THW. Current Qwen3-VL
+    expects only the 3 THW axes. This helper keeps that distinction centralized.
+    """
     if processor is None:
         return compute_position_id_with_mask(attention_mask)
 
     image_grid_thw = multi_modal_inputs.get("image_grid_thw") if multi_modal_inputs else None
     video_grid_thw = multi_modal_inputs.get("video_grid_thw") if multi_modal_inputs else None
     if image_grid_thw is None and video_grid_thw is None:
-        return _compute_text_position_ids_3d(input_ids, attention_mask)
+        return _append_text_axis_if_needed(
+            processor, _compute_text_position_ids_3d(input_ids, attention_mask), input_ids, attention_mask
+        )
 
     mm_kwargs: dict[str, Any] = {
         "image_grid_thw": image_grid_thw,
@@ -860,17 +905,12 @@ def _compute_vlm_position_ids(
             mm_token_type_ids[0][input_ids[0] == video_token_id] = 2
         mm_kwargs["mm_token_type_ids"] = mm_token_type_ids
 
-    vision_position_ids, _ = processor.get_rope_index(
+    position_ids, _ = processor.get_rope_index(
         input_ids=input_ids,
         attention_mask=attention_mask,
         **mm_kwargs,
     )
-    vision_position_ids = vision_position_ids.transpose(0, 1)
-    valid_mask = attention_mask[0].bool()
-    text_position_ids = torch.ones((1, input_ids.shape[-1]), dtype=torch.long, device=input_ids.device)
-    text_position_ids[0, valid_mask] = torch.arange(valid_mask.sum().item(), device=input_ids.device)
-    text_position_ids = text_position_ids.unsqueeze(0)
-    return torch.cat((text_position_ids, vision_position_ids), dim=1)
+    return _append_text_axis_if_needed(processor, position_ids, input_ids, attention_mask)
 
 
 def resolve_multi_modal_refs(
@@ -963,7 +1003,7 @@ def resolve_multi_modal_refs(
                 processed_inputs.append(_processed_payload_inputs(image_bank[image_id]))
             mm_cpu = _merge_processed_image_inputs(processed_inputs)
 
-        pos = _compute_vlm_position_ids(processor, row_input_ids_2d, row_attention_mask, dict(mm_cpu))
+        pos = compute_vlm_position_ids(processor, row_input_ids_2d, row_attention_mask, dict(mm_cpu))
         position_rows.append(pos.squeeze(0))
         if mm_cpu:
             row_multi_modal_inputs.append(_move_tensor_dict(mm_cpu, device))
