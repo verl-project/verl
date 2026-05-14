@@ -2,7 +2,7 @@
 
 > 本文档整理自 [verl-project/verl 昇腾后端特性指南](https://github.com/verl-project/verl/blob/main/docs/ascend_tutorial/features/ascend_backend_features.md)，提取昇腾 NPU 在 verl 生态中的高级特性与优化能力，供开发者参考。
 >
-> 最后更新: 2026/03/03
+Last updated: 05/13/2026.
 
 ---
 
