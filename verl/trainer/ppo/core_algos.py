@@ -272,6 +272,7 @@ def compute_grpo_outcome_advantage(
     epsilon: float = 1e-6,
     norm_adv_by_std_in_grpo: bool = True,
     config: Optional[AlgoConfig] = None,
+    token_level_advantages: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Compute advantage for GRPO, operating only on Outcome reward
@@ -290,6 +291,9 @@ def compute_grpo_outcome_advantage(
             whether to scale the GRPO advantage
         config: `(Optional[AlgoConfig])`
             algorithm configuration object
+        token_level_advantages: `(Optional[torch.Tensor])`
+            Pre-computed per-token advantages, shape (bs, response_length).
+            When provided, skips GRPO advantage computation and uses these directly.
 
     Note:
         If norm_adv_by_std_in_grpo is True, the advantage is scaled by the std, as in the original GRPO.
@@ -301,6 +305,12 @@ def compute_grpo_outcome_advantage(
         Returns: `(torch.Tensor)`
             shape is (bs, response_length)
     """
+    # If pre-computed token-level advantages are provided, use them directly
+    if token_level_advantages is not None:
+        with torch.no_grad():
+            advantages = token_level_advantages * response_mask
+            return advantages, advantages
+
     scores = token_level_rewards.sum(dim=-1)
 
     id2score = defaultdict(list)
