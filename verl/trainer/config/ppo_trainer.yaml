@@ -313,10 +313,19 @@ transfer_queue:
   # Whether to enable TransferQueue
   enable: False
 
+  # Prometheus metrics exporter.
+  metrics:
+
+    # When set to `false`, use logger to report essential metrics.
+    enabled: false
+
+    # HTTP port for /metrics endpoint (0 = auto-assign free port)
+    port: 0
+
   # Pluggable storage/transport backend of TransferQueue
   backend:
 
-    # SimpleStorage with ZeroMQ
+    # Enabled backend. Choose from: SimpleStorage, MooncakeStore (experimental)
     storage_backend: SimpleStorage
 
     # Backend specific configs
@@ -325,8 +334,35 @@ transfer_queue:
         # Maximum number of samples to hold
         total_storage_size: 100000
 
-        # Number of distributed storage units
+        # Number of distributed storage units. Recommended: >= 2 x num_nodes
         num_data_storage_units: 8
+
+    MooncakeStore:
+
+      # Whether to let TQ automatically init metadata_server.
+      # Note: If set to `true`, TQ will try to kill existing mooncake_master process.
+      auto_init: true
+
+      # Address of the HTTP metadata server
+      metadata_server: localhost:50123
+
+      # Address of master server
+      master_server_address: localhost:50124
+
+      # Address of local host. Set to "" to use Ray IP as local host address
+      local_hostname: localhost
+
+      # Protocol for transmission. Choose from: tcp, rdma. (default: tcp)
+      protocol: tcp
+
+      # Memory segment size in bytes for mounting (for each client, default: 4GB)
+      global_segment_size: 4294967296
+
+      # Local buffer size in bytes (for each client, default: 1GB)
+      local_buffer_size: 1073741824
+
+      # Network device name. Set to "" to let Mooncake to auto-picks devices
+      device_name: ""
 
 # configs related to ray
 ray_kwargs:

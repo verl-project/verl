@@ -1771,17 +1771,20 @@ class TaskRunner:
         # initialize transfer queue
         tq.init(config.transfer_queue)
 
-        self.add_actor_rollout_worker(config)
-        self.add_critic_worker(config)
-        self.init_resource_pool_mgr(config)
+        try:
+            self.add_actor_rollout_worker(config)
+            self.add_critic_worker(config)
+            self.init_resource_pool_mgr(config)
 
-        trainer = PPOTrainer(
-            config=config,
-            role_worker_mapping=self.role_worker_mapping,
-            resource_pool_manager=self.resource_pool_manager,
-        )
-        trainer.init_workers()
-        trainer.fit()
+            trainer = PPOTrainer(
+                config=config,
+                role_worker_mapping=self.role_worker_mapping,
+                resource_pool_manager=self.resource_pool_manager,
+            )
+            trainer.init_workers()
+            trainer.fit()
+        finally:
+            tq.close()
 
 
 @hydra.main(config_path="config", config_name="ppo_trainer", version_base=None)
