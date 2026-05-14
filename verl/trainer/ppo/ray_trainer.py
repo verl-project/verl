@@ -23,7 +23,6 @@ import os
 import uuid
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from copy import deepcopy
 from pprint import pprint
 from typing import Any, Optional
 
@@ -480,7 +479,7 @@ class RayPPOTrainer:
             sample_gts = [item.non_tensor_batch.get("reward_model", {}).get("ground_truth", None) for item in batch]
 
             reward_extra_infos_to_dump = {
-                k: (v.tolist() if isinstance(v, np.ndarray) else v) for k, v in reward_extra_infos_dict.items()
+                k: (v.tolist() if hasattr(v, "tolist") else v) for k, v in reward_extra_infos_dict.items()
             }
             if "request_id" in batch.non_tensor_batch:
                 reward_extra_infos_to_dump.setdefault(
