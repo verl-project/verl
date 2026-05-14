@@ -112,6 +112,8 @@ r_t
 \right).
 \]
 
+**Note**: When using the k1 estimator, the stop-gradient is required so that the reward is treated as fixed under the policy-gradient update; otherwise, the loss will not depend on the teacher logprob due to differentiation with respect to student parameters.
+
 
 ### Multi-Teacher OPD
 
@@ -307,6 +309,46 @@ Using the `DataProto` produced by the Agent Loop (rollouts + teacher logprobs in
 
 The returned scalar loss is what `engine.train_batch` backpropagates.
 
+## Files
+
+### **Core Implementation**
+
+- `verl/experimental/teacher_loop/teacher_model.py` — `MultiTeacherModelManager` and `TeacherModelManager`; spin up teacher inference replicas on the dedicated teacher resource pool and expose per-teacher `LLMServerClient` factories
+- `verl/experimental/teacher_loop/teacher_manager.py` — `AsyncTeacherLLMServerManager`; routes per-sample teacher calls (single- or multi-teacher) and builds scoring sampling params (`max_tokens=1`, `prompt_logprobs=topk`)
+- `verl/experimental/agent_loop/agent_loop.py` — `AgentLoopWorker._compute_teacher_logprobs`; per-sample teacher dispatch from `_agent_loop_postprocess`, packs `teacher_ids` / `teacher_logprobs` into the rollout output
+- `verl/trainer/distillation/losses.py` — `distillation_ppo_loss`, `distillation_loss`, loss registry, top-k vs. estimator dispatch, policy-gradient vs. supervised aggregation, task-reward combination
+- `verl/trainer/distillation/fsdp/losses.py` — FSDP backend `compute_forward_kl_topk`
+- `verl/trainer/distillation/megatron/losses.py` — Megatron backend `compute_forward_kl_topk`
+- `verl/workers/engine_workers.py` — `ActorRolloutRefWorker.init_model`; binds `distillation_ppo_loss` as the actor's `loss_fn` when distillation is enabled
+- `verl/workers/engine/fsdp/transformer_impl.py` — `forward_step` / `prepare_model_outputs`; invokes `distillation_ppo_loss` first as a logits processor (top-k modes) and again as the final loss
+- `verl/trainer/main_ppo.py` — `is_distillation_enabled` gate; allocates the dedicated `teacher_pool` resource pool
+- `verl/trainer/ppo/ray_trainer.py` — constructs `MultiTeacherModelManager` and hands its `get_client()` dict to `AgentLoopWorker(... teacher_client=…)`
+- `verl/workers/rollout/llm_server.py` — `LLMServerClient` and `GlobalRequestLoadBalancer` (sticky-session + least-loaded) used for both student rollout and teacher scoring
+
+### **Configuration Files**
+
+- `verl/trainer/config/distillation/distillation.yaml` — YAML defaults for the `distillation.*` config tree
+- `verl/workers/config/distillation.py` — dataclass schema (`DistillationConfig`, `DistillationLossConfig`, `DistillationTeacherModelConfig`)
+
+### **Documentation**
+
+- `docs/algo/opd.md` — this document
+
+### **Example Scripts**
+
+- `examples/on_policy_distillation_trainer/README.md` — script index
+- `examples/on_policy_distillation_trainer/run_qwen3_8b_fsdp.sh` — text, vLLM rollout, FSDP student, single teacher
+- `examples/on_policy_distillation_trainer/run_qwen3_8b_megatron.sh` — text, vLLM rollout, Megatron student, single teacher
+- `examples/on_policy_distillation_trainer/run_qwen3_vl_8b_fsdp.sh` — VL student/teacher, vLLM rollout, FSDP student
+- `examples/on_policy_distillation_trainer/run_qwen3_mopd_gsm8k_geo3k.sh` — multi-teacher (one per dataset), routed by `data_source`
+
+### **Tests**
+
+- `tests/workers/test_distillation_topk_symmetry_on_cpu.py` — top-k loss symmetry checks
+- `tests/utils/test_special_megatron_kl_loss_tp.py` — Megatron KL loss under tensor parallelism
+- `tests/special_e2e/run_fully_async_policy_opd.sh` — end-to-end OPD with the fully-async rollouter
+
+
 ## Usage
 
 We have example scripts in the directory `examples/on_policy_distillation_trainer`. Now we show some basics for adapting a script to OPD.
@@ -343,8 +385,7 @@ actor_rollout_ref:
    actor:
       use_kl_loss: false
 algorithm: 
-   use_kl_in_reward: 
-      False
+   use_kl_in_reward: false
 ```
 
 ### GKD OPD
@@ -367,12 +408,14 @@ distillation:
 
 ### PG OPD
 
-To use PG OPD, set the loss mode and enable policy gradient:
+To use PG OPD with k1 estimator, set the loss mode and enable policy gradient:
 
-
-
-
-**Note**: When using the k1 estimator, the stop-gradient is required so that the reward is treated as fixed under the policy-gradient update; otherwise, the loss will not depend on the teacher logprob due to differentiation with respect to student parameters.
+```yaml
+distillation:
+   distillation_loss: 
+      loss_mode: k1
+      use_policy_gradient: true
+```
 
 **Note**: Computing the distillation loss using KL estimator is valid for reverse KL because samples are drawn from the student distribution. Estimating forward KL would instead require samples from the teacher distribution, which is just conventional (off-policy) KD. 
 
