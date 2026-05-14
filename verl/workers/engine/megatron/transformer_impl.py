@@ -197,44 +197,29 @@ class MegatronEngine(BaseEngine):
             # Get Megatron provider and configure it
             provider = bridge.to_megatron_provider(load_weights=False)
 
-            # In case of invalid overrides, we need to make sure some critical params are set correctly
-            provider.params_dtype = self.param_dtype
-
-            # Ensure dtype settings propagate to Megatron-Bridge/TE
-            provider.fp16 = self.param_dtype == torch.float16
-            provider.bf16 = self.param_dtype == torch.bfloat16
-
-            # Pass distributed info
-            provider.tensor_model_parallel_size = self.engine_config.tensor_model_parallel_size
-            provider.pipeline_model_parallel_size = self.engine_config.pipeline_model_parallel_size
-            provider.expert_model_parallel_size = self.engine_config.expert_model_parallel_size
-            provider.expert_tensor_parallel_size = self.engine_config.expert_tensor_parallel_size
-            provider.virtual_pipeline_model_parallel_size = self.engine_config.virtual_pipeline_model_parallel_size
-            provider.context_parallel_size = self.engine_config.context_parallel_size
-            provider.sequence_parallel = self.engine_config.sequence_parallel
-
             # Match verl implementation (need variable_seq_lengths)
-            from megatron.core.transformer.enums import AttnBackend
 
-            provider.attention_backend = AttnBackend.flash
-            provider.variable_seq_lengths = True
-            provider.moe_token_dispatcher_type = "alltoall"
-            provider.moe_router_load_balancing_type = "none"
+            provider_overrides = {
+                "sequence_parallel": self.engine_config.sequence_parallel,
+                "variable_seq_lengths": True,
+                "moe_token_dispatcher_type": "alltoall",
+                "moe_router_load_balancing_type": "none",
+                **override_transformer_config,
+            }
+            if self.enable_routing_replay:
+                provider_overrides["enable_routing_replay"] = True
 
-            # Apply QAT: set quantization layer spec and patch Megatron-Bridge
+            pre_finalize_hooks = []
             if self._qat_enabled:
                 from verl.utils.modelopt import patch_provider_for_qat
 
-                patch_provider_for_qat(provider)
+                pre_finalize_hooks.append(patch_provider_for_qat)
 
-            # Apply transformer config overrides
-            for key, value in override_transformer_config.items():
-                setattr(provider, key, value)
-
-            if self.enable_routing_replay:
-                provider.enable_routing_replay = True
-
-            provider.finalize()
+            provider.configure(
+                dtype=self.param_dtype,
+                overrides=provider_overrides,
+                pre_finalize_hooks=pre_finalize_hooks,
+            )
             self.provider = provider
             tf_config = None  # Will be set after model creation
         self.bridge = bridge

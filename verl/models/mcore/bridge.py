@@ -16,9 +16,6 @@
 try:
     from megatron.bridge import AutoBridge
     from megatron.bridge.models.conversion.param_mapping import AutoMapping
-    from megatron.bridge.peft.canonical_lora import CanonicalLoRA
-    from megatron.bridge.peft.dora import DoRA
-    from megatron.bridge.peft.lora import LoRA, VLMLoRA
 except ImportError:
     # `pip install verl[mcore]` or
     print("Megatron-Bridge package not found. Please install Megatron-Bridge with `pip install megatron-bridge`")
@@ -171,8 +168,4 @@ __all__ = [
     "AutoBridge",
     "make_value_model",
     "freeze_moe_router",
-    "LoRA",
-    "VLMLoRA",
-    "DoRA",
-    "CanonicalLoRA",
 ]
