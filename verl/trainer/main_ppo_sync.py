@@ -30,6 +30,7 @@ import threading
 import time
 import uuid
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from pprint import pprint
 from typing import Any
@@ -513,6 +514,7 @@ class PPOTrainer:
 
         self._init_tokenizer()
         self._init_dataloader()
+        self._init_dump_executor()
 
     def _init_tokenizer(self):
         """Initialize tokenizer."""
@@ -1010,10 +1012,11 @@ class PPOTrainer:
         # Log to each configured logger
         self.validation_generations_logger.log(self.config.trainer.logger, samples, self.global_steps)
 
-    def _dump_generations(self, inputs, outputs, gts, scores, reward_extra_infos_dict, dump_path):
-        """Dump rollout/validation samples as JSONL."""
+    @staticmethod
+    def _write_generations(inputs, outputs, gts, scores, reward_extra_infos_dict, dump_path, global_steps):
+        """Write generation samples as JSONL (runs in background thread)."""
         os.makedirs(dump_path, exist_ok=True)
-        filename = os.path.join(dump_path, f"{self.global_steps}.jsonl")
+        filename = os.path.join(dump_path, f"{global_steps}.jsonl")
 
         n = len(inputs)
         base_data = {
@@ -1021,7 +1024,7 @@ class PPOTrainer:
             "output": outputs,
             "gts": gts,
             "score": scores,
-            "step": [self.global_steps] * n,
+            "step": [global_steps] * n,
         }
 
         for k, v in reward_extra_infos_dict.items():
@@ -1035,19 +1038,51 @@ class PPOTrainer:
                 return float(obj)
             elif isinstance(obj, np.bool_):
                 return bool(obj)
-            elif isinstance(obj, np.ndarray):
+            elif hasattr(obj, "tolist"):
                 return obj.tolist()
             raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
-        lines = []
-        for i in range(n):
-            entry = {k: v[i] for k, v in base_data.items()}
-            lines.append(json.dumps(entry, ensure_ascii=False, default=json_encode_default))
-
         with open(filename, "w") as f:
-            f.write("\n".join(lines) + "\n")
+            for i in range(n):
+                entry = {k: v[i] for k, v in base_data.items()}
+                f.write(json.dumps(entry, ensure_ascii=False, default=json_encode_default) + "\n")
 
         print(f"Dumped generations to {filename}")
+
+    def _dump_generations(self, inputs, outputs, gts, scores, reward_extra_infos_dict, dump_path):
+        """Dump rollout/validation samples as JSONL asynchronously."""
+        global_steps = self.global_steps
+        future = self._dump_executor.submit(
+            self._write_generations,
+            inputs,
+            outputs,
+            gts,
+            scores,
+            reward_extra_infos_dict,
+            dump_path,
+            global_steps,
+        )
+        self._dump_futures.append(future)
+        # Clean up completed futures and surface any exceptions early
+        still_pending = []
+        for f in self._dump_futures:
+            if f.done():
+                f.result()  # re-raises if the write failed
+            else:
+                still_pending.append(f)
+        self._dump_futures = still_pending
+
+    def _init_dump_executor(self):
+        """Create or recreate the dump executor and futures list."""
+        self._dump_executor = ThreadPoolExecutor(max_workers=1)
+        self._dump_futures = []
+
+    def _shutdown_dump_executor(self):
+        """Drain pending dump futures and shut down the executor."""
+        for f in self._dump_futures:
+            f.result()
+        self._dump_futures.clear()
+        self._dump_executor.shutdown(wait=True)
 
     def _log_rollout_data(self, batch: KVBatchMeta, timing_raw: dict, rollout_data_dir: str):
         """Fetch rollout data from TransferQueue and dump sorted by uid."""
@@ -1544,6 +1579,9 @@ class PPOTrainer:
         )
 
     def fit(self):
+        if self._dump_executor._shutdown:
+            self._init_dump_executor()
+
         self.logger = Tracking(
             project_name=self.config.trainer.project_name,
             experiment_name=self.config.trainer.experiment_name,
@@ -1566,6 +1604,7 @@ class PPOTrainer:
             pprint(f"Initial validation metrics: {val_metrics}")
             self.logger.log(data=val_metrics, step=self.global_steps)
             if self.config.trainer.get("val_only", False):
+                self._shutdown_dump_executor()
                 return
 
         current_epoch = self.global_steps // len(self.train_dataloader)
@@ -1630,9 +1669,13 @@ class PPOTrainer:
                 progress_bar.update(1)
                 self.global_steps += 1
                 if is_last_step:
+                    self._shutdown_dump_executor()
                     pprint(f"Final validation metrics: {last_val_metrics}")
                     progress_bar.close()
                     return
+
+        # Ensure dump executor is shut down when training loop ends without reaching is_last_step
+        self._shutdown_dump_executor()
 
     def step(self, batch_dict: dict, metrics: dict, timing_raw: dict) -> KVBatchMeta:
         # 1. put batch to agent loop manager
