@@ -27,8 +27,8 @@ ascend_tutorial/
 
 ## 特性支持说明
 
-- [verl特性支持](./feature_support/support_verl_features.md) - 支持的verl框架特性/参数列表
-- [NPU特性支持](./feature_support/npu_advance_features/npu_advance_features.md) - NPU相关常用特性/环境变量说明
+- [verl特性支持](./dev_guide/model_dev/parameter_and_metrics.md) - 支持的verl框架特性/参数列表
+- [NPU特性支持](./feature_support/npu_advance_features.md) - NPU相关常用特性/环境变量说明
 
 ## 模型支持说明
 
@@ -40,15 +40,15 @@ ascend_tutorial/
 
 - [模型开发](./dev_guide/model_dev) 
     - [模型迁移](./dev_guide/model_dev/transfer_to_npu_guide.md) - 模型迁移指南
-    - [训练参数与指标](./dev_guide/model_dev/parameters_and_metrics.md) - 训练参数与指标
+    - [训练参数与指标](./dev_guide/model_dev/parameter_and_metrics.md) - 训练参数与指标
     - [模型评测](./dev_guide/model_dev/evaluation.md) - 模型评测指南
 - [精度调试](./dev_guide/precision_analysis) 
-    - [精度分析](./dev_guide/precision_analysis/precision_alignment.md) - 精度对齐指南
-    - [精度调试器](./dev_guide/precision_analysis/precision_debugger.md) - 精度问题排查工具
+    - [精度分析](./dev_guide/precision_analysis/precision_alignment_zh.md) - 精度对齐指南
+    - [精度调试器](./dev_guide/precision_analysis/precision_debugger_zh.md) - 精度问题排查工具
 - [性能调优](./dev_guide/performance) 
     - [性能分析](./dev_guide/performance/ascend_performance_analysis_guide.md) - 性能分析指南
     - [性能调优](./dev_guide/performance/perf_tuning_on_ascend.rst) - 性能调优指南
-    - [profiling采集](./dev_guide/performance/ascend_profiling_zh.md) - profiling 工具使用指南
+    - [profiling采集](./dev_guide/performance/ascend_profiling_zh.rst) - profiling 工具使用指南
 
 
 ## 支持与反馈
