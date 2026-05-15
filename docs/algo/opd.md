@@ -530,11 +530,11 @@ Thus, the update cannot directly assign credit to the non-sampled top-\(k\) toke
 
 ### PG OPD
 
-To use PG OPD with k1 estimator, set the loss mode, enable policy gradient, and coonfigure clipping:
+PG OPD treats the negative reverse-KL estimate as a reward and applies a policy-gradient update. To use PG OPD with the `k1` estimator, set `loss_mode=k1`, enable policy-gradient distillation, and configure the PPO clipping range:
 
 ```yaml
 distillation:
-   distillation_loss: 
+   distillation_loss:
       loss_mode: k1
       use_policy_gradient: true
       policy_loss_mode: vanilla
@@ -542,23 +542,64 @@ distillation:
       clip_ratio_high: 0.28
 ```
 
-**Note**: currently only `policy_loss_mode=vanilla` is supported. Other loss modes such as `dppo_tv` require additional parameters, such as `clip_ratio_c`.
+Currently, only `policy_loss_mode=vanilla` is supported. Other policy-loss modes, such as `dppo_tv`, require additional parameters and are not implemented for OPD.
 
-**Note**: Computing the distillation loss using KL estimator is valid for reverse KL because samples are drawn from the student distribution. Estimating forward KL would instead require samples from the teacher distribution, which is just conventional (off-policy) KD. 
+The `k1` estimator is valid for reverse KL because sampled tokens are drawn from the student policy:
+
+\[
+D_{\mathrm{KL}}(\pi_\theta \,\|\, \nu)(s_t)
+=
+\mathbb{E}_{y_t \sim \pi_\theta(\cdot \mid s_t)}
+\left[
+\log \pi_\theta(y_t \mid s_t)
+-
+\log \nu(y_t \mid s_t)
+\right].
+\]
+
+Thus, a single student-sampled token gives the estimator
+
+\[
+\widehat{D}_{\mathrm{KL}}(\pi_\theta \,\|\, \nu)(s_t, y_t)
+=
+\log \pi_\theta(y_t \mid s_t)
+-
+\log \nu(y_t \mid s_t).
+\]
+
+Estimating forward KL would require samples from the teacher distribution:
+
+\[
+D_{\mathrm{KL}}(\nu \,\|\, \pi_\theta)(s_t)
+=
+\mathbb{E}_{y_t \sim \nu(\cdot \mid s_t)}
+\left[
+\log \nu(y_t \mid s_t)
+-
+\log \pi_\theta(y_t \mid s_t)
+\right],
+\]
+
+which is closer to standard off-policy KD.
 
 ### Task rewards
 
-Task rewards can be optimized at the same time as distillation loss by adding together as:
+OPD can be optimized alone or combined with the standard PPO/GRPO task-reward loss.
 
-TODO: make the eqn better. 
+When `use_task_rewards=true`, the final loss is
 
-$$
-\mathcal L = \mathcal L_{task} + \lambda \mathcal L_{distillation},
-$$
+\[
+\mathcal{L}
+=
+\mathcal{L}_{\mathrm{policy}}
++
+\lambda_{\mathrm{distill}}
+\mathcal{L}_{\mathrm{distill}},
+\]
 
-where $\lambda$ is the parameter controlling the strength of the distillation loss.
+where \(\mathcal{L}_{\mathrm{policy}}\) is the PPO/GRPO task-reward loss, \(\mathcal{L}_{\mathrm{distill}}\) is the distillation loss, and \(\lambda_{\mathrm{distill}}\) is set by `distillation_loss_coef`.
 
-To simultaneously optimize task rewards (e.g., RLVR rewards) with a distillation loss, enable task rewards and set coefficient for the distillation loss:
+To combine task rewards with distillation:
 
 ```yaml
 distillation:
@@ -566,6 +607,8 @@ distillation:
       use_task_rewards: true
       distillation_loss_coef: 1.5
 ```
+
+When `use_task_rewards=false`, the PPO/GRPO task-reward loss is zeroed and the model optimizes only the distillation loss.
 
 ### Multi-teacher OPD
 
@@ -602,6 +645,51 @@ data:
 ```
 
 **Note**: TODO: add a note about teacher GPU placement. follow the function below to highlight how placement is done. rm the function code after this TODO is satisfied. Relate the explanation to the configuration snippet above by explaining why the snippet works and telling how it could be modified not to work anymore
+
+```
+    def _validate_replica_node_alignment(self, replica_pools, per_replica_world_size, gpus_per_node):
+        """Verify that each replica occupies the expected number of nodes.
+
+        `per_replica_world_size` (W below) is the GPU count of a *single* inference
+        replica — the product of the replica's inference-time parallelism
+        (tensor_model_parallel_size * data_parallel_size * pipeline_model_parallel_size).
+        It is not the teacher's total GPU footprint (`num_replicas * W`).
+
+        `split_resource_pool` walks bundles linearly and is oblivious to node
+        boundaries, so a replica's sub-pool can end up touching more nodes than W
+        implies when W does not divide the node layout cleanly.
+
+        Example (P = n_gpus_per_node = 4, two teachers with W=3 and W=4):
+
+                node 0                  node 1
+                [0 1 2 3]               [4 5 6 7]         ← bundle idx
+
+            teacher A (W=3):
+                [A A A .]               [. . . .]          expected span 1, observed 1  ✓
+            teacher B (W=4):
+                [. . . B]               [B B B .]          expected span 1, observed 2  ✗
+
+        Teacher B's one replica (W=4) is expected to stay on a single node, but the
+        linear split dropped it on bundles 3-6 — straddling nodes 0 and 1.
+        """
+        key = self.teacher_model_config.key
+        P = gpus_per_node
+        W = per_replica_world_size
+        expected_span = (W + P - 1) // P
+        for i, sub_pool in enumerate(replica_pools):
+            start = sub_pool.start_bundle_index
+            first_node = start // P
+            last_node = (start + W - 1) // P
+            observed_span = last_node - first_node + 1
+            if observed_span != expected_span:
+                raise ValueError(
+                    f"Teacher {key!r} replica {i} sub-pool bundles [{start}, {start + W}) "
+                    f"span {observed_span} node(s) but per_replica_world_size {W} with "
+                    f"n_gpus_per_node {P} expects {expected_span}. Reorder teachers or "
+                    f"adjust num_replicas / inference parallelism so each replica sub-pool "
+                    f"aligns to node boundaries."
+                )
+```
 
 **Note**: The `teacher_key` is used to route examples to teachers and can be any string that is in the `extra_info` of each example. If examples are routed based on data source, i.e., `teacher_key == data_source`, make sure to shuffle the data. Otherwise, only one teacher will be active. For example, if the data is GSM8k concatenated with Geo3k, the first 8/11~73% of training will only use the GSM8k teacher, and the remaining 27% will use the Geo3k teacher.
 
