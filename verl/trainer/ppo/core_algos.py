@@ -2088,6 +2088,9 @@ def compute_value_loss(
     response_mask: torch.Tensor,
     cliprange_value: float,
     loss_agg_mode: str = "token-mean",
+    dp_size: int = 1,
+    batch_num_tokens: int | None = None,
+    global_batch_size: int | None = None,
 ):
     """
     Compute the clipped value-function loss for PPO.
@@ -2107,6 +2110,9 @@ def compute_value_loss(
             Clip range for value prediction updates.
         loss_agg_mode (str, optional):
             Aggregation mode for `agg_loss`. Defaults to "token-mean".
+        dp_size: Data parallel size for global loss normalization.
+        batch_num_tokens: Number of valid response tokens in the global batch.
+        global_batch_size: Number of valid rows in the global batch.
 
     Returns:
         vf_loss (torch.FloatTensor):
@@ -2118,7 +2124,14 @@ def compute_value_loss(
     vf_losses1 = (vpreds - returns) ** 2
     vf_losses2 = (vpredclipped - returns) ** 2
     clipped_vf_losses = torch.max(vf_losses1, vf_losses2)
-    vf_loss = 0.5 * agg_loss(loss_mat=clipped_vf_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+    vf_loss = 0.5 * agg_loss(
+        loss_mat=clipped_vf_losses,
+        loss_mask=response_mask,
+        loss_agg_mode=loss_agg_mode,
+        dp_size=dp_size,
+        batch_num_tokens=batch_num_tokens,
+        global_batch_size=global_batch_size,
+    )
     vf_clipfrac = verl_F.masked_mean(torch.gt(vf_losses2, vf_losses1).float(), response_mask)
     return vf_loss, vf_clipfrac
 

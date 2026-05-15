@@ -923,22 +923,14 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         return batch
 
     def _fit_compute_advantage(self, batch: DataProto) -> DataProto:
-        """Compute GRPO advantage on the final subset only, then scatter.
+        """Compute one GRPO advantage per rollout, then broadcast to its rows.
 
-        The batch at this point is the expanded+padded batch with mixed
-        ``trajectory_role`` rows. Running GRPO on the whole thing would
-        pollute group mean/std statistics with intermediate rows (which
-        share the same ``uid`` and ``reward`` as their final siblings),
-        collapsing advantage to zero.
-
-        We therefore:
-          1. Slice out the ``trajectory_role == "final"`` subset and run
-             the standard ``_fit_compute_advantage`` (parent class) on it.
-          2. Copy the resulting advantages/returns back into the full batch
-             at the same indices.
-          3. Scatter final-row advantages to sibling intermediate rows
-             (grouped by ``rollout_group_id``) and apply ``1 / T_rollout``
-             normalization so every rollout contributes equally to the loss.
+        The expanded batch contains multiple rows for the same rollout
+        trajectory (intermediate steps plus the final step). All those rows have
+        the same outcome reward, so only one representative row per
+        ``rollout_group_id`` should enter GRPO group mean/std. The resulting
+        rollout-level advantage is then broadcast to every row in that rollout
+        using each row's own ``response_mask``.
         """
         import numpy as np  # local import to avoid polluting top-level namespace
 
@@ -949,84 +941,97 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         # turn). Fall back to the standard advantage pipeline, followed only
         # by the optional 1/T_rollout normalization.
         if roles is None:
+            saved_reward_tensor = self.reward_tensor
+            saved_reward_extra_infos_dict = self.reward_extra_infos_dict
+            if batch.batch is not None and "rm_scores" in batch.batch.keys():
+                self.reward_tensor = batch.batch["rm_scores"]
+            if saved_reward_extra_infos_dict:
+                self.reward_extra_infos_dict = {
+                    k: batch.non_tensor_batch[k]
+                    for k in saved_reward_extra_infos_dict
+                    if k in (batch.non_tensor_batch or {}) and len(batch.non_tensor_batch[k]) == len(batch)
+                }
+            try:
+                batch = super()._fit_compute_advantage(batch)
+            finally:
+                self.reward_tensor = saved_reward_tensor
+                self.reward_extra_infos_dict = saved_reward_extra_infos_dict
+            if bool(self.config.async_training.get("normalize_rollout_weight", True)):
+                batch = scatter_advantage_to_intermediate_and_normalize(batch, normalize_rollout_weight=True)
+            return batch
+
+        group_ids = nt.get("rollout_group_id")
+        if group_ids is None:
             batch = super()._fit_compute_advantage(batch)
             if bool(self.config.async_training.get("normalize_rollout_weight", True)):
                 batch = scatter_advantage_to_intermediate_and_normalize(batch, normalize_rollout_weight=True)
             return batch
 
-        final_idx = np.where(np.asarray(roles) == "final")[0]
-        if len(final_idx) == 0:
-            # Degenerate case: pad-only batch. Skip advantage.
+        roles_np = np.asarray(roles, dtype=object)
+        group_ids_np = np.asarray(group_ids, dtype=np.int64)
+        group_order: list[int] = []
+        first_by_group: dict[int, int] = {}
+        final_by_group: dict[int, int] = {}
+        for idx, gid_raw in enumerate(group_ids_np):
+            gid = int(gid_raw)
+            if gid < 0 or roles_np[idx] == "padding":
+                continue
+            if gid not in first_by_group:
+                first_by_group[gid] = idx
+                group_order.append(gid)
+            if roles_np[idx] == "final":
+                final_by_group[gid] = idx
+
+        if not group_order:
             return batch
 
-        # ------------------------------------------------------------------
-        # (1) Slice the final-only subset while keeping row order stable.
-        # ------------------------------------------------------------------
-        final_subset = batch.select_idxs(torch.as_tensor(final_idx, dtype=torch.long))
+        # Pick one representative per rollout group. Prefer the final step for
+        # stability, but any row in the group has the same outcome reward.
+        rep_idx = np.asarray([final_by_group.get(gid, first_by_group[gid]) for gid in group_order], dtype=np.int64)
+        rep_subset = batch.select_idxs(torch.as_tensor(rep_idx, dtype=torch.long))
 
-        # Transfer reward tensors the parent expects. ``_fit_compute_advantage``
-        # reads ``self.reward_tensor`` (set by ``_fit_compute_reward``) which
-        # has shape (len(batch_before_expand), response_length). We need to
-        # re-align it to the final subset: the first ``n_final`` rows of the
-        # expanded batch are exactly the original (pre-expansion) final rows,
-        # in the same order. ``final_idx`` recovers them.
+        # The parent implementation expects rewards from ``self.reward_tensor``.
+        # Use row-attached ``rm_scores`` from the representative subset so
+        # rewards follow DataProto reorder/sort naturally.
         saved_reward_tensor = self.reward_tensor
-        if self.reward_tensor is not None:
-            # reward_tensor was produced before expansion, so its rows align
-            # with the final rows now sitting at positions [0, n_final).
-            # ``final_idx`` should therefore be ``arange(n_final)`` in the
-            # canonical pipeline; we still index defensively in case
-            # expander reorders in the future.
-            if self.reward_tensor.shape[0] == len(final_subset):
-                reward_tensor_final = self.reward_tensor
-            else:
-                reward_tensor_final = self.reward_tensor[: len(final_subset)]
-            self.reward_tensor = reward_tensor_final
+        saved_reward_extra_infos_dict = self.reward_extra_infos_dict
+        if rep_subset.batch is not None and "rm_scores" in rep_subset.batch.keys():
+            self.reward_tensor = rep_subset.batch["rm_scores"]
+        if saved_reward_extra_infos_dict:
+            self.reward_extra_infos_dict = {
+                k: rep_subset.non_tensor_batch[k]
+                for k in saved_reward_extra_infos_dict
+                if k in (rep_subset.non_tensor_batch or {}) and len(rep_subset.non_tensor_batch[k]) == len(rep_subset)
+            }
 
-        # ------------------------------------------------------------------
-        # (2) Run the standard advantage pipeline on the final subset.
-        # ------------------------------------------------------------------
-        final_subset = super()._fit_compute_advantage(final_subset)
+        try:
+            rep_subset = super()._fit_compute_advantage(rep_subset)
+        finally:
+            self.reward_tensor = saved_reward_tensor
+            self.reward_extra_infos_dict = saved_reward_extra_infos_dict
 
-        # Restore original reward_tensor reference for any downstream hooks.
-        self.reward_tensor = saved_reward_tensor
-
-        # ------------------------------------------------------------------
-        # (3) Write the computed advantages/returns back into the full batch
-        #     (only on final rows). Intermediate rows remain untouched here;
-        #     ``scatter_advantage_to_intermediate_and_normalize`` will copy
-        #     from the final rows in the next step.
-        # ------------------------------------------------------------------
-        if "advantages" in final_subset.batch.keys():
+        if "advantages" in rep_subset.batch.keys():
             if "advantages" not in batch.batch.keys():
                 batch.batch["advantages"] = torch.zeros(
-                    (len(batch), final_subset.batch["advantages"].shape[-1]),
-                    dtype=final_subset.batch["advantages"].dtype,
+                    (len(batch), rep_subset.batch["advantages"].shape[-1]),
+                    dtype=rep_subset.batch["advantages"].dtype,
                 )
-            batch.batch["advantages"][final_idx] = final_subset.batch["advantages"]
-        if "returns" in final_subset.batch.keys():
+            batch.batch["advantages"][rep_idx] = rep_subset.batch["advantages"]
+        if "returns" in rep_subset.batch.keys():
             if "returns" not in batch.batch.keys():
                 batch.batch["returns"] = torch.zeros_like(batch.batch["advantages"])
-            batch.batch["returns"][final_idx] = final_subset.batch["returns"]
-        # Bring along any other token-level fields the parent may have added
-        # (e.g. ``token_level_rewards``) so downstream metrics are consistent.
-        for extra_key in ("token_level_rewards", "token_level_scores"):
-            if extra_key in final_subset.batch.keys():
-                if extra_key not in batch.batch.keys():
-                    batch.batch[extra_key] = torch.zeros(
-                        (len(batch), final_subset.batch[extra_key].shape[-1]),
-                        dtype=final_subset.batch[extra_key].dtype,
-                    )
-                batch.batch[extra_key][final_idx] = final_subset.batch[extra_key]
+            batch.batch["returns"][rep_idx] = rep_subset.batch["returns"]
 
-        # ------------------------------------------------------------------
-        # (4) Scatter final advantages to intermediate siblings and apply
-        #     1 / T_rollout normalization so every rollout contributes
-        #     equally under loss_agg_mode="token-mean".
-        # ------------------------------------------------------------------
+        if "rm_scores" in batch.batch.keys():
+            batch.batch["token_level_scores"] = batch.batch["rm_scores"]
+            if not self.config.algorithm.use_kl_in_reward:
+                batch.batch["token_level_rewards"] = batch.batch["rm_scores"]
+
         normalize_rollout_weight = bool(self.config.async_training.get("normalize_rollout_weight", True))
         batch = scatter_advantage_to_intermediate_and_normalize(
-            batch, normalize_rollout_weight=normalize_rollout_weight
+            batch,
+            normalize_rollout_weight=normalize_rollout_weight,
+            source_indices=rep_idx,
         )
 
         return batch

@@ -157,6 +157,9 @@ def value_loss(config: CriticConfig, model_output, data: TensorDict, dp_group=No
         value loss
     """
     vpreds = no_padding_2_padding(model_output["values"], data)  # (bsz, response_length)
+    dp_size = data["dp_size"]
+    batch_num_tokens = data["batch_num_tokens"]
+    global_batch_size = data["global_batch_size"]
 
     # select fields and convert to padded tensor
     data = data.select("values", "returns", "response_mask").to_padded_tensor()
@@ -171,6 +174,9 @@ def value_loss(config: CriticConfig, model_output, data: TensorDict, dp_group=No
         response_mask=response_mask,
         cliprange_value=config.cliprange_value,
         loss_agg_mode=config.loss_agg_mode,
+        dp_size=dp_size,
+        batch_num_tokens=batch_num_tokens,
+        global_batch_size=global_batch_size,
     )
 
     metrics = {}

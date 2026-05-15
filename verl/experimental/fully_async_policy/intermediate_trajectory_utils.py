@@ -639,38 +639,14 @@ def strip_intermediate_trajectories_column(
     return stripped
 
 
-def _compute_rollout_group_ids(
-    data_proto: DataProto,
-    rollout_n: int,
-) -> np.ndarray:
-    """Assign each row to a rollout-group id.
+def _compute_rollout_group_ids(data_proto: DataProto) -> np.ndarray:
+    """Assign each final row to its own rollout-trajectory group id.
 
-    Semantics: "rollout group" means one prompt (one RolloutSample) that was
-    repeated ``rollout.n`` times at generation time. We identify it by the
-    ``uid`` non-tensor field set in ``FullyAsyncRollouter`` (same uid for all
-    ``rollout.n`` rows of the same RolloutSample). If ``uid`` is absent, fall
-    back to bucketing by a fixed stride of ``rollout_n``.
-
-    Returns a numpy array of shape (batch_size,) with dense integer group ids.
+    A row in the pre-expanded batch is one rollout trajectory. Intermediate
+    rows derived from that row should share the same id, so they inherit that
+    rollout's advantage and rollout-level token normalization.
     """
-    bsz = len(data_proto)
-    nt = data_proto.non_tensor_batch or {}
-    if "uid" in nt and len(nt["uid"]) == bsz:
-        uids = nt["uid"]
-        # map unique uid -> dense id, preserving first-seen order
-        order: dict = {}
-        group_ids = np.empty(bsz, dtype=np.int64)
-        for i, u in enumerate(uids):
-            if u not in order:
-                order[u] = len(order)
-            group_ids[i] = order[u]
-        return group_ids
-    # Fallback: pure positional bucketing. Assumes rows are interleaved in
-    # contiguous groups of size rollout_n, which matches the way
-    # ``prepare_single_generation_data`` repeats each prompt.
-    if rollout_n <= 0:
-        rollout_n = 1
-    return np.arange(bsz, dtype=np.int64) // rollout_n
+    return np.arange(len(data_proto), dtype=np.int64)
 
 
 def expand_intermediate_trajectories_pre_log_prob(
@@ -695,21 +671,20 @@ def expand_intermediate_trajectories_pre_log_prob(
       padded 1-row DataProto that matches the final row's tensor schema at
       this stage (``prompts``, ``responses``, ``response_mask``,
       ``attention_mask``, ``input_ids``, ``position_ids``, optional
-      ``rollout_log_probs`` / ``routed_experts``, and ``rm_scores``-free
-      since reward is already aggregated on the final row only).
+      ``rollout_log_probs`` / ``routed_experts`` / ``rm_scores``).
     * Stamp two non-tensor fields on every row (final *and* intermediate):
         - ``trajectory_role`` = ``"final"`` | ``"intermediate"``
-        - ``rollout_group_id`` = dense integer id identifying the rollout
-          (same for all rows that belong to the same RolloutSample).
+        - ``rollout_group_id`` = dense integer id identifying one rollout
+          trajectory and all of its intermediate rows.
       These labels are used later by :func:`_fit_compute_advantage` to
-      (a) pick the final-only subset for GRPO statistics, and (b) compute
-      ``1 / T_rollout`` normalization after scattering advantage.
+      (a) pick the final-only subset for GRPO statistics, and (b) copy each
+      final-row advantage to its own intermediate rows before ``1 / T_rollout``
+      normalization.
 
     No ``advantages`` / ``returns`` inheritance happens here (advantage is
-    still to be computed). No ``rm_scores`` is emitted on intermediate rows
-    either — the final row already carries the shared reward, and advantage
-    will be computed on final-only, so intermediate rows do not need any
-    token-level reward of their own.
+    still to be computed). ``rm_scores`` is emitted on intermediate rows using
+    the shared rollout reward, so rewards remain row-attached through any
+    downstream reorder/pad operation.
 
     The input payload is expected to live in ``meta_info[cache_key]`` (put
     there by :func:`strip_intermediate_trajectories_column`). If the cache is
@@ -747,11 +722,12 @@ def expand_intermediate_trajectories_pre_log_prob(
     _pos_ndim = base.batch["position_ids"].ndim if "position_ids" in base.batch.keys() else None
     assert_batch_schema(base, "expand_pre_logprob.base_before_expand", require_position_ids_ndim=_pos_ndim)
 
-    # Group ids for the final rows (uid-based; falls back to positional buckets).
-    group_ids = _compute_rollout_group_ids(base, rollout_n=rollout_n)
+    del rollout_n  # kept in the signature for backward-compatible callers.
+    # Group ids for final rows: one id per rollout trajectory.
+    group_ids = _compute_rollout_group_ids(base)
 
-    # Stamp role / group id on the final rows even when no intermediates are
-    # present, so downstream code can always rely on these fields.
+    # Stamp role / rollout group id on the final rows even when no
+    # intermediates are present, so downstream code can rely on these fields.
     def _stamp_role_and_group(dp: DataProto, roles: np.ndarray, gids: np.ndarray) -> None:
         dp.non_tensor_batch["trajectory_role"] = roles
         dp.non_tensor_batch["rollout_group_id"] = gids.astype(np.int64, copy=False)
@@ -787,7 +763,7 @@ def expand_intermediate_trajectories_pre_log_prob(
                 rollout_config=rollout_config,
                 inherited_non_tensor=inherited_nt,
                 inherited_tensors=None,
-                emit_rm_scores=False,
+                emit_rm_scores=True,
             )
             # --- Assert: each intermediate piece must match base position_ids ndim ---
             if _pos_ndim is not None and "position_ids" in piece.batch.keys():
@@ -933,11 +909,10 @@ def zero_out_padding_rows(data_proto: DataProto, pad_size: int) -> DataProto:
       * zero ``response_mask`` (so token-mean ignores them),
       * zero ``advantages`` / ``returns`` / ``rm_scores`` /
         ``token_level_{rewards,scores}`` (belt-and-braces), and
-      * relabel ``trajectory_role`` -> ``"padding"`` and
-        ``rollout_group_id`` -> ``-1`` on the padded tail, so downstream
-        role-aware logic (``_fit_compute_advantage`` slicing by
-        ``role == "final"``, ``scatter_advantage_to_intermediate_and_normalize``
-        grouping by ``rollout_group_id``) skips them cleanly.
+      * relabel ``trajectory_role`` -> ``"padding"`` and ``rollout_group_id``
+        -> ``-1`` on the padded tail, so downstream role-aware logic
+        (``_fit_compute_advantage`` slicing by ``role == "final"``,
+        ``scatter_advantage_to_intermediate_and_normalize``) skips them cleanly.
     """
     if pad_size <= 0:
         return data_proto
@@ -975,26 +950,26 @@ def scatter_advantage_to_intermediate_and_normalize(
     data_proto: DataProto,
     *,
     normalize_rollout_weight: bool = True,
+    source_indices: np.ndarray | list[int] | None = None,
 ) -> DataProto:
     """Scatter final-row advantage/returns to sibling intermediate rows and
     apply ``1 / T_rollout`` normalization.
 
-    Assumes the expanded batch has two non-tensor fields stamped by
+    Assumes the expanded batch has non-tensor fields stamped by
     :func:`expand_intermediate_trajectories_pre_log_prob`:
       - ``trajectory_role`` ∈ {"final", "intermediate"}
-      - ``rollout_group_id`` (int)
+      - ``rollout_group_id`` identifying one rollout trajectory
 
-    And that ``advantages`` / ``returns`` are already set on *final* rows
-    (computed by the standard GRPO path on the final subset). This function:
+    And that ``advantages`` / ``returns`` are already set on one representative
+    row per ``rollout_group_id``. This function:
 
-    1. Copies the per-group final-row advantages/returns onto the intermediate
-       rows sharing the same ``rollout_group_id``. Each rollout group has
-       ``rollout.n`` final rows (all carry the same advantage scalar in GRPO
-       after group-normalize), so we pick the first final row in each group
-       as the canonical source.
-    2. Optionally multiplies every row in a rollout group by ``1 / T_rollout``
-       where ``T_rollout`` is the total number of valid response tokens across
-       that rollout's final + all intermediate rows. Under
+    1. Broadcasts each representative row's scalar advantage/return onto all
+       rows sharing the same ``rollout_group_id`` using each row's own
+       ``response_mask``. This preserves per-rollout GRPO advantages after
+       prompt-level group normalization.
+    2. Optionally multiplies every row in a rollout trajectory by
+       ``1 / T_rollout`` where ``T_rollout`` is the total number of valid
+       response tokens across that trajectory's final + intermediate rows. Under
        ``loss_agg_mode="token-mean"`` this yields equal per-rollout
        contribution to the final loss regardless of how many turns it has.
     """
@@ -1017,40 +992,49 @@ def scatter_advantage_to_intermediate_and_normalize(
     group_ids_np = np.asarray(group_ids, dtype=np.int64)
 
     # ------------------------------------------------------------------
-    # (1) Scatter advantages / returns from final rows to intermediate rows.
+    # (1) Broadcast representative advantages / returns to all rows in group.
     # ------------------------------------------------------------------
-    if roles is not None:
-        # Build: group_id -> first-final-row-index
-        group_to_final: dict[int, int] = {}
+    response_mask = data_proto.batch.get("response_mask", None)
+    if response_mask is None:
+        logger.warning("[scatter_advantage] response_mask missing; cannot broadcast advantages by row mask")
+    else:
+        source_set = set(int(i) for i in source_indices) if source_indices is not None else None
+        group_to_source: dict[int, int] = {}
         for i in range(n):
-            if roles[i] == "final":
-                gid = int(group_ids_np[i])
-                if gid not in group_to_final:
-                    group_to_final[gid] = i
+            gid = int(group_ids_np[i])
+            if gid < 0:
+                continue
+            if source_set is not None and i not in source_set:
+                continue
+            if source_set is None and roles is not None and roles[i] == "padding":
+                continue
+            if gid not in group_to_source:
+                group_to_source[gid] = i
 
-        # Copy advantage vectors from the canonical final row onto
-        # intermediate rows of the same group. We do this as whole-row
-        # copies to preserve any in-row structure (though for GRPO the
-        # scalar is broadcast across response_length on all rows anyway).
         adv = data_proto.batch["advantages"]
         has_returns = "returns" in data_proto.batch.keys()
         ret = data_proto.batch["returns"] if has_returns else None
+        mask_float = response_mask.to(torch.float32)
+
+        def _row_scalar(values: torch.Tensor, row_idx: int) -> torch.Tensor:
+            row_mask = mask_float[row_idx].to(values.device, dtype=values.dtype)
+            denom = row_mask.sum().clamp(min=1.0)
+            return (values[row_idx] * row_mask).sum() / denom
+
+        adv_scalars = {gid: _row_scalar(adv, src) for gid, src in group_to_source.items()}
+        ret_scalars = {gid: _row_scalar(ret, src) for gid, src in group_to_source.items()} if has_returns else {}
 
         for i in range(n):
-            if roles[i] != "intermediate":
-                continue
             gid = int(group_ids_np[i])
-            src = group_to_final.get(gid)
-            if src is None:
-                # Orphan intermediate (no final row in the same group).
-                # Zero out the advantage to be safe.
+            if gid not in adv_scalars:
                 adv[i] = 0
                 if has_returns:
                     ret[i] = 0
                 continue
-            adv[i] = adv[src]
+            row_mask = mask_float[i].to(adv.device, dtype=adv.dtype)
+            adv[i] = adv_scalars[gid].to(adv.device, dtype=adv.dtype) * row_mask
             if has_returns:
-                ret[i] = ret[src]
+                ret[i] = ret_scalars[gid].to(ret.device, dtype=ret.dtype) * row_mask.to(ret.device, dtype=ret.dtype)
 
     # ------------------------------------------------------------------
     # (2) Rollout-level weight normalization: advantage /= T_rollout.
@@ -1063,18 +1047,20 @@ def scatter_advantage_to_intermediate_and_normalize(
             per_row_tokens = response_mask.to(torch.float32).sum(dim=-1)
             per_row_tokens_np = per_row_tokens.detach().cpu().numpy()
 
-            # Aggregate token count per group.
-            group_tokens: dict[int, float] = {}
+            # Aggregate token count per rollout trajectory.
+            trajectory_tokens: dict[int, float] = {}
             for i in range(n):
                 gid = int(group_ids_np[i])
-                group_tokens[gid] = group_tokens.get(gid, 0.0) + float(per_row_tokens_np[i])
+                if gid < 0:
+                    continue
+                trajectory_tokens[gid] = trajectory_tokens.get(gid, 0.0) + float(per_row_tokens_np[i])
 
             # Build scale[i] = 1 / T_rollout_of(i).
             adv_dtype = data_proto.batch["advantages"].dtype
             scale = torch.empty(n, dtype=adv_dtype)
             for i in range(n):
                 gid = int(group_ids_np[i])
-                t = group_tokens.get(gid, 0.0)
+                t = trajectory_tokens.get(gid, 0.0)
                 scale[i] = (1.0 / t) if t > 0 else 0.0
             scale = scale.unsqueeze(-1)
 
@@ -1082,7 +1068,7 @@ def scatter_advantage_to_intermediate_and_normalize(
             if "returns" in data_proto.batch.keys():
                 data_proto.batch["returns"] = data_proto.batch["returns"] * scale
 
-            data_proto.meta_info["fully_async/rollout_weight/num_groups"] = len(group_tokens)
-            data_proto.meta_info["fully_async/rollout_weight/total_tokens"] = float(sum(group_tokens.values()))
+            data_proto.meta_info["fully_async/rollout_weight/num_groups"] = len(trajectory_tokens)
+            data_proto.meta_info["fully_async/rollout_weight/total_tokens"] = float(sum(trajectory_tokens.values()))
 
     return data_proto
