@@ -214,14 +214,23 @@ RUN git clone --filter=blob:none "${VERL_REPO}" verl && \
     git -C verl checkout "${VERL_REF}"
 WORKDIR /workspace/verl
 
-# Sync every backend in a single layer (TARGETS is a build-arg so we can't
-# split into one-RUN-per-backend without hard-coding the list). uv's own
-# package cache is dropped at the end to keep the image lean.
-RUN set -e; for b in ${TARGETS}; do \
-        echo "=== uv sync ${b} ===" && \
-        python3 manage_envs.py sync ${b}; \
-    done && \
-    uv cache clean
+# One RUN per backend so each venv lands in its own Docker layer: editing one
+# pin only invalidates that backend's layer, and a partial build keeps every
+# previously-finished venv. Each layer is gated on TARGETS via a whole-word
+# match (` x ` in ` $TARGETS `), so dropping a backend from --build-arg TARGETS
+# turns its layer into a no-op without rewriting this file.
+RUN if echo " ${TARGETS} " | grep -q " vllm ";          then python3 manage_envs.py sync vllm; fi
+RUN if echo " ${TARGETS} " | grep -q " sglang ";        then python3 manage_envs.py sync sglang; fi
+RUN if echo " ${TARGETS} " | grep -q " trtllm ";        then python3 manage_envs.py sync trtllm; fi
+RUN if echo " ${TARGETS} " | grep -q " fsdp ";          then python3 manage_envs.py sync fsdp; fi
+RUN if echo " ${TARGETS} " | grep -q " megatron ";      then python3 manage_envs.py sync megatron; fi
+RUN if echo " ${TARGETS} " | grep -q " veomni ";        then python3 manage_envs.py sync veomni; fi
+RUN if echo " ${TARGETS} " | grep -q " nemoautomodel "; then python3 manage_envs.py sync nemoautomodel; fi
+RUN if echo " ${TARGETS} " | grep -q " cpu ";           then python3 manage_envs.py sync cpu; fi
+
+# Drop uv's package cache as a final layer — keeps the image lean while letting
+# each per-backend layer above stay reproducible / cache-friendly.
+RUN uv cache clean
 
 # Default PATH points at the megatron venv — the typical RL trainer driver.
 # Switch at runtime by sourcing or prepending another:
