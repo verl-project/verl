@@ -125,7 +125,7 @@ r_t
 \right).
 $$
 
-The stop-gradient is required because the reward is used inside a policy-gradient objective. Without it, differentiating through the estimator would not produce the intended score-function update. 
+The stop-gradient is required because the reward is used inside a policy-gradient objective. Without it, differentiating through the estimator with respect to student parameters would zero the teacher's logprob, leading to a loss that is independent of the teacher signal. 
 
 ### Multi-Teacher OPD
 
@@ -722,10 +722,10 @@ The returned scalar loss is what `engine.train_batch` backpropagates.
 - `verl/trainer/distillation/fsdp/losses.py` — FSDP backend `compute_forward_kl_topk`
 - `verl/trainer/distillation/megatron/losses.py` — Megatron backend `compute_forward_kl_topk`
 - `verl/workers/engine_workers.py` — `ActorRolloutRefWorker.init_model`; binds `distillation_ppo_loss` as the actor's `loss_fn` when distillation is enabled
-- `verl/workers/engine/{fsdp,megatron}/transformer_impl.py` — training-engine forward steps; invoke `distillation_ppo_loss` first as a logits processor (top-k modes) and again as the final loss
+- `verl/workers/engine/{fsdp,megatron}/transformer_impl.py` — training-engine forward steps; invoke `distillation_ppo_loss` first as a logits processor (top-$k$ modes) and again as the final loss
 - `verl/trainer/main_ppo.py` — `is_distillation_enabled` gate; allocates the dedicated `teacher_pool` resource pool
-- `verl/trainer/ppo/ray_trainer.py` — constructs `MultiTeacherModelManager` and hands its `get_client()` dict to `AgentLoopWorker(... teacher_client=…)`
-- `verl/workers/rollout/llm_server.py` — `LLMServerClient` and `GlobalRequestLoadBalancer` (sticky-session + least-loaded) used for both student rollout and teacher scoring
+- `verl/trainer/ppo/ray_trainer.py` — constructs `MultiTeacherModelManager` and hands its `get_client()` dict to `AgentLoopWorker(... teacher_client=...)`
+- `verl/workers/rollout/llm_server.py` — `LLMServerClient` and `GlobalRequestLoadBalancer` used for both student rollout and teacher logprob computation
 
 ### **Configuration Files**
 
