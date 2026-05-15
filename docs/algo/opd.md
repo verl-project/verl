@@ -1,4 +1,4 @@
-# On-Policy Distillation
+# On-Policy Distillation (OPD)
 
 **Author:** [Jacob Helwig](https://jacobhelwig.github.io/)
 
@@ -46,9 +46,9 @@ On-policy distillation (OPD) combines the state alignment of on-policy RL with t
 
 Intuitively, the teacher provides guidance conditioned on the trajectory the student actually chose. If the student follows an algebraic proof path, the teacher supplies supervision for what it would do from that algebraic state.
 
-Formally, let \(x \sim p_{\mathrm{data}}\) be a prompt, \(y \sim \pi_{\theta}(\cdot \mid x)\) be a student rollout, and \(s_t = (x, y_{<t})\) be the state at token \(t\). OPD minimizes
+Formally, let $x \sim p_{\mathrm{data}}$ be a prompt, $y \sim \pi_{\theta}(\cdot \mid x)$ be a student rollout, and $s_t = (x, y_{<t})$ be the state at token $t$. OPD minimizes
 
-\[
+$$
 \mathcal{L}_{\mathrm{OPD}}(\theta)
 =
 \mathbb{E}_{x \sim p_{\mathrm{data}},\, y \sim \pi_{\theta}(\cdot \mid x)}
@@ -61,9 +61,9 @@ D_t\!\left(
 y_t
 \right)
 \right],
-\]
+$$
 
-where \(\pi_{\theta}\) is the student policy, \(\nu\) is the teacher policy, and \(D_t\) is either a distribution-level divergence or a sampled-token estimator of a divergence.
+where $\pi_{\theta}$ is the student policy, $\nu$ is the teacher policy, and $D_t$ is either a distribution-level divergence or a sampled-token estimator of a divergence.
 
 In practice, the sampled rollout is treated as fixed during the student update. The distinction between supervised OPD and policy-gradient OPD is how the per-token distillation signal is applied.
 
@@ -75,7 +75,7 @@ We implement two OPD variants.
 
 GKD OPD directly minimizes a KL divergence between the teacher and student distributions at student-induced states. For forward KL,
 
-\[
+$$
 D_{\mathrm{KL}}\!\left(\nu \,\|\, \pi_{\theta}\right)(s_t)
 =
 \sum_{v \in V}
@@ -86,7 +86,7 @@ D_{\mathrm{KL}}\!\left(\nu \,\|\, \pi_{\theta}\right)(s_t)
 }{
 \pi_{\theta}(v \mid s_t)
 }.
-\]
+$$
 
 The distillation loss is optimized by direct backpropagation through the student probabilities. This uses the full distributional signal available from the teacher.
 
@@ -94,7 +94,7 @@ The distillation loss is optimized by direct backpropagation through the student
 
 PG OPD treats the distillation signal as a reward and applies a policy-gradient update. Since tokens are sampled from the student policy, the sampled-token estimator corresponds to reverse KL:
 
-\[
+$$
 D_{\mathrm{KL}}\!\left(\pi_{\theta} \,\|\, \nu\right)(s_t)
 =
 \mathbb{E}_{y_t \sim \pi_{\theta}(\cdot \mid s_t)}
@@ -103,11 +103,11 @@ D_{\mathrm{KL}}\!\left(\pi_{\theta} \,\|\, \nu\right)(s_t)
 -
 \log \nu(y_t \mid s_t)
 \right].
-\]
+$$
 
 The per-token Monte Carlo estimator is
 
-\[
+$$
 \widehat{D}_{\mathrm{KL}}\!\left(\pi_{\theta} \,\|\, \nu\right)(s_t, y_t)
 =
 \operatorname{sg}\!\left(
@@ -117,11 +117,11 @@ The per-token Monte Carlo estimator is
 \right),
 \quad
 y_t \sim \pi_{\theta}(\cdot \mid s_t).
-\]
+$$
 
 Equivalently, maximizing negative reverse KL uses the reward
 
-\[
+$$
 r_t
 =
 \operatorname{sg}\!\left(
@@ -129,7 +129,7 @@ r_t
 -
 \log \pi_{\theta}(y_t \mid s_t)
 \right).
-\]
+$$
 
 The stop-gradient is required because the reward is used inside a policy-gradient objective. Without it, differentiating through the estimator would not produce the intended score-function update. This estimator is valid for reverse KL because samples are drawn from the student distribution; estimating forward KL would require samples from the teacher distribution.
 
@@ -252,9 +252,9 @@ GPUs, so the teacher's total footprint is `num_replicas × per_replica_world_siz
 For a **single teacher**, you may leave this at `0`: `_resolve_teacher_models`
 auto-fills it as `pool_size // per_replica_world_size`.
 
-### `distillation.teacher_models.<name>.inference.*` ([`RolloutConfig`](../../verl/workers/config/rollout.py))
+### `distillation.teacher_models.<name>.inference.*`
 
-Inference-engine config for this teacher (vLLM/SGLang). Same shape as
+Inference-engine config for this teacher (vLLM/SGLang); see [`RolloutConfig`](../../verl/workers/config/rollout.py). Same shape as
 `actor_rollout_ref.rollout.*`. Notable defaults inherited from the YAML:
 
 - `inference.name` — e.g. `vllm` or `sglang`.
@@ -416,9 +416,9 @@ algorithm:
 
 ### GKD OPD
 
-GKD OPD uses a top-\(k\) partial-sum approximation to forward KL from the teacher to the student:
+GKD OPD uses a top-$k$ partial-sum approximation to forward KL from the teacher to the student:
 
-\[
+$$
 \mathcal{L}_{\mathrm{GKD}}^{(k)}(s_t)
 =
 \sum_{v \in \operatorname{TopK}(\nu(\cdot \mid s_t))}
@@ -428,11 +428,11 @@ GKD OPD uses a top-\(k\) partial-sum approximation to forward KL from the teache
 -
 \log \pi_\theta(v \mid s_t)
 \bigr],
-\]
+$$
 
-where \(\nu\) is the teacher policy and \(\pi_\theta\) is the student policy. The teacher and student probabilities here are the values from each model's full-vocabulary softmax, evaluated at the teacher's top-\(k\) token IDs. Because the sum is taken over only \(k\) tokens rather than the full vocabulary, the per-token loss can be negative when the student concentrates probability mass outside the teacher's top-\(k\); the implementation clamps such per-token losses to \(0\).
+where $\nu$ is the teacher policy and $\pi_\theta$ is the student policy. The teacher and student probabilities here are the values from each model's full-vocabulary softmax, evaluated at the teacher's top-$k$ token IDs. Because the sum is taken over only $k$ tokens rather than the full vocabulary, the per-token loss can be negative when the student concentrates probability mass outside the teacher's top-$k$; the implementation clamps such per-token losses to $0$.
 
-As of May 14, 2026, GKD OPD is implemented only over the teacher top-\(k\) logits. The current teacher server returns log-probabilities for the sampled token and the teacher top-\(k\) tokens, but does not support gathering log-probabilities at arbitrary token IDs. Therefore, the implementation supports teacher-top-\(k\) forward KL, but not student-top-\(k\) reverse KL.
+As of May 14, 2026, GKD OPD is implemented only over the teacher top-$k$ logits. The current teacher server returns log-probabilities for the sampled token and the teacher top-$k$ tokens, but does not support gathering log-probabilities at arbitrary token IDs. Therefore, the implementation supports teacher-top-$k$ forward KL, but not student-top-$k$ reverse KL.
 
 To use GKD OPD, set `loss_mode=forward_kl_topk`, choose `topk`, and disable policy-gradient distillation:
 
@@ -444,15 +444,15 @@ distillation:
       use_policy_gradient: false
 ```
 
-Do not use `forward_kl_topk` with `use_policy_gradient=true`. The top-\(k\) loss contains distributional information for many teacher-preferred tokens, but a policy-gradient update only acts through the sampled token:
+Do not use `forward_kl_topk` with `use_policy_gradient=true`. The top-$k$ loss contains distributional information for many teacher-preferred tokens, but a policy-gradient update only acts through the sampled token:
 
-\[
+$$
 \nabla_\theta \mathcal{L}_{\mathrm{PG}}
 \propto
 - A_t \nabla_\theta \log \pi_\theta(y_t \mid s_t).
-\]
+$$
 
-Thus, the update cannot directly assign credit to the non-sampled top-\(k\) tokens. This discards most of the distributional signal and can produce misleading updates. For example, if the student already matches the teacher on the sampled token but overestimates other teacher-top-\(k\) tokens, the forward KL is still positive; using it as a policy-gradient reward would incorrectly push on the sampled token.
+Thus, the update cannot directly assign credit to the non-sampled top-$k$ tokens. This discards most of the distributional signal and can produce misleading updates. For example, if the student already matches the teacher on the sampled token but overestimates other teacher-top-$k$ tokens, the forward KL is still positive; using it as a policy-gradient reward would incorrectly push on the sampled token.
 
 
 ### PG OPD
@@ -473,7 +473,7 @@ Currently, only `policy_loss_mode=vanilla` is supported. Other policy-loss modes
 
 The `k1` estimator is valid for reverse KL because sampled tokens are drawn from the student policy:
 
-\[
+$$
 D_{\mathrm{KL}}(\pi_\theta \,\|\, \nu)(s_t)
 =
 \mathbb{E}_{y_t \sim \pi_\theta(\cdot \mid s_t)}
@@ -482,21 +482,21 @@ D_{\mathrm{KL}}(\pi_\theta \,\|\, \nu)(s_t)
 -
 \log \nu(y_t \mid s_t)
 \right].
-\]
+$$
 
 Thus, a single student-sampled token gives the estimator
 
-\[
+$$
 \widehat{D}_{\mathrm{KL}}(\pi_\theta \,\|\, \nu)(s_t, y_t)
 =
 \log \pi_\theta(y_t \mid s_t)
 -
 \log \nu(y_t \mid s_t).
-\]
+$$
 
 Estimating forward KL would require samples from the teacher distribution:
 
-\[
+$$
 D_{\mathrm{KL}}(\nu \,\|\, \pi_\theta)(s_t)
 =
 \mathbb{E}_{y_t \sim \nu(\cdot \mid s_t)}
@@ -505,7 +505,7 @@ D_{\mathrm{KL}}(\nu \,\|\, \pi_\theta)(s_t)
 -
 \log \pi_\theta(y_t \mid s_t)
 \right],
-\]
+$$
 
 which is closer to standard off-policy KD.
 
@@ -515,16 +515,16 @@ OPD can be optimized alone or combined with the standard PPO/GRPO task-reward lo
 
 When `use_task_rewards=true`, the final loss is
 
-\[
+$$
 \mathcal{L}
 =
 \mathcal{L}_{\mathrm{policy}}
 +
 \lambda_{\mathrm{distill}}
 \mathcal{L}_{\mathrm{distill}},
-\]
+$$
 
-where \(\mathcal{L}_{\mathrm{policy}}\) is the PPO/GRPO task-reward loss, \(\mathcal{L}_{\mathrm{distill}}\) is the distillation loss, and \(\lambda_{\mathrm{distill}}\) is set by `distillation_loss_coef`.
+where $\mathcal{L}_{\mathrm{policy}}$ is the PPO/GRPO task-reward loss, $\mathcal{L}_{\mathrm{distill}}$ is the distillation loss, and $\lambda_{\mathrm{distill}}$ is set by `distillation_loss_coef`.
 
 To combine task rewards with distillation:
 
@@ -573,25 +573,25 @@ data:
 
 In this example, the teacher pool has
 
-\[
+$$
 8 \times 2 = 16
-\]
+$$
 
 GPUs. Assuming `data_parallel_size=1` and `pipeline_model_parallel_size=1`, the teacher footprints are:
 
-\[
+$$
 \text{gsm8k}: 2 \text{ replicas} \times 2 \text{ GPUs} = 4 \text{ GPUs}
-\]
+$$
 
-\[
+$$
 \text{geo3k}: 3 \text{ replicas} \times 4 \text{ GPUs} = 12 \text{ GPUs}
-\]
+$$
 
-so the total teacher footprint is \(4 + 12 = 16\) GPUs, matching the resource pool.
+so the total teacher footprint is $4 + 12 = 16$ GPUs, matching the resource pool.
 
 Teacher replicas are assigned by linearly splitting the teacher resource pool into contiguous GPU bundles. Each individual replica must occupy the expected number of nodes implied by its `per_replica_world_size`:
 
-\[
+$$
 \texttt{per\_replica\_world\_size}
 =
 \texttt{tensor\_model\_parallel\_size}
@@ -599,7 +599,7 @@ Teacher replicas are assigned by linearly splitting the teacher resource pool in
 \texttt{data\_parallel\_size}
 \times
 \texttt{pipeline\_model\_parallel\_size}.
-\]
+$$
 
 With `n_gpus_per_node=8`, the example above aligns cleanly:
 
@@ -645,23 +645,23 @@ OPD logs metrics under `actor/distillation/*`.
 - `actor/distillation/loss_min` / `actor/distillation/loss_max`  
   Minimum and maximum per-token distillation loss in the batch. Use these to detect outlier tokens or numerical instability.
 
-### Top-\(k\) metrics
+### Top-$k$ metrics
 
-These metrics are logged for top-\(k\) loss modes such as `forward_kl_topk`.
+These metrics are logged for top-$k$ loss modes such as `forward_kl_topk`.
 
 - `actor/distillation/student_mass`  
-  Average student probability mass assigned to the teacher top-\(k\) tokens.
+  Average student probability mass assigned to the teacher top-$k$ tokens.
 
 - `actor/distillation/teacher_mass`  
-  Average teacher probability mass assigned to its own top-\(k\) tokens.
+  Average teacher probability mass assigned to its own top-$k$ tokens.
 
 - `actor/distillation/student_mass_min` / `actor/distillation/student_mass_max`  
-  Minimum and maximum student mass on the teacher top-\(k\) tokens within the batch.
+  Minimum and maximum student mass on the teacher top-$k$ tokens within the batch.
 
 - `actor/distillation/teacher_mass_min` / `actor/distillation/teacher_mass_max`  
-  Minimum and maximum teacher mass on the teacher top-\(k\) tokens within the batch.
+  Minimum and maximum teacher mass on the teacher top-$k$ tokens within the batch.
 
-`teacher_mass` indicates how much of the teacher distribution is covered by the selected top-\(k\). Low `teacher_mass` means the top-\(k\) approximation is truncating substantial teacher probability mass; increase `topk` if memory and runtime allow.
+`teacher_mass` indicates how much of the teacher distribution is covered by the selected top-$k$. Low `teacher_mass` means the top-$k$ approximation is truncating substantial teacher probability mass; increase `topk` if memory and runtime allow.
 
 `student_mass` indicates how much probability the student assigns to the teacher-preferred tokens. During successful distillation, `student_mass` should generally move toward `teacher_mass`. A sharp drop in `student_mass`, especially with rising `loss`, can indicate instability or a token-alignment issue.
 
