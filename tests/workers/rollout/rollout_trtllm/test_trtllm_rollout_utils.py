@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import os
 import uuid
 
 import numpy as np
@@ -22,8 +23,24 @@ from omegaconf import OmegaConf
 from PIL import Image
 from transformers import AutoTokenizer
 
-UNIMODAL_MODEL_PATH = "Qwen/Qwen2.5-0.5B-Instruct"
-MULTIMODAL_MODEL_PATH = "Qwen/Qwen2.5-VL-3B-Instruct"
+# Resolve model paths from the CI cache root (shared with the other TRT-LLM
+# unit tests in this directory). The CI runner ships weights under
+# ${TRTLLM_TEST_MODEL_PATH_ROOT}/Qwen/..., so we avoid an HF Hub round-trip
+# (and the matching "couldn't connect to https://hf-mirror.com" failure) by
+# loading from disk. Local dev runs without the env var fall back to the HF
+# model IDs and resolve via the normal HF cache / hub.
+_MODEL_PATH_ROOT = os.path.expanduser(os.getenv("TRTLLM_TEST_MODEL_PATH_ROOT", ""))
+
+
+def _resolve_model_path(model_id: str) -> str:
+    if not _MODEL_PATH_ROOT:
+        return model_id
+    candidate = os.path.join(_MODEL_PATH_ROOT, model_id)
+    return candidate if os.path.isdir(candidate) else model_id
+
+
+UNIMODAL_MODEL_PATH = _resolve_model_path("Qwen/Qwen2.5-0.5B-Instruct")
+MULTIMODAL_MODEL_PATH = _resolve_model_path("Qwen/Qwen2.5-VL-3B-Instruct")
 
 MAX_MODEL_LEN = 2048
 RESPONSE_LENGTH = 32

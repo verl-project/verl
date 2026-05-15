@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
-# GRPO | vision | vLLM rollout | Megatron training | NVIDIA GPUs
+# GRPO | vision | configurable rollout | Megatron training | NVIDIA GPUs
+#
+# INFER_BACKEND controls rollout backend: vllm | sglang | trtllm.
 
 set -xeuo pipefail
 
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 
 # ---- user-adjustable ----
+INFER_BACKEND=${INFER_BACKEND:-vllm}
 MODEL_PATH=${MODEL_PATH:-Qwen/Qwen3-VL-8B-Instruct}
 NNODES=${NNODES:-1}
 NGPUS_PER_NODE=${NGPUS_PER_NODE:-8}
@@ -32,7 +35,7 @@ save_freq=${SAVE_FREQ:-20}
 test_freq=${TEST_FREQ:-5}
 
 project_name=${PROJECT_NAME:-verl_grpo_geo3k}
-experiment_name=${EXPERIMENT_NAME:-qwen3_vl_8b_vllm_megatron}
+experiment_name=${EXPERIMENT_NAME:-qwen3_vl_8b_${INFER_BACKEND}_megatron}
 # ---- end user-adjustable ----
 ########################### parameter arrays ###########################
 
@@ -70,7 +73,7 @@ ACTOR=(
 )
 
 ROLLOUT=(
-    actor_rollout_ref.rollout.name=vllm
+    actor_rollout_ref.rollout.name=${INFER_BACKEND}
     actor_rollout_ref.rollout.tensor_model_parallel_size=${rollout_tp}
     actor_rollout_ref.rollout.gpu_memory_utilization=${rollout_gpu_mem_util}
     actor_rollout_ref.rollout.n=${rollout_n}
