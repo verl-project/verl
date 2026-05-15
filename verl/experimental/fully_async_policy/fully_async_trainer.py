@@ -44,14 +44,18 @@ from verl.experimental.fully_async_policy.message_queue import MessageQueueClien
 from verl.experimental.separation.ray_trainer import SeparateRayPPOTrainer
 from verl.protocol import pad_dataproto_to_divisor
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
+from verl.trainer.distillation.losses import is_distillation_enabled
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager
 from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_reward_model
+from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, should_save_ckpt_esi
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
+from verl.utils.py_functional import rename_dict
 from verl.utils.tracking import Tracking, ValidationGenerationsLogger
 from verl.workers.rollout.llm_server import LLMServerManager
+from verl.workers.utils.padding import left_right_2_no_padding
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -228,9 +232,6 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         self.use_reference_policy = need_reference_policy(self.config)
 
         self.use_rm = need_reward_model(self.config)
-
-        # distillation config needed by _update_actor in ray_trainer.py
-        from verl.trainer.distillation.losses import is_distillation_enabled
 
         if is_distillation_enabled(self.config.get("distillation")):
             self.distillation_config = omega_conf_to_dataclass(self.config.distillation)
@@ -712,8 +713,8 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
                 require_position_ids_ndim=_pos_ndim,
                 has_processor=self.processor is not None,
             )
-            # Expand intermediate trajectories (and pad to actor mini-batch
-            # multiple) BEFORE any per-token forward pass, so that
+            # Expand intermediate trajectories (and pad for even worker
+            # dispatch) BEFORE any per-token forward pass, so that
             # log_prob / ref_log_prob / critic are computed over every
             # trajectory row that will participate in the actor update.
             batch = self._fit_expand_and_pad(batch)
@@ -762,6 +763,63 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
         return batch
 
+    def _update_actor(self, batch: DataProto) -> DataProto:
+        """Update actor using the expanded rows as one PPO mini-batch."""
+        rollout_config = self.config.actor_rollout_ref.rollout
+        batch.meta_info["temperature"] = rollout_config.temperature
+        batch_td = batch.to_tensordict()
+        batch_td = left_right_2_no_padding(batch_td)
+        calculate_entropy = self.config.actor_rollout_ref.actor.calculate_entropy or (
+            self.config.actor_rollout_ref.actor.entropy_coeff != 0.0
+        )
+        distillation_use_topk = (
+            self.distillation_config.distillation_loss.loss_settings.use_topk
+            if is_distillation_enabled(self.config.get("distillation"))
+            else False
+        )
+        pad_size = int(batch.meta_info.get("fully_async/pad/num_padding_rows", 0) or 0)
+        valid_batch_size = max(len(batch) - pad_size, 1)
+        expanded_mini_batch_size = len(batch)
+        tu.assign_non_tensor(
+            batch_td,
+            calculate_entropy=calculate_entropy,
+            distillation_use_topk=distillation_use_topk,
+            global_batch_size=valid_batch_size,
+            mini_batch_size=expanded_mini_batch_size,
+            epochs=self.config.actor_rollout_ref.actor.ppo_epochs,
+            seed=self.config.actor_rollout_ref.actor.data_loader_seed,
+            dataloader_kwargs={"shuffle": self.config.actor_rollout_ref.actor.shuffle},
+            compute_loss=True,
+        )
+        actor_output = self.actor_rollout_wg.update_actor(batch_td)
+        actor_output = tu.get(actor_output, "metrics")
+        actor_output = rename_dict(actor_output, "actor/")
+        actor_output["perf/mfu/actor"] = actor_output.pop("actor/mfu")
+        return DataProto.from_single_dict(data={}, meta_info={"metrics": actor_output})
+
+    def _update_critic(self, batch: DataProto) -> DataProto:
+        """Update critic using the expanded rows as one PPO mini-batch."""
+        batch_td = batch.to_tensordict()
+        batch_td = left_right_2_no_padding(batch_td)
+        pad_size = int(batch.meta_info.get("fully_async/pad/num_padding_rows", 0) or 0)
+        valid_batch_size = max(len(batch) - pad_size, 1)
+        expanded_mini_batch_size = len(batch)
+        tu.assign_non_tensor(
+            batch_td,
+            global_batch_size=valid_batch_size,
+            mini_batch_size=expanded_mini_batch_size,
+            epochs=self.config.critic.ppo_epochs,
+            seed=self.config.critic.data_loader_seed,
+            dataloader_kwargs={"shuffle": self.config.critic.shuffle},
+        )
+
+        output = self.critic_wg.train_mini_batch(batch_td)
+        output = output.get()
+        output = tu.get(output, "metrics")
+        output = rename_dict(output, "critic/")
+        output["perf/mfu/critic"] = output.pop("critic/mfu")
+        return DataProto.from_single_dict(data={}, meta_info={"metrics": output})
+
     def _compute_old_log_prob(self, batch: DataProto):
         """
         If algorithm.rollout_correction.bypass_mode is False,
@@ -797,16 +855,16 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
              ``expand_intermediate_trajectories_pre_log_prob``). Each row is
              tagged with ``trajectory_role`` and ``rollout_group_id`` in the
              non-tensor batch for later advantage scatter / normalization.
-          2. Pad the expanded batch to a multiple of the global actor
-             mini-batch size (``ppo_mini_batch_size * rollout.n``) and zero
-             out the training signal on the padded tail so padding rows do
-             not contribute to the actor loss.
+          2. Pad the expanded batch to a multiple of the training DP size so
+             worker dispatch can split rows evenly. Padding rows have their
+             training signal zeroed out and do not contribute to the actor
+             loss.
         """
         timing_raw = self.timing_raw
         self._log_batch_storage("expand.before", batch)
         with marked_timer("expand_intermediate", timing_raw, color="magenta"):
-            rollout_n = int(self.config.actor_rollout_ref.rollout.get("n", 1) or 1)
             rollout_cfg = self.config.actor_rollout_ref.rollout
+            rollout_n = int(rollout_cfg.get("n", 1) or 1)
 
             batch = expand_intermediate_trajectories_pre_log_prob(
                 batch,
@@ -839,17 +897,16 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             if _bad_key in batch.meta_info:
                 _stashed_meta[_bad_key] = batch.meta_info.pop(_bad_key)
 
-        # Pad to actor mini-batch multiple. ``train_mini_batch`` requires
-        # ``mini_batch_size = ppo_mini_batch_size * rollout.n`` to evenly
-        # divide the per-DP batch; padding the global batch guarantees that
-        # dispatching by DP size preserves divisibility.
-        ppo_mini_batch_size = int(self.config.actor_rollout_ref.actor.ppo_mini_batch_size)
-        global_mini_batch = ppo_mini_batch_size * rollout_n
-        if global_mini_batch > 0 and len(batch) % global_mini_batch != 0:
+        # After intermediate expansion, the global update batch is the expanded
+        # row count. Pad only so worker dispatch can split it evenly by DP size.
+        training_dp_size = int(self.config.trainer.nnodes) * int(self.config.trainer.n_gpus_per_node)
+        if training_dp_size > 0 and len(batch) % training_dp_size != 0:
             with marked_timer("pad_mini_batch", timing_raw, color="magenta"):
-                batch, pad_size = pad_dataproto_to_divisor(batch, global_mini_batch)
+                batch, pad_size = pad_dataproto_to_divisor(batch, training_dp_size)
                 zero_out_padding_rows(batch, pad_size)
                 batch.meta_info["fully_async/pad/num_padding_rows"] = int(pad_size)
+                if batch.batch is not None and "attention_mask" in batch.batch.keys():
+                    batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
                 self._log_batch_storage("expand.after_pad", batch)
         else:
             batch.meta_info["fully_async/pad/num_padding_rows"] = 0
@@ -859,6 +916,9 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         # per rollout), so they stay valid across pad.
         if _stashed_meta:
             batch.meta_info.update(_stashed_meta)
+
+        if batch.batch is not None and "attention_mask" in batch.batch.keys():
+            batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
 
         return batch
 
