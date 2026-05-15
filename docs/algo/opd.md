@@ -9,8 +9,12 @@ Last updated: 05/14/2026.
 > **Contents**
 >
 > - **Background** - Introduction to On-Policy Distillation
-> - **Architecture** - Implementation and control flow of OPD 
-> - **Usage** - Configuring OPD runs
+> - **Configuration Parameters** - Reference for the `distillation.*` config tree
+> - **Usage** - Recipes for single-teacher, multi-teacher, GKD, PG, and task-reward OPD
+> - **Metrics** - Logged metrics and how to interpret them
+> - **Debugging** - Sanity-check tips
+> - **Architecture** - Implementation and control flow of OPD
+> - **Files** - Where each piece of OPD lives in the repo
 
 ---
 
@@ -357,7 +361,6 @@ Internal fields populated at runtime — **do not set from the user side.**
 `loss_settings` is auto-populated from `loss_mode` via
 `get_distillation_loss_settings`; `global_batch_info` is filled by the actor
 worker before the loss runs.
-
 
 ## Usage
 
