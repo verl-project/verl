@@ -377,10 +377,6 @@ worker before the loss runs.
 
 ## Usage
 
-We have example scripts in the directory `examples/on_policy_distillation_trainer`. Now we show some basics for adapting a script to OPD.
-
-## Usage
-
 Example scripts are available in `examples/on_policy_distillation_trainer`. This section shows the main configuration changes needed to adapt an existing PPO/GRPO script to OPD.
 
 ### Quick start
@@ -420,22 +416,21 @@ algorithm:
 
 ### GKD OPD
 
-GKD OPD uses a top-\(k\) approximation to forward KL from the teacher to the student:
+GKD OPD uses a top-\(k\) partial-sum approximation to forward KL from the teacher to the student:
 
 \[
-D_{\mathrm{KL}}^{(k)}(\nu \,\|\, \pi_\theta)(s_t)
+\mathcal{L}_{\mathrm{GKD}}^{(k)}(s_t)
 =
 \sum_{v \in \operatorname{TopK}(\nu(\cdot \mid s_t))}
-\tilde{\nu}(v \mid s_t)
-\log
-\frac{
-\tilde{\nu}(v \mid s_t)
-}{
-\tilde{\pi}_\theta(v \mid s_t)
-},
+\nu(v \mid s_t)
+\bigl[
+\log \nu(v \mid s_t)
+-
+\log \pi_\theta(v \mid s_t)
+\bigr],
 \]
 
-where \(\nu\) is the teacher policy, \(\pi_\theta\) is the student policy, and the distributions are renormalized over the teacher top-\(k\) tokens.
+where \(\nu\) is the teacher policy and \(\pi_\theta\) is the student policy. The teacher and student probabilities here are the values from each model's full-vocabulary softmax, evaluated at the teacher's top-\(k\) token IDs. Because the sum is taken over only \(k\) tokens rather than the full vocabulary, the per-token loss can be negative when the student concentrates probability mass outside the teacher's top-\(k\); the implementation clamps such per-token losses to \(0\).
 
 As of May 14, 2026, GKD OPD is implemented only over the teacher top-\(k\) logits. The current teacher server returns log-probabilities for the sampled token and the teacher top-\(k\) tokens, but does not support gathering log-probabilities at arbitrary token IDs. Therefore, the implementation supports teacher-top-\(k\) forward KL, but not student-top-\(k\) reverse KL.
 
@@ -619,7 +614,7 @@ A similar-looking configuration can fail if the replica sizes do not align with 
 
 #### Teacher routing
 
-The `teacher_key` controls routing. It must refer to a field in each sample's `extra_info`. In the example above, `teacher_key=data_source`, so samples with `data_source="openai/gsm8k"` are routed to the `gsm8k` teacher, and samples with `data_source="hiyouga/geometry3k"` are routed to the `geo3k` teacher.
+The `teacher_key` controls routing. It must name a top-level field on each sample's `non_tensor_batch` (the lookup is `sample_kwargs[teacher_key]` in `AgentLoopWorker._compute_teacher_logprobs`). `data_source` is one such field, set by the dataset loader; it is *not* nested under `extra_info`. In the example above, `teacher_key=data_source`, so samples with `data_source="openai/gsm8k"` are routed to the `gsm8k` teacher, and samples with `data_source="hiyouga/geometry3k"` are routed to the `geo3k` teacher.
 
 When routing by data source, enable data shuffling. Without shuffling, a concatenated dataset may activate only one teacher for long contiguous stretches. For example, if GSM8K examples are followed by Geo3K examples, then training will use only the GSM8K teacher for the first portion of the epoch and only the Geo3K teacher for the remaining portion.
 
@@ -863,7 +858,7 @@ The returned scalar loss is what `engine.train_batch` backpropagates.
 - `examples/on_policy_distillation_trainer/run_qwen3_8b_fsdp.sh` — text, vLLM rollout, FSDP student, single teacher
 - `examples/on_policy_distillation_trainer/run_qwen3_8b_megatron.sh` — text, vLLM rollout, Megatron student, single teacher
 - `examples/on_policy_distillation_trainer/run_qwen3_vl_8b_fsdp.sh` — VL student/teacher, vLLM rollout, FSDP student
-- `examples/on_policy_distillation_trainer/run_qwen3_mopd_gsm8k_geo3k.sh` — multi-teacher (one per dataset), routed by `data_source`
+- `examples/on_policy_distillation_trainer/run_qwen3_8b_mopd_fsdp.sh` — multi-teacher (gsm8k text + geo3k VL), routed by `data_source`
 
 ### **Tests**
 
