@@ -14,21 +14,27 @@
 
 """Per-backend uv environment driver for verl.
 
-Everything that controls *what* gets installed lives in ``pyproject.toml``
-(``[project.optional-dependencies]`` + ``[tool.uv]``). This script is a thin
-convenience wrapper around ``uv sync`` that:
+Everything that controls *what* gets installed lives in ``pyproject.toml``:
+``[project.optional-dependencies]`` lists the backend packages, and
+``[tool.uv.sources]`` / ``[tool.uv.index]`` route git packages and PyTorch
+wheels. This script intentionally uses ``uv pip install`` instead of
+``uv sync`` so each backend resolves independently:
 
-  * picks the right Python interpreter version per backend,
-  * points ``UV_PROJECT_ENVIRONMENT`` at ``verl/.venvs/.venv-<backend>``,
-  * (optionally) sets recommended build-time env vars for backends that
-    compile native extensions from source (``MAX_JOBS`` / ``NVTE_FRAMEWORK``
-    / ``FLASH_ATTENTION_FORCE_BUILD``).
+  * ``sync vllm`` never resolves / clones VeOmni, MindSpeed, NeMo-Automodel,
+    or any other unrelated backend source,
+  * each backend still gets a separate venv under
+    ``verl/.venvs/.venv-<backend>``,
+  * recommended build-time env vars are set for backends that compile native
+    extensions from source (``MAX_JOBS`` / ``NVTE_FRAMEWORK`` /
+    ``FLASH_ATTENTION_FORCE_BUILD``).
 
-Anything you can do here you can also do directly with ``uv`` from the
-``verl/`` directory::
+The equivalent raw ``uv`` shape is:
 
-    UV_PROJECT_ENVIRONMENT=.venvs/.venv-vllm \\
-        uv sync --extra vllm --python 3.12 --link-mode=copy
+    uv venv .venvs/.venv-vllm --python 3.12 --seed
+    uv pip install --python .venvs/.venv-vllm/bin/python --link-mode=copy \\
+        <only the vllm + verl-core dependencies>
+    uv pip install --python .venvs/.venv-vllm/bin/python --link-mode=copy \\
+        -e . --no-deps
 
 Usage::
 
@@ -40,7 +46,7 @@ Usage::
     python manage_envs.py shell vllm
     python manage_envs.py path vllm
 
-Anything after ``--`` is forwarded verbatim to ``uv sync``::
+Anything after ``--`` is forwarded verbatim to ``uv pip install``::
 
     python manage_envs.py sync megatron -- --reinstall -v
 
@@ -69,11 +75,14 @@ the driver interpreter.
 from __future__ import annotations
 
 import argparse
+import importlib
 import os
+import re
 import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 INFERENCE_BACKENDS: list[str] = ["vllm", "sglang", "trtllm", "vllm-ascend", "sglang-ascend"]
@@ -101,7 +110,7 @@ PYTHON_VERSION: dict[str, str] = {
 }
 
 # Recommended build-time env vars per backend. Optional perf / reproducibility
-# hints — `uv sync` works without them. Set here so users don't have to
+# hints — `uv pip install` works without them. Set here so users don't have to
 # remember them.
 #
 # MAX_JOBS=32 is conservative on purpose. The reference Dockerfiles use
@@ -132,6 +141,9 @@ GROUPS: dict[str, list[str]] = {
 
 VERL_DIR = Path(__file__).resolve().parent
 VENVS_DIR = (VERL_DIR / ".venvs").resolve()
+
+_REQ_NAME_RE = re.compile(r"^\s*([A-Za-z0-9_.-]+)")
+_TORCH_PACKAGES = {"torch", "torchvision", "torchaudio"}
 
 
 def _venv_path(backend: str) -> Path:
@@ -170,29 +182,234 @@ def _run(cmd: list[str], env_overrides: dict[str, str] | None = None) -> int:
     return subprocess.run(cmd, env=env, cwd=str(VERL_DIR)).returncode
 
 
+def _load_pyproject() -> dict:
+    if sys.version_info < (3, 11):
+        sys.exit("error: manage_envs.py requires Python >=3.11 to parse pyproject.toml")
+    tomllib = importlib.import_module("tomllib")
+    return tomllib.loads((VERL_DIR / "pyproject.toml").read_text())
+
+
+def _req_name(req: str) -> str:
+    requirement = req.split(";", 1)[0].strip()
+    if " @ " in requirement:
+        requirement = requirement.split(" @ ", 1)[0].strip()
+    match = _REQ_NAME_RE.match(requirement)
+    if not match:
+        sys.exit(f"error: cannot parse requirement name from {req!r}")
+    return match.group(1).lower().replace("_", "-")
+
+
+def _req_project_part(req: str) -> str:
+    requirement = req.split(";", 1)[0].strip()
+    if " @ " in requirement:
+        return requirement.split(" @ ", 1)[0].strip()
+    match = re.match(r"^\s*([A-Za-z0-9_.-]+(?:\[[^\]]+\])?)", requirement)
+    if not match:
+        sys.exit(f"error: cannot parse requirement project from {req!r}")
+    return match.group(1)
+
+
+def _req_marker(req: str) -> str:
+    parts = req.split(";", 1)
+    return f";{parts[1]}" if len(parts) == 2 else ""
+
+
+def _source_applies(source: dict, backend: str) -> bool:
+    return source.get("extra") in (None, backend)
+
+
+def _select_source(source_config: object, backend: str) -> dict | None:
+    if isinstance(source_config, dict):
+        return source_config if _source_applies(source_config, backend) else None
+    if isinstance(source_config, list):
+        for source in source_config:
+            if isinstance(source, dict) and _source_applies(source, backend):
+                return source
+    return None
+
+
+def _source_to_requirement(req: str, source: dict) -> str:
+    if "git" not in source:
+        return req
+    ref = source.get("rev") or source.get("tag") or source.get("branch")
+    git_url = f"git+{source['git']}"
+    if ref:
+        git_url = f"{git_url}@{ref}"
+    return f"{_req_project_part(req)} @ {git_url}{_req_marker(req)}"
+
+
+def _backend_requirements(pyproject: dict, backend: str) -> list[str]:
+    extras = pyproject["project"]["optional-dependencies"]
+    sources = pyproject.get("tool", {}).get("uv", {}).get("sources", {})
+    seen_extras: set[str] = set()
+    seen_reqs: set[str] = set()
+    requirements: list[str] = []
+
+    def add_extra(extra: str) -> None:
+        if extra in seen_extras:
+            return
+        if extra not in extras:
+            sys.exit(f"error: pyproject.toml has no optional dependency extra {extra!r}")
+        seen_extras.add(extra)
+        for raw_req in extras[extra]:
+            if raw_req.startswith("verl[") and raw_req.endswith("]"):
+                add_extra(raw_req[len("verl[") : -1])
+                continue
+            name = _req_name(raw_req)
+            source = _select_source(sources.get(name), backend)
+            req = _source_to_requirement(raw_req, source) if source else raw_req
+            if req not in seen_reqs:
+                seen_reqs.add(req)
+                requirements.append(req)
+
+    add_extra(backend)
+    return requirements
+
+
+def _index_args(pyproject: dict, backend: str, requirements: list[str]) -> list[str]:
+    uv = pyproject.get("tool", {}).get("uv", {})
+    sources = uv.get("sources", {})
+    indexes = {index["name"]: index["url"] for index in uv.get("index", [])}
+    selected_names = {_req_name(req) for req in requirements}
+    args: list[str] = []
+    seen_urls: set[str] = set()
+    for name in sorted(selected_names):
+        source = _select_source(sources.get(name), backend)
+        if not source or "index" not in source:
+            continue
+        url = indexes.get(source["index"])
+        if not url or url in seen_urls:
+            continue
+        seen_urls.add(url)
+        args.extend(["--extra-index-url", url])
+    return args
+
+
+def _no_build_isolation_args(pyproject: dict, requirements: list[str]) -> list[str]:
+    uv = pyproject.get("tool", {}).get("uv", {})
+    selected_names = {_req_name(req) for req in requirements}
+    args: list[str] = []
+    for name in uv.get("no-build-isolation-package", []):
+        if name in selected_names:
+            args.extend(["--no-build-isolation-package", name])
+    return args
+
+
+def _config_setting_args(pyproject: dict, requirements: list[str]) -> list[str]:
+    uv = pyproject.get("tool", {}).get("uv", {})
+    selected_names = {_req_name(req) for req in requirements}
+    settings = uv.get("config-settings-package", {})
+    args: list[str] = []
+    for package, package_settings in settings.items():
+        if package not in selected_names:
+            continue
+        for key, values in package_settings.items():
+            if not isinstance(values, list):
+                values = [values]
+            for value in values:
+                args.extend(["--config-setting-package", f"{package}:{key}={value}"])
+    return args
+
+
+def _write_requirements(requirements: list[str]) -> tempfile.NamedTemporaryFile:
+    req_file = tempfile.NamedTemporaryFile("w", prefix="verl-", suffix=".requirements.txt", delete=False)
+    req_file.write("\n".join(requirements))
+    req_file.write("\n")
+    req_file.close()
+    return req_file
+
+
 def cmd_sync(args: argparse.Namespace) -> int:
     backends = _expand(args.backends)
     _require_uv()
     VENVS_DIR.mkdir(parents=True, exist_ok=True)
+    pyproject = _load_pyproject()
     for backend in backends:
         venv = _venv_path(backend)
-        env_overrides = {
-            "UV_PROJECT_ENVIRONMENT": str(venv),
-            **BUILD_ENV.get(backend, {}),
-        }
+        venv_python = _venv_python(backend)
+        env_overrides = BUILD_ENV.get(backend, {})
+
+        rc = _run(["uv", "venv", str(venv), "--python", PYTHON_VERSION[backend], "--seed"], env_overrides)
+        if rc:
+            print(f"error: uv venv failed for {backend}", file=sys.stderr)
+            return rc
+
+        requirements = _backend_requirements(pyproject, backend)
+        common_install_args = [
+            "uv",
+            "pip",
+            "install",
+            "--python",
+            str(venv_python),
+            "--link-mode=copy",
+            *_index_args(pyproject, backend, requirements),
+            *_no_build_isolation_args(pyproject, requirements),
+            *_config_setting_args(pyproject, requirements),
+            *args.uv_args,
+        ]
+
+        bootstrap = ["setuptools>=61.0", "wheel", "packaging", "pybind11", "ninja"]
+        rc = _run(
+            [
+                "uv",
+                "pip",
+                "install",
+                "--python",
+                str(venv_python),
+                "--link-mode=copy",
+                *bootstrap,
+            ],
+            env_overrides,
+        )
+        if rc:
+            print(f"error: uv pip bootstrap failed for {backend}", file=sys.stderr)
+            return rc
+
+        torch_requirements = [req for req in requirements if _req_name(req) in _TORCH_PACKAGES]
+        if torch_requirements:
+            torch_req_file = _write_requirements(torch_requirements)
+            rc = _run(
+                [
+                    "uv",
+                    "pip",
+                    "install",
+                    "--python",
+                    str(venv_python),
+                    "--link-mode=copy",
+                    *_index_args(pyproject, backend, torch_requirements),
+                    *args.uv_args,
+                    "-r",
+                    torch_req_file.name,
+                ],
+                env_overrides,
+            )
+            Path(torch_req_file.name).unlink(missing_ok=True)
+            if rc:
+                print(f"error: uv pip torch install failed for {backend}", file=sys.stderr)
+                return rc
+
+        req_file = _write_requirements(requirements)
+        rc = _run([*common_install_args, "-r", req_file.name], env_overrides)
+        Path(req_file.name).unlink(missing_ok=True)
+        if rc:
+            print(f"error: uv pip install failed for {backend}", file=sys.stderr)
+            return rc
+
         cmd = [
             "uv",
-            "sync",
-            "--link-mode=copy",
-            "--extra",
-            backend,
+            "pip",
+            "install",
             "--python",
-            PYTHON_VERSION[backend],
+            str(venv_python),
+            "--link-mode=copy",
+            "--no-deps",
             *args.uv_args,
+            "-e",
+            str(VERL_DIR),
         ]
         rc = _run(cmd, env_overrides=env_overrides)
         if rc:
-            print(f"error: uv sync failed for {backend}", file=sys.stderr)
+            print(f"error: editable verl install failed for {backend}", file=sys.stderr)
             return rc
     return 0
 
@@ -341,7 +558,7 @@ def _build_parser() -> argparse.ArgumentParser:
     s.add_argument(
         "uv_args",
         nargs=argparse.REMAINDER,
-        help="anything after `--` is forwarded to `uv sync`",
+        help="anything after `--` is forwarded to `uv pip install`",
     )
     s.set_defaults(func=cmd_sync)
 

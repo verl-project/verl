@@ -15,8 +15,8 @@ build-backend = "setuptools.build_meta"
 name = "verl"
 # `version` and `dependencies` stay dynamic so setup.py remains the source of
 # truth for `pip install verl` users. `optional-dependencies` is now static
-# below — the per-backend extras need to be declared here for uv to pick them
-# up alongside the [tool.uv] configuration (sources, conflicts, indexes).
+# below — manage_envs.py reads the per-backend extras alongside [tool.uv]
+# source/index metadata to build isolated uv pip installs.
 dynamic = ["version", "dependencies", "authors", "urls"]
 
 description = "verl: Volcano Engine Reinforcement Learning for LLM"
@@ -348,38 +348,15 @@ verl = [
 
 # =============================================================================
 # tool.uv — see docs/start/install.rst for the full reference.
-#   UV_PROJECT_ENVIRONMENT=.venvs/.venv-<backend> uv sync --extra <backend>
-# (or `python manage_envs.py sync <backend>`)
+# `python manage_envs.py sync <backend>` reads this metadata and installs with
+# uv pip into `.venvs/.venv-<backend>`. We intentionally do not use `uv sync`
+# for backend envs because uv's universal lockfile resolves every extra and
+# therefore touches unrelated git backends during a vllm-only install.
 # =============================================================================
 [tool.uv]
-# Each backend gets its own venv + its own fork in uv.lock; without this, uv
-# would try to satisfy torch==2.10/2.9.1/2.7.1 in a single resolution.
-conflicts = [[
-    { extra = "vllm" },
-    { extra = "sglang" },
-    { extra = "trtllm" },
-    { extra = "vllm-ascend" },
-    { extra = "sglang-ascend" },
-    { extra = "fsdp" },
-    { extra = "megatron" },
-    { extra = "mindspeed" },
-    { extra = "veomni" },
-    { extra = "nemoautomodel" },
-    { extra = "cpu" },
-]]
-
-# Lock for all platforms a verl user actually targets, so uv.lock is portable
-# across machines (Linux x86_64 for cu12/cu13 GPUs, Linux aarch64 for Grace,
-# macOS for read-only dev resolves of the cpu-routed mindspeed extra).
-environments = [
-    "sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "sys_platform == 'linux' and platform_machine == 'aarch64'",
-    "sys_platform == 'darwin'",
-]
-
 # These packages `import torch` at build time, so we let them see the torch
-# uv already resolved into the env (uv installs torch first thanks to the
-# dependency-metadata declarations below).
+# already installed into the backend venv. manage_envs.py installs torch first,
+# then passes these as `uv pip install --no-build-isolation-package ...`.
 no-build-isolation-package = [
     "apex",
     "transformer-engine",
@@ -392,51 +369,15 @@ no-build-isolation-package = [
     "nemo-automodel",
 ]
 
-# Relax upstream pins so each extra's version wins. Replaces the Dockerfiles'
-# `--no-deps` / `--force-reinstall` hacks for trl/Megatron/cuDNN/NCCL.
-override-dependencies = [
-    "numpy",
-    "transformers",
-    "torch",
-    "torchvision",
-    "torchaudio",
-    "nvidia-cudnn-cu12",
-    "nvidia-nccl-cu12",
-    "nvidia-nccl-cu13",
-]
-
 # Pass --cpp_ext / --cuda_ext to apex's setup.py so its native CUDA extensions
 # (FusedAdam, FusedSGD, multi_tensor_applier, FusedLayerNorm, FastLayerNormFN)
-# actually compile. Mirrors the `--config-settings "--build-option=--cpp_ext"
-# --config-settings "--build-option=--cuda_ext"` flags from
+# actually compile. manage_envs.py converts this to uv pip's
+# `--config-setting-package apex:--build-option=...` flags, mirroring
 # Dockerfile.stable.vllm L55-56. Without these, apex installs as a pure-Python
 # package and Megatron-LM's apex.optimizers / apex.contrib / apex.normalization
 # / apex.multi_tensor_apply imports silently fall back to slow torch ops.
 [tool.uv.config-settings-package]
 apex = { "--build-option" = ["--cpp_ext", "--cuda_ext"] }
-
-# Trimmed metadata for git-only packages with noisy declared deps
-# (Megatron-LM declares nvidia-resiliency-ext / flask / etc.). Equivalent to
-# the Dockerfiles' `pip install --no-deps`.
-[[tool.uv.dependency-metadata]]
-name = "apex"
-version = "0.1.0"
-requires-dist = ["torch", "packaging"]
-
-[[tool.uv.dependency-metadata]]
-name = "transformer-engine"
-version = "2.12.0"
-requires-dist = ["torch", "pybind11", "ninja", "packaging"]
-
-[[tool.uv.dependency-metadata]]
-name = "megatron-core"
-version = "0.16.0"
-requires-dist = ["torch>=2.6.0", "numpy", "packaging>=24.2"]
-
-[[tool.uv.dependency-metadata]]
-name = "mindspeed"
-version = "2.3.0+core-r0.12.1"
-requires-dist = ["torch", "packaging"]
 
 # Git sources (revs match the reference Dockerfiles); PyTorch routed per-extra
 # to the right CUDA wheel index.
