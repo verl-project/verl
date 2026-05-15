@@ -1,5 +1,13 @@
 #!/usr/bin/env bash
+# PPO trainer smoke test: megatron engine + reward-model
+# (Skywork-Reward-V2-Llama-3.2-1B). Pinned to ppo_megatron_trainer.yaml.
+#
+# Sibling scripts in this directory:
+#   - run_ppo_trainer_fsdp.sh   : function-reward smoke, strategy-parameterized
+#   - run_ppo_trainer_veomni.sh : veomni + profiler smoke
 set -xeuo pipefail
+
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/../model_path.sh"
 
 export CUDA_DEVICE_MAX_CONNECTIONS=1 # For megatron communication/computation overlapping
 export VERL_LOGGING_LEVEL=INFO
@@ -8,22 +16,20 @@ export VERL_PPO_LOGGING_LEVEL=INFO
 NUM_GPUS=${NUM_GPUS:-8}
 
 MODEL_ID=${MODEL_ID:-Qwen/Qwen2.5-0.5B}
-MODEL_PATH=${MODEL_PATH:-${HOME}/models/${MODEL_ID}}
-RM_MODEL_PATH=${RM_MODEL_PATH:-${HOME}/models/Skywork/Skywork-Reward-V2-Llama-3.2-1B}
-#hf download "${MODEL_ID}" --local-dir "${MODEL_PATH}"
+MODEL_PATH=${MODEL_PATH:-$(verl_model_path "${MODEL_ID}")}
+RM_MODEL_ID=${RM_MODEL_ID:-Skywork/Skywork-Reward-V2-Llama-3.2-1B}
+RM_MODEL_PATH=${RM_MODEL_PATH:-$(verl_model_path "${RM_MODEL_ID}")}
 
 USE_DUMMY_MODEL=${USE_DUMMY_MODEL:-False}
 DUMMY_MODEL_PATH=${DUMMY_MODEL_PATH:-${HOME}/dummy_models/${MODEL_ID}}
 if [ "$USE_DUMMY_MODEL" = "True" ]; then
-    if [ -z "${DUMMY_MODEL_CONFIG_PATH}"  ]; then
-        echo "[ERROR] DUMMY_MODEL_CONFIG_PATH not set"
-        exit 1
-    fi
-
+    # init model with a 2-layer dummy override (kept inline so we don't ship a
+    # tests/special_e2e/.../*_minimal.json artifact for two scalars)
     python scripts/init_random_model.py \
         --hf_model_path "${MODEL_PATH}" \
-        --new_config_path "${DUMMY_MODEL_CONFIG_PATH}" \
-        --output_path "${DUMMY_MODEL_PATH}"
+        --output_path "${DUMMY_MODEL_PATH}" \
+        --config-override num_hidden_layers=2 \
+        --config-override max_window_layers=2
 
     MODEL_PATH="${DUMMY_MODEL_PATH}"
 fi

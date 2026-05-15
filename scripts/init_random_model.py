@@ -17,10 +17,24 @@
 This script override a model with custom config and random weights, mainly for create small models for 
 debugging purposes.
 
+Config overrides may come from a JSON file (``--new_config_path``) and/or from
+inline ``--config-override KEY=VALUE`` flags. Inline values are parsed as JSON
+when possible (so ``num_hidden_layers=2`` becomes the int ``2`` and
+``tie_word_embeddings=true`` becomes the bool ``True``); otherwise they are
+treated as raw strings. When both sources are given, inline overrides win.
+
 Usage:
+    # Override from a JSON file:
     python scripts/init_random_model.py \
         --hf_model_path <path_to_hf_model> \
         --new_config_path <path_to_new_config.json> \
+        --output_path <path_to_output_model>
+
+    # Override inline (no JSON file needed for tiny overrides):
+    python scripts/init_random_model.py \
+        --hf_model_path <path_to_hf_model> \
+        --config-override num_hidden_layers=2 \
+        --config-override max_window_layers=2 \
         --output_path <path_to_output_model>
 
 """
@@ -34,10 +48,42 @@ from typing import Any
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, PretrainedConfig
 
 
+def _parse_override(raw: str) -> tuple[str, Any]:
+    if "=" not in raw:
+        raise argparse.ArgumentTypeError(f"--config-override expects KEY=VALUE, got: {raw!r}")
+    key, _, value = raw.partition("=")
+    key = key.strip()
+    if not key:
+        raise argparse.ArgumentTypeError(f"--config-override key is empty in: {raw!r}")
+    try:
+        parsed: Any = json.loads(value)
+    except json.JSONDecodeError:
+        parsed = value
+    return key, parsed
+
+
 def _init_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--hf_model_path", type=str, required=True, help="The path for the huggingface model")
-    parser.add_argument("--new_config_path", type=str, required=True, help="The path for the new config file")
+    parser.add_argument(
+        "--new_config_path",
+        type=str,
+        default=None,
+        help="Path to a JSON file with config overrides. Optional if --config-override is used.",
+    )
+    parser.add_argument(
+        "--config-override",
+        dest="config_overrides",
+        type=_parse_override,
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help=(
+            "Inline override applied on top of the original model config. May be repeated. "
+            "Values are parsed as JSON when possible (e.g. num_hidden_layers=2, "
+            "tie_word_embeddings=true), otherwise treated as a raw string."
+        ),
+    )
     parser.add_argument("--output_path", type=str, required=True, help="The path for the output random model")
     parser.add_argument(
         "--trust_remote_code",
@@ -45,6 +91,8 @@ def _init_args():
         help="Whether to trust remote code when loading HF model. Disabled by default for security.",
     )
     args = parser.parse_args()
+    if not args.new_config_path and not args.config_overrides:
+        parser.error("at least one of --new_config_path or --config-override must be provided")
     return args
 
 
@@ -74,13 +122,23 @@ def check_configs(original_config: dict[str, Any], new_config: dict[str, Any]) -
             )
 
 
-def init_random_model(hf_model_path, new_config_path, output_path, trust_remote_code: bool = False):
+def init_random_model(
+    hf_model_path,
+    output_path,
+    new_config_path: str | None = None,
+    config_overrides: list[tuple[str, Any]] | None = None,
+    trust_remote_code: bool = False,
+):
     config = AutoConfig.from_pretrained(hf_model_path, trust_remote_code=trust_remote_code)
     tokenizer = AutoTokenizer.from_pretrained(hf_model_path, trust_remote_code=trust_remote_code)
     config_dict = PretrainedConfig.get_config_dict(hf_model_path)[0]
     print(config_dict)
-    with open(new_config_path) as f:
-        new_config_dict = json.load(f)
+    new_config_dict: dict[str, Any] = {}
+    if new_config_path is not None:
+        with open(new_config_path) as f:
+            new_config_dict.update(json.load(f))
+    for key, value in config_overrides or []:
+        new_config_dict[key] = value
     check_configs(config_dict, new_config_dict)
     config_dict.update(new_config_dict)
     new_confg = config.from_dict(config_dict)
@@ -102,7 +160,8 @@ if __name__ == "__main__":
     check_output_path(args.output_path)
     init_random_model(
         hf_model_path=args.hf_model_path,
-        new_config_path=args.new_config_path,
         output_path=args.output_path,
+        new_config_path=args.new_config_path,
+        config_overrides=args.config_overrides,
         trust_remote_code=args.trust_remote_code,
     )

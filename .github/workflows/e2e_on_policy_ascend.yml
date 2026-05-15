@@ -1,0 +1,338 @@
+# # Tests layout
+#
+# Each folder under tests/ corresponds to a test category for a sub-namespace in verl. For instance:
+# - `tests/trainer` for testing functionality related to `verl/trainer`
+# - `tests/models` for testing functionality related to `verl/models`
+# - ...
+#
+# There are a few folders with `special_` prefix, created for special purposes:
+# - `special_distributed`: unit tests that must run with multiple GPUs
+# - `special_e2e`: end-to-end tests with training/generation scripts (CPU/CUDA/NPU)
+# - `special_sanity`: a suite of quick sanity tests
+# - `special_standalone`: a set of tests designed to run in dedicated environments
+#
+# # Workflow layout
+#
+# Ascend NPU counterpart of e2e_on_policy_vllm.yml + e2e_on_policy_sglang.yml,
+# collapsed into one file because both share the same fixed-runner pool. Cells
+# exercised here:
+#
+#   train\infer | vllm                    | sglang
+#   ------------+-------------------------+--------------------
+#   fsdp/fsdp2  | fsdp_vllm_ascend        | fsdp_sglang_ascend
+#   megatron    | (none)                  | megatron_sglang_ascend
+#   veomni      | veomni_vllm_ascend      | (driver hardcodes vllm)
+#
+# Megatron × vllm Ascend coverage is intentionally absent here (it has not
+# been brought up on the NPU side yet). Standalone SGLang rollout / agent-loop
+# unit coverage still lives in sgl_ascend.yml. MindSpeed/MindSpeed-LLM
+# coverage stays in e2e_ascend.yml.
+#
+# Drivers under tests/special_e2e/ppo_trainer/run_ppo_trainer_fsdp.sh and
+# run_ppo_trainer_megatron.sh are accelerator-pluggable: the NPU caller sets
+# DEVICE=npu and USE_OPTIMIZED_MODEL=0 (vllm-ascend specific) so the same
+# script services both CUDA and NPU CI.
+
+name: e2e_on_policy_ascend
+
+# Triggers (whitelist):
+#   Same set of code paths as e2e_on_policy_{vllm,sglang}.yml, restricted to
+#   the backends actually exercised on Ascend NPU here:
+#     {fsdp/fsdp2, veomni} × vllm   and   {fsdp/fsdp2, megatron} × sglang.
+#   trtllm Ascend coverage lives elsewhere.
+
+on:
+  pull_request:
+    branches:
+      - main
+      - v0.*
+    paths:
+      - ".github/workflows/e2e_on_policy_ascend.yml"
+      - "examples/data_preprocess/gsm8k.py"
+      - "examples/data_preprocess/geo3k.py"
+      - "tests/special_e2e/ppo_trainer/run_ppo_trainer_fsdp.sh"
+      - "tests/special_e2e/ppo_trainer/run_ppo_trainer_megatron.sh"
+      - "tests/special_e2e/ppo_trainer/run_ppo_trainer_veomni.sh"
+      - "verl/workers/**"
+      - "verl/trainer/**"
+      - "verl/utils/**"
+      - "verl/models/**"
+      - "verl/single_controller/**"
+      - "verl/third_party/**"
+      - "pyproject.toml"
+      - "setup.py"
+      - "requirements-npu.txt"
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  # ============================================================
+  # FSDP × vLLM on Ascend NPU
+  #   Driver: tests/special_e2e/ppo_trainer/run_ppo_trainer_fsdp.sh
+  #   Steps:  PPO smoke (Qwen2.5-0.5B), GRPO smoke (Qwen2.5-0.5B),
+  #           GRPO+LoRA+save+merge (Qwen2.5-0.5B), VLM GRPO (Qwen2.5-VL-3B)
+  # ============================================================
+  fsdp_vllm_ascend:
+    if: github.repository_owner == 'verl-project'
+    runs-on: linux-aarch64-a3-8
+    timeout-minutes: 120
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-8.5.0-a3-ubuntu22.04-py3.11-latest
+      options: >-
+        --shm-size 16g
+    env:
+      HF_ENDPOINT: "https://hf-mirror.com"
+      HF_HUB_ENABLE_HF_TRANSFER: "0"
+      # Tells run_ppo_trainer_fsdp.sh that we are on NPU.
+      DEVICE: "npu"
+      # vllm-ascend ships kernel-optimised builds of some models that
+      # aren't numerically suitable for RLHF training; disable them.
+      USE_OPTIMIZED_MODEL: "0"
+    steps:
+      - name: Check npu and CANN info
+        run: |
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+          npu-smi info
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          clean: true
+      - name: Install the current repository
+        run: |
+          pip install --no-deps -e .
+      - name: Prepare weights
+        run: |
+          ln -s /root/.cache/models ~/models
+      - name: Prepare GSM8K dataset
+        run: |
+          python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
+      - name: PPO + FSDP (Qwen2.5-0.5B-Instruct)
+        run: |
+          ray stop --force
+          MODEL_ID=Qwen/Qwen2.5-0.5B-Instruct \
+            MODEL_PATH=${HOME}/models/Qwen/Qwen2.5-0.5B-Instruct \
+            ADV_ESTIMATOR=gae STRATEGY=fsdp \
+            ROLLOUT_TP=1 ROLLOUT_N=1 \
+            MAX_PROMPT_LEN=512 MAX_RESPONSE_LEN=128 \
+            GPU_MEMORY_UTILIZATION=0.8 \
+            VERL_EXP_NAME="qwen2.5-0.5b-ppo-fsdp-ascend" \
+            bash tests/special_e2e/ppo_trainer/run_ppo_trainer_fsdp.sh \
+            data.shuffle=False \
+            actor_rollout_ref.model.enable_gradient_checkpointing=True \
+            actor_rollout_ref.actor.use_kl_loss=False \
+            actor_rollout_ref.actor.ulysses_sequence_parallel_size=2 \
+            actor_rollout_ref.actor.use_dynamic_bsz=True \
+            actor_rollout_ref.actor.use_torch_compile=False \
+            actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True \
+            actor_rollout_ref.rollout.enforce_eager=False \
+            +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode='FULL_AND_PIECEWISE' \
+            critic.model.enable_gradient_checkpointing=True \
+            critic.ulysses_sequence_parallel_size=2 \
+            critic.use_dynamic_bsz=True
+          rm -rf $HOME/ckpts
+      - name: GRPO + FSDP (Qwen2.5-0.5B-Instruct)
+        run: |
+          ray stop --force
+          MODEL_ID=Qwen/Qwen2.5-0.5B-Instruct \
+            MODEL_PATH=${HOME}/models/Qwen/Qwen2.5-0.5B-Instruct \
+            ADV_ESTIMATOR=grpo USE_KL=True STRATEGY=fsdp \
+            ROLLOUT_TP=2 ROLLOUT_N=2 \
+            MAX_PROMPT_LEN=512 MAX_RESPONSE_LEN=128 \
+            GPU_MEMORY_UTILIZATION=0.6 \
+            VERL_EXP_NAME="qwen2.5-0.5b-grpo-fsdp-ascend" \
+            bash tests/special_e2e/ppo_trainer/run_ppo_trainer_fsdp.sh \
+            actor_rollout_ref.model.enable_gradient_checkpointing=True \
+            actor_rollout_ref.actor.use_torch_compile=False \
+            actor_rollout_ref.ref.use_torch_compile=False \
+            +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode='FULL_AND_PIECEWISE'
+          rm -rf $HOME/ckpts
+      - name: GRPO + FSDP2 + LoRA + save + merge (Qwen2.5-0.5B)
+        run: |
+          ray stop --force
+          CUSTOM_REWARD_FN=True ADV_ESTIMATOR=grpo USE_KL=True USE_SHM=True \
+            LORA_RANK=32 LOAD_FORMAT=safetensors LAYERED_SUMMON=True \
+            STRATEGY=fsdp2 VAL_BEFORE_TRAIN=True TEST_FREQ=1 SAVE_FREQ=1 \
+            SAVE_HF_MODEL=True RESUME_MODE=auto TOTAL_TRAIN_STEPS=2 FSDP_SIZE=4 \
+            VERL_EXP_NAME="qwen2.5-0.5b-grpo-lora-fsdp2-ascend" \
+            bash tests/special_e2e/ppo_trainer/run_ppo_trainer_fsdp.sh
+          python3 -m verl.model_merger merge --backend fsdp \
+            --local_dir checkpoints/verl-test/qwen2.5-0.5b-grpo-lora-fsdp2-ascend/global_step_1/actor/ \
+            --target_dir checkpoints/verl-test/qwen2.5-0.5b-grpo-lora-fsdp2-ascend/global_step_1/actor/huggingface
+          rm -rf $HOME/ckpts
+      - name: Prepare GEO3K dataset
+        run: |
+          python examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/.cache/datasets/hiyouga/geometry3k
+      - name: GRPO VLM + FSDP (Qwen2.5-VL-3B-Instruct)
+        # VLM specifics: data.image_key=images, larger seq lengths, no chunked
+        # prefill, enforce_eager.
+        run: |
+          ray stop --force
+          MODEL_ID=Qwen/Qwen2.5-VL-3B-Instruct \
+            MODEL_PATH=${HOME}/models/Qwen/Qwen2.5-VL-3B-Instruct \
+            ADV_ESTIMATOR=grpo USE_KL=True STRATEGY=fsdp \
+            ROLLOUT_TP=2 ROLLOUT_N=2 \
+            MAX_PROMPT_LEN=1024 MAX_RESPONSE_LEN=2048 \
+            GPU_MEMORY_UTILIZATION=0.6 \
+            TRAIN_FILES=$HOME/data/geo3k/train.parquet \
+            VAL_FILES=$HOME/data/geo3k/test.parquet \
+            VERL_EXP_NAME="qwen2.5-vl-3b-grpo-fsdp-ascend" \
+            bash tests/special_e2e/ppo_trainer/run_ppo_trainer_fsdp.sh \
+            data.image_key=images \
+            actor_rollout_ref.model.enable_gradient_checkpointing=True \
+            actor_rollout_ref.actor.use_torch_compile=False \
+            actor_rollout_ref.actor.kl_loss_coef=0.01 \
+            actor_rollout_ref.actor.entropy_coeff=0 \
+            actor_rollout_ref.ref.use_torch_compile=False \
+            actor_rollout_ref.rollout.enforce_eager=True \
+            actor_rollout_ref.rollout.free_cache_engine=True \
+            +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode='FULL_AND_PIECEWISE' \
+            algorithm.use_kl_in_reward=False
+          rm -rf $HOME/ckpts
+
+  # ============================================================
+  # VeOmni × vLLM on Ascend NPU
+  #   Driver: tests/special_e2e/ppo_trainer/run_ppo_trainer_veomni.sh
+  #   Model:  Qwen/Qwen2.5-0.5B-Instruct
+  # ============================================================
+  veomni_vllm_ascend:
+    if: github.repository_owner == 'verl-project'
+    runs-on: linux-aarch64-a2b3-8
+    timeout-minutes: 60
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-8.5.0-910b-ubuntu22.04-py3.11-latest
+      options: >-
+        --shm-size 16g
+    env:
+      HF_ENDPOINT: "https://hf-mirror.com"
+      HF_HUB_ENABLE_HF_TRANSFER: "0"
+      device_name: "npu"
+    steps:
+      - name: Check npu and CANN info
+        run: |
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+          npu-smi info
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          clean: true
+      - name: Install the current repository
+        run: |
+          pip install -r requirements-npu.txt
+          pip install --no-deps -e .
+          pip3 install veomni==0.1.9a4 --ignore-requires-python --no-deps --index-url https://pypi.org/simple/
+          pip install transformers==4.57.3
+      - name: Prepare weights
+        run: |
+          ln -s /root/.cache/models ~/models
+      - name: Prepare GSM8K dataset
+        run: |
+          python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
+      - name: VeOmni FSDP4 + USP2 (Qwen2.5-0.5B-Instruct)
+        run: |
+          ray stop --force
+          bash tests/special_e2e/ppo_trainer/run_ppo_trainer_veomni.sh
+
+  # ============================================================
+  # FSDP × SGLang on Ascend NPU
+  #   Driver: tests/special_e2e/ppo_trainer/run_ppo_trainer_fsdp.sh
+  #   Model:  Qwen/Qwen2.5-0.5B (default in the script)
+  # ============================================================
+  fsdp_sglang_ascend:
+    if: github.repository_owner == 'verl-project'
+    runs-on: linux-aarch64-a3-8
+    timeout-minutes: 90
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-sglang-8.5.0-a3-ubuntu22.04-py3.11-latest
+      options: >-
+        --shm-size 16g
+    env:
+      HF_ENDPOINT: "https://hf-mirror.com"
+      HF_HUB_ENABLE_HF_TRANSFER: "0"
+      RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES: "1"
+      ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7"
+      HCCL_HOST_SOCKET_PORT_RANGE: "60000-60050"
+      HCCL_NPU_SOCKET_PORT_RANGE: "61000-61050"
+      DEVICE: "npu"
+      ENGINE: sglang
+    steps:
+      - name: Check npu and CANN info
+        run: |
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+          npu-smi info
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          clean: true
+      - name: Install the current repository
+        run: |
+          pip3 install pytest pytest-asyncio
+          pip3 install --no-deps --no-build-isolation -e .
+      - name: Prepare weights
+        run: |
+          ln -s /root/.cache/models ~/models
+      - name: Prepare GSM8K dataset
+        run: |
+          python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
+      - name: GSM8K function-reward smoke (FSDP + SGLang, Qwen2.5-0.5B)
+        run: |
+          ray stop --force
+          bash tests/special_e2e/ppo_trainer/run_ppo_trainer_fsdp.sh
+          rm -rf $HOME/ckpts
+
+  # ============================================================
+  # Megatron × SGLang on Ascend NPU
+  #   Driver: tests/special_e2e/ppo_trainer/run_ppo_trainer_megatron.sh
+  #   Model:  Qwen/Qwen3-0.6B (matches the GPU sibling megatron_sglang)
+  # ============================================================
+  megatron_sglang_ascend:
+    if: github.repository_owner == 'verl-project'
+    runs-on: linux-aarch64-a3-8
+    timeout-minutes: 90
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-sglang-8.5.0-a3-ubuntu22.04-py3.11-latest
+      options: >-
+        --shm-size 16g
+    env:
+      HF_ENDPOINT: "https://hf-mirror.com"
+      HF_HUB_ENABLE_HF_TRANSFER: "0"
+      RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES: "1"
+      ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7"
+      HCCL_HOST_SOCKET_PORT_RANGE: "60000-60050"
+      HCCL_NPU_SOCKET_PORT_RANGE: "61000-61050"
+      DEVICE: "npu"
+      ENGINE: sglang
+    steps:
+      - name: Check npu and CANN info
+        run: |
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+          npu-smi info
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          clean: true
+      - name: Install the current repository
+        run: |
+          pip3 install pytest pytest-asyncio
+          pip3 install megatron-bridge --no-deps
+          pip3 install git+https://github.com/ISEEKYAN/mbridge.git@main --no-deps --no-build-isolation
+          pip3 install --no-deps --no-build-isolation -e .
+      - name: Prepare weights
+        run: |
+          ln -s /root/.cache/models ~/models
+      - name: Prepare GSM8K dataset
+        run: |
+          python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
+      - name: Megatron GRPO with resume, val and save (Qwen2.5-0.5B)
+        run: |
+          ray stop --force
+          ray start --head
+          OPTIM_MEMORY_EFFICIENT=True COMMON_VPP=null USE_REMOVE_PADDING=True \
+            VAL_BEFORE_TRAIN=True TEST_FREQ=1 SAVE_FREQ=1 RESUME_MODE=auto \
+            ADV_ESTIMATOR=grpo TOTAL_TRAIN_STEPS=2 \
+            bash tests/special_e2e/ppo_trainer/run_ppo_trainer_megatron.sh
+          rm -rf checkpoints
+          rm -rf "${HOME}/profiling"

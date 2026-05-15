@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
+# PPO trainer smoke test: veomni engine + profiler-output validation.
+# Hard-codes model_engine=veomni and runs tests/utils/check_profiler_output.py
+# against the saved profiler data. Used on both CUDA and NPU.
+#
+# Sibling scripts in this directory:
+#   - run_ppo_trainer_fsdp.sh     : function-reward smoke, strategy-parameterized
+#   - run_ppo_trainer_megatron.sh : megatron + reward-model smoke
 set -xeuo pipefail
 
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/../model_path.sh"
 
 SAVE_PATH=tests/utils/ci/profiler_data
 rm -rf "$SAVE_PATH"
@@ -10,10 +18,8 @@ PROFILE_RANKS_ALL=False
 PROFILE_RANKS=[0]
 DISCRETE=True
 
-# Download model if not exists
 MODEL_ID=${MODEL_ID:-Qwen/Qwen2.5-0.5B-Instruct}
-MODEL_PATH=${MODEL_PATH:-${HOME}/models/${MODEL_ID}}
-#huggingface-cli download "${MODEL_ID}" --local-dir "${MODEL_PATH}"
+MODEL_PATH=${MODEL_PATH:-$(verl_model_path "${MODEL_ID}")}
 
 TRAIN_FILES=${TRAIN_FILES:-${HOME}/data/gsm8k/train.parquet}
 VAL_FILES=${VAL_FILES:-${HOME}/data/gsm8k/test.parquet}
@@ -101,7 +107,7 @@ if [ -n "$device_name" ] && [ "$device_name" == "cuda" ]; then
         actor_rollout_ref.ref.profiler.tool_config.torch.contents=$CONTENTS \
         global_profiler.tool=torch $@
 
-    python3 "tests/utils/test_check_profiler_output.py" --profiler_dir="$SAVE_PATH" --device="gpu"
+    python3 "tests/utils/check_profiler_output.py" --profiler_dir="$SAVE_PATH" --device="gpu"
     
 elif [ -n "$device_name" ] && [ "$device_name" == "npu" ]; then
     CONTENTS=['npu','cpu']
@@ -113,7 +119,7 @@ elif [ -n "$device_name" ] && [ "$device_name" == "npu" ]; then
         actor_rollout_ref.ref.profiler.tool_config.npu.contents=$CONTENTS \
         global_profiler.tool=npu $@
     
-    python3 "tests/utils/test_check_profiler_output.py" --profiler_dir="$SAVE_PATH" --device="npu"
+    python3 "tests/utils/check_profiler_output.py" --profiler_dir="$SAVE_PATH" --device="npu"
 else
     echo "Unknown device: $device_name"
     exit 1

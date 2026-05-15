@@ -1,0 +1,320 @@
+# # Tests layout
+#
+# Each folder under tests/ corresponds to a test category for a sub-namespace in verl. For instance:
+# - `tests/trainer` for testing functionality related to `verl/trainer`
+# - `tests/models` for testing functionality related to `verl/models`
+# - ...
+#
+# There are a few folders with `special_` prefix, created for special purposes:
+# - `special_distributed`: unit tests that must run with multiple GPUs
+# - `special_e2e`: end-to-end tests with training/generation scripts (CPU/CUDA/NPU)
+# - `special_sanity`: a suite of quick sanity tests
+# - `special_standalone`: a set of test that are designed to run in dedicated environments
+#
+# # Workflow layout
+#
+# This workflow exercises the on-policy PPO/GRPO trainer for the SGLang
+# inference backend. It is one of three sibling files split by inference
+# backend (each pinned to its own image), so a PR that only changes
+# vllm/sglang/trtllm rollout code only triggers the matching workflow:
+#
+#   - e2e_on_policy_vllm.yml
+#   - e2e_on_policy_sglang.yml  (this file, image: ${{ env.IMAGE }})
+#   - e2e_on_policy_trtllm.yml
+#
+# Cells exercised here (NVIDIA GPU, SGLang image):
+#
+#   train\modality | LLM                | VLM
+#   ---------------+--------------------+--------------------
+#   fsdp / fsdp2   | fsdp_sglang        | fsdp_sglang_vlm
+#   megatron       | megatron_sglang    | megatron_sglang_vlm
+#
+# (VeOmni × SGLang is intentionally skipped — the VeOmni driver script
+#  hardcodes vLLM as the rollout backend today.)
+#
+# Models: Qwen2.5-0.5B (FSDP LLM), Qwen3-0.6B (Megatron LLM),
+# Qwen2.5-VL-3B-Instruct (all VLM cells, GEO3K).
+
+name: e2e_on_policy_sglang
+
+# PR trigger:
+#   Exercises {fsdp/fsdp2, megatron} × sglang × {llm, vlm}.
+#   See README.md §2.4 for the matrix.
+
+on:
+  pull_request:
+    branches:
+      - main
+      - v0.*
+    paths:
+      - ".github/workflows/e2e_on_policy_sglang.yml"
+      # Drivers (LLM + VLM) reachable from this file
+      - "examples/data_preprocess/gsm8k.py"
+      - "examples/data_preprocess/geo3k.py"
+      - "tests/special_e2e/ppo_trainer/run_ppo_trainer_fsdp.sh"
+      - "tests/special_e2e/ppo_trainer/run_ppo_trainer_megatron.sh"
+      # Worker backends / rollout
+      - "verl/workers/**"
+      # Trainer / config
+      - "verl/trainer/**"
+      # Library core
+      - "verl/utils/**"
+      - "verl/models/**"
+      - "verl/single_controller/**"
+      - "verl/third_party/**"
+      # Build / deps
+      - "pyproject.toml"
+      - "setup.py"
+      - "requirements.txt"
+      - "requirements-test.txt"
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:sgl059.dev2"
+  DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
+
+jobs:
+  # ---------- SGLang-image runner (shared by all jobs in this file) ----------
+  setup:
+    if: github.repository_owner == 'verl-project'
+    runs-on: ubuntu-latest
+    outputs:
+      runner-label: ${{ steps.create-runner.outputs.runner-label }}
+      mlp-task-id: ${{ steps.create-runner.outputs.mlp-task-id }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: create-runner
+        uses: volcengine/vemlp-github-runner@v1
+        with:
+          mode: "create"
+          faas-url: "${{ env.DYNAMIC_RUNNER_ENDPOINT }}"
+          mlp-image: "${{ env.IMAGE }}"
+
+  # ============================================================
+  # FSDP × SGLang
+  #   Driver: tests/special_e2e/ppo_trainer/run_ppo_trainer_fsdp.sh
+  #   Model:  Qwen/Qwen2.5-0.5B (default in the script)
+  # ============================================================
+  fsdp_sglang:
+    needs: setup
+    runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
+    timeout-minutes: 40
+    env:
+      HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
+      NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
+      HF_ENDPOINT: "https://hf-mirror.com"
+      HF_HUB_ENABLE_HF_TRANSFER: "0"
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - name: Install the current repository
+        run: |
+          pip3 install -r requirements-test.txt
+          pip3 install --no-deps -e .
+      - name: Prepare GSM8K dataset
+        run: |
+          ray stop --force
+          python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
+      - name: Running GSM8K E2E training tests on 8 L20 GPUs with rmpad using function rm and save ckpt
+        run: |
+          ray stop --force
+          ENGINE=sglang bash tests/special_e2e/ppo_trainer/run_ppo_trainer_fsdp.sh
+      - name: clean up
+        run: rm -rf checkpoints
+
+  # ============================================================
+  # FSDP × SGLang — VLM
+  #   Driver: tests/special_e2e/ppo_trainer/run_ppo_trainer_fsdp.sh
+  #   Model:  Qwen/Qwen2.5-VL-3B-Instruct
+  #   Data:   GEO3K
+  # ============================================================
+  fsdp_sglang_vlm:
+    needs: setup
+    runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
+    timeout-minutes: 40
+    env:
+      HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
+      NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
+      HF_ENDPOINT: "https://hf-mirror.com"
+      HF_HUB_ENABLE_HF_TRANSFER: "0"
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - name: Install the current repository
+        run: |
+          pip3 install -r requirements-test.txt
+          pip3 install --no-deps -e .
+          pip3 install qwen_vl_utils
+          pip3 install mathruler
+      - name: Prepare GEO3K dataset
+        run: |
+          python3 examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/models/hf_data/hiyouga/geometry3k --local_save_dir ${PWD}/data/geo3k
+      - name: GRPO VLM (FSDP + SGLang, Qwen2.5-VL-3B)
+        run: |
+          ray stop --force
+          ENGINE=sglang CUSTOM_REWARD_FN=True ADV_ESTIMATOR=grpo STRATEGY=fsdp2 \
+          MODEL_ID=Qwen/Qwen2.5-VL-3B-Instruct \
+          TRAIN_FILES="${PWD}/data/geo3k/train.parquet" \
+          VAL_FILES="${PWD}/data/geo3k/test.parquet" \
+          MAX_PROMPT_LEN=512 MAX_RESPONSE_LEN=128 \
+          GPU_MEMORY_UTILIZATION=0.6 \
+            bash tests/special_e2e/ppo_trainer/run_ppo_trainer_fsdp.sh \
+            data.image_key=images \
+            data.train_files="['${PWD}/data/geo3k/train.parquet']" \
+            data.val_files="['${PWD}/data/geo3k/test.parquet']" \
+            data.train_batch_size=16 \
+            actor_rollout_ref.actor.ppo_mini_batch_size=8 \
+            actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
+            actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
+            actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
+            actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
+            actor_rollout_ref.rollout.n=2 \
+            actor_rollout_ref.rollout.enforce_eager=True \
+            actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
+            trainer.logger='["console"]' \
+            trainer.total_epochs=1 \
+            trainer.total_training_steps=1 \
+            trainer.save_freq=-1 \
+            trainer.test_freq=-1
+      - name: clean up
+        run: rm -rf checkpoints
+
+  # ============================================================
+  # Megatron × SGLang
+  #   Driver: tests/special_e2e/ppo_trainer/run_ppo_trainer_megatron.sh
+  #   Model:  Qwen/Qwen3-0.6B (dense, tie_word_embeddings=True)
+  # ============================================================
+  megatron_sglang:
+    needs: setup
+    runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
+    timeout-minutes: 60
+    env:
+      HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
+      NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
+      HF_ENDPOINT: "https://hf-mirror.com"
+      HF_HUB_ENABLE_HF_TRANSFER: "0"
+      ENGINE: sglang
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - name: Install the current repository
+        run: |
+          pip3 install -r requirements-test.txt
+          pip3 install --no-deps -e .
+          pip3 install megatron-bridge --no-deps
+          pip3 install --force-reinstall git+https://github.com/ISEEKYAN/mbridge.git@main --no-deps --no-build-isolation
+          pip3 install math-verify
+      - name: Prepare GSM8K dataset
+        run: |
+          python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
+      - name: Megatron GRPO async rollout with resume, profiling, val and save
+        run: |
+          ray stop --force
+          ray start --head
+          ENGINE=sglang MODE=async ALL_OFFLOAD=True VAL_BEFORE_TRAIN=True \
+            TEST_FREQ=1 SAVE_FREQ=1 RESUME_MODE=auto \
+            PROFILE_ENABLE=True ADV_ESTIMATOR=grpo USE_DYNAMIC_BSZ=False \
+            TOTAL_TRAIN_STEPS=2 \
+            MODEL_ID=Qwen/Qwen3-0.6B \
+            bash tests/special_e2e/ppo_trainer/run_ppo_trainer_megatron.sh
+          if [ -z "$( ls -A '/tmp/ray/session_latest/logs/nsight/' )" ]; then
+            echo "[ERROR] no profiling files generated"
+            exit 1
+          fi
+      - name: clean up
+        run: rm -rf checkpoints
+
+  # ============================================================
+  # Megatron × SGLang — VLM
+  #   Driver: tests/special_e2e/ppo_trainer/run_ppo_trainer_fsdp.sh
+  #   Model:  Qwen/Qwen2.5-VL-3B-Instruct
+  #   Data:   GEO3K
+  # ============================================================
+  megatron_sglang_vlm:
+    needs: setup
+    runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
+    timeout-minutes: 60
+    env:
+      HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
+      NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
+      HF_ENDPOINT: "https://hf-mirror.com"
+      HF_HUB_ENABLE_HF_TRANSFER: "0"
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - name: Install the current repository
+        run: |
+          pip3 install -r requirements-test.txt
+          pip3 install --no-deps -e .
+          pip3 install megatron-bridge --no-deps
+          pip3 install --force-reinstall git+https://github.com/ISEEKYAN/mbridge.git@main --no-deps --no-build-isolation
+          pip3 install math-verify
+          pip3 install qwen_vl_utils
+          pip3 install mathruler
+      - name: Prepare GEO3K dataset
+        run: |
+          python3 examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/models/hf_data/hiyouga/geometry3k --local_save_dir ${PWD}/data/geo3k
+      - name: GRPO VLM (Megatron + SGLang, Qwen2.5-VL-3B)
+        run: |
+          ray stop --force
+          ENGINE=sglang CUSTOM_REWARD_FN=True ADV_ESTIMATOR=grpo STRATEGY=megatron \
+          MODEL_ID=Qwen/Qwen2.5-VL-3B-Instruct \
+          TRAIN_FILES="${PWD}/data/geo3k/train.parquet" \
+          VAL_FILES="${PWD}/data/geo3k/test.parquet" \
+          MAX_PROMPT_LEN=512 MAX_RESPONSE_LEN=128 \
+          GPU_MEMORY_UTILIZATION=0.6 \
+            bash tests/special_e2e/ppo_trainer/run_ppo_trainer_fsdp.sh \
+            data.image_key=images \
+            data.train_files="['${PWD}/data/geo3k/train.parquet']" \
+            data.val_files="['${PWD}/data/geo3k/test.parquet']" \
+            data.train_batch_size=16 \
+            actor_rollout_ref.actor.ppo_mini_batch_size=8 \
+            actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
+            actor_rollout_ref.actor.megatron.tensor_model_parallel_size=2 \
+            actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=1 \
+            actor_rollout_ref.actor.megatron.use_dist_checkpointing=False \
+            actor_rollout_ref.ref.megatron.tensor_model_parallel_size=2 \
+            actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=1 \
+            actor_rollout_ref.ref.megatron.use_dist_checkpointing=False \
+            actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
+            actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
+            actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
+            actor_rollout_ref.rollout.n=2 \
+            actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
+            actor_rollout_ref.actor.use_dynamic_bsz=False \
+            actor_rollout_ref.ref.log_prob_use_dynamic_bsz=False \
+            actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=False \
+            trainer.logger='["console"]' \
+            trainer.total_epochs=1 \
+            trainer.total_training_steps=1 \
+            trainer.save_freq=-1 \
+            trainer.test_freq=-1
+      - name: clean up
+        run: rm -rf checkpoints
+
+  # ---------- cleanup of dynamic runner ----------
+  cleanup:
+    runs-on: ubuntu-latest
+    needs:
+      - setup
+      - fsdp_sglang
+      - fsdp_sglang_vlm
+      - megatron_sglang
+      - megatron_sglang_vlm
+    if: always()
+    steps:
+      - id: destroy-runner
+        uses: volcengine/vemlp-github-runner@v1
+        with:
+          mode: "destroy"
+          faas-url: "${{ env.DYNAMIC_RUNNER_ENDPOINT }}"
+          mlp-task-id: "${{ needs.setup.outputs.mlp-task-id }}"

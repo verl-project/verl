@@ -1,11 +1,32 @@
 #!/usr/bin/env bash
+# PPO trainer smoke test: function reward (gsm8k correctness or a custom
+# python reward fn). The trainer engine is parameterized via STRATEGY /
+# MODEL_ENGINE; defaults to FSDP. Megatron-VLM CI jobs override
+# STRATEGY=megatron, so this script must keep the engine pluggable.
+#
+# Both CUDA and Ascend NPU CI jobs invoke this script. The accelerator is
+# selected via DEVICE (default: cuda) and USE_OPTIMIZED_MODEL (vllm-ascend
+# specific). Use $@ to pass arbitrary additional Hydra overrides
+# (e.g. `+actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode=FULL_AND_PIECEWISE`).
+#
+# Sibling scripts in this directory:
+#   - run_ppo_trainer_megatron.sh : hardcoded megatron + reward-model smoke
+#   - run_ppo_trainer_veomni.sh   : hardcoded veomni + profiler smoke
 set -xeuo pipefail
 
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/../model_path.sh"
+
 NUM_GPUS=${NUM_GPUS:-8}
+DEVICE=${DEVICE:-cuda}
+
+# vllm-ascend ships kernel-optimised builds of some models that aren't
+# numerically suitable for RLHF training. Setting this to 0 disables them.
+# A no-op on CUDA (vllm upstream ignores it).
+USE_OPTIMIZED_MODEL=${USE_OPTIMIZED_MODEL:-1}
+export USE_OPTIMIZED_MODEL
 
 MODEL_ID=${MODEL_ID:-Qwen/Qwen2.5-0.5B}
-MODEL_PATH=${MODEL_PATH:-${HOME}/models/${MODEL_ID}}
-#hf download "${MODEL_ID}" --local-dir "${MODEL_PATH}"
+MODEL_PATH=${MODEL_PATH:-$(verl_model_path "${MODEL_ID}")}
 
 TRAIN_FILES=${TRAIN_FILES:-$HOME/data/gsm8k/train.parquet}
 VAL_FILES=${VAL_FILES:-$HOME/data/gsm8k/test.parquet}
@@ -34,6 +55,13 @@ USE_KL=${USE_KL:-False}
 CUSTOM_REWARD_FN=${CUSTOM_REWARD_FN:-False}
 ENABLE_CHUNKED_PREFILL=${ENABLE_CHUNKED_PREFILL:-True} # For vLLM VLM placeholder issue: https://github.com/vllm-project/vllm/issues/15185
 STRATEGY=${STRATEGY:-fsdp}
+MODEL_ENGINE=${MODEL_ENGINE:-dp}
+if [ "${STRATEGY}" = "megatron" ]; then
+    MODEL_ENGINE=megatron
+fi
+if [ "${MODEL_ENGINE}" = "megatron" ]; then
+    STRATEGY=megatron
+fi
 # LoRA config
 LORA_RANK=${LORA_RANK:-0}
 LORA_ALPHA=${LORA_ALPHA:-${LORA_RANK}}
@@ -62,7 +90,8 @@ else
 fi
 
 train_traj_micro_bsz_per_gpu=2 # b
-n_resp_per_prompt=4 # g
+n_resp_per_prompt=${ROLLOUT_N:-4} # g
+ROLLOUT_TP=${ROLLOUT_TP:-2}
 
 train_traj_micro_bsz=$((train_traj_micro_bsz_per_gpu * 1)) # b * n
 train_traj_mini_bsz=$((train_traj_micro_bsz * 2)) # 2 * b * n
@@ -87,6 +116,23 @@ fi
 
 exp_name="${VERL_EXP_NAME:-$(basename "${MODEL_ID,,}")-function-reward-minimal}"
 
+ENGINE_OVERRIDES=(
+    "model_engine=${MODEL_ENGINE}"
+    "actor_rollout_ref.actor.strategy=${STRATEGY}"
+)
+
+if [ "${MODEL_ENGINE}" != "megatron" ]; then
+    ENGINE_OVERRIDES+=(
+        "actor_rollout_ref.actor.fsdp_config.param_offload=${ACTOR_FSDP_PARAM_OFFLOAD}"
+        "actor_rollout_ref.actor.fsdp_config.optimizer_offload=${ACTOR_FSDP_OPTIMIZER_OFFLOAD}"
+        "actor_rollout_ref.actor.fsdp_config.fsdp_size=${FSDP_SIZE}"
+        "actor_rollout_ref.actor.ulysses_sequence_parallel_size=${SP_SIZE}"
+        "actor_rollout_ref.ref.fsdp_config.param_offload=${REF_FSDP_PARAM_OFFLOAD}"
+        "critic.fsdp.param_offload=True"
+        "critic.fsdp.optimizer_offload=True"
+    )
+fi
+
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator="${ADV_ESTIMATOR}" \
     data.train_files="${TRAIN_FILES}" \
@@ -107,16 +153,11 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.model.fused_kernel_options.impl_backend=${FUSED_KERNEL_BACKEND} \
     actor_rollout_ref.actor.ppo_mini_batch_size=${train_prompt_mini_bsz} \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=${train_traj_micro_bsz_per_gpu} \
-    actor_rollout_ref.actor.strategy=${STRATEGY} \
-    actor_rollout_ref.actor.fsdp_config.param_offload=${ACTOR_FSDP_PARAM_OFFLOAD} \
-    actor_rollout_ref.actor.fsdp_config.optimizer_offload=${ACTOR_FSDP_OPTIMIZER_OFFLOAD} \
-    actor_rollout_ref.actor.fsdp_config.fsdp_size=${FSDP_SIZE} \
-    actor_rollout_ref.actor.ulysses_sequence_parallel_size="${SP_SIZE}" \
     actor_rollout_ref.actor.checkpoint.save_contents=${CHECKPOINT_CONTENTS} \
     actor_rollout_ref.actor.use_kl_loss="${USE_KL}" \
     actor_rollout_ref.actor.policy_loss.loss_mode="${LOSS_MODE}" \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=${train_traj_micro_bsz_per_gpu} \
-    actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
+    actor_rollout_ref.rollout.tensor_model_parallel_size=${ROLLOUT_TP} \
     actor_rollout_ref.rollout.n=${n_resp_per_prompt} \
     actor_rollout_ref.rollout.name="${ENGINE}" \
     actor_rollout_ref.rollout.mode="${ROLLOUT_MODE}" \
@@ -126,14 +167,12 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.gpu_memory_utilization="${GPU_MEMORY_UTILIZATION}" \
     actor_rollout_ref.rollout.enable_chunked_prefill="${ENABLE_CHUNKED_PREFILL}" \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=${train_traj_micro_bsz_per_gpu} \
-    actor_rollout_ref.ref.fsdp_config.param_offload="${REF_FSDP_PARAM_OFFLOAD}" \
     critic.optim.lr=1e-5 \
     critic.model.use_remove_padding="${RM_PAD}" \
     critic.model.path="${MODEL_PATH}" \
     critic.model.enable_gradient_checkpointing=False \
     critic.ppo_micro_batch_size_per_gpu=${train_traj_micro_bsz_per_gpu} \
-    critic.fsdp.param_offload=True \
-    critic.fsdp.optimizer_offload=True \
+    "${ENGINE_OVERRIDES[@]}" \
     reward.custom_reward_function.path="${reward_fn_file_path}"\
     reward.custom_reward_function.name="${reward_fn_name}"\
     algorithm.use_kl_in_reward="${USE_KL}" \
@@ -150,7 +189,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.save_freq="${SAVE_FREQ}" \
     trainer.resume_mode="${RESUME_MODE}" \
     trainer.total_epochs=2 \
-    trainer.device=cuda \
+    trainer.device="${DEVICE}" \
     trainer.total_training_steps="${TOTAL_TRAIN_STEPS}" $@ \
     | tee "${output_file}"
 
