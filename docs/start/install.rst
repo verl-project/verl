@@ -114,7 +114,7 @@ backend you need under ``verl/.venvs/.venv-<backend>/``.
 1. Pick a base image
 ::::::::::::::::::::
 
-``uv sync`` installs Python packages only — bring your own OS / CUDA
+``uv pip install`` installs Python packages only — bring your own OS / CUDA
 base image:
 
 .. list-table::
@@ -136,14 +136,14 @@ base image:
    * - ``sglang-ascend`` (Atlas A2 / A3)
      - same Ascend CANN base, plus the off-PyPI ``sgl-kernel-npu`` / ``deep_ep`` / ``torch_memory_saver`` zip from `sgl-kernel-npu releases <https://github.com/sgl-project/sgl-kernel-npu/releases>`_
    * - ``cpu`` (CI / sanity)
-     - any Linux/macOS host with python ≥3.10; no GPU drivers needed
+     - any Linux/macOS host with Python ≥3.11 for ``manage_envs.py``; no GPU drivers needed
 
-NVIDIA backends: any ``nvcr.io/nvidia/pytorch`` image works too — ``uv
-sync`` replaces its bundled torch. Ascend backends (NPU): ``torch-npu``
+NVIDIA backends: any ``nvcr.io/nvidia/pytorch`` image works too — the
+backend venv install replaces its bundled torch. Ascend backends (NPU): ``torch-npu``
 provides the NPU runtime; ``torch`` itself comes from PyPI (the aarch64
 wheel is already CPU-only — no CUDA needed).
 
-2. Install uv and sync a backend
+2. Install uv and create venv
 ::::::::::::::::::::::::::::::::
 
 .. code:: bash
@@ -172,12 +172,23 @@ The simplest entry point is ``manage_envs.py``:
    python manage_envs.py clean <backend>  # delete a venv
    python manage_envs.py --help
 
-It is just a thin wrapper; the equivalent raw ``uv`` invocation is:
+``manage_envs.py`` uses ``uv pip install`` instead of ``uv sync``. Each
+backend resolves independently, so ``sync vllm`` only sees ``vllm`` +
+``verl-core`` dependencies and does not resolve or clone training backends
+like VeOmni / MindSpeed / NeMo-Automodel.
+
+The equivalent raw ``uv`` shape is:
 
 .. code:: bash
 
-   UV_PROJECT_ENVIRONMENT=.venvs/.venv-vllm \
-       uv sync --extra vllm --python 3.12 --link-mode=copy
+   uv venv .venvs/.venv-vllm --python 3.12 --seed
+   uv pip install --python .venvs/.venv-vllm/bin/python --link-mode=copy \
+       --extra-index-url https://download.pytorch.org/whl/cu129 \
+       torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0
+   uv pip install --python .venvs/.venv-vllm/bin/python --link-mode=copy \
+       -r <requirements expanded from pyproject.toml's vllm + verl-core extras>
+   uv pip install --python .venvs/.venv-vllm/bin/python --link-mode=copy \
+       --no-deps -e .
 
 3. Run code in a backend
 ::::::::::::::::::::::::
@@ -292,7 +303,7 @@ Troubleshooting
   ``null`` (legacy single-venv mode), or pass an absolute path /
   ``uv run`` command line.
 
-Optional, not handled by ``uv sync`` (Dockerfile-only steps): system
+Optional, not handled by ``uv pip install`` (Dockerfile-only steps): system
 deps (``apt-get install`` cuDNN / build-essential / libibverbs-dev /
 …), GDRCopy + DeepEP for MoE all-to-all, Mooncake for sglang KV-cache
 transfer, flashinfer JIT cache, sgl-router. Recipes live in
