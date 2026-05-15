@@ -348,6 +348,223 @@ The returned scalar loss is what `engine.train_batch` backpropagates.
 - `tests/utils/test_special_megatron_kl_loss_tp.py` — Megatron KL loss under tensor parallelism
 - `tests/special_e2e/run_fully_async_policy_opd.sh` — end-to-end OPD with the fully-async rollouter
 
+## Configuration Parameters
+
+OPD parameters live under three namespaces:
+
+- `distillation.*` — top-level switches and the teacher resource pool ([`DistillationConfig`](../../verl/workers/config/distillation.py))
+- `distillation.teacher_models.<name>.*` — one entry per teacher ([`DistillationTeacherModelConfig`](../../verl/workers/config/distillation.py))
+- `distillation.distillation_loss.*` — loss-mode and aggregation settings ([`DistillationLossConfig`](../../verl/workers/config/distillation.py))
+
+Defaults below are the YAML defaults from
+[`verl/trainer/config/distillation/distillation.yaml`](../../verl/trainer/config/distillation/distillation.yaml).
+
+---
+
+### `distillation.enabled` (bool)
+
+Whether on-policy distillation is enabled. Default: `false`.
+
+When `true`, `main_ppo` allocates a separate teacher resource pool and spins up
+one or more teacher inference servers; the actor loss switches from `ppo_loss`
+to `distillation_ppo_loss`.
+
+### `distillation.n_gpus_per_node` (int)
+
+Number of GPUs per node in the teacher resource pool. Default: `8`.
+
+### `distillation.nnodes` (int)
+
+Number of nodes in the teacher resource pool. Default: `0` (effectively
+disables the pool — must be set to `≥ 1` when `enabled=True`).
+
+**Constraint:** the total teacher pool size (`n_gpus_per_node × nnodes`) must
+exactly equal the sum of `(num_replicas × per_replica_world_size)` across all
+configured teachers, or `DistillationConfig.__post_init__` raises.
+
+### `distillation.teacher_key` (str)
+
+Field on each sample's data proto used to route the sample to the right
+teacher in multi-teacher setups. Default: `"data_source"`.
+
+- **Single-teacher**: ignored (everything goes to the sole teacher).
+- **Multi-teacher**: the value of `sample[teacher_key]` must match the `key`
+  of one of the configured teachers, or
+  `AsyncTeacherLLMServerManager._resolve_teacher_key` raises.
+
+### `distillation.teacher_models` (dict)
+
+Map of teacher entries. Each value is a `DistillationTeacherModelConfig`.
+
+The single-teacher entry is named `teacher_model` by convention. **Pitfall:**
+when adding more named teachers, the `teacher_model` entry is silently popped
+— so do **not** keep `teacher_model` as one entry alongside other named
+teachers. Either rely on it alone, or rename it (e.g. `teacher_model1`) and
+add the others.
+
+```bash
+# WRONG: teacher_model is popped, only teacher_model2 is used
+distillation.teacher_models.teacher_model.key=openai/gsm8k
+distillation.teacher_models.teacher_model.model_path=Qwen/Qwen3-4B
++distillation.teacher_models.teacher_model2.key=hiyouga/geometry3k
++distillation.teacher_models.teacher_model2.model_path=Qwen/Qwen3-VL-4B-Instruct
+
+# RIGHT: rename the first teacher
++distillation.teacher_models.teacher_model1.key=openai/gsm8k
++distillation.teacher_models.teacher_model1.model_path=Qwen/Qwen3-4B
++distillation.teacher_models.teacher_model2.key=hiyouga/geometry3k
++distillation.teacher_models.teacher_model2.model_path=Qwen/Qwen3-VL-4B-Instruct
+```
+
+---
+
+### `distillation.teacher_models.<name>.key` (str)
+
+Identifier used to route samples to this teacher in multi-teacher mode. Must
+match the value of `sample[distillation.teacher_key]`. Default: `null`
+(required for multi-teacher; auto-set to `"default"` for single-teacher).
+
+### `distillation.teacher_models.<name>.model_path` (str)
+
+Local path or Hugging Face model id for the teacher. **Required.**
+
+The teacher must share the student's tokenizer/vocab — typically satisfied by
+picking a teacher in the same model family (e.g. `Qwen3-32B` teacher for a
+`Qwen3-8B` student). Different LM-head padding is fine.
+
+### `distillation.teacher_models.<name>.num_replicas` (int)
+
+Number of inference replicas of this teacher to launch. Default: `0`.
+
+Each replica occupies
+`per_replica_world_size = inference.tensor_model_parallel_size * inference.data_parallel_size * inference.pipeline_model_parallel_size`
+GPUs, so the teacher's total footprint is `num_replicas × per_replica_world_size`.
+
+For a **single teacher**, you may leave this at `0`: `_resolve_teacher_models`
+auto-fills it as `pool_size // per_replica_world_size`.
+
+### `distillation.teacher_models.<name>.inference.*` ([`RolloutConfig`](../../verl/workers/config/rollout.py))
+
+Inference-engine config for this teacher (vLLM/SGLang). Same shape as
+`actor_rollout_ref.rollout.*`. Notable defaults inherited from the YAML:
+
+- `inference.name` — e.g. `vllm` or `sglang`.
+- `inference.tensor_model_parallel_size` — default `2`.
+- `inference.gpu_memory_utilization` — default `0.5`.
+- `inference.max_model_len` — must accommodate `student_prompt_length +
+  student_response_length + 1`; otherwise
+  `validate_and_prepare_for_distillation` raises.
+- `inference.engine_kwargs.vllm.max_logprobs` — auto-bumped to `≥
+  distillation.distillation_loss.topk` whenever the active loss mode requires
+  top-k. (No-op for SGLang; `top_logprobs_num` is per-request there.)
+
+`validate_and_prepare_for_distillation` rewrites
+`inference.prompt_length := prompt_length + response_length` and
+`inference.response_length := 1`, since the teacher only scores the
+(prompt + response) prefix and emits one dummy token.
+
+---
+
+### `distillation.distillation_loss.loss_mode` (str)
+
+Distillation divergence to use. Default: `"k3"`.
+
+Two registered families:
+
+- **Top-k** (`forward_kl_topk`): forward KL using the teacher's top-k logits.
+  Computed as a logits processor inline with the student's forward pass so the
+  full vocab logits don't need to leave the GPU.
+- **Single-sample KL estimators** (`kl`, `k1`, `abs`, `mse`, `k2`,
+  `low_var_kl`, `k3`): per-token Monte Carlo estimators of reverse KL
+  computed from the student's `log_probs` and the teacher's single
+  `log_prob` at the sampled token.
+
+### `distillation.distillation_loss.topk` (int, optional)
+
+`k` for top-k distillation losses. Default: `32`.
+
+Only used when `loss_mode` requires top-k (e.g. `forward_kl_topk`). Drives both
+the teacher's `prompt_logprobs` request size and (for vLLM) the engine's
+`max_logprobs` cap.
+
+### `distillation.distillation_loss.use_task_rewards` (bool)
+
+Whether to add the standard PPO/GRPO task-reward loss on top of the
+distillation loss. Default: `true`.
+
+- `true`: final loss is `policy_loss + distillation_loss_coef × distill_loss`.
+- `false`: the PPO term is zeroed and only the distillation loss contributes.
+
+Orthogonal to `use_policy_gradient` (which controls how the *distillation
+signal itself* is applied).
+
+### `distillation.distillation_loss.distillation_loss_coef` (float)
+
+Coefficient on the distillation loss when combined with task rewards.
+Default: `1.0`. Only takes effect when `use_task_rewards=true`.
+
+### `distillation.distillation_loss.loss_max_clamp` (float, optional)
+
+Per-token clamp on the distillation loss to `[-clamp, +clamp]`. Default:
+`null` (no clamp).
+
+Useful for `k1`, which can be negative, and to defang occasional
+exploding-token outliers. Example scripts override to `10.0`.
+
+### `distillation.distillation_loss.log_prob_min_clamp` (float, optional)
+
+Lower clamp on log probabilities used inside divergence computations, to
+prevent `log q − log p` from blowing up when `p` or `q` are near zero.
+Default: `null`. Example scripts override to `-10.0`.
+
+### `distillation.distillation_loss.use_policy_gradient` (bool)
+
+How the distillation signal is applied. Default: `false`.
+
+- `false` (supervised, [arxiv:2306.13649](https://arxiv.org/abs/2306.13649)):
+  per-token distillation loss is aggregated over the response mask and
+  backpropagated directly. Recommended with `loss_mode=k3` or
+  `forward_kl_topk`.
+- `true` (on-policy distillation,
+  [Thinking Machines blog](https://thinkingmachines.ai/blog/on-policy-distillation/)):
+  treat `−distillation_loss` as the advantage and run a PPO-style clipped
+  importance-sampling update against `data["old_log_probs"]`. Recommended
+  with `loss_mode=k1`.
+
+**Validation:**
+
+- `use_policy_gradient=False` + `loss_mode="k1"` → `ValueError`. The k1 loss
+  has no gradient through the teacher logprob, so backpropagating it directly
+  is meaningless.
+- `use_policy_gradient=True` + `loss_mode="forward_kl_topk"` → warning. The
+  PG update only moves `∇log π(a)` for the sampled token, so the top-k
+  distributional signal is largely unused.
+
+### `distillation.distillation_loss.policy_loss_mode` (str)
+
+Name of the policy loss to use when `use_policy_gradient=True`. Default:
+`"vanilla"`. **Currently only `"vanilla"` is supported**; anything else raises
+`NotImplementedError`.
+
+### `distillation.distillation_loss.clip_ratio` (float)
+
+PPO clip ratio used by the policy-gradient update when
+`use_policy_gradient=True`. Default: `0.2`.
+
+### `distillation.distillation_loss.clip_ratio_low` (float)
+
+Lower bound of the PPO clip range. Default: `0.2`.
+
+### `distillation.distillation_loss.clip_ratio_high` (float)
+
+Upper bound of the PPO clip range. Default: `0.2`.
+
+### `distillation.distillation_loss.global_batch_info` / `loss_settings`
+
+Internal fields populated at runtime — **do not set from the user side.**
+`loss_settings` is auto-populated from `loss_mode` via
+`get_distillation_loss_settings`; `global_batch_info` is filled by the actor
+worker before the loss runs.
 
 
 ## Usage
