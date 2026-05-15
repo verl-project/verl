@@ -511,18 +511,6 @@ data:
 
 **Note**: The `teacher_key` is used to route examples to teachers and can be any string that is in the `extra_info` of each example. If examples are routed based on data source, i.e., `teacher_key == data_source`, make sure to shuffle the data. Otherwise, only one teacher will be active. For example, if the data is GSM8k concatenated with Geo3k, the first 8/11~73% of training will only use the GSM8k teacher, and the remaining 27% will use the Geo3k teacher.
 
-### Loss clamping
-
-To prevent instability, loss clamping is applied in two ways:
-
-```yaml
-distillation:
-   distillation_loss:
-      loss_max_clamp: 10.0
-      log_prob_min_clamp: -10.0
-```
-
-`loss_max_clamp` clamps 
 
 
 ## Metrics
