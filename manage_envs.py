@@ -24,7 +24,8 @@ This script intentionally uses ``uv pip install`` instead of
   * ``sync vllm`` never resolves / clones VeOmni, MindSpeed, NeMo-Automodel,
     or any other unrelated backend source,
   * backend metadata constraints on transformers (for example ``<5``) are
-    overridden to ``transformers==5.3.0``,
+    bypassed by installing ``transformers==5.3.0`` afterward with
+    ``uv pip install --no-deps``,
   * each backend still gets a separate venv under
     ``verl/.venvs/.venv-<backend>``,
   * recommended build-time env vars are set for backends that compile native
@@ -147,7 +148,8 @@ VENVS_DIR = (VERL_DIR / ".venvs").resolve()
 
 _REQ_NAME_RE = re.compile(r"^\s*([A-Za-z0-9_.-]+)")
 _TORCH_PACKAGES = {"torch", "torchvision", "torchaudio"}
-_GLOBAL_OVERRIDES = ["transformers==5.3.0"]
+_FORCED_PACKAGES = ["transformers==5.3.0"]
+_FORCED_PACKAGE_NAMES = {"transformers"}
 
 
 def _venv_path(backend: str) -> Path:
@@ -323,9 +325,8 @@ def _write_requirements(requirements: list[str]) -> tempfile.NamedTemporaryFile:
     return req_file
 
 
-def _override_args() -> tuple[list[str], Path]:
-    override_file = _write_requirements(_GLOBAL_OVERRIDES)
-    return ["--override", override_file.name], Path(override_file.name)
+def _without_forced_packages(requirements: list[str]) -> list[str]:
+    return [req for req in requirements if _req_name(req) not in _FORCED_PACKAGE_NAMES]
 
 
 def cmd_sync(args: argparse.Namespace) -> int:
@@ -385,8 +386,8 @@ def cmd_sync(args: argparse.Namespace) -> int:
                 print(f"error: uv pip torch install failed for {backend}", file=sys.stderr)
                 return rc
 
-        req_file = _write_requirements(requirements)
-        override_args, override_file = _override_args()
+        solver_requirements = _without_forced_packages(requirements)
+        req_file = _write_requirements(solver_requirements)
         rc = _run(
             [
                 "uv",
@@ -398,7 +399,6 @@ def cmd_sync(args: argparse.Namespace) -> int:
                 *_index_args(pyproject, backend, requirements),
                 *_no_build_isolation_args(pyproject, requirements),
                 *_config_setting_args(pyproject, requirements),
-                *override_args,
                 *args.uv_args,
                 "-r",
                 req_file.name,
@@ -406,9 +406,25 @@ def cmd_sync(args: argparse.Namespace) -> int:
             env_overrides,
         )
         Path(req_file.name).unlink(missing_ok=True)
-        override_file.unlink(missing_ok=True)
         if rc:
             print(f"error: uv pip install failed for {backend}", file=sys.stderr)
+            return rc
+
+        rc = _run(
+            [
+                "uv",
+                "pip",
+                "install",
+                "--python",
+                str(venv_python),
+                "--link-mode=copy",
+                "--no-deps",
+                *_FORCED_PACKAGES,
+            ],
+            env_overrides,
+        )
+        if rc:
+            print(f"error: forced package install failed for {backend}", file=sys.stderr)
             return rc
 
         cmd = [

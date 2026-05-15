@@ -74,8 +74,8 @@ verl-core = [
 # ---- inference backends ----------------------------------------------------
 # Rollout-only slices of the reference Dockerfiles. Transformers is
 # intentionally synchronized to 5.3.0 across all backend venvs; manage_envs.py
-# passes an override file so backend package metadata constraints such as
-# `transformers<5` do not block installation.
+# installs it in a final `uv pip install --no-deps` step, so backend package
+# metadata constraints such as `transformers<5` do not block installation.
 
 # verl/docker/Dockerfile.stable.vllm (rollout half)
 vllm = [
@@ -350,11 +350,12 @@ verl = [
 # =============================================================================
 # tool.uv — see docs/start/install.rst for the full reference.
 # `python manage_envs.py sync <backend>` reads this metadata and installs with
-# uv pip into `.venvs/.venv-<backend>`. It also passes a global override file
-# for `transformers==5.3.0`, so backend metadata constraints such as `<5` do
-# not change the synchronized transformers version. We intentionally do not
-# use `uv sync` for backend envs because uv's universal lockfile resolves every
-# extra and therefore touches unrelated git backends during a vllm-only install.
+# uv pip into `.venvs/.venv-<backend>`. It installs `transformers==5.3.0`
+# after the backend solve with `--no-deps`, so backend metadata constraints
+# such as `<5` do not change the synchronized transformers version. We
+# intentionally do not use `uv sync` for backend envs because uv's universal
+# lockfile resolves every extra and therefore touches unrelated git backends
+# during a vllm-only install.
 # =============================================================================
 [tool.uv]
 # These packages `import torch` at build time, so we let them see the torch
