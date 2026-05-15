@@ -623,6 +623,40 @@ The `teacher_key` controls routing. It must refer to a field in each sample's `e
 
 When routing by data source, enable data shuffling. Without shuffling, a concatenated dataset may activate only one teacher for long contiguous stretches. For example, if GSM8K examples are followed by Geo3K examples, then training will use only the GSM8K teacher for the first portion of the epoch and only the Geo3K teacher for the remaining portion.
 
+## Metrics
+
+OPD logs metrics under `actor/distillation/*`.
+
+### Core metrics
+
+- `actor/distillation/loss`  
+  Unscaled distillation loss. When `use_task_rewards=true`, compare this with `actor/pg_loss` to choose `distillation_loss_coef`.
+
+- `actor/distillation/abs_loss`  
+  Absolute value of the distillation loss. This is mainly useful for signed estimators such as `k1`, where the mean loss can be near zero even when individual token-level values are large.
+
+- `actor/distillation/loss_min` / `actor/distillation/loss_max`  
+  Minimum and maximum per-token distillation loss in the batch. Use these to detect outlier tokens or numerical instability.
+
+### Top-\(k\) metrics
+
+These metrics are logged for top-\(k\) loss modes such as `forward_kl_topk`.
+
+- `actor/distillation/student_mass`  
+  Average student probability mass assigned to the teacher top-\(k\) tokens.
+
+- `actor/distillation/teacher_mass`  
+  Average teacher probability mass assigned to its own top-\(k\) tokens.
+
+- `actor/distillation/student_mass_min` / `actor/distillation/student_mass_max`  
+  Minimum and maximum student mass on the teacher top-\(k\) tokens within the batch.
+
+- `actor/distillation/teacher_mass_min` / `actor/distillation/teacher_mass_max`  
+  Minimum and maximum teacher mass on the teacher top-\(k\) tokens within the batch.
+
+`teacher_mass` indicates how much of the teacher distribution is covered by the selected top-\(k\). Low `teacher_mass` means the top-\(k\) approximation is truncating substantial teacher probability mass; increase `topk` if memory and runtime allow.
+
+`student_mass` indicates how much probability the student assigns to the teacher-preferred tokens. During successful distillation, `student_mass` should generally move toward `teacher_mass`. A sharp drop in `student_mass`, especially with rising `loss`, can indicate instability or a token-alignment issue.
 
 ## Debugging
 
