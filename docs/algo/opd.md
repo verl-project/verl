@@ -349,6 +349,7 @@ The returned scalar loss is what `engine.train_batch` backpropagates.
 - `tests/special_e2e/run_fully_async_policy_opd.sh` — end-to-end OPD with the fully-async rollouter
 
 
+
 ## Usage
 
 We have example scripts in the directory `examples/on_policy_distillation_trainer`. Now we show some basics for adapting a script to OPD.
@@ -404,31 +405,122 @@ distillation:
 
 **Note**: It is also important to not use policy gradient, since policy gradient only directly influences increases/decreases the logprob of the sampled token to match the teacher logprob, whereas the top-\(k\) loss includes signal for at least \(k-1\) other tokens. Using policy gradient is therefore not only computationally wasteful, but also adds noise to the reward. For example, consider the case where the student has perfectly matched the logprob of the sampled token relative to the teacher, but for all other tokens in the top-\(k\), it has overestimated. The forward KL is therefore positive, so policy gradient will decrease the logprob of the sampled token, despite already matching.
 
+
 **TODO: add a math eqn summarizing this**
+
+Put another way (rm this note after editting):
+
+```python
+        if self.use_policy_gradient and self.loss_mode == "forward_kl_topk":
+            print(
+                "WARNING: forward_kl_topk is most effective as a supervised distillation loss "
+                "(use_policy_gradient=False). With policy gradient, the update uses only the sampled"
+                " token's logprob ∇logπ(a), so the top-k distributional signal (how non-sampled logits "
+                "should move) is largely unused."
+            )
+
+```
+
 
 ### PG OPD
 
-To use PG OPD with k1 estimator, set the loss mode and enable policy gradient:
+To use PG OPD with k1 estimator, set the loss mode, enable policy gradient, and coonfigure clipping:
 
 ```yaml
 distillation:
    distillation_loss: 
       loss_mode: k1
       use_policy_gradient: true
+      policy_loss_mode: vanilla
+      clip_ratio_low: 0.2
+      clip_ratio_high: 0.28
 ```
+
+**Note**: currently only `policy_loss_mode=vanilla` is supported. Other loss modes such as `dppo_tv` require additional parameters, such as `clip_ratio_c`.
 
 **Note**: Computing the distillation loss using KL estimator is valid for reverse KL because samples are drawn from the student distribution. Estimating forward KL would instead require samples from the teacher distribution, which is just conventional (off-policy) KD. 
 
 ### Task rewards
 
-Show how to enable 
+Task rewards can be optimized at the same time as distillation loss by adding together as:
 
-### Metrics
+TODO: make the eqn better. 
 
-Use topk mass, max distillation loss
+$$
+\mathcal L = \mathcal L_{task} + \lambda \mathcal L_{distillation},
+$$
+
+where $\lambda$ is the parameter controlling the strength of the distillation loss.
+
+To simultaneously optimize task rewards (e.g., RLVR rewards) with a distillation loss, enable task rewards and set coefficient for the distillation loss:
+
+```yaml
+distillation:
+   distillation_loss:
+      use_task_rewards: true
+      distillation_loss_coef: 1.5
+```
 
 ### Multi-teacher OPD
 
-Add a note about how to specify teachers 
+Multiple teachers can be specified as
 
-Add a note about shuffling data
+```yaml
+distillation:
+   n_gpus_per_node: 8
+   nnodes: 2
+   teacher_key: data_source
+   
+   teacher_models:
+      gsm8k:
+         key: "openai/gsm8k"
+         model_path: Qwen/Qwen3-32B
+         num_replicas: 2
+         inference:
+            name: vllm
+            tensor_model_parallel_size: 2
+            gpu_memory_utilization: 0.6
+
+      geo3k:
+         key: "hiyouga/geometry3k"
+         model_path: Qwen/Qwen3-VL-32B-Instruct
+         num_replicas: 3
+         inference: 
+            name: vllm
+            tensor_model_parallel_size: 4
+            gpu_memory_utilization: 0.8
+
+data:
+   shuffle: true
+   reward_fn_key: data_source
+```
+
+**Note**: TODO: add a note about teacher GPU placement
+
+**Note**: The `teacher_key` is used to route examples to teachers and can be any string that is in the `extra_info` of each example. If examples are routed based on data source, i.e., `teacher_key == data_source`, make sure to shuffle the data. Otherwise, only one teacher will be active. For example, if the data is GSM8k concatenated with Geo3k, the first 8/11~73% of training will only use the GSM8k teacher, and the remaining 27% will use the Geo3k teacher.
+
+### Loss clamping
+
+To prevent instability, loss clamping is applied in two ways:
+
+```yaml
+distillation:
+   distillation_loss:
+      loss_max_clamp: 10.0
+      log_prob_min_clamp: -10.0
+```
+
+`loss_max_clamp` clamps 
+
+
+## Metrics
+
+- `actor/distillation/abs_loss`: absolute value of distillation loss. Useful for k1 estimator, which can be negative.
+- `actor/distillation/loss_{min,max}`: min/max distillation loss in a batch.
+- `actor/distillation/loss`: Unscaled distillation loss. Compare the magnitude to `actor/pg_loss` when `use_task_rewards=True` to determine the value of `distillation_loss_coef`.
+- `actor/distillation/{student,teacher}_mass`: average sum of probabilities for the student/ teacher in the teacher top-\(k\) when using a top-\(k\) loss. Decreasing can indicate instability.
+- `actor/distillation/{student,teacher}_mass_{min,max}`: min/max sum of probabilities for the student/teacher in the teacher top-\(k\) when using a top-\(k\) loss. Decreasing can indicate instability.
+
+## Debugging
+
+A useful technique for debugging modifications and additions to the distillation pipeline is to set the student to be the same model as the teacher. The loss should be approximately zero (not exact, since due to differences between train/inference engines). 
