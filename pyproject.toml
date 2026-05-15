@@ -89,9 +89,9 @@ vllm = [
 ]
 
 # sglang/docker/Dockerfile + verl/docker/Dockerfile.stable.sglang (rollout half).
-# nvidia-cudnn/nccl pins replicate sglang's `--force-reinstall --no-deps`
-# workarounds. The training tools that Dockerfile.stable.sglang adds on top
-# (apex/TE/flash-attn/Megatron-LM/...) live in the `megatron` extra.
+# nvidia-cudnn-cu12 / nvidia-nccl-cu12 are NOT declared here — manage_envs.py
+# auto-detects the system cuDNN/NCCL version and force-installs the matching
+# pip packages in every CUDA backend (see _detect_system_match_packages).
 sglang = [
     "verl[verl-core]",
     "torch==2.9.1",
@@ -100,14 +100,14 @@ sglang = [
     "sglang==0.5.9",
     "mbridge",
     "transformers==5.3.0",
-    "nvidia-cudnn-cu12==9.16.0.29",
-    "nvidia-nccl-cu12==2.28.3",
 ]
 
 # verl/docker/Dockerfile.stable.trtllm — Linux/x86_64/cu13 wheels only.
-# TRT-LLM has its own hard pins (TensorRT-LLM/requirements.txt): numpy<2.4,
-# nvidia-nccl-cu13 in [2.28.9, 2.29.2]. ray==2.54.1 is the TRT-LLM-compat pin
-# from Dockerfile.stable.trtllm L53. Transformers is still forced to 5.3.0.
+# TRT-LLM targets CUDA 13; nvidia-nccl-cu13 is kept here as a per-backend
+# override that replaces the auto-detected cu12 default. On a proper cu13
+# base image, auto-detection would find it directly; on a cu12 base this
+# explicit pin ensures the correct NCCL variant is force-installed.
+# ray==2.54.1 is the TRT-LLM-compat pin from Dockerfile.stable.trtllm L53.
 trtllm = [
     "verl[verl-core]",
     "torch>=2.10.0,<2.11.0a0",

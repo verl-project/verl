@@ -148,9 +148,125 @@ VENVS_DIR = (VERL_DIR / ".venvs").resolve()
 
 _REQ_NAME_RE = re.compile(r"^\s*([A-Za-z0-9_.-]+)")
 _TORCH_PACKAGES = {"torch", "torchvision", "torchaudio"}
+# Packages installed AFTER the solver with --no-deps, bypassing transitive
+# constraints from backends that declare incompatible ranges.
+# - transformers: verl standardizes on 5.3.0 across all backends even when a
+#   backend (e.g. vllm) declares transformers<5.
 _FORCED_PACKAGES = ["transformers==5.3.0"]
 _FORCED_PACKAGE_NAMES = {"transformers"}
+
+# nvidia-cudnn-cu12 / nvidia-nccl-cu12: these MUST match the system-level
+# libraries in the base Docker image. torch bundles its own transitive pin
+# (e.g. cudnn==9.10.2.21) that conflicts with the base image's actual version.
+# We auto-detect the system library version and force-install the matching pip
+# package in every CUDA backend so the pip .so files always match the system.
+_SYSTEM_MATCH_PREFIXES = ("nvidia-cudnn", "nvidia-nccl")
+_NON_CUDA_BACKENDS = {"cpu", "vllm-ascend", "sglang-ascend", "mindspeed"}
 _UV_PIP_BASE_ARGS = ["--link-mode=copy", "--index-strategy", "unsafe-best-match"]
+
+
+def _detect_system_cudnn_version() -> str | None:
+    """Detect system cuDNN version from the installed debian package.
+
+    Returns a pip version string like '9.16.0.29' or None if not found.
+    Works in nvidia/cuda Docker images where libcudnn is installed via apt.
+    """
+    # Try debian package first (nvidia Docker images)
+    for pkg_name in ("libcudnn9-cuda-12", "libcudnn8-cuda-12", "libcudnn9", "libcudnn8"):
+        try:
+            out = subprocess.check_output(
+                ["dpkg-query", "-W", "-f=${Version}", pkg_name],
+                stderr=subprocess.DEVNULL,
+                text=True,
+            ).strip()
+            # Format: "9.16.0.29-1+cuda12.9" → "9.16.0.29"
+            version = out.split("-")[0]
+            if version:
+                return version
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            continue
+    # Fallback: parse cudnn_version.h (covers non-deb installs)
+    for header_dir in ("/usr/include", "/usr/local/cuda/include"):
+        header = Path(header_dir) / "cudnn_version.h"
+        if header.exists():
+            content = header.read_text()
+            major = re.search(r"#define\s+CUDNN_MAJOR\s+(\d+)", content)
+            minor = re.search(r"#define\s+CUDNN_MINOR\s+(\d+)", content)
+            patch = re.search(r"#define\s+CUDNN_PATCHLEVEL\s+(\d+)", content)
+            if major and minor and patch:
+                return f"{major.group(1)}.{minor.group(1)}.{patch.group(1)}"
+    return None
+
+
+def _detect_system_nccl_version() -> str | None:
+    """Detect system NCCL version from the installed debian package.
+
+    Returns a pip version string like '2.28.3' or None if not found.
+    """
+    for pkg_name in ("libnccl2", "libnccl-dev"):
+        try:
+            out = subprocess.check_output(
+                ["dpkg-query", "-W", "-f=${Version}", pkg_name],
+                stderr=subprocess.DEVNULL,
+                text=True,
+            ).strip()
+            # Format: "2.28.3-1+cuda12.9" → "2.28.3"
+            version = out.split("-")[0]
+            if version:
+                return version
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            continue
+    # Fallback: parse nccl.h
+    for header_dir in ("/usr/include", "/usr/local/cuda/include"):
+        header = Path(header_dir) / "nccl.h"
+        if header.exists():
+            content = header.read_text()
+            major = re.search(r"#define\s+NCCL_MAJOR\s+(\d+)", content)
+            minor = re.search(r"#define\s+NCCL_MINOR\s+(\d+)", content)
+            patch = re.search(r"#define\s+NCCL_PATCH\s+(\d+)", content)
+            if major and minor and patch:
+                return f"{major.group(1)}.{minor.group(1)}.{patch.group(1)}"
+    return None
+
+
+def _detect_cuda_suffix() -> str:
+    """Detect CUDA major version suffix (cu12 or cu13) from nvcc."""
+    try:
+        out = subprocess.check_output(["nvcc", "--version"], stderr=subprocess.DEVNULL, text=True)
+        m = re.search(r"release (\d+)\.", out)
+        if m:
+            return f"cu{m.group(1)}"
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pass
+    # Default assumption for our base images
+    return "cu12"
+
+
+def _detect_system_match_packages() -> list[str]:
+    """Auto-detect nvidia-cudnn and nvidia-nccl pip packages matching system.
+
+    Returns a list of pinned requirements, e.g.:
+        ["nvidia-cudnn-cu12==9.16.0.29", "nvidia-nccl-cu12==2.28.3"]
+    Prints warnings if detection fails.
+    """
+    packages: list[str] = []
+    cuda_suffix = _detect_cuda_suffix()
+
+    cudnn_ver = _detect_system_cudnn_version()
+    if cudnn_ver:
+        packages.append(f"nvidia-cudnn-{cuda_suffix}=={cudnn_ver}")
+        print(f"  Detected system cuDNN: {cudnn_ver} → nvidia-cudnn-{cuda_suffix}=={cudnn_ver}")
+    else:
+        print("  WARNING: could not detect system cuDNN version; skipping nvidia-cudnn pin")
+
+    nccl_ver = _detect_system_nccl_version()
+    if nccl_ver:
+        packages.append(f"nvidia-nccl-{cuda_suffix}=={nccl_ver}")
+        print(f"  Detected system NCCL:  {nccl_ver} → nvidia-nccl-{cuda_suffix}=={nccl_ver}")
+    else:
+        print("  WARNING: could not detect system NCCL version; skipping nvidia-nccl pin")
+
+    return packages
 
 
 def _venv_path(backend: str) -> Path:
@@ -326,13 +442,55 @@ def _write_requirements(requirements: list[str]) -> tempfile.NamedTemporaryFile:
     return req_file
 
 
-def _without_forced_packages(requirements: list[str]) -> list[str]:
-    return [req for req in requirements if _req_name(req) not in _FORCED_PACKAGE_NAMES]
+def _is_post_solver(name: str) -> bool:
+    return name in _FORCED_PACKAGE_NAMES or name.startswith(_SYSTEM_MATCH_PREFIXES)
 
 
 def _without_staged_packages(requirements: list[str]) -> list[str]:
-    staged = _FORCED_PACKAGE_NAMES | _TORCH_PACKAGES
-    return [req for req in requirements if _req_name(req) not in staged]
+    return [
+        req for req in requirements if not _is_post_solver(_req_name(req)) and _req_name(req) not in _TORCH_PACKAGES
+    ]
+
+
+def _collect_post_solver_packages(requirements: list[str], backend: str, system_match_packages: list[str]) -> list[str]:
+    """Packages installed after the main solve with --no-deps.
+
+    Two categories:
+    1. _FORCED_PACKAGES: verl-wide version overrides (transformers).
+    2. System-match packages (nvidia-cudnn-*, nvidia-nccl-*): auto-detected
+       versions that MUST match the system libraries. Applied to ALL CUDA
+       backends. Per-backend overrides from pyproject.toml (e.g. trtllm
+       needing nvidia-nccl-cu13) replace the detected default for that prefix.
+    """
+    post = list(_FORCED_PACKAGES)
+
+    if backend not in _NON_CUDA_BACKENDS:
+        # Collect per-backend nvidia-* overrides from pyproject.toml first.
+        backend_overrides: dict[str, str] = {}
+        for req in requirements:
+            name = _req_name(req)
+            if name.startswith(_SYSTEM_MATCH_PREFIXES):
+                backend_overrides[name] = req
+
+        # Determine which prefix families the backend already covers.
+        # e.g. if trtllm declares nvidia-nccl-cu13, skip the detected nvidia-nccl-cu12.
+        covered_prefixes = set()
+        for name in backend_overrides:
+            for prefix in _SYSTEM_MATCH_PREFIXES:
+                if name.startswith(prefix):
+                    covered_prefixes.add(prefix)
+
+        # Add auto-detected system packages only for families NOT overridden.
+        for req in system_match_packages:
+            name = _req_name(req)
+            dominated = any(name.startswith(p) for p in covered_prefixes)
+            if not dominated:
+                post.append(req)
+
+        # Add the backend-specific overrides.
+        post.extend(backend_overrides.values())
+
+    return post
 
 
 def cmd_sync(args: argparse.Namespace) -> int:
@@ -340,6 +498,15 @@ def cmd_sync(args: argparse.Namespace) -> int:
     _require_uv()
     VENVS_DIR.mkdir(parents=True, exist_ok=True)
     pyproject = _load_pyproject()
+
+    # Detect system nvidia library versions once for all backends.
+    has_cuda_backend = any(b not in _NON_CUDA_BACKENDS for b in backends)
+    if has_cuda_backend:
+        print("--- Detecting system NVIDIA library versions ---")
+        system_match_packages = _detect_system_match_packages()
+    else:
+        system_match_packages = []
+
     for backend in backends:
         venv = _venv_path(backend)
         venv_python = _venv_python(backend)
@@ -416,22 +583,27 @@ def cmd_sync(args: argparse.Namespace) -> int:
             print(f"error: uv pip install failed for {backend}", file=sys.stderr)
             return rc
 
-        rc = _run(
-            [
-                "uv",
-                "pip",
-                "install",
-                "--python",
-                str(venv_python),
-                *_UV_PIP_BASE_ARGS,
-                "--no-deps",
-                *_FORCED_PACKAGES,
-            ],
-            env_overrides,
-        )
-        if rc:
-            print(f"error: forced package install failed for {backend}", file=sys.stderr)
-            return rc
+        post_solver = _collect_post_solver_packages(requirements, backend, system_match_packages)
+        if post_solver:
+            print("--- Force-installing post-solver packages (--no-deps) ---")
+            for pkg in post_solver:
+                print(f"  {pkg}")
+            rc = _run(
+                [
+                    "uv",
+                    "pip",
+                    "install",
+                    "--python",
+                    str(venv_python),
+                    *_UV_PIP_BASE_ARGS,
+                    "--no-deps",
+                    *post_solver,
+                ],
+                env_overrides,
+            )
+            if rc:
+                print(f"error: post-solver package install failed for {backend}", file=sys.stderr)
+                return rc
 
         cmd = [
             "uv",
