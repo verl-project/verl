@@ -176,9 +176,9 @@ The simplest entry point is ``manage_envs.py``:
 backend resolves independently, so ``sync vllm`` only sees ``vllm`` +
 ``verl-core`` dependencies and does not resolve or clone training backends
 like VeOmni / MindSpeed / NeMo-Automodel. ``transformers==5.3.0`` is
-synchronized across all backend venvs; ``manage_envs.py`` passes a uv
-override file so backend package metadata constraints such as
-``transformers<5`` do not change that version.
+synchronized across all backend venvs; ``manage_envs.py`` installs it in a
+final ``uv pip install --no-deps`` step so backend package metadata
+constraints such as ``transformers<5`` do not change that version.
 
 The equivalent raw ``uv`` shape is:
 
@@ -188,10 +188,10 @@ The equivalent raw ``uv`` shape is:
    uv pip install --python .venvs/.venv-vllm/bin/python --link-mode=copy \
        --extra-index-url https://download.pytorch.org/whl/cu129 \
        torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0
-   printf 'transformers==5.3.0\n' > /tmp/verl-overrides.txt
    uv pip install --python .venvs/.venv-vllm/bin/python --link-mode=copy \
-       --override /tmp/verl-overrides.txt \
        -r <requirements expanded from pyproject.toml's vllm + verl-core extras>
+   uv pip install --python .venvs/.venv-vllm/bin/python --link-mode=copy \
+       --no-deps transformers==5.3.0
    uv pip install --python .venvs/.venv-vllm/bin/python --link-mode=copy \
        --no-deps -e .
 
