@@ -7,7 +7,7 @@
 #   - Runtime Python packages, if the container does not include them:
 #       python3 -m pip install -q "nvidia-modelopt[torch]>=0.37.0"
 #       python3 -m pip install -q "flash-linear-attention==0.4.1"
-#       python3 -m pip install -U "git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@refs/pull/3746/head"
+#       python3 -m pip install -U "git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git"
 #       python3 -m pip install -U "git+https://github.com/NVIDIA/Megatron-LM.git@refs/pull/4799/head"
 set -xeuo pipefail
 
@@ -39,7 +39,6 @@ TP_SIZE=${TP_SIZE:-2}
 PP_SIZE=${PP_SIZE:-1}
 VPP_SIZE=${VPP_SIZE:-null}
 CP_SIZE=${CP_SIZE:-2}
-CP_COMM_TYPE=${CP_COMM_TYPE:-p2p}
 EP_SIZE=${EP_SIZE:-8}
 ETP_SIZE=${ETP_SIZE:-1}
 
@@ -86,10 +85,7 @@ ENGINE_CONFIG="\
     optim.clip_grad=1.0 \
     optim.lr_warmup_init=0 \
     optim.lr_decay_style=cosine \
-    +optim.override_optimizer_config.optimizer_offload_fraction=0 \
-    +optim.override_optimizer_config.overlap_cpu_optimizer_d2h_h2d=False \
     +optim.override_optimizer_config.use_precision_aware_optimizer=True \
-    +optim.override_optimizer_config.optimizer_cpu_offload=False \
     engine.tensor_model_parallel_size=${TP_SIZE} \
     engine.pipeline_model_parallel_size=${PP_SIZE} \
     engine.virtual_pipeline_model_parallel_size=${VPP_SIZE} \
@@ -101,8 +97,15 @@ ENGINE_CONFIG="\
     engine.use_megatron_fsdp=True \
     engine.dtype=${DTYPE} \
     engine.use_remove_padding=True \
-    +engine.override_transformer_config.cp_comm_type=${CP_COMM_TYPE} \
-    engine.override_transformer_config.attention_backend=auto \
+    +engine.override_ddp_config.check_for_nan_in_grad=True \
+    +engine.override_ddp_config.megatron_fsdp_use_decoupled_grad=True \
+    +engine.override_transformer_config.moe_router_dtype=fp32 \
+    +engine.override_transformer_config.moe_token_dispatcher_type=flex \
+    +engine.override_transformer_config.moe_flex_dispatcher_backend=deepep \
+    +engine.override_transformer_config.moe_grouped_gemm=True \
+    +engine.override_transformer_config.moe_permute_fusion=True \
+    +engine.override_transformer_config.moe_router_fusion=True \
+    engine.override_transformer_config.attention_backend=flash \
     engine.override_transformer_config.recompute_method=uniform \
     engine.override_transformer_config.recompute_granularity=full \
     engine.override_transformer_config.recompute_num_layers=1 \
