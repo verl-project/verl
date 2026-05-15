@@ -7,6 +7,16 @@
 # base image and are deliberately NOT installed here — see
 # `docker/ascend/Dockerfile.ascend_8.5.0_a2` and friends instead.
 #
+# The base layer is a superset of the "basic" stages of the upstream
+# `sglang/docker/Dockerfile` and `vllm/docker/Dockerfile`, so the resulting
+# image satisfies the system-level prerequisites of both inference engines:
+#
+#   - sglang basic: full RDMA/InfiniBand + OpenMPI + NUMA + dev libs +
+#                   GDRCopy + IBGDA symlink + locale (Ubuntu 24.04).
+#   - vllm  basic: gcc-10 alternatives, uv-driven Python install, the
+#                  uv tunables (UV_HTTP_TIMEOUT / UV_INDEX_STRATEGY /
+#                  UV_LINK_MODE) and CUDA forward-compat toggle.
+#
 # No build context is needed; the repo is fetched at build time:
 #
 #     docker build -f Dockerfile_uv -t verl:uv .
@@ -18,11 +28,16 @@
 #     --build-arg TARGETS="vllm fsdp megatron"   # slim, only these backends
 #     --build-arg MAX_JOBS=128                   # bump for big build hosts
 #     --build-arg CUDA_VERSION=12.9.1            # alternative CUDA dev base
+#     --build-arg UBUNTU_MIRROR=...              # apt mirror (sglang-style)
+#     --build-arg PIP_DEFAULT_INDEX=...          # pip global index URL
+#     --build-arg GITHUB_ARTIFACTORY=github.com  # github mirror
 
 ARG CUDA_VERSION=12.9.1
 FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu24.04 AS base
 
+ARG TARGETARCH
 ARG DEBIAN_FRONTEND=noninteractive
+
 # Build parallelism for source-built packages (apex / TransformerEngine /
 # flash-attn / megatron-core). 32 is conservative and survives most CI
 # hosts; raise via --build-arg MAX_JOBS=128 on big machines.
@@ -40,19 +55,158 @@ ARG TARGETS="vllm sglang trtllm fsdp megatron veomni nemoautomodel cpu"
 ARG VERL_REPO=https://github.com/verl-project/verl.git
 ARG VERL_REF=main
 
-# System deps: build-essential / nvcc are needed to compile apex+TE+flash-attn
-# from source; ib / numa / rdma libs cover NCCL + GPUDirect runtimes; python3
-# is bootstrapped only to run manage_envs.py — uv provides per-venv pythons.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential ca-certificates curl git wget cmake \
-        libibverbs-dev libnuma-dev librdmacm-dev numactl \
-        openssh-client \
-        python3 python3-venv \
-    && rm -rf /var/lib/apt/lists/*
+# Mirrors / index overrides (kept compatible with the sglang/vllm Dockerfiles).
+ARG UBUNTU_MIRROR
+ARG PIP_DEFAULT_INDEX
+ARG GITHUB_ARTIFACTORY=github.com
+ARG GDRCOPY_VERSION=2.5.1
 
-# uv (single binary, brings its own python downloads per-venv).
+ENV CUDA_HOME=/usr/local/cuda \
+    GDRCOPY_HOME=/usr/src/gdrdrv-${GDRCOPY_VERSION}/
+
+# Add GKE default lib and bin locations (mirrors vllm + sglang base layers).
+ENV PATH="${PATH}:/usr/local/nvidia/bin" \
+    LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/usr/local/nvidia/lib:/usr/local/nvidia/lib64"
+
+# Replace Ubuntu sources if a mirror was supplied (sglang-style override).
+RUN if [ -n "${UBUNTU_MIRROR}" ]; then \
+        find /etc/apt -name '*.list' -o -name '*.sources' | xargs -r \
+            sed -i "s|http://.*archive.ubuntu.com|${UBUNTU_MIRROR}|g; s|http://.*security.ubuntu.com|${UBUNTU_MIRROR}|g"; \
+    fi
+
+# ---------------------------------------------------------------------------
+# System dependencies — superset of `sglang/docker/Dockerfile` (lines 60-127)
+# and `vllm/docker/Dockerfile` (lines 100-114) basic stages.
+# ---------------------------------------------------------------------------
+RUN --mount=type=cache,target=/var/cache/apt,id=verl-uv-apt \
+    apt-get update && apt-get install -y --no-install-recommends \
+        # Core system utilities
+        ca-certificates \
+        software-properties-common \
+        netcat-openbsd \
+        kmod \
+        unzip \
+        openssh-client \
+        openssh-server \
+        sudo \
+        curl \
+        wget \
+        lsof \
+        locales \
+        vim \
+        # Build essentials
+        build-essential \
+        ccache \
+        cmake \
+        perl \
+        patchelf \
+        git \
+        git-lfs \
+        # gcc-10 / g++-10 to dodge https://gcc.gnu.org/bugzilla/show_bug.cgi?id=92519
+        # when compiling CUTLASS kernels (carried over from vllm base).
+        gcc-10 \
+        g++-10 \
+        # Python (only used to bootstrap manage_envs.py; uv brings its own)
+        python3 \
+        python3-dev \
+        python3-pip \
+        python3-venv \
+        # MPI and NUMA
+        libopenmpi-dev \
+        libnuma1 \
+        libnuma-dev \
+        numactl \
+        # transformers multimodal VLM
+        ffmpeg \
+        # InfiniBand / RDMA
+        libibverbs-dev \
+        libibverbs1 \
+        libibumad3 \
+        librdmacm-dev \
+        librdmacm1 \
+        libnl-3-200 \
+        libnl-route-3-200 \
+        libnl-route-3-dev \
+        libnl-3-dev \
+        ibverbs-providers \
+        infiniband-diags \
+        perftest \
+        # Development libraries
+        libgoogle-glog-dev \
+        libgtest-dev \
+        libjsoncpp-dev \
+        libunwind-dev \
+        libboost-all-dev \
+        libssl-dev \
+        libgrpc-dev \
+        libgrpc++-dev \
+        libprotobuf-dev \
+        protobuf-compiler \
+        protobuf-compiler-grpc \
+        pybind11-dev \
+        libhiredis-dev \
+        libcurl4-openssl-dev \
+        libczmq4 \
+        libczmq-dev \
+        libfabric-dev \
+        # Package building tools
+        devscripts \
+        debhelper \
+        fakeroot \
+        dkms \
+        check \
+        libsubunit0 \
+        libsubunit-dev \
+    && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-10 110 --slave /usr/bin/g++ g++ /usr/bin/g++-10 \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+# Generate locale (sglang base layer).
+RUN locale-gen en_US.UTF-8
+ENV LANG=en_US.UTF-8 \
+    LANGUAGE=en_US:en \
+    LC_ALL=en_US.UTF-8
+
+# Override pip global index if requested.
+RUN if [ -n "${PIP_DEFAULT_INDEX}" ]; then \
+        python3 -m pip config --global set global.index-url "${PIP_DEFAULT_INDEX}" || true; \
+    fi
+
+# ---------------------------------------------------------------------------
+# GDRCopy — pulled from sglang base. Required by DeepEP / GPUDirect on
+# both sglang and vllm runtime stacks.
+# ---------------------------------------------------------------------------
+RUN mkdir -p /tmp/gdrcopy && cd /tmp \
+    && curl --retry 3 --retry-delay 2 -fsSL -o v${GDRCOPY_VERSION}.tar.gz \
+        https://${GITHUB_ARTIFACTORY}/NVIDIA/gdrcopy/archive/refs/tags/v${GDRCOPY_VERSION}.tar.gz \
+    && tar -xzf v${GDRCOPY_VERSION}.tar.gz && rm v${GDRCOPY_VERSION}.tar.gz \
+    && cd gdrcopy-${GDRCOPY_VERSION}/packages \
+    && CUDA=/usr/local/cuda ./build-deb-packages.sh \
+    && dpkg -i gdrdrv-dkms_*.deb libgdrapi_*.deb gdrcopy-tests_*.deb gdrcopy_*.deb \
+    && cd / && rm -rf /tmp/gdrcopy
+
+# DeepEP IBGDA symlink fix (sglang base).
+RUN ln -sf /usr/lib/$(uname -m)-linux-gnu/libmlx5.so.1 /usr/lib/$(uname -m)-linux-gnu/libmlx5.so
+
+# ---------------------------------------------------------------------------
+# uv — single static binary. We use one venv per backend (manage_envs.py),
+# not the single /opt/venv that vllm's base creates, so we just put uv on
+# PATH and copy across the uv tunables that vllm sets.
+# ---------------------------------------------------------------------------
 RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
 
+ENV UV_HTTP_TIMEOUT=500 \
+    UV_INDEX_STRATEGY="unsafe-best-match" \
+    UV_LINK_MODE=copy
+
+# Enable CUDA forward compatibility by setting '-e VLLM_ENABLE_CUDA_COMPATIBILITY=1'.
+# Only needed for datacenter/professional GPUs with older drivers.
+# See: https://docs.nvidia.com/deploy/cuda-compatibility/
+ENV VLLM_ENABLE_CUDA_COMPATIBILITY=0
+
+# ---------------------------------------------------------------------------
+# verl source + per-backend venvs.
+# ---------------------------------------------------------------------------
 WORKDIR /workspace
 # Partial clone (--filter=blob:none) keeps the layer small; uv sync only
 # needs the working tree, never historical blobs.
