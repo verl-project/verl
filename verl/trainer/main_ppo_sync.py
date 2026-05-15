@@ -1283,20 +1283,14 @@ class PPOTrainer:
         fields = ["entropy", "log_probs", "response_mask"]
         if self.config.actor_rollout_ref.rollout.calculate_log_probs:
             fields.extend(["responses", "rollout_log_probs"])
-        t_start = time.time()
         data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=fields)
-        t_end = time.time()
-        print(f"[DEBUG] _compute_old_log_prob time to get data: {t_end - t_start:.2f}", flush=True)
 
         # 2. write old_log_probs and entropy back to TransferQueue
         data["old_log_probs"] = response_from_nested(data.pop("log_probs"), data["response_mask"])
         data["entropy"] = response_from_nested(data.pop("entropy"), data["response_mask"])
-        t_start = time.time()
         batch = tq.kv_batch_put(
             keys=batch.keys, partition_id=batch.partition_id, fields=data.select("old_log_probs", "entropy")
         )
-        t_end = time.time()
-        print(f"[DEBUG] _compute_old_log_prob time to put data: {t_end - t_start:.2f}", flush=True)
 
         data = DataProto(batch=data.to_padded_tensor())
 
@@ -1338,17 +1332,11 @@ class PPOTrainer:
         assert len(output) == len(batch)
 
         # 2. write ref_log_prob and entropy back to TransferQueue
-        t_start = time.time()
         data = tq.kv_batch_get(
             keys=batch.keys, partition_id=batch.partition_id, select_fields=["log_probs", "response_mask"]
         )
-        t_end = time.time()
-        print(f"[DEBUG] _compute_ref_log_prob time to get data: {t_end - t_start:.2f}", flush=True)
         data["ref_log_prob"] = response_from_nested(data.pop("log_probs"), data["response_mask"])
-        t_start = time.time()
         tq.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=data.select("ref_log_prob"))
-        t_end = time.time()
-        print(f"[DEBUG] _compute_ref_log_prob time to put data: {t_end - t_start:.2f}", flush=True)
 
         return batch
 
@@ -1360,17 +1348,11 @@ class PPOTrainer:
         ray.get(output.futures)
 
         # 2. write value back to TransferQueue
-        t_start = time.time()
         data = tq.kv_batch_get(
             keys=batch.keys, partition_id=batch.partition_id, select_fields=["values", "response_mask"]
         )
-        t_end = time.time()
-        print(f"[DEBUG] _compute_values time to get data: {t_end - t_start:.2f}", flush=True)
         data["values"] = response_from_nested(data.pop("values"), data["response_mask"])
-        t_start = time.time()
         tq.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=data.select("values"))
-        t_end = time.time()
-        print(f"[DEBUG] _compute_values time to put data: {t_end - t_start:.2f}", flush=True)
 
         return batch
 
@@ -1379,11 +1361,9 @@ class PPOTrainer:
         fields = ["uid", "response_mask", "rm_scores", "rollout_log_probs", "old_log_probs", "ref_log_prob", "values"]
         if self.config.algorithm.adv_estimator == core_algos.AdvantageEstimator.REMAX:
             fields.append("reward_baselines")
-        t_start = time.time()
         data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=fields)
+
         response_mask = data["response_mask"]
-        t_end = time.time()
-        print(f"[DEBUG] _compute_advantage time to get data: {t_end - t_start:.2f}", flush=True)
         data = DataProto(batch=data.to_padded_tensor())
         data.batch["token_level_scores"] = data.batch["rm_scores"]
         data.non_tensor_batch["uid"] = np.array(data.batch.pop("uid").tolist(), dtype=object)
@@ -1434,10 +1414,8 @@ class PPOTrainer:
         for field in fields:
             output[field] = response_to_nested(data.batch[field], response_mask)
         output = TensorDict(output, batch_size=len(batch))
-        t_start = time.time()
+
         batch = tq.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=output)
-        t_end = time.time()
-        print(f"[DEBUG] _compute_advantage time to put data: {t_end - t_start:.2f}", flush=True)
 
         return batch
 

@@ -1305,12 +1305,10 @@ class BatchData:
             return concat_tensordict(data)
         if isinstance(sample, BatchMeta):
             # handle extra_info merge manually
-            from collections import defaultdict
-
-            merged_extra_info = defaultdict(list)
+            merged_extra_info = {}
             for meta in data:
                 for k, v in meta.extra_info.items():
-                    merged_extra_info[k].append(v)
+                    merged_extra_info.setdefault(k, []).append(v)
                 meta.extra_info = {}
 
             # translate BatchMeta -> KVBatchMeta
