@@ -208,10 +208,7 @@ ENV VLLM_ENABLE_CUDA_COMPATIBILITY=0
 # verl source + per-backend venvs.
 # ---------------------------------------------------------------------------
 WORKDIR /workspace
-# Partial clone (--filter=blob:none) keeps the layer small; uv sync only
-# needs the working tree, never historical blobs.
-RUN git clone --filter=blob:none "${VERL_REPO}" verl && \
-    git -C verl checkout "${VERL_REF}"
+COPY . /workspace/verl
 WORKDIR /workspace/verl
 
 # One RUN per backend so each venv lands in its own Docker layer: editing one
