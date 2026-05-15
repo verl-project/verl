@@ -141,6 +141,32 @@ def _intermediate_summary(batch: DataProto) -> dict[str, Any]:
     }
 
 
+def _sort_dataproto_by_sample_key(batch: DataProto) -> tuple[str | None, int, bool]:
+    """Stable-sort rows so rows from the same sample/image bank are contiguous.
+
+    Worker dispatch still chunks by row count; this reorder improves image bank
+    locality before dispatch without changing row contents or loss weights.
+    """
+    nt = batch.non_tensor_batch or {}
+    key_name = None
+    for candidate in ("uid", "image_bank_ref", "rollout_group_id"):
+        values = nt.get(candidate)
+        if values is not None and len(values) == len(batch):
+            key_name = candidate
+            break
+    if key_name is None:
+        return None, 0, False
+
+    values = nt[key_name]
+    keys = ["<none>" if value is None else str(value) for value in values]
+    group_count = len(set(keys))
+    order = sorted(range(len(keys)), key=lambda idx: (keys[idx], idx))
+    changed = any(idx != original for original, idx in enumerate(order))
+    if changed:
+        batch.reorder(torch.tensor(order, dtype=torch.long))
+    return key_name, group_count, changed
+
+
 def _dataproto_storage_summary(batch: DataProto | None) -> dict[str, Any]:
     if batch is None:
         return {"batch_len": 0}
@@ -790,6 +816,14 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
                 rollout_n=rollout_n,
             )
         self._log_batch_storage("expand.after_expand", batch)
+        sort_key, sort_groups, sort_changed = _sort_dataproto_by_sample_key(batch)
+        print(
+            "[FullyAsyncTrainer][SampleSort][after_expand] "
+            f"key={sort_key} groups={sort_groups} changed={sort_changed} rows={len(batch)}",
+            flush=True,
+        )
+        if sort_changed:
+            self._log_batch_storage("expand.after_sample_sort", batch)
 
         # Temporarily move meta_info fields that are per-row ndarrays out of
         # ``batch.meta_info`` before pad. ``DataProto.concat`` inside
