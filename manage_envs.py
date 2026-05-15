@@ -150,6 +150,7 @@ _REQ_NAME_RE = re.compile(r"^\s*([A-Za-z0-9_.-]+)")
 _TORCH_PACKAGES = {"torch", "torchvision", "torchaudio"}
 _FORCED_PACKAGES = ["transformers==5.3.0"]
 _FORCED_PACKAGE_NAMES = {"transformers"}
+_UV_PIP_BASE_ARGS = ["--link-mode=copy", "--index-strategy", "unsafe-best-match"]
 
 
 def _venv_path(backend: str) -> Path:
@@ -329,6 +330,11 @@ def _without_forced_packages(requirements: list[str]) -> list[str]:
     return [req for req in requirements if _req_name(req) not in _FORCED_PACKAGE_NAMES]
 
 
+def _without_staged_packages(requirements: list[str]) -> list[str]:
+    staged = _FORCED_PACKAGE_NAMES | _TORCH_PACKAGES
+    return [req for req in requirements if _req_name(req) not in staged]
+
+
 def cmd_sync(args: argparse.Namespace) -> int:
     backends = _expand(args.backends)
     _require_uv()
@@ -346,7 +352,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
 
         requirements = _backend_requirements(pyproject, backend)
 
-        bootstrap = ["setuptools>=61.0", "wheel", "packaging", "pybind11", "ninja"]
+        bootstrap = ["setuptools>=77.0.3,<81.0.0", "wheel", "packaging", "pybind11", "ninja"]
         rc = _run(
             [
                 "uv",
@@ -354,7 +360,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                 "install",
                 "--python",
                 str(venv_python),
-                "--link-mode=copy",
+                *_UV_PIP_BASE_ARGS,
                 *bootstrap,
             ],
             env_overrides,
@@ -373,7 +379,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                     "install",
                     "--python",
                     str(venv_python),
-                    "--link-mode=copy",
+                    *_UV_PIP_BASE_ARGS,
                     *_index_args(pyproject, backend, torch_requirements),
                     *args.uv_args,
                     "-r",
@@ -386,7 +392,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                 print(f"error: uv pip torch install failed for {backend}", file=sys.stderr)
                 return rc
 
-        solver_requirements = _without_forced_packages(requirements)
+        solver_requirements = _without_staged_packages(requirements)
         req_file = _write_requirements(solver_requirements)
         rc = _run(
             [
@@ -395,10 +401,10 @@ def cmd_sync(args: argparse.Namespace) -> int:
                 "install",
                 "--python",
                 str(venv_python),
-                "--link-mode=copy",
-                *_index_args(pyproject, backend, requirements),
-                *_no_build_isolation_args(pyproject, requirements),
-                *_config_setting_args(pyproject, requirements),
+                *_UV_PIP_BASE_ARGS,
+                *_index_args(pyproject, backend, solver_requirements),
+                *_no_build_isolation_args(pyproject, solver_requirements),
+                *_config_setting_args(pyproject, solver_requirements),
                 *args.uv_args,
                 "-r",
                 req_file.name,
@@ -417,7 +423,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                 "install",
                 "--python",
                 str(venv_python),
-                "--link-mode=copy",
+                *_UV_PIP_BASE_ARGS,
                 "--no-deps",
                 *_FORCED_PACKAGES,
             ],
@@ -433,7 +439,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
             "install",
             "--python",
             str(venv_python),
-            "--link-mode=copy",
+            *_UV_PIP_BASE_ARGS,
             "--no-deps",
             *args.uv_args,
             "-e",

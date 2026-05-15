@@ -186,13 +186,17 @@ The equivalent raw ``uv`` shape is:
 
    uv venv .venvs/.venv-vllm --python 3.12 --seed
    uv pip install --python .venvs/.venv-vllm/bin/python --link-mode=copy \
+       --index-strategy unsafe-best-match \
        --extra-index-url https://download.pytorch.org/whl/cu129 \
        torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0
    uv pip install --python .venvs/.venv-vllm/bin/python --link-mode=copy \
-       -r <requirements expanded from pyproject.toml's vllm + verl-core extras>
+       --index-strategy unsafe-best-match \
+       -r <vllm + verl-core requirements, excluding torch/torchvision/torchaudio/transformers>
    uv pip install --python .venvs/.venv-vllm/bin/python --link-mode=copy \
+       --index-strategy unsafe-best-match \
        --no-deps transformers==5.3.0
    uv pip install --python .venvs/.venv-vllm/bin/python --link-mode=copy \
+       --index-strategy unsafe-best-match \
        --no-deps -e .
 
 3. Run code in a backend
