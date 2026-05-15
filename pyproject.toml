@@ -475,7 +475,7 @@ torch = [
 torchvision = [
     { index = "pytorch-cu129", extra = "vllm" },
     { index = "pytorch-cu129", extra = "sglang" },
-    { index = "pytorch-cu130", extra = "trtllm" },
+    # trtllm extra does not list torchvision (rollout doesn't need it)
     { index = "pytorch-cu129", extra = "fsdp" },
     { index = "pytorch-cu129", extra = "megatron" },
     { index = "pytorch-cu129", extra = "veomni" },
