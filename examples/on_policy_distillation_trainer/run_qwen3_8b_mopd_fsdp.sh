@@ -12,6 +12,7 @@ NNODES=${NNODES:-1}
 NGPUS_PER_NODE=${NGPUS_PER_NODE:-8}
 
 # Per-teacher replicas; total teacher GPUs = sum(num_replicas) * teacher_tp
+TEACHER_NNODES=${TEACHER_NNODES:-1}
 TEACHER_NUM_REPLICAS_GSM8K=${TEACHER_NUM_REPLICAS_GSM8K:-1}
 TEACHER_NUM_REPLICAS_GEO3K=${TEACHER_NUM_REPLICAS_GEO3K:-1}
 teacher_tp=${TEACHER_TP:-2}
@@ -111,7 +112,7 @@ TRAINER=(
 EXTRA=(
     distillation.enabled=True
     distillation.n_gpus_per_node=${TEACHER_WORLD_SIZE}
-    distillation.nnodes=${NNODES}
+    distillation.nnodes=${TEACHER_NNODES}
     distillation.teacher_key=data_source
     # --- gsm8k teacher (text) ---
     +distillation.teacher_models.gsm8k.key="openai/gsm8k"
