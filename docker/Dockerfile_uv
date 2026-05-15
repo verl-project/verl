@@ -33,8 +33,9 @@
 #     --build-arg GITHUB_ARTIFACTORY=github.com  # github mirror
 
 ARG CUDA_VERSION=12.9.1
-FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu24.04 AS base
+FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu24.04 AS base
 
+ARG CUDA_VERSION
 ARG TARGETARCH
 ARG DEBIAN_FRONTEND=noninteractive
 
@@ -43,6 +44,13 @@ ARG DEBIAN_FRONTEND=noninteractive
 # hosts; raise via --build-arg MAX_JOBS=128 on big machines.
 ARG MAX_JOBS=32
 ENV MAX_JOBS=${MAX_JOBS}
+
+# cuDNN / NCCL versions — actively installed at system level.
+# manage_envs.py auto-detects these and force-installs the corresponding pip
+# packages (nvidia-cudnn-cu12, nvidia-nccl-cu12) in every CUDA backend venv.
+# Update when changing CUDA_VERSION. See: https://developer.nvidia.com/cudnn-downloads
+ARG CUDNN_VERSION=9.16.0.29-1
+ARG NCCL_VERSION=2.28.3-1
 
 # Backends to materialize. By default every non-Ascend extra in
 # pyproject.toml. Override via --build-arg TARGETS="vllm fsdp" for slimmer
@@ -157,6 +165,21 @@ ENV LANG=en_US.UTF-8 \
     LANGUAGE=en_US:en \
     LC_ALL=en_US.UTF-8
 
+# ---------------------------------------------------------------------------
+# cuDNN + NCCL — actively installed following https://developer.nvidia.com/cudnn-downloads
+# The base image is -devel (no cuDNN); we install it explicitly so the version
+# is visible, pinned, and reproducible. manage_envs.py auto-detects these
+# system versions and force-installs the matching pip packages per-venv.
+# ---------------------------------------------------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends --allow-change-held-packages \
+        libcudnn9-cuda-12=${CUDNN_VERSION} \
+        libcudnn9-dev-cuda-12=${CUDNN_VERSION} \
+        libnccl2=${NCCL_VERSION}+cuda${CUDA_VERSION%.*} \
+        libnccl-dev=${NCCL_VERSION}+cuda${CUDA_VERSION%.*} \
+    && rm -rf /var/lib/apt/lists/* \
+    && echo "=== Installed cuDNN $(dpkg-query -W -f='${Version}' libcudnn9-cuda-12) ===" \
+    && echo "=== Installed NCCL  $(dpkg-query -W -f='${Version}' libnccl2) ==="
+
 # Override pip global index if requested.
 RUN if [ -n "${PIP_DEFAULT_INDEX}" ]; then \
         python3 -m pip config --global set global.index-url "${PIP_DEFAULT_INDEX}" || true; \
@@ -206,9 +229,10 @@ WORKDIR /workspace/verl
 # previously-finished venv. Each layer is gated on TARGETS via a whole-word
 # match (` x ` in ` $TARGETS `), so dropping a backend from --build-arg TARGETS
 # turns its layer into a no-op without rewriting this file.
+# manage_envs.py auto-detects system cuDNN/NCCL and force-installs the matching
+# nvidia-cudnn-cu12 / nvidia-nccl-cu12 pip packages in every CUDA backend.
 RUN if echo " ${TARGETS} " | grep -q " vllm ";          then python3 manage_envs.py sync vllm; fi
 RUN if echo " ${TARGETS} " | grep -q " sglang ";        then python3 manage_envs.py sync sglang; fi
-RUN if echo " ${TARGETS} " | grep -q " trtllm ";        then python3 manage_envs.py sync trtllm; fi
 RUN if echo " ${TARGETS} " | grep -q " fsdp ";          then python3 manage_envs.py sync fsdp; fi
 RUN if echo " ${TARGETS} " | grep -q " megatron ";      then python3 manage_envs.py sync megatron; fi
 RUN if echo " ${TARGETS} " | grep -q " veomni ";        then python3 manage_envs.py sync veomni; fi
