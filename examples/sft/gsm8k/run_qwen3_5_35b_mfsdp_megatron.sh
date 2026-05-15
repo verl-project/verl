@@ -71,87 +71,113 @@ MTP_DETACH_ENCODER=${MTP_DETACH_ENCODER:-True}
 MTP_LOSS_SCALING_FACTOR=${MTP_LOSS_SCALING_FACTOR:-0.1}
 
 # ============================================================
-# Engine config
+# Parameter arrays
 # ============================================================
-ENGINE_CONFIG="\
-    engine=megatron \
-    optim=megatron \
-    optim.lr=${LR} \
-    optim.min_lr=${MIN_LR} \
-    optim.lr_warmup_steps=${LR_WARMUP_STEPS} \
-    optim.lr_decay_steps=${LR_DECAY_STEPS} \
-    optim.weight_decay=0.1 \
-    optim.betas='[0.9,0.95]' \
-    optim.clip_grad=1.0 \
-    optim.lr_warmup_init=0 \
-    optim.lr_decay_style=cosine \
-    +optim.override_optimizer_config.use_precision_aware_optimizer=True \
-    engine.tensor_model_parallel_size=${TP_SIZE} \
-    engine.pipeline_model_parallel_size=${PP_SIZE} \
-    engine.virtual_pipeline_model_parallel_size=${VPP_SIZE} \
-    engine.context_parallel_size=${CP_SIZE} \
-    engine.expert_model_parallel_size=${EP_SIZE} \
-    engine.expert_tensor_parallel_size=${ETP_SIZE} \
-    engine.use_mbridge=True \
-    engine.vanilla_mbridge=False \
-    engine.use_megatron_fsdp=True \
-    engine.dtype=${DTYPE} \
-    engine.use_remove_padding=True \
-    +engine.override_ddp_config.check_for_nan_in_grad=True \
-    +engine.override_ddp_config.megatron_fsdp_use_decoupled_grad=True \
-    +engine.override_transformer_config.moe_router_dtype=fp32 \
-    +engine.override_transformer_config.moe_token_dispatcher_type=flex \
-    +engine.override_transformer_config.moe_flex_dispatcher_backend=deepep \
-    +engine.override_transformer_config.moe_grouped_gemm=True \
-    +engine.override_transformer_config.moe_permute_fusion=True \
-    +engine.override_transformer_config.moe_router_fusion=True \
-    engine.override_transformer_config.attention_backend=flash \
-    engine.override_transformer_config.recompute_method=uniform \
-    engine.override_transformer_config.recompute_granularity=full \
-    engine.override_transformer_config.recompute_num_layers=1 \
-    +engine.override_transformer_config.mtp_num_layers=${MTP_NUM_LAYERS} \
-    +engine.override_transformer_config.calculate_per_token_loss=True \
-    +engine.override_transformer_config.gradient_accumulation_fusion=False"
+DATA=(
+    data.train_files="${TRAIN_FILES}"
+    data.val_files="${VAL_FILES}"
+    data.train_batch_size=${TRAIN_BATCH_SIZE}
+    data.micro_batch_size_per_gpu=${MICRO_BATCH_SIZE}
+    data.max_length=${MAX_LENGTH}
+    data.pad_mode=no_padding
+    data.truncation=error
+    data.use_dynamic_bsz=True
+    data.max_token_len_per_gpu=${MAX_LENGTH}
+    data.messages_key=messages
+    data.ignore_input_ids_mismatch=True
+    data.num_workers=0
+)
+
+MODEL=(
+    model=hf_model
+    model.path="${MODEL_PATH}"
+    model.use_remove_padding=True
+    model.trust_remote_code=True
+    model.mtp.enable=${MTP_ENABLE}
+    model.mtp.enable_train=${MTP_ENABLE_TRAIN}
+    model.mtp.detach_encoder=${MTP_DETACH_ENCODER}
+    model.mtp.mtp_loss_scaling_factor=${MTP_LOSS_SCALING_FACTOR}
+)
+
+ENGINE=(
+    engine=megatron
+    optim=megatron
+    optim.lr=${LR}
+    optim.min_lr=${MIN_LR}
+    optim.lr_warmup_steps=${LR_WARMUP_STEPS}
+    optim.lr_decay_steps=${LR_DECAY_STEPS}
+    optim.weight_decay=0.1
+    "optim.betas=[0.9,0.95]"
+    optim.clip_grad=1.0
+    optim.lr_warmup_init=0
+    optim.lr_decay_style=cosine
+    +optim.override_optimizer_config.use_precision_aware_optimizer=True
+    engine.tensor_model_parallel_size=${TP_SIZE}
+    engine.pipeline_model_parallel_size=${PP_SIZE}
+    engine.virtual_pipeline_model_parallel_size=${VPP_SIZE}
+    engine.context_parallel_size=${CP_SIZE}
+    engine.expert_model_parallel_size=${EP_SIZE}
+    engine.expert_tensor_parallel_size=${ETP_SIZE}
+    engine.use_mbridge=True
+    engine.vanilla_mbridge=False
+    engine.use_megatron_fsdp=True
+    engine.dtype=${DTYPE}
+    engine.use_remove_padding=True
+    +engine.override_ddp_config.check_for_nan_in_grad=True
+    +engine.override_ddp_config.megatron_fsdp_use_decoupled_grad=True
+    +engine.override_transformer_config.moe_router_dtype=fp32
+    +engine.override_transformer_config.moe_token_dispatcher_type=flex
+    +engine.override_transformer_config.moe_flex_dispatcher_backend=deepep
+    +engine.override_transformer_config.moe_grouped_gemm=True
+    +engine.override_transformer_config.moe_permute_fusion=True
+    +engine.override_transformer_config.moe_router_fusion=True
+    engine.override_transformer_config.attention_backend=flash
+    engine.override_transformer_config.recompute_method=uniform
+    engine.override_transformer_config.recompute_granularity=full
+    engine.override_transformer_config.recompute_num_layers=1
+    +engine.override_transformer_config.mtp_num_layers=${MTP_NUM_LAYERS}
+    +engine.override_transformer_config.calculate_per_token_loss=True
+    +engine.override_transformer_config.gradient_accumulation_fusion=False
+)
+
+TRAINER=(
+    trainer.test_freq=-1
+    trainer.save_freq=-1
+    "trainer.logger=['console']"
+    trainer.project_name="${project_name}"
+    trainer.experiment_name="${exp_name}"
+    trainer.total_epochs=1
+    trainer.total_training_steps=${TOTAL_TRAIN_STEPS}
+    trainer.default_local_dir="${ckpts_home}"
+    trainer.resume_mode=${RESUME_MODE}
+)
+
+CHECKPOINT=(
+    'checkpoint.save_contents=["model","optimizer"]'
+    'checkpoint.load_contents=["model","optimizer"]'
+)
+
+TORCHRUN_ARGS=(
+    --nproc_per_node=${NUM_GPUS}
+    --nnodes=${NNODES}
+    --node_rank=${NODE_RANK}
+    --master_addr=${MASTER_ADDR}
+    --master_port=${MASTER_PORT}
+)
 
 # ============================================================
 # Launch
 # ============================================================
-torchrun \
-    --nproc_per_node=${NUM_GPUS} \
-    --nnodes=${NNODES} \
-    --node_rank=${NODE_RANK} \
-    --master_addr=${MASTER_ADDR} \
-    --master_port=${MASTER_PORT} \
-    -m verl.trainer.sft_trainer \
-    data.train_files="${TRAIN_FILES}" \
-    data.val_files="${VAL_FILES}" \
-    data.train_batch_size=${TRAIN_BATCH_SIZE} \
-    data.micro_batch_size_per_gpu=${MICRO_BATCH_SIZE} \
-    data.max_length=${MAX_LENGTH} \
-    data.pad_mode=no_padding \
-    data.truncation=error \
-    data.use_dynamic_bsz=True \
-    data.max_token_len_per_gpu=${MAX_LENGTH} \
-    data.messages_key=messages \
-    data.ignore_input_ids_mismatch=True \
-    data.num_workers=0 \
-    model=hf_model \
-    model.path=${MODEL_PATH} \
-    model.use_remove_padding=True \
-    model.trust_remote_code=True \
-    model.mtp.enable=${MTP_ENABLE} \
-    model.mtp.enable_train=${MTP_ENABLE_TRAIN} \
-    model.mtp.detach_encoder=${MTP_DETACH_ENCODER} \
-    model.mtp.mtp_loss_scaling_factor=${MTP_LOSS_SCALING_FACTOR} \
-    ${ENGINE_CONFIG} \
-    trainer.test_freq=-1 \
-    trainer.save_freq=-1 \
-    "trainer.logger=['console']" \
-    trainer.project_name="${project_name}" \
-    trainer.experiment_name="${exp_name}" \
-    trainer.total_epochs=1 \
-    trainer.total_training_steps=${TOTAL_TRAIN_STEPS} \
-    trainer.default_local_dir="${ckpts_home}" \
-    'checkpoint.save_contents=["model","optimizer"]' \
-    'checkpoint.load_contents=["model","optimizer"]' \
-    trainer.resume_mode=${RESUME_MODE}
+CMD=(
+    torchrun
+    "${TORCHRUN_ARGS[@]}"
+    -m
+    verl.trainer.sft_trainer
+    "${DATA[@]}"
+    "${MODEL[@]}"
+    "${ENGINE[@]}"
+    "${TRAINER[@]}"
+    "${CHECKPOINT[@]}"
+)
+
+"${CMD[@]}"
