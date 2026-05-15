@@ -27,9 +27,10 @@ requires-python = ">=3.10,<3.13"
 # -------------------------------
 # project.optional-dependencies
 # -------------------------------
-# 3 inference + 5 training backends; each pins its own torch/cuda/transformers
-# and gets its own venv (`.venvs/.venv-<extra>/`). Conflicts, source routing,
-# overrides etc. live in [tool.uv] below. See docs/start/install.rst.
+# 5 inference + 5 training backends; each pins its own torch/cuda stack and
+# gets its own venv (`.venvs/.venv-<extra>/`). Transformers is intentionally
+# synchronized across backends. Source/index routing lives in [tool.uv] below.
+# See docs/start/install.rst.
 [project.optional-dependencies]
 # ---- legacy setup.py extras (kept for `pip install verl[…]` compatibility) -
 test         = ["pytest", "pre-commit", "py-spy", "pytest-asyncio", "pytest-rerunfailures"]
@@ -71,9 +72,10 @@ verl-core = [
 ]
 
 # ---- inference backends ----------------------------------------------------
-# Rollout-only slices of the reference Dockerfiles. `transformers` is
-# overridden to verl's 5.3.0 via [tool.uv] except for sglang, which keeps
-# sglang's hard-pinned 4.57.1.
+# Rollout-only slices of the reference Dockerfiles. Transformers is
+# intentionally synchronized to 5.3.0 across all backend venvs; manage_envs.py
+# passes an override file so backend package metadata constraints such as
+# `transformers<5` do not block installation.
 
 # verl/docker/Dockerfile.stable.vllm (rollout half)
 vllm = [
@@ -88,9 +90,8 @@ vllm = [
 
 # sglang/docker/Dockerfile + verl/docker/Dockerfile.stable.sglang (rollout half).
 # nvidia-cudnn/nccl pins replicate sglang's `--force-reinstall --no-deps`
-# workarounds; both names are in override-dependencies below so torch 2.9.1's
-# transitive pins lose. The training tools that Dockerfile.stable.sglang adds
-# on top (apex/TE/flash-attn/Megatron-LM/...) live in the `megatron` extra.
+# workarounds. The training tools that Dockerfile.stable.sglang adds on top
+# (apex/TE/flash-attn/Megatron-LM/...) live in the `megatron` extra.
 sglang = [
     "verl[verl-core]",
     "torch==2.9.1",
@@ -98,22 +99,21 @@ sglang = [
     "torchaudio==2.9.1",
     "sglang==0.5.9",
     "mbridge",
-    "transformers==4.57.1",
+    "transformers==5.3.0",
     "nvidia-cudnn-cu12==9.16.0.29",
     "nvidia-nccl-cu12==2.28.3",
 ]
 
 # verl/docker/Dockerfile.stable.trtllm — Linux/x86_64/cu13 wheels only.
-# TRT-LLM has its own hard pins (TensorRT-LLM/requirements.txt): transformers
-# ==4.57.3, numpy<2.4, nvidia-nccl-cu13 in [2.28.9, 2.29.2]. ray==2.54.1 is the
-# TRT-LLM-compat pin from Dockerfile.stable.trtllm L53. The verl-wide
-# transformers==5.3.0 does NOT apply to this venv.
+# TRT-LLM has its own hard pins (TensorRT-LLM/requirements.txt): numpy<2.4,
+# nvidia-nccl-cu13 in [2.28.9, 2.29.2]. ray==2.54.1 is the TRT-LLM-compat pin
+# from Dockerfile.stable.trtllm L53. Transformers is still forced to 5.3.0.
 trtllm = [
     "verl[verl-core]",
     "torch>=2.10.0,<2.11.0a0",
     "tensorrt-llm==1.3.0rc14 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "mbridge",
-    "transformers==4.57.3",
+    "transformers==5.3.0",
     "numpy>=2.0.0,<2.4",
     "nvidia-nccl-cu13>=2.28.9,<=2.29.2",
     "ray[default]==2.54.1",
@@ -131,7 +131,7 @@ vllm-ascend = [
     "torch-npu==2.9.0 ; sys_platform == 'linux'",
     "vllm==0.18.0",
     "vllm-ascend==0.18.0 ; sys_platform == 'linux'",
-    "transformers==4.57.6",
+    "transformers==5.3.0",
     "numpy<2.0.0",
     "hf_transfer",
 ]
@@ -210,19 +210,19 @@ mindspeed = [
     "mindspeed",
     "megatron-core",
     "mbridge",
-    "transformers==4.57.6",
+    "transformers==5.3.0",
     "hf_transfer",
 ]
 
-# VeOmni v0.1.9a5 `gpu` extra slice. transformers stays at VeOmni's 4.57.3
-# pin (their v5 support is experimental upstream).
+# VeOmni v0.1.9a5 `gpu` extra slice. Transformers is still synchronized to
+# 5.3.0 for verl runtime consistency.
 veomni = [
     "verl[verl-core]",
     "torch==2.9.1",
     "torchvision==0.24.1",
     "torchaudio==2.9.1",
     "veomni",
-    "transformers==4.57.3",
+    "transformers==5.3.0",
     "flash-attn==2.8.3",
     "liger-kernel",
     "hf_transfer",
@@ -249,6 +249,7 @@ cpu = [
     "torch==2.10.0",
     "torchvision==0.25.0",
     "torchaudio==2.10.0",
+    "transformers==5.3.0",
     "pytest",
     "pre-commit",
     "py-spy",
@@ -349,9 +350,11 @@ verl = [
 # =============================================================================
 # tool.uv — see docs/start/install.rst for the full reference.
 # `python manage_envs.py sync <backend>` reads this metadata and installs with
-# uv pip into `.venvs/.venv-<backend>`. We intentionally do not use `uv sync`
-# for backend envs because uv's universal lockfile resolves every extra and
-# therefore touches unrelated git backends during a vllm-only install.
+# uv pip into `.venvs/.venv-<backend>`. It also passes a global override file
+# for `transformers==5.3.0`, so backend metadata constraints such as `<5` do
+# not change the synchronized transformers version. We intentionally do not
+# use `uv sync` for backend envs because uv's universal lockfile resolves every
+# extra and therefore touches unrelated git backends during a vllm-only install.
 # =============================================================================
 [tool.uv]
 # These packages `import torch` at build time, so we let them see the torch

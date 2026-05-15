@@ -17,11 +17,14 @@
 Everything that controls *what* gets installed lives in ``pyproject.toml``:
 ``[project.optional-dependencies]`` lists the backend packages, and
 ``[tool.uv.sources]`` / ``[tool.uv.index]`` route git packages and PyTorch
-wheels. This script intentionally uses ``uv pip install`` instead of
+wheels. ``transformers==5.3.0`` is a global override shared by every backend.
+This script intentionally uses ``uv pip install`` instead of
 ``uv sync`` so each backend resolves independently:
 
   * ``sync vllm`` never resolves / clones VeOmni, MindSpeed, NeMo-Automodel,
     or any other unrelated backend source,
+  * backend metadata constraints on transformers (for example ``<5``) are
+    overridden to ``transformers==5.3.0``,
   * each backend still gets a separate venv under
     ``verl/.venvs/.venv-<backend>``,
   * recommended build-time env vars are set for backends that compile native
@@ -144,6 +147,7 @@ VENVS_DIR = (VERL_DIR / ".venvs").resolve()
 
 _REQ_NAME_RE = re.compile(r"^\s*([A-Za-z0-9_.-]+)")
 _TORCH_PACKAGES = {"torch", "torchvision", "torchaudio"}
+_GLOBAL_OVERRIDES = ["transformers==5.3.0"]
 
 
 def _venv_path(backend: str) -> Path:
@@ -319,6 +323,11 @@ def _write_requirements(requirements: list[str]) -> tempfile.NamedTemporaryFile:
     return req_file
 
 
+def _override_args() -> tuple[list[str], Path]:
+    override_file = _write_requirements(_GLOBAL_OVERRIDES)
+    return ["--override", override_file.name], Path(override_file.name)
+
+
 def cmd_sync(args: argparse.Namespace) -> int:
     backends = _expand(args.backends)
     _require_uv()
@@ -335,18 +344,6 @@ def cmd_sync(args: argparse.Namespace) -> int:
             return rc
 
         requirements = _backend_requirements(pyproject, backend)
-        common_install_args = [
-            "uv",
-            "pip",
-            "install",
-            "--python",
-            str(venv_python),
-            "--link-mode=copy",
-            *_index_args(pyproject, backend, requirements),
-            *_no_build_isolation_args(pyproject, requirements),
-            *_config_setting_args(pyproject, requirements),
-            *args.uv_args,
-        ]
 
         bootstrap = ["setuptools>=61.0", "wheel", "packaging", "pybind11", "ninja"]
         rc = _run(
@@ -389,8 +386,27 @@ def cmd_sync(args: argparse.Namespace) -> int:
                 return rc
 
         req_file = _write_requirements(requirements)
-        rc = _run([*common_install_args, "-r", req_file.name], env_overrides)
+        override_args, override_file = _override_args()
+        rc = _run(
+            [
+                "uv",
+                "pip",
+                "install",
+                "--python",
+                str(venv_python),
+                "--link-mode=copy",
+                *_index_args(pyproject, backend, requirements),
+                *_no_build_isolation_args(pyproject, requirements),
+                *_config_setting_args(pyproject, requirements),
+                *override_args,
+                *args.uv_args,
+                "-r",
+                req_file.name,
+            ],
+            env_overrides,
+        )
         Path(req_file.name).unlink(missing_ok=True)
+        override_file.unlink(missing_ok=True)
         if rc:
             print(f"error: uv pip install failed for {backend}", file=sys.stderr)
             return rc
