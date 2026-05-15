@@ -42,7 +42,7 @@ This aligns training and inference states, but the reward is sparse and outcome-
 
 ### On-Policy Distillation
 
-On-policy distillation (OPD) combines the state alignment of on-policy RL with the dense supervision of KD. The student samples rollouts from its own policy. Given each student-generated state, the teacher provides next-token log-probabilities, and the student is trained to match the teacher distribution at those states.
+On-policy distillation (OPD) [1,2,3] combines the state alignment of on-policy RL with the dense supervision of KD. The student samples rollouts from its own policy. Given each student-generated state, the teacher provides next-token log-probabilities, and the student is trained to match the teacher distribution at those states.
 
 Intuitively, the teacher provides guidance conditioned on the trajectory the student actually chose. If the student follows an algebraic proof path, the teacher supplies supervision for what it would do from that algebraic state.
 
@@ -55,7 +55,7 @@ $$
 \left[
 \frac{1}{|y|}
 \sum_{t=1}^{|y|}
-D_t\!\left(
+D\!\left(
 \pi_{\theta}(\cdot \mid s_t),
 \nu(\cdot \mid s_t),
 y_t
@@ -73,10 +73,14 @@ We implement two OPD variants.
 
 #### GKD OPD
 
-GKD OPD directly minimizes a KL divergence between the teacher and student distributions at student-induced states. For forward KL,
+GKD OPD [1] directly minimizes a KL divergence between the teacher and student distributions at student-induced states. For forward KL,
 
 $$
-D_{\mathrm{KL}}\!\left(\nu \,\|\, \pi_{\theta}\right)(s_t)
+D\!\left(
+\pi_{\theta}(\cdot \mid s_t),
+\nu(\cdot \mid s_t),
+y_t
+\right)
 =
 \sum_{v \in V}
 \nu(v \mid s_t)
@@ -92,10 +96,10 @@ The distillation loss is optimized by direct backpropagation through the student
 
 #### PG OPD
 
-PG OPD treats the distillation signal as a reward and applies a policy-gradient update. Since tokens are sampled from the student policy, the sampled-token estimator corresponds to reverse KL:
+PG OPD [3] treats an unbiased estimator of the reverse KL as a reward and applies a policy-gradient update. The reverse KL is given by:
 
 $$
-D_{\mathrm{KL}}\!\left(\pi_{\theta} \,\|\, \nu\right)(s_t)
+{\mathrm{KL}}\!\left(\pi_{\theta}(\cdot|s_t) \,\Vert \nu(\cdot| s_t)\right)
 =
 \mathbb{E}_{y_t \sim \pi_{\theta}(\cdot \mid s_t)}
 \left[
@@ -105,10 +109,14 @@ D_{\mathrm{KL}}\!\left(\pi_{\theta} \,\|\, \nu\right)(s_t)
 \right].
 $$
 
-The per-token Monte Carlo estimator is
+Since tokens are sampled from the student policy $\pi_\theta$, a Monte Carlo estimator can be used to approximate this divergence. PG OPD uses a single-sample estimator such as the k1 estimator [4] given by 
 
 $$
-\widehat{D}_{\mathrm{KL}}\!\left(\pi_{\theta} \,\|\, \nu\right)(s_t, y_t)
+D\!\left(
+\pi_{\theta}(\cdot \mid s_t),
+\nu(\cdot \mid s_t),
+y_t
+\right)
 =
 \operatorname{sg}\!\left(
 \log \pi_{\theta}(y_t \mid s_t)
@@ -119,7 +127,7 @@ $$
 y_t \sim \pi_{\theta}(\cdot \mid s_t).
 $$
 
-Equivalently, maximizing negative reverse KL uses the reward
+PG OPD then uses the negative reverse KL estimator as a reward given by
 
 $$
 r_t
@@ -131,11 +139,11 @@ r_t
 \right).
 $$
 
-The stop-gradient is required because the reward is used inside a policy-gradient objective. Without it, differentiating through the estimator would not produce the intended score-function update. This estimator is valid for reverse KL because samples are drawn from the student distribution; estimating forward KL would require samples from the teacher distribution.
+The stop-gradient is required because the reward is used inside a policy-gradient objective. Without it, differentiating through the estimator would not produce the intended score-function update. 
 
 ### Multi-Teacher OPD
 
-Multi-teacher OPD (MOPD) extends OPD to multiple domain-specialized teachers. This is useful when different teachers are specialized for different data domains, such as math, coding, or instruction following.
+Multi-teacher OPD (MOPD) extends OPD to multiple domain-specialized teachers [5,6,7,8]. This is useful when distilling knowledge to a student across multiple domains. In each domain, such as math, coding, or instruction following, different teachers specialized to the domain can be used.
 
 A base model can be trained or adapted independently on each domain, producing one expert teacher per domain. The student is then trained on a mixture of domains. For each example, the routing key selects the corresponding teacher, and the student matches that teacher's log-probabilities on student-induced states.
 
@@ -149,13 +157,15 @@ MOPD consolidates multiple specialized policies into a single student model whil
 
 [3] Lu, Kevin and Thinking Machines Lab. "On-Policy Distillation." *Thinking Machines Lab: Connectionism*, Oct. 2025.
 
-[4] Xiao, Bangjun, et al. "Mimo-v2-flash Technical Report." arXiv preprint arXiv:2601, 2026.
+[4] DeepSeek-AI. "DeepSeek-V4: Towards Highly Efficient Million-Token Context Intelligence." 2026.
 
-[5] Zeng, Aohan, et al. "GLM-5: From Vibe Coding to Agentic Engineering." arXiv preprint arXiv:2602.15763, 2026.
+[5] Xiao, Bangjun, et al. "Mimo-v2-flash Technical Report." arXiv preprint arXiv:2601, 2026.
 
-[6] Yang, Zhuolin, et al. "Nemotron-Cascade 2: Post-Training LLMs with Cascade RL and Multi-Domain On-Policy Distillation." arXiv preprint arXiv:2603.19220, 2026.
+[6] Zeng, Aohan, et al. "GLM-5: From Vibe Coding to Agentic Engineering." arXiv preprint arXiv:2602.15763, 2026.
 
-[7] DeepSeek-AI. "DeepSeek-V4: Towards Highly Efficient Million-Token Context Intelligence." 2026.
+[7] Yang, Zhuolin, et al. "Nemotron-Cascade 2: Post-Training LLMs with Cascade RL and Multi-Domain On-Policy Distillation." arXiv preprint arXiv:2603.19220, 2026.
+
+[8] DeepSeek-AI. "DeepSeek-V4: Towards Highly Efficient Million-Token Context Intelligence." 2026.
 
 ## Configuration Parameters
 
@@ -239,7 +249,7 @@ Local path or Hugging Face model id for the teacher. **Required.**
 
 The teacher must share the student's tokenizer/vocab — typically satisfied by
 picking a teacher in the same model family (e.g. `Qwen3-32B` teacher for a
-`Qwen3-8B` student). Different LM-head padding is fine.
+`Qwen3-8B` student).
 
 ### `distillation.teacher_models.<name>.num_replicas` (int)
 
@@ -474,7 +484,7 @@ Currently, only `policy_loss_mode=vanilla` is supported. Other policy-loss modes
 The `k1` estimator is valid for reverse KL because sampled tokens are drawn from the student policy:
 
 $$
-D_{\mathrm{KL}}(\pi_\theta \,\|\, \nu)(s_t)
+\mathrm{KL}\!\left(\pi_\theta(\cdot \mid s_t) \,\Vert\, \nu(\cdot \mid s_t)\right)
 =
 \mathbb{E}_{y_t \sim \pi_\theta(\cdot \mid s_t)}
 \left[
@@ -487,7 +497,7 @@ $$
 Thus, a single student-sampled token gives the estimator
 
 $$
-\widehat{D}_{\mathrm{KL}}(\pi_\theta \,\|\, \nu)(s_t, y_t)
+\widehat{\mathrm{KL}}\!\left(\pi_\theta(\cdot \mid s_t) \,\Vert\, \nu(\cdot \mid s_t);\, y_t\right)
 =
 \log \pi_\theta(y_t \mid s_t)
 -
@@ -497,7 +507,7 @@ $$
 Estimating forward KL would require samples from the teacher distribution:
 
 $$
-D_{\mathrm{KL}}(\nu \,\|\, \pi_\theta)(s_t)
+\mathrm{KL}\!\left(\nu(\cdot \mid s_t) \,\Vert\, \pi_\theta(\cdot \mid s_t)\right)
 =
 \mathbb{E}_{y_t \sim \nu(\cdot \mid s_t)}
 \left[
