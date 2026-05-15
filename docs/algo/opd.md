@@ -36,7 +36,7 @@ For example, the student may prefer algebraic proofs while the teacher prefers g
 
 ### On-Policy RL
 
-RLVR avoids this state-distribution mismatch by sampling rollouts from the student policy. If a rollout produces a correct final answer, the policy is updated to increase the likelihood of the sampled solution.
+RLVR has no train/inference state mismatch by construction: rollouts are sampled from the student policy, so the states the student trains on are exactly the states it would visit at inference time. If a rollout produces a correct final answer, the policy is updated to increase the likelihood of the sampled solution.
 
 This aligns training and inference states, but the reward is sparse and outcome-based. A rollout typically contributes a binary success signal at the sequence level rather than dense token-level feedback.
 
@@ -610,7 +610,19 @@ node 1: [geo3k replica 1: 4 GPUs] [geo3k replica 2: 4 GPUs]
 
 No replica crosses a node boundary unless its `per_replica_world_size` requires multiple nodes.
 
-A similar-looking configuration can fail if the replica sizes do not align with node boundaries. For example, if `gsm8k.tensor_model_parallel_size` were changed from `2` to `3`, then `gsm8k` replicas would occupy bundles `[0, 3)`, `[3, 6)`, `[6, 9)`, and so on. The replica covering `[6, 9)` would straddle node 0 and node 1, even though a 3-GPU replica is expected to fit within one 8-GPU node. In that case, validation raises and asks you to reorder teachers or adjust `num_replicas` / inference parallelism.
+A similar-looking configuration can fail if a replica's GPU bundle does not fall entirely within a single node. For example, with the same `n_gpus_per_node=8`, `nnodes=2` (pool size 16) but two teachers configured as
+
+- `a`: `tensor_model_parallel_size=3`, `num_replicas=2` → 6 GPUs total
+- `b`: `tensor_model_parallel_size=5`, `num_replicas=2` → 10 GPUs total
+
+the pool size still matches (`6 + 10 = 16`), but the linear bundle layout becomes
+
+```text
+node 0: [a₀: 0,1,2] [a₁: 3,4,5] [b₀: 6,7,...
+node 1:                              ...,8,9,10] [b₁: 11,12,13,14,15]
+```
+
+Replica `b₀` spans bundles `[6, 11)` — straddling node 0 (bundles 6, 7) and node 1 (bundles 8, 9, 10). A 5-GPU replica with `n_gpus_per_node=8` is expected to fit on a single node (`ceil(5 / 8) = 1`), so `_validate_replica_node_alignment` raises. To fix it, adjust `num_replicas` and the per-teacher inference parallelism so every replica's bundle range falls entirely within one node — for instance, by choosing a `tensor_model_parallel_size` that divides `n_gpus_per_node` cleanly.
 
 #### Teacher routing
 
@@ -673,8 +685,6 @@ Teacher logprob computation is interleaved with rollouts inside the **Agent
 Loop**. Each sample's teacher call fires as soon as its rollout finishes — there
 is no batch-wide barrier — so teacher work overlaps with the still-running
 rollouts on other samples.
-
-#### Step-by-step
 
 1. **Input.** `AgentLoopManager.generate_sequences(prompts: DataProto)` receives
    a batch of prompts
@@ -757,12 +767,10 @@ rollouts on other samples.
     student optimization step.
 
 
-### Student Optimization
+### Student training
 
 Using the `DataProto` produced by the Agent Loop (rollouts + teacher logprobs in
 `teacher_ids` / `teacher_logprobs`), the student step proceeds as follows.
-
-#### Step-by-step
 
 1. **Train entry.** `TrainingWorker.train_batch`
    ([`verl/workers/engine_workers.py`](../../verl/workers/engine_workers.py))
