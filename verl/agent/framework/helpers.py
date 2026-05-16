@@ -35,7 +35,10 @@ def normalize_trajectory_rewards(
                 merged_reward_info[key] = _resolve_trajectory_value(value, index=index, count=count)
 
         if trajectory.reward_score is None:
-            raise ValueError(f"Trajectory {trajectory.uid} has no reward_score. reward_fn must return a score for every trajectory.")
+            raise ValueError(
+                f"Trajectory at index {index} has no reward_score. "
+                "reward_fn must return a score for every trajectory."
+            )
 
         normalized.append(replace(trajectory, reward_info=merged_reward_info))
 

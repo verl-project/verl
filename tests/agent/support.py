@@ -513,9 +513,6 @@ class TrackingGatewayActor:
         self.sessions.pop(session_id, None)
         return [
             Trajectory(
-                uid=session_id,
-                session_id=session_id,
-                trajectory_id=0,
                 prompt_ids=[1],
                 response_ids=[2],
                 response_mask=[1],

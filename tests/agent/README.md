@@ -1,109 +1,164 @@
 # Agent tests
 
-This directory contains the CPU-only unit tests for the new `verl.agent`
-packages introduced for the agent framework / gateway path.
+This directory contains CPU-only tests for the `verl.agent` framework and
+gateway packages. The suite focuses on behavior that reviewers need to trust:
+TransferQueue output schema, multimodal postprocessing, OpenAI-compatible
+gateway sessions, session routing, and runtime ownership.
 
 ## Naming and CI routing
 
-All executable test modules in this directory use the `*_on_cpu.py` suffix so
-they are picked up by VERL's existing `cpu_unit_tests.yml` workflow instead of
-the default GPU unit-test workflow.
+Executable test modules use the `*_on_cpu.py` suffix so VERL's CPU unit-test
+workflow can discover them without pulling GPU-only rollout infrastructure.
+Run the current suite with:
+
+```bash
+pytest tests/agent/ -q
+```
 
 ## Coverage inventory
 
 ### Framework
 
-- `framework/test_assembler_on_cpu.py`
-  - `test_trajectory_assembler_matches_training_batch_contract`
-    - Verifies the assembled `TensorDict` matches the expected training batch contract, including prompt/response padding, masks, `position_ids`, rollout logprobs, routed experts, `rm_scores`, and non-tensor metadata packing.
-  - `test_trajectory_assembler_rejects_empty_trajectories`
-    - Verifies `assemble()` rejects an empty trajectory list.
-  - `test_trajectory_assembler_rejects_response_mask_length_mismatch`
-    - Verifies `response_mask` length must match `response_ids`.
-  - `test_trajectory_assembler_rejects_response_logprobs_length_mismatch`
-    - Verifies `response_logprobs` length must match `response_ids` when logprobs are present.
-  - `test_trajectory_assembler_requires_reward_score`
-    - Verifies each trajectory must have a non-`None` `reward_score` before assembly.
-  - `test_trajectory_assembler_supports_numpy_routed_experts`
-    - Verifies `routed_experts` accepts `numpy.ndarray` input and preserves the expected tensor shape/dtype in the output.
-- `framework/test_openai_compatible_framework_on_cpu.py`
-  - `test_openai_compatible_framework_runs_against_fake_session_runtime`
-    - Verifies the framework can run end-to-end against a fake in-memory session runtime and propagate sample-level non-tensor fields into the assembled batch.
-  - `test_openai_compatible_framework_waits_for_completion_when_configured`
-    - Verifies optional `wait_for_completion()` is invoked with the configured timeout before finalization.
-  - `test_openai_compatible_framework_broadcasts_sample_fields_to_multiple_trajectories`
-    - Verifies a single sample's non-tensor fields are broadcast to all trajectories materialized from that sample.
-  - `test_openai_compatible_framework_aborts_session_on_agent_error`
-    - Verifies agent runner failures trigger `abort_session()`, do not finalize the session, and surface a clear all-failed batch error when no sample succeeds.
-  - `test_openai_compatible_framework_drops_failed_samples_but_keeps_successful_ones`
-    - Verifies a mixed batch can drop a failed sample while still finalizing, rewarding, and assembling the successful sample.
-  - `test_openai_compatible_framework_raises_when_all_samples_fail_without_calling_assembler`
-    - Verifies an all-failed batch raises a clear error and does not call the assembler with an empty trajectory list.
-  - `test_openai_compatible_framework_omits_rollout_log_probs_when_missing`
-    - Verifies missing rollout logprobs stay absent from the assembled batch instead of being synthesized.
+- `framework/test_generate_sequences_on_cpu.py`
+  - `test_generate_sequences_writes_tq_schema_for_each_session`
+    - Verifies `generate_sequences()` runs multiple sessions per prompt and
+      writes the TransferQueue key, tag, tensor, nested-tensor, and non-tensor
+      schema consumed by sync training.
+  - `test_generate_sequences_keeps_successful_sessions_when_one_session_fails`
+    - Verifies a failed session is aborted and reported without dropping
+      successful sessions for the same prompt.
+  - `test_generate_sequences_marks_prompt_failure_when_all_sessions_fail`
+    - Verifies all-failed prompts write a failure status and no trajectory
+      batch.
+  - `test_generate_sequences_omits_rm_scores_when_reward_fn_is_none`
+    - Verifies reward-free generation omits `rm_scores` instead of inventing
+      scores.
+  - `test_generate_sequences_keeps_other_prompts_when_prompt_task_raises`
+    - Verifies an unexpected prompt-level exception is counted as one failed
+      uid while other prompt tasks still contribute results.
+- `framework/test_multi_modal_postprocess_on_cpu.py`
+  - `test_compute_multi_modal_inputs_returns_empty_dict_without_processor`
+    - Verifies text-only execution produces no multimodal processor inputs.
+  - `test_compute_multi_modal_inputs_returns_image_tensors_and_images_seqlens`
+    - Verifies processor image outputs drop duplicate text tensors and add
+      `images_seqlens`.
+  - `test_compute_position_ids_returns_text_shape_without_processor`
+    - Verifies text-only position ids keep the standard 2-D shape.
+  - `test_compute_position_ids_returns_multimodal_shape_with_processor`
+    - Verifies processor-aware position ids include text and vision channels
+      and derive `mm_token_type_ids` from image/video token ids.
 
 ### Gateway
 
 - `gateway/test_gateway_actor_on_cpu.py`
-  - `test_normalize_request_context_preserves_structured_fields`
-    - Verifies request normalization preserves structured multimodal content, `tool_calls`, and `tool_call_id` fields needed for prefix comparison.
+  - `test_gateway_actor_abort_session_does_not_wait_for_backend_generate`
+    - Verifies `abort_session()` can complete while a backend generation is
+      still in flight.
+  - `test_normalize_request_context_preserves_multimodal_blocks_for_later_extraction`
+    - Verifies request normalization preserves multimodal content, `tools`,
+      `tool_calls`, and `tool_call_id` fields needed by later gateway stages.
+  - `test_gateway_actor_forwards_image_data_on_initial_multimodal_request`
+    - Verifies the initial multimodal request extracts image data, forwards it
+      to the backend, and materializes it into trajectory metadata.
   - `test_gateway_actor_complete_wait_and_finalize`
-    - Verifies `/complete`, `wait_for_completion()`, and `finalize_session()` work together on the happy path and attach `reward_info` to materialized trajectories.
+    - Verifies `/complete`, `wait_for_completion()`, and `finalize_session()`
+      cooperate on the happy path and attach reward info.
+  - `test_gateway_actor_continuation_reuses_accumulated_media_context`
+    - Verifies continuation turns reuse existing session media without
+      re-extracting the original image.
+  - `test_gateway_actor_multimodal_reference_change_splits_trajectory`
+    - Verifies changing multimodal request context starts a new trajectory.
+  - `test_gateway_actor_continuation_with_tool_returned_image_appends_media`
+    - Verifies a tool-returned image is appended to accumulated media and
+      encoded into the incremental prompt.
   - `test_gateway_actor_prefix_mismatch_splits_trajectories`
-    - Verifies a message-history prefix mismatch starts a new trajectory instead of continuing the active one.
+    - Verifies message-history prefix mismatch materializes the active
+      trajectory and starts the next one.
   - `test_gateway_actor_tool_context_change_splits_trajectory`
-    - Verifies a tool-schema change is treated as a request-context split boundary.
+    - Verifies tool-schema changes split trajectories.
   - `test_gateway_actor_does_not_forward_tools_in_sampling_params`
-    - Verifies `tools` are stripped before backend generation params are forwarded.
+    - Verifies `tools` do not leak into backend sampling params.
   - `test_gateway_actor_strips_request_envelope_but_keeps_sampling_params`
-    - Verifies request-envelope fields such as `messages`, `model`, and `tools` are removed at the backend boundary while backend sampling params come from gateway-owned base params plus whitelisted request overrides.
+    - Verifies backend sampling params come from gateway base params plus
+      whitelisted request overrides, not request-envelope fields.
   - `test_gateway_actor_ignores_non_whitelisted_request_sampling_params`
-    - Verifies non-whitelisted request fields do not leak into backend sampling params.
+    - Verifies non-whitelisted request sampling fields are ignored.
   - `test_gateway_actor_continuation_preserves_prompt_and_generation_masks`
-    - Verifies continuation tokenization appends mask `0` for replayed/incremental context and mask `1` for newly generated tokens.
+    - Verifies continuation context uses mask `0` and new model output uses
+      mask `1`.
   - `test_gateway_actor_tool_argument_json_equivalence_does_not_split_after_valid_continuation`
-    - Verifies JSON-equivalent tool-call arguments do not trigger a trajectory split when only key order changes.
+    - Verifies JSON-equivalent tool-call argument strings do not split a valid
+      continuation.
   - `test_message_prefix_falls_back_to_raw_tool_argument_value_comparison_when_arguments_are_invalid_json`
-    - Verifies invalid tool-call argument strings fall back to raw-value comparison rather than best-effort JSON equivalence.
+    - Verifies invalid tool-call argument strings compare by raw value.
   - `test_gateway_actor_serializes_same_session_concurrent_requests`
-    - Verifies concurrent requests targeting the same session are serialized rather than entering the backend concurrently.
+    - Verifies concurrent requests for one session are serialized before they
+      reach the backend.
   - `test_gateway_actor_rejects_chat_after_complete`
-    - Verifies chat requests are rejected once the session has been marked completed.
+    - Verifies chat requests after completion return HTTP 409.
   - `test_gateway_actor_finalizes_without_complete`
-    - Verifies `finalize_session()` can materialize and remove the active trajectory even if `/complete` was never called.
+    - Verifies finalization can materialize an active trajectory even when
+      `/complete` was never called.
   - `test_gateway_actor_rejects_malformed_requests_with_bad_request`
-    - Verifies representative malformed request shapes are rejected with HTTP 400.
+    - Verifies representative malformed OpenAI request shapes return HTTP 400.
   - `test_gateway_actor_backend_failure_does_not_commit_partial_state`
-    - Verifies backend generation failure returns HTTP 500 without committing partial trajectory/session state.
+    - Verifies backend failure returns HTTP 500 without committing a partial
+      trajectory.
   - `test_gateway_actor_backend_failure_after_tool_mismatch_does_not_split`
-    - Verifies a failed request after a tool-context mismatch does not prematurely materialize/split the previous trajectory.
+    - Verifies a failed split attempt leaves the previous active trajectory
+      intact.
   - `test_gateway_actor_tool_call_decode_returns_openai_format`
-    - Verifies tool-parser output is decoded back into OpenAI-compatible `tool_calls` responses and can be continued with a tool-result turn.
+    - Verifies tool-parser output is decoded into OpenAI-compatible
+      `tool_calls` and can be continued with a tool-result turn.
 - `gateway/test_gateway_manager_on_cpu.py`
   - `test_gateway_manager_routes_sessions_stickily`
-    - Verifies session creation/finalization stay routed to the owning gateway.
+    - Verifies created sessions remain routed to their owning gateway through
+      chat and finalization.
   - `test_gateway_manager_uses_least_active_sessions_routing`
-    - Verifies new sessions are assigned to the gateway with the fewest active sessions.
+    - Verifies new sessions are assigned to the gateway with the fewest active
+      sessions and counters are decremented on finalization.
   - `test_gateway_manager_wait_for_completion_delegates_to_session_owner`
-    - Verifies `wait_for_completion()` is delegated to the gateway that owns the session.
+    - Verifies completion waits are delegated to the gateway that owns the
+      session.
 - `gateway/test_session_runtime_on_cpu.py`
   - `test_gateway_serving_runtime_owns_gateway_lifecycle_and_session_runtime`
-    - Verifies the runtime can own gateway actor lifecycle plus session creation, wait, completion, and finalization behavior.
-  - `test_gateway_serving_runtime_injects_runtime_owned_gateway_backend`
-    - Verifies runtime-owned gateways use the runtime itself as backend and correctly apply gateway-owned base sampling params plus whitelisted request overrides before calling the rollout server.
-  - `test_gateway_serving_runtime_passes_processor_and_media_to_owned_gateway`
-    - Verifies runtime-owned gateways accept processor-aware actor kwargs and forward extracted multimodal media to the rollout server.
-  - `test_gateway_serving_runtime_releases_server_when_generate_fails`
-    - Verifies backend-server slots are still released when `generate()` raises, preventing load-balancer bookkeeping leaks.
-  - `test_gateway_serving_runtime_gateway_count_zero_falls_back_to_generate_only_mode`
-    - Verifies `gateway_count=0` still supports direct `generate()` requests without creating owned gateway actors or a session runtime.
+    - Verifies `GatewayServingRuntime` can own gateway actors, expose the
+      session runtime, delegate backend generation through itself, and shut down.
+  - `test_gateway_serving_runtime_delegates_generate_to_llm_client`
+    - Verifies generate-only mode delegates directly to the supplied LLM client
+      when no gateway actors are configured.
 
 ## Mocking boundaries
 
-- No test in this directory depends on a real `LLMServer`, model weights, or a
-  production serving runtime.
-- `tests/agent/support.py` provides the fakes and lightweight Ray actors used by
-  the gateway/runtime tests.
-- The only retained dependency on the old experimental tree is
-  `verl.experimental.agent_loop.tool_parser`, which is intentionally reused by
-  `GatewayActor` until the community-wide extraction lands.
+- Real code under test: `verl.agent.framework.*` and `verl.agent.gateway.*`.
+  Gateway actor tests also use real Ray actors, FastAPI routing, and HTTPX
+  requests against local in-process servers.
+- External systems intentionally excluded: real `LLMServer`, model weights,
+  GPU rollout engines, recipe submodules, external smoke tests, and trainer
+  integration jobs.
+- `tests/agent/support.py` provides shared fakes:
+  - Tokenization and processors: `FakeTokenizer`, `FakeProcessor`.
+  - Multimodal extraction: `fake_vision_info_extractor`,
+    `SingleUseVisionInfoExtractor`.
+  - Backend behavior: `InspectingBackend`, `InspectingSequencedBackend`,
+    `QueuedBackend`, `SlowBackend`, `RecordingLLMClient`,
+    `RejectToolsSamplingParamsBackend`, `RejectRequestEnvelopeBackend`,
+    `FailingBackend`, `SequencedBackend`, `RejectConcurrentSessionBackend`.
+  - Manager/runtime actors: `TrackingGatewayActor`.
+- Currently unused support fakes are `NoLogprobBackend`,
+  `RecordingLoadBalancer`, `RecordingRolloutServer`, and
+  `FailingRolloutServer`; treat them as cleanup candidates unless a follow-up
+  test needs them.
+
+## Intentional gaps
+
+- Backend-fatal layering is intentionally not covered here. Risk analysis
+  classifies it as P0 follow-up work because current framework/gateway code
+  does not yet distinguish backend-fatal failures from recoverable session
+  failures.
+- `abort_session` backend propagation is intentionally not covered here. The
+  current tests only verify gateway-side session cleanup/non-blocking behavior;
+  request-level backend abort is P1 follow-up work.
+- Framework timeout and health behavior is intentionally not covered here.
+  Current code has only optional completion waiting and no health/heartbeat
+  contract, so tests for that would describe future code rather than this PR.

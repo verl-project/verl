@@ -98,12 +98,21 @@ class MinimalTransferQueue:
         )
 
 
+class MinimalReplayBuffer:
+    def __init__(self):
+        self.adds = []
+
+    def add(self, partition_id, items):
+        self.adds.append({"partition_id": partition_id, "items": dict(items)})
+
+
 def _build_prompts():
     return tu.get_tensordict(
         tensor_dict={
             "raw_prompt": [[{"role": "user", "content": "Say MINIMAL"}]],
             "uid": ["sample-0"],
-        }
+        },
+        non_tensor_dict={"global_steps": 1},
     )
 
 
@@ -143,6 +152,7 @@ async def run_example() -> dict[str, object]:
     runtime: GatewayServingRuntime | None = None
     gateway_response_text = ""
     fake_tq = MinimalTransferQueue()
+    replay_buffer = MinimalReplayBuffer()
     original_tq = framework_module.tq
 
     if not ray.is_initialized():
@@ -181,15 +191,13 @@ async def run_example() -> dict[str, object]:
             session_runtime=runtime,
             agent_runner=agent_runner,
             reward_fn=_reward_fn,
+            replay_buffer=replay_buffer,
+            rollout_config={"n": 1, "val_kwargs": {"n": 1}},
             wait_for_completion_after_agent_run=True,
             completion_timeout=5.0,
         )
 
-        stats = await framework.generate_sequences(
-            _build_prompts(),
-            global_steps=1,
-            partition_id="train",
-        )
+        await framework.generate_sequences(_build_prompts())
         rollout_calls = ray.get(rollout_server.get_calls.remote())
         fields = fake_tq.batch_puts[0]["fields"]
 
@@ -200,7 +208,7 @@ async def run_example() -> dict[str, object]:
             "framework_class": type(framework).__name__,
             "agent_runner_contract": "session_to_base_url_adapter",
             "gateway_response_text": gateway_response_text,
-            "rollout_stats": stats,
+            "replay_buffer_adds": replay_buffer.adds,
             "tq_keys": fake_tq.batch_puts[0]["keys"],
             "finished_tags": fake_tq.puts,
             "uid_values": tu.get(fields, "uid"),

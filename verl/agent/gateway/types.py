@@ -41,4 +41,3 @@ class GatewaySessionState:
     updated_at: float = field(default_factory=time.time)
     request_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     generation_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    next_trajectory_id: int = 0

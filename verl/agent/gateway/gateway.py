@@ -87,6 +87,9 @@ def _validate_tools(tools: Any) -> list[dict[str, Any]] | None:
         return None
     if not isinstance(tools, list):
         raise MalformedRequestError("tools must be a list")
+    for tool in tools:
+        if not isinstance(tool, dict):
+            raise MalformedRequestError("tools entries must be objects")
     return tools
 
 
@@ -298,12 +301,10 @@ class _GatewayActor:
         self._touch_session(session)
         session.trajectories.append(
             self._build_materialized_trajectory(
-            session=session,
-            active=active,
-            trajectory_id=session.next_trajectory_id,
+                session=session,
+                active=active,
             )
         )
-        session.next_trajectory_id += 1
         session.active_trajectory = None
 
     def _build_materialized_trajectory(
@@ -311,12 +312,8 @@ class _GatewayActor:
         *,
         session: GatewaySessionState,
         active: TrajectoryBuffer,
-        trajectory_id: int,
     ) -> Trajectory:
         return Trajectory(
-            uid=session.handle.session_id,
-            session_id=session.handle.session_id,
-            trajectory_id=trajectory_id,
             prompt_ids=list(active.prompt_ids),
             response_ids=list(active.response_ids),
             response_mask=list(active.response_mask),
@@ -508,7 +505,6 @@ class _GatewayActor:
                 self._touch_session(session)
                 messages = request_context["messages"]
                 tools = request_context["tools"]
-                next_trajectory_id = session.next_trajectory_id
                 materialized_trajectory = None
                 image_data = None
                 video_data = None
@@ -548,9 +544,7 @@ class _GatewayActor:
                     materialized_trajectory = self._build_materialized_trajectory(
                         session=session,
                         active=session.active_trajectory,
-                        trajectory_id=next_trajectory_id,
                     )
-                    next_trajectory_id += 1
                     image_data, video_data = await self._extract_multi_modal_data(messages)
                     active_trajectory = TrajectoryBuffer(
                         prompt_ids=self._encode_full(
@@ -558,7 +552,6 @@ class _GatewayActor:
                         )
                     )
 
-                # TODO: prompt_ids for generate requests are different from those in trajectories, shall we use different variable names?
                 generation_context_ids = active_trajectory.prompt_ids + active_trajectory.response_ids
                 sampling_params = _build_sampling_params(
                     payload,
@@ -591,7 +584,6 @@ class _GatewayActor:
 
                 if materialized_trajectory is not None:
                     session.trajectories.append(materialized_trajectory)
-                session.next_trajectory_id = next_trajectory_id
                 session.active_trajectory = active_trajectory
                 session.image_data = list(image_data) if image_data is not None else None
                 session.video_data = list(video_data) if video_data is not None else None

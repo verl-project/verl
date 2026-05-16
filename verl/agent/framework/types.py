@@ -16,9 +16,6 @@ class SessionHandle:
 
 @dataclass
 class Trajectory:
-    uid: str
-    session_id: str
-    trajectory_id: int
     prompt_ids: list[int]
     response_ids: list[int]
     response_mask: list[int]

@@ -199,7 +199,6 @@ async def test_gateway_actor_complete_wait_and_finalize(ray_runtime):
 
     assert len(trajectories) == 1
     assert trajectories[0].reward_info == {"score": 1.0, "label": "A"}
-    assert trajectories[0].trajectory_id == 0
     assert trajectories[0].response_ids
     assert all(mask == 1 for mask in trajectories[0].response_mask)
 
@@ -449,7 +448,6 @@ async def test_gateway_actor_prefix_mismatch_splits_trajectories(ray_runtime):
     ray.get(actor.shutdown.remote())
 
     assert len(trajectories) == 2
-    assert [trajectory.trajectory_id for trajectory in trajectories] == [0, 1]
     assert trajectories[0].prompt_ids != trajectories[1].prompt_ids
 
 
@@ -693,7 +691,6 @@ async def test_gateway_actor_tool_argument_json_equivalence_does_not_split_after
     ray.get(actor.shutdown.remote())
 
     assert len(trajectories) == 1
-    assert trajectories[0].trajectory_id == 0
     assert 0 in trajectories[0].response_mask
     assert trajectories[0].response_mask[-len("THIRD") :] == [1] * len("THIRD")
 
@@ -806,7 +803,6 @@ async def test_gateway_actor_finalizes_without_complete(ray_runtime):
     ray.get(actor.shutdown.remote())
 
     assert len(trajectories) == 1
-    assert trajectories[0].trajectory_id == 0
     assert trajectories[0].reward_info == {}
 
 

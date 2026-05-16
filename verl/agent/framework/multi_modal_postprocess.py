@@ -1,15 +1,10 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
 from typing import Any
 
 import torch
-from tensordict import TensorDict
 
-from verl.utils import tensordict_utils as tu
 from verl.utils.model import compute_position_id_with_mask
-
-from .types import Trajectory
 
 # Behavior mirrors legacy `_compute_multi_modal_inputs` / `_compute_position_ids`
 # in `verl/experimental/agent_loop/agent_loop.py`.
@@ -97,46 +92,3 @@ def compute_position_ids(
     text_position_ids[0, valid_mask] = torch.arange(valid_mask.sum().item(), device=input_ids.device)
     text_position_ids = text_position_ids.unsqueeze(0)
     return torch.cat((text_position_ids, vision_position_ids), dim=1)
-
-
-def apply_multi_modal_postprocess(
-    batch: TensorDict,
-    trajectories: Sequence[Trajectory],
-    processor,
-) -> TensorDict:
-    """Apply multimodal helper logic per sample and attach non-tensor outputs."""
-    if len(batch) != len(trajectories):
-        raise ValueError(f"batch/trajectory size mismatch: {len(batch)} != {len(trajectories)}")
-
-    result = batch.copy()
-    position_ids = []
-    multi_modal_data = []
-    multi_modal_inputs = []
-
-    for sample_index, trajectory in enumerate(trajectories):
-        sample_input_ids = result["input_ids"][sample_index : sample_index + 1]
-        sample_attention_mask = result["attention_mask"][sample_index : sample_index + 1]
-        sample_multi_modal_data = trajectory.multi_modal_data
-        sample_multi_modal_inputs = compute_multi_modal_inputs(
-            processor,
-            sample_input_ids,
-            sample_multi_modal_data,
-        )
-        position_ids.append(
-            compute_position_ids(
-                processor,
-                sample_input_ids,
-                sample_attention_mask,
-                sample_multi_modal_inputs,
-            )
-        )
-        multi_modal_data.append(sample_multi_modal_data)
-        multi_modal_inputs.append(sample_multi_modal_inputs)
-
-    result["position_ids"] = torch.cat(position_ids, dim=0)
-    tu.assign_non_tensor(
-        result,
-        multi_modal_data=multi_modal_data,
-        multi_modal_inputs=multi_modal_inputs,
-    )
-    return result

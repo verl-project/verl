@@ -1,21 +1,25 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import inspect
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import replace
+from functools import partial
 from uuid import uuid4
 
+from omegaconf import OmegaConf
 import torch
 from tensordict import TensorDict
 from tensordict.tensorclass import NonTensorData, NonTensorStack
 
+from verl.tools.utils.tool_registry import initialize_tools_from_config
+from verl.trainer.ppo.reward import get_custom_reward_fn
+from verl.utils.import_utils import load_class_from_fqn
 from verl.utils.transferqueue_utils import tq
 from verl.utils import tensordict_utils as tu
 from verl.utils.model import compute_position_id_with_mask
 
-from .assembler import TrajectoryAssembler
 from .multi_modal_postprocess import compute_multi_modal_inputs, compute_position_ids
 from .types import RewardFn, SessionRewardContext, SessionRuntime, Trajectory
 
@@ -23,15 +27,30 @@ logger = logging.getLogger(__name__)
 
 
 class AgentFramework(ABC):
+    """Abstract base for framework implementations.
+
+    Phase A: entry.py owns session runtime construction and passes it in.
+    Subclasses receive shared entry resources plus the raw config for
+    subclass-specific field parsing.
+
+    Phase B: trainer inlines entry; this from_config contract remains.
+    """
+
+    @classmethod
     @abstractmethod
-    async def generate_sequences(
-        self,
-        prompts: TensorDict,
+    async def from_config(
+        cls,
         *,
-        global_steps: int,
-        partition_id: str,
-        num_sessions: int = 1,
-    ) -> dict:
+        config,
+        session_runtime,
+        tokenizer=None,
+        processor=None,
+        replay_buffer,
+    ) -> "AgentFramework":
+        ...
+
+    @abstractmethod
+    async def generate_sequences(self, prompts: TensorDict) -> None:
         """Run agent sessions and write finalized trajectories to TransferQueue."""
         ...
 
@@ -79,6 +98,37 @@ def _list_of_tq_fields_to_tensordict(fields: list[dict[str, object]]) -> TensorD
     return td
 
 
+def _build_reward_fn(config, tokenizer):
+    # Phase A keeps reward configuration in the existing VERL path and only
+    # bridges framework trajectories to the raw custom_reward_function
+    # signature. Phase B should reuse the main reward manager path directly
+    # instead of growing a parallel agent-framework reward config surface.
+    custom_reward_fn = get_custom_reward_fn(config)
+    if custom_reward_fn is None:
+        return None
+
+    async def reward_fn(ctx):
+        data_source = ctx.sample_fields.get("data_source")
+        reward_model = ctx.sample_fields.get("reward_model")
+        if isinstance(reward_model, dict):
+            ground_truth = reward_model.get("ground_truth")
+        elif reward_model is None:
+            ground_truth = None
+        else:
+            ground_truth = getattr(reward_model, "ground_truth", None)
+        extra_info = ctx.sample_fields.get("extra_info")
+        scores = []
+        for trajectory in ctx.trajectories:
+            response_text = tokenizer.decode(trajectory.response_ids, skip_special_tokens=True)
+            score = custom_reward_fn(data_source, response_text, ground_truth, extra_info)
+            if inspect.isawaitable(score):
+                score = await score
+            scores.append(score)
+        return scores
+
+    return reward_fn
+
+
 class OpenAICompatibleAgentFramework(AgentFramework):
     """Reference AgentFramework implementation for OpenAI-compatible agent loops.
 
@@ -86,7 +136,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
     communicates with the Gateway via standard ``/v1/chat/completions``
     requests, and the Gateway collects token-level trajectories.  After
     finalization, ``reward_fn`` scores the session's trajectories and the
-    assembler packs everything into a training-ready ``TensorDict``.
+    framework writes them to the TransferQueue schema consumed by sync training.
     """
 
     def __init__(
@@ -96,8 +146,8 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         reward_fn: RewardFn | None,
         *,
         processor=None,
-        assembler: TrajectoryAssembler | None = None,
-        pad_token_id: int = 0,
+        replay_buffer=None,
+        rollout_config=None,
         completion_timeout: float | None = 30.0,
         wait_for_completion_after_agent_run: bool = False,
     ):
@@ -105,11 +155,116 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         self.agent_runner = agent_runner
         self.reward_fn = reward_fn
         self._processor = processor
-        self.assembler = assembler or TrajectoryAssembler(pad_token_id=pad_token_id)
+        # TODO(phase-b): once trainer constructs framework directly, these become
+        # constructor-required and no transitional dual-path is needed.
+        self._replay_buffer = replay_buffer
+        self._rollout_config = rollout_config
         self.completion_timeout = completion_timeout
         self.wait_for_completion_after_agent_run = wait_for_completion_after_agent_run
 
-    async def generate_sequences(
+    @classmethod
+    async def from_config(
+        cls,
+        *,
+        config,
+        session_runtime,
+        tokenizer=None,
+        processor=None,
+        replay_buffer,
+    ) -> "OpenAICompatibleAgentFramework":
+        if tokenizer is None:
+            raise ValueError("OpenAICompatibleAgentFramework requires tokenizer for reward bridge")
+
+        # TODO(phase-b): switch this to actor_rollout_ref.rollout.agent_framework.*
+        af_cfg = OmegaConf.select(config, "actor_rollout_ref.rollout.custom.agent_framework", default={}) or {}
+        agent_runner_fqn = af_cfg.get("agent_runner_fqn")
+        if not agent_runner_fqn:
+            raise ValueError("actor_rollout_ref.rollout.custom.agent_framework.agent_runner_fqn is required")
+
+        agent_runner = load_class_from_fqn(str(agent_runner_fqn), description="agent runner")
+        runner_kwargs = dict(
+            OmegaConf.to_container(OmegaConf.create(af_cfg.get("agent_runner_kwargs", {})), resolve=True) or {}
+        )
+        tool_config_path = af_cfg.get("tool_config_path")
+        if tool_config_path:
+            tool_config = initialize_tools_from_config(tool_config_path)
+            if not tool_config:
+                raise ValueError(f"tool config did not initialize any tools: {tool_config_path}")
+            runner_kwargs["tool_config"] = tool_config
+        if runner_kwargs:
+            agent_runner = partial(agent_runner, **runner_kwargs)
+
+        # TODO(phase-x): when reward_loop_worker_handles is available from
+        # trainer, accept reward_fn as an entry-injected resource and skip
+        # bridge construction. Bridge remains available for simple recipes
+        # that supply reward.custom_reward_function directly.
+        reward_fn = _build_reward_fn(config, tokenizer)
+
+        completion_timeout = af_cfg.get("completion_timeout_seconds")
+        return cls(
+            session_runtime=session_runtime,
+            agent_runner=agent_runner,
+            reward_fn=reward_fn,
+            processor=processor,
+            replay_buffer=replay_buffer,
+            rollout_config=config.actor_rollout_ref.rollout,
+            completion_timeout=completion_timeout,
+            wait_for_completion_after_agent_run=completion_timeout is not None,
+        )
+
+    async def generate_sequences(self, prompts: TensorDict) -> None:
+        """Run rollout-manager generation and write outputs into TransferQueue."""
+        if self._replay_buffer is None:
+            raise RuntimeError("OpenAICompatibleAgentFramework requires replay_buffer for generate_sequences")
+        if self._rollout_config is None:
+            raise RuntimeError("OpenAICompatibleAgentFramework requires rollout_config for generate_sequences")
+
+        global_steps = tu.get(prompts, "global_steps")
+        if global_steps is None:
+            raise ValueError("OpenAICompatibleAgentFramework requires prompts['global_steps']")
+
+        partition_id = "val" if "validate" in prompts.keys() else "train"
+        num_sessions = self._num_sessions_for_partition(partition_id)
+
+        uids = tu.get(prompts, "uid")
+        if uids is None:
+            raise ValueError("OpenAICompatibleAgentFramework requires prompts['uid'] for replay_buffer")
+        uid_values = uids.tolist() if hasattr(uids, "tolist") else list(uids)
+        self._replay_buffer.add(
+            partition_id,
+            {str(uid): {"global_steps": global_steps, "status": "running"} for uid in uid_values},
+        )
+
+        stats = await self._generate_to_tq(
+            prompts,
+            global_steps=global_steps,
+            partition_id=partition_id,
+            num_sessions=num_sessions,
+        )
+        logger.info(
+            "generate_sequences summary: num_input_prompts=%s num_success_sessions=%s "
+            "num_failed_sessions=%s num_success_outputs=%s num_failed_uids=%s failure_reasons=%s",
+            stats["num_input_prompts"],
+            stats["num_success_sessions"],
+            stats["num_failed_sessions"],
+            stats["num_success_outputs"],
+            stats["num_failed_uids"],
+            stats["failure_reasons"][:3],
+        )
+        if stats["num_success_outputs"] == 0:
+            raise RuntimeError(
+                f"All rollouts failed at global_steps={global_steps}. "
+                f"failures={stats['num_failed_uids']}/{stats['num_input_prompts']}"
+            )
+        return None
+
+    def _num_sessions_for_partition(self, partition_id: str) -> int:
+        if partition_id == "val":
+            val_kwargs = self._rollout_config.get("val_kwargs", {})
+            return int(val_kwargs.get("n"))
+        return int(self._rollout_config.get("n"))
+
+    async def _generate_to_tq(
         self,
         prompts: TensorDict,
         *,
@@ -165,17 +320,6 @@ class OpenAICompatibleAgentFramework(AgentFramework):
             stats["num_success_outputs"] += outcome["num_success_outputs"]
             stats["num_failed_uids"] += outcome["num_failed_uids"]
             failure_reasons.extend(outcome["failure_reasons"])
-        if failure_reasons:
-            logger.warning(
-                "generate_sequences completed with failures: num_input_prompts=%s num_success_sessions=%s "
-                "num_failed_sessions=%s num_success_outputs=%s num_failed_uids=%s failure_reasons=%s",
-                stats["num_input_prompts"],
-                stats["num_success_sessions"],
-                stats["num_failed_sessions"],
-                stats["num_success_outputs"],
-                stats["num_failed_uids"],
-                failure_reasons[:3],
-            )
         return stats
 
     async def _run_prompt_to_replay_buffer(
@@ -199,13 +343,14 @@ class OpenAICompatibleAgentFramework(AgentFramework):
                 prompts=prompts,
                 raw_prompt=raw_prompt,
                 sample_index=sample_index,
-                session_index=session_index,
-                session_id=self._build_session_id_with_index(
+                session_id=self._build_session_id(
                     prompts=prompts,
                     sample_index=sample_index,
                     session_index=session_index,
                 ),
-                runner_kwargs=self._runner_kwargs_for_sample(sample_fields),
+                runner_kwargs=(
+                    {"tools_kwargs": sample_fields["tools_kwargs"]} if "tools_kwargs" in sample_fields else {}
+                ),
             )
             for session_index in range(num_sessions)
         ]
@@ -259,7 +404,6 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         prompts: TensorDict,
         raw_prompt,
         sample_index: int,
-        session_index: int = 0,
         session_id: str | None = None,
         runner_kwargs: dict[str, object] | None = None,
     ) -> tuple[list[Trajectory], dict[str, object]]:
@@ -309,10 +453,11 @@ class OpenAICompatibleAgentFramework(AgentFramework):
                 f"reward_fn returned {len(scores)} scores for {len(session_trajectories)} trajectories"
             )
         normalized_scores: list[float] = []
-        for trajectory, score in zip(session_trajectories, scores, strict=True):
+        for _, score in zip(session_trajectories, scores, strict=True):
             if score is None:
                 raise ValueError(
-                    f"reward_fn must return a score for every trajectory; got None for trajectory {trajectory.uid}"
+                    "reward_fn must return a score for every trajectory; "
+                    f"got None for uid={sample_fields.get('uid')}"
                 )
             normalized_scores.append(float(score))
         return normalized_scores
@@ -328,12 +473,6 @@ class OpenAICompatibleAgentFramework(AgentFramework):
                 assert isinstance(value, NonTensorData)
                 sample_fields[key] = value.data
         return sample_fields
-
-    def _runner_kwargs_for_sample(self, sample_fields: dict[str, object]) -> dict[str, object]:
-        runner_kwargs = {}
-        if "tools_kwargs" in sample_fields:
-            runner_kwargs["tools_kwargs"] = sample_fields["tools_kwargs"]
-        return runner_kwargs
 
     async def _write_session_trajectories_to_tq(
         self,
@@ -438,13 +577,5 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         }
         return field, tag
 
-    def _build_session_id(self, prompts: TensorDict, sample_index: int) -> str:
-        return f"session-{sample_index}-{uuid4().hex}"
-
-    def _build_session_id_with_index(self, *, prompts: TensorDict, sample_index: int, session_index: int) -> str:
-        try:
-            return self._build_session_id(prompts=prompts, sample_index=sample_index, session_index=session_index)
-        except TypeError:
-            if session_index == 0:
-                return self._build_session_id(prompts=prompts, sample_index=sample_index)
-            return f"session-{sample_index}-{session_index}-{uuid4().hex}"
+    def _build_session_id(self, prompts: TensorDict, sample_index: int, session_index: int = 0) -> str:
+        return f"session-{sample_index}-{session_index}-{uuid4().hex}"

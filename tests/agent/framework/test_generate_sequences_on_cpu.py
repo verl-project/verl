@@ -25,6 +25,14 @@ class _FakeTransferQueue:
         )
 
 
+class _FakeReplayBuffer:
+    def __init__(self):
+        self.adds = []
+
+    def add(self, partition_id, items):
+        self.adds.append({"partition_id": partition_id, "items": dict(items)})
+
+
 class _FakeSessionRuntime:
     def __init__(self, finalized_by_session_id: dict[str, list[Trajectory]]):
         self.finalized_by_session_id = finalized_by_session_id
@@ -47,7 +55,10 @@ class _FakeSessionRuntime:
         return None
 
 
-def _build_prompts(count: int = 2):
+def _build_prompts(count: int = 2, *, global_steps: int = 7, validate: bool = False):
+    non_tensor_dict = {"global_steps": global_steps}
+    if validate:
+        non_tensor_dict["validate"] = True
     return tu.get_tensordict(
         tensor_dict={
             "raw_prompt": [[{"role": "user", "content": f"sample {i}"}] for i in range(count)],
@@ -57,15 +68,13 @@ def _build_prompts(count: int = 2):
             "extra_info": [{"index": i} for i in range(count)],
             "tools_kwargs": [{"tool": i} for i in range(count)],
             "agent_name": ["deepeyes"] * count,
-        }
+        },
+        non_tensor_dict=non_tensor_dict,
     )
 
 
 def _trajectory(
     *,
-    uid: str,
-    session_id: str,
-    trajectory_id: int = 0,
     prompt_ids: list[int] | None = None,
     response_ids: list[int] | None = None,
     response_logprobs: list[float] | None = None,
@@ -74,9 +83,6 @@ def _trajectory(
     prompt_ids = prompt_ids or [10, 11]
     response_ids = response_ids or [20, 21]
     return Trajectory(
-        uid=uid,
-        session_id=session_id,
-        trajectory_id=trajectory_id,
         prompt_ids=prompt_ids,
         response_ids=response_ids,
         response_mask=[1] * len(response_ids),
@@ -93,14 +99,15 @@ async def test_generate_sequences_writes_tq_schema_for_each_session(monkeypatch)
     from verl.agent.framework.framework import OpenAICompatibleAgentFramework
 
     fake_tq = _FakeTransferQueue()
+    replay_buffer = _FakeReplayBuffer()
     monkeypatch.setattr(framework_module, "tq", fake_tq)
 
     runtime = _FakeSessionRuntime(
         {
-            "session-0-0": [_trajectory(uid="uid-0", session_id="session-0-0", response_logprobs=[-0.1, -0.2])],
-            "session-0-1": [_trajectory(uid="uid-0", session_id="session-0-1", response_logprobs=[-0.3, -0.4])],
-            "session-1-0": [_trajectory(uid="uid-1", session_id="session-1-0", response_logprobs=[-0.5, -0.6])],
-            "session-1-1": [_trajectory(uid="uid-1", session_id="session-1-1", response_logprobs=[-0.7, -0.8])],
+            "session-0-0": [_trajectory(response_logprobs=[-0.1, -0.2])],
+            "session-0-1": [_trajectory(response_logprobs=[-0.3, -0.4])],
+            "session-1-0": [_trajectory(response_logprobs=[-0.5, -0.6])],
+            "session-1-1": [_trajectory(response_logprobs=[-0.7, -0.8])],
         }
     )
 
@@ -115,21 +122,22 @@ async def test_generate_sequences_writes_tq_schema_for_each_session(monkeypatch)
         session_runtime=runtime,
         agent_runner=agent_runner,
         reward_fn=reward_fn,
+        replay_buffer=replay_buffer,
+        rollout_config={"n": 2, "val_kwargs": {"n": 2}},
     )
     framework._build_session_id = lambda prompts, sample_index, session_index=0: f"session-{sample_index}-{session_index}"
 
-    stats = await framework.generate_sequences(
-        _build_prompts(),
-        global_steps=7,
-        partition_id="train",
-        num_sessions=2,
-    )
+    await framework.generate_sequences(_build_prompts(global_steps=7))
 
-    assert stats["num_input_prompts"] == 2
-    assert stats["num_success_sessions"] == 4
-    assert stats["num_failed_sessions"] == 0
-    assert stats["num_success_outputs"] == 4
-    assert stats["num_failed_uids"] == 0
+    assert replay_buffer.adds == [
+        {
+            "partition_id": "train",
+            "items": {
+                "uid-0": {"global_steps": 7, "status": "running"},
+                "uid-1": {"global_steps": 7, "status": "running"},
+            },
+        }
+    ]
     assert fake_tq.batch_puts[0]["keys"] == ["uid-0_0_0"]
     assert fake_tq.batch_puts[1]["keys"] == ["uid-0_1_0"]
     assert fake_tq.batch_puts[2]["keys"] == ["uid-1_0_0"]
@@ -177,11 +185,12 @@ async def test_generate_sequences_keeps_successful_sessions_when_one_session_fai
     from verl.agent.framework.framework import OpenAICompatibleAgentFramework
 
     fake_tq = _FakeTransferQueue()
+    replay_buffer = _FakeReplayBuffer()
     monkeypatch.setattr(framework_module, "tq", fake_tq)
     runtime = _FakeSessionRuntime(
         {
-            "session-0-0": [_trajectory(uid="uid-0", session_id="session-0-0")],
-            "session-0-1": [_trajectory(uid="uid-0", session_id="session-0-1")],
+            "session-0-0": [_trajectory()],
+            "session-0-1": [_trajectory()],
         }
     )
 
@@ -193,21 +202,16 @@ async def test_generate_sequences_keeps_successful_sessions_when_one_session_fai
         session_runtime=runtime,
         agent_runner=agent_runner,
         reward_fn=lambda ctx: [1.0 for _ in ctx.trajectories],
+        replay_buffer=replay_buffer,
+        rollout_config={"n": 2, "val_kwargs": {"n": 2}},
     )
     framework._build_session_id = lambda prompts, sample_index, session_index=0: f"session-{sample_index}-{session_index}"
 
-    stats = await framework.generate_sequences(
-        _build_prompts(count=1),
-        global_steps=8,
-        partition_id="train",
-        num_sessions=2,
-    )
+    await framework.generate_sequences(_build_prompts(count=1, global_steps=8))
 
-    assert stats["num_success_sessions"] == 1
-    assert stats["num_failed_sessions"] == 1
-    assert stats["num_success_outputs"] == 1
-    assert stats["num_failed_uids"] == 0
-    assert "gateway failed once" in stats["failure_reasons"][0]
+    assert replay_buffer.adds == [
+        {"partition_id": "train", "items": {"uid-0": {"global_steps": 8, "status": "running"}}}
+    ]
     assert fake_tq.batch_puts[0]["keys"] == ["uid-0_0_0"]
     assert fake_tq.puts == [{"key": "uid-0", "partition_id": "train", "tag": {"status": "finished"}}]
     assert runtime.aborted_sessions == ["session-0-1"]
@@ -219,6 +223,7 @@ async def test_generate_sequences_marks_prompt_failure_when_all_sessions_fail(mo
     from verl.agent.framework.framework import OpenAICompatibleAgentFramework
 
     fake_tq = _FakeTransferQueue()
+    replay_buffer = _FakeReplayBuffer()
     monkeypatch.setattr(framework_module, "tq", fake_tq)
     runtime = _FakeSessionRuntime({"session-0-0": [], "session-0-1": []})
 
@@ -229,20 +234,17 @@ async def test_generate_sequences_marks_prompt_failure_when_all_sessions_fail(mo
         session_runtime=runtime,
         agent_runner=agent_runner,
         reward_fn=lambda ctx: [1.0 for _ in ctx.trajectories],
+        replay_buffer=replay_buffer,
+        rollout_config={"n": 1, "val_kwargs": {"n": 2}},
     )
     framework._build_session_id = lambda prompts, sample_index, session_index=0: f"session-{sample_index}-{session_index}"
 
-    stats = await framework.generate_sequences(
-        _build_prompts(count=1),
-        global_steps=9,
-        partition_id="val",
-        num_sessions=2,
-    )
+    with pytest.raises(RuntimeError, match="All rollouts failed at global_steps=9"):
+        await framework.generate_sequences(_build_prompts(count=1, global_steps=9, validate=True))
 
-    assert stats["num_success_sessions"] == 0
-    assert stats["num_failed_sessions"] == 2
-    assert stats["num_success_outputs"] == 0
-    assert stats["num_failed_uids"] == 1
+    assert replay_buffer.adds == [
+        {"partition_id": "val", "items": {"uid-0": {"global_steps": 9, "status": "running"}}}
+    ]
     assert fake_tq.batch_puts == []
     assert fake_tq.puts == [{"key": "uid-0", "partition_id": "val", "tag": {"status": "failure"}}]
 
@@ -253,8 +255,9 @@ async def test_generate_sequences_omits_rm_scores_when_reward_fn_is_none(monkeyp
     from verl.agent.framework.framework import OpenAICompatibleAgentFramework
 
     fake_tq = _FakeTransferQueue()
+    replay_buffer = _FakeReplayBuffer()
     monkeypatch.setattr(framework_module, "tq", fake_tq)
-    runtime = _FakeSessionRuntime({"session-0-0": [_trajectory(uid="uid-0", session_id="session-0-0")]})
+    runtime = _FakeSessionRuntime({"session-0-0": [_trajectory()]})
 
     async def agent_runner(*, raw_prompt, session, sample_index, tools_kwargs):
         return None
@@ -263,25 +266,24 @@ async def test_generate_sequences_omits_rm_scores_when_reward_fn_is_none(monkeyp
         session_runtime=runtime,
         agent_runner=agent_runner,
         reward_fn=None,
+        replay_buffer=replay_buffer,
+        rollout_config={"n": 1, "val_kwargs": {"n": 1}},
     )
     framework._build_session_id = lambda prompts, sample_index, session_index=0: f"session-{sample_index}-{session_index}"
 
-    await framework.generate_sequences(
-        _build_prompts(count=1),
-        global_steps=10,
-        partition_id="train",
-    )
+    await framework.generate_sequences(_build_prompts(count=1, global_steps=10))
 
     assert "rm_scores" not in fake_tq.batch_puts[0]["fields"].keys()
 
 
 @pytest.mark.asyncio
-async def test_generate_sequences_keeps_other_prompts_when_prompt_task_raises(monkeypatch):
+async def test_generate_sequences_keeps_other_prompts_when_prompt_task_raises(monkeypatch, caplog):
     from verl.agent.framework.framework import OpenAICompatibleAgentFramework
 
+    replay_buffer = _FakeReplayBuffer()
     runtime = _FakeSessionRuntime(
         {
-            "session-1-0": [_trajectory(uid="uid-1", session_id="session-1-0")],
+            "session-1-0": [_trajectory()],
         }
     )
 
@@ -289,6 +291,8 @@ async def test_generate_sequences_keeps_other_prompts_when_prompt_task_raises(mo
         session_runtime=runtime,
         agent_runner=lambda **_: None,
         reward_fn=lambda ctx: [1.0 for _ in ctx.trajectories],
+        replay_buffer=replay_buffer,
+        rollout_config={"n": 1, "val_kwargs": {"n": 1}},
     )
 
     async def fake_run_prompt_to_replay_buffer(*, sample_index, **kwargs):
@@ -304,16 +308,17 @@ async def test_generate_sequences_keeps_other_prompts_when_prompt_task_raises(mo
 
     monkeypatch.setattr(framework, "_run_prompt_to_replay_buffer", fake_run_prompt_to_replay_buffer)
 
-    stats = await framework.generate_sequences(
-        _build_prompts(count=2),
-        global_steps=11,
-        partition_id="train",
-        num_sessions=1,
-    )
+    caplog.set_level("INFO")
+    await framework.generate_sequences(_build_prompts(count=2, global_steps=11))
 
-    assert stats["num_input_prompts"] == 2
-    assert stats["num_success_sessions"] == 1
-    assert stats["num_failed_sessions"] == 1
-    assert stats["num_success_outputs"] == 1
-    assert stats["num_failed_uids"] == 1
-    assert "prompt 0 exploded" in stats["failure_reasons"][0]
+    assert replay_buffer.adds == [
+        {
+            "partition_id": "train",
+            "items": {
+                "uid-0": {"global_steps": 11, "status": "running"},
+                "uid-1": {"global_steps": 11, "status": "running"},
+            },
+        }
+    ]
+    assert "num_failed_uids=1" in caplog.text
+    assert "prompt 0 exploded" in caplog.text
