@@ -112,6 +112,12 @@ TRAINER=(
     trainer.total_training_steps=100
 )
 
+if [ "${DEVICE}" = "npu" ]; then
+    ROLLOUT+=(
+        +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode="FULL_DECODE_ONLY"
+    )
+fi
+
 EXTRA=(
     model_engine=veomni
 )
