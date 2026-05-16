@@ -122,8 +122,10 @@ class MegatronEngine(BaseEngine):
             self.mini_layer_topk_idx_list = []
         # Apply checkpoint patch for MoE models
         from verl.utils.device import is_cuda_available, is_npu_available
-
-        if is_npu_available:
+        import megatron.core
+        from megatron.core.package_info import __version__
+        
+        if is_npu_available and __version__ == "0.16.0":
             from verl.models.mcore.patch import apply_mtp_inference_patch
             apply_mtp_inference_patch()
         
