@@ -13,9 +13,8 @@ max_prompt_length=$((1024 * 2))
 max_response_length=$((1024 * 8))
 rollout_max_num_seqs=$((128))
 n_devices_per_node=$((8))
-use_dynamic_bsz=True
 actor_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 1))
-infer_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 1))
+infer_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 3))
 
 case "${DEVICE}" in
     gpu)
@@ -51,7 +50,6 @@ DATA=(
 )
 
 MODEL=(
-    +actor_rollout_ref.model.override_config.max_position_embeddings=32768
     actor_rollout_ref.model.path=/Qwen3-30B-MoE-merge
     actor_rollout_ref.model.enable_gradient_checkpointing=True
     actor_rollout_ref.model.use_remove_padding=True
@@ -70,7 +68,6 @@ ACTOR=(
     actor_rollout_ref.actor.use_torch_compile=False
     actor_rollout_ref.actor.veomni.fsdp_size=-1
     actor_rollout_ref.actor.veomni.expert_parallel_size=1
-    actor_rollout_ref.actor.use_dynamic_bsz=${use_dynamic_bsz}
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=${actor_ppo_max_token_len}
 )
 
@@ -80,7 +77,6 @@ ROLLOUT=(
     actor_rollout_ref.rollout.expert_parallel_size=8
     actor_rollout_ref.rollout.tensor_model_parallel_size=1
     actor_rollout_ref.rollout.name=$ENGINE
-    actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=${use_dynamic_bsz}
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${infer_ppo_max_token_len}
     actor_rollout_ref.rollout.gpu_memory_utilization=0.7
     actor_rollout_ref.rollout.enable_chunked_prefill=True
@@ -91,16 +87,14 @@ ROLLOUT=(
     actor_rollout_ref.rollout.enforce_eager=False
     actor_rollout_ref.rollout.free_cache_engine=True
     actor_rollout_ref.rollout.n=4
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_capture_sizes="[1, 8, 16, 32, 40, 48, 64, 96, 128, 256]"
     +actor_rollout_ref.rollout.engine_kwargs.vllm.mm_processor_cache_gb=0
-    +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_capture_sizes="[1, 8, 16, 32, 64, 128, 256]"
-    +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode="FULL_DECODE_ONLY"
 )
 
 REF=(
     actor_rollout_ref.ref.veomni.param_offload=True
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1
     actor_rollout_ref.ref.veomni.param_offload=True
-    actor_rollout_ref.ref.log_prob_use_dynamic_bsz=${use_dynamic_bsz}
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${infer_ppo_max_token_len}
 )
 
