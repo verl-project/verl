@@ -86,6 +86,66 @@ def _compute_response_info(batch: DataProto) -> dict[str, Any]:
     )
 
 
+def _compute_grpo_group_reward_metrics(
+    batch: DataProto,
+    sequence_reward: torch.Tensor,
+    non_aborted_mask: torch.Tensor,
+) -> dict[str, float]:
+    """Compute reward variance across rollout samples within each GRPO uid group.
+
+    For expanded intermediate trajectories, one rollout appears as multiple rows.
+    ``rollout_group_id`` is used to count each rollout once so intermediate rows
+    do not artificially change group statistics.
+    """
+    nt = batch.non_tensor_batch or {}
+    uids = nt.get("uid")
+    if uids is None or len(uids) != len(sequence_reward):
+        return {}
+
+    rewards = sequence_reward.detach().float().cpu().numpy()
+    valid = non_aborted_mask.detach().cpu().numpy().astype(bool)
+    roles = np.asarray(nt.get("trajectory_role", [None] * len(rewards)), dtype=object)
+    rollout_group_ids = nt.get("rollout_group_id")
+    if rollout_group_ids is not None and len(rollout_group_ids) == len(rewards):
+        rollout_group_ids = np.asarray(rollout_group_ids)
+    else:
+        rollout_group_ids = None
+
+    group_rewards: dict[str, list[float]] = defaultdict(list)
+    seen_rollouts: set[tuple[str, int | str]] = set()
+    for i, uid in enumerate(uids):
+        if not valid[i] or roles[i] == "padding":
+            continue
+        uid_key = str(uid)
+        if rollout_group_ids is not None:
+            rollout_id_raw = rollout_group_ids[i]
+            try:
+                rollout_id: int | str = int(rollout_id_raw)
+            except (TypeError, ValueError):
+                rollout_id = str(rollout_id_raw)
+            if isinstance(rollout_id, int) and rollout_id < 0:
+                continue
+        else:
+            rollout_id = i
+        key = (uid_key, rollout_id)
+        if key in seen_rollouts:
+            continue
+        seen_rollouts.add(key)
+        group_rewards[uid_key].append(float(rewards[i]))
+
+    if not group_rewards:
+        return {
+            "grpo/group_reward_std_mean": float("nan"),
+            "grpo/group_reward_std_nonzero_frac": float("nan"),
+        }
+
+    stds = np.asarray([float(np.std(vals)) if len(vals) > 1 else 0.0 for vals in group_rewards.values()])
+    return {
+        "grpo/group_reward_std_mean": float(np.mean(stds)),
+        "grpo/group_reward_std_nonzero_frac": float(np.mean(stds > 1e-8)),
+    }
+
+
 def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str, Any]:
     """
     Computes various metrics from a batch of data for PPO training.
@@ -166,6 +226,8 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
         logger.warning("Response mask is all False, returning default return metrics")
         returns_mean = returns_max = returns_min = float("nan")
 
+    grpo_group_reward_metrics = _compute_grpo_group_reward_metrics(batch, sequence_reward, non_aborted_mask)
+
     # Aborted samples and non-aborted response length statistics
     # response_length_non_aborted/*: statistics computed on non-aborted samples only
     aborted_ratio = torch.mean(aborted_mask.float()).detach().item()
@@ -228,6 +290,7 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
         "critic/returns/mean": returns_mean,
         "critic/returns/max": returns_max,
         "critic/returns/min": returns_min,
+        **grpo_group_reward_metrics,
         **critic_value_metrics,
         # response length
         "response_length/mean": torch.mean(response_length).detach().item(),

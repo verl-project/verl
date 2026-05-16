@@ -938,8 +938,8 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         roles = nt.get("trajectory_role")
 
         # Fast path: no intermediate rows (e.g. rollouts all finished in one
-        # turn). Fall back to the standard advantage pipeline, followed only
-        # by the optional 1/T_rollout normalization.
+        # turn). Fall back to the standard advantage pipeline; optional rollout
+        # weight normalization is disabled by default.
         if roles is None:
             saved_reward_tensor = self.reward_tensor
             saved_reward_extra_infos_dict = self.reward_extra_infos_dict
@@ -956,14 +956,14 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             finally:
                 self.reward_tensor = saved_reward_tensor
                 self.reward_extra_infos_dict = saved_reward_extra_infos_dict
-            if bool(self.config.async_training.get("normalize_rollout_weight", True)):
+            if bool(self.config.async_training.get("normalize_rollout_weight", False)):
                 batch = scatter_advantage_to_intermediate_and_normalize(batch, normalize_rollout_weight=True)
             return batch
 
         group_ids = nt.get("rollout_group_id")
         if group_ids is None:
             batch = super()._fit_compute_advantage(batch)
-            if bool(self.config.async_training.get("normalize_rollout_weight", True)):
+            if bool(self.config.async_training.get("normalize_rollout_weight", False)):
                 batch = scatter_advantage_to_intermediate_and_normalize(batch, normalize_rollout_weight=True)
             return batch
 
@@ -1027,7 +1027,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             if not self.config.algorithm.use_kl_in_reward:
                 batch.batch["token_level_rewards"] = batch.batch["rm_scores"]
 
-        normalize_rollout_weight = bool(self.config.async_training.get("normalize_rollout_weight", True))
+        normalize_rollout_weight = bool(self.config.async_training.get("normalize_rollout_weight", False))
         batch = scatter_advantage_to_intermediate_and_normalize(
             batch,
             normalize_rollout_weight=normalize_rollout_weight,
