@@ -346,32 +346,6 @@ class vLLMHttpServer:
         if self.config.enable_rollout_routing_replay:
             args.update({"enable_return_routed_experts": True})
 
-        # External Mooncake KV store offload: forward kv_transfer_config to
-        # vLLM if rollout.kv_store.enable is set. The connector itself decides
-        # how to talk to the Mooncake master (config_path / env). On every
-        # weight update we drive a hard reset via reset_prefix_cache(
-        # reset_connector=True), which makes vLLM call
-        # MooncakeStoreConnector.reset_cache() -> store.remove_all(force=True).
-        # When no connector is attached the scheduler treats reset_connector=True
-        # as a no-op success, so we can pass it unconditionally on the reset
-        # paths and avoid carrying state into the adapter.
-        kv_store_cfg = getattr(self.config, "kv_store", None)
-        if kv_store_cfg and kv_store_cfg.get("enable", False):
-            extra_config = dict(kv_store_cfg.get("extra_config", {}) or {})
-            config_path = kv_store_cfg.get("config_path")
-            if config_path:
-                # MooncakeStoreWorker reads MOONCAKE_CONFIG_PATH from env;
-                # vLLM serve also accepts kv_connector_extra_config so we
-                # pass both for clarity. The env var is set by the per-run
-                # master wrapper script before `ray job submit`.
-                extra_config.setdefault("mooncake_config_path", config_path)
-            kv_transfer_config = {
-                "kv_connector": kv_store_cfg.get("kv_connector", "MooncakeStoreConnector"),
-                "kv_role": kv_store_cfg.get("kv_role", "kv_both"),
-                "kv_connector_extra_config": extra_config,
-            }
-            args["kv_transfer_config"] = json.dumps(kv_transfer_config)
-
         server_args = ["serve", self.model_config.local_path] + build_cli_args_from_config(args)
 
         if self.replica_rank == 0:
@@ -587,9 +561,10 @@ class vLLMHttpServer:
         elif self.rollout_mode == RolloutMode.COLOCATED:
             # Directly call engine to wake up without sync weights.
             await self.engine.wake_up(tags=self._get_wake_up_tags())
-            # reset_connector=True is a no-op when no connector is attached
-            # (scheduler treats it as success), so we don't need to gate this
-            # behind a kv_store-enabled flag.
+            # reset_connector=True drops any attached external KV store
+            # (e.g. MooncakeStoreConnector) whose entries were computed
+            # against the previous weights. No-op success when no connector
+            # is configured (vLLM scheduler treats it as such).
             await self.engine.reset_prefix_cache(reset_connector=True)
         elif self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip wake_up in standalone mode")
@@ -660,14 +635,15 @@ class vLLMHttpServer:
                 # 1. Set engine to paused state (blocks new generate calls)
                 # 2. Abort all in-flight requests
                 # 3. Wait for requests to drain
-                # 4. Clear prefix and mm caches if clear_cache=True; extend
-                #    step 4 to also clear the external store (e.g. Mooncake
-                #    master) when reset_connector=True. No-op success when
-                #    no connector is attached.
+                # 4. Clear prefix and mm caches if clear_cache=True.
+                #    EngineCore._reset_caches defaults reset_connector=True
+                #    on this path, so any attached external KV store (e.g.
+                #    MooncakeStoreConnector) is invalidated along with the
+                #    local prefix cache — RL-correct hard-reset at every
+                #    weight update boundary, no extra kwargs needed.
                 await self.engine.pause_generation(
                     wait_for_inflight_requests=False,
                     clear_cache=reset_prefix_cache,
-                    reset_connector=reset_prefix_cache,
                 )
             else:
                 # Take an atomic snapshot to avoid race conditions with the vLLM engine thread
