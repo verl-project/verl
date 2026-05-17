@@ -1143,6 +1143,8 @@ def agg_loss(
     batch_num_tokens: Optional[int] = None,
     global_batch_size: Optional[int] = None,
     loss_scale_factor: Optional[int] = None,
+    rollout_loss_weights: Optional[torch.Tensor] = None,
+    global_rollout_count: Optional[int] = None,
 ):
     """
     Aggregate the loss across global batch to ensure the loss is invariant to fsdp/megatron parallelism.
@@ -1160,6 +1162,8 @@ def agg_loss(
         global_batch_size: global batch size
         loss_scale_factor: scale factor for "seq-mean-token-sum-norm" mode. If None, uses loss_mask.shape[-1].
             Set this to a constant value to ensure consistent normalization throughout training.
+        rollout_loss_weights: per-token weights where each rollout's valid tokens sum to 1.
+        global_rollout_count: number of valid rollout groups in the global batch.
 
     Returns:
         loss: `a scalar torch.Tensor`
@@ -1193,6 +1197,16 @@ def agg_loss(
                 raise ValueError("global_batch_size is required when dp_size > 1")
             global_batch_size = seq_mask.sum()
         loss = verl_F.masked_sum(seq_losses, seq_mask) / global_batch_size * dp_size  # seq-mean
+    elif loss_agg_mode == "rollout-mean-token-mean":
+        if rollout_loss_weights is None:
+            raise ValueError("rollout_loss_weights is required for rollout-mean-token-mean")
+        if global_rollout_count is None:
+            if dp_size > 1:
+                raise ValueError("global_rollout_count is required when dp_size > 1")
+            row_has_tokens = torch.sum(loss_mask, dim=-1) > 0
+            global_rollout_count = row_has_tokens.sum()
+        weights = rollout_loss_weights.to(loss_mat.device, dtype=loss_mat.dtype)
+        loss = torch.sum(loss_mat * loss_mask.to(loss_mat.dtype) * weights) / global_rollout_count * dp_size
     else:
         raise ValueError(f"Invalid loss_agg_mode: {loss_agg_mode}")
 

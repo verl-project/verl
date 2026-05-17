@@ -926,6 +926,7 @@ def zero_out_padding_rows(data_proto: DataProto, pad_size: int) -> DataProto:
         "rm_scores",
         "token_level_rewards",
         "token_level_scores",
+        "rollout_loss_weights",
     )
     for k in fields_to_zero:
         if k in data_proto.batch.keys():
@@ -967,11 +968,13 @@ def scatter_advantage_to_intermediate_and_normalize(
        rows sharing the same ``rollout_group_id`` using each row's own
        ``response_mask``. This preserves per-rollout GRPO advantages after
        prompt-level group normalization.
-    2. Optionally multiplies every row in a rollout trajectory by
-       ``1 / T_rollout`` where ``T_rollout`` is the total number of valid
-       response tokens across that trajectory's final + intermediate rows. Under
-       ``loss_agg_mode="token-mean"`` this yields equal per-rollout
-       contribution to the final loss regardless of how many turns it has.
+    2. Builds ``rollout_loss_weights`` with per-token weight ``1 / T_rollout``
+       where ``T_rollout`` is the total number of valid response tokens across
+       that trajectory's final + intermediate rows. Actor loss can use these
+       weights with ``loss_agg_mode="rollout-mean-token-mean"`` so each rollout
+       contributes equally while keeping all intermediate rows.
+    3. Optionally also multiplies advantages/returns by ``1 / T_rollout`` for
+       the legacy token-mean approximation.
     """
     if "advantages" not in data_proto.batch.keys():
         return data_proto
@@ -1037,38 +1040,45 @@ def scatter_advantage_to_intermediate_and_normalize(
                 ret[i] = ret_scalars[gid].to(ret.device, dtype=ret.dtype) * row_mask.to(ret.device, dtype=ret.dtype)
 
     # ------------------------------------------------------------------
-    # (2) Rollout-level weight normalization: advantage /= T_rollout.
+    # (2) Rollout-level loss weights: token weight = 1 / T_rollout.
     # ------------------------------------------------------------------
-    if normalize_rollout_weight:
-        if "response_mask" not in data_proto.batch.keys():
-            logger.warning("[scatter_advantage] response_mask missing; skipping 1/T_rollout normalization")
-        else:
-            response_mask = data_proto.batch["response_mask"]
-            per_row_tokens = response_mask.to(torch.float32).sum(dim=-1)
-            per_row_tokens_np = per_row_tokens.detach().cpu().numpy()
+    if "response_mask" not in data_proto.batch.keys():
+        logger.warning("[scatter_advantage] response_mask missing; skipping rollout loss weights")
+    else:
+        response_mask = data_proto.batch["response_mask"]
+        per_row_tokens = response_mask.to(torch.float32).sum(dim=-1)
+        per_row_tokens_np = per_row_tokens.detach().cpu().numpy()
 
-            # Aggregate token count per rollout trajectory.
-            trajectory_tokens: dict[int, float] = {}
-            for i in range(n):
-                gid = int(group_ids_np[i])
-                if gid < 0:
-                    continue
-                trajectory_tokens[gid] = trajectory_tokens.get(gid, 0.0) + float(per_row_tokens_np[i])
+        # Aggregate token count per rollout trajectory.
+        trajectory_tokens: dict[int, float] = {}
+        for i in range(n):
+            gid = int(group_ids_np[i])
+            if gid < 0:
+                continue
+            trajectory_tokens[gid] = trajectory_tokens.get(gid, 0.0) + float(per_row_tokens_np[i])
 
-            # Build scale[i] = 1 / T_rollout_of(i).
-            adv_dtype = data_proto.batch["advantages"].dtype
-            scale = torch.empty(n, dtype=adv_dtype)
-            for i in range(n):
-                gid = int(group_ids_np[i])
-                t = trajectory_tokens.get(gid, 0.0)
-                scale[i] = (1.0 / t) if t > 0 else 0.0
-            scale = scale.unsqueeze(-1)
+        weight_dtype = data_proto.batch["advantages"].dtype
+        scale = torch.empty(n, dtype=weight_dtype)
+        for i in range(n):
+            gid = int(group_ids_np[i])
+            t = trajectory_tokens.get(gid, 0.0)
+            scale[i] = (1.0 / t) if t > 0 else 0.0
+        scale = scale.unsqueeze(-1).to(response_mask.device)
+        data_proto.batch["rollout_loss_weights"] = response_mask.to(weight_dtype) * scale
 
-            data_proto.batch["advantages"] = data_proto.batch["advantages"] * scale
+        data_proto.meta_info["fully_async/rollout_weight/num_groups"] = len(trajectory_tokens)
+        data_proto.meta_info["fully_async/rollout_weight/total_tokens"] = float(sum(trajectory_tokens.values()))
+
+        # Legacy option: also shrink advantages/returns for token-mean loss.
+        if normalize_rollout_weight:
+            data_proto.batch["advantages"] = data_proto.batch["advantages"] * scale.to(
+                data_proto.batch["advantages"].device,
+                dtype=data_proto.batch["advantages"].dtype,
+            )
             if "returns" in data_proto.batch.keys():
-                data_proto.batch["returns"] = data_proto.batch["returns"] * scale
-
-            data_proto.meta_info["fully_async/rollout_weight/num_groups"] = len(trajectory_tokens)
-            data_proto.meta_info["fully_async/rollout_weight/total_tokens"] = float(sum(trajectory_tokens.values()))
+                data_proto.batch["returns"] = data_proto.batch["returns"] * scale.to(
+                    data_proto.batch["returns"].device,
+                    dtype=data_proto.batch["returns"].dtype,
+                )
 
     return data_proto

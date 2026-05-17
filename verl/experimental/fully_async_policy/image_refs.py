@@ -19,6 +19,8 @@ from __future__ import annotations
 import hashlib
 import io
 import logging
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Any
 
@@ -35,6 +37,7 @@ MULTI_MODAL_DATA_KEY = "multi_modal_data"
 MULTI_MODAL_INPUTS_KEY = "multi_modal_inputs"
 MULTI_MODAL_REFS_KEY = "multi_modal_refs"
 IMAGE_BANK_REF_KEY = "image_bank_ref"
+IMAGE_REF_PROCESS_WORKERS = max(1, int(os.getenv("IMAGE_REF_PROCESS_WORKERS", "8")))
 
 
 @dataclass(frozen=True)
@@ -168,8 +171,7 @@ def _payload_as_dict(payload: ProcessedImagePayload) -> dict[str, Any]:
 
 def _add_images_to_bank(
     multi_modal_data: dict[str, Any] | None,
-    image_bank: dict[str, ProcessedImagePayload],
-    processor: Any,
+    image_inputs: dict[str, tuple[Image.Image, int, str, tuple[int, int], str]],
 ) -> dict[str, list[str]]:
     refs = empty_multi_modal_refs()
     if not multi_modal_data:
@@ -180,19 +182,52 @@ def _add_images_to_bank(
     images = multi_modal_data.get("images") or []
     for image in images:
         pil_image, raw_data, mode, size, sha1, image_id = _canonicalize_image(image)
-        if image_id not in image_bank:
-            inputs = _process_image(processor, pil_image)
-            image_bank[image_id] = ProcessedImagePayload(
-                image_id=image_id,
-                inputs=inputs,
-                mode=mode,
-                size=size,
-                sha1=sha1,
-                raw_bytes=len(raw_data),
-                processed_bytes=_tensor_nbytes(inputs),
-            )
+        image_inputs.setdefault(image_id, (pil_image, len(raw_data), mode, size, sha1))
         refs["image_ids"].append(image_id)
     return refs
+
+
+def _process_image_payload(
+    image_id: str,
+    canonical: tuple[Image.Image, int, str, tuple[int, int], str],
+    processor: Any,
+) -> ProcessedImagePayload:
+    pil_image, raw_bytes, mode, size, sha1 = canonical
+    inputs = _process_image(processor, pil_image)
+    return ProcessedImagePayload(
+        image_id=image_id,
+        inputs=inputs,
+        mode=mode,
+        size=size,
+        sha1=sha1,
+        raw_bytes=raw_bytes,
+        processed_bytes=_tensor_nbytes(inputs),
+    )
+
+
+def _process_image_bank_parallel(
+    image_inputs: dict[str, tuple[Image.Image, int, str, tuple[int, int], str]],
+    processor: Any,
+) -> dict[str, ProcessedImagePayload]:
+    if not image_inputs:
+        return {}
+    workers = min(IMAGE_REF_PROCESS_WORKERS, len(image_inputs))
+    if workers <= 1:
+        return {
+            image_id: _process_image_payload(image_id, canonical, processor)
+            for image_id, canonical in image_inputs.items()
+        }
+
+    image_bank: dict[str, ProcessedImagePayload] = {}
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="image-ref-process") as executor:
+        futures = {
+            executor.submit(_process_image_payload, image_id, canonical, processor): image_id
+            for image_id, canonical in image_inputs.items()
+        }
+        for future in as_completed(futures):
+            payload = future.result()
+            image_bank[payload.image_id] = payload
+    return image_bank
 
 
 def _strip_inline_images(value: Any) -> Any:
@@ -225,7 +260,7 @@ def attach_image_refs_to_dataproto(
     """
     nt = dict(data_proto.non_tensor_batch or {})
     n_rows = len(data_proto)
-    image_bank: dict[str, ProcessedImagePayload] = {}
+    image_inputs: dict[str, tuple[Image.Image, int, str, tuple[int, int], str]] = {}
 
     final_multi_modal_data = nt.get(MULTI_MODAL_DATA_KEY)
     row_refs: list[dict[str, list[str]]] = []
@@ -233,7 +268,7 @@ def attach_image_refs_to_dataproto(
         mm_data = None
         if final_multi_modal_data is not None and row_idx < len(final_multi_modal_data):
             mm_data = final_multi_modal_data[row_idx]
-        row_refs.append(_add_images_to_bank(mm_data, image_bank, processor))
+        row_refs.append(_add_images_to_bank(mm_data, image_inputs))
     total_image_refs = sum(len(refs["image_ids"]) for refs in row_refs)
 
     if INTERMEDIATE_TRAJECTORIES_KEY in nt:
@@ -246,13 +281,15 @@ def attach_image_refs_to_dataproto(
             new_list = []
             for traj in raw_list:
                 traj = dict(traj)
-                traj_refs = _add_images_to_bank(traj.get(MULTI_MODAL_DATA_KEY), image_bank, processor)
+                traj_refs = _add_images_to_bank(traj.get(MULTI_MODAL_DATA_KEY), image_inputs)
                 total_image_refs += len(traj_refs["image_ids"])
                 traj[MULTI_MODAL_REFS_KEY] = traj_refs
                 traj.pop(MULTI_MODAL_DATA_KEY, None)
                 new_list.append(traj)
             new_interm_col[row_idx] = new_list
         nt[INTERMEDIATE_TRAJECTORIES_KEY] = new_interm_col
+
+    image_bank = _process_image_bank_parallel(image_inputs, processor)
 
     nt[MULTI_MODAL_REFS_KEY] = object_array(row_refs)
     nt.pop(MULTI_MODAL_DATA_KEY, None)

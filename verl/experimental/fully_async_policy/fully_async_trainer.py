@@ -779,12 +779,16 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         )
         pad_size = int(batch.meta_info.get("fully_async/pad/num_padding_rows", 0) or 0)
         valid_batch_size = max(len(batch) - pad_size, 1)
+        global_rollout_count = int(
+            batch.meta_info.get("fully_async/rollout_weight/num_groups", valid_batch_size) or valid_batch_size
+        )
         expanded_mini_batch_size = len(batch)
         tu.assign_non_tensor(
             batch_td,
             calculate_entropy=calculate_entropy,
             distillation_use_topk=distillation_use_topk,
             global_batch_size=valid_batch_size,
+            global_rollout_count=global_rollout_count,
             mini_batch_size=expanded_mini_batch_size,
             epochs=self.config.actor_rollout_ref.actor.ppo_epochs,
             seed=self.config.actor_rollout_ref.actor.data_loader_seed,

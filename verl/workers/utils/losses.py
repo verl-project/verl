@@ -66,6 +66,7 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     config.global_batch_info["batch_num_tokens"] = data["batch_num_tokens"]
     config.global_batch_info["global_batch_size"] = data["global_batch_size"]
     config.global_batch_info["loss_scale_factor"] = config.loss_scale_factor
+    config.global_batch_info["global_rollout_count"] = tu.get_non_tensor_data(data, "global_rollout_count", None)
 
     # assumes that if any of the global batch info is set, the policy_loss_fn will
     # normalize using dp_size/global_bsz/global_token; in this case, metric aggregation should be SUM
@@ -84,6 +85,8 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
 
     # select fields and convert to padded tensor
     fields = ["response_mask", "old_log_probs", "advantages"]
+    if "rollout_loss_weights" in data:
+        fields.append("rollout_loss_weights")
     if "rollout_is_weights" in data:
         fields.append("rollout_is_weights")
     if "ref_log_prob" in data:
@@ -94,7 +97,9 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     # compute policy loss
     old_log_prob = data["old_log_probs"]
     advantages = data["advantages"]
+    rollout_loss_weights = data.get("rollout_loss_weights", None)
     rollout_is_weights = data.get("rollout_is_weights", None)
+    config.global_batch_info["rollout_loss_weights"] = rollout_loss_weights
 
     loss_agg_mode = config.loss_agg_mode
 
