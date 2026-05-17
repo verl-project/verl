@@ -85,6 +85,7 @@ from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference
 from verl.utils import hf_processor, hf_tokenizer
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
+from verl.utils.checkpoint.lora_metadata import save_lora_train_meta
 from verl.utils.config import omega_conf_to_dataclass, validate_config
 from verl.utils.dataset.rl_dataset import collate_fn
 from verl.utils.debug import marked_timer
@@ -811,6 +812,7 @@ class PPOTrainer:
         self.actor_rollout_wg.save_checkpoint(
             actor_local_path, actor_remote_path, self.global_steps, max_ckpt_to_keep=max_actor_ckpt_to_keep
         )
+        save_lora_train_meta(self.config.actor_rollout_ref.model, actor_local_path, actor_remote_path)
 
         # save critic
         if self.use_critic:
