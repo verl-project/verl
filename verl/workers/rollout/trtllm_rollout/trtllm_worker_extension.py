@@ -54,6 +54,7 @@ class WorkerExtension(TrtllmWorkerExtension):
 
     @control_action_decorator
     def update_weights(self, ipc_handles: Optional[dict] = None):
+        print(f"RAY_EXECUTOR_DEBUG: WorkerExtension.update_weights ENTER ipc_handles={'set' if ipc_handles is not None else 'None'}", flush=True)
         try:
             if not hasattr(self.engine.model_engine.model, "first_pre_reload_weights"):
                 for module in self.engine.model_engine.model.modules():
@@ -107,6 +108,7 @@ class WorkerExtension(TrtllmWorkerExtension):
                             "device",
                             "float32",
                             "float16",
+                            "bfloat16",
                             "int32",
                             "int64",
                             "int16",

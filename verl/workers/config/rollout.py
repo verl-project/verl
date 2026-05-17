@@ -287,6 +287,8 @@ class RolloutConfig(BaseConfig):
 
     qat: Optional[dict] = None
 
+    force_dynamic_quantization: bool = False
+
     def __post_init__(self):
         """Validate the rollout config"""
         # Deprecation warning for mode field - only async mode is supported

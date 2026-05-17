@@ -154,6 +154,25 @@ class TRTLLMHttpServer:
             else:
                 raise ValueError(f"Currently only support fp8 quantization, got: {quantization}")
 
+        # NVFP4 QAT — actor (Megatron+modelopt) emits real-quantized NVFP4 weights;
+        # rollout must build NVFP4-packed linears to receive them.
+        qat_cfg = getattr(self.config, "qat", None)
+        if qat_cfg is not None and qat_cfg.get("enable", False):
+            import json as _json
+            _quant_json_path = qat_cfg.get("quantization_config_path")
+            with open(_quant_json_path) as _f:
+                _quant_json = _json.load(_f)
+            _gs = (_quant_json.get("config_groups", {}).get("group_0", {})
+                   .get("weights", {}) or {}).get("group_size", 16)
+            engine_kwargs.setdefault("model_kwargs", {})["quantization_config"] = {
+                "quant_method": "nvfp4",
+                "group_size": _gs,
+                "modules_to_not_convert": _quant_json.get("ignore", []) or ["lm_head"],
+            }
+            if self.config.load_format != "dummy":
+                raise ValueError("NVFP4 QAT rollout requires load_format=dummy")
+            logger.info(f"NVFP4 QAT injected: group_size={_gs}")
+
         llm_kwargs = {
             "model": self.model_config.local_path,
             "backend": "pytorch",
@@ -220,6 +239,13 @@ class TRTLLMHttpServer:
                 }
             )
 
+        # Experimental: force TRT-LLM to dynamically re-quantize incoming weights
+        # at reload time. Reads actor_rollout_ref.rollout.force_dynamic_quantization.
+        _fdq = bool(getattr(self.config, "force_dynamic_quantization", False))
+        if _fdq:
+            llm_kwargs["force_dynamic_quantization"] = True
+            logger.info("force_dynamic_quantization=True set on TRT-LLM rollout")
+
         self.llm = await AsyncLLM(**llm_kwargs)
         import inspect
 
@@ -285,6 +311,22 @@ class TRTLLMHttpServer:
                 sampling_params=trt_llm_sampling_params,
             )
         token_ids = outputs.outputs[0].token_ids
+        try:
+            import sys as _dbg_sys
+            _tids = list(token_ids) if token_ids is not None else []
+            if _tids:
+                _mn = min(_tids); _mx = max(_tids)
+                _bad = _mx >= 200000 or _mn < 0
+                print(
+                    f"RAY_EXECUTOR_DEBUG: rollout.generate.token_ids: "
+                    f"len={len(_tids)} min={_mn} max={_mx} bad={_bad} "
+                    f"first5={_tids[:5]} last5={_tids[-5:]} "
+                    f"finish_reason={outputs.outputs[0].finish_reason}",
+                    file=_dbg_sys.stderr, flush=True,
+                )
+        except Exception as _e:
+            import sys as _dbg_sys
+            print(f"RAY_EXECUTOR_DEBUG: rollout.generate.probe_error: {_e}", file=_dbg_sys.stderr, flush=True)
         log_probs = None
         if outputs.outputs[0].logprobs is not None:
             # When logprobs=1, TRT-LLM returns only the sampled token's logprob at each position

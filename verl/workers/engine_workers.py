@@ -673,6 +673,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         peft_config=None, so the rollout receives a standard weight update.
         """
 
+        print(f"RAY_EXECUTOR_DEBUG: engine_workers.update_weights ENTER global_steps={global_steps}", flush=True)
         # 0. send_weights only for async training with disaggregated trainer and rollout
         if self.config.rollout.checkpoint_engine.backend != "naive":
             per_tensor_param, _ = self.actor.engine.get_per_tensor_param()
@@ -706,9 +707,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 per_tensor_param_base, peft_config=peft_config, base_sync_done=False, global_steps=global_steps
             )
 
+        print(f"RAY_EXECUTOR_DEBUG: engine_workers.before_rollout_update_weights global_steps={global_steps}", flush=True)
         await self.rollout.update_weights(
             per_tensor_param, peft_config=peft_config, base_sync_done=True, global_steps=global_steps
         )
+        print(f"RAY_EXECUTOR_DEBUG: engine_workers.after_rollout_update_weights global_steps={global_steps}", flush=True)
 
         log_gpu_memory_usage("After update_weights", logger=logger)
 

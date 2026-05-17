@@ -262,7 +262,10 @@ class AsyncTRTLLMHttpAdapter:
         Returns:
             Dict[str, Any]: Server response containing update status
         """
-        return await self._make_async_request("update_weights", {"weights": weights})
+        print(f"RAY_EXECUTOR_DEBUG: AsyncTRTLLMHttpAdapter.update_weights ENTER n_weights={len(weights) if weights else 0}", flush=True)
+        result = await self._make_async_request("update_weights", {"weights": weights})
+        print(f"RAY_EXECUTOR_DEBUG: AsyncTRTLLMHttpAdapter.update_weights EXIT", flush=True)
+        return result
 
 
 class ServerAdapter(BaseRollout):
@@ -300,6 +303,24 @@ class ServerAdapter(BaseRollout):
             }
             fp8_block_quant_kwargs = dict(FP8_BLOCK_QUANT_KWARGS)
             model_config.hf_config.quantization_config = fp8_block_quant_kwargs
+
+        # NVFP4 QAT — mirror actor's quant config onto hf_config so ServerAdapter
+        # weight-sync sees NVFP4 metadata (same role as the FP8 block above).
+        qat_cfg = config.get("qat", None)
+        if qat_cfg is not None and qat_cfg.get("enable", False):
+            qat_path = qat_cfg.get("quantization_config_path")
+            if qat_path:
+                import json as _json
+                with open(qat_path) as _f:
+                    _q = _json.load(_f)
+                _gs = (_q.get("config_groups", {}).get("group_0", {})
+                       .get("weights", {}) or {}).get("group_size", 16)
+                model_config.hf_config.quantization_config = {
+                    "quant_method": "nvfp4",
+                    "group_size": _gs,
+                    "modules_to_not_convert": _q.get("ignore", []) or ["lm_head"],
+                }
+
         super().__init__(config, model_config, device_mesh)
         self._adapter = None
         self.hybrid_device_mesh = None

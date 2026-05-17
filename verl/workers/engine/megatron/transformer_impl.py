@@ -730,10 +730,12 @@ class MegatronEngine(BaseEngine):
                 )
 
         # QAT: process weights through QATWeightExporter for quantized weight sync to vLLM
+        print(f"RAY_EXECUTOR_DEBUG: transformer_impl.get_per_tensor_param _qat_enabled={self._qat_enabled} type={type(per_tensor_param).__name__}", flush=True)
         if self._qat_enabled:
             from verl.utils.modelopt import export_qat_weights
 
             per_tensor_param = export_qat_weights(per_tensor_param, self.module, self._qat_config.mode, self.bridge)
+            print(f"RAY_EXECUTOR_DEBUG: transformer_impl.get_per_tensor_param post_qat type={type(per_tensor_param).__name__}", flush=True)
 
         return per_tensor_param, peft_config
 
