@@ -392,10 +392,10 @@ class AgentLoopWorker:
             self.function_tools = []
 
         # Load custom agent loop implementations from config path
-        # Expose tokenizer on server_manager so that @rollout_trace_op's
-        # add_token2text can decode prompt_ids / token_ids into readable text.
-        if hasattr(self, "server_manager") and self.server_manager is not None:
-            self.server_manager.tokenizer = self.tokenizer
+        # Expose tokenizer on the LLM client so @rollout_trace_op can decode
+        # prompt_ids / token_ids into readable text for generate() spans.
+        if self.llm_client is not None:
+            self.llm_client.tokenizer = self.tokenizer
 
         agent_loop_config_path = self.rollout_config.agent.agent_loop_config_path
         if agent_loop_config_path:
