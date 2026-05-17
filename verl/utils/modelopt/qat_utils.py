@@ -17,16 +17,10 @@
 
 
 def patch_provider_for_qat(provider):
-    """Patch the Megatron-Bridge provider to support QAT quantized layers."""
-    from megatron.bridge.models.conversion.param_mapping import AutoMapping
-    from megatron.bridge.models.gpt_provider import quantization_layer_spec
+    """Configure a Megatron-Bridge provider to use QAT quantized layers."""
+    from megatron.bridge.models.gpt_provider import modelopt_transformer_layer_spec
 
-    from verl.utils.modelopt.megatron_qat_patch import apply_qat_patch
-
-    provider.transformer_layer_spec = quantization_layer_spec
-    apply_qat_patch()
-    AutoMapping.register_module_type("QuantColumnParallelLinear", "column")
-    AutoMapping.register_module_type("QuantRowParallelLinear", "row")
+    provider.transformer_layer_spec = modelopt_transformer_layer_spec
 
 
 def _get_qat_field(qat_config, key, default=None):
