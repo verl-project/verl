@@ -137,7 +137,8 @@ class AtroposAgentLoopManager(AgentLoopBase):
         # Generate response using the LLM server manager
         # Note: The server_manager is an LLMServerClient
         response = await self.server_manager.generate(
-            prompt_ids, 
+            uuid.uuid4().hex,
+            prompt_ids=prompt_ids,
             sampling_params=sampling_params
         )
         
