@@ -28,7 +28,6 @@ from megatron.core import dist_checkpointing, mpu, tensor_parallel
 from megatron.core.dist_checkpointing.mapping import ShardedObject
 from megatron.core.transformer.enums import AttnBackend
 from packaging import version
-from torch.distributed.checkpoint import FileSystemWriter
 from transformers import GenerationConfig
 
 from verl.models.weight_loader_registry import get_weight_saver
@@ -409,13 +408,11 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             metadata=self._build_sharded_state_dict_metadata(),
         )
 
-        from megatron.bridge.training.checkpointing import (
-            _load_fsdp_dtensor_base_checkpoint as bridge_load_fsdp_dtensor_base_checkpoint,
-        )
+        from megatron.bridge.training.checkpointing import load_fsdp_dtensor_checkpoint
 
         checkpoint_model = getattr(self.model[0], "module", self.model[0])
         sharded_state_dict["_model"] = [checkpoint_model]
-        state_dict, _, _, _ = bridge_load_fsdp_dtensor_base_checkpoint(
+        state_dict, _, _, _ = load_fsdp_dtensor_checkpoint(
             load_dir=dist_checkpoint_path,
             ckpt_cfg=self.checkpoint_config,
             rank0=False,
@@ -463,15 +460,15 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             metadata=self._build_sharded_state_dict_metadata(),
         )
 
-        from megatron.bridge.training.checkpointing import (
-            preprocess_fsdp_dtensor_state_dict as bridge_preprocess_fsdp_dtensor_state_dict,
-        )
+        from megatron.bridge.training.checkpointing import save_fsdp_dtensor_checkpoint
 
         checkpoint_model = getattr(self.model[0], "module", self.model[0])
-        state_dict = bridge_preprocess_fsdp_dtensor_state_dict(self.transformer_config, state_dict, checkpoint_model)
-        storage_writer = FileSystemWriter(dist_checkpoint_path)
-        torch.distributed.checkpoint.save(state_dict=state_dict, storage_writer=storage_writer)
-        torch.distributed.barrier()
+        save_fsdp_dtensor_checkpoint(
+            dist_checkpoint_path,
+            state_dict,
+            cfg=self.transformer_config,
+            model=checkpoint_model,
+        )
         return None
 
     def load_rng_states(self, rng_states, data_parallel_random_init=False, use_dist_ckpt=True):
