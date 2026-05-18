@@ -1,6 +1,20 @@
-# vllm: x86_64=0.18.0, aarch64=0.18.0
+# vllm: x86_64=0.20.2, aarch64=0.18.0
 
-FROM nvidia/cuda:12.9.1-devel-ubuntu24.04
+ARG CUDA_VERSION=13.0.2
+ARG PYTHON_VERSION=3.12
+ARG TORCH_VERSION=2.11.0
+ARG TORCH_VISION_VERSION=0.26.0
+ARG TORCH_AUDIO_VERSION=2.11.0
+ARG TRANSFORMERS_VERSION=5.3.0
+ARG VLLM_VERSION=0.20.2
+ARG TRL_VERSION=0.27.0
+ARG TRANSFORMER_ENGINE_VERSION=v2.15
+ARG FLASH_ATTENTION_VERSION=2.8.3
+ARG NSIGHT_VERSION=2025.6.1
+ARG MCORE_VERSION=core_v0.16.1
+ARG VERL_VERSION=v0.7.1
+
+FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu24.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG PIP_NO_CACHE_DIR=1
@@ -23,30 +37,38 @@ RUN apt-get update && apt-get install -y \
     numactl \
     software-properties-common \
     vim \
-    python3.12 \
-    python3.12-dev \
+    python${PYTHON_VERSION} \
+    python${PYTHON_VERSION}-dev \
     && rm -rf /var/lib/apt/lists/*
 
 RUN wget https://bootstrap.pypa.io/get-pip.py && \
-    python3.12 get-pip.py && \
+    python${PYTHON_VERSION} get-pip.py && \
     rm get-pip.py
 
-RUN ln -sf /usr/bin/python3.12 /usr/bin/python3 && \
-    ln -sf /usr/bin/python3.12 /usr/bin/python
+RUN ln -sf /usr/bin/python${PYTHON_VERSION} /usr/bin/python3 && \
+    ln -sf /usr/bin/python${PYTHON_VERSION} /usr/bin/python
 
-RUN pip install torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 --index-url https://download.pytorch.org/whl/cu129
+RUN pip install torch==${TORCH_VERSION} torchvision==${TORCH_VISION_VERSION} torchaudio==${TORCH_AUDIO_VERSION} --index-url https://download.pytorch.org/whl/cu130
 
 RUN pip install pybind11 wheel
 
 # =========================
 # Install cuDNN
 # =========================
-RUN ARCH=$(if [ "$(uname -m)" = "aarch64" ]; then echo "sbsa"; else echo "x86_64"; fi) && \
-    wget https://developer.download.nvidia.com/compute/cuda/repos/debian12/${ARCH}/cuda-keyring_1.1-1_all.deb && \
-    dpkg -i cuda-keyring_1.1-1_all.deb && \
+ARG CUDNN_VERSION=9.16.0
+ARG CUDNN_SPEC_VERSION=9.16.0_1.0-1
+RUN ARCH=$(if [ "$(uname -m)" = "aarch64" ]; then echo "arm64"; else echo "amd64"; fi) && \
+    CUDA_VERSION_SHORT=$(echo ${CUDA_VERSION} | cut -d '.' -f 1-2) && \
+    wget https://developer.download.nvidia.com/compute/cudnn/${CUDNN_VERSION}/local_installers/cudnn-local-repo-ubuntu2404-${CUDNN_SPEC_VERSION}_arm64.deb && \
+    dpkg -i cudnn-local-repo-ubuntu2404-${CUDNN_SPEC_VERSION}_${ARCH}.deb && \
+    cp /var/cudnn-local-repo-ubuntu2404-${CUDA_VERSION}/cudnn-*-keyring.gpg /usr/share/keyrings/ && \
     apt-get update && \
-    apt-get -y install cudnn && \
-    rm cuda-keyring_1.1-1_all.deb && \
+    apt-get -y --allow-downgrades --allow-change-held-packages install cudnn9-cuda-${CUDA_VERSION_SHORT}=${CUDNN_SPEC_VERSION} && \
+    apt-get install -y --allow-downgrades --allow-change-held-packages \
+    libcudnn9-cuda-${CUDA_VERSION_SHORT}=${CUDNN_SPEC_VERSION} \
+    libcudnn9-dev-cuda-${CUDA_VERSION_SHORT}=${CUDNN_SPEC_VERSION} \
+    libcudnn9-headers-cuda-${CUDA_VERSION_SHORT}=${CUDNN_SPEC_VERSION} && \
+    rm -rf cudnn-local-repo-ubuntu2404-${CUDNN_SPEC_VERSION}_${ARCH}.deb && \
     rm -rf /var/lib/apt/lists/*
 
 RUN pip install nvidia-mathdx ninja
@@ -58,11 +80,11 @@ RUN MAX_JOBS=256 pip install -v --disable-pip-version-check --no-build-isolation
 
 RUN export NVTE_FRAMEWORK=pytorch && \
     MAX_JOBS=256 NVTE_BUILD_THREADS_PER_JOB=4 \
-    pip3 install --resume-retries 999 --no-build-isolation git+https://github.com/NVIDIA/TransformerEngine.git@release_v2.12
+    pip3 install --resume-retries 999 --no-build-isolation git+https://github.com/NVIDIA/TransformerEngine.git@${TRANSFORMER_ENGINE_VERSION}
 
 RUN pip install codetiming mathruler pylatexenc qwen_vl_utils cachetools pytest-asyncio
 
-RUN export FLASH_ATTENTION_FORCE_BUILD="TRUE" && MAX_JOBS=32 pip install --no-build-isolation flash_attn==2.8.3
+RUN export FLASH_ATTENTION_FORCE_BUILD="TRUE" && MAX_JOBS=32 pip install --no-build-isolation flash_attn==${FLASH_ATTENTION_VERSION}
 
 RUN NSIGHT_VERSION=2025.6.1_2025.6.1.190-1_$(if [ "$(uname -m)" = "aarch64" ]; then echo "arm64"; else echo "amd64"; fi) && \
     wget https://developer.nvidia.com/downloads/assets/tools/secure/nsight-systems/2025_6/nsight-systems-${NSIGHT_VERSION}.deb && \
@@ -95,27 +117,21 @@ RUN cd /home && mkdir -p dpsk_a2a && cd dpsk_a2a && \
     export CPATH=/usr/local/cuda/targets/${CUDA_TARGET}/include/cccl:$CPATH && \
     TORCH_CUDA_ARCH_LIST="9.0;10.0" python setup.py install
 
-RUN if [ "$(uname -m)" = "aarch64" ]; then apt-get remove -y python3-jwt; fi && \
-    pip install vllm==0.18.0
+RUN if [ "$(uname -m)" = "aarch64" ]; then apt-get remove -y python3-jwt; fi
 
-RUN pip3 install --no-deps trl==0.27.0
+RUN pip install vllm==${VLLM_VERSION}
+
+RUN pip3 install --no-deps trl==${TRL_VERSION}
 
 RUN pip3 install nvtx matplotlib liger_kernel
 
-RUN pip install -U git+https://github.com/ISEEKYAN/mbridge.git@641a5a0
+RUN pip install -U git+https://github.com/ISEEKYAN/mbridge.git@main
 
-RUN pip install --no-deps git+https://github.com/NVIDIA/Megatron-LM.git@core_v0.16.0
+RUN pip install --no-deps git+https://github.com/NVIDIA/Megatron-LM.git@${MCORE_VERSION}
 
-RUN pip install transformers==5.3.0
+RUN pip install transformers==${TRANSFORMERS_VERSION}
 
-RUN pip install git+https://github.com/verl-project/verl.git@v0.7.1 && pip uninstall -y verl
+RUN pip install git+https://github.com/verl-project/verl.git@${VERL_VERSION} && pip uninstall -y verl
 
 RUN apt-get update && apt-get install -y curl \
     && rm -rf /var/lib/apt/lists/*
-
-RUN apt-get update && \
-    apt-get install -y --allow-downgrades --allow-change-held-packages \
-    libcudnn9-cuda-12=9.16.0.29-1 \
-    libcudnn9-dev-cuda-12=9.16.0.29-1 \
-    libcudnn9-headers-cuda-12=9.16.0.29-1 && \
-    rm -rf /var/lib/apt/lists/*
