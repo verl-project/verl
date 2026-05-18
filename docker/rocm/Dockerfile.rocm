@@ -53,8 +53,7 @@ RUN curl -sL https://repo.radeon.com/rocm/rocm.gpg.key | apt-key add - \
     find /opt/rocm/lib/hipblaslt/library -type f -name '*gfx*' | grep -Ev "${GFX_ARCH}" | xargs rm -f && \
     find /opt/rocm/lib/rocblas/library -type f -name '*gfx*' | grep -Ev "${GFX_ARCH}" | xargs rm -f && \
     find /opt/rocm/share/miopen/db -type f -name '*gfx*' | grep -Ev "${GFX_ARCH}" | xargs rm -f && \
-    sqlite3 /opt/rocm/lib/rocfft/rocfft_kernel_cache.db "delete from cache_v1 where arch != '${GFX_ARCH}' ; vacuum"
-
+    
 ENV ROCM_HOME=/opt/rocm
 ENV CPLUS_INCLUDE_PATH=/opt/rocm/include:
 ENV LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH
@@ -80,7 +79,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip3 install *.whl && \
     rm -f *.whl
 
-ARG GPU_ARCH=gfx942;gfx950
+ARG GPU_ARCH="gfx942;gfx950"
 ENV PYTORCH_ROCM_ARCH=${GPU_ARCH}
 
 WORKDIR /root
@@ -155,7 +154,7 @@ RUN pip uninstall tilelang -y && pip install xgrammar==0.1.32
 RUN apt-get update && apt install vim -y
 
 FROM install_vllm AS install_verl
-RUN cd /workspace && git clone https://github.com/volcengine/verl.git && \
+RUN cd /workspace && git clone https://github.com/verl-project/verl.git && \
     cd verl && pip install .
 RUN pip install cupy-rocm-7-0
 
@@ -165,7 +164,7 @@ ARG AITER_TAG="45c428e54"
 RUN cd /workspace && git clone --recursive https://github.com/ROCm/aiter.git && cd aiter && git checkout ${AITER_TAG} && python3 setup.py develop
 
 # for qwen3.5
-RUN pip install -U git+https://github.com/ISEEKYAN/mbridge.git && \
+RUN pip install -U git+https://github.com/ISEEKYAN/mbridge.git@v0.15.1 && \
     pip install transformers --upgrade && \
     pip install megatron-core==0.16.0 && \
     pip install mathruler && \
