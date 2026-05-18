@@ -15,7 +15,7 @@
 
 try:
     from megatron.bridge import AutoBridge
-    from megatron.bridge.training.integration import LinearForLastLayer, freeze_moe_router, make_value_model
+    from megatron.bridge.training.utils.train_utils import LinearForLastLayer, freeze_moe_router, make_value_model
 except ImportError:
     # `pip install verl[mcore]` or
     print("Megatron-Bridge package not found. Please install Megatron-Bridge with `pip install megatron-bridge`")

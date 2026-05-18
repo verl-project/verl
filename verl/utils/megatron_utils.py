@@ -248,7 +248,8 @@ def make_megatron_module(
         if override_model_config.get("moe_config", {}).get("freeze_moe_router", False):
             post_model_creation_callbacks.append(freeze_moe_router)
         if provider is not None:
-            from megatron.bridge.training import integration
+            from megatron.bridge.peft.utils import create_peft_hook, load_peft_adapter_checkpoint
+            from megatron.bridge.training.utils.config_utils import create_ddp_config
 
             # When using PEFT with Megatron-Bridge, we must apply PEFT transformation
             # BEFORE wrapping the model in DDP. This is required because:
@@ -262,41 +263,36 @@ def make_megatron_module(
             if peft_cls is not None:
                 from verl.utils.megatron_peft_utils import print_adapter_info
 
+                provider.register_pre_wrap_hook(create_peft_hook(peft_cls, training=True))
+
                 adapter_path = getattr(peft_config, "adapter_path", None)
+                if adapter_path:
 
-                def adapter_checkpoint_loader(model):
-                    print(f"Loading adapter weights from: {adapter_path}")
-                    integration.load_peft_adapter_checkpoint(
-                        model,
-                        adapter_path,
-                        peft=peft_cls,
-                        strict=False,
-                    )
+                    def adapter_checkpoint_hook(model):
+                        print(f"Loading adapter weights from: {adapter_path}")
+                        load_peft_adapter_checkpoint(
+                            model,
+                            adapter_path,
+                            peft=peft_cls,
+                            strict=False,
+                        )
+                        return model
 
-                bridge_peft_hook = integration.create_peft_hook(
-                    peft_cls,
-                    adapter_checkpoint_loader=adapter_checkpoint_loader if adapter_path else None,
-                    training=True,
-                )
+                    provider.register_pre_wrap_hook(adapter_checkpoint_hook)
 
-                def peft_pre_wrap_hook(model):
-                    """Pre-wrap hook that applies PEFT transformation."""
-                    transformed_model = bridge_peft_hook(model)
-
-                    # Print PEFT statistics
+                def peft_info_hook(model):
                     if torch.distributed.get_rank() == 0:
-                        print_adapter_info(transformed_model)
+                        print_adapter_info(model)
+                    return model
 
-                    return transformed_model
-
-                provider.register_pre_wrap_hook(peft_pre_wrap_hook)
+                provider.register_pre_wrap_hook(peft_info_hook)
 
             # Register post-creation callbacks (make_value_model, freeze_moe_router) as pre-wrap hooks
             for callback in post_model_creation_callbacks:
                 provider.register_pre_wrap_hook(callback)
 
             # Create DDP config if needed
-            ddp_config = integration.create_ddp_config(
+            ddp_config = create_ddp_config(
                 wrap_with_ddp=wrap_config.wrap_with_ddp,
                 use_distributed_optimizer=wrap_config.use_distributed_optimizer,
                 use_megatron_fsdp=wrap_config.use_megatron_fsdp,

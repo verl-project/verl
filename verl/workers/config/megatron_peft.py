@@ -25,9 +25,9 @@ def get_peft_cls(model_config, bridge, provider, dtype=None):
 
     assert bridge is not None and provider is not None, "LoRA/PEFT only supported via Megatron-Bridge"
 
-    from megatron.bridge.training import integration
+    from megatron.bridge.peft.utils import create_peft
 
-    peft_cls = integration.create_peft(lora_cfg, dtype=dtype)
+    peft_cls = create_peft(lora_cfg, dtype=dtype)
     print(
         f"Enabling {lora_cfg.get('type', 'lora').upper()} with rank={lora_cfg.get('rank')}, "
         f"alpha={lora_cfg.get('alpha')}, dropout={lora_cfg.get('dropout')}"
