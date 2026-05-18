@@ -45,12 +45,13 @@ ARG DEBIAN_FRONTEND=noninteractive
 ARG MAX_JOBS=32
 ENV MAX_JOBS=${MAX_JOBS}
 
-# cuDNN / NCCL versions — actively installed at system level.
-# manage_envs.py auto-detects these and force-installs the corresponding pip
-# packages (nvidia-cudnn-cu12, nvidia-nccl-cu12) in every CUDA backend venv.
-# Update when changing CUDA_VERSION. See: https://developer.nvidia.com/cudnn-downloads
+# cuDNN / NCCL — see https://developer.nvidia.com/cudnn-downloads
+# Deb versions for apt install; pip versions for manage_envs.py force-install.
 ARG CUDNN_VERSION=9.16.0.29-1
 ARG NCCL_VERSION=2.28.3-1
+# Pip package versions — must match the deb versions above exactly.
+ENV VERL_CUDNN_PIP_VERSION=9.16.0.29
+ENV VERL_NCCL_PIP_VERSION=2.28.3
 
 # Backends to materialize. By default every non-Ascend extra in
 # pyproject.toml. Override via --build-arg TARGETS="vllm fsdp" for slimmer

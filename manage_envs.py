@@ -243,26 +243,28 @@ def _detect_cuda_suffix() -> str:
 
 
 def _detect_system_match_packages() -> list[str]:
-    """Auto-detect nvidia-cudnn and nvidia-nccl pip packages matching system.
+    """Return nvidia-cudnn and nvidia-nccl pip packages matching the system.
 
-    Returns a list of pinned requirements, e.g.:
-        ["nvidia-cudnn-cu12==9.16.0.29", "nvidia-nccl-cu12==2.28.3"]
-    Prints warnings if detection fails.
+    Priority:
+    1. VERL_CUDNN_PIP_VERSION / VERL_NCCL_PIP_VERSION env vars (set in Dockerfile)
+    2. Auto-detect from dpkg-query / header files
+
+    Returns e.g. ["nvidia-cudnn-cu12==9.16.0.29", "nvidia-nccl-cu12==2.28.3"]
     """
     packages: list[str] = []
     cuda_suffix = _detect_cuda_suffix()
 
-    cudnn_ver = _detect_system_cudnn_version()
+    cudnn_ver = os.environ.get("VERL_CUDNN_PIP_VERSION") or _detect_system_cudnn_version()
     if cudnn_ver:
         packages.append(f"nvidia-cudnn-{cuda_suffix}=={cudnn_ver}")
-        print(f"  Detected system cuDNN: {cudnn_ver} → nvidia-cudnn-{cuda_suffix}=={cudnn_ver}")
+        print(f"  cuDNN pip: nvidia-cudnn-{cuda_suffix}=={cudnn_ver}")
     else:
         print("  WARNING: could not detect system cuDNN version; skipping nvidia-cudnn pin")
 
-    nccl_ver = _detect_system_nccl_version()
+    nccl_ver = os.environ.get("VERL_NCCL_PIP_VERSION") or _detect_system_nccl_version()
     if nccl_ver:
         packages.append(f"nvidia-nccl-{cuda_suffix}=={nccl_ver}")
-        print(f"  Detected system NCCL:  {nccl_ver} → nvidia-nccl-{cuda_suffix}=={nccl_ver}")
+        print(f"  NCCL pip:  nvidia-nccl-{cuda_suffix}=={nccl_ver}")
     else:
         print("  WARNING: could not detect system NCCL version; skipping nvidia-nccl pin")
 
@@ -306,9 +308,13 @@ def _run(cmd: list[str], env_overrides: dict[str, str] | None = None) -> int:
 
 
 def _load_pyproject() -> dict:
-    if sys.version_info < (3, 11):
-        sys.exit("error: manage_envs.py requires Python >=3.11 to parse pyproject.toml")
-    tomllib = importlib.import_module("tomllib")
+    if sys.version_info >= (3, 11):
+        tomllib = importlib.import_module("tomllib")
+    else:
+        try:
+            tomllib = importlib.import_module("tomli")
+        except ModuleNotFoundError:
+            sys.exit("error: Python <3.11 requires the 'tomli' package.\n       Install it with: pip install tomli")
     return tomllib.loads((VERL_DIR / "pyproject.toml").read_text())
 
 
