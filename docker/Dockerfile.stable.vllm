@@ -59,6 +59,7 @@ RUN pip install pybind11 wheel
 RUN ARCH=$(if [ "$(uname -m)" = "aarch64" ]; then echo "sbsa"; else echo "x86_64"; fi) && \
     CUDA_VERSION_MAJOR=$(echo ${CUDA_VERSION} | cut -d '.' -f 1) && \
     wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/${ARCH}/cuda-keyring_1.1-1_all.deb && \
+    sed -i '/developer\.download\.nvidia\.com\/compute\/cuda\/repos/d' /etc/apt/sources.list.d/* && \
     dpkg -i cuda-keyring_1.1-1_all.deb && \
     apt-get update && \
     apt-get -y --allow-downgrades --allow-change-held-packages install \
