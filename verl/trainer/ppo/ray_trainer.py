@@ -57,8 +57,8 @@ from verl.trainer.ppo.utils import (
     need_teacher_policy,
 )
 from verl.utils import tensordict_utils as tu
+from verl.utils.checkpoint.checkpoint_handler import save_lora_train_meta
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, should_save_ckpt_esi
-from verl.utils.checkpoint.lora_metadata import save_lora_train_meta
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
 from verl.utils.import_utils import load_class_from_fqn

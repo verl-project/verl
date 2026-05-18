@@ -34,7 +34,6 @@ from tqdm import tqdm
 
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint import CheckpointHandler, OrchestrationMode
-from verl.utils.checkpoint.lora_metadata import get_lora_train_meta
 from verl.utils.dataset.dataset_utils import SFTTensorCollator
 from verl.utils.dataset.multiturn_sft_dataset import MultiTurnSFTDataset
 from verl.utils.device import auto_set_device, get_device_name
@@ -73,7 +72,6 @@ class SFTTrainer:
         resume_from_path = getattr(self.config.trainer, "resume_from_path", None)
         max_ckpt_to_keep = getattr(self.config.trainer, "max_ckpt_to_keep", None)
         default_hdfs_dir = getattr(self.config.trainer, "default_hdfs_dir", None)
-        lora_train_meta = get_lora_train_meta(self.config.model)
 
         self.ckpt_handler = CheckpointHandler(
             engine=self.training_client,
@@ -84,7 +82,6 @@ class SFTTrainer:
             resume_mode=resume_mode,
             resume_from_path=resume_from_path,
             mode=OrchestrationMode.RAY,
-            lora_train_meta=lora_train_meta,
         )
 
     def _build_config(self):

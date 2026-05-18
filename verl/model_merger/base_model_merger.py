@@ -24,7 +24,6 @@ from accelerate import init_empty_weights
 from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForTokenClassification, GenerationConfig
 
 from verl.utils import hf_processor, hf_tokenizer
-from verl.utils.checkpoint.lora_metadata import load_lora_train_meta
 from verl.utils.transformers_compat import drop_tied_target_keys, get_auto_model_for_vision2seq
 
 AutoModelForVision2Seq = get_auto_model_for_vision2seq()
@@ -234,7 +233,45 @@ class BaseModelMerger(ABC):
         return model
 
     def _load_lora_train_meta(self) -> Optional[dict[str, object]]:
-        return load_lora_train_meta(self.config.local_dir)
+        if not self.config.local_dir:
+            return None
+
+        meta_path = os.path.join(self.config.local_dir, "lora_train_meta.json")
+        if not os.path.exists(meta_path):
+            return None
+
+        import json
+
+        try:
+            with open(meta_path, encoding="utf-8") as f:
+                lora_meta = json.load(f)
+        except Exception as e:
+            warnings.warn(f"Failed to read LoRA metadata from {meta_path}: {e}", stacklevel=2)
+            return None
+
+        result = {}
+        if "r" in lora_meta:
+            try:
+                result["r"] = int(lora_meta["r"])
+            except (TypeError, ValueError):
+                warnings.warn(f"Invalid LoRA rank in {meta_path}: {lora_meta['r']}", stacklevel=2)
+
+        if "lora_alpha" in lora_meta:
+            try:
+                result["lora_alpha"] = int(lora_meta["lora_alpha"])
+            except (TypeError, ValueError):
+                warnings.warn(f"Invalid lora_alpha in {meta_path}: {lora_meta['lora_alpha']}", stacklevel=2)
+
+        if "task_type" in lora_meta:
+            task_type = lora_meta["task_type"]
+            if task_type is None:
+                pass
+            elif isinstance(task_type, str):
+                result["task_type"] = task_type
+            else:
+                warnings.warn(f"Invalid task_type in {meta_path}: {task_type}", stacklevel=2)
+
+        return result if len(result) > 0 else None
 
     def save_lora_adapter(self, state_dict: dict[str, torch.Tensor]):
         """

@@ -40,6 +40,78 @@ def extract_step(path):
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_SFT_LOGGING_LEVEL", "WARN"))
 
+LORA_TRAIN_META_FILENAME = "lora_train_meta.json"
+
+
+def _get_config_value(config, key, default=None):
+    if config is None:
+        return default
+    if hasattr(config, "get"):
+        try:
+            return config.get(key, default)
+        except TypeError:
+            pass
+    return getattr(config, key, default)
+
+
+def _to_int(value, default=0):
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def get_lora_train_meta(model_config):
+    """Build LoRA rank, alpha, and task type metadata from a model config."""
+    lora_config = _get_config_value(model_config, "lora", {}) or {}
+
+    flat_rank = _to_int(_get_config_value(model_config, "lora_rank", 0))
+    nested_rank = _to_int(_get_config_value(lora_config, "rank", 0))
+    flat_adapter_path = _get_config_value(model_config, "lora_adapter_path", None)
+    nested_adapter_path = _get_config_value(lora_config, "adapter_path", None)
+
+    if flat_rank <= 0 and nested_rank <= 0 and flat_adapter_path is None and nested_adapter_path is None:
+        return None
+
+    if flat_rank > 0 or flat_adapter_path is not None:
+        lora_rank = flat_rank
+        raw_lora_alpha = _get_config_value(model_config, "lora_alpha", 0)
+    else:
+        lora_rank = nested_rank
+        raw_lora_alpha = _get_config_value(lora_config, "alpha", 0)
+
+    task_type = _get_config_value(model_config, "task_type", None) or _get_config_value(
+        lora_config, "task_type", None
+    )
+
+    return {
+        "r": lora_rank,
+        "lora_alpha": _to_int(raw_lora_alpha),
+        "task_type": str(task_type or "CAUSAL_LM"),
+    }
+
+
+def save_lora_train_meta(model_config, local_dir, hdfs_dir=None):
+    """Save LoRA training metadata beside an actor checkpoint when LoRA is enabled."""
+    from verl.utils.fs import local_mkdir_safe
+
+    lora_train_meta = get_lora_train_meta(model_config)
+    if lora_train_meta is None:
+        return None
+
+    local_mkdir_safe(str(local_dir))
+    lora_meta_path = os.path.join(str(local_dir), LORA_TRAIN_META_FILENAME)
+    with open(lora_meta_path, "w", encoding="utf-8") as f:
+        json.dump(lora_train_meta, f, ensure_ascii=False, indent=4)
+
+    if hdfs_dir is not None:
+        hdfs_io.makedirs(str(hdfs_dir), exist_ok=True)
+        hdfs_io.copy(lora_meta_path, os.path.join(str(hdfs_dir), LORA_TRAIN_META_FILENAME))
+
+    return lora_meta_path
+
 
 class OrchestrationMode(Enum):
     SPMD = 0
@@ -108,7 +180,7 @@ class CheckpointHandler:
         # So it's identical in each dp rank.
         if self.rank == 0 and self.lora_train_meta is not None:
             local_mkdir_safe(local_global_step_folder)
-            lora_meta_path = os.path.join(local_global_step_folder, "lora_train_meta.json")
+            lora_meta_path = os.path.join(local_global_step_folder, LORA_TRAIN_META_FILENAME)
             with open(lora_meta_path, "w", encoding="utf-8") as f:
                 json.dump(self.lora_train_meta, f, ensure_ascii=False, indent=4)
             print(f"Saved LoRA rank/alpha metadata to: {lora_meta_path}")
