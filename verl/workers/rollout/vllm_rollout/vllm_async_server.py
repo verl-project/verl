@@ -118,6 +118,20 @@ class vLLMHttpServer:
         # error on restart.
         os.environ["VERL_RAY_JOB_ID"] = ray.get_runtime_context().get_job_id()
 
+        # Apply train-inference consistency patches when enabled.
+        # This ensures vLLM inference behavior matches Megatron training.
+        from verl.utils.true_on_policy_npu import (
+            TRAIN_INFER_CONSIST_ENV,
+            apply_train_infer_consist_patches,
+        )
+
+        if os.getenv(TRAIN_INFER_CONSIST_ENV, "0") == "1":
+            device = "npu" if is_torch_npu_available() else "cuda"
+            apply_train_infer_consist_patches(
+                inference_backend="vllm",
+                device=device,
+            )
+
         self.config = self._init_config(config)
         self.model_config = self._init_model_config(model_config)
         self._validate_configs()

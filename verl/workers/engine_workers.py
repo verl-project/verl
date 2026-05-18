@@ -90,10 +90,6 @@ class TrainingWorker(Worker, DistProfilerExtension):
         if is_npu_available:
             os.environ["PYTORCH_NPU_ALLOC_CONF"] = "expandable_segments:True"
 
-        initialize_global_process_group_ray(timeout_second=None)
-
-        set_numa_affinity()
-
         self.config = config
         self.model_config = self.config.model_config
         self.engine_config = self.config.engine_config
@@ -112,6 +108,32 @@ class TrainingWorker(Worker, DistProfilerExtension):
             self.engine_config, self.optimizer_config = self.config.auto_select_engine_optim_fn(
                 self.model_config, self.device_name
             )
+
+        # Apply train-inference consistency patches for NPU when enabled.
+        # This includes batch-invariant operators and other alignment patches.
+        # Must run before distributed init so HCCL determinism env vars take effect.
+        from verl.utils.true_on_policy_npu import (
+            TRAIN_INFER_CONSIST_ENV,
+            apply_train_infer_consist_patches,
+            apply_training_batch_invariance_patches,
+        )
+
+        if os.getenv(TRAIN_INFER_CONSIST_ENV, "0") == "1":
+            # Training side should enable batch-invariant operator replacement
+            # immediately (before distributed init), even before inference backend
+            # is discovered in two-phase patch orchestration.
+            apply_training_batch_invariance_patches(
+                training_backend=self.engine_config.strategy,
+                device=self.device_name,
+            )
+            apply_train_infer_consist_patches(
+                training_backend=self.engine_config.strategy,
+                device=self.device_name,
+            )
+
+        initialize_global_process_group_ray(timeout_second=None)
+
+        set_numa_affinity()
 
         # we use the one defined in model
         # TODO: this is not elegant and should refactor later
