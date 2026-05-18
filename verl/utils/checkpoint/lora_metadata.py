@@ -113,6 +113,7 @@ def save_lora_train_meta(
     local_dir: str | os.PathLike,
     hdfs_dir: str | os.PathLike | None = None,
 ) -> Optional[str]:
+    """Persist LoRA rank/alpha metadata beside a checkpoint and optionally copy it to HDFS."""
     lora_train_meta = get_lora_train_meta(model_config)
     if lora_train_meta is None:
         return None
