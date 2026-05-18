@@ -31,7 +31,7 @@ Use the following prebuilt image for tutorial and validation:
 
 The Docker build recipe remains unchanged:
 
-- ``docker/Dockerfile.rocm``
+- `docker/rocm/Dockerfile.rocm <https://github.com/verl-project/verl/blob/main/docker/rocm/Dockerfile.rocm>`_
 
 Host Prerequisites
 ------------------
