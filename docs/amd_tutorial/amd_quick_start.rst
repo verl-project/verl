@@ -15,8 +15,8 @@ verification, and training examples.
 Current software and hardware scope:
 
 - Runtime modes: fully supports **Fully Async** and **Colocate**.
-- Inference engine: **vLLM** validated; **SGLang** support is ongoing.
-- Trainer backends: **FSDP** and **Megatron**.
+- Inference engine: **vLLM** validated; **SGLang/VeOmni** support is ongoing.
+- Trainer backends: **FSDP**, **FSDP2** and **Megatron**.
 - GPU targets:
 
   - MI300X / MI325X (``gfx942``)
