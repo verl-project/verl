@@ -156,7 +156,7 @@ RUN apt-get update && apt install vim -y
 
 FROM install_vllm AS install_verl
 RUN cd /workspace && git clone https://github.com/volcengine/verl.git && \
-    cd verl && pip install -e .
+    cd verl && pip install .
 RUN pip install cupy-rocm-7-0
 
 
