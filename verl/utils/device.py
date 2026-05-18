@@ -43,8 +43,22 @@ def is_torch_npu_available(check_device=True) -> bool:
         return False
 
 
+def is_torch_mlu_available(check_device=True) -> bool:
+    """Check if Cambricon MLU is available for PyTorch operations."""
+    try:
+        if not hasattr(torch, "mlu"):
+            return False
+
+        if check_device:
+            return torch.mlu.is_available()
+        else:
+            return True
+    except ImportError:
+        return False
+
 is_cuda_available = torch.cuda.is_available()
 is_npu_available = is_torch_npu_available()
+is_mlu_available = is_torch_mlu_available()
 
 
 def get_resource_name() -> str:
@@ -52,7 +66,10 @@ def get_resource_name() -> str:
     Returns:
         ray resource name string, either "GPU" or "NPU".
     """
-    return "GPU" if is_cuda_available else "NPU"
+    if is_npu_available:
+        return "NPU"
+    else:
+        return "GPU"
 
 
 def get_visible_devices_keyword() -> str:
@@ -63,9 +80,15 @@ def get_visible_devices_keyword() -> str:
 
     Returns:
         str: 'CUDA_VISIBLE_DEVICES' if CUDA is available,
-            'ASCEND_RT_VISIBLE_DEVICES' otherwise.
+            'ASCEND_RT_VISIBLE_DEVICES' if NPU is available,
+            'MLU_VISIBLE_DEVICES' if MLU is available,
     """
-    return "CUDA_VISIBLE_DEVICES" if not is_torch_npu_available(check_device=False) else "ASCEND_RT_VISIBLE_DEVICES"
+    if is_torch_npu_available(check_device=False):
+        return "ASCEND_RT_VISIBLE_DEVICES"
+    elif is_torch_mlu_available(check_device=False):
+        return "MLU_VISIBLE_DEVICES"
+    else:
+        return "CUDA_VISIBLE_DEVICES"
 
 
 def get_device_name() -> str:
@@ -81,6 +104,8 @@ def get_device_name() -> str:
         device = "cuda"
     elif is_npu_available:
         device = "npu"
+    elif is_mlu_available:
+        device = "mlu"
     else:
         device = "cpu"
     return device
@@ -120,10 +145,12 @@ def get_nccl_backend() -> str:
     detected accelerator (HCCL for Ascend NPU, NCCL for CUDA).
 
     Returns:
-        str: Backend name ('hccl' for NPU, 'nccl' for CUDA/default).
+        str: Backend name ('hccl' for NPU, 'cncl' for MLU, 'nccl' for CUDA/default).
     """
     if is_npu_available:
         return "hccl"
+    elif is_mlu_available:
+        return "cncl"
     else:
         # default to nccl
         return "nccl"
@@ -144,6 +171,8 @@ def set_expandable_segments(enable: bool) -> None:
     """
     if is_cuda_available:
         torch.cuda.memory._set_allocator_settings(f"expandable_segments:{enable}")
+    if is_mlu_available:
+        torch.mlu.memory._set_allocator_settings(f"expandable_segments:{enable}")
 
 
 def auto_set_device(config) -> None:
