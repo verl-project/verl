@@ -8,7 +8,11 @@
 #       python3 -m pip install -q "nvidia-modelopt[torch]>=0.37.0"
 #       python3 -m pip install -q "flash-linear-attention==0.4.1"
 #       python3 -m pip install -U "git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git"
-#       python3 -m pip install -U "git+https://github.com/NVIDIA/Megatron-LM.git@refs/pull/4799/head"
+#       python3 -m pip install -U "git+https://github.com/NVIDIA/Megatron-LM.git@dev"
+#
+# Note: the required Megatron-FSDP changes are available in Megatron-LM dev
+# (https://github.com/NVIDIA/Megatron-LM/pull/4799) and Megatron-Bridge main
+# (https://github.com/NVIDIA-NeMo/Megatron-Bridge/pull/3746).
 set -xeuo pipefail
 
 # ============================================================
@@ -49,26 +53,9 @@ TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-64}
 MICRO_BATCH_SIZE=${MICRO_BATCH_SIZE:-1}
 MAX_LENGTH=${MAX_LENGTH:-4096}
 TOTAL_TRAIN_STEPS=${TOTAL_TRAIN_STEPS:-8}
-LR=${LR:-1.2e-4}
-MIN_LR=${MIN_LR:-1.2e-5}
-LR_WARMUP_STEPS=${LR_WARMUP_STEPS:-100}
-LR_DECAY_STEPS=${LR_DECAY_STEPS:-2000}
-DTYPE=${DTYPE:-bfloat16}
-RESUME_MODE=${RESUME_MODE:-disable}
 
 project_name=${PROJECT_NAME:-verl_sft_qwen35_mfsdp_example}
 exp_name=${EXP_NAME:-qwen3_5_35b_a3b-mfsdp-tp${TP_SIZE}-pp${PP_SIZE}-cp${CP_SIZE}-ep${EP_SIZE}-gbs${TRAIN_BATCH_SIZE}-seq${MAX_LENGTH}}
-ckpts_home=${ckpts_home:-~/verl/checkpoints/${project_name}/${exp_name}}
-mkdir -p "${ckpts_home}"
-
-# ============================================================
-# MTP hyper-parameters
-# ============================================================
-MTP_ENABLE=${MTP_ENABLE:-False}
-MTP_ENABLE_TRAIN=${MTP_ENABLE_TRAIN:-False}
-MTP_NUM_LAYERS=${MTP_NUM_LAYERS:-null}
-MTP_DETACH_ENCODER=${MTP_DETACH_ENCODER:-True}
-MTP_LOSS_SCALING_FACTOR=${MTP_LOSS_SCALING_FACTOR:-0.1}
 
 # ============================================================
 # Parameter arrays
@@ -93,24 +80,12 @@ MODEL=(
     model.path="${MODEL_PATH}"
     model.use_remove_padding=True
     model.trust_remote_code=True
-    model.mtp.enable=${MTP_ENABLE}
-    model.mtp.enable_train=${MTP_ENABLE_TRAIN}
-    model.mtp.detach_encoder=${MTP_DETACH_ENCODER}
-    model.mtp.mtp_loss_scaling_factor=${MTP_LOSS_SCALING_FACTOR}
+    model.mtp.enable=False
 )
 
 ENGINE=(
     engine=megatron
     optim=megatron
-    optim.lr=${LR}
-    optim.min_lr=${MIN_LR}
-    optim.lr_warmup_steps=${LR_WARMUP_STEPS}
-    optim.lr_decay_steps=${LR_DECAY_STEPS}
-    optim.weight_decay=0.1
-    "optim.betas=[0.9,0.95]"
-    optim.clip_grad=1.0
-    optim.lr_warmup_init=0
-    optim.lr_decay_style=cosine
     +optim.override_optimizer_config.use_precision_aware_optimizer=True
     engine.tensor_model_parallel_size=${TP_SIZE}
     engine.pipeline_model_parallel_size=${PP_SIZE}
@@ -121,9 +96,7 @@ ENGINE=(
     engine.use_mbridge=True
     engine.vanilla_mbridge=False
     engine.use_megatron_fsdp=True
-    engine.dtype=${DTYPE}
     engine.use_remove_padding=True
-    +engine.override_ddp_config.check_for_nan_in_grad=True
     +engine.override_ddp_config.megatron_fsdp_use_decoupled_grad=True
     +engine.override_transformer_config.moe_router_dtype=fp32
     +engine.override_transformer_config.moe_token_dispatcher_type=flex
@@ -135,7 +108,7 @@ ENGINE=(
     engine.override_transformer_config.recompute_method=uniform
     engine.override_transformer_config.recompute_granularity=full
     engine.override_transformer_config.recompute_num_layers=1
-    +engine.override_transformer_config.mtp_num_layers=${MTP_NUM_LAYERS}
+    +engine.override_transformer_config.mtp_num_layers=null
     +engine.override_transformer_config.calculate_per_token_loss=True
     +engine.override_transformer_config.gradient_accumulation_fusion=False
 )
@@ -148,21 +121,7 @@ TRAINER=(
     trainer.experiment_name="${exp_name}"
     trainer.total_epochs=1
     trainer.total_training_steps=${TOTAL_TRAIN_STEPS}
-    trainer.default_local_dir="${ckpts_home}"
-    trainer.resume_mode=${RESUME_MODE}
-)
-
-CHECKPOINT=(
-    'checkpoint.save_contents=["model","optimizer"]'
-    'checkpoint.load_contents=["model","optimizer"]'
-)
-
-TORCHRUN_ARGS=(
-    --nproc_per_node=${NUM_GPUS}
-    --nnodes=${NNODES}
-    --node_rank=${NODE_RANK}
-    --master_addr=${MASTER_ADDR}
-    --master_port=${MASTER_PORT}
+    trainer.resume_mode=disable
 )
 
 # ============================================================
@@ -170,14 +129,19 @@ TORCHRUN_ARGS=(
 # ============================================================
 CMD=(
     torchrun
-    "${TORCHRUN_ARGS[@]}"
+    --nproc_per_node=${NUM_GPUS}
+    --nnodes=${NNODES}
+    --node_rank=${NODE_RANK}
+    --master_addr=${MASTER_ADDR}
+    --master_port=${MASTER_PORT}
     -m
     verl.trainer.sft_trainer
     "${DATA[@]}"
     "${MODEL[@]}"
     "${ENGINE[@]}"
     "${TRAINER[@]}"
-    "${CHECKPOINT[@]}"
+    'checkpoint.save_contents=["model","optimizer"]'
+    'checkpoint.load_contents=["model","optimizer"]'
 )
 
 "${CMD[@]}"
