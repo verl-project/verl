@@ -152,7 +152,6 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
         self.config = config
         self.model_config = self.config.model_config
-        self.model_config.freeze_vision_tower = bool(self.config.freeze_vision_tower)
         self.engine_config = self.config.engine_config
         self.optimizer_config = self.config.optimizer_config
         self.checkpoint_config = self.config.checkpoint_config
@@ -628,8 +627,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 engine_config=actor_config.engine,
                 optimizer_config=actor_config.optim,
                 checkpoint_config=actor_config.checkpoint,
-                freeze_vision_tower=actor_config.freeze_vision_tower,
             )
+            actor_training_config.engine_config.freeze_vision_tower = actor_config.freeze_vision_tower
 
             assert self.config.actor.use_dynamic_bsz == self.config.rollout.log_prob_use_dynamic_bsz
 

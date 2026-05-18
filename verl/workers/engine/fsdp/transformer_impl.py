@@ -540,7 +540,7 @@ class FSDPEngine(BaseEngine):
         return module
 
     def _freeze_vision_tower(self, module):
-        if not getattr(self.model_config, "freeze_vision_tower", False):
+        if not getattr(self.engine_config, "freeze_vision_tower", False):
             return module
 
         vision_module_names = {"visual", "vision_tower", "vision_model", "vision_encoder", "image_encoder"}

@@ -116,7 +116,6 @@ class HFModelConfig(BaseConfig):
 
     enable_gradient_checkpointing: bool = True
     enable_activation_offload: bool = False
-    freeze_vision_tower: bool = False
 
     use_remove_padding: bool = True
 

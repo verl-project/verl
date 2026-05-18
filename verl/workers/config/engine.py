@@ -85,6 +85,7 @@ class EngineConfig(BaseConfig):
         "use_remove_padding",
         "forward_only",
         "param_offload",
+        "freeze_vision_tower",
     }
     # whether to offload param
     param_offload: bool = False
@@ -92,6 +93,8 @@ class EngineConfig(BaseConfig):
     optimizer_offload: bool = False
     # whether to offload grad
     grad_offload: bool = False
+    # whether to freeze VLM vision tower parameters for actor training
+    freeze_vision_tower: bool = False
     # whether the engine is forward only (e.g., ref policy)
     forward_only: bool = False
     # the strategy (backend)
@@ -597,7 +600,6 @@ class TrainingWorkerConfig(BaseConfig):
     optimizer_config: OptimizerConfig = None
     checkpoint_config: CheckpointConfig = None
     profiler_config: ProfilerConfig = None
-    freeze_vision_tower: bool = False
     # automatically select engine and optimizer function.
     # This function takes model config and the device name as parameter.
     # Users can pass in a higher-order function to take more parameters
