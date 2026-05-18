@@ -371,18 +371,10 @@ no-build-isolation-package = [
     "nemo-automodel",
 ]
 
-# Pass --cpp_ext / --cuda_ext to apex's setup.py so its native CUDA extensions
-# (FusedAdam, FusedSGD, multi_tensor_applier, FusedLayerNorm, FastLayerNormFN)
-# actually compile. manage_envs.py converts this to uv pip's
-# `--config-setting-package apex:--build-option=...` flags, mirroring
-# Dockerfile.stable.vllm L55-56. Without these, apex installs as a pure-Python
-# package and Megatron-LM's apex.optimizers / apex.contrib / apex.normalization
-# / apex.multi_tensor_apply imports silently fall back to slow torch ops.
-[tool.uv.config-settings-package]
-apex = { "--build-option" = ["--cpp_ext", "--cuda_ext"] }
-
 # Git sources (revs match the reference Dockerfiles); PyTorch routed per-extra
 # to the right CUDA wheel index.
+# Note: apex (latest HEAD) auto-builds CUDA extensions when nvcc is on PATH;
+# --cpp_ext / --cuda_ext flags are no longer needed or recognized.
 [tool.uv.sources]
 apex               = { git = "https://github.com/NVIDIA/apex.git" }
 transformer-engine = { git = "https://github.com/NVIDIA/TransformerEngine.git", tag = "release_v2.12" }
