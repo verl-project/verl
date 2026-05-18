@@ -16,13 +16,6 @@
 """High-level QAT workflow helpers for Megatron backend."""
 
 
-def patch_provider_for_qat(provider):
-    """Configure a Megatron-Bridge provider to use QAT quantized layers."""
-    from megatron.bridge.models.gpt_provider import modelopt_transformer_layer_spec
-
-    provider.transformer_layer_spec = modelopt_transformer_layer_spec
-
-
 def _get_qat_field(qat_config, key, default=None):
     """Extract a field from qat_config, supporting both dict and object-style access."""
     if isinstance(qat_config, dict):

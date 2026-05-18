@@ -198,27 +198,34 @@ class MegatronEngine(BaseEngine):
             provider = bridge.to_megatron_provider(load_weights=False)
 
             # Match verl implementation (need variable_seq_lengths)
+            from megatron.core.transformer.enums import AttnBackend
 
             provider_overrides = {
+                "tensor_model_parallel_size": self.engine_config.tensor_model_parallel_size,
+                "pipeline_model_parallel_size": self.engine_config.pipeline_model_parallel_size,
+                "expert_model_parallel_size": self.engine_config.expert_model_parallel_size,
+                "expert_tensor_parallel_size": self.engine_config.expert_tensor_parallel_size,
+                "virtual_pipeline_model_parallel_size": self.engine_config.virtual_pipeline_model_parallel_size,
+                "context_parallel_size": self.engine_config.context_parallel_size,
                 "sequence_parallel": self.engine_config.sequence_parallel,
                 "variable_seq_lengths": True,
+                "attention_backend": AttnBackend.flash,
                 "moe_token_dispatcher_type": "alltoall",
                 "moe_router_load_balancing_type": "none",
-                **override_transformer_config,
             }
+            for key, value in override_transformer_config.items():
+                provider_overrides[key] = value
             if self.enable_routing_replay:
                 provider_overrides["enable_routing_replay"] = True
 
-            pre_finalize_hooks = []
             if self._qat_enabled:
-                from verl.utils.modelopt import patch_provider_for_qat
+                from megatron.bridge.models.gpt_provider import modelopt_transformer_layer_spec
 
-                pre_finalize_hooks.append(patch_provider_for_qat)
+                provider.transformer_layer_spec = modelopt_transformer_layer_spec
 
             provider.configure(
                 dtype=self.param_dtype,
                 overrides=provider_overrides,
-                pre_finalize_hooks=pre_finalize_hooks,
             )
             self.provider = provider
             tf_config = None  # Will be set after model creation
