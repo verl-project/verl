@@ -539,10 +539,51 @@ class FSDPEngine(BaseEngine):
 
         return module
 
+    def _freeze_vision_tower(self, module):
+        if not getattr(self.model_config, "freeze_vision_tower", False):
+            return module
+
+        vision_module_names = {"visual", "vision_tower", "vision_model", "vision_encoder", "image_encoder"}
+        frozen_param_ids: set[int] = set()
+        frozen_numel = 0
+
+        for module_name, submodule in module.named_modules():
+            if not module_name:
+                continue
+            if module_name.split(".")[-1] not in vision_module_names:
+                continue
+            for param in submodule.parameters():
+                if id(param) in frozen_param_ids:
+                    continue
+                frozen_param_ids.add(id(param))
+                frozen_numel += param.numel()
+                param.requires_grad_(False)
+
+        if not frozen_param_ids:
+            for param_name, param in module.named_parameters():
+                if not any(part in vision_module_names for part in param_name.split(".")):
+                    continue
+                frozen_param_ids.add(id(param))
+                frozen_numel += param.numel()
+                param.requires_grad_(False)
+
+        if frozen_param_ids:
+            logger.info(
+                "freeze_vision_tower=True: froze %d vision parameter tensor(s), %.3fB parameter(s)",
+                len(frozen_param_ids),
+                frozen_numel / 1e9,
+            )
+        else:
+            logger.warning("freeze_vision_tower=True but no known vision module/parameter names were found")
+        return module
+
     def _build_optimizer(self, module):
         from verl.workers.config.optimizer import build_optimizer
 
-        optimizer = build_optimizer(module.parameters(), self.optimizer_config)
+        trainable_params = [param for param in module.parameters() if param.requires_grad]
+        if not trainable_params:
+            raise ValueError("No trainable parameters found when building optimizer")
+        optimizer = build_optimizer(trainable_params, self.optimizer_config)
 
         return optimizer
 
@@ -643,6 +684,9 @@ class FSDPEngine(BaseEngine):
         # Apply QAT before FSDP wrapping (training only)
         if self._qat_enabled and not self.engine_config.forward_only:
             module = self._apply_qat(module)
+
+        if not self.engine_config.forward_only:
+            module = self._freeze_vision_tower(module)
 
         # Synchronize all distributed processes before proceeding
         torch.distributed.barrier()
