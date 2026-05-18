@@ -7,6 +7,7 @@ set -xeuo pipefail
 
 NUM_GPUS=${NUM_GPUS:-8}
 ACTOR_STRATEGY=${ACTOR_STRATEGY:-"fsdp2"}  # fsdp2 or megatron
+ROLLOUT_NAME=${ROLLOUT_NAME:-"vllm"}       # vllm, sglang, or trtllm
 
 # Download model if not exists
 MODEL_ID=${MODEL_ID:-Qwen/Qwen2.5-0.5B-Instruct}
@@ -15,10 +16,10 @@ MODEL_PATH=${MODEL_PATH:-${HOME}/models/${MODEL_ID}}
 
 
 rollout_mode="async"
-rollout_name="vllm" # sglang or vllm
-if [ "$rollout_mode" = "async" ]; then
+rollout_name="${ROLLOUT_NAME}"
+return_raw_chat="True"
+if [ "$rollout_name" = "vllm" ]; then
     export VLLM_USE_V1=1
-    return_raw_chat="True"
 fi
 
 # Algorithm parameters
@@ -49,8 +50,9 @@ top_k=-1
 val_top_p=0.7
 
 # Fully async specific parameters
-n_gpus_rollout=4
-n_gpus_training=4
+# Split GPUs evenly between rollout and training.
+n_gpus_rollout=${N_GPUS_ROLLOUT:-$((NUM_GPUS / 2))}
+n_gpus_training=${N_GPUS_TRAINING:-$((NUM_GPUS / 2))}
 
 train_prompt_bsz=0
 gen_prompt_bsz=1
@@ -58,11 +60,12 @@ n_resp_per_prompt=16
 train_prompt_mini_bsz=16
 total_rollout_steps=$(((128)))
 test_freq=-1
-staleness_threshold=0.1
+staleness_threshold=0.5
 trigger_parameter_sync_step=4
 partial_rollout=True
+use_trainer_do_validate=False
 
-exp_name="$(basename "${MODEL_ID,,}")-fully-async-policy-${ACTOR_STRATEGY}-minimal"
+exp_name="$(basename "${MODEL_ID,,}")-fully-async-policy-${rollout_name}-${ACTOR_STRATEGY}-minimal"
 
 echo "Running fully_async_policy with ${ACTOR_STRATEGY} strategy"
 echo "Total GPUs: ${NUM_GPUS}, Rollout GPUs: ${n_gpus_rollout}, Training GPUs: ${n_gpus_training}"
@@ -109,12 +112,12 @@ common_params=(
     actor_rollout_ref.rollout.name=${rollout_name}
     actor_rollout_ref.rollout.mode=${rollout_mode}
     actor_rollout_ref.rollout.disable_log_stats=False
-    reward_model.reward_manager.name=dapo
-    +reward_model.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer}
-    +reward_model.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len}
-    +reward_model.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor}
-    +reward_model.reward_kwargs.overlong_buffer_cfg.log=False
-    +reward_model.reward_kwargs.max_resp_len=${max_response_length}
+    reward.reward_manager.name=dapo
+    +reward.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer}
+    +reward.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len}
+    +reward.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor}
+    +reward.reward_kwargs.overlong_buffer_cfg.log=False
+    +reward.reward_kwargs.max_resp_len=${max_response_length}
     trainer.logger=['console']
     trainer.project_name='verl-test-fully-async'
     trainer.experiment_name="${exp_name}"
@@ -127,27 +130,51 @@ common_params=(
     rollout.nnodes=1
     rollout.n_gpus_per_node=${n_gpus_rollout}
     rollout.total_rollout_steps=${total_rollout_steps}
-    rollout.total_epochs=2
-    rollout.test_freq=${test_freq}
+    trainer.total_epochs=2
+    trainer.test_freq=${test_freq}
     # Fully async specific configurations
     async_training.staleness_threshold=${staleness_threshold}
     async_training.partial_rollout="${partial_rollout}"
     async_training.trigger_parameter_sync_step="${trigger_parameter_sync_step}"
+    async_training.use_trainer_do_validate=${use_trainer_do_validate}
+    actor_rollout_ref.rollout.checkpoint_engine.backend='nccl'
+    actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=1024
+)
+
+    # Detect device
+    device_name=$(python3 - <<'EOF'
+from verl.utils.device import get_device_name
+print(get_device_name())
+EOF
 )
 
 if [ "${ACTOR_STRATEGY}" == "fsdp2" ]; then
     echo "Running fully async training with FSDP2 strategy..."
     # FSDP2 specific parameters
-    gen_tp=1
+    # trtllm: one replica uses all rollout GPUs as a single TP group.
+    # vllm/sglang: TP=1, rely on data parallelism across replicas.
+    if [ "${rollout_name}" = "trtllm" ]; then
+        gen_tp=${GEN_TP:-${n_gpus_rollout}}
+    else
+        gen_tp=1
+    fi
     sp_size=1
     fsdp_size=1
     ref_offload=True
     actor_offload=False
 
+    if [ -n "$device_name" ] && [ "$device_name" == "npu" ]; then
+        common_params+=(
+            # Todo The checkpoint_engine.backend should be unified to nccl
+            # actor_rollout_ref.rollout.checkpoint_engine.backend='hccl'
+            actor_rollout_ref.rollout.gpu_memory_utilization=0.70
+        )
+        actor_offload=True
+    fi
     python3 -m verl.experimental.fully_async_policy.fully_async_main \
         "${common_params[@]}" \
         actor_rollout_ref.model.enable_gradient_checkpointing=True \
-        actor_rollout_ref.actor.strategy=fsdp2 \
+        actor_rollout_ref.actor.fsdp_config.strategy=fsdp2 \
         critic.strategy=fsdp2 \
         actor_rollout_ref.actor.grad_clip=1.0 \
         actor_rollout_ref.model.use_remove_padding=True \
@@ -165,11 +192,18 @@ if [ "${ACTOR_STRATEGY}" == "fsdp2" ]; then
 elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
     echo "Running fully async training with Megatron strategy..."
     # Megatron specific parameters
-    gen_tp=2
-    train_tp=1
-    train_pp=2
+    if [ "${rollout_name}" = "trtllm" ]; then
+        gen_tp=${GEN_TP:-${n_gpus_rollout}}
+    else
+        gen_tp=2
+    fi
+    train_tp=2
+    train_pp=$((n_gpus_training / train_tp))
     ref_offload=True
-    actor_offload=False
+    actor_offload=True
+    common_params+=(
+        actor_rollout_ref.rollout.gpu_memory_utilization=0.60
+    )
 
     python3 -m verl.experimental.fully_async_policy.fully_async_main \
         --config-path=config \
@@ -179,8 +213,8 @@ elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
         critic.strategy=megatron \
         actor_rollout_ref.actor.optim.lr_decay_steps=10000000 \
         actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=2 \
-        actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=4 \
-        actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4 \
+        actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
+        actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
         actor_rollout_ref.actor.megatron.param_offload=${actor_offload} \
         actor_rollout_ref.actor.megatron.optimizer_offload=${actor_offload} \
         actor_rollout_ref.actor.megatron.grad_offload=${actor_offload} \

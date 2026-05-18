@@ -1,0 +1,93 @@
+# configs for the reward computation
+_target_: verl.workers.config.RewardConfig
+
+# we launch num_workers reward managers to parallelize the reward computation
+num_workers: 8
+
+# custom reward function definition
+custom_reward_function:
+  # The path to the file containing your customized reward function.
+  # If not specified, pre-implemented reward functions will be used.
+  path: null
+  # The name of the reward function within the specified file. Default is 'compute_score'.
+  name: compute_score
+
+# reward manager, see `verl/trainer/config/reward_manager.yaml` for details.
+reward_manager:
+  _target_: verl.workers.config.reward.RewardManagerConfig
+  source: register
+  name: naive
+  module:
+    _target_: verl.trainer.config.config.ModuleConfig
+    path: null
+    name: custom_reward_manager
+
+# Inference config for reward models,
+# support both discriminative and generative models
+reward_model:
+  _target_: verl.workers.config.RewardModelConfig
+  enable: False
+
+  # Whether to deploy the model to a separate resource pool.
+  # If true, n_gpus_per_node & nnodes will be used to determine the resource node.
+  enable_resource_pool: False
+  n_gpus_per_node: 8
+  nnodes: 0
+
+  model_path: null
+  rollout:
+    _target_: verl.workers.config.RolloutConfig
+    name: ???
+    dtype: bfloat16
+    gpu_memory_utilization: 0.5
+    enforce_eager: true
+    cudagraph_capture_sizes: null
+    free_cache_engine: true
+    data_parallel_size: 1
+    expert_parallel_size: 1
+    tensor_model_parallel_size: 2
+    pipeline_model_parallel_size: 1
+    max_num_batched_tokens: 8192
+    max_model_len: null
+    max_num_seqs: 1024
+    load_format: auto
+    layered_summon: false
+    scheduling_policy: fcfs
+    multi_stage_wake_up: false
+    engine_kwargs: {}
+    limit_images: null
+    enable_chunked_prefill: true
+    enable_prefix_caching: true
+    disable_log_stats: true
+    skip_tokenizer_init: false
+    ignore_eos: false
+    temperature: 1.0
+    top_k: -1
+    top_p: 1
+    do_sample: true
+    n: 1
+
+    prompt_length: 2048
+    response_length: 2048
+
+    quantization: null
+    quantization_config_file: null
+    mtp: null
+    disaggregation:
+      enabled: false
+      prefill_replicas: 1
+      decode_replicas: 1
+      decode_tensor_model_parallel_size: null
+      transfer_backend: nixl
+      bootstrap_port: null
+      ib_device: null
+
+# Cloud/local sandbox fusion configuration for custom reward logic
+sandbox_fusion:
+  _target_: verl.workers.config.SandboxFusionConfig
+  # Cloud /local function URL for sandbox execution
+  url: null
+  # Max concurrent requests allowed to sandbox
+  max_concurrent: 64
+  # Max memory limit for each sandbox process in MB
+  memory_limit_mb: 1024

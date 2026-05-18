@@ -38,6 +38,9 @@ num_cycles: 0.5
 # LR scheduler type: "constant" or "cosine"
 lr_scheduler_type: constant
 
+# Whether the LR schedule uses 0-indexed steps
+zero_indexed_step: true
+
 # deprecated
 warmup_style: null
 

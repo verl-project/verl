@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import asyncio
 import os
 
 import pytest
@@ -21,7 +20,8 @@ from openai import AsyncOpenAI, OpenAI
 
 from tests.experimental.agent_loop.agent_utils import init_agent_loop_manager
 from verl.checkpoint_engine import CheckpointEngineManager
-from verl.workers.rollout.replica import get_rollout_replica_class
+from verl.utils import omega_conf_to_dataclass
+from verl.workers.rollout.llm_server import LLMServerManager
 
 
 @pytest.fixture
@@ -58,24 +58,18 @@ async def test_standalone_rollout(init_config, tp_size):
         }
     )
 
+    init_config.actor_rollout_ref.rollout.nnodes = init_config.trainer.nnodes
     init_config.actor_rollout_ref.rollout.tensor_model_parallel_size = tp_size
     num_replicas = (init_config.trainer.n_gpus_per_node * init_config.trainer.nnodes) // tp_size
-    rollout_config = init_config.actor_rollout_ref.rollout
-    model_config = init_config.actor_rollout_ref.model
 
     # create standalone rollout server
-    rollout_server_class = get_rollout_replica_class(init_config.actor_rollout_ref.rollout.name)
-    rollout_servers = [
-        rollout_server_class(
-            replica_rank=replica_rank, config=rollout_config, model_config=model_config, gpus_per_node=2
-        )
-        for replica_rank in range(num_replicas)
-    ]
-    await asyncio.gather(*[server.init_standalone() for server in rollout_servers])
+    llm_server_manager = await LLMServerManager.create(
+        config=init_config,
+        worker_group=None,
+        rollout_resource_pool=None,
+    )
 
-    server_handles = [server._server_handle for server in rollout_servers]
-    server_addresses = [server._server_address for server in rollout_servers]
-    assert len(server_handles) == num_replicas
+    server_addresses = llm_server_manager.get_addresses()
     assert len(server_addresses) == num_replicas
 
     os.environ.pop("HTTPS_PROXY", None)
@@ -124,7 +118,7 @@ def test_hybrid_rollout_with_ep(init_config):
     # - sleep rollout and load FSDP model and optimizer
     agent_loop_manager = init_agent_loop_manager(init_config)
     checkpoint_manager = CheckpointEngineManager(
-        backend=init_config.actor_rollout_ref.rollout.checkpoint_engine.backend,
+        config=omega_conf_to_dataclass(init_config.actor_rollout_ref.rollout.checkpoint_engine),
         trainer=agent_loop_manager.worker_group,
         replicas=agent_loop_manager.rollout_replicas,
     )

@@ -30,9 +30,9 @@ class DAPORewardManager(RewardManagerBase):
         self.is_async_reward_score = inspect.iscoroutinefunction(self.compute_score)
 
         # DAPO Reward Config
-        overlong_buffer_cfg = config.reward_model.get("reward_kwargs", {}).get("overlong_buffer_cfg", None)
+        overlong_buffer_cfg = config.reward.get("reward_kwargs", {}).get("overlong_buffer_cfg", None)
         self.overlong_buffer_cfg = overlong_buffer_cfg
-        self.max_resp_len = config.reward_model.get("reward_kwargs", {}).get("max_resp_len", None)
+        self.max_resp_len = config.reward.get("reward_kwargs", {}).get("max_resp_len", None)
         self.reward_router_address = reward_router_address
         self.reward_model_tokenizer = reward_model_tokenizer
 
@@ -50,7 +50,7 @@ class DAPORewardManager(RewardManagerBase):
             )
 
     async def run_single(self, data: DataProto) -> dict:
-        assert len(data) == 1, "Only support single data item"
+        data = data[-1:]  # for multi-sequence outputs, we only compute reward based on the last sequence
         data_item = data[0]
         response_ids = data_item.batch["responses"]
         response_length = response_ids.shape[-1]

@@ -71,8 +71,7 @@ python -m verl.experimental.fully_async_policy.fully_async_main \
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=5120 \
     actor_rollout_ref.rollout.name=$ENGINE \
-    actor_rollout_ref.rollout.mode=${rollout_mode} \
-    +actor_rollout_ref.rollout.engine_kwargs.vllm.disable_mm_preprocessor_cache=True \
+
     actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
     actor_rollout_ref.rollout.n=${n_resp_per_prompt} \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
@@ -102,8 +101,8 @@ python -m verl.experimental.fully_async_policy.fully_async_main \
     rollout.nnodes="${NNODES}" \
     rollout.n_gpus_per_node="${n_gpus_rollout}" \
     rollout.total_rollout_steps="${total_rollout_steps}" \
-    rollout.total_epochs="${total_epochs}" \
-    rollout.test_freq="${test_freq}" \
+    trainer.total_epochs="${total_epochs}" \
+    trainer.test_freq="${test_freq}" \
     async_training.staleness_threshold="${staleness_threshold}" \
     async_training.trigger_parameter_sync_step="${trigger_parameter_sync_step}" \
     async_training.require_batches="${require_batches}" \

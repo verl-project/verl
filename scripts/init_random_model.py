@@ -87,10 +87,10 @@ def init_random_model(hf_model_path, new_config_path, output_path, trust_remote_
     print(f"new_config: {new_confg}")
     if trust_remote_code:
         model = AutoModelForCausalLM.from_pretrained(
-            hf_model_path, config=new_confg, trust_remote_code=trust_remote_code
+            hf_model_path, config=new_confg, trust_remote_code=trust_remote_code, torch_dtype=new_confg.torch_dtype
         )
     else:
-        model = AutoModelForCausalLM.from_config(new_confg)
+        model = AutoModelForCausalLM.from_config(new_confg, torch_dtype=new_confg.torch_dtype)
     model.save_pretrained(output_path)
     tokenizer.save_pretrained(output_path)
     new_confg.save_pretrained(output_path)

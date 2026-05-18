@@ -11,9 +11,28 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import logging
+import os
+
+import torch
 from torch.distributed.device_mesh import init_device_mesh
 
-from verl.utils.device import get_device_name
+from verl.utils.device import get_device_name, is_npu_available
+
+logger = logging.getLogger(__file__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+
+def apply_npu_fsdp_patches():
+    """Apply NPU patches for FSDP backend if NPU is available."""
+    if is_npu_available:
+        try:
+            import verl.models.transformers.npu_patch  # noqa
+
+            if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:
+                logger.info("Applied NPU patches for FSDP backend")
+        except Exception as e:
+            logger.warning(f"Failed to apply NPU patches: {e}")
 
 
 def create_device_mesh(world_size, fsdp_size):

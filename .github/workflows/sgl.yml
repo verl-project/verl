@@ -63,7 +63,6 @@ on:
       - ".github/workflows/sgl.yml"
       - "tests/rollout/*sglang*"
       - "tests/rollout/async_rollout_utils.py"
-      - "tests/workers/rollout/*interaction*"
 
 # Cancel jobs on the same ref if a new one is triggered
 concurrency:
@@ -75,7 +74,7 @@ permissions:
   contents: read
 
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:sgl056.latest"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:sgl059.dev2"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
 
 jobs:
@@ -99,7 +98,6 @@ jobs:
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 35 # Increase this timeout value as needed
     env:
-      HTTP_PROXY: ${{ secrets.PROXY_HTTP }}
       HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
       NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
@@ -113,8 +111,8 @@ jobs:
           fetch-depth: 0
       - name: Install the current repository
         run: |
-          pip3 install cupy-cuda12x pytest-asyncio
-          pip3 install hf_transfer fastmcp pytest-asyncio
+          pip3 install cupy-cuda12x==13.6.0 pytest-asyncio
+          pip3 install hf_transfer pytest-asyncio
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
       - name: Prepare gsm8k dataset
@@ -130,7 +128,6 @@ jobs:
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 35 # Increase this timeout value as needed
     env:
-      HTTP_PROXY: ${{ secrets.PROXY_HTTP }}
       HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
       NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
@@ -144,8 +141,8 @@ jobs:
           fetch-depth: 0
       - name: Install the current repository
         run: |
-          pip3 install cupy-cuda12x pytest-asyncio
-          pip3 install hf_transfer fastmcp pytest-asyncio
+          pip3 install cupy-cuda12x==13.6.0 pytest-asyncio
+          pip3 install hf_transfer pytest-asyncio
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
       - name: Test SGLang ServerAdapter with Checkpoint Engine (NCCL)

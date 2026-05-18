@@ -34,11 +34,10 @@ def enable_full_determinism(seed: int):
 
     os.environ["PYTHONHASHSEED"] = str(seed)
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
-    os.environ["NCCL_DETERMINISTIC"] = "1"
     os.environ["FLASH_ATTENTION_DETERMINISTIC"] = "1"
     if is_npu_available:
         # The environment variable required to enable deterministic mode on Ascend NPUs.
-        os.environ["NCCL_DETERMINISTIC"] = "true"
+        os.environ["HCCL_DETERMINISTIC"] = "true"
         os.environ["CLOSE_MATMUL_K_SHIFT"] = "1"
 
     random.seed(seed)
@@ -70,6 +69,8 @@ def prepare_micro_batches(
     use_dynamic_bsz = tu.get_non_tensor_data(data=data, key="use_dynamic_bsz", default=True)
     sp_size = tu.get_non_tensor_data(data=data, key="sp_size", default=1)
 
+    force_group_size = tu.get_non_tensor_data(data=data, key="force_group_size", default=1)
+
     if use_dynamic_bsz:
         assert "max_token_len_per_gpu" in data.keys(), "max_token_len_per_gpu must be set when use_dynamic_bsz is True"
         max_token_len_per_gpu = data["max_token_len_per_gpu"]
@@ -82,10 +83,15 @@ def prepare_micro_batches(
             same_micro_num_in_dp=same_micro_num_in_dp,
             min_num_micro_batch=min_num_micro_batch,
             use_dynamic_bsz_balance=use_dynamic_bsz_balance,
+            force_group_size=force_group_size,
         )
     else:
+        total_data_size = len(data)
         micro_batch_size_per_gpu = data["micro_batch_size_per_gpu"]
-        micro_batches = tu.chunk_tensordict(data, len(data) // micro_batch_size_per_gpu)
+        assert total_data_size % (force_group_size * micro_batch_size_per_gpu) == 0, (
+            "data size must be divisible by force_group_size * micro_batch_size_per_gpu"
+        )
+        micro_batches = tu.chunk_tensordict(data, total_data_size // (micro_batch_size_per_gpu * force_group_size))
         batch_idx_list = None
     return micro_batches, batch_idx_list
 

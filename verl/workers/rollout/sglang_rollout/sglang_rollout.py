@@ -18,18 +18,22 @@ from __future__ import annotations
 import logging
 import multiprocessing as mp
 import os
+from dataclasses import asdict
 from typing import Generator
 
 import ray
 import sglang.srt.entrypoints.engine
 import torch
+from peft import LoraConfig
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import (
+    MultiprocessingSerializer,
     assert_pkg_version,
     is_cuda,
     set_prometheus_multiproc_dir,
     set_ulimit,
 )
+from sglang.srt.weight_sync.utils import _preprocess_tensor_for_update_weights
 from sglang.srt.weight_sync.utils import update_weights as sgl_update_weights
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 
@@ -37,7 +41,10 @@ from verl.utils.net_utils import is_valid_ipv6_address
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.base import BaseRollout
 from verl.workers.rollout.sglang_rollout.http_server_engine import AsyncHttpServerAdapter
-from verl.workers.rollout.sglang_rollout.utils import get_named_tensor_buckets
+from verl.workers.rollout.sglang_rollout.utils import (
+    SGLANG_LORA_NAME,
+    get_named_tensor_buckets,
+)
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -98,8 +105,10 @@ class ServerAdapter(BaseRollout):
         config: RolloutConfig,
         model_config: HFModelConfig,
         device_mesh: DeviceMesh,
+        replica_rank: int = -1,
     ):
-        if config.get("quantization", None) == "fp8":
+        super().__init__(config, model_config, device_mesh)
+        if self.config.get("quantization", None) == "fp8":
             import sglang
             from packaging import version
 
@@ -113,23 +122,79 @@ class ServerAdapter(BaseRollout):
                 "weight_block_size": [128, 128],
             }
             fp8_block_quant_kwargs = dict(FP8_BLOCK_QUANT_KWARGS)
-            model_config.hf_config.quantization_config = fp8_block_quant_kwargs
-        super().__init__(config, model_config, device_mesh)
+            self.model_config.hf_config.quantization_config = fp8_block_quant_kwargs
         self._engine: AsyncHttpServerAdapter = None
 
         rank = int(os.environ["RANK"])
         local_world_size = int(os.environ["RAY_LOCAL_WORLD_SIZE"])
-        rollout_world_size = self.config.tensor_model_parallel_size * self.config.data_parallel_size
-        self.replica_rank = rank // rollout_world_size
+        # PD asymmetric layout inflates per-replica footprint; must match
+        # agent_loop.py:_initialize_llm_servers or trainer-to-replica mapping breaks.
+        disagg = getattr(self.config, "disaggregation", None)
+        prefill_tp = self.config.tensor_model_parallel_size
+        if disagg is not None and getattr(disagg, "enabled", False):
+            # Inline decode_tp default: OmegaConf/Ray serialization drops dataclass methods.
+            decode_tp = (
+                disagg.decode_tensor_model_parallel_size
+                if disagg.decode_tensor_model_parallel_size is not None
+                else prefill_tp
+            )
+            rollout_world_size = (
+                (prefill_tp * disagg.prefill_replicas + decode_tp * disagg.decode_replicas)
+                * self.config.data_parallel_size
+                * self.config.pipeline_model_parallel_size
+            )
+        else:
+            rollout_world_size = prefill_tp * self.config.data_parallel_size * self.config.pipeline_model_parallel_size
+        if replica_rank == -1:
+            self.replica_rank = rank // rollout_world_size
+        else:
+            self.replica_rank = replica_rank
         self.rollout_rank = rank % rollout_world_size
         self.node_rank = self.rollout_rank // local_world_size
         self.local_rank = self.rollout_rank % local_world_size
+
+        # Map each trainer rank to its co-located SGLang server so weight-update
+        # IPC handles stay on the GPU where they were created. Offset math
+        # assumes prefill_replicas == 1 (enforced by SGLangPDReplica); if that
+        # ever lifts, update both this block and SGLangPDReplica.launch_servers.
+        self._pd_role = None
+        self._pd_server_index = None
+        self._pd_tp_local_rank = None
+        if disagg is not None and getattr(disagg, "enabled", False):
+            decode_tp = (
+                disagg.decode_tensor_model_parallel_size
+                if disagg.decode_tensor_model_parallel_size is not None
+                else prefill_tp
+            )
+            # Modulo by single-group footprint so if DP>1 is ever enabled,
+            # each DP group's ranks resolve to the same role offsets.
+            footprint = prefill_tp + disagg.decode_replicas * decode_tp
+            local = self.rollout_rank % footprint
+            if local < prefill_tp:
+                self._pd_role = "prefill"
+                self._pd_server_index = 0
+                self._pd_tp_local_rank = local
+            else:
+                off = local - prefill_tp
+                self._pd_role = "decode"
+                self._pd_server_index = off // decode_tp
+                self._pd_tp_local_rank = off % decode_tp
+        self._has_server = (disagg is None or not getattr(disagg, "enabled", False)) or (self._pd_role is not None)
+
+        # sleep_level controls what gets released during sleep/release:
+        #   2 (default) = release weights + kv_cache (full sleep, merge path)
+        #   1 = release kv_cache only (keep base weights, adapter path)
+        # Set by engine_workers.update_weights() when lora.merge=False.
+        self.sleep_level = 2
 
     async def _init_server_adapter(self):
         if self._engine is not None:
             return
 
-        # device_mesh is needed to gather cuda ipc handle to update weights
+        if not self._has_server:
+            return
+
+        # device_mesh is needed to gather cuda ipc handle to update weights.
         if self.device_mesh is None:
             assert torch.distributed.is_initialized(), "torch distributed must be initialized"
             infer_tp = self.config.tensor_model_parallel_size * self.config.data_parallel_size
@@ -140,25 +205,55 @@ class ServerAdapter(BaseRollout):
                 "cpu", mesh_shape=(dp, infer_tp, infer_pp), mesh_dim_names=["dp", "infer_tp", "infer_pp"]
             )
 
-        # Only init http server adapter in tp rank 0
-        if self.device_mesh["infer_tp"].get_local_rank() != 0:
-            return
+        # Only the role's TP-rank-0 builds an adapter; others participate in
+        # FSDP collectives but skip HTTP dispatch.
+        if self._pd_role is not None:
+            if self._pd_tp_local_rank != 0:
+                return
+        else:
+            if self.device_mesh["infer_tp"].get_local_rank() != 0:
+                return
 
-        # Lazy init http server adapter because http server is launched after hybrid engine.
-        self.server_actor = ray.get_actor(f"sglang_server_{self.replica_rank}_{self.node_rank}")
+        if self._pd_role == "prefill":
+            actor_name = f"sglang_server_{self.replica_rank}_0"
+            timeout_kwargs = {}
+        elif self._pd_role == "decode":
+            actor_name = f"sglang_server_decode_{self.replica_rank}_{self._pd_server_index}"
+            # Decode init on long-prompt workloads can stall past the default
+            # (60s × 12); shorter timeout + fewer attempts avoids trainer lockup.
+            timeout_kwargs = {"timeout": 10.0, "max_attempts": 2}
+        else:
+            actor_name = f"sglang_server_{self.replica_rank}_{self.node_rank}"
+            timeout_kwargs = {}
+
+        self.server_actor = ray.get_actor(actor_name)
         server_address, server_port = await self.server_actor.get_server_address.remote()
-        logger.debug(
-            f"replica_rank={self.replica_rank} node_rank={self.node_rank}, "
-            f"server address: {server_address}, port: {server_port}"
-        )
         host = f"[{server_address}]" if is_valid_ipv6_address(server_address) else server_address
+        logger.info(
+            f"ServerAdapter {self._pd_role or 'colocated'}: "
+            f"replica_rank={self.replica_rank}, rollout_rank={self.rollout_rank}, "
+            f"server={host}:{server_port}, actor={actor_name}"
+        )
+
         self._engine = AsyncHttpServerAdapter(
             model_path=self.model_config.local_path,
             host=host,
             port=server_port,
             launch_server=False,
             trust_remote_code=self.model_config.trust_remote_code,
+            **timeout_kwargs,
         )
+
+    def _is_server_tp_leader(self) -> bool:
+        """True if this rank is TP-rank-0 of its server's group.
+
+        In PD, the role's TP (prefill_tp or decode_tp) may differ from the
+        config-level TP that device_mesh was built with, so use
+        _pd_tp_local_rank when PD is active.
+        """
+        if self._pd_role is not None:
+            return self._pd_tp_local_rank == 0
+        return self.device_mesh["infer_tp"].get_local_rank() == 0
 
     async def resume(self, tags: list[str]):
         """Resume rollout weights or kv cache in GPU memory.
@@ -167,16 +262,31 @@ class ServerAdapter(BaseRollout):
             tag: weights or kv_cache.
         """
         await self._init_server_adapter()
-        if self.device_mesh["infer_tp"].get_local_rank() == 0 and self.config.free_cache_engine:
+        if self._engine is None:
+            return
+        if self._is_server_tp_leader() and self.config.free_cache_engine:
             await self._engine.resume_memory_occupation(tags=tags)
 
     async def release(self):
-        """Release weights and kv cache in GPU memory."""
-        await self._init_server_adapter()
-        if self.device_mesh["infer_tp"].get_local_rank() == 0 and self.config.free_cache_engine:
-            await self._engine.release_memory_occupation(tags=["kv_cache", "weights"])
+        """Release weights and kv cache in GPU memory.
 
-    async def update_weights(self, weights: Generator[tuple[str, torch.Tensor], None, None], **kwargs):
+        When sleep_level=1 (LoRA adapter mode), only releases kv_cache
+        to keep base weights alive across training iterations.
+        When sleep_level=2 (default/merge mode), releases everything.
+        """
+        await self._init_server_adapter()
+        if self._engine is None:
+            return
+        if self._is_server_tp_leader() and self.config.free_cache_engine:
+            if self.sleep_level == 1:
+                tags = ["kv_cache"]
+            else:
+                tags = ["kv_cache", "weights"]
+            await self._engine.release_memory_occupation(tags=tags)
+
+    async def update_weights(
+        self, weights: Generator[tuple[str, torch.Tensor], None, None], global_steps: int = None, **kwargs
+    ):
         """
         Update model weights using tensor buckets, similar to THUDM/slime's implementation.
 
@@ -190,27 +300,73 @@ class ServerAdapter(BaseRollout):
             - runtime envs: https://github.com/THUDM/slime/blob/fb7605cc5fb09af0f9369d37f7192f12bddee577/slime/ray/ppo_actor.py#L39
         """
         await self._init_server_adapter()
+        # All ranks MUST iterate the weights generator below — DTensor.full_tensor()
+        # all_gather's across the FSDP group and skipping deadlocks the others.
+        # Only HTTP dispatch is gated on self._engine.
 
-        update_weights_bucket_bytes = int(self.config.checkpoint_engine.update_weights_bucket_megabytes) << 20
-        if self.config.get("quantization", None) == "fp8":
-            from verl.utils.sglang.sglang_fp8_utils import quant_weights_by_name
+        peft_config, base_sync_done = kwargs.get("peft_config", None), kwargs.get("base_sync_done", False)
+        if peft_config and base_sync_done:
+            if self.device_mesh["infer_tp"].get_local_rank() == 0:
+                # unload lora
+                models_result = await self._engine.available_models()
+                exists = any(item["id"] == SGLANG_LORA_NAME for item in models_result["data"])
+                if exists:
+                    await self._engine.unload_lora_adapter(SGLANG_LORA_NAME)
 
-            logger.info("Convert bf16 weights to fp8 format before loading")
-            weights = quant_weights_by_name(
-                weights,
-                self.model_config.hf_config.quantization_config,
-                dtype=self.model_config.hf_config.dtype,
-            )
+                # load lora by tensor
+                serialize_peft_config, serialize_named_tensors = self.wrap_lora_params(peft_config, weights)
+                from sglang.srt.managers.io_struct import LoadLoRAAdapterFromTensorsReqInput
+
+                req = LoadLoRAAdapterFromTensorsReqInput(
+                    lora_name=SGLANG_LORA_NAME,
+                    config_dict=serialize_peft_config,
+                    serialized_tensors=serialize_named_tensors,
+                )
+                # send http request
+                await self._engine.load_lora_adapter_from_tensor(req)
         else:
-            weights = weights
+            update_weights_bucket_bytes = int(self.config.checkpoint_engine.update_weights_bucket_megabytes) << 20
+            if self.config.get("quantization", None) == "fp8":
+                from verl.utils.sglang.sglang_fp8_utils import SGLangFP8QuantizerHelper
 
-        async for params_batch in get_named_tensor_buckets(weights, update_weights_bucket_bytes):
-            await sgl_update_weights(
-                engine=self._engine,
-                params_batch=params_batch,
-                device_mesh_key="infer_tp",
-                device_mesh=self.device_mesh,
-            )
+                logger.info("Convert bf16 weights to fp8 format before loading")
+                fp8_quantizer_helper = SGLangFP8QuantizerHelper(self.model_config.hf_config.quantization_config)
+                weights = fp8_quantizer_helper.quant_weights_by_name(
+                    weights,
+                    dtype=self.model_config.hf_config.dtype,
+                )
+            else:
+                weights = weights
 
-        if self.device_mesh["infer_tp"].get_local_rank() == 0:
+            async for params_batch in get_named_tensor_buckets(weights, update_weights_bucket_bytes):
+                await sgl_update_weights(
+                    engine=self._engine,
+                    params_batch=params_batch,
+                    device_mesh_key="infer_tp",
+                    device_mesh=self.device_mesh,
+                )
+
+        if self._engine is not None and self._is_server_tp_leader():
             await self._engine.flush_cache()
+            if global_steps is not None:
+                await self.server_actor.set_global_steps.remote(global_steps)
+
+    def wrap_lora_params(self, peft_config: LoraConfig, weights: Generator[tuple[str, torch.Tensor]]):
+        # peft config
+        peft_config_json = asdict(peft_config)
+        peft_config_json["task_type"] = peft_config_json["task_type"].value
+        peft_config_json["peft_type"] = peft_config_json["peft_type"].value
+        peft_config_json["target_modules"] = list(peft_config_json["target_modules"])
+
+        # lora weights
+        processed_weights: dict[str, torch.Tensor] = {
+            name: _preprocess_tensor_for_update_weights(tensor.detach()) for name, tensor in weights
+        }
+
+        infer_tp_size = self.device_mesh["infer_tp"].mesh.size()[0]
+        serialized_named_tensors = []
+        for i in range(infer_tp_size):
+            serialized_tensors = MultiprocessingSerializer.serialize(processed_weights, output_str=True)
+            serialized_named_tensors.append(serialized_tensors)
+
+        return peft_config_json, serialized_named_tensors

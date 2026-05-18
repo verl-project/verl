@@ -92,8 +92,8 @@ A single PPO step contain two phase: rollout and train. In rollout phase:
 
 In agent loop, when user need LLM generate response:
 
-5. Call ``AsyncLLMServerManager.generate`` with prompt_ids.
-6. AsyncLLMServerManager select a server instance with least request in first turn and send request to it. (In following turns, the request will be sent to the same server instance).
+5. Call ``LLMServerClient.generate`` with prompt_ids.
+6. LLMServerClient select a server instance with least request in first turn and send request to it. (In following turns, the request will be sent to the same server instance).
 7. AsyncLLMServer receive a request, issue ipc/rpc with model_runner, and generate response. (There's slight differences between vLLM and SGLang, see below).
 
 When all prompts in all AgentLoopWorker finish, AgentLoopManager gather results and return to PPOTrainer.
@@ -152,7 +152,7 @@ Chat completion vs Token in token out
 Almost all agent frameworks (LangGraph, CrewAI, LlamaIndex, etc) call LLM with OpenAI chat completion api, and 
 keep chat history as messages. So user may expect that we should use the chat completion api in multi-turn rollout.
 
-But based on our recent experience on single-turn training on DAPO and multi-turn training on `retool <https://github.com/volcengine/verl-recipe/tree/main/retool>`_,
+But based on our recent experience on single-turn training on DAPO and multi-turn training on `retool <https://github.com/verl-project/verl-recipe/tree/main/retool>`_,
 we found the token_ids from apply the final messages may not equal to the token_ids by concat prompt_ids and response_ids in each turn.
 
 .. image:: https://github.com/eric-haibin-lin/verl-community/blob/main/docs/multi_turn.png?raw=true
@@ -197,20 +197,20 @@ SGLang
 For SGLang, the Async LLM Engine is running in same process as FSDP/Megatron-LM worker-0, and it spawn multiple subprocesses as ModelRunner.
 Also, Async LLM Engine communicate with ModelRunner through ZeroMQ. When server receive a request, it remote call the worker-0 and get response_ids.
 
-AsyncLLMServerManager
+LLMServerClient
 ~~~~~~~~~~~~~~~~~~~~~
 
-AsyncLLMServerManager serve as proxy to multiple AsyncLLMServer instances, provides:
+LLMServerClient serve as proxy to multiple AsyncLLMServer instances, provides:
 
 - load balance: select a server instance with least request in first turn and send request to it.
 - sticky session: bind request_id to server instance, so that the same request_id will be sent to the same server instance in following turns.
 
-AsyncLLMServerManager is passed to ``AgentLoopBase.__init__``, whenever user want to interact with LLM in agent loop,
-they can call ``AsyncLLMServerManager.generate`` to generate response_ids.
+LLMServerClient is passed to ``AgentLoopBase.__init__``, whenever user want to interact with LLM in agent loop,
+they can call ``LLMServerClient.generate`` to generate response_ids.
 
 .. code:: python
 
-   class AsyncLLMServerManager:
+   class LLMServerClient:
        async def generate(
            self,
            request_id,
@@ -234,5 +234,5 @@ Next
 ----
 
 - :doc:`Agentic RL Training<../start/agentic_rl>`: Quick start agentic RL training with gsm8k dataset.
-- `LangGraph MathExpression <https://github.com/volcengine/verl-recipe/tree/main/langgraph_agent/example>`_: Demonstrate how to use LangGraph to build agent loop.
-- `Retool <https://github.com/volcengine/verl-recipe/tree/main/retool>`_: End-to-end retool paper reproduction using tool agent.
+- `LangGraph MathExpression <https://github.com/verl-project/verl-recipe/tree/main/langgraph_agent/example>`_: Demonstrate how to use LangGraph to build agent loop.
+- `Retool <https://github.com/verl-project/verl-recipe/tree/main/retool>`_: End-to-end retool paper reproduction using tool agent.

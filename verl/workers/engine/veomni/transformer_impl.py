@@ -21,11 +21,13 @@ import torch
 import torch.distributed as dist
 from tensordict import TensorDict
 from torch.distributed.tensor import DTensor
+from veomni.arguments import OpsImplementationConfig
 from veomni.distributed import parallel_state
 from veomni.distributed.offloading import build_activation_offloading_context
 from veomni.distributed.torch_parallelize import build_parallelize_model
 from veomni.models.auto import build_foundation_model
 from veomni.optim import build_lr_scheduler, build_optimizer
+from veomni.utils.seqlen_pos_transform_utils import prepare_fa_kwargs_from_position_ids
 
 import verl.utils.torch_functional as verl_F
 from verl.trainer.config import CheckpointConfig
@@ -35,8 +37,11 @@ from verl.utils.device import get_device_id, get_device_name
 from verl.utils.fsdp_utils import fsdp_version
 from verl.utils.model import convert_weight_keys
 from verl.utils.profiler import log_gpu_memory_usage
+from verl.utils.ulysses import (
+    get_ulysses_sequence_parallel_group,
+    set_ulysses_sequence_parallel_group,
+)
 from verl.workers.config import HFModelConfig, VeOmniEngineConfig, VeOmniOptimizerConfig
-from verl.workers.sharding_manager.fsdp_ulysses import FSDPUlyssesShardingManager
 
 from ..base import BaseEngineCtx, EngineRegistry
 from ..fsdp.transformer_impl import FSDPEngine, FSDPEngineWithLMHead
@@ -79,14 +84,27 @@ class VeOmniEngine(FSDPEngine):
         self.data_parallel_mode = "fsdp2"
         self.rank = dist.get_rank()
 
+        fsdp_size = self.engine_config.fsdp_size
+        world_size = dist.get_world_size()
+        dp_size = world_size // self.engine_config.ulysses_parallel_size
+
+        if fsdp_size < 0 or fsdp_size >= dp_size:
+            data_parallel_replicate_size = 1
+            data_parallel_shard_size = dp_size
+        else:
+            if dp_size % fsdp_size != 0:
+                raise ValueError(
+                    f"Data parallel size ({dp_size}) must be divisible by fsdp_size ({fsdp_size}). "
+                    "Please adjust your parallel configuration."
+                )
+            data_parallel_replicate_size = dp_size // fsdp_size
+            data_parallel_shard_size = fsdp_size
+
         parallel_state.init_parallel_state(
-            dp_size=self.engine_config.data_parallel_size,
-            dp_replicate_size=self.engine_config.data_parallel_replicate_size,
-            dp_shard_size=self.engine_config.data_parallel_shard_size,
-            tp_size=self.engine_config.tensor_parallel_size,
-            ep_size=self.engine_config.expert_parallel_size,
-            pp_size=self.engine_config.pipeline_parallel_size,
-            cp_size=self.engine_config.context_parallel_size,
+            dp_size=dp_size,
+            dp_replicate_size=data_parallel_replicate_size,
+            dp_shard_size=data_parallel_shard_size,
+            extra_parallel_sizes=(self.engine_config.expert_parallel_size,),
             ulysses_size=self.engine_config.ulysses_parallel_size,
             dp_mode=self.data_parallel_mode,
         )
@@ -104,9 +122,9 @@ class VeOmniEngine(FSDPEngine):
         self.ulysses_sequence_parallel_size = self.engine_config.ulysses_parallel_size
 
         if self.use_ulysses_sp:
-            self.ulysses_sharding_manager = FSDPUlyssesShardingManager(parallel_state.get_parallel_state().device_mesh)
+            self.ulysses_parallel_group = parallel_state.get_parallel_state().device_mesh["sp"].get_group()
         else:
-            self.ulysses_sharding_manager = FSDPUlyssesShardingManager(None)
+            self.ulysses_parallel_group = None
 
         if self.engine_config.entropy_from_logits_with_chunking:
             entropy_from_logits = verl_F.entropy_from_logits_with_chunking
@@ -177,13 +195,26 @@ class VeOmniEngine(FSDPEngine):
         return lr_scheduler
 
     def _build_model_optimizer(self):
-        # Load base model with specified configuration and dtype
-        module = build_foundation_model(
-            config_path=self.model_config.hf_config_path,
-            weights_path=self.model_config.path,
-            torch_dtype="float32" if self.engine_config.mixed_precision else "bfloat16",
+        # build_foundation_model runs apply_ops_config(ops_implementation)
+        # before constructing the model, so per-model device_patch files see
+        # the resolved kernel backends.
+        ops_implementation = OpsImplementationConfig(
             attn_implementation=self.engine_config.attn_implementation,
             moe_implementation=self.engine_config.moe_implementation,
+            cross_entropy_loss_implementation=self.engine_config.cross_entropy_loss_implementation,
+            rms_norm_implementation=self.engine_config.rms_norm_implementation,
+            swiglu_mlp_implementation=self.engine_config.swiglu_mlp_implementation,
+            rotary_pos_emb_implementation=self.engine_config.rotary_pos_emb_implementation,
+            load_balancing_loss_implementation=self.engine_config.load_balancing_loss_implementation,
+        )
+
+        # Load base model with specified configuration and dtype
+        module = build_foundation_model(
+            config_path=self.model_config.local_hf_config_path,
+            weights_path=self.model_config.local_path,
+            torch_dtype="float32" if self.engine_config.mixed_precision else "bfloat16",
+            attn_implementation=self.engine_config.attn_implementation,
+            ops_implementation=ops_implementation,
             init_device=self.engine_config.init_device,
         )
         log_gpu_memory_usage("After load base model", logger=logger)
@@ -193,12 +224,14 @@ class VeOmniEngine(FSDPEngine):
         module = build_parallelize_model(
             module,
             init_device=self.engine_config.init_device,
-            weights_path=self.model_config.path,
+            weights_path=self.model_config.local_path,
             enable_full_shard=self.engine_config.enable_full_shard,
             enable_mixed_precision=self.engine_config.mixed_precision,
             enable_gradient_checkpointing=self.model_config.enable_gradient_checkpointing,
             enable_fsdp_offload=self.engine_config.enable_fsdp_offload,
-            basic_modules=module._no_split_modules + self.engine_config.basic_modules,
+            basic_modules=list(
+                set(getattr(module, "_no_split_modules", None) or []) | set(self.engine_config.basic_modules)
+            ),
             enable_reentrant=self.engine_config.enable_reentrant,
             enable_forward_prefetch=self.engine_config.forward_prefetch,
         )
@@ -292,6 +325,12 @@ class VeOmniEngine(FSDPEngine):
             return parallel_state.get_parallel_state().device_mesh.get_group(mesh_dim="dp")
         else:
             return torch.distributed.group.WORLD
+
+    def get_model_parallel_group(self):
+        raise NotImplementedError
+
+    def get_context_parallel_group(self):
+        raise NotImplementedError
 
     def is_mp_src_rank_with_outputs(self):
         """
@@ -438,12 +477,13 @@ class EngineEvalModeCtx(BaseEngineCtx):
     def __enter__(self):
         assert isinstance(self.engine, VeOmniEngine)
         super().__enter__()
-        self.engine.ulysses_sharding_manager.__enter__()
+        self.prev_sp_group = get_ulysses_sequence_parallel_group()
+        set_ulysses_sequence_parallel_group(self.engine.ulysses_parallel_group)
         self.engine.module.train()
 
     def __exit__(self, exc_type, exc_value, traceback):
         assert isinstance(self.engine, VeOmniEngine)
-        self.engine.ulysses_sharding_manager.__exit__(exc_type, exc_value, traceback)
+        set_ulysses_sequence_parallel_group(self.prev_sp_group)
 
         # https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes
         # unshard the root FSDP module
@@ -463,14 +503,15 @@ class EngineTrainModeCtx(BaseEngineCtx):
     def __enter__(self):
         assert isinstance(self.engine, VeOmniEngine)
         super().__enter__()
-        self.engine.ulysses_sharding_manager.__enter__()
+        self.prev_sp_group = get_ulysses_sequence_parallel_group()
+        set_ulysses_sequence_parallel_group(self.engine.ulysses_parallel_group)
         # TODO: Switch to eval mode after Integrating the CI environment
         # VeOmni (ref: https://github.com/ByteDance-Seed/VeOmni/pull/421)
         self.engine.module.train()
 
     def __exit__(self, exc_type, exc_value, traceback):
         assert isinstance(self.engine, VeOmniEngine)
-        self.engine.ulysses_sharding_manager.__exit__(exc_type, exc_value, traceback)
+        set_ulysses_sequence_parallel_group(self.prev_sp_group)
         self.engine.optimizer_zero_grad()
         super().__exit__(exc_type, exc_value, traceback)
 
@@ -492,6 +533,21 @@ class OmniSequenceShardCollator:
         metadata={"help": "features to slice sequence dimension."},
     )
 
+    # features to padding sequence dimension
+    padding_features: dict[str, int] = field(
+        default_factory=lambda: {
+            "pixel_values": 0,
+            "pixel_values_videos": 0,
+        },
+        metadata={"help": "features to padding sequence dimension."},
+    )
+
+    # padding scale for padding features
+    padding_scale: dict[str, int] = field(
+        default_factory=lambda: {"pixel_values": 4, "pixel_values_videos": 4},
+        metadata={"help": "padding scale for padding features."},
+    )
+
     def __post_init__(self):
         self.sp_size = parallel_state.get_parallel_state().sp_size
         self.sp_rank = parallel_state.get_parallel_state().sp_rank
@@ -501,7 +557,35 @@ class OmniSequenceShardCollator:
         sp_chunk_size = (seq_length + self.sp_size - 1) // self.sp_size
         return feature.narrow(dim, self.sp_rank * sp_chunk_size, sp_chunk_size)
 
+    def sp_padding(
+        self, tensor: "torch.Tensor", dim: int = -1, pad_value: int = 0, pad_scale: int = 1
+    ) -> "torch.Tensor":
+        """
+        Pads a tensor with pad_length to aligns tensor with sp size.
+        """
+        seq_length = tensor.size(dim)
+        scale_sp_size = self.sp_size * pad_scale
+
+        sp_chunk_size = (seq_length + scale_sp_size - 1) // scale_sp_size
+        pad_size = sp_chunk_size * scale_sp_size - seq_length
+        if pad_size == 0:
+            return tensor
+
+        pad_shape = list(tensor.shape)
+        pad_shape[dim] = pad_size
+        pad = torch.full(pad_shape, fill_value=pad_value, dtype=tensor.dtype, device=tensor.device)
+        return torch.cat((tensor, pad), dim=dim)
+
     def __call__(self, batch: Sequence[dict[str, "torch.Tensor"]]) -> dict[str, "torch.Tensor"]:
+        for key in batch.keys():
+            if key in self.padding_features.keys():
+                batch[key] = self.sp_padding(
+                    batch[key],
+                    dim=self.sp_slice_features.get(key, -1),
+                    pad_value=self.padding_features[key],
+                    pad_scale=self.padding_scale.get(key, 1),
+                )
+
         # sp slice
         for key in batch.keys():
             if key in self.sp_slice_features.keys():
@@ -510,19 +594,71 @@ class OmniSequenceShardCollator:
         return batch
 
 
+def _prepare_veomni_flash_attention_kwargs(position_ids: torch.Tensor) -> dict[str, torch.Tensor | int]:
+    """Normalize packed position_ids layout and derive varlen FlashAttention kwargs.
+
+    Supported formats for use_remove_padding=true:
+        - 2D: (1, total_nnz) - standard packed format
+        - 3D: (rope_dim, 1, total_nnz) - VeRL mRoPE packed format
+    """
+    if position_ids.dim() == 2:
+        # (1, total_nnz) - standard packed format
+        fa_position_ids = position_ids
+    elif position_ids.dim() == 3:
+        # (rope_dim, 1, total_nnz) - VeRL mRoPE packed format
+        if position_ids.shape[1] == 1:
+            fa_position_ids = position_ids[0]
+        else:
+            raise ValueError(
+                f"Unsupported 3D position_ids shape: {tuple(position_ids.shape)}, expected (rope_dim, 1, total_nnz)"
+            )
+    else:
+        raise ValueError(
+            f"Unsupported position_ids rank: {position_ids.dim()}, "
+            f"expected 2 (1, total_nnz) or 3 (rope_dim, 1, total_nnz)"
+        )
+
+    (cu_seq_lens_q, cu_seq_lens_k), (max_length_q, max_length_k) = prepare_fa_kwargs_from_position_ids(fa_position_ids)
+    return {
+        "cu_seq_lens_q": cu_seq_lens_q,
+        "cu_seq_lens_k": cu_seq_lens_k,
+        "max_length_q": max_length_q,
+        "max_length_k": max_length_k,
+    }
+
+
 @EngineRegistry.register(model_type="language_model", backend=["veomni"], device=["cuda", "npu"])
 class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
     def prepare_model_inputs(self, micro_batch: TensorDict):
-        # TODO: Cannot work properly for qwen_vl ulysses
         model_inputs, output_args = super().prepare_model_inputs(micro_batch)
         input_ids_rmpad = model_inputs["input_ids"]
+        sp_enabled = parallel_state.get_parallel_state().sp_enabled
+        sp_shard_collator = OmniSequenceShardCollator() if sp_enabled else None
+
         if self.module.config.model_type in VL_TYPE2INDEX.keys():
             image_mask = input_ids_rmpad == VL_TYPE2INDEX[self.module.config.model_type]["IMAGE_INPUT_INDEX"]
             video_mask = input_ids_rmpad == VL_TYPE2INDEX[self.module.config.model_type]["VIDEO_INPUT_INDEX"]
             model_inputs.update({"image_mask": image_mask, "video_mask": video_mask})
 
-            if parallel_state.get_parallel_state().sp_enabled:
-                omni_sequence_shard_collator = OmniSequenceShardCollator()
-                omni_sequence_shard_collator(model_inputs)
+            if sp_enabled:
+                sp_shard_collator(model_inputs)
+
+        use_remove_padding = tu.get_non_tensor_data(data=micro_batch, key="use_remove_padding", default=True)
+        if use_remove_padding and model_inputs.get("position_ids", None) is not None:
+            model_inputs.update(_prepare_veomni_flash_attention_kwargs(model_inputs["position_ids"]))
+            if sp_enabled:
+                model_inputs["position_ids"] = sp_shard_collator.sp_slice(model_inputs["position_ids"], dim=-1)
+
+        # Activate VeOmni's chunk_logprobs path: ForCausalLMLoss short-circuits
+        # to per-token log_probs/entropy on return_log_probs=True. Pass the
+        # already-rolled labels as shift_labels so chunk_logprobs skips its
+        # internal causal shift and the output seq length matches the input —
+        # prepare_model_outputs().squeeze(0) then lands at (total_nnz,).
+        use_fused_kernels = tu.get_non_tensor_data(data=micro_batch, key="use_fused_kernels", default=False)
+        if use_fused_kernels and use_remove_padding:
+            shift_labels = output_args["input_ids_rmpad_rolled"].unsqueeze(0)
+            model_inputs["labels"] = input_ids_rmpad
+            model_inputs["shift_labels"] = shift_labels
+            model_inputs["return_log_probs"] = True
 
         return model_inputs, output_args

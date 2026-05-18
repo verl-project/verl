@@ -54,10 +54,10 @@ trainer:
 
 ### 2. Run Training
 
-Use the provided script `run_qwen3_prefix_grouper.sh` as an example:
+Use the provided script `run_qwen3_8b_fsdp.sh` as an example:
 
 ```bash
-bash examples/prefix_grouper/run_qwen3_prefix_grouper.sh
+bash examples/prefix_grouper/run_qwen3_8b_fsdp.sh
 ```
 
 ## How It Works

@@ -8,6 +8,8 @@
 **/playground
 **/wandb
 
+/pyrightconfig.json
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -97,6 +99,7 @@ celerybeat-schedule
 venv/
 .venv/
 ENV/
+!**/workers/env/
 
 # Spyder project settings
 .spyderproject

@@ -15,12 +15,9 @@ import inspect
 from functools import partial, wraps
 from types import FunctionType
 
-from tensordict import TensorDict
-
 from verl.protocol import DataProtoFuture, _padding_size_key
 from verl.utils.py_functional import DynamicEnum
-from verl.utils.tensordict_utils import chunk_tensordict, concat_tensordict, contiguous
-from verl.utils.transferqueue_utils import BatchMeta
+from verl.utils.transferqueue_utils import tqbridge
 
 # here we add a magic number of avoid user-defined function already have this attribute
 MAGIC_ATTR = "attrs_3141562937"
@@ -71,32 +68,20 @@ init_predefined_dispatch_mode()
 init_predefined_execute_mode()
 
 
-def _consolidate_tuple_td(chunked_arg):
-    return tuple(contiguous(val).consolidate() for val in chunked_arg)
-
-
 def _split_args_kwargs_data_proto(chunks, *args, **kwargs):
-    from verl.protocol import DataProto, DataProtoFuture
+    from verl.protocol import BatchData
 
     splitted_args = []
     for arg in args:
-        assert isinstance(arg, DataProto | DataProtoFuture | BatchMeta | TensorDict)
-        if isinstance(arg, TensorDict):
-            chunked_arg = chunk_tensordict(arg, chunks)
-            chunked_arg = _consolidate_tuple_td(chunked_arg)
-        else:
-            chunked_arg = arg.chunk(chunks=chunks)
+        assert BatchData(arg).is_chunkable(), f"arg of type {type(arg)} is not chunkable"
+        chunked_arg = BatchData(arg).chunk(chunks=chunks)
         assert len(chunked_arg) == chunks
         splitted_args.append(chunked_arg)
 
     splitted_kwargs = {}
     for key, val in kwargs.items():
-        assert isinstance(val, DataProto | DataProtoFuture | BatchMeta | TensorDict)
-        if isinstance(val, TensorDict):
-            chunked_kwarg = chunk_tensordict(val, chunks)
-            chunked_kwarg = _consolidate_tuple_td(chunked_kwarg)
-        else:
-            chunked_kwarg = val.chunk(chunks=chunks)
+        assert BatchData(val).is_chunkable(), f"kwarg '{key}' of type {type(val)} is not chunkable"
+        chunked_kwarg = BatchData(val).chunk(chunks=chunks)
         assert len(chunked_kwarg) == chunks
         splitted_kwargs[key] = chunked_kwarg
 
@@ -151,26 +136,13 @@ def collect_all_to_all(worker_group, output):
 
 
 def _concat_data_proto_or_future(output: list):
-    import ray
-
-    from verl.protocol import DataProto, DataProtoFuture
+    from verl.protocol import BatchData
 
     # make sure all the elements in output has the same type
     for o in output:
         assert type(o) is type(output[0])
 
-    o = output[0]
-
-    if isinstance(o, DataProto):
-        return DataProto.concat(output)
-    elif isinstance(o, ray.ObjectRef):
-        return DataProtoFuture.concat(output)
-    elif isinstance(o, BatchMeta):
-        return BatchMeta.concat(output)
-    elif isinstance(o, TensorDict):
-        return concat_tensordict(output)
-    else:
-        raise NotImplementedError
+    return BatchData(output).concat()
 
 
 def dispatch_dp_compute(worker_group, *args, **kwargs):
@@ -217,12 +189,11 @@ def dispatch_dp_compute_data_proto_with_func(worker_group, *args, **kwargs):
 
 
 def collect_dp_compute_data_proto(worker_group, output):
-    import ray
+    from verl.protocol import BatchData
 
-    from verl.protocol import DataProto
-
-    for o in output:
-        assert isinstance(o, DataProto | ray.ObjectRef), f"expecting {o} to be DataProto, but got {type(o)}"
+    assert BatchData(output).is_concatable(), (
+        f"expecting concatable output, but got element type {type(output[0]) if output else 'empty'}"
+    )
 
     output = collect_dp_compute(worker_group, output)
     return _concat_data_proto_or_future(output)
@@ -283,14 +254,12 @@ def dispatch_nd_compute_dataproto(dp_rank_mapping: list[int], dp_size, worker_gr
 
 def collect_nd_compute_dataproto(collect_mask: list[bool], worker_group, output):
     output = collect_nd_compute(collect_mask, worker_group, output)
-    import ray
 
-    from verl.protocol import DataProto
+    from verl.protocol import BatchData
 
-    for o in output:
-        assert isinstance(o, DataProto | ray.ObjectRef | BatchMeta | TensorDict), (
-            f"expecting {o} to be DataProto | ray.ObjectRef | BatchMeta | TensorDict, but got {type(o)}"
-        )
+    assert BatchData(output).is_concatable(), (
+        f"expecting concatable output, but got element type {type(output[0]) if output else 'empty'}"
+    )
     return _concat_data_proto_or_future(output)
 
 
@@ -443,11 +412,11 @@ def register(dispatch_mode=Dispatch.ALL_TO_ALL, execute_mode=Execute.ALL, blocki
         materialize_futures:
             Whether to materialize the data before dispatching. Defaults to True.
 
+
     Returns:
         A decorator that wraps the original function with distributed execution
         configuration.
     """
-    from verl.utils.transferqueue_utils import tqbridge
 
     _check_dispatch_mode(dispatch_mode=dispatch_mode)
     _check_execute_mode(execute_mode=execute_mode)

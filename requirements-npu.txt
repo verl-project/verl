@@ -1,5 +1,6 @@
 # requirements.txt records the full set of dependencies for development
 accelerate
+bytecode
 codetiming
 datasets
 dill
@@ -18,4 +19,5 @@ torchdata
 einops
 qwen_vl_utils
 hf_transfer
-triton-ascend==3.2.0rc4
+triton-ascend==3.2.0
+TransferQueue==0.1.7

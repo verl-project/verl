@@ -130,12 +130,10 @@ Actor/Rollout/Reference Policy
       use_kl_loss: False # True for GRPO
       # Rollout Correction (corrects distribution mismatch between rollout and training)
       rollout_correction:
-        rollout_is: token # IS weights: token/sequence/null
-        rollout_is_threshold: 2.0 # Upper threshold for IS weights
-        rollout_rs: null # Rejection sampling: token/sequence/geometric/null
+        rollout_is: token # IS weights
+        rollout_is_threshold: 2.0 # TIS upper bound, or "0.5_5.0" for IcePop
+        rollout_rs: null # Rejection sampling
         rollout_rs_threshold: null # RS upper threshold
-        rollout_rs_threshold_lower: null # RS lower threshold
-        rollout_token_veto_threshold: null # Per-token veto (null to disable)
       use_torch_compile: True # False to disable torch compile
       kl_loss_coef: 0.001 # for grpo
       kl_loss_type: low_var_kl # for grpo
@@ -322,7 +320,7 @@ Actor/Rollout/Reference Policy
 
 - ``actor_rollout_ref.actor.kl_loss_coef``: The coefficient of kl loss. Default is 0.001. 
 
-- ``actor_rollout_ref.actor.kl_loss_type``: Support ``kl`` (``k1``), ``abs``, ``mse`` (``k2``), ``low_var_kl`` (``k3``) and ``full``. Appending ``+`` in the end (e.g., ``k1+`` and ``k3+``) would use straight-through to employ ``k2`` for unbiased gradient estimation, regardless of the kl value estimation (see https://github.com/volcengine/verl/pull/2953#issuecomment-3162113848 for more details). How to calculate the kl divergence between actor and reference policy. For specific options, refer to `kl_penalty()` in `core_algos.py <https://github.com/volcengine/verl/blob/main/verl/trainer/ppo/core_algos.py>`_ . See this blog post for detailed analysis: http://joschu.net/blog/kl-approx.html
+- ``actor_rollout_ref.actor.kl_loss_type``: Support ``kl`` (``k1``), ``abs``, ``mse`` (``k2``), ``low_var_kl`` (``k3``) and ``full``. Appending ``+`` in the end (e.g., ``k1+`` and ``k3+``) would use straight-through to employ ``k2`` for unbiased gradient estimation, regardless of the kl value estimation (see https://github.com/verl-project/verl/pull/2953#issuecomment-3162113848 for more details). How to calculate the kl divergence between actor and reference policy. For specific options, refer to `kl_penalty()` in `core_algos.py <https://github.com/verl-project/verl/blob/main/verl/trainer/ppo/core_algos.py>`_ . See this blog post for detailed analysis: http://joschu.net/blog/kl-approx.html
 
 - ``actor_rollout_ref.actor.checkpoint``: The configurations of checkpoint function in actor
 
@@ -534,12 +532,10 @@ Algorithm
        target_kl: 0.1
      # Rollout Correction
      rollout_correction:
-       rollout_is: null  # IS weights: token/sequence/null
+       rollout_is: null  # IS weights
        rollout_is_threshold: 2.0  # Upper threshold for IS weights
-       rollout_rs: null  # Rejection sampling: token/sequence/geometric/null
+       rollout_rs: null  # Rejection sampling
        rollout_rs_threshold: null  # RS upper threshold
-       rollout_rs_threshold_lower: null  # RS lower threshold
-       rollout_token_veto_threshold: null  # Per-token veto (null to disable)
 
 - ``gamma``: discount factor
 - ``lam``: Trade-off between bias and variance in the GAE estimator
@@ -547,7 +543,7 @@ Algorithm
 - ``use_kl_in_reward``: Whether to enable in-reward kl penalty. Default is False.
 - ``kl_penalty``: Support ``kl``, ``abs``, ``mse``, ``low_var_kl`` and ``full``. How to
   calculate the kl divergence between actor and reference policy. For
-  specific options, refer to `kl_penalty()` in `core_algos.py <https://github.com/volcengine/verl/blob/main/verl/trainer/ppo/core_algos.py>`_ .
+  specific options, refer to `kl_penalty()` in `core_algos.py <https://github.com/verl-project/verl/blob/main/verl/trainer/ppo/core_algos.py>`_ .
 - ``kl_ctrl``: Config for in-reward kl_penalty controller
 
   - ``kl_coef``: The (initial) coefficient of in-reward kl_penalty. Default is 0.001.
@@ -557,12 +553,10 @@ Algorithm
 - ``rollout_correction``: Rollout Correction configuration (nested dict). Set to ``null`` to disable.
   When enabled, contains:
 
-  - ``rollout_is``: IS weights aggregation level: ``token``, ``sequence``, or ``null`` to disable IS weights.
+  - ``rollout_is``: IS weights aggregation level, ``null`` to disable IS weights.
   - ``rollout_is_threshold``: Upper threshold for IS weights (e.g., 2.0).
-  - ``rollout_rs``: Rejection sampling mode: ``token``, ``sequence``, ``geometric``, or ``null`` to disable RS.
+  - ``rollout_rs``: Rejection sampling mode, ``null`` to disable RS.
   - ``rollout_rs_threshold``: RS upper threshold.
-  - ``rollout_rs_threshold_lower``: RS lower threshold (null = auto-reciprocal).
-  - ``rollout_token_veto_threshold``: Per-token veto threshold for catastrophic outliers (null = disabled).
 
   Note: Rollout Correction requires setting ``actor_rollout_ref.rollout.calculate_log_probs=True``.
 

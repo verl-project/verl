@@ -1,6 +1,7 @@
 #!/bin/bash
 set -e
 NPU_DEVICE=${NPU_DEVICE:=A3}
+USE_MEGATRON=${USE_MEGATRON:-1}
 
 export MAX_JOBS=32
 

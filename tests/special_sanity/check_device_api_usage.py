@@ -36,25 +36,28 @@ CUDA_KEYWORD_CHECK_WHITELIST = [
     "verl/experimental/transfer_queue/ray_trainer.py",  # appear in docstring as default device_name
     "verl/experimental/one_step_off_policy/ray_trainer.py",  # appear in docstring as default device_name
     "verl/utils/reward_score/sandbox_fusion/utils.py",  # appear in sandbox language type
-    "verl/workers/reward_model/megatron/reward_model.py",  # appear in default device_name
     "verl/third_party/torch/distributed/_state_dict_utils.py",  # torch monkey patch fixes
     "verl/third_party/torch/distributed/checkpoint/state_dict.py",  # torch monkey patch fixes
     "verl/workers/engine/base.py",  # appear in default device_name
     "verl/workers/engine/utils.py",  # appear in enable_full_determinism
     "verl/workers/engine/fsdp/transformer_impl.py",  # appear in default device_name
     "verl/workers/engine/veomni/transformer_impl.py",  # appear in default device_name
+    "verl/workers/engine/torchtitan/transformer_impl.py",  # appear in default device_name
+    "verl/workers/engine/torchtitan/utils.py",  # appear in torch.cuda.empty_cache()
+    "verl/workers/engine/automodel/transformer_impl.py",  # appear in default device_name
     "verl/workers/rollout/vllm_rollout/vllm_async_server.py",  # appear in config.cudagraph_capture_sizes
     "verl/workers/rollout/sglang_rollout/async_sglang_server.py",  # manually set CUDA_VISIBLE_DEVICES
     "verl/workers/rollout/trtllm_rollout/trtllm_async_server.py",  # appear in config.cudagraph_capture_sizes
     "verl/workers/rollout/replica.py",  # appear in default device_name
     "verl/checkpoint_engine",  # checkpoint engine backend are device specific
+    "verl/utils/modelopt/megatron_qat_patch.py",  # appear in torch.cuda.empty_cache()
+    "verl/models/mcore/patch.py",  # checkpoint patch only on cuda
 ]
 
 # directory or file path must contain keyword "nccl"
 NCCL_KEYWORD_CHECK_WHITELIST = [
     "verl/utils/device.py",
     "verl/third_party/sglang/parallel_state.py",  # appear in default backend
-    "verl/recipe/fully_async_policy/param_sync.py",  # fully_async_policy in default backend
 ]
 
 SEARCH_WHITELIST = CUDA_KEYWORD_CHECK_WHITELIST + NCCL_KEYWORD_CHECK_WHITELIST

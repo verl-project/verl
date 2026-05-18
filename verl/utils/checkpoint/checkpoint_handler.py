@@ -15,6 +15,7 @@
 
 # TODO: add unit tests
 
+import json
 import logging
 import os
 import re
@@ -63,6 +64,7 @@ class CheckpointHandler:
         resume_mode="auto",
         resume_from_path=None,
         mode=OrchestrationMode.SPMD,
+        lora_train_meta=None,
     ):
         self.default_local_dir = default_local_dir
         self.max_ckpt_to_keep = max_ckpt_to_keep
@@ -72,6 +74,7 @@ class CheckpointHandler:
         self.engine = engine
         self.train_dataloader = train_dataloader
         self.mode = mode
+        self.lora_train_meta = lora_train_meta
 
         if self.mode == OrchestrationMode.SPMD:
             self.rank = torch.distributed.get_rank()
@@ -103,6 +106,13 @@ class CheckpointHandler:
 
         # Save dataloader state. Note that we only save the iterator in the train_dataloader.
         # So it's identical in each dp rank.
+        if self.rank == 0 and self.lora_train_meta is not None:
+            local_mkdir_safe(local_global_step_folder)
+            lora_meta_path = os.path.join(local_global_step_folder, "lora_train_meta.json")
+            with open(lora_meta_path, "w", encoding="utf-8") as f:
+                json.dump(self.lora_train_meta, f, ensure_ascii=False, indent=4)
+            print(f"Saved LoRA rank/alpha metadata to: {lora_meta_path}")
+
         if self.is_mp_src_rank_with_outputs:
             dp_rank = self.dp_rank
             local_mkdir_safe(local_global_step_folder)

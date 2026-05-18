@@ -84,8 +84,10 @@ class RolloutCorrectionConfig(BaseConfig):
             - "sequence": Per-sequence IS weights (unbiased, high variance)
             Default: "sequence"
 
-        rollout_is_threshold (float): Upper threshold for IS weight truncation/rejection.
+        rollout_is_threshold (str | float): Threshold specification for IS weighting.
             Typical range: 1.5-5.0 for token level, 2.0-10.0 for sequence level.
+            - Single float or float-like string (e.g. ``2.0``): TIS, clamp weights to the upper bound
+            - ``"lower_upper"`` string (e.g. ``"0.5_5.0"``): IcePop, zero weights outside [lower, upper]
             Default: 2.0
 
         rollout_is_batch_normalize (bool): Apply batch normalization to IS weights.
@@ -171,7 +173,7 @@ class RolloutCorrectionConfig(BaseConfig):
     """
 
     rollout_is: Optional[str] = "sequence"
-    rollout_is_threshold: float = 2.0
+    rollout_is_threshold: str | float = 2.0
     rollout_is_batch_normalize: bool = False
     rollout_rs: Optional[str] = None
     rollout_rs_threshold: Optional[str | float] = None
@@ -205,6 +207,27 @@ class RolloutCorrectionConfig(BaseConfig):
             RolloutCorrectionConfig configured for decoupled mode with sequence-level IS
         """
         return cls(rollout_is="sequence", rollout_is_threshold=threshold, rollout_rs=None)
+
+    @classmethod
+    def decoupled_token_icepop(
+        cls,
+        threshold: float = 5.0,
+        threshold_lower: float = 0.5,
+    ) -> "RolloutCorrectionConfig":
+        """Decoupled Mode with exact token-level IcePop.
+
+        Keeping response_mask unchanged and
+        zeroing token IS weights outside
+        [threshold_lower, threshold].
+
+        Args:
+            threshold (float): Upper IcePop bound. Default: 5.0
+            threshold_lower (float): Lower IcePop bound. Default: 0.5
+
+        Returns:
+            RolloutCorrectionConfig configured for decoupled mode with token-level IcePop
+        """
+        return cls(rollout_is="token", rollout_is_threshold=f"{threshold_lower}_{threshold}", rollout_rs=None)
 
     @classmethod
     def decoupled_seq_is_rs(
@@ -338,6 +361,32 @@ class RolloutCorrectionConfig(BaseConfig):
         return cls(
             rollout_is="sequence",
             rollout_is_threshold=threshold,
+            rollout_rs=None,
+            bypass_mode=True,
+            loss_type="reinforce",
+        )
+
+    @classmethod
+    def bypass_pg_token_icepop(
+        cls,
+        threshold: float = 5.0,
+        threshold_lower: float = 0.5,
+    ) -> "RolloutCorrectionConfig":
+        """Bypass mode with REINFORCE loss and exact token-level IcePop.
+
+        Uses explicit IS weights in bypass mode and zeroes out token weights
+        outside [threshold_lower, threshold] without modifying response_mask.
+
+        Args:
+            threshold (float): Upper IcePop bound. Default: 5.0
+            threshold_lower (float): Lower IcePop bound. Default: 0.5
+
+        Returns:
+            RolloutCorrectionConfig configured for bypass mode with REINFORCE + token-level IcePop
+        """
+        return cls(
+            rollout_is="token",
+            rollout_is_threshold=f"{threshold_lower}_{threshold}",
             rollout_rs=None,
             bypass_mode=True,
             loss_type="reinforce",
@@ -612,3 +661,9 @@ class AlgoConfig(BaseConfig):
     # Rollout Correction: corrects off-policy issues (policy mismatch, model staleness, distribution shifts)
     # Set to None to disable, use RolloutCorrectionConfig presets (e.g., .tis(), .mis()), or pass dict
     rollout_correction: Optional[RolloutCorrectionConfig] = None
+    # GDPO (Group reward-Decoupled Normalization Policy Optimization) settings.
+    # gdpo_reward_keys: keys in non_tensor_batch (from compute_score's return dict) that
+    #   correspond to individual reward dimensions, e.g. ["format_reward", "accuracy_reward"].
+    # gdpo_reward_weights: per-dimension weights for aggregation (default: equal weights).
+    gdpo_reward_keys: Optional[list[str]] = None
+    gdpo_reward_weights: Optional[list[float]] = None
