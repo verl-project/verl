@@ -543,6 +543,9 @@ class FSDPEngine(BaseEngine):
         if not getattr(self.engine_config, "freeze_vision_tower", False):
             return module
 
+        # Freeze after FSDP wrapping. Freezing before wrapping can put frozen and
+        # trainable tensors in the same flat parameter and trip FSDP's uniform
+        # requires_grad check when use_orig_params=False.
         vision_module_names = {"visual", "vision_tower", "vision_model", "vision_encoder", "image_encoder"}
         frozen_param_ids: set[int] = set()
         frozen_numel = 0
@@ -685,9 +688,6 @@ class FSDPEngine(BaseEngine):
         if self._qat_enabled and not self.engine_config.forward_only:
             module = self._apply_qat(module)
 
-        if not self.engine_config.forward_only:
-            module = self._freeze_vision_tower(module)
-
         # Synchronize all distributed processes before proceeding
         torch.distributed.barrier()
         if self.rank == 0:
@@ -700,6 +700,7 @@ class FSDPEngine(BaseEngine):
         log_gpu_memory_usage("After FSDP", logger=None)
 
         if not self.engine_config.forward_only:
+            module = self._freeze_vision_tower(module)
             # Initialize optimizer with model parameters and config settings
             optimizer = self._build_optimizer(module)
             # Create learning rate scheduler with warmup and decay settings
