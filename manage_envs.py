@@ -358,6 +358,8 @@ def _select_source(source_config: object, backend: str) -> dict | None:
 
 
 def _source_to_requirement(req: str, source: dict) -> str:
+    if "url" in source:
+        return f"{_req_project_part(req)} @ {source['url']}{_req_marker(req)}"
     if "git" not in source:
         return req
     ref = source.get("rev") or source.get("tag") or source.get("branch")
@@ -436,7 +438,7 @@ def _config_setting_args(pyproject: dict, requirements: list[str]) -> list[str]:
             if not isinstance(values, list):
                 values = [values]
             for value in values:
-                args.extend(["--config-setting-package", f"{package}:{key}={value}"])
+                args.extend(["--config-settings-package", f"{package}:{key}={value}"])
     return args
 
 
@@ -591,7 +593,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
 
         post_solver = _collect_post_solver_packages(requirements, backend, system_match_packages)
         if post_solver:
-            print("--- Force-installing post-solver packages (--no-deps) ---")
+            print("--- Force-installing post-solver packages (--reinstall --no-deps) ---")
             for pkg in post_solver:
                 print(f"  {pkg}")
             rc = _run(
@@ -602,6 +604,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                     "--python",
                     str(venv_python),
                     *_UV_PIP_BASE_ARGS,
+                    "--reinstall",
                     "--no-deps",
                     *post_solver,
                 ],
