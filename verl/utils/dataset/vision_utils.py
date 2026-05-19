@@ -12,8 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import inspect
+from functools import lru_cache
 from io import BytesIO
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 from PIL import Image
@@ -34,6 +36,51 @@ def process_image(image: dict | Image.Image, image_patch_size: int = 14) -> Imag
     except Exception:
         ans = fetch_image(image)
     return ans
+
+
+@lru_cache(maxsize=1)
+def _process_vision_info_supported_kwargs() -> frozenset:
+    """Cache the keyword arguments accepted by ``qwen_vl_utils.process_vision_info``.
+
+    The signature has changed across releases — ``image_patch_size`` and
+    ``return_video_metadata`` were added in v0.0.13 — so callers need to know
+    which kwargs are safe to forward on the installed version.
+    """
+    from qwen_vl_utils import process_vision_info
+
+    try:
+        return frozenset(inspect.signature(process_vision_info).parameters)
+    except (TypeError, ValueError):
+        return frozenset()
+
+
+def safe_process_vision_info(
+    messages: list[dict],
+    *,
+    image_patch_size: int = 14,
+    return_video_metadata: bool = False,
+) -> tuple[Optional[list[Image.Image]], Optional[list[Any]]]:
+    """Backward-compatible wrapper around ``qwen_vl_utils.process_vision_info``.
+
+    ``image_patch_size`` and ``return_video_metadata`` were introduced in
+    qwen-vl-utils v0.0.13. Older releases (still pinned by some downstream
+    images such as vLLM 0.20.2 wheels) raise ``TypeError`` when called with
+    those keyword arguments. To keep verl working across both API generations,
+    we forward only the kwargs that the installed function signature actually
+    accepts. When ``return_video_metadata`` is not supported, videos are
+    returned without their metadata tuples; downstream consumers like
+    ``build_multimodal_processor_inputs`` already handle that shape.
+    """
+    from qwen_vl_utils import process_vision_info
+
+    supported = _process_vision_info_supported_kwargs()
+    kwargs: dict[str, Any] = {}
+    if "image_patch_size" in supported:
+        kwargs["image_patch_size"] = image_patch_size
+    if return_video_metadata and "return_video_metadata" in supported:
+        kwargs["return_video_metadata"] = True
+
+    return process_vision_info(messages, **kwargs)
 
 
 VIDEO_FORMAT_HELP = """Currently, we only support the video formats introduced in qwen2-vl.

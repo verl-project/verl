@@ -421,9 +421,11 @@ class RLHFDataset(Dataset):
             images: List of images.
             videos: List of videos, each video is a tuple of (video_tensor, video_metadata).
         """
-        from qwen_vl_utils import process_vision_info
+        from verl.utils.dataset.vision_utils import safe_process_vision_info
 
-        images, videos = process_vision_info(messages, image_patch_size=image_patch_size, return_video_metadata=True)
+        images, videos = safe_process_vision_info(
+            messages, image_patch_size=image_patch_size, return_video_metadata=True
+        )
         return images, videos
 
     @classmethod
@@ -457,9 +459,9 @@ class RLHFDataset(Dataset):
             for message in messages
         )
         if has_visual:
-            from qwen_vl_utils import process_vision_info
+            from verl.utils.dataset.vision_utils import safe_process_vision_info
 
-            images, videos = process_vision_info(
+            images, videos = safe_process_vision_info(
                 messages, image_patch_size=image_patch_size, return_video_metadata=True
             )
         else:
