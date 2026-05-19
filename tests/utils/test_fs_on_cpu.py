@@ -95,7 +95,9 @@ def test_always_recopy_flag(tmp_path, monkeypatch):
 
 
 # ----------------------------------------------------------------------------
-# None-tolerance regression tests for copy_to_local / copy_local_path_from_hdfs.
+# Falsy-tolerance regression tests for copy_to_local / copy_local_path_from_hdfs.
+# Both ``None`` and empty string must short-circuit; the empty-string case used
+# to crash with ``IndexError`` on ``src[-1]`` further down.
 # ----------------------------------------------------------------------------
 
 
@@ -106,20 +108,30 @@ def test_copy_to_local_returns_none_for_none_src():
     assert fs.copy_to_local(None) is None
 
 
+def test_copy_to_local_returns_none_for_empty_src():
+    """``copy_to_local('')`` must also short-circuit (otherwise the empty
+    string would propagate to ``src[-1]`` in the deprecated helper and raise
+    ``IndexError``)."""
+    assert fs.copy_to_local("") is None
+
+
 def test_copy_to_local_returns_none_for_none_src_with_use_shm():
-    """The ``use_shm`` branch must also tolerate ``None`` (it should never
-    reach ``copy_to_shm`` with ``None``)."""
+    """The ``use_shm`` branch must also tolerate falsy ``src`` (it should
+    never reach ``copy_to_shm`` with a falsy path)."""
     assert fs.copy_to_local(None, use_shm=True) is None
+    assert fs.copy_to_local("", use_shm=True) is None
 
 
-def test_copy_local_path_from_hdfs_returns_none_for_none_src():
-    """The deprecated alias must behave identically."""
+def test_copy_local_path_from_hdfs_returns_none_for_falsy_src():
+    """The deprecated alias must behave identically for both ``None`` and
+    empty string."""
     assert fs.copy_local_path_from_hdfs(None) is None
+    assert fs.copy_local_path_from_hdfs("") is None
 
 
 def test_copy_to_local_passes_through_existing_local_path(tmp_path):
     """Sanity check that a plain local path is returned unchanged (the happy
-    path is unaffected by the ``None`` short-circuit)."""
+    path is unaffected by the falsy short-circuit)."""
     f = tmp_path / "existing.txt"
     f.write_text("test")
     result = fs.copy_to_local(str(f))

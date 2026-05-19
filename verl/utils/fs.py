@@ -20,6 +20,7 @@ import hashlib
 import os
 import shutil
 import tempfile
+from typing import Optional
 
 try:
     from hdfs_io import copy, exists, makedirs  # for internal use only
@@ -193,15 +194,20 @@ def _check_directory_structure(folder_path, record_file):
 
 
 def copy_to_local(
-    src: str, cache_dir=None, filelock=".file.lock", verbose=False, always_recopy=False, use_shm: bool = False
-) -> str:
+    src: Optional[str],
+    cache_dir=None,
+    filelock=".file.lock",
+    verbose=False,
+    always_recopy=False,
+    use_shm: bool = False,
+) -> Optional[str]:
     """Copy files/directories from HDFS to local cache with validation.
 
     Args:
         src (str | None): Source path - HDFS path (hdfs://...), local filesystem path, or Hugging Face
-            model ID. If ``None``, this short-circuits and returns ``None`` so callers can forward
-            optional path config fields (e.g. an unset checkpoint or auxiliary model path) without
-            adding a guard at every call site.
+            model ID. If falsy (``None`` or empty string), this short-circuits and returns ``None`` so
+            callers can forward optional path config fields (e.g. an unset checkpoint or auxiliary
+            model path) without adding a guard at every call site.
         cache_dir (str, optional): Local directory for cached files. Uses system tempdir if None
         filelock (str): Base name for file lock. Defaults to ".file.lock"
         verbose (bool): Enable copy operation logging. Defaults to False
@@ -209,10 +215,12 @@ def copy_to_local(
         use_shm (bool): Enable shared memory copy. Defaults to False
 
     Returns:
-        str | None: Local filesystem path to copied resource, or ``None`` if ``src`` is ``None``.
+        str | None: Local filesystem path to copied resource, or ``None`` if ``src`` is falsy.
     """
-    # Tolerate ``None`` so callers can forward optional path config fields without a guard at every site.
-    if src is None:
+    # Tolerate ``None`` and empty string so callers can forward optional path config fields without a
+    # guard at every site. Empty string would otherwise raise ``IndexError`` on ``src[-1]`` below or
+    # silently hit ``copy_to_shm("")`` further down.
+    if not src:
         return None
 
     # Save to a local path for persistence.
@@ -237,13 +245,14 @@ def copy_to_local(
 
 
 def copy_local_path_from_hdfs(
-    src: str, cache_dir=None, filelock=".file.lock", verbose=False, always_recopy=False
-) -> str:
+    src: Optional[str], cache_dir=None, filelock=".file.lock", verbose=False, always_recopy=False
+) -> Optional[str]:
     """Deprecated. Please use copy_to_local instead."""
     from filelock import FileLock
 
-    # Tolerate ``None`` for the same reason as ``copy_to_local`` above.
-    if src is None:
+    # Tolerate ``None`` and empty string for the same reason as ``copy_to_local`` above (an empty
+    # string would otherwise raise ``IndexError`` at ``src[-1]`` below).
+    if not src:
         return None
 
     assert src[-1] != "/", f"Make sure the last char in src is not / because it will cause error. Got {src}"
