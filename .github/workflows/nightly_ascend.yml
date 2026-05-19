@@ -36,8 +36,8 @@ on:
   # but only for the main branch
   # For push, for now only anti-patterns are specified so it is more conservative
   # and achieves higher coverage.
-  # schedule:
-  #   - cron: "0 17 * * *"
+  schedule:
+    - cron: "0 17 * * *"
 
 # Declare permissions just read content.
 permissions:
