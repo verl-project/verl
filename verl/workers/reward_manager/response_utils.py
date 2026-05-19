@@ -30,7 +30,7 @@ def select_response_ids_for_reward(
 
     valid_model_mask = response_mask[:valid_response_length].bool()
     if not torch.any(valid_model_mask):
-        return valid_response_ids, reward_index
+        return response_ids[:0], 0
 
     valid_response_ids = valid_response_ids[valid_model_mask]
     reward_index = int(valid_model_mask.nonzero(as_tuple=False)[-1].item())
