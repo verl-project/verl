@@ -234,6 +234,34 @@ class TestAssistantResponseLengthLimit(unittest.TestCase):
 
         assert loop._get_turn_sampling_params(agent_data, sampling_params) is None
 
+    def test_exhausted_budget_terminates_even_without_per_turn_cap(self):
+        """Budget check fires regardless of max_assistant_response_length setting."""
+        loop = _make_tool_agent_loop({}, response_length=100, max_assistant_response_length=None)
+        sampling_params = {"temperature": 0}
+        agent_data = FakeAgentData(response_mask=[1] * 100)
+
+        assert loop._get_turn_sampling_params(agent_data, sampling_params) is None
+
+    def test_respects_existing_max_tokens_in_sampling_params(self):
+        """Should take the min of all constraints including caller-provided max_tokens."""
+        loop = _make_tool_agent_loop({}, response_length=100, max_assistant_response_length=64)
+        sampling_params = {"temperature": 0, "max_tokens": 16}
+        agent_data = FakeAgentData(response_mask=[1] * 20)
+
+        turn_sampling_params = loop._get_turn_sampling_params(agent_data, sampling_params)
+
+        assert turn_sampling_params["max_tokens"] == 16
+
+    def test_no_copy_when_existing_max_tokens_is_already_most_restrictive(self):
+        """Avoid unnecessary dict copy when existing max_tokens is already the tightest."""
+        loop = _make_tool_agent_loop({}, response_length=100, max_assistant_response_length=64)
+        sampling_params = {"temperature": 0, "max_tokens": 10}
+        agent_data = FakeAgentData(response_mask=[1] * 20)
+
+        turn_sampling_params = loop._get_turn_sampling_params(agent_data, sampling_params)
+
+        assert turn_sampling_params is sampling_params
+
 
 if __name__ == "__main__":
     unittest.main()

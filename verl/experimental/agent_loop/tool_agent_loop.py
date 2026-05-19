@@ -283,16 +283,25 @@ class ToolAgentLoop(AgentLoopBase):
     def _get_turn_sampling_params(
         self, agent_data: AgentData, sampling_params: dict[str, Any]
     ) -> Optional[dict[str, Any]]:
-        max_assistant_response_length = self.max_assistant_response_length
-        if max_assistant_response_length is None:
-            return sampling_params
-
-        remaining_response_length = self.response_length - len(agent_data.response_mask)
-        if remaining_response_length <= 0:
+        remaining = self.response_length - len(agent_data.response_mask)
+        if remaining <= 0:
             return None
 
+        max_turn = self.max_assistant_response_length
+        if max_turn is None and "max_tokens" not in sampling_params:
+            return sampling_params
+
+        effective = remaining
+        if max_turn is not None:
+            effective = min(effective, max_turn)
+        if "max_tokens" in sampling_params:
+            effective = min(effective, sampling_params["max_tokens"])
+
+        if sampling_params.get("max_tokens") == effective:
+            return sampling_params
+
         turn_sampling_params = dict(sampling_params)
-        turn_sampling_params["max_tokens"] = min(max_assistant_response_length, remaining_response_length)
+        turn_sampling_params["max_tokens"] = effective
         return turn_sampling_params
 
     async def _handle_processing_tools_state(self, agent_data: AgentData) -> AgentState:
