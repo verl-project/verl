@@ -7,7 +7,7 @@ Last updated: 05/09/2026.
 镜像获取 & 公开镜像地址
 --------------------
 
-昇腾在 `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_ 中托管每日构建的 A2/A3 镜像，基于 `Dockerfile <../../../docker/ascend>`_ 构建。
+昇腾在 `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_ 中托管每日构建的 A2/A3 镜像，基于 `Dockerfile <../../../docker/ascend>`_ 构建，具体说明见 ``Dockerfile构建镜像脚本清单`` 。
 
 每日构建镜像名格式：verl-{CANN版本}-{NPU设备类型}-{操作系统版本}-{python版本}-latest
 
@@ -131,15 +131,15 @@ A3              8.5.2                vLLM          Qwen3.5        `Dockerfile.as
        -v /usr/sbin:/usr/sbin \
        -v /home:/home \
        -v /data:/data \
-       {image_name:tag} \
+       {image_name}:{tag} \
        /bin/bash
 
 **说明：**
 
 * 如需挂载其他本地路径到容器，请自行添加 ``-v <宿主机路径>:<容器内路径>``
-* 建议将 ``your_docker_name`` 替换为具有实际意义的容器名称
+* 建议将 ``{your_docker_name}`` 替换为具有实际意义的容器名称
 * ``--privileged`` 参数授予容器扩展权限，请根据实际安全需求评估是否必要
-* ``image_name:tag`` 请换成容器构建时对应的镜像名称与标签
+* ``{image_name}:{tag}`` 请换成容器构建时对应的镜像名称与标签
 
 启动容器
 --------
