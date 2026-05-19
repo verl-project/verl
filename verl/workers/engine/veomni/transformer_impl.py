@@ -452,7 +452,7 @@ class VeOmniEngine(FSDPEngine):
 
                 if is_expert_layer and is_proj and ps.ep_enabled:
                     output_shape = list(unsharded_tensor.shape)
-                    output_shape[0] *= ps.ep_size
+                    output_shape[0] *= ps.extra_parallel_sizes["ep"]
                     stacked_tensor = torch.empty(output_shape, dtype=unsharded_tensor.dtype, device=device)
 
                     # all gather expert tensors [32, H, I] -> [128, H, I]

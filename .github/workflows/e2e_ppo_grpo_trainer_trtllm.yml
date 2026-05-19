@@ -247,18 +247,17 @@ jobs:
       - name: clean up
         run: |
           rm -rf checkpoints
-      - name: Prepare DAPO-Math-17k and AIME-2024 datasets (data_preprocess)
+      - name: Prepare GSM8K dataset (data_preprocess)
         run: |
-          python3 examples/data_preprocess/dapo_multiturn_w_tool.py --local_save_dir ${PWD}/data/dapo-math-17k
-          python3 examples/data_preprocess/aime2024_multiturn_w_tool.py --local_save_dir ${PWD}/data/aime-2024
-      - name: Running DAPO E2E with FP8 TRT-LLM rollout (Qwen3-0.6B)
+          python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k --local_save_dir ${PWD}/data/gsm8k
+      - name: Running GRPO E2E with FP8 TRT-LLM rollout (Qwen3-0.6B, gsm8k)
         run: |
           unset TORCH_CUDA_ARCH_LIST  # Let TRT-LLM CUTLASS DSL auto-detect runtime GPU arch
           export TRTLLM_ENABLE_PDL=0  # Disable Programmatic Dependent Launch (uses SM 9.0 griddepcontrol)
           ray stop --force
           export INFER_TP=2 ACTOR_TP=2 ACTOR_PP=2 ACTOR_VPP=2 ACTOR_EP=1 ACTOR_CP=2 REF_TP=2 REF_PP=2 REF_VPP=2 REF_EP=1 REF_CP=2 GEN_MOE_TP=null GEN_MOE_EP=null
           export NNODES=1 GPUS_PER_NODE=8 TRTLLM_MOE_BACKEND=TRITON
-          export DATA_DIR=${PWD} DAPO_MATH_TRAIN=${PWD}/data/dapo-math-17k/train.parquet AIME_VAL=${PWD}/data/aime-2024/train.parquet MODEL_PATH=${HOME}/models/Qwen/Qwen3-0.6B
+          export DATA_DIR=${PWD} DAPO_MATH_TRAIN=${PWD}/data/gsm8k/train.parquet AIME_VAL=${PWD}/data/gsm8k/test.parquet MODEL_PATH=${HOME}/models/Qwen/Qwen3-0.6B
           INFER_BACKEND=trtllm ROLLOUT_QUANTIZATION=fp8 bash examples/grpo_trainer/run_qwen3_30b_a3b_megatron.sh \
             reward_model.reward_kwargs.overlong_buffer_cfg.len=258 \
             reward_model.reward_kwargs.max_resp_len=512 \

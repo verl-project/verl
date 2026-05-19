@@ -5,7 +5,7 @@ Last updated: 05/19/2026.
 
 
 镜像获取 & 公开镜像地址
---------------------
+--------------------------
 
 昇腾在 `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_ 中托管每日构建的 A2/A3 镜像，基于 `Dockerfile <../../../docker/ascend>`_ 构建，具体说明见 ``Dockerfile构建镜像脚本清单`` 。
 
@@ -49,46 +49,12 @@ sgl-kernel-npu     2026.02.01
 
 
 
+.. _ascend-dockerfile-list:
+
 Dockerfile构建镜像脚本清单
 ---------------------------
 
 **通用镜像**
-
-============== ==================== ============== ==============================================================
-设备类型         CANN基础镜像版本     推理后端        参考文件
-============== ==================== ============== ==============================================================
-A2              8.5.0                  vLLM            `Dockerfile.ascend_8.5.0_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.0_a2>`_
-A3              8.5.0                  vLLM            `Dockerfile.ascend_8.5.0_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.0_a3>`_
-A2              8.5.0                  SGLang          `Dockerfile.ascend.sglang_8.5.0_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend.sglang_8.5.0_a2>`_
-A3              8.5.0                  SGLang          `Dockerfile.ascend.sglang_8.5.0_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend.sglang_8.5.0_a3>`_
-A2              8.3.RC1                vLLM            `Dockerfile.ascend_8.3.rc1_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.3.rc1_a2>`_
-A3              8.3.RC1                vLLM            `Dockerfile.ascend_8.3.rc1_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.3.rc1_a3>`_
-A2              8.3.RC1                SGLang          `Dockerfile.ascend.sglang_8.3.rc1_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend.sglang_8.3.rc1_a2>`_
-A3              8.3.RC1                SGLang          `Dockerfile.ascend.sglang_8.3.rc1_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend.sglang_8.3.rc1_a3>`_
-A2              8.2.RC1                vLLM            `Dockerfile.ascend_8.2.rc1_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.2.rc1_a2>`_
-A3              8.2.RC1                vLLM            `Dockerfile.ascend_8.2.rc1_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.2.rc1_a3>`_
-============== ==================== ============== ==============================================================
-
-
-**verl release版本镜像**
-
-============== ==================== ============== ============== ==============================================================
-设备类型         CANN基础镜像版本     推理后端        verl版本       参考文件                                
-============== ==================== ============== ============== ==============================================================
-A2              8.5.0                vLLM          release/v0.7.1 `Dockerfile.ascend_8.5.0_a2_v0.7.1 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.0_a2_v0.7.1>`_     
-A3              8.5.0                vLLM          release/v0.7.1 `Dockerfile.ascend_8.5.0_a3_v0.7.1 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.0_a3_v0.7.1>`_ 
-============== ==================== ============== ============== ==============================================================
-
-
-**模型定制镜像**
-
-============== ==================== ============== ============== ==============================================================
-设备类型         CANN基础镜像版本     推理后端        模型           参考文件                            
-============== ==================== ============== ============== ==============================================================
-A2              8.5.2                vLLM          Qwen3.5        `Dockerfile.ascend_8.5.2_a2_qwen3-5 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.2_a2_qwen3-5>`_   
-A3              8.5.2                vLLM          Qwen3.5        `Dockerfile.ascend_8.5.2_a3_qwen3-5 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.2_a3_qwen3-5>`_ 
-============== ==================== ============== ============== ==============================================================
-
 
 
 **说明：**
@@ -111,12 +77,15 @@ A3              8.5.2                vLLM          Qwen3.5        `Dockerfile.as
    # SGLang
    docker build -f Dockerfile.ascend.sglang_8.5.0_a2 -t verl-ascend-sglang:8.5.0-a2 .
 
+   # Query local images after build
+   docker images
+
 **说明：**
 
-* 以VLLM的镜像为例，``Dockerfile.ascend_8.3.rc1_a2`` 为 Dockerfile 文件名，``verl-ascend:8.5.0-a2`` 中， verl-ascend 为自定义的镜像名称，8.5.0-a2 为自定义的镜像标签
+* 以 vLLM 的镜像为例，``Dockerfile.ascend_8.5.0_a2`` 为 Dockerfile 文件名，``verl-ascend:8.5.0-a2`` 中， verl-ascend 为自定义的镜像名称，8.5.0-a2 为自定义的镜像标签
 
 容器启动命令模板
---------
+----------------
 
 .. code:: bash
 
@@ -146,14 +115,14 @@ A3              8.5.2                vLLM          Qwen3.5        `Dockerfile.as
 
 .. code:: bash
 
-   docker start your_docker_name
+   docker start {your_docker_name}
 
 进入正在运行的容器
 ------------------
 
 .. code:: bash
 
-   docker exec -it your_docker_name bash
+   docker exec -it {your_docker_name} bash
 
 
 声明
