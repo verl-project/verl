@@ -48,6 +48,29 @@ def test_union_tensor_dict():
         union_tensor_dict(data1, data_with_copied_obs)
 
 
+def test_union_tensor_dict_del_source():
+    obs = torch.randn(100, 10)
+
+    data1 = TensorDict({"obs": obs, "act": torch.randn(100, 3)}, batch_size=[100])
+    data2 = TensorDict({"next_obs": torch.randn(100, 10), "rew": torch.randn(100)}, batch_size=[100])
+
+    result = union_tensor_dict(data1, data2)
+
+    next_obs_orig = data2["next_obs"].clone()
+    rew_orig = data2["rew"].clone()
+
+    del data2
+
+    assert "obs" in result.keys()
+    assert "act" in result.keys()
+    assert "next_obs" in result.keys()
+    assert "rew" in result.keys()
+
+    assert torch.equal(result["next_obs"], next_obs_orig)
+    assert torch.equal(result["rew"], rew_orig)
+    assert torch.equal(data1["obs"], obs)
+
+
 def test_union_numpy_dict():
     """
     A comprehensive test suite for union_numpy_dict, covering standard use
