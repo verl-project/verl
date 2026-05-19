@@ -78,9 +78,10 @@ bash examples/grpo_trainer/run_qwen3_8b_fsdp.sh
 | Qwen3-8B (dense)      | ✓      | ✓        | ✓        | FSDP, Megatron  | nvidia, npu (FSDP + MindSpeed), `_gb200` variant |
 | Qwen2.5-VL-7B         | ✓      | ✓        | ✓        | FSDP, Megatron  | nvidia    |
 | Qwen3-VL-8B           | ✓      |          |          | FSDP, Megatron  | nvidia, npu (FSDP) |
-| Qwen3-VL-30B-A3B      | ✓      |          |          | FSDP, Megatron  | nvidia, npu (FSDP) |
+| Qwen3-VL-30B-A3B      | ✓      |          |          | FSDP, Megatron, VeOmni  | nvidia, npu (FSDP) |
 | Qwen3-VL-235B-A22B    | ✓      |          |          | Megatron        | nvidia    |
-| Qwen3-30B-A3B (MoE)   | ✓      | ✓        | ✓        | FSDP, Megatron  | nvidia, npu (MindSpeed) |
+| Qwen3-1.7B            | ✓      |          |          | VeOmni          | nvidia, npu |
+| Qwen3-30B-A3B (MoE)   | ✓      | ✓        | ✓        | FSDP, Megatron, VeOmni  | nvidia, npu (MindSpeed) |
 | Qwen3-235B-A22B       | ✓      |          | ✓        | Megatron        | nvidia, npu |
 | Qwen3-Next-80B-A3B    | ✓      |          |          | FSDP            | npu       |
 | Qwen3.5-27B (dense)   | ✓      |          |          | FSDP2           | nvidia, npu |

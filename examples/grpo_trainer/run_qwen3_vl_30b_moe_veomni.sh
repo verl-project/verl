@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# This script is a demo for GRPO training of Qwen3-VL-30B-MOE using VeOmniEngine.
+#
+# GRPO | Qwen3-VL-30B-A3B | VeOmni training | NVIDIA GPUs or Ascend NPUs
+#
+# INFER_BACKEND controls rollout backend: vllm
 
 set -xeuo pipefail
 

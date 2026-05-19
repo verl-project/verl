@@ -48,6 +48,9 @@ Last updated: 05/14/2026.
 | 40 | Qwen3.5-35B-A3B | GRPO | [35B](https://huggingface.co/Qwen/Qwen3.5-35B-A3B) | FSDP2(MindSpeed-MM) | vllm | [`link`](https://github.com/verl-project/verl-recipe/blob/main/grpo_mindspeed_mm/run_qwen3_5-35b_npu.sh) | Atlas 200T A2 Box16, Atlas 800T A3 |
 | 41 | Qwen3-Next-80B-A3B-Instruct | GRPO | [80B](https://huggingface.co/Qwen/Qwen3-Next-80B-A3B-Instruct) | FSDP2 | vllm | [`link`](https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3_next_80b_a3b_fsdp.sh) | Atlas 900 A2 PODc, Atlas 200T A2 Box16, Atlas 800T A3 |
 | 42 | DeepSeek-V3 | GRPO | [671B](https://huggingface.co/deepseek-ai/DeepSeek-V3) | Megatron | vllm | [`link`](https://github.com/verl-project/verl-recipe/blob/main/r1_ascend/run_deepseekv3_671b_grpo_megatron_npu.sh) | Atlas 200T A2 Box16, Atlas 800T A3 |
+| 43 | Qwen3-1.7B | GRPO | [1.7B](https://huggingface.co/Qwen/Qwen3-1.7B) | VeOmni | vllm | [`link`](https://github.com/verl-project/verl-ascend-recipe/blob/main/verl_ascend_practice/run_qwen3_1_7b_npu.sh) | Atlas 800T A3 |
+| 44 | Qwen3-30B-A3B | GRPO | [30B](https://huggingface.co/Qwen/Qwen3-30B-A3B) | VeOmni | vllm | [`link`](https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3_30b_veomni.sh) | Atlas 800T A3 |
+| 45 | Qwen3-VL-30B-A3B-Instruct | GRPO | [30B](https://huggingface.co/Qwen/Qwen3-VL-30B-A3B-Instruct) | VeOmni | vllm | [`link`](https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3_vl_30b_moe_veomni.sh) | Atlas 800T A3 |
 
 ### Table 2 SFT Algorithms
 
