@@ -599,6 +599,7 @@ class RayPPOTrainer:
                 self.checkpoint_manager.sleep_replicas()
                 batch_reward = self._compute_reward_colocate(test_output_gen_batch_padded)
                 test_output_gen_batch_padded = test_output_gen_batch_padded.union(batch_reward)
+                del batch_reward
                 # wake up rollout model
                 # replace with wake_up method once supported
                 self.checkpoint_manager.update_weights(self.global_steps)
@@ -614,6 +615,7 @@ class RayPPOTrainer:
             sample_outputs.extend(output_texts)
 
             test_batch = test_batch.union(test_output_gen_batch)
+            del test_output_gen_batch
             test_batch.meta_info["validate"] = True
 
             # Store original inputs
@@ -1437,6 +1439,7 @@ class RayPPOTrainer:
                         if self.use_rm and "rm_scores" not in gen_baseline_output.batch.keys():
                             baseline_reward = self._compute_reward_colocate(gen_baseline_output)
                             gen_baseline_output = gen_baseline_output.union(baseline_reward)
+                            del baseline_reward
 
                         reward_baseline_tensor = gen_baseline_output.batch["rm_scores"].sum(dim=-1)
                         batch.batch["reward_baselines"] = reward_baseline_tensor
@@ -1446,6 +1449,7 @@ class RayPPOTrainer:
                     # repeat to align with repeated responses in rollout
                     batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                     batch = batch.union(gen_batch_output)
+                    del gen_batch_output
 
                     if "response_mask" not in batch.batch.keys():
                         batch.batch["response_mask"] = compute_response_mask(batch)
@@ -1470,6 +1474,7 @@ class RayPPOTrainer:
                         if self.use_rm and "rm_scores" not in batch.batch.keys():
                             batch_reward = self._compute_reward_colocate(batch)
                             batch = batch.union(batch_reward)
+                            del batch_reward
 
                         # extract reward_tensor and reward_extra_infos_dict for training
                         reward_tensor, reward_extra_infos_dict = extract_reward(batch)
@@ -1515,6 +1520,7 @@ class RayPPOTrainer:
                                     "it should not be set when using R2 mode."
                                 )
                             batch = batch.union(old_log_prob)
+                            del old_log_prob
                             if "rollout_log_probs" in batch.batch.keys():
                                 # TODO: we may want to add diff of probs too.
                                 from verl.utils.debug.metrics import calculate_debug_metrics
@@ -1528,12 +1534,15 @@ class RayPPOTrainer:
                         with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
                             ref_log_prob = self._compute_ref_log_prob(batch)
                             batch = batch.union(ref_log_prob)
+                            del ref_log_prob
+
 
                     # compute values
                     if self.use_critic:
                         with marked_timer("values", timing_raw, color="cyan"):
                             values = self._compute_values(batch)
                             batch = batch.union(values)
+                            del values
 
                     with marked_timer("adv", timing_raw, color="brown"):
                         # we combine with rule-based rm
