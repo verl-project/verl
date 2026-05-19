@@ -81,7 +81,7 @@ RUN export NVTE_FRAMEWORK=pytorch && \
     MAX_JOBS=256 NVTE_BUILD_THREADS_PER_JOB=4 \
     pip3 install --resume-retries 999 --no-build-isolation git+https://github.com/NVIDIA/TransformerEngine.git@${TRANSFORMER_ENGINE_VERSION}
 
-RUN pip install codetiming mathruler pylatexenc qwen_vl_utils cachetools pytest-asyncio
+    RUN pip install codetiming mathruler pylatexenc cachetools pytest-asyncio
 
 RUN export FLASH_ATTENTION_FORCE_BUILD="TRUE" && MAX_JOBS=32 pip install --no-build-isolation flash_attn==${FLASH_ATTENTION_VERSION}
 
@@ -133,6 +133,10 @@ RUN pip install -U git+https://github.com/ISEEKYAN/mbridge.git@main
 RUN pip install --no-deps git+https://github.com/NVIDIA/Megatron-LM.git@${MCORE_VERSION}
 
 RUN pip install transformers==${TRANSFORMERS_VERSION}
+
+RUN pip install torchcodec --index-url=https://download.pytorch.org/whl/cu130
+
+RUN pip install git+https://github.com/ETOgaosion/qwen-vl-utils.git@main
 
 RUN pip install git+https://github.com/verl-project/verl.git@${VERL_VERSION} && pip uninstall -y verl
 
