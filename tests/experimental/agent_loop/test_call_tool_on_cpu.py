@@ -39,6 +39,7 @@ class FakeAgentData:
     """Minimal AgentData for testing."""
 
     tools_kwargs: dict = field(default_factory=dict)
+    response_mask: list[int] = field(default_factory=list)
 
 
 class FakeTool:
@@ -79,6 +80,8 @@ def _make_tool_agent_loop(
     tools: dict[str, Any],
     max_tool_response_length: int = 10000,
     tool_response_truncate_side: str = "left",
+    response_length: int = 100,
+    max_assistant_response_length: int | None = None,
 ):
     """Create a minimal ToolAgentLoop instance with only the fields _call_tool needs."""
     from verl.experimental.agent_loop.tool_agent_loop import ToolAgentLoop
@@ -87,8 +90,11 @@ def _make_tool_agent_loop(
     mock.tools = tools
     mock.max_tool_response_length = max_tool_response_length
     mock.tool_response_truncate_side = tool_response_truncate_side
+    mock.response_length = response_length
+    mock.max_assistant_response_length = max_assistant_response_length
     # Bind the real _call_tool method to our mock
     mock._call_tool = ToolAgentLoop._call_tool.__get__(mock, ToolAgentLoop)
+    mock._get_turn_sampling_params = ToolAgentLoop._get_turn_sampling_params.__get__(mock, ToolAgentLoop)
     return mock
 
 
@@ -186,6 +192,47 @@ class TestCallToolErrorHandling(unittest.IsolatedAsyncioTestCase):
         assert response.text.startswith("Search results")
         assert response.text.endswith("...(truncated)")
         assert "Final answer: Paris" not in response.text
+
+
+class TestAssistantResponseLengthLimit(unittest.TestCase):
+    """Test per-assistant-turn generation limits without launching a rollout server."""
+
+    def test_no_config_keeps_sampling_params_unchanged(self):
+        loop = _make_tool_agent_loop({}, max_assistant_response_length=None)
+        sampling_params = {"temperature": 0}
+        agent_data = FakeAgentData(response_mask=[1] * 90)
+
+        turn_sampling_params = loop._get_turn_sampling_params(agent_data, sampling_params)
+
+        assert turn_sampling_params is sampling_params
+        assert "max_tokens" not in turn_sampling_params
+
+    def test_per_turn_limit_is_clamped_by_remaining_response_budget(self):
+        loop = _make_tool_agent_loop({}, response_length=100, max_assistant_response_length=32)
+        sampling_params = {"temperature": 0}
+        agent_data = FakeAgentData(response_mask=[1] * 90)
+
+        turn_sampling_params = loop._get_turn_sampling_params(agent_data, sampling_params)
+
+        assert turn_sampling_params is not sampling_params
+        assert turn_sampling_params["max_tokens"] == 10
+        assert "max_tokens" not in sampling_params
+
+    def test_per_turn_limit_is_used_when_budget_is_larger(self):
+        loop = _make_tool_agent_loop({}, response_length=100, max_assistant_response_length=32)
+        sampling_params = {"temperature": 0}
+        agent_data = FakeAgentData(response_mask=[1] * 20)
+
+        turn_sampling_params = loop._get_turn_sampling_params(agent_data, sampling_params)
+
+        assert turn_sampling_params["max_tokens"] == 32
+
+    def test_exhausted_response_budget_stops_before_generation(self):
+        loop = _make_tool_agent_loop({}, response_length=100, max_assistant_response_length=32)
+        sampling_params = {"temperature": 0}
+        agent_data = FakeAgentData(response_mask=[1] * 100)
+
+        assert loop._get_turn_sampling_params(agent_data, sampling_params) is None
 
 
 if __name__ == "__main__":

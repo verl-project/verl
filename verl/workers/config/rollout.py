@@ -68,6 +68,7 @@ class MultiTurnConfig(BaseConfig):
 
     enable: bool = False
     max_assistant_turns: Optional[int] = None
+    max_assistant_response_length: Optional[int] = None
     tool_config_path: Optional[str] = None
     function_tool_path: Optional[str] = None
     max_user_turns: Optional[int] = None
@@ -78,6 +79,10 @@ class MultiTurnConfig(BaseConfig):
     tokenization_sanity_check_mode: str = "strict"
     format: str = "hermes"
     num_repeat_rollouts: Optional[int] = None
+
+    def __post_init__(self):
+        if self.max_assistant_response_length is not None and self.max_assistant_response_length <= 0:
+            raise ValueError("`max_assistant_response_length` must be a positive integer or null.")
 
 
 @dataclass
