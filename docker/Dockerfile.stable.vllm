@@ -116,7 +116,11 @@ RUN cd /home && mkdir -p dpsk_a2a && cd dpsk_a2a && \
     export CPATH=/usr/local/cuda/targets/${CUDA_TARGET}/include/cccl:$CPATH && \
     TORCH_CUDA_ARCH_LIST="9.0;10.0" python setup.py install
 
-RUN if [ "$(uname -m)" = "aarch64" ]; then apt-get remove -y python3-jwt; fi
+# Debian python3-jwt has no pip RECORD; vllm cannot uninstall it when upgrading PyJWT.
+RUN apt-get update && \
+    apt-get remove -y --purge python3-jwt 2>/dev/null || true && \
+    rm -rf /var/lib/apt/lists/* && \
+    pip install --ignore-installed PyJWT
 
 RUN pip install vllm==${VLLM_VERSION}
 
