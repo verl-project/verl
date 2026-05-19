@@ -309,6 +309,9 @@ class RayPPOTrainer:
 
         self.checkpoint_manager = None
 
+        self.wg_kwargs = {}
+        self.use_gpu = True
+
     def _create_dataloader(self, train_dataset, val_dataset, collate_fn, train_sampler: Optional[Sampler]):
         """
         Creates the train and validation dataloaders.
@@ -682,7 +685,7 @@ class RayPPOTrainer:
         1. Ray resource pools from configuration
         2. Worker groups for each role (actor, critic, etc.)
         """
-        self.resource_pool_manager.create_resource_pool()
+        self.resource_pool_manager.create_resource_pool(use_gpu=self.use_gpu)
 
         self.resource_pool_to_cls = {pool: {} for pool in self.resource_pool_manager.resource_pool_dict.values()}
 
@@ -694,6 +697,7 @@ class RayPPOTrainer:
                 cls=self.role_worker_mapping[actor_role],
                 config=self.config.actor_rollout_ref,
                 role=str(actor_role),
+                **self.wg_kwargs,
             )
             self.resource_pool_to_cls[actor_rollout_resource_pool][str(actor_role)] = actor_rollout_cls
         else:
@@ -840,6 +844,7 @@ class RayPPOTrainer:
             worker_group=self.actor_rollout_wg,
             rollout_resource_pool=actor_rollout_resource_pool,
             reward_loop_worker_handles=reward_loop_worker_handles,
+            **self.wg_kwargs,
         )
         checkpoint_engine_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
         self.checkpoint_manager = CheckpointEngineManager(
@@ -1589,7 +1594,8 @@ class RayPPOTrainer:
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
                 # TODO: implement actual tflpo and theoretical tflpo
                 n_gpus = self.resource_pool_manager.get_n_gpus()
-                metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
+                # To support serverless/tinker-like training, we need to support 0 GPUs training
+                metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=max(n_gpus, 1)))
                 # compute variance proxy metrics
                 gradient_norm = metrics.get("actor/grad_norm", None)
                 metrics.update(compute_variance_proxy_metrics(batch=batch, gradient_norm=gradient_norm))

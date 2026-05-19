@@ -203,6 +203,12 @@ trainer:
   #  mode: "auto", "enable", or "disable"
   use_legacy_worker_impl: auto
 
+  # Remote-backend selector. Set to a registered backend name
+  # (e.g. "arctic") to route training/rollout/log-prob/sync/ckpt through
+  # `verl.remote_backend.RemoteBackend` instead of an in-process engine.
+  # Leave null for the standard in-process verl path.
+  remote_backend: null
+
 # profiler configs
 global_profiler:
 
@@ -310,3 +316,34 @@ ray_kwargs:
 
   # Path to save Ray timeline JSON for performance profiling
   timeline_json_file: null
+
+
+# config for arctic rl
+arctic_rl:
+
+  # whether to use colocate mode
+  colocate: False
+
+  training_gpus: 1
+  sampling_gpus: 1
+  log_prob_gpus: 1
+  sampling_tp_size: 1
+
+  use_zorro: False
+
+  # only set to True if running into OOM, otherwise it'll be faster not to tile (extra forward replay and smaller chunks to compute)
+  tiled_logits_compute: False
+
+  # ray or http: ray would be much faster for payload comms in the en-prem use case
+  comm_protocol: ray
+
+  zero_optimization:
+    # 2 for optim + grad sharding
+    # 3 for optim + grad +weight sharding
+    stage: 0
+
+    offload_optimizer:
+      device: none
+
+    offload_param:
+      device: none
