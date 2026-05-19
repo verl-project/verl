@@ -17,6 +17,7 @@ import itertools
 import json
 import math
 import os
+import warnings
 from abc import ABC
 from collections import OrderedDict
 from contextlib import contextmanager, nullcontext
@@ -127,15 +128,22 @@ def get_fsdp_wrap_policy(module, config=None, is_lora=False):
         for layer_class in fsdp_transformer_layer_cls_to_wrap:
             transformer_cls = get_module_class_from_name(module, layer_class)
             if transformer_cls is None:
-                raise Exception("Could not find the transformer layer class to wrap in the model.")
+                # Gemma4: not all configured layer classes exist in the model (e.g. text-only
+                # extraction removes vision/audio layers). Warn instead of crashing.
+                warnings.warn(f"Could not find layer class '{layer_class}' in the model, skipping.")
             else:
                 transformer_cls_to_wrap.add(transformer_cls)
 
-        transformer_policy = functools.partial(
-            transformer_auto_wrap_policy,
-            transformer_layer_cls=transformer_cls_to_wrap,
-        )
-        policies.append(transformer_policy)
+        if transformer_cls_to_wrap:
+            transformer_policy = functools.partial(
+                transformer_auto_wrap_policy,
+                transformer_layer_cls=transformer_cls_to_wrap,
+            )
+            policies.append(transformer_policy)
+        else:
+            # Fall back to size-based policy if no layer classes resolved
+            size_policy = functools.partial(size_based_auto_wrap_policy, min_num_params=1e6)
+            policies.append(size_policy)
 
     if len(policies) > 0:
         auto_wrap_policy = functools.partial(_or_policy, policies=policies)
@@ -479,7 +487,12 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_state: dict, device_
     set_model_state_dict(model, full_state, options=options)
 
     # rotary_emb is not in state_dict, so we need to broadcast it manually
-    for name, buf in model.named_buffers():
+    # Sort by name to ensure deterministic order across ranks. FSDP2 can return
+    # named_buffers() in different order on different ranks. Gemma4 has heterogeneous
+    # rotary embedding buffers (256 vs 128 elements) so mismatched order = size
+    # mismatch on the same broadcast collective = NCCL deadlock.
+    bufs = sorted(model.named_buffers(), key=lambda x: x[0])
+    for name, buf in bufs:
         dist.broadcast(buf, src=0)
 
     if cpu_offload:
