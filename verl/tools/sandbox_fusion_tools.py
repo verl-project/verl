@@ -68,7 +68,12 @@ class ExecutionWorker:
     def _init_rate_limit(self, rate_limit):
         # TODO validation for rate_limit
         # A Singleton Rate Limitor
-        return TokenBucketWorker.options(name="rate-limiter", get_if_exists=True).remote(rate_limit)
+        return TokenBucketWorker.options(
+            name="rate-limiter",
+            get_if_exists=True,
+            lifetime="detached",
+            namespace="verl_sandbox",
+        ).remote(rate_limit)
 
     def ping(self):
         return True
@@ -90,7 +95,13 @@ def init_execution_pool(
     if mode == PoolMode.ThreadMode:
         return (
             ray.remote(ExecutionWorker)
-            .options(name="sandbox-execution-pool", get_if_exists=True, max_concurrency=num_workers)
+            .options(
+                name="sandbox-execution-pool",
+                get_if_exists=True,
+                lifetime="detached",
+                namespace="verl_sandbox",
+                max_concurrency=num_workers,
+            )
             .remote(enable_global_rate_limit=enable_global_rate_limit, rate_limit=rate_limit)
         )
     else:

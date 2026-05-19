@@ -73,6 +73,7 @@ class AgentData:
         self.response_logprobs: list[float] = []
         self.turn_scores: list[float] = []
         self.tool_rewards: list[float] = []
+        self.round_io: list[dict[str, Any]] = []
         self.user_turns = 0
         self.assistant_turns = 0
 
@@ -105,6 +106,7 @@ class ToolAgentLoop(AgentLoopBase):
 
         self.prompt_length = self.rollout_config.prompt_length
         self.response_length = self.rollout_config.response_length
+        self.enable_round_io_logging = bool(os.getenv("VERL_ROLLOUT_PROMPT_LOG_PATH", "").strip())
 
     @rollout_trace_op
     async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
@@ -180,7 +182,13 @@ class ToolAgentLoop(AgentLoopBase):
             ),
             extra_fields=agent_data.extra_fields,
         )
-        output.extra_fields.update({"turn_scores": agent_data.turn_scores, "tool_rewards": agent_data.tool_rewards})
+        output.extra_fields.update(
+            {
+                "turn_scores": agent_data.turn_scores,
+                "tool_rewards": agent_data.tool_rewards,
+                "round_io": agent_data.round_io,
+            }
+        )
         return output
 
     async def _handle_pending_state(self, agent_data: AgentData, sampling_params: dict[str, Any]) -> AgentState:
@@ -199,6 +207,8 @@ class ToolAgentLoop(AgentLoopBase):
         self, agent_data: AgentData, sampling_params: dict[str, Any], ignore_termination: bool = False
     ) -> AgentState:
         """Handle the generating state: generate model response and check for tool calls."""
+        round_prompt_ids = list(agent_data.prompt_ids)
+
         with simple_timer("generate_sequences", agent_data.metrics):
             output: TokenOutput = await self.server_manager.generate(
                 request_id=agent_data.request_id,
@@ -231,6 +241,21 @@ class ToolAgentLoop(AgentLoopBase):
 
         if output.routed_experts is not None:
             agent_data.routed_experts = output.routed_experts
+
+        if self.enable_round_io_logging:
+            prompt_text = await self.loop.run_in_executor(
+                None, lambda: self.tokenizer.decode(round_prompt_ids, skip_special_tokens=True)
+            )
+            response_text = await self.loop.run_in_executor(
+                None, lambda: self.tokenizer.decode(output.token_ids, skip_special_tokens=True)
+            )
+            agent_data.round_io.append(
+                {
+                    "turn": agent_data.assistant_turns,
+                    "prompt": prompt_text,
+                    "response": response_text,
+                }
+            )
 
         # Check termination conditions
         if not ignore_termination and len(agent_data.response_mask) >= self.response_length:

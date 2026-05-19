@@ -424,11 +424,6 @@ class CheckpointEngineManager:
             global_steps: The global steps of the trainer.
         """
 
-        # 0. update weights for sync training with colocated trainer and rollout
-        if self.backend == "naive":
-            ray.get(self.trainer.update_weights(global_steps=global_steps))
-            return
-
         # 0a. skip refit entirely if configured. Rollout backend keeps serving
         # with the weights it was initialized with; trainer-side actor still
         # advances independently. Mirrors NeMo-RL PR #2222 NEED_REFIT=False
@@ -438,6 +433,11 @@ class CheckpointEngineManager:
         if self.config.skip_refit:
             return
 
+        # 0. update weights for sync training with colocated trainer and rollout
+        if self.backend == "naive":
+            ray.get(self.trainer.update_weights(global_steps=global_steps))
+            return
+            
         # 1. abort and save all unfinished requests for partial rollout
         await asyncio.gather(*[r.abort_all_requests() for r in self.replicas])
 
