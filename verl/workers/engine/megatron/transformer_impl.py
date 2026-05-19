@@ -223,7 +223,7 @@ class MegatronEngine(BaseEngine):
 
                 provider.transformer_layer_spec = modelopt_transformer_layer_spec
 
-            provider.configure(
+            provider.apply_overrides_and_finalize(
                 dtype=self.param_dtype,
                 overrides=provider_overrides,
             )
