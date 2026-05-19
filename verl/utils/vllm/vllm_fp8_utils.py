@@ -366,12 +366,10 @@ def process_weights_after_loading_for_vllm11(self, layer) -> None:
 
 
 def process_weights_after_loading_for_vllm14(self, layer) -> None:
-    """process_weights_after_loading for vLLM >= 0.14.
+    """This function is used to process the weights after loading for a Linear layer, it is used for vllm v0.14-v0.19.
 
-    Starting from v0.14, vLLM keeps the scale parameter as `weight_scale_inv`
-    (instead of renaming it to `weight_scale` like v0.11-v0.12), and `apply()`
-    accesses `layer.weight_scale_inv`. We preserve `weight_loader` and
-    `subclass_type` attributes so that refit (repeated weight sync) works.
+    Compared to the original process_weights_after_loading in vllm, we just avoid creation of
+    new torch.nn.Parameter objects, because that removes the weight_loader attribute which we need for refit.
     """
     from torch.nn import Parameter
     from vllm.model_executor.layers.quantization.utils.fp8_utils import (
@@ -390,9 +388,11 @@ def process_weights_after_loading_for_vllm14(self, layer) -> None:
         param = Parameter(custom_param.data, requires_grad=False)
         base_param_dir = dir(torch.nn.Parameter)
         custom_param_dir = dir(custom_param)
+        # Find the attributes that are unique to the custom parameter
         custom_attributes = [
             attr for attr in custom_param_dir if attr not in base_param_dir and not attr.startswith("__")
         ]
+        # Set the custom attributes into the base parameter object
         for attr in custom_attributes:
             setattr(param, attr, getattr(custom_param, attr))
 
@@ -425,6 +425,31 @@ def process_weights_after_loading_for_vllm14(self, layer) -> None:
         layer.input_scale = None
 
     maybe_post_process_fp8_weight_block(layer)
+
+
+def process_weights_after_loading_for_vllm20(self, layer) -> None:
+    """``process_weights_after_loading`` for vLLM >= 0.20.
+
+    vLLM 0.20 (PR vllm-project/vllm#33892) refactored FP8 block linear into the
+    ``Fp8BlockScaledMMLinearKernel`` abstraction selected by
+    ``init_fp8_linear_kernel``. The standalone helper
+    ``maybe_post_process_fp8_weight_block`` was removed; the equivalent
+    block-strategy quantization and DeepGEMM layout transform now happen inside
+    ``self.fp8_linear.process_weights_after_loading(layer)``.
+
+    The kernel uses ``vllm.model_executor.utils.replace_parameter`` to update
+    weight/scale tensors, which preserves the ``weight_loader`` attribute that
+    verl relies on for refit.
+    """
+    assert self.block_quant and self.quant_config.is_checkpoint_fp8_serialized
+    assert self.quant_config.activation_scheme == "dynamic"
+
+    # vLLM v0.17+ no longer registers `input_scale=None` for dynamic activation,
+    # but the kernel's apply() still reads `layer.input_scale`.
+    if not hasattr(layer, "input_scale"):
+        layer.input_scale = None
+
+    self.fp8_linear.process_weights_after_loading(layer)
 
 
 def process_weights_after_loading_moe_for_vllm10(self, layer) -> None:
@@ -641,9 +666,17 @@ def apply_vllm_fp8_patches():
     logger.info("Applying vllm fp8 patches for blockwise quantization")
     vllm_ver = version.parse(vllm.__version__)
 
-    # Linear patch: v0.14+ keeps weight_scale_inv, v0.11-v0.12 renames to weight_scale
+    # Linear patch:
+    # - v0.20+: vLLM moved FP8 block linear into a kernel abstraction
+    #   (vllm-project/vllm#33892) and removed `maybe_post_process_fp8_weight_block`;
+    #   we now delegate to ``self.fp8_linear.process_weights_after_loading``.
+    # - v0.14-v0.19: vLLM still exposes the standalone helper and keeps the
+    #   `weight_scale_inv` name.
+    # - v0.11-v0.12: vLLM renames `weight_scale_inv` to `weight_scale`.
     func1_path = "vllm.model_executor.layers.quantization.fp8.Fp8LinearMethod.process_weights_after_loading"
-    if vllm_ver >= version.parse("0.14.0"):
+    if vllm_ver >= version.parse("0.20.0"):
+        linear_patch_fn = process_weights_after_loading_for_vllm20
+    elif vllm_ver >= version.parse("0.14.0"):
         linear_patch_fn = process_weights_after_loading_for_vllm14
     elif vllm_ver >= version.parse("0.11.0"):
         linear_patch_fn = process_weights_after_loading_for_vllm11
