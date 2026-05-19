@@ -402,11 +402,17 @@ class vLLMHttpServer:
 
         build_app_sig = inspect.signature(build_app)
         supported_tasks: tuple[Any, ...] = ()
+        build_app_kwargs: dict[str, Any] = {}
         if "supported_tasks" in build_app_sig.parameters:
             supported_tasks = await engine_client.get_supported_tasks()
-            app = build_app(args, supported_tasks)
-        else:
-            app = build_app(args)
+            build_app_kwargs["supported_tasks"] = supported_tasks
+        # vLLM >= 0.20.0 requires `model_config` to register pooling API routes
+        # (e.g. ``/classify``, ``/embed``); see
+        # ``register_pooling_api_routers`` in vllm/entrypoints/pooling/factories.py
+        # which short-circuits when ``model_config`` is ``None``.
+        if "model_config" in build_app_sig.parameters:
+            build_app_kwargs["model_config"] = engine_client.model_config
+        app = build_app(args, **build_app_kwargs)
 
         init_app_sig = inspect.signature(init_app_state)
         if "vllm_config" in init_app_sig.parameters:
