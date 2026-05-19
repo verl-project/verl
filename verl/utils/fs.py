@@ -198,7 +198,10 @@ def copy_to_local(
     """Copy files/directories from HDFS to local cache with validation.
 
     Args:
-        src (str): Source path - HDFS path (hdfs://...), local filesystem path, or Hugging Face model ID
+        src (str | None): Source path - HDFS path (hdfs://...), local filesystem path, or Hugging Face
+            model ID. If ``None``, this short-circuits and returns ``None`` so callers can forward
+            optional path config fields (e.g. an unset checkpoint or auxiliary model path) without
+            adding a guard at every call site.
         cache_dir (str, optional): Local directory for cached files. Uses system tempdir if None
         filelock (str): Base name for file lock. Defaults to ".file.lock"
         verbose (bool): Enable copy operation logging. Defaults to False
@@ -206,8 +209,12 @@ def copy_to_local(
         use_shm (bool): Enable shared memory copy. Defaults to False
 
     Returns:
-        str: Local filesystem path to copied resource
+        str | None: Local filesystem path to copied resource, or ``None`` if ``src`` is ``None``.
     """
+    # Tolerate ``None`` so callers can forward optional path config fields without a guard at every site.
+    if src is None:
+        return None
+
     # Save to a local path for persistence.
     local_path = copy_local_path_from_hdfs(src, cache_dir, filelock, verbose, always_recopy)
 
@@ -234,6 +241,10 @@ def copy_local_path_from_hdfs(
 ) -> str:
     """Deprecated. Please use copy_to_local instead."""
     from filelock import FileLock
+
+    # Tolerate ``None`` for the same reason as ``copy_to_local`` above.
+    if src is None:
+        return None
 
     assert src[-1] != "/", f"Make sure the last char in src is not / because it will cause error. Got {src}"
 

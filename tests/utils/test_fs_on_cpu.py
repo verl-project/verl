@@ -92,3 +92,36 @@ def test_always_recopy_flag(tmp_path, monkeypatch):
     # Subsequent normal call (always_recopy=False)
     fs.copy_to_local(hdfs_path, cache_dir=test_cache)
     assert copy_call_count == 2  # Should not increment
+
+
+# ----------------------------------------------------------------------------
+# None-tolerance regression tests for copy_to_local / copy_local_path_from_hdfs.
+# ----------------------------------------------------------------------------
+
+
+def test_copy_to_local_returns_none_for_none_src():
+    """``copy_to_local(None)`` must short-circuit to ``None`` so callers can
+    forward optional config fields (e.g. an unset model path) without a guard
+    at every call site."""
+    assert fs.copy_to_local(None) is None
+
+
+def test_copy_to_local_returns_none_for_none_src_with_use_shm():
+    """The ``use_shm`` branch must also tolerate ``None`` (it should never
+    reach ``copy_to_shm`` with ``None``)."""
+    assert fs.copy_to_local(None, use_shm=True) is None
+
+
+def test_copy_local_path_from_hdfs_returns_none_for_none_src():
+    """The deprecated alias must behave identically."""
+    assert fs.copy_local_path_from_hdfs(None) is None
+
+
+def test_copy_to_local_passes_through_existing_local_path(tmp_path):
+    """Sanity check that a plain local path is returned unchanged (the happy
+    path is unaffected by the ``None`` short-circuit)."""
+    f = tmp_path / "existing.txt"
+    f.write_text("test")
+    result = fs.copy_to_local(str(f))
+    assert result == str(f)
+    assert os.path.exists(result)
