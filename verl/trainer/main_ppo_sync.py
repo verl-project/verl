@@ -813,13 +813,6 @@ class PPOTrainer:
         self.actor_rollout_wg.save_checkpoint(
             actor_local_path, actor_remote_path, self.global_steps, max_ckpt_to_keep=max_actor_ckpt_to_keep
         )
-        lora_train_meta = self._get_actor_lora_train_meta()
-        if lora_train_meta is not None:
-            local_mkdir_safe(actor_local_path)
-            lora_meta_path = os.path.join(actor_local_path, "lora_train_meta.json")
-            with open(lora_meta_path, "w", encoding="utf-8") as f:
-                json.dump(lora_train_meta, f, ensure_ascii=False, indent=4)
-            logger.info(f"Saved LoRA rank/alpha metadata to {lora_meta_path}")
 
         # save critic
         if self.use_critic:
@@ -850,33 +843,6 @@ class PPOTrainer:
         )
         with open(local_latest_checkpointed_iteration, "w") as f:
             f.write(str(self.global_steps))
-
-    def _get_actor_lora_train_meta(self):
-        model_config = self.config.actor_rollout_ref.model
-        lora_config = model_config.get("lora", {}) or {}
-        lora_rank = int(lora_config.get("rank", 0) or 0)
-        raw_lora_alpha = lora_config.get("alpha", None) if lora_rank > 0 else None
-
-        if lora_rank <= 0:
-            lora_rank = int(model_config.get("lora_rank", 0) or 0)
-            raw_lora_alpha = model_config.get("lora_alpha", None)
-
-        if lora_rank <= 0:
-            return None
-
-        if raw_lora_alpha is None:
-            logger.warning(
-                "LoRA is enabled but LoRA alpha is not set; "
-                f"fallback to lora_rank ({lora_rank}) in checkpoint metadata."
-            )
-            lora_alpha = lora_rank
-        else:
-            lora_alpha = int(raw_lora_alpha)
-            if lora_alpha == 0:
-                logger.warning("LoRA is enabled but LoRA alpha is 0; this may lead to ineffective LoRA scaling.")
-
-        task_type = model_config.get("task_type", None) or lora_config.get("task_type", None) or "CAUSAL_LM"
-        return {"r": lora_rank, "lora_alpha": lora_alpha, "task_type": str(task_type)}
 
     def _validate(self) -> dict[str, float]:
         # Lists to collect samples for the table

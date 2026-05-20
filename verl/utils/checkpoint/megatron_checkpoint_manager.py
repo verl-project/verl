@@ -131,6 +131,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         bridge=None,
         provider=None,
         peft_cls=None,
+        lora_config=None,
         **kwargs,
     ):
         super().__init__(
@@ -158,6 +159,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         self.provider = provider
         self.vanilla_bridge = self.provider is None
         self.peft_cls = peft_cls
+        self.lora_config = lora_config
         self.use_megatron_fsdp = use_megatron_fsdp
         self.rank = torch.distributed.get_rank()
         # Megatron-Bridge is Okay to load/save HF checkpoint for value model as well
@@ -169,6 +171,44 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         self.weight_saver = None
         if self.bridge is None:
             self.weight_saver = get_weight_saver(self.arch)
+
+    def _get_lora_train_meta(self):
+        if self.lora_config is None:
+            return None
+        lora_rank = int(self.lora_config.get("rank", 0) or 0)
+        if lora_rank <= 0:
+            return None
+
+        raw_lora_alpha = self.lora_config.get("alpha", None)
+        if raw_lora_alpha is None:
+            lora_alpha = lora_rank
+        else:
+            lora_alpha = int(raw_lora_alpha)
+
+        task_type = self.lora_config.get("task_type", None) or "CAUSAL_LM"
+        if hasattr(task_type, "value"):
+            task_type = task_type.value
+
+        return {"r": lora_rank, "lora_alpha": lora_alpha, "task_type": str(task_type)}
+
+    def _save_lora_train_meta(self, local_path: str):
+        if self.rank != 0:
+            return None
+
+        lora_train_meta = self._get_lora_train_meta()
+        if lora_train_meta is None:
+            return None
+
+        lora_meta_path = os.path.join(local_path, "lora_train_meta.json")
+        with open(lora_meta_path, "w", encoding="utf-8") as f:
+            json.dump(lora_train_meta, f, ensure_ascii=False, indent=4)
+        log_with_rank(
+            f"Saved LoRA rank/alpha metadata to {os.path.abspath(lora_meta_path)}",
+            rank=self.rank,
+            logger=logger,
+            log_only_rank_0=True,
+        )
+        return lora_meta_path
 
     def get_rng_state(self, use_dist_ckpt: bool = True, data_parallel_random_init: bool = False):
         """collect rng state across data parallel ranks"""
@@ -867,6 +907,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                 f"Dist checkpointing save completed for {dist_checkpoint_path}", rank=self.rank, logger=logger
             )
             if self.rank == 0:
+                lora_meta_path = self._save_lora_train_meta(local_path)
                 if hdfs_path is not None:
                     log_with_rank(f"Uploading checkpoint to {hdfs_path}", rank=self.rank, logger=logger)
                     from verl.utils import hdfs_io
@@ -874,6 +915,8 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                     hdfs_io.makedirs(hdfs_path, exist_ok=True)
                     hdfs_io.copy(src=dist_checkpoint_path, dst=hdfs_path, dirs_exist_ok=True)
                     hdfs_io.copy(src=hf_config_tokenizer_path, dst=hdfs_path, dirs_exist_ok=True)
+                    if lora_meta_path is not None:
+                        hdfs_io.copy(src=lora_meta_path, dst=hdfs_path, dirs_exist_ok=True)
 
             # update latest_checkpointed_iteration.txt when async_save is True
             if self.checkpoint_config.async_save and self.rank == 0:
