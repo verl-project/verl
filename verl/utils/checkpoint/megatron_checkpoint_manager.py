@@ -17,8 +17,8 @@ import json
 import logging
 import os
 import random
-from collections.abc import Callable
-from dataclasses import asdict
+from dataclasses import fields, is_dataclass
+from enum import Enum
 
 import megatron.core
 import numpy as np
@@ -26,7 +26,6 @@ import torch
 import torch.distributed
 from megatron.core import dist_checkpointing, mpu, tensor_parallel
 from megatron.core.dist_checkpointing.mapping import ShardedObject
-from megatron.core.transformer.enums import AttnBackend
 from packaging import version
 from transformers import GenerationConfig
 
@@ -52,6 +51,61 @@ if not mcore_ge_014:
         "Detected megatron.core %s, recommend upgrading to >= 0.14.0 for better checkpoint compatibility",
         megatron.core.__version__,
     )
+
+
+_SKIP_CONFIG_VALUE = object()
+
+
+def _to_json_safe_config_value(value, seen):
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    if type(value) is torch.dtype or isinstance(value, Enum):
+        return str(value)
+    if isinstance(value, np.generic):
+        return value.item()
+    if callable(value):
+        return _SKIP_CONFIG_VALUE
+    if isinstance(value, list | tuple):
+        value_id = id(value)
+        if value_id in seen:
+            return _SKIP_CONFIG_VALUE
+        seen.add(value_id)
+        converted = []
+        for item in value:
+            converted_item = _to_json_safe_config_value(item, seen)
+            if converted_item is not _SKIP_CONFIG_VALUE:
+                converted.append(converted_item)
+        seen.remove(value_id)
+        return converted
+    if isinstance(value, dict):
+        value_id = id(value)
+        if value_id in seen:
+            return _SKIP_CONFIG_VALUE
+        seen.add(value_id)
+        converted = {}
+        for key, item in value.items():
+            converted_key = _to_json_safe_config_value(key, seen)
+            converted_item = _to_json_safe_config_value(item, seen)
+            if converted_key is not _SKIP_CONFIG_VALUE and converted_item is not _SKIP_CONFIG_VALUE:
+                converted[str(converted_key)] = converted_item
+        seen.remove(value_id)
+        return converted
+    return _SKIP_CONFIG_VALUE
+
+
+def _to_json_safe_config_dict(config_dict):
+    json_safe_config = {}
+    for key, value in config_dict.items():
+        converted = _to_json_safe_config_value(value, set())
+        if converted is not _SKIP_CONFIG_VALUE:
+            json_safe_config[key] = converted
+    return json_safe_config
+
+
+def _config_to_shallow_dict(config):
+    if is_dataclass(config):
+        return {field.name: getattr(config, field.name) for field in fields(config) if hasattr(config, field.name)}
+    return vars(config)
 
 
 class MegatronCheckpointManager(BaseCheckpointManager):
@@ -752,36 +806,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             if self.rank == 0:
                 # Save transformer config
                 print(self.transformer_config)
-                bypass_keys = [
-                    "finalize_model_grads_func",
-                    "grad_scale_func",
-                    "no_sync_func",
-                    "grad_sync_func",
-                    "param_sync_func",
-                    "generation_config",
-                    "transformer_layer_spec",
-                    "_pg_collection",
-                ]
-                backup = {}
-                for k in bypass_keys:
-                    if hasattr(self.transformer_config, k):
-                        backup[k] = getattr(self.transformer_config, k, None)
-                        delattr(self.transformer_config, k)
-                transformer_config_dict = asdict(self.transformer_config)
-                for k in backup:
-                    setattr(self.transformer_config, k, backup[k])
-                to_convert_types = {torch.dtype: str, AttnBackend: str}
-                ignore_types = [Callable]
-                pop_keys = []
-                for key, value in transformer_config_dict.items():
-                    if type(value) in to_convert_types:
-                        transformer_config_dict[key] = to_convert_types[type(value)](value)
-                    if type(value) in ignore_types:
-                        pop_keys.append(key)
-                    if callable(value):
-                        pop_keys.append(key)
-                for key in pop_keys:
-                    transformer_config_dict.pop(key)
+                transformer_config_dict = _to_json_safe_config_dict(_config_to_shallow_dict(self.transformer_config))
                 transformer_config_path = get_transformer_config_checkpoint_path(local_path)
                 with open(transformer_config_path, "w") as f:
                     json.dump(transformer_config_dict, f, indent=2)
