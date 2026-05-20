@@ -37,7 +37,6 @@ async def test_gateway_actor_abort_session_does_not_wait_for_backend_generate(ra
     actor = GatewayActor.remote(
         tokenizer=FakeTokenizer(),
         backend=SlowBackend(delay_s=1.5),
-        host="127.0.0.1",
     )
     ray.get(actor.start.remote())
     session = ray.get(actor.create_session.remote("session-abort-during-generate"))
@@ -113,7 +112,6 @@ async def test_gateway_actor_forwards_image_data_on_initial_multimodal_request(r
         processor=processor,
         vision_info_extractor=fake_vision_info_extractor,
         backend=InspectingBackend(),
-        host="127.0.0.1",
     )
     ray.get(actor.start.remote())
 
@@ -170,7 +168,7 @@ async def test_gateway_actor_forwards_image_data_on_initial_multimodal_request(r
 async def test_gateway_actor_complete_wait_and_finalize(ray_runtime):
     from verl.agent.gateway.gateway import GatewayActor
 
-    actor = GatewayActor.remote(tokenizer=FakeTokenizer(), backend=QueuedBackend(["ANSWER: A"]), host="127.0.0.1")
+    actor = GatewayActor.remote(tokenizer=FakeTokenizer(), backend=QueuedBackend(["ANSWER: A"]))
     ray.get(actor.start.remote())
 
     session = ray.get(actor.create_session.remote("session-0"))
@@ -212,7 +210,6 @@ async def test_gateway_actor_continuation_reuses_accumulated_media_context(ray_r
         processor=FakeProcessor(),
         vision_info_extractor=SingleUseVisionInfoExtractor(),
         backend=InspectingBackend(),
-        host="127.0.0.1",
     )
     ray.get(actor.start.remote())
     session = ray.get(actor.create_session.remote("session-mm-continuation"))
@@ -269,7 +266,6 @@ async def test_gateway_actor_multimodal_reference_change_splits_trajectory(ray_r
         processor=FakeProcessor(),
         vision_info_extractor=fake_vision_info_extractor,
         backend=InspectingBackend(),
-        host="127.0.0.1",
     )
     ray.get(actor.start.remote())
     session = ray.get(actor.create_session.remote("session-mm-split"))
@@ -327,7 +323,6 @@ async def test_gateway_actor_continuation_with_tool_returned_image_appends_media
         processor=processor,
         vision_info_extractor=fake_vision_info_extractor,
         backend=InspectingSequencedBackend([tool_call_text, "__inspect__"]),
-        host="127.0.0.1",
         tool_parser_name="hermes",
     )
     ray.get(actor.start.remote())
@@ -420,7 +415,7 @@ async def test_gateway_actor_continuation_with_tool_returned_image_appends_media
 async def test_gateway_actor_prefix_mismatch_splits_trajectories(ray_runtime):
     from verl.agent.gateway.gateway import GatewayActor
 
-    actor = GatewayActor.remote(tokenizer=FakeTokenizer(), backend=QueuedBackend(["FIRST", "SECOND"]), host="127.0.0.1")
+    actor = GatewayActor.remote(tokenizer=FakeTokenizer(), backend=QueuedBackend(["FIRST", "SECOND"]))
     ray.get(actor.start.remote())
 
     session = ray.get(actor.create_session.remote("session-1"))
@@ -455,7 +450,7 @@ async def test_gateway_actor_prefix_mismatch_splits_trajectories(ray_runtime):
 async def test_gateway_actor_tool_context_change_splits_trajectory(ray_runtime):
     from verl.agent.gateway.gateway import GatewayActor
 
-    actor = GatewayActor.remote(tokenizer=FakeTokenizer(), backend=QueuedBackend(["FIRST", "SECOND"]), host="127.0.0.1")
+    actor = GatewayActor.remote(tokenizer=FakeTokenizer(), backend=QueuedBackend(["FIRST", "SECOND"]))
     ray.get(actor.start.remote())
 
     session = ray.get(actor.create_session.remote("session-tools"))
@@ -498,7 +493,6 @@ async def test_gateway_actor_does_not_forward_tools_in_sampling_params(ray_runti
     actor = GatewayActor.remote(
         tokenizer=FakeTokenizer(),
         backend=RejectToolsSamplingParamsBackend("SAFE"),
-        host="127.0.0.1",
     )
     ray.get(actor.start.remote())
     session = ray.get(actor.create_session.remote("session-no-tools-sampling"))
@@ -528,7 +522,6 @@ async def test_gateway_actor_strips_request_envelope_but_keeps_sampling_params(r
             "SAFE",
             expected_sampling_params={"temperature": 0.25, "top_p": 0.8, "max_tokens": 128},
         ),
-        host="127.0.0.1",
         base_sampling_params={"temperature": 0.1, "top_p": 0.8, "max_tokens": 64},
         allowed_request_sampling_param_keys={"temperature", "max_tokens"},
     )
@@ -563,7 +556,6 @@ async def test_gateway_actor_ignores_non_whitelisted_request_sampling_params(ray
             "SAFE",
             expected_sampling_params={"temperature": 0.1, "top_p": 0.9},
         ),
-        host="127.0.0.1",
         base_sampling_params={"temperature": 0.1, "top_p": 0.9},
         allowed_request_sampling_param_keys={"temperature"},
     )
@@ -589,7 +581,7 @@ async def test_gateway_actor_ignores_non_whitelisted_request_sampling_params(ray
 async def test_gateway_actor_continuation_preserves_prompt_and_generation_masks(ray_runtime):
     from verl.agent.gateway.gateway import GatewayActor
 
-    actor = GatewayActor.remote(tokenizer=FakeTokenizer(), backend=QueuedBackend(["FIRST", "SECOND"]), host="127.0.0.1")
+    actor = GatewayActor.remote(tokenizer=FakeTokenizer(), backend=QueuedBackend(["FIRST", "SECOND"]))
     ray.get(actor.start.remote())
     session = ray.get(actor.create_session.remote("session-continuation-mask"))
 
@@ -637,7 +629,6 @@ async def test_gateway_actor_tool_argument_json_equivalence_does_not_split_after
     actor = GatewayActor.remote(
         tokenizer=FakeTokenizer(),
         backend=QueuedBackend([tool_call_text, "SECOND", "THIRD"]),
-        host="127.0.0.1",
         tool_parser_name="hermes",
     )
     ray.get(actor.start.remote())
@@ -735,7 +726,6 @@ async def test_gateway_actor_serializes_same_session_concurrent_requests(ray_run
     actor = GatewayActor.remote(
         tokenizer=FakeTokenizer(),
         backend=RejectConcurrentSessionBackend(["FIRST", "SECOND"]),
-        host="127.0.0.1",
     )
     ray.get(actor.start.remote())
     session = ray.get(actor.create_session.remote("session-concurrent"))
@@ -768,7 +758,7 @@ async def test_gateway_actor_serializes_same_session_concurrent_requests(ray_run
 async def test_gateway_actor_rejects_chat_after_complete(ray_runtime):
     from verl.agent.gateway.gateway import GatewayActor
 
-    actor = GatewayActor.remote(tokenizer=FakeTokenizer(), backend=QueuedBackend(["DONE"]), host="127.0.0.1")
+    actor = GatewayActor.remote(tokenizer=FakeTokenizer(), backend=QueuedBackend(["DONE"]))
     ray.get(actor.start.remote())
     session = ray.get(actor.create_session.remote("session-completed-chat"))
     ray.get(actor.complete_session.remote("session-completed-chat"))
@@ -788,7 +778,7 @@ async def test_gateway_actor_rejects_chat_after_complete(ray_runtime):
 async def test_gateway_actor_finalizes_without_complete(ray_runtime):
     from verl.agent.gateway.gateway import GatewayActor
 
-    actor = GatewayActor.remote(tokenizer=FakeTokenizer(), backend=QueuedBackend(["DONE"]), host="127.0.0.1")
+    actor = GatewayActor.remote(tokenizer=FakeTokenizer(), backend=QueuedBackend(["DONE"]))
     ray.get(actor.start.remote())
     session = ray.get(actor.create_session.remote("session-finalize-without-complete"))
 
@@ -811,8 +801,8 @@ async def test_gateway_actor_finalizes_without_complete(ray_runtime):
     [
         ({"model": "dummy-model", "messages": []}, "messages must be non-empty"),
         (
-            {"model": "dummy-model", "messages": [{"role": "user", "name": "alice", "content": "hello"}]},
-            "message.name is not supported",
+            {"model": "dummy-model", "messages": [{"role": "user", "name": 123, "content": "hello"}]},
+            "message.name must be a string",
         ),
         (
             {"model": "dummy-model", "messages": [{"role": "user", "content": 123}]},
@@ -839,7 +829,7 @@ async def test_gateway_actor_finalizes_without_complete(ray_runtime):
 async def test_gateway_actor_rejects_malformed_requests_with_bad_request(ray_runtime, payload, detail_fragment):
     from verl.agent.gateway.gateway import GatewayActor
 
-    actor = GatewayActor.remote(tokenizer=FakeTokenizer(), backend=QueuedBackend(["DONE"]), host="127.0.0.1")
+    actor = GatewayActor.remote(tokenizer=FakeTokenizer(), backend=QueuedBackend(["DONE"]))
     ray.get(actor.start.remote())
     session = ray.get(actor.create_session.remote("session-validation"))
 
@@ -859,7 +849,7 @@ async def test_gateway_actor_rejects_malformed_requests_with_bad_request(ray_run
 async def test_gateway_actor_backend_failure_does_not_commit_partial_state(ray_runtime):
     from verl.agent.gateway.gateway import GatewayActor
 
-    actor = GatewayActor.remote(tokenizer=FakeTokenizer(), backend=FailingBackend("boom"), host="127.0.0.1")
+    actor = GatewayActor.remote(tokenizer=FakeTokenizer(), backend=FailingBackend("boom"))
     ray.get(actor.start.remote())
     session = ray.get(actor.create_session.remote("session-backend-failure"))
 
@@ -884,7 +874,6 @@ async def test_gateway_actor_backend_failure_after_tool_mismatch_does_not_split(
     actor = GatewayActor.remote(
         tokenizer=FakeTokenizer(),
         backend=SequencedBackend(["FIRST", RuntimeError("boom")]),
-        host="127.0.0.1",
     )
     ray.get(actor.start.remote())
     session = ray.get(actor.create_session.remote("session-failure-mismatch"))
@@ -934,7 +923,6 @@ async def test_gateway_actor_tool_call_decode_returns_openai_format(ray_runtime)
     actor = GatewayActor.remote(
         tokenizer=FakeTokenizer(),
         backend=QueuedBackend([tool_call_text, "sunny today"]),
-        host="127.0.0.1",
         tool_parser_name="hermes",
     )
     ray.get(actor.start.remote())
@@ -985,3 +973,47 @@ async def test_gateway_actor_tool_call_decode_returns_openai_format(ray_runtime)
     # Should have both mask=0 (incremental) and mask=1 (model output) tokens
     assert 0 in trajectories[0].response_mask
     assert 1 in trajectories[0].response_mask
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stop_reason", "expected_finish_reason"),
+    [
+        ("completed", "stop"),
+        ("length", "length"),
+        ("abort", "stop"),
+        ("matched_stop", "stop"),
+        (None, "stop"),
+    ],
+)
+async def test_decode_response_normalizes_backend_stop_reasons(stop_reason, expected_finish_reason):
+    """Gateway must map backend-specific stop_reason values to OpenAI-spec
+    finish_reason values so downstream OpenAI/litellm parsers stay compatible.
+    """
+    from verl.agent.gateway.gateway import _GatewayActor
+
+    actor = _GatewayActor(tokenizer=FakeTokenizer(), backend=QueuedBackend(["IGNORED"]))
+    response_ids = [ord(char) for char in "hello"]
+
+    _message, finish_reason = await actor._decode_response(
+        response_ids, tools=None, stop_reason=stop_reason
+    )
+
+    assert finish_reason == expected_finish_reason
+
+
+@pytest.mark.asyncio
+async def test_decode_response_preserves_unknown_stop_reasons():
+    """Unknown backend stop_reason values should be forwarded unchanged so a
+    future reader can spot a new backend value rather than silently coerce it.
+    """
+    from verl.agent.gateway.gateway import _GatewayActor
+
+    actor = _GatewayActor(tokenizer=FakeTokenizer(), backend=QueuedBackend(["IGNORED"]))
+    response_ids = [ord(char) for char in "hello"]
+
+    _message, finish_reason = await actor._decode_response(
+        response_ids, tools=None, stop_reason="unknown_future_value"
+    )
+
+    assert finish_reason == "unknown_future_value"

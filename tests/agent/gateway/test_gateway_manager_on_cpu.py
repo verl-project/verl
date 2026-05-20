@@ -18,8 +18,8 @@ async def test_gateway_manager_routes_sessions_stickily(ray_runtime):
     from verl.agent.gateway.manager import GatewayManager
 
     gateways = [
-        GatewayActor.remote(tokenizer=FakeTokenizer(), backend=QueuedBackend(["A"]), host="127.0.0.1"),
-        GatewayActor.remote(tokenizer=FakeTokenizer(), backend=QueuedBackend(["B"]), host="127.0.0.1"),
+        GatewayActor.remote(tokenizer=FakeTokenizer(), backend=QueuedBackend(["A"])),
+        GatewayActor.remote(tokenizer=FakeTokenizer(), backend=QueuedBackend(["B"])),
     ]
     ray.get([gateway.start.remote() for gateway in gateways])
 

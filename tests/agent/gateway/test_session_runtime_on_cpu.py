@@ -24,7 +24,6 @@ async def test_gateway_serving_runtime_owns_gateway_lifecycle_and_session_runtim
         gateway_count=1,
         gateway_actor_kwargs={
             "tokenizer": FakeTokenizer(),
-            "host": "127.0.0.1",
         },
     )
 
@@ -80,3 +79,49 @@ async def test_gateway_serving_runtime_delegates_generate_to_llm_client(ray_runt
             "kwargs": {},
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_gateway_serving_runtime_round_robins_actors_across_alive_nodes(ray_runtime, monkeypatch):
+    """gateway_count > 1 should distribute actors across alive CPU nodes round-robin."""
+    from verl.agent.gateway.runtime import GatewayServingRuntime
+
+    fake_nodes = [
+        {"NodeID": "a" * 56, "Alive": True, "Resources": {"CPU": 8.0}},
+        {"NodeID": "b" * 56, "Alive": True, "Resources": {"CPU": 8.0}},
+        {"NodeID": "c" * 56, "Alive": False, "Resources": {"CPU": 8.0}},
+        {"NodeID": "d" * 56, "Alive": True, "Resources": {"GPU": 1.0}},
+    ]
+    monkeypatch.setattr("verl.agent.gateway.runtime.ray.nodes", lambda: fake_nodes)
+
+    captured_node_ids = []
+
+    class _StubStartHandle:
+        @staticmethod
+        def remote():
+            return ray.put(None)
+
+    class _StubActorHandle:
+        start = _StubStartHandle()
+
+    class _RecordingActor:
+        @classmethod
+        def options(cls, *, scheduling_strategy):
+            captured_node_ids.append(scheduling_strategy.node_id)
+            return cls
+
+        @classmethod
+        def remote(cls, **kwargs):
+            return _StubActorHandle()
+
+    monkeypatch.setattr("verl.agent.gateway.gateway.GatewayActor", _RecordingActor)
+
+    runtime = GatewayServingRuntime(
+        llm_client=object(),
+        gateway_count=5,
+        gateway_actor_kwargs={"tokenizer": object()},
+    )
+
+    assert captured_node_ids == ["a" * 56, "b" * 56, "a" * 56, "b" * 56, "a" * 56], captured_node_ids
+    assert len(runtime.owned_gateway_actors) == 5
+    # No shutdown call needed: stub actors have no real Ray state.

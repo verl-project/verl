@@ -93,6 +93,25 @@ def _trajectory(
     )
 
 
+def _install_fake_score(monkeypatch, *, score_from_sample_fields=None, default_score=1.0):
+    """Replace OpenAICompatibleAgentFramework._score_trajectories with a fake.
+
+    Mirrors the production "score-last + broadcast" behavior: returns the same
+    (score, extra_info) for every trajectory in the session. The score is
+    derived from sample_fields if a callable is provided; otherwise default_score.
+    """
+    from verl.agent.framework.framework import OpenAICompatibleAgentFramework
+
+    async def fake_score(self, trajectories, sample_fields):
+        if score_from_sample_fields is not None:
+            score = float(score_from_sample_fields(sample_fields))
+        else:
+            score = float(default_score)
+        return [(score, {})] * len(trajectories)
+
+    monkeypatch.setattr(OpenAICompatibleAgentFramework, "_score_trajectories", fake_score)
+
+
 @pytest.mark.asyncio
 async def test_generate_sequences_writes_tq_schema_for_each_session(monkeypatch):
     from verl.agent.framework import framework as framework_module
@@ -111,17 +130,20 @@ async def test_generate_sequences_writes_tq_schema_for_each_session(monkeypatch)
         }
     )
 
-    async def agent_runner(*, raw_prompt, session, sample_index, tools_kwargs):
+    async def agent_runner(*, raw_prompt, session, sample_index, tools_kwargs, **kwargs):
         assert raw_prompt == [{"role": "user", "content": f"sample {sample_index}"}]
         assert tools_kwargs == {"tool": sample_index}
 
-    def reward_fn(ctx):
-        return [float(ctx.sample_fields["extra_info"]["index"]) + 0.25 for _ in ctx.trajectories]
+    # Score derived from sample_fields["extra_info"]["index"] + 0.25 (same as legacy lambda)
+    _install_fake_score(
+        monkeypatch,
+        score_from_sample_fields=lambda sf: sf["extra_info"]["index"] + 0.25,
+    )
 
     framework = OpenAICompatibleAgentFramework(
         session_runtime=runtime,
         agent_runner=agent_runner,
-        reward_fn=reward_fn,
+        reward_loop_worker_handles=["sentinel"],
         replay_buffer=replay_buffer,
         rollout_config={"n": 2, "val_kwargs": {"n": 2}},
     )
@@ -194,14 +216,16 @@ async def test_generate_sequences_keeps_successful_sessions_when_one_session_fai
         }
     )
 
-    async def agent_runner(*, raw_prompt, session, sample_index, tools_kwargs):
+    async def agent_runner(*, raw_prompt, session, sample_index, tools_kwargs, **kwargs):
         if session.session_id == "session-0-1":
             raise RuntimeError("gateway failed once")
+
+    _install_fake_score(monkeypatch, default_score=1.0)
 
     framework = OpenAICompatibleAgentFramework(
         session_runtime=runtime,
         agent_runner=agent_runner,
-        reward_fn=lambda ctx: [1.0 for _ in ctx.trajectories],
+        reward_loop_worker_handles=["sentinel"],
         replay_buffer=replay_buffer,
         rollout_config={"n": 2, "val_kwargs": {"n": 2}},
     )
@@ -227,13 +251,15 @@ async def test_generate_sequences_marks_prompt_failure_when_all_sessions_fail(mo
     monkeypatch.setattr(framework_module, "tq", fake_tq)
     runtime = _FakeSessionRuntime({"session-0-0": [], "session-0-1": []})
 
-    async def agent_runner(*, raw_prompt, session, sample_index, tools_kwargs):
+    async def agent_runner(*, raw_prompt, session, sample_index, tools_kwargs, **kwargs):
         raise RuntimeError(f"failed {session.session_id}")
+
+    _install_fake_score(monkeypatch, default_score=1.0)
 
     framework = OpenAICompatibleAgentFramework(
         session_runtime=runtime,
         agent_runner=agent_runner,
-        reward_fn=lambda ctx: [1.0 for _ in ctx.trajectories],
+        reward_loop_worker_handles=["sentinel"],
         replay_buffer=replay_buffer,
         rollout_config={"n": 1, "val_kwargs": {"n": 2}},
     )
@@ -250,7 +276,7 @@ async def test_generate_sequences_marks_prompt_failure_when_all_sessions_fail(mo
 
 
 @pytest.mark.asyncio
-async def test_generate_sequences_omits_rm_scores_when_reward_fn_is_none(monkeypatch):
+async def test_generate_sequences_omits_rm_scores_when_no_reward_handles(monkeypatch):
     from verl.agent.framework import framework as framework_module
     from verl.agent.framework.framework import OpenAICompatibleAgentFramework
 
@@ -259,13 +285,12 @@ async def test_generate_sequences_omits_rm_scores_when_reward_fn_is_none(monkeyp
     monkeypatch.setattr(framework_module, "tq", fake_tq)
     runtime = _FakeSessionRuntime({"session-0-0": [_trajectory()]})
 
-    async def agent_runner(*, raw_prompt, session, sample_index, tools_kwargs):
+    async def agent_runner(*, raw_prompt, session, sample_index, tools_kwargs, **kwargs):
         return None
 
     framework = OpenAICompatibleAgentFramework(
         session_runtime=runtime,
         agent_runner=agent_runner,
-        reward_fn=None,
         replay_buffer=replay_buffer,
         rollout_config={"n": 1, "val_kwargs": {"n": 1}},
     )
@@ -287,10 +312,12 @@ async def test_generate_sequences_keeps_other_prompts_when_prompt_task_raises(mo
         }
     )
 
+    _install_fake_score(monkeypatch, default_score=1.0)
+
     framework = OpenAICompatibleAgentFramework(
         session_runtime=runtime,
         agent_runner=lambda **_: None,
-        reward_fn=lambda ctx: [1.0 for _ in ctx.trajectories],
+        reward_loop_worker_handles=["sentinel"],
         replay_buffer=replay_buffer,
         rollout_config={"n": 1, "val_kwargs": {"n": 1}},
     )
@@ -322,3 +349,64 @@ async def test_generate_sequences_keeps_other_prompts_when_prompt_task_raises(mo
     ]
     assert "num_failed_uids=1" in caplog.text
     assert "prompt 0 exploded" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# _score_trajectories method-level tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def ray_runtime():
+    import ray
+    ray.init(ignore_reinit_error=True)
+    yield
+    ray.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_score_trajectories_dispatches_only_final_trajectory_and_broadcasts(ray_runtime):
+    """_score_trajectories scores trajectories[-1] only, broadcasts to all (matches AgentLoopWorkerTQ)."""
+    import ray as ray_module
+    from verl.agent.framework.framework import OpenAICompatibleAgentFramework
+    from verl.agent.framework.types import Trajectory
+
+    @ray_module.remote
+    class _StubWorker:
+        def __init__(self):
+            self.calls = []
+
+        def compute_score(self, data):
+            self.calls.append(data)
+            return {"reward_score": 0.42, "reward_extra_info": {"acc": 1.0, "format": 0.8}}
+
+        def get_call_count(self):
+            return len(self.calls)
+
+    worker = _StubWorker.remote()
+
+    runtime = _FakeSessionRuntime({})  # not used in this test
+    framework = OpenAICompatibleAgentFramework(
+        session_runtime=runtime,
+        agent_runner=lambda **_: None,
+        reward_loop_worker_handles=[worker],
+        replay_buffer=_FakeReplayBuffer(),
+        rollout_config={"n": 1, "val_kwargs": {"n": 1}},
+    )
+
+    trajectories = [
+        Trajectory(prompt_ids=[1, 2], response_ids=[3, 4], response_mask=[1, 1], num_turns=1),
+        Trajectory(prompt_ids=[5, 6], response_ids=[7, 8], response_mask=[1, 1], num_turns=2),
+        Trajectory(prompt_ids=[9, 10], response_ids=[11, 12], response_mask=[1, 1], num_turns=3),
+    ]
+    sample_fields = {"data_source": "test", "raw_prompt": [{"role": "user", "content": "hi"}]}
+    annotations = await framework._score_trajectories(trajectories, sample_fields)
+
+    # Score-last + broadcast: 3 trajectories, but only 1 worker call
+    assert ray_module.get(worker.get_call_count.remote()) == 1
+    # All 3 trajectories get the same score and extra_info
+    assert annotations == [
+        (0.42, {"acc": 1.0, "format": 0.8}),
+        (0.42, {"acc": 1.0, "format": 0.8}),
+        (0.42, {"acc": 1.0, "format": 0.8}),
+    ]

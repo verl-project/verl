@@ -145,10 +145,6 @@ pytest tests/agent/ -q
     `RejectToolsSamplingParamsBackend`, `RejectRequestEnvelopeBackend`,
     `FailingBackend`, `SequencedBackend`, `RejectConcurrentSessionBackend`.
   - Manager/runtime actors: `TrackingGatewayActor`.
-- Currently unused support fakes are `NoLogprobBackend`,
-  `RecordingLoadBalancer`, `RecordingRolloutServer`, and
-  `FailingRolloutServer`; treat them as cleanup candidates unless a follow-up
-  test needs them.
 
 ## Intentional gaps
 

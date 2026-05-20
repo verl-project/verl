@@ -7,7 +7,6 @@ import ray
 
 from verl.agent.framework import framework as framework_module
 from verl.agent.framework.framework import OpenAICompatibleAgentFramework
-from verl.agent.framework.types import SessionRewardContext
 from verl.agent.gateway.runtime import GatewayServingRuntime
 from verl.utils import tensordict_utils as tu
 from verl.workers.rollout.llm_server import GlobalRequestLoadBalancer, LLMServerClient
@@ -116,10 +115,6 @@ def _build_prompts():
     )
 
 
-def _reward_fn(ctx: SessionRewardContext) -> list[float]:
-    return [float(traj.reward_info["score"]) for traj in ctx.trajectories]
-
-
 async def run_mock_agent(*, base_url: str, raw_prompt) -> tuple[str, dict[str, object]]:
     """Mimic an external agent that only knows an OpenAI-compatible backend URL."""
 
@@ -174,7 +169,6 @@ async def run_example() -> dict[str, object]:
             gateway_count=1,
             gateway_actor_kwargs={
                 "tokenizer": MinimalTokenizer(),
-                "host": "127.0.0.1",
             },
         )
 
@@ -190,7 +184,7 @@ async def run_example() -> dict[str, object]:
         framework = OpenAICompatibleAgentFramework(
             session_runtime=runtime,
             agent_runner=agent_runner,
-            reward_fn=_reward_fn,
+            reward_loop_worker_handles=None,
             replay_buffer=replay_buffer,
             rollout_config={"n": 1, "val_kwargs": {"n": 1}},
             wait_for_completion_after_agent_run=True,
@@ -212,7 +206,11 @@ async def run_example() -> dict[str, object]:
             "tq_keys": fake_tq.batch_puts[0]["keys"],
             "finished_tags": fake_tq.puts,
             "uid_values": tu.get(fields, "uid"),
-            "reward_scores": fields["rm_scores"][0].tolist(),
+            # Tutorial intentionally omits reward computation
+            # (reward_loop_worker_handles=None); rm_scores is therefore absent
+            # from the TQ field dict and the trainer skips reward assignment.
+            "reward_scores": None,
+            "has_rm_scores": "rm_scores" in fields.keys(),
             "rollout_calls": rollout_calls,
         }
     finally:

@@ -279,19 +279,6 @@ class RecordingLLMClient:
         )
 
 
-class NoLogprobBackend:
-    def __init__(self, response_text: str = "OK"):
-        self.response_text = response_text
-
-    async def generate(self, request_id, *, prompt_ids, sampling_params, image_data=None, video_data=None):
-        token_ids = [ord(char) for char in self.response_text]
-        return TokenOutput(
-            token_ids=token_ids,
-            log_probs=None,
-            stop_reason="completed",
-        )
-
-
 class RejectToolsSamplingParamsBackend:
     def __init__(self, response_text: str = "OK"):
         self.response_text = response_text
@@ -370,92 +357,6 @@ class SequencedBackend:
             log_probs=[-0.1] * len(token_ids),
             stop_reason="completed",
         )
-
-
-@ray.remote
-class RecordingLoadBalancer:
-    def __init__(self, server_id: str = "server-0"):
-        self.server_id = server_id
-        self.acquire_calls = []
-        self.release_calls = []
-
-    def acquire_server(self, request_id: str) -> str:
-        self.acquire_calls.append(request_id)
-        return self.server_id
-
-    def release_server(self, server_id: str) -> None:
-        self.release_calls.append(server_id)
-
-    def stats(self):
-        return {
-            "acquire_calls": list(self.acquire_calls),
-            "release_calls": list(self.release_calls),
-        }
-
-
-@ray.remote
-class RecordingRolloutServer:
-    def __init__(self, response_text: str = "OWNER"):
-        self.response_text = response_text
-        self.calls = []
-
-    async def generate(
-        self,
-        request_id,
-        *,
-        prompt_ids,
-        sampling_params,
-        image_data=None,
-        video_data=None,
-    ):
-        self.calls.append(
-            {
-                "request_id": request_id,
-                "prompt_ids": list(prompt_ids),
-                "sampling_params": dict(sampling_params),
-                "image_data": image_data,
-                "video_data": video_data,
-            }
-        )
-        token_ids = [ord(char) for char in self.response_text]
-        return TokenOutput(
-            token_ids=token_ids,
-            log_probs=[-0.1] * len(token_ids),
-            stop_reason="completed",
-        )
-
-    def get_calls(self):
-        return list(self.calls)
-
-
-@ray.remote
-class FailingRolloutServer:
-    def __init__(self, error_message: str = "rollout failure"):
-        self.error_message = error_message
-        self.calls = []
-
-    async def generate(
-        self,
-        request_id,
-        *,
-        prompt_ids,
-        sampling_params,
-        image_data=None,
-        video_data=None,
-    ):
-        self.calls.append(
-            {
-                "request_id": request_id,
-                "prompt_ids": list(prompt_ids),
-                "sampling_params": dict(sampling_params),
-                "image_data": image_data,
-                "video_data": video_data,
-            }
-        )
-        raise RuntimeError(self.error_message)
-
-    def get_calls(self):
-        return list(self.calls)
 
 
 class RejectConcurrentSessionBackend:
