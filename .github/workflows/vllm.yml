@@ -151,6 +151,10 @@ jobs:
       - name: Test bucketed weight transfer
         run: |
           pytest -svvv tests/utils/test_bucketed_weight_transfer.py
+      - name: Download Model to Use
+        run: |
+          mkdir -p ${HOME}/models/deepseek-ai/DeepSeek-V2-Lite-Chat
+          hf download deepseek-ai/DeepSeek-V2-Lite-Chat --local-dir ${HOME}/models/deepseek-ai/DeepSeek-V2-Lite-Chat
       - name: Test vLLM process_weights_after_loading
         run: |
           ray stop --force

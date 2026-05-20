@@ -36,11 +36,8 @@ from verl.workers.rollout.replica import RolloutMode, TokenOutput
 from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightSender
 from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer
 
-MODEL_ID_DEEPSEEK = os.environ.get("MODEL_ID_DEEPSEEK", "deepseek-ai/DeepSeek-V2-Lite-Chat")
-MODEL_PATH_DEEPSEEK = os.environ.get("MODEL_PATH_DEEPSEEK", os.path.expanduser(f"~/.cache/models/{MODEL_ID_DEEPSEEK}"))
-MODEL_ID_QWEN3_4B = os.environ.get("MODEL_ID_QWEN3_4B", "Qwen/Qwen3-4B")
-MODEL_PATH_QWEN3_4B = os.environ.get("MODEL_PATH_QWEN3_4B", os.path.expanduser(f"~/.cache/models/{MODEL_ID_QWEN3_4B}"))
 
+MODEL_PATH_DEEPSEEK = os.path.expanduser("~/models/deepseek-ai/DeepSeek-V2-Lite-Chat")
 
 def _build_config(load_format: str, model_path: str):
     rollout_cfg = OmegaConf.create(
