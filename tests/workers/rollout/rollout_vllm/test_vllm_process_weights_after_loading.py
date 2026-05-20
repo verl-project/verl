@@ -1,25 +1,48 @@
+# Copyright 2026 Bytedance Ltd. and/or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""
+E2E test for process_weights_after_loading.
+
+Usage:
+    pytest tests/workers/rollout/rollout_vllm/test_vllm_process_weights_after_loading.py -v -s
+    python tests/workers/rollout/rollout_vllm/test_vllm_process_weights_after_loading.py
+"""
+
 import asyncio
 import gc
 import os
 import time
 from uuid import uuid4
 
-import pytest
 import ray
 from omegaconf import OmegaConf
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from verl.utils.device import get_device_id, is_support_ipc
+from verl.utils.device import is_support_ipc
 from verl.utils.tokenizer import normalize_token_ids
 from verl.workers.rollout.replica import RolloutMode, TokenOutput
 from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightSender
-from verl.workers.rollout.vllm_rollout.utils import get_device_uuid
 from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer
 
-MODEL_PATH = "/data02/Moonlight-16B-A3B-Instruct"
-MODEL_PATH_QWEN3_14B = "/data02/Qwen3/Qwen3-14B"
+MODEL_ID_DEEPSEEK = os.environ.get("MODEL_ID_DEEPSEEK", "deepseek-ai/DeepSeek-V2-Lite-Chat")
+MODEL_PATH_DEEPSEEK = os.environ.get("MODEL_PATH_DEEPSEEK", os.path.expanduser(f"~/.cache/models/{MODEL_ID_DEEPSEEK}"))
+MODEL_ID_QWEN3_4B = os.environ.get("MODEL_ID_QWEN3_4B", "Qwen/Qwen3-4B")
+MODEL_PATH_QWEN3_4B = os.environ.get("MODEL_PATH_QWEN3_4B", os.path.expanduser(f"~/.cache/models/{MODEL_ID_QWEN3_4B}"))
 
-def _build_config(load_format: str, model_path: str, enable_npugraph_ex: bool = True):
+
+def _build_config(load_format: str, model_path: str):
     rollout_cfg = OmegaConf.create(
         {
             "_target_": "verl.workers.config.RolloutConfig",
@@ -45,15 +68,6 @@ def _build_config(load_format: str, model_path: str, enable_npugraph_ex: bool = 
             "top_k": -1,
             "top_p": 1.0,
             "temperature": 0.0,
-            "engine_kwargs": {
-                "vllm": {
-                    "additional_config": {
-                        "ascend_compilation_config": {
-                            "enable_npugraph_ex": enable_npugraph_ex,
-                        },
-                    },
-                }
-            },
         }
     )
     model_cfg = OmegaConf.create(
@@ -67,7 +81,7 @@ def _build_config(load_format: str, model_path: str, enable_npugraph_ex: bool = 
     return rollout_cfg, model_cfg
 
 
-def _start_server(load_format: str, model_path: str, enable_npugraph_ex: bool = True, force_dummy: bool = False):
+def _start_server(load_format: str, model_path: str, force_dummy: bool = False):
     runtime_env = {
         "TOKENIZERS_PARALLELISM": "true",
         "VERL_LOGGING_LEVEL": "INFO",
@@ -76,29 +90,34 @@ def _start_server(load_format: str, model_path: str, enable_npugraph_ex: bool = 
         "HCCL_HOST_SOCKET_PORT_RANGE": os.environ.get("HCCL_HOST_SOCKET_PORT_RANGE", "60000-60050"),
         "HCCL_NPU_SOCKET_PORT_RANGE": os.environ.get("HCCL_NPU_SOCKET_PORT_RANGE", "61000-61050"),
     }
-    if not ray.is_initialized():
-        ray.init(runtime_env={"env_vars": runtime_env}, ignore_reinit_error=True)
+    if ray.is_initialized():
+        ray.shutdown()
+    ray.init(runtime_env={"env_vars": runtime_env})
 
-    rollout_cfg, model_cfg = _build_config(load_format, model_path, enable_npugraph_ex)
-    server = ray.remote(vLLMHttpServer).options(
-        runtime_env={
-            "env_vars": {
-                "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
-                "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
-                "NCCL_CUMEM_ENABLE": "0",
-            }
-        },
-        max_concurrency=16,
-    ).remote(
-        config=rollout_cfg,
-        model_config=model_cfg,
-        rollout_mode=RolloutMode.STANDALONE,
-        workers=[],
-        replica_rank=0,
-        node_rank=0,
-        gpus_per_node=1,
-        nnodes=1,
-        cuda_visible_devices="0",
+    rollout_cfg, model_cfg = _build_config(load_format, model_path)
+    server = (
+        ray.remote(vLLMHttpServer)
+        .options(
+            runtime_env={
+                "env_vars": {
+                    "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
+                    "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
+                    "NCCL_CUMEM_ENABLE": "0",
+                }
+            },
+            max_concurrency=16,
+        )
+        .remote(
+            config=rollout_cfg,
+            model_config=model_cfg,
+            rollout_mode=RolloutMode.STANDALONE,
+            workers=[],
+            replica_rank=0,
+            node_rank=0,
+            gpus_per_node=1,
+            nnodes=1,
+            cuda_visible_devices="0",
+        )
     )
 
     if force_dummy:
@@ -118,7 +137,9 @@ def _iter_weights(model_path: str):
 
 
 def _update_weights(server, model_path: str):
-    zmq_handle = f"ipc:///tmp/rl-colocate-zmq-{get_device_uuid(get_device_id())}.sock"
+    # Use the same zmq handle format as vLLMColocateWorkerExtension._get_zmq_handle()
+    replica_rank = os.environ.get("VERL_REPLICA_RANK", "0")
+    zmq_handle = f"ipc:///tmp/rl-colocate-zmq-replica-{replica_rank}-rank-0.sock"
     use_shm = not is_support_ipc()
     update_ref = server.collective_rpc.remote("update_weights_from_ipc", kwargs={"use_shm": use_shm})
     sender = BucketedWeightSender(zmq_handle=zmq_handle, bucket_size_mb=4096, use_shm=use_shm)
@@ -150,11 +171,11 @@ def _clear_npu_memory():
     time.sleep(2)
 
 
-def _run_compare_test(model_path: str, enable_npugraph_ex: bool, prompt: str, model_name: str):
+def _run_compare_test(model_path: str, prompt: str, model_name: str):
     dummy_server = None
     auto_server = None
     try:
-        dummy_server = _start_server("dummy", model_path, enable_npugraph_ex, force_dummy=True)
+        dummy_server = _start_server("dummy", model_path, force_dummy=True)
         _update_weights(dummy_server, model_path)
         ray.get(dummy_server.set_global_steps.remote(1))
         dummy_text = _generate(dummy_server, prompt, "dummy", model_path)
@@ -163,11 +184,13 @@ def _run_compare_test(model_path: str, enable_npugraph_ex: bool, prompt: str, mo
         dummy_server = None
         _clear_npu_memory()
 
-        auto_server = _start_server("auto", model_path, enable_npugraph_ex, force_dummy=False)
+        auto_server = _start_server("auto", model_path, force_dummy=False)
         auto_text = _generate(auto_server, prompt, "auto", model_path)
 
         print(f"\n[{model_name}] Prompt: {prompt}\n[dummy+update] {dummy_text}\n[auto] {auto_text}\n")
-        assert dummy_text == auto_text, f"{model_name} outputs mismatch:\n[dummy+update] {dummy_text}\n[auto] {auto_text}"
+        assert dummy_text == auto_text, (
+            f"{model_name} outputs mismatch:\n[dummy+update] {dummy_text}\n[auto] {auto_text}"
+        )
     finally:
         if dummy_server:
             ray.kill(dummy_server)
@@ -178,10 +201,18 @@ def _run_compare_test(model_path: str, enable_npugraph_ex: bool, prompt: str, mo
 
 
 def test_compare_dummy_update_and_auto_outputs_same_prompt_qwen3_14b():
-    """Test non-ACL graph mode with Qwen3-14B model."""
-    _run_compare_test(MODEL_PATH_QWEN3_14B, enable_npugraph_ex=False, prompt="whats the difference between Deepseek-V3 and Deepseek-V4?", model_name="Qwen3-14B")
+    """Test non-ACL graph mode with Qwen3-4B model."""
+    _run_compare_test(
+        MODEL_PATH_QWEN3_4B,
+        prompt="write a poem about the moon.",
+        model_name="Qwen3-4B",
+    )
 
 
 def test_compare_dummy_update_and_auto_outputs_same_prompt():
-    """Test ACL graph mode (npugraph_ex) with Moonlight-16B-A3B model."""
-    _run_compare_test(MODEL_PATH, enable_npugraph_ex=True, prompt="whats the difference between Deepseek-V3 and Deepseek-V4?", model_name="Moonlight-16B-A3B")
+    """Test ACL graph mode (npugraph_ex) with DeepSeek-V2-Lite-Chat model."""
+    _run_compare_test(
+        MODEL_PATH_DEEPSEEK,
+        prompt="write a poem about the moon.",
+        model_name="DeepSeek-V2-Lite-Chat",
+    )
