@@ -149,6 +149,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         rollout_config=None,
         completion_timeout: float | None = 30.0,
         wait_for_completion_after_agent_run: bool = False,
+        max_concurrent_sessions: int = 0,
     ):
         self.session_runtime = session_runtime
         self.agent_runner = agent_runner
@@ -160,6 +161,9 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         self._rollout_config = rollout_config
         self.completion_timeout = completion_timeout
         self.wait_for_completion_after_agent_run = wait_for_completion_after_agent_run
+        self._max_concurrent_sessions = max_concurrent_sessions
+        self._semaphore: asyncio.Semaphore | None = None
+        self._semaphore_loop: asyncio.AbstractEventLoop | None = None
 
     @classmethod
     async def from_config(
@@ -200,6 +204,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
             rollout_config=config.actor_rollout_ref.rollout,
             completion_timeout=completion_timeout,
             wait_for_completion_after_agent_run=completion_timeout is not None,
+            max_concurrent_sessions=int(af_cfg.get("max_concurrent_sessions", 0)),
         )
 
     async def generate_sequences(self, prompts: TensorDict) -> None:
@@ -399,6 +404,39 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         session_id: str | None = None,
         runner_kwargs: dict[str, object] | None = None,
     ) -> tuple[list[Trajectory], dict[str, object]]:
+        if self._max_concurrent_sessions <= 0:
+            return await self._run_session_inner(
+                prompts=prompts,
+                raw_prompt=raw_prompt,
+                sample_index=sample_index,
+                session_id=session_id,
+                runner_kwargs=runner_kwargs,
+            )
+        # Lazy-init Semaphore on first use and rebind if the running loop
+        # changed: asyncio.Semaphore binds to the loop at construction, but
+        # Ray actors may run _run_session on a different loop than __init__.
+        loop = asyncio.get_running_loop()
+        if self._semaphore is None or self._semaphore_loop is not loop:
+            self._semaphore = asyncio.Semaphore(self._max_concurrent_sessions)
+            self._semaphore_loop = loop
+        async with self._semaphore:
+            return await self._run_session_inner(
+                prompts=prompts,
+                raw_prompt=raw_prompt,
+                sample_index=sample_index,
+                session_id=session_id,
+                runner_kwargs=runner_kwargs,
+            )
+
+    async def _run_session_inner(
+        self,
+        *,
+        prompts: TensorDict,
+        raw_prompt,
+        sample_index: int,
+        session_id: str | None = None,
+        runner_kwargs: dict[str, object] | None = None,
+    ) -> tuple[list[Trajectory], dict[str, object]]:
         session_id = session_id or self._build_session_id(prompts=prompts, sample_index=sample_index)
         sample_fields = self._extract_sample_fields(prompts=prompts, sample_index=sample_index)
         session = await self.session_runtime.create_session(session_id)
@@ -550,17 +588,18 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         }
         if trajectory.response_logprobs is not None:
             field["rollout_log_probs"] = torch.tensor(trajectory.response_logprobs, dtype=torch.float32)
+        else:
+            field["rollout_log_probs"] = torch.zeros_like(responses, dtype=torch.float32)
         if trajectory.routed_experts is not None:
             field["routed_experts"] = (
                 torch.from_numpy(trajectory.routed_experts.copy())
                 if hasattr(trajectory.routed_experts, "copy") and not isinstance(trajectory.routed_experts, torch.Tensor)
                 else trajectory.routed_experts
             )
-        if trajectory.reward_score is not None:
-            rm_scores = torch.zeros_like(responses, dtype=torch.float32)
-            if responses.numel() > 0:
-                rm_scores[-1] = float(trajectory.reward_score)
-            field["rm_scores"] = rm_scores
+        rm_scores = torch.zeros_like(responses, dtype=torch.float32)
+        if trajectory.reward_score is not None and responses.numel() > 0:
+            rm_scores[-1] = float(trajectory.reward_score)
+        field["rm_scores"] = rm_scores
 
         field.update(trajectory.extra_fields)
         field.pop("multi_modal_data", None)

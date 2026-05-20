@@ -276,7 +276,7 @@ async def test_generate_sequences_marks_prompt_failure_when_all_sessions_fail(mo
 
 
 @pytest.mark.asyncio
-async def test_generate_sequences_omits_rm_scores_when_no_reward_handles(monkeypatch):
+async def test_generate_sequences_zero_fills_rm_scores_when_no_reward_handles(monkeypatch):
     from verl.agent.framework import framework as framework_module
     from verl.agent.framework.framework import OpenAICompatibleAgentFramework
 
@@ -298,7 +298,10 @@ async def test_generate_sequences_omits_rm_scores_when_no_reward_handles(monkeyp
 
     await framework.generate_sequences(_build_prompts(count=1, global_steps=10))
 
-    assert "rm_scores" not in fake_tq.batch_puts[0]["fields"].keys()
+    # rm_scores is always written (zero-filled when no reward) so the trainer's
+    # KVBatchMeta select_fields never hits a missing field across the batch.
+    rm_scores = fake_tq.batch_puts[0]["fields"]["rm_scores"]
+    assert rm_scores[0].tolist() == [0.0, 0.0]
 
 
 @pytest.mark.asyncio
@@ -349,6 +352,76 @@ async def test_generate_sequences_keeps_other_prompts_when_prompt_task_raises(mo
     ]
     assert "num_failed_uids=1" in caplog.text
     assert "prompt 0 exploded" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_generate_sequences_zero_fills_rollout_log_probs_when_missing(monkeypatch):
+    from verl.agent.framework import framework as framework_module
+    from verl.agent.framework.framework import OpenAICompatibleAgentFramework
+
+    fake_tq = _FakeTransferQueue()
+    replay_buffer = _FakeReplayBuffer()
+    monkeypatch.setattr(framework_module, "tq", fake_tq)
+    # Trajectory without response_logprobs (e.g. backend returned no logprobs).
+    runtime = _FakeSessionRuntime({"session-0-0": [_trajectory(response_logprobs=None)]})
+
+    async def agent_runner(*, raw_prompt, session, sample_index, tools_kwargs, **kwargs):
+        return None
+
+    framework = OpenAICompatibleAgentFramework(
+        session_runtime=runtime,
+        agent_runner=agent_runner,
+        replay_buffer=replay_buffer,
+        rollout_config={"n": 1, "val_kwargs": {"n": 1}},
+    )
+    framework._build_session_id = lambda prompts, sample_index, session_index=0: f"session-{sample_index}-{session_index}"
+
+    await framework.generate_sequences(_build_prompts(count=1, global_steps=10))
+
+    # rollout_log_probs is zero-filled rather than omitted so the trainer's
+    # bypass-mode select_fields(["rollout_log_probs"]) never KeyErrors.
+    rollout_log_probs = fake_tq.batch_puts[0]["fields"]["rollout_log_probs"]
+    assert rollout_log_probs[0].tolist() == [0.0, 0.0]
+
+
+@pytest.mark.asyncio
+async def test_max_concurrent_sessions_caps_in_flight_sessions(monkeypatch):
+    import asyncio
+
+    from verl.agent.framework import framework as framework_module
+    from verl.agent.framework.framework import OpenAICompatibleAgentFramework
+
+    fake_tq = _FakeTransferQueue()
+    replay_buffer = _FakeReplayBuffer()
+    monkeypatch.setattr(framework_module, "tq", fake_tq)
+    runtime = _FakeSessionRuntime(
+        {f"session-{i}-0": [_trajectory()] for i in range(4)}
+    )
+
+    in_flight = 0
+    max_observed = 0
+
+    async def agent_runner(*, raw_prompt, session, sample_index, tools_kwargs, **kwargs):
+        nonlocal in_flight, max_observed
+        in_flight += 1
+        max_observed = max(max_observed, in_flight)
+        await asyncio.sleep(0.01)
+        in_flight -= 1
+        return None
+
+    _install_fake_score(monkeypatch, default_score=1.0)
+    framework = OpenAICompatibleAgentFramework(
+        session_runtime=runtime,
+        agent_runner=agent_runner,
+        replay_buffer=replay_buffer,
+        rollout_config={"n": 1, "val_kwargs": {"n": 1}},
+        max_concurrent_sessions=2,
+    )
+    framework._build_session_id = lambda prompts, sample_index, session_index=0: f"session-{sample_index}-{session_index}"
+
+    await framework.generate_sequences(_build_prompts(count=4, global_steps=10))
+
+    assert max_observed <= 2
 
 
 # ---------------------------------------------------------------------------
