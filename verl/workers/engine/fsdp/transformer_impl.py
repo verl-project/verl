@@ -364,7 +364,7 @@ class FSDPEngine(BaseEngine):
         )
 
         fsdp_mesh = self.device_mesh
-        sharding_strategy = get_sharding_strategy(fsdp_mesh)
+        sharding_strategy = get_sharding_strategy(fsdp_mesh, zero3_enable=self.engine_config.reshard_after_forward)
 
         # Note: We force turn off CPUOffload because it causes incorrect results when using grad accumulation
         if self.engine_config.strategy == "fsdp":

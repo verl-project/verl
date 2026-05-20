@@ -56,7 +56,7 @@ def create_device_mesh(world_size, fsdp_size):
     return device_mesh
 
 
-def get_sharding_strategy(device_mesh):
+def get_sharding_strategy(device_mesh, zero3_enable=True):
     """
     Determine the appropriate sharding strategy based on the number of dimensions of the device mesh.
 
@@ -69,12 +69,22 @@ def get_sharding_strategy(device_mesh):
     Raises:
         NotImplementedError: If the number of dimensions of the device mesh is neither 1 nor 2.
     """
+
     from torch.distributed.fsdp import ShardingStrategy
+
+    if zero3_enable:
+        fsdp_strategy = ShardingStrategy.FULL_SHARD
+        hsdp_strategy = ShardingStrategy.HYBRID_SHARD
+    else:
+        fsdp_strategy = ShardingStrategy.SHARD_GRAD_OP
+        hsdp_strategy = ShardingStrategy._HYBRID_SHARD_ZERO2
 
     if device_mesh.ndim == 1:
         sharding_strategy = ShardingStrategy.FULL_SHARD
+        sharding_strategy = fsdp_strategy
     elif device_mesh.ndim == 2:
         sharding_strategy = ShardingStrategy.HYBRID_SHARD
+        sharding_strategy = hsdp_strategy
     else:
         raise NotImplementedError(f"Get device mesh ndim={device_mesh.ndim}, but only support 1 or 2")
     return sharding_strategy
