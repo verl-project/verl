@@ -265,7 +265,7 @@ def make_megatron_module(
 
                 provider.register_pre_wrap_hook(create_peft_hook(peft_cls, training=True))
 
-                adapter_path = getattr(peft_config, "adapter_path", None)
+                adapter_path = peft_config.get("adapter_path", None)
                 if adapter_path:
 
                     def adapter_checkpoint_hook(model):
