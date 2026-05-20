@@ -46,7 +46,25 @@ class GatewayServingRuntime:
         if "backend" not in gateway_actor_kwargs:
             gateway_actor_kwargs["backend"] = self
 
-        self.owned_gateway_actors = [GatewayActor.remote(**gateway_actor_kwargs) for _ in range(gateway_count)]
+        # Round-robin across alive CPU nodes so gateway actors do not all pack onto
+        # the driver node under Ray's default PACK scheduling. Mirrors
+        # AgentLoopWorker placement (verl/experimental/agent_loop/agent_loop.py).
+        node_ids = [
+            node["NodeID"]
+            for node in ray.nodes()
+            if node["Alive"] and node["Resources"].get("CPU", 0) > 0
+        ]
+        if not node_ids:
+            raise RuntimeError("No alive CPU nodes available for GatewayActor placement")
+
+        self.owned_gateway_actors = [
+            GatewayActor.options(
+                scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
+                    node_id=node_ids[i % len(node_ids)], soft=True,
+                ),
+            ).remote(**gateway_actor_kwargs)
+            for i in range(gateway_count)
+        ]
         ray.get([gateway.start.remote() for gateway in self.owned_gateway_actors])
         self.gateway_manager = GatewayManager(self.owned_gateway_actors)
 
@@ -62,6 +80,10 @@ class GatewayServingRuntime:
     async def finalize_session(self, session_id: str):
         gateway_manager = self._require_session_runtime()
         return await gateway_manager.finalize_session(session_id=session_id)
+
+    async def complete_session(self, session_id: str) -> None:
+        gateway_manager = self._require_session_runtime()
+        await gateway_manager.complete_session(session_id=session_id)
 
     async def abort_session(self, session_id: str) -> None:
         gateway_manager = self._require_session_runtime()

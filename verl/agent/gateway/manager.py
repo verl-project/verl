@@ -46,6 +46,10 @@ class GatewayManager:
         self.active_sessions_per_gateway[gateway_index] -= 1
         return trajectories
 
+    async def complete_session(self, session_id: str) -> None:
+        gateway, _ = self._get_gateway(session_id)
+        await _await_object_ref(gateway.complete_session.remote(session_id=session_id))
+
     async def abort_session(self, session_id: str) -> None:
         gateway, gateway_index = self._get_gateway(session_id)
         await _await_object_ref(gateway.abort_session.remote(session_id=session_id))

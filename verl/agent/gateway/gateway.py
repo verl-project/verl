@@ -31,6 +31,33 @@ _DEFAULT_ALLOWED_REQUEST_SAMPLING_PARAM_KEYS = frozenset({
 })
 
 
+# Map backend stop_reason values to OpenAI-spec finish_reason values.
+# OpenAI Chat Completions spec defines finish_reason ∈
+# {"stop", "length", "tool_calls", "content_filter", "function_call"}.
+#
+# Note on vLLM information loss: the vLLM rollout adapter
+# (verl/workers/rollout/vllm_rollout/vllm_async_server.py:538-545)
+# collapses vLLM's raw finish_reason "stop" and "length" into a single
+# "completed" stop_reason before the gateway sees it. As a result,
+# mapping "completed" -> "stop" here cannot recover whether generation
+# actually hit max_tokens; recovering that distinction requires the
+# vLLM adapter to preserve the raw finish_reason on TokenOutput.
+# TODO(phase-c): preserve raw backend finish_reason on TokenOutput
+# (e.g. a new TokenOutput.finish_reason field or
+# extra_fields["finish_reason"]) so the gateway can distinguish vLLM
+# "length" from "stop" instead of mapping both to "stop".
+_FINISH_REASON_MAP = {
+    "completed": "stop",
+    "stop": "stop",
+    "matched_stop": "stop",
+    "eos": "stop",
+    "length": "length",
+    "max_tokens": "length",
+    "aborted": "stop",
+    "abort": "stop",
+}
+
+
 # TODO: double-check if all these validations/normalization are necessary
 # Make sure they don't alter messages in unexpected ways.
 def _normalize_message_content(content: Any) -> Any:
@@ -62,8 +89,6 @@ def _normalize_message(message: Any) -> dict[str, Any]:
     """
     if not isinstance(message, dict):
         raise MalformedRequestError("messages entries must be objects")
-    if "name" in message:
-        raise MalformedRequestError("message.name is not supported in PR1")
 
     role = message.get("role")
     if not isinstance(role, str) or not role:
@@ -73,6 +98,11 @@ def _normalize_message(message: Any) -> dict[str, Any]:
         "role": role,
         "content": _normalize_message_content(message.get("content", "")),
     }
+    if "name" in message:
+        name = message["name"]
+        if not isinstance(name, str):
+            raise MalformedRequestError("message.name must be a string")
+        normalized["name"] = name
     if "tool_calls" in message:
         _validate_tool_calls(message["tool_calls"])
         normalized["tool_calls"] = list(message["tool_calls"])
@@ -81,15 +111,12 @@ def _normalize_message(message: Any) -> dict[str, Any]:
     return normalized
 
 
-def _validate_tools(tools: Any) -> list[dict[str, Any]] | None:
+def _validate_tools(tools: Any) -> list[Any] | None:
     """Validate tools structure. Does not modify content."""
     if tools is None:
         return None
     if not isinstance(tools, list):
         raise MalformedRequestError("tools must be a list")
-    for tool in tools:
-        if not isinstance(tool, dict):
-            raise MalformedRequestError("tools entries must be objects")
     return tools
 
 
@@ -220,7 +247,6 @@ class _GatewayActor:
         self,
         tokenizer,
         backend,
-        host: str | None = None,
         *,
         processor=None,
         vision_info_extractor=None,
@@ -231,8 +257,8 @@ class _GatewayActor:
         allowed_request_sampling_param_keys: set[str] | frozenset[str] | None = None,
     ):
         # Same pattern as vllm_async_server.py / async_sglang_server.py:
-        # use the node's routable IP for both bind and URL by default.
-        self._server_address = host if host is not None else ray.util.get_node_ip_address()
+        # use the node's routable IP for both bind and URL.
+        self._server_address = ray.util.get_node_ip_address()
         self._tokenizer = tokenizer
         self._processor = processor
         self._backend = backend
@@ -457,10 +483,20 @@ class _GatewayActor:
 
         Returns:
             message: OpenAI-compatible assistant message.
-            finish_reason: "tool_calls" when tool calls are present, else stop_reason or "stop".
+            finish_reason: "tool_calls" when tool calls are present, else the
+                OpenAI-spec-normalized stop_reason (see _FINISH_REASON_MAP).
         """
         if self._tool_parser is not None and tools:
-            content, function_calls = await self._tool_parser.extract_tool_calls(response_ids)
+            parsed_tools = None
+            try:
+                from verl.tools.schemas import OpenAIFunctionToolSchema
+                parsed_tools = [
+                    OpenAIFunctionToolSchema(**t) if isinstance(t, dict) else t
+                    for t in tools
+                ]
+            except Exception:
+                pass
+            content, function_calls = await self._tool_parser.extract_tool_calls(response_ids, parsed_tools)
             if function_calls:
                 tool_calls = [
                     {
@@ -480,7 +516,8 @@ class _GatewayActor:
                 }
                 return message, "tool_calls"
         response_text = self._tokenizer.decode(response_ids, skip_special_tokens=True)
-        return {"role": "assistant", "content": response_text}, stop_reason or "stop"
+        finish_reason = _FINISH_REASON_MAP.get(stop_reason, stop_reason) if stop_reason else "stop"
+        return {"role": "assistant", "content": response_text}, finish_reason
 
     async def _handle_chat_completions(self, session_id: str, payload: dict[str, Any]) -> JSONResponse:
         session = self._sessions.get(session_id)
