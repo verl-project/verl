@@ -107,6 +107,9 @@ class GPUMemoryLogger(DecoratorLoggerBase):
         return f
 
     def log(self, func, *args, **kwargs):
+        if self.logger is not None and not self.logger.isEnabledFor(self.level):
+            return func(*args, **kwargs)
+
         if dist.is_initialized():
             # Decorators may be constructed before distributed initialization, so refresh rank at call time.
             self.rank = dist.get_rank()
