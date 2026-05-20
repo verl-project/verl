@@ -385,6 +385,7 @@ actor_rollout_ref:
     use_fused_kernels: false
     fused_kernel_options:
       impl_backend: torch
+    use_npu_patch_kernels: true
     tiled_mlp:
       enabled: false
       num_shards: 4
@@ -582,6 +583,7 @@ critic:
     use_fused_kernels: false
     fused_kernel_options:
       impl_backend: torch
+    use_npu_patch_kernels: true
     tiled_mlp:
       enabled: false
       num_shards: 4

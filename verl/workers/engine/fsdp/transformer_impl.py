@@ -277,9 +277,6 @@ class FSDPEngine(BaseEngine):
                 _apply_liger_kernel_to_instance(
                     model=module,
                     fused_linear_cross_entropy=False,
-                    cross_entropy=False,
-                    rmsnorm=False,
-                    rope=False,
                     swiglu=True,
                 )
 
