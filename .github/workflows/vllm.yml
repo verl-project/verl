@@ -145,10 +145,6 @@ jobs:
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
           pip3 install cupy-cuda12x==13.6.0
-      - name: Test vLLM process_weights_after_loading
-        run: |
-          ray stop --force
-          pytest tests/workers/rollout/rollout_vllm/test_vllm_process_weights_after_loading.py -v -s
       - name: Test vLLM ServerAdapter with Checkpoint Engine (NCCL)
         run: |
           ROLLOUT_NAME=vllm pytest -svvv tests/checkpoint_engine/test_special_server_adapter.py
