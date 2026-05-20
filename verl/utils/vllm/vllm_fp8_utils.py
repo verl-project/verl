@@ -438,18 +438,85 @@ def process_weights_after_loading_for_vllm20(self, layer) -> None:
     ``self.fp8_linear.process_weights_after_loading(layer)``.
 
     The kernel uses ``vllm.model_executor.utils.replace_parameter`` to update
-    weight/scale tensors, which preserves the ``weight_loader`` attribute that
-    verl relies on for refit.
+    weight/scale tensors. ``replace_parameter`` preserves the ``weight_loader``
+    attribute but downgrades the parameter to a plain ``torch.nn.Parameter``,
+    discarding the original ``BasevLLMParameter`` subclass (e.g.
+    ``ModelWeightParameter`` / ``BlockQuantScaleParameter``). In vLLM 0.20+
+    row/column parallel FP8 linear layers use ``weight_loader_v2``, which calls
+    ``param.load_row_parallel_weight(...)`` / ``load_column_parallel_weight``
+    -- methods that only exist on those subclasses. Refit (the second
+    ``model.load_weights`` invoked from ``load_quanted_weights``) then fails
+    with ``AttributeError: 'Parameter' object has no attribute
+    'load_row_parallel_weight'``.
+
+    To mirror the v0.14 patch, after the kernel runs we rewrap the resulting
+    plain parameters as ``ModelWeightParameter`` / ``BlockQuantScaleParameter``
+    and attach ``subclass_type`` so ``load_quanted_weights`` can restore
+    ``param.__class__`` before calling ``model.load_weights``.
     """
+    from torch.nn import Parameter
+    from vllm.model_executor.parameter import (
+        BlockQuantScaleParameter,
+        ModelWeightParameter,
+    )
+
     assert self.block_quant and self.quant_config.is_checkpoint_fp8_serialized
     assert self.quant_config.activation_scheme == "dynamic"
+
+    def _create_param_from_subclass_attributes(custom_param):
+        param = Parameter(custom_param.data, requires_grad=False)
+        base_param_dir = dir(torch.nn.Parameter)
+        custom_param_dir = dir(custom_param)
+        # Find the attributes that are unique to the custom parameter
+        custom_attributes = [
+            attr for attr in custom_param_dir if attr not in base_param_dir and not attr.startswith("__")
+        ]
+        # Set the custom attributes into the base parameter object
+        for attr in custom_attributes:
+            setattr(param, attr, getattr(custom_param, attr))
+
+        param.subclass_type = type(custom_param)
+        return param
 
     # vLLM v0.17+ no longer registers `input_scale=None` for dynamic activation,
     # but the kernel's apply() still reads `layer.input_scale`.
     if not hasattr(layer, "input_scale"):
         layer.input_scale = None
 
+    # Snapshot weight_loader callables via the original subclass parameters'
+    # property API before the kernel rewrites them via ``replace_parameter``.
+    weight_loader = layer.weight.weight_loader
+    scale_attr = "weight_scale_inv" if hasattr(layer, "weight_scale_inv") else "weight_scale"
+    weight_scale_loader = getattr(layer, scale_attr).weight_loader
+
+    # Run the kernel's block-strategy quantization plus any backend-specific
+    # post-processing (e.g. DeepGEMM column-major TMA-aligned scales). The
+    # kernel uses ``replace_parameter`` which leaves us with plain Parameters.
     self.fp8_linear.process_weights_after_loading(layer)
+
+    # Rewrap the kernel-transformed tensors as their original vLLM subclasses
+    # so refit (``load_quanted_weights`` -> ``model.load_weights`` ->
+    # ``weight_loader_v2``) can find ``load_row_parallel_weight`` etc.
+    layer.weight = _create_param_from_subclass_attributes(
+        ModelWeightParameter(
+            data=layer.weight.data,
+            output_dim=0,
+            input_dim=1,
+            weight_loader=weight_loader,
+        )
+    )
+    setattr(
+        layer,
+        scale_attr,
+        _create_param_from_subclass_attributes(
+            BlockQuantScaleParameter(
+                data=getattr(layer, scale_attr).data,
+                output_dim=0,
+                input_dim=1,
+                weight_loader=weight_scale_loader,
+            )
+        ),
+    )
 
 
 def process_weights_after_loading_moe_for_vllm10(self, layer) -> None:

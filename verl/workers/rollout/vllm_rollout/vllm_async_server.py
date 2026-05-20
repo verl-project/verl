@@ -13,6 +13,7 @@
 # limitations under the License.
 import argparse
 import asyncio
+import hashlib
 import inspect
 import json
 import logging
@@ -465,12 +466,15 @@ class vLLMHttpServer:
         prompt_ids = normalize_token_ids(prompt_ids)
 
         # Calculate the maximum possible new tokens based on available context space
-        # This serves as a safety upper bound
+        # This serves as a safety upper bound. vLLM v0.20+ rejects `max_tokens < 1`
+        # (see vllm.sampling_params.SamplingParams._verify_args), so we require at
+        # least one token of headroom to be able to generate at all.
         max_possible_tokens = self.config.max_model_len - len(prompt_ids)
-        if max_possible_tokens < 0:
+        if max_possible_tokens < 1:
             raise ValueError(
-                f"Prompt length ({len(prompt_ids)}) exceeds the model's maximum context length "
-                f"({self.config.max_model_len})."
+                f"Prompt length ({len(prompt_ids)}) leaves no room to generate within the "
+                f"model's maximum context length ({self.config.max_model_len}); need at least "
+                f"1 token of headroom."
             )
 
         # Determine max_tokens from sampling_params or use configured response_length as default
@@ -487,11 +491,12 @@ class vLLMHttpServer:
                 self.config.response_length, self.config.prompt_length + self.config.response_length - len(prompt_ids)
             )
 
-        # Clamp max_tokens to the valid range [0, max_possible_tokens]
-        max_tokens = max(0, min(max_tokens, max_possible_tokens))
+        # Clamp max_tokens to the valid range [1, max_possible_tokens]. The lower bound
+        # is 1 because vLLM v0.20+ raises VLLMValidationError when max_tokens < 1.
+        max_tokens = max(1, min(max_tokens, max_possible_tokens))
 
-        assert max_tokens <= max_possible_tokens, (
-            f"max_tokens {max_tokens} exceeds available context space {max_possible_tokens}"
+        assert 1 <= max_tokens <= max_possible_tokens, (
+            f"max_tokens {max_tokens} not in valid range [1, {max_possible_tokens}]"
         )
         sampling_params["logprobs"] = 0 if sampling_params.pop("logprobs", False) else None
         sampling_params.setdefault("repetition_penalty", self.config.get("repetition_penalty", 1.0))
@@ -928,6 +933,31 @@ class vLLMReplica(RolloutReplica):
         )
         self.server_class = ray.remote(vLLMHttpServer)
 
+    def _vllm_port_hint(self, node_rank: int) -> int:
+        """Deterministic starting port for vLLM's internal distributed init.
+
+        vLLM's ``multiproc_executor`` allocates the TP rendezvous port via
+        ``vllm.utils.network_utils.get_open_port``, which falls back to
+        ``bind(("", 0))`` and races when multiple engines initialize in
+        parallel on the same node: two engines can each receive the same
+        ephemeral port between ``getsockname`` and the worker actually
+        binding it, producing the EADDRINUSE failure reported in
+        https://github.com/ServiceNow/PipelineRL/issues/27.
+
+        Setting ``VLLM_PORT`` makes ``_get_open_port`` start its bind loop
+        at a specific port and increment on conflict. Assigning a distinct
+        start port per (replica, node) eliminates the race.
+        """
+        # 16-bit role/name_suffix hash, quantized to a 100-port grid so that
+        # co-located actor/reward/teacher systems land in disjoint ranges.
+        role = "reward" if self.is_reward_model else "teacher" if self.is_teacher_model else "actor"
+        identity = f"{self.name_suffix}|{role}"
+        system_offset = int(hashlib.md5(identity.encode()).hexdigest()[:4], 16) % 100 * 100
+        # 20000 base keeps us above well-known ports and below the typical
+        # Linux ephemeral range (32768+). Replica stride 200 / node stride 50
+        # absorb a comfortable number of retries before the next slot.
+        return 20000 + system_offset + self.replica_rank * 200 + node_rank * 50
+
     async def launch_servers(self):
         """Launch http server in each node."""
         assert len(self.workers) == self.world_size, (
@@ -966,22 +996,25 @@ class vLLMReplica(RolloutReplica):
                 name = f"{prefix}server_teacher_{self.replica_rank}_{node_rank}{self.name_suffix}"
             else:
                 name = f"{prefix}server_{self.replica_rank}_{node_rank}{self.name_suffix}"
+            env_vars = {
+                "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
+                "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
+                # To prevent hanging or crash during synchronization of weights between actor and rollout
+                # in disaggregated mode. See:
+                # https://docs.vllm.ai/en/latest/usage/troubleshooting.html?h=nccl_cumem_enable#known-issues
+                # https://github.com/vllm-project/vllm/blob/c6b0a7d3ba03ca414be1174e9bd86a97191b7090/vllm/worker/worker_base.py#L445
+                "NCCL_CUMEM_ENABLE": "0",
+            }
+            # Pin VLLM_PORT per (replica, node) so parallel engines do not race for
+            # the same internal distributed-init port. See ``_vllm_port_hint``.
+            if "VLLM_PORT" not in os.environ:
+                env_vars["VLLM_PORT"] = str(self._vllm_port_hint(node_rank))
             server = self.server_class.options(
                 scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                     node_id=node_id,
                     soft=False,
                 ),
-                runtime_env={
-                    "env_vars": {
-                        "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
-                        "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
-                        # To prevent hanging or crash during synchronization of weights between actor and rollout
-                        # in disaggregated mode. See:
-                        # https://docs.vllm.ai/en/latest/usage/troubleshooting.html?h=nccl_cumem_enable#known-issues
-                        # https://github.com/vllm-project/vllm/blob/c6b0a7d3ba03ca414be1174e9bd86a97191b7090/vllm/worker/worker_base.py#L445
-                        "NCCL_CUMEM_ENABLE": "0",
-                    }
-                },
+                runtime_env={"env_vars": env_vars},
                 name=name,
                 max_concurrency=self.max_concurrency,
             ).remote(
