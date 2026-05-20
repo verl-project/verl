@@ -1232,3 +1232,58 @@ def test_serialize_dataproto_with_empty_tensordict():
     deserialized_data = pickle.loads(serialized_data)
     assert len(deserialized_data.batch.keys()) == 0
     assert deserialized_data.batch.batch_size == torch.Size([10])
+
+
+def test_unfold_column_chunks_split_keys_none_does_not_crash_on_non_tensor_batch():
+    """Regression for https://github.com/verl-project/verl/issues/6411.
+
+    ``split_keys=None`` should repeat every non-tensor key (matching the
+    documented behavior) instead of raising ``TypeError`` from
+    ``key in None``.
+    """
+    n_split = 2
+    obs = torch.tensor([[1, 2, 3, 4], [5, 6, 7, 8]])  # (2, 4) → repeat path → (4, 4)
+    labels = ["a", "b"]
+    data = DataProto.from_dict(tensors={"obs": obs}, non_tensors={"labels": labels})
+
+    unfolded = data.unfold_column_chunks(n_split=n_split, split_keys=None)
+
+    # Tensor branch: repeat path (key not in split_keys) → (4, 4)
+    assert unfolded.batch["obs"].shape == (4, 4)
+    expected_obs = torch.repeat_interleave(obs, n_split, dim=0)
+    assert torch.equal(unfolded.batch["obs"], expected_obs)
+
+    # Non-tensor branch: repeat path → np.repeat(labels, 2, axis=0)
+    assert np.array_equal(
+        unfolded.non_tensor_batch["labels"], np.array(["a", "a", "b", "b"])
+    )
+
+
+def test_unfold_column_chunks_split_keys_subset_keeps_split_path():
+    """Happy-path regression: when ``split_keys`` is provided and a tensor
+    key is in it, the membership check still routes that key through the
+    reshape branch (not the repeat branch).
+    """
+    n_split = 2
+    obs = torch.tensor([[1, 2, 3, 4], [5, 6, 7, 8]])  # (2, 4) → reshape (4, 2)
+    extra = torch.tensor([[10, 20], [30, 40]])  # (2, 2) → repeat (4, 2)
+    labels = ["a", "b"]
+    data = DataProto.from_dict(
+        tensors={"obs": obs, "extra": extra},
+        non_tensors={"labels": labels},
+    )
+
+    unfolded = data.unfold_column_chunks(n_split=n_split, split_keys=["obs"])
+
+    # ``obs`` is in split_keys → reshape branch: (2, 4) → (4, 2)
+    assert unfolded.batch["obs"].shape == (4, 2)
+    assert torch.equal(unfolded.batch["obs"], obs.reshape(4, 2))
+
+    # ``extra`` not in split_keys → repeat branch: (2, 2) → (4, 2)
+    assert unfolded.batch["extra"].shape == (4, 2)
+    assert torch.equal(unfolded.batch["extra"], torch.repeat_interleave(extra, n_split, dim=0))
+
+    # Non-tensor key not in split_keys → repeat branch
+    assert np.array_equal(
+        unfolded.non_tensor_batch["labels"], np.array(["a", "a", "b", "b"])
+    )

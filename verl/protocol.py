@@ -1037,7 +1037,7 @@ class DataProto:
 
         repeated_non_tensor_batch = {}
         for key, val in self.non_tensor_batch.items():
-            if key in split_keys:
+            if split_keys is not None and key in split_keys:
                 shape = list(val.shape)
                 shape[0] = val.shape[0] * n_split
                 shape[1] = val.shape[1] // n_split
