@@ -184,7 +184,7 @@ class ServerAdapter(BaseRollout):
         # sleep_level controls what gets released during sleep/release:
         #   2 (default) = release weights + kv_cache (full sleep, merge path)
         #   1 = release kv_cache only (keep base weights, adapter path)
-        # Set by engine_workers.update_weights() when lora.merge=False.
+        # Set by engine_workers.actor_weights_to_rollout() when lora.merge=False.
         self.sleep_level = 2
 
     async def _init_server_adapter(self):

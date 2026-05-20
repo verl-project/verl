@@ -656,12 +656,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self.actor.save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    async def update_weights(self, global_steps: int = None, mode: str = "auto"):
+    async def actor_weights_to_rollout(self, global_steps: int = None, mode: str = "auto"):
         """Update weights from trainer to rollout.
 
         1. For sync training with colocated trainer and rollout, update rollout directly from model engine.
-           - before update_weights: rollout should be in sleep mode.
-           - after update_weights: rollout should be in wake_up mode.
+           - before actor_weights_to_rollout: rollout should be in sleep mode.
+           - after actor_weights_to_rollout: rollout should be in wake_up mode.
         2. For async training with disaggregated trainer and rollout, send_weights only by checkpoint engine.
 
         LoRA handling: when model.lora.merge=True (peft_merge), LoRA is merged into
@@ -722,7 +722,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             per_tensor_param, peft_config=peft_config, base_sync_done=True, global_steps=global_steps
         )
 
-        log_gpu_memory_usage("After update_weights", logger=logger)
+        log_gpu_memory_usage("After actor_weights_to_rollout", logger=logger)
 
         # 3. offload model to cpu
         if self.actor.engine.is_param_offload_enabled:
