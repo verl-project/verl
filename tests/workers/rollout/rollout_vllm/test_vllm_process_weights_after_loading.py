@@ -39,6 +39,7 @@ from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer
 MODEL_ID = os.environ.get("MODEL_ID", "moonshotai/Moonlight-16B-A3B-Instruct")
 MODEL_PATH_DEEPSEEK = os.environ.get("MODEL_PATH", os.path.expanduser(f"~/.cache/models/{MODEL_ID}"))
 
+
 def _build_config(load_format: str, model_path: str):
     rollout_cfg = OmegaConf.create(
         {
