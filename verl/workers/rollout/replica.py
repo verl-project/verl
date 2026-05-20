@@ -348,11 +348,16 @@ def _load_trtllm():
 
     return TRTLLMReplica
 
+def _load_arctic():
+    from verl.workers.rollout.arctic_rollout.arctic_rollout import ArcticReplica
+    
+    return ArcticReplica
 
 # Register built-in types
 RolloutReplicaRegistry.register("vllm", _load_vllm)
 RolloutReplicaRegistry.register("sglang", _load_sglang)
 RolloutReplicaRegistry.register("trtllm", _load_trtllm)
+RolloutReplicaRegistry.register("arctic", _load_arctic)
 
 
 # Original function for backward compatibility
