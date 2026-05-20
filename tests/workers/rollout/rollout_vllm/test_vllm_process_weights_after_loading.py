@@ -36,9 +36,7 @@ from verl.workers.rollout.replica import RolloutMode, TokenOutput
 from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightSender
 from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer
 
-MODEL_ID = os.environ.get("MODEL_ID", "moonshotai/Moonlight-16B-A3B-Instruct")
-MODEL_PATH_DEEPSEEK = os.environ.get("MODEL_PATH", os.path.expanduser(f"~/.cache/models/{MODEL_ID}"))
-
+MODEL_PATH_DEEPSEEK = os.path.expanduser("~/models/deepseek-ai/DeepSeek-V2-Lite-Chat")
 
 def _build_config(load_format: str, model_path: str):
     rollout_cfg = OmegaConf.create(
