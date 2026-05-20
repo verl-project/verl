@@ -14,5 +14,8 @@ export HCCL_NPU_SOCKET_PORT_RANGE=61000-61050
 MODEL_ID=${MODEL_ID:-moonshotai/Moonlight-16B-A3B-Instruct}
 MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/models/${MODEL_ID}}
 
+echo "MODEL_ID: $MODEL_ID"
+echo "MODEL_PATH: $MODEL_PATH"
+
 # Run the test
 cd "$(dirname "$0")/../.." && python3 tests/workers/rollout/rollout_vllm/test_vllm_process_weights_after_loading.py
