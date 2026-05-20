@@ -94,6 +94,9 @@ image_key: images
 # The field in the multi-modal dataset where the video is located.
 video_key: videos
 
+# The field in the multi-modal dataset where the audio is located.
+audio_key: audios
+
 # If the remote tokenizer has a Python file, this flag determines whether to allow using it.
 trust_remote_code: False
 
@@ -111,3 +114,6 @@ return_multi_modal_inputs: True
 
 # Additional kwargs when calling tokenizer.apply_chat_template
 apply_chat_template_kwargs: {}
+
+# Additional kwargs passed to multimodal processors/backends.
+mm_processor_kwargs: {}

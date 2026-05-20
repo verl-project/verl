@@ -16,7 +16,13 @@
 import types
 import warnings
 
-__all__ = ["hf_tokenizer", "hf_processor", "normalize_token_ids"]
+__all__ = [
+    "hf_tokenizer",
+    "hf_processor",
+    "normalize_token_ids",
+    "build_multimodal_processor_inputs",
+    "get_processor_token_id",
+]
 
 
 def normalize_token_ids(tokenized_output) -> list[int]:
@@ -54,6 +60,78 @@ def normalize_token_ids(tokenized_output) -> list[int]:
         except (TypeError, ValueError) as e:
             raise TypeError(f"token_id must be int-convertible, got {type(token_id).__name__}: {token_id!r}") from e
     return normalized_ids
+
+
+def get_processor_token_id(processor, token_name: str) -> int | None:
+    """Resolve a multimodal special token id from a processor.
+
+    Newer processors may expose ``image_token``/``video_token`` strings instead
+    of ``image_token_id``/``video_token_id`` integers. Fall back to tokenizer
+    conversion so rollout code can stay processor-agnostic.
+    """
+
+    if processor is None:
+        return None
+
+    token_id_attr = f"{token_name}_token_id"
+    token_id = getattr(processor, token_id_attr, None)
+    if token_id is not None:
+        return int(token_id)
+
+    token_attr = f"{token_name}_token"
+    token = getattr(processor, token_attr, None)
+    tokenizer = getattr(processor, "tokenizer", None)
+    if token is not None and tokenizer is not None:
+        converted = tokenizer.convert_tokens_to_ids(token)
+        if converted is not None:
+            return int(converted)
+
+    return None
+
+
+def _split_videos_and_metadata(videos):
+    if videos is None:
+        return None, None
+    videos = list(videos)
+    if len(videos) > 0 and isinstance(videos[0], tuple):
+        video_values, video_metadata = zip(*videos, strict=False)
+        return list(video_values), list(video_metadata)
+    return videos, None
+
+
+def build_multimodal_processor_inputs(
+    processor,
+    *,
+    text,
+    images=None,
+    videos=None,
+    audio=None,
+    mm_processor_kwargs=None,
+    return_tensors: str = "pt",
+):
+    """Build kwargs for multimodal processor calls.
+
+    This keeps the existing VL flow intact while extending it with audio-aware
+    paths for processors that accept audio inputs.
+    """
+    processor_kwargs = dict(mm_processor_kwargs or {})
+    if audio is not None and "sampling_rate" not in processor_kwargs:
+        sampling_rate = getattr(getattr(processor, "feature_extractor", None), "sampling_rate", None)
+        if sampling_rate is not None:
+            processor_kwargs["sampling_rate"] = int(sampling_rate)
+
+    videos, video_metadata = _split_videos_and_metadata(videos)
+    processor_kwargs.setdefault("return_tensors", return_tensors)
+
+    if video_metadata is not None:
+        processor_kwargs.setdefault("video_metadata", video_metadata)
+        processor_kwargs.setdefault("do_sample_frames", False)
+
+    processor_inputs = {"text": text, "images": images, "videos": videos, **processor_kwargs}
+    if audio is not None:
+        processor_inputs["audio"] = audio
+
+    return processor(**processor_inputs)
 
 
 def set_pad_token_id(tokenizer):
@@ -124,7 +202,7 @@ def hf_processor(name_or_path, **kwargs):
 
         config = AutoConfig.from_pretrained(name_or_path, **kwargs)
 
-        # Bind vlm model's get_rope_index method to processor
+        # Bind vlm model's get_rope_index method to processor.
         processor.config = config
         model_class = None
         match processor.__class__.__name__:
@@ -162,4 +240,5 @@ def hf_processor(name_or_path, **kwargs):
     # https://github.com/huggingface/transformers/blob/v4.49.0/src/transformers/models/auto/processing_auto.py#L344
     if processor is not None and "Processor" not in processor.__class__.__name__:
         processor = None
+
     return processor

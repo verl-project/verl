@@ -22,28 +22,44 @@ def initialize_system_prompt(tokenizer, **apply_chat_template_kwargs) -> list[in
         List of token IDs for the system prompt, or empty list if not supported
     """
     token1 = normalize_token_ids(
-        tokenizer.apply_chat_template([{"role": "user", "content": ""}], add_generation_prompt=False, tokenize=True)
+        tokenizer.apply_chat_template(
+            [{"role": "user", "content": ""}], add_generation_prompt=False, tokenize=True, **apply_chat_template_kwargs
+        )
     )
     token2 = normalize_token_ids(
-        tokenizer.apply_chat_template([{"role": "user", "content": ""}] * 2, add_generation_prompt=False, tokenize=True)
+        tokenizer.apply_chat_template(
+            [{"role": "user", "content": ""}] * 2,
+            add_generation_prompt=False,
+            tokenize=True,
+            **apply_chat_template_kwargs,
+        )
     )
     # get system prompt tokens
     system_prompt = token1[: -(len(token2) - len(token1))]
     return system_prompt
 
 
-def extract_system_prompt_and_generation(tokenizer):
+def extract_system_prompt_and_generation(tokenizer, **apply_chat_template_kwargs):
     token1 = normalize_token_ids(
-        tokenizer.apply_chat_template([{"role": "user", "content": ""}], add_generation_prompt=False, tokenize=True)
+        tokenizer.apply_chat_template(
+            [{"role": "user", "content": ""}], add_generation_prompt=False, tokenize=True, **apply_chat_template_kwargs
+        )
     )
     token2 = normalize_token_ids(
-        tokenizer.apply_chat_template([{"role": "user", "content": ""}] * 2, add_generation_prompt=False, tokenize=True)
+        tokenizer.apply_chat_template(
+            [{"role": "user", "content": ""}] * 2,
+            add_generation_prompt=False,
+            tokenize=True,
+            **apply_chat_template_kwargs,
+        )
     )
     # get system prompt tokens
     system_prompt = token1[: -(len(token2) - len(token1))]
     # get generate prompt tokens
     token3 = normalize_token_ids(
-        tokenizer.apply_chat_template([{"role": "user", "content": ""}], add_generation_prompt=True, tokenize=True)
+        tokenizer.apply_chat_template(
+            [{"role": "user", "content": ""}], add_generation_prompt=True, tokenize=True, **apply_chat_template_kwargs
+        )
     )
     generate_prompt = token3[len(token1) :]
 

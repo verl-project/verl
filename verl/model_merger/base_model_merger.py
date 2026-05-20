@@ -24,7 +24,7 @@ from accelerate import init_empty_weights
 from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForTokenClassification, GenerationConfig
 
 from verl.utils import hf_processor, hf_tokenizer
-from verl.utils.transformers_compat import get_auto_model_for_vision2seq
+from verl.utils.transformers_compat import drop_tied_target_keys, get_auto_model_for_vision2seq
 
 AutoModelForVision2Seq = get_auto_model_for_vision2seq()
 
@@ -384,6 +384,8 @@ class BaseModelMerger(ABC):
         lora_path = self.save_lora_adapter(state_dict)
         if lora_path:
             print(f"Saving lora adapter to {lora_path}")
+
+        drop_tied_target_keys(state_dict, model, self.model_config)
 
         print(f"Saving model to {self.config.target_dir}")
         model.save_pretrained(self.config.target_dir, state_dict=state_dict)

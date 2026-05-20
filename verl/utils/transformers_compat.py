@@ -90,3 +90,32 @@ def unpack_visual_output(visual_output):
         return visual_output
     else:
         return visual_output, None
+
+
+def drop_tied_target_keys(state_dict, model, model_config) -> None:
+    """Drop tied alias keys (e.g. ``lm_head.weight``) from ``state_dict``.
+
+    FSDP gather and the model merger materialise one independent CPU tensor
+    per state_dict key, which defeats ``save_pretrained``'s storage-pointer-
+    based dedup. When both keys end up in safetensors, ``transformers>=5``
+    silently refuses to re-tie on reload. Detects aliases by ``Parameter``
+    identity after ``tie_weights()``.
+
+    Only drops the alias when the canonical name has been confirmed to exist
+    in ``state_dict``; otherwise the alias is promoted to canonical so we
+    never accidentally remove every entry for a tied parameter.
+    """
+    if not getattr(model_config, "tie_word_embeddings", False):
+        return
+    model.tie_weights()
+    canonical_by_id: dict[int, str] = {}
+    for name, param in model.named_parameters(remove_duplicate=False):
+        pid = id(param)
+        if pid not in canonical_by_id:
+            canonical_by_id[pid] = name
+            continue
+        if canonical_by_id[pid] in state_dict:
+            state_dict.pop(name, None)
+        else:
+            # Canonical name absent: promote the alias instead of erasing it.
+            canonical_by_id[pid] = name
