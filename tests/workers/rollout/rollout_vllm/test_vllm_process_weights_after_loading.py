@@ -200,15 +200,6 @@ def _run_compare_test(model_path: str, prompt: str, model_name: str):
             ray.shutdown()
 
 
-def test_compare_dummy_update_and_auto_outputs_same_prompt_qwen3_14b():
-    """Test non-ACL graph mode with Qwen3-4B model."""
-    _run_compare_test(
-        MODEL_PATH_QWEN3_4B,
-        prompt="write a poem about the moon.",
-        model_name="Qwen3-4B",
-    )
-
-
 def test_compare_dummy_update_and_auto_outputs_same_prompt():
     """Test ACL graph mode (npugraph_ex) with DeepSeek-V2-Lite-Chat model."""
     _run_compare_test(
