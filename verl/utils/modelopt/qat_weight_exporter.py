@@ -92,6 +92,8 @@ class QATWeightExporter:
         quantized, or the original tensor unchanged otherwise.
         """
         for hf_name, weight in per_tensor_param:
+            if "_quantizer." in hf_name:
+                continue
             meta = self._resolve_quant_metadata(hf_name)
             if meta is None:
                 yield (hf_name, weight)
@@ -152,9 +154,7 @@ class QATWeightExporter:
         if self._config is None:
             return name
 
-        from megatron.bridge.models.conversion.model_bridge import (
-            _megatron_local_name_to_global,
-        )
+        from megatron.bridge.models.conversion.model_bridge import _megatron_local_name_to_global
 
         return _megatron_local_name_to_global(self._actor_module, self._config, name, vpp_idx)
 
