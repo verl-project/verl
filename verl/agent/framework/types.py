@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -28,27 +27,6 @@ class Trajectory:
     extra_fields: dict[str, Any] = field(default_factory=dict)
 
 
-@dataclass
-class SessionRewardContext:
-    """Context passed to ``reward_fn`` after a session is finalized.
-
-    A single session may produce multiple trajectories (e.g. when the agent
-    switches conversation context mid-session). ``reward_fn`` receives all of
-    them together so the implementor can choose the session-to-trajectory
-    scoring policy, but it must return one score per trajectory.
-
-    ``sample_fields`` carries per-sample dataset fields (``data_source``,
-    ``reward_model.ground_truth``, ``extra_info``, ...) — the same dict that
-    ``AgentLoopWorker._compute_score`` forwards as ``kwargs`` to the reward
-    worker.
-    """
-
-    trajectories: list[Trajectory]
-    sample_fields: dict[str, Any] = field(default_factory=dict)
-
-RewardFn = Callable[[SessionRewardContext], Awaitable[list[float]] | list[float]]
-
-
 class SessionRuntime(Protocol):
     """Protocol for gateway-backed session lifecycle.
 
@@ -58,6 +36,7 @@ class SessionRuntime(Protocol):
     """
 
     async def create_session(self, session_id: str, **kwargs) -> SessionHandle: ...
+    async def complete_session(self, session_id: str) -> None: ...
     async def finalize_session(self, session_id: str) -> list[Trajectory]: ...
     async def abort_session(self, session_id: str) -> None: ...
     async def wait_for_completion(self, session_id: str, timeout: float | None = None) -> None: ...

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import logging
+import random
 from abc import ABC, abstractmethod
 from dataclasses import replace
 from functools import partial
@@ -14,14 +14,13 @@ from tensordict import TensorDict
 from tensordict.tensorclass import NonTensorData, NonTensorStack
 
 from verl.tools.utils.tool_registry import initialize_tools_from_config
-from verl.trainer.ppo.reward import get_custom_reward_fn
 from verl.utils.import_utils import load_class_from_fqn
 from verl.utils.transferqueue_utils import tq
 from verl.utils import tensordict_utils as tu
 from verl.utils.model import compute_position_id_with_mask
 
 from .multi_modal_postprocess import compute_multi_modal_inputs, compute_position_ids
-from .types import RewardFn, SessionRewardContext, SessionRuntime, Trajectory
+from .types import SessionRuntime, Trajectory
 
 logger = logging.getLogger(__name__)
 
@@ -43,9 +42,9 @@ class AgentFramework(ABC):
         *,
         config,
         session_runtime,
-        tokenizer=None,
         processor=None,
         replay_buffer,
+        reward_loop_worker_handles=None,
     ) -> "AgentFramework":
         ...
 
@@ -53,14 +52,6 @@ class AgentFramework(ABC):
     async def generate_sequences(self, prompts: TensorDict) -> None:
         """Run agent sessions and write finalized trajectories to TransferQueue."""
         ...
-
-
-def _to_long_tensor(values) -> torch.Tensor:
-    return torch.tensor(list(values), dtype=torch.long)
-
-
-def _to_float_tensor(values) -> torch.Tensor:
-    return torch.tensor(list(values), dtype=torch.float32)
 
 
 def _short_failure_reason(error: BaseException) -> str:
@@ -98,35 +89,40 @@ def _list_of_tq_fields_to_tensordict(fields: list[dict[str, object]]) -> TensorD
     return td
 
 
-def _build_reward_fn(config, tokenizer):
-    # Phase A keeps reward configuration in the existing VERL path and only
-    # bridges framework trajectories to the raw custom_reward_function
-    # signature. Phase B should reuse the main reward manager path directly
-    # instead of growing a parallel agent-framework reward config surface.
-    custom_reward_fn = get_custom_reward_fn(config)
-    if custom_reward_fn is None:
-        return None
+def _trajectory_to_reward_dataproto(trajectory, sample_fields):
+    """Build a single-sample DataProto for RewardLoopWorker.compute_score.
 
-    async def reward_fn(ctx):
-        data_source = ctx.sample_fields.get("data_source")
-        reward_model = ctx.sample_fields.get("reward_model")
-        if isinstance(reward_model, dict):
-            ground_truth = reward_model.get("ground_truth")
-        elif reward_model is None:
-            ground_truth = None
-        else:
-            ground_truth = getattr(reward_model, "ground_truth", None)
-        extra_info = ctx.sample_fields.get("extra_info")
-        scores = []
-        for trajectory in ctx.trajectories:
-            response_text = tokenizer.decode(trajectory.response_ids, skip_special_tokens=True)
-            score = custom_reward_fn(data_source, response_text, ground_truth, extra_info)
-            if inspect.isawaitable(score):
-                score = await score
-            scores.append(score)
-        return scores
+    Field shape matches AgentLoopWorker._compute_score
+    (verl/experimental/agent_loop/agent_loop.py:753-772). Only fields actually
+    consumed by NaiveRewardManager.run_single / RewardLoopWorker dispatch are
+    populated; tool_extra_fields / num_turns are passed via non_tensor_batch
+    for parity.
+    """
+    import numpy as np
+    from verl.protocol import DataProto
 
-    return reward_fn
+    prompt_ids = torch.tensor(trajectory.prompt_ids, dtype=torch.long).unsqueeze(0)
+    response_ids = torch.tensor(trajectory.response_ids, dtype=torch.long).unsqueeze(0)
+    input_ids = torch.cat([prompt_ids, response_ids], dim=1)
+    attention_mask = torch.ones_like(input_ids, dtype=torch.long)
+
+    batch = TensorDict(
+        {
+            "prompts": prompt_ids,
+            "responses": response_ids,
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+        },
+        batch_size=1,
+    )
+
+    non_tensor_batch: dict[str, object] = {}
+    for key in ("raw_prompt", "data_source", "reward_model", "extra_info", "tools_kwargs", "agent_name"):
+        if key in sample_fields:
+            non_tensor_batch[key] = np.array([sample_fields[key]], dtype=object)
+    non_tensor_batch["__num_turns__"] = np.array([trajectory.num_turns])
+
+    return DataProto(batch=batch, non_tensor_batch=non_tensor_batch)
 
 
 class OpenAICompatibleAgentFramework(AgentFramework):
@@ -135,16 +131,19 @@ class OpenAICompatibleAgentFramework(AgentFramework):
     Each sample in the batch is run as an independent session: the agent
     communicates with the Gateway via standard ``/v1/chat/completions``
     requests, and the Gateway collects token-level trajectories.  After
-    finalization, ``reward_fn`` scores the session's trajectories and the
-    framework writes them to the TransferQueue schema consumed by sync training.
+    finalization, ``_score_trajectories`` dispatches the session's final
+    trajectory to a RewardLoopWorker and broadcasts the score back to all
+    trajectories in the session (matching
+    ``AgentLoopWorkerTQ._agent_loop_postprocess``); the framework then writes
+    them to the TransferQueue schema consumed by sync training.
     """
 
     def __init__(
         self,
         session_runtime: SessionRuntime,
         agent_runner,
-        reward_fn: RewardFn | None,
         *,
+        reward_loop_worker_handles=None,
         processor=None,
         replay_buffer=None,
         rollout_config=None,
@@ -153,7 +152,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
     ):
         self.session_runtime = session_runtime
         self.agent_runner = agent_runner
-        self.reward_fn = reward_fn
+        self.reward_loop_worker_handles = list(reward_loop_worker_handles) if reward_loop_worker_handles else None
         self._processor = processor
         # TODO(phase-b): once trainer constructs framework directly, these become
         # constructor-required and no transitional dual-path is needed.
@@ -168,13 +167,10 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         *,
         config,
         session_runtime,
-        tokenizer=None,
         processor=None,
         replay_buffer,
+        reward_loop_worker_handles=None,
     ) -> "OpenAICompatibleAgentFramework":
-        if tokenizer is None:
-            raise ValueError("OpenAICompatibleAgentFramework requires tokenizer for reward bridge")
-
         # TODO(phase-b): switch this to actor_rollout_ref.rollout.agent_framework.*
         af_cfg = OmegaConf.select(config, "actor_rollout_ref.rollout.custom.agent_framework", default={}) or {}
         agent_runner_fqn = af_cfg.get("agent_runner_fqn")
@@ -194,17 +190,11 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         if runner_kwargs:
             agent_runner = partial(agent_runner, **runner_kwargs)
 
-        # TODO(phase-x): when reward_loop_worker_handles is available from
-        # trainer, accept reward_fn as an entry-injected resource and skip
-        # bridge construction. Bridge remains available for simple recipes
-        # that supply reward.custom_reward_function directly.
-        reward_fn = _build_reward_fn(config, tokenizer)
-
         completion_timeout = af_cfg.get("completion_timeout_seconds")
         return cls(
             session_runtime=session_runtime,
             agent_runner=agent_runner,
-            reward_fn=reward_fn,
+            reward_loop_worker_handles=reward_loop_worker_handles,
             processor=processor,
             replay_buffer=replay_buffer,
             rollout_config=config.actor_rollout_ref.rollout,
@@ -348,9 +338,11 @@ class OpenAICompatibleAgentFramework(AgentFramework):
                     sample_index=sample_index,
                     session_index=session_index,
                 ),
-                runner_kwargs=(
-                    {"tools_kwargs": sample_fields["tools_kwargs"]} if "tools_kwargs" in sample_fields else {}
-                ),
+                runner_kwargs={
+                    key: sample_fields[key]
+                    for key in ("tools_kwargs", "agent_name")
+                    if key in sample_fields
+                },
             )
             for session_index in range(num_sessions)
         ]
@@ -369,13 +361,13 @@ class OpenAICompatibleAgentFramework(AgentFramework):
             trajectories, session_sample_fields = outcome
             if not trajectories:
                 failed_sessions += 1
-                failure_reasons.append(f"empty trajectories for uid={uid} session_id={session_index}")
+                failure_reasons.append(f"empty trajectories for uid={uid} session_index={session_index}")
                 continue
 
             success_sessions += 1
             await self._write_session_trajectories_to_tq(
                 uid=uid,
-                session_id=session_index,
+                session_index=session_index,
                 trajectories=trajectories,
                 sample_fields=session_sample_fields,
                 global_steps=global_steps,
@@ -426,41 +418,54 @@ class OpenAICompatibleAgentFramework(AgentFramework):
 
         # Score the session's trajectories immediately after finalization,
         # consistent with VERL's per-sample reward path.
-        if self.reward_fn is None:
+        if not self.reward_loop_worker_handles or not session_trajectories:
             return session_trajectories, sample_fields
 
-        normalized_scores = await self._score_trajectories(session_trajectories, sample_fields)
-        return (
-            [
-                replace(traj, reward_score=score)
-                for traj, score in zip(session_trajectories, normalized_scores, strict=True)
-            ],
-            sample_fields,
-        )
+        annotations = await self._score_trajectories(session_trajectories, sample_fields)
+        scored_trajectories = []
+        for traj, (score, extra) in zip(session_trajectories, annotations, strict=True):
+            # Spread reward_extra_info into trajectory.extra_fields with reward_ prefix
+            # so each key becomes its own TQ field (downstream consumers don't unwrap nested dicts).
+            # Prefix prevents collision with framework-owned TQ fields like "responses" / "prompts".
+            extra_with_prefix = {f"reward_{k}": v for k, v in extra.items()}
+            scored_trajectories.append(
+                replace(
+                    traj,
+                    reward_score=score,
+                    extra_fields={**traj.extra_fields, **extra_with_prefix},
+                )
+            )
+        return scored_trajectories, sample_fields
 
     async def _score_trajectories(
         self,
         session_trajectories: list[Trajectory],
         sample_fields: dict[str, object],
-    ) -> list[float]:
-        assert self.reward_fn is not None
-        ctx = SessionRewardContext(trajectories=session_trajectories, sample_fields=sample_fields)
-        scores = self.reward_fn(ctx)
-        if inspect.isawaitable(scores):
-            scores = await scores
-        if len(scores) != len(session_trajectories):
+    ) -> list[tuple[float, dict[str, object]]]:
+        """Score the session's final trajectory and broadcast (score, extra_info) to all.
+
+        Mirrors AgentLoopWorkerTQ._agent_loop_postprocess
+        (verl/trainer/main_ppo_sync.py:353-396): only the final trajectory (the
+        session's last interaction segment) is dispatched to RewardLoopWorker;
+        its score + reward_extra_info are then broadcast to every trajectory in
+        the session. Subclasses can override this method to implement custom
+        session-to-trajectory scoring policies.
+        """
+        assert self.reward_loop_worker_handles is not None
+        assert session_trajectories, "expected non-empty session_trajectories"
+
+        final_trajectory = session_trajectories[-1]
+        data = _trajectory_to_reward_dataproto(final_trajectory, sample_fields)
+        worker = random.choice(self.reward_loop_worker_handles)
+        result = await worker.compute_score.remote(data)
+
+        if "reward_score" not in result:
             raise ValueError(
-                f"reward_fn returned {len(scores)} scores for {len(session_trajectories)} trajectories"
+                f"RewardLoopWorker result missing 'reward_score' key for uid={sample_fields.get('uid')}"
             )
-        normalized_scores: list[float] = []
-        for _, score in zip(session_trajectories, scores, strict=True):
-            if score is None:
-                raise ValueError(
-                    "reward_fn must return a score for every trajectory; "
-                    f"got None for uid={sample_fields.get('uid')}"
-                )
-            normalized_scores.append(float(score))
-        return normalized_scores
+        score = float(result["reward_score"])
+        extra = dict(result.get("reward_extra_info") or {})
+        return [(score, extra)] * len(session_trajectories)
 
     def _extract_sample_fields(self, *, prompts: TensorDict, sample_index: int) -> dict[str, object]:
         sample_fields = {}
@@ -478,7 +483,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         self,
         *,
         uid: str,
-        session_id: int,
+        session_index: int,
         trajectories: list[Trajectory],
         sample_fields: dict[str, object],
         global_steps: int,
@@ -491,10 +496,10 @@ class OpenAICompatibleAgentFramework(AgentFramework):
             field, tag = self._trajectory_to_tq_field_and_tag(
                 trajectory=trajectory,
                 sample_fields=sample_fields,
-                session_id=session_id,
+                session_index=session_index,
                 global_steps=global_steps,
             )
-            keys.append(f"{uid}_{session_id}_{index}")
+            keys.append(f"{uid}_{session_index}_{index}")
             fields.append(field)
             tags.append(tag)
 
@@ -510,12 +515,12 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         *,
         trajectory: Trajectory,
         sample_fields: dict[str, object],
-        session_id: int,
+        session_index: int,
         global_steps: int,
     ) -> tuple[dict[str, object], dict[str, object]]:
-        prompts = _to_long_tensor(trajectory.prompt_ids)
-        responses = _to_long_tensor(trajectory.response_ids)
-        response_mask = _to_long_tensor(trajectory.response_mask)
+        prompts = torch.tensor(trajectory.prompt_ids, dtype=torch.long)
+        responses = torch.tensor(trajectory.response_ids, dtype=torch.long)
+        response_mask = torch.tensor(trajectory.response_mask, dtype=torch.long)
         input_ids = torch.cat([prompts, responses], dim=0)
         attention_mask = torch.ones_like(input_ids, dtype=torch.long)
         multi_modal_inputs = compute_multi_modal_inputs(
@@ -544,7 +549,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
             "multi_modal_inputs": multi_modal_inputs,
         }
         if trajectory.response_logprobs is not None:
-            field["rollout_log_probs"] = _to_float_tensor(trajectory.response_logprobs)
+            field["rollout_log_probs"] = torch.tensor(trajectory.response_logprobs, dtype=torch.float32)
         if trajectory.routed_experts is not None:
             field["routed_experts"] = (
                 torch.from_numpy(trajectory.routed_experts.copy())
@@ -562,7 +567,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         for key in ("uid", "raw_prompt", "data_source", "reward_model", "extra_info", "tools_kwargs", "agent_name"):
             if key in sample_fields:
                 field[key] = sample_fields[key]
-        field["session_id"] = session_id
+        field["session_id"] = session_index
         field["global_steps"] = global_steps
         field["num_turns"] = torch.tensor(int(trajectory.num_turns), dtype=torch.long)
 
