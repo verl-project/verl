@@ -16,6 +16,14 @@
 #       pip install -U git+https://github.com/ISEEKYAN/mbridge.git
 #   - Megatron-LM==0.16.0
 #
+# Requirements on Ascend:
+#   - 8 NPUs (2*64GB each, e.g. 1x8 A3)
+#   - Additional packages on base image(verl-8.5.2-a3-ubuntu22.04-py3.11-qwen3-5):
+#       pip install viztracer flash-linear-attention nvidia-modelopt nvidia-ml-py nvidia-resiliency-ext megatron-energon
+#   - Megatron-LM==0.16.1
+#   - MindSpeed==0.16.0
+#   - Megatron-Bridge==de93536e
+#
 # Qwen3.5 architecture notes:
 #   Qwen3.5 uses Gated Delta Net (GDN) linear attention which currently does
 #   NOT support packed sequences (THD format) in Megatron-LM. Therefore:
@@ -39,12 +47,32 @@ set -xeuo pipefail
 ########################### Quick Config ###########################
 
 # ---- user-adjustable ----
-TP=${TP:-2}
-PP=${PP:-1}
-CP=${CP:-1}
-EP=${EP:-8}
-ETP=${ETP:-1}
-GEN_TP=${GEN_TP:-8}
+# DEVICE is auto-detected by probing torch_npu; override only for special cases.
+DEVICE=${DEVICE:-$(python3 -c 'import torch_npu' 2>/dev/null && echo npu || echo gpu)}
+case "${DEVICE}" in
+    gpu)
+        TP=${TP:-2}
+        PP=${PP:-1}
+        CP=${CP:-1}
+        EP=${EP:-8}
+        ETP=${ETP:-1}
+        GEN_TP=${GEN_TP:-8}
+        n_devices_per_node=${NDEVICES_PER_NODE:-8}
+        ;;
+    npu)
+        TP=${TP:-2}
+        PP=${PP:-2}
+        CP=${CP:-1}
+        EP=${EP:-8}
+        ETP=${ETP:-1}
+        GEN_TP=${GEN_TP:-8}
+        n_devices_per_node=${NDEVICES_PER_NODE:-16}
+        ;;
+    *)
+        echo "Unsupported DEVICE=${DEVICE}. Expected 'gpu' or 'npu'." >&2
+        exit 1
+        ;;
+esac
 
 ALL_OFFLOAD=${ALL_OFFLOAD:-True}
 
@@ -105,6 +133,8 @@ ACTOR=(
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1
     +actor_rollout_ref.actor.megatron.override_transformer_config.moe_aux_loss_coeff=0.01
     +actor_rollout_ref.actor.megatron.override_transformer_config.moe_z_loss_coeff=0.001
+    +actor_rollout_ref.actor.megatron.override_transformer_config.moe_permute_fusion=True
+    +actor_rollout_ref.actor.megatron.override_transformer_config.moe_grouped_gemm=True
     +actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_offload_fraction=1
     +actor_rollout_ref.actor.optim.override_optimizer_config.overlap_cpu_optimizer_d2h_h2d=True
     +actor_rollout_ref.actor.optim.override_optimizer_config.use_precision_aware_optimizer=True
@@ -120,6 +150,7 @@ ROLLOUT=(
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=False
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=4096
+    actor_rollout_ref.rollout.calculate_log_probs=True
 )
 
 REF=(
@@ -144,7 +175,7 @@ TRAINER=(
     trainer.logger='["console","wandb"]'
     trainer.project_name=${project_name}
     trainer.experiment_name=${exp_name}
-    trainer.n_gpus_per_node=8
+    trainer.n_gpus_per_node=${n_devices_per_node}
     trainer.nnodes=1
     trainer.save_freq=20
     trainer.val_before_train=False
@@ -155,6 +186,25 @@ TRAINER=(
 EXTRA=(
     model_engine=megatron
 )
+
+case "${DEVICE}" in
+    gpu)
+        ;;
+    npu)
+        export CPU_AFFINITY_CONF=1
+        ACTOR+=(
+            actor_rollout_ref.actor.megatron.vanilla_mbridge=False
+            actor_rollout_ref.actor.checkpoint.strict=False
+            +actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn=True
+            +actor_rollout_ref.actor.megatron.override_transformer_config.moe_token_dispatcher_type=alltoall
+            +actor_rollout_ref.actor.megatron.override_transformer_config.use_naive_l2norm=True
+        )
+        ;;
+    *)
+        echo "Unsupported DEVICE=${DEVICE}. Expected 'gpu' or 'npu'." >&2
+        exit 1
+        ;;
+esac
 
 ########################### Launch ###########################
 
