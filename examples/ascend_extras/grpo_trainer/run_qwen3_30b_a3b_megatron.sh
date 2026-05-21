@@ -126,7 +126,7 @@ ACTOR_CONFIG=(
     # Model Weights Management
     actor_rollout_ref.actor.megatron.dist_checkpointing_path=${MCORE_MODEL_PATH}
     actor_rollout_ref.actor.megatron.use_dist_checkpointing=True
-    actor_rollout_ref.actor.megatron.use_mbridge=False
+    actor_rollout_ref.actor.megatron.use_mbridge=True
     # Transformer Architecture Optimizations
     +actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn=True
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform
@@ -152,7 +152,7 @@ REF_CONFIG=(
     # Model Weights Management
     actor_rollout_ref.ref.megatron.dist_checkpointing_path=${MCORE_MODEL_PATH}
     actor_rollout_ref.ref.megatron.use_dist_checkpointing=True
-    actor_rollout_ref.ref.megatron.use_mbridge=False
+    actor_rollout_ref.ref.megatron.use_mbridge=True
 )
 
 ROLLOUT_CONFIG=(

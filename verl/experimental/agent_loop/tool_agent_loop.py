@@ -217,6 +217,11 @@ class ToolAgentLoop(AgentLoopBase):
         self, agent_data: AgentData, sampling_params: dict[str, Any], ignore_termination: bool = False
     ) -> AgentState:
         """Handle the generating state: generate model response and check for tool calls."""
+        # Inject tool parser stop tokens so generation halts after each tool call
+        if self.tool_parser.stop_token_ids:
+            stop_token_ids = list(set((sampling_params.get("stop_token_ids") or []) + self.tool_parser.stop_token_ids))
+            sampling_params = {**sampling_params, "stop_token_ids": stop_token_ids}
+
         with simple_timer("generate_sequences", agent_data.metrics):
             output: TokenOutput = await self.server_manager.generate(
                 request_id=agent_data.request_id,
@@ -339,6 +344,22 @@ class ToolAgentLoop(AgentLoopBase):
         if self.tool_parser_name == "gpt-oss":
             logger.info("manually format tool responses for gpt-oss")
             tool_response_text = build_gpt_oss_tool_response_text(add_messages, tool_call_names)
+            response_ids = await self.loop.run_in_executor(
+                None, lambda: self.tokenizer.encode(tool_response_text, add_special_tokens=False)
+            )
+        elif self.tool_parser_name == "gemma4":
+            # Gemma4's chat template drops tool responses when passed without the preceding
+            # assistant tool_call message. Manually format the response tokens.
+            # Format: <|tool_response>response:func_name{value:<|"|>content<|"|>}<tool_response|>
+            parts = []
+            for msg, name in zip(add_messages, tool_call_names, strict=True):
+                content = msg.get("content", "")
+                if isinstance(content, list):
+                    content = "".join([item.get("text", "") for item in content if item.get("type") == "text"])
+                if isinstance(content, list):
+                    content = "".join([item.get("text", "") for item in content if item.get("type") == "text"])
+                parts.append(f'<|tool_response>response:{name}{{value:<|"|>{content}<|"|>}}<tool_response|>')
+            tool_response_text = "".join(parts)
             response_ids = await self.loop.run_in_executor(
                 None, lambda: self.tokenizer.encode(tool_response_text, add_special_tokens=False)
             )

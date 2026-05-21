@@ -47,6 +47,18 @@ class ToolParser(ABC):
     def __init__(self, tokenizer) -> None:
         self.tokenizer = tokenizer
 
+    @property
+    def stop_token_ids(self) -> list[int]:
+        """Token IDs that should stop generation so the parser can run.
+
+        Models like Qwen3 naturally emit EOS after a tool call, so no extra stop
+        tokens are needed. Models like Gemma4 emit <tool_call|> but continue
+        generating without EOS — they need the closing token as an explicit stop.
+
+        Returns empty list by default (rely on model's EOS behavior).
+        """
+        return []
+
     @abstractmethod
     async def extract_tool_calls(
         self, responses_ids: list[int], tools: list[OpenAIFunctionToolSchema] = None
@@ -339,3 +351,80 @@ class Qwen3XMLToolParser(ToolParser):
         except Exception as e:
             logger.exception(f"Error in extracting tool call from response: {e}")
             return text, []
+
+
+@ToolParser.register("gemma4")
+class Gemma4ToolParser(ToolParser):
+    """Tool parser for Google Gemma 4 models.
+
+    Format: <|tool_call>call:func_name{key:<|"|>str_val<|"|>,key2:num_val}<tool_call|>
+
+    Reference: https://ai.google.dev/gemma/docs/capabilities/text/function-calling-gemma4
+    """
+
+    def __init__(self, tokenizer) -> None:
+        super().__init__(tokenizer)
+        self.tool_call_start_token = "<|tool_call>"
+        self.tool_call_end_token = "<tool_call|>"
+        self._stop_token_id = tokenizer.convert_tokens_to_ids("<tool_call|>")
+        self.tool_call_regex = regex.compile(r"<\|tool_call>call:(\w+)\{(.*?)\}<tool_call\|>", regex.DOTALL)
+        self.arg_regex = regex.compile(r'(\w+):(?:<\|"\|>(.*?)<\|"\|>|([^,}]*))')
+
+    @property
+    def stop_token_ids(self) -> list[int]:
+        """Gemma4 doesn't emit EOS after <tool_call|> — it continues generating.
+        Stop on <tool_call|> so the agent loop can execute the tool between calls."""
+        return [self._stop_token_id]
+
+    def _parse_arguments(self, args_str: str) -> dict:
+        result = {}
+        for match in self.arg_regex.finditer(args_str):
+            key = match.group(1)
+            str_val, bare_val = match.group(2), match.group(3)
+            if str_val is not None:
+                result[key] = str_val
+            elif bare_val is not None:
+                bare_val = bare_val.strip()
+                if bare_val.lower() == "true":
+                    result[key] = True
+                elif bare_val.lower() == "false":
+                    result[key] = False
+                elif bare_val.lower() == "null":
+                    result[key] = None
+                else:
+                    try:
+                        result[key] = int(bare_val)
+                    except ValueError:
+                        try:
+                            result[key] = float(bare_val)
+                        except ValueError:
+                            result[key] = bare_val
+        return result
+
+    @rollout_trace_op
+    async def extract_tool_calls(
+        self, responses_ids: list[int], tools: list[OpenAIFunctionToolSchema] = None
+    ) -> tuple[str, list[FunctionCall]]:
+        loop = get_event_loop()
+        text = await loop.run_in_executor(None, lambda: self.tokenizer.decode(responses_ids, skip_special_tokens=False))
+        if self.tokenizer.pad_token:
+            text = text.replace(self.tokenizer.pad_token, "")
+
+        if self.tool_call_start_token not in text:
+            return text, []
+
+        matches = self.tool_call_regex.findall(text)
+        if not matches:
+            return text, []
+
+        function_calls = []
+        for name, args_str in matches:
+            try:
+                arguments = self._parse_arguments(args_str)
+                function_calls.append(FunctionCall(name=name, arguments=json.dumps(arguments, ensure_ascii=False)))
+            except Exception as e:
+                logger.error(f"Failed to parse Gemma4 tool call: {e}")
+
+        content_idx = text.find(self.tool_call_start_token)
+        content = text[:content_idx] if content_idx >= 0 else text
+        return content, function_calls
