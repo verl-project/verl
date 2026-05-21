@@ -162,4 +162,8 @@ Usage of Trackio
 2. View Log
 ~~~~~~~~~~~
 
-After executing training, open the Trackio dashboard and select the configured project and experiment. Rollout trace operations are logged as Trackio traces with ``step``, ``sample_index``, ``rollout_n``, ``validate``, and ``experiment_name`` metadata. Validation generations are also logged as Trackio traces when ``trackio`` is enabled in ``trainer.logger``.
+After executing training, open the Trackio dashboard and select the configured project and experiment. Rollout trace operations are logged as Trackio traces with ``step``, ``sample_index``, ``rollout_n``, ``validate``, and ``experiment_name`` metadata. Validation generations are also logged as Trackio traces when ``trackio`` is enabled in ``trainer.logger``. Click on any Trace to expand it:
+
+.. image:: https://huggingface.co/buckets/trackio/doc-images/resolve/traces-verl.png
+
+
