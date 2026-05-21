@@ -43,6 +43,20 @@ def mock_weave_client():
         yield mock_client
 
 
+@pytest.fixture
+def mock_trackio_client():
+    """Mocks the trackio module, yielding the mock module."""
+    mock_trackio = MagicMock()
+    mock_trackio.Trace.side_effect = lambda messages, metadata=None: {
+        "_type": "trackio.trace",
+        "messages": messages,
+        "metadata": metadata or {},
+    }
+
+    with patch.dict(sys.modules, {"trackio": mock_trackio}):
+        yield mock_trackio
+
+
 class TracedClass:
     @rollout_trace_op
     # @weave.op
@@ -126,6 +140,28 @@ async def test_rollout_trace_with_dummy_backend(mock_weave_client):
     await instance.my_method("test_a")
 
     mock_weave_client.create_call.assert_not_called()
+
+
+async def test_rollout_trace_with_trackio_backend(mock_trackio_client):
+    """Tests that the trackio backend logs a Trackio Trace."""
+    RolloutTraceConfig.init(project_name="my-project", experiment_name="my-experiment", backend="trackio")
+    instance = TracedClass()
+
+    with rollout_trace_attr(step=1, sample_index=2, rollout_n=3):
+        result = await instance.my_method("test_a", b="test_b")
+
+    assert result == "result: test_a, test_b"
+    mock_trackio_client.init.assert_called_once_with(
+        project="my-project", name="my-experiment", config={"framework": "verl"}
+    )
+    mock_trackio_client.Trace.assert_called_once()
+    trace_kwargs = mock_trackio_client.Trace.call_args.kwargs
+    assert trace_kwargs["messages"][0]["content"] == "verl rollout trace operation: TracedClass.my_method"
+    assert trace_kwargs["metadata"]["step"] == 1
+    assert trace_kwargs["metadata"]["sample_index"] == 2
+    mock_trackio_client.log.assert_called_once()
+    log_kwargs = mock_trackio_client.log.call_args.kwargs
+    assert log_kwargs["step"] == 1
 
 
 async def test_trace_disabled_with_trace_false(mock_weave_client):

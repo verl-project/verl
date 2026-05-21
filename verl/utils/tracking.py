@@ -392,6 +392,8 @@ class ValidationGenerationsLogger:
             self.log_generations_to_swanlab(samples, step)
         if "mlflow" in loggers:
             self.log_generations_to_mlflow(samples, step)
+        if "trackio" in loggers:
+            self.log_generations_to_trackio(samples, step)
 
         if "clearml" in loggers:
             self.log_generations_to_clearml(samples, step)
@@ -475,6 +477,34 @@ class ValidationGenerationsLogger:
                 mlflow.log_artifact(validation_gen_step_file)
         except Exception as e:
             print(f"WARNING: save validation generation file to mlflow failed with error {e}")
+
+    def log_generations_to_trackio(self, samples, step):
+        """Log validation generations to trackio as traces."""
+        import trackio
+
+        traces = []
+        for sample_index, sample in enumerate(samples):
+            if len(sample) >= 3:
+                input_text, output_text, score = sample[0], sample[1], sample[2]
+            else:
+                input_text, output_text, score = sample, "", None
+
+            traces.append(
+                trackio.Trace(
+                    messages=[
+                        {"role": "user", "content": str(input_text)},
+                        {"role": "assistant", "content": str(output_text)},
+                    ],
+                    metadata={
+                        "source": "validation_generations",
+                        "sample_index": sample_index,
+                        "score": score,
+                    },
+                )
+            )
+
+        if traces:
+            trackio.log({"val/generations": traces}, step=step)
 
     def log_generations_to_clearml(self, samples, step):
         """Log validation generation to clearml as table"""

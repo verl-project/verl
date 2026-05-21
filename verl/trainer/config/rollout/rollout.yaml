@@ -303,7 +303,7 @@ trace:
   # Experiment name for run identification in tracking tools
   experiment_name: ${oc.select:trainer.experiment_name,null}
 
-  # trace backend, support mlflow, weave
+  # trace backend, support mlflow, weave, trackio
   backend: null
 
   # whether translate token id to text in output
