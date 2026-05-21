@@ -106,25 +106,6 @@ Weave can select multiple trace items and then compare the differences among the
 
 .. image:: https://github.com/eric-haibin-lin/verl-community/blob/main/docs/weave_trace_compare.png?raw=true
 
-Usage of Trackio
-----------------
-
-1. Basic Configuration
-~~~~~~~~~~~~~~~~~~~~~~
-
-1. Configuration Parameters
-
-   1. ``actor_rollout_ref.rollout.trace.backend=trackio``
-   2. ``trainer.logger=['console', 'trackio']``. This item is optional for rollout traces, but recommended so metrics, validation generations, and traces are available in one Trackio run.
-   3. ``trainer.project_name=$project_name``
-   4. ``trainer.experiment_name=$experiment_name``
-
-2. View Log
-~~~~~~~~~~~
-
-After executing training, open the Trackio dashboard and select the configured project and experiment. Rollout trace operations are logged as Trackio traces with ``step``, ``sample_index``, ``rollout_n``, ``validate``, and ``experiment_name`` metadata. Validation generations are also logged as Trackio traces when ``trackio`` is enabled in ``trainer.logger``.
-
-
 Usage of mlflow
 ---------------
 
@@ -163,3 +144,22 @@ Note:
 
 1. mlflow does not support comparing multiple traces
 2. rollout_trace can not associate the mlflow trace with the run, so the trace content cannot be seen in the mlflow run logs.
+
+
+Usage of Trackio
+----------------
+
+1. Basic Configuration
+~~~~~~~~~~~~~~~~~~~~~~
+
+1. Configuration Parameters
+
+   1. ``actor_rollout_ref.rollout.trace.backend=trackio``
+   2. ``trainer.logger=['console', 'trackio']``. This item is optional for rollout traces, but recommended so metrics, validation generations, and traces are available in one Trackio run.
+   3. ``trainer.project_name=$project_name``
+   4. ``trainer.experiment_name=$experiment_name``
+
+2. View Log
+~~~~~~~~~~~
+
+After executing training, open the Trackio dashboard and select the configured project and experiment. Rollout trace operations are logged as Trackio traces with ``step``, ``sample_index``, ``rollout_n``, ``validate``, and ``experiment_name`` metadata. Validation generations are also logged as Trackio traces when ``trackio`` is enabled in ``trainer.logger``.
