@@ -108,6 +108,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         # ==================== SeparateRayPPOTrainer config ====================
         self.global_steps = 0
         self.epoch = 0
+        self._init_dump_executor()
         self.max_steps_duration = 0
         self.progress_bar = None
         self.is_last_step = False
