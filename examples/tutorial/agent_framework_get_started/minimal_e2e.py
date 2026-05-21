@@ -207,9 +207,7 @@ async def run_example() -> dict[str, object]:
             "finished_tags": fake_tq.puts,
             "uid_values": tu.get(fields, "uid"),
             # Tutorial intentionally omits reward computation
-            # (reward_loop_worker_handles=None); rm_scores is therefore absent
-            # from the TQ field dict and the trainer skips reward assignment.
-            "reward_scores": None,
+            # (reward_loop_worker_handles=None); rm_scores is zero-filled.
             "has_rm_scores": "rm_scores" in fields.keys(),
             "rollout_calls": rollout_calls,
         }

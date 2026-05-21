@@ -34,11 +34,20 @@ class _FakeReplayBuffer:
 
 
 class _FakeSessionRuntime:
-    def __init__(self, finalized_by_session_id: dict[str, list[Trajectory]]):
-        self.finalized_by_session_id = finalized_by_session_id
+    """Fake runtime that matches session IDs by prefix (``session-{sample}-{session}``)
+    to support the real uuid-suffixed IDs produced by the framework."""
+
+    def __init__(self, finalized_by_session_prefix: dict[str, list[Trajectory]]):
+        self._finalized_by_prefix = finalized_by_session_prefix
         self.created_sessions = []
         self.finalized_sessions = []
         self.aborted_sessions = []
+
+    def _lookup(self, session_id: str) -> list[Trajectory]:
+        for prefix, trajectories in self._finalized_by_prefix.items():
+            if session_id.startswith(prefix):
+                return trajectories
+        raise KeyError(f"No prefix match for session_id={session_id}")
 
     async def create_session(self, session_id: str, **kwargs):
         self.created_sessions.append(session_id)
@@ -46,7 +55,7 @@ class _FakeSessionRuntime:
 
     async def finalize_session(self, session_id: str):
         self.finalized_sessions.append(session_id)
-        return self.finalized_by_session_id[session_id]
+        return self._lookup(session_id)
 
     async def abort_session(self, session_id: str) -> None:
         self.aborted_sessions.append(session_id)
@@ -147,7 +156,7 @@ async def test_generate_sequences_writes_tq_schema_for_each_session(monkeypatch)
         replay_buffer=replay_buffer,
         rollout_config={"n": 2, "val_kwargs": {"n": 2}},
     )
-    framework._build_session_id = lambda prompts, sample_index, session_index=0: f"session-{sample_index}-{session_index}"
+
 
     await framework.generate_sequences(_build_prompts(global_steps=7))
 
@@ -217,7 +226,7 @@ async def test_generate_sequences_keeps_successful_sessions_when_one_session_fai
     )
 
     async def agent_runner(*, raw_prompt, session, sample_index, tools_kwargs, **kwargs):
-        if session.session_id == "session-0-1":
+        if session.session_id.startswith("session-0-1-"):
             raise RuntimeError("gateway failed once")
 
     _install_fake_score(monkeypatch, default_score=1.0)
@@ -229,7 +238,7 @@ async def test_generate_sequences_keeps_successful_sessions_when_one_session_fai
         replay_buffer=replay_buffer,
         rollout_config={"n": 2, "val_kwargs": {"n": 2}},
     )
-    framework._build_session_id = lambda prompts, sample_index, session_index=0: f"session-{sample_index}-{session_index}"
+
 
     await framework.generate_sequences(_build_prompts(count=1, global_steps=8))
 
@@ -238,7 +247,8 @@ async def test_generate_sequences_keeps_successful_sessions_when_one_session_fai
     ]
     assert fake_tq.batch_puts[0]["keys"] == ["uid-0_0_0"]
     assert fake_tq.puts == [{"key": "uid-0", "partition_id": "train", "tag": {"status": "finished"}}]
-    assert runtime.aborted_sessions == ["session-0-1"]
+    assert len(runtime.aborted_sessions) == 1
+    assert runtime.aborted_sessions[0].startswith("session-0-1-")
 
 
 @pytest.mark.asyncio
@@ -263,7 +273,7 @@ async def test_generate_sequences_marks_prompt_failure_when_all_sessions_fail(mo
         replay_buffer=replay_buffer,
         rollout_config={"n": 1, "val_kwargs": {"n": 2}},
     )
-    framework._build_session_id = lambda prompts, sample_index, session_index=0: f"session-{sample_index}-{session_index}"
+
 
     with pytest.raises(RuntimeError, match="All rollouts failed at global_steps=9"):
         await framework.generate_sequences(_build_prompts(count=1, global_steps=9, validate=True))
@@ -294,7 +304,7 @@ async def test_generate_sequences_zero_fills_rm_scores_when_no_reward_handles(mo
         replay_buffer=replay_buffer,
         rollout_config={"n": 1, "val_kwargs": {"n": 1}},
     )
-    framework._build_session_id = lambda prompts, sample_index, session_index=0: f"session-{sample_index}-{session_index}"
+
 
     await framework.generate_sequences(_build_prompts(count=1, global_steps=10))
 
@@ -325,7 +335,7 @@ async def test_generate_sequences_keeps_other_prompts_when_prompt_task_raises(mo
         rollout_config={"n": 1, "val_kwargs": {"n": 1}},
     )
 
-    async def fake_run_prompt_to_replay_buffer(*, sample_index, **kwargs):
+    async def fake_run_prompt_sessions_to_tq(*, sample_index, **kwargs):
         if sample_index == 0:
             raise RuntimeError("prompt 0 exploded")
         return {
@@ -336,7 +346,7 @@ async def test_generate_sequences_keeps_other_prompts_when_prompt_task_raises(mo
             "failure_reasons": [],
         }
 
-    monkeypatch.setattr(framework, "_run_prompt_to_replay_buffer", fake_run_prompt_to_replay_buffer)
+    monkeypatch.setattr(framework, "_run_prompt_sessions_to_tq", fake_run_prompt_sessions_to_tq)
 
     caplog.set_level("INFO")
     await framework.generate_sequences(_build_prompts(count=2, global_steps=11))
@@ -374,7 +384,7 @@ async def test_generate_sequences_zero_fills_rollout_log_probs_when_missing(monk
         replay_buffer=replay_buffer,
         rollout_config={"n": 1, "val_kwargs": {"n": 1}},
     )
-    framework._build_session_id = lambda prompts, sample_index, session_index=0: f"session-{sample_index}-{session_index}"
+
 
     await framework.generate_sequences(_build_prompts(count=1, global_steps=10))
 
@@ -417,7 +427,7 @@ async def test_max_concurrent_sessions_caps_in_flight_sessions(monkeypatch):
         rollout_config={"n": 1, "val_kwargs": {"n": 1}},
         max_concurrent_sessions=2,
     )
-    framework._build_session_id = lambda prompts, sample_index, session_index=0: f"session-{sample_index}-{session_index}"
+
 
     await framework.generate_sequences(_build_prompts(count=4, global_steps=10))
 

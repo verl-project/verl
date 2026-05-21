@@ -219,7 +219,11 @@ class OpenAICompatibleAgentFramework(AgentFramework):
             raise ValueError("OpenAICompatibleAgentFramework requires prompts['global_steps']")
 
         partition_id = "val" if "validate" in prompts.keys() else "train"
-        num_sessions = self._num_sessions_for_partition(partition_id)
+        if partition_id == "val":
+            val_kwargs = self._rollout_config.get("val_kwargs", {})
+            num_sessions = int(val_kwargs.get("n"))
+        else:
+            num_sessions = int(self._rollout_config.get("n"))
 
         uids = tu.get(prompts, "uid")
         if uids is None:
@@ -230,7 +234,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
             {str(uid): {"global_steps": global_steps, "status": "running"} for uid in uid_values},
         )
 
-        stats = await self._generate_to_tq(
+        stats = await self._run_batch_to_tq(
             prompts,
             global_steps=global_steps,
             partition_id=partition_id,
@@ -253,13 +257,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
             )
         return None
 
-    def _num_sessions_for_partition(self, partition_id: str) -> int:
-        if partition_id == "val":
-            val_kwargs = self._rollout_config.get("val_kwargs", {})
-            return int(val_kwargs.get("n"))
-        return int(self._rollout_config.get("n"))
-
-    async def _generate_to_tq(
+    async def _run_batch_to_tq(
         self,
         prompts: TensorDict,
         *,
@@ -267,13 +265,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         partition_id: str,
         num_sessions: int = 1,
     ) -> dict:
-        """Run agent sessions and write finalized trajectories to TransferQueue.
-
-        This is the TransferQueue-oriented sibling of ``generate_sequences``.
-        It preserves the same session lifecycle, but writes each finalized
-        trajectory with the key/tag/field schema consumed by
-        ``verl.trainer.main_ppo_sync`` instead of returning a batch.
-        """
+        """Run all prompts in a batch and aggregate prompt/session stats."""
         assert len(prompts) > 0, "generate_sequences requires a non-empty batch"
         if num_sessions <= 0:
             raise ValueError(f"num_sessions must be positive, got {num_sessions}")
@@ -282,8 +274,10 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         if raw_prompts is None:
             raise ValueError("OpenAICompatibleAgentFramework requires prompts['raw_prompt']")
 
+        # Batch layer: each sample/prompt owns its own group of rollout.n sessions.
+        # Prompt tasks are isolated so one prompt failure does not drop the whole batch.
         tasks = [
-            self._run_prompt_to_replay_buffer(
+            self._run_prompt_sessions_to_tq(
                 prompts=prompts,
                 raw_prompt=raw_prompts[sample_index],
                 sample_index=sample_index,
@@ -317,7 +311,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
             failure_reasons.extend(outcome["failure_reasons"])
         return stats
 
-    async def _run_prompt_to_replay_buffer(
+    async def _run_prompt_sessions_to_tq(
         self,
         *,
         prompts: TensorDict,
@@ -333,16 +327,14 @@ class OpenAICompatibleAgentFramework(AgentFramework):
             raise ValueError("OpenAICompatibleAgentFramework requires prompts['uid'] for TransferQueue output")
         uid = str(uid)
 
+        # Prompt layer: rollout.n sessions race independently for the same uid.
+        # Successful sessions are written to TQ; failed sessions only affect this uid's stats.
         tasks = [
-            self._run_session(
+            self._run_session_with_concurrency_limit(
                 prompts=prompts,
                 raw_prompt=raw_prompt,
                 sample_index=sample_index,
-                session_id=self._build_session_id(
-                    prompts=prompts,
-                    sample_index=sample_index,
-                    session_index=session_index,
-                ),
+                session_id=f"session-{sample_index}-{session_index}-{uuid4().hex}",
                 runner_kwargs={
                     key: sample_fields[key]
                     for key in ("tools_kwargs", "agent_name")
@@ -395,7 +387,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
             "failure_reasons": failure_reasons,
         }
 
-    async def _run_session(
+    async def _run_session_with_concurrency_limit(
         self,
         *,
         prompts: TensorDict,
@@ -405,7 +397,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         runner_kwargs: dict[str, object] | None = None,
     ) -> tuple[list[Trajectory], dict[str, object]]:
         if self._max_concurrent_sessions <= 0:
-            return await self._run_session_inner(
+            return await self._run_session(
                 prompts=prompts,
                 raw_prompt=raw_prompt,
                 sample_index=sample_index,
@@ -414,13 +406,13 @@ class OpenAICompatibleAgentFramework(AgentFramework):
             )
         # Lazy-init Semaphore on first use and rebind if the running loop
         # changed: asyncio.Semaphore binds to the loop at construction, but
-        # Ray actors may run _run_session on a different loop than __init__.
+        # Ray actors may run sessions on a different loop than __init__.
         loop = asyncio.get_running_loop()
         if self._semaphore is None or self._semaphore_loop is not loop:
             self._semaphore = asyncio.Semaphore(self._max_concurrent_sessions)
             self._semaphore_loop = loop
         async with self._semaphore:
-            return await self._run_session_inner(
+            return await self._run_session(
                 prompts=prompts,
                 raw_prompt=raw_prompt,
                 sample_index=sample_index,
@@ -428,7 +420,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
                 runner_kwargs=runner_kwargs,
             )
 
-    async def _run_session_inner(
+    async def _run_session(
         self,
         *,
         prompts: TensorDict,
@@ -437,7 +429,8 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         session_id: str | None = None,
         runner_kwargs: dict[str, object] | None = None,
     ) -> tuple[list[Trajectory], dict[str, object]]:
-        session_id = session_id or self._build_session_id(prompts=prompts, sample_index=sample_index)
+        """Run one gateway session lifecycle and return finalized trajectories."""
+        session_id = session_id or f"session-{sample_index}-0-{uuid4().hex}"
         sample_fields = self._extract_sample_fields(prompts=prompts, sample_index=sample_index)
         session = await self.session_runtime.create_session(session_id)
         try:
@@ -462,15 +455,11 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         annotations = await self._score_trajectories(session_trajectories, sample_fields)
         scored_trajectories = []
         for traj, (score, extra) in zip(session_trajectories, annotations, strict=True):
-            # Spread reward_extra_info into trajectory.extra_fields with reward_ prefix
-            # so each key becomes its own TQ field (downstream consumers don't unwrap nested dicts).
-            # Prefix prevents collision with framework-owned TQ fields like "responses" / "prompts".
-            extra_with_prefix = {f"reward_{k}": v for k, v in extra.items()}
             scored_trajectories.append(
                 replace(
                     traj,
                     reward_score=score,
-                    extra_fields={**traj.extra_fields, **extra_with_prefix},
+                    extra_fields={**traj.extra_fields, "reward_extra_info": extra},
                 )
             )
         return scored_trajectories, sample_fields
@@ -621,5 +610,3 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         }
         return field, tag
 
-    def _build_session_id(self, prompts: TensorDict, sample_index: int, session_index: int = 0) -> str:
-        return f"session-{sample_index}-{session_index}-{uuid4().hex}"
