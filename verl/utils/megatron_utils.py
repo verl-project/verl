@@ -1550,6 +1550,7 @@ def check_mtp_config(model_config: HFModelConfig, engine_config: McoreEngineConf
         return
     elif not enable_mtp and has_mtp:
         _set_mtp_num_layers(hf_config, 0)
+        engine_config.override_transformer_config["mtp_num_layers"] = 0
     elif enable_mtp and not has_mtp:
         raise ValueError("enable mtp while model has no mtp layer, please use a model with mtp layer")
     elif enable_mtp and has_mtp:

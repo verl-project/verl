@@ -282,10 +282,6 @@ class vLLMHttpServer:
             # vLLM >= 0.13.0 supports profiler config via CLI args; env vars still work but will be deprecated
             args.update(profiler_args)
 
-        # allow deprecated quantization for vLLM >= 0.18.0
-        if _VLLM_VERSION >= version.parse("0.18.0"):
-            args["allow_deprecated_quantization"] = True
-
         if self.config.prometheus.enable:
             if self.config.prometheus.served_model_name:
                 # Extract model name from path if it's a full path
@@ -295,7 +291,7 @@ class vLLMHttpServer:
                     served_model_name = served_model_name.split("/")[-1]
                 args["served_model_name"] = served_model_name
 
-        if self.config.mtp.enable and self.config.mtp.enable_rollout:
+        if self.config.mtp is not None and self.config.mtp.enable and self.config.mtp.enable_rollout:
             speculative_config = {
                 "method": self.config.mtp.method,
                 "num_speculative_tokens": self.config.mtp.num_speculative_tokens,
@@ -575,15 +571,12 @@ class vLLMHttpServer:
         if hasattr(final_res.outputs[0], "num_preempted"):
             num_preempted = final_res.outputs[0].num_preempted
 
-        # Per-request spec decode stats. vLLM populates these attributes on
-        # RequestOutput when speculative decoding is enabled (see verl's MTP
-        # rollout config block above). Mirrors the sglang path in
-        # ``async_sglang_server.py``: gated by config, fail-fast if any of the
-        # three attrs is missing.
-        if self.config.mtp.enable and self.config.mtp.enable_rollout:
-            extra_fields["spec_num_draft_tokens"] = final_res.spec_num_draft_tokens
-            extra_fields["spec_num_accepted_tokens"] = final_res.spec_num_accepted_tokens
-            extra_fields["spec_num_verify_steps"] = final_res.spec_num_verify_steps
+        # Re-key backend spec-decoding stats to the rollout-common names.
+        if self.config.mtp is not None and self.config.mtp.enable and self.config.mtp.enable_rollout:
+            spec_decode_stats = final_res.request_spec_decode_stats
+            extra_fields["spec_num_draft_tokens"] = spec_decode_stats.num_draft_tokens
+            extra_fields["spec_num_accepted_tokens"] = spec_decode_stats.num_accepted_tokens
+            extra_fields["spec_num_verify_steps"] = spec_decode_stats.num_verify_steps
         return TokenOutput(
             token_ids=token_ids,
             log_probs=log_probs,

@@ -271,7 +271,7 @@ class vLLMColocateWorkerExtension:
                 # Convert bf16 weights to fp8 format before loading
                 loaded_params = load_quanted_weights(weights, self.model_runner)
                 logger.info(f"FP8 weights loaded (async), loaded_params: {len(loaded_params)}")
-                # Also load into drafter (MTP) model if present
+                # Keep the draft model in sync when present.
                 if self._get_drafter_model() is not None:
                     load_quanted_weights(weights, self.model_runner, is_drafter=True)
             else:

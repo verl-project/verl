@@ -139,24 +139,13 @@ def compute_spec_decode_metrics(
     spec_verifies,
     non_padding_mask=None,
 ) -> dict:
-    """Aggregate per-request speculative decoding stats into the two headline
-    metrics slime exposes (``spec_accept_rate`` / ``spec_accept_length``).
+    """Aggregate per-request speculative decoding stats.
 
-    Aggregation matches slime/slime/ray/rollout.py::_compute_spec_metrics —
-    *macro* averaging over requests (compute the per-sample ratio first, then
-    take the mean), not micro averaging over tokens. Macro and micro can
-    differ noticeably when sequences have very different lengths, so keeping
-    them aligned is required for direct slime ↔ verl comparison.
+    Ratios are computed per request and then averaged, so long and short
+    responses have equal metric weight.
 
-    Per slime/slime/utils/types.py::SpecInfo:
-      * spec_accept_rate    = spec_accept_token_num / spec_draft_token_num
-      * spec_accept_length  = completion_token_num / spec_verify_ct
-                            = 1 + spec_accept_token_num / spec_verify_ct
-        (one originally-decoded token per verify step, plus the accepted
-         draft tokens; equivalent to slime's completion / verify_ct).
-
-    The three inputs come from the rollout engine (vLLM ``spec_num_*`` attrs or
-    sglang ``meta_info["spec_*"]`` keys). Either all three are ``None``
+    The three inputs come from the rollout engine (vLLM request spec-decode
+    stats or sglang ``meta_info["spec_*"]`` keys). Either all three are ``None``
     (caller didn't fetch them, e.g. spec rollout disabled) and the function
     is a no-op, or all three are populated; mixed state is a programmer error.
 
@@ -182,8 +171,7 @@ def compute_spec_decode_metrics(
     if len(drafts) == 0:
         return {}
 
-    # slime's per-sample property returns 0.0 when the denominator is 0; we
-    # mirror that exactly so empty/short samples still contribute to the mean.
+    # Treat zero-denominator samples as 0.0 and keep them in the mean.
     per_sample_accept_rate = [(a / d) if d > 0 else 0.0 for a, d in zip(accepts, drafts, strict=True)]
     per_sample_accept_length = [(1.0 + a / v) if v > 0 else 0.0 for a, v in zip(accepts, verifies, strict=True)]
 
@@ -1748,7 +1736,7 @@ class RayPPOTrainer:
                 metrics.update(compute_variance_proxy_metrics(batch=batch, gradient_norm=gradient_norm))
                 # Note: mismatch metrics (KL, PPL, etc.) are collected at line 1179 after advantage computation
 
-                # Per-request spec decode metrics — token-weighted aggregation (MTP).
+                # Per-request spec decode metrics.
                 metrics.update(
                     compute_spec_decode_metrics(
                         batch.non_tensor_batch.get("spec_num_draft_tokens", None),

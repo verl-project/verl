@@ -1528,20 +1528,19 @@ class PPOTrainer:
         response_length = data["responses"].offsets().diff()
         global_token_num = (prompt_length + response_length).tolist()
 
-        # Per-request speculative decoding stats. Only fetch when the user has
-        # explicitly enabled spec rollout; otherwise the fields are not in the
-        # transfer queue and a kv_batch_get would error. slime's equivalent
-        # stats live in ``Sample.SpecInfo`` (see ``slime/utils/types.py``).
+        # Only fetch speculative decoding stats when rollout writes them.
         spec_drafts = spec_accepts = spec_verifies = None
-        if self.config.actor_rollout_ref.model.mtp.enable_rollout:
+        mtp_config = getattr(self.config.actor_rollout_ref.model, "mtp", None)
+        if mtp_config is not None and mtp_config.enable and mtp_config.enable_rollout:
             spec_data = tq.kv_batch_get(
                 keys=batch.keys,
                 partition_id=batch.partition_id,
-                select_fields=["spec_num_draft_tokens", "spec_num_accepted_tokens", "spec_num_verify_steps"],
+                select_fields=["extra_fields"],
             )
-            spec_drafts = spec_data["spec_num_draft_tokens"]
-            spec_accepts = spec_data["spec_num_accepted_tokens"]
-            spec_verifies = spec_data["spec_num_verify_steps"]
+            extra_fields = spec_data["extra_fields"].tolist()
+            spec_drafts = [extra_field["spec_num_draft_tokens"] for extra_field in extra_fields]
+            spec_accepts = [extra_field["spec_num_accepted_tokens"] for extra_field in extra_fields]
+            spec_verifies = [extra_field["spec_num_verify_steps"] for extra_field in extra_fields]
 
         data = data.to_padded_tensor()
         data["token_level_scores"] = data["rm_scores"]
