@@ -282,6 +282,10 @@ class vLLMHttpServer:
             # vLLM >= 0.13.0 supports profiler config via CLI args; env vars still work but will be deprecated
             args.update(profiler_args)
 
+        # allow deprecated quantization for vLLM >= 0.18.0
+        if _VLLM_VERSION >= version.parse("0.18.0"):
+            args["allow_deprecated_quantization"] = True
+
         if self.config.prometheus.enable:
             if self.config.prometheus.served_model_name:
                 # Extract model name from path if it's a full path
@@ -571,6 +575,20 @@ class vLLMHttpServer:
         if hasattr(final_res.outputs[0], "num_preempted"):
             num_preempted = final_res.outputs[0].num_preempted
 
+        # Extract per-request spec decode stats (if available)
+        spec_decode_info = {}
+        draft_tokens = getattr(final_res, "spec_num_draft_tokens", 0)
+        if draft_tokens > 0:
+            draft = final_res.spec_num_draft_tokens
+            accept = final_res.spec_num_accepted_tokens
+            verify = final_res.spec_num_verify_steps
+            spec_decode_info = {
+                "spec_num_draft_tokens": draft,
+                "spec_num_accepted_tokens": accept,
+                "spec_num_verify_steps": verify,
+            }
+
+        extra_fields.update(spec_decode_info)
         return TokenOutput(
             token_ids=token_ids,
             log_probs=log_probs,

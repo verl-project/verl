@@ -1687,6 +1687,19 @@ class RayPPOTrainer:
                 metrics.update(compute_variance_proxy_metrics(batch=batch, gradient_norm=gradient_norm))
                 # Note: mismatch metrics (KL, PPL, etc.) are collected at line 1179 after advantage computation
 
+                # Per-request spec decode metrics — token-weighted aggregation (MTP)
+                spec_drafts = batch.non_tensor_batch.get("spec_num_draft_tokens", None)
+                spec_accepts = batch.non_tensor_batch.get("spec_num_accepted_tokens", None)
+                spec_verifies = batch.non_tensor_batch.get("spec_num_verify_steps", None)
+                if spec_drafts is not None:
+                    draft_total = sum(d for d in spec_drafts if d is not None)
+                    accept_total = sum(a for a in spec_accepts if a is not None)
+                    verify_total = sum(v for v in spec_verifies if v is not None)
+                    if draft_total > 0:
+                        metrics["rollout/spec_accept_rate"] = float(accept_total / draft_total)
+                    if verify_total > 0:
+                        metrics["rollout/spec_accept_length"] = float(1.0 + accept_total / verify_total)
+
                 # TODO: make a canonical logger that supports various backend
                 logger.log(data=metrics, step=self.global_steps)
 
