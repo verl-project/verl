@@ -146,9 +146,36 @@ def _load_dpo_dataset():
 
 
 def _get_tokenizer():
-    """Get a small tokenizer for testing (requires torch + transformers)."""
-    from verl.utils import hf_tokenizer
-    return hf_tokenizer("Qwen/Qwen2.5-0.5B-Instruct")
+    """Create a mock tokenizer for testing (no HuggingFace download needed).
+
+    Supports the minimal interface used by DPODataset:
+    - __call__(text, ...) → {"input_ids": tensor}
+    - apply_chat_template(messages, ...) → str
+    - eos_token_id → int
+    """
+    import torch
+
+    class MockTokenizer:
+        eos_token_id = 0
+
+        def __call__(self, text, return_tensors=None, add_special_tokens=True, **kwargs):
+            # Simple char-level "tokenization" — each char becomes a token ID
+            ids = [ord(c) % 256 for c in (text or "")]
+            if not ids:
+                ids = [self.eos_token_id]
+            result = {"input_ids": torch.tensor([ids], dtype=torch.long)}
+            return result
+
+        def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=False, **kwargs):
+            # Simple template: join message contents
+            parts = []
+            for msg in messages:
+                parts.append(f"<|{msg['role']}|>{msg['content']}")
+            if add_generation_prompt:
+                parts.append("<|assistant|>")
+            return "\n".join(parts)
+
+    return MockTokenizer()
 
 
 def _create_parquet(tmp_dir: str, name: str = "dpo_data.parquet", num_samples: int = 5, **col_overrides) -> str:

@@ -148,12 +148,6 @@ checkpoint:
   # When doing LoRA training, save only the adapter (not full model) for regular checkpoints
   save_only_adapter_if_lora: true
 
-# Model configuration
-model:
-
-  # Dropout probability applied to lora inputs for regularization
-  lora_dropout: 0.05
-
 # Trainer configuration
 trainer:
 
