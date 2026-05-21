@@ -487,7 +487,7 @@ class SGLangHttpServer:
 
     async def resume_kv_cache(self):
         """Restore kv_cache GPU memory after a weight sync. Counterpart to release_kv_cache()."""
-        if self.node_rank != 0:
+        if self.node_rank != 0 or not self.config.free_cache_engine:
             return
         obj = ResumeMemoryOccupationReqInput(tags=["kv_cache"])
         await self.tokenizer_manager.resume_memory_occupation(obj, None)
