@@ -136,6 +136,11 @@ RUN pip install transformers==${TRANSFORMERS_VERSION}
 
 RUN pip install torchcodec --index-url=https://download.pytorch.org/whl/cu130
 
+RUN apt-get update && \
+    apt-get install -y ffmpeg && \
+    ffmpeg -decoders | grep -i nvidia && \
+    rm -rf /var/lib/apt/lists/*
+
 RUN pip install git+https://github.com/ETOgaosion/qwen-vl-utils.git@main
 
 RUN pip install git+https://github.com/verl-project/verl.git@${VERL_VERSION} && pip uninstall -y verl
@@ -148,8 +153,3 @@ RUN CUDA_VERSION_MAJOR=$(echo ${CUDA_VERSION} | cut -d '.' -f 1) && \
         CUDNN_VERSION=$(grep -E '^#define CUDNN_(MAJOR|MINOR|PATCHLEVEL) ' "${CUDNN_HDR}" | awk '{print $3}' | paste -sd. -); \
     fi && \
     pip install "nvidia-cudnn-cu${CUDA_VERSION_MAJOR}>=${CUDNN_VERSION}"
-
-RUN apt-get update && \
-    apt-get install -y ffmpeg && \
-    ffmpeg -decoders | grep -i nvidia && \
-    rm -rf /var/lib/apt/lists/*

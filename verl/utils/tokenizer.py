@@ -124,9 +124,7 @@ def build_multimodal_processor_inputs(
     processor_kwargs.setdefault("return_tensors", return_tensors)
 
     if videos is not None:
-        # Frames are already sampled by qwen_vl_utils within the per-message pixel
-        # budget; transformers 5.x defaults ``do_sample_frames=True``, which would
-        # re-sample at fps×duration and blow past that budget.
+        # Pre-sampled frames must not be re-sampled by the processor.
         processor_kwargs.setdefault("do_sample_frames", False)
         if video_metadata is not None:
             processor_kwargs.setdefault("video_metadata", video_metadata)
