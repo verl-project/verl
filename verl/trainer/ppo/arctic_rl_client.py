@@ -94,10 +94,15 @@ class ArcticRLClientWrapper(RemoteBackend):
     it via ``config.trainer.remote_backend = "arctic"``.
     """
 
+    # Key under `main_config.remote_backend.<name>` where this adapter's
+    # config lives. Matches the registered backend name above.
+    _BACKEND_CONFIG_KEY = "arctic"
+
     def __init__(self, config, reconnect_job_config: dict = None, rl_server_state: ArcticRLRayServerState = None):
         self.config = config
+        self._backend_config = config.remote_backend[self._BACKEND_CONFIG_KEY]
         self._client = None
-        self.use_zorro = self.config.arctic_rl.use_zorro
+        self.use_zorro = self._backend_config.use_zorro
         self.use_liger = self.config.actor_rollout_ref.model.use_liger
         # Static, config-derived engineering value Arctic needs on every
         # `compute_log_prob` / `update_actor` call. Cached here at init
@@ -267,7 +272,7 @@ class ArcticRLClientWrapper(RemoteBackend):
     def _create_ds_config(self, n_gpus: int) -> dict[str, Any]:
         actor_cfg = self.config.actor_rollout_ref.actor
         data_cfg = self.config.data
-        zero_optimization_config = self.config.arctic_rl.zero_optimization
+        zero_optimization_config = self._backend_config.zero_optimization
 
         micro_batch_size = actor_cfg.ppo_micro_batch_size_per_gpu or 1
         train_batch_size = data_cfg.train_batch_size * self.config.actor_rollout_ref.rollout.n
@@ -309,7 +314,7 @@ class ArcticRLClientWrapper(RemoteBackend):
                 max_token_len=self.config.actor_rollout_ref.rollout.max_num_batched_tokens,
                 rollout_n=self.config.actor_rollout_ref.rollout.n,
                 temperature=self.config.actor_rollout_ref.rollout.temperature,
-                tiled_logits_compute=self.config.arctic_rl.tiled_logits_compute,
+                tiled_logits_compute=self._backend_config.tiled_logits_compute,
                 use_unpad=use_unpad,
             )
 
@@ -324,10 +329,10 @@ class ArcticRLClientWrapper(RemoteBackend):
             return create_arctic_rl_client(reconnect_job_config)
 
         model_name = self.config.actor_rollout_ref.model.path
-        n_training_gpus = self.config.arctic_rl.get("training_gpus", self.config.trainer.n_gpus_per_node)
-        n_sampling_gpus = self.config.arctic_rl.get("sampling_gpus", self.config.trainer.n_gpus_per_node)
-        n_log_prob_gpus = self.config.arctic_rl.get("log_prob_gpus", self.config.trainer.n_gpus_per_node)
-        colocate = self.config.arctic_rl.get("colocate", False)
+        n_training_gpus = self._backend_config.get("training_gpus", self.config.trainer.n_gpus_per_node)
+        n_sampling_gpus = self._backend_config.get("sampling_gpus", self.config.trainer.n_gpus_per_node)
+        n_log_prob_gpus = self._backend_config.get("log_prob_gpus", self.config.trainer.n_gpus_per_node)
+        colocate = self._backend_config.get("colocate", False)
         attn_implementation = self.config.actor_rollout_ref.model.override_config.get(
             'attn_implementation', 'eager'
         )
@@ -340,7 +345,7 @@ class ArcticRLClientWrapper(RemoteBackend):
 
         rollout_cfg = self.config.actor_rollout_ref.rollout
         vllm_config = {
-            "tensor_parallel_size": self.config.arctic_rl.sampling_tp_size,
+            "tensor_parallel_size": self._backend_config.sampling_tp_size,
             "gpu_memory_utilization": rollout_cfg.gpu_memory_utilization,
             "max_model_len": rollout_cfg.get("max_model_len") or max_length,
             "max_num_seqs": rollout_cfg.max_num_seqs,
@@ -351,9 +356,9 @@ class ArcticRLClientWrapper(RemoteBackend):
             vllm_config["quantization"] = rollout_cfg.quantization
 
         rl_config = ArcticRLClientConfig(
-            host=None if self.config.arctic_rl.comm_protocol == "ray" else "localhost",
-            port=None if self.config.arctic_rl.comm_protocol == "ray" else 7000,
-            comm_protocol=self.config.arctic_rl.comm_protocol,
+            host=None if self._backend_config.comm_protocol == "ray" else "localhost",
+            port=None if self._backend_config.comm_protocol == "ray" else 7000,
+            comm_protocol=self._backend_config.comm_protocol,
             backend="local",
             training_gpus=n_training_gpus,
             sampling_gpus=n_sampling_gpus,

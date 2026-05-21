@@ -318,32 +318,41 @@ ray_kwargs:
   timeline_json_file: null
 
 
-# config for arctic rl
-arctic_rl:
+# Per-backend configuration for `verl.remote_backend` adapters. The backend
+# is selected by `trainer.remote_backend` (a string registered in
+# `RemoteBackendRegistry`); each backend nests its config under
+# `remote_backend.<name>`. To plug in a new backend (e.g. "tinker"),
+# add a sibling block here and register the adapter — no changes needed
+# to the rest of this file or `main_ppo.py`.
+remote_backend:
 
-  # whether to use colocate mode
-  colocate: False
+  # Arctic adapter (`verl.trainer.ppo.arctic_rl_client`). Active when
+  # `trainer.remote_backend=arctic`.
+  arctic:
 
-  training_gpus: 1
-  sampling_gpus: 1
-  log_prob_gpus: 1
-  sampling_tp_size: 1
+    # whether to use colocate mode
+    colocate: False
 
-  use_zorro: False
+    training_gpus: 1
+    sampling_gpus: 1
+    log_prob_gpus: 1
+    sampling_tp_size: 1
 
-  # only set to True if running into OOM, otherwise it'll be faster not to tile (extra forward replay and smaller chunks to compute)
-  tiled_logits_compute: False
+    use_zorro: False
 
-  # ray or http: ray would be much faster for payload comms in the en-prem use case
-  comm_protocol: ray
+    # only set to True if running into OOM, otherwise it'll be faster not to tile (extra forward replay and smaller chunks to compute)
+    tiled_logits_compute: False
 
-  zero_optimization:
-    # 2 for optim + grad sharding
-    # 3 for optim + grad +weight sharding
-    stage: 0
+    # ray or http: ray would be much faster for payload comms in the en-prem use case
+    comm_protocol: ray
 
-    offload_optimizer:
-      device: none
+    zero_optimization:
+      # 2 for optim + grad sharding
+      # 3 for optim + grad +weight sharding
+      stage: 0
 
-    offload_param:
-      device: none
+      offload_optimizer:
+        device: none
+
+      offload_param:
+        device: none
