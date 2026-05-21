@@ -3,7 +3,7 @@
 
 # Examples:
 #   # plain SFT on Ascend A3 910C
-#   bash run_qwen3_8b_ascend_a3_fsdp.sh
+#   bash run_qwen3_0_6b_ascend_a3_fsdp.sh
 
 set -x
 
@@ -15,7 +15,7 @@ master_port=$(shuf -i 20000-65535 -n 1)
 
 
 # ---- user-adjustable ----
-MODEL_PATH=${MODEL_PATH:-Qwen/Qwen3-8B}
+MODEL_PATH=${MODEL_PATH:-Qwen/Qwen3-0.6B}
 SAVE_PATH=${SAVE_PATH:-verl_output}
 SP_SIZE=${SP_SIZE:-1}
 TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-16}
@@ -24,7 +24,7 @@ LR=${LR:-3e-5}
 TOTAL_EPOCHS=${TOTAL_EPOCHS:-2}
 MAX_LENGTH=${MAX_LENGTH:-4096}
 PROJECT_NAME=${PROJECT_NAME:-gsm8k-sft}
-EXPERIMENT_NAME=${EXPERIMENT_NAME:-gsm8k-sft-qwen3-8b-instruct-a3}
+EXPERIMENT_NAME=${EXPERIMENT_NAME:-gsm8k-sft-qwen3-0-6b-instruct-a3}
 # ---- end user-adjustable ----
 
 
