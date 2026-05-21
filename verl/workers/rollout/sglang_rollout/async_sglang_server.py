@@ -354,7 +354,7 @@ class SGLangHttpServer:
             args.update({"enable_return_routed_experts": True})
 
         # mtp
-        if self.config.mtp is not None and self.config.mtp.enable and self.config.mtp.enable_rollout:
+        if self.config.mtp.enable and self.config.mtp.enable_rollout:
             # Enable weights CPU backup for sglang >= 0.5.6
             if sglang.__version__ < "0.5.6":
                 raise ValueError(f"sglang version {sglang.__version__} is not supported for MTP rollout")
@@ -651,6 +651,19 @@ class SGLangHttpServer:
                 sequence_length=len(prompt_ids),
                 result_dict=extra_fields,
             )
+
+        # Per-request speculative decoding stats. sglang exposes these on
+        # ``meta_info`` when (a) the build includes the slime sglang patch
+        # (slime/docker/patch/v0.5.9/sglang.patch) and (b) the user has enabled
+        # spec rollout via ``mtp.enable_rollout=True`` (which configures sglang
+        # to do speculative decoding above). Re-key to verl's vLLM-compatible
+        # names so ray_trainer's aggregation works for both backends. Fails
+        # loudly with KeyError if mtp.enable_rollout is set but the slime patch
+        # is missing.
+        if self.config.mtp.enable and self.config.mtp.enable_rollout:
+            extra_fields["spec_num_draft_tokens"] = int(meta_info["spec_draft_token_num"])
+            extra_fields["spec_num_accepted_tokens"] = int(meta_info["spec_accept_token_num"])
+            extra_fields["spec_num_verify_steps"] = int(meta_info["spec_verify_ct"])
 
         return TokenOutput(
             token_ids=token_ids,

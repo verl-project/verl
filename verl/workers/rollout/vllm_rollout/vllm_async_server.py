@@ -295,7 +295,7 @@ class vLLMHttpServer:
                     served_model_name = served_model_name.split("/")[-1]
                 args["served_model_name"] = served_model_name
 
-        if self.config.mtp is not None and self.config.mtp.enable and self.config.mtp.enable_rollout:
+        if self.config.mtp.enable and self.config.mtp.enable_rollout:
             speculative_config = {
                 "method": self.config.mtp.method,
                 "num_speculative_tokens": self.config.mtp.num_speculative_tokens,
@@ -575,20 +575,15 @@ class vLLMHttpServer:
         if hasattr(final_res.outputs[0], "num_preempted"):
             num_preempted = final_res.outputs[0].num_preempted
 
-        # Extract per-request spec decode stats (if available)
-        spec_decode_info = {}
-        draft_tokens = getattr(final_res, "spec_num_draft_tokens", 0)
-        if draft_tokens > 0:
-            draft = final_res.spec_num_draft_tokens
-            accept = final_res.spec_num_accepted_tokens
-            verify = final_res.spec_num_verify_steps
-            spec_decode_info = {
-                "spec_num_draft_tokens": draft,
-                "spec_num_accepted_tokens": accept,
-                "spec_num_verify_steps": verify,
-            }
-
-        extra_fields.update(spec_decode_info)
+        # Per-request spec decode stats. vLLM populates these attributes on
+        # RequestOutput when speculative decoding is enabled (see verl's MTP
+        # rollout config block above). Mirrors the sglang path in
+        # ``async_sglang_server.py``: gated by config, fail-fast if any of the
+        # three attrs is missing.
+        if self.config.mtp.enable and self.config.mtp.enable_rollout:
+            extra_fields["spec_num_draft_tokens"] = final_res.spec_num_draft_tokens
+            extra_fields["spec_num_accepted_tokens"] = final_res.spec_num_accepted_tokens
+            extra_fields["spec_num_verify_steps"] = final_res.spec_num_verify_steps
         return TokenOutput(
             token_ids=token_ids,
             log_probs=log_probs,

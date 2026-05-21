@@ -80,7 +80,7 @@ from verl.trainer.ppo.metric_utils import (
     process_validation_metrics,
 )
 from verl.trainer.ppo.padding_utils import upsample_batch_to_divisible_size
-from verl.trainer.ppo.ray_trainer import apply_kl_penalty, compute_advantage
+from verl.trainer.ppo.ray_trainer import apply_kl_penalty, compute_advantage, compute_spec_decode_metrics
 from verl.trainer.ppo.rollout_corr_helper import compute_rollout_correction_and_add_to_batch
 from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_teacher_policy
 from verl.utils import hf_processor, hf_tokenizer
@@ -1527,6 +1527,22 @@ class PPOTrainer:
         prompt_length = data["prompts"].offsets().diff()
         response_length = data["responses"].offsets().diff()
         global_token_num = (prompt_length + response_length).tolist()
+
+        # Per-request speculative decoding stats. Only fetch when the user has
+        # explicitly enabled spec rollout; otherwise the fields are not in the
+        # transfer queue and a kv_batch_get would error. slime's equivalent
+        # stats live in ``Sample.SpecInfo`` (see ``slime/utils/types.py``).
+        spec_drafts = spec_accepts = spec_verifies = None
+        if self.config.actor_rollout_ref.model.mtp.enable_rollout:
+            spec_data = tq.kv_batch_get(
+                keys=batch.keys,
+                partition_id=batch.partition_id,
+                select_fields=["spec_num_draft_tokens", "spec_num_accepted_tokens", "spec_num_verify_steps"],
+            )
+            spec_drafts = spec_data["spec_num_draft_tokens"]
+            spec_accepts = spec_data["spec_num_accepted_tokens"]
+            spec_verifies = spec_data["spec_num_verify_steps"]
+
         data = data.to_padded_tensor()
         data["token_level_scores"] = data["rm_scores"]
         if "token_level_rewards" not in data:
@@ -1555,6 +1571,10 @@ class PPOTrainer:
                 "training/num_turns/min": num_turns.min(),
             }
         )
+
+        # 4. per-request speculative-decoding aggregation (same metrics async PPO logs;
+        # see compute_spec_decode_metrics in verl/trainer/ppo/ray_trainer.py).
+        metrics.update(compute_spec_decode_metrics(spec_drafts, spec_accepts, spec_verifies, non_padding_mask))
 
     def fit(self):
         if self._dump_executor._shutdown:

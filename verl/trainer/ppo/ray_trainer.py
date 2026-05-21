@@ -133,6 +133,67 @@ def compute_response_mask(data: DataProto):
     return attention_mask[:, -response_length:]
 
 
+def compute_spec_decode_metrics(
+    spec_drafts,
+    spec_accepts,
+    spec_verifies,
+    non_padding_mask=None,
+) -> dict:
+    """Aggregate per-request speculative decoding stats into the two headline
+    metrics slime exposes (``spec_accept_rate`` / ``spec_accept_length``).
+
+    Aggregation matches slime/slime/ray/rollout.py::_compute_spec_metrics —
+    *macro* averaging over requests (compute the per-sample ratio first, then
+    take the mean), not micro averaging over tokens. Macro and micro can
+    differ noticeably when sequences have very different lengths, so keeping
+    them aligned is required for direct slime ↔ verl comparison.
+
+    Per slime/slime/utils/types.py::SpecInfo:
+      * spec_accept_rate    = spec_accept_token_num / spec_draft_token_num
+      * spec_accept_length  = completion_token_num / spec_verify_ct
+                            = 1 + spec_accept_token_num / spec_verify_ct
+        (one originally-decoded token per verify step, plus the accepted
+         draft tokens; equivalent to slime's completion / verify_ct).
+
+    The three inputs come from the rollout engine (vLLM ``spec_num_*`` attrs or
+    sglang ``meta_info["spec_*"]`` keys). Either all three are ``None``
+    (caller didn't fetch them, e.g. spec rollout disabled) and the function
+    is a no-op, or all three are populated; mixed state is a programmer error.
+
+    ``non_padding_mask`` is a numpy bool array used by sync PPO to drop padded
+    placeholder samples; pass ``None`` for async PPO.
+    """
+    if spec_drafts is None and spec_accepts is None and spec_verifies is None:
+        return {}
+    assert spec_drafts is not None and spec_accepts is not None and spec_verifies is not None, (
+        "spec_decode metrics require all three of spec_num_draft_tokens / "
+        "spec_num_accepted_tokens / spec_num_verify_steps; got partial inputs"
+    )
+
+    drafts = spec_drafts.tolist() if hasattr(spec_drafts, "tolist") else list(spec_drafts)
+    accepts = spec_accepts.tolist() if hasattr(spec_accepts, "tolist") else list(spec_accepts)
+    verifies = spec_verifies.tolist() if hasattr(spec_verifies, "tolist") else list(spec_verifies)
+
+    if non_padding_mask is not None:
+        drafts = [d for d, keep in zip(drafts, non_padding_mask, strict=True) if keep]
+        accepts = [a for a, keep in zip(accepts, non_padding_mask, strict=True) if keep]
+        verifies = [v for v, keep in zip(verifies, non_padding_mask, strict=True) if keep]
+
+    if len(drafts) == 0:
+        return {}
+
+    # slime's per-sample property returns 0.0 when the denominator is 0; we
+    # mirror that exactly so empty/short samples still contribute to the mean.
+    per_sample_accept_rate = [(a / d) if d > 0 else 0.0 for a, d in zip(accepts, drafts, strict=True)]
+    per_sample_accept_length = [(1.0 + a / v) if v > 0 else 0.0 for a, v in zip(accepts, verifies, strict=True)]
+
+    n = len(drafts)
+    return {
+        "rollout/spec_accept_rate": float(sum(per_sample_accept_rate) / n),
+        "rollout/spec_accept_length": float(sum(per_sample_accept_length) / n),
+    }
+
+
 def compute_advantage(
     data: DataProto,
     adv_estimator: AdvantageEstimator,
@@ -1687,18 +1748,14 @@ class RayPPOTrainer:
                 metrics.update(compute_variance_proxy_metrics(batch=batch, gradient_norm=gradient_norm))
                 # Note: mismatch metrics (KL, PPL, etc.) are collected at line 1179 after advantage computation
 
-                # Per-request spec decode metrics — token-weighted aggregation (MTP)
-                spec_drafts = batch.non_tensor_batch.get("spec_num_draft_tokens", None)
-                spec_accepts = batch.non_tensor_batch.get("spec_num_accepted_tokens", None)
-                spec_verifies = batch.non_tensor_batch.get("spec_num_verify_steps", None)
-                if spec_drafts is not None:
-                    draft_total = sum(d for d in spec_drafts if d is not None)
-                    accept_total = sum(a for a in spec_accepts if a is not None)
-                    verify_total = sum(v for v in spec_verifies if v is not None)
-                    if draft_total > 0:
-                        metrics["rollout/spec_accept_rate"] = float(accept_total / draft_total)
-                    if verify_total > 0:
-                        metrics["rollout/spec_accept_length"] = float(1.0 + accept_total / verify_total)
+                # Per-request spec decode metrics — token-weighted aggregation (MTP).
+                metrics.update(
+                    compute_spec_decode_metrics(
+                        batch.non_tensor_batch.get("spec_num_draft_tokens", None),
+                        batch.non_tensor_batch.get("spec_num_accepted_tokens", None),
+                        batch.non_tensor_batch.get("spec_num_verify_steps", None),
+                    )
+                )
 
                 # TODO: make a canonical logger that supports various backend
                 logger.log(data=metrics, step=self.global_steps)
