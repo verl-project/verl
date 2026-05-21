@@ -128,11 +128,11 @@ RUN pip3 install --no-deps trl==${TRL_VERSION}
 
 RUN pip3 install nvtx matplotlib liger_kernel
 
+RUN pip install transformers==${TRANSFORMERS_VERSION}
+
 RUN pip install -U git+https://github.com/ISEEKYAN/mbridge.git@main
 
 RUN pip install --no-deps git+https://github.com/NVIDIA/Megatron-LM.git@${MCORE_VERSION}
-
-RUN pip install transformers==${TRANSFORMERS_VERSION}
 
 RUN pip install torchcodec --index-url=https://download.pytorch.org/whl/cu130
 
