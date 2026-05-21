@@ -60,7 +60,7 @@ reward_model.overlong_buffer.penalty_factor=${overlong_penalty_factor}   #惩罚
 
 ## 硬件要求
 
-当前支持Atlas 800T A3 与 Atlas 900 A3 SuperPoD。完成跑完本次最佳实践需要 1 台 Atlas 900 A3 SuperPoD。关键软件版本可以参考：[Ascend Quickstart](https://github.com/verl-project/verl/blob/main/docs/ascend_tutorial/quick_start/ascend_quick_start.rst)
+当前支持Atlas 800T A3 与 Atlas 900 A3 SuperPoD。完成跑完本次最佳实践需要 1 台 Atlas 900 A3 SuperPoD。关键软件版本可以参考：[Ascend Quickstart](https://github.com/verl-project/verl/blob/02e059ea/docs/ascend_tutorial/quick_start/ascend_quick_start.rst)
 
 ## 安装基础环境
 

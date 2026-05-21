@@ -317,6 +317,8 @@ class TRTLLMHttpServer:
         request_id: str,
         image_data: Optional[list[Any]] = None,
         video_data: Optional[list[Any]] = None,
+        audio_data: Optional[list[Any]] = None,
+        mm_processor_kwargs: Optional[dict[str, Any]] = None,
     ) -> TokenOutput:
         from tensorrt_llm.llmapi import SamplingParams
 
@@ -337,6 +339,9 @@ class TRTLLMHttpServer:
         sampling_params.update(self.sampling_args)
 
         trt_llm_sampling_params = SamplingParams(**sampling_params)
+        if audio_data is not None:
+            raise NotImplementedError("TRT-LLM rollout does not support audio inputs yet.")
+
         await self._generation_allowed.wait()
         if self.is_vlm_model and (image_data or video_data):
             deduped_ids = qwen2_5_vl_dedup_image_tokens(prompt_ids, self.model_config.processor)
@@ -344,7 +349,7 @@ class TRTLLMHttpServer:
             input_dict = {
                 "prompt": org_prompt,
                 "multi_modal_data": {},
-                "mm_processor_kwargs": {},
+                "mm_processor_kwargs": dict(mm_processor_kwargs or {}),
             }
             if image_data:
                 input_dict["multi_modal_data"]["image"] = image_data
@@ -398,6 +403,19 @@ class TRTLLMHttpServer:
     async def clear_kv_cache(self):
         """Invalidate prefix cache entries after weight update."""
         await self.llm.collective_rpc("reset_prefix_cache")
+
+    async def release_kv_cache(self):
+        """Release only kv_cache GPU memory, keeping model weights intact.
+
+        This is used during weight sync to free GPU memory for new weights.
+        """
+        if not self.config.free_cache_engine:
+            return
+        await self.llm.release(tags=["kv_cache"])
+
+    async def resume_kv_cache(self):
+        """Restore kv_cache GPU memory after a weight sync. Counterpart to release_kv_cache()."""
+        await self.llm.resume(tags=["kv_cache"])
 
     async def wake_up(self):
         from verl.workers.rollout.trtllm_rollout.trtllm_rollout import ServerAdapter

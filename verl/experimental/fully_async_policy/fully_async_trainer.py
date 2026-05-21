@@ -17,7 +17,6 @@ import logging
 import os
 import time
 from datetime import datetime
-from pprint import pprint
 from typing import Any
 
 import ray
@@ -28,7 +27,6 @@ from verl import DataProto
 from verl.checkpoint_engine import CheckpointEngineManager
 from verl.experimental.fully_async_policy.detach_utils import (
     MetricsAggregator,
-    ValidateMetrics,
     assemble_batch_from_rollout_samples,
 )
 from verl.experimental.fully_async_policy.message_queue import MessageQueueClient
@@ -40,8 +38,7 @@ from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, should_save_ckpt_esi
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
-from verl.utils.tracking import Tracking, ValidationGenerationsLogger
-from verl.workers.rollout.llm_server import LLMServerManager
+from verl.utils.tracking import Tracking
 
 logger = logging.getLogger(__name__)
 
@@ -66,14 +63,12 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         role_worker_mapping: dict[Role, WorkerType],
         resource_pool_manager: ResourcePoolManager,
         ray_worker_group_cls: RayWorkerGroup = RayWorkerGroup,
-        processor=None,
         device_name=None,
     ):
         # ==================== RayPPOTrainer config ====================
 
         # Store the tokenizer for text processing
         self.tokenizer = tokenizer
-        self.processor = processor
         self.config = config
 
         self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
@@ -133,10 +128,6 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             default_backend=self.config.trainer.logger,
             config=OmegaConf.to_container(self.config, resolve=True),
         )
-        self.validation_generations_logger = ValidationGenerationsLogger(
-            project_name=self.config.trainer.project_name,
-            experiment_name=self.config.trainer.experiment_name,
-        )
 
         # ==================== fully async config ====================
 
@@ -162,61 +153,103 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         )
         self.metrics_aggregator = MetricsAggregator(total_gpus=total_gpus)
 
-        # use trainer to do validation
-        if self.config.async_training.use_trainer_do_validate:
-            from verl.trainer.main_ppo import create_rl_dataset
-            from verl.utils.dataset.rl_dataset import collate_fn
-
-            val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor)
-            rollout_gpus = config.rollout.nnodes * config.rollout.n_gpus_per_node
-            print(f"[FullyAsyncTrainer] split before val_dataset total len: {len(val_dataset)}")
-            split_dataset = val_dataset.split(total_gpus)
-            rollout_val_dataset0 = split_dataset[rollout_gpus:]
-            from torch.utils.data import ConcatDataset
-
-            val_dataset = ConcatDataset(rollout_val_dataset0)
-            print(f"[FullyAsyncTrainer] split after val_dataset total len: {len(val_dataset)}")
-            self.val_dataset = val_dataset
-            # update val_dataloader
-            val_batch_size = self.config.data.val_batch_size  # Prefer config value if set
-            if val_batch_size is None:
-                val_batch_size = len(val_dataset)
-            from torchdata.stateful_dataloader import StatefulDataLoader
-
-            print(f"[FullyAsyncTrainer] create val_dataloader with batch_size: {val_batch_size}")
-            self.val_dataloader = StatefulDataLoader(
-                dataset=val_dataset,
-                batch_size=val_batch_size,
-                num_workers=self.config.data["dataloader_num_workers"],
-                shuffle=self.config.data.get("validation_shuffle", True),
-                drop_last=False,
-                collate_fn=collate_fn,
-            )
         # Reference to rollouter for parameter synchronization
         self.rollouter = None
         self.checkpoint_manager = None
 
-        # when use_trainer_do_validate == Ture, use colocate_checkpoint_manager to sync params
-        self.colocate_checkpoint_manager = None
+        # Hybrid checkpoint manager for trainer-side validation (use_trainer_do_validate)
+        # Uses naive backend to sync weights from trainer to hybrid rollout replicas.
+        # Initialized in _setup_hybrid_checkpoint_manager_and_sleep() via set_rollouter().
+        self.hybrid_checkpoint_manager = None
 
-    def _setup_checkpoint_manager(self, rollouter):
+    async def _setup_checkpoint_manager(self):
         """Setup checkpoint manager after rollouter is initialized"""
-        replicas = ray.get(rollouter.get_replicas.remote())
+        replicas = await self.rollouter.get_replicas.remote()
         checkpoint_engine_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
         self.checkpoint_manager = CheckpointEngineManager(
             config=checkpoint_engine_config, trainer=self.actor_wg, replicas=replicas
         )
         print("[FullyAsyncTrainer] Checkpoint manager initialized")
 
+    async def _setup_hybrid_checkpoint_manager(self):
+        """Setup hybrid checkpoint manager and perform initial sleep of hybrid replicas.
+
+        When use_trainer_do_validate is enabled:
+          1. Creates a CheckpointEngineManager with naive backend for trainer-side
+             weight sync to hybrid rollout replicas.
+          2. Fetches hybrid replicas from the rollouter's ALM (created during
+             rollouter.init_workers()).
+          3. Registers them with the hybrid CP manager and calls sleep_replicas()
+             to release GPU memory for training.
+
+        Must be called AFTER set_rollouter() so that self.rollouter is available,
+        and AFTER rollouter.init_workers() so that hybrid replicas exist.
+        This mirrors the colocate pattern in ray_trainer.py:882-889 but fetches
+        replicas from the rollouter's ALM via RPC since they live on the rollout side.
+        """
+        if not self.config.async_training.use_trainer_do_validate:
+            return
+
+        # --- Part 1: Create hybrid CheckpointEngineManager with naive backend ---
+        print("[FullyAsyncTrainer] Setting up hybrid checkpoint manager (naive backend)")
+
+        # Create hybrid CheckpointEngineManager with naive backend.
+        checkpoint_engine_cfg = self.config.actor_rollout_ref.rollout.checkpoint_engine
+        original_backend = checkpoint_engine_cfg.backend
+        with open_dict(checkpoint_engine_cfg):
+            checkpoint_engine_cfg.backend = "naive"
+        checkpoint_engine_config = omega_conf_to_dataclass(checkpoint_engine_cfg)
+
+        self.hybrid_checkpoint_manager = CheckpointEngineManager(
+            config=checkpoint_engine_config,
+            trainer=self.actor_rollout_wg,
+            replicas=[],  # Start empty; will be populated below
+        )
+
+        # Restore original backend value
+        with open_dict(checkpoint_engine_cfg):
+            checkpoint_engine_cfg.backend = original_backend
+
+        print("[FullyAsyncTrainer] Hybrid checkpoint manager initialized (naive backend)")
+
+        # --- Part 2: Fetch hybrid replicas from rollouter's ALM ---
+        print("[FullyAsyncTrainer] Fetching hybrid replicas from rollouter...")
+        hybrid_replicas_dict = ray.get(self.rollouter.get_all_hybrid_replicas.remote())
+        print(
+            f"[FullyAsyncTrainer] Got {len(hybrid_replicas_dict)} hybrid replicas: {list(hybrid_replicas_dict.keys())}"
+        )
+
+        if not hybrid_replicas_dict:
+            print("[FullyAsyncTrainer] No hybrid replicas found, skipping initial sleep")
+            return
+
+        # --- Part 3: Register replicas and perform initial sleep ---
+        for resource_id, replica in hybrid_replicas_dict.items():
+            self.hybrid_checkpoint_manager.replicas.append(replica)
+            print(
+                f"[FullyAsyncTrainer] Registered '{resource_id}' "
+                f"(mode={getattr(replica, 'rollout_mode', '?')}, "
+                f"addr={getattr(replica, '_server_address', '?')})"
+            )
+
+        # Step 3: Sleep all hybrid replicas
+        print(
+            f"[FullyAsyncTrainer] Calling sleep_replicas() on "
+            f"{len(self.hybrid_checkpoint_manager.replicas)} replicas..."
+        )
+        await self.hybrid_checkpoint_manager.sleep_replicas()
+        print("[FullyAsyncTrainer] Initial sleep complete, GPU memory now owned by training engine")
+
     def set_message_queue_client(self, message_queue_client: MessageQueueClient):
         """Set message queue client"""
         self.message_queue_client = message_queue_client
 
-    def set_rollouter(self, rollouter):
-        """Set rollouter reference for parameter synchronization"""
+    async def set_rollouter(self, rollouter):
+        """Set rollouter reference and initialize all checkpoint managers."""
         self.rollouter = rollouter
         # Setup checkpoint manager after rollouter is set
-        self._setup_checkpoint_manager(rollouter)
+        await self._setup_checkpoint_manager()
+        await self._setup_hybrid_checkpoint_manager()
 
     def set_total_train_steps(self, total_training_steps):
         self.total_train_steps = total_training_steps
@@ -297,7 +330,9 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         return 0, batch
 
     def _create_actor_rollout_classes(self):
-        # create actor
+        # create actor — always use Role.Actor (not ActorRollout) even when
+        # use_trainer_do_validate is enabled. Rollout capability on trainer GPUs
+        # is handled by ElasticAgentLoopManager's hybrid replicas.
         for role in [self.train_role]:
             resource_pool = self.resource_pool_manager.get_resource_pool(role)
             role_cls = RayClassWithInitArgs(
@@ -335,73 +370,6 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         self._create_worker_classes()
         self._init_worker_groups()
         self._init_models()
-        self._init_reward_loop()
-        await self._init_async_rollout_manager()
-
-    def _init_reward_loop(self):
-        if self.config.async_training.use_trainer_do_validate:
-            print("[FullyAsyncTrainer] Init reward loop")
-            super()._init_reward_loop()
-
-    async def _init_async_rollout_manager(self):
-        # use async rollout do validate
-        print(f"[FullyAsyncTrainer] use_trainer_do_validate: {self.config.async_training.use_trainer_do_validate}")
-        if self.config.async_training.use_trainer_do_validate:
-            print("[FullyAsyncTrainer] Init async rollout manager")
-
-            # infrastructure overview: https://verl.readthedocs.io/en/latest/advance/reward_loop.html#architecture-design
-            # agent_reward_loop: streaming reward computation with actor rollout
-            # two conditions satisfied: (1) no reward model, or (2) reward model with extra resource pool
-            enable_agent_reward_loop = not self.use_rm or self.config.reward.reward_model.enable_resource_pool
-
-            # if enable_agent_reward_loop, we directly pass reward_loop_workers to agent loop manager
-            # to stream reward computation with actor rollout
-            reward_loop_worker_handles = (
-                self.reward_loop_manager.reward_loop_workers if enable_agent_reward_loop else None
-            )
-
-            # create async rollout manager and request scheduler
-            assert self.config.actor_rollout_ref.rollout.mode == "async"
-
-            self.async_rollout_mode = True
-            from verl.experimental.agent_loop import AgentLoopManager
-
-            self.llm_server_manager = await LLMServerManager.create(
-                config=self.config, worker_group=self.actor_rollout_wg
-            )
-            self.async_rollout_manager = await AgentLoopManager.create(
-                config=self.config,
-                llm_client=self.llm_server_manager.get_client(),
-                reward_loop_worker_handles=reward_loop_worker_handles,
-            )
-            print("[FullyAsyncTrainer] async_rollout_manager initialized")
-
-            # Modify checkpoint_engine config to use naive backend
-            checkpoint_engine_cfg = self.config.actor_rollout_ref.rollout.checkpoint_engine
-            original_backend = checkpoint_engine_cfg.backend
-            with open_dict(checkpoint_engine_cfg):
-                checkpoint_engine_cfg.backend = "naive"
-            checkpoint_engine_config = omega_conf_to_dataclass(checkpoint_engine_cfg)
-
-            print(f"[FullyAsyncTrainer] checkpoint_engine_config: {checkpoint_engine_config}")
-
-            self.colocate_checkpoint_manager = CheckpointEngineManager(
-                config=checkpoint_engine_config,
-                trainer=self.actor_rollout_wg,
-                replicas=self.llm_server_manager.get_replicas(),
-            )
-
-            # sleep all replicas to load checkpoint
-            await self.colocate_checkpoint_manager.sleep_replicas()
-
-            # Restore original backend value
-            with open_dict(checkpoint_engine_cfg):
-                checkpoint_engine_cfg.backend = original_backend
-
-            print("[FullyAsyncTrainer] colocate_checkpoint_manager initialized")
-
-        else:
-            print("[FullyAsyncTrainer] Skip async rollout manager (use_trainer_do_validate=False)")
 
     async def fit(self):
         """
@@ -556,51 +524,6 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         )
         self.metrics_aggregator.reset()
 
-    def _maybe_log_val_generations(self, inputs, outputs, scores):
-        """Capture validation generations for deferred logging in _fit_validate.
-
-        When use_trainer_do_validate=True, the trainer also runs _validate(True) which
-        calls this method. We capture instead of logging immediately so that we can
-        merge with rollouter-side generations and log once with the correct step.
-        """
-        generations_to_log = self.config.trainer.log_val_generations
-        if generations_to_log == 0:
-            self._captured_val_generations = []
-            return
-
-        import numpy as np
-
-        samples = list(zip(inputs, outputs, scores, strict=True))
-        samples.sort(key=lambda x: x[0])
-
-        rng = np.random.RandomState(42)
-        rng.shuffle(samples)
-
-        self._captured_val_generations = samples[:generations_to_log]
-
-    async def _validate_process(self):
-        """Run trainer-side validation using async rollout manager"""
-        if self.config.async_training.use_trainer_do_validate:
-            print("[FullyAsyncTrainer] _validate_process")
-            from verl.utils.profiler import marked_timer
-
-            # Wake up rollouter replicas and sync weights
-            print("[FullyAsyncTrainer] wake up replicas before validation")
-            await self.colocate_checkpoint_manager.update_weights(global_steps=self.current_param_version)
-
-            with marked_timer("trainer/validate_time", self.timing_raw):
-                train_val_metrics = self._validate(True)
-
-            # Sleep rollouter replicas to free GPU memory for validation
-            print("[FullyAsyncTrainer] sleep replicas after validation")
-            await self.colocate_checkpoint_manager.sleep_replicas()
-
-            print(f"[FullyAsyncTrainer] validate timing: {self.timing_raw['trainer/validate_time']}")
-            return train_val_metrics
-        else:
-            print("[FullyAsyncTrainer] _validate_process without async_rollout_manager")
-            return None
-
     async def _fit_validate(self, val_before_train=False):
         if self.local_trigger_step != 1:
             return
@@ -614,51 +537,53 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         # Skip validation if not needed and not validation before training
         if not need_validate and not val_before_train:
             return
-
-        # Trigger rollouter validation and get future
-        val_future = self.rollouter.do_validate.remote()
-
-        # Run trainer-side validation
-        self._captured_val_generations = []
-        train_val_metrics = await self._validate_process()
-
-        # Wait for rollouter validation result and log
-        val_metrics: ValidateMetrics = await asyncio.wrap_future(val_future.future())
-        if train_val_metrics:
-            # Merge trainer and rollouter validation results
-            with marked_timer("timing_s/merge_val", self.timing_raw):
-                new_metrics = self._merge_validation_results(train_val_metrics, val_metrics.metrics)
-            if new_metrics:
-                self.logger.log(data=new_metrics, step=self.current_param_version)
-                pprint(
-                    f"[FullyAsyncTrainer] parameter version: {self.current_param_version} "
-                    f"Validation metrics: {new_metrics}, timing: {self.timing_raw['timing_s/merge_val']}"
-                )
+        # Execute validation
+        if self.config.async_training.use_trainer_do_validate:
+            await self._trainer_side_validate()
         else:
-            if val_metrics.metrics:
-                self.logger.log(data=val_metrics.metrics, step=self.current_param_version)
-                pprint(
-                    f"[FullyAsyncTrainer] parameter version: {self.current_param_version} "
-                    f"Validation metrics: {val_metrics.metrics}"
-                )
-        self.logger.log(data=val_metrics.timing_raw, step=self.current_param_version)
+            val_metrics = await self.rollouter.do_validate.remote()
+            self.logger.log(data=val_metrics, step=self.current_param_version)
 
-        # Merge and log validation generations from rollouter (and trainer if applicable)
-        generations_to_log = self.config.trainer.log_val_generations
-        if generations_to_log > 0:
-            import numpy as np
+    async def _trainer_side_validate(self):
+        """Run trainer-side validation using hybrid rollout replicas."""
+        print("[FullyAsyncTrainer] _trainer_side_validate === START ===")
+        validate_start = time.time()
+        # ================================================================
+        # Phase 1: Switch ALL trainer GPUs to ROLLOUT mode
+        # ================================================================
+        phase_1_start = time.time()
+        print("[FullyAsyncTrainer] Phase 1: Switching all GPUs to ROLLOUT mode")
+        await self.hybrid_checkpoint_manager.update_weights(global_steps=self.current_param_version)
+        await self.checkpoint_manager.abort_replicas()
+        await self.hybrid_checkpoint_manager.abort_replicas()
+        hybrid_replicas_dict = await self.rollouter.get_all_hybrid_replicas.remote()
+        hybrid_resource_ids = list(hybrid_replicas_dict.keys())
+        await self.rollouter.add_replicas.remote(hybrid_resource_ids)
+        await self.checkpoint_manager.resume_generation_replicas()
+        await self.hybrid_checkpoint_manager.resume_generation_replicas()
+        print(f"[FullyAsyncTrainer] Phase 1 done ({time.time() - phase_1_start:.2f}s)")
 
-            all_generations = list(self._captured_val_generations)
-            if val_metrics.val_generations:
-                all_generations.extend(val_metrics.val_generations)
-            if all_generations:
-                all_generations.sort(key=lambda x: x[0])
-                rng = np.random.RandomState(42)
-                rng.shuffle(all_generations)
-                all_generations = all_generations[:generations_to_log]
-                self.validation_generations_logger.log(
-                    self.config.trainer.logger, all_generations, self.current_param_version
-                )
+        # ================================================================
+        # Phase 2: Run validation via RPC to rollouter
+        # ================================================================
+        print("[FullyAsyncTrainer] Phase 2: Running validation")
+        val_metrics = await self.rollouter.do_validate.remote()
+        self.logger.log(data=val_metrics, step=self.current_param_version)
+
+        # ================================================================
+        # Phase 3: Switch hybrid GPUs back to TRAIN mode
+        # ================================================================
+        print("[FullyAsyncTrainer] Phase 3: Switching hybrid GPUs back to TRAIN mode")
+        await self.checkpoint_manager.abort_replicas()
+        await self.hybrid_checkpoint_manager.abort_replicas()
+        # Batch remove all hybrid replicas from the load balancer in a single RPC.
+        await self.rollouter.remove_replicas.remote(hybrid_resource_ids)
+        await self.hybrid_checkpoint_manager.sleep_replicas()
+        await self.checkpoint_manager.resume_generation_replicas()
+        await self.hybrid_checkpoint_manager.resume_generation_replicas()
+
+        total_time = time.time() - validate_start
+        print(f"[FullyAsyncTrainer] _trainer_side_validate === END === (total: {total_time:.2f}s)")
 
     def _fit_save_checkpoint(self, force=False):
         if self.current_param_version == self.last_ckpt_version:
@@ -810,10 +735,6 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             self.critic_wg.load_checkpoint(
                 critic_path, del_local_after_load=self.config.trainer.del_local_ckpt_after_load
             )
-
-        if self.colocate_checkpoint_manager:
-            await self.colocate_checkpoint_manager.update_weights(self.current_param_version)
-            await self.colocate_checkpoint_manager.sleep_replicas()
 
         return self.current_param_version
 

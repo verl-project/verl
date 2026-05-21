@@ -478,6 +478,21 @@ class SGLangHttpServer:
         if self.node_rank == 0:
             await self.tokenizer_manager.flush_cache()
 
+    async def release_kv_cache(self):
+        """Release only kv_cache GPU memory, keeping model weights intact."""
+        if self.node_rank != 0 or not self.config.free_cache_engine:
+            return
+        obj = ReleaseMemoryOccupationReqInput(tags=["kv_cache"])
+        await self.tokenizer_manager.release_memory_occupation(obj, None)
+
+    async def resume_kv_cache(self):
+        """Restore kv_cache GPU memory after a weight sync. Counterpart to release_kv_cache()."""
+        if self.node_rank != 0:
+            return
+        obj = ResumeMemoryOccupationReqInput(tags=["kv_cache"])
+        await self.tokenizer_manager.resume_memory_occupation(obj, None)
+        await self.tokenizer_manager.flush_cache()
+
     async def generate(
         self,
         prompt_ids: torch.Tensor,
@@ -599,10 +614,12 @@ class SGLangHttpServer:
                 # SGLang may return mismatched lengths (e.g. max_new_tokens=0
                 # produces a phantom logprob entry with empty output_ids), or
                 # an abort may leave an empty logprob payload.
-                assert not token_ids, (
-                    f"output_token_logprobs length ({len(output_token_logprobs)}) != "
-                    f"output_ids length ({len(token_ids)}) for request {request_id}"
-                )
+                if len(output_token_logprobs) != len(token_ids):
+                    logger.error(
+                        f"output_token_logprobs length ({len(output_token_logprobs)}) != "
+                        f"output_ids length ({len(token_ids)}) for request {request_id}"
+                    )
+                token_ids = []
                 log_probs = []
         else:
             token_ids = output["output_ids"]

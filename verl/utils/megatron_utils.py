@@ -43,7 +43,6 @@ import verl.utils.megatron.tensor_parallel as tp_utils
 from verl.utils import tensordict_utils as tu
 from verl.utils.device import get_device_id, get_device_name, get_torch_device
 from verl.utils.fs import local_mkdir_safe
-from verl.utils.megatron.dist_checkpointing import load_dist_checkpointing
 from verl.utils.model import normalize_model_name
 from verl.utils.torch_dtypes import PrecisionType
 from verl.workers.config import HFModelConfig, McoreEngineConfig
@@ -249,6 +248,9 @@ def make_megatron_module(
         if override_model_config.get("moe_config", {}).get("freeze_moe_router", False):
             post_model_creation_callbacks.append(freeze_moe_router)
         if provider is not None:
+            from megatron.bridge.peft.utils import create_peft_hook, load_peft_adapter_checkpoint
+            from megatron.bridge.training.utils.config_utils import create_ddp_config
+
             # When using PEFT with Megatron-Bridge, we must apply PEFT transformation
             # BEFORE wrapping the model in DDP. This is required because:
             # 1. PEFT freezes base model parameters (requires_grad=False)
@@ -259,66 +261,43 @@ def make_megatron_module(
             # Register PEFT transformation as pre-wrap hook if peft_cls is specified
             # This must happen BEFORE DDP wrapping to avoid KeyError with frozen parameters
             if peft_cls is not None:
-                from megatron.bridge.training.checkpointing import (
-                    _generate_model_state_dict,
-                    apply_peft_adapter_filter_to_state_dict,
-                )
-
                 from verl.utils.megatron_peft_utils import print_adapter_info
 
-                def peft_pre_wrap_hook(model):
-                    """Pre-wrap hook that applies PEFT transformation."""
-                    # Apply PEFT transformation - this will freeze base model and add adapters
-                    # The PEFT callable handles both freezing and transformation
-                    transformed_model = peft_cls(model, training=True)
+                provider.register_pre_wrap_hook(create_peft_hook(peft_cls, training=True))
 
-                    # Set parameters to save (adapter-only checkpointing)
-                    peft_cls.set_params_to_save(transformed_model)
+                adapter_path = peft_config.get("adapter_path", None)
+                if adapter_path:
 
-                    # Load adapter weights if adapter_path is specified
-                    adapter_path = getattr(peft_config, "adapter_path", None)
-                    if adapter_path is not None and adapter_path:
+                    def adapter_checkpoint_hook(model):
                         print(f"Loading adapter weights from: {adapter_path}")
-                        model_chunks = transformed_model if isinstance(transformed_model, list) else [transformed_model]
-                        sharded_state_dict = _generate_model_state_dict(model_chunks, {})
-                        sharded_state_dict = apply_peft_adapter_filter_to_state_dict(sharded_state_dict, peft_cls)
-                        loaded_state_dict = load_dist_checkpointing(sharded_state_dict, str(adapter_path))
-                        for vpp_rank, model_chunk in enumerate(model_chunks):
-                            model_key = "model" if len(model_chunks) == 1 else f"model{vpp_rank}"
-                            model_chunk.load_state_dict(loaded_state_dict[model_key], strict=False)
+                        load_peft_adapter_checkpoint(
+                            model,
+                            adapter_path,
+                            peft=peft_cls,
+                            strict=False,
+                        )
+                        return model
 
-                    # Print PEFT statistics
+                    provider.register_pre_wrap_hook(adapter_checkpoint_hook)
+
+                def peft_info_hook(model):
                     if torch.distributed.get_rank() == 0:
-                        print_adapter_info(transformed_model)
+                        print_adapter_info(model)
+                    return model
 
-                    return transformed_model
-
-                provider.register_pre_wrap_hook(peft_pre_wrap_hook)
+                provider.register_pre_wrap_hook(peft_info_hook)
 
             # Register post-creation callbacks (make_value_model, freeze_moe_router) as pre-wrap hooks
             for callback in post_model_creation_callbacks:
                 provider.register_pre_wrap_hook(callback)
 
             # Create DDP config if needed
-            ddp_config = None
-            if wrap_config.wrap_with_ddp:
-                from megatron.bridge.training.config import DistributedDataParallelConfig
-
-                ddp_config_dict = {
-                    "use_distributed_optimizer": wrap_config.use_distributed_optimizer,
-                }
-                if wrap_config.use_megatron_fsdp:
-                    ddp_config_dict["use_distributed_optimizer"] = True
-                    ddp_config_dict.setdefault("check_for_nan_in_grad", True)
-                    ddp_config_dict.setdefault("use_megatron_fsdp", True)
-                    ddp_config_dict.setdefault("data_parallel_sharding_strategy", "optim_grads_params")
-                    ddp_config_dict.setdefault("overlap_grad_reduce", True)
-                # Apply any DDP config overrides
-                if override_ddp_config is not None:
-                    ddp_config_dict.update(override_ddp_config)
-
-                ddp_config = DistributedDataParallelConfig(**ddp_config_dict)
-                ddp_config.finalize()
+            ddp_config = create_ddp_config(
+                wrap_with_ddp=wrap_config.wrap_with_ddp,
+                use_distributed_optimizer=wrap_config.use_distributed_optimizer,
+                use_megatron_fsdp=wrap_config.use_megatron_fsdp,
+                overrides=override_ddp_config,
+            )
 
             # Now call provide_distributed_model with all hooks registered
             # Hooks will be applied automatically before DDP wrapping

@@ -55,6 +55,7 @@ from verl.workers.rollout.vllm_rollout.utils import (
 
 _VLLM_VERSION = version.parse(vllm.__version__)
 
+
 if _VLLM_VERSION > version.parse("0.11.0"):
     from vllm.utils.argparse_utils import FlexibleArgumentParser
 
@@ -450,6 +451,8 @@ class vLLMHttpServer:
         request_id: str,
         image_data: Optional[list[Any]] = None,
         video_data: Optional[list[Any]] = None,
+        audio_data: Optional[list[Any]] = None,
+        mm_processor_kwargs: Optional[dict[str, Any]] = None,
         priority: int = 0,
     ) -> TokenOutput:
         """Generate sequence with token-in-token-out."""
@@ -493,8 +496,16 @@ class vLLMHttpServer:
             multi_modal_data["image"] = image_data
         if video_data is not None:
             multi_modal_data["video"] = video_data
+        if audio_data is not None:
+            multi_modal_data["audio"] = audio_data
 
-        prompt = TokensPrompt(prompt_token_ids=prompt_ids, multi_modal_data=multi_modal_data)
+        prompt_kwargs = {"prompt_token_ids": prompt_ids, "multi_modal_data": multi_modal_data}
+        if mm_processor_kwargs:
+            prompt_kwargs["mm_processor_kwargs"] = mm_processor_kwargs
+        try:
+            prompt = TokensPrompt(**prompt_kwargs)
+        except TypeError:
+            prompt = prompt_kwargs
 
         # Add lora request
         lora_request = None
@@ -519,6 +530,17 @@ class vLLMHttpServer:
         async for output in generator:
             final_res = output
         assert final_res is not None
+
+        # Handle abort case: when the request is aborted by pause_generation(abort),
+        # outputs may be empty. Return empty results with stop_reason="aborted"
+        # instead of crashing with "IndexError: list index out of range".
+        if not final_res.outputs:
+            return TokenOutput(
+                token_ids=[],
+                log_probs=None,
+                routed_experts=None,
+                stop_reason="aborted",
+            )
 
         extra_fields = {"global_steps": self.global_steps}
         extract_prompt_logprobs(
@@ -583,6 +605,22 @@ class vLLMHttpServer:
         elif self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip sleep in standalone mode")
 
+    async def clear_kv_cache(self):
+        if self.node_rank == 0:
+            await self.engine.reset_prefix_cache()
+
+    async def release_kv_cache(self):
+        """Release only kv_cache GPU memory, keeping model weights intact.
+        # TODO: support true release of kv_cache
+        """
+        if self.node_rank != 0 or not self.config.free_cache_engine:
+            return
+
+    async def resume_kv_cache(self):
+        """Restore kv_cache GPU memory after a weight sync. Counterpart to release_kv_cache()."""
+        if self.node_rank != 0:
+            return
+
     async def start_profile(self, **kwargs):
         if (
             self.profiler_controller.check_enable()
@@ -598,10 +636,6 @@ class vLLMHttpServer:
             and self.profiler_controller.is_discrete_mode()
         ):
             await self.engine.stop_profile()
-
-    async def clear_kv_cache(self):
-        if self.node_rank == 0:
-            await self.engine.reset_prefix_cache()
 
     async def set_global_steps(self, global_steps: int):
         """Set the global steps of the model weights."""
@@ -1023,6 +1057,12 @@ class vLLMReplica(RolloutReplica):
                 return r
 
         return {"aborted": False, "request_id": request_id, "error": "Request not found on any server"}
+
+    async def release_kv_cache(self):
+        # Drain all in-flight requests so that vLLM worker threads go idle
+        # before we touch engine.release_kv_cache()
+        await self.servers[0].wait_for_requests_to_drain.remote()
+        await asyncio.gather(*[server.release_kv_cache.remote() for server in self.servers])
 
     # -----------------------------------------------------------------------
     # Hook methods for subclass overrides

@@ -25,14 +25,12 @@ from typing import Any, Optional
 from uuid import uuid4
 
 import ray
-import torch
 from cachetools import LRUCache
 from omegaconf import DictConfig
 
 from verl.single_controller.ray.base import RayResourcePool, RayWorkerGroup
 from verl.utils.ray_utils import auto_await
 from verl.utils.rollout_trace import rollout_trace_op
-from verl.utils.tokenizer import normalize_token_ids
 from verl.workers.rollout.replica import RolloutReplica, TokenOutput, get_rollout_replica_class
 from verl.workers.rollout.utils import update_prometheus_config
 
@@ -44,45 +42,105 @@ DEFAULT_ROUTING_CACHE_SIZE = 10000
 
 @ray.remote
 class GlobalRequestLoadBalancer:
-    """Global sticky-session + in-flight load balancer shared by all AgentLoopWorkers."""
+    """Global sticky-session + in-flight load balancer shared by all AgentLoopWorkers.
+
+    When a sticky session points to a removed server, the cache entry is
+    automatically invalidated and a new server is selected.
+
+    Key features:
+    - **Atomic acquire**: ``acquire_server()`` returns ``(server_id, handle)``
+    - **Sticky Session**: Uses LRUCache to map request_id → server_id, ensuring
+      multi-turn conversations route to the same server.
+    - **Least-loaded Selection**: When no sticky session exists, selects the
+      server with the fewest in-flight requests.
+    - **Dynamic Server Management**: Supports add/remove servers at runtime
+      for hybrid scaling.
+    """
 
     def __init__(self, servers: dict[str, ray.actor.ActorHandle], max_cache_size: int = DEFAULT_ROUTING_CACHE_SIZE):
         if not servers:
-            raise ValueError("server must be non-empty")
+            raise ValueError("servers must be non-empty")
 
-        self._server = servers
+        self._servers: dict[str, ray.actor.ActorHandle] = dict(servers)
         self._inflight_requests: dict[str, int] = {sid: 0 for sid in servers}
         self._request_id_to_server: LRUCache = LRUCache(maxsize=max_cache_size)
 
-    def acquire_server(self, request_id: str) -> str:
-        """Acquire a server for the given request, reusing the same server for multi-turn conversations."""
-        # request-level sticky (multi-turn: same conversation -> same server)
+    def acquire_server(self, request_id: str) -> tuple[str, ray.actor.ActorHandle]:
+        """Acquire a server for the given request (sticky + least-loaded).
+
+        Returns:
+            A tuple of ``(server_id, actor_handle)`` in a single atomic call.
+        """
+        # Try sticky session first
         if request_id in self._request_id_to_server:
             server_id = self._request_id_to_server[request_id]
-            self._inflight_requests[server_id] += 1
-            return server_id
+            # Check if server is still in the active pool
+            if server_id in self._inflight_requests:
+                self._inflight_requests[server_id] += 1
+                return server_id, self._servers[server_id]
+            # Server was removed, clear stale cache entry and re-select
+            del self._request_id_to_server[request_id]
 
-        # new request: route to least loaded server
+        # Select new server (least-loaded among available)
+        if not self._inflight_requests:
+            raise RuntimeError("No available servers in load balancer")
+
         server_id = min(self._inflight_requests, key=self._inflight_requests.get)
         self._request_id_to_server[request_id] = server_id
         self._inflight_requests[server_id] += 1
-        return server_id
+        return server_id, self._servers[server_id]
 
     def release_server(self, server_id: str) -> None:
-        """Release a server after a request completes, decrementing its inflight count."""
+        """Release a server after a request completes."""
         if server_id not in self._inflight_requests:
-            raise ValueError(f"Invalid server_id for release: {server_id}")
-        if self._inflight_requests[server_id] <= 0:
-            raise ValueError(f"Release called with no inflight requests on server {server_id}")
-        self._inflight_requests[server_id] -= 1
+            return
+        if self._inflight_requests[server_id] > 0:
+            self._inflight_requests[server_id] -= 1
 
     def add_servers(self, servers: dict[str, ray.actor.ActorHandle]) -> None:
-        """Add new servers to the server handles."""
-        raise NotImplementedError("Not implemented")
+        """Atomically add multiple servers to the load balancer pool.
+
+        This is more efficient than calling :meth:`add_server` in a loop
+        because it performs a single bulk update on the internal state.
+
+        Args:
+            servers: Dict mapping server_id → actor_handle for all servers
+                to register.
+        """
+        for sid, handle in servers.items():
+            self._inflight_requests[sid] = 0
+            self._servers[sid] = handle
+        logger.info(f"[GlobalLoadBalancer] added {len(servers)} servers")
 
     def remove_servers(self, server_ids: list[str]) -> None:
-        """Remove servers from the server handles."""
-        raise NotImplementedError("Not implemented")
+        """Atomically remove multiple servers from the load balancer pool.
+
+        More efficient than calling :meth:`remove_server` in a loop.
+
+        Args:
+            server_ids: List of server identifiers to remove.
+        """
+        for sid in server_ids:
+            self._inflight_requests.pop(sid, None)
+            self._servers.pop(sid, None)
+        logger.info(f"[GlobalLoadBalancer] removed {len(server_ids)} servers")
+
+    def get_inflight_count(self, server_id: str) -> int:
+        """Get number of in-flight requests for a server."""
+        return self._inflight_requests.get(server_id, 0)
+
+    def get_all_servers(self) -> list[str]:
+        """Get list of all active server IDs."""
+        return list(self._inflight_requests.keys())
+
+    def get_status(self) -> dict:
+        """Return current load balancer state for debugging."""
+        return {
+            "servers": dict(self._inflight_requests),
+            "total_inflight": sum(self._inflight_requests.values()),
+            "active_servers": len(self._inflight_requests),
+            "registered_handles": list(self._servers.keys()),
+        }
 
 
 class LLMServerClient:
@@ -95,26 +153,22 @@ class LLMServerClient:
     def __init__(
         self,
         config: DictConfig,
-        servers: dict[str, ray.actor.ActorHandle],
         load_balancer_handle: ray.actor.ActorHandle,
+        **kwargs,
     ):
         """Initialize the LLMServerClient.
 
         Args:
             config (DictConfig): whole config for main entrypoint.
-            servers (dict[str, ray.actor.ActorHandle]): handle for each LLM server.
-            load_balancer_handle (ray.actor.ActorHandle): shared global load balancer actor.
+            load_balancer_handle (ray.actor.ActorHandle): shared global load balancer actor
+                that also holds the server-handle registry.
         """
         self.config = config
         self._load_balancer = load_balancer_handle
-        self._server_id_to_handle: dict[str, ray.actor.ActorHandle] = servers
 
     async def _acquire_server(self, request_id: str) -> tuple[str, ray.actor.ActorHandle]:
-        server_id = await self._load_balancer.acquire_server.remote(request_id=request_id)
-        handle = self._server_id_to_handle.get(server_id)
-        if handle is None:
-            raise RuntimeError(f"Unknown server_id returned by load balancer: {server_id}")
-        return server_id, handle
+        # Atomic acquire: returns (server_id, handle) in one Ray RPC.
+        return await self._load_balancer.acquire_server.remote(request_id=request_id)
 
     def _release_server(self, server_id: str) -> None:
         # Fire-and-forget: release is just a counter decrement, no need to await.
@@ -130,6 +184,8 @@ class LLMServerClient:
         sampling_params: dict[str, Any],
         image_data: Optional[list[Any]] = None,
         video_data: Optional[list[Any]] = None,
+        audio_data: Optional[list[Any]] = None,
+        mm_processor_kwargs: Optional[dict[str, Any]] = None,
         **kwargs: Any,
     ) -> TokenOutput:
         """Generate tokens from prompt ids.
@@ -144,110 +200,23 @@ class LLMServerClient:
         """
         server_id, server = await self._acquire_server(request_id)
         try:
+            multimodal_kwargs = {}
+            if audio_data is not None:
+                multimodal_kwargs["audio_data"] = audio_data
+            if mm_processor_kwargs:
+                multimodal_kwargs["mm_processor_kwargs"] = mm_processor_kwargs
             output: TokenOutput = await server.generate.remote(
                 request_id=uuid4().hex,  # use new request_id for each turn
                 prompt_ids=prompt_ids,
                 sampling_params=sampling_params,
                 image_data=image_data,
                 video_data=video_data,
+                **multimodal_kwargs,
                 **kwargs,
             )
             return output
         finally:
             self._release_server(server_id)
-
-
-class FullyLLMServerClient(LLMServerClient):
-    """FullyLLMServerClient supports resume generation on partial rollout, making rollout interruption
-    invisible to the AgentLoop.
-    """
-
-    @rollout_trace_op
-    async def generate(
-        self,
-        request_id,
-        *,
-        prompt_ids: list[int],
-        sampling_params: dict[str, Any],
-        image_data: Optional[list[Any]] = None,
-        video_data: Optional[list[Any]] = None,
-    ) -> TokenOutput:
-        """Generate tokens from prompt ids.
-
-        Args:
-            request_id (str): request id for sticky session.
-            prompt_ids (List[int]): List of prompt token ids.
-            sampling_params (Dict[str, Any]): Sampling parameters for the chat completion.
-            image_data (Optional[List[Any]]): Image data for the chat completion.
-            video_data (Optional[List[Any]]): Video data for the chat completion.
-
-        Returns:
-            TokenOutput: token output
-        """
-        prompt_ids = normalize_token_ids(prompt_ids)
-
-        limit_key = None
-        if "max_tokens" in sampling_params:
-            limit_key = "max_tokens"
-        elif "max_new_tokens" in sampling_params:
-            limit_key = "max_new_tokens"
-        original_max_tokens = sampling_params.get(limit_key) if limit_key else None
-
-        final_output = TokenOutput(
-            token_ids=[],
-            log_probs=[],
-            num_preempted=0,
-        )
-        min_global_steps, max_global_steps = None, None
-
-        while True:
-            # 1. generate tokens
-            output = await super().generate(
-                request_id=request_id,
-                prompt_ids=prompt_ids + final_output.token_ids,
-                sampling_params=sampling_params,
-                image_data=image_data,
-                video_data=video_data,
-            )
-
-            # 2. merge output into final_output
-            final_output.token_ids.extend(output.token_ids)
-            if output.log_probs is not None:
-                final_output.log_probs.extend(output.log_probs)
-            # On partial rollout resume the model version may differ, so keep
-            # existing routing and only append routing for newly generated tokens.
-            if output.routed_experts is not None and len(output.token_ids) > 0:
-                if final_output.routed_experts is None:
-                    final_output.routed_experts = output.routed_experts
-                else:
-                    final_output.routed_experts = torch.cat(
-                        [final_output.routed_experts, output.routed_experts[-len(output.token_ids) :]],
-                        dim=0,
-                    )
-            if output.num_preempted is not None:
-                final_output.num_preempted += output.num_preempted
-            final_output.stop_reason = output.stop_reason
-
-            # update model weights version
-            global_steps = output.extra_fields.get("global_steps", None)
-            if min_global_steps is None:
-                min_global_steps = global_steps
-            max_global_steps = global_steps
-
-            # 3. update max_new_tokens
-            if original_max_tokens is not None:
-                sampling_params[limit_key] = original_max_tokens - len(final_output.token_ids)
-                if len(final_output.token_ids) >= original_max_tokens:
-                    final_output.stop_reason = "length"
-                    break
-
-            # 4. check stop reason
-            if output.stop_reason not in ("aborted", "abort") or not self.config.async_training.partial_rollout:
-                break
-        final_output.extra_fields["global_steps"] = global_steps
-        final_output.extra_fields["min_global_steps"] = min_global_steps
-        final_output.extra_fields["max_global_steps"] = max_global_steps
-        return final_output
 
 
 class LLMServerManager:
@@ -293,8 +262,16 @@ class LLMServerManager:
         await instance._init_global_load_balancer()
         return instance
 
-    async def _initialize_llm_servers(self):
-        """Initialize the LLM server replicas."""
+    async def _initialize_llm_servers(self, start_rank: int = 0):
+        """Initialize the LLM server replicas.
+
+        Args:
+            start_rank: First ``replica_rank`` to assign.  Defaults to 0 so that
+                existing callers are unaffected.  Subclasses (e.g.
+                ``FullyAsyncLLMServerManager``) may pass a non-zero value to avoid
+                Ray named-actor collisions when hybrid and standalone replicas
+                coexist.
+        """
         rollout_world_size = (
             self.rollout_config.tensor_model_parallel_size
             * self.rollout_config.data_parallel_size
@@ -325,7 +302,7 @@ class LLMServerManager:
 
         self.rollout_replicas = [
             self.rollout_replica_class(
-                replica_rank=replica_rank,
+                replica_rank=start_rank + replica_rank,
                 config=self.rollout_config,
                 model_config=self.model_config,
                 gpus_per_node=self.rollout_config.n_gpus_per_node,
@@ -362,19 +339,19 @@ class LLMServerManager:
             max_cache_size=DEFAULT_ROUTING_CACHE_SIZE,
         )
 
-    def get_client(self, fully_async: bool = False) -> LLMServerClient:
+    def get_client(self, client_cls=LLMServerClient, **kwargs) -> LLMServerClient:
         """Get the LLMServerClient to request LLM server replicas.
 
         Args:
-            fully_async (bool): Whether to return the FullyLLMServerClient.
+            client_cls: The client class to instantiate (default: ``LLMServerClient``).
+                Pass ``FullyAsyncLLMServerClient`` for abort-resume support.
+            **kwargs: Forwarded to the client constructor.
         """
-        servers = dict(zip(self.server_addresses, self.server_handles, strict=True))
-        if not fully_async:
-            return LLMServerClient(config=self.config, servers=servers, load_balancer_handle=self.global_load_balancer)
-        else:
-            return FullyLLMServerClient(
-                config=self.config, servers=servers, load_balancer_handle=self.global_load_balancer
-            )
+        return client_cls(
+            config=self.config,
+            load_balancer_handle=self.global_load_balancer,
+            **kwargs,
+        )
 
     def get_addresses(self) -> list[str]:
         """Get the OpenAI chat completion API http addresses of the LLM server replicas."""
@@ -383,11 +360,6 @@ class LLMServerManager:
     def get_replicas(self) -> list[RolloutReplica]:
         """Get the LLM server replicas."""
         return self.rollout_replicas
-
-    @auto_await
-    async def clear_kv_cache(self):
-        """Clear all rollout kv cache, but don`t sleep."""
-        await asyncio.gather(*[replica.clear_kv_cache() for replica in self.rollout_replicas])
 
     @auto_await
     async def start_profile(self, **kwargs):

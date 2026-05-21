@@ -307,26 +307,69 @@ global_profiler:
       # Whether to fail on unknown stage or missing msprobe
       strict: False
 
-# configs for TransferQueue
+# TransferQueue configuration: asynchronous streaming data management system
 transfer_queue:
 
   # Whether to enable TransferQueue
   enable: False
 
-  # Pluggable storage/transport backend of TransferQueue
+  # Metrics configuration for TransferQueue
+  metrics:
+
+    # If true, exposes Prometheus-style metrics via an HTTP /metrics endpoint.
+    # If false, metrics are reported through the logger only.
+    enabled: false
+
+    # HTTP port for the /metrics endpoint (0 = auto-assign a free port)
+    port: 0
+
+  # Pluggable storage and transport backend for TransferQueue
   backend:
 
-    # SimpleStorage with ZeroMQ
+    # Storage backend type. Options: SimpleStorage, MooncakeStore (experimental)
     storage_backend: SimpleStorage
 
-    # Backend specific configs
+    # Backend-specific configurations
+    # SimpleStorage: ZMQ-based in-memory storage for out-of-the-box usage
     SimpleStorage:
-      
-        # Maximum number of samples to hold
-        total_storage_size: 100000
 
-        # Number of distributed storage units
-        num_data_storage_units: 8
+      # Maximum number of experience samples to hold across all storage units
+      total_storage_size: 100000
+
+      # Number of distributed storage units.
+      # Recommended: >= 2 x number of nodes for load balancing and fault tolerance.
+      num_data_storage_units: 8
+
+    # MooncakeStore (experimental): high-performance KV-based hierarchical storage
+    # that supports RDMA transport between GPU and DRAM.
+    MooncakeStore:
+
+      # Whether TransferQueue should automatically start the Mooncake metadata server.
+      # WARNING: When set to `true`, TQ will attempt to terminate any existing mooncake_master process.
+      auto_init: false
+
+      # Address of the metadata coordination server.
+      metadata_server: localhost:50123
+
+      # Address of the Mooncake master server.
+      master_server_address: localhost:50124
+
+      # Local host address visible to the Mooncake cluster.
+      # Set to "" to auto-detect using Ray's node IP.
+      local_hostname: localhost
+
+      # Transport protocol: tcp or rdma.
+      protocol: tcp
+
+      # Global memory segment size in bytes **per client** for mounting (default: 4GB)
+      global_segment_size: 4294967296
+
+      # Local buffer size in bytes **per client** (default: 1GB)
+      local_buffer_size: 1073741824
+
+      # Network device name for RDMA.
+      # Leave empty to let Mooncake auto-select available devices.
+      device_name: ""
 
 # configs related to ray
 ray_kwargs:

@@ -167,6 +167,14 @@ class MegatronEngine(BaseEngine):
         self.dtype = PrecisionType.to_dtype(self.param_dtype)
 
         override_transformer_config = mapping_string_to_attn_backend({**self.engine_config.override_transformer_config})
+        if self.engine_config.dynamic_context_parallel:
+            override_transformer_config["max_seqlen_per_dp_cp_rank"] = self.engine_config.max_seqlen_per_dp_cp_rank
+            # note(baiyan): we must set the transformer_config.dynamic_context_parallel to False
+            # because of the bad coupling design in Megatron-LM
+            # https://github.com/xiaoyao0115/Megatron-LM/blob/88733ab6614e3e91b9d095172f41e7d8b5d8e9d4/megatron/core/pipeline_parallel/dynamic_cp_schedule.py#L552-L553
+            # but it does not affect the functionality of dynamic CP, so we can use it to avoid the coupling.
+            override_transformer_config["dynamic_context_parallel"] = False
+            override_transformer_config["context_parallel_size"] = mpu.get_data_parallel_world_size()
 
         self.provider = None
         self.vanilla_bridge = self.engine_config.vanilla_mbridge
@@ -175,14 +183,6 @@ class MegatronEngine(BaseEngine):
             from verl.models.mcore.mbridge import AutoBridge
 
             bridge = AutoBridge.from_config(self.model_config.hf_config, dtype=self.param_dtype)
-            if self.engine_config.dynamic_context_parallel:
-                override_transformer_config["max_seqlen_per_dp_cp_rank"] = self.engine_config.max_seqlen_per_dp_cp_rank
-                # note(baiyan): we must set the transformer_config.dynamic_context_parallel to False
-                # because of the bad coupling design in Megatron-LM
-                # https://github.com/xiaoyao0115/Megatron-LM/blob/88733ab6614e3e91b9d095172f41e7d8b5d8e9d4/megatron/core/pipeline_parallel/dynamic_cp_schedule.py#L552-L553
-                # but it does not affect the functionality of dynamic CP, so we can use it to avoid the coupling.
-                override_transformer_config["dynamic_context_parallel"] = False
-                override_transformer_config["context_parallel_size"] = mpu.get_data_parallel_world_size()
             bridge.set_extra_args(**override_transformer_config)
             tf_config = bridge.config
             tf_config.fp16 = self.param_dtype == torch.float16
@@ -197,44 +197,36 @@ class MegatronEngine(BaseEngine):
             # Get Megatron provider and configure it
             provider = bridge.to_megatron_provider(load_weights=False)
 
-            # In case of invalid overrides, we need to make sure some critical params are set correctly
-            provider.params_dtype = self.param_dtype
-
-            # Ensure dtype settings propagate to Megatron-Bridge/TE
-            provider.fp16 = self.param_dtype == torch.float16
-            provider.bf16 = self.param_dtype == torch.bfloat16
-
-            # Pass distributed info
-            provider.tensor_model_parallel_size = self.engine_config.tensor_model_parallel_size
-            provider.pipeline_model_parallel_size = self.engine_config.pipeline_model_parallel_size
-            provider.expert_model_parallel_size = self.engine_config.expert_model_parallel_size
-            provider.expert_tensor_parallel_size = self.engine_config.expert_tensor_parallel_size
-            provider.virtual_pipeline_model_parallel_size = self.engine_config.virtual_pipeline_model_parallel_size
-            provider.context_parallel_size = self.engine_config.context_parallel_size
-            provider.sequence_parallel = self.engine_config.sequence_parallel
-
             # Match verl implementation (need variable_seq_lengths)
             from megatron.core.transformer.enums import AttnBackend
 
-            provider.attention_backend = AttnBackend.flash
-            provider.variable_seq_lengths = True
-            provider.moe_token_dispatcher_type = "alltoall"
-            provider.moe_router_load_balancing_type = "none"
-
-            # Apply QAT: set quantization layer spec and patch Megatron-Bridge
-            if self._qat_enabled:
-                from verl.utils.modelopt import patch_provider_for_qat
-
-                patch_provider_for_qat(provider)
-
-            # Apply transformer config overrides
+            provider_overrides = {
+                "tensor_model_parallel_size": self.engine_config.tensor_model_parallel_size,
+                "pipeline_model_parallel_size": self.engine_config.pipeline_model_parallel_size,
+                "expert_model_parallel_size": self.engine_config.expert_model_parallel_size,
+                "expert_tensor_parallel_size": self.engine_config.expert_tensor_parallel_size,
+                "virtual_pipeline_model_parallel_size": self.engine_config.virtual_pipeline_model_parallel_size,
+                "context_parallel_size": self.engine_config.context_parallel_size,
+                "sequence_parallel": self.engine_config.sequence_parallel,
+                "variable_seq_lengths": True,
+                "attention_backend": AttnBackend.flash,
+                "moe_token_dispatcher_type": "alltoall",
+                "moe_router_load_balancing_type": "none",
+            }
             for key, value in override_transformer_config.items():
-                setattr(provider, key, value)
-
+                provider_overrides[key] = value
             if self.enable_routing_replay:
-                provider.enable_routing_replay = True
+                provider_overrides["enable_routing_replay"] = True
 
-            provider.finalize()
+            if self._qat_enabled:
+                from megatron.bridge.models.gpt_provider import modelopt_transformer_layer_spec
+
+                provider.transformer_layer_spec = modelopt_transformer_layer_spec
+
+            provider.apply_overrides_and_finalize(
+                dtype=self.param_dtype,
+                overrides=provider_overrides,
+            )
             self.provider = provider
             tf_config = None  # Will be set after model creation
         self.bridge = bridge

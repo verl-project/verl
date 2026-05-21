@@ -56,6 +56,8 @@ class AgentData:
         messages: list[dict[str, Any]],
         image_data: list[Image.Image],
         video_data: list[tuple[torch.Tensor, dict[str, Any]]],
+        audio_data: Optional[list[Any]],
+        mm_processor_kwargs: Optional[dict[str, Any]],
         metrics: dict[str, Any],
         request_id: str,
         tools_kwargs: dict[str, Any],
@@ -63,6 +65,8 @@ class AgentData:
         self.messages = messages
         self.image_data = image_data
         self.video_data = video_data
+        self.audio_data = audio_data
+        self.mm_processor_kwargs = mm_processor_kwargs or {}
         self.metrics = metrics
         self.request_id = request_id
         self.tools_kwargs = tools_kwargs
@@ -115,10 +119,12 @@ class ToolAgentLoop(AgentLoopBase):
     async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
         messages = list(kwargs["raw_prompt"])
 
-        # extract images and videos from messages
-        multi_modal_data = await self.process_vision_info(messages)
+        # extract multimodal inputs from messages
+        multi_modal_data = await self.process_multi_modal_info(messages)
         images = multi_modal_data.get("images")
         videos = multi_modal_data.get("videos")
+        audios = multi_modal_data.get("audios")
+        mm_processor_kwargs = self._get_mm_processor_kwargs(audios)
 
         metrics = {}
         request_id = uuid4().hex
@@ -128,6 +134,8 @@ class ToolAgentLoop(AgentLoopBase):
             messages=messages,
             image_data=images,
             video_data=videos,
+            audio_data=audios,
+            mm_processor_kwargs=mm_processor_kwargs,
             metrics=metrics,
             request_id=request_id,
             tools_kwargs=tools_kwargs,
@@ -167,12 +175,15 @@ class ToolAgentLoop(AgentLoopBase):
             multi_modal_data["images"] = agent_data.image_data
         if agent_data.video_data is not None:
             multi_modal_data["videos"] = agent_data.video_data
+        if agent_data.audio_data is not None:
+            multi_modal_data["audios"] = agent_data.audio_data
 
         output: AgentLoopOutput = AgentLoopOutput(
             prompt_ids=prompt_ids,
             response_ids=response_ids[: self.response_length],
             response_mask=agent_data.response_mask[: self.response_length],
             multi_modal_data=multi_modal_data,
+            mm_processor_kwargs=agent_data.mm_processor_kwargs,
             response_logprobs=agent_data.response_logprobs[: self.response_length]
             if agent_data.response_logprobs
             else None,
@@ -196,6 +207,8 @@ class ToolAgentLoop(AgentLoopBase):
             tools=schemas,
             images=agent_data.image_data,
             videos=agent_data.video_data,
+            audios=agent_data.audio_data,
+            mm_processor_kwargs=agent_data.mm_processor_kwargs,
         )
         agent_data.prompt_ids = prompt_ids
         return AgentState.GENERATING
@@ -204,6 +217,11 @@ class ToolAgentLoop(AgentLoopBase):
         self, agent_data: AgentData, sampling_params: dict[str, Any], ignore_termination: bool = False
     ) -> AgentState:
         """Handle the generating state: generate model response and check for tool calls."""
+        # Inject tool parser stop tokens so generation halts after each tool call
+        if self.tool_parser.stop_token_ids:
+            stop_token_ids = list(set((sampling_params.get("stop_token_ids") or []) + self.tool_parser.stop_token_ids))
+            sampling_params = {**sampling_params, "stop_token_ids": stop_token_ids}
+
         with simple_timer("generate_sequences", agent_data.metrics):
             output: TokenOutput = await self.server_manager.generate(
                 request_id=agent_data.request_id,
@@ -211,6 +229,8 @@ class ToolAgentLoop(AgentLoopBase):
                 sampling_params=sampling_params,
                 image_data=agent_data.image_data,
                 video_data=agent_data.video_data,
+                audio_data=agent_data.audio_data,
+                mm_processor_kwargs=agent_data.mm_processor_kwargs,
             )
         # first time to set num_preempted
         if agent_data.metrics.get("num_preempted") is None:
@@ -327,6 +347,22 @@ class ToolAgentLoop(AgentLoopBase):
             response_ids = await self.loop.run_in_executor(
                 None, lambda: self.tokenizer.encode(tool_response_text, add_special_tokens=False)
             )
+        elif self.tool_parser_name == "gemma4":
+            # Gemma4's chat template drops tool responses when passed without the preceding
+            # assistant tool_call message. Manually format the response tokens.
+            # Format: <|tool_response>response:func_name{value:<|"|>content<|"|>}<tool_response|>
+            parts = []
+            for msg, name in zip(add_messages, tool_call_names, strict=True):
+                content = msg.get("content", "")
+                if isinstance(content, list):
+                    content = "".join([item.get("text", "") for item in content if item.get("type") == "text"])
+                if isinstance(content, list):
+                    content = "".join([item.get("text", "") for item in content if item.get("type") == "text"])
+                parts.append(f'<|tool_response>response:{name}{{value:<|"|>{content}<|"|>}}<tool_response|>')
+            tool_response_text = "".join(parts)
+            response_ids = await self.loop.run_in_executor(
+                None, lambda: self.tokenizer.encode(tool_response_text, add_special_tokens=False)
+            )
         else:
             # Note that we have to pass None to the images and videos if there are no new images / videos
             # to stay compatible with downstream image processing logic!
@@ -416,9 +452,9 @@ class ToolAgentLoop(AgentLoopBase):
         tool_response_text = tool_execution_response.text
         if tool_response_text and len(tool_response_text) > self.max_tool_response_length:
             if self.tool_response_truncate_side == "left":
-                tool_response_text = tool_response_text[: self.max_tool_response_length] + "...(truncated)"
-            elif self.tool_response_truncate_side == "right":
                 tool_response_text = "(truncated)..." + tool_response_text[-self.max_tool_response_length :]
+            elif self.tool_response_truncate_side == "right":
+                tool_response_text = tool_response_text[: self.max_tool_response_length] + "...(truncated)"
             else:
                 length = self.max_tool_response_length // 2
                 tool_response_text = tool_response_text[:length] + "...(truncated)..." + tool_response_text[-length:]
