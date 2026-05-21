@@ -232,8 +232,6 @@ def _build_mtp_loss_mask_nested(response_mask, input_ids_lengths, response_atten
         )
         batch_size = response_mask.shape[0]
         response_lengths = response_attention_mask.to(torch.int32).sum(dim=-1).tolist()
-        response_offsets = None
-        response_values = None
 
     assert len(input_ids_lengths) == batch_size, (
         f"len(input_ids_lengths)={len(input_ids_lengths)} != batch_size={batch_size}"
