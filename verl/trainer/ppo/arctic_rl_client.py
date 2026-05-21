@@ -461,7 +461,7 @@ class ArcticRLClientWrapper(RemoteBackend):
         return step_response
 
     async def save_checkpoint(self):
-        return await asyncio.to_thread(self._client.save_checkpoint)
+        return await self._client.save_checkpoint()
 
     async def update_weights(self):
         return await self._client.sync_weights()
