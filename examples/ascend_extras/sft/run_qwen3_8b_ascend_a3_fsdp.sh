@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# SFT | GSM8K | FSDP engine | Ascend A3 910C NPU (16 NPUs per node)
+# SFT | GSM8K | FSDP engine | Ascend A3 NPU (16 NPUs per node)
 
 # Examples:
 #   # plain SFT on Ascend A3 910C
-#   bash run_qwen3_8b_910c_fsdp.sh
+#   bash run_qwen3_8b_ascend_a3_fsdp.sh
 
 set -x
 
