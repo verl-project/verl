@@ -1,4 +1,5 @@
 import sys
+import types
 from unittest.mock import MagicMock, patch
 
 from verl.utils.tracking import ValidationGenerationsLogger
@@ -6,6 +7,8 @@ from verl.utils.tracking import ValidationGenerationsLogger
 
 def test_validation_generations_logger_logs_trackio_traces():
     mock_trackio = MagicMock()
+    mock_trackio.context_vars = types.SimpleNamespace(current_run=MagicMock())
+    mock_trackio.context_vars.current_run.get.return_value = None
     mock_trackio.Trace.side_effect = lambda messages, metadata=None: {
         "_type": "trackio.trace",
         "messages": messages,

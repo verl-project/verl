@@ -82,9 +82,11 @@ class Tracking:
 
         if "trackio" in default_backend:
             import trackio
+            from trackio import context_vars
 
-            trackio.init(project=project_name, name=experiment_name, config=config)
-            self.logger["trackio"] = trackio
+            if context_vars.current_run.get() is None:
+                trackio.init(project=project_name, name=experiment_name, config=config)
+            self.logger["trackio"] = _TrackioLoggingAdapter(trackio)
 
         if "mlflow" in default_backend:
             import os
@@ -250,6 +252,20 @@ class ClearMLLogger:
 
     def finish(self):
         self._task.close()
+
+
+class _TrackioLoggingAdapter:
+    def __init__(self, trackio):
+        self.trackio = trackio
+
+    def log(self, data, step):
+        self.trackio.log(data, step=step)
+
+    def finish(self):
+        from trackio import context_vars
+
+        if context_vars.current_run.get() is not None:
+            self.trackio.finish()
 
 
 class FileLogger:

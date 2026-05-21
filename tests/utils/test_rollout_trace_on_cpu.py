@@ -14,6 +14,7 @@
 
 import os
 import sys
+import types
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -47,6 +48,8 @@ def mock_weave_client():
 def mock_trackio_client():
     """Mocks the trackio module, yielding the mock module."""
     mock_trackio = MagicMock()
+    mock_trackio.context_vars = types.SimpleNamespace(current_run=MagicMock())
+    mock_trackio.context_vars.current_run.get.return_value = None
     mock_trackio.Trace.side_effect = lambda messages, metadata=None: {
         "_type": "trackio.trace",
         "messages": messages,

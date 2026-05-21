@@ -102,8 +102,10 @@ class RolloutTraceConfig:
             mlflow.set_experiment(project_name)
         elif backend == "trackio":
             import trackio
+            from trackio import context_vars
 
-            trackio.init(project=project_name, name=experiment_name, config={"framework": "verl"})
+            if context_vars.current_run.get() is None:
+                trackio.init(project=project_name, name=experiment_name, config={"framework": "verl"})
             config.client = trackio
         else:
             config.client = None
