@@ -8,7 +8,6 @@
 set -x
 
 # ---- Ascend A3 910C fixed config ----
-export PYTHONPATH=./verl:$PYTHONPATH
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
 nproc_per_node=16
 master_port=$(shuf -i 20000-65535 -n 1)
