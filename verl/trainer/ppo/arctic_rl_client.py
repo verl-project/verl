@@ -289,7 +289,7 @@ class ArcticRLClientWrapper(RemoteBackend):
                 "offload_optimizer": {"device": zero_optimization_config.offload_optimizer.device},
                 "offload_param": {"device": zero_optimization_config.offload_param.device},
             },
-    }
+        }
 
 
     def reconnect_config(self):
