@@ -91,6 +91,17 @@ class UntracedClass:
         return x * 2
 
 
+class ChatTraceClass:
+    @rollout_trace_op
+    async def run(self, messages, sampling_params):
+        return {
+            "prompt_ids": [1, 2, 3],
+            "response_ids": [4],
+            "response_text": "4",
+            "reward": 1.0,
+        }
+
+
 async def test_rollout_trace_on_untraced_class():
     """Tests that the decorator works correctly when no backend is configured."""
     instance = UntracedClass()
@@ -165,6 +176,30 @@ async def test_rollout_trace_with_trackio_backend(mock_trackio_client):
     mock_trackio_client.log.assert_called_once()
     log_kwargs = mock_trackio_client.log.call_args.kwargs
     assert log_kwargs["step"] == 1
+
+
+async def test_trackio_backend_uses_chat_messages_when_available(mock_trackio_client):
+    RolloutTraceConfig.init(project_name="my-project", experiment_name="my-experiment", backend="trackio")
+    instance = ChatTraceClass()
+    input_messages = [
+        {"role": "system", "content": "You are a concise math assistant."},
+        {"role": "user", "content": "What is 2 + 2?"},
+    ]
+
+    with rollout_trace_attr(step=1, sample_index=2, rollout_n=3):
+        await instance.run(
+            messages=input_messages,
+            sampling_params={"temperature": 0.0, "max_tokens": 16},
+        )
+
+    trace_kwargs = mock_trackio_client.Trace.call_args.kwargs
+    assert trace_kwargs["messages"] == [
+        *input_messages,
+        {"role": "assistant", "content": "4"},
+    ]
+    assert trace_kwargs["metadata"]["inputs"] == {"sampling_params": {"temperature": 0.0, "max_tokens": 16}}
+    assert trace_kwargs["metadata"]["output"]["prompt_ids"] == [1, 2, 3]
+    assert trace_kwargs["metadata"]["output"]["response_text"] == "4"
 
 
 async def test_trace_disabled_with_trace_false(mock_weave_client):

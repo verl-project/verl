@@ -205,6 +205,8 @@ def _json_trace_content(value):
 
 
 def _json_trace_metadata(value):
+    if isinstance(value, BaseModel):
+        value = value.model_dump()
     if value is None or isinstance(value, str | int | float | bool):
         return value
     if isinstance(value, dict):
@@ -212,6 +214,25 @@ def _json_trace_metadata(value):
     if isinstance(value, list | tuple):
         return [_json_trace_metadata(v) for v in value]
     return str(value)
+
+
+def _trackio_message_dict(message):
+    if not isinstance(message, dict):
+        return None
+    role = message.get("role")
+    if not isinstance(role, str):
+        return None
+    return dict(message)
+
+
+def _trackio_output_dict(output):
+    if isinstance(output, BaseModel):
+        return output.model_dump()
+    if isinstance(output, dict):
+        return output
+    if hasattr(output, "__dict__"):
+        return dict(vars(output))
+    return None
 
 
 def _trackio_trace_key(op_name):
@@ -231,10 +252,13 @@ def _trackio_trace_step(attributes):
 def _log_trackio_trace(op_name, inputs, output=None, exception=None):
     trackio = RolloutTraceConfig.get_client()
     attributes = _current_trace_attributes()
+    metadata_inputs = {key: value for key, value in inputs.items() if key != "messages"}
+    output_dict = _trackio_output_dict(output)
     metadata = {
         "op": op_name,
         "backend": "trackio",
         "experiment_name": RolloutTraceConfig.get_instance().experiment_name,
+        "inputs": _json_trace_metadata(metadata_inputs),
         **{key: _json_trace_metadata(value) for key, value in attributes.items()},
     }
     if exception is not None:
@@ -242,11 +266,21 @@ def _log_trackio_trace(op_name, inputs, output=None, exception=None):
         metadata["exception_type"] = type(exception).__name__
     else:
         metadata["status"] = "success"
+        metadata["output"] = _json_trace_metadata(output_dict if output_dict is not None else output)
 
-    messages = [
-        {"role": "system", "content": f"verl rollout trace operation: {op_name}"},
-        {"role": "user", "content": _json_trace_content({"inputs": inputs})},
-    ]
+    messages = []
+    input_messages = inputs.get("messages") if isinstance(inputs, dict) else None
+    if isinstance(input_messages, list):
+        messages = [
+            message for message in (_trackio_message_dict(message) for message in input_messages) if message is not None
+        ]
+
+    if not messages:
+        messages = [
+            {"role": "system", "content": f"verl rollout trace operation: {op_name}"},
+            {"role": "user", "content": _json_trace_content({"inputs": inputs})},
+        ]
+
     if exception is not None:
         messages.append(
             {
@@ -259,6 +293,10 @@ def _log_trackio_trace(op_name, inputs, output=None, exception=None):
                 ),
             }
         )
+    elif output_dict is not None and output_dict.get("response_text"):
+        messages.append({"role": "assistant", "content": str(output_dict["response_text"])})
+    elif output_dict is not None and output_dict.get("answer"):
+        messages.append({"role": "assistant", "content": str(output_dict["answer"])})
     else:
         messages.append({"role": "assistant", "content": _json_trace_content({"output": output})})
 
