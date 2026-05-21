@@ -6,6 +6,8 @@
 set -xeuo pipefail
 
 # ---- user-adjustable ----
+# DEVICE is auto-detected by probing torch_npu; override only for special cases.
+DEVICE=${DEVICE:-$(python3 -c 'import torch_npu' 2>/dev/null && echo npu || echo gpu)}
 INFER_BACKEND=${INFER_BACKEND:-vllm}
 MODEL_PATH=${MODEL_PATH:-Qwen/Qwen3-4B}
 TRAIN_FILE=${TRAIN_FILE:-$HOME/data/gsm8k/train.parquet}
