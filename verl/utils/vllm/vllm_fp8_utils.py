@@ -248,6 +248,57 @@ def load_quanted_weights(weights, model_runner):
     return loaded_params
 
 
+def _copy_param_subclass_attrs(param, source_param):
+    if source_param is None:
+        return
+
+    base_param_dir = dir(torch.nn.Parameter)
+    source_param_dir = dir(source_param)
+    custom_attributes = [attr for attr in source_param_dir if attr not in base_param_dir and not attr.startswith("__")]
+    for attr in custom_attributes:
+        try:
+            setattr(param, attr, getattr(source_param, attr))
+        except AttributeError:
+            pass
+
+    subclass_type = getattr(source_param, "subclass_type", type(source_param))
+    if subclass_type is not torch.nn.Parameter:
+        param.subclass_type = subclass_type
+
+
+def replace_parameter_preserve_subclass(layer: torch.nn.Module, param_name: str, new_data: torch.Tensor | None):
+    if new_data is None:
+        setattr(layer, param_name, None)
+        return
+
+    if isinstance(new_data, torch.nn.Parameter):
+        new_data = new_data.data
+
+    old_param = getattr(layer, param_name, None)
+    param = torch.nn.Parameter(new_data, requires_grad=False)
+    _copy_param_subclass_attrs(param, old_param)
+    setattr(layer, param_name, param)
+
+
+def _restore_layer_param_subclass_attrs(layer: torch.nn.Module, old_params: dict[str, torch.nn.Parameter]):
+    for name, old_param in old_params.items():
+        new_param = getattr(layer, name, None)
+        if isinstance(new_param, torch.nn.Parameter):
+            _copy_param_subclass_attrs(new_param, old_param)
+
+
+def _make_process_weights_after_loading_for_vllm20(original_fn):
+    def _patched_process_weights_after_loading(self, layer) -> None:
+        old_params = dict(layer.named_parameters(recurse=False))
+        with patch(
+            "vllm.model_executor.layers.quantization.fp8.replace_parameter", replace_parameter_preserve_subclass
+        ):
+            original_fn(self, layer)
+        _restore_layer_param_subclass_attrs(layer, old_params)
+
+    return _patched_process_weights_after_loading
+
+
 def process_weights_after_loading_for_vllm10(self, layer) -> None:
     """This function is used to process the weights after loading for a Linear layer, it is used for vllm v0.10
 
@@ -425,98 +476,6 @@ def process_weights_after_loading_for_vllm14(self, layer) -> None:
         layer.input_scale = None
 
     maybe_post_process_fp8_weight_block(layer)
-
-
-def process_weights_after_loading_for_vllm20(self, layer) -> None:
-    """``process_weights_after_loading`` for vLLM >= 0.20.
-
-    vLLM 0.20 (PR vllm-project/vllm#33892) refactored FP8 block linear into the
-    ``Fp8BlockScaledMMLinearKernel`` abstraction selected by
-    ``init_fp8_linear_kernel``. The standalone helper
-    ``maybe_post_process_fp8_weight_block`` was removed; the equivalent
-    block-strategy quantization and DeepGEMM layout transform now happen inside
-    ``self.fp8_linear.process_weights_after_loading(layer)``.
-
-    The kernel uses ``vllm.model_executor.utils.replace_parameter`` to update
-    weight/scale tensors. ``replace_parameter`` preserves the ``weight_loader``
-    attribute but downgrades the parameter to a plain ``torch.nn.Parameter``,
-    discarding the original ``BasevLLMParameter`` subclass (e.g.
-    ``ModelWeightParameter`` / ``BlockQuantScaleParameter``). In vLLM 0.20+
-    row/column parallel FP8 linear layers use ``weight_loader_v2``, which calls
-    ``param.load_row_parallel_weight(...)`` / ``load_column_parallel_weight``
-    -- methods that only exist on those subclasses. Refit (the second
-    ``model.load_weights`` invoked from ``load_quanted_weights``) then fails
-    with ``AttributeError: 'Parameter' object has no attribute
-    'load_row_parallel_weight'``.
-
-    To mirror the v0.14 patch, after the kernel runs we rewrap the resulting
-    plain parameters as ``ModelWeightParameter`` / ``BlockQuantScaleParameter``
-    and attach ``subclass_type`` so ``load_quanted_weights`` can restore
-    ``param.__class__`` before calling ``model.load_weights``.
-    """
-    from torch.nn import Parameter
-    from vllm.model_executor.parameter import (
-        BlockQuantScaleParameter,
-        ModelWeightParameter,
-    )
-
-    assert self.block_quant and self.quant_config.is_checkpoint_fp8_serialized
-    assert self.quant_config.activation_scheme == "dynamic"
-
-    def _create_param_from_subclass_attributes(custom_param):
-        param = Parameter(custom_param.data, requires_grad=False)
-        base_param_dir = dir(torch.nn.Parameter)
-        custom_param_dir = dir(custom_param)
-        # Find the attributes that are unique to the custom parameter
-        custom_attributes = [
-            attr for attr in custom_param_dir if attr not in base_param_dir and not attr.startswith("__")
-        ]
-        # Set the custom attributes into the base parameter object
-        for attr in custom_attributes:
-            setattr(param, attr, getattr(custom_param, attr))
-
-        param.subclass_type = type(custom_param)
-        return param
-
-    # vLLM v0.17+ no longer registers `input_scale=None` for dynamic activation,
-    # but the kernel's apply() still reads `layer.input_scale`.
-    if not hasattr(layer, "input_scale"):
-        layer.input_scale = None
-
-    # Snapshot weight_loader callables via the original subclass parameters'
-    # property API before the kernel rewrites them via ``replace_parameter``.
-    weight_loader = layer.weight.weight_loader
-    scale_attr = "weight_scale_inv" if hasattr(layer, "weight_scale_inv") else "weight_scale"
-    weight_scale_loader = getattr(layer, scale_attr).weight_loader
-
-    # Run the kernel's block-strategy quantization plus any backend-specific
-    # post-processing (e.g. DeepGEMM column-major TMA-aligned scales). The
-    # kernel uses ``replace_parameter`` which leaves us with plain Parameters.
-    self.fp8_linear.process_weights_after_loading(layer)
-
-    # Rewrap the kernel-transformed tensors as their original vLLM subclasses
-    # so refit (``load_quanted_weights`` -> ``model.load_weights`` ->
-    # ``weight_loader_v2``) can find ``load_row_parallel_weight`` etc.
-    layer.weight = _create_param_from_subclass_attributes(
-        ModelWeightParameter(
-            data=layer.weight.data,
-            output_dim=0,
-            input_dim=1,
-            weight_loader=weight_loader,
-        )
-    )
-    setattr(
-        layer,
-        scale_attr,
-        _create_param_from_subclass_attributes(
-            BlockQuantScaleParameter(
-                data=getattr(layer, scale_attr).data,
-                output_dim=0,
-                input_dim=1,
-                weight_loader=weight_scale_loader,
-            )
-        ),
-    )
 
 
 def process_weights_after_loading_moe_for_vllm10(self, layer) -> None:
@@ -732,18 +691,37 @@ def process_weights_after_loading_moe_for_vllm14(self, layer) -> None:
 def apply_vllm_fp8_patches():
     logger.info("Applying vllm fp8 patches for blockwise quantization")
     vllm_ver = version.parse(vllm.__version__)
+    if fp8_state.vllm_patches:
+        logger.debug("vLLM FP8 patches already applied")
+        return
 
-    # Linear patch:
-    # - v0.20+: vLLM moved FP8 block linear into a kernel abstraction
-    #   (vllm-project/vllm#33892) and removed `maybe_post_process_fp8_weight_block`;
-    #   we now delegate to ``self.fp8_linear.process_weights_after_loading``.
-    # - v0.14-v0.19: vLLM still exposes the standalone helper and keeps the
-    #   `weight_scale_inv` name.
-    # - v0.11-v0.12: vLLM renames `weight_scale_inv` to `weight_scale`.
     func1_path = "vllm.model_executor.layers.quantization.fp8.Fp8LinearMethod.process_weights_after_loading"
+    func2_path = "vllm.model_executor.layers.quantization.fp8.Fp8MoEMethod.process_weights_after_loading"
+
+    # vLLM 0.20 refactored FP8 post-load handling and removed
+    # maybe_post_process_fp8_weight_block. Keep its native transformation logic,
+    # but preserve parameter subclass metadata for RL weight reloads.
     if vllm_ver >= version.parse("0.20.0"):
-        linear_patch_fn = process_weights_after_loading_for_vllm20
-    elif vllm_ver >= version.parse("0.14.0"):
+        from vllm.model_executor.layers.quantization.fp8 import (
+            Fp8LinearMethod,
+            Fp8MoEMethod,
+        )
+
+        patcher1 = patch(
+            func1_path,
+            _make_process_weights_after_loading_for_vllm20(Fp8LinearMethod.process_weights_after_loading),
+        )
+        patcher2 = patch(
+            func2_path,
+            _make_process_weights_after_loading_for_vllm20(Fp8MoEMethod.process_weights_after_loading),
+        )
+        patcher1.start()
+        patcher2.start()
+        fp8_state.vllm_patches.extend([patcher1, patcher2])
+        return
+
+    # Linear patch: v0.14+ keeps weight_scale_inv, v0.11-v0.12 renames to weight_scale
+    if vllm_ver >= version.parse("0.14.0"):
         linear_patch_fn = process_weights_after_loading_for_vllm14
     elif vllm_ver >= version.parse("0.11.0"):
         linear_patch_fn = process_weights_after_loading_for_vllm11
@@ -753,7 +731,6 @@ def apply_vllm_fp8_patches():
     patcher1.start()
 
     # MoE patch
-    func2_path = "vllm.model_executor.layers.quantization.fp8.Fp8MoEMethod.process_weights_after_loading"
     if vllm_ver >= version.parse("0.14.0"):
         moe_patch_fn = process_weights_after_loading_moe_for_vllm14
     elif vllm_ver >= version.parse("0.11.0"):
@@ -762,3 +739,4 @@ def apply_vllm_fp8_patches():
         moe_patch_fn = process_weights_after_loading_moe_for_vllm10
     patcher2 = patch(func2_path, moe_patch_fn)
     patcher2.start()
+    fp8_state.vllm_patches.extend([patcher1, patcher2])
