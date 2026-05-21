@@ -427,7 +427,6 @@ class MegatronEngine(BaseEngine):
             bridge=self.bridge,
             provider=self.provider,
             peft_cls=self.peft_cls,
-            lora_config=self.model_config.lora,
             use_dist_checkpointing=self.engine_config.use_dist_checkpointing,
             use_megatron_fsdp=self.engine_config.use_megatron_fsdp,
         )
