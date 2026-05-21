@@ -1,3 +1,4 @@
+import asyncio
 import os
 from typing import Any
 
@@ -164,7 +165,7 @@ class ArcticRLClientWrapper(RemoteBackend):
     # ``processing`` pipeline) and dispatch through the private
     # `_send_*` wire helpers below.
 
-    def compute_log_prob(
+    async def compute_log_prob(
         self,
         data,
         *,
@@ -187,7 +188,7 @@ class ArcticRLClientWrapper(RemoteBackend):
         )
         payload = dict(batch=batch, meta=meta)
 
-        response = (
+        response = await (
             self._send_compute_ref_log_prob(payload) if ref else self._send_compute_log_prob(payload)
         )
 
@@ -198,7 +199,7 @@ class ArcticRLClientWrapper(RemoteBackend):
         metrics = dict(response.get("metrics", {}))
         return {"model_output": model_output, "metrics": metrics}
 
-    def update_actor(
+    async def update_actor(
         self,
         data,
         *,
@@ -256,7 +257,7 @@ class ArcticRLClientWrapper(RemoteBackend):
         meta["policy_loss_config"] = _safe_serialize(vars(policy_loss)) if policy_loss is not None else {}
 
         payload = dict(batch=batch, meta=meta)
-        response = self._send_update_actor(payload)
+        response = await self._send_update_actor(payload)
 
         metrics = dict(response["metrics"])
         loss = metrics.pop("loss")
@@ -314,7 +315,7 @@ class ArcticRLClientWrapper(RemoteBackend):
                 max_token_len=self.config.actor_rollout_ref.rollout.max_num_batched_tokens,
                 rollout_n=self.config.actor_rollout_ref.rollout.n,
                 temperature=self.config.actor_rollout_ref.rollout.temperature,
-                tiled_logits_compute=self._backend_config.tiled_logits_compute,
+                tiled_logits_compute=self._backend_config.get("tiled_logits_compute", True),
                 use_unpad=use_unpad,
             )
 
@@ -332,7 +333,7 @@ class ArcticRLClientWrapper(RemoteBackend):
         n_training_gpus = self._backend_config.get("training_gpus", self.config.trainer.n_gpus_per_node)
         n_sampling_gpus = self._backend_config.get("sampling_gpus", self.config.trainer.n_gpus_per_node)
         n_log_prob_gpus = self._backend_config.get("log_prob_gpus", self.config.trainer.n_gpus_per_node)
-        colocate = self._backend_config.get("colocate", False)
+        colocate = self._backend_config.get("colocate", True)
         attn_implementation = self.config.actor_rollout_ref.model.override_config.get(
             'attn_implementation', 'eager'
         )
@@ -419,19 +420,22 @@ class ArcticRLClientWrapper(RemoteBackend):
     # backends are free to pick their own wire format; verl never calls
     # these directly.
 
-    def _send_compute_ref_log_prob(self, payload: dict):
+    async def _send_compute_ref_log_prob(self, payload: dict):
         payload["processing"] = {"post": ["compute_entropy_and_logprobs"], "loss_fn": None}
-        response = self._client.fwd_no_grad(payload, reference_model=True)
+        # Offload the blocking RPC to a worker thread so the forwarder's
+        # asyncio loop (and the Ray actor that owns it) stays responsive
+        # to concurrent calls.
+        response = await asyncio.to_thread(self._client.fwd_no_grad, payload, reference_model=True)
         response["batch"]["log_probs"] = response["batch"].pop("logprobs")
         return response
 
-    def _send_compute_log_prob(self, payload: dict):
+    async def _send_compute_log_prob(self, payload: dict):
         payload["processing"] = {"post": ["compute_entropy_and_logprobs"], "loss_fn": None}
-        response = self._client.fwd_no_grad(payload, reference_model=False)
+        response = await asyncio.to_thread(self._client.fwd_no_grad, payload, reference_model=False)
         response["batch"]["log_probs"] = response["batch"].pop("logprobs")
         return response
 
-    def _send_update_actor(self, payload: dict):
+    async def _send_update_actor(self, payload: dict):
         payload["processing"] = {
             "post": ["apply_temperature", "compute_entropy_and_logprobs"],
             "loss_fn": "verl_grpo",
@@ -451,13 +455,13 @@ class ArcticRLClientWrapper(RemoteBackend):
                 payload["batch"][name] = _left_pad(payload["batch"][name], seq_len)
         payload["batch"]["loss_mask"] = payload["batch"]["response_mask"]
 
-        fwd_bwd_response = self._client.fwd_bwd(payload)
-        step_response = self._client.step()
+        fwd_bwd_response = await asyncio.to_thread(self._client.fwd_bwd, payload)
+        step_response = await asyncio.to_thread(self._client.step)
         step_response["metrics"].update(**fwd_bwd_response["metrics"])
         return step_response
 
-    def save_checkpoint(self):
-        return self._client.save_checkpoint()
+    async def save_checkpoint(self):
+        return await asyncio.to_thread(self._client.save_checkpoint)
 
     async def update_weights(self):
         return await self._client.sync_weights()

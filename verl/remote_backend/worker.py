@@ -118,17 +118,17 @@ class RemoteBackendActorRolloutRefWorker(Worker, DistProfilerExtension):
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="ref"))
     @DistProfiler.annotate(color="olive", role="ref_compute_log_prob")
     async def compute_ref_log_prob(self, data: TensorDict) -> TensorDict:
-        return self._run_log_prob(data, ref=True, calculate_entropy=False)
+        return await self._run_log_prob(data, ref=True, calculate_entropy=False)
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @DistProfiler.annotate(color="blue", role="actor_compute_log_prob")
     async def compute_log_prob(self, data: TensorDict) -> TensorDict:
-        return self._run_log_prob(data, ref=False, calculate_entropy=True)
+        return await self._run_log_prob(data, ref=False, calculate_entropy=True)
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @DistProfiler.annotate(color="red", role="actor_update")
     async def update_actor(self, data: TensorDict) -> TensorDict:
-        return self._run_update_actor(data)
+        return await self._run_update_actor(data)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     async def update_weights(self, global_steps: int = None):
@@ -137,7 +137,7 @@ class RemoteBackendActorRolloutRefWorker(Worker, DistProfilerExtension):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     async def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):
         assert self._is_actor, "save_checkpoint only supported on actor role"
-        self.backend.save_checkpoint()
+        await self.backend.save_checkpoint()
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     async def sleep_replicas(self):
@@ -146,7 +146,7 @@ class RemoteBackendActorRolloutRefWorker(Worker, DistProfilerExtension):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     async def destroy(self):
         if self.backend is not None:
-            self.backend.destroy()
+            await self.backend.destroy()
             self.backend = None
 
     # ------------------------------------------------------------------ #
@@ -156,8 +156,8 @@ class RemoteBackendActorRolloutRefWorker(Worker, DistProfilerExtension):
     # are read directly from `self.config` by the backend at init time —
     # this forwarder no longer re-injects them into every batch.
 
-    def _run_log_prob(self, data: TensorDict, *, ref: bool, calculate_entropy: bool) -> TensorDict:
-        result = self.backend.compute_log_prob(
+    async def _run_log_prob(self, data: TensorDict, *, ref: bool, calculate_entropy: bool) -> TensorDict:
+        result = await self.backend.compute_log_prob(
             data,
             ref=ref,
             calculate_entropy=calculate_entropy,
@@ -178,7 +178,7 @@ class RemoteBackendActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         return tu.get_tensordict(tensor_dict=model_output, non_tensor_dict={"metrics": metrics})
 
-    def _run_update_actor(self, data: TensorDict) -> TensorDict:
+    async def _run_update_actor(self, data: TensorDict) -> TensorDict:
         from tensordict import NonTensorData
 
         # `train_batch` style fields the backend may want to read from data.
@@ -191,7 +191,7 @@ class RemoteBackendActorRolloutRefWorker(Worker, DistProfilerExtension):
             )
 
         with Timer(name="train_batch", logger=None) as timer:
-            result = self.backend.update_actor(
+            result = await self.backend.update_actor(
                 data,
                 actor_config=self.actor_config,
                 pad_token_id=self.pad_token_id,

@@ -340,9 +340,6 @@ remote_backend:
 
     use_zorro: False
 
-    # only set to True if running into OOM, otherwise it'll be faster not to tile (extra forward replay and smaller chunks to compute)
-    tiled_logits_compute: False
-
     # ray or http: ray would be much faster for payload comms in the en-prem use case
     comm_protocol: ray
 

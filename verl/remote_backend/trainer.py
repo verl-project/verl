@@ -125,5 +125,11 @@ class RemoteBackendTrainer(RayPPOTrainer):
 
     def destroy(self) -> None:
         if getattr(self, "backend", None) is not None:
-            self.backend.destroy()
+            # `RemoteBackend.destroy` is async (so adapters can await
+            # remote RPCs without blocking event loops). The trainer's
+            # `destroy` is called from synchronous shutdown paths, so
+            # bridge with `asyncio.run`.
+            import asyncio
+
+            asyncio.run(self.backend.destroy())
             self.backend = None

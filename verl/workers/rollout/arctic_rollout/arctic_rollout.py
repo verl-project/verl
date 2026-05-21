@@ -32,10 +32,11 @@ class ArcticLLMEngine:
         self,
         replica_rank: int,
         arctic_rl_client: ArcticRLClientWrapper,
+        tokenizer: AutoTokenizer,
     ):
         self.replica_rank = replica_rank
         self.arctic_rl_client = arctic_rl_client
-        self.tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
+        self.tokenizer = tokenizer
 
     async def generate(
         self,
@@ -137,7 +138,10 @@ class ArcticLLMServer(vLLMHttpServer):
         self._dp_rpc_port = None
         self._dp_master_port = None
 
-        self.engine = ArcticLLMEngine(replica_rank, arctic_rl_client)
+        # Use the tokenizer already loaded on `model_config` (per upstream
+        # `HFModelConfig.__post_init__`) instead of re-loading from the HF
+        # hub here; avoids a hardcoded model name and an extra download.
+        self.engine = ArcticLLMEngine(replica_rank, arctic_rl_client, self.model_config.tokenizer)
 
         # logger.info(
         #     f"vLLMHttpServer, replica_rank: {self.replica_rank}, node_rank: {self.node_rank}, "

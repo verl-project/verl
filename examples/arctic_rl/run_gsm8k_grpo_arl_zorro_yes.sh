@@ -69,7 +69,6 @@ python3 -m verl.trainer.main_ppo \
     remote_backend.arctic.training_gpus=1 \
     remote_backend.arctic.sampling_gpus=1 \
     remote_backend.arctic.log_prob_gpus=0 \
-    remote_backend.arctic.tiled_logits_compute=True \
     remote_backend.arctic.zero_optimization.stage=2 \
     remote_backend.arctic.zero_optimization.offload_optimizer.device=none \
     remote_backend.arctic.zero_optimization.offload_param.device=none \
