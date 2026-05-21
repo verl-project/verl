@@ -279,6 +279,7 @@ actor_rollout_ref:
       use_inference_chat_template: false
       tokenization_sanity_check_mode: strict
       format: hermes
+      reasoning_parser: null
       num_repeat_rollouts: null
     calculate_log_probs: false
     agent:

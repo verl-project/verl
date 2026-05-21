@@ -77,6 +77,12 @@ class MultiTurnConfig(BaseConfig):
     use_inference_chat_template: bool = False
     tokenization_sanity_check_mode: str = "strict"
     format: str = "hermes"
+    # Optional reasoning parser name (e.g. "qwen3", "deepseek_r1") used to strip
+    # think-block content before tool-call extraction in the agent loop. Default
+    # ``None`` keeps legacy behavior (no stripping). See
+    # ``verl/experimental/agent_loop/reasoning_parser.py`` for built-in parsers
+    # and the ``@ReasoningParser.register`` decorator for adding custom ones.
+    reasoning_parser: Optional[str] = None
     num_repeat_rollouts: Optional[int] = None
 
 
