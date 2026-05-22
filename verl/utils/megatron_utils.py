@@ -1570,13 +1570,18 @@ def patch_engine_mtp(module, model_config):
         model_config: The model configuration containing MTP settings.
     """
     logger.warning("Applying mtp patch...")
-    from verl.models.mcore.mtp_patch import patch_mtp_layer_get_embeddings, patch_postprocess
+    from verl.models.mcore.mtp_patch import (
+        patch_mtp_layer_checkpointed_forward,
+        patch_mtp_layer_get_embeddings,
+        patch_postprocess,
+    )
 
     print(module)
 
     modules = module if isinstance(module, list) else [module]
     for m in modules:
         patch_postprocess(m)
+        patch_mtp_layer_checkpointed_forward(m)
         if model_config.mtp.detach_encoder:
             patch_mtp_layer_get_embeddings(m)
 

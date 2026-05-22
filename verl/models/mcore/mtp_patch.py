@@ -222,12 +222,43 @@ def patch_mtp_layer_get_embeddings(model: torch.nn.Module):
         for layer in target_layers:
             layer._get_embeddings_backup = layer._get_embeddings
             layer._get_embeddings = _patched_get_embeddings_for_detach.__get__(layer, layer.__class__)
-            layer._checkpointed_forward_backup = layer._checkpointed_forward
-            layer._checkpointed_forward = _patched_checkpointed_forward.__get__(layer, layer.__class__)
         print(f"Found and patched {len(target_layers)} MTP layer(s) in any of the actor modules")
         return True
     else:
         print("No MTP layers found to patch in any of the actor modules")
+        return False
+
+
+def patch_mtp_layer_checkpointed_forward(model: torch.nn.Module):
+    """Patch the _checkpointed_forward method of MultiTokenPredictionLayer"""
+    from megatron.core.models.gpt.gpt_model import GPTModel
+    from megatron.core.transformer.multi_token_prediction import MultiTokenPredictionLayer
+
+    # Unwrap each model in the actor_module to get the actual GPTModel
+    model = _get_patching_model(model)
+    # Collect all MultiTokenPredictionLayer instances
+    target_layers = []
+
+    if isinstance(model, GPTModel):
+        # Check if GPTModel has MTP and find the layers
+        if hasattr(model, "mtp") and hasattr(model.mtp, "layers"):
+            for layer in model.mtp.layers:
+                if isinstance(layer, MultiTokenPredictionLayer):
+                    target_layers.append(layer)
+    elif hasattr(model, "layers"):
+        # Check if any layer in the model is MultiTokenPredictionLayer
+        for layer in model.layers:
+            if isinstance(layer, MultiTokenPredictionLayer):
+                target_layers.append(layer)
+
+    if target_layers:
+        for layer in target_layers:
+            layer._checkpointed_forward_backup = layer._checkpointed_forward
+            layer._checkpointed_forward = _patched_checkpointed_forward.__get__(layer, layer.__class__)
+        print(f"Found and patched checkpointed forward for {len(target_layers)} MTP layer(s)")
+        return True
+    else:
+        print("No MTP layers found to patch checkpointed forward")
         return False
 
 
@@ -260,12 +291,45 @@ def unpatch_mtp_layer_get_embeddings(model: torch.nn.Module):
             layer._get_embeddings = layer._get_embeddings_backup
             delattr(layer, "_get_embeddings_backup")
             unpatched_count += 1
-        if hasattr(layer, "_checkpointed_forward_backup"):
-            layer._checkpointed_forward = layer._checkpointed_forward_backup
-            delattr(layer, "_checkpointed_forward_backup")
 
     if unpatched_count > 0:
         print(f"Unpatched {unpatched_count} MTP layer(s)")
+        return True
+    return False
+
+
+def unpatch_mtp_layer_checkpointed_forward(model: torch.nn.Module):
+    """Unpatch the _checkpointed_forward method of MultiTokenPredictionLayer"""
+    from megatron.core.models.gpt.gpt_model import GPTModel
+    from megatron.core.transformer.multi_token_prediction import MultiTokenPredictionLayer
+
+    # Unwrap each model in the actor_module to get the actual GPTModel
+    model = _get_patching_model(model)
+
+    # Collect all MultiTokenPredictionLayer instances
+    target_layers = []
+
+    if isinstance(model, GPTModel):
+        # Check if GPTModel has MTP and find the layers
+        if hasattr(model, "mtp") and hasattr(model.mtp, "layers"):
+            for layer in model.mtp.layers:
+                if isinstance(layer, MultiTokenPredictionLayer):
+                    target_layers.append(layer)
+    elif hasattr(model, "layers"):
+        # Check if any layer in the model is MultiTokenPredictionLayer
+        for layer in model.layers:
+            if isinstance(layer, MultiTokenPredictionLayer):
+                target_layers.append(layer)
+
+    unpatched_count = 0
+    for layer in target_layers:
+        if hasattr(layer, "_checkpointed_forward_backup"):
+            layer._checkpointed_forward = layer._checkpointed_forward_backup
+            delattr(layer, "_checkpointed_forward_backup")
+            unpatched_count += 1
+
+    if unpatched_count > 0:
+        print(f"Unpatched checkpointed forward for {unpatched_count} MTP layer(s)")
         return True
     return False
 
