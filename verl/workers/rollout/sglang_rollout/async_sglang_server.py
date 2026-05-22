@@ -270,7 +270,13 @@ class SGLangHttpServer:
             else:
                 raise ValueError(f"Currently only support fp8 quantization, got: {quantization}")
         infer_tp = self.config.tensor_model_parallel_size * self.config.data_parallel_size
+        # Assign a unique free port per replica to avoid EADDRINUSE when multiple
+        # replicas on the same node derive nccl_port from the default port=30000.
+        replica_port, _sock = get_free_port(self._server_address)
+        if _sock is not None:
+            _sock.close()
         args = {
+            "port": replica_port,
             "model_path": self.model_config.local_path,
             "dtype": self.config.dtype,
             "mem_fraction_static": self.config.gpu_memory_utilization,
@@ -487,7 +493,7 @@ class SGLangHttpServer:
 
     async def resume_kv_cache(self):
         """Restore kv_cache GPU memory after a weight sync. Counterpart to release_kv_cache()."""
-        if self.node_rank != 0:
+        if self.node_rank != 0 or not self.config.free_cache_engine:
             return
         obj = ResumeMemoryOccupationReqInput(tags=["kv_cache"])
         await self.tokenizer_manager.resume_memory_occupation(obj, None)
