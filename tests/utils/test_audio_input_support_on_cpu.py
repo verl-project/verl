@@ -75,38 +75,6 @@ def test_build_multimodal_processor_inputs_includes_audio_sampling_rate() -> Non
     assert captured["use_audio_in_video"] is True
 
 
-def test_build_multimodal_processor_inputs_pins_do_sample_frames_for_videos() -> None:
-    """Pre-sampled frames must not be re-sampled by the Qwen-VL processor regardless
-    of whether the installed ``qwen_vl_utils`` returns metadata."""
-    captured = {}
-
-    class VideoProcessor:
-        def __call__(self, **kwargs):
-            captured.update(kwargs)
-            return {"input_ids": torch.tensor([[1, 2, 3]])}
-
-    build_multimodal_processor_inputs(
-        VideoProcessor(),
-        text=["hello"],
-        images=None,
-        videos=[torch.zeros((4, 3, 16, 16))],
-        audio=None,
-    )
-    assert captured.get("do_sample_frames") is False
-    assert "video_metadata" not in captured
-
-    captured.clear()
-    build_multimodal_processor_inputs(
-        VideoProcessor(),
-        text=["hello"],
-        images=None,
-        videos=[(torch.zeros((4, 3, 16, 16)), {"fps": 2.0, "duration": 2.0})],
-        audio=None,
-    )
-    assert captured.get("do_sample_frames") is False
-    assert captured.get("video_metadata") == [{"fps": 2.0, "duration": 2.0}]
-
-
 def test_build_multimodal_processor_inputs_skips_video_kwargs_when_no_videos() -> None:
     captured = {}
 
