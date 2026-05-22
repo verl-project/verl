@@ -193,11 +193,12 @@ def _pad_to_length(
 
     Mirrors the ``tokenizer.pad`` calls used by ``_agent_loop_postprocess``.
     """
+    ids = list(ids or [])
     prev_side = tokenizer.padding_side
     tokenizer.padding_side = side
     try:
         out = tokenizer.pad(
-            {"input_ids": ids},
+            [{"input_ids": ids}],
             padding="max_length",
             max_length=max_length,
             return_tensors="pt",
@@ -207,11 +208,16 @@ def _pad_to_length(
         tokenizer.padding_side = prev_side
 
     input_ids = out["input_ids"]
+    if not isinstance(input_ids, torch.Tensor):
+        input_ids = torch.tensor(input_ids, dtype=torch.long)
     if input_ids.dim() == 1:
         input_ids = input_ids.unsqueeze(0)
+
     attention_mask = None
     if return_attention_mask:
         attention_mask = out["attention_mask"]
+        if not isinstance(attention_mask, torch.Tensor):
+            attention_mask = torch.tensor(attention_mask, dtype=torch.long)
         if attention_mask.dim() == 1:
             attention_mask = attention_mask.unsqueeze(0)
     return input_ids, attention_mask
@@ -299,6 +305,23 @@ def _build_one_intermediate_row(
     multi_modal_data = traj.get("multi_modal_data")
     multi_modal_refs = traj.get(MULTI_MODAL_REFS_KEY)
     image_ref_mode = multi_modal_refs is not None
+
+    prompt_ids_len = len(prompt_ids)
+    response_ids_len = len(response_ids)
+    response_mask_len = len(response_mask_raw)
+    traj_extra = traj.get("extra_fields", {}) or {}
+    if response_ids_len == 0 or response_mask_len == 0:
+        logger.warning(
+            "[_build_one_intermediate_row] empty intermediate response: "
+            "prompt_ids_len=%d, response_ids_len=%d, response_mask_len=%d, "
+            "num_turns=%s, stop_reason=%s, trajectory_role=%s",
+            prompt_ids_len,
+            response_ids_len,
+            response_mask_len,
+            traj.get("num_turns", "?"),
+            traj_extra.get("stop_reason"),
+            traj_extra.get("trajectory_role"),
+        )
 
     # Note: it is valid for an intermediate trajectory to have no
     # multi_modal_data (e.g. a text-only turn after a tool failure that
