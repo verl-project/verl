@@ -361,7 +361,12 @@ def register(agent_name: str):
 
     def decorator(subclass: type[AgentLoopBase]) -> type[AgentLoopBase]:
         fqdn = f"{subclass.__module__}.{subclass.__qualname__}"
-        _agent_loop_registry[agent_name] = {"_target_": fqdn}
+        # setdefault, not assignment: AgentLoopWorker.__init__ may have already
+        # populated this entry from `agent_loop_config_path` with extra fields
+        # (kwargs to be forwarded by hydra.utils.instantiate). When that loaded
+        # config later triggers a module import, the decorator must not clobber
+        # the rich entry back down to a bare `{"_target_": ...}`.
+        _agent_loop_registry.setdefault(agent_name, {"_target_": fqdn})
         return subclass
 
     return decorator

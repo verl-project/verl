@@ -1,0 +1,61 @@
+# Copyright 2026 Alibaba Group
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# The `harbor_trial_config` block below is adapted from SkyRL (Apache 2.0):
+#   https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train_integrations/harbor/harbor_trial_config/default.yaml
+
+- name: harbor_agent
+  _target_: verl.experimental.agentic_rl_harbor.harbor_agent_loop.HarborAgentLoop
+
+  # Set this to the value vLLM advertises (basename of the model path by default).
+  # Override on the command line:
+  #   actor_rollout_ref.rollout.agent.agent_loop_kwargs.served_model_name=Qwen3-8B
+  served_model_name: null
+
+  harbor_trial_config:
+    trials_dir: trials
+    timeout_multiplier: 1.0
+
+    agent:
+      name: terminus-2
+      override_timeout_sec: 1200
+      kwargs:
+        max_turns: 32
+        suppress_max_turns_warning: true
+        enable_summarize: false
+        collect_rollout_details: true
+        temperature: 1.0
+        model_info:
+          max_input_tokens: 32768
+          max_output_tokens: 32768
+          input_cost_per_token: 0.0
+          output_cost_per_token: 0.0
+        llm_kwargs:
+          timeout: 900
+          max_retries: 0
+          top_p: 1.0
+          top_k: -1
+          min_p: 0.0
+
+    environment:
+      type: daytona
+      override_cpus: 1
+      override_memory_mb: 1024
+      override_storage_mb: 1024
+      suppress_override_warnings: true
+      kwargs:
+        auto_stop_interval_mins: 30
+
+    verifier:
+      disable: false
