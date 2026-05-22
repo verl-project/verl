@@ -114,6 +114,8 @@ jobs:
           clean: true
       - name: Install the current repository
         run: |
+          cd recipe
+          git checkout main
           pip install -r requirements-npu.txt
           pip install --no-deps -e .
       - name: Check final pip list
