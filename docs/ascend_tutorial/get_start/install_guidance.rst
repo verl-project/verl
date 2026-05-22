@@ -1,7 +1,7 @@
 Ascend Install Guidance
 =================
 
-Last updated: 05/20/2026.
+Last updated: 05/22/2026.
 
 关键更新
 --------
@@ -104,7 +104,7 @@ torch         ``2.9.0``
 torch_npu     ``2.9.0``
 torchvision   ``0.24.0``
 torchaudio    ``2.9.0``
-triton-ascend ``3.2.0``
+triton-ascend ``3.2.1``
 transformers  ``>=4.57.4, <5.0.0``\ ，推荐 ``4.57.6``
 vLLM          ``0.18.0``
 vLLM-Ascend   ``0.18.0``
@@ -115,7 +115,7 @@ vLLM-Ascend   ``0.18.0``
    [说明] vLLM-Ascend ``0.18.0`` 的 `release
    note <https://docs.vllm.ai/projects/ascend/en/v0.18.0/user_guide/release_notes.html>`__
    中提到，因已知问题可手动升级到 ``torch_npu==2.9.0.post1+git4c901a4``
-   和 ``triton-ascend==3.2.0.dev20260322``\ 。如环境中已升级到 CANN
+   和 ``triton-ascend==3.2.1``\ 。如环境中已升级到 CANN
    ``9.0.0``\ ，需要同步升级对应的 ``torch_npu`` 和 ``triton-ascend``
    版本。
 
@@ -160,7 +160,7 @@ torch_npu ``2.9.0``
    # 安装与 vLLM-Ascend 0.18.0 对应的软件包
    pip install torchvision==0.24.0
    pip install torchaudio==2.9.0
-   pip install triton-ascend==3.2.0
+   pip install triton-ascend==3.2.1 --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn
    pip install "transformers>=4.57.4,<5.0.0"
 
 .. _安装-vllm--vllm-ascend:
@@ -336,8 +336,8 @@ mbridge。
 =========== ======================
 软件        版本
 =========== ======================
-MindSpeed   ``2.3.0_core_r0.12.1``
-Megatron-LM ``core_v0.12.1``
+MindSpeed   ``core_r0.16.0``
+Megatron-LM ``core_v0.16.1``
 =========== ======================
 
 安装 MindSpeed
@@ -349,8 +349,8 @@ MindSpeed 源码安装指令：
 
    # 下载 MindSpeed，切换到指定 commit-id，并下载 Megatron-LM
    git clone https://gitcode.com/Ascend/MindSpeed.git
-   cd MindSpeed && git checkout 2.3.0_core_r0.12.1 && cd ..
-   git clone --depth 1 --branch core_v0.12.1 https://github.com/NVIDIA/Megatron-LM.git
+   cd MindSpeed && git checkout core_r0.16.0 && cd ..
+   git clone --depth 1 --branch core_v0.16.1 https://github.com/NVIDIA/Megatron-LM.git
 
    # 安装 Megatron & MindSpeed
    pip install -e Megatron-LM
@@ -374,7 +374,7 @@ MindSpeed-LLM 训练后端支持
 
 如需使用基于 Megatron/MindSpeed 体系的 MindSpeed-LLM 训练后端，需要额外下载
 MindSpeed-LLM。需要注意的是，MindSpeed-LLM 训练后端依赖 MindSpeed-LLM
-master 分支、MindSpeed master 分支以及 Megatron-LM ``core_v0.12.1``
+master 分支、MindSpeed master 分支以及 Megatron-LM ``core_v0.16.1``
 分支。
 
 MindSpeed-LLM 及相关依赖的源码安装指令：
@@ -384,7 +384,7 @@ MindSpeed-LLM 及相关依赖的源码安装指令：
    # 下载 MindSpeed-LLM、MindSpeed 和 Megatron-LM
    git clone https://gitcode.com/Ascend/MindSpeed-LLM.git
    git clone https://gitcode.com/Ascend/MindSpeed.git
-   git clone --depth 1 --branch core_v0.12.1 https://github.com/NVIDIA/Megatron-LM.git
+   git clone --depth 1 --branch core_v0.16.1 https://github.com/NVIDIA/Megatron-LM.git
 
    # 配置环境变量
    export PYTHONPATH=$PYTHONPATH:your path/Megatron-LM
