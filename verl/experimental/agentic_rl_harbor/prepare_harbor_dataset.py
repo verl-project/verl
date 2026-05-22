@@ -73,8 +73,12 @@ def _safe_extract_tar(archive_bytes: bytes, dest_dir: Path) -> None:
                 with tf.extractfile(member) as src:
                     if src is None:
                         continue
+            if member.isfile():
+                with tf.extractfile(member) as src:
+                    if src is None:
+                        continue
                     with open(target, "wb") as dst:
-                        dst.write(src.read())
+                        shutil.copyfileobj(src, dst)
             elif member.isdir():
                 target.mkdir(parents=True, exist_ok=True)
 
@@ -112,7 +116,7 @@ def extract_parquet(parquet_path: Path, output_dir: Path) -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
     args = [(p, d, str(output_dir)) for p, d in zip(path_col, data_col, strict=False)]
 
-    with ProcessPoolExecutor(max_workers=8) as pool:
+    with ProcessPoolExecutor(max_workers=None) as pool:
         results = list(pool.map(_extract_one, args, chunksize=64))
 
     return sum(results)
