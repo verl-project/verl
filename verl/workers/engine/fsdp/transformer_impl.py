@@ -118,7 +118,7 @@ class FSDPEngine(BaseEngine):
         # Apply NPU patches for FSDP backend
         from .utils import apply_npu_fsdp_patches
 
-        apply_npu_fsdp_patches()
+        apply_npu_fsdp_patches(self.model_config)
 
         # build device mesh for Ulysses Sequence Parallel
 
@@ -364,7 +364,7 @@ class FSDPEngine(BaseEngine):
         )
 
         fsdp_mesh = self.device_mesh
-        sharding_strategy = get_sharding_strategy(fsdp_mesh)
+        sharding_strategy = get_sharding_strategy(fsdp_mesh, zero3_enable=self.engine_config.reshard_after_forward)
 
         # Note: We force turn off CPUOffload because it causes incorrect results when using grad accumulation
         if self.engine_config.strategy == "fsdp":
@@ -1184,6 +1184,21 @@ class FSDPEngineWithLMHead(FSDPEngine):
                     logits_rmpad = torch.cat([t for t in logits.unbind()])
                     input_ids_rmpad_rolled = output_args["input_ids_rmpad_rolled"]
                     log_probs = logprobs_from_logits(logits=logits_rmpad, labels=input_ids_rmpad_rolled)
+
+                    # Mirror the use_remove_padding=True branch (see verl#6293).
+                    # No Ulysses SP gather here: this branch is the no-SP path
+                    # (log_probs is also not gathered) and pad_size is only
+                    # populated in output_args along the use_remove_padding=True
+                    # path of prepare_model_inputs.
+                    if distillation_use_topk:
+                        outputs = logits_processor_func(student_logits=logits_rmpad.unsqueeze(0), data=micro_batch)
+                        for k, v in outputs.items():
+                            v = v.squeeze(0)
+                            assert v.shape == log_probs.shape, (
+                                f"log_probs shape: {log_probs.shape}, {k} shape: {v.shape}"
+                            )
+                            model_output[k] = torch.nested.nested_tensor_from_jagged(v, cu_seqlens)
+
                     # (bsz, j1), for each sample, length of each sample: [real_prompt_length + real_response_length]
                     log_probs = torch.nested.nested_tensor_from_jagged(log_probs, cu_seqlens)
                     if calculate_entropy:

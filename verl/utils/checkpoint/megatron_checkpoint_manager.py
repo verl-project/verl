@@ -17,8 +17,8 @@ import json
 import logging
 import os
 import random
-from collections.abc import Callable
-from dataclasses import asdict
+from dataclasses import fields, is_dataclass
+from enum import Enum
 
 import megatron.core
 import numpy as np
@@ -26,9 +26,7 @@ import torch
 import torch.distributed
 from megatron.core import dist_checkpointing, mpu, tensor_parallel
 from megatron.core.dist_checkpointing.mapping import ShardedObject
-from megatron.core.transformer.enums import AttnBackend
 from packaging import version
-from torch.distributed.checkpoint import FileSystemWriter
 from transformers import GenerationConfig
 
 from verl.models.weight_loader_registry import get_weight_saver
@@ -53,6 +51,61 @@ if not mcore_ge_014:
         "Detected megatron.core %s, recommend upgrading to >= 0.14.0 for better checkpoint compatibility",
         megatron.core.__version__,
     )
+
+
+_SKIP_CONFIG_VALUE = object()
+
+
+def _to_json_safe_config_value(value, seen):
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    if type(value) is torch.dtype or isinstance(value, Enum):
+        return str(value)
+    if isinstance(value, np.generic):
+        return value.item()
+    if callable(value):
+        return _SKIP_CONFIG_VALUE
+    if isinstance(value, list | tuple):
+        value_id = id(value)
+        if value_id in seen:
+            return _SKIP_CONFIG_VALUE
+        seen.add(value_id)
+        converted = []
+        for item in value:
+            converted_item = _to_json_safe_config_value(item, seen)
+            if converted_item is not _SKIP_CONFIG_VALUE:
+                converted.append(converted_item)
+        seen.remove(value_id)
+        return converted
+    if isinstance(value, dict):
+        value_id = id(value)
+        if value_id in seen:
+            return _SKIP_CONFIG_VALUE
+        seen.add(value_id)
+        converted = {}
+        for key, item in value.items():
+            converted_key = _to_json_safe_config_value(key, seen)
+            converted_item = _to_json_safe_config_value(item, seen)
+            if converted_key is not _SKIP_CONFIG_VALUE and converted_item is not _SKIP_CONFIG_VALUE:
+                converted[str(converted_key)] = converted_item
+        seen.remove(value_id)
+        return converted
+    return _SKIP_CONFIG_VALUE
+
+
+def _to_json_safe_config_dict(config_dict):
+    json_safe_config = {}
+    for key, value in config_dict.items():
+        converted = _to_json_safe_config_value(value, set())
+        if converted is not _SKIP_CONFIG_VALUE:
+            json_safe_config[key] = converted
+    return json_safe_config
+
+
+def _config_to_shallow_dict(config):
+    if is_dataclass(config):
+        return {field.name: getattr(config, field.name) for field in fields(config) if hasattr(config, field.name)}
+    return vars(config)
 
 
 class MegatronCheckpointManager(BaseCheckpointManager):
@@ -409,13 +462,11 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             metadata=self._build_sharded_state_dict_metadata(),
         )
 
-        from megatron.bridge.training.checkpointing import (
-            _load_fsdp_dtensor_base_checkpoint as bridge_load_fsdp_dtensor_base_checkpoint,
-        )
+        from megatron.bridge.training.checkpointing import load_fsdp_dtensor_checkpoint
 
         checkpoint_model = getattr(self.model[0], "module", self.model[0])
         sharded_state_dict["_model"] = [checkpoint_model]
-        state_dict, _, _, _ = bridge_load_fsdp_dtensor_base_checkpoint(
+        state_dict, _, _, _ = load_fsdp_dtensor_checkpoint(
             load_dir=dist_checkpoint_path,
             ckpt_cfg=self.checkpoint_config,
             rank0=False,
@@ -463,15 +514,15 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             metadata=self._build_sharded_state_dict_metadata(),
         )
 
-        from megatron.bridge.training.checkpointing import (
-            preprocess_fsdp_dtensor_state_dict as bridge_preprocess_fsdp_dtensor_state_dict,
-        )
+        from megatron.bridge.training.checkpointing import save_fsdp_dtensor_checkpoint
 
         checkpoint_model = getattr(self.model[0], "module", self.model[0])
-        state_dict = bridge_preprocess_fsdp_dtensor_state_dict(self.transformer_config, state_dict, checkpoint_model)
-        storage_writer = FileSystemWriter(dist_checkpoint_path)
-        torch.distributed.checkpoint.save(state_dict=state_dict, storage_writer=storage_writer)
-        torch.distributed.barrier()
+        save_fsdp_dtensor_checkpoint(
+            dist_checkpoint_path,
+            state_dict,
+            cfg=self.transformer_config,
+            model=checkpoint_model,
+        )
         return None
 
     def load_rng_states(self, rng_states, data_parallel_random_init=False, use_dist_ckpt=True):
@@ -725,7 +776,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                             log_only_rank_0=True,
                         )
                     else:
-                        self.bridge.save_hf_weights(self.model, hf_ckpt_path)
+                        self.bridge.save_hf_weights(self.model, hf_ckpt_path, strict=self.checkpoint_config.strict)
 
                 log_with_rank(f"Saved bridge checkpoint to {hf_ckpt_path}", rank=self.rank, logger=logger)
 
@@ -755,38 +806,16 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             if self.rank == 0:
                 # Save transformer config
                 print(self.transformer_config)
-                bypass_keys = [
-                    "finalize_model_grads_func",
-                    "grad_scale_func",
-                    "no_sync_func",
-                    "grad_sync_func",
-                    "param_sync_func",
-                    "generation_config",
-                    "_pg_collection",
-                ]
-                backup = {}
-                for k in bypass_keys:
-                    if hasattr(self.transformer_config, k):
-                        backup[k] = getattr(self.transformer_config, k, None)
-                        delattr(self.transformer_config, k)
-                transformer_config_dict = asdict(self.transformer_config)
-                for k in backup:
-                    setattr(self.transformer_config, k, backup[k])
-                to_convert_types = {torch.dtype: str, AttnBackend: str}
-                ignore_types = [Callable]
-                pop_keys = []
-                for key, value in transformer_config_dict.items():
-                    if type(value) in to_convert_types:
-                        transformer_config_dict[key] = to_convert_types[type(value)](value)
-                    if type(value) in ignore_types:
-                        pop_keys.append(key)
-                    if callable(value):
-                        pop_keys.append(key)
-                for key in pop_keys:
-                    transformer_config_dict.pop(key)
+                transformer_config_dict = _to_json_safe_config_dict(_config_to_shallow_dict(self.transformer_config))
                 transformer_config_path = get_transformer_config_checkpoint_path(local_path)
+                # NOTE: With Megatron-Bridge backend, a circular import issue occurs when transformers version >= 5.4.0.
                 with open(transformer_config_path, "w") as f:
-                    json.dump(transformer_config_dict, f, indent=2)
+                    json.dump(
+                        transformer_config_dict,
+                        f,
+                        indent=2,
+                        default=lambda o: o.to_dict() if hasattr(o, "to_dict") else o,
+                    )
 
         if self.should_save_hf_model and not self.use_hf_checkpoint:
             # wait for everyone to dump to local

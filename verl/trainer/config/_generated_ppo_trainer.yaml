@@ -101,6 +101,7 @@ actor_rollout_ref:
       load_contents: ${.save_contents}
       async_save: false
       mbridge_config: {}
+      strict: true
     use_fused_kernels: ${oc.select:actor_rollout_ref.model.use_fused_kernels,false}
     profiler:
       _target_: verl.utils.profiler.ProfilerConfig
@@ -891,11 +892,23 @@ global_profiler:
       strict: false
 transfer_queue:
   enable: false
+  metrics:
+    enabled: false
+    port: 0
   backend:
     storage_backend: SimpleStorage
     SimpleStorage:
       total_storage_size: 100000
       num_data_storage_units: 8
+    MooncakeStore:
+      auto_init: false
+      metadata_server: localhost:50123
+      master_server_address: localhost:50124
+      local_hostname: localhost
+      protocol: tcp
+      global_segment_size: 4294967296
+      local_buffer_size: 1073741824
+      device_name: ''
 ray_kwargs:
   ray_init:
     num_cpus: null
