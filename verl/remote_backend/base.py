@@ -91,7 +91,7 @@ class RemoteBackend(abc.ABC):
     # below this layer.
 
     @abc.abstractmethod
-    def compute_log_prob(
+    async def compute_log_prob(
         self,
         data,
         *,
@@ -104,6 +104,9 @@ class RemoteBackend(abc.ABC):
         """Forward-only pass; either the actor (``ref=False``) or the
         reference model (``ref=True``).
 
+        ``async`` so the underlying RPC (typically a Ray actor call) can be
+        awaited without blocking the forwarder's event loop.
+
         Returns:
             ``{"model_output": {"log_probs": Tensor,
             "entropy": Tensor?}, "metrics": dict}``. The generic worker
@@ -113,7 +116,7 @@ class RemoteBackend(abc.ABC):
         """
 
     @abc.abstractmethod
-    def update_actor(
+    async def update_actor(
         self,
         data,
         *,
@@ -123,6 +126,9 @@ class RemoteBackend(abc.ABC):
         temperature,
     ) -> dict[str, Any]:
         """Forward-backward + optimizer step on a global batch.
+
+        ``async`` so the underlying RPC (typically a Ray actor call) can be
+        awaited without blocking the forwarder's event loop.
 
         Returns:
             ``{"loss": float|list[float], "metrics": dict,
@@ -147,8 +153,12 @@ class RemoteBackend(abc.ABC):
         """
 
     @abc.abstractmethod
-    def save_checkpoint(self) -> dict[str, Any]:
-        """Persist current model + optimizer state."""
+    async def save_checkpoint(self) -> dict[str, Any]:
+        """Persist current model + optimizer state.
+
+        ``async`` so the underlying RPC (typically a Ray actor call) can be
+        awaited without blocking the forwarder's event loop.
+        """
 
     # ------------------------------------------------------------------ #
     # Parallelism contract
