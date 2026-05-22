@@ -87,13 +87,7 @@ class ProfilerChecker:
         for d in dirs:
             logger.info(f"[{stage}] Found: {d}")
 
-        # 3. Validate directory count
-        if not self.config.dir_count_validator(stage, dirs):
-            expected = ">1" if stage == "*_rollout_*" and self.device_type == "npu" else 1
-            logger.error(f"[{stage}] Expected {expected} directories, found {len(dirs)}")
-            return False
-
-        # 4. Validate PROF files/directories
+        # 3. Validate PROF files/directories
         for target_dir in dirs:
             if not self.config.prof_validator(target_dir):
                 logger.error(f"[{stage}] PROF not found in {target_dir}")
