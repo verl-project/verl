@@ -292,7 +292,7 @@ class ServerAdapter(BaseRollout):
         self, config: RolloutConfig, model_config: HFModelConfig, device_mesh: DeviceMesh, replica_rank: int = -1
     ):
         super().__init__(config, model_config, device_mesh)
-        if config.get("quantization", None) == "fp8":
+        if self.config.quantization == "fp8" and self.model_config.hf_config is not None:
             FP8_BLOCK_QUANT_KWARGS = {
                 "activation_scheme": "dynamic",
                 "fmt": "e4m3",
