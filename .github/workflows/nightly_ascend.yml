@@ -114,8 +114,6 @@ jobs:
           clean: true
       - name: Install the current repository
         run: |
-          cd recipe
-          git checkout main
           pip install -r requirements-npu.txt
           pip install --no-deps -e .
       - name: Check final pip list
@@ -137,6 +135,9 @@ jobs:
       - name: Running nightlyCI_dapo-moonlight-16b-megatron-vllm_ascend
         run: |
           ray stop --force
+          cd recipe
+          git checkout main
+          cd ..
           export HCCL_OP_EXPANSION_MODE="AIV"
           bash tests/special_npu/nightly_ci_ascend/run_dapo_moonlight-16b_megatron_npu.sh
 

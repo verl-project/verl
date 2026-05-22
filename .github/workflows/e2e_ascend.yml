@@ -88,7 +88,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          submodules: recursive
           clean: true
       - name: Install the current repository
         run: |
@@ -99,20 +98,6 @@ jobs:
       - name: Preprocess gsm8k dataset
         run: |
           python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
-      - name: update mbridge
-        run: |
-          # get mbridge path
-          MBRIDGE_PATH=$(pip show mbridge | grep Location | awk '{print $2}')
-          # cuda to npu
-          TARGET_FILE="${MBRIDGE_PATH}/mbridge/models/ext/deepseek_v3/dequant_fp8_safetensor_io.py"
-          sed -i '34s/cuda/npu/;51s/cuda/npu/' "$TARGET_FILE"
-      - name: Running nightlyCI_dapo-moonlight-16b-megatron-vllm_ascend
-        run: |
-          ray stop --force
-          cd recipe
-          git checkout main
-          export HCCL_OP_EXPANSION_MODE="AIV"
-          bash tests/special_npu/nightly_ci_ascend/run_dapo_moonlight-16b_megatron_npu.sh
       - name: Running gsm8k e2e training tests with PPO on ASCEND NPU (FSDP backend)
         run: |
           ray stop --force
