@@ -13,16 +13,39 @@
 # limitations under the License.
 
 import re
+from decimal import Decimal, InvalidOperation
 
 _SOLUTION_CLIP_CHARS = 300
+_BOXED_NUMERIC_RE = re.compile(r"\\boxed\{\s*\$?([+-]?(?:\d[\d,]*|\d*\.\d+))\s*\}")
 
 
 def _normalize_numeric_token(token):
+    if token is None:
+        return None
     token = token.replace(",", "").replace("$", "")
     # Flexible extraction can pick up sentence-ending punctuation like "308.".
     # Strip only trailing punctuation after a digit while keeping real decimals intact.
-    token = re.sub(r"(?<=\d)[\.,]+$", "", token)
+    token = re.sub(r"(?<=\d)[\.,]+$", "", token).strip()
+    if token in {"", "."}:
+        return None
     return token
+
+
+def _extract_boxed_numeric_token(solution_str):
+    tail = solution_str[-800:] if len(solution_str) > 800 else solution_str
+    matches = _BOXED_NUMERIC_RE.findall(tail)
+    if not matches:
+        return None
+    return _normalize_numeric_token(matches[-1])
+
+
+def _numeric_tokens_equal(left, right):
+    if left is None or right is None:
+        return False
+    try:
+        return Decimal(left) == Decimal(right)
+    except InvalidOperation:
+        return left == right
 
 
 def extract_solution(solution_str, method="strict"):
@@ -31,10 +54,9 @@ def extract_solution(solution_str, method="strict"):
     # Optimization: Regular expression matching on very long strings can be slow.
     # For math problems, the final answer is usually at the end.
     # We only match on the last 300 characters, which is a safe approximation for 300 tokens.
-    if len(solution_str) > _SOLUTION_CLIP_CHARS:
-        solution_str = solution_str[-_SOLUTION_CLIP_CHARS:]
-
     if method == "strict":
+        if len(solution_str) > _SOLUTION_CLIP_CHARS:
+            solution_str = solution_str[-_SOLUTION_CLIP_CHARS:]
         # this also tests the formatting of the model
         solutions = re.findall("#### (\\-?[0-9\\.\\,]+)", solution_str)
         if len(solutions) == 0:
@@ -43,8 +65,12 @@ def extract_solution(solution_str, method="strict"):
             # take the last solution
             final_answer = _normalize_numeric_token(solutions[-1])
     elif method == "flexible":
+        final_answer = _extract_boxed_numeric_token(solution_str)
+        if final_answer is not None:
+            return final_answer
+        if len(solution_str) > _SOLUTION_CLIP_CHARS:
+            solution_str = solution_str[-_SOLUTION_CLIP_CHARS:]
         answer = re.findall("(\\-?[0-9\\.\\,]+)", solution_str)
-        final_answer = None
         if len(answer) == 0:
             # no reward is there is no answer
             pass
@@ -75,7 +101,11 @@ def compute_score(solution_str, ground_truth, method="strict", format_score=0.0,
     if answer is None:
         return 0
     else:
-        if answer == ground_truth:
+        if method == "flexible":
+            correct = _numeric_tokens_equal(answer, _normalize_numeric_token(ground_truth))
+        else:
+            correct = answer == ground_truth
+        if correct:
             return score
         else:
             return format_score
