@@ -126,7 +126,7 @@ class MegatronEngine(BaseEngine):
         from megatron.core.package_info import __version__
         
         from packaging import version
-        if is_npu_available and version.parse(__version__) == version.parse("0.16.0"):
+        if is_npu_available and __version__ in ["0.16.0", "0.16.1"]:
             from verl.models.mcore.patch import apply_mtp_inference_patch
             apply_mtp_inference_patch()
         
