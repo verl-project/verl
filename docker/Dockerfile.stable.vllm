@@ -141,7 +141,7 @@ RUN apt-get update && \
     ffmpeg -decoders | grep -i nvidia && \
     rm -rf /var/lib/apt/lists/*
 
-RUN pip install git+https://github.com/ETOgaosion/qwen-vl-utils.git@main
+RUN pip install qwen-vl-utils==0.0.14
 
 RUN pip install git+https://github.com/verl-project/verl.git@${VERL_VERSION} && pip uninstall -y verl
 

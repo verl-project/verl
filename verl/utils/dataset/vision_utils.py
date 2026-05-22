@@ -12,34 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import inspect
-from functools import cache
 from io import BytesIO
-from typing import Any, Callable, Optional
+from typing import Optional
 
 import torch
 from PIL import Image
-
-
-@cache
-def _signature_params(func: Callable[..., Any]) -> frozenset[str]:
-    """Cached parameter set for ``func``.
-
-    ``qwen-vl-utils`` has shipped multiple incompatible signatures
-    (``image_patch_size`` and ``return_video_metadata`` were added in v0.0.13,
-    and some internal forks still lag behind). Callers use this to forward only
-    kwargs the installed function actually accepts.
-    """
-    try:
-        return frozenset(inspect.signature(func).parameters)
-    except (TypeError, ValueError):
-        return frozenset()
-
-
-def _select_supported(func: Callable[..., Any], candidate: dict[str, Any]) -> dict[str, Any]:
-    """Return the subset of ``candidate`` whose keys are in ``func``'s signature."""
-    supported = _signature_params(func)
-    return {k: v for k, v in candidate.items() if k in supported}
 
 
 def process_image(image: dict | Image.Image, image_patch_size: int = 14) -> Image.Image:
@@ -52,29 +29,11 @@ def process_image(image: dict | Image.Image, image_patch_size: int = 14) -> Imag
         assert "image" not in image, "Cannot have both `bytes` and `image`"
         image["image"] = Image.open(BytesIO(image["bytes"]))
 
-    return fetch_image(image, **_select_supported(fetch_image, {"image_patch_size": image_patch_size}))
-
-
-def safe_process_vision_info(
-    messages: list[dict],
-    *,
-    image_patch_size: int = 14,
-    return_video_metadata: bool = False,
-) -> tuple[Optional[list[Image.Image]], Optional[list[Any]]]:
-    """Backward-compatible wrapper around ``qwen_vl_utils.process_vision_info``.
-
-    Forwards only the kwargs the installed function signature accepts so verl
-    keeps working across upstream releases and any internal qwen-vl-utils fork
-    that hasn't been resynced. When ``return_video_metadata`` is not supported,
-    videos come back as bare tensors; ``build_multimodal_processor_inputs``
-    handles both shapes and still pins ``do_sample_frames=False`` as a guardrail.
-    """
-    from qwen_vl_utils import process_vision_info
-
-    candidate: dict[str, Any] = {"image_patch_size": image_patch_size}
-    if return_video_metadata:
-        candidate["return_video_metadata"] = True
-    return process_vision_info(messages, **_select_supported(process_vision_info, candidate))
+    try:
+        ans = fetch_image(image, image_patch_size=image_patch_size)
+    except Exception:
+        ans = fetch_image(image)
+    return ans
 
 
 VIDEO_FORMAT_HELP = """Currently, we only support the video formats introduced in qwen2-vl.
@@ -115,12 +74,9 @@ def process_video(
     return_video_sample_fps: bool = False,
     return_video_metadata: bool = False,
 ) -> torch.Tensor:
-    """Converts a video dict into a ``[n_frames, 3, H, W]`` tensor.
+    """Converts a video dict into a [n_frames, 3, H, W] tensor
 
-    Forwards the v0.0.13+ kwargs (``image_patch_size``,
-    ``return_video_sample_fps``, ``return_video_metadata``) only when the
-    installed ``fetch_video`` signature accepts them, so verl stays compatible
-    with older qwen-vl-utils variants that don't expose them.
+    Add video sample FPS in a future MR
     """
     from qwen_vl_utils import fetch_video
 
@@ -142,12 +98,12 @@ def process_video(
             if fps_max_frames is not None:
                 video["max_frames"] = fps_max_frames
 
-    candidate = {
-        "image_patch_size": image_patch_size,
-        "return_video_sample_fps": return_video_sample_fps,
-        "return_video_metadata": return_video_metadata,
-    }
-    return fetch_video(video, **_select_supported(fetch_video, candidate))
+    return fetch_video(
+        video,
+        image_patch_size=image_patch_size,
+        return_video_sample_fps=return_video_sample_fps,
+        return_video_metadata=return_video_metadata,
+    )
 
 
 def process_multi_modal_inputs_for_minicpmo(input_ids, attention_mask, position_ids, cu_seqlens, multi_modal_inputs):

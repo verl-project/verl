@@ -123,11 +123,9 @@ def build_multimodal_processor_inputs(
     videos, video_metadata = _split_videos_and_metadata(videos)
     processor_kwargs.setdefault("return_tensors", return_tensors)
 
-    if videos is not None:
-        # Pre-sampled frames must not be re-sampled by the processor.
+    if video_metadata is not None:
+        processor_kwargs.setdefault("video_metadata", video_metadata)
         processor_kwargs.setdefault("do_sample_frames", False)
-        if video_metadata is not None:
-            processor_kwargs.setdefault("video_metadata", video_metadata)
 
     processor_inputs = {"text": text, "images": images, "videos": videos, **processor_kwargs}
     if audio is not None:

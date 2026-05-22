@@ -13,7 +13,6 @@
 # limitations under the License.
 import argparse
 import asyncio
-import hashlib
 import inspect
 import json
 import logging
@@ -933,31 +932,6 @@ class vLLMReplica(RolloutReplica):
         )
         self.server_class = ray.remote(vLLMHttpServer)
 
-    def _vllm_port_hint(self, node_rank: int) -> int:
-        """Deterministic starting port for vLLM's internal distributed init.
-
-        vLLM's ``multiproc_executor`` allocates the TP rendezvous port via
-        ``vllm.utils.network_utils.get_open_port``, which falls back to
-        ``bind(("", 0))`` and races when multiple engines initialize in
-        parallel on the same node: two engines can each receive the same
-        ephemeral port between ``getsockname`` and the worker actually
-        binding it, producing the EADDRINUSE failure reported in
-        https://github.com/ServiceNow/PipelineRL/issues/27.
-
-        Setting ``VLLM_PORT`` makes ``_get_open_port`` start its bind loop
-        at a specific port and increment on conflict. Assigning a distinct
-        start port per (replica, node) eliminates the race.
-        """
-        # 16-bit role/name_suffix hash, quantized to a 100-port grid so that
-        # co-located actor/reward/teacher systems land in disjoint ranges.
-        role = "reward" if self.is_reward_model else "teacher" if self.is_teacher_model else "actor"
-        identity = f"{self.name_suffix}|{role}"
-        system_offset = int(hashlib.md5(identity.encode()).hexdigest()[:4], 16) % 100 * 100
-        # 20000 base keeps us above well-known ports and below the typical
-        # Linux ephemeral range (32768+). Replica stride 200 / node stride 50
-        # absorb a comfortable number of retries before the next slot.
-        return 20000 + system_offset + self.replica_rank * 200 + node_rank * 50
-
     async def launch_servers(self):
         """Launch http server in each node."""
         assert len(self.workers) == self.world_size, (
@@ -1005,10 +979,6 @@ class vLLMReplica(RolloutReplica):
                 # https://github.com/vllm-project/vllm/blob/c6b0a7d3ba03ca414be1174e9bd86a97191b7090/vllm/worker/worker_base.py#L445
                 "NCCL_CUMEM_ENABLE": "0",
             }
-            # Pin VLLM_PORT per (replica, node) so parallel engines do not race for
-            # the same internal distributed-init port. See ``_vllm_port_hint``.
-            if "VLLM_PORT" not in os.environ:
-                env_vars["VLLM_PORT"] = str(self._vllm_port_hint(node_rank))
             server = self.server_class.options(
                 scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                     node_id=node_id,
