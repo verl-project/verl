@@ -41,9 +41,7 @@ class PlatformBase(abc.ABC):
         if shutil.which(cmd) is None:
             return False
         try:
-            result = subprocess.run(
-                [cmd], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10
-            )
+            result = subprocess.run([cmd], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
             return result.returncode == 0
         except (subprocess.TimeoutExpired, OSError):
             return False

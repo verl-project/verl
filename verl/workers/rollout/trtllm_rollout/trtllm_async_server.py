@@ -23,10 +23,10 @@ from ray.actor import ActorHandle
 from ray.util import placement_group_table
 from ray.util.placement_group import PlacementGroup
 
+from verl.plugin.platform import get_platform
 from verl.single_controller.ray import SubRayResourcePool
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.net_utils import is_valid_ipv6_address
-from verl.plugin.platform import get_platform
 from verl.utils.profiler import DistProfiler
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput

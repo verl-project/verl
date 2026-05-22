@@ -34,9 +34,9 @@ from vllm.outputs import RequestOutput
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 
+from verl.plugin.platform import get_platform
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import get_resource_name, get_visible_devices_keyword, is_torch_npu_available
-from verl.plugin.platform import get_platform
 from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
 from verl.utils.profiler import DistProfiler, build_vllm_profiler_args
 from verl.utils.tokenizer import normalize_token_ids

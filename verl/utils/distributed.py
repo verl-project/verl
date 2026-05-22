@@ -112,7 +112,6 @@ def stateless_init_process_group(master_address, master_port, rank, world_size, 
     from torch.distributed import TCPStore
     from vllm.distributed.utils import StatelessProcessGroup
 
-    from verl.plugin.platform import get_platform
     from verl.utils.device import is_npu_available
 
     if is_npu_available:
