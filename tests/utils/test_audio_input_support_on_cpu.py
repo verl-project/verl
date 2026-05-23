@@ -75,6 +75,25 @@ def test_build_multimodal_processor_inputs_includes_audio_sampling_rate() -> Non
     assert captured["use_audio_in_video"] is True
 
 
+def test_build_multimodal_processor_inputs_skips_video_kwargs_when_no_videos() -> None:
+    captured = {}
+
+    class TextOnlyProcessor:
+        def __call__(self, **kwargs):
+            captured.update(kwargs)
+            return {"input_ids": torch.tensor([[1, 2, 3]])}
+
+    build_multimodal_processor_inputs(
+        TextOnlyProcessor(),
+        text=["hello"],
+        images=None,
+        videos=None,
+        audio=None,
+    )
+    assert "do_sample_frames" not in captured
+    assert "video_metadata" not in captured
+
+
 def test_extract_multi_modal_inputs_merges_variable_audio_fields() -> None:
     first_features = torch.arange(6, dtype=torch.float32).view(1, 2, 3)
     second_features = torch.arange(10, dtype=torch.float32).view(1, 2, 5)

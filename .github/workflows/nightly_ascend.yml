@@ -44,7 +44,7 @@ permissions:
   contents: read
 
 jobs:
-  # Test ppo qwen3-8b fsdp+vllm
+  # Test ppo qwen3-8b fsdp vllm
   nightlyCI_ppo-qwen3-8b-fsdp-vllm_ascend:
     if: github.repository_owner == 'verl-project'
     runs-on: linux-aarch64-a2b3-8
@@ -271,6 +271,9 @@ jobs:
       - name: Running nightlyCI_dapo-moonlight-16b-megatron-vllm_ascend
         run: |
           ray stop --force
+          cd recipe
+          git checkout main
+          cd ..
           export HCCL_OP_EXPANSION_MODE="AIV"
           bash tests/special_npu/nightly_ci_ascend/run_dapo_moonlight-16b_megatron_npu.sh
 

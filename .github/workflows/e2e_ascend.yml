@@ -106,13 +106,13 @@ jobs:
       - name: Running gsm8k e2e training tests with GRPO on ASCEND NPU (FSDP backend)
         run: |
           ray stop --force
-          bash tests/special_npu/run_qwen2_5_05b_grpo.sh
+          bash tests/special_npu/run_qwen3_8b_grpo_profiling.sh
           rm -rf $HOME/ckpts
       - name: Running gsm8k e2e training tests with GRPO on ASCEND NPU (MindSpeed backend)
         run: |
           ray stop --force
-          USE_DIST_CKPT=True bash tests/special_npu/run_qwen2_5_05b_grpo_mindspeed.sh
-          rm -rf $HOME/dist_ckpt/qwen2_5_05b_grpo_mindspeed
+          USE_DIST_CKPT=True bash tests/special_npu/run_qwen3_06b_grpo_mindspeed.sh
+          rm -rf $HOME/dist_ckpt/qwen3_06b_grpo_mindspeed
           rm -rf $HOME/ckpts
       - name: Running gsm8k e2e training tests with GRPO on ASCEND NPU (MindSpeed backend, MoE Model)
         run: |

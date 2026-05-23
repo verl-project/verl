@@ -7,7 +7,7 @@ Last updated: 05/19/2026.
 镜像获取 & 公开镜像地址
 --------------------------
 
-昇腾在 `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_ 中托管每日构建的 A2/A3 镜像，基于下方“Dockerfile构建镜像脚本清单”中列出的 Dockerfile 构建。
+昇腾在 `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_ 中托管每日构建的 A2/A3 镜像，基于 `Dockerfile <../../../docker/ascend>`_ 构建，具体说明见 ``Dockerfile构建镜像脚本清单`` 。
 
 每日构建镜像名格式：verl-{CANN版本}-{NPU设备类型}-{操作系统版本}-{python版本}-latest
 
@@ -25,8 +25,8 @@ Atlas 900 A2 PODc
 Atlas 800T A3
 
 
-镜像内各组件版本信息清单
---------------------------
+最新镜像内各组件版本信息清单
+----------------
 
 ================= ============
 组件               版本
@@ -54,24 +54,8 @@ sgl-kernel-npu     2026.02.01
 Dockerfile构建镜像脚本清单
 ---------------------------
 
-============== ================== ============== ===========================================================================================================
-设备类型         CANN基础镜像版本      推理后端        参考文件
-============== ================== ============== ===========================================================================================================
-A2              8.5.1 + 8.5.2组件  vLLM            `Dockerfile.ascend_8.5.2_a2_qwen3-5 <https://github.com/verl-project/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.2_a2_qwen3-5>`_
-A2              8.5.0              vLLM            `Dockerfile.ascend_8.5.0_a2 <https://github.com/verl-project/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.0_a2>`_
-A2              8.5.0              vLLM            `Dockerfile.ascend_8.5.0_a2_v0.7.1 <https://github.com/verl-project/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.0_a2_v0.7.1>`_
-A2              8.3.RC1            vLLM            `Dockerfile.ascend_8.3.rc1_a2 <https://github.com/verl-project/verl/blob/main/docker/ascend/Dockerfile.ascend_8.3.rc1_a2>`_
-A2              8.2.RC1            vLLM            `Dockerfile.ascend_8.2.rc1_a2 <https://github.com/verl-project/verl/blob/main/docker/ascend/Dockerfile.ascend_8.2.rc1_a2>`_
-A2              8.5.0              SGLang          `Dockerfile.ascend.sglang_8.5.0_a2 <https://github.com/verl-project/verl/blob/main/docker/ascend/Dockerfile.ascend.sglang_8.5.0_a2>`_
-A2              8.3.RC1            SGLang          `Dockerfile.ascend.sglang_8.3.rc1_a2 <https://github.com/verl-project/verl/blob/main/docker/ascend/Dockerfile.ascend.sglang_8.3.rc1_a2>`_
-A3              8.5.1 + 8.5.2组件  vLLM            `Dockerfile.ascend_8.5.2_a3_qwen3-5 <https://github.com/verl-project/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.2_a3_qwen3-5>`_
-A3              8.5.0              vLLM            `Dockerfile.ascend_8.5.0_a3 <https://github.com/verl-project/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.0_a3>`_
-A3              8.5.0              vLLM            `Dockerfile.ascend_8.5.0_a3_v0.7.1 <https://github.com/verl-project/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.0_a3_v0.7.1>`_
-A3              8.3.RC1            vLLM            `Dockerfile.ascend_8.3.rc1_a3 <https://github.com/verl-project/verl/blob/main/docker/ascend/Dockerfile.ascend_8.3.rc1_a3>`_
-A3              8.2.RC1            vLLM            `Dockerfile.ascend_8.2.rc1_a3 <https://github.com/verl-project/verl/blob/main/docker/ascend/Dockerfile.ascend_8.2.rc1_a3>`_
-A3              8.5.0              SGLang          `Dockerfile.ascend.sglang_8.5.0_a3 <https://github.com/verl-project/verl/blob/main/docker/ascend/Dockerfile.ascend.sglang_8.5.0_a3>`_
-A3              8.3.RC1            SGLang          `Dockerfile.ascend.sglang_8.3.rc1_a3 <https://github.com/verl-project/verl/blob/main/docker/ascend/Dockerfile.ascend.sglang_8.3.rc1_a3>`_
-============== ================== ============== ===========================================================================================================
+**通用镜像**
+
 
 **说明：**
 
