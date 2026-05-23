@@ -251,15 +251,22 @@ def merge_router_topk_indices(attention_mask, input_ids, mini_layer_topk_idx_lis
             .contiguous()
         )
 
+        fp8 = tf_config.fp8
+        use_fp8_padding = fp8 in ["e4m3", "hybrid"]
+
         if input_ids.is_nested:
             batch_size = input_ids.shape[0]
-            _, packed_seq_params, _ = preprocess_thd_engine(input_ids, pre_process=True)
+            _, packed_seq_params, _ = preprocess_thd_engine(
+                input_ids, pre_process=True, use_fp8_padding=use_fp8_padding
+            )
             layers_topk_idx = postprocess_thd_engine(
                 layers_topk_idx, packed_seq_params, input_ids, batch_size, post_process=True
             )
         else:
             batch_size, seq_len = attention_mask.shape[:2]
-            _, packed_seq_params = preprocess_packed_seqs(input_ids, attention_mask, pre_process=True)
+            _, packed_seq_params = preprocess_packed_seqs(
+                input_ids, attention_mask, pre_process=True, use_fp8_padding=use_fp8_padding
+            )
             layers_topk_idx = postprocess_packed_seqs(
                 layers_topk_idx, packed_seq_params, attention_mask, batch_size, seq_len, post_process=True
             )
@@ -286,10 +293,17 @@ def set_router_replay_data(layers_topk_idx, attention_mask, tf_config, vp_rank=N
         None: The function updates internal RouterReplay instances in-place.
     """
     with torch.no_grad():
+        fp8 = tf_config.fp8
+        use_fp8_padding = fp8 in ["e4m3", "hybrid"]
+
         if layers_topk_idx.is_nested:
-            layers_topk_idx_rmpad, _, _ = preprocess_thd_engine(layers_topk_idx, pre_process=True)
+            layers_topk_idx_rmpad, _, _ = preprocess_thd_engine(
+                layers_topk_idx, pre_process=True, use_fp8_padding=use_fp8_padding
+            )
         else:
-            layers_topk_idx_rmpad, _ = preprocess_packed_seqs(layers_topk_idx, attention_mask, pre_process=True)
+            layers_topk_idx_rmpad, _ = preprocess_packed_seqs(
+                layers_topk_idx, attention_mask, pre_process=True, use_fp8_padding=use_fp8_padding
+            )
         layers_topk_idx_rmpad = layers_topk_idx_rmpad.contiguous()  # 1, dynamic_bs_all, layer_num, topk
 
         # 1, dynamic_bs_split, layer_num, topk

@@ -20,6 +20,7 @@ from functools import partial
 from itertools import chain
 from typing import Optional
 
+import psutil
 import torch
 from codetiming import Timer
 from omegaconf import DictConfig, open_dict
@@ -32,7 +33,7 @@ from verl.single_controller.base.decorator import Dispatch, make_nd_compute_data
 from verl.trainer.distillation import distillation_ppo_loss, is_distillation_enabled
 from verl.utils import tensordict_utils as tu
 from verl.utils.config import omega_conf_to_dataclass
-from verl.utils.device import get_device_name, is_npu_available, set_expandable_segments
+from verl.utils.device import get_device_name, get_torch_device, set_expandable_segments
 from verl.utils.distributed import initialize_global_process_group_ray, set_numa_affinity
 from verl.utils.flops_counter import FlopsCounter
 from verl.utils.import_utils import import_external_libs
@@ -84,11 +85,6 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
         from verl.workers.engine import BaseEngine, EngineRegistry
 
-        # TODO(jhz): Switch to `set_expandable_segments` when the torch_npu library
-        # supports `torch.npu.memory._set_allocator_settings`
-        if is_npu_available:
-            os.environ["PYTORCH_NPU_ALLOC_CONF"] = "expandable_segments:True"
-
         initialize_global_process_group_ray(timeout_second=None)
 
         set_numa_affinity()
@@ -117,7 +113,6 @@ class TrainingWorker(Worker, DistProfilerExtension):
         self.engine_config.use_remove_padding = self.model_config.get("use_remove_padding", False)
         self.engine_config.use_fused_kernels = self.model_config.get("use_fused_kernels", False)
 
-        # TODO: add DistProfilerExtension
         self.profiler_config = self.config.profiler_config
         if self.profiler_config is not None:
             self.profiler_tool_config = self.profiler_config.tool_config.get(self.profiler_config.tool, {})
@@ -148,7 +143,6 @@ class TrainingWorker(Worker, DistProfilerExtension):
         if hasattr(self.model_config, "hf_config"):
             self.flops_counter = FlopsCounter(self.model_config.hf_config)
         else:
-            # for Diffusion models, FlopsCounter is not supported yet.
             self.flops_counter = None
 
         self.loss_fn = None
@@ -184,10 +178,6 @@ class TrainingWorker(Worker, DistProfilerExtension):
         Returns:
 
         """
-        # TODO: whether to log memory
-        # metrics["perf/max_memory_allocated_gb"] = get_torch_device().max_memory_allocated() / (1024 ** 3)
-        # metrics["perf/max_memory_reserved_gb"] = get_torch_device().max_memory_reserved() / (1024 ** 3)
-        # metrics["perf/cpu_memory_used_gb"] = psutil.virtual_memory().used / (1024 ** 3)
 
         metrics: dict = output.pop("metrics")
         # perform all gather in dp group to ensure that it's correct.
@@ -201,6 +191,8 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
         # For grad_norm, we do not perform all reduce because it is already been done when clipping grad
         grad_norm = metrics.pop("grad_norm", None)
+        if isinstance(grad_norm, torch.Tensor):
+            grad_norm = grad_norm.detach().item()
         lr = metrics.pop("lr", None)
 
         # For other metrics, we perform all gather in dp group (only if DP > 1)
@@ -213,6 +205,11 @@ class TrainingWorker(Worker, DistProfilerExtension):
             final_metrics["grad_norm"] = grad_norm
         if lr is not None:
             final_metrics["lr"] = lr
+
+        # log memory
+        final_metrics["perf/max_memory_allocated_gb"] = get_torch_device().max_memory_allocated() / (1024**3)
+        final_metrics["perf/max_memory_reserved_gb"] = get_torch_device().max_memory_reserved() / (1024**3)
+        final_metrics["perf/cpu_memory_used_gb"] = psutil.virtual_memory().used / (1024**3)
 
         # TODO: confirm the mtp loss IS same across dp
         for k, v in final_metrics.items():
@@ -324,6 +321,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
         return output
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="train"), blocking=False)
+    @DistProfiler.annotate(color="red", role="train_batch")
     def train_batch(self, data: TensorDict) -> TensorDict:
         assert self.loss_fn is not None, "loss function can't be None when calling train_batch"
         assert not self.engine_config.forward_only, "Can't run `train_batch` when forward_only is in the engine config."
@@ -513,7 +511,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
             # construct TrainingWorkerConfig
             ref_training_config = TrainingWorkerConfig(
-                model_type="language_model",
+                model_type=ref_config.model_config.get("model_type", "language_model"),
                 model_config=ref_config.model_config,
                 engine_config=ref_config.engine,
                 optimizer_config=ref_config.optim,
@@ -526,7 +524,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             ref_training_config.engine_config.infer_micro_batch_size_per_gpu = (
                 self.config.ref.ppo_micro_batch_size_per_gpu
             )
-            ref_training_config.engine_config.use_remove_padding = model_config.use_remove_padding
+            ref_training_config.engine_config.use_remove_padding = model_config.get("use_remove_padding", False)
 
             self.ref = TrainingWorker(config=ref_training_config)
             self.ref.reset()
@@ -541,7 +539,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             )
 
             actor_training_config = TrainingWorkerConfig(
-                model_type="language_model",
+                model_type=actor_config.model_config.get("model_type", "language_model"),
                 model_config=actor_config.model_config,
                 engine_config=actor_config.engine,
                 optimizer_config=actor_config.optim,
@@ -562,7 +560,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             actor_training_config.engine_config.micro_batch_size_per_gpu = (
                 self.config.actor.ppo_micro_batch_size_per_gpu
             )
-            actor_training_config.engine_config.use_remove_padding = model_config.use_remove_padding
+            actor_training_config.engine_config.use_remove_padding = model_config.get("use_remove_padding", False)
 
             if self.config.actor.use_dynamic_bsz:
                 assert self.config.rollout.log_prob_max_token_len_per_gpu is not None
@@ -658,7 +656,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self.actor.save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    async def update_weights(self, global_steps: int = None):
+    async def update_weights(self, global_steps: int = None, mode: str = "auto"):
         """Update weights from trainer to rollout.
 
         1. For sync training with colocated trainer and rollout, update rollout directly from model engine.
@@ -669,10 +667,26 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         LoRA handling: when model.lora.merge=True (peft_merge), LoRA is merged into
         base weights before sync. The engine returns full HF-keyed params with
         peft_config=None, so the rollout receives a standard weight update.
+
+        Args:
+            global_steps: Current global training step count, passed to rollout for logging/tracking.
+            mode: Weight update strategy. Supported values:
+                - ``"auto"``: Automatically resolve to the backend configured in
+                  ``config.rollout.checkpoint_engine.backend`` (default).
+                - ``"naive"``: Direct in-process weight sync between colocated trainer
+                  and rollout. Used for synchronous training where both share the same
+                  process. Rollout must be in sleep mode before this call.
+                - Any other value: Delegates to
+                  :meth:`checkpoint_engine.send_weights` for asynchronous weight
+                  transfer via checkpoint engine, suitable for disaggregated
+                  trainer/rollout deployments.
         """
 
+        # Resolve mode: "auto" falls back to config, explicit values take precedence
+        effective_mode = mode if mode != "auto" else self.config.rollout.checkpoint_engine.backend
+
         # 0. send_weights only for async training with disaggregated trainer and rollout
-        if self.config.rollout.checkpoint_engine.backend != "naive":
+        if effective_mode != "naive":
             per_tensor_param, _ = self.actor.engine.get_per_tensor_param()
             await self.checkpoint_engine.send_weights(per_tensor_param)
             return

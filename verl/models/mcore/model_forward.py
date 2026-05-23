@@ -279,12 +279,12 @@ def gptmodel_forward_model_engine(
         # For VLM model, need to pass bshd format `input_ids` and `attention_mask`.
         attention_mask = None
         if vision_model:
-            attention_mask = build_vlm_attn_mask_thd(input_ids, pad_token_id)
+            input_ids_rmpad, attention_mask = build_vlm_attn_mask_thd(input_ids, pad_token_id)
 
         output_orig = model(
             input_ids=input_ids_rmpad,
             attention_mask=attention_mask,
-            position_ids=position_ids_rmpad if not vision_model else None,  # vision models will calculate position_ids
+            position_ids=position_ids_rmpad if mtp_enable_train else None,  # position_ids is only needed for MTP
             packed_seq_params=packed_seq_params,
             **model_kwargs,
         )
@@ -351,7 +351,7 @@ def gptmodel_forward_model_engine(
 
         # For VLM model, need to pass bshd format `input_ids` and `attention_mask`.
         if vision_model:
-            attention_mask = build_vlm_attn_mask_bshd(input_ids, batch_size, pad_token_id)
+            input_ids_bshd, attention_mask = build_vlm_attn_mask_bshd(input_ids, batch_size, pad_token_id)
         else:
             attention_mask = attention_mask_bshd
 

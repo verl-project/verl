@@ -23,6 +23,7 @@ from verl.protocol import DataProto
 from verl.trainer.main_ppo import create_rl_sampler
 from verl.utils import hf_tokenizer
 from verl.utils.dataset.rl_dataset import RLHFDataset, collate_fn
+from verl.workers.rollout.llm_server import LLMServerManager
 
 
 def test_agent_reward_loop_standalone():
@@ -77,8 +78,10 @@ def test_agent_reward_loop_standalone():
 
     # 1. init reward model manager
     reward_loop_manager = RewardLoopManager(config)
+    llm_server_manager = LLMServerManager.create(config=config)
     agent_loop_manager = AgentLoopManager.create(
         config=config,
+        llm_client=llm_server_manager.get_client(),
         reward_loop_worker_handles=reward_loop_manager.reward_loop_workers,
     )
 

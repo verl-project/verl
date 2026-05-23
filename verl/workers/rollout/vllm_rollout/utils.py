@@ -29,22 +29,6 @@ from verl.utils.vllm import TensorLoRARequest, VLLMHijack
 from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
 from verl.utils.vllm.vllm_fp8_utils import apply_vllm_fp8_patches, is_fp8_model, load_quanted_weights
 
-try:
-    from vllm_omni.diffusion.worker.diffusion_worker import CustomPipelineWorkerExtension
-
-    from verl.utils.vllm_omni import OmniTensorLoRARequest, VLLMOmniHijack
-
-    _VLLM_OMNI_AVAILABLE = True
-except (ImportError, RuntimeError):  # optional stack; ImportError if missing, RuntimeError e.g. diffusers/transformers
-    CustomPipelineWorkerExtension = None  # type: ignore[assignment]
-    OmniTensorLoRARequest = None  # type: ignore[assignment]
-    VLLMOmniHijack = None  # type: ignore[assignment]
-    _VLLM_OMNI_AVAILABLE = False
-
-# Use object as fallback base so the class definition is always valid even when
-# vllm_omni is not installed (None is not a valid base class).
-_OmniWorkerBase = CustomPipelineWorkerExtension if _VLLM_OMNI_AVAILABLE else object
-
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
@@ -264,76 +248,17 @@ class vLLMColocateWorkerExtension:
                 self.model_runner.model.load_weights(weights)
 
     def _get_zmq_handle(self) -> str:
-        """Get ZMQ handle for communication."""
-        if not hasattr(self, "device_uuid") or not self.device_uuid:
-            self.device_uuid = get_device_uuid(self.device.index)
-        return f"ipc:///tmp/rl-colocate-zmq-{self.device_uuid}.sock"
-
-
-class vLLMOmniColocateWorkerExtension(_OmniWorkerBase):
-    """
-    The class for vLLM-Omni's worker to inherit from, in the colocate setting.
-    By defining an extension class, the code can work no matter what is
-    the underlying worker class. This way, the code can be compatible
-    with both vLLM V0 and V1.
-    NOTE: we define this class in a separate module, and the main module
-    should pass the full qualified name as `worker_extension_cls` argument.
-
-    Feature support:
-    1. LoRA
-    """
-
-    def __new__(cls, **kwargs):
-        assert _VLLM_OMNI_AVAILABLE, "vLLM-Omni is required to use vLLMOmniColocateWorkerExtension"
-        set_death_signal()
-
-        # 1. patch for Lora
-        VLLMOmniHijack.hijack()
-
-        return super().__new__(cls)
-
-    def update_weights_from_ipc(self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False):
-        """Update the weights of the rollout model."""
-
-        from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightReceiver
-
-        # In async mode, make sure the old lora is removed before adding the new one
-        if peft_config and base_sync_done:
-            self.remove_lora(VLLM_LORA_INT_ID)
-
-        assert self.device is not None
-        receiver = BucketedWeightReceiver(
-            zmq_handle=self._get_zmq_handle(),
-            device=self.device,
-            use_shm=use_shm,
-        )
-        receiver.receive_weights(
-            on_bucket_received=lambda weights: self._update_weights(
-                weights, peft_config=peft_config, base_sync_done=base_sync_done
-            )
-        )
-
-    def _update_weights(self, weights: list[tuple[str, torch.Tensor]], peft_config: dict, base_sync_done: bool):
-        if peft_config and base_sync_done:
-            weights = dict(weights)
-            lora_request = OmniTensorLoRARequest(
-                lora_name=VLLM_LORA_NAME,
-                lora_int_id=VLLM_LORA_INT_ID,
-                lora_path=VLLM_LORA_PATH,
-                peft_config=peft_config,
-                lora_tensors=weights,
-            )
-            self.add_lora(lora_request)
-            logger.info(f"vLLM-Omni load weights, loaded_params: {len(weights)}")
-        else:
-            logger.info("Loading standard weights (async)")
-            self.load_weights(weights)
-
-    def _get_zmq_handle(self) -> str:
-        """Get ZMQ handle for communication."""
-        if not hasattr(self, "device_uuid") or not self.device_uuid:
-            self.device_uuid = get_device_uuid(self.device.index)
-        return f"ipc:///tmp/rl-colocate-zmq-{self.device_uuid}.sock"
+        """Get ZMQ handle for communication.
+        Uses Ray job id + replica_rank + local_rank to form the handle so it
+        matches the sender side regardless of CUDA_VISIBLE_DEVICES differences,
+        avoids collisions when multiple replicas share the same node, and is
+        unique per Ray job to avoid cross-job collisions on shared hosts. The
+        job id is forwarded by the vLLMHttpServer actor as VERL_RAY_JOB_ID and
+        inherited by this vLLM worker subprocess.
+        """
+        replica_rank = os.environ.get("VERL_REPLICA_RANK", "0")
+        job_id = os.environ.get("VERL_RAY_JOB_ID", "0")
+        return f"ipc:///tmp/rl-colocate-zmq-{job_id}-replica-{replica_rank}-rank-{self.local_rank}.sock"
 
 
 class SuppressSignalInThread:

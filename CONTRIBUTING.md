@@ -14,9 +14,9 @@ Your support can take many forms:
 
 Looking for ways to dive in? Check out these issues:
 
-- [Good first issues](https://github.com/volcengine/verl/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22good%20first%20issue%22)
-- [Call for contribution](https://github.com/volcengine/verl/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22call%20for%20contribution%22)
-  Furthermore, you can learn the development plan and roadmap via [RFC](https://github.com/volcengine/verl/issues?q=is%3Aissue%20state%3Aopen%20label%3ARFC) and [Roadmap](https://github.com/volcengine/verl/issues?q=state%3Aopen%20label%3A%22roadmap%22).
+- [Good first issues](https://github.com/verl-project/verl/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22good%20first%20issue%22)
+- [Call for contribution](https://github.com/verl-project/verl/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22call%20for%20contribution%22)
+  Furthermore, you can learn the development plan and roadmap via [RFC](https://github.com/verl-project/verl/issues?q=is%3Aissue%20state%3Aopen%20label%3ARFC) and [Roadmap](https://github.com/verl-project/verl/issues?q=state%3Aopen%20label%3A%22roadmap%22).
 
 ## Developing
 
@@ -43,10 +43,10 @@ pre-commit run --all-files --show-diff-on-failure --color=always autogen-trainer
 
 Our test suites run on GitHub Actions. Check these workflows for details:
 
-- [GPU unit tests](https://github.com/volcengine/verl/blob/main/.github/workflows/gpu_unit_tests.yml)
-- [CPU unit tests](https://github.com/volcengine/verl/blob/main/.github/workflows/cpu_unit_tests.yml)
-- [vLLM tests](https://github.com/volcengine/verl/blob/main/.github/workflows/vllm.yml)
-- [SGLang tests](https://github.com/volcengine/verl/blob/main/.github/workflows/sgl.yml)
+- [GPU unit tests](https://github.com/verl-project/verl/blob/main/.github/workflows/gpu_unit_tests.yml)
+- [CPU unit tests](https://github.com/verl-project/verl/blob/main/.github/workflows/cpu_unit_tests.yml)
+- [vLLM tests](https://github.com/verl-project/verl/blob/main/.github/workflows/vllm.yml)
+- [SGLang tests](https://github.com/verl-project/verl/blob/main/.github/workflows/sgl.yml)
 
 ### Adding CI tests
 
@@ -94,7 +94,7 @@ See
 
 ## License
 
-See the [LICENSE](https://github.com/volcengine/verl/blob/main/LICENSE) file for full details.
+See the [LICENSE](https://github.com/verl-project/verl/blob/main/LICENSE) file for full details.
 
 ## Thank You
 

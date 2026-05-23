@@ -15,6 +15,7 @@
 import functools
 import itertools
 import json
+import logging
 import math
 import os
 from abc import ABC
@@ -34,6 +35,8 @@ from transformers.trainer_pt_utils import get_module_class_from_name
 
 from verl.utils.device import get_device_id, get_device_name, get_torch_device
 from verl.utils.model import check_exclude_modules, check_target_modules
+
+logger = logging.getLogger(__name__)
 
 if version.parse(torch.__version__) >= version.parse("2.6"):
     from torch.distributed.fsdp import CPUOffloadPolicy, FSDPModule, MixedPrecisionPolicy, fully_shard
@@ -124,12 +127,29 @@ def get_fsdp_wrap_policy(module, config=None, is_lora=False):
         policies.append(size_policy)
     elif fsdp_transformer_layer_cls_to_wrap is not None:
         transformer_cls_to_wrap = set()
+        missing_classes = []
         for layer_class in fsdp_transformer_layer_cls_to_wrap:
             transformer_cls = get_module_class_from_name(module, layer_class)
             if transformer_cls is None:
-                raise Exception("Could not find the transformer layer class to wrap in the model.")
+                # Some HF transformers releases expose names in `_no_split_modules` that are not
+                # (yet) concrete classes -- e.g. Qwen3.5 lists `Qwen3_5TextDecoderLayer` alongside
+                # the real `Qwen3_5DecoderLayer`. Skip such names and only fail if none resolve,
+                # so a single forward-compat name does not break the whole FSDP wrap policy.
+                missing_classes.append(layer_class)
             else:
                 transformer_cls_to_wrap.add(transformer_cls)
+
+        if not transformer_cls_to_wrap:
+            raise Exception(
+                f"Could not find any of the transformer layer classes to wrap in the model: "
+                f"{list(fsdp_transformer_layer_cls_to_wrap)}"
+            )
+        if missing_classes:
+            logger.warning(
+                "FSDP wrap policy: skipped missing layer class names %s, wrapping %s",
+                missing_classes,
+                sorted(c.__name__ for c in transformer_cls_to_wrap),
+            )
 
         transformer_policy = functools.partial(
             transformer_auto_wrap_policy,
@@ -479,7 +499,12 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_state: dict, device_
     set_model_state_dict(model, full_state, options=options)
 
     # rotary_emb is not in state_dict, so we need to broadcast it manually
-    for name, buf in model.named_buffers():
+    # Sort by name to ensure deterministic order across ranks. FSDP2 can return
+    # named_buffers() in different order on different ranks. Gemma4 has heterogeneous
+    # rotary embedding buffers (256 vs 128 elements) so mismatched order = size
+    # mismatch on the same broadcast collective = NCCL deadlock.
+    bufs = sorted(model.named_buffers(), key=lambda x: x[0])
+    for name, buf in bufs:
         dist.broadcast(buf, src=0)
 
     if cpu_offload:
@@ -560,6 +585,19 @@ def apply_fsdp2(model, fsdp_kwargs, config):
     with maybe_patch_fsdp_module(model):
         fully_shard(model, **fsdp_kwargs)  # fsdp2 will not reshard_after_forward for root module
 
+    # Honor `forward_prefetch` config to match the FSDP1 path. Depth=1 mirrors
+    # PyTorch FSDP1's hardcoded `forward_prefetch_limit=1`. Static-graph models
+    # only (see PyTorch FSDP1's docstring on `forward_prefetch`).
+    # `set_modules_to_forward_prefetch` was introduced in PyTorch 2.5; guard with
+    # `hasattr` so users on PyTorch 2.4 silently fall back to the no-prefetch
+    # behavior (same as before this PR — no regression).
+    if config.get("forward_prefetch", False):
+        fsdp_modules = [m for m in modules if isinstance(m, FSDPModule)]
+        for i, m in enumerate(fsdp_modules):
+            next_targets = fsdp_modules[i + 1 : i + 2]  # depth=1, mirrors FSDP1's forward_prefetch_limit=1
+            if next_targets and hasattr(m, "set_modules_to_forward_prefetch"):
+                m.set_modules_to_forward_prefetch(next_targets)
+
 
 def get_shard_placement_fn(fsdp_size):
     """Choose the dimension that can divide fsdp_size to avoid padding"""
@@ -590,7 +628,7 @@ def fsdp2_clip_grad_norm_(parameters, max_norm, norm_type=2.0, error_if_nonfinit
     return total_norm
 
 
-def layered_summon_lora_params(fsdp_module, is_diffusers=False) -> OrderedDict:
+def layered_summon_lora_params(fsdp_module) -> OrderedDict:
     from peft.utils.save_and_load import get_peft_model_state_dict
 
     def __prefix_submodules(module, prefix):
@@ -599,33 +637,22 @@ def layered_summon_lora_params(fsdp_module, is_diffusers=False) -> OrderedDict:
                 yield name, submodule
 
     lora_params = OrderedDict()
-    if is_diffusers:
-        prefix_list = [
-            # fsdp
-            "_fsdp_wrapped_module.transformer_blocks.",
-            # fsdp2
-            "transformer_blocks.",
-        ]
-    else:
-        prefix_list = [
-            # fsdp
-            "_fsdp_wrapped_module.base_model.model.",
-            "_fsdp_wrapped_module.base_model.model.model.",
-            "_fsdp_wrapped_module.base_model.model.model.layers.",
-            "_fsdp_wrapped_module.base_model.model.model.language_model.layers.",
-            # fsdp2
-            "base_model.model.",
-            "base_model.model.model.",
-            "base_model.model.model.layers.",
-            "base_model.model.model.language_model.layers.",
-        ]
+    prefix_list = [
+        # fsdp
+        "_fsdp_wrapped_module.base_model.model.",
+        "_fsdp_wrapped_module.base_model.model.model.",
+        "_fsdp_wrapped_module.base_model.model.model.layers.",
+        "_fsdp_wrapped_module.base_model.model.model.language_model.layers.",
+        # fsdp2
+        "base_model.model.",
+        "base_model.model.model.",
+        "base_model.model.model.layers.",
+        "base_model.model.model.language_model.layers.",
+    ]
     peft_model = getattr(fsdp_module, "_fsdp_wrapped_module", fsdp_module)
     for prefix in prefix_list:
         for name, submodule in __prefix_submodules(fsdp_module, prefix):
-            if is_diffusers:
-                prefix = name.replace("_fsdp_wrapped_module.", "")
-            else:
-                prefix = name.replace("_fsdp_wrapped_module.base_model.model.", "base_model.model.")
+            prefix = name.replace("_fsdp_wrapped_module.base_model.model.", "base_model.model.")
             if name.endswith(".model") or name.endswith(".layers"):
                 continue
             if fsdp_version(submodule) > 0:
@@ -643,9 +670,7 @@ def layered_summon_lora_params(fsdp_module, is_diffusers=False) -> OrderedDict:
     return lora_params
 
 
-def collect_lora_params(
-    module: FSDP, layered_summon: bool, base_sync_done: bool, is_diffusers: bool = False
-) -> OrderedDict:
+def collect_lora_params(module: FSDP, layered_summon: bool, base_sync_done: bool) -> OrderedDict:
     """
     collect lora params or full params if base model is not ready in vllm
     work with if isinstance(self.module._fsdp_wrapped_module, PeftModel)
@@ -661,7 +686,7 @@ def collect_lora_params(
                     "To use layered_summon, you must make sure base-model is preloaded in vllm, e.g. let "
                     "rollout.load_format=safetensors"
                 )
-            lora_params = layered_summon_lora_params(module, is_diffusers=is_diffusers)
+            lora_params = layered_summon_lora_params(module)
         else:
             with FSDP.summon_full_params(module, writeback=False):
                 if base_sync_done:

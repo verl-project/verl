@@ -15,7 +15,7 @@
 import functools
 from typing import Callable, Optional
 
-from ..memory_utils import MemorySnapshotSampler, enable_memory_visualize
+from ..memory_utils import MemorySnapshotSampler, clear_memory_history, enable_memory_visualize
 from .config import ProfilerConfig, TorchMemoryToolConfig
 
 
@@ -108,6 +108,11 @@ class DistProfiler:
             # default rank 0 if enabled but ranks unspecified
             self._this_rank = (rank == 0) if self._enable else False
 
+        # precision_debugger delegates rank filtering to msprobe config.json.
+        # Keep verl-side rank gate open when profiler is enabled.
+        if self._tool == "precision_debugger" and self._enable:
+            self._this_rank = True
+
         # TorchMemoryProfiler currently do not support discrete mode.
         self._discrete = getattr(tool_config, "discrete", False) if tool_config else False
 
@@ -129,7 +134,7 @@ class DistProfiler:
         elif self._tool == "precision_debugger":
             from .precision_debugger_profile import PrecisionDebuggerProfiler as _Precision
 
-            self._impl = _Precision(precision_cfg=tool_config, rank=rank)
+            self._impl = _Precision(precision_cfg=tool_config, rank=rank, save_path=config.save_path)
         else:
             # Fallback to a no-op impl
             self._impl = _NoOpProfiler()
@@ -229,16 +234,18 @@ class TorchMemoryProfiler:
 
         # Get parameters from tool_config, with fallback to defaults
         if tool_config:
-            trace_alloc_max_entries = tool_config.trace_alloc_max_entries
-            stack_depth = tool_config.stack_depth
+            self.trace_alloc_max_entries = tool_config.trace_alloc_max_entries
+            self.stack_depth = tool_config.stack_depth
         else:
-            trace_alloc_max_entries = 100_000
-            stack_depth = 32
+            self.trace_alloc_max_entries = 100_000
+            self.stack_depth = 32
 
         # Best-effort enable memory history once
         if not TorchMemoryProfiler._memory_history_enabled:
             try:
-                enable_memory_visualize(trace_alloc_max_entries=trace_alloc_max_entries, stack_depth=stack_depth)
+                enable_memory_visualize(
+                    trace_alloc_max_entries=self.trace_alloc_max_entries, stack_depth=self.stack_depth
+                )
             except Exception:
                 # silently ignore if not supported
                 pass
@@ -267,6 +274,9 @@ class TorchMemoryProfiler:
             self.sampler.dump_memory_snapshot(out_dir=out_dir, tag=tag, sub_dir=self.sub_dir)
         except Exception:
             pass
+        # Clear memory history
+        if TorchMemoryProfiler._memory_history_enabled:
+            clear_memory_history(trace_alloc_max_entries=self.trace_alloc_max_entries, stack_depth=self.stack_depth)
 
     def _should_profile_this_rank(self) -> bool:
         if self.config.all_ranks:

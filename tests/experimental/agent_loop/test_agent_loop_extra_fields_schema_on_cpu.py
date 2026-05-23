@@ -43,8 +43,10 @@ class _FakeServerManager:
         sampling_params: dict[str, Any],
         image_data: Optional[list[Any]] = None,
         video_data: Optional[list[Any]] = None,
+        audio_data: Optional[list[Any]] = None,
+        mm_processor_kwargs: Optional[dict[str, Any]] = None,
     ) -> TokenOutput:
-        del request_id, sampling_params, image_data, video_data
+        del request_id, sampling_params, image_data, video_data, audio_data, mm_processor_kwargs
         # Return a short, deterministic "generation" for testing.
         return TokenOutput(token_ids=prompt_ids[-1:] + [11, 12, 13], log_probs=[0.0, 0.0, 0.0, 0.0])
 
@@ -56,8 +58,10 @@ class _FakeServerManager:
         sampling_params: dict[str, Any],
         image_data: Optional[list[Any]] = None,
         video_data: Optional[list[Any]] = None,
+        audio_data: Optional[list[Any]] = None,
+        mm_processor_kwargs: Optional[dict[str, Any]] = None,
     ) -> tuple[list[int], list[float], bool]:
-        del request_id, sampling_params, image_data, video_data
+        del request_id, sampling_params, image_data, video_data, audio_data, mm_processor_kwargs
         # Return a short partial generation and "not cancelled".
         response_ids = prompt_ids[-1:] + [21, 22]
         response_logprobs = [0.0] * len(response_ids)
@@ -222,7 +226,7 @@ async def test_agent_loop_extra_fields_schema_stable_for_training_concat_on_cpu(
     dummy_worker = type(
         "_DummyWorker",
         (),
-        {"reward_loop_worker_handles": None, "distillation_enabled": False, "stream_teacher_with_rollout": False},
+        {"reward_loop_worker_handles": None, "distillation_enabled": False},
     )()
     merged = AgentLoopWorker._postprocess(
         dummy_worker,
@@ -257,15 +261,16 @@ async def test_agent_loop_postprocess_accepts_read_only_routed_experts_on_cpu():
     class _DummyWorker:
         _compute_multi_modal_inputs = AgentLoopWorker._compute_multi_modal_inputs
         _compute_position_ids = AgentLoopWorker._compute_position_ids
+        _get_mm_processor_kwargs = AgentLoopWorker._get_mm_processor_kwargs
         _compute_score = AgentLoopWorker._compute_score
         _compute_teacher_logprobs = AgentLoopWorker._compute_teacher_logprobs
         distillation_enabled = False
-        stream_teacher_with_rollout = False
 
         def __init__(self):
             self.tokenizer = _FakeTokenizer()
             self.rollout_config = OmegaConf.create({"prompt_length": 4, "response_length": 4})
             self.processor = None
+            self.mm_processor_kwargs = {}
             self.reward_loop_worker_handles = None
 
     routed_experts = np.arange(8, dtype=np.int64).reshape(4, 2, 1)

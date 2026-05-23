@@ -11,11 +11,19 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import random
 
 import torch
 from tensordict import TensorDict
 
-from verl.workers.utils.padding import embeds_padding_2_no_padding, left_right_2_no_padding, no_padding_2_padding
+from verl.workers.utils.padding import (
+    build_attention_mask_from_nested,
+    embeds_padding_2_no_padding,
+    left_right_2_no_padding,
+    no_padding_2_padding,
+    response_from_nested,
+    response_to_nested,
+)
 
 
 def test_padding_conversion_with_log_probs():
@@ -238,6 +246,27 @@ def test_no_padding_2_padding_varying_lengths():
     print("All varied length tests passed")
 
 
+def test_build_attention_mask_from_nested_uses_full_sequence_lengths():
+    input_ids = torch.nested.as_nested_tensor(
+        [
+            torch.tensor([11, 12, 13, 14, 15]),
+            torch.tensor([21, 22, 23]),
+        ],
+        layout=torch.jagged,
+    )
+
+    attention_mask = build_attention_mask_from_nested(input_ids, max_seq_len=5)
+
+    expected = torch.tensor(
+        [
+            [1, 1, 1, 1, 1],
+            [1, 1, 1, 0, 0],
+        ],
+        dtype=torch.int32,
+    )
+    torch.testing.assert_close(attention_mask.cpu(), expected)
+
+
 def test_embeds_padding_2_no_padding_varying_lengths():
     """Test that padding tokens are stripped correctly when sequences have different valid lengths."""
     batch_size = 3
@@ -275,10 +304,46 @@ def test_embeds_padding_2_no_padding_varying_lengths():
         torch.testing.assert_close(sample_embed, prompt_embeds[i, :vlen, :])
 
 
+def test_response_from_nested():
+    batch_size = 10
+    log_probs = [torch.rand(random.randint(2, 100)) for _ in range(batch_size)]
+    log_probs_nt = torch.nested.as_nested_tensor(
+        log_probs,
+        layout=torch.jagged,
+    )
+    response_mask = [torch.ones(random.randint(1, log_probs[i].shape[0] - 1)) for i in range(batch_size)]
+    response_mask_nt = torch.nested.as_nested_tensor(
+        response_mask,
+        layout=torch.jagged,
+    )
+    response_log_probs = response_from_nested(log_probs_nt, response_mask_nt)
+    for i, tensor in enumerate(response_log_probs.unbind()):
+        response_len = response_mask[i].shape[0]
+        expected = log_probs[i][-response_len - 1 : -1]
+        torch.testing.assert_close(tensor, expected)
+
+
+def test_response_to_nested():
+    batch_size = 10
+    log_probs = torch.rand(batch_size, 100)
+    response_mask = [torch.ones(random.randint(1, log_probs[i].shape[0] - 1)) for i in range(batch_size)]
+    response_mask_nt = torch.nested.as_nested_tensor(
+        response_mask,
+        layout=torch.jagged,
+    )
+    log_probs_nt = response_to_nested(log_probs, response_mask_nt)
+    for i, tensor in enumerate(log_probs_nt.unbind()):
+        response_len = response_mask[i].shape[0]
+        expected = log_probs[i, :response_len]
+        torch.testing.assert_close(tensor, expected)
+
+
 if __name__ == "__main__":
     test_padding_conversion_with_log_probs()
     test_padding_conversion_without_log_probs()
     test_padding_roundtrip()
     test_no_padding_2_padding_varying_lengths()
     test_embeds_padding_2_no_padding_varying_lengths()
+    test_response_from_nested()
+    test_response_to_nested()
     print("All padding conversion tests passed!")

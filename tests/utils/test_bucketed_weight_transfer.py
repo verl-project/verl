@@ -86,7 +86,7 @@ def _receiver_fn(zmq_handle, use_shm, result_queue):
         use_shm=use_shm,
     )
     received = []
-    receiver.receive_weights(on_bucket_received=lambda w: received.extend(w))
+    receiver.receive_weights(on_bucket_received=lambda w: received.extend([(name, t.clone()) for name, t in w]))
     # Only send lightweight metadata + checksum back through the queue
     summaries = [(name, t.dtype, tuple(t.shape), t.float().sum().item()) for name, t in received]
     result_queue.put(summaries)
@@ -216,4 +216,13 @@ class TestBucketedWeightTransferIPC:
         # 1 MB bucket = 1048576 bytes; float32 = 4 bytes => 262144 elements
         numel = (1 << 20) // 4
         specs = [("exact_fit", (numel,), torch.float32)]
+        _transfer_and_validate(specs, bucket_size_mb=1, use_shm=False)
+
+    def test_large_weight(self):
+        specs = [("embedding", (1024, 1024), torch.float32)]  # 4MB
+        specs.extend([(f"layer{i}.weight", (128,), torch.bfloat16) for i in range(5)])
+        specs.append(("gate_up_proj", (1024, 1024), torch.float32))  # 4MB
+        specs.extend([(f"layer{i}.weight", (128,), torch.bfloat16) for i in range(20)])
+        specs.append(("lm_head", (1024, 1024), torch.float32))  # 4MB
+
         _transfer_and_validate(specs, bucket_size_mb=1, use_shm=False)

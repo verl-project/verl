@@ -13,6 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""LoRA merger for the Megatron backend, built on the unified model engine.
+
+The legacy :mod:`verl.workers.megatron_workers` module was removed in favour of
+:mod:`verl.workers.engine_workers`. This script ports the old ``CustomSaveWorker``
+onto the new ``ActorRolloutRefWorker`` / ``TrainingWorker`` stack while keeping
+the same CLI contract: reuse the training Hydra config, supply an
+``actor_rollout_ref.model.lora.adapter_path``, and the merged HuggingFace
+weights are written next to the adapter checkpoint.
+"""
+
 import os
 from pprint import pprint
 
@@ -23,31 +33,41 @@ from omegaconf import OmegaConf
 
 from verl.single_controller.base.decorator import Dispatch, register
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
-from verl.utils.megatron_utils import get_hf_model_checkpoint_path, load_megatron_model_to_gpu
-from verl.workers.megatron_workers import ActorRolloutRefWorker
+from verl.utils.megatron_utils import get_hf_model_checkpoint_path
+from verl.workers.engine_workers import ActorRolloutRefWorker
 
 os.environ["NCCL_DEBUG"] = "WARN"
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
 
 class CustomSaveWorker(ActorRolloutRefWorker):
+    """Extends the unified :class:`ActorRolloutRefWorker` with a merge RPC.
+
+    The actor ``TrainingWorker`` built by ``init_model`` already loads the base
+    HuggingFace weights via the Megatron bridge and applies the LoRA adapter
+    from ``config.model.lora.adapter_path`` (see
+    :func:`verl.utils.megatron_utils.make_megatron_module`). Here we just need
+    to dump the merged weights back to HuggingFace format.
+    """
+
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def save_merged_weights(self, hf_ckpt_path):
-        import os
+        engine = self.actor.engine
 
-        if self._is_offload_param:
-            load_megatron_model_to_gpu(self.actor_module)
+        # Reload model parameters to the accelerator if they were offloaded.
+        if engine.is_param_offload_enabled:
+            self.actor.to(device="device", model=True, optimizer=False, grad=False)
 
         torch.distributed.barrier()
 
-        print(f"[Rank {os.environ.get('RANK', '?')}] Saving weights to {hf_ckpt_path}...")
+        print(f"[Rank {os.environ.get('RANK', '?')}] Saving merged weights to {hf_ckpt_path}...")
 
-        if self.vanilla_bridge:
-            self.bridge.save_weights(
-                self.actor_module, hf_ckpt_path, distributed_filesystem=True, memory_efficient=True
-            )
+        # ``MegatronEngine`` exposes the bridge that was used to load the base
+        # weights; reuse it to export merged HF-format weights.
+        if engine.vanilla_bridge:
+            engine.bridge.save_weights(engine.module, hf_ckpt_path, distributed_filesystem=True, memory_efficient=True)
         else:
-            self.bridge.save_hf_weights(self.actor_module, hf_ckpt_path)
+            engine.bridge.save_hf_weights(engine.module, hf_ckpt_path)
 
         return True
 
@@ -106,9 +126,9 @@ if __name__ == "__main__":
     """
     Use the same config as your training script, besides **specifying the adapter_path**.
 
-    For example, your training script starts with: 
+    For example, your training script starts with:
         `python3 -m verl.trainer.main_ppo --config-name=ppo_megatron_trainer ...`
-    Now replace it with 
+    Now replace it with
         `python3 ./scripts/megatron_merge_lora.py --config-name=ppo_megatron_trainer ...`
     """
     main()
