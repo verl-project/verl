@@ -1,4 +1,3 @@
-import asyncio
 import os
 from typing import Any
 
@@ -422,16 +421,13 @@ class ArcticRLClientWrapper(RemoteBackend):
 
     async def _send_compute_ref_log_prob(self, payload: dict):
         payload["processing"] = {"post": ["compute_entropy_and_logprobs"], "loss_fn": None}
-        # Offload the blocking RPC to a worker thread so the forwarder's
-        # asyncio loop (and the Ray actor that owns it) stays responsive
-        # to concurrent calls.
-        response = await asyncio.to_thread(self._client.fwd_no_grad, payload, reference_model=True)
+        response = await self._client.fwd_no_grad(payload, reference_model=True)
         response["batch"]["log_probs"] = response["batch"].pop("logprobs")
         return response
 
     async def _send_compute_log_prob(self, payload: dict):
         payload["processing"] = {"post": ["compute_entropy_and_logprobs"], "loss_fn": None}
-        response = await asyncio.to_thread(self._client.fwd_no_grad, payload, reference_model=False)
+        response = await self._client.fwd_no_grad(payload, reference_model=False)
         response["batch"]["log_probs"] = response["batch"].pop("logprobs")
         return response
 
@@ -455,8 +451,8 @@ class ArcticRLClientWrapper(RemoteBackend):
                 payload["batch"][name] = _left_pad(payload["batch"][name], seq_len)
         payload["batch"]["loss_mask"] = payload["batch"]["response_mask"]
 
-        fwd_bwd_response = await asyncio.to_thread(self._client.fwd_bwd, payload)
-        step_response = await asyncio.to_thread(self._client.step)
+        fwd_bwd_response = await self._client.fwd_bwd(payload)
+        step_response = await self._client.step()
         step_response["metrics"].update(**fwd_bwd_response["metrics"])
         return step_response
 
