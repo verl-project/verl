@@ -402,11 +402,17 @@ class vLLMHttpServer:
 
         build_app_sig = inspect.signature(build_app)
         supported_tasks: tuple[Any, ...] = ()
+        build_app_kwargs: dict[str, Any] = {}
         if "supported_tasks" in build_app_sig.parameters:
             supported_tasks = await engine_client.get_supported_tasks()
-            app = build_app(args, supported_tasks)
-        else:
-            app = build_app(args)
+            build_app_kwargs["supported_tasks"] = supported_tasks
+        # vLLM >= 0.20.0 requires `model_config` to register pooling API routes
+        # (e.g. ``/classify``, ``/embed``); see
+        # ``register_pooling_api_routers`` in vllm/entrypoints/pooling/factories.py
+        # which short-circuits when ``model_config`` is ``None``.
+        if "model_config" in build_app_sig.parameters:
+            build_app_kwargs["model_config"] = engine_client.model_config
+        app = build_app(args, **build_app_kwargs)
 
         init_app_sig = inspect.signature(init_app_state)
         if "vllm_config" in init_app_sig.parameters:
@@ -459,12 +465,15 @@ class vLLMHttpServer:
         prompt_ids = normalize_token_ids(prompt_ids)
 
         # Calculate the maximum possible new tokens based on available context space
-        # This serves as a safety upper bound
+        # This serves as a safety upper bound. vLLM v0.20+ rejects `max_tokens < 1`
+        # (see vllm.sampling_params.SamplingParams._verify_args), so we require at
+        # least one token of headroom to be able to generate at all.
         max_possible_tokens = self.config.max_model_len - len(prompt_ids)
-        if max_possible_tokens < 0:
+        if max_possible_tokens < 1:
             raise ValueError(
-                f"Prompt length ({len(prompt_ids)}) exceeds the model's maximum context length "
-                f"({self.config.max_model_len})."
+                f"Prompt length ({len(prompt_ids)}) leaves no room to generate within the "
+                f"model's maximum context length ({self.config.max_model_len}); need at least "
+                f"1 token of headroom."
             )
 
         # Determine max_tokens from sampling_params or use configured response_length as default
@@ -481,11 +490,12 @@ class vLLMHttpServer:
                 self.config.response_length, self.config.prompt_length + self.config.response_length - len(prompt_ids)
             )
 
-        # Clamp max_tokens to the valid range [0, max_possible_tokens]
-        max_tokens = max(0, min(max_tokens, max_possible_tokens))
+        # Clamp max_tokens to the valid range [1, max_possible_tokens]. The lower bound
+        # is 1 because vLLM v0.20+ raises VLLMValidationError when max_tokens < 1.
+        max_tokens = max(1, min(max_tokens, max_possible_tokens))
 
-        assert max_tokens <= max_possible_tokens, (
-            f"max_tokens {max_tokens} exceeds available context space {max_possible_tokens}"
+        assert 1 <= max_tokens <= max_possible_tokens, (
+            f"max_tokens {max_tokens} not in valid range [1, {max_possible_tokens}]"
         )
         sampling_params["logprobs"] = 0 if sampling_params.pop("logprobs", False) else None
         sampling_params.setdefault("repetition_penalty", self.config.get("repetition_penalty", 1.0))
@@ -960,22 +970,21 @@ class vLLMReplica(RolloutReplica):
                 name = f"{prefix}server_teacher_{self.replica_rank}_{node_rank}{self.name_suffix}"
             else:
                 name = f"{prefix}server_{self.replica_rank}_{node_rank}{self.name_suffix}"
+            env_vars = {
+                "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
+                "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
+                # To prevent hanging or crash during synchronization of weights between actor and rollout
+                # in disaggregated mode. See:
+                # https://docs.vllm.ai/en/latest/usage/troubleshooting.html?h=nccl_cumem_enable#known-issues
+                # https://github.com/vllm-project/vllm/blob/c6b0a7d3ba03ca414be1174e9bd86a97191b7090/vllm/worker/worker_base.py#L445
+                "NCCL_CUMEM_ENABLE": "0",
+            }
             server = self.server_class.options(
                 scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                     node_id=node_id,
                     soft=False,
                 ),
-                runtime_env={
-                    "env_vars": {
-                        "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
-                        "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
-                        # To prevent hanging or crash during synchronization of weights between actor and rollout
-                        # in disaggregated mode. See:
-                        # https://docs.vllm.ai/en/latest/usage/troubleshooting.html?h=nccl_cumem_enable#known-issues
-                        # https://github.com/vllm-project/vllm/blob/c6b0a7d3ba03ca414be1174e9bd86a97191b7090/vllm/worker/worker_base.py#L445
-                        "NCCL_CUMEM_ENABLE": "0",
-                    }
-                },
+                runtime_env={"env_vars": env_vars},
                 name=name,
                 max_concurrency=self.max_concurrency,
             ).remote(

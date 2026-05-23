@@ -499,7 +499,12 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_state: dict, device_
     set_model_state_dict(model, full_state, options=options)
 
     # rotary_emb is not in state_dict, so we need to broadcast it manually
-    for name, buf in model.named_buffers():
+    # Sort by name to ensure deterministic order across ranks. FSDP2 can return
+    # named_buffers() in different order on different ranks. Gemma4 has heterogeneous
+    # rotary embedding buffers (256 vs 128 elements) so mismatched order = size
+    # mismatch on the same broadcast collective = NCCL deadlock.
+    bufs = sorted(model.named_buffers(), key=lambda x: x[0])
+    for name, buf in bufs:
         dist.broadcast(buf, src=0)
 
     if cpu_offload:

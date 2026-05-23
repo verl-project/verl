@@ -439,6 +439,8 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
 
         self.use_prefix_grouper = self.config.actor_rollout_ref.actor.get("use_prefix_grouper", False)
 
+        self._init_dump_executor()
+
         # ==================== fully async config ====================
 
         print("[FullyAsyncRollouter] Creating datasets...")
