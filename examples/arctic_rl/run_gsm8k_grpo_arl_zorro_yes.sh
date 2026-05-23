@@ -65,6 +65,7 @@ python3 -m verl.trainer.main_ppo \
     algorithm.use_kl_in_reward=False \
     trainer.use_legacy_worker_impl=disable \
     trainer.remote_backend=arctic \
+    remote_backend=arctic \
     remote_backend.arctic.colocate=False \
     remote_backend.arctic.training_gpus=1 \
     remote_backend.arctic.sampling_gpus=1 \

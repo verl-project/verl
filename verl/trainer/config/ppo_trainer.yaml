@@ -29,6 +29,12 @@ defaults:
   # Critic model config.
   - critic@critic: ${model_engine}_critic
 
+  # Remote backend config (optional). Opt in with `remote_backend=arctic`
+  # (loads `trainer/config/remote_backend/arctic.yaml` into the
+  # `remote_backend` key). Default leaves the field unset so the regular
+  # FSDP/Megatron actor/rollout/ref worker stack stays in charge.
+  - optional remote_backend@remote_backend: null
+
   # legacy reward impl config, for backward compatibility
   - legacy_reward_impl
 
@@ -318,38 +324,9 @@ ray_kwargs:
   timeline_json_file: null
 
 
-# Per-backend configuration for `verl.remote_backend` adapters. The backend
-# is selected by `trainer.remote_backend` (a string registered in
-# `RemoteBackendRegistry`); each backend nests its config under
-# `remote_backend.<name>`. To plug in a new backend (e.g. "tinker"),
-# add a sibling block here and register the adapter — no changes needed
-# to the rest of this file or `main_ppo.py`.
-remote_backend:
-
-  # Arctic adapter (`verl.trainer.ppo.arctic_rl_client`). Active when
-  # `trainer.remote_backend=arctic`.
-  arctic:
-
-    # whether to use colocate mode
-    colocate: False
-
-    training_gpus: 1
-    sampling_gpus: 1
-    log_prob_gpus: 1
-    sampling_tp_size: 1
-
-    use_zorro: False
-
-    # ray or http: ray would be much faster for payload comms in the en-prem use case
-    comm_protocol: ray
-
-    zero_optimization:
-      # 2 for optim + grad sharding
-      # 3 for optim + grad +weight sharding
-      stage: 0
-
-      offload_optimizer:
-        device: none
-
-      offload_param:
-        device: none
+# Per-backend `remote_backend` config lives in its own file under
+# `trainer/config/remote_backend/<name>.yaml` (loaded via the Hydra
+# defaults entry above). To plug in a new backend (e.g. "tinker"), add
+# `trainer/config/remote_backend/tinker.yaml` and opt in with
+# `+remote_backend@remote_backend=tinker` — no changes needed to this
+# file or `main_ppo.py`.

@@ -134,16 +134,28 @@ class TaskRunner:
             actor_rollout_cls = ActorRolloutRefWorker
             ray_worker_group_cls = RayWorkerGroup
 
-            if config.trainer.get("remote_backend"):
-                # Generic forwarder worker — payload encoding lives in
-                # the registered backend's `compute_log_prob` /
-                # `update_actor`. The trainer side lazy-imports the
-                # adapter via `RemoteBackendRegistry.get(name)`; nothing
-                # backend-specific is imported here.
-                from verl.remote_backend.worker import (
-                    RemoteBackendActorRolloutRefWorker as ActorRolloutRefWorker,
-                )
-                actor_rollout_cls = ActorRolloutRefWorker
+            backend_name = config.trainer.get("remote_backend")
+            if backend_name:
+                # Per @zw0610: each remote backend ships its own
+                # per-backend worker (under `verl/remote_backend/workers/
+                # <name>/`) and adapter (under `verl/workers/
+                # remote_client/`). We import the adapter explicitly here
+                # so it registers with `RemoteBackendRegistry`; the
+                # registry no longer carries a lazy `MODULES` table.
+                if backend_name == "arctic":
+                    from verl.workers.remote_client import arctic_rl_client  # noqa: F401
+                    from verl.remote_backend.workers.arctic_rl import (
+                        ArcticRLActorRolloutRefWorker,
+                    )
+                    actor_rollout_cls = ArcticRLActorRolloutRefWorker
+                else:
+                    raise ValueError(
+                        f"Unknown trainer.remote_backend={backend_name!r}. "
+                        "Known: 'arctic'. Plug in a new backend by adding "
+                        "verl/workers/remote_client/<name>_rl_client.py + "
+                        "verl/remote_backend/workers/<name>/worker.py and "
+                        "wiring it here."
+                    )
 
             lora_rank = config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
             if lora_rank <= 0:

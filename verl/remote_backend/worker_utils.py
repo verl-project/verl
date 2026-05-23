@@ -1,14 +1,15 @@
-"""Backend-agnostic tensor + metric helpers used by
-:class:`verl.remote_backend.worker.RemoteBackendActorRolloutRefWorker`.
+"""Backend-agnostic tensor + metric helpers shared across per-backend
+forwarder workers under :mod:`verl.remote_backend.workers`.
 
-Lifted here (out of the worker module) so that backends and other
-auxiliary modules can reuse them without importing the heavy Worker class
-or its single-controller dispatch decorators.
+Lifted here (out of any per-backend module) so each backend's worker
+can reuse them without re-implementing nested-jagged reconstruction or
+metric normalization, and without importing one another's Worker
+classes or single-controller dispatch decorators.
 
-The forwarder worker stays backend-agnostic by routing every payload-
-encoding decision through ``RemoteBackend.compute_log_prob`` /
-``RemoteBackend.update_actor``; these helpers cover the small set of
-generic transformations the worker needs around those calls:
+Each per-backend worker keeps its own payload-encoding decisions on
+its adapter's compute/update methods (the ABC intentionally doesn't
+fix those signatures); these helpers cover the small set of generic
+transformations a worker needs around those calls:
 
 * :func:`make_njt` — reconstruct a nested-jagged tensor from a dense
   ``[B, L]`` tensor returned by a backend, using the offsets carried in
