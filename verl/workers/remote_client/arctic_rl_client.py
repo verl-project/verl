@@ -158,7 +158,7 @@ class ArcticRLClientWrapper(RemoteBackend):
         return True
 
     # ------------------------------------------------------------------ #
-    # Core RL ops — called by `RemoteBackendActorRolloutRefWorker`
+    # Core RL ops — called by `ArcticRLActorRolloutRefWorker`
     # ------------------------------------------------------------------ #
     # Build Arctic's payload shape (dense padded batch, ``meta`` dict,
     # ``processing`` pipeline) and dispatch through the private
