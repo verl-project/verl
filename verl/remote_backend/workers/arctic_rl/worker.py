@@ -24,6 +24,13 @@ from omegaconf import DictConfig
 from tensordict import TensorDict
 
 from verl.remote_backend.base import RemoteBackend, RemoteBackendRegistry
+
+# Eager import so the adapter registers with `RemoteBackendRegistry` in
+# every process that loads this worker — including Ray child procs, which
+# do not inherit the driver's import side-effects. The driver also
+# imports this adapter explicitly (see `verl.trainer.main_ppo`).
+from verl.workers.remote_client import arctic_rl_client  # noqa: F401
+
 from verl.remote_backend.worker_utils import make_njt, normalize_backend_metrics
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import (
