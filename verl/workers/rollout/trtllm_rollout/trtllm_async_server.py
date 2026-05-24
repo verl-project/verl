@@ -171,7 +171,6 @@ class TRTLLMHttpServer:
             }
             if self.config.load_format != "dummy":
                 raise ValueError("NVFP4 QAT rollout requires load_format=dummy")
-            logger.info(f"NVFP4 QAT injected: group_size={_gs}")
 
         llm_kwargs = {
             "model": self.model_config.local_path,
@@ -242,7 +241,6 @@ class TRTLLMHttpServer:
         _fdq = bool(getattr(self.config, "force_dynamic_quantization", False))
         if _fdq:
             llm_kwargs["force_dynamic_quantization"] = True
-            logger.info("force_dynamic_quantization=True set on TRT-LLM rollout")
 
         self.llm = await AsyncLLM(**llm_kwargs)
         import inspect
