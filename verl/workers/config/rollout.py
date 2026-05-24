@@ -15,7 +15,7 @@ import warnings
 from dataclasses import dataclass, field
 from typing import Optional
 
-from omegaconf import MISSING
+from omegaconf import MISSING, DictConfig, OmegaConf
 
 from verl.base_config import BaseConfig
 from verl.utils.profiler import ProfilerConfig
@@ -279,6 +279,8 @@ class RolloutConfig(BaseConfig):
 
     qat: Optional[dict] = None
 
+    # Prefill-Decode disaggregated rollout config. Active when ``rollout.name``
+    # is ``sglang`` or ``vllm`` and ``disaggregation.enabled=True``.
     disaggregation: DisaggregationConfig = field(default_factory=DisaggregationConfig)
 
     def __post_init__(self):
@@ -328,13 +330,12 @@ class RolloutConfig(BaseConfig):
                     f"Current rollout {self.name=} not implemented pipeline_model_parallel_size > 1 yet."
                 )
 
-        # Hydra passes this as dict/DictConfig; coerce to dataclass so
-        # downstream .enabled etc. work. BaseConfig is frozen, hence object.__setattr__.
+        # OmegaConf hands us either a dict, DictConfig, or already-coerced dataclass
+        # depending on call site; normalize so downstream code can treat
+        # ``self.disaggregation`` as a DisaggregationConfig uniformly.
         if isinstance(self.disaggregation, dict):
             object.__setattr__(self, "disaggregation", DisaggregationConfig(**self.disaggregation))
         elif not isinstance(self.disaggregation, DisaggregationConfig):
-            from omegaconf import DictConfig, OmegaConf
-
             if not isinstance(self.disaggregation, DictConfig):
                 raise TypeError(
                     f"rollout.disaggregation must be dict, DictConfig, or DisaggregationConfig; "
@@ -346,8 +347,8 @@ class RolloutConfig(BaseConfig):
                 DisaggregationConfig(**OmegaConf.to_container(self.disaggregation, resolve=True)),
             )
 
-        if self.disaggregation.enabled and self.name != "sglang":
+        if self.disaggregation.enabled and self.name not in ("sglang", "vllm"):
             raise ValueError(
-                f"rollout.disaggregation.enabled=True is currently only supported with "
-                f"rollout.name='sglang'; got {self.name!r}. (vLLM PD is a tracked follow-up.)"
+                f"rollout.disaggregation.enabled=True requires rollout.name in "
+                f"('sglang', 'vllm'); got {self.name!r}."
             )

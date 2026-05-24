@@ -255,10 +255,24 @@ class vLLMColocateWorkerExtension:
         unique per Ray job to avoid cross-job collisions on shared hosts. The
         job id is forwarded by the vLLMHttpServer actor as VERL_RAY_JOB_ID and
         inherited by this vLLM worker subprocess.
+
+        PD path override: under PD disaggregation each engine is its own Ray
+        actor, so worker `local_rank` resets per actor (TP=1 → every actor's
+        only worker is local_rank=0; TP>1 → every actor has workers 0..TP-1).
+        Without remapping, all actors would bind the same
+        `rank-{0..TP-1}.sock` and update_weights_from_ipc hangs on trainer
+        ranks not paired with the bind winner. The spawner sets
+        `VERL_ZMQ_BASE_TRAINER_RANK` to the first global trainer rank covered
+        by this actor's worker slice (prefill: 0; decode-i:
+        prefill_tp + i*decode_tp); each worker binds
+        `rank-{base + self.local_rank}.sock`, restoring the 1:1
+        trainer-rank ↔ engine-worker mapping for any TP.
         """
         replica_rank = os.environ.get("VERL_REPLICA_RANK", "0")
         job_id = os.environ.get("VERL_RAY_JOB_ID", "0")
-        return f"ipc:///tmp/rl-colocate-zmq-{job_id}-replica-{replica_rank}-rank-{self.local_rank}.sock"
+        base = os.environ.get("VERL_ZMQ_BASE_TRAINER_RANK")
+        rank_for_zmq = int(base) + self.local_rank if base is not None else self.local_rank
+        return f"ipc:///tmp/rl-colocate-zmq-{job_id}-replica-{replica_rank}-rank-{rank_for_zmq}.sock"
 
 
 class SuppressSignalInThread:

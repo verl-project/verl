@@ -17,6 +17,7 @@ import inspect
 import json
 import logging
 import os
+import uuid
 from pprint import pprint
 from typing import Any, Callable, Optional
 
@@ -96,6 +97,8 @@ class vLLMHttpServer:
         gpus_per_node: int,
         nnodes: int,
         cuda_visible_devices: str,
+        disaggregation_role: str = "null",
+        disaggregation_kv_transfer_config: Optional[dict] = None,
     ):
         """
         Args:
@@ -107,7 +110,31 @@ class vLLMHttpServer:
             gpus_per_node (int): number of gpus per node.
             nnodes (int): number of nodes.
             cuda_visible_devices (str): cuda visible devices.
+            disaggregation_role: ``"null"`` for the default colocated server,
+                ``"prefill"`` or ``"decode"`` for the corresponding leg of a
+                vLLM PD-disaggregated replica. Set by ``vLLMPDReplica``.
+            disaggregation_kv_transfer_config: vLLM ``KVTransferConfig`` payload
+                serialized to a dict (forwarded to ``vllm serve`` as
+                ``--kv-transfer-config <json>``). Required when
+                ``disaggregation_role != "null"``.
         """
+        if disaggregation_role not in ("null", "prefill", "decode"):
+            raise ValueError(f"disaggregation_role must be 'null'|'prefill'|'decode', got {disaggregation_role!r}")
+        if disaggregation_role != "null" and disaggregation_kv_transfer_config is None:
+            raise ValueError(
+                f"disaggregation_role={disaggregation_role!r} requires disaggregation_kv_transfer_config to be set"
+            )
+        self._disaggregation_role = disaggregation_role
+        self._disaggregation_kv_transfer_config = disaggregation_kv_transfer_config
+        # PD peer linkage populated post-launch by vLLMPDReplica.set_pd_peer
+        # (no-op for colocated). _pd_peer_idx drives the round-robin in
+        # _select_decode_peer.
+        self._pd_decode_peers: list[ActorHandle] = []
+        self._pd_prefill_side_channel_host: Optional[str] = None
+        self._pd_prefill_side_channel_port: Optional[int] = None
+        self._pd_prefill_engine_id: Optional[str] = None
+        self._pd_peer_idx: int = 0
+
         os.environ[get_visible_devices_keyword()] = cuda_visible_devices
         os.environ["VERL_REPLICA_RANK"] = str(replica_rank)
         # Forward the Ray job id into the vLLM worker subprocess so the
@@ -198,6 +225,30 @@ class vLLMHttpServer:
             args=args,
             kwargs=kwargs,
         )
+
+    async def set_pd_peer(
+        self,
+        decode_peers: list,
+        prefill_side_channel_host: str,
+        prefill_side_channel_port: int,
+        prefill_engine_id: str,
+    ) -> None:
+        """Record the prefill→decode wiring established by ``vLLMPDReplica``.
+
+        Only meaningful when ``self._disaggregation_role == "prefill"``; called
+        once per replica after every server's ``launch_server`` has returned.
+        The actual per-request fan-out using these peers is wired in the
+        ``generate`` override added in Phase 2 of the verl-vllm-pd-disagg
+        series.
+        """
+        assert self._disaggregation_role == "prefill", (
+            f"set_pd_peer must be called on the prefill server (got role={self._disaggregation_role!r})"
+        )
+        assert isinstance(decode_peers, list) and decode_peers, "decode_peers must be a non-empty list"
+        self._pd_decode_peers = list(decode_peers)
+        self._pd_prefill_side_channel_host = prefill_side_channel_host
+        self._pd_prefill_side_channel_port = prefill_side_channel_port
+        self._pd_prefill_engine_id = prefill_engine_id
 
     async def launch_server(self, master_address: str = None, master_port: int = None, dp_rpc_port: int = None):
         if self.node_rank != 0:
@@ -354,6 +405,12 @@ class vLLMHttpServer:
         if self.config.enable_rollout_routing_replay:
             args.update({"enable_return_routed_experts": True})
 
+        # PD-disagg: forward the KVTransferConfig built by vLLMPDReplica to the
+        # vLLM serve CLI so the engine wires up NixlConnector before the API
+        # server starts. ``--kv-transfer-config`` accepts a JSON blob.
+        if self._disaggregation_role != "null":
+            args["kv_transfer_config"] = json.dumps(self._disaggregation_kv_transfer_config)
+
         server_args = ["serve", self.model_config.local_path] + build_cli_args_from_config(args)
 
         if self.replica_rank == 0:
@@ -460,8 +517,35 @@ class vLLMHttpServer:
         audio_data: Optional[list[Any]] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
         priority: int = 0,
+        kv_transfer_params: Optional[dict] = None,
     ) -> TokenOutput:
-        """Generate sequence with token-in-token-out."""
+        """Generate sequence with token-in-token-out.
+
+        Args:
+            kv_transfer_params: vLLM KV-transfer hook used by NixlConnector. The
+                top-level prefill request mints
+                ``{"do_remote_decode": True, "do_remote_prefill": False}`` and
+                the decode leg receives the prefill's response payload (engine
+                id / block ids / side-channel host:port) so it can pull KV.
+                Plumbed into ``SamplingParams.extra_args``; the response's
+                ``kv_transfer_params`` is propagated back through
+                ``TokenOutput.extra_fields["kv_transfer_params"]`` so the PD
+                dispatcher can hand it to the decode peer.
+        """
+        # PD-disagg top-level dispatch. When this server is the prefill leg of a
+        # vLLMPDReplica and the caller has not yet supplied kv_transfer_params,
+        # fan out to one decode peer in two sequential legs (matches
+        # vllm-project/router's vllm_pd_router.rs and the toy proxy).
+        if self._disaggregation_role == "prefill" and self._pd_decode_peers and kv_transfer_params is None:
+            return await self._pd_dispatch(
+                prompt_ids,
+                sampling_params,
+                request_id,
+                image_data=image_data,
+                video_data=video_data,
+                priority=priority,
+            )
+
         prompt_ids = normalize_token_ids(prompt_ids)
 
         # Calculate the maximum possible new tokens based on available context space
@@ -499,6 +583,16 @@ class vLLMHttpServer:
         )
         sampling_params["logprobs"] = 0 if sampling_params.pop("logprobs", False) else None
         sampling_params.setdefault("repetition_penalty", self.config.get("repetition_penalty", 1.0))
+
+        # PD-disagg: forward kv_transfer_params via SamplingParams.extra_args.
+        # vLLM's Request reads it from extra_args and hands it to the
+        # KVConnector (vllm/v1/request.py:108). Round-trips back as
+        # final_res.kv_transfer_params after the prefill leg.
+        if kv_transfer_params is not None:
+            extra_args = dict(sampling_params.pop("extra_args", None) or {})
+            extra_args["kv_transfer_params"] = kv_transfer_params
+            sampling_params["extra_args"] = extra_args
+
         sampling_params = SamplingParams(max_tokens=max_tokens, **sampling_params)
         prompt_ids = qwen2_5_vl_dedup_image_tokens(prompt_ids, self.model_config.processor)
         multi_modal_data = {}
@@ -581,6 +675,12 @@ class vLLMHttpServer:
         if hasattr(final_res.outputs[0], "num_preempted"):
             num_preempted = final_res.outputs[0].num_preempted
 
+        # Surface kv_transfer_params back to the dispatcher via extra_fields.
+        # The prefill leg uses this to drive the decode leg's NIXL pull.
+        response_kv_transfer_params = getattr(final_res, "kv_transfer_params", None)
+        if response_kv_transfer_params is not None:
+            extra_fields["kv_transfer_params"] = response_kv_transfer_params
+
         return TokenOutput(
             token_ids=token_ids,
             log_probs=log_probs,
@@ -588,6 +688,105 @@ class vLLMHttpServer:
             stop_reason=stop_reason,
             num_preempted=num_preempted,
             extra_fields=extra_fields,
+        )
+
+    def _select_decode_peer(self) -> ActorHandle:
+        """Round-robin across decode peers (matches vllm-project/router default)."""
+        peer = self._pd_decode_peers[self._pd_peer_idx % len(self._pd_decode_peers)]
+        self._pd_peer_idx += 1
+        return peer
+
+    async def _pd_dispatch(
+        self,
+        prompt_ids: list[int],
+        sampling_params: dict[str, Any],
+        request_id: str,
+        image_data: Optional[list[Any]] = None,
+        video_data: Optional[list[Any]] = None,
+        priority: int = 0,
+    ) -> TokenOutput:
+        """Two-leg sequential dispatch for PD-disaggregated inference.
+
+        Mirrors ``tests/v1/kv_connector/nixl_integration/toy_proxy_server.py`` in
+        the vLLM tree and ``vllm_pd_router.rs::process_vllm_two_stage_request`` in
+        ``vllm-project/router``: prefill runs locally with ``max_tokens=1`` and
+        ``do_remote_decode=True``; its response carries the
+        ``kv_transfer_params`` payload that the decode peer needs to pull KV
+        from this server's NIXL side-channel.
+        """
+        decode_peer = self._select_decode_peer()
+        connector = (self._disaggregation_kv_transfer_config or {}).get("kv_connector", "")
+        is_mooncake = connector == "MooncakeConnector"
+
+        # Prefill leg — only needs to materialise KV; we discard its single
+        # generated token.
+        prefill_sp = dict(sampling_params)
+        prefill_sp.pop("max_tokens", None)
+        prefill_sp.pop("max_new_tokens", None)
+        prefill_sp["max_tokens"] = 1
+        # Both connectors accept transfer_id; Mooncake requires it on both legs
+        # (mooncake_connector.py:608 logs "Missing transfer_id in
+        # kv_transfer_params from router!"), NIXL ignores it.
+        transfer_id = uuid.uuid4().hex
+        prefill_kv_params = {
+            "do_remote_decode": True,
+            "do_remote_prefill": False,
+            "transfer_id": transfer_id,
+        }
+
+        prefill_out = await self.generate(
+            prompt_ids,
+            prefill_sp,
+            f"{request_id}_P",
+            image_data=image_data,
+            video_data=video_data,
+            priority=priority,
+            kv_transfer_params=prefill_kv_params,
+        )
+        if is_mooncake:
+            # Mooncake's request_finished returns (delay_free_blocks, None)
+            # — the proxy is expected to construct the decode params itself
+            # from prefill state it already knows (engine_id + bootstrap addr;
+            # see vllm/examples/.../mooncake_connector_proxy.py:299-304).
+            # Mooncake hardcodes the bootstrap host to "127.0.0.1" outside
+            # external/hybrid LB mode (mooncake_connector.py:1789), and decoders
+            # registered with that local address at startup, so the bootstrap
+            # URL the prefill should hand to decode is on localhost too.
+            decode_kv_params = {
+                "do_remote_decode": False,
+                "do_remote_prefill": True,
+                "remote_engine_id": self._pd_prefill_engine_id,
+                # Must include http:// scheme — decoder appends "/query" and
+                # passes to httpx.AsyncClient, which rejects scheme-less URLs.
+                # See mooncake_connector.py:1568 + mooncake_connector_proxy.py
+                # make_http_path() helper for the canonical shape.
+                "remote_bootstrap_addr": f"http://127.0.0.1:{self._pd_prefill_side_channel_port}",
+                "transfer_id": transfer_id,
+            }
+        else:
+            decode_kv_params = prefill_out.extra_fields.get("kv_transfer_params")
+            if decode_kv_params is None:
+                raise RuntimeError(
+                    f"PD prefill leg returned no kv_transfer_params (request_id={request_id}); "
+                    f"the NIXL connector failed to register — check the prefill engine's "
+                    f"VLLM_NIXL_SIDE_CHANNEL_HOST/PORT and kv_transfer_config."
+                )
+
+        # Decode leg — full sampling_params, decode peer pulls KV from the
+        # prefill engine on first read using the coordinates encoded in
+        # decode_kv_params (NIXL: remote_host/port; Mooncake:
+        # remote_bootstrap_addr).
+        # Defensive copy: `generate()` mutates sampling_params via .pop on
+        # entry; passing the caller's dict directly would corrupt it for
+        # retries / multi-turn workflows that reuse the same params.
+        return await decode_peer.generate.remote(
+            prompt_ids,
+            dict(sampling_params),
+            f"{request_id}_D",
+            image_data=image_data,
+            video_data=video_data,
+            priority=priority,
+            kv_transfer_params=decode_kv_params,
         )
 
     async def wake_up(self):
