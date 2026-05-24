@@ -292,22 +292,23 @@ class VeOmniEngine(FSDPEngine):
         moe_metrics = self._moe_monitor.compute_metrics(current_step=self._moe_monitor_step)
         if not moe_metrics:
             return
-        from PIL import Image as PILImage
 
-        scalars = {k: v for k, v in moe_metrics.items() if not isinstance(v, PILImage)}
+        heatmap_key = None
+        scalars = {}
+        for k, v in moe_metrics.items():
+            if k.endswith("expert_load_heatmap"):
+                heatmap_key = k
+            else:
+                scalars[k] = v
         if scalars and isinstance(outputs, dict) and "metrics" in outputs:
             outputs["metrics"].update(scalars)
-        if self.rank == 0:
+        if self.rank == 0 and heatmap_key is not None:
             import wandb
 
             if wandb.run is not None:
-                images = {}
-                for k, v in moe_metrics.items():
-                    if isinstance(v, PILImage):
-                        start, end = self._moe_monitor._last_step_range
-                        images[k] = wandb.Image(v, caption=f"Steps {start}-{end}")
-                if images:
-                    wandb.log(images, step=self._moe_monitor_step)
+                start, end = self._moe_monitor._last_step_range
+                img = wandb.Image(moe_metrics[heatmap_key], caption=f"Steps {start}-{end}")
+                wandb.log({heatmap_key: img}, step=self._moe_monitor_step)
 
     def optimizer_step(self):
         """
