@@ -164,20 +164,28 @@ class vLLMColocateWorkerExtension:
         spec = self.model_runner.vllm_config.speculative_config
         return spec.draft_model_config if spec is not None and spec.draft_model_config is not None else None
 
+    def _use_mtp_drafter_weight_sync(self):
+        """Return whether the vLLM MTP drafter should receive actor weights."""
+        spec = self.model_runner.vllm_config.speculative_config
+        return spec is not None and spec.method == "mtp" and self._get_drafter_model() is not None
+
     def _iter_all_models(self):
-        """Yield all model objects that need weight updates (main + optional drafter)."""
+        """Yield models that need weight updates.
+
+        Only vLLM MTP drafter sync is supported for now. Independent non-MTP
+        draft models are not compatible with actor weight loading through this path.
+        """
         yield self.model_runner.model
-        drafter_model = self._get_drafter_model()
-        if drafter_model is not None:
-            yield drafter_model
+        if self._use_mtp_drafter_weight_sync():
+            yield self._get_drafter_model()
 
     def _iter_all_models_with_config(self):
-        """Yield (model, model_config) for all models that need post-processing."""
+        """Yield (model, model_config) for models that need post-processing."""
         yield self.model_runner.model, self.model_runner.vllm_config.model_config
-        drafter_model = self._get_drafter_model()
-        draft_cfg = self._get_draft_model_config()
-        if drafter_model is not None and draft_cfg is not None:
-            yield drafter_model, draft_cfg
+        if self._use_mtp_drafter_weight_sync():
+            draft_cfg = self._get_draft_model_config()
+            if draft_cfg is not None:
+                yield self._get_drafter_model(), draft_cfg
 
     def monkey_patch_model(self, vocab_size: int):
         for model in self._iter_all_models():
@@ -272,7 +280,7 @@ class vLLMColocateWorkerExtension:
                 loaded_params = load_quanted_weights(weights, self.model_runner)
                 logger.info(f"FP8 weights loaded (async), loaded_params: {len(loaded_params)}")
                 # Keep the draft model in sync when present.
-                if self._get_drafter_model() is not None:
+                if self._use_mtp_drafter_weight_sync():
                     load_quanted_weights(weights, self.model_runner, is_drafter=True)
             else:
                 logger.info("Loading standard weights (non-FP8, async)")
