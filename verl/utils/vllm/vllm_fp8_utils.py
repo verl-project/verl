@@ -170,7 +170,6 @@ def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
 
     fp8_state.seen_params.clear()
     fp8_state.fp8_param_names.clear()
-    fp8_state.vllm_patches.clear()
     is_mxfp8_npu = is_mxfp8_vllm_ascend(quant_config)
     if is_mxfp8_npu:
         import torch_npu
