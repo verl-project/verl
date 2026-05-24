@@ -16,33 +16,7 @@ import inspect
 from typing import Optional
 
 import torch
-
-# Register float8 dtypes in torch's legacy storage pickle maps and create stub
-# storage classes so the legacy save/load path round-trips W4A4 weight_scale
-# (float8_e4m3fn) tensors via IPC. Must run in BOTH the verl rollout worker
-# (sender) and the TRT-LLM rollout worker (receiver). This module is imported
-# on the TRT-LLM side via WorkerExtension registration.
-try:
-    from torch import storage as _torch_storage
-    _fwd = _torch_storage._dtype_to_storage_type_map
-    _bwd = _torch_storage._storage_type_to_dtype_map
-    if callable(_fwd):
-        _fwd = _fwd()
-    if callable(_bwd):
-        _bwd = _bwd()
-    for _dt, _name in (
-        (torch.float8_e4m3fn, "Float8_e4m3fnStorage"),
-        (torch.float8_e5m2, "Float8_e5m2Storage"),
-    ):
-        if _dt not in _fwd:
-            _fwd[_dt] = _name
-        if _name not in _bwd:
-            _bwd[_name] = _dt
-        if not hasattr(torch, _name):
-            _stub = type(_name, (torch.UntypedStorage,), {"dtype": _dt, "__module__": "torch"})
-            setattr(torch, _name, _stub)
-except (AttributeError, ImportError):
-    pass
+from verl.workers.rollout.trtllm_rollout import _w4a4_compat  # noqa: F401  (registers float8 storage stubs at import)
 
 # Defer tensorrt_llm imports to avoid FlashInfer's check_cuda_arch() crash
 # when this module is loaded on CPU-only Ray actors. The module is normally

@@ -29,38 +29,7 @@ import pynvml
 import ray
 import torch
 import torch.distributed as dist
-
-# Workaround: torch's legacy storage pickle path (used by
-# multiprocessing.reductions.reduce_tensor when IPC-sharing tensors) is missing
-# float8_e4m3fn / float8_e5m2 entries in some container builds. W4A4 QAT yields
-# weight_scale as float8_e4m3fn (quantizer.py:66), so update_weights crashes
-# inside pickle.dumps(cur_handles). Register the entries at import time so the
-# legacy path round-trips float8 storages losslessly.
-try:
-    from torch import storage as _torch_storage
-    _fwd = _torch_storage._dtype_to_storage_type_map
-    _bwd = _torch_storage._storage_type_to_dtype_map
-    if callable(_fwd):
-        _fwd = _fwd()
-    if callable(_bwd):
-        _bwd = _bwd()
-    for _dt, _name in (
-        (torch.float8_e4m3fn, "Float8_e4m3fnStorage"),
-        (torch.float8_e5m2, "Float8_e5m2Storage"),
-    ):
-        if _dt not in _fwd:
-            _fwd[_dt] = _name
-        if _name not in _bwd:
-            _bwd[_name] = _dt
-        # The legacy save path (torch/serialization.py persistent_id) calls
-        # `getattr(torch, storage_type_str)` to embed module+name in the pickle
-        # stream. Register a stub class that subclasses UntypedStorage and
-        # carries the dtype, so getattr succeeds and round-trip works.
-        if not hasattr(torch, _name):
-            _stub = type(_name, (torch.UntypedStorage,), {"dtype": _dt, "__module__": "torch"})
-            setattr(torch, _name, _stub)
-except (AttributeError, ImportError):
-    pass
+from verl.workers.rollout.trtllm_rollout import _w4a4_compat  # noqa: F401  (registers float8 storage stubs at import)
 
 try:
     from tensorrt_llm.llmapi.llm_args import ExecutorMemoryType
@@ -294,8 +263,7 @@ class AsyncTRTLLMHttpAdapter:
         Returns:
             Dict[str, Any]: Server response containing update status
         """
-        result = await self._make_async_request("update_weights", {"weights": weights})
-        return result
+        return await self._make_async_request("update_weights", {"weights": weights})
 
 
 class ServerAdapter(BaseRollout):
@@ -337,19 +305,8 @@ class ServerAdapter(BaseRollout):
         # NVFP4 QAT — mirror actor's quant config onto hf_config so ServerAdapter
         # weight-sync sees NVFP4 metadata (same role as the FP8 block above).
         qat_cfg = config.get("qat", None)
-        if qat_cfg is not None and qat_cfg.get("enable", False):
-            qat_path = qat_cfg.get("quantization_config_path")
-            if qat_path:
-                import json as _json
-                with open(qat_path) as _f:
-                    _q = _json.load(_f)
-                _gs = (_q.get("config_groups", {}).get("group_0", {})
-                       .get("weights", {}) or {}).get("group_size", 16)
-                model_config.hf_config.quantization_config = {
-                    "quant_method": "nvfp4",
-                    "group_size": _gs,
-                    "modules_to_not_convert": _q.get("ignore", []) or ["lm_head"],
-                }
+        if qat_cfg is not None and qat_cfg.get("enable", False) and qat_cfg.get("quantization_config_path"):
+            model_config.hf_config.quantization_config = _w4a4_compat.build_nvfp4_quantization_config(qat_cfg)
 
         super().__init__(config, model_config, device_mesh)
         self._adapter = None

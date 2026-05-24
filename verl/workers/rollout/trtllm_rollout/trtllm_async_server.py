@@ -158,17 +158,10 @@ class TRTLLMHttpServer:
         # rollout must build NVFP4-packed linears to receive them.
         qat_cfg = getattr(self.config, "qat", None)
         if qat_cfg is not None and qat_cfg.get("enable", False):
-            import json as _json
-            _quant_json_path = qat_cfg.get("quantization_config_path")
-            with open(_quant_json_path) as _f:
-                _quant_json = _json.load(_f)
-            _gs = (_quant_json.get("config_groups", {}).get("group_0", {})
-                   .get("weights", {}) or {}).get("group_size", 16)
-            engine_kwargs.setdefault("model_kwargs", {})["quantization_config"] = {
-                "quant_method": "nvfp4",
-                "group_size": _gs,
-                "modules_to_not_convert": _quant_json.get("ignore", []) or ["lm_head"],
-            }
+            from verl.workers.rollout.trtllm_rollout._w4a4_compat import build_nvfp4_quantization_config
+            engine_kwargs.setdefault("model_kwargs", {})["quantization_config"] = (
+                build_nvfp4_quantization_config(qat_cfg)
+            )
             if self.config.load_format != "dummy":
                 raise ValueError("NVFP4 QAT rollout requires load_format=dummy")
 
@@ -238,8 +231,7 @@ class TRTLLMHttpServer:
 
         # Experimental: force TRT-LLM to dynamically re-quantize incoming weights
         # at reload time. Reads actor_rollout_ref.rollout.force_dynamic_quantization.
-        _fdq = bool(getattr(self.config, "force_dynamic_quantization", False))
-        if _fdq:
+        if getattr(self.config, "force_dynamic_quantization", False):
             llm_kwargs["force_dynamic_quantization"] = True
 
         self.llm = await AsyncLLM(**llm_kwargs)
