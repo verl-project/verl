@@ -281,27 +281,6 @@ def gptmodel_forward_model_engine(
         if vision_model:
             input_ids_rmpad, attention_mask = build_vlm_attn_mask_thd(input_ids, pad_token_id)
 
-        import sys as _sys
-        try:
-            _iids = input_ids_rmpad
-            if _iids is not None and hasattr(_iids, "numel") and _iids.numel() > 0:
-                _mn = int(_iids.min().item())
-                _mx = int(_iids.max().item())
-                _vs = getattr(model.config, "vocab_size", None) if hasattr(model, "config") else None
-                print(
-                    f"RAY_EXECUTOR_DEBUG: model_forward.input_ids_rmpad: "
-                    f"shape={tuple(_iids.shape)} min={_mn} max={_mx} vocab_size={_vs}",
-                    file=_sys.stderr, flush=True,
-                )
-                if _vs is not None and _mx >= _vs:
-                    print(
-                        f"RAY_EXECUTOR_DEBUG: model_forward.OOB_DETECTED: "
-                        f"max_token_id={_mx} >= vocab_size={_vs}",
-                        file=_sys.stderr, flush=True,
-                    )
-        except Exception as _e:
-            print(f"RAY_EXECUTOR_DEBUG: model_forward.probe_error: {_e}", file=_sys.stderr, flush=True)
-
         output_orig = model(
             input_ids=input_ids_rmpad,
             attention_mask=attention_mask,

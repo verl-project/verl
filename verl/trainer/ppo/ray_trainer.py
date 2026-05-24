@@ -1300,9 +1300,7 @@ class RayPPOTrainer:
 
         # load checkpoint and update weights before doing anything
         self._load_checkpoint()
-        print(f"RAY_EXECUTOR_DEBUG: ray_trainer.update_weights ENTER step={self.global_steps}", flush=True)
         self.checkpoint_manager.update_weights(self.global_steps)
-        print(f"RAY_EXECUTOR_DEBUG: ray_trainer.update_weights EXIT step={self.global_steps}", flush=True)
 
         current_epoch = self.global_steps // len(self.train_dataloader)
 
@@ -1556,9 +1554,7 @@ class RayPPOTrainer:
                     # implement critic warmup
                     if self.config.trainer.critic_warmup > self.global_steps:
                         # Still in critic warmup, only update weights to wake up rollout replicas.
-                        print(f"RAY_EXECUTOR_DEBUG: ray_trainer.update_weights ENTER step={self.global_steps} (critic_warmup)", flush=True)
                         self.checkpoint_manager.update_weights(self.global_steps)
-                        print(f"RAY_EXECUTOR_DEBUG: ray_trainer.update_weights EXIT step={self.global_steps} (critic_warmup)", flush=True)
                     else:
                         # update actor
                         with marked_timer("update_actor", timing_raw, color="red"):
@@ -1588,9 +1584,7 @@ class RayPPOTrainer:
 
                         # update weights from trainer to rollout
                         with marked_timer("update_weights", timing_raw, color="red"):
-                            print(f"RAY_EXECUTOR_DEBUG: ray_trainer.update_weights ENTER step={self.global_steps}", flush=True)
                             self.checkpoint_manager.update_weights(self.global_steps)
-                            print(f"RAY_EXECUTOR_DEBUG: ray_trainer.update_weights EXIT step={self.global_steps}", flush=True)
 
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
