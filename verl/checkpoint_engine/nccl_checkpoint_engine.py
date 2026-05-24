@@ -35,6 +35,7 @@ from verl.checkpoint_engine.base import (
     split_weight_chunks,
 )
 from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
+from verl.workers.rollout.utils import ensure_async_iterator
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -237,7 +238,7 @@ class NCCLCheckpointEngine(CheckpointEngine):
 
         # For trainer rank other than 0, consume weights without sending.
         if self.rank < 0:
-            for name, weight in weights:
+            async for name, weight in ensure_async_iterator(weights):
                 pass
             return
 

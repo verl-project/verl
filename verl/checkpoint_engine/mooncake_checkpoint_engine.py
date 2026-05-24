@@ -26,6 +26,7 @@ from vllm.distributed.utils import StatelessProcessGroup
 from verl.checkpoint_engine.base import CheckpointEngine, CheckpointEngineRegistry, TensorMeta
 from verl.utils.device import get_torch_device
 from verl.utils.net_utils import get_free_port
+from verl.workers.rollout.utils import ensure_async_iterator
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -150,7 +151,7 @@ class MooncakeCheckpointEngine(CheckpointEngine):
     async def send_weights(self, weights: Generator[tuple[str, torch.Tensor], None, None]):
         """Send weights using Mooncake TransferEngine"""
         if self.rank < 0:
-            for name, weight in weights:
+            async for name, weight in ensure_async_iterator(weights):
                 pass
             logger.info(f"send_weights rank={self.rank}")
             return
@@ -164,7 +165,7 @@ class MooncakeCheckpointEngine(CheckpointEngine):
         idx = 0
         current = bufs[idx]
 
-        for name, weight in weights:
+        async for name, weight in ensure_async_iterator(weights):
             weight = weight.to(self.rollout_dtype)
 
             if offset + weight.nbytes > self.bucket_size:

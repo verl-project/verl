@@ -29,24 +29,26 @@ from checkpoint_engine.ps import H2DBucket, ParameterMeta, ParameterServer, _gen
 from verl.checkpoint_engine.base import CheckpointEngine, CheckpointEngineRegistry
 from verl.utils.device import get_nccl_backend, get_torch_device
 from verl.utils.net_utils import get_free_port
+from verl.workers.rollout.utils import ensure_async_iterator
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
-def ckpt_get_named_tensor_buckets(
-    iterable: Generator[tuple[str, torch.Tensor], None, None],
+async def ckpt_get_named_tensor_buckets(
+    iterable,
     bucket_bytes: int,
     world_size: int,
     rank_id: int,
     rollout_dtype: torch.dtype = torch.bfloat16,
-) -> dict[str, torch.Tensor]:
+) -> AsyncGenerator[dict[str, torch.Tensor], None]:
     if bucket_bytes <= 0:
         raise ValueError(f"bucket_bytes must be greater than 0, got {bucket_bytes}")
 
     current_bucket = {}
     current_size = 0
-    for tensor_idx, (name, tensor) in enumerate(iterable):
+    tensor_idx = 0
+    async for name, tensor in ensure_async_iterator(iterable):
         tensor = tensor.to(rollout_dtype)
         if tensor_idx % world_size == rank_id:
             tensor_size = tensor.element_size() * tensor.numel()
@@ -58,6 +60,7 @@ def ckpt_get_named_tensor_buckets(
 
             current_bucket[name] = tensor
             current_size += tensor_size
+        tensor_idx += 1
 
     if current_bucket:
         yield current_bucket
@@ -330,7 +333,7 @@ class KIMICheckpointEngine(CheckpointEngine):
 
         start_time = time.time()
         named_tensors = {}
-        for named_tensors_gpu in ckpt_get_named_tensor_buckets(
+        async for named_tensors_gpu in ckpt_get_named_tensor_buckets(
             weights, self.bucket_size, self.trainer_world_size, self.rank, self.rollout_dtype
         ):
             with concurrent.futures.ThreadPoolExecutor(max_workers=32) as executor:

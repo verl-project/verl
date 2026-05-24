@@ -160,7 +160,9 @@ class vLLMColocateWorkerExtension:
         # patch weight loader to support MoE model
         patch_vllm_moe_model_weight_loader(self.model_runner.model)
 
-    def update_weights_from_ipc(self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False):
+    def update_weights_from_ipc(
+        self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False, pre_quantized_fp8: bool = False
+    ):
         """Update the weights of the rollout model."""
         from vllm.platforms import current_platform
 
@@ -200,7 +202,7 @@ class vLLMColocateWorkerExtension:
         )
         receiver.receive_weights(
             on_bucket_received=lambda weights: self._update_weights(
-                weights, peft_config=peft_config, base_sync_done=base_sync_done
+                weights, peft_config=peft_config, base_sync_done=base_sync_done, pre_quantized_fp8=pre_quantized_fp8
             )
         )
 
@@ -223,7 +225,13 @@ class vLLMColocateWorkerExtension:
             model_config = self.model_runner.vllm_config.model_config
             process_weights_after_loading(model, model_config, self.device)
 
-    def _update_weights(self, weights: list[tuple[str, torch.Tensor]], peft_config: dict, base_sync_done: bool):
+    def _update_weights(
+        self,
+        weights: list[tuple[str, torch.Tensor]],
+        peft_config: dict,
+        base_sync_done: bool,
+        pre_quantized_fp8: bool = False,
+    ):
         if peft_config and base_sync_done:
             weights = dict(weights)
             lora_request = TensorLoRARequest(
@@ -239,9 +247,11 @@ class vLLMColocateWorkerExtension:
             # Add the FP8 related logic here as sharding manager has been deprecated.
             # Check if FP8 quantization is enabled and apply appropriate weight loading
             if is_fp8_model(self.model_runner.vllm_config):
-                logger.info(f"FP8 model detected (async): {self.model_runner.vllm_config.quant_config}")
-                # Convert bf16 weights to fp8 format before loading
-                loaded_params = load_quanted_weights(weights, self.model_runner)
+                if pre_quantized_fp8:
+                    logger.info("FP8 model detected (async): loading pre-quantized weights from trainer side")
+                else:
+                    logger.info(f"FP8 model detected (async): {self.model_runner.vllm_config.quant_config}")
+                loaded_params = load_quanted_weights(weights, self.model_runner, pre_quantized=pre_quantized_fp8)
                 logger.info(f"FP8 weights loaded (async), loaded_params: {len(loaded_params)}")
             else:
                 logger.info("Loading standard weights (non-FP8, async)")
