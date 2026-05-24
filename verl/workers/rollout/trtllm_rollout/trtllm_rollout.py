@@ -30,6 +30,38 @@ import ray
 import torch
 import torch.distributed as dist
 
+# Workaround: torch's legacy storage pickle path (used by
+# multiprocessing.reductions.reduce_tensor when IPC-sharing tensors) is missing
+# float8_e4m3fn / float8_e5m2 entries in some container builds. W4A4 QAT yields
+# weight_scale as float8_e4m3fn (quantizer.py:66), so update_weights crashes
+# inside pickle.dumps(cur_handles). Register the entries at import time so the
+# legacy path round-trips float8 storages losslessly.
+try:
+    from torch import storage as _torch_storage
+    _fwd = _torch_storage._dtype_to_storage_type_map
+    _bwd = _torch_storage._storage_type_to_dtype_map
+    if callable(_fwd):
+        _fwd = _fwd()
+    if callable(_bwd):
+        _bwd = _bwd()
+    for _dt, _name in (
+        (torch.float8_e4m3fn, "Float8_e4m3fnStorage"),
+        (torch.float8_e5m2, "Float8_e5m2Storage"),
+    ):
+        if _dt not in _fwd:
+            _fwd[_dt] = _name
+        if _name not in _bwd:
+            _bwd[_name] = _dt
+        # The legacy save path (torch/serialization.py persistent_id) calls
+        # `getattr(torch, storage_type_str)` to embed module+name in the pickle
+        # stream. Register a stub class that subclasses UntypedStorage and
+        # carries the dtype, so getattr succeeds and round-trip works.
+        if not hasattr(torch, _name):
+            _stub = type(_name, (torch.UntypedStorage,), {"dtype": _dt, "__module__": "torch"})
+            setattr(torch, _name, _stub)
+except (AttributeError, ImportError):
+    pass
+
 try:
     from tensorrt_llm.llmapi.llm_args import ExecutorMemoryType
 except (ImportError, RuntimeError):
@@ -262,9 +294,7 @@ class AsyncTRTLLMHttpAdapter:
         Returns:
             Dict[str, Any]: Server response containing update status
         """
-        print(f"RAY_EXECUTOR_DEBUG: AsyncTRTLLMHttpAdapter.update_weights ENTER n_weights={len(weights) if weights else 0}", flush=True)
         result = await self._make_async_request("update_weights", {"weights": weights})
-        print(f"RAY_EXECUTOR_DEBUG: AsyncTRTLLMHttpAdapter.update_weights EXIT", flush=True)
         return result
 
 
@@ -517,8 +547,23 @@ class ServerAdapter(BaseRollout):
                 )
                 cur_available_bytes -= size_in_bytes
 
-            handle = reduce_tensor(param.detach())
-            cur_handles.append((name, handle))
+            t = param.detach()
+            # With param_offload=True, weights may arrive on CPU; reduce_tensor
+            # falls back to legacy save for CPU tensors, yielding handle args
+            # incompatible with the receiver (which assumes rebuild_cuda_tensor
+            # 15-arg layout). Move to CUDA so reduce_tensor takes the IPC path.
+            if not t.is_cuda:
+                t = t.cuda()
+            # Float8 dtypes (e.g. W4A4 weight_scale) don't take CUDA IPC fast
+            # path in reduce_tensor; they fall through to legacy save which
+            # yields incompatible handle args. View as uint8 for transport and
+            # record original dtype so the receiver can view it back.
+            orig_dtype_str = None
+            if t.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+                orig_dtype_str = str(t.dtype).split(".")[-1]
+                t = t.view(torch.uint8)
+            handle = reduce_tensor(t)
+            cur_handles.append((name, handle, orig_dtype_str))
 
         await flush()
 

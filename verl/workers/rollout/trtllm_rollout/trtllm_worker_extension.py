@@ -15,6 +15,35 @@ import base64
 import inspect
 from typing import Optional
 
+import torch
+
+# Register float8 dtypes in torch's legacy storage pickle maps and create stub
+# storage classes so the legacy save/load path round-trips W4A4 weight_scale
+# (float8_e4m3fn) tensors via IPC. Must run in BOTH the verl rollout worker
+# (sender) and the TRT-LLM rollout worker (receiver). This module is imported
+# on the TRT-LLM side via WorkerExtension registration.
+try:
+    from torch import storage as _torch_storage
+    _fwd = _torch_storage._dtype_to_storage_type_map
+    _bwd = _torch_storage._storage_type_to_dtype_map
+    if callable(_fwd):
+        _fwd = _fwd()
+    if callable(_bwd):
+        _bwd = _bwd()
+    for _dt, _name in (
+        (torch.float8_e4m3fn, "Float8_e4m3fnStorage"),
+        (torch.float8_e5m2, "Float8_e5m2Storage"),
+    ):
+        if _dt not in _fwd:
+            _fwd[_dt] = _name
+        if _name not in _bwd:
+            _bwd[_name] = _dt
+        if not hasattr(torch, _name):
+            _stub = type(_name, (torch.UntypedStorage,), {"dtype": _dt, "__module__": "torch"})
+            setattr(torch, _name, _stub)
+except (AttributeError, ImportError):
+    pass
+
 # Defer tensorrt_llm imports to avoid FlashInfer's check_cuda_arch() crash
 # when this module is loaded on CPU-only Ray actors. The module is normally
 # loaded only on GPU workers via string path in trtllm_async_server.py, but
@@ -37,6 +66,36 @@ except (ImportError, RuntimeError):
     logger = None
 
 
+# Monkey-patch tensorrt_llm.serialization.loads to permit torch.storage._load_from_bytes
+# and float8 storage stubs. The parent rlhf_utils.WorkerExtension.update_weights calls
+# serialization.loads with a hard-coded approved_imports that omits these — needed for
+# W4A4 weight_scale (float8_e4m3fn) IPC round-trip.
+if serialization is not None and not getattr(serialization, "_verl_w4a4_patched", False):
+    _orig_loads = serialization.loads
+
+    def _patched_loads(data, approved_imports=None, **kwargs):
+        extra = {
+            "torch.storage": ["_load_from_bytes", "UntypedStorage", "TypedStorage", "_TypedStorage"],
+            "torch._utils": ["_rebuild_tensor_v2"],
+            "torch.multiprocessing.reductions": ["rebuild_cuda_tensor", "rebuild_tensor"],
+            "torch": ["Tensor", "Size", "dtype", "device", "Float8_e4m3fnStorage", "Float8_e5m2Storage",
+                      "float8_e4m3fn", "float8_e5m2"],
+        }
+        if approved_imports is None:
+            approved_imports = {}
+        approved_imports = dict(approved_imports)
+        for _mod, _names in extra.items():
+            merged = list(approved_imports.get(_mod, []))
+            for _n in _names:
+                if _n not in merged:
+                    merged.append(_n)
+            approved_imports[_mod] = merged
+        return _orig_loads(data, approved_imports=approved_imports, **kwargs)
+
+    serialization.loads = _patched_loads
+    serialization._verl_w4a4_patched = True
+
+
 class WorkerExtension(TrtllmWorkerExtension):
     def __init__(self):
         pass
@@ -54,7 +113,6 @@ class WorkerExtension(TrtllmWorkerExtension):
 
     @control_action_decorator
     def update_weights(self, ipc_handles: Optional[dict] = None):
-        print(f"RAY_EXECUTOR_DEBUG: WorkerExtension.update_weights ENTER ipc_handles={'set' if ipc_handles is not None else 'None'}", flush=True)
         try:
             if not hasattr(self.engine.model_engine.model, "first_pre_reload_weights"):
                 for module in self.engine.model_engine.model.modules():
@@ -142,11 +200,20 @@ class WorkerExtension(TrtllmWorkerExtension):
                     # Data is already in the correct format (backward compatibility)
                     all_handles = serialized_handles
 
-                for param_name, tensor_handle in all_handles:
+                for entry in all_handles:
+                    # Support both 2-tuple (legacy) and 3-tuple (with orig_dtype_str
+                    # for float8 transport-as-uint8 round-trip).
+                    if len(entry) == 3:
+                        param_name, tensor_handle, orig_dtype_str = entry
+                    else:
+                        param_name, tensor_handle = entry
+                        orig_dtype_str = None
                     func, args = tensor_handle
                     list_args = list(args)
                     list_args[6] = self.device_id
                     tensor = func(*list_args)
+                    if orig_dtype_str is not None:
+                        tensor = tensor.view(getattr(torch, orig_dtype_str))
                     weights[param_name] = tensor
 
                 logger.info(f"weights key size: {len(weights.keys())}")

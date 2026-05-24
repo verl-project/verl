@@ -206,17 +206,15 @@ class TRTLLMHttpServer:
             **engine_kwargs,
         }
 
+        # Always use verl's WorkerExtension. The module-level imports register
+        # float8 storage stubs and monkey-patch tensorrt_llm.serialization.loads
+        # to allow torch.storage._load_from_bytes — required for W4A4 weight_scale
+        # (float8_e4m3fn) IPC. Without this, non-VLM models fell back to the
+        # parent TRT-LLM extension and the patches never ran on the server.
         self_defined_extension = {
             "ray_worker_extension_cls": "verl.workers.rollout.trtllm_rollout.trtllm_worker_extension.WorkerExtension",
         }
-        if self.is_vlm_model:
-            llm_kwargs.update(self_defined_extension)
-        else:
-            llm_kwargs.update(
-                {
-                    "ray_worker_extension_cls": "tensorrt_llm.llmapi.rlhf_utils.WorkerExtension",
-                }
-            )
+        llm_kwargs.update(self_defined_extension)
 
         if self.is_reward_model:
             llm_kwargs.update(
@@ -311,22 +309,6 @@ class TRTLLMHttpServer:
                 sampling_params=trt_llm_sampling_params,
             )
         token_ids = outputs.outputs[0].token_ids
-        try:
-            import sys as _dbg_sys
-            _tids = list(token_ids) if token_ids is not None else []
-            if _tids:
-                _mn = min(_tids); _mx = max(_tids)
-                _bad = _mx >= 200000 or _mn < 0
-                print(
-                    f"RAY_EXECUTOR_DEBUG: rollout.generate.token_ids: "
-                    f"len={len(_tids)} min={_mn} max={_mx} bad={_bad} "
-                    f"first5={_tids[:5]} last5={_tids[-5:]} "
-                    f"finish_reason={outputs.outputs[0].finish_reason}",
-                    file=_dbg_sys.stderr, flush=True,
-                )
-        except Exception as _e:
-            import sys as _dbg_sys
-            print(f"RAY_EXECUTOR_DEBUG: rollout.generate.probe_error: {_e}", file=_dbg_sys.stderr, flush=True)
         log_probs = None
         if outputs.outputs[0].logprobs is not None:
             # When logprobs=1, TRT-LLM returns only the sampled token's logprob at each position

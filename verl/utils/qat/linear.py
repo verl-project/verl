@@ -220,8 +220,9 @@ class QATLinear(nn.Linear):
         self._fusion_siblings_ref = None
 
         if mode == QATMode.W4A4:
+            # Seed to 1.0 (not the -1.0 sentinel) so step-0 update_weights passes before any actor forward runs to populate the real scale.
             self.register_buffer(
-                "input_global_scale", torch.tensor([self._UNINITIALIZED_SCALE], dtype=torch.float32), persistent=True
+                "input_global_scale", torch.tensor([1.0], dtype=torch.float32), persistent=True
             )
 
             self.register_buffer(
