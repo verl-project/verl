@@ -44,7 +44,7 @@ from verl.utils.ulysses import (
 from verl.workers.config import HFModelConfig, VeOmniEngineConfig, VeOmniOptimizerConfig
 
 from ..base import BaseEngineCtx, EngineRegistry
-from ..fsdp.transformer_impl import FSDPEngine, FSDPEngineWithLMHead
+from ..fsdp.transformer_impl import FSDPEngine, FSDPEngineWithLMHead, FSDPEngineWithValueHead
 from ..utils import enable_full_determinism, postprocess_batch_func, prepare_micro_batches
 from .utils import (
     MOE_PARAM_HANDERS,
@@ -59,6 +59,32 @@ logger = logging.getLogger(__file__)
 
 
 class VeOmniEngine(FSDPEngine):
+    _veomni_handles_position_ids = True
+
+    def _apply_veomni_input_transforms(self, model_inputs: dict, micro_batch: TensorDict):
+        """Apply VeOmni-specific input transforms shared by LM and value heads.
+
+        Handles vision-language model masks, sequence parallel sharding,
+        and flash attention kwargs from position_ids.
+        """
+        input_ids_rmpad = model_inputs["input_ids"]
+        sp_enabled = parallel_state.get_parallel_state().sp_enabled
+        sp_shard_collator = OmniSequenceShardCollator() if sp_enabled else None
+
+        if self.module.config.model_type in VL_TYPE2INDEX.keys():
+            image_mask = input_ids_rmpad == VL_TYPE2INDEX[self.module.config.model_type]["IMAGE_INPUT_INDEX"]
+            video_mask = input_ids_rmpad == VL_TYPE2INDEX[self.module.config.model_type]["VIDEO_INPUT_INDEX"]
+            model_inputs.update({"image_mask": image_mask, "video_mask": video_mask})
+
+            if sp_enabled:
+                sp_shard_collator(model_inputs)
+
+        use_remove_padding = tu.get_non_tensor_data(data=micro_batch, key="use_remove_padding", default=True)
+        if use_remove_padding and model_inputs.get("position_ids", None) is not None:
+            model_inputs.update(_prepare_veomni_flash_attention_kwargs(model_inputs["position_ids"]))
+            if sp_enabled:
+                model_inputs["position_ids"] = sp_shard_collator.sp_slice(model_inputs["position_ids"], dim=-1)
+
     def __init__(
         self,
         model_config: HFModelConfig,
@@ -631,34 +657,34 @@ def _prepare_veomni_flash_attention_kwargs(position_ids: torch.Tensor) -> dict[s
 class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
     def prepare_model_inputs(self, micro_batch: TensorDict):
         model_inputs, output_args = super().prepare_model_inputs(micro_batch)
-        input_ids_rmpad = model_inputs["input_ids"]
-        sp_enabled = parallel_state.get_parallel_state().sp_enabled
-        sp_shard_collator = OmniSequenceShardCollator() if sp_enabled else None
-
-        if self.module.config.model_type in VL_TYPE2INDEX.keys():
-            image_mask = input_ids_rmpad == VL_TYPE2INDEX[self.module.config.model_type]["IMAGE_INPUT_INDEX"]
-            video_mask = input_ids_rmpad == VL_TYPE2INDEX[self.module.config.model_type]["VIDEO_INPUT_INDEX"]
-            model_inputs.update({"image_mask": image_mask, "video_mask": video_mask})
-
-            if sp_enabled:
-                sp_shard_collator(model_inputs)
-
-        use_remove_padding = tu.get_non_tensor_data(data=micro_batch, key="use_remove_padding", default=True)
-        if use_remove_padding and model_inputs.get("position_ids", None) is not None:
-            model_inputs.update(_prepare_veomni_flash_attention_kwargs(model_inputs["position_ids"]))
-            if sp_enabled:
-                model_inputs["position_ids"] = sp_shard_collator.sp_slice(model_inputs["position_ids"], dim=-1)
+        self._apply_veomni_input_transforms(model_inputs, micro_batch)
 
         # Activate VeOmni's chunk_logprobs path: ForCausalLMLoss short-circuits
         # to per-token log_probs/entropy on return_log_probs=True. Pass the
         # already-rolled labels as shift_labels so chunk_logprobs skips its
         # internal causal shift and the output seq length matches the input —
         # prepare_model_outputs().squeeze(0) then lands at (total_nnz,).
+        use_remove_padding = tu.get_non_tensor_data(data=micro_batch, key="use_remove_padding", default=True)
         use_fused_kernels = tu.get_non_tensor_data(data=micro_batch, key="use_fused_kernels", default=False)
         if use_fused_kernels and use_remove_padding:
+            input_ids_rmpad = model_inputs["input_ids"]
             shift_labels = output_args["input_ids_rmpad_rolled"].unsqueeze(0)
             model_inputs["labels"] = input_ids_rmpad
             model_inputs["shift_labels"] = shift_labels
             model_inputs["return_log_probs"] = True
 
+        return model_inputs, output_args
+
+
+@EngineRegistry.register(model_type="value_model", backend=["veomni"], device=["cuda", "npu"])
+class VeOmniEngineWithValueHead(VeOmniEngine, FSDPEngineWithValueHead):
+    """Value model engine using VeOmni's FSDP2 + sequence parallelism.
+
+    Combines VeOmniEngine (model init, parallel state, activation offloading)
+    with FSDPEngineWithValueHead (TokenClassification output → per-token values).
+    """
+
+    def prepare_model_inputs(self, micro_batch: TensorDict):
+        model_inputs, output_args = super().prepare_model_inputs(micro_batch)
+        self._apply_veomni_input_transforms(model_inputs, micro_batch)
         return model_inputs, output_args

@@ -21,7 +21,13 @@ from verl.base_config import BaseConfig
 from verl.trainer.config import BaseModelConfig, CheckpointConfig
 from verl.utils.profiler import ProfilerConfig
 
-from .engine import FSDPEngineConfig, McoreEngineConfig, MindSpeedEngineConfig, TorchtitanEngineConfig
+from .engine import (
+    FSDPEngineConfig,
+    McoreEngineConfig,
+    MindSpeedEngineConfig,
+    TorchtitanEngineConfig,
+    VeOmniEngineConfig,
+)
 from .model import HFModelConfig
 from .optimizer import OptimizerConfig
 
@@ -32,6 +38,7 @@ __all__ = [
     "TorchTitanCriticConfig",
     "FSDPCriticModelCfg",
     "MindSpeedCriticConfig",
+    "VeOmniCriticConfig",
 ]
 
 
@@ -298,3 +305,38 @@ class MindSpeedCriticConfig(CriticConfig):
     def validate(self, n_gpus: int, train_batch_size: int):
         """Validate mindspeed critic configuration with runtime parameters."""
         super().validate(n_gpus, train_batch_size)
+
+
+@dataclass
+class VeOmniCriticConfig(CriticConfig):
+    """Configuration for VeOmni-based critic model training.
+
+    Uses VeOmni's FSDP2 + sequence parallelism engine for the value model,
+    mirroring VeOmniActorConfig but for the critic role.
+
+    Args:
+        strategy (str): Training strategy set to 'veomni'.
+        veomni (VeOmniEngineConfig): VeOmni engine configuration.
+    """
+
+    strategy: str = "veomni"
+    veomni: VeOmniEngineConfig = field(default_factory=VeOmniEngineConfig)
+    grad_clip: float = 1.0
+
+    def __post_init__(self):
+        """Set engine to VeOmni config."""
+        super().__post_init__()
+        self.engine = self.veomni
+
+    def validate(self, n_gpus: int, train_batch_size: int):
+        """Validate VeOmni critic configuration with runtime parameters."""
+        super().validate(n_gpus, train_batch_size)
+
+        if not self.use_dynamic_bsz:
+            sp_size = self.veomni.ulysses_parallel_size
+            if self.ppo_micro_batch_size is not None:
+                if self.ppo_micro_batch_size * sp_size < n_gpus:
+                    raise ValueError(
+                        f"critic.ppo_micro_batch_size ({self.ppo_micro_batch_size}) * "
+                        f"veomni.ulysses_parallel_size ({sp_size}) must be >= n_gpus ({n_gpus})"
+                    )
