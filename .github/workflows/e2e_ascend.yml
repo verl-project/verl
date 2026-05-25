@@ -208,8 +208,13 @@ jobs:
       - name: Preprocess geo3k dataset
         run: |
           python examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/.cache/datasets/hiyouga/geometry3k
-      # - name: Running geo3k e2e training tests with GRPO on ASCEND NPU
-      #   run: |
-      #     ray stop --force
-      #     bash tests/special_npu/run_qwen2_5_vl_3b_npu.sh
-      #     rm -rf $HOME/ckpts
+      - name: Running run_vllm_process_weights_test
+        run: |
+          ray stop --force
+          export HCCL_OP_EXPANSION_MODE="AIV"
+          bash tests/special_npu/nightly_ci_ascend/run_vllm_process_weights_test.sh
+      - name: Running geo3k e2e training tests with GRPO on ASCEND NPU
+        run: |
+          ray stop --force
+          bash tests/special_npu/run_qwen2_5_vl_3b_npu.sh
+          rm -rf $HOME/ckpts
