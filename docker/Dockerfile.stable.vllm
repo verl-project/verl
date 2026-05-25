@@ -1,4 +1,4 @@
-# vllm: x86_64=0.20.2, aarch64=0.18.0
+# vllm: x86_64=0.20.2, aarch64=0.20.2
 
 ARG CUDA_VERSION=13.0.2
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu24.04
