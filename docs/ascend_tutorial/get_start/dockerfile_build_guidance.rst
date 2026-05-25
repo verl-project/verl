@@ -33,7 +33,7 @@ Atlas 800T A3
 ================= ============
 基础镜像            Ubuntu 22.04
 Python             3.11
-CANN               8.5.0
+CANN               9.0.0
 torch              2.9.0
 torch_npu          2.9.0
 torchvision        0.24.0
@@ -41,7 +41,7 @@ vLLM               0.18.0
 vLLM-ascend        0.18.0
 Megatron-LM        v0.12.1
 MindSpeed          2.3.0_core_r0.12.1
-triton-ascend      3.2.0
+triton-ascend      3.2.1
 mbridge            0.15.1
 SGLang             v0.5.10
 sgl-kernel-npu     2026.02.01
