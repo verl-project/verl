@@ -146,6 +146,7 @@ def _update_weights(server, model_path: str):
     asyncio.run(sender.async_send_weights(_iter_weights(model_path)))
     ray.get(update_ref, timeout=300)
 
+
 def _generate(server, prompt: str, tag: str, model_path: str) -> str:
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
     prompt_ids = normalize_token_ids(
