@@ -1,3 +1,17 @@
+# Copyright 2024 Bytedance Ltd. and/or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from collections import defaultdict
 
 from .common import maximization_score, parse_answer_literal
@@ -27,7 +41,7 @@ def validation(data, answer, ground_truth):
     seen_meetings = set()
 
     for entry in schedule:
-        if not (isinstance(entry, (tuple, list)) and len(entry) == 3):
+        if not (isinstance(entry, tuple | list) and len(entry) == 3):
             return True, -1, f"invalid entry: {entry!r}, expected (meeting_id, room_id, start_time)"
 
         meeting_id, room_id, start = entry
@@ -70,8 +84,10 @@ def validation(data, answer, ground_truth):
                 return True, -1, f"attendee {attendee} availability not found"
             for previous_meeting, prev_start, prev_end in attendee_schedule[attendee_key]:
                 if start < prev_end and prev_start < end:
-                    return True, -1, (
-                        f"attendee {attendee} is double-booked in meetings {previous_meeting} and {meeting_id}"
+                    return (
+                        True,
+                        -1,
+                        (f"attendee {attendee} is double-booked in meetings {previous_meeting} and {meeting_id}"),
                     )
             is_available = any(
                 start >= available_start and end <= available_end

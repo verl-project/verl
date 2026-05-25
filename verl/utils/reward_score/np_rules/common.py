@@ -1,3 +1,17 @@
+# Copyright 2024 Bytedance Ltd. and/or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import ast
 import re
 from collections import defaultdict
@@ -27,7 +41,7 @@ def parse_int_list(answer: str, *, allow_empty: bool = False) -> list[int]:
 
     try:
         parsed = parse_answer_literal(answer)
-        if isinstance(parsed, (list, tuple, set)):
+        if isinstance(parsed, list | tuple | set):
             values = list(parsed)
         else:
             raise ValueError("answer must be a list")
@@ -67,7 +81,7 @@ def normalize_adjacency(graph: dict) -> dict[int, set[int]]:
         vertices.add(u)
         if isinstance(adjacent, dict):
             iterator = adjacent.items()
-        elif isinstance(adjacent, Iterable) and not isinstance(adjacent, (str, bytes)):
+        elif isinstance(adjacent, Iterable) and not isinstance(adjacent, str | bytes):
             iterator = ((raw_v, 1) for raw_v in adjacent)
         else:
             continue
@@ -78,7 +92,7 @@ def normalize_adjacency(graph: dict) -> dict[int, set[int]]:
             except (TypeError, ValueError):
                 continue
             vertices.add(v)
-            if isinstance(weight, (int, float)) and weight == 0:
+            if isinstance(weight, int | float) and weight == 0:
                 continue
             neighbors[u].add(v)
             neighbors[v].add(u)
