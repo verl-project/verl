@@ -146,6 +146,7 @@ jobs:
           npu-smi info
       - name: Check initial pip list from image
         run: |
+          pip install --upgrade transformers
           pip list
       - name: Checkout verl-project/verl repo
         uses: actions/checkout@v4
