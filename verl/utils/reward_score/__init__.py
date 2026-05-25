@@ -91,6 +91,26 @@ def default_compute_score(
 
         res = geo3k.compute_score(solution_str, ground_truth)
     elif data_source in [
+        "bootcamp/NpGcpD",
+        "bootcamp/NpHamiltonianCycle",
+        "bootcamp/NpMaximumCliqueProblem",
+        "bootcamp/NpMaximumSet",
+        "bootcamp/NpMinimumCut",
+        "bootcamp/NpTsp",
+        "bootcamp/NpKnapsack",
+        "bootcamp/NpSetCover",
+        "bootcamp/NpSubsetSum",
+        "bootcamp/NpMeetingSchedule",
+    ]:
+        from . import np
+
+        res = np.compute_score(
+            data_source=data_source,
+            solution_str=solution_str,
+            ground_truth=ground_truth,
+            extra_info=extra_info,
+        )
+    elif data_source in [
         "searchR1_nq",
         "searchR1_triviaqa",
         "searchR1_popqa",
