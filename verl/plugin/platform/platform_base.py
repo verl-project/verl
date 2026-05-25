@@ -53,6 +53,18 @@ class PlatformBase(abc.ABC):
         ...
 
     @property
+    def vendor(self) -> str:
+        """Return the hardware vendor name (e.g. ``'nvidia'``, ``'metax'``, ``'huawei'``).
+
+        For CUDA-compatible chips from different vendors, this allows distinguishing
+        between NVIDIA GPUs and CUDA-compatible accelerators from other manufacturers.
+
+        Default implementation returns ``'nvidia'`` for CUDA devices, ``'huawei'`` for NPU,
+        and the device name for others. Subclasses should override for vendor-specific detection.
+        """
+        return "nvidia"
+
+    @property
     @abc.abstractmethod
     def device_module(self) -> ModuleType:
         """Return the ``torch.<device>`` namespace module (e.g. ``torch.cuda``)."""

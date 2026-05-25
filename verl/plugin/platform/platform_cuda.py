@@ -16,7 +16,7 @@ from .platform_manager import PlatformRegistry
 
 @PlatformRegistry.register(platform="cuda")
 class PlatformCUDA(PlatformBase):
-    """Platform backend for NVIDIA CUDA GPUs."""
+    """Platform backend for NVIDIA CUDA GPUs and CUDA-compatible accelerators."""
 
     # ------------------------------------------------------------------
     # Core device management
@@ -25,6 +25,10 @@ class PlatformCUDA(PlatformBase):
     @property
     def device_name(self) -> str:
         return "cuda"
+
+    @property
+    def vendor(self) -> str:
+        return "nvidia"
 
     @property
     def device_module(self) -> ModuleType:

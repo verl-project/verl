@@ -43,6 +43,10 @@ class PlatformNPU(PlatformBase):
         return "npu"
 
     @property
+    def vendor(self) -> str:
+        return "huawei"
+
+    @property
     def device_module(self) -> ModuleType:
         if not _ensure_torch_npu():
             raise RuntimeError("torch_npu is not installed or torch.npu is not available")

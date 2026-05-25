@@ -69,6 +69,18 @@ def get_resource_name() -> str:
     return get_platform().ray_resource_name()
 
 
+def get_vendor() -> str:
+    """Return the hardware vendor name for the current platform.
+
+    For CUDA-compatible chips, this distinguishes between NVIDIA and other vendors
+    (e.g. metax, iluvatar, mthreads) via auto-detection.
+
+    Returns:
+        Vendor name string, e.g. "nvidia", "metax", "huawei".
+    """
+    return get_platform().vendor
+
+
 # ---------------------------------------------------------------------------
 # Device info helpers
 # ---------------------------------------------------------------------------
