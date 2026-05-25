@@ -143,16 +143,8 @@ def _update_weights(server, model_path: str):
     use_shm = not is_support_ipc()
     update_ref = server.collective_rpc.remote("update_weights_from_ipc", kwargs={"use_shm": use_shm})
     sender = BucketedWeightSender(zmq_handle=zmq_handle, bucket_size_mb=4096, use_shm=use_shm)
-    try:
-        asyncio.run(sender.async_send_weights(_iter_weights(model_path)))
-    except Exception as e:
-        raise
-    # Use shorter timeout to fail fast if there's an error
-    try:
-        ray.get(update_ref, timeout=300)
-    except ray.exceptions.RayTimeoutError:
-        raise RuntimeError("Weight update timed out. Check if worker is stuck or crashed.")
-
+    asyncio.run(sender.async_send_weights(_iter_weights(model_path)))
+    ray.get(update_ref, timeout=300)
 
 def _generate(server, prompt: str, tag: str, model_path: str) -> str:
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
