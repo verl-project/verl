@@ -273,17 +273,19 @@ class vLLMHttpServer:
             **engine_kwargs,
         }
 
-        # On ROCm with TP=1, omit distributed_executor_backend so vLLM defaults
-        # to UniProcExecutor, avoiding a nested WorkerProc spawn that causes
-        # SIGSEGV (HIP runtime issue with two-level multiprocessing spawn
-        # after CUDA/HIP init in a Ray actor).  For TP>1, "mp" is still required.
-        if not self._should_omit_distributed_executor_backend():
-            args["distributed_executor_backend"] = "mp"
-        else:
-            logger.info(
-                "ROCm + TP=1 detected: omitting distributed_executor_backend "
-                "so vLLM uses UniProcExecutor and avoids nested WorkerProc spawn."
-            )
+        # Set distributed_executor_backend default if not already specified
+        # by the user via engine_kwargs.  On ROCm with TP=1, omit it entirely
+        # so vLLM defaults to UniProcExecutor, avoiding a nested WorkerProc
+        # spawn that causes SIGSEGV (HIP runtime issue with two-level
+        # multiprocessing spawn after CUDA/HIP init in a Ray actor).
+        if "distributed_executor_backend" not in args:
+            if not self._should_omit_distributed_executor_backend():
+                args["distributed_executor_backend"] = "mp"
+            else:
+                logger.info(
+                    "ROCm + TP=1 detected: omitting distributed_executor_backend "
+                    "so vLLM uses UniProcExecutor and avoids nested WorkerProc spawn."
+                )
 
         # update profiler args
         profiler_args = build_vllm_profiler_args(
