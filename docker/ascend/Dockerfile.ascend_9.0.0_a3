@@ -27,7 +27,9 @@ RUN ARCH=$(uname -m) && \
     git clone --depth 1 --branch core_v0.12.1 https://github.com/NVIDIA/Megatron-LM.git
 
 # Install repositories with low update frequency
-RUN ARCH=$(uname -m) && \
+RUN export PIP_EXTRA_INDEX_URL=https://triton-ascend.osinfra.cn/pypi/simple/ && \
+    export PIP_TRUSTED_HOST=triton-ascend.osinfra.cn && \
+    ARCH=$(uname -m) && \
     # Export and source env
     if [ "$ARCH" = "aarch64" ]; then \
         export LD_LIBRARY_PATH=/usr/local/Ascend/cann-9.0.0/aarch64-linux/devlib/linux/aarch64:$LD_LIBRARY_PATH; \
@@ -36,13 +38,11 @@ RUN ARCH=$(uname -m) && \
     fi && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
-    # Install transformers
-    pip install transformers==4.57.6 && \
     # Install vllm
     cd vllm && pip install -r requirements/build.txt && \
     VLLM_TARGET_DEVICE=empty pip install -v -e. && cd .. && \
     # Install vllm-ascend
-    cd vllm-ascend && pip install -r requirements.txt --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn && \
+    cd vllm-ascend && pip install -r requirements.txt && \
     export COMPILE_CUSTOM_KERNELS=1 && pip install -v -e . && cd .. && \
     # Install MindSpeed & Megatron
     pip install -e MindSpeed && \
