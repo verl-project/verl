@@ -141,10 +141,22 @@ def _update_weights(server, model_path: str):
     replica_rank = os.environ.get("VERL_REPLICA_RANK", "0")
     zmq_handle = f"ipc:///tmp/rl-colocate-zmq-replica-{replica_rank}-rank-0.sock"
     use_shm = not is_support_ipc()
+    logger.info(f"Starting weight update with zmq_handle={zmq_handle}, use_shm={use_shm}")
     update_ref = server.collective_rpc.remote("update_weights_from_ipc", kwargs={"use_shm": use_shm})
     sender = BucketedWeightSender(zmq_handle=zmq_handle, bucket_size_mb=4096, use_shm=use_shm)
-    asyncio.run(sender.async_send_weights(_iter_weights(model_path)))
-    ray.get(update_ref, timeout=1800)
+    try:
+        asyncio.run(sender.async_send_weights(_iter_weights(model_path)))
+        logger.info("Weight sending completed")
+    except Exception as e:
+        logger.error(f"Weight sending failed: {e}")
+        raise
+    # Use shorter timeout to fail fast if there's an error
+    try:
+        ray.get(update_ref, timeout=300)
+        logger.info("Weight update RPC completed")
+    except ray.exceptions.RayTimeoutError:
+        logger.error("Weight update RPC timed out after 300s")
+        raise RuntimeError("Weight update timed out. Check if worker is stuck or crashed.")
 
 
 def _generate(server, prompt: str, tag: str, model_path: str) -> str:
@@ -176,6 +188,11 @@ def _run_compare_test(model_path: str, prompt: str, model_name: str):
     auto_server = None
     try:
         dummy_server = _start_server("dummy", model_path, force_dummy=True)
+        # Wait for model compilation and engine initialization to complete before weight update
+        # This prevents shared memory broadcast from blocking during compilation
+        # ACL graph compilation for Moonlight-16B can take 1-2 minutes
+        logger.info("Waiting for model compilation and engine initialization to complete...")
+        time.sleep(120)  # Wait for ACL graph compilation and engine setup to finish
         _update_weights(dummy_server, model_path)
         ray.get(dummy_server.set_global_steps.remote(1))
         dummy_text = _generate(dummy_server, prompt, "dummy", model_path)
