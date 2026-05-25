@@ -33,14 +33,6 @@ actor_rollout_ref:
           }
 ```
 
-Or as a Hydra CLI override:
-
-```bash
-+actor_rollout_ref.rollout.engine_kwargs.vllm.kv_transfer_config.kv_connector=MooncakeStoreConnector \
-+actor_rollout_ref.rollout.engine_kwargs.vllm.kv_transfer_config.kv_role=kv_both \
-+actor_rollout_ref.rollout.engine_kwargs.vllm.kv_transfer_config.kv_connector_extra_config.mooncake_config_path=/path/to/mooncake_config.json
-```
-
 Set `MOONCAKE_CONFIG_PATH=/path/to/mooncake_config.json` on every rollout
 actor (verl propagates via Ray `runtime_env`). For `DP>1` or multiple rollout
 replicas, also set `PYTHONHASHSEED=0` — vLLM's block-hash seed is randomized
@@ -61,29 +53,4 @@ which clears the master via the `RemoveAll` RPC.
 (`MooncakeStoreConnector.reset_cache` + the `EngineCore._reset_caches` default
 that threads `reset_connector=True` through `pause_generation`). Without it,
 `reset_connector=True` clears only the local prefix cache and leaves the
-Mooncake master populated with stale KV — silent correctness loss. Do not
-enable the connector on an older vLLM build.
-
-When no connector is attached, `reset_connector=True` is a no-op success in
-upstream vLLM, so this code path is always safe.
-
-## When to enable
-
-Enable when **all** hold:
-
-- Rollout has long, reusable prefixes (multi-turn agentic, large `rollout.n`).
-- Within-engine prefix cache hit rate is already saturated.
-- You have cross-engine reuse opportunity (DP > 1, multi-replica fully-async).
-
-For short prompts or small `rollout.n` on a single engine, the round-trip to
-Mooncake nets out negative — keep it off.
-
-## Failure modes
-
-- **Master unreachable at launch**: vLLM serve fails to start. Fail-loud is
-  intentional — silently disabling a configured KV store would hide stale-cache
-  corruption.
-- **Master dies mid-run**: rollout falls back to local prefix cache;
-  re-attaching is not supported in this version.
-- **Cross-rank `block_hash` divergence** (forgot `PYTHONHASHSEED`): silent
-  zero hit rate. Check the `vllm_external_prefix_cache_hits` metric.
+Mooncake master populated with stale KV — silent correctness loss.
