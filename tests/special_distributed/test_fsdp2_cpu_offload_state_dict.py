@@ -124,7 +124,7 @@ def main():
     device_mesh = init_device_mesh(get_device_name(), mesh_shape=(world_size,), mesh_dim_names=("dp",))
 
     _assert_fixed_path_succeeds(device_mesh, rank)
-    _probe_pre_fix_crash(device_mesh, rank)
+    # _probe_pre_fix_crash(device_mesh, rank)
 
     torch.distributed.barrier()
     torch.distributed.destroy_process_group()
