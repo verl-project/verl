@@ -192,6 +192,25 @@ class vLLMHttpServer:
         args: tuple = (),
         kwargs: dict[str, Any] | None = None,
     ):
+        if not hasattr(self, "engine"):
+            # Non-master nodes (node_rank != 0) in HYBRID mode run headless via
+            # run_headless() and never set self.engine. All DP worker communication
+            # is handled by the master node through the DP coordinator.
+            return
+        if self.rollout_mode == RolloutMode.HYBRID:
+            if method == "wake_up":
+                # Use engine.wake_up() instead of engine.collective_rpc("wake_up") to
+                # ensure wake_up propagates to ALL data-parallel workers, not just TP
+                # workers within a single DP shard (same reasoning as _sleep_hybrid).
+                await self.engine.wake_up(**(kwargs or {}))
+                await self.engine.reset_prefix_cache()
+                return
+            elif method == "sleep":
+                # Redirect to _sleep_hybrid() which uses engine.sleep() to propagate
+                # sleep to all DP workers (instead of collective_rpc which only reaches
+                # TP workers within a single DP shard).
+                await self._sleep_hybrid()
+                return
         await self.engine.collective_rpc(
             method=method,
             timeout=timeout,
