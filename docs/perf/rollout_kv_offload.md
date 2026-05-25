@@ -33,6 +33,14 @@ actor_rollout_ref:
           }
 ```
 
+Or as a Hydra CLI override:
+
+```bash
++actor_rollout_ref.rollout.engine_kwargs.vllm.kv_transfer_config.kv_connector=MooncakeStoreConnector \
++actor_rollout_ref.rollout.engine_kwargs.vllm.kv_transfer_config.kv_role=kv_both \
++actor_rollout_ref.rollout.engine_kwargs.vllm.kv_transfer_config.kv_connector_extra_config.mooncake_config_path=/path/to/mooncake_config.json
+```
+
 Set `MOONCAKE_CONFIG_PATH=/path/to/mooncake_config.json` on every rollout
 actor (verl propagates via Ray `runtime_env`). For `DP>1` or multiple rollout
 replicas, also set `PYTHONHASHSEED=0` — vLLM's block-hash seed is randomized
