@@ -66,8 +66,7 @@ def _build_config(load_format: str, model_path: str):
             "top_k": -1,
             "top_p": 1.0,
             "temperature": 0.0,
-            "disable_shm_broadcast": True,
-            "distributed_executor_backend": "mp",
+            "disable_custom_all_reduce": True,
         }
     )
     model_cfg = OmegaConf.create(
@@ -89,6 +88,7 @@ def _start_server(load_format: str, model_path: str, force_dummy: bool = False):
         "HCCL_CONNECT_TIMEOUT": os.environ.get("HCCL_CONNECT_TIMEOUT", "1500"),
         "HCCL_HOST_SOCKET_PORT_RANGE": os.environ.get("HCCL_HOST_SOCKET_PORT_RANGE", "60000-60050"),
         "HCCL_NPU_SOCKET_PORT_RANGE": os.environ.get("HCCL_NPU_SOCKET_PORT_RANGE", "61000-61050"),
+        "NCCL_P2P_DISABLE": "1",
     }
     if ray.is_initialized():
         ray.shutdown()
