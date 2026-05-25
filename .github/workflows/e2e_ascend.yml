@@ -92,6 +92,7 @@ jobs:
       - name: Install the current repository
         run: |
           pip install --no-deps -e .
+          pip install --upgrade transformers
       - name: Check final pip list
         run: |
           pip list
@@ -147,6 +148,7 @@ jobs:
       - name: Install the current repository
         run: |
           pip install --no-deps --no-build-isolation -e .
+          pip install --upgrade transformers
       - name: Check final pip list
         run: |
           pip list
