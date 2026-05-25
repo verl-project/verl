@@ -66,6 +66,8 @@ def _build_config(load_format: str, model_path: str):
             "top_k": -1,
             "top_p": 1.0,
             "temperature": 0.0,
+            "disable_shm_broadcast": True,
+            "distributed_executor_backend": "mp",
         }
     )
     model_cfg = OmegaConf.create(
@@ -199,11 +201,11 @@ def _run_compare_test(model_path: str, prompt: str, model_name: str):
 
 
 def test_compare_dummy_update_and_auto_outputs_same_prompt():
-    """Test ACL graph mode (npugraph_ex) with DeepSeek-V2-Lite-Chat model."""
+    """Test ACL graph mode (npugraph_ex) with Moonlight-16B-A3B-Instruct model."""
     _run_compare_test(
         MODEL_PATH_DEEPSEEK,
         prompt="write a poem about the moon.",
-        model_name="DeepSeek-V2-Lite-Chat",
+        model_name="Moonlight-16B-A3B-Instruct",
     )
 
 
