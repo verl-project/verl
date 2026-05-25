@@ -193,10 +193,12 @@ class vLLMHttpServer:
         kwargs: dict[str, Any] | None = None,
     ):
         if not hasattr(self, "engine"):
-            # Non-master nodes (node_rank != 0) in HYBRID mode run headless via
-            # run_headless() and never set self.engine. All DP worker communication
-            # is handled by the master node through the DP coordinator.
-            return
+            if self.node_rank != 0:
+                # Non-master nodes (node_rank != 0) in HYBRID mode run headless via
+                # run_headless() and never set self.engine. All DP worker communication
+                # is handled by the master node through the DP coordinator.
+                return
+            raise AttributeError("vLLMHttpServer has no attribute 'engine'")
         if self.rollout_mode == RolloutMode.HYBRID:
             if method == "wake_up":
                 # Use engine.wake_up() instead of engine.collective_rpc("wake_up") to
