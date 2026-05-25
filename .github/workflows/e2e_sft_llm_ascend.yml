@@ -101,6 +101,7 @@ jobs:
           pip install pandas==2.3.3
           pip uninstall -y mbridge
           pip install git+https://github.com/ISEEKYAN/mbridge.git@89eb10
+          pip install --upgrade transformers
       - name: Check final pip list
         run: |
           pip list
