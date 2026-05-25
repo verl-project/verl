@@ -133,6 +133,8 @@ class FSDPEngine(BaseEngine):
         self._is_offload_param = self.engine_config.param_offload
         self._is_offload_optimizer = self.engine_config.optimizer_offload
         self._is_lora = self.model_config.lora_rank > 0
+        # Set in _build_fsdp_module when FSDP2 CPUOffloadPolicy is configured (see #5995).
+        self._uses_fsdp2_cpu_offload_policy = False
 
         # Defaults for mixed-precision state. _build_fsdp_module overrides these when it
         # runs; subclasses that bypass _build_fsdp_module (e.g. VeOmniEngine) keep the
@@ -407,6 +409,7 @@ class FSDPEngine(BaseEngine):
                 self._is_offload_param = False
                 self._is_offload_optimizer = False
                 offload_policy = CPUOffloadPolicy(pin_memory=True)
+                self._uses_fsdp2_cpu_offload_policy = True
 
             fsdp_kwargs = {
                 "mesh": fsdp_mesh,
@@ -785,7 +788,11 @@ class FSDPEngine(BaseEngine):
     def get_per_tensor_param(self, layered_summon=False, base_sync_done=False, **kwargs):
         log_gpu_memory_usage("Before load_fsdp_model_to_gpu", logger=logger)
 
-        load_fsdp_model_to_gpu(self.module)
+        # FSDP2 CPUOffloadPolicy owns CPU<->GPU placement; calling model.to(device) here
+        # leaves the module half-moved and crashes state_dict() below (#5995). The
+        # per-DTensor .to(device).full_tensor() below still produces GPU tensors.
+        if not self._uses_fsdp2_cpu_offload_policy:
+            load_fsdp_model_to_gpu(self.module)
 
         log_gpu_memory_usage("After load_fsdp_model_to_gpu", logger=logger)
 
