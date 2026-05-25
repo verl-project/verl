@@ -66,7 +66,6 @@ def _build_config(load_format: str, model_path: str):
             "top_k": -1,
             "top_p": 1.0,
             "temperature": 0.0,
-            "disable_custom_all_reduce": True,
         }
     )
     model_cfg = OmegaConf.create(
