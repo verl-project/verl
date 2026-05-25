@@ -100,6 +100,7 @@ jobs:
         run: |
           pip install --no-deps -e .[test]
           pip install mlflow pytest-asyncio
+          pip install --upgrade transformers
       - name: Check final pip list
         run: |
           pip list
