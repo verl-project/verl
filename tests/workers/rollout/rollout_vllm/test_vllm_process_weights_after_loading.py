@@ -45,7 +45,7 @@ def _build_config(load_format: str, model_path: str):
         {
             "_target_": "verl.workers.config.RolloutConfig",
             "name": "vllm",
-            "mode": "async",
+            "mode": "sync",
             "tensor_model_parallel_size": 1,
             "data_parallel_size": 1,
             "pipeline_model_parallel_size": 1,
