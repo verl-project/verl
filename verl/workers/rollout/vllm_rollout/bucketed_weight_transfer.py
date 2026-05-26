@@ -305,7 +305,10 @@ class BucketedWeightReceiver:
             while True:
                 metadata = self.socket.recv_pyobj()
                 for name, meta in metadata["bucket_meta"].items():
-                    shape, dtype, offset = meta["shape"], meta["dtype"], meta["offset"]
+                    shape, dtype, offset, handle = meta["shape"], meta["dtype"], meta["offset"], meta["handle"]
+                    if handle is not None:
+                        yield name, rebuild_ipc(handle, self.device.index)
+                        continue
                     size = dtype.itemsize * shape.numel()
                     tensor = self.buffer[offset : offset + size].view(dtype=dtype).view(shape)
                     if self.use_shm:
