@@ -458,7 +458,6 @@ class vLLMColocateWorkerExtension:
                 for model in self._iter_all_models():
                     patch_vllm_moe_model_weight_loader(model)
 
-            assert self.device is not None
             quant_reload_state = False
             if is_fp8_model(self.model_runner.vllm_config) and not (peft_config and base_sync_done):
                 from verl.utils.vllm.vllm_fp8_utils import prepare_quanted_weights_for_loading
