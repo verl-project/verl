@@ -45,7 +45,7 @@ def _build_config(load_format: str, model_path: str):
         {
             "_target_": "verl.workers.config.RolloutConfig",
             "name": "vllm",
-            "mode": "sync",
+            "mode": "async",
             "tensor_model_parallel_size": 1,
             "data_parallel_size": 1,
             "pipeline_model_parallel_size": 1,
@@ -66,6 +66,7 @@ def _build_config(load_format: str, model_path: str):
             "top_k": -1,
             "top_p": 1.0,
             "temperature": 0.0,
+            "distributed_executor_backend": "ray",
         }
     )
     model_cfg = OmegaConf.create(
