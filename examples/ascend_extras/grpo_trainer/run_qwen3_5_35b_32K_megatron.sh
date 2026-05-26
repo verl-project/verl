@@ -110,8 +110,6 @@ ROLLOUT=(
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=4096
     actor_rollout_ref.rollout.calculate_log_probs=True
 
-    actor_rollout_ref.rollout.ignore_eos=True
-    actor_rollout_ref.rollout.enforce_eager=False
     actor_rollout_ref.rollout.max_num_batched_tokens=16384
     actor_rollout_ref.rollout.expert_parallel_size=${EP}
 )
@@ -140,10 +138,9 @@ TRAINER=(
     trainer.experiment_name=${exp_name}
     trainer.n_gpus_per_node=${NDEVICES_PER_NODE}
     trainer.nnodes=1
-    trainer.save_freq=-1
+    trainer.save_freq=20
     trainer.val_before_train=False
-    trainer.test_freq=-1
-    trainer.total_training_steps=20
+    trainer.test_freq=5
     trainer.total_epochs=15
 )
 
