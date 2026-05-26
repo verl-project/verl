@@ -66,7 +66,6 @@ def _build_config(load_format: str, model_path: str):
             "top_k": -1,
             "top_p": 1.0,
             "temperature": 0.0,
-            "distributed_executor_backend": "ray",
         }
     )
     model_cfg = OmegaConf.create(
@@ -114,9 +113,9 @@ def _start_server(load_format: str, model_path: str, force_dummy: bool = False):
             workers=[],
             replica_rank=0,
             node_rank=0,
-            gpus_per_node=1,
+            gpus_per_node=2,
             nnodes=1,
-            cuda_visible_devices="0",
+            cuda_visible_devices="0,1",
         )
     )
 
