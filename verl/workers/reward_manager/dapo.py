@@ -129,8 +129,8 @@ class DAPORewardManager(AbstractRewardManager):
                     reward_extra_info["overlong_reward"].append(overlong_reward)
                     reward_extra_info["overlong"].append(overlong_reward < 0)
 
-            if valid_response_length > 0:
-                reward_tensor[i, valid_response_length - 1] = reward
+            if valid_response_length.item() > 0:
+                reward_tensor[i, valid_response_length.item() - 1] = reward
 
             if data_source not in already_print_data_sources:
                 already_print_data_sources[data_source] = 0
