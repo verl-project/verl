@@ -153,7 +153,7 @@ class LLMServerClient:
     def __init__(
         self,
         config: DictConfig,
-        load_balancer_handle: ray.actor.ActorHandle,
+        load_balancer_handle: ray.actor.ActorHandle = None,
         **kwargs,
     ):
         """Initialize the LLMServerClient.
@@ -161,7 +161,8 @@ class LLMServerClient:
         Args:
             config (DictConfig): whole config for main entrypoint.
             load_balancer_handle (ray.actor.ActorHandle): shared global load balancer actor
-                that also holds the server-handle registry.
+                that also holds the server-handle registry. Optional; subclasses that
+                manage server routing externally can pass None.
         """
         self.config = config
         self._load_balancer = load_balancer_handle
