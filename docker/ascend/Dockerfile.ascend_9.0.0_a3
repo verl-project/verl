@@ -3,6 +3,11 @@ FROM swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:9.0.0-910b-ubuntu22.04-py3.
 
 ARG SOC_VERSION="ascend910_9392"
 
+RUN ARCH=$(uname -m) && \
+    if [ "$ARCH" = "x86_64" ]; then \
+        pip config set global.extra-index-url "https://download.pytorch.org/whl/cpu/"; \
+    fi
+
 
 # Prepare required system dependencies
 RUN apt-get update -y && \
