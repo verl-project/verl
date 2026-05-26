@@ -92,8 +92,8 @@ class MindspeedEngineWithValueHead(MegatronEngineWithValueHead):
         super()._init_device_mesh()
 
 
-@EngineRegistry.register(model_type="language_model", backend="mindspeed_llm", device="npu")
-class MindSpeedLLMEngineWithLMHead(MegatronEngineWithLMHead):
+@EngineRegistry.register(model_type="language_model", backend="mindspeed_megatron", device="npu")
+class MindSpeedMegatronEngineWithLMHead(MegatronEngineWithLMHead):
     def __init__(
         self,
         model_config: HFModelConfig,
@@ -122,9 +122,9 @@ class MindSpeedLLMEngineWithLMHead(MegatronEngineWithLMHead):
         # For forward_only, we don't need optimizer, lr_scheduler, checkpoint_mananager
         if self.engine_config.forward_only:
             module = get_model(gpt_model_provider, ModelType.encoder_or_decoder, wrap_with_ddp=False)
-            return module
+        else:
+            module = get_model(gpt_model_provider, ModelType.encoder_or_decoder, wrap_with_ddp=True)
 
-        module = get_model(gpt_model_provider, ModelType.encoder_or_decoder, wrap_with_ddp=True)
         if self.vanilla_bridge:
             self.bridge.load_weights(module, self.model_config.local_path)
         else:

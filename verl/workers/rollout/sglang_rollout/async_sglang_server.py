@@ -356,7 +356,7 @@ class SGLangHttpServer:
         # mtp
         if self.config.mtp is not None and self.config.mtp.enable and self.config.mtp.enable_rollout:
             # Enable weights CPU backup for sglang >= 0.5.6
-            if sglang.__version__ < "0.5.6":
+            if version.parse(sglang.__version__) < version.parse("0.5.6"):
                 raise ValueError(f"sglang version {sglang.__version__} is not supported for MTP rollout")
 
             args["speculative_algorithm"] = self.config.mtp.speculative_algorithm
@@ -487,7 +487,7 @@ class SGLangHttpServer:
 
     async def resume_kv_cache(self):
         """Restore kv_cache GPU memory after a weight sync. Counterpart to release_kv_cache()."""
-        if self.node_rank != 0:
+        if self.node_rank != 0 or not self.config.free_cache_engine:
             return
         obj = ResumeMemoryOccupationReqInput(tags=["kv_cache"])
         await self.tokenizer_manager.resume_memory_occupation(obj, None)
@@ -651,6 +651,12 @@ class SGLangHttpServer:
                 sequence_length=len(prompt_ids),
                 result_dict=extra_fields,
             )
+
+        # Re-key backend spec-decoding stats to the rollout-common names.
+        if self.config.mtp is not None and self.config.mtp.enable and self.config.mtp.enable_rollout:
+            extra_fields["spec_num_draft_tokens"] = int(meta_info["spec_draft_token_num"])
+            extra_fields["spec_num_accepted_tokens"] = int(meta_info["spec_accept_token_num"])
+            extra_fields["spec_num_verify_steps"] = int(meta_info["spec_verify_ct"])
 
         return TokenOutput(
             token_ids=token_ids,

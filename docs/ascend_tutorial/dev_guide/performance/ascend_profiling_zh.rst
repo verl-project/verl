@@ -127,6 +127,12 @@ Last updated: 12/20/2025.
    - vLLM 引擎：自动采集 AsyncLLM 调度栈及推理进程性能数据。不支持设置 analysis（默认不解析，需离线解析）和 profiler_level（默认 level1）。
    - SGLang 引擎：自动采集推理进程性能数据。不支持 contents 中的 memory 配置项。不支持设置 analysis（默认解析）和 profiler_level（默认 level0）。
 
+**Fully Async Policy 模式说明**：
+
+1. 在 `Fully Async Policy <https://verl.readthedocs.io/en/latest/advance/fully_async.html>`_ 模式下，`global_profiler.steps` 代表每一轮`update_weights`后的`step`, 这点和同步模式下保持同步，而非单轮的`mini-batch step`.
+
+2. 因为复用AgentLoop采集能力，因此在 `Fully Async Policy <https://verl.readthedocs.io/en/latest/advance/fully_async.html>`_ 模式下的注意事项和AgentLoop相同。
+
 可视化
 ------
 

@@ -44,7 +44,7 @@ from verl.utils.ulysses import (
 from verl.workers.config import HFModelConfig, VeOmniEngineConfig, VeOmniOptimizerConfig
 
 from ..base import BaseEngineCtx, EngineRegistry
-from ..fsdp.transformer_impl import FSDPEngine, FSDPEngineWithLMHead
+from ..fsdp.transformer_impl import FSDPEngine, FSDPEngineWithLMHead, FSDPEngineWithValueHead
 from ..utils import enable_full_determinism, postprocess_batch_func, prepare_micro_batches
 from .utils import (
     MOE_PARAM_HANDERS,
@@ -59,6 +59,32 @@ logger = logging.getLogger(__file__)
 
 
 class VeOmniEngine(FSDPEngine):
+    _veomni_handles_position_ids = True
+
+    def _apply_veomni_input_transforms(self, model_inputs: dict, micro_batch: TensorDict):
+        """Apply VeOmni-specific input transforms shared by LM and value heads.
+
+        Handles vision-language model masks, sequence parallel sharding,
+        and flash attention kwargs from position_ids.
+        """
+        input_ids_rmpad = model_inputs["input_ids"]
+        sp_enabled = parallel_state.get_parallel_state().sp_enabled
+        sp_shard_collator = OmniSequenceShardCollator() if sp_enabled else None
+
+        if self.module.config.model_type in VL_TYPE2INDEX.keys():
+            image_mask = input_ids_rmpad == VL_TYPE2INDEX[self.module.config.model_type]["IMAGE_INPUT_INDEX"]
+            video_mask = input_ids_rmpad == VL_TYPE2INDEX[self.module.config.model_type]["VIDEO_INPUT_INDEX"]
+            model_inputs.update({"image_mask": image_mask, "video_mask": video_mask})
+
+            if sp_enabled:
+                sp_shard_collator(model_inputs)
+
+        use_remove_padding = tu.get_non_tensor_data(data=micro_batch, key="use_remove_padding", default=True)
+        if use_remove_padding and model_inputs.get("position_ids", None) is not None:
+            model_inputs.update(_prepare_veomni_flash_attention_kwargs(model_inputs["position_ids"]))
+            if sp_enabled:
+                model_inputs["position_ids"] = sp_shard_collator.sp_slice(model_inputs["position_ids"], dim=-1)
+
     def __init__(
         self,
         model_config: HFModelConfig,
@@ -144,7 +170,11 @@ class VeOmniEngine(FSDPEngine):
         Applies device, dtype, and precision configurations, including mixed precision.
         Sets up checkpoint manager and FLOPs counter.
         """
+        self._moe_monitor = None
+        self._moe_monitor_step = 0
+
         self._build_model_optimizer()
+        self._init_moe_monitor()
 
         self.checkpoint_manager = FSDPCheckpointManager(
             model=self.module,
@@ -255,6 +285,64 @@ class VeOmniEngine(FSDPEngine):
             self.engine_config.activation_gpu_limit,
         )
 
+    # ------------------------------------------------------------------ #
+    # MoE expert-load monitor                                            #
+    # ------------------------------------------------------------------ #
+
+    def _init_moe_monitor(self) -> None:
+        """Construct, attach hooks, and activate the MoE load-balance monitor."""
+        interval = self.engine_config.moe_load_balance_monitor_interval
+        if interval <= 0:
+            return
+        num_experts = getattr(self.module.config, "num_experts", None)
+        if num_experts is None:
+            logger.warning("moe_load_balance_monitor_interval > 0 but model has no num_experts; skipping.")
+            return
+
+        from veomni.utils.moe_monitor import MoERouterMonitor, attach_moe_router_monitor, set_active_monitor
+
+        ps = parallel_state.get_parallel_state()
+        self._moe_monitor = MoERouterMonitor(num_experts=num_experts, dp_group=ps.fsdp_group)
+        set_active_monitor(self._moe_monitor)
+        attached = attach_moe_router_monitor(self.module, self._moe_monitor)
+        if attached == 0:
+            logger.warning("MoE monitor: no recognized routers found; disabling.")
+            self._moe_monitor.disable()
+            set_active_monitor(None)
+            self._moe_monitor = None
+        else:
+            logger.info(f"MoE monitor: attached to {attached} router(s), interval={interval}.")
+
+    def _log_moe_metrics(self, outputs: Any) -> None:
+        """All-reduce counts and log MoE metrics.
+
+        Scalars and heatmap are logged directly via ``wandb.log`` on rank 0
+        to avoid verl's ``allgather_dict_into_dict`` wrapping them in lists
+        (which breaks wandb chart rendering).
+        """
+        moe_metrics = self._moe_monitor.compute_metrics(current_step=self._moe_monitor_step)
+        if not moe_metrics:
+            return
+
+        if self.rank != 0:
+            return
+
+        try:
+            import wandb
+        except ImportError:
+            return
+        if wandb.run is None:
+            return
+
+        log_dict = {}
+        for k, v in moe_metrics.items():
+            if k.endswith("expert_load_heatmap"):
+                start, end = self._moe_monitor._last_step_range
+                log_dict[k] = wandb.Image(v, caption=f"Steps {start}-{end}")
+            else:
+                log_dict[k] = v
+        wandb.log(log_dict, step=self._moe_monitor_step)
+
     def optimizer_step(self):
         """
         Perform an optimization step using the optimizer.
@@ -287,6 +375,12 @@ class VeOmniEngine(FSDPEngine):
         Returns:
             Any: The output of the forward pass, which can be used for loss computation or other purposes.
         """
+        if self._moe_monitor is not None:
+            if forward_only:
+                self._moe_monitor.pause()
+            else:
+                self._moe_monitor.resume()
+
         tu.assign_non_tensor(data, sp_size=parallel_state.get_parallel_state().ulysses_size)
 
         # compute num_tokens in global batch for loss normalization
@@ -312,7 +406,15 @@ class VeOmniEngine(FSDPEngine):
 
             output_lst.append(meta_info)
 
-        return postprocess_batch_func(output_lst=output_lst, indices=indices, data=data)
+        result = postprocess_batch_func(output_lst=output_lst, indices=indices, data=data)
+
+        if not forward_only and self._moe_monitor is not None:
+            self._moe_monitor_step += 1
+            interval = self.engine_config.moe_load_balance_monitor_interval
+            if interval > 0 and self._moe_monitor_step % interval == 0:
+                self._log_moe_metrics(result)
+
+        return result
 
     def get_data_parallel_rank(self):
         return parallel_state.get_parallel_state().device_mesh.get_local_rank("dp")
@@ -631,34 +733,34 @@ def _prepare_veomni_flash_attention_kwargs(position_ids: torch.Tensor) -> dict[s
 class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
     def prepare_model_inputs(self, micro_batch: TensorDict):
         model_inputs, output_args = super().prepare_model_inputs(micro_batch)
-        input_ids_rmpad = model_inputs["input_ids"]
-        sp_enabled = parallel_state.get_parallel_state().sp_enabled
-        sp_shard_collator = OmniSequenceShardCollator() if sp_enabled else None
-
-        if self.module.config.model_type in VL_TYPE2INDEX.keys():
-            image_mask = input_ids_rmpad == VL_TYPE2INDEX[self.module.config.model_type]["IMAGE_INPUT_INDEX"]
-            video_mask = input_ids_rmpad == VL_TYPE2INDEX[self.module.config.model_type]["VIDEO_INPUT_INDEX"]
-            model_inputs.update({"image_mask": image_mask, "video_mask": video_mask})
-
-            if sp_enabled:
-                sp_shard_collator(model_inputs)
-
-        use_remove_padding = tu.get_non_tensor_data(data=micro_batch, key="use_remove_padding", default=True)
-        if use_remove_padding and model_inputs.get("position_ids", None) is not None:
-            model_inputs.update(_prepare_veomni_flash_attention_kwargs(model_inputs["position_ids"]))
-            if sp_enabled:
-                model_inputs["position_ids"] = sp_shard_collator.sp_slice(model_inputs["position_ids"], dim=-1)
+        self._apply_veomni_input_transforms(model_inputs, micro_batch)
 
         # Activate VeOmni's chunk_logprobs path: ForCausalLMLoss short-circuits
         # to per-token log_probs/entropy on return_log_probs=True. Pass the
         # already-rolled labels as shift_labels so chunk_logprobs skips its
         # internal causal shift and the output seq length matches the input —
         # prepare_model_outputs().squeeze(0) then lands at (total_nnz,).
+        use_remove_padding = tu.get_non_tensor_data(data=micro_batch, key="use_remove_padding", default=True)
         use_fused_kernels = tu.get_non_tensor_data(data=micro_batch, key="use_fused_kernels", default=False)
         if use_fused_kernels and use_remove_padding:
+            input_ids_rmpad = model_inputs["input_ids"]
             shift_labels = output_args["input_ids_rmpad_rolled"].unsqueeze(0)
             model_inputs["labels"] = input_ids_rmpad
             model_inputs["shift_labels"] = shift_labels
             model_inputs["return_log_probs"] = True
 
+        return model_inputs, output_args
+
+
+@EngineRegistry.register(model_type="value_model", backend=["veomni"], device=["cuda", "npu"])
+class VeOmniEngineWithValueHead(VeOmniEngine, FSDPEngineWithValueHead):
+    """Value model engine using VeOmni's FSDP2 + sequence parallelism.
+
+    Combines VeOmniEngine (model init, parallel state, activation offloading)
+    with FSDPEngineWithValueHead (TokenClassification output → per-token values).
+    """
+
+    def prepare_model_inputs(self, micro_batch: TensorDict):
+        model_inputs, output_args = super().prepare_model_inputs(micro_batch)
+        self._apply_veomni_input_transforms(model_inputs, micro_batch)
         return model_inputs, output_args

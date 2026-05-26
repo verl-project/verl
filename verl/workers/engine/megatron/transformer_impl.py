@@ -175,7 +175,6 @@ class MegatronEngine(BaseEngine):
             # but it does not affect the functionality of dynamic CP, so we can use it to avoid the coupling.
             override_transformer_config["dynamic_context_parallel"] = False
             override_transformer_config["context_parallel_size"] = mpu.get_data_parallel_world_size()
-
         self.provider = None
         self.vanilla_bridge = self.engine_config.vanilla_mbridge
 
@@ -373,6 +372,14 @@ class MegatronEngine(BaseEngine):
 
         if self.model_config.mtp.enable:
             patch_engine_mtp(self.module, self.model_config)
+        elif (
+            self.engine_config.forward_only
+            and self.engine_config.override_transformer_config.get("mtp_num_layers") == 0
+        ):
+            from verl.models.mcore.mtp_patch import patch_postprocess
+
+            for model in self.module:
+                patch_postprocess(model)
 
         # For forward_only, we don't need optimizer, lr_scheduler, checkpoint_mananager
         if self.engine_config.forward_only:
@@ -789,6 +796,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
 
         return {
             "input_ids": input_ids,
+            "attention_mask": batch.get("attention_mask", None),
             "loss_mask": loss_mask,
             "multi_modal_inputs": multi_modal_inputs,
             "routed_experts": routed_experts,
@@ -828,6 +836,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
         temperature = batch["temperature"]
         model_inputs = self.prepare_model_inputs(batch)
         input_ids = model_inputs["input_ids"]
+        attention_mask = model_inputs["attention_mask"]
         multi_modal_inputs = model_inputs["multi_modal_inputs"]
         local_cp_size = tu.get_non_tensor_data(data=batch, key="local_cp_size", default=None)
         loss_mask = model_inputs["loss_mask"]
@@ -925,7 +934,15 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 ret["log_probs"] = log_probs
                 return ret
 
-            logits_processor_args = {"label": label, "temperature": temperature, "loss_mask": loss_mask}
+            response_attention_mask = None
+            if attention_mask is not None and not loss_mask.is_nested:
+                response_attention_mask = attention_mask[:, -loss_mask.shape[-1] :]
+            logits_processor_args = {
+                "label": label,
+                "temperature": temperature,
+                "loss_mask": loss_mask,
+                "response_attention_mask": response_attention_mask,
+            }
 
             output = forward_fn(
                 model,
