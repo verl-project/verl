@@ -113,9 +113,9 @@ def _start_server(load_format: str, model_path: str, force_dummy: bool = False):
             workers=[],
             replica_rank=0,
             node_rank=0,
-            gpus_per_node=2,
+            gpus_per_node=1,
             nnodes=1,
-            cuda_visible_devices="0,1",
+            cuda_visible_devices="1",
         )
     )
 
