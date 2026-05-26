@@ -120,10 +120,12 @@ def test_update_weights_from_ipc_accumulates_lora_tensors_across_buckets(monkeyp
             del zmq_handle, device, use_shm
 
         def receive_weights(self, on_bucket_received):
+            shared_bucket_tensor = torch.ones(1)
             on_bucket_received(
-                [("layers.0.self_attn.q_proj.lora_A.weight", torch.ones(1))],
+                [("layers.0.self_attn.q_proj.lora_A.weight", shared_bucket_tensor)],
                 is_last=False,
             )
+            shared_bucket_tensor.fill_(7)
             on_bucket_received(
                 [("layers.0.self_attn.q_proj.lora_B.weight", torch.zeros(1))],
                 is_last=True,
@@ -157,6 +159,10 @@ def test_update_weights_from_ipc_accumulates_lora_tensors_across_buckets(monkeyp
         "layers.0.self_attn.q_proj.lora_A.weight",
         "layers.0.self_attn.q_proj.lora_B.weight",
     }
+    torch.testing.assert_close(
+        added_requests[0].lora_tensors["layers.0.self_attn.q_proj.lora_A.weight"],
+        torch.ones(1),
+    )
 
 
 def test_update_weights_from_ipc_uses_reload_weights_stream_for_standard_base_sync(monkeypatch):
