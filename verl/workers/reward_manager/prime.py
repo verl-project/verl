@@ -174,7 +174,8 @@ class PrimeRewardManager(AbstractRewardManager):
 
         for i in range(len(data)):
             data_source = data_sources[i]
-            reward_tensor[i, valid_response_length[i].item() - 1] = scores[i]
+            if valid_response_length[i].item() > 0:
+                reward_tensor[i, valid_response_length[i].item() - 1] = scores[i]
 
             if data_source not in already_print_data_sources:
                 already_print_data_sources[data_source] = 0
