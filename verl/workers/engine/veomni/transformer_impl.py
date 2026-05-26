@@ -170,7 +170,11 @@ class VeOmniEngine(FSDPEngine):
         Applies device, dtype, and precision configurations, including mixed precision.
         Sets up checkpoint manager and FLOPs counter.
         """
+        self._moe_monitor = None
+        self._moe_monitor_step = 0
+
         self._build_model_optimizer()
+        self._init_moe_monitor()
 
         self.checkpoint_manager = FSDPCheckpointManager(
             model=self.module,
@@ -281,6 +285,64 @@ class VeOmniEngine(FSDPEngine):
             self.engine_config.activation_gpu_limit,
         )
 
+    # ------------------------------------------------------------------ #
+    # MoE expert-load monitor                                            #
+    # ------------------------------------------------------------------ #
+
+    def _init_moe_monitor(self) -> None:
+        """Construct, attach hooks, and activate the MoE load-balance monitor."""
+        interval = self.engine_config.moe_load_balance_monitor_interval
+        if interval <= 0:
+            return
+        num_experts = getattr(self.module.config, "num_experts", None)
+        if num_experts is None:
+            logger.warning("moe_load_balance_monitor_interval > 0 but model has no num_experts; skipping.")
+            return
+
+        from veomni.utils.moe_monitor import MoERouterMonitor, attach_moe_router_monitor, set_active_monitor
+
+        ps = parallel_state.get_parallel_state()
+        self._moe_monitor = MoERouterMonitor(num_experts=num_experts, dp_group=ps.fsdp_group)
+        set_active_monitor(self._moe_monitor)
+        attached = attach_moe_router_monitor(self.module, self._moe_monitor)
+        if attached == 0:
+            logger.warning("MoE monitor: no recognized routers found; disabling.")
+            self._moe_monitor.disable()
+            set_active_monitor(None)
+            self._moe_monitor = None
+        else:
+            logger.info(f"MoE monitor: attached to {attached} router(s), interval={interval}.")
+
+    def _log_moe_metrics(self, outputs: Any) -> None:
+        """All-reduce counts and log MoE metrics.
+
+        Scalars and heatmap are logged directly via ``wandb.log`` on rank 0
+        to avoid verl's ``allgather_dict_into_dict`` wrapping them in lists
+        (which breaks wandb chart rendering).
+        """
+        moe_metrics = self._moe_monitor.compute_metrics(current_step=self._moe_monitor_step)
+        if not moe_metrics:
+            return
+
+        if self.rank != 0:
+            return
+
+        try:
+            import wandb
+        except ImportError:
+            return
+        if wandb.run is None:
+            return
+
+        log_dict = {}
+        for k, v in moe_metrics.items():
+            if k.endswith("expert_load_heatmap"):
+                start, end = self._moe_monitor._last_step_range
+                log_dict[k] = wandb.Image(v, caption=f"Steps {start}-{end}")
+            else:
+                log_dict[k] = v
+        wandb.log(log_dict, step=self._moe_monitor_step)
+
     def optimizer_step(self):
         """
         Perform an optimization step using the optimizer.
@@ -313,6 +375,12 @@ class VeOmniEngine(FSDPEngine):
         Returns:
             Any: The output of the forward pass, which can be used for loss computation or other purposes.
         """
+        if self._moe_monitor is not None:
+            if forward_only:
+                self._moe_monitor.pause()
+            else:
+                self._moe_monitor.resume()
+
         tu.assign_non_tensor(data, sp_size=parallel_state.get_parallel_state().ulysses_size)
 
         # compute num_tokens in global batch for loss normalization
@@ -338,7 +406,15 @@ class VeOmniEngine(FSDPEngine):
 
             output_lst.append(meta_info)
 
-        return postprocess_batch_func(output_lst=output_lst, indices=indices, data=data)
+        result = postprocess_batch_func(output_lst=output_lst, indices=indices, data=data)
+
+        if not forward_only and self._moe_monitor is not None:
+            self._moe_monitor_step += 1
+            interval = self.engine_config.moe_load_balance_monitor_interval
+            if interval > 0 and self._moe_monitor_step % interval == 0:
+                self._log_moe_metrics(result)
+
+        return result
 
     def get_data_parallel_rank(self):
         return parallel_state.get_parallel_state().device_mesh.get_local_rank("dp")

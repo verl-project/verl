@@ -33,7 +33,7 @@ Atlas 800T A3
 ================= ============
 基础镜像            Ubuntu 22.04
 Python             3.11
-CANN               8.5.0
+CANN               9.0.0
 torch              2.9.0
 torch_npu          2.9.0
 torchvision        0.24.0
@@ -41,7 +41,7 @@ vLLM               0.18.0
 vLLM-ascend        0.18.0
 Megatron-LM        v0.12.1
 MindSpeed          2.3.0_core_r0.12.1
-triton-ascend      3.2.0
+triton-ascend      3.2.1
 mbridge            0.15.1
 SGLang             v0.5.10
 sgl-kernel-npu     2026.02.01
@@ -55,6 +55,44 @@ Dockerfile构建镜像脚本清单
 ---------------------------
 
 **通用镜像**
+
+============== ==================== ============== ==============================================================
+设备类型         CANN基础镜像版本     推理后端        参考文件
+============== ==================== ============== ==============================================================
+A2              9.0.0                  vLLM            `Dockerfile.ascend_9.0.0_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.0_a2>`_
+A3              9.0.0                  vLLM            `Dockerfile.ascend_9.0.0_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.0_a3>`_
+A2              8.5.0                  vLLM            `Dockerfile.ascend_8.5.0_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.0_a2>`_
+A3              8.5.0                  vLLM            `Dockerfile.ascend_8.5.0_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.0_a3>`_
+A2              8.5.0                  SGLang          `Dockerfile.ascend.sglang_8.5.0_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend.sglang_8.5.0_a2>`_
+A3              8.5.0                  SGLang          `Dockerfile.ascend.sglang_8.5.0_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend.sglang_8.5.0_a3>`_
+A2              8.3.RC1                vLLM            `Dockerfile.ascend_8.3.rc1_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.3.rc1_a2>`_
+A3              8.3.RC1                vLLM            `Dockerfile.ascend_8.3.rc1_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.3.rc1_a3>`_
+A2              8.3.RC1                SGLang          `Dockerfile.ascend.sglang_8.3.rc1_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend.sglang_8.3.rc1_a2>`_
+A3              8.3.RC1                SGLang          `Dockerfile.ascend.sglang_8.3.rc1_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend.sglang_8.3.rc1_a3>`_
+A2              8.2.RC1                vLLM            `Dockerfile.ascend_8.2.rc1_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.2.rc1_a2>`_
+A3              8.2.RC1                vLLM            `Dockerfile.ascend_8.2.rc1_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.2.rc1_a3>`_
+============== ==================== ============== ==============================================================
+
+
+**verl release版本镜像**
+
+============== ==================== ============== ============== ==============================================================
+设备类型         CANN基础镜像版本     推理后端        verl版本       参考文件                                
+============== ==================== ============== ============== ==============================================================
+A2              8.5.0                vLLM          release/v0.7.1 `Dockerfile.ascend_8.5.0_a2_v0.7.1 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.0_a2_v0.7.1>`_     
+A3              8.5.0                vLLM          release/v0.7.1 `Dockerfile.ascend_8.5.0_a3_v0.7.1 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.0_a3_v0.7.1>`_ 
+============== ==================== ============== ============== ==============================================================
+
+
+**模型定制镜像**
+
+============== ==================== ============== ============== ==============================================================
+设备类型         CANN基础镜像版本     推理后端        模型           参考文件                            
+============== ==================== ============== ============== ==============================================================
+A2              8.5.2                vLLM          Qwen3.5        `Dockerfile.ascend_8.5.2_a2_qwen3-5 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.2_a2_qwen3-5>`_   
+A3              8.5.2                vLLM          Qwen3.5        `Dockerfile.ascend_8.5.2_a3_qwen3-5 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.2_a3_qwen3-5>`_ 
+============== ==================== ============== ============== ==============================================================
+
 
 
 **说明：**

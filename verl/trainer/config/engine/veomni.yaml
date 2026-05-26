@@ -65,3 +65,7 @@ load_balancing_loss_implementation: eager
 force_use_huggingface: false
 
 activation_gpu_limit: 0.0
+
+# MoE expert-load monitor interval. When > 0, attach VeOmni's MoERouterMonitor.
+# Scalar metrics flow through Tracking; heatmap images go to wandb on rank 0.
+moe_load_balance_monitor_interval: 0
