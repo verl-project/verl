@@ -10,7 +10,7 @@ Last updated: 05/22/2026.
    #6291 <https://github.com/verl-project/verl/pull/6291>`__\ 将 vLLM /
    vLLM-Ascend 从 ``0.13.0`` 更新为 ``0.18.0``\ ，vLLM
    路线对应基础环境版本同步调整为 torch ``2.9.0``\ 、torch_npu
-   ``2.9.0``\ 。
+   ``2.9.0.post2``\ 。
 -  2025/12/11：verl 存量场景目前支持自动识别 NPU 设备类型。原则上，GPU
    脚本在昇腾上运行时不再需要显式设置
    ``trainer.device=npu``\ ；新增特性仍可通过设置 ``trainer.device``
@@ -98,14 +98,15 @@ vLLM-Ascend 的安装；训练侧可继续使用 FSDP，或按需安装 Megatron
 软件          版本
 ============= =======================================
 Python        ``>=3.10, <3.12``\ ，推荐 ``3.11``
-CANN          ``8.5.0``
-NNAL / ATB    ``8.5.0``
+CANN          ``9.0.0``
+NNAL / ATB    ``9.0.0``
 torch         ``2.9.0``
-torch_npu     ``2.9.0``
+torch_npu     ``2.9.0.post2``
 torchvision   ``0.24.0``
 torchaudio    ``2.9.0``
+triton        ``3.5.0``
 triton-ascend ``3.2.1``
-transformers  ``>=4.57.4, <5.0.0``\ ，推荐 ``4.57.6``
+transformers  ``5.3.0``
 vLLM          ``0.18.0``
 vLLM-Ascend   ``0.18.0``
 ============= =======================================
@@ -129,9 +130,9 @@ vLLM-Ascend   ``0.18.0``
 软件      版本
 ========= =================
 Python    ``>=3.10, <3.12``
-CANN      ``8.5.0``
+CANN      ``9.0.0``
 torch     ``2.9.0``
-torch_npu ``2.9.0``
+torch_npu ``2.9.0.post2``
 ========= =================
 
 可创建 Python 环境：
@@ -161,7 +162,7 @@ torch_npu ``2.9.0``
    pip install torchvision==0.24.0
    pip install torchaudio==2.9.0
    pip install triton-ascend==3.2.1 --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn
-   pip install "transformers>=4.57.4,<5.0.0"
+   pip install "transformers==5.3.0"
 
 .. _安装-vllm--vllm-ascend:
 
