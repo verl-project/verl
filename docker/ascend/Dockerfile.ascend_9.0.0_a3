@@ -41,7 +41,7 @@ RUN export PIP_EXTRA_INDEX_URL=https://triton-ascend.osinfra.cn/pypi/simple/ && 
     cd vllm && pip install -r requirements/build.txt && \
     VLLM_TARGET_DEVICE=empty pip install -v -e. && cd .. && \
     if [ "$ARCH" = "x86_64" ]; then \
-        pip install torch==2.9.0+cpu --index-url https://download.pytorch.org/whl/cpu/
+        pip install torch==2.9.0+cpu --index-url https://download.pytorch.org/whl/cpu/; \
     fi && \
     # Install vllm-ascend
     cd vllm-ascend && pip install -r requirements.txt && \
