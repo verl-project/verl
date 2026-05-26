@@ -10,6 +10,33 @@ logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
+def _system_prompt_from_user_turns(token1: list[int], token2: list[int]) -> list[int]:
+    """Peel one user-turn boundary off ``token1`` to expose the system prompt.
+
+    Given ``token1 = apply_chat_template([user_msg1])`` and
+    ``token2 = apply_chat_template([user_msg1, user_msg2])``, the per-user-
+    turn token count is ``len(token2) - len(token1)``. Subtracting that
+    span from the right of ``token1`` leaves whatever prefix the template
+    injected (typically the system prompt).
+
+    When the template produces equal-length encodings for 1 vs 2 user
+    messages (or the second-message encoding is shorter than the first
+    for a misbehaving template), no per-turn boundary is inferable.
+    Returns an empty list in that case as a defensive "no inferable
+    prefix" fallback. The previous expression
+    ``token1[: -(len(token2) - len(token1))]`` already evaluated to
+    ``[]`` for ``diff == 0`` via Python's ``token1[:-0] == token1[:0]``
+    slice semantics; this helper makes that fallback explicit (and
+    handles negative ``diff`` uniformly) instead of letting it slip
+    through implicit slice behavior. See
+    https://github.com/volcengine/verl/issues/6477.
+    """
+    diff = len(token2) - len(token1)
+    if diff > 0:
+        return token1[:-diff]
+    return []
+
+
 def initialize_system_prompt(tokenizer, **apply_chat_template_kwargs) -> list[int]:
     """
     Initialize system prompt tokens for chat templates that support them.
@@ -35,7 +62,7 @@ def initialize_system_prompt(tokenizer, **apply_chat_template_kwargs) -> list[in
         )
     )
     # get system prompt tokens
-    system_prompt = token1[: -(len(token2) - len(token1))]
+    system_prompt = _system_prompt_from_user_turns(token1, token2)
     return system_prompt
 
 
@@ -54,7 +81,7 @@ def extract_system_prompt_and_generation(tokenizer, **apply_chat_template_kwargs
         )
     )
     # get system prompt tokens
-    system_prompt = token1[: -(len(token2) - len(token1))]
+    system_prompt = _system_prompt_from_user_turns(token1, token2)
     # get generate prompt tokens
     token3 = normalize_token_ids(
         tokenizer.apply_chat_template(
