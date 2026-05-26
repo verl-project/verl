@@ -106,7 +106,7 @@ torchvision   ``0.24.0``
 torchaudio    ``2.9.0``
 triton        ``3.5.0``
 triton-ascend ``3.2.1``
-transformers  ``5.3.0``\ ，推荐 ``4.57.6``
+transformers  ``5.3.0``
 vLLM          ``0.18.0``
 vLLM-Ascend   ``0.18.0``
 ============= =======================================
