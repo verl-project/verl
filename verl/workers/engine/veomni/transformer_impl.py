@@ -288,29 +288,34 @@ class VeOmniEngine(FSDPEngine):
             logger.info(f"MoE monitor: attached to {attached} router(s), interval={interval}.")
 
     def _log_moe_metrics(self, outputs: Any) -> None:
-        """All-reduce counts, put scalars into outputs, log heatmap image to wandb."""
+        """All-reduce counts and log MoE metrics.
+
+        Scalars and heatmap are logged directly via ``wandb.log`` on rank 0
+        to avoid verl's ``allgather_dict_into_dict`` wrapping them in lists
+        (which breaks wandb chart rendering).
+        """
         moe_metrics = self._moe_monitor.compute_metrics(current_step=self._moe_monitor_step)
         if not moe_metrics:
             return
 
-        heatmap_key = None
-        scalars = {}
+        if self.rank != 0:
+            return
+
+        try:
+            import wandb
+        except ImportError:
+            return
+        if wandb.run is None:
+            return
+
+        log_dict = {}
         for k, v in moe_metrics.items():
             if k.endswith("expert_load_heatmap"):
-                heatmap_key = k
-            else:
-                scalars[k] = v
-        if scalars and hasattr(outputs, "__contains__") and "metrics" in outputs:
-            outputs["metrics"].update(scalars)
-        if self.rank == 0 and heatmap_key is not None:
-            try:
-                import wandb
-            except ImportError:
-                return
-            if wandb.run is not None:
                 start, end = self._moe_monitor._last_step_range
-                img = wandb.Image(moe_metrics[heatmap_key], caption=f"Steps {start}-{end}")
-                wandb.log({heatmap_key: img}, step=self._moe_monitor_step)
+                log_dict[k] = wandb.Image(v, caption=f"Steps {start}-{end}")
+            else:
+                log_dict[k] = v
+        wandb.log(log_dict, step=self._moe_monitor_step)
 
     def optimizer_step(self):
         """
