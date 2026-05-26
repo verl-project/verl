@@ -903,15 +903,21 @@ class vLLMHttpServer:
         return ["kv_cache", "weights"]
 
     async def _sleep_hybrid(self):
-        """HYBRID sleep: lora adapters only need level=1; full weights need level=2."""
-        # Don't use engine.sleep(level=2) here
+        """HYBRID sleep: lora adapters only need level=1; full weights need level=2.
+
+        Uses engine.sleep() instead of engine.collective_rpc("sleep") to ensure
+        that sleep is properly propagated to all data-parallel worker processes.
+        collective_rpc only reaches the TP workers within a single DP shard,
+        leaving other DP shards' weights unreleased, which causes OOM during
+        FSDP training backward when DP > 1.
+        """
         # lora only update adapter weights, so set sleep level to 1
         # vllm_ascend not support sleep_level now. Enabling EP during training may lead to accuracy issues.
         if self.lora_as_adapter or is_torch_npu_available(check_device=False):
             sleep_level = 1
         else:
             sleep_level = 2
-        await self.engine.collective_rpc("sleep", kwargs={"level": sleep_level})
+        await self.engine.sleep(level=sleep_level)
         if _VLLM_VERSION >= version.parse("0.17.0"):
             await self.engine.reset_encoder_cache()
 
