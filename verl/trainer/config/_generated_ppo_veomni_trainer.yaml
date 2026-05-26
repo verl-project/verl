@@ -50,6 +50,7 @@ actor_rollout_ref:
       load_balancing_loss_implementation: eager
       force_use_huggingface: false
       activation_gpu_limit: 0.0
+      moe_load_balance_monitor_interval: 0
     _target_: verl.workers.config.VeOmniActorConfig
     rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
     strategy: veomni
@@ -215,6 +216,7 @@ actor_rollout_ref:
       load_balancing_loss_implementation: ${oc.select:actor_rollout_ref.actor.veomni.load_balancing_loss_implementation,eager}
       force_use_huggingface: false
       activation_gpu_limit: 0.0
+      moe_load_balance_monitor_interval: 0
     _target_: verl.workers.config.VeOmniActorConfig
   rollout:
     _target_: verl.workers.config.RolloutConfig
@@ -498,6 +500,7 @@ critic:
     load_balancing_loss_implementation: eager
     force_use_huggingface: false
     activation_gpu_limit: 0.0
+    moe_load_balance_monitor_interval: 0
   _target_: verl.workers.config.VeOmniCriticConfig
   rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
   strategy: veomni
