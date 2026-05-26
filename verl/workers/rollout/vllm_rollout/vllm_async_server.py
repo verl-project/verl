@@ -199,20 +199,6 @@ class vLLMHttpServer:
                 # is handled by the master node through the DP coordinator.
                 return
             raise AttributeError("vLLMHttpServer has no attribute 'engine'")
-        if self.rollout_mode == RolloutMode.HYBRID:
-            if method == "wake_up":
-                # Use engine.wake_up() instead of engine.collective_rpc("wake_up") to
-                # ensure wake_up propagates to ALL data-parallel workers, not just TP
-                # workers within a single DP shard (same reasoning as _sleep_hybrid).
-                await self.engine.wake_up(**(kwargs or {}))
-                await self.engine.reset_prefix_cache()
-                return
-            elif method == "sleep":
-                # Redirect to _sleep_hybrid() which uses engine.sleep() to propagate
-                # sleep to all DP workers (instead of collective_rpc which only reaches
-                # TP workers within a single DP shard).
-                await self._sleep_hybrid()
-                return
         await self.engine.collective_rpc(
             method=method,
             timeout=timeout,
@@ -611,13 +597,16 @@ class vLLMHttpServer:
             extra_fields=extra_fields,
         )
 
-    async def wake_up(self):
+    async def wake_up(self, tags: list[str] | None = None):
         if self.node_rank != 0:
             return
 
         if self.rollout_mode == RolloutMode.HYBRID:
-            # In hybrid mode, rollout is wake up in `update_weights`
-            raise ValueError(f"wake_up not support rollout_mode {self.rollout_mode}")
+            # engine.wake_up() broadcasts via the DP coordinator to ALL EngineCore
+            # processes across all DP shards (unlike collective_rpc which only reaches
+            # TP workers within a single shard).
+            await self.engine.wake_up(tags=tags or self._get_wake_up_tags())
+            await self.engine.reset_prefix_cache()
         elif self.rollout_mode == RolloutMode.COLOCATED:
             # Directly call engine to wake up without sync weights.
             await self.engine.wake_up(tags=self._get_wake_up_tags())
