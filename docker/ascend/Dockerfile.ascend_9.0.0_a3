@@ -3,12 +3,6 @@ FROM swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:9.0.0-910b-ubuntu22.04-py3.
 
 ARG SOC_VERSION="ascend910_9392"
 
-RUN ARCH=$(uname -m) && \
-    if [ "$ARCH" = "x86_64" ]; then \
-        pip config set global.extra-index-url "https://download.pytorch.org/whl/cpu/"; \
-    fi
-
-
 # Prepare required system dependencies
 RUN apt-get update -y && \
     apt-get install -y --no-install-recommends gcc g++ cmake libnuma-dev wget git curl jq vim build-essential && \
@@ -46,6 +40,9 @@ RUN export PIP_EXTRA_INDEX_URL=https://triton-ascend.osinfra.cn/pypi/simple/ && 
     # Install vllm
     cd vllm && pip install -r requirements/build.txt && \
     VLLM_TARGET_DEVICE=empty pip install -v -e. && cd .. && \
+    if [ "$ARCH" = "x86_64" ]; then \
+        pip install torch==2.9.0+cpu --index-url https://download.pytorch.org/whl/cpu/
+    fi
     # Install vllm-ascend
     cd vllm-ascend && pip install -r requirements.txt && \
     export COMPILE_CUSTOM_KERNELS=1 && pip install -v -e . && cd .. && \
