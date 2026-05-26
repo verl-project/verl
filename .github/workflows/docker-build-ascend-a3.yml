@@ -99,7 +99,7 @@ jobs:
           platforms: ${{ matrix.arch }}
           file: ./docker/ascend/Dockerfile.ascend_9.0.0_a3
           push: false
-          outputs: type=image,name=${{ env.QUAY_REPO }},push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=${{ env.QUAY_REPO }},name-canonical=true
           provenance: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
