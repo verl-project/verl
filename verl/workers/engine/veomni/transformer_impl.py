@@ -300,11 +300,13 @@ class VeOmniEngine(FSDPEngine):
                 heatmap_key = k
             else:
                 scalars[k] = v
-        if scalars and isinstance(outputs, dict) and "metrics" in outputs:
+        if scalars and hasattr(outputs, "__contains__") and "metrics" in outputs:
             outputs["metrics"].update(scalars)
         if self.rank == 0 and heatmap_key is not None:
-            import wandb
-
+            try:
+                import wandb
+            except ImportError:
+                return
             if wandb.run is not None:
                 start, end = self._moe_monitor._last_step_range
                 img = wandb.Image(moe_metrics[heatmap_key], caption=f"Steps {start}-{end}")
