@@ -224,6 +224,14 @@ class VeOmniEngine(FSDPEngine):
 
         return lr_scheduler
 
+    def _get_model_config_path(self):
+        """Return the config path (or PretrainedConfig) for build_foundation_model.
+
+        Subclasses can override to modify the HF config before model construction
+        (e.g. VeOmniEngineWithValueHead rewrites architectures to ForTokenClassification).
+        """
+        return self.model_config.local_hf_config_path
+
     def _build_model_optimizer(self):
         # build_foundation_model runs apply_ops_config(ops_implementation)
         # before constructing the model, so per-model device_patch files see
@@ -240,7 +248,7 @@ class VeOmniEngine(FSDPEngine):
 
         # Load base model with specified configuration and dtype
         module = build_foundation_model(
-            config_path=self.model_config.local_hf_config_path,
+            config_path=self._get_model_config_path(),
             weights_path=self.model_config.local_path,
             torch_dtype="float32" if self.engine_config.mixed_precision else "bfloat16",
             attn_implementation=self.engine_config.attn_implementation,
@@ -757,8 +765,30 @@ class VeOmniEngineWithValueHead(VeOmniEngine, FSDPEngineWithValueHead):
     """Value model engine using VeOmni's FSDP2 + sequence parallelism.
 
     Combines VeOmniEngine (model init, parallel state, activation offloading)
-    with FSDPEngineWithValueHead (TokenClassification output → per-token values).
+    with FSDPEngineWithValueHead (TokenClassification output -> per-token values).
     """
+
+    def _get_model_config_path(self):
+        """Return a modified HF config that loads ForTokenClassification(num_labels=1).
+
+        Uses HF's AutoModelForTokenClassification model mapping to resolve the
+        canonical ForTokenClassification class name for this model family, then
+        sets config.architectures so VeOmni's MODELING_REGISTRY dispatches to it.
+        """
+        from transformers import AutoModelForTokenClassification
+        from veomni.models.auto import build_config
+
+        config = build_config(self.model_config.local_hf_config_path)
+        config.num_labels = 1
+        config.classifier_dropout = 0.0
+        config.hidden_dropout = "0"
+        config.summary_dropout_prob = 0.0
+        config.tie_word_embeddings = False
+        token_cls = AutoModelForTokenClassification._model_mapping.get(type(config))
+        if token_cls is None:
+            raise ValueError(f"No ForTokenClassification class in transformers for {type(config).__name__}.")
+        config.architectures = [token_cls.__name__]
+        return config
 
     def prepare_model_inputs(self, micro_batch: TensorDict):
         model_inputs, output_args = super().prepare_model_inputs(micro_batch)
