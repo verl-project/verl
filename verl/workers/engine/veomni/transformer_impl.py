@@ -186,9 +186,8 @@ class VeOmniEngine(FSDPEngine):
         self._init_moe_monitor()
 
         if self.enable_routing_replay:
-            # Defense in depth: the worker-side check at
-            # ``ActorRolloutRefWorker.__init__`` is the primary fail-fast
-            # point and runs *before* engine init. By the time we get here,
+            # Defense in depth: the VeOmniActorConfig check is the primary
+            # fail-fast point and runs *before* engine init. By the time we get here,
             # ``_build_model_optimizer()`` has already finished — this
             # second check exists to catch direct ``VeOmniEngine``
             # instantiation paths that bypass the worker (e.g. unit tests,

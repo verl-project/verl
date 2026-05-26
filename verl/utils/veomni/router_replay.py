@@ -57,27 +57,10 @@ Layer position L is learned implicitly from input shapes:
 
 Parallelism scope
 -----------------
-VeOmni uses **FSDP2 + optional Ulysses SP**, with no pipeline parallelism.
-The state machine therefore gets away with a simple RECORD / REPLAY
-two-action model and a single ``_targets`` slot per layer — the same
-target carries across forward + recompute-in-backward because forward
-and its backward are not interleaved with other micro-batches' forwards.
-Engines with pipeline-parallel interleaved schedules (Megatron, mindspeed)
-need a richer state model (separate REPLAY_FORWARD / REPLAY_BACKWARD
-actions + a FIFO queue of pending targets, so late-arriving backwards can
-still recover their microbatch's target after later forwards have
-overwritten the "current target" slot). That lives in
-:mod:`verl.utils.megatron.router_replay_patch`; the two implementations
-are intentionally kept separate because their state models answer
-different parallelism constraints, not stylistic differences.
-
-The cross-rank aggregation for RECORD (Ulysses SP all-gather, pad trim)
-lives in :meth:`_all_gather_recorded` / :meth:`collect_recorded` here,
-and :meth:`slice_microbatch_replay_targets` handles the symmetric
-pad+slice on the REPLAY input path. Both delegate to
-``verl.utils.ulysses`` primitives so the pad/slice rule stays
-bit-identical to the one ``super().prepare_model_inputs`` applies to
-``input_ids``.
+VeOmni uses FSDP2 + optional Ulysses SP, no pipeline parallelism. The
+RECORD all-gather and REPLAY pad+slice both go through
+``verl.utils.ulysses`` so the SP layout matches what
+``super().prepare_model_inputs`` applies to ``input_ids``.
 """
 
 from __future__ import annotations
