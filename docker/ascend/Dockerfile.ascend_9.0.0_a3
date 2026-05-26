@@ -45,7 +45,7 @@ RUN export PIP_EXTRA_INDEX_URL=https://triton-ascend.osinfra.cn/pypi/simple/ && 
     fi && \
     # Install vllm-ascend
     cd vllm-ascend && pip install -r requirements.txt && \
-    export COMPILE_CUSTOM_KERNELS=1 && pip install -v -e . && cd .. && \
+    export COMPILE_CUSTOM_KERNELS=1 && pip install --no-build-isolation --no-deps -v -e . && cd .. && \
     # Install MindSpeed & Megatron
     pip install -e MindSpeed && \
     pip install -e Megatron-LM && \
