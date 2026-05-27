@@ -1,5 +1,7 @@
 # Rollout KV Cache Offload via Mooncake-Store
 
+Last updated: 05/27/2026.
+
 Offload prefix KV blocks from the vLLM rollout engine to a shared
 [Mooncake](https://github.com/kvcache-ai/Mooncake) store so long shared
 prefixes (system prompt, agentic tool history, `rollout.n` samples per prompt)

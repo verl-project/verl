@@ -54,6 +54,9 @@ from verl.workers.rollout.vllm_rollout.utils import (
 )
 
 _VLLM_VERSION = version.parse(vllm.__version__)
+_RESET_PREFIX_CACHE_KWARGS = {}
+if _VLLM_VERSION >= version.parse("0.13.0"):
+    _RESET_PREFIX_CACHE_KWARGS["reset_connector"] = True
 
 
 if _VLLM_VERSION > version.parse("0.11.0"):
@@ -607,7 +610,7 @@ class vLLMHttpServer:
             # processes across all DP shards (unlike collective_rpc which only reaches
             # TP workers within a single shard).
             await self.engine.wake_up(tags=tags or self._get_wake_up_tags())
-            await self.engine.reset_prefix_cache(reset_connector=True)
+            await self.engine.reset_prefix_cache(**_RESET_PREFIX_CACHE_KWARGS)
         elif self.rollout_mode == RolloutMode.COLOCATED:
             # Directly call engine to wake up without sync weights.
             await self.engine.wake_up(tags=self._get_wake_up_tags())
@@ -615,7 +618,7 @@ class vLLMHttpServer:
             # (e.g. MooncakeStoreConnector) whose entries were computed
             # against the previous weights. No-op success when no connector
             # is configured (vLLM scheduler treats it as such).
-            await self.engine.reset_prefix_cache(reset_connector=True)
+            await self.engine.reset_prefix_cache(**_RESET_PREFIX_CACHE_KWARGS)
         elif self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip wake_up in standalone mode")
 
@@ -636,7 +639,7 @@ class vLLMHttpServer:
             # (e.g. MooncakeStoreConnector) whose entries were computed
             # against the previous model weights. With no connector it
             # is a no-op success, so we can pass it unconditionally.
-            await self.engine.reset_prefix_cache(reset_connector=True)
+            await self.engine.reset_prefix_cache(**_RESET_PREFIX_CACHE_KWARGS)
 
     async def release_kv_cache(self):
         """Release only kv_cache GPU memory, keeping model weights intact.
