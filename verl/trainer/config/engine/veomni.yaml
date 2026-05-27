@@ -7,6 +7,15 @@ param_offload: False
 # Whether to offload optimizer state to CPU
 optimizer_offload: False
 
+# Whether to offload gradients to CPU
+grad_offload: false
+
+# Only for FSDP2: offload param/grad/optimizer during train
+offload_policy: false
+
+# policy for wrapping the model
+wrap_policy: {}
+
 # FSDP group size. -1 means use all available GPUs.
 fsdp_size: -1
 
@@ -15,6 +24,9 @@ ulysses_parallel_size: 1
 expert_parallel_size: 1
 
 mixed_precision: true
+
+# Mixed precision training param dtype
+dtype: bfloat16
 
 # Random seed for reproducibility.
 seed: 42
@@ -28,14 +40,30 @@ enable_full_shard: true
 
 ckpt_manager: dcp
 
+# Path to load checkpoint from, if any
+load_checkpoint_path: null
+
 # Only for FSDP1: FSDP1 configuration, prefetch the next forward-pass all-gather
 # before the current forward computation.
 forward_prefetch: true
+
+# Reshard after forward pass to reduce memory footprint
+# For FSDP1, `false` enables `ShardingStrategy.SHARD_GRAD_OP`
+reshard_after_forward: true
+
+# Whether to use original parameters in fsdp. Only available in fsdp1
+use_orig_params: false
 
 strategy: veomni
 
 # Whether to use torch compile in fsdp.
 use_torch_compile: false
+
+# Whether to use entropy_from_logits_with_chunking in fsdp.
+entropy_from_logits_with_chunking: false
+
+# Whether to use entropy checkpointing in fsdp.
+entropy_checkpointing: false
 
 # Whether to use forward only in fsdp.
 forward_only: false
@@ -65,6 +93,9 @@ load_balancing_loss_implementation: eager
 force_use_huggingface: false
 
 activation_gpu_limit: 0.0
+
+# List of basic modules to use
+basic_modules: []
 
 # MoE expert-load monitor interval. When > 0, attach VeOmni's MoERouterMonitor.
 # Scalar metrics flow through Tracking; heatmap images go to wandb on rank 0.
