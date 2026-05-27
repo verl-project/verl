@@ -272,11 +272,9 @@ class VeOmniEngineConfig(EngineConfig):
     The inheritance from BaseConfig provides omegaconf.DictConfig-like interface for a dataclass config.
 
     Args:
-        wrap_policy (Dict[str, Any]): Configuration for FSDP wrap policy.
         param_offload (bool): Whether to offload parameters to CPU, default False
         optimizer_offload (bool): Whether to offload optimizer states to CPU, default False
         offload_policy (bool): Whether to offload policy model parameters, default False
-        reshard_after_forward (bool): Whether to reshard parameters after forward pass, default True
         fsdp_size (int): FSDP group size. -1 means use all available GPUs, default -1
         ulysses_parallel_size (int): Ulysses sequence parallel size, default 1
         expert_parallel_size (int): Expert parallel size, default 1
@@ -324,7 +322,6 @@ class VeOmniEngineConfig(EngineConfig):
         basic_modules (list[str]): List of basic modules to use, default None
         forward_prefetch (bool): Whether to prefetch parameters for next forward pass, default False
         model_dtype (str): Model data type used to initialize the transformers model. default "fp32"
-        use_orig_params (bool): Whether to use original parameters when initialize FSDP1, default False
         seed (int): Random seed for reproducibility.
         full_determinism (bool): If true, enable_full_determinism is called to ensure reproducible results
             in distributed training. Important: this will negatively impact performance, so only use it for
@@ -351,11 +348,7 @@ class VeOmniEngineConfig(EngineConfig):
 
     _mutable_fields = EngineConfig._mutable_fields | {"attn_implementation"}
 
-    wrap_policy: dict[str, Any] = field(default_factory=dict)
-    offload_policy: bool = False
-    reshard_after_forward: bool = True
     forward_prefetch: bool = False
-    use_orig_params: bool = False
     entropy_from_logits_with_chunking: bool = False
     use_torch_compile: bool = True
     entropy_checkpointing: bool = False

@@ -16,9 +16,6 @@ expert_parallel_size: 1
 
 mixed_precision: true
 
-# Mixed precision training param dtype
-dtype: bfloat16
-
 # Random seed for reproducibility.
 seed: 42
 
