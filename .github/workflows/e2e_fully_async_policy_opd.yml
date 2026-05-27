@@ -81,7 +81,7 @@ jobs:
         run: |
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
-          pip3 install cupy-cuda12x==13.6.0
+          pip3 install cupy-cuda13x==13.6.0
           pip3 install --force-reinstall --no-deps --no-build-isolation git+https://github.com/ISEEKYAN/mbridge.git@main
       - name: Prepare datasets
         run: |
