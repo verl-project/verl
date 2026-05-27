@@ -3,7 +3,9 @@
 Offload prefix KV blocks from the vLLM rollout engine to a shared
 [Mooncake](https://github.com/kvcache-ai/Mooncake) store so long shared
 prefixes (system prompt, agentic tool history, `rollout.n` samples per prompt)
-get deduplicated across requests and rollout replicas.
+get deduplicated across requests and rollout replicas. This also helps
+long-tail load balancing: when work migrates to idle rollout replicas, shared
+prefix KV reduces the re-prefill cost.
 
 ## Setup Mooncake + vLLM
 
@@ -41,24 +43,10 @@ Or as a Hydra CLI override:
 +actor_rollout_ref.rollout.engine_kwargs.vllm.kv_transfer_config.kv_connector_extra_config.mooncake_config_path=/path/to/mooncake_config.json
 ```
 
-Set `MOONCAKE_CONFIG_PATH=/path/to/mooncake_config.json` on every rollout
-actor (verl propagates via Ray `runtime_env`). For `DP>1` or multiple rollout
-replicas, also set `PYTHONHASHSEED=0` — vLLM's block-hash seed is randomized
-per process and cross-engine hits drop to zero without it.
-
 ## RL correctness: hard reset on every weight update
 
-Model weights change between rollout steps, so any KV block written to the
-external store under the previous policy must be evicted before the next
-rollout starts — otherwise stale KV silently corrupts inference. verl
-handles this automatically via `engine.reset_prefix_cache(reset_connector=True)`
-in `vllm_async_server.py`'s `wake_up` / `clear_kv_cache` / `abort_all_requests`
-paths. The flag cascades through vLLM into `MooncakeStoreConnector.reset_cache()`,
-which clears the master via the `RemoveAll` RPC.
+verl clears both local and Mooncake KV caches at every weight update boundary
+to avoid reusing KV from the previous policy.
 
-**Required vLLM build**: must include
-[vllm-project/vllm#42694](https://github.com/vllm-project/vllm/pull/42694)
-(`MooncakeStoreConnector.reset_cache` + the `EngineCore._reset_caches` default
-that threads `reset_connector=True` through `pause_generation`). Without it,
-`reset_connector=True` clears only the local prefix cache and leaves the
-Mooncake master populated with stale KV — silent correctness loss.
+**Required vLLM version**: use vLLM 0.22 or newer. Older builds may leave stale
+KV in the Mooncake master after a weight update.
