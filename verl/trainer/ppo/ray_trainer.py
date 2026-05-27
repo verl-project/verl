@@ -133,6 +133,55 @@ def compute_response_mask(data: DataProto):
     return attention_mask[:, -response_length:]
 
 
+def compute_spec_decode_metrics(
+    spec_drafts,
+    spec_accepts,
+    spec_verifies,
+    non_padding_mask=None,
+) -> dict:
+    """Aggregate per-request speculative decoding stats.
+
+    Ratios are computed per request and then averaged, so long and short
+    responses have equal metric weight.
+
+    The three inputs come from the rollout engine (vLLM request spec-decode
+    stats or sglang ``meta_info["spec_*"]`` keys). Either all three are ``None``
+    (caller didn't fetch them, e.g. spec rollout disabled) and the function
+    is a no-op, or all three are populated; mixed state is a programmer error.
+
+    ``non_padding_mask`` is a numpy bool array used by sync PPO to drop padded
+    placeholder samples; pass ``None`` for async PPO.
+    """
+    if spec_drafts is None and spec_accepts is None and spec_verifies is None:
+        return {}
+    assert spec_drafts is not None and spec_accepts is not None and spec_verifies is not None, (
+        "spec_decode metrics require all three of spec_num_draft_tokens / "
+        "spec_num_accepted_tokens / spec_num_verify_steps; got partial inputs"
+    )
+
+    drafts = spec_drafts.tolist() if hasattr(spec_drafts, "tolist") else list(spec_drafts)
+    accepts = spec_accepts.tolist() if hasattr(spec_accepts, "tolist") else list(spec_accepts)
+    verifies = spec_verifies.tolist() if hasattr(spec_verifies, "tolist") else list(spec_verifies)
+
+    if non_padding_mask is not None:
+        drafts = [d for d, keep in zip(drafts, non_padding_mask, strict=True) if keep]
+        accepts = [a for a, keep in zip(accepts, non_padding_mask, strict=True) if keep]
+        verifies = [v for v, keep in zip(verifies, non_padding_mask, strict=True) if keep]
+
+    if len(drafts) == 0:
+        return {}
+
+    # Treat zero-denominator samples as 0.0 and keep them in the mean.
+    per_sample_accept_rate = [(a / d) if d > 0 else 0.0 for a, d in zip(accepts, drafts, strict=True)]
+    per_sample_accept_length = [(1.0 + a / v) if v > 0 else 0.0 for a, v in zip(accepts, verifies, strict=True)]
+
+    n = len(drafts)
+    return {
+        "rollout/spec_accept_rate": float(sum(per_sample_accept_rate) / n),
+        "rollout/spec_accept_length": float(sum(per_sample_accept_length) / n),
+    }
+
+
 def compute_advantage(
     data: DataProto,
     adv_estimator: AdvantageEstimator,
@@ -770,6 +819,7 @@ class RayPPOTrainer:
                 engine_config=engine_config,
                 optimizer_config=orig_critic_cfg.optim,
                 checkpoint_config=orig_critic_cfg.checkpoint,
+                extra_context=getattr(self, "_critic_extra_context", {}),
             )
 
             critic_cls = RayClassWithInitArgs(cls=self.role_worker_mapping[Role.Critic], config=critic_cfg)
@@ -1686,6 +1736,15 @@ class RayPPOTrainer:
                 gradient_norm = metrics.get("actor/grad_norm", None)
                 metrics.update(compute_variance_proxy_metrics(batch=batch, gradient_norm=gradient_norm))
                 # Note: mismatch metrics (KL, PPL, etc.) are collected at line 1179 after advantage computation
+
+                # Per-request spec decode metrics.
+                metrics.update(
+                    compute_spec_decode_metrics(
+                        batch.non_tensor_batch.get("spec_num_draft_tokens", None),
+                        batch.non_tensor_batch.get("spec_num_accepted_tokens", None),
+                        batch.non_tensor_batch.get("spec_num_verify_steps", None),
+                    )
+                )
 
                 # TODO: make a canonical logger that supports various backend
                 logger.log(data=metrics, step=self.global_steps)

@@ -370,6 +370,12 @@ class VeOmniEngineConfig(EngineConfig):
     force_use_huggingface: bool = False
     activation_gpu_limit: float = 0.0
     basic_modules: Optional[list[str]] = field(default_factory=list)
+    # MoE expert-load monitor: when > 0, attach VeOmni's MoERouterMonitor.
+    # Scalar violation metrics flow through the engine's metrics dict (all
+    # Tracking backends); heatmap images are logged directly to wandb on
+    # rank 0. Rollout/log-prob forwards are excluded. Counts are all-reduced
+    # across DP/SP groups. Disabled (0) by default; no-op on non-MoE models.
+    moe_load_balance_monitor_interval: int = 0
 
     def __post_init__(self):
         super().__post_init__()
@@ -574,17 +580,17 @@ class MindSpeedEngineConfig(McoreEngineConfig):
     The inheritance from BaseConfig provides omegaconf.DictConfig-like interface for a dataclass config.
 
     Args:
-        llm_kwargs (str): mindspeed_llm engine kwargs.
-        mm_kwargs (str): mindspeed_mm engine kwargs.
+        mcore_kwargs dict[str, Any]: mindspeed_megatron engine kwargs.
+        fsdp_kwargs dict[str, Any]: mindspeed_fsdp engine kwargs.
     """
 
-    strategy: str = "mindspeed_llm"
-    llm_kwargs: dict[str, Any] = field(default_factory=dict)
-    mm_kwargs: dict[str, Any] = field(default_factory=dict)
+    strategy: str = "mindspeed_megatron"
+    mcore_kwargs: dict[str, Any] = field(default_factory=dict)
+    fsdp_kwargs: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """config validation logics go here"""
-        assert self.strategy in ["mindspeed_llm", "mindspeed_mm"], f"strategy {self.strategy} not supported"
+        assert self.strategy in ["mindspeed_megatron", "mindspeed_fsdp"], f"strategy {self.strategy} not supported"
         assert self.dtype in ["bfloat16", "float16"], f"dtype {self.dtype} not supported"
         if self.tensor_model_parallel_size == 1:
             warnings.warn("set sequence parallel to false as TP size is 1", stacklevel=2)
@@ -603,3 +609,4 @@ class TrainingWorkerConfig(BaseConfig):
     # This function takes model config and the device name as parameter.
     # Users can pass in a higher-order function to take more parameters
     auto_select_engine_optim_fn: Callable[["HFModelConfig", str], tuple["EngineConfig", "OptimizerConfig"]] = None
+    extra_context: dict = field(default_factory=dict)

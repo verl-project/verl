@@ -80,7 +80,7 @@ from verl.trainer.ppo.metric_utils import (
     process_validation_metrics,
 )
 from verl.trainer.ppo.padding_utils import upsample_batch_to_divisible_size
-from verl.trainer.ppo.ray_trainer import apply_kl_penalty, compute_advantage
+from verl.trainer.ppo.ray_trainer import apply_kl_penalty, compute_advantage, compute_spec_decode_metrics
 from verl.trainer.ppo.rollout_corr_helper import compute_rollout_correction_and_add_to_batch
 from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_teacher_policy
 from verl.utils import hf_processor, hf_tokenizer
@@ -204,21 +204,32 @@ class ReplayBuffer:
 
         self.poll_interval = poll_interval
         self.lock = threading.Lock()
+        self._stop_event = threading.Event()
         self.poll_thread = threading.Thread(target=self._poll_from_transfer_queue, daemon=True)
         self.poll_thread.start()
 
     def _poll_from_transfer_queue(self):
         """Periodically poll metadata from transfer queue."""
         try:
-            while True:
+            while not self._stop_event.is_set():
                 data = tq.kv_list()
                 if data is not None:
                     for partition_id, items in data.items():
                         self.add(partition_id, items)
-                time.sleep(self.poll_interval)
+                self._stop_event.wait(self.poll_interval)
         except Exception as e:
-            logger.error(f"Error in _poll_from_transfer_queue: {e}")
-            os._exit(1)
+            if not self._stop_event.is_set():
+                logger.error(f"Error in _poll_from_transfer_queue: {e}")
+                os._exit(1)
+
+    def close(self):
+        """Stop the background polling thread."""
+        if not self.poll_thread.is_alive():
+            return
+        self._stop_event.set()
+        self.poll_thread.join(timeout=self.poll_interval + 1.0)
+        if self.poll_thread.is_alive():
+            logger.warning("ReplayBuffer poll thread did not stop within timeout")
 
     def add(self, partition_id: str, items: dict[str, dict]):
         """Add items to the replay buffer.
@@ -1527,6 +1538,21 @@ class PPOTrainer:
         prompt_length = data["prompts"].offsets().diff()
         response_length = data["responses"].offsets().diff()
         global_token_num = (prompt_length + response_length).tolist()
+
+        # Only fetch speculative decoding stats when rollout writes them.
+        spec_drafts = spec_accepts = spec_verifies = None
+        mtp_config = getattr(self.config.actor_rollout_ref.model, "mtp", None)
+        if mtp_config is not None and mtp_config.enable and mtp_config.enable_rollout:
+            spec_data = tq.kv_batch_get(
+                keys=batch.keys,
+                partition_id=batch.partition_id,
+                select_fields=["extra_fields"],
+            )
+            extra_fields = spec_data["extra_fields"].tolist()
+            spec_drafts = [extra_field["spec_num_draft_tokens"] for extra_field in extra_fields]
+            spec_accepts = [extra_field["spec_num_accepted_tokens"] for extra_field in extra_fields]
+            spec_verifies = [extra_field["spec_num_verify_steps"] for extra_field in extra_fields]
+
         data = data.to_padded_tensor()
         data["token_level_scores"] = data["rm_scores"]
         if "token_level_rewards" not in data:
@@ -1555,6 +1581,10 @@ class PPOTrainer:
                 "training/num_turns/min": num_turns.min(),
             }
         )
+
+        # 4. per-request speculative-decoding aggregation (same metrics async PPO logs;
+        # see compute_spec_decode_metrics in verl/trainer/ppo/ray_trainer.py).
+        metrics.update(compute_spec_decode_metrics(spec_drafts, spec_accepts, spec_verifies, non_padding_mask))
 
     def fit(self):
         if self._dump_executor._shutdown:
@@ -1791,7 +1821,7 @@ class TaskRunner:
 
         # initialize transfer queue
         tq.init(config.transfer_queue)
-
+        trainer = None
         try:
             self.add_actor_rollout_worker(config)
             self.add_critic_worker(config)
@@ -1805,6 +1835,8 @@ class TaskRunner:
             trainer.init_workers()
             trainer.fit()
         finally:
+            if trainer:
+                trainer.replay_buffer.close()
             tq.close()
 
 

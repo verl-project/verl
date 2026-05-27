@@ -15,10 +15,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import warnings
 from typing import Callable
 
 import torch
-from megatron.core import parallel_state
+from megatron.core import parallel_state, tensor_parallel
 from megatron.core.models.gpt.gpt_model import GPTModel
 from megatron.core.transformer.multi_token_prediction import (
     MTPLossAutoScaler,
@@ -141,7 +142,7 @@ def _megatron_gptmodel_postprocess(
                 scale_logits_fn=scale_logits_fn,
             )
         else:
-            # Legacy Megatron API: manual rolling + compute_output_layer_and_language_model_loss.
+            # Legacy Megatron API: manual rolling + detached output-layer functional_call.
             mtp_labels = labels.clone()
             hidden_states_list = torch.chunk(hidden_states, 1 + self.config.mtp_num_layers, dim=0)
             hidden_states = hidden_states_list[0]
@@ -163,17 +164,19 @@ def _megatron_gptmodel_postprocess(
                     cp_group=cp_group,
                     packed_seq_params=packed_seq_params,
                 )
-                mtp_loss = self.compute_output_layer_and_language_model_loss(
-                    hidden_states_list[mtp_layer_number + 1],
-                    labels=mtp_labels,
-                    weight=self.shared_embedding_or_output_weight(),
-                    sequence_parallel_enabled=self.output_layer.sequence_parallel,
-                    column_parallel_linear=self.output_layer,
-                    col_linear_kwargs={
-                        "weight": output_weight,
+                # Detach output-layer params so MTP loss does not update lm_head.
+                output_layer_params = {k: v.detach() for k, v in self.output_layer.named_parameters()}
+                output_layer_buffers = dict(self.output_layer.named_buffers())
+                mtp_logits, _ = torch.func.functional_call(
+                    self.output_layer,
+                    {**output_layer_params, **output_layer_buffers},
+                    args=(hidden_states_list[mtp_layer_number + 1],),
+                    kwargs={
+                        "weight": output_weight.detach() if output_weight is not None else None,
                         "runtime_gather_output": runtime_gather_output,
                     },
                 )
+                mtp_loss = self.compute_language_model_loss(mtp_labels, mtp_logits)
                 mtp_loss = loss_mask * mtp_loss
                 if self.training:
                     MTPLossLoggingHelper.save_loss_to_tracker(
@@ -226,6 +229,39 @@ def patch_mtp_layer_get_embeddings(model: torch.nn.Module):
         return False
 
 
+def patch_mtp_layer_checkpointed_forward(model: torch.nn.Module):
+    """Patch the _checkpointed_forward method of MultiTokenPredictionLayer"""
+    from megatron.core.models.gpt.gpt_model import GPTModel
+    from megatron.core.transformer.multi_token_prediction import MultiTokenPredictionLayer
+
+    # Unwrap each model in the actor_module to get the actual GPTModel
+    model = _get_patching_model(model)
+    # Collect all MultiTokenPredictionLayer instances
+    target_layers = []
+
+    if isinstance(model, GPTModel):
+        # Check if GPTModel has MTP and find the layers
+        if hasattr(model, "mtp") and hasattr(model.mtp, "layers"):
+            for layer in model.mtp.layers:
+                if isinstance(layer, MultiTokenPredictionLayer):
+                    target_layers.append(layer)
+    elif hasattr(model, "layers"):
+        # Check if any layer in the model is MultiTokenPredictionLayer
+        for layer in model.layers:
+            if isinstance(layer, MultiTokenPredictionLayer):
+                target_layers.append(layer)
+
+    if target_layers:
+        for layer in target_layers:
+            layer._checkpointed_forward_backup = layer._checkpointed_forward
+            layer._checkpointed_forward = _patched_checkpointed_forward.__get__(layer, layer.__class__)
+        print(f"Found and patched checkpointed forward for {len(target_layers)} MTP layer(s)")
+        return True
+    else:
+        print("No MTP layers found to patch checkpointed forward")
+        return False
+
+
 def unpatch_mtp_layer_get_embeddings(model: torch.nn.Module):
     """Unpatch the _get_embeddings method of MultiTokenPredictionLayer"""
     from megatron.core.models.gpt.gpt_model import GPTModel
@@ -258,6 +294,42 @@ def unpatch_mtp_layer_get_embeddings(model: torch.nn.Module):
 
     if unpatched_count > 0:
         print(f"Unpatched {unpatched_count} MTP layer(s)")
+        return True
+    return False
+
+
+def unpatch_mtp_layer_checkpointed_forward(model: torch.nn.Module):
+    """Unpatch the _checkpointed_forward method of MultiTokenPredictionLayer"""
+    from megatron.core.models.gpt.gpt_model import GPTModel
+    from megatron.core.transformer.multi_token_prediction import MultiTokenPredictionLayer
+
+    # Unwrap each model in the actor_module to get the actual GPTModel
+    model = _get_patching_model(model)
+
+    # Collect all MultiTokenPredictionLayer instances
+    target_layers = []
+
+    if isinstance(model, GPTModel):
+        # Check if GPTModel has MTP and find the layers
+        if hasattr(model, "mtp") and hasattr(model.mtp, "layers"):
+            for layer in model.mtp.layers:
+                if isinstance(layer, MultiTokenPredictionLayer):
+                    target_layers.append(layer)
+    elif hasattr(model, "layers"):
+        # Check if any layer in the model is MultiTokenPredictionLayer
+        for layer in model.layers:
+            if isinstance(layer, MultiTokenPredictionLayer):
+                target_layers.append(layer)
+
+    unpatched_count = 0
+    for layer in target_layers:
+        if hasattr(layer, "_checkpointed_forward_backup"):
+            layer._checkpointed_forward = layer._checkpointed_forward_backup
+            delattr(layer, "_checkpointed_forward_backup")
+            unpatched_count += 1
+
+    if unpatched_count > 0:
+        print(f"Unpatched checkpointed forward for {unpatched_count} MTP layer(s)")
         return True
     return False
 
@@ -310,10 +382,71 @@ def _patched_get_embeddings_for_detach(
     # Apply custom transformations if needed
     # For example: decoder_input = some_custom_function(decoder_input)
 
-    hidden_states = make_viewless_tensor(inp=hidden_states, requires_grad=True, keep_graph=True)
-
-    # detach decoder_input and hidden_states
+    # Detach token embeddings and main-decoder hidden states for detach_encoder.
     decoder_input = decoder_input.detach()
-    hidden_states = hidden_states.detach()
+    hidden_states = make_viewless_tensor(inp=hidden_states, requires_grad=True, keep_graph=False)
 
     return input_ids, position_ids, decoder_input, hidden_states
+
+
+def _patched_checkpointed_forward(self, forward_func, *args, **kwargs):
+    """Checkpoint MTP forward while keeping non-tensor args out of saved tensors."""
+    # Reference: THUDM/slime Megatron MTP recompute patch.
+    # https://github.com/THUDM/slime/blob/6961f5970e9dbb4716a10ba4a54a28fa3876d274/docker/patch/latest/megatron.patch#L723
+    positional_specs: list = []
+    kw_specs: list = []
+    tensor_args: list[torch.Tensor] = []
+
+    for arg in args:
+        if torch.is_tensor(arg):
+            positional_specs.append(("tensor", len(tensor_args)))
+            tensor_args.append(arg)
+        else:
+            positional_specs.append(("const", arg))
+
+    for key, value in kwargs.items():
+        if torch.is_tensor(value):
+            kw_specs.append((key, ("tensor", len(tensor_args))))
+            tensor_args.append(value)
+        else:
+            kw_specs.append((key, ("const", value)))
+
+    def run(*flat_tensor_args):
+        rebuilt_args = []
+        for spec_type, payload in positional_specs:
+            if spec_type == "tensor":
+                rebuilt_args.append(flat_tensor_args[payload])
+            else:
+                rebuilt_args.append(payload)
+
+        rebuilt_kwargs = {}
+        for key, (spec_type, payload) in kw_specs:
+            if spec_type == "tensor":
+                rebuilt_kwargs[key] = flat_tensor_args[payload]
+            else:
+                rebuilt_kwargs[key] = payload
+
+        return forward_func(*rebuilt_args, **rebuilt_kwargs)
+
+    tensor_args_tuple = tuple(tensor_args)
+
+    def checkpoint_handler():
+        if self.config.fp8:
+            from megatron.core.extensions.transformer_engine import te_checkpoint
+
+            return te_checkpoint(
+                run,
+                self.config.distribute_saved_activations,
+                tensor_parallel.random.get_cuda_rng_tracker,
+                parallel_state.get_tensor_model_parallel_group(),
+                *tensor_args_tuple,
+            )
+        return tensor_parallel.checkpoint(run, self.config.distribute_saved_activations, *tensor_args_tuple)
+
+    if self.config.recompute_method == "uniform":
+        assert self.config.recompute_num_layers == 1, "recompute_num_layers must be 1 for MTP recompute"
+        return checkpoint_handler()
+    if self.config.recompute_method == "block":
+        warnings.warn("recompute_method == 'block' is not supported for MTP yet. Skipping recompute.", stacklevel=2)
+        return forward_func(*args, **kwargs)
+    raise ValueError(f"Invalid activation recompute method: {self.config.recompute_method}")

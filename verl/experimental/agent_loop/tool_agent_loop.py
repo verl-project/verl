@@ -39,6 +39,12 @@ from verl.workers.rollout.replica import TokenOutput
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
+SPEC_DECODE_EXTRA_KEYS = (
+    "spec_num_draft_tokens",
+    "spec_num_accepted_tokens",
+    "spec_num_verify_steps",
+)
+
 
 class AgentState(Enum):
     PENDING = "pending"
@@ -246,6 +252,9 @@ class ToolAgentLoop(AgentLoopBase):
             max_global_steps = output.extra_fields.get("max_global_steps", None)
             if max_global_steps:
                 agent_data.extra_fields["max_global_steps"] = max_global_steps
+            for key in SPEC_DECODE_EXTRA_KEYS:
+                if key in output.extra_fields and key in agent_data.extra_fields:
+                    agent_data.extra_fields[key] = int(agent_data.extra_fields[key]) + int(output.extra_fields[key])
 
         agent_data.assistant_turns += 1
         agent_data.response_ids = output.token_ids

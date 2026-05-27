@@ -2,7 +2,7 @@
 
 **Author:** [Jacob Helwig](https://jacobhelwig.github.io/)
 
-Last updated: 05/14/2026.
+Last updated: 05/26/2026.
 
 ## Background
 
@@ -152,6 +152,8 @@ MOPD consolidates multiple specialized policies into a single student model whil
 [7] Yang, Zhuolin, et al. "Nemotron-Cascade 2: Post-Training LLMs with Cascade RL and Multi-Domain On-Policy Distillation." arXiv preprint arXiv:2603.19220, 2026.
 
 [8] DeepSeek-AI. "DeepSeek-V4: Towards Highly Efficient Million-Token Context Intelligence." 2026.
+
+[9] Li, Yaxuan, et al. "Rethinking On-Policy Distillation of Large Language Models: Phenomenology, Mechanism, and Recipe." arXiv preprint arXiv:2604.13016, 2026.
 
 ## Configuration Parameters
 
@@ -587,9 +589,26 @@ These metrics are logged for top-$k$ loss modes such as `forward_kl_topk`.
 - `actor/distillation/teacher_mass_min` / `actor/distillation/teacher_mass_max`  
   Minimum and maximum teacher mass on the teacher top-$k$ tokens within the batch.
 
+- `actor/distillation/overlap_ratio`
+  Average fraction of teacher top-$k$ tokens that also appear in the student's
+  top-$k$ tokens, computed as
+  $|\operatorname{TopK}_{\nu}(s_t) \cap \operatorname{TopK}_{\pi_\theta}(s_t)| / k$
+  over response tokens. A value near `1.0` means the teacher and student top-$k$
+  token sets largely match at student-visited states.
+
+- `actor/distillation/overlap_token_advantage`
+  Average negative teacher-token KL contribution on teacher top-$k$ tokens that
+  also appear in the student's top-$k$ tokens. The per-token value is averaged
+  only over positions with at least one overlapping token; if no response
+  position has overlap, the metric is reported as `0.0`.
+
 `teacher_mass` indicates how much of the teacher distribution is covered by the selected top-$k$. Low `teacher_mass` means the top-$k$ approximation is truncating substantial teacher probability mass. This can happen either by selecting too small $k$, or due to unstable optimization leading to the student generating low probability sequences.
 
 `student_mass` indicates how much probability the student assigns to the teacher-preferred tokens. 
+
+The overlap metrics follow the token-level top-$k$ overlap analysis in [9].
+They are logging-only diagnostics and do not change the distillation loss or
+gradient.
 
 ## Debugging
 
@@ -685,9 +704,10 @@ Using the `DataProto` produced by the Agent Loop (rollouts + teacher logprobs in
    the `student_logits is not None` branch of `distillation_ppo_loss`. The
    logits-processor branch dispatches to `compute_forward_kl_topk`, which has a
    separate implementation per training engine (FSDP and Megatron). Per-token
-   `distillation_losses`, `student_mass`, and `teacher_mass` tensors are
-   written back into `model_output` so the full logits can be freed before the
-   final loss step.
+   `distillation_losses`, `student_mass`, `teacher_mass`, `overlap_count`, and
+   `overlap_token_advantage` tensors are written back into `model_output` so the
+   full logits can be freed before the final loss step. The overlap tensors are
+   used only for logging.
 
 3. **Final loss.** After the forward, the engine calls the loss function with
    `model_output` (full logits already freed); this is the
@@ -746,6 +766,6 @@ The returned scalar loss is what `engine.train_batch` backpropagates.
 
 ### **Tests**
 
-- `tests/workers/test_distillation_topk_symmetry_on_cpu.py` — top-k loss symmetry checks
-- `tests/utils/test_special_megatron_kl_loss_tp.py` — Megatron KL loss under tensor parallelism
+- `tests/workers/test_distillation_topk_symmetry_on_cpu.py` — top-k loss symmetry and overlap metric checks
+- `tests/utils/test_special_megatron_kl_loss_tp.py` — Megatron KL loss and overlap metrics under tensor parallelism
 - `tests/special_e2e/run_fully_async_policy_opd.sh` — end-to-end OPD with the fully-async rollouter

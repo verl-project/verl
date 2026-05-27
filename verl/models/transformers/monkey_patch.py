@@ -494,11 +494,13 @@ def apply_monkey_patch(
         from transformers.models.qwen3_5.modeling_qwen3_5 import (
             Qwen3_5ForConditionalGeneration,
             Qwen3_5Model,
+            Qwen3_5TextModel,
             Qwen3_5VisionModel,
         )
         from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
             Qwen3_5MoeForConditionalGeneration,
             Qwen3_5MoeModel,
+            Qwen3_5MoeTextModel,
             Qwen3_5MoeVisionModel,
         )
 
@@ -517,6 +519,9 @@ def apply_monkey_patch(
         # Step 2: patch vision model to fix fsdp2 cpu_offload bug.
         Qwen3_5VisionModel.fast_pos_embed_interpolate = fast_pos_embed_interpolate
         Qwen3_5MoeVisionModel.fast_pos_embed_interpolate = fast_pos_embed_interpolate
+        if ulysses_sp_size > 1:
+            patch_vlm_for_ulysses_input_slicing(Qwen3_5TextModel)
+            patch_vlm_for_ulysses_input_slicing(Qwen3_5MoeTextModel)
 
     if use_remove_padding or ulysses_sp_size > 1:
         if hasattr(module, "_flash_attention_forward"):  # transformers <= 4.47.1 or legacy models

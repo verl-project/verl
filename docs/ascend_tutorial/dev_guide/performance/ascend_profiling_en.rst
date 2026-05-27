@@ -135,6 +135,12 @@ When Rollout runs in `Agent Loop <../advance/agent_loop.rst>`_ mode, performance
    - vLLM Engine: Automatically collects AsyncLLM scheduling stacks and inference process performance data. Does not support setting analysis (defaults to no analysis, requires offline analysis) and profiler_level (defaults to level1).
    - SGLang Engine: Automatically collects inference process performance data. Does not support the memory option in contents. Does not support setting analysis (defaults to enabled) and profiler_level (defaults to level0).
 
+**Fully Async Policy Mode Description**:
+
+1. In `Fully Async Policy <https://verl.readthedocs.io/en/latest/advance/fully_async.html>`_ mode, ``global_profiler.steps`` refers to the step **after each** ``update_weights`` round. This is consistent with synchronous mode, not a per mini-batch step within a single training round.
+
+2. Because it reuses Agent Loop collection capabilities, the notes for `Fully Async Policy <https://verl.readthedocs.io/en/latest/advance/fully_async.html>`_ mode are the same as for Agent Loop.
+
 
 Visualization
 -------------

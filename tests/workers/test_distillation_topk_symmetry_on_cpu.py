@@ -34,18 +34,21 @@ import os
 
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 import torch
 from tensordict import TensorDict
 
+from verl.trainer.distillation.fsdp.losses import compute_forward_kl_topk as compute_fsdp_forward_kl_topk
+from verl.trainer.distillation.losses import compute_forward_kl_topk as collect_forward_kl_topk_metrics
 from verl.utils import tensordict_utils as tu
 from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.workers.engine.fsdp.transformer_impl import FSDPEngineWithLMHead
 
 _VOCAB_SIZE = 8
-_DISTILLATION_KEYS = ("distillation_losses", "student_mass")
+_DISTILLATION_KEYS = ("distillation_losses", "student_mass", "overlap_count", "overlap_token_advantage")
 
 
 def _make_engine_stub():
@@ -157,3 +160,79 @@ def test_distillation_outputs_emitted_in_both_padding_modes(use_remove_padding):
             f"Expected '{k}' to be a nested tensor (use_remove_padding={use_remove_padding}); "
             f"got {type(model_output[k])}"
         )
+
+
+def _nested_from_rows(rows):
+    values = torch.tensor(rows)
+    offsets = torch.tensor([0, len(rows)], dtype=torch.int64)
+    return torch.nested.nested_tensor_from_jagged(values, offsets=offsets)
+
+
+def test_forward_kl_topk_emits_overlap_metrics():
+    logits = torch.tensor(
+        [
+            [0.0, 9.0, 8.0, 1.0, 0.0, 0.0],
+            [8.0, 7.0, 0.0, 0.0, 9.0, 0.0],
+            [9.0, 8.0, 7.0, 0.0, 0.0, 0.0],
+        ],
+        dtype=torch.float32,
+    ).unsqueeze(0)
+    teacher_ids = _nested_from_rows([[1, 2], [4, 5], [3, 4]]).to(torch.int64)
+    teacher_logprobs = _nested_from_rows(
+        [
+            [torch.log(torch.tensor(0.7)), torch.log(torch.tensor(0.2))],
+            [torch.log(torch.tensor(0.6)), torch.log(torch.tensor(0.3))],
+            [torch.log(torch.tensor(0.5)), torch.log(torch.tensor(0.4))],
+        ]
+    ).to(torch.float32)
+    config = SimpleNamespace(distillation_loss=SimpleNamespace(log_prob_min_clamp=None))
+
+    output = compute_fsdp_forward_kl_topk(
+        student_logits=logits,
+        teacher_topk_log_probs=teacher_logprobs,
+        teacher_topk_ids=teacher_ids,
+        config=config,
+        data_format="thd",
+    )
+
+    torch.testing.assert_close(output["overlap_count"], torch.tensor([[2, 1, 0]]))
+
+    student_log_probs = torch.log_softmax(logits, dim=-1)
+    gathered_student = torch.gather(student_log_probs, dim=-1, index=teacher_ids.values().unsqueeze(0))
+    teacher_log_probs = teacher_logprobs.values().unsqueeze(0)
+    token_adv = -(teacher_log_probs.exp() * (teacher_log_probs - gathered_student))
+    expected_ota = torch.tensor(
+        [[token_adv[0, 0].mean(), token_adv[0, 1, 0], 0.0]],
+        dtype=output["overlap_token_advantage"].dtype,
+    )
+    torch.testing.assert_close(output["overlap_token_advantage"], expected_ota)
+
+
+def test_forward_kl_topk_metric_aggregation_for_overlap_outputs():
+    data = TensorDict(
+        {
+            "prompts": torch.tensor([[101]]),
+            "responses": torch.tensor([[11, 12, 0]]),
+            "attention_mask": torch.tensor([[1, 1, 1, 0]]),
+            "response_mask": torch.tensor([[1, 1, 0]], dtype=torch.bool),
+        },
+        batch_size=[1],
+    )
+    model_output = {
+        "distillation_losses": torch.tensor([0.1, 0.2, 0.3]),
+        "student_mass": torch.tensor([0.9, 0.8, 0.7]),
+        "teacher_mass": torch.tensor([0.95, 0.85, 0.75]),
+        "overlap_count": torch.tensor([2, 1, 0]),
+        "overlap_token_advantage": torch.tensor([-0.2, -0.4, 0.0]),
+    }
+    distillation_config = SimpleNamespace(distillation_loss=SimpleNamespace(topk=2))
+
+    _, metrics = collect_forward_kl_topk_metrics(
+        config=SimpleNamespace(),
+        distillation_config=distillation_config,
+        model_output=model_output,
+        data=data,
+    )
+
+    assert metrics["distillation/overlap_ratio"] == pytest.approx(0.75)
+    assert metrics["distillation/overlap_token_advantage"] == pytest.approx(-0.3)

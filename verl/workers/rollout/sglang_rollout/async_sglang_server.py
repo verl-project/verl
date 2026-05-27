@@ -356,7 +356,7 @@ class SGLangHttpServer:
         # mtp
         if self.config.mtp is not None and self.config.mtp.enable and self.config.mtp.enable_rollout:
             # Enable weights CPU backup for sglang >= 0.5.6
-            if sglang.__version__ < "0.5.6":
+            if version.parse(sglang.__version__) < version.parse("0.5.6"):
                 raise ValueError(f"sglang version {sglang.__version__} is not supported for MTP rollout")
 
             args["speculative_algorithm"] = self.config.mtp.speculative_algorithm
@@ -651,6 +651,12 @@ class SGLangHttpServer:
                 sequence_length=len(prompt_ids),
                 result_dict=extra_fields,
             )
+
+        # Re-key backend spec-decoding stats to the rollout-common names.
+        if self.config.mtp is not None and self.config.mtp.enable and self.config.mtp.enable_rollout:
+            extra_fields["spec_num_draft_tokens"] = int(meta_info["spec_draft_token_num"])
+            extra_fields["spec_num_accepted_tokens"] = int(meta_info["spec_accept_token_num"])
+            extra_fields["spec_num_verify_steps"] = int(meta_info["spec_verify_ct"])
 
         return TokenOutput(
             token_ids=token_ids,

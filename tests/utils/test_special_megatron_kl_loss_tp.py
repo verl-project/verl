@@ -168,8 +168,15 @@ class TestVocabParallelKLDivergence:
             ref_loss.sum().backward()
             grad_ref_shard = full_ref.grad[..., shard_start:shard_end].detach().clone()
 
-            # Compare losses
+            # Compare losses and overlap logging metrics
             torch.testing.assert_close(vp_loss, ref_loss, atol=1e-4, rtol=1e-4)
+            torch.testing.assert_close(
+                loss_out["overlap_token_advantage"],
+                fsdp_loss_out["overlap_token_advantage"],
+                atol=1e-4,
+                rtol=1e-4,
+            )
+            torch.testing.assert_close(loss_out["overlap_count"], fsdp_loss_out["overlap_count"])
 
             # Compare gradients
             torch.testing.assert_close(grad_vp, grad_ref_shard, atol=1e-4, rtol=1e-4)

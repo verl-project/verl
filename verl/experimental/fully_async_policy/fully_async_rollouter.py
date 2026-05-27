@@ -594,6 +594,14 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
 
         return timing_raw
 
+    async def _start_profiling(self):
+        """Start rollout profiling on all replicas via LLMServerManager after weight sync."""
+        await self.llm_server_manager.start_profile()
+
+    async def _stop_profiling(self):
+        """Stop rollout profiling on all replicas before the next weight sync."""
+        await self.llm_server_manager.stop_profile()
+
     def do_validate(self):
         """Run validation and return metrics"""
         timing_raw = {}

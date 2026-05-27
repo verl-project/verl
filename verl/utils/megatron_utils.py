@@ -1550,6 +1550,7 @@ def check_mtp_config(model_config: HFModelConfig, engine_config: McoreEngineConf
         return
     elif not enable_mtp and has_mtp:
         _set_mtp_num_layers(hf_config, 0)
+        engine_config.override_transformer_config["mtp_num_layers"] = 0
     elif enable_mtp and not has_mtp:
         raise ValueError("enable mtp while model has no mtp layer, please use a model with mtp layer")
     elif enable_mtp and has_mtp:
@@ -1569,13 +1570,18 @@ def patch_engine_mtp(module, model_config):
         model_config: The model configuration containing MTP settings.
     """
     logger.warning("Applying mtp patch...")
-    from verl.models.mcore.mtp_patch import patch_mtp_layer_get_embeddings, patch_postprocess
+    from verl.models.mcore.mtp_patch import (
+        patch_mtp_layer_checkpointed_forward,
+        patch_mtp_layer_get_embeddings,
+        patch_postprocess,
+    )
 
     print(module)
 
     modules = module if isinstance(module, list) else [module]
     for m in modules:
         patch_postprocess(m)
+        patch_mtp_layer_checkpointed_forward(m)
         if model_config.mtp.detach_encoder:
             patch_mtp_layer_get_embeddings(m)
 

@@ -168,6 +168,8 @@ def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
         Tuples of (name, tensor) for each weight and its scale
     """
 
+    fp8_state.seen_params.clear()
+    fp8_state.fp8_param_names.clear()
     is_mxfp8_npu = is_mxfp8_vllm_ascend(quant_config)
     if is_mxfp8_npu:
         import torch_npu
@@ -212,8 +214,16 @@ def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
         del v, param_lp, param_scale
 
 
-def load_quanted_weights(weights, model_runner):
-    model = model_runner.model
+def load_quanted_weights(weights, model_runner, is_drafter=False):
+    if is_drafter:
+        drafter = getattr(model_runner, "drafter", None)
+        model = drafter.model if drafter is not None and hasattr(drafter, "model") else None
+        assert model is not None, (
+            "load_quanted_weights(is_drafter=True) requires model_runner.drafter.model "
+            "to be present and non-None for FP8 weight loading."
+        )
+    else:
+        model = model_runner.model
     quant_config = model_runner.vllm_config.quant_config
     vllm_dtype = model_runner.vllm_config.model_config.dtype
 
