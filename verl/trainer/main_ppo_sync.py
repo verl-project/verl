@@ -204,21 +204,32 @@ class ReplayBuffer:
 
         self.poll_interval = poll_interval
         self.lock = threading.Lock()
+        self._stop_event = threading.Event()
         self.poll_thread = threading.Thread(target=self._poll_from_transfer_queue, daemon=True)
         self.poll_thread.start()
 
     def _poll_from_transfer_queue(self):
         """Periodically poll metadata from transfer queue."""
         try:
-            while True:
+            while not self._stop_event.is_set():
                 data = tq.kv_list()
                 if data is not None:
                     for partition_id, items in data.items():
                         self.add(partition_id, items)
-                time.sleep(self.poll_interval)
+                self._stop_event.wait(self.poll_interval)
         except Exception as e:
-            logger.error(f"Error in _poll_from_transfer_queue: {e}")
-            os._exit(1)
+            if not self._stop_event.is_set():
+                logger.error(f"Error in _poll_from_transfer_queue: {e}")
+                os._exit(1)
+
+    def close(self):
+        """Stop the background polling thread."""
+        if not self.poll_thread.is_alive():
+            return
+        self._stop_event.set()
+        self.poll_thread.join(timeout=self.poll_interval + 1.0)
+        if self.poll_thread.is_alive():
+            logger.warning("ReplayBuffer poll thread did not stop within timeout")
 
     def add(self, partition_id: str, items: dict[str, dict]):
         """Add items to the replay buffer.
@@ -1810,7 +1821,7 @@ class TaskRunner:
 
         # initialize transfer queue
         tq.init(config.transfer_queue)
-
+        trainer = None
         try:
             self.add_actor_rollout_worker(config)
             self.add_critic_worker(config)
@@ -1824,6 +1835,8 @@ class TaskRunner:
             trainer.init_workers()
             trainer.fit()
         finally:
+            if trainer:
+                trainer.replay_buffer.close()
             tq.close()
 
 
