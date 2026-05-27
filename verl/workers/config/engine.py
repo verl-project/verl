@@ -330,6 +330,22 @@ class VeOmniEngineConfig(EngineConfig):
             in distributed training. Important: this will negatively impact performance, so only use it for
             debugging.
         mixed_precision (Optional[dict[str, Any]]): Mixed precision configuration for FSDP, default None
+        rms_norm_gated_implementation (str): Gated RMSNorm implementation (Qwen3.5 GatedDeltaNet
+            ``self.norm``). ``"fla"`` uses fla.modules.FusedRMSNormGated (requires flash-linear-attention,
+            GPU). ``"eager"`` (default) uses the HuggingFace Qwen3_5RMSNormGated. Qwen3.5 has no NPU
+            backend today — selecting any non-eager value on NPU raises at OpSlot bind time.
+        causal_conv1d_implementation (str): Varlen depthwise causal conv1d implementation (Qwen3.5
+            GatedDeltaNet pre-mixer). ``"fla"`` uses fla.modules.convolution.causal_conv1d (requires
+            flash-linear-attention, GPU). ``"eager"`` (default) leaves causal_conv1d_fn unset; the varlen
+            training path then raises because no torch fallback handles cu_seqlens. Qwen3.5 has no NPU
+            backend today — selecting any non-eager value on NPU raises at OpSlot bind time.
+        chunk_gated_delta_rule_implementation (str): Chunk gated delta-rule kernel for Qwen3.5 linear
+            attention. ``"fla"`` uses fla.ops.gated_delta_rule.chunk_gated_delta_rule (requires
+            flash-linear-attention, GPU). ``"flash_qla"`` uses QwenLM FlashQLA (requires the optional
+            flash-qla extra, Hopper SM90 only — no Ampere/Ada below or Blackwell above; SM10x wheels are
+            WIP upstream). ``"eager"`` (default) uses transformers' torch_chunk_gated_delta_rule, which
+            does NOT support cu_seqlens; varlen training therefore raises at runtime. Qwen3.5 has no NPU
+            backend today — selecting any non-eager value on NPU raises at OpSlot bind time.
 
     """
 
@@ -367,6 +383,9 @@ class VeOmniEngineConfig(EngineConfig):
     swiglu_mlp_implementation: str = "eager"
     rotary_pos_emb_implementation: str = "eager"
     load_balancing_loss_implementation: str = "eager"
+    rms_norm_gated_implementation: str = "eager"
+    causal_conv1d_implementation: str = "eager"
+    chunk_gated_delta_rule_implementation: str = "eager"
     force_use_huggingface: bool = False
     activation_gpu_limit: float = 0.0
     basic_modules: Optional[list[str]] = field(default_factory=list)

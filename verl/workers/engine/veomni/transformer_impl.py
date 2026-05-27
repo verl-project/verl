@@ -277,6 +277,9 @@ class VeOmniEngine(FSDPEngine):
             swiglu_mlp_implementation=self.engine_config.swiglu_mlp_implementation,
             rotary_pos_emb_implementation=self.engine_config.rotary_pos_emb_implementation,
             load_balancing_loss_implementation=self.engine_config.load_balancing_loss_implementation,
+            rms_norm_gated_implementation=self.engine_config.rms_norm_gated_implementation,
+            causal_conv1d_implementation=self.engine_config.causal_conv1d_implementation,
+            chunk_gated_delta_rule_implementation=self.engine_config.chunk_gated_delta_rule_implementation,
         )
 
         # Load base model with specified configuration and dtype
