@@ -30,7 +30,6 @@ import ray
 from omegaconf import OmegaConf
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from verl.utils.device import is_support_ipc
 from verl.utils.tokenizer import normalize_token_ids
 from verl.workers.rollout.replica import RolloutMode, TokenOutput
 from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightSender
@@ -136,10 +135,16 @@ def _iter_weights(model_path: str):
 
 
 def _update_weights(server, model_path: str):
-    # Use the same zmq handle format as vLLMColocateWorkerExtension._get_zmq_handle()
+    # Use the same zmq handle format as vLLMColocateWorkerExtension._get_zmq_handle().
+    # NOTE: keep IPC enabled when available to avoid shared-memory fallback,
+    # which can exacerbate hangs/timeouts in vLLM's internal shm_broadcast path.
     replica_rank = os.environ.get("VERL_REPLICA_RANK", "0")
     zmq_handle = f"ipc:///tmp/rl-colocate-zmq-replica-{replica_rank}-rank-0.sock"
-    use_shm = not is_support_ipc()
+
+    # Force using IPC (cuda/npu IPC handles) for weight transfer whenever possible.
+    # On unsupported platforms this would fail earlier; in CI/NPU env we require IPC-capable stack.
+    use_shm = False
+
     update_ref = server.collective_rpc.remote("update_weights_from_ipc", kwargs={"use_shm": use_shm})
     sender = BucketedWeightSender(zmq_handle=zmq_handle, bucket_size_mb=4096, use_shm=use_shm)
     asyncio.run(sender.async_send_weights(_iter_weights(model_path)))
