@@ -29,8 +29,8 @@ distillation_loss_mode=${DISTILLATION_LOSS_MODE:-k1}
 use_policy_gradient=${USE_POLICY_GRADIENT:-True}
 distillation_topk=${DISTILLATION_TOPK:-32}
 
-train_batch_size=${TRAIN_BATCH_SIZE:-16}
-ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE:-16}
+train_batch_size=${TRAIN_BATCH_SIZE:-14}
+ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE:-14}
 max_prompt_length=${MAX_PROMPT_LENGTH:-512}
 max_response_length=${MAX_RESPONSE_LENGTH:-1024}
 ppo_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU:-8192}
