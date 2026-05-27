@@ -1,60 +1,56 @@
 #!/usr/bin/env bash
-# On-policy distillation | multi-teacher (gsm8k text + geo3k VL) | vLLM rollout | VeOmni training | NVIDIA GPUs
+# On-policy distillation | single teacher | vLLM rollout | VeOmni training | NVIDIA GPUs
 #
-# VeOmni engine variant of the FSDP OPD script. Key difference:
+# VeOmni engine variant of the FSDP OPD script. Key differences:
 #   - model_engine=veomni for FSDP2-based training
-#   - use_fused_kernels=True enables veomni's chunk_topk_distill kernel,
-#     which computes the top-K forward-KL distillation loss without
-#     materializing the full [B, L, V] logits tensor — saving significant
-#     GPU memory for large-vocabulary models.
+#   - use_fused_kernels=True enables veomni's fused-linear kernels:
+#     * For RL/SFT batches: fused log-prob + entropy (no logits materialization)
+#     * For top-K distillation batches with teacher_topk_ids in the TD:
+#       veomni's chunk_topk_distill kernel computes the top-K forward-KL
+#       distillation loss without materializing [B, L, V] logits — saving
+#       significant GPU memory for large-vocabulary models.
+#   Without use_fused_kernels, the vanilla FSDP actor materializes full
+#   [B, L, V] logits and computes distillation loss eagerly. The VeOmni fused
+#   chunk_topk_distill path avoids this by streaming the lm_head
+#   projection chunk-by-chunk.
 
 set -xeuo pipefail
 
 # ---- user-adjustable ----
-STUDENT_MODEL=${STUDENT_MODEL:-Qwen/Qwen3-VL-8B-Instruct}
-GSM8K_TEACHER_MODEL=${GSM8K_TEACHER_MODEL:-Qwen/Qwen3-32B}
-GEO3K_TEACHER_MODEL=${GEO3K_TEACHER_MODEL:-Qwen/Qwen3-VL-32B-Instruct}
+STUDENT_MODEL=${STUDENT_MODEL:-Qwen/Qwen3-0.6B}
+TEACHER_MODEL=${TEACHER_MODEL:-Qwen/Qwen3-1.7B}
 
 NNODES=${NNODES:-1}
-NGPUS_PER_NODE=${NGPUS_PER_NODE:-8}
-
-TEACHER_NNODES=${TEACHER_NNODES:-1}
-TEACHER_NUM_REPLICAS_GSM8K=${TEACHER_NUM_REPLICAS_GSM8K:-1}
-TEACHER_NUM_REPLICAS_GEO3K=${TEACHER_NUM_REPLICAS_GEO3K:-1}
-teacher_tp=${TEACHER_TP:-2}
-TEACHER_WORLD_SIZE=$(( (TEACHER_NUM_REPLICAS_GSM8K + TEACHER_NUM_REPLICAS_GEO3K) * teacher_tp ))
+NGPUS_PER_NODE=${NGPUS_PER_NODE:-7}
+TEACHER_NGPUS=${TEACHER_NGPUS:-1}
+teacher_tp=${TEACHER_TP:-1}
 
 distillation_loss_mode=${DISTILLATION_LOSS_MODE:-k1}
 use_policy_gradient=${USE_POLICY_GRADIENT:-True}
-distillation_topk=${DISTILLATION_TOPK:-64}
+distillation_topk=${DISTILLATION_TOPK:-32}
 
-train_batch_size=${TRAIN_BATCH_SIZE:-128}
-ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE:-128}
-max_prompt_length=${MAX_PROMPT_LENGTH:-1024}
-max_response_length=${MAX_RESPONSE_LENGTH:-2048}
-ppo_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU:-24576}
+train_batch_size=${TRAIN_BATCH_SIZE:-16}
+ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE:-16}
+max_prompt_length=${MAX_PROMPT_LENGTH:-512}
+max_response_length=${MAX_RESPONSE_LENGTH:-1024}
+ppo_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU:-8192}
 
-actor_lr=${ACTOR_LR:-1e-6}
+actor_lr=${ACTOR_LR:-1e-5}
 
-rollout_tp=${ROLLOUT_TP:-2}
-rollout_gpu_mem_util=${ROLLOUT_GPU_MEM_UTIL:-0.4}
-teacher_gpu_mem_util=${TEACHER_GPU_MEM_UTIL:-0.4}
+rollout_tp=${ROLLOUT_TP:-1}
+rollout_gpu_mem_util=${ROLLOUT_GPU_MEM_UTIL:-0.3}
+teacher_gpu_mem_util=${TEACHER_GPU_MEM_UTIL:-0.3}
 
 total_epochs=${TOTAL_EPOCHS:-15}
 save_freq=${SAVE_FREQ:-200}
 test_freq=${TEST_FREQ:-5}
 
-project_name=${PROJECT_NAME:-verl_distill_mopd_gsm8k_geo3k}
-experiment_name=${EXPERIMENT_NAME:-qwen3_vl_8b_mopd_veomni_fused}
+project_name=${PROJECT_NAME:-verl_distill_opd_veomni}
+experiment_name=${EXPERIMENT_NAME:-qwen3_0.6b_from_1.7b_opd_veomni_fused}
 # ---- end user-adjustable ----
 
-gsm8k_train=$HOME/data/gsm8k/train.parquet
-gsm8k_test=$HOME/data/gsm8k/test.parquet
-geo3k_train=$HOME/data/geo3k/train.parquet
-geo3k_test=$HOME/data/geo3k/test.parquet
-
-train_files="['$gsm8k_train', '$geo3k_train']"
-val_files="['$gsm8k_test', '$geo3k_test']"
+train_files=$HOME/data/gsm8k/train.parquet
+val_files=$HOME/data/gsm8k/test.parquet
 
 max_num_tokens=$(( max_prompt_length + max_response_length + 1 ))
 ########################### parameter arrays ###########################
@@ -69,8 +65,6 @@ DATA=(
     data.max_response_length=${max_response_length}
     data.filter_overlong_prompts=True
     data.truncation='error'
-    data.shuffle=True
-    data.image_key=images
 )
 
 MODEL=(
@@ -86,8 +80,8 @@ ACTOR=(
     actor_rollout_ref.actor.ppo_mini_batch_size=${ppo_mini_batch_size}
     actor_rollout_ref.actor.use_dynamic_bsz=True
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=${ppo_max_token_len_per_gpu}
-    actor_rollout_ref.actor.veomni.param_offload=True
-    actor_rollout_ref.actor.veomni.optimizer_offload=True
+    actor_rollout_ref.actor.veomni.param_offload=False
+    actor_rollout_ref.actor.veomni.optimizer_offload=False
 )
 
 ROLLOUT=(
@@ -101,8 +95,7 @@ ROLLOUT=(
 )
 
 TRAINER=(
-    trainer.balance_batch=True
-    trainer.logger='["console","wandb"]'
+    trainer.logger=console
     trainer.project_name=${project_name}
     trainer.experiment_name=${experiment_name}
     trainer.n_gpus_per_node=${NGPUS_PER_NODE}
@@ -116,26 +109,15 @@ TRAINER=(
 EXTRA=(
     model_engine=veomni
     distillation.enabled=True
-    distillation.n_gpus_per_node=${TEACHER_WORLD_SIZE}
-    distillation.nnodes=${TEACHER_NNODES}
-    distillation.teacher_key=data_source
-    # --- gsm8k teacher (text) ---
+    distillation.n_gpus_per_node=${TEACHER_NGPUS}
+    distillation.nnodes=1
     +distillation.teacher_models.gsm8k.key="openai/gsm8k"
-    +distillation.teacher_models.gsm8k.model_path="$GSM8K_TEACHER_MODEL"
-    +distillation.teacher_models.gsm8k.num_replicas=${TEACHER_NUM_REPLICAS_GSM8K}
+    +distillation.teacher_models.gsm8k.model_path="$TEACHER_MODEL"
+    +distillation.teacher_models.gsm8k.num_replicas=1
     +distillation.teacher_models.gsm8k.inference.name=vllm
     +distillation.teacher_models.gsm8k.inference.tensor_model_parallel_size=${teacher_tp}
     +distillation.teacher_models.gsm8k.inference.gpu_memory_utilization=${teacher_gpu_mem_util}
     +distillation.teacher_models.gsm8k.inference.max_model_len=${max_num_tokens}
-    # --- geo3k teacher (VL) ---
-    +distillation.teacher_models.geo3k.key="hiyouga/geometry3k"
-    +distillation.teacher_models.geo3k.model_path="$GEO3K_TEACHER_MODEL"
-    +distillation.teacher_models.geo3k.num_replicas=${TEACHER_NUM_REPLICAS_GEO3K}
-    +distillation.teacher_models.geo3k.inference.name=vllm
-    +distillation.teacher_models.geo3k.inference.tensor_model_parallel_size=${teacher_tp}
-    +distillation.teacher_models.geo3k.inference.gpu_memory_utilization=${teacher_gpu_mem_util}
-    +distillation.teacher_models.geo3k.inference.max_model_len=${max_num_tokens}
-    # --- loss ---
     distillation.distillation_loss.loss_mode=${distillation_loss_mode}
     distillation.distillation_loss.topk=${distillation_topk}
     distillation.distillation_loss.use_task_rewards=False

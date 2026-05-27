@@ -867,9 +867,7 @@ class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
             # while verl's native distillation path uses different keys
             # (teacher_logprobs / teacher_ids) and relies on the eager
             # logit-processor instead.
-            distillation_use_topk = tu.get_non_tensor_data(
-                data=micro_batch, key="distillation_use_topk", default=False
-            )
+            distillation_use_topk = tu.get_non_tensor_data(data=micro_batch, key="distillation_use_topk", default=False)
             if distillation_use_topk and "teacher_topk_ids" in micro_batch.keys():
                 if "teacher_topk_log_probs" not in micro_batch.keys():
                     raise ValueError(
