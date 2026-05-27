@@ -367,7 +367,7 @@ def apply_patch_mbridge():
         import warnings
 
         import megatron.core.utils
-        
+        import torch
         from megatron.core import parallel_state
 
         def get_tensor_model_parallel_group_if_none(tp_group, is_expert=False, check_initialized=True):
@@ -399,7 +399,7 @@ def apply_patch_megatron_v012_with_torch_v28_v29() -> None:
     from pathlib import Path
 
     import megatron.core
-    
+    import torch
     from megatron.core.dist_checkpointing.strategies.async_utils import _disable_gc
     from megatron.core.dist_checkpointing.strategies.filesystem_async import _process_memory
     from packaging import version
