@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, AsyncGenerator, Generator
@@ -28,6 +29,8 @@ from verl.utils.ray_utils import auto_await
 from verl.workers.config import CheckpointEngineConfig, HFModelConfig, RolloutConfig
 from verl.workers.rollout import BaseRollout, RolloutReplica, get_rollout_class
 from verl.workers.rollout.utils import ensure_async_iterator
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -389,6 +392,14 @@ class CheckpointEngineManager:
             trainer.execute_checkpoint_engine(**trainer_kwargs) + rollout.execute_checkpoint_engine(**rollout_kwargs)
         )
 
+    def finalize_process_group(self, rollout: RayWorkerGroup):
+        """Finalize checkpoint engines on trainer and rollout workers."""
+        trainer = self.trainer
+        ray.get(
+            trainer.execute_checkpoint_engine(["finalize"] * trainer.world_size)
+            + rollout.execute_checkpoint_engine(["finalize"] * rollout.world_size)
+        )
+
     def add_replicas(self, replicas: list[RolloutReplica]):
         """Add rollout replicas to the manager for elastic scale up, will rebuild process group.
 
@@ -457,39 +468,91 @@ class CheckpointEngineManager:
             ray.get(self.trainer.update_weights(global_steps=global_steps, mode=self.backend))
             return
 
-        # 1. abort and save all unfinished requests for partial rollout
-        await self.abort_replicas()
+        rollout: RayWorkerGroup | None = None
+        resume_generation = False
+        resume_kv_cache = False
+        finalize_checkpoint_engines = False
+        primary_error: BaseException | None = None
+        try:
+            # 1. abort and save all unfinished requests for partial rollout
+            resume_generation = True
+            await self.abort_replicas()
 
-        # 2. create a temporay worker group for all replicas
-        workers = []
-        for replica in self.replicas:
-            workers.extend(replica.workers)
-        rollout = RayWorkerGroup(worker_handles=workers, ray_cls_with_init=RayClassWithInitArgs(cls=_worker_cls))
-        trainer = self.trainer
+            # 2. create a temporary worker group for all replicas
+            workers = []
+            for replica in self.replicas:
+                workers.extend(replica.workers)
+            rollout = RayWorkerGroup(worker_handles=workers, ray_cls_with_init=RayClassWithInitArgs(cls=_worker_cls))
+            trainer = self.trainer
 
-        # 3. release kv_cache before weight sync (weights stay in place)
-        await self.release_kv_cache_replicas()
+            # 3. release kv_cache before weight sync (weights stay in place)
+            resume_kv_cache = True
+            await self.release_kv_cache_replicas()
 
-        # 4. build process group
-        self.build_process_group(rollout)
+            # 4. build process group
+            finalize_checkpoint_engines = True
+            self.build_process_group(rollout)
 
-        # 5. update weights of all workers
-        ray.get(
-            trainer.update_weights(global_steps=global_steps, mode=self.backend)
-            + rollout.update_weights(global_steps=global_steps)
+            # 5. update weights of all workers
+            ray.get(
+                trainer.update_weights(global_steps=global_steps, mode=self.backend)
+                + rollout.update_weights(global_steps=global_steps)
+            )
+        except BaseException as exc:
+            primary_error = exc
+            raise
+        finally:
+            cleanup_error = await self._cleanup_weight_update(
+                rollout,
+                finalize_checkpoint_engines=finalize_checkpoint_engines,
+                resume_kv_cache=resume_kv_cache,
+                resume_generation=resume_generation,
+                primary_error=primary_error,
+            )
+            if cleanup_error is not None and primary_error is None:
+                raise cleanup_error
+
+    async def _cleanup_weight_update(
+        self,
+        rollout: RayWorkerGroup | None,
+        *,
+        finalize_checkpoint_engines: bool,
+        resume_kv_cache: bool,
+        resume_generation: bool,
+        primary_error: BaseException | None,
+    ) -> Exception | None:
+        cleanup_errors: list[tuple[str, Exception]] = []
+
+        if finalize_checkpoint_engines and rollout is not None:
+            try:
+                self.finalize_process_group(rollout)
+            except Exception as exc:
+                self._record_cleanup_error(cleanup_errors, "finalize checkpoint engines", exc)
+
+        if resume_kv_cache:
+            try:
+                await self.resume_kv_cache_replicas()
+            except Exception as exc:
+                self._record_cleanup_error(cleanup_errors, "resume kv cache", exc)
+
+        if resume_generation:
+            try:
+                await self.resume_generation_replicas()
+            except Exception as exc:
+                self._record_cleanup_error(cleanup_errors, "resume generation", exc)
+
+        if not cleanup_errors or primary_error is not None:
+            return None
+        return cleanup_errors[0][1]
+
+    @staticmethod
+    def _record_cleanup_error(cleanup_errors: list[tuple[str, Exception]], label: str, exc: Exception) -> None:
+        cleanup_errors.append((label, exc))
+        logger.warning(
+            "CheckpointEngineManager failed to %s during update_weights cleanup",
+            label,
+            exc_info=(type(exc), exc, exc.__traceback__),
         )
-
-        # 6. finalize all workers
-        ray.get(
-            trainer.execute_checkpoint_engine(["finalize"] * trainer.world_size)
-            + rollout.execute_checkpoint_engine(["finalize"] * rollout.world_size)
-        )
-
-        # 7. restore kv_cache after weight sync
-        await self.resume_kv_cache_replicas()
-
-        # 8. resume all unfinished requests for partial rollout
-        await self.resume_generation_replicas()
 
 
 async def split_weight_chunks(
