@@ -33,7 +33,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from verl.utils.tokenizer import normalize_token_ids
 from verl.workers.rollout.replica import RolloutMode, TokenOutput
 from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightSender
-from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer
+from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMReplica
 
 MODEL_ID = os.environ.get("MODEL_ID", "moonshotai/Moonlight-16B-A3B-Instruct")
 MODEL_PATH_DEEPSEEK = os.environ.get("MODEL_PATH", os.path.expanduser(f"~/.cache/models/{MODEL_ID}"))
@@ -93,35 +93,25 @@ def _start_server(load_format: str, model_path: str, force_dummy: bool = False):
     ray.init(runtime_env={"env_vars": runtime_env})
 
     rollout_cfg, model_cfg = _build_config(load_format, model_path)
-    server = (
-        ray.remote(vLLMHttpServer)
-        .options(
-            runtime_env={
-                "env_vars": {
-                    "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
-                    "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
-                    "NCCL_CUMEM_ENABLE": "0",
-                }
-            },
-            max_concurrency=16,
-        )
-        .remote(
-            config=rollout_cfg,
-            model_config=model_cfg,
-            rollout_mode=RolloutMode.STANDALONE,
-            workers=[],
-            replica_rank=0,
-            node_rank=0,
-            gpus_per_node=1,
-            nnodes=1,
-            cuda_visible_devices="1",
-        )
+
+    # Use the same code path as production rollout (vLLMReplica) so the server
+    # runs in COLOCATED mode with worker actors, instead of a standalone actor
+    # with an empty workers list.
+    replica = vLLMReplica(
+        replica_rank=0,
+        config=rollout_cfg,
+        model_config=model_cfg,
+        gpus_per_node=1,
     )
+
+    # Create a colocated worker group and launch server(s).
+    # NOTE: resource_pool is optional for our E2E test; Ray will schedule workers.
+    ray.get(replica.init_standalone())
+    server = replica.servers[0]
 
     if force_dummy:
         ray.get(server.__ray_call__.remote(lambda self: setattr(self.config, "load_format", "dummy")))
 
-    ray.get(server.launch_server.remote())
     return server
 
 
