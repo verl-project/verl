@@ -666,6 +666,10 @@ def layered_summon_lora_params(fsdp_module) -> OrderedDict:
         # all-gathers on demand, so no context is required and they have no
         # ``_is_root`` attribute.
         is_fsdp1 = fsdp_version(submodule) == 1
+
+        if not any("lora_" in n for n, _ in submodule.named_parameters(recurse=True)):
+            continue
+
         if is_fsdp1:
             submodule._is_root = True
         summon_ctx = (
@@ -673,7 +677,8 @@ def layered_summon_lora_params(fsdp_module) -> OrderedDict:
         )
 
         with summon_ctx:
-            sub_lora_params = get_peft_model_state_dict(peft_model, state_dict=submodule.state_dict())
+            sub_state_dict = dict(submodule.named_parameters())
+            sub_lora_params = get_peft_model_state_dict(peft_model, state_dict=sub_state_dict)
             if not sub_lora_params:
                 continue
             sub_lora_params = {
