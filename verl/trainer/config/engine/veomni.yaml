@@ -7,15 +7,6 @@ param_offload: False
 # Whether to offload optimizer state to CPU
 optimizer_offload: False
 
-# Whether to offload gradients to CPU
-grad_offload: false
-
-# Only for FSDP2: offload param/grad/optimizer during train
-offload_policy: false
-
-# policy for wrapping the model
-wrap_policy: {}
-
 # FSDP group size. -1 means use all available GPUs.
 fsdp_size: -1
 
@@ -46,13 +37,6 @@ load_checkpoint_path: null
 # Only for FSDP1: FSDP1 configuration, prefetch the next forward-pass all-gather
 # before the current forward computation.
 forward_prefetch: true
-
-# Reshard after forward pass to reduce memory footprint
-# For FSDP1, `false` enables `ShardingStrategy.SHARD_GRAD_OP`
-reshard_after_forward: true
-
-# Whether to use original parameters in fsdp. Only available in fsdp1
-use_orig_params: false
 
 strategy: veomni
 
