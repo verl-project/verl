@@ -21,8 +21,8 @@ from typing import Any, Callable, ContextManager, Iterator, Optional
 import torch
 import torch.distributed
 from megatron.core import parallel_state as mpu
-from megatron.core.pipeline_parallel import get_forward_backward_func
 from megatron.core.package_info import __version__
+from megatron.core.pipeline_parallel import get_forward_backward_func
 from omegaconf import OmegaConf
 from tensordict import TensorDict
 
