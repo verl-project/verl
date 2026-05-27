@@ -31,6 +31,8 @@ def get_base_mcore_config_from_model_config(model_config: HFModelConfig) -> dict
         TransformerConfig with common parameters
     """
 
+    from verl.models.mcore.config_converter import get_hf_rope_theta
+
     hf_config = model_config.hf_config
     base_config = {
         "num_layers": hf_config.num_hidden_layers,
@@ -47,7 +49,7 @@ def get_base_mcore_config_from_model_config(model_config: HFModelConfig) -> dict
         "tie_word_embeddings": hf_config.tie_word_embeddings,
         "torch_dtype": hf_config.torch_dtype,
         "bf16": hf_config.dtype is torch.bfloat16,
-        "rotary_base": int(hf_config.rope_theta),
+        "rotary_base": get_hf_rope_theta(hf_config),
         "num_experts": getattr(hf_config, "num_experts", None),
         "moe_router_topk": getattr(hf_config, "num_experts_per_tok", None),
         "moe_ffn_hidden_size": getattr(hf_config, "moe_intermediate_size", None),
@@ -86,10 +88,8 @@ def get_base_mcore_config_from_engine_config(engine_config: MindSpeedEngineConfi
         "use_distributed_optimizer": engine_config.use_distributed_optimizer,
         "seed": engine_config.seed,
     }
-    if engine_config.strategy == "mindspeed_llm":
-        base_config.update(engine_config.llm_kwargs)
-    elif engine_config.strategy == "mindspeed_mm":
-        base_config.update(engine_config.mm_kwargs)
+
+    base_config.update(engine_config.mcore_kwargs)
     return base_config
 
 

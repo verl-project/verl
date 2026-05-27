@@ -352,6 +352,14 @@ class VeOmniActorConfig(ActorConfig):
         """Validate VeOmni actor configuration parameters."""
         super().__post_init__()
         self.engine = self.veomni
+        if self.veomni.router_replay.mode != "disabled" and not self.use_remove_padding:
+            raise RuntimeError(
+                "router_replay requires use_remove_padding=True. In VeOmni engine, "
+                "the non-remove-padding path also disables Ulysses SP slicing and "
+                "the fused-kernel log_probs path, and is not a tested production "
+                "configuration for MoE routing replay. Set "
+                "actor.use_remove_padding=True or router_replay.mode='disabled'."
+            )
 
 
 @dataclass

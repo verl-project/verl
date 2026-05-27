@@ -28,6 +28,11 @@ router_replay:
 
 ## Quick Start Guide
 
+The config path differs by engine: `actor.megatron.router_replay.mode` for the
+Megatron engine, `actor.veomni.router_replay.mode` for the VeOmni engine.
+Examples below use `<engine>` as a placeholder — substitute `megatron` or
+`veomni`.
+
 ### Enabling R2 Mode
 
 #### Configuration File Method
@@ -35,15 +40,16 @@ Add the following to your training configuration:
 
 ```yaml
 actor:
-  router_replay:
-    mode: "R2"
+  <engine>:
+    router_replay:
+      mode: "R2"
 ```
 
 #### Command Line Method
 Enable R2 mode via command-line parameters:
 
 ```bash
-actor_rollout_ref.actor.router_replay.mode="R2"
+actor_rollout_ref.actor.<engine>.router_replay.mode="R2"
 ```
 
 ### Enabling R3 Mode
@@ -52,19 +58,20 @@ actor_rollout_ref.actor.router_replay.mode="R2"
 Configure both actor and rollout settings:
 
 ```yaml
-# Actor configuration
-router_replay:
-  mode: "R3"
+actor:
+  <engine>:
+    router_replay:
+      mode: "R3"
 
-# Rollout configuration  
-enable_rollout_routing_replay: True
+rollout:
+  enable_rollout_routing_replay: True
 ```
 
 #### Command Line Method
 Enable R3 mode via command-line parameters:
 
 ```bash
-actor_rollout_ref.actor.router_replay.mode="R3"
+actor_rollout_ref.actor.<engine>.router_replay.mode="R3"
 actor_rollout_ref.rollout.enable_rollout_routing_replay=True
 ```
 

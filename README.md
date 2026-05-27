@@ -48,7 +48,8 @@ verl is fast with:
 </p>
 
 ## News
-
+- [2026/05] [VeRL-Omni](https://github.com/verl-project/verl-omni) is pre-released: a unified RL stack for diffusion and omni-modal model post-training built on top of verl. Read the [blog post](https://vllm.ai/blog/2026-05-14-verl-omni) for details.
+- [2026/05] verl's zero-mismatch HuggingFace rollout [vexact](https://github.com/verl-project/vexact) is released: with batch-invariant kernels, shared model definition with FSDP, and out-of-box examples compatible with VeOmni.
 - [2026/04] verl's Megatron backend LoRA and router replay support is showcased at [PyTorch Conference Europe 2026](https://pytorchconferenceeu2026.sched.com/event/2Juce/optimizing-reinforcement-learning-at-trillion-parameter-scale-songlin-jiang-aalto-university-mind-lab).
 - [2026/03] verl is presented at NVIDIA GTC26: [session#1](https://www.nvidia.com/en-us/on-demand/session/gtc26-S81829/), [session#2](https://www.nvidia.com/en-us/on-demand/session/gtc26-S81620/)
 - [2026/01] verl has been migrated to the [verl-project](https://github.com/verl-project)
@@ -88,27 +89,18 @@ verl is fast with:
 
 - **FSDP**, **FSDP2** and **Megatron-LM** for training.
 - **vLLM**, **SGLang** and **HF Transformers** for rollout generation.
-- Compatible with Hugging Face Transformers and Modelscope Hub: [Qwen-3](https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3_8b_fsdp.sh), Qwen-2.5, Llama3.1, Gemma2, DeepSeek-LLM, etc
+- Compatible with Hugging Face Transformers and Modelscope Hub: Qwen3.5, Qwen3, Qwen-2.5, Llama3.1, Gemma2, DeepSeek-LLM, etc
 - Supervised fine-tuning.
 - Reinforcement learning with [PPO](examples/ppo_trainer/), [GRPO](examples/grpo_trainer/), [GSPO](https://github.com/verl-project/verl-recipe/tree/main/gspo/), [ReMax](examples/remax_trainer/), [REINFORCE++](https://verl.readthedocs.io/en/latest/examples/config.html#algorithm), [RLOO](examples/rloo_trainer/), [PRIME](https://github.com/verl-project/verl-recipe/tree/main/prime/), [DAPO](https://github.com/verl-project/verl-recipe/tree/main/dapo/), [DrGRPO](https://github.com/verl-project/verl-recipe/tree/main/drgrpo), [KL_Cov & Clip_Cov](https://github.com/verl-project/verl-recipe/tree/main/entropy) etc.
   - Support model-based reward and function-based reward (verifiable reward) for math, [coding](https://github.com/verl-project/verl-recipe/tree/main/dapo), etc
   - Support vision-language models (VLMs) and [multi-modal RL](examples/grpo_trainer/run_qwen2_5_vl_7b_fsdp.sh) with Qwen2.5-vl, Kimi-VL
-  - [Multi-turn with tool calling](https://github.com/verl-project/verl/tree/main/examples/sglang_multiturn)
+  - [Multi-turn with tool calling](examples/tutorial/agent_loop_get_started/)
 - LLM alignment recipes such as [Self-play preference optimization (SPPO)](https://github.com/verl-project/verl-recipe/tree/main/sppo)
 - Flash attention 2, sequence packing, sequence parallelism via DeepSpeed Ulysses, [LoRA](examples/tuning/lora/run_qwen3_8b_fsdp.sh), [Liger-kernel](examples/sft/gsm8k/run_qwen2_5_0_5b_fsdp.sh) (`USE_LIGER=1`).
 - Scales up to 671B models and hundreds of GPUs with [expert parallelism](https://github.com/verl-project/verl/pull/1467)
 - Multi-gpu [LoRA RL](https://verl.readthedocs.io/en/latest/advance/ppo_lora.html) support to save memory.
 - Experiment tracking with wandb, swanlab, mlflow and tensorboard.
-- Hardware Support: Supports NVIDIA, AMD, [Ascend](https://github.com/verl-project/verl/blob/main/docs/ascend_tutorial/quick_start/ascend_quick_start.rst)
-
-## Upcoming Features and Changes
-
-- Q3 Roadmap https://github.com/verl-project/verl/issues/2388
-- DeepSeek 671b optimizations with Megatron https://github.com/verl-project/verl/issues/1033
-- Multi-turn rollout and tools using optimizations https://github.com/verl-project/verl/issues/1882
-- [Agent integration](https://github.com/verl-project/verl/tree/main/verl/experimental/agent_loop)
-- Async and off-policy architecture https://github.com/verl-project/verl/pull/2231
-- List of breaking changes since v0.4 https://github.com/verl-project/verl/discussions/2270
+- Hardware Support: Supports NVIDIA, AMD, [Ascend](https://github.com/verl-project/verl/blob/main/docs/ascend_tutorial/README.md)
 
 ## Getting Started
 
@@ -221,6 +213,7 @@ Welcome to register your awesome project build with `verl` for other developers'
 - [SkyThought](https://github.com/NovaSky-AI/SkyThought): RL training for Sky-T1-7B by NovaSky AI team. ![GitHub Repo stars](https://img.shields.io/github/stars/NovaSky-AI/SkyThought)
 - [simpleRL-reason](https://github.com/hkust-nlp/simpleRL-reason): SimpleRL-Zoo: Investigating and Taming Zero Reinforcement Learning for Open Base Models in the Wild ![GitHub Repo stars](https://img.shields.io/github/stars/hkust-nlp/simpleRL-reason)
 - [Easy-R1](https://github.com/hiyouga/EasyR1): **Multi-modal** RL training framework ![GitHub Repo stars](https://img.shields.io/github/stars/hiyouga/EasyR1)
+- [RandOpt](https://github.com/sunrainyg/RandOpt): Neural Thickets: Diverse Task Experts Are Dense Around Pretrained Weights ![GitHub Repo stars](https://img.shields.io/github/stars/sunrainyg/RandOpt)
 - [OpenManus-RL](https://github.com/OpenManus/OpenManus-RL): LLM Agents RL tuning framework for multiple agent environments. ![GitHub Repo stars](https://img.shields.io/github/stars/OpenManus/OpenManus-RL)
 - [rllm](https://github.com/agentica-project/rllm): async RL training with [verl-pipeline](https://github.com/agentica-project/verl-pipeline) ![GitHub Repo stars](https://img.shields.io/github/stars/agentica-project/rllm)
 - [RAGEN](https://github.com/ZihanWang314/ragen): a general-purpose reasoning **agent** training framework ![GitHub Repo stars](https://img.shields.io/github/stars/ZihanWang314/ragen)
@@ -291,6 +284,7 @@ Welcome to register your awesome project build with `verl` for other developers'
 - [RuleReasoner](https://github.com/bigai-nlco/RuleReasoner): **RuleReasoner:** Reinforced Rule-based Reasoning via **Domain-aware Dynamic Sampling** (ICLR 2026) ![GitHub Repo stars](https://img.shields.io/github/stars/bigai-nlco/RuleReasoner)
 - [MetaphorStar](https://metaphorstar.github.io/): **Image Metaphor** Understanding and Reasoning with End-to-End **Visual Reinforcement Learning** ![GitHub Repo stars](https://img.shields.io/github/stars/MING-ZCH/MetaphorStar)
 - [DART-GUI](https://github.com/Computer-use-agents/dart-gui): a decoupled agentic RL framework for Computer Use Agents, achieving ~2× training speedup and ~5× environment utilization! ![GitHub Repo stars](https://img.shields.io/github/stars/Computer-use-agents/dart-gui)
+- [Rethinking OPD](https://github.com/thunlp/OPD): Rethinking On-Policy Distillation of Large Language Models: Phenomenology, Mechanism, and Recipe ![GitHub Repo stars](https://img.shields.io/github/stars/thunlp/OPD)
 
 ## Contribution Guide
 

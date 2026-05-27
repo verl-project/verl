@@ -1,7 +1,7 @@
 NPU 常见问题解答
 ================
 
-Last updated: 03/26/2026.
+Last updated: 05/13/2026.
 
 本文档总结了在 NPU 上执行 VERL 训练和推理时遇到的常见问题及解决方案。
 
@@ -78,6 +78,112 @@ Last updated: 03/26/2026.
 **原因**：MindSpeed版本过低
 
 **解决方案**：切换MindSpeed至 2.3.0_core_r0.12.1
+
+### Q3: "AssertionError: Weight ... is too large to fit in the bucket"
+
+**问题现象**：在分布式训练权重同步时，出现如下错误：
+
+.. code-block:: text
+
+   AssertionError: Weight model.embed_tokens.weight(torch.Size([151936, 4096]), torch.float32) is too large to fit in the bucket.
+   Please increase rollout.update_weights_bucket_megabytes(2048 MB).
+
+**原因**：模型某个权重张量的大小超过了权重传输 bucket 的默认容量（2048 MB）。在 verl 框架中，模型权重通过 bucket（缓冲区）进行分块打包传输。当单个权重张量超过 bucket 大小时，断言检查失败。
+
+**权重大小计算方法**：
+
+权重张量的内存占用（字节）= 各维度大小的乘积 × 每个元素的字节数
+
+其中数据类型对应的字节数为：
+
+- ``torch.float32`` → 4 字节
+- ``torch.float16`` / ``torch.bfloat16`` → 2 字节
+- ``torch.int8`` → 1 字节
+
+以本例中的 ``model.embed_tokens.weight`` 为例：
+
+.. code-block:: text
+
+   张量形状: torch.Size([151936, 4096])
+   数据类型: torch.float32 (4 字节)
+   权重大小 = 151936 × 4096 × 4 = 2,483,027,968 字节 ≈ 2369 MB
+
+   默认 bucket 大小 = 2048 MB < 2369 MB → 触发断言失败
+
+**解决方案**：在启动训练时增加 ``update_weights_bucket_megabytes`` 参数，使 bucket 容量大于最大权重张量的内存占用：
+
+.. code-block:: bash
+
+   actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=4096
+
+**参数值选择建议**：
+
+1. **计算模型中最大权重张量的内存占用**：遍历模型所有参数，找出 ``nbytes`` 最大的那个，将其转换为 MB（除以 1024²）。
+
+2. **向上取整到 2 的幂次**：为便于内存分配和管理，建议将计算结果向上取整到最近的 2 的幂次（如 2048、4096、8192 等）。例如最大权重为 2369 MB，则取 4096 MB。
+
+3. **预留适当余量**：考虑到内存对齐和运行时开销，建议 bucket 大小至少为最大权重大小的 1.2~1.5 倍，再向上取整到 2 的幂次。
+
+4. **注意内存限制**：bucket 大小会直接影响 worker 节点的内存占用，设置过大会导致 OOM。应在满足权重传输需求的前提下，尽量选择较小的值。
+
+**常见模型的推荐值**：
+
+.. list-table::
+   :header-rows: 1
+
+   * - 模型规模
+     - 典型最大权重形状
+     - 推荐 bucket 大小
+   * - 7B (Qwen2 等)
+     - [151936, 4096] float32
+     - 4096 MB
+   * - 14B
+     - [152064, 5120] float32
+     - 4096 MB
+   * - 72B
+     - [152064, 8192] float32
+     - 8192 MB
+
+### Q4: 非共享存储下 checkpoint 加载失败，找不到 common.pt / .metadata / metadata.json
+
+**问题现象**：使用 verl + Megatron 后端在**非共享存储**的多机环境下，保存 checkpoint 正常，但重新加载时报错，提示找不到以下文件：
+
+.. code-block:: text
+
+   FileNotFoundError: common.pt
+   FileNotFoundError: .metadata
+   FileNotFoundError: metadata.json
+
+**原因**：当前 checkpoint 机制对非共享存储的支持不完善。具体表现为：
+
+- **分布式训练权重是分节点保存的**，每个节点只保存自己负责的分片权重，不会只在主节点保存全部权重。
+- 但 ``common.pt``、``.metadata``、``metadata.json`` 等元数据文件**仅保存在执行保存操作的节点上**（通常是 rank 0 所在节点），其他节点本地没有这些文件。
+- 加载 checkpoint 时，每个节点都需要读取这些元数据文件来还原模型状态，但非共享存储下其他节点本地路径中不存在这些文件，导致加载失败。
+
+**临时解决方案**：手动将元数据文件从保存节点复制到所有其他节点：
+
+.. code-block:: bash
+
+   # 假设 checkpoint 保存在 rank 0 节点的 /path/to/ckpt/ 目录下
+   # 将元数据文件从 rank 0 节点复制到其他所有节点
+
+   # 需要复制的文件
+   /path/to/ckpt/common.pt
+   /path/to/ckpt/.metadata
+   /path/to/ckpt/metadata.json
+
+   # 示例：使用 scp 复制到其他节点
+   scp /path/to/ckpt/common.pt node1:/path/to/ckpt/
+   scp /path/to/ckpt/.metadata node1:/path/to/ckpt/
+   scp /path/to/ckpt/metadata.json node1:/path/to/ckpt/
+
+   # 对所有节点重复上述操作
+
+**注意事项**：
+
+- 每次保存 checkpoint 后都需要重新复制元数据文件，因为保存操作可能会更新这些文件的内容。
+- 如果训练过程中频繁保存 checkpoint（如按步数自动保存），建议编写脚本在保存后自动触发复制，避免遗漏。
+- 长期方案应等待框架层面支持非共享存储的 checkpoint 加载，使元数据文件能自动同步到所有节点。
 
 参考资料
 --------

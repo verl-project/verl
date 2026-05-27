@@ -93,7 +93,6 @@ ACTOR_CONFIG="
 
 CONFIG_NAME=ppo_trainer
 ACTOR_CONFIG="$ACTOR_CONFIG $ACTOR_VEOMNI_CONFIG"
-CIRITC_CONFIG=""
 
 # ===================================== Inference =====================================
 rollout_name=sglang
@@ -156,7 +155,6 @@ TRAINER=(
 EXTRA=(
     model_engine=$model_engine
     $ACTOR_CONFIG
-    $CIRITC_CONFIG
     $ROLLOUT_CONFIG
 )
 

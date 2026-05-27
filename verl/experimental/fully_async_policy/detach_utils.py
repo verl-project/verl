@@ -15,7 +15,7 @@ import asyncio
 import time
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 import torch
@@ -37,15 +37,6 @@ class RolloutSample:
 
     # Processing metadata
     rollout_status: dict[str, Any]
-
-
-@dataclass
-class ValidateMetrics:
-    """Metrics for validation"""
-
-    timing_raw: dict[str, Any]
-    metrics: Optional[dict[str, Any]] = None
-    val_generations: Optional[list[tuple]] = None
 
 
 def prepare_single_generation_data(batch_dict, config) -> DataProto:
