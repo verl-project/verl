@@ -861,6 +861,19 @@ class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
             model_inputs["shift_labels"] = shift_labels
             model_inputs["return_log_probs"] = True
 
+            # Pass teacher top-K tensors so ForCausalLMLoss routes to
+            # chunk_topk_distill_function for fused distillation.
+            # Guard on key existence: the tinker_router path uses these keys,
+            # while verl's native distillation path uses different keys
+            # (teacher_logprobs / teacher_ids) and relies on the eager
+            # logit-processor instead.
+            distillation_use_topk = tu.get_non_tensor_data(
+                data=micro_batch, key="distillation_use_topk", default=False
+            )
+            if distillation_use_topk and "teacher_topk_ids" in micro_batch.keys():
+                model_inputs["teacher_topk_ids"] = micro_batch["teacher_topk_ids"].values().unsqueeze(0)
+                model_inputs["teacher_topk_log_probs"] = micro_batch["teacher_topk_log_probs"].values().unsqueeze(0)
+
         # Router replay plumbing. Two responsibilities:
         #   (1) snapshot the ulysses pad_size for this micro-batch so
         #       forward_backward_batch can trim it during RECORD aggregation;
