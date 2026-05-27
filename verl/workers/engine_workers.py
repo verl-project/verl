@@ -696,7 +696,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # 0. send_weights only for async training with disaggregated trainer and rollout
         if effective_mode != "naive":
             per_tensor_param, _ = self.actor.engine.get_per_tensor_param()
-            await self.checkpoint_engine.send_weights(per_tensor_param)
+            await self.checkpoint_engine.send_weights(per_tensor_param, global_steps=global_steps)
             return
 
         set_expandable_segments(False)
