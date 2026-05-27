@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
 # On-policy distillation | multi-teacher (gsm8k text + geo3k VL) | vLLM rollout | VeOmni training | NVIDIA GPUs
 #
-# VeOmni engine variant of the FSDP OPD script. Key difference:
+# VeOmni engine variant of the FSDP OPD script. Key differences:
 #   - model_engine=veomni for FSDP2-based training
-#   - use_fused_kernels=True enables veomni's chunk_topk_distill kernel,
-#     which computes the top-K forward-KL distillation loss without
-#     materializing the full [B, L, V] logits tensor — saving significant
-#     GPU memory for large-vocabulary models.
+#   - use_fused_kernels=True enables veomni's fused-linear kernels:
+#     * For RL/SFT batches: fused log-prob + entropy (no logits materialization)
+#     * For top-K distillation batches with teacher_topk_ids in the TD:
+#       veomni's chunk_topk_distill kernel computes the top-K forward-KL
+#       distillation loss without materializing [B, L, V] logits — saving
+#       significant GPU memory for large-vocabulary models.
+#   Without use_fused_kernels, the vanilla FSDP actor materializes full
+#   [B, L, V] logits and computes distillation loss eagerly. The VeOmni fused
+#   chunk_topk_distill path avoids this by streaming the lm_head
+#   projection chunk-by-chunk.
 
 set -xeuo pipefail
 

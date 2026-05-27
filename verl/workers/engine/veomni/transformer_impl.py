@@ -871,6 +871,11 @@ class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
                 data=micro_batch, key="distillation_use_topk", default=False
             )
             if distillation_use_topk and "teacher_topk_ids" in micro_batch.keys():
+                if "teacher_topk_log_probs" not in micro_batch.keys():
+                    raise ValueError(
+                        "teacher_topk_ids present without teacher_topk_log_probs; "
+                        "both must be provided together for fused top-K distillation."
+                    )
                 model_inputs["teacher_topk_ids"] = micro_batch["teacher_topk_ids"].values().unsqueeze(0)
                 model_inputs["teacher_topk_log_probs"] = micro_batch["teacher_topk_log_probs"].values().unsqueeze(0)
 
