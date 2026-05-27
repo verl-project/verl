@@ -677,80 +677,10 @@ def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_cod
 
 _architecture_to_auto_class = {
     "ForCausalLM": AutoModelForCausalLM,
-    "Qwen3OmniMoeForConditionalGeneration": AutoModelForCausalLM,
     "ForVision2Seq": AutoModelForVision2Seq,
     "ForTokenClassification": AutoModelForTokenClassification,
     "ForSequenceClassification": AutoModelForSequenceClassification,
 }
-
-# Register Qwen3-Omni Thinker in AutoModelForCausalLM so verl's FSDP engine can load it.
-# Qwen3OmniMoe uses the "ForConditionalGeneration" suffix but is a decoder-only causal LM.
-try:
-    from transformers.models.qwen3_omni_moe import (
-        Qwen3OmniMoeConfig,
-        Qwen3OmniMoeForConditionalGeneration,
-    )
-
-    def _qwen3_omni_get_input_embeddings(self):
-        return self.thinker.get_input_embeddings()
-
-    def _qwen3_omni_set_input_embeddings(self, value):
-        self.thinker.set_input_embeddings(value)
-
-    def _qwen3_omni_forward(
-        self,
-        input_ids=None,
-        attention_mask=None,
-        position_ids=None,
-        past_key_values=None,
-        inputs_embeds=None,
-        labels=None,
-        use_cache=None,
-        output_attentions=None,
-        output_hidden_states=None,
-        return_dict=None,
-        **kwargs,
-    ):
-        return self.thinker(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            past_key_values=past_key_values,
-            inputs_embeds=inputs_embeds,
-            labels=labels,
-            use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-            **kwargs,
-        )
-
-    Qwen3OmniMoeForConditionalGeneration.forward = _qwen3_omni_forward
-    Qwen3OmniMoeForConditionalGeneration.get_input_embeddings = _qwen3_omni_get_input_embeddings
-    Qwen3OmniMoeForConditionalGeneration.set_input_embeddings = _qwen3_omni_set_input_embeddings
-    # _no_split_modules in upstream incorrectly references Qwen3OmniMoeDecoderLayer
-    # (does not exist); the actual Thinker decoder layer is Qwen3OmniMoeThinkerTextDecoderLayer.
-    Qwen3OmniMoeForConditionalGeneration._no_split_modules = ["Qwen3OmniMoeThinkerTextDecoderLayer"]
-    Qwen3OmniMoeForConditionalGeneration._verl_strip_modules = [
-        "talker",
-        "code2wav",
-        "code_predictor",
-    ]
-
-    # tie_word_embeddings=True forces use_meta_tensor=False during FSDP init,
-    # which OOMs on a 30B-A3B base. Use a no-op descriptor to override at the
-    # config class level (so config __init__ assignments are tolerated).
-    class _FalseTieDescriptor:
-        def __get__(self, obj, objtype=None):
-            return False
-
-        def __set__(self, obj, value):
-            pass
-
-    Qwen3OmniMoeConfig.tie_word_embeddings = _FalseTieDescriptor()
-    AutoModelForCausalLM.register(Qwen3OmniMoeConfig, Qwen3OmniMoeForConditionalGeneration)
-except ImportError:
-    pass
 
 
 def get_hf_auto_model_class(hf_config):

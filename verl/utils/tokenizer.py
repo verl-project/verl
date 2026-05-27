@@ -218,17 +218,6 @@ def hf_processor(name_or_path, **kwargs):
                 from transformers.models.qwen3_vl import Qwen3VLModel
 
                 model_class = Qwen3VLModel
-            case "Qwen3OmniMoeProcessor":
-                from transformers.models.qwen3_omni_moe import Qwen3OmniMoeThinkerForConditionalGeneration
-
-                model_class = Qwen3OmniMoeThinkerForConditionalGeneration
-                # Token IDs / spatial_merge_size live on thinker_config, not the
-                # top-level Qwen3OmniMoeConfig that AutoConfig returned.
-                processor.config = config.thinker_config
-                processor.spatial_merge_size = config.thinker_config.vision_config.spatial_merge_size
-                processor.get_llm_pos_ids_for_vision = types.MethodType(
-                    model_class.get_llm_pos_ids_for_vision, processor
-                )
             case "Glm4vImageProcessor":
                 from transformers.models.glm4v import Glm4vModel
 

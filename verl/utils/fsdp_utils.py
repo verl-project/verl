@@ -631,7 +631,7 @@ def fsdp2_clip_grad_norm_(parameters, max_norm, norm_type=2.0, error_if_nonfinit
     return total_norm
 
 
-def layered_summon_lora_params(fsdp_module, is_diffusers=False) -> OrderedDict:
+def layered_summon_lora_params(fsdp_module) -> OrderedDict:
     """Collect LoRA params one FSDP unit at a time to keep peak GPU memory low.
 
     Iterates every FSDP unit (parent before child via named_modules order) and
@@ -661,7 +661,18 @@ def layered_summon_lora_params(fsdp_module, is_diffusers=False) -> OrderedDict:
         if clean_prefix.endswith(".model") or clean_prefix.endswith(".layers"):
             continue
 
-        with FSDP.summon_full_params(submodule, writeback=False):
+        # FSDP1 needs the explicit summon context + ``_is_root`` toggling;
+        # FSDP2 modules expose params as ``DTensor`` and ``param.full_tensor()``
+        # all-gathers on demand, so no context is required and they have no
+        # ``_is_root`` attribute.
+        is_fsdp1 = fsdp_version(submodule) == 1
+        if is_fsdp1:
+            submodule._is_root = True
+        summon_ctx = (
+            FSDP.summon_full_params(submodule, writeback=False) if is_fsdp1 else nullcontext()
+        )
+
+        with summon_ctx:
             sub_lora_params = get_peft_model_state_dict(peft_model, state_dict=submodule.state_dict())
             if not sub_lora_params:
                 continue
@@ -672,14 +683,15 @@ def layered_summon_lora_params(fsdp_module, is_diffusers=False) -> OrderedDict:
                 for key, param in sub_lora_params.items()
             }
             lora_params.update(sub_lora_params)
-            submodule._is_root = False
+            if is_fsdp1:
+                submodule._is_root = False
         get_torch_device().empty_cache()
 
     return lora_params
 
 
 def collect_lora_params(
-    module: FSDP, layered_summon: bool, base_sync_done: bool, is_diffusers: bool = False
+    module: FSDP, layered_summon: bool, base_sync_done: bool
 ) -> OrderedDict:
     """
     collect lora params or full params if base model is not ready in vllm
@@ -696,12 +708,21 @@ def collect_lora_params(
                     "To use layered_summon, you must make sure base-model is preloaded in vllm, e.g. let "
                     "rollout.load_format=safetensors"
                 )
-            lora_params = layered_summon_lora_params(module, is_diffusers=is_diffusers)
+            lora_params = layered_summon_lora_params(module)
             if not lora_params:
                 import logging
 
                 logging.getLogger(__name__).warning("layered_summon returned empty, falling back to full summon")
-                with FSDP.summon_full_params(module, writeback=False, offload_to_cpu=True):
+                # FSDP2 ``DTensor`` params don't need a summon context;
+                # ``param.full_tensor()`` below does the all-gather. FSDP1
+                # still needs the explicit context.
+                is_fsdp1 = fsdp_version(module) == 1
+                summon_ctx = (
+                    FSDP.summon_full_params(module, writeback=False, offload_to_cpu=True)
+                    if is_fsdp1
+                    else nullcontext()
+                )
+                with summon_ctx:
                     lora_params = get_peft_model_state_dict(peft_model)
                     lora_params = {
                         name: param.full_tensor().detach().cpu()
