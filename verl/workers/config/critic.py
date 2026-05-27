@@ -216,13 +216,6 @@ class FSDPCriticConfig(CriticConfig):
         # falls back to FSDP1 even when critic.strategy="fsdp2".
         object.__setattr__(self.engine, "strategy", self.strategy)
 
-        if self.strategy in {"fsdp", "fsdp2"}:
-            if self.ulysses_sequence_parallel_size > 1:
-                if not self.model.get("use_remove_padding", False):
-                    raise ValueError(
-                        "When using sequence parallelism for critic, you must enable `use_remove_padding`."
-                    )
-
     def validate(self, n_gpus: int, train_batch_size: int):
         """Validate FSDP critic configuration with runtime parameters."""
         super().validate(n_gpus, train_batch_size)

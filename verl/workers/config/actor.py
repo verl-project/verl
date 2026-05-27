@@ -324,12 +324,6 @@ class FSDPActorConfig(ActorConfig):
         """Validate FSDP actor configuration with runtime parameters."""
         super().validate(n_gpus, train_batch_size, model_config)
 
-        if self.strategy in {"fsdp", "fsdp2"} and self.ulysses_sequence_parallel_size > 1:
-            if model_config and not model_config.get("use_remove_padding", False):
-                raise ValueError(
-                    "When using sequence parallelism for actor/ref policy, you must enable `use_remove_padding`."
-                )
-
 
 @dataclass
 class VeOmniActorConfig(ActorConfig):
