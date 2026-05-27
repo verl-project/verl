@@ -173,7 +173,6 @@ def _run_compare_test(model_path: str, prompt: str, model_name: str):
         # Wait for model compilation and engine initialization to complete before weight update
         # This prevents shared memory broadcast from blocking during compilation
         # ACL graph compilation for Moonlight-16B can take 1-2 minutes
-        time.sleep(120)  # Wait for ACL graph compilation and engine setup to finish
         _update_weights(dummy_server, model_path)
         ray.get(dummy_server.set_global_steps.remote(1))
         dummy_text = _generate(dummy_server, prompt, "dummy", model_path)
