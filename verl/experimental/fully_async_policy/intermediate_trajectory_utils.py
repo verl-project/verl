@@ -414,6 +414,44 @@ def _build_one_intermediate_row(
     if routed_experts_padded is not None:
         tensor_batch["routed_experts"] = routed_experts_padded
 
+    traj_extra = traj.get("extra_fields", {}) or {}
+    teacher_ids_raw = traj_extra.get("teacher_ids")
+    teacher_logprobs_raw = traj_extra.get("teacher_logprobs")
+    if (teacher_ids_raw is None) != (teacher_logprobs_raw is None):
+        raise ValueError(
+            "Intermediate trajectory must carry both teacher_ids and teacher_logprobs, "
+            f"got teacher_ids={teacher_ids_raw is not None}, teacher_logprobs={teacher_logprobs_raw is not None}."
+        )
+    if teacher_ids_raw is not None and teacher_logprobs_raw is not None:
+        from verl.experimental.teacher_loop.teacher_manager import _pad_teacher_outputs
+
+        teacher_ids = teacher_ids_raw if isinstance(teacher_ids_raw, torch.Tensor) else torch.tensor(teacher_ids_raw)
+        teacher_logprobs = (
+            teacher_logprobs_raw
+            if isinstance(teacher_logprobs_raw, torch.Tensor)
+            else torch.tensor(teacher_logprobs_raw)
+        )
+        if teacher_ids.shape != teacher_logprobs.shape:
+            raise ValueError(
+                f"Intermediate teacher_ids shape {tuple(teacher_ids.shape)} must match teacher_logprobs shape "
+                f"{tuple(teacher_logprobs.shape)}."
+            )
+        if teacher_logprobs.ndim != 2:
+            raise ValueError(
+                f"Intermediate teacher outputs must have shape [seq_len, k], got {tuple(teacher_logprobs.shape)}."
+            )
+        padded_teacher_ids, padded_teacher_logprobs = _pad_teacher_outputs(
+            teacher_ids=teacher_ids,
+            teacher_logprobs=teacher_logprobs,
+            prompt_width=rollout_config.prompt_length,
+            response_width=rollout_config.response_length,
+            prompt_length=len(prompt_ids),
+            response_length=len(response_ids),
+            pad_token_id=tokenizer.pad_token_id,
+        )
+        tensor_batch["teacher_ids"] = padded_teacher_ids
+        tensor_batch["teacher_logprobs"] = padded_teacher_logprobs
+
     # rm_scores: set the last response token's score to the shared reward.
     # Prefer the top-level ``reward_score`` field (AgentLoopOutput schema);
     # fall back to ``extra_fields.reward_score`` for backward compatibility.
@@ -463,7 +501,6 @@ def _build_one_intermediate_row(
     # ``DataProto.concat`` to fail because the main row would be missing
     # those keys.  Fields like ``reward_score`` are already expressed via
     # the ``rm_scores`` tensor and do not need a non_tensor duplicate.
-    traj_extra = traj.get("extra_fields", {}) or {}
     # Only forward extra_fields keys that the parent (main) row already has.
     parent_keys = set(inherited_non_tensor.keys())
     overlay = {

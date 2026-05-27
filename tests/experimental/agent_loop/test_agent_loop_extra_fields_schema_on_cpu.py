@@ -15,13 +15,16 @@
 from __future__ import annotations
 
 import warnings
+from types import SimpleNamespace
 from typing import Any, Optional
 
 import numpy as np
 import pytest
 import torch
 from omegaconf import OmegaConf
+from tensordict import TensorDict
 
+from verl import DataProto
 from verl.experimental.agent_loop.agent_loop import (
     AgentLoopMetrics,
     AgentLoopOutput,
@@ -30,6 +33,10 @@ from verl.experimental.agent_loop.agent_loop import (
     _InternalAgentLoopOutput,
 )
 from verl.experimental.agent_loop.single_turn_agent_loop import SingleTurnAgentLoop
+from verl.experimental.fully_async_policy.image_refs import INTERMEDIATE_TRAJECTORIES_KEY
+from verl.experimental.fully_async_policy.intermediate_trajectory_utils import (
+    expand_intermediate_trajectories_pre_log_prob,
+)
 from verl.utils.dataset.rl_dataset import RLHFDataset
 from verl.workers.rollout.replica import TokenOutput
 
@@ -66,6 +73,7 @@ class _FakeServerManager:
 
 class _FakeTokenizer:
     padding_side = "right"
+    pad_token_id = 0
 
     def apply_chat_template(
         self,
@@ -82,7 +90,7 @@ class _FakeTokenizer:
 
     def pad(
         self,
-        encoded_inputs: dict[str, list[int]],
+        encoded_inputs: dict[str, list[int]] | list[dict[str, list[int]]],
         *,
         padding: str,
         max_length: int,
@@ -90,7 +98,10 @@ class _FakeTokenizer:
         return_attention_mask: bool,
     ) -> dict[str, torch.Tensor]:
         del padding, return_tensors
-        input_ids = encoded_inputs["input_ids"]
+        if isinstance(encoded_inputs, list):
+            input_ids = encoded_inputs[0]["input_ids"]
+        else:
+            input_ids = encoded_inputs["input_ids"]
         if len(input_ids) > max_length:
             if self.padding_side == "left":
                 input_ids = input_ids[-max_length:]
@@ -119,6 +130,13 @@ def _pad_1d(ids: list[int], *, length: int, pad_id: int = 0) -> list[int]:
     if len(ids) > length:
         return ids[:length]
     return ids + [pad_id] * (length - len(ids))
+
+
+def _object_array(values: list[Any]) -> np.ndarray:
+    arr = np.empty(len(values), dtype=object)
+    for idx, value in enumerate(values):
+        arr[idx] = value
+    return arr
 
 
 def _to_internal(
@@ -164,6 +182,32 @@ def _to_internal(
         metrics=metrics,
         extra_fields=extra_fields,
     )
+
+
+class _FakeTeacherManager:
+    def __init__(self, *, use_topk: bool = False, topk: int = 1):
+        self.distillation_loss_config = SimpleNamespace(
+            loss_settings=SimpleNamespace(use_topk=use_topk),
+            topk=topk,
+        )
+        self.calls: list[tuple[list[int], Optional[str]]] = []
+
+    async def compute_teacher_logprobs_single(
+        self,
+        *,
+        sequence_ids: list[int],
+        multi_modal_data: Optional[dict[str, Any]] = None,
+        routing_key: Optional[str] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        del multi_modal_data
+        self.calls.append((list(sequence_ids), routing_key))
+        k = self.distillation_loss_config.topk if self.distillation_loss_config.loss_settings.use_topk else 1
+        teacher_ids = torch.tensor(
+            [[token + offset for offset in range(k)] for token in sequence_ids],
+            dtype=torch.int32,
+        )
+        teacher_logprobs = torch.full((len(sequence_ids), k), -0.5, dtype=torch.float32)
+        return teacher_ids, teacher_logprobs
 
 
 @pytest.mark.asyncio
@@ -260,6 +304,7 @@ async def test_agent_loop_postprocess_accepts_read_only_routed_experts_on_cpu():
         _compute_score = AgentLoopWorker._compute_score
         _compute_teacher_logprobs = AgentLoopWorker._compute_teacher_logprobs
         distillation_enabled = False
+        image_refs_enabled = False
 
         def __init__(self):
             self.tokenizer = _FakeTokenizer()
@@ -299,3 +344,117 @@ async def test_agent_loop_postprocess_accepts_read_only_routed_experts_on_cpu():
     torch.testing.assert_close(internal.routed_experts[:, 2:6], expected)
     assert torch.count_nonzero(internal.routed_experts[:, :2]) == 0
     assert torch.count_nonzero(internal.routed_experts[:, 6:]) == 0
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_postprocess_adds_teacher_targets_to_intermediate_trajectories_on_cpu():
+    class _DummyWorker:
+        _compute_multi_modal_inputs = AgentLoopWorker._compute_multi_modal_inputs
+        _compute_position_ids = AgentLoopWorker._compute_position_ids
+        _compute_score = AgentLoopWorker._compute_score
+        _compute_teacher_logprobs = AgentLoopWorker._compute_teacher_logprobs
+        _compute_intermediate_teacher_logprobs = AgentLoopWorker._compute_intermediate_teacher_logprobs
+        _compute_teacher_logprobs_for_sequence = AgentLoopWorker._compute_teacher_logprobs_for_sequence
+        _validate_teacher_logprob_shape = AgentLoopWorker._validate_teacher_logprob_shape
+        distillation_enabled = True
+        teacher_key = "data_source"
+        image_refs_enabled = False
+
+        def __init__(self):
+            self.tokenizer = _FakeTokenizer()
+            self.rollout_config = OmegaConf.create({"prompt_length": 4, "response_length": 4})
+            self.processor = None
+            self.reward_loop_worker_handles = None
+            self.teacher_server_manager = _FakeTeacherManager(use_topk=False)
+
+    output = AgentLoopOutput(
+        prompt_ids=[101, 102],
+        response_ids=[11, 12],
+        response_mask=[1, 1],
+        metrics=AgentLoopMetrics(),
+        extra_fields={
+            INTERMEDIATE_TRAJECTORIES_KEY: [
+                {
+                    "prompt_ids": [201, 202],
+                    "response_ids": [21],
+                    "response_mask": [1],
+                    "metrics": AgentLoopMetrics().model_dump(),
+                    "extra_fields": {},
+                }
+            ],
+        },
+    )
+
+    worker = _DummyWorker()
+    internal = await AgentLoopWorker._agent_loop_postprocess(
+        worker,
+        output,
+        validate=False,
+        raw_prompt=[{"role": "user", "content": "hi"}],
+        data_source="math",
+    )
+
+    assert internal.teacher_ids is not None
+    assert internal.teacher_logprobs is not None
+    assert internal.teacher_ids.shape == (1, 8, 1)
+    intermediate = internal.extra_fields[INTERMEDIATE_TRAJECTORIES_KEY][0]
+    assert intermediate["extra_fields"]["teacher_ids"].shape == (3, 1)
+    assert intermediate["extra_fields"]["teacher_logprobs"].shape == (3, 1)
+    assert worker.teacher_server_manager.calls == [([101, 102, 11, 12], "math"), ([201, 202, 21], "math")]
+
+
+@pytest.mark.parametrize("topk", [1, 3])
+def test_expand_intermediate_trajectories_preserves_teacher_targets_on_cpu(topk: int):
+    prompt_length = 4
+    response_length = 4
+    seq_len = prompt_length + response_length
+    final_teacher_ids = torch.arange(seq_len * topk, dtype=torch.int32).view(1, seq_len, topk)
+    final_teacher_logprobs = torch.full((1, seq_len, topk), -1.0, dtype=torch.float32)
+    batch = TensorDict(
+        {
+            "prompts": torch.tensor([[0, 0, 101, 102]], dtype=torch.long),
+            "responses": torch.tensor([[11, 12, 0, 0]], dtype=torch.long),
+            "response_mask": torch.tensor([[1, 1, 0, 0]], dtype=torch.long),
+            "attention_mask": torch.tensor([[0, 0, 1, 1, 1, 1, 0, 0]], dtype=torch.long),
+            "input_ids": torch.tensor([[0, 0, 101, 102, 11, 12, 0, 0]], dtype=torch.long),
+            "position_ids": torch.arange(seq_len, dtype=torch.long).unsqueeze(0),
+            "teacher_ids": final_teacher_ids,
+            "teacher_logprobs": final_teacher_logprobs,
+        },
+        batch_size=1,
+    )
+    raw_teacher_ids = torch.arange(3 * topk, dtype=torch.int32).view(3, topk)
+    raw_teacher_logprobs = torch.full((3, topk), -0.25, dtype=torch.float32)
+    data = DataProto(
+        batch=batch,
+        non_tensor_batch={
+            INTERMEDIATE_TRAJECTORIES_KEY: _object_array(
+                [
+                    [
+                        {
+                            "prompt_ids": [201, 202],
+                            "response_ids": [21],
+                            "response_mask": [1],
+                            "extra_fields": {
+                                "teacher_ids": raw_teacher_ids,
+                                "teacher_logprobs": raw_teacher_logprobs,
+                            },
+                        }
+                    ]
+                ]
+            )
+        },
+    )
+
+    expanded = expand_intermediate_trajectories_pre_log_prob(
+        data,
+        tokenizer=_FakeTokenizer(),
+        processor=None,
+        rollout_config=OmegaConf.create({"prompt_length": prompt_length, "response_length": response_length}),
+        rollout_n=1,
+    )
+
+    assert len(expanded) == 2
+    assert expanded.batch["teacher_ids"].shape == (2, seq_len, topk)
+    assert expanded.batch["teacher_logprobs"].shape == (2, seq_len, topk)
+    torch.testing.assert_close(expanded.batch["teacher_logprobs"][1, 2:5], raw_teacher_logprobs)

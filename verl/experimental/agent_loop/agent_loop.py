@@ -46,7 +46,11 @@ from tensordict import TensorDict
 from transformers import AutoProcessor, AutoTokenizer
 
 from verl.experimental.agent_loop.utils import resolve_config_path
-from verl.experimental.fully_async_policy.image_refs import MULTI_MODAL_DATA_KEY, image_refs_enabled
+from verl.experimental.fully_async_policy.image_refs import (
+    INTERMEDIATE_TRAJECTORIES_KEY,
+    MULTI_MODAL_DATA_KEY,
+    image_refs_enabled,
+)
 from verl.protocol import DataProto
 from verl.tools.utils.function_tool import FunctionTool, load_function_tools_from_path
 from verl.trainer.distillation import is_distillation_enabled
@@ -753,13 +757,29 @@ class AgentLoopWorker:
             position_ids=position_ids,
             kwargs=kwargs,
         )
-        await self._compute_teacher_logprobs(
-            output,
-            prompt_ids=output.prompt_ids,
-            response_ids=output.response_ids,
-            validate=validate,
-            sample_kwargs=kwargs,
-        )
+        if self.distillation_enabled and not validate:
+            await asyncio.gather(
+                self._compute_teacher_logprobs(
+                    output,
+                    prompt_ids=output.prompt_ids,
+                    response_ids=output.response_ids,
+                    validate=validate,
+                    sample_kwargs=kwargs,
+                ),
+                self._compute_intermediate_teacher_logprobs(
+                    output,
+                    validate=validate,
+                    sample_kwargs=kwargs,
+                ),
+            )
+        else:
+            await self._compute_teacher_logprobs(
+                output,
+                prompt_ids=output.prompt_ids,
+                response_ids=output.response_ids,
+                validate=validate,
+                sample_kwargs=kwargs,
+            )
         teacher_ids, teacher_logprobs = (
             output.extra_fields.pop("teacher_ids", None),
             output.extra_fields.pop("teacher_logprobs", None),
@@ -879,19 +899,92 @@ class AgentLoopWorker:
     ) -> None:
         """Compute teacher logprobs for single sample."""
         if self.distillation_enabled and not validate:
-            routing_key = None
-            if sample_kwargs is not None:
-                routing_value = sample_kwargs.get(self.teacher_key)
-                if routing_value is not None:
-                    # Non-tensor batch values arrive as 0-d numpy objects / arrays; normalize to Python.
-                    routing_key = routing_value.item() if hasattr(routing_value, "item") else routing_value
-            teacher_ids, teacher_logprobs = await self.teacher_server_manager.compute_teacher_logprobs_single(
-                sequence_ids=prompt_ids + response_ids,
+            teacher_ids, teacher_logprobs = await self._compute_teacher_logprobs_for_sequence(
+                prompt_ids=prompt_ids,
+                response_ids=response_ids,
                 multi_modal_data=output.multi_modal_data,
-                routing_key=routing_key,
+                sample_kwargs=sample_kwargs,
             )
             output.extra_fields["teacher_ids"] = teacher_ids
             output.extra_fields["teacher_logprobs"] = teacher_logprobs
+
+    async def _compute_intermediate_teacher_logprobs(
+        self,
+        output: AgentLoopOutput,
+        validate: bool,
+        sample_kwargs: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """Compute teacher logprobs for packed intermediate trajectories."""
+        if not self.distillation_enabled or validate:
+            return
+
+        intermediate_trajectories = output.extra_fields.get(INTERMEDIATE_TRAJECTORIES_KEY)
+        if not intermediate_trajectories:
+            return
+
+        tasks = []
+        trajectories = []
+        for trajectory in intermediate_trajectories:
+            if not isinstance(trajectory, dict):
+                raise TypeError(
+                    f"Expected packed intermediate trajectory to be a dict, got {type(trajectory).__name__}."
+                )
+            tasks.append(
+                self._compute_teacher_logprobs_for_sequence(
+                    prompt_ids=trajectory["prompt_ids"],
+                    response_ids=trajectory["response_ids"],
+                    multi_modal_data=trajectory.get("multi_modal_data"),
+                    sample_kwargs=sample_kwargs,
+                )
+            )
+            trajectories.append(trajectory)
+
+        for trajectory, (teacher_ids, teacher_logprobs) in zip(trajectories, await asyncio.gather(*tasks), strict=True):
+            extra_fields = trajectory.setdefault("extra_fields", {})
+            extra_fields["teacher_ids"] = teacher_ids
+            extra_fields["teacher_logprobs"] = teacher_logprobs
+
+    async def _compute_teacher_logprobs_for_sequence(
+        self,
+        prompt_ids: list[int],
+        response_ids: list[int],
+        multi_modal_data: Optional[dict[str, Any]] = None,
+        sample_kwargs: Optional[dict[str, Any]] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        routing_key = None
+        if sample_kwargs is not None:
+            routing_value = sample_kwargs.get(self.teacher_key)
+            if routing_value is not None:
+                # Non-tensor batch values arrive as 0-d numpy objects / arrays; normalize to Python.
+                routing_key = routing_value.item() if hasattr(routing_value, "item") else routing_value
+
+        teacher_ids, teacher_logprobs = await self.teacher_server_manager.compute_teacher_logprobs_single(
+            sequence_ids=list(prompt_ids) + list(response_ids),
+            multi_modal_data=multi_modal_data,
+            routing_key=routing_key,
+        )
+        self._validate_teacher_logprob_shape(teacher_ids=teacher_ids, teacher_logprobs=teacher_logprobs)
+        return teacher_ids, teacher_logprobs
+
+    def _validate_teacher_logprob_shape(self, teacher_ids: torch.Tensor, teacher_logprobs: torch.Tensor) -> None:
+        if teacher_ids.shape != teacher_logprobs.shape:
+            raise ValueError(
+                f"teacher_ids shape {tuple(teacher_ids.shape)} must match teacher_logprobs shape "
+                f"{tuple(teacher_logprobs.shape)}."
+            )
+        if teacher_logprobs.ndim != 2:
+            raise ValueError(f"teacher_logprobs must have shape [seq_len, k], got {tuple(teacher_logprobs.shape)}.")
+
+        loss_config = self.teacher_server_manager.distillation_loss_config
+        if loss_config.loss_settings.use_topk:
+            expected_k = loss_config.topk
+            if teacher_logprobs.shape[-1] != expected_k:
+                raise ValueError(f"Expected teacher top-k dimension {expected_k}, got {teacher_logprobs.shape[-1]}.")
+        elif teacher_logprobs.shape[-1] != 1:
+            raise ValueError(
+                f"Expected estimator teacher output to have one logprob per token, got last dim "
+                f"{teacher_logprobs.shape[-1]}."
+            )
 
     def _postprocess(
         self,
