@@ -468,6 +468,28 @@ def mcore_model_parallel_config(
     )
 
 
+def _can_safely_resize_storage(tensor: torch.Tensor) -> bool:
+    """Check whether it is safe to call ``storage().resize_(0)`` on *tensor*.
+
+    Resizing the underlying storage to zero immediately frees the GPU memory
+    but also invalidates **every** tensor that shares the same storage
+    (e.g. views, tied weights stored as different Python objects, or slices
+    of a DDP flat buffer).  This function returns True only when the tensor
+    exclusively owns its entire storage, making ``resize_(0)`` safe.
+    """
+    return (
+        # Storage holds exactly the elements of this tensor – no room for
+        # other tensors sharing the same storage.
+        tensor.storage().size() == tensor.numel()
+        # Tensor starts at the beginning of the storage – not a slice/view
+        # offset into a larger buffer.
+        and tensor.storage_offset() == 0
+        # Tensor is contiguous in memory – rules out transposed or
+        # non-contiguous views that only occupy part of the storage layout.
+        and tensor.is_contiguous()
+    )
+
+
 @torch.no_grad()
 def offload_megatron_model_to_cpu(models):
     """
@@ -538,9 +560,16 @@ def offload_megatron_model_to_cpu(models):
         else:
             # we need this for ref module
             for _, param in model_chunk.named_parameters():
-                param.data = param.data.to("cpu", non_blocking=True)
+                old_data = param.data
+                param.data = param.data.to("cpu")
+                if _can_safely_resize_storage(old_data):
+                    old_data.storage().resize_(0)
                 if param.grad is not None:
-                    param.grad = param.grad.to("cpu", non_blocking=True)
+                    old_grad = param.grad
+                    param.grad = param.grad.to("cpu")
+                    if _can_safely_resize_storage(old_grad):
+                        old_grad.storage().resize_(0)
+
     gc.collect()
     get_torch_device().empty_cache()
 
