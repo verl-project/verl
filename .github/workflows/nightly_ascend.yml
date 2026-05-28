@@ -32,12 +32,13 @@
 name: nightly_ci_ascend
 
 on:
-  Trigger the workflow on push or pull request,
-  but only for the main branch
-  For push, for now only anti-patterns are specified so it is more conservative
-  and achieves higher coverage.
-  schedule:
-    - cron: "0 17 * * *"
+  # Trigger the workflow on push or pull request,
+  # but only for the main branch
+  # For push, for now only anti-patterns are specified so it is more conservative
+  # and achieves higher coverage.
+  workflow_dispatch:
+  # schedule:
+  #   - cron: "0 17 * * *"
 
 # Declare permissions just read content.
 permissions:
