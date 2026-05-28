@@ -31,7 +31,9 @@ RUN ARCH=$(uname -m) && \
     git clone --depth 1 --branch core_v0.12.1 https://github.com/NVIDIA/Megatron-LM.git
 
 # Install repositories with low update frequency
-RUN ARCH=$(uname -m) && \
+RUN export PIP_EXTRA_INDEX_URL=https://triton-ascend.osinfra.cn/pypi/simple/ && \
+    export PIP_TRUSTED_HOST=triton-ascend.osinfra.cn && \
+    ARCH=$(uname -m) && \
     # Export and source env
     if [ "$ARCH" = "aarch64" ]; then \
         export LD_LIBRARY_PATH=/usr/local/Ascend/cann-8.5.0/aarch64-linux/devlib/linux/aarch64:$LD_LIBRARY_PATH; \
@@ -45,9 +47,12 @@ RUN ARCH=$(uname -m) && \
     # Install vllm
     cd vllm && pip install -r requirements/build.txt && \
     VLLM_TARGET_DEVICE=empty pip install -v -e. && cd .. && \
+    if [ "$ARCH" = "x86_64" ]; then \
+    pip install torch==2.9.0+cpu --index-url https://download.pytorch.org/whl/cpu/; \
+    fi && \
     # Install vllm-ascend
     cd vllm-ascend && pip install -r requirements.txt && \
-    export COMPILE_CUSTOM_KERNELS=1 && pip install -v -e . && cd .. && \
+    export COMPILE_CUSTOM_KERNELS=1 && pip install --no-build-isolation --no-deps -v -e . && cd .. && \
     # Install MindSpeed & Megatron
     pip install -e MindSpeed && \
     pip install -e Megatron-LM && \

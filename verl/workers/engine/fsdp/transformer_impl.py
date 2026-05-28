@@ -124,6 +124,12 @@ class FSDPEngine(BaseEngine):
 
         self.use_remove_padding = self.model_config.use_remove_padding
 
+        if self.engine_config.ulysses_sequence_parallel_size > 1 and not self.use_remove_padding:
+            raise ValueError(
+                "When using sequence parallelism (ulysses_sequence_parallel_size > 1), "
+                "you must enable `use_remove_padding`."
+            )
+
         self._init_device_mesh()
 
         if self.engine_config.full_determinism:

@@ -1,20 +1,43 @@
-# sgl059
+# sgl0512
 
-FROM lmsysorg/sglang:v0.5.9
+FROM lmsysorg/sglang:v0.5.12
+
+ARG CUDA_VERSION=13.0.2
+ARG TRL_VERSION=0.27.0
+ARG TRANSFORMER_ENGINE_VERSION=v2.15
+ARG FLASH_ATTENTION_VERSION=2.8.3
+ARG NSIGHT_VERSION=2025.6.1
+ARG MCORE_VERSION=core_v0.16.1
+ARG VERL_VERSION=v0.7.1
+
+# =========================
+# Install cuDNN (network repo)
+# =========================
+RUN ARCH=$(if [ "$(uname -m)" = "aarch64" ]; then echo "sbsa"; else echo "x86_64"; fi) && \
+    CUDA_VERSION_MAJOR=$(echo ${CUDA_VERSION} | cut -d '.' -f 1) && \
+    wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/${ARCH}/cuda-keyring_1.1-1_all.deb && \
+    sed -i '/developer\.download\.nvidia\.com\/compute\/cuda\/repos/d' /etc/apt/sources.list.d/* && \
+    dpkg -i cuda-keyring_1.1-1_all.deb && \
+    apt-get update && \
+    apt-get -y --allow-downgrades --allow-change-held-packages install \
+    cudnn9-cuda-${CUDA_VERSION_MAJOR} \
+    libcudnn9-cuda-${CUDA_VERSION_MAJOR} \
+    libcudnn9-dev-cuda-${CUDA_VERSION_MAJOR} \
+    libcudnn9-headers-cuda-${CUDA_VERSION_MAJOR} && \
+    rm -f cuda-keyring_1.1-1_all.deb && \
+    rm -rf /var/lib/apt/lists/*
 
 ARG PIP_NO_CACHE_DIR=1
 
-RUN pip install pybind11
-
-RUN pip install nvidia-mathdx
+RUN pip install pybind11 nvidia-mathdx
 
 RUN MAX_JOBS=128 pip install -v --disable-pip-version-check --no-build-isolation --config-settings "--build-option=--cpp_ext" --config-settings "--build-option=--cuda_ext" git+https://github.com/NVIDIA/apex.git
 
-RUN export NVTE_FRAMEWORK=pytorch && MAX_JOBS=128 NVTE_BUILD_THREADS_PER_JOB=4 pip3 install --resume-retries 999 --no-build-isolation git+https://github.com/NVIDIA/TransformerEngine.git@release_v2.12
+RUN export NVTE_FRAMEWORK=pytorch && MAX_JOBS=128 NVTE_BUILD_THREADS_PER_JOB=4 pip3 install --resume-retries 999 --no-build-isolation git+https://github.com/NVIDIA/TransformerEngine.git@${TRANSFORMER_ENGINE_VERSION}
 
 # RUN pip install --upgrade transformers tokenizers
 
-RUN pip install codetiming mathruler pylatexenc qwen_vl_utils cachetools pytest-asyncio
+RUN pip install codetiming mathruler pylatexenc cachetools pytest-asyncio
 
 RUN pip install --no-build-isolation flash_attn==2.8.3
 
@@ -34,20 +57,29 @@ RUN pip3 install --no-deps trl==0.27.0
 
 RUN pip3 install nvtx matplotlib liger_kernel
 
-RUN pip install -U git+https://github.com/ISEEKYAN/mbridge.git
+RUN pip install torchcodec --index-url=https://download.pytorch.org/whl/cu130
 
-RUN pip install --no-deps git+https://github.com/NVIDIA/Megatron-LM.git@core_v0.16.0
+RUN pip install qwen-vl-utils==0.0.14
 
-RUN pip install git+https://github.com/verl-project/verl.git@v0.7.0 && \
+RUN pip uninstall "flash-attn-4" && pip install "flash-attn-4[cu13]"
+
+RUN wget https://github.com/sgl-project/whl/releases/download/v0.4.2.post2/sglang_kernel-0.4.2.post2+cu130-cp310-abi3-manylinux2014_x86_64.whl#sha256=4e7ce619274234d182b20da883fcf1d20e7e55cbea90d62244e2b6a3d6c0fc85 && \
+    pip install sglang_kernel-0.4.2.post2+cu130-cp310-abi3-manylinux2014_x86_64.whl --force-reinstall
+
+RUN pip install transformers==5.3.0
+
+RUN pip install -U git+https://github.com/ISEEKYAN/mbridge.git@main
+
+RUN pip install --no-deps git+https://github.com/NVIDIA/Megatron-LM.git@${MCORE_VERSION}
+
+RUN pip install git+https://github.com/verl-project/verl.git@${VERL_VERSION} && \
     pip uninstall -y verl
 
-RUN sed -i '/nvidia-cudnn-cu12/d' /usr/local/lib/python3.12/dist-packages/torch-2.9.1+cu129.dist-info/METADATA && \
-    pip install --no-deps --force-reinstall nvidia-cudnn-cu12==9.16.0.29
-
-# for packages compiled from source code
-RUN apt-get update && \
-    apt-get install -y --allow-downgrades --allow-change-held-packages \
-    libcudnn9-cuda-12=9.16.0.29-1 \
-    libcudnn9-dev-cuda-12=9.16.0.29-1 \
-    libcudnn9-headers-cuda-12=9.16.0.29-1 && \
-    rm -rf /var/lib/apt/lists/*
+RUN CUDA_VERSION_MAJOR=$(echo ${CUDA_VERSION} | cut -d '.' -f 1) && \
+    CUDNN_PKG=libcudnn9-cuda-${CUDA_VERSION_MAJOR} && \
+    CUDNN_VERSION=$(dpkg-query -W -f='${Version}' "${CUDNN_PKG}" 2>/dev/null | sed 's/-[0-9]*$//') && \
+    if [ -z "${CUDNN_VERSION}" ]; then \
+        CUDNN_HDR=$(find /usr/include -name cudnn_version.h | head -1) && \
+        CUDNN_VERSION=$(grep -E '^#define CUDNN_(MAJOR|MINOR|PATCHLEVEL) ' "${CUDNN_HDR}" | awk '{print $3}' | paste -sd. -); \
+    fi && \
+    pip install "nvidia-cudnn-cu${CUDA_VERSION_MAJOR}>=${CUDNN_VERSION}"
