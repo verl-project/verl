@@ -95,6 +95,135 @@ After pulling the desired Docker image and installing desired inference and trai
     pip3 install -e ".[sglang]"
 
 
+Install from multi-backend uv image (Dockerfile_uv)
+---------------------------------------------------
+
+``docker/Dockerfile_uv`` builds one image that contains a separate venv per
+GPU x86_64 backend under ``/workspace/verl/.venvs/.venv-<backend>/``
+(``vllm``, ``sglang``, ``trtllm``, ``fsdp``, ``megatron``, ``veomni``,
+``nemoautomodel``, ``cpu``). The default ``PATH`` points at
+``.venv-megatron``; switch backends at runtime via
+``-e PATH=/workspace/verl/.venvs/.venv-vllm/bin:$PATH``. Ascend NPU backends
+and aarch64 GPU variants (e.g. Grace-Blackwell) are out of scope for the
+uv flow for now — for Ascend, see the standalone Dockerfiles in
+``docker/ascend/``.
+
+Build with BuildKit
+:::::::::::::::::::
+
+BuildKit is required so the per-backend ``manage_envs.py sync`` steps can
+reuse the shared uv cache mount:
+
+.. code:: bash
+
+   DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile_uv -t verl:uv .
+   # or
+   docker buildx build -f docker/Dockerfile_uv -t verl:uv .
+
+   # Slim the image — backends omitted from TARGETS skip their RUN entirely:
+   DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile_uv \
+       --build-arg TARGETS="vllm fsdp megatron" \
+       -t verl:uv .
+
+See the top of ``docker/Dockerfile_uv`` for the full set of build args
+(``TARGETS``, ``MAX_JOBS``, ``CUDA_VERSION``, ``UBUNTU_MIRROR``,
+``PIP_DEFAULT_INDEX``, ``GITHUB_ARTIFACTORY``).
+
+Cache reuse — fast rebuilds AND fast in-container resyncs
+:::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+
+Every per-backend RUN mounts a shared BuildKit cache at
+``/root/.cache/uv`` (``id=verl-uv-cache``), and the image pre-sets
+``UV_CACHE_DIR=/root/.cache/uv`` so any ``uv`` invocation — directly or
+via ``manage_envs.py`` — uses that path.
+
+* **Build time.** The cache persists across ``docker build`` invocations
+  on the same host and is shared between backends, so:
+
+  - editing one pin and rebuilding only re-runs the affected backend's
+    solver — wheels (``torch``, ``flash-attn``, ``apex``, …) come from
+    the cache instead of the network,
+  - ``torch`` is downloaded once and reused across ``vllm``, ``sglang``,
+    ``fsdp``, ``megatron``, … combined,
+  - the cache lives on the host (not in the image), so the final image
+    stays lean — there is no ``uv cache clean`` step.
+
+* **Run time.** The build-time cache is intentionally not baked into the
+  image. To get the same fast resync inside a running container — e.g.
+  bumping a pin, adding a backend you skipped via ``TARGETS``, or
+  rebuilding a broken venv without a full ``docker build`` — bind-mount
+  your host's uv cache at the same path the image expects:
+
+  .. code:: bash
+
+     docker run --rm -it \
+         --runtime=nvidia --gpus all --shm-size=10g \
+         -v "$HOME/.cache/uv:/root/.cache/uv" \
+         -v "$PWD:/workspace/verl" \
+         verl:uv bash
+
+     # inside the container — these reuse already-downloaded wheels:
+     python3 manage_envs.py sync vllm
+     python3 manage_envs.py sync megatron
+     uv pip install --python .venvs/.venv-megatron/bin/python <pkg>
+
+  The same host cache is what plain ``uv pip install`` calls on the host
+  populate, so a fresh ``docker run`` after local ``uv`` work already
+  has those wheels primed.
+
+Re-locking after a dependency change
+::::::::::::::::::::::::::::::::::::
+
+``uv.lock`` is committed to the repo and ``uv sync --frozen`` rejects any
+drift between it and ``pyproject.toml``. To bump a pin:
+
+.. code:: bash
+
+   # 1. edit verl/pyproject.toml
+   # 2. regenerate the lockfile (resolves ALL forks in one pass):
+   uv lock
+   # 3. re-sync every affected backend locally to validate:
+   python manage_envs.py sync vllm
+   # ...repeat for any other backend whose fork was touched.
+   # 4. commit pyproject.toml + uv.lock together.
+
+If the pin is for a system-coupled wheel
+(``nvidia-cudnn-cu12`` / ``nvidia-nccl-cu12``), update both
+``[tool.uv].override-dependencies`` in ``pyproject.toml`` *and* the
+matching ``CUDNN_VERSION`` / ``NCCL_VERSION`` ARGs in
+``docker/Dockerfile_uv``, then re-lock and rebuild the image so the apt
+debs and the in-venv pip wheels stay aligned.
+
+Bootstrap uv.lock without local uv
+::::::::::::::::::::::::::::::::::
+
+If you can't (or don't want to) install uv on the host, ``Dockerfile_uv``
+self-bootstraps the lockfile: when the COPY'd source does not contain
+``uv.lock`` it inserts an extra ``RUN uv lock`` step before the per-backend
+syncs, then ``manage_envs.py sync ...`` continues with ``uv sync --frozen``
+against the freshly-resolved lockfile. The same BuildKit cache mount
+populates wheels during this bootstrap, so a follow-up build with
+``uv.lock`` committed reuses everything that was just downloaded.
+
+Pull the generated lockfile back to the host so it can be committed:
+
+.. code:: bash
+
+   DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile_uv \
+       --build-arg TARGETS="cpu" -t verl:uv-lock .   # smallest possible bootstrap
+   docker create --name verl-tmp verl:uv-lock
+   docker cp verl-tmp:/workspace/verl/uv.lock ./uv.lock
+   docker rm verl-tmp
+   git add pyproject.toml uv.lock && git commit
+
+The same recipe primes the BuildKit ``verl-uv-cache`` mount on the build
+host, so the next ``docker build`` (with the committed ``uv.lock``) runs
+``uv sync --frozen`` against warm wheels and skips network downloads where
+possible. ``manage_envs.py sync`` on the host also auto-bootstraps when
+``uv.lock`` is missing — the first sync drops ``--frozen`` and writes
+``uv.lock`` for you (with a warning).
+
+
 Install from custom environment (with uv)
 ---------------------------------------------
 
@@ -102,19 +231,19 @@ If your environment is not compatible with the docker images, the
 recommended local install uses `uv <https://docs.astral.sh/uv/>`_ to
 build **one venv per backend** straight from ``verl/pyproject.toml``.
 
-verl supports 5 inference backends (``vllm``, ``sglang``, ``trtllm``,
-``vllm-ascend``, ``sglang-ascend``) and 5 training backends (``fsdp``,
-``megatron``, ``mindspeed``, ``veomni``, ``nemoautomodel``), plus a
-``cpu`` extra for CI / unit-test / sanity work that needs no GPU or
-NPU runtime. ``vllm-ascend`` / ``sglang-ascend`` / ``mindspeed`` target
-Huawei Ascend NPU; the rest target NVIDIA GPUs. Each pins its own
-Python / CUDA / PyTorch and cannot share a venv, so you create one per
-backend you need under ``verl/.venvs/.venv-<backend>/``.
+verl supports 3 inference backends (``vllm``, ``sglang``, ``trtllm``) and
+4 training backends (``fsdp``, ``megatron``, ``veomni``, ``nemoautomodel``),
+plus a ``cpu`` extra for CI / unit-test / sanity work that needs no GPU
+runtime. All currently target NVIDIA GPUs on **x86_64 Linux** — Ascend
+NPU and aarch64 GPU variants (e.g. Grace-Blackwell) are out of scope for
+now (see ``[tool.uv].environments`` in ``pyproject.toml``). Each backend
+pins its own Python / CUDA / PyTorch and cannot share a venv, so you
+create one per backend you need under ``verl/.venvs/.venv-<backend>/``.
 
 1. Pick a base image
 ::::::::::::::::::::
 
-``uv pip install`` installs Python packages only — bring your own OS / CUDA
+``uv sync`` installs Python packages only — bring your own OS / CUDA
 base image:
 
 .. list-table::
@@ -129,22 +258,20 @@ base image:
      - ``nvidia/cuda:12.9.1-cudnn-devel-ubuntu24.04``
    * - ``trtllm``
      - ``nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc14``
-   * - ``vllm-ascend`` / ``mindspeed`` (Atlas A2)
-     - ``swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:8.5.0-910b-ubuntu22.04-py3.11``
-   * - ``vllm-ascend`` / ``mindspeed`` (Atlas A3)
-     - ``swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:8.5.0-a3-ubuntu22.04-py3.11``
-   * - ``sglang-ascend`` (Atlas A2 / A3)
-     - same Ascend CANN base, plus the off-PyPI ``sgl-kernel-npu`` / ``deep_ep`` / ``torch_memory_saver`` zip from `sgl-kernel-npu releases <https://github.com/sgl-project/sgl-kernel-npu/releases>`_
    * - ``cpu`` (CI / sanity)
-     - any Linux/macOS host with Python ≥3.11 for ``manage_envs.py``; no GPU drivers needed
+     - any x86_64 Linux host with Python ≥3.11 for ``manage_envs.py``; no GPU drivers needed
 
-NVIDIA backends: any ``nvcr.io/nvidia/pytorch`` image works too — the
-backend venv install replaces its bundled torch. Ascend backends (NPU): ``torch-npu``
-provides the NPU runtime; ``torch`` itself comes from PyPI (the aarch64
-wheel is already CPU-only — no CUDA needed).
+Any ``nvcr.io/nvidia/pytorch`` image works too — the backend venv install
+replaces its bundled torch.
 
-2. Install uv and create venv
-::::::::::::::::::::::::::::::::
+2. Sync a backend
+:::::::::::::::::
+
+Per-backend venvs live under ``verl/.venvs/.venv-<backend>/``. Mutual
+exclusion is declared in ``[tool.uv].conflicts`` so ``uv lock`` resolves
+every backend as an independent fork in a single committed ``uv.lock``;
+``uv sync --frozen --extra <backend>`` then installs that fork without
+re-resolving.
 
 .. code:: bash
 
@@ -154,7 +281,9 @@ wheel is already CPU-only — no CUDA needed).
    git clone https://github.com/verl-project/verl.git
    cd verl
 
-The simplest entry point is ``manage_envs.py``:
+The simplest entry point is ``manage_envs.py``, which wraps
+``uv sync --frozen --extra <backend>`` with the right ``UV_PROJECT_ENVIRONMENT``
+and any backend-specific build env:
 
 .. code:: bash
 
@@ -164,40 +293,32 @@ The simplest entry point is ``manage_envs.py``:
    python manage_envs.py sync cpu         # creates .venvs/.venv-cpu for CI / sanity tests
 
    # by group:
-   python manage_envs.py sync inference   # vllm + sglang + trtllm + vllm-ascend + sglang-ascend
-   python manage_envs.py sync training    # fsdp + megatron + mindspeed + veomni + nemoautomodel
+   python manage_envs.py sync inference   # vllm + sglang + trtllm
+   python manage_envs.py sync training    # fsdp + megatron + veomni + nemoautomodel
    python manage_envs.py sync dev         # cpu
 
    python manage_envs.py list             # show installed venvs
    python manage_envs.py clean <backend>  # delete a venv
    python manage_envs.py --help
 
-``manage_envs.py`` uses ``uv pip install`` instead of ``uv sync``. Each
-backend resolves independently, so ``sync vllm`` only sees ``vllm`` +
-``verl-core`` dependencies and does not resolve or clone training backends
-like VeOmni / MindSpeed / NeMo-Automodel. ``transformers==5.3.0`` is
-synchronized across all backend venvs; ``manage_envs.py`` installs it in a
-final ``uv pip install --no-deps`` step so backend package metadata
-constraints such as ``transformers<5`` do not change that version.
+   # anything after `--` is forwarded to uv sync, e.g. force a clean refresh:
+   python manage_envs.py sync megatron -- --reinstall
 
-The equivalent raw ``uv`` shape is:
+``transformers==5.3.0`` plus the ``nvidia-cudnn-cu12`` and
+``nvidia-nccl-cu12`` wheels are pinned globally via
+``[tool.uv].override-dependencies``; the cuDNN / NCCL pins must match the
+apt deb versions baked into ``docker/Dockerfile_uv`` so the in-venv ``.so``
+files line up with the system libraries.
+
+The equivalent raw ``uv`` shape — handy when composing with other tooling —
+is:
 
 .. code:: bash
 
-   uv venv .venvs/.venv-vllm --python 3.12 --seed
-   uv pip install --python .venvs/.venv-vllm/bin/python --link-mode=copy \
-       --index-strategy unsafe-best-match \
-       --extra-index-url https://download.pytorch.org/whl/cu129 \
-       torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0
-   uv pip install --python .venvs/.venv-vllm/bin/python --link-mode=copy \
-       --index-strategy unsafe-best-match \
-       -r <vllm + verl-core requirements, excluding torch/torchvision/torchaudio/transformers>
-   uv pip install --python .venvs/.venv-vllm/bin/python --link-mode=copy \
-       --index-strategy unsafe-best-match \
-       --no-deps transformers==5.3.0
-   uv pip install --python .venvs/.venv-vllm/bin/python --link-mode=copy \
-       --index-strategy unsafe-best-match \
-       --no-deps -e .
+   UV_PROJECT_ENVIRONMENT=.venvs/.venv-vllm \
+       uv sync --frozen --extra vllm \
+               --python 3.12 \
+               --link-mode=copy
 
 3. Run code in a backend
 ::::::::::::::::::::::::
@@ -212,78 +333,27 @@ The equivalent raw ``uv`` shape is:
    # …or no activation:
    .venvs/.venv-vllm/bin/python -m verl.trainer.main_ppo --help
 
-4. Cross-venv runtime (rollout in one venv, trainer in another)
-:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+4. Cross-venv runtime (one venv per role)
+:::::::::::::::::::::::::::::::::::::::::
 
-For **disaggregated** RL jobs verl can route the rollout (inference)
-Ray actors and the trainer Ray actors at *different* Python interpreters
-in the same job — e.g. ``.venvs/.venv-vllm`` for rollout +
-``.venvs/.venv-megatron`` for the trainer. This avoids the impossible
-"single venv with both vLLM and Megatron+TE+Apex" matrix.
-
-It is **opt-in** via two Hydra config fields read at job start:
-
-- ``actor_rollout_ref.rollout.venv`` — used by every rollout / inference
-  Ray actor (defined on
-  :class:`verl.workers.config.RolloutConfig.venv`),
-- ``trainer.venv`` — used by every trainer Ray actor (PPO actor, critic,
-  ref policy, reward model).
-
-Each accepts any of:
-
-* a **backend name** (resolved to ``.venvs/.venv-<name>/bin/python``),
-* an **absolute venv directory** (we append ``bin/python``),
-* an **absolute path** to a Python interpreter,
-* a **full command line** such as ``"uv run --project /abs/path/to/verl"``.
-  Ray's `py_executable
-  <https://docs.ray.io/en/latest/ray-core/handling-dependencies.html#using-uv-for-package-management>`_
-  field accepts a string with arguments, so this is the recommended way
-  to integrate with ``uv run`` (auto-resync from ``pyproject.toml`` /
-  ``uv.lock`` on worker startup, support for editable packages, etc.).
-
-The two simplest usages are equivalent:
+For **disaggregated** RL jobs verl can route each Ray worker group at a
+different Python interpreter in the same job — e.g. ``.venvs/.venv-vllm``
+for rollout and ``.venvs/.venv-megatron`` for the trainer. The simplest
+common case:
 
 .. code:: bash
 
-   # plain Hydra overrides on the verl driver command
-   .venvs/.venv-megatron/bin/python -m verl.trainer.main_ppo \
-       actor_rollout_ref.rollout.venv=vllm \
-       trainer.venv=megatron \
-       trainer.n_gpus_per_node=8 ...
-
-   # convenience wrapper (resolves specs and appends the same overrides)
    python manage_envs.py launch --rollout vllm --trainer megatron -- \
        python -m verl.trainer.main_ppo trainer.n_gpus_per_node=8 ...
 
-If you prefer ``uv run``-driven workers (Ray's own recommendation) point
-each role at a different uv project / extra:
-
-.. code:: bash
-
-   uv run --project $(pwd) --extra megatron -m verl.trainer.main_ppo \
-       actor_rollout_ref.rollout.venv="uv run --project $(pwd) --extra vllm" \
-       trainer.venv="uv run --project $(pwd) --extra megatron" \
-       ...
-
-Under the hood, every rollout actor / HTTP server / trainer worker is
-started with Ray's ``runtime_env={"py_executable": <spec>}``. With the
-config fields left as ``null`` (the default), behaviour is unchanged —
-every actor inherits the driver's interpreter (legacy single-venv mode).
-
-Caveats:
-
-- **Hybrid / colocated mode** runs actor + rollout in a single Ray
-  actor and therefore in a single venv; the config fields are ignored
-  for that worker class. Pick a single venv that has both rollout and
-  training packages, or switch to disaggregated mode.
-- The driver process itself isn't switched — only spawned actors are.
-  Run the driver from any venv that has verl installed (typically the
-  trainer venv), or — for the ``uv run`` style — invoke the driver via
-  ``uv run`` so Ray inherits the same executable for any actors whose
-  ``venv`` config field is ``null``.
-- ``py_executable`` is `marked experimental upstream
-  <https://docs.ray.io/en/latest/ray-core/handling-dependencies.html#runtime-environments-api-ref>`_;
-  behaviour may change with newer Ray releases.
+Per-role overrides exist for finer control (``actor_rollout_ref.actor.venv``,
+``actor_rollout_ref.ref.venv``, ``critic.venv``, ``actor_rollout_ref.rollout.venv``);
+``trainer.venv`` is the global fallback for any unset trainer-side group.
+Roles fused into one Ray actor must agree on the resolved spec — verl
+raises at job start otherwise. See the :mod:`verl.utils.venv` module
+docstring for the full field list, accepted spec formats (backend name /
+abs path / ``uv run`` command line), and the colocation invariant; see
+``python manage_envs.py launch --help`` for all CLI flags.
 
 Troubleshooting
 :::::::::::::::
@@ -297,20 +367,21 @@ Troubleshooting
   most hosts); on big machines, ``MAX_JOBS=128 python manage_envs.py
   sync megatron`` is faster.
 - **``trtllm`` install fails on macOS / non-x86_64** — ``tensorrt-llm``
-  only ships Linux/x86_64/CUDA 13 wheels; this is by design.
-- **``mindspeed`` / ``vllm-ascend`` / ``sglang-ascend`` env can't find
-  ``torch_npu``** — ``torch-npu`` wheels only publish for Linux
-  (aarch64 + x86_64) on Ascend hosts. The extras are platform-marked
-  with ``sys_platform == 'linux'``; on macOS / Windows you can still
-  resolve a lock entry but actual NPU runs need an Ascend host.
+  only ships Linux/x86_64/CUDA 13 wheels; this is by design, and
+  ``[tool.uv].environments`` constrains the lockfile to the same matrix.
+- **``uv sync --frozen`` fails on macOS** — the committed ``uv.lock`` is
+  Linux x86_64 only (see ``[tool.uv].environments``). ``manage_envs.py``
+  drops ``--frozen`` automatically when the lockfile doesn't apply, but
+  expect the resolver to refuse to find CUDA wheels for macOS — the uv
+  flow is intended for Linux x86_64 hosts and Docker.
+- **Need Ascend NPU or aarch64 GPU?** — out of scope for this flow for
+  now. Use the standalone Dockerfiles in ``docker/ascend/`` for Ascend.
 - **Want to start over?** —
   ``python manage_envs.py clean all && python manage_envs.py sync <backend>``.
-- **``rollout venv resolver: ... is not an executable Python interpreter``** —
-  the ``actor_rollout_ref.rollout.venv`` / ``trainer.venv`` config field
-  points at something that isn't a real venv. Either run the missing
-  ``python manage_envs.py sync <backend>`` first, leave the field as
-  ``null`` (legacy single-venv mode), or pass an absolute path /
-  ``uv run`` command line.
+- **Cross-venv errors at job start** (``<role> venv resolver: ...`` /
+  ``colocated worker group hosts roles with disagreeing venv specs``) —
+  see :mod:`verl.utils.venv` for the resolution rules and the colocation
+  invariant.
 
 Optional, not handled by ``uv pip install`` (Dockerfile-only steps): system
 deps (``apt-get install`` cuDNN / build-essential / libibverbs-dev /
