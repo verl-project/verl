@@ -216,3 +216,4 @@ jobs:
           ray stop --force
           bash tests/special_npu/run_qwen2_5_vl_3b_npu.sh
           rm -rf $HOME/ckpts
+          
