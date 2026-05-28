@@ -535,6 +535,77 @@ def _estimate_gpt_oss_flops(config, tokens_sum, batch_seqlens, delta_time):
     return flops_achieved
 
 
+def _estimate_glm_moe_dsa_flops(config, tokens_sum, batch_seqlens, delta_time):
+    hidden_size = config.hidden_size
+    vocab_size = config.vocab_size
+    moe_intermediate_size = config.moe_intermediate_size
+    num_hidden_layers = config.num_hidden_layers
+    num_experts = config.n_routed_experts
+
+    moe_topk = config.num_experts_per_tok
+    share_expert_num = config.n_shared_experts
+
+    num_attention_heads = config.num_attention_heads
+    q_lora_rank = config.q_lora_rank
+    kv_lora_rank = config.kv_lora_rank
+    qk_head_dim = config.qk_head_dim
+    qk_rope_head_dim = config.qk_rope_head_dim
+    qk_nope_head_dim = config.qk_nope_head_dim
+    v_head_dim = config.v_head_dim
+
+    # DSA indexer config
+    index_head_dim = config.index_head_dim
+    index_n_heads = config.index_n_heads
+    index_topk = config.index_topk
+
+    # MLA attention linear params per layer:
+    # q_a_proj + q_b_proj + kv_a_proj + kv_b_proj + o_proj
+    attn_linear_N = (
+        hidden_size * q_lora_rank
+        + q_lora_rank * (num_attention_heads * qk_head_dim)
+        + hidden_size * (kv_lora_rank + qk_rope_head_dim)
+        + kv_lora_rank * (num_attention_heads * (qk_nope_head_dim + v_head_dim))
+        + (num_attention_heads * v_head_dim) * hidden_size
+    )
+
+    # DSA indexer linear params per layer:
+    # wq_b: q_lora_rank -> index_n_heads * index_head_dim
+    # wk: kv_lora_rank -> index_n_heads * index_head_dim
+    # weights_proj: index_n_heads -> num_attention_heads
+    indexer_linear_N = (
+        q_lora_rank * (index_n_heads * index_head_dim)
+        + kv_lora_rank * (index_n_heads * index_head_dim)
+        + index_n_heads * num_attention_heads
+    )
+
+    moe_gata_N = hidden_size * num_experts
+    moe_expertmlp_N = hidden_size * moe_intermediate_size * (moe_topk + share_expert_num) * 3
+    moe_mlp_N = moe_gata_N + moe_expertmlp_N
+
+    emd_and_lm_head_N = vocab_size * hidden_size * 2
+
+    dense_N = (moe_mlp_N + attn_linear_N + indexer_linear_N) * num_hidden_layers + emd_and_lm_head_N
+
+    dense_N_flops = 6 * dense_N * tokens_sum
+
+    # DSA attention FLOPs per layer:
+    # Stage 1 (indexer): Q_idx × K_idx^T over full seq -> seq × seq × index_head_dim × index_n_heads
+    # Stage 2 (sparse MLA): Q × K^T and attn × V only over topk tokens
+    #   -> seq × topk × (qk_head_dim + v_head_dim) × num_attention_heads
+    indexer_qk_flops = 0
+    sparse_attn_flops = 0
+    for seqlen in batch_seqlens:
+        effective_topk = min(index_topk, seqlen)
+        indexer_qk_flops += seqlen * seqlen * index_head_dim * index_n_heads
+        sparse_attn_flops += seqlen * effective_topk * (qk_head_dim + v_head_dim) * num_attention_heads
+
+    attn_qkv_flops = 6 * (indexer_qk_flops + sparse_attn_flops) * num_hidden_layers
+
+    flops_all_token = dense_N_flops + attn_qkv_flops
+    flops_achieved = flops_all_token * (1.0 / delta_time) / 1e12
+    return flops_achieved
+
+
 def _estimate_unknown_flops(config, tokens_sum, batch_seqlens, delta_time):
     return 0
 
@@ -559,6 +630,7 @@ ESTIMATE_FUNC = {
     "glm4v": _estimate_qwen2_flops,
     "gpt_oss": _estimate_gpt_oss_flops,
     "mimo": _estimate_qwen2_flops,
+    "glm_moe_dsa": _estimate_glm_moe_dsa_flops,
 }
 
 

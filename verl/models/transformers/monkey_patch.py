@@ -522,6 +522,15 @@ def apply_monkey_patch(
         if ulysses_sp_size > 1:
             patch_vlm_for_ulysses_input_slicing(Qwen3_5TextModel)
             patch_vlm_for_ulysses_input_slicing(Qwen3_5MoeTextModel)
+    
+    elif model.config.model_type == "glm_moe_dsa":
+        if use_remove_padding or ulysses_sp_size > 1:
+            from transformers.models.glm_moe_dsa.modeling_glm_moe_dsa import GlmMoeDsaAttention
+
+            from verl.models.transformers.glm_moe_dsa import glm_moe_dsa_attn_forward_with_dsa
+
+            GlmMoeDsaAttention.forward = glm_moe_dsa_attn_forward_with_dsa
+            print(f"Monkey patch {model.__class__.__name__} attention layer with DSA")
 
     if use_remove_padding or ulysses_sp_size > 1:
         if hasattr(module, "_flash_attention_forward"):  # transformers <= 4.47.1 or legacy models
