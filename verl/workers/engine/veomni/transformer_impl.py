@@ -862,24 +862,22 @@ class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
             model_inputs["return_log_probs"] = True
 
             # Pass teacher top-K tensors so ForCausalLMLoss routes to
-            # chunk_topk_distill_function for fused distillation.
-            # Guard on key existence: the tinker_router path uses these keys,
-            # while verl's native distillation path uses different keys
-            # (teacher_logprobs / teacher_ids) and relies on the eager
-            # logit-processor instead.
+            # chunk_topk_distill_function for fused distillation. TD keys
+            # teacher_ids / teacher_logprobs are populated by verl's native
+            # distillation pipeline (see verl/trainer/distillation/losses.py).
             distillation_use_topk = tu.get_non_tensor_data(data=micro_batch, key="distillation_use_topk", default=False)
-            if distillation_use_topk and "teacher_topk_ids" in micro_batch.keys():
-                if "teacher_topk_log_probs" not in micro_batch.keys():
+            if distillation_use_topk and "teacher_ids" in micro_batch.keys():
+                if "teacher_logprobs" not in micro_batch.keys():
                     raise ValueError(
-                        "teacher_topk_ids present without teacher_topk_log_probs; "
+                        "teacher_ids present without teacher_logprobs; "
                         "both must be provided together for fused top-K distillation."
                     )
-                teacher_topk_ids = micro_batch["teacher_topk_ids"].values().unsqueeze(0)
-                teacher_topk_log_probs = micro_batch["teacher_topk_log_probs"].values().unsqueeze(0)
-                # Pad + slice teacher tensors along the seqlen dim (dim=1) to
-                # match the student's SP-sliced sequence. ulysses_pad_and_slice_inputs
-                # hardcodes 2D shape; teacher tensors are 3D (1, total_nnz, K)
-                # so use slice_input_tensor directly (handles arbitrary dims).
+                # Kernel kwarg names follow veomni's chunk_topk_distill_function API.
+                teacher_topk_ids = micro_batch["teacher_ids"].values().unsqueeze(0)
+                teacher_topk_log_probs = micro_batch["teacher_logprobs"].values().unsqueeze(0)
+                # SP-slice along seqlen (dim=1); teacher tensors are 3D
+                # (1, total_nnz, K) so use slice_input_tensor directly —
+                # ulysses_pad_and_slice_inputs hardcodes 2D.
                 if self.use_ulysses_sp:
                     from verl.utils.ulysses import slice_input_tensor
 
