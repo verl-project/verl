@@ -177,10 +177,9 @@ class PlatformBase(abc.ABC):
         else:
             return f"{self.ray_resource_name()}-{device_id}"
 
-    @abc.abstractmethod
     def apply_model_patches(self, model_type: str) -> None:
         """Apply platform-specific model patches (e.g. replace ops unsupported on this device)."""
-        ...  # default no-op
+        return  # default no-op
 
     # ------------------------------------------------------------------
     # Ray integration
