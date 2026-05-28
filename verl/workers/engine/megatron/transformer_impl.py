@@ -282,6 +282,7 @@ class MegatronEngine(BaseEngine):
             self.optimizer_config,
             use_distributed_optimizer=self.engine_config.use_distributed_optimizer,
             fp16=self.param_dtype == torch.float16,
+            bf16=self.param_dtype == torch.bfloat16,
         )
         optimizer = get_megatron_optimizer(model=self.module, config=optim_config_megatron)
         register_megatron_training_hooks(self.module, optimizer)

@@ -22,7 +22,10 @@ from verl.utils.logger import print_rank_0
 
 
 def init_megatron_optim_config(
-    optim_config: dict, use_distributed_optimizer: bool = True, fp16: bool = False
+    optim_config: dict,
+    use_distributed_optimizer: bool = True,
+    fp16: bool = False,
+    bf16: bool = True,
 ) -> OptimizerConfig:
     optim_args = {
         "optimizer": optim_config.optimizer,
@@ -44,11 +47,40 @@ def init_megatron_optim_config(
                 "store_param_remainders": False,
             }
         )
-    else:  # bf16 mode
+    elif bf16:
+        # Match precision: keep the grad-accumulation buffer and Adam
+        # moments (m, v) in bf16 so optimizer-state memory tracks the
+        # model dtype. Master parameters stay fp32 (Megatron default
+        # `main_params_dtype`) because TE FusedAdam currently rejects
+        # bf16 master weights at init (only fp32/fp16 accepted). The
+        # int16 "store_param_remainders" path (Megatron default True
+        # in bf16 mode) already eliminates the fp32 master buffer in
+        # favor of bf16 working + int16 remainders, achieving the same
+        # ~50% master-memory reduction.
+        # Requires TransformerEngine's FusedAdam (already needed by
+        # the precision-aware optimizer path). Override any of these
+        # via `override_optimizer_config` to opt back into fp32.
         optim_args.update(
             {
                 "bf16": True,
                 "params_dtype": torch.bfloat16,
+                "use_precision_aware_optimizer": True,
+                "main_grads_dtype": torch.bfloat16,
+                "exp_avg_dtype": torch.bfloat16,
+                "exp_avg_sq_dtype": torch.bfloat16,
+            }
+        )
+    else:
+        # fp32 mode: leave grad-accumulation buffer and Adam moments at
+        # Megatron's default torch.float32. Do not enable the precision-aware
+        # optimizer — it's only beneficial when a moment/grad dtype is below
+        # fp32, and Megatron asserts the dtype fields equal fp32 whenever the
+        # precision-aware optimizer is off (optimizer_config.py:258-268).
+        optim_args.update(
+            {
+                "bf16": False,
+                "fp16": False,
+                "params_dtype": torch.float32,
             }
         )
     override_config = optim_config.get("override_optimizer_config", {})

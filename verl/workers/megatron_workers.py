@@ -489,6 +489,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
                 optim_config,
                 use_distributed_optimizer=wrap_config.use_distributed_optimizer,
                 fp16=self.dtype == torch.float16,
+                bf16=self.dtype == torch.bfloat16,
             )
             actor_optimizer = get_megatron_optimizer(model=actor_module, config=optim_config_megatron)
             actor_optimizer_scheduler = get_megatron_optimizer_param_scheduler(
@@ -1134,6 +1135,7 @@ class CriticWorker(MegatronWorker, DistProfilerExtension):
             optim_config,
             use_distributed_optimizer=wrap_config.use_distributed_optimizer,
             fp16=self.dtype == torch.float16,
+            bf16=self.dtype == torch.bfloat16,
         )
         critic_optimizer = get_megatron_optimizer(model=critic_module, config=optim_config_megatron)
         critic_optimizer_scheduler = get_megatron_optimizer_param_scheduler(

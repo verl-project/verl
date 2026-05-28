@@ -142,10 +142,16 @@ def get_model(
         model = [Float16Module(config, model_module) for model_module in model]
 
     if wrap_with_ddp:
+        # Derive the grad-bucket dtype from model precision so the DDP buffer
+        # matches the optimizer's main_grads_dtype: bf16 weights → bf16 grad
+        # bucket (paired with the precision-aware optimizer in
+        # init_megatron_optim_config); fp16/fp32 weights → fp32 grad bucket.
+        # User overrides via `override_ddp_config` still win.
+        grad_reduce_in_fp32 = not getattr(tfconfig, "bf16", False)
         ddp_models = []
         ddp_config_dict = {
             "use_distributed_optimizer": use_distributed_optimizer,
-            "grad_reduce_in_fp32": True,
+            "grad_reduce_in_fp32": grad_reduce_in_fp32,
             "overlap_grad_reduce": False,
         }
         if override_ddp_config is not None:
