@@ -190,9 +190,9 @@ class ServerAdapter(BaseRollout):
         if future is not None:
             await future
 
-        # reset prefix cache after updating weights
+        # reset all caches after updating weights
         if self.rollout_rank == 0:
-            await self.server_handle.clear_kv_cache.remote()
+            await self.server_handle.clear_all_caches.remote()
             if global_steps is not None:
                 await self.server_handle.set_global_steps.remote(global_steps)
 
