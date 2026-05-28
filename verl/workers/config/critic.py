@@ -88,7 +88,7 @@ class CriticConfig(BaseConfig):
     ppo_infer_micro_batch_size_per_gpu: Optional[int] = None
     ppo_infer_max_token_len_per_gpu: int = 32768
     ppo_epochs: int = 1
-    data_loader_seed: int = 1
+    data_loader_seed: int = 42
     shuffle: bool = True
     cliprange_value: float = 0.5
     loss_agg_mode: str = "token-mean"
