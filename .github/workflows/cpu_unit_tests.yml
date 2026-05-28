@@ -91,11 +91,18 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
+      # Phase 1 of the uv migration: install verl via `uv pip install --system`
+      # into the prebuilt image's system Python. This adopts uv as the install
+      # tool but does NOT use uv.lock yet — the system Python is already
+      # populated by the image, and we only overlay test deps + editable verl.
+      # Phase 2 (follow-up PR, after the CI image is rebuilt from
+      # docker/Dockerfile_uv) will switch to `source .venvs/.venv-cpu/bin/activate`
+      # to gain lockfile-grade reproducibility.
       - name: Install the current repository
         run: |
-          pip3 install -r requirements-test.txt
-          pip3 install --no-deps -e .
-          pip3 install --no-deps TransferQueue==0.1.8
+          uv pip install --system -r requirements-test.txt
+          uv pip install --system --no-deps -e .
+          uv pip install --system --no-deps TransferQueue==0.1.8
       - name: Check final pip list
         run: |
           pip3 list

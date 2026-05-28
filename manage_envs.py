@@ -14,31 +14,36 @@
 
 """Per-backend uv environment driver for verl.
 
-Everything that controls *what* gets installed lives in ``pyproject.toml``:
-``[project.optional-dependencies]`` lists the backend packages, and
-``[tool.uv.sources]`` / ``[tool.uv.index]`` route git packages and PyTorch
-wheels. ``transformers==5.3.0`` is a global override shared by every backend.
-This script intentionally uses ``uv pip install`` instead of
-``uv sync`` so each backend resolves independently:
+Everything that controls *what* gets installed lives in ``pyproject.toml``
+and ``uv.lock``:
 
-  * ``sync vllm`` never resolves / clones VeOmni, MindSpeed, NeMo-Automodel,
-    or any other unrelated backend source,
-  * backend metadata constraints on transformers (for example ``<5``) are
-    bypassed by installing ``transformers==5.3.0`` afterward with
-    ``uv pip install --no-deps``,
-  * each backend still gets a separate venv under
-    ``verl/.venvs/.venv-<backend>``,
-  * recommended build-time env vars are set for backends that compile native
-    extensions from source (``MAX_JOBS`` / ``NVTE_FRAMEWORK`` /
+* ``[project.optional-dependencies]`` declares one extra per backend (vllm,
+  sglang, megatron, fsdp, cpu, ...).
+* ``[tool.uv].conflicts`` marks the backends as mutually exclusive so
+  ``uv lock`` resolves each as an independent fork in a single lockfile.
+* ``[tool.uv].override-dependencies`` pins ``transformers`` and the
+  ``nvidia-cudnn-cu12`` / ``nvidia-nccl-cu12`` wheels to versions that match
+  the system libraries shipped in the reference Docker image.
+* ``[tool.uv].sources`` / ``[tool.uv].index`` route git packages and PyTorch
+  wheels.
+* ``uv.lock`` is committed and is the single source of truth for resolved
+  versions across every backend.
+
+This script is a thin convenience wrapper around::
+
+    UV_PROJECT_ENVIRONMENT=.venvs/.venv-<backend> \\
+        uv sync --frozen --extra <backend> \\
+                --python <python-version> \\
+                --link-mode=copy
+
+so that:
+
+  * each backend gets a separate venv under ``.venvs/.venv-<backend>``,
+  * ``--frozen`` keeps every install reproducible from ``uv.lock`` (no
+    silent re-resolves),
+  * recommended build-time env vars are set for backends that compile
+    native extensions from source (``MAX_JOBS`` / ``NVTE_FRAMEWORK`` /
     ``FLASH_ATTENTION_FORCE_BUILD``).
-
-The equivalent raw ``uv`` shape is:
-
-    uv venv .venvs/.venv-vllm --python 3.12 --seed
-    uv pip install --python .venvs/.venv-vllm/bin/python --link-mode=copy \\
-        <only the vllm + verl-core dependencies>
-    uv pip install --python .venvs/.venv-vllm/bin/python --link-mode=copy \\
-        -e . --no-deps
 
 Usage::
 
@@ -50,71 +55,88 @@ Usage::
     python manage_envs.py shell vllm
     python manage_envs.py path vllm
 
-Anything after ``--`` is forwarded verbatim to ``uv pip install``::
+Anything after ``--`` is forwarded verbatim to ``uv sync``::
 
     python manage_envs.py sync megatron -- --reinstall -v
 
+Re-locking after a dependency change
+------------------------------------
+Edit ``pyproject.toml`` (and the matching apt deb in ``docker/Dockerfile_uv``
+if it's a system lib), then::
+
+    uv lock                                    # regenerate uv.lock
+    python manage_envs.py sync <backend>       # validate locally
+    git add pyproject.toml uv.lock             # commit them together
+
 Cross-venv runtime
 ------------------
-For disaggregated jobs where rollout and trainer run in separate Ray actors,
-``launch`` *appends Hydra overrides* (``actor_rollout_ref.rollout.venv=...``
-and ``trainer.venv=...``) to the user's command — verl reads those at job
-start to route each role at the right venv's Python::
+For disaggregated jobs ``launch`` *appends Hydra overrides* (one per role)
+to the user's command — verl reads those at job start to route each Ray
+worker group at the right venv's Python. Per-role flags map to per-role
+``*.venv`` Hydra fields (see :mod:`verl.utils.venv` for the resolution
+rules). ``--trainer`` is a global fallback for trainer-side groups whose
+role-level field is left null.
+
+Common case (one venv for all training, one for inference)::
 
     python manage_envs.py launch --rollout vllm --trainer megatron -- \\
         python -m verl.trainer.main_ppo trainer.n_gpus_per_node=8 ...
 
-is equivalent to running the verl driver yourself with the resolved
-overrides::
+is equivalent to::
 
     python -m verl.trainer.main_ppo trainer.n_gpus_per_node=8 \\
         actor_rollout_ref.rollout.venv=/abs/.venvs/.venv-vllm \\
         trainer.venv=/abs/.venvs/.venv-megatron
 
-The driver itself can run in any venv that has verl installed (typically the
-trainer venv); ``launch`` only appends config overrides, it does not switch
-the driver interpreter.
+Disaggregated case (mix engines per role)::
+
+    python manage_envs.py launch --rollout vllm --actor megatron \\
+        --ref fsdp --critic fsdp -- python -m verl.trainer.main_ppo ...
+
+emits ``actor_rollout_ref.rollout.venv=...``,
+``actor_rollout_ref.actor.venv=...``,
+``actor_rollout_ref.ref.venv=...`` and ``critic.venv=...`` separately. Roles
+that share a Ray actor (e.g. fused ActorRolloutRef) must agree — verl
+raises a clear error at job start otherwise.
+
+The driver itself can run in any venv that has verl installed (typically
+the trainer venv); ``launch`` only appends config overrides, it does not
+switch the driver interpreter.
 """
 
 from __future__ import annotations
 
 import argparse
-import importlib
 import os
-import re
 import shlex
 import shutil
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
-INFERENCE_BACKENDS: list[str] = ["vllm", "sglang", "trtllm", "vllm-ascend", "sglang-ascend"]
-TRAINING_BACKENDS: list[str] = ["fsdp", "megatron", "mindspeed", "veomni", "nemoautomodel"]
-# `cpu` is a CI / unit-test / dev-sanity env (no GPU/NPU runtime) — kept out
+INFERENCE_BACKENDS: list[str] = ["vllm", "sglang", "trtllm"]
+TRAINING_BACKENDS: list[str] = ["fsdp", "megatron", "veomni", "nemoautomodel"]
+# `cpu` is a CI / unit-test / dev-sanity env (no GPU runtime) — kept out
 # of the inference/training groups but still a first-class backend.
 DEV_BACKENDS: list[str] = ["cpu"]
 ALL_BACKENDS: list[str] = INFERENCE_BACKENDS + TRAINING_BACKENDS + DEV_BACKENDS
 
-# Per-backend python version. Ascend NPU backends (vllm-ascend / sglang-ascend
-# / mindspeed) target the Atlas A2/A3 CANN 8.5.x base image which ships
-# python 3.11; everything else uses 3.12.
+# Per-backend python version. Every supported backend currently targets
+# CUDA-on-x86_64-Linux + Python 3.12; Ascend NPU and aarch64 GPU variants
+# are out of scope for the uv flow (see [tool.uv].environments).
 PYTHON_VERSION: dict[str, str] = {
     "vllm": "3.12",
     "sglang": "3.12",
     "trtllm": "3.12",
-    "vllm-ascend": "3.11",
-    "sglang-ascend": "3.11",
     "fsdp": "3.12",
     "megatron": "3.12",
-    "mindspeed": "3.11",
     "veomni": "3.12",
     "nemoautomodel": "3.12",
     "cpu": "3.12",
 }
 
 # Recommended build-time env vars per backend. Optional perf / reproducibility
-# hints — `uv pip install` works without them. Set here so users don't have to
+# hints — `uv sync` works without them. Set here so users don't have to
 # remember them.
 #
 # MAX_JOBS=32 is conservative on purpose. The reference Dockerfiles use
@@ -130,9 +152,6 @@ BUILD_ENV: dict[str, dict[str, str]] = {
         "NVTE_BUILD_THREADS_PER_JOB": "4",
         "FLASH_ATTENTION_FORCE_BUILD": "TRUE",
     },
-    "mindspeed": {
-        "MAX_JOBS": "32",
-    },
     # vllm / sglang / trtllm install pre-built wheels and don't need build env.
 }
 
@@ -145,130 +164,6 @@ GROUPS: dict[str, list[str]] = {
 
 VERL_DIR = Path(__file__).resolve().parent
 VENVS_DIR = (VERL_DIR / ".venvs").resolve()
-
-_REQ_NAME_RE = re.compile(r"^\s*([A-Za-z0-9_.-]+)")
-_TORCH_PACKAGES = {"torch", "torchvision", "torchaudio"}
-# Packages installed AFTER the solver with --no-deps, bypassing transitive
-# constraints from backends that declare incompatible ranges.
-# - transformers: verl standardizes on 5.3.0 across all backends even when a
-#   backend (e.g. vllm) declares transformers<5.
-_FORCED_PACKAGES = ["transformers==5.3.0"]
-_FORCED_PACKAGE_NAMES = {"transformers"}
-
-# nvidia-cudnn-cu12 / nvidia-nccl-cu12: these MUST match the system-level
-# libraries in the base Docker image. torch bundles its own transitive pin
-# (e.g. cudnn==9.10.2.21) that conflicts with the base image's actual version.
-# We auto-detect the system library version and force-install the matching pip
-# package in every CUDA backend so the pip .so files always match the system.
-_SYSTEM_MATCH_PREFIXES = ("nvidia-cudnn", "nvidia-nccl")
-_NON_CUDA_BACKENDS = {"cpu", "vllm-ascend", "sglang-ascend", "mindspeed"}
-_UV_PIP_BASE_ARGS = ["--link-mode=copy", "--index-strategy", "unsafe-best-match"]
-
-
-def _detect_system_cudnn_version() -> str | None:
-    """Detect system cuDNN version from the installed debian package.
-
-    Returns a pip version string like '9.16.0.29' or None if not found.
-    Works in nvidia/cuda Docker images where libcudnn is installed via apt.
-    """
-    # Try debian package first (nvidia Docker images)
-    for pkg_name in ("libcudnn9-cuda-12", "libcudnn8-cuda-12", "libcudnn9", "libcudnn8"):
-        try:
-            out = subprocess.check_output(
-                ["dpkg-query", "-W", "-f=${Version}", pkg_name],
-                stderr=subprocess.DEVNULL,
-                text=True,
-            ).strip()
-            # Format: "9.16.0.29-1+cuda12.9" → "9.16.0.29"
-            version = out.split("-")[0]
-            if version:
-                return version
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            continue
-    # Fallback: parse cudnn_version.h (covers non-deb installs)
-    for header_dir in ("/usr/include", "/usr/local/cuda/include"):
-        header = Path(header_dir) / "cudnn_version.h"
-        if header.exists():
-            content = header.read_text()
-            major = re.search(r"#define\s+CUDNN_MAJOR\s+(\d+)", content)
-            minor = re.search(r"#define\s+CUDNN_MINOR\s+(\d+)", content)
-            patch = re.search(r"#define\s+CUDNN_PATCHLEVEL\s+(\d+)", content)
-            if major and minor and patch:
-                return f"{major.group(1)}.{minor.group(1)}.{patch.group(1)}"
-    return None
-
-
-def _detect_system_nccl_version() -> str | None:
-    """Detect system NCCL version from the installed debian package.
-
-    Returns a pip version string like '2.28.3' or None if not found.
-    """
-    for pkg_name in ("libnccl2", "libnccl-dev"):
-        try:
-            out = subprocess.check_output(
-                ["dpkg-query", "-W", "-f=${Version}", pkg_name],
-                stderr=subprocess.DEVNULL,
-                text=True,
-            ).strip()
-            # Format: "2.28.3-1+cuda12.9" → "2.28.3"
-            version = out.split("-")[0]
-            if version:
-                return version
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            continue
-    # Fallback: parse nccl.h
-    for header_dir in ("/usr/include", "/usr/local/cuda/include"):
-        header = Path(header_dir) / "nccl.h"
-        if header.exists():
-            content = header.read_text()
-            major = re.search(r"#define\s+NCCL_MAJOR\s+(\d+)", content)
-            minor = re.search(r"#define\s+NCCL_MINOR\s+(\d+)", content)
-            patch = re.search(r"#define\s+NCCL_PATCH\s+(\d+)", content)
-            if major and minor and patch:
-                return f"{major.group(1)}.{minor.group(1)}.{patch.group(1)}"
-    return None
-
-
-def _detect_cuda_suffix() -> str:
-    """Detect CUDA major version suffix (cu12 or cu13) from nvcc."""
-    try:
-        out = subprocess.check_output(["nvcc", "--version"], stderr=subprocess.DEVNULL, text=True)
-        m = re.search(r"release (\d+)\.", out)
-        if m:
-            return f"cu{m.group(1)}"
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        pass
-    # Default assumption for our base images
-    return "cu12"
-
-
-def _detect_system_match_packages() -> list[str]:
-    """Return nvidia-cudnn and nvidia-nccl pip packages matching the system.
-
-    Priority:
-    1. VERL_CUDNN_PIP_VERSION / VERL_NCCL_PIP_VERSION env vars (set in Dockerfile)
-    2. Auto-detect from dpkg-query / header files
-
-    Returns e.g. ["nvidia-cudnn-cu12==9.16.0.29", "nvidia-nccl-cu12==2.28.3"]
-    """
-    packages: list[str] = []
-    cuda_suffix = _detect_cuda_suffix()
-
-    cudnn_ver = os.environ.get("VERL_CUDNN_PIP_VERSION") or _detect_system_cudnn_version()
-    if cudnn_ver:
-        packages.append(f"nvidia-cudnn-{cuda_suffix}=={cudnn_ver}")
-        print(f"  cuDNN pip: nvidia-cudnn-{cuda_suffix}=={cudnn_ver}")
-    else:
-        print("  WARNING: could not detect system cuDNN version; skipping nvidia-cudnn pin")
-
-    nccl_ver = os.environ.get("VERL_NCCL_PIP_VERSION") or _detect_system_nccl_version()
-    if nccl_ver:
-        packages.append(f"nvidia-nccl-{cuda_suffix}=={nccl_ver}")
-        print(f"  NCCL pip:  nvidia-nccl-{cuda_suffix}=={nccl_ver}")
-    else:
-        print("  WARNING: could not detect system NCCL version; skipping nvidia-nccl pin")
-
-    return packages
 
 
 def _venv_path(backend: str) -> Path:
@@ -307,328 +202,54 @@ def _run(cmd: list[str], env_overrides: dict[str, str] | None = None) -> int:
     return subprocess.run(cmd, env=env, cwd=str(VERL_DIR)).returncode
 
 
-def _load_pyproject() -> dict:
-    if sys.version_info >= (3, 11):
-        tomllib = importlib.import_module("tomllib")
-    else:
-        try:
-            tomllib = importlib.import_module("tomli")
-        except ModuleNotFoundError:
-            sys.exit("error: Python <3.11 requires the 'tomli' package.\n       Install it with: pip install tomli")
-    return tomllib.loads((VERL_DIR / "pyproject.toml").read_text())
-
-
-def _req_name(req: str) -> str:
-    requirement = req.split(";", 1)[0].strip()
-    if " @ " in requirement:
-        requirement = requirement.split(" @ ", 1)[0].strip()
-    match = _REQ_NAME_RE.match(requirement)
-    if not match:
-        sys.exit(f"error: cannot parse requirement name from {req!r}")
-    return match.group(1).lower().replace("_", "-")
-
-
-def _req_project_part(req: str) -> str:
-    requirement = req.split(";", 1)[0].strip()
-    if " @ " in requirement:
-        return requirement.split(" @ ", 1)[0].strip()
-    match = re.match(r"^\s*([A-Za-z0-9_.-]+(?:\[[^\]]+\])?)", requirement)
-    if not match:
-        sys.exit(f"error: cannot parse requirement project from {req!r}")
-    return match.group(1)
-
-
-def _req_marker(req: str) -> str:
-    parts = req.split(";", 1)
-    return f";{parts[1]}" if len(parts) == 2 else ""
-
-
-def _source_applies(source: dict, backend: str) -> bool:
-    return source.get("extra") in (None, backend)
-
-
-def _select_source(source_config: object, backend: str) -> dict | None:
-    if isinstance(source_config, dict):
-        return source_config if _source_applies(source_config, backend) else None
-    if isinstance(source_config, list):
-        for source in source_config:
-            if isinstance(source, dict) and _source_applies(source, backend):
-                return source
-    return None
-
-
-def _source_to_requirement(req: str, source: dict) -> str:
-    if "url" in source:
-        return f"{_req_project_part(req)} @ {source['url']}{_req_marker(req)}"
-    if "git" not in source:
-        return req
-    ref = source.get("rev") or source.get("tag") or source.get("branch")
-    git_url = f"git+{source['git']}"
-    if ref:
-        git_url = f"{git_url}@{ref}"
-    return f"{_req_project_part(req)} @ {git_url}{_req_marker(req)}"
-
-
-def _backend_requirements(pyproject: dict, backend: str) -> list[str]:
-    extras = pyproject["project"]["optional-dependencies"]
-    sources = pyproject.get("tool", {}).get("uv", {}).get("sources", {})
-    seen_extras: set[str] = set()
-    seen_reqs: set[str] = set()
-    requirements: list[str] = []
-
-    def add_extra(extra: str) -> None:
-        if extra in seen_extras:
-            return
-        if extra not in extras:
-            sys.exit(f"error: pyproject.toml has no optional dependency extra {extra!r}")
-        seen_extras.add(extra)
-        for raw_req in extras[extra]:
-            if raw_req.startswith("verl[") and raw_req.endswith("]"):
-                add_extra(raw_req[len("verl[") : -1])
-                continue
-            name = _req_name(raw_req)
-            source = _select_source(sources.get(name), backend)
-            req = _source_to_requirement(raw_req, source) if source else raw_req
-            if req not in seen_reqs:
-                seen_reqs.add(req)
-                requirements.append(req)
-
-    add_extra(backend)
-    return requirements
-
-
-def _index_args(pyproject: dict, backend: str, requirements: list[str]) -> list[str]:
-    uv = pyproject.get("tool", {}).get("uv", {})
-    sources = uv.get("sources", {})
-    indexes = {index["name"]: index["url"] for index in uv.get("index", [])}
-    selected_names = {_req_name(req) for req in requirements}
-    args: list[str] = []
-    seen_urls: set[str] = set()
-    for name in sorted(selected_names):
-        source = _select_source(sources.get(name), backend)
-        if not source or "index" not in source:
-            continue
-        url = indexes.get(source["index"])
-        if not url or url in seen_urls:
-            continue
-        seen_urls.add(url)
-        args.extend(["--extra-index-url", url])
-    return args
-
-
-def _no_build_isolation_args(pyproject: dict, requirements: list[str]) -> list[str]:
-    uv = pyproject.get("tool", {}).get("uv", {})
-    selected_names = {_req_name(req) for req in requirements}
-    args: list[str] = []
-    for name in uv.get("no-build-isolation-package", []):
-        if name in selected_names:
-            args.extend(["--no-build-isolation-package", name])
-    return args
-
-
-def _config_setting_args(pyproject: dict, requirements: list[str]) -> list[str]:
-    uv = pyproject.get("tool", {}).get("uv", {})
-    selected_names = {_req_name(req) for req in requirements}
-    settings = uv.get("config-settings-package", {})
-    args: list[str] = []
-    for package, package_settings in settings.items():
-        if package not in selected_names:
-            continue
-        for key, values in package_settings.items():
-            if not isinstance(values, list):
-                values = [values]
-            for value in values:
-                args.extend(["--config-settings-package", f"{package}:{key}={value}"])
-    return args
-
-
-def _write_requirements(requirements: list[str]) -> tempfile.NamedTemporaryFile:
-    req_file = tempfile.NamedTemporaryFile("w", prefix="verl-", suffix=".requirements.txt", delete=False)
-    req_file.write("\n".join(requirements))
-    req_file.write("\n")
-    req_file.close()
-    return req_file
-
-
-def _is_post_solver(name: str) -> bool:
-    return name in _FORCED_PACKAGE_NAMES or name.startswith(_SYSTEM_MATCH_PREFIXES)
-
-
-def _without_staged_packages(requirements: list[str]) -> list[str]:
-    return [
-        req for req in requirements if not _is_post_solver(_req_name(req)) and _req_name(req) not in _TORCH_PACKAGES
-    ]
-
-
-def _collect_post_solver_packages(requirements: list[str], backend: str, system_match_packages: list[str]) -> list[str]:
-    """Packages installed after the main solve with --no-deps.
-
-    Two categories:
-    1. _FORCED_PACKAGES: verl-wide version overrides (transformers).
-    2. System-match packages (nvidia-cudnn-*, nvidia-nccl-*): auto-detected
-       versions that MUST match the system libraries. Applied to ALL CUDA
-       backends. Per-backend overrides from pyproject.toml (e.g. trtllm
-       needing nvidia-nccl-cu13) replace the detected default for that prefix.
-    """
-    post = list(_FORCED_PACKAGES)
-
-    if backend not in _NON_CUDA_BACKENDS:
-        # Collect per-backend nvidia-* overrides from pyproject.toml first.
-        backend_overrides: dict[str, str] = {}
-        for req in requirements:
-            name = _req_name(req)
-            if name.startswith(_SYSTEM_MATCH_PREFIXES):
-                backend_overrides[name] = req
-
-        # Determine which prefix families the backend already covers.
-        # e.g. if trtllm declares nvidia-nccl-cu13, skip the detected nvidia-nccl-cu12.
-        covered_prefixes = set()
-        for name in backend_overrides:
-            for prefix in _SYSTEM_MATCH_PREFIXES:
-                if name.startswith(prefix):
-                    covered_prefixes.add(prefix)
-
-        # Add auto-detected system packages only for families NOT overridden.
-        for req in system_match_packages:
-            name = _req_name(req)
-            dominated = any(name.startswith(p) for p in covered_prefixes)
-            if not dominated:
-                post.append(req)
-
-        # Add the backend-specific overrides.
-        post.extend(backend_overrides.values())
-
-    return post
-
-
 def cmd_sync(args: argparse.Namespace) -> int:
+    """Create or refresh per-backend venvs via ``uv sync --frozen --extra``.
+
+    Each backend resolves to its own fork in ``uv.lock`` (declared via
+    ``[tool.uv].conflicts``), so ``uv sync --extra <backend>`` installs only
+    that fork into the venv at ``UV_PROJECT_ENVIRONMENT``. ``--frozen``
+    rejects any drift between ``pyproject.toml`` and ``uv.lock`` — bumping
+    a pin requires re-running ``uv lock``.
+
+    If ``uv.lock`` is missing (fresh checkout, or you just bumped a pin
+    locally), ``--frozen`` is dropped from the first sync so ``uv`` can
+    generate the lockfile as a side effect. Subsequent backends in the same
+    invocation, and all subsequent invocations, find the lockfile and use
+    ``--frozen`` automatically. Commit the produced ``uv.lock`` alongside
+    your ``pyproject.toml`` change to keep installs reproducible.
+    """
     backends = _expand(args.backends)
     _require_uv()
     VENVS_DIR.mkdir(parents=True, exist_ok=True)
-    pyproject = _load_pyproject()
-
-    # Detect system nvidia library versions once for all backends.
-    has_cuda_backend = any(b not in _NON_CUDA_BACKENDS for b in backends)
-    if has_cuda_backend:
-        print("--- Detecting system NVIDIA library versions ---")
-        system_match_packages = _detect_system_match_packages()
-    else:
-        system_match_packages = []
-
+    if not (VERL_DIR / "uv.lock").is_file():
+        print(
+            "warning: uv.lock not found — the first uv sync will run without "
+            "--frozen and generate uv.lock. Commit it next to pyproject.toml.",
+            file=sys.stderr,
+        )
     for backend in backends:
         venv = _venv_path(backend)
-        venv_python = _venv_python(backend)
-        env_overrides = BUILD_ENV.get(backend, {})
-
-        rc = _run(["uv", "venv", str(venv), "--python", PYTHON_VERSION[backend], "--seed"], env_overrides)
-        if rc:
-            print(f"error: uv venv failed for {backend}", file=sys.stderr)
-            return rc
-
-        requirements = _backend_requirements(pyproject, backend)
-
-        bootstrap = ["setuptools>=77.0.3,<81.0.0", "wheel", "packaging", "pybind11", "ninja"]
-        rc = _run(
-            [
-                "uv",
-                "pip",
-                "install",
-                "--python",
-                str(venv_python),
-                *_UV_PIP_BASE_ARGS,
-                *bootstrap,
-            ],
-            env_overrides,
-        )
-        if rc:
-            print(f"error: uv pip bootstrap failed for {backend}", file=sys.stderr)
-            return rc
-
-        torch_requirements = [req for req in requirements if _req_name(req) in _TORCH_PACKAGES]
-        if torch_requirements:
-            torch_req_file = _write_requirements(torch_requirements)
-            rc = _run(
-                [
-                    "uv",
-                    "pip",
-                    "install",
-                    "--python",
-                    str(venv_python),
-                    *_UV_PIP_BASE_ARGS,
-                    *_index_args(pyproject, backend, torch_requirements),
-                    *args.uv_args,
-                    "-r",
-                    torch_req_file.name,
-                ],
-                env_overrides,
-            )
-            Path(torch_req_file.name).unlink(missing_ok=True)
-            if rc:
-                print(f"error: uv pip torch install failed for {backend}", file=sys.stderr)
-                return rc
-
-        solver_requirements = _without_staged_packages(requirements)
-        req_file = _write_requirements(solver_requirements)
-        rc = _run(
-            [
-                "uv",
-                "pip",
-                "install",
-                "--python",
-                str(venv_python),
-                *_UV_PIP_BASE_ARGS,
-                *_index_args(pyproject, backend, solver_requirements),
-                *_no_build_isolation_args(pyproject, solver_requirements),
-                *_config_setting_args(pyproject, solver_requirements),
-                *args.uv_args,
-                "-r",
-                req_file.name,
-            ],
-            env_overrides,
-        )
-        Path(req_file.name).unlink(missing_ok=True)
-        if rc:
-            print(f"error: uv pip install failed for {backend}", file=sys.stderr)
-            return rc
-
-        post_solver = _collect_post_solver_packages(requirements, backend, system_match_packages)
-        if post_solver:
-            print("--- Force-installing post-solver packages (--reinstall --no-deps) ---")
-            for pkg in post_solver:
-                print(f"  {pkg}")
-            rc = _run(
-                [
-                    "uv",
-                    "pip",
-                    "install",
-                    "--python",
-                    str(venv_python),
-                    *_UV_PIP_BASE_ARGS,
-                    "--reinstall",
-                    "--no-deps",
-                    *post_solver,
-                ],
-                env_overrides,
-            )
-            if rc:
-                print(f"error: post-solver package install failed for {backend}", file=sys.stderr)
-                return rc
-
+        env_overrides = {
+            **BUILD_ENV.get(backend, {}),
+            "UV_PROJECT_ENVIRONMENT": str(venv),
+        }
+        # Re-check on every iteration: the first sync of a fresh checkout
+        # writes uv.lock, so subsequent backends pick up --frozen.
+        frozen_args = ["--frozen"] if (VERL_DIR / "uv.lock").is_file() else []
         cmd = [
             "uv",
-            "pip",
-            "install",
+            "sync",
+            *frozen_args,
+            "--extra",
+            backend,
             "--python",
-            str(venv_python),
-            *_UV_PIP_BASE_ARGS,
-            "--no-deps",
+            PYTHON_VERSION[backend],
+            "--link-mode=copy",
             *args.uv_args,
-            "-e",
-            str(VERL_DIR),
         ]
-        rc = _run(cmd, env_overrides=env_overrides)
+        rc = _run(cmd, env_overrides)
         if rc:
-            print(f"error: editable verl install failed for {backend}", file=sys.stderr)
+            print(f"error: uv sync failed for {backend}", file=sys.stderr)
             return rc
     return 0
 
@@ -697,8 +318,6 @@ def _resolve_role_venv(spec: str, role: str) -> str:
     (Ray's ``py_executable`` accepts arguments — see
     https://docs.ray.io/en/latest/ray-core/handling-dependencies.html#using-uv-for-package-management).
     """
-    import shlex
-
     tokens = shlex.split(spec)
     if len(tokens) > 1:
         head = tokens[0]
@@ -735,23 +354,50 @@ def _resolve_role_venv(spec: str, role: str) -> str:
     return str(_venv_path(spec))
 
 
-def cmd_launch(args: argparse.Namespace) -> int:
-    """Run a verl command with rollout and trainer routed at separate venvs
-    by appending Hydra-style config overrides to the user's command.
+# Per-role launch flags → Hydra paths. Mirrors ``_ROLE_VENV_PATH`` in
+# ``verl/utils/venv.py``; keep them in sync. ``trainer`` is the legacy-shape
+# fallback and only emits ``trainer.venv=...``.
+_LAUNCH_ROLE_KEYS: dict[str, str] = {
+    "rollout": "actor_rollout_ref.rollout.venv",
+    "actor": "actor_rollout_ref.actor.venv",
+    "ref": "actor_rollout_ref.ref.venv",
+    "critic": "critic.venv",
+    "trainer": "trainer.venv",
+}
 
-    By default this appends ``actor_rollout_ref.rollout.venv=<rollout-spec>``
-    and ``trainer.venv=<trainer-spec>``. Override the keys via
-    ``--rollout-key`` / ``--trainer-key`` if your entry point uses different
-    Hydra paths.
+
+def cmd_launch(args: argparse.Namespace) -> int:
+    """Run a verl command with each role routed at a separate venv by
+    appending Hydra-style config overrides to the user's command.
+
+    Per-role flags accepted: ``--rollout``, ``--actor``, ``--ref``,
+    ``--critic``, ``--trainer``. Each maps to the matching ``*.venv`` field
+    (see ``_LAUNCH_ROLE_KEYS``). ``--trainer`` is the global fallback for any
+    trainer-side group whose role-level field is left null. Pass ``--*-key``
+    to override the Hydra path emitted for any role.
     """
     if not args.command:
-        sys.exit("error: nothing to run after `--`. Try: launch --rollout vllm --trainer megatron -- python -m ...")
-    rollout_spec = _resolve_role_venv(args.rollout, role="rollout")
-    trainer_spec = _resolve_role_venv(args.trainer, role="trainer")
-    overrides = [
-        f"{args.rollout_key}={rollout_spec}",
-        f"{args.trainer_key}={trainer_spec}",
-    ]
+        sys.exit(
+            "error: nothing to run after `--`. Try:\n"
+            "  launch --rollout vllm --trainer megatron -- python -m ...\n"
+            "  launch --rollout vllm --actor megatron --critic fsdp -- python -m ..."
+        )
+    overrides: list[str] = []
+    keys = {
+        "rollout": args.rollout_key,
+        "actor": args.actor_key,
+        "ref": args.ref_key,
+        "critic": args.critic_key,
+        "trainer": args.trainer_key,
+    }
+    for role, hydra_key in keys.items():
+        spec = getattr(args, role, None)
+        if not spec:
+            continue
+        resolved = _resolve_role_venv(spec, role=role)
+        overrides.append(f"{hydra_key}={resolved}")
+    if not overrides:
+        sys.exit("error: at least one of --rollout/--actor/--ref/--critic/--trainer must be set")
     cmd = [*args.command, *overrides]
     print(f"$ {' '.join(shlex.quote(c) for c in cmd)}", flush=True)
     return subprocess.run(cmd, cwd=str(VERL_DIR)).returncode
@@ -767,17 +413,18 @@ def _build_parser() -> argparse.ArgumentParser:
 
     backends_help = (
         "backend name(s); shortcuts: all, "
-        "inference (vllm sglang trtllm vllm-ascend sglang-ascend), "
-        "training (fsdp megatron mindspeed veomni nemoautomodel), "
-        "dev (cpu)"
+        "inference (vllm sglang trtllm), "
+        "training (fsdp megatron veomni nemoautomodel), "
+        "dev (cpu). x86_64 Linux only — Ascend NPU and aarch64 GPU variants "
+        "are not currently supported via uv sync."
     )
 
-    s = sub.add_parser("sync", help="create or refresh one or more backend venvs")
+    s = sub.add_parser("sync", help="create or refresh one or more backend venvs (uv sync --frozen)")
     s.add_argument("backends", nargs="+", help=backends_help)
     s.add_argument(
         "uv_args",
         nargs=argparse.REMAINDER,
-        help="anything after `--` is forwarded to `uv pip install`",
+        help="anything after `--` is forwarded to `uv sync`",
     )
     s.set_defaults(func=cmd_sync)
 
@@ -797,24 +444,43 @@ def _build_parser() -> argparse.ArgumentParser:
 
     lh = sub.add_parser(
         "launch",
-        help="run a command with rollout/trainer routed at separate venvs (cross-venv runtime)",
+        help="run a command with each role routed at a separate venv (cross-venv runtime)",
         description=(
-            "Appends Hydra config overrides for the rollout and trainer venvs to the user's "
-            "command. Both flags accept a backend name (vllm/megatron/...), an absolute venv "
-            "path / python path, or a 'uv run --project ...' command line."
+            "Appends Hydra config overrides for one or more role venvs to the user's command. "
+            "Each --<role> flag accepts a backend name (vllm/megatron/...), an absolute venv "
+            "path / python path, or a 'uv run --project ...' command line. --trainer is the "
+            "global fallback for any trainer-side worker group whose role-level field is null."
         ),
     )
-    lh.add_argument("--rollout", required=True, help="rollout/inference venv spec")
-    lh.add_argument("--trainer", required=True, help="trainer/training venv spec")
+    lh.add_argument("--rollout", default=None, help="rollout/inference venv spec")
+    lh.add_argument("--actor", default=None, help="actor (PPO trainer) venv spec")
+    lh.add_argument("--ref", default=None, help="reference-policy venv spec (disaggregated only)")
+    lh.add_argument("--critic", default=None, help="critic venv spec")
+    lh.add_argument("--trainer", default=None, help="fallback venv for any trainer-side group with no per-role spec")
     lh.add_argument(
         "--rollout-key",
-        default="actor_rollout_ref.rollout.venv",
+        default=_LAUNCH_ROLE_KEYS["rollout"],
         help="Hydra path for the rollout venv override (default: %(default)s)",
     )
     lh.add_argument(
+        "--actor-key",
+        default=_LAUNCH_ROLE_KEYS["actor"],
+        help="Hydra path for the actor venv override (default: %(default)s)",
+    )
+    lh.add_argument(
+        "--ref-key",
+        default=_LAUNCH_ROLE_KEYS["ref"],
+        help="Hydra path for the ref venv override (default: %(default)s)",
+    )
+    lh.add_argument(
+        "--critic-key",
+        default=_LAUNCH_ROLE_KEYS["critic"],
+        help="Hydra path for the critic venv override (default: %(default)s)",
+    )
+    lh.add_argument(
         "--trainer-key",
-        default="trainer.venv",
-        help="Hydra path for the trainer venv override (default: %(default)s)",
+        default=_LAUNCH_ROLE_KEYS["trainer"],
+        help="Hydra path for the trainer-fallback venv override (default: %(default)s)",
     )
     lh.add_argument("command", nargs=argparse.REMAINDER, help="command to run after `--`")
     lh.set_defaults(func=cmd_launch)

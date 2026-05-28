@@ -180,4 +180,10 @@ profiler:
 
       # Whether to fail on unknown stage or missing msprobe
       strict: ${oc.select:global_profiler.global_tool_config.precision_debugger.strict,False}
-      
+
+# Cross-venv runtime spec for critic Ray actors. Accepts a backend name
+# (e.g. "fsdp"), an absolute venv / python path, or a full command line such as
+# "uv run --project /abs/path/to/verl --extra fsdp". Null falls back to
+# ``trainer.venv``. See verl/utils/venv.py for the resolver.
+venv: null
+

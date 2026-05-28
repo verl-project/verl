@@ -55,6 +55,21 @@ Pre-built images for GB200 (aarch64) are not yet published. Users should build l
 docker build -f docker/Dockerfile.stable.vllm -t verl:vllm-arm64 .
 ```
 
+## Multi-backend uv image (`Dockerfile_uv`)
+
+`Dockerfile_uv` builds one image with a separate venv per non-Ascend backend
+under `/workspace/verl/.venvs/`. Build with BuildKit so the per-backend uv
+cache mount is honored:
+
+```sh
+DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile_uv -t verl:uv .
+```
+
+For the cache layout, `TARGETS` slimming, and the recipe for bind-mounting
+`~/.cache/uv` at runtime to quickly resync packages in a running container,
+see the **"Install from multi-backend uv image (Dockerfile_uv)"** section in
+[`docs/start/install.rst`](../docs/start/install.rst).
+
 ## Installation from Docker
 
 After pulling the desired Docker image and installing desired inference and training frameworks, you can run it with the following steps:

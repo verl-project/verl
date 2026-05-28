@@ -821,7 +821,7 @@ class SGLangReplica(RolloutReplica):
                             **get_platform().rollout_env_vars(),
                         }
                     },
-                    resolve_py_executable(self.config.venv, role="rollout"),
+                    resolve_py_executable(self.config.venv, role="rollout", auto_hint=self.config.name),
                 ),
                 name=name,
                 max_concurrency=self.max_concurrency,

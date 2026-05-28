@@ -212,7 +212,7 @@ class SGLangPDReplica(SGLangReplica):
             ),
             runtime_env=inject_py_executable(
                 {"env_vars": {f"RAY_EXPERIMENTAL_NOSET_{visible_devices_keyword}": "1"}},
-                resolve_py_executable(self.config.venv, role="rollout"),
+                resolve_py_executable(self.config.venv, role="rollout", auto_hint=self.config.name),
             ),
             name=actor_name,
             max_concurrency=self.max_concurrency,

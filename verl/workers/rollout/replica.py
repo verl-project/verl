@@ -183,7 +183,7 @@ class RolloutReplica(ABC):
             name_prefix=name_prefix,
             use_gpu=use_gpu,
             device_name="cuda" if not is_torch_npu_available(check_device=False) else "npu",
-            worker_py_executable=resolve_py_executable(self.config.venv, role="rollout"),
+            worker_py_executable=resolve_py_executable(self.config.venv, role="rollout", auto_hint=self.config.name),
         )
         self.workers = worker_group.workers
         await self.launch_servers()
@@ -223,7 +223,7 @@ class RolloutReplica(ABC):
             name_prefix=name_prefix,
             use_gpu=True,
             device_name="cuda" if not is_torch_npu_available(check_device=False) else "npu",
-            worker_py_executable=resolve_py_executable(self.config.venv, role="rollout"),
+            worker_py_executable=resolve_py_executable(self.config.venv, role="rollout", auto_hint=self.config.name),
         )
         self.workers = worker_group.workers
         await self.launch_servers()

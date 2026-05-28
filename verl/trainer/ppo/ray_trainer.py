@@ -70,7 +70,7 @@ from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_
 from verl.utils.skip.skip_manager import SkipManager
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
-from verl.utils.venv import resolve_py_executable
+from verl.utils.venv import resolve_group_py_executable
 from verl.workers.config import DistillationConfig, EngineConfig
 from verl.workers.rollout.llm_server import LLMServerManager
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
@@ -855,21 +855,24 @@ class RayPPOTrainer:
                     OmegaConf.select(self.config.global_profiler.global_tool_config.nsys, "worker_nsight_options")
                 )
         wg_kwargs["device_name"] = self.device_name
-        # Cross-venv runtime: route trainer (actor / critic / ref / rm) workers
-        # at the training venv when ``trainer.venv`` is set in config. ``None``
-        # / unset means Ray inherits the driver's interpreter.
-        trainer_py_executable = resolve_py_executable(OmegaConf.select(self.config.trainer, "venv"), role="trainer")
-        if trainer_py_executable is not None:
-            wg_kwargs["worker_py_executable"] = trainer_py_executable
 
         for resource_pool, class_dict in self.resource_pool_to_cls.items():
             if not class_dict:
                 continue
+            # Cross-venv runtime: route this worker group's actors at a
+            # specific Python interpreter. The resolver looks at the per-role
+            # ``venv`` field for every role colocated in this group (actor /
+            # ref / critic) and falls back to ``trainer.venv``. None / unset
+            # leaves the actors on the driver's interpreter.
+            group_py_executable = resolve_group_py_executable(class_dict.keys(), self.config)
+            group_kwargs = dict(wg_kwargs)
+            if group_py_executable is not None:
+                group_kwargs["worker_py_executable"] = group_py_executable
             worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
             wg_dict = self.ray_worker_group_cls(
                 resource_pool=resource_pool,
                 ray_cls_with_init=worker_dict_cls,
-                **wg_kwargs,
+                **group_kwargs,
             )
             spawn_wg = wg_dict.spawn(prefix_set=class_dict.keys())
             all_wg.update(spawn_wg)

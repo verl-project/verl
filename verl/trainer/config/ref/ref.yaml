@@ -138,3 +138,9 @@ router_replay:
   # File path to load recorded routing decisions for replay
   # Required when mode is 'replay'
   replay_file: null
+
+# Cross-venv runtime spec for the reference-policy Ray actors (only meaningful
+# when ref is disaggregated from actor; in the fused ActorRolloutRef path the
+# ref shares the actor's interpreter). Null falls back to ``trainer.venv``.
+# See verl/utils/venv.py for the resolver.
+venv: null

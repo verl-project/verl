@@ -27,10 +27,15 @@ requires-python = ">=3.10,<3.13"
 # -------------------------------
 # project.optional-dependencies
 # -------------------------------
-# 5 inference + 5 training backends; each pins its own torch/cuda stack and
-# gets its own venv (`.venvs/.venv-<extra>/`). Transformers is intentionally
-# synchronized across backends. Source/index routing lives in [tool.uv] below.
-# See docs/start/install.rst.
+# 3 inference (vllm / sglang / trtllm) + 4 training (fsdp / megatron / veomni
+# / nemoautomodel) GPU backends, plus a `cpu` extra for CI / sanity, all
+# x86_64 Linux. Each pins its own torch/cuda stack and gets its own venv
+# (`.venvs/.venv-<extra>/`). Transformers is intentionally synchronized
+# across backends. Source/index routing lives in [tool.uv] below.
+# Ascend NPU backends (vllm-ascend / sglang-ascend / mindspeed) and aarch64
+# GPU variants (e.g. GB200) are intentionally NOT exposed here — they
+# require a different torch / wheel matrix and are tracked separately in
+# docker/ascend/. See docs/start/install.rst.
 [project.optional-dependencies]
 # ---- legacy setup.py extras (kept for `pip install verl[…]` compatibility) -
 test         = ["pytest", "pre-commit", "py-spy", "pytest-asyncio", "pytest-rerunfailures"]
@@ -73,9 +78,9 @@ verl-core = [
 
 # ---- inference backends ----------------------------------------------------
 # Rollout-only slices of the reference Dockerfiles. Transformers is
-# intentionally synchronized to 5.3.0 across all backend venvs; manage_envs.py
-# installs it in a final `uv pip install --no-deps` step, so backend package
-# metadata constraints such as `transformers<5` do not block installation.
+# intentionally synchronized to 5.3.0 across all backend venvs via
+# [tool.uv].override-dependencies, so backend package metadata constraints
+# such as `transformers<5` do not block installation.
 
 # verl/docker/Dockerfile.stable.vllm (rollout half)
 vllm = [
@@ -89,9 +94,10 @@ vllm = [
 ]
 
 # sglang/docker/Dockerfile + verl/docker/Dockerfile.stable.sglang (rollout half).
-# nvidia-cudnn-cu12 / nvidia-nccl-cu12 are NOT declared here — manage_envs.py
-# auto-detects the system cuDNN/NCCL version and force-installs the matching
-# pip packages in every CUDA backend (see _detect_system_match_packages).
+# nvidia-cudnn-cu12 / nvidia-nccl-cu12 are NOT declared here — they are
+# pinned globally in [tool.uv].override-dependencies below so every CUDA
+# backend resolves to the same wheel versions as the apt debs in
+# docker/Dockerfile_uv.
 sglang = [
     "verl[verl-core]",
     "torch==2.9.1",
@@ -103,10 +109,9 @@ sglang = [
 ]
 
 # verl/docker/Dockerfile.stable.trtllm — Linux/x86_64/cu13 wheels only.
-# TRT-LLM targets CUDA 13; nvidia-nccl-cu13 is kept here as a per-backend
-# override that replaces the auto-detected cu12 default. On a proper cu13
-# base image, auto-detection would find it directly; on a cu12 base this
-# explicit pin ensures the correct NCCL variant is force-installed.
+# TRT-LLM targets CUDA 13; nvidia-nccl-cu13 is pinned here per-backend
+# (the global [tool.uv].override-dependencies pins nvidia-nccl-cu12 for
+# every other backend; trtllm needs the cu13 variant instead).
 # ray==2.54.1 is the TRT-LLM-compat pin from Dockerfile.stable.trtllm L53.
 trtllm = [
     "verl[verl-core]",
@@ -117,42 +122,6 @@ trtllm = [
     "numpy>=2.0.0,<2.4",
     "nvidia-nccl-cu13>=2.28.9,<=2.29.2",
     "ray[default]==2.54.1",
-]
-
-# verl/docker/ascend/Dockerfile.ascend_8.5.0_a2|a3 (rollout half). vllm built
-# with VLLM_TARGET_DEVICE=empty + vllm-ascend layered on top; torch 2.9.0 /
-# torch-npu 2.9.0 from PyPI matches the qwen3-5 Dockerfile variant L88.
-# torch comes from PyPI default — torch-npu pulls the matching wheel.
-vllm-ascend = [
-    "verl[verl-core]",
-    "torch==2.9.0",
-    "torchvision==0.24.0",
-    "torchaudio==2.9.0",
-    "torch-npu==2.9.0 ; sys_platform == 'linux'",
-    "vllm==0.18.0",
-    "vllm-ascend==0.18.0 ; sys_platform == 'linux'",
-    "transformers==5.3.0",
-    "numpy<2.0.0",
-    "hf_transfer",
-]
-
-# verl/docker/ascend/Dockerfile.ascend.sglang_8.5.0_a2|a3 (rollout half).
-# sglang 0.5.10 from PyPI; the upstream Dockerfile swaps in pyproject_npu.toml
-# but the base deps overlap — we pin the NPU-specific overlay versions
-# (transformers / torchao / timm) directly. sgl-kernel-npu, deep_ep,
-# torch_memory_saver wheels are not on PyPI; install separately from
-# https://github.com/sgl-project/sgl-kernel-npu/releases if you need them.
-sglang-ascend = [
-    "verl[verl-core]",
-    "torch==2.8.0",
-    "torchvision==0.23.0",
-    "torch-npu==2.8.0.post2 ; sys_platform == 'linux'",
-    "sglang==0.5.10",
-    "transformers==5.3.0",
-    "torchao==0.9.0",
-    "timm==1.0.16",
-    "numpy<2.0.0",
-    "hf_transfer",
 ]
 
 # ---- training backends -----------------------------------------------------
@@ -194,26 +163,6 @@ megatron = [
     "transformers==5.3.0",
 ]
 
-# Trainer-only slice of verl/docker/ascend/Dockerfile.ascend_8.5.0_a2|a3
-# (Ascend NPU). MindSpeed's own requirements.txt doesn't pin torch — it
-# expects the env to provide torch + torch_npu. The Dockerfile gets them
-# transitively via vllm-ascend (torch 2.9.0 + torch-npu 2.9.0); we pin
-# explicitly so this extra is self-contained and pairs cleanly with the
-# `vllm-ascend` extra.
-mindspeed = [
-    "verl[verl-core]",
-    "torch==2.9.0",
-    "torchvision==0.24.0",
-    "torchaudio==2.9.0",
-    "torch-npu==2.9.0 ; sys_platform == 'linux'",
-    "triton-ascend==3.2.0 ; sys_platform == 'linux'",
-    "mindspeed",
-    "megatron-core",
-    "mbridge",
-    "transformers==5.3.0",
-    "hf_transfer",
-]
-
 # VeOmni v0.1.9a5 `gpu` extra slice. Transformers is still synchronized to
 # 5.3.0 for verl runtime consistency.
 veomni = [
@@ -243,7 +192,10 @@ nemoautomodel = [
 # ---- pure CPU env for CI / unit tests / dev sanity ------------------------
 # Mirrors verl/.github/workflows/{cpu_unit_tests,sanity}.yml: CPU torch +
 # verl-core + the full requirements-test.txt set. No flash-attn, no apex,
-# no vllm/sglang — works on any Linux/macOS host.
+# no vllm/sglang. The committed uv.lock is x86_64 Linux only (see
+# [tool.uv].environments below); macOS / Windows users can still
+# `pip install verl[cpu]` via the legacy pip path, but `uv sync --frozen`
+# requires a Linux x86_64 host.
 cpu = [
     "verl[verl-core]",
     "torch==2.10.0",
@@ -349,24 +301,80 @@ verl = [
 
 # =============================================================================
 # tool.uv — see docs/start/install.rst for the full reference.
-# `python manage_envs.py sync <backend>` reads this metadata and installs with
-# uv pip into `.venvs/.venv-<backend>`. It installs `transformers==5.3.0`
-# after the backend solve with `--no-deps`, so backend metadata constraints
-# such as `<5` do not change the synchronized transformers version. We
-# intentionally do not use `uv sync` for backend envs because uv's universal
-# lockfile resolves every extra and therefore touches unrelated git backends
-# during a vllm-only install.
+# `python manage_envs.py sync <backend>` runs `uv sync --frozen --extra X`
+# against uv.lock with `UV_PROJECT_ENVIRONMENT=.venvs/.venv-<backend>`, so
+# every backend resolves into its own venv from a single committed lockfile.
 # =============================================================================
 [tool.uv]
+# Lock for x86_64 Linux only. This is the only platform / arch matrix verl's
+# uv flow currently supports — Ascend NPU (aarch64 / x86_64) and aarch64
+# GPU variants (Grace-Blackwell) are out of scope for now. Constraining
+# environments here keeps `uv lock` from trying to resolve torch wheels for
+# arches we don't ship.
+#
+# To extend to a new platform (e.g. aarch64 GPU or Ascend NPU):
+#   1. Append a marker below, e.g.
+#        "sys_platform == 'linux' and platform_machine == 'aarch64'"
+#   2. Add platform-specific backend extras under
+#      [project.optional-dependencies], using markers like
+#      `; platform_machine == 'aarch64'` on arch-specific deps
+#      (torch-npu, aarch64-only wheels, …).
+#   3. Append each new extra to the `conflicts` cluster so it resolves
+#      as an independent fork in uv.lock.
+#   4. Wire per-extra torch / index routing in [tool.uv.sources] if
+#      the new platform needs a different wheel index, and add any
+#      additional git sources (e.g. mindspeed for Ascend).
+#   5. Register the backend in manage_envs.py (INFERENCE_BACKENDS /
+#      TRAINING_BACKENDS / PYTHON_VERSION / BUILD_ENV).
+#   6. Run `uv lock` and commit pyproject.toml + uv.lock together.
+# See docs/start/install.rst → "Adding a new platform or backend" for
+# the full walkthrough.
+environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+
+# Mutually exclusive: each pins its own torch / CUDA stack; uv.lock resolves
+# them as independent forks. With this declaration,
+# `uv sync --extra <backend>` activates exactly one fork into the venv at
+# UV_PROJECT_ENVIRONMENT (manage_envs.py wires that up per backend).
+conflicts = [
+    [
+        { extra = "vllm" },
+        { extra = "sglang" },
+        { extra = "trtllm" },
+        { extra = "fsdp" },
+        { extra = "megatron" },
+        { extra = "veomni" },
+        { extra = "nemoautomodel" },
+        { extra = "cpu" },
+    ],
+]
+
+# Resolution-time overrides applied across every fork. Replaces the
+# `_detect_system_match_packages` + `--reinstall --no-deps` postscript that
+# manage_envs.py used to run after the per-backend solve.
+#  * transformers — synchronized to 5.3.0 across all backends; some backend
+#    metadata declares `<5`, which the override suppresses.
+#  * nvidia-cudnn-cu12 / nvidia-nccl-cu12 — must match the apt deb versions
+#    in docker/Dockerfile_uv (CUDNN_VERSION, NCCL_VERSION). Bumping either
+#    apt pin requires updating the override here and re-running `uv lock`.
+# Overrides are inert on forks that don't transitively pull the package
+# (NPU / CPU backends don't pull nvidia-cudnn-cu12 via torch, so the cuDNN
+# override is dormant there).
+override-dependencies = [
+    "transformers==5.3.0",
+    "nvidia-cudnn-cu12==9.16.0.29",
+    "nvidia-nccl-cu12==2.28.3",
+]
+
 # These packages `import torch` at build time, so we let them see the torch
-# already installed into the backend venv. manage_envs.py installs torch first,
-# then passes these as `uv pip install --no-build-isolation-package ...`.
+# already installed into the backend venv. `uv sync` honors this list when
+# building any of these from source.
 no-build-isolation-package = [
     "apex",
     "transformer-engine",
     "transformer-engine-torch",
     "megatron-core",
-    "mindspeed",
     "veomni",
     "nemo-automodel",
 ]
@@ -382,22 +390,8 @@ flash-attn         = { url = "https://github.com/lesj0610/flash-attention/releas
 mbridge            = { git = "https://github.com/ISEEKYAN/mbridge.git",         rev = "641a5a0" }
 veomni             = { git = "https://github.com/ByteDance-Seed/VeOmni.git",    tag = "v0.1.9a5" }
 nemo-automodel     = { git = "https://github.com/NVIDIA-NeMo/Automodel.git",    tag = "v0.3.0" }
-mindspeed          = { git = "https://gitcode.com/Ascend/MindSpeed.git",        rev = "2.3.0_core_r0.12.1" }
+megatron-core      = { git = "https://github.com/NVIDIA/Megatron-LM.git",       tag = "core_v0.16.0" }
 
-# megatron-core split per-extra: CUDA `megatron` tracks core_v0.16.0
-# (Dockerfile.stable.{vllm,sglang,trtllm}); ascend `mindspeed` tracks
-# core_v0.12.1 to match MindSpeed's `2.3.0_core_r0.12.1` branch name and
-# Dockerfile.ascend.*.
-megatron-core = [
-    { git = "https://github.com/NVIDIA/Megatron-LM.git", tag = "core_v0.16.0", extra = "megatron" },
-    { git = "https://github.com/NVIDIA/Megatron-LM.git", tag = "core_v0.12.1", extra = "mindspeed" },
-]
-
-# NPU extras (vllm-ascend / sglang-ascend / mindspeed) deliberately have no
-# torch index entry: `torch-npu==X` requires `torch==X` and PyPI serves the
-# right wheel (CPU build on aarch64 Atlas A2/A3, default on x86_64). The
-# Dockerfiles match — they only add the cpu wheel index as a fallback on
-# x86_64 hosts, never as a forced override.
 torch = [
     { index = "pytorch-cu129", extra = "vllm" },
     { index = "pytorch-cu129", extra = "sglang" },

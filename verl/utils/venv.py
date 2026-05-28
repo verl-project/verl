@@ -11,39 +11,21 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Cross-venv runtime helpers.
+"""Resolve per-role venv specs into Ray ``runtime_env={"py_executable": ...}``.
 
-verl supports running rollout (inference) workers and trainer workers under
-different Python interpreters / package sets in the *same* Ray job. This
-module is the single source of truth for resolving the user-supplied
-*venv spec* (passed via Hydra config) into a string that is suitable for
-Ray's ``runtime_env={"py_executable": ...}``.
+Per-role Hydra knobs (all default ``None``): ``actor_rollout_ref.{actor,ref,rollout}.venv``,
+``critic.venv``, and the global ``trainer.venv`` fallback.
 
-The two config knobs are:
+Resolution priority for each Ray worker group:
+  1. Per-role ``venv`` field — colocated roles must agree, else raise.
+  2. ``trainer.venv`` (preserves prior single-trainer-venv behaviour).
+  3. Auto-detect ``.venvs/.venv-<engine>`` from the role's engine field
+     (rollout ``name`` / actor / critic ``strategy``); silent on miss.
+  4. ``None`` — worker inherits the driver's interpreter.
 
-  * ``actor_rollout_ref.rollout.venv`` — used by every rollout / inference
-    Ray actor (set on :class:`verl.workers.config.RolloutConfig.venv`),
-  * ``trainer.venv`` — used by every trainer Ray actor (PPO actor, critic,
-    ref policy, reward model).
-
-Each accepts any of:
-
-  * an absolute path to a Python interpreter (``/abs/.../bin/python``),
-  * an absolute path to a venv directory (we append ``bin/python``),
-  * a bare backend name (``vllm`` / ``sglang`` / ``megatron`` / ...) that is
-    looked up under ``<verl>/.venvs/.venv-<backend>/bin/python`` — i.e. the
-    layout produced by ``manage_envs.py sync``,
-  * a full command line such as ``"uv run --project /abs/path/to/verl"``.
-    Ray's ``py_executable`` field accepts a string with arguments, so this
-    is the recommended way to integrate with ``uv run`` (see Ray docs:
-    https://docs.ray.io/en/latest/ray-core/handling-dependencies.html#using-uv-for-package-management).
-
-If the relevant config value is ``None`` (default) or empty, the resolver
-returns ``None`` and the worker inherits the driver's interpreter — the
-legacy single-venv behaviour.
-
-NOTE: ``py_executable`` is marked experimental upstream (Ray docs, runtime
-environments API reference). Behaviour may change with newer Ray releases.
+Specs accept: backend name (looked up under ``<verl>/.venvs/.venv-<name>``),
+absolute python / venv path, or a multi-token command line such as
+``"uv run --project /abs/path"`` (Ray's ``py_executable`` is experimental).
 """
 
 from __future__ import annotations
@@ -52,11 +34,10 @@ import os
 import shlex
 import shutil
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
 
 def _verl_root() -> Path:
-    # verl/utils/venv.py -> verl/utils -> verl -> <verl pkg root>
     return Path(__file__).resolve().parent.parent.parent
 
 
@@ -65,28 +46,18 @@ def _venvs_dir() -> Path:
 
 
 def _resolve_to_python(spec: str) -> Path:
-    """Resolve a single-token ``spec`` to an absolute Python interpreter
-    path. The returned path is **not** checked for existence here — callers
-    wanting strict validation should call :func:`resolve_py_executable`.
-    """
+    """Single-token spec → absolute python path. Existence is *not* checked here."""
     p = Path(spec).expanduser()
     if p.is_absolute():
-        # already a python binary
         if p.is_file() and os.access(p, os.X_OK):
             return p.resolve()
-        # absolute path to a venv directory
-        candidate = p / "bin" / "python"
-        return candidate.resolve()
-    # treat as bare backend name: <verl>/.venvs/.venv-<name>/bin/python
+        return (p / "bin" / "python").resolve()
     return (_venvs_dir() / f".venv-{spec}" / "bin" / "python").resolve()
 
 
 def _validate_command_head(spec: str, role: str) -> str:
-    """Validate the head token of a multi-token ``py_executable`` command
-    line and return ``spec`` unchanged for pass-through to Ray.
-    """
-    tokens = shlex.split(spec)
-    head = tokens[0]
+    """Cheap executability check on the head token; spec is returned unchanged."""
+    head = shlex.split(spec)[0]
     head_path = Path(head).expanduser()
     if head_path.is_absolute():
         if not head_path.is_file() or not os.access(head_path, os.X_OK):
@@ -96,24 +67,35 @@ def _validate_command_head(spec: str, role: str) -> str:
     return spec
 
 
-def resolve_py_executable(spec: Optional[str], *, role: str) -> Optional[str]:
-    """Turn a config-supplied venv spec (or ``None``) into a string suitable
-    for Ray's ``runtime_env={"py_executable": ...}``, or ``None`` if no
-    override was requested.
+# Aliases — distinct strategies that intentionally share a single venv.
+_VENV_ALIASES = {"fsdp2": "fsdp"}
 
-    Single-token specs (backend name / venv dir / abs python path) are
-    resolved to an absolute interpreter path. Multi-token specs (e.g.
-    ``"uv run --project /abs/path"``) are passed through verbatim after a
-    cheap head-token executability check.
 
-    Raises ``FileNotFoundError`` with a clear message if ``spec`` is set but
-    cannot be turned into something runnable — failing fast at process start
-    is much friendlier than failing later inside a Ray actor.
+def _auto_detect_venv(hint: Optional[str]) -> Optional[str]:
+    """Return ``<verl>/.venvs/.venv-<hint>/bin/python`` if it exists, else ``None``."""
+    if not hint:
+        return None
+    name = _VENV_ALIASES.get(hint, hint)
+    candidate = _venvs_dir() / f".venv-{name}" / "bin" / "python"
+    if candidate.is_file() and os.access(candidate, os.X_OK):
+        return str(candidate.resolve())
+    return None
 
-    ``role`` is used purely for diagnostics (``"rollout"`` / ``"trainer"``).
+
+def resolve_py_executable(
+    spec: Optional[str],
+    *,
+    role: str,
+    auto_hint: Optional[str] = None,
+) -> Optional[str]:
+    """Resolve a venv spec for Ray's ``py_executable``; ``None`` falls through to ``auto_hint``.
+
+    Explicit specs that don't resolve raise ``FileNotFoundError``; auto-detect
+    misses stay silent (it's a backward-compat convenience). ``role`` is for
+    diagnostics only.
     """
     if spec is None or spec == "":
-        return None
+        return _auto_detect_venv(auto_hint)
     if len(shlex.split(spec)) > 1:
         return _validate_command_head(spec, role)
     py = _resolve_to_python(spec)
@@ -124,19 +106,87 @@ def resolve_py_executable(spec: Optional[str], *, role: str) -> Optional[str]:
             "(e.g. actor_rollout_ref.rollout.venv=vllm after "
             "`python manage_envs.py sync vllm`), pass a uv command line such as "
             "'uv run --project /abs/path/to/verl', or leave it null to use the "
-            "driver's interpreter."
+            "driver's interpreter (or auto-detected venv)."
         )
     return str(py)
 
 
 def inject_py_executable(runtime_env: Optional[dict], py_executable: Optional[str]) -> Optional[dict]:
-    """Return a new ``runtime_env`` dict with ``py_executable`` set, or the
-    original dict / ``None`` if no override was requested. ``runtime_env`` is
-    not mutated.
-    """
+    """Return a copy of ``runtime_env`` with ``py_executable`` set, without clobbering an existing entry."""
     if py_executable is None:
         return runtime_env
     new = dict(runtime_env) if runtime_env else {}
-    # Don't clobber a caller-set py_executable (allows per-call overrides).
     new.setdefault("py_executable", py_executable)
     return new
+
+
+# ``str(Role.X)`` → Hydra path of that role's ``venv`` field. Fused-actor
+# roles share the actor's interpreter, so all three map to ``actor.venv``.
+_ROLE_VENV_PATH = {
+    "actor": "actor_rollout_ref.actor.venv",
+    "actor_rollout": "actor_rollout_ref.actor.venv",
+    "actor_rollout_ref": "actor_rollout_ref.actor.venv",
+    "ref": "actor_rollout_ref.ref.venv",
+    "critic": "critic.venv",
+}
+
+# Engine field used as the auto-detect hint when ``venv`` / ``trainer.venv``
+# are both null. Ref inherits the actor's strategy in stock configs.
+_ROLE_ENGINE_PATH = {
+    "actor": "actor_rollout_ref.actor.strategy",
+    "actor_rollout": "actor_rollout_ref.actor.strategy",
+    "actor_rollout_ref": "actor_rollout_ref.actor.strategy",
+    "ref": "actor_rollout_ref.actor.strategy",
+    "critic": "critic.strategy",
+}
+
+
+def resolve_group_py_executable(role_keys: Iterable[str], config) -> Optional[str]:
+    """Pick the ``py_executable`` for a Ray worker group hosting ``role_keys``
+    (i.e. ``class_dict.keys()``). See module docstring for the priority chain.
+    """
+    from omegaconf import OmegaConf
+
+    role_keys = list(role_keys)
+    role_label = "+".join(sorted(role_keys)) or "trainer"
+
+    candidates: dict[str, str] = {}
+    for key in role_keys:
+        path = _ROLE_VENV_PATH.get(key)
+        if path is None:
+            continue
+        spec = OmegaConf.select(config, path)
+        if spec is None or spec == "":
+            continue
+        candidates[key] = spec
+    distinct = set(candidates.values())
+    if len(distinct) > 1:
+        details = ", ".join(f"{role}={spec!r}" for role, spec in sorted(candidates.items()))
+        raise ValueError(
+            "colocated worker group hosts roles with disagreeing ``venv`` specs "
+            f"({details}); pick one or unset all but the dominant role and rely "
+            "on ``trainer.venv`` as the fallback."
+        )
+    if len(distinct) == 1:
+        return resolve_py_executable(next(iter(distinct)), role=role_label)
+
+    trainer_spec = OmegaConf.select(config, "trainer.venv")
+    if trainer_spec is not None and trainer_spec != "":
+        return resolve_py_executable(trainer_spec, role=role_label)
+
+    # Auto-detect: only commit when every role with a hint resolves to the
+    # same on-disk venv — mismatched engines can't share an interpreter.
+    detected: set[str] = set()
+    for key in role_keys:
+        engine_path = _ROLE_ENGINE_PATH.get(key)
+        if engine_path is None:
+            continue
+        engine = OmegaConf.select(config, engine_path)
+        if not engine:
+            continue
+        py = _auto_detect_venv(engine)
+        if py is not None:
+            detected.add(py)
+    if len(detected) == 1:
+        return next(iter(detected))
+    return None
