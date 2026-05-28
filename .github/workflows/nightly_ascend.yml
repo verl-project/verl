@@ -38,7 +38,7 @@ on:
   # and achieves higher coverage.
   schedule:
     - cron: "0 17 * * *"
-    
+
 # Declare permissions just read content.
 permissions:
   contents: read
