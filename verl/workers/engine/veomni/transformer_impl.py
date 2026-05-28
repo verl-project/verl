@@ -874,8 +874,26 @@ class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
                         "teacher_topk_ids present without teacher_topk_log_probs; "
                         "both must be provided together for fused top-K distillation."
                     )
-                model_inputs["teacher_topk_ids"] = micro_batch["teacher_topk_ids"].values().unsqueeze(0)
-                model_inputs["teacher_topk_log_probs"] = micro_batch["teacher_topk_log_probs"].values().unsqueeze(0)
+                teacher_topk_ids = micro_batch["teacher_topk_ids"].values().unsqueeze(0)
+                teacher_topk_log_probs = micro_batch["teacher_topk_log_probs"].values().unsqueeze(0)
+                # Pad + slice teacher tensors along the seqlen dim to match the
+                # student's SP-sliced sequence (same pattern the parent class
+                # uses for input_ids_rmpad_rolled / temperature_rmpad).
+                if self.use_ulysses_sp:
+                    from verl.utils.ulysses import ulysses_pad_and_slice_inputs
+
+                    teacher_topk_ids, _, _ = ulysses_pad_and_slice_inputs(
+                        teacher_topk_ids,
+                        position_ids_rmpad=None,
+                        sp_size=self.ulysses_sequence_parallel_size,
+                    )
+                    teacher_topk_log_probs, _, _ = ulysses_pad_and_slice_inputs(
+                        teacher_topk_log_probs,
+                        position_ids_rmpad=None,
+                        sp_size=self.ulysses_sequence_parallel_size,
+                    )
+                model_inputs["teacher_topk_ids"] = teacher_topk_ids
+                model_inputs["teacher_topk_log_probs"] = teacher_topk_log_probs
 
         # Router replay plumbing. Two responsibilities:
         #   (1) snapshot the ulysses pad_size for this micro-batch so
