@@ -876,22 +876,15 @@ class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
                     )
                 teacher_topk_ids = micro_batch["teacher_topk_ids"].values().unsqueeze(0)
                 teacher_topk_log_probs = micro_batch["teacher_topk_log_probs"].values().unsqueeze(0)
-                # Pad + slice teacher tensors along the seqlen dim to match the
-                # student's SP-sliced sequence (same pattern the parent class
-                # uses for input_ids_rmpad_rolled / temperature_rmpad).
+                # Pad + slice teacher tensors along the seqlen dim (dim=1) to
+                # match the student's SP-sliced sequence. ulysses_pad_and_slice_inputs
+                # hardcodes 2D shape; teacher tensors are 3D (1, total_nnz, K)
+                # so use slice_input_tensor directly (handles arbitrary dims).
                 if self.use_ulysses_sp:
-                    from verl.utils.ulysses import ulysses_pad_and_slice_inputs
+                    from verl.utils.ulysses import slice_input_tensor
 
-                    teacher_topk_ids, _, _ = ulysses_pad_and_slice_inputs(
-                        teacher_topk_ids,
-                        position_ids_rmpad=None,
-                        sp_size=self.ulysses_sequence_parallel_size,
-                    )
-                    teacher_topk_log_probs, _, _ = ulysses_pad_and_slice_inputs(
-                        teacher_topk_log_probs,
-                        position_ids_rmpad=None,
-                        sp_size=self.ulysses_sequence_parallel_size,
-                    )
+                    teacher_topk_ids = slice_input_tensor(teacher_topk_ids, dim=1, padding=True)
+                    teacher_topk_log_probs = slice_input_tensor(teacher_topk_log_probs, dim=1, padding=True)
                 model_inputs["teacher_topk_ids"] = teacher_topk_ids
                 model_inputs["teacher_topk_log_probs"] = teacher_topk_log_probs
 
