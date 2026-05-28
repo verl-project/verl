@@ -54,7 +54,6 @@ def _build_causal_mask_from_position_ids(position_ids: torch.Tensor, seq_len: in
     return float_mask.unsqueeze(1)  # [B, 1, S, S]
 
 
-
 def glm_moe_dsa_attn_forward_with_dsa(
     self,
     hidden_states: torch.Tensor,
@@ -90,9 +89,7 @@ def glm_moe_dsa_attn_forward_with_dsa(
         sp_group = get_ulysses_sequence_parallel_group()
         position_ids_full = _all_gather_seq(position_ids, sp_group, ulysses_sp_size)
         full_seq_length = seq_length * ulysses_sp_size
-        attention_mask = _build_causal_mask_from_position_ids(
-            position_ids_full, full_seq_length, hidden_states.dtype
-        )
+        attention_mask = _build_causal_mask_from_position_ids(position_ids_full, full_seq_length, hidden_states.dtype)
     elif attention_mask is None and position_ids is not None:
         attention_mask = _build_causal_mask_from_position_ids(position_ids, seq_length, hidden_states.dtype)
 
@@ -162,7 +159,9 @@ def glm_moe_dsa_attn_forward_with_dsa(
         indexer_mask = (
             attention_mask[:, 0, :, :]
             if attention_mask is not None and attention_mask.dim() == 4
-            else attention_mask.unsqueeze(1) if attention_mask is not None else None
+            else attention_mask.unsqueeze(1)
+            if attention_mask is not None
+            else None
         )
         topk_indices = self.indexer(
             hidden_states_full,

@@ -522,7 +522,7 @@ def apply_monkey_patch(
         if ulysses_sp_size > 1:
             patch_vlm_for_ulysses_input_slicing(Qwen3_5TextModel)
             patch_vlm_for_ulysses_input_slicing(Qwen3_5MoeTextModel)
-    
+
     elif model.config.model_type == "glm_moe_dsa":
         if use_remove_padding or ulysses_sp_size > 1:
             from transformers.models.glm_moe_dsa.modeling_glm_moe_dsa import GlmMoeDsaAttention
