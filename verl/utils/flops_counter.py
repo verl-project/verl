@@ -560,9 +560,16 @@ def _estimate_glm_moe_dsa_flops(config, tokens_sum, batch_seqlens, delta_time):
 
     # MLA attention linear params per layer:
     # q_a_proj + q_b_proj + kv_a_proj + kv_b_proj + o_proj
+    # When q_lora_rank is None, q_proj directly maps hidden_size -> num_attention_heads * qk_head_dim
+    if q_lora_rank is None:
+        q_proj_N = hidden_size * (num_attention_heads * qk_head_dim)
+        indexer_q_N = hidden_size * (index_n_heads * index_head_dim)
+    else:
+        q_proj_N = hidden_size * q_lora_rank + q_lora_rank * (num_attention_heads * qk_head_dim)
+        indexer_q_N = q_lora_rank * (index_n_heads * index_head_dim)
+
     attn_linear_N = (
-        hidden_size * q_lora_rank
-        + q_lora_rank * (num_attention_heads * qk_head_dim)
+        q_proj_N
         + hidden_size * (kv_lora_rank + qk_rope_head_dim)
         + kv_lora_rank * (num_attention_heads * (qk_nope_head_dim + v_head_dim))
         + (num_attention_heads * v_head_dim) * hidden_size
@@ -573,7 +580,7 @@ def _estimate_glm_moe_dsa_flops(config, tokens_sum, batch_seqlens, delta_time):
     # wk: kv_lora_rank -> index_n_heads * index_head_dim
     # weights_proj: index_n_heads -> num_attention_heads
     indexer_linear_N = (
-        q_lora_rank * (index_n_heads * index_head_dim)
+        indexer_q_N
         + kv_lora_rank * (index_n_heads * index_head_dim)
         + index_n_heads * num_attention_heads
     )
