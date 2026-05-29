@@ -641,9 +641,6 @@ class vLLMHttpServer:
             # is a no-op success, so we can pass it unconditionally.
             await self.engine.reset_prefix_cache(**_RESET_PREFIX_CACHE_KWARGS)
 
-    async def clear_all_caches(self):
-        await self.clear_kv_cache()
-        if self.node_rank == 0:
             if _VLLM_VERSION >= version.parse("0.9.0"):
                 await self.engine.reset_mm_cache()
             if _VLLM_VERSION >= version.parse("0.16.0"):
