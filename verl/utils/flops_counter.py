@@ -580,9 +580,7 @@ def _estimate_glm_moe_dsa_flops(config, tokens_sum, batch_seqlens, delta_time):
     # wk: kv_lora_rank -> index_n_heads * index_head_dim
     # weights_proj: index_n_heads -> num_attention_heads
     indexer_linear_N = (
-        indexer_q_N
-        + kv_lora_rank * (index_n_heads * index_head_dim)
-        + index_n_heads * num_attention_heads
+        indexer_q_N + kv_lora_rank * (index_n_heads * index_head_dim) + index_n_heads * num_attention_heads
     )
 
     moe_gata_N = hidden_size * num_experts
