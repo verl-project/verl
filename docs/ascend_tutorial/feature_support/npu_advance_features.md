@@ -141,7 +141,7 @@ repatch
 | `actor_rollout_ref.actor.megatron.use_mbridge` | **MBridge 权重转换** — 启用 mbridge 进行权重格式转换 |
 | `actor_rollout_ref.actor.megatron.use_dist_checkpointing` | **分布式 checkpoint** — 使用分布式格式保存/加载权重，默认 `False` |
 | `actor_rollout_ref.actor.megatron.dist_checkpointing_path` | **分布式权重路径** — 分布式 checkpoint 加载路径，默认 `null` |
-| 熵计算分块大小 (`entropy_from_logits_chunk_size`) | 训练 (FSDP) | 熵计算分块大小 |
+
 ---
 
 ## 3. 性能优化特性
@@ -155,7 +155,7 @@ repatch
 | 参数 CPU 卸载 (`param_offload`) | 训练 (FSDP/Megatron) | 将模型权重卸载到 CPU |
 | 优化器 CPU 卸载 (`optimizer_offload`) | 训练 (FSDP/Megatron) | 将优化器状态卸载到 CPU |
 | 分块熵计算 (`entropy_from_logits_with_chunking`) | 训练 (FSDP) | 分块计算熵值降低显存峰值 |
-
+| 熵计算分块大小 (`entropy_from_logits_chunk_size`) | 训练 (FSDP) | 熵计算分块大小 |
 | 熵计算重计算 (`entropy_checkpointing`) | 训练 (FSDP) | 对熵计算启用重计算 |
 | 流水线输出释放 (`deallocate_pipeline_outputs`) | 训练 (Megatron) | PP 场景下释放已传递的张量 |
 | 激活重计算 (`recompute_granularity`) | 训练 (Megatron) | 支持 full/selective/none 三级粒度控制 |
