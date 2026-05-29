@@ -79,18 +79,19 @@ def glm_moe_dsa_attn_forward_with_dsa(
     cos, sin = position_embeddings
     ulysses_sp_size = get_ulysses_sequence_parallel_world_size()
 
-    # Generate causal mask from position_ids.
-    # When ulysses_sp_size > 1, the model's causal_mask is local-sized (wrong for full-seq attention),
-    # so we always rebuild it from all-gathered position_ids.
-    # When attention_mask is None (use_remove_padding), we also need to build it.
+    # Always rebuild a float additive mask from position_ids.
+    # The model's create_causal_mask may return a bool mask (incompatible with the DSA indexer
+    # which expects float 0/-inf) or a local-sized mask (wrong when ulysses_sp_size > 1).
     if ulysses_sp_size > 1 and position_ids is not None:
         from verl.utils.ulysses import get_ulysses_sequence_parallel_group
 
         sp_group = get_ulysses_sequence_parallel_group()
         position_ids_full = _all_gather_seq(position_ids, sp_group, ulysses_sp_size)
         full_seq_length = seq_length * ulysses_sp_size
-        attention_mask = _build_causal_mask_from_position_ids(position_ids_full, full_seq_length, hidden_states.dtype)
-    elif attention_mask is None and position_ids is not None:
+        attention_mask = _build_causal_mask_from_position_ids(
+            position_ids_full, full_seq_length, hidden_states.dtype
+        )
+    elif position_ids is not None:
         attention_mask = _build_causal_mask_from_position_ids(position_ids, seq_length, hidden_states.dtype)
 
     # ===== Query path (MLA) =====
@@ -159,9 +160,7 @@ def glm_moe_dsa_attn_forward_with_dsa(
         indexer_mask = (
             attention_mask[:, 0, :, :]
             if attention_mask is not None and attention_mask.dim() == 4
-            else attention_mask.unsqueeze(1)
-            if attention_mask is not None
-            else None
+            else attention_mask.unsqueeze(1) if attention_mask is not None else None
         )
         topk_indices = self.indexer(
             hidden_states_full,

@@ -29,12 +29,12 @@ from verl.utils.device import get_device_name, get_torch_device
 from verl.utils.distributed import initialize_global_process_group
 from verl.utils.model import compute_position_id_with_mask, create_random_mask
 from verl.utils.ulysses import (
-    FSDPUlyssesShardingManager,
     gather_outputs_and_unpad,
     get_ulysses_sequence_parallel_world_size,
     set_ulysses_sequence_parallel_group,
     ulysses_pad_and_slice_inputs,
 )
+from verl.workers.sharding_manager.fsdp_ulysses import FSDPUlyssesShardingManager
 
 if get_device_name() == "cuda":
     from flash_attn.bert_padding import index_first_axis, rearrange, unpad_input
@@ -50,6 +50,7 @@ class SequenceParallelConfig:
     config: PretrainedConfig
     sp_size: int
     is_valid: bool
+    attn_implementation: str = "flash_attention_2"
 
 
 def test_configs():
@@ -86,6 +87,20 @@ def test_configs():
             )
         )
 
+    try:
+        from transformers import GlmMoeDsaConfig
+
+        configs.append(
+            SequenceParallelConfig(
+                GlmMoeDsaConfig(num_hidden_layers=2, n_routed_experts=4, vocab_size=1024, index_topk=128),
+                sp_size=4,
+                is_valid=True,
+                attn_implementation="sdpa",
+            )
+        )
+    except ImportError:
+        pass
+
     return configs
 
 
@@ -103,13 +118,14 @@ def test_hf_casual_fwd_bwd(test_config):
     context = contextlib.nullcontext() if test_config.is_valid else pytest.raises(AssertionError)
     with context:
         world_size = torch.distributed.get_world_size()
-        _hf_casual_fwd_bwd(test_config.config, test_config.sp_size, world_size // test_config.sp_size)
+        _hf_casual_fwd_bwd(test_config.config, test_config.sp_size, world_size // test_config.sp_size,
+                           attn_implementation=test_config.attn_implementation)
 
     # TODO: seems not work, will cause `socketStartConnect: Connect to xxx failed : Software caused connection abort`
     # torch.distributed.destroy_process_group()
 
 
-def _hf_casual_fwd(config, sp_size, dp_size):
+def _hf_casual_fwd(config, sp_size, dp_size, attn_implementation="flash_attention_2"):
     assert get_torch_device().device_count() >= 2, "need at least 2 gpus for test"
 
     ulysses_device_mesh = init_device_mesh(
@@ -124,7 +140,7 @@ def _hf_casual_fwd(config, sp_size, dp_size):
     # patch before load
     with torch.device(get_device_name()):
         model = AutoModelForCausalLM.from_config(
-            config=config, torch_dtype=torch.bfloat16, attn_implementation="flash_attention_2"
+            config=config, torch_dtype=torch.bfloat16, attn_implementation=attn_implementation
         )
         apply_monkey_patch(model, sp_size)
         model = model.to(device=get_device_name())
@@ -188,7 +204,7 @@ def _hf_casual_fwd(config, sp_size, dp_size):
     torch.testing.assert_close(mean_local, mean_full, rtol=1e-2, atol=1e-5)
 
 
-def _hf_casual_fwd_bwd(config, sp_size, dp_size):
+def _hf_casual_fwd_bwd(config, sp_size, dp_size, attn_implementation="flash_attention_2"):
     assert get_torch_device().device_count() >= 2, "need at least 2 gpus for test"
 
     ulysses_device_mesh = init_device_mesh(
@@ -203,7 +219,7 @@ def _hf_casual_fwd_bwd(config, sp_size, dp_size):
     # patch before load
     with torch.device(get_device_name()):
         model = AutoModelForCausalLM.from_config(
-            config=config, torch_dtype=torch.bfloat16, attn_implementation="flash_attention_2"
+            config=config, torch_dtype=torch.bfloat16, attn_implementation=attn_implementation
         )
         apply_monkey_patch(model, sp_size)
         model = model.to(device=get_device_name())
@@ -271,13 +287,17 @@ def _hf_casual_fwd_bwd(config, sp_size, dp_size):
     mean_full.backward()
     mean_local.backward()
 
-    # 3. check the gradients
-    grad = model.model.layers[0].self_attn.q_proj.weight.grad
-    grad_full = model_no_sp.model.layers[0].self_attn.q_proj.weight.grad
+    # 3. check the gradients (MLA models use q_a_proj instead of q_proj)
+    sp_attn = model.model.layers[0].self_attn
+    no_sp_attn = model_no_sp.model.layers[0].self_attn
+    q_proj_name = "q_proj" if hasattr(sp_attn, "q_proj") else "q_a_proj"
+    grad = getattr(sp_attn, q_proj_name).weight.grad
+    grad_full = getattr(no_sp_attn, q_proj_name).weight.grad
+
     torch.testing.assert_close(mean_local, mean_full, rtol=1e-2, atol=3e-5)
     # The check should be less strict because the gradient is not an averaged value.
     torch.testing.assert_close(grad, grad_full, rtol=1e-2, atol=1e-3)
 
 
 if __name__ == "__main__":
-    pytest.main([__file__, "-svv"])
+    pytest.main([__file__, "-svv", "-c", "/dev/null"])
