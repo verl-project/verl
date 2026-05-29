@@ -155,10 +155,23 @@ ALLOW_FLASH_ATTN_SOURCE_BUILD=1 MAX_JOBS=4 ./run/install_flash_attn.sh
 Each run writes to `runs/<run_id>/`:
 
 - `items/<split>.jsonl`: per-question accepted solutions and stats
+- `artifacts/answers_<timestamp>.json`: one record per question with every generated response attempt
+- `artifacts/evaluation_<timestamp>.json`: rich parser/judge labels for each generated response attempt
 - `datasets/gsm8k_oe_<generator>/<split>.jsonl`
 - `datasets/gsm8k_mc_onecorrect_<generator>/<split>.jsonl`
 - `datasets/gsm8k_mc_allwrong_<generator>/<split>.jsonl`
 - `manifest.json`
+
+Every item and dataset row includes both:
+
+- `item_id`: positional id such as `gsm8k:train:42`
+- `question_id`: stable `md5(question)` hash for joining generated answers, evaluations, and final datasets
+
+Candidate-source metadata is explicit:
+
+- OE targets use `original`
+- MC options currently use live `sampled_from_model` generations
+- the manifest reserves the source names `original`, `sampled_from_model`, `programmatic`, and `path_to_answers` for future source-mode extensions
 
 When multi-GPU mode is used, worker artifacts are also kept under:
 
