@@ -446,7 +446,7 @@ nemo-automodel           = ["setuptools"]
 # --cpp_ext / --cuda_ext flags are no longer needed or recognized.
 [tool.uv.sources]
 apex               = { git = "https://github.com/NVIDIA/apex.git" }
-transformer-engine = { git = "https://github.com/NVIDIA/TransformerEngine.git", tag = "release_v2.12" }
+transformer-engine = { git = "https://github.com/NVIDIA/TransformerEngine.git", tag = "v2.12" }
 flash-attn         = { url = "https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.10-cp312/flash_attn-2.8.3%2Bcu12torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" }
 mbridge            = { git = "https://github.com/ISEEKYAN/mbridge.git",         rev = "641a5a0" }
 veomni             = { git = "https://github.com/ByteDance-Seed/VeOmni.git",    tag = "v0.1.9a5" }
