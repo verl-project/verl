@@ -31,6 +31,9 @@ use_torch_compile: true
 # Whether to use entropy_from_logits_with_chunking
 entropy_from_logits_with_chunking: false
 
+# Chunk size for entropy from logits with chunking
+entropy_from_logits_chunk_size: 2048
+
 # Whether to use entropy checkpointing
 entropy_checkpointing: false
 
