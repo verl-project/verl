@@ -58,7 +58,9 @@ RUN pip install -e MindSpeed && \
     pip cache purge
 
 # Prepare and install verl (update frequently)
-RUN git clone --recursive https://github.com/volcengine/verl.git && \
+RUN export PIP_EXTRA_INDEX_URL=https://triton-ascend.osinfra.cn/pypi/simple/ && \
+    export PIP_TRUSTED_HOST=triton-ascend.osinfra.cn && \
+    git clone --recursive https://github.com/volcengine/verl.git && \
     cd verl/recipe && git checkout main && cd .. && \
     pip install -r requirements-npu.txt && pip install -v -e . && cd .. && \
     pip install click==8.2.1 cachetools nvtx opencv-python-headless==4.10.0.84 && \

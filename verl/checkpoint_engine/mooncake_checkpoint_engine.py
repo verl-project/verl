@@ -147,7 +147,11 @@ class MooncakeCheckpointEngine(CheckpointEngine):
             await asyncio.sleep(0)
 
     @torch.no_grad()
-    async def send_weights(self, weights: Generator[tuple[str, torch.Tensor], None, None]):
+    async def send_weights(
+        self,
+        weights: Generator[tuple[str, torch.Tensor], None, None],
+        global_steps: int | None = None,
+    ):
         """Send weights using Mooncake TransferEngine"""
         if self.rank < 0:
             for name, weight in weights:
@@ -219,7 +223,10 @@ class MooncakeCheckpointEngine(CheckpointEngine):
         )
 
     @torch.no_grad()
-    async def receive_weights(self) -> AsyncGenerator[tuple[str, torch.Tensor], None]:
+    async def receive_weights(
+        self,
+        global_steps: int | None = None,
+    ) -> AsyncGenerator[tuple[str, torch.Tensor], None]:
         """Receive weights using Mooncake TransferEngine"""
         start_time = time.time()
         total_bytes = 0

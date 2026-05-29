@@ -175,7 +175,7 @@ class ActorConfig(BaseConfig):
     kl_loss_type: str = "low_var_kl"
     ppo_epochs: int = 1
     shuffle: bool = False
-    data_loader_seed: int = 1
+    data_loader_seed: int = 42
     checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
     optim: OptimizerConfig = field(default_factory=OptimizerConfig)
     use_fused_kernels: bool = False
@@ -323,12 +323,6 @@ class FSDPActorConfig(ActorConfig):
     def validate(self, n_gpus: int, train_batch_size: int, model_config: dict = None):
         """Validate FSDP actor configuration with runtime parameters."""
         super().validate(n_gpus, train_batch_size, model_config)
-
-        if self.strategy in {"fsdp", "fsdp2"} and self.ulysses_sequence_parallel_size > 1:
-            if model_config and not model_config.get("use_remove_padding", False):
-                raise ValueError(
-                    "When using sequence parallelism for actor/ref policy, you must enable `use_remove_padding`."
-                )
 
 
 @dataclass

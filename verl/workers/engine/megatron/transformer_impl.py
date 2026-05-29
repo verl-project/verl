@@ -21,6 +21,7 @@ from typing import Any, Callable, ContextManager, Iterator, Optional
 import torch
 import torch.distributed
 from megatron.core import parallel_state as mpu
+from megatron.core.package_info import __version__
 from megatron.core.pipeline_parallel import get_forward_backward_func
 from omegaconf import OmegaConf
 from tensordict import TensorDict
@@ -121,7 +122,12 @@ class MegatronEngine(BaseEngine):
             apply_router_replay_patch()
             self.mini_layer_topk_idx_list = []
         # Apply checkpoint patch for MoE models
-        from verl.utils.device import is_cuda_available
+        from verl.utils.device import is_cuda_available, is_npu_available
+
+        if is_npu_available and __version__ >= "0.16.0":
+            from verl.models.mcore.patch import apply_mtp_inference_patch
+
+            apply_mtp_inference_patch()
 
         if is_cuda_available:
             from verl.models.mcore.patch import apply_patch_megatron_recomputation_backward

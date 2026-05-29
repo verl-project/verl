@@ -54,6 +54,9 @@ from verl.workers.rollout.vllm_rollout.utils import (
 )
 
 _VLLM_VERSION = version.parse(vllm.__version__)
+_RESET_PREFIX_CACHE_KWARGS = {}
+if _VLLM_VERSION >= version.parse("0.13.0"):
+    _RESET_PREFIX_CACHE_KWARGS["reset_connector"] = True
 
 
 if _VLLM_VERSION > version.parse("0.11.0"):
@@ -265,7 +268,7 @@ class vLLMHttpServer:
             "gpu_memory_utilization": self.config.gpu_memory_utilization,
             "disable_log_stats": self.config.disable_log_stats,
             "tensor_parallel_size": self.config.tensor_model_parallel_size,
-            "seed": self.replica_rank + self.config.get("seed", 0),
+            "seed": self.replica_rank + (self.config.get("seed") or 0),
             "override_generation_config": json.dumps(override_generation_config),
             "quantization": quantization,
             "hf_overrides": hf_overrides,
@@ -598,17 +601,24 @@ class vLLMHttpServer:
             extra_fields=extra_fields,
         )
 
-    async def wake_up(self):
+    async def wake_up(self, tags: list[str] | None = None):
         if self.node_rank != 0:
             return
 
         if self.rollout_mode == RolloutMode.HYBRID:
-            # In hybrid mode, rollout is wake up in `update_weights`
-            raise ValueError(f"wake_up not support rollout_mode {self.rollout_mode}")
+            # engine.wake_up() broadcasts via the DP coordinator to ALL EngineCore
+            # processes across all DP shards (unlike collective_rpc which only reaches
+            # TP workers within a single shard).
+            await self.engine.wake_up(tags=tags or self._get_wake_up_tags())
+            await self.engine.reset_prefix_cache(**_RESET_PREFIX_CACHE_KWARGS)
         elif self.rollout_mode == RolloutMode.COLOCATED:
             # Directly call engine to wake up without sync weights.
             await self.engine.wake_up(tags=self._get_wake_up_tags())
-            await self.engine.reset_prefix_cache()
+            # reset_connector=True drops any attached external KV store
+            # (e.g. MooncakeStoreConnector) whose entries were computed
+            # against the previous weights. No-op success when no connector
+            # is configured (vLLM scheduler treats it as such).
+            await self.engine.reset_prefix_cache(**_RESET_PREFIX_CACHE_KWARGS)
         elif self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip wake_up in standalone mode")
 
@@ -625,7 +635,11 @@ class vLLMHttpServer:
 
     async def clear_kv_cache(self):
         if self.node_rank == 0:
-            await self.engine.reset_prefix_cache()
+            # reset_connector=True drops any attached external KV store
+            # (e.g. MooncakeStoreConnector) whose entries were computed
+            # against the previous model weights. With no connector it
+            # is a no-op success, so we can pass it unconditionally.
+            await self.engine.reset_prefix_cache(**_RESET_PREFIX_CACHE_KWARGS)
 
     async def release_kv_cache(self):
         """Release only kv_cache GPU memory, keeping model weights intact.
@@ -686,7 +700,12 @@ class vLLMHttpServer:
                 # 1. Set engine to paused state (blocks new generate calls)
                 # 2. Abort all in-flight requests
                 # 3. Wait for requests to drain
-                # 4. Clear prefix and mm caches if clear_cache=True
+                # 4. Clear prefix and mm caches if clear_cache=True.
+                #    EngineCore._reset_caches defaults reset_connector=True
+                #    on this path, so any attached external KV store (e.g.
+                #    MooncakeStoreConnector) is invalidated along with the
+                #    local prefix cache — RL-correct hard-reset at every
+                #    weight update boundary, no extra kwargs needed.
                 await self.engine.pause_generation(
                     wait_for_inflight_requests=False,
                     clear_cache=reset_prefix_cache,
@@ -911,15 +930,21 @@ class vLLMHttpServer:
         return ["kv_cache", "weights"]
 
     async def _sleep_hybrid(self):
-        """HYBRID sleep: lora adapters only need level=1; full weights need level=2."""
-        # Don't use engine.sleep(level=2) here
+        """HYBRID sleep: lora adapters only need level=1; full weights need level=2.
+
+        Uses engine.sleep() instead of engine.collective_rpc("sleep") to ensure
+        that sleep is properly propagated to all data-parallel worker processes.
+        collective_rpc only reaches the TP workers within a single DP shard,
+        leaving other DP shards' weights unreleased, which causes OOM during
+        FSDP training backward when DP > 1.
+        """
         # lora only update adapter weights, so set sleep level to 1
         # vllm_ascend not support sleep_level now. Enabling EP during training may lead to accuracy issues.
         if self.lora_as_adapter or is_torch_npu_available(check_device=False):
             sleep_level = 1
         else:
             sleep_level = 2
-        await self.engine.collective_rpc("sleep", kwargs={"level": sleep_level})
+        await self.engine.sleep(level=sleep_level)
         if _VLLM_VERSION >= version.parse("0.17.0"):
             await self.engine.reset_encoder_cache()
 

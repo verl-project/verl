@@ -49,7 +49,7 @@ def init_config() -> DictConfig:
             ],
         )
 
-    model_path = os.path.expanduser("~/models/Qwen/Qwen2.5-1.5B-Instruct")
+    model_path = os.path.expanduser("~/models/Qwen/Qwen3-0.6B")
     config.actor_rollout_ref.model.path = model_path
     config.actor_rollout_ref.rollout.name = os.environ["ROLLOUT_NAME"]
     config.actor_rollout_ref.rollout.mode = "async"
@@ -188,6 +188,7 @@ class WeatherToolWithData(BaseTool):
 
 
 def test_tool_agent(init_config):
+    ray.shutdown()
     ray.init(
         runtime_env={
             "env_vars": {
@@ -303,6 +304,8 @@ def test_tool_agent(init_config):
 
 def test_function_tool_agent(init_config):
     """End-to-end coverage for ``rollout.multi_turn.function_tool_path``."""
+    # See ``test_tool_agent`` for why we shut Ray down first.
+    ray.shutdown()
     ray.init(
         runtime_env={
             "env_vars": {

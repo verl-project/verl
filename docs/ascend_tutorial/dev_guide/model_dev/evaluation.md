@@ -2,9 +2,9 @@
 
 Last updated: 05/14/2026.
 
-不同模型步骤一致,仅以Qwen3-30B为例列举
+不同模型步骤一致，仅以Qwen3-30B为例列举
 
-我们通过 AISBenchmark 评估模型,该工具支持vllm/sglang多种推理后端的评估
+我们通过 AISBench 评估模型，该工具支持vllm/sglang多种推理后端的评估
 
 ## 1.安装方法
 
@@ -30,13 +30,13 @@ rm math.zip
 
 如果模型权重不是hf格式,需要先转换为hf格式,再进行评估
 
-此处参照verl原生[转换方法](verl\docs\advance\checkpoint.rst)
+此处参照verl原生[转换方法](verl/docs/advance/checkpoint.rst)
 
 ## 4.vllm推理评测
 
 **启动vllm_server服务**
 
-通过以下命令拉起NPU服务端，需要修改的参数：model和tensor-parallel-size。
+通过以下命令拉起推理服务端，需要修改的参数：model和tensor-parallel-size。
 
 model：保存训练后权重转换完的huggingface模型地址；
 
@@ -59,7 +59,7 @@ vllm serve /path/to/Qwen3-30B/ \
        --tensor-parallel-size 8 \
        --data-parallel-size 1 \
        --generation-config vllm \
-       --port 6380
+       --port 8080
 ~~~
 
 **修改aisbench推理配置启动vllm_client评测**

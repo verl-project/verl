@@ -254,6 +254,18 @@ class SGLangHttpServer:
 
         engine_kwargs = self.config.get("engine_kwargs", {}).get("sglang", {}) or {}
         attention_backend = engine_kwargs.pop("attention_backend", None)
+        mm_attention_backend = engine_kwargs.pop("mm_attention_backend", None)
+        if attention_backend is None:
+            # FA3 CUDA-graph capture is broken on sglang>=0.5.12 (#22800);
+            # default to flashinfer (users can opt into fa4 via engine_kwargs).
+            if version.parse(sglang.__version__) >= version.parse("0.5.12"):
+                attention_backend = "flashinfer"
+            else:
+                attention_backend = "fa3"
+        # mm_attention_backend uses a different name space than attention_backend
+        # (e.g. text "flashinfer" vs vision "flashinfer_cudnn"), so don't mirror it.
+        # Leave None to let sglang's VisionAttention auto-pick per device
+        # (triton_attn on Ada, fa3 on Hopper, fa4 on Blackwell).
         quantization = self.config.get("quantization", None)
         if quantization is not None:
             if quantization == "fp8":
@@ -287,8 +299,8 @@ class SGLangHttpServer:
             "trust_remote_code": self.model_config.trust_remote_code,
             "max_running_requests": self.config.get("max_num_seqs", None),
             "log_level": "error",
-            "mm_attention_backend": "fa3",
-            "attention_backend": attention_backend if attention_backend is not None else "fa3",
+            "mm_attention_backend": mm_attention_backend,
+            "attention_backend": attention_backend,
             "skip_tokenizer_init": self.config.skip_tokenizer_init,
             "skip_server_warmup": True,
             "quantization": quantization,

@@ -1,8 +1,8 @@
 # 训练配置参数与指标说明
 
-Last updated: 05/12/2026.
+Last updated: 05/29/2026.
 
-verl 通过层级化的 YAML 配置文件管理所有参数，涉及到的所有配置文件均在 `verl\trainer\config` 目录下。
+verl 通过层级化的 YAML 配置文件管理所有参数，涉及到的所有配置文件均在 `verl/trainer/config` 目录下。
 
 ---
 
@@ -225,16 +225,16 @@ verl 通过层级化的 YAML 配置文件管理所有参数，涉及到的所有
 | `critic.ppo_micro_batch_size_per_gpu` | `null` | 每 GPU 的 PPO micro batch 大小 |
 | `critic.use_dynamic_bsz` | 引用自 `actor.use_dynamic_bsz` | 是否使用动态 batch size |
 | `critic.ppo_max_token_len_per_gpu` | `32768` | 每 GPU 的 PPO 最大 token 长度 |
-| `critic.forward_max_token_len_per_gpu` | 引用自 `.ppo_max_token_len_per_gpu` | 前向计算每 GPU 最大 token 长度 |
+| `critic.forward_max_token_len_per_gpu` | 引用自 `critic.ppo_max_token_len_per_gpu` | 前向计算每 GPU 最大 token 长度 |
 | `critic.ppo_epochs` | 引用自 `actor.ppo_epochs` | PPO 更新轮数 |
 | `critic.shuffle` | 引用自 `actor.shuffle` | 是否 shuffle |
 | `critic.data_loader_seed` | `42` / 引用自 `actor.data_loader_seed` | 数据加载器随机种子 |
-| `critic.cliprange_value` | `0.5` | Critic 值函数裁剪范围，一般取值范围 [0.1, 0.3] |
+| `critic.cliprange_value` | `0.5` | Critic 值函数裁剪范围 |
 | `critic.loss_agg_mode` | 引用自 `actor.loss_agg_mode` | 损失聚合模式 |
 | `critic.grad_clip` | `1.0` | 梯度裁剪值 |
 | `critic.ulysses_sequence_parallel_size` | `1` | Ulysses 序列并行大小 |
-| `critic.forward_micro_batch_size` | 引用自 `.ppo_micro_batch_size` | 前向计算 micro batch 大小 |
-| `critic.forward_micro_batch_size_per_gpu` | 引用自 `.ppo_micro_batch_size_per_gpu` | 前向计算每 GPU micro batch 大小 |
+| `critic.forward_micro_batch_size` | 引用自 `critic.ppo_micro_batch_size` | 前向计算 micro batch 大小 |
+| `critic.forward_micro_batch_size_per_gpu` | 引用自 `critic.ppo_micro_batch_size_per_gpu` | 前向计算每 GPU micro batch 大小 |
 
 #### 1.1.14 Critic 模型配置
 
@@ -606,7 +606,7 @@ verl 通过层级化的 YAML 配置文件管理所有参数，涉及到的所有
 | 参数名 | 默认值 | 说明 |
 |--------|--------|------|
 | `checkpoint.save_contents` | `[model, optimizer, extra]` | Checkpoint 保存内容 |
-| `checkpoint.load_contents` | 引用自 `.save_contents` | Checkpoint 加载内容 |
+| `checkpoint.load_contents` | 引用自 `checkpoint.save_contents` | Checkpoint 加载内容 |
 | `checkpoint.async_save` | `false` | 是否异步保存 Checkpoint |
 | `checkpoint.mbridge_config` | `{}` | mBridge 配置 |
 

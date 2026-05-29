@@ -861,6 +861,31 @@ class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
             model_inputs["shift_labels"] = shift_labels
             model_inputs["return_log_probs"] = True
 
+            # Pass teacher top-K tensors so ForCausalLMLoss routes to
+            # chunk_topk_distill_function for fused distillation. TD keys
+            # teacher_ids / teacher_logprobs are populated by verl's native
+            # distillation pipeline (see verl/trainer/distillation/losses.py).
+            distillation_use_topk = tu.get_non_tensor_data(data=micro_batch, key="distillation_use_topk", default=False)
+            if distillation_use_topk and "teacher_ids" in micro_batch.keys():
+                if "teacher_logprobs" not in micro_batch.keys():
+                    raise ValueError(
+                        "teacher_ids present without teacher_logprobs; "
+                        "both must be provided together for fused top-K distillation."
+                    )
+                # Kernel kwarg names follow veomni's chunk_topk_distill_function API.
+                teacher_topk_ids = micro_batch["teacher_ids"].values().unsqueeze(0)
+                teacher_topk_log_probs = micro_batch["teacher_logprobs"].values().unsqueeze(0)
+                # SP-slice along seqlen (dim=1); teacher tensors are 3D
+                # (1, total_nnz, K) so use slice_input_tensor directly —
+                # ulysses_pad_and_slice_inputs hardcodes 2D.
+                if self.use_ulysses_sp:
+                    from verl.utils.ulysses import slice_input_tensor
+
+                    teacher_topk_ids = slice_input_tensor(teacher_topk_ids, dim=1, padding=True)
+                    teacher_topk_log_probs = slice_input_tensor(teacher_topk_log_probs, dim=1, padding=True)
+                model_inputs["teacher_topk_ids"] = teacher_topk_ids
+                model_inputs["teacher_topk_log_probs"] = teacher_topk_log_probs
+
         # Router replay plumbing. Two responsibilities:
         #   (1) snapshot the ulysses pad_size for this micro-batch so
         #       forward_backward_batch can trim it during RECORD aggregation;
