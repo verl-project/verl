@@ -677,6 +677,17 @@ def _merge_jsonl_files(output_path: Path, input_paths: list[Path]) -> int:
         return writer.count
 
 
+def _write_parquet_from_jsonl(jsonl_path: Path) -> Path | None:
+    records = list(_iter_jsonl(jsonl_path))
+    if not records:
+        return None
+    from datasets import Dataset
+
+    parquet_path = jsonl_path.with_suffix(".parquet")
+    Dataset.from_list(records).to_parquet(str(parquet_path))
+    return parquet_path
+
+
 def _merge_json_array_files(output_path: Path, input_paths: list[Path]) -> int:
     records: list[dict[str, Any]] = []
     for input_path in input_paths:
@@ -899,6 +910,12 @@ def merge_run_shards(
         "answers": _merge_json_array_files(answers_path, artifact_input_paths("answers")),
         "evaluation": _merge_json_array_files(evaluation_path, artifact_input_paths("evaluation")),
     }
+    parquet_paths = {
+        "items": _write_parquet_from_jsonl(items_dir / f"{split}.jsonl"),
+        "oe": _write_parquet_from_jsonl(oe_dir / f"{split}.jsonl"),
+        "mc_onecorrect": _write_parquet_from_jsonl(mc_onecorrect_dir / f"{split}.jsonl"),
+        "mc_allwrong": _write_parquet_from_jsonl(mc_allwrong_dir / f"{split}.jsonl"),
+    }
 
     manifest = {
         "run_id": run_id,
@@ -908,6 +925,7 @@ def merge_run_shards(
         "split": split,
         "max_items": max_items,
         "generator_profile": generator_profile_name,
+        "generator_model_path": shard_manifests[0].get("generator_model_path"),
         "inference_profile": inference_profile_name,
         "inference_config": shard_manifests[0].get("inference_config", {}),
         "judge_profile": judge_profile_name if use_judge else None,
@@ -923,6 +941,11 @@ def merge_run_shards(
         "artifacts": {
             "answers": str(answers_path.resolve()),
             "evaluation": str(evaluation_path.resolve()),
+            "parquet": {
+                key: str(path.resolve())
+                for key, path in parquet_paths.items()
+                if path is not None
+            },
         },
         "record_counts": record_counts,
         "stats": _merge_run_stats(shard_manifests),
@@ -944,6 +967,7 @@ def build_run(
     max_items: int | None,
     output_root: Path,
     generator_profile_name: str,
+    generator_model_path: str | None,
     inference_profile_name: str,
     judge_profile_name: str | None,
     judge_max_tokens: int,
@@ -957,6 +981,10 @@ def build_run(
     gpu_id: str | None = None,
 ) -> dict[str, Any]:
     generator_config = get_generator_profile(generator_profile_name)
+    if generator_model_path is not None:
+        generator_config["model_name"] = generator_model_path
+        if "tokenizer_name" in generator_config:
+            generator_config["tokenizer_name"] = generator_model_path
     inference_config = get_inference_profile(inference_profile_name)
     generator_backend = create_generation_backend(generator_config)
     generator_model_name = str(generator_config["model_name"])
@@ -991,6 +1019,7 @@ def build_run(
         "split": split,
         "max_items": max_items,
         "generator_profile": generator_profile_name,
+        "generator_model_path": generator_model_path,
         "inference_profile": inference_profile_name,
         "inference_config": inference_config,
         "judge_profile": judge_profile_name if use_judge else None,
@@ -1240,5 +1269,16 @@ def build_run(
     manifest["completed_at"] = _utc_now()
     _write_json(answers_path, sorted(answer_artifact_records, key=_record_sort_key))
     _write_json(evaluation_path, sorted(evaluation_artifact_records, key=_record_sort_key))
+    parquet_paths = {
+        "items": _write_parquet_from_jsonl(items_dir / f"{split}.jsonl"),
+        "oe": _write_parquet_from_jsonl(oe_dir / f"{split}.jsonl"),
+        "mc_onecorrect": _write_parquet_from_jsonl(mc_onecorrect_dir / f"{split}.jsonl"),
+        "mc_allwrong": _write_parquet_from_jsonl(mc_allwrong_dir / f"{split}.jsonl"),
+    }
+    manifest["artifacts"]["parquet"] = {
+        key: str(path.resolve())
+        for key, path in parquet_paths.items()
+        if path is not None
+    }
     _write_json(run_dir / "manifest.json", manifest)
     return manifest

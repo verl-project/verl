@@ -53,6 +53,8 @@ def _spawn_multi_gpu_workers(args: argparse.Namespace, *, script_path: Path, gpu
                 str(gpu_id),
                 "--disable-multi-gpu",
             ]
+            if args.generator_model_path is not None:
+                cmd.extend(["--generator-model-path", args.generator_model_path])
             if args.judge_profile is not None:
                 cmd.extend(["--judge-profile", args.judge_profile])
             if args.use_judge:
@@ -86,6 +88,11 @@ def main() -> None:
     parser.add_argument("--num-samples", type=int, default=None, help="Alias for --max-items when you want to run only a small sample.")
     parser.add_argument("--output-root", default=str(SCRIPT_DIR / "runs"), help="Directory that will contain run outputs.")
     parser.add_argument("--generator-profile", default="qwen25_3b", help="Built-in generator profile name.")
+    parser.add_argument(
+        "--generator-model-path",
+        default=None,
+        help="Optional model/checkpoint path overriding the selected generator profile's model/tokenizer.",
+    )
     parser.add_argument("--inference-profile", default="greedy", help="Built-in inference profile name.")
     parser.add_argument("--judge-profile", default="judgelm_7b", help="Built-in judge profile name if --use-judge is enabled.")
     parser.add_argument("--use-judge", action="store_true", help="Use a judge model to verify generated numeric answers. Disabled by default.")
@@ -162,6 +169,7 @@ def main() -> None:
         max_items=args.effective_max_items,
         output_root=output_root,
         generator_profile_name=args.generator_profile,
+        generator_model_path=args.generator_model_path,
         inference_profile_name=args.inference_profile,
         judge_profile_name=args.judge_profile,
         judge_max_tokens=args.judge_max_tokens,

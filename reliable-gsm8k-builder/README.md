@@ -93,6 +93,17 @@ python run_build.py \
   --generator-profile qwen25_3b
 ```
 
+Use a local checkpoint/model path as the generator:
+
+```bash
+python run_build.py \
+  --run-id from-checkpoint \
+  --split train \
+  --num-samples 100 \
+  --generator-profile qwen25_3b \
+  --generator-model-path /path/to/actor/huggingface
+```
+
 ## Multi-GPU
 
 If multiple GPUs are visible and either the generator or the optional judge uses a local Transformers model,
@@ -160,6 +171,7 @@ Each run writes to `runs/<run_id>/`:
 - `datasets/gsm8k_oe_<generator>/<split>.jsonl`
 - `datasets/gsm8k_mc_onecorrect_<generator>/<split>.jsonl`
 - `datasets/gsm8k_mc_allwrong_<generator>/<split>.jsonl`
+- matching `.parquet` files for `items` and every generated dataset
 - `manifest.json`
 
 Every item and dataset row includes both:
@@ -198,3 +210,45 @@ FINAL_ANSWER: ...
 - `gsm8k_mc_allwrong` is a real all-wrong dataset:
   - the prompt tells the model to output `NONE` if no option is correct
   - the ground truth is always `NONE`
+
+## On-Policy Loop
+
+`run_on_policy_loop.py` automates:
+
+1. generate `N` fresh data samples from the current model
+2. train with VERL/GRPO on the generated parquet
+3. find the saved HF actor checkpoint
+4. use that checkpoint as the generator for the next iteration
+
+Example dry run:
+
+```bash
+python run_on_policy_loop.py \
+  --run-prefix onpol-smoke \
+  --iterations 2 \
+  --num-samples 100 \
+  --base-model Qwen/Qwen2.5-3B-Instruct \
+  --generator-profile qwen25_3b \
+  --inference-profile sample_balanced \
+  --train-dataset mc_onecorrect \
+  --gpu-ids 0,1,2 \
+  --dry-run
+```
+
+Real run:
+
+```bash
+python run_on_policy_loop.py \
+  --run-prefix onpol-qwen \
+  --iterations 3 \
+  --num-samples 1000 \
+  --base-model Qwen/Qwen2.5-3B-Instruct \
+  --generator-profile qwen25_3b \
+  --inference-profile sample_balanced \
+  --train-dataset mc_onecorrect \
+  --val-file ~/data/gsm8k/test.parquet \
+  --gpu-ids 0,1,2
+```
+
+The loop stores generated data under `runs_on_policy/<run>-iterXX-data/` and checkpoints under
+`../checkpoints/on_policy/<run>-iterXX-train/` by default.
