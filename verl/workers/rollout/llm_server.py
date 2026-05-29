@@ -53,40 +53,82 @@ class GlobalRequestLoadBalancer:
       multi-turn conversations route to the same server.
     - **Least-loaded Selection**: When no sticky session exists, selects the
       server with the fewest in-flight requests.
+    - **Imbalance gate**: A sticky session is honored only while the cluster is
+      balanced. Once load becomes skewed, the request is re-pinned to the
+      least-loaded server, trading prefix KV-cache reuse for throughput. This
+      prevents long-tail stalls where a few long-running conversations stay
+      pinned to one replica while peers sit idle.
     - **Dynamic Server Management**: Supports add/remove servers at runtime
       for hybrid scaling.
+
+    Imbalance is detected with the dual-threshold rule from sglang's
+    cache-aware router: the pool is imbalanced iff BOTH
+
+        (max_inflight - min_inflight) > balance_abs_threshold
+        max_inflight > min_inflight * balance_rel_threshold
+
+    The absolute term guards against churning on tiny gaps; the relative term
+    guards against treating a uniformly-busy pool as skewed. Setting
+    ``balance_abs_threshold <= 0`` disables the gate entirely, recovering the
+    historical pure-sticky behavior.
     """
 
-    def __init__(self, servers: dict[str, ray.actor.ActorHandle], max_cache_size: int = DEFAULT_ROUTING_CACHE_SIZE):
+    def __init__(
+        self,
+        servers: dict[str, ray.actor.ActorHandle],
+        max_cache_size: int = DEFAULT_ROUTING_CACHE_SIZE,
+        balance_abs_threshold: int = 0,
+        balance_rel_threshold: float = 1.5,
+    ):
         if not servers:
             raise ValueError("servers must be non-empty")
 
         self._servers: dict[str, ray.actor.ActorHandle] = dict(servers)
         self._inflight_requests: dict[str, int] = {sid: 0 for sid in servers}
         self._request_id_to_server: LRUCache = LRUCache(maxsize=max_cache_size)
+        self._balance_abs_threshold = balance_abs_threshold
+        self._balance_rel_threshold = balance_rel_threshold
+
+    def _is_imbalanced(self) -> bool:
+        """Whether the current in-flight distribution is skewed enough to rebalance.
+
+        Returns ``False`` when the gate is disabled (``balance_abs_threshold <= 0``)
+        so that sticky sessions are always honored.
+        """
+        if self._balance_abs_threshold <= 0:
+            return False
+        loads = self._inflight_requests.values()
+        min_load, max_load = min(loads), max(loads)
+        return (max_load - min_load) > self._balance_abs_threshold and max_load > min_load * self._balance_rel_threshold
 
     def acquire_server(self, request_id: str) -> tuple[str, ray.actor.ActorHandle]:
         """Acquire a server for the given request (sticky + least-loaded).
 
+        While the pool is balanced, a previously-pinned ``request_id`` is routed
+        back to the same server for prefix KV-cache reuse. Once the pool becomes
+        imbalanced (see :meth:`_is_imbalanced`), the request is re-pinned to the
+        least-loaded server instead.
+
         Returns:
             A tuple of ``(server_id, actor_handle)`` in a single atomic call.
         """
-        # Try sticky session first
-        if request_id in self._request_id_to_server:
-            server_id = self._request_id_to_server[request_id]
-            # Check if server is still in the active pool
-            if server_id in self._inflight_requests:
-                self._inflight_requests[server_id] += 1
-                return server_id, self._servers[server_id]
-            # Server was removed, clear stale cache entry and re-select
+        # Resolve any existing sticky binding, dropping it if the server is gone.
+        sticky_id = self._request_id_to_server.get(request_id)
+        if sticky_id is not None and sticky_id not in self._inflight_requests:
+            # Server was removed, clear stale cache entry and re-select.
             del self._request_id_to_server[request_id]
+            sticky_id = None
 
-        # Select new server (least-loaded among available)
         if not self._inflight_requests:
             raise RuntimeError("No available servers in load balancer")
 
-        server_id = min(self._inflight_requests, key=self._inflight_requests.get)
-        self._request_id_to_server[request_id] = server_id
+        # Honor sticky only while balanced; otherwise re-pin to least-loaded.
+        if sticky_id is not None and not self._is_imbalanced():
+            server_id = sticky_id
+        else:
+            server_id = min(self._inflight_requests, key=self._inflight_requests.get)
+            self._request_id_to_server[request_id] = server_id
+
         self._inflight_requests[server_id] += 1
         return server_id, self._servers[server_id]
 
@@ -335,9 +377,14 @@ class LLMServerManager:
             update_prometheus_config(self.rollout_config.prometheus, self.server_addresses, self.rollout_config.name)
 
     async def _init_global_load_balancer(self) -> None:
+        # Sticky-vs-balance tradeoff knobs; absent/legacy configs fall back to
+        # pure sticky (abs_threshold=0 disables the imbalance gate).
+        lb_config = getattr(self.rollout_config, "load_balancer", None)
         self.global_load_balancer = GlobalRequestLoadBalancer.remote(
             servers=dict(zip(self.server_addresses, self.server_handles, strict=True)),
             max_cache_size=DEFAULT_ROUTING_CACHE_SIZE,
+            balance_abs_threshold=getattr(lb_config, "balance_abs_threshold", 0),
+            balance_rel_threshold=getattr(lb_config, "balance_rel_threshold", 1.5),
         )
 
     def get_client(self, client_cls=LLMServerClient, **kwargs) -> LLMServerClient:

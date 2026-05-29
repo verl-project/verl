@@ -30,6 +30,7 @@ __all__ = [
     "TraceConfig",
     "ServerConfig",
     "PrometheusConfig",
+    "LoadBalancerConfig",
     "RolloutConfig",
     "CheckpointEngineConfig",
     "SkipConfig",
@@ -140,6 +141,29 @@ class PrometheusConfig(BaseConfig):
 
 
 @dataclass
+class LoadBalancerConfig(BaseConfig):
+    """Sticky-vs-balance tradeoff for the global request load balancer.
+
+    The load balancer keeps multi-turn conversations pinned to one server for
+    prefix KV-cache reuse (sticky session). During the long-tail phase of a
+    rollout step, a few long conversations can stay pinned to one replica while
+    peers go idle. To recover throughput, the balancer re-pins a request to the
+    least-loaded server once the in-flight distribution becomes skewed, adopting
+    the dual-threshold rule from sglang's cache-aware router. A pool is
+    imbalanced iff BOTH conditions hold::
+
+        (max_inflight - min_inflight) > balance_abs_threshold
+        max_inflight > min_inflight * balance_rel_threshold
+    """
+
+    # Absolute in-flight gap that triggers rebalancing. ``0`` (default) disables
+    # the imbalance gate, preserving pure sticky-session routing.
+    balance_abs_threshold: int = 0
+    # Relative in-flight ratio that triggers rebalancing.
+    balance_rel_threshold: float = 1.5
+
+
+@dataclass
 class CheckpointEngineConfig(BaseConfig):
     """
     Configuration for checkpoint engine to update weights from trainer to rollout
@@ -235,6 +259,9 @@ class RolloutConfig(BaseConfig):
 
     # Use Prometheus to collect and monitor rollout statistics
     prometheus: PrometheusConfig = field(default_factory=PrometheusConfig)
+
+    # Sticky-vs-balance tradeoff for the global request load balancer
+    load_balancer: LoadBalancerConfig = field(default_factory=LoadBalancerConfig)
 
     # Extension point for custom configurations
     custom: Optional[dict] = None

@@ -443,6 +443,20 @@ prometheus:
   # Specify served_model_name to avoid displaying overly long model paths in Grafana
   served_model_name: ${oc.select:actor_rollout_ref.model.path,null}
 
+# sticky-vs-balance tradeoff for the global request load balancer (server mode)
+load_balancer:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.workers.config.LoadBalancerConfig
+
+  # Absolute in-flight gap that triggers rebalancing. 0 disables the imbalance
+  # gate, preserving pure sticky-session routing (prefix KV-cache reuse).
+  balance_abs_threshold: 0
+
+  # Relative in-flight ratio that triggers rebalancing. A pool is imbalanced iff
+  # (max - min) > balance_abs_threshold AND max > min * balance_rel_threshold.
+  balance_rel_threshold: 1.5
+
 # type of quantization in vllm, currently support fp8 and torchao
 quantization: null
 

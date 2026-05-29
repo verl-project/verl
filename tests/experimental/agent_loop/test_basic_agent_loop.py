@@ -558,3 +558,81 @@ class TestLoadBalancerHybrid:
         status = ray.get(lb.get_status.remote())
         assert status["active_servers"] == 2  # s0 and s2
         assert status["total_inflight"] == 0
+
+
+class TestLoadBalancerImbalanceGate:
+    """Sticky-vs-balance tradeoff: re-pin sticky sessions once load is skewed.
+
+    Adapted from sglang's cache-aware router dual-threshold rule. The gate is
+    opt-in: ``balance_abs_threshold <= 0`` (the default) preserves pure sticky
+    routing.
+    """
+
+    @staticmethod
+    def _make_skewed(lb):
+        """Drive a 2-server LB into the state {s0: 3 inflight, s1: 0 inflight}.
+
+        Acquires 6 distinct requests (least-loaded alternates s0/s1/...), then
+        releases the three pinned to s1. Returns the request_ids pinned to s0.
+        """
+        pinned = {}
+        for i in range(6):
+            rid = f"r{i}"
+            pinned[rid] = ray.get(lb.acquire_server.remote(request_id=rid))[0]
+        # r0/r2/r4 -> s0, r1/r3/r5 -> s1 (deterministic least-loaded tie-break).
+        for rid, sid in pinned.items():
+            if sid == "s1":
+                ray.get(lb.release_server.remote(server_id=sid))
+        s0_reqs = [rid for rid, sid in pinned.items() if sid == "s0"]
+        return s0_reqs
+
+    def test_disabled_by_default_keeps_sticky_under_imbalance(self, ray_for_lb):
+        """Default thresholds disable the gate: sticky is honored even when skewed."""
+        lb = GlobalRequestLoadBalancer.remote(servers={"s0": None, "s1": None})
+        s0_reqs = self._make_skewed(lb)
+        # {s0: 3, s1: 0} is heavily imbalanced, but the gate is off by default.
+        for rid in s0_reqs:
+            assert ray.get(lb.acquire_server.remote(request_id=rid))[0] == "s0"
+
+    def test_repins_sticky_when_imbalanced(self, ray_for_lb):
+        """With the gate enabled, a sticky request on the hot server is re-pinned."""
+        lb = GlobalRequestLoadBalancer.remote(
+            servers={"s0": None, "s1": None},
+            balance_abs_threshold=2,
+            balance_rel_threshold=1.5,
+        )
+        s0_reqs = self._make_skewed(lb)
+        # State is {s0: 3, s1: 0}: (3 - 0) > 2 and 3 > 0 * 1.5 -> imbalanced.
+        moved = ray.get(lb.acquire_server.remote(request_id=s0_reqs[0]))[0]
+        assert moved == "s1"  # re-pinned to least-loaded
+
+    def test_honors_sticky_while_balanced(self, ray_for_lb):
+        """Gate enabled but load balanced -> sticky session preserved (KV reuse)."""
+        lb = GlobalRequestLoadBalancer.remote(
+            servers={"s0": None, "s1": None},
+            balance_abs_threshold=2,
+            balance_rel_threshold=1.5,
+        )
+        s = ray.get(lb.acquire_server.remote(request_id="x"))[0]  # -> s0
+        # {s0: 1, s1: 0}: (1 - 0) <= 2 -> balanced, sticky honored.
+        assert ray.get(lb.acquire_server.remote(request_id="x"))[0] == s
+
+    def test_relative_threshold_guards_uniformly_busy_pool(self, ray_for_lb):
+        """A busy-but-proportional pool is not treated as imbalanced (rel guard)."""
+        lb = GlobalRequestLoadBalancer.remote(
+            servers={"s0": None, "s1": None},
+            balance_abs_threshold=1,
+            balance_rel_threshold=1.5,
+        )
+        # Build {s0: 10, s1: 8} from distinct *new* requests (each routed purely by
+        # least-loaded, so the gate is never consulted during construction) plus
+        # two releases on s1. r0 stays pinned to s0 and in-flight throughout.
+        for i in range(20):
+            ray.get(lb.acquire_server.remote(request_id=f"r{i}"))  # alternates -> {10, 10}
+        ray.get(lb.release_server.remote(server_id="s1"))
+        ray.get(lb.release_server.remote(server_id="s1"))
+        status = ray.get(lb.get_status.remote())
+        assert status["servers"] == {"s0": 10, "s1": 8}
+        # (10 - 8) = 2 > 1, but 10 > 8 * 1.5 = 12 is False -> balanced.
+        # r0 (pinned to s0) must stay on s0 despite the absolute gap.
+        assert ray.get(lb.acquire_server.remote(request_id="r0"))[0] == "s0"
