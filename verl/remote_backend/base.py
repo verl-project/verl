@@ -132,9 +132,9 @@ class RemoteBackendRegistry:
     script) imports the adapter module they want to use::
 
         # in main_ppo.py, conditioned on `trainer.remote_backend == "arctic"`:
-        from verl.workers.remote_client import arctic_rl_client  # noqa: F401
+        from verl.workers.remote_client import arctic_rl  # noqa: F401
 
-        # arctic_rl_client decorates its class with
+        # arctic_rl decorates its class with
         # @RemoteBackendRegistry.register("arctic"), so by import time the
         # name is available to `get()` / `create()`.
 
@@ -166,7 +166,7 @@ class RemoteBackendRegistry:
             raise KeyError(
                 f"Unknown remote backend '{name}'. Registered: "
                 f"{sorted(cls._backends)}. Import the adapter module "
-                "(e.g. `from verl.workers.remote_client import arctic_rl_client`) "
+                "(e.g. `from verl.workers.remote_client import arctic_rl`) "
                 "before calling `get()`."
             )
         return cls._backends[name]

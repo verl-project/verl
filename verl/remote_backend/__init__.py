@@ -25,7 +25,7 @@ Pieces:
 
 Adapter modules (the concrete :class:`RemoteBackend` implementations)
 live under :mod:`verl.workers.remote_client`. See
-:mod:`verl.workers.remote_client.arctic_rl_client` for a reference adapter.
+:mod:`verl.workers.remote_client.arctic_rl` for a reference adapter.
 """
 
 from verl.remote_backend.base import RemoteBackend, RemoteBackendRegistry

@@ -143,7 +143,7 @@ class TaskRunner:
                 # so it registers with `RemoteBackendRegistry`; the
                 # registry no longer carries a lazy `MODULES` table.
                 if backend_name == "arctic":
-                    from verl.workers.remote_client import arctic_rl_client  # noqa: F401
+                    from verl.workers.remote_client import arctic_rl  # noqa: F401
                     from verl.remote_backend.workers.arctic_rl import (
                         ArcticRLActorRolloutRefWorker,
                     )
@@ -152,7 +152,7 @@ class TaskRunner:
                     raise ValueError(
                         f"Unknown trainer.remote_backend={backend_name!r}. "
                         "Known: 'arctic'. Plug in a new backend by adding "
-                        "verl/workers/remote_client/<name>_rl_client.py + "
+                        "verl/workers/remote_client/<name>.py + "
                         "verl/remote_backend/workers/<name>/worker.py and "
                         "wiring it here."
                     )

@@ -94,13 +94,13 @@ class ArcticRLClientWrapper(RemoteBackend):
     it via ``config.trainer.remote_backend = "arctic"``.
     """
 
-    # Key under `main_config.remote_backend.<name>` where this adapter's
-    # config lives. Matches the registered backend name above.
-    _BACKEND_CONFIG_KEY = "arctic"
-
     def __init__(self, config, reconnect_job_config: dict = None, rl_server_state: ArcticRLRayServerState = None):
         self.config = config
-        self._backend_config = config.remote_backend[self._BACKEND_CONFIG_KEY]
+        # Per @sfc-gh-truwase (PR #4): the per-backend yaml
+        # (`trainer/config/remote_backend/arctic.yaml`) is loaded into
+        # `config.remote_backend` as a flat block — the file name already
+        # names the backend, so no extra `arctic:` nesting is needed.
+        self._backend_config = config.remote_backend
         self._client = None
         self.use_zorro = self._backend_config.use_zorro
         self.use_liger = self.config.actor_rollout_ref.model.use_liger

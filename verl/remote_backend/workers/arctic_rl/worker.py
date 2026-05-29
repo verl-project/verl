@@ -1,7 +1,7 @@
 """Arctic-RL forwarder worker.
 
 Per-backend worker that drives the Arctic adapter
-(:class:`verl.workers.remote_client.arctic_rl_client.ArcticRLClientWrapper`).
+(:class:`verl.workers.remote_client.arctic_rl.ArcticRLClientWrapper`).
 Owns single-controller dispatch annotations, FlopsCounter / MFU, and
 metric aggregation. Payload encoding (loss, wire format, parallelism)
 lives on the adapter's ``compute_log_prob`` / ``update_actor`` — those
@@ -29,7 +29,7 @@ from verl.remote_backend.base import RemoteBackend, RemoteBackendRegistry
 # every process that loads this worker — including Ray child procs, which
 # do not inherit the driver's import side-effects. The driver also
 # imports this adapter explicitly (see `verl.trainer.main_ppo`).
-from verl.workers.remote_client import arctic_rl_client  # noqa: F401
+from verl.workers.remote_client import arctic_rl  # noqa: F401
 
 from verl.remote_backend.worker_utils import make_njt, normalize_backend_metrics
 from verl.single_controller.base import Worker

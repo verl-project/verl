@@ -4,7 +4,7 @@ from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer
 
 import argparse
 from typing import Any, Optional
-from verl.workers.remote_client.arctic_rl_client import ArcticRLClientWrapper
+from verl.workers.remote_client.arctic_rl import ArcticRLClientWrapper
 from collections.abc import AsyncGenerator
 
 import ray
