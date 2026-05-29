@@ -52,6 +52,7 @@ from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, should_save_ckpt_esi
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
+from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
 from verl.utils.tracking import Tracking, ValidationGenerationsLogger
 from verl.workers.rollout.llm_server import LLMServerManager
@@ -669,6 +670,128 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
                 flush=True,
             )
 
+    def _log_rollout_corr_actor_update(
+        self,
+        stage: str,
+        batch: DataProto | None,
+        actor_metrics: dict[str, Any] | None = None,
+    ) -> None:
+        if str(os.getenv("VERL_ROLLOUT_CORR_UPDATE_DEBUG", "1")).lower() in {"0", "false", "no"}:
+            return
+
+        def _as_float(value: Any) -> float | None:
+            try:
+                if isinstance(value, torch.Tensor):
+                    return float(value.detach().float().mean().cpu().item())
+                if isinstance(value, np.ndarray):
+                    return float(np.asarray(value, dtype=np.float64).mean())
+                return float(value)
+            except Exception:
+                return None
+
+        def _count_values(values: Any, limit: int = 8) -> dict[str, int]:
+            if values is None:
+                return {}
+            try:
+                arr = np.asarray(values).reshape(-1).tolist()
+            except Exception:
+                arr = list(values) if isinstance(values, list | tuple) else [values]
+            counts: dict[str, int] = {}
+            for raw in arr:
+                key = str(int(raw)) if isinstance(raw, int | np.integer) else str(raw)
+                counts[key] = counts.get(key, 0) + 1
+            return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:limit])
+
+        def _min_max(values: Any) -> tuple[Any, Any]:
+            if values is None:
+                return None, None
+            try:
+                arr = np.asarray(values).reshape(-1)
+                if arr.size == 0:
+                    return None, None
+                return arr.min().item(), arr.max().item()
+            except Exception:
+                return None, None
+
+        try:
+            summary: dict[str, Any] = {
+                "stage": stage,
+                "global_steps": self.global_steps,
+                "local_trigger_step": self.local_trigger_step,
+                "trigger_parameter_sync_step": self.trigger_parameter_sync_step,
+                "current_param_version": self.current_param_version,
+            }
+            if batch is not None:
+                pad_rows = int(batch.meta_info.get("fully_async/pad/num_padding_rows", 0) or 0)
+                rollout_group_ids = (batch.non_tensor_batch or {}).get("rollout_group_id")
+                rollout_groups = (
+                    len(set(np.asarray(rollout_group_ids).reshape(-1).tolist()))
+                    if rollout_group_ids is not None
+                    else None
+                )
+                summary.update(
+                    {
+                        "batch_len": len(batch),
+                        "valid_batch_len": max(len(batch) - pad_rows, 0),
+                        "pad_rows": pad_rows,
+                        "trajectory_param_versions": _count_values(batch.meta_info.get("trajectory_param_versions")),
+                        "trajectory_roles": _count_values((batch.non_tensor_batch or {}).get("trajectory_role")),
+                        "rollout_groups": rollout_groups,
+                    }
+                )
+                sample_steps = (batch.non_tensor_batch or {}).get("global_steps")
+                sample_min, sample_max = _min_max(sample_steps)
+                summary["sample_global_steps_min"] = sample_min
+                summary["sample_global_steps_max"] = sample_max
+
+                if batch.batch is not None and "response_mask" in batch.batch.keys():
+                    response_mask = batch.batch["response_mask"]
+                    valid = response_mask.bool()
+                    row_lengths = response_mask.detach().float().sum(dim=-1).cpu()
+                    summary.update(
+                        {
+                            "valid_tokens": int(valid.sum().detach().cpu().item()),
+                            "response_len_mean": float(row_lengths.mean().item()) if row_lengths.numel() else None,
+                            "response_len_min": float(row_lengths.min().item()) if row_lengths.numel() else None,
+                            "response_len_max": float(row_lengths.max().item()) if row_lengths.numel() else None,
+                        }
+                    )
+                    for key in ("rollout_log_probs", "old_log_probs"):
+                        if key in batch.batch.keys():
+                            values = batch.batch[key][valid].detach().float()
+                            if values.numel() > 0:
+                                summary[f"{key}_mean"] = float(values.mean().cpu().item())
+                                summary[f"{key}_min"] = float(values.min().cpu().item())
+                                summary[f"{key}_max"] = float(values.max().cpu().item())
+                    if "rollout_log_probs" in batch.batch.keys() and "old_log_probs" in batch.batch.keys():
+                        diff = (batch.batch["old_log_probs"] - batch.batch["rollout_log_probs"])[valid].detach().float()
+                        if diff.numel() > 0:
+                            summary["old_minus_rollout_mean"] = float(diff.mean().cpu().item())
+                            summary["old_minus_rollout_min"] = float(diff.min().cpu().item())
+                            summary["old_minus_rollout_max"] = float(diff.max().cpu().item())
+
+            if actor_metrics:
+                metric_keys = (
+                    "actor/rollout_corr/kl",
+                    "actor/rollout_corr/k3_kl",
+                    "actor/rollout_corr/training_log_ppl",
+                    "actor/rollout_corr/rollout_log_ppl",
+                    "actor/rollout_corr/rollout_rs_masked_fraction",
+                    "actor/rollout_corr/rollout_rs_seq_masked_fraction",
+                    "actor/ppo_kl",
+                    "actor/pg_loss",
+                    "actor/entropy_loss",
+                    "actor/kl_loss",
+                    "actor/grad_norm",
+                )
+                summary["actor_metrics"] = {
+                    key: value for key in metric_keys if (value := _as_float(actor_metrics.get(key))) is not None
+                }
+
+            print(f"[RolloutCorrDebug][actor_update_{stage}] {summary}", flush=True)
+        except Exception as exc:
+            print(f"[RolloutCorrDebug][actor_update_{stage}] failed: {exc!r}", flush=True)
+
     async def fit_step(self, batch_dict: dict = None):
         """
         Single-step training template method. Handles all logic for one training step.
@@ -800,6 +923,19 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         actor_output = rename_dict(actor_output, "actor/")
         actor_output["perf/mfu/actor"] = actor_output.pop("actor/mfu")
         return DataProto.from_single_dict(data={}, meta_info={"metrics": actor_output})
+
+    def _fit_update_actor(self, batch: DataProto) -> DataProto:
+        metrics = self.metrics
+        timing_raw = self.timing_raw
+        if self.config.trainer.critic_warmup <= self.global_steps:
+            self._log_rollout_corr_actor_update("begin", batch)
+            with marked_timer("update_actor", timing_raw, color="red"):
+                actor_output = self._update_actor(batch)
+
+            actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
+            self._log_rollout_corr_actor_update("end", batch, actor_metrics=actor_output_metrics)
+            metrics.update(actor_output_metrics)
+        return batch
 
     def _update_critic(self, batch: DataProto) -> DataProto:
         """Update critic using the expanded rows as one PPO mini-batch."""
@@ -1042,6 +1178,8 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
 
     def _fit_update_local_step(self):
         time_str = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        old_local_trigger_step = self.local_trigger_step
+        old_param_version = self.current_param_version
         logger.info(
             "[FullyAsyncTrainer] global_steps: %d local_trigger_step: %d trigger_parameter_sync_step: %s %s",
             self.global_steps,
@@ -1054,6 +1192,18 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         else:
             self.current_param_version += 1
             self.local_trigger_step = 1
+        if str(os.getenv("VERL_ROLLOUT_CORR_UPDATE_DEBUG", "1")).lower() not in {"0", "false", "no"}:
+            print(
+                "[RolloutCorrDebug][actor_update_local_step] "
+                f"global_steps={self.global_steps} "
+                f"local_trigger_step_before={old_local_trigger_step} "
+                f"local_trigger_step_after={self.local_trigger_step} "
+                f"current_param_version_before={old_param_version} "
+                f"current_param_version_after={self.current_param_version} "
+                f"trigger_parameter_sync_step={self.trigger_parameter_sync_step} "
+                f"will_sync={self.local_trigger_step == 1}",
+                flush=True,
+            )
 
     async def _fit_update_weights(self):
         if self.local_trigger_step != 1:
