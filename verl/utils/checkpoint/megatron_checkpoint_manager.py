@@ -31,7 +31,7 @@ from packaging import version
 from transformers import GenerationConfig
 
 from verl.models.weight_loader_registry import get_weight_saver
-from verl.utils.device import get_device_name, get_torch_device
+from verl.utils.device import get_device_name, get_torch_device, is_npu_available
 from verl.utils.fs import is_non_local, local_mkdir_safe
 from verl.utils.logger import log_with_rank
 from verl.utils.megatron.dist_checkpointing import load_dist_checkpointing, save_dist_checkpointing
@@ -444,12 +444,13 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             # For backward compatibility
             sharded_sd_metadata = None
         else:
-            try:
-                from mindspeed.core.optimizer.adamw import AdamW as MindSpeedAdamW
+            if is_npu_available:
+                try:
+                    from mindspeed.core.optimizer.adamw import AdamW as MindSpeedAdamW
 
-                torch.serialization.add_safe_globals([MindSpeedAdamW])
-            except Exception:
-                pass
+                    torch.serialization.add_safe_globals([MindSpeedAdamW])
+                except Exception:
+                    pass
             sharded_sd_metadata = load_content_metadata(checkpoint_dir=dist_checkpoint_path)
         if sharded_sd_metadata is None:
             if self.use_distributed_optimizer:
