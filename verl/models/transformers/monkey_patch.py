@@ -475,6 +475,9 @@ def apply_monkey_patch(
             patch_vlm_for_ulysses_input_slicing(Glm4vTextModel)
 
     elif model.config.model_type == "glm_moe_dsa":
+        if use_fused_kernels:
+            print("Fused kernels are not supported for glm_moe_dsa. Disabling use_fused_kernels.")
+            use_fused_kernels = False
         if use_remove_padding or ulysses_sp_size > 1:
             from transformers.models.glm_moe_dsa.modeling_glm_moe_dsa import GlmMoeDsaAttention
 
