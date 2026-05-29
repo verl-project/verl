@@ -10,10 +10,13 @@
 #     cpu (upstream stacks not yet on torch 2.11).
 #
 # The single committed verl/uv.lock holds both forks (mutually exclusive
-# extras declared in pyproject.toml's [tool.uv].conflicts), so each image
-# only ever runs `uv sync --frozen --extra <backend>` against the one
-# fork it cares about. See pyproject.toml's [tool.uv] header for the
-# backend -> torch / wheel-suite map.
+# dependency-groups declared in pyproject.toml's [tool.uv].conflicts), so
+# each image only ever runs
+#   `uv sync --frozen --no-default-groups --group <backend>`
+# against the one fork it cares about. `--no-default-groups` is what
+# guarantees `sync trtllm` only installs the trtllm slice and never touches
+# vllm's cu13 wheels at install time. See pyproject.toml's [tool.uv] header
+# for the backend -> torch / wheel-suite map.
 #
 # The build clones the verl source into /workspace/verl and runs
 # `manage_envs.py sync ...` for every cu12.9 backend, leaving one venv per
@@ -56,7 +59,8 @@
 #     --build-arg GITHUB_ARTIFACTORY=github.com    # github mirror
 #
 # Build with BuildKit so the uv cache mount below is honored. Each backend
-# RUN is a `uv sync --frozen --extra <backend>` call driven by manage_envs.py;
+# RUN is a `uv sync --frozen --no-default-groups --group <backend>` call
+# driven by manage_envs.py;
 # the lockfile (verl/uv.lock) is the single source of truth for resolved
 # versions across every backend. See the "Install from multi-backend uv image"
 # section in docs/start/install.rst for the full cache story (build-time
@@ -70,18 +74,19 @@ ARG TARGETARCH
 ARG DEBIAN_FRONTEND=noninteractive
 
 # Build parallelism for source-built packages (apex / TransformerEngine /
-# flash-attn / megatron-core). 32 is conservative and survives most CI
-# hosts; raise via --build-arg MAX_JOBS=128 on big machines.
+# megatron-core). 32 is conservative and survives most CI hosts; raise
+# via --build-arg MAX_JOBS=128 on big machines. flash-attn ships as a
+# prebuilt wheel (mjun0812 v0.7.11) and does not honor MAX_JOBS.
 ARG MAX_JOBS=32
 ENV MAX_JOBS=${MAX_JOBS}
 
 # cuDNN / NCCL — see https://developer.nvidia.com/cudnn-downloads
 # These ARGs control the apt deb versions installed below. The matching pip
-# wheel pins live in pyproject.toml's [tool.uv].override-dependencies as
-# `nvidia-cudnn-cu12==X` and `nvidia-nccl-cu12==Y` (per-extra markers gated
-# on the cu12.9 backends); bumping either ARG here requires updating both
-# the override and re-running `uv lock` so the .so files in every backend
-# venv stay aligned with the system libraries.
+# wheel pins live INLINE in each cu12.9 backend group in pyproject.toml's
+# [dependency-groups] (`nvidia-cudnn-cu12==X` / `nvidia-nccl-cu12==Y` in
+# the trtllm / veomni / nemoautomodel groups). Bumping either ARG here
+# requires updating those inline pins and re-running `uv lock` so the .so
+# files in every backend venv stay aligned with the system libraries.
 ARG CUDNN_VERSION=9.16.0.29-1
 ARG NCCL_VERSION=2.28.3-1
 
@@ -288,12 +293,12 @@ FROM base AS final
 # One RUN per backend so each venv lands in its own Docker layer: editing
 # one pin only invalidates that backend's layer, and a partial build keeps
 # every previously-finished venv. Each manage_envs.py invocation runs
-# `uv sync --frozen --extra <backend>` against the lockfile produced (or
-# reused) in `base` — no resolver runs in these layers. The cuDNN / NCCL
-# pip wheels (nvidia-cudnn-cu12 / nvidia-nccl-cu12) are pinned in
-# pyproject.toml's [tool.uv].override-dependencies (per-extra markers
-# gated on the cu12.9 backends) and must already match the apt deb
-# versions above. All per-backend RUNs share a BuildKit cache at
+# `uv sync --frozen --no-default-groups --group <backend>` against the
+# lockfile produced (or reused) in `base` — no resolver runs in these
+# layers. The cuDNN / NCCL pip wheels (nvidia-cudnn-cu12 / nvidia-nccl-cu12)
+# are inlined in each cu12 backend group in pyproject.toml and must
+# already match the apt deb versions above. All per-backend RUNs share a
+# BuildKit cache at
 # UV_CACHE_DIR (id=verl-uv-cache) so wheels are downloaded once across
 # rebuilds and across backends — see docs/start/install.rst.
 RUN --mount=type=cache,target=/root/.cache/uv,id=verl-uv-cache \
