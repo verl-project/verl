@@ -190,11 +190,14 @@ def glm_moe_dsa_attn_forward_with_dsa(
         causal_mask = attention_mask[..., :total_len]
         combined_mask = index_mask + causal_mask
     else:
-        combined_mask = (
-            attention_mask.masked_fill(index_mask == float("-inf"), float("-inf"))
-            if attention_mask is not None
-            else index_mask
-        )
+        if attention_mask is not None:
+            if attention_mask.dim() == 2:
+                attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)
+            elif attention_mask.dim() == 3:
+                attention_mask = attention_mask.unsqueeze(1)
+            combined_mask = index_mask + attention_mask
+        else:
+            combined_mask = index_mask
 
     # DSA produces a dense 4D float mask incompatible with flash attention.
     attn_impl = "sdpa"
