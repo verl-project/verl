@@ -1,12 +1,27 @@
-# Build every GPU x86_64 uv venv into a single image.
+# Build the cu13 (CUDA 13) slice of verl's uv-managed multi-backend image.
+#
+# This Dockerfile pairs with docker/Dockerfile.uv.cu129; together they
+# cover verl's full GPU backend matrix:
+#
+#   * Dockerfile.uv.cu130 (this file) — base nvidia/cuda:13.0.2; backends
+#     pinned on torch 2.11 / cu130: vllm, sglang, fsdp, megatron, cpu.
+#   * Dockerfile.uv.cu129               — base nvidia/cuda:12.9.1; backends
+#     pinned on torch 2.9.x-2.10 / cu129: trtllm, veomni, nemoautomodel,
+#     cpu (upstream stacks not yet on torch 2.11).
+#
+# The single committed verl/uv.lock holds both forks (mutually exclusive
+# extras declared in pyproject.toml's [tool.uv].conflicts), so each image
+# only ever runs `uv sync --frozen --extra <backend>` against the one
+# fork it cares about. See pyproject.toml's [tool.uv] header for the
+# backend -> torch / wheel-suite map.
 #
 # The build clones the verl source into /workspace/verl and runs
-# `manage_envs.py sync ...` for every NVIDIA / CPU backend, leaving one
-# venv per backend under /workspace/verl/.venvs/.venv-<backend>/. The
-# uv flow is intentionally x86_64 Linux only — Ascend NPU
-# (vllm-ascend / sglang-ascend / mindspeed) and aarch64 GPU variants
-# (e.g. Grace-Blackwell) are out of scope for now; for Ascend, see
-# `docker/ascend/Dockerfile.ascend_8.5.0_a2` and friends instead.
+# `manage_envs.py sync ...` for every cu13 backend, leaving one venv per
+# backend under /workspace/verl/.venvs/.venv-<backend>/. The uv flow is
+# x86_64 Linux only — Ascend NPU (vllm-ascend / sglang-ascend / mindspeed)
+# and aarch64 GPU variants (e.g. Grace-Blackwell) are out of scope for
+# now; for Ascend, see `docker/ascend/Dockerfile.ascend_8.5.0_a2` and
+# friends instead.
 #
 # The base layer is a superset of the "basic" stages of the upstream
 # `sglang/docker/Dockerfile` and `vllm/docker/Dockerfile`, so the resulting
@@ -20,15 +35,22 @@
 #
 # No build context is needed; the repo is fetched at build time:
 #
-#     docker build -f Dockerfile_uv -t verl:uv .
+#     docker build -f docker/Dockerfile.uv.cu130 -t verl:uv-cu130 .
+#
+# This always builds the full cu13 backend set (vllm + sglang + fsdp +
+# megatron + cpu). The image is intentionally not slim-able via build
+# args — pick the Dockerfile, get every backend that is known to work
+# against that CUDA major. To bootstrap just the lockfile (no
+# per-backend syncs), build the named `base` stage instead:
+#
+#     docker build -f docker/Dockerfile.uv.cu130 --target=base -t verl:uv-cu130-lock .
 #
 # Useful build args:
 #
 #     --build-arg VERL_REF=v0.7.1                # branch / tag / commit
 #     --build-arg VERL_REPO=https://github.com/your-fork/verl.git
-#     --build-arg TARGETS="vllm fsdp megatron"   # slim, only these backends
 #     --build-arg MAX_JOBS=128                   # bump for big build hosts
-#     --build-arg CUDA_VERSION=12.9.1            # alternative CUDA dev base
+#     --build-arg CUDA_VERSION=13.0.2            # alternative CUDA dev base
 #     --build-arg UBUNTU_MIRROR=...              # apt mirror (sglang-style)
 #     --build-arg PIP_DEFAULT_INDEX=...          # pip global index URL
 #     --build-arg GITHUB_ARTIFACTORY=github.com  # github mirror
@@ -40,7 +62,7 @@
 # section in docs/start/install.rst for the full cache story (build-time
 # reuse + bind-mount for in-container resync).
 
-ARG CUDA_VERSION=12.9.1
+ARG CUDA_VERSION=13.0.2
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu24.04 AS base
 
 ARG CUDA_VERSION
@@ -56,18 +78,11 @@ ENV MAX_JOBS=${MAX_JOBS}
 # cuDNN / NCCL — see https://developer.nvidia.com/cudnn-downloads
 # These ARGs control the apt deb versions installed below. The matching pip
 # wheel pins live in pyproject.toml's [tool.uv].override-dependencies as
-# `nvidia-cudnn-cu12==X` and `nvidia-nccl-cu12==Y`; bumping either ARG here
+# `nvidia-cudnn-cu13==X` and `nvidia-nccl-cu13==Y`; bumping either ARG here
 # requires updating both the override and re-running `uv lock` so the .so
 # files in every backend venv stay aligned with the system libraries.
 ARG CUDNN_VERSION=9.16.0.29-1
 ARG NCCL_VERSION=2.28.3-1
-
-# Backends to materialize. By default every non-Ascend extra in
-# pyproject.toml. Override via --build-arg TARGETS="vllm fsdp" for slimmer
-# images. Note: trtllm pins tensorrt-llm whose wheels target CUDA 13;
-# `uv sync` succeeds on this CUDA 12.9 base but actual TRT-LLM inference
-# may need a CUDA-13 base — see docker/Dockerfile.stable.trtllm.
-ARG TARGETS="vllm sglang trtllm fsdp megatron veomni nemoautomodel cpu"
 
 # Source to build from. Override VERL_REF for tags / commits.
 ARG VERL_REPO=https://github.com/verl-project/verl.git
@@ -181,13 +196,14 @@ ENV LANG=en_US.UTF-8 \
 # is visible, pinned, and reproducible. manage_envs.py auto-detects these
 # system versions and force-installs the matching pip packages per-venv.
 # ---------------------------------------------------------------------------
-RUN apt-get update && apt-get install -y --no-install-recommends --allow-change-held-packages \
-        libcudnn9-cuda-12=${CUDNN_VERSION} \
-        libcudnn9-dev-cuda-12=${CUDNN_VERSION} \
+RUN CUDA_VERSION_MAJOR=$(echo ${CUDA_VERSION} | cut -d '.' -f 1) \
+    && apt-get update && apt-get install -y --no-install-recommends --allow-change-held-packages \
+        libcudnn9-cuda-${CUDA_VERSION_MAJOR}=${CUDNN_VERSION} \
+        libcudnn9-dev-cuda-${CUDA_VERSION_MAJOR}=${CUDNN_VERSION} \
         libnccl2=${NCCL_VERSION}+cuda${CUDA_VERSION%.*} \
         libnccl-dev=${NCCL_VERSION}+cuda${CUDA_VERSION%.*} \
     && rm -rf /var/lib/apt/lists/* \
-    && echo "=== Installed cuDNN $(dpkg-query -W -f='${Version}' libcudnn9-cuda-12) ===" \
+    && echo "=== Installed cuDNN $(dpkg-query -W -f='${Version}' libcudnn9-cuda-${CUDA_VERSION_MAJOR}) ===" \
     && echo "=== Installed NCCL  $(dpkg-query -W -f='${Version}' libnccl2) ==="
 
 # Override pip global index if requested.
@@ -243,8 +259,10 @@ WORKDIR /workspace/verl
 # is committed back to the repo, this RUN turns into a no-op. The cache
 # mount makes the resolve cheap on subsequent builds — git sources still
 # need to be cloned, but wheel downloads are reused. To pull the generated
-# lockfile back to the host so it can be committed:
-#     docker create --name verl-tmp <image>
+# lockfile back to the host so it can be committed (using the cheap
+# lockfile-only build target):
+#     docker build -f docker/Dockerfile.uv.cu130 --target=base -t verl:uv-cu130-lock .
+#     docker create --name verl-tmp verl:uv-cu130-lock
 #     docker cp verl-tmp:/workspace/verl/uv.lock ./uv.lock
 #     docker rm verl-tmp
 RUN --mount=type=cache,target=/root/.cache/uv,id=verl-uv-cache \
@@ -255,32 +273,37 @@ RUN --mount=type=cache,target=/root/.cache/uv,id=verl-uv-cache \
         echo ">>> uv.lock found in source — skipping bootstrap"; \
     fi
 
-# One RUN per backend so each venv lands in its own Docker layer: editing one
-# pin only invalidates that backend's layer, and a partial build keeps every
-# previously-finished venv. Each layer is gated on TARGETS via a whole-word
-# match (` x ` in ` $TARGETS `), so dropping a backend from --build-arg TARGETS
-# turns its layer into a no-op without rewriting this file.
-# Each manage_envs.py invocation runs `uv sync --frozen --extra <backend>`
-# against the lockfile produced (or reused) above — no resolver runs in these
-# layers. The cuDNN / NCCL pip wheels are pinned in pyproject.toml's
-# [tool.uv].override-dependencies and must already match the apt deb versions
-# above. All per-backend RUNs share a BuildKit cache at UV_CACHE_DIR
-# (id=verl-uv-cache) so wheels are downloaded once across rebuilds and across
-# backends — see docs/start/install.rst.
+# `base` ends here. `docker build --target=base ...` stops at the lockfile
+# bootstrap and skips the per-backend RUN steps below — useful for
+# regenerating uv.lock without paying for every backend's wheel install.
+# The full image (default target) continues into the `final` stage and
+# materialises every cu13 backend.
+
+# ---------------------------------------------------------------------------
+# Per-backend venvs (cu13 set: vllm + sglang + fsdp + megatron + cpu).
+# ---------------------------------------------------------------------------
+FROM base AS final
+
+# One RUN per backend so each venv lands in its own Docker layer: editing
+# one pin only invalidates that backend's layer, and a partial build keeps
+# every previously-finished venv. Each manage_envs.py invocation runs
+# `uv sync --frozen --extra <backend>` against the lockfile produced (or
+# reused) in `base` — no resolver runs in these layers. The cuDNN / NCCL
+# pip wheels (nvidia-cudnn-cu13 / nvidia-nccl-cu13) are pinned in
+# pyproject.toml's [tool.uv].override-dependencies and must already match
+# the apt deb versions above. All per-backend RUNs share a BuildKit cache
+# at UV_CACHE_DIR (id=verl-uv-cache) so wheels are downloaded once across
+# rebuilds and across backends — see docs/start/install.rst.
 RUN --mount=type=cache,target=/root/.cache/uv,id=verl-uv-cache \
-    if echo " ${TARGETS} " | grep -q " vllm ";          then python3 manage_envs.py sync vllm; fi
+    python3 manage_envs.py sync vllm
 RUN --mount=type=cache,target=/root/.cache/uv,id=verl-uv-cache \
-    if echo " ${TARGETS} " | grep -q " sglang ";        then python3 manage_envs.py sync sglang; fi
+    python3 manage_envs.py sync sglang
 RUN --mount=type=cache,target=/root/.cache/uv,id=verl-uv-cache \
-    if echo " ${TARGETS} " | grep -q " fsdp ";          then python3 manage_envs.py sync fsdp; fi
+    python3 manage_envs.py sync fsdp
 RUN --mount=type=cache,target=/root/.cache/uv,id=verl-uv-cache \
-    if echo " ${TARGETS} " | grep -q " megatron ";      then python3 manage_envs.py sync megatron; fi
+    python3 manage_envs.py sync megatron
 RUN --mount=type=cache,target=/root/.cache/uv,id=verl-uv-cache \
-    if echo " ${TARGETS} " | grep -q " veomni ";        then python3 manage_envs.py sync veomni; fi
-RUN --mount=type=cache,target=/root/.cache/uv,id=verl-uv-cache \
-    if echo " ${TARGETS} " | grep -q " nemoautomodel "; then python3 manage_envs.py sync nemoautomodel; fi
-RUN --mount=type=cache,target=/root/.cache/uv,id=verl-uv-cache \
-    if echo " ${TARGETS} " | grep -q " cpu ";           then python3 manage_envs.py sync cpu; fi
+    python3 manage_envs.py sync cpu
 
 # Default PATH points at the megatron venv — the typical RL trainer driver.
 # Switch at runtime by sourcing or prepending another:

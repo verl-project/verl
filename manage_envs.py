@@ -21,9 +21,11 @@ and ``uv.lock``:
   sglang, megatron, fsdp, cpu, ...).
 * ``[tool.uv].conflicts`` marks the backends as mutually exclusive so
   ``uv lock`` resolves each as an independent fork in a single lockfile.
-* ``[tool.uv].override-dependencies`` pins ``transformers`` and the
-  ``nvidia-cudnn-cu12`` / ``nvidia-nccl-cu12`` wheels to versions that match
-  the system libraries shipped in the reference Docker image.
+* ``[tool.uv].override-dependencies`` pins ``transformers`` and (per-extra)
+  the matching ``nvidia-cudnn-cu{12,13}`` / ``nvidia-nccl-cu{12,13}`` wheels
+  so they line up with the apt deb versions in
+  ``docker/Dockerfile.uv.cu{129,130}``. cu13 backends are vllm / sglang /
+  fsdp / megatron; cu12.9 backends are trtllm / veomni / nemoautomodel.
 * ``[tool.uv].sources`` / ``[tool.uv].index`` route git packages and PyTorch
   wheels.
 * ``uv.lock`` is committed and is the single source of truth for resolved
@@ -61,7 +63,7 @@ Anything after ``--`` is forwarded verbatim to ``uv sync``::
 
 Re-locking after a dependency change
 ------------------------------------
-Edit ``pyproject.toml`` (and the matching apt deb in ``docker/Dockerfile_uv``
+Edit ``pyproject.toml`` (and the matching apt deb in ``docker/Dockerfile.uv.cu130``
 if it's a system lib), then::
 
     uv lock                                    # regenerate uv.lock
@@ -121,6 +123,31 @@ TRAINING_BACKENDS: list[str] = ["fsdp", "megatron", "veomni", "nemoautomodel"]
 DEV_BACKENDS: list[str] = ["cpu"]
 ALL_BACKENDS: list[str] = INFERENCE_BACKENDS + TRAINING_BACKENDS + DEV_BACKENDS
 
+# Per-backend CUDA major. The lockfile has two parallel cu forks (declared
+# in pyproject.toml's [tool.uv.sources] / override-dependencies markers),
+# each backed by a matching Docker base image:
+#
+#   * cu13 (docker/Dockerfile.uv.cu130, cuda:13.0.2) — torch 2.11 / cu130
+#     wheels; matching apt cuDNN-cuda-13 / nccl-cuda13.0 debs.
+#   * cu12.9 (docker/Dockerfile.uv.cu129, cuda:12.9.1) — torch 2.9.x-2.10
+#     / cu129 wheels; matching apt cuDNN-cuda-12 / nccl-cuda12.9 debs.
+#     Used for backends whose upstream pins still trail torch 2.11
+#     (trtllm, veomni, nemoautomodel).
+#
+# Use this map to validate "image vs backend" combos and to drive the
+# Dockerfile.uv.cu* TARGETS defaults. `cpu` carries no CUDA dep so it is
+# valid in both images.
+BACKEND_CUDA_MAJOR: dict[str, str] = {
+    "vllm": "13",
+    "sglang": "13",
+    "fsdp": "13",
+    "megatron": "13",
+    "trtllm": "12",
+    "veomni": "12",
+    "nemoautomodel": "12",
+    "cpu": "any",
+}
+
 # Per-backend python version. Every supported backend currently targets
 # CUDA-on-x86_64-Linux + Python 3.12; Ascend NPU and aarch64 GPU variants
 # are out of scope for the uv flow (see [tool.uv].environments).
@@ -145,13 +172,23 @@ PYTHON_VERSION: dict[str, str] = {
 # the beefiest CI hosts. We pick the floor (32) so the build succeeds
 # everywhere; bump it via `MAX_JOBS=128 python manage_envs.py sync megatron`
 # on hosts with plenty of RAM if you want apex/TE to compile faster.
+#
+# Every CUDA-13 / torch-2.11 backend that lists `flash-attn==2.8.3` source-builds
+# it (no precompiled cu13 wheel on PyPI yet); FLASH_ATTENTION_FORCE_BUILD=TRUE
+# mirrors Dockerfile.stable.{vllm,sglang}.
+_FLASH_ATTN_BUILD_ENV: dict[str, str] = {
+    "MAX_JOBS": "32",
+    "FLASH_ATTENTION_FORCE_BUILD": "TRUE",
+}
 BUILD_ENV: dict[str, dict[str, str]] = {
+    "fsdp": {**_FLASH_ATTN_BUILD_ENV},
     "megatron": {
-        "MAX_JOBS": "32",
+        **_FLASH_ATTN_BUILD_ENV,
         "NVTE_FRAMEWORK": "pytorch",
         "NVTE_BUILD_THREADS_PER_JOB": "4",
-        "FLASH_ATTENTION_FORCE_BUILD": "TRUE",
     },
+    "veomni": {**_FLASH_ATTN_BUILD_ENV},
+    "nemoautomodel": {**_FLASH_ATTN_BUILD_ENV},
     # vllm / sglang / trtllm install pre-built wheels and don't need build env.
 }
 
@@ -415,8 +452,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "backend name(s); shortcuts: all, "
         "inference (vllm sglang trtllm), "
         "training (fsdp megatron veomni nemoautomodel), "
-        "dev (cpu). x86_64 Linux only — Ascend NPU and aarch64 GPU variants "
-        "are not currently supported via uv sync."
+        "dev (cpu). x86_64 Linux only. Backends are split between two "
+        "CUDA majors (see BACKEND_CUDA_MAJOR): vllm/sglang/fsdp/megatron "
+        "build against cu13 (Dockerfile.uv.cu130, torch 2.11); "
+        "trtllm/veomni/nemoautomodel build against cu12.9 "
+        "(Dockerfile.uv.cu129, torch 2.9.x-2.10) until upstream catches "
+        "up. Ascend NPU and aarch64 GPU variants are out of scope here."
     )
 
     s = sub.add_parser("sync", help="create or refresh one or more backend venvs (uv sync --frozen)")

@@ -32,6 +32,33 @@ requires-python = ">=3.10,<3.13"
 # x86_64 Linux. Each pins its own torch/cuda stack and gets its own venv
 # (`.venvs/.venv-<extra>/`). Transformers is intentionally synchronized
 # across backends. Source/index routing lives in [tool.uv] below.
+#
+# Backend -> CUDA-major / torch / image map
+# -----------------------------------------
+# Two parallel cu majors live in this lockfile, one per Docker base:
+#
+#   cu13  (docker/Dockerfile.uv.cu130, nvidia/cuda:13.0.2-devel-ubuntu24.04):
+#     vllm  -> torch 2.11.0 + torchvision 0.26.0 + torchaudio 2.11.0
+#     sglang -> torch 2.11.0 + torchvision 0.26.0 + torchaudio 2.11.0
+#     fsdp   -> torch 2.11.0 + torchvision 0.26.0 + torchaudio 2.11.0
+#     megatron -> torch 2.11.0 + torchvision 0.26.0 + torchaudio 2.11.0
+#                  (cupy-cuda13x, transformer-engine v2.15, megatron-core core_v0.16.1)
+#
+#   cu12.9 (docker/Dockerfile.uv.cu129, nvidia/cuda:12.9.1-devel-ubuntu24.04):
+#     trtllm        -> torch 2.10.0 + tensorrt-llm 1.3.0rc14
+#     veomni        -> torch 2.9.1  + torchvision 0.24.1 + torchaudio 2.9.1
+#                       (upstream veomni v0.1.9a5 not yet on torch 2.11)
+#     nemoautomodel -> torch 2.9.1  + torchvision 0.24.1 + torchaudio 2.9.1
+#                       (NeMo-Automodel v0.3.0 needs torch in [2.6, 2.10])
+#
+#   cpu (any host, no GPU runtime): torch 2.11.0 cpu wheels.
+#
+# Each extra routes torch/torchvision/torchaudio to the matching pytorch
+# wheel index via [tool.uv.sources] below. cuDNN / NCCL pip wheels are
+# pinned per-extra in [tool.uv].override-dependencies (cu12 for the cu129
+# fork, cu13 for the cu130 fork) and must match the apt deb versions
+# baked into the corresponding Dockerfile.
+#
 # Ascend NPU backends (vllm-ascend / sglang-ascend / mindspeed) and aarch64
 # GPU variants (e.g. GB200) are intentionally NOT exposed here — they
 # require a different torch / wheel matrix and are tracked separately in
@@ -85,42 +112,41 @@ verl-core = [
 # verl/docker/Dockerfile.stable.vllm (rollout half)
 vllm = [
     "verl[verl-core]",
-    "torch==2.10.0",
-    "torchvision==0.25.0",
-    "torchaudio==2.10.0",
-    "vllm==0.18.0",
+    "torch==2.11.0",
+    "torchvision==0.26.0",
+    "torchaudio==2.11.0",
+    "vllm==0.20.2",
     "mbridge",
     "transformers==5.3.0",
 ]
 
 # sglang/docker/Dockerfile + verl/docker/Dockerfile.stable.sglang (rollout half).
-# nvidia-cudnn-cu12 / nvidia-nccl-cu12 are NOT declared here — they are
+# nvidia-cudnn-cu13 / nvidia-nccl-cu13 are NOT declared here — they are
 # pinned globally in [tool.uv].override-dependencies below so every CUDA
 # backend resolves to the same wheel versions as the apt debs in
-# docker/Dockerfile_uv.
+# docker/Dockerfile.uv.cu130.
 sglang = [
     "verl[verl-core]",
-    "torch==2.9.1",
-    "torchvision==0.24.1",
-    "torchaudio==2.9.1",
-    "sglang==0.5.9",
+    "torch==2.11.0",
+    "torchvision==0.26.0",
+    "torchaudio==2.11.0",
+    "sglang==0.5.12",
     "mbridge",
     "transformers==5.3.0",
 ]
 
-# verl/docker/Dockerfile.stable.trtllm — Linux/x86_64/cu13 wheels only.
-# TRT-LLM targets CUDA 13; nvidia-nccl-cu13 is pinned here per-backend
-# (the global [tool.uv].override-dependencies pins nvidia-nccl-cu12 for
-# every other backend; trtllm needs the cu13 variant instead).
-# ray==2.54.1 is the TRT-LLM-compat pin from Dockerfile.stable.trtllm L53.
+# verl/docker/Dockerfile.stable.trtllm — Linux/x86_64 only. trtllm pins
+# stay on cu12.9 / torch 2.10 because tensorrt-llm 1.3.0rc14 does not
+# ship cu13 / torch-2.11 PyPI wheels yet; it builds from the cu12 wheel
+# index inside docker/Dockerfile.uv.cu129. ray==2.54.1 is the TRT-LLM-compat
+# pin from Dockerfile.stable.trtllm L53.
 trtllm = [
     "verl[verl-core]",
-    "torch>=2.10.0,<2.11.0a0",
+    "torch==2.10.0",
     "tensorrt-llm==1.3.0rc14 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "mbridge",
     "transformers==5.3.0",
     "numpy>=2.0.0,<2.4",
-    "nvidia-nccl-cu13>=2.28.9,<=2.29.2",
     "ray[default]==2.54.1",
 ]
 
@@ -128,25 +154,26 @@ trtllm = [
 # Pure PyTorch FSDP — no third-party engine.
 fsdp = [
     "verl[verl-core]",
-    "torch==2.10.0",
-    "torchvision==0.25.0",
-    "torchaudio==2.10.0",
+    "torch==2.11.0",
+    "torchvision==0.26.0",
+    "torchaudio==2.11.0",
     "flash-attn==2.8.3",
     "liger-kernel",
     "trl==0.27.0",
     "transformers==5.3.0",
 ]
 
-# Trainer-side union of Dockerfile.stable.{vllm,sglang,trtllm}. apex / TE /
+# Trainer-side union of Dockerfile.stable.{vllm,sglang}. apex / TE /
 # megatron-core come from upstream git (see [tool.uv.sources]) and build from
-# source via no-build-isolation. We standardize on torch 2.10
-# (Dockerfile.stable.vllm) over 2.9.1 (Dockerfile.stable.sglang). cupy-cuda12x
-# is from Dockerfile.stable.trtllm L38 — used for Megatron MoE all-to-all.
+# source via no-build-isolation. torch 2.11.0 + cu130 matches the cu13
+# upstream Dockerfiles. cupy-cuda13x — used for Megatron MoE all-to-all —
+# was originally added on the Dockerfile.stable.trtllm side; it stays here
+# because Megatron itself needs it.
 megatron = [
     "verl[verl-core]",
-    "torch==2.10.0",
-    "torchvision==0.25.0",
-    "torchaudio==2.10.0",
+    "torch==2.11.0",
+    "torchvision==0.26.0",
+    "torchaudio==2.11.0",
     "pybind11",
     "wheel",
     "ninja",
@@ -159,12 +186,13 @@ megatron = [
     "liger-kernel",
     "mbridge",
     "megatron-core",
-    "cupy-cuda12x==14.0.1",
+    "cupy-cuda13x==14.0.1",
     "transformers==5.3.0",
 ]
 
-# VeOmni v0.1.9a5 `gpu` extra slice. Transformers is still synchronized to
-# 5.3.0 for verl runtime consistency.
+# VeOmni v0.1.9a5 `gpu` extra slice. Pinned on cu12.9 / torch 2.9.1 because
+# upstream veomni has not yet bumped to torch 2.11 / cu13. Transformers is
+# still synchronized to 5.3.0 for verl runtime consistency.
 veomni = [
     "verl[verl-core]",
     "torch==2.9.1",
@@ -178,7 +206,8 @@ veomni = [
 ]
 
 # NeMo-Automodel v0.3.0 — upstream needs torch in [2.6, 2.10] and transformers
-# >=5.0; flash-attn matches their `[fa]` extra cap (<=2.8.3).
+# >=5.0; flash-attn matches their `[fa]` extra cap (<=2.8.3). Pinned on
+# cu12.9 / torch 2.9.1 (highest in NeMo-Automodel's supported range).
 nemoautomodel = [
     "verl[verl-core]",
     "torch==2.9.1",
@@ -198,9 +227,9 @@ nemoautomodel = [
 # requires a Linux x86_64 host.
 cpu = [
     "verl[verl-core]",
-    "torch==2.10.0",
-    "torchvision==0.25.0",
-    "torchaudio==2.10.0",
+    "torch==2.11.0",
+    "torchvision==0.26.0",
+    "torchaudio==2.11.0",
     "transformers==5.3.0",
     "pytest",
     "pre-commit",
@@ -355,21 +384,35 @@ conflicts = [
 # manage_envs.py used to run after the per-backend solve.
 #  * transformers — synchronized to 5.3.0 across all backends; some backend
 #    metadata declares `<5`, which the override suppresses.
-#  * nvidia-cudnn-cu12 / nvidia-nccl-cu12 — must match the apt deb versions
-#    in docker/Dockerfile_uv (CUDNN_VERSION, NCCL_VERSION). Bumping either
-#    apt pin requires updating the override here and re-running `uv lock`.
-# Overrides are inert on forks that don't transitively pull the package
-# (NPU / CPU backends don't pull nvidia-cudnn-cu12 via torch, so the cuDNN
-# override is dormant there).
+#  * nvidia-cudnn-cu13 / nvidia-nccl-cu13 — pinned for cu130 backends; must
+#    match the apt deb versions in docker/Dockerfile.uv.cu130
+#    (CUDNN_VERSION, NCCL_VERSION).
+#  * nvidia-cudnn-cu12 / nvidia-nccl-cu12 — pinned for cu129 backends; must
+#    match the apt deb versions in docker/Dockerfile.uv.cu129.
+# Bumping either apt pin requires updating the matching override here and
+# re-running `uv lock`. Overrides are inert on forks that don't transitively
+# pull the package (the CPU backend doesn't pull either, so both cuDNN/NCCL
+# overrides are dormant there).
 override-dependencies = [
     "transformers==5.3.0",
-    "nvidia-cudnn-cu12==9.16.0.29",
-    "nvidia-nccl-cu12==2.28.3",
+    # cu130 fork (vllm / sglang / fsdp / megatron) — torch 2.11 transitively
+    # pulls nvidia-cudnn-cu13 / nvidia-nccl-cu13; pin them to the apt-deb
+    # version baked into docker/Dockerfile.uv.cu130.
+    "nvidia-cudnn-cu13==9.16.0.29 ; extra == 'vllm' or extra == 'sglang' or extra == 'fsdp' or extra == 'megatron'",
+    "nvidia-nccl-cu13==2.28.3 ; extra == 'vllm' or extra == 'sglang' or extra == 'fsdp' or extra == 'megatron'",
+    # cu129 fork (trtllm / veomni / nemoautomodel) — torch 2.9.x / 2.10
+    # transitively pulls nvidia-cudnn-cu12 / nvidia-nccl-cu12; pin them to
+    # the apt-deb version baked into docker/Dockerfile.uv.cu129.
+    "nvidia-cudnn-cu12==9.16.0.29 ; extra == 'trtllm' or extra == 'veomni' or extra == 'nemoautomodel'",
+    "nvidia-nccl-cu12==2.28.3 ; extra == 'trtllm' or extra == 'veomni' or extra == 'nemoautomodel'",
 ]
 
 # These packages `import torch` at build time, so we let them see the torch
 # already installed into the backend venv. `uv sync` honors this list when
-# building any of these from source.
+# building any of these from source. flash-attn is here because no
+# precompiled cu13/torch2.11 wheel ships on PyPI yet — each backend builds
+# its own against the venv's torch (matches Dockerfile.stable.{vllm,sglang}
+# which set FLASH_ATTENTION_FORCE_BUILD=TRUE + --no-build-isolation).
 no-build-isolation-package = [
     "apex",
     "transformer-engine",
@@ -377,6 +420,7 @@ no-build-isolation-package = [
     "megatron-core",
     "veomni",
     "nemo-automodel",
+    "flash-attn",
 ]
 
 # Git sources (revs match the reference Dockerfiles); PyTorch routed per-extra
@@ -390,46 +434,48 @@ flash-attn         = { url = "https://github.com/lesj0610/flash-attention/releas
 mbridge            = { git = "https://github.com/ISEEKYAN/mbridge.git",         rev = "641a5a0" }
 veomni             = { git = "https://github.com/ByteDance-Seed/VeOmni.git",    tag = "v0.1.9a5" }
 nemo-automodel     = { git = "https://github.com/NVIDIA-NeMo/Automodel.git",    tag = "v0.3.0" }
-megatron-core      = { git = "https://github.com/NVIDIA/Megatron-LM.git",       tag = "core_v0.16.0" }
+megatron-core      = { git = "https://github.com/NVIDIA/Megatron-LM.git",       tag = "core_v0.16.1" }
 
 torch = [
-    { index = "pytorch-cu129", extra = "vllm" },
-    { index = "pytorch-cu129", extra = "sglang" },
-    { index = "pytorch-cu130", extra = "trtllm" },
-    { index = "pytorch-cu129", extra = "fsdp" },
-    { index = "pytorch-cu129", extra = "megatron" },
+    # cu130 fork — torch 2.11.0 wheels (matches Dockerfile.uv.cu130).
+    { index = "pytorch-cu130", extra = "vllm" },
+    { index = "pytorch-cu130", extra = "sglang" },
+    { index = "pytorch-cu130", extra = "fsdp" },
+    { index = "pytorch-cu130", extra = "megatron" },
+    # cu129 fork — torch 2.10.0 / 2.9.1 wheels (matches Dockerfile.uv.cu129).
+    { index = "pytorch-cu129", extra = "trtllm" },
     { index = "pytorch-cu129", extra = "veomni" },
     { index = "pytorch-cu129", extra = "nemoautomodel" },
     { index = "pytorch-cpu",   extra = "cpu" },
 ]
 torchvision = [
-    { index = "pytorch-cu129", extra = "vllm" },
-    { index = "pytorch-cu129", extra = "sglang" },
+    { index = "pytorch-cu130", extra = "vllm" },
+    { index = "pytorch-cu130", extra = "sglang" },
     # trtllm extra does not list torchvision (rollout doesn't need it)
-    { index = "pytorch-cu129", extra = "fsdp" },
-    { index = "pytorch-cu129", extra = "megatron" },
+    { index = "pytorch-cu130", extra = "fsdp" },
+    { index = "pytorch-cu130", extra = "megatron" },
     { index = "pytorch-cu129", extra = "veomni" },
     { index = "pytorch-cu129", extra = "nemoautomodel" },
     { index = "pytorch-cpu",   extra = "cpu" },
 ]
 torchaudio = [
-    { index = "pytorch-cu129", extra = "vllm" },
-    { index = "pytorch-cu129", extra = "sglang" },
-    { index = "pytorch-cu129", extra = "fsdp" },
-    { index = "pytorch-cu129", extra = "megatron" },
+    { index = "pytorch-cu130", extra = "vllm" },
+    { index = "pytorch-cu130", extra = "sglang" },
+    { index = "pytorch-cu130", extra = "fsdp" },
+    { index = "pytorch-cu130", extra = "megatron" },
     { index = "pytorch-cu129", extra = "veomni" },
     { index = "pytorch-cu129", extra = "nemoautomodel" },
     { index = "pytorch-cpu",   extra = "cpu" },
 ]
 
 [[tool.uv.index]]
-name = "pytorch-cu129"
-url = "https://download.pytorch.org/whl/cu129"
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
 [[tool.uv.index]]
-name = "pytorch-cu130"
-url = "https://download.pytorch.org/whl/cu130"
+name = "pytorch-cu129"
+url = "https://download.pytorch.org/whl/cu129"
 explicit = true
 
 [[tool.uv.index]]
