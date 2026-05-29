@@ -88,7 +88,7 @@ class CriticConfig(BaseConfig):
     ppo_infer_micro_batch_size_per_gpu: Optional[int] = None
     ppo_infer_max_token_len_per_gpu: int = 32768
     ppo_epochs: int = 1
-    data_loader_seed: int = 1
+    data_loader_seed: int = 42
     shuffle: bool = True
     cliprange_value: float = 0.5
     loss_agg_mode: str = "token-mean"
@@ -215,13 +215,6 @@ class FSDPCriticConfig(CriticConfig):
         # EngineConfig.strategy defaults to None, so without this, engine_workers.py always
         # falls back to FSDP1 even when critic.strategy="fsdp2".
         object.__setattr__(self.engine, "strategy", self.strategy)
-
-        if self.strategy in {"fsdp", "fsdp2"}:
-            if self.ulysses_sequence_parallel_size > 1:
-                if not self.model.get("use_remove_padding", False):
-                    raise ValueError(
-                        "When using sequence parallelism for critic, you must enable `use_remove_padding`."
-                    )
 
     def validate(self, n_gpus: int, train_batch_size: int):
         """Validate FSDP critic configuration with runtime parameters."""

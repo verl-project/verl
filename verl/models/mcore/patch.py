@@ -491,6 +491,23 @@ def apply_patch_megatron_v012_with_torch_v28_v29() -> None:
     FileSystemWriterAsync.write_preloaded_data = write_preloaded_data_patch
 
 
+def apply_mtp_inference_patch():
+    from megatron.core.models.gpt.gpt_model import GPTModel
+
+    _original_postprocess = GPTModel._postprocess
+
+    def _patched(self, *args, **kwargs):
+        original_mtp_num_layers = self.config.mtp_num_layers
+        if not self.config.mtp_num_layers:
+            self.config.mtp_num_layers = None
+        try:
+            return _original_postprocess(self, *args, **kwargs)
+        finally:
+            self.config.mtp_num_layers = original_mtp_num_layers
+
+    GPTModel._postprocess = _patched
+
+
 # When using checkpoint + MoE models (like Qwen3-30B-A3B and Qwen3-VL-30B-A3B),
 # input tensors and their grads will stay in gpu memory after forward_backward completes.
 # see https://github.com/NVIDIA/Megatron-LM/pull/3267
