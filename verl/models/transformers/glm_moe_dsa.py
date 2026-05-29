@@ -82,6 +82,9 @@ def glm_moe_dsa_attn_forward_with_dsa(
     # Always rebuild a float additive mask from position_ids.
     # The model's create_causal_mask may return a bool mask (incompatible with the DSA indexer
     # which expects float 0/-inf) or a local-sized mask (wrong when ulysses_sp_size > 1).
+    if position_ids is not None and position_ids.dim() == 1:
+        position_ids = position_ids.unsqueeze(0)
+
     if ulysses_sp_size > 1 and position_ids is not None:
         from verl.utils.ulysses import get_ulysses_sequence_parallel_group
 
