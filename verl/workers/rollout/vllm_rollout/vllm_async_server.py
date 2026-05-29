@@ -21,6 +21,7 @@ from pprint import pprint
 from typing import Any, Callable, Optional
 
 import ray
+import torch
 import vllm.entrypoints.cli.serve
 from packaging import version
 from ray.actor import ActorHandle
@@ -131,6 +132,7 @@ class vLLMHttpServer:
         # model weights version, set by ServerAdapter when update weights.
         self.global_steps = None
         self._logged_qwen_vl_dedup = False
+        self._rollout_logprob_debug_count = 0
 
         if self.rollout_mode != RolloutMode.HYBRID and self.config.load_format == "dummy":
             logger.warning(f"rollout mode is {self.rollout_mode}, load_format is dummy, set to auto")
@@ -493,15 +495,15 @@ class vLLMHttpServer:
         if not self._logged_qwen_vl_dedup:
             processor = self.model_config.processor
             image_processor = getattr(processor, "image_processor", None)
-            logger.info(
-                "Qwen VL prompt token dedup: vllm_version=%s processor=%s image_processor=%s "
-                "raw_prompt_len=%d dedup_prompt_len=%d removed=%d",
-                vllm.__version__,
-                processor.__class__.__name__ if processor is not None else None,
-                image_processor.__class__.__name__ if image_processor is not None else None,
-                raw_prompt_len,
-                len(prompt_ids),
-                raw_prompt_len - len(prompt_ids),
+            print(
+                "[RolloutCorrDebug][vllm_dedup] "
+                f"vllm_version={vllm.__version__} "
+                f"processor={processor.__class__.__name__ if processor is not None else None} "
+                f"image_processor={image_processor.__class__.__name__ if image_processor is not None else None} "
+                f"raw_prompt_len={raw_prompt_len} "
+                f"dedup_prompt_len={len(prompt_ids)} "
+                f"removed={raw_prompt_len - len(prompt_ids)}",
+                flush=True,
             )
             self._logged_qwen_vl_dedup = True
         multi_modal_data = {}
@@ -546,6 +548,30 @@ class vLLMHttpServer:
         log_probs = None
         if sampling_params.logprobs is not None:
             log_probs = [logprobs[token_ids[i]].logprob for i, logprobs in enumerate(final_res.outputs[0].logprobs)]
+            debug_limit = int(os.getenv("VERL_ROLLOUT_CORR_DEBUG_LIMIT", "5"))
+            if self._rollout_logprob_debug_count < debug_limit and log_probs:
+                log_probs_tensor = torch.tensor(log_probs, dtype=torch.float32)
+                preview = [
+                    {
+                        "token_id": int(token_ids[i]),
+                        "logprob": float(log_probs[i]),
+                    }
+                    for i in range(min(12, len(log_probs)))
+                ]
+                print(
+                    "[RolloutCorrDebug][vllm_logprobs] "
+                    f"request_id={request_id} "
+                    f"global_steps={self.global_steps} "
+                    f"raw_prompt_len={raw_prompt_len} "
+                    f"dedup_prompt_len={len(prompt_ids)} "
+                    f"response_len={len(token_ids)} "
+                    f"mean={log_probs_tensor.mean().item():.6f} "
+                    f"min={log_probs_tensor.min().item():.6f} "
+                    f"max={log_probs_tensor.max().item():.6f} "
+                    f"first_tokens={preview}",
+                    flush=True,
+                )
+                self._rollout_logprob_debug_count += 1
 
         routed_experts = None
         if self.config.enable_rollout_routing_replay:

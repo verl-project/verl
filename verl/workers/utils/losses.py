@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 
 import torch
 from tensordict import TensorDict
@@ -23,6 +24,93 @@ from verl.utils.metric import AggregationType, Metric
 from verl.utils.torch_functional import masked_mean, masked_sum
 from verl.workers.config import ActorConfig, CriticConfig
 from verl.workers.utils.padding import no_padding_2_padding
+
+_ROLLOUT_CORR_DEBUG_COUNT = 0
+
+
+def _debug_rollout_corr_logprob_alignment(
+    data: TensorDict,
+    log_prob: torch.Tensor,
+    old_log_prob: torch.Tensor,
+    response_mask: torch.Tensor,
+    loss_mode: str,
+) -> None:
+    global _ROLLOUT_CORR_DEBUG_COUNT
+
+    if loss_mode != "bypass_mode":
+        return
+    debug_limit = int(os.getenv("VERL_ROLLOUT_CORR_DEBUG_LIMIT", "5"))
+    if _ROLLOUT_CORR_DEBUG_COUNT >= debug_limit:
+        return
+    if "responses" not in data or not response_mask.any():
+        return
+
+    with torch.no_grad():
+        valid = response_mask.bool()
+        current_valid = log_prob[valid].detach().float().cpu()
+        rollout_valid = old_log_prob[valid].detach().float().cpu()
+        diff_valid = (rollout_valid - current_valid).float()
+        responses = data["responses"].detach().cpu()
+
+        seq_current = masked_mean(log_prob.detach().float(), response_mask, axis=-1).cpu()
+        seq_rollout = masked_mean(old_log_prob.detach().float(), response_mask, axis=-1).cpu()
+        seq_diff = seq_rollout - seq_current
+        top_k = min(5, seq_diff.numel())
+        top_values, top_indices = torch.topk(seq_diff, k=top_k) if top_k > 0 else ([], [])
+
+        rows = []
+        for row_idx in range(min(3, response_mask.shape[0])):
+            valid_cols = torch.nonzero(response_mask[row_idx].detach().cpu().bool(), as_tuple=False).flatten()
+            if valid_cols.numel() == 0:
+                continue
+            cols = valid_cols[:12]
+            rows.append(
+                {
+                    "row": int(row_idx),
+                    "valid_tokens": int(valid_cols.numel()),
+                    "seq_rollout_minus_current": float(seq_diff[row_idx].item()),
+                    "tokens": [
+                        {
+                            "pos": int(col.item()),
+                            "token_id": int(responses[row_idx, col].item()),
+                            "current_logprob": float(log_prob[row_idx, col].detach().float().cpu().item()),
+                            "rollout_logprob": float(old_log_prob[row_idx, col].detach().float().cpu().item()),
+                            "rollout_minus_current": float(
+                                (old_log_prob[row_idx, col] - log_prob[row_idx, col]).detach().float().cpu().item()
+                            ),
+                        }
+                        for col in cols
+                    ],
+                }
+            )
+
+        top_sequences = [
+            {
+                "row": int(idx.item()),
+                "seq_rollout_minus_current": float(val.item()),
+                "valid_tokens": int(response_mask[idx].sum().detach().cpu().item()),
+            }
+            for val, idx in zip(top_values, top_indices, strict=False)
+        ]
+
+        print(
+            "[RolloutCorrDebug][actor_logprob_alignment] "
+            f"shape={tuple(log_prob.shape)} "
+            f"valid_tokens={int(valid.sum().item())} "
+            f"current_mean={current_valid.mean().item():.6f} "
+            f"current_min={current_valid.min().item():.6f} "
+            f"current_max={current_valid.max().item():.6f} "
+            f"rollout_mean={rollout_valid.mean().item():.6f} "
+            f"rollout_min={rollout_valid.min().item():.6f} "
+            f"rollout_max={rollout_valid.max().item():.6f} "
+            f"diff_mean={diff_valid.mean().item():.6f} "
+            f"diff_min={diff_valid.min().item():.6f} "
+            f"diff_max={diff_valid.max().item():.6f} "
+            f"top_sequences={top_sequences} "
+            f"sample_rows={rows}",
+            flush=True,
+        )
+        _ROLLOUT_CORR_DEBUG_COUNT += 1
 
 
 def sft_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None):
@@ -91,6 +179,9 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         fields.append("rollout_is_weights")
     if "ref_log_prob" in data:
         fields.append("ref_log_prob")
+    loss_mode = config.policy_loss.get("loss_mode", "vanilla")
+    if loss_mode == "bypass_mode" and "responses" in data:
+        fields.append("responses")
     data = data.select(*fields).to_padded_tensor()
 
     response_mask = data["response_mask"].to(bool)
@@ -103,8 +194,7 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
 
     loss_agg_mode = config.loss_agg_mode
 
-    loss_mode = config.policy_loss.get("loss_mode", "vanilla")
-
+    _debug_rollout_corr_logprob_alignment(data, log_prob, old_log_prob, response_mask, loss_mode)
     policy_loss_fn = get_policy_loss_fn(loss_mode)
     pg_loss, pg_metrics = policy_loss_fn(
         old_log_prob=old_log_prob,
