@@ -130,6 +130,7 @@ class vLLMHttpServer:
         self.nnodes = nnodes
         # model weights version, set by ServerAdapter when update weights.
         self.global_steps = None
+        self._logged_qwen_vl_dedup = False
 
         if self.rollout_mode != RolloutMode.HYBRID and self.config.load_format == "dummy":
             logger.warning(f"rollout mode is {self.rollout_mode}, load_format is dummy, set to auto")
@@ -487,7 +488,22 @@ class vLLMHttpServer:
         sampling_params["logprobs"] = 0 if sampling_params.pop("logprobs", False) else None
         sampling_params.setdefault("repetition_penalty", self.config.get("repetition_penalty", 1.0))
         sampling_params = SamplingParams(max_tokens=max_tokens, **sampling_params)
+        raw_prompt_len = len(prompt_ids)
         prompt_ids = qwen2_5_vl_dedup_image_tokens(prompt_ids, self.model_config.processor)
+        if not self._logged_qwen_vl_dedup:
+            processor = self.model_config.processor
+            image_processor = getattr(processor, "image_processor", None)
+            logger.info(
+                "Qwen VL prompt token dedup: vllm_version=%s processor=%s image_processor=%s "
+                "raw_prompt_len=%d dedup_prompt_len=%d removed=%d",
+                vllm.__version__,
+                processor.__class__.__name__ if processor is not None else None,
+                image_processor.__class__.__name__ if image_processor is not None else None,
+                raw_prompt_len,
+                len(prompt_ids),
+                raw_prompt_len - len(prompt_ids),
+            )
+            self._logged_qwen_vl_dedup = True
         multi_modal_data = {}
         if image_data is not None:
             multi_modal_data["image"] = image_data
