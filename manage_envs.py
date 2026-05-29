@@ -17,24 +17,30 @@
 Everything that controls *what* gets installed lives in ``pyproject.toml``
 and ``uv.lock``:
 
-* ``[project.optional-dependencies]`` declares one extra per backend (vllm,
-  sglang, megatron, fsdp, cpu, ...).
-* ``[tool.uv].conflicts`` marks the backends as mutually exclusive so
-  ``uv lock`` resolves each as an independent fork in a single lockfile.
-* ``[tool.uv].override-dependencies`` pins ``transformers`` and (per-extra)
-  the matching ``nvidia-cudnn-cu{12,13}`` / ``nvidia-nccl-cu{12,13}`` wheels
-  so they line up with the apt deb versions in
-  ``docker/Dockerfile.uv.cu{129,130}``. cu13 backends are vllm / sglang /
+* ``[dependency-groups]`` declares one PEP 735 group per backend (vllm,
+  sglang, megatron, fsdp, cpu, ...). Groups (not extras) are used so that
+  ``uv sync --no-default-groups --group <name>`` installs ONLY that group's
+  closure and never another backend's git sources / cu wheels at install
+  time. The legacy ``[project.optional-dependencies]`` block still carries
+  thin shadows (``vllm``, ``sglang``, ``trtllm``) so ``pip install
+  verl[<name>]`` keeps working — those don't pin torch / cuDNN.
+* ``[tool.uv].conflicts`` marks the backend groups as mutually exclusive
+  so ``uv lock`` resolves each as an independent fork in a single lockfile.
+* cuDNN / NCCL wheel pins are inlined into each backend group (cu13 vs
+  cu12 lines up with the apt deb versions in
+  ``docker/Dockerfile.uv.cu{129,130}``). PEP 508 markers don't have a
+  ``group ==`` operator, so the previous conditional override-dependencies
+  approach was replaced by inline pins. cu13 backends are vllm / sglang /
   fsdp / megatron; cu12.9 backends are trtllm / veomni / nemoautomodel.
 * ``[tool.uv].sources`` / ``[tool.uv].index`` route git packages and PyTorch
-  wheels.
+  wheels per-group.
 * ``uv.lock`` is committed and is the single source of truth for resolved
   versions across every backend.
 
 This script is a thin convenience wrapper around::
 
     UV_PROJECT_ENVIRONMENT=.venvs/.venv-<backend> \\
-        uv sync --frozen --extra <backend> \\
+        uv sync --frozen --no-default-groups --group <backend> \\
                 --python <python-version> \\
                 --link-mode=copy
 
@@ -43,9 +49,13 @@ so that:
   * each backend gets a separate venv under ``.venvs/.venv-<backend>``,
   * ``--frozen`` keeps every install reproducible from ``uv.lock`` (no
     silent re-resolves),
-  * recommended build-time env vars are set for backends that compile
-    native extensions from source (``MAX_JOBS`` / ``NVTE_FRAMEWORK`` /
-    ``FLASH_ATTENTION_FORCE_BUILD``).
+  * ``--no-default-groups --group <backend>`` is what guarantees
+    ``sync vllm`` only installs the vllm group's slice of the lockfile —
+    no megatron / apex / TE / etc. ever appear in the venv,
+  * recommended build-time env vars are set for the one backend that
+    compiles native extensions from source — ``megatron``, which builds
+    apex + TransformerEngine (``MAX_JOBS`` / ``NVTE_FRAMEWORK`` /
+    ``NVTE_BUILD_THREADS_PER_JOB``).
 
 Usage::
 
@@ -167,29 +177,21 @@ PYTHON_VERSION: dict[str, str] = {
 # remember them.
 #
 # MAX_JOBS=32 is conservative on purpose. The reference Dockerfiles use
-# different values per package (256 for apex/TE, 32 for flash-attn) because
-# flash-attn's CUDA compile units are massive — high parallelism OOMs all but
-# the beefiest CI hosts. We pick the floor (32) so the build succeeds
-# everywhere; bump it via `MAX_JOBS=128 python manage_envs.py sync megatron`
-# on hosts with plenty of RAM if you want apex/TE to compile faster.
-#
-# Every CUDA-13 / torch-2.11 backend that lists `flash-attn==2.8.3` source-builds
-# it (no precompiled cu13 wheel on PyPI yet); FLASH_ATTENTION_FORCE_BUILD=TRUE
-# mirrors Dockerfile.stable.{vllm,sglang}.
-_FLASH_ATTN_BUILD_ENV: dict[str, str] = {
-    "MAX_JOBS": "32",
-    "FLASH_ATTENTION_FORCE_BUILD": "TRUE",
-}
+# 256 for apex / TransformerEngine on big build hosts; we pick 32 as the
+# floor that succeeds everywhere. Bump it via `MAX_JOBS=128 python
+# manage_envs.py sync megatron` on hosts with plenty of RAM if you want
+# apex / TE to compile faster. Only `megatron` source-builds today (apex
+# + TE v2.15); every other backend installs only prebuilt wheels (flash-attn
+# 2.8.3 from mjun0812/flash-attention-prebuild-wheels, torch / vllm /
+# sglang / trtllm from PyPI / pytorch indexes).
 BUILD_ENV: dict[str, dict[str, str]] = {
-    "fsdp": {**_FLASH_ATTN_BUILD_ENV},
     "megatron": {
-        **_FLASH_ATTN_BUILD_ENV,
+        "MAX_JOBS": "32",
         "NVTE_FRAMEWORK": "pytorch",
         "NVTE_BUILD_THREADS_PER_JOB": "4",
     },
-    "veomni": {**_FLASH_ATTN_BUILD_ENV},
-    "nemoautomodel": {**_FLASH_ATTN_BUILD_ENV},
-    # vllm / sglang / trtllm install pre-built wheels and don't need build env.
+    # fsdp / veomni / nemoautomodel / vllm / sglang / trtllm install only
+    # prebuilt wheels and don't need build env.
 }
 
 GROUPS: dict[str, list[str]] = {
@@ -240,20 +242,26 @@ def _run(cmd: list[str], env_overrides: dict[str, str] | None = None) -> int:
 
 
 def cmd_sync(args: argparse.Namespace) -> int:
-    """Create or refresh per-backend venvs via ``uv sync --frozen --extra``.
+    """Create or refresh per-backend venvs via ``uv sync --frozen
+    --no-default-groups --group <backend>``.
 
-    Each backend resolves to its own fork in ``uv.lock`` (declared via
-    ``[tool.uv].conflicts``), so ``uv sync --extra <backend>`` installs only
-    that fork into the venv at ``UV_PROJECT_ENVIRONMENT``. ``--frozen``
-    rejects any drift between ``pyproject.toml`` and ``uv.lock`` — bumping
-    a pin requires re-running ``uv lock``.
+    Each backend is a PEP 735 group declared in ``[dependency-groups]`` and
+    marked mutually exclusive in ``[tool.uv].conflicts``. With
+    ``--no-default-groups``, only the requested group's slice of
+    ``uv.lock`` is installed — no other backend's git sources or cu wheels
+    are touched. ``--frozen`` rejects any drift between ``pyproject.toml``
+    and ``uv.lock``; bumping a pin requires re-running ``uv lock``.
 
     If ``uv.lock`` is missing (fresh checkout, or you just bumped a pin
     locally), ``--frozen`` is dropped from the first sync so ``uv`` can
-    generate the lockfile as a side effect. Subsequent backends in the same
-    invocation, and all subsequent invocations, find the lockfile and use
-    ``--frozen`` automatically. Commit the produced ``uv.lock`` alongside
-    your ``pyproject.toml`` change to keep installs reproducible.
+    generate the lockfile as a side effect. The lock step still resolves
+    every group's fork (uv.lock is global), but with the
+    ``[[tool.uv.dependency-metadata]]`` table covering all git-source
+    packages, that lock is metadata-only — no source builds run during
+    lock. Subsequent backends in the same invocation, and all subsequent
+    invocations, find the lockfile and use ``--frozen`` automatically.
+    Commit the produced ``uv.lock`` alongside your ``pyproject.toml``
+    change to keep installs reproducible.
     """
     backends = _expand(args.backends)
     _require_uv()
@@ -277,7 +285,12 @@ def cmd_sync(args: argparse.Namespace) -> int:
             "uv",
             "sync",
             *frozen_args,
-            "--extra",
+            # `--no-default-groups --group X` is what makes `sync vllm`
+            # install only the vllm slice. Without --no-default-groups, uv
+            # would also activate any group named in [tool.uv].default-groups
+            # (we set it to [] in pyproject so this is doubly safe).
+            "--no-default-groups",
+            "--group",
             backend,
             "--python",
             PYTHON_VERSION[backend],
