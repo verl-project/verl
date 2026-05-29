@@ -17,7 +17,7 @@ Last updated: 03/03/2026.
 
 ##### 参数特性支持
 
-| vllm参数| verl对应通用参数 | 简介|
+| vllm参数| verl对应通用参数 | 简介 |
 | --- | --- | --- |
 | `model_path` | `actor_rollout_ref.model.path` |模型权重文件的路径|
 | `gpu_memory_utilization` | `actor_rollout_ref.rollout.gpu_memory_utilization` |用于控制每个阶段可使用的 GPU 内存量。它被指定为一个介于 0.0 和 1.0 之间的分数，其中：- 0.8 表示 GPU 总内存的 80%- 1.0 表示 GPU 总内存的 100%（不推荐，没有预留缓冲）|
@@ -38,12 +38,11 @@ Last updated: 03/03/2026.
 | `skip_tokenizer_init`| `actor_rollout_ref.rollout.skip_tokenizer_init` |跳过初始化分词器并将 input_ids 传递到推理请求中|
 | `enable_prefix_caching` | `actor_rollout_ref.rollout.enable_prefix_caching`|`用于启用自动前缀缓存` |
 | `quantization`| `actor_rollout_ref.rollout.quantization，默认为None`|`量化方法`|
-| `enforce_eager`|`actor_rollout_ref.rollout.enforce_eager`|标志用于强制使用PyTorch的eager执行模式，而非默认的图执行模式|
 
 ### 2. sglang:
 
 对于sglang推理后端，昇腾通过直接向sglang社区进行持续建设与维护来支持相关功能。
-此外在verl中使用sglang还涉及以下组件, 我们在[quick start](https://github.com/verl-project/verl/blob/main/docs/ascend_tutorial/quick_start/ascend_sglang_quick_start.rst)中提供详细说明与一键安装脚本。
+此外在verl中使用sglang还涉及以下组件
 
 | 组件| 描述|
 | --- | --- |
@@ -53,7 +52,7 @@ Last updated: 03/03/2026.
 ##### 参数特性支持
 
 verl中通过rollout config管理推理后端参数使能，包含通用参数和engine_kwargs自定义传参。
-以下列举在verl中常见设置的sglang特性参数，更多参数介绍请参考 [sglang社区NPU特性支持](https://docs.sglang.io/platforms/ascend_npu_support_features.html)
+以下列举在verl中常见设置的sglang特性参数，更多参数介绍请参考 [sglang社区NPU特性支持](https://docs.sglang.io/docs/hardware-platforms/ascend-npus/ascend_npu_support_features)
 
 | sglang参数| verl对应通用参数 | 简介|
 | --- | --- | --- |
@@ -122,7 +121,7 @@ Megatron 是 NVIDIA 推出的一个专注于模型并行的训练框架仓库。
 
 MindSpeed 底层的替换原理采用了 Monkey Patch 技术
 
-* MindSpeed Moneky Patch框架
+* MindSpeed 'Monkey Patch框架
 
 在verl里面通过`from mindspeed.megatron_adaptor import repatch  `触发patch，调用栈如下：
 
@@ -195,7 +194,7 @@ class MindSpeedFeature:
     def pre_validate_args(self, args: Namespace):
         """Validate the arguments of mindspeed before megatron args validation
         and store some arguments of the mindspeed temporarily,
-        incase that megatron validate faile.
+        in case that megatron validate fails.
         for example:
             ```python
             origin_context_parallel_size = args.context_parallel_size
@@ -255,10 +254,10 @@ class MindSpeedFeature:
 | `actor_rollout_ref.actor.megatron.pipeline_model_parallel_size`  |流水并行大小，默认值为1|
 | `actor_rollout_ref.actor.megatron.expert_model_parallel_size` | 专家并行大小，默认值为1|
 | `actor_rollout_ref.actor.megatron.expert_tensor_parallel_size`|TP拓展EP大小，默认值为null|
-| `actor_rollout_ref.actor.context_parallel_size`|序列并行大小，默认值为False|
+| `actor_rollout_ref.actor.context_parallel_size`|序列并行大小，默认值为1|
 | `actor_rollout_ref.actor.megatron.override_transformer_config.deallocate_pipeline_outputs`|张量在发送到下一个pp stage后,输出数据被释放，降低显存峰值，默认值为False|
 | `actor_rollout_ref.actor.megatron.override_transformer_config.persist_layer_norm` |是否使用持久化 LayerNorm，默认值为False|
-| `actor_rollout_ref.actor.megatron.override_transformer_config.moe_grouped_gemm` |是否使用持Group GEMM，默认值为False|
+| `actor_rollout_ref.actor.megatron.override_transformer_config.moe_grouped_gemm` |是否使用Group GEMM，默认值为False|
 | `actor_rollout_ref.actor.megatron.override_transformer_config.moe_router_dtype` |用于路由和专家输出加权平均的数据类型。使用 fp32 或 fp64 可以提高稳定性，尤其是在专家数量较多时，默认值为fp32|
 | `actor_rollout_ref.actor.megatron.override_transformer_config.account_for_loss_in_pipeline_split` |如果设置为 True，在流水线并行的划分和放置策略中，loss 层会被视为一个标准的 Transformer 层来处理。默认为False。|
 | `actor_rollout_ref.actor.megatron.override_transformer_config.account_for_embedding_in_pipeline_split` |如果设置为 True，在流水线并行的划分和放置策略中，输入embedding 层会被视为一个标准的 Transformer 层来处理。默认为False。|
@@ -267,7 +266,7 @@ class MindSpeedFeature:
 | `actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers` |该参数需将recompute_granularity设置为'full'才生效，默认为None。若recompute_method设置为uniform，该参数含义为每个均匀划分的重新计算单元的transformer layers数量。例如你可以指定为--recompute_granularity full --recompute_method uniform --recompute_num_layers 4。recompute_num_layers越大，显存占用越小，计算成本越大。注意：当前进程中的模型层数需能被recompute_num_layers整除。默认为None。|
 | `actor_rollout_ref.actor.megatron.use_dist_checkpointing` |是否使用分布式权重，默认值为False|
 | `actor_rollout_ref.actor.megatron.dist_checkpointing_path` |分布式权重路径，默认值为null|
-| `actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn` |是否使用fa，默认值为true|
+| `actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn` |是否使用Flash Attention，默认值为true|
 | `actor_rollout_ref.actor.megatron.override_transformer_config.use_fused_rotary_pos_emb` |是否使用融合旋转位置编码，默认值为False|
 | `actor_rollout_ref.actor.megatron.override_transformer_config.use_fused_swiglu` |是否使用融合swiglu，默认值为False|
 | `actor_rollout_ref.actor.megatron.override_transformer_config.num_layers_in_first_pipeline_stage` |第一个pipeline stage 的层数，默认值为none|

@@ -16,7 +16,7 @@ DAPO的论文可以参考：[DAPO](https://arxiv.org/pdf/2503.14476)，其中包
 - **奖励模型的管理策略为 DAPO**
   在dapo算法中，必须配置成dapo。
 
-```
+``
 reward_model.reward_manager.name=dapo
 ```
 
@@ -98,8 +98,7 @@ python ./examples/data_preprocess/geo3k.py --local_dir=./data/geo3k
 
 ### 权重下载
 
-从Hugging Face库下载对应的模型权重：[Qwen3-VL-30B-A3B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-30B-A3B-Instruct/tree/main
-)
+从Hugging Face库下载对应的模型权重：[Qwen3-VL-30B-A3B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-30B-A3B-Instruct/tree/main)
 
 ### jemalloc安装
 
