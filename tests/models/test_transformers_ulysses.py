@@ -118,8 +118,12 @@ def test_hf_casual_fwd_bwd(test_config):
     context = contextlib.nullcontext() if test_config.is_valid else pytest.raises(AssertionError)
     with context:
         world_size = torch.distributed.get_world_size()
-        _hf_casual_fwd_bwd(test_config.config, test_config.sp_size, world_size // test_config.sp_size,
-                           attn_implementation=test_config.attn_implementation)
+        _hf_casual_fwd_bwd(
+            test_config.config,
+            test_config.sp_size,
+            world_size // test_config.sp_size,
+            attn_implementation=test_config.attn_implementation,
+        )
 
     # TODO: seems not work, will cause `socketStartConnect: Connect to xxx failed : Software caused connection abort`
     # torch.distributed.destroy_process_group()
