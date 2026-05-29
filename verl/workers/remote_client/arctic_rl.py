@@ -1,4 +1,3 @@
-import asyncio
 import os
 from typing import Any
 
@@ -95,13 +94,13 @@ class ArcticRLClientWrapper(RemoteBackend):
     it via ``config.trainer.remote_backend = "arctic"``.
     """
 
-    # Key under `main_config.remote_backend.<name>` where this adapter's
-    # config lives. Matches the registered backend name above.
-    _BACKEND_CONFIG_KEY = "arctic"
-
     def __init__(self, config, reconnect_job_config: dict = None, rl_server_state: ArcticRLRayServerState = None):
         self.config = config
-        self._backend_config = config.remote_backend[self._BACKEND_CONFIG_KEY]
+        # Per @sfc-gh-truwase (PR #4): the per-backend yaml
+        # (`trainer/config/remote_backend/arctic.yaml`) is loaded into
+        # `config.remote_backend` as a flat block — the file name already
+        # names the backend, so no extra `arctic:` nesting is needed.
+        self._backend_config = config.remote_backend
         self._client = None
         self.use_zorro = self._backend_config.use_zorro
         self.use_liger = self.config.actor_rollout_ref.model.use_liger
@@ -159,7 +158,7 @@ class ArcticRLClientWrapper(RemoteBackend):
         return True
 
     # ------------------------------------------------------------------ #
-    # Core RL ops — called by `RemoteBackendActorRolloutRefWorker`
+    # Core RL ops — called by `ArcticRLActorRolloutRefWorker`
     # ------------------------------------------------------------------ #
     # Build Arctic's payload shape (dense padded batch, ``meta`` dict,
     # ``processing`` pipeline) and dispatch through the private
@@ -422,16 +421,13 @@ class ArcticRLClientWrapper(RemoteBackend):
 
     async def _send_compute_ref_log_prob(self, payload: dict):
         payload["processing"] = {"post": ["compute_entropy_and_logprobs"], "loss_fn": None}
-        # Offload the blocking RPC to a worker thread so the forwarder's
-        # asyncio loop (and the Ray actor that owns it) stays responsive
-        # to concurrent calls.
-        response = await asyncio.to_thread(self._client.fwd_no_grad, payload, reference_model=True)
+        response = await self._client.fwd_no_grad(payload, reference_model=True)
         response["batch"]["log_probs"] = response["batch"].pop("logprobs")
         return response
 
     async def _send_compute_log_prob(self, payload: dict):
         payload["processing"] = {"post": ["compute_entropy_and_logprobs"], "loss_fn": None}
-        response = await asyncio.to_thread(self._client.fwd_no_grad, payload, reference_model=False)
+        response = await self._client.fwd_no_grad(payload, reference_model=False)
         response["batch"]["log_probs"] = response["batch"].pop("logprobs")
         return response
 
@@ -455,8 +451,8 @@ class ArcticRLClientWrapper(RemoteBackend):
                 payload["batch"][name] = _left_pad(payload["batch"][name], seq_len)
         payload["batch"]["loss_mask"] = payload["batch"]["response_mask"]
 
-        fwd_bwd_response = await asyncio.to_thread(self._client.fwd_bwd, payload)
-        step_response = await asyncio.to_thread(self._client.step)
+        fwd_bwd_response = await self._client.fwd_bwd(payload)
+        step_response = await self._client.step()
         step_response["metrics"].update(**fwd_bwd_response["metrics"])
         return step_response
 

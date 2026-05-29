@@ -1,14 +1,17 @@
-"""Backend-agnostic forwarder worker.
+"""Arctic-RL forwarder worker.
 
+Per-backend worker that drives the Arctic adapter
+(:class:`verl.workers.remote_client.arctic_rl.ArcticRLClientWrapper`).
 Owns single-controller dispatch annotations, FlopsCounter / MFU, and
-metric aggregation. Every payload encoding decision (loss, wire format,
-parallelism) lives behind ``RemoteBackend.compute_log_prob`` and
-``RemoteBackend.update_actor`` — the worker stays backend-agnostic.
+metric aggregation. Payload encoding (loss, wire format, parallelism)
+lives on the adapter's ``compute_log_prob`` / ``update_actor`` — those
+are Arctic-specific concrete methods, intentionally not on the
+:class:`verl.remote_backend.RemoteBackend` ABC (which only enforces
+lifecycle + checkpoint + weight-sync).
 
 Generic tensor / metric helpers live in
-:mod:`verl.remote_backend.worker_utils` so backends and other modules can
-import them without pulling in the Worker class or its dispatch
-decorators.
+:mod:`verl.remote_backend.worker_utils` so other per-backend worker
+modules can reuse them without pulling in this class or its decorators.
 """
 
 from __future__ import annotations
@@ -21,6 +24,13 @@ from omegaconf import DictConfig
 from tensordict import TensorDict
 
 from verl.remote_backend.base import RemoteBackend, RemoteBackendRegistry
+
+# Eager import so the adapter registers with `RemoteBackendRegistry` in
+# every process that loads this worker — including Ray child procs, which
+# do not inherit the driver's import side-effects. The driver also
+# imports this adapter explicitly (see `verl.trainer.main_ppo`).
+from verl.workers.remote_client import arctic_rl  # noqa: F401
+
 from verl.remote_backend.worker_utils import make_njt, normalize_backend_metrics
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import (
@@ -38,11 +48,25 @@ from verl.workers.config import ActorConfig, HFModelConfig
 
 
 # ---------------------------------------------------------------------- #
-# Generic forwarder worker
+# Arctic-RL forwarder worker
 # ---------------------------------------------------------------------- #
 
-class RemoteBackendActorRolloutRefWorker(Worker, DistProfilerExtension):
-    """CPU-only forwarder; assumes ``data["input_ids"]`` is nested-jagged."""
+class ArcticRLActorRolloutRefWorker(Worker, DistProfilerExtension):
+    """CPU-only forwarder for the Arctic backend.
+
+    Assumes ``data["input_ids"]`` is nested-jagged.
+
+    NOTE: per @zw0610's review on verl-project/verl#6422, the long-term
+    direction is to inherit from
+    :class:`verl.workers.engine_workers.ActorRolloutRefWorker` and only
+    override ``init_model`` + the compute/update methods so we don't
+    drift from the canonical worker. That requires decoupling
+    ``ActorRolloutRefWorker.__init__`` from megatron-specific config
+    fields (e.g. ``config.actor.megatron.router_replay``) which the
+    Arctic config tree doesn't carry. Left as a follow-up; the current
+    class parents (``Worker``, ``DistProfilerExtension``) match the
+    minimum required by the dispatch decorators below.
+    """
 
     def __init__(self, config: DictConfig, role: str, **kwargs):
         Worker.__init__(self)
@@ -58,14 +82,17 @@ class RemoteBackendActorRolloutRefWorker(Worker, DistProfilerExtension):
         backend_name = self.main_config.trainer.get("remote_backend")
         if backend_name is None:
             raise ValueError(
-                "RemoteBackendActorRolloutRefWorker requires "
+                "ArcticRLActorRolloutRefWorker requires "
                 "main_config.trainer.remote_backend to be set."
             )
 
-        # `RemoteBackendRegistry.get` lazy-imports the adapter module
-        # (Ray child procs don't inherit the driver's import side-effects).
-        # `from_config(handle=...)` is the sole public constructor; the
-        # handle is what makes this a re-attach rather than a fresh init.
+        # Registry has no lazy `MODULES` table any more (per @zw0610): the
+        # adapter module is imported explicitly by `main_ppo.py` when the
+        # corresponding backend is selected, which decorates the class
+        # with `@RemoteBackendRegistry.register(...)`. Here we only look
+        # it up. `from_config(handle=...)` is the sole public constructor;
+        # the handle is what makes this a re-attach rather than a fresh
+        # init.
         backend_cls = RemoteBackendRegistry.get(backend_name)
         self.backend: RemoteBackend = backend_cls.from_config(
             self.main_config, handle=backend_handle

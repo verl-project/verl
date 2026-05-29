@@ -1,0 +1,49 @@
+# Format checks enforced on CI:
+# 1. Comments must appear above each field.
+# 2. There must be a blank line between each field.
+# 3. Inline comments (after a field on the same line) are not allowed.
+# 4. Indentation level is respected for nested fields.
+
+# Per-backend block loaded into `config.remote_backend` via Hydra
+# defaults (`+remote_backend@remote_backend=arctic`). Companion adapter:
+# `verl.workers.remote_client.arctic_rl.ArcticRLClientWrapper`.
+# Selected at runtime by `trainer.remote_backend=arctic`. Per
+# @sfc-gh-truwase (PR #4): kept flat — the file name (`arctic.yaml`)
+# already names the backend, so no extra top-level `arctic:` nesting.
+
+# whether to use colocate mode
+colocate: True
+
+# number of GPUs allocated to the training engine
+training_gpus: 1
+
+# number of GPUs allocated to the sampling/inference engine
+sampling_gpus: 1
+
+# number of GPUs allocated to the log-prob engine; 0 means colocated with training
+log_prob_gpus: 1
+
+# tensor-parallel size for the sampling engine
+sampling_tp_size: 1
+
+# whether to use zorro packing for off-policy log-probs
+use_zorro: False
+
+# ray or http: ray would be much faster for payload comms in the on-prem use case
+comm_protocol: ray
+
+# DeepSpeed ZeRO-style sharding for the training engine
+zero_optimization:
+
+  # 2 for optim + grad sharding; 3 also shards weights
+  stage: 0
+
+  offload_optimizer:
+
+    # `none` keeps the optimizer state on GPU; `cpu` offloads it
+    device: none
+
+  offload_param:
+
+    # `none` keeps params on GPU; `cpu` offloads them
+    device: none

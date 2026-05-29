@@ -8,19 +8,24 @@ RPC the backend prefers).
 
 Pieces:
 
-* :class:`RemoteBackend` (``base.py``) — the all-abstract contract
-  every backend implements.
-* :class:`RemoteBackendRegistry` (``base.py``) — name → class lookup so
-  ``trainer.remote_backend="<name>"`` resolves to a concrete adapter.
-* :class:`RemoteBackendTrainer` (``trainer.py``) — `RayPPOTrainer` subclass
-  that creates the backend on the driver and threads its reconnect handle
-  to every worker.
-* :class:`RemoteBackendActorRolloutRefWorker` (``worker.py``) — the
-  backend-agnostic CPU forwarder.
-* ``worker_utils.py`` — small generic tensor / metric helpers shared by
-  the forwarder and backend adapters.
+* :class:`RemoteBackend` (``base.py``) — minimal ABC: lifecycle
+  (``from_config`` / ``reconnect_handle`` / ``destroy``) + weight sync
+  + checkpoint + a single-forwarder parallelism flag. Compute/update
+  op signatures intentionally live on the per-backend adapter, not
+  here.
+* :class:`RemoteBackendRegistry` (``base.py``) — name → class lookup
+  populated by explicit adapter imports (no lazy MODULES table).
+* :class:`RemoteBackendTrainer` (``trainer.py``) — `RayPPOTrainer`
+  subclass that creates the backend on the driver and threads its
+  reconnect handle to every worker.
+* ``workers/<backend_name>/`` — per-backend forwarder worker (Arctic
+  ships as ``workers/arctic_rl/`` -> :class:`ArcticRLActorRolloutRefWorker`).
+* ``worker_utils.py`` — small generic tensor / metric helpers shared
+  across per-backend workers.
 
-See :mod:`verl.trainer.ppo.arctic_rl_client` for a reference adapter.
+Adapter modules (the concrete :class:`RemoteBackend` implementations)
+live under :mod:`verl.workers.remote_client`. See
+:mod:`verl.workers.remote_client.arctic_rl` for a reference adapter.
 """
 
 from verl.remote_backend.base import RemoteBackend, RemoteBackendRegistry

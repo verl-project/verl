@@ -1,22 +1,27 @@
 """`RemoteBackend` ABC + `RemoteBackendRegistry`.
 
-The ABC is intentionally minimal: every method is abstract, so each
-backend declares its own implementation explicitly. There are no
-default behaviours to silently inherit.
+The ABC is intentionally minimal — it only enforces the *lifecycle*
+contract that verl's trainer side needs to know about. Compute/update
+op signatures (``compute_log_prob``, ``update_actor``, ``generate``)
+intentionally live on the concrete per-backend adapter and its
+matching per-backend worker, not on the ABC, so different backends can
+shape those calls however suits them (one backend for training and
+another for sampling, different payload schemas, etc.) without growing
+this base class.
 
-What the abstraction is responsible for (what verl drives):
+What the ABC owns (what verl drives):
 
 * Lifecycle: ``from_config`` (sole constructor, takes an optional
   ``handle=`` for re-attach) / ``reconnect_handle`` / ``destroy``.
-* Core RL ops: ``compute_log_prob`` / ``update_actor`` /
-  ``generate`` / ``update_weights`` / ``save_checkpoint``.
+* Weight sync + checkpoint: ``update_weights`` / ``save_checkpoint``
+  (called from ``ONE_TO_ALL`` worker hooks).
 * Parallelism contract: ``requires_single_forwarder`` (read by
   :class:`verl.remote_backend.trainer.RemoteBackendTrainer` to decide
   whether to assert ``n_gpus_per_node × nnodes == 1``).
 
-What the abstraction is NOT responsible for: payload schemas, wire
-formats, loss-function plumbing — those live entirely inside each
-backend.
+What the ABC does NOT own: payload schemas, wire formats, loss-function
+plumbing, compute/update method signatures — those live entirely on the
+concrete backend + its per-backend worker.
 """
 
 from __future__ import annotations
@@ -24,7 +29,6 @@ from __future__ import annotations
 import abc
 from typing import Any, Callable
 
-import torch
 from omegaconf import DictConfig
 
 
@@ -83,68 +87,8 @@ class RemoteBackend(abc.ABC):
         """
 
     # ------------------------------------------------------------------ #
-    # Core RL operations called by `RemoteBackendActorRolloutRefWorker`
+    # Weight sync + checkpoint (called from ONE_TO_ALL worker hooks).
     # ------------------------------------------------------------------ #
-    # Inputs are verl `TensorDict`s; outputs are plain Python dicts that
-    # the worker wraps / augments with FlopsCounter MFU before returning a
-    # `TensorDict` to the trainer. Backends pick their own wire format
-    # below this layer.
-
-    @abc.abstractmethod
-    async def compute_log_prob(
-        self,
-        data,
-        *,
-        ref: bool,
-        calculate_entropy: bool,
-        rollout_n: int,
-        temperature,
-        pad_token_id: int,
-    ) -> dict[str, Any]:
-        """Forward-only pass; either the actor (``ref=False``) or the
-        reference model (``ref=True``).
-
-        ``async`` so the underlying RPC (typically a Ray actor call) can be
-        awaited without blocking the forwarder's event loop.
-
-        Returns:
-            ``{"model_output": {"log_probs": Tensor,
-            "entropy": Tensor?}, "metrics": dict}``. The generic worker
-            reconstructs nested-jagged tensors from
-            ``model_output["log_probs"]`` / ``["entropy"]`` and attaches
-            MFU.
-        """
-
-    @abc.abstractmethod
-    async def update_actor(
-        self,
-        data,
-        *,
-        actor_config,
-        pad_token_id: int,
-        rollout_n: int,
-        temperature,
-    ) -> dict[str, Any]:
-        """Forward-backward + optimizer step on a global batch.
-
-        ``async`` so the underlying RPC (typically a Ray actor call) can be
-        awaited without blocking the forwarder's event loop.
-
-        Returns:
-            ``{"loss": float|list[float], "metrics": dict,
-            "global_token_num": list[int]}``. ``metrics["loss"]`` may
-            also be present; the generic worker computes MFU from
-            ``global_token_num`` and aggregates metrics.
-        """
-
-    @abc.abstractmethod
-    async def generate(
-        self,
-        prompt_ids: torch.Tensor,
-        sampling_params: dict[str, Any],
-    ) -> list:
-        """Sample a rollout. Called from the rollout server that owns
-        this backend (e.g. ``ArcticLLMEngine``)."""
 
     @abc.abstractmethod
     async def update_weights(self) -> dict[str, Any]:
@@ -172,9 +116,8 @@ class RemoteBackend(abc.ABC):
         With more than one forwarder worker, ``ONE_TO_ALL`` calls
         (``save_checkpoint``, ``update_weights``, ``to``, ``set_loss_fn``)
         get duplicated against the single backend, and mesh-dispatched
-        calls (``compute_log_prob``, ``update_actor``) fragment the
-        global batch across forwarders that each forward the whole
-        batch downstream.
+        compute/update calls fragment the global batch across forwarders
+        that each forward the whole batch downstream.
 
         Returning ``True`` enables the assert; returning ``False`` opts
         out (the backend takes responsibility for validating its own
@@ -185,27 +128,23 @@ class RemoteBackend(abc.ABC):
 class RemoteBackendRegistry:
     """Process-wide registry of name → :class:`RemoteBackend` class.
 
-    Backends register themselves at import time::
+    Registration is explicit and happens when the user (or their entry
+    script) imports the adapter module they want to use::
 
-        @RemoteBackendRegistry.register("arctic")
-        class ArcticBackend(RemoteBackend): ...
+        # in main_ppo.py, conditioned on `trainer.remote_backend == "arctic"`:
+        from verl.workers.remote_client import arctic_rl  # noqa: F401
 
-    Callers don't need to know which module to import for a given
-    backend name — :meth:`create` and :meth:`get` lazy-import the
-    adapter module listed in :attr:`MODULES`. To plug in a new
-    backend (e.g. ``"tinker"``), add an entry to ``MODULES`` and
-    decorate the class with ``@RemoteBackendRegistry.register("tinker")``.
+        # arctic_rl decorates its class with
+        # @RemoteBackendRegistry.register("arctic"), so by import time the
+        # name is available to `get()` / `create()`.
+
+    There is intentionally no eager `MODULES` table that pre-imports
+    every known adapter — that would force the process to take on the
+    transitive deps (vLLM, arctic-training, tinker, ...) of every
+    backend even when only one is in use.
     """
 
     _backends: dict[str, type[RemoteBackend]] = {}
-
-    # Backend name → dotted module path to import on first use. Ray
-    # child procs (and the driver) only need to know the name; the
-    # registry resolves to the right adapter module without forcing
-    # `main_ppo.py` to grow a per-backend `import` line.
-    MODULES: dict[str, str] = {
-        "arctic": "verl.trainer.ppo.arctic_rl_client",
-    }
 
     @classmethod
     def register(cls, name: str) -> Callable[[type[RemoteBackend]], type[RemoteBackend]]:
@@ -223,20 +162,13 @@ class RemoteBackendRegistry:
 
     @classmethod
     def get(cls, name: str) -> type[RemoteBackend]:
-        """Resolve ``name`` to a registered backend class, lazy-importing
-        the adapter module if needed."""
         if name not in cls._backends:
-            module_path = cls.MODULES.get(name)
-            if module_path is None:
-                raise KeyError(
-                    f"Unknown remote backend '{name}'. Registered: "
-                    f"{sorted(cls._backends)}. Known modules: "
-                    f"{sorted(cls.MODULES)}. Either add an entry to "
-                    f"RemoteBackendRegistry.MODULES or import the module "
-                    "that registers the backend before calling get()."
-                )
-            import importlib
-            importlib.import_module(module_path)
+            raise KeyError(
+                f"Unknown remote backend '{name}'. Registered: "
+                f"{sorted(cls._backends)}. Import the adapter module "
+                "(e.g. `from verl.workers.remote_client import arctic_rl`) "
+                "before calling `get()`."
+            )
         return cls._backends[name]
 
     @classmethod
