@@ -423,6 +423,23 @@ no-build-isolation-package = [
     "flash-attn",
 ]
 
+# Build-time deps that the upstream pyproject.toml files of these git-sourced
+# packages forget to declare under build-system.requires. uv installs these
+# into the isolated build env it spins up during `uv lock` (resolution time
+# metadata extraction) AND into the in-venv build env at `uv sync` time when
+# the package is in no-build-isolation-package above. Without this, lock
+# fails with "ModuleNotFoundError: No module named 'setuptools'" on the
+# first package whose setup.py-based build hook is invoked. Add a row here
+# whenever a new git source surfaces the same error.
+[tool.uv.extra-build-dependencies]
+megatron-core            = ["setuptools"]
+apex                     = ["setuptools"]
+transformer-engine       = ["setuptools"]
+transformer-engine-torch = ["setuptools"]
+mbridge                  = ["setuptools"]
+veomni                   = ["setuptools"]
+nemo-automodel           = ["setuptools"]
+
 # Git sources (revs match the reference Dockerfiles); PyTorch routed per-extra
 # to the right CUDA wheel index.
 # Note: apex (latest HEAD) auto-builds CUDA extensions when nvcc is on PATH;
