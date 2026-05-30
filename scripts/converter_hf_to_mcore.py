@@ -195,7 +195,7 @@ def convert_checkpoint_from_transformers_to_megatron(
                 gate_up = hf_experts.gate_up_proj[idx]
                 intermediate_size = gate_up.shape[0] // 2
                 gate_w = gate_up[:intermediate_size]
-                up_w   = gate_up[intermediate_size:]
+                up_w = gate_up[intermediate_size:]
 
                 fc1_weight = torch.cat([gate_w, up_w], dim=0)
                 # down_proj: [num_experts, hidden_size, intermediate_size]
