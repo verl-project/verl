@@ -142,6 +142,44 @@ def _debug_media_summary(items: Optional[list[Any]], max_items: int = 4) -> list
     return rows
 
 
+def _debug_vllm_mm_processor_summary(processor, image_data: Optional[list[Any]]) -> dict:
+    if processor is None or not image_data:
+        return {}
+    try:
+        image_processor = getattr(processor, "image_processor", None)
+        if image_processor is None:
+            return {"error": "missing_image_processor"}
+        try:
+            processed = image_processor(images=image_data, return_tensors="pt")
+        except TypeError:
+            processed = image_processor(image_data, return_tensors="pt")
+        if hasattr(processed, "convert_to_tensors"):
+            processed = processed.convert_to_tensors("pt")
+        inputs = dict(processed)
+        image_grid_thw = inputs.get("image_grid_thw")
+        image_token_count_from_grid = None
+        merge_size = (
+            getattr(image_processor, "merge_size", None) or getattr(image_processor, "spatial_merge_size", None) or 1
+        )
+        if isinstance(image_grid_thw, torch.Tensor):
+            grid = image_grid_thw.detach().cpu().long()
+            image_token_count_from_grid = int(
+                (grid[:, 0] * (grid[:, 1] // merge_size) * (grid[:, 2] // merge_size)).sum()
+            )
+        return {
+            "processor": processor.__class__.__name__,
+            "image_processor": image_processor.__class__.__name__,
+            "merge_size": int(merge_size),
+            "image_count": len(image_data),
+            "image_token_count_from_grid": image_token_count_from_grid,
+            "image_grid_thw_digest": _debug_tensor_digest(image_grid_thw),
+            "pixel_values_digest": _debug_tensor_digest(inputs.get("pixel_values")),
+            "image_embeds_digest": _debug_tensor_digest(inputs.get("image_embeds")),
+        }
+    except Exception as exc:
+        return {"error": type(exc).__name__}
+
+
 class vLLMHttpServer:
     """vLLM http server in single node, this is equivalent to launch server with command line:
     ```
@@ -565,6 +603,7 @@ class vLLMHttpServer:
         dedup_prompt_digest = _debug_sequence_digest(prompt_ids)
         dedup_image_token_count = prompt_ids.count(image_token_id) if image_token_id is not None else None
         dedup_video_token_count = prompt_ids.count(video_token_id) if video_token_id is not None else None
+        mm_processor_summary = _debug_vllm_mm_processor_summary(processor, image_data)
         if not self._logged_qwen_vl_dedup:
             image_processor = getattr(processor, "image_processor", None)
             print(
@@ -579,6 +618,7 @@ class vLLMHttpServer:
                 f"raw_prompt_digest={raw_prompt_digest} "
                 f"dedup_prompt_digest={dedup_prompt_digest} "
                 f"image_summary={_debug_media_summary(image_data)} "
+                f"mm_processor_summary={mm_processor_summary} "
                 f"raw_image_tokens={raw_image_token_count} "
                 f"dedup_image_tokens={dedup_image_token_count} "
                 f"raw_video_tokens={raw_video_token_count} "
@@ -649,6 +689,7 @@ class vLLMHttpServer:
                     f"dedup_prompt_digest={dedup_prompt_digest} "
                     f"response_digest={_debug_sequence_digest(token_ids)} "
                     f"image_summary={_debug_media_summary(image_data)} "
+                    f"mm_processor_summary={mm_processor_summary} "
                     f"raw_image_tokens={raw_image_token_count} "
                     f"dedup_image_tokens={dedup_image_token_count} "
                     f"response_len={len(token_ids)} "

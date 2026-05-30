@@ -237,6 +237,145 @@ def _debug_ref_alignment_snapshot(data, ref_log_probs: torch.Tensor, row_ids: to
         )
 
 
+def _debug_non_tensor_item(batch: DataProto, key: str, row: int):
+    try:
+        values = (batch.non_tensor_batch or {}).get(key)
+        if values is None or row >= len(values):
+            return None
+        return values[row]
+    except Exception as exc:
+        return f"<{key}_failed:{type(exc).__name__}>"
+
+
+def _debug_actor_eval_alignment_snapshot(batch: DataProto, actor_eval_log_probs: torch.Tensor, stage: str):
+    limit = _rollout_corr_debug_limit()
+    if limit <= 0:
+        return
+
+    try:
+        response_mask = batch.batch["response_mask"].bool()
+        responses = batch.batch["responses"]
+        rollout_log_probs = batch.batch.get("rollout_log_probs", batch.batch.get("old_log_probs", None))
+        ref_log_probs = batch.batch.get("ref_log_prob", None)
+        valid = response_mask & torch.isfinite(actor_eval_log_probs)
+        if valid.sum().item() == 0:
+            print(
+                f"[RolloutCorrDebug][actor_eval_logprob_alignment] stage={stage} valid_tokens=0",
+                flush=True,
+            )
+            return
+
+        actor_valid = actor_eval_log_probs[valid].detach().float()
+        rollout_valid = (
+            rollout_log_probs[valid].detach().float() if isinstance(rollout_log_probs, torch.Tensor) else None
+        )
+        ref_valid = ref_log_probs[valid].detach().float() if isinstance(ref_log_probs, torch.Tensor) else None
+
+        candidates = list(range(min(limit, response_mask.shape[0])))
+        valid_counts = response_mask.sum(dim=-1)
+        score = torch.zeros(response_mask.shape[0], dtype=torch.float32, device=response_mask.device)
+        denom = valid_counts.clamp_min(1)
+        if isinstance(ref_log_probs, torch.Tensor):
+            score = torch.maximum(
+                score,
+                (((actor_eval_log_probs - ref_log_probs) * response_mask).sum(dim=-1) / denom).abs().float(),
+            )
+        if isinstance(rollout_log_probs, torch.Tensor):
+            score = torch.maximum(
+                score,
+                (((actor_eval_log_probs - rollout_log_probs) * response_mask).sum(dim=-1) / denom).abs().float(),
+            )
+        top_k = min(limit, score.numel())
+        candidates.extend(torch.topk(score, k=top_k).indices.detach().cpu().tolist())
+
+        seen = set()
+        rows = []
+        for row in candidates:
+            if row in seen or row >= response_mask.shape[0]:
+                continue
+            seen.add(row)
+            mask = response_mask[row]
+            positions = mask.nonzero(as_tuple=False).reshape(-1)[:limit]
+            row_info = {
+                "row": int(row),
+                "debug_row_id": _debug_non_tensor_item(batch, "debug_row_id", row),
+                "uid": _debug_non_tensor_item(batch, "uid", row),
+                "trajectory_role": _debug_non_tensor_item(batch, "trajectory_role", row),
+                "turn_number": _debug_non_tensor_item(batch, "turn_number", row),
+                "rollout_group_id": _debug_non_tensor_item(batch, "rollout_group_id", row),
+                "valid_tokens": int(valid_counts[row].detach().cpu()),
+            }
+            if valid_counts[row].item() > 0:
+                actor_row = actor_eval_log_probs[row][mask].detach().float().cpu()
+                row_info["actor_eval_mean"] = float(actor_row.mean().item())
+                if isinstance(rollout_log_probs, torch.Tensor):
+                    rollout_row = rollout_log_probs[row][mask].detach().float().cpu()
+                    row_info["rollout_mean"] = float(rollout_row.mean().item())
+                    row_info["actor_eval_minus_rollout_mean"] = float((actor_row - rollout_row).mean().item())
+                if isinstance(ref_log_probs, torch.Tensor):
+                    ref_row = ref_log_probs[row][mask].detach().float().cpu()
+                    row_info["ref_mean"] = float(ref_row.mean().item())
+                    row_info["actor_eval_minus_ref_mean"] = float((actor_row - ref_row).mean().item())
+
+            tokens = []
+            for pos_t in positions:
+                pos = int(pos_t.detach().cpu())
+                token = {
+                    "pos": pos,
+                    "token_id": int(responses[row, pos].detach().cpu()),
+                    "actor_eval_logprob": float(actor_eval_log_probs[row, pos].detach().float().cpu()),
+                }
+                if isinstance(rollout_log_probs, torch.Tensor):
+                    rollout_val = rollout_log_probs[row, pos]
+                    token["rollout_logprob"] = float(rollout_val.detach().float().cpu())
+                    token["actor_eval_minus_rollout"] = float(
+                        (actor_eval_log_probs[row, pos] - rollout_val).detach().float().cpu()
+                    )
+                if isinstance(ref_log_probs, torch.Tensor):
+                    ref_val = ref_log_probs[row, pos]
+                    token["ref_logprob"] = float(ref_val.detach().float().cpu())
+                    token["actor_eval_minus_ref"] = float(
+                        (actor_eval_log_probs[row, pos] - ref_val).detach().float().cpu()
+                    )
+                tokens.append(token)
+            row_info["tokens"] = tokens
+            rows.append(row_info)
+
+        ref_stats = (
+            f"ref_mean={ref_valid.mean().item():.6f} "
+            f"actor_eval_minus_ref_mean={(actor_valid - ref_valid).mean().item():.6f} "
+            f"actor_eval_minus_ref_min={(actor_valid - ref_valid).min().item():.6f} "
+            f"actor_eval_minus_ref_max={(actor_valid - ref_valid).max().item():.6f} "
+            if ref_valid is not None
+            else ""
+        )
+        rollout_stats = (
+            f"rollout_mean={rollout_valid.mean().item():.6f} "
+            f"actor_eval_minus_rollout_mean={(actor_valid - rollout_valid).mean().item():.6f} "
+            f"actor_eval_minus_rollout_min={(actor_valid - rollout_valid).min().item():.6f} "
+            f"actor_eval_minus_rollout_max={(actor_valid - rollout_valid).max().item():.6f} "
+            if rollout_valid is not None
+            else ""
+        )
+        print(
+            "[RolloutCorrDebug][actor_eval_logprob_alignment] "
+            f"stage={stage} shape={tuple(actor_eval_log_probs.shape)} "
+            f"valid_tokens={int(valid.sum().item())} "
+            f"actor_eval_mean={actor_valid.mean().item():.6f} "
+            f"actor_eval_min={actor_valid.min().item():.6f} "
+            f"actor_eval_max={actor_valid.max().item():.6f} "
+            f"{rollout_stats}"
+            f"{ref_stats}"
+            f"rows={rows}",
+            flush=True,
+        )
+    except Exception as exc:
+        print(
+            f"[RolloutCorrDebug][actor_eval_logprob_alignment] stage={stage} failed={type(exc).__name__}: {exc}",
+            flush=True,
+        )
+
+
 def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, kl_penalty="kl"):
     """Apply KL penalty to the token-level rewards.
 
@@ -477,6 +616,7 @@ class RayPPOTrainer:
             self.kl_ctrl_in_reward = core_algos.get_kl_controller(self.config.algorithm.kl_ctrl)
 
         self.use_prefix_grouper = self.config.actor_rollout_ref.actor.get("use_prefix_grouper", False)
+        self._actor_eval_logprob_debug_count = 0
 
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
 
@@ -1455,11 +1595,47 @@ class RayPPOTrainer:
         old_log_prob = DataProto.from_tensordict(old_log_prob)
         return old_log_prob, old_log_prob_mfu
 
+    def _debug_actor_eval_log_prob_before_update(self, batch: DataProto) -> None:
+        limit = _rollout_corr_debug_limit()
+        if limit <= 0 or self._actor_eval_logprob_debug_count >= limit:
+            return
+        self._actor_eval_logprob_debug_count += 1
+        try:
+            print(
+                "[RayPPOTrainer][actor_eval_logprob_debug][enter] "
+                f"ts={time.time():.3f} count={self._actor_eval_logprob_debug_count - 1} "
+                f"summary={_debug_dataproto_summary(batch)}",
+                flush=True,
+            )
+            batch_td = batch.to_tensordict()
+            batch_td = left_right_2_no_padding(batch_td)
+            tu.assign_non_tensor(
+                batch_td,
+                calculate_entropy=False,
+                compute_loss=False,
+            )
+            output = self.actor_rollout_wg.compute_log_prob(batch_td)
+            log_probs = tu.get(output, "log_probs")
+            log_probs = no_padding_2_padding(log_probs, batch_td).float()
+            _debug_actor_eval_alignment_snapshot(batch, log_probs, "before_update_actor_eval")
+            print(
+                "[RayPPOTrainer][actor_eval_logprob_debug][exit] "
+                f"ts={time.time():.3f} log_probs_shape={_debug_shape(log_probs)}",
+                flush=True,
+            )
+        except Exception as exc:
+            print(
+                "[RolloutCorrDebug][actor_eval_logprob_alignment] "
+                f"stage=before_update_actor_eval failed={type(exc).__name__}: {exc}",
+                flush=True,
+            )
+
     def _update_actor(self, batch: DataProto) -> DataProto:
         rollout_config = self.config.actor_rollout_ref.rollout
         batch.meta_info["multi_turn"] = rollout_config.multi_turn.enable
         # TODO: Make "temperature" single source of truth from generation.
         batch.meta_info["temperature"] = rollout_config.temperature
+        self._debug_actor_eval_log_prob_before_update(batch)
         # update actor
         batch_td = batch.to_tensordict()
         # step 2: convert from padding to no-padding
