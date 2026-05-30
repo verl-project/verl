@@ -713,6 +713,23 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             except Exception:
                 return None, None
 
+        def _as_list(values: Any) -> list[Any]:
+            if values is None:
+                return []
+            try:
+                if hasattr(values, "tolist"):
+                    values = values.tolist()
+                else:
+                    values = list(values)
+            except Exception:
+                values = [values]
+            return [getattr(item, "data", item) for item in values]
+
+        def _image_ref_count(value: Any) -> int:
+            if not isinstance(value, dict):
+                return 0
+            return len(value.get("image_ids") or []) + len(value.get("video_ids") or [])
+
         try:
             summary: dict[str, Any] = {
                 "stage": stage,
@@ -756,19 +773,100 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
                             "response_len_max": float(row_lengths.max().item()) if row_lengths.numel() else None,
                         }
                     )
-                    for key in ("rollout_log_probs", "old_log_probs"):
+                    for key in ("rollout_log_probs", "old_log_probs", "ref_log_prob"):
                         if key in batch.batch.keys():
                             values = batch.batch[key][valid].detach().float()
                             if values.numel() > 0:
                                 summary[f"{key}_mean"] = float(values.mean().cpu().item())
                                 summary[f"{key}_min"] = float(values.min().cpu().item())
                                 summary[f"{key}_max"] = float(values.max().cpu().item())
-                    if "rollout_log_probs" in batch.batch.keys() and "old_log_probs" in batch.batch.keys():
-                        diff = (batch.batch["old_log_probs"] - batch.batch["rollout_log_probs"])[valid].detach().float()
-                        if diff.numel() > 0:
-                            summary["old_minus_rollout_mean"] = float(diff.mean().cpu().item())
-                            summary["old_minus_rollout_min"] = float(diff.min().cpu().item())
-                            summary["old_minus_rollout_max"] = float(diff.max().cpu().item())
+                    diff_pairs = (
+                        ("old_log_probs", "rollout_log_probs", "old_minus_rollout"),
+                        ("rollout_log_probs", "ref_log_prob", "rollout_minus_ref"),
+                        ("old_log_probs", "ref_log_prob", "old_minus_ref"),
+                    )
+                    for left_key, right_key, out_key in diff_pairs:
+                        if left_key in batch.batch.keys() and right_key in batch.batch.keys():
+                            diff = (batch.batch[left_key] - batch.batch[right_key])[valid].detach().float()
+                            if diff.numel() > 0:
+                                summary[f"{out_key}_mean"] = float(diff.mean().cpu().item())
+                                summary[f"{out_key}_min"] = float(diff.min().cpu().item())
+                                summary[f"{out_key}_max"] = float(diff.max().cpu().item())
+
+                    nt = batch.non_tensor_batch or {}
+                    roles = _as_list(nt.get("trajectory_role"))
+                    if roles:
+                        role_stats: dict[str, dict[str, Any]] = {}
+                        image_refs = _as_list(nt.get("multi_modal_refs"))
+                        turn_numbers = _as_list(nt.get("turn_number"))
+                        prompt_lens = None
+                        if "attention_mask" in batch.batch.keys() and "prompts" in batch.batch.keys():
+                            prompt_width = batch.batch["prompts"].shape[-1]
+                            prompt_lens = (
+                                batch.batch["attention_mask"][:, :prompt_width].detach().float().sum(dim=-1).cpu()
+                            )
+
+                        for role in sorted(set(str(role) for role in roles)):
+                            row_indices = [idx for idx, value in enumerate(roles) if str(value) == role]
+                            row_indices = [idx for idx in row_indices if idx < response_mask.shape[0]]
+                            if not row_indices:
+                                continue
+                            idx_tensor = torch.tensor(row_indices, dtype=torch.long, device=response_mask.device)
+                            role_valid = valid.index_select(0, idx_tensor)
+                            stat: dict[str, Any] = {
+                                "rows": len(row_indices),
+                                "valid_tokens": int(role_valid.sum().detach().cpu().item()),
+                            }
+                            role_response_lens = row_lengths.index_select(0, idx_tensor.cpu())
+                            if role_response_lens.numel() > 0:
+                                stat["response_len_mean"] = float(role_response_lens.mean().item())
+                                stat["response_len_max"] = float(role_response_lens.max().item())
+                            if prompt_lens is not None:
+                                role_prompt_lens = prompt_lens.index_select(0, idx_tensor.cpu())
+                                stat["prompt_len_mean"] = float(role_prompt_lens.mean().item())
+                                stat["prompt_len_min"] = float(role_prompt_lens.min().item())
+                                stat["prompt_len_max"] = float(role_prompt_lens.max().item())
+                            if image_refs:
+                                counts = [
+                                    _image_ref_count(image_refs[idx]) if idx < len(image_refs) else 0
+                                    for idx in row_indices
+                                ]
+                                if counts:
+                                    stat["image_refs_mean"] = float(np.mean(counts))
+                                    stat["image_refs_max"] = int(max(counts))
+                            if turn_numbers:
+                                turns = []
+                                for idx in row_indices:
+                                    if idx >= len(turn_numbers):
+                                        continue
+                                    try:
+                                        turns.append(int(turn_numbers[idx]))
+                                    except Exception:
+                                        pass
+                                if turns:
+                                    stat["turn_min"] = min(turns)
+                                    stat["turn_max"] = max(turns)
+
+                            for key in ("rollout_log_probs", "old_log_probs", "ref_log_prob"):
+                                if key in batch.batch.keys():
+                                    values = batch.batch[key].index_select(0, idx_tensor)[role_valid].detach().float()
+                                    if values.numel() > 0:
+                                        stat[f"{key}_mean"] = float(values.mean().cpu().item())
+                            for left_key, right_key, out_key in diff_pairs:
+                                if left_key in batch.batch.keys() and right_key in batch.batch.keys():
+                                    diff = (
+                                        (
+                                            batch.batch[left_key].index_select(0, idx_tensor)
+                                            - batch.batch[right_key].index_select(0, idx_tensor)
+                                        )[role_valid]
+                                        .detach()
+                                        .float()
+                                    )
+                                    if diff.numel() > 0:
+                                        stat[f"{out_key}_mean"] = float(diff.mean().cpu().item())
+                                        stat[f"{out_key}_max"] = float(diff.max().cpu().item())
+                            role_stats[role] = stat
+                        summary["role_stats"] = role_stats
 
             if actor_metrics:
                 metric_keys = (

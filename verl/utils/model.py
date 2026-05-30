@@ -59,6 +59,7 @@ from verl.utils.tensordict_utils import nested_tensor_from_tensor_list
 from verl.utils.transformers_compat import get_auto_model_for_vision2seq
 
 AutoModelForVision2Seq = get_auto_model_for_vision2seq()
+_IMAGE_REF_RESOLVE_DEBUG_COUNT = 0
 
 
 class LambdaLayer(nn.Module):
@@ -937,6 +938,7 @@ def resolve_multi_modal_refs(
     overwrites ``micro_batch["position_ids"]`` with position ids recomputed from
     the resolved image grids.
     """
+    global _IMAGE_REF_RESOLVE_DEBUG_COUNT
     del tokenizer  # kept in the signature for caller compatibility.
     refs_col = _unwrap_non_tensor_column(micro_batch.get("multi_modal_refs", None))
     if not refs_col:
@@ -968,6 +970,8 @@ def resolve_multi_modal_refs(
     total_image_refs = 0
     bank_cache_misses = 0
     ray_get_ms_total = 0.0
+    debug_limit = int(os.getenv("VERL_IMAGE_REF_RESOLVE_DEBUG_LIMIT", "8"))
+    preview_rows: list[dict[str, Any]] = []
 
     for row_idx, (refs, bank_ref, row_input_ids, row_attention) in enumerate(
         zip(refs_col, bank_refs, input_rows, attention_rows, strict=True)
@@ -1033,6 +1037,33 @@ def resolve_multi_modal_refs(
             mm_cpu = _merge_processed_image_inputs(processed_inputs)
 
         pos = compute_vlm_position_ids(processor, row_input_ids_2d, row_attention_mask, dict(mm_cpu))
+        if _IMAGE_REF_RESOLVE_DEBUG_COUNT < debug_limit and len(preview_rows) < 4:
+            image_token_id = getattr(processor, "image_token_id", None)
+            video_token_id = getattr(processor, "video_token_id", None)
+            merge_size = getattr(getattr(processor, "image_processor", None), "merge_size", 1) or 1
+            image_grid_thw = mm_cpu.get("image_grid_thw")
+            grid_list = image_grid_thw.detach().cpu().tolist() if isinstance(image_grid_thw, torch.Tensor) else None
+            grid_token_count = None
+            if isinstance(image_grid_thw, torch.Tensor):
+                grid = image_grid_thw.detach().cpu().long()
+                grid_token_count = int((grid[:, 0] * (grid[:, 1] // merge_size) * (grid[:, 2] // merge_size)).sum())
+            preview_rows.append(
+                {
+                    "row": row_idx,
+                    "image_refs": len(image_ids),
+                    "input_len": int(row_input_ids_2d.shape[-1]),
+                    "valid_len": int(row_attention_mask.sum().item()),
+                    "image_token_count": int((row_input_ids_2d == image_token_id).sum().item())
+                    if image_token_id is not None
+                    else None,
+                    "video_token_count": int((row_input_ids_2d == video_token_id).sum().item())
+                    if video_token_id is not None
+                    else None,
+                    "grid_token_count": grid_token_count,
+                    "image_grid_thw": grid_list,
+                    "position_shape": tuple(pos.shape),
+                }
+            )
         position_rows.append(pos.squeeze(0))
         if mm_cpu:
             row_multi_modal_inputs.append(_move_tensor_dict(mm_cpu, device))
@@ -1046,6 +1077,14 @@ def resolve_multi_modal_refs(
         f"bank_cache_size={len(bank_cache)} device={device}",
         flush=True,
     )
+    if preview_rows and _IMAGE_REF_RESOLVE_DEBUG_COUNT < debug_limit:
+        print(
+            "[ImageRefs][resolve_debug] "
+            f"count={_IMAGE_REF_RESOLVE_DEBUG_COUNT} "
+            f"rows={len(refs_col)} preview_rows={preview_rows}",
+            flush=True,
+        )
+        _IMAGE_REF_RESOLVE_DEBUG_COUNT += 1
     return extract_multi_modal_inputs(row_multi_modal_inputs)
 
 

@@ -491,9 +491,15 @@ class vLLMHttpServer:
         sampling_params.setdefault("repetition_penalty", self.config.get("repetition_penalty", 1.0))
         sampling_params = SamplingParams(max_tokens=max_tokens, **sampling_params)
         raw_prompt_len = len(prompt_ids)
+        processor = self.model_config.processor
+        image_token_id = getattr(processor, "image_token_id", None)
+        video_token_id = getattr(processor, "video_token_id", None)
+        raw_image_token_count = prompt_ids.count(image_token_id) if image_token_id is not None else None
+        raw_video_token_count = prompt_ids.count(video_token_id) if video_token_id is not None else None
         prompt_ids = qwen2_5_vl_dedup_image_tokens(prompt_ids, self.model_config.processor)
+        dedup_image_token_count = prompt_ids.count(image_token_id) if image_token_id is not None else None
+        dedup_video_token_count = prompt_ids.count(video_token_id) if video_token_id is not None else None
         if not self._logged_qwen_vl_dedup:
-            processor = self.model_config.processor
             image_processor = getattr(processor, "image_processor", None)
             print(
                 "[RolloutCorrDebug][vllm_dedup] "
@@ -502,7 +508,12 @@ class vLLMHttpServer:
                 f"image_processor={image_processor.__class__.__name__ if image_processor is not None else None} "
                 f"raw_prompt_len={raw_prompt_len} "
                 f"dedup_prompt_len={len(prompt_ids)} "
-                f"removed={raw_prompt_len - len(prompt_ids)}",
+                f"removed={raw_prompt_len - len(prompt_ids)} "
+                f"image_count={len(image_data) if image_data is not None else 0} "
+                f"raw_image_tokens={raw_image_token_count} "
+                f"dedup_image_tokens={dedup_image_token_count} "
+                f"raw_video_tokens={raw_video_token_count} "
+                f"dedup_video_tokens={dedup_video_token_count}",
                 flush=True,
             )
             self._logged_qwen_vl_dedup = True
@@ -564,6 +575,9 @@ class vLLMHttpServer:
                     f"global_steps={self.global_steps} "
                     f"raw_prompt_len={raw_prompt_len} "
                     f"dedup_prompt_len={len(prompt_ids)} "
+                    f"image_count={len(image_data) if image_data is not None else 0} "
+                    f"raw_image_tokens={raw_image_token_count} "
+                    f"dedup_image_tokens={dedup_image_token_count} "
                     f"response_len={len(token_ids)} "
                     f"mean={log_probs_tensor.mean().item():.6f} "
                     f"min={log_probs_tensor.min().item():.6f} "

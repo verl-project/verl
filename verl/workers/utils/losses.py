@@ -50,6 +50,9 @@ def _debug_rollout_corr_logprob_alignment(
         current_valid = log_prob[valid].detach().float().cpu()
         rollout_valid = old_log_prob[valid].detach().float().cpu()
         diff_valid = (rollout_valid - current_valid).float()
+        ref_log_prob = data.get("ref_log_prob", None)
+        ref_valid = ref_log_prob[valid].detach().float().cpu() if ref_log_prob is not None else None
+        actor_ref_diff = (current_valid - ref_valid).float() if ref_valid is not None else None
         responses = data["responses"].detach().cpu()
 
         seq_current = masked_mean(log_prob.detach().float(), response_mask, axis=-1).cpu()
@@ -78,6 +81,27 @@ def _debug_rollout_corr_logprob_alignment(
                             "rollout_minus_current": float(
                                 (old_log_prob[row_idx, col] - log_prob[row_idx, col]).detach().float().cpu().item()
                             ),
+                            **(
+                                {
+                                    "ref_logprob": float(ref_log_prob[row_idx, col].detach().float().cpu().item()),
+                                    "current_minus_ref": float(
+                                        (log_prob[row_idx, col] - ref_log_prob[row_idx, col])
+                                        .detach()
+                                        .float()
+                                        .cpu()
+                                        .item()
+                                    ),
+                                    "rollout_minus_ref": float(
+                                        (old_log_prob[row_idx, col] - ref_log_prob[row_idx, col])
+                                        .detach()
+                                        .float()
+                                        .cpu()
+                                        .item()
+                                    ),
+                                }
+                                if ref_log_prob is not None
+                                else {}
+                            ),
                         }
                         for col in cols
                     ],
@@ -92,6 +116,16 @@ def _debug_rollout_corr_logprob_alignment(
             }
             for val, idx in zip(top_values, top_indices, strict=False)
         ]
+        ref_stats = (
+            f"ref_mean={ref_valid.mean().item():.6f} "
+            f"ref_min={ref_valid.min().item():.6f} "
+            f"ref_max={ref_valid.max().item():.6f} "
+            f"actor_minus_ref_mean={actor_ref_diff.mean().item():.6f} "
+            f"actor_minus_ref_min={actor_ref_diff.min().item():.6f} "
+            f"actor_minus_ref_max={actor_ref_diff.max().item():.6f} "
+            if ref_valid is not None and actor_ref_diff is not None
+            else ""
+        )
 
         print(
             "[RolloutCorrDebug][actor_logprob_alignment] "
@@ -106,6 +140,7 @@ def _debug_rollout_corr_logprob_alignment(
             f"diff_mean={diff_valid.mean().item():.6f} "
             f"diff_min={diff_valid.min().item():.6f} "
             f"diff_max={diff_valid.max().item():.6f} "
+            f"{ref_stats}"
             f"top_sequences={top_sequences} "
             f"sample_rows={rows}",
             flush=True,
