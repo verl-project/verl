@@ -1015,6 +1015,11 @@ def resolve_multi_modal_refs(
     ray_get_ms_total = 0.0
     debug_limit = int(os.getenv("VERL_IMAGE_REF_RESOLVE_DEBUG_LIMIT", "10"))
     preview_rows: list[dict[str, Any]] = []
+    debug_row_ids = _unwrap_non_tensor_column(micro_batch.get("debug_row_id", None))
+    uids = _unwrap_non_tensor_column(micro_batch.get("uid", None))
+    roles = _unwrap_non_tensor_column(micro_batch.get("trajectory_role", None))
+    turn_numbers = _unwrap_non_tensor_column(micro_batch.get("turn_number", None))
+    rollout_group_ids = _unwrap_non_tensor_column(micro_batch.get("rollout_group_id", None))
 
     for row_idx, (refs, bank_ref, row_input_ids, row_attention) in enumerate(
         zip(refs_col, bank_refs, input_rows, attention_rows, strict=True)
@@ -1093,6 +1098,11 @@ def resolve_multi_modal_refs(
             preview_rows.append(
                 {
                     "row": row_idx,
+                    "debug_row_id": debug_row_ids[row_idx] if row_idx < len(debug_row_ids) else None,
+                    "uid": uids[row_idx] if row_idx < len(uids) else None,
+                    "trajectory_role": roles[row_idx] if row_idx < len(roles) else None,
+                    "turn_number": turn_numbers[row_idx] if row_idx < len(turn_numbers) else None,
+                    "rollout_group_id": rollout_group_ids[row_idx] if row_idx < len(rollout_group_ids) else None,
                     "image_refs": len(image_ids),
                     "image_ids_digest": _debug_sequence_digest(image_ids, max_items=64),
                     "input_len": int(row_input_ids_2d.shape[-1]),
