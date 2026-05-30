@@ -15,6 +15,7 @@
 Utilities to create common models from huggingface
 """
 
+import hashlib
 import json
 import os
 import re
@@ -60,6 +61,48 @@ from verl.utils.transformers_compat import get_auto_model_for_vision2seq
 
 AutoModelForVision2Seq = get_auto_model_for_vision2seq()
 _IMAGE_REF_RESOLVE_DEBUG_COUNT = 0
+
+
+def _debug_tensor_digest(value, max_items: int = 2048) -> dict | None:
+    if not isinstance(value, torch.Tensor):
+        return None
+    try:
+        tensor = value.detach()
+        shape = tuple(tensor.shape)
+        dtype = str(tensor.dtype)
+        flat = tensor.reshape(-1)
+        numel = int(flat.numel())
+        if numel == 0:
+            return {"shape": shape, "dtype": dtype, "numel": 0, "sha1": "empty"}
+        if numel > max_items:
+            head = max_items // 2
+            tail = max_items - head
+            sample = torch.cat([flat[:head], flat[-tail:]])
+        else:
+            sample = flat
+        if sample.dtype in (torch.bfloat16, torch.float16):
+            sample = sample.float()
+        sample_cpu = sample.contiguous().cpu()
+        sha1 = hashlib.sha1(sample_cpu.numpy().tobytes()).hexdigest()[:16]
+        return {"shape": shape, "dtype": dtype, "numel": numel, "sampled": int(sample_cpu.numel()), "sha1": sha1}
+    except Exception as exc:
+        return {"error": type(exc).__name__}
+
+
+def _debug_sequence_digest(values, max_items: int = 2048) -> dict:
+    try:
+        seq = list(values or [])
+        sample = seq if len(seq) <= max_items else seq[: max_items // 2] + seq[-(max_items - max_items // 2) :]
+        payload = json.dumps(sample, sort_keys=True, default=str).encode("utf-8")
+        return {
+            "len": len(seq),
+            "sampled": len(sample),
+            "sha1": hashlib.sha1(payload).hexdigest()[:16],
+            "first": seq[:8],
+            "last": seq[-8:] if len(seq) > 8 else seq[:],
+        }
+    except Exception as exc:
+        return {"error": type(exc).__name__}
 
 
 class LambdaLayer(nn.Module):
@@ -970,7 +1013,7 @@ def resolve_multi_modal_refs(
     total_image_refs = 0
     bank_cache_misses = 0
     ray_get_ms_total = 0.0
-    debug_limit = int(os.getenv("VERL_IMAGE_REF_RESOLVE_DEBUG_LIMIT", "8"))
+    debug_limit = int(os.getenv("VERL_IMAGE_REF_RESOLVE_DEBUG_LIMIT", "10"))
     preview_rows: list[dict[str, Any]] = []
 
     for row_idx, (refs, bank_ref, row_input_ids, row_attention) in enumerate(
@@ -1051,8 +1094,11 @@ def resolve_multi_modal_refs(
                 {
                     "row": row_idx,
                     "image_refs": len(image_ids),
+                    "image_ids_digest": _debug_sequence_digest(image_ids, max_items=64),
                     "input_len": int(row_input_ids_2d.shape[-1]),
                     "valid_len": int(row_attention_mask.sum().item()),
+                    "input_ids_digest": _debug_tensor_digest(row_input_ids_2d),
+                    "attention_mask_digest": _debug_tensor_digest(row_attention_mask),
                     "image_token_count": int((row_input_ids_2d == image_token_id).sum().item())
                     if image_token_id is not None
                     else None,
@@ -1061,7 +1107,11 @@ def resolve_multi_modal_refs(
                     else None,
                     "grid_token_count": grid_token_count,
                     "image_grid_thw": grid_list,
+                    "image_grid_thw_digest": _debug_tensor_digest(image_grid_thw),
+                    "pixel_values_digest": _debug_tensor_digest(mm_cpu.get("pixel_values")),
+                    "image_embeds_digest": _debug_tensor_digest(mm_cpu.get("image_embeds")),
                     "position_shape": tuple(pos.shape),
+                    "position_ids_digest": _debug_tensor_digest(pos),
                 }
             )
         position_rows.append(pos.squeeze(0))

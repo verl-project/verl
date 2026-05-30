@@ -140,6 +140,24 @@ def postprocess_batch_func(output_lst, indices, data: TensorDict):
         if use_dynamic_bsz:
             model_output[key] = restore_dynamic_batch(model_output[key], indices)
 
+    if "__ref_debug_row_id" in data.keys():
+        row_ids = data["__ref_debug_row_id"]
+        model_output["__ref_debug_row_id"] = row_ids.detach() if isinstance(row_ids, torch.Tensor) else row_ids
+        try:
+            rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else None
+            print(
+                "[RolloutCorrDebug][ref_row_id_postprocess] "
+                f"rank={rank} batch_size={len(row_ids)} "
+                f"first_row_ids={row_ids[:5].detach().cpu().tolist()} "
+                f"use_dynamic_bsz={use_dynamic_bsz}",
+                flush=True,
+            )
+        except Exception as exc:
+            print(
+                f"[RolloutCorrDebug][ref_row_id_postprocess] print_failed={type(exc).__name__}",
+                flush=True,
+            )
+
     # loss
     for o in output_lst:
         if "loss" in o:

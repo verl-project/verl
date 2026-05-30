@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import functools
+import hashlib
 import logging
 import os
 import time
@@ -114,6 +115,78 @@ def _debug_tensordict_summary(data: TensorDict) -> dict:
     }
 
 
+def _rollout_corr_debug_limit() -> int:
+    try:
+        return max(0, int(os.getenv("VERL_ROLLOUT_CORR_DEBUG_LIMIT", "10")))
+    except ValueError:
+        return 5
+
+
+def _debug_param_digest(param: torch.nn.Parameter, max_items: int = 4096) -> dict:
+    try:
+        tensor = param.detach()
+        if tensor.is_meta:
+            return {"shape": tuple(tensor.shape), "dtype": str(tensor.dtype), "device": "meta"}
+        flat = tensor.reshape(-1)
+        numel = int(flat.numel())
+        if numel == 0:
+            return {"shape": tuple(tensor.shape), "dtype": str(tensor.dtype), "numel": 0, "sha1": "empty"}
+        if numel > max_items:
+            head = max_items // 2
+            tail = max_items - head
+            sample = torch.cat([flat[:head], flat[-tail:]])
+        else:
+            sample = flat
+        sample_float = sample.float()
+        sample_cpu = sample_float.contiguous().cpu()
+        sha1 = hashlib.sha1(sample_cpu.numpy().tobytes()).hexdigest()[:16]
+        return {
+            "shape": tuple(tensor.shape),
+            "dtype": str(tensor.dtype),
+            "device": str(tensor.device),
+            "numel": numel,
+            "sampled": int(sample_cpu.numel()),
+            "sha1": sha1,
+            "sample_mean": float(sample_cpu.mean().item()),
+            "sample_std": float(sample_cpu.std(unbiased=False).item()) if sample_cpu.numel() > 1 else 0.0,
+            "sample_norm": float(sample_cpu.norm().item()),
+        }
+    except Exception as exc:
+        return {"error": type(exc).__name__}
+
+
+def _debug_selected_named_parameters(module: torch.nn.Module, limit: int = 8) -> list[tuple[str, torch.nn.Parameter]]:
+    preferred = (
+        "embed_tokens",
+        "lm_head",
+        "visual",
+        "vision",
+        "merger",
+        "multi_modal_projector",
+        "layers.0.",
+        "model.layers.0.",
+    )
+    selected: list[tuple[str, torch.nn.Parameter]] = []
+    fallback: list[tuple[str, torch.nn.Parameter]] = []
+    seen: set[str] = set()
+    for name, param in module.named_parameters():
+        if len(fallback) < limit:
+            fallback.append((name, param))
+        if any(marker in name for marker in preferred) and name not in seen:
+            selected.append((name, param))
+            seen.add(name)
+            if len(selected) >= limit:
+                break
+    if len(selected) < min(3, limit):
+        for item in fallback:
+            if item[0] not in seen:
+                selected.append(item)
+                seen.add(item[0])
+            if len(selected) >= limit:
+                break
+    return selected[:limit]
+
+
 def _with_routing_replay_flag(enabled: bool):
     """Decorator to set 'enable_routing_replay' flag on the data TensorDict."""
 
@@ -207,6 +280,42 @@ class TrainingWorker(Worker, DistProfilerExtension):
             self.flops_counter = None
 
         self.loss_fn = None
+        self._rollout_corr_weight_digest_logged: set[str] = set()
+
+    def _debug_model_weight_digest(self, stage: str) -> None:
+        if _rollout_corr_debug_limit() <= 0 or stage in self._rollout_corr_weight_digest_logged:
+            return
+        self._rollout_corr_weight_digest_logged.add(stage)
+        try:
+            module = getattr(self.engine, "module", None)
+            if module is None:
+                print(
+                    "[RolloutCorrDebug][model_weight_digest] "
+                    f"stage={stage} rank={torch.distributed.get_rank()} module=None",
+                    flush=True,
+                )
+                return
+            rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else None
+            dp_rank = self.engine.get_data_parallel_rank()
+            digests = [
+                {"name": name, **_debug_param_digest(param)}
+                for name, param in _debug_selected_named_parameters(module, limit=8)
+            ]
+            print(
+                "[RolloutCorrDebug][model_weight_digest] "
+                f"stage={stage} rank={rank} dp_rank={dp_rank} "
+                f"forward_only={self.engine_config.forward_only} "
+                f"strategy={self.engine_config.strategy} "
+                f"model_type={self.config.model_type} "
+                f"local_path={self.model_config.get('local_path', None)} "
+                f"digests={digests}",
+                flush=True,
+            )
+        except Exception as exc:
+            print(
+                f"[RolloutCorrDebug][model_weight_digest] stage={stage} failed={type(exc).__name__}: {exc}",
+                flush=True,
+            )
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def to(self, device, model=True, optimizer=True, grad=True):
@@ -229,6 +338,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
         we initialize it. Otherwise, reload ckpt and reset states
         """
         self.engine.initialize()
+        self._debug_model_weight_digest("after_reset_initialize")
 
     def _postprocess_output(self, output, *, global_token_num, delta_time, forward_only, images_seqlens):
         """
@@ -385,6 +495,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
     def train_batch(self, data: TensorDict) -> TensorDict:
         assert self.loss_fn is not None, "loss function can't be None when calling train_batch"
         assert not self.engine_config.forward_only, "Can't run `train_batch` when forward_only is in the engine config."
+        self._debug_model_weight_digest("before_train_batch")
         # global_token_num should be a list of number of tokens of each seq in this batch
         global_token_num = tu.get(data, key="global_token_num")
         disable_auto_offload = tu.get(data, key="disable_auto_offload", default=False)
@@ -438,6 +549,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="train"), blocking=False)
     def infer_batch(self, data: TensorDict) -> TensorDict:
+        self._debug_model_weight_digest("before_infer_batch")
         # add mfu calculator
         global_token_num = tu.get(data, key="global_token_num")
         compute_loss = tu.get(data, key="compute_loss", default=True)

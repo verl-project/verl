@@ -132,6 +132,111 @@ def _debug_dataproto_summary(batch: DataProto | None) -> dict:
     }
 
 
+def _rollout_corr_debug_limit() -> int:
+    try:
+        return max(0, int(os.getenv("VERL_ROLLOUT_CORR_DEBUG_LIMIT", "10")))
+    except ValueError:
+        return 5
+
+
+def _debug_ref_row_id_summary(expected: torch.Tensor, returned: torch.Tensor | None) -> dict:
+    if returned is None:
+        return {"returned": False}
+    expected_cpu = expected.detach().cpu().reshape(-1)
+    returned_cpu = returned.detach().cpu().reshape(-1)
+    limit = _rollout_corr_debug_limit()
+    if returned_cpu.numel() != expected_cpu.numel():
+        return {
+            "returned": True,
+            "count": int(returned_cpu.numel()),
+            "expected_count": int(expected_cpu.numel()),
+            "first_expected": expected_cpu[:limit].tolist(),
+            "first_returned": returned_cpu[:limit].tolist(),
+            "mismatch_count": "shape_mismatch",
+        }
+    mismatch = returned_cpu.ne(expected_cpu)
+    mismatch_indices = mismatch.nonzero(as_tuple=False).reshape(-1)
+    return {
+        "returned": True,
+        "count": int(returned_cpu.numel()),
+        "first_expected": expected_cpu[:limit].tolist(),
+        "first_returned": returned_cpu[:limit].tolist(),
+        "mismatch_count": int(mismatch.sum().item()),
+        "first_mismatch_indices": mismatch_indices[:limit].tolist(),
+        "first_mismatch_pairs": [
+            {
+                "idx": int(i),
+                "expected": int(expected_cpu[i]),
+                "returned": int(returned_cpu[i]),
+            }
+            for i in mismatch_indices[:limit].tolist()
+        ],
+    }
+
+
+def _debug_ref_alignment_snapshot(data, ref_log_probs: torch.Tensor, row_ids: torch.Tensor | None, stage: str):
+    limit = _rollout_corr_debug_limit()
+    if limit <= 0:
+        return
+
+    try:
+        response_mask = data["response_mask"].bool()
+        responses = data["responses"]
+        rollout_log_probs = data.get("rollout_log_probs", None)
+        old_log_probs = data.get("old_log_probs", None)
+
+        valid_counts = response_mask.sum(dim=-1)
+        candidates = list(range(min(limit, response_mask.shape[0])))
+
+        if isinstance(rollout_log_probs, torch.Tensor):
+            diff = (rollout_log_probs - ref_log_probs) * response_mask
+            denom = valid_counts.clamp_min(1)
+            seq_mean = diff.sum(dim=-1) / denom
+            top_k = min(limit, seq_mean.numel())
+            top_rows = torch.topk(seq_mean.abs(), k=top_k).indices.detach().cpu().tolist()
+            candidates.extend(top_rows)
+
+        seen = set()
+        rows = []
+        for row in candidates:
+            if row in seen or row >= response_mask.shape[0]:
+                continue
+            seen.add(row)
+            positions = response_mask[row].nonzero(as_tuple=False).reshape(-1)[:limit]
+            row_info = {
+                "row": int(row),
+                "row_id": int(row_ids[row].detach().cpu()) if isinstance(row_ids, torch.Tensor) else None,
+                "valid_tokens": int(valid_counts[row].detach().cpu()),
+            }
+            tokens = []
+            for pos_t in positions:
+                pos = int(pos_t.detach().cpu())
+                token = {
+                    "pos": pos,
+                    "token_id": int(responses[row, pos].detach().cpu()),
+                    "ref_logprob": float(ref_log_probs[row, pos].detach().cpu()),
+                }
+                if isinstance(rollout_log_probs, torch.Tensor):
+                    rollout_val = rollout_log_probs[row, pos]
+                    token["rollout_logprob"] = float(rollout_val.detach().cpu())
+                    token["rollout_minus_ref"] = float((rollout_val - ref_log_probs[row, pos]).detach().cpu())
+                if isinstance(old_log_probs, torch.Tensor):
+                    old_val = old_log_probs[row, pos]
+                    token["old_logprob"] = float(old_val.detach().cpu())
+                    token["old_minus_ref"] = float((old_val - ref_log_probs[row, pos]).detach().cpu())
+                tokens.append(token)
+            row_info["tokens"] = tokens
+            rows.append(row_info)
+
+        summary = {"stage": stage, "rows": rows}
+        print(f"[RolloutCorrDebug][ref_alignment_snapshot] {summary}", flush=True)
+    except Exception as exc:
+        print(
+            f"[RolloutCorrDebug][ref_alignment_snapshot] stage={stage} failed={type(exc).__name__}: {exc}",
+            flush=True,
+        )
+
+
 def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, kl_penalty="kl"):
     """Apply KL penalty to the token-level rewards.
 
@@ -1248,6 +1353,8 @@ class RayPPOTrainer:
         )
         # step 1: convert dataproto to tensordict.
         batch_td = batch.to_tensordict()
+        expected_row_ids = torch.arange(len(batch_td), dtype=torch.long)
+        batch_td["__ref_debug_row_id"] = expected_row_ids
         print(
             "[RayPPOTrainer][compute_ref_log_prob][after_to_tensordict] "
             f"ts={time.time():.3f} summary={_debug_tensordict_summary(batch_td)}",
@@ -1280,6 +1387,11 @@ class RayPPOTrainer:
             f"ts={time.time():.3f} output_type={type(output).__name__}",
             flush=True,
         )
+        returned_row_ids = tu.get(output, "__ref_debug_row_id", default=None)
+        print(
+            f"[RolloutCorrDebug][ref_row_id_collect] {_debug_ref_row_id_summary(expected_row_ids, returned_row_ids)}",
+            flush=True,
+        )
         # gather output
         log_probs = tu.get(output, "log_probs")
         print(
@@ -1294,6 +1406,7 @@ class RayPPOTrainer:
             f"ts={time.time():.3f} log_probs_shape={_debug_shape(log_probs)}",
             flush=True,
         )
+        _debug_ref_alignment_snapshot(batch_td, log_probs, returned_row_ids, "after_no_padding_2_padding")
         # step 5: rebuild a tensordict and convert to dataproto
         ref_log_prob = tu.get_tensordict({"ref_log_prob": log_probs.float()})
         ref_log_prob = DataProto.from_tensordict(ref_log_prob)

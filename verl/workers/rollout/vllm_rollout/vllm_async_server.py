@@ -13,6 +13,7 @@
 # limitations under the License.
 import argparse
 import asyncio
+import hashlib
 import inspect
 import json
 import logging
@@ -76,6 +77,69 @@ else:
 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
+
+
+def _debug_sequence_digest(values, max_items: int = 2048) -> dict:
+    try:
+        seq = list(values or [])
+        sample = seq if len(seq) <= max_items else seq[: max_items // 2] + seq[-(max_items - max_items // 2) :]
+        payload = json.dumps(sample, sort_keys=True, default=str).encode("utf-8")
+        return {
+            "len": len(seq),
+            "sampled": len(sample),
+            "sha1": hashlib.sha1(payload).hexdigest()[:16],
+            "first": seq[:12],
+            "last": seq[-12:] if len(seq) > 12 else seq[:],
+        }
+    except Exception as exc:
+        return {"error": type(exc).__name__}
+
+
+def _debug_tensor_digest(value, max_items: int = 2048) -> dict | None:
+    if not isinstance(value, torch.Tensor):
+        return None
+    try:
+        tensor = value.detach()
+        shape = tuple(tensor.shape)
+        dtype = str(tensor.dtype)
+        flat = tensor.reshape(-1)
+        numel = int(flat.numel())
+        if numel == 0:
+            return {"shape": shape, "dtype": dtype, "numel": 0, "sha1": "empty"}
+        if numel > max_items:
+            head = max_items // 2
+            tail = max_items - head
+            sample = torch.cat([flat[:head], flat[-tail:]])
+        else:
+            sample = flat
+        if sample.dtype in (torch.bfloat16, torch.float16):
+            sample = sample.float()
+        sample_cpu = sample.contiguous().cpu()
+        sha1 = hashlib.sha1(sample_cpu.numpy().tobytes()).hexdigest()[:16]
+        return {"shape": shape, "dtype": dtype, "numel": numel, "sampled": int(sample_cpu.numel()), "sha1": sha1}
+    except Exception as exc:
+        return {"error": type(exc).__name__}
+
+
+def _debug_media_summary(items: Optional[list[Any]], max_items: int = 4) -> list[dict]:
+    if not items:
+        return []
+    rows = []
+    for idx, item in enumerate(items[:max_items]):
+        row = {"idx": idx, "type": type(item).__name__}
+        tensor_digest = _debug_tensor_digest(item) if isinstance(item, torch.Tensor) else None
+        if tensor_digest is not None:
+            row["tensor_digest"] = tensor_digest
+        for attr in ("size", "mode", "shape", "dtype"):
+            try:
+                if hasattr(item, attr):
+                    row[attr] = str(getattr(item, attr))
+            except Exception:
+                pass
+        rows.append(row)
+    if len(items) > max_items:
+        rows.append({"remaining": len(items) - max_items})
+    return rows
 
 
 class vLLMHttpServer:
@@ -496,7 +560,9 @@ class vLLMHttpServer:
         video_token_id = getattr(processor, "video_token_id", None)
         raw_image_token_count = prompt_ids.count(image_token_id) if image_token_id is not None else None
         raw_video_token_count = prompt_ids.count(video_token_id) if video_token_id is not None else None
+        raw_prompt_digest = _debug_sequence_digest(prompt_ids)
         prompt_ids = qwen2_5_vl_dedup_image_tokens(prompt_ids, self.model_config.processor)
+        dedup_prompt_digest = _debug_sequence_digest(prompt_ids)
         dedup_image_token_count = prompt_ids.count(image_token_id) if image_token_id is not None else None
         dedup_video_token_count = prompt_ids.count(video_token_id) if video_token_id is not None else None
         if not self._logged_qwen_vl_dedup:
@@ -510,6 +576,9 @@ class vLLMHttpServer:
                 f"dedup_prompt_len={len(prompt_ids)} "
                 f"removed={raw_prompt_len - len(prompt_ids)} "
                 f"image_count={len(image_data) if image_data is not None else 0} "
+                f"raw_prompt_digest={raw_prompt_digest} "
+                f"dedup_prompt_digest={dedup_prompt_digest} "
+                f"image_summary={_debug_media_summary(image_data)} "
                 f"raw_image_tokens={raw_image_token_count} "
                 f"dedup_image_tokens={dedup_image_token_count} "
                 f"raw_video_tokens={raw_video_token_count} "
@@ -559,7 +628,7 @@ class vLLMHttpServer:
         log_probs = None
         if sampling_params.logprobs is not None:
             log_probs = [logprobs[token_ids[i]].logprob for i, logprobs in enumerate(final_res.outputs[0].logprobs)]
-            debug_limit = int(os.getenv("VERL_ROLLOUT_CORR_DEBUG_LIMIT", "5"))
+            debug_limit = int(os.getenv("VERL_ROLLOUT_CORR_DEBUG_LIMIT", "10"))
             if self._rollout_logprob_debug_count < debug_limit and log_probs:
                 log_probs_tensor = torch.tensor(log_probs, dtype=torch.float32)
                 preview = [
@@ -576,6 +645,10 @@ class vLLMHttpServer:
                     f"raw_prompt_len={raw_prompt_len} "
                     f"dedup_prompt_len={len(prompt_ids)} "
                     f"image_count={len(image_data) if image_data is not None else 0} "
+                    f"raw_prompt_digest={raw_prompt_digest} "
+                    f"dedup_prompt_digest={dedup_prompt_digest} "
+                    f"response_digest={_debug_sequence_digest(token_ids)} "
+                    f"image_summary={_debug_media_summary(image_data)} "
                     f"raw_image_tokens={raw_image_token_count} "
                     f"dedup_image_tokens={dedup_image_token_count} "
                     f"response_len={len(token_ids)} "
