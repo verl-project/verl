@@ -46,7 +46,13 @@ from verl.protocol import pad_dataproto_to_divisor
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.trainer.distillation.losses import is_distillation_enabled
 from verl.trainer.ppo import core_algos
-from verl.trainer.ppo.ray_trainer import ResourcePoolManager
+from verl.trainer.ppo.ray_trainer import (
+    ResourcePoolManager,
+    _debug_actor_eval_alignment_snapshot,
+    _debug_dataproto_summary,
+    _debug_shape,
+    _rollout_corr_debug_limit,
+)
 from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_reward_model
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, should_save_ckpt_esi
@@ -56,7 +62,7 @@ from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
 from verl.utils.tracking import Tracking, ValidationGenerationsLogger
 from verl.workers.rollout.llm_server import LLMServerManager
-from verl.workers.utils.padding import left_right_2_no_padding
+from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -268,6 +274,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         self.last_val_metrics = {}
         self.metrics = {}
         self.timing_raw = {}
+        self._actor_eval_logprob_debug_count = 0
         # reward message
         self.future_reward = None
         self.reward_tensor = None
@@ -984,10 +991,46 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
         return batch
 
+    def _debug_actor_eval_log_prob_before_update(self, batch: DataProto) -> None:
+        limit = _rollout_corr_debug_limit()
+        if limit <= 0 or self._actor_eval_logprob_debug_count >= limit:
+            return
+        self._actor_eval_logprob_debug_count += 1
+        try:
+            print(
+                "[FullyAsyncTrainer][actor_eval_logprob_debug][enter] "
+                f"ts={time.time():.3f} count={self._actor_eval_logprob_debug_count - 1} "
+                f"summary={_debug_dataproto_summary(batch)}",
+                flush=True,
+            )
+            batch_td = batch.to_tensordict()
+            batch_td = left_right_2_no_padding(batch_td)
+            tu.assign_non_tensor(
+                batch_td,
+                calculate_entropy=False,
+                compute_loss=False,
+            )
+            output = self.actor_rollout_wg.compute_log_prob(batch_td)
+            log_probs = tu.get(output, "log_probs")
+            log_probs = no_padding_2_padding(log_probs, batch_td).float()
+            _debug_actor_eval_alignment_snapshot(batch, log_probs, "fully_async_before_update_actor_eval")
+            print(
+                "[FullyAsyncTrainer][actor_eval_logprob_debug][exit] "
+                f"ts={time.time():.3f} log_probs_shape={_debug_shape(log_probs)}",
+                flush=True,
+            )
+        except Exception as exc:
+            print(
+                "[RolloutCorrDebug][actor_eval_logprob_alignment] "
+                f"stage=fully_async_before_update_actor_eval failed={type(exc).__name__}: {exc}",
+                flush=True,
+            )
+
     def _update_actor(self, batch: DataProto) -> DataProto:
         """Update actor using the expanded rows as one PPO mini-batch."""
         rollout_config = self.config.actor_rollout_ref.rollout
         batch.meta_info["temperature"] = rollout_config.temperature
+        self._debug_actor_eval_log_prob_before_update(batch)
         batch_td = batch.to_tensordict()
         batch_td = left_right_2_no_padding(batch_td)
         calculate_entropy = self.config.actor_rollout_ref.actor.calculate_entropy or (
