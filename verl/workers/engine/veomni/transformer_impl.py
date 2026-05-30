@@ -1054,7 +1054,7 @@ class VeOmniEngineWithValueHead(VeOmniEngine, FSDPEngineWithValueHead):
         config.hidden_dropout = "0"
         config.summary_dropout_prob = 0.0
         config.tie_word_embeddings = False
-        token_cls = AutoModelForTokenClassification._model_mapping.get(type(config))
+        token_cls = AutoModelForTokenClassification._model_mapping.get(type(config), None)
         if token_cls is None:
             raise ValueError(f"No ForTokenClassification class in transformers for {type(config).__name__}.")
         config.architectures = [token_cls.__name__]
