@@ -123,6 +123,20 @@ def _rollout_corr_debug_rows() -> int:
         return 16
 
 
+def _rollout_corr_debug_token_limit() -> int:
+    try:
+        return int(os.getenv("VERL_ROLLOUT_CORR_DEBUG_TOKEN_LIMIT", "4096"))
+    except ValueError:
+        return 4096
+
+
+def _debug_slice_limit(total: int) -> int:
+    limit = _rollout_corr_debug_token_limit()
+    if limit <= 0:
+        return total
+    return min(total, limit)
+
+
 def _debug_tensor_digest(value, max_items: int = 2048) -> dict | None:
     if not isinstance(value, torch.Tensor):
         return None
@@ -323,10 +337,15 @@ def _debug_response_logprob_rows(
     top_details = []
     for _, row_idx in sorted(scores, reverse=True)[:max_detail_rows]:
         mask = response_mask[row_idx]
-        valid_cols = mask.nonzero(as_tuple=False).reshape(-1)[:12]
+        all_valid_cols = mask.nonzero(as_tuple=False).reshape(-1)
+        token_limit = _debug_slice_limit(int(all_valid_cols.numel()))
+        valid_cols = all_valid_cols[:token_limit]
         detail = {
             "row": row_idx,
             "debug_row_id": _debug_column_item(micro_batch, "debug_row_id", row_idx),
+            "valid_tokens": int(all_valid_cols.numel()),
+            "token_detail_limit": _rollout_corr_debug_token_limit(),
+            "tokens_truncated": int(all_valid_cols.numel()) > token_limit,
             "tokens": [],
         }
         for col_t in valid_cols:
@@ -360,6 +379,7 @@ def _debug_forward_io_snapshot(
     model_inputs: dict | None = None,
     output_args: dict | None = None,
     model_output: dict | None = None,
+    runtime_context: dict | None = None,
 ) -> None:
     limit = _rollout_corr_debug_limit()
     if limit <= 0:
@@ -414,11 +434,31 @@ def _debug_forward_io_snapshot(
             for key in ("input_ids_rmpad_rolled", "temperature_rmpad", "temperature"):
                 if key in output_args:
                     output_args_summary[key] = _debug_tensor_digest(output_args[key])
+        non_tensor_flags = {}
+        for key in (
+            "calculate_entropy",
+            "compute_loss",
+            "distillation_use_topk",
+            "use_remove_padding",
+            "use_dynamic_bsz",
+            "use_fused_kernels",
+            "micro_batch_size_per_gpu",
+            "max_token_len_per_gpu",
+            "batch_num_tokens",
+            "disable_auto_offload",
+        ):
+            try:
+                non_tensor_flags[key] = tu.get(micro_batch, key=key)
+            except Exception:
+                pass
+        runtime_context = dict(runtime_context or {})
+        runtime_context.setdefault("torch_grad_enabled", torch.is_grad_enabled())
         print(
             "[RolloutCorrDebug][fsdp_forward_io] "
             f"stage={stage} count={count} rank={rank} forward_only={forward_only} "
             f"batch_rows={n_rows} shown_rows={len(rows)} "
             f"keys={list(micro_batch.keys())} "
+            f"runtime_context={runtime_context} non_tensor_flags={non_tensor_flags} "
             f"model_inputs={model_inputs_summary} output_args={output_args_summary} "
             f"rows={rows} top_logprob_details={top_details}",
             flush=True,
@@ -1786,19 +1826,26 @@ class FSDPEngineWithLMHead(FSDPEngine):
         _log_memory("forward_step.after_micro_batch_to_device", rank=rank, dp_rank=dp_rank)
         model_inputs, output_args = self.prepare_model_inputs(micro_batch=micro_batch)
         _log_memory("forward_step.after_prepare_model_inputs", rank=rank, dp_rank=dp_rank)
+        autocast_dtype = getattr(self, "_autocast_dtype", torch.bfloat16)
+        runtime_context = {
+            "module_training": getattr(self.module, "training", None),
+            "torch_grad_enabled": torch.is_grad_enabled(),
+            "autocast_dtype": str(autocast_dtype),
+            "fsdp_version": fsdp_version(self.module),
+        }
         _debug_forward_io_snapshot(
             "after_prepare_model_inputs",
             micro_batch,
             forward_only=forward_only,
             model_inputs=model_inputs,
             output_args=output_args,
+            runtime_context=runtime_context,
         )
 
         # Honor mixed_precision.param_dtype resolved during FSDP setup. When dtype is fp32,
         # autocast is a no-op at best and a footgun at worst, so skip it entirely.
         # getattr fallback: some subclasses (e.g. VeOmniEngine) bypass FSDPEngine.__init__
         # and _build_fsdp_module, so self._autocast_dtype may not be set.
-        autocast_dtype = getattr(self, "_autocast_dtype", torch.bfloat16)
         autocast_ctx: ContextManager = (
             nullcontext()
             if autocast_dtype == torch.float32
@@ -1821,6 +1868,12 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 model_inputs=model_inputs,
                 output_args=output_args,
                 model_output=model_output,
+                runtime_context={
+                    **runtime_context,
+                    "module_training": getattr(self.module, "training", None),
+                    "torch_grad_enabled": torch.is_grad_enabled(),
+                    "autocast_enabled": autocast_dtype != torch.float32,
+                },
             )
 
             if loss_function is not None:

@@ -142,6 +142,90 @@ def _debug_media_summary(items: Optional[list[Any]], max_items: int = 4) -> list
     return rows
 
 
+def _debug_logprob_stats(values: list[float]) -> dict:
+    if not values:
+        return {"count": 0}
+    tensor = torch.tensor(values, dtype=torch.float32)
+    return {
+        "count": len(values),
+        "mean": float(tensor.mean().item()),
+        "min": float(tensor.min().item()),
+        "max": float(tensor.max().item()),
+    }
+
+
+def _debug_token_detail_limit() -> int:
+    try:
+        return int(os.getenv("VERL_ROLLOUT_CORR_DEBUG_TOKEN_LIMIT", "4096"))
+    except ValueError:
+        return 4096
+
+
+def _debug_slice_limit(total: int) -> int:
+    limit = _debug_token_detail_limit()
+    if limit <= 0:
+        return total
+    return min(total, limit)
+
+
+def _debug_extract_prompt_token_logprobs(
+    prompt_logprobs, token_ids: list[int], start_pos: int
+) -> tuple[list[float], list[dict], bool]:
+    values = []
+    per_token = []
+    if prompt_logprobs is None:
+        return values, [{"error": "missing_prompt_logprobs"}], False
+
+    token_limit = _debug_slice_limit(len(token_ids))
+    for offset, token_id in enumerate(token_ids[:token_limit]):
+        prompt_pos = start_pos + offset
+        if prompt_pos >= len(prompt_logprobs):
+            per_token.append({"offset": offset, "token_id": int(token_id), "error": "position_out_of_range"})
+            break
+        logprobs_dict = prompt_logprobs[prompt_pos]
+        if not logprobs_dict:
+            per_token.append({"offset": offset, "token_id": int(token_id), "error": "empty_logprobs"})
+            continue
+
+        matched = None
+        try:
+            matched = logprobs_dict.get(token_id)
+        except Exception:
+            matched = None
+        if matched is None:
+            try:
+                matched = logprobs_dict.get(str(token_id))
+            except Exception:
+                matched = None
+        matched_token_id = token_id
+        exact_match = matched is not None
+        if matched is None:
+            try:
+                matched_token_id, matched = next(iter(logprobs_dict.items()))
+            except Exception:
+                per_token.append({"offset": offset, "token_id": int(token_id), "error": "iter_logprobs_failed"})
+                continue
+
+        try:
+            logprob = float(matched.logprob)
+        except Exception:
+            per_token.append({"offset": offset, "token_id": int(token_id), "error": "missing_logprob"})
+            continue
+        values.append(logprob)
+        per_token.append(
+            {
+                "offset": offset,
+                "prompt_pos": prompt_pos,
+                "token_id": int(token_id),
+                "matched_token_id": int(matched_token_id),
+                "exact_match": exact_match,
+                "logprob": logprob,
+                "rank": getattr(matched, "rank", None),
+            }
+        )
+    return values, per_token, len(token_ids) > token_limit
+
+
 def _debug_vllm_mm_processor_summary(processor, image_data: Optional[list[Any]]) -> dict:
     if processor is None or not image_data:
         return {}
@@ -235,6 +319,7 @@ class vLLMHttpServer:
         self.global_steps = None
         self._logged_qwen_vl_dedup = False
         self._rollout_logprob_debug_count = 0
+        self._rollout_teacher_forced_debug_count = 0
 
         if self.rollout_mode != RolloutMode.HYBRID and self.config.load_format == "dummy":
             logger.warning(f"rollout mode is {self.rollout_mode}, load_format is dummy, set to auto")
@@ -671,12 +756,14 @@ class vLLMHttpServer:
             debug_limit = int(os.getenv("VERL_ROLLOUT_CORR_DEBUG_LIMIT", "10"))
             if self._rollout_logprob_debug_count < debug_limit and log_probs:
                 log_probs_tensor = torch.tensor(log_probs, dtype=torch.float32)
-                preview = [
+                token_limit = _debug_slice_limit(len(log_probs))
+                per_token_logprobs = [
                     {
+                        "offset": i,
                         "token_id": int(token_ids[i]),
                         "logprob": float(log_probs[i]),
                     }
-                    for i in range(min(12, len(log_probs)))
+                    for i in range(token_limit)
                 ]
                 print(
                     "[RolloutCorrDebug][vllm_logprobs] "
@@ -696,10 +783,104 @@ class vLLMHttpServer:
                     f"mean={log_probs_tensor.mean().item():.6f} "
                     f"min={log_probs_tensor.min().item():.6f} "
                     f"max={log_probs_tensor.max().item():.6f} "
-                    f"first_tokens={preview}",
+                    f"token_detail_limit={_debug_token_detail_limit()} "
+                    f"per_token_logprobs_truncated={len(log_probs) > token_limit} "
+                    f"per_token_logprobs={per_token_logprobs}",
                     flush=True,
                 )
                 self._rollout_logprob_debug_count += 1
+
+            if self._rollout_teacher_forced_debug_count < debug_limit and token_ids:
+                self._rollout_teacher_forced_debug_count += 1
+                try:
+                    full_prompt_ids = list(prompt_ids) + list(token_ids)
+                    if len(full_prompt_ids) + 1 > self.config.max_model_len:
+                        print(
+                            "[RolloutCorrDebug][vllm_teacher_forced_logprobs] "
+                            f"request_id={request_id} skipped=context_too_long "
+                            f"full_prompt_len={len(full_prompt_ids)} max_model_len={self.config.max_model_len}",
+                            flush=True,
+                        )
+                    else:
+                        tf_prompt = TokensPrompt(
+                            prompt_token_ids=full_prompt_ids,
+                            multi_modal_data=dict(multi_modal_data),
+                        )
+                        tf_sampling_params = SamplingParams(
+                            max_tokens=1,
+                            temperature=1.0,
+                            prompt_logprobs=0,
+                        )
+                        tf_request_id = f"{request_id}:rollout-corr-teacher-forced"
+                        tf_generator = self.engine.generate(
+                            prompt=tf_prompt,
+                            sampling_params=tf_sampling_params,
+                            request_id=tf_request_id,
+                            lora_request=lora_request,
+                            priority=priority,
+                        )
+                        tf_res: Optional[RequestOutput] = None
+                        async for output in tf_generator:
+                            tf_res = output
+                        assert tf_res is not None
+                        tf_log_probs, tf_per_token, tf_truncated = _debug_extract_prompt_token_logprobs(
+                            tf_res.prompt_logprobs,
+                            list(token_ids),
+                            len(prompt_ids),
+                        )
+                        compare_limit = min(_debug_slice_limit(len(token_ids)), len(log_probs), len(tf_log_probs))
+                        per_token_compare = [
+                            {
+                                "offset": i,
+                                "token_id": int(token_ids[i]),
+                                "decode_logprob": float(log_probs[i]),
+                                "teacher_forced_logprob": float(tf_log_probs[i]),
+                                "tf_minus_decode": float(tf_log_probs[i] - log_probs[i]),
+                            }
+                            for i in range(compare_limit)
+                        ]
+                        min_len = min(len(log_probs), len(tf_log_probs))
+                        diff_stats = {}
+                        if min_len > 0:
+                            diff_stats = _debug_logprob_stats(
+                                [float(tf_log_probs[i] - log_probs[i]) for i in range(min_len)]
+                            )
+                        tf_prompt_logprobs_len = (
+                            len(tf_res.prompt_logprobs) if tf_res.prompt_logprobs is not None else None
+                        )
+                        print(
+                            "[RolloutCorrDebug][vllm_teacher_forced_logprobs] "
+                            f"request_id={request_id} "
+                            f"tf_request_id={tf_request_id} "
+                            f"global_steps={self.global_steps} "
+                            f"vllm_version={vllm.__version__} "
+                            f"raw_prompt_len={raw_prompt_len} "
+                            f"dedup_prompt_len={len(prompt_ids)} "
+                            f"response_len={len(token_ids)} "
+                            f"full_prompt_len={len(full_prompt_ids)} "
+                            f"raw_prompt_digest={raw_prompt_digest} "
+                            f"dedup_prompt_digest={dedup_prompt_digest} "
+                            f"response_digest={_debug_sequence_digest(token_ids)} "
+                            f"image_summary={_debug_media_summary(image_data)} "
+                            f"mm_processor_summary={mm_processor_summary} "
+                            f"decode_stats={_debug_logprob_stats([float(x) for x in log_probs])} "
+                            f"teacher_forced_stats={_debug_logprob_stats(tf_log_probs)} "
+                            f"teacher_forced_minus_decode_stats={diff_stats} "
+                            f"teacher_forced_prompt_logprobs_len={tf_prompt_logprobs_len} "
+                            f"teacher_forced_output_token_ids={list(tf_res.outputs[0].token_ids)} "
+                            f"token_detail_limit={_debug_token_detail_limit()} "
+                            f"teacher_forced_per_token_truncated={tf_truncated} "
+                            f"compare_per_token_truncated={len(token_ids) > compare_limit} "
+                            f"teacher_forced_per_token_logprobs={tf_per_token} "
+                            f"per_token_compare={per_token_compare}",
+                            flush=True,
+                        )
+                except Exception as exc:
+                    print(
+                        "[RolloutCorrDebug][vllm_teacher_forced_logprobs] "
+                        f"request_id={request_id} failed={type(exc).__name__}: {exc}",
+                        flush=True,
+                    )
 
         routed_experts = None
         if self.config.enable_rollout_routing_replay:

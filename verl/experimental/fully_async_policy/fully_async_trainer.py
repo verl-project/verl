@@ -92,6 +92,130 @@ def _tensor_bytes(obj: Any) -> int:
     return 0
 
 
+def _debug_dataproto_item(batch: DataProto, key: str, row: int):
+    try:
+        values = batch.non_tensor_batch.get(key, None)
+        if values is None or row >= len(values):
+            return None
+        value = values[row]
+        if hasattr(value, "item"):
+            try:
+                value = value.item()
+            except Exception:
+                pass
+        return value
+    except Exception:
+        return None
+
+
+def _rollout_corr_debug_token_limit() -> int:
+    try:
+        return int(os.getenv("VERL_ROLLOUT_CORR_DEBUG_TOKEN_LIMIT", "4096"))
+    except ValueError:
+        return 4096
+
+
+def _debug_slice_limit(total: int) -> int:
+    limit = _rollout_corr_debug_token_limit()
+    if limit <= 0:
+        return total
+    return min(total, limit)
+
+
+def _debug_actor_train_eval_probe_snapshot(
+    batch: DataProto,
+    eval_log_probs: torch.Tensor,
+    train_log_probs: torch.Tensor,
+    stage: str,
+) -> None:
+    limit = _rollout_corr_debug_limit()
+    if limit <= 0:
+        return
+    try:
+        response_mask = batch.batch["response_mask"].bool()
+        responses = batch.batch["responses"]
+        valid = response_mask & torch.isfinite(eval_log_probs) & torch.isfinite(train_log_probs)
+        if valid.sum().item() == 0:
+            print(f"[RolloutCorrDebug][actor_train_eval_probe] stage={stage} valid_tokens=0", flush=True)
+            return
+
+        eval_valid = eval_log_probs[valid].detach().float()
+        train_valid = train_log_probs[valid].detach().float()
+        diff_valid = train_valid - eval_valid
+        valid_counts = response_mask.sum(dim=-1)
+        denom = valid_counts.clamp_min(1)
+        row_score = (((train_log_probs - eval_log_probs) * response_mask).sum(dim=-1) / denom).abs().float()
+
+        candidates = list(range(min(limit, response_mask.shape[0])))
+        top_k = min(limit, row_score.numel())
+        if top_k > 0:
+            candidates.extend(torch.topk(row_score, k=top_k).indices.detach().cpu().tolist())
+
+        rows = []
+        seen = set()
+        for row in candidates:
+            if row in seen or row >= response_mask.shape[0]:
+                continue
+            seen.add(row)
+            mask = response_mask[row]
+            valid_positions = mask.nonzero(as_tuple=False).reshape(-1)
+            token_limit = _debug_slice_limit(int(valid_positions.numel()))
+            positions = valid_positions[:token_limit]
+            row_info = {
+                "row": int(row),
+                "debug_row_id": _debug_dataproto_item(batch, "debug_row_id", row),
+                "uid": _debug_dataproto_item(batch, "uid", row),
+                "trajectory_role": _debug_dataproto_item(batch, "trajectory_role", row),
+                "turn_number": _debug_dataproto_item(batch, "turn_number", row),
+                "rollout_group_id": _debug_dataproto_item(batch, "rollout_group_id", row),
+                "valid_tokens": int(valid_counts[row].detach().cpu()),
+                "token_detail_limit": _rollout_corr_debug_token_limit(),
+                "tokens_truncated": int(valid_positions.numel()) > token_limit,
+            }
+            if valid_counts[row].item() > 0:
+                eval_row = eval_log_probs[row][mask].detach().float().cpu()
+                train_row = train_log_probs[row][mask].detach().float().cpu()
+                row_info["actor_eval_mean"] = float(eval_row.mean().item())
+                row_info["actor_train_mode_no_grad_mean"] = float(train_row.mean().item())
+                row_info["train_minus_eval_mean"] = float((train_row - eval_row).mean().item())
+                row_info["train_minus_eval_absmean"] = float((train_row - eval_row).abs().mean().item())
+
+            tokens = []
+            for pos_t in positions:
+                pos = int(pos_t.detach().cpu())
+                eval_val = eval_log_probs[row, pos].detach().float().cpu()
+                train_val = train_log_probs[row, pos].detach().float().cpu()
+                tokens.append(
+                    {
+                        "pos": pos,
+                        "token_id": int(responses[row, pos].detach().cpu()),
+                        "actor_eval_logprob": float(eval_val.item()),
+                        "actor_train_mode_no_grad_logprob": float(train_val.item()),
+                        "train_minus_eval": float((train_val - eval_val).item()),
+                    }
+                )
+            row_info["tokens"] = tokens
+            rows.append(row_info)
+
+        print(
+            "[RolloutCorrDebug][actor_train_eval_probe] "
+            f"stage={stage} shape={tuple(eval_log_probs.shape)} valid_tokens={int(valid.sum().item())} "
+            f"actor_eval_mean={eval_valid.mean().item():.6f} "
+            f"actor_train_mode_no_grad_mean={train_valid.mean().item():.6f} "
+            f"train_minus_eval_mean={diff_valid.mean().item():.6f} "
+            f"train_minus_eval_absmean={diff_valid.abs().mean().item():.6f} "
+            f"train_minus_eval_min={diff_valid.min().item():.6f} "
+            f"train_minus_eval_max={diff_valid.max().item():.6f} "
+            f"rows={rows}",
+            flush=True,
+        )
+    except Exception as exc:
+        print(
+            f"[RolloutCorrDebug][actor_train_eval_probe] stage={stage} failed={type(exc).__name__}: {exc}",
+            flush=True,
+        )
+
+
 def _object_bytes(obj: Any, *, _seen: set[int] | None = None, _depth: int = 0) -> int:
     """Best-effort recursive host-memory estimator for Python/numpy/torch objects."""
     if _seen is None:
@@ -1014,9 +1138,32 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             log_probs = tu.get(output, "log_probs")
             log_probs = no_padding_2_padding(log_probs, batch_td).float()
             _debug_actor_eval_alignment_snapshot(batch, log_probs, "fully_async_before_update_actor_eval")
+
+            train_probe_td = batch.to_tensordict()
+            train_probe_td = left_right_2_no_padding(train_probe_td)
+            tu.assign_non_tensor(
+                train_probe_td,
+                calculate_entropy=False,
+                compute_loss=False,
+            )
+            train_probe_output = self.actor_rollout_wg.debug_actor_train_mode_log_prob(train_probe_td)
+            train_probe_log_probs = tu.get(train_probe_output, "log_probs")
+            train_probe_log_probs = no_padding_2_padding(train_probe_log_probs, train_probe_td).float()
+            _debug_actor_eval_alignment_snapshot(
+                batch,
+                train_probe_log_probs,
+                "fully_async_before_update_actor_train_mode_no_grad",
+            )
+            _debug_actor_train_eval_probe_snapshot(
+                batch,
+                log_probs,
+                train_probe_log_probs,
+                "fully_async_before_update",
+            )
             print(
                 "[FullyAsyncTrainer][actor_eval_logprob_debug][exit] "
-                f"ts={time.time():.3f} log_probs_shape={_debug_shape(log_probs)}",
+                f"ts={time.time():.3f} log_probs_shape={_debug_shape(log_probs)} "
+                f"train_probe_log_probs_shape={_debug_shape(train_probe_log_probs)}",
                 flush=True,
             )
         except Exception as exc:

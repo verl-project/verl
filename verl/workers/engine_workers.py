@@ -34,7 +34,7 @@ from verl.single_controller.base.decorator import Dispatch, make_nd_compute_data
 from verl.trainer.distillation import distillation_ppo_loss, is_distillation_enabled
 from verl.utils import tensordict_utils as tu
 from verl.utils.config import omega_conf_to_dataclass
-from verl.utils.device import get_device_name, is_npu_available, set_expandable_segments
+from verl.utils.device import get_device_name, get_torch_device, is_npu_available, set_expandable_segments
 from verl.utils.distributed import initialize_global_process_group_ray, set_numa_affinity
 from verl.utils.flops_counter import FlopsCounter
 from verl.utils.import_utils import import_external_libs
@@ -617,6 +617,75 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
         return final_output
 
+    def debug_train_mode_infer_batch(self, data: TensorDict) -> TensorDict:
+        """Run the log-prob forward path under module.train(), without loss/backward."""
+        self._debug_model_weight_digest("before_debug_train_mode_infer_batch")
+        global_token_num = tu.get(data, key="global_token_num")
+        disable_auto_offload = tu.get(data, key="disable_auto_offload", default=False)
+        no_lora_adapter = tu.pop(data, key="no_lora_adapter", default=False)
+        images_seqlens = tu.get(data, key="images_seqlens", default=None)
+        print(
+            "[TrainingWorker][debug_train_mode_infer_batch][enter] "
+            f"ts={time.time():.3f} rank={torch.distributed.get_rank()} "
+            f"dp_rank={self.engine.get_data_parallel_rank()} "
+            f"dp_size={self.engine.get_data_parallel_size()} "
+            f"world_size={torch.distributed.get_world_size()} "
+            f"no_lora_adapter={no_lora_adapter} disable_auto_offload={disable_auto_offload} "
+            f"summary={_debug_tensordict_summary(data)}",
+            flush=True,
+        )
+
+        default_keys = dict(
+            use_remove_padding=self.model_config.get("use_remove_padding", False),
+            use_dynamic_bsz=self.engine_config.use_dynamic_bsz,
+            max_token_len_per_gpu=self.engine_config.infer_max_token_len_per_gpu,
+            micro_batch_size_per_gpu=self.engine_config.infer_micro_batch_size_per_gpu,
+            use_fused_kernels=self.engine_config.use_fused_kernels,
+        )
+        for key, val in default_keys.items():
+            if key not in data.keys():
+                tu.assign_non_tensor(data, **{key: val})
+        tu.assign_non_tensor(data, compute_loss=False, calculate_entropy=False)
+
+        cpu_rng_state = torch.get_rng_state()
+        device_module = get_torch_device()
+        accelerator_rng_state = (
+            device_module.get_rng_state_all()
+            if hasattr(device_module, "get_rng_state_all") and device_module.is_available()
+            else None
+        )
+        try:
+            with (
+                self.engine.train_mode(disable_auto_offload=disable_auto_offload),
+                Timer(name="debug_train_mode_infer_batch", logger=None) as timer,
+            ):
+                adapter_ctx = self.engine.disable_adapter() if no_lora_adapter else nullcontext()
+                with adapter_ctx:
+                    output = self.engine.infer_batch(data, loss_function=None)
+            delta_time = timer.last
+        finally:
+            torch.set_rng_state(cpu_rng_state)
+            if accelerator_rng_state is not None:
+                device_module.set_rng_state_all(accelerator_rng_state)
+
+        if self.engine.is_mp_src_rank_with_outputs():
+            final_output = self._postprocess_output(
+                output,
+                global_token_num=global_token_num,
+                delta_time=delta_time,
+                forward_only=True,
+                images_seqlens=images_seqlens,
+            ).cpu()
+        else:
+            final_output = None
+
+        print(
+            "[TrainingWorker][debug_train_mode_infer_batch][exit] "
+            f"ts={time.time():.3f} rank={torch.distributed.get_rank()} output_none={final_output is None}",
+            flush=True,
+        )
+        return final_output
+
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):
         return self.engine.save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep)
@@ -843,6 +912,14 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @_with_routing_replay_flag(enabled=True)
     def compute_log_prob(self, data: TensorDict) -> TensorDict:
         output = self.actor.infer_batch(data)
+
+        return output.cpu() if output is not None else None
+
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
+    @DistProfiler.annotate(color="blue", role="actor_debug_train_mode_log_prob")
+    @_with_routing_replay_flag(enabled=True)
+    def debug_actor_train_mode_log_prob(self, data: TensorDict) -> TensorDict:
+        output = self.actor.debug_train_mode_infer_batch(data)
 
         return output.cpu() if output is not None else None
 

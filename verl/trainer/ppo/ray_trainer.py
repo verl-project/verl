@@ -139,6 +139,20 @@ def _rollout_corr_debug_limit() -> int:
         return 5
 
 
+def _rollout_corr_debug_token_limit() -> int:
+    try:
+        return int(os.getenv("VERL_ROLLOUT_CORR_DEBUG_TOKEN_LIMIT", "4096"))
+    except ValueError:
+        return 4096
+
+
+def _debug_slice_limit(total: int) -> int:
+    limit = _rollout_corr_debug_token_limit()
+    if limit <= 0:
+        return total
+    return min(total, limit)
+
+
 def _debug_ref_row_id_summary(expected: torch.Tensor, returned: torch.Tensor | None) -> dict:
     if returned is None:
         return {"returned": False}
@@ -202,11 +216,15 @@ def _debug_ref_alignment_snapshot(data, ref_log_probs: torch.Tensor, row_ids: to
             if row in seen or row >= response_mask.shape[0]:
                 continue
             seen.add(row)
-            positions = response_mask[row].nonzero(as_tuple=False).reshape(-1)[:limit]
+            valid_positions = response_mask[row].nonzero(as_tuple=False).reshape(-1)
+            token_limit = _debug_slice_limit(int(valid_positions.numel()))
+            positions = valid_positions[:token_limit]
             row_info = {
                 "row": int(row),
                 "row_id": int(row_ids[row].detach().cpu()) if isinstance(row_ids, torch.Tensor) else None,
                 "valid_tokens": int(valid_counts[row].detach().cpu()),
+                "token_detail_limit": _rollout_corr_debug_token_limit(),
+                "tokens_truncated": int(valid_positions.numel()) > token_limit,
             }
             tokens = []
             for pos_t in positions:
@@ -295,7 +313,9 @@ def _debug_actor_eval_alignment_snapshot(batch: DataProto, actor_eval_log_probs:
                 continue
             seen.add(row)
             mask = response_mask[row]
-            positions = mask.nonzero(as_tuple=False).reshape(-1)[:limit]
+            valid_positions = mask.nonzero(as_tuple=False).reshape(-1)
+            token_limit = _debug_slice_limit(int(valid_positions.numel()))
+            positions = valid_positions[:token_limit]
             row_info = {
                 "row": int(row),
                 "debug_row_id": _debug_non_tensor_item(batch, "debug_row_id", row),
@@ -304,6 +324,8 @@ def _debug_actor_eval_alignment_snapshot(batch: DataProto, actor_eval_log_probs:
                 "turn_number": _debug_non_tensor_item(batch, "turn_number", row),
                 "rollout_group_id": _debug_non_tensor_item(batch, "rollout_group_id", row),
                 "valid_tokens": int(valid_counts[row].detach().cpu()),
+                "token_detail_limit": _rollout_corr_debug_token_limit(),
+                "tokens_truncated": int(valid_positions.numel()) > token_limit,
             }
             if valid_counts[row].item() > 0:
                 actor_row = actor_eval_log_probs[row][mask].detach().float().cpu()

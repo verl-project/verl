@@ -37,6 +37,20 @@ def _rollout_corr_debug_limit() -> int:
         return 5
 
 
+def _rollout_corr_debug_token_limit() -> int:
+    try:
+        return int(os.getenv("VERL_ROLLOUT_CORR_DEBUG_TOKEN_LIMIT", "4096"))
+    except ValueError:
+        return 4096
+
+
+def _debug_slice_limit(total: int) -> int:
+    limit = _rollout_corr_debug_token_limit()
+    if limit <= 0:
+        return total
+    return min(total, limit)
+
+
 def _debug_tensor_digest(value, row_idx: int | None = None, max_items: int = 2048) -> dict | None:
     if not isinstance(value, torch.Tensor):
         return None
@@ -204,11 +218,14 @@ def _debug_rollout_corr_logprob_alignment(
             valid_cols = torch.nonzero(response_mask[row_idx].detach().cpu().bool(), as_tuple=False).flatten()
             if valid_cols.numel() == 0:
                 continue
-            cols = valid_cols[:12]
+            token_limit = _debug_slice_limit(int(valid_cols.numel()))
+            cols = valid_cols[:token_limit]
             rows.append(
                 {
                     "row": int(row_idx),
                     "valid_tokens": int(valid_cols.numel()),
+                    "token_detail_limit": _rollout_corr_debug_token_limit(),
+                    "tokens_truncated": int(valid_cols.numel()) > token_limit,
                     "seq_rollout_minus_current": float(seq_diff[row_idx].item()),
                     "metadata": row_metadata[row_idx] if row_metadata and row_idx < len(row_metadata) else {},
                     "input_digests": _debug_row_inputs(data, row_idx),
