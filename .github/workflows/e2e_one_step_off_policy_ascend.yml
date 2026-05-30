@@ -94,14 +94,22 @@ jobs:
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
       ACTOR_STRATEGY: "fsdp2"
       device_name: "npu"
+      UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi"
+      UV_INDEX_STRATEGY: unsafe-best-match
+      UV_INSECURE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
+      UV_HTTP_TIMEOUT: 120
+      UV_NO_CACHE: "1"
+      UV_SYSTEM_PYTHON: "1"
     steps:
       - name: Check npu and CANN info
         run: |
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
           npu-smi info
+      - name: Install uv
+        run: pip install uv
       - name: Check initial pip list from image
         run: |
-          pip list
+          uv pip list
       - name: Checkout verl-project/verl repo
         uses: actions/checkout@v4
         with:
@@ -109,10 +117,10 @@ jobs:
           clean: true
       - name: Install the current repository
         run: |
-          pip install --no-deps -e .
+          uv pip install --no-deps -e .
       - name: Check final pip list
         run: |
-          pip list
+          uv pip list
       - name: Prepare weights
         run: |
           ln -s /root/.cache/models ~/models
@@ -138,14 +146,22 @@ jobs:
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
       ACTOR_STRATEGY: "megatron"
       device_name: "npu"
+      UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi"
+      UV_INDEX_STRATEGY: unsafe-best-match
+      UV_INSECURE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
+      UV_HTTP_TIMEOUT: 120
+      UV_NO_CACHE: "1"
+      UV_SYSTEM_PYTHON: "1"
     steps:
       - name: Check npu and CANN info
         run: |
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
           npu-smi info
+      - name: Install uv
+        run: pip install uv
       - name: Check initial pip list from image
         run: |
-          pip list
+          uv pip list
       - name: Checkout verl-project/verl repo
         uses: actions/checkout@v4
         with:
@@ -153,10 +169,10 @@ jobs:
           clean: true
       - name: Install the current repository
         run: |
-          pip install --no-deps -e .
+          uv pip install --no-deps -e .
       - name: Check final pip list
         run: |
-          pip list
+          uv pip list
       - name: Prepare weights
         run: |
           ln -s /root/.cache/models ~/models
