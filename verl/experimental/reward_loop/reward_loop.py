@@ -339,10 +339,17 @@ class RewardLoopManager:
         batch = TensorDict({"rm_scores": rm_scores}, batch_size=len(data))
 
         reward_extra_infos = [output.get("reward_extra_info", {}) for output in outputs_flat]
-        reward_extra_keys = list(reward_extra_infos[0].keys())
+        # Collect the union of keys across all outputs rather than only the first
+        # one. Different samples may produce different reward_extra_info keys; using
+        # only outputs[0] either raises KeyError (a later sample is missing a key
+        # the first one has) or silently drops keys (present only in later samples).
+        reward_extra_keys = list(dict.fromkeys(key for info in reward_extra_infos for key in info))
         non_tensor_batch = {}
         for key in reward_extra_keys:
-            non_tensor_batch[key] = np.array([info[key] for info in reward_extra_infos])
+            # Preserve the original dtype on the common (consistent-keys) path; only
+            # missing values fall back to None (yielding an object array) instead of
+            # raising KeyError.
+            non_tensor_batch[key] = np.array([info.get(key, None) for info in reward_extra_infos])
 
         if self.reward_model_manager is not None:
             self.reward_model_manager.sleep()
