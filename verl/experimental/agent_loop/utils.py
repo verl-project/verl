@@ -101,8 +101,10 @@ def add_generation_prompt_for_gpt_oss(message_content: str) -> str:
 def build_gpt_oss_tool_response_text(messages: list[dict[str, Any]], tool_call_names: list[str]) -> str:
     """Build gpt-oss tool response text (manual formatting + generation prompt)."""
     tool_response_texts: list[str] = []
-    for i, tool_msg in enumerate(messages):
-        actual_tool_name = tool_call_names[i]
+    # Use strict zip so a messages/tool_call_names length mismatch fails loudly
+    # instead of raising an opaque IndexError or silently dropping trailing names
+    # (matches the gemma4 path in tool_agent_loop.py).
+    for tool_msg, actual_tool_name in zip(messages, tool_call_names, strict=True):
         formatted = format_gpt_oss_tool_response_manually(tool_msg["content"], actual_tool_name)
         tool_response_texts.append(formatted)
     return add_generation_prompt_for_gpt_oss("".join(tool_response_texts))
