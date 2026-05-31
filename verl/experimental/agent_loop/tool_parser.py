@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import ast
 import json
 import logging
 import os
@@ -280,11 +281,14 @@ class Qwen3XMLToolParser(ToolParser):
                             f"JSON object in tool '{func_name}', will try other methods to parse it."
                         )
                 try:
-                    param_value = eval(param_value)
+                    # Use ast.literal_eval instead of eval: the parameter value comes from
+                    # untrusted model output, and eval() would allow arbitrary code execution.
+                    # literal_eval only parses Python literals (lists, tuples, dicts, numbers, ...).
+                    param_value = ast.literal_eval(param_value)
                 except Exception:
                     logger.warning(
                         f"Parsed value '{param_value}' of parameter '{param_name}' cannot be converted "
-                        f"via Python `eval()` in tool '{func_name}', degenerating to string."
+                        f"via `ast.literal_eval()` in tool '{func_name}', degenerating to string."
                     )
                 return param_value
 
