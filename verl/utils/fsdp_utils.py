@@ -667,7 +667,15 @@ def layered_summon_lora_params(fsdp_module) -> OrderedDict:
         # ``_is_root`` attribute.
         is_fsdp1 = fsdp_version(submodule) == 1
 
-        if not any("lora_" in n for n, _ in submodule.named_parameters(recurse=True)):
+        # Exclude nested FSDP children from both the pre-check and the state_dict so
+        # their params are not gathered here and again when their own unit is visited.
+        nested_fsdp_names = {n for n, m in submodule.named_modules() if n != "" and fsdp_version(m) > 0}
+
+        if not any(
+            "lora_" in n
+            for n, _ in submodule.named_parameters()
+            if not any(n.startswith(f"{nn}.") for nn in nested_fsdp_names)
+        ):
             continue
 
         if is_fsdp1:
@@ -677,7 +685,10 @@ def layered_summon_lora_params(fsdp_module) -> OrderedDict:
         )
 
         with summon_ctx:
-            sub_state_dict = dict(submodule.named_parameters())
+            sub_state_dict = {
+                n: p for n, p in submodule.named_parameters()
+                if not any(n.startswith(f"{nn}.") for nn in nested_fsdp_names)
+            }
             sub_lora_params = get_peft_model_state_dict(peft_model, state_dict=sub_state_dict)
             if not sub_lora_params:
                 continue
