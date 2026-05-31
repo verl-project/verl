@@ -465,9 +465,9 @@ class TorchTitanEngine(BaseEngine):
         self.checkpointer.folder = parent_dir
 
         # Extract step number from path (verl uses global_step_N format)
-        match = re.search(r"global_step_(\d+)", local_path)
-        if match:
-            step = int(match.group(1))
+        matches = re.findall(r"global_step_(\d+)", local_path)
+        if matches:
+            step = int(matches[-1])
             self.checkpointer.load(step=step)
         else:
             # Fallback to latest

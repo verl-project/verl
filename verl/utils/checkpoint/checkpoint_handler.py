@@ -31,9 +31,12 @@ from verl.workers.engine import BaseEngine
 
 
 def extract_step(path):
-    match = re.search(r"global_step_(\d+)", path)
-    if match:
-        return int(match.group(1))
+    # A path can contain more than one "global_step_<n>" segment (e.g. resuming
+    # from a checkpoint nested under an older run). The actual checkpoint folder
+    # is the last such segment, so take the last match rather than the first.
+    matches = re.findall(r"global_step_(\d+)", path)
+    if matches:
+        return int(matches[-1])
     return None
 
 
