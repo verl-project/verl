@@ -893,11 +893,17 @@ def _vlm_position_ids_need_text_axis(processor: Any) -> bool:
     """Return whether model forward expects text axis + 3 vision axes.
 
     Qwen2-VL/GLM4V wrappers expose ``process_position_ids`` and expect 4 axes.
-    Current Qwen3-VL rotary embedding consumes only the 3 THW axes.
+    Qwen3-VL consumes 3 THW axes for rotary embedding, but recent transformers
+    also use a leading text axis to build packed-sequence causal masks.
     """
     override = getattr(processor, "position_ids_need_text_axis", None)
     if override is not None:
         return bool(override)
+    processor_name = processor.__class__.__name__
+    config = getattr(processor, "config", None)
+    model_type = getattr(config, "model_type", None)
+    if processor_name == "Qwen3VLProcessor" or model_type in {"qwen3_vl", "qwen3_vl_moe"}:
+        return True
     fn = getattr(processor, "get_rope_index", None)
     raw_fn = getattr(fn, "__func__", fn)
     module_name = getattr(raw_fn, "__module__", "")
@@ -910,6 +916,8 @@ def _append_text_axis_if_needed(
 ) -> torch.Tensor:
     position_ids = _normalize_vlm_position_ids(position_ids)
     if not _vlm_position_ids_need_text_axis(processor):
+        return position_ids
+    if position_ids.dim() == 3 and position_ids.shape[1] == 4:
         return position_ids
     text_position_ids = _compute_text_position_ids_1d(input_ids, attention_mask)
     return torch.cat((text_position_ids, position_ids), dim=1)
@@ -928,8 +936,8 @@ def compute_vlm_position_ids(
 ) -> torch.Tensor:
     """Compute model-specific VLM position ids.
 
-    Some wrappers (Qwen2-VL/GLM4V) expect 4 axes: text + THW. Current Qwen3-VL
-    expects only the 3 THW axes. This helper keeps that distinction centralized.
+    Some VLMs expect 4 axes: text + THW. For Qwen3-VL the text axis is also
+    needed by transformers packed FA2 masking when attention_mask is omitted.
     """
     if processor is None:
         return compute_position_id_with_mask(attention_mask)

@@ -140,6 +140,7 @@ def hf_processor(name_or_path, **kwargs):
                 from transformers.models.qwen3_vl import Qwen3VLModel
 
                 model_class = Qwen3VLModel
+                processor.position_ids_need_text_axis = True
             case "Glm4vImageProcessor":
                 from transformers.models.glm4v import Glm4vModel
 

@@ -70,6 +70,10 @@ class TextAxisDummyProcessor(StrictDummyProcessor):
     position_ids_need_text_axis = True
 
 
+class Qwen3VLProcessor(DummyProcessor):
+    pass
+
+
 def _object_array(values):
     arr = np.empty(len(values), dtype=object)
     for idx, value in enumerate(values):
@@ -287,6 +291,17 @@ def test_compute_vlm_position_ids_adds_text_axis_for_legacy_vl_models():
     position_ids = compute_vlm_position_ids(TextAxisDummyProcessor(), input_ids, attention_mask, {})
 
     assert position_ids.shape == (1, 4, 3)
+
+
+def test_compute_vlm_position_ids_adds_text_axis_for_qwen3vl():
+    input_ids = torch.tensor([[1, 42, 2]], dtype=torch.long)
+    attention_mask = torch.ones_like(input_ids)
+    multi_modal_inputs = {"image_grid_thw": torch.tensor([[1, 2, 2]], dtype=torch.long)}
+
+    position_ids = compute_vlm_position_ids(Qwen3VLProcessor(), input_ids, attention_mask, multi_modal_inputs)
+
+    assert position_ids.shape == (1, 4, 3)
+    assert position_ids[:, 0].tolist() == [[0, 1, 2]]
 
 
 def test_agent_loop_position_ids_skip_rope_without_image_grid():

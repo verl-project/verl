@@ -87,6 +87,7 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 device_name = get_device_name()
 _FSDP_FORWARD_IO_DEBUG_COUNTS: dict[str, int] = {}
+_FSDP_PACKED_POSITION_DEBUG_COUNTS: dict[str, int] = {}
 
 
 def _debug_shape(value):
@@ -135,6 +136,14 @@ def _fsdp_forward_io_debug_limit() -> int:
         return max(0, int(os.getenv("VERL_FSDP_FORWARD_IO_DEBUG_LIMIT", "0")))
     except ValueError:
         return 0
+
+
+def _fsdp_packed_position_debug_limit() -> int:
+    try:
+        default = os.getenv("VERL_ROLLOUT_CORR_DEBUG_LIMIT", "10")
+        return max(0, int(os.getenv("VERL_FSDP_PACKED_POSITION_DEBUG_LIMIT", default)))
+    except ValueError:
+        return 10
 
 
 def _debug_slice_limit(total: int) -> int:
@@ -200,6 +209,83 @@ def _debug_sequence_digest(values, max_items: int = 2048) -> dict:
         }
     except Exception as exc:
         return {"error": type(exc).__name__}
+
+
+def _debug_packed_position_ids(
+    stage: str,
+    micro_batch: TensorDict,
+    *,
+    input_ids,
+    position_ids_rmpad: torch.Tensor,
+) -> None:
+    limit = _fsdp_packed_position_debug_limit()
+    if limit <= 0:
+        return
+    count = _FSDP_PACKED_POSITION_DEBUG_COUNTS.get(stage, 0)
+    if count >= limit:
+        return
+    _FSDP_PACKED_POSITION_DEBUG_COUNTS[stage] = count + 1
+    try:
+        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else None
+        dp_rank = tu.get_non_tensor_data(data=micro_batch, key="dp_rank", default=None)
+        batch_rows = int(input_ids.shape[0])
+        seq_lens = None
+        if hasattr(input_ids, "offsets"):
+            offsets = input_ids.offsets()
+            seq_lens = offsets.diff().detach().cpu().tolist()
+
+        packed = position_ids_rmpad.detach()
+        if packed.dim() == 3:
+            rope_axes = int(packed.shape[0])
+            text_axis = packed[0, 0]
+            axis_zero_counts = [
+                int((packed[axis, 0].detach().long() == 0).sum().cpu().item()) for axis in range(min(rope_axes, 8))
+            ]
+        elif packed.dim() == 2:
+            rope_axes = 1
+            text_axis = packed[0]
+            axis_zero_counts = [int((text_axis.detach().long() == 0).sum().cpu().item())]
+        else:
+            rope_axes = None
+            text_axis = packed.reshape(-1)
+            axis_zero_counts = []
+
+        text_axis = text_axis.detach().long()
+        total_nnz = int(text_axis.numel())
+        zero_positions = (text_axis == 0).nonzero(as_tuple=False).flatten()
+        if total_nnz > 1:
+            diffs = torch.diff(text_axis)
+            non_unit_diff_count = int((diffs != 1).sum().cpu().item())
+            negative_diff_count = int((diffs < 0).sum().cpu().item())
+        else:
+            non_unit_diff_count = 0
+            negative_diff_count = 0
+        expected_boundaries = max(batch_rows - 1, 0)
+        looks_like_text_axis = (
+            int(zero_positions.numel()) == batch_rows
+            and negative_diff_count == expected_boundaries
+            and non_unit_diff_count == expected_boundaries
+        )
+        seq_lens_preview = seq_lens[:12] if seq_lens is not None else None
+        print(
+            "[RolloutCorrDebug][packed_position_ids] "
+            f"stage={stage} count={count} rank={rank} dp_rank={dp_rank} "
+            f"batch_rows={batch_rows} total_nnz={total_nnz} seq_lens_first={seq_lens_preview} "
+            f"position_shape={tuple(packed.shape)} rope_axes={rope_axes} "
+            f"axis_zero_counts_first={axis_zero_counts} text_zero_count={int(zero_positions.numel())} "
+            f"expected_zero_count={batch_rows} text_negative_diff_count={negative_diff_count} "
+            f"expected_boundary_count={expected_boundaries} text_non_unit_diff_count={non_unit_diff_count} "
+            f"looks_like_text_axis={looks_like_text_axis} "
+            f"text_zero_positions_first={zero_positions[:12].detach().cpu().tolist()} "
+            f"text_head={text_axis[:12].detach().cpu().tolist()} "
+            f"text_tail={text_axis[-12:].detach().cpu().tolist()}",
+            flush=True,
+        )
+    except Exception as exc:
+        print(
+            f"[RolloutCorrDebug][packed_position_ids] stage={stage} failed={type(exc).__name__}: {exc}",
+            flush=True,
+        )
 
 
 def _debug_unwrap_non_tensor(value):
@@ -1605,6 +1691,12 @@ class FSDPEngineWithLMHead(FSDPEngine):
             output_args["temperature_rmpad"] = temperature_rmpad
 
             # only pass input_ids and position_ids to enable flash_attn_varlen
+            _debug_packed_position_ids(
+                "fsdp_lmhead_prepare_model_inputs",
+                micro_batch,
+                input_ids=input_ids,
+                position_ids_rmpad=position_ids_rmpad,
+            )
 
             model_inputs = {
                 "input_ids": input_ids_rmpad,
