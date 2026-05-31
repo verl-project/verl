@@ -16,8 +16,6 @@ The concrete Engine implementation using PyTorch FullyShardedDataParallel (FSDP)
 """
 
 import gc
-import hashlib
-import json
 import logging
 import os
 import time
@@ -31,7 +29,6 @@ import torch
 import torch.distributed
 from peft import LoraConfig, TaskType, get_peft_model
 from tensordict import TensorDict
-from tensordict.tensorclass import NonTensorData, NonTensorStack
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.api import FullStateDictConfig, ShardedStateDictConfig, StateDictType
 from torch.distributed.tensor import DTensor
@@ -76,7 +73,6 @@ from verl.utils.ulysses import (
     ulysses_pad_and_slice_inputs,
 )
 from verl.workers.config import FSDPEngineConfig, FSDPOptimizerConfig, HFModelConfig
-from verl.workers.utils.padding import no_padding_2_padding
 
 from ..base import BaseEngine, BaseEngineCtx, EngineRegistry
 from ..utils import enable_full_determinism, postprocess_batch_func, prepare_micro_batches
@@ -86,8 +82,6 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 device_name = get_device_name()
-_FSDP_FORWARD_IO_DEBUG_COUNTS: dict[str, int] = {}
-_FSDP_PACKED_POSITION_DEBUG_COUNTS: dict[str, int] = {}
 
 
 def _debug_shape(value):
@@ -108,459 +102,6 @@ def _debug_sum(value):
         return total
     except Exception as exc:
         return f"<sum_failed:{type(exc).__name__}>"
-
-
-def _rollout_corr_debug_limit() -> int:
-    try:
-        return max(0, int(os.getenv("VERL_ROLLOUT_CORR_DEBUG_LIMIT", "10")))
-    except ValueError:
-        return 10
-
-
-def _rollout_corr_debug_rows() -> int:
-    try:
-        return max(0, int(os.getenv("VERL_ROLLOUT_CORR_DEBUG_ROWS", "16")))
-    except ValueError:
-        return 16
-
-
-def _rollout_corr_debug_token_limit() -> int:
-    try:
-        return int(os.getenv("VERL_ROLLOUT_CORR_DEBUG_TOKEN_LIMIT", "128"))
-    except ValueError:
-        return 128
-
-
-def _fsdp_forward_io_debug_limit() -> int:
-    try:
-        return max(0, int(os.getenv("VERL_FSDP_FORWARD_IO_DEBUG_LIMIT", "0")))
-    except ValueError:
-        return 0
-
-
-def _fsdp_packed_position_debug_limit() -> int:
-    try:
-        default = os.getenv("VERL_ROLLOUT_CORR_DEBUG_LIMIT", "10")
-        return max(0, int(os.getenv("VERL_FSDP_PACKED_POSITION_DEBUG_LIMIT", default)))
-    except ValueError:
-        return 10
-
-
-def _debug_slice_limit(total: int) -> int:
-    limit = _rollout_corr_debug_token_limit()
-    if limit <= 0:
-        return total
-    return min(total, limit)
-
-
-def _debug_tensor_digest(value, max_items: int = 2048) -> dict | None:
-    if not isinstance(value, torch.Tensor):
-        return None
-    try:
-        tensor = value.detach()
-        shape = tuple(tensor.shape)
-        dtype = str(tensor.dtype)
-        if tensor.is_nested:
-            offsets = tensor.offsets().detach().cpu().tolist() if hasattr(tensor, "offsets") else None
-            flat = tensor.values().detach().reshape(-1)
-        else:
-            offsets = None
-            flat = tensor.reshape(-1)
-        numel = int(flat.numel())
-        if numel == 0:
-            return {"shape": shape, "dtype": dtype, "numel": 0, "sha1": "empty"}
-        if numel > max_items:
-            head = max_items // 2
-            tail = max_items - head
-            sample = torch.cat([flat[:head], flat[-tail:]])
-        else:
-            sample = flat
-        if sample.dtype in (torch.bfloat16, torch.float16):
-            sample = sample.float()
-        sample_cpu = sample.contiguous().cpu()
-        out = {
-            "shape": shape,
-            "dtype": dtype,
-            "numel": numel,
-            "sampled": int(sample_cpu.numel()),
-            "sha1": hashlib.sha1(sample_cpu.numpy().tobytes()).hexdigest()[:16],
-        }
-        if offsets is not None:
-            out["offsets_head"] = offsets[:8]
-            out["offsets_tail"] = offsets[-8:] if len(offsets) > 8 else offsets
-        if numel <= 16 and not tensor.is_nested:
-            out["values"] = tensor.detach().cpu().tolist()
-        return out
-    except Exception as exc:
-        return {"error": type(exc).__name__}
-
-
-def _debug_sequence_digest(values, max_items: int = 2048) -> dict:
-    try:
-        seq = list(values or [])
-        sample = seq if len(seq) <= max_items else seq[: max_items // 2] + seq[-(max_items - max_items // 2) :]
-        payload = json.dumps(sample, sort_keys=True, default=str).encode("utf-8")
-        return {
-            "len": len(seq),
-            "sampled": len(sample),
-            "sha1": hashlib.sha1(payload).hexdigest()[:16],
-            "first": seq[:12],
-            "last": seq[-12:] if len(seq) > 12 else seq[:],
-        }
-    except Exception as exc:
-        return {"error": type(exc).__name__}
-
-
-def _debug_packed_position_ids(
-    stage: str,
-    micro_batch: TensorDict,
-    *,
-    input_ids,
-    position_ids_rmpad: torch.Tensor,
-) -> None:
-    limit = _fsdp_packed_position_debug_limit()
-    if limit <= 0:
-        return
-    count = _FSDP_PACKED_POSITION_DEBUG_COUNTS.get(stage, 0)
-    if count >= limit:
-        return
-    _FSDP_PACKED_POSITION_DEBUG_COUNTS[stage] = count + 1
-    try:
-        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else None
-        dp_rank = tu.get_non_tensor_data(data=micro_batch, key="dp_rank", default=None)
-        batch_rows = int(input_ids.shape[0])
-        seq_lens = None
-        if hasattr(input_ids, "offsets"):
-            offsets = input_ids.offsets()
-            seq_lens = offsets.diff().detach().cpu().tolist()
-
-        packed = position_ids_rmpad.detach()
-        if packed.dim() == 3:
-            rope_axes = int(packed.shape[0])
-            text_axis = packed[0, 0]
-            axis_zero_counts = [
-                int((packed[axis, 0].detach().long() == 0).sum().cpu().item()) for axis in range(min(rope_axes, 8))
-            ]
-        elif packed.dim() == 2:
-            rope_axes = 1
-            text_axis = packed[0]
-            axis_zero_counts = [int((text_axis.detach().long() == 0).sum().cpu().item())]
-        else:
-            rope_axes = None
-            text_axis = packed.reshape(-1)
-            axis_zero_counts = []
-
-        text_axis = text_axis.detach().long()
-        total_nnz = int(text_axis.numel())
-        zero_positions = (text_axis == 0).nonzero(as_tuple=False).flatten()
-        if total_nnz > 1:
-            diffs = torch.diff(text_axis)
-            non_unit_diff_count = int((diffs != 1).sum().cpu().item())
-            negative_diff_count = int((diffs < 0).sum().cpu().item())
-        else:
-            non_unit_diff_count = 0
-            negative_diff_count = 0
-        expected_boundaries = max(batch_rows - 1, 0)
-        looks_like_text_axis = (
-            int(zero_positions.numel()) == batch_rows
-            and negative_diff_count == expected_boundaries
-            and non_unit_diff_count == expected_boundaries
-        )
-        seq_lens_preview = seq_lens[:12] if seq_lens is not None else None
-        print(
-            "[RolloutCorrDebug][packed_position_ids] "
-            f"stage={stage} count={count} rank={rank} dp_rank={dp_rank} "
-            f"batch_rows={batch_rows} total_nnz={total_nnz} seq_lens_first={seq_lens_preview} "
-            f"position_shape={tuple(packed.shape)} rope_axes={rope_axes} "
-            f"axis_zero_counts_first={axis_zero_counts} text_zero_count={int(zero_positions.numel())} "
-            f"expected_zero_count={batch_rows} text_negative_diff_count={negative_diff_count} "
-            f"expected_boundary_count={expected_boundaries} text_non_unit_diff_count={non_unit_diff_count} "
-            f"looks_like_text_axis={looks_like_text_axis} "
-            f"text_zero_positions_first={zero_positions[:12].detach().cpu().tolist()} "
-            f"text_head={text_axis[:12].detach().cpu().tolist()} "
-            f"text_tail={text_axis[-12:].detach().cpu().tolist()}",
-            flush=True,
-        )
-    except Exception as exc:
-        print(
-            f"[RolloutCorrDebug][packed_position_ids] stage={stage} failed={type(exc).__name__}: {exc}",
-            flush=True,
-        )
-
-
-def _debug_unwrap_non_tensor(value):
-    if isinstance(value, NonTensorData):
-        return value.data
-    return value
-
-
-def _debug_column(data: TensorDict, key: str) -> list:
-    try:
-        if key not in data.keys():
-            return []
-        value = _debug_unwrap_non_tensor(data.get(key))
-        if isinstance(value, NonTensorStack):
-            return [_debug_unwrap_non_tensor(item) for item in value.tolist()]
-        if isinstance(value, torch.Tensor):
-            if value.ndim == 0:
-                return [value.detach().cpu().item()]
-            return value.detach().cpu().tolist()
-        if hasattr(value, "tolist") and not isinstance(value, str | bytes | dict):
-            return value.tolist()
-        if isinstance(value, list | tuple):
-            return list(value)
-        return [value]
-    except Exception as exc:
-        return [f"<{key}_failed:{type(exc).__name__}>"]
-
-
-def _debug_column_item(data: TensorDict, key: str, row_idx: int):
-    col = _debug_column(data, key)
-    if row_idx < len(col):
-        return col[row_idx]
-    return None
-
-
-def _debug_row_tensor(data: TensorDict, key: str, row_idx: int):
-    try:
-        if key not in data.keys():
-            return None
-        tensor = data[key]
-        if not isinstance(tensor, torch.Tensor):
-            return None
-        if tensor.is_nested:
-            return tensor.unbind()[row_idx].detach()
-        return tensor[row_idx].detach()
-    except Exception:
-        return None
-
-
-def _debug_row_tensor_digest(data: TensorDict, key: str, row_idx: int) -> dict | None:
-    row = _debug_row_tensor(data, key, row_idx)
-    return _debug_tensor_digest(row) if isinstance(row, torch.Tensor) else None
-
-
-def _debug_row_token_slices(data: TensorDict, row_idx: int) -> dict:
-    input_row = _debug_row_tensor(data, "input_ids", row_idx)
-    response_row = _debug_row_tensor(data, "responses", row_idx)
-    response_mask_row = _debug_row_tensor(data, "response_mask", row_idx)
-    out = {}
-    try:
-        if isinstance(response_row, torch.Tensor):
-            if isinstance(response_mask_row, torch.Tensor):
-                valid_response_len = int(response_mask_row.reshape(-1).bool().sum().item())
-                response_tokens = response_row.reshape(-1)[:valid_response_len].cpu().tolist()
-            else:
-                response_tokens = response_row.reshape(-1).cpu().tolist()
-                valid_response_len = len(response_tokens)
-            out["response_token_digest"] = _debug_sequence_digest(response_tokens)
-            out["response_tokens_head"] = response_tokens[:12]
-        else:
-            valid_response_len = 0
-        if isinstance(input_row, torch.Tensor):
-            input_tokens = input_row.reshape(-1).cpu().tolist()
-            prompt_tokens = input_tokens[: max(0, len(input_tokens) - valid_response_len)]
-            out["full_input_token_digest"] = _debug_sequence_digest(input_tokens)
-            out["prompt_token_digest"] = _debug_sequence_digest(prompt_tokens)
-    except Exception as exc:
-        out["token_slice_error"] = type(exc).__name__
-    return out
-
-
-def _debug_refs_digest(data: TensorDict, row_idx: int) -> dict:
-    refs = _debug_column_item(data, "multi_modal_refs", row_idx)
-    image_bank_ref = _debug_column_item(data, "image_bank_ref", row_idx)
-    try:
-        image_ids = list((refs or {}).get("image_ids") or []) if isinstance(refs, dict) else []
-        video_ids = list((refs or {}).get("video_ids") or []) if isinstance(refs, dict) else []
-        return {
-            "image_ids_digest": _debug_sequence_digest(image_ids, max_items=64),
-            "video_ids_digest": _debug_sequence_digest(video_ids, max_items=64),
-            "image_bank_ref": str(image_bank_ref)[:120] if image_bank_ref is not None else None,
-        }
-    except Exception as exc:
-        return {"error": type(exc).__name__}
-
-
-def _debug_response_logprob_rows(
-    micro_batch: TensorDict,
-    model_output: dict | None,
-    *,
-    max_detail_rows: int = 4,
-) -> tuple[list[dict], list[dict]]:
-    if model_output is None or "log_probs" not in model_output:
-        return [], []
-    try:
-        response_model = no_padding_2_padding(model_output["log_probs"].detach(), micro_batch)
-    except Exception as exc:
-        return [], [{"error": f"no_padding_2_padding_failed:{type(exc).__name__}"}]
-
-    rows = []
-    scores = []
-    response_mask = micro_batch["response_mask"].bool()
-    rollout = micro_batch.get("rollout_log_probs", micro_batch.get("old_log_probs", None))
-    ref = micro_batch.get("ref_log_prob", None)
-    responses = micro_batch.get("responses", None)
-    n_rows = int(response_model.shape[0])
-    for row_idx in range(n_rows):
-        mask = response_mask[row_idx]
-        valid = int(mask.sum().detach().cpu().item())
-        row = {
-            "row": row_idx,
-            "model_response_logprob_digest": _debug_tensor_digest(response_model[row_idx]),
-            "valid_response_len": valid,
-        }
-        if valid > 0:
-            model_valid = response_model[row_idx][mask].detach().float().cpu()
-            row["model_response_mean"] = float(model_valid.mean().item())
-            score = float(model_valid.abs().mean().item())
-            if isinstance(rollout, torch.Tensor):
-                rollout_valid = rollout[row_idx][mask].detach().float().cpu()
-                row["rollout_response_mean"] = float(rollout_valid.mean().item())
-                row["model_minus_rollout_mean"] = float((model_valid - rollout_valid).mean().item())
-                score = max(score, abs(row["model_minus_rollout_mean"]))
-            if isinstance(ref, torch.Tensor):
-                ref_valid = ref[row_idx][mask].detach().float().cpu()
-                row["ref_response_mean"] = float(ref_valid.mean().item())
-                row["model_minus_ref_mean"] = float((model_valid - ref_valid).mean().item())
-                score = max(score, abs(row["model_minus_ref_mean"]))
-            scores.append((score, row_idx))
-        rows.append(row)
-
-    top_details = []
-    for _, row_idx in sorted(scores, reverse=True)[:max_detail_rows]:
-        mask = response_mask[row_idx]
-        all_valid_cols = mask.nonzero(as_tuple=False).reshape(-1)
-        token_limit = _debug_slice_limit(int(all_valid_cols.numel()))
-        valid_cols = all_valid_cols[:token_limit]
-        detail = {
-            "row": row_idx,
-            "debug_row_id": _debug_column_item(micro_batch, "debug_row_id", row_idx),
-            "valid_tokens": int(all_valid_cols.numel()),
-            "token_detail_limit": _rollout_corr_debug_token_limit(),
-            "tokens_truncated": int(all_valid_cols.numel()) > token_limit,
-            "tokens": [],
-        }
-        for col_t in valid_cols:
-            col = int(col_t.detach().cpu().item())
-            token = {
-                "pos": col,
-                "model_logprob": float(response_model[row_idx, col].detach().float().cpu().item()),
-            }
-            if isinstance(responses, torch.Tensor):
-                token["token_id"] = int(responses[row_idx, col].detach().cpu().item())
-            if isinstance(rollout, torch.Tensor):
-                rollout_val = rollout[row_idx, col]
-                token["rollout_logprob"] = float(rollout_val.detach().float().cpu().item())
-                token["model_minus_rollout"] = float(
-                    (response_model[row_idx, col] - rollout_val).detach().float().cpu().item()
-                )
-            if isinstance(ref, torch.Tensor):
-                ref_val = ref[row_idx, col]
-                token["ref_logprob"] = float(ref_val.detach().float().cpu().item())
-                token["model_minus_ref"] = float((response_model[row_idx, col] - ref_val).detach().float().cpu().item())
-            detail["tokens"].append(token)
-        top_details.append(detail)
-    return rows, top_details
-
-
-def _debug_forward_io_snapshot(
-    stage: str,
-    micro_batch: TensorDict,
-    *,
-    forward_only: bool,
-    model_inputs: dict | None = None,
-    output_args: dict | None = None,
-    model_output: dict | None = None,
-    runtime_context: dict | None = None,
-) -> None:
-    limit = _fsdp_forward_io_debug_limit()
-    if limit <= 0:
-        return
-    count_key = f"{stage}:forward_only={forward_only}"
-    count = _FSDP_FORWARD_IO_DEBUG_COUNTS.get(count_key, 0)
-    if count >= limit:
-        return
-    _FSDP_FORWARD_IO_DEBUG_COUNTS[count_key] = count + 1
-    try:
-        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else None
-        n_rows = int(micro_batch.shape[0])
-        max_rows = min(n_rows, _rollout_corr_debug_rows())
-        rows = []
-        response_rows, top_details = _debug_response_logprob_rows(micro_batch, model_output)
-        response_by_row = {r["row"]: r for r in response_rows}
-        for row_idx in range(max_rows):
-            row = {
-                "row": row_idx,
-                "debug_row_id": _debug_column_item(micro_batch, "debug_row_id", row_idx),
-                "uid": _debug_column_item(micro_batch, "uid", row_idx),
-                "trajectory_role": _debug_column_item(micro_batch, "trajectory_role", row_idx),
-                "turn_number": _debug_column_item(micro_batch, "turn_number", row_idx),
-                "rollout_group_id": _debug_column_item(micro_batch, "rollout_group_id", row_idx),
-                "input_ids_digest": _debug_row_tensor_digest(micro_batch, "input_ids", row_idx),
-                "position_ids_digest": _debug_row_tensor_digest(micro_batch, "position_ids", row_idx),
-                "attention_mask_digest": _debug_row_tensor_digest(micro_batch, "attention_mask", row_idx),
-                "response_mask_digest": _debug_row_tensor_digest(micro_batch, "response_mask", row_idx),
-                "rollout_log_probs_digest": _debug_row_tensor_digest(micro_batch, "rollout_log_probs", row_idx),
-                "old_log_probs_digest": _debug_row_tensor_digest(micro_batch, "old_log_probs", row_idx),
-                "ref_log_prob_digest": _debug_row_tensor_digest(micro_batch, "ref_log_prob", row_idx),
-                "refs": _debug_refs_digest(micro_batch, row_idx),
-            }
-            row.update(_debug_row_token_slices(micro_batch, row_idx))
-            if row_idx in response_by_row:
-                row.update(response_by_row[row_idx])
-            rows.append(row)
-        model_inputs_summary = {}
-        if model_inputs is not None:
-            for key in (
-                "input_ids",
-                "position_ids",
-                "attention_mask",
-                "pixel_values",
-                "image_grid_thw",
-                "images_seqlens",
-            ):
-                if key in model_inputs:
-                    model_inputs_summary[key] = _debug_tensor_digest(model_inputs[key])
-        output_args_summary = {}
-        if output_args is not None:
-            for key in ("input_ids_rmpad_rolled", "temperature_rmpad", "temperature"):
-                if key in output_args:
-                    output_args_summary[key] = _debug_tensor_digest(output_args[key])
-        non_tensor_flags = {}
-        for key in (
-            "calculate_entropy",
-            "compute_loss",
-            "distillation_use_topk",
-            "use_remove_padding",
-            "use_dynamic_bsz",
-            "use_fused_kernels",
-            "micro_batch_size_per_gpu",
-            "max_token_len_per_gpu",
-            "batch_num_tokens",
-            "disable_auto_offload",
-        ):
-            try:
-                non_tensor_flags[key] = tu.get(micro_batch, key=key)
-            except Exception:
-                pass
-        runtime_context = dict(runtime_context or {})
-        runtime_context.setdefault("torch_grad_enabled", torch.is_grad_enabled())
-        print(
-            "[RolloutCorrDebug][fsdp_forward_io] "
-            f"stage={stage} count={count} rank={rank} forward_only={forward_only} "
-            f"batch_rows={n_rows} shown_rows={len(rows)} "
-            f"keys={list(micro_batch.keys())} "
-            f"runtime_context={runtime_context} non_tensor_flags={non_tensor_flags} "
-            f"model_inputs={model_inputs_summary} output_args={output_args_summary} "
-            f"rows={rows} top_logprob_details={top_details}",
-            flush=True,
-        )
-    except Exception as exc:
-        print(
-            f"[RolloutCorrDebug][fsdp_forward_io] stage={stage} failed={type(exc).__name__}: {exc}",
-            flush=True,
-        )
 
 
 def _memory_summary() -> str:
@@ -1212,7 +753,6 @@ class FSDPEngine(BaseEngine):
     def forward_backward_batch(self, data: TensorDict, loss_function: Callable, forward_only=False) -> list[TensorDict]:
         # note that the global_batch_size should include data on all the dp
         tu.assign_non_tensor(data, sp_size=self.ulysses_sequence_parallel_size)
-        debug_skip_backward = tu.get_non_tensor_data(data=data, key="debug_skip_backward", default=False)
 
         rank = torch.distributed.get_rank()
         dp_rank = self.get_data_parallel_rank()
@@ -1223,7 +763,6 @@ class FSDPEngine(BaseEngine):
             "[FSDPEngine][forward_backward_batch][enter] "
             f"ts={time.time():.3f} rank={rank} dp_rank={dp_rank} "
             f"dp_size={dp_size} world_size={world_size} forward_only={forward_only} "
-            f"debug_skip_backward={debug_skip_backward} "
             f"summary={_debug_tensordict_summary(data)}",
             flush=True,
         )
@@ -1285,18 +824,11 @@ class FSDPEngine(BaseEngine):
             with ctx:
                 loss, meta_info = self.forward_step(micro_batch, loss_function=loss_function, forward_only=forward_only)
 
-                if not forward_only and not debug_skip_backward:
+                if not forward_only:
                     if scaler is not None:
                         scaler.scale(loss).backward()
                     else:
                         loss.backward()
-                elif debug_skip_backward:
-                    print(
-                        "[RolloutCorrDebug][train_forward_dryrun] "
-                        f"rank={rank} dp_rank={dp_rank} micro_batch_idx={micro_batch_idx} "
-                        f"loss={loss.detach().float().item():.6f} backward_skipped=True",
-                        flush=True,
-                    )
 
             output_lst.append(meta_info)
             print(
@@ -1691,12 +1223,6 @@ class FSDPEngineWithLMHead(FSDPEngine):
             output_args["temperature_rmpad"] = temperature_rmpad
 
             # only pass input_ids and position_ids to enable flash_attn_varlen
-            _debug_packed_position_ids(
-                "fsdp_lmhead_prepare_model_inputs",
-                micro_batch,
-                input_ids=input_ids,
-                position_ids_rmpad=position_ids_rmpad,
-            )
 
             model_inputs = {
                 "input_ids": input_ids_rmpad,
@@ -1934,26 +1460,12 @@ class FSDPEngineWithLMHead(FSDPEngine):
         _log_memory("forward_step.after_micro_batch_to_device", rank=rank, dp_rank=dp_rank)
         model_inputs, output_args = self.prepare_model_inputs(micro_batch=micro_batch)
         _log_memory("forward_step.after_prepare_model_inputs", rank=rank, dp_rank=dp_rank)
-        autocast_dtype = getattr(self, "_autocast_dtype", torch.bfloat16)
-        runtime_context = {
-            "module_training": getattr(self.module, "training", None),
-            "torch_grad_enabled": torch.is_grad_enabled(),
-            "autocast_dtype": str(autocast_dtype),
-            "fsdp_version": fsdp_version(self.module),
-        }
-        _debug_forward_io_snapshot(
-            "after_prepare_model_inputs",
-            micro_batch,
-            forward_only=forward_only,
-            model_inputs=model_inputs,
-            output_args=output_args,
-            runtime_context=runtime_context,
-        )
 
         # Honor mixed_precision.param_dtype resolved during FSDP setup. When dtype is fp32,
         # autocast is a no-op at best and a footgun at worst, so skip it entirely.
         # getattr fallback: some subclasses (e.g. VeOmniEngine) bypass FSDPEngine.__init__
         # and _build_fsdp_module, so self._autocast_dtype may not be set.
+        autocast_dtype = getattr(self, "_autocast_dtype", torch.bfloat16)
         autocast_ctx: ContextManager = (
             nullcontext()
             if autocast_dtype == torch.float32
@@ -1968,20 +1480,6 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
             model_output = self.prepare_model_outputs(
                 output=raw_output, output_args=output_args, micro_batch=micro_batch, logits_processor_func=loss_function
-            )
-            _debug_forward_io_snapshot(
-                "after_prepare_model_outputs",
-                micro_batch,
-                forward_only=forward_only,
-                model_inputs=model_inputs,
-                output_args=output_args,
-                model_output=model_output,
-                runtime_context={
-                    **runtime_context,
-                    "module_training": getattr(self.module, "training", None),
-                    "torch_grad_enabled": torch.is_grad_enabled(),
-                    "autocast_enabled": autocast_dtype != torch.float32,
-                },
             )
 
             if loss_function is not None:

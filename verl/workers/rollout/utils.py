@@ -89,22 +89,9 @@ async def ensure_async_iterator(iterable):
             yield item
 
 
-def _should_dedup_qwen_vl_image_tokens(processor) -> bool:
-    if processor is None or not hasattr(processor, "image_processor"):
-        return False
-
-    processor_class = processor.__class__.__name__
-    image_processor_class = processor.image_processor.__class__.__name__
-
-    return (
-        processor_class in {"Qwen2VLProcessor", "Qwen2_5_VLProcessor", "Qwen3VLProcessor"}
-        or "Qwen2VLImageProcessor" in image_processor_class
-    )
-
-
 def qwen2_5_vl_dedup_image_tokens(prompt_ids: list[int], processor):
-    """Deduplicate consecutive image tokens for Qwen VL processors, since vLLM will replicate the
-    <|image_pad|> and <|video_pad|> token from image/video data.
+    """Deduplicate consecutive image tokens in prompt_ids for Qwen2.5-VL, since vLLM will replicate the
+    <|image_pad|> and <|video_pad|> token by image_data.
     For example,
     ```
     <|vision_start|><|image_pad|><|image_pad|>...<|image_pad|><|vision_end|>
@@ -112,12 +99,14 @@ def qwen2_5_vl_dedup_image_tokens(prompt_ids: list[int], processor):
     <|vision_start|><|image_pad|><|vision_end|>
     ```
     """
-    if _should_dedup_qwen_vl_image_tokens(processor):
+    if (
+        processor is not None
+        and hasattr(processor, "image_processor")
+        and "Qwen2VLImageProcessor" in processor.image_processor.__class__.__name__
+    ):
         prompt_ids = np.array(prompt_ids)
         mask = np.ones(len(prompt_ids), dtype=bool)
-        is_value = prompt_ids == processor.image_token_id
-        if hasattr(processor, "video_token_id"):
-            is_value |= prompt_ids == processor.video_token_id
+        is_value = (prompt_ids == processor.image_token_id) | (prompt_ids == processor.video_token_id)
         mask[1:] &= ~(is_value[1:] & is_value[:-1])
         return prompt_ids[mask].tolist()
     else:

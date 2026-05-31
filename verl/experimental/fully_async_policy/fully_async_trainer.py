@@ -46,23 +46,16 @@ from verl.protocol import pad_dataproto_to_divisor
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.trainer.distillation.losses import is_distillation_enabled
 from verl.trainer.ppo import core_algos
-from verl.trainer.ppo.ray_trainer import (
-    ResourcePoolManager,
-    _debug_actor_eval_alignment_snapshot,
-    _debug_dataproto_summary,
-    _debug_shape,
-    _rollout_corr_debug_limit,
-)
+from verl.trainer.ppo.ray_trainer import ResourcePoolManager
 from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_reward_model
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, should_save_ckpt_esi
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
-from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
 from verl.utils.tracking import Tracking, ValidationGenerationsLogger
 from verl.workers.rollout.llm_server import LLMServerManager
-from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
+from verl.workers.utils.padding import left_right_2_no_padding
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -90,138 +83,6 @@ def _tensor_bytes(obj: Any) -> int:
     if isinstance(obj, np.ndarray) and obj.dtype == object:
         return sum(_tensor_bytes(v) for v in obj.flat)
     return 0
-
-
-def _debug_dataproto_item(batch: DataProto, key: str, row: int):
-    try:
-        values = batch.non_tensor_batch.get(key, None)
-        if values is None or row >= len(values):
-            return None
-        value = values[row]
-        if hasattr(value, "item"):
-            try:
-                value = value.item()
-            except Exception:
-                pass
-        return value
-    except Exception:
-        return None
-
-
-def _rollout_corr_debug_token_limit() -> int:
-    try:
-        return int(os.getenv("VERL_ROLLOUT_CORR_DEBUG_TOKEN_LIMIT", "128"))
-    except ValueError:
-        return 128
-
-
-def _rollout_corr_debug_grad_probes_enabled() -> bool:
-    return os.getenv("VERL_ROLLOUT_CORR_DEBUG_GRAD_PROBES", "0").lower() in ("1", "true", "yes", "on")
-
-
-def _rollout_corr_debug_entropy_probe_enabled() -> bool:
-    return os.getenv("VERL_ROLLOUT_CORR_DEBUG_ENTROPY_PROBE", "0").lower() in ("1", "true", "yes", "on")
-
-
-def _debug_slice_limit(total: int) -> int:
-    limit = _rollout_corr_debug_token_limit()
-    if limit <= 0:
-        return total
-    return min(total, limit)
-
-
-def _debug_actor_train_eval_probe_snapshot(
-    batch: DataProto,
-    eval_log_probs: torch.Tensor,
-    train_log_probs: torch.Tensor,
-    stage: str,
-) -> None:
-    limit = _rollout_corr_debug_limit()
-    if limit <= 0:
-        return
-    try:
-        response_mask = batch.batch["response_mask"].bool()
-        responses = batch.batch["responses"]
-        valid = response_mask & torch.isfinite(eval_log_probs) & torch.isfinite(train_log_probs)
-        if valid.sum().item() == 0:
-            print(f"[RolloutCorrDebug][actor_train_eval_probe] stage={stage} valid_tokens=0", flush=True)
-            return
-
-        eval_valid = eval_log_probs[valid].detach().float()
-        train_valid = train_log_probs[valid].detach().float()
-        diff_valid = train_valid - eval_valid
-        valid_counts = response_mask.sum(dim=-1)
-        denom = valid_counts.clamp_min(1)
-        row_score = (((train_log_probs - eval_log_probs) * response_mask).sum(dim=-1) / denom).abs().float()
-
-        candidates = list(range(min(limit, response_mask.shape[0])))
-        top_k = min(limit, row_score.numel())
-        if top_k > 0:
-            candidates.extend(torch.topk(row_score, k=top_k).indices.detach().cpu().tolist())
-
-        rows = []
-        seen = set()
-        for row in candidates:
-            if row in seen or row >= response_mask.shape[0]:
-                continue
-            seen.add(row)
-            mask = response_mask[row]
-            valid_positions = mask.nonzero(as_tuple=False).reshape(-1)
-            token_limit = _debug_slice_limit(int(valid_positions.numel()))
-            positions = valid_positions[:token_limit]
-            row_info = {
-                "row": int(row),
-                "debug_row_id": _debug_dataproto_item(batch, "debug_row_id", row),
-                "uid": _debug_dataproto_item(batch, "uid", row),
-                "trajectory_role": _debug_dataproto_item(batch, "trajectory_role", row),
-                "turn_number": _debug_dataproto_item(batch, "turn_number", row),
-                "rollout_group_id": _debug_dataproto_item(batch, "rollout_group_id", row),
-                "valid_tokens": int(valid_counts[row].detach().cpu()),
-                "token_detail_limit": _rollout_corr_debug_token_limit(),
-                "tokens_truncated": int(valid_positions.numel()) > token_limit,
-            }
-            if valid_counts[row].item() > 0:
-                eval_row = eval_log_probs[row][mask].detach().float().cpu()
-                train_row = train_log_probs[row][mask].detach().float().cpu()
-                row_info["actor_eval_mean"] = float(eval_row.mean().item())
-                row_info["actor_train_mode_no_grad_mean"] = float(train_row.mean().item())
-                row_info["train_minus_eval_mean"] = float((train_row - eval_row).mean().item())
-                row_info["train_minus_eval_absmean"] = float((train_row - eval_row).abs().mean().item())
-
-            tokens = []
-            for pos_t in positions:
-                pos = int(pos_t.detach().cpu())
-                eval_val = eval_log_probs[row, pos].detach().float().cpu()
-                train_val = train_log_probs[row, pos].detach().float().cpu()
-                tokens.append(
-                    {
-                        "pos": pos,
-                        "token_id": int(responses[row, pos].detach().cpu()),
-                        "actor_eval_logprob": float(eval_val.item()),
-                        "actor_train_mode_no_grad_logprob": float(train_val.item()),
-                        "train_minus_eval": float((train_val - eval_val).item()),
-                    }
-                )
-            row_info["tokens"] = tokens
-            rows.append(row_info)
-
-        print(
-            "[RolloutCorrDebug][actor_train_eval_probe] "
-            f"stage={stage} shape={tuple(eval_log_probs.shape)} valid_tokens={int(valid.sum().item())} "
-            f"actor_eval_mean={eval_valid.mean().item():.6f} "
-            f"actor_train_mode_no_grad_mean={train_valid.mean().item():.6f} "
-            f"train_minus_eval_mean={diff_valid.mean().item():.6f} "
-            f"train_minus_eval_absmean={diff_valid.abs().mean().item():.6f} "
-            f"train_minus_eval_min={diff_valid.min().item():.6f} "
-            f"train_minus_eval_max={diff_valid.max().item():.6f} "
-            f"rows={rows}",
-            flush=True,
-        )
-    except Exception as exc:
-        print(
-            f"[RolloutCorrDebug][actor_train_eval_probe] stage={stage} failed={type(exc).__name__}: {exc}",
-            flush=True,
-        )
 
 
 def _object_bytes(obj: Any, *, _seen: set[int] | None = None, _depth: int = 0) -> int:
@@ -406,7 +267,6 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         self.last_val_metrics = {}
         self.metrics = {}
         self.timing_raw = {}
-        self._actor_eval_logprob_debug_count = 0
         # reward message
         self.future_reward = None
         self.reward_tensor = None
@@ -809,226 +669,6 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
                 flush=True,
             )
 
-    def _log_rollout_corr_actor_update(
-        self,
-        stage: str,
-        batch: DataProto | None,
-        actor_metrics: dict[str, Any] | None = None,
-    ) -> None:
-        if str(os.getenv("VERL_ROLLOUT_CORR_UPDATE_DEBUG", "1")).lower() in {"0", "false", "no"}:
-            return
-
-        def _as_float(value: Any) -> float | None:
-            try:
-                if isinstance(value, torch.Tensor):
-                    return float(value.detach().float().mean().cpu().item())
-                if isinstance(value, np.ndarray):
-                    return float(np.asarray(value, dtype=np.float64).mean())
-                return float(value)
-            except Exception:
-                return None
-
-        def _count_values(values: Any, limit: int = 8) -> dict[str, int]:
-            if values is None:
-                return {}
-            try:
-                arr = np.asarray(values).reshape(-1).tolist()
-            except Exception:
-                arr = list(values) if isinstance(values, list | tuple) else [values]
-            counts: dict[str, int] = {}
-            for raw in arr:
-                key = str(int(raw)) if isinstance(raw, int | np.integer) else str(raw)
-                counts[key] = counts.get(key, 0) + 1
-            return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:limit])
-
-        def _min_max(values: Any) -> tuple[Any, Any]:
-            if values is None:
-                return None, None
-            try:
-                arr = np.asarray(values).reshape(-1)
-                if arr.size == 0:
-                    return None, None
-                return arr.min().item(), arr.max().item()
-            except Exception:
-                return None, None
-
-        def _as_list(values: Any) -> list[Any]:
-            if values is None:
-                return []
-            try:
-                if hasattr(values, "tolist"):
-                    values = values.tolist()
-                else:
-                    values = list(values)
-            except Exception:
-                values = [values]
-            return [getattr(item, "data", item) for item in values]
-
-        def _image_ref_count(value: Any) -> int:
-            if not isinstance(value, dict):
-                return 0
-            return len(value.get("image_ids") or []) + len(value.get("video_ids") or [])
-
-        try:
-            summary: dict[str, Any] = {
-                "stage": stage,
-                "global_steps": self.global_steps,
-                "local_trigger_step": self.local_trigger_step,
-                "trigger_parameter_sync_step": self.trigger_parameter_sync_step,
-                "current_param_version": self.current_param_version,
-            }
-            if batch is not None:
-                pad_rows = int(batch.meta_info.get("fully_async/pad/num_padding_rows", 0) or 0)
-                rollout_group_ids = (batch.non_tensor_batch or {}).get("rollout_group_id")
-                rollout_groups = (
-                    len(set(np.asarray(rollout_group_ids).reshape(-1).tolist()))
-                    if rollout_group_ids is not None
-                    else None
-                )
-                summary.update(
-                    {
-                        "batch_len": len(batch),
-                        "valid_batch_len": max(len(batch) - pad_rows, 0),
-                        "pad_rows": pad_rows,
-                        "trajectory_param_versions": _count_values(batch.meta_info.get("trajectory_param_versions")),
-                        "trajectory_roles": _count_values((batch.non_tensor_batch or {}).get("trajectory_role")),
-                        "rollout_groups": rollout_groups,
-                    }
-                )
-                sample_steps = (batch.non_tensor_batch or {}).get("global_steps")
-                sample_min, sample_max = _min_max(sample_steps)
-                summary["sample_global_steps_min"] = sample_min
-                summary["sample_global_steps_max"] = sample_max
-
-                if batch.batch is not None and "response_mask" in batch.batch.keys():
-                    response_mask = batch.batch["response_mask"]
-                    valid = response_mask.bool()
-                    row_lengths = response_mask.detach().float().sum(dim=-1).cpu()
-                    summary.update(
-                        {
-                            "valid_tokens": int(valid.sum().detach().cpu().item()),
-                            "response_len_mean": float(row_lengths.mean().item()) if row_lengths.numel() else None,
-                            "response_len_min": float(row_lengths.min().item()) if row_lengths.numel() else None,
-                            "response_len_max": float(row_lengths.max().item()) if row_lengths.numel() else None,
-                        }
-                    )
-                    for key in ("rollout_log_probs", "old_log_probs", "ref_log_prob"):
-                        if key in batch.batch.keys():
-                            values = batch.batch[key][valid].detach().float()
-                            if values.numel() > 0:
-                                summary[f"{key}_mean"] = float(values.mean().cpu().item())
-                                summary[f"{key}_min"] = float(values.min().cpu().item())
-                                summary[f"{key}_max"] = float(values.max().cpu().item())
-                    diff_pairs = (
-                        ("old_log_probs", "rollout_log_probs", "old_minus_rollout"),
-                        ("rollout_log_probs", "ref_log_prob", "rollout_minus_ref"),
-                        ("old_log_probs", "ref_log_prob", "old_minus_ref"),
-                    )
-                    for left_key, right_key, out_key in diff_pairs:
-                        if left_key in batch.batch.keys() and right_key in batch.batch.keys():
-                            diff = (batch.batch[left_key] - batch.batch[right_key])[valid].detach().float()
-                            if diff.numel() > 0:
-                                summary[f"{out_key}_mean"] = float(diff.mean().cpu().item())
-                                summary[f"{out_key}_min"] = float(diff.min().cpu().item())
-                                summary[f"{out_key}_max"] = float(diff.max().cpu().item())
-
-                    nt = batch.non_tensor_batch or {}
-                    roles = _as_list(nt.get("trajectory_role"))
-                    if roles:
-                        role_stats: dict[str, dict[str, Any]] = {}
-                        image_refs = _as_list(nt.get("multi_modal_refs"))
-                        turn_numbers = _as_list(nt.get("turn_number"))
-                        prompt_lens = None
-                        if "attention_mask" in batch.batch.keys() and "prompts" in batch.batch.keys():
-                            prompt_width = batch.batch["prompts"].shape[-1]
-                            prompt_lens = (
-                                batch.batch["attention_mask"][:, :prompt_width].detach().float().sum(dim=-1).cpu()
-                            )
-
-                        for role in sorted(set(str(role) for role in roles)):
-                            row_indices = [idx for idx, value in enumerate(roles) if str(value) == role]
-                            row_indices = [idx for idx in row_indices if idx < response_mask.shape[0]]
-                            if not row_indices:
-                                continue
-                            idx_tensor = torch.tensor(row_indices, dtype=torch.long, device=response_mask.device)
-                            role_valid = valid.index_select(0, idx_tensor)
-                            stat: dict[str, Any] = {
-                                "rows": len(row_indices),
-                                "valid_tokens": int(role_valid.sum().detach().cpu().item()),
-                            }
-                            role_response_lens = row_lengths.index_select(0, idx_tensor.cpu())
-                            if role_response_lens.numel() > 0:
-                                stat["response_len_mean"] = float(role_response_lens.mean().item())
-                                stat["response_len_max"] = float(role_response_lens.max().item())
-                            if prompt_lens is not None:
-                                role_prompt_lens = prompt_lens.index_select(0, idx_tensor.cpu())
-                                stat["prompt_len_mean"] = float(role_prompt_lens.mean().item())
-                                stat["prompt_len_min"] = float(role_prompt_lens.min().item())
-                                stat["prompt_len_max"] = float(role_prompt_lens.max().item())
-                            if image_refs:
-                                counts = [
-                                    _image_ref_count(image_refs[idx]) if idx < len(image_refs) else 0
-                                    for idx in row_indices
-                                ]
-                                if counts:
-                                    stat["image_refs_mean"] = float(np.mean(counts))
-                                    stat["image_refs_max"] = int(max(counts))
-                            if turn_numbers:
-                                turns = []
-                                for idx in row_indices:
-                                    if idx >= len(turn_numbers):
-                                        continue
-                                    try:
-                                        turns.append(int(turn_numbers[idx]))
-                                    except Exception:
-                                        pass
-                                if turns:
-                                    stat["turn_min"] = min(turns)
-                                    stat["turn_max"] = max(turns)
-
-                            for key in ("rollout_log_probs", "old_log_probs", "ref_log_prob"):
-                                if key in batch.batch.keys():
-                                    values = batch.batch[key].index_select(0, idx_tensor)[role_valid].detach().float()
-                                    if values.numel() > 0:
-                                        stat[f"{key}_mean"] = float(values.mean().cpu().item())
-                            for left_key, right_key, out_key in diff_pairs:
-                                if left_key in batch.batch.keys() and right_key in batch.batch.keys():
-                                    diff = (
-                                        (
-                                            batch.batch[left_key].index_select(0, idx_tensor)
-                                            - batch.batch[right_key].index_select(0, idx_tensor)
-                                        )[role_valid]
-                                        .detach()
-                                        .float()
-                                    )
-                                    if diff.numel() > 0:
-                                        stat[f"{out_key}_mean"] = float(diff.mean().cpu().item())
-                                        stat[f"{out_key}_max"] = float(diff.max().cpu().item())
-                            role_stats[role] = stat
-                        summary["role_stats"] = role_stats
-
-            if actor_metrics:
-                metric_keys = (
-                    "actor/rollout_corr/kl",
-                    "actor/rollout_corr/k3_kl",
-                    "actor/rollout_corr/training_log_ppl",
-                    "actor/rollout_corr/rollout_log_ppl",
-                    "actor/rollout_corr/rollout_rs_masked_fraction",
-                    "actor/rollout_corr/rollout_rs_seq_masked_fraction",
-                    "actor/ppo_kl",
-                    "actor/pg_loss",
-                    "actor/entropy_loss",
-                    "actor/kl_loss",
-                    "actor/grad_norm",
-                )
-                summary["actor_metrics"] = {
-                    key: value for key in metric_keys if (value := _as_float(actor_metrics.get(key))) is not None
-                }
-
-            print(f"[RolloutCorrDebug][actor_update_{stage}] {summary}", flush=True)
-        except Exception as exc:
-            print(f"[RolloutCorrDebug][actor_update_{stage}] failed: {exc!r}", flush=True)
-
     async def fit_step(self, batch_dict: dict = None):
         """
         Single-step training template method. Handles all logic for one training step.
@@ -1123,210 +763,10 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
         return batch
 
-    def _debug_actor_eval_log_prob_before_update(self, batch: DataProto) -> None:
-        limit = _rollout_corr_debug_limit()
-        if limit <= 0 or self._actor_eval_logprob_debug_count >= limit:
-            return
-        self._actor_eval_logprob_debug_count += 1
-        try:
-            print(
-                "[FullyAsyncTrainer][actor_eval_logprob_debug][enter] "
-                f"ts={time.time():.3f} count={self._actor_eval_logprob_debug_count - 1} "
-                f"summary={_debug_dataproto_summary(batch)}",
-                flush=True,
-            )
-            actor_config = self.config.actor_rollout_ref.actor
-            rollout_config = self.config.actor_rollout_ref.rollout
-            pad_size = int(batch.meta_info.get("fully_async/pad/num_padding_rows", 0) or 0)
-            valid_batch_size = max(len(batch) - pad_size, 1)
-            global_rollout_count = int(
-                batch.meta_info.get("fully_async/rollout_weight/num_groups", valid_batch_size) or valid_batch_size
-            )
-            expanded_mini_batch_size = len(batch)
-            distillation_use_topk = (
-                self.distillation_config.distillation_loss.loss_settings.use_topk
-                if is_distillation_enabled(self.config.get("distillation"))
-                else False
-            )
-
-            def make_probe_td(
-                *,
-                calculate_entropy: bool,
-                compute_loss: bool,
-                use_remove_padding: bool | None = None,
-                use_dynamic_bsz: bool | None = None,
-                max_token_len_per_gpu: int | None = None,
-                micro_batch_size_per_gpu: int | None = None,
-                disable_auto_offload: bool | None = None,
-            ):
-                probe_td = batch.to_tensordict()
-                probe_td = left_right_2_no_padding(probe_td)
-                kwargs = {
-                    "calculate_entropy": calculate_entropy,
-                    "compute_loss": compute_loss,
-                    "distillation_use_topk": distillation_use_topk,
-                    "global_batch_size": valid_batch_size,
-                    "global_rollout_count": global_rollout_count,
-                    "mini_batch_size": expanded_mini_batch_size,
-                    "temperature": rollout_config.temperature,
-                }
-                if use_dynamic_bsz is not None:
-                    kwargs["use_dynamic_bsz"] = use_dynamic_bsz
-                if use_remove_padding is not None:
-                    kwargs["use_remove_padding"] = use_remove_padding
-                if max_token_len_per_gpu is not None:
-                    kwargs["max_token_len_per_gpu"] = max_token_len_per_gpu
-                if micro_batch_size_per_gpu is not None:
-                    kwargs["micro_batch_size_per_gpu"] = micro_batch_size_per_gpu
-                if disable_auto_offload is not None:
-                    kwargs["disable_auto_offload"] = disable_auto_offload
-                tu.assign_non_tensor(probe_td, **kwargs)
-                return probe_td
-
-            def log_probe_alignment(stage: str, probe_log_probs: torch.Tensor):
-                _debug_actor_eval_alignment_snapshot(batch, probe_log_probs, f"fully_async_before_update_{stage}")
-                _debug_actor_train_eval_probe_snapshot(batch, log_probs, probe_log_probs, stage)
-
-            def run_actor_eval_probe(stage: str, **kwargs):
-                try:
-                    probe_td = make_probe_td(calculate_entropy=False, compute_loss=False, **kwargs)
-                    probe_output = self.actor_rollout_wg.compute_log_prob(probe_td)
-                    probe_log_probs = tu.get(probe_output, "log_probs")
-                    probe_log_probs = no_padding_2_padding(probe_log_probs, probe_td).float()
-                    log_probe_alignment(stage, probe_log_probs)
-                    return probe_log_probs
-                except Exception as exc:
-                    print(
-                        f"[RolloutCorrDebug][actor_eval_probe] stage={stage} failed={type(exc).__name__}: {exc}",
-                        flush=True,
-                    )
-                    return None
-
-            def run_train_no_grad_probe(stage: str, **kwargs):
-                try:
-                    probe_td = make_probe_td(compute_loss=False, **kwargs)
-                    probe_output = self.actor_rollout_wg.debug_actor_train_mode_log_prob(probe_td)
-                    probe_log_probs = tu.get(probe_output, "log_probs")
-                    probe_log_probs = no_padding_2_padding(probe_log_probs, probe_td).float()
-                    log_probe_alignment(stage, probe_log_probs)
-                    return probe_log_probs
-                except Exception as exc:
-                    print(
-                        f"[RolloutCorrDebug][actor_train_eval_probe] stage={stage} failed={type(exc).__name__}: {exc}",
-                        flush=True,
-                    )
-                    return None
-
-            def run_train_grad_dryrun_probe(stage: str, **kwargs):
-                if not _rollout_corr_debug_grad_probes_enabled():
-                    return None
-                try:
-                    probe_td = make_probe_td(compute_loss=True, disable_auto_offload=True, **kwargs)
-                    probe_output = self.actor_rollout_wg.debug_actor_train_grad_log_prob(probe_td)
-                    probe_log_probs = tu.get(probe_output, "log_probs")
-                    probe_log_probs = no_padding_2_padding(probe_log_probs, probe_td).float()
-                    log_probe_alignment(stage, probe_log_probs)
-                    return probe_log_probs
-                except Exception as exc:
-                    print(
-                        f"[RolloutCorrDebug][actor_train_grad_probe] stage={stage} failed={type(exc).__name__}: {exc}",
-                        flush=True,
-                    )
-                    return None
-
-            batch_td = batch.to_tensordict()
-            batch_td = left_right_2_no_padding(batch_td)
-            tu.assign_non_tensor(
-                batch_td,
-                calculate_entropy=False,
-                compute_loss=False,
-            )
-            output = self.actor_rollout_wg.compute_log_prob(batch_td)
-            log_probs = tu.get(output, "log_probs")
-            log_probs = no_padding_2_padding(log_probs, batch_td).float()
-            _debug_actor_eval_alignment_snapshot(batch, log_probs, "fully_async_before_update_actor_eval")
-
-            actor_eval_no_rmpad_log_probs = run_actor_eval_probe(
-                "actor_eval_no_remove_padding",
-                use_remove_padding=False,
-                use_dynamic_bsz=True,
-                max_token_len_per_gpu=actor_config.ppo_max_token_len_per_gpu,
-                micro_batch_size_per_gpu=actor_config.ppo_micro_batch_size_per_gpu,
-            )
-            actor_eval_static_bsz1_log_probs = run_actor_eval_probe(
-                "actor_eval_static_bsz1_remove_padding",
-                use_remove_padding=True,
-                use_dynamic_bsz=False,
-                max_token_len_per_gpu=actor_config.ppo_max_token_len_per_gpu,
-                micro_batch_size_per_gpu=1,
-            )
-            train_probe_log_probs = run_train_no_grad_probe(
-                "actor_train_mode_no_grad_infer_defaults",
-                calculate_entropy=False,
-            )
-            train_dynamic_probe_log_probs = run_train_no_grad_probe(
-                "actor_train_mode_no_grad_train_dynamic_bsz",
-                calculate_entropy=False,
-                use_dynamic_bsz=True,
-                max_token_len_per_gpu=actor_config.ppo_max_token_len_per_gpu,
-                micro_batch_size_per_gpu=actor_config.ppo_micro_batch_size_per_gpu,
-            )
-            train_static_probe_log_probs = run_train_no_grad_probe(
-                "actor_train_mode_no_grad_static_bsz",
-                calculate_entropy=False,
-                use_dynamic_bsz=False,
-                max_token_len_per_gpu=actor_config.ppo_max_token_len_per_gpu,
-                micro_batch_size_per_gpu=actor_config.ppo_micro_batch_size_per_gpu or 1,
-            )
-
-            entropy_probe_log_probs = None
-            if _rollout_corr_debug_entropy_probe_enabled():
-                entropy_probe_log_probs = run_train_no_grad_probe(
-                    "actor_train_mode_entropy_no_grad",
-                    calculate_entropy=True,
-                    use_dynamic_bsz=True,
-                    max_token_len_per_gpu=actor_config.ppo_max_token_len_per_gpu,
-                    micro_batch_size_per_gpu=actor_config.ppo_micro_batch_size_per_gpu,
-                )
-            grad_no_entropy_probe_log_probs = run_train_grad_dryrun_probe(
-                "actor_train_grad_loss_no_entropy_dryrun",
-                calculate_entropy=False,
-                use_dynamic_bsz=True,
-                max_token_len_per_gpu=actor_config.ppo_max_token_len_per_gpu,
-                micro_batch_size_per_gpu=actor_config.ppo_micro_batch_size_per_gpu,
-            )
-            grad_entropy_probe_log_probs = run_train_grad_dryrun_probe(
-                "actor_train_grad_loss_entropy_dryrun",
-                calculate_entropy=True,
-                use_dynamic_bsz=True,
-                max_token_len_per_gpu=actor_config.ppo_max_token_len_per_gpu,
-                micro_batch_size_per_gpu=actor_config.ppo_micro_batch_size_per_gpu,
-            )
-            print(
-                "[FullyAsyncTrainer][actor_eval_logprob_debug][exit] "
-                f"ts={time.time():.3f} log_probs_shape={_debug_shape(log_probs)} "
-                f"actor_eval_no_rmpad_log_probs_shape={_debug_shape(actor_eval_no_rmpad_log_probs)} "
-                f"actor_eval_static_bsz1_log_probs_shape={_debug_shape(actor_eval_static_bsz1_log_probs)} "
-                f"train_probe_log_probs_shape={_debug_shape(train_probe_log_probs)} "
-                f"train_dynamic_probe_log_probs_shape={_debug_shape(train_dynamic_probe_log_probs)} "
-                f"train_static_probe_log_probs_shape={_debug_shape(train_static_probe_log_probs)} "
-                f"entropy_probe_log_probs_shape={_debug_shape(entropy_probe_log_probs)} "
-                f"grad_no_entropy_probe_log_probs_shape={_debug_shape(grad_no_entropy_probe_log_probs)} "
-                f"grad_entropy_probe_log_probs_shape={_debug_shape(grad_entropy_probe_log_probs)}",
-                flush=True,
-            )
-        except Exception as exc:
-            print(
-                "[RolloutCorrDebug][actor_eval_logprob_alignment] "
-                f"stage=fully_async_before_update_actor_eval failed={type(exc).__name__}: {exc}",
-                flush=True,
-            )
-
     def _update_actor(self, batch: DataProto) -> DataProto:
         """Update actor using the expanded rows as one PPO mini-batch."""
         rollout_config = self.config.actor_rollout_ref.rollout
         batch.meta_info["temperature"] = rollout_config.temperature
-        self._debug_actor_eval_log_prob_before_update(batch)
         batch_td = batch.to_tensordict()
         batch_td = left_right_2_no_padding(batch_td)
         calculate_entropy = self.config.actor_rollout_ref.actor.calculate_entropy or (
@@ -1360,19 +800,6 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         actor_output = rename_dict(actor_output, "actor/")
         actor_output["perf/mfu/actor"] = actor_output.pop("actor/mfu")
         return DataProto.from_single_dict(data={}, meta_info={"metrics": actor_output})
-
-    def _fit_update_actor(self, batch: DataProto) -> DataProto:
-        metrics = self.metrics
-        timing_raw = self.timing_raw
-        if self.config.trainer.critic_warmup <= self.global_steps:
-            self._log_rollout_corr_actor_update("begin", batch)
-            with marked_timer("update_actor", timing_raw, color="red"):
-                actor_output = self._update_actor(batch)
-
-            actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
-            self._log_rollout_corr_actor_update("end", batch, actor_metrics=actor_output_metrics)
-            metrics.update(actor_output_metrics)
-        return batch
 
     def _update_critic(self, batch: DataProto) -> DataProto:
         """Update critic using the expanded rows as one PPO mini-batch."""
@@ -1615,8 +1042,6 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
 
     def _fit_update_local_step(self):
         time_str = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-        old_local_trigger_step = self.local_trigger_step
-        old_param_version = self.current_param_version
         logger.info(
             "[FullyAsyncTrainer] global_steps: %d local_trigger_step: %d trigger_parameter_sync_step: %s %s",
             self.global_steps,
@@ -1629,18 +1054,6 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         else:
             self.current_param_version += 1
             self.local_trigger_step = 1
-        if str(os.getenv("VERL_ROLLOUT_CORR_UPDATE_DEBUG", "1")).lower() not in {"0", "false", "no"}:
-            print(
-                "[RolloutCorrDebug][actor_update_local_step] "
-                f"global_steps={self.global_steps} "
-                f"local_trigger_step_before={old_local_trigger_step} "
-                f"local_trigger_step_after={self.local_trigger_step} "
-                f"current_param_version_before={old_param_version} "
-                f"current_param_version_after={self.current_param_version} "
-                f"trigger_parameter_sync_step={self.trigger_parameter_sync_step} "
-                f"will_sync={self.local_trigger_step == 1}",
-                flush=True,
-            )
 
     async def _fit_update_weights(self):
         if self.local_trigger_step != 1:

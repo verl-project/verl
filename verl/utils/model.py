@@ -15,7 +15,6 @@
 Utilities to create common models from huggingface
 """
 
-import hashlib
 import json
 import os
 import re
@@ -60,49 +59,6 @@ from verl.utils.tensordict_utils import nested_tensor_from_tensor_list
 from verl.utils.transformers_compat import get_auto_model_for_vision2seq
 
 AutoModelForVision2Seq = get_auto_model_for_vision2seq()
-_IMAGE_REF_RESOLVE_DEBUG_COUNT = 0
-
-
-def _debug_tensor_digest(value, max_items: int = 2048) -> dict | None:
-    if not isinstance(value, torch.Tensor):
-        return None
-    try:
-        tensor = value.detach()
-        shape = tuple(tensor.shape)
-        dtype = str(tensor.dtype)
-        flat = tensor.reshape(-1)
-        numel = int(flat.numel())
-        if numel == 0:
-            return {"shape": shape, "dtype": dtype, "numel": 0, "sha1": "empty"}
-        if numel > max_items:
-            head = max_items // 2
-            tail = max_items - head
-            sample = torch.cat([flat[:head], flat[-tail:]])
-        else:
-            sample = flat
-        if sample.dtype in (torch.bfloat16, torch.float16):
-            sample = sample.float()
-        sample_cpu = sample.contiguous().cpu()
-        sha1 = hashlib.sha1(sample_cpu.numpy().tobytes()).hexdigest()[:16]
-        return {"shape": shape, "dtype": dtype, "numel": numel, "sampled": int(sample_cpu.numel()), "sha1": sha1}
-    except Exception as exc:
-        return {"error": type(exc).__name__}
-
-
-def _debug_sequence_digest(values, max_items: int = 2048) -> dict:
-    try:
-        seq = list(values or [])
-        sample = seq if len(seq) <= max_items else seq[: max_items // 2] + seq[-(max_items - max_items // 2) :]
-        payload = json.dumps(sample, sort_keys=True, default=str).encode("utf-8")
-        return {
-            "len": len(seq),
-            "sampled": len(sample),
-            "sha1": hashlib.sha1(payload).hexdigest()[:16],
-            "first": seq[:8],
-            "last": seq[-8:] if len(seq) > 8 else seq[:],
-        }
-    except Exception as exc:
-        return {"error": type(exc).__name__}
 
 
 class LambdaLayer(nn.Module):
@@ -989,7 +945,6 @@ def resolve_multi_modal_refs(
     overwrites ``micro_batch["position_ids"]`` with position ids recomputed from
     the resolved image grids.
     """
-    global _IMAGE_REF_RESOLVE_DEBUG_COUNT
     del tokenizer  # kept in the signature for caller compatibility.
     refs_col = _unwrap_non_tensor_column(micro_batch.get("multi_modal_refs", None))
     if not refs_col:
@@ -1021,13 +976,6 @@ def resolve_multi_modal_refs(
     total_image_refs = 0
     bank_cache_misses = 0
     ray_get_ms_total = 0.0
-    debug_limit = int(os.getenv("VERL_IMAGE_REF_RESOLVE_DEBUG_LIMIT", "10"))
-    preview_rows: list[dict[str, Any]] = []
-    debug_row_ids = _unwrap_non_tensor_column(micro_batch.get("debug_row_id", None))
-    uids = _unwrap_non_tensor_column(micro_batch.get("uid", None))
-    roles = _unwrap_non_tensor_column(micro_batch.get("trajectory_role", None))
-    turn_numbers = _unwrap_non_tensor_column(micro_batch.get("turn_number", None))
-    rollout_group_ids = _unwrap_non_tensor_column(micro_batch.get("rollout_group_id", None))
 
     for row_idx, (refs, bank_ref, row_input_ids, row_attention) in enumerate(
         zip(refs_col, bank_refs, input_rows, attention_rows, strict=True)
@@ -1093,45 +1041,6 @@ def resolve_multi_modal_refs(
             mm_cpu = _merge_processed_image_inputs(processed_inputs)
 
         pos = compute_vlm_position_ids(processor, row_input_ids_2d, row_attention_mask, dict(mm_cpu))
-        if _IMAGE_REF_RESOLVE_DEBUG_COUNT < debug_limit and len(preview_rows) < 4:
-            image_token_id = getattr(processor, "image_token_id", None)
-            video_token_id = getattr(processor, "video_token_id", None)
-            merge_size = getattr(getattr(processor, "image_processor", None), "merge_size", 1) or 1
-            image_grid_thw = mm_cpu.get("image_grid_thw")
-            grid_list = image_grid_thw.detach().cpu().tolist() if isinstance(image_grid_thw, torch.Tensor) else None
-            grid_token_count = None
-            if isinstance(image_grid_thw, torch.Tensor):
-                grid = image_grid_thw.detach().cpu().long()
-                grid_token_count = int((grid[:, 0] * (grid[:, 1] // merge_size) * (grid[:, 2] // merge_size)).sum())
-            preview_rows.append(
-                {
-                    "row": row_idx,
-                    "debug_row_id": debug_row_ids[row_idx] if row_idx < len(debug_row_ids) else None,
-                    "uid": uids[row_idx] if row_idx < len(uids) else None,
-                    "trajectory_role": roles[row_idx] if row_idx < len(roles) else None,
-                    "turn_number": turn_numbers[row_idx] if row_idx < len(turn_numbers) else None,
-                    "rollout_group_id": rollout_group_ids[row_idx] if row_idx < len(rollout_group_ids) else None,
-                    "image_refs": len(image_ids),
-                    "image_ids_digest": _debug_sequence_digest(image_ids, max_items=64),
-                    "input_len": int(row_input_ids_2d.shape[-1]),
-                    "valid_len": int(row_attention_mask.sum().item()),
-                    "input_ids_digest": _debug_tensor_digest(row_input_ids_2d),
-                    "attention_mask_digest": _debug_tensor_digest(row_attention_mask),
-                    "image_token_count": int((row_input_ids_2d == image_token_id).sum().item())
-                    if image_token_id is not None
-                    else None,
-                    "video_token_count": int((row_input_ids_2d == video_token_id).sum().item())
-                    if video_token_id is not None
-                    else None,
-                    "grid_token_count": grid_token_count,
-                    "image_grid_thw": grid_list,
-                    "image_grid_thw_digest": _debug_tensor_digest(image_grid_thw),
-                    "pixel_values_digest": _debug_tensor_digest(mm_cpu.get("pixel_values")),
-                    "image_embeds_digest": _debug_tensor_digest(mm_cpu.get("image_embeds")),
-                    "position_shape": tuple(pos.shape),
-                    "position_ids_digest": _debug_tensor_digest(pos),
-                }
-            )
         position_rows.append(pos.squeeze(0))
         if mm_cpu:
             row_multi_modal_inputs.append(_move_tensor_dict(mm_cpu, device))
@@ -1145,14 +1054,6 @@ def resolve_multi_modal_refs(
         f"bank_cache_size={len(bank_cache)} device={device}",
         flush=True,
     )
-    if preview_rows and _IMAGE_REF_RESOLVE_DEBUG_COUNT < debug_limit:
-        print(
-            "[ImageRefs][resolve_debug] "
-            f"count={_IMAGE_REF_RESOLVE_DEBUG_COUNT} "
-            f"rows={len(refs_col)} preview_rows={preview_rows}",
-            flush=True,
-        )
-        _IMAGE_REF_RESOLVE_DEBUG_COUNT += 1
     return extract_multi_modal_inputs(row_multi_modal_inputs)
 
 

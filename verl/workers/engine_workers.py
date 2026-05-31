@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import functools
-import hashlib
 import logging
 import os
 import time
@@ -34,7 +33,7 @@ from verl.single_controller.base.decorator import Dispatch, make_nd_compute_data
 from verl.trainer.distillation import distillation_ppo_loss, is_distillation_enabled
 from verl.utils import tensordict_utils as tu
 from verl.utils.config import omega_conf_to_dataclass
-from verl.utils.device import get_device_name, get_torch_device, is_npu_available, set_expandable_segments
+from verl.utils.device import get_device_name, is_npu_available, set_expandable_segments
 from verl.utils.distributed import initialize_global_process_group_ray, set_numa_affinity
 from verl.utils.flops_counter import FlopsCounter
 from verl.utils.import_utils import import_external_libs
@@ -113,78 +112,6 @@ def _debug_tensordict_summary(data: TensorDict) -> dict:
         "tensor_shapes": shapes,
         "loss_mask_sum": loss_mask_sum,
     }
-
-
-def _rollout_corr_debug_limit() -> int:
-    try:
-        return max(0, int(os.getenv("VERL_ROLLOUT_CORR_DEBUG_LIMIT", "10")))
-    except ValueError:
-        return 5
-
-
-def _debug_param_digest(param: torch.nn.Parameter, max_items: int = 4096) -> dict:
-    try:
-        tensor = param.detach()
-        if tensor.is_meta:
-            return {"shape": tuple(tensor.shape), "dtype": str(tensor.dtype), "device": "meta"}
-        flat = tensor.reshape(-1)
-        numel = int(flat.numel())
-        if numel == 0:
-            return {"shape": tuple(tensor.shape), "dtype": str(tensor.dtype), "numel": 0, "sha1": "empty"}
-        if numel > max_items:
-            head = max_items // 2
-            tail = max_items - head
-            sample = torch.cat([flat[:head], flat[-tail:]])
-        else:
-            sample = flat
-        sample_float = sample.float()
-        sample_cpu = sample_float.contiguous().cpu()
-        sha1 = hashlib.sha1(sample_cpu.numpy().tobytes()).hexdigest()[:16]
-        return {
-            "shape": tuple(tensor.shape),
-            "dtype": str(tensor.dtype),
-            "device": str(tensor.device),
-            "numel": numel,
-            "sampled": int(sample_cpu.numel()),
-            "sha1": sha1,
-            "sample_mean": float(sample_cpu.mean().item()),
-            "sample_std": float(sample_cpu.std(unbiased=False).item()) if sample_cpu.numel() > 1 else 0.0,
-            "sample_norm": float(sample_cpu.norm().item()),
-        }
-    except Exception as exc:
-        return {"error": type(exc).__name__}
-
-
-def _debug_selected_named_parameters(module: torch.nn.Module, limit: int = 8) -> list[tuple[str, torch.nn.Parameter]]:
-    preferred = (
-        "embed_tokens",
-        "lm_head",
-        "visual",
-        "vision",
-        "merger",
-        "multi_modal_projector",
-        "layers.0.",
-        "model.layers.0.",
-    )
-    selected: list[tuple[str, torch.nn.Parameter]] = []
-    fallback: list[tuple[str, torch.nn.Parameter]] = []
-    seen: set[str] = set()
-    for name, param in module.named_parameters():
-        if len(fallback) < limit:
-            fallback.append((name, param))
-        if any(marker in name for marker in preferred) and name not in seen:
-            selected.append((name, param))
-            seen.add(name)
-            if len(selected) >= limit:
-                break
-    if len(selected) < min(3, limit):
-        for item in fallback:
-            if item[0] not in seen:
-                selected.append(item)
-                seen.add(item[0])
-            if len(selected) >= limit:
-                break
-    return selected[:limit]
 
 
 def _with_routing_replay_flag(enabled: bool):
@@ -280,42 +207,6 @@ class TrainingWorker(Worker, DistProfilerExtension):
             self.flops_counter = None
 
         self.loss_fn = None
-        self._rollout_corr_weight_digest_logged: set[str] = set()
-
-    def _debug_model_weight_digest(self, stage: str) -> None:
-        if _rollout_corr_debug_limit() <= 0 or stage in self._rollout_corr_weight_digest_logged:
-            return
-        self._rollout_corr_weight_digest_logged.add(stage)
-        try:
-            module = getattr(self.engine, "module", None)
-            if module is None:
-                print(
-                    "[RolloutCorrDebug][model_weight_digest] "
-                    f"stage={stage} rank={torch.distributed.get_rank()} module=None",
-                    flush=True,
-                )
-                return
-            rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else None
-            dp_rank = self.engine.get_data_parallel_rank()
-            digests = [
-                {"name": name, **_debug_param_digest(param)}
-                for name, param in _debug_selected_named_parameters(module, limit=8)
-            ]
-            print(
-                "[RolloutCorrDebug][model_weight_digest] "
-                f"stage={stage} rank={rank} dp_rank={dp_rank} "
-                f"forward_only={self.engine_config.forward_only} "
-                f"strategy={self.engine_config.strategy} "
-                f"model_type={self.config.model_type} "
-                f"local_path={self.model_config.get('local_path', None)} "
-                f"digests={digests}",
-                flush=True,
-            )
-        except Exception as exc:
-            print(
-                f"[RolloutCorrDebug][model_weight_digest] stage={stage} failed={type(exc).__name__}: {exc}",
-                flush=True,
-            )
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def to(self, device, model=True, optimizer=True, grad=True):
@@ -338,7 +229,6 @@ class TrainingWorker(Worker, DistProfilerExtension):
         we initialize it. Otherwise, reload ckpt and reset states
         """
         self.engine.initialize()
-        self._debug_model_weight_digest("after_reset_initialize")
 
     def _postprocess_output(self, output, *, global_token_num, delta_time, forward_only, images_seqlens):
         """
@@ -495,7 +385,6 @@ class TrainingWorker(Worker, DistProfilerExtension):
     def train_batch(self, data: TensorDict) -> TensorDict:
         assert self.loss_fn is not None, "loss function can't be None when calling train_batch"
         assert not self.engine_config.forward_only, "Can't run `train_batch` when forward_only is in the engine config."
-        self._debug_model_weight_digest("before_train_batch")
         # global_token_num should be a list of number of tokens of each seq in this batch
         global_token_num = tu.get(data, key="global_token_num")
         disable_auto_offload = tu.get(data, key="disable_auto_offload", default=False)
@@ -549,7 +438,6 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="train"), blocking=False)
     def infer_batch(self, data: TensorDict) -> TensorDict:
-        self._debug_model_weight_digest("before_infer_batch")
         # add mfu calculator
         global_token_num = tu.get(data, key="global_token_num")
         compute_loss = tu.get(data, key="compute_loss", default=True)
@@ -615,148 +503,6 @@ class TrainingWorker(Worker, DistProfilerExtension):
         else:
             final_output = None
 
-        return final_output
-
-    def debug_train_mode_infer_batch(self, data: TensorDict) -> TensorDict:
-        """Run the log-prob forward path under module.train(), without loss/backward."""
-        self._debug_model_weight_digest("before_debug_train_mode_infer_batch")
-        global_token_num = tu.get(data, key="global_token_num")
-        disable_auto_offload = tu.get(data, key="disable_auto_offload", default=False)
-        calculate_entropy = tu.get(data, key="calculate_entropy", default=False)
-        no_lora_adapter = tu.pop(data, key="no_lora_adapter", default=False)
-        images_seqlens = tu.get(data, key="images_seqlens", default=None)
-        print(
-            "[TrainingWorker][debug_train_mode_infer_batch][enter] "
-            f"ts={time.time():.3f} rank={torch.distributed.get_rank()} "
-            f"dp_rank={self.engine.get_data_parallel_rank()} "
-            f"dp_size={self.engine.get_data_parallel_size()} "
-            f"world_size={torch.distributed.get_world_size()} "
-            f"calculate_entropy={calculate_entropy} no_lora_adapter={no_lora_adapter} "
-            f"disable_auto_offload={disable_auto_offload} "
-            f"summary={_debug_tensordict_summary(data)}",
-            flush=True,
-        )
-
-        default_keys = dict(
-            use_remove_padding=self.model_config.get("use_remove_padding", False),
-            use_dynamic_bsz=self.engine_config.use_dynamic_bsz,
-            max_token_len_per_gpu=self.engine_config.infer_max_token_len_per_gpu,
-            micro_batch_size_per_gpu=self.engine_config.infer_micro_batch_size_per_gpu,
-            use_fused_kernels=self.engine_config.use_fused_kernels,
-        )
-        for key, val in default_keys.items():
-            if key not in data.keys():
-                tu.assign_non_tensor(data, **{key: val})
-        tu.assign_non_tensor(data, compute_loss=False, calculate_entropy=calculate_entropy)
-
-        cpu_rng_state = torch.get_rng_state()
-        device_module = get_torch_device()
-        accelerator_rng_state = (
-            device_module.get_rng_state_all()
-            if hasattr(device_module, "get_rng_state_all") and device_module.is_available()
-            else None
-        )
-        try:
-            with (
-                self.engine.train_mode(disable_auto_offload=disable_auto_offload),
-                Timer(name="debug_train_mode_infer_batch", logger=None) as timer,
-            ):
-                adapter_ctx = self.engine.disable_adapter() if no_lora_adapter else nullcontext()
-                with adapter_ctx:
-                    output = self.engine.infer_batch(data, loss_function=None)
-            delta_time = timer.last
-        finally:
-            torch.set_rng_state(cpu_rng_state)
-            if accelerator_rng_state is not None:
-                device_module.set_rng_state_all(accelerator_rng_state)
-
-        if self.engine.is_mp_src_rank_with_outputs():
-            final_output = self._postprocess_output(
-                output,
-                global_token_num=global_token_num,
-                delta_time=delta_time,
-                forward_only=True,
-                images_seqlens=images_seqlens,
-            ).cpu()
-        else:
-            final_output = None
-
-        print(
-            "[TrainingWorker][debug_train_mode_infer_batch][exit] "
-            f"ts={time.time():.3f} rank={torch.distributed.get_rank()} output_none={final_output is None}",
-            flush=True,
-        )
-        return final_output
-
-    def debug_train_grad_forward_batch(self, data: TensorDict) -> TensorDict:
-        """Run the real train forward/loss path with grad enabled, but skip backward and optimizer step."""
-        assert self.loss_fn is not None, "loss function can't be None when calling debug_train_grad_forward_batch"
-        self._debug_model_weight_digest("before_debug_train_grad_forward_batch")
-        global_token_num = tu.get(data, key="global_token_num")
-        disable_auto_offload = tu.get(data, key="disable_auto_offload", default=True)
-        images_seqlens = tu.get(data, key="images_seqlens", default=None)
-        print(
-            "[TrainingWorker][debug_train_grad_forward_batch][enter] "
-            f"ts={time.time():.3f} rank={torch.distributed.get_rank()} "
-            f"dp_rank={self.engine.get_data_parallel_rank()} "
-            f"dp_size={self.engine.get_data_parallel_size()} "
-            f"world_size={torch.distributed.get_world_size()} "
-            f"calculate_entropy={tu.get(data, key='calculate_entropy', default=None)} "
-            f"compute_loss={tu.get(data, key='compute_loss', default=None)} "
-            f"use_dynamic_bsz={tu.get(data, key='use_dynamic_bsz', default=None)} "
-            f"max_token_len_per_gpu={tu.get(data, key='max_token_len_per_gpu', default=None)} "
-            f"micro_batch_size_per_gpu={tu.get(data, key='micro_batch_size_per_gpu', default=None)} "
-            f"disable_auto_offload={disable_auto_offload} summary={_debug_tensordict_summary(data)}",
-            flush=True,
-        )
-
-        default_keys = dict(
-            use_remove_padding=self.model_config.get("use_remove_padding", False),
-            use_dynamic_bsz=self.engine_config.use_dynamic_bsz,
-            max_token_len_per_gpu=self.engine_config.max_token_len_per_gpu,
-            micro_batch_size_per_gpu=self.engine_config.micro_batch_size_per_gpu,
-            use_fused_kernels=self.engine_config.use_fused_kernels,
-        )
-        for key, val in default_keys.items():
-            if key not in data.keys():
-                tu.assign_non_tensor(data, **{key: val})
-        tu.assign_non_tensor(data, debug_skip_backward=True, compute_loss=True)
-
-        cpu_rng_state = torch.get_rng_state()
-        device_module = get_torch_device()
-        accelerator_rng_state = (
-            device_module.get_rng_state_all()
-            if hasattr(device_module, "get_rng_state_all") and device_module.is_available()
-            else None
-        )
-        try:
-            with (
-                self.engine.train_mode(disable_auto_offload=disable_auto_offload),
-                Timer(name="debug_train_grad_forward_batch", logger=None) as timer,
-            ):
-                output = self.engine.forward_backward_batch(data, loss_function=self.loss_fn, forward_only=False)
-            delta_time = timer.last
-        finally:
-            torch.set_rng_state(cpu_rng_state)
-            if accelerator_rng_state is not None:
-                device_module.set_rng_state_all(accelerator_rng_state)
-
-        if self.engine.is_mp_src_rank_with_outputs():
-            final_output = self._postprocess_output(
-                output,
-                global_token_num=global_token_num,
-                delta_time=delta_time,
-                forward_only=False,
-                images_seqlens=images_seqlens,
-            ).cpu()
-        else:
-            final_output = None
-
-        print(
-            "[TrainingWorker][debug_train_grad_forward_batch][exit] "
-            f"ts={time.time():.3f} rank={torch.distributed.get_rank()} output_none={final_output is None}",
-            flush=True,
-        )
         return final_output
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
@@ -985,22 +731,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @_with_routing_replay_flag(enabled=True)
     def compute_log_prob(self, data: TensorDict) -> TensorDict:
         output = self.actor.infer_batch(data)
-
-        return output.cpu() if output is not None else None
-
-    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
-    @DistProfiler.annotate(color="blue", role="actor_debug_train_mode_log_prob")
-    @_with_routing_replay_flag(enabled=True)
-    def debug_actor_train_mode_log_prob(self, data: TensorDict) -> TensorDict:
-        output = self.actor.debug_train_mode_infer_batch(data)
-
-        return output.cpu() if output is not None else None
-
-    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
-    @DistProfiler.annotate(color="red", role="actor_debug_train_grad_log_prob")
-    @_with_routing_replay_flag(enabled=True)
-    def debug_actor_train_grad_log_prob(self, data: TensorDict) -> TensorDict:
-        output = self.actor.debug_train_grad_forward_batch(data)
 
         return output.cpu() if output is not None else None
 

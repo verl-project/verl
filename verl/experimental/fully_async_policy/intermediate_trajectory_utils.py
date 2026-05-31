@@ -709,10 +709,6 @@ def _compute_rollout_group_ids(data_proto: DataProto) -> np.ndarray:
     return np.arange(len(data_proto), dtype=np.int64)
 
 
-def _compute_final_debug_row_ids(n_rows: int) -> np.ndarray:
-    return np.array([f"final:{idx}" for idx in range(n_rows)], dtype=object)
-
-
 def expand_intermediate_trajectories_pre_log_prob(
     data_proto: DataProto,
     tokenizer,
@@ -806,7 +802,6 @@ def expand_intermediate_trajectories_pre_log_prob(
             )
         roles = np.array(["final"] * n_rows, dtype=object)
         _stamp_role_and_group(base, roles, group_ids)
-        base.non_tensor_batch["debug_row_id"] = _compute_final_debug_row_ids(n_rows)
         base.meta_info["fully_async/intermediate/num_final_rows"] = int(n_rows)
         base.meta_info["fully_async/intermediate/num_intermediate_rows"] = 0
         return base
@@ -845,26 +840,23 @@ def expand_intermediate_trajectories_pre_log_prob(
     if total_appended == 0:
         roles = np.array(["final"] * n_rows, dtype=object)
         _stamp_role_and_group(base, roles, group_ids)
-        base.non_tensor_batch["debug_row_id"] = _compute_final_debug_row_ids(n_rows)
         return base
 
     # Stamp role/group on each piece individually BEFORE concat. This keeps
     # the concat schema consistent across all rows.
     final_roles = np.array(["final"] * n_rows, dtype=object)
     _stamp_role_and_group(base, final_roles, group_ids)
-    base.non_tensor_batch["debug_row_id"] = _compute_final_debug_row_ids(n_rows)
 
     # Iterate pieces[1:] in the order they were appended, mapping each back
     # to its parent row.
     piece_idx = 1
     for row_idx in range(n_rows):
         cnt = per_row_counts[row_idx]
-        for local_idx in range(cnt):
+        for _ in range(cnt):
             p = pieces[piece_idx]
             roles_p = np.array(["intermediate"], dtype=object)
             gids_p = np.array([group_ids[row_idx]], dtype=np.int64)
             _stamp_role_and_group(p, roles_p, gids_p)
-            p.non_tensor_batch["debug_row_id"] = np.array([f"intermediate:{row_idx}:{local_idx}"], dtype=object)
             piece_idx += 1
 
     # --------------------------------------------------------------
@@ -1011,11 +1003,6 @@ def zero_out_padding_rows(data_proto: DataProto, pad_size: int) -> DataProto:
         gids = np.asarray(nt["rollout_group_id"], dtype=np.int64).copy()
         gids[start:total] = -1
         nt["rollout_group_id"] = gids
-    if "debug_row_id" in nt:
-        row_ids = np.asarray(nt["debug_row_id"], dtype=object).copy()
-        for idx in range(start, total):
-            row_ids[idx] = f"padding:{idx}"
-        nt["debug_row_id"] = row_ids
 
     return data_proto
 

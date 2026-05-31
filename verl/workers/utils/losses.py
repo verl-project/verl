@@ -12,12 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import hashlib
-import os
 
 import torch
 from tensordict import TensorDict
-from tensordict.tensorclass import NonTensorData, NonTensorStack
 
 from verl.trainer.ppo.core_algos import agg_loss, compute_value_loss, get_policy_loss_fn, kl_penalty
 from verl.utils import tensordict_utils as tu
@@ -26,286 +23,6 @@ from verl.utils.metric import AggregationType, Metric
 from verl.utils.torch_functional import masked_mean, masked_sum
 from verl.workers.config import ActorConfig, CriticConfig
 from verl.workers.utils.padding import no_padding_2_padding
-
-_ROLLOUT_CORR_DEBUG_COUNT = 0
-
-
-def _rollout_corr_debug_limit() -> int:
-    try:
-        return max(0, int(os.getenv("VERL_ROLLOUT_CORR_DEBUG_LIMIT", "10")))
-    except ValueError:
-        return 5
-
-
-def _rollout_corr_debug_token_limit() -> int:
-    try:
-        return int(os.getenv("VERL_ROLLOUT_CORR_DEBUG_TOKEN_LIMIT", "4096"))
-    except ValueError:
-        return 4096
-
-
-def _debug_slice_limit(total: int) -> int:
-    limit = _rollout_corr_debug_token_limit()
-    if limit <= 0:
-        return total
-    return min(total, limit)
-
-
-def _debug_tensor_digest(value, row_idx: int | None = None, max_items: int = 2048) -> dict | None:
-    if not isinstance(value, torch.Tensor):
-        return None
-    try:
-        tensor = value[row_idx] if row_idx is not None else value
-        tensor = tensor.detach()
-        shape = tuple(tensor.shape)
-        dtype = str(tensor.dtype)
-        flat = tensor.reshape(-1)
-        numel = int(flat.numel())
-        if numel == 0:
-            return {"shape": shape, "dtype": dtype, "numel": 0, "sha1": "empty"}
-        if numel > max_items:
-            head = max_items // 2
-            tail = max_items - head
-            sample = torch.cat([flat[:head], flat[-tail:]])
-        else:
-            sample = flat
-        if sample.dtype in (torch.bfloat16, torch.float16):
-            sample = sample.float()
-        sample_cpu = sample.contiguous().cpu()
-        sha1 = hashlib.sha1(sample_cpu.numpy().tobytes()).hexdigest()[:16]
-        out = {"shape": shape, "dtype": dtype, "numel": numel, "sampled": int(sample_cpu.numel()), "sha1": sha1}
-        if numel <= 16 and tensor.dim() <= 2:
-            out["values"] = tensor.detach().cpu().tolist()
-        return out
-    except Exception as exc:
-        return {"error": type(exc).__name__}
-
-
-def _debug_unwrap_non_tensor(value):
-    if isinstance(value, NonTensorData):
-        return value.data
-    return value
-
-
-def _debug_non_tensor_item(data: TensorDict, key: str, row_idx: int):
-    try:
-        if key not in data.keys():
-            return None
-        value = data.get(key)
-        value = _debug_unwrap_non_tensor(value)
-        if isinstance(value, NonTensorStack):
-            return _debug_unwrap_non_tensor(value[row_idx])
-        if isinstance(value, torch.Tensor):
-            if value.ndim == 0:
-                return value.detach().cpu().item()
-            return (
-                value[row_idx].detach().cpu().item()
-                if value[row_idx].ndim == 0
-                else value[row_idx].detach().cpu().tolist()
-            )
-        if hasattr(value, "shape") and hasattr(value, "__getitem__") and len(value) > row_idx:
-            return value[row_idx]
-        if isinstance(value, list | tuple) and len(value) > row_idx:
-            return value[row_idx]
-        return value
-    except Exception as exc:
-        return f"<{key}_failed:{type(exc).__name__}>"
-
-
-def _debug_shorten(value, max_len: int = 180):
-    try:
-        if isinstance(value, dict):
-            return {str(k): _debug_shorten(v, max_len=max_len) for k, v in value.items()}
-        if isinstance(value, list | tuple):
-            shown = [_debug_shorten(v, max_len=max_len) for v in list(value)[:8]]
-            if len(value) > 8:
-                shown.append(f"...(+{len(value) - 8})")
-            return shown
-        text = str(value)
-        return text if len(text) <= max_len else text[:max_len] + "...<truncated>"
-    except Exception as exc:
-        return f"<repr_failed:{type(exc).__name__}>"
-
-
-def _debug_collect_row_metadata(data: TensorDict) -> list[dict]:
-    keys = (
-        "debug_row_id",
-        "__ref_debug_row_id",
-        "uid",
-        "request_id",
-        "trajectory_role",
-        "turn_number",
-        "rollout_group_id",
-        "data_source",
-    )
-    try:
-        n_rows = int(data.shape[0])
-    except Exception:
-        return []
-    rows = []
-    for row_idx in range(n_rows):
-        row = {}
-        for key in keys:
-            value = _debug_non_tensor_item(data, key, row_idx)
-            if value is not None:
-                row[key] = _debug_shorten(value)
-        rows.append(row)
-    return rows
-
-
-def _debug_row_inputs(data: TensorDict, row_idx: int) -> dict:
-    out = {}
-    for key in ("input_ids", "prompts", "responses", "attention_mask", "position_ids", "ref_log_prob", "old_log_probs"):
-        if key in data.keys():
-            digest = _debug_tensor_digest(data[key], row_idx=row_idx)
-            if digest is not None:
-                out[f"{key}_digest"] = digest
-    if "attention_mask" in data.keys() and isinstance(data["attention_mask"], torch.Tensor):
-        try:
-            out["attention_valid_len"] = int(data["attention_mask"][row_idx].detach().cpu().sum().item())
-        except Exception:
-            pass
-    if "response_mask" in data.keys() and isinstance(data["response_mask"], torch.Tensor):
-        try:
-            out["response_valid_len"] = int(data["response_mask"][row_idx].detach().cpu().sum().item())
-        except Exception:
-            pass
-    return out
-
-
-def _debug_rollout_corr_logprob_alignment(
-    data: TensorDict,
-    log_prob: torch.Tensor,
-    old_log_prob: torch.Tensor,
-    response_mask: torch.Tensor,
-    loss_mode: str,
-    row_metadata: list[dict] | None = None,
-) -> None:
-    global _ROLLOUT_CORR_DEBUG_COUNT
-
-    if loss_mode != "bypass_mode":
-        return
-    debug_limit = _rollout_corr_debug_limit()
-    if _ROLLOUT_CORR_DEBUG_COUNT >= debug_limit:
-        return
-    if "responses" not in data or not response_mask.any():
-        return
-
-    with torch.no_grad():
-        valid = response_mask.bool()
-        current_valid = log_prob[valid].detach().float().cpu()
-        rollout_valid = old_log_prob[valid].detach().float().cpu()
-        diff_valid = (rollout_valid - current_valid).float()
-        ref_log_prob = data.get("ref_log_prob", None)
-        ref_valid = ref_log_prob[valid].detach().float().cpu() if ref_log_prob is not None else None
-        actor_ref_diff = (current_valid - ref_valid).float() if ref_valid is not None else None
-        responses = data["responses"].detach().cpu()
-
-        seq_current = masked_mean(log_prob.detach().float(), response_mask, axis=-1).cpu()
-        seq_rollout = masked_mean(old_log_prob.detach().float(), response_mask, axis=-1).cpu()
-        seq_diff = seq_rollout - seq_current
-        top_k = min(5, seq_diff.numel())
-        top_values, top_indices = torch.topk(seq_diff, k=top_k) if top_k > 0 else ([], [])
-
-        rows = []
-        candidate_rows = list(range(min(3, response_mask.shape[0])))
-        candidate_rows.extend(int(idx.item()) for idx in top_indices)
-        seen_rows = set()
-        for row_idx in candidate_rows:
-            if row_idx in seen_rows or row_idx >= response_mask.shape[0]:
-                continue
-            seen_rows.add(row_idx)
-            valid_cols = torch.nonzero(response_mask[row_idx].detach().cpu().bool(), as_tuple=False).flatten()
-            if valid_cols.numel() == 0:
-                continue
-            token_limit = _debug_slice_limit(int(valid_cols.numel()))
-            cols = valid_cols[:token_limit]
-            rows.append(
-                {
-                    "row": int(row_idx),
-                    "valid_tokens": int(valid_cols.numel()),
-                    "token_detail_limit": _rollout_corr_debug_token_limit(),
-                    "tokens_truncated": int(valid_cols.numel()) > token_limit,
-                    "seq_rollout_minus_current": float(seq_diff[row_idx].item()),
-                    "metadata": row_metadata[row_idx] if row_metadata and row_idx < len(row_metadata) else {},
-                    "input_digests": _debug_row_inputs(data, row_idx),
-                    "tokens": [
-                        {
-                            "pos": int(col.item()),
-                            "token_id": int(responses[row_idx, col].item()),
-                            "current_logprob": float(log_prob[row_idx, col].detach().float().cpu().item()),
-                            "rollout_logprob": float(old_log_prob[row_idx, col].detach().float().cpu().item()),
-                            "rollout_minus_current": float(
-                                (old_log_prob[row_idx, col] - log_prob[row_idx, col]).detach().float().cpu().item()
-                            ),
-                            **(
-                                {
-                                    "ref_logprob": float(ref_log_prob[row_idx, col].detach().float().cpu().item()),
-                                    "current_minus_ref": float(
-                                        (log_prob[row_idx, col] - ref_log_prob[row_idx, col])
-                                        .detach()
-                                        .float()
-                                        .cpu()
-                                        .item()
-                                    ),
-                                    "rollout_minus_ref": float(
-                                        (old_log_prob[row_idx, col] - ref_log_prob[row_idx, col])
-                                        .detach()
-                                        .float()
-                                        .cpu()
-                                        .item()
-                                    ),
-                                }
-                                if ref_log_prob is not None
-                                else {}
-                            ),
-                        }
-                        for col in cols
-                    ],
-                }
-            )
-
-        top_sequences = [
-            {
-                "row": int(idx.item()),
-                "seq_rollout_minus_current": float(val.item()),
-                "valid_tokens": int(response_mask[idx].sum().detach().cpu().item()),
-                "metadata": row_metadata[int(idx.item())]
-                if row_metadata and int(idx.item()) < len(row_metadata)
-                else {},
-            }
-            for val, idx in zip(top_values, top_indices, strict=False)
-        ]
-        ref_stats = (
-            f"ref_mean={ref_valid.mean().item():.6f} "
-            f"ref_min={ref_valid.min().item():.6f} "
-            f"ref_max={ref_valid.max().item():.6f} "
-            f"actor_minus_ref_mean={actor_ref_diff.mean().item():.6f} "
-            f"actor_minus_ref_min={actor_ref_diff.min().item():.6f} "
-            f"actor_minus_ref_max={actor_ref_diff.max().item():.6f} "
-            if ref_valid is not None and actor_ref_diff is not None
-            else ""
-        )
-
-        print(
-            "[RolloutCorrDebug][actor_logprob_alignment] "
-            f"shape={tuple(log_prob.shape)} "
-            f"valid_tokens={int(valid.sum().item())} "
-            f"current_mean={current_valid.mean().item():.6f} "
-            f"current_min={current_valid.min().item():.6f} "
-            f"current_max={current_valid.max().item():.6f} "
-            f"rollout_mean={rollout_valid.mean().item():.6f} "
-            f"rollout_min={rollout_valid.min().item():.6f} "
-            f"rollout_max={rollout_valid.max().item():.6f} "
-            f"diff_mean={diff_valid.mean().item():.6f} "
-            f"diff_min={diff_valid.min().item():.6f} "
-            f"diff_max={diff_valid.max().item():.6f} "
-            f"{ref_stats}"
-            f"top_sequences={top_sequences} "
-            f"sample_rows={rows}",
-            flush=True,
-        )
-        _ROLLOUT_CORR_DEBUG_COUNT += 1
 
 
 def sft_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None):
@@ -374,16 +91,7 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         fields.append("rollout_is_weights")
     if "ref_log_prob" in data:
         fields.append("ref_log_prob")
-    loss_mode = config.policy_loss.get("loss_mode", "vanilla")
-    debug_enabled = loss_mode == "bypass_mode" and _ROLLOUT_CORR_DEBUG_COUNT < _rollout_corr_debug_limit()
-    row_metadata = _debug_collect_row_metadata(data) if debug_enabled else None
-    if loss_mode == "bypass_mode" and "responses" in data:
-        fields.append("responses")
-    if debug_enabled:
-        for key in ("input_ids", "prompts", "attention_mask", "position_ids"):
-            if key in data.keys():
-                fields.append(key)
-    data = data.select(*dict.fromkeys(fields)).to_padded_tensor()
+    data = data.select(*fields).to_padded_tensor()
 
     response_mask = data["response_mask"].to(bool)
     # compute policy loss
@@ -395,7 +103,8 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
 
     loss_agg_mode = config.loss_agg_mode
 
-    _debug_rollout_corr_logprob_alignment(data, log_prob, old_log_prob, response_mask, loss_mode, row_metadata)
+    loss_mode = config.policy_loss.get("loss_mode", "vanilla")
+
     policy_loss_fn = get_policy_loss_fn(loss_mode)
     pg_loss, pg_metrics = policy_loss_fn(
         old_log_prob=old_log_prob,

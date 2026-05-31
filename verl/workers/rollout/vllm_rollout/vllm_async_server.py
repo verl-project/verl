@@ -13,7 +13,6 @@
 # limitations under the License.
 import argparse
 import asyncio
-import hashlib
 import inspect
 import json
 import logging
@@ -22,7 +21,6 @@ from pprint import pprint
 from typing import Any, Callable, Optional
 
 import ray
-import torch
 import vllm.entrypoints.cli.serve
 from packaging import version
 from ray.actor import ActorHandle
@@ -79,201 +77,6 @@ logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
 
 
-def _debug_sequence_digest(values, max_items: int = 2048) -> dict:
-    try:
-        seq = list(values or [])
-        sample = seq if len(seq) <= max_items else seq[: max_items // 2] + seq[-(max_items - max_items // 2) :]
-        payload = json.dumps(sample, sort_keys=True, default=str).encode("utf-8")
-        return {
-            "len": len(seq),
-            "sampled": len(sample),
-            "sha1": hashlib.sha1(payload).hexdigest()[:16],
-            "first": seq[:12],
-            "last": seq[-12:] if len(seq) > 12 else seq[:],
-        }
-    except Exception as exc:
-        return {"error": type(exc).__name__}
-
-
-def _debug_tensor_digest(value, max_items: int = 2048) -> dict | None:
-    if not isinstance(value, torch.Tensor):
-        return None
-    try:
-        tensor = value.detach()
-        shape = tuple(tensor.shape)
-        dtype = str(tensor.dtype)
-        flat = tensor.reshape(-1)
-        numel = int(flat.numel())
-        if numel == 0:
-            return {"shape": shape, "dtype": dtype, "numel": 0, "sha1": "empty"}
-        if numel > max_items:
-            head = max_items // 2
-            tail = max_items - head
-            sample = torch.cat([flat[:head], flat[-tail:]])
-        else:
-            sample = flat
-        if sample.dtype in (torch.bfloat16, torch.float16):
-            sample = sample.float()
-        sample_cpu = sample.contiguous().cpu()
-        sha1 = hashlib.sha1(sample_cpu.numpy().tobytes()).hexdigest()[:16]
-        return {"shape": shape, "dtype": dtype, "numel": numel, "sampled": int(sample_cpu.numel()), "sha1": sha1}
-    except Exception as exc:
-        return {"error": type(exc).__name__}
-
-
-def _debug_media_summary(items: Optional[list[Any]], max_items: int = 4) -> list[dict]:
-    if not items:
-        return []
-    rows = []
-    for idx, item in enumerate(items[:max_items]):
-        row = {"idx": idx, "type": type(item).__name__}
-        tensor_digest = _debug_tensor_digest(item) if isinstance(item, torch.Tensor) else None
-        if tensor_digest is not None:
-            row["tensor_digest"] = tensor_digest
-        for attr in ("size", "mode", "shape", "dtype"):
-            try:
-                if hasattr(item, attr):
-                    row[attr] = str(getattr(item, attr))
-            except Exception:
-                pass
-        rows.append(row)
-    if len(items) > max_items:
-        rows.append({"remaining": len(items) - max_items})
-    return rows
-
-
-def _debug_logprob_stats(values: list[float]) -> dict:
-    if not values:
-        return {"count": 0}
-    tensor = torch.tensor(values, dtype=torch.float32)
-    return {
-        "count": len(values),
-        "mean": float(tensor.mean().item()),
-        "min": float(tensor.min().item()),
-        "max": float(tensor.max().item()),
-    }
-
-
-def _debug_token_detail_limit() -> int:
-    try:
-        return int(os.getenv("VERL_ROLLOUT_CORR_DEBUG_TOKEN_LIMIT", "128"))
-    except ValueError:
-        return 128
-
-
-def _debug_slice_limit(total: int) -> int:
-    limit = _debug_token_detail_limit()
-    if limit <= 0:
-        return total
-    return min(total, limit)
-
-
-def _debug_env_limit(name: str, default: str) -> int:
-    try:
-        return max(0, int(os.getenv(name, default)))
-    except ValueError:
-        try:
-            return max(0, int(default))
-        except ValueError:
-            return 0
-
-
-def _debug_extract_prompt_token_logprobs(
-    prompt_logprobs, token_ids: list[int], start_pos: int
-) -> tuple[list[float], list[dict], bool]:
-    values = []
-    per_token = []
-    if prompt_logprobs is None:
-        return values, [{"error": "missing_prompt_logprobs"}], False
-
-    token_limit = _debug_slice_limit(len(token_ids))
-    for offset, token_id in enumerate(token_ids[:token_limit]):
-        prompt_pos = start_pos + offset
-        if prompt_pos >= len(prompt_logprobs):
-            per_token.append({"offset": offset, "token_id": int(token_id), "error": "position_out_of_range"})
-            break
-        logprobs_dict = prompt_logprobs[prompt_pos]
-        if not logprobs_dict:
-            per_token.append({"offset": offset, "token_id": int(token_id), "error": "empty_logprobs"})
-            continue
-
-        matched = None
-        try:
-            matched = logprobs_dict.get(token_id)
-        except Exception:
-            matched = None
-        if matched is None:
-            try:
-                matched = logprobs_dict.get(str(token_id))
-            except Exception:
-                matched = None
-        matched_token_id = token_id
-        exact_match = matched is not None
-        if matched is None:
-            try:
-                matched_token_id, matched = next(iter(logprobs_dict.items()))
-            except Exception:
-                per_token.append({"offset": offset, "token_id": int(token_id), "error": "iter_logprobs_failed"})
-                continue
-
-        try:
-            logprob = float(matched.logprob)
-        except Exception:
-            per_token.append({"offset": offset, "token_id": int(token_id), "error": "missing_logprob"})
-            continue
-        values.append(logprob)
-        per_token.append(
-            {
-                "offset": offset,
-                "prompt_pos": prompt_pos,
-                "token_id": int(token_id),
-                "matched_token_id": int(matched_token_id),
-                "exact_match": exact_match,
-                "logprob": logprob,
-                "rank": getattr(matched, "rank", None),
-            }
-        )
-    return values, per_token, len(token_ids) > token_limit
-
-
-def _debug_vllm_mm_processor_summary(processor, image_data: Optional[list[Any]]) -> dict:
-    if processor is None or not image_data:
-        return {}
-    try:
-        image_processor = getattr(processor, "image_processor", None)
-        if image_processor is None:
-            return {"error": "missing_image_processor"}
-        try:
-            processed = image_processor(images=image_data, return_tensors="pt")
-        except TypeError:
-            processed = image_processor(image_data, return_tensors="pt")
-        if hasattr(processed, "convert_to_tensors"):
-            processed = processed.convert_to_tensors("pt")
-        inputs = dict(processed)
-        image_grid_thw = inputs.get("image_grid_thw")
-        image_token_count_from_grid = None
-        merge_size = (
-            getattr(image_processor, "merge_size", None) or getattr(image_processor, "spatial_merge_size", None) or 1
-        )
-        if isinstance(image_grid_thw, torch.Tensor):
-            grid = image_grid_thw.detach().cpu().long()
-            image_token_count_from_grid = int(
-                (grid[:, 0] * (grid[:, 1] // merge_size) * (grid[:, 2] // merge_size)).sum()
-            )
-        return {
-            "processor": processor.__class__.__name__,
-            "image_processor": image_processor.__class__.__name__,
-            "merge_size": int(merge_size),
-            "image_count": len(image_data),
-            "image_token_count_from_grid": image_token_count_from_grid,
-            "image_grid_thw_digest": _debug_tensor_digest(image_grid_thw),
-            "pixel_values_digest": _debug_tensor_digest(inputs.get("pixel_values")),
-            "image_embeds_digest": _debug_tensor_digest(inputs.get("image_embeds")),
-        }
-    except Exception as exc:
-        return {"error": type(exc).__name__}
-
-
 class vLLMHttpServer:
     """vLLM http server in single node, this is equivalent to launch server with command line:
     ```
@@ -327,9 +130,6 @@ class vLLMHttpServer:
         self.nnodes = nnodes
         # model weights version, set by ServerAdapter when update weights.
         self.global_steps = None
-        self._logged_qwen_vl_dedup = False
-        self._rollout_logprob_debug_count = 0
-        self._rollout_teacher_forced_debug_count = 0
 
         if self.rollout_mode != RolloutMode.HYBRID and self.config.load_format == "dummy":
             logger.warning(f"rollout mode is {self.rollout_mode}, load_format is dummy, set to auto")
@@ -687,40 +487,7 @@ class vLLMHttpServer:
         sampling_params["logprobs"] = 0 if sampling_params.pop("logprobs", False) else None
         sampling_params.setdefault("repetition_penalty", self.config.get("repetition_penalty", 1.0))
         sampling_params = SamplingParams(max_tokens=max_tokens, **sampling_params)
-        raw_prompt_len = len(prompt_ids)
-        processor = self.model_config.processor
-        image_token_id = getattr(processor, "image_token_id", None)
-        video_token_id = getattr(processor, "video_token_id", None)
-        raw_image_token_count = prompt_ids.count(image_token_id) if image_token_id is not None else None
-        raw_video_token_count = prompt_ids.count(video_token_id) if video_token_id is not None else None
-        raw_prompt_digest = _debug_sequence_digest(prompt_ids)
         prompt_ids = qwen2_5_vl_dedup_image_tokens(prompt_ids, self.model_config.processor)
-        dedup_prompt_digest = _debug_sequence_digest(prompt_ids)
-        dedup_image_token_count = prompt_ids.count(image_token_id) if image_token_id is not None else None
-        dedup_video_token_count = prompt_ids.count(video_token_id) if video_token_id is not None else None
-        mm_processor_summary = _debug_vllm_mm_processor_summary(processor, image_data)
-        if not self._logged_qwen_vl_dedup:
-            image_processor = getattr(processor, "image_processor", None)
-            print(
-                "[RolloutCorrDebug][vllm_dedup] "
-                f"vllm_version={vllm.__version__} "
-                f"processor={processor.__class__.__name__ if processor is not None else None} "
-                f"image_processor={image_processor.__class__.__name__ if image_processor is not None else None} "
-                f"raw_prompt_len={raw_prompt_len} "
-                f"dedup_prompt_len={len(prompt_ids)} "
-                f"removed={raw_prompt_len - len(prompt_ids)} "
-                f"image_count={len(image_data) if image_data is not None else 0} "
-                f"raw_prompt_digest={raw_prompt_digest} "
-                f"dedup_prompt_digest={dedup_prompt_digest} "
-                f"image_summary={_debug_media_summary(image_data)} "
-                f"mm_processor_summary={mm_processor_summary} "
-                f"raw_image_tokens={raw_image_token_count} "
-                f"dedup_image_tokens={dedup_image_token_count} "
-                f"raw_video_tokens={raw_video_token_count} "
-                f"dedup_video_tokens={dedup_video_token_count}",
-                flush=True,
-            )
-            self._logged_qwen_vl_dedup = True
         multi_modal_data = {}
         if image_data is not None:
             multi_modal_data["image"] = image_data
@@ -763,143 +530,6 @@ class vLLMHttpServer:
         log_probs = None
         if sampling_params.logprobs is not None:
             log_probs = [logprobs[token_ids[i]].logprob for i, logprobs in enumerate(final_res.outputs[0].logprobs)]
-            debug_limit = _debug_env_limit("VERL_VLLM_LOGPROB_DEBUG_LIMIT", "0")
-            teacher_forced_debug_limit = _debug_env_limit(
-                "VERL_VLLM_TEACHER_FORCED_DEBUG_LIMIT", os.getenv("VERL_ROLLOUT_CORR_DEBUG_LIMIT", "10")
-            )
-            if self._rollout_logprob_debug_count < debug_limit and log_probs:
-                log_probs_tensor = torch.tensor(log_probs, dtype=torch.float32)
-                token_limit = _debug_slice_limit(len(log_probs))
-                per_token_logprobs = [
-                    {
-                        "offset": i,
-                        "token_id": int(token_ids[i]),
-                        "logprob": float(log_probs[i]),
-                    }
-                    for i in range(token_limit)
-                ]
-                print(
-                    "[RolloutCorrDebug][vllm_logprobs] "
-                    f"request_id={request_id} "
-                    f"global_steps={self.global_steps} "
-                    f"raw_prompt_len={raw_prompt_len} "
-                    f"dedup_prompt_len={len(prompt_ids)} "
-                    f"image_count={len(image_data) if image_data is not None else 0} "
-                    f"raw_prompt_digest={raw_prompt_digest} "
-                    f"dedup_prompt_digest={dedup_prompt_digest} "
-                    f"response_digest={_debug_sequence_digest(token_ids)} "
-                    f"image_summary={_debug_media_summary(image_data)} "
-                    f"mm_processor_summary={mm_processor_summary} "
-                    f"raw_image_tokens={raw_image_token_count} "
-                    f"dedup_image_tokens={dedup_image_token_count} "
-                    f"response_len={len(token_ids)} "
-                    f"mean={log_probs_tensor.mean().item():.6f} "
-                    f"min={log_probs_tensor.min().item():.6f} "
-                    f"max={log_probs_tensor.max().item():.6f} "
-                    f"token_detail_limit={_debug_token_detail_limit()} "
-                    f"per_token_logprobs_truncated={len(log_probs) > token_limit} "
-                    f"per_token_logprobs={per_token_logprobs}",
-                    flush=True,
-                )
-                self._rollout_logprob_debug_count += 1
-
-            if self._rollout_teacher_forced_debug_count < teacher_forced_debug_limit and token_ids:
-                self._rollout_teacher_forced_debug_count += 1
-                try:
-                    full_prompt_ids = list(prompt_ids) + list(token_ids)
-                    if len(full_prompt_ids) + 1 > self.config.max_model_len:
-                        print(
-                            "[RolloutCorrDebug][vllm_teacher_forced_logprobs] "
-                            f"request_id={request_id} skipped=context_too_long "
-                            f"full_prompt_len={len(full_prompt_ids)} max_model_len={self.config.max_model_len}",
-                            flush=True,
-                        )
-                    else:
-                        tf_prompt = TokensPrompt(
-                            prompt_token_ids=full_prompt_ids,
-                            multi_modal_data=dict(multi_modal_data),
-                        )
-                        tf_sampling_params = SamplingParams(
-                            max_tokens=1,
-                            temperature=1.0,
-                            prompt_logprobs=0,
-                        )
-                        tf_request_id = f"{request_id}:rollout-corr-teacher-forced"
-                        tf_generator = self.engine.generate(
-                            prompt=tf_prompt,
-                            sampling_params=tf_sampling_params,
-                            request_id=tf_request_id,
-                            lora_request=lora_request,
-                            priority=priority,
-                        )
-                        tf_res: Optional[RequestOutput] = None
-                        async for output in tf_generator:
-                            tf_res = output
-                        assert tf_res is not None
-                        tf_prompt_logprobs_len = (
-                            len(tf_res.prompt_logprobs) if tf_res.prompt_logprobs is not None else None
-                        )
-                        tf_start_pos = len(prompt_ids)
-                        if tf_prompt_logprobs_len is not None and tf_prompt_logprobs_len >= len(token_ids):
-                            # vLLM expands Qwen-VL image placeholders internally before returning prompt_logprobs.
-                            # Therefore the response span starts after the expanded prompt, not after dedup_prompt.
-                            tf_start_pos = tf_prompt_logprobs_len - len(token_ids)
-                        tf_log_probs, tf_per_token, tf_truncated = _debug_extract_prompt_token_logprobs(
-                            tf_res.prompt_logprobs,
-                            list(token_ids),
-                            tf_start_pos,
-                        )
-                        compare_limit = min(_debug_slice_limit(len(token_ids)), len(log_probs), len(tf_log_probs))
-                        per_token_compare = [
-                            {
-                                "offset": i,
-                                "token_id": int(token_ids[i]),
-                                "decode_logprob": float(log_probs[i]),
-                                "teacher_forced_logprob": float(tf_log_probs[i]),
-                                "tf_minus_decode": float(tf_log_probs[i] - log_probs[i]),
-                            }
-                            for i in range(compare_limit)
-                        ]
-                        min_len = min(len(log_probs), len(tf_log_probs))
-                        diff_stats = {}
-                        if min_len > 0:
-                            diff_stats = _debug_logprob_stats(
-                                [float(tf_log_probs[i] - log_probs[i]) for i in range(min_len)]
-                            )
-                        print(
-                            "[RolloutCorrDebug][vllm_teacher_forced_logprobs] "
-                            f"request_id={request_id} "
-                            f"tf_request_id={tf_request_id} "
-                            f"global_steps={self.global_steps} "
-                            f"vllm_version={vllm.__version__} "
-                            f"raw_prompt_len={raw_prompt_len} "
-                            f"dedup_prompt_len={len(prompt_ids)} "
-                            f"response_len={len(token_ids)} "
-                            f"full_prompt_len={len(full_prompt_ids)} "
-                            f"raw_prompt_digest={raw_prompt_digest} "
-                            f"dedup_prompt_digest={dedup_prompt_digest} "
-                            f"response_digest={_debug_sequence_digest(token_ids)} "
-                            f"image_summary={_debug_media_summary(image_data)} "
-                            f"mm_processor_summary={mm_processor_summary} "
-                            f"decode_stats={_debug_logprob_stats([float(x) for x in log_probs])} "
-                            f"teacher_forced_stats={_debug_logprob_stats(tf_log_probs)} "
-                            f"teacher_forced_minus_decode_stats={diff_stats} "
-                            f"teacher_forced_prompt_logprobs_len={tf_prompt_logprobs_len} "
-                            f"teacher_forced_response_start_pos={tf_start_pos} "
-                            f"teacher_forced_output_token_ids={list(tf_res.outputs[0].token_ids)} "
-                            f"token_detail_limit={_debug_token_detail_limit()} "
-                            f"teacher_forced_per_token_truncated={tf_truncated} "
-                            f"compare_per_token_truncated={len(token_ids) > compare_limit} "
-                            f"teacher_forced_per_token_logprobs={tf_per_token} "
-                            f"per_token_compare={per_token_compare}",
-                            flush=True,
-                        )
-                except Exception as exc:
-                    print(
-                        "[RolloutCorrDebug][vllm_teacher_forced_logprobs] "
-                        f"request_id={request_id} failed={type(exc).__name__}: {exc}",
-                        flush=True,
-                    )
 
         routed_experts = None
         if self.config.enable_rollout_routing_replay:

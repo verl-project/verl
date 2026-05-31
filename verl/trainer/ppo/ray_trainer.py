@@ -132,272 +132,6 @@ def _debug_dataproto_summary(batch: DataProto | None) -> dict:
     }
 
 
-def _rollout_corr_debug_limit() -> int:
-    try:
-        return max(0, int(os.getenv("VERL_ROLLOUT_CORR_DEBUG_LIMIT", "10")))
-    except ValueError:
-        return 5
-
-
-def _rollout_corr_debug_token_limit() -> int:
-    try:
-        return int(os.getenv("VERL_ROLLOUT_CORR_DEBUG_TOKEN_LIMIT", "128"))
-    except ValueError:
-        return 128
-
-
-def _debug_slice_limit(total: int) -> int:
-    limit = _rollout_corr_debug_token_limit()
-    if limit <= 0:
-        return total
-    return min(total, limit)
-
-
-def _debug_ref_row_id_summary(expected: torch.Tensor, returned: torch.Tensor | None) -> dict:
-    if returned is None:
-        return {"returned": False}
-    expected_cpu = expected.detach().cpu().reshape(-1)
-    returned_cpu = returned.detach().cpu().reshape(-1)
-    limit = _rollout_corr_debug_limit()
-    if returned_cpu.numel() != expected_cpu.numel():
-        return {
-            "returned": True,
-            "count": int(returned_cpu.numel()),
-            "expected_count": int(expected_cpu.numel()),
-            "first_expected": expected_cpu[:limit].tolist(),
-            "first_returned": returned_cpu[:limit].tolist(),
-            "mismatch_count": "shape_mismatch",
-        }
-    mismatch = returned_cpu.ne(expected_cpu)
-    mismatch_indices = mismatch.nonzero(as_tuple=False).reshape(-1)
-    return {
-        "returned": True,
-        "count": int(returned_cpu.numel()),
-        "first_expected": expected_cpu[:limit].tolist(),
-        "first_returned": returned_cpu[:limit].tolist(),
-        "mismatch_count": int(mismatch.sum().item()),
-        "first_mismatch_indices": mismatch_indices[:limit].tolist(),
-        "first_mismatch_pairs": [
-            {
-                "idx": int(i),
-                "expected": int(expected_cpu[i]),
-                "returned": int(returned_cpu[i]),
-            }
-            for i in mismatch_indices[:limit].tolist()
-        ],
-    }
-
-
-def _debug_ref_alignment_snapshot(data, ref_log_probs: torch.Tensor, row_ids: torch.Tensor | None, stage: str):
-    limit = _rollout_corr_debug_limit()
-    if limit <= 0:
-        return
-
-    try:
-        response_mask = data["response_mask"].bool()
-        responses = data["responses"]
-        rollout_log_probs = data.get("rollout_log_probs", None)
-        old_log_probs = data.get("old_log_probs", None)
-
-        valid_counts = response_mask.sum(dim=-1)
-        candidates = list(range(min(limit, response_mask.shape[0])))
-
-        if isinstance(rollout_log_probs, torch.Tensor):
-            diff = (rollout_log_probs - ref_log_probs) * response_mask
-            denom = valid_counts.clamp_min(1)
-            seq_mean = diff.sum(dim=-1) / denom
-            top_k = min(limit, seq_mean.numel())
-            top_rows = torch.topk(seq_mean.abs(), k=top_k).indices.detach().cpu().tolist()
-            candidates.extend(top_rows)
-
-        seen = set()
-        rows = []
-        for row in candidates:
-            if row in seen or row >= response_mask.shape[0]:
-                continue
-            seen.add(row)
-            valid_positions = response_mask[row].nonzero(as_tuple=False).reshape(-1)
-            token_limit = _debug_slice_limit(int(valid_positions.numel()))
-            positions = valid_positions[:token_limit]
-            row_info = {
-                "row": int(row),
-                "row_id": int(row_ids[row].detach().cpu()) if isinstance(row_ids, torch.Tensor) else None,
-                "valid_tokens": int(valid_counts[row].detach().cpu()),
-                "token_detail_limit": _rollout_corr_debug_token_limit(),
-                "tokens_truncated": int(valid_positions.numel()) > token_limit,
-            }
-            tokens = []
-            for pos_t in positions:
-                pos = int(pos_t.detach().cpu())
-                token = {
-                    "pos": pos,
-                    "token_id": int(responses[row, pos].detach().cpu()),
-                    "ref_logprob": float(ref_log_probs[row, pos].detach().cpu()),
-                }
-                if isinstance(rollout_log_probs, torch.Tensor):
-                    rollout_val = rollout_log_probs[row, pos]
-                    token["rollout_logprob"] = float(rollout_val.detach().cpu())
-                    token["rollout_minus_ref"] = float((rollout_val - ref_log_probs[row, pos]).detach().cpu())
-                if isinstance(old_log_probs, torch.Tensor):
-                    old_val = old_log_probs[row, pos]
-                    token["old_logprob"] = float(old_val.detach().cpu())
-                    token["old_minus_ref"] = float((old_val - ref_log_probs[row, pos]).detach().cpu())
-                tokens.append(token)
-            row_info["tokens"] = tokens
-            rows.append(row_info)
-
-        summary = {"stage": stage, "rows": rows}
-        print(f"[RolloutCorrDebug][ref_alignment_snapshot] {summary}", flush=True)
-    except Exception as exc:
-        print(
-            f"[RolloutCorrDebug][ref_alignment_snapshot] stage={stage} failed={type(exc).__name__}: {exc}",
-            flush=True,
-        )
-
-
-def _debug_non_tensor_item(batch: DataProto, key: str, row: int):
-    try:
-        values = (batch.non_tensor_batch or {}).get(key)
-        if values is None or row >= len(values):
-            return None
-        return values[row]
-    except Exception as exc:
-        return f"<{key}_failed:{type(exc).__name__}>"
-
-
-def _debug_actor_eval_alignment_snapshot(batch: DataProto, actor_eval_log_probs: torch.Tensor, stage: str):
-    limit = _rollout_corr_debug_limit()
-    if limit <= 0:
-        return
-
-    try:
-        response_mask = batch.batch["response_mask"].bool()
-        responses = batch.batch["responses"]
-        rollout_log_probs = batch.batch.get("rollout_log_probs", batch.batch.get("old_log_probs", None))
-        ref_log_probs = batch.batch.get("ref_log_prob", None)
-        valid = response_mask & torch.isfinite(actor_eval_log_probs)
-        if valid.sum().item() == 0:
-            print(
-                f"[RolloutCorrDebug][actor_eval_logprob_alignment] stage={stage} valid_tokens=0",
-                flush=True,
-            )
-            return
-
-        actor_valid = actor_eval_log_probs[valid].detach().float()
-        rollout_valid = (
-            rollout_log_probs[valid].detach().float() if isinstance(rollout_log_probs, torch.Tensor) else None
-        )
-        ref_valid = ref_log_probs[valid].detach().float() if isinstance(ref_log_probs, torch.Tensor) else None
-
-        candidates = list(range(min(limit, response_mask.shape[0])))
-        valid_counts = response_mask.sum(dim=-1)
-        score = torch.zeros(response_mask.shape[0], dtype=torch.float32, device=response_mask.device)
-        denom = valid_counts.clamp_min(1)
-        if isinstance(ref_log_probs, torch.Tensor):
-            score = torch.maximum(
-                score,
-                (((actor_eval_log_probs - ref_log_probs) * response_mask).sum(dim=-1) / denom).abs().float(),
-            )
-        if isinstance(rollout_log_probs, torch.Tensor):
-            score = torch.maximum(
-                score,
-                (((actor_eval_log_probs - rollout_log_probs) * response_mask).sum(dim=-1) / denom).abs().float(),
-            )
-        top_k = min(limit, score.numel())
-        candidates.extend(torch.topk(score, k=top_k).indices.detach().cpu().tolist())
-
-        seen = set()
-        rows = []
-        for row in candidates:
-            if row in seen or row >= response_mask.shape[0]:
-                continue
-            seen.add(row)
-            mask = response_mask[row]
-            valid_positions = mask.nonzero(as_tuple=False).reshape(-1)
-            token_limit = _debug_slice_limit(int(valid_positions.numel()))
-            positions = valid_positions[:token_limit]
-            row_info = {
-                "row": int(row),
-                "debug_row_id": _debug_non_tensor_item(batch, "debug_row_id", row),
-                "uid": _debug_non_tensor_item(batch, "uid", row),
-                "trajectory_role": _debug_non_tensor_item(batch, "trajectory_role", row),
-                "turn_number": _debug_non_tensor_item(batch, "turn_number", row),
-                "rollout_group_id": _debug_non_tensor_item(batch, "rollout_group_id", row),
-                "valid_tokens": int(valid_counts[row].detach().cpu()),
-                "token_detail_limit": _rollout_corr_debug_token_limit(),
-                "tokens_truncated": int(valid_positions.numel()) > token_limit,
-            }
-            if valid_counts[row].item() > 0:
-                actor_row = actor_eval_log_probs[row][mask].detach().float().cpu()
-                row_info["actor_eval_mean"] = float(actor_row.mean().item())
-                if isinstance(rollout_log_probs, torch.Tensor):
-                    rollout_row = rollout_log_probs[row][mask].detach().float().cpu()
-                    row_info["rollout_mean"] = float(rollout_row.mean().item())
-                    row_info["actor_eval_minus_rollout_mean"] = float((actor_row - rollout_row).mean().item())
-                if isinstance(ref_log_probs, torch.Tensor):
-                    ref_row = ref_log_probs[row][mask].detach().float().cpu()
-                    row_info["ref_mean"] = float(ref_row.mean().item())
-                    row_info["actor_eval_minus_ref_mean"] = float((actor_row - ref_row).mean().item())
-
-            tokens = []
-            for pos_t in positions:
-                pos = int(pos_t.detach().cpu())
-                token = {
-                    "pos": pos,
-                    "token_id": int(responses[row, pos].detach().cpu()),
-                    "actor_eval_logprob": float(actor_eval_log_probs[row, pos].detach().float().cpu()),
-                }
-                if isinstance(rollout_log_probs, torch.Tensor):
-                    rollout_val = rollout_log_probs[row, pos]
-                    token["rollout_logprob"] = float(rollout_val.detach().float().cpu())
-                    token["actor_eval_minus_rollout"] = float(
-                        (actor_eval_log_probs[row, pos] - rollout_val).detach().float().cpu()
-                    )
-                if isinstance(ref_log_probs, torch.Tensor):
-                    ref_val = ref_log_probs[row, pos]
-                    token["ref_logprob"] = float(ref_val.detach().float().cpu())
-                    token["actor_eval_minus_ref"] = float(
-                        (actor_eval_log_probs[row, pos] - ref_val).detach().float().cpu()
-                    )
-                tokens.append(token)
-            row_info["tokens"] = tokens
-            rows.append(row_info)
-
-        ref_stats = (
-            f"ref_mean={ref_valid.mean().item():.6f} "
-            f"actor_eval_minus_ref_mean={(actor_valid - ref_valid).mean().item():.6f} "
-            f"actor_eval_minus_ref_min={(actor_valid - ref_valid).min().item():.6f} "
-            f"actor_eval_minus_ref_max={(actor_valid - ref_valid).max().item():.6f} "
-            if ref_valid is not None
-            else ""
-        )
-        rollout_stats = (
-            f"rollout_mean={rollout_valid.mean().item():.6f} "
-            f"actor_eval_minus_rollout_mean={(actor_valid - rollout_valid).mean().item():.6f} "
-            f"actor_eval_minus_rollout_min={(actor_valid - rollout_valid).min().item():.6f} "
-            f"actor_eval_minus_rollout_max={(actor_valid - rollout_valid).max().item():.6f} "
-            if rollout_valid is not None
-            else ""
-        )
-        print(
-            "[RolloutCorrDebug][actor_eval_logprob_alignment] "
-            f"stage={stage} shape={tuple(actor_eval_log_probs.shape)} "
-            f"valid_tokens={int(valid.sum().item())} "
-            f"actor_eval_mean={actor_valid.mean().item():.6f} "
-            f"actor_eval_min={actor_valid.min().item():.6f} "
-            f"actor_eval_max={actor_valid.max().item():.6f} "
-            f"{rollout_stats}"
-            f"{ref_stats}"
-            f"rows={rows}",
-            flush=True,
-        )
-    except Exception as exc:
-        print(
-            f"[RolloutCorrDebug][actor_eval_logprob_alignment] stage={stage} failed={type(exc).__name__}: {exc}",
-            flush=True,
-        )
-
-
 def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, kl_penalty="kl"):
     """Apply KL penalty to the token-level rewards.
 
@@ -638,7 +372,6 @@ class RayPPOTrainer:
             self.kl_ctrl_in_reward = core_algos.get_kl_controller(self.config.algorithm.kl_ctrl)
 
         self.use_prefix_grouper = self.config.actor_rollout_ref.actor.get("use_prefix_grouper", False)
-        self._actor_eval_logprob_debug_count = 0
 
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
 
@@ -1515,8 +1248,6 @@ class RayPPOTrainer:
         )
         # step 1: convert dataproto to tensordict.
         batch_td = batch.to_tensordict()
-        expected_row_ids = torch.arange(len(batch_td), dtype=torch.long)
-        batch_td["__ref_debug_row_id"] = expected_row_ids
         print(
             "[RayPPOTrainer][compute_ref_log_prob][after_to_tensordict] "
             f"ts={time.time():.3f} summary={_debug_tensordict_summary(batch_td)}",
@@ -1549,11 +1280,6 @@ class RayPPOTrainer:
             f"ts={time.time():.3f} output_type={type(output).__name__}",
             flush=True,
         )
-        returned_row_ids = tu.get(output, "__ref_debug_row_id", default=None)
-        print(
-            f"[RolloutCorrDebug][ref_row_id_collect] {_debug_ref_row_id_summary(expected_row_ids, returned_row_ids)}",
-            flush=True,
-        )
         # gather output
         log_probs = tu.get(output, "log_probs")
         print(
@@ -1568,7 +1294,6 @@ class RayPPOTrainer:
             f"ts={time.time():.3f} log_probs_shape={_debug_shape(log_probs)}",
             flush=True,
         )
-        _debug_ref_alignment_snapshot(batch_td, log_probs, returned_row_ids, "after_no_padding_2_padding")
         # step 5: rebuild a tensordict and convert to dataproto
         ref_log_prob = tu.get_tensordict({"ref_log_prob": log_probs.float()})
         ref_log_prob = DataProto.from_tensordict(ref_log_prob)
@@ -1617,47 +1342,11 @@ class RayPPOTrainer:
         old_log_prob = DataProto.from_tensordict(old_log_prob)
         return old_log_prob, old_log_prob_mfu
 
-    def _debug_actor_eval_log_prob_before_update(self, batch: DataProto) -> None:
-        limit = _rollout_corr_debug_limit()
-        if limit <= 0 or self._actor_eval_logprob_debug_count >= limit:
-            return
-        self._actor_eval_logprob_debug_count += 1
-        try:
-            print(
-                "[RayPPOTrainer][actor_eval_logprob_debug][enter] "
-                f"ts={time.time():.3f} count={self._actor_eval_logprob_debug_count - 1} "
-                f"summary={_debug_dataproto_summary(batch)}",
-                flush=True,
-            )
-            batch_td = batch.to_tensordict()
-            batch_td = left_right_2_no_padding(batch_td)
-            tu.assign_non_tensor(
-                batch_td,
-                calculate_entropy=False,
-                compute_loss=False,
-            )
-            output = self.actor_rollout_wg.compute_log_prob(batch_td)
-            log_probs = tu.get(output, "log_probs")
-            log_probs = no_padding_2_padding(log_probs, batch_td).float()
-            _debug_actor_eval_alignment_snapshot(batch, log_probs, "before_update_actor_eval")
-            print(
-                "[RayPPOTrainer][actor_eval_logprob_debug][exit] "
-                f"ts={time.time():.3f} log_probs_shape={_debug_shape(log_probs)}",
-                flush=True,
-            )
-        except Exception as exc:
-            print(
-                "[RolloutCorrDebug][actor_eval_logprob_alignment] "
-                f"stage=before_update_actor_eval failed={type(exc).__name__}: {exc}",
-                flush=True,
-            )
-
     def _update_actor(self, batch: DataProto) -> DataProto:
         rollout_config = self.config.actor_rollout_ref.rollout
         batch.meta_info["multi_turn"] = rollout_config.multi_turn.enable
         # TODO: Make "temperature" single source of truth from generation.
         batch.meta_info["temperature"] = rollout_config.temperature
-        self._debug_actor_eval_log_prob_before_update(batch)
         # update actor
         batch_td = batch.to_tensordict()
         # step 2: convert from padding to no-padding
