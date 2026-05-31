@@ -125,9 +125,16 @@ def _rollout_corr_debug_rows() -> int:
 
 def _rollout_corr_debug_token_limit() -> int:
     try:
-        return int(os.getenv("VERL_ROLLOUT_CORR_DEBUG_TOKEN_LIMIT", "4096"))
+        return int(os.getenv("VERL_ROLLOUT_CORR_DEBUG_TOKEN_LIMIT", "128"))
     except ValueError:
-        return 4096
+        return 128
+
+
+def _fsdp_forward_io_debug_limit() -> int:
+    try:
+        return max(0, int(os.getenv("VERL_FSDP_FORWARD_IO_DEBUG_LIMIT", "0")))
+    except ValueError:
+        return 0
 
 
 def _debug_slice_limit(total: int) -> int:
@@ -381,7 +388,7 @@ def _debug_forward_io_snapshot(
     model_output: dict | None = None,
     runtime_context: dict | None = None,
 ) -> None:
-    limit = _rollout_corr_debug_limit()
+    limit = _fsdp_forward_io_debug_limit()
     if limit <= 0:
         return
     count_key = f"{stage}:forward_only={forward_only}"

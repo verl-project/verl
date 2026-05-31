@@ -156,9 +156,9 @@ def _debug_logprob_stats(values: list[float]) -> dict:
 
 def _debug_token_detail_limit() -> int:
     try:
-        return int(os.getenv("VERL_ROLLOUT_CORR_DEBUG_TOKEN_LIMIT", "4096"))
+        return int(os.getenv("VERL_ROLLOUT_CORR_DEBUG_TOKEN_LIMIT", "128"))
     except ValueError:
-        return 4096
+        return 128
 
 
 def _debug_slice_limit(total: int) -> int:
@@ -166,6 +166,16 @@ def _debug_slice_limit(total: int) -> int:
     if limit <= 0:
         return total
     return min(total, limit)
+
+
+def _debug_env_limit(name: str, default: str) -> int:
+    try:
+        return max(0, int(os.getenv(name, default)))
+    except ValueError:
+        try:
+            return max(0, int(default))
+        except ValueError:
+            return 0
 
 
 def _debug_extract_prompt_token_logprobs(
@@ -753,7 +763,10 @@ class vLLMHttpServer:
         log_probs = None
         if sampling_params.logprobs is not None:
             log_probs = [logprobs[token_ids[i]].logprob for i, logprobs in enumerate(final_res.outputs[0].logprobs)]
-            debug_limit = int(os.getenv("VERL_ROLLOUT_CORR_DEBUG_LIMIT", "10"))
+            debug_limit = _debug_env_limit("VERL_VLLM_LOGPROB_DEBUG_LIMIT", "0")
+            teacher_forced_debug_limit = _debug_env_limit(
+                "VERL_VLLM_TEACHER_FORCED_DEBUG_LIMIT", os.getenv("VERL_ROLLOUT_CORR_DEBUG_LIMIT", "10")
+            )
             if self._rollout_logprob_debug_count < debug_limit and log_probs:
                 log_probs_tensor = torch.tensor(log_probs, dtype=torch.float32)
                 token_limit = _debug_slice_limit(len(log_probs))
@@ -790,7 +803,7 @@ class vLLMHttpServer:
                 )
                 self._rollout_logprob_debug_count += 1
 
-            if self._rollout_teacher_forced_debug_count < debug_limit and token_ids:
+            if self._rollout_teacher_forced_debug_count < teacher_forced_debug_limit and token_ids:
                 self._rollout_teacher_forced_debug_count += 1
                 try:
                     full_prompt_ids = list(prompt_ids) + list(token_ids)

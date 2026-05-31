@@ -36,6 +36,13 @@ def _rollout_corr_debug_limit() -> int:
         return 10
 
 
+def _dynamic_batch_debug_limit() -> int:
+    try:
+        return max(0, int(os.getenv("VERL_DYNAMIC_BATCH_DEBUG_LIMIT", "2")))
+    except ValueError:
+        return 2
+
+
 def _debug_non_tensor_preview(data: TensorDict, key: str, indices: list[int] | None = None, limit: int = 12):
     try:
         if key not in data.keys():
@@ -82,7 +89,7 @@ def _debug_dynamic_batch_summary(
     micro_batch_size_per_gpu=None,
 ) -> None:
     global _DYNAMIC_BATCH_DEBUG_COUNT
-    limit = _rollout_corr_debug_limit()
+    limit = _dynamic_batch_debug_limit()
     if limit <= 0 or _DYNAMIC_BATCH_DEBUG_COUNT >= limit:
         return
     _DYNAMIC_BATCH_DEBUG_COUNT += 1
@@ -123,7 +130,7 @@ def _debug_dynamic_batch_summary(
 
 def _debug_dynamic_restore_summary(data: TensorDict, indices, model_output: dict) -> None:
     global _DYNAMIC_BATCH_RESTORE_DEBUG_COUNT
-    limit = _rollout_corr_debug_limit()
+    limit = _dynamic_batch_debug_limit()
     if limit <= 0 or _DYNAMIC_BATCH_RESTORE_DEBUG_COUNT >= limit:
         return
     _DYNAMIC_BATCH_RESTORE_DEBUG_COUNT += 1

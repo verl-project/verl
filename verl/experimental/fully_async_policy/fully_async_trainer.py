@@ -110,9 +110,17 @@ def _debug_dataproto_item(batch: DataProto, key: str, row: int):
 
 def _rollout_corr_debug_token_limit() -> int:
     try:
-        return int(os.getenv("VERL_ROLLOUT_CORR_DEBUG_TOKEN_LIMIT", "4096"))
+        return int(os.getenv("VERL_ROLLOUT_CORR_DEBUG_TOKEN_LIMIT", "128"))
     except ValueError:
-        return 4096
+        return 128
+
+
+def _rollout_corr_debug_grad_probes_enabled() -> bool:
+    return os.getenv("VERL_ROLLOUT_CORR_DEBUG_GRAD_PROBES", "0").lower() in ("1", "true", "yes", "on")
+
+
+def _rollout_corr_debug_entropy_probe_enabled() -> bool:
+    return os.getenv("VERL_ROLLOUT_CORR_DEBUG_ENTROPY_PROBE", "0").lower() in ("1", "true", "yes", "on")
 
 
 def _debug_slice_limit(total: int) -> int:
@@ -1145,6 +1153,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
                 *,
                 calculate_entropy: bool,
                 compute_loss: bool,
+                use_remove_padding: bool | None = None,
                 use_dynamic_bsz: bool | None = None,
                 max_token_len_per_gpu: int | None = None,
                 micro_batch_size_per_gpu: int | None = None,
@@ -1163,6 +1172,8 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
                 }
                 if use_dynamic_bsz is not None:
                     kwargs["use_dynamic_bsz"] = use_dynamic_bsz
+                if use_remove_padding is not None:
+                    kwargs["use_remove_padding"] = use_remove_padding
                 if max_token_len_per_gpu is not None:
                     kwargs["max_token_len_per_gpu"] = max_token_len_per_gpu
                 if micro_batch_size_per_gpu is not None:
@@ -1176,21 +1187,52 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
                 _debug_actor_eval_alignment_snapshot(batch, probe_log_probs, f"fully_async_before_update_{stage}")
                 _debug_actor_train_eval_probe_snapshot(batch, log_probs, probe_log_probs, stage)
 
+            def run_actor_eval_probe(stage: str, **kwargs):
+                try:
+                    probe_td = make_probe_td(calculate_entropy=False, compute_loss=False, **kwargs)
+                    probe_output = self.actor_rollout_wg.compute_log_prob(probe_td)
+                    probe_log_probs = tu.get(probe_output, "log_probs")
+                    probe_log_probs = no_padding_2_padding(probe_log_probs, probe_td).float()
+                    log_probe_alignment(stage, probe_log_probs)
+                    return probe_log_probs
+                except Exception as exc:
+                    print(
+                        f"[RolloutCorrDebug][actor_eval_probe] stage={stage} failed={type(exc).__name__}: {exc}",
+                        flush=True,
+                    )
+                    return None
+
             def run_train_no_grad_probe(stage: str, **kwargs):
-                probe_td = make_probe_td(compute_loss=False, **kwargs)
-                probe_output = self.actor_rollout_wg.debug_actor_train_mode_log_prob(probe_td)
-                probe_log_probs = tu.get(probe_output, "log_probs")
-                probe_log_probs = no_padding_2_padding(probe_log_probs, probe_td).float()
-                log_probe_alignment(stage, probe_log_probs)
-                return probe_log_probs
+                try:
+                    probe_td = make_probe_td(compute_loss=False, **kwargs)
+                    probe_output = self.actor_rollout_wg.debug_actor_train_mode_log_prob(probe_td)
+                    probe_log_probs = tu.get(probe_output, "log_probs")
+                    probe_log_probs = no_padding_2_padding(probe_log_probs, probe_td).float()
+                    log_probe_alignment(stage, probe_log_probs)
+                    return probe_log_probs
+                except Exception as exc:
+                    print(
+                        f"[RolloutCorrDebug][actor_train_eval_probe] stage={stage} failed={type(exc).__name__}: {exc}",
+                        flush=True,
+                    )
+                    return None
 
             def run_train_grad_dryrun_probe(stage: str, **kwargs):
-                probe_td = make_probe_td(compute_loss=True, disable_auto_offload=True, **kwargs)
-                probe_output = self.actor_rollout_wg.debug_actor_train_grad_log_prob(probe_td)
-                probe_log_probs = tu.get(probe_output, "log_probs")
-                probe_log_probs = no_padding_2_padding(probe_log_probs, probe_td).float()
-                log_probe_alignment(stage, probe_log_probs)
-                return probe_log_probs
+                if not _rollout_corr_debug_grad_probes_enabled():
+                    return None
+                try:
+                    probe_td = make_probe_td(compute_loss=True, disable_auto_offload=True, **kwargs)
+                    probe_output = self.actor_rollout_wg.debug_actor_train_grad_log_prob(probe_td)
+                    probe_log_probs = tu.get(probe_output, "log_probs")
+                    probe_log_probs = no_padding_2_padding(probe_log_probs, probe_td).float()
+                    log_probe_alignment(stage, probe_log_probs)
+                    return probe_log_probs
+                except Exception as exc:
+                    print(
+                        f"[RolloutCorrDebug][actor_train_grad_probe] stage={stage} failed={type(exc).__name__}: {exc}",
+                        flush=True,
+                    )
+                    return None
 
             batch_td = batch.to_tensordict()
             batch_td = left_right_2_no_padding(batch_td)
@@ -1204,6 +1246,20 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             log_probs = no_padding_2_padding(log_probs, batch_td).float()
             _debug_actor_eval_alignment_snapshot(batch, log_probs, "fully_async_before_update_actor_eval")
 
+            actor_eval_no_rmpad_log_probs = run_actor_eval_probe(
+                "actor_eval_no_remove_padding",
+                use_remove_padding=False,
+                use_dynamic_bsz=True,
+                max_token_len_per_gpu=actor_config.ppo_max_token_len_per_gpu,
+                micro_batch_size_per_gpu=actor_config.ppo_micro_batch_size_per_gpu,
+            )
+            actor_eval_static_bsz1_log_probs = run_actor_eval_probe(
+                "actor_eval_static_bsz1_remove_padding",
+                use_remove_padding=True,
+                use_dynamic_bsz=False,
+                max_token_len_per_gpu=actor_config.ppo_max_token_len_per_gpu,
+                micro_batch_size_per_gpu=1,
+            )
             train_probe_log_probs = run_train_no_grad_probe(
                 "actor_train_mode_no_grad_infer_defaults",
                 calculate_entropy=False,
@@ -1223,13 +1279,15 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
                 micro_batch_size_per_gpu=actor_config.ppo_micro_batch_size_per_gpu or 1,
             )
 
-            entropy_probe_log_probs = run_train_no_grad_probe(
-                "actor_train_mode_entropy_no_grad",
-                calculate_entropy=True,
-                use_dynamic_bsz=True,
-                max_token_len_per_gpu=actor_config.ppo_max_token_len_per_gpu,
-                micro_batch_size_per_gpu=actor_config.ppo_micro_batch_size_per_gpu,
-            )
+            entropy_probe_log_probs = None
+            if _rollout_corr_debug_entropy_probe_enabled():
+                entropy_probe_log_probs = run_train_no_grad_probe(
+                    "actor_train_mode_entropy_no_grad",
+                    calculate_entropy=True,
+                    use_dynamic_bsz=True,
+                    max_token_len_per_gpu=actor_config.ppo_max_token_len_per_gpu,
+                    micro_batch_size_per_gpu=actor_config.ppo_micro_batch_size_per_gpu,
+                )
             grad_no_entropy_probe_log_probs = run_train_grad_dryrun_probe(
                 "actor_train_grad_loss_no_entropy_dryrun",
                 calculate_entropy=False,
@@ -1247,6 +1305,8 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             print(
                 "[FullyAsyncTrainer][actor_eval_logprob_debug][exit] "
                 f"ts={time.time():.3f} log_probs_shape={_debug_shape(log_probs)} "
+                f"actor_eval_no_rmpad_log_probs_shape={_debug_shape(actor_eval_no_rmpad_log_probs)} "
+                f"actor_eval_static_bsz1_log_probs_shape={_debug_shape(actor_eval_static_bsz1_log_probs)} "
                 f"train_probe_log_probs_shape={_debug_shape(train_probe_log_probs)} "
                 f"train_dynamic_probe_log_probs_shape={_debug_shape(train_dynamic_probe_log_probs)} "
                 f"train_static_probe_log_probs_shape={_debug_shape(train_static_probe_log_probs)} "
