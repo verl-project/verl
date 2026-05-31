@@ -1119,6 +1119,7 @@ class FSDPEngine(BaseEngine):
     def forward_backward_batch(self, data: TensorDict, loss_function: Callable, forward_only=False) -> list[TensorDict]:
         # note that the global_batch_size should include data on all the dp
         tu.assign_non_tensor(data, sp_size=self.ulysses_sequence_parallel_size)
+        debug_skip_backward = tu.get_non_tensor_data(data=data, key="debug_skip_backward", default=False)
 
         rank = torch.distributed.get_rank()
         dp_rank = self.get_data_parallel_rank()
@@ -1129,6 +1130,7 @@ class FSDPEngine(BaseEngine):
             "[FSDPEngine][forward_backward_batch][enter] "
             f"ts={time.time():.3f} rank={rank} dp_rank={dp_rank} "
             f"dp_size={dp_size} world_size={world_size} forward_only={forward_only} "
+            f"debug_skip_backward={debug_skip_backward} "
             f"summary={_debug_tensordict_summary(data)}",
             flush=True,
         )
@@ -1190,11 +1192,18 @@ class FSDPEngine(BaseEngine):
             with ctx:
                 loss, meta_info = self.forward_step(micro_batch, loss_function=loss_function, forward_only=forward_only)
 
-                if not forward_only:
+                if not forward_only and not debug_skip_backward:
                     if scaler is not None:
                         scaler.scale(loss).backward()
                     else:
                         loss.backward()
+                elif debug_skip_backward:
+                    print(
+                        "[RolloutCorrDebug][train_forward_dryrun] "
+                        f"rank={rank} dp_rank={dp_rank} micro_batch_idx={micro_batch_idx} "
+                        f"loss={loss.detach().float().item():.6f} backward_skipped=True",
+                        flush=True,
+                    )
 
             output_lst.append(meta_info)
             print(

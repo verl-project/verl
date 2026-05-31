@@ -1127,6 +1127,71 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
                 f"summary={_debug_dataproto_summary(batch)}",
                 flush=True,
             )
+            actor_config = self.config.actor_rollout_ref.actor
+            rollout_config = self.config.actor_rollout_ref.rollout
+            pad_size = int(batch.meta_info.get("fully_async/pad/num_padding_rows", 0) or 0)
+            valid_batch_size = max(len(batch) - pad_size, 1)
+            global_rollout_count = int(
+                batch.meta_info.get("fully_async/rollout_weight/num_groups", valid_batch_size) or valid_batch_size
+            )
+            expanded_mini_batch_size = len(batch)
+            distillation_use_topk = (
+                self.distillation_config.distillation_loss.loss_settings.use_topk
+                if is_distillation_enabled(self.config.get("distillation"))
+                else False
+            )
+
+            def make_probe_td(
+                *,
+                calculate_entropy: bool,
+                compute_loss: bool,
+                use_dynamic_bsz: bool | None = None,
+                max_token_len_per_gpu: int | None = None,
+                micro_batch_size_per_gpu: int | None = None,
+                disable_auto_offload: bool | None = None,
+            ):
+                probe_td = batch.to_tensordict()
+                probe_td = left_right_2_no_padding(probe_td)
+                kwargs = {
+                    "calculate_entropy": calculate_entropy,
+                    "compute_loss": compute_loss,
+                    "distillation_use_topk": distillation_use_topk,
+                    "global_batch_size": valid_batch_size,
+                    "global_rollout_count": global_rollout_count,
+                    "mini_batch_size": expanded_mini_batch_size,
+                    "temperature": rollout_config.temperature,
+                }
+                if use_dynamic_bsz is not None:
+                    kwargs["use_dynamic_bsz"] = use_dynamic_bsz
+                if max_token_len_per_gpu is not None:
+                    kwargs["max_token_len_per_gpu"] = max_token_len_per_gpu
+                if micro_batch_size_per_gpu is not None:
+                    kwargs["micro_batch_size_per_gpu"] = micro_batch_size_per_gpu
+                if disable_auto_offload is not None:
+                    kwargs["disable_auto_offload"] = disable_auto_offload
+                tu.assign_non_tensor(probe_td, **kwargs)
+                return probe_td
+
+            def log_probe_alignment(stage: str, probe_log_probs: torch.Tensor):
+                _debug_actor_eval_alignment_snapshot(batch, probe_log_probs, f"fully_async_before_update_{stage}")
+                _debug_actor_train_eval_probe_snapshot(batch, log_probs, probe_log_probs, stage)
+
+            def run_train_no_grad_probe(stage: str, **kwargs):
+                probe_td = make_probe_td(compute_loss=False, **kwargs)
+                probe_output = self.actor_rollout_wg.debug_actor_train_mode_log_prob(probe_td)
+                probe_log_probs = tu.get(probe_output, "log_probs")
+                probe_log_probs = no_padding_2_padding(probe_log_probs, probe_td).float()
+                log_probe_alignment(stage, probe_log_probs)
+                return probe_log_probs
+
+            def run_train_grad_dryrun_probe(stage: str, **kwargs):
+                probe_td = make_probe_td(compute_loss=True, disable_auto_offload=True, **kwargs)
+                probe_output = self.actor_rollout_wg.debug_actor_train_grad_log_prob(probe_td)
+                probe_log_probs = tu.get(probe_output, "log_probs")
+                probe_log_probs = no_padding_2_padding(probe_log_probs, probe_td).float()
+                log_probe_alignment(stage, probe_log_probs)
+                return probe_log_probs
+
             batch_td = batch.to_tensordict()
             batch_td = left_right_2_no_padding(batch_td)
             tu.assign_non_tensor(
@@ -1139,31 +1204,55 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             log_probs = no_padding_2_padding(log_probs, batch_td).float()
             _debug_actor_eval_alignment_snapshot(batch, log_probs, "fully_async_before_update_actor_eval")
 
-            train_probe_td = batch.to_tensordict()
-            train_probe_td = left_right_2_no_padding(train_probe_td)
-            tu.assign_non_tensor(
-                train_probe_td,
+            train_probe_log_probs = run_train_no_grad_probe(
+                "actor_train_mode_no_grad_infer_defaults",
                 calculate_entropy=False,
-                compute_loss=False,
             )
-            train_probe_output = self.actor_rollout_wg.debug_actor_train_mode_log_prob(train_probe_td)
-            train_probe_log_probs = tu.get(train_probe_output, "log_probs")
-            train_probe_log_probs = no_padding_2_padding(train_probe_log_probs, train_probe_td).float()
-            _debug_actor_eval_alignment_snapshot(
-                batch,
-                train_probe_log_probs,
-                "fully_async_before_update_actor_train_mode_no_grad",
+            train_dynamic_probe_log_probs = run_train_no_grad_probe(
+                "actor_train_mode_no_grad_train_dynamic_bsz",
+                calculate_entropy=False,
+                use_dynamic_bsz=True,
+                max_token_len_per_gpu=actor_config.ppo_max_token_len_per_gpu,
+                micro_batch_size_per_gpu=actor_config.ppo_micro_batch_size_per_gpu,
             )
-            _debug_actor_train_eval_probe_snapshot(
-                batch,
-                log_probs,
-                train_probe_log_probs,
-                "fully_async_before_update",
+            train_static_probe_log_probs = run_train_no_grad_probe(
+                "actor_train_mode_no_grad_static_bsz",
+                calculate_entropy=False,
+                use_dynamic_bsz=False,
+                max_token_len_per_gpu=actor_config.ppo_max_token_len_per_gpu,
+                micro_batch_size_per_gpu=actor_config.ppo_micro_batch_size_per_gpu or 1,
+            )
+
+            entropy_probe_log_probs = run_train_no_grad_probe(
+                "actor_train_mode_entropy_no_grad",
+                calculate_entropy=True,
+                use_dynamic_bsz=True,
+                max_token_len_per_gpu=actor_config.ppo_max_token_len_per_gpu,
+                micro_batch_size_per_gpu=actor_config.ppo_micro_batch_size_per_gpu,
+            )
+            grad_no_entropy_probe_log_probs = run_train_grad_dryrun_probe(
+                "actor_train_grad_loss_no_entropy_dryrun",
+                calculate_entropy=False,
+                use_dynamic_bsz=True,
+                max_token_len_per_gpu=actor_config.ppo_max_token_len_per_gpu,
+                micro_batch_size_per_gpu=actor_config.ppo_micro_batch_size_per_gpu,
+            )
+            grad_entropy_probe_log_probs = run_train_grad_dryrun_probe(
+                "actor_train_grad_loss_entropy_dryrun",
+                calculate_entropy=True,
+                use_dynamic_bsz=True,
+                max_token_len_per_gpu=actor_config.ppo_max_token_len_per_gpu,
+                micro_batch_size_per_gpu=actor_config.ppo_micro_batch_size_per_gpu,
             )
             print(
                 "[FullyAsyncTrainer][actor_eval_logprob_debug][exit] "
                 f"ts={time.time():.3f} log_probs_shape={_debug_shape(log_probs)} "
-                f"train_probe_log_probs_shape={_debug_shape(train_probe_log_probs)}",
+                f"train_probe_log_probs_shape={_debug_shape(train_probe_log_probs)} "
+                f"train_dynamic_probe_log_probs_shape={_debug_shape(train_dynamic_probe_log_probs)} "
+                f"train_static_probe_log_probs_shape={_debug_shape(train_static_probe_log_probs)} "
+                f"entropy_probe_log_probs_shape={_debug_shape(entropy_probe_log_probs)} "
+                f"grad_no_entropy_probe_log_probs_shape={_debug_shape(grad_no_entropy_probe_log_probs)} "
+                f"grad_entropy_probe_log_probs_shape={_debug_shape(grad_entropy_probe_log_probs)}",
                 flush=True,
             )
         except Exception as exc:

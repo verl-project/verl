@@ -622,6 +622,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
         self._debug_model_weight_digest("before_debug_train_mode_infer_batch")
         global_token_num = tu.get(data, key="global_token_num")
         disable_auto_offload = tu.get(data, key="disable_auto_offload", default=False)
+        calculate_entropy = tu.get(data, key="calculate_entropy", default=False)
         no_lora_adapter = tu.pop(data, key="no_lora_adapter", default=False)
         images_seqlens = tu.get(data, key="images_seqlens", default=None)
         print(
@@ -630,7 +631,8 @@ class TrainingWorker(Worker, DistProfilerExtension):
             f"dp_rank={self.engine.get_data_parallel_rank()} "
             f"dp_size={self.engine.get_data_parallel_size()} "
             f"world_size={torch.distributed.get_world_size()} "
-            f"no_lora_adapter={no_lora_adapter} disable_auto_offload={disable_auto_offload} "
+            f"calculate_entropy={calculate_entropy} no_lora_adapter={no_lora_adapter} "
+            f"disable_auto_offload={disable_auto_offload} "
             f"summary={_debug_tensordict_summary(data)}",
             flush=True,
         )
@@ -645,7 +647,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
         for key, val in default_keys.items():
             if key not in data.keys():
                 tu.assign_non_tensor(data, **{key: val})
-        tu.assign_non_tensor(data, compute_loss=False, calculate_entropy=False)
+        tu.assign_non_tensor(data, compute_loss=False, calculate_entropy=calculate_entropy)
 
         cpu_rng_state = torch.get_rng_state()
         device_module = get_torch_device()
@@ -681,6 +683,77 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
         print(
             "[TrainingWorker][debug_train_mode_infer_batch][exit] "
+            f"ts={time.time():.3f} rank={torch.distributed.get_rank()} output_none={final_output is None}",
+            flush=True,
+        )
+        return final_output
+
+    def debug_train_grad_forward_batch(self, data: TensorDict) -> TensorDict:
+        """Run the real train forward/loss path with grad enabled, but skip backward and optimizer step."""
+        assert self.loss_fn is not None, "loss function can't be None when calling debug_train_grad_forward_batch"
+        self._debug_model_weight_digest("before_debug_train_grad_forward_batch")
+        global_token_num = tu.get(data, key="global_token_num")
+        disable_auto_offload = tu.get(data, key="disable_auto_offload", default=True)
+        images_seqlens = tu.get(data, key="images_seqlens", default=None)
+        print(
+            "[TrainingWorker][debug_train_grad_forward_batch][enter] "
+            f"ts={time.time():.3f} rank={torch.distributed.get_rank()} "
+            f"dp_rank={self.engine.get_data_parallel_rank()} "
+            f"dp_size={self.engine.get_data_parallel_size()} "
+            f"world_size={torch.distributed.get_world_size()} "
+            f"calculate_entropy={tu.get(data, key='calculate_entropy', default=None)} "
+            f"compute_loss={tu.get(data, key='compute_loss', default=None)} "
+            f"use_dynamic_bsz={tu.get(data, key='use_dynamic_bsz', default=None)} "
+            f"max_token_len_per_gpu={tu.get(data, key='max_token_len_per_gpu', default=None)} "
+            f"micro_batch_size_per_gpu={tu.get(data, key='micro_batch_size_per_gpu', default=None)} "
+            f"disable_auto_offload={disable_auto_offload} summary={_debug_tensordict_summary(data)}",
+            flush=True,
+        )
+
+        default_keys = dict(
+            use_remove_padding=self.model_config.get("use_remove_padding", False),
+            use_dynamic_bsz=self.engine_config.use_dynamic_bsz,
+            max_token_len_per_gpu=self.engine_config.max_token_len_per_gpu,
+            micro_batch_size_per_gpu=self.engine_config.micro_batch_size_per_gpu,
+            use_fused_kernels=self.engine_config.use_fused_kernels,
+        )
+        for key, val in default_keys.items():
+            if key not in data.keys():
+                tu.assign_non_tensor(data, **{key: val})
+        tu.assign_non_tensor(data, debug_skip_backward=True, compute_loss=True)
+
+        cpu_rng_state = torch.get_rng_state()
+        device_module = get_torch_device()
+        accelerator_rng_state = (
+            device_module.get_rng_state_all()
+            if hasattr(device_module, "get_rng_state_all") and device_module.is_available()
+            else None
+        )
+        try:
+            with (
+                self.engine.train_mode(disable_auto_offload=disable_auto_offload),
+                Timer(name="debug_train_grad_forward_batch", logger=None) as timer,
+            ):
+                output = self.engine.forward_backward_batch(data, loss_function=self.loss_fn, forward_only=False)
+            delta_time = timer.last
+        finally:
+            torch.set_rng_state(cpu_rng_state)
+            if accelerator_rng_state is not None:
+                device_module.set_rng_state_all(accelerator_rng_state)
+
+        if self.engine.is_mp_src_rank_with_outputs():
+            final_output = self._postprocess_output(
+                output,
+                global_token_num=global_token_num,
+                delta_time=delta_time,
+                forward_only=False,
+                images_seqlens=images_seqlens,
+            ).cpu()
+        else:
+            final_output = None
+
+        print(
+            "[TrainingWorker][debug_train_grad_forward_batch][exit] "
             f"ts={time.time():.3f} rank={torch.distributed.get_rank()} output_none={final_output is None}",
             flush=True,
         )
@@ -920,6 +993,14 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @_with_routing_replay_flag(enabled=True)
     def debug_actor_train_mode_log_prob(self, data: TensorDict) -> TensorDict:
         output = self.actor.debug_train_mode_infer_batch(data)
+
+        return output.cpu() if output is not None else None
+
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
+    @DistProfiler.annotate(color="red", role="actor_debug_train_grad_log_prob")
+    @_with_routing_replay_flag(enabled=True)
+    def debug_actor_train_grad_log_prob(self, data: TensorDict) -> TensorDict:
+        output = self.actor.debug_train_grad_forward_batch(data)
 
         return output.cpu() if output is not None else None
 

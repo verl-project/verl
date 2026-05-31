@@ -823,10 +823,18 @@ class vLLMHttpServer:
                         async for output in tf_generator:
                             tf_res = output
                         assert tf_res is not None
+                        tf_prompt_logprobs_len = (
+                            len(tf_res.prompt_logprobs) if tf_res.prompt_logprobs is not None else None
+                        )
+                        tf_start_pos = len(prompt_ids)
+                        if tf_prompt_logprobs_len is not None and tf_prompt_logprobs_len >= len(token_ids):
+                            # vLLM expands Qwen-VL image placeholders internally before returning prompt_logprobs.
+                            # Therefore the response span starts after the expanded prompt, not after dedup_prompt.
+                            tf_start_pos = tf_prompt_logprobs_len - len(token_ids)
                         tf_log_probs, tf_per_token, tf_truncated = _debug_extract_prompt_token_logprobs(
                             tf_res.prompt_logprobs,
                             list(token_ids),
-                            len(prompt_ids),
+                            tf_start_pos,
                         )
                         compare_limit = min(_debug_slice_limit(len(token_ids)), len(log_probs), len(tf_log_probs))
                         per_token_compare = [
@@ -845,9 +853,6 @@ class vLLMHttpServer:
                             diff_stats = _debug_logprob_stats(
                                 [float(tf_log_probs[i] - log_probs[i]) for i in range(min_len)]
                             )
-                        tf_prompt_logprobs_len = (
-                            len(tf_res.prompt_logprobs) if tf_res.prompt_logprobs is not None else None
-                        )
                         print(
                             "[RolloutCorrDebug][vllm_teacher_forced_logprobs] "
                             f"request_id={request_id} "
@@ -867,6 +872,7 @@ class vLLMHttpServer:
                             f"teacher_forced_stats={_debug_logprob_stats(tf_log_probs)} "
                             f"teacher_forced_minus_decode_stats={diff_stats} "
                             f"teacher_forced_prompt_logprobs_len={tf_prompt_logprobs_len} "
+                            f"teacher_forced_response_start_pos={tf_start_pos} "
                             f"teacher_forced_output_token_ids={list(tf_res.outputs[0].token_ids)} "
                             f"token_detail_limit={_debug_token_detail_limit()} "
                             f"teacher_forced_per_token_truncated={tf_truncated} "
