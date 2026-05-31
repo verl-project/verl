@@ -32,7 +32,7 @@ def test_getitem_success(base_config_mock):
 
 def test_getitem_nonexistent_attribute(base_config_mock):
     """Test __getitem__ with non-existent attribute (exception path 1)."""
-    with pytest.raises(AttributeError):
+    with pytest.raises(KeyError):
         _ = base_config_mock["nonexistent_attr"]
 
 

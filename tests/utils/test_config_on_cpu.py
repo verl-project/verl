@@ -34,6 +34,13 @@ class TestTrainConfig(BaseConfig):
     override_config: dict = field(default_factory=dict)
 
 
+@dataclass
+class ConfigWithBrokenProperty(BaseConfig):
+    @property
+    def broken_property(self):
+        raise AttributeError("internal property failure")
+
+
 _cfg_str = """train_config:
   _target_: tests.utils.test_config_on_cpu.TestTrainConfig
   batch_size: 32
@@ -69,6 +76,11 @@ class TestConfigOnCPU(unittest.TestCase):
         self.assertEqual(cfg.model.activation, "relu")
         assert isinstance(cfg, TestTrainConfig)
         assert isinstance(cfg.model, TestDataclass)
+
+    def test_getitem_preserves_internal_attribute_error(self):
+        cfg = ConfigWithBrokenProperty()
+        with self.assertRaisesRegex(AttributeError, "internal property failure"):
+            _ = cfg["broken_property"]
 
 
 class TestPrintCfgCommand(unittest.TestCase):

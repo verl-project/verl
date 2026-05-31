@@ -15,6 +15,8 @@
 import os
 import unittest
 
+import pytest
+
 from verl.utils.config import omega_conf_to_dataclass
 from verl.workers.config import (
     ActorConfig,
@@ -137,6 +139,9 @@ class TestActorConfig(unittest.TestCase):
 
         self.assertEqual(config["strategy"], "fsdp")
         self.assertEqual(config["ppo_mini_batch_size"], 256)
+        self.assertNotIn("non_existing", config)
+        with pytest.raises(KeyError):
+            _ = config["non_existing"]
 
         field_names = list(config)
         self.assertIn("strategy", field_names)

@@ -17,6 +17,10 @@ from dataclasses import FrozenInstanceError, dataclass, fields
 from typing import Any
 
 
+def _has_attribute_definition(obj: Any, key: str) -> bool:
+    return key in obj.__dict__ or any(key in cls.__dict__ for cls in obj.__class__.__mro__)
+
+
 # BaseConfig class inherits from collections.abc.Mapping, which means it can act like a dictionary
 @dataclass
 class BaseConfig(collections.abc.Mapping):
@@ -62,10 +66,15 @@ class BaseConfig(collections.abc.Mapping):
             Any: The value of the attribute.
 
         Raises:
-            AttributeError: If the attribute does not exist.
+            KeyError: If the attribute does not exist.
             TypeError: If the key type is not string
         """
-        return getattr(self, key)
+        try:
+            return getattr(self, key)
+        except AttributeError as e:
+            if _has_attribute_definition(self, key):
+                raise
+            raise KeyError(key) from e
 
     def __iter__(self):
         """Implement the iterator protocol. Allows iterating over the attribute names of the instance.
