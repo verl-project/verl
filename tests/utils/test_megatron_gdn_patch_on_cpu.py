@@ -128,9 +128,13 @@ class _FakeGdnInstance:
 def test_gdn_patch_passes_cu_seqlens_to_fla_varlen_paths(monkeypatch):
     if torch is None:
         pytest.skip("torch is not installed")
-    fake_gdn_cls, calls = _install_fake_gdn_dependencies(monkeypatch)
 
+    # Import before installing fake modules: importing verl.models.mcore runs its
+    # package __init__, which needs the real megatron.core (e.g. ModelParallelConfig).
+    # The patch's own megatron/fla imports are lazy, so the fakes still apply at call time.
     from verl.models.mcore.patch import apply_patch_megatron_gated_delta_net
+
+    fake_gdn_cls, calls = _install_fake_gdn_dependencies(monkeypatch)
 
     apply_patch_megatron_gated_delta_net()
 
@@ -159,9 +163,10 @@ def test_gdn_patch_passes_cu_seqlens_to_fla_varlen_paths(monkeypatch):
 def test_gdn_patch_rejects_packed_deterministic_mode(monkeypatch):
     if torch is None:
         pytest.skip("torch is not installed")
-    fake_gdn_cls, _ = _install_fake_gdn_dependencies(monkeypatch)
 
     from verl.models.mcore.patch import apply_patch_megatron_gated_delta_net
+
+    fake_gdn_cls, _ = _install_fake_gdn_dependencies(monkeypatch)
 
     apply_patch_megatron_gated_delta_net()
 
