@@ -1,9 +1,13 @@
+# Checkpoint Save and Resume Tips on Ascend NPU
+
+Last updated: 06/01/2026
+
 Apply changes to MindSpeed if you need to save and resume checkpoints in async training
 
 ### a:
 In `/MindSpeed/mindspeed/core/megatron_basic/megatron_basic.py`, at **line 184**
 
-Replce 
+Replace 
 
 ```python
         self.optimizer.dummy_step()
@@ -49,7 +53,7 @@ with
 
 In `/MindSpeed/mindspeed/core/megatron_basic/megatron_basic.py`, at **line 290** 
 
-replace 
+Replace 
 ```python
        steps = list(
             set([g["step"] for g in state_dict["optimizer"]["param_groups"] if "step" in g])

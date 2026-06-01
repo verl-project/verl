@@ -153,6 +153,7 @@ verl is fast with:
    ascend_tutorial/quick_start/ascend_quick_start.rst
    ascend_tutorial/quick_start/dockerfile_build_guidance.rst
    ascend_tutorial/quick_start/ascend_sglang_quick_start.rst
+   ascend_tutorial/quick_start/ascend_checkpoint_save_and_resume_tips.md
    ascend_tutorial/features/ascend_consistency.rst
    ascend_tutorial/features/ascend_backend_features.md
    ascend_tutorial/profiling/ascend_profiling_zh.rst
