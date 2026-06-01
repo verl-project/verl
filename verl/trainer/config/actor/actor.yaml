@@ -314,8 +314,7 @@ qat:
 # Cross-venv runtime spec for actor Ray actors (the training side of the
 # ActorRolloutRef fused worker, or a standalone Actor group). Accepts a
 # backend name (e.g. "megatron"), an absolute venv / python path, or a full
-# command line such as "uv run --project /abs/path/to/verl --no-default-groups --group megatron".
-# Null falls back to ``trainer.venv`` (the global trainer-side default). See
-# verl/utils/venv.py for the resolver.
+# command line. Null falls back to ``trainer.venv`` (the global trainer-side
+# default). See verl/utils/venv.py for the resolver.
 venv: null
 

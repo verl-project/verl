@@ -102,10 +102,11 @@ verl ships **two parallel multi-backend uv Dockerfiles**, one per CUDA
 major. Each builds **the full set of backends known to work against its
 CUDA major** (no opt-in / opt-out — pick the Dockerfile, get every
 backend it supports), with one venv per backend under
-``/workspace/verl/.venvs/.venv-<backend>/``. They share the same
-committed ``verl/uv.lock`` (each extra resolves as its own fork via
-``[tool.uv].conflicts``), so the only difference is which backends'
-venvs land in which image:
+``/workspace/verl/.venvs/.venv-<backend>/``. Each backend has its own
+independent lockfile under ``requirements/<backend>.lock`` (compiled from
+the matching extra in ``[project.optional-dependencies]``); there is no
+universal ``uv.lock``. The only difference between the two images is
+which backends' venvs land in which:
 
 .. list-table::
    :header-rows: 1
@@ -136,8 +137,9 @@ CI / sanity work.
 Backend → CUDA / torch / wheel-suite map
 ::::::::::::::::::::::::::::::::::::::::
 
-This map is also encoded in ``pyproject.toml`` ([tool.uv].sources +
-override-dependencies markers), in ``manage_envs.py`` (``BACKEND_CUDA_MAJOR``),
+This map is also encoded in ``pyproject.toml`` (per-extra
+``[tool.uv.sources]`` entries route torch wheels to the matching cu13
+or cu12.9 PyTorch index), in ``manage_envs.py`` (``BACKEND_CUDA_MAJOR``),
 and in each Dockerfile's per-backend ``RUN python3 manage_envs.py sync ...``
 block:
 
@@ -226,9 +228,10 @@ Each Dockerfile always materialises every backend in its set — there is
 no ``--build-arg`` for picking a subset, on purpose: every backend the
 Dockerfile knows about is one that has been validated against that CUDA
 major, so shipping the union avoids "this backend builds, that one
-doesn't" footguns. To regenerate ``uv.lock`` *without* paying for every
-backend's wheel install, build the named ``base`` stage instead — see
-the **Bootstrap uv.lock without local uv** section below.
+doesn't" footguns. To compile every per-backend lockfile *without*
+paying for the venv wheel installs, build the named ``lock`` stage
+instead — see the **Bootstrap lockfiles without local uv** section
+below.
 
 See the top of each Dockerfile for the full set of build args
 (``MAX_JOBS``, ``CUDA_VERSION``, ``UBUNTU_MIRROR``, ``PIP_DEFAULT_INDEX``,
@@ -279,58 +282,67 @@ via ``manage_envs.py`` — uses that path.
 Re-locking after a dependency change
 ::::::::::::::::::::::::::::::::::::
 
-``uv.lock`` is committed to the repo and ``uv sync --frozen`` rejects any
-drift between it and ``pyproject.toml``. To bump a pin:
+Each backend has its own independent lockfile under
+``requirements/<backend>.lock`` (compiled from the matching extra in
+``[project.optional-dependencies]``). To bump a pin for a single
+backend, regenerate just that backend's lockfile:
 
 .. code:: bash
 
-   # 1. edit verl/pyproject.toml
-   # 2. regenerate the lockfile (resolves ALL forks in one pass):
-   uv lock
-   # 3. re-sync every affected backend locally to validate:
+   # 1. edit verl/pyproject.toml (the backend's extra block)
+   # 2. recompile the lockfile (only resolves that one extra):
+   python manage_envs.py lock vllm --recompile
+   # 3. re-sync the venv to validate:
    python manage_envs.py sync vllm
-   # ...repeat for any other backend whose fork was touched.
-   # 4. commit pyproject.toml + uv.lock together.
+   # 4. commit pyproject.toml + requirements/vllm.lock together.
+
+To refresh every lockfile in one pass (e.g. after bumping
+``[tool.uv].override-dependencies``)::
+
+   python manage_envs.py lock all --recompile
 
 If the pin is for a system-coupled wheel (``nvidia-cudnn-cu1{2,3}`` /
-``nvidia-nccl-cu1{2,3}``), update both ``[tool.uv].override-dependencies``
-in ``pyproject.toml`` (per-extra markers route cu12 wheels to the cu129
-fork and cu13 wheels to the cu130 fork) *and* the matching
+``nvidia-nccl-cu1{2,3}``), update both the inline pin in the affected
+backend's extra in ``pyproject.toml`` *and* the matching
 ``CUDNN_VERSION`` / ``NCCL_VERSION`` ARGs in the affected Dockerfile
 (``Dockerfile.uv.cu130`` for cu13 backends, ``Dockerfile.uv.cu129`` for
 cu12.9 backends), then re-lock and rebuild the image so the apt debs and
 the in-venv pip wheels stay aligned.
 
-Bootstrap uv.lock without local uv
-::::::::::::::::::::::::::::::::::
+Bootstrap lockfiles without local uv
+::::::::::::::::::::::::::::::::::::
 
 If you can't (or don't want to) install uv on the host, both
-``Dockerfile.uv.cu130`` and ``Dockerfile.uv.cu129`` self-bootstrap the
-lockfile: the ``base`` stage runs ``uv lock`` if ``uv.lock`` is missing
-from the COPY'd source, and only the ``final`` stage on top runs the
-per-backend syncs. Building ``--target=base`` stops at the lockfile and
-skips every per-backend wheel install — the cheapest possible
-bootstrap. Either Dockerfile produces a lockfile that resolves *all*
-extras (both cu forks share the lockfile), so pick whichever base image
-is more convenient for your build host.
+``Dockerfile.uv.cu130`` and ``Dockerfile.uv.cu129`` self-bootstrap their
+per-backend lockfiles: the ``lock`` stage runs
+``manage_envs.py lock <backends>`` for every backend in that image's
+set (skipping ones already present under ``requirements/``), and only
+the ``final`` stage on top runs the per-backend venv builds. Building
+``--target=lock`` stops at the lockfiles and skips every per-backend
+wheel install — the cheapest possible bootstrap.
 
-Pull the generated lockfile back to the host so it can be committed:
+Pull the generated lockfiles back to the host so they can be committed:
 
 .. code:: bash
 
    DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile.uv.cu130 \
-       --target=base -t verl:uv-lock .          # lockfile-only build, no backend syncs
-   docker create --name verl-tmp verl:uv-lock
-   docker cp verl-tmp:/workspace/verl/uv.lock ./uv.lock
+       --target=lock -t verl:uv-cu130-lock .  # cu13 lockfiles, no venvs
+   docker create --name verl-tmp verl:uv-cu130-lock
+   docker cp verl-tmp:/workspace/verl/requirements ./requirements
    docker rm verl-tmp
-   git add pyproject.toml uv.lock && git commit
+
+   # Repeat with Dockerfile.uv.cu129 to cover trtllm / veomni /
+   # nemoautomodel (cu13 image only generates lockfiles for backends
+   # that ship in it). cpu lockfile is identical in both — either is fine.
+
+   git add pyproject.toml requirements/ && git commit
 
 The same recipe primes the BuildKit ``verl-uv-cache`` mount on the build
-host, so the next ``docker build`` (with the committed ``uv.lock``) runs
-``uv sync --frozen`` against warm wheels and skips network downloads where
+host, so the next ``docker build`` (with the committed lockfiles) runs
+``uv pip sync`` against warm wheels and skips network downloads where
 possible. ``manage_envs.py sync`` on the host also auto-bootstraps when
-``uv.lock`` is missing — the first sync drops ``--frozen`` and writes
-``uv.lock`` for you (with a warning).
+a backend's lockfile is missing — the first sync calls
+``uv pip compile`` for you and writes ``requirements/<backend>.lock``.
 
 
 Install from custom environment (with uv)
@@ -341,21 +353,21 @@ recommended local install uses `uv <https://docs.astral.sh/uv/>`_ to
 build **one venv per backend** straight from ``verl/pyproject.toml``.
 
 verl exposes 3 inference backends (``vllm``, ``sglang``, ``trtllm``) and
-4 training backends (``fsdp``, ``megatron``, ``veomni``, ``nemoautomodel``)
-via ``uv sync``, plus a ``cpu`` extra for CI / unit-test / sanity work
-that needs no GPU runtime. All target NVIDIA GPUs on **x86_64 Linux**;
-each backend is pinned to one of two CUDA majors (cu13 / torch 2.11 or
-cu12.9 / torch 2.9.x-2.10) — see the **Backend → CUDA / torch /
-wheel-suite map** above. Ascend NPU and aarch64 GPU variants (e.g.
-Grace-Blackwell) are out of scope for now (see
-``[tool.uv].environments`` in ``pyproject.toml``). Each backend pins its
-own torch / cuDNN / NCCL and cannot share a venv, so you create one per
-backend you need under ``verl/.venvs/.venv-<backend>/``.
+4 training backends (``fsdp``, ``megatron``, ``veomni``, ``nemoautomodel``),
+plus a ``cpu`` extra for CI / unit-test / sanity work that needs no GPU
+runtime. All target NVIDIA GPUs on **x86_64 Linux**; each backend is
+pinned to one of two CUDA majors (cu13 / torch 2.11 or cu12.9 / torch
+2.9.x-2.10) — see the **Backend → CUDA / torch / wheel-suite map**
+above. Ascend NPU and aarch64 GPU variants (e.g. Grace-Blackwell) are
+out of scope for now (see ``[tool.uv].environments`` in
+``pyproject.toml``). Each backend pins its own torch / cuDNN / NCCL and
+cannot share a venv, so you create one per backend you need under
+``verl/.venvs/.venv-<backend>/``.
 
 1. Pick a base image
 ::::::::::::::::::::
 
-``uv sync`` installs Python packages only — bring your own OS / CUDA
+``uv pip sync`` installs Python packages only — bring your own OS / CUDA
 base image. Pick by the backend's CUDA major (above):
 
 .. list-table::
@@ -381,13 +393,19 @@ vice versa).
 2. Sync a backend
 :::::::::::::::::
 
-Per-backend venvs live under ``verl/.venvs/.venv-<backend>/``. Each
-backend is a PEP 735 dependency group declared in
-``[dependency-groups]``, with mutual exclusion in ``[tool.uv].conflicts``
-so ``uv lock`` resolves every backend as an independent fork in a single
-committed ``uv.lock``. ``uv sync --frozen --no-default-groups --group
-<backend>`` then installs only that group's slice — no other backend's
-git sources or cu wheels are pulled in.
+Per-backend venvs live under ``verl/.venvs/.venv-<backend>/``, and each
+backend has its own independent lockfile under
+``requirements/<backend>.lock``. There is **no universal uv.lock** — a
+``sync vllm`` will only ever resolve / install vllm's slice. The
+two-step pipeline is:
+
+1. ``uv pip compile pyproject.toml --extra <backend> -o
+   requirements/<backend>.lock`` — resolves only that one extra. No
+   other backend's git sources / URL wheels are touched.
+2. ``uv venv .venvs/.venv-<backend>`` followed by ``uv pip sync
+   requirements/<backend>.lock --python .venvs/.venv-<backend>/bin/python``
+   then ``uv pip install -e . --no-deps`` to drop verl into the venv in
+   editable mode.
 
 .. code:: bash
 
@@ -397,9 +415,8 @@ git sources or cu wheels are pulled in.
    git clone https://github.com/verl-project/verl.git
    cd verl
 
-The simplest entry point is ``manage_envs.py``, which wraps
-``uv sync --frozen --no-default-groups --group <backend>`` with the right
-``UV_PROJECT_ENVIRONMENT`` and any backend-specific build env:
+The simplest entry point is ``manage_envs.py``, which runs both steps
+in one call (and auto-compiles the lockfile when missing):
 
 .. code:: bash
 
@@ -414,22 +431,25 @@ The simplest entry point is ``manage_envs.py``, which wraps
    python manage_envs.py sync training    # fsdp + megatron + veomni + nemoautomodel
    python manage_envs.py sync dev         # cpu
 
+   # explicit lock control (skip if requirements/<backend>.lock is up to date):
+   python manage_envs.py lock vllm                    # compile if missing
+   python manage_envs.py lock vllm --recompile        # always re-resolve
+   python manage_envs.py lock all  --recompile        # refresh every lockfile
+
    python manage_envs.py list             # show installed venvs
    python manage_envs.py clean <backend>  # delete a venv
    python manage_envs.py --help
 
-   # anything after `--` is forwarded to uv sync, e.g. force a clean refresh:
+   # anything after `--` is forwarded to `uv pip sync`, e.g. force reinstalls:
    python manage_envs.py sync megatron -- --reinstall
 
 ``transformers==5.3.0`` is pinned globally via
 ``[tool.uv].override-dependencies``. The matching ``nvidia-cudnn-cu1{2,3}``
-and ``nvidia-nccl-cu1{2,3}`` pins are inlined in each backend group
-(cu13 versions in vllm / sglang / fsdp / megatron groups, cu12 versions
-in trtllm / veomni / nemoautomodel groups) — PEP 508 markers don't have
-a ``group ==`` operator, so the pins live next to the matching torch
-declaration in each group rather than in a conditional override. Each
-pin must match the apt deb versions baked into the corresponding
-Dockerfile (``docker/Dockerfile.uv.cu130`` for cu13,
+and ``nvidia-nccl-cu1{2,3}`` pins are inlined in each backend extra
+(cu13 in vllm / sglang / fsdp / megatron extras, cu12 in trtllm /
+veomni / nemoautomodel extras). Each pin must match the apt deb
+versions baked into the corresponding Dockerfile
+(``docker/Dockerfile.uv.cu130`` for cu13,
 ``docker/Dockerfile.uv.cu129`` for cu12.9) so the in-venv ``.so`` files
 line up with the system libraries.
 
@@ -438,32 +458,31 @@ is:
 
 .. code:: bash
 
-   UV_PROJECT_ENVIRONMENT=.venvs/.venv-vllm \
-       uv sync --frozen --no-default-groups --group vllm \
-               --python 3.12 \
-               --link-mode=copy
+   # 1. compile lockfile (only resolves the vllm extra):
+   uv pip compile pyproject.toml --extra vllm \
+       --python 3.12 \
+       --output-file requirements/vllm.lock
 
-Why ``--no-default-groups --group`` and not ``--extra``? Earlier versions
-of verl declared backends as ``[project.optional-dependencies]`` and
-synced via ``--extra <backend>``. That worked but had two warts:
+   # 2. create + sync venv + install verl editable:
+   uv venv .venvs/.venv-vllm --python 3.12 --link-mode=copy
+   uv pip sync requirements/vllm.lock \
+       --python .venvs/.venv-vllm/bin/python --link-mode=copy
+   uv pip install -e . --no-deps \
+       --python .venvs/.venv-vllm/bin/python --link-mode=copy
 
-* Every backend's deps appeared in the published wheel's metadata, even
-  for downstream ``pip install verl`` users who only wanted the runtime
-  surface.
-* ``uv sync --extra X`` always installs the project itself plus extra X;
-  there was no way to say "install **only** X and nothing else".
-  Combined with a missing or stale ``uv.lock``, that meant every sync
-  walked every backend's git source at lock time.
-
-Switching to ``[dependency-groups]`` (PEP 735) keeps the per-backend
-recipes local-only (not on the published wheel) and gives us
-``--no-default-groups --group X``, which installs precisely group X.
-A thin shadow of each inference backend remains under
-``[project.optional-dependencies]`` (``vllm``, ``sglang``, ``trtllm``)
-so ``pip install verl[<engine>]`` still resolves the engine wheel —
-those shadows don't pin torch / cuDNN / NCCL, though, so for a
-reproducible CUDA stack always go through ``uv sync`` on the matching
-Dockerfile.
+Why per-extra lockfiles and not a universal ``uv.lock``? Earlier
+versions of verl used ``uv sync`` (project mode) with backends declared
+as either ``[project.optional-dependencies]`` extras or PEP 735
+``[dependency-groups]``, plus ``[tool.uv].conflicts`` to mark them
+mutually exclusive. That model produced a single ``uv.lock`` that had
+to resolve **every** conflict fork — including downloading every
+backend's URL-pinned wheels and fetching every backend's git refs —
+even when the user only wanted to install one backend. Switching to
+``uv pip compile --extra <backend>`` (non-project mode) makes each
+backend's lockfile fully independent: ``manage_envs.py sync vllm``
+never even mentions ``flash-attn``, ``apex``, ``Megatron-LM``, etc.
+Legacy thin extras (``test``, ``gpu``, ``mcore``, …) are still
+published on the wheel for downstream ``pip install verl[X]`` use.
 
 3. Run code in a backend
 ::::::::::::::::::::::::
@@ -510,11 +529,11 @@ Troubleshooting
   (``nvidia/cuda:*-devel``) and cuDNN. ``manage_envs.py sync megatron``
   defaults to ``MAX_JOBS=32`` (safe on most hosts); on big machines,
   ``MAX_JOBS=128 python manage_envs.py sync megatron`` is faster.
-- **``flash-attn`` install** — every backend group routes flash-attn
+- **``flash-attn`` install** — every backend extra routes flash-attn
   2.8.3 to a prebuilt wheel from
   https://github.com/mjun0812/flash-attention-prebuild-wheels/releases,
   matched (CUDA major, torch minor, cpython ABI) tuple-for-tuple to its
-  parent group's torch pin:
+  parent extra's torch pin:
 
   * ``fsdp`` / ``megatron`` (cu13.0 / torch 2.11.0 / cp312) ->
     ``v0.9.4/flash_attn-2.8.3+cu130torch2.11-cp312-cp312-linux_x86_64.whl``
@@ -522,22 +541,21 @@ Troubleshooting
     ``v0.7.11/flash_attn-2.8.3+cu129torch2.9-cp312-cp312-linux_x86_64.whl``
 
   Each URL appears exactly once in ``[tool.uv.sources].flash-attn``
-  thanks to the internal sub-groups
-  ``flash-attn-cu130torch211`` / ``flash-attn-cu129torch29`` —
-  parent groups pull them in via ``{include-group = "..."}``. To bump
-  to a different CUDA / torch / Python combo, swap the URL for one
-  from the same upstream release page that matches the new tuple. If
-  no prebuilt exists, add ``"flash-attn"`` to
-  ``[tool.uv].no-build-isolation-package`` and list
-  ``"flash-attn==2.8.3"`` directly in the parent group; uv will
+  thanks to the internal sub-extras
+  ``flash-attn-cu130torch211`` / ``flash-attn-cu129torch29`` — parent
+  extras pull them in via ``"verl[flash-attn-cu130torch211]"`` /
+  ``"verl[flash-attn-cu129torch29]"``. To bump to a different CUDA /
+  torch / Python combo, swap the URL for one from the same upstream
+  release page that matches the new tuple. If no prebuilt exists, add
+  ``"flash-attn"`` to ``[tool.uv].no-build-isolation-package`` and list
+  ``"flash-attn==2.8.3"`` directly in the parent extra; uv will
   source-build (~20-30 min on a 32-core box).
-- **Need TRT-LLM rollout via uv?** — ``trtllm`` lives in the cu12.9 fork
-  of ``uv.lock`` (``tensorrt-llm`` has no cu13 / torch-2.11 PyPI wheels
-  yet), so build / sync it on a cu12.9 host via
-  ``docker/Dockerfile.uv.cu129`` or
-  ``UV_PROJECT_ENVIRONMENT=.venvs/.venv-trtllm uv sync --frozen --no-default-groups --group trtllm``
-  on a ``nvidia/cuda:12.9.1-devel-ubuntu24.04`` base. If you want the
-  full TensorRT-LLM container instead of just the wheel, the standalone
+- **Need TRT-LLM rollout via uv?** — ``trtllm`` is a cu12.9-only extra
+  (``tensorrt-llm`` has no cu13 / torch-2.11 PyPI wheels yet), so
+  build / sync it on a cu12.9 host via ``docker/Dockerfile.uv.cu129``
+  or ``python manage_envs.py sync trtllm`` on a
+  ``nvidia/cuda:12.9.1-devel-ubuntu24.04`` base. If you want the full
+  TensorRT-LLM container instead of just the wheel, the standalone
   ``docker/Dockerfile.stable.trtllm`` (built from
   ``nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc14``) is still the
   recommended path.
@@ -548,11 +566,10 @@ Troubleshooting
   match one of the two. Run them as separate Ray actors using the
   per-role ``venv:`` field (each actor launches with the matching
   Dockerfile / image as its driver).
-- **``uv sync --frozen`` fails on macOS** — the committed ``uv.lock`` is
-  Linux x86_64 only (see ``[tool.uv].environments``). ``manage_envs.py``
-  drops ``--frozen`` automatically when the lockfile doesn't apply, but
-  expect the resolver to refuse to find CUDA wheels for macOS — the uv
-  flow is intended for Linux x86_64 hosts and Docker.
+- **``uv pip compile`` fails on macOS** — backend lockfiles are
+  resolved against ``[tool.uv].environments`` (Linux x86_64 only) and
+  carry CUDA wheel URLs that don't apply on macOS. The uv flow is
+  intended for Linux x86_64 hosts and Docker.
 - **Need Ascend NPU or aarch64 GPU?** — out of scope for this flow for
   now. Use the standalone Dockerfiles in ``docker/ascend/`` for Ascend.
 - **Want to start over?** —
