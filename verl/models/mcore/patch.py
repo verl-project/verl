@@ -618,9 +618,8 @@ def apply_patch_megatron_gated_delta_net():
     def _build_seq_idx_from_cu_seqlens(cu_seqlens, total_tokens):
         if cu_seqlens is None:
             return None
-        if cu_seqlens[-1] < total_tokens:
-            cu_seqlens = torch.cat([cu_seqlens, cu_seqlens.new_tensor([total_tokens])])
-        seq_lengths = (cu_seqlens[1:] - cu_seqlens[:-1]).clamp(min=0)
+        cu_seqlens = torch.cat([cu_seqlens, cu_seqlens.new_tensor([total_tokens])])
+        seq_lengths = cu_seqlens[1:] - cu_seqlens[:-1]
         return (
             torch.repeat_interleave(torch.arange(seq_lengths.numel(), device=cu_seqlens.device), seq_lengths)[
                 :total_tokens
