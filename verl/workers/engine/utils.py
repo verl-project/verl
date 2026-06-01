@@ -136,8 +136,8 @@ def postprocess_batch_func(output_lst, indices, data: TensorDict):
         else:
             raise NotImplementedError(f"pad_mode {pad_mode} not implemented")
 
-        # reverse with dynamic bsz
-        if use_dynamic_bsz:
+        # reverse with dynamic bsz (skip when indices is None, e.g. DCP scheduler path)
+        if use_dynamic_bsz and indices is not None:
             model_output[key] = restore_dynamic_batch(model_output[key], indices)
 
     # loss
