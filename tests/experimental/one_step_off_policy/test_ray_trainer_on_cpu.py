@@ -30,22 +30,17 @@ def test_fit_generate_reports_dataloader_exhaustion_on_cpu():
     trainer.timing_raw = {}
     trainer.global_steps = 5
     trainer.total_training_steps = 10
-    trainer.config = OmegaConf.create(
-        {
-            "data": {
-                "train_batch_size": 8,
-                "train_max_samples": 32,
-            },
-            "trainer": {
-                "total_epochs": 1,
-                "total_training_steps": 10,
-            },
-        }
-    )
+    trainer.config = OmegaConf.create({"data": {"train_batch_size": 8}})
 
     async def run():
         batch_data_future = asyncio.create_task(_none_batch())
-        with pytest.raises(RuntimeError, match="Training dataloader was exhausted"):
+        with pytest.raises(RuntimeError) as exc_info:
             await trainer._fit_generate(batch_data_future, iter(()))
+        message = str(exc_info.value)
+        assert "Training dataloader was exhausted" in message
+        assert "data.train_batch_size=8" in message
+        assert "data.train_max_samples=N/A" in message
+        assert "trainer.total_epochs=N/A" in message
+        assert "trainer.total_training_steps=N/A" in message
 
     asyncio.run(run())
