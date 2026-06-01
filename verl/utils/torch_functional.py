@@ -611,6 +611,19 @@ def log_probs_from_logits_response(input_ids, logits, response_length):
     return response_log_prob
 
 
+def get_unpad_sequence_shifted_labels(input_ids: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
+    """Build next-token labels for unpadded inputs without crossing sequence boundaries.
+
+    ``indices`` maps valid tokens from the padded ``[batch, seqlen]`` input into
+    the rmpad/packed layout. Shifting in the padded layout first keeps labels
+    inside each sequence; shifting the packed tensor directly would leak the
+    first token of sequence i+1 into the last token of sequence i.
+    """
+    labels = input_ids.clone()
+    labels[:, :-1] = input_ids[:, 1:]
+    return labels.reshape(-1)[indices]
+
+
 def log_probs_from_logits_response_rmpad(input_ids, attention_mask, logits_rmpad, response_length):
     """Compute the log_probs from logits with rmpad logits and pad input. Note that
     logits_rmpad = model(input_ids_rmpad). For each sentences, there is a shift between
@@ -627,10 +640,9 @@ def log_probs_from_logits_response_rmpad(input_ids, attention_mask, logits_rmpad
     from flash_attn.bert_padding import pad_input, unpad_input
 
     batch_size, seqlen = input_ids.shape
-    input_ids_rmpad, indices, *_ = unpad_input(input_ids.unsqueeze(-1), attention_mask=attention_mask)
-    input_ids_rmpad = input_ids_rmpad.squeeze(-1)
-    input_ids_rmpad_rolled = torch.roll(input_ids_rmpad, shifts=-1, dims=0)
-    full_log_probs_rmpad = logprobs_from_logits(logits=logits_rmpad, labels=input_ids_rmpad_rolled)  # (total_nnz,)
+    _, indices, *_ = unpad_input(input_ids.unsqueeze(-1), attention_mask=attention_mask)
+    labels_rmpad = get_unpad_sequence_shifted_labels(input_ids, indices)
+    full_log_probs_rmpad = logprobs_from_logits(logits=logits_rmpad, labels=labels_rmpad)  # (total_nnz,)
     full_output = pad_input(
         hidden_states=full_log_probs_rmpad.unsqueeze(-1), indices=indices, batch=batch_size, seqlen=seqlen
     )
@@ -660,8 +672,11 @@ def log_probs_from_logits_all_rmpad(input_ids_rmpad, logits_rmpad, indices, batc
 
     input_ids_rmpad = input_ids_rmpad.transpose(0, 1)  # transpose back to [total_nnz, 1]
     input_ids_rmpad = input_ids_rmpad.squeeze(-1)
-    input_ids_rmpad_rolled = torch.roll(input_ids_rmpad, shifts=-1, dims=0)
-    full_log_probs_rmpad = logprobs_from_logits(logits=logits_rmpad, labels=input_ids_rmpad_rolled)  # (total_nnz,)
+    input_ids = pad_input(
+        hidden_states=input_ids_rmpad.unsqueeze(-1), indices=indices, batch=batch_size, seqlen=seqlen
+    ).squeeze(-1)
+    labels_rmpad = get_unpad_sequence_shifted_labels(input_ids, indices)
+    full_log_probs_rmpad = logprobs_from_logits(logits=logits_rmpad, labels=labels_rmpad)  # (total_nnz,)
     full_output = pad_input(
         hidden_states=full_log_probs_rmpad.unsqueeze(-1), indices=indices, batch=batch_size, seqlen=seqlen
     )
