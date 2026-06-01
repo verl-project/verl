@@ -8,7 +8,7 @@ Last updated: 05/13/2026.
 环境配置问题
 ------------
 
-### Q1: NPU 设备不可见怎么办？
+### Q1： NPU 设备不可见怎么办？
 
 **问题现象**：torch_npu.npu.is_available() 返回 False
 
@@ -29,7 +29,7 @@ Last updated: 05/13/2026.
 调试和诊断
 ----------
 
-### Q1: 如何启用 NPU 性能分析？
+### Q1： 如何启用 NPU 性能分析？
 
 使用 VERL 内置的 profiler：
 
@@ -40,7 +40,7 @@ Last updated: 05/13/2026.
    actor_rollout_ref.actor.profiler.tool_config.npu.level=1 \
    actor_rollout_ref.actor.profiler.tool_config.npu.analysis=true
 
-### Q2: 如何排查 NPU 训练失败的问题？
+### Q2： 如何排查 NPU 训练失败的问题？
 
 **排查步骤**：
 
@@ -67,7 +67,7 @@ Last updated: 05/13/2026.
 常见错误信息
 ------------
 
-### Q1: "torch_npu detected, but NPU device is not available or visible"
+### Q1： "torch_npu detected, but NPU device is not available or visible"
 
 **原因**：NPU 驱动未正确安装或设备不可见
 
@@ -79,7 +79,7 @@ Last updated: 05/13/2026.
 
 **解决方案**：切换MindSpeed至 2.3.0_core_r0.12.1
 
-### Q3: "AssertionError: Weight ... is too large to fit in the bucket"
+### Q3： "AssertionError: Weight ... is too large to fit in the bucket"
 
 **问题现象**：在分布式训练权重同步时，出现如下错误：
 
@@ -144,7 +144,7 @@ Last updated: 05/13/2026.
      - [152064, 8192] float32
      - 8192 MB
 
-### Q4: 非共享存储下 checkpoint 加载失败，找不到 common.pt / .metadata / metadata.json
+### Q4： 非共享存储下 checkpoint 加载失败，找不到 common.pt / .metadata / metadata.json
 
 **问题现象**：使用 verl + Megatron 后端在**非共享存储**的多机环境下，保存 checkpoint 正常，但重新加载时报错，提示找不到以下文件：
 
@@ -192,7 +192,7 @@ Last updated: 05/13/2026.
 - `NPU 快速开始指南 <../start/install.rst>`_
 - `NPU CI 指南 <../contribution_guide/ascend_ci_guide_zh.rst>`_
 - Ascend NPU 文档: https://www.hiascend.com/document
-- CANN 工具包文档: https://www.hiascend.com/software/cann
+- CANN 工具包文档： https://www.hiascend.com/software/cann
 
 获取更多帮助
 ------------

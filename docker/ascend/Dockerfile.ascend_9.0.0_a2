@@ -49,8 +49,6 @@ RUN export PIP_EXTRA_INDEX_URL=https://triton-ascend.osinfra.cn/pypi/simple/ && 
     # Install MindSpeed & Megatron
     pip install -e MindSpeed && \
     pip install -e Megatron-LM && \
-    # Remove existing triton installed by some third-party packages
-    pip uninstall -y triton && \
     # Install transformers
     pip install transformers==5.3.0 && \
     # Install mbridge

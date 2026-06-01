@@ -1,7 +1,7 @@
 NPU-CI 添加指导
 ===========
 
-Last updated: 02/02/2026.
+Last updated：02/02/2026.
 
 我们在 verl 上增加基于华为昇腾设备的CI用例添加指导。
 
@@ -58,7 +58,7 @@ NPU 相关的工作流主要包括：
 
    gpu用例中权重在~/models/路径下，如需适配可以用软链接，``ln -s /root/.cache/models ~/models``
 
-   此处为原始数据集，按需进行数据处理，如下。
+   以下为原始数据集，请按需进行数据处理，示例如下。
    
    ``python examples/data_preprocess/gsm8k_multiturn_sft.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k``
 

@@ -186,7 +186,7 @@ Furthermore, FSDP2 cpu offloading is compatible with gradient accumulation. You 
 
 ## AMD Support (ROCm Kernel)
 
-verl now supports FSDP as the training engine (Megatron support coming soon) and both integrates with vLLM and SGLang as inference engines. Please refer to [this document](https://github.com/verl-project/verl/blob/main/docs/amd_tutorial/amd_build_dockerfile_page.rst) for the installation guide and more information, and [this document](https://github.com/verl-project/verl/blob/main/docs/amd_tutorial/amd_vllm_page.rst) for the vLLM performance tuning for ROCm.
+verl runs on AMD ROCm GPUs (MI300X / MI325X / MI355X) with FSDP, FSDP2, and Megatron trainer backends, and vLLM as the validated inference engine (SGLang support is in progress). See the [AMD ROCm quick-start guide](https://github.com/verl-project/verl/blob/main/docs/amd_tutorial/amd_quick_start.rst) for container bring-up, environment verification, and training examples.
 
 ## Citation and acknowledgement
 

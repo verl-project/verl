@@ -138,7 +138,7 @@ Last updated: 12/20/2025.
 
 采集后的数据存放在用户设置的save_path下，可通过 `MindStudio Insight <https://www.hiascend.com/document/detail/zh/mindstudio/80RC1/GUI_baseddevelopmenttool/msascendinsightug/Insight_userguide_0002.html>`_ 工具进行可视化。
 
-另外在Linux环境下，MindStudio Insight工具提供了 `JupyterLab插件 <https://www.hiascend.com/document/detail/zh/mindstudio/82RC1/GUI_baseddevelopmenttool/msascendinsightug/Insight_userguide_0130.html>`_ 形态，提供更直观和交互式强的操作界面。JupyterLab插件优势如下：
+另外在Linux环境下，MindStudio Insight工具提供了 [JupyterLab插件](https://www.hiascend.com/document/detail/zh/mindstudio/82RC1/GUI_baseddevelopmenttool/msascendinsightug/Insight_userguide_0130.html) 形态，提供更直观和交互式强的操作界面。JupyterLab插件优势如下：
 
 - 无缝集成：支持在Jupyter环境中直接运行MindStudio Insight工具，无需切换平台，无需拷贝服务器上的数据，实现数据即采即用。
 - 快速启动：通过JupyterLab的命令行或图形界面，可快速启动MindStudio Insight工具。

@@ -1092,6 +1092,21 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 # temperature is singleton
                 log_probs = output.log_probs.squeeze(0)  # (total_nnz,)
                 entropy_rmpad = output.entropy.squeeze(0)  # (total_nnz,)
+
+                # When the fused kernel also computed top-K distillation
+                # (veomni's chunk_topk_distill path), extract the per-token
+                # distillation outputs and store them as nested tensors —
+                # same model_output keys as the eager logit-processor path.
+                if distillation_use_topk:
+                    aux_outputs = getattr(output, "fused_linear_aux", None)
+                    if aux_outputs is not None and aux_outputs.distillation_losses is not None:
+                        cu_seqlens = input_ids.offsets()
+                        for field_name in ("distillation_losses", "student_mass", "teacher_mass"):
+                            v = getattr(aux_outputs, field_name).squeeze(0)
+                            if self.use_ulysses_sp:
+                                pad_size = output_args["pad_size"]
+                                v = gather_outputs_and_unpad(v, gather_dim=0, unpad_dim=0, padding_size=pad_size)
+                            model_output[field_name] = torch.nested.nested_tensor_from_jagged(v, cu_seqlens)
             else:
                 logits_rmpad = output.logits.squeeze(0)  # (total_nnz, vocab_size)
                 logits_rmpad.div_(temperature_rmpad.clamp(min=1e-8).unsqueeze(-1).to(logits_rmpad.dtype))
