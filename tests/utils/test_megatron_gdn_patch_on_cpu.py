@@ -24,7 +24,14 @@ except ModuleNotFoundError:
     torch = None
 
 
-def _install_fake_gdn_dependencies(monkeypatch):
+def _install_fake_gdn_dependencies(monkeypatch, conv_backend="fla"):
+    """Install fake megatron/fla modules so the GDN patch can run on CPU.
+
+    ``conv_backend`` selects which convolution path the patch will exercise:
+    - "fla": expose ``fla.modules.convolution.causal_conv1d`` (preferred path).
+    - "ccfn": omit the fla conv and expose ``causal_conv1d.causal_conv1d_fn``
+      so the varlen ``seq_idx`` fallback path is taken instead.
+    """
     calls = {}
 
     class FakeGatedDeltaNet:
@@ -47,6 +54,14 @@ def _install_fake_gdn_dependencies(monkeypatch):
             "output_final_state": output_final_state,
         }
         return x, None
+
+    def causal_conv1d_fn(x, weight, bias, activation, seq_idx):
+        calls["ccfn"] = {
+            "x_shape": tuple(x.shape),
+            "seq_idx": seq_idx,
+            "activation": activation,
+        }
+        return x
 
     modules = {
         "megatron": types.ModuleType("megatron"),
@@ -71,7 +86,15 @@ def _install_fake_gdn_dependencies(monkeypatch):
     modules["megatron.core.utils"].nvtx_range_pop = lambda suffix: None
     modules["fla.modules.l2norm"].l2norm = lambda x: x
     modules["fla.ops.gated_delta_rule"].chunk_gated_delta_rule = chunk_gated_delta_rule
-    modules["fla.modules.convolution"].causal_conv1d = fla_causal_conv1d
+
+    if conv_backend == "fla":
+        modules["fla.modules.convolution"].causal_conv1d = fla_causal_conv1d
+    elif conv_backend == "ccfn":
+        # No fla conv: patch falls back to causal_conv1d_fn (seq_idx path).
+        modules["causal_conv1d"] = types.ModuleType("causal_conv1d")
+        modules["causal_conv1d"].causal_conv1d_fn = causal_conv1d_fn
+    else:
+        raise ValueError(conv_backend)
 
     for name, module in modules.items():
         monkeypatch.setitem(sys.modules, name, module)
@@ -157,6 +180,45 @@ def test_gdn_patch_passes_cu_seqlens_to_fla_varlen_paths(monkeypatch):
     assert tuple(out.shape) == (4, 1, 2)
     assert calls["conv"]["cu_seqlens"] is cu_seqlens
     assert calls["conv"]["x_shape"] == (1, 4, 6)
+    assert calls["chunk"]["cu_seqlens"] is cu_seqlens
+
+
+def test_gdn_patch_builds_seq_idx_for_causal_conv1d_fn(monkeypatch):
+    if torch is None:
+        pytest.skip("torch is not installed")
+
+    from verl.models.mcore.patch import apply_patch_megatron_gated_delta_net
+
+    # No fla conv available -> patch falls back to causal_conv1d_fn (seq_idx path).
+    fake_gdn_cls, calls = _install_fake_gdn_dependencies(monkeypatch, conv_backend="ccfn")
+
+    apply_patch_megatron_gated_delta_net()
+
+    cu_seqlens = torch.tensor([0, 2, 4], dtype=torch.int32)
+    packed_seq_params = SimpleNamespace(
+        cu_seqlens_q=cu_seqlens,
+        cu_seqlens_q_padded=None,
+        seq_idx=None,
+    )
+
+    hidden_states = torch.zeros(2, 1, 4)  # sp_size=2 -> full seq len 4
+    out, bias = fake_gdn_cls.forward(
+        _FakeGdnInstance(),
+        hidden_states,
+        attention_mask=None,
+        packed_seq_params=packed_seq_params,
+    )
+
+    assert bias is None
+    assert tuple(out.shape) == (4, 1, 2)
+    # causal_conv1d_fn receives the channel-first (b, d, s) layout.
+    assert calls["ccfn"]["x_shape"] == (1, 6, 4)
+    # seq_idx is derived from cu_seqlens: two sequences of length 2 -> [[0,0,1,1]].
+    seq_idx = calls["ccfn"]["seq_idx"]
+    assert seq_idx is not None
+    assert seq_idx.dtype == torch.int32
+    assert seq_idx.tolist() == [[0, 0, 1, 1]]
+    # cu_seqlens still flows into the varlen gated-delta-rule kernel.
     assert calls["chunk"]["cu_seqlens"] is cu_seqlens
 
 
