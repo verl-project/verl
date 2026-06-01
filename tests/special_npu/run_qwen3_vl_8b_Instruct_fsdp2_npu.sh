@@ -33,6 +33,7 @@ EXPERIMENT_NAME=${EXPERIMENT_NAME:-qwen3_vl_8b_grpo_vllm_fsdp2_$(date +%Y%m%d_%H
 SCRIPT_NAME="$(basename -- "${BASH_SOURCE[0]}" .sh)"
 LOG_DIR=/root/.cache/nightly_log/$SCRIPT_NAME
 mkdir -p $LOG_DIR
+rm -rf $LOG_DIR/$SCRIPT_NAME.log
 
 TRAIN_FILE=${TRAIN_FILE:-$HOME/data/geo3k/train.parquet}
 TEST_FILE=${TEST_FILE:-$HOME/data/geo3k/test.parquet}
@@ -106,6 +107,7 @@ TRAINER=(
     trainer.save_freq=${SAVE_FREQ}
     trainer.test_freq=${TEST_FREQ}
     trainer.total_epochs=${TOTAL_EPOCHS}
+    trainer.total_training_steps=${TOTAL_EPOCHS}
 )
 
 EXTRA=(
