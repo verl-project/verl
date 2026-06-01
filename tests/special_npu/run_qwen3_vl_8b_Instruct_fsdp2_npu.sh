@@ -29,7 +29,7 @@ SAVE_FREQ=${SAVE_FREQ:-20}
 TEST_FREQ=${TEST_FREQ:-5}
 
 PROJECT_NAME=${PROJECT_NAME:-verl_grpo_geo3k}
-EXPERIMENT_NAME=${EXPERIMENT_NAME:-qwen3_vl_8b_grpo_vllm_fsdp2_$(date +%Y%m%d_%H%M)}
+EXPERIMENT_NAME=${EXPERIMENT_NAME:-qwen3_vl_8b_grpo_fsdp2_vllm_$(date +%Y%m%d_%H%M)}
 SCRIPT_NAME="$(basename -- "${BASH_SOURCE[0]}" .sh)"
 LOG_DIR=/root/.cache/nightly_log/$SCRIPT_NAME
 mkdir -p $LOG_DIR
