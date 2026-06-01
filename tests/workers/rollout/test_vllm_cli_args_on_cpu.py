@@ -15,6 +15,7 @@
 import json
 
 import pytest
+from omegaconf import OmegaConf
 
 from verl.workers.rollout.vllm_cli_args import build_cli_args_from_config
 
@@ -83,6 +84,20 @@ class TestBuildCliArgsFromConfig:
         assert result[0] == "--extra-config"
         # JSON output may have different key ordering, so parse and compare
         assert json.loads(result[1]) == {"key": "value", "nested": True}
+
+    def test_omegaconf_container_values(self):
+        """OmegaConf list/dict values are handled like plain Python containers."""
+        config = OmegaConf.create(
+            {
+                "cuda-graph-sizes": [1, 2, 4],
+                "extra-config": {"key": "value", "nested": True},
+            }
+        )
+        result = build_cli_args_from_config(config)
+
+        assert result[:4] == ["--cuda-graph-sizes", "1", "2", "4"]
+        assert result[4] == "--extra-config"
+        assert json.loads(result[5]) == {"key": "value", "nested": True}
 
     def test_mixed_config(self):
         """Test a realistic mixed configuration."""

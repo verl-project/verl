@@ -12,10 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+from collections.abc import Mapping
 from typing import Any
 
+from omegaconf import DictConfig, ListConfig, OmegaConf
 
-def build_cli_args_from_config(config: dict[str, Any]) -> list[str]:
+
+def _to_plain_container(value: Any) -> Any:
+    if isinstance(value, DictConfig | ListConfig):
+        return OmegaConf.to_container(value, resolve=True)
+    if isinstance(value, Mapping):
+        return {k: _to_plain_container(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_to_plain_container(v) for v in value]
+    return value
+
+
+def build_cli_args_from_config(config: Mapping[str, Any] | DictConfig) -> list[str]:
     """
     Convert a config dictionary to CLI arguments for vLLM server.
 
@@ -34,6 +47,10 @@ def build_cli_args_from_config(config: dict[str, Any]) -> list[str]:
     Returns:
         List of CLI argument strings
     """
+    config = _to_plain_container(config)
+    if not isinstance(config, Mapping):
+        raise TypeError(f"config must be a mapping, got {type(config).__name__}")
+
     cli_args = []
     for k, v in config.items():
         if v is None:
