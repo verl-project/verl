@@ -399,7 +399,11 @@ class OneStepOffRayTrainer(SeparateRayPPOTrainer):
                 total_epochs = OmegaConf.select(self.config, "trainer.total_epochs", default="N/A")
                 total_training_steps = OmegaConf.select(
                     self.config, "trainer.total_training_steps", default="N/A"
-                )
+            if batch_data is None:
+                train_batch_size = OmegaConf.select(self.config, "data.train_batch_size", default="N/A")
+                train_max_samples = OmegaConf.select(self.config, "data.train_max_samples", default="N/A")
+                total_epochs = OmegaConf.select(self.config, "trainer.total_epochs", default="N/A")
+                total_training_steps = OmegaConf.select(self.config, "trainer.total_training_steps", default="N/A")
                 raise RuntimeError(
                     "Training dataloader was exhausted before one-step-off-policy reached "
                     f"step {self.global_steps}/{self.total_training_steps}. "
