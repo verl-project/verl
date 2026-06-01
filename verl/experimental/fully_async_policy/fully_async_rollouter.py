@@ -35,6 +35,7 @@ from verl.single_controller.ray import RayWorkerGroup
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager
 from verl.trainer.ppo.utils import Role, WorkerType
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
+from verl.utils.import_utils import load_class_from_fqn
 from verl.utils.profiler import marked_timer
 from verl.utils.tracking import ValidationGenerationsLogger
 
@@ -389,7 +390,12 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
 
         # create async rollout manager and request scheduler
         assert self.config.actor_rollout_ref.rollout.mode == "async"
-        from verl.experimental.fully_async_policy.agent_loop import FullyAsyncAgentLoopManager
+        
+        manager_class_fqn = self.config.actor_rollout_ref.rollout.get("agent", {}).get("agent_loop_manager_class")
+        if manager_class_fqn:
+            FullyAsyncAgentLoopManager = load_class_from_fqn(manager_class_fqn, "AgentLoopManager")
+        else:
+            from verl.experimental.fully_async_policy.agent_loop import FullyAsyncAgentLoopManager
 
         self.async_rollout_mode = True
         self.async_rollout_manager = await FullyAsyncAgentLoopManager.create(
