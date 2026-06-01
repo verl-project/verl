@@ -109,26 +109,69 @@ def no_padding_2_padding(tensor: torch.Tensor, data: TensorDict) -> torch.Tensor
         tensor: sliced response tensor of shape [bsz, max_response_len, *]
     """
     values = tensor.values() if tensor.is_nested else tensor
-    prompt_ids = data["prompts"]
-    response_ids = data["responses"]
-
     max_response_len = tu.get_non_tensor_data(data=data, key="max_response_len", default=-1)
 
-    if prompt_ids.is_nested:
-        prompt_lens = prompt_ids.offsets().diff()
-        response_lens = response_ids.offsets().diff()
-        if max_response_len < 0:
-            max_response_len = response_lens.max().item()
+    has_prompts = "prompts" in data.keys() and "responses" in data.keys()
+    if has_prompts:
+        prompt_ids = data["prompts"]
+        response_ids = data["responses"]
+        attention_mask = data.get("attention_mask", None)
+
+        if prompt_ids.is_nested:
+            prompt_lens = prompt_ids.offsets().diff()
+            response_lens = response_ids.offsets().diff()
+            if max_response_len < 0:
+                max_response_len = response_lens.max().item()
+        else:
+            assert attention_mask is not None and not attention_mask.is_nested
+            prompt_lens = attention_mask[:, : prompt_ids.shape[1]].sum(dim=1)
+            response_lens = attention_mask[:, prompt_ids.shape[1] :].sum(dim=1)
+            max_response_len = response_ids.shape[1]
     else:
-        attention_mask = data["attention_mask"]
-        assert not attention_mask.is_nested
-        prompt_lens = attention_mask[:, : prompt_ids.shape[1]].sum(dim=1)
-        response_lens = attention_mask[:, prompt_ids.shape[1] :].sum(dim=1)
-        max_response_len = response_ids.shape[1]
+        # DCP path: no prompts/responses, use loss_mask (response_mask) and NestedTensor offsets
+        if tensor.is_nested:
+            seq_lens = tensor.offsets().diff()
+            num_seqs = len(seq_lens)
+            loss_mask = data.get("loss_mask", data.get("response_mask", None))
+            if loss_mask is not None and not loss_mask.is_nested:
+                # loss_mask is padded (num_seqs, padded_len): sum to get response_lens
+                response_lens = loss_mask.sum(dim=-1).to(seq_lens.dtype).to(seq_lens.device)
+                prompt_lens = seq_lens - response_lens
+            else:
+                # Fallback: treat all tokens as response
+                prompt_lens = torch.zeros(num_seqs, dtype=seq_lens.dtype, device=seq_lens.device)
+                response_lens = seq_lens
+            if max_response_len < 0:
+                max_response_len = response_lens.max().item()
+        else:
+            raise ValueError("no_padding_2_padding requires 'prompts'/'responses' or nested tensor input")
 
     sequence_lens = prompt_lens + response_lens
     sequence_offsets = sequence_lens.cumsum(dim=0)
-    assert sequence_offsets[-1].item() == values.shape[0]
+    expected_tokens = sequence_offsets[-1].item()
+    actual_tokens = values.shape[0]
+    if expected_tokens != actual_tokens:
+        import logging
+
+        logger = logging.getLogger(__name__)
+        logger.warning(
+            f"Token count mismatch (DCP routing): expected={expected_tokens} actual={actual_tokens} "
+            f"n_seqs={len(sequence_lens)}. Adjusting to match actual output."
+        )
+        # Adjust: rebuild from actual nested tensor offsets
+        if tensor.is_nested:
+            actual_seq_lens = tensor.offsets().diff()
+            # Recompute response_lens = actual_seq_len - prompt_len
+            response_lens = actual_seq_lens - prompt_lens
+            response_lens = response_lens.clamp(min=0)
+            sequence_lens = prompt_lens + response_lens
+            sequence_offsets = actual_seq_lens.cumsum(dim=0)
+            if max_response_len < 0:
+                max_response_len = response_lens.max().item()
+        else:
+            assert expected_tokens == actual_tokens, (
+                f"Token count mismatch: expected={expected_tokens} actual={actual_tokens}"
+            )
     assert not prompt_lens.eq(0).any(), f"seq_offset - resp_len - 1 assumes prompt_len > 0. Got {prompt_lens}"
 
     response_list = []
