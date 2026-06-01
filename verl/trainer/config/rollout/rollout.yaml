@@ -131,7 +131,16 @@ multi_stage_wake_up: false
 engine_kwargs:
 
   # vllm engine config
-  vllm: {}
+  vllm:
+
+    # Whether to enable vLLM auto tool choice. Requires a compatible tool_call_parser.
+    enable_auto_tool_choice: False
+
+    # vLLM tool call parser name, e.g. hermes, llama3_json, mistral.
+    tool_call_parser: null
+
+    # Optional Python module path for a custom vLLM tool parser plugin.
+    tool_parser_plugin: null
 
   # sglang engine config
   sglang: {}

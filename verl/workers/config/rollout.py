@@ -297,6 +297,14 @@ class RolloutConfig(BaseConfig):
                 stacklevel=2,
             )
 
+        vllm_engine_kwargs = (self.engine_kwargs or {}).get("vllm", {}) or {}
+        if self.name == "vllm" and vllm_engine_kwargs.get("enable_auto_tool_choice", False):
+            if not vllm_engine_kwargs.get("tool_call_parser"):
+                raise ValueError(
+                    "`actor_rollout_ref.rollout.engine_kwargs.vllm.tool_call_parser` must be set when "
+                    "`actor_rollout_ref.rollout.engine_kwargs.vllm.enable_auto_tool_choice=True`."
+                )
+
         if self.name != "trtllm" and self.expert_parallel_size > 1:
             assert self.expert_parallel_size == (self.tensor_model_parallel_size * self.data_parallel_size), (
                 "expert_parallel_size must be equal to tensor_model_parallel_size * data_parallel_size"

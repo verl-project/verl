@@ -12,14 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import ctypes
-import json
 import logging
 import os
 import platform
 import signal
 import threading
 from types import MethodType
-from typing import Any, Literal, Optional, get_args
+from typing import Literal, Optional, get_args
 
 import torch
 from vllm.outputs import RequestOutput
@@ -316,47 +315,6 @@ class SuppressSignalInThread:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         signal.signal = self.original_signal
-
-
-def build_cli_args_from_config(config: dict[str, Any]) -> list[str]:
-    """
-    Convert a config dictionary to CLI arguments for vLLM server.
-
-    Handles different value types appropriately:
-    - None: skipped
-    - bool True: adds '--key'
-    - bool False: skipped
-    - list: expands to '--key item1 item2 ...'
-    - empty list: skipped (vLLM uses nargs="+" which requires at least one value)
-    - dict: JSON serialized
-    - other: string converted
-
-    Args:
-        config: Dictionary of configuration key-value pairs
-
-    Returns:
-        List of CLI argument strings
-    """
-    cli_args = []
-    for k, v in config.items():
-        if v is None:
-            continue
-        if isinstance(v, bool):
-            if v:
-                cli_args.append(f"--{k}")
-        elif isinstance(v, list):
-            if not v:
-                # Skip empty lists - vLLM uses nargs="+" which requires at least one value
-                continue
-            # Lists need to be expanded as multiple separate arguments
-            # e.g., --cuda-graph-sizes 1 2 4 8 becomes ['--cuda-graph-sizes', '1', '2', '4', '8']
-            cli_args.append(f"--{k}")
-            cli_args.extend([str(item) for item in v])
-        else:
-            cli_args.append(f"--{k}")
-            # Use json.dumps for dict to ensure valid JSON format
-            cli_args.append(json.dumps(v) if isinstance(v, dict) else str(v))
-    return cli_args
 
 
 def extract_prompt_logprobs(output: RequestOutput, num_prompt_logprobs: Optional[int], result_dict: dict[str, list]):

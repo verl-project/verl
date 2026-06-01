@@ -274,7 +274,10 @@ actor_rollout_ref:
     over_sample_rate: 0
     multi_stage_wake_up: false
     engine_kwargs:
-      vllm: {}
+      vllm:
+        enable_auto_tool_choice: false
+        tool_call_parser: null
+        tool_parser_plugin: null
       sglang: {}
       trtllm: {}
     val_kwargs:

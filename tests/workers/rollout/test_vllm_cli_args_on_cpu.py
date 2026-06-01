@@ -16,7 +16,7 @@ import json
 
 import pytest
 
-from verl.workers.rollout.vllm_rollout.utils import build_cli_args_from_config
+from verl.workers.rollout.vllm_cli_args import build_cli_args_from_config
 
 
 class TestBuildCliArgsFromConfig:
@@ -109,6 +109,23 @@ class TestBuildCliArgsFromConfig:
         # Check skipped values are not present
         assert "--disable-log-requests" not in result
         assert "--lora-path" not in result
+
+    def test_vllm_tool_calling_options(self):
+        """vLLM tool-calling options are serialized for the serve parser."""
+        config = {
+            "enable_auto_tool_choice": True,
+            "tool_call_parser": "hermes",
+            "tool_parser_plugin": "custom.tool_parser",
+        }
+        result = build_cli_args_from_config(config)
+
+        assert result == [
+            "--enable_auto_tool_choice",
+            "--tool_call_parser",
+            "hermes",
+            "--tool_parser_plugin",
+            "custom.tool_parser",
+        ]
 
     def test_preserves_order(self):
         """Arguments should preserve dictionary order (Python 3.7+)."""
