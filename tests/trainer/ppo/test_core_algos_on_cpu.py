@@ -260,6 +260,26 @@ def test_rloo_and_vectorized_equivalence(batch_size: int, seq_len: int, num_grou
     assert torch.allclose(ret1, ret2, rtol=1e-5, atol=1e-6)
 
 
+def test_grpo_vectorized_matches_original_for_low_variance_rewards():
+    token_level_rewards = torch.tensor([[1.0], [1.00001], [2.0], [2.00001]], dtype=torch.float32)
+    response_mask = torch.ones_like(token_level_rewards)
+    index = np.array(["prompt-a", "prompt-a", "prompt-b", "prompt-b"], dtype=object)
+
+    adv1, ret1 = compute_grpo_outcome_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+    )
+    adv2, ret2 = compute_grpo_vectorized_outcome_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+    )
+
+    assert torch.allclose(adv1, adv2, rtol=1e-5, atol=1e-6)
+    assert torch.allclose(ret1, ret2, rtol=1e-5, atol=1e-6)
+
+
 @pytest.mark.parametrize(
     "batch_size,seq_len,num_groups,seed",
     [

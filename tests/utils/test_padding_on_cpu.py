@@ -17,6 +17,7 @@ import torch
 from tensordict import TensorDict
 
 from verl.workers.utils.padding import (
+    build_attention_mask_from_nested,
     embeds_padding_2_no_padding,
     left_right_2_no_padding,
     no_padding_2_padding,
@@ -243,6 +244,27 @@ def test_no_padding_2_padding_varying_lengths():
             msg=f"Batch {i} (prompt_len={prompt_lens[i]}, resp_len={resp_len}): values incorrect",
         )
     print("All varied length tests passed")
+
+
+def test_build_attention_mask_from_nested_uses_full_sequence_lengths():
+    input_ids = torch.nested.as_nested_tensor(
+        [
+            torch.tensor([11, 12, 13, 14, 15]),
+            torch.tensor([21, 22, 23]),
+        ],
+        layout=torch.jagged,
+    )
+
+    attention_mask = build_attention_mask_from_nested(input_ids, max_seq_len=5)
+
+    expected = torch.tensor(
+        [
+            [1, 1, 1, 1, 1],
+            [1, 1, 1, 0, 0],
+        ],
+        dtype=torch.int32,
+    )
+    torch.testing.assert_close(attention_mask.cpu(), expected)
 
 
 def test_embeds_padding_2_no_padding_varying_lengths():

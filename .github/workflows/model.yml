@@ -62,7 +62,7 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm018.dev1"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm020.dev1"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
 
 jobs:
@@ -169,12 +169,6 @@ jobs:
         run: |
           ray stop --force
           pytest -s -x tests/models/test_engine.py
-
-      - name: Running diffusers FSDP engine tests on 8 L20 GPUs
-        run: |
-          ray stop --force
-          pip3 install diffusers==0.37.0
-          pytest -s -x tests/models/test_diffusers_fsdp_engine.py
 
   cleanup:
     runs-on: ubuntu-latest

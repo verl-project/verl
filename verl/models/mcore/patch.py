@@ -390,7 +390,7 @@ def apply_patch_mbridge():
         megatron.core.utils.get_tensor_model_parallel_group_if_none = get_tensor_model_parallel_group_if_none
 
 
-def apply_patch_megatron_v012_with_torch_v28():
+def apply_patch_megatron_v012_with_torch_v28_v29() -> None:
     # Error due to missing serialization_format in _write_item of megatron v012;
     # resolved by using megatron v013's implementation.
     import inspect
@@ -407,7 +407,7 @@ def apply_patch_megatron_v012_with_torch_v28():
     from torch.distributed.checkpoint.filesystem import _write_item
 
     if (
-        version.parse(torch.__version__).base_version != "2.8.0"
+        version.parse(torch.__version__).base_version not in ("2.8.0", "2.9.0")
         or version.parse(megatron.core.__version__).base_version != "0.12.1"
     ):
         return
@@ -489,6 +489,23 @@ def apply_patch_megatron_v012_with_torch_v28():
     from megatron.core.dist_checkpointing.strategies.filesystem_async import FileSystemWriterAsync
 
     FileSystemWriterAsync.write_preloaded_data = write_preloaded_data_patch
+
+
+def apply_mtp_inference_patch():
+    from megatron.core.models.gpt.gpt_model import GPTModel
+
+    _original_postprocess = GPTModel._postprocess
+
+    def _patched(self, *args, **kwargs):
+        original_mtp_num_layers = self.config.mtp_num_layers
+        if not self.config.mtp_num_layers:
+            self.config.mtp_num_layers = None
+        try:
+            return _original_postprocess(self, *args, **kwargs)
+        finally:
+            self.config.mtp_num_layers = original_mtp_num_layers
+
+    GPTModel._postprocess = _patched
 
 
 # When using checkpoint + MoE models (like Qwen3-30B-A3B and Qwen3-VL-30B-A3B),

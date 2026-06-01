@@ -14,18 +14,17 @@
 from typing import Any, Optional
 from uuid import uuid4
 
-import ray
 import torch
 from omegaconf import DictConfig
 from torch.nn import functional as F
 
-from verl.experimental.agent_loop import AsyncLLMServerManager
 from verl.utils.config import omega_conf_to_dataclass
 from verl.workers.config import (
     DistillationConfig,
     DistillationLossConfig,
     DistillationTeacherModelConfig,
 )
+from verl.workers.rollout.llm_server import LLMServerClient
 
 
 def _get_teacher_sampling_params(
@@ -69,8 +68,7 @@ class AsyncTeacherLLMServerManager:
     def __init__(
         self,
         config: DictConfig,
-        servers: dict[str, list[tuple[str, ray.actor.ActorHandle]]],
-        load_balancer_handle: dict[str, ray.actor.ActorHandle],
+        teacher_client: dict[str, LLMServerClient],
     ):
         self.distillation_config: DistillationConfig = omega_conf_to_dataclass(config.distillation)
         self.distillation_loss_config: DistillationLossConfig = self.distillation_config.distillation_loss
@@ -78,22 +76,12 @@ class AsyncTeacherLLMServerManager:
 
         self.teacher_model_configs: dict[str, DistillationTeacherModelConfig] = self.distillation_config.teacher_models
         expected = set(self.teacher_model_configs)
-        if set(servers.keys()) != expected:
-            raise ValueError(f"server keys {sorted(servers)} do not match teacher routing keys {sorted(expected)}.")
-        if set(load_balancer_handle.keys()) != expected:
+        if set(teacher_client.keys()) != expected:
             raise ValueError(
-                f"load_balancer_handle keys {sorted(load_balancer_handle)} do not match "
-                f"teacher routing keys {sorted(expected)}."
+                f"teacher client keys {sorted(teacher_client.keys())} "
+                f"do not match teacher routing keys {sorted(expected)}."
             )
-
-        self.server_managers: dict[str, AsyncLLMServerManager] = {
-            key: AsyncLLMServerManager(
-                config=config,
-                servers=servers[key],
-                load_balancer_handle=load_balancer_handle[key],
-            )
-            for key in self.teacher_model_configs
-        }
+        self.teacher_client: dict[str, LLMServerClient] = teacher_client
 
     def _resolve_teacher_key(self, routing_key: Optional[str]) -> str:
         if len(self.teacher_model_configs) == 1:
@@ -115,19 +103,22 @@ class AsyncTeacherLLMServerManager:
         self,
         sequence_ids: list[int],
         multi_modal_data: Optional[dict[str, Any]] = None,
+        mm_processor_kwargs: Optional[dict[str, Any]] = None,
         routing_key: Optional[str] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute teacher log probabilities for a single unpadded sequence."""
         multi_modal_data = multi_modal_data or {}
         teacher_key = self._resolve_teacher_key(routing_key)
         teacher_model_config = self.teacher_model_configs[teacher_key]
-        server_manager = self.server_managers[teacher_key]
-        teacher_output = await server_manager.generate(
+        client = self.teacher_client[teacher_key]
+        teacher_output = await client.generate(
             request_id=uuid4().hex,
             prompt_ids=sequence_ids,
             sampling_params=_get_teacher_sampling_params(teacher_model_config, self.distillation_loss_config),
             image_data=multi_modal_data.get("images"),
             video_data=multi_modal_data.get("videos"),
+            audio_data=multi_modal_data.get("audios"),
+            mm_processor_kwargs=mm_processor_kwargs,
         )
         # Shapes: # S, (1 or K), where S is the response length, K is either 1 or topk depending on
         # the distillation loss settings.

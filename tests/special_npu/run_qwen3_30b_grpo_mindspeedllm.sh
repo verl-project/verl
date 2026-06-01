@@ -143,20 +143,21 @@ ACTOR_CONFIG=(
     actor_rollout_ref.actor.mindspeed.use_mbridge=True
     actor_rollout_ref.actor.mindspeed.vanilla_mbridge=True
     # Transformer Architecture Optimizations
-    actor_rollout_ref.actor.mindspeed.llm_kwargs.spec='[mindspeed_llm.tasks.models.spec.qwen3_spec, layer_spec]'
-    actor_rollout_ref.actor.mindspeed.llm_kwargs.seq_length=${max_model_len}
-    actor_rollout_ref.actor.mindspeed.llm_kwargs.micro_batch_size=${micro_batch_size}
-    +actor_rollout_ref.actor.mindspeed.llm_kwargs.num_query_groups=4
-    +actor_rollout_ref.actor.mindspeed.llm_kwargs.recompute_method=uniform
-    +actor_rollout_ref.actor.mindspeed.llm_kwargs.recompute_granularity=full
-    +actor_rollout_ref.actor.mindspeed.llm_kwargs.recompute_num_layers=1
+    actor_rollout_ref.actor.mindspeed.strategy=mindspeed_megatron
+    actor_rollout_ref.actor.mindspeed.mcore_kwargs.spec='[mindspeed_llm.tasks.models.spec.qwen3_spec, layer_spec]'
+    actor_rollout_ref.actor.mindspeed.mcore_kwargs.seq_length=${max_model_len}
+    actor_rollout_ref.actor.mindspeed.mcore_kwargs.micro_batch_size=${micro_batch_size}
+    +actor_rollout_ref.actor.mindspeed.mcore_kwargs.num_query_groups=4
+    +actor_rollout_ref.actor.mindspeed.mcore_kwargs.recompute_method=uniform
+    +actor_rollout_ref.actor.mindspeed.mcore_kwargs.recompute_granularity=full
+    +actor_rollout_ref.actor.mindspeed.mcore_kwargs.recompute_num_layers=1
     # MOE
-    +actor_rollout_ref.actor.mindspeed.llm_kwargs.moe_router_load_balancing_type=aux_loss
-    +actor_rollout_ref.actor.mindspeed.llm_kwargs.moe_permutation_async_comm=True
-    +actor_rollout_ref.actor.mindspeed.llm_kwargs.moe_token_dispatcher_type=alltoall
-    +actor_rollout_ref.actor.mindspeed.llm_kwargs.moe_aux_loss_coeff=0.001
-    +actor_rollout_ref.actor.mindspeed.llm_kwargs.moe_grouped_gemm=True
-    +actor_rollout_ref.actor.mindspeed.llm_kwargs.fix_router=True
+    +actor_rollout_ref.actor.mindspeed.mcore_kwargs.moe_router_load_balancing_type=aux_loss
+    +actor_rollout_ref.actor.mindspeed.mcore_kwargs.moe_permutation_async_comm=True
+    +actor_rollout_ref.actor.mindspeed.mcore_kwargs.moe_token_dispatcher_type=alltoall
+    +actor_rollout_ref.actor.mindspeed.mcore_kwargs.moe_aux_loss_coeff=0.001
+    +actor_rollout_ref.actor.mindspeed.mcore_kwargs.moe_grouped_gemm=True
+    +actor_rollout_ref.actor.mindspeed.mcore_kwargs.fix_router=True
 )
 
 REF_CONFIG=(

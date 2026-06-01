@@ -55,7 +55,7 @@ actor_rollout_ref:
 
 ## Example script
 
-See `examples/otb_trainer/run_qwen2_5-7b.sh` for a reference training loop.
+See `examples/otb_trainer/run_qwen3_8b_fsdp.sh` for a reference training loop.
 
 ## Gradient Variance Proxy Metrics
 
