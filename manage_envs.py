@@ -14,71 +14,61 @@
 
 """Per-backend uv environment driver for verl.
 
-Everything that controls *what* gets installed lives in ``pyproject.toml``
-and ``uv.lock``:
+Each backend has its own independent lockfile under
+``requirements/<backend>.lock``, generated from ``[project.optional-dependencies].<backend>``
+in ``pyproject.toml``. There is intentionally no universal ``uv.lock``:
+``manage_envs.py sync vllm`` resolves *only* the vllm extra and never
+fetches another backend's git sources or URL-pinned wheels.
 
-* ``[dependency-groups]`` declares one PEP 735 group per backend (vllm,
-  sglang, megatron, fsdp, cpu, ...). Groups (not extras) are used so that
-  ``uv sync --no-default-groups --group <name>`` installs ONLY that group's
-  closure and never another backend's git sources / cu wheels at install
-  time. The legacy ``[project.optional-dependencies]`` block still carries
-  thin shadows (``vllm``, ``sglang``, ``trtllm``) so ``pip install
-  verl[<name>]`` keeps working — those don't pin torch / cuDNN.
-* ``[tool.uv].conflicts`` marks the backend groups as mutually exclusive
-  so ``uv lock`` resolves each as an independent fork in a single lockfile.
-* cuDNN / NCCL wheel pins are inlined into each backend group (cu13 vs
-  cu12 lines up with the apt deb versions in
-  ``docker/Dockerfile.uv.cu{129,130}``). PEP 508 markers don't have a
-  ``group ==`` operator, so the previous conditional override-dependencies
-  approach was replaced by inline pins. cu13 backends are vllm / sglang /
-  fsdp / megatron; cu12.9 backends are trtllm / veomni / nemoautomodel.
-* ``[tool.uv].sources`` / ``[tool.uv].index`` route git packages and PyTorch
-  wheels per-group.
-* ``uv.lock`` is committed and is the single source of truth for resolved
-  versions across every backend.
+Two-step pipeline per backend::
 
-This script is a thin convenience wrapper around::
+    # 1. Compile pyproject extra -> requirements lockfile (when missing
+    #    or when --recompile is passed)
+    uv pip compile pyproject.toml --extra <backend> \\
+        --python <python-version> \\
+        --output-file requirements/<backend>.lock
 
-    UV_PROJECT_ENVIRONMENT=.venvs/.venv-<backend> \\
-        uv sync --frozen --no-default-groups --group <backend> \\
-                --python <python-version> \\
-                --link-mode=copy
+    # 2. Sync venv from the lockfile, then install verl editable
+    uv venv .venvs/.venv-<backend> --python <python-version>
+    uv pip sync requirements/<backend>.lock \\
+        --python .venvs/.venv-<backend>/bin/python \\
+        --link-mode=copy
+    uv pip install -e . --no-deps \\
+        --python .venvs/.venv-<backend>/bin/python
 
-so that:
+What that buys:
 
-  * each backend gets a separate venv under ``.venvs/.venv-<backend>``,
-  * ``--frozen`` keeps every install reproducible from ``uv.lock`` (no
-    silent re-resolves),
-  * ``--no-default-groups --group <backend>`` is what guarantees
-    ``sync vllm`` only installs the vllm group's slice of the lockfile —
-    no megatron / apex / TE / etc. ever appear in the venv,
-  * recommended build-time env vars are set for the one backend that
-    compiles native extensions from source — ``megatron``, which builds
-    apex + TransformerEngine (``MAX_JOBS`` / ``NVTE_FRAMEWORK`` /
-    ``NVTE_BUILD_THREADS_PER_JOB``).
+  * ``manage_envs.py sync vllm`` only resolves vllm extras (no megatron /
+    apex / TE / flash-attn etc. appear during lock or install),
+  * lockfiles can be checked in for reproducibility,
+  * pyproject.toml stays the single source of truth for backend recipes,
+  * ``[tool.uv.sources]`` per-extra URL / index routing still applies.
 
 Usage::
 
     python manage_envs.py sync vllm
     python manage_envs.py sync inference
     python manage_envs.py sync all
+    python manage_envs.py lock vllm                # (re)compile only
+    python manage_envs.py lock all --recompile     # refresh every lockfile
     python manage_envs.py list
     python manage_envs.py clean vllm
     python manage_envs.py shell vllm
     python manage_envs.py path vllm
 
-Anything after ``--`` is forwarded verbatim to ``uv sync``::
+Anything after ``--`` on ``sync`` / ``lock`` is forwarded to the underlying
+``uv pip ...`` invocation::
 
     python manage_envs.py sync megatron -- --reinstall -v
 
 Re-locking after a dependency change
 ------------------------------------
-Edit ``pyproject.toml`` (and the matching apt deb in ``docker/Dockerfile.uv.cu130``
-if it's a system lib), then::
+Edit ``pyproject.toml`` (and the matching apt deb in
+``docker/Dockerfile.uv.cu{130,129}`` if it's a system lib), then::
 
-    uv lock                                    # regenerate uv.lock
-    python manage_envs.py sync <backend>       # validate locally
-    git add pyproject.toml uv.lock             # commit them together
+    python manage_envs.py lock <backend> --recompile  # refresh that lockfile
+    python manage_envs.py sync <backend>              # validate locally
+    git add pyproject.toml requirements/<backend>.lock
 
 Cross-venv runtime
 ------------------
@@ -94,26 +84,10 @@ Common case (one venv for all training, one for inference)::
     python manage_envs.py launch --rollout vllm --trainer megatron -- \\
         python -m verl.trainer.main_ppo trainer.n_gpus_per_node=8 ...
 
-is equivalent to::
-
-    python -m verl.trainer.main_ppo trainer.n_gpus_per_node=8 \\
-        actor_rollout_ref.rollout.venv=/abs/.venvs/.venv-vllm \\
-        trainer.venv=/abs/.venvs/.venv-megatron
-
 Disaggregated case (mix engines per role)::
 
     python manage_envs.py launch --rollout vllm --actor megatron \\
         --ref fsdp --critic fsdp -- python -m verl.trainer.main_ppo ...
-
-emits ``actor_rollout_ref.rollout.venv=...``,
-``actor_rollout_ref.actor.venv=...``,
-``actor_rollout_ref.ref.venv=...`` and ``critic.venv=...`` separately. Roles
-that share a Ray actor (e.g. fused ActorRolloutRef) must agree — verl
-raises a clear error at job start otherwise.
-
-The driver itself can run in any venv that has verl installed (typically
-the trainer venv); ``launch`` only appends config overrides, it does not
-switch the driver interpreter.
 """
 
 from __future__ import annotations
@@ -172,26 +146,18 @@ PYTHON_VERSION: dict[str, str] = {
     "cpu": "3.12",
 }
 
-# Recommended build-time env vars per backend. Optional perf / reproducibility
-# hints — `uv sync` works without them. Set here so users don't have to
-# remember them.
-#
-# MAX_JOBS=32 is conservative on purpose. The reference Dockerfiles use
-# 256 for apex / TransformerEngine on big build hosts; we pick 32 as the
-# floor that succeeds everywhere. Bump it via `MAX_JOBS=128 python
-# manage_envs.py sync megatron` on hosts with plenty of RAM if you want
-# apex / TE to compile faster. Only `megatron` source-builds today (apex
-# + TE v2.15); every other backend installs only prebuilt wheels (flash-attn
-# 2.8.3 from mjun0812/flash-attention-prebuild-wheels, torch / vllm /
-# sglang / trtllm from PyPI / pytorch indexes).
+# Recommended build-time env vars per backend. Only `megatron` source-builds
+# today (apex + TE v2.15); every other backend installs only prebuilt wheels
+# (flash-attn 2.8.3 from mjun0812/flash-attention-prebuild-wheels, torch /
+# vllm / sglang / trtllm from PyPI / pytorch indexes). MAX_JOBS=32 is the
+# floor that succeeds everywhere; bump via `MAX_JOBS=128 python
+# manage_envs.py sync megatron` on big hosts.
 BUILD_ENV: dict[str, dict[str, str]] = {
     "megatron": {
         "MAX_JOBS": "32",
         "NVTE_FRAMEWORK": "pytorch",
         "NVTE_BUILD_THREADS_PER_JOB": "4",
     },
-    # fsdp / veomni / nemoautomodel / vllm / sglang / trtllm install only
-    # prebuilt wheels and don't need build env.
 }
 
 GROUPS: dict[str, list[str]] = {
@@ -203,6 +169,7 @@ GROUPS: dict[str, list[str]] = {
 
 VERL_DIR = Path(__file__).resolve().parent
 VENVS_DIR = (VERL_DIR / ".venvs").resolve()
+REQUIREMENTS_DIR = (VERL_DIR / "requirements").resolve()
 
 
 def _venv_path(backend: str) -> Path:
@@ -211,6 +178,10 @@ def _venv_path(backend: str) -> Path:
 
 def _venv_python(backend: str) -> Path:
     return _venv_path(backend) / "bin" / "python"
+
+
+def _lock_path(backend: str) -> Path:
+    return REQUIREMENTS_DIR / f"{backend}.lock"
 
 
 def _require_uv() -> None:
@@ -241,65 +212,133 @@ def _run(cmd: list[str], env_overrides: dict[str, str] | None = None) -> int:
     return subprocess.run(cmd, env=env, cwd=str(VERL_DIR)).returncode
 
 
+def _compile_lockfile(
+    backend: str,
+    *,
+    extra_args: list[str] | None = None,
+    env_overrides: dict[str, str] | None = None,
+) -> int:
+    """Run ``uv pip compile pyproject.toml --extra <backend>`` and write
+    the resolved requirements to ``requirements/<backend>.lock``.
+
+    Resolution is scoped to a single extra: only that extra's transitive
+    closure is fetched. Other backends' git sources / URL wheels are
+    never touched.
+    """
+    REQUIREMENTS_DIR.mkdir(parents=True, exist_ok=True)
+    lock = _lock_path(backend)
+    cmd = [
+        "uv",
+        "pip",
+        "compile",
+        "pyproject.toml",
+        "--extra",
+        backend,
+        "--python",
+        PYTHON_VERSION[backend],
+        "--output-file",
+        str(lock),
+        *(extra_args or []),
+    ]
+    return _run(cmd, env_overrides)
+
+
+def cmd_lock(args: argparse.Namespace) -> int:
+    """(Re)compile per-backend lockfiles via ``uv pip compile``.
+
+    Without ``--recompile``, only missing lockfiles are generated. With
+    ``--recompile``, every requested backend is re-resolved (use this
+    after bumping a pin in ``pyproject.toml``).
+    """
+    backends = _expand(args.backends)
+    _require_uv()
+    for backend in backends:
+        lock = _lock_path(backend)
+        if lock.is_file() and not args.recompile:
+            print(f"(skip) {lock} already exists; pass --recompile to refresh", flush=True)
+            continue
+        rc = _compile_lockfile(backend)
+        if rc:
+            print(f"error: uv pip compile failed for {backend}", file=sys.stderr)
+            return rc
+    return 0
+
+
 def cmd_sync(args: argparse.Namespace) -> int:
-    """Create or refresh per-backend venvs via ``uv sync --frozen
-    --no-default-groups --group <backend>``.
+    """Create or refresh per-backend venvs.
 
-    Each backend is a PEP 735 group declared in ``[dependency-groups]`` and
-    marked mutually exclusive in ``[tool.uv].conflicts``. With
-    ``--no-default-groups``, only the requested group's slice of
-    ``uv.lock`` is installed — no other backend's git sources or cu wheels
-    are touched. ``--frozen`` rejects any drift between ``pyproject.toml``
-    and ``uv.lock``; bumping a pin requires re-running ``uv lock``.
+    For each backend:
 
-    If ``uv.lock`` is missing (fresh checkout, or you just bumped a pin
-    locally), ``--frozen`` is dropped from the first sync so ``uv`` can
-    generate the lockfile as a side effect. The lock step still resolves
-    every group's fork (uv.lock is global), but with the
-    ``[[tool.uv.dependency-metadata]]`` table covering all git-source
-    packages, that lock is metadata-only — no source builds run during
-    lock. Subsequent backends in the same invocation, and all subsequent
-    invocations, find the lockfile and use ``--frozen`` automatically.
-    Commit the produced ``uv.lock`` alongside your ``pyproject.toml``
-    change to keep installs reproducible.
+    1. Ensure ``requirements/<backend>.lock`` exists (compile from
+       ``[project.optional-dependencies].<backend>`` if missing).
+    2. ``uv venv .venvs/.venv-<backend> --python <python-version>``.
+    3. ``uv pip sync <lock> --python <venv-python> --link-mode=copy`` —
+       this installs *exactly* what the lockfile says, nothing else.
+    4. ``uv pip install -e . --no-deps --python <venv-python>`` to put
+       verl itself into the venv in editable mode (deps come from the
+       lockfile, so ``--no-deps`` is correct here).
+
+    Step (1) is what makes ``sync vllm`` only touch vllm: the compile is
+    scoped to a single extra. Step (3) installs only what is in
+    ``requirements/<backend>.lock`` — verbatim — so other backends'
+    packages can never leak in.
     """
     backends = _expand(args.backends)
     _require_uv()
     VENVS_DIR.mkdir(parents=True, exist_ok=True)
-    if not (VERL_DIR / "uv.lock").is_file():
-        print(
-            "warning: uv.lock not found — the first uv sync will run without "
-            "--frozen and generate uv.lock. Commit it next to pyproject.toml.",
-            file=sys.stderr,
-        )
+    REQUIREMENTS_DIR.mkdir(parents=True, exist_ok=True)
     for backend in backends:
+        lock = _lock_path(backend)
         venv = _venv_path(backend)
-        env_overrides = {
-            **BUILD_ENV.get(backend, {}),
-            "UV_PROJECT_ENVIRONMENT": str(venv),
-        }
-        # Re-check on every iteration: the first sync of a fresh checkout
-        # writes uv.lock, so subsequent backends pick up --frozen.
-        frozen_args = ["--frozen"] if (VERL_DIR / "uv.lock").is_file() else []
-        cmd = [
-            "uv",
-            "sync",
-            *frozen_args,
-            # `--no-default-groups --group X` is what makes `sync vllm`
-            # install only the vllm slice. Without --no-default-groups, uv
-            # would also activate any group named in [tool.uv].default-groups
-            # (we set it to [] in pyproject so this is doubly safe).
-            "--no-default-groups",
-            "--group",
-            backend,
-            "--python",
-            PYTHON_VERSION[backend],
-            "--link-mode=copy",
-            *args.uv_args,
-        ]
-        rc = _run(cmd, env_overrides)
+        py = PYTHON_VERSION[backend]
+        env_overrides = {**BUILD_ENV.get(backend, {})}
+
+        if not lock.is_file():
+            print(f"info: {lock} missing — compiling from pyproject.toml [{backend}]", flush=True)
+            rc = _compile_lockfile(backend)
+            if rc:
+                print(f"error: uv pip compile failed for {backend}", file=sys.stderr)
+                return rc
+
+        rc = _run(["uv", "venv", str(venv), "--python", py, "--link-mode=copy"])
         if rc:
-            print(f"error: uv sync failed for {backend}", file=sys.stderr)
+            print(f"error: uv venv failed for {backend}", file=sys.stderr)
+            return rc
+
+        venv_py = str(_venv_python(backend))
+        rc = _run(
+            [
+                "uv",
+                "pip",
+                "sync",
+                str(lock),
+                "--python",
+                venv_py,
+                "--link-mode=copy",
+                *args.uv_args,
+            ],
+            env_overrides,
+        )
+        if rc:
+            print(f"error: uv pip sync failed for {backend}", file=sys.stderr)
+            return rc
+
+        rc = _run(
+            [
+                "uv",
+                "pip",
+                "install",
+                "-e",
+                ".",
+                "--no-deps",
+                "--python",
+                venv_py,
+                "--link-mode=copy",
+            ],
+            env_overrides,
+        )
+        if rc:
+            print(f"error: editable verl install failed for {backend}", file=sys.stderr)
             return rc
     return 0
 
@@ -473,14 +512,29 @@ def _build_parser() -> argparse.ArgumentParser:
         "up. Ascend NPU and aarch64 GPU variants are out of scope here."
     )
 
-    s = sub.add_parser("sync", help="create or refresh one or more backend venvs (uv sync --frozen)")
+    s = sub.add_parser(
+        "sync",
+        help="create or refresh one or more backend venvs (per-backend lockfile + uv pip sync)",
+    )
     s.add_argument("backends", nargs="+", help=backends_help)
     s.add_argument(
         "uv_args",
         nargs=argparse.REMAINDER,
-        help="anything after `--` is forwarded to `uv sync`",
+        help="anything after `--` is forwarded to the underlying `uv pip sync`",
     )
     s.set_defaults(func=cmd_sync)
+
+    lk = sub.add_parser(
+        "lock",
+        help="(re)compile per-backend lockfiles in requirements/<backend>.lock",
+    )
+    lk.add_argument(
+        "--recompile",
+        action="store_true",
+        help="re-resolve and overwrite each lockfile (default: only compile missing ones)",
+    )
+    lk.add_argument("backends", nargs="+", help=backends_help)
+    lk.set_defaults(func=cmd_lock)
 
     c = sub.add_parser("clean", help="remove one or more backend venvs")
     c.add_argument("backends", nargs="+", help=backends_help)

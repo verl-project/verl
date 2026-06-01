@@ -9,14 +9,11 @@
 #     pinned on torch 2.9.x-2.10 / cu129: trtllm, veomni, nemoautomodel,
 #     cpu (upstream stacks not yet on torch 2.11).
 #
-# The single committed verl/uv.lock holds both forks (mutually exclusive
-# dependency-groups declared in pyproject.toml's [tool.uv].conflicts), so
-# each image only ever runs
-#   `uv sync --frozen --no-default-groups --group <backend>`
-# against the one fork it cares about. `--no-default-groups` is what
-# guarantees `sync vllm` only installs the vllm slice and never touches
-# megatron's git sources / cu13 wheels at install time. See pyproject.toml's
-# [tool.uv] header for the backend -> torch / wheel-suite map.
+# Each backend has its own independent lockfile under
+# requirements/<backend>.lock (compiled from the matching extra in
+# pyproject.toml's [project.optional-dependencies]). There is no universal
+# uv.lock — `manage_envs.py sync vllm` only resolves vllm's slice and
+# never fetches another backend's git sources or URL-pinned wheels.
 #
 # The build clones the verl source into /workspace/verl and runs
 # `manage_envs.py sync ...` for every cu13 backend, leaving one venv per
@@ -43,10 +40,10 @@
 # This always builds the full cu13 backend set (vllm + sglang + fsdp +
 # megatron + cpu). The image is intentionally not slim-able via build
 # args — pick the Dockerfile, get every backend that is known to work
-# against that CUDA major. To bootstrap just the lockfile (no
-# per-backend syncs), build the named `base` stage instead:
+# against that CUDA major. To compile just the lockfiles (no venvs), build
+# the named `lock` stage:
 #
-#     docker build -f docker/Dockerfile.uv.cu130 --target=base -t verl:uv-cu130-lock .
+#     docker build -f docker/Dockerfile.uv.cu130 --target=lock -t verl:uv-cu130-lock .
 #
 # Useful build args:
 #
@@ -59,12 +56,11 @@
 #     --build-arg GITHUB_ARTIFACTORY=github.com  # github mirror
 #
 # Build with BuildKit so the uv cache mount below is honored. Each backend
-# RUN is a `uv sync --frozen --no-default-groups --group <backend>` call
-# driven by manage_envs.py;
-# the lockfile (verl/uv.lock) is the single source of truth for resolved
-# versions across every backend. See the "Install from multi-backend uv image"
-# section in docs/start/install.rst for the full cache story (build-time
-# reuse + bind-mount for in-container resync).
+# RUN is a `manage_envs.py sync <backend>` call, which compiles
+# requirements/<backend>.lock (if missing) then runs `uv pip sync` against
+# it — only the requested backend's deps are ever touched. See the "Install
+# from multi-backend uv image" section in docs/start/install.rst for the
+# full cache story (build-time reuse + bind-mount for in-container resync).
 
 ARG CUDA_VERSION=13.0.2
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu24.04 AS base
@@ -82,11 +78,12 @@ ENV MAX_JOBS=${MAX_JOBS}
 
 # cuDNN / NCCL — see https://developer.nvidia.com/cudnn-downloads
 # These ARGs control the apt deb versions installed below. The matching pip
-# wheel pins live INLINE in each cu13 backend group in pyproject.toml's
-# [dependency-groups] (`nvidia-cudnn-cu13==X` / `nvidia-nccl-cu13==Y` in
-# the vllm / sglang / fsdp / megatron groups). Bumping either ARG here
-# requires updating those inline pins and re-running `uv lock` so the .so
-# files in every backend venv stay aligned with the system libraries.
+# wheel pins live INLINE in each cu13 backend extra in pyproject.toml's
+# [project.optional-dependencies] (`nvidia-cudnn-cu13==X` / `nvidia-nccl-cu13==Y`
+# in the vllm / sglang / fsdp / megatron extras). Bumping either ARG here
+# requires updating those inline pins and re-running
+# `python manage_envs.py lock <backend> --recompile` so the .so files in
+# every backend venv stay aligned with the system libraries.
 ARG CUDNN_VERSION=9.16.0.29-1
 ARG NCCL_VERSION=2.28.3-1
 
@@ -259,47 +256,34 @@ WORKDIR /workspace
 COPY . /workspace/verl
 WORKDIR /workspace/verl
 
-# Bootstrap uv.lock if it isn't in the COPY'd source. On a fresh checkout
-# (or when bumping a pin without locally re-running `uv lock`) this resolves
-# every backend fork once and writes /workspace/verl/uv.lock; once the lock
-# is committed back to the repo, this RUN turns into a no-op. The cache
-# mount makes the resolve cheap on subsequent builds — git sources still
-# need to be cloned, but wheel downloads are reused. To pull the generated
-# lockfile back to the host so it can be committed (using the cheap
-# lockfile-only build target):
-#     docker build -f docker/Dockerfile.uv.cu130 --target=base -t verl:uv-cu130-lock .
+# `lock` stage: compile requirements/<backend>.lock for every cu13 backend
+# whose lockfile isn't already in the COPY'd source. Each invocation only
+# resolves that one extra (no other backend's git sources / URL wheels
+# are fetched). Stop here with `--target=lock` to extract the lockfiles
+# without paying for any venv builds:
+#
+#     docker build -f docker/Dockerfile.uv.cu130 --target=lock -t verl:uv-cu130-lock .
 #     docker create --name verl-tmp verl:uv-cu130-lock
-#     docker cp verl-tmp:/workspace/verl/uv.lock ./uv.lock
+#     docker cp verl-tmp:/workspace/verl/requirements ./requirements
 #     docker rm verl-tmp
+FROM base AS lock
 RUN --mount=type=cache,target=/root/.cache/uv,id=verl-uv-cache \
-    if [ ! -f uv.lock ]; then \
-        echo ">>> uv.lock not in source — running 'uv lock' to bootstrap"; \
-        uv lock; \
-    else \
-        echo ">>> uv.lock found in source — skipping bootstrap"; \
-    fi
-
-# `base` ends here. `docker build --target=base ...` stops at the lockfile
-# bootstrap and skips the per-backend RUN steps below — useful for
-# regenerating uv.lock without paying for every backend's wheel install.
-# The full image (default target) continues into the `final` stage and
-# materialises every cu13 backend.
+    python3 manage_envs.py lock vllm sglang fsdp megatron cpu
 
 # ---------------------------------------------------------------------------
 # Per-backend venvs (cu13 set: vllm + sglang + fsdp + megatron + cpu).
 # ---------------------------------------------------------------------------
-FROM base AS final
+FROM lock AS final
 
 # One RUN per backend so each venv lands in its own Docker layer: editing
 # one pin only invalidates that backend's layer, and a partial build keeps
 # every previously-finished venv. Each manage_envs.py invocation runs
-# `uv sync --frozen --no-default-groups --group <backend>` against the
-# lockfile produced (or reused) in `base` — no resolver runs in these
-# layers. The cuDNN / NCCL pip wheels (nvidia-cudnn-cu13 / nvidia-nccl-cu13)
-# are inlined in each cu13 backend group in pyproject.toml and must
-# already match the apt deb versions above. All per-backend RUNs share a
-# BuildKit cache
-# at UV_CACHE_DIR (id=verl-uv-cache) so wheels are downloaded once across
+# `uv pip sync requirements/<backend>.lock` followed by an editable verl
+# install — only the requested backend's deps are touched. The cuDNN /
+# NCCL pip wheels (nvidia-cudnn-cu13 / nvidia-nccl-cu13) are inlined in
+# each cu13 backend extra in pyproject.toml and must already match the
+# apt deb versions above. All per-backend RUNs share a BuildKit cache at
+# UV_CACHE_DIR (id=verl-uv-cache) so wheels are downloaded once across
 # rebuilds and across backends — see docs/start/install.rst.
 RUN --mount=type=cache,target=/root/.cache/uv,id=verl-uv-cache \
     python3 manage_envs.py sync vllm
