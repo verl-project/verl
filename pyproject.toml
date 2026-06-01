@@ -23,8 +23,14 @@ requires-python = ">=3.10,<3.13"
 #     trtllm (2.10.0), veomni / nemoautomodel (2.9.1)
 #   cpu — torch 2.11.0 cpu wheels
 #
-# cuDNN / NCCL pip wheels are inlined per extra and must match the matching
-# Dockerfile's apt debs.
+# cuDNN / NCCL pip wheels are NOT pinned here — torch's wheel already
+# transitively pins them (e.g. torch 2.11.0+cu130 -> nvidia-cudnn-cu13==9.19.0.56).
+# What matters is that the apt debs in the Dockerfiles match whatever
+# version uv resolves into the lockfile. After
+# `python manage_envs.py lock <backend> --recompile`, grep the resolved
+# `nvidia-cudnn-cu1{2,3}==X` / `nvidia-nccl-cu1{2,3}==Y` lines in
+# `requirements/<backend>.lock` and update `CUDNN_VERSION` / `NCCL_VERSION`
+# in the matching `docker/Dockerfile.uv.cu1{29,30}`.
 [project.optional-dependencies]
 
 # ---- legacy small extras (kept verbatim from setup.py) ---------------------
@@ -81,8 +87,6 @@ vllm = [
     "vllm==0.20.2",
     "mbridge",
     "transformers==5.3.0",
-    "nvidia-cudnn-cu13==9.16.0.29",
-    "nvidia-nccl-cu13==2.28.3",
 ]
 
 sglang = [
@@ -93,8 +97,6 @@ sglang = [
     "sglang==0.5.12",
     "mbridge",
     "transformers==5.3.0",
-    "nvidia-cudnn-cu13==9.16.0.29",
-    "nvidia-nccl-cu13==2.28.3",
 ]
 
 # trtllm sticks on cu12.9 / torch 2.10 (no cu13 / torch-2.11 wheel yet).
@@ -106,8 +108,6 @@ trtllm = [
     "transformers==5.3.0",
     "numpy>=2.0.0,<2.4",
     "ray[default]==2.54.1",
-    "nvidia-cudnn-cu12==9.16.0.29",
-    "nvidia-nccl-cu12==2.28.3",
 ]
 
 # ---- training backends -----------------------------------------------------
@@ -120,8 +120,6 @@ fsdp = [
     "liger-kernel",
     "trl==0.27.0",
     "transformers==5.3.0",
-    "nvidia-cudnn-cu13==9.16.0.29",
-    "nvidia-nccl-cu13==2.28.3",
 ]
 
 # apex / TE / megatron-core come from git (see [tool.uv.sources]) and are
@@ -145,8 +143,6 @@ megatron = [
     "megatron-core",
     "cupy-cuda13x==14.0.1",
     "transformers==5.3.0",
-    "nvidia-cudnn-cu13==9.16.0.29",
-    "nvidia-nccl-cu13==2.28.3",
 ]
 
 # veomni v0.1.9a5 not yet on torch 2.11 / cu13.
@@ -160,8 +156,6 @@ veomni = [
     "transformers==5.3.0",
     "liger-kernel",
     "hf_transfer",
-    "nvidia-cudnn-cu12==9.16.0.29",
-    "nvidia-nccl-cu12==2.28.3",
 ]
 
 # NeMo-Automodel v0.3.0 caps torch at 2.10 → highest in-range is 2.9.1.
@@ -173,8 +167,6 @@ nemoautomodel = [
     "torchaudio==2.9.1",
     "nemo-automodel",
     "transformers==5.3.0",
-    "nvidia-cudnn-cu12==9.16.0.29",
-    "nvidia-nccl-cu12==2.28.3",
 ]
 
 # CI / unit tests / dev sanity. No GPU runtime.
@@ -275,9 +267,15 @@ environments = [
     "sys_platform == 'linux' and platform_machine == 'x86_64'",
 ]
 
-# transformers 5.3.0 across every backend (overrides upstream `<5` caps).
+# Global override pins:
+#   * transformers 5.3.0 across every backend (overrides upstream `<5` caps).
+#   * nvidia-cudnn-cu12==9.16.0.29 forces 9.15+ on cu12.9 backends to dodge
+#     the torch 2.9.1 conv3d bug (https://github.com/pytorch/pytorch/issues/168167);
+#     torch 2.9.1's wheel transitively pins cudnn-cu12==9.10. cu13 backends
+#     accept torch 2.11.0's transitive nvidia-cudnn-cu13==9.19.0.56 unmodified.
 override-dependencies = [
     "transformers==5.3.0",
+    "nvidia-cudnn-cu12==9.16.0.29",
 ]
 
 # Source-build inside the venv (no isolated build env): apex / TE need to

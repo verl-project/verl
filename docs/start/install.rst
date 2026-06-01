@@ -301,13 +301,18 @@ To refresh every lockfile in one pass (e.g. after bumping
 
    python manage_envs.py lock all --recompile
 
-If the pin is for a system-coupled wheel (``nvidia-cudnn-cu1{2,3}`` /
-``nvidia-nccl-cu1{2,3}``), update both the inline pin in the affected
-backend's extra in ``pyproject.toml`` *and* the matching
-``CUDNN_VERSION`` / ``NCCL_VERSION`` ARGs in the affected Dockerfile
-(``Dockerfile.uv.cu130`` for cu13 backends, ``Dockerfile.uv.cu129`` for
-cu12.9 backends), then re-lock and rebuild the image so the apt debs and
-the in-venv pip wheels stay aligned.
+If the bump pulls in a different cuDNN / NCCL transitively (visible at
+the top of the regenerated ``requirements/<backend>.lock``),
+**update the matching Dockerfile** so the apt deb agrees with the pip
+wheel: ``CUDNN_VERSION`` / ``NCCL_VERSION`` in
+``docker/Dockerfile.uv.cu130`` for cu13 backends,
+``docker/Dockerfile.uv.cu129`` for cu12.9 backends. The pyproject extras
+do *not* pin cuDNN / NCCL — torch's wheel does — so the lockfile is the
+authoritative source for what version the apt deb has to match. Quick
+check::
+
+    grep -E '^(nvidia-cudnn|nvidia-nccl)-cu13==' requirements/vllm.lock
+    grep -E '^(nvidia-cudnn|nvidia-nccl)-cu12==' requirements/veomni.lock
 
 Bootstrap lockfiles without local uv
 ::::::::::::::::::::::::::::::::::::
@@ -444,14 +449,24 @@ in one call (and auto-compiles the lockfile when missing):
    python manage_envs.py sync megatron -- --reinstall
 
 ``transformers==5.3.0`` is pinned globally via
-``[tool.uv].override-dependencies``. The matching ``nvidia-cudnn-cu1{2,3}``
-and ``nvidia-nccl-cu1{2,3}`` pins are inlined in each backend extra
-(cu13 in vllm / sglang / fsdp / megatron extras, cu12 in trtllm /
-veomni / nemoautomodel extras). Each pin must match the apt deb
-versions baked into the corresponding Dockerfile
+``[tool.uv].override-dependencies``, alongside one targeted cuDNN
+override: ``nvidia-cudnn-cu12==9.16.0.29`` forces cu12.9 backends to
+9.15+ to dodge the torch 2.9.1 ``nn.Conv3d`` bug
+(`pytorch/pytorch#168167 <https://github.com/pytorch/pytorch/issues/168167>`_;
+torch 2.9.1's wheel transitively pins ``nvidia-cudnn-cu12==9.10``,
+which is broken). cu13 backends accept torch 2.11.0's transitive
+``nvidia-cudnn-cu13==9.19.0.56`` unmodified — no inline cuDNN / NCCL
+pins live in the backend extras.
+
+Whichever cuDNN / NCCL versions uv ends up resolving into
+``requirements/<backend>.lock`` must match the ``CUDNN_VERSION`` /
+``NCCL_VERSION`` ARGs in the corresponding Dockerfile
 (``docker/Dockerfile.uv.cu130`` for cu13,
 ``docker/Dockerfile.uv.cu129`` for cu12.9) so the in-venv ``.so`` files
-line up with the system libraries.
+line up with the system libraries. To check after a re-lock::
+
+    grep -E '^(nvidia-cudnn|nvidia-nccl)-cu13==' requirements/vllm.lock
+    grep -E '^(nvidia-cudnn|nvidia-nccl)-cu12==' requirements/veomni.lock
 
 The equivalent raw ``uv`` shape — handy when composing with other tooling —
 is:

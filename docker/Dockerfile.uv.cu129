@@ -77,13 +77,18 @@ ARG MAX_JOBS=32
 ENV MAX_JOBS=${MAX_JOBS}
 
 # cuDNN / NCCL — see https://developer.nvidia.com/cudnn-downloads
-# These ARGs control the apt deb versions installed below. The matching pip
-# wheel pins live INLINE in each cu12.9 backend extra in pyproject.toml's
-# [project.optional-dependencies] (`nvidia-cudnn-cu12==X` / `nvidia-nccl-cu12==Y`
-# in the trtllm / veomni / nemoautomodel extras). Bumping either ARG here
-# requires updating those inline pins and re-running
-# `python manage_envs.py lock <backend> --recompile` so the .so files in
-# every backend venv stay aligned with the system libraries.
+# These ARGs control the apt deb versions installed below and MUST match
+# whatever uv resolves into requirements/<backend>.lock. Backend pyproject
+# extras don't pin cuDNN / NCCL — torch's wheel pins them transitively.
+# For cu12.9 backends (torch 2.9.1 / 2.10), pyproject overrides cudnn-cu12
+# to 9.16.0.29 in [tool.uv].override-dependencies so the resolved version
+# clears the torch 2.9.1 conv3d bug
+# (https://github.com/pytorch/pytorch/issues/168167). After bumping a
+# backend's torch pin and re-running
+# `python manage_envs.py lock <backend> --recompile`, grep the resolved
+# versions out of the lockfile and update these ARGs:
+#
+#     grep -E '^(nvidia-cudnn-cu12|nvidia-nccl-cu12)==' requirements/veomni.lock
 ARG CUDNN_VERSION=9.16.0.29-1
 ARG NCCL_VERSION=2.28.3-1
 
