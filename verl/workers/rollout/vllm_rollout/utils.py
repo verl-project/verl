@@ -196,68 +196,71 @@ class vLLMColocateWorkerExtension:
 
     def update_weights_from_ipc(self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False):
         """Update the weights of the rollout model."""
+        from vllm.config.vllm import set_current_vllm_config
         from vllm.platforms import current_platform
 
         from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightReceiver
 
-        if current_platform.device_type == "npu" and self.device is None:
-            self.device = torch.device(f"npu:{self.local_rank}")
+        with set_current_vllm_config(self.vllm_config):
+            if current_platform.device_type == "npu" and self.device is None:
+                self.device = torch.device(f"npu:{self.local_rank}")
 
-        # In async mode, make sure the old lora is removed before adding the new one
-        if peft_config and base_sync_done:
-            self.remove_lora(VLLM_LORA_INT_ID)
+            # In async mode, make sure the old lora is removed before adding the new one
+            if peft_config and base_sync_done:
+                self.remove_lora(VLLM_LORA_INT_ID)
 
-        use_standard_weight_load = not (peft_config and base_sync_done) and not is_fp8_model(
-            self.model_runner.vllm_config
-        )
-
-        if self._is_qat_model:
-            # QAT (compressed-tensors): Prepare for weight loading BEFORE receiving any buckets
-            from verl.utils.qat import prepare_qat_for_load_weights
-
-            for model in self._iter_all_models():
-                prepare_qat_for_load_weights(model, device=self.device)
-            logger.info("QAT: prepare_qat_for_load_weights completed")
-        elif self._is_modelopt_qat:
-            from verl.utils.modelopt.vllm_modelopt_patch import prepare_modelopt_for_weight_reload
-
-            prepare_modelopt_for_weight_reload(self.model_runner.model, device=self.device)
-            logger.info("ModelOpt: prepare_modelopt_for_weight_reload completed")
-        elif use_standard_weight_load:
-            # Re-apply here because async IPC weight sync can happen long after init and lose MoE weight_loader attrs.
-            for model in self._iter_all_models():
-                patch_vllm_moe_model_weight_loader(model)
-
-        assert self.device is not None
-        receiver = BucketedWeightReceiver(
-            zmq_handle=self._get_zmq_handle(),
-            device=self.device,
-            use_shm=use_shm,
-        )
-        receiver.receive_weights(
-            on_bucket_received=lambda weights: self._update_weights(
-                weights, peft_config=peft_config, base_sync_done=base_sync_done
+            use_standard_weight_load = not (peft_config and base_sync_done) and not is_fp8_model(
+                self.model_runner.vllm_config
             )
-        )
 
-        if self._is_qat_model:
-            # QAT (compressed-tensors): call process_weights_after_loading AFTER all buckets are received
-            from verl.utils.qat import manual_process_weights_after_loading
+            if self._is_qat_model:
+                # QAT (compressed-tensors): Prepare for weight loading BEFORE receiving any buckets
+                from verl.utils.qat import prepare_qat_for_load_weights
 
-            for model in self._iter_all_models():
-                manual_process_weights_after_loading(model)
-            logger.info("QAT: process_weights_after_loading completed")
-        elif self._is_modelopt_qat:
-            from verl.utils.modelopt.vllm_modelopt_patch import modelopt_process_weights_after_loading
+                for model in self._iter_all_models():
+                    prepare_qat_for_load_weights(model, device=self.device)
+                logger.info("QAT: prepare_qat_for_load_weights completed")
+            elif self._is_modelopt_qat:
+                from verl.utils.modelopt.vllm_modelopt_patch import prepare_modelopt_for_weight_reload
 
-            modelopt_process_weights_after_loading(self.model_runner.model)
-            logger.info("ModelOpt QAT: process_weights_after_loading completed")
-        elif use_standard_weight_load:
-            # Some post-load transforms are non-idempotent; run once after all buckets.
-            from vllm.model_executor.model_loader.utils import process_weights_after_loading
+                prepare_modelopt_for_weight_reload(self.model_runner.model, device=self.device)
+                logger.info("ModelOpt: prepare_modelopt_for_weight_reload completed")
+            elif use_standard_weight_load:
+                # Re-apply here because async IPC weight sync can happen
+                # long after init and lose MoE weight_loader attrs.
+                for model in self._iter_all_models():
+                    patch_vllm_moe_model_weight_loader(model)
 
-            for model, model_config in self._iter_all_models_with_config():
-                process_weights_after_loading(model, model_config, self.device)
+            assert self.device is not None
+            receiver = BucketedWeightReceiver(
+                zmq_handle=self._get_zmq_handle(),
+                device=self.device,
+                use_shm=use_shm,
+            )
+            receiver.receive_weights(
+                on_bucket_received=lambda weights: self._update_weights(
+                    weights, peft_config=peft_config, base_sync_done=base_sync_done
+                )
+            )
+
+            if self._is_qat_model:
+                # QAT (compressed-tensors): call process_weights_after_loading AFTER all buckets are received
+                from verl.utils.qat import manual_process_weights_after_loading
+
+                for model in self._iter_all_models():
+                    manual_process_weights_after_loading(model)
+                logger.info("QAT: process_weights_after_loading completed")
+            elif self._is_modelopt_qat:
+                from verl.utils.modelopt.vllm_modelopt_patch import modelopt_process_weights_after_loading
+
+                modelopt_process_weights_after_loading(self.model_runner.model)
+                logger.info("ModelOpt QAT: process_weights_after_loading completed")
+            elif use_standard_weight_load:
+                # Some post-load transforms are non-idempotent; run once after all buckets.
+                from vllm.model_executor.model_loader.utils import process_weights_after_loading
+
+                for model, model_config in self._iter_all_models_with_config():
+                    process_weights_after_loading(model, model_config, self.device)
 
     def _update_weights(self, weights: list[tuple[str, torch.Tensor]], peft_config: dict, base_sync_done: bool):
         if peft_config and base_sync_done:
