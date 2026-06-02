@@ -318,6 +318,30 @@ class RolloutConfig(BaseConfig):
                     f"Current rollout {self.name=} not implemented pipeline_model_parallel_size > 1 yet."
                 )
 
+        multi_turn_enabled = self.multi_turn.get("enable", False)
+        uses_agent_loop_tools = (
+            multi_turn_enabled
+            or self.agent.get("default_agent_loop", "single_turn_agent") != "single_turn_agent"
+            or self.multi_turn.get("tool_config_path") is not None
+            or self.multi_turn.get("function_tool_path") is not None
+        )
+        if self.name == "vllm" and uses_agent_loop_tools:
+            vllm_engine_kwargs = (self.engine_kwargs or {}).get("vllm", {}) or {}
+            server_side_tool_parser_args = {
+                "enable_auto_tool_choice",
+                "tool_call_parser",
+                "tool_parser_plugin",
+            }
+            configured_parser_args = sorted(
+                key for key in server_side_tool_parser_args if vllm_engine_kwargs.get(key) not in (None, False)
+            )
+            if configured_parser_args:
+                raise ValueError(
+                    "vLLM multi-turn RL rollout uses token-in-token-out generation with "
+                    "client-side AgentLoop tool parsing. Do not configure server-side vLLM "
+                    f"tool parser args in rollout.engine_kwargs.vllm: {configured_parser_args}."
+                )
+
         # Hydra passes this as dict/DictConfig; coerce to dataclass so
         # downstream .enabled etc. work. BaseConfig is frozen, hence object.__setattr__.
         if isinstance(self.disaggregation, dict):
