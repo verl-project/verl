@@ -2,7 +2,15 @@
 Search Tool Integration
 =======================
 
-Last updated: 05/30/2025.
+Last updated: 05/09/2026.
+
+.. note::
+
+   The in-tree ``verl.tools.search_tool.SearchTool`` reference implementation
+   used throughout this guide has been removed. The end-to-end recipe
+   (config, retrieval server, training script) still works as documentation
+   of the integration pattern, but the ``SearchTool`` class must now be
+   provided by users (see :class:`verl.tools.base_tool.BaseTool`).
 
 Introduction
 ------------
@@ -59,7 +67,7 @@ Install verl Upstream
 .. code:: bash
 
    cd ~
-   git clone https://github.com/volcengine/verl.git
+   git clone https://github.com/verl-project/verl.git
    cd verl
 
    # Install verl
@@ -201,7 +209,7 @@ Testing on 8 x H20
    # Set GPUs and run with a suitable log path
    export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 
-   nohup bash examples/sglang_multiturn/search_r1_like/run_qwen2.5-3b_instruct_search_multiturn.sh \
+   nohup bash examples/sglang_multiturn/search_r1_like/run_qwen2_5_3b_search_multiturn_fsdp.sh \
      trainer.experiment_name=qwen2.5-3b-it_rm-searchR1-like-sgl-multiturn-$(now) \
      > logs/searchR1-like$(now).log 2>&1 &
 

@@ -82,9 +82,11 @@ class Tracking:
 
         if "trackio" in default_backend:
             import trackio
+            from trackio import context_vars
 
-            trackio.init(project=project_name, name=experiment_name, config=config)
-            self.logger["trackio"] = trackio
+            if context_vars.current_run.get() is None:
+                trackio.init(project=project_name, name=experiment_name, config=config)
+            self.logger["trackio"] = _TrackioLoggingAdapter(trackio)
 
         if "mlflow" in default_backend:
             import os
@@ -252,6 +254,20 @@ class ClearMLLogger:
         self._task.close()
 
 
+class _TrackioLoggingAdapter:
+    def __init__(self, trackio):
+        self.trackio = trackio
+
+    def log(self, data, step):
+        self.trackio.log(data, step=step)
+
+    def finish(self):
+        from trackio import context_vars
+
+        if context_vars.current_run.get() is not None:
+            self.trackio.finish()
+
+
 class FileLogger:
     def __init__(self, project_name: str, experiment_name: str):
         self.project_name = project_name
@@ -263,7 +279,7 @@ class FileLogger:
             directory = os.path.join(root_path, self.project_name)
             os.makedirs(directory, exist_ok=True)
             self.filepath = os.path.join(directory, f"{self.experiment_name}.jsonl")
-            print(f"Creating file logger at {self.filepath}")
+        print(f"Creating file logger at {os.path.abspath(self.filepath)}")
         self.fp = open(self.filepath, "wb", buffering=0)
 
     def log(self, data, step):
@@ -331,7 +347,18 @@ class _MlflowLoggingAdapter:
         import mlflow
 
         results = {self._sanitize_key(k): v for k, v in data.items()}
-        mlflow.log_metrics(metrics=results, step=step)
+        for _attempt in range(MLFLOW_MAX_ATTEMPTS):
+            try:
+                mlflow.log_metrics(metrics=results, step=step)
+                return
+            except Exception as error:
+                # No sleep between retries — this runs per training step, so we avoid blocking.
+                msg = "mlflow.log_metrics failed (attempt %d/%d): %s"
+                args = (_attempt + 1, MLFLOW_MAX_ATTEMPTS, error)
+                if _attempt < MLFLOW_MAX_ATTEMPTS - 1:
+                    self.logger.info(msg, *args)
+                else:
+                    self.logger.warning(msg, *args)
 
 
 def _compute_mlflow_params_from_objects(params) -> dict[str, Any]:
@@ -381,6 +408,8 @@ class ValidationGenerationsLogger:
             self.log_generations_to_swanlab(samples, step)
         if "mlflow" in loggers:
             self.log_generations_to_mlflow(samples, step)
+        if "trackio" in loggers:
+            self.log_generations_to_trackio(samples, step)
 
         if "clearml" in loggers:
             self.log_generations_to_clearml(samples, step)
@@ -464,6 +493,34 @@ class ValidationGenerationsLogger:
                 mlflow.log_artifact(validation_gen_step_file)
         except Exception as e:
             print(f"WARNING: save validation generation file to mlflow failed with error {e}")
+
+    def log_generations_to_trackio(self, samples, step):
+        """Log validation generations to trackio as traces."""
+        import trackio
+
+        traces = []
+        for sample_index, sample in enumerate(samples):
+            if len(sample) >= 3:
+                input_text, output_text, score = sample[0], sample[1], sample[2]
+            else:
+                input_text, output_text, score = sample, "", None
+
+            traces.append(
+                trackio.Trace(
+                    messages=[
+                        {"role": "user", "content": str(input_text)},
+                        {"role": "assistant", "content": str(output_text)},
+                    ],
+                    metadata={
+                        "source": "validation_generations",
+                        "sample_index": sample_index,
+                        "score": score,
+                    },
+                )
+            )
+
+        if traces:
+            trackio.log({"val/generations": traces}, step=step)
 
     def log_generations_to_clearml(self, samples, step):
         """Log validation generation to clearml as table"""

@@ -77,11 +77,19 @@ def _set_envs_and_config(server_args: ServerArgs):
             "Please uninstall the old version and reinstall the latest version by following the instructions at https://docs.flashinfer.ai/installation.html.",
         )
     if is_cuda():
-        assert_pkg_version(
-            "sgl-kernel",
-            "0.1.1",
-            "Please reinstall the latest version with `pip install sgl-kernel --force-reinstall`",
-        )
+        try:
+            # For sglang 0.5.12 and sglang_kernel > 0.4.2, naming is sglang_kernel
+            assert_pkg_version(
+                "sglang_kernel",
+                "0.1.1",
+                "Please reinstall the latest version with `pip install follow https://sgl-project.github.io/get_started/install.html#for-cuda-13`",
+            )
+        except AssertionError:
+            assert_pkg_version(
+                "sgl_kernel",
+                "0.1.1",
+                "Please reinstall the latest version with `pip install sgl-kernel --force-reinstall`",
+            )
 
     # Set mp start method
     mp.set_start_method("spawn", force=True)
@@ -107,7 +115,8 @@ class ServerAdapter(BaseRollout):
         device_mesh: DeviceMesh,
         replica_rank: int = -1,
     ):
-        if config.get("quantization", None) == "fp8":
+        super().__init__(config, model_config, device_mesh)
+        if self.config.get("quantization", None) == "fp8":
             import sglang
             from packaging import version
 
@@ -121,13 +130,29 @@ class ServerAdapter(BaseRollout):
                 "weight_block_size": [128, 128],
             }
             fp8_block_quant_kwargs = dict(FP8_BLOCK_QUANT_KWARGS)
-            model_config.hf_config.quantization_config = fp8_block_quant_kwargs
-        super().__init__(config, model_config, device_mesh)
+            self.model_config.hf_config.quantization_config = fp8_block_quant_kwargs
         self._engine: AsyncHttpServerAdapter = None
 
         rank = int(os.environ["RANK"])
         local_world_size = int(os.environ["RAY_LOCAL_WORLD_SIZE"])
-        rollout_world_size = self.config.tensor_model_parallel_size * self.config.data_parallel_size
+        # PD asymmetric layout inflates per-replica footprint; must match
+        # agent_loop.py:_initialize_llm_servers or trainer-to-replica mapping breaks.
+        disagg = getattr(self.config, "disaggregation", None)
+        prefill_tp = self.config.tensor_model_parallel_size
+        if disagg is not None and getattr(disagg, "enabled", False):
+            # Inline decode_tp default: OmegaConf/Ray serialization drops dataclass methods.
+            decode_tp = (
+                disagg.decode_tensor_model_parallel_size
+                if disagg.decode_tensor_model_parallel_size is not None
+                else prefill_tp
+            )
+            rollout_world_size = (
+                (prefill_tp * disagg.prefill_replicas + decode_tp * disagg.decode_replicas)
+                * self.config.data_parallel_size
+                * self.config.pipeline_model_parallel_size
+            )
+        else:
+            rollout_world_size = prefill_tp * self.config.data_parallel_size * self.config.pipeline_model_parallel_size
         if replica_rank == -1:
             self.replica_rank = rank // rollout_world_size
         else:
@@ -135,6 +160,34 @@ class ServerAdapter(BaseRollout):
         self.rollout_rank = rank % rollout_world_size
         self.node_rank = self.rollout_rank // local_world_size
         self.local_rank = self.rollout_rank % local_world_size
+
+        # Map each trainer rank to its co-located SGLang server so weight-update
+        # IPC handles stay on the GPU where they were created. Offset math
+        # assumes prefill_replicas == 1 (enforced by SGLangPDReplica); if that
+        # ever lifts, update both this block and SGLangPDReplica.launch_servers.
+        self._pd_role = None
+        self._pd_server_index = None
+        self._pd_tp_local_rank = None
+        if disagg is not None and getattr(disagg, "enabled", False):
+            decode_tp = (
+                disagg.decode_tensor_model_parallel_size
+                if disagg.decode_tensor_model_parallel_size is not None
+                else prefill_tp
+            )
+            # Modulo by single-group footprint so if DP>1 is ever enabled,
+            # each DP group's ranks resolve to the same role offsets.
+            footprint = prefill_tp + disagg.decode_replicas * decode_tp
+            local = self.rollout_rank % footprint
+            if local < prefill_tp:
+                self._pd_role = "prefill"
+                self._pd_server_index = 0
+                self._pd_tp_local_rank = local
+            else:
+                off = local - prefill_tp
+                self._pd_role = "decode"
+                self._pd_server_index = off // decode_tp
+                self._pd_tp_local_rank = off % decode_tp
+        self._has_server = (disagg is None or not getattr(disagg, "enabled", False)) or (self._pd_role is not None)
 
         # sleep_level controls what gets released during sleep/release:
         #   2 (default) = release weights + kv_cache (full sleep, merge path)
@@ -146,7 +199,10 @@ class ServerAdapter(BaseRollout):
         if self._engine is not None:
             return
 
-        # device_mesh is needed to gather cuda ipc handle to update weights
+        if not self._has_server:
+            return
+
+        # device_mesh is needed to gather cuda ipc handle to update weights.
         if self.device_mesh is None:
             assert torch.distributed.is_initialized(), "torch distributed must be initialized"
             infer_tp = self.config.tensor_model_parallel_size * self.config.data_parallel_size
@@ -157,25 +213,55 @@ class ServerAdapter(BaseRollout):
                 "cpu", mesh_shape=(dp, infer_tp, infer_pp), mesh_dim_names=["dp", "infer_tp", "infer_pp"]
             )
 
-        # Only init http server adapter in tp rank 0
-        if self.device_mesh["infer_tp"].get_local_rank() != 0:
-            return
+        # Only the role's TP-rank-0 builds an adapter; others participate in
+        # FSDP collectives but skip HTTP dispatch.
+        if self._pd_role is not None:
+            if self._pd_tp_local_rank != 0:
+                return
+        else:
+            if self.device_mesh["infer_tp"].get_local_rank() != 0:
+                return
 
-        # Lazy init http server adapter because http server is launched after hybrid engine.
-        self.server_actor = ray.get_actor(f"sglang_server_{self.replica_rank}_{self.node_rank}")
+        if self._pd_role == "prefill":
+            actor_name = f"sglang_server_{self.replica_rank}_0"
+            timeout_kwargs = {}
+        elif self._pd_role == "decode":
+            actor_name = f"sglang_server_decode_{self.replica_rank}_{self._pd_server_index}"
+            # Decode init on long-prompt workloads can stall past the default
+            # (60s × 12); shorter timeout + fewer attempts avoids trainer lockup.
+            timeout_kwargs = {"timeout": 10.0, "max_attempts": 2}
+        else:
+            actor_name = f"sglang_server_{self.replica_rank}_{self.node_rank}"
+            timeout_kwargs = {}
+
+        self.server_actor = ray.get_actor(actor_name)
         server_address, server_port = await self.server_actor.get_server_address.remote()
-        logger.debug(
-            f"replica_rank={self.replica_rank} node_rank={self.node_rank}, "
-            f"server address: {server_address}, port: {server_port}"
-        )
         host = f"[{server_address}]" if is_valid_ipv6_address(server_address) else server_address
+        logger.info(
+            f"ServerAdapter {self._pd_role or 'colocated'}: "
+            f"replica_rank={self.replica_rank}, rollout_rank={self.rollout_rank}, "
+            f"server={host}:{server_port}, actor={actor_name}"
+        )
+
         self._engine = AsyncHttpServerAdapter(
             model_path=self.model_config.local_path,
             host=host,
             port=server_port,
             launch_server=False,
             trust_remote_code=self.model_config.trust_remote_code,
+            **timeout_kwargs,
         )
+
+    def _is_server_tp_leader(self) -> bool:
+        """True if this rank is TP-rank-0 of its server's group.
+
+        In PD, the role's TP (prefill_tp or decode_tp) may differ from the
+        config-level TP that device_mesh was built with, so use
+        _pd_tp_local_rank when PD is active.
+        """
+        if self._pd_role is not None:
+            return self._pd_tp_local_rank == 0
+        return self.device_mesh["infer_tp"].get_local_rank() == 0
 
     async def resume(self, tags: list[str]):
         """Resume rollout weights or kv cache in GPU memory.
@@ -184,7 +270,9 @@ class ServerAdapter(BaseRollout):
             tag: weights or kv_cache.
         """
         await self._init_server_adapter()
-        if self.device_mesh["infer_tp"].get_local_rank() == 0 and self.config.free_cache_engine:
+        if self._engine is None:
+            return
+        if self._is_server_tp_leader() and self.config.free_cache_engine:
             await self._engine.resume_memory_occupation(tags=tags)
 
     async def release(self):
@@ -195,7 +283,9 @@ class ServerAdapter(BaseRollout):
         When sleep_level=2 (default/merge mode), releases everything.
         """
         await self._init_server_adapter()
-        if self.device_mesh["infer_tp"].get_local_rank() == 0 and self.config.free_cache_engine:
+        if self._engine is None:
+            return
+        if self._is_server_tp_leader() and self.config.free_cache_engine:
             if self.sleep_level == 1:
                 tags = ["kv_cache"]
             else:
@@ -218,6 +308,9 @@ class ServerAdapter(BaseRollout):
             - runtime envs: https://github.com/THUDM/slime/blob/fb7605cc5fb09af0f9369d37f7192f12bddee577/slime/ray/ppo_actor.py#L39
         """
         await self._init_server_adapter()
+        # All ranks MUST iterate the weights generator below — DTensor.full_tensor()
+        # all_gather's across the FSDP group and skipping deadlocks the others.
+        # Only HTTP dispatch is gated on self._engine.
 
         peft_config, base_sync_done = kwargs.get("peft_config", None), kwargs.get("base_sync_done", False)
         if peft_config and base_sync_done:
@@ -261,7 +354,7 @@ class ServerAdapter(BaseRollout):
                     device_mesh=self.device_mesh,
                 )
 
-        if self.device_mesh["infer_tp"].get_local_rank() == 0:
+        if self._engine is not None and self._is_server_tp_leader():
             await self._engine.flush_cache()
             if global_steps is not None:
                 await self.server_actor.set_global_steps.remote(global_steps)

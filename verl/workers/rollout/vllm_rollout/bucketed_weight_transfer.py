@@ -38,6 +38,7 @@ class TensorMetadata(TypedDict):
     shape: torch.Size
     dtype: torch.dtype
     offset: int
+    handle: tuple
 
 
 # copy from https://github.com/vllm-project/vllm/blob/main/examples/offline_inference/rlhf_utils.py
@@ -125,23 +126,27 @@ class BucketedWeightSender:
                 # weight = weight.to(dtype, non_blocking=True)
 
                 # fill the tensor bucket
-                if offset + weight.nbytes > self.bucket_size:
+                if offset + weight.nbytes > self.bucket_size and len(bucket_meta) > 0:
                     get_torch_device().synchronize()
                     self.socket.send_pyobj({"bucket_meta": bucket_meta, "is_last": False})
                     self.socket.recv()
                     bucket_meta = {}
                     offset = 0
 
-                # TODO: slice embedding layer weight into chunks
-                assert offset + weight.nbytes <= self.bucket_size, (
-                    f"Weight {name}({weight.shape}, {weight.dtype}) is too large to fit in the bucket."
-                    f"Please increase rollout.update_weights_bucket_megabytes({self.bucket_size_mb} MB)."
-                )
+                if offset + weight.nbytes > self.bucket_size:
+                    assert not self.use_shm, (
+                        f"Weight {name}({weight.shape}, {weight.dtype}) is too large to fit in the bucket."
+                        f"Please increase rollout.update_weights_bucket_megabytes({self.bucket_size_mb} MB)."
+                    )
+                    self._direct_send_large_weight(name, weight)
+                    continue
+
                 bucket_meta[name] = {
                     "name": name,
                     "shape": weight.shape,
                     "dtype": weight.dtype,
                     "offset": offset,
+                    "handle": None,
                 }
                 self.buffer[offset : offset + weight.nbytes].copy_(weight.view(-1).view(torch.uint8), non_blocking=True)
                 offset += weight.nbytes
@@ -155,6 +160,12 @@ class BucketedWeightSender:
 
     def _init_socket(self):
         """Initialize ZMQ REQ socket and bind."""
+        if self.zmq_handle.startswith("ipc://"):
+            ipc_path = self.zmq_handle[len("ipc://") :]
+            try:
+                os.remove(ipc_path)
+            except OSError:
+                pass
         self.socket = self.zmq_context.socket(zmq.REQ)
         self.socket.bind(self.zmq_handle)
 
@@ -185,6 +196,12 @@ class BucketedWeightSender:
         if self.socket is not None:
             self.socket.close()
             self.socket = None
+        if self.zmq_handle.startswith("ipc://"):
+            ipc_path = self.zmq_handle[len("ipc://") :]
+            try:
+                os.remove(ipc_path)
+            except OSError:
+                pass
         del self.buffer
         self.buffer = None
         if self.shm is not None:
@@ -195,6 +212,22 @@ class BucketedWeightSender:
         gc.collect()
         get_torch_device().ipc_collect()
         get_torch_device().empty_cache()
+
+    def _direct_send_large_weight(self, name: str, weight: torch.Tensor):
+        """Send a weight larger than the bucket size via cuda ipc or share memory."""
+        logger.debug(f"Direct sending large weight {name}({weight.shape}, {weight.dtype})")
+        # TODO: support fallback to shared memory
+        handle = reduce_tensor(weight)
+        bucket_meta: dict[str, TensorMetadata] = {}
+        bucket_meta[name] = {
+            "name": name,
+            "shape": weight.shape,
+            "dtype": weight.dtype,
+            "offset": 0,
+            "handle": handle,
+        }
+        self.socket.send_pyobj({"bucket_meta": bucket_meta, "is_last": False})
+        self.socket.recv()
 
 
 class BucketedWeightReceiver:
@@ -241,20 +274,19 @@ class BucketedWeightReceiver:
                 metadata = self.socket.recv_pyobj()
                 weights, tensor = [], None
                 for name, meta in metadata["bucket_meta"].items():
-                    shape, dtype, offset = meta["shape"], meta["dtype"], meta["offset"]
+                    shape, dtype, offset, handle = meta["shape"], meta["dtype"], meta["offset"], meta["handle"]
+                    if handle is not None:
+                        tensor = rebuild_ipc(handle, self.device.index)
+                        weights.append((name, tensor))
+                        continue
                     size = dtype.itemsize * shape.numel()
-                    # NOTE: we need to clone the tensor to release CUDA IPC memory
-                    # but for shared memory, it's not necessary and if we do clone,
-                    # it will cause extra memory copy overhead and slow down the process.
                     tensor = self.buffer[offset : offset + size].view(dtype=dtype).view(shape)
-                    if not self.use_shm:
-                        tensor = tensor.clone()
-                    else:
+                    if self.use_shm:
                         tensor = tensor.to(self.device)
                     weights.append((name, tensor))
+                on_bucket_received(weights)
                 get_torch_device().synchronize()
                 self.socket.send(b"")
-                on_bucket_received(weights)
                 del weights, tensor
                 if metadata["is_last"]:
                     break

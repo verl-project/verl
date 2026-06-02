@@ -35,6 +35,7 @@ _DEVICE_FLOPS = {
     "L20": 119.5e12,
     "H20": 148e12,
     "910B": 354e12,
+    "Ascend950DT": 432e12,
     "Ascend910": 354e12,
     "RTX 3070 Ti": 21.75e12,
 }
@@ -240,7 +241,10 @@ def _estimate_qwen3_vit_flop(images_seqlens, config):
     merger_N = (out_hidden_size + (dim * (spatial_merge_size**2))) * (dim * (spatial_merge_size**2))
 
     # Qwen3 VL uses deep stack, one merger for every deepstack layer
-    deepstack_merger_N = merger_N * len(config.deepstack_visual_indexes)
+    if getattr(config, "deepstack_visual_indexes", None) is not None:
+        deepstack_merger_N = merger_N * len(config.deepstack_visual_indexes)
+    else:
+        deepstack_merger_N = 0
     # non-attn all_layer parm
     dense_N = patch_embed_N + (mlp_N + attn_linear_N) * depth + deepstack_merger_N + merger_N
 
@@ -539,8 +543,8 @@ ESTIMATE_FUNC = {
     "qwen2": _estimate_qwen2_flops,
     "llama": _estimate_qwen2_flops,
     "qwen2_moe": _estimate_qwen2_moe_flops,
-    "qwen2_vl": _estimate_qwen2_flops,
-    "qwen2_5_vl": _estimate_qwen2_flops,
+    "qwen2_vl": _estimate_qwen3_vl_flops,
+    "qwen2_5_vl": _estimate_qwen3_vl_flops,
     "qwen3": _estimate_qwen2_flops,
     "qwen3_moe": _estimate_qwen2_moe_flops,
     "qwen3_vl": _estimate_qwen3_vl_flops,

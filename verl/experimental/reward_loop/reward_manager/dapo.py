@@ -50,7 +50,7 @@ class DAPORewardManager(RewardManagerBase):
             )
 
     async def run_single(self, data: DataProto) -> dict:
-        assert len(data) == 1, "Only support single data item"
+        data = data[-1:]  # for multi-sequence outputs, we only compute reward based on the last sequence
         data_item = data[0]
         response_ids = data_item.batch["responses"]
         response_length = response_ids.shape[-1]

@@ -1,0 +1,104 @@
+# Pull base image
+FROM swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:8.5.1-a3-ubuntu22.04-py3.11
+
+ARG SOC_VERSION="ascend910_9392"
+
+RUN set -e && \
+    cd /tmp && \
+    ARCH=$(uname -m) && \
+    if [ "$ARCH" = "aarch64" ]; then \
+        wget -v --no-check-certificate https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.5.2/Ascend-cann-toolkit_8.5.2_linux-aarch64.run && \
+        bash Ascend-cann-toolkit_8.5.2_linux-aarch64.run --quiet --install && \
+        rm -f Ascend-cann-toolkit_8.5.2_linux-aarch64.run && \
+
+        wget -v --no-check-certificate https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.5.2/Ascend-cann-A3-ops_8.5.2_linux-aarch64.run && \
+        bash Ascend-cann-A3-ops_8.5.2_linux-aarch64.run --quiet --install && \
+        rm -f Ascend-cann-A3-ops_8.5.2_linux-aarch64.run && \
+
+        source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
+        wget -v --no-check-certificate https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.5.2/Ascend-cann-nnal_8.5.2_linux-aarch64.run && \
+        bash Ascend-cann-nnal_8.5.2_linux-aarch64.run --quiet --install && \
+        rm -f Ascend-cann-nnal_8.5.2_linux-aarch64.run ; \
+    elif [ "$ARCH" = "x86_64" ]; then \
+        wget -v --no-check-certificate https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.5.2/Ascend-cann-toolkit_8.5.2_linux-x86_64.run && \
+        bash Ascend-cann-toolkit_8.5.2_linux-x86_64.run --quiet --install && \
+        rm -f Ascend-cann-toolkit_8.5.2_linux-x86_64.run && \
+
+        wget -v --no-check-certificate https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.5.2/Ascend-cann-A3-ops_8.5.2_linux-x86_64.run && \
+        bash Ascend-cann-A3-ops_8.5.2_linux-x86_64.run --quiet --install && \
+        rm -f Ascend-cann-A3-ops_8.5.2_linux-x86_64.run && \
+
+        source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
+        wget -v --no-check-certificate https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.5.2/Ascend-cann-nnal_8.5.2_linux-x86_64.run && \
+        bash Ascend-cann-nnal_8.5.2_linux-x86_64.run --quiet --install && \
+        rm -f Ascend-cann-nnal_8.5.2_linux-x86_64.run ; \
+    fi && \
+
+    source /usr/local/Ascend/cann/set_env.sh && \
+    rm -rf /tmp/*
+
+# Prepare required system dependencies
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends gcc g++ cmake libnuma-dev wget git curl jq vim build-essential && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* && \
+    pip install --upgrade pip packaging setuptools==80.10.2 && \
+    pip cache purge
+
+# Prepare repositories with low update frequency
+RUN ARCH=$(uname -m) && \
+    # Set extra pip index for x86_64 platform
+    echo "[LOG INFO] Detected architecture: $ARCH" && \
+    if [ "$ARCH" = "x86_64" ]; then \
+        pip config set global.extra-index-url "https://download.pytorch.org/whl/cpu/"; \
+    fi && \
+    # Clone libs
+    git clone --depth 1 --branch v0.18.0 https://github.com/vllm-project/vllm.git && \
+    git clone https://github.com/vllm-project/vllm-ascend.git && \
+    cd vllm-ascend && git checkout 54879467c41784a446aa5b486a391d9bfbf488fa && cd .. && \
+    git clone https://github.com/huggingface/transformers.git && \
+    cd transformers && git checkout cc7ab9be508ce6ed3637bba9e50367b29b742dc6 && cd ..
+
+# 避免vllm-ascend 安装失败
+ENV MAX_JOBS=1
+ENV MAKEFLAGS="-j1"
+ENV CMAKE_BUILD_PARALLEL_LEVEL=1
+
+# Install repositories with low update frequency
+RUN ARCH=$(uname -m) && \
+    # Export and source env
+    if [ "$ARCH" = "aarch64" ]; then \
+        export LD_LIBRARY_PATH=/usr/local/Ascend/cann-8.5.2/aarch64-linux/devlib/linux/aarch64:$LD_LIBRARY_PATH; \
+    elif [ "$ARCH" = "x86_64" ]; then \
+        export LD_LIBRARY_PATH=/usr/local/Ascend/cann-8.5.2/x86_64-linux/devlib/linux/x86_64/:$LD_LIBRARY_PATH; \
+    fi && \
+    source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
+    source /usr/local/Ascend/nnal/atb/set_env.sh && \
+
+    # Install vllm
+    cd vllm && pip install -r requirements/build.txt && \
+    VLLM_TARGET_DEVICE=empty pip install -v -e. && cd .. && \
+    # Install vllm-ascend
+    cd vllm-ascend && pip install -r requirements.txt && \
+    export COMPILE_CUSTOM_KERNELS=1 && pip install -v -e . --no-build-isolation && cd .. && \
+    # Install transformers
+    cd transformers && pip install -e . && cd .. && \
+    # Install torch & torch_npu & torchvision
+    pip install torch==2.9.0 torch_npu==2.9.0 torchvision==0.24.0 accelerate==1.13.0 mathruler && \
+    # Clear extra files
+    rm -rf /tmp/* /var/tmp/* && \
+    pip cache purge
+
+
+# Prepare and install verl (update frequently)
+RUN git clone https://github.com/verl-project/verl.git && \
+    cd verl && git checkout 4045d67063052dcb800c918c107b8d5a87046006 && pip install -r requirements-npu.txt && pip install -v -e . && cd .. && \
+    # Clear extra files
+    rm -rf /tmp/* /var/tmp/* && \
+    pip cache purge
+
+# Show install results
+RUN pip list
+
+# Setting Default Commands
+CMD ["/bin/bash"]

@@ -97,6 +97,8 @@ class RolloutReplica(ABC):
         model_config: DictConfig,
         gpus_per_node: int = 8,
         is_reward_model: bool = False,
+        is_teacher_model: bool = False,
+        name_suffix: str = "",
     ) -> None:
         self.replica_rank = replica_rank
         self.config: RolloutConfig = omega_conf_to_dataclass(config)
@@ -114,6 +116,8 @@ class RolloutReplica(ABC):
         )
         self.nnodes = self.world_size // self.gpus_per_replica_node
         self.is_reward_model = is_reward_model
+        self.is_teacher_model = is_teacher_model
+        self.name_suffix = f"_{name_suffix}" if name_suffix else ""
 
         self.rollout_mode: RolloutMode = None
         self.workers: list[ActorHandle] = []
@@ -164,13 +168,18 @@ class RolloutReplica(ABC):
         self.resource_pool = resource_pool
         use_gpu = self.rollout_worker_use_gpu()
 
+        if self.is_reward_model:
+            name_prefix = f"rollout_reward_colocate_{self.replica_rank}{self.name_suffix}"
+        elif self.is_teacher_model:
+            name_prefix = f"rollout_teacher_colocate_{self.replica_rank}{self.name_suffix}"
+        else:
+            name_prefix = f"rollout_colocate_{self.replica_rank}{self.name_suffix}"
+
         worker_group = RayWorkerGroup(
             resource_pool=self.resource_pool,
             ray_cls_with_init=self.get_ray_class_with_init_args(),
             bin_pack=False,
-            name_prefix=f"rollout_colocate_{self.replica_rank}"
-            if not self.is_reward_model
-            else f"rollout_reward_colocate_{self.replica_rank}",
+            name_prefix=name_prefix,
             use_gpu=use_gpu,
             device_name="cuda" if not is_torch_npu_available(check_device=False) else "npu",
         )
@@ -181,28 +190,36 @@ class RolloutReplica(ABC):
         """Init standalone rollout server, create new resource pool for this rollout."""
         # create resource pool for this rollout
         self.rollout_mode = RolloutMode.STANDALONE
-        resource_pool_name = (
-            f"rollout_pool_{self.replica_rank}"
-            if not self.is_reward_model
-            else f"rollout_pool_reward_{self.replica_rank}"
-        )
+        if self.is_reward_model:
+            resource_pool_name = f"rollout_pool_reward_{self.replica_rank}{self.name_suffix}"
+        elif self.is_teacher_model:
+            resource_pool_name = f"rollout_pool_teacher_{self.replica_rank}{self.name_suffix}"
+        else:
+            resource_pool_name = f"rollout_pool_{self.replica_rank}{self.name_suffix}"
         resource_pool_spec = {
             resource_pool_name: [self.gpus_per_replica_node] * self.nnodes,
         }
-        resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=None)
+        resource_pool_manager = ResourcePoolManager(
+            resource_pool_spec=resource_pool_spec,
+            mapping=None,
+            max_colocate_count=2,
+        )
         resource_pool_manager.create_resource_pool()
         self.resource_pool = resource_pool_manager.resource_pool_dict[resource_pool_name]
 
         # create worker group for this rollout
-        use_gpu = self.rollout_worker_use_gpu()
+        if self.is_reward_model:
+            name_prefix = f"rollout_reward_standalone_{self.replica_rank}{self.name_suffix}"
+        elif self.is_teacher_model:
+            name_prefix = f"rollout_teacher_standalone_{self.replica_rank}{self.name_suffix}"
+        else:
+            name_prefix = f"rollout_standalone_{self.replica_rank}{self.name_suffix}"
         worker_group = RayWorkerGroup(
             resource_pool=self.resource_pool,
             ray_cls_with_init=self.get_ray_class_with_init_args(),
             bin_pack=False,
-            name_prefix=f"rollout_standalone_{self.replica_rank}"
-            if not self.is_reward_model
-            else f"rollout_reward_standalone_{self.replica_rank}",
-            use_gpu=use_gpu,
+            name_prefix=name_prefix,
+            use_gpu=True,
             device_name="cuda" if not is_torch_npu_available(check_device=False) else "npu",
         )
         self.workers = worker_group.workers
@@ -264,6 +281,14 @@ class RolloutReplica(ABC):
     async def clear_kv_cache(self):
         """reset kv cache in each rollout server."""
         await asyncio.gather(*[server.clear_kv_cache.remote() for server in self.servers])
+
+    async def release_kv_cache(self):
+        """Release only the kv_cache GPU memory, keeping model weights in place."""
+        await asyncio.gather(*[server.release_kv_cache.remote() for server in self.servers])
+
+    async def resume_kv_cache(self):
+        """Restore the kv_cache GPU memory after a weight sync."""
+        await asyncio.gather(*[server.resume_kv_cache.remote() for server in self.servers])
 
     async def start_profile(self, **kwargs):
         """Start profiling on the replica."""
@@ -355,6 +380,23 @@ RolloutReplicaRegistry.register("sglang", _load_sglang)
 RolloutReplicaRegistry.register("trtllm", _load_trtllm)
 
 
-# Original function for backward compatibility
-def get_rollout_replica_class(rollout: str) -> type[RolloutReplica]:
+def get_rollout_replica_class(rollout: str, disaggregation_enabled: bool = False) -> type[RolloutReplica]:
+    """Resolve a replica class by backend name.
+
+    PD-disaggregated SGLang reuses the ``sglang`` backend name; the dispatch
+    here picks ``SGLangPDReplica`` only when the caller asserts
+    ``disaggregation_enabled=True`` (sourced from
+    ``RolloutConfig.disaggregation.enabled``). Validation in
+    ``RolloutConfig.__post_init__`` blocks the flag for non-SGLang names, so
+    this function only has to handle the SGLang fork.
+    """
+    if disaggregation_enabled:
+        if rollout != "sglang":
+            raise NotImplementedError(f"PD disaggregation is only supported with rollout='sglang'; got {rollout!r}.")
+        # _load_sglang side-effect: installs vllm mocks needed by SGLangPDReplica's
+        # transitive imports. Cheap if already installed.
+        RolloutReplicaRegistry.get("sglang")
+        from verl.workers.rollout.sglang_rollout.sglang_pd_replica import SGLangPDReplica
+
+        return SGLangPDReplica
     return RolloutReplicaRegistry.get(rollout)

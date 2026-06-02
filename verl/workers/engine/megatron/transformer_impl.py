@@ -11,6 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+import inspect
 import logging
 import os
 from functools import partial
@@ -19,12 +21,13 @@ from typing import Any, Callable, ContextManager, Iterator, Optional
 import torch
 import torch.distributed
 from megatron.core import parallel_state as mpu
+from megatron.core.package_info import __version__
 from megatron.core.pipeline_parallel import get_forward_backward_func
 from omegaconf import OmegaConf
 from tensordict import TensorDict
 
 import verl.utils.torch_functional as verl_F
-from verl.models.mcore import get_mcore_forward_fused_no_padding_fn, get_mcore_weight_converter
+from verl.models.mcore import get_mcore_weight_converter
 from verl.trainer.config import CheckpointConfig
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.megatron_checkpoint_manager import MegatronCheckpointManager
@@ -40,7 +43,11 @@ from verl.utils.megatron.router_replay_utils import (
     reorder_and_merge_vpp_layers,
     set_router_replay_data,
 )
-from verl.utils.megatron.tensor_parallel import vocab_parallel_entropy, vocab_parallel_log_probs_from_logits
+from verl.utils.megatron.tensor_parallel import (
+    vocab_parallel_entropy,
+    vocab_parallel_log_probs_from_logits,
+    vocab_parallel_sum_pi_squared,
+)
 from verl.utils.megatron_peft_utils import add_base_layer_suffix, build_peft_config_for_vllm
 from verl.utils.megatron_utils import (
     check_mtp_config,
@@ -97,6 +104,17 @@ class MegatronEngine(BaseEngine):
         }
         self.weight_converter = None
 
+        # QAT configuration
+        self._qat_config = getattr(self.engine_config, "qat", None)
+        self._qat_enabled = self._qat_config is not None and getattr(self._qat_config, "enable", False)
+        if self._qat_enabled:
+            if self.engine_config.vanilla_mbridge:
+                raise ValueError(
+                    "QAT requires non-vanilla Megatron bridge. "
+                    "Please set 'use_mbridge=True' and 'vanilla_mbridge=False'."
+                )
+            logger.info(f"QAT enabled in MegatronEngine: mode={self._qat_config.mode}")
+
         # Router replay configuration for MoE models
         self.enable_routing_replay = self.engine_config.router_replay.mode != "disabled"
         logger.info(f"enable_routing_replay in MegatronEngine: {self.enable_routing_replay}")
@@ -104,7 +122,12 @@ class MegatronEngine(BaseEngine):
             apply_router_replay_patch()
             self.mini_layer_topk_idx_list = []
         # Apply checkpoint patch for MoE models
-        from verl.utils.device import is_cuda_available
+        from verl.utils.device import is_cuda_available, is_npu_available
+
+        if is_npu_available and __version__ >= "0.16.0":
+            from verl.models.mcore.patch import apply_mtp_inference_patch
+
+            apply_mtp_inference_patch()
 
         if is_cuda_available:
             from verl.models.mcore.patch import apply_patch_megatron_recomputation_backward
@@ -116,6 +139,18 @@ class MegatronEngine(BaseEngine):
         if mpu.is_initialized():
             return
 
+        extra_args = dict()
+
+        if self.engine_config.dynamic_context_parallel:
+            assert "dynamic_context_parallel" in inspect.signature(mpu.initialize_model_parallel).parameters, (
+                "dynamic_context_parallel is not supported in your megatron version, "
+                + "please update your megatron version to the latest version"
+            )
+            assert self.engine_config.max_seqlen_per_dp_cp_rank is not None, (
+                "max_seqlen_per_dp_cp_rank is required when dynamic_context_parallel is enabled"
+            )
+            extra_args["dynamic_context_parallel"] = self.engine_config.dynamic_context_parallel
+
         mpu.initialize_model_parallel(
             tensor_model_parallel_size=self.engine_config.tensor_model_parallel_size,
             pipeline_model_parallel_size=self.engine_config.pipeline_model_parallel_size,
@@ -125,6 +160,7 @@ class MegatronEngine(BaseEngine):
             expert_model_parallel_size=self.engine_config.expert_model_parallel_size,
             expert_tensor_parallel_size=self.engine_config.expert_tensor_parallel_size,
             nccl_communicator_config_path=None,
+            **extra_args,
         )
 
     def _build_tf_config(self):
@@ -137,9 +173,14 @@ class MegatronEngine(BaseEngine):
         self.dtype = PrecisionType.to_dtype(self.param_dtype)
 
         override_transformer_config = mapping_string_to_attn_backend({**self.engine_config.override_transformer_config})
-        if self.enable_routing_replay:
-            override_transformer_config["enable_routing_replay"] = True
-
+        if self.engine_config.dynamic_context_parallel:
+            override_transformer_config["max_seqlen_per_dp_cp_rank"] = self.engine_config.max_seqlen_per_dp_cp_rank
+            # note(baiyan): we must set the transformer_config.dynamic_context_parallel to False
+            # because of the bad coupling design in Megatron-LM
+            # https://github.com/xiaoyao0115/Megatron-LM/blob/88733ab6614e3e91b9d095172f41e7d8b5d8e9d4/megatron/core/pipeline_parallel/dynamic_cp_schedule.py#L552-L553
+            # but it does not affect the functionality of dynamic CP, so we can use it to avoid the coupling.
+            override_transformer_config["dynamic_context_parallel"] = False
+            override_transformer_config["context_parallel_size"] = mpu.get_data_parallel_world_size()
         self.provider = None
         self.vanilla_bridge = self.engine_config.vanilla_mbridge
 
@@ -161,41 +202,49 @@ class MegatronEngine(BaseEngine):
             # Get Megatron provider and configure it
             provider = bridge.to_megatron_provider(load_weights=False)
 
-            # In case of invalid overrides, we need to make sure some critical params are set correctly
-            provider.params_dtype = self.param_dtype
-
-            # Ensure dtype settings propagate to Megatron-Bridge/TE
-            provider.fp16 = self.param_dtype == torch.float16
-            provider.bf16 = self.param_dtype == torch.bfloat16
-
-            # Pass distributed info
-            provider.tensor_model_parallel_size = self.engine_config.tensor_model_parallel_size
-            provider.pipeline_model_parallel_size = self.engine_config.pipeline_model_parallel_size
-            provider.expert_model_parallel_size = self.engine_config.expert_model_parallel_size
-            provider.expert_tensor_parallel_size = self.engine_config.expert_tensor_parallel_size
-            provider.virtual_pipeline_model_parallel_size = self.engine_config.virtual_pipeline_model_parallel_size
-            provider.context_parallel_size = self.engine_config.context_parallel_size
-            provider.sequence_parallel = self.engine_config.sequence_parallel
-
             # Match verl implementation (need variable_seq_lengths)
             from megatron.core.transformer.enums import AttnBackend
 
-            provider.attention_backend = AttnBackend.flash
-            provider.variable_seq_lengths = True
-            provider.moe_token_dispatcher_type = "alltoall"
-            provider.moe_router_load_balancing_type = "none"
-
-            # Apply transformer config overrides
+            provider_overrides = {
+                "tensor_model_parallel_size": self.engine_config.tensor_model_parallel_size,
+                "pipeline_model_parallel_size": self.engine_config.pipeline_model_parallel_size,
+                "expert_model_parallel_size": self.engine_config.expert_model_parallel_size,
+                "expert_tensor_parallel_size": self.engine_config.expert_tensor_parallel_size,
+                "virtual_pipeline_model_parallel_size": self.engine_config.virtual_pipeline_model_parallel_size,
+                "context_parallel_size": self.engine_config.context_parallel_size,
+                "sequence_parallel": self.engine_config.sequence_parallel,
+                "variable_seq_lengths": True,
+                "attention_backend": AttnBackend.flash,
+                "moe_token_dispatcher_type": "alltoall",
+                "moe_router_load_balancing_type": "none",
+            }
             for key, value in override_transformer_config.items():
-                setattr(provider, key, value)
+                provider_overrides[key] = value
+            if self.enable_routing_replay:
+                provider_overrides["enable_routing_replay"] = True
 
-            provider.finalize()
+            if self._qat_enabled:
+                from megatron.bridge.models.gpt_provider import modelopt_transformer_layer_spec
+
+                provider.transformer_layer_spec = modelopt_transformer_layer_spec
+
+            provider.apply_overrides_and_finalize(
+                dtype=self.param_dtype,
+                overrides=provider_overrides,
+            )
             self.provider = provider
             tf_config = None  # Will be set after model creation
         self.bridge = bridge
 
         if not self.bridge:
             self.weight_converter = get_mcore_weight_converter(self.model_config.hf_config, self.dtype)
+
+        # Set enable_routing_replay directly on tf_config instead of passing through
+        # override_transformer_config, because dataclass subclasses like MLATransformerConfig
+        # generate their own __init__ and don't inherit the patched TransformerConfig.__init__
+        # that accepts this kwarg.
+        if self.enable_routing_replay and tf_config is not None:
+            tf_config.enable_routing_replay = True
 
         if torch.distributed.get_rank() == 0:
             if tf_config is not None:
@@ -212,25 +261,21 @@ class MegatronEngine(BaseEngine):
         from verl.utils.megatron_utils import McoreModuleWrapperConfig, make_megatron_module
         from verl.utils.model import print_model_size
 
-        # TODO: add more cases
-        is_value_model = (
-            "ForTokenClassification" in self.model_config.architectures[0]
-            or "ForSequenceClassification" in self.model_config.architectures[0]
-        )
-
-        self.is_value_model = is_value_model
-
+        self.is_value_model = self.model_config.model_type == "value_model"
         if self.engine_config.forward_only:
             wrap_with_ddp = False
         else:
             wrap_with_ddp = True
 
         wrap_config = McoreModuleWrapperConfig(
-            is_value_model=is_value_model,  # actor is not value model
-            share_embeddings_and_output_weights=self.model_config.share_embeddings_and_output_weights,
+            is_value_model=self.is_value_model,
             wrap_with_ddp=wrap_with_ddp,
             use_distributed_optimizer=self.engine_config.use_distributed_optimizer,
+            use_megatron_fsdp=self.engine_config.use_megatron_fsdp,
         )
+        if self.is_value_model:
+            self.model_config.hf_config.tie_word_embeddings = False
+
         module, updated_tf_config = make_megatron_module(
             wrap_config=wrap_config,
             tf_config=self.tf_config,
@@ -246,7 +291,9 @@ class MegatronEngine(BaseEngine):
         print(f"module: {len(module)}")
 
         if self.engine_config.use_dist_checkpointing:
-            load_mcore_dist_weights(module, self.engine_config.dist_checkpointing_path, is_value_model=is_value_model)
+            load_mcore_dist_weights(
+                module, self.engine_config.dist_checkpointing_path, is_value_model=self.is_value_model
+            )
         else:
             if self.vanilla_bridge:
                 self.bridge.load_weights(module, self.model_config.local_path)
@@ -322,10 +369,23 @@ class MegatronEngine(BaseEngine):
 
         self.module = self._build_megatron_module()
 
+        if self._qat_enabled and not self.engine_config.forward_only:
+            from verl.utils.modelopt import apply_qat_to_modules
+
+            self.module = apply_qat_to_modules(self.module, self._qat_config)
+
         self._maybe_enable_fused_kernels()
 
         if self.model_config.mtp.enable:
             patch_engine_mtp(self.module, self.model_config)
+        elif (
+            self.engine_config.forward_only
+            and self.engine_config.override_transformer_config.get("mtp_num_layers") == 0
+        ):
+            from verl.models.mcore.mtp_patch import patch_postprocess
+
+            for model in self.module:
+                patch_postprocess(model)
 
         # For forward_only, we don't need optimizer, lr_scheduler, checkpoint_mananager
         if self.engine_config.forward_only:
@@ -369,10 +429,11 @@ class MegatronEngine(BaseEngine):
             optimizer_scheduler=self.lr_scheduler,
             use_distributed_optimizer=self.engine_config.use_distributed_optimizer,
             use_checkpoint_opt_param_scheduler=self.optimizer_config.use_checkpoint_opt_param_scheduler,
+            use_dist_checkpointing=self.engine_config.use_dist_checkpointing,
             bridge=self.bridge,
             provider=self.provider,
             peft_cls=self.peft_cls,
-            use_dist_checkpointing=self.engine_config.use_dist_checkpointing,
+            use_megatron_fsdp=self.engine_config.use_megatron_fsdp,
         )
 
         self.to(
@@ -472,9 +533,15 @@ class MegatronEngine(BaseEngine):
             raise ValueError(f"Invalid device type: {device}")
 
     def get_data_parallel_rank(self):
+        if self.engine_config.dynamic_context_parallel:
+            # in order to let every dp-cp group has full data to split, we set dp=1
+            return 0
         return mpu.get_data_parallel_rank()
 
     def get_data_parallel_size(self):
+        if self.engine_config.dynamic_context_parallel:
+            # in order to let every dp-cp group has full data to split, we set dp=1
+            return 1
         return mpu.get_data_parallel_world_size()
 
     def get_data_parallel_group(self):
@@ -581,7 +648,11 @@ class MegatronEngine(BaseEngine):
 
         tu.assign_non_tensor(data, num_micro_batch=n_micro_batch)
 
-        forward_step = partial(self.forward_step, postprocess_micro_batch_func=postprocess_micro_batch_func)
+        forward_step = partial(
+            self.forward_step,
+            logits_processor_func=loss_function,
+            postprocess_micro_batch_func=postprocess_micro_batch_func,
+        )
 
         enable_routing_replay = tu.get_non_tensor_data(data, key="enable_routing_replay", default=False)
 
@@ -607,12 +678,15 @@ class MegatronEngine(BaseEngine):
             forward_only=forward_only,
         )
 
-        if self.model_config.mtp.enable and self.is_mp_src_rank_with_outputs():
-            # add mtp_losses
+        if self.model_config.mtp.enable and mpu.is_pipeline_last_stage(ignore_virtual=True):
+            # All CP ranks must participate in the all_reduce inside get_megatron_mtp_loss,
+            # because save_loss_to_tracker uses avg_group=DP+CP group.
+            # Only collect metrics on the src rank afterward.
             metrics = get_megatron_mtp_loss(n_micro_batch)
-            if "metrics" not in losses_reduced[0]:
-                losses_reduced[0]["metrics"] = {}
-            losses_reduced[0]["metrics"].update(metrics)
+            if self.is_mp_src_rank_with_outputs():
+                if "metrics" not in losses_reduced[0]:
+                    losses_reduced[0]["metrics"] = {}
+                losses_reduced[0]["metrics"].update(metrics)
 
         if RouterReplayHelper.is_r2_record_action(self.tf_config):
             if self.tf_config.virtual_pipeline_model_parallel_size is not None:
@@ -647,26 +721,37 @@ class MegatronEngine(BaseEngine):
         peft_config = None
         non_merge_lora_sync = self.peft_cls is not None and not self.model_config.lora.get("merge", False)
         adapter_only = base_sync_done and non_merge_lora_sync
+        if non_merge_lora_sync:
+            peft_config = build_peft_config_for_vllm(self.model_config.lora)
         # when lora adapter only, we only load adapter weights when base sync is done, otherwise load all weights
         load_megatron_model_to_gpu(self.module, load_grad=False, load_frozen_params=not adapter_only)
         if self.vanilla_bridge:
             per_tensor_param = self.bridge.export_weights(self.module)
         elif adapter_only:
-            # Only export adapter weights
-            peft_config = build_peft_config_for_vllm(self.model_config.lora)
             per_tensor_param = self.bridge.export_adapter_weights(self.module)
         else:
-            per_tensor_param = self.bridge.export_hf_weights(self.module)
+            per_tensor_param = (
+                self.bridge.export_hf_weights(self.module, merge_adapter_weights=False)
+                if non_merge_lora_sync
+                else self.bridge.export_hf_weights(self.module)
+            )
             if non_merge_lora_sync:
                 per_tensor_param = add_base_layer_suffix(
                     per_tensor_param, model_type=self.model_config.hf_config.model_type
                 )
+
+        # QAT: process weights through QATWeightExporter for quantized weight sync to vLLM
+        if self._qat_enabled:
+            from verl.utils.modelopt import export_qat_weights
+
+            per_tensor_param = export_qat_weights(per_tensor_param, self.module, self._qat_config.mode, self.bridge)
+
         return per_tensor_param, peft_config
 
     def disable_adapter(self) -> ContextManager:
         return self.peft_cls.disable_adapter(self.module)
 
-    def forward_step(self, batch_iter, model, postprocess_micro_batch_func):
+    def forward_step(self, batch_iter, model, logits_processor_func, postprocess_micro_batch_func):
         raise NotImplementedError("forward_step must be implemented in subclass")
 
     def postprocess_micro_batch_func(self, output, data: TensorDict, forward_only: bool, loss_function):
@@ -717,32 +802,49 @@ class MegatronEngineWithLMHead(MegatronEngine):
 
         return {
             "input_ids": input_ids,
+            "attention_mask": batch.get("attention_mask", None),
             "loss_mask": loss_mask,
             "multi_modal_inputs": multi_modal_inputs,
             "routed_experts": routed_experts,
         }
 
     def prepare_model_outputs(self, output: dict, data: TensorDict):
-        calculate_entropy = tu.get_non_tensor_data(data, key="calculate_entropy", default=False)
+        return output
 
-        log_prob = output["log_probs"]
-        model_output = {"log_probs": log_prob}
-        if calculate_entropy:
-            entropy = output["entropy"]
-            model_output["entropy"] = entropy
-
-        return model_output
-
-    def forward_step(self, batch_iter: Iterator[TensorDict], model, postprocess_micro_batch_func):
+    def forward_step(
+        self, batch_iter: Iterator[TensorDict], model, logits_processor_func, postprocess_micro_batch_func
+    ):
         batch: TensorDict = next(batch_iter)
+
+        if self.engine_config.dynamic_context_parallel:
+            # split the batch and give the sub-batches to each dp-cp group
+            from verl.utils.megatron_utils import dynamic_cp_split_batch
+
+            batch = dynamic_cp_split_batch(
+                batch=batch,
+                engine_config=self.engine_config,
+                dp_size=mpu.get_data_parallel_world_size(),
+                dp_rank=mpu.get_data_parallel_rank(),
+            )
+
         batch = batch.to(get_device_id())
         use_fused_kernels = tu.get_non_tensor_data(batch, key="use_fused_kernels", default=False)
         calculate_entropy = tu.get_non_tensor_data(batch, key="calculate_entropy", default=False)
+        calculate_sum_pi_squared = tu.get_non_tensor_data(batch, key="calculate_sum_pi_squared", default=False)
+        distillation_use_topk = tu.get_non_tensor_data(batch, key="distillation_use_topk", default=False)
+
+        if calculate_sum_pi_squared and use_fused_kernels:
+            raise NotImplementedError(
+                "calculate_sum_pi_squared=True is not supported with use_fused_kernels=True: "
+                "fused kernels do not materialize the full logits tensor needed for Σπ²."
+            )
         pad_mode = tu.get_non_tensor_data(batch, key="pad_mode", default=DatasetPadMode.NO_PADDING)
         temperature = batch["temperature"]
         model_inputs = self.prepare_model_inputs(batch)
         input_ids = model_inputs["input_ids"]
+        attention_mask = model_inputs["attention_mask"]
         multi_modal_inputs = model_inputs["multi_modal_inputs"]
+        local_cp_size = tu.get_non_tensor_data(data=batch, key="local_cp_size", default=None)
         loss_mask = model_inputs["loss_mask"]
 
         unwrapped_model = unwrap_model(model)
@@ -765,8 +867,6 @@ class MegatronEngineWithLMHead(MegatronEngine):
         else:
             raise NotImplementedError(f"Pad mode {pad_mode} is not supported for megatron engine")
 
-        from verl.models.mcore import get_mcore_forward_no_padding_fn
-
         if use_fused_kernels:
             if not self.engine_config.use_remove_padding:
                 logger.warning_once(
@@ -785,7 +885,9 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 temperature_value = float(temperature)
 
         if use_fused_kernels:
-            fused_forward_fn = get_mcore_forward_fused_no_padding_fn(self.model_config.hf_config)
+            from verl.models.mcore import get_mcore_forward_fused_model_engine_fn
+
+            fused_forward_fn = get_mcore_forward_fused_model_engine_fn(self.model_config.hf_config)
             output = fused_forward_fn(
                 model=model,
                 input_ids=input_ids,
@@ -802,8 +904,10 @@ class MegatronEngineWithLMHead(MegatronEngine):
             temperature = temperature.to(torch.float32)
             assert temperature.shape[0] == input_ids.shape[0]
             temperature = verl_F.expand_as_nested(temperature, input_ids)  # (bsz, j1)
+            from verl.models.mcore import get_mcore_engine_forward_fn
 
-            forward_fn = get_mcore_forward_no_padding_fn(self.model_config.hf_config)
+            forward_fn = get_mcore_engine_forward_fn(self.model_config.hf_config)
+            data_format = "thd" if self.engine_config.use_remove_padding else "bshd"
 
             def logits_processor(logits, label, temperature):
                 assert logits.shape[:2] == label.shape[:2]
@@ -812,6 +916,9 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 assert torch.all(temperature > 0).item(), f"temperature tensor must be positive. Got {temperature}"
                 logits.div_(temperature.unsqueeze(dim=-1).to(logits.dtype))
                 ret = {}
+                # sum_pi_squared is non-destructive — must run before vocab_parallel_entropy.
+                if calculate_sum_pi_squared:
+                    ret["sum_pi_squared"] = vocab_parallel_sum_pi_squared(logits)
                 if calculate_entropy:
                     logits_bak = logits.clone()
                     # # disable the hint until the fused_kernel is optimized for triton>=3.3
@@ -826,11 +933,22 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 else:
                     logits_bak = logits
 
+                # logits_processor_func return tensors with shape (1, total_nnz/cp_size)
+                if distillation_use_topk:
+                    ret.update(logits_processor_func(student_logits=logits_bak, data=batch, data_format=data_format))
                 log_probs = vocab_parallel_log_probs_from_logits(logits_bak, label)
                 ret["log_probs"] = log_probs
                 return ret
 
-            logits_processor_args = {"label": label, "temperature": temperature, "loss_mask": loss_mask}
+            response_attention_mask = None
+            if attention_mask is not None and not loss_mask.is_nested:
+                response_attention_mask = attention_mask[:, -loss_mask.shape[-1] :]
+            logits_processor_args = {
+                "label": label,
+                "temperature": temperature,
+                "loss_mask": loss_mask,
+                "response_attention_mask": response_attention_mask,
+            }
 
             output = forward_fn(
                 model,
@@ -840,8 +958,9 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 logits_processor_args=logits_processor_args,
                 vision_model=hasattr(self.model_config.hf_config, "vision_config"),
                 pad_token_id=self.model_config.tokenizer.pad_token_id,
-                data_format="thd" if self.engine_config.use_remove_padding else "bshd",
+                data_format=data_format,
                 mtp_enable_train=self.model_config.mtp.enable and self.model_config.mtp.enable_train,
+                local_cp_size=local_cp_size,
             )
 
         # Router replay: record routing decisions for R2 mode
@@ -854,15 +973,19 @@ class MegatronEngineWithLMHead(MegatronEngine):
             for router in router_instance_list:
                 router.set_router_replay_action(RouterReplayAction.REPLAY_BACKWARD)
 
-        return output, partial(postprocess_micro_batch_func, data=batch)
+        return output, partial(postprocess_micro_batch_func, data=batch, local_cp_size=local_cp_size)
 
-    def postprocess_micro_batch_func(self, output, data: TensorDict, forward_only: bool, loss_function):
+    def postprocess_micro_batch_func(
+        self, output, data: TensorDict, forward_only: bool, loss_function, local_cp_size=None
+    ):
         # For memory efficiency
         # We move calculation of entropy to compute_log_probs, forward_only == True
         device = data["input_ids"].device
         model_output = self.prepare_model_outputs(output, data)
 
         if loss_function is not None:
+            # TODO(baiyan): How to support hybrid context parallel with dp_group,
+            # now the dp_group is not used, so just leave it as is, but what if we need to use it?
             loss, metrics = loss_function(model_output=model_output, data=data, dp_group=self.get_data_parallel_group())
             # scale loss by num_micro_batch because megatron will scale loss
             # by n_micro_batch inside pp schedule
@@ -872,6 +995,16 @@ class MegatronEngineWithLMHead(MegatronEngine):
             loss = torch.tensor(1.0, device=device)
             scaled_loss = loss
             metrics = {}
+        if local_cp_size is not None:
+            # aggregate model_output by DP-CP groups
+            from verl.utils.megatron_utils import dynamic_cp_merge_output
+
+            model_output = dynamic_cp_merge_output(
+                model_output,
+                dp_size=mpu.get_data_parallel_world_size(),
+                dp_rank=mpu.get_data_parallel_rank(),
+                local_cp_size=local_cp_size,
+            )
 
         output = {
             "model_output": model_output,
@@ -886,16 +1019,16 @@ class MegatronEngineWithLMHead(MegatronEngine):
 @EngineRegistry.register(model_type="value_model", backend="megatron")
 class MegatronEngineWithValueHead(MegatronEngineWithLMHead):
     # for value head
-    def forward_step(self, batch_iter, model, postprocess_micro_batch_func):
+    def forward_step(self, batch_iter, model, logits_processor_func, postprocess_micro_batch_func):
         batch: TensorDict = next(batch_iter)
         batch = batch.to(get_device_id())
         model_inputs = self.prepare_model_inputs(batch)
         input_ids = model_inputs["input_ids"]
         multi_modal_inputs = model_inputs["multi_modal_inputs"]
 
-        from verl.models.mcore import get_mcore_forward_no_padding_fn
+        from verl.models.mcore import get_mcore_engine_forward_fn
 
-        forward_fn = get_mcore_forward_no_padding_fn(self.model_config.hf_config)
+        forward_fn = get_mcore_engine_forward_fn(self.model_config.hf_config)
 
         output = forward_fn(
             model,
@@ -904,7 +1037,7 @@ class MegatronEngineWithValueHead(MegatronEngineWithLMHead):
             value_model=True,
             vision_model=hasattr(self.model_config.hf_config, "vision_config"),
             pad_token_id=self.model_config.tokenizer.pad_token_id,
-            enable_mtp=self.model_config.mtp.enable_train,
+            data_format="thd" if self.engine_config.use_remove_padding else "bshd",
         )
 
         return output, partial(postprocess_micro_batch_func, data=batch)

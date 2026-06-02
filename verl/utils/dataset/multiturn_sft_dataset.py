@@ -177,7 +177,9 @@ class MultiTurnSFTDataset(Dataset):
 
         # system prompt: <|im_start|>system\nYou are a helpful assistant.<|im_end|>\n
         # generation prompt: <|im_start|>assistant\n
-        self.system_prompt, self.generation_prompt = extract_system_prompt_and_generation(self.tokenizer)
+        self.system_prompt, self.generation_prompt = extract_system_prompt_and_generation(
+            self.tokenizer, **self.apply_chat_template_kwargs
+        )
 
     def __len__(self):
         return len(self.messages)
@@ -250,7 +252,7 @@ class MultiTurnSFTDataset(Dataset):
         Returns:
             messages: List of messages with replaced placeholder.
         """
-        messages: list = example[self.messages_key]
+        messages: list = convert_nested_value_to_list_recursive(example[self.messages_key])
         images = example[self.image_key] if self.image_key in example else []
         videos = example[self.video_key] if self.video_key in example else []
 
@@ -293,6 +295,8 @@ class MultiTurnSFTDataset(Dataset):
         enable_thinking = (
             self.enable_thinking[item] if self.enable_thinking is not None else self.enable_thinking_default
         )
+        if enable_thinking is not None:
+            enable_thinking = bool(enable_thinking)
 
         # 1. tokenize each message
         input_ids, loss_mask, attention_mask, multi_modal_inputs = [], [], [], {}
@@ -323,6 +327,9 @@ class MultiTurnSFTDataset(Dataset):
         # Since the tokenizer may return user-customized results, we need to filter out inconsistent tensor shapes
         keys_to_remove = []
         for k, v in multi_modal_inputs.items():
+            if k == "mm_token_type_ids":
+                keys_to_remove.append(k)
+                continue
             if len(v) > 0 and v[0] is not None and isinstance(v[0], torch.Tensor):
                 # Check if all tensors in the list have the same shape
                 first_shape = v[0].shape[1:]

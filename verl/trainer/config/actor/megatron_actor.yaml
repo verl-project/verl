@@ -15,4 +15,16 @@ _target_: verl.workers.config.McoreActorConfig
 
 strategy: megatron
 
-load_weight: True
+# Megatron-specific checkpoint overrides: swap the base CheckpointConfig for
+# McoreCheckpointConfig so ``mbridge_config`` is available.
+checkpoint:
+
+  # Target dataclass for this configuration
+  _target_: verl.workers.config.McoreCheckpointConfig
+
+  # Mbridge config extension.
+  # when vanilla_mbridge=True, and your filesystem is a distributed filesystem,(which means you write a file in node A
+  # and you can read the file in node B immediately)
+  # set `mbridge_config.distributed_filesystem=True` and `mbridge_config.memory_efficient=True` to
+  # speed up the checkpoint saving by 10x speed.
+  mbridge_config: {}

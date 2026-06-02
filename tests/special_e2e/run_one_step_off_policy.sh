@@ -142,6 +142,9 @@ if [ "${ACTOR_STRATEGY}" == "fsdp2" ]; then
     python3 -m verl.experimental.one_step_off_policy.main_ppo \
         "${common_params[@]}" \
         actor_rollout_ref.actor.fsdp_config.strategy=fsdp2 \
+        actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
+        actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=2 \
+        actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=2 \
         critic.strategy=fsdp2 \
         actor_rollout_ref.actor.grad_clip=1.0 \
         actor_rollout_ref.model.use_remove_padding=True \
@@ -161,8 +164,8 @@ elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
     echo "Running with Megatron strategy..."
     # Megatron specific parameters
     gen_tp=2
-    train_tp=1
-    train_pp=2
+    train_tp=2
+    train_pp=3
     ref_offload=True
     actor_offload=False
 
@@ -171,8 +174,6 @@ elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
             # Todo The checkpoint_engine.backend should be unified to nccl
             # actor_rollout_ref.rollout.checkpoint_engine.backend='hccl'
             actor_rollout_ref.rollout.gpu_memory_utilization=0.70
-            trainer.n_gpus_per_node=4
-            rollout.n_gpus_per_node=4
             actor_rollout_ref.model.use_remove_padding=True \
             actor_rollout_ref.model.enable_gradient_checkpointing=True \
             actor_rollout_ref.actor.use_dynamic_bsz=True \
@@ -189,9 +190,9 @@ elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
         "${common_params[@]}" \
         actor_rollout_ref.actor.strategy=megatron \
         critic.strategy=megatron \
-        actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=2 \
-        actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=4 \
-        actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4 \
+        actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
+        actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=2 \
+        actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=2 \
         actor_rollout_ref.actor.megatron.param_offload=${actor_offload} \
         actor_rollout_ref.actor.megatron.optimizer_offload=${actor_offload} \
         actor_rollout_ref.actor.megatron.grad_offload=${actor_offload} \

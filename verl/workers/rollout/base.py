@@ -38,7 +38,7 @@ class BaseRollout(ABC):
         **kwargs,
     ):
         self.config = omega_conf_to_dataclass(config)
-        self.model_config: HFModelConfig = omega_conf_to_dataclass(model_config, dataclass_type=HFModelConfig)
+        self.model_config: HFModelConfig = omega_conf_to_dataclass(model_config)
         self.device_mesh = device_mesh
 
     @abstractmethod
