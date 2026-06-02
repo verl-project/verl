@@ -26,19 +26,21 @@ from typing import TYPE_CHECKING
 
 import torch
 from PIL import Image
+from transformers import ProcessorMixin
+from transformers.image_processing_utils import ImageProcessingMixin
 
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizer
 
 
-class _FakeImageProcessor:
+class _FakeImageProcessor(ImageProcessingMixin):
     """Minimal image_processor stub — actual pixel encoding is done by vLLM."""
     patch_size: int = 14  # InternVL vision encoder uses 14x14 patches
     image_mean: list[float] = [0.485, 0.456, 0.406]
     image_std: list[float] = [0.229, 0.224, 0.225]
 
 
-class InternVLProcessor:
+class InternVLProcessor(ProcessorMixin):
     """Minimal processor for InternVL2_5 that wraps the tokenizer.
 
     Provides the interface verl's :class:`AgentLoopBase` expects:
@@ -50,11 +52,15 @@ class InternVLProcessor:
     * :attr:`image_token_id` – ``<img>`` token id
     """
 
+    attributes = ["feature_extractor", "tokenizer"]
+    feature_extractor_class = "AutoImageProcessor"
+    tokenizer_class = "AutoTokenizer"
+
     def __init__(self, tokenizer: PreTrainedTokenizer, config):
-        self._tokenizer = tokenizer
+        image_processor = _FakeImageProcessor()
+        super().__init__(image_processor, tokenizer)
         self._config = config
-        self.image_processor = _FakeImageProcessor()
-        self.chat_template = tokenizer.chat_template
+        self.image_processor = image_processor
         # InternVL config
         self._image_size = getattr(config, "force_image_size", 448)
         self._min_dynamic_patch = getattr(config, "min_dynamic_patch", 1)
@@ -67,7 +73,7 @@ class InternVLProcessor:
 
     @property
     def image_token_id(self) -> int:
-        return self._tokenizer.convert_tokens_to_ids("<img>")
+        return self.tokenizer.convert_tokens_to_ids("<img>")
 
     @property
     def image_token(self) -> str:
@@ -75,14 +81,14 @@ class InternVLProcessor:
 
     @property
     def video_token_id(self) -> int:
-        return self._tokenizer.convert_tokens_to_ids("<video>")
+        return self.tokenizer.convert_tokens_to_ids("<video>")
 
     @property
     def video_token(self) -> str:
         return "<video>"
 
     def apply_chat_template(self, messages, **kwargs):
-        return self._tokenizer.apply_chat_template(messages, **kwargs)
+        return self.tokenizer.apply_chat_template(messages, **kwargs)
 
     def __call__(
         self,
@@ -138,9 +144,9 @@ class InternVLProcessor:
                         replacement = f"<img>{'<IMG_CONTEXT>' * feature_size}</img>"
                         t = t.replace('<image>', replacement, 1)
                     modified_text.append(t)
-                tokenized = self._tokenizer(modified_text, return_tensors=return_tensors, **kwargs)
+                tokenized = self.tokenizer(modified_text, return_tensors=return_tensors, **kwargs)
             else:
-                tokenized = self._tokenizer(text, return_tensors=return_tensors, **kwargs)
+                tokenized = self.tokenizer(text, return_tensors=return_tensors, **kwargs)
         else:
             tokenized = {}
 
@@ -173,9 +179,9 @@ class InternVLProcessor:
         feature_size = num_tiles * self._num_image_token
         expansion_text = f"<img>{'<IMG_CONTEXT>' * feature_size}</img>"
 
-        text = self._tokenizer.decode(prompt_ids, skip_special_tokens=False)
+        text = self.tokenizer.decode(prompt_ids, skip_special_tokens=False)
         text = text.replace("<image>", expansion_text, 1)
-        return self._tokenizer.encode(text, add_special_tokens=False)
+        return self.tokenizer.encode(text, add_special_tokens=False)
 
     def get_rope_index(self, input_ids, attention_mask, **multi_modal_kwargs):
         """Compute position IDs for InternVL (1D RoPE, no 3D mRoPE).
