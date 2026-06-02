@@ -361,7 +361,13 @@ class ToolAgentLoop(AgentLoopBase):
 
         if self.tool_parser_name == "gpt-oss" or self._is_gpt_oss_tokenizer:
             logger.info("manually format tool responses for gpt-oss")
-            tool_response_text = build_gpt_oss_tool_response_text(add_messages, tool_call_names)
+            text_only_messages = []
+            for msg in add_messages:
+                content = msg.get("content", "")
+                if isinstance(content, list):
+                    content = "".join([item.get("text", "") for item in content if item.get("type") == "text"])
+                text_only_messages.append({**msg, "content": content})
+            tool_response_text = build_gpt_oss_tool_response_text(text_only_messages, tool_call_names)
             response_ids = await self.loop.run_in_executor(
                 None, lambda: self.tokenizer.encode(tool_response_text, add_special_tokens=False)
             )
