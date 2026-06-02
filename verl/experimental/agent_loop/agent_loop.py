@@ -1119,6 +1119,12 @@ class AgentLoopManager:
         Returns:
             DataProto: Output batch.
         """
+        # Attach per-sample priority to the batch (like ``uid``) so each sample gets
+        # a globally-unique priority that flows to vLLM request scheduling. Assigned
+        # before chunking so chunks own disjoint ranges without per-worker offsets.
+        if "priority" not in prompts.non_tensor_batch:
+            prompts.non_tensor_batch["priority"] = np.arange(len(prompts), dtype=np.int64)
+
         chunkes = prompts.chunk(len(self.agent_loop_workers))
         outputs = await asyncio.gather(
             *[

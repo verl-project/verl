@@ -127,6 +127,15 @@ class vLLMHttpServer:
         self.model_config = self._init_model_config(model_config)
         self._validate_configs()
 
+        if self.config.full_determinism:
+            from verl.workers.engine.utils import enable_full_determinism
+
+            rollout_seed = replica_rank + self.config.seed
+            enable_full_determinism(seed=rollout_seed)
+            os.environ["VERL_FULL_DETERMINISM"] = "1"
+            os.environ["VERL_SEED"] = str(rollout_seed)
+            os.environ["VLLM_BATCH_INVARIANT"] = "1"
+
         self.rollout_mode = rollout_mode
         self.workers = workers
 
@@ -273,7 +282,7 @@ class vLLMHttpServer:
             "gpu_memory_utilization": self.config.gpu_memory_utilization,
             "disable_log_stats": self.config.disable_log_stats,
             "tensor_parallel_size": self.config.tensor_model_parallel_size,
-            "seed": self.replica_rank + (self.config.get("seed") or 0),
+            "seed": self.replica_rank + self.config.seed,
             "override_generation_config": json.dumps(override_generation_config),
             "quantization": quantization,
             "hf_overrides": hf_overrides,
@@ -507,8 +516,10 @@ class vLLMHttpServer:
         )
         sampling_params["logprobs"] = 0 if sampling_params.pop("logprobs", False) else None
         sampling_params.setdefault("repetition_penalty", self.config.get("repetition_penalty", 1.0))
-
         sampling_params.setdefault("ignore_eos", self.config.get("ignore_eos", False))
+        # Inject per-request seed for deterministic sampling when full_determinism is enabled.
+        if self.config.full_determinism:
+            sampling_params.setdefault("seed", self.replica_rank + self.config.seed)
         sampling_params = SamplingParams(max_tokens=max_tokens, **sampling_params)
         prompt_ids = qwen2_5_vl_dedup_image_tokens(prompt_ids, self.model_config.processor)
         multi_modal_data = {}

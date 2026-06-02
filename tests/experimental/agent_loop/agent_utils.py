@@ -42,15 +42,19 @@ def init_agent_loop_manager(config: DictConfig) -> AgentLoopManager | RayWorkerG
     mapping = {
         Role.ActorRollout: global_pool_id,
     }
-    if config.reward.reward_model.enable_resource_pool:
-        mapping[Role.RewardModel] = "reward_pool"
-        if config.reward.reward_model.n_gpus_per_node <= 0:
-            raise ValueError("config.reward.reward_model.n_gpus_per_node must be greater than 0")
-        if config.reward.reward_model.nnodes <= 0:
-            raise ValueError("config.reward.reward_model.nnodes must be greater than 0")
-
-        reward_pool = [config.reward.reward_model.n_gpus_per_node] * config.reward.reward_model.nnodes
-        resource_pool_spec["reward_pool"] = reward_pool
+    if config.reward.reward_model.enable:
+        if config.reward.reward_model.enable_resource_pool:
+            mapping[Role.RewardModel] = "reward_pool"
+            if config.reward.reward_model.n_gpus_per_node <= 0:
+                raise ValueError("config.reward.reward_model.n_gpus_per_node must be greater than 0")
+            if config.reward.reward_model.nnodes <= 0:
+                raise ValueError("config.reward.reward_model.nnodes must be greater than 0")
+            reward_pool = [config.reward.reward_model.n_gpus_per_node] * config.reward.reward_model.nnodes
+            resource_pool_spec["reward_pool"] = reward_pool
+        else:
+            mapping[Role.RewardModel] = global_pool_id
+            config.reward.reward_model.nnodes = config.trainer.nnodes
+            config.reward.reward_model.n_gpus_per_node = config.trainer.n_gpus_per_node
     resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
     resource_pool_manager.create_resource_pool()
     resource_pool_to_cls = {pool: {} for pool in resource_pool_manager.resource_pool_dict.values()}

@@ -45,8 +45,9 @@ class _FakeServerManager:
         video_data: Optional[list[Any]] = None,
         audio_data: Optional[list[Any]] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
+        **kwargs: Any,
     ) -> TokenOutput:
-        del request_id, sampling_params, image_data, video_data, audio_data, mm_processor_kwargs
+        del request_id, sampling_params, image_data, video_data, audio_data, mm_processor_kwargs, kwargs
         # Return a short, deterministic "generation" for testing.
         return TokenOutput(token_ids=prompt_ids[-1:] + [11, 12, 13], log_probs=[0.0, 0.0, 0.0, 0.0])
 
