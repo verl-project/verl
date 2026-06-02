@@ -27,14 +27,21 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
+def _get_val(cfg, key):
+    """Get a config value whether *cfg* is a dict or an object."""
+    if isinstance(cfg, dict):
+        return cfg.get(key, None)
+    return getattr(cfg, key, None)
+
+
 def get_max_position_embeddings(hf_config) -> int:
-    max_len = getattr(hf_config, "max_position_embeddings", None)
+    max_len = _get_val(hf_config, "max_position_embeddings")
     if max_len is None:
         # Try text_config first, then common VLM LLM sub-config names.
         for key in ("text_config", "llm_config", "language_config"):
-            sub = getattr(hf_config, key, None)
+            sub = _get_val(hf_config, key)
             if sub is not None:
-                max_len = getattr(sub, "max_position_embeddings", None)
+                max_len = _get_val(sub, "max_position_embeddings")
                 if max_len is not None:
                     break
 
