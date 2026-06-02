@@ -16,19 +16,6 @@
 """High-level QAT workflow helpers for Megatron backend."""
 
 
-def patch_provider_for_qat(provider):
-    """Patch the Megatron-Bridge provider to support QAT quantized layers."""
-    from megatron.bridge.models.conversion.param_mapping import AutoMapping
-    from megatron.bridge.models.gpt_provider import quantization_layer_spec
-
-    from verl.utils.modelopt.megatron_qat_patch import apply_qat_patch
-
-    provider.transformer_layer_spec = quantization_layer_spec
-    apply_qat_patch()
-    AutoMapping.register_module_type("QuantColumnParallelLinear", "column")
-    AutoMapping.register_module_type("QuantRowParallelLinear", "row")
-
-
 def _get_qat_field(qat_config, key, default=None):
     """Extract a field from qat_config, supporting both dict and object-style access."""
     if isinstance(qat_config, dict):

@@ -48,16 +48,25 @@ class RewardModelManager:
             self.sleep()
 
     def _initialize_llm_servers(self):
-        rollout_world_size = self.config.rollout.tensor_model_parallel_size
+        rollout_config = self.config.rollout
+        rollout_world_size = (
+            rollout_config.tensor_model_parallel_size
+            * rollout_config.data_parallel_size
+            * rollout_config.pipeline_model_parallel_size
+        )
         world_size = (
             self.resource_pool.world_size
             if self.resource_pool  # colocate mode
             else self.config.n_gpus_per_node * self.config.nnodes  # standalone mode
         )
         num_replicas = world_size // rollout_world_size
+        assert num_replicas > 0, (
+            f"Not enough GPUs to run the reward model. "
+            f"world_size ({world_size}) < rollout_world_size ({rollout_world_size}). "
+            f"Check your resource pool or standalone config (n_gpus_per_node, nnodes)."
+        )
 
-        rollout_replica_class = get_rollout_replica_class(self.config.rollout.name)
-        rollout_config = self.config.rollout
+        rollout_replica_class = get_rollout_replica_class(rollout_config.name)
         model_config = HFModelConfig(path=self.config.model_path)
         self.tokenizer = model_config.get_processor()
         self.rollout_replicas = [

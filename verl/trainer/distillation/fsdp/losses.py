@@ -64,6 +64,7 @@ def compute_forward_kl_topk(
 
     # 2. compute token-wise KL divergence across sp groups
     student_log_probs = F.log_softmax(student_logits, dim=-1)
+    student_topk_ids = torch.topk(student_log_probs, k=teacher_topk_ids.shape[-1], dim=-1).indices
     student_topk_log_probs = torch.gather(student_log_probs, dim=-1, index=teacher_topk_ids)
     student_mass = student_topk_log_probs.exp().sum(dim=-1)
     teacher_mass = teacher_topk_log_probs.exp().sum(dim=-1)
@@ -73,4 +74,21 @@ def compute_forward_kl_topk(
         teacher_topk_log_probs = teacher_topk_log_probs.clamp_min(loss_config.log_prob_min_clamp)
     distillation_losses = kl_divergence(log_q=student_topk_log_probs, log_p=teacher_topk_log_probs)
 
-    return {"distillation_losses": distillation_losses, "student_mass": student_mass, "teacher_mass": teacher_mass}
+    # Diagnostics for tracking teacher/student top-k overlap in OPD, following
+    # "Rethinking On-Policy Distillation of Large Language Models" (arXiv:2604.13016).
+    overlap_mask = (teacher_topk_ids.unsqueeze(-1) == student_topk_ids.unsqueeze(-2)).any(dim=-1)
+    overlap_count = overlap_mask.sum(dim=-1)
+    token_kl = teacher_topk_log_probs.exp() * (teacher_topk_log_probs - student_topk_log_probs)
+    overlap_token_advantage_sum = (-token_kl * overlap_mask).sum(dim=-1)
+    overlap_token_advantage = overlap_token_advantage_sum / overlap_count.clamp_min(1)
+    overlap_token_advantage = torch.where(
+        overlap_count > 0, overlap_token_advantage, torch.zeros_like(overlap_token_advantage)
+    )
+
+    return {
+        "distillation_losses": distillation_losses,
+        "student_mass": student_mass,
+        "teacher_mass": teacher_mass,
+        "overlap_count": overlap_count,
+        "overlap_token_advantage": overlap_token_advantage,
+    }

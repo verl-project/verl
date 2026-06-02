@@ -103,6 +103,14 @@ def _update_ref_or_create(layer, ref_name, new_data):
         setattr(layer, ref_name, Parameter(t, requires_grad=False))
 
 
+def _unwrap_marlin_scale(value):
+    return value[0] if isinstance(value, tuple) else value
+
+
+def _split_marlin_scale(value):
+    return value if isinstance(value, tuple) else (value, 1.0)
+
+
 class ModelOptParamMetaDict(dict):
     """Dict-like parameter store with metadata-based rebuild and tensor swap."""
 
@@ -262,24 +270,36 @@ def _modelopt_dense_process_weights(self, layer: torch.nn.Module) -> None:
         size_n=part_size_n,
         group_size=group_size,
     )
-    marlin_weight_scale = nvfp4_marlin_process_scales(weight_scale)
-    marlin_weight_scale_2 = nvfp4_marlin_process_global_scale(weight_scale_2_max.to(param_dtype))
+    marlin_weight_scale, scale_factor = _split_marlin_scale(
+        nvfp4_marlin_process_scales(weight_scale, a_dtype=param_dtype)
+    )
+    marlin_weight_global_scale = (
+        nvfp4_marlin_process_global_scale(weight_scale_2_max.to(torch.float32), param_dtype) / scale_factor
+    )
 
     if is_first_call:
         layer.weight = Parameter(marlin_weight, requires_grad=False)
         layer.weight_scale = Parameter(marlin_weight_scale, requires_grad=False)
-        layer.weight_scale_2 = Parameter(marlin_weight_scale_2, requires_grad=False)
+        layer.weight_global_scale = Parameter(marlin_weight_global_scale, requires_grad=False)
+        layer.weight_scale_2 = Parameter(layer.weight_global_scale.data, requires_grad=False)
         layer._marlin_tensor_refs = {
             "weight": layer.weight.data,
             "weight_scale": layer.weight_scale.data,
-            "weight_scale_2": layer.weight_scale_2.data,
+            "weight_scale_2": layer.weight_global_scale.data,
         }
     else:
         _update_ref_or_create(layer, "weight", marlin_weight)
         _update_ref_or_create(layer, "weight_scale", marlin_weight_scale)
-        _update_ref_or_create(layer, "weight_scale_2", marlin_weight_scale_2)
+        _update_ref_or_create(layer, "weight_scale_2", marlin_weight_global_scale)
+        layer.weight_global_scale = Parameter(layer._marlin_tensor_refs["weight_scale_2"], requires_grad=False)
 
-    for attr in ["input_scale", "alpha", "input_scale_inv"]:
+    if hasattr(layer, "input_scale"):
+        input_global_scale = layer.input_scale.data.max().to(torch.float32)
+        layer.input_global_scale = Parameter(input_global_scale, requires_grad=False)
+        layer.alpha = Parameter(input_global_scale * weight_scale_2_max, requires_grad=False)
+        layer.input_global_scale_inv = Parameter((1.0 / input_global_scale).to(torch.float32), requires_grad=False)
+
+    for attr in ["input_scale"]:
         if hasattr(layer, attr):
             delattr(layer, attr)
 
@@ -310,7 +330,7 @@ def _marlin_process_scales_experts(scale_hf, param_dtype, size_k, size_n, group_
     scales = scale_hf.to(param_dtype)
     for i in range(num_experts):
         s = marlin_permute_scales(s=scales[i].T, size_k=size_k, size_n=size_n, group_size=group_size)
-        result.append(nvfp4_marlin_process_scales(s))
+        result.append(_unwrap_marlin_scale(nvfp4_marlin_process_scales(s)))
     return torch.stack(result)
 
 
@@ -327,48 +347,28 @@ _MOE_HF_PARAMS = [
 
 
 def _modelopt_moe_marlin_convert(self, layer: torch.nn.Module, is_first_call: bool) -> None:
-    from vllm.model_executor.layers.quantization.utils.marlin_utils import marlin_make_workspace_new
-    from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import nvfp4_marlin_process_global_scale
+    from vllm.model_executor.layers.quantization import modelopt as vllm_modelopt
 
-    group_size = 16
-    e = layer.num_experts
-    k = layer.hidden_size
-    n = layer.intermediate_size_per_partition
-    device = layer.w13_weight.device
-    param_dtype = layer.params_dtype
-
-    if is_first_call:
-        layer.workspace = marlin_make_workspace_new(device, 4)
-
-    perm = torch.empty(0, dtype=torch.int, device=device)
-    size_n_w13, size_k_w13 = n * 2, k
-    size_n_w2, size_k_w2 = k, n
-
-    # Repack weights
-    w13_weight_marlin = _marlin_repack_experts(layer.w13_weight.data, perm, size_k_w13, size_n_w13, e)
-    w2_weight_marlin = _marlin_repack_experts(layer.w2_weight.data, perm, size_k_w2, size_n_w2, e)
-
-    # Process scales
-    w13_weight_scale_marlin = _marlin_process_scales_experts(
-        layer.w13_weight_scale.data,
-        param_dtype,
-        size_k_w13,
-        size_n_w13,
-        group_size,
-        e,
+    prepare_for_marlin = vllm_modelopt.convert_to_nvfp4_moe_kernel_format.__globals__[
+        "prepare_nvfp4_moe_layer_for_marlin"
+    ]
+    (
+        w13_weight_marlin,
+        w13_weight_scale_marlin,
+        w13_scale_2_processed,
+        w2_weight_marlin,
+        w2_weight_scale_marlin,
+        w2_scale_2_processed,
+    ) = prepare_for_marlin(
+        layer=layer,
+        w13=layer.w13_weight.data,
+        w13_scale=layer.w13_weight_scale.data,
+        w13_scale_2=layer.w13_weight_scale_2.data,
+        w2=layer.w2_weight.data,
+        w2_scale=layer.w2_weight_scale.data,
+        w2_scale_2=layer.w2_weight_scale_2.data,
+        is_act_and_mul=self.moe.is_act_and_mul,
     )
-    w2_weight_scale_marlin = _marlin_process_scales_experts(
-        layer.w2_weight_scale.data,
-        param_dtype,
-        size_k_w2,
-        size_n_w2,
-        group_size,
-        e,
-    )
-
-    # Process global scales  (w13_weight_scale_2 is already (E,) after common processing)
-    w13_scale_2_processed = nvfp4_marlin_process_global_scale(layer.w13_weight_scale_2.data.to(param_dtype))
-    w2_scale_2_processed = nvfp4_marlin_process_global_scale(layer.w2_weight_scale_2.data.to(param_dtype))
 
     if is_first_call:
         layer.w13_weight = Parameter(w13_weight_marlin, requires_grad=False)
@@ -399,9 +399,8 @@ def _modelopt_moe_marlin_convert(self, layer: torch.nn.Module, is_first_call: bo
         ]:
             _update_ref_or_create(layer, rn, nd)
 
-    for attr in ["w13_input_scale", "w2_input_scale"]:
-        if hasattr(layer, attr):
-            delattr(layer, attr)
+    layer.w13_input_scale = None
+    layer.w2_input_scale = None
 
 
 def _modelopt_moe_process_weights(self, layer: torch.nn.Module) -> None:
@@ -426,7 +425,21 @@ def _modelopt_moe_process_weights(self, layer: torch.nn.Module) -> None:
 
     _modelopt_moe_marlin_convert(self, layer, is_first_call)
 
+    from vllm.model_executor.layers.quantization.modelopt import make_nvfp4_moe_kernel
+
     self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+    assert self.experts_cls is not None
+    routing_tables = (
+        layer._maybe_init_expert_routing_tables() if hasattr(layer, "_maybe_init_expert_routing_tables") else None
+    )
+    self.moe_kernel = make_nvfp4_moe_kernel(
+        moe_quant_config=self.moe_quant_config,
+        moe_config=self.moe,
+        experts_cls=self.experts_cls,
+        shared_experts=getattr(layer, "shared_experts", None),
+        routing_tables=routing_tables,
+    )
+    self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
 
 def _modelopt_kv_process_weights(self, layer) -> None:
@@ -494,6 +507,37 @@ def _modelopt_kv_process_weights(self, layer) -> None:
 
 
 _patched = False
+_original_dense_init = None
+_original_moe_init = None
+
+
+def _require_fp4_marlin_supported() -> None:
+    from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import is_fp4_marlin_supported
+
+    if not is_fp4_marlin_supported():
+        raise RuntimeError("ModelOpt NVFP4 QAT weight reload requires vLLM FP4 Marlin support.")
+
+
+def _modelopt_dense_init_marlin(self, quant_config) -> None:
+    _original_dense_init(self, quant_config)
+    _require_fp4_marlin_supported()
+    self.backend = "marlin"
+
+
+def _modelopt_moe_init_marlin(self, quant_config, moe_config) -> None:
+    _original_moe_init(self, quant_config, moe_config)
+    _require_fp4_marlin_supported()
+    from vllm.model_executor.layers.fused_moe.fused_marlin_moe import MarlinExperts
+    from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import NvFp4MoeBackend
+
+    self.allow_flashinfer = False
+    self.cutlass_nvfp4_supported = False
+    self.flashinfer_moe_backend = None
+    self.use_marlin = True
+    self.backend = "marlin"
+    self.nvfp4_backend = NvFp4MoeBackend.MARLIN
+    self.experts_cls = MarlinExperts
+    self.use_global_sf = False
 
 
 def prepare_modelopt_for_weight_reload(model, device=None):
@@ -554,16 +598,20 @@ def modelopt_process_weights_after_loading(model):
 def apply_modelopt_nvfp4_patches():
     """Apply ModelOpt NVFP4 patches to support dynamic weight updates. Call before model loading."""
     global _patched
+    global _original_dense_init
+    global _original_moe_init
 
     if _patched:
         return
 
     from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
-    from vllm.model_executor.layers.quantization.modelopt import (
-        ModelOptNvFp4FusedMoE,
-        ModelOptNvFp4LinearMethod,
-    )
+    from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4FusedMoE, ModelOptNvFp4LinearMethod
 
+    _original_dense_init = ModelOptNvFp4LinearMethod.__init__
+    _original_moe_init = ModelOptNvFp4FusedMoE.__init__
+
+    ModelOptNvFp4LinearMethod.__init__ = _modelopt_dense_init_marlin
+    ModelOptNvFp4FusedMoE.__init__ = _modelopt_moe_init_marlin
     ModelOptNvFp4LinearMethod.process_weights_after_loading = _modelopt_dense_process_weights
     ModelOptNvFp4FusedMoE.process_weights_after_loading = _modelopt_moe_process_weights
     BaseKVCacheMethod.process_weights_after_loading = _modelopt_kv_process_weights

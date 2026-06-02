@@ -17,6 +17,16 @@ import os
 
 from ray._private.runtime_env.constants import RAY_JOB_CONFIG_JSON_ENV_VAR
 
+from verl.utils.device import get_device_capability
+
+_major, _ = get_device_capability()
+# Opt-in GB200 NCCL WAR: set TLLM_DISABLE_NVLS_MNNVL=1 in the launch shell to disable
+# both NCCL_NVLS_ENABLE and NCCL_MNNVL_ENABLE on Blackwell. Required by async-RL
+# Megatron on GB200 nodes without IMEX (mbridge all_gather raises NCCL 801).
+_gb200_nccl_env = {}
+if (_major or 0) >= 10 and os.environ.get("TLLM_DISABLE_NVLS_MNNVL", "0") == "1":
+    _gb200_nccl_env = {"NCCL_NVLS_ENABLE": "0", "NCCL_MNNVL_ENABLE": "0"}
+
 PPO_RAY_RUNTIME_ENV = {
     "env_vars": {
         "TOKENIZERS_PARALLELISM": "true",
@@ -31,6 +41,8 @@ PPO_RAY_RUNTIME_ENV = {
         # https://www.hiascend.com/document/detail/zh/canncommercial/83RC1/maintenref/envvar/envref_07_0143.html
         "HCCL_HOST_SOCKET_PORT_RANGE": "auto",
         "HCCL_NPU_SOCKET_PORT_RANGE": "auto",
+        "HSA_NO_SCRATCH_RECLAIM": "1",
+        **_gb200_nccl_env,
     },
 }
 

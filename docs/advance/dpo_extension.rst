@@ -216,7 +216,7 @@ computation, and data collection.
 
 Furthermore, the model parallelism size of each model is usually fixed,
 including dp, tp, pp. So for these common distributed scenarios, we have
-pre-implemented specific dispatch and collect methods,in `decorator.py <https://github.com/volcengine/verl/blob/main/verl/single_controller/base/decorator.py>`_, which can be directly used to wrap the computations.
+pre-implemented specific dispatch and collect methods,in `decorator.py <https://github.com/verl-project/verl/blob/main/verl/single_controller/base/decorator.py>`_, which can be directly used to wrap the computations.
 
 .. code:: python
 
@@ -227,7 +227,7 @@ pre-implemented specific dispatch and collect methods,in `decorator.py <https://
        pass
 
 Here it requires the data interface to be ``DataProto``. Definition of
-``DataProto`` is in `protocol.py <https://github.com/volcengine/verl/blob/main/verl/protocol.py>`_.
+``DataProto`` is in `protocol.py <https://github.com/verl-project/verl/blob/main/verl/protocol.py>`_.
 
 Step 3: Main training loop
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -270,4 +270,4 @@ flow. It is recommended that ``main_task`` is also a ray remote process.
 
 Here, different ``WorkerGroups`` can be placed in the same resource pool or
 in different resource pools using ``create_colocated_worker_cls``
-similar as in `ray_trainer.py <https://github.com/volcengine/verl/blob/main/verl/trainer/ppo/ray_trainer.py>`_.
+similar as in `ray_trainer.py <https://github.com/verl-project/verl/blob/main/verl/trainer/ppo/ray_trainer.py>`_.

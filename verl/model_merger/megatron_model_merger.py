@@ -489,9 +489,9 @@ class MegatronModelMerger(BaseModelMerger):
                 tokenizer.save_pretrained(self.config.target_dir)
 
     def merge_and_save(self):
-        from verl.utils.megatron_utils import get_dist_checkpoint_path
+        from verl.utils.megatron_utils import get_model_dist_checkpoint_path
 
-        model_ckpt_path = get_dist_checkpoint_path(self.config.local_dir)
+        model_ckpt_path = get_model_dist_checkpoint_path(self.config.local_dir)
 
         model_state_dict = self._load_state_dicts(model_ckpt_path)
         merged_state_dict = self._merge_state_dicts(model_state_dict)

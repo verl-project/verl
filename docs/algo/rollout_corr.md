@@ -190,7 +190,8 @@ actor_rollout_ref:
 - `verl/trainer/ppo/rollout_corr_helper.py` - Contains `compute_rollout_correction_and_rejection_mask()` and `compute_offpolicy_metrics()`
 - `verl/trainer/ppo/core_algos.py` - Rollout Correction integration with PPO and REINFORCE modes (`compute_policy_loss_bypass_mode()`, `compute_policy_loss_reinforce()`)
 - `verl/trainer/ppo/ray_trainer.py` - Bypass mode implementation (skips `old_log_prob` computation)
-- `verl/workers/actor/dp_actor.py` - Mode selection logic and metrics collection
+- `verl/workers/utils/losses.py` - `ppo_loss` loss function wired to actor `TrainingWorker` via `verl.workers.engine_workers.ActorRolloutRefWorker.init_model`
+- `verl/trainer/ppo/core_algos.py` - `@register_policy_loss("bypass_mode")` policy loss that invokes `compute_rollout_correction_and_rejection_mask` and emits off-policy metrics
 
 ### **Configuration Files**
 
@@ -206,8 +207,8 @@ actor_rollout_ref:
 ### **Example Scripts**
 
 - `recipe/dapo/run_dapo_qwen2.5_32b_rollout_corr.sh` - DAPO example with Rollout Correction
-- `examples/rollout_correction/run_with_rollout_corr.sh` - Basic example
-- `examples/rollout_correction/run_with_rollout_corr_multi_rs.sh` - Multi-RS example
+- `examples/rollout_correction/run_qwen2_5_7b_fsdp.sh` - Basic example
+- `examples/rollout_correction/run_qwen2_5_7b_fsdp_multi_rs.sh` - Multi-RS example
 
 ### **Tests**
 
@@ -1093,7 +1094,7 @@ if not is_healthy:
 Start with the basic token-level truncate configuration:
 
 ```bash
-bash examples/rollout_correction/run_with_rollout_corr.sh
+bash examples/rollout_correction/run_qwen2_5_7b_fsdp.sh
 ```
 
 Monitor metrics for 1-2 epochs before adjusting parameters.

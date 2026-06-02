@@ -83,6 +83,7 @@ def forward_with_torch_backend(
     cache_position: Optional[torch.LongTensor] = None,
     logits_to_keep: int | torch.Tensor = 0,
     temperature: float = 1.0,
+    shift_labels: Optional[torch.LongTensor] = None,
     **loss_kwargs,
 ) -> tuple | CausalLMOutputForPPO:
     from verl.utils.experimental.torch_functional import FusedLinearForPPO
@@ -105,8 +106,13 @@ def forward_with_torch_backend(
     if not return_dict:
         raise NotImplementedError("forward_with_torch_backend has to return_dict")
 
-    # Loss calculations
-    if labels is not None:
+    # Loss calculations.
+    # When the engine has already prepared globally-rolled labels (e.g. the FSDP
+    # path under Ulysses SP, see issue #6068), it passes them as `shift_labels`
+    # so we don't redo `torch.roll` on a sequence-parallel-sliced shard.
+    if shift_labels is not None:
+        rolled_labels = shift_labels
+    elif labels is not None:
         rolled_labels = torch.roll(labels, shifts=-1, dims=-1)
     elif input_ids is not None:
         rolled_labels = torch.roll(input_ids, shifts=-1, dims=-1)
@@ -145,6 +151,7 @@ def forward_with_triton_backend(
     cache_position: Optional[torch.LongTensor] = None,
     logits_to_keep: int | torch.Tensor = 0,
     temperature: float = 1.0,
+    shift_labels: Optional[torch.LongTensor] = None,
     **loss_kwargs,
 ) -> tuple | CausalLMOutputForPPO:
     from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy
@@ -168,8 +175,11 @@ def forward_with_triton_backend(
     if not return_dict:
         raise NotImplementedError("forward_with_triton_backend has to return_dict")
 
-    # Loss calculations
-    if labels is not None:
+    # Loss calculations. See `forward_with_torch_backend` for why `shift_labels`
+    # takes precedence over local `torch.roll` (issue #6068).
+    if shift_labels is not None:
+        rolled_labels = shift_labels
+    elif labels is not None:
         rolled_labels = torch.roll(labels, shifts=-1, dims=-1)
     elif input_ids is not None:
         rolled_labels = torch.roll(input_ids, shifts=-1, dims=-1)

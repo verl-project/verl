@@ -63,7 +63,7 @@ n_resp_per_prompt=16
 train_prompt_mini_bsz=32
 test_freq=20
 
-# https://github.com/volcengine/verl/blob/main/docs/algo/rollout_corr.md
+# https://github.com/verl-project/verl/blob/main/docs/algo/rollout_corr.md
 # use decoupled_geo_rs
 #algorithm:
 #  rollout_correction:

@@ -32,7 +32,7 @@ from verl.utils.device import is_cuda_available
 from verl.utils.fs import copy_to_local, is_non_local, local_mkdir_safe
 from verl.utils.fsdp_utils import fsdp_version, get_fsdp_full_state_dict, get_fsdp_state_ctx
 from verl.utils.logger import log_with_rank
-from verl.utils.transformers_compat import get_auto_model_for_vision2seq
+from verl.utils.transformers_compat import drop_tied_target_keys, get_auto_model_for_vision2seq
 
 from .checkpoint_manager import BaseCheckpointManager
 
@@ -98,6 +98,42 @@ class FSDPCheckpointManager(BaseCheckpointManager):
             checkpoint_config=checkpoint_config,
         )
         self.trust_remote_code = trust_remote_code
+
+    def _get_lora_train_meta(self, unwrap_model):
+        peft_config = getattr(unwrap_model, "peft_config", None)
+        if not peft_config:
+            return None
+        if isinstance(peft_config, dict):
+            peft_config = peft_config.get("default") or next(iter(peft_config.values()), None)
+        if peft_config is None:
+            return None
+
+        lora_rank = int(getattr(peft_config, "r", 0) or 0)
+        if lora_rank <= 0:
+            return None
+
+        lora_alpha = int(getattr(peft_config, "lora_alpha", lora_rank) or 0)
+        task_type = getattr(peft_config, "task_type", None) or "CAUSAL_LM"
+        if hasattr(task_type, "value"):
+            task_type = task_type.value
+
+        return {"r": lora_rank, "lora_alpha": lora_alpha, "task_type": str(task_type)}
+
+    def _save_lora_train_meta(self, local_path: str, unwrap_model):
+        lora_train_meta = self._get_lora_train_meta(unwrap_model)
+        if lora_train_meta is None:
+            return None
+
+        lora_meta_path = os.path.join(local_path, "lora_train_meta.json")
+        with open(lora_meta_path, "w", encoding="utf-8") as f:
+            json.dump(lora_train_meta, f, ensure_ascii=False, indent=4)
+        log_with_rank(
+            f"Saved LoRA rank/alpha metadata to {os.path.abspath(lora_meta_path)}",
+            rank=self.rank,
+            logger=logger,
+            log_only_rank_0=True,
+        )
+        return lora_meta_path
 
     def load_checkpoint(self, local_path: str, hdfs_path: str = None, del_local_after_load=False):
         """
@@ -297,6 +333,7 @@ class FSDPCheckpointManager(BaseCheckpointManager):
             )
             with open(fsdp_config_path, "w") as f:
                 json.dump(asdict(fsdp_config), f, indent=4)
+            self._save_lora_train_meta(local_path, unwrap_model)
 
         # wait for everyone to dump to local
         torch.distributed.barrier()
@@ -338,6 +375,8 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                             f"Warning: {self.__class__.__name__}.save_checkpoint: Generation config file not found "
                             f"in, using a generation config created from the model config when saving hf_model."
                         )
+
+                drop_tied_target_keys(state_dict, save_model, model_config)
 
                 save_model.save_pretrained(hf_local_path, state_dict=state_dict)
                 log_with_rank(

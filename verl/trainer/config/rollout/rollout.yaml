@@ -161,20 +161,31 @@ val_kwargs:
   # Whether to sample during training rollout. False uses greedy sampling.
   do_sample: False
 
-# Multi-turn interaction config for tools or chat.
+# Multi-turn tool config.
 multi_turn:
 
   # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
   _target_: verl.workers.config.MultiTurnConfig
 
-  # set to True for multi-turn tool interaction tasks; should set rollout.name to sglang as well
+  # set to True for multi-turn tool tasks; should set rollout.name to sglang as well
   enable: False
 
   # null for no limit (default max_length // 3)
   max_assistant_turns: null
 
-  # null for no tool
+  # YAML config for stateful tools that subclass ``BaseTool``.
+  # Use this when a tool needs per-trajectory state, async ``create``/``release``
+  # lifecycle hooks, or custom rewards.
+  # null disables this code path.
   tool_config_path: null
+
+  # Path to a Python file with ``@function_tool``-decorated functions, loaded
+  # once per ``AgentLoopWorker``. Use this for stateless tools where the
+  # OpenAI-compatible JSON schema can be inferred from the function signature
+  # and Google-style docstring. Coexists with ``tool_config_path``; name
+  # collisions across the two raise an error.
+  # null disables this code path.
+  function_tool_path: null
 
   # null for no limit (default max_length // 3)
   max_user_turns: null
@@ -187,9 +198,6 @@ multi_turn:
 
   # truncate side of tool response: left, middle, right
   tool_response_truncate_side: middle
-
-  # null for no interaction
-  interaction_config_path: null
 
   # - When set to True, the model's default chat template is used for multi-turn rollout, which typically matches production behavior.
   # - When set to False, the token ids recorded for training are used instead; unlike the default chat template, these always include the model's full output,
@@ -206,10 +214,10 @@ multi_turn:
   # - ignore_strippable: ignore strippable tokens when checking tokenization sanity
   tokenization_sanity_check_mode: strict
 
-  # Format of the multi-turn interaction. Options: hermes, llama3_json, ...
+  # Format of the multi-turn rollout. Options: hermes, llama3_json, ...
   format: hermes
 
-  # Number of repeat rollouts for each interaction
+  # Number of repeat rollouts for each sample
   num_repeat_rollouts: null
 
 # support logging rollout prob for debugging purpose
@@ -263,7 +271,7 @@ checkpoint_engine:
 
   # Specifies the tensor bucket size (in megabytes) for batch weight updates during rollout operations.
   # This parameter controls the maximum payload size for a single weight update request.
-  # Reference: https://github.com/volcengine/verl/pull/2418
+  # Reference: https://github.com/verl-project/verl/pull/2418
   # Currently only supported in SGLang rollout implementations
   # Larger values may improve throughput but increase memory overhead
   # Detailed performance comparison:
@@ -295,7 +303,7 @@ trace:
   # Experiment name for run identification in tracking tools
   experiment_name: ${oc.select:trainer.experiment_name,null}
 
-  # trace backend, support mlflow, weave
+  # trace backend, support mlflow, weave, trackio
   backend: null
 
   # whether translate token id to text in output
@@ -397,6 +405,26 @@ profiler:
       # True for each task has its own database, False for all tasks in one training step share one database.
       discrete: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.torch.discrete,false}
 
+    # msprobe precision debugger config
+    precision_debugger:
+
+      # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+      _target_: verl.utils.profiler.config.PrecisionDebuggerToolConfig
+
+      # Path to msprobe config json
+      config_path: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.precision_debugger.config_path,${oc.select:global_profiler.global_tool_config.precision_debugger.config_path,null}}
+
+      # Deprecated and ignored. Use global_profiler.steps.
+      steps: null
+
+      # Profile stages
+      # Supported stages: actor_update, actor_compute_log_prob, ref_compute_log_prob,
+      # compute_values, critic_update, compute_rm_score
+      stages: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.precision_debugger.stages,${oc.select:global_profiler.global_tool_config.precision_debugger.stages,null}}
+
+      # Whether to fail on unknown stage or missing msprobe
+      strict: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.precision_debugger.strict,${oc.select:global_profiler.global_tool_config.precision_debugger.strict,False}}
+
 # prometheus configuration for vllm/sglang server mode
 prometheus:
 
@@ -426,3 +454,27 @@ mtp: ${oc.select:actor_rollout_ref.model.mtp, null}
 
 # QAT configuration (inherited from actor's engine config)
 qat: ${oc.select:actor_rollout_ref.actor.fsdp_config.qat,${oc.select:actor_rollout_ref.actor.megatron.qat,null}}
+
+# Prefill-Decode disaggregation (SGLang only; keep rollout.name=sglang and toggle enabled=True).
+disaggregation:
+
+  # Master switch for PD disaggregation.
+  enabled: False
+
+  # Number of prefill replicas (each uses tensor_model_parallel_size GPUs).
+  prefill_replicas: 1
+
+  # Number of decode replicas.
+  decode_replicas: 1
+
+  # Decode TP override; null = same as tensor_model_parallel_size.
+  decode_tensor_model_parallel_size: null
+
+  # KV cache transport: nixl | mooncake | ascend | mori | fake.
+  transfer_backend: nixl
+
+  # Bootstrap server port on prefill side; null = auto-assign.
+  bootstrap_port: null
+
+  # InfiniBand device (required for mooncake over RDMA).
+  ib_device: null

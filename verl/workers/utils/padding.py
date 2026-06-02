@@ -111,7 +111,6 @@ def no_padding_2_padding(tensor: torch.Tensor, data: TensorDict) -> torch.Tensor
     values = tensor.values() if tensor.is_nested else tensor
     prompt_ids = data["prompts"]
     response_ids = data["responses"]
-    attention_mask = data["attention_mask"]
 
     max_response_len = tu.get_non_tensor_data(data=data, key="max_response_len", default=-1)
 
@@ -121,6 +120,7 @@ def no_padding_2_padding(tensor: torch.Tensor, data: TensorDict) -> torch.Tensor
         if max_response_len < 0:
             max_response_len = response_lens.max().item()
     else:
+        attention_mask = data["attention_mask"]
         assert not attention_mask.is_nested
         prompt_lens = attention_mask[:, : prompt_ids.shape[1]].sum(dim=1)
         response_lens = attention_mask[:, prompt_ids.shape[1] :].sum(dim=1)
@@ -143,10 +143,20 @@ def no_padding_2_padding(tensor: torch.Tensor, data: TensorDict) -> torch.Tensor
     return output
 
 
+def build_attention_mask_from_nested(input_ids: torch.Tensor, max_seq_len: int | None = None) -> torch.Tensor:
+    """Build a padded full-sequence attention mask from nested input ids."""
+    assert input_ids.is_nested, "input_ids must be a nested tensor"
+    device = input_ids.values().device
+    seq_lens = input_ids.offsets().diff().to(device=device)
+    if max_seq_len is None:
+        max_seq_len = int(seq_lens.max().item())
+    positions = torch.arange(max_seq_len, device=device).unsqueeze(0)
+    return (positions < seq_lens.unsqueeze(1)).to(torch.int32)
+
+
 def embeds_padding_2_no_padding(data: TensorDict) -> TensorDict:
     """
     Convert TensorDict from prompt embeds with padding to no-padding format.
-    For diffusion model training only.
 
     Currently we expect the prompt embedding mask to be [1111000...] format,
     which means the valid tokens are continuous and start from the left.
@@ -181,3 +191,41 @@ def embeds_padding_2_no_padding(data: TensorDict) -> TensorDict:
         )
 
     return data
+
+
+def response_from_nested(tensor: torch.Tensor, response_mask: torch.Tensor) -> torch.Tensor:
+    """Extract response from nested model output.
+
+    Args:
+        tensor: a nested tensor with shape (bsz, prompt_len + response_len)
+        response_mask: a nested tensor with shape (bsz, response_len)
+
+    Returns:
+        tensor: a nested tensor with shape (bsz, response_len)
+    """
+    values, offsets = tensor.values(), tensor.offsets()
+    response_lens = response_mask.offsets().diff()
+    response_list = []
+    for resp_len, seq_offset in zip(response_lens, offsets[1:], strict=True):
+        # left-shift model output by one token for log_probs/values
+        response_list.append(values[seq_offset - resp_len - 1 : seq_offset - 1])
+    return torch.nested.as_nested_tensor(response_list, layout=torch.jagged)
+
+
+def response_to_nested(tensor: torch.Tensor, response_mask: torch.Tensor) -> torch.Tensor:
+    """Convert padded response tensor to nested tensor.
+
+    Args:
+        tensor: a tensor with shape (bsz, response_len)
+        response_mask: a nested tensor with shape (bsz, response_len)
+
+    Returns:
+        tensor: a nested tensor with shape (bsz, response_len)
+    """
+    assert response_mask.is_nested
+    response_lens = response_mask.offsets().diff()
+    response_list = []
+    for i in range(tensor.shape[0]):
+        response_list.append(tensor[i, : response_lens[i]])
+
+    return torch.nested.as_nested_tensor(response_list, layout=torch.jagged)
