@@ -198,6 +198,13 @@ def hf_processor(name_or_path, **kwargs):
         # tokenizer backend (e.g. TokenizersBackend) for text-only models.
         # Treat it as "no multimodal processor" and let callers use hf_tokenizer.
         if isinstance(processor, PreTrainedTokenizerBase):
+            config = AutoConfig.from_pretrained(name_or_path, **kwargs)
+            if getattr(config, "model_type", None) == "internvl_chat":
+                from verl.utils.internvl_processor import InternVLProcessor
+
+                tokenizer = processor  # AutoProcessor fell back to tokenizer
+                processor = InternVLProcessor(tokenizer, config)
+                return processor
             return None
 
         config = AutoConfig.from_pretrained(name_or_path, **kwargs)

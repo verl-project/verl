@@ -647,6 +647,27 @@ class AgentLoopWorker:
         #   e.g., [0,0,0,0,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,0,0,0,0]
 
         # TODO(wuxibin): remove padding and use tensordict.
+
+        # For InternVL: expand <image> to <img><IMG_CONTEXT>*N</img> tokens before padding.
+        # vLLM receives the unexpanded prompt (keeps <image>), but the model forward
+        # uses <IMG_CONTEXT> tokens to locate vision feature injection positions.
+        if hasattr(self.processor, "expand_prompt_ids") and output.multi_modal_data:
+            images = output.multi_modal_data.get("images")
+            if images:
+                from vllm.model_executor.models.internvl import image_to_pixel_values_internvl
+                num_tiles = 0
+                for img in images:
+                    if isinstance(img, Image.Image):
+                        pv = image_to_pixel_values_internvl(
+                            img,
+                            input_size=self.processor._image_size,
+                            min_num=self.processor._min_dynamic_patch,
+                            max_num=self.processor._max_dynamic_patch,
+                            use_thumbnail=self.processor._use_thumbnail,
+                        )
+                        num_tiles += pv.shape[0]
+                output.prompt_ids = self.processor.expand_prompt_ids(output.prompt_ids, num_tiles)
+
         prompt_output = self._pad_token_ids(
             output.prompt_ids,
             max_length=self.rollout_config.prompt_length,
@@ -804,6 +825,12 @@ class AgentLoopWorker:
     ) -> torch.Tensor:
         """Compute position ids for multi-modal inputs."""
         if self.processor is None:
+            return compute_position_id_with_mask(attention_mask)  # (1, seq_len)
+
+        # Non-mRoPE VLMs (e.g. InternVL uses standard 1D RoPE on its Qwen2 LLM
+        # backbone) do not need multi-dimensional position IDs. Fall back to
+        # simple 1D positions when image_processor lacks merge_size attribute.
+        if not getattr(getattr(self.processor, "image_processor", None), "merge_size", None):
             return compute_position_id_with_mask(attention_mask)  # (1, seq_len)
 
         multi_modal_kwargs = {
