@@ -201,7 +201,7 @@ class vLLMColocateWorkerExtension:
 
         from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightReceiver
 
-        with set_current_vllm_config(self.vllm_config):
+        with set_current_vllm_config(self.model_runner.vllm_config):
             if current_platform.device_type == "npu" and self.device is None:
                 self.device = torch.device(f"npu:{self.local_rank}")
 
