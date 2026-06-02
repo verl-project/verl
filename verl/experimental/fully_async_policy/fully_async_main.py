@@ -107,7 +107,12 @@ class FullyAsyncTaskRunner:
             config=config,
             key="message_queue_num_cpus",
             default_num_cpus=DEFAULT_MESSAGE_QUEUE_NUM_CPUS,
-            remaining_keys=(),
+            remaining_keys=(
+                ("trainer_num_cpus", DEFAULT_TRAINER_NUM_CPUS),
+                ("rollouter_num_cpus", DEFAULT_ROLLOUTER_NUM_CPUS),
+            ),
+            reserved_num_cpus=estimate_trainer_worker_group_num_cpus(config)
+            + estimate_rollout_worker_group_num_cpus(config),
         )
         message_queue = MessageQueue.options(num_cpus=message_queue_num_cpus).remote(config, max_queue_size)
         message_queue_client = MessageQueueClient(message_queue)
