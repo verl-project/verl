@@ -30,9 +30,13 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 def get_max_position_embeddings(hf_config) -> int:
     max_len = getattr(hf_config, "max_position_embeddings", None)
     if max_len is None:
-        text_config = getattr(hf_config, "text_config", None)
-        if text_config is not None:
-            max_len = getattr(text_config, "max_position_embeddings", None)
+        # Try text_config first, then common VLM LLM sub-config names.
+        for key in ("text_config", "llm_config", "language_config"):
+            sub = getattr(hf_config, key, None)
+            if sub is not None:
+                max_len = getattr(sub, "max_position_embeddings", None)
+                if max_len is not None:
+                    break
 
     if max_len is None:
         raise ValueError("max_position_embeddings not found in HFModelConfig!")
