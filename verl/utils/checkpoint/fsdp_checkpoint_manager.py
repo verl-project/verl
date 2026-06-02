@@ -312,15 +312,7 @@ class FSDPCheckpointManager(BaseCheckpointManager):
 
             model_config.save_pretrained(hf_config_tokenizer_path)
             if self.processing_class is not None:
-                try:
-                    self.processing_class.save_pretrained(hf_config_tokenizer_path)
-                except AttributeError:
-                    log_with_rank(
-                        f"processing_class {type(self.processing_class).__name__} has no save_pretrained method, skipping",
-                        rank=self.rank,
-                        logger=logger,
-                        log_only_rank_0=True,
-                    )
+                self.processing_class.save_pretrained(hf_config_tokenizer_path)
             log_with_rank(
                 f"Saved model config and tokenizer class to {os.path.abspath(hf_config_tokenizer_path)}",
                 rank=self.rank,
