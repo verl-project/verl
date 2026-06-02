@@ -15,7 +15,7 @@ import asyncio
 import time
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 import torch
@@ -37,14 +37,6 @@ class RolloutSample:
 
     # Processing metadata
     rollout_status: dict[str, Any]
-
-
-@dataclass
-class ValidateMetrics:
-    """Metrics for validation"""
-
-    timing_raw: dict[str, Any]
-    metrics: Optional[dict[str, Any]] = None
 
 
 def prepare_single_generation_data(batch_dict, config) -> DataProto:
@@ -71,9 +63,7 @@ def prepare_single_generation_data(batch_dict, config) -> DataProto:
         )
 
     # Setting selected agent, that supports partial
-    if config.actor_rollout_ref.rollout.multi_turn.enable:
-        full_batch.non_tensor_batch["agent_name"] = np.array(["tool_agent"] * len(full_batch), dtype=object)
-    else:
+    if not config.actor_rollout_ref.rollout.multi_turn.enable:
         full_batch.non_tensor_batch["agent_name"] = np.array(["single_turn_agent"] * len(full_batch), dtype=object)
 
     # Add global step count to generated data

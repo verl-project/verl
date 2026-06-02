@@ -104,16 +104,20 @@ def derive_torchtitan_name_and_flavor(hf_config) -> tuple[str, str]:
             f"Supported types: {list(_HF_MODEL_TYPE_TO_TORCHTITAN_NAME.keys())}."
         )
 
-    # Import the model package and find the configs dict
+    # Import the model package and use model_registry to build each flavor's config.
+    # model_registry has sensible defaults for all optional params (attn_backend, etc.).
     model_module = importlib.import_module(f"torchtitan.models.{name}")
-    model_configs = None
-    for attr in dir(model_module):
-        obj = getattr(model_module, attr)
-        if isinstance(obj, dict) and attr.endswith("_configs"):
-            model_configs = obj
+    model_registry = model_module.model_registry
+
+    # The configs dict name isn't derivable from the model name
+    # (e.g. gpt_oss -> gptoss_configs), so we find it by convention.
+    flavor_names = None
+    for attr, obj in vars(model_module).items():
+        if attr.endswith("_configs") and isinstance(obj, dict):
+            flavor_names = list(obj.keys())
             break
 
-    if model_configs is None:
+    if flavor_names is None:
         raise ValueError(
             f"Could not find model configs dict in torchtitan.models.{name}. "
             f"Expected a dict attribute ending with '_configs'."
@@ -123,11 +127,13 @@ def derive_torchtitan_name_and_flavor(hf_config) -> tuple[str, str]:
     num_layers = hf_config.num_hidden_layers
     vocab_size = hf_config.vocab_size
 
-    for flavor_name, model_cfg in model_configs.items():
+    for flavor_name in flavor_names:
+        cfg = model_registry(flavor_name).model
+        n_layers = getattr(cfg, "n_layers", None) or len(getattr(cfg, "layers", []))
         if (
-            getattr(model_cfg, "dim", None) == hidden_size
-            and getattr(model_cfg, "n_layers", None) == num_layers
-            and getattr(model_cfg, "vocab_size", None) == vocab_size
+            getattr(cfg, "dim", None) == hidden_size
+            and n_layers == num_layers
+            and getattr(cfg, "vocab_size", None) == vocab_size
         ):
             logger.info(
                 f"Auto-derived torchtitan name='{name}', flavor='{flavor_name}' from HF model_type='{model_type}'"
@@ -138,7 +144,7 @@ def derive_torchtitan_name_and_flavor(hf_config) -> tuple[str, str]:
         f"No matching torchtitan flavor found for model_type='{model_type}' "
         f"(hidden_size={hidden_size}, num_hidden_layers={num_layers}, "
         f"vocab_size={vocab_size}). "
-        f"Available flavors for '{name}': {list(model_configs.keys())}."
+        f"Available flavors for '{name}': {flavor_names}."
     )
 
 

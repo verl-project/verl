@@ -37,7 +37,7 @@ SFT Examples
 ------------
 
 We provide example SFT training scripts using the Automodel backend in
-`examples/sft/gsm8k/ <https://github.com/volcengine/verl/blob/main/examples/sft/gsm8k/>`_.
+`examples/sft/gsm8k/ <https://github.com/verl-project/verl/blob/main/examples/sft/gsm8k/>`_.
 
 Basic: Qwen2.5-0.5B with FSDP2
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -47,9 +47,9 @@ no parallelism:
 
 .. code:: shell
 
-   bash examples/sft/gsm8k/run_qwen_05_automodel.sh 4 /tmp/automodel_sft_test
+   bash examples/sft/gsm8k/run_qwen2_5_0_5b_automodel.sh 4 /tmp/automodel_sft_test
 
-See `run_qwen_05_automodel.sh <https://github.com/volcengine/verl/blob/main/examples/sft/gsm8k/run_qwen_05_automodel.sh>`_.
+See `run_qwen2_5_0_5b_automodel.sh <https://github.com/verl-project/verl/blob/main/examples/sft/gsm8k/run_qwen2_5_0_5b_automodel.sh>`_.
 
 Advanced: Qwen3-30B MoE with Expert Parallelism
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -62,4 +62,4 @@ torch_mm experts backend:
 
    bash examples/sft/gsm8k/run_qwen3_30b_automodel.sh 8 /tmp/automodel_sft_30b
 
-See `run_qwen3_30b_automodel.sh <https://github.com/volcengine/verl/blob/main/examples/sft/gsm8k/run_qwen3_30b_automodel.sh>`_.
+See `run_qwen3_30b_automodel.sh <https://github.com/verl-project/verl/blob/main/examples/sft/gsm8k/run_qwen3_30b_automodel.sh>`_.

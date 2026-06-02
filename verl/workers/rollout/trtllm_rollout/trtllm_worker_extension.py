@@ -15,12 +15,26 @@ import base64
 import inspect
 from typing import Optional
 
-from tensorrt_llm import serialization
-from tensorrt_llm._ray_utils import control_action_decorator
-from tensorrt_llm._torch.modules.fused_moe.moe_load_balancer import MoeLoadBalancer
-from tensorrt_llm._torch.utils import get_device_uuid
-from tensorrt_llm.llmapi.rlhf_utils import WorkerExtension as TrtllmWorkerExtension
-from tensorrt_llm.logger import logger
+# Defer tensorrt_llm imports to avoid FlashInfer's check_cuda_arch() crash
+# when this module is loaded on CPU-only Ray actors. The module is normally
+# loaded only on GPU workers via string path in trtllm_async_server.py, but
+# guard defensively in case of transitive imports.
+try:
+    from tensorrt_llm import serialization
+    from tensorrt_llm._ray_utils import control_action_decorator
+    from tensorrt_llm._torch.modules.fused_moe.moe_load_balancer import MoeLoadBalancer
+    from tensorrt_llm._torch.utils import get_device_uuid
+    from tensorrt_llm.llmapi.rlhf_utils import WorkerExtension as TrtllmWorkerExtension
+    from tensorrt_llm.logger import logger
+except (ImportError, RuntimeError):
+    # On CPU actors without CUDA, these imports may fail.
+    # The class below won't be usable, but the module can be imported safely.
+    serialization = None
+    control_action_decorator = lambda f: f  # noqa: E731 — identity fallback
+    MoeLoadBalancer = None
+    get_device_uuid = None
+    TrtllmWorkerExtension = object
+    logger = None
 
 
 class WorkerExtension(TrtllmWorkerExtension):
@@ -93,6 +107,7 @@ class WorkerExtension(TrtllmWorkerExtension):
                             "device",
                             "float32",
                             "float16",
+                            "bfloat16",
                             "int32",
                             "int64",
                             "int16",
@@ -165,3 +180,19 @@ class WorkerExtension(TrtllmWorkerExtension):
         except Exception as e:
             logger.error("Encountered an error in update_weights")
             raise e
+
+    def reset_prefix_cache(self) -> None:
+        """Invalidate the KV cache prefix reuse state after weight updates."""
+        self.engine.reset_prefix_cache()
+
+
+# TODO: remove this class and revert the non-VLM path in trtllm_async_server.py
+# to use "tensorrt_llm.llmapi.rlhf_utils.WorkerExtension" once verl's TRT-LLM version
+# is bumped to include https://github.com/NVIDIA/TensorRT-LLM/pull/13784.
+class RlhfWorkerExtension(TrtllmWorkerExtension):
+    """Minimal extension of TRT-LLM's WorkerExtension for non-VLM RLHF models."""
+
+    @control_action_decorator
+    def wait_for_engine_idle(self) -> None:
+        """Block until the engine has no active or queued requests."""
+        pass

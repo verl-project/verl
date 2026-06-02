@@ -34,11 +34,10 @@ def enable_full_determinism(seed: int):
 
     os.environ["PYTHONHASHSEED"] = str(seed)
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
-    os.environ["NCCL_DETERMINISTIC"] = "1"
     os.environ["FLASH_ATTENTION_DETERMINISTIC"] = "1"
     if is_npu_available:
         # The environment variable required to enable deterministic mode on Ascend NPUs.
-        os.environ["NCCL_DETERMINISTIC"] = "true"
+        os.environ["HCCL_DETERMINISTIC"] = "true"
         os.environ["CLOSE_MATMUL_K_SHIFT"] = "1"
 
     random.seed(seed)

@@ -20,7 +20,6 @@ This trainer supports model-agonistic model initialization with huggingface
 """
 
 import uuid
-from copy import deepcopy
 from pprint import pprint
 from typing import Any, Optional
 
@@ -31,8 +30,6 @@ from torch.utils.data import Dataset, Sampler
 from tqdm import tqdm
 
 from verl import DataProto
-from verl.checkpoint_engine import CheckpointEngineManager
-from verl.experimental.dataset.sampler import AbstractCurriculumSampler
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, ResourcePoolManager
 from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
@@ -48,6 +45,7 @@ from verl.trainer.ppo.utils import Role, WorkerType
 from verl.utils.checkpoint.checkpoint_manager import should_save_ckpt_esi
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
+from verl.utils.import_utils import load_class_from_fqn
 from verl.utils.metric import reduce_metrics
 from verl.utils.rollout_skip import RolloutSkip
 
@@ -119,10 +117,17 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
         self._init_reward_loop()
         self._init_async_rollout_manager()
 
+        # Support custom CheckpointEngineManager via config
+        checkpoint_manager_class_fqn = self.config.actor_rollout_ref.rollout.get("checkpoint_manager_class")
+        if checkpoint_manager_class_fqn:
+            CheckpointEngineManager = load_class_from_fqn(checkpoint_manager_class_fqn, "CheckpointEngineManager")
+        else:
+            from verl.checkpoint_engine import CheckpointEngineManager
+
         self.checkpoint_manager = CheckpointEngineManager(
             config=omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine),
             trainer=self.actor_rollout_wg,
-            replicas=self.async_rollout_manager.rollout_replicas,
+            replicas=self.llm_server_manager.get_replicas(),
         )
 
     def _init_resource_pools(self):
@@ -144,26 +149,25 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.Critic)
             critic_cfg = omega_conf_to_dataclass(self.config.critic)
 
-            if self.use_legacy_worker_impl == "disable":
-                # convert critic_cfg into TrainingWorkerConfig
-                from verl.workers.config import FSDPEngineConfig
-                from verl.workers.engine_workers import TrainingWorkerConfig
+            # convert critic_cfg into TrainingWorkerConfig for the unified model engine worker
+            from verl.workers.config import FSDPEngineConfig
+            from verl.workers.engine_workers import TrainingWorkerConfig
 
-                self.orig_critic_cfg = critic_cfg
-                if self.orig_critic_cfg.strategy == "fsdp":
-                    engine_config: FSDPEngineConfig = self.orig_critic_cfg.model.fsdp_config
-                    engine_config.infer_max_token_len_per_gpu = critic_cfg.ppo_infer_max_token_len_per_gpu
-                    engine_config.max_token_len_per_gpu = critic_cfg.ppo_max_token_len_per_gpu
-                else:
-                    raise NotImplementedError(f"Unknown strategy {self.orig_critic_cfg.strategy=}")
+            self.orig_critic_cfg = critic_cfg
+            if self.orig_critic_cfg.strategy == "fsdp":
+                engine_config: FSDPEngineConfig = self.orig_critic_cfg.model.fsdp_config
+                engine_config.infer_max_token_len_per_gpu = critic_cfg.ppo_infer_max_token_len_per_gpu
+                engine_config.max_token_len_per_gpu = critic_cfg.ppo_max_token_len_per_gpu
+            else:
+                raise NotImplementedError(f"Unknown strategy {self.orig_critic_cfg.strategy=}")
 
-                critic_cfg = TrainingWorkerConfig(
-                    model_type="value_model",
-                    model_config=self.orig_critic_cfg.model_config,
-                    engine_config=engine_config,
-                    optimizer_config=self.orig_critic_cfg.optim,
-                    checkpoint_config=self.orig_critic_cfg.checkpoint,
-                )
+            critic_cfg = TrainingWorkerConfig(
+                model_type="value_model",
+                model_config=self.orig_critic_cfg.model_config,
+                engine_config=engine_config,
+                optimizer_config=self.orig_critic_cfg.optim,
+                checkpoint_config=self.orig_critic_cfg.checkpoint,
+            )
 
             critic_cls = RayClassWithInitArgs(cls=self.role_worker_mapping[Role.Critic], config=critic_cfg)
             self.resource_pool_to_cls[resource_pool][str(Role.Critic)] = critic_cls
@@ -195,7 +199,8 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
         # NOTE: if you want to use a different resource pool for each role, which can support different parallel size,
         # you should not use `create_colocated_worker_cls`.
         # Instead, directly pass different resource pool to different worker groups.
-        # See https://github.com/volcengine/verl/blob/master/examples/ray/tutorial.ipynb for more information.
+        # See https://github.com/verl-project/verl/blob/master/examples/tutorial/ray/tutorial.ipynb
+        # for more information.
         all_wg = {}
         wg_kwargs = {}  # Setting up kwargs for RayWorkerGroup
         if OmegaConf.select(self.config.trainer, "ray_wait_register_center_timeout") is not None:
@@ -227,17 +232,14 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
     def _init_models(self):
         if self.use_critic:
             self.critic_wg = self.all_wg[str(Role.Critic)]
-            if self.use_legacy_worker_impl == "disable":
-                self.critic_wg.reset()
-                # assign critic loss
-                from functools import partial
+            self.critic_wg.reset()
+            # assign critic loss
+            from functools import partial
 
-                from verl.workers.utils.losses import value_loss
+            from verl.workers.utils.losses import value_loss
 
-                value_loss_ = partial(value_loss, config=self.orig_critic_cfg)
-                self.critic_wg.set_loss_fn(value_loss_)
-            else:
-                self.critic_wg.init_model()
+            value_loss_ = partial(value_loss, config=self.orig_critic_cfg)
+            self.critic_wg.set_loss_fn(value_loss_)
 
         if self.use_reference_policy and not self.ref_in_actor:
             self.ref_policy_wg = self.all_wg[str(Role.RefPolicy)]
@@ -371,7 +373,6 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
         self._fit_save_checkpoint()
         self._fit_stop_profile()
         self._fit_collect_metrics(batch)
-        self._fit_torch_memory()
         self._fit_experimental(batch)
         self._fit_postprocess_step()
 
@@ -380,14 +381,20 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
             self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=False)
         self.is_last_step = self.global_steps >= self.total_training_steps
 
-    def _fit_start_profile(self):
+    def _fit_start_profile(self, should_profiler=None):
         timing_raw = self.timing_raw
+        if should_profiler is not None:
+            self.curr_step_profile = should_profiler
         with marked_timer("start_profile", timing_raw):
-            self._start_profiling(
-                not self.prev_step_profile and self.curr_step_profile
-                if self.config.global_profiler.profile_continuous_steps
-                else self.curr_step_profile
-            )
+            if should_profiler is None:
+                do_profile = (
+                    not self.prev_step_profile and self.curr_step_profile
+                    if self.config.global_profiler.profile_continuous_steps
+                    else self.curr_step_profile
+                )
+            else:
+                do_profile = should_profiler
+            self._start_profiling(do_profile)
 
     def _fit_get_batch(self, batch_dict: dict) -> DataProto:
         batch = DataProto.from_single_dict(batch_dict)
@@ -402,47 +409,55 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
         gen_batch = self._get_gen_batch(batch)
         # pass global_steps to trace
         gen_batch.meta_info["global_steps"] = self.global_steps
-        gen_batch_output = gen_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+        rollout_n = self.config.actor_rollout_ref.rollout.n
+        gen_batch_output = gen_batch.repeat(repeat_times=rollout_n, interleave=True)
+
+        if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
+            # NOTE: REMAX needs one sampled rollout plus one greedy baseline per prompt.
+            # Keep them in a single agent-loop/vLLM request to avoid sending a second
+            # rollout after replicas have been put to sleep, which can leave async vLLM
+            # engines in an invalid state for multi-turn agent workloads.
+            gen_batch_output.non_tensor_batch["__do_sample__"] = np.ones(len(gen_batch_output), dtype=bool)
+            gen_baseline_batch = gen_batch.slice(0, None)
+            gen_baseline_batch.non_tensor_batch["__do_sample__"] = np.zeros(len(gen_baseline_batch), dtype=bool)
+            combined_gen_batch = DataProto.concat([gen_batch_output, gen_baseline_batch])
+            num_sampled_prompts = len(gen_batch_output)
+        else:
+            combined_gen_batch = gen_batch_output
+            num_sampled_prompts = len(gen_batch_output)
 
         with marked_timer("gen", timing_raw, color="red"):
             if self.curr_step_profile:
                 self.async_rollout_manager.start_profile(global_step=self.global_steps)
-            gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
+            combined_gen_output = self.async_rollout_manager.generate_sequences(combined_gen_batch)
             self.checkpoint_manager.sleep_replicas()
             if self.curr_step_profile:
-                self.async_rollout_manager.stop_profile()
+                self.llm_server_manager.stop_profile()
 
-            timing_raw.update(gen_batch_output.meta_info["timing"])
-            gen_batch_output.meta_info.pop("timing", None)
+            timing_raw.update(combined_gen_output.meta_info["timing"])
+            combined_gen_output.meta_info.pop("timing", None)
+
+        gen_batch_output = combined_gen_output.slice(0, num_sampled_prompts)
+        if "__do_sample__" in gen_batch_output.non_tensor_batch:
+            gen_batch_output.pop(non_tensor_batch_keys=["__do_sample__"])
 
         if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
-            with marked_timer("gen_max", timing_raw, color="purple"):
-                gen_baseline_batch = deepcopy(gen_batch)
-                gen_baseline_batch.meta_info["do_sample"] = False
-                if self.curr_step_profile:
-                    self.async_rollout_manager.start_profile()
-                gen_baseline_output = self.async_rollout_manager.generate_sequences(gen_baseline_batch)
-                self.checkpoint_manager.sleep_replicas()
-                if self.curr_step_profile:
-                    self.async_rollout_manager.stop_profile()
-                batch = batch.union(gen_baseline_output)
-                # compute reward model score on batch
-                rm_scores = None
-                if self.use_rm and "rm_scores" not in batch.batch.keys():
-                    batch_reward = self._compute_reward_colocate(batch)
-                    batch = batch.union(batch_reward)
+            gen_baseline_output = combined_gen_output.slice(num_sampled_prompts, None)
+            if "__do_sample__" in gen_baseline_output.non_tensor_batch:
+                gen_baseline_output.pop(non_tensor_batch_keys=["__do_sample__"])
 
-                # Compute or extract reward for REMAX baseline
-                reward_baseline_tensor = batch.batch["rm_scores"].sum(dim=-1)
+            # REMAX only needs one scalar baseline reward per original prompt.
+            # Agent-loop rollout outputs contain sample-specific non-tensor fields
+            # such as turns, tool rewards and extras; keep the baseline path isolated.
+            if self.use_rm and "rm_scores" not in gen_baseline_output.batch.keys():
+                baseline_reward = self._compute_reward_colocate(gen_baseline_output)
+                gen_baseline_output = gen_baseline_output.union(baseline_reward)
 
-                keys_to_pop = set(gen_baseline_output.batch.keys())
-                if rm_scores is not None:
-                    keys_to_pop.update(rm_scores.batch.keys())
-                batch.pop(batch_keys=list(keys_to_pop))
+            reward_baseline_tensor = gen_baseline_output.batch["rm_scores"].sum(dim=-1)
+            batch.batch["reward_baselines"] = reward_baseline_tensor
 
-                batch.batch["reward_baselines"] = reward_baseline_tensor
-
-                del rm_scores, gen_baseline_batch, gen_baseline_output
+            del gen_baseline_output
+        del combined_gen_batch, combined_gen_output
         # repeat to align with repeated responses in rollout
         batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
         batch = batch.union(gen_batch_output)
@@ -681,21 +696,26 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
                 # TODO: Check separation is needed.
                 # self.checkpoint_manager.update_weights()
 
-    def _fit_stop_profile(self):
+    def _fit_stop_profile(self, should_profiler=None):
         timing_raw = self.timing_raw
         with marked_timer("stop_profile", timing_raw):
-            self.next_step_profile = (
-                self.global_steps + 1 in self.config.global_profiler.steps
-                if self.config.global_profiler.steps is not None
-                else False
-            )
-            self._stop_profiling(
-                self.curr_step_profile and not self.next_step_profile
-                if self.config.global_profiler.profile_continuous_steps
-                else self.curr_step_profile
-            )
+            if should_profiler is None:
+                self.next_step_profile = (
+                    self.global_steps + 1 in self.config.global_profiler.steps
+                    if self.config.global_profiler.steps is not None
+                    else False
+                )
+                do_profile = (
+                    self.curr_step_profile and not self.next_step_profile
+                    if self.config.global_profiler.profile_continuous_steps
+                    else self.curr_step_profile
+                )
+            else:
+                do_profile = should_profiler
+            self._stop_profiling(do_profile)
             self.prev_step_profile = self.curr_step_profile
-            self.curr_step_profile = self.next_step_profile
+            if should_profiler is None:
+                self.curr_step_profile = self.next_step_profile
 
     def _fit_collect_metrics(self, batch):
         metrics = self.metrics
@@ -711,20 +731,7 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
         gradient_norm = metrics.get("actor/grad_norm", None)
         metrics.update(compute_variance_proxy_metrics(batch=batch, gradient_norm=gradient_norm))
 
-    def _fit_torch_memory(self):
-        if (
-            hasattr(self.config.actor_rollout_ref.actor, "profiler")
-            and self.config.actor_rollout_ref.actor.profiler.tool == "torch_memory"
-        ):
-            self.actor_rollout_wg.dump_memory_snapshot(
-                tag=f"post_update_step{self.global_steps}", sub_dir=f"step{self.global_steps}"
-            )
-
     def _fit_experimental(self, batch):
-        # this is experimental and may be changed/removed in the future in favor of a general-purpose one
-        if isinstance(self.train_dataloader.sampler, AbstractCurriculumSampler):
-            self.train_dataloader.sampler.update(batch=batch)
-
         # this is experimental and may be changed/removed in the future
         # in favor of a general-purpose data buffer pool
         if hasattr(self.train_dataset, "on_batch_end"):

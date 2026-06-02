@@ -1,0 +1,123 @@
+name: docker-build-ascend-a3-qwen3_5
+
+on:
+  workflow_dispatch:
+
+env:
+  QUAY_REPO: quay.io/ascend/verl
+
+jobs:
+  build-push-digest:
+    name: build-${{ matrix.tag }}
+    if: ${{ github.repository_owner == 'verl-project' }}
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      packages: write
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: linux/amd64
+            runner: ubuntu-latest
+            tag: amd64
+          - arch: linux/arm64
+            runner: ubuntu-22.04-arm
+            tag: arm64
+    steps:
+      - name: Remove unnecessary parts in github actions runners to free up disk space
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: true
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Login to Quay.io
+        uses: docker/login-action@v3
+        with:
+          registry: quay.io
+          username: ${{ secrets.QUAY_USERNAME }}
+          password: ${{ secrets.QUAY_PASSWORD }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          install: true
+          driver: docker-container
+          use: true
+
+      - name: Clean Docker cache before build
+        run: |
+          docker system prune -a -f --volumes || true
+
+      - name: Build and push by digest
+        uses: docker/build-push-action@v6
+        id: build
+        with:
+          context: .
+          platforms: ${{ matrix.arch }}
+          file: ./docker/ascend/Dockerfile.ascend_8.5.2_a3_qwen3-5
+          push: true
+          # 关键：push-by-digest=true 只推送镜像层，不创建 tag
+          outputs: type=image,name=${{ env.QUAY_REPO }},push-by-digest=true,name-canonical=true,push=true
+          provenance: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
+
+      - name: Export digest
+        run: |
+          mkdir -p ${{ runner.temp }}/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.tag }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge-image:
+    name: merge
+    runs-on: ubuntu-latest
+    needs: build-push-digest
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Login to Quay.io
+        uses: docker/login-action@v3
+        with:
+          registry: quay.io
+          username: ${{ secrets.QUAY_USERNAME }}
+          password: ${{ secrets.QUAY_PASSWORD }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Merge and push multi-arch image
+        env:
+          IMAGE: ${{ env.QUAY_REPO }}
+        run: |
+          # 读取所有 digest 文件，构建 IMAGE@sha256:DIGEST 格式
+          DIGESTS=$(printf "$IMAGE@sha256:%s " $(ls ${{ runner.temp }}/digests))
+          
+          echo "Digests: $DIGESTS"
+          
+          # 创建多架构 manifest
+          docker buildx imagetools create \
+            -t "$IMAGE:verl-8.5.2-a3-ubuntu22.04-py3.11-qwen3-5" \
+            $DIGESTS

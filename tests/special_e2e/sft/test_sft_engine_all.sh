@@ -25,7 +25,7 @@ echo "run with sp2 fsdp_size2 num_gpus8 fsdp_strategy fsdp2"
 BACKEND=fsdp SP_SIZE=2 FSDP_SIZE=2 NUM_GPUS=8 FSDP_STRATEGY=fsdp2 bash tests/special_e2e/sft/run_sft_engine.sh
 
 # test with veomni
-echo "run with sp2 fsdp_size4 num_gpus8 fsdp_strategy fsdp2"
+echo "run with sp2 fsdp_size4 num_gpus8 fsdp_strategy fsdp2 backend veomni"
 BACKEND=veomni SP_SIZE=2 FSDP_SIZE=4 NUM_GPUS=8 FSDP_STRATEGY=fsdp2 bash tests/special_e2e/sft/run_sft_engine.sh
 
 

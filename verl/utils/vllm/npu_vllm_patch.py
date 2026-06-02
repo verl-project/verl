@@ -194,7 +194,7 @@ if is_torch_npu_available(check_device=False):
     from packaging import version
 
     _VLLM_VERSION = version.parse(vllm.__version__)
-    if _VLLM_VERSION >= version.parse("0.13.0"):
+    if _VLLM_VERSION >= version.parse("0.13.0") and _VLLM_VERSION <= version.parse("0.14.0"):
         # Disable flash_attn in RotaryEmbedding (NPU) when VLLM >= 0.13
         from vllm.model_executor.layers.fused_moe import FusedMoE
 
@@ -204,7 +204,7 @@ if is_torch_npu_available(check_device=False):
     VERL_NPU_ENABLE_A2_PATCH_VLLM_ASCEND_MC2 = bool(int(os.getenv("VERL_NPU_ENABLE_A2_PATCH_VLLM_ASCEND_MC2", "1")))
     if VERL_NPU_ENABLE_A2_PATCH_VLLM_ASCEND_MC2:
         # only support vllm 0.13 and 0.11 now.
-        if _VLLM_VERSION >= version.parse("0.13.0"):
+        if _VLLM_VERSION >= version.parse("0.13.0") and _VLLM_VERSION <= version.parse("0.14.0"):
             from vllm_ascend import ascend_forward_context
             from vllm_ascend.ops.linear_op import SequenceRowParallelOp
 
@@ -215,7 +215,7 @@ if is_torch_npu_available(check_device=False):
                 SequenceRowParallelOp.matmul_and_reduce
             )
 
-        elif _VLLM_VERSION >= version.parse("0.11.0"):
+        elif _VLLM_VERSION >= version.parse("0.11.0") and _VLLM_VERSION < version.parse("0.13.0"):
             from vllm_ascend.ops.linear_op import SequenceRowParallelOp
             from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 

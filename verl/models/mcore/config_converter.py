@@ -26,36 +26,9 @@ from megatron.core import parallel_state as mpu
 from megatron.core.transformer import MLATransformerConfig, TransformerConfig
 from transformers import PretrainedConfig
 
+from verl.utils.megatron_utils import get_hf_rope_theta
+
 T = TypeVar("T", bound=TransformerConfig)
-
-
-def get_hf_rope_theta(hf_config: PretrainedConfig) -> float:
-    """Return RoPE base frequency theta.
-
-    Most configs expose ``rope_theta`` on the root. Newer models (e.g. Qwen3 in transformers>=5) store it under
-    ``rope_parameters["rope_theta"]``, optionally nested per attention pattern when ``rope_parameters`` maps names
-    to parameter dicts.
-    """
-    if hasattr(hf_config, "rope_theta"):
-        return hf_config.rope_theta
-    if hasattr(hf_config, "text_config") and hasattr(hf_config.text_config, "rope_theta"):
-        return hf_config.text_config.rope_theta
-
-    rp = None
-    if hasattr(hf_config, "rope_parameters"):
-        rp = hf_config.rope_parameters
-    elif hasattr(hf_config, "text_config") and hasattr(hf_config.text_config, "rope_parameters"):
-        rp = hf_config.text_config.rope_parameters
-    if isinstance(rp, dict):
-        if "rope_theta" in rp:
-            return rp["rope_theta"]
-        for v in rp.values():
-            if isinstance(v, dict) and "rope_theta" in v:
-                return v["rope_theta"]
-    raise AttributeError(
-        f"{type(hf_config).__name__} has no rope_theta and no rope_parameters['rope_theta'] — "
-        "cannot determine RoPE base."
-    )
 
 
 def _get_base_transformer_config(
@@ -281,6 +254,14 @@ def hf_to_mcore_config_mixtral(
 def hf_to_mcore_config_qwen3moe(
     hf_config: PretrainedConfig, dtype: torch.dtype, **override_transformer_config_kwargs
 ) -> TransformerConfig:
+    """Config converter for Qwen3.5 MoE models (e.g. Qwen3.5-35B-A3B, Qwen3.5-397B-A17B).
+
+    Extends ``hf_to_mcore_config_qwen3moe`` with MTP (Multi-Token Prediction) support:
+    Qwen3.5 may carry ``mtp_num_hidden_layers`` in ``hf_config`` or
+    ``hf_config.text_config``; when present, the corresponding
+    ``mtp_num_layers`` / ``mtp_loss_scaling_factor`` fields are set on the
+    returned ``TransformerConfig``.
+    """
     args: dict = _get_base_transformer_config(
         hf_config=hf_config,
         dtype=dtype,
@@ -307,7 +288,20 @@ def hf_to_mcore_config_qwen3moe(
     )
     # override_transformer_config_kwargs as kwargs shall never be none
     args.update(override_transformer_config_kwargs)
-    return check_and_construct_configs(args, TransformerConfig)
+    transformer_config = check_and_construct_configs(args, TransformerConfig)
+
+    # MTP support: mtp_num_hidden_layers may be in hf_config or hf_config.text_config
+    mtp_num_layers = 0
+    if hasattr(hf_config, "mtp_num_hidden_layers"):
+        mtp_num_layers = hf_config.mtp_num_hidden_layers
+    elif hasattr(hf_config, "text_config") and hasattr(hf_config.text_config, "mtp_num_hidden_layers"):
+        mtp_num_layers = hf_config.text_config.mtp_num_hidden_layers
+
+    if mtp_num_layers > 0:
+        transformer_config.mtp_num_layers = mtp_num_layers
+        transformer_config.mtp_loss_scaling_factor = getattr(hf_config, "mtp_loss_scaling_factor", 0.1)
+
+    return transformer_config
 
 
 def hf_to_mcore_config_dpskv3(

@@ -15,6 +15,7 @@
 import contextlib
 import functools
 import inspect
+import json
 import os
 from contextvars import ContextVar
 from typing import Optional
@@ -24,13 +25,14 @@ from pydantic import BaseModel
 from verl.utils.ray_utils import get_event_loop
 
 _trace_enabled: ContextVar[bool] = ContextVar("_trace_enabled", default=True)
+_trace_attributes: ContextVar[dict | None] = ContextVar("_trace_attributes", default=None)
 
 
 class RolloutTraceConfig:
     """Configuration for rollout tracing with various backends.
 
     Singleton configuration class for managing rollout trace settings across different
-    tracing backends like Weave and MLflow.
+            tracing backends like Weave, MLflow, and Trackio.
 
     Args:
         backend (Optional[str]): Tracing backend to use ('weave', 'mlflow', or None).
@@ -45,13 +47,13 @@ class RolloutTraceConfig:
     """
 
     _instance: Optional["RolloutTraceConfig"] = None
-    backend: Optional[str] = None
-    client: Optional[object] = None
+    backend: str | None = None
+    client: object | None = None
     token2text: bool = False
     _initialized: bool = False
     project_name: str = None
     experiment_name: str = None
-    max_samples_per_step_per_worker: Optional[int] = None
+    max_samples_per_step_per_worker: int | None = None
 
     def __new__(cls, *args, **kwargs):
         if cls._instance is None:
@@ -72,7 +74,7 @@ class RolloutTraceConfig:
         experiment_name: str,
         backend: str,
         token2text: bool = False,
-        max_samples_per_step_per_worker: Optional[int] = None,
+        max_samples_per_step_per_worker: int | None = None,
     ):
         config = cls.get_instance()
         if config._initialized:
@@ -98,21 +100,28 @@ class RolloutTraceConfig:
             mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
 
             mlflow.set_experiment(project_name)
+        elif backend == "trackio":
+            import trackio
+            from trackio import context_vars
+
+            if context_vars.current_run.get() is None:
+                trackio.init(project=project_name, name=experiment_name, config={"framework": "verl"})
+            config.client = trackio
         else:
             config.client = None
 
         config._initialized = True
 
     @classmethod
-    def get_backend(cls) -> Optional[str]:
+    def get_backend(cls) -> str | None:
         return cls.get_instance().backend
 
     @classmethod
-    def get_client(cls) -> Optional[object]:
+    def get_client(cls) -> object | None:
         return cls.get_instance().client
 
     @classmethod
-    def enable_token2text(cls) -> Optional[bool]:
+    def enable_token2text(cls) -> bool | None:
         return cls.get_instance().token2text
 
     @classmethod
@@ -162,21 +171,148 @@ def rollout_trace_attr(
         yield
         return
 
+    token = _trace_attributes.set(attributes)
     if backend == "weave":
         import weave
 
-        with weave.attributes(attributes):
-            yield
+        try:
+            with weave.attributes(attributes):
+                yield
+        finally:
+            _trace_attributes.reset(token)
     elif backend == "mlflow":
         import mlflow
 
-        with mlflow.start_span(name=name) as span:
-            trace_id = span.trace_id
-            for key, value in attributes.items():
-                mlflow.set_trace_tag(trace_id, str(key), str(value))
-            yield
+        try:
+            with mlflow.start_span(name=name) as span:
+                trace_id = span.trace_id
+                for key, value in attributes.items():
+                    mlflow.set_trace_tag(trace_id, str(key), str(value))
+                yield
+        finally:
+            _trace_attributes.reset(token)
     else:
-        yield
+        try:
+            yield
+        finally:
+            _trace_attributes.reset(token)
+
+
+def _json_trace_content(value):
+    if isinstance(value, BaseModel):
+        value = value.model_dump()
+    return json.dumps(value, default=str, ensure_ascii=False)
+
+
+def _json_trace_metadata(value):
+    if isinstance(value, BaseModel):
+        value = value.model_dump()
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    if isinstance(value, dict):
+        return {str(k): _json_trace_metadata(v) for k, v in value.items()}
+    if isinstance(value, list | tuple):
+        return [_json_trace_metadata(v) for v in value]
+    return str(value)
+
+
+def _trackio_message_dict(message):
+    if not isinstance(message, dict):
+        return None
+    role = message.get("role")
+    if not isinstance(role, str):
+        return None
+    return dict(message)
+
+
+def _trackio_output_dict(output):
+    if isinstance(output, BaseModel):
+        return output.model_dump()
+    if isinstance(output, dict):
+        return output
+    if hasattr(output, "__dict__"):
+        return dict(vars(output))
+    return None
+
+
+def _trackio_trace_key(op_name):
+    return "rollout_trace/" + "".join(char if char.isalnum() or char in "._-" else "_" for char in op_name)
+
+
+def _trackio_trace_step(attributes):
+    step = attributes.get("step")
+    if step is None:
+        return None
+    try:
+        return int(step)
+    except (TypeError, ValueError):
+        return None
+
+
+def _log_trackio_trace(op_name, inputs, output=None, exception=None):
+    trackio = RolloutTraceConfig.get_client()
+    attributes = _current_trace_attributes()
+    metadata_inputs = {key: value for key, value in inputs.items() if key != "messages"}
+    output_dict = _trackio_output_dict(output)
+    metadata = {
+        "op": op_name,
+        "backend": "trackio",
+        "experiment_name": RolloutTraceConfig.get_instance().experiment_name,
+        "inputs": _json_trace_metadata(metadata_inputs),
+        **{key: _json_trace_metadata(value) for key, value in attributes.items()},
+    }
+    if exception is not None:
+        metadata["status"] = "error"
+        metadata["exception_type"] = type(exception).__name__
+    else:
+        metadata["status"] = "success"
+        metadata["output"] = _json_trace_metadata(output_dict if output_dict is not None else output)
+
+    messages = []
+    input_messages = inputs.get("messages") if isinstance(inputs, dict) else None
+    if isinstance(input_messages, list):
+        messages = [
+            message for message in (_trackio_message_dict(message) for message in input_messages) if message is not None
+        ]
+
+    if not messages:
+        messages = [
+            {"role": "system", "content": f"verl rollout trace operation: {op_name}"},
+            {"role": "user", "content": _json_trace_content({"inputs": inputs})},
+        ]
+
+    if exception is not None:
+        messages.append(
+            {
+                "role": "assistant",
+                "content": _json_trace_content(
+                    {
+                        "exception_type": type(exception).__name__,
+                        "exception": str(exception),
+                    }
+                ),
+            }
+        )
+    elif output_dict is not None and output_dict.get("response_text"):
+        messages.append({"role": "assistant", "content": str(output_dict["response_text"])})
+    elif output_dict is not None and output_dict.get("answer"):
+        messages.append({"role": "assistant", "content": str(output_dict["answer"])})
+    else:
+        messages.append({"role": "assistant", "content": _json_trace_content({"output": output})})
+
+    trackio.log(
+        {_trackio_trace_key(op_name): trackio.Trace(messages=messages, metadata=metadata)},
+        step=_trackio_trace_step(attributes),
+    )
+
+
+def _current_trace_attributes():
+    backend = RolloutTraceConfig.get_backend()
+    if backend == "weave":
+        from weave.trace.context import call_context
+
+        return {**call_context.call_attributes.get()}
+    return {**(_trace_attributes.get() or {})}
 
 
 def rollout_trace_op(func):
@@ -218,9 +354,8 @@ def rollout_trace_op(func):
 
         if backend == "weave":
             tracer = RolloutTraceConfig.get_client()
-            from weave.trace.context import call_context
 
-            cur_attributes = {**call_context.call_attributes.get()}
+            cur_attributes = _current_trace_attributes()
             call = tracer.create_call(op=func.__qualname__, inputs=inputs, attributes=cur_attributes)
             try:
                 result = await func(self, *args, **kwargs)
@@ -249,6 +384,18 @@ def rollout_trace_op(func):
                     span.set_outputs(result)
 
             return result
+        elif backend == "trackio":
+            try:
+                result = await func(self, *args, **kwargs)
+                if enable_token2text:
+                    _result = await add_token2text(self, result)
+                    _log_trackio_trace(func.__qualname__, inputs, output=_result)
+                else:
+                    _log_trackio_trace(func.__qualname__, inputs, output=result)
+                return result
+            except Exception as e:
+                _log_trackio_trace(func.__qualname__, inputs, exception=e)
+                raise e
 
         else:
             return await func(self, *args, **kwargs)
@@ -270,9 +417,8 @@ def rollout_trace_op(func):
 
         if backend == "weave":
             tracer = RolloutTraceConfig.get_client()
-            from weave.trace.context import call_context
 
-            cur_attributes = {**call_context.call_attributes.get()}
+            cur_attributes = _current_trace_attributes()
             call = tracer.create_call(op=func.__qualname__, inputs=inputs, attributes=cur_attributes)
             try:
                 result = func(self, *args, **kwargs)
@@ -285,6 +431,14 @@ def rollout_trace_op(func):
             import mlflow
 
             return mlflow.trace(func)(self, *args, **kwargs)
+        elif backend == "trackio":
+            try:
+                result = func(self, *args, **kwargs)
+                _log_trackio_trace(func.__qualname__, inputs, output=result)
+                return result
+            except Exception as e:
+                _log_trackio_trace(func.__qualname__, inputs, exception=e)
+                raise e
         else:
             return func(self, *args, **kwargs)
 

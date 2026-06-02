@@ -301,7 +301,8 @@ class TestComputeDataMetrics(unittest.TestCase):
             "token_level_rewards": torch.tensor([[0.5, 1.0], [1.5, 2.0]]),
             "advantages": torch.tensor([[0.1, 0.2], [0.3, 0.4]]),
             "returns": torch.tensor([[1.1, 1.2], [1.3, 1.4]]),
-            "responses": torch.zeros((2, 2)),  # 2 samples, 2 tokens each
+            "prompts": torch.zeros((2, 2)),  # 2 samples, 2 tokens for each prompt
+            "responses": torch.zeros((2, 2)),  # 2 samples, 2 tokens for each response
             "attention_mask": torch.tensor(
                 [
                     [1, 1, 1, 1],  # 2 prompt tokens, 2 response tokens

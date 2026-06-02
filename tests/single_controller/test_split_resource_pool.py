@@ -29,6 +29,10 @@ from verl.single_controller.ray.base import (
 from verl.utils.device import get_device_name, get_nccl_backend
 
 
+def get_local_gpus_num(division=1):
+    return max(1, torch.cuda.device_count() // division)
+
+
 @ray.remote
 class Actor(Worker):
     def __init__(self, worker_id) -> None:
@@ -49,12 +53,15 @@ class Actor(Worker):
 
 def test_split_resource_pool_with_split_size():
     ray.init()
-    # assume we have 2 nodes, with 4 GPUs each
-    global_resource_pool = RayResourcePool(process_on_nodes=[4, 4])
+    ngpus = torch.cuda.device_count()
+    half = get_local_gpus_num(2)
+    # simulate 2 nodes of half GPUs each
+    global_resource_pool = RayResourcePool(process_on_nodes=[half, half])
     global_resource_pool.get_placement_groups(device_name=get_device_name())
 
-    # first 4 gpus for actor_1, last 4 gpus for actor_2
-    actor_1_resource_pool, actor_2_resource_pool = split_resource_pool(resource_pool=global_resource_pool, split_size=4)
+    actor_1_resource_pool, actor_2_resource_pool = split_resource_pool(
+        resource_pool=global_resource_pool, split_size=half
+    )
     actor_cls_1 = RayClassWithInitArgs(cls=Actor, worker_id=0)
     actor_cls_2 = RayClassWithInitArgs(cls=Actor, worker_id=100)
     actor_worker_1 = RayWorkerGroup(
@@ -63,28 +70,28 @@ def test_split_resource_pool_with_split_size():
     actor_worker_2 = RayWorkerGroup(
         resource_pool=actor_2_resource_pool, ray_cls_with_init=actor_cls_2, device_name=get_device_name()
     )
-    assert actor_worker_1.world_size == 4
-    assert actor_worker_2.world_size == 4
+    assert actor_worker_1.world_size == half
+    assert actor_worker_2.world_size == half
 
-    data = DataProto.from_dict({"a": torch.zeros(8)})
+    data = DataProto.from_dict({"a": torch.zeros(ngpus)})
     actor_output_1 = actor_worker_1.add(data)
     actor_output_2 = actor_worker_2.add(data)
-    assert actor_output_1.batch["a"].tolist() == [0, 0, 1, 1, 2, 2, 3, 3]
-    assert actor_output_2.batch["a"].tolist() == [100, 100, 101, 101, 102, 102, 103, 103]
+    assert actor_output_1.batch["a"].tolist() == [float(r) for r in range(half) for _ in range(2)]
+    assert actor_output_2.batch["a"].tolist() == [float(r + 100) for r in range(half) for _ in range(2)]
 
     ray.shutdown()
 
 
 def test_split_resource_pool_with_split_size_list():
     ray.init()
-    # assume we have 4 nodes, with 2 GPUs each
-    global_resource_pool = RayResourcePool(process_on_nodes=[2, 2, 2, 2])
+    quarter = get_local_gpus_num(4)
+    # simulate 4 nodes of quarter GPUs each
+    global_resource_pool = RayResourcePool(process_on_nodes=[quarter] * 4)
     global_resource_pool.get_placement_groups(device_name=get_device_name())
 
-    # first 2 gpus for actor_1, last 6 gpus for actor_2
     actor_1_resource_pool, actor_2_resource_pool = split_resource_pool(
         resource_pool=global_resource_pool,
-        split_size=[2, 6],
+        split_size=[quarter, 3 * quarter],
     )
     actor_cls_1 = RayClassWithInitArgs(cls=Actor, worker_id=0)
     actor_cls_2 = RayClassWithInitArgs(cls=Actor, worker_id=100)
@@ -94,31 +101,32 @@ def test_split_resource_pool_with_split_size_list():
     actor_worker_2 = RayWorkerGroup(
         resource_pool=actor_2_resource_pool, ray_cls_with_init=actor_cls_2, device_name=get_device_name()
     )
-    assert actor_worker_1.world_size == 2
-    assert actor_worker_2.world_size == 6
+    assert actor_worker_1.world_size == quarter
+    assert actor_worker_2.world_size == 3 * quarter
 
-    data_1 = DataProto.from_dict({"a": torch.zeros(4)})
-    data_2 = DataProto.from_dict({"a": torch.zeros(6)})
+    data_1 = DataProto.from_dict({"a": torch.zeros(quarter)})
+    data_2 = DataProto.from_dict({"a": torch.zeros(3 * quarter)})
     actor_output_1 = actor_worker_1.add(data_1)
     actor_output_2 = actor_worker_2.add(data_2)
     print(actor_output_1.batch["a"].tolist())
     print(actor_output_2.batch["a"].tolist())
-    assert actor_output_1.batch["a"].tolist() == [0, 0, 1, 1]
-    assert actor_output_2.batch["a"].tolist() == [100, 101, 102, 103, 104, 105]
+    assert actor_output_1.batch["a"].tolist() == list(range(quarter))
+    assert actor_output_2.batch["a"].tolist() == list(range(100, 100 + 3 * quarter))
 
     ray.shutdown()
 
 
 def test_split_resource_pool_with_split_size_list_cross_nodes():
     ray.init()
-    # assume we have 4 nodes, with 2 GPUs each
-    global_resource_pool = RayResourcePool(process_on_nodes=[4, 4])
+    half = get_local_gpus_num(2)
+    quarter = get_local_gpus_num(4)
+    # simulate 2 nodes of half GPUs each (cross-node split)
+    global_resource_pool = RayResourcePool(process_on_nodes=[half, half])
     global_resource_pool.get_placement_groups(device_name=get_device_name())
 
-    # first 2 gpus for actor_1, last 6 gpus for actor_2
     actor_1_resource_pool, actor_2_resource_pool = split_resource_pool(
         resource_pool=global_resource_pool,
-        split_size=[2, 6],
+        split_size=[quarter, 3 * quarter],
     )
     actor_cls_1 = RayClassWithInitArgs(cls=Actor, worker_id=0)
     actor_cls_2 = RayClassWithInitArgs(cls=Actor, worker_id=100)
@@ -129,47 +137,43 @@ def test_split_resource_pool_with_split_size_list_cross_nodes():
         resource_pool=actor_2_resource_pool, ray_cls_with_init=actor_cls_2, device_name=get_device_name()
     )
 
-    assert actor_worker_1.world_size == 2
-    assert actor_worker_2.world_size == 6
+    assert actor_worker_1.world_size == quarter
+    assert actor_worker_2.world_size == 3 * quarter
 
-    data_1 = DataProto.from_dict({"a": torch.zeros(4)})
-    data_2 = DataProto.from_dict({"a": torch.zeros(6)})
+    data_1 = DataProto.from_dict({"a": torch.zeros(quarter)})
+    data_2 = DataProto.from_dict({"a": torch.zeros(3 * quarter)})
     actor_output_1 = actor_worker_1.add(data_1)
     actor_output_2 = actor_worker_2.add(data_2)
     print(actor_output_1.batch["a"].tolist())
     print(actor_output_2.batch["a"].tolist())
-    assert actor_output_1.batch["a"].tolist() == [0, 0, 1, 1]
-    assert actor_output_2.batch["a"].tolist() == [100, 101, 102, 103, 104, 105]
+    assert actor_output_1.batch["a"].tolist() == list(range(quarter))
+    assert actor_output_2.batch["a"].tolist() == list(range(100, 100 + 3 * quarter))
 
     ray.shutdown()
 
 
 def test_split_resource_pool_with_split_twice():
     ray.init()
-
-    # assume we have 4 nodes, with 2 GPUs each
-    global_resource_pool = RayResourcePool(process_on_nodes=[2, 2, 2, 2])
+    ngpus = torch.cuda.device_count()
+    quarter = get_local_gpus_num(4)
+    mid = ngpus - 2 * quarter  # middle pool size
+    # simulate ngpus//2 nodes of 2 GPUs each
+    global_resource_pool = RayResourcePool(process_on_nodes=[2] * (ngpus // 2))
     global_resource_pool.get_placement_groups(device_name=get_device_name())
 
-    # actors with [2, 1, 1, 1, 1, 2] (split twice)
     rp_1, rp_2, rp_3 = split_resource_pool(
         resource_pool=global_resource_pool,
-        split_size=[2, 4, 2],
+        split_size=[quarter, mid, quarter],
     )
-    rp_2_1, rp_2_2, rp_2_3, rp_2_4 = split_resource_pool(
-        resource_pool=rp_2,
-        split_size=1,
-    )
-    fp_list = [rp_1, rp_2_1, rp_2_2, rp_2_3, rp_2_4, rp_3]
-    correct_world_size = [2, 1, 1, 1, 1, 2]
-    correct_output = [
-        [0.0, 0.0, 1.0, 1.0],  # 2 worker
-        [100.0, 100.0, 100.0, 100.0],  # 1 worker
-        [200.0, 200.0, 200.0, 200.0],  # 1 worker
-        [300.0, 300.0, 300.0, 300.0],  # 1 worker
-        [400.0, 400.0, 400.0, 400.0],  # 1 worker
-        [500.0, 500.0, 501.0, 501.0],  # 2 worker
-    ]
+    rp_2_subs = split_resource_pool(resource_pool=rp_2, split_size=1)
+    fp_list = [rp_1] + list(rp_2_subs) + [rp_3]
+
+    correct_world_size = [quarter] + [1] * mid + [quarter]
+    correct_output = []
+    for ws in correct_world_size:
+        idx = len(correct_output)
+        correct_output.append([float(r + idx * 100) for r in range(ws) for _ in range(4 // ws)])
+
     for idx, rp in enumerate(fp_list):
         actor_cls = RayClassWithInitArgs(cls=Actor, worker_id=idx * 100)
         actor_worker = RayWorkerGroup(resource_pool=rp, ray_cls_with_init=actor_cls, device_name=get_device_name())

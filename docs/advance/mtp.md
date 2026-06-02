@@ -4,7 +4,7 @@
 
 Last updated: 02/15/2026
 
-# 1. Scope of Support
+## 1. Scope of Support
 
 Currently, RL training can be performed on mimo-7B-RL, Qwen-next, and Deepseek series models based on the MTP architecture. The support rules for training and inference engines are as follows:
 
@@ -22,7 +22,7 @@ Currently, RL training can be performed on mimo-7B-RL, Qwen-next, and Deepseek s
     
     - sglang: Use the specified branch: [https://github.com/ArronHZG/sglang/tree/fix_mtp_update_weights_from_tensor](https://github.com/ArronHZG/sglang/tree/fix_mtp_update_weights_from_tensor), [PR](https://github.com/sgl-project/sglang/pull/17870) , which fix the MTP update weights from tensor OOM issue.
 
-# 2. MTP Training Configuration (Core Parameters)
+## 2. MTP Training Configuration (Core Parameters)
 
 The MTP training process can be flexibly controlled through the following configurations. All configurations are based on the `actor_rollout_ref.model.mtp` prefix:
 
@@ -33,7 +33,7 @@ The MTP training process can be flexibly controlled through the following config
 | MTP Parameter-Only Training | `enable=True`<br>`enable_train=True`<br>`detach_encoder=True`                                                                                                                                                                                                                                      | Freeze the Encoder layer, update only MTP module parameters, MTP Loss applies only to MTP parameters |
 | MTP Accelerated Rollout | 1. vLLM configuration:<br>`enable=True`<br>`enable_rollout=True`<br>`method="mtp"`<br>`num_speculative_tokens=1`<br>2. SGLang configuration:<br>`enable=True`<br>`enable_rollout=True`<br>`speculative_algorithm="EAGLE"`<br>`speculative_num_steps=2`<br>`speculative_eagle_topk=2`<br>`speculative_num_draft_tokens=4` | Achieve inference acceleration during the Rollout phase based on MTP                      |
 
-# 3. Experimental Results
+## 3. Experimental Results
 
 The experiment was conducted as follows:
 
@@ -69,7 +69,7 @@ Only the following configuration will have a noticeable impact on training resul
 
 It is recommended to adopt the `detach_encoder=True` approach for MTP training.
 
-# 4. Performance Notes for MTP in Rollout Inference
+## 4. Performance Notes for MTP in Rollout Inference
 
 Enabling MTP improves the rollout acceptance rate by around 14%. However, on H20 GPUs, overall throughput does not increase and even decreases slightly.
 
@@ -94,11 +94,11 @@ Taking the mimo-7B model deployed separately on H20 hardware using SGLang as an 
 
 - Future planning: Further optimization of the speculative logic in the Rollout phase will be conducted to improve throughput performance.
 
-# 5. SFT training
+## 5. SFT training
 
 The SFT training with MTP is supported, using the same MTP training configuration as RL training.
 
-An example configuration for running SFT can be found in `examples/sft/gsm8k/run_mimo_megatron_mtp.sh`
+An example configuration for running SFT can be found in `examples/sft/gsm8k/run_mimo_7b_mtp_megatron.sh`
 
 **SFT result**
 
