@@ -330,9 +330,18 @@ def apply_monkey_patch(
     try:
         num_attention_heads, num_key_value_heads = model.config.num_attention_heads, model.config.num_key_value_heads
     except AttributeError:
+        text_config = getattr(model.config, "text_config", None) or model.config.get_text_config()
+        if not hasattr(text_config, "num_attention_heads"):
+            # Some VL configs (e.g. InternVLChatConfig) return self from
+            # get_text_config().  Try common sub-config names.
+            for key in ("llm_config", "language_config"):
+                sub = getattr(model.config, key, None)
+                if sub is not None and hasattr(sub, "num_attention_heads"):
+                    text_config = sub
+                    break
         num_attention_heads, num_key_value_heads = (
-            model.config.text_config.num_attention_heads,
-            model.config.text_config.num_key_value_heads,
+            text_config.num_attention_heads,
+            text_config.num_key_value_heads,
         )
 
     assert num_attention_heads % ulysses_sp_size == 0, (
