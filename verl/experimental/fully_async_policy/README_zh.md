@@ -83,6 +83,9 @@ https://github.com/ArronHZG/verl-community/blob/main/docs/fully_async_policy_rev
 | `async_training.staleness_threshold`                             | 新鲜度控制                                                           |
 | `async_training.partial_rollout`                                 | 是否进行partial_rollout                                             |
 | `async_training.use_trainer_do_validate`                         | 是否使用Trainer的do_validate方法进行validation，默认值False                  |
+| `async_training.trainer_num_cpus`                                | FullyAsyncTrainer actor 的 Ray CPU 资源预留，默认值 `auto`             |
+| `async_training.rollouter_num_cpus`                              | FullyAsyncRollouter actor 的 Ray CPU 资源预留，默认值 `auto`           |
+| `async_training.message_queue_num_cpus`                          | MessageQueue actor 的 Ray CPU 资源预留，默认值 `auto`                 |
 
 **进一步的解释：**
 

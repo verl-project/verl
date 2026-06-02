@@ -25,6 +25,12 @@ async_training:
   # whether to use trainer do_validate
   use_trainer_do_validate: False
 
+  # Ray CPU reservations for fully async helper actors. Use "auto" to scale
+  # reservations down when the cluster has fewer CPUs than the historical defaults.
+  trainer_num_cpus: auto
+  rollouter_num_cpus: auto
+  message_queue_num_cpus: auto
+
 # Rollout config
 rollout:
 

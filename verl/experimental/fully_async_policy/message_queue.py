@@ -23,7 +23,7 @@ from omegaconf import DictConfig
 logger = logging.getLogger(__name__)
 
 
-@ray.remote(num_cpus=2, max_concurrency=20)
+@ray.remote(max_concurrency=20)
 class MessageQueue:
     """
     Simplified Ray-based asynchronous message queue for communication between Rollouter and Trainer

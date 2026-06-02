@@ -106,6 +106,9 @@ https://github.com/ArronHZG/verl-community/blob/main/docs/fully_async_policy_rev
 | `async_training.staleness_threshold`                             | Freshness control                                                                              |
 | `async_training.partial_rollout`                                 | Whether to perform partial_rollout                                                             |
 | `async_training.use_trainer_do_validate`                         | Whether use trainer node to do validate process, default `False`                               |
+| `async_training.trainer_num_cpus`                                | Ray CPU reservation for the FullyAsyncTrainer actor, default `auto`                            |
+| `async_training.rollouter_num_cpus`                              | Ray CPU reservation for the FullyAsyncRollouter actor, default `auto`                          |
+| `async_training.message_queue_num_cpus`                          | Ray CPU reservation for the MessageQueue actor, default `auto`                                 |
 
 **Further Explanation:**
 

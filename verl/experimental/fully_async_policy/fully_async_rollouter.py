@@ -389,7 +389,7 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
         return worker
 
 
-@ray.remote(num_cpus=10, max_concurrency=100)
+@ray.remote(max_concurrency=100)
 class FullyAsyncRollouter(SeparateRayPPOTrainer):
     """
     Asynchronous sample generator, responsible for continuously generating training samples

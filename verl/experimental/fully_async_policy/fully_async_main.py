@@ -25,6 +25,15 @@ from omegaconf import OmegaConf
 from verl.experimental.fully_async_policy.fully_async_rollouter import FullyAsyncRollouter
 from verl.experimental.fully_async_policy.fully_async_trainer import FullyAsyncTrainer
 from verl.experimental.fully_async_policy.message_queue import MessageQueue, MessageQueueClient
+from verl.experimental.fully_async_policy.ray_actor_resources import (
+    DEFAULT_MESSAGE_QUEUE_NUM_CPUS,
+    DEFAULT_ROLLOUTER_NUM_CPUS,
+    DEFAULT_TRAINER_NUM_CPUS,
+    estimate_rollout_worker_group_num_cpus,
+    estimate_trainer_worker_group_num_cpus,
+    get_actor_num_cpus_config_or_default,
+    resolve_actor_num_cpus,
+)
 from verl.experimental.reward_loop import migrate_legacy_reward_impl
 from verl.experimental.separation.utils import create_resource_pool_manager, create_role_worker_mapping
 from verl.trainer.ppo.utils import Role
@@ -94,7 +103,13 @@ class FullyAsyncTaskRunner:
         # max_queue_size
         max_queue_size = ray.get(self.components["rollouter"].get_max_queue_size.remote())
         print(f"[ASYNC MAIN] Creating MessageQueue... max_queue_size {max_queue_size}")
-        message_queue = MessageQueue.remote(config, max_queue_size)
+        message_queue_num_cpus = self._resolve_actor_num_cpus(
+            config=config,
+            key="message_queue_num_cpus",
+            default_num_cpus=DEFAULT_MESSAGE_QUEUE_NUM_CPUS,
+            remaining_keys=(),
+        )
+        message_queue = MessageQueue.options(num_cpus=message_queue_num_cpus).remote(config, max_queue_size)
         message_queue_client = MessageQueueClient(message_queue)
         self.components["message_queue"] = message_queue
         self.components["message_queue_client"] = message_queue_client
@@ -116,7 +131,14 @@ class FullyAsyncTaskRunner:
 
     def _create_rollouter(self, config) -> None:
         print("[ASYNC MAIN] Starting create rollouter...")
-        rollouter = FullyAsyncRollouter.remote(
+        rollouter_num_cpus = self._resolve_actor_num_cpus(
+            config=config,
+            key="rollouter_num_cpus",
+            default_num_cpus=DEFAULT_ROLLOUTER_NUM_CPUS,
+            remaining_keys=(("message_queue_num_cpus", DEFAULT_MESSAGE_QUEUE_NUM_CPUS),),
+            reserved_num_cpus=estimate_rollout_worker_group_num_cpus(config),
+        )
+        rollouter = FullyAsyncRollouter.options(num_cpus=rollouter_num_cpus).remote(
             config=config,
             tokenizer=self.components["tokenizer"],
             processor=self.components["processor"],
@@ -143,7 +165,18 @@ class FullyAsyncTaskRunner:
             if role != Role.Rollout
         }
 
-        trainer = FullyAsyncTrainer.remote(
+        trainer_num_cpus = self._resolve_actor_num_cpus(
+            config=config,
+            key="trainer_num_cpus",
+            default_num_cpus=DEFAULT_TRAINER_NUM_CPUS,
+            remaining_keys=(
+                ("rollouter_num_cpus", DEFAULT_ROLLOUTER_NUM_CPUS),
+                ("message_queue_num_cpus", DEFAULT_MESSAGE_QUEUE_NUM_CPUS),
+            ),
+            reserved_num_cpus=estimate_trainer_worker_group_num_cpus(config)
+            + estimate_rollout_worker_group_num_cpus(config),
+        )
+        trainer = FullyAsyncTrainer.options(num_cpus=trainer_num_cpus).remote(
             config=config,
             tokenizer=self.components["tokenizer"],
             role_worker_mapping=trainer_role_mapping,
@@ -155,6 +188,32 @@ class FullyAsyncTaskRunner:
         ray.get(trainer.init_workers.remote())
         self.components["trainer"] = trainer
         print("[ASYNC MAIN] FullyAsyncTrainer created and initialized successfully")
+
+    def _resolve_actor_num_cpus(
+        self,
+        config,
+        key: str,
+        default_num_cpus: float,
+        remaining_keys,
+        reserved_num_cpus: float = 0.0,
+    ) -> float:
+        remaining_num_cpus = [
+            get_actor_num_cpus_config_or_default(config, remaining_key, remaining_default_num_cpus)
+            for remaining_key, remaining_default_num_cpus in remaining_keys
+        ]
+        num_cpus = resolve_actor_num_cpus(
+            config=config,
+            key=key,
+            default_num_cpus=default_num_cpus,
+            remaining_num_cpus=remaining_num_cpus,
+            reserved_num_cpus=reserved_num_cpus,
+        )
+        print(
+            f"[ASYNC MAIN] Ray CPU reservation for {key}: {num_cpus} "
+            f"(available={ray.available_resources().get('CPU', 'unknown')}, "
+            f"default={default_num_cpus}, remaining={remaining_num_cpus}, reserved={reserved_num_cpus})"
+        )
+        return num_cpus
 
     def _setup_hybrid_worker_group(self, config) -> None:
         """
