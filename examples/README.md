@@ -129,7 +129,6 @@ under `recipe/` instead.
 | `profile/`           | NPU profiler / torch-memory profiler runs.                                               |
 | `sft/`               | Supervised fine-tuning examples.                                                         |
 | `generation/`        | Rollout-only inference launches.                                                         |
-| `sglang_multiturn/`  | SGLang multi-turn rollout examples.                                                      |
 | `vllm_omni/`         | vLLM omni backend examples.                                                              |
 | `data_preprocess/`   | Scripts that produce the `$HOME/data/<dataset>/*.parquet` layout the run scripts expect. |
 | `prefix_grouper/`    | Prefix-grouped rollout examples.                                                         |

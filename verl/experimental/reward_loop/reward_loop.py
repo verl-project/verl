@@ -143,7 +143,6 @@ class RewardLoopWorker:
         return outputs
 
     async def compute_score(self, data: DataProto) -> dict:
-        assert len(data) == 1, "RewardLoopWorker only support single data item"
         if self.config.reward.custom_reward_function.path is not None:
             # directly use user-customized reward function
             return await self.reward_manager.run_single(data)
@@ -151,7 +150,7 @@ class RewardLoopWorker:
             if self.config.reward.reward_model.enable:
                 # we assume the rm is disrm
                 # genrm must set custom_reward_function
-                return await self.compute_score_disrm(data)
+                return await self.compute_score_disrm(data[-1:])
             else:
                 return await self.reward_manager.run_single(data)
 

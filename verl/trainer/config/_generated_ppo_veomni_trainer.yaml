@@ -50,6 +50,10 @@ actor_rollout_ref:
       load_balancing_loss_implementation: eager
       force_use_huggingface: false
       activation_gpu_limit: 0.0
+      moe_load_balance_monitor_interval: 0
+      router_replay:
+        _target_: verl.workers.config.EngineRouterReplayConfig
+        mode: disabled
     _target_: verl.workers.config.VeOmniActorConfig
     rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
     strategy: veomni
@@ -95,6 +99,7 @@ actor_rollout_ref:
       load_contents: ${.save_contents}
       async_save: false
       mbridge_config: {}
+      strict: true
     use_fused_kernels: ${oc.select:actor_rollout_ref.model.use_fused_kernels,false}
     profiler:
       _target_: verl.utils.profiler.ProfilerConfig
@@ -142,6 +147,7 @@ actor_rollout_ref:
       - re:.*mlp.gate$
       activation_observer: static_minmax
       quantization_config_path: null
+    use_remove_padding: ${oc.select:actor_rollout_ref.model.use_remove_padding,false}
   ref:
     rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
     strategy: veomni
@@ -214,6 +220,10 @@ actor_rollout_ref:
       load_balancing_loss_implementation: ${oc.select:actor_rollout_ref.actor.veomni.load_balancing_loss_implementation,eager}
       force_use_huggingface: false
       activation_gpu_limit: 0.0
+      moe_load_balance_monitor_interval: 0
+      router_replay:
+        _target_: verl.workers.config.EngineRouterReplayConfig
+        mode: disabled
     _target_: verl.workers.config.VeOmniActorConfig
   rollout:
     _target_: verl.workers.config.RolloutConfig
@@ -270,6 +280,7 @@ actor_rollout_ref:
       enable: false
       max_assistant_turns: null
       tool_config_path: null
+      function_tool_path: null
       max_user_turns: null
       max_parallel_calls: 1
       max_tool_response_length: 256
@@ -427,6 +438,8 @@ data:
   val_batch_size: null
   tool_config_path: ${oc.select:actor_rollout_ref.rollout.multi_turn.tool_config_path,
     null}
+  function_tool_path: ${oc.select:actor_rollout_ref.rollout.multi_turn.function_tool_path,
+    null}
   return_raw_input_ids: false
   return_raw_chat: true
   return_full_prompt: false
@@ -440,18 +453,14 @@ data:
   truncation: error
   image_key: images
   video_key: videos
+  audio_key: audios
   trust_remote_code: false
   custom_cls:
     path: null
     name: null
   return_multi_modal_inputs: true
-  sampler:
-    class_path: null
-    class_name: null
-  datagen:
-    path: null
-    name: null
   apply_chat_template_kwargs: {}
+  mm_processor_kwargs: {}
 critic:
   optim:
     _target_: verl.workers.config.VeOmniOptimizerConfig
@@ -498,6 +507,10 @@ critic:
     load_balancing_loss_implementation: eager
     force_use_huggingface: false
     activation_gpu_limit: 0.0
+    moe_load_balance_monitor_interval: 0
+    router_replay:
+      _target_: verl.workers.config.EngineRouterReplayConfig
+      mode: disabled
   _target_: verl.workers.config.VeOmniCriticConfig
   rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
   strategy: veomni
@@ -656,12 +669,13 @@ sandbox_fusion:
   max_concurrent: null
   memory_limit_mb: null
 reward:
+  _target_: verl.workers.config.RewardConfig
   num_workers: 8
   custom_reward_function:
     path: null
     name: compute_score
   reward_manager:
-    _target_: verl.workers.config.reward_model.RewardManagerConfig
+    _target_: verl.workers.config.reward.RewardManagerConfig
     source: register
     name: naive
     module:
@@ -669,6 +683,7 @@ reward:
       path: null
       name: custom_reward_manager
   reward_model:
+    _target_: verl.workers.config.RewardModelConfig
     enable: false
     enable_resource_pool: false
     n_gpus_per_node: 8
@@ -685,19 +700,41 @@ reward:
       data_parallel_size: 1
       expert_parallel_size: 1
       tensor_model_parallel_size: 2
+      pipeline_model_parallel_size: 1
       max_num_batched_tokens: 8192
       max_model_len: null
       max_num_seqs: 1024
       load_format: auto
+      layered_summon: false
+      scheduling_policy: fcfs
+      multi_stage_wake_up: false
       engine_kwargs: {}
       limit_images: null
       enable_chunked_prefill: true
       enable_prefix_caching: true
       disable_log_stats: true
       skip_tokenizer_init: false
+      ignore_eos: false
+      temperature: 1.0
+      top_k: -1
+      top_p: 1
+      do_sample: true
+      'n': 1
       prompt_length: 2048
       response_length: 2048
+      quantization: null
+      quantization_config_file: null
+      mtp: null
+      disaggregation:
+        enabled: false
+        prefill_replicas: 1
+        decode_replicas: 1
+        decode_tensor_model_parallel_size: null
+        transfer_backend: nixl
+        bootstrap_port: null
+        ib_device: null
   sandbox_fusion:
+    _target_: verl.workers.config.SandboxFusionConfig
     url: null
     max_concurrent: 64
     memory_limit_mb: 1024
@@ -771,7 +808,7 @@ distillation:
         enable_chunked_prefill: true
         enable_prefix_caching: true
         disable_log_stats: true
-        skip_tokenizer_init: false
+        skip_tokenizer_init: true
         prompt_length: ${oc.select:actor_rollout_ref.rollout.prompt_length}
         response_length: ${oc.select:actor_rollout_ref.rollout.response_length}
         temperature: ${oc.select:actor_rollout_ref.rollout.temperature}
@@ -840,11 +877,23 @@ global_profiler:
       strict: false
 transfer_queue:
   enable: false
+  metrics:
+    enabled: false
+    port: 0
   backend:
     storage_backend: SimpleStorage
     SimpleStorage:
       total_storage_size: 100000
       num_data_storage_units: 8
+    MooncakeStore:
+      auto_init: false
+      metadata_server: localhost:50123
+      master_server_address: localhost:50124
+      local_hostname: localhost
+      protocol: tcp
+      global_segment_size: 4294967296
+      local_buffer_size: 1073741824
+      device_name: ''
 ray_kwargs:
   ray_init:
     num_cpus: null

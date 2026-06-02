@@ -62,7 +62,7 @@ concurrency:
 
 permissions:
   contents: read
-
+ 
 jobs:
   llm_rl_job:
     if: github.repository_owner == 'verl-project'
@@ -70,7 +70,7 @@ jobs:
     runs-on: linux-aarch64-a3-8
     timeout-minutes: 120
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-8.5.0-a3-ubuntu22.04-py3.11-latest
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-9.0.0-a3-ubuntu22.04-py3.11-latest
       options: >-
         --shm-size 16g
     env:
@@ -106,13 +106,13 @@ jobs:
       - name: Running gsm8k e2e training tests with GRPO on ASCEND NPU (FSDP backend)
         run: |
           ray stop --force
-          bash tests/special_npu/run_qwen2_5_05b_grpo.sh
+          bash tests/special_npu/run_qwen3_8b_grpo_profiling.sh
           rm -rf $HOME/ckpts
       - name: Running gsm8k e2e training tests with GRPO on ASCEND NPU (MindSpeed backend)
         run: |
           ray stop --force
-          USE_DIST_CKPT=True bash tests/special_npu/run_qwen2_5_05b_grpo_mindspeed.sh
-          rm -rf $HOME/dist_ckpt/qwen2_5_05b_grpo_mindspeed
+          USE_DIST_CKPT=True bash tests/special_npu/run_qwen3_06b_grpo_mindspeed.sh
+          rm -rf $HOME/dist_ckpt/qwen3_06b_grpo_mindspeed
           rm -rf $HOME/ckpts
       - name: Running gsm8k e2e training tests with GRPO on ASCEND NPU (MindSpeed backend, MoE Model)
         run: |
@@ -165,6 +165,7 @@ jobs:
           export PYTHONPATH=$PYTHONPATH:/Megatron-LM
           export PYTHONPATH=$PYTHONPATH:/MindSpeed
           export PYTHONPATH=$PYTHONPATH:/MindSpeed-LLM
+          rm -rf /root/.cache/torch_extensions/py311_cpu/npu_rotary_position_embedding
           bash tests/special_npu/run_qwen3_8b_grpo_mindspeedllm.sh
       - name: Running gsm8k e2e training tests with GRPO on ASCEND NPU (MindSpeedLLM backend, MoE Model)
         run: |
@@ -172,15 +173,17 @@ jobs:
           export PYTHONPATH=$PYTHONPATH:/Megatron-LM
           export PYTHONPATH=$PYTHONPATH:/MindSpeed
           export PYTHONPATH=$PYTHONPATH:/MindSpeed-LLM
-          USE_DIST_CKPT=True USE_DUMMY_MODEL=True DUMMY_MODEL_CONFIG_PATH=tests/special_e2e/ppo_trainer/expert_parallel/qwen3moe_minimal.json DUMMY_MODEL_PATH=$HOME/dist_ckpt/qwen3_30b_grpo_mindspeedllm bash tests/special_npu/run_qwen3_30b_grpo_mindspeedllm.sh
+          rm -rf /root/.cache/torch_extensions/py311_cpu/npu_rotary_position_embedding
+          USE_DUMMY_MODEL=True DUMMY_MODEL_CONFIG_PATH=tests/special_e2e/ppo_trainer/expert_parallel/qwen3moe_minimal.json DUMMY_MODEL_PATH=$HOME/dist_ckpt/qwen3_30b_grpo_mindspeedllm bash tests/special_npu/run_qwen3_30b_grpo_mindspeedllm.sh
+          rm -rf $HOME/dist_ckpt/qwen3_30b_grpo_mindspeedllm
 
   vlm_rl_job:
     if: github.repository_owner == 'verl-project'
     name: E2E Ascend testing for RL training scenarios of VLM models
-    runs-on: linux-aarch64-a3-16
+    runs-on: linux-aarch64-a2b3-8
     timeout-minutes: 120
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-8.5.0-a3-ubuntu22.04-py3.11-latest
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-9.0.0-910b-ubuntu22.04-py3.11-latest
       options: >-
         --shm-size 16g
     env:
@@ -211,5 +214,5 @@ jobs:
       - name: Running geo3k e2e training tests with GRPO on ASCEND NPU
         run: |
           ray stop --force
-          bash tests/special_npu/run_qwen2_5_vl_3b_npu.sh
+          TOTAL_TRAINING_STEPS=1 bash tests/special_npu/run_qwen3_vl_8b_Instruct_fsdp2_npu.sh
           rm -rf $HOME/ckpts

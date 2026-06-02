@@ -56,16 +56,6 @@ def create_resource_pool_manager(config, roles: list) -> ResourcePoolManager:
         assert rm_cfg.n_gpus_per_node > 0, "config.reward.reward_model.n_gpus_per_node must be greater than 0"
         assert rm_cfg.nnodes > 0, "config.reward.reward_model.nnodes must be greater than 0"
 
-    # Teacher model resource pool (for distillation)
-    if Role.TeacherModel in roles:
-        distillation_cfg = config.get("distillation", {})
-        n_gpus = distillation_cfg.get("n_gpus_per_node", 0)
-        nnodes = distillation_cfg.get("nnodes", 1)
-        assert n_gpus > 0, "distillation.n_gpus_per_node must be greater than 0 for TeacherModel"
-        teacher_pool = [n_gpus] * nnodes
-        resource_pool_spec["teacher_pool"] = teacher_pool
-        mapping[Role.TeacherModel] = "teacher_pool"
-
     return ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 
 

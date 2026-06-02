@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# GRPO | Qwen2.5-VL-7B | FSDP training | NVIDIA GPUs
+# GRPO | Qwen2.5-VL-7B | FSDP training | NVIDIA GPUs or Ascend NPUs
 #
 # INFER_BACKEND controls rollout backend: vllm | sglang | trtllm.
 
@@ -7,6 +7,9 @@ set -xeuo pipefail
 
 ########################### user-adjustable ###########################
 INFER_BACKEND=${INFER_BACKEND:-vllm}
+
+# DEVICE is auto-detected by probing torch_npu; override only for special cases.
+DEVICE=${DEVICE:-$(python3 -c 'import torch_npu' 2>/dev/null && echo npu || echo gpu)}
 
 MODEL_PATH=${MODEL_PATH:-Qwen/Qwen2.5-VL-7B-Instruct}
 NNODES=${NNODES:-1}
@@ -108,6 +111,33 @@ EXTRA=(
     actor_rollout_ref.rollout.enforce_eager=False
     actor_rollout_ref.rollout.free_cache_engine=True
 )
+
+
+case "${DEVICE}" in
+    gpu)
+        ;;
+    npu)
+        TRAINER+=(trainer.n_gpus_per_node=16
+        )
+        ROLLOUT+=(
+            actor_rollout_ref.rollout.gpu_memory_utilization=0.5
+            +actor_rollout_ref.rollout.engine_kwargs.vllm.mm_processor_cache_gb=0
+            actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4
+        )
+        REF+=(
+            actor_rollout_ref.ref.fsdp_config.param_offload=True
+        )
+        EXTRA+=(
+            actor_rollout_ref.model.use_fused_kernels=False
+            actor_rollout_ref.rollout.multi_stage_wake_up=False
+            actor_rollout_ref.rollout.free_cache_engine=False
+        )
+        ;;
+    *)
+        echo "Unsupported DEVICE=${DEVICE}. Expected 'gpu' or 'npu'." >&2
+        exit 1
+        ;;
+esac
 
 ########################### launch ###########################
 python3 -m verl.trainer.main_ppo \

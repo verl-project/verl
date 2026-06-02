@@ -2,7 +2,15 @@
 Search Tool Integration
 =======================
 
-Last updated: 05/30/2025.
+Last updated: 05/09/2026.
+
+.. note::
+
+   The in-tree ``verl.tools.search_tool.SearchTool`` reference implementation
+   used throughout this guide has been removed. The end-to-end recipe
+   (config, retrieval server, training script) still works as documentation
+   of the integration pattern, but the ``SearchTool`` class must now be
+   provided by users (see :class:`verl.tools.base_tool.BaseTool`).
 
 Introduction
 ------------

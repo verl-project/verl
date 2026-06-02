@@ -154,11 +154,45 @@ class vLLMColocateWorkerExtension:
         instance._is_modelopt_qat = _is_modelopt_qat
         return instance
 
+    def _get_drafter_model(self):
+        """Return the drafter's model object, or None if unavailable."""
+        drafter = getattr(self.model_runner, "drafter", None)
+        return drafter.model if drafter is not None and hasattr(drafter, "model") else None
+
+    def _get_draft_model_config(self):
+        """Return the draft model config from speculative_config, or None."""
+        spec = self.model_runner.vllm_config.speculative_config
+        return spec.draft_model_config if spec is not None and spec.draft_model_config is not None else None
+
+    def _use_mtp_drafter_weight_sync(self):
+        """Return whether the vLLM MTP drafter should receive actor weights."""
+        spec = self.model_runner.vllm_config.speculative_config
+        return spec is not None and spec.method == "mtp" and self._get_drafter_model() is not None
+
+    def _iter_all_models(self):
+        """Yield models that need weight updates.
+
+        Only vLLM MTP drafter sync is supported for now. Independent non-MTP
+        draft models are not compatible with actor weight loading through this path.
+        """
+        yield self.model_runner.model
+        if self._use_mtp_drafter_weight_sync():
+            yield self._get_drafter_model()
+
+    def _iter_all_models_with_config(self):
+        """Yield (model, model_config) for models that need post-processing."""
+        yield self.model_runner.model, self.model_runner.vllm_config.model_config
+        if self._use_mtp_drafter_weight_sync():
+            draft_cfg = self._get_draft_model_config()
+            if draft_cfg is not None:
+                yield self._get_drafter_model(), draft_cfg
+
     def monkey_patch_model(self, vocab_size: int):
-        # patch compute_logits to avoid sampling OOV token
-        monkey_patch_compute_logits(self.model_runner.model, vocab_size)
-        # patch weight loader to support MoE model
-        patch_vllm_moe_model_weight_loader(self.model_runner.model)
+        for model in self._iter_all_models():
+            # patch compute_logits to avoid sampling OOV token
+            monkey_patch_compute_logits(model, vocab_size)
+            # patch weight loader to support MoE model
+            patch_vllm_moe_model_weight_loader(model)
 
     def update_weights_from_ipc(self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False):
         """Update the weights of the rollout model."""
@@ -181,7 +215,8 @@ class vLLMColocateWorkerExtension:
             # QAT (compressed-tensors): Prepare for weight loading BEFORE receiving any buckets
             from verl.utils.qat import prepare_qat_for_load_weights
 
-            prepare_qat_for_load_weights(self.model_runner.model, device=self.device)
+            for model in self._iter_all_models():
+                prepare_qat_for_load_weights(model, device=self.device)
             logger.info("QAT: prepare_qat_for_load_weights completed")
         elif self._is_modelopt_qat:
             from verl.utils.modelopt.vllm_modelopt_patch import prepare_modelopt_for_weight_reload
@@ -190,7 +225,8 @@ class vLLMColocateWorkerExtension:
             logger.info("ModelOpt: prepare_modelopt_for_weight_reload completed")
         elif use_standard_weight_load:
             # Re-apply here because async IPC weight sync can happen long after init and lose MoE weight_loader attrs.
-            patch_vllm_moe_model_weight_loader(self.model_runner.model)
+            for model in self._iter_all_models():
+                patch_vllm_moe_model_weight_loader(model)
 
         assert self.device is not None
         receiver = BucketedWeightReceiver(
@@ -208,7 +244,8 @@ class vLLMColocateWorkerExtension:
             # QAT (compressed-tensors): call process_weights_after_loading AFTER all buckets are received
             from verl.utils.qat import manual_process_weights_after_loading
 
-            manual_process_weights_after_loading(self.model_runner.model)
+            for model in self._iter_all_models():
+                manual_process_weights_after_loading(model)
             logger.info("QAT: process_weights_after_loading completed")
         elif self._is_modelopt_qat:
             from verl.utils.modelopt.vllm_modelopt_patch import modelopt_process_weights_after_loading
@@ -219,9 +256,8 @@ class vLLMColocateWorkerExtension:
             # Some post-load transforms are non-idempotent; run once after all buckets.
             from vllm.model_executor.model_loader.utils import process_weights_after_loading
 
-            model = self.model_runner.model
-            model_config = self.model_runner.vllm_config.model_config
-            process_weights_after_loading(model, model_config, self.device)
+            for model, model_config in self._iter_all_models_with_config():
+                process_weights_after_loading(model, model_config, self.device)
 
     def _update_weights(self, weights: list[tuple[str, torch.Tensor]], peft_config: dict, base_sync_done: bool):
         if peft_config and base_sync_done:
@@ -243,9 +279,13 @@ class vLLMColocateWorkerExtension:
                 # Convert bf16 weights to fp8 format before loading
                 loaded_params = load_quanted_weights(weights, self.model_runner)
                 logger.info(f"FP8 weights loaded (async), loaded_params: {len(loaded_params)}")
+                # Keep the draft model in sync when present.
+                if self._use_mtp_drafter_weight_sync():
+                    load_quanted_weights(weights, self.model_runner, is_drafter=True)
             else:
                 logger.info("Loading standard weights (non-FP8, async)")
-                self.model_runner.model.load_weights(weights)
+                for model in self._iter_all_models():
+                    model.load_weights(weights)
 
     def _get_zmq_handle(self) -> str:
         """Get ZMQ handle for communication.

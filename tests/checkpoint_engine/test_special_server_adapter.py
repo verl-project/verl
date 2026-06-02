@@ -21,12 +21,14 @@ from transformers import PreTrainedTokenizer
 
 from tests.checkpoint_engine.test_utils import create_trainer_worker_group
 from verl.checkpoint_engine import CheckpointEngineManager
+from verl.experimental.fully_async_policy.fully_async_rollouter import FullyAsyncLLMServerClient
 from verl.single_controller.ray import (
     RayResourcePool,
 )
 from verl.utils.config import omega_conf_to_dataclass
+from verl.utils.tokenizer import normalize_token_ids
 from verl.workers.config import CheckpointEngineConfig, HFModelConfig
-from verl.workers.rollout.llm_server import FullyLLMServerClient, LLMServerClient, LLMServerManager
+from verl.workers.rollout.llm_server import LLMServerClient, LLMServerManager
 
 
 @pytest.fixture
@@ -60,7 +62,7 @@ async def _run_update_weights_with_global_steps_none(
 ):
     await checkpoint_manager.update_weights(global_steps=None)
     prompt = [{"role": "user", "content": "How to make a sandwich?"}]
-    prompt_ids = tokenizer.apply_chat_template(prompt, add_generation_prompt=True, tokenize=True)
+    prompt_ids = normalize_token_ids(tokenizer.apply_chat_template(prompt, add_generation_prompt=True, tokenize=True))
     output = await server_manager.generate(
         request_id="test_0",
         prompt_ids=prompt_ids,
@@ -90,7 +92,9 @@ async def _run_server_manager_without_resume(
     for global_steps in range(initial_steps, initial_steps + train_steps):
         tasks = []
         for i, prompt in enumerate(prompts):
-            prompt_ids = tokenizer.apply_chat_template(prompt, add_generation_prompt=True, tokenize=True)
+            prompt_ids = normalize_token_ids(
+                tokenizer.apply_chat_template(prompt, add_generation_prompt=True, tokenize=True)
+            )
             tasks.append(
                 asyncio.create_task(
                     server_manager.generate(
@@ -123,7 +127,7 @@ async def _run_server_manager_without_resume(
 async def _run_server_manager_with_resume(
     initial_steps: int,
     train_steps: int,
-    server_manager: FullyLLMServerClient,
+    server_manager: FullyAsyncLLMServerClient,
     checkpoint_manager: CheckpointEngineManager,
     prompts: list[list[dict]],
     tokenizer: PreTrainedTokenizer,
@@ -131,7 +135,9 @@ async def _run_server_manager_with_resume(
     # 1. rollout generate responses
     tasks = []
     for i, prompt in enumerate(prompts):
-        prompt_ids = tokenizer.apply_chat_template(prompt, add_generation_prompt=True, tokenize=True)
+        prompt_ids = normalize_token_ids(
+            tokenizer.apply_chat_template(prompt, add_generation_prompt=True, tokenize=True)
+        )
         tasks.append(
             asyncio.create_task(
                 server_manager.generate(
@@ -231,7 +237,7 @@ async def test_server_adapter(init_config):
     await _run_server_manager_with_resume(
         initial_steps=4,
         train_steps=3,
-        server_manager=llm_server_manager.get_client(fully_async=True),
+        server_manager=llm_server_manager.get_client(client_cls=FullyAsyncLLMServerClient),
         checkpoint_manager=checkpoint_manager,
         prompts=prompts,
         tokenizer=model_config.tokenizer,
