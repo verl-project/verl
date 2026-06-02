@@ -113,10 +113,6 @@ def _get_available_cpus() -> float | None:
         cpu_count = os.cpu_count()
         return float(cpu_count) if cpu_count is not None else None
 
-    available_cpus = ray.available_resources().get("CPU")
-    if available_cpus is not None:
-        return float(available_cpus)
-
     cluster_cpus = ray.cluster_resources().get("CPU")
     if cluster_cpus is not None:
         return float(cluster_cpus)
