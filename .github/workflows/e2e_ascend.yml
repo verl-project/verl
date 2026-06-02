@@ -214,5 +214,5 @@ jobs:
       - name: Running geo3k e2e training tests with GRPO on ASCEND NPU
         run: |
           ray stop --force
-          TOTAL_EPOCHS=1 bash tests/special_npu/run_qwen3_vl_8b_Instruct_fsdp2_npu.sh
+          TOTAL_TRAINING_STEPS=1 bash tests/special_npu/run_qwen3_vl_8b_Instruct_fsdp2_npu.sh
           rm -rf $HOME/ckpts

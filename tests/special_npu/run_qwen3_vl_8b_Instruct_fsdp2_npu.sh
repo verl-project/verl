@@ -10,7 +10,7 @@ NNODES=${NNODES:-1}
 NDEVICES_PER_NODE=${NDEVICES_PER_NODE:-}
 
 TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-16}
-PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-16}
+PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-8}
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-1024}
 MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-2048}
 PPO_MAX_TOKEN_LEN_PER_GPU=${PPO_MAX_TOKEN_LEN_PER_GPU:-24576}
@@ -25,8 +25,9 @@ ROLLOUT_N=${ROLLOUT_N:-5}
 SP_SIZE=${SP_SIZE:-1}
 
 TOTAL_EPOCHS=${TOTAL_EPOCHS:-15}
+TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-15}
 SAVE_FREQ=${SAVE_FREQ:-20}
-TEST_FREQ=${TEST_FREQ:-5}
+TEST_FREQ=${TEST_FREQ:-20}
 
 PROJECT_NAME=${PROJECT_NAME:-verl_grpo_geo3k}
 EXPERIMENT_NAME=${EXPERIMENT_NAME:-qwen3_vl_8b_grpo_fsdp2_vllm_$(date +%Y%m%d_%H%M)}
@@ -46,7 +47,7 @@ export HCCL_HOST_SOCKET_PORT_RANGE=60000-60050
 export HCCL_NPU_SOCKET_PORT_RANGE=61000-61050
 export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
 
-rollout_gpu_mem_util=${ROLLOUT_GPU_MEM_UTIL:-0.5}
+rollout_gpu_mem_util=${ROLLOUT_GPU_MEM_UTIL:-0.6}
 
 ########################### parameter arrays ###########################
 
@@ -88,6 +89,7 @@ ROLLOUT=(
     actor_rollout_ref.rollout.enable_chunked_prefill=False
     actor_rollout_ref.rollout.n=${ROLLOUT_N}
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True
+    actor_rollout_ref.rollout.calculate_log_probs=True
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU}
 )
 
@@ -107,7 +109,7 @@ TRAINER=(
     trainer.save_freq=${SAVE_FREQ}
     trainer.test_freq=${TEST_FREQ}
     trainer.total_epochs=${TOTAL_EPOCHS}
-    trainer.total_training_steps=${TOTAL_EPOCHS}
+    trainer.total_training_steps=${TOTAL_TRAINING_STEPS}
 )
 
 EXTRA=(
@@ -118,7 +120,6 @@ EXTRA=(
     actor_rollout_ref.ref.fsdp_config.ulysses_sequence_parallel_size=${SP_SIZE}
     +actor_rollout_ref.rollout.engine_kwargs.vllm.mm_processor_cache_gb=0
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=20
-    actor_rollout_ref.rollout.calculate_log_probs=True
 )
 
 ########################### launch ###########################
