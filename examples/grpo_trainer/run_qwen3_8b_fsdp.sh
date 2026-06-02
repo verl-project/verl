@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# GRPO | Qwen3-8B | FSDP training | NVIDIA GPUs or Ascend NPUs
+# GRPO | Qwen3-8B | FSDP training | NVIDIA GPUs, AMD GPUs, or Ascend NPUs
 #
 # Knobs:
 #   INFER_BACKEND   rollout backend: vllm | sglang | trtllm        (default: vllm)
@@ -85,6 +85,11 @@ case "${DEVICE}" in
                 if [ "${INFER_BACKEND}" = sglang ]; then
                     EXTRA+=(+actor_rollout_ref.rollout.engine_kwargs.sglang.attention_backend=flashinfer)
                 fi
+                ;;
+            mi300x)
+                NGPUS_PER_NODE=${NGPUS_PER_NODE:-8}
+                actor_param_offload=True
+                actor_optimizer_offload=True
                 ;;
             *)
                 NGPUS_PER_NODE=${NGPUS_PER_NODE:-8}
