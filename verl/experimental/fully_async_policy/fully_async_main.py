@@ -140,8 +140,12 @@ class FullyAsyncTaskRunner:
             config=config,
             key="rollouter_num_cpus",
             default_num_cpus=DEFAULT_ROLLOUTER_NUM_CPUS,
-            remaining_keys=(("message_queue_num_cpus", DEFAULT_MESSAGE_QUEUE_NUM_CPUS),),
-            reserved_num_cpus=estimate_rollout_worker_group_num_cpus(config),
+            remaining_keys=(
+                ("trainer_num_cpus", DEFAULT_TRAINER_NUM_CPUS),
+                ("message_queue_num_cpus", DEFAULT_MESSAGE_QUEUE_NUM_CPUS),
+            ),
+            reserved_num_cpus=estimate_trainer_worker_group_num_cpus(config)
+            + estimate_rollout_worker_group_num_cpus(config),
         )
         rollouter = FullyAsyncRollouter.options(num_cpus=rollouter_num_cpus).remote(
             config=config,
