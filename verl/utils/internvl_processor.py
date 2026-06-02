@@ -119,6 +119,8 @@ class InternVLProcessor(ProcessorMixin):
         patches_per_image = []
 
         if images is not None:
+            if isinstance(images, Image.Image):
+                images = [images]
             for img in images:
                 if isinstance(img, Image.Image):
                     pv = image_to_pixel_values_internvl(
@@ -137,12 +139,14 @@ class InternVLProcessor(ProcessorMixin):
         if text is not None:
             if replace_image:
                 modified_text = []
-                for i, t in enumerate(text):
-                    if i < len(patches_per_image):
-                        num_patches = patches_per_image[i]
+                image_idx = 0
+                for t in text:
+                    while '<image>' in t and image_idx < len(patches_per_image):
+                        num_patches = patches_per_image[image_idx]
                         feature_size = num_patches * self._num_image_token
                         replacement = f"<img>{'<IMG_CONTEXT>' * feature_size}</img>"
                         t = t.replace('<image>', replacement, 1)
+                        image_idx += 1
                     modified_text.append(t)
                 tokenized = self.tokenizer(modified_text, return_tensors=return_tensors, **kwargs)
             else:

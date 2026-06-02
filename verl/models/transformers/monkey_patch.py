@@ -330,7 +330,11 @@ def apply_monkey_patch(
     try:
         num_attention_heads, num_key_value_heads = model.config.num_attention_heads, model.config.num_key_value_heads
     except AttributeError:
-        text_config = getattr(model.config, "text_config", None) or model.config.get_text_config()
+        text_config = getattr(model.config, "text_config", None)
+        if text_config is None and hasattr(model.config, "get_text_config"):
+            text_config = model.config.get_text_config()
+        if text_config is None:
+            text_config = model.config
         if not hasattr(text_config, "num_attention_heads"):
             # Some VL configs (e.g. InternVLChatConfig) return self from
             # get_text_config().  Try common sub-config names.
