@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import logging
 import os
 import time
@@ -20,6 +21,7 @@ from typing import AsyncGenerator, Generator
 import ray
 import torch
 import zmq
+import zmq.asyncio
 from vllm.distributed.utils import StatelessProcessGroup
 
 from verl.checkpoint_engine.base import CheckpointEngine, CheckpointEngineRegistry, TensorMeta
@@ -47,11 +49,12 @@ class BroadcastOperation:
 
     Args:
         rank (int): The rank of the current process.
-        group_name (str): The name of the HCCL process group.
+        process_group (StatelessProcessGroup | str): The HCCL process group.
         bucket (torch.Tensor): The tensor to broadcast.
         metadata (dict[str, TensorMeta]): The metadata of the tensor.
         socket (zmq.Socket): The zeromq socket to communicate with master.
         topic (str): The topic to subscribe.
+        device (int): The NPU device index used by the broadcast thread.
     """
 
     def __init__(
@@ -62,6 +65,7 @@ class BroadcastOperation:
         metadata: dict[str, TensorMeta],
         socket: zmq.Socket,
         topic: str,
+        device: int,
     ) -> None:
         self.rank = rank
         self.pyhccl = process_group
@@ -69,19 +73,25 @@ class BroadcastOperation:
         self.metadata = metadata
         self.socket = socket
         self.topic = topic
+        self.device = device
 
-        self._run()
+        loop = asyncio.get_running_loop()
+        self._task = loop.create_task(self._run())
 
-    def _run(self):
+    async def _run(self):
         # broadcast tensor meta via zeromq PUB/SUB
         if self.rank == 0:
-            self.socket.send_string(self.topic, flags=zmq.SNDMORE)
-            self.socket.send_pyobj(self.metadata)
+            await self.socket.send_string(self.topic, flags=zmq.SNDMORE)
+            await self.socket.send_pyobj(self.metadata)
         else:
-            self.socket.recv_string()
-            self.metadata = self.socket.recv_pyobj()
+            await self.socket.recv_string()
+            self.metadata = await self.socket.recv_pyobj()
 
-        # broadcast tensor via HCCL
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self._run_broadcast)
+
+    def _run_broadcast(self):
+        torch.npu.set_device(self.device)
         self.pyhccl.broadcast(self.bucket, src=0)
 
     async def wait_for_complete(self) -> dict[str, TensorMeta]:
@@ -90,6 +100,7 @@ class BroadcastOperation:
         Returns:
             dict[str, TensorMeta]: The bucket meta after broadcast.
         """
+        await self._task
         return self.metadata
 
 
@@ -169,7 +180,7 @@ class HCCLCheckpointEngine(CheckpointEngine):
         self.ip = ray.util.get_node_ip_address().strip("[]")
         self.zmq_port, _ = get_free_port(self.ip)
 
-        context = zmq.Context()
+        context = zmq.asyncio.Context()
         self.socket = context.socket(zmq.PUB)
         if is_valid_ipv6_address(self.ip):
             address = f"tcp://[{self.ip}]:{self.zmq_port}"
@@ -181,7 +192,7 @@ class HCCLCheckpointEngine(CheckpointEngine):
 
     def _connect_zmq_client(self, metadata: MasterMetadata):
         assert not self.is_master, "Master process should not connect to other processes."
-        context = zmq.Context()
+        context = zmq.asyncio.Context()
         self.socket = context.socket(zmq.SUB)
         if is_valid_ipv6_address(metadata.zmq_ip):
             address = f"tcp://[{metadata.zmq_ip}]:{metadata.zmq_port}"
@@ -267,6 +278,7 @@ class HCCLCheckpointEngine(CheckpointEngine):
                     metadata={"bucket_meta": bucket_meta, "is_last": False},
                     socket=self.socket,
                     topic=self.topic,
+                    device=self.device,
                 )
 
                 # swap send_buf and recv_buf
@@ -299,6 +311,7 @@ class HCCLCheckpointEngine(CheckpointEngine):
             metadata={"bucket_meta": bucket_meta, "is_last": True},
             socket=self.socket,
             topic=self.topic,
+            device=self.device,
         )
         await broadcast_op.wait_for_complete()
         logger.info(f"Rank {self.rank} send weights done, time cost: {time.time() - start_time:.2f}s")
@@ -326,6 +339,7 @@ class HCCLCheckpointEngine(CheckpointEngine):
             metadata=None,
             socket=self.socket,
             topic=self.topic,
+            device=self.device,
         )
         metadata = await broadcast_op.wait_for_complete()
         total_bytes += self.bucket_size
@@ -342,6 +356,7 @@ class HCCLCheckpointEngine(CheckpointEngine):
                 metadata=None,
                 socket=self.socket,
                 topic=self.topic,
+                device=self.device,
             )
 
             # 2. yield tensor from send_buf
