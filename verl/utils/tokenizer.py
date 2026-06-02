@@ -192,8 +192,24 @@ def hf_processor(name_or_path, **kwargs):
     """
     from transformers import AutoConfig, AutoProcessor, PreTrainedTokenizerBase
 
+    # AutoProcessor.from_pretrained may raise for models without a standard
+    # HF processor (e.g. InternVL).  Handle the fallback path first.
     try:
         processor = AutoProcessor.from_pretrained(name_or_path, **kwargs)
+    except Exception:
+        # AutoProcessor failed — check if this is an InternVL model that
+        # needs our custom processor wrapper.
+        config = AutoConfig.from_pretrained(name_or_path, **kwargs)
+        if getattr(config, "model_type", None) == "internvl_chat":
+            from verl.utils.internvl_processor import InternVLProcessor
+
+            from verl.utils import hf_tokenizer
+
+            tokenizer = hf_tokenizer(name_or_path, **kwargs)
+            return InternVLProcessor(tokenizer, config)
+        raise
+
+    try:
         # In newer transformers, AutoProcessor may legitimately fall back to a
         # tokenizer backend (e.g. TokenizersBackend) for text-only models.
         # Treat it as "no multimodal processor" and let callers use hf_tokenizer.
