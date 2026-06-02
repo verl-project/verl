@@ -57,6 +57,7 @@ verl 通过层级化的 YAML 配置文件管理所有参数，涉及到的所有
 | `actor_rollout_ref.actor.grad_clip` | `1.0` | 梯度裁剪值 |
 | `actor_rollout_ref.actor.ulysses_sequence_parallel_size` | `1` | Ulysses 序列并行大小 |
 | `actor_rollout_ref.actor.entropy_from_logits_with_chunking` | `false` | 是否使用分块方式从 logits 计算熵 |
+| `actor_rollout_ref.actor.entropy_from_logits_chunk_size` | `2048` | 熵计算分块大小 |
 | `actor_rollout_ref.actor.entropy_checkpointing` | `false` | 是否对熵计算使用梯度检查点 |
 | `actor_rollout_ref.actor.use_remove_padding` | 引用自 `model.use_remove_padding` | 是否移除 padding |
 | `actor_rollout_ref.actor.calculate_sum_pi_squared` | `false` | 是否计算策略概率平方和 |
