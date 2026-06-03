@@ -712,9 +712,13 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def update_weights(self, global_steps: int = None, mode: str = "auto"):
-        from verl.utils.ray_utils import auto_await
+        import asyncio
 
-        return auto_await(self._update_weights_async(global_steps=global_steps, mode=mode))
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(self._update_weights_async(global_steps=global_steps, mode=mode))
+        finally:
+            loop.close()
 
     async def _update_weights_async(self, global_steps: int = None, mode: str = "auto"):
         """Update weights from trainer to rollout.
