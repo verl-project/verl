@@ -742,6 +742,40 @@ class AsyncHttpServerAdapter(HttpServerAdapter):
         """
         return await self._make_async_request("resume_memory_occupation", {"tags": tags})
 
+    async def init_weights_update_group(
+        self,
+        master_address: str,
+        master_port: int,
+        rank_offset: int,
+        world_size: int,
+        group_name: str = "weight_update_group",
+    ) -> dict:
+        payload = {
+            "master_address": master_address,
+            "master_port": master_port,
+            "rank_offset": rank_offset,
+            "world_size": world_size,
+            "group_name": group_name,
+            "backend": "nccl",
+        }
+        return await self._make_async_request("init_weights_update_group", payload)
+
+    async def update_weights_from_distributed(
+        self,
+        names: list,
+        dtypes: list,
+        shapes: list,
+        group_name: str = "weight_update_group",
+    ) -> dict:
+        payload = {
+            "names": names,
+            "dtypes": dtypes,
+            "shapes": shapes,
+            "group_name": group_name,
+            "flush_cache": True,
+        }
+        return await self._make_async_request("update_weights_from_distributed", payload)
+
     async def update_weights_from_tensor(
         self,
         req: UpdateWeightsFromTensorReqInput,

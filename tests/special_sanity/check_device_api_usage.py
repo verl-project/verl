@@ -51,6 +51,7 @@ CUDA_KEYWORD_CHECK_WHITELIST = [
     "verl/workers/engine/automodel/transformer_impl.py",  # appear in default device_name
     "verl/workers/rollout/vllm_rollout/vllm_async_server.py",  # appear in config.cudagraph_capture_sizes
     "verl/workers/rollout/sglang_rollout/async_sglang_server.py",  # manually set CUDA_VISIBLE_DEVICES
+    "verl/workers/rollout/sglang_rollout/http_server_engine.py",  # nccl backend string passed as HTTP payload to SGLang
     "verl/workers/rollout/trtllm_rollout/trtllm_async_server.py",  # appear in config.cudagraph_capture_sizes
     "verl/workers/rollout/replica.py",  # appear in default device_name
     "verl/checkpoint_engine",  # checkpoint engine backend are device specific
