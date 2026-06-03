@@ -718,7 +718,6 @@ class PPOTrainer:
         # For standalone mode: initialize NCCL weight sync group
         rollout_nnodes = self.config.actor_rollout_ref.rollout.get("nnodes", 0)
         if rollout_nnodes > 0:
-            import asyncio
             import socket
 
             from verl.utils.net_utils import get_free_port
@@ -737,21 +736,18 @@ class PPOTrainer:
                 world_size=total_world_size,
                 group_name="weight_update_group",
             )
-            # Simultaneously trigger SGLang servers to join
-            auto_await(
-                asyncio.gather(
-                    *[
-                        replica.workers[0].rollout.init_weight_sync_group(
-                            master_address=head_addr,
-                            master_port=sync_port,
-                            rank_offset=fsdp_world_size + i * tp_size,
-                            world_size=total_world_size,
-                        )
-                        for i, replica in enumerate(replicas)
-                    ]
+            # Simultaneously trigger SGLang servers to join via HTTP
+            sglang_futures = [
+                replica.server_handle.init_weight_sync_group.remote(
+                    master_address=head_addr,
+                    master_port=sync_port,
+                    rank_offset=fsdp_world_size + i * tp_size,
+                    world_size=total_world_size,
                 )
-            )
+                for i, replica in enumerate(replicas)
+            ]
             ray.get(init_group_futures)
+            ray.get(sglang_futures)
         manager_class_fqn = self.config.actor_rollout_ref.rollout.get("agent", {}).get("agent_loop_manager_class")
         if manager_class_fqn:
             agent_loop_manager_cls = load_class_from_fqn(manager_class_fqn, "AgentLoopManager")

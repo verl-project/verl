@@ -490,6 +490,28 @@ class SGLangHttpServer:
         if self.node_rank == 0:
             await self.tokenizer_manager.flush_cache()
 
+    async def init_weight_sync_group(
+        self,
+        master_address: str,
+        master_port: int,
+        rank_offset: int,
+        world_size: int,
+        group_name: str = "weight_update_group",
+    ):
+        """Initialize NCCL weight sync group on SGLang TP workers for standalone mode."""
+        from sglang.srt.managers.io_struct import InitWeightsUpdateGroupReqInput
+
+        if self.node_rank != 0:
+            return
+        obj = InitWeightsUpdateGroupReqInput(
+            master_address=master_address,
+            master_port=master_port,
+            rank_offset=rank_offset,
+            world_size=world_size,
+            group_name=group_name,
+        )
+        await self.tokenizer_manager.init_weights_update_group(obj, None)
+
     async def release_kv_cache(self):
         """Release only kv_cache GPU memory, keeping model weights intact."""
         if self.node_rank != 0 or not self.config.free_cache_engine:
