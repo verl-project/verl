@@ -358,9 +358,7 @@ class TestLinearCrossEntropy:
 
         for _ in range(iterations):
             hidden, weight, labels = self.generate_forward_inputs()
-            t_tensor = torch.full(
-                (self.num_tokens,), self.temperature, dtype=torch.float32, device="cuda"
-            )
+            t_tensor = torch.full((self.num_tokens,), self.temperature, dtype=torch.float32, device="cuda")
 
             # torch fused path runs in fp32 so the prescale cast is a no-op.
             # Residual difference (~1e-5) comes from the matmul associativity
@@ -368,14 +366,10 @@ class TestLinearCrossEntropy:
             # evaluates (h / T) @ W.T, which accumulates in a different order
             # and differs by a few ULPs per-token. Match the cross-implementation
             # tolerance used for verl_fused vs. torch further down.
-            lp_scalar, ent_scalar = run_verl_torch_fused_entropy(
-                hidden, weight, labels, self.temperature
-            )
+            lp_scalar, ent_scalar = run_verl_torch_fused_entropy(hidden, weight, labels, self.temperature)
             hidden_f32 = hidden.to(torch.float32)
             weight_f32 = weight.to(torch.float32)
-            lp_tensor, ent_tensor = fused_linear_for_ppo(
-                hidden_f32, weight_f32, labels, temperature=t_tensor
-            )
+            lp_tensor, ent_tensor = fused_linear_for_ppo(hidden_f32, weight_f32, labels, temperature=t_tensor)
             lp_tensor = lp_tensor.squeeze(0)
             ent_tensor = ent_tensor.squeeze(0)
             torch.testing.assert_close(lp_scalar, lp_tensor, atol=1e-4, rtol=1e-4)
@@ -407,13 +401,11 @@ class TestLinearCrossEntropy:
 
         for _ in range(iterations):
             hidden, weight, labels = self.generate_forward_inputs()
-            temperature_per_token = torch.empty(
-                (self.num_tokens,), dtype=torch.float32, device="cuda"
-            ).uniform_(0.5, 2.0)
-
-            ref_logprobs, ref_entropy = run_torch_per_sample_entropy(
-                hidden, weight, labels, temperature_per_token
+            temperature_per_token = torch.empty((self.num_tokens,), dtype=torch.float32, device="cuda").uniform_(
+                0.5, 2.0
             )
+
+            ref_logprobs, ref_entropy = run_torch_per_sample_entropy(hidden, weight, labels, temperature_per_token)
 
             hidden_f32 = hidden.to(torch.float32)
             weight_f32 = weight.to(torch.float32)
@@ -423,9 +415,7 @@ class TestLinearCrossEntropy:
             fused_logprobs = fused_logprobs.squeeze(0)
             fused_entropy = fused_entropy.squeeze(0)
 
-            kernel_logprobs, kernel_entropy = linear_cross_entropy(
-                hidden, weight, labels, temperature_per_token
-            )
+            kernel_logprobs, kernel_entropy = linear_cross_entropy(hidden, weight, labels, temperature_per_token)
 
             # torch fused path is run in fp32, so we expect tight agreement.
             torch.testing.assert_close(ref_logprobs, fused_logprobs, atol=1e-4, rtol=1e-4)

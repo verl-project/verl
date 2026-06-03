@@ -122,7 +122,7 @@ def linear_cross_entropy(
     hidden: torch.Tensor,
     weight: torch.Tensor,
     labels: torch.Tensor,
-    temperature: typing.Union[float, torch.Tensor] = 1.0,
+    temperature: float | torch.Tensor = 1.0,
     reduction: typing.Optional[str] = "none",
     dist_process_group: typing.Optional[dist.ProcessGroup] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -136,6 +136,4 @@ def linear_cross_entropy(
     scaling and the autograd graph propagates gradients correctly.
     """
     hidden, temperature_scalar = resolve_temperature_for_fused_kernel(hidden, temperature)
-    return LinearCrossEntropy.apply(
-        hidden, weight, labels, temperature_scalar, reduction, dist_process_group
-    )
+    return LinearCrossEntropy.apply(hidden, weight, labels, temperature_scalar, reduction, dist_process_group)

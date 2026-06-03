@@ -17,7 +17,7 @@ Contain small torch utilities
 
 import math
 from contextlib import contextmanager
-from typing import Optional, Union
+from typing import Optional
 
 import torch
 import torch.distributed
@@ -46,9 +46,7 @@ except ImportError:
     NPU_CROSS_ENTROPY_LOSS_AVAILABLE = False
 
 
-def prescale_hidden_by_per_sample_temperature(
-    hidden: torch.Tensor, temperature: torch.Tensor
-) -> torch.Tensor:
+def prescale_hidden_by_per_sample_temperature(hidden: torch.Tensor, temperature: torch.Tensor) -> torch.Tensor:
     """Pre-scale ``hidden`` by ``1/temperature`` per token in fp32 and cast back
     to the hidden dtype.
 
@@ -79,17 +77,12 @@ def prescale_hidden_by_per_sample_temperature(
         ``hidden`` with the same shape/dtype, scaled row-wise by ``1/T``.
     """
     if temperature.dim() != 1:
-        raise ValueError(
-            f"per-sample temperature must be 1D, got shape {tuple(temperature.shape)}"
-        )
+        raise ValueError(f"per-sample temperature must be 1D, got shape {tuple(temperature.shape)}")
     original_shape = hidden.shape
     hidden_flat = hidden.reshape(-1, hidden.shape[-1]) if hidden.dim() > 2 else hidden
     num_tokens = hidden_flat.shape[0]
     if temperature.shape[0] != num_tokens:
-        raise ValueError(
-            f"per-sample temperature length {temperature.shape[0]} does not match "
-            f"num_tokens {num_tokens}"
-        )
+        raise ValueError(f"per-sample temperature length {temperature.shape[0]} does not match num_tokens {num_tokens}")
     inv_t = (1.0 / temperature.to(torch.float32)).unsqueeze(-1)
     hidden_scaled = (hidden_flat.to(torch.float32) * inv_t).to(hidden.dtype)
     if hidden.dim() > 2:
@@ -98,7 +91,7 @@ def prescale_hidden_by_per_sample_temperature(
 
 
 def resolve_temperature_for_fused_kernel(
-    hidden: torch.Tensor, temperature: Union[float, torch.Tensor]
+    hidden: torch.Tensor, temperature: float | torch.Tensor
 ) -> tuple[torch.Tensor, float]:
     """Dispatcher helper shared by fused linear + cross-entropy kernels.
 

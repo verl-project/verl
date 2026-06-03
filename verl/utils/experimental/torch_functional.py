@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional, Union
+from typing import Optional
 
 import torch
 
@@ -219,7 +219,7 @@ class FusedLinearForPPO(torch.nn.Module):
         hidden_states: torch.FloatTensor,
         vocab_weights: torch.FloatTensor,
         input_ids: torch.LongTensor,
-        temperature: Union[float, torch.Tensor] = 1.0,
+        temperature: float | torch.Tensor = 1.0,
     ) -> tuple[torch.FloatTensor, torch.FloatTensor]:
         """Compute log-probs and entropy via fused linear + cross-entropy.
 
@@ -236,9 +236,7 @@ class FusedLinearForPPO(torch.nn.Module):
         input_ids = input_ids.to(torch.int64)
         # Per-sample temperature: prescale hidden by 1/T outside the
         # ``Function`` so autograd handles the extra op automatically.
-        hidden_states, scalar_temperature = resolve_temperature_for_fused_kernel(
-            hidden_states, temperature
-        )
+        hidden_states, scalar_temperature = resolve_temperature_for_fused_kernel(hidden_states, temperature)
         return FusedLinearForPPOFunction.apply(
             hidden_states,
             vocab_weights,
