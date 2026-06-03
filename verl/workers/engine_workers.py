@@ -711,16 +711,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         logger.info(f"[NCCL weight sync] FSDP rank {torch.distributed.get_rank()} joined group successfully")
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    def update_weights(self, global_steps: int = None, mode: str = "auto"):
-        import asyncio
-
-        loop = asyncio.new_event_loop()
-        try:
-            return loop.run_until_complete(self._update_weights_async(global_steps=global_steps, mode=mode))
-        finally:
-            loop.close()
-
-    async def _update_weights_async(self, global_steps: int = None, mode: str = "auto"):
+    async def update_weights(self, global_steps: int = None, mode: str = "auto"):
         """Update weights from trainer to rollout.
 
         1. For sync training with colocated trainer and rollout, update rollout directly from model engine.
@@ -783,7 +774,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             )
 
         # Use NCCL broadcast for standalone mode (cross-node), HTTP for hybrid
-        standalone_nnodes = self.config.rollout.get("nnodes", 0)
+        standalone_nnodes = self.config.rollout.nnodes
         if standalone_nnodes > 0 and hasattr(self.rollout, "_weight_sync_group"):
             await self.rollout.update_weights_nccl(per_tensor_param, global_steps=global_steps)
         else:

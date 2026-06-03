@@ -235,7 +235,7 @@ class ServerAdapter(BaseRollout):
             timeout_kwargs = {}
         # In standalone mode, actual server count = nnodes * n_gpus / tp_size
         # FSDP replica_rank may exceed this, wrap with modulo
-        standalone_nnodes = getattr(self.config, "nnodes", 0)
+        standalone_nnodes = self.config.nnodes
         if standalone_nnodes > 0:
             n_gpus = getattr(self.config, "n_gpus_per_node", 4)
             tp_size = getattr(self.config, "tensor_model_parallel_size", 1)
@@ -282,7 +282,7 @@ class ServerAdapter(BaseRollout):
         if self._engine is None:
             return
         # In standalone mode weights are always loaded — skip resume
-        standalone_nnodes = getattr(self.config, "nnodes", 0)
+        standalone_nnodes = self.config.nnodes
         if standalone_nnodes > 0 and "weights" in tags:
             return
         if self._is_server_tp_leader() and self.config.free_cache_engine:
@@ -338,17 +338,16 @@ class ServerAdapter(BaseRollout):
         if self._engine is None:
             return
 
-        names, dtypes, shapes, tensors = [], [], [], []
+        assert hasattr(self, "_weight_sync_group"), "weight_sync_group not set — call init_weight_sync_group first"
+
+        # Broadcast one tensor at a time so FSDP layered_summon can reclaim
+        # each un-sharded shard before the next layer is gathered.
+        names, dtypes, shapes = [], [], []
         for name, param in weights:
             names.append(name)
             dtypes.append(str(param.dtype).replace("torch.", ""))
             shapes.append(list(param.shape))
-            tensors.append(param.detach())
-
-        # Broadcast each tensor from FSDP rank 0 into the weight sync group
-        assert hasattr(self, "_weight_sync_group"), "weight_sync_group not set — call init_weight_sync_group first"
-        for tensor in tensors:
-            torch.distributed.broadcast(tensor, src=0, group=self._weight_sync_group)
+            torch.distributed.broadcast(param.detach(), src=0, group=self._weight_sync_group)
 
         # Tell SGLang to receive the weights from the group
         if self._is_server_tp_leader():
