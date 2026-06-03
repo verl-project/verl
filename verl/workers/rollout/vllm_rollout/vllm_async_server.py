@@ -1011,7 +1011,12 @@ class vLLMReplica(RolloutReplica):
                 # https://docs.vllm.ai/en/latest/usage/troubleshooting.html?h=nccl_cumem_enable#known-issues
                 # https://github.com/vllm-project/vllm/blob/c6b0a7d3ba03ca414be1174e9bd86a97191b7090/vllm/worker/worker_base.py#L445
                 "NCCL_CUMEM_ENABLE": "0",
+                "VLLM_ASCEND_AUTO_DETECT_QUANTIZATION": "0",
             }
+            if os.environ.get("TASK_QUEUE_ENABLE", "0") == "2":
+                logger.info("TASK_QUEUE_ENABLE=2 is not supported in vLLM, revert to 1")
+                env_vars["TASK_QUEUE_ENABLE"] = "1"
+
             server = self.server_class.options(
                 scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                     node_id=node_id,
