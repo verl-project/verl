@@ -75,7 +75,7 @@ from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.dataset.rl_dataset import collate_fn
 from verl.utils.debug import marked_timer
 from verl.utils.debug.metrics import calculate_debug_metrics
-from verl.utils.device import auto_set_device, get_nccl_backend
+from verl.utils.device import auto_set_device
 from verl.utils.fs import copy_to_local
 from verl.utils.import_utils import load_extern_type
 from verl.utils.metric import reduce_metrics
@@ -275,9 +275,6 @@ class PPOTrainer(ABC):
             import asyncio
             import socket
 
-            import torch
-            from sglang.srt.utils import init_custom_process_group
-
             from verl.utils.net_utils import get_free_port
 
             head_addr = socket.gethostbyname(socket.gethostname())
@@ -286,17 +283,15 @@ class PPOTrainer(ABC):
             tp_size = self.config.actor_rollout_ref.rollout.tensor_model_parallel_size
             n_gpus = self.config.actor_rollout_ref.rollout.n_gpus_per_node
             total_world_size = fsdp_world_size + rollout_nnodes * n_gpus
-            weight_sync_group = init_custom_process_group(
-                backend=get_nccl_backend(),
-                init_method=f"tcp://{head_addr}:{sync_port}",
+            replicas = self.llm_server_manager.get_replicas()
+            # Init NCCL group on FSDP workers (they have dist initialized)
+            init_group_futures = self.actor_rollout_wg.init_weight_sync_group(
+                master_address=head_addr,
+                master_port=sync_port,
                 world_size=total_world_size,
-                rank=torch.distributed.get_rank(),
                 group_name="weight_update_group",
             )
-            replicas = self.llm_server_manager.get_replicas()
-            for replica in replicas:
-                for worker in replica.workers:
-                    worker.rollout._weight_sync_group = weight_sync_group
+            # Simultaneously trigger SGLang servers to join
             auto_await(
                 asyncio.gather(
                     *[
@@ -310,7 +305,7 @@ class PPOTrainer(ABC):
                     ]
                 )
             )
-
+            ray.get(init_group_futures)
         manager_class_fqn = self.config.actor_rollout_ref.rollout.get("agent", {}).get("agent_loop_manager_class")
         if manager_class_fqn:
             agent_loop_manager_cls = load_class_from_fqn(manager_class_fqn, "AgentLoopManager")
