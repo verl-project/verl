@@ -718,11 +718,10 @@ class PPOTrainer:
         # For standalone mode: initialize NCCL weight sync group
         rollout_nnodes = self.config.actor_rollout_ref.rollout.get("nnodes", 0)
         if rollout_nnodes > 0:
-            import socket
-
             from verl.utils.net_utils import get_free_port
 
-            head_addr = socket.gethostbyname(socket.gethostname())
+            # Get address of FSDP rank 0 node (not the TaskRunner node)
+            head_addr = ray.get(self.actor_rollout_wg.get_master_address.remote())[0]
             sync_port, _ = get_free_port(head_addr)
             fsdp_world_size = self.config.trainer.nnodes * self.config.trainer.n_gpus_per_node
             tp_size = self.config.actor_rollout_ref.rollout.tensor_model_parallel_size

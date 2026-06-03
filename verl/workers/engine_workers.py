@@ -664,6 +664,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self.actor.save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    def get_master_address(self) -> str:
+        """Return the IP address of this worker (used to find FSDP rank 0 address)."""
+        import socket
+
+        return socket.gethostbyname(socket.gethostname())
+
     def init_weight_sync_group(
         self,
         master_address: str,
