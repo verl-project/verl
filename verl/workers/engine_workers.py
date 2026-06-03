@@ -711,7 +711,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         logger.info(f"[NCCL weight sync] FSDP rank {torch.distributed.get_rank()} joined group successfully")
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    async def update_weights(self, global_steps: int = None, mode: str = "auto"):
+    def update_weights(self, global_steps: int = None, mode: str = "auto"):
+        from verl.utils.ray_utils import auto_await
+
+        return auto_await(self._update_weights_async(global_steps=global_steps, mode=mode))
+
+    async def _update_weights_async(self, global_steps: int = None, mode: str = "auto"):
         """Update weights from trainer to rollout.
 
         1. For sync training with colocated trainer and rollout, update rollout directly from model engine.
