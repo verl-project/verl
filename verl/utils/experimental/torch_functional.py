@@ -221,6 +221,18 @@ class FusedLinearForPPO(torch.nn.Module):
         input_ids: torch.LongTensor,
         temperature: Union[float, torch.Tensor] = 1.0,
     ) -> tuple[torch.FloatTensor, torch.FloatTensor]:
+        """Compute log-probs and entropy via fused linear + cross-entropy.
+
+        Args:
+            hidden_states: ``(num_tokens, D)`` hidden representations.
+            vocab_weights: ``(vocab_size, D)`` output projection weight.
+            input_ids: ``(num_tokens,)`` label token ids.
+            temperature: Global scalar (``float`` or 0/1-dim tensor) applied
+                inside the kernel, **or** a 1-D tensor of shape
+                ``(num_tokens,)`` for per-token temperature.  In the
+                per-token case ``hidden_states`` is pre-scaled by ``1/T``
+                in fp32 and the kernel runs at ``temperature=1.0``.
+        """
         input_ids = input_ids.to(torch.int64)
         # Per-sample temperature: prescale hidden by 1/T outside the
         # ``Function`` so autograd handles the extra op automatically.
