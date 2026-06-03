@@ -339,27 +339,37 @@ class ServerAdapter(BaseRollout):
             return
 
         assert hasattr(self, "_weight_sync_group"), "weight_sync_group not set — call init_weight_sync_group first"
+        logger.info("[NCCL weight sync] update_weights_nccl: starting broadcast  global_steps=%s", global_steps)
 
         # Broadcast one tensor at a time so FSDP layered_summon can reclaim
         # each un-sharded shard before the next layer is gathered.
         names, dtypes, shapes = [], [], []
+        n_params = 0
         for name, param in weights:
             names.append(name)
             dtypes.append(str(param.dtype).replace("torch.", ""))
             shapes.append(list(param.shape))
             torch.distributed.broadcast(param.detach(), src=0, group=self._weight_sync_group)
+            n_params += 1
+
+        logger.info("[NCCL weight sync] update_weights_nccl: broadcast complete  n_params=%d", n_params)
 
         # Tell SGLang to receive the weights from the group
         if self._is_server_tp_leader():
+            logger.info("[NCCL weight sync] update_weights_nccl: calling update_weights_from_distributed via HTTP")
             await self._engine.update_weights_from_distributed(
                 names=names,
                 dtypes=dtypes,
                 shapes=shapes,
                 group_name=group_name,
             )
+            logger.info(
+                "[NCCL weight sync] update_weights_nccl: update_weights_from_distributed complete, flushing cache"
+            )
             await self._engine.flush_cache()
             if global_steps is not None:
                 await self.server_actor.set_global_steps.remote(global_steps)
+            logger.info("[NCCL weight sync] update_weights_nccl: done")
 
     async def update_weights(
         self, weights: Generator[tuple[str, torch.Tensor], None, None], global_steps: int = None, **kwargs
