@@ -502,6 +502,7 @@ class SGLangHttpServer:
         from sglang.srt.managers.io_struct import InitWeightsUpdateGroupReqInput
 
         if self.node_rank != 0:
+            logger.info(f"[NCCL weight sync] SGLang node_rank={self.node_rank} skipping (not node 0)")
             return
         obj = InitWeightsUpdateGroupReqInput(
             master_address=master_address,
@@ -509,6 +510,10 @@ class SGLangHttpServer:
             rank_offset=rank_offset,
             world_size=world_size,
             group_name=group_name,
+        )
+        logger.info(
+            f"[NCCL weight sync] SGLang node_rank={self.node_rank} initializing weight sync group with master \
+            {master_address}:{master_port}, rank_offset {rank_offset}, world_size {world_size}"
         )
         await self.tokenizer_manager.init_weights_update_group(obj, None)
 
