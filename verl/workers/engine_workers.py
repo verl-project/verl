@@ -686,7 +686,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         port, _ = get_free_port(addr)
         return (addr, port)
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def init_weight_sync_group(
         self,
         master_address: str,
@@ -706,7 +706,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             rank=torch.distributed.get_rank(),
             group_name=group_name,
         )
+        logger.info(
+            f"[NCCL weight sync] FSDP rank {torch.distributed.get_rank()} joining group: \
+            'master={master_address}:{master_port} world_size={world_size}"
+        )
         self.rollout._weight_sync_group = self._weight_sync_group
+        logger.info(f"[NCCL weight sync] FSDP rank {torch.distributed.get_rank()} joined group successfully")
 
     async def update_weights(self, global_steps: int = None, mode: str = "auto"):
         """Update weights from trainer to rollout.
