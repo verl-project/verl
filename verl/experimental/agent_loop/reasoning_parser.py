@@ -164,6 +164,20 @@ class ThinkBlockReasoningParser(ReasoningParser):
     the opening tag to end-of-text so the unfinished reasoning never
     reaches the tool parser.
 
+    Two response shapes are supported:
+
+    * **Explicit opener.** The decoded response contains both
+      ``<think>`` and ``</think>``; everything between (each pair) is
+      stripped.
+    * **Implicit opener.** Qwen3 / DeepSeek-R1 default chat templates
+      append ``<think>`` to the prompt itself when
+      ``add_generation_prompt=True``, so ``response_ids`` (only the
+      generated tokens) decode to ``reasoning…</think>\\n\\nanswer``
+      with no leading ``<think>``. The parser treats this as an
+      implicit opener at the start of text and strips up to the first
+      ``</think>``, matching what vLLM's and SGLang's serving-side
+      Qwen3 reasoning parsers do.
+
     Implementation note: ``str.partition`` (C-level, single early-
     terminating scan) is used instead of a DOTALL regex over the whole
     response. For long reasoning outputs (e.g. 32K-token traces) the
@@ -182,11 +196,27 @@ class ThinkBlockReasoningParser(ReasoningParser):
             # any literal ``<think>`` in model output is incidental
             # (code, quoted text) and must not trigger greedy stripping.
             return text
-        if "<think>" not in text:
+        first_open = text.find("<think>")
+        first_close = text.find("</think>")
+        if first_open < 0 and first_close < 0:
+            # No reasoning markers at all -- nothing to strip.
             return text
 
         parts: list[str] = []
         remainder = text
+
+        # Implicit opener: ``response_ids`` start *inside* the think
+        # block because the chat template emitted ``<think>`` as part
+        # of the prompt. Detected when ``</think>`` appears before any
+        # ``<think>`` (or when there is no ``<think>`` at all). The
+        # first ``</think>`` closes that implicit reasoning span; drop
+        # everything up to and including it before entering the loop.
+        if first_close >= 0 and (first_open < 0 or first_close < first_open):
+            _inside, _closer, after_closer = remainder.partition("</think>")
+            remainder = after_closer
+            # Fall through: any further ``<think>...</think>`` pairs
+            # are handled by the regular loop below.
+
         while True:
             before, opener, after_opener = remainder.partition("<think>")
             parts.append(before)

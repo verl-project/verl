@@ -110,6 +110,71 @@ def test_unclosed_think_block_truncates_to_eot(qwen3_parser: ReasoningParser) ->
     assert "tool_call" not in stripped
 
 
+def test_qwen3_implicit_opener_from_chat_template(
+    qwen3_parser: ReasoningParser,
+) -> None:
+    """Qwen3 / DeepSeek-R1 default chat templates append ``<think>`` to the
+    prompt itself when ``add_generation_prompt=True``, so ``response_ids``
+    (the model's generated tokens only) decode to text that contains
+    ``</think>`` but no leading ``<think>``. The parser must treat the
+    start of text as an implicit ``<think>`` opener and strip up to the
+    first ``</think>``.
+
+    Regression for the upstream review on PR #6434: the previous fast
+    path ``if "<think>" not in text: return text`` returned the response
+    verbatim in this default Qwen3 setup, leaving the entire reasoning
+    block (including any ``<tool_call>`` patterns inside it) visible to
+    the tool parser -- defeating the whole point of the parser for the
+    most common production configuration.
+    """
+    text = "step 1\nstep 2\n</think>\n\nFinal: foo"
+    assert qwen3_parser.extract_content(text) == "\n\nFinal: foo"
+
+
+def test_qwen3_implicit_opener_drops_inner_tool_call(
+    qwen3_parser: ReasoningParser,
+) -> None:
+    """The bug-fixing case for the implicit-opener path: a ``<tool_call>``
+    that appears in the chain-of-thought (before ``</think>``) must not
+    leak through to the tool parser, even when there is no leading
+    ``<think>`` tag in the response.
+    """
+    text = (
+        "Let me think -- maybe I should "
+        '<tool_call>{"name": "spurious", "arguments": {}}</tool_call>'
+        " first</think>"
+        '<tool_call>{"name": "real_call", "arguments": {}}</tool_call>'
+    )
+    stripped = qwen3_parser.extract_content(text)
+    assert "spurious" not in stripped, (
+        f"tool call inside implicit-opener think block leaked through reasoning parser; got: {stripped!r}"
+    )
+    assert "real_call" in stripped, f"real tool call after </think> was incorrectly removed; got: {stripped!r}"
+
+
+def test_qwen3_implicit_opener_then_explicit_pair(
+    qwen3_parser: ReasoningParser,
+) -> None:
+    """An implicit-opener span followed by additional explicit
+    ``<think>...</think>`` pairs (rare for Qwen3 but allowed by the
+    grammar) are all stripped: the implicit span is closed at the first
+    ``</think>``, then the regular loop handles subsequent pairs.
+    """
+    text = "implicit reasoning</think>middle<think>more reasoning</think>tail"
+    assert qwen3_parser.extract_content(text) == "middletail"
+
+
+def test_qwen3_lone_close_tag_drops_everything_before(
+    qwen3_parser: ReasoningParser,
+) -> None:
+    """A response consisting entirely of reasoning followed immediately
+    by ``</think>`` (no content after the closer) collapses to the empty
+    string. Pinning this so an extracted-content branch does not
+    accidentally start preserving the reasoning text.
+    """
+    assert qwen3_parser.extract_content("just reasoning</think>") == ""
+
+
 def test_idempotent(qwen3_parser: ReasoningParser) -> None:
     """Calling ``extract_content`` twice on the same input returns the same
     output (and on already-stripped text returns it unchanged).
