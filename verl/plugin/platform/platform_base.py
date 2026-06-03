@@ -78,11 +78,22 @@ class PlatformBase(abc.ABC):
         ...
 
     @abc.abstractmethod
-    def is_available(self, use_smi_check) -> bool:
-        """Return ``True`` if the accelerator is available on this host.
-        `use_smi_check` is used to support the hardware which has `torch.cuda` but not `GPU`.
-        """
+    def is_available(self) -> bool:
+        """Return ``True`` if the accelerator device is visible and usable in this process."""
         ...
+
+    def is_platform_available(self, use_smi_check=False) -> bool:
+        """Return ``True`` if this platform is available on this host.
+
+        Used during auto-detection to determine if the environment targets
+        this platform.  When ``use_smi_check=True``, may use relaxed checks
+        (e.g. package importability, system commands) that work even in
+        processes without device visibility (CPU-only Ray actors).
+
+        Default implementation delegates to ``is_available()``.  Subclasses
+        can override to provide more sophisticated detection logic.
+        """
+        return self.is_available()
 
     @abc.abstractmethod
     def current_device(self) -> int:

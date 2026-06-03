@@ -3,6 +3,7 @@
 """NVIDIA CUDA platform implementation."""
 
 import os
+import shutil
 from contextlib import contextmanager
 from types import ModuleType
 from typing import Any, Optional
@@ -34,7 +35,10 @@ class PlatformCUDA(PlatformBase):
     def device_module(self) -> ModuleType:
         return torch.cuda
 
-    def is_available(self, use_smi_check=False) -> bool:
+    def is_available(self) -> bool:
+        return torch.cuda.is_available()
+
+    def is_platform_available(self, use_smi_check=False) -> bool:
         if not hasattr(torch, "cuda"):
             return False
         if use_smi_check:
@@ -42,12 +46,24 @@ class PlatformCUDA(PlatformBase):
             # even though the cluster has GPUs. Fall back to nvidia-smi check,
             # and if that's also unavailable (e.g. not on PATH), treat
             # torch.cuda being built as sufficient evidence.
-            if self.check_smi_command("nvidia-smi"):
+            cmd = "nvidia-smi"
+            cmd_path = shutil.which(cmd)
+            if cmd_path is None:
+                # Fallback to common absolute paths if not found in PATH
+                common_paths = [
+                    f"/usr/bin/{cmd}",
+                    f"/usr/local/bin/{cmd}",
+                    f"/usr/local/cuda/bin/{cmd}",
+                ]
+                for path in common_paths:
+                    if os.path.isfile(path) and os.access(path, os.X_OK):
+                        cmd_path = path
+                        break
+                if cmd_path is None:
+                    return False
+            if self.check_smi_command(cmd_path):
                 return True
-            return torch.cuda.is_available()
-        if not torch.cuda.is_available():
-            return False
-        return True
+        return torch.cuda.is_available()
 
     def current_device(self) -> int:
         return torch.cuda.current_device()

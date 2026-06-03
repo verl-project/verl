@@ -31,6 +31,9 @@ def _ensure_torch_npu() -> bool:
     return False
 
 
+_ensure_torch_npu()  # Attempt to import torch_npu at module load time so that availability checks are faster later
+
+
 @PlatformRegistry.register(platform="huawei")
 class PlatformNPU(PlatformBase):
     """Platform backend for Huawei Ascend NPU."""
@@ -49,20 +52,17 @@ class PlatformNPU(PlatformBase):
 
     @property
     def device_module(self) -> ModuleType:
-        if not _ensure_torch_npu():
-            raise RuntimeError("torch_npu is not installed or torch.npu is not available")
         return torch.npu
 
-    def is_available(self, use_smi_check=False) -> bool:
-        """Check if NPU platform is available.
+    def is_available(self) -> bool:
+        return torch.npu.is_available()
 
-        In multi-process environments (e.g., Ray CPU-only actors),
-        a process may not have visible NPU devices even though the cluster
-        has NPUs.  When ``use_smi_check=True`` (used during auto-detection),
-        we only require that ``torch_npu`` is importable — this is sufficient
-        evidence that the environment targets NPU hardware.  When
-        ``use_smi_check=False`` (runtime usage), we additionally require at
-        least one device to be visible via ``torch.npu.is_available()``.
+    def is_platform_available(self, use_smi_check=False) -> bool:
+        """Return True if this platform is available on this host.
+
+        Used during auto-detection to determine if the environment targets
+        this platform.  When ``use_smi_check=True``, only requires that
+        torch_npu is importable (even if no devices are visible).
         """
         if not _ensure_torch_npu():
             return False

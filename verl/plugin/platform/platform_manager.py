@@ -85,7 +85,7 @@ def _detect_platform_name() -> str:
 
     Detection order:
     1. ``VERL_PLATFORM`` environment variable (explicit override)
-    2. Probe registered platforms via ``is_available(use_smi_check=True)``
+    2. Probe registered platforms via ``is_platform_available(use_smi_check=True)``
     3. Fall back to ``'nvidia'``
     """
 
@@ -103,7 +103,7 @@ def _detect_platform_name() -> str:
             continue
         try:
             instance = platform_cls()
-            if instance.is_available(use_smi_check=True):
+            if instance.is_platform_available(use_smi_check=True):
                 logger.info("Auto-detected platform: %s", name)
                 return name
         except Exception as e:
@@ -128,7 +128,12 @@ def _create_platform(name: str) -> PlatformBase:
         )
     platform = platform_cls()
     if not platform.is_available():
-        logger.warning("Platform '%s' (%s) is registered but not available.", name, platform_cls.__name__)
+        logger.warning(
+            "Platform '%s' (%s) is registered but not available. "
+            "This may be due to this ray actor being a CPU-only actor.",
+            name,
+            platform_cls.__name__,
+        )
     return platform
 
 

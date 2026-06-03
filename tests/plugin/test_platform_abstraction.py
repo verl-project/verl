@@ -37,6 +37,9 @@ def _make_mock_platform(name="mock_xpu"):
         def is_available(self):
             return True
 
+        def is_platform_available(self, use_smi_check=False):
+            return True
+
         def current_device(self):
             return 0
 
