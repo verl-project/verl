@@ -512,10 +512,20 @@ class SGLangHttpServer:
             group_name=group_name,
         )
         logger.info(
-            f"[NCCL weight sync] SGLang node_rank={self.node_rank} initializing weight sync group with master \
-            {master_address}:{master_port}, rank_offset {rank_offset}, world_size {world_size}"
+            "[NCCL weight sync] SGLang node_rank=%d calling init_weights_update_group: "
+            "master=%s:%d  rank_offset=%d  world_size=%d  group=%s",
+            self.node_rank,
+            master_address,
+            master_port,
+            rank_offset,
+            world_size,
+            group_name,
         )
         await self.tokenizer_manager.init_weights_update_group(obj, None)
+        logger.info(
+            "[NCCL weight sync] SGLang node_rank=%d init_weights_update_group completed",
+            self.node_rank,
+        )
 
     async def release_kv_cache(self):
         """Release only kv_cache GPU memory, keeping model weights intact."""

@@ -718,7 +718,11 @@ class PPOTrainer:
         # For standalone mode: initialize NCCL weight sync group
         rollout_nnodes = self.config.actor_rollout_ref.rollout.get("nnodes", 0)
         if rollout_nnodes > 0:
+            logger.info(
+                "[NCCL init] standalone mode detected (rollout.nnodes=%d), starting NCCL group init", rollout_nnodes
+            )
             # Get address and free port from FSDP rank 0 node
+            logger.info("[NCCL init] calling get_master_address_and_port on FSDP worker group")
             _addr_port_results = self.actor_rollout_wg.get_master_address_and_port()
             head_addr, sync_port = next(r for r in _addr_port_results if r is not None)
             fsdp_world_size = self.config.trainer.nnodes * self.config.trainer.n_gpus_per_node
@@ -726,7 +730,20 @@ class PPOTrainer:
             n_gpus = self.config.actor_rollout_ref.rollout.n_gpus_per_node
             total_world_size = fsdp_world_size + rollout_nnodes * n_gpus
             replicas = self.llm_server_manager.get_replicas()
+            logger.info(
+                "[NCCL init] rendezvous: master=%s:%d  fsdp_world_size=%d  rollout_nnodes=%d  "
+                "n_gpus_per_node=%d  tp_size=%d  total_world_size=%d  num_sglang_replicas=%d",
+                head_addr,
+                sync_port,
+                fsdp_world_size,
+                rollout_nnodes,
+                n_gpus,
+                tp_size,
+                total_world_size,
+                len(replicas),
+            )
             # Init NCCL group on FSDP workers (they have dist initialized)
+            logger.info("[NCCL init] dispatching init_weight_sync_group to %d FSDP workers", fsdp_world_size)
             init_group_futures = self.actor_rollout_wg.init_weight_sync_group(
                 master_address=head_addr,
                 master_port=sync_port,
@@ -734,22 +751,33 @@ class PPOTrainer:
                 group_name="weight_update_group",
             )
             # Simultaneously trigger SGLang servers to join via HTTP
-            sglang_futures = [
-                replica.server_handle.init_weight_sync_group.remote(
-                    master_address=head_addr,
-                    master_port=sync_port,
-                    rank_offset=fsdp_world_size + i * tp_size,
-                    world_size=total_world_size,
+            sglang_futures = []
+            for i, replica in enumerate(replicas):
+                rank_offset = fsdp_world_size + i * tp_size
+                logger.info(
+                    "[NCCL init] dispatching init_weight_sync_group to SGLang replica %d  rank_offset=%d",
+                    i,
+                    rank_offset,
                 )
-                for i, replica in enumerate(replicas)
-            ]
+                sglang_futures.append(
+                    replica.server_handle.init_weight_sync_group.remote(
+                        master_address=head_addr,
+                        master_port=sync_port,
+                        rank_offset=rank_offset,
+                        world_size=total_world_size,
+                    )
+                )
             # Both sides must join the NCCL group simultaneously
             all_futures = sglang_futures
             if isinstance(init_group_futures, list):
                 all_futures = all_futures + init_group_futures
             else:
                 all_futures = all_futures + [init_group_futures]
+            logger.info(
+                "[NCCL init] waiting for all %d futures (FSDP + SGLang) to complete rendezvous", len(all_futures)
+            )
             ray.get(all_futures)
+            logger.info("[NCCL init] NCCL weight sync group initialized successfully")
         manager_class_fqn = self.config.actor_rollout_ref.rollout.get("agent", {}).get("agent_loop_manager_class")
         if manager_class_fqn:
             agent_loop_manager_cls = load_class_from_fqn(manager_class_fqn, "AgentLoopManager")

@@ -696,19 +696,27 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         from verl.utils.device import get_nccl_backend
 
+        my_rank = torch.distributed.get_rank()
+        logger.info(
+            "[NCCL weight sync] FSDP rank %d/%d entering init_custom_process_group: "
+            "master=%s:%d  world_size=%d  group=%s",
+            my_rank,
+            world_size,
+            master_address,
+            master_port,
+            world_size,
+            group_name,
+        )
         self._weight_sync_group = init_custom_process_group(
             backend=get_nccl_backend(),
             init_method=f"tcp://{master_address}:{master_port}",
             world_size=world_size,
-            rank=torch.distributed.get_rank(),
+            rank=my_rank,
             group_name=group_name,
         )
-        logger.info(
-            f"[NCCL weight sync] FSDP rank {torch.distributed.get_rank()} joining group: \
-            'master={master_address}:{master_port} world_size={world_size}"
-        )
+        logger.info("[NCCL weight sync] FSDP rank %d joined group successfully", my_rank)
         self.rollout._weight_sync_group = self._weight_sync_group
-        logger.info(f"[NCCL weight sync] FSDP rank {torch.distributed.get_rank()} joined group successfully")
+        logger.info("[NCCL weight sync] FSDP rank %d assigned group to rollout", my_rank)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     async def update_weights(self, global_steps: int = None, mode: str = "auto"):
