@@ -65,3 +65,21 @@ load_balancing_loss_implementation: eager
 force_use_huggingface: false
 
 activation_gpu_limit: 0.0
+
+# MoE expert-load monitor interval. When > 0, attach VeOmni's MoERouterMonitor.
+# Scalar metrics flow through Tracking; heatmap images go to wandb on rank 0.
+moe_load_balance_monitor_interval: 0
+
+router_replay:
+
+  # Target dataclass for this configuration
+  _target_: verl.workers.config.EngineRouterReplayConfig
+
+  # Router replay mode: disabled, R2, R3
+  # - R2: record top-k indices in compute_log_prob (forward-only) and
+  #       replay them in the actor update. No rollout-side change required.
+  # - R3: record top-k indices at the rollout backend and replay them in
+  #       both compute_log_prob and the actor update. Requires
+  #       ``rollout.enable_rollout_routing_replay=True`` and rollout backend
+  #       support for returning the selected indices.
+  mode: disabled

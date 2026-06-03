@@ -50,6 +50,10 @@ actor_rollout_ref:
       load_balancing_loss_implementation: eager
       force_use_huggingface: false
       activation_gpu_limit: 0.0
+      moe_load_balance_monitor_interval: 0
+      router_replay:
+        _target_: verl.workers.config.EngineRouterReplayConfig
+        mode: disabled
     _target_: verl.workers.config.VeOmniActorConfig
     rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
     strategy: veomni
@@ -94,7 +98,7 @@ actor_rollout_ref:
       - extra
       load_contents: ${.save_contents}
       async_save: false
-      mbridge_config: {}
+      strict: true
     use_fused_kernels: ${oc.select:actor_rollout_ref.model.use_fused_kernels,false}
     profiler:
       _target_: verl.utils.profiler.ProfilerConfig
@@ -142,6 +146,7 @@ actor_rollout_ref:
       - re:.*mlp.gate$
       activation_observer: static_minmax
       quantization_config_path: null
+    use_remove_padding: ${oc.select:actor_rollout_ref.model.use_remove_padding,false}
   ref:
     rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
     strategy: veomni
@@ -214,6 +219,10 @@ actor_rollout_ref:
       load_balancing_loss_implementation: ${oc.select:actor_rollout_ref.actor.veomni.load_balancing_loss_implementation,eager}
       force_use_huggingface: false
       activation_gpu_limit: 0.0
+      moe_load_balance_monitor_interval: 0
+      router_replay:
+        _target_: verl.workers.config.EngineRouterReplayConfig
+        mode: disabled
     _target_: verl.workers.config.VeOmniActorConfig
   rollout:
     _target_: verl.workers.config.RolloutConfig
@@ -497,6 +506,10 @@ critic:
     load_balancing_loss_implementation: eager
     force_use_huggingface: false
     activation_gpu_limit: 0.0
+    moe_load_balance_monitor_interval: 0
+    router_replay:
+      _target_: verl.workers.config.EngineRouterReplayConfig
+      mode: disabled
   _target_: verl.workers.config.VeOmniCriticConfig
   rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
   strategy: veomni
@@ -520,7 +533,6 @@ critic:
     - extra
     load_contents: ${.save_contents}
     async_save: false
-    mbridge_config: {}
   profiler:
     _target_: verl.utils.profiler.ProfilerConfig
     tool: ${oc.select:global_profiler.tool,null}

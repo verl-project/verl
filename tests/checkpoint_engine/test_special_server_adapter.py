@@ -26,6 +26,7 @@ from verl.single_controller.ray import (
     RayResourcePool,
 )
 from verl.utils.config import omega_conf_to_dataclass
+from verl.utils.tokenizer import normalize_token_ids
 from verl.workers.config import CheckpointEngineConfig, HFModelConfig
 from verl.workers.rollout.llm_server import LLMServerClient, LLMServerManager
 
@@ -61,7 +62,7 @@ async def _run_update_weights_with_global_steps_none(
 ):
     await checkpoint_manager.update_weights(global_steps=None)
     prompt = [{"role": "user", "content": "How to make a sandwich?"}]
-    prompt_ids = tokenizer.apply_chat_template(prompt, add_generation_prompt=True, tokenize=True)
+    prompt_ids = normalize_token_ids(tokenizer.apply_chat_template(prompt, add_generation_prompt=True, tokenize=True))
     output = await server_manager.generate(
         request_id="test_0",
         prompt_ids=prompt_ids,
@@ -91,7 +92,9 @@ async def _run_server_manager_without_resume(
     for global_steps in range(initial_steps, initial_steps + train_steps):
         tasks = []
         for i, prompt in enumerate(prompts):
-            prompt_ids = tokenizer.apply_chat_template(prompt, add_generation_prompt=True, tokenize=True)
+            prompt_ids = normalize_token_ids(
+                tokenizer.apply_chat_template(prompt, add_generation_prompt=True, tokenize=True)
+            )
             tasks.append(
                 asyncio.create_task(
                     server_manager.generate(
@@ -132,7 +135,9 @@ async def _run_server_manager_with_resume(
     # 1. rollout generate responses
     tasks = []
     for i, prompt in enumerate(prompts):
-        prompt_ids = tokenizer.apply_chat_template(prompt, add_generation_prompt=True, tokenize=True)
+        prompt_ids = normalize_token_ids(
+            tokenizer.apply_chat_template(prompt, add_generation_prompt=True, tokenize=True)
+        )
         tasks.append(
             asyncio.create_task(
                 server_manager.generate(

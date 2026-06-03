@@ -117,6 +117,10 @@ class PlatformCUDA(PlatformBase):
     # ------------------------------------------------------------------
 
     def rollout_env_vars(self) -> dict[str, str]:
+        # To prevent hanging or crash during synchronization of weights between actor and rollout
+        # in disaggregated mode. See:
+        # https://docs.vllm.ai/en/latest/usage/troubleshooting.html?h=nccl_cumem_enable#known-issues
+        # https://github.com/vllm-project/vllm/blob/c6b0a7d3ba03ca414be1174e9bd86a97191b7090/vllm/worker/worker_base.py#L445
         return {"NCCL_CUMEM_ENABLE": "0"}
 
     # ------------------------------------------------------------------

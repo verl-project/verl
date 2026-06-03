@@ -102,6 +102,7 @@ verl is fast with:
    perf/dpsk.md
    perf/best_practices
    perf/perf_tuning
+   perf/rollout_kv_offload.md
    README_vllm0.8.md
    perf/device_tuning
    perf/verl_profiler_system.md

@@ -210,6 +210,57 @@ def _convert_to_nested_tensor(v, input_ids_lengths):
     return v
 
 
+def _build_mtp_loss_mask_nested(response_mask, input_ids_lengths, response_attention_mask):
+    """Build a nested loss_mask aligned to ``input_ids = [prompt; response]`` for MTP.
+
+    ``response_mask`` is response-only data. This expands it to full packed
+    input length as prompt zeros followed by valid response positions.
+    """
+    if isinstance(response_mask, NestedTensor):
+        response_offsets = response_mask.offsets().tolist()
+        response_lengths = [response_offsets[i + 1] - response_offsets[i] for i in range(len(response_offsets) - 1)]
+        batch_size = len(response_lengths)
+        response_values = response_mask.values()
+    else:
+        assert response_attention_mask is not None, "response_attention_mask is required to align padded MTP loss_mask"
+        assert not isinstance(response_attention_mask, NestedTensor), (
+            "response_attention_mask must be a padded (bs, max_response_len) tensor, got NestedTensor"
+        )
+        assert response_attention_mask.shape == response_mask.shape, (
+            f"response_attention_mask shape {response_attention_mask.shape} "
+            f"!= response_mask shape {response_mask.shape}"
+        )
+        batch_size = response_mask.shape[0]
+        response_lengths = response_attention_mask.to(torch.int32).sum(dim=-1).tolist()
+
+    assert len(input_ids_lengths) == batch_size, (
+        f"len(input_ids_lengths)={len(input_ids_lengths)} != batch_size={batch_size}"
+    )
+
+    pieces = []
+    for i in range(batch_size):
+        actual_total = int(input_ids_lengths[i])
+        actual_response = int(response_lengths[i])
+        actual_prompt = actual_total - actual_response
+        assert actual_prompt >= 0, (
+            f"sample {i}: actual_response={actual_response} > actual_total={actual_total}; "
+            "loss_mask cannot be longer than input_ids"
+        )
+        prompt_pad = torch.zeros(actual_prompt, dtype=response_mask.dtype, device=response_mask.device)
+        # Keep the whole valid response span; response_mask may contain internal zeros for tool outputs.
+        if isinstance(response_mask, NestedTensor):
+            response_piece = response_values[response_offsets[i] : response_offsets[i + 1]]
+        else:
+            response_piece = response_mask[i, :actual_response]
+        full = torch.cat([prompt_pad, response_piece], dim=0)
+        assert full.shape[0] == actual_total, (
+            f"sample {i}: built loss_mask length {full.shape[0]} != input_ids length {actual_total}"
+        )
+        pieces.append(full)
+
+    return torch.nested.nested_tensor(pieces, layout=torch.jagged)
+
+
 def gptmodel_forward_model_engine(
     model,
     input_ids,
@@ -257,10 +308,14 @@ def gptmodel_forward_model_engine(
             # Use input_ids sequence length to ensure label and loss_mask alignment
             input_ids_offsets = input_ids.offsets()
             input_ids_lengths = input_ids_offsets.diff().tolist()
+            response_attention_mask = logits_processor_args.get("response_attention_mask", None)
 
             for k in ["label", "loss_mask"]:
                 v = logits_processor_args[k]
-                v = _convert_to_nested_tensor(v, input_ids_lengths)
+                if k == "loss_mask":
+                    v = _build_mtp_loss_mask_nested(v, input_ids_lengths, response_attention_mask)
+                else:
+                    v = _convert_to_nested_tensor(v, input_ids_lengths)
                 logits_processor_args[k] = v
                 args[k] = preprocess_thd_engine(
                     v,
@@ -275,6 +330,8 @@ def gptmodel_forward_model_engine(
 
         if logits_processor_args and "loss_mask" in logits_processor_args:
             logits_processor_args.pop("loss_mask")
+        if logits_processor_args and "response_attention_mask" in logits_processor_args:
+            logits_processor_args.pop("response_attention_mask")
 
         # For VLM model, need to pass bshd format `input_ids` and `attention_mask`.
         attention_mask = None
@@ -335,10 +392,14 @@ def gptmodel_forward_model_engine(
             # Use input_ids sequence length to ensure label and loss_mask alignment
             input_ids_offsets = input_ids.offsets()
             input_ids_lengths = input_ids_offsets.diff().tolist()
+            response_attention_mask = logits_processor_args.get("response_attention_mask", None)
 
             for k in ["label", "loss_mask"]:
                 v = logits_processor_args[k]
-                v = _convert_to_nested_tensor(v, input_ids_lengths)
+                if k == "loss_mask":
+                    v = _build_mtp_loss_mask_nested(v, input_ids_lengths, response_attention_mask)
+                else:
+                    v = _convert_to_nested_tensor(v, input_ids_lengths)
                 logits_processor_args[k] = v
                 args[k] = preprocess_bshd_engine(v, pre_process=True, need_roll=True, use_fp8_padding=use_fp8_padding)[
                     0
@@ -348,6 +409,8 @@ def gptmodel_forward_model_engine(
 
         if logits_processor_args and "loss_mask" in logits_processor_args:
             logits_processor_args.pop("loss_mask")
+        if logits_processor_args and "response_attention_mask" in logits_processor_args:
+            logits_processor_args.pop("response_attention_mask")
 
         # For VLM model, need to pass bshd format `input_ids` and `attention_mask`.
         if vision_model:

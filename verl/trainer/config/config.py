@@ -26,17 +26,22 @@ class CheckpointConfig(BaseConfig):
 
     The inheritance from BaseConfig provides omegaconf.DictConfig-like interface for a dataclass config.
 
+    Backend-specific knobs (e.g. mbridge options for Megatron) live on subclasses
+    under ``verl/workers/config/checkpoint.py``. Keep this base class limited to
+    fields every backend understands.
+
     Args:
         save_contents (list[str]): What to include in saved checkpoints.
             Options: 'model', 'optimizer', 'extra', 'hf_model'.
         load_contents (list[str]): Contents to load from checkpoint. Defaults to same as save_contents.
         async_save (bool): Whether to save checkpoints asynchronously. Only implemented for Megatron as of now.
+        strict (bool): Whether to perform strict validation during weight export
     """
 
     save_contents: list[str] = field(default_factory=lambda: ["model", "optimizer", "extra"])
     load_contents: list[str] = field(default_factory=lambda: ["model", "optimizer", "extra"])
     async_save: bool = False
-    mbridge_config: dict[str, Any] = field(default_factory=dict)
+    strict: bool = True
 
 
 @dataclass

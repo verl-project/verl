@@ -381,14 +381,20 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
             self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=False)
         self.is_last_step = self.global_steps >= self.total_training_steps
 
-    def _fit_start_profile(self):
+    def _fit_start_profile(self, should_profiler=None):
         timing_raw = self.timing_raw
+        if should_profiler is not None:
+            self.curr_step_profile = should_profiler
         with marked_timer("start_profile", timing_raw):
-            self._start_profiling(
-                not self.prev_step_profile and self.curr_step_profile
-                if self.config.global_profiler.profile_continuous_steps
-                else self.curr_step_profile
-            )
+            if should_profiler is None:
+                do_profile = (
+                    not self.prev_step_profile and self.curr_step_profile
+                    if self.config.global_profiler.profile_continuous_steps
+                    else self.curr_step_profile
+                )
+            else:
+                do_profile = should_profiler
+            self._start_profiling(do_profile)
 
     def _fit_get_batch(self, batch_dict: dict) -> DataProto:
         batch = DataProto.from_single_dict(batch_dict)
@@ -690,21 +696,26 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
                 # TODO: Check separation is needed.
                 # self.checkpoint_manager.update_weights()
 
-    def _fit_stop_profile(self):
+    def _fit_stop_profile(self, should_profiler=None):
         timing_raw = self.timing_raw
         with marked_timer("stop_profile", timing_raw):
-            self.next_step_profile = (
-                self.global_steps + 1 in self.config.global_profiler.steps
-                if self.config.global_profiler.steps is not None
-                else False
-            )
-            self._stop_profiling(
-                self.curr_step_profile and not self.next_step_profile
-                if self.config.global_profiler.profile_continuous_steps
-                else self.curr_step_profile
-            )
+            if should_profiler is None:
+                self.next_step_profile = (
+                    self.global_steps + 1 in self.config.global_profiler.steps
+                    if self.config.global_profiler.steps is not None
+                    else False
+                )
+                do_profile = (
+                    self.curr_step_profile and not self.next_step_profile
+                    if self.config.global_profiler.profile_continuous_steps
+                    else self.curr_step_profile
+                )
+            else:
+                do_profile = should_profiler
+            self._stop_profiling(do_profile)
             self.prev_step_profile = self.curr_step_profile
-            self.curr_step_profile = self.next_step_profile
+            if should_profiler is None:
+                self.curr_step_profile = self.next_step_profile
 
     def _fit_collect_metrics(self, batch):
         metrics = self.metrics

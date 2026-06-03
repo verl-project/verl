@@ -264,6 +264,7 @@ async def test_agent_loop_postprocess_accepts_read_only_routed_experts_on_cpu():
         _get_mm_processor_kwargs = AgentLoopWorker._get_mm_processor_kwargs
         _compute_score = AgentLoopWorker._compute_score
         _compute_teacher_logprobs = AgentLoopWorker._compute_teacher_logprobs
+        _pad_token_ids = AgentLoopWorker._pad_token_ids
         distillation_enabled = False
 
         def __init__(self):

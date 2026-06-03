@@ -48,6 +48,7 @@ verl is fast with:
 </p>
 
 ## News
+- [2026/05] [uni-agent](https://github.com/verl-project/uni-agent) is released: a unified agent framework to build, run, and train LLM agents at scale, built on top of verl.
 - [2026/05] [VeRL-Omni](https://github.com/verl-project/verl-omni) is pre-released: a unified RL stack for diffusion and omni-modal model post-training built on top of verl. Read the [blog post](https://vllm.ai/blog/2026-05-14-verl-omni) for details.
 - [2026/05] verl's zero-mismatch HuggingFace rollout [vexact](https://github.com/verl-project/vexact) is released: with batch-invariant kernels, shared model definition with FSDP, and out-of-box examples compatible with VeOmni.
 - [2026/04] verl's Megatron backend LoRA and router replay support is showcased at [PyTorch Conference Europe 2026](https://pytorchconferenceeu2026.sched.com/event/2Juce/optimizing-reinforcement-learning-at-trillion-parameter-scale-songlin-jiang-aalto-university-mind-lab).
@@ -100,7 +101,7 @@ verl is fast with:
 - Scales up to 671B models and hundreds of GPUs with [expert parallelism](https://github.com/verl-project/verl/pull/1467)
 - Multi-gpu [LoRA RL](https://verl.readthedocs.io/en/latest/advance/ppo_lora.html) support to save memory.
 - Experiment tracking with wandb, swanlab, mlflow and tensorboard.
-- Hardware Support: Supports NVIDIA, AMD, [Ascend](https://github.com/verl-project/verl/blob/main/docs/ascend_tutorial/quick_start/ascend_quick_start.rst)
+- Hardware Support: Supports NVIDIA, AMD, [Ascend](https://github.com/verl-project/verl/blob/main/docs/ascend_tutorial/README.md)
 
 ## Getting Started
 
@@ -185,7 +186,7 @@ Furthermore, FSDP2 cpu offloading is compatible with gradient accumulation. You 
 
 ## AMD Support (ROCm Kernel)
 
-verl now supports FSDP as the training engine (Megatron support coming soon) and both integrates with vLLM and SGLang as inference engines. Please refer to [this document](https://github.com/verl-project/verl/blob/main/docs/amd_tutorial/amd_build_dockerfile_page.rst) for the installation guide and more information, and [this document](https://github.com/verl-project/verl/blob/main/docs/amd_tutorial/amd_vllm_page.rst) for the vLLM performance tuning for ROCm.
+verl runs on AMD ROCm GPUs (MI300X / MI325X / MI355X) with FSDP, FSDP2, and Megatron trainer backends, and vLLM as the validated inference engine (SGLang support is in progress). See the [AMD ROCm quick-start guide](https://github.com/verl-project/verl/blob/main/docs/amd_tutorial/amd_quick_start.rst) for container bring-up, environment verification, and training examples.
 
 ## Citation and acknowledgement
 
@@ -284,6 +285,7 @@ Welcome to register your awesome project build with `verl` for other developers'
 - [RuleReasoner](https://github.com/bigai-nlco/RuleReasoner): **RuleReasoner:** Reinforced Rule-based Reasoning via **Domain-aware Dynamic Sampling** (ICLR 2026) ![GitHub Repo stars](https://img.shields.io/github/stars/bigai-nlco/RuleReasoner)
 - [MetaphorStar](https://metaphorstar.github.io/): **Image Metaphor** Understanding and Reasoning with End-to-End **Visual Reinforcement Learning** ![GitHub Repo stars](https://img.shields.io/github/stars/MING-ZCH/MetaphorStar)
 - [DART-GUI](https://github.com/Computer-use-agents/dart-gui): a decoupled agentic RL framework for Computer Use Agents, achieving ~2× training speedup and ~5× environment utilization! ![GitHub Repo stars](https://img.shields.io/github/stars/Computer-use-agents/dart-gui)
+- [Rethinking OPD](https://github.com/thunlp/OPD): Rethinking On-Policy Distillation of Large Language Models: Phenomenology, Mechanism, and Recipe ![GitHub Repo stars](https://img.shields.io/github/stars/thunlp/OPD)
 
 ## Contribution Guide
 

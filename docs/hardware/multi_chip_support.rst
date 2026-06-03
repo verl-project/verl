@@ -1,7 +1,7 @@
 Multi-Chip Support
 ==================
 
-Last updated: 05/26/2026.
+Last updated: 06/03/2026.
 
 Overview
 --------
@@ -22,7 +22,6 @@ Hardware Support
 
 - NVIDIA GPU (CUDA)
 - Huawei Ascend NPU
-- AMD GPU
 
 **Via verl-hardware-plugin (reference implementations):**
 
@@ -33,7 +32,6 @@ package, which provides reference implementations for vendors to adapt:
 - Intel XPU (Data Center GPU Max / Arc)
 - Cambricon MLU (MLU370 / MLU590)
 - MetaX (CUDA-compatible)
-- FlagOS (multi-chip via FlagGems/FlagCX)
 
 .. note::
 
@@ -78,33 +76,24 @@ Architecture Overview
     |  |              Platform Plugin System                      |      |
     |  |            (verl.plugin.platform)                        |      |
     |  |                                                          |      |
-    |  |  PlatformRegistry --auto-detect--> PlatformBase          |      |
-    |  |       |                                 |                |      |
-    |  |       +-- PlatformCUDA  (nvidia/cuda)   +- is_available  |      |
-    |  |       +-- PlatformNPU   (huawei/npu)    +- device_name   |      |
-    |  |       +-- PlatformAMD   (amd/cuda)      +- vendor_name   |      |
-    |  |       |                                 +- device_count  |      |
-    |  |       | (via verl-hardware-plugin)      +- empty_cache   |      |
-    |  |       +-- PlatformXPU   (intel/xpu)     +- ...           |      |
-    |  |       +-- PlatformMLU   (cambricon/mlu)                  |      |
-    |  |       +-- PlatformMetaX (metax/cuda)                     |      |
-    |  |       +-- PlatformFlagOS(flagos/cuda)                    |      |
+    |  |  PlatformRegistry                                        |      |
+    |  |    ├─ "nvidia"    → PlatformCUDA      (built-in)         |      |
+    |  |    ├─ "huawei"    → PlatformNPU       (built-in)         |      |
+    |  |    ├─ "intel"     → PlatformXPU       (plugin)           |      |
+    |  |    ├─ "cambricon" → PlatformMLU       (plugin)           |      |
+    |  |    └─ "metax"     → PlatformMetaX     (plugin)           |      |
     |  |                                                          |      |
     |  +---------------------------------------------------------+      |
-    |                        |                                          |
-    |                        v                                          |
+    |                                                                    |
     |  +---------------------------------------------------------+      |
     |  |              Engine Plugin System                        |      |
     |  |            (verl.workers.engine.base)                    |      |
     |  |                                                          |      |
-    |  |  EngineRegistry.get_engine_cls(model_type, backend)      |      |
-    |  |       |                                                  |      |
-    |  |       | Resolution: (device_name, vendor_name) lookup    |      |
+    |  |  EngineRegistry  (device, vendor) → Engine class         |      |
     |  |       |                                                  |      |
     |  |       +-- ("cuda", None)     → FSDPEngineWithLMHead      |      |
     |  |       +-- ("npu", None)      → FSDPNPUEngineWithLMHead   |      |
     |  |       +-- ("cuda", "metax")  → FSDPMetaXEngineWithLMHead |      |
-    |  |       +-- ("cuda", "flagos") → FSDPFlagOSEngineWithLMHead|      |
     |  |       +-- ("xpu", "intel")   → FSDPXPUEngineWithLMHead   |      |
     |  |       +-- ("mlu","cambricon")→ FSDPMLUEngineWithLMHead   |      |
     |  |                                                          |      |
@@ -175,42 +164,6 @@ Environment variable overrides for engine selection:
 
 - ``VERL_ENGINE_DEVICE`` — override detected device name
 - ``VERL_ENGINE_VENDOR`` — override detected vendor name
-
-FLEnvManager (FlagOS-specific)
-------------------------------
-
-``FLEnvManager`` provides unified management of environment variables for
-both training and rollout phases in FlagOS deployments. It supports:
-
-- **Training phase variables**: TE-FL backend priority, strict mode, vendor
-  allow/deny lists, per-op configuration, FlagGems operator whitelists and
-  blacklists:
-
-  .. code-block:: bash
-
-     export TE_FL_PREFER=flagos    # flagos / vendor / reference
-     export TE_FL_STRICT=0         # Strict mode (no fallback): 1 / 0
-
-  Refer to `TransformerEngine-FL <https://github.com/flagos-ai/TransformerEngine-FL/pull/4>`_ for details.
-
-- **Rollout phase variables**: vLLM-FL preference, platform type, backend
-  priority, out-of-tree plugin toggle, FlagGems operator whitelists and
-  blacklists:
-
-  .. code-block:: bash
-
-     export VLLM_PLUGINS="fl"
-     export USE_FLAGGEMS=true
-     export VLLM_FL_OOT_ENABLED=1
-     export VLLM_FL_FLAGOS_BLACKLIST="where_scalar_other,where_scalar_self,where_self,where_self_out,pad"
-     export USE_FLAGCX=1
-     export FLAGCX_PATH=/path/FlagCX
-
-  Refer to `vllm-plugin-FL <https://github.com/flagos-ai/vllm-plugin-FL/blob/main/vllm_fl/dispatch/README.md>`_ for details.
-
-- **Common variables**: ``USE_FLAGGEMS`` (global FlagGems toggle),
-  ``USE_FLAGCX`` (FlagCX communication toggle), ``FLAGCX_PATH`` (FlagCX
-  installation path).
 
 Adding New Hardware
 -------------------

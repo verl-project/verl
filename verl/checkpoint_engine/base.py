@@ -171,17 +171,28 @@ class CheckpointEngine(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    async def send_weights(self, weights: Generator[tuple[str, torch.Tensor], None, None]):
+    async def send_weights(
+        self,
+        weights: Generator[tuple[str, torch.Tensor], None, None],
+        global_steps: int | None = None,
+    ):
         """Send the weights of the model.
 
         Args:
             weights: A generator that yields the name of the weight tensor and the tensor itself.
+            global_steps: Optional trainer step/version associated with this weight update.
         """
         raise NotImplementedError
 
     @abstractmethod
-    async def receive_weights(self) -> Generator[tuple[str, torch.Tensor], None, None]:
+    async def receive_weights(
+        self,
+        global_steps: int | None = None,
+    ) -> Generator[tuple[str, torch.Tensor], None, None]:
         """Receive the weights of the model.
+
+        Args:
+            global_steps: Optional trainer step/version associated with this weight update.
 
         Yields:
             A tuple of the name of the weight tensor and the tensor itself.
@@ -235,16 +246,27 @@ class ColocatedCheckpointEngine(CheckpointEngine):
     def build_topology(cls, *args, **kwargs):
         raise NotImplementedError
 
-    def send_weights(self, weights: Generator[tuple[str, torch.Tensor], None, None]):
+    def send_weights(
+        self,
+        weights: Generator[tuple[str, torch.Tensor], None, None],
+        global_steps: int | None = None,
+    ):
         """Send the weights of the model.
 
         Args:
             weights: A generator that yields the name of the weight tensor and the tensor itself.
+            global_steps: Optional trainer step/version associated with this weight update.
         """
         self.weights = weights
 
-    def receive_weights(self) -> Generator[tuple[str, torch.Tensor], None, None]:
+    def receive_weights(
+        self,
+        global_steps: int | None = None,
+    ) -> Generator[tuple[str, torch.Tensor], None, None]:
         """Receive the weights of the model.
+
+        Args:
+            global_steps: Optional trainer step/version associated with this weight update.
 
         Yields:
             A tuple of the name of the weight tensor and the tensor itself.
@@ -299,7 +321,7 @@ class CheckpointEngineWorker(Worker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     async def update_weights(self, global_steps: int = None):
-        weights = self.checkpoint_engine.receive_weights()
+        weights = self.checkpoint_engine.receive_weights(global_steps=global_steps)
         await self.server_adapter.update_weights(weights, global_steps=global_steps)
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE, blocking=False)

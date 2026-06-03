@@ -84,7 +84,7 @@ class RewardModelConfig(BaseConfig):
 
     enable: bool = False
     enable_resource_pool: bool = False
-    n_gpus_per_node: int = 0
+    n_gpus_per_node: int = 8
     nnodes: int = 0
     model_path: Optional[str] = None
     rollout: RolloutConfig = field(default_factory=RolloutConfig)

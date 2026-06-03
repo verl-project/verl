@@ -50,7 +50,7 @@ Last updated: 05/13/2026.
 | `quantization` | `actor_rollout_ref.rollout.quantization` | **量化支持** — 支持模型量化加载与推理 |
 
 
-> 更多 SGLang NPU 特性参数请参考 [sglang 社区 NPU 特性支持文档](https://docs.sglang.io/platforms/ascend_npu_support_features.html)
+> 更多 SGLang NPU 特性参数请参考 [sglang 社区 NPU 特性支持文档](https://docs.sglang.io/docs/hardware-platforms/ascend-npus/ascend_npu_support_features)
 
 ---
 
