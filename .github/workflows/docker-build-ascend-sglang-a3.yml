@@ -67,7 +67,7 @@ jobs:
           file: ./docker/ascend/Dockerfile.ascend.sglang_8.5.0_a3
           push: false
           tags: |
-            quay.io/ascend/verl:${{ steps.version.outputs.tag }}
+            quay.io/ascend/verl:sglang
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: |
