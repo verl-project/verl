@@ -300,8 +300,13 @@ class PPOTrainer(ABC):
                 )
                 for i, replica in enumerate(replicas)
             ]
-            ray.get(init_group_futures)
-            ray.get(sglang_futures)
+            # Both sides must join the NCCL group simultaneously
+            all_futures = sglang_futures
+            if isinstance(init_group_futures, list):
+                all_futures = all_futures + init_group_futures
+            else:
+                all_futures = all_futures + [init_group_futures]
+            ray.get(all_futures)
         manager_class_fqn = self.config.actor_rollout_ref.rollout.get("agent", {}).get("agent_loop_manager_class")
         if manager_class_fqn:
             agent_loop_manager_cls = load_class_from_fqn(manager_class_fqn, "AgentLoopManager")
