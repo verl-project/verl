@@ -21,6 +21,7 @@ import os
 from .platform_base import PlatformBase
 
 logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 _current_platform: PlatformBase | None = None
 

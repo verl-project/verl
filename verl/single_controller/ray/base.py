@@ -136,10 +136,11 @@ class RayResourcePool(ResourcePool):
             name if name else f"{self.name_prefix}verl_group_{'_'.join([str(count) for count in self._store])}:"
         )
         # print(f"pg_name_prefix = {pg_name_prefix}")
-        if device_name == "npu":
-            device_name = "NPU"
-        elif device_name == "cuda":
-            device_name = "GPU"
+        current_platform = get_platform()
+        assert device_name == current_platform.device_name, (
+            f"Requested device {device_name} does not match current platform device {current_platform.device_name}"
+        )
+        device_name = current_platform.ray_resource_name()
 
         bundle = {"CPU": self.max_colocate_count}
         if self.use_gpu:

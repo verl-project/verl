@@ -25,6 +25,10 @@ def _make_mock_platform(name="mock_xpu"):
             return name
 
         @property
+        def vendor_name(self):
+            return f"mock_{name}"
+
+        @property
         def device_module(self):
             import torch
 
@@ -100,25 +104,27 @@ class TestPlatformDetection:
 
         pm._current_platform = None
 
-    def test_env_override_cuda(self):
-        with mock.patch.dict(os.environ, {"VERL_PLATFORM": "cuda"}):
-            assert _detect_platform_name() == "cuda"
+    def test_env_override_nvidia(self):
+        with mock.patch.dict(os.environ, {"VERL_PLATFORM": "nvidia"}):
+            assert _detect_platform_name() == "nvidia"
 
-    def test_env_override_npu(self):
-        with mock.patch.dict(os.environ, {"VERL_PLATFORM": "npu"}):
-            assert _detect_platform_name() == "npu"
+    def test_env_override_huawei(self):
+        with mock.patch.dict(os.environ, {"VERL_PLATFORM": "huawei"}):
+            assert _detect_platform_name() == "huawei"
 
-    def test_invalid_value_falls_back(self):
+    def test_invalid_value_passes_through(self):
+        # When an explicit platform name is set, _detect_platform_name returns
+        # it as-is (validation happens later in _create_platform).
         with mock.patch.dict(os.environ, {"VERL_PLATFORM": "invalid"}):
-            assert _detect_platform_name() in ("cuda", "npu")
+            assert _detect_platform_name() == "invalid"
 
     def test_case_insensitive(self):
-        with mock.patch.dict(os.environ, {"VERL_PLATFORM": "CUDA"}):
-            assert _detect_platform_name() == "cuda"
+        with mock.patch.dict(os.environ, {"VERL_PLATFORM": "NVIDIA"}):
+            assert _detect_platform_name() == "nvidia"
 
     def test_empty_triggers_auto_detection(self):
         with mock.patch.dict(os.environ, {"VERL_PLATFORM": ""}):
-            assert _detect_platform_name() in ("cuda", "npu")
+            assert _detect_platform_name() in ("nvidia", "huawei")
 
 
 class TestPlatformCreation:
@@ -127,7 +133,7 @@ class TestPlatformCreation:
     def test_cuda_warns_if_unavailable(self):
         with mock.patch("torch.cuda.is_available", return_value=False):
             with mock.patch("verl.plugin.platform.platform_manager.logger") as mock_logger:
-                platform = _create_platform("cuda")
+                platform = _create_platform("nvidia")
                 mock_logger.warning.assert_called_once()
                 assert platform is not None
 
@@ -167,8 +173,8 @@ class TestPlatformRegistry:
 
     def test_builtin_platforms_registered(self):
         names = PlatformRegistry.registered_names()
-        assert "cuda" in names
-        assert "npu" in names
+        assert "nvidia" in names
+        assert "huawei" in names
 
     def test_register_custom_platform(self):
         """External plugin registers a new platform via @PlatformRegistry.register()."""
@@ -183,11 +189,11 @@ class TestPlatformRegistry:
 
     def test_register_override(self):
         """Re-registering the same name overrides the previous class (last writer wins)."""
-        original = PlatformRegistry.get("cuda")
-        FakeCls = _make_mock_platform("cuda")
-        PlatformRegistry.register(platform="cuda")(FakeCls)
-        assert PlatformRegistry.get("cuda") is FakeCls
-        PlatformRegistry._platforms["cuda"] = original
+        original = PlatformRegistry.get("nvidia")
+        FakeCls = _make_mock_platform("nvidia")
+        PlatformRegistry.register(platform="nvidia")(FakeCls)
+        assert PlatformRegistry.get("nvidia") is FakeCls
+        PlatformRegistry._platforms["nvidia"] = original
 
     def test_unregistered_platform_raises(self):
         with pytest.raises(ValueError):

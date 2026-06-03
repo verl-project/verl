@@ -53,6 +53,7 @@ class PlatformNPU(PlatformBase):
         return torch.npu
 
     def is_available(self, use_smi_check=False) -> bool:
+        # For NPU, we rely on torch.npu.is_available() which checks both the presence of the driver and the device.
         if not _ensure_torch_npu():
             return False
         return torch.npu.is_available()
