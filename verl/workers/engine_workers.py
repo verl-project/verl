@@ -710,6 +710,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self.rollout._weight_sync_group = self._weight_sync_group
         logger.info(f"[NCCL weight sync] FSDP rank {torch.distributed.get_rank()} joined group successfully")
 
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     async def update_weights(self, global_steps: int = None, mode: str = "auto"):
         """Update weights from trainer to rollout.
 
