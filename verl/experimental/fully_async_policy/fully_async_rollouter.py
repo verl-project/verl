@@ -218,6 +218,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         # Initialize async queues
         self.pending_queue = asyncio.Queue(maxsize=128)
         self.active_tasks = set()
+        self.postprocess_tasks = set()
 
         cpu_cores = multiprocessing.cpu_count()
         # cpu case use cpu_cores; io case use cpu_cores*2
@@ -231,6 +232,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         # `_resume_event` signals that the rollouter is currently running (paused == False).
         self._resume_event = asyncio.Event()
         self._resume_event.set()
+        self.image_refs_postprocess_semaphore = asyncio.Semaphore(1)
 
     async def set_message_queue_client(self, message_queue_client: MessageQueueClient):
         """Set message queue client"""
@@ -307,7 +309,9 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
             # new samples to idle replicas instead of waiting for long-tail in-flight tasks.
             self._resume_event.set()
             # every time param change, reset staleness_samples
-            self.staleness_samples = len(self.active_tasks) + await self.message_queue_client.get_queue_size()
+            self.staleness_samples = (
+                len(self.active_tasks) + len(self.postprocess_tasks) + await self.message_queue_client.get_queue_size()
+            )
             timing_raw = {}
             rollout_version_time = max(time.time() - self.step_start_time, 1e-6)
             if self.idle_start_time > self.step_start_time:
@@ -633,6 +637,10 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
                             )
                             for task in done_tasks:
                                 await task
+                while self.postprocess_tasks:
+                    done_tasks, _ = await asyncio.wait(self.postprocess_tasks, return_when=asyncio.FIRST_COMPLETED)
+                    for task in done_tasks:
+                        await task
                 break
 
             # Check whether the number of concurrent tasks exceeds the limit
@@ -703,48 +711,78 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         rollout_sample.full_batch.non_tensor_batch["uid"] = np.array(
             [f"uid_{rollout_sample.sample_id}"] * len(rollout_sample.full_batch), dtype=object
         )
-        if self.image_refs_enabled:
-            image_ref_start = time.time()
-            rollout_sample.full_batch, image_bank, image_bank_stats = attach_image_refs_to_dataproto(
-                rollout_sample.full_batch,
-                processor=self.processor,
-                sample_id=rollout_sample.sample_id,
-            )
-            image_bank_stats["build_ms"] = (time.time() - image_ref_start) * 1000.0
-            bank_put_start = time.time()
-            image_bank_ref = ray.put(image_bank) if image_bank else None
-            image_bank_stats["bank_ref_put_ms"] = (time.time() - bank_put_start) * 1000.0
-            rollout_sample.full_batch = attach_image_bank_ref(rollout_sample.full_batch, image_bank_ref)
-            image_bank_stats["total_ms"] = (time.time() - image_ref_start) * 1000.0
-            rollout_sample.image_bank_ref = image_bank_ref
-            rollout_sample.image_bank_stats = image_bank_stats
-            print(
-                "[ImageRefs][rollouter] "
-                f"sample_id={rollout_sample.sample_id} bank_ref_set={image_bank_ref is not None} "
-                f"unique_images={image_bank_stats.get('unique_images', 0)} "
-                f"processed_bytes={image_bank_stats.get('processed_bytes', 0)} "
-                f"build_ms={image_bank_stats['build_ms']:.2f} "
-                f"bank_ref_put_ms={image_bank_stats['bank_ref_put_ms']:.2f} "
-                f"total_ms={image_bank_stats['total_ms']:.2f}",
-                flush=True,
-            )
-        rollout_sample.rollout_status = await self.get_statistics()
-
-        sample_ref = ray.put(rollout_sample)
-        # Wrap the ObjectRef so Ray does not auto-dereference it when passing it
-        # as a top-level actor method argument to MessageQueue.put_sample.
-        success = await self.message_queue_client.put_sample(
-            sample=[sample_ref],
+        task = safe_create_task(
+            self._postprocess_and_publish_sample(rollout_sample),
+            name=f"{rollout_sample.sample_id}_postprocess",
+            task_set=self.postprocess_tasks,
         )
-        if success:
-            self.total_generated_samples += 1
-        else:
-            # MQ rejected the sample (e.g. queue full + reject policy). The
-            # sample never reaches the trainer, so it must not keep occupying
-            # a staleness slot.
+        task.add_done_callback(self.postprocess_tasks.discard)
+
+    def _attach_image_refs_for_sample(self, rollout_sample: RolloutSample) -> RolloutSample:
+        if not self.image_refs_enabled:
+            return rollout_sample
+
+        image_ref_start = time.time()
+        rollout_sample.full_batch, image_bank, image_bank_stats = attach_image_refs_to_dataproto(
+            rollout_sample.full_batch,
+            processor=self.processor,
+            sample_id=rollout_sample.sample_id,
+        )
+        image_bank_stats["build_ms"] = (time.time() - image_ref_start) * 1000.0
+        bank_put_start = time.time()
+        image_bank_ref = ray.put(image_bank) if image_bank else None
+        image_bank_stats["bank_ref_put_ms"] = (time.time() - bank_put_start) * 1000.0
+        rollout_sample.full_batch = attach_image_bank_ref(rollout_sample.full_batch, image_bank_ref)
+        image_bank_stats["total_ms"] = (time.time() - image_ref_start) * 1000.0
+        rollout_sample.image_bank_ref = image_bank_ref
+        rollout_sample.image_bank_stats = image_bank_stats
+        print(
+            "[ImageRefs][rollouter] "
+            f"sample_id={rollout_sample.sample_id} bank_ref_set={image_bank_ref is not None} "
+            f"unique_images={image_bank_stats.get('unique_images', 0)} "
+            f"processed_bytes={image_bank_stats.get('processed_bytes', 0)} "
+            f"build_ms={image_bank_stats['build_ms']:.2f} "
+            f"bank_ref_put_ms={image_bank_stats['bank_ref_put_ms']:.2f} "
+            f"total_ms={image_bank_stats['total_ms']:.2f}",
+            flush=True,
+        )
+        return rollout_sample
+
+    async def _postprocess_and_publish_sample(self, rollout_sample: RolloutSample):
+        try:
+            image_ref_start = time.time()
+            async with self.image_refs_postprocess_semaphore:
+                rollout_sample = await asyncio.to_thread(self._attach_image_refs_for_sample, rollout_sample)
+            postprocess_ms = (time.time() - image_ref_start) * 1000.0
+            if self.image_refs_enabled and hasattr(rollout_sample, "image_bank_stats"):
+                rollout_sample.image_bank_stats["postprocess_task_ms"] = postprocess_ms
+
+            rollout_sample.rollout_status = await self.get_statistics()
+
+            sample_ref = await asyncio.to_thread(ray.put, rollout_sample)
+            # Wrap the ObjectRef so Ray does not auto-dereference it when passing it
+            # as a top-level actor method argument to MessageQueue.put_sample.
+            success = await self.message_queue_client.put_sample(
+                sample=[sample_ref],
+            )
+            if success:
+                self.total_generated_samples += 1
+            else:
+                # MQ rejected the sample (e.g. queue full + reject policy). The
+                # sample never reaches the trainer, so it must not keep occupying
+                # a staleness slot.
+                self.dropped_stale_samples += 1
+                self.staleness_samples = max(0, self.staleness_samples - 1)
+            self.processed_sample_count += 1
+        except Exception as exc:
+            logger.error(
+                "[POTENTIAL ERROR][FullyAsyncRollouter] postprocess dropped sample_id=%s: %r",
+                rollout_sample.sample_id,
+                exc,
+            )
             self.dropped_stale_samples += 1
             self.staleness_samples = max(0, self.staleness_samples - 1)
-        self.processed_sample_count += 1
+            self.processed_sample_count += 1
 
     async def _streaming_generation_main(self):
         """The main entry method for stream processing"""
@@ -786,6 +824,12 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
             await self.pending_queue.join()
             logger.info("[FullyAsyncRollouter] pending_queue joined")
 
+            while self.postprocess_tasks:
+                done_tasks, _ = await asyncio.wait(self.postprocess_tasks, return_when=asyncio.FIRST_COMPLETED)
+                for task in done_tasks:
+                    await task
+            logger.info("[FullyAsyncRollouter] postprocess tasks drained")
+
         except Exception:
             logger.exception("[FullyAsyncRollouter] Streaming process exception")
             raise
@@ -798,6 +842,9 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
             if self.processor_task and not self.processor_task.done():
                 self.processor_task.cancel()
                 await asyncio.gather(self.processor_task, return_exceptions=True)
+
+            if self.postprocess_tasks:
+                await asyncio.gather(*list(self.postprocess_tasks), return_exceptions=True)
 
             self.feed_task = None
             self.processor_task = None
@@ -905,6 +952,8 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         stats = {
             # monitor stats
             "monitor/active_tasks_size": len(self.active_tasks),
+            "monitor/postprocess_tasks_size": len(self.postprocess_tasks),
+            "monitor/total_inflight_tasks_size": len(self.active_tasks) + len(self.postprocess_tasks),
             "monitor/queue/pending_queue_size": self.pending_queue.qsize(),
             "monitor/queue/mq_queue_size": queue_stats["queue_size"],
             # counting stats
