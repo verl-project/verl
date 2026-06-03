@@ -156,10 +156,10 @@ if [ "${ACTOR_STRATEGY}" == "fsdp2" ]; then
     if [ "${rollout_name}" = "trtllm" ]; then
         gen_tp=${GEN_TP:-${n_gpus_rollout}}
     else
-        gen_tp=1
+        gen_tp=2
     fi
     sp_size=1
-    fsdp_size=1
+    fsdp_size=2
     ref_offload=True
     actor_offload=False
 
