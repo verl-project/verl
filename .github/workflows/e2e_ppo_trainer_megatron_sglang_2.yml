@@ -122,6 +122,8 @@ jobs:
         run: |
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
+      - name: Check final pip list
+          pip3 list
       - name: Prepare gsm8k dataset
         run: |
           ray stop --force
