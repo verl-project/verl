@@ -122,6 +122,21 @@ class ModelMergerConfig:
             self.private = False
 
 
+def _default_hf_model_config_path(backend: str, local_dir: str) -> str:
+    """Return the default path to HuggingFace config/tokenizer artifacts.
+
+    - FSDP: ``<local_dir>/huggingface`` (unchanged, single-tree layout).
+    - Megatron (v2 layout): ``<local_dir>/model/huggingface`` — the HF tree
+      is nested under ``model/`` alongside the optional ``model/dist_ckpt/``
+      shards.  Checkpoints produced before the v2 refactor will therefore
+      not resolve here; run ``scripts/migrate_megatron_checkpoint_layout.py``
+      first.
+    """
+    if backend == "megatron":
+        return os.path.join(local_dir, "model", "huggingface")
+    return os.path.join(local_dir, "huggingface")
+
+
 def generate_config_from_args(args: argparse.Namespace) -> ModelMergerConfig:
     common_config_args = {
         "operation": args.operation,
@@ -130,7 +145,7 @@ def generate_config_from_args(args: argparse.Namespace) -> ModelMergerConfig:
         "trust_remote_code": args.trust_remote_code,
         "is_value_model": args.is_value_model,
         "local_dir": args.local_dir,
-        "hf_model_config_path": os.path.join(args.local_dir, "huggingface"),
+        "hf_model_config_path": _default_hf_model_config_path(args.backend, args.local_dir),
         "use_cpu_initialization": args.use_cpu_initialization,
     }
 

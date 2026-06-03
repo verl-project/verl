@@ -79,9 +79,6 @@ checkpoint:
   # Whether to save checkpoints asynchronously. Only effective for Megatron as of now.
   async_save: False
 
-  # Mbridge config extension.
-  mbridge_config: {}
-
 # profile the critic model in `update_critic`
 profiler:
 

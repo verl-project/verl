@@ -248,7 +248,7 @@ class MindSpeedFeature:
 | verl参数 | 简介|
 | --- | --- |
 | `actor_rollout_ref.actor.megatron.optimizer_offload` |是否卸载模型优化器到CPU，默认值为False|
-| `actor_rollout_ref.actor.megatron.use_mbridge` |是否使用mbridge进行权重转换|
+| `actor_rollout_ref.actor.megatron.use_mbridge` |是否启用 mbridge：为 True（默认）时 engine 会构造 `bridge` 并交给 checkpoint manager，从而可读写 `model/huggingface/`；`save_contents` / `load_contents` 含 `hf_model` 时 manager 要求 `bridge` 非空（通常即此项为 True）。可与 `use_dist_checkpointing` 同时开启，在同一 checkpoint 中同时写入 HF 树与 `model/dist_ckpt/` 分片。为 False 时一般无 `hf_model`；仅 `model` 槽位走 `dist_checkpointing` 时需配合 `use_dist_checkpointing=True`|
 | `actor_rollout_ref.actor.megatron.param_offload` |是否卸载模型权重到CPU，默认值为False|
 | `actor_rollout_ref.actor.megatron.tensor_model_parallel_size` | 张量并行大小；默认值为1。|
 | `actor_rollout_ref.actor.megatron.pipeline_model_parallel_size`  |流水并行大小，默认值为1|
@@ -264,7 +264,7 @@ class MindSpeedFeature:
 | `actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity` |重新计算激活的粒度，可选项为'full', 'selective' and 'none'。其中full代表重新计算整个transformer layer，selective代表只计算transformer layer中的核心注意力部分。默认为'none'。|
 | `actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method` |该参数需将recompute_granularity设置为'full'才生效，可选项为'uniform', 'block'。默认为None。|
 | `actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers` |该参数需将recompute_granularity设置为'full'才生效，默认为None。若recompute_method设置为uniform，该参数含义为每个均匀划分的重新计算单元的transformer layers数量。例如你可以指定为--recompute_granularity full --recompute_method uniform --recompute_num_layers 4。recompute_num_layers越大，显存占用越小，计算成本越大。注意：当前进程中的模型层数需能被recompute_num_layers整除。默认为None。|
-| `actor_rollout_ref.actor.megatron.use_dist_checkpointing` |是否使用分布式权重，默认值为False|
+| `actor_rollout_ref.actor.megatron.use_dist_checkpointing` |为 True 时，`model` 槽位使用 Megatron `dist_checkpointing` 分片（`model/dist_ckpt/`）。与 `use_mbridge` 独立：两者可同时为 True 以保存/加载分片 + HF 导出。默认 False|
 | `actor_rollout_ref.actor.megatron.dist_checkpointing_path` |分布式权重路径，默认值为null|
 | `actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn` |是否使用Flash Attention，默认值为true|
 | `actor_rollout_ref.actor.megatron.override_transformer_config.use_fused_rotary_pos_emb` |是否使用融合旋转位置编码，默认值为False|

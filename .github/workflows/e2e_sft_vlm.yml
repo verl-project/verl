@@ -104,10 +104,14 @@ jobs:
         run: |
           pip3 install peft
           pip3 install -r requirements-test.txt
+          pip3 install -r requirements.txt
           pip3 install --no-deps -e .
           pip3 install veomni==0.1.11 --ignore-requires-python --no-deps --index-url https://pypi.org/simple/
           pip3 install transformers==5.3.0
           pip3 uninstall -y "flash-attn-4"
+      - name: Check final pip list
+        run: |
+          pip3 list
       - name: Prepare pokemon-gpt4o-captions dataset
         run: |
           ray stop --force

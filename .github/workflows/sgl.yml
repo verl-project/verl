@@ -115,6 +115,9 @@ jobs:
           pip3 install hf_transfer pytest-asyncio
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
+      - name: Check final pip list
+        run: |
+          pip3 list
       - name: Prepare gsm8k dataset
         run: |
           ray stop --force
@@ -144,7 +147,11 @@ jobs:
           pip3 install cupy-cuda13x==13.6.0 pytest-asyncio
           pip3 install hf_transfer pytest-asyncio
           pip3 install -r requirements-test.txt
+          pip3 install -r requirements.txt
           pip3 install --no-deps -e .
+      - name: Check final pip list
+        run: |
+          pip3 list
       - name: Test SGLang ServerAdapter with Checkpoint Engine (NCCL)
         run: |
           ROLLOUT_NAME=sglang pytest -svvv tests/checkpoint_engine/test_special_server_adapter.py

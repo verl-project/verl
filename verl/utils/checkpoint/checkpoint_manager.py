@@ -118,6 +118,14 @@ class BaseCheckpointManager:
         """
         return "extra" in self.checkpoint_load_contents
 
+    @property
+    def should_load_hf_model(self) -> bool:
+        """
+        Returns True if 'hf_model' is in checkpoint_load_contents, indicating an HF-format model
+        checkpoint should be loaded (e.g. via a bridge).
+        """
+        return "hf_model" in self.checkpoint_load_contents
+
     def load_checkpoint(self, local_path: str, hdfs_path: str = None, del_local_after_load: bool = False):
         raise NotImplementedError
 

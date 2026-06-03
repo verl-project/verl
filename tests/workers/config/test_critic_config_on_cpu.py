@@ -63,7 +63,6 @@ class TestCriticConfig:
             "get",
             "nccl_timeout",
             "megatron",
-            "load_weight",
         ]
         for attr in expected_attrs:
             assert hasattr(megatron_config_obj, attr), f"Missing attribute: {attr}"
@@ -146,7 +145,7 @@ class TestCriticConfig:
                 setattr(critic_config, field_name, "modified_value")
 
         megatron_config = McoreCriticConfig(ppo_micro_batch_size_per_gpu=1, optim=McoreOptimizerConfig(lr=0.1))
-        megatron_frozen_fields = ["nccl_timeout", "load_weight", "data_loader_seed"]
+        megatron_frozen_fields = ["nccl_timeout", "data_loader_seed"]
 
         for field_name in megatron_frozen_fields:
             with pytest.raises((AttributeError, TypeError, ValueError)):

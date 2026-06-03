@@ -641,6 +641,11 @@ class vLLMHttpServer:
             # is a no-op success, so we can pass it unconditionally.
             await self.engine.reset_prefix_cache(**_RESET_PREFIX_CACHE_KWARGS)
 
+            if _VLLM_VERSION >= version.parse("0.9.0"):
+                await self.engine.reset_mm_cache()
+            if _VLLM_VERSION >= version.parse("0.16.0"):
+                await self.engine.reset_encoder_cache()
+
     async def release_kv_cache(self):
         """Release only kv_cache GPU memory, keeping model weights intact.
         # TODO: support true release of kv_cache

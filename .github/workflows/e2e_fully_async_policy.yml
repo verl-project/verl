@@ -1,169 +1,233 @@
-# # Tests layout
+#!/usr/bin/env bash
+set -xeuo pipefail
 
-# Each folder under tests/ corresponds to a test category for a sub-namespace in verl. For instance:
-# - `tests/trainer` for testing functionality related to `verl/trainer`
-# - `tests/models` for testing functionality related to `verl/models`
-# - ...
+# Test script for fully_async_policy E2E regression testing
+# This script runs fully async PPO training with both FSDP2 and Megatron backends
+# to ensure the asynchronous training mechanism works correctly
 
-# There are a few folders with `special_` prefix, created for special purposes:
-# - `special_distributed`: unit tests that must run with multiple GPUs
-# - `special_e2e`: end-to-end tests with training/generation scripts
-# - `special_npu`: tests for NPUs
-# - `special_sanity`: a suite of quick sanity tests
-# - `special_standalone`: a set of test that are designed to run in dedicated environments
+NUM_GPUS=${NUM_GPUS:-8}
+ACTOR_STRATEGY=${ACTOR_STRATEGY:-"fsdp2"}  # fsdp2 or megatron
+ROLLOUT_NAME=${ROLLOUT_NAME:-"vllm"}       # vllm, sglang, or trtllm
 
-# Accelerators for tests
-# - By default tests are run with GPU available, except for the ones under `special_npu`, and any test script whose name ends with `on_cpu.py`.
-# - For test scripts with `on_cpu.py` name suffix would be tested on CPU resources in linux environment.
+# Download model if not exists
+MODEL_ID=${MODEL_ID:-Qwen/Qwen2.5-0.5B-Instruct}
+MODEL_PATH=${MODEL_PATH:-${HOME}/models/${MODEL_ID}}
+# hf download "${MODEL_ID}" --local-dir "${MODEL_PATH}"
 
-# # Workflow layout
 
-# All CI tests are configured by yaml files in `.github/workflows/`. Here's an overview of all test configs:
-# 1. A list of always triggered CPU sanity tests: `check-pr-title.yml`, `secrets_scan.yml`, `check-pr-title,yml`, `pre-commit.yml`, `doc.yml`
-# 2. Some heavy multi-GPU unit tests, such as `model.yml`, `vllm.yml`, `sgl.yml`
-# 3. End-to-end tests: `e2e_*.yml`
-# 4. Unit tests
-#   - `cpu_unit_tests.yml`, run pytest on all scripts with file name pattern `tests/**/test_*_on_cpu.py`
-#   - `gpu_unit_tests.yml`, run pytest on all scripts with file without the `on_cpu.py` suffix.
-#   - Since cpu/gpu unit tests by default runs all tests under `tests`, please make sure tests are manually excluded in them when
-#     - new workflow yaml is added to `.github/workflows`
-#     - new tests are added to workflow mentioned in 2.
+rollout_mode="async"
+rollout_name="${ROLLOUT_NAME}"
+return_raw_chat="True"
+if [ "$rollout_name" = "vllm" ]; then
+    export VLLM_USE_V1=1
+fi
 
-name: e2e_fully_async_policy
+# Algorithm parameters
+adv_estimator=grpo
 
-on:
-  # Trigger the workflow on push or pull request,
-  # but only for the main branch
-  # For push, for now only anti-patterns are specified so it is more conservative
-  # and achieves higher coverage.
-  push:
-    branches:
-      - main
-      - v0.*
-    paths:
-      - "**/*.py"
-      - "!**/*.md"
-      - "!**/*.sh"
-      # Other entrypoints
-      - "!examples/*trainer*"
-      - "!tests/**"
-      - "!verl/trainer/main_*.py"
-      - "!verl/trainer/fsdp_sft_trainer.py"
-      - "verl/experimental/fully_async_policy"
-  pull_request:
-    branches:
-      - main
-      - v0.*
-    paths:
-      - "**/*.py"
-      - "!**/*.md"
-      - "!**/*.sh"
-      # Other entrypoints
-      - "!examples/**"
-      - "!tests/**"
-      - "!verl/trainer/main_*.py"
-      - "!verl/trainer/fsdp_sft_trainer.py"
-      # Home
-      - "verl/experimental/fully_async_policy"
-      # Entrypoints
-      - ".github/workflows/e2e_fully_async_policy.yml"
-      - "examples/data_preprocess/gsm8k.py"
-      - "tests/special_e2e/run_fully_async_policy.sh"
+use_kl_in_reward=False
+kl_coef=0.0
+use_kl_loss=False
+kl_loss_coef=0.0
 
-# Cancel jobs on the same ref if a new one is triggered
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+clip_ratio_low=0.2
+clip_ratio_high=0.28
 
-# Declare permissions just read content.
-permissions:
-  contents: read
+# Response length parameters
+max_prompt_length=1024
+max_response_length=2048
+enable_overlong_buffer=True
+overlong_buffer_len=128
+overlong_penalty_factor=1.0
 
-env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm020.dev1"
-  DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
+# Training parameters
+loss_agg_mode="token-mean"
 
-jobs:
-  setup:
-    if: github.repository_owner == 'verl-project'
-    runs-on: ubuntu-latest
-    outputs:
-      runner-label: ${{ steps.create-runner.outputs.runner-label }}
-      mlp-task-id: ${{ steps.create-runner.outputs.mlp-task-id }}
-    steps:
-      - uses: actions/checkout@v4
-      - id: create-runner
-        uses: volcengine/vemlp-github-runner@v1
-        with:
-          mode: "create"
-          faas-url: "${{ env.DYNAMIC_RUNNER_ENDPOINT }}"
-          mlp-image: "${{ env.IMAGE }}"
+# Temperature parameters
+temperature=1.0
+top_p=1.0
+top_k=-1
+val_top_p=0.7
 
-  # Test FSDP2 strategy
-  e2e_fully_async_policy_fsdp2:
-    needs: setup
-    runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
-    timeout-minutes: 10 # Increase timeout for async training
-    env:
-      HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
-      NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
-      HF_ENDPOINT: "https://hf-mirror.com"
-      HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
-      ACTOR_STRATEGY: "fsdp2"
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          fetch-depth: 0
-      - name: Install the current repository
-        run: |
-          pip3 install -r requirements-test.txt
-          pip3 install --no-deps -e .
-          pip3 install cupy-cuda13x==13.6.0
-      - name: Prepare GSM8K dataset
-        run: |
-          python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
-      - name: Running the E2E test with fully_async_policy algorithm (FSDP2)
-        run: |
-          ray stop --force
-          bash tests/special_e2e/run_fully_async_policy.sh
+# Fully async specific parameters
+# Split GPUs evenly between rollout and training.
+n_gpus_rollout=${N_GPUS_ROLLOUT:-$((NUM_GPUS / 2))}
+n_gpus_training=${N_GPUS_TRAINING:-$((NUM_GPUS / 2))}
 
-  # Test Megatron strategy
-  e2e_fully_async_policy_megatron:
-    needs: setup
-    runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
-    timeout-minutes: 10 # Increase timeout for async training
-    env:
-      HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
-      NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
-      HF_ENDPOINT: "https://hf-mirror.com"
-      HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
-      ACTOR_STRATEGY: "megatron"
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          fetch-depth: 0
-      - name: Install the current repository
-        run: |
-          pip3 install -r requirements-test.txt
-          pip3 install --no-deps -e .
-          pip3 install cupy-cuda13x==13.6.0
-          pip3 install git+https://github.com/ISEEKYAN/mbridge.git@main --no-deps --no-build-isolation
-      - name: Prepare GSM8K dataset
-        run: |
-          python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
-      - name: Running the E2E test with fully_async_policy algorithm (Megatron)
-        run: |
-          ray stop --force
-          bash tests/special_e2e/run_fully_async_policy.sh
+train_prompt_bsz=0
+gen_prompt_bsz=1
+n_resp_per_prompt=16
+train_prompt_mini_bsz=16
+total_rollout_steps=$(((128)))
+test_freq=-1
+staleness_threshold=0.5
+trigger_parameter_sync_step=4
+partial_rollout=True
+use_trainer_do_validate=False
 
-  cleanup:
-    runs-on: ubuntu-latest
-    needs: [setup, e2e_fully_async_policy_fsdp2]
-    if: always()
-    steps:
-      - id: destroy-runner
-        uses: volcengine/vemlp-github-runner@v1
-        with:
-          mode: "destroy"
-          faas-url: "${{ env.DYNAMIC_RUNNER_ENDPOINT }}"
-          mlp-task-id: "${{ needs.setup.outputs.mlp-task-id }}"
+exp_name="$(basename "${MODEL_ID,,}")-fully-async-policy-${rollout_name}-${ACTOR_STRATEGY}-minimal"
+
+echo "Running fully_async_policy with ${ACTOR_STRATEGY} strategy"
+echo "Total GPUs: ${NUM_GPUS}, Rollout GPUs: ${n_gpus_rollout}, Training GPUs: ${n_gpus_training}"
+
+# Common parameters for both FSDP2 and Megatron
+common_params=(
+    data.train_files="${HOME}/data/gsm8k/train.parquet"
+    data.val_files="${HOME}/data/gsm8k/test.parquet"
+    data.prompt_key=prompt
+    data.truncation='left'
+    data.max_prompt_length=${max_prompt_length}
+    data.max_response_length=${max_response_length}
+    data.train_batch_size=${train_prompt_bsz}
+    data.gen_batch_size=${gen_prompt_bsz}
+    data.return_raw_chat=${return_raw_chat}
+    actor_rollout_ref.rollout.n=${n_resp_per_prompt}
+    actor_rollout_ref.rollout.calculate_log_probs=True
+    algorithm.adv_estimator=${adv_estimator}
+    algorithm.use_kl_in_reward=${use_kl_in_reward}
+    algorithm.kl_ctrl.kl_coef=${kl_coef}
+    actor_rollout_ref.hybrid_engine=False
+    actor_rollout_ref.actor.use_kl_loss=${use_kl_loss}
+    actor_rollout_ref.actor.kl_loss_coef=${kl_loss_coef}
+    actor_rollout_ref.actor.clip_ratio_low=${clip_ratio_low}
+    actor_rollout_ref.actor.clip_ratio_high=${clip_ratio_high}
+    actor_rollout_ref.actor.clip_ratio_c=10.0
+    actor_rollout_ref.model.path="${MODEL_PATH}"
+    actor_rollout_ref.actor.optim.lr=1e-6
+    actor_rollout_ref.actor.optim.lr_warmup_steps=-1
+    actor_rollout_ref.actor.optim.weight_decay=0.1
+    actor_rollout_ref.actor.ppo_mini_batch_size=${train_prompt_mini_bsz}
+    actor_rollout_ref.actor.entropy_coeff=0
+    actor_rollout_ref.actor.loss_agg_mode=${loss_agg_mode}
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.80
+    actor_rollout_ref.rollout.temperature=${temperature}
+    actor_rollout_ref.rollout.top_p=${top_p}
+    actor_rollout_ref.rollout.top_k=${top_k}
+    actor_rollout_ref.rollout.val_kwargs.temperature=${temperature}
+    actor_rollout_ref.rollout.val_kwargs.top_p=${val_top_p}
+    actor_rollout_ref.rollout.val_kwargs.top_k=${top_k}
+    actor_rollout_ref.rollout.val_kwargs.do_sample=True
+    actor_rollout_ref.rollout.val_kwargs.n=1
+    actor_rollout_ref.rollout.enable_chunked_prefill=True
+    actor_rollout_ref.rollout.name=${rollout_name}
+    actor_rollout_ref.rollout.mode=${rollout_mode}
+    actor_rollout_ref.rollout.disable_log_stats=False
+    reward.reward_manager.name=dapo
+    +reward.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer}
+    +reward.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len}
+    +reward.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor}
+    +reward.reward_kwargs.overlong_buffer_cfg.log=False
+    +reward.reward_kwargs.max_resp_len=${max_response_length}
+    trainer.logger=['console']
+    trainer.project_name='verl-test-fully-async'
+    trainer.experiment_name="${exp_name}"
+    trainer.val_before_train=True
+    trainer.save_freq=-1
+    trainer.resume_mode=disable
+    trainer.nnodes=1
+    trainer.n_gpus_per_node=${n_gpus_training}
+    trainer.log_val_generations=10
+    rollout.nnodes=1
+    rollout.n_gpus_per_node=${n_gpus_rollout}
+    rollout.total_rollout_steps=${total_rollout_steps}
+    trainer.total_epochs=2
+    trainer.test_freq=${test_freq}
+    # Fully async specific configurations
+    async_training.staleness_threshold=${staleness_threshold}
+    async_training.partial_rollout="${partial_rollout}"
+    async_training.trigger_parameter_sync_step="${trigger_parameter_sync_step}"
+    async_training.use_trainer_do_validate=${use_trainer_do_validate}
+    actor_rollout_ref.rollout.checkpoint_engine.backend='nccl'
+    actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=1024
+)
+
+    # Detect device
+    device_name=$(python3 - <<'EOF'
+from verl.utils.device import get_device_name
+print(get_device_name())
+EOF
+)
+
+if [ "${ACTOR_STRATEGY}" == "fsdp2" ]; then
+    echo "Running fully async training with FSDP2 strategy..."
+    # FSDP2 specific parameters
+    # trtllm: one replica uses all rollout GPUs as a single TP group.
+    # vllm/sglang: TP=1, rely on data parallelism across replicas.
+    if [ "${rollout_name}" = "trtllm" ]; then
+        gen_tp=${GEN_TP:-${n_gpus_rollout}}
+    else
+        gen_tp=2
+    fi
+    sp_size=1
+    fsdp_size=2
+    ref_offload=True
+    actor_offload=False
+
+    if [ -n "$device_name" ] && [ "$device_name" == "npu" ]; then
+        common_params+=(
+            # Todo The checkpoint_engine.backend should be unified to nccl
+            # actor_rollout_ref.rollout.checkpoint_engine.backend='hccl'
+            actor_rollout_ref.rollout.gpu_memory_utilization=0.70
+        )
+        actor_offload=True
+    fi
+    python3 -m verl.experimental.fully_async_policy.fully_async_main \
+        "${common_params[@]}" \
+        actor_rollout_ref.model.enable_gradient_checkpointing=True \
+        actor_rollout_ref.actor.fsdp_config.strategy=fsdp2 \
+        critic.strategy=fsdp2 \
+        actor_rollout_ref.actor.grad_clip=1.0 \
+        actor_rollout_ref.model.use_remove_padding=True \
+        actor_rollout_ref.actor.use_dynamic_bsz=True \
+        actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True \
+        actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True \
+        actor_rollout_ref.actor.fsdp_config.param_offload=${actor_offload} \
+        actor_rollout_ref.actor.fsdp_config.optimizer_offload=${actor_offload} \
+        actor_rollout_ref.actor.ulysses_sequence_parallel_size=${sp_size} \
+        actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
+        actor_rollout_ref.ref.fsdp_config.param_offload=${ref_offload} \
+        actor_rollout_ref.ref.ulysses_sequence_parallel_size=${sp_size} \
+        actor_rollout_ref.actor.fsdp_config.fsdp_size=${fsdp_size} $@
+
+elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
+    echo "Running fully async training with Megatron strategy..."
+    # Megatron specific parameters
+    if [ "${rollout_name}" = "trtllm" ]; then
+        gen_tp=${GEN_TP:-${n_gpus_rollout}}
+    else
+        gen_tp=2
+    fi
+    train_tp=2
+    train_pp=$((n_gpus_training / train_tp))
+    ref_offload=True
+    actor_offload=True
+    common_params+=(
+        actor_rollout_ref.rollout.gpu_memory_utilization=0.60
+    )
+
+    python3 -m verl.experimental.fully_async_policy.fully_async_main \
+        --config-path=config \
+        --config-name='fully_async_ppo_megatron_trainer.yaml' \
+        "${common_params[@]}" \
+        actor_rollout_ref.actor.strategy=megatron \
+        critic.strategy=megatron \
+        actor_rollout_ref.actor.optim.lr_decay_steps=10000000 \
+        actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=2 \
+        actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
+        actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
+        actor_rollout_ref.actor.megatron.param_offload=${actor_offload} \
+        actor_rollout_ref.actor.megatron.optimizer_offload=${actor_offload} \
+        actor_rollout_ref.actor.megatron.grad_offload=${actor_offload} \
+        actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=${train_pp} \
+        actor_rollout_ref.actor.megatron.tensor_model_parallel_size=${train_tp} \
+        actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
+        actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=${train_pp} \
+        actor_rollout_ref.ref.megatron.tensor_model_parallel_size=${train_tp} \
+        actor_rollout_ref.ref.megatron.param_offload=${ref_offload} $@
+else
+    echo "Error: Unknown strategy ${ACTOR_STRATEGY}. Please use 'fsdp2' or 'megatron'"
+    exit 1
+fi
+
+echo "Fully async policy E2E test completed successfully with ${ACTOR_STRATEGY} strategy"
+

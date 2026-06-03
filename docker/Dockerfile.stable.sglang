@@ -61,12 +61,19 @@ RUN pip install torchcodec --index-url=https://download.pytorch.org/whl/cu130
 
 RUN pip install qwen-vl-utils==0.0.14
 
-RUN pip uninstall "flash-attn-4" && pip install "flash-attn-4[cu13]"
+RUN if [ "$(uname -m)" = "aarch64" ]; then \
+        pip show "flash-attn-4"; \
+    else \
+        pip uninstall -y "flash-attn-4" && \
+        pip install "flash-attn-4[cu13]"; \
+    fi
 
-RUN wget https://github.com/sgl-project/whl/releases/download/v0.4.2.post2/sglang_kernel-0.4.2.post2+cu130-cp310-abi3-manylinux2014_x86_64.whl#sha256=4e7ce619274234d182b20da883fcf1d20e7e55cbea90d62244e2b6a3d6c0fc85 && \
-    pip install sglang_kernel-0.4.2.post2+cu130-cp310-abi3-manylinux2014_x86_64.whl --force-reinstall
-
-RUN pip install transformers==5.3.0
+RUN if [ "$(uname -m)" = "aarch64" ]; then \
+        pip show "sglang-kernel"; \
+    else \
+        wget https://github.com/sgl-project/whl/releases/download/v0.4.2.post2/sglang_kernel-0.4.2.post2+cu130-cp310-abi3-manylinux2014_x86_64.whl#sha256=4e7ce619274234d182b20da883fcf1d20e7e55cbea90d62244e2b6a3d6c0fc85 && \
+        pip install sglang_kernel-0.4.2.post2+cu130-cp310-abi3-manylinux2014_x86_64.whl --force-reinstall; \
+    fi
 
 RUN pip install -U git+https://github.com/ISEEKYAN/mbridge.git@main
 
