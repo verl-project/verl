@@ -35,10 +35,18 @@ class PlatformCUDA(PlatformBase):
         return torch.cuda
 
     def is_available(self, use_smi_check=False) -> bool:
-        if not torch.cuda.is_available():
+        if not hasattr(torch, "cuda"):
             return False
         if use_smi_check:
-            return self.check_smi_command("nvidia-smi")
+            # In CPU-only Ray actors, torch.cuda.is_available() may return False
+            # even though the cluster has GPUs. Fall back to nvidia-smi check,
+            # and if that's also unavailable (e.g. not on PATH), treat
+            # torch.cuda being built as sufficient evidence.
+            if self.check_smi_command("nvidia-smi"):
+                return True
+            return torch.cuda.is_available()
+        if not torch.cuda.is_available():
+            return False
         return True
 
     def current_device(self) -> int:

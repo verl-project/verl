@@ -39,10 +39,22 @@ class PlatformBase(abc.ABC):
         Useful for CUDA-compatible hardware that needs to be distinguished
         from NVIDIA during auto-detection.
         """
-        if shutil.which(cmd) is None:
-            return False
+        cmd_path = shutil.which(cmd)
+        if cmd_path is None:
+            # Fallback to common absolute paths if not found in PATH
+            common_paths = [
+                f"/usr/bin/{cmd}",
+                f"/usr/local/bin/{cmd}",
+                f"/usr/local/cuda/bin/{cmd}",
+            ]
+            for path in common_paths:
+                if os.path.isfile(path) and os.access(path, os.X_OK):
+                    cmd_path = path
+                    break
+            if cmd_path is None:
+                return False
         try:
-            result = subprocess.run([cmd], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+            result = subprocess.run([cmd_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
             return result.returncode == 0
         except (subprocess.TimeoutExpired, OSError):
             return False

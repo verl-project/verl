@@ -54,9 +54,21 @@ class PlatformNPU(PlatformBase):
         return torch.npu
 
     def is_available(self, use_smi_check=False) -> bool:
-        # For NPU, we rely on torch.npu.is_available() which checks both the presence of the driver and the device.
+        """Check if NPU platform is available.
+
+        In multi-process environments (e.g., Ray CPU-only actors),
+        a process may not have visible NPU devices even though the cluster
+        has NPUs.  When ``use_smi_check=True`` (used during auto-detection),
+        we only require that ``torch_npu`` is importable — this is sufficient
+        evidence that the environment targets NPU hardware.  When
+        ``use_smi_check=False`` (runtime usage), we additionally require at
+        least one device to be visible via ``torch.npu.is_available()``.
+        """
         if not _ensure_torch_npu():
             return False
+        if use_smi_check:
+            # torch_npu imported successfully — NPU environment confirmed
+            return True
         return torch.npu.is_available()
 
     def current_device(self) -> int:
