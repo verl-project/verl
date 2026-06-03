@@ -35,7 +35,7 @@ from ..megatron import MegatronEngineWithLMHead, MegatronEngineWithValueHead
 from .utils import (
     apply_patch,
     gpt_model_provider,
-    onload_or_offload_quantized_weights,
+    reset_fp8_reuse_quantized_weight,
 )
 
 logger = logging.getLogger(__file__)
@@ -81,8 +81,8 @@ class MindspeedEngineWithLMHead(MegatronEngineWithLMHead):
             model: If True, move the model.
             optimizer: If True, move the optimizer states.
         """
-        if not onload_or_offload_quantized_weights(self, device, model, optimizer, grad):
-            super().to(device=device, model=model, optimizer=optimizer, grad=grad)
+        reset_fp8_reuse_quantized_weight(self, device, model, optimizer, grad)
+        super().to(device=device, model=model, optimizer=optimizer, grad=grad)
 
 
 @EngineRegistry.register(model_type="value_model", backend="megatron", device="npu")
@@ -162,5 +162,5 @@ class MindSpeedMegatronEngineWithLMHead(MegatronEngineWithLMHead):
             model: If True, move the model.
             optimizer: If True, move the optimizer states.
         """
-        if not onload_or_offload_quantized_weights(self, device, model, optimizer, grad):
-            super().to(device=device, model=model, optimizer=optimizer, grad=grad)
+        reset_fp8_reuse_quantized_weight(self, device, model, optimizer, grad)
+        super().to(device=device, model=model, optimizer=optimizer, grad=grad)

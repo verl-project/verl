@@ -18,7 +18,6 @@ import argparse
 import torch
 
 from verl.workers.config import HFModelConfig, McoreOptimizerConfig, MindSpeedEngineConfig
-from verl.utils.device import get_device_name
 
 
 def get_base_mcore_config_from_model_config(model_config: HFModelConfig) -> dict:
@@ -224,19 +223,23 @@ def gpt_model_provider(pre_process=True, post_process=True):
     return model
 
 
-def onload_or_offload_quantized_weights(engine, device: str, model: bool, optimizer: bool, grad: bool)->bool:
-    if engine.engine_config.forward_only and engine.engine_config.override_transformer_config.get("fp8_reuse_quantized_weight", False):
-        assert model, "model should be True for forward_only"
+def reset_fp8_reuse_quantized_weight(engine, device: str, model: bool, optimizer: bool, grad: bool):       
+    if engine.engine_config.override_transformer_config.get("fp8_reuse_quantized_weight", False):
 
-        if not hasattr(engine, "quantized_cpu_pool"):
-            engine.quantized_cpu_pool = dict()
-            engine.quantized_npu_pool = dict()
+        from mindspeed.te.pytorch.fp8.reuse import (
+            set_weight_release_enabled, 
+            clear_weight_quantization_reuse_cache,
+        )
 
-        from mindspeed.te.pytorch.fp8.reuse import offload_quantized_weights, onload_quantized_weights
-        device_name = get_device_name()
-        if device == device_name:
-            suc = onload_quantized_weights(engine.quantized_cpu_pool, engine.quantized_npu_pool)
+        if device == "cpu":
+            # clear quantized weights on NPU
+            clear_weight_quantization_reuse_cache()
         else:
-            suc = offload_quantized_weights(engine.quantized_cpu_pool, engine.quantized_npu_pool)
-        return suc
-    return False
+            # enable release high-precision weights only when all modules are in training mode. E.g. for ref model,
+            # we need to keep its high-precision weights for offloading. For actor_update model, the high-precision
+            # weights will be released if possible, and then recovered before optimizer step
+            all_training = True
+            for module in engine.module:
+                all_training = all_training and module.training
+
+            set_weight_release_enabled(all_training)
