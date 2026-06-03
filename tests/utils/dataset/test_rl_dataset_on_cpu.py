@@ -25,12 +25,62 @@ from verl.utils import hf_processor, hf_tokenizer
 from verl.utils.dataset.rl_dataset import RLHFDataset, collate_fn
 
 
+class _ImageProcessor:
+    patch_size = 16
+
+
+class _Processor:
+    image_processor = _ImageProcessor()
+
+
 def get_gsm8k_data():
     # prepare test dataset
     local_folder = os.path.expanduser("~/data/gsm8k/")
     local_path = os.path.join(local_folder, "train.parquet")
     os.makedirs(local_folder, exist_ok=True)
     return local_path
+
+
+def test_rl_dataset_uses_processor_image_patch_size_by_default(monkeypatch):
+    monkeypatch.setattr(RLHFDataset, "_download", lambda self: None)
+    monkeypatch.setattr(RLHFDataset, "_read_files_and_tokenize", lambda self: None)
+
+    dataset = RLHFDataset(
+        data_files="dummy.parquet",
+        tokenizer=object(),
+        config=OmegaConf.create({}),
+        processor=_Processor(),
+    )
+
+    assert dataset.image_patch_size == 16
+
+
+def test_rl_dataset_keeps_explicit_image_patch_size(monkeypatch):
+    monkeypatch.setattr(RLHFDataset, "_download", lambda self: None)
+    monkeypatch.setattr(RLHFDataset, "_read_files_and_tokenize", lambda self: None)
+
+    dataset = RLHFDataset(
+        data_files="dummy.parquet",
+        tokenizer=object(),
+        config=OmegaConf.create({"image_patch_size": 14}),
+        processor=_Processor(),
+    )
+
+    assert dataset.image_patch_size == 14
+
+
+def test_rl_dataset_falls_back_when_image_patch_size_is_null(monkeypatch):
+    monkeypatch.setattr(RLHFDataset, "_download", lambda self: None)
+    monkeypatch.setattr(RLHFDataset, "_read_files_and_tokenize", lambda self: None)
+
+    dataset = RLHFDataset(
+        data_files="dummy.parquet",
+        tokenizer=object(),
+        config=OmegaConf.create({"image_patch_size": None}),
+        processor=_Processor(),
+    )
+
+    assert dataset.image_patch_size == 16
 
 
 def test_rl_dataset():
