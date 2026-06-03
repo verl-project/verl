@@ -670,6 +670,18 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         return socket.gethostbyname(socket.gethostname())
 
+    def get_master_address_and_port(self):
+        """Return (address, port) from FSDP rank 0 node for NCCL rendezvous."""
+        import socket
+
+        from verl.utils.net_utils import get_free_port
+
+        if torch.distributed.get_rank() != 0:
+            return None
+        addr = socket.gethostbyname(socket.gethostname())
+        port, _ = get_free_port(addr)
+        return (addr, port)
+
     def init_weight_sync_group(
         self,
         master_address: str,
