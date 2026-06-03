@@ -233,6 +233,15 @@ class ServerAdapter(BaseRollout):
         else:
             actor_name = f"sglang_server_{self.replica_rank}_{self.node_rank}"
             timeout_kwargs = {}
+        # In standalone mode, actual server count = nnodes * n_gpus / tp_size
+        # FSDP replica_rank may exceed this, wrap with modulo
+        standalone_nnodes = getattr(self.config, "nnodes", 0)
+        if standalone_nnodes > 0:
+            n_gpus = getattr(self.config, "n_gpus_per_node", 4)
+            tp_size = getattr(self.config, "tensor_model_parallel_size", 1)
+            num_standalone = max(1, standalone_nnodes * n_gpus // tp_size)
+            effective_rank = self.replica_rank % num_standalone
+            actor_name = f"sglang_server_{effective_rank}_{self.node_rank}"
 
         self.server_actor = ray.get_actor(actor_name)
         server_address, server_port = await self.server_actor.get_server_address.remote()
@@ -272,6 +281,10 @@ class ServerAdapter(BaseRollout):
         await self._init_server_adapter()
         if self._engine is None:
             return
+        # In standalone mode weights are always loaded — skip resume
+        standalone_nnodes = getattr(self.config, "nnodes", 0)
+        if standalone_nnodes > 0 and "weights" in tags:
+            return
         if self._is_server_tp_leader() and self.config.free_cache_engine:
             await self._engine.resume_memory_occupation(tags=tags)
 
@@ -291,6 +304,63 @@ class ServerAdapter(BaseRollout):
             else:
                 tags = ["kv_cache", "weights"]
             await self._engine.release_memory_occupation(tags=tags)
+
+    async def init_weight_sync_group(
+        self,
+        master_address: str,
+        master_port: int,
+        rank_offset: int,
+        world_size: int,
+        group_name: str = "weight_update_group",
+    ):
+        """Initialize NCCL weight sync group for standalone mode."""
+        await self._init_server_adapter()
+        if self._engine is None:
+            return
+        if self._is_server_tp_leader():
+            await self._engine.init_weights_update_group(
+                master_address=master_address,
+                master_port=master_port,
+                rank_offset=rank_offset,
+                world_size=world_size,
+                group_name=group_name,
+            )
+
+    async def update_weights_nccl(
+        self,
+        weights,
+        global_steps: int = None,
+        group_name: str = "weight_update_group",
+        **kwargs,
+    ):
+        """Sync weights via NCCL broadcast — works across nodes in standalone mode."""
+        await self._init_server_adapter()
+        if self._engine is None:
+            return
+
+        names, dtypes, shapes, tensors = [], [], [], []
+        for name, param in weights:
+            names.append(name)
+            dtypes.append(str(param.dtype).replace("torch.", ""))
+            shapes.append(list(param.shape))
+            tensors.append(param.detach())
+
+        # Broadcast each tensor from FSDP rank 0 into the weight sync group
+        assert hasattr(self, "_weight_sync_group"), "weight_sync_group not set — call init_weight_sync_group first"
+        for tensor in tensors:
+            torch.distributed.broadcast(tensor, src=0, group=self._weight_sync_group)
+
+        # Tell SGLang to receive the weights from the group
+        if self._is_server_tp_leader():
+            await self._engine.update_weights_from_distributed(
+                names=names,
+                dtypes=dtypes,
+                shapes=shapes,
+                group_name=group_name,
+            )
+            await self._engine.flush_cache()
+            if global_steps is not None:
+                await self.server_actor.set_global_steps.remote(global_steps)
 
     async def update_weights(
         self, weights: Generator[tuple[str, torch.Tensor], None, None], global_steps: int = None, **kwargs
