@@ -75,6 +75,7 @@ from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.dataset.rl_dataset import collate_fn
 from verl.utils.debug import marked_timer
 from verl.utils.debug.metrics import calculate_debug_metrics
+from verl.utils.device import auto_set_device, get_nccl_backend
 from verl.utils.fs import copy_to_local
 from verl.utils.import_utils import load_extern_type
 from verl.utils.metric import reduce_metrics
@@ -263,8 +264,66 @@ class PPOTrainer(ABC):
 
         # 9. initialize agent loop manager
         self.llm_server_manager: LLMServerManager = LLMServerManager.create(
-            config=self.config, worker_group=self.actor_rollout_wg, rollout_resource_pool=actor_rollout_resource_pool
+            config=self.config, 
+            worker_group=None if self.config.actor_rollout_ref.rollout.get("nnodes", 0) > 0 else self.actor_rollout_wg, 
+            rollout_resource_pool=actor_rollout_resource_pool
         )
+
+        # For standalone mode: initialize NCCL weight sync group
+        rollout_nnodes = self.config.actor_rollout_ref.rollout.get("nnodes", 0)
+        if rollout_nnodes > 0:
+            import asyncio
+            import socket
+
+            import torch
+            from sglang.srt.utils import init_custom_process_group
+
+            from verl.utils.net_utils import get_free_port
+
+            head_addr = socket.gethostbyname(socket.gethostname())
+            sync_port, _ = get_free_port(head_addr)
+            fsdp_world_size = self.config.trainer.nnodes * self.config.trainer.n_gpus_per_node
+            tp_size = self.config.actor_rollout_ref.rollout.tensor_model_parallel_size
+            n_gpus = self.config.actor_rollout_ref.rollout.n_gpus_per_node
+            total_world_size = fsdp_world_size + rollout_nnodes * n_gpus
+            weight_sync_group = init_custom_process_group(
+                backend=get_nccl_backend(),
+                init_method=f"tcp://{head_addr}:{sync_port}",
+                world_size=total_world_size,
+                rank=torch.distributed.get_rank(),
+                group_name="weight_update_group",
+            )
+            replicas = self.llm_server_manager.get_replicas()
+            for replica in replicas:
+                for worker in replica.workers:
+                    worker.rollout._weight_sync_group = weight_sync_group
+            auto_await(
+                asyncio.gather(
+                    *[
+                        replica.workers[0].rollout.init_weight_sync_group(
+                            master_address=head_addr,
+                            master_port=sync_port,
+                            rank_offset=fsdp_world_size + i * tp_size,
+                            world_size=total_world_size,
+                        )
+                        for i, replica in enumerate(replicas)
+                    ]
+                )
+            )
+
+        manager_class_fqn = self.config.actor_rollout_ref.rollout.get("agent", {}).get("agent_loop_manager_class")
+        if manager_class_fqn:
+            agent_loop_manager_cls = load_class_from_fqn(manager_class_fqn, "AgentLoopManager")
+        else:
+            agent_loop_manager_cls = AgentLoopManagerTQ
+        self.async_rollout_manager = agent_loop_manager_cls.create(
+            config=self.config,
+            llm_client=self.llm_server_manager.get_client(),
+            teacher_client=self.teacher_model_manager.get_client() if self.use_teacher_policy else None,
+            reward_loop_worker_handles=self.reward_loop_manager.reward_loop_workers,
+            replay_buffer=self.replay_buffer,
+        )
+        logger.info("agent loop manager initialized")
 
         # 10. initialize checkpoint engine manager
         checkpoint_engine_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)

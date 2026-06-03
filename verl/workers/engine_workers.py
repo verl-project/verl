@@ -729,9 +729,14 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 per_tensor_param_base, peft_config=peft_config, base_sync_done=False, global_steps=global_steps
             )
 
-        await self.rollout.update_weights(
-            per_tensor_param, peft_config=peft_config, base_sync_done=True, global_steps=global_steps
-        )
+        # Use NCCL broadcast for standalone mode (cross-node), HTTP for hybrid
+        standalone_nnodes = self.config.rollout.get("nnodes", 0)
+        if standalone_nnodes > 0 and hasattr(self.rollout, "_weight_sync_group"):
+            await self.rollout.update_weights_nccl(per_tensor_param, global_steps=global_steps)
+        else:
+            await self.rollout.update_weights(
+                per_tensor_param, peft_config=peft_config, base_sync_done=True, global_steps=global_steps
+            )
 
         log_gpu_memory_usage("After update_weights", logger=logger)
 
