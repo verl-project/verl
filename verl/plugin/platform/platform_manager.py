@@ -21,7 +21,7 @@ import os
 from .platform_base import PlatformBase
 
 logger = logging.getLogger(__name__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 _current_platform: PlatformBase | None = None
 
@@ -106,7 +106,8 @@ def _detect_platform_name() -> str:
             if instance.is_available(use_smi_check=True):
                 logger.info("Auto-detected platform: %s", name)
                 return name
-        except Exception:
+        except Exception as e:
+            logger.debug("Platform '%s' detection failed: %s", name, e)
             continue
 
     logger.warning(

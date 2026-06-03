@@ -26,8 +26,9 @@ def _ensure_torch_npu() -> bool:
         import torch_npu  # noqa: F401
 
         return hasattr(torch, "npu")
-    except ImportError:
-        return False
+    except Exception as e:
+        logger.debug("The current machine has no torch.npu, because: %s", e)
+    return False
 
 
 @PlatformRegistry.register(platform="huawei")
