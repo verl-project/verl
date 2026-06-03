@@ -664,6 +664,27 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self.actor.save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    def init_weight_sync_group(
+        self,
+        master_address: str,
+        master_port: int,
+        world_size: int,
+        group_name: str = "weight_update_group",
+    ):
+        """Initialize NCCL weight sync group on FSDP workers for standalone rollout."""
+        from sglang.srt.utils import init_custom_process_group
+
+        from verl.utils.device import get_nccl_backend
+
+        self._weight_sync_group = init_custom_process_group(
+            backend=get_nccl_backend(),
+            init_method=f"tcp://{master_address}:{master_port}",
+            world_size=world_size,
+            rank=torch.distributed.get_rank(),
+            group_name=group_name,
+        )
+        self.rollout._weight_sync_group = self._weight_sync_group
+
     async def update_weights(self, global_steps: int = None, mode: str = "auto"):
         """Update weights from trainer to rollout.
 
