@@ -166,9 +166,12 @@ class ThinkBlockReasoningParser(ReasoningParser):
 
     Two response shapes are supported:
 
-    * **Explicit opener.** The decoded response contains both
-      ``<think>`` and ``</think>``; everything between (each pair) is
-      stripped.
+    * **Explicit opener.** The decoded response contains an opening
+      ``<think>``; the parser walks ``<think>...</think>`` pairs left to
+      right with non-overlapping first-opener / first-closer semantics
+      (consistent with how the previous regex implementation behaved on
+      pathological nested-looking inputs that real Qwen3 / DeepSeek-R1
+      outputs do not produce).
     * **Implicit opener.** Qwen3 / DeepSeek-R1 default chat templates
       append ``<think>`` to the prompt itself when
       ``add_generation_prompt=True``, so ``response_ids`` (only the
@@ -184,6 +187,17 @@ class ThinkBlockReasoningParser(ReasoningParser):
     partition path skips re-scanning the post-``</think>`` tail, matching
     the idiom vLLM and SGLang use in their serving-side reasoning
     parsers.
+
+    **Caveat — literal ``</think>`` in legitimate output.** Under the
+    default ``enable_thinking=True`` path, a literal ``</think>``
+    substring appearing in normal output (e.g. quoted tag inside a code
+    block or a discussion of the parser itself) is treated as the
+    closer of an implicit reasoning span and the preceding text is
+    dropped. Production Qwen3 / DeepSeek-R1 outputs do not emit
+    ``</think>`` outside reasoning closure, so this matches vLLM and
+    SGLang's serving-side behavior. Callers that need to preserve such
+    substrings must either pass ``enable_thinking=False`` (which
+    short-circuits stripping entirely) or register a custom parser.
     """
 
     def extract_content(self, text: str, **kwargs) -> str:
@@ -219,10 +233,22 @@ class ThinkBlockReasoningParser(ReasoningParser):
 
         while True:
             before, opener, after_opener = remainder.partition("<think>")
-            parts.append(before)
             if not opener:
-                # No more ``<think>``: emit the rest verbatim and stop.
+                # No more ``<think>``: emit the rest verbatim. If a
+                # dangling ``</think>`` is sitting in ``before`` (left
+                # over from non-overlapping pair-loop semantics on
+                # nested-looking inputs), drop everything up to and
+                # including it. Without this, a second call to
+                # ``extract_content`` would mis-detect the dangling
+                # closer as an implicit opener marker and strip again,
+                # violating the documented idempotence contract.
+                if "</think>" in before:
+                    _inside, _closer, tail = before.partition("</think>")
+                    parts.append(tail)
+                else:
+                    parts.append(before)
                 break
+            parts.append(before)
             # Look for the matching ``</think>``.
             _inside, closer, after_closer = after_opener.partition("</think>")
             if not closer:
