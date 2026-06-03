@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import functools
-import logging
 from typing import Callable, Optional
 
 from ..memory_utils import MemorySnapshotSampler, clear_memory_history, enable_memory_visualize
@@ -169,21 +168,11 @@ class DistProfiler:
         color: Optional[str] = None,
         domain: Optional[str] = None,
         category: Optional[str] = None,
-        log_gpu_memory: bool = False,
-        logger: Optional[logging.Logger] = None,
         **kwargs_outer,
     ) -> Callable:
         def decorator(func):
-            gpu_memory_logger = None
-            if log_gpu_memory:
-                from .performance import GPUMemoryLogger
-
-                gpu_memory_logger = GPUMemoryLogger(
-                    logger=logger,
-                )
-
             @functools.wraps(func)
-            def profiled_func(self_instance, *args, **kwargs_inner):
+            def wrapper(self_instance, *args, **kwargs_inner):
                 profiler = getattr(self_instance, "profiler", None)
                 if (
                     not profiler
@@ -204,12 +193,6 @@ class DistProfiler:
                     except Exception:
                         return func(self_instance, *args, **kwargs_inner)
                 return func(self_instance, *args, **kwargs_inner)
-
-            @functools.wraps(func)
-            def wrapper(self_instance, *args, **kwargs_inner):
-                if gpu_memory_logger is not None:
-                    return gpu_memory_logger.log(profiled_func, self_instance, *args, **kwargs_inner)
-                return profiled_func(self_instance, *args, **kwargs_inner)
 
             return wrapper
 

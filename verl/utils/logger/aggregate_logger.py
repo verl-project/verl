@@ -75,18 +75,15 @@ class DecoratorLoggerBase:
         if logger is None:
             self.logging_function = self.log_by_print
 
-    def _format_message(self, log_str):
-        return f"{self.role} {log_str}" if self.role else log_str
-
     def log_by_print(self, log_str):
         if not self.log_only_rank_0 or self.rank == 0:
-            print(self._format_message(log_str), flush=True)
+            print(f"{self.role} {log_str}", flush=True)
 
     def log_by_logging(self, log_str):
         if self.logger is None:
             raise ValueError("Logger is not initialized")
         if not self.log_only_rank_0 or self.rank == 0:
-            self.logger.log(self.level, self._format_message(log_str))
+            self.logger.log(self.level, f"{self.role} {log_str}")
 
 
 def print_rank_0(message):
