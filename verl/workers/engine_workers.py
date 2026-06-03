@@ -683,6 +683,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         port, _ = get_free_port(addr)
         return (addr, port)
 
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_weight_sync_group(
         self,
         master_address: str,
