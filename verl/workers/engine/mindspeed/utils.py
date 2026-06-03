@@ -231,15 +231,10 @@ def reset_fp8_reuse_quantized_weight(engine, device: str, model: bool, optimizer
             clear_weight_quantization_reuse_cache,
         )
 
-        if device == "cpu":
-            # clear quantized weights on NPU
-            clear_weight_quantization_reuse_cache()
-        else:
-            # enable release high-precision weights only when all modules are in training mode. E.g. for ref model,
-            # we need to keep its high-precision weights for offloading. For actor_update model, the high-precision
-            # weights will be released if possible, and then recovered before optimizer step
-            all_training = True
-            for module in engine.module:
-                all_training = all_training and module.training
+        # clear quantized weights on NPU
+        clear_weight_quantization_reuse_cache(release_storage=True)
 
-            set_weight_release_enabled(all_training)
+        # enable release high-precision weights only when all modules are in training mode. For ref model,
+        # we need to keep its high-precision weights for offloading. For actor_update model, the high-precision
+        # weights will be released if possible, and then recovered before optimizer step
+        set_weight_release_enabled(engine.mode=='train')
