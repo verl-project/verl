@@ -673,6 +673,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         return socket.gethostbyname(socket.gethostname())
 
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def get_master_address_and_port(self):
         """Return (address, port) from FSDP rank 0 node for NCCL rendezvous."""
         import socket
