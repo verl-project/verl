@@ -1018,7 +1018,7 @@ class vLLMReplica(RolloutReplica):
                 "NCCL_CUMEM_ENABLE": "0",
             }
             if os.environ.get("TASK_QUEUE_ENABLE", "0") == "2":
-                logger.info(f"TASK_QUEUE_ENABLE=2 is not supported in vLLM, revert to 1")
+                logger.info("TASK_QUEUE_ENABLE=2 is not supported in vLLM, revert to 1")
                 env_vars["TASK_QUEUE_ENABLE"] = "1"
 
             server = self.server_class.options(
