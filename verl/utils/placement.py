@@ -171,12 +171,13 @@ def get_ray_declared_rack_resource_keys() -> set[str]:
     """Exact RACK_* resource name strings on all alive Ray nodes (case-sensitive, as in ``ray start``)."""
     try:
         import ray
+        nodes = ray.nodes()
     except Exception as e:
-        logger.warning("Failed to import ray for rack resource discovery: %s", e)
+        logger.warning("Failed to query Ray nodes for rack resource discovery: %s", e)
         return set()
 
     keys: set[str] = set()
-    for node in ray.nodes():
+    for node in nodes:
         if not node.get("Alive", False):
             continue
         for key in node.get("Resources", {}):
@@ -199,11 +200,12 @@ def get_ray_alive_node_ids() -> set[str]:
     """Ray ``NodeID`` strings for all alive nodes (same as ``selected_nodes[i][1]`` from placement search)."""
     try:
         import ray
+        nodes = ray.nodes()
     except Exception as e:
-        logger.warning("Failed to import ray for node id validation: %s", e)
+        logger.warning("Failed to query Ray nodes for node id validation: %s", e)
         return set()
 
-    return {n.get("NodeID", "") for n in ray.nodes() if n.get("Alive", False) and n.get("NodeID")}
+    return {n.get("NodeID", "") for n in nodes if n.get("Alive", False) and n.get("NodeID")}
 
 
 def validate_ray_node_ids_exist(node_ids: List[str]) -> None:
@@ -747,7 +749,9 @@ def init_pool_degrees_and_spec(
     n_gpus = n_gpus_per_node * nnodes
     
     # Default: placement search disabled for backward compatibility
-    enable_placement = getattr(config.trainer, "enable_placement", False)
+    from omegaconf import OmegaConf
+
+    enable_placement = OmegaConf.select(config, "trainer.enable_placement", default=False)
     
     degrees = extract_degrees_from_config(config, n_gpus)
     
