@@ -130,7 +130,6 @@ class MindSpeedMegatronEngineWithLMHead(MegatronEngineWithLMHead):
         self.is_value_model = is_value_model
 
         import torch.distributed
-
         from megatron.core.enums import ModelType
         from megatron.training.training import get_model
 
