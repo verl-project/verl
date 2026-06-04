@@ -22,7 +22,7 @@ from pathlib import Path
 
 import torch
 
-from verl.utils.device import get_torch_device
+from verl.utils.device import get_device_name, get_torch_device
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -37,6 +37,9 @@ def aggressive_empty_cache(force_sync: bool = True, max_retries: int = 3) -> Non
         force_sync: Whether to force device synchronization
         max_retries: Maximum number of retries
     """
+    if get_device_name() == "cpu":
+        gc.collect()
+        return
     device = get_torch_device()
     if not device.is_available():
         return
@@ -76,15 +79,16 @@ def aggressive_empty_cache(force_sync: bool = True, max_retries: int = 3) -> Non
 
 def reset_memory_stats() -> None:
     """Reset GPU memory statistics"""
-    if get_torch_device().is_available():
-        device = get_torch_device()
-        device.reset_peak_memory_stats()
-        device.reset_accumulated_memory_stats()
+    if get_device_name() == "cpu" or not get_torch_device().is_available():
+        return
+    device = get_torch_device()
+    device.reset_peak_memory_stats()
+    device.reset_accumulated_memory_stats()
 
 
 def get_memory_info() -> dict:
     """Get detailed GPU memory information"""
-    if not get_torch_device().is_available():
+    if get_device_name() == "cpu" or not get_torch_device().is_available():
         return {}
 
     device = get_torch_device()
@@ -102,7 +106,7 @@ def get_memory_info() -> dict:
 
 def log_memory_usage(stage: str = "current") -> None:
     """Log GPU memory usage"""
-    if not get_torch_device().is_available():
+    if get_device_name() == "cpu" or not get_torch_device().is_available():
         return
 
     info = get_memory_info()

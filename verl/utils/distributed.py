@@ -21,7 +21,14 @@ from datetime import timedelta
 import ray
 import torch.distributed
 
-from verl.utils.device import get_device_name, get_nccl_backend, get_resource_name, get_torch_device, is_npu_available
+from verl.utils.device import (
+    get_device_name,
+    get_distributed_backend,
+    get_nccl_backend,
+    get_resource_name,
+    get_torch_device,
+    is_npu_available,
+)
 from verl.utils.net_utils import is_ipv6
 
 
@@ -83,7 +90,7 @@ def initialize_global_process_group_ray(timeout_second=None, backend=None):
     import torch.distributed
 
     timeout = timedelta(seconds=timeout_second) if timeout_second is not None else None
-    backend = backend or f"cpu:gloo,{get_device_name()}:{get_nccl_backend()}"
+    backend = backend or get_distributed_backend()
     if not torch.distributed.is_initialized():
         rank = int(os.environ.get("RANK", 0))
         world_size = int(os.environ.get("WORLD_SIZE", 1))

@@ -119,6 +119,21 @@ def get_device_id() -> int:
     return get_platform().current_device()
 
 
+def get_distributed_backend() -> str:
+    """Get the distributed process group backend string.
+
+    For CPU: returns 'gloo'.
+    For CUDA/NPU: returns 'cpu:gloo,{device}:{backend}' for multi-device support.
+
+    Returns:
+        str: Backend string for torch.distributed.init_process_group.
+    """
+    device = get_device_name()
+    if device == "cpu":
+        return "gloo"
+    return f"cpu:gloo,{device}:{get_nccl_backend()}"
+
+
 def get_nccl_backend() -> str:
     """Get the distributed communication backend based on device type.
 

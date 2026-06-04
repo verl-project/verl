@@ -165,6 +165,8 @@ def get_fsdp_wrap_policy(module, config=None, is_lora=False):
 
 @torch.no_grad()
 def offload_fsdp_model_to_cpu(model: FSDP, empty_cache: bool = True):
+    if get_device_name() == "cpu":
+        return  # no-op: model already on CPU
     if fsdp_version(model) == 2 or fsdp_version(model) == 0:
         offload_fsdp2_model_to_cpu(model, empty_cache)
         return
@@ -199,6 +201,8 @@ def offload_fsdp2_model_to_cpu(model, empty_cache: bool = True):
 
 @torch.no_grad()
 def load_fsdp_model_to_gpu(model: FSDP):
+    if get_device_name() == "cpu":
+        return  # no-op: model already on CPU
     if fsdp_version(model) == 2 or fsdp_version(model) == 0:
         load_fsdp2_model_to_gpu(model)
         return

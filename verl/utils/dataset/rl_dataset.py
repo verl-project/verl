@@ -176,6 +176,14 @@ class RLHFDataset(Dataset):
             dataframes.append(dataframe)
         self.dataframe: datasets.Dataset = datasets.concatenate_datasets(dataframes)
 
+        cols = self.dataframe.column_names
+        if self.prompt_key not in cols:
+            raise ValueError(
+                f"data.prompt_key={self.prompt_key!r} is not a column in the dataset {cols}. "
+                f"Parquet from examples/data_preprocess/gsm8k.py uses chat messages under 'prompt'; "
+                f"set data.prompt_key=prompt (or match your parquet schema)."
+            )
+
         total = len(self.dataframe)
         print(f"dataset len: {len(self.dataframe)}")
 

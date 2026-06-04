@@ -71,6 +71,7 @@ from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.config import DistillationConfig, EngineConfig
 from verl.workers.rollout.llm_server import LLMServerManager
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
+from verl.utils.model import compute_position_id_with_mask
 
 
 def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, kl_penalty="kl"):
@@ -417,7 +418,7 @@ class RayPPOTrainer:
         val_batch_size = self.config.data.val_batch_size  # Prefer config value if set
         if val_batch_size is None:
             val_batch_size = len(self.val_dataset)
-
+        val_batch_size = max(1, val_batch_size or 1)  # ensure positive for BatchSampler
         self.val_dataloader = StatefulDataLoader(
             dataset=self.val_dataset,
             batch_size=val_batch_size,
@@ -588,6 +589,59 @@ class RayPPOTrainer:
 
         return gen_batch
 
+    def _tokenize_batch_for_hf_rollout(self, batch: DataProto) -> None:
+        """Tokenize raw_prompt into input_ids, attention_mask, position_ids for HF rollout."""
+        raw_prompts = batch.non_tensor_batch.get("raw_prompt")
+        if raw_prompts is None:
+            return
+        tokenizer = self.tokenizer
+        max_prompt_length = self.config.data.get("max_prompt_length", 512)
+        apply_kwargs = self.config.data.get("apply_chat_template_kwargs", {})
+        orig_padding_side = tokenizer.padding_side
+        tokenizer.padding_side = "left"
+        pad_token_id = tokenizer.pad_token_id or tokenizer.eos_token_id
+        try:
+            formatted = [
+                tokenizer.apply_chat_template(
+                    list(messages),
+                    add_generation_prompt=True,
+                    tokenize=False,
+                    **apply_kwargs,
+                )
+                for messages in raw_prompts
+            ]
+            encoded = tokenizer(
+                formatted,
+                return_tensors="pt",
+                padding="max_length",
+                max_length=max_prompt_length,
+                truncation=True,
+                return_attention_mask=True,
+            )
+            input_ids = encoded["input_ids"]
+            attention_mask = encoded["attention_mask"]
+            position_ids = compute_position_id_with_mask(attention_mask)
+            batch.batch["input_ids"] = input_ids
+            batch.batch["attention_mask"] = attention_mask
+            batch.batch["position_ids"] = position_ids
+        finally:
+            tokenizer.padding_side = orig_padding_side
+
+    def _get_gen_batch_for_hf(self, batch: DataProto) -> DataProto:
+        """Build gen_batch for HF rollout: batch with input_ids, attention_mask, position_ids + reward keys."""
+        reward_keys = {"data_source", "reward_model", "extra_info", "uid"}
+        non_tensor_batch = {k: v for k, v in batch.non_tensor_batch.items() if k in reward_keys}
+        gen_batch = DataProto.from_dict(
+            tensors={
+                "input_ids": batch.batch["input_ids"],
+                "attention_mask": batch.batch["attention_mask"],
+                "position_ids": batch.batch["position_ids"],
+            },
+            meta_info=dict(batch.meta_info),
+        )
+        gen_batch.non_tensor_batch = non_tensor_batch
+        return gen_batch
+
     def _compute_reward_colocate(self, batch: DataProto) -> tuple[torch.Tensor, dict[str, Any]] | torch.Tensor:
         """
         compute reward use colocate reward model
@@ -595,6 +649,39 @@ class RayPPOTrainer:
         assert self.reward_loop_manager is not None, "RewardLoopManager is None"
         batch_reward = self.reward_loop_manager.compute_rm_score(batch)
         return batch_reward
+
+    def _compute_reward_from_ground_truth(self, batch: DataProto) -> None:
+        """Compute rm_scores from ground_truth using default_compute_score (e.g. GSM8K)."""
+        from verl.utils.reward_score import default_compute_score
+
+        reward_models = batch.non_tensor_batch["reward_model"]
+        data_sources = batch.non_tensor_batch.get("data_source", np.array(["openai/gsm8k"] * len(reward_models)))
+        responses = batch.batch["responses"]
+        response_mask = batch.batch["response_mask"]
+        response_length = response_mask.sum(dim=1).long()
+        scores = []
+        for i in range(responses.size(0)):
+            rm = reward_models[i] if isinstance(reward_models[i], dict) else {}
+            ground_truth = rm.get("ground_truth")
+            ds = data_sources[i] if i < len(data_sources) else "openai/gsm8k"
+            data_source = rm.get("data_source", ds)
+            if ground_truth is None:
+                scores.append(0.0)
+                continue
+            response_ids = responses[i]
+            valid_len = int(response_length[i].item())
+            solution_ids = response_ids[:valid_len]
+            solution_str = self.tokenizer.decode(solution_ids, skip_special_tokens=True)
+            try:
+                score = default_compute_score(data_source, solution_str, ground_truth)
+            except Exception:
+                score = 0.0
+            scores.append(float(score))
+        rm_scores = torch.zeros_like(response_mask, dtype=torch.float32)
+        for i, score in enumerate(scores):
+            idx = max(0, int(response_length[i].item()) - 1)
+            rm_scores[i, idx] = score
+        batch.batch["rm_scores"] = rm_scores
 
     def _validate(self, merged: bool = False):
         data_source_lst = []
@@ -626,7 +713,11 @@ class RayPPOTrainer:
             ]
             sample_gts.extend(ground_truths)
 
-            test_gen_batch = self._get_gen_batch(test_batch)
+            if self.config.actor_rollout_ref.rollout.name == "hf":
+                self._tokenize_batch_for_hf_rollout(test_batch)
+                test_gen_batch = self._get_gen_batch_for_hf(test_batch)
+            else:
+                test_gen_batch = self._get_gen_batch(test_batch)
             test_gen_batch.meta_info = {
                 "eos_token_id": self.tokenizer.eos_token_id,
                 "pad_token_id": self.tokenizer.pad_token_id,
@@ -928,11 +1019,18 @@ class RayPPOTrainer:
             self.distillation_config = None
 
         # Support custom AgentLoopManager via config
-        manager_class_fqn = self.config.actor_rollout_ref.rollout.get("agent", {}).get("agent_loop_manager_class")
-        if manager_class_fqn:
-            AgentLoopManager = load_class_from_fqn(manager_class_fqn, "AgentLoopManager")
+        # HF rollout uses colocated generation - bypass async agent loop
+        rollout_name = self.config.actor_rollout_ref.rollout.name
+        if rollout_name == "hf":
+            from verl.trainer.ppo.hf_agent_loop import HFAgentLoopManager
+
+            AgentLoopManager = HFAgentLoopManager
         else:
-            from verl.experimental.agent_loop import AgentLoopManager
+            manager_class_fqn = self.config.actor_rollout_ref.rollout.get("agent", {}).get("agent_loop_manager_class")
+            if manager_class_fqn:
+                AgentLoopManager = load_class_from_fqn(manager_class_fqn, "AgentLoopManager")
+            else:
+                from verl.experimental.agent_loop import AgentLoopManager
 
         # infrastructure overview: https://verl.readthedocs.io/en/latest/advance/reward_loop.html#architecture-design
         # agent_reward_loop: streaming reward computation with actor rollout
@@ -1440,7 +1538,14 @@ class RayPPOTrainer:
                     [str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object
                 )
 
-                gen_batch = self._get_gen_batch(batch)
+                if self.config.actor_rollout_ref.rollout.name == "hf":
+                    self._tokenize_batch_for_hf_rollout(batch)
+                    gen_batch = self._get_gen_batch_for_hf(batch)
+                    # Remove tokenized tensors from batch so union with gen_batch_output won't conflict
+                    for key in ("input_ids", "attention_mask", "position_ids"):
+                        batch.batch.pop(key, None)
+                else:
+                    gen_batch = self._get_gen_batch(batch)
 
                 # pass global_steps to trace
                 gen_batch.meta_info["global_steps"] = self.global_steps
@@ -1508,18 +1613,22 @@ class RayPPOTrainer:
 
                     # compute global_valid tokens
                     batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
-                    # get images_seqlens
+                    # get images_seqlens (text-only data may not have multi_modal_inputs)
                     images_seqlens_all = []
-                    for multi_modal_input in batch.non_tensor_batch["multi_modal_inputs"]:
-                        if "image_grid_thw" not in multi_modal_input.keys():
-                            continue
-                        images_seqlens_all.extend(multi_modal_input["images_seqlens"].tolist())
+                    if "multi_modal_inputs" in batch.non_tensor_batch:
+                        for multi_modal_input in batch.non_tensor_batch["multi_modal_inputs"]:
+                            if "image_grid_thw" not in multi_modal_input.keys():
+                                continue
+                            images_seqlens_all.extend(multi_modal_input["images_seqlens"].tolist())
                     batch.meta_info["images_seqlens"] = images_seqlens_all
                     with marked_timer("reward", timing_raw, color="yellow"):
                         # compute reward model score
                         if self.use_rm and "rm_scores" not in batch.batch.keys():
                             batch_reward = self._compute_reward_colocate(batch)
                             batch = batch.union(batch_reward)
+                        # compute reward from ground_truth when no reward model (e.g. HF rollout + GSM8K)
+                        elif "rm_scores" not in batch.batch.keys() and "reward_model" in batch.non_tensor_batch:
+                            self._compute_reward_from_ground_truth(batch)
 
                         # extract reward_tensor and reward_extra_infos_dict for training
                         reward_tensor, reward_extra_infos_dict = extract_reward(batch)
