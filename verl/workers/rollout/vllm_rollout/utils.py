@@ -29,6 +29,7 @@ from verl.utils.device import is_npu_available
 from verl.utils.vllm import TensorLoRARequest, VLLMHijack
 from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
 from verl.utils.vllm.vllm_fp8_utils import apply_vllm_fp8_patches, is_fp8_model, load_quanted_weights
+from verl.workers.rollout.vllm_rollout.weight_update_utils import apply_buffer_updates, split_buffer_updates
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -263,6 +264,18 @@ class vLLMColocateWorkerExtension:
             for model, model_config in self._iter_all_models_with_config():
                 process_weights_after_loading(model, model_config, self.device)
 
+    def _apply_buffer_updates_all_models(self, buffer_updates, main_named_buffers):
+        """Apply buffer updates to the main model and any synced MTP drafter.
+
+        The main model (yielded first) reuses the prebuilt ``named_buffers`` map;
+        the drafter builds its own. Returns buffers applied to the main model.
+        """
+        models = list(self._iter_all_models())
+        loaded = apply_buffer_updates(models[0], buffer_updates, named_buffers=main_named_buffers)
+        for model in models[1:]:
+            apply_buffer_updates(model, buffer_updates)
+        return loaded
+
     def _update_weights(self, weights: list[tuple[str, torch.Tensor]], peft_config: dict, base_sync_done: bool):
         if peft_config and base_sync_done:
             weights = dict(weights)
@@ -276,20 +289,29 @@ class vLLMColocateWorkerExtension:
             self.add_lora(lora_request)
             logger.info(f"vLLM load weights, loaded_params: {len(weights)}")
         else:
+            param_updates, buffer_updates, named_buffers = split_buffer_updates(self.model_runner.model, weights)
             # Add the FP8 related logic here as sharding manager has been deprecated.
             # Check if FP8 quantization is enabled and apply appropriate weight loading
             if is_fp8_model(self.model_runner.vllm_config):
                 logger.info(f"FP8 model detected (async): {self.model_runner.vllm_config.quant_config}")
                 # Convert bf16 weights to fp8 format before loading
-                loaded_params = load_quanted_weights(weights, self.model_runner)
-                logger.info(f"FP8 weights loaded (async), loaded_params: {len(loaded_params)}")
+                loaded_params = load_quanted_weights(param_updates, self.model_runner) if param_updates else []
                 # Keep the draft model in sync when present.
-                if self._use_mtp_drafter_weight_sync():
-                    load_quanted_weights(weights, self.model_runner, is_drafter=True)
+                if self._use_mtp_drafter_weight_sync() and param_updates:
+                    load_quanted_weights(param_updates, self.model_runner, is_drafter=True)
+                loaded_buffers = self._apply_buffer_updates_all_models(buffer_updates, named_buffers)
+                logger.info(
+                    f"FP8 weights loaded (async), loaded_params: {len(loaded_params)}, loaded_buffers: {loaded_buffers}"
+                )
             else:
-                logger.info("Loading standard weights (non-FP8, async)")
-                for model in self._iter_all_models():
-                    model.load_weights(weights)
+                if param_updates:
+                    for model in self._iter_all_models():
+                        model.load_weights(param_updates)
+                loaded_buffers = self._apply_buffer_updates_all_models(buffer_updates, named_buffers)
+                logger.info(
+                    f"Loading standard weights (non-FP8, async), "
+                    f"loaded_params: {len(param_updates)}, loaded_buffers: {loaded_buffers}"
+                )
 
     def _get_zmq_handle(self) -> str:
         """Get ZMQ handle for communication.
