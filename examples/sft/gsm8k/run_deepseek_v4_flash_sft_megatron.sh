@@ -1,14 +1,6 @@
 #!/usr/bin/env bash
 # DeepSeek-V4-Flash SFT on GSM8K via the Megatron-Bridge backend.
 #
-# Environment — validated on container `nvcr.io/nvidia/pytorch:26.04-py3` with:
-#   * verl (this PR; the MTP postprocess fix is in verl/models/mcore/mtp_patch.py here)
-#   * Megatron-Bridge (megatron.bridge) + Megatron-Core with the DSv4 hybrid attention
-#     and THD support (NVIDIA/Megatron-LM#5011) — fetched onto PYTHONPATH by this script
-#   * DSv4 kernels: fast_hadamard_transform + nvidia-cudnn-frontend — installed by this script
-# So a plain `nvcr.io/nvidia/pytorch:26.04-py3` container is enough: the script bootstraps the
-# Megatron-side pieces and the kernels below; you supply verl (this PR) and GPUs.
-#
 # DSv4 hybrid attention requires TP=1; scale with PP and EP -> TP1/PP4/EP8 = 32 GPUs
 # (e.g. 4 nodes x 8 GPU on H100/H200, 8 nodes x 4 GPU on GB200/GB300).
 set -xeuo pipefail
