@@ -290,11 +290,12 @@ class SGLangHttpServer:
             # In standalone mode, NCCL weight sync allocates non-PyTorch GPU buffers
             # during the first broadcast. These persist for the communicator lifetime
             # and are invisible to torch.cuda.empty_cache(). SGLang sizes the KV cache
-            # to consume all remaining GPU memory at startup, so even a small NCCL
-            # allocation (~100-300 MB) prevents resume_memory_occupation from
-            # re-creating the KV cache VMM at its original size (cu_mem_create OOM).
-            # Reserve 0.5% headroom (~475 MB on a 95 GiB GPU) to avoid this.
-            mem_fraction_static = mem_fraction_static - 0.005
+            # to consume all remaining GPU memory at startup, so these NCCL buffers
+            # prevent resume_memory_occupation from re-creating the KV cache VMM at
+            # its original size (cu_mem_create OOM). On multi-node InfiniBand setups
+            # with many ranks, NCCL staging + IB proxy buffers can reach ~1-2 GB.
+            # Reserve 5% headroom (~1.9 GiB on 95 GiB) to accommodate this.
+            mem_fraction_static = mem_fraction_static - 0.05
         args = {
             "model_path": self.model_config.local_path,
             "dtype": self.config.dtype,
