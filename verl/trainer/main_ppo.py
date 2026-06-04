@@ -58,6 +58,12 @@ def run_ppo(config, task_runner_class=None) -> None:
                 model paths, and training hyperparameters.
         task_runner_class: For recipe to change TaskRunner.
     """
+    # Load external verl plugins (e.g. verl-omni) on the driver. Workers load
+    # them via the worker_process_setup_hook in get_ppo_ray_runtime_env().
+    from verl.utils.plugins import load_plugins
+
+    load_plugins()
+
     # Check if Ray is not initialized
     if not ray.is_initialized():
         # Initialize Ray with a local cluster configuration
