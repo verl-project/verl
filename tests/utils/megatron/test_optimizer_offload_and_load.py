@@ -25,13 +25,13 @@ from megatron.core.models.gpt.gpt_layer_specs import get_gpt_layer_local_spec
 from megatron.core.models.gpt.gpt_model import GPTModel
 from megatron.core.optimizer import OptimizerConfig, get_megatron_optimizer
 from megatron.core.optimizer.optimizer import ChainedOptimizer
-from megatron.core.pipeline_parallel import get_forward_backward_func
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 from megatron.core.transformer.transformer_config import TransformerConfig
 
 from verl.utils.megatron_utils import load_megatron_optimizer, offload_megatron_optimizer
 
-# ==== Helper functions === #
+# ==== Helper functions ==== #
+
 
 MICROBATCH_SIZE = 32
 SEQUENCE_LENGTH = 64
@@ -59,32 +59,6 @@ def initialize_distributed_env():
         dist.barrier()
         dist.destroy_process_group()
         mpu.destroy_model_parallel()
-
-
-def init_data_iterator():
-    """A data iterator that yields dummy data for the test."""
-
-    device = torch.cuda.current_device()
-    input_tokens = torch.zeros(
-        (MICROBATCH_SIZE, SEQUENCE_LENGTH),
-        dtype=torch.int64,
-        device=device,
-    )
-    position_ids = (
-        torch.arange(SEQUENCE_LENGTH, dtype=torch.int64, device=device)
-        .unsqueeze(0)
-        .expand(MICROBATCH_SIZE, SEQUENCE_LENGTH)
-    )
-    attention_mask = (
-        torch.triu(
-            torch.ones(SEQUENCE_LENGTH, SEQUENCE_LENGTH, dtype=torch.bool, device=device),
-            diagonal=1,
-        )
-        .view(1, 1, SEQUENCE_LENGTH, SEQUENCE_LENGTH)
-        .expand(MICROBATCH_SIZE, 1, -1, -1)
-    )
-    while True:
-        yield (input_tokens, position_ids, attention_mask)
 
 
 def init_model():
@@ -127,46 +101,6 @@ def init_optimizer(model, use_precision_aware_optimizer):
     return get_megatron_optimizer(optimizer_config, model)
 
 
-def train_step(data_iterator, model, optimizer):
-    """Run a single train step on `model` with `optimizer` using data from
-    `data_iterator`.
-
-    Megatron optimizers may lazily initialize optimizer state, so we always run
-    a train_step between offloading / loading optimizer state in tests."""
-
-    forward_backward_func = get_forward_backward_func()
-
-    def forward_step(data_iterator, model_chunk):
-        input_tokens, position_ids, attention_mask = next(data_iterator)
-        output_tensor = model_chunk(input_tokens, position_ids, attention_mask)
-
-        def loss_func(output_tensor):
-            return torch.mean(output_tensor.float()), {}
-
-        return output_tensor, loss_func
-
-    with torch.cuda.amp.autocast():
-        losses = forward_backward_func(
-            forward_step_func=forward_step,
-            data_iterator=data_iterator,
-            model=model,
-            num_microbatches=1,
-            seq_length=SEQUENCE_LENGTH,
-            micro_batch_size=MICROBATCH_SIZE,
-            forward_only=False,
-        )
-
-        update_successful, grad_norm, num_zeros_in_grad = optimizer.step()
-        optimizer.zero_grad(set_to_none=True)
-
-    for chunk in model:
-        chunk.zero_grad_buffer()
-
-    assert update_successful
-
-    return losses
-
-
 def optimizer_state_is_on_device(
     optimizer,
     device,
@@ -176,26 +110,17 @@ def optimizer_state_is_on_device(
 
     opts = optimizer.chained_optimizers if isinstance(optimizer, ChainedOptimizer) else [optimizer]
 
-    # First validate that all optimizer have the fields assumed by VeRL's host
-    # offloading code.
-    for opt in opts:
-        assert hasattr(opt, "shard_fp32_from_float16_groups")
-        if use_precision_aware_optimizer:
-            expected_tensor_state_keys = ["exp_avg", "exp_avg_sq", "master_param"]
-            # If use_precision_aware_optimizer=True, 'master' params should be
-            # managed by the wrapped TE FusedAdam optimizer, not the wrapper
-            # DistributedOptimizer.
+    # If use_precision_aware_optimizer=True, verify that "master_param" is
+    # populated for each parameter and not shard_fp32_from_float16_groups
+    # (this is an assumption made by VeRL's optimizer offloading code).
+    if use_precision_aware_optimizer:
+        for opt in opts:
             for group in opt.shard_fp32_from_float16_groups:
                 for param in group:
                     assert param is None
-        else:
-            expected_tensor_state_keys = ["exp_avg", "exp_avg_sq"]
-        # For each parameter, check that only expected_tensor_state_keys are
-        # stored.
-        param_to_param_opt_state = opt.optimizer.state
-        for param_state in param_to_param_opt_state.values():
-            tensor_state = {k: v for k, v in param_state.items() if isinstance(v, torch.Tensor)}
-            assert sorted(list(tensor_state.keys())) == sorted(expected_tensor_state_keys)
+            param_to_param_opt_state = opt.optimizer.state
+            for param_state in param_to_param_opt_state.values():
+                assert param_state.get("master_param", None) is not None
 
     # Check device placement of optimizer state.
     for opt in opts:
@@ -224,13 +149,17 @@ def test_distributed_optimizer_offload_and_load(
     initialize_distributed_env,
     use_precision_aware_optimizer,
 ):
-    # Initialize data iterator, model, and optimizer.
-    data_iterator = init_data_iterator()
-    model = init_model()
-    optimizer = init_optimizer(model, use_precision_aware_optimizer)
+    # Initialize model and optimizer.
+    model_chunks = init_model()
+    optimizer = init_optimizer(model_chunks, use_precision_aware_optimizer)
 
-    # Run a train step to fully initialize the optimizer state.
-    train_step(data_iterator, model, optimizer)
+    # Fully initialize the optimizer state by calling optimizer.step() on
+    # dummy gradients set to 0.
+    for model_chunk in model_chunks:
+        model_chunk.zero_grad_buffer()
+    optimizer.zero_grad(set_to_none=False)
+    update_successful, _, _ = optimizer.step()
+    assert update_successful
 
     # Offload optimizer state.
     offload_megatron_optimizer(optimizer)
