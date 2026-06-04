@@ -348,7 +348,7 @@ class ResourcePoolManager:
                 self.resource_pool_spec,
                 self.pool_rack_labels,
                 node_available_resources,
-                max_colocate_count=3,
+                max_colocate_count=self.max_colocate_count,
             )
 
 

@@ -150,6 +150,10 @@ def get_cluster_placement_racks() -> Dict[str, List[str]]:
             continue
 
         resources = node.get("Resources", {})
+        # Skip CPU-only nodes (e.g. head) that may still declare RACK_* resources.
+        if resources.get("GPU", 0) == 0 and resources.get("NPU", 0) == 0:
+            continue
+
         node_id = node.get("NodeID", "")
 
         # Deterministic pick when a node declares multiple RACK_* resources (same string Ray uses).
@@ -614,6 +618,8 @@ def _symmetric_allocation(
 ) -> List[Tuple[str, str]]:
     """Symmetric fallback allocation across racks."""
     logger.info("✓ Strategy: Symmetric allocation across racks")
+    # Prefer racks with more nodes (avoid arbitrary alphabetical ordering).
+    sorted_racks = sorted(sorted_racks, key=lambda r: -len(rack_map[r]))
 
     total_capacity = sum(rack_capacities.values())
     if total_capacity < total_npus:
