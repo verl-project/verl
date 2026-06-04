@@ -285,10 +285,20 @@ class SGLangHttpServer:
             else:
                 raise ValueError(f"Currently only support fp8 quantization, got: {quantization}")
         infer_tp = self.config.tensor_model_parallel_size * self.config.data_parallel_size
+        mem_fraction_static = self.config.gpu_memory_utilization
+        if self.nnodes > 0:
+            # In standalone mode, NCCL weight sync allocates non-PyTorch GPU buffers
+            # during the first broadcast. These persist for the communicator lifetime
+            # and are invisible to torch.cuda.empty_cache(). SGLang sizes the KV cache
+            # to consume all remaining GPU memory at startup, so even a small NCCL
+            # allocation (~100-300 MB) prevents resume_memory_occupation from
+            # re-creating the KV cache VMM at its original size (cu_mem_create OOM).
+            # Reserve 0.5% headroom (~475 MB on a 95 GiB GPU) to avoid this.
+            mem_fraction_static = mem_fraction_static - 0.005
         args = {
             "model_path": self.model_config.local_path,
             "dtype": self.config.dtype,
-            "mem_fraction_static": self.config.gpu_memory_utilization,
+            "mem_fraction_static": mem_fraction_static,
             "disable_cuda_graph": self.config.enforce_eager,
             "enable_memory_saver": True,
             "base_gpu_id": self.base_gpu_id,

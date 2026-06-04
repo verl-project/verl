@@ -375,9 +375,11 @@ class ServerAdapter(BaseRollout):
             # Release the KV cache memory pool before updating weights. Non-leader
             # ranks block inside torch.distributed.broadcast() until SGLang joins
             # the collective, so the NCCL timeout (30 min default) is not a concern.
-            # flush_cache() only evicts cached tokens but does NOT free the pre-
-            # allocated KV pool; release_memory_occupation frees the GPU memory so
-            # update_weights_from_distributed can allocate temporary buffers.
+            # SGLang's update_weights_from_distributed allocates a fresh tensor for
+            # every parameter before loading (not in-place), so peak usage is 2x the
+            # model weights. On a large GPU where SGLang has consumed nearly all free
+            # memory for KV cache, this causes OOM. Releasing the KV pool first frees
+            # enough headroom for the temporary weight buffers.
             logger.info("[NCCL weight sync] update_weights_nccl: releasing KV cache memory before weight update")
             await self._engine.release_memory_occupation(tags=["kv_cache"])
             # Launch broadcasts in thread executor; await HTTP in the event loop.
