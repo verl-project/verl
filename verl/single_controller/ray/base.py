@@ -137,9 +137,10 @@ class RayResourcePool(ResourcePool):
         )
         # print(f"pg_name_prefix = {pg_name_prefix}")
         current_platform = get_platform()
-        assert device_name == current_platform.device_name, (
-            f"Requested device {device_name} does not match current platform device {current_platform.device_name}"
-        )
+        if device_name != current_platform.device_name:
+            logger.warning(
+                f"Requested device {device_name} does not match current platform device {current_platform.device_name}"
+            )
         device_name = current_platform.ray_resource_name()
 
         bundle = {"CPU": self.max_colocate_count}

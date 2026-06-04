@@ -152,9 +152,12 @@ class PlatformCUDA(PlatformBase):
     # ------------------------------------------------------------------
 
     def get_collective_module(self) -> Any:
-        from cupy.cuda import nccl
+        try:
+            from cupy.cuda import nccl
 
-        return nccl
+            return nccl
+        except (ImportError, ModuleNotFoundError):
+            return None
 
     # ------------------------------------------------------------------
     # Profiling helpers

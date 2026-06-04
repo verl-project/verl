@@ -476,24 +476,20 @@ def _create_cpu_state_dict(
             t = torch.empty(*tuple(obj.size()), dtype=obj.dtype)
             t = t.share_memory_()
             if pin_memory:
-                from verl.plugin.platform import get_platform
 
-                _cudart = get_platform().cudart()
-                if _cudart is not None:
+                def unpin_memory(t):
+                    succ = int(torch.cuda.cudart().cudaHostUnregister(t.data_ptr()))
+                    assert succ == 0, f"Unpinning shared memory failed with error-code: {succ}"
 
-                    def unpin_memory(t, _rt=_cudart):
-                        succ = int(_rt.cudaHostUnregister(t.data_ptr()))
-                        assert succ == 0, f"Unpinning shared memory failed with error-code: {succ}"
-
-                    weakref.finalize(t, unpin_memory, t)
-                    succ = int(
-                        _cudart.cudaHostRegister(
-                            t.data_ptr(),
-                            t.numel() * t.element_size(),
-                            1,  # lines up with 'cudaHostRegisterPortable'
-                        )
+                weakref.finalize(t, unpin_memory, t)
+                succ = int(
+                    torch.cuda.cudart().cudaHostRegister(
+                        t.data_ptr(),
+                        t.numel() * t.element_size(),
+                        1,  # lines up with 'cudaHostRegisterPortable'
                     )
-                    assert succ == 0, f"Pinning shared memory failed with error-code: {succ}"
+                )
+                assert succ == 0, f"Pinning shared memory failed with error-code: {succ}"
             return t
         elif pin_memory:
             return torch.empty(*tuple(obj.size()), dtype=obj.dtype).pin_memory()
