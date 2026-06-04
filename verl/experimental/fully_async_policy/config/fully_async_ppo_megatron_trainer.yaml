@@ -64,5 +64,11 @@ actor_rollout_ref:
 # Only then will the use of log probs be correct.
 # And it can be used in conjunction with other rollout_correction algorithms.
 algorithm:
+  filter_groups:
+    _target_: verl.trainer.config.FilterGroupsConfig
+    enable: False
+    metric: null
+    max_num_gen_batches: 0
+
   rollout_correction:
     bypass_mode: True

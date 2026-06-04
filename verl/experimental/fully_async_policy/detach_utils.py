@@ -71,6 +71,54 @@ def prepare_single_generation_data(batch_dict, config) -> DataProto:
     return full_batch
 
 
+def validate_async_filter_groups_config(config, logger=None):
+    """Validate filter_groups settings in config."""
+    filter_groups_config = config.algorithm.get("filter_groups", None)
+    if filter_groups_config is None or not filter_groups_config.enable:
+        return
+
+    metric_name = filter_groups_config.metric
+    if not metric_name:
+        raise ValueError("algorithm.filter_groups.metric must be set when filter_groups.enable=True")
+
+    if metric_name == "seq_final_reward" and config.algorithm.use_kl_in_reward:
+        raise ValueError(
+            "algorithm.filter_groups.metric='seq_final_reward' is not supported in fully async mode when "
+            "algorithm.use_kl_in_reward=True because KL-adjusted rewards are computed on the trainer."
+        )
+
+    max_num_gen_batches = filter_groups_config.get("max_num_gen_batches", 0)
+    if max_num_gen_batches > 0 and logger is not None:
+        logger.warning(
+            "algorithm.filter_groups.max_num_gen_batches=%s is ignored in fully async streaming mode; "
+            "filtered samples are simply skipped before queue insertion.",
+            max_num_gen_batches,
+        )
+
+
+def should_keep_async_filter_group(batch: DataProto, filter_groups_config) -> bool:
+    """Return whether a fully async rollout group should be enqueued for training."""
+    metric_name = filter_groups_config.metric
+    if metric_name in {"seq_reward", "seq_final_reward"}:
+        if batch.batch is None or "rm_scores" not in batch.batch.keys():
+            raise ValueError(
+                f"algorithm.filter_groups.metric={metric_name!r} requires 'rm_scores' in the rollout output"
+            )
+        metric_values = batch.batch["rm_scores"].sum(dim=-1)
+    else:
+        if metric_name not in batch.non_tensor_batch:
+            raise ValueError(
+                f"algorithm.filter_groups.metric={metric_name!r} was not found in rollout reward extras. "
+                "Use a metric returned by the reward function or one of: seq_reward, seq_final_reward."
+            )
+        metric_values = batch.non_tensor_batch[metric_name]
+
+    if isinstance(metric_values, torch.Tensor):
+        metric_values = metric_values.detach().cpu().numpy()
+    metric_values = np.asarray(metric_values, dtype=np.float64).reshape(-1)
+    return bool(len(metric_values) <= 1 or np.std(metric_values) > 0)
+
+
 def addition_process(output: DataProto):
     """collect metirics"""
     metrics = output.meta_info.pop("metrics")  # List[Dict[str, str]]
@@ -208,6 +256,8 @@ class MetricsAggregator:
                 "fully_async/count/stale_trajectory_processed",
                 "fully_async/count/current_param_version",
                 "fully_async/count/dropped_stale_samples",
+                "fully_async/count/filtered_group_samples",
+                "fully_async/count/filtered_group_trajectories",
                 "training/global_step",  # TODO change name to: total_step
             ],
         }
