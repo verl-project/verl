@@ -301,6 +301,25 @@ class vLLMHttpServer:
             }
             args["speculative_config"] = speculative_config
 
+        if self.config.speculative.enable:
+            assert not self.config.mtp.enable, (
+                "MTP speculative decoding and suffix speculative decoding cannot be enabled at the same time."
+            )
+            speculative_config = {
+                "method": self.config.speculative.method,
+                "num_speculative_tokens": self.config.speculative.num_speculative_tokens,
+            }
+            if self.config.speculative.method == "suffix":
+                speculative_config["suffix_decoding_max_spec_factor"] = (
+                    self.config.speculative.suffix_decoding_max_spec_factor
+                )
+                speculative_config["suffix_decoding_max_cached_requests"] = (
+                    self.config.speculative.suffix_decoding_max_cached_requests
+                )
+            if self.config.speculative.draft_model_path:
+                speculative_config["model"] = self.config.speculative.draft_model_path
+            args["speculative_config"] = speculative_config
+
         if self.config.data_parallel_size > 1:
             assert self.gpus_per_node % self.config.tensor_model_parallel_size == 0, (
                 "gpus_per_node should be divisible by tensor_model_parallel_size"

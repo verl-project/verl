@@ -32,6 +32,7 @@ __all__ = [
     "PrometheusConfig",
     "RolloutConfig",
     "CheckpointEngineConfig",
+    "SpeculativeConfig",
     "SkipConfig",
 ]
 
@@ -158,6 +159,16 @@ class CheckpointEngineConfig(BaseConfig):
 
 
 @dataclass
+class SpeculativeConfig(BaseConfig):
+    enable: bool = False
+    method: str = "suffix"
+    num_speculative_tokens: int = 5
+    draft_model_path: Optional[str] = ""
+    suffix_decoding_max_spec_factor: float = 1.0
+    suffix_decoding_max_cached_requests: int = 10000
+
+
+@dataclass
 class RolloutConfig(BaseConfig):
     _mutable_fields = {
         "max_model_len",
@@ -276,6 +287,8 @@ class RolloutConfig(BaseConfig):
     enable_sleep_mode: bool = True
 
     mtp: MtpConfig = field(default_factory=MtpConfig)
+
+    speculative: SpeculativeConfig = field(default_factory=SpeculativeConfig)
 
     qat: Optional[dict] = None
 

@@ -291,6 +291,30 @@ checkpoint_engine:
   # in CheckpointEngineRegistry.
   custom_backend_module: null
 
+# Configuration for speculative decoding
+speculative:
+
+  # Target class for speculative config
+  _target_: verl.workers.config.SpeculativeConfig
+
+  # whether enable speculative in rollout
+  enable: False
+
+  # The speculative decoding method to use (e.g., "suffix")
+  method: suffix
+
+  # Number of draft tokens to generate in one speculative step
+  num_speculative_tokens: 3
+
+  # Path to the draft model checkpoint; if empty, not used (suffix doesn't need it)
+  draft_model_path: ""
+
+  # Maximum speculation factor for suffix decoding
+  suffix_decoding_max_spec_factor: 1.0
+
+  # Maximum number of cached requests for suffix decoding
+  suffix_decoding_max_cached_requests: 10000
+
 # trace rollout data
 trace:
 
