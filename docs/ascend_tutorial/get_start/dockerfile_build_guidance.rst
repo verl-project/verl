@@ -39,8 +39,8 @@ torch_npu          2.9.0
 torchvision        0.24.0
 vLLM               0.18.0
 vLLM-ascend        0.18.0
-Megatron-LM        v0.12.1
-MindSpeed          2.3.0_core_r0.12.1
+Megatron-LM        core_r0.16.0
+MindSpeed          core_r0.16.0
 triton-ascend      3.2.1
 mbridge            0.15.1
 SGLang             v0.5.10
