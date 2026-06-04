@@ -102,6 +102,7 @@ verl is fast with:
    perf/dpsk.md
    perf/best_practices
    perf/perf_tuning
+   perf/rollout_kv_offload.md
    README_vllm0.8.md
    perf/device_tuning
    perf/verl_profiler_system.md
@@ -143,7 +144,7 @@ verl is fast with:
    advance/dpo_extension
    examples/sandbox_fusion_example
    advance/rollout_trace.rst
-   advance/rollout_skip.rst
+   advance/skip_manager.rst
    advance/agent_loop
    advance/reward_loop
    data/transfer_queue.md
@@ -168,6 +169,7 @@ verl is fast with:
    ascend_tutorial/model_support/examples/ascend_sglang_best_practices.rst
    ascend_tutorial/model_support/examples/dapo_multi_model_optimization_practice.md
    ascend_tutorial/model_support/examples/gspo_optimization_practice.md
+   ascend_tutorial/model_support/examples/qwen3_5_122b_npu.md
    ascend_tutorial/dev_guide/model_dev/evaluation.md
    ascend_tutorial/dev_guide/model_dev/parameter_and_metrics.md
    ascend_tutorial/dev_guide/model_dev/transfer_to_npu_guide.md

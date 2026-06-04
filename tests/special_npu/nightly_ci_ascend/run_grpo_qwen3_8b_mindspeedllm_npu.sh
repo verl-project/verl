@@ -171,6 +171,7 @@ ROLLOUT_CONFIG=(
     actor_rollout_ref.rollout.val_kwargs.top_p=1.0
     actor_rollout_ref.rollout.val_kwargs.top_k=-1
     actor_rollout_ref.rollout.val_kwargs.temperature=1.0
+    actor_rollout_ref.rollout.calculate_log_probs=True
 )
 
 TRAINER_CONFIG=(

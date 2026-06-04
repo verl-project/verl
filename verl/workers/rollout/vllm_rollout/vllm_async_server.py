@@ -54,6 +54,9 @@ from verl.workers.rollout.vllm_rollout.utils import (
 )
 
 _VLLM_VERSION = version.parse(vllm.__version__)
+_RESET_PREFIX_CACHE_KWARGS = {}
+if _VLLM_VERSION >= version.parse("0.13.0"):
+    _RESET_PREFIX_CACHE_KWARGS["reset_connector"] = True
 
 
 if _VLLM_VERSION > version.parse("0.11.0"):
@@ -265,7 +268,7 @@ class vLLMHttpServer:
             "gpu_memory_utilization": self.config.gpu_memory_utilization,
             "disable_log_stats": self.config.disable_log_stats,
             "tensor_parallel_size": self.config.tensor_model_parallel_size,
-            "seed": self.replica_rank + self.config.get("seed", 0),
+            "seed": self.replica_rank + (self.config.get("seed") or 0),
             "override_generation_config": json.dumps(override_generation_config),
             "quantization": quantization,
             "hf_overrides": hf_overrides,
@@ -607,11 +610,15 @@ class vLLMHttpServer:
             # processes across all DP shards (unlike collective_rpc which only reaches
             # TP workers within a single shard).
             await self.engine.wake_up(tags=tags or self._get_wake_up_tags())
-            await self.engine.reset_prefix_cache()
+            await self.engine.reset_prefix_cache(**_RESET_PREFIX_CACHE_KWARGS)
         elif self.rollout_mode == RolloutMode.COLOCATED:
             # Directly call engine to wake up without sync weights.
             await self.engine.wake_up(tags=self._get_wake_up_tags())
-            await self.engine.reset_prefix_cache()
+            # reset_connector=True drops any attached external KV store
+            # (e.g. MooncakeStoreConnector) whose entries were computed
+            # against the previous weights. No-op success when no connector
+            # is configured (vLLM scheduler treats it as such).
+            await self.engine.reset_prefix_cache(**_RESET_PREFIX_CACHE_KWARGS)
         elif self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip wake_up in standalone mode")
 
@@ -628,7 +635,16 @@ class vLLMHttpServer:
 
     async def clear_kv_cache(self):
         if self.node_rank == 0:
-            await self.engine.reset_prefix_cache()
+            # reset_connector=True drops any attached external KV store
+            # (e.g. MooncakeStoreConnector) whose entries were computed
+            # against the previous model weights. With no connector it
+            # is a no-op success, so we can pass it unconditionally.
+            await self.engine.reset_prefix_cache(**_RESET_PREFIX_CACHE_KWARGS)
+
+            if _VLLM_VERSION >= version.parse("0.9.0"):
+                await self.engine.reset_mm_cache()
+            if _VLLM_VERSION >= version.parse("0.16.0"):
+                await self.engine.reset_encoder_cache()
 
     async def release_kv_cache(self):
         """Release only kv_cache GPU memory, keeping model weights intact.
@@ -689,7 +705,12 @@ class vLLMHttpServer:
                 # 1. Set engine to paused state (blocks new generate calls)
                 # 2. Abort all in-flight requests
                 # 3. Wait for requests to drain
-                # 4. Clear prefix and mm caches if clear_cache=True
+                # 4. Clear prefix and mm caches if clear_cache=True.
+                #    EngineCore._reset_caches defaults reset_connector=True
+                #    on this path, so any attached external KV store (e.g.
+                #    MooncakeStoreConnector) is invalidated along with the
+                #    local prefix cache — RL-correct hard-reset at every
+                #    weight update boundary, no extra kwargs needed.
                 await self.engine.pause_generation(
                     wait_for_inflight_requests=False,
                     clear_cache=reset_prefix_cache,
@@ -995,7 +1016,13 @@ class vLLMReplica(RolloutReplica):
                 # https://docs.vllm.ai/en/latest/usage/troubleshooting.html?h=nccl_cumem_enable#known-issues
                 # https://github.com/vllm-project/vllm/blob/c6b0a7d3ba03ca414be1174e9bd86a97191b7090/vllm/worker/worker_base.py#L445
                 "NCCL_CUMEM_ENABLE": "0",
+                "VLLM_ASCEND_AUTO_DETECT_QUANTIZATION": "0",
             }
+            if os.environ.get("VLLM_ASCEND_TASK_QUEUE_ENABLE", None):
+                # use VLLM_ASCEND_TASK_QUEUE_ENABLE to support different TASK_QUEUE_ENABLE mode for
+                # train and rollout on Ascend NPU
+                env_vars["TASK_QUEUE_ENABLE"] = os.environ["VLLM_ASCEND_TASK_QUEUE_ENABLE"]
+
             server = self.server_class.options(
                 scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                     node_id=node_id,

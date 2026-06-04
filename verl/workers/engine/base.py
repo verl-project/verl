@@ -256,8 +256,8 @@ class BaseEngineCtx:
             )
 
     def __enter__(self):
-        self._context_switch(get_device_name())
         self.engine.mode = self.mode
+        self._context_switch(get_device_name())
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self._context_switch("cpu")

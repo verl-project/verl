@@ -21,8 +21,15 @@ strategy: megatron
 # seconds, default is 10 minutes for torch, you can set it to a larger value if you have long-running operations like 32B or 72B model using megatron
 nccl_timeout: 600
 
-# Whether to load initial weights
-load_weight: True
-
 # seed for data loader
 data_loader_seed: ${oc.select:actor_rollout_ref.actor.data_loader_seed,null}
+
+# Megatron-specific checkpoint overrides: swap the base CheckpointConfig for
+# McoreCheckpointConfig so ``mbridge_config`` is available.
+checkpoint:
+
+  # Target dataclass for this configuration
+  _target_: verl.workers.config.McoreCheckpointConfig
+
+  # Mbridge config extension.
+  mbridge_config: {}

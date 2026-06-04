@@ -33,5 +33,3 @@ mindspeed:
   strategy: ${oc.select:actor_rollout_ref.actor.mindspeed.strategy,''}
   mcore_kwargs: ${oc.select:actor_rollout_ref.actor.mindspeed.mcore_kwargs,{}}
   fsdp_kwargs: ${oc.select:actor_rollout_ref.actor.mindspeed.fsdp_kwargs,{}}
-
-load_weight: True

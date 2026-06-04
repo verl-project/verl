@@ -1,5 +1,5 @@
 # Pull base image
-FROM swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:9.0.0-910b-ubuntu22.04-py3.11
+FROM swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:9.0.0-a3-ubuntu22.04-py3.11
 
 ARG SOC_VERSION="ascend910_9392"
 
@@ -23,8 +23,8 @@ RUN ARCH=$(uname -m) && \
     git clone --depth 1 --branch v0.18.0 https://github.com/vllm-project/vllm.git && \
     git clone -b releases/v0.18.0 https://github.com/vllm-project/vllm-ascend.git && \
     git clone https://gitcode.com/Ascend/MindSpeed.git && \
-    cd MindSpeed && git checkout 2.3.0_core_r0.12.1 && cd .. && \
-    git clone --depth 1 --branch core_v0.12.1 https://github.com/NVIDIA/Megatron-LM.git
+    cd MindSpeed && git checkout core_r0.16.0 && cd .. && \
+    git clone --depth 1 --branch core_r0.16.0 https://github.com/NVIDIA/Megatron-LM.git
 
 # Install repositories with low update frequency
 RUN export PIP_EXTRA_INDEX_URL=https://triton-ascend.osinfra.cn/pypi/simple/ && \
@@ -41,14 +41,17 @@ RUN export PIP_EXTRA_INDEX_URL=https://triton-ascend.osinfra.cn/pypi/simple/ && 
     # Install vllm
     cd vllm && pip install -r requirements/build.txt && \
     VLLM_TARGET_DEVICE=empty pip install -v -e. && cd .. && \
+    if [ "$ARCH" = "x86_64" ]; then \
+    pip install torch==2.9.0+cpu --index-url https://download.pytorch.org/whl/cpu/; \
+    fi && \
     # Install vllm-ascend
     cd vllm-ascend && pip install -r requirements.txt && \
-    export COMPILE_CUSTOM_KERNELS=1 && pip install -v -e . && cd .. && \
+    export COMPILE_CUSTOM_KERNELS=1 && pip install --no-build-isolation --no-deps -v -e . && cd .. && \
     # Install MindSpeed & Megatron
     pip install -e MindSpeed && \
     pip install -e Megatron-LM && \
-    # Remove existing triton installed by some third-party packages
-    pip uninstall -y triton && \
+    # Install transformers
+    pip install transformers==5.3.0 && \
     # Install mbridge
     pip install mbridge && \
     # Clear extra files

@@ -114,15 +114,15 @@ actor_rollout_ref:
     shuffle: false
     data_loader_seed: 42
     checkpoint:
-      _target_: verl.trainer.config.CheckpointConfig
+      _target_: verl.workers.config.McoreCheckpointConfig
       save_contents:
       - model
       - optimizer
       - extra
       load_contents: ${.save_contents}
       async_save: false
-      mbridge_config: {}
       strict: true
+      mbridge_config: {}
     use_fused_kernels: ${oc.select:actor_rollout_ref.model.use_fused_kernels,false}
     profiler:
       _target_: verl.utils.profiler.ProfilerConfig
@@ -170,7 +170,6 @@ actor_rollout_ref:
       - re:.*mlp.gate$
       activation_observer: static_minmax
       quantization_config_path: null
-    load_weight: true
   ref:
     rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
     strategy: megatron
@@ -261,7 +260,6 @@ actor_rollout_ref:
         activation_observer: null
         quantization_config_path: null
     _target_: verl.workers.config.McoreActorConfig
-    load_weight: true
   rollout:
     _target_: verl.workers.config.RolloutConfig
     name: ???
@@ -349,12 +347,6 @@ actor_rollout_ref:
       backend: null
       token2text: false
       max_samples_per_step_per_worker: null
-    skip:
-      _target_: verl.workers.config.SkipConfig
-      enable: false
-      dump_dir: ~/.verl/rollout_dump
-      max_dump_step: 1
-      action: cache
     skip_tokenizer_init: true
     enable_rollout_routing_replay: false
     profiler:
@@ -587,7 +579,7 @@ critic:
   cliprange_value: 0.5
   loss_agg_mode: ${oc.select:actor_rollout_ref.actor.loss_agg_mode,token-mean}
   checkpoint:
-    _target_: verl.trainer.config.CheckpointConfig
+    _target_: verl.workers.config.McoreCheckpointConfig
     save_contents:
     - model
     - optimizer
@@ -627,7 +619,6 @@ critic:
         stages: ${oc.select:global_profiler.global_tool_config.precision_debugger.stages,null}
         strict: ${oc.select:global_profiler.global_tool_config.precision_debugger.strict,False}
   nccl_timeout: 600
-  load_weight: true
   model:
     _target_: verl.workers.config.HFModelConfig
     path: ~/models/deepseek-llm-7b-chat
@@ -956,6 +947,18 @@ transfer_queue:
       global_segment_size: 4294967296
       local_buffer_size: 1073741824
       device_name: ''
+skip:
+  _target_: verl.utils.skip.SkipManagerConfig
+  rollout:
+    enable: false
+    dump_dir: ~/.verl/rollout_dump
+    steps: []
+    action: cache
+  async_rollout:
+    enable: false
+    dump_dir: ~/.verl/rollout_dump
+    steps: []
+    action: cache
 ray_kwargs:
   ray_init:
     num_cpus: null
