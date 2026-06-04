@@ -169,9 +169,9 @@ class TaskRunner:
         selected_nodes = None
         pool_rack_labels = None
         pool_placement_group_target_node_ids = None
-        pin_rack = getattr(config.trainer, "placement_pin_rack_resources", False)
-        pin_node = getattr(config.trainer, "placement_pin_node_affinity", False)
-        enable_placement = getattr(config.trainer, "enable_placement", False)
+        pin_rack = OmegaConf.select(config, "trainer.placement_pin_rack_resources", default=False)
+        pin_node = OmegaConf.select(config, "trainer.placement_pin_node_affinity", default=False)
+        enable_placement = OmegaConf.select(config, "trainer.enable_placement", default=False)
 
         if pin_rack and not enable_placement:
             logger.warning(
@@ -198,7 +198,7 @@ class TaskRunner:
                     )
 
                     raw_rack_ids = [str(t[0]) for t in selected_nodes]
-                    rack_map = getattr(config.trainer, "placement_rack_bundle_resource_map", None)
+                    rack_map = OmegaConf.select(config, "trainer.placement_rack_bundle_resource_map", default=None)
                     if rack_map is not None:
                         rack_map = OmegaConf.to_container(rack_map, resolve=True)
                     if not isinstance(rack_map, dict):
@@ -267,7 +267,7 @@ class TaskRunner:
             resource_pool_spec["teacher_pool"] = teacher_pool
 
         # Copy trainer rack/node PG pins onto reward_pool when shapes align (subset or full).
-        follow_reward = getattr(config.trainer, "placement_reward_pool_follows_trainer", True)
+        follow_reward = OmegaConf.select(config, "trainer.placement_reward_pool_follows_trainer", default=True)
         if (
             follow_reward
             and config.reward.reward_model.enable_resource_pool

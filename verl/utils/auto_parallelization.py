@@ -666,43 +666,48 @@ def _apply_degrees_to_config(config, *, degrees) -> None:
 
     Note: vLLM/sglang/trtllm rollout currently do not support PP>1; we force PP=1.
     """
-    # Training-side overrides (actor)
-    config.actor_rollout_ref.actor.megatron.tensor_model_parallel_size = degrees.tensor_model_parallel_size
-    config.actor_rollout_ref.actor.megatron.pipeline_model_parallel_size = degrees.pipeline_model_parallel_size
-    config.actor_rollout_ref.actor.megatron.context_parallel_size = degrees.context_parallel_size
-    config.actor_rollout_ref.actor.megatron.expert_model_parallel_size = degrees.expert_model_parallel_size
-    config.actor_rollout_ref.actor.megatron.sequence_parallel = bool(degrees.sequence_parallel)
+    from omegaconf import OmegaConf, open_dict
 
-    # Training-side overrides (reference policy), only if present in config
-    if "ref" in config.actor_rollout_ref and hasattr(config.actor_rollout_ref.ref, "megatron"):
-        config.actor_rollout_ref.ref.megatron.tensor_model_parallel_size = degrees.tensor_model_parallel_size
-        config.actor_rollout_ref.ref.megatron.pipeline_model_parallel_size = degrees.pipeline_model_parallel_size
-        config.actor_rollout_ref.ref.megatron.context_parallel_size = degrees.context_parallel_size
-        config.actor_rollout_ref.ref.megatron.expert_model_parallel_size = degrees.expert_model_parallel_size
-        config.actor_rollout_ref.ref.megatron.sequence_parallel = bool(degrees.sequence_parallel)
+    with open_dict(config):
+        # Training-side overrides (actor)
+        config.actor_rollout_ref.actor.megatron.tensor_model_parallel_size = degrees.tensor_model_parallel_size
+        config.actor_rollout_ref.actor.megatron.pipeline_model_parallel_size = degrees.pipeline_model_parallel_size
+        config.actor_rollout_ref.actor.megatron.context_parallel_size = degrees.context_parallel_size
+        config.actor_rollout_ref.actor.megatron.expert_model_parallel_size = degrees.expert_model_parallel_size
+        config.actor_rollout_ref.actor.megatron.sequence_parallel = bool(degrees.sequence_parallel)
 
-    # Training-side overrides (critic), only if critic uses megatron
-    if hasattr(config, "critic") and getattr(config.critic, "strategy", None) == "megatron" and hasattr(
-        config.critic, "megatron"
-    ):
-        config.critic.megatron.tensor_model_parallel_size = degrees.tensor_model_parallel_size
-        config.critic.megatron.pipeline_model_parallel_size = degrees.pipeline_model_parallel_size
-        config.critic.megatron.context_parallel_size = degrees.context_parallel_size
-        config.critic.megatron.expert_model_parallel_size = degrees.expert_model_parallel_size
-        config.critic.megatron.sequence_parallel = bool(degrees.sequence_parallel)
+        # Training-side overrides (reference policy), only if present in config
+        if "ref" in config.actor_rollout_ref and hasattr(config.actor_rollout_ref.ref, "megatron"):
+            config.actor_rollout_ref.ref.megatron.tensor_model_parallel_size = degrees.tensor_model_parallel_size
+            config.actor_rollout_ref.ref.megatron.pipeline_model_parallel_size = degrees.pipeline_model_parallel_size
+            config.actor_rollout_ref.ref.megatron.context_parallel_size = degrees.context_parallel_size
+            config.actor_rollout_ref.ref.megatron.expert_model_parallel_size = degrees.expert_model_parallel_size
+            config.actor_rollout_ref.ref.megatron.sequence_parallel = bool(degrees.sequence_parallel)
 
-    # Rollout-side overrides (force PP=1)
-    config.actor_rollout_ref.rollout.tensor_model_parallel_size = degrees.tensor_model_parallel_size
-    config.actor_rollout_ref.rollout.pipeline_model_parallel_size = 1
-    config.actor_rollout_ref.rollout.data_parallel_size = degrees.data_parallel_size
-    # RolloutConfig has an internal constraint:
-    #   if expert_parallel_size > 1:
-    #       expert_parallel_size == tensor_model_parallel_size * data_parallel_size
-    # So map MoE EP from training degrees into the rollout-compatible setting.
-    rollout_ep = int(degrees.expert_model_parallel_size)
-    if rollout_ep > 1:
-        rollout_ep = int(degrees.tensor_model_parallel_size * degrees.data_parallel_size)
-    config.actor_rollout_ref.rollout.expert_parallel_size = rollout_ep
+        # Training-side overrides (critic), only if critic uses megatron
+        if (
+            OmegaConf.select(config, "critic.strategy", default=None) == "megatron"
+            and hasattr(config, "critic")
+            and hasattr(config.critic, "megatron")
+        ):
+            config.critic.megatron.tensor_model_parallel_size = degrees.tensor_model_parallel_size
+            config.critic.megatron.pipeline_model_parallel_size = degrees.pipeline_model_parallel_size
+            config.critic.megatron.context_parallel_size = degrees.context_parallel_size
+            config.critic.megatron.expert_model_parallel_size = degrees.expert_model_parallel_size
+            config.critic.megatron.sequence_parallel = bool(degrees.sequence_parallel)
+
+        # Rollout-side overrides (force PP=1)
+        config.actor_rollout_ref.rollout.tensor_model_parallel_size = degrees.tensor_model_parallel_size
+        config.actor_rollout_ref.rollout.pipeline_model_parallel_size = 1
+        config.actor_rollout_ref.rollout.data_parallel_size = degrees.data_parallel_size
+        # RolloutConfig has an internal constraint:
+        #   if expert_parallel_size > 1:
+        #       expert_parallel_size == tensor_model_parallel_size * data_parallel_size
+        # So map MoE EP from training degrees into the rollout-compatible setting.
+        rollout_ep = int(degrees.expert_model_parallel_size)
+        if rollout_ep > 1:
+            rollout_ep = int(degrees.tensor_model_parallel_size * degrees.data_parallel_size)
+        config.actor_rollout_ref.rollout.expert_parallel_size = rollout_ep
 
 
 def apply_analytical_auto_parallel_degrees(config) -> None:
