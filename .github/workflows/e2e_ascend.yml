@@ -115,6 +115,8 @@ jobs:
         run: |
           ray stop --force
           bash tests/special_npu/run_qwen3_8b_grpo_profiling.sh
+          python3 "tests/utils/test_check_profiler_output.py" --profiler_dir="./profiler_data-dis" --device="npu"
+          rm -rf ./profiler_data-dis
           rm -rf $HOME/ckpts
       - name: Running gsm8k e2e training tests with GRPO on ASCEND NPU (MindSpeed backend)
         run: |
