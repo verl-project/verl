@@ -390,6 +390,10 @@ class TaskRunner:
         # Add a reference policy worker if KL loss or KL reward is used.
         self.add_ref_policy_worker(config, actor_rollout_cls)
 
+        from verl.utils.auto_parallelization import apply_analytical_auto_parallel_degrees
+
+        apply_analytical_auto_parallel_degrees(config)
+
         # validate config
         validate_config(
             config=config,
