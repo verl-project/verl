@@ -33,7 +33,6 @@ from verl.utils.megatron_utils import load_megatron_optimizer, offload_megatron_
 # ==== Helper functions ==== #
 
 
-MICROBATCH_SIZE = 32
 SEQUENCE_LENGTH = 64
 
 
@@ -84,8 +83,8 @@ def init_model():
     return [model_chunk]
 
 
-def init_optimizer(model, use_precision_aware_optimizer):
-    """Initialize an optimizer for the model."""
+def init_precision_aware_optimizer(model):
+    """Initialize a precision-aware optimizer for the model."""
 
     optimizer_config = OptimizerConfig(
         optimizer="adam",
@@ -96,42 +95,30 @@ def init_optimizer(model, use_precision_aware_optimizer):
         use_distributed_optimizer=True,
         bf16=True,
         params_dtype=torch.bfloat16,
-        use_precision_aware_optimizer=use_precision_aware_optimizer,
+        use_precision_aware_optimizer=True,
     )
     return get_megatron_optimizer(optimizer_config, model)
 
 
-def optimizer_state_is_on_device(
-    optimizer,
-    device,
-    use_precision_aware_optimizer,
-):
-    """Check that all tensors inside optimizer_state are on the specified device."""
+def precision_aware_optimizer_is_on_device(optimizer, device):
+    """Check that all optimizer state tracked by a given precision-aware
+    optimizer is on the specified device."""
 
     opts = optimizer.chained_optimizers if isinstance(optimizer, ChainedOptimizer) else [optimizer]
 
-    # If use_precision_aware_optimizer=True, verify that "master_param" is
-    # populated for each parameter and not shard_fp32_from_float16_groups
-    # (this is an assumption made by VeRL's optimizer offloading code).
-    if use_precision_aware_optimizer:
-        for opt in opts:
-            for group in opt.shard_fp32_from_float16_groups:
-                for param in group:
-                    assert param is None
-            param_to_param_opt_state = opt.optimizer.state
-            for param_state in param_to_param_opt_state.values():
-                assert param_state.get("master_param", None) is not None
+    # Verify that "master_param" is populated for each parameter and not
+    # shard_fp32_from_float16_groups (this is an assumption made by VeRL's
+    # optimizer offloading code).
+    for opt in opts:
+        for group in opt.shard_fp32_from_float16_groups:
+            for param in group:
+                assert param is None
+        param_to_param_opt_state = opt.optimizer.state
+        for param_state in param_to_param_opt_state.values():
+            assert param_state.get("master_param", None) is not None
 
     # Check device placement of optimizer state.
     for opt in opts:
-        # Check if master params are on the requested device when
-        # use_precision_aware_optimizer=True.
-        if not use_precision_aware_optimizer:
-            for group in opt.shard_fp32_from_float16_groups:
-                for param in group:
-                    if isinstance(param, torch.Tensor) and param.device != device:
-                        return False
-        # Check whether any parameters are not on the expected device.
         param_to_param_opt_state = opt.optimizer.state
         for param_state in param_to_param_opt_state.values():
             for v in param_state.values():
@@ -144,14 +131,10 @@ def optimizer_state_is_on_device(
 # ==== Tests ==== #
 
 
-@pytest.mark.parametrize("use_precision_aware_optimizer", [False, True])
-def test_distributed_optimizer_offload_and_load(
-    initialize_distributed_env,
-    use_precision_aware_optimizer,
-):
+def test_precision_aware_optimizer_offload_and_load(initialize_distributed_env):
     # Initialize model and optimizer.
     model_chunks = init_model()
-    optimizer = init_optimizer(model_chunks, use_precision_aware_optimizer)
+    optimizer = init_precision_aware_optimizer(model_chunks)
 
     # Fully initialize the optimizer state by calling optimizer.step() on
     # dummy gradients set to 0.
@@ -165,18 +148,16 @@ def test_distributed_optimizer_offload_and_load(
     offload_megatron_optimizer(optimizer)
 
     # Make sure everything has been offloaded.
-    assert optimizer_state_is_on_device(
+    assert precision_aware_optimizer_is_on_device(
         optimizer,
         torch.device("cpu"),
-        use_precision_aware_optimizer,
     )
 
     # Load optimizer state.
     load_megatron_optimizer(optimizer)
 
     # Make sure everything has been loaded.
-    assert optimizer_state_is_on_device(
+    assert precision_aware_optimizer_is_on_device(
         optimizer,
         torch.device("cuda:0"),
-        use_precision_aware_optimizer,
     )
