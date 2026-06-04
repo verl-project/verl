@@ -372,6 +372,11 @@ class ServerAdapter(BaseRollout):
             logger.info("[NCCL weight sync] update_weights_nccl: broadcasts complete")
 
         if self._is_server_tp_leader():
+            # Flush KV cache before NCCL to free GPU memory. Non-leader ranks block
+            # inside torch.distributed.broadcast() until SGLang joins the collective,
+            # so the NCCL timeout (30 min default) is not a concern here.
+            logger.info("[NCCL weight sync] update_weights_nccl: flushing cache before weight update")
+            await self._engine.flush_cache()
             # Launch broadcasts in thread executor; await HTTP in the event loop.
             loop = asyncio.get_running_loop()
             logger.info("[NCCL weight sync] update_weights_nccl: launching broadcast thread + SGLang HTTP recv")
@@ -384,8 +389,6 @@ class ServerAdapter(BaseRollout):
             )
             logger.info("[NCCL weight sync] update_weights_nccl: SGLang HTTP done, awaiting broadcast thread")
             await broadcast_task
-            logger.info("[NCCL weight sync] update_weights_nccl: flushing cache")
-            await self._engine.flush_cache()
             if global_steps is not None:
                 await self.server_actor.set_global_steps.remote(global_steps)
             logger.info("[NCCL weight sync] update_weights_nccl: done")
