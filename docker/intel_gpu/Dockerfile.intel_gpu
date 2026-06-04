@@ -1,0 +1,202 @@
+# syntax=docker/dockerfile:1
+
+# verl on Intel GPU 
+#
+# Design goals:
+# - Match vLLM's Intel GPU container workflow (DLE base + uv + oneCCL setup).
+# - Keep versions explicit and reproducible.
+# - Keep torch/vLLM alignment owned by vLLM requirements/xpu.txt.
+#
+# Build:
+#   docker build -t verl-intel-gpu:latest -f docker/intel_gpu/Dockerfile.intel_gpu .
+#
+# Behind a corporate proxy:
+#   docker build --build-arg http_proxy=... --build-arg https_proxy=... ...
+#
+# Run (mount GPU devices + render group):
+#   RENDER_GID=$(getent group render | cut -d: -f3)
+#   docker run -it --rm \
+#     --device /dev/dri --group-add ${RENDER_GID} \
+#     --shm-size 16g \
+#     -v $HOME/data:/root/data \
+#     verl-intel-gpu:latest
+#
+# Quick Intel GPU sanity check:
+#   docker run --rm --device /dev/dri --group-add ${RENDER_GID} verl-intel-gpu:latest \
+#     python3 -c "import torch; print(torch.__version__); print(torch.xpu.is_available()); print(torch.xpu.device_count())"
+
+FROM intel/deep-learning-essentials:2025.3.2-0-devel-ubuntu24.04
+
+LABEL org.opencontainers.image.title="verl-intel-gpu"
+LABEL org.opencontainers.image.description="verl development image for Intel GPU"
+LABEL org.opencontainers.image.vendor="verl"
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG PYTHON_VERSION=3.12
+ARG VLLM_VERSION=0.17.1
+
+# torch version is intentionally not pinned here. vLLM's requirements/xpu.txt
+# owns the tested torch+xpu pairing for each vLLM release.
+ARG PIP_INDEX_URL="https://download.pytorch.org/whl/xpu"
+ARG PIP_EXTRA_INDEX_URL="https://pypi.org/simple"
+
+# Intel userspace driver/component versions (explicit for reproducible builds).
+ARG IGC_VERSION=2.30.1
+ARG IGC_BUILD=20950
+ARG COMPUTE_RUNTIME_VERSION=26.09.37435.1
+ARG IGDGMM_VERSION=22.9.0
+ARG LEVEL_ZERO_VERSION=1.28.0+u24.04
+
+# oneCCL with Battlemage support.
+ARG ONECCL_VERSION=2021.15.7
+ARG ONECCL_INSTALLER="intel-oneccl-2021.15.7.8_offline.sh"
+# oneCCL install tree series used for env and /latest symlink.
+ARG ONECCL_SERIES=2021.15
+
+# Runtime defaults. Keep configurable because some values are temporary
+# workarounds and may be removed after upstream fixes (for example PyTorch 2.13+).
+ARG DEFAULT_CCL_ATL_SHM=1
+ARG DEFAULT_CCL_BUFFER_CACHE=0
+ARG DEFAULT_VLLM_WORKER_MULTIPROC_METHOD=spawn
+ARG DEFAULT_NO_PROXY=127.0.0.1,localhost,::1
+
+WORKDIR /workspace
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+# --- System dependencies ---
+RUN set -eux && \
+    apt-get update -y && \
+    apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        cmake \
+        curl \
+        g++ \
+        gcc \
+        git \
+        libnuma-dev \
+        python${PYTHON_VERSION} \
+        python${PYTHON_VERSION}-dev \
+        python3-pip \
+        wget && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# --- uv: fast, deterministic resolver ---
+ENV PATH="/root/.local/bin:${PATH}"
+ENV VIRTUAL_ENV="/opt/venv"
+ENV UV_PYTHON_INSTALL_DIR="/opt/uv/python"
+RUN set -eux && \
+    curl -LsSf https://astral.sh/uv/install.sh | sh && \
+    uv venv --python ${PYTHON_VERSION} --seed ${VIRTUAL_ENV}
+ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+
+# --- Intel GPU user-mode drivers (UMD) ---
+# Pinned to compute-runtime 26.09 to avoid known IPC/compile/collective issues.
+RUN set -eux && \
+    tmp_dir="$(mktemp -d)" && \
+    cd "${tmp_dir}" && \
+    wget -q "https://github.com/intel/intel-graphics-compiler/releases/download/v${IGC_VERSION}/intel-igc-core-2_${IGC_VERSION}+${IGC_BUILD}_amd64.deb" && \
+    wget -q "https://github.com/intel/intel-graphics-compiler/releases/download/v${IGC_VERSION}/intel-igc-opencl-2_${IGC_VERSION}+${IGC_BUILD}_amd64.deb" && \
+    wget -q "https://github.com/intel/compute-runtime/releases/download/${COMPUTE_RUNTIME_VERSION}/intel-ocloc_${COMPUTE_RUNTIME_VERSION}-0_amd64.deb" && \
+    wget -q "https://github.com/intel/compute-runtime/releases/download/${COMPUTE_RUNTIME_VERSION}/intel-opencl-icd_${COMPUTE_RUNTIME_VERSION}-0_amd64.deb" && \
+    wget -q "https://github.com/intel/compute-runtime/releases/download/${COMPUTE_RUNTIME_VERSION}/libigdgmm12_${IGDGMM_VERSION}_amd64.deb" && \
+    wget -q "https://github.com/intel/compute-runtime/releases/download/${COMPUTE_RUNTIME_VERSION}/libze-intel-gpu1_${COMPUTE_RUNTIME_VERSION}-0_amd64.deb" && \
+    wget -q "https://github.com/oneapi-src/level-zero/releases/download/v${LEVEL_ZERO_VERSION%%+*}/level-zero_${LEVEL_ZERO_VERSION}_amd64.deb" && \
+    dpkg -i ./*.deb && \
+    cd / && \
+    rm -rf "${tmp_dir}"
+
+# --- oneCCL setup ---
+RUN set -eux && \
+    wget -q "https://github.com/uxlfoundation/oneCCL/releases/download/${ONECCL_VERSION}/${ONECCL_INSTALLER}" && \
+    bash "${ONECCL_INSTALLER}" -a --silent --eula accept && \
+    rm -f "${ONECCL_INSTALLER}" && \
+    echo "source /opt/intel/oneapi/setvars.sh --force" >> /root/.bashrc && \
+    echo "source /opt/intel/oneapi/ccl/${ONECCL_SERIES}/env/vars.sh --force" >> /root/.bashrc && \
+    rm -f /opt/intel/oneapi/ccl/latest && \
+    ln -s /opt/intel/oneapi/ccl/${ONECCL_SERIES} /opt/intel/oneapi/ccl/latest
+
+ENV UV_HTTP_TIMEOUT=500
+# XPU index is primary, PyPI is extra. This avoids pulling CPU-only torch from PyPI.
+ENV UV_INDEX_URL="${PIP_INDEX_URL}"
+ENV UV_EXTRA_INDEX_URL="${PIP_EXTRA_INDEX_URL}"
+ENV UV_INDEX_STRATEGY="unsafe-best-match"
+ENV UV_LINK_MODE="copy"
+ENV VLLM_TARGET_DEVICE="xpu"
+
+# --- Layer 1: vLLM + torch Intel GPU ---
+# oneAPI vars scripts may reference optional unset vars; avoid nounset here.
+RUN set -ex && \
+    git clone --depth 1 --branch "v${VLLM_VERSION}" \
+        https://github.com/vllm-project/vllm.git /opt/vllm && \
+    cd /opt/vllm && \
+    source /opt/intel/oneapi/setvars.sh --force && \
+    source /opt/intel/oneapi/ccl/${ONECCL_SERIES}/env/vars.sh --force && \
+    uv pip install --upgrade pip setuptools wheel && \
+    uv pip install -r requirements/xpu.txt && \
+    uv pip install --no-build-isolation .
+
+# --- Layer 2: verl Python dependencies ---
+COPY requirements-intel-gpu.txt /tmp/requirements-intel-gpu.txt
+RUN set -eux && uv pip install -r /tmp/requirements-intel-gpu.txt
+    
+# --- Layer 3: verl source ---
+COPY . /workspace/verl
+WORKDIR /workspace/verl
+RUN set -eux && uv pip install --no-deps -e .
+
+# --- Runtime defaults / workarounds ---
+ENV CCL_ATL_SHM=${DEFAULT_CCL_ATL_SHM}
+ENV CCL_BUFFER_CACHE=${DEFAULT_CCL_BUFFER_CACHE}
+ENV VLLM_WORKER_MULTIPROC_METHOD=${DEFAULT_VLLM_WORKER_MULTIPROC_METHOD}
+
+# Ensure Ray internal localhost traffic is never routed through proxies.
+ENV no_proxy=${DEFAULT_NO_PROXY}
+ENV NO_PROXY=${DEFAULT_NO_PROXY}
+
+# setvars.sh may leave ONEAPI_DEVICE_SELECTOR as an invalid "level_zero:".
+# Fix at Python startup for every process (main + worker + subprocess).
+RUN python3 - <<'PY'
+import site
+from pathlib import Path
+
+snippet = '''# verl-intel-gpu: fix ONEAPI_DEVICE_SELECTOR at startup
+import os as _os
+
+_sel = _os.environ.get("ONEAPI_DEVICE_SELECTOR", "")
+if not _sel or _sel.endswith(":"):
+    try:
+        import torch
+        _n = torch.xpu.device_count()
+    except Exception:
+        _n = sum(
+            1
+            for i in range(16)
+            if _os.path.exists(f"/dev/dri/renderD{128 + i}")
+        )
+        _n = max(_n, 1)
+    _os.environ["ONEAPI_DEVICE_SELECTOR"] = "level_zero:" + ",".join(str(i) for i in range(_n))
+'''
+
+lib_dir = Path(site.getsitepackages()[0]).parent
+sitecustomize = lib_dir / "sitecustomize.py"
+existing = sitecustomize.read_text() if sitecustomize.exists() else ""
+if "# verl-intel-gpu: fix ONEAPI_DEVICE_SELECTOR at startup" not in existing:
+    if existing and not existing.endswith("\n"):
+        existing += "\n"
+    sitecustomize.write_text(existing + snippet)
+PY
+
+# Runtime env precedence:
+# 1) /workspace/.env (workspace-local)
+# 2) /workspace/verl/.env (repo-local fallback)
+ENV VERL_PRIMARY_ENV_FILE=/workspace/.env
+ENV VERL_FALLBACK_ENV_FILE=/workspace/verl/.env
+
+COPY docker/intel_gpu/verl-entrypoint.sh /usr/local/bin/verl-entrypoint.sh
+RUN chmod +x /usr/local/bin/verl-entrypoint.sh
+
+ENTRYPOINT ["/usr/local/bin/verl-entrypoint.sh"]
+CMD ["bash", "-c", "source /root/.bashrc && exec bash"]

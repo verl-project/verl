@@ -137,7 +137,8 @@ class RayResourcePool(ResourcePool):
         # print(f"pg_name_prefix = {pg_name_prefix}")
         if device_name == "npu":
             device_name = "NPU"
-        elif device_name == "cuda":
+        elif device_name in ("cuda", "xpu"):
+            # Ray's IntelGPUAccelerator registers XPU as "GPU", same as CUDA
             device_name = "GPU"
 
         bundle = {"CPU": self.max_colocate_count}
@@ -398,9 +399,10 @@ class RayClassWithInitArgs(ClassWithInitArgs):
         }
         options.update(self._options)
 
-        if use_gpu and device_name == "cuda":
+        if use_gpu and device_name in ("cuda", "xpu"):
+            # Ray's IntelGPUAccelerator registers XPU as "GPU", same as CUDA
             options["num_gpus"] = num_gpus
-        if use_gpu and device_name == "npu":
+        elif use_gpu and device_name == "npu":
             options["resources"] = {"NPU": num_gpus}
 
         if len(self._additional_resource) > 1:

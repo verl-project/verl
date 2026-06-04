@@ -1,0 +1,43 @@
+# Requirements for Intel XPU
+#
+# PyTorch with XPU support is installed by docker/intel_gpu/Dockerfile.intel_gpu, NOT here.
+# Version must match vLLM XPU requirements (currently torch==2.11.0+xpu).
+# Pinned here as a hard backstop so uv/pip cannot drift to a CUDA or CPU wheel.
+# Do NOT remove this pin.
+torch==2.11.0+xpu
+# Runtime deps imported directly by the verl XPU rollout/training paths.
+cachetools
+#
+# vLLM >= 0.17 with XPU support must be built from source:
+#   VLLM_TARGET_DEVICE=xpu pip install --no-build-isolation -v .
+#
+# flash-attn CUDA package is NOT needed — XPU uses SDPA for now. XPU flash-attn enablement in progress.
+# to Intel's SYCL-TLA Flash kernel automatically (10-22x faster than eager).
+accelerate
+codetiming
+datasets
+dill
+dpctl
+einops
+fastapi
+hydra-core
+latex2sympy2_extended
+math_verify
+mathruler
+msgspec
+numpy<2.0.0
+packaging>=20.0
+pandas
+peft>=0.15.2
+pyarrow>=15.0.0
+pybind11
+pylatexenc
+qwen_vl_utils
+ray[default]
+tensorboard
+tensordict>=0.10.0
+torchdata
+transformers
+trl<=0.9.6
+uvicorn
+wandb

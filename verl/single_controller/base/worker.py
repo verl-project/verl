@@ -26,6 +26,7 @@ from verl.utils.device import (
     get_torch_device,
     get_visible_devices_keyword,
     is_npu_available,
+    is_xpu_available,
 )
 
 from .decorator import Dispatch, Execute, register
@@ -275,10 +276,23 @@ class Worker(WorkerHelper):
             # environment variable for each actor, unless
             # RAY_EXPERIMENTAL_NOSET_*_VISIBLE_DEVICES is set,
             # so we need to set local rank when the flag is set.
+            # Ray's IntelGPUAccelerator registers XPU as "GPU", same as CUDA.
             device_name = "NPU" if is_npu_available else "GPU"
             local_rank = ray.get_runtime_context().get_accelerator_ids()[device_name][0]
             os.environ["LOCAL_RANK"] = local_rank
             get_torch_device().set_device(int(local_rank))
+
+        # XPU: Keep ONEAPI_DEVICE_SELECTOR consistent with ZE_AFFINITY_MASK.
+        # Ray's IntelGPUAccelerator sets ZE_AFFINITY_MASK for device isolation
+        # (e.g. "1" for the second GPU).  Level Zero re-numbers the masked
+        # devices 0..n-1, so the selector must be "level_zero:0" not
+        # "level_zero:1".  Setting this at the same point we write the
+        # visibility env var avoids needing sanitize calls elsewhere.
+        if is_xpu_available:
+            ze_mask = os.environ.get("ZE_AFFINITY_MASK", "")
+            if ze_mask:
+                n = len(ze_mask.split(","))
+                os.environ["ONEAPI_DEVICE_SELECTOR"] = f"level_zero:{','.join(str(i) for i in range(n))}"
 
     def _configure_with_store(self, store: dict):
         """
