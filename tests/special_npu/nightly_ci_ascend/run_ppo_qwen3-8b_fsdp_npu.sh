@@ -58,3 +58,6 @@ python3 -m verl.trainer.main_ppo \
     trainer.max_actor_ckpt_to_keep=1 \
     trainer.max_critic_ckpt_to_keep=1 \
     trainer.total_training_steps=15 2>&1 | tee /root/.cache/nightly_log/ppo_qwen3_8b/ppo_qwen3-8b_fsdp_npu.log
+
+cd /root/.cache/nightly_log/ppo_qwen3_8b/
+python check_ppo_qwen3-8b_fsdp_npu.py --log ppo_qwen3-8b_fsdp_npu.log --base baseline_ppo_qwen3-8b_fsdp_npu.txt
