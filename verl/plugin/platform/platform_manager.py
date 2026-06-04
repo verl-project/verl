@@ -95,7 +95,7 @@ def _detect_platform_name() -> str:
         return env_platform
 
     names = PlatformRegistry.registered_names()
-    logger.info("Registered platforms: %s", names)
+    logger.debug("Registered platforms: %s", names)
 
     for name in names:
         platform_cls = PlatformRegistry.get(name)
@@ -104,7 +104,7 @@ def _detect_platform_name() -> str:
         try:
             instance = platform_cls()
             if instance.is_platform_available(use_smi_check=True):
-                logger.info("Auto-detected platform: %s", name)
+                logger.debug("Auto-detected platform: %s", name)
                 return name
         except Exception as e:
             logger.debug("Platform '%s' detection failed: %s", name, e)
@@ -143,7 +143,7 @@ def get_platform() -> PlatformBase:
     if _current_platform is None:
         name = _detect_platform_name()
         _current_platform = _create_platform(name)
-        logger.info("verl platform initialised: %s", _current_platform.device_name)
+        logger.debug("verl platform initialised: %s", _current_platform.device_name)
     return _current_platform
 
 
