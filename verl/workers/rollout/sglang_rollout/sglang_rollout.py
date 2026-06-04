@@ -372,11 +372,14 @@ class ServerAdapter(BaseRollout):
             logger.info("[NCCL weight sync] update_weights_nccl: broadcasts complete")
 
         if self._is_server_tp_leader():
-            # Flush KV cache before NCCL to free GPU memory. Non-leader ranks block
-            # inside torch.distributed.broadcast() until SGLang joins the collective,
-            # so the NCCL timeout (30 min default) is not a concern here.
-            logger.info("[NCCL weight sync] update_weights_nccl: flushing cache before weight update")
-            await self._engine.flush_cache()
+            # Release the KV cache memory pool before updating weights. Non-leader
+            # ranks block inside torch.distributed.broadcast() until SGLang joins
+            # the collective, so the NCCL timeout (30 min default) is not a concern.
+            # flush_cache() only evicts cached tokens but does NOT free the pre-
+            # allocated KV pool; release_memory_occupation frees the GPU memory so
+            # update_weights_from_distributed can allocate temporary buffers.
+            logger.info("[NCCL weight sync] update_weights_nccl: releasing KV cache memory before weight update")
+            await self._engine.release_memory_occupation(tags=["kv_cache"])
             # Launch broadcasts in thread executor; await HTTP in the event loop.
             loop = asyncio.get_running_loop()
             logger.info("[NCCL weight sync] update_weights_nccl: launching broadcast thread + SGLang HTTP recv")
@@ -389,6 +392,8 @@ class ServerAdapter(BaseRollout):
             )
             logger.info("[NCCL weight sync] update_weights_nccl: SGLang HTTP done, awaiting broadcast thread")
             await broadcast_task
+            logger.info("[NCCL weight sync] update_weights_nccl: resuming KV cache memory after weight update")
+            await self._engine.resume_memory_occupation(tags=["kv_cache"])
             if global_steps is not None:
                 await self.server_actor.set_global_steps.remote(global_steps)
             logger.info("[NCCL weight sync] update_weights_nccl: done")
