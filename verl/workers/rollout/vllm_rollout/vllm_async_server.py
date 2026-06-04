@@ -1013,9 +1013,10 @@ class vLLMReplica(RolloutReplica):
                 "NCCL_CUMEM_ENABLE": "0",
                 "VLLM_ASCEND_AUTO_DETECT_QUANTIZATION": "0",
             }
-            if os.environ.get("TASK_QUEUE_ENABLE", "0") == "2":
-                logger.info("TASK_QUEUE_ENABLE=2 is not supported in vLLM, revert to 1")
-                env_vars["TASK_QUEUE_ENABLE"] = "1"
+            if os.environ.get("VLLM_ASCEND_TASK_QUEUE_ENABLE", None):
+                # use VLLM_ASCEND_TASK_QUEUE_ENABLE to support different TASK_QUEUE_ENABLE mode for
+                # train and rollout on Ascend NPU
+                env_vars["TASK_QUEUE_ENABLE"] = os.environ["VLLM_ASCEND_TASK_QUEUE_ENABLE"]
 
             server = self.server_class.options(
                 scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
