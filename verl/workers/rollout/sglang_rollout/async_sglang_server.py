@@ -837,17 +837,27 @@ class SGLangReplica(RolloutReplica):
                 name = f"sglang_server_teacher_{self.replica_rank}_{node_rank}{self.name_suffix}"
             else:
                 name = f"sglang_server_{self.replica_rank}_{node_rank}{self.name_suffix}"
+            # Forward JIT/kernel cache env vars so SGLang scheduler subprocesses
+            # use local tmpfs instead of falling back to home (~/.cache/*) on
+            # Lustre/NFS, where fcntl.flock fails with ENOLCK.
+            _JIT_CACHE_KEYS = [
+                "FLASHINFER_CACHE_DIR",
+                "FLASHINFER_JIT_CACHE_DIR",
+                "TRITON_CACHE_DIR",
+                "TRITON_HOME",
+                "TORCHINDUCTOR_CACHE_DIR",
+            ]
+            actor_env_vars = {f"RAY_EXPERIMENTAL_NOSET_{visible_devices_keyword}": "1"}
+            for _k in _JIT_CACHE_KEYS:
+                _v = os.environ.get(_k)
+                if _v:
+                    actor_env_vars[_k] = _v
             server = self.server_class.options(
                 scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                     node_id=node_id,
                     soft=False,
                 ),
-                runtime_env={
-                    "env_vars": {
-                        **{var: "1" for var in get_platform().ray_noset_envvars()},
-                        **get_platform().rollout_env_vars(),
-                    }
-                },
+                runtime_env={"env_vars": actor_env_vars},
                 name=name,
                 max_concurrency=self.max_concurrency,
             ).remote(
