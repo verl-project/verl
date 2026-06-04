@@ -371,6 +371,17 @@ class RayPPOTrainer:
         self.checkpoint_manager = None
         self._init_dump_executor()
 
+    @property
+    def is_last_step(self) -> bool:
+        """True iff ``global_steps`` has reached the configured training budget.
+
+        Read at iteration boundaries: ``global_steps`` indexes the last
+        completed step (or — pre-loop — the resumed cursor), so the same
+        ``>=`` predicate answers both the pre-loop resume guard and the
+        in-loop cleanup-return check.
+        """
+        return self.global_steps >= self.total_training_steps
+
     def _create_dataloader(self, train_dataset, val_dataset, collate_fn, train_sampler: Optional[Sampler]):
         """
         Creates the train and validation dataloaders.
@@ -1406,6 +1417,15 @@ class RayPPOTrainer:
         # add tqdm
         progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
 
+        # Resume guard: exit before any setup if the checkpoint already finished.
+        if self.is_last_step:
+            pprint(
+                f"Skipping training: resumed global_steps={self.global_steps} "
+                f"already reached total_training_steps={self.total_training_steps}."
+            )
+            progress_bar.close()
+            return
+
         # we start from step 1
         self.global_steps += 1
         last_val_metrics = None
@@ -1461,7 +1481,6 @@ class RayPPOTrainer:
                     combined_gen_batch = gen_batch_output
                     num_sampled_prompts = len(gen_batch_output)
 
-                is_last_step = self.global_steps >= self.total_training_steps
                 with marked_timer("step", timing_raw):
                     # generate a batch
                     with marked_timer("gen", timing_raw, color="red"):
@@ -1661,7 +1680,7 @@ class RayPPOTrainer:
                         # 3. The current step number is a multiple of the save frequency.
                         # 4. The ESI(Elastic Server Instance)/training plan is close to expiration.
                         if self.config.trainer.save_freq > 0 and (
-                            is_last_step
+                            self.is_last_step
                             or self.global_steps % self.config.trainer.save_freq == 0
                             or esi_close_to_expiration
                         ):
@@ -1684,11 +1703,11 @@ class RayPPOTrainer:
 
                 # validate
                 if self.config.trainer.test_freq > 0 and (
-                    is_last_step or self.global_steps % self.config.trainer.test_freq == 0
+                    self.is_last_step or self.global_steps % self.config.trainer.test_freq == 0
                 ):
                     with marked_timer("testing", timing_raw, color="green"):
                         val_metrics: dict = self._validate()
-                        if is_last_step:
+                        if self.is_last_step:
                             last_val_metrics = val_metrics
                     metrics.update(val_metrics)
 
@@ -1750,15 +1769,14 @@ class RayPPOTrainer:
                 logger.log(data=metrics, step=self.global_steps)
 
                 progress_bar.update(1)
-                self.global_steps += 1
-
-                if is_last_step:
+                if self.is_last_step:
                     if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):
                         self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=True)
                     self._shutdown_dump_executor()
                     pprint(f"Final validation metrics: {last_val_metrics}")
                     progress_bar.close()
                     return
+                self.global_steps += 1
 
                 # this is experimental and may be changed/removed in the future
                 # in favor of a general-purpose data buffer pool

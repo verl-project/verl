@@ -112,7 +112,6 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         self.validation_generations_logger = None
         self.max_steps_duration = 0
         self.progress_bar = None
-        self.is_last_step = False
         self.prev_step_profile = False
         self.curr_step_profile = False
         self.next_step_profile = False
@@ -163,6 +162,17 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         # Uses naive backend to sync weights from trainer to hybrid rollout replicas.
         # Initialized in _setup_hybrid_checkpoint_manager_and_sleep() via set_rollouter().
         self.hybrid_checkpoint_manager = None
+
+    @property
+    def is_last_step(self) -> bool:
+        """Override the inherited property to use ``total_train_steps``.
+
+        FullyAsyncTrainer tracks the budget under ``total_train_steps`` rather
+        than ``total_training_steps``.
+        """
+        if self.total_train_steps is None:
+            return False
+        return self.global_steps >= self.total_train_steps
 
     async def _setup_checkpoint_manager(self):
         """Setup checkpoint manager after rollouter is initialized"""
@@ -387,6 +397,10 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             raise ValueError("rollouter not set. Call set_rollouter() first.")
 
         self.max_steps_duration = 0
+
+        # Resume guard: exit before any setup if the checkpoint already finished.
+        if self.is_last_step:
+            return
 
         self.global_steps += 1
 
