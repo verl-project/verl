@@ -354,35 +354,43 @@ class ServerAdapter(BaseRollout):
             shapes.append(list(param.shape))
             tensors.append(param.detach())
 
-        logger.info("[NCCL weight sync] update_weights_nccl: collected %d params, firing SGLang recv", len(names))
+        logger.info("[NCCL weight sync] update_weights_nccl: collected %d params", len(names))
 
-        # Fire the HTTP call without awaiting so SGLang TP workers start their recv loop.
-        # Yield once so the request reaches the wire before we block on NCCL.
-        http_task = None
+        # NCCL broadcast and the SGLang HTTP call must run concurrently:
+        #   - The HTTP call triggers SGLang TP workers to enter their NCCL recv loop.
+        #   - The broadcasts must be in flight while SGLang is recving.
+        # A single asyncio.sleep(0) is not enough because the HTTP adapter was just
+        # created and the TCP connection hasn't been established yet.  Running the
+        # broadcasts in a thread executor keeps the event loop free to complete the
+        # full TCP handshake + HTTP round-trip while NCCL proceeds in parallel.
+        weight_sync_group = self._weight_sync_group
+
+        def do_broadcasts():
+            logger.info("[NCCL weight sync] update_weights_nccl: starting NCCL broadcasts for %d params", len(tensors))
+            for tensor in tensors:
+                torch.distributed.broadcast(tensor, src=0, group=weight_sync_group)
+            logger.info("[NCCL weight sync] update_weights_nccl: broadcasts complete")
+
         if self._is_server_tp_leader():
-            http_task = asyncio.ensure_future(
-                self._engine.update_weights_from_distributed(
-                    names=names,
-                    dtypes=dtypes,
-                    shapes=shapes,
-                    group_name=group_name,
-                )
+            # Launch broadcasts in thread executor; await HTTP in the event loop.
+            loop = asyncio.get_running_loop()
+            logger.info("[NCCL weight sync] update_weights_nccl: launching broadcast thread + SGLang HTTP recv")
+            broadcast_task = loop.run_in_executor(None, do_broadcasts)
+            await self._engine.update_weights_from_distributed(
+                names=names,
+                dtypes=dtypes,
+                shapes=shapes,
+                group_name=group_name,
             )
-            await asyncio.sleep(0)
-
-        logger.info("[NCCL weight sync] update_weights_nccl: starting NCCL broadcasts for %d params", len(tensors))
-        for tensor in tensors:
-            torch.distributed.broadcast(tensor, src=0, group=self._weight_sync_group)
-        logger.info("[NCCL weight sync] update_weights_nccl: broadcasts complete")
-
-        if http_task is not None:
-            logger.info("[NCCL weight sync] update_weights_nccl: awaiting SGLang HTTP response")
-            await http_task
+            logger.info("[NCCL weight sync] update_weights_nccl: SGLang HTTP done, awaiting broadcast thread")
+            await broadcast_task
             logger.info("[NCCL weight sync] update_weights_nccl: flushing cache")
             await self._engine.flush_cache()
             if global_steps is not None:
                 await self.server_actor.set_global_steps.remote(global_steps)
             logger.info("[NCCL weight sync] update_weights_nccl: done")
+        else:
+            do_broadcasts()
 
     async def update_weights(
         self, weights: Generator[tuple[str, torch.Tensor], None, None], global_steps: int = None, **kwargs
