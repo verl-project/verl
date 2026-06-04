@@ -336,8 +336,10 @@ class ServerAdapter(BaseRollout):
     ):
         """Sync weights via NCCL broadcast — works across nodes in standalone mode."""
         await self._init_server_adapter()
-        if self._engine is None:
-            return
+        # Do NOT return early when self._engine is None. All FSDP ranks must
+        # iterate the weights generator (DTensor.full_tensor() issues all-gathers
+        # on the default process group) and participate in the weight_update_group
+        # broadcast. Only the HTTP dispatch is gated on being a TP leader.
 
         assert hasattr(self, "_weight_sync_group"), "weight_sync_group not set — call init_weight_sync_group first"
         logger.info("[NCCL weight sync] update_weights_nccl: collecting weights  global_steps=%s", global_steps)
