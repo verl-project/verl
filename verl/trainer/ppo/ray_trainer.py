@@ -503,7 +503,7 @@ class RayPPOTrainer:
 
         print(f"Dumped generations to {filename}")
 
-    def _dump_generations(self, inputs, outputs, gts, scores, reward_extra_infos_dict, dump_path):
+    def _dump_generations(self, inputs, outputs, gts, scores, reward_extra_infos_dict, dump_path, extra_fields=None):
         """Dump rollout/validation samples as JSONL asynchronously."""
         global_steps = self.global_steps
         future = self._dump_executor.submit(
@@ -515,6 +515,7 @@ class RayPPOTrainer:
             reward_extra_infos_dict,
             dump_path,
             global_steps,
+            extra_fields,
         )
         self._dump_futures.append(future)
         # Clean up completed futures and surface any exceptions early
