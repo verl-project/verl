@@ -172,6 +172,10 @@ class CheckpointEngineConfig(BaseConfig):
     # backends that have not implemented weight refit yet (dynamo), and to
     # form an apples-to-apples baseline by forcing vllm into the same mode.
     skip_refit: bool = False
+    # If True, allow the global_steps=0 bootstrap sync into rollout, then skip
+    # subsequent per-step refits. This keeps vLLM initialized from actor
+    # weights without paying update_weights during training.
+    skip_refit_after_init: bool = False
 
 
 @dataclass

@@ -13,6 +13,9 @@
 # limitations under the License.
 
 from collections import defaultdict
+import hashlib
+import json
+import os
 from typing import Any
 
 import torch
@@ -42,6 +45,32 @@ class NaiveRewardManager(AbstractRewardManager):
         self.num_examine = num_examine  # the number of batches of decoded responses to print to the console
         self.compute_score = compute_score or default_compute_score
         self.reward_fn_key = reward_fn_key  # Store the key for accessing the data source
+        self.rollout_log_path = os.getenv("VERL_ROLLOUT_PROMPT_LOG_PATH", "").strip()
+        if self.rollout_log_path:
+            log_dir = os.path.dirname(self.rollout_log_path)
+            if log_dir:
+                os.makedirs(log_dir, exist_ok=True)
+
+    def _log_rollout_sample(self, prompt: str, response: str, num_turns: int | None) -> None:
+        if not self.rollout_log_path:
+            return
+        print('_log_rollout_sample')
+        # Encode prompt identity into `turn` so same turn index from different prompts remains distinguishable.
+        prompt_key = hashlib.sha1(prompt.encode("utf-8")).hexdigest()[:12]
+        turn_value = f"{prompt_key}_t{num_turns if num_turns is not None else 'na'}"
+        payload = {
+            "turn": turn_value,
+            "prompt": prompt,
+            "response": response,
+        }
+
+        try:
+            with open(self.rollout_log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+                print(f'write rollout log to {self.rollout_log_path}')
+        except Exception:
+            # Logging should never interrupt training.
+            pass
 
     def __call__(self, data: DataProto, return_dict: bool = False) -> torch.Tensor | dict[str, Any]:
         """We will expand this function gradually based on the available datasets"""
@@ -88,6 +117,7 @@ class NaiveRewardManager(AbstractRewardManager):
                 ground_truth=ground_truth,
                 extra_info=extra_info,
             )
+            self._log_rollout_sample(prompt=prompt_str, response=response_str, num_turns=num_turns)
 
             if isinstance(score, dict):
                 reward = score["score"]

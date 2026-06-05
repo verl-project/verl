@@ -424,13 +424,15 @@ class CheckpointEngineManager:
             global_steps: The global steps of the trainer.
         """
 
-        # 0a. skip refit entirely if configured. Rollout backend keeps serving
-        # with the weights it was initialized with; trainer-side actor still
-        # advances independently. Mirrors NeMo-RL PR #2222 NEED_REFIT=False
-        # (nemo_rl/algorithms/grpo.py:2494). Used for (a) backends that have
-        # not yet implemented weight refit (dynamo), and (b) forcing vllm into
-        # the same off-policy mode for apples-to-apples comparison.
         if self.config.skip_refit:
+            return
+
+        # Skip only the weight transfer after the initial sync. The trainer
+        # sleeps rollout replicas after generation, so no-refit still has to
+        # wake them for the next step.
+        if self.config.skip_refit_after_init and global_steps != 0:
+            await self.wake_up_replicas()
+            await asyncio.gather(*[r.resume_generation() for r in self.replicas])
             return
 
         # 0. update weights for sync training with colocated trainer and rollout
