@@ -156,9 +156,7 @@ verl is fast with:
    :caption: Hardware Support
 
    hardware/multi_chip_support
-   amd_tutorial/amd_build_dockerfile_page.rst
-   amd_tutorial/amd_vllm_page.rst
-   amd_tutorial/amd_quick_start.rst
+   amd_tutorial/index.rst
    ascend_tutorial/index.rst 
 
 .. toctree::
