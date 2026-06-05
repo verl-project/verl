@@ -449,9 +449,9 @@ load_balancer:
   # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
   _target_: verl.workers.config.LoadBalancerConfig
 
-  # Absolute in-flight gap that triggers rebalancing. 0 disables the imbalance
-  # gate, preserving pure sticky-session routing (prefix KV-cache reuse).
-  balance_abs_threshold: 0
+  # Absolute in-flight gap that triggers rebalancing. Set to 0 to disable the
+  # imbalance gate; the default of 64 mirrors sglang's cache-aware router.
+  balance_abs_threshold: 64
 
   # Relative in-flight ratio that triggers rebalancing. A pool is imbalanced iff
   # (max - min) > balance_abs_threshold AND max > min * balance_rel_threshold.

@@ -77,7 +77,7 @@ class GlobalRequestLoadBalancer:
         self,
         servers: dict[str, ray.actor.ActorHandle],
         max_cache_size: int = DEFAULT_ROUTING_CACHE_SIZE,
-        balance_abs_threshold: int = 0,
+        balance_abs_threshold: int = 64,
         balance_rel_threshold: float = 1.5,
     ):
         if not servers:
@@ -113,17 +113,20 @@ class GlobalRequestLoadBalancer:
             A tuple of ``(server_id, actor_handle)`` in a single atomic call.
         """
         # Resolve any existing sticky binding, dropping it if the server is gone.
-        sticky_id = self._request_id_to_server.get(request_id)
-        if sticky_id is not None and sticky_id not in self._inflight_requests:
-            # Server was removed, clear stale cache entry and re-select.
-            del self._request_id_to_server[request_id]
-            sticky_id = None
+        sticky_id = None
+        if request_id in self._request_id_to_server:
+            sticky_id = self._request_id_to_server[request_id]
+            if sticky_id not in self._inflight_requests:
+                # Server was removed, clear stale cache entry and re-select.
+                del self._request_id_to_server[request_id]
+                sticky_id = None
 
         if not self._inflight_requests:
             raise RuntimeError("No available servers in load balancer")
 
         # Honor sticky only while balanced; otherwise re-pin to least-loaded.
-        if sticky_id is not None and not self._is_imbalanced():
+        min_load = min(self._inflight_requests.values())
+        if sticky_id is not None and (self._inflight_requests[sticky_id] == min_load or not self._is_imbalanced()):
             server_id = sticky_id
         else:
             server_id = min(self._inflight_requests, key=self._inflight_requests.get)

@@ -156,9 +156,9 @@ class LoadBalancerConfig(BaseConfig):
         max_inflight > min_inflight * balance_rel_threshold
     """
 
-    # Absolute in-flight gap that triggers rebalancing. ``0`` (default) disables
-    # the imbalance gate, preserving pure sticky-session routing.
-    balance_abs_threshold: int = 0
+    # Absolute in-flight gap that triggers rebalancing. ``0`` disables the
+    # imbalance gate; the default of ``64`` mirrors sglang's cache-aware router.
+    balance_abs_threshold: int = 64
     # Relative in-flight ratio that triggers rebalancing.
     balance_rel_threshold: float = 1.5
 
