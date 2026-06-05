@@ -13,9 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-
-import pytest
 import torch
 import torch.distributed as dist
 from megatron.core import parallel_state as mpu
@@ -34,30 +31,6 @@ from verl.utils.megatron_utils import load_megatron_optimizer, offload_megatron_
 
 
 SEQUENCE_LENGTH = 64
-
-
-@pytest.fixture
-def initialize_distributed_env():
-    """Bring up and tear down torch.distributed + Megatron parallel state
-    before / after each test."""
-
-    os.environ.setdefault("MASTER_ADDR", "localhost")
-    os.environ.setdefault("MASTER_PORT", "29500")
-    os.environ.setdefault("RANK", "0")
-    os.environ.setdefault("WORLD_SIZE", "1")
-
-    torch.cuda.set_device(0)
-    assert not dist.is_initialized()
-    dist.init_process_group(backend="cpu:gloo,cuda:nccl")
-    mpu.initialize_model_parallel()
-    model_parallel_cuda_manual_seed(123)
-
-    try:
-        yield
-    finally:
-        dist.barrier()
-        mpu.destroy_model_parallel()
-        dist.destroy_process_group()
 
 
 def init_model():
@@ -131,33 +104,51 @@ def precision_aware_optimizer_is_on_device(optimizer, device):
 # ==== Tests ==== #
 
 
-def test_precision_aware_optimizer_offload_and_load(initialize_distributed_env):
-    # Initialize model and optimizer.
-    model_chunks = init_model()
-    optimizer = init_precision_aware_optimizer(model_chunks)
+def test_precision_aware_optimizer_offload_and_load(tmp_path):
+    # Initialize torch distributed and Megatron parallel state.
+    rendezvous_file = tmp_path / "rdzv_optimizer"
 
-    # Fully initialize the optimizer state by calling optimizer.step() on
-    # dummy gradients set to 0.
-    for model_chunk in model_chunks:
-        model_chunk.zero_grad_buffer()
-    optimizer.zero_grad(set_to_none=False)
-    update_successful, _, _ = optimizer.step()
-    assert update_successful
-
-    # Offload optimizer state.
-    offload_megatron_optimizer(optimizer)
-
-    # Make sure everything has been offloaded.
-    assert precision_aware_optimizer_is_on_device(
-        optimizer,
-        torch.device("cpu"),
+    torch.cuda.set_device(0)
+    dist.init_process_group(
+        backend="cpu:gloo,cuda:nccl",
+        init_method=f"file://{rendezvous_file}",
+        rank=0,
+        world_size=1,
     )
+    mpu.initialize_model_parallel()
+    model_parallel_cuda_manual_seed(123)
 
-    # Load optimizer state.
-    load_megatron_optimizer(optimizer)
+    try:
+        # Initialize model and optimizer.
+        model_chunks = init_model()
+        optimizer = init_precision_aware_optimizer(model_chunks)
 
-    # Make sure everything has been loaded.
-    assert precision_aware_optimizer_is_on_device(
-        optimizer,
-        torch.device("cuda:0"),
-    )
+        # Fully initialize the optimizer state by calling optimizer.step() on
+        # dummy gradients set to 0.
+        for model_chunk in model_chunks:
+            model_chunk.zero_grad_buffer()
+        optimizer.zero_grad(set_to_none=False)
+        update_successful, _, _ = optimizer.step()
+        assert update_successful
+
+        # Offload optimizer state.
+        offload_megatron_optimizer(optimizer)
+
+        # Make sure everything has been offloaded.
+        assert precision_aware_optimizer_is_on_device(
+            optimizer,
+            torch.device("cpu"),
+        )
+
+        # Load optimizer state.
+        load_megatron_optimizer(optimizer)
+
+        # Make sure everything has been loaded.
+        assert precision_aware_optimizer_is_on_device(
+            optimizer,
+            torch.device("cuda:0"),
+        )
+    finally:
+        # Tear down MPU state and torch.distributed.
+        mpu.destroy_model_parallel()
+        dist.destroy_process_group()
