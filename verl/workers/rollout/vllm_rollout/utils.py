@@ -41,6 +41,32 @@ VLLM_LORA_PATH = "simon_lora_path"
 VLLM_ASCEND_REQUIRED_ENV_VARS = {"VLLM_ALL2ALL_BACKEND": "flashinfer_all2allv", "VLLM_ASCEND_ENABLE_NZ": "0"}
 
 
+def _resolve_vllm_weight_sync_local_rank(worker_local_rank: int, parallel_config: Any) -> int:
+    worker_local_rank = int(worker_local_rank)
+    if parallel_config is None:
+        return worker_local_rank
+
+    tp_size = max(int(getattr(parallel_config, "tensor_parallel_size", 1) or 1), 1)
+    dp_size = int(getattr(parallel_config, "data_parallel_size", 1) or 1)
+    dp_local_size = int(getattr(parallel_config, "data_parallel_size_local", 1) or 1)
+    if dp_size <= 1 and dp_local_size <= 1:
+        return worker_local_rank
+
+    dp_local_rank = getattr(parallel_config, "data_parallel_rank_local", None)
+    if dp_local_rank is None:
+        dp_rank = getattr(parallel_config, "data_parallel_rank", None)
+        if dp_rank is None:
+            dp_rank = getattr(parallel_config, "data_parallel_index", None)
+        if dp_rank is not None and dp_local_size > 0:
+            dp_local_rank = int(dp_rank) % dp_local_size
+
+    if dp_local_rank is None:
+        return worker_local_rank
+
+    tp_rank = worker_local_rank % tp_size
+    return int(dp_local_rank) * tp_size + tp_rank
+
+
 def set_death_signal():
     """Kill the current process when the parent process exits."""
     if platform.system() != "Linux":
@@ -293,16 +319,15 @@ class vLLMColocateWorkerExtension:
 
     def _get_zmq_handle(self) -> str:
         """Get ZMQ handle for communication.
-        Uses Ray job id + replica_rank + local_rank to form the handle so it
-        matches the sender side regardless of CUDA_VISIBLE_DEVICES differences,
-        avoids collisions when multiple replicas share the same node, and is
-        unique per Ray job to avoid cross-job collisions on shared hosts. The
-        job id is forwarded by the vLLMHttpServer actor as VERL_RAY_JOB_ID and
-        inherited by this vLLM worker subprocess.
+        Uses Ray job id + replica_rank + rollout-local rank to match the sender
+        side and avoid cross-job collisions on shared hosts.
         """
         replica_rank = os.environ.get("VERL_REPLICA_RANK", "0")
         job_id = os.environ.get("VERL_RAY_JOB_ID", "0")
-        return f"ipc:///tmp/rl-colocate-zmq-{job_id}-replica-{replica_rank}-rank-{self.local_rank}.sock"
+        vllm_config = getattr(self.model_runner, "vllm_config", None)
+        parallel_config = getattr(vllm_config, "parallel_config", None)
+        local_rank = _resolve_vllm_weight_sync_local_rank(self.local_rank, parallel_config)
+        return f"ipc:///tmp/rl-colocate-zmq-{job_id}-replica-{replica_rank}-rank-{local_rank}.sock"
 
 
 class SuppressSignalInThread:
