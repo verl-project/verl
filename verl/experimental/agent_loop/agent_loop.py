@@ -223,6 +223,9 @@ class AgentLoopBase(ABC):
         self.dataset_cls = dataset_cls
         self.data_config = data_config.config
         self.apply_chat_template_kwargs = self.data_config.get("apply_chat_template_kwargs", {})
+        self.force_thinking_prefix = bool(self.dataset_config.get("force_thinking_prefix", False))
+        self.thinking_prefix_token = self.dataset_config.get("thinking_prefix_token", "<|inner_prefix|>")
+        self.thinking_prefix_token_ids = self.tokenizer.encode(self.thinking_prefix_token, add_special_tokens=False)
         self.mm_processor_kwargs = self.data_config.get("mm_processor_kwargs", {})
         processing_class = self.processor if self.processor is not None else self.tokenizer
         self.system_prompt = initialize_system_prompt(processing_class, **self.apply_chat_template_kwargs)
@@ -332,6 +335,9 @@ class AgentLoopBase(ABC):
 
         if remove_system_prompt:
             prompt_ids = prompt_ids[len(self.system_prompt) :]
+        if self.force_thinking_prefix:
+            prompt_ids = prompt_ids + self.thinking_prefix_token_ids
+
 
         # Mirror the response-side ``response_ids[:response_length]`` cap on the prompt side:
         # every prompt produced by the agent loop must fit in ``rollout.prompt_length`` so that

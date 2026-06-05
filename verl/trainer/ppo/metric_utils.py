@@ -29,6 +29,14 @@ from verl.utils.import_utils import deprecated
 
 logger = logging.getLogger(__name__)
 
+THINKING_TOKEN_SPECS = {
+    "think_start": "<think>",
+    "think_end": "</think>",
+    "inner_prefix": "<|inner_prefix|>",
+    "inner_suffix": "<|inner_suffix|>",
+}
+DEGENERATION_TTR_THRESHOLD = 0.2
+
 
 @deprecated("verl.utils.metric.reduce_metrics")
 def reduce_metrics(metrics: dict[str, list[Any]]) -> dict[str, Any]:
@@ -66,12 +74,6 @@ def _compute_response_info(batch: DataProto) -> dict[str, Any]:
             - prompt_length: Tensor of prompt lengths for each item in the batch
             - response_length: Tensor of response lengths for each item in the batch
     """
-    if "prompt_length" in batch.batch and "response_length" in batch.batch:
-        return dict(
-            prompt_length=batch.batch["prompt_length"],
-            response_length=batch.batch["response_length"],
-        )
-
     response_length = batch.batch["responses"].shape[-1]
 
     prompt_mask = batch.batch["attention_mask"][:, :-response_length]
@@ -81,9 +83,195 @@ def _compute_response_info(batch: DataProto) -> dict[str, Any]:
     response_length = response_mask.sum(-1).float()  # (batch_size,)
 
     return dict(
+        response_mask=response_mask,
         prompt_length=prompt_length,
         response_length=response_length,
     )
+
+
+def ttr_chunked(
+    chunk: list[int],
+    n: int = 2,
+    window: int = 512,
+    step: int = 512,
+) -> list[float]:
+    """Compute n-gram TTR over sliding windows of one tokenized chunk."""
+    chunk_windows = [chunk[i : i + window] for i in range(0, len(chunk), step)]
+
+    ttr_scores = []
+    for window_chunk in chunk_windows:
+        if len(window_chunk) >= n:
+            ngrams = [tuple(window_chunk[i : i + n]) for i in range(len(window_chunk) - n + 1)]
+            ttr_scores.append(len(set(ngrams)) / len(ngrams))
+        else:
+            ttr_scores.append(0.0)
+
+    return ttr_scores
+
+
+def _count_subsequence(token_ids: list[int], pattern: list[int]) -> int:
+    if not pattern or len(pattern) > len(token_ids):
+        return 0
+    pattern_len = len(pattern)
+    return sum(1 for idx in range(len(token_ids) - pattern_len + 1) if token_ids[idx : idx + pattern_len] == pattern)
+
+
+def _masked_token_lists(tokens: torch.Tensor, mask: torch.Tensor) -> list[list[int]]:
+    tokens_cpu = tokens.detach().cpu()
+    mask_cpu = mask.detach().cpu().bool()
+    return [row[row_mask].tolist() for row, row_mask in zip(tokens_cpu, mask_cpu, strict=True)]
+
+
+def compute_generation_sample_metrics(
+    batch: DataProto,
+    tokenizer: Any | None = None,
+    prompt_thinking_start_tokens: set[str] | None = None,
+) -> dict[str, list[float]]:
+    """Compute token-level diagnostics for generated responses without decoding them."""
+    if "response_mask" in batch.batch:
+        response_mask = batch.batch["response_mask"]
+    else:
+        response_mask = _compute_response_info(batch)["response_mask"]
+
+    response_token_lists = _masked_token_lists(batch.batch["responses"], response_mask)
+    response_lengths = [len(token_ids) for token_ids in response_token_lists]
+    ttr_scores = [ttr_chunked(token_ids) for token_ids in response_token_lists]
+    ttrs = [float(np.mean(scores)) if scores else 0.0 for scores in ttr_scores]
+    max_response_length = batch.batch["responses"].shape[-1]
+
+    sample_metrics: dict[str, list[float]] = {
+        "response_length": [float(length) for length in response_lengths],
+        "response_length_clipped": [float(length == max_response_length) for length in response_lengths],
+        "degeneration_ttr": [float(ttr) for ttr in ttrs],
+        "degeneration_score": [
+            float(any(ttr < DEGENERATION_TTR_THRESHOLD for ttr in scores) if scores else True)
+            for scores in ttr_scores
+        ],
+    }
+
+    if tokenizer is None:
+        return sample_metrics
+
+    thinking_token_ids = {
+        name: tokenizer.encode(token, add_special_tokens=False) for name, token in THINKING_TOKEN_SPECS.items()
+    }
+    prompt_thinking_start_tokens = set(prompt_thinking_start_tokens or [])
+    prompt_thinking_start_names = {
+        name for name, token in THINKING_TOKEN_SPECS.items() if token in prompt_thinking_start_tokens
+    }
+
+    prompt_token_lists = None
+    if "prompts" in batch.batch and "attention_mask" in batch.batch:
+        response_width = batch.batch["responses"].shape[-1]
+        prompt_mask = batch.batch["attention_mask"][:, :-response_width]
+        prompt_token_lists = _masked_token_lists(batch.batch["prompts"], prompt_mask)
+
+    counts: dict[str, list[int]] = {name: [] for name in THINKING_TOKEN_SPECS}
+    prompt_start_counts: dict[str, list[int]] = {"think_start": [], "inner_prefix": []}
+
+    for sample_idx, token_ids in enumerate(response_token_lists):
+        for name, pattern in thinking_token_ids.items():
+            counts[name].append(_count_subsequence(token_ids, pattern))
+
+        prompt_token_ids = [] if prompt_token_lists is None else prompt_token_lists[sample_idx]
+        for name in prompt_start_counts:
+            if name in prompt_thinking_start_names:
+                prompt_start_counts[name].append(_count_subsequence(prompt_token_ids, thinking_token_ids[name]))
+            else:
+                prompt_start_counts[name].append(0)
+
+    for name, count_values in counts.items():
+        sample_metrics[f"thinking_{name}_count"] = [float(value) for value in count_values]
+        sample_metrics[f"thinking_{name}_present"] = [float(value > 0) for value in count_values]
+
+    think_start_present = [
+        response_count > 0 or prompt_count > 0
+        for response_count, prompt_count in zip(counts["think_start"], prompt_start_counts["think_start"], strict=True)
+    ]
+    inner_start_present = [
+        response_count > 0 or prompt_count > 0
+        for response_count, prompt_count in zip(
+            counts["inner_prefix"], prompt_start_counts["inner_prefix"], strict=True
+        )
+    ]
+    think_end_present = [count > 0 for count in counts["think_end"]]
+    inner_end_present = [count > 0 for count in counts["inner_suffix"]]
+
+    think_consistent = [
+        not has_end or has_start for has_end, has_start in zip(think_end_present, think_start_present, strict=True)
+    ]
+    inner_consistent = [
+        not has_end or has_start for has_end, has_start in zip(inner_end_present, inner_start_present, strict=True)
+    ]
+    any_thinking_token = [any(counts[name][idx] > 0 for name in THINKING_TOKEN_SPECS) for idx in range(len(ttrs))]
+
+    sample_metrics.update(
+        {
+            "thinking_think_pair_consistent": [float(value) for value in think_consistent],
+            "thinking_inner_pair_consistent": [float(value) for value in inner_consistent],
+            "thinking_all_pairs_consistent": [
+                float(think_ok and inner_ok)
+                for think_ok, inner_ok in zip(think_consistent, inner_consistent, strict=True)
+            ],
+            "thinking_think_pair_inconsistent": [float(not value) for value in think_consistent],
+            "thinking_inner_pair_inconsistent": [float(not value) for value in inner_consistent],
+            "thinking_any_token_present": [float(value) for value in any_thinking_token],
+        }
+    )
+
+    return sample_metrics
+
+
+def aggregate_generation_sample_metrics(
+    sample_metrics: dict[str, list[float]],
+    prefix: str = "",
+    include_response_length: bool = True,
+) -> dict[str, float]:
+    metrics: dict[str, float] = {}
+
+    def metric_name(name: str) -> str:
+        return f"{prefix}{name}" if prefix else name
+
+    ttr = np.asarray(sample_metrics.get("degeneration_ttr", []), dtype=np.float64)
+    if ttr.size:
+        metrics.update(
+            {
+                metric_name("degeneration/ttr_mean"): float(np.mean(ttr)),
+                metric_name("degeneration/ttr_median"): float(np.median(ttr)),
+                metric_name("degeneration/ttr_p75"): float(np.percentile(ttr, 75)),
+                metric_name("degeneration/ttr_p90"): float(np.percentile(ttr, 90)),
+            }
+        )
+
+    degeneration_score = np.asarray(sample_metrics.get("degeneration_score", []), dtype=np.float64)
+    if degeneration_score.size:
+        metrics[metric_name("degeneration/score")] = float(np.mean(degeneration_score))
+
+    if include_response_length:
+        response_length = np.asarray(sample_metrics.get("response_length", []), dtype=np.float64)
+        if response_length.size:
+            metrics[metric_name("response_length/mean")] = float(np.mean(response_length))
+        response_length_clipped = np.asarray(sample_metrics.get("response_length_clipped", []), dtype=np.float64)
+        if response_length_clipped.size:
+            metrics[metric_name("response_length/clip_ratio")] = float(np.mean(response_length_clipped))
+
+    for key, values in sample_metrics.items():
+        if not key.startswith("thinking_"):
+            continue
+        array = np.asarray(values, dtype=np.float64)
+        if not array.size:
+            continue
+        metric_key = key.removeprefix("thinking_")
+        if metric_key.endswith("_count"):
+            metric_prefix = metric_key.removesuffix("_count")
+            metrics[metric_name(f"thinking/{metric_prefix}/count_mean")] = float(np.mean(array))
+        elif metric_key.endswith("_present"):
+            metric_prefix = metric_key.removesuffix("_present")
+            metrics[metric_name(f"thinking/{metric_prefix}/present_ratio")] = float(np.mean(array))
+        else:
+            metrics[metric_name(f"thinking/{metric_key}/ratio")] = float(np.mean(array))
+
+    return metrics
 
 
 def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str, Any]:
