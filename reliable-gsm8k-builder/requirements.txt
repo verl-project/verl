@@ -1,0 +1,17 @@
+# Core dataset and parsing dependencies
+datasets>=2.20.0
+sympy>=1.13.0
+
+# Local model backends
+torch>=2.8.0
+transformers>=4.49.0
+accelerate>=0.34.0
+sentencepiece>=0.2.0
+
+# Local build/runtime helpers
+packaging>=24.0
+psutil>=5.9.0
+ninja>=1.11.1
+
+# Optional, installed separately on Linux when wanted:
+# ./run/install_flash_attn.sh

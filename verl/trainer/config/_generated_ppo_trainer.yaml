@@ -845,6 +845,9 @@ trainer:
   val_before_train: true
   val_only: false
   test_freq: -1
+  early_stop_metric: null
+  early_stop_patience: 0
+  early_stop_mode: null
   critic_warmup: 0
   default_hdfs_dir: null
   del_local_ckpt_after_load: false

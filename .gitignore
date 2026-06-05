@@ -131,3 +131,7 @@ logs
 log
 outputs
 .history
+.hf
+reliable-gsm8k-builder/runs/*
+.venv-evals
+evals/oe_mc_eval_05_02_26/*.json
