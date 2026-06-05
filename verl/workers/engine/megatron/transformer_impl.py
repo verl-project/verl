@@ -751,6 +751,18 @@ class MegatronEngine(BaseEngine):
     def disable_adapter(self) -> ContextManager:
         return self.peft_cls.disable_adapter(self.module)
 
+    def suspend_nccl_comms(self, *, measure_per_comm: bool = False):
+        """Suspend Megatron NCCL comms. Gracefully no-ops on NCCL < 2.29.7."""
+        from verl.workers.engine.megatron.utils import suspend_via_parallel_state
+
+        return suspend_via_parallel_state(measure_per_comm=measure_per_comm)
+
+    def resume_nccl_comms(self, *, measure_per_comm: bool = False):
+        """Resume comms suspended by ``suspend_nccl_comms``. Idempotent."""
+        from verl.workers.engine.megatron.utils import resume_via_parallel_state
+
+        return resume_via_parallel_state(measure_per_comm=measure_per_comm)
+
     def forward_step(self, batch_iter, model, logits_processor_func, postprocess_micro_batch_func):
         raise NotImplementedError("forward_step must be implemented in subclass")
 

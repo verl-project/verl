@@ -24,6 +24,7 @@ from verl.single_controller.base.decorator import Dispatch, register
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.utils.distributed import initialize_global_process_group_ray
 from verl.utils.import_utils import import_external_libs
+from verl.utils.nccl_suspend import log_aggregate_summary
 from verl.utils.ray_utils import auto_await
 from verl.workers.config import CheckpointEngineConfig, HFModelConfig, RolloutConfig
 from verl.workers.rollout import BaseRollout, RolloutReplica, get_rollout_class
@@ -369,6 +370,8 @@ class CheckpointEngineManager:
         config: The checkpoint engine config.
         trainer: The trainer worker group.
         replicas: The list of rollout replicas.
+        suspend_nccl_comms: If True, release idle training NCCL comms at phase
+            boundaries (requires HYBRID/COLOCATED rollout).
     """
 
     def __init__(
@@ -376,6 +379,7 @@ class CheckpointEngineManager:
         config: CheckpointEngineConfig,
         trainer: RayWorkerGroup,
         replicas: list[RolloutReplica],
+        suspend_nccl_comms: bool = False,
     ) -> None:
         self.config = config
         self.backend = config.backend
@@ -383,6 +387,42 @@ class CheckpointEngineManager:
         self.backend_cls = CheckpointEngineRegistry.get(config.backend)
         self.trainer = trainer
         self.replicas = replicas
+        self.suspend_nccl_comms_enabled: bool = suspend_nccl_comms
+
+    def _validate_suspend_mode_compat(self) -> None:
+        """Raise if suspend_nccl_comms is requested but rollout is STANDALONE.
+
+        The feature only frees memory when trainer and rollout share GPUs
+        (HYBRID / COLOCATED). All replicas share one mode, so checking the
+        first one is enough. Called just-in-time from suspend/resume so
+        replicas added after __init__ (elastic scale-up) are also validated.
+        """
+        if not self.replicas:
+            return
+        from verl.workers.rollout.replica import RolloutMode
+
+        if self.replicas[0].rollout_mode is RolloutMode.STANDALONE:
+            raise ValueError(
+                "suspend_nccl_comms=True is not supported with STANDALONE rollout: "
+                "nothing on trainer GPUs consumes the freed memory. "
+                "Use HYBRID/COLOCATED rollout or set the flag to False."
+            )
+
+    def _suspend_training_nccl_comms(self) -> None:
+        """Fan out a suspend RPC to every training worker, aggregate to one INFO line."""
+        if not self.suspend_nccl_comms_enabled:
+            return
+        self._validate_suspend_mode_compat()
+        results = self.trainer.suspend_training_nccl_comms()
+        log_aggregate_summary("suspend", results, size_attr="freed_mb", size_verb="freed")
+
+    def _resume_training_nccl_comms(self) -> None:
+        """Reverse of ``_suspend_training_nccl_comms``."""
+        if not self.suspend_nccl_comms_enabled:
+            return
+        self._validate_suspend_mode_compat()
+        results = self.trainer.resume_training_nccl_comms()
+        log_aggregate_summary("resume", results, size_attr="reclaimed_mb", size_verb="reclaimed")
 
     def build_process_group(self, rollout: RayWorkerGroup):
         """Build process group for trainer and rollout replicas."""
@@ -430,8 +470,12 @@ class CheckpointEngineManager:
 
     @auto_await
     async def sleep_replicas(self):
-        """Sleep all rollout replicas: free weight and kv_cache device memory."""
+        """Sleep all rollout replicas: free weight and kv_cache device memory.
+
+        Also resumes training-side NCCL comms if ``suspend_nccl_comms`` is on.
+        """
         await asyncio.gather(*[r.sleep() for r in self.replicas])
+        self._resume_training_nccl_comms()
 
     @auto_await
     async def wake_up_replicas(self):
@@ -477,6 +521,8 @@ class CheckpointEngineManager:
         # 0. update weights for sync training with colocated trainer and rollout
         if self.backend == "naive":
             ray.get(self.trainer.update_weights(global_steps=global_steps, mode=self.backend))
+            # Trainer is done; rollout is invoked by the caller next — release training comms first.
+            self._suspend_training_nccl_comms()
             return
 
         # 1. abort and save all unfinished requests for partial rollout
@@ -506,6 +552,9 @@ class CheckpointEngineManager:
             trainer.execute_checkpoint_engine(["finalize"] * trainer.world_size)
             + rollout.execute_checkpoint_engine(["finalize"] * rollout.world_size)
         )
+
+        # Release before rollout wakes so kv_cache restore has the memory.
+        self._suspend_training_nccl_comms()
 
         # 7. restore kv_cache after weight sync
         await self.resume_kv_cache_replicas()

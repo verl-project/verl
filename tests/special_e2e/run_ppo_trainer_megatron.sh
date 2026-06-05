@@ -158,6 +158,11 @@ else
     ENABLE_ROLLOUT_ROUTING_REPLAY=False
 fi
 
+# Opt into NCCL communicator suspend/resume during the rollout phase. Defaults
+# off so existing CI jobs are unaffected. Requires the CI image to ship
+# NCCL >= 2.29.7 (no-op at runtime if libnccl lacks ncclCommSuspend).
+SUSPEND_NCCL_COMMS=${SUSPEND_NCCL_COMMS:-False}
+
 common_params=(
     algorithm.adv_estimator="${ADV_ESTIMATOR}"
     data.train_files="${TRAIN_FILES}"
@@ -199,6 +204,7 @@ common_params=(
     actor_rollout_ref.actor.megatron.grad_offload=${ACTOR_GRAD_OFFLOAD}
     actor_rollout_ref.actor.megatron.use_dist_checkpointing=${USE_DIST_CKPT}
     actor_rollout_ref.actor.megatron.dist_checkpointing_path=${DIST_CKPT_PATH}
+    actor_rollout_ref.actor.suspend_nccl_comms=${SUSPEND_NCCL_COMMS}
     actor_rollout_ref.actor.use_kl_loss=True
     actor_rollout_ref.actor.kl_loss_coef=0.001
     actor_rollout_ref.actor.kl_loss_type=low_var_kl

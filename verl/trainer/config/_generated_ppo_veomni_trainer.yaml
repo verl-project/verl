@@ -146,6 +146,7 @@ actor_rollout_ref:
       - re:.*mlp.gate$
       activation_observer: static_minmax
       quantization_config_path: null
+    suspend_nccl_comms: false
     use_remove_padding: ${oc.select:actor_rollout_ref.model.use_remove_padding,false}
   ref:
     rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}

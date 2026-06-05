@@ -745,6 +745,20 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self.base_sync_done = True
         set_expandable_segments(True)
 
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def suspend_training_nccl_comms(self):
+        """RPC entry: forward to ``BaseEngine.suspend_nccl_comms``."""
+        if self.actor is None:
+            return None
+        return self.actor.engine.suspend_nccl_comms()
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def resume_training_nccl_comms(self):
+        """RPC entry: forward to ``BaseEngine.resume_nccl_comms``."""
+        if self.actor is None:
+            return None
+        return self.actor.engine.resume_nccl_comms()
+
     @register(dispatch_mode=Dispatch.DP_COMPUTE, blocking=False)
     def execute_checkpoint_engine(self, method: str, *args, **kwargs):
         """Execute checkpoint engine method.

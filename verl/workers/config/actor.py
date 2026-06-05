@@ -192,6 +192,9 @@ class ActorConfig(BaseConfig):
     # global_batch_size: global batch size
     global_batch_info: dict = field(default_factory=dict)
     qat: QATConfig = field(default_factory=QATConfig)
+    # Release idle training NCCL comms between rollout/training phases to free
+    # GPU memory for KV cache. Requires NCCL >= 2.29.7; engine support varies.
+    suspend_nccl_comms: bool = False
 
     def __post_init__(self):
         """Validate actor configuration parameters."""

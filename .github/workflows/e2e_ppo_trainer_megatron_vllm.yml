@@ -194,6 +194,10 @@ jobs:
         run: |
           ray stop --force
           ALL_OFFLOAD=True VAL_BEFORE_TRAIN=True TEST_FREQ=1 SAVE_FREQ=1 LR_WARMUP_STEPS=1 TOTAL_TRAIN_STEPS=2 MODEL_ID=Qwen/Qwen3-0.6B bash tests/special_e2e/run_ppo_trainer_megatron.sh
+      - name: Running GSM8K E2E training tests with 3D parallelism on 8 L20 GPUs with Megatron (Qwen3) and NCCL suspend/resume
+        run: |
+          ray stop --force
+          SUSPEND_NCCL_COMMS=True TOTAL_TRAIN_STEPS=2 MODEL_ID=Qwen/Qwen3-0.6B bash tests/special_e2e/run_ppo_trainer_megatron.sh
       - name: Running GSM8K E2E training tests with 3D parallelism on 8 L20 GPUs with FP8 rollout
         run: |
           ray stop --force
