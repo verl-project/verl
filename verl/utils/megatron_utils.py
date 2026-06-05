@@ -1525,9 +1525,9 @@ def _set_mtp_num_layers(hf_config, value: int):
     """Set MTP layer count in the appropriate config field."""
     if hasattr(hf_config, "num_nextn_predict_layers"):
         hf_config.num_nextn_predict_layers = value
-    elif hasattr(hf_config, "mtp_num_hidden_layers"):
+    if hasattr(hf_config, "mtp_num_hidden_layers"):
         hf_config.mtp_num_hidden_layers = value
-    elif hasattr(hf_config, "text_config") and hasattr(hf_config.text_config, "mtp_num_hidden_layers"):
+    if hasattr(hf_config, "text_config") and hasattr(hf_config.text_config, "mtp_num_hidden_layers"):
         hf_config.text_config.mtp_num_hidden_layers = value
 
 
@@ -1536,21 +1536,25 @@ def check_mtp_config(model_config: HFModelConfig, engine_config: McoreEngineConf
     Check and configure MTP (Multi-Token Prediction) settings.
 
     Cases:
-        - mtp.enable == False and no MTP layers: return directly
-        - mtp.enable == False and has MTP layers: set num_nextn_predict_layers = 0
-        - mtp.enable == True and has MTP layers: configure override_transformer_config
+        - mtp.enable == False and no MTP layers: force provider MTP config to None
+        - mtp.enable == False and has MTP layers: clear HF MTP fields and force provider MTP config to None
         - mtp.enable == True and no MTP layers: raise ValueError
+        - mtp.enable == True and has MTP layers: configure override_transformer_config
     """
     hf_config = model_config.hf_config
     mtp_num_layers = _get_mtp_num_layers(hf_config)
     has_mtp = mtp_num_layers > 0
     enable_mtp = model_config.mtp.enable
 
-    if not enable_mtp and not has_mtp:
-        return
-    elif not enable_mtp and has_mtp:
+    if not enable_mtp:
         _set_mtp_num_layers(hf_config, 0)
-        engine_config.override_transformer_config["mtp_num_layers"] = 0
+
+        # The non-vanilla Megatron-Bridge path reloads the HF config from local_path.
+        # Force the provider override so MTP remains disabled after that reload.
+        engine_config.override_transformer_config["mtp_num_layers"] = None
+        engine_config.override_transformer_config.pop("mtp_loss_scaling_factor", None)
+        return
+
     elif enable_mtp and not has_mtp:
         raise ValueError("enable mtp while model has no mtp layer, please use a model with mtp layer")
     elif enable_mtp and has_mtp:
