@@ -65,6 +65,11 @@ trigger_parameter_sync_step=4
 partial_rollout=True
 use_trainer_do_validate=False
 
+SKIP_ENABLE=True
+SKIP_DUMP_DIR=${SKIP_DUMP_DIR:-${HOME}/data/rollout_dump_async}
+SKIP_STEPS='[1]'
+SKIP_ACTION=cache
+
 exp_name="$(basename "${MODEL_ID,,}")-fully-async-policy-${rollout_name}-${ACTOR_STRATEGY}-minimal"
 
 echo "Running fully_async_policy with ${ACTOR_STRATEGY} strategy"
@@ -139,6 +144,10 @@ common_params=(
     async_training.use_trainer_do_validate=${use_trainer_do_validate}
     actor_rollout_ref.rollout.checkpoint_engine.backend='nccl'
     actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=1024
+    skip.async_rollout.enable=${SKIP_ENABLE}
+    skip.async_rollout.dump_dir=${SKIP_DUMP_DIR}
+    skip.async_rollout.steps=${SKIP_STEPS}
+    skip.async_rollout.action=${SKIP_ACTION}
 )
 
     # Detect device
@@ -230,4 +239,3 @@ else
 fi
 
 echo "Fully async policy E2E test completed successfully with ${ACTOR_STRATEGY} strategy"
-

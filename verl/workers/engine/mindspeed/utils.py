@@ -221,3 +221,20 @@ def gpt_model_provider(pre_process=True, post_process=True):
     )
 
     return model
+
+
+def reset_fp8_reuse_quantized_weight(engine, device: str, model: bool, optimizer: bool, grad: bool):
+    override_config = getattr(engine.engine_config, "override_transformer_config", None)
+    if override_config and override_config.get("fp8_reuse_quantized_weight", False):
+        from mindspeed.te.pytorch.fp8.reuse import (
+            clear_weight_quantization_reuse_cache,
+            set_weight_release_enabled,
+        )
+
+        # clear quantized weights on NPU
+        clear_weight_quantization_reuse_cache(release_storage=True)
+
+        # enable release high-precision weights only when all modules are in training mode. For ref model,
+        # we need to keep its high-precision weights for offloading. For actor_update model, the high-precision
+        # weights will be released if possible, and then recovered before optimizer step
+        set_weight_release_enabled(getattr(engine, "mode", None) == "train")

@@ -115,8 +115,6 @@ verl 通过层级化的 YAML 配置文件管理所有参数，涉及到的所有
 | `actor_rollout_ref.rollout.over_sample_rate` | `0` | 过采样率 |
 | `actor_rollout_ref.rollout.multi_stage_wake_up` | `false` | 是否启用多阶段唤醒 |
 | `actor_rollout_ref.rollout.calculate_log_probs` | `false` | 是否在 rollout 阶段计算 log probs |
-| `actor_rollout_ref.rollout.skip_rollout` | `false` | 是否跳过 rollout |
-| `actor_rollout_ref.rollout.skip_dump_dir` | `/tmp/rollout_dump` | 跳过 rollout 时的 dump 目录 |
 | `actor_rollout_ref.rollout.skip_tokenizer_init` | `true` | 是否跳过分词器初始化 |
 | `actor_rollout_ref.rollout.enable_rollout_routing_replay` | `false` | 是否启用 rollout 路由重放 |
 | `actor_rollout_ref.rollout.quantization` | `null` | 量化方式 |

@@ -652,10 +652,9 @@ class VeOmniEngine(FSDPEngine):
         if self._is_offload_param:
             offload_veomni_model_to_cpu(self.module)
 
-        device = get_device_id()
         ps = parallel_state.get_parallel_state()
         model_type = getattr(self.module.config, "model_type", "default")
-        process_func = MOE_PARAM_HANDERS.get(model_type, lambda n, t: iter([(n, t)]))
+        process_func = MOE_PARAM_HANDERS.get(model_type, lambda n, t, ep_rank: iter([(n, t)]))
 
         def param_generator():
             for name, param in params.items():
@@ -665,18 +664,16 @@ class VeOmniEngine(FSDPEngine):
                 is_proj = any(p in name for p in ["down_proj", "gate_proj", "up_proj", "gate_up_proj"])
 
                 if is_expert_layer and is_proj and ps.ep_enabled:
-                    output_shape = list(unsharded_tensor.shape)
-                    output_shape[0] *= ps.extra_parallel_sizes["ep"]
-                    stacked_tensor = torch.empty(output_shape, dtype=unsharded_tensor.dtype, device=device)
+                    ep_rank, ep_size = ps.ep_rank, ps.ep_size
+                    buffer = torch.empty_like(unsharded_tensor)  # [num_experts/ep_size, H, I]
+                    for src_ep_rank in range(ep_size):
+                        tensor = unsharded_tensor if src_ep_rank == ep_rank else buffer
+                        torch.distributed.broadcast(tensor, group_src=src_ep_rank, group=ps.ep_group)
+                        yield from process_func(name, tensor, ep_rank=src_ep_rank)
 
-                    # all gather expert tensors [32, H, I] -> [128, H, I]
-                    torch.distributed.all_gather_into_tensor(stacked_tensor, unsharded_tensor, group=ps.ep_group)
-                    yield from process_func(name, stacked_tensor)
-
-                    del stacked_tensor
                 else:
                     if is_expert_layer:
-                        yield from process_func(name, unsharded_tensor)
+                        yield from process_func(name, unsharded_tensor, ep_rank=0)
                     else:
                         yield name, unsharded_tensor
 

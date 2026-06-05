@@ -108,9 +108,8 @@ def is_fp8_weight(name, model):
 def is_mxfp8_vllm_ascend(quant_config):
     try:
         from vllm_ascend.quantization.modelslim_config import AscendModelSlimConfig
-        from vllm_ascend.quantization.quant_config import AscendQuantConfig
 
-        if isinstance(quant_config, AscendModelSlimConfig) or isinstance(quant_config, AscendQuantConfig):
+        if isinstance(quant_config, AscendModelSlimConfig):
             quant_method = quant_config.quant_description.get("quant_method")
             return quant_method in ["ascend"]
         return False
