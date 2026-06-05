@@ -486,10 +486,20 @@ class AgentLoopWorker:
         trajectory_info = await get_trajectory_info(
             batch.meta_info.get("global_steps", -1), index.tolist(), batch.meta_info.get("validate", False)
         )
+        rollout_n_override = batch.meta_info.get("rollout_n")
+        if rollout_n_override is not None:
+            if not isinstance(rollout_n_override, list | tuple | np.ndarray):
+                rollout_n_override = [rollout_n_override] * len(batch)
+            if len(rollout_n_override) != len(batch):
+                raise ValueError(
+                    f"rollout_n override length mismatch: got {len(rollout_n_override)}, expected {len(batch)}"
+                )
+            for i, rollout_n in enumerate(rollout_n_override):
+                trajectory_info[i]["rollout_n"] = int(rollout_n)
 
         tasks = []
         # Limit concurrency to avoid exhausting desktop-env container pools.
-        # Training rollouts are gated by FullyAsyncRollouter.max_concurrent_samples,
+        # Training rollouts are gated by FullyAsyncRollouter.max_concurrent_rollouts,
         # but generate_sequences (used by validation) launches all samples at once.
         # The semaphore caps the number of concurrent agent loops (each holds an
         # env session). Falls back to batch size when running on a single worker.

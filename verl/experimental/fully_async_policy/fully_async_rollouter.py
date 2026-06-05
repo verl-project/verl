@@ -64,6 +64,18 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
         output_future = worker.generate_sequences.remote(prompts)
         return await asyncio.wrap_future(output_future.future())
 
+    async def generate_sequence_row(self, prompt: DataProto, rollout_n: int) -> DataProto:
+        """Dispatch one rollout row to an agent loop worker."""
+        if len(prompt) != 1:
+            raise ValueError(f"generate_sequence_row expects exactly one row, got {len(prompt)}")
+
+        row = prompt.select(deepcopy=True)
+        row.meta_info = dict(row.meta_info)
+        row.meta_info["rollout_n"] = [rollout_n]
+        worker = self._select_best_worker()
+        output_future = worker.generate_sequences.remote(row)
+        return await asyncio.wrap_future(output_future.future())
+
     def _select_best_worker(self):
         """Select the best worker, simple round-robin load balancing"""
         if not hasattr(self, "_worker_index"):
@@ -194,6 +206,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         self.required_samples = config.actor_rollout_ref.actor.ppo_mini_batch_size * self.require_batches
         self.max_required_samples = None
         self.max_concurrent_samples = None
+        self.max_concurrent_rollouts = None
         # queue size
         self.max_queue_size = None
 
@@ -219,6 +232,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         self.pending_queue = asyncio.Queue(maxsize=128)
         self.active_tasks = set()
         self.postprocess_tasks = set()
+        self.rollout_semaphore = None
 
         cpu_cores = multiprocessing.cpu_count()
         # cpu case use cpu_cores; io case use cpu_cores*2
@@ -251,22 +265,18 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
                 / (self.required_samples * self.config.async_training.trigger_parameter_sync_step)
             )
 
-            self.max_concurrent_samples = len(self.llm_server_manager.get_replicas()) * 16
-            self.max_concurrent_samples = min(self.max_concurrent_samples, self.max_required_samples)
-            # Optional user-provided hard cap on in-flight rollouts, e.g. to
-            # respect an external resource limit such as a desktop-env service
-            # that only allows N concurrent sessions. 0 or unset = no extra cap.
-            #
-            # NOTE: `max_concurrent_samples` is prompt-level (one "sample" == one
-            # RolloutSample == one prompt expanded to n rollouts), while `user_cap`
-            # is the real rollout-level concurrency the external service sees
-            # (each rollout occupies one desktop session). Convert by dividing
-            # by rollout.n so the actual in-flight rollouts stay under user_cap.
+            rollout_n = int(self.config.actor_rollout_ref.rollout.get("n", 1) or 1)
+            self.max_concurrent_samples = self.max_required_samples
+            # Optional user-provided hard cap on in-flight rollout trajectories,
+            # e.g. to respect an external desktop-env service limit. Sample-level
+            # batching is still preserved for MQ/trainer; only env acquisition is
+            # gated at trajectory level.
             user_cap = int(self.config.async_training.get("max_concurrent_rollouts", 0) or 0)
             if user_cap > 0:
-                rollout_n = int(self.config.actor_rollout_ref.rollout.get("n", 1) or 1)
-                sample_cap = max(1, user_cap // rollout_n)
-                self.max_concurrent_samples = min(self.max_concurrent_samples, sample_cap)
+                self.max_concurrent_rollouts = user_cap
+            else:
+                self.max_concurrent_rollouts = max(1, self.max_concurrent_samples * rollout_n)
+            self.rollout_semaphore = asyncio.Semaphore(self.max_concurrent_rollouts)
             self.max_queue_size = self.max_required_samples
 
             logger.info(
@@ -276,6 +286,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
                 "total_train_steps: %s "
                 "total_rollout_steps: %s "
                 "max_concurrent_samples: %s "
+                "max_concurrent_rollouts: %s "
                 "user_cap(rollout-level): %d "
                 "rollout.n: %d ",
                 self.required_samples,
@@ -284,8 +295,9 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
                 self.total_train_steps,
                 self.total_rollout_steps,
                 self.max_concurrent_samples,
+                self.max_concurrent_rollouts,
                 user_cap,
-                int(self.config.actor_rollout_ref.rollout.get("n", 1) or 1),
+                rollout_n,
             )
 
     def get_replicas(self):
@@ -675,9 +687,48 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         samples accumulate against ``max_required_samples`` and the rollouter
         can wedge into ``paused`` even though no real samples are in flight.
         """
-        # Calling asynchronous generation methods
+
+        def _drop_sample():
+            self.dropped_stale_samples += 1
+            self.processed_sample_count += 1
+            self.staleness_samples = max(0, self.staleness_samples - 1)
+
         try:
-            ret = await self.async_rollout_manager.generate_sequences_single(rollout_sample.full_batch)
+            await self._process_single_sample_rollouts(rollout_sample, _drop_sample)
+        except Exception as exc:
+            logger.exception(
+                "[POTENTIAL ERROR][FullyAsyncRollouter] _process_single_sample_streaming dropped "
+                "sample_id=%s due to unexpected aggregation failure: %r",
+                rollout_sample.sample_id,
+                exc,
+            )
+            _drop_sample()
+
+    async def _process_single_sample_rollouts(
+        self,
+        rollout_sample: RolloutSample,
+        _drop_sample,
+    ):
+        """Run rollout rows independently, then aggregate successful rows back into one sample."""
+
+        if self.rollout_semaphore is None:
+            cap = self.max_concurrent_rollouts or len(rollout_sample.full_batch)
+            self.rollout_semaphore = asyncio.Semaphore(max(1, int(cap)))
+
+        async def _run_one_rollout(row_idx: int) -> DataProto:
+            async with self.rollout_semaphore:
+                row_batch = rollout_sample.full_batch.slice(row_idx, row_idx + 1)
+                return await self.async_rollout_manager.generate_sequence_row(row_batch, rollout_n=row_idx)
+
+        try:
+            rollout_tasks = []
+            for row_idx in range(len(rollout_sample.full_batch)):
+                task = asyncio.create_task(
+                    _run_one_rollout(row_idx),
+                    name=f"{rollout_sample.sample_id}_rollout_{row_idx}",
+                )
+                rollout_tasks.append(task)
+            raw_outputs = await asyncio.gather(*rollout_tasks, return_exceptions=True)
         except Exception as exc:
             # Entire sample failed (e.g. every rollout hit a fatal tool error
             # and was discarded). Skip put_sample so the downstream trainer
@@ -685,14 +736,50 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
             # single failed sample must not kill the whole rollouter.
             logger.error(
                 "[POTENTIAL ERROR][FullyAsyncRollouter] _process_single_sample_streaming dropped "
-                "sample_id=%s due to generate_sequences_single failure: %r",
+                "sample_id=%s due to row rollout dispatch failure: %r",
                 rollout_sample.sample_id,
                 exc,
             )
-            self.dropped_stale_samples += 1
-            self.processed_sample_count += 1
-            self.staleness_samples = max(0, self.staleness_samples - 1)
+            _drop_sample()
             return
+
+        valid_outputs = []
+        n_exceptions = 0
+        n_empty = 0
+        for output in raw_outputs:
+            if isinstance(output, BaseException):
+                n_exceptions += 1
+                logger.error(
+                    "[POTENTIAL ERROR][FullyAsyncRollouter] sample_id=%s rollout task failed: %r",
+                    rollout_sample.sample_id,
+                    output,
+                )
+                continue
+            if output.batch is None or len(output) == 0 or output.meta_info.get("all_rollouts_failed", False):
+                n_empty += 1
+                continue
+            valid_outputs.append(output)
+
+        if not valid_outputs:
+            logger.error(
+                "[POTENTIAL ERROR][FullyAsyncRollouter] _process_single_sample_streaming dropped "
+                "sample_id=%s: empty batch (all rollouts failed; exceptions=%d, empty=%d)",
+                rollout_sample.sample_id,
+                n_exceptions,
+                n_empty,
+            )
+            _drop_sample()
+            return
+
+        ret = DataProto.concat(valid_outputs)
+        metrics = []
+        for output in valid_outputs:
+            item_metrics = output.meta_info.get("metrics", [])
+            if isinstance(item_metrics, dict):
+                metrics.append(item_metrics)
+            else:
+                metrics.extend(item_metrics)
+        ret.meta_info["metrics"] = metrics
         rollout_sample.full_batch = ret
 
         # If all rollouts in this sample were discarded (e.g. env creation
@@ -703,9 +790,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
                 "sample_id=%s: empty batch (all rollouts failed)",
                 rollout_sample.sample_id,
             )
-            self.dropped_stale_samples += 1
-            self.processed_sample_count += 1
-            self.staleness_samples = max(0, self.staleness_samples - 1)
+            _drop_sample()
             return
 
         rollout_sample.full_batch.non_tensor_batch["uid"] = np.array(
@@ -792,8 +877,10 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
 
         # Start the streaming loop
         logger.info(
-            "[FullyAsyncRollouter] Start streaming mode, maximum concurrent samples: %s",
+            "[FullyAsyncRollouter] Start streaming mode, maximum concurrent samples: %s, "
+            "maximum concurrent rollouts: %s",
             self.max_concurrent_samples,
+            self.max_concurrent_rollouts,
         )
 
         # Start sample feed coroutine, streaming process coroutine
@@ -966,6 +1053,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
             "static/staleness_threshold": self.staleness_threshold,
             "static/max_queue_size": self.max_queue_size,
             "static/max_concurrent_samples": self.max_concurrent_samples,
+            "static/max_concurrent_rollouts": self.max_concurrent_rollouts,
         }
 
         return stats
