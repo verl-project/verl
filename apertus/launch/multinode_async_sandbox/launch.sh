@@ -79,7 +79,7 @@ resolve_run_name_and_dir() {
   fi
 
   if [[ -z "${JOB_NAME}" ]]; then
-    JOB_NAME="async_sandbox_${CONFIG_NAME}_${group_filtering_tag}${model_tag}_train${TRAIN_NNODES}n_rollout${ROLLOUT_NNODES}n_s${SEED}${thinking_tag}"
+    JOB_NAME="async__${CONFIG_NAME}_${group_filtering_tag}${model_tag}_${TRAIN_NNODES}tn-${ROLLOUT_NNODES}rn__s${SEED}${thinking_tag}"
   fi
   JOB_NAME="$(sanitize_job_name "${JOB_NAME}")"
   RUN_NAME="${JOB_NAME}__$(date +%Y%m%d-%H%M%S)"

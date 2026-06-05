@@ -142,8 +142,6 @@ trainer:
   val_before_train: false # TODO: modify
   default_local_dir: ./outputs/${trainer.project_name}/${trainer.experiment_name}
   validation_data_dir: ${trainer.default_local_dir}/validation/
-  rollout_data_dir: ${trainer.default_local_dir}/rollouts
-
 
 ray_kwargs:
   ray_init:

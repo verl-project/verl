@@ -13,18 +13,11 @@
 # limitations under the License.
 
 import multiprocessing
+import os
+import sys
 import threading
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
-
-try:
-    from math_verify.errors import TimeoutException
-except ImportError:
-
-    class TimeoutException(Exception):
-        pass
-
-    print("To use Math-Verify, please install it first by running `pip install math-verify`.")
 
 _pool = None
 _pool_lock = threading.Lock()
@@ -41,6 +34,25 @@ def _get_pool():
 
 def _verify_in_subprocess(ground_truth_boxed: str, model_output: str) -> float:
     """Run math_verify in a subprocess where signal.alarm() works."""
+    # TODO: Find a better dependency isolation strategy 
+    # This patch forces subprocesses to load math_verify
+    # from the shared path instead of whatever Ray/container imports first
+    math_verify_pythonpath = os.environ.get("MATH_VERIFY_PYTHONPATH")
+    if math_verify_pythonpath:
+        for path in reversed(math_verify_pythonpath.split(os.pathsep)):
+            if path and path not in sys.path:
+                sys.path.insert(0, path)
+        for module_name in list(sys.modules):
+            if (
+                module_name == "antlr4"
+                or module_name.startswith("antlr4.")
+                or module_name == "math_verify"
+                or module_name.startswith("math_verify.")
+                or module_name == "latex2sympy2_extended"
+                or module_name.startswith("latex2sympy2_extended.")
+            ):
+                del sys.modules[module_name]
+
     from math_verify.grader import verify
     from math_verify.parser import ExprExtractionConfig, LatexExtractionConfig, parse
 
@@ -60,7 +72,7 @@ def compute_score(model_output: str, ground_truth: str, timeout_score: float = 0
     try:
         future = _get_pool().submit(_verify_in_subprocess, ground_truth_boxed, model_output)
         ret_score = future.result(timeout=timeout)
-    except (FuturesTimeoutError, TimeoutException):
+    except FuturesTimeoutError:
         ret_score = timeout_score
     except Exception as e:
         print(f"Error in math_verify compute_score: {e}")
