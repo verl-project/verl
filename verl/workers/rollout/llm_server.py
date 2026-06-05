@@ -90,11 +90,7 @@ class GlobalRequestLoadBalancer:
         self._balance_rel_threshold = balance_rel_threshold
 
     def _is_imbalanced(self) -> bool:
-        """Whether the current in-flight distribution is skewed enough to rebalance.
-
-        Returns ``False`` when the gate is disabled (``balance_abs_threshold <= 0``)
-        so that sticky sessions are always honored.
-        """
+        """Whether the current in-flight distribution is skewed enough to rebalance."""
         if self._balance_abs_threshold <= 0:
             return False
         loads = self._inflight_requests.values()
@@ -380,8 +376,6 @@ class LLMServerManager:
             update_prometheus_config(self.rollout_config.prometheus, self.server_addresses, self.rollout_config.name)
 
     async def _init_global_load_balancer(self) -> None:
-        # Sticky-vs-balance tradeoff knobs on rollout_config; 0 disables the
-        # imbalance gate, while the default of 64 keeps it enabled.
         self.global_load_balancer = GlobalRequestLoadBalancer.remote(
             servers=dict(zip(self.server_addresses, self.server_handles, strict=True)),
             max_cache_size=DEFAULT_ROUTING_CACHE_SIZE,
