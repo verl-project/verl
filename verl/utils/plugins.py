@@ -15,9 +15,12 @@
 
 A plugin is any installed package that declares a ``verl.plugins`` entry point;
 importing it applies its registrations (rollout adapters, model patches, ...).
-``load_plugins`` runs on the driver and is installed as the Ray
-``worker_process_setup_hook`` so plugins load in every process. It is a no-op
-when no plugins are installed.
+``load_plugins`` is called at process entry points where plugin functionality is
+first needed (the launcher, the TaskRunner actor, and each worker's
+``init_model`` — i.e. after the worker is placed on its GPU). It is intentionally
+NOT installed as a Ray ``worker_process_setup_hook``: importing plugins at worker
+startup, before ``CUDA_VISIBLE_DEVICES`` is narrowed, can initialize CUDA on
+device 0 in every worker. It is idempotent and a no-op when no plugins exist.
 """
 
 import importlib.metadata

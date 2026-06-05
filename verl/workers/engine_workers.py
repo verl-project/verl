@@ -490,6 +490,15 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
+        # Load external verl plugins (e.g. verl-omni) inside this GPU worker before
+        # building the model, so plugin patches (model auto-class routing/registration)
+        # are in place. Done here — after the worker is placed on its GPU — rather
+        # than via a Ray worker_process_setup_hook, which would import plugins before
+        # CUDA_VISIBLE_DEVICES is narrowed and pin every worker to device 0.
+        from verl.utils.plugins import load_plugins
+
+        load_plugins()
+
         model_config: HFModelConfig = omega_conf_to_dataclass(self.config.model)
 
         # 1. build reference model
