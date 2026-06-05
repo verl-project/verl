@@ -1,7 +1,7 @@
 Ascend (NPU) Tutorial
+=====================
 
 Last updated: 06/05/2026.
-=====================
 
 .. toctree::
    :maxdepth: 1
