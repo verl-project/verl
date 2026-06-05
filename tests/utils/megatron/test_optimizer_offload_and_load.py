@@ -56,8 +56,8 @@ def initialize_distributed_env():
         yield
     finally:
         dist.barrier()
-        dist.destroy_process_group()
         mpu.destroy_model_parallel()
+        dist.destroy_process_group()
 
 
 def init_model():
