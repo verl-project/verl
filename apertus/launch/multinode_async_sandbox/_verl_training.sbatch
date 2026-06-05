@@ -22,8 +22,8 @@ fi
 ulimit -c 0
 
 USERNAME="$(whoami)"
-WORKING_DIR="${WORKING_DIR:-/iopsstor/scratch/cscs/${}/apertus_rl_async}"
-HF_HOME="${HF_HOME:-/capstor/scratch/cscs/${}/huggingface}"
+WORKING_DIR="${WORKING_DIR:-/iopsstor/scratch/cscs/${USERNAME}/apertus_rl_async}"
+HF_HOME="${HF_HOME:-/capstor/scratch/cscs/${USERNAME}/huggingface}"
 HF_HUB_CACHE_DIR="${HF_HUB_CACHE_DIR:-${HF_HOME}/hub}"
 
 cd "${WORKING_DIR}"
@@ -53,7 +53,7 @@ GPUS_PER_NODE="${GPUS_PER_NODE##*:}"
 TRAIN_GPUS_PER_NODE="${TRAIN_GPUS_PER_NODE:-${GPUS_PER_NODE}}"
 ROLLOUT_GPUS_PER_NODE="${ROLLOUT_GPUS_PER_NODE:-${GPUS_PER_NODE}}"
 CPUS_PER_TASK="${SLURM_CPUS_PER_TASK:-64}"
-ENVIRONMENT_PATH="${ENVIRONMENT_PATH:-/users/${}/.edf/async.toml}"
+ENVIRONMENT_PATH="${ENVIRONMENT_PATH:-/users/${USERNAME}/.edf/async.toml}"
 
 # Sandbox and code reward settings
 DEFAULT_MEMORY_LIMIT_MB="${DEFAULT_MEMORY_LIMIT_MB:-512}"
@@ -63,10 +63,10 @@ CODEGYM_REWARD_CONTINUOUS="${CODEGYM_REWARD_CONTINUOUS:-false}"
 # Extra packages needed for scoring are installed once into a target dir 
 # so every node can use them and avoid repeated installations
 # TODO: for production run, think about a better solution!
-PY_DEPS_DIR="${PY_DEPS_DIR:-/iopsstor/scratch/cscs/${}/python_deps/apertus_reward_py312}"
-MATH_VERIFY_DEPS_DIR="${MATH_VERIFY_DEPS_DIR:-/iopsstor/scratch/cscs/${}/python_deps/math_verify_py312}"
-NLTK_DATA_DIR="${NLTK_DATA_DIR:-/iopsstor/scratch/cscs/${}/nltk_data}"
-DEPS_STAMP_DIR="${DEPS_STAMP_DIR:-/iopsstor/scratch/cscs/${}/python_deps/.stamps}"
+PY_DEPS_DIR="${PY_DEPS_DIR:-/iopsstor/scratch/cscs/${USERNAME}/python_deps/apertus_reward_py312}"
+MATH_VERIFY_DEPS_DIR="${MATH_VERIFY_DEPS_DIR:-/iopsstor/scratch/cscs/${USERNAME}/python_deps/math_verify_py312}"
+NLTK_DATA_DIR="${NLTK_DATA_DIR:-/iopsstor/scratch/cscs/${USERNAME}/nltk_data}"
+DEPS_STAMP_DIR="${DEPS_STAMP_DIR:-/iopsstor/scratch/cscs/${USERNAME}/python_deps/.stamps}"
 DEPS_STAMP="${DEPS_STAMP_DIR}/apertus_reward_py312.ready"
 DEPS_LOCK="${DEPS_STAMP_DIR}/apertus_reward_py312.lock"
 IF_REWARD_PIP_PACKAGES="${IF_REWARD_PIP_PACKAGES:-immutabledict nltk langdetect absl-py emoji syllapy antlr4-python3-runtime==4.9.3 requests}"
