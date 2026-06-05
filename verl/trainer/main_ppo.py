@@ -58,8 +58,11 @@ def run_ppo(config, task_runner_class=None) -> None:
                 model paths, and training hyperparameters.
         task_runner_class: For recipe to change TaskRunner.
     """
-    # Load external verl plugins (e.g. verl-omni) on the driver. Workers load
-    # them via the worker_process_setup_hook in get_ppo_ray_runtime_env().
+    # Load external verl plugins (e.g. verl-omni) in the launcher process so
+    # their registrations are available here; TaskRunner.run() loads them again
+    # inside its actor. Plugins are intentionally NOT loaded via a Ray
+    # worker_process_setup_hook: importing them at worker startup (before the
+    # GPU is narrowed) can initialize CUDA on device 0 in every worker.
     from verl.utils.plugins import load_plugins
 
     load_plugins()
@@ -242,6 +245,13 @@ class TaskRunner:
         from omegaconf import OmegaConf
 
         from verl.utils.fs import copy_to_local
+
+        # Load external verl plugins (e.g. verl-omni) inside this actor so their
+        # registrations / patches (rollout adapter, hf_processor, model auto-class)
+        # are applied before the rollout lookup and tokenizer/processor below.
+        from verl.utils.plugins import load_plugins
+
+        load_plugins()
 
         print(f"TaskRunner hostname: {socket.gethostname()}, PID: {os.getpid()}")
         pprint(OmegaConf.to_container(config, resolve=True))

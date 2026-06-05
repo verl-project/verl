@@ -58,8 +58,6 @@ def get_ppo_ray_runtime_env():
 
     runtime_env = {
         "env_vars": PPO_RAY_RUNTIME_ENV["env_vars"].copy(),
-        # Load external verl plugins (e.g. verl-omni) in every Ray worker.
-        "worker_process_setup_hook": "verl.utils.plugins.load_plugins",
         **({"working_dir": None} if working_dir is None else {}),
     }
     for key in list(runtime_env["env_vars"].keys()):
