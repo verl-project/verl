@@ -80,7 +80,7 @@ def _set_envs_and_config(server_args: ServerArgs):
         try:
             # For sglang 0.5.12 and sglang_kernel > 0.4.2, naming is sglang_kernel
             assert_pkg_version(
-                "sglang_kernel",
+                "sgl_kernel",
                 "0.1.1",
                 "Please reinstall the latest version with `pip install follow https://sgl-project.github.io/get_started/install.html#for-cuda-13`",
             )
