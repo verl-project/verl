@@ -78,8 +78,8 @@ DOCKER_BUILDKIT=1 docker build \
 | Build arg | Default | Purpose |
 | --------- | ------- | ------- |
 | `GPU_ARCH` | `gfx942;gfx950` | GPU architectures to compile kernels for. Set to a single arch (e.g. `gfx942`) to roughly halve Flash Attention build time. |
-| `ROCM_VERSION` / `AMDGPU_VERSION` | `7.0.2` | ROCm / amdgpu apt repo version. |
-| `PYTHON_VERSION` | `3.12` | Python version. |
+| `ROCM_VERSION` / `AMDGPU_VERSION` | `7.0.2` | ROCm / amdgpu apt repo version. Note: the prebuilt torch/triton/etc. wheel URLs in the Dockerfile are pinned to ROCm 7.0.2; changing this also requires updating those URLs. |
+| `PYTHON_VERSION` | `3.12` | Python version. Note: the prebuilt wheel URLs are pinned to the `cp312` ABI; changing this also requires updating those URLs. |
 | `MAX_JOBS` | `$(nproc)` | Parallel compile jobs. Lower it (e.g. `64`) if the vLLM build runs out of memory. |
 | `FA_TAG` / `TE_TAG` / `VLLM_TAG` / `AITER_TAG` | pinned | Source commits for the from-source components. |
 

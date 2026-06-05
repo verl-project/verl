@@ -71,6 +71,10 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install /opt/rocm/share/amd_smi
 
 # Install the prebuilt ROCm wheels directly via pip.
+# NOTE: these URLs are pinned to a specific ROCm release (rocm-rel-7.0.2),
+# Python ABI (cp312) and nightly git hashes. Overriding ROCM_VERSION or
+# PYTHON_VERSION alone will NOT change these wheels -- you must also update
+# the URLs below to matching builds, otherwise install will 404 or mismatch.
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip3 install \
     https://repo.radeon.com/rocm/manylinux/rocm-rel-7.0.2/torch-2.9.1.dev20251204+rocm7.0.2.lw.git351ff442-cp312-cp312-linux_x86_64.whl \
