@@ -134,6 +134,7 @@ def load_reward_manager(config: DictConfig, tokenizer: Any, **reward_kwargs: Any
     if compute_score is None:
         sandbox_config = config.reward.get("sandbox_fusion")
         sandbox_url = sandbox_config.get("url") if sandbox_config else None
+        continuous = sandbox_config.get("continuous", True) if sandbox_config else True
         memory_limit_mb = sandbox_config.get("memory_limit_mb", 1024) if sandbox_config else 1024
         if sandbox_url:
             sandbox_manager = multiprocessing.Manager()
@@ -144,6 +145,7 @@ def load_reward_manager(config: DictConfig, tokenizer: Any, **reward_kwargs: Any
                 sandbox_fusion_url=sandbox_url,
                 concurrent_semaphore=_concurrent_semaphore,
                 memory_limit_mb=memory_limit_mb,
+                continuous=continuous,
             )
         else:
             final_compute_score = default_compute_score_

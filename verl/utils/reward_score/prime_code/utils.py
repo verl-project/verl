@@ -23,19 +23,19 @@ from typing import Optional
 from .testing_util import run_test
 
 
-def _temp_run(sample, generation, debug, result, metadata_list, timeout):
+def _temp_run(sample, generation, debug, result_conn, timeout):
     with open(os.devnull, "w") as devnull:
         sys.stdout = devnull
         sys.stderr = devnull
         try:
             res, metadata = run_test(in_outs=sample, test=generation, debug=debug, timeout=timeout)
-            result.append(res)
-            metadata_list.append(metadata)
+            result_conn.send((res, metadata))
         except Exception:
             # print(e) # some tracebacks are extremely long.
             traceback.print_exc(10)
-            result.append([-1 for i in range(len(sample["inputs"]))])
-            metadata_list.append({})
+            result_conn.send(([-1 for i in range(len(sample["inputs"]))], {}))
+        finally:
+            result_conn.close()
 
 
 def check_correctness(in_outs: Optional[dict], generation, timeout=10, debug=True):
@@ -43,18 +43,18 @@ def check_correctness(in_outs: Optional[dict], generation, timeout=10, debug=Tru
     The global timeout is to catch some extreme/rare cases not handled by the timeouts
     inside `run_test`"""
 
-    manager = multiprocessing.Manager()
-    result = manager.list()
-    metadata_list = manager.list()
-    p = multiprocessing.Process(target=_temp_run, args=(in_outs, generation, debug, result, metadata_list, timeout))
+    result_conn, child_conn = multiprocessing.Pipe(duplex=False)
+    p = multiprocessing.Process(target=_temp_run, args=(in_outs, generation, debug, child_conn, timeout))
     p.start()
+    child_conn.close()
     p.join(timeout=timeout + 1)
     if p.is_alive():
         p.kill()
-        # p.terminate()
-    if not result:
+        p.join()
+    if not result_conn.poll():
         # consider that all tests failed
-        result = [[-1 for i in range(len(in_outs["inputs"]))]]
         if debug:
             print("global timeout")
-    return result[0], metadata_list
+        return [-1 for i in range(len(in_outs["inputs"]))], []
+    result, metadata = result_conn.recv()
+    return result, [metadata]

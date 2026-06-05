@@ -24,11 +24,15 @@ with open(os.path.join(version_folder, "verl/version/version")) as f:
     __version__ = f.read().strip()
 
 install_requires = [
+    "absl-py",
     "accelerate",
     "codetiming",
     "datasets",
     "dill",
     "hydra-core",
+    "immutabledict",
+    "langdetect",
+    "nltk",
     "numpy<2.0.0",
     "pandas",
     "peft",
@@ -36,6 +40,7 @@ install_requires = [
     "pybind11",
     "pylatexenc",
     "ray[default]>=2.41.0",
+    "requests",
     "torchdata",
     "tensordict>=0.8.0,<=0.10.0,!=0.9.0",
     "transformers",
@@ -45,7 +50,7 @@ install_requires = [
 ]
 
 TEST_REQUIRES = ["pytest", "pre-commit", "py-spy", "pytest-asyncio", "pytest-rerunfailures"]
-PRIME_REQUIRES = ["pyext"]
+PRIME_REQUIRES = []
 GEO_REQUIRES = ["mathruler", "torchvision", "qwen_vl_utils"]
 GPU_REQUIRES = ["liger-kernel", "flash-attn"]
 MATH_REQUIRES = ["math-verify"]  # Add math-verify as an optional dependency

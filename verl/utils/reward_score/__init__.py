@@ -13,7 +13,18 @@
 # limitations under the License.
 # from . import gsm8k, math, prime_math, prime_code
 
+import os
+
 from verl.utils.import_utils import deprecated
+
+
+def _code_test_cases_for_prime_code(ground_truth, extra_info):
+    if isinstance(extra_info, dict):
+        for key in ("prime_code_input_output", "input_output"):
+            value = extra_info.get(key)
+            if value:
+                return value
+    return ground_truth
 
 
 def default_compute_score(
@@ -24,6 +35,7 @@ def default_compute_score(
     sandbox_fusion_url=None,
     concurrent_semaphore=None,
     memory_limit_mb=None,
+    continuous=True,
     **kwargs,
 ):
     """Compute the score for a given solution based on the data source.
@@ -44,19 +56,55 @@ def default_compute_score(
     if data_source == "openai/gsm8k":
         from . import gsm8k
 
-        res = gsm8k.compute_score(solution_str, ground_truth)
-    elif data_source in ["lighteval/MATH", "DigitalLearningGmbH/MATH-lighteval", "HuggingFaceH4/MATH-500"]:
-        from . import math_reward
-
-        res = math_reward.compute_score(solution_str, ground_truth)
+        res = gsm8k.compute_score(solution_str, ground_truth, method="flexible")
+    elif data_source in [
+        "lighteval/MATH",
+        "DigitalLearningGmbH/MATH-lighteval",
+        "HuggingFaceH4/MATH-500",
+        "SynthLabsAI/Big-Math-RL-Verified",
+        "zwhe99/DeepMath-103K",
+        "deepmath",
+        "deepscaler",
+        "math500",
+        "amc23",
+        "amc2023",
+        "aime2024",
+        "aime2025",
+        "aime2026",
+        "beyondaime",
+        "gsm8k_boxed",
+        "dapo_en",
+        "hendrycks-math-12k",
+    ]:
         # [Optional] Math-Verify Integration
         # For enhanced accuracy, consider utilizing Math-Verify (https://github.com/huggingface/Math-Verify).
         # Note: Math-Verify needs to be manually installed via pip: `pip install math-verify`.
         # To use it, override the `compute_score` function with the following implementation:
 
-        # from . import math_verify
-        # res = math_verify.compute_score(solution_str, ground_truth)
-    elif data_source in ["math_dapo", "math", "math_dapo_reasoning"] or data_source.startswith("aime"):
+        from . import math_verify
+
+        res = math_verify.compute_score(solution_str, ground_truth)
+    elif data_source in ["mmlu", "gpqa_diamond", "gpqa", "Idavidrein/gpqa"]:
+        from . import multiple_choice
+
+        res = multiple_choice.compute_score(solution_str, ground_truth)
+    elif data_source in [
+        "allenai/IF_multi_constraints_upto5",
+        "swiss-ai/if-rl-singleturn-prompts",
+        "swiss-ai/if-rl-singleturn-hard-prompts",
+        "google/IFEval",
+        "allenai/IFBench_test",
+    ]:
+        from . import instruction_following
+
+        res = instruction_following.compute_score(
+            solution_str, ground_truth, extra_info=extra_info
+        )
+    elif data_source in [
+        "math_dapo",
+        "math",
+        "math_dapo_reasoning",
+    ] or data_source.startswith("aime"):
         from . import math_dapo
 
         res = math_dapo.compute_score(solution_str, ground_truth)
@@ -71,21 +119,39 @@ def default_compute_score(
         from . import prime_math
 
         res = prime_math.compute_score(solution_str, ground_truth)
-    elif data_source in ["codecontests", "apps", "codeforces", "taco"]:
-        # Use the passed sandbox_fusion_url if available
-        if sandbox_fusion_url:
-            from . import sandbox_fusion
+    elif data_source in [
+        "humaneval",
+        "openai/openai_humaneval",
+    ]:
+        from . import prime_code
+        res = prime_code.compute_score(solution_str, ground_truth, continuous=True)
+    elif data_source in [
+        "taco",
+        "likaixin/TACO-verified",
+        "codecontests",
+        "deepmind/code_contests",
+        "apps",
+        "codeforces",
+    ]:
+        scheduler_url = sandbox_fusion_url or os.environ.get("SCHEDULER_URL")
+        if scheduler_url:
+            from . import codegym_sandbox
 
-            # Pass the URL directly, ground_truth likely contains test cases here
-            res = sandbox_fusion.compute_score(
-                sandbox_fusion_url, concurrent_semaphore, memory_limit_mb, solution_str, ground_truth, continuous=True
+            res = codegym_sandbox.compute_score(
+                data_source=data_source,
+                solution_str=solution_str,
+                ground_truth=ground_truth,
+                extra_info=extra_info,
+                sandbox_fusion_url=scheduler_url,
+                concurrent_semaphore=concurrent_semaphore,
+                memory_limit_mb=memory_limit_mb,
+                continuous=continuous,
             )
         else:
-            # If no sandbox URL is provided, fall back to prime_code or raise error
+            # Fallback to prime code scoring
             from . import prime_code
-
-            # Assuming prime_code doesn't need the URL
-            res = prime_code.compute_score(solution_str, ground_truth, continuous=True)
+            test_cases = _code_test_cases_for_prime_code(ground_truth, extra_info)
+            res = prime_code.compute_score(solution_str, test_cases, continuous=continuous)
     elif data_source in ["hiyouga/geometry3k"]:
         from . import geo3k
 
