@@ -199,7 +199,10 @@ class FSDPModelMerger(BaseModelMerger):
                     # 2-D list, FSDP + TP
                     raise NotImplementedError("FSDP + TP is not supported yet")
             else:
-                state_dict[key] = torch.cat(state_dict[key], dim=0)
+                if state_dict[key][0].dim() == 0:
+                    state_dict[key] = state_dict[key][0]
+                else:
+                    state_dict[key] = torch.cat(state_dict[key], dim=0)
 
         return state_dict
 
