@@ -41,7 +41,7 @@ gpu           = ["liger-kernel", "flash-attn"]
 math          = ["math-verify"]
 trl           = ["trl<=0.9.6"]
 mcore         = ["mbridge"]
-transferqueue = ["TransferQueue==0.1.6"]
+transferqueue = ["TransferQueue @ git+https://github.com/Ascend/TransferQueue.git@main"]
 
 # Shared runtime deps; included by every backend extra via `verl[verl-core]`.
 verl-core = [
@@ -50,6 +50,7 @@ verl-core = [
     "datasets",
     "dill",
     "hydra-core",
+    "numpy>=2.0.0",
     "pandas",
     "peft",
     "pyarrow>=19.0.0",
@@ -276,6 +277,7 @@ environments = [
 override-dependencies = [
     "transformers==5.3.0",
     "nvidia-cudnn-cu12==9.16.0.29",
+    "numpy>=2.0.0",
 ]
 
 # Source-build inside the venv (no isolated build env): apex / TE need to
