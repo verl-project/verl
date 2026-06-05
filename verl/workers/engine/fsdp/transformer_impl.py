@@ -18,13 +18,11 @@ The concrete Engine implementation using PyTorch FullyShardedDataParallel (FSDP)
 import gc
 import logging
 import os
-import time
 import warnings
 from collections import OrderedDict
 from contextlib import nullcontext
 from typing import Callable, ContextManager, Optional
 
-import psutil
 import torch
 import torch.distributed
 from peft import LoraConfig, TaskType, get_peft_model
@@ -41,7 +39,7 @@ from verl.utils.activation_offload import enable_activation_offloading
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
 from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.utils.debug import log_gpu_memory_usage
-from verl.utils.device import get_device_id, get_device_name, get_torch_device
+from verl.utils.device import get_device_id, get_device_name
 from verl.utils.fsdp_utils import (
     CPUOffloadPolicy,
     FSDPModule,
@@ -82,104 +80,6 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 device_name = get_device_name()
-
-
-def _debug_shape(value):
-    try:
-        shape = getattr(value, "shape", None)
-        if shape is not None:
-            return tuple(shape)
-    except Exception:
-        pass
-    return type(value).__name__
-
-
-def _debug_sum(value):
-    try:
-        total = value.sum()
-        if isinstance(total, torch.Tensor):
-            return total.detach().item()
-        return total
-    except Exception as exc:
-        return f"<sum_failed:{type(exc).__name__}>"
-
-
-def _memory_summary() -> str:
-    parts = []
-    try:
-        rss_gb = psutil.Process(os.getpid()).memory_info().rss / (1024**3)
-        parts.append(f"rss={rss_gb:.3f}GB")
-    except Exception as exc:
-        parts.append(f"rss=<failed:{type(exc).__name__}>")
-
-    try:
-        device = get_torch_device()
-        if get_device_name() != "cpu" and device.is_available():
-            allocated_gb = device.memory_allocated() / (1024**3)
-            reserved_gb = device.memory_reserved() / (1024**3)
-            max_allocated_gb = device.max_memory_allocated() / (1024**3)
-            max_reserved_gb = device.max_memory_reserved() / (1024**3)
-            free_bytes, total_bytes = device.mem_get_info()
-            used_gb = (total_bytes - free_bytes) / (1024**3)
-            total_gb = total_bytes / (1024**3)
-            parts.append(
-                f"device={get_device_name()}:{device.current_device()} "
-                f"alloc={allocated_gb:.3f}GB reserved={reserved_gb:.3f}GB "
-                f"max_alloc={max_allocated_gb:.3f}GB max_reserved={max_reserved_gb:.3f}GB "
-                f"used={used_gb:.3f}/{total_gb:.3f}GB"
-            )
-        else:
-            parts.append("device=cpu")
-    except Exception as exc:
-        parts.append(f"device_mem=<failed:{type(exc).__name__}>")
-    return " ".join(parts)
-
-
-def _log_memory(stage: str, *, rank: int | None = None, dp_rank: int | None = None, extra: str = "") -> None:
-    rank_part = f" rank={rank}" if rank is not None else ""
-    dp_rank_part = f" dp_rank={dp_rank}" if dp_rank is not None else ""
-    extra_part = f" {extra}" if extra else ""
-    print(
-        f"[FSDPEngine][Memory][{stage}] ts={time.time():.3f} pid={os.getpid()}"
-        f"{rank_part}{dp_rank_part} {_memory_summary()}{extra_part}",
-        flush=True,
-    )
-
-
-def _debug_tensordict_summary(data: TensorDict) -> dict:
-    try:
-        keys = list(data.keys())
-    except Exception as exc:
-        keys = [f"<keys_failed:{type(exc).__name__}>"]
-
-    shapes = {}
-    for key in (
-        "input_ids",
-        "attention_mask",
-        "position_ids",
-        "responses",
-        "response_mask",
-        "loss_mask",
-        "image_grid_thw",
-    ):
-        if key in keys:
-            try:
-                shapes[key] = _debug_shape(data[key])
-            except Exception as exc:
-                shapes[key] = f"<shape_failed:{type(exc).__name__}>"
-
-    loss_mask_sum = None
-    for key in ("loss_mask", "response_mask"):
-        if key in keys:
-            loss_mask_sum = _debug_sum(data[key])
-            break
-
-    return {
-        "batch_shape": _debug_shape(data),
-        "keys": keys,
-        "tensor_shapes": shapes,
-        "loss_mask_sum": loss_mask_sum,
-    }
 
 
 class FSDPEngine(BaseEngine):
@@ -754,51 +654,16 @@ class FSDPEngine(BaseEngine):
         # note that the global_batch_size should include data on all the dp
         tu.assign_non_tensor(data, sp_size=self.ulysses_sequence_parallel_size)
 
-        rank = torch.distributed.get_rank()
-        dp_rank = self.get_data_parallel_rank()
         dp_size = self.get_data_parallel_size()
-        world_size = torch.distributed.get_world_size()
         dp_group = self.get_data_parallel_group()
-        print(
-            "[FSDPEngine][forward_backward_batch][enter] "
-            f"ts={time.time():.3f} rank={rank} dp_rank={dp_rank} "
-            f"dp_size={dp_size} world_size={world_size} forward_only={forward_only} "
-            f"summary={_debug_tensordict_summary(data)}",
-            flush=True,
-        )
-        _log_memory("forward_backward.enter", rank=rank, dp_rank=dp_rank)
 
         # compute num_tokens in global batch for loss normalization
         batch_num_tokens = data["loss_mask"].sum().to(get_device_id())
-        print(
-            "[FSDPEngine][forward_backward_batch][before_token_all_reduce] "
-            f"ts={time.time():.3f} rank={rank} dp_rank={dp_rank} "
-            f"local_tokens={batch_num_tokens.detach().item()} group={dp_group}",
-            flush=True,
-        )
         torch.distributed.all_reduce(batch_num_tokens, op=torch.distributed.ReduceOp.SUM, group=dp_group)
-        print(
-            "[FSDPEngine][forward_backward_batch][after_token_all_reduce] "
-            f"ts={time.time():.3f} rank={rank} dp_rank={dp_rank} "
-            f"global_tokens={batch_num_tokens.detach().item()}",
-            flush=True,
-        )
         tu.assign_non_tensor(data, batch_num_tokens=batch_num_tokens.item())
         tu.assign_non_tensor(data, dp_size=dp_size)
 
         micro_batches, indices = prepare_micro_batches(data=data, dp_group=dp_group, same_micro_num_in_dp=True)
-        print(
-            "[FSDPEngine][forward_backward_batch][after_prepare_micro_batches] "
-            f"ts={time.time():.3f} rank={rank} dp_rank={dp_rank} "
-            f"num_micro_batches={len(micro_batches)}",
-            flush=True,
-        )
-        _log_memory(
-            "forward_backward.after_prepare_micro_batches",
-            rank=rank,
-            dp_rank=dp_rank,
-            extra=f"num_micro_batches={len(micro_batches)}",
-        )
 
         output_lst = []
 
@@ -809,18 +674,6 @@ class FSDPEngine(BaseEngine):
         scaler = getattr(self, "scaler", None)
 
         for micro_batch_idx, micro_batch in enumerate(micro_batches):
-            print(
-                "[FSDPEngine][forward_backward_batch][before_forward_step] "
-                f"ts={time.time():.3f} rank={rank} dp_rank={dp_rank} "
-                f"micro_batch_idx={micro_batch_idx} summary={_debug_tensordict_summary(micro_batch)}",
-                flush=True,
-            )
-            _log_memory(
-                "forward_backward.before_forward_step",
-                rank=rank,
-                dp_rank=dp_rank,
-                extra=f"micro_batch_idx={micro_batch_idx}",
-            )
             with ctx:
                 loss, meta_info = self.forward_step(micro_batch, loss_function=loss_function, forward_only=forward_only)
 
@@ -831,43 +684,11 @@ class FSDPEngine(BaseEngine):
                         loss.backward()
 
             output_lst.append(meta_info)
-            print(
-                "[FSDPEngine][forward_backward_batch][after_forward_step] "
-                f"ts={time.time():.3f} rank={rank} dp_rank={dp_rank} micro_batch_idx={micro_batch_idx}",
-                flush=True,
-            )
-            _log_memory(
-                "forward_backward.after_forward_step",
-                rank=rank,
-                dp_rank=dp_rank,
-                extra=f"micro_batch_idx={micro_batch_idx}",
-            )
 
-        # postprocess and return
-        print(
-            "[FSDPEngine][forward_backward_batch][before_postprocess] "
-            f"ts={time.time():.3f} rank={rank} dp_rank={dp_rank} outputs={len(output_lst)}",
-            flush=True,
-        )
         result = postprocess_batch_func(output_lst=output_lst, indices=indices, data=data)
         bank_cache = getattr(self, "_image_ref_bank_cache", None)
         if bank_cache is not None:
-            cleared_bank_cache_size = len(bank_cache)
             bank_cache.clear()
-        else:
-            cleared_bank_cache_size = 0
-        print(
-            "[FSDPEngine][forward_backward_batch][exit] "
-            f"ts={time.time():.3f} rank={rank} dp_rank={dp_rank} result_none={result is None} "
-            f"cleared_image_bank_cache={cleared_bank_cache_size}",
-            flush=True,
-        )
-        _log_memory(
-            "forward_backward.exit",
-            rank=rank,
-            dp_rank=dp_rank,
-            extra=f"result_none={result is None} cleared_image_bank_cache={cleared_bank_cache_size}",
-        )
         return result
 
     def forward_step(self, micro_batch: TensorDict, loss_function, forward_only):
@@ -1455,11 +1276,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
         device_name = get_device_name()
         # actually, we should avoid assigning like this...
         micro_batch = micro_batch.to(get_device_id())
-        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else None
-        dp_rank = self.get_data_parallel_rank() if torch.distributed.is_initialized() else None
-        _log_memory("forward_step.after_micro_batch_to_device", rank=rank, dp_rank=dp_rank)
         model_inputs, output_args = self.prepare_model_inputs(micro_batch=micro_batch)
-        _log_memory("forward_step.after_prepare_model_inputs", rank=rank, dp_rank=dp_rank)
 
         # Honor mixed_precision.param_dtype resolved during FSDP setup. When dtype is fp32,
         # autocast is a no-op at best and a footgun at worst, so skip it entirely.
@@ -1476,7 +1293,6 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 **model_inputs,
                 use_cache=False,
             )  # prevent model thinks we are generating
-            _log_memory("forward_step.after_module_forward", rank=rank, dp_rank=dp_rank)
 
             model_output = self.prepare_model_outputs(
                 output=raw_output, output_args=output_args, micro_batch=micro_batch, logits_processor_func=loss_function
@@ -1491,7 +1307,6 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 loss = torch.tensor(1.0, device=device_name)
                 metrics = {}
 
-            _log_memory("forward_step.after_loss", rank=rank, dp_rank=dp_rank)
             output = {
                 "model_output": model_output,
                 "loss": loss.detach().item(),

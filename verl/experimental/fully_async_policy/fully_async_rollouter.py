@@ -821,16 +821,6 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         image_bank_stats["total_ms"] = (time.time() - image_ref_start) * 1000.0
         rollout_sample.image_bank_ref = image_bank_ref
         rollout_sample.image_bank_stats = image_bank_stats
-        print(
-            "[ImageRefs][rollouter] "
-            f"sample_id={rollout_sample.sample_id} bank_ref_set={image_bank_ref is not None} "
-            f"unique_images={image_bank_stats.get('unique_images', 0)} "
-            f"processed_bytes={image_bank_stats.get('processed_bytes', 0)} "
-            f"build_ms={image_bank_stats['build_ms']:.2f} "
-            f"bank_ref_put_ms={image_bank_stats['bank_ref_put_ms']:.2f} "
-            f"total_ms={image_bank_stats['total_ms']:.2f}",
-            flush=True,
-        )
         return rollout_sample
 
     async def _postprocess_and_publish_sample(self, rollout_sample: RolloutSample):

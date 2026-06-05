@@ -21,7 +21,6 @@ This trainer supports model-agonistic model initialization with huggingface
 import json
 import logging
 import os
-import time
 import uuid
 from collections import defaultdict
 from copy import deepcopy
@@ -77,59 +76,6 @@ from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_pad
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
-
-
-def _debug_shape(value: Any):
-    try:
-        shape = getattr(value, "shape", None)
-        if shape is not None:
-            return tuple(shape)
-    except Exception:
-        pass
-    return type(value).__name__
-
-
-def _debug_tensordict_summary(data) -> dict:
-    try:
-        keys = list(data.keys())
-    except Exception as exc:
-        keys = [f"<keys_failed:{type(exc).__name__}>"]
-
-    shapes = {}
-    for key in (
-        "input_ids",
-        "attention_mask",
-        "position_ids",
-        "responses",
-        "response_mask",
-        "loss_mask",
-        "image_grid_thw",
-    ):
-        if key in keys:
-            try:
-                shapes[key] = _debug_shape(data[key])
-            except Exception as exc:
-                shapes[key] = f"<shape_failed:{type(exc).__name__}>"
-
-    return {"batch_shape": _debug_shape(data), "keys": keys, "tensor_shapes": shapes}
-
-
-def _debug_dataproto_summary(batch: DataProto | None) -> dict:
-    if batch is None:
-        return {"batch_len": 0}
-    tensor_shapes = {}
-    if batch.batch is not None:
-        for key, value in batch.batch.items():
-            tensor_shapes[key] = _debug_shape(value)
-    non_tensor_keys = []
-    if batch.non_tensor_batch is not None:
-        non_tensor_keys = list(batch.non_tensor_batch.keys())
-    return {
-        "batch_len": len(batch),
-        "tensor_shapes": tensor_shapes,
-        "non_tensor_keys": non_tensor_keys,
-        "meta_keys": list((batch.meta_info or {}).keys()),
-    }
 
 
 def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, kl_penalty="kl"):
@@ -1240,68 +1186,26 @@ class RayPPOTrainer:
         return values
 
     def _compute_ref_log_prob(self, batch: DataProto) -> DataProto:
-        print(
-            "[RayPPOTrainer][compute_ref_log_prob][enter] "
-            f"ts={time.time():.3f} ref_in_actor={self.ref_in_actor} "
-            f"summary={_debug_dataproto_summary(batch)}",
-            flush=True,
-        )
         # step 1: convert dataproto to tensordict.
         batch_td = batch.to_tensordict()
-        print(
-            "[RayPPOTrainer][compute_ref_log_prob][after_to_tensordict] "
-            f"ts={time.time():.3f} summary={_debug_tensordict_summary(batch_td)}",
-            flush=True,
-        )
         # step 2: convert from padding to nopadding
         batch_td = left_right_2_no_padding(batch_td)
-        print(
-            "[RayPPOTrainer][compute_ref_log_prob][after_left_right_2_no_padding] "
-            f"ts={time.time():.3f} summary={_debug_tensordict_summary(batch_td)}",
-            flush=True,
-        )
         # step 3: add meta info
         metadata = {"calculate_entropy": False, "compute_loss": False}
         if self.ref_in_actor:
             metadata["no_lora_adapter"] = True
         tu.assign_non_tensor(batch_td, **metadata)
-        print(
-            "[RayPPOTrainer][compute_ref_log_prob][before_worker_call] "
-            f"ts={time.time():.3f} ref_in_actor={self.ref_in_actor} "
-            f"summary={_debug_tensordict_summary(batch_td)}",
-            flush=True,
-        )
         if self.ref_in_actor:
             output = self.actor_rollout_wg.compute_log_prob(batch_td)
         else:
             output = self.ref_policy_wg.compute_ref_log_prob(batch_td)
-        print(
-            "[RayPPOTrainer][compute_ref_log_prob][after_worker_call] "
-            f"ts={time.time():.3f} output_type={type(output).__name__}",
-            flush=True,
-        )
         # gather output
         log_probs = tu.get(output, "log_probs")
-        print(
-            "[RayPPOTrainer][compute_ref_log_prob][after_get_log_probs] "
-            f"ts={time.time():.3f} log_probs_shape={_debug_shape(log_probs)}",
-            flush=True,
-        )
         # step 4. No padding to padding
         log_probs = no_padding_2_padding(log_probs, batch_td)
-        print(
-            "[RayPPOTrainer][compute_ref_log_prob][after_no_padding_2_padding] "
-            f"ts={time.time():.3f} log_probs_shape={_debug_shape(log_probs)}",
-            flush=True,
-        )
         # step 5: rebuild a tensordict and convert to dataproto
         ref_log_prob = tu.get_tensordict({"ref_log_prob": log_probs.float()})
         ref_log_prob = DataProto.from_tensordict(ref_log_prob)
-        print(
-            "[RayPPOTrainer][compute_ref_log_prob][exit] "
-            f"ts={time.time():.3f} summary={_debug_dataproto_summary(ref_log_prob)}",
-            flush=True,
-        )
 
         return ref_log_prob
 

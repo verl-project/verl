@@ -306,13 +306,6 @@ def attach_image_refs_to_dataproto(
         "processed_bytes": sum(payload.processed_bytes for payload in image_bank.values()),
     }
     stats["dedup_ratio"] = stats["row_image_refs"] / max(stats["unique_images"], 1)
-    print(
-        "[ImageRefs][build] "
-        f"sample_id={sample_id} rows={n_rows} unique_images={stats['unique_images']} "
-        f"row_image_refs={stats['row_image_refs']} raw_bytes={stats['raw_bytes']} "
-        f"processed_bytes={stats['processed_bytes']} dedup_ratio={stats['dedup_ratio']:.2f}",
-        flush=True,
-    )
 
     output = DataProto(batch=data_proto.batch, non_tensor_batch=nt, meta_info=dict(data_proto.meta_info or {}))
     return output, {image_id: _payload_as_dict(payload) for image_id, payload in image_bank.items()}, stats

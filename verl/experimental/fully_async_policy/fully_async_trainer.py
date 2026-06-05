@@ -705,6 +705,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             )
 
             batch = self._fit_compute_reward(batch)
+            self._record_sample_reward_before_expand(batch)
             self._log_batch_storage("after_reward", batch)
             assert_batch_schema(
                 batch,
@@ -762,6 +763,24 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             self._collect_metrics_from_samples(batch, metrics)
         batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
         return batch
+
+    def _record_sample_reward_before_expand(self, batch: DataProto) -> None:
+        reward_tensor = None
+        if batch.batch is not None and "rm_scores" in batch.batch.keys():
+            reward_tensor = batch.batch["rm_scores"]
+        elif self.reward_tensor is not None:
+            reward_tensor = self.reward_tensor
+        if reward_tensor is None:
+            return
+
+        sequence_rewards = reward_tensor.detach().float().sum(dim=-1)
+        finite_rewards = sequence_rewards[torch.isfinite(sequence_rewards)]
+        if finite_rewards.numel() == 0:
+            return
+
+        sample_mean = float(finite_rewards.mean().item())
+        self.metrics["reward/sample_mean_before_expand"] = sample_mean
+        batch.meta_info["reward/sample_mean_before_expand"] = sample_mean
 
     def _update_actor(self, batch: DataProto) -> DataProto:
         """Update actor using the expanded rows as one PPO mini-batch."""
@@ -1364,5 +1383,5 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
                 }
             )
             for key, value in batch.meta_info.items():
-                if key.startswith("fully_async") or key.startswith("timing_s"):
+                if key.startswith("fully_async") or key.startswith("timing_s") or key.startswith("reward/"):
                     metrics[key] = value
