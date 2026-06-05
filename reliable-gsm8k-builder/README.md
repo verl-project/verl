@@ -252,3 +252,64 @@ python run_on_policy_loop.py \
 
 The loop stores generated data under `runs_on_policy/<run>-iterXX-data/` and checkpoints under
 `../checkpoints/on_policy/<run>-iterXX-train/` by default.
+
+## VERL-Native Dynamic MC Loop
+
+`bash/20260604_gsm8k_dynamic_mc_verl_native.sh` is the faster on-policy variant. It starts VERL once and keeps the actor/rollout model resident on GPU. The seed parquet only contains Stage 1 GSM8K prompts:
+
+- each seed row asks the current actor to solve the GSM8K question with chain-of-thought
+- `STAGE1_PROMPT_COUNT` controls how many neutral candidate-generation prompts are seeded per question
+- each rollout is parsed with `FINAL_ANSWER: <number>` and verified against the GSM8K gold answer
+- correct Stage 1 completions get reward `1`; incorrect neutral completions get reward `0` but are still buffered as Stage 2 distractors
+- rewards are computed by `reliable_gsm8k.verl_dynamic_mc.compute_score`
+
+After each VERL batch, `GSM8KDynamicMCDataset.on_batch_end(...)` reads the generated rollouts from the same `DataProto`, verifies final numeric answers against GSM8K gold, and buffers candidates by `question_id = md5(question)`. Once a question has one verified correct candidate and three distinct verified incorrect candidates, the dataset queues a Stage 2 MC prompt with four CoT options and exactly one correct letter. Later candidate sets consume newer verified wrong answers in groups of three and newer verified correct CoTs when available, so Stage 2 can keep refreshing instead of being frozen to the first successful candidate set. At epoch end, VERL calls `on_epoch_end(...)`, and the queued Stage 2 rows are prepended for the next dataloader pass. This avoids mutating numeric sampler indices in the middle of an active epoch.
+
+Run a dry command preview:
+
+```bash
+DRY_RUN=1 NUM_SAMPLES=10 GPU_IDS=0 GPUS=1 \
+TRAIN_BATCH_SIZE=4 GEN_BATCH_SIZE=4 PPO_MINI_BATCH_SIZE=4 \
+  ../bash/20260604_gsm8k_dynamic_mc_verl_native.sh
+```
+
+Run a small real smoke:
+
+```bash
+NUM_SAMPLES=10 GPU_IDS=0 GPUS=1 \
+TRAIN_BATCH_SIZE=4 GEN_BATCH_SIZE=4 PPO_MINI_BATCH_SIZE=4 \
+TOTAL_EPOCHS=3 TEST_FREQ=999999 SAVE_FREQ=999999 \
+  ../bash/20260604_gsm8k_dynamic_mc_verl_native.sh
+```
+
+Then validate that the run actually reached the dynamic Stage 2 path:
+
+```bash
+python check_dynamic_mc_smoke_log.py ../logs/20260604_gsm8k_dynamic_mc_verl_native_grpo.log
+```
+
+The checker requires evidence that Stage 1 rollouts were parsed, correct and incorrect candidates were accepted, Stage 2 rows were queued and inserted, and the train dataloader was rebuilt without restarting VERL.
+
+Useful parameters:
+
+- `NUM_SAMPLES`: number of GSM8K questions used to create the initial Stage 1 seed parquet.
+- `ROLLOUT_N`: number of VERL rollouts per prompt. Default `4`, which is useful for GRPO grouping.
+- `STAGE1_PROMPT_COUNT`: number of neutral Stage 1 candidate-generation prompts seeded per GSM8K question. Default `4`. Actual Stage 1 sampled completions per question are `STAGE1_PROMPT_COUNT * ROLLOUT_N`, so the default is `16` attempts per question.
+- `STAGE1_PROMPT_MODE`: prompt style for Stage 1 seed rows. Default `neutral`. `role` keeps the older candidate-mining behavior with one correct-solution prompt and wrong-solution prompts, but the cleaner on-policy path is `neutral`.
+- `INCORRECT_PROMPT_COUNT` / `INCORRECT_TARGET_COUNT`: deprecated aliases from the role-prompt version. If one is set, the launcher maps it to total neutral seed rows as `old_value + 1`.
+- `STAGE2_INCORRECT_COUNT`: number of verified wrong candidates used in each Stage 2 MC prompt. This must be `3`, because Stage 2 is always one correct option plus three wrong options.
+- `MAX_STAGE2_PER_QUESTION`: how many MC prompts can be created from one GSM8K question. Default `4`.
+- `MAX_NEW_STAGE2_PER_BATCH`: cap on new Stage 2 rows queued after one VERL batch. Default `256`.
+- `STAGE2_CANDIDATE_MAX_CHARS`: maximum characters kept from each candidate CoT when building Stage 2 options. Default `2000`; the final `FINAL_ANSWER` tail is preserved when clipping.
+- `TOTAL_EPOCHS`: number of dataloader passes. Default `3`. Use at least `2`, because Stage 2 rows are produced after Stage 1 rollouts and consumed on a later pass. Use `3+` when you want to see the updated actor generate a second wave of Stage 1 candidates and train on the promoted Stage 2 rows from that wave.
+- `TOTAL_TRAINING_STEPS`: optional explicit VERL step budget. If unset, VERL starts from the seed dataloader length and expands the automatic step budget after epoch-end Stage 2 insertion. If set, it is treated as a hard cap.
+- `VAL_FILE`: optional validation parquet. If unset, the launcher creates a small Stage 1 GSM8K test parquet under `runs_verl_native_dynamic_mc/seed/`.
+- `VAL_NUM_SAMPLES`: number of GSM8K test questions used for that auto-created validation parquet. Default `128`.
+- `TRAIN_BATCH_SIZE`, `GEN_BATCH_SIZE`, `PPO_MINI_BATCH_SIZE`, `ACTOR_MICRO_BATCH_SIZE`: VERL batch controls.
+- `MODEL_PATH`: base model or local actor checkpoint path.
+- `GPU_IDS`, `GPUS`: visible CUDA devices and VERL GPU count.
+- `TRAINER_LOGGER`: VERL logger list. Default `["console"]`; use `TRAINER_LOGGER='["console","wandb"]'` when W&B is configured.
+
+This path is different from `run_on_policy_loop.py`: it does not regenerate a static dataset, stop VERL, save an HF checkpoint, reload it, and start again. It keeps the update loop inside one VERL run. Checkpoints are still saved according to `SAVE_FREQ` and at the final step, but they are not used as the mechanism for the next policy update.
+
+Trainer resume is intentionally disabled for this dynamic dataset. The candidate buffer is in memory and is not part of VERL's dataloader checkpoint, so `trainer.resume_mode=disable` is required for this path.

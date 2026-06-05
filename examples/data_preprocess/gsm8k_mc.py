@@ -110,6 +110,15 @@ if __name__ == "__main__":
         help="Remove the \"Let's think step by step\" phrase from the prompt suffix.",
     )
     parser.add_argument(
+        "--val_data_source",
+        default=None,
+        help=(
+            "Data source string to write into the *test* split records. "
+            "If not set, uses the same `data_source` as train. "
+            "Set this only if you intentionally want a different data_source label for eval/dispatch."
+        ),
+    )
+    parser.add_argument(
         "--open_ended_fraction",
         type=float,
         default=0.0,
@@ -194,7 +203,7 @@ if __name__ == "__main__":
         # Avoid overwriting defaults when adding open-ended samples
         local_save_dir = openended_prefixed_dir(local_save_dir, args.open_ended_fraction)
 
-    val_data_source = os.path.basename(os.path.normpath(os.path.expanduser(local_save_dir)))
+    val_data_source = args.val_data_source or data_source
 
     if local_dataset_path is not None:
         # Note: The GSM-MC-Stage dataset only has 'train' and 'test' splits

@@ -364,7 +364,7 @@ class RayPPOTrainer:
         Creates the train and validation dataloaders.
         """
         # TODO: we have to make sure the batch size is divisible by the dp size
-        from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler
+        from verl.trainer.main_ppo import create_rl_dataset
 
         if train_dataset is None:
             train_dataset = create_rl_dataset(
@@ -384,23 +384,15 @@ class RayPPOTrainer:
             )
         self.train_dataset, self.val_dataset = train_dataset, val_dataset
 
-        if train_sampler is None:
-            train_sampler = create_rl_sampler(self.config.data, self.train_dataset)
         if collate_fn is None:
             from verl.utils.dataset.rl_dataset import collate_fn as default_collate_fn
 
             collate_fn = default_collate_fn
+        self._train_collate_fn = collate_fn
 
         num_workers = self.config.data["dataloader_num_workers"]
 
-        self.train_dataloader = StatefulDataLoader(
-            dataset=self.train_dataset,
-            batch_size=self.config.data.get("gen_batch_size", self.config.data.train_batch_size),
-            num_workers=num_workers,
-            drop_last=True,
-            collate_fn=collate_fn,
-            sampler=train_sampler,
-        )
+        self.train_dataloader = self._build_train_dataloader(train_sampler=train_sampler)
 
         val_batch_size = self.config.data.val_batch_size  # Prefer config value if set
         if val_batch_size is None:
@@ -440,6 +432,28 @@ class RayPPOTrainer:
                     self.config.critic.optim.total_training_steps = total_training_steps
         except Exception as e:
             print(f"Warning: Could not set total_training_steps in config. Structure missing? Error: {e}")
+
+    def _build_train_dataloader(self, train_sampler: Optional[Sampler] = None) -> StatefulDataLoader:
+        from verl.trainer.main_ppo import create_rl_sampler
+
+        if train_sampler is None:
+            train_sampler = create_rl_sampler(self.config.data, self.train_dataset)
+        return StatefulDataLoader(
+            dataset=self.train_dataset,
+            batch_size=self.config.data.get("gen_batch_size", self.config.data.train_batch_size),
+            num_workers=self.config.data["dataloader_num_workers"],
+            drop_last=True,
+            collate_fn=self._train_collate_fn,
+            sampler=train_sampler,
+        )
+
+    def _rebuild_train_dataloader_for_dynamic_dataset(self, inserted_rows: int) -> None:
+        self.train_dataloader = self._build_train_dataloader()
+        print(
+            f"Rebuilt train dataloader after dynamic dataset insertion: "
+            f"inserted_rows={inserted_rows}, dataset_len={len(self.train_dataset)}, "
+            f"dataloader_len={len(self.train_dataloader)}"
+        )
 
     def _dump_generations(self, inputs, outputs, gts, scores, reward_extra_infos_dict, dump_path):
         """Dump rollout/validation samples as JSONL."""
@@ -956,6 +970,12 @@ class RayPPOTrainer:
     def _load_checkpoint(self):
         if self.config.trainer.resume_mode == "disable":
             return 0
+        if getattr(self.train_dataset, "supports_trainer_resume", True) is False:
+            raise RuntimeError(
+                f"{self.train_dataset.__class__.__name__} does not support trainer resume because "
+                "its in-memory dynamic state is not stored in VERL dataloader checkpoints. "
+                "Use trainer.resume_mode=disable for this dataset."
+            )
 
         # load from hdfs
         if self.config.trainer.default_hdfs_dir is not None:
@@ -1544,6 +1564,26 @@ class RayPPOTrainer:
                         tag=f"post_update_step{self.global_steps}", sub_dir=f"step{self.global_steps}"
                     )
 
+                # this is experimental and may be changed/removed in the future
+                # in favor of a general-purpose data buffer pool
+                if hasattr(self.train_dataset, "on_batch_end"):
+                    # Dynamic datasets should only queue here; materialize rows
+                    # at epoch boundaries to avoid mutating active sampler indices.
+                    self.train_dataset.on_batch_end(batch=batch)
+
+                if (
+                    is_last_step
+                    and self.config.trainer.total_training_steps is None
+                    and epoch + 1 < self.config.trainer.total_epochs
+                    and hasattr(self.train_dataset, "has_pending_dynamic_rows")
+                    and self.train_dataset.has_pending_dynamic_rows()
+                ):
+                    # A dynamic dataset may have just queued rows for the next
+                    # dataloader pass. Do not stop before on_epoch_end promotes
+                    # them and the automatic step budget is expanded.
+                    is_last_step = False
+                    print("Deferring final stop because dynamic training rows are pending.")
+
                 if is_last_step:
                     if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):
                         self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=True)
@@ -1558,8 +1598,20 @@ class RayPPOTrainer:
                     progress_bar.close()
                     return
 
-                # this is experimental and may be changed/removed in the future
-                # in favor of a general-purpose data buffer pool
-                if hasattr(self.train_dataset, "on_batch_end"):
-                    # The dataset may be changed after each training batch
-                    self.train_dataset.on_batch_end(batch=batch)
+            if hasattr(self.train_dataset, "on_epoch_end"):
+                # Allow dynamic datasets to safely materialize buffered rows
+                # between sampler passes instead of mutating indices mid-epoch.
+                inserted_dynamic_rows = self.train_dataset.on_epoch_end(epoch=epoch) or 0
+                if inserted_dynamic_rows > 0:
+                    self._rebuild_train_dataloader_for_dynamic_dataset(inserted_rows=inserted_dynamic_rows)
+                if self.config.trainer.total_training_steps is None:
+                    completed_steps = self.global_steps - 1
+                    remaining_epochs = self.config.trainer.total_epochs - epoch - 1
+                    dynamic_batch_size = self.config.data.get("gen_batch_size", self.config.data.train_batch_size)
+                    dynamic_epoch_steps = len(self.train_dataset) // dynamic_batch_size
+                    dynamic_total_steps = completed_steps + remaining_epochs * dynamic_epoch_steps
+                    if dynamic_total_steps > self.total_training_steps:
+                        self.total_training_steps = dynamic_total_steps
+                        progress_bar.total = self.total_training_steps
+                        progress_bar.refresh()
+                        print(f"Updated total training steps for dynamic dataset: {self.total_training_steps}")

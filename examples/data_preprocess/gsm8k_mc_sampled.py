@@ -152,9 +152,18 @@ def build_candidate_pools(
     *,
     answer_record: dict[str, Any],
     evaluation_record: dict[str, Any],
+    parse_method: str,
 ) -> tuple[list[Candidate], dict[str, list[Candidate]]]:
     responses = ((answer_record.get("payload") or {}).get("responses")) or []
-    verify_result = (evaluation_record.get("verify_result") or {}).get("strict") or []
+    verify_results_by_method = evaluation_record.get("verify_result") or {}
+    if parse_method not in verify_results_by_method:
+        question_id = evaluation_record.get("question_id")
+        available = ", ".join(sorted(verify_results_by_method.keys())) or "<none>"
+        raise ValueError(
+            f"Evaluation record for question_id={question_id} does not contain parse_method={parse_method!r}. "
+            f"Available methods: {available}. Re-run verification with this parse method or pass --parse_method."
+        )
+    verify_result = verify_results_by_method[parse_method] or []
 
     if len(responses) != len(verify_result):
         question_id = evaluation_record.get("question_id")
@@ -166,9 +175,13 @@ def build_candidate_pools(
     correct_candidates: list[Candidate] = []
     wrong_candidates: list[Candidate] = []
     for idx, (response_text, verdict) in enumerate(zip(responses, verify_result, strict=True)):
-        if not isinstance(verdict, list) or len(verdict) < 2:
+        if isinstance(verdict, dict):
+            parsed_answer = verdict.get("parsed_solution")
+            status = verdict.get("label")
+        elif isinstance(verdict, list) and len(verdict) >= 2:
+            parsed_answer, status = verdict[0], verdict[1]
+        else:
             continue
-        parsed_answer, status = verdict[0], verdict[1]
         if status not in {"correct", "incorrect"}:
             continue
         if not isinstance(parsed_answer, str) or not parsed_answer.strip():
@@ -203,6 +216,7 @@ def sample_variant(
     augment_total: int,
     gold_solution: str,
     gold_answer: str,
+    parse_method: str,
 ) -> dict[str, Any]:
     wrong_values = rng.sample(sorted(wrong_candidate_groups.keys()), number_of_multiple_choice_wrong)
     sampled_wrong_candidates = [rng.choice(wrong_candidate_groups[value]) for value in wrong_values]
@@ -291,6 +305,7 @@ def sample_variant(
             "correct_option_source": correct_option_source,
             "number_of_multiple_choice_correct": number_of_multiple_choice_correct,
             "number_of_multiple_choice_wrong": number_of_multiple_choice_wrong,
+            "sampled_candidate_parse_method": parse_method,
             "options": labeled_options,
             "option_records": option_metadata,
             "sampled_correct_response_indices": [],
@@ -315,6 +330,7 @@ def preprocess_split(
     number_of_multiple_choice_wrong: int,
     augment: int,
     data_source_name: str,
+    parse_method: str,
 ) -> tuple[datasets.Dataset, dict[str, int]]:
     records = []
     stats = {
@@ -344,6 +360,7 @@ def preprocess_split(
         _, wrong_candidate_groups = build_candidate_pools(
             answer_record=answer_record,
             evaluation_record=evaluation_record,
+            parse_method=parse_method,
         )
 
         if len(wrong_candidate_groups) < number_of_multiple_choice_wrong:
@@ -367,6 +384,7 @@ def preprocess_split(
                     augment_total=augment,
                     gold_solution=gold_solution,
                     gold_answer=gold_answer,
+                    parse_method=parse_method,
                 )
             )
             stats["written"] += 1
@@ -399,6 +417,12 @@ if __name__ == "__main__":
         help="How many independently sampled variants to create per original question.",
     )
     parser.add_argument("--seed", type=int, default=0, help="Random seed for response sampling.")
+    parser.add_argument(
+        "--parse_method",
+        choices=["strict", "flexible"],
+        default="flexible",
+        help="Verification result bucket to use when selecting sampled wrong answers.",
+    )
     parser.add_argument(
         "--no_cot_phrase",
         action="store_true",
@@ -465,6 +489,7 @@ if __name__ == "__main__":
         number_of_multiple_choice_wrong=args.number_of_multiple_choice_wrong,
         augment=args.augment,
         data_source_name=DEFAULT_DATA_SOURCE,
+        parse_method=args.parse_method,
     )
     test_dataset, test_stats = preprocess_split(
         dataset_split=gsm8k_dataset["test"],
@@ -477,6 +502,7 @@ if __name__ == "__main__":
         number_of_multiple_choice_wrong=args.number_of_multiple_choice_wrong,
         augment=args.augment,
         data_source_name=val_data_source,
+        parse_method=args.parse_method,
     )
 
     if legacy_local_dir is not None:
@@ -488,7 +514,8 @@ if __name__ == "__main__":
         "Sampling config: "
         f"correct_source_count={args.number_of_multiple_choice_correct}, "
         f"wrong_visible_count={args.number_of_multiple_choice_wrong}, "
-        f"augment={args.augment}"
+        f"augment={args.augment}, "
+        f"parse_method={args.parse_method}"
     )
     print(f"Train stats: {train_stats}")
     print(f"Test stats: {test_stats}")
