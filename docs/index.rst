@@ -155,6 +155,7 @@ verl is fast with:
    :maxdepth: 2
    :caption: Hardware Support
 
+   hardware/multi_chip_support
    amd_tutorial/amd_build_dockerfile_page.rst
    amd_tutorial/amd_vllm_page.rst
    amd_tutorial/amd_quick_start.rst

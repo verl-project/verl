@@ -24,6 +24,7 @@ from typing import Any, Literal, Optional, get_args
 import torch
 from vllm.outputs import RequestOutput
 
+from verl.plugin.platform import get_platform
 from verl.utils.device import is_npu_available
 from verl.utils.vllm import TensorLoRARequest, VLLMHijack
 from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
@@ -62,7 +63,10 @@ def get_device_uuid(device_id: int) -> str:
         else:
             return f"NPU-{device_id}"
     else:
-        return current_platform.get_device_uuid(device_id)
+        try:
+            return current_platform.get_device_uuid(device_id)
+        except Exception:
+            return get_platform().get_device_uuid(device_id=device_id)
 
 
 def get_vllm_max_lora_rank(lora_rank: int):

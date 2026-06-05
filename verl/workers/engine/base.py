@@ -15,6 +15,7 @@
 The abstract base class defining the interface for model training engines.
 """
 
+import os
 from abc import abstractmethod
 from contextlib import nullcontext
 from typing import Any, Callable, ContextManager, Generator, Optional
@@ -22,7 +23,7 @@ from typing import Any, Callable, ContextManager, Generator, Optional
 import torch
 from tensordict import TensorDict
 
-from verl.utils.device import get_device_name
+from verl.utils.device import get_device_name, get_vendor
 from verl.utils.tensordict_utils import maybe_fix_3d_position_ids
 
 
@@ -276,7 +277,13 @@ class EngineRegistry:
     _engines = {}
 
     @classmethod
-    def register(cls, model_type: str, backend: list[str] | str, device: list[str] | str = "cuda"):
+    def register(
+        cls,
+        model_type: str,
+        backend: list[str] | str,
+        device: list[str] | str = "cuda",
+        vendor: list[str] | str | None = None,
+    ):
         """
         A class method decorator that registers an engine class with a given key.
 
@@ -287,6 +294,8 @@ class EngineRegistry:
             backend (list[str] | str): The backend to use for the model type
             device (list[str] | str): The device type (e.g., "cuda", "npu", "cpu") this engine supports,
                 default is "cuda"
+            vendor (list[str] | str | None): The hardware vendor (e.g., "nvidia", "metax") this engine
+                supports. If None, the engine is registered as the default for the device type.
 
         Returns:
             A decorator function that takes an engine class and registers it.
@@ -299,12 +308,17 @@ class EngineRegistry:
 
             backends = backend if isinstance(backend, list) else [backend]
             devices = device if isinstance(device, list) else [device]
+            vendors = vendor if isinstance(vendor, list) else ([vendor] if vendor else [None])
             for current_backend in backends:
                 for current_device in devices:
                     if current_backend not in cls._engines[model_type]:
                         cls._engines[model_type][current_backend] = {}
-                    if current_device not in cls._engines[model_type][current_backend]:
-                        cls._engines[model_type][current_backend][current_device] = engine_class
+                    for current_vendor in vendors:
+                        key = (current_device, current_vendor) if current_vendor else current_device
+                        assert key not in cls._engines[model_type][current_backend], (
+                            f"The key(device-vendor: {key}) has been already registed!"
+                        )
+                        cls._engines[model_type][current_backend][key] = engine_class
 
             return engine_class
 
@@ -315,10 +329,33 @@ class EngineRegistry:
         assert model_type in cls._engines, f"Unknown model_type: {model_type}"
         assert backend in cls._engines[model_type], f"Unknown backend: {backend}"
         device = get_device_name()
-        assert device in cls._engines[model_type][backend], (
-            f"Unknown device: {device} for model_type: {model_type} and backend: {backend}"
+        vendor = get_vendor()
+        # Allow environment variables to override detected device and vendor for engine selection, if set
+        if os.getenv("VERL_ENGINE_DEVICE"):
+            device = os.getenv("VERL_ENGINE_DEVICE")
+        if os.getenv("VERL_ENGINE_VENDOR"):
+            vendor = os.getenv("VERL_ENGINE_VENDOR")
+        registry = cls._engines[model_type][backend]
+
+        # Try vendor-specific lookup: (device, vendor)
+        vendor_key = (device, vendor)
+        if vendor_key in registry:
+            return registry[vendor_key]
+
+        # Fallback to device-only key (registered without vendor)
+        if device in registry:
+            return registry[device]
+
+        # For cuda-compatible vendors without a specific registration, try nvidia
+        if device == "cuda" and vendor != "nvidia":
+            nvidia_key = (device, "nvidia")
+            if nvidia_key in registry:
+                return registry[nvidia_key]
+
+        raise ValueError(
+            f"No engine registered for device={device!r}, vendor={vendor!r}, "
+            f"model_type={model_type!r}, backend={backend!r}"
         )
-        return cls._engines[model_type][backend][device]
 
     @classmethod
     def new(cls, model_type, backend, *args, **kwargs):

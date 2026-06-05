@@ -108,7 +108,9 @@ class RLHFDataset(Dataset):
         self.image_key = config.get("image_key", "images")
         self.video_key = config.get("video_key", "videos")
         self.audio_key = config.get("audio_key", "audios")
-        self.image_patch_size = config.get("image_patch_size", 14)
+        # Default to the processor's real patch_size to align with the rollout path.
+        _default_patch_size = getattr(getattr(self.processor, "image_processor", None), "patch_size", 14)
+        self.image_patch_size = config.get("image_patch_size") or _default_patch_size
         self.max_prompt_length = config.get("max_prompt_length", 1024)
         self.return_raw_chat = config.get("return_raw_chat", False)
         self.return_full_prompt = config.get("return_full_prompt", False)
