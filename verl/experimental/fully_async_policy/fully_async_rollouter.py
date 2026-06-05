@@ -391,7 +391,6 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
         return worker
 
 
-@ray.remote(num_cpus=10, max_concurrency=100)
 class FullyAsyncRollouter(SeparateRayPPOTrainer):
     """
     Asynchronous sample generator, responsible for continuously generating training samples
@@ -483,6 +482,8 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         # When set, its GPUs back hybrid replicas for trainer-side validation.
         self._hybrid_worker_group = None
 
+        self.agent_loop_manager_class = FullyAsyncAgentLoopManager
+
         # Config
         self.staleness_threshold: float = config.async_training.get("staleness_threshold", 1)
         # required_samples use ppo_mini_batch_size*require_batches as the minimum number of samples.
@@ -557,6 +558,14 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         """Get rollout worker group"""
         return self.llm_server_manager.get_replicas()
 
+    def get_max_concurrent_samples(self):
+        """Max simultaneous in-flight samples (physical slot limit for RB Layer 1)."""
+        return self.max_concurrent_samples
+
+    def get_max_required_samples(self):
+        """Max samples per model version (version window limit for RB Layer 2)."""
+        return self.max_required_samples
+
     def get_max_queue_size(self):
         return self.max_queue_size
 
@@ -604,7 +613,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         """Stop rollout profiling on all replicas before the next weight sync."""
         await self.llm_server_manager.stop_profile()
 
-    def do_validate(self):
+    async def do_validate(self):
         """Run validation and return metrics"""
         timing_raw = {}
         with marked_timer("rollouter/validate_time", timing_raw, color="green"):
@@ -807,7 +816,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
             config=self.config,
             worker_group=self.get_hybrid_worker_group(),
         )
-        self.async_rollout_manager = await FullyAsyncAgentLoopManager.create(
+        self.async_rollout_manager = await self.agent_loop_manager_class.create(
             config=self.config,
             llm_client=self.llm_server_manager.get_client(client_cls=FullyAsyncLLMServerClient),
             reward_loop_worker_handles=reward_loop_worker_handles,
@@ -1023,9 +1032,6 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         """
 
         print("[FullyAsyncRollouter] Starting FullyAsyncRollouter...")
-
-        if self.message_queue_client is None:
-            raise ValueError("MessageQueue client not set. Call set_message_queue_client() first.")
 
         # Set the running status flag
         async with self.lock:

@@ -291,10 +291,8 @@ class MetricsAggregator:
 
     def get_aggregated_metrics(self) -> dict[str, Any]:
         """aggregated metrics"""
-        t = time.time()
         if self.step_count == 0:
             return {}
-
         aggregated = {}
 
         # Aggregate all metrics
@@ -303,9 +301,6 @@ class MetricsAggregator:
 
         # Aggregate special metrics
         aggregated = self._special_metrics_aggergate(aggregated)
-
-        print(f"aggregated metrics done. cost {time.time() - t:.4f} seconds.")
-
         return aggregated
 
     def _special_metrics_aggergate(self, aggregated: dict[str, Any]) -> dict[str, Any]:
