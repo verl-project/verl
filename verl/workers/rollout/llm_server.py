@@ -380,14 +380,13 @@ class LLMServerManager:
             update_prometheus_config(self.rollout_config.prometheus, self.server_addresses, self.rollout_config.name)
 
     async def _init_global_load_balancer(self) -> None:
-        # Sticky-vs-balance tradeoff knobs; absent/legacy configs fall back to
-        # pure sticky (abs_threshold=0 disables the imbalance gate).
-        lb_config = getattr(self.rollout_config, "load_balancer", None)
+        # Sticky-vs-balance tradeoff knobs on rollout_config; 0 disables the
+        # imbalance gate, while the default of 64 keeps it enabled.
         self.global_load_balancer = GlobalRequestLoadBalancer.remote(
             servers=dict(zip(self.server_addresses, self.server_handles, strict=True)),
             max_cache_size=DEFAULT_ROUTING_CACHE_SIZE,
-            balance_abs_threshold=getattr(lb_config, "balance_abs_threshold", 0),
-            balance_rel_threshold=getattr(lb_config, "balance_rel_threshold", 1.5),
+            balance_abs_threshold=self.rollout_config.balance_abs_threshold,
+            balance_rel_threshold=self.rollout_config.balance_rel_threshold,
         )
 
     def get_client(self, client_cls=LLMServerClient, **kwargs) -> LLMServerClient:

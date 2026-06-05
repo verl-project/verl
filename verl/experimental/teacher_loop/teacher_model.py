@@ -146,11 +146,10 @@ class TeacherModelManager:
     def _initialize_load_balancer_handle(self):
         from verl.workers.rollout.llm_server import GlobalRequestLoadBalancer
 
-        load_balancer_config = self.teacher_model_config.inference.load_balancer
         self.load_balancer_handle = GlobalRequestLoadBalancer.remote(
             servers=dict(zip(self.server_addresses, self.server_handles, strict=True)),
-            balance_abs_threshold=load_balancer_config.balance_abs_threshold,
-            balance_rel_threshold=load_balancer_config.balance_rel_threshold,
+            balance_abs_threshold=self.teacher_model_config.inference.balance_abs_threshold,
+            balance_rel_threshold=self.teacher_model_config.inference.balance_rel_threshold,
         )
 
 
