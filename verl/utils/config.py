@@ -83,7 +83,7 @@ def validate_config(
         use_reference_policy (bool): is ref policy needed
         use_critic (bool): is critic needed
     """
-    # number of GPUs total
+    # number of GPUs total (0 for CPU mode)
     n_gpus = config.trainer.n_gpus_per_node * config.trainer.nnodes
 
     if not config.actor_rollout_ref.actor.use_dynamic_bsz:
@@ -103,7 +103,8 @@ def validate_config(
             )
             minimal_bsz = megatron_dp * config.actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu
         else:
-            minimal_bsz = n_gpus
+            # CPU mode: n_gpus=0, use minimal_bsz=1 to avoid ZeroDivisionError
+            minimal_bsz = n_gpus if n_gpus > 0 else 1
 
         # 1. Check total batch size for data correctness
         real_train_batch_size = config.data.train_batch_size * config.actor_rollout_ref.rollout.n

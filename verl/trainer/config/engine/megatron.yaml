@@ -85,6 +85,11 @@ override_transformer_config:
   # Attention backend to use (flash,fused,unfused,local,auto). Defaults to auto in mcore, flash in verl
   attention_backend: flash
 
+  # MindSpeed (Ascend NPU): attention mask generation requires micro_batch_size OR use_flash_attn=True
+  # on TransformerConfig (mbridge). Set true here so actor/ref/critic Megatron stacks work without core code changes.
+  # Override per-job if needed, e.g. micro_batch_size: ${actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu}
+  use_flash_attn: true
+
 override_mcore_model_config: {}
 
 # oc.select: default val for ref.megatron.use_mbridge

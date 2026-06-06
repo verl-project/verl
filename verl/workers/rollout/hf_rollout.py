@@ -21,6 +21,7 @@ to perform generation.
 import contextlib
 
 import torch
+from omegaconf import OmegaConf
 import torch.distributed
 from tensordict import TensorDict
 from torch import nn
@@ -37,10 +38,31 @@ __all__ = ["HFRollout"]
 
 
 class HFRollout(BaseRollout):
-    def __init__(self, module: nn.Module, config):
-        super().__init__()
-        self.config = config
+    def __init__(self, module: nn.Module, config, model_config=None, device_mesh=None):
+        from verl.utils.config import omega_conf_to_dataclass
+        from verl.workers.config import HFModelConfig
+
+        _model_config = model_config if model_config is not None else omega_conf_to_dataclass({}, dataclass_type=HFModelConfig)
+        super().__init__(config=config, model_config=_model_config, device_mesh=device_mesh)
+        self.config = config if (hasattr(config, "get") or isinstance(config, dict)) else {}  # keep dict-like for .get()
         self.module = module
+
+    async def resume(self, tags: list[str]):
+        """No-op: HFRollout uses the same module as actor, weights already in memory."""
+        pass
+
+    async def update_weights(
+        self,
+        weights,  # Generator[tuple[str, torch.Tensor], None, None]
+        **kwargs,
+    ):
+        """No-op: HFRollout uses the same module as actor, no weight sync needed."""
+        for _ in weights:
+            pass
+
+    async def release(self):
+        """No-op: HFRollout does not manage separate GPU memory."""
+        pass
 
     def generate_sequences(self, prompts: DataProto) -> DataProto:
         batch_size = prompts.batch.batch_size[0]
@@ -170,8 +192,9 @@ class HFRollout(BaseRollout):
             batch_size=generated_batch_size,
         )
 
-        # empty cache before compute old_log_prob
-        get_torch_device().empty_cache()
+        # empty cache before compute old_log_prob (no-op on CPU)
+        if get_device_name() != "cpu" and hasattr(get_torch_device(), "empty_cache"):
+            get_torch_device().empty_cache()
 
         self.module.train()
         return DataProto(batch=batch)

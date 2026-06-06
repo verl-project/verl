@@ -5,6 +5,7 @@ datasets
 dill
 hydra-core
 liger-kernel
+nest-asyncio
 numpy<2.0.0
 pandas
 peft
