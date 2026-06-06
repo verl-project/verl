@@ -35,6 +35,7 @@ if TYPE_CHECKING:
 
 class _FakeImageProcessor(ImageProcessingMixin):
     """Minimal image_processor stub — actual pixel encoding is done by vLLM."""
+
     patch_size: int = 14  # InternVL vision encoder uses 14x14 patches
     image_mean: list[float] = [0.485, 0.456, 0.406]
     image_std: list[float] = [0.229, 0.224, 0.225]
@@ -69,7 +70,7 @@ class InternVLProcessor(ProcessorMixin):
         # Number of vision tokens per tile after pixel_shuffle
         patch_size = config.vision_config.patch_size
         downsample_ratio = config.downsample_ratio
-        self._num_image_token = int((self._image_size // patch_size) ** 2 * (downsample_ratio ** 2))
+        self._num_image_token = int((self._image_size // patch_size) ** 2 * (downsample_ratio**2))
 
     @property
     def image_token_id(self) -> int:
@@ -141,11 +142,11 @@ class InternVLProcessor(ProcessorMixin):
                 modified_text = []
                 image_idx = 0
                 for t in text:
-                    while '<image>' in t and image_idx < len(patches_per_image):
+                    while "<image>" in t and image_idx < len(patches_per_image):
                         num_patches = patches_per_image[image_idx]
                         feature_size = num_patches * self._num_image_token
                         replacement = f"<img>{'<IMG_CONTEXT>' * feature_size}</img>"
-                        t = t.replace('<image>', replacement, 1)
+                        t = t.replace("<image>", replacement, 1)
                         image_idx += 1
                     modified_text.append(t)
                 tokenized = self.tokenizer(modified_text, return_tensors=return_tensors, **kwargs)

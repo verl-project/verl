@@ -211,6 +211,8 @@ def _maybe_load_custom_processor(model_type, name_or_path, config, tokenizer, **
     if tokenizer is None:
         tokenizer = hf_tokenizer(name_or_path, **kwargs)
     return cls(tokenizer, config)
+
+
 # ------------------------------------------------------------------
 
 
@@ -271,7 +273,7 @@ def hf_processor(name_or_path, **kwargs):
             processor.get_rope_index = types.MethodType(model_class.get_rope_index, processor)
             if hasattr(model_class, "get_vision_position_ids"):
                 processor.get_vision_position_ids = types.MethodType(model_class.get_vision_position_ids, processor)
-    except Exception as e:
+    except Exception:
         # AutoProcessor.from_pretrained may raise for models without a standard
         # HF processor (e.g. InternVL).  Try the custom registry before giving up.
         config = AutoConfig.from_pretrained(name_or_path, **kwargs)

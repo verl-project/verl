@@ -259,8 +259,8 @@ class FSDPEngine(BaseEngine):
                 # feature injection. The config doesn't include it, so the model
                 # initializes img_context_token_id to None. Set it from the tokenizer
                 # so the forward pass can find <IMG_CONTEXT> tokens in input_ids.
-                if hasattr(module, 'img_context_token_id'):
-                    module.img_context_token_id = self.model_config.tokenizer.convert_tokens_to_ids('<IMG_CONTEXT>')
+                if hasattr(module, "img_context_token_id"):
+                    module.img_context_token_id = self.model_config.tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>")
             else:
                 from verl.utils.model import load_valuehead_model
 
