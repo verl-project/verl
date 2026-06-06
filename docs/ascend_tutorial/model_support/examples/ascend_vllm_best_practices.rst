@@ -114,7 +114,7 @@ vLLM 是当前主流的高性能开源推理引擎, 昇腾已经全面原生支�
   export HCCL_HOST_SOCKET_PORT_RANGE=60000-60050
   export HCCL_NPU_SOCKET_PORT_RANGE=61000-61050
   export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
-  export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8
+  export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
   # 修改为当前需要跑的用例路径
   DEFAULT_SH="./run_*.sh"
   echo "Use $DEFAULT_SH"
