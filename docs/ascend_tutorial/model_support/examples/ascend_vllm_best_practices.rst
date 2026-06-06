@@ -300,8 +300,6 @@ port：可任意设置空闲端口；
 -----------------------------------
 关于NPU profiling的详细文档请参考 `ascend_profiling_zh <https://github.com/volcengine/verl/blob/c98cb8cc/docs/ascend_tutorial/ascend_profiling_zh.rst>`_
 
-在 `Qwen3-30B`_ 的脚本中提供了基本的采集性能选项PROF_CONFIG，默认设置 global_profiler.steps=null 关闭采集， 开发者可根据实际需要进行参数修改
-
 采集完成后，开发者可以使用 `MindStudio Insight <https://www.hiascend.com/document/detail/zh/mindstudio/830/GUI_baseddevelopmenttool/msascendinsightug/Insight_userguide_0002.html>`_ 进行数据解析
 
 注: verl框架侧进行采集全量 Profiling 产生海量且重复的算子记录，可以根据文档修改代码仅采集关键阶段
