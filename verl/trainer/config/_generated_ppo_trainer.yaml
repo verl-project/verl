@@ -297,7 +297,7 @@ actor_rollout_ref:
       tokenization_sanity_check_mode: strict
       format: hermes
       num_repeat_rollouts: null
-    calculate_log_probs: false
+    calculate_log_probs: true
     agent:
       _target_: verl.workers.config.AgentLoopConfig
       num_workers: 8

@@ -149,6 +149,9 @@ def _megatron_gptmodel_postprocess(
             if loss_mask is None:
                 loss_mask = torch.ones_like(mtp_labels)
             cp_group = getattr(self, "cp_group", None)
+            # Capture pre-roll token count so calculate_per_token_loss=True can
+            # re-normalize MTP gradients against the main-loss token count.
+            original_num_tokens = loss_mask.sum()
             for mtp_layer_number in range(self.config.mtp_num_layers):
                 mtp_labels, _ = roll_tensor(
                     mtp_labels,
@@ -178,18 +181,30 @@ def _megatron_gptmodel_postprocess(
                 )
                 mtp_loss = self.compute_language_model_loss(mtp_labels, mtp_logits)
                 mtp_loss = loss_mask * mtp_loss
+                mtp_loss_for_log = torch.sum(mtp_loss) / num_tokens if num_tokens > 0 else mtp_loss.new_tensor(0.0)
                 if self.training:
                     MTPLossLoggingHelper.save_loss_to_tracker(
-                        torch.sum(mtp_loss) / num_tokens,
+                        mtp_loss_for_log,
                         mtp_layer_number,
                         self.config.mtp_num_layers,
                         avg_group=parallel_state.get_data_parallel_group(with_context_parallel=True),
                     )
                 mtp_loss_scale = self.config.mtp_loss_scaling_factor / self.config.mtp_num_layers
                 if self.config.calculate_per_token_loss:
-                    hidden_states = MTPLossAutoScaler.apply(hidden_states, mtp_loss_scale * mtp_loss)
+                    # When calculate_per_token_loss is enabled, finalize_model_grads will
+                    # divide all gradients by total_num_tokens (from main loss).
+                    # However, MTP has fewer valid tokens due to rolling. To ensure correct
+                    # per-token gradient weighting, we normalize by the rolled token count
+                    # and re-scale by the original token count.
+                    # Avoid division by zero
+                    num_tokens_safe = torch.clamp(num_tokens, min=1)
+                    hidden_states = MTPLossAutoScaler.apply(
+                        hidden_states,
+                        mtp_loss_scale * mtp_loss * (original_num_tokens / num_tokens_safe),
+                    )
                 else:
-                    hidden_states = MTPLossAutoScaler.apply(hidden_states, mtp_loss_scale * mtp_loss / num_tokens)
+                    safe_num_tokens = num_tokens.clamp(min=1)
+                    hidden_states = MTPLossAutoScaler.apply(hidden_states, mtp_loss_scale * mtp_loss / safe_num_tokens)
 
     logits, _ = self.output_layer(hidden_states, weight=output_weight, runtime_gather_output=runtime_gather_output)
     # [s b h] => [b s h]
