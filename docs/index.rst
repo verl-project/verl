@@ -169,6 +169,7 @@ verl is fast with:
    ascend_tutorial/model_support/examples/ascend_sglang_best_practices.rst
    ascend_tutorial/model_support/examples/dapo_multi_model_optimization_practice.md
    ascend_tutorial/model_support/examples/gspo_optimization_practice.md
+   ascend_tutorial/model_support/examples/qwen3_5_megatron_npu.md
    ascend_tutorial/dev_guide/model_dev/evaluation.md
    ascend_tutorial/dev_guide/model_dev/parameter_and_metrics.md
    ascend_tutorial/dev_guide/model_dev/transfer_to_npu_guide.md
