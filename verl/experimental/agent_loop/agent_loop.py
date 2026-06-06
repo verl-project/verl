@@ -655,6 +655,7 @@ class AgentLoopWorker:
             images = output.multi_modal_data.get("images")
             if images:
                 from vllm.model_executor.models.internvl import image_to_pixel_values_internvl
+
                 if isinstance(images, Image.Image):
                     images = [images]
                 num_tiles = 0
