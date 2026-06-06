@@ -87,8 +87,8 @@ jobs:
           bash tests/special_npu/nightly_ci_ascend/run_ppo_qwen3-8b_fsdp_npu.sh
       - name: Running nightlyCI_ppo-qwen3-8b-fsdp-vllm_ascend checking script
         run: |
-          cd /root/.cache/nightly_log/ppo_qwen3_8b/
-          python check_ppo_qwen3-8b_fsdp_npu.py --log ppo_qwen3-8b_fsdp_npu.log --base baseline_ppo_qwen3-8b_fsdp_npu.txt
+          cd /root/.cache/nightly_log/run_ppo_qwen3-8b_fsdp_npu/
+          python check_ppo_qwen3-8b_fsdp_npu.py --log run_ppo_qwen3-8b_fsdp_npu.log --base baseline_ppo_qwen3-8b_fsdp_npu.txt
 
   # Test grpo qwen3_vl_8b_Instruct fsdp2 vllm
   nightlyCI_grpo_qwen3_vl_8b_Instruct_fsdp2_vllm_ascend:

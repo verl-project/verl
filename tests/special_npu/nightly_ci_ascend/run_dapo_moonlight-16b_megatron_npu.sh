@@ -28,6 +28,10 @@ infer_ppo_micro_batch_size_per_gpu=2
 MODEL_ID=${MODEL_ID:-moonshotai/Moonlight-16B-A3B-Instruct}
 MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/models/${MODEL_ID}}
 
+SCRIPT_NAME="$(basename -- "${BASH_SOURCE[0]}" .sh)"
+LOG_DIR=/root/.cache/nightly_log/$SCRIPT_NAME
+mkdir -p $LOG_DIR
+
 TRAIN_FILE=$HOME/.cache/datasets/dapo-math-17k.parquet
 TEST_FILE=$HOME/.cache/datasets/dapo-math-17k.parquet
 
@@ -188,4 +192,4 @@ python3 -m recipe.dapo.main_dapo \
     trainer.save_freq=-1 \
     trainer.resume_mode=auto \
     trainer.log_val_generations=10 \
-    trainer.total_training_steps=15 2>&1 | tee /root/.cache/nightly_log/moonlight/dapo_moonlight16b_megatron_npu-$(date +%Y%m%d_%H%M).log
+    trainer.total_training_steps=15 2>&1 | tee $LOG_DIR/$SCRIPT_NAME.log

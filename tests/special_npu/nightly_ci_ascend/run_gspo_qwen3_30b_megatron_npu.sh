@@ -8,6 +8,10 @@ export VLLM_USE_V1=1
 MODEL_ID=${MODEL_ID:-Qwen/Qwen3-30B-A3B-Instruct-2507}
 MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/models/${MODEL_ID}}
 
+SCRIPT_NAME="$(basename -- "${BASH_SOURCE[0]}" .sh)"
+LOG_DIR=/root/.cache/nightly_log/$SCRIPT_NAME
+mkdir -p $LOG_DIR
+
 NNODES=${NNODES:-1}
 NGPUS_PER_NODE=${NGPUS_PER_NODE:-16}
 
@@ -142,4 +146,4 @@ python3 -m verl.trainer.main_ppo \
     "${REF[@]}" \
     "${TRAINER[@]}" \
     "${EXTRA[@]}" \
-    "$@"
+    "$@" | tee $LOG_DIR/$SCRIPT_NAME.log
