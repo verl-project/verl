@@ -87,6 +87,15 @@ def validate_async_filter_groups_config(config, logger=None):
             "algorithm.use_kl_in_reward=True because KL-adjusted rewards are computed on the trainer."
         )
 
+    min_group = filter_groups_config.get("min", None)
+    max_group = filter_groups_config.get("max", None)
+    if min_group is None or max_group is None:
+        raise ValueError("algorithm.filter_groups.min and algorithm.filter_groups.max must be set")
+    if min_group >= max_group:
+        raise ValueError(
+            f"algorithm.filter_groups.min must be less than algorithm.filter_groups.max, got {min_group} >= {max_group}"
+        )
+
     max_num_gen_batches = filter_groups_config.get("max_num_gen_batches", 0)
     if max_num_gen_batches > 0 and logger is not None:
         logger.warning(
@@ -116,7 +125,8 @@ def should_keep_async_filter_group(batch: DataProto, filter_groups_config) -> bo
     if isinstance(metric_values, torch.Tensor):
         metric_values = metric_values.detach().cpu().numpy()
     metric_values = np.asarray(metric_values, dtype=np.float64).reshape(-1)
-    return bool(len(metric_values) <= 1 or np.std(metric_values) > 0)
+    group_mean = np.mean(metric_values)
+    return bool(filter_groups_config.min < group_mean < filter_groups_config.max)
 
 
 def addition_process(output: DataProto):

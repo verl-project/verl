@@ -48,11 +48,15 @@ class FilterGroupsConfig(BaseConfig):
     Args:
         enable (bool): Whether to enable filter groups.
         metric (Optional[str]): Metric to use for filtering: "acc", "score", "seq_reward", "seq_final_reward", etc.
+        min (float): Strict lower bound for the group mean of the metric.
+        max (float): Strict upper bound for the group mean of the metric.
         max_num_gen_batches (int): Non-positive values mean no upper limit.
     """
 
     enable: bool = False
     metric: Optional[str] = None
+    min: float = 0.0
+    max: float = 1.0
     max_num_gen_batches: int = 0
 
 

@@ -68,6 +68,8 @@ algorithm:
     _target_: verl.trainer.config.FilterGroupsConfig
     enable: False
     metric: null
+    min: 0.0
+    max: 1.0
     max_num_gen_batches: 0
 
   rollout_correction:

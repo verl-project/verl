@@ -16,20 +16,22 @@ USERNAME="$(whoami)"
 # Experiment configuration
 ###############################################################################
 PROJECT_NAME=apertus-rl-tests
-WORKING_DIR=/iopsstor/scratch/cscs/${USERNAME}/apertus_rl_async
-ENVIRONMENT_PATH=/users/${USERNAME}/.edf/async.toml
+WORKING_DIR=/users/jgarcagi/iopsstor/projects/verl
+HOME=/users/jgarcagi/iopsstor
+HF_HOME=/users/jgarcagi/iopsstor/huggingface
+ENVIRONMENT_PATH=/capstor/store/cscs/swissai/infra01/reasoning/raas/docker/vs:251215-patched/env.toml
 
-MODEL_NAME_OR_PATH=swiss-ai/Apertus-8B-Instruct-2509
-TOKENIZER_NAME_OR_PATH="${TOKENIZER_NAME_OR_PATH:-}"
+MODEL_NAME_OR_PATH=/capstor/store/cscs/swissai/infra01/reasoning/models/Apertus-1p5-8B-sft-capfilter-linear-it8816
+TOKENIZER_NAME_OR_PATH=
 CONFIG_NAME=async
 SLURM_TIME=04:00:00
-TRAIN_NNODES=1
-ROLLOUT_NNODES=1
+TRAIN_NNODES=4
+ROLLOUT_NNODES=2
 NNODES=$((TRAIN_NNODES + ROLLOUT_NNODES))
-TRAINING_DATA_DIR=/iopsstor/scratch/cscs/${USERNAME}/apertus_rl_async/data/apertus_demo_rl
+TRAINING_DATA_DIR=/users/jgarcagi/iopsstor/projects/verl/apertus/data/apertus_demo_rl
 ENABLE_THINKING=false
 FORCE_THINKING=false
-THINK_PREFIX_TOKEN="<think>"
+THINK_PREFIX_TOKEN="<|inner_prefix|>"
 SEED=85
 ROLLOUT_N=8
 USE_GROUP_FILTERING=true
@@ -39,7 +41,7 @@ JOB_NAME=""
 # Sandbox configuration
 ###############################################################################
 
-CODE_GYM_DIR=/users/${USERNAME}/scratch/code-gym
+CODE_GYM_DIR=/users/jgarcagi/iopsstor/projects/code-gym
 PORT=8000
 POLL_SECS=3
 MAX_WAIT=$((60 * 10))
@@ -47,6 +49,15 @@ GIVEN_URL="${SCHEDULER_URL:-}"  # potentially reuse running scheduler
 CODEGYM_REWARD_CONTINUOUS=false # default is binary reward
 
 log(){ echo -e "$*" >&2; }
+
+clear_inherited_pyxis_options() {
+  local name
+  while IFS='=' read -r name _; do
+    case "${name}" in
+      SLURM_SPANK__SLURM_SPANK_OPTION_pyxis_*) unset "${name}" ;;
+    esac
+  done < <(env)
+}
 
 sanitize_job_name() {
   local value="$1"
@@ -104,6 +115,7 @@ probe_ok() {
 }
 
 resolve_run_name_and_dir
+clear_inherited_pyxis_options
 
 # ==========================================
 # STEP 1 & 2: Scheduler logic (or skip)
@@ -186,10 +198,9 @@ TRAIN_SUBMIT="$(sbatch \
   --job-name="${TRAIN_JOB_NAME}" \
   --nodes="${NNODES}" \
   --time="${SLURM_TIME}" \
-  --environment="${ENVIRONMENT_PATH}" \
   --output="${RUN_DIR}/multinode_async_sandbox_%j.out" \
   --error="${RUN_DIR}/multinode_async_sandbox_%j.err" \
-  --export=ALL,SCHEDULER_URL="${URL}",CODEGYM_REWARD_CONTINUOUS="${CODEGYM_REWARD_CONTINUOUS}",MODEL_NAME_OR_PATH="${MODEL_NAME_OR_PATH}",TOKENIZER_NAME_OR_PATH="${TOKENIZER_NAME_OR_PATH}",CONFIG_NAME="${CONFIG_NAME}",NNODES="${NNODES}",TRAIN_NNODES="${TRAIN_NNODES}",ROLLOUT_NNODES="${ROLLOUT_NNODES}",TRAINING_DATA_DIR="${TRAINING_DATA_DIR}",ENABLE_THINKING="${ENABLE_THINKING}",FORCE_THINKING="${FORCE_THINKING}",THINK_PREFIX_TOKEN="${THINK_PREFIX_TOKEN}",SEED="${SEED}",ROLLOUT_N="${ROLLOUT_N}",USE_GROUP_FILTERING="${USE_GROUP_FILTERING}",PROJECT_NAME="${PROJECT_NAME}",RUN_NAME="${RUN_NAME}",RUN_DIR="${RUN_DIR}",WORKING_DIR="${WORKING_DIR}",ENVIRONMENT_PATH="${ENVIRONMENT_PATH}",JOB_NAME="${JOB_NAME}" \
+  --export=ALL,SCHEDULER_URL="${URL}",CODEGYM_REWARD_CONTINUOUS="${CODEGYM_REWARD_CONTINUOUS}",MODEL_NAME_OR_PATH="${MODEL_NAME_OR_PATH}",TOKENIZER_NAME_OR_PATH="${TOKENIZER_NAME_OR_PATH}",CONFIG_NAME="${CONFIG_NAME}",NNODES="${NNODES}",TRAIN_NNODES="${TRAIN_NNODES}",ROLLOUT_NNODES="${ROLLOUT_NNODES}",TRAINING_DATA_DIR="${TRAINING_DATA_DIR}",ENABLE_THINKING="${ENABLE_THINKING}",FORCE_THINKING="${FORCE_THINKING}",THINK_PREFIX_TOKEN="${THINK_PREFIX_TOKEN}",SEED="${SEED}",ROLLOUT_N="${ROLLOUT_N}",USE_GROUP_FILTERING="${USE_GROUP_FILTERING}",PROJECT_NAME="${PROJECT_NAME}",RUN_NAME="${RUN_NAME}",RUN_DIR="${RUN_DIR}",WORKING_DIR="${WORKING_DIR}",HOME="${HOME}",HF_HOME="${HF_HOME}",ENVIRONMENT_PATH="${ENVIRONMENT_PATH}",JOB_NAME="${JOB_NAME}" \
   "${TRAIN_SCRIPT}" "$@")"
 TRAIN_ID="$(awk '{print $NF}' <<<"${TRAIN_SUBMIT}")"
 [[ "${TRAIN_ID}" =~ ^[0-9]+$ ]] || { echo "Failed to parse training job id: ${TRAIN_SUBMIT}" >&2; exit 1; }

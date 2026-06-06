@@ -12,6 +12,8 @@ algorithm:
   filter_groups:
     enable: true
     metric: acc
+    min: 0.0
+    max: 0.8
   
   rollout_correction:
     bypass_mode: true

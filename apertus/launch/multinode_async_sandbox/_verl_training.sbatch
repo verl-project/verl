@@ -1,18 +1,27 @@
 #!/bin/bash
 #SBATCH --account=infra01
 #SBATCH --partition=normal
-#SBATCH --container-writable
 #SBATCH --nodes=2
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=4
 #SBATCH --cpus-per-task=64
-#SBATCH --environment=/users/msantelmo/.edf/async.toml
 #SBATCH --time=12:00:00
 #SBATCH --reservation=SD-69241-apertus-1-5-0
 #SBATCH --output=%x_%j.out
 #SBATCH --error=%x_%j.err
 
 set -xeuo pipefail
+
+clear_inherited_pyxis_options() {
+  local name
+  while IFS='=' read -r name _; do
+    case "${name}" in
+      SLURM_SPANK__SLURM_SPANK_OPTION_pyxis_*) unset "${name}" ;;
+    esac
+  done < <(env)
+}
+
+clear_inherited_pyxis_options
 
 if [[ -z "${SCHEDULER_URL:-}" ]]; then
     echo "SCHEDULER_URL must be set by multinode_async_sandbox_split.sh" >&2
@@ -54,6 +63,7 @@ TRAIN_GPUS_PER_NODE="${TRAIN_GPUS_PER_NODE:-${GPUS_PER_NODE}}"
 ROLLOUT_GPUS_PER_NODE="${ROLLOUT_GPUS_PER_NODE:-${GPUS_PER_NODE}}"
 CPUS_PER_TASK="${SLURM_CPUS_PER_TASK:-64}"
 ENVIRONMENT_PATH="${ENVIRONMENT_PATH:-/users/${USERNAME}/.edf/async.toml}"
+SRUN_ENV=(--environment="${ENVIRONMENT_PATH}" --container-writable)
 
 # Sandbox and code reward settings
 DEFAULT_MEMORY_LIMIT_MB="${DEFAULT_MEMORY_LIMIT_MB:-512}"
@@ -63,14 +73,15 @@ CODEGYM_REWARD_CONTINUOUS="${CODEGYM_REWARD_CONTINUOUS:-false}"
 # Extra packages needed for scoring are installed once into a target dir 
 # so every node can use them and avoid repeated installations
 # TODO: for production run, think about a better solution!
-PY_DEPS_DIR="${PY_DEPS_DIR:-/iopsstor/scratch/cscs/${USERNAME}/python_deps/apertus_reward_py312}"
-MATH_VERIFY_DEPS_DIR="${MATH_VERIFY_DEPS_DIR:-/iopsstor/scratch/cscs/${USERNAME}/python_deps/math_verify_py312}"
+PY_DEPS_ROOT="${PY_DEPS_ROOT:-/iopsstor/scratch/cscs/${USERNAME}/python_deps}"
+PY_DEPS_DIR="${PY_DEPS_DIR:-${PY_DEPS_ROOT}/apertus_reward_py312}"
 NLTK_DATA_DIR="${NLTK_DATA_DIR:-/iopsstor/scratch/cscs/${USERNAME}/nltk_data}"
-DEPS_STAMP_DIR="${DEPS_STAMP_DIR:-/iopsstor/scratch/cscs/${USERNAME}/python_deps/.stamps}"
+
+DEPS_STAMP_DIR="${PY_DEPS_ROOT}/.stamps"
 DEPS_STAMP="${DEPS_STAMP_DIR}/apertus_reward_py312.ready"
 DEPS_LOCK="${DEPS_STAMP_DIR}/apertus_reward_py312.lock"
-IF_REWARD_PIP_PACKAGES="${IF_REWARD_PIP_PACKAGES:-immutabledict nltk langdetect absl-py emoji syllapy antlr4-python3-runtime==4.9.3 requests}"
-MATH_VERIFY_PIP_PACKAGES="${MATH_VERIFY_PIP_PACKAGES:-math_verify}"
+
+EXTRA_PIP_PACKAGES="${EXTRA_PIP_PACKAGES:-immutabledict nltk langdetect absl-py emoji syllapy antlr4-python3-runtime==4.9.3 requests math_verify}"
 
 
 DATA_DIR="${TRAINING_DATA_DIR:-${WORKING_DIR}/data/apertus_demo_rl}"
@@ -126,33 +137,37 @@ resolve_hf_path() {
 build_overrides() {
   overrides=(
     "--config-name=${CONFIG_NAME}"
-    "actor_rollout_ref.model.path=${RESOLVED_MODEL}"
     "data.train_files=['${TRAIN_FILE}']"
     "data.val_files=['${TEST_FILE}']"
     "data.seed=${SEED}"
     "data.apply_chat_template_kwargs.enable_thinking=${ENABLE_THINKING}"
     "+data.force_thinking_prefix=${FORCE_THINKING}"
     "+data.thinking_prefix_token='${THINK_PREFIX_TOKEN}'"
+    "actor_rollout_ref.model.path=${RESOLVED_MODEL}"
+    "actor_rollout_ref.rollout.n=${ROLLOUT_N}"
+    "actor_rollout_ref.actor.data_loader_seed=${SEED}"
+    "actor_rollout_ref.rollout.max_num_batched_tokens=8192"
+    "actor_rollout_ref.rollout.max_num_seqs=256"
+    "actor_rollout_ref.rollout.gpu_memory_utilization=0.8"
+    "rollout.nnodes=${ROLLOUT_NNODES}"
+    "rollout.n_gpus_per_node=${ROLLOUT_GPUS_PER_NODE}"
+    "reward.sandbox_fusion.url=${SCHEDULER_URL}"
+    "reward.sandbox_fusion.memory_limit_mb=${DEFAULT_MEMORY_LIMIT_MB}"
+    "reward.sandbox_fusion.max_concurrent=${CODEGYM_REWARD_MAX_CONCURRENT}"
+    "+reward.sandbox_fusion.continuous=${CODEGYM_REWARD_CONTINUOUS}"
     "trainer.project_name=${PROJECT_NAME}"
     "trainer.experiment_name=${RUN_NAME}"
     "trainer.default_local_dir=${RUN_DIR}"
     "trainer.validation_data_dir=${RUN_DIR}/validation"
     "trainer.nnodes=${TRAIN_NNODES}"
     "trainer.n_gpus_per_node=${TRAIN_GPUS_PER_NODE}"
-    "rollout.nnodes=${ROLLOUT_NNODES}"
-    "rollout.n_gpus_per_node=${ROLLOUT_GPUS_PER_NODE}"
-    "actor_rollout_ref.rollout.n=${ROLLOUT_N}"
-    "actor_rollout_ref.actor.data_loader_seed=${SEED}"
     "+ray_kwargs.ray_init.address=${ip_head}"
     "ray_kwargs.ray_init.num_cpus=null"
+    "+ray_kwargs.ray_init.runtime_env.env_vars.HOME=${HOME}"
     "+ray_kwargs.ray_init.runtime_env.env_vars.PYTHONPATH=${PY_DEPS_DIR}:${WORKING_DIR}:${PYTHONPATH:-}"
     "+ray_kwargs.ray_init.runtime_env.env_vars.NLTK_DATA=${NLTK_DATA_DIR}"
-    "+ray_kwargs.ray_init.runtime_env.env_vars.MATH_VERIFY_PYTHONPATH=${MATH_VERIFY_DEPS_DIR}"
+    "+ray_kwargs.ray_init.runtime_env.env_vars.MATH_VERIFY_PYTHONPATH=${PY_DEPS_DIR}"
     "+ray_kwargs.ray_init.runtime_env.env_vars.SCHEDULER_URL=${SCHEDULER_URL}"
-    "reward.sandbox_fusion.url=${SCHEDULER_URL}"
-    "reward.sandbox_fusion.memory_limit_mb=${DEFAULT_MEMORY_LIMIT_MB}"
-    "reward.sandbox_fusion.max_concurrent=${CODEGYM_REWARD_MAX_CONCURRENT}"
-    "+reward.sandbox_fusion.continuous=${CODEGYM_REWARD_CONTINUOUS}"
   )
 
   if [ -n "${RESOLVED_TOKENIZER}" ]; then
@@ -176,7 +191,7 @@ build_overrides() {
 
 cleanup_ray() {
   set +e
-  srun --overlap --environment="${ENVIRONMENT_PATH}" --nodes="${NNODES}" --ntasks="${NNODES}" \
+  srun --overlap "${SRUN_ENV[@]}" --nodes="${NNODES}" --ntasks="${NNODES}" \
     bash -lc "cd '${WORKING_DIR}' && ray stop --force"
 }
 trap cleanup_ray EXIT
@@ -184,13 +199,14 @@ trap cleanup_ray EXIT
 wait_for_ray_cluster() {
   local attempt
   for attempt in {1..60}; do
-    if python3 -c 'import os, ray
+    if srun --overlap "${SRUN_ENV[@]}" --nodes=1 --ntasks=1 -w "${head_node}" \
+      bash -lc 'python3 -c '"'"'import os, ray
 ray.init(address=os.environ["ip_head"], ignore_reinit_error=True)
 alive = sum(1 for node in ray.nodes() if node.get("Alive"))
 expected = int(os.environ["NNODES"])
 print(f"Ray nodes alive: {alive}/{expected}")
 ray.shutdown()
-raise SystemExit(0 if alive >= expected else 1)'; then
+raise SystemExit(0 if alive >= expected else 1)'"'"''; then
       return 0
     fi
     sleep 5
@@ -199,33 +215,42 @@ raise SystemExit(0 if alive >= expected else 1)'; then
   return 1
 }
 
-prepare_shared_python_deps() {
-  mkdir -p "${PY_DEPS_DIR}" "${MATH_VERIFY_DEPS_DIR}" "${NLTK_DATA_DIR}" "${DEPS_STAMP_DIR}"
-
-  if [ -f "${DEPS_STAMP}" ]; then
-    return 0
-  fi
-
-  while ! mkdir "${DEPS_LOCK}" 2>/dev/null; do
-    if [ -f "${DEPS_STAMP}" ]; then
-      return 0
-    fi
-    echo "Waiting for shared Python deps to be prepared by another process..."
-    sleep 10
-  done
-  trap 'rmdir "${DEPS_LOCK}" 2>/dev/null || true; cleanup_ray' EXIT
-
-  if [ ! -f "${DEPS_STAMP}" ]; then
-    python3 -m pip install --no-cache-dir --upgrade --target "${PY_DEPS_DIR}" ${IF_REWARD_PIP_PACKAGES}
-    python3 -m pip install --no-cache-dir --upgrade --target "${MATH_VERIFY_DEPS_DIR}" ${MATH_VERIFY_PIP_PACKAGES}
-    python3 -c "import nltk; [nltk.download(pkg, download_dir='${NLTK_DATA_DIR}', quiet=True) for pkg in ('punkt', 'punkt_tab', 'stopwords', 'averaged_perceptron_tagger_eng')]"
-    python3 -c "import sys; sys.path[:0] = ['${PY_DEPS_DIR}', '${WORKING_DIR}']; import absl, emoji, immutabledict, langdetect, nltk, requests, syllapy, verl; print('Using shared deps from', '${PY_DEPS_DIR}'); print('Using verl from', verl.__file__)"
-    python3 -c "import sys; sys.path[:0] = ['${MATH_VERIFY_DEPS_DIR}']; import math_verify; print('Using math_verify from', math_verify.__file__)"
-    touch "${DEPS_STAMP}"
-  fi
-
+release_deps_lock() {
   rmdir "${DEPS_LOCK}" 2>/dev/null || true
   trap cleanup_ray EXIT
+}
+
+prepare_shared_python_deps() {
+  srun "${SRUN_ENV[@]}" --nodes=1 --ntasks=1 -w "${head_node}" bash -lc '
+    set -euo pipefail
+    release_deps_lock() {
+      rmdir "${DEPS_LOCK}" 2>/dev/null || true
+    }
+    trap release_deps_lock EXIT
+
+    if [ -f "${DEPS_STAMP}" ]; then
+      exit 0
+    fi
+
+    mkdir -p "${PY_DEPS_DIR}" "${NLTK_DATA_DIR}" "${DEPS_STAMP_DIR}"
+
+    while ! mkdir "${DEPS_LOCK}" 2>/dev/null; do
+      if [ -f "${DEPS_STAMP}" ]; then
+        exit 0
+      fi
+      echo "Waiting for shared Python deps to be prepared by another process..."
+      sleep 10
+    done
+
+    if [ -f "${DEPS_STAMP}" ]; then
+      exit 0
+    fi
+
+    python3 -m pip install --no-cache-dir --upgrade --target "${PY_DEPS_DIR}" ${EXTRA_PIP_PACKAGES}
+    python3 -c "import nltk; [nltk.download(pkg, download_dir=\"${NLTK_DATA_DIR}\", quiet=True) for pkg in (\"punkt\", \"punkt_tab\", \"stopwords\", \"averaged_perceptron_tagger_eng\")]"
+    python3 -c "import sys; sys.path[:0] = [\"${PY_DEPS_DIR}\", \"${WORKING_DIR}\"]; import absl, emoji, immutabledict, langdetect, math_verify, nltk, requests, syllapy, verl; print(\"Using shared deps from\", \"${PY_DEPS_DIR}\"); print(\"Using verl from\", verl.__file__)"
+    touch "${DEPS_STAMP}"
+  '
 }
 
 resolve_run_name
@@ -236,13 +261,22 @@ if [ -n "${TOKENIZER_NAME_OR_PATH}" ]; then
 fi
 
 # Shared HuggingFace cache prevents repeated downloads across runs/workers.
+export HOME
 export HF_HOME
 export HF_HUB_CACHE="${HF_HUB_CACHE_DIR}"
 export HF_HUB_OFFLINE="1"
 export TRANSFORMERS_OFFLINE="1"
 export NLTK_DATA="${NLTK_DATA_DIR}"
 export PYTHONPATH="${PY_DEPS_DIR}:${WORKING_DIR}:${PYTHONPATH:-}"
-export MATH_VERIFY_PYTHONPATH="${MATH_VERIFY_DEPS_DIR}"
+export MATH_VERIFY_PYTHONPATH="${PY_DEPS_DIR}"
+export ENVIRONMENT_PATH
+export PY_DEPS_ROOT
+export PY_DEPS_DIR
+export NLTK_DATA_DIR
+export DEPS_STAMP_DIR
+export DEPS_STAMP
+export DEPS_LOCK
+export EXTRA_PIP_PACKAGES
 export SCHEDULER_URL
 export DEFAULT_MEMORY_LIMIT_MB
 export CODEGYM_REWARD_MAX_CONCURRENT
@@ -259,15 +293,15 @@ if [ "${#nodes_array[@]}" -lt "${NNODES}" ]; then
   exit 1
 fi
 
-prepare_shared_python_deps
-python3 -c "import sys; sys.path[:0] = ['${PY_DEPS_DIR}', '${WORKING_DIR}']; import requests; print('Using requests from', requests.__file__)"
-
-
 # ====================
 # Start Ray cluster
 # ====================
 head_node="${nodes_array[0]}"
-head_node_ip="$(srun --environment="${ENVIRONMENT_PATH}" --nodes=1 --ntasks=1 -w "${head_node}" \
+prepare_shared_python_deps
+srun "${SRUN_ENV[@]}" --nodes=1 --ntasks=1 -w "${head_node}" \
+  bash -lc "python3 -c \"import sys; sys.path[:0] = ['${PY_DEPS_DIR}', '${WORKING_DIR}']; import requests; print('Using requests from', requests.__file__)\""
+
+head_node_ip="$(srun "${SRUN_ENV[@]}" --nodes=1 --ntasks=1 -w "${head_node}" \
   bash -lc "cd '${WORKING_DIR}' && hostname --ip-address")"
 
 if [[ "${head_node_ip}" == *" "* ]]; then
@@ -288,7 +322,7 @@ export MASTER_ADDR="${head_node_ip}"
 export MASTER_PORT="${port}"
 
 echo "Starting Ray head at ${head_node} (${ip_head})"
-srun --environment="${ENVIRONMENT_PATH}" --nodes=1 --ntasks=1 -w "${head_node}" \
+srun "${SRUN_ENV[@]}" --nodes=1 --ntasks=1 -w "${head_node}" \
   bash -lc "cd '${WORKING_DIR}' && ray start --head --node-ip-address='${head_node_ip}' --port='${port}' --dashboard-host=0.0.0.0 --num-cpus '${CPUS_PER_TASK}' --num-gpus '${GPUS_PER_NODE}' --block" &
 
 sleep 10
@@ -297,7 +331,7 @@ worker_num=$((NNODES - 1))
 for ((i = 1; i <= worker_num; i++)); do
   node_i="${nodes_array[$i]}"
   echo "Starting Ray worker ${i} at ${node_i}"
-  srun --environment="${ENVIRONMENT_PATH}" --nodes=1 --ntasks=1 -w "${node_i}" \
+  srun "${SRUN_ENV[@]}" --nodes=1 --ntasks=1 -w "${node_i}" \
     bash -lc "cd '${WORKING_DIR}' && ray start --address '${ip_head}' --num-cpus '${CPUS_PER_TASK}' --num-gpus '${GPUS_PER_NODE}' --block" &
   sleep 5
 done
@@ -305,7 +339,7 @@ done
 wait_for_ray_cluster
 build_overrides
 
-srun --overlap --environment="${ENVIRONMENT_PATH}" --nodes=1 --ntasks=1 -w "${head_node}" \
+srun --overlap "${SRUN_ENV[@]}" --nodes=1 --ntasks=1 -w "${head_node}" \
   bash -lc "cd '${WORKING_DIR}' && HYDRA_FULL_ERROR=1 python3 -m verl.experimental.fully_async_policy.fully_async_main \"\$@\"" -- \
   "${overrides[@]}" \
   "$@"
