@@ -115,17 +115,47 @@ def compute_forward_kl_topk(
     assert teacher_topk_log_probs.shape[:2] == teacher_topk_ids.shape[:2] == student_logits.shape[:2]
 
     # 2. compute token-wise KL divergence across sp groups
-    # Memory optimization: avoid materializing student_log_probs of shape [B, T, V].
-    # For Qwen-class V=152064 with bf16, this can take 28+ GB persistent at long context.
-    #   - log_softmax is monotonic, so topk(log_softmax(x)) == topk(x); use student_logits directly.
-    #   - For teacher-side gather, use chunked gather-logsumexp (math identity:
-    #     log_softmax(x).gather(idx) = x.gather(idx) - logsumexp(x, keepdim=True)).
-    # Same optimization pattern as in verl/utils/torch_functional.py chunked log-probs helper.
-    student_topk_ids = torch.topk(student_logits, k=teacher_topk_ids.shape[-1], dim=-1).indices
-    student_topk_log_probs = _chunked_topk_log_probs(student_logits, teacher_topk_ids, chunk_size=4096)
+    # Two paths, controlled by ``loss_config.use_chunked_topk``:
+    #
+    # Default (use_chunked_topk=False):
+    #   F.log_softmax + gather. Lowest latency at short context (no kernel-
+    #   launch overhead from chunking), but materialises a ``[B, T, V]``
+    #   log_softmax buffer that autograd saves for backward. At long context
+    #   (e.g. N=64K, V=152K, bf16) this single buffer is ~20 GB and combined
+    #   with the upstream ``student_logits`` allocation can OOM.
+    #
+    # Chunked (use_chunked_topk=True):
+    #   Streams ``log_softmax(x).gather(idx) = x.gather(idx) - logsumexp(x)``
+    #   in chunks along (B*T), avoiding the [B, T, V] log_softmax buffer.
+    #   Required at long context (>=64K) where the default path OOMs.
+    #   Trade-offs at short context (N=14K, V=152K, bf16):
+    #     - peak: ~30 GB chunked vs ~22 GB default (+40%)
+    #     - time: ~95ms chunked vs ~16ms default (~6x slower)
+    #   Hence opt-in: enable only for runs where the baseline OOMs.
+    #
+    # Note: this PR only addresses the ``log_softmax`` buffer (tier-2). The
+    # upstream ``student_logits`` allocation (tier-1, ~28 GB at N=96K) is
+    # still materialised by the caller; eliminating that requires a separate
+    # ``forward``-side refactor (skip LM head, chunk over hidden_states),
+    # tracked as future work.
+    loss_config: DistillationLossConfig = config.distillation_loss
+    if loss_config.use_chunked_topk:
+        # log_softmax is monotonic, so topk(log_softmax(x)) == topk(x); use
+        # student_logits directly to avoid the extra [B, T, V] log_softmax.
+        student_topk_ids = torch.topk(student_logits, k=teacher_topk_ids.shape[-1], dim=-1).indices
+        student_topk_log_probs = _chunked_topk_log_probs(
+            student_logits,
+            teacher_topk_ids,
+            chunk_size=loss_config.chunked_topk_chunk_size,
+        )
+    else:
+        # Baseline path -- unchanged from the pre-PR implementation. Lowest
+        # latency at short context.
+        student_log_probs = F.log_softmax(student_logits, dim=-1)
+        student_topk_ids = torch.topk(student_log_probs, k=teacher_topk_ids.shape[-1], dim=-1).indices
+        student_topk_log_probs = torch.gather(student_log_probs, dim=-1, index=teacher_topk_ids)
     student_mass = student_topk_log_probs.exp().sum(dim=-1)
     teacher_mass = teacher_topk_log_probs.exp().sum(dim=-1)
-    loss_config: DistillationLossConfig = config.distillation_loss
     if loss_config.log_prob_min_clamp is not None:
         student_topk_log_probs = student_topk_log_probs.clamp_min(loss_config.log_prob_min_clamp)
         teacher_topk_log_probs = teacher_topk_log_probs.clamp_min(loss_config.log_prob_min_clamp)
