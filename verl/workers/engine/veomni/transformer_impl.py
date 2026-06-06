@@ -21,7 +21,7 @@ import torch
 import torch.distributed as dist
 from tensordict import TensorDict
 from torch.distributed.tensor import DTensor
-from veomni.arguments import OpsImplementationConfig
+from veomni.arguments import MixedPrecisionConfig, OpsImplementationConfig
 from veomni.distributed import parallel_state
 from veomni.distributed.offloading import build_activation_offloading_context
 from veomni.distributed.torch_parallelize import build_parallelize_model
@@ -292,12 +292,16 @@ class VeOmniEngine(FSDPEngine):
 
         # Applies parallel strategies to the model.
         log_gpu_memory_usage("Before parallelize model", logger=logger)
+        mixed_precision = self.engine_config.mixed_precision
+        if isinstance(mixed_precision, bool):
+            mixed_precision = MixedPrecisionConfig(enable=mixed_precision)
+
         module = build_parallelize_model(
             module,
             init_device=self.engine_config.init_device,
             weights_path=self.model_config.local_path,
             enable_full_shard=self.engine_config.enable_full_shard,
-            enable_mixed_precision=self.engine_config.mixed_precision,
+            mixed_precision=mixed_precision,
             enable_gradient_checkpointing=self.model_config.enable_gradient_checkpointing,
             enable_fsdp_offload=self.engine_config.enable_fsdp_offload,
             basic_modules=list(
