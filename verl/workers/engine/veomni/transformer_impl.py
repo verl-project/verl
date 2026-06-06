@@ -279,11 +279,13 @@ class VeOmniEngine(FSDPEngine):
             load_balancing_loss_implementation=self.engine_config.load_balancing_loss_implementation,
         )
 
+        veomni_mixed_precision_config = MixedPrecisionConfig(enable=self.engine_config.mixed_precision)
+
         # Load base model with specified configuration and dtype
         module = build_foundation_model(
             config_path=self._get_model_config_path(),
             weights_path=self.model_config.local_path,
-            torch_dtype="float32" if self.engine_config.mixed_precision else "bfloat16",
+            torch_dtype="float32" if veomni_mixed_precision_config.enable else "bfloat16",
             attn_implementation=self.engine_config.attn_implementation,
             ops_implementation=ops_implementation,
             init_device=self.engine_config.init_device,
@@ -292,16 +294,12 @@ class VeOmniEngine(FSDPEngine):
 
         # Applies parallel strategies to the model.
         log_gpu_memory_usage("Before parallelize model", logger=logger)
-        mixed_precision = self.engine_config.mixed_precision
-        if isinstance(mixed_precision, bool):
-            mixed_precision = MixedPrecisionConfig(enable=mixed_precision)
-
         module = build_parallelize_model(
             module,
             init_device=self.engine_config.init_device,
             weights_path=self.model_config.local_path,
             enable_full_shard=self.engine_config.enable_full_shard,
-            mixed_precision=mixed_precision,
+            mixed_precision=veomni_mixed_precision_config,
             enable_gradient_checkpointing=self.model_config.enable_gradient_checkpointing,
             enable_fsdp_offload=self.engine_config.enable_fsdp_offload,
             basic_modules=list(
