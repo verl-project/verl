@@ -171,10 +171,13 @@ class PrimeRewardManager(AbstractRewardManager):
         data_sources = data.non_tensor_batch["data_source"]
 
         scores = self.verify(data)
+        valid_response_lengths = valid_response_length.tolist()
 
         for i in range(len(data)):
             data_source = data_sources[i]
-            reward_tensor[i, valid_response_length[i].item() - 1] = scores[i]
+            response_length = valid_response_lengths[i]
+            if response_length > 0:
+                reward_tensor[i, response_length - 1] = scores[i]
 
             if data_source not in already_print_data_sources:
                 already_print_data_sources[data_source] = 0

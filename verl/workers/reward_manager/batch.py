@@ -107,7 +107,8 @@ class BatchRewardManager(AbstractRewardManager):
                 reward = score
 
             rewards.append(reward)
-            reward_tensor[i, length - 1] = reward
+            if length > 0:
+                reward_tensor[i, length - 1] = reward
 
             data_source = data_sources[i]
             if already_printed.get(data_source, 0) < self.num_examine:

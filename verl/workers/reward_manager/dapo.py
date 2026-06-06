@@ -79,7 +79,7 @@ class DAPORewardManager(AbstractRewardManager):
             valid_prompt_ids = prompt_ids[-valid_prompt_length:]
 
             response_ids = data_item.batch["responses"]
-            valid_response_length = data_item.batch["attention_mask"][prompt_length:].sum()
+            valid_response_length = int(data_item.batch["attention_mask"][prompt_length:].sum().item())
             valid_response_ids = response_ids[:valid_response_length]
 
             # decode
@@ -118,18 +118,19 @@ class DAPORewardManager(AbstractRewardManager):
 
             reward = score
 
-            if self.overlong_buffer_cfg.enable:
+            if self.overlong_buffer_cfg is not None and self.overlong_buffer_cfg.enable:
                 overlong_buffer_len = self.overlong_buffer_cfg.len
                 expected_len = self.max_resp_len - overlong_buffer_len
                 exceed_len = valid_response_length - expected_len
                 overlong_penalty_factor = self.overlong_buffer_cfg.penalty_factor
-                overlong_reward = min(-exceed_len / overlong_buffer_len * overlong_penalty_factor, 0)
+                overlong_reward = min(-exceed_len / overlong_buffer_len * overlong_penalty_factor, 0.0)
                 reward += overlong_reward
                 if self.overlong_buffer_cfg.log:
                     reward_extra_info["overlong_reward"].append(overlong_reward)
                     reward_extra_info["overlong"].append(overlong_reward < 0)
 
-            reward_tensor[i, valid_response_length - 1] = reward
+            if valid_response_length > 0:
+                reward_tensor[i, valid_response_length - 1] = reward
 
             if data_source not in already_print_data_sources:
                 already_print_data_sources[data_source] = 0
