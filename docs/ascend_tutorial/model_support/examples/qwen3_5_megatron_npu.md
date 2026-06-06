@@ -22,7 +22,7 @@ Last updated: 06/06/2026.
 git checkout cdd9014f
 ```
 
-如果镜像中缺少依赖，可以在容器内补充安装：
+脚本注释中列出的额外依赖如下；镜像已包含的依赖不需要重复安装：
 
 ```bash
 pip install viztracer flash-linear-attention nvidia-modelopt nvidia-ml-py nvidia-resiliency-ext megatron-energon
@@ -37,7 +37,7 @@ pip install viztracer flash-linear-attention nvidia-modelopt nvidia-ml-py nvidia
 
 ## 硬件和并行配置
 
-示例脚本默认使用如下 NPU 配置：
+示例脚本默认使用如下 NPU 配置，可以通过同名环境变量覆盖：
 
 | model | nnodes | devices per node | TP | PP | CP | EP | ETP | GEN_TP |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -61,7 +61,25 @@ hf download Qwen/Qwen3.5-122B-A10B --local-dir /path/to/Qwen3.5-122B-A10B
 
 ## 启动训练
 
-在 Ray 集群已启动后，在主节点执行。
+训练前需要先启动 Ray 集群。通用多节点说明可参考 [Multinode Training](../../../start/multinode.rst)，Ascend 多节点脚本示例可参考 [Ascend SGLang Best Practices](ascend_sglang_best_practices.rst)。
+
+最小启动方式如下，单机任务只需要执行 head 节点命令；多机任务需要在其他节点执行 worker 节点命令。`MASTER_ADDR` 在所有节点上保持一致，`CURRENT_IP` 设置为当前节点 IP。
+
+```bash
+MASTER_ADDR=<head-node-ip>
+CURRENT_IP=<current-node-ip>
+NPUS_PER_NODE=16
+
+# head node
+ray start --head --port 6766 --dashboard-host=$MASTER_ADDR --node-ip-address=$CURRENT_IP --dashboard-port=8260 --resources='{"NPU": '$NPUS_PER_NODE'}'
+
+# worker nodes, only needed for multi-node jobs
+ray start --address="$MASTER_ADDR:6766" --node-ip-address=$CURRENT_IP --resources='{"NPU": '$NPUS_PER_NODE'}'
+
+ray status
+```
+
+通过 `ray status` 确认 NPU 资源数量符合预期后，在主节点执行训练脚本。Qwen3.5-35B-A3B 默认需要 16 个 NPU 资源，Qwen3.5-122B-A10B 默认需要 64 个 NPU 资源。
 
 ### Qwen3.5-35B-A3B
 
