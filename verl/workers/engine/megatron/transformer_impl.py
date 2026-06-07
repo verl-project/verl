@@ -221,7 +221,10 @@ class MegatronEngine(BaseEngine):
             for key, value in override_transformer_config.items():
                 provider_overrides[key] = value
             if self.enable_routing_replay:
-                provider_overrides["enable_routing_replay"] = True
+                if hasattr(provider, "moe_enable_routing_replay"):
+                    provider_overrides["moe_enable_routing_replay"] = True
+                else:
+                    provider_overrides["enable_routing_replay"] = True
 
             if self._qat_enabled:
                 from megatron.bridge.models.gpt_provider import modelopt_transformer_layer_spec
