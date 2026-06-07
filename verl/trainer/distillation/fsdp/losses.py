@@ -34,18 +34,7 @@ def _chunked_topk_log_probs(
     Uses the identity:
         log_softmax(x).gather(idx) == x.gather(idx) - logsumexp(x, keepdim=True)
     Streams the reduction in chunks of `chunk_size` tokens along (B*T) with fp32
-    logsumexp for numerical stability. Mathematically equivalent to the direct
-    formulation; max diff ~1.9e-6 in fp32, exact (max diff = 0) in bf16.
-
-    Note on autograd: `out = torch.empty(...)` followed by `out[s:e] = ...` is
-    safe with autograd. PyTorch's __setitem__ dispatches to the differentiable
-    aten.index_put_ op and `out` becomes a non-leaf tensor with grad_fn=CopySlices,
-    correctly propagating gradients back to `logits` (verified by unit test
-    `test_gradient_correctness` and explicit grad-equivalence checks vs both
-    F.log_softmax(...).gather(...) reference and torch.cat alternative).
-    `torch.empty + slice` is preferred over `torch.cat(chunks, dim=0)` because
-    it avoids holding all chunks simultaneously, keeping peak memory at 1x output
-    instead of 2x.
+    logsumexp for numerical stability.
 
     Args:
         logits:    [B, T, V] student logits.
@@ -115,33 +104,14 @@ def compute_forward_kl_topk(
     assert teacher_topk_log_probs.shape[:2] == teacher_topk_ids.shape[:2] == student_logits.shape[:2]
 
     # 2. compute token-wise KL divergence across sp groups
-    # Two paths, controlled by ``loss_config.use_chunked_topk``:
-    #
-    # Default (use_chunked_topk=False):
-    #   F.log_softmax + gather. Lowest latency at short context (no kernel-
-    #   launch overhead from chunking), but materialises a ``[B, T, V]``
-    #   log_softmax buffer that autograd saves for backward. At long context
-    #   (e.g. N=64K, V=152K, bf16) this single buffer is ~20 GB and combined
-    #   with the upstream ``student_logits`` allocation can OOM.
-    #
-    # Chunked (use_chunked_topk=True):
-    #   Streams ``log_softmax(x).gather(idx) = x.gather(idx) - logsumexp(x)``
-    #   in chunks along (B*T), avoiding the [B, T, V] log_softmax buffer.
-    #   Required at long context (>=64K) where the default path OOMs.
-    #   Trade-offs at short context (N=14K, V=152K, bf16):
-    #     - peak: ~30 GB chunked vs ~22 GB default (+40%)
-    #     - time: ~95ms chunked vs ~16ms default (~6x slower)
-    #   Hence opt-in: enable only for runs where the baseline OOMs.
-    #
-    # Note: this PR only addresses the ``log_softmax`` buffer (tier-2). The
-    # upstream ``student_logits`` allocation (tier-1, ~28 GB at N=96K) is
-    # still materialised by the caller; eliminating that requires a separate
-    # ``forward``-side refactor (skip LM head, chunk over hidden_states),
-    # tracked as future work.
+    # ``use_chunked_topk`` (opt-in, default off) trades latency for memory:
+    # the chunked path streams logsumexp + gather to avoid the [B, T, V]
+    # log_softmax buffer, enabling long-context (>=64K) where the default
+    # F.log_softmax path OOMs. See ``DistillationLossConfig.use_chunked_topk``
+    # for trade-offs and benchmark numbers.
     loss_config: DistillationLossConfig = config.distillation_loss
     if loss_config.use_chunked_topk:
-        # log_softmax is monotonic, so topk(log_softmax(x)) == topk(x); use
-        # student_logits directly to avoid the extra [B, T, V] log_softmax.
+        # log_softmax is monotonic, so topk(logits) == topk(log_softmax(logits)).
         student_topk_ids = torch.topk(student_logits, k=teacher_topk_ids.shape[-1], dim=-1).indices
         student_topk_log_probs = _chunked_topk_log_probs(
             student_logits,
@@ -149,8 +119,6 @@ def compute_forward_kl_topk(
             chunk_size=loss_config.chunked_topk_chunk_size,
         )
     else:
-        # Baseline path -- unchanged from the pre-PR implementation. Lowest
-        # latency at short context.
         student_log_probs = F.log_softmax(student_logits, dim=-1)
         student_topk_ids = torch.topk(student_log_probs, k=teacher_topk_ids.shape[-1], dim=-1).indices
         student_topk_log_probs = torch.gather(student_log_probs, dim=-1, index=teacher_topk_ids)
