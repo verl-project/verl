@@ -433,6 +433,9 @@ actor_rollout_ref:
       speculative_num_draft_tokens: 4
       method: mtp
       num_speculative_tokens: 1
+      rollout_engine_kwargs:
+        vllm: {}
+        sglang: {}
     lora:
       type: lora
       merge: false
@@ -661,6 +664,9 @@ critic:
       speculative_num_draft_tokens: 4
       method: mtp
       num_speculative_tokens: 1
+      rollout_engine_kwargs:
+        vllm: {}
+        sglang: {}
     lora:
       type: lora
       merge: false

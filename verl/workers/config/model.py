@@ -43,6 +43,7 @@ class MtpConfig(BaseConfig):
     vLLM rollout parameters:
         method: "mtp"
         num-speculative-tokens: 1
+        rollout_engine_kwargs: additional per-engine MTP rollout arguments
 
     SGLang rollout parameters:
         speculative-algorithm: EAGLE
@@ -65,6 +66,7 @@ class MtpConfig(BaseConfig):
 
     method: str = "mtp"
     num_speculative_tokens: int = 1
+    rollout_engine_kwargs: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
