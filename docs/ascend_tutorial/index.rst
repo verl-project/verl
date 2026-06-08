@@ -26,6 +26,7 @@ Last updated: 06/05/2026.
    model_support/model_and_algorithm_support
    model_support/examples/ascend_retool_best_pratice
    model_support/examples/ascend_sglang_best_practices
+   model_support/examples/ascend_vllm_best_practices
    model_support/examples/dapo_multi_model_optimization_practice
    model_support/examples/gspo_optimization_practice
    model_support/examples/qwen3_5_122b_npu
