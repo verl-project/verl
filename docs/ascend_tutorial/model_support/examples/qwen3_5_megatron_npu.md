@@ -1,6 +1,6 @@
 # Qwen3.5 Megatron NPU 使用指南
 
-Last updated: 06/06/2026.
+Last updated: 06/08/2026.
 
 本文用于指导在 Ascend NPU 上使用 verl + Megatron + vLLM 跑通 Qwen3.5-35B-A3B 和 Qwen3.5-122B-A10B GRPO 示例。
 
@@ -8,15 +8,21 @@ Last updated: 06/06/2026.
 
 | software | version |
 | --- | --- |
-| Docker image | `quay.io/ascend/verl:verl-8.5.2-a3-ubuntu22.04-py3.11-qwen3-5` |
+| Docker image | `quay.io/ascend/verl:verl-9.0.0-a3-ubuntu22.04-py3.11-latest` |
 | verl | commit `cdd9014f` |
 | Python | 3.11 |
-| CANN | 8.5.2 |
+| CANN | 9.0.0 |
 | Megatron-LM | 0.16.1 |
 | MindSpeed | 0.16.0 |
 | Megatron-Bridge | `de93536e` |
 
-建议直接使用上表中的镜像，并将 verl 固定到指定 commit：
+建议直接使用上表中的镜像：
+
+```bash
+docker pull quay.io/ascend/verl:verl-9.0.0-a3-ubuntu22.04-py3.11-latest
+```
+
+启动容器后，将 verl 固定到指定 commit：
 
 ```bash
 git checkout cdd9014f
