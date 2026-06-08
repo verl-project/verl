@@ -16,9 +16,9 @@ USERNAME="$(whoami)"
 # Experiment configuration
 ###############################################################################
 PROJECT_NAME=apertus-rl-tests
-WORKING_DIR=/users/jgarcagi/iopsstor/projects/verl
-HOME=/users/jgarcagi/iopsstor
-HF_HOME=/users/jgarcagi/iopsstor/huggingface
+WORKING_DIR="/iopsstor/scratch/cscs/${USER}/projects/verl"
+HOME=/iopsstor/scratch/cscs/${USER}
+HF_HOME=/iopsstor/scratch/cscs/${USER}/huggingface
 ENVIRONMENT_PATH=/capstor/store/cscs/swissai/infra01/reasoning/raas/docker/vs:251215-patched/env.toml
 
 MODEL_NAME_OR_PATH=/capstor/store/cscs/swissai/infra01/reasoning/models/Apertus-1p5-8B-sft-capfilter-linear-it8816
@@ -28,7 +28,7 @@ SLURM_TIME=04:00:00
 TRAIN_NNODES=2
 ROLLOUT_NNODES=2
 NNODES=$((TRAIN_NNODES + ROLLOUT_NNODES))
-TRAINING_DATA_DIR=/users/jgarcagi/iopsstor/projects/verl/apertus/data/apertus_demo_rl
+TRAINING_DATA_DIR=/capstor/store/cscs/swissai/infra01/reasoning/data/RL-prod/apertus_demo_rl
 ENABLE_THINKING=false
 FORCE_THINKING=false
 THINK_PREFIX_TOKEN="<|inner_prefix|>"
@@ -41,7 +41,7 @@ JOB_NAME=""
 # Sandbox configuration
 ###############################################################################
 
-CODE_GYM_DIR=/users/jgarcagi/iopsstor/projects/code-gym
+CODE_GYM_DIR=/iopsstor/scratch/cscs/${USER}/projects/code-gym
 PORT=8000
 POLL_SECS=3
 MAX_WAIT=$((60 * 10))
