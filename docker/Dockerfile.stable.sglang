@@ -75,17 +75,17 @@ RUN if [ "$(uname -m)" = "aarch64" ]; then \
         pip install sglang_kernel-0.4.2.post2+cu130-cp310-abi3-manylinux2014_x86_64.whl --force-reinstall; \
     fi
 
-# Override NCCL to >= 2.29.7 for ncclCommSuspend / ncclCommResume
-# (RFC: https://github.com/verl-project/verl/issues/6266).
-# TODO(xiefan46): remove once torch pin bumps to >= 2.12.0.
-RUN pip install --no-deps --upgrade "nvidia-nccl-cu13>=2.29.7,<3.0"
-
 RUN pip install -U git+https://github.com/ISEEKYAN/mbridge.git@main
 
 RUN pip install --no-deps git+https://github.com/NVIDIA/Megatron-LM.git@${MCORE_VERSION}
 
 RUN pip install git+https://github.com/verl-project/verl.git@${VERL_VERSION} && \
     pip uninstall -y verl
+
+# Override NCCL to >= 2.29.7 for ncclCommSuspend / ncclCommResume
+# (RFC: https://github.com/verl-project/verl/issues/6266).
+# TODO(xiefan46): remove once torch pin bumps to >= 2.12.0.
+RUN pip install --no-deps --upgrade "nvidia-nccl-cu13>=2.29.7,<3.0"
 
 RUN CUDA_VERSION_MAJOR=$(echo ${CUDA_VERSION} | cut -d '.' -f 1) && \
     CUDNN_PKG=libcudnn9-cuda-${CUDA_VERSION_MAJOR} && \
