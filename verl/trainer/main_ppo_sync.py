@@ -44,7 +44,7 @@ try:
     import transfer_queue as tq
     from transfer_queue import KVBatchMeta
 except ImportError:
-    print("Please install TQ by calling `pip install TransferQueue==0.1.6` and try again.")
+    print("Please install TQ by calling `pip install TransferQueue==0.1.8` and try again.")
     from verl.utils.transferqueue_utils import KVBatchMeta, tq
 
 from omegaconf import DictConfig, OmegaConf, open_dict
