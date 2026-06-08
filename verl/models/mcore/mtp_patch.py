@@ -253,12 +253,17 @@ def patch_mtp_layer_get_embeddings(model: torch.nn.Module):
                 target_layers.append(layer)
 
     if target_layers:
+        patched_count = 0
         for layer in target_layers:
+            if hasattr(layer, "_get_embeddings_backup"):
+                continue
             layer._get_embeddings_has_padding_mask = "padding_mask" in signature(layer._get_embeddings).parameters
             layer._get_embeddings_backup = layer._get_embeddings
             layer._get_embeddings = _patched_get_embeddings_for_detach.__get__(layer, layer.__class__)
-        print(f"Found and patched {len(target_layers)} MTP layer(s) in any of the actor modules")
-        return True
+            patched_count += 1
+        if patched_count:
+            print(f"Found and patched {patched_count} MTP layer(s) in any of the actor modules")
+        return patched_count > 0
     else:
         print("No MTP layers found to patch in any of the actor modules")
         return False
@@ -289,6 +294,8 @@ def patch_mtp_layer_checkpointed_forward(model: torch.nn.Module):
     if target_layers:
         patched_count = 0
         for layer in target_layers:
+            if hasattr(layer, "_checkpointed_forward_backup"):
+                continue
             try:
                 params = list(signature(layer._checkpointed_forward).parameters)
             except (TypeError, ValueError):
