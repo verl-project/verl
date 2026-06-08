@@ -13,7 +13,7 @@ algorithm:
     enable: true
     metric: acc
     min: 0.0
-    max: 0.8
+    max: 1.0
   
   rollout_correction:
     bypass_mode: true
@@ -55,6 +55,7 @@ actor_rollout_ref:
 
   model:
     path: swiss-ai/Apertus-8B-Instruct-2509
+    tokenizer_path: null
     use_remove_padding: true
     enable_gradient_checkpointing: true
     use_shm: false

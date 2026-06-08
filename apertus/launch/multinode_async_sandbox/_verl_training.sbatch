@@ -171,15 +171,15 @@ build_overrides() {
   )
 
   if [ -n "${RESOLVED_TOKENIZER}" ]; then
-    # overrides+=("actor_rollout_ref.model.tokenizer_path=${RESOLVED_TOKENIZER}")
-    echo "Custom tokenizer paths are not supported in this script." >&2
-    exit 1
+    overrides+=("actor_rollout_ref.model.tokenizer_path=${RESOLVED_TOKENIZER}")
   fi
 
   if [ "${USE_GROUP_FILTERING}" = "true" ]; then
     overrides+=(
       "algorithm.filter_groups.enable=true"
       "algorithm.filter_groups.metric=acc"
+      "algorithm.filter_groups.min=0.0"
+      "algorithm.filter_groups.max=1.0"
     )
   else
     overrides+=(

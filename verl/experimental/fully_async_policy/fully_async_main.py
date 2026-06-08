@@ -22,11 +22,19 @@ import hydra
 import ray
 from omegaconf import OmegaConf
 
-from verl.experimental.fully_async_policy.fully_async_rollouter import FullyAsyncRollouter
+from verl.experimental.fully_async_policy.fully_async_rollouter import (
+    FullyAsyncRollouter,
+)
 from verl.experimental.fully_async_policy.fully_async_trainer import FullyAsyncTrainer
-from verl.experimental.fully_async_policy.message_queue import MessageQueue, MessageQueueClient
+from verl.experimental.fully_async_policy.message_queue import (
+    MessageQueue,
+    MessageQueueClient,
+)
 from verl.experimental.reward_loop import migrate_legacy_reward_impl
-from verl.experimental.separation.utils import create_resource_pool_manager, create_role_worker_mapping
+from verl.experimental.separation.utils import (
+    create_resource_pool_manager,
+    create_role_worker_mapping,
+)
 from verl.trainer.ppo.utils import Role
 from verl.utils.device import auto_set_device
 from verl.utils.fs import copy_to_local
@@ -49,21 +57,30 @@ class FullyAsyncTaskRunner:
         self._run_training_loop()
 
     def _initialize_components(self, config) -> None:
-        print(f"[ASYNC MAIN] TaskRunner hostname: {socket.gethostname()}, PID: {os.getpid()}")
+        print(
+            f"[ASYNC MAIN] TaskRunner hostname: {socket.gethostname()}, PID: {os.getpid()}"
+        )
         pprint(OmegaConf.to_container(config, resolve=True))
         OmegaConf.resolve(config)
 
-        print("[ASYNC MAIN] Initializing model and tokenizer...")
-        local_path = copy_to_local(
-            config.actor_rollout_ref.model.path, use_shm=config.actor_rollout_ref.model.get("use_shm", False)
+        print("[ASYNC MAIN] Initializing tokenizer...")
+        use_shm = config.actor_rollout_ref.model.get("use_shm", False)
+        tokenizer_path = (
+            config.actor_rollout_ref.model.get("tokenizer_path")
+            or config.actor_rollout_ref.model.path
         )
+        local_tokenizer_path = copy_to_local(tokenizer_path, use_shm=use_shm)
         from verl.utils import hf_processor, hf_tokenizer
 
         trust_remote_code = config.data.get("trust_remote_code", False)
-        tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
+        tokenizer = hf_tokenizer(
+            local_tokenizer_path, trust_remote_code=trust_remote_code
+        )
 
         # Used for multimodal LLM, could be None
-        processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
+        processor = hf_processor(
+            local_tokenizer_path, trust_remote_code=trust_remote_code, use_fast=True
+        )
 
         self.components["tokenizer"] = tokenizer
         self.components["processor"] = processor
@@ -74,33 +91,55 @@ class FullyAsyncTaskRunner:
         self.components["role_worker_mapping"] = role_worker_mapping
         self.components["ray_worker_group_cls"] = ray_worker_group_cls
 
-        print("[ASYNC MAIN] Creating FullyAsyncTrainer first (needed for hybrid worker group injection)...")
+        print(
+            "[ASYNC MAIN] Creating FullyAsyncTrainer first (needed for hybrid worker group injection)..."
+        )
         self._create_trainer(config)
 
-        print("[ASYNC MAIN] Injecting trainer's worker group into rollouter for hybrid replicas...")
+        print(
+            "[ASYNC MAIN] Injecting trainer's worker group into rollouter for hybrid replicas..."
+        )
         self._setup_hybrid_worker_group(config)
 
         print("[ASYNC MAIN] Creating FullyAsyncRollouter...")
         self._create_rollouter(config)
 
         print("[ASYNC MAIN] Setting up rollouter reference on trainer")
-        ray.get(self.components["trainer"].set_rollouter.remote(self.components["rollouter"]))
+        ray.get(
+            self.components["trainer"].set_rollouter.remote(
+                self.components["rollouter"]
+            )
+        )
 
         # sync total_train_steps between rollouter and trainer
-        total_train_steps = ray.get(self.components["rollouter"].get_total_train_steps.remote())
+        total_train_steps = ray.get(
+            self.components["rollouter"].get_total_train_steps.remote()
+        )
         print(f"total_train_steps {total_train_steps}")
-        ray.get(self.components["trainer"].set_total_train_steps.remote(total_train_steps))
+        ray.get(
+            self.components["trainer"].set_total_train_steps.remote(total_train_steps)
+        )
 
         # max_queue_size
-        max_queue_size = ray.get(self.components["rollouter"].get_max_queue_size.remote())
+        max_queue_size = ray.get(
+            self.components["rollouter"].get_max_queue_size.remote()
+        )
         print(f"[ASYNC MAIN] Creating MessageQueue... max_queue_size {max_queue_size}")
         message_queue = MessageQueue.remote(config, max_queue_size)
         message_queue_client = MessageQueueClient(message_queue)
         self.components["message_queue"] = message_queue
         self.components["message_queue_client"] = message_queue_client
 
-        ray.get(self.components["rollouter"].set_message_queue_client.remote(self.components["message_queue_client"]))
-        ray.get(self.components["trainer"].set_message_queue_client.remote(self.components["message_queue_client"]))
+        ray.get(
+            self.components["rollouter"].set_message_queue_client.remote(
+                self.components["message_queue_client"]
+            )
+        )
+        ray.get(
+            self.components["trainer"].set_message_queue_client.remote(
+                self.components["message_queue_client"]
+            )
+        )
 
         # param_version resume from ckpt or default 0
         ray.get(self.components["trainer"].load_checkpoint.remote())
@@ -126,7 +165,11 @@ class FullyAsyncTaskRunner:
         # set_hybrid_worker_group must be called BEFORE init_workers() so that
         # _init_async_rollout_manager can pass the hybrid WG to ALM.create().
         if "hybrid_worker_group" in self.components:
-            ray.get(rollouter.set_hybrid_worker_group.remote(self.components["hybrid_worker_group"]))
+            ray.get(
+                rollouter.set_hybrid_worker_group.remote(
+                    self.components["hybrid_worker_group"]
+                )
+            )
             print("[ASYNC MAIN] Hybrid worker group injected into rollouter")
 
         ray.get(rollouter.init_workers.remote())
@@ -147,7 +190,9 @@ class FullyAsyncTaskRunner:
             config=config,
             tokenizer=self.components["tokenizer"],
             role_worker_mapping=trainer_role_mapping,
-            resource_pool_manager=create_resource_pool_manager(config, roles=list(trainer_role_mapping.keys())),
+            resource_pool_manager=create_resource_pool_manager(
+                config, roles=list(trainer_role_mapping.keys())
+            ),
             ray_worker_group_cls=self.components["ray_worker_group_cls"],
             device_name=config.trainer.device,
         )
@@ -171,7 +216,9 @@ class FullyAsyncTaskRunner:
                 f"(world_size={getattr(trainer_wg, 'world_size', '?')})"
             )
         else:
-            print("[ASYNC MAIN] use_trainer_do_validate=False, skipping hybrid worker group setup")
+            print(
+                "[ASYNC MAIN] use_trainer_do_validate=False, skipping hybrid worker group setup"
+            )
 
     def _run_training_loop(self):
         self.running = True
@@ -185,7 +232,9 @@ class FullyAsyncTaskRunner:
         try:
             while futures:
                 # Use ray.wait to monitor all futures and return when any one is completed.
-                done_futures, remaining_futures = ray.wait(futures, num_returns=1, timeout=None)
+                done_futures, remaining_futures = ray.wait(
+                    futures, num_returns=1, timeout=None
+                )
 
                 for future in done_futures:
                     try:
@@ -209,7 +258,9 @@ class FullyAsyncTaskRunner:
             print("[ASYNC MAIN] Training completed or interrupted")
 
 
-@hydra.main(config_path="config", config_name="fully_async_ppo_trainer", version_base=None)
+@hydra.main(
+    config_path="config", config_name="fully_async_ppo_trainer", version_base=None
+)
 def main(config):
     from verl.trainer.main_ppo import run_ppo
 
