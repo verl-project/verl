@@ -937,6 +937,8 @@ class FSDPEngineWithLMHead(FSDPEngine):
         multi_modal_inputs = extract_multi_modal_inputs(micro_batch.get("multi_modal_inputs", []))
         input_ids = micro_batch["input_ids"]
         position_ids = micro_batch["position_ids"]
+        hf_model_type = getattr(self.model_config.hf_config, "model_type", None)
+        pass_packed_cu_seqlens = hf_model_type in {"qwen3_5", "qwen3_5_moe"}
 
         if not isinstance(temperature, torch.Tensor):
             temperature = torch.tensor([temperature] * input_ids.shape[0], device=input_ids.device)
@@ -953,9 +955,11 @@ class FSDPEngineWithLMHead(FSDPEngine):
             # input_ids (bsz, j1)
             temperature_rmpad = verl_F.expand_as_nested(temperature, input_ids).values()  # (total_nnz,)
             temperature_rmpad = temperature_rmpad.unsqueeze(0)  # (1, total_nnz)
+            packed_cu_seqlens = None
 
             if pad_mode == DatasetPadMode.NO_PADDING:
                 input_ids_rmpad = input_ids.values().unsqueeze(0)  # (1, total_nnz)
+                packed_cu_seqlens = input_ids.offsets().to(device=input_ids_rmpad.device, dtype=torch.long)
                 if position_ids.dim() == 3:
                     position_ids_rmpad = position_ids.values().unsqueeze(1)  # (4, 1, total_nnz)
                 else:
@@ -967,6 +971,8 @@ class FSDPEngineWithLMHead(FSDPEngine):
             input_ids_rmpad_rolled = torch.roll(input_ids_rmpad, shifts=-1, dims=1)  # (1, total_nnz)
 
             # pad and slice the inputs if sp > 1
+            sp_pad_size = 0
+            is_vlm_model = False
             if self.use_ulysses_sp:
                 is_vlm_model = hasattr(getattr(self.module, "module", self.module).config, "vision_config")
                 if is_vlm_model:
@@ -994,6 +1000,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 )
 
                 output_args["pad_size"] = pad_size
+                sp_pad_size = pad_size
 
             input_ids_rmpad_rolled = input_ids_rmpad_rolled.squeeze(0)  # ((total_nnz / sp) + pad)
             temperature_rmpad = temperature_rmpad.squeeze(0)
@@ -1007,6 +1014,18 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 "attention_mask": None,
                 "position_ids": position_ids_rmpad,
             }
+            if packed_cu_seqlens is not None and pass_packed_cu_seqlens:
+                model_cu_seqlens = packed_cu_seqlens
+                if self.use_ulysses_sp and sp_pad_size:
+                    padded_total = int(model_cu_seqlens[-1].item()) + int(sp_pad_size)
+                    model_cu_seqlens = torch.cat(
+                        [
+                            model_cu_seqlens,
+                            model_cu_seqlens.new_tensor([padded_total]),
+                        ]
+                    )
+                model_inputs["cu_seqlens"] = model_cu_seqlens
+                model_inputs["cu_seqlens_cpu"] = model_cu_seqlens.cpu()
 
         else:
             if pad_mode == DatasetPadMode.NO_PADDING:
