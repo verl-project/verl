@@ -132,6 +132,21 @@ BACKEND_CUDA_MAJOR: dict[str, str] = {
     "cpu": "any",
 }
 
+# PyTorch wheel index for ``uv pip sync``. ``uv pip compile`` reads
+# ``[tool.uv.sources]`` from pyproject.toml, but sync only sees the lockfile —
+# pass ``--torch-backend`` so ``torch==*+cu130`` / ``+cu129`` wheels resolve.
+# See https://docs.astral.sh/uv/guides/integration/pytorch/
+BACKEND_TORCH_BACKEND: dict[str, str] = {
+    "vllm": "cu130",
+    "sglang": "cu130",
+    "fsdp": "cu130",
+    "megatron": "cu130",
+    "trtllm": "cu129",
+    "veomni": "cu129",
+    "nemoautomodel": "cu129",
+    "cpu": "cpu",
+}
+
 # Per-backend python version. Every supported backend currently targets
 # CUDA-on-x86_64-Linux + Python 3.12; Ascend NPU and aarch64 GPU variants
 # are out of scope for the uv flow (see [tool.uv].environments).
@@ -272,8 +287,12 @@ def cmd_sync(args: argparse.Namespace) -> int:
     1. Ensure ``requirements/<backend>.lock`` exists (compile from
        ``[project.optional-dependencies].<backend>`` if missing).
     2. ``uv venv .venvs/.venv-<backend> --python <python-version>``.
-    3. ``uv pip sync <lock> --python <venv-python> --link-mode=copy`` —
-       this installs *exactly* what the lockfile says, nothing else.
+    3. ``uv pip sync <lock> --python <venv-python> --link-mode=copy
+       --torch-backend <cu130|cu129|cpu>`` — installs *exactly* what the
+       lockfile says. The torch-backend flag is required so PyTorch CUDA
+       wheels (``torch==*+cu130`` etc.) resolve from the right index;
+       ``uv pip compile`` already knows the index via pyproject.toml, but
+       sync does not read pyproject.toml.
     4. ``uv pip install -e . --no-deps --python <venv-python>`` to put
        verl itself into the venv in editable mode (deps come from the
        lockfile, so ``--no-deps`` is correct here).
@@ -315,6 +334,8 @@ def cmd_sync(args: argparse.Namespace) -> int:
                 "--python",
                 venv_py,
                 "--link-mode=copy",
+                "--torch-backend",
+                BACKEND_TORCH_BACKEND[backend],
                 *args.uv_args,
             ],
             env_overrides,
