@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import torch
+from torch.distributed.tensor import DTensor
 from transformers.models.qwen3_vl.modeling_qwen3_vl import (
     Qwen3VLCausalLMOutputWithPast,
     Qwen3VLForConditionalGeneration,
