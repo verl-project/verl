@@ -51,11 +51,6 @@ RUN ln -sf /usr/bin/python${PYTHON_VERSION} /usr/bin/python3 && \
 
 RUN pip install torch==${TORCH_VERSION} torchvision==${TORCH_VISION_VERSION} torchaudio==${TORCH_AUDIO_VERSION} --index-url https://download.pytorch.org/whl/cu130
 
-# Override NCCL to >= 2.29.7 for ncclCommSuspend / ncclCommResume
-# (RFC: https://github.com/verl-project/verl/issues/6266).
-# TODO(xiefan46): remove once torch pin bumps to >= 2.12.0.
-RUN pip install --no-deps --upgrade "nvidia-nccl-cu13>=2.29.7,<3.0"
-
 RUN pip install pybind11 wheel
 
 # =========================
@@ -132,6 +127,11 @@ RUN pip install vllm==${VLLM_VERSION}
 RUN pip3 install --no-deps trl==${TRL_VERSION}
 
 RUN pip3 install nvtx matplotlib liger_kernel
+
+# Override NCCL to >= 2.29.7 for ncclCommSuspend / ncclCommResume
+# (RFC: https://github.com/verl-project/verl/issues/6266).
+# TODO(xiefan46): remove once torch pin bumps to >= 2.12.0.
+RUN pip install --no-deps --upgrade "nvidia-nccl-cu13>=2.29.7,<3.0"
 
 RUN pip install transformers==${TRANSFORMERS_VERSION}
 
