@@ -164,6 +164,7 @@ class MegatronEngine(BaseEngine):
         )
 
     def _build_tf_config(self):
+        from verl.utils.megatron.rope_config import get_hf_yarn_rope_config, without_yarn_runtime_config
         from verl.utils.megatron_utils import mapping_string_to_attn_backend
         from verl.utils.torch_dtypes import PrecisionType
 
@@ -181,6 +182,10 @@ class MegatronEngine(BaseEngine):
             # but it does not affect the functionality of dynamic CP, so we can use it to avoid the coupling.
             override_transformer_config["dynamic_context_parallel"] = False
             override_transformer_config["context_parallel_size"] = mpu.get_data_parallel_world_size()
+        self.yarn_runtime_config = get_hf_yarn_rope_config(
+            self.model_config.hf_config, override_transformer_config
+        )
+        bridge_transformer_config = without_yarn_runtime_config(override_transformer_config)
         self.provider = None
         self.vanilla_bridge = self.engine_config.vanilla_mbridge
 
@@ -188,8 +193,10 @@ class MegatronEngine(BaseEngine):
             from verl.models.mcore.mbridge import AutoBridge
 
             bridge = AutoBridge.from_config(self.model_config.hf_config, dtype=self.param_dtype)
-            bridge.set_extra_args(**override_transformer_config)
+            bridge.set_extra_args(**bridge_transformer_config)
             tf_config = bridge.config
+            for key, value in self.yarn_runtime_config.items():
+                setattr(tf_config, key, value)
             tf_config.fp16 = self.param_dtype == torch.float16
             tf_config.bf16 = self.param_dtype == torch.bfloat16
         else:
@@ -218,7 +225,7 @@ class MegatronEngine(BaseEngine):
                 "moe_token_dispatcher_type": "alltoall",
                 "moe_router_load_balancing_type": "none",
             }
-            for key, value in override_transformer_config.items():
+            for key, value in bridge_transformer_config.items():
                 provider_overrides[key] = value
             if self.enable_routing_replay:
                 if hasattr(provider, "moe_enable_routing_replay"):
@@ -231,10 +238,14 @@ class MegatronEngine(BaseEngine):
 
                 provider.transformer_layer_spec = modelopt_transformer_layer_spec
 
+            for key, value in self.yarn_runtime_config.items():
+                setattr(provider, key, value)
             provider.apply_overrides_and_finalize(
                 dtype=self.param_dtype,
                 overrides=provider_overrides,
             )
+            for key, value in self.yarn_runtime_config.items():
+                setattr(provider, key, value)
             self.provider = provider
             tf_config = None  # Will be set after model creation
         self.bridge = bridge
@@ -290,6 +301,8 @@ class MegatronEngine(BaseEngine):
             peft_cls=self.peft_cls,
             peft_config=self.model_config.get("lora", None),
         )
+        for key, value in self.yarn_runtime_config.items():
+            setattr(updated_tf_config, key, value)
         self.tf_config = updated_tf_config
         print(f"module: {len(module)}")
 
