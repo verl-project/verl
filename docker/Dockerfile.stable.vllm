@@ -145,11 +145,6 @@ RUN pip install qwen-vl-utils==0.0.14
 
 RUN pip install git+https://github.com/verl-project/verl.git@${VERL_VERSION} && pip uninstall -y verl
 
-# Override NCCL to >= 2.29.7 for ncclCommSuspend / ncclCommResume
-# (RFC: https://github.com/verl-project/verl/issues/6266).
-# TODO(xiefan46): remove once torch pin bumps to >= 2.12.0.
-RUN pip install --no-deps --upgrade "nvidia-nccl-cu13>=2.29.7,<3.0"
-
 RUN CUDA_VERSION_MAJOR=$(echo ${CUDA_VERSION} | cut -d '.' -f 1) && \
     CUDNN_PKG=libcudnn9-cuda-${CUDA_VERSION_MAJOR} && \
     CUDNN_VERSION=$(dpkg-query -W -f='${Version}' "${CUDNN_PKG}" 2>/dev/null | sed 's/-[0-9]*$//') && \
@@ -158,3 +153,8 @@ RUN CUDA_VERSION_MAJOR=$(echo ${CUDA_VERSION} | cut -d '.' -f 1) && \
         CUDNN_VERSION=$(grep -E '^#define CUDNN_(MAJOR|MINOR|PATCHLEVEL) ' "${CUDNN_HDR}" | awk '{print $3}' | paste -sd. -); \
     fi && \
     pip install "nvidia-cudnn-cu${CUDA_VERSION_MAJOR}>=${CUDNN_VERSION}"
+
+# Override NCCL to >= 2.29.7 for ncclCommSuspend / ncclCommResume
+# (RFC: https://github.com/verl-project/verl/issues/6266).
+# TODO(xiefan46): remove once torch pin bumps to >= 2.12.0.
+RUN pip install --no-deps --upgrade "nvidia-nccl-cu13>=2.29.7,<3.0"
