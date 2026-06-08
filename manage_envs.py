@@ -286,7 +286,9 @@ def cmd_sync(args: argparse.Namespace) -> int:
 
     1. Ensure ``requirements/<backend>.lock`` exists (compile from
        ``[project.optional-dependencies].<backend>`` if missing).
-    2. ``uv venv .venvs/.venv-<backend> --python <python-version>``.
+    2. ``uv venv .venvs/.venv-<backend> --python <python-version>``
+       (skipped if the venv already exists, so a re-run after a failed
+       ``pip sync`` reuses it; use ``clean`` to force a rebuild).
     3. ``uv pip sync <lock> --python <venv-python> --link-mode=copy
        --torch-backend <cu130|cu129|cpu>`` — installs *exactly* what the
        lockfile says. The torch-backend flag is required so PyTorch CUDA
@@ -319,10 +321,18 @@ def cmd_sync(args: argparse.Namespace) -> int:
                 print(f"error: uv pip compile failed for {backend}", file=sys.stderr)
                 return rc
 
-        rc = _run(["uv", "venv", str(venv), "--python", py, "--link-mode=copy"])
-        if rc:
-            print(f"error: uv venv failed for {backend}", file=sys.stderr)
-            return rc
+        if _venv_python(backend).exists():
+            # Idempotent re-run: a prior `sync` may have failed mid-`pip sync`
+            # (e.g. a transient wheel download error) and left the venv behind.
+            # `uv venv` refuses an existing dir without --clear, so skip
+            # creation and let `uv pip sync` below reconcile it to the lock.
+            # Use `clean <backend>` first to force a from-scratch rebuild.
+            print(f"(reuse) venv already exists at {venv}; skipping uv venv", flush=True)
+        else:
+            rc = _run(["uv", "venv", str(venv), "--python", py, "--link-mode=copy"])
+            if rc:
+                print(f"error: uv venv failed for {backend}", file=sys.stderr)
+                return rc
 
         venv_py = str(_venv_python(backend))
         rc = _run(
