@@ -39,10 +39,7 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
 def _call_accepts_kwarg(fn, name: str) -> bool:
-    try:
-        params = signature(fn).parameters
-    except (TypeError, ValueError):
-        return True
+    params = signature(fn).parameters
     return name in params or any(param.kind == param.VAR_KEYWORD for param in params.values())
 
 
@@ -60,10 +57,21 @@ def _prepare_packed_seq_idx(cu_seqlens: torch.LongTensor, cu_seqlens_cpu: Option
         return torch.cat(seq_idx, dim=0).unsqueeze(0)
 
 
-def _split_packed_args(cu_seqlens: torch.LongTensor, tensors: tuple[torch.Tensor, ...]):
-    offsets = cu_seqlens.detach().cpu().tolist()
+def _split_packed_args(
+    cu_seqlens: torch.LongTensor,
+    tensors: tuple[torch.Tensor, ...],
+    cu_seqlens_cpu: Optional[torch.LongTensor] = None,
+    dim: int = 1,
+):
+    offsets = (cu_seqlens_cpu if cu_seqlens_cpu is not None else cu_seqlens.detach().cpu()).tolist()
     for start, end in zip(offsets[:-1], offsets[1:], strict=True):
-        yield tuple(tensor[:, start:end] for tensor in tensors)
+        chunks = []
+        for tensor in tensors:
+            split_dim = dim if dim >= 0 else tensor.ndim + dim
+            slices = [slice(None)] * tensor.ndim
+            slices[split_dim] = slice(start, end)
+            chunks.append(tensor[tuple(slices)])
+        yield tuple(chunks)
 
 
 class _ConvPrefixExchange(torch.autograd.Function):
@@ -135,9 +143,14 @@ def _prepare_cp_conv_seq_idx(
     return torch.cat((prefix_idx, seq_idx), dim=1)
 
 
-def _packed_causal_conv1d_fallback(self, mixed_qkv: torch.Tensor, cu_seqlens: torch.LongTensor):
+def _packed_causal_conv1d_fallback(
+    self,
+    mixed_qkv: torch.Tensor,
+    cu_seqlens: torch.LongTensor,
+    cu_seqlens_cpu: Optional[torch.LongTensor] = None,
+):
     outputs = []
-    for (segment,) in _split_packed_args(cu_seqlens, (mixed_qkv,)):
+    for (segment,) in _split_packed_args(cu_seqlens, (mixed_qkv,), cu_seqlens_cpu=cu_seqlens_cpu, dim=2):
         outputs.append(F.silu(self.conv1d(segment)[:, :, : segment.shape[-1]]))
     return torch.cat(outputs, dim=-1)
 
@@ -166,7 +179,9 @@ def _packed_chunk_gated_delta_rule(self, query, key, value, g, beta, cu_seqlens,
         return self.chunk_gated_delta_rule(query, key, value, **kwargs)
 
     outputs = []
-    for q_i, k_i, v_i, g_i, beta_i in _split_packed_args(cu_seqlens, (query, key, value, g, beta)):
+    for q_i, k_i, v_i, g_i, beta_i in _split_packed_args(
+        cu_seqlens, (query, key, value, g, beta), cu_seqlens_cpu=cu_seqlens_cpu
+    ):
         split_kwargs = dict(kwargs)
         split_kwargs["g"] = g_i
         split_kwargs["beta"] = beta_i
@@ -260,9 +275,14 @@ def qwen3_5_gated_delta_net_forward(
                 mixed_qkv, conv_prefix_len = _prepend_cp_conv_prefix(mixed_qkv, cp_context)
                 model_cu_seqlens = model_cu_seqlens + conv_prefix_len
                 model_cu_seqlens[0] = 0
-                mixed_qkv = _packed_causal_conv1d_fallback(self, mixed_qkv, model_cu_seqlens)[..., conv_prefix_len:]
+                if model_cu_seqlens_cpu is not None:
+                    model_cu_seqlens_cpu = model_cu_seqlens_cpu + conv_prefix_len
+                    model_cu_seqlens_cpu[0] = 0
+                mixed_qkv = _packed_causal_conv1d_fallback(
+                    self, mixed_qkv, model_cu_seqlens, model_cu_seqlens_cpu
+                )[..., conv_prefix_len:]
             else:
-                mixed_qkv = _packed_causal_conv1d_fallback(self, mixed_qkv, model_cu_seqlens)
+                mixed_qkv = _packed_causal_conv1d_fallback(self, mixed_qkv, model_cu_seqlens, model_cu_seqlens_cpu)
         else:
             mixed_qkv = F.silu(self.conv1d(mixed_qkv)[:, :, :seq_len])
 

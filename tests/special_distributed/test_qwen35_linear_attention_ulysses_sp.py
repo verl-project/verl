@@ -163,7 +163,12 @@ def _run_case(case_name: str, lengths: list[int], layer: Qwen3_5DecoderLayer, de
     assert grad_err_ratio < 2e-3
 
 
-def test_qwen35_linear_attention_matches_full_forward_under_ulysses_sp():
+@pytest.mark.parametrize(
+    "use_causal_conv1d_fn",
+    [True, False],
+    ids=["causal_conv1d_fn", "torch_conv1d_fallback"],
+)
+def test_qwen35_linear_attention_matches_full_forward_under_ulysses_sp(use_causal_conv1d_fn: bool):
     assert torch.cuda.is_available(), "CUDA is required"
     if not dist.is_initialized():
         dist.init_process_group("nccl")
@@ -176,6 +181,10 @@ def test_qwen35_linear_attention_matches_full_forward_under_ulysses_sp():
     Qwen3_5GatedDeltaNet.forward = qwen3_5_gated_delta_net_forward
 
     layer = _make_layer(device)
+    if not use_causal_conv1d_fn:
+        for module in layer.modules():
+            if isinstance(module, Qwen3_5GatedDeltaNet):
+                module.causal_conv1d_fn = None
     _broadcast_params(layer)
 
     for case_name, lengths in _cases_for_world_size(dist.get_world_size()):
