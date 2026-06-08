@@ -18,6 +18,7 @@ import os
 import platform
 import signal
 import threading
+from collections.abc import Mapping
 from types import MethodType
 from typing import Any, Literal, Optional, get_args
 
@@ -361,6 +362,24 @@ def build_cli_args_from_config(config: dict[str, Any]) -> list[str]:
             # Use json.dumps for dict to ensure valid JSON format
             cli_args.append(json.dumps(v) if isinstance(v, dict) else str(v))
     return cli_args
+
+
+def build_mtp_speculative_config(
+    method: str, num_speculative_tokens: int, engine_speculative_config: Any = None
+) -> dict[str, Any]:
+    """Build vLLM's MTP speculative config, applying rollout engine overrides."""
+    if engine_speculative_config is None:
+        engine_speculative_config = {}
+    if isinstance(engine_speculative_config, str):
+        engine_speculative_config = json.loads(engine_speculative_config)
+    if not isinstance(engine_speculative_config, Mapping):
+        raise TypeError("rollout.engine_kwargs.vllm.speculative_config must be a mapping when MTP rollout is enabled")
+
+    return {
+        "method": method,
+        "num_speculative_tokens": num_speculative_tokens,
+        **{key: val for key, val in engine_speculative_config.items() if val is not None},
+    }
 
 
 def extract_prompt_logprobs(output: RequestOutput, num_prompt_logprobs: Optional[int], result_dict: dict[str, list]):

@@ -50,6 +50,7 @@ from verl.workers.rollout.vllm_rollout.utils import (
     VLLM_LORA_PATH,
     SuppressSignalInThread,
     build_cli_args_from_config,
+    build_mtp_speculative_config,
     extract_prompt_logprobs,
     get_vllm_max_lora_rank,
 )
@@ -297,15 +298,11 @@ class vLLMHttpServer:
                 args["served_model_name"] = served_model_name
 
         if self.config.mtp is not None and self.config.mtp.enable and self.config.mtp.enable_rollout:
-            mtp_engine_kwargs = (self.config.mtp.rollout_engine_kwargs or {}).get(
-                self._get_engine_kwargs_key(), {}
-            ) or {}
-            speculative_config = {
-                "method": self.config.mtp.method,
-                "num_speculative_tokens": self.config.mtp.num_speculative_tokens,
-                **{key: val for key, val in mtp_engine_kwargs.items() if val is not None},
-            }
-            args["speculative_config"] = speculative_config
+            args["speculative_config"] = build_mtp_speculative_config(
+                self.config.mtp.method,
+                self.config.mtp.num_speculative_tokens,
+                args.get("speculative_config"),
+            )
 
         if self.config.data_parallel_size > 1:
             assert self.gpus_per_node % self.config.tensor_model_parallel_size == 0, (

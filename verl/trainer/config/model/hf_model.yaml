@@ -95,9 +95,6 @@ mtp:
 
   method: mtp
   num_speculative_tokens: 1
-  rollout_engine_kwargs:
-    vllm: {}
-    sglang: {}
 
 # LoRA (Low-Rank Adaptation) configuration for parameter-efficient fine-tuning
 lora:
