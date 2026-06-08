@@ -837,7 +837,8 @@ class AgentLoopWorker:
         # For text-only input (no images/videos), skip vision rope and use text position ids.
         # This handles VLM models running on text-only tasks (e.g. GSM8K reasoning).
         if image_grid_thw is None and video_grid_thw is None:
-            return compute_position_id_with_mask(attention_mask)  # (1, seq_len)
+            text_position_ids = compute_position_id_with_mask(attention_mask)
+            return text_position_ids.unsqueeze(1).expand(-1, 4, -1)  # (1, 4, seq_len)
 
         multi_modal_kwargs = {
             "image_grid_thw": image_grid_thw,
