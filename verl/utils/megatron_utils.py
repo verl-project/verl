@@ -733,6 +733,10 @@ def offload_megatron_optimizer(optimizers):
                         v["exp_avg"] = v["exp_avg"].to("cpu", non_blocking=True)
                     if "exp_avg_sq" in v:
                         v["exp_avg_sq"] = v["exp_avg_sq"].to("cpu", non_blocking=True)
+                    # Offload additional optimizer state that is stored under
+                    # "master_param" when use_precision_aware_optimizer=True.
+                    if "master_param" in v:
+                        v["master_param"] = v["master_param"].to("cpu", non_blocking=True)
 
         try:
             # Free TransformerEngine's dummy weight gradients cache
@@ -771,6 +775,10 @@ def load_megatron_optimizer(optimizers):
                         v["exp_avg"] = v["exp_avg"].to(get_device_id(), non_blocking=True)
                     if "exp_avg_sq" in v:
                         v["exp_avg_sq"] = v["exp_avg_sq"].to(get_device_id(), non_blocking=True)
+                    # Load additional optimizer state that is stored under
+                    # "master_param" when use_precision_aware_optimizer=True.
+                    if "master_param" in v:
+                        v["master_param"] = v["master_param"].to(get_device_id(), non_blocking=True)
         gc.collect()
         get_torch_device().empty_cache()
 

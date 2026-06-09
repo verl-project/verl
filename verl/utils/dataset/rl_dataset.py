@@ -299,9 +299,9 @@ class RLHFDataset(Dataset):
         """Replace multimodal placeholders in messages with structured content.
 
         This is required by processor.apply_chat_template.
-        - <image>: {"type": "image", **image}
-        - <video>: {"type": "video", **video}
-        - <audio>: {"type": "audio", **audio}
+        - <image>: {"type": "image", "image": image} or {"type": "image", **image}
+        - <video>: {"type": "video", "video": video} or {"type": "video", **video}
+        - <audio>: {"type": "audio", "audio": audio} or {"type": "audio", **audio}
 
         Args:
             example: Row dictionary from dataframe.
@@ -339,12 +339,27 @@ class RLHFDataset(Dataset):
                         if "bytes" in image:
                             image["image"] = Image.open(BytesIO(image["bytes"]))
                         content_list.append({"type": "image", **image})
+                    elif isinstance(image, str | os.PathLike):
+                        content_list.append({"type": "image", "image": os.fspath(image)})
                     else:
-                        raise TypeError(f"image must be dict or PIL.Image, unsupported image type: {type(image)}")
+                        raise TypeError(
+                            f"image must be dict, PIL.Image, or path-like, unsupported image type: {type(image)}"
+                        )
                     image_offset += 1
                 elif segment == "<video>":
                     assert video_offset < len(videos), f"video_offset {video_offset} >= len(videos) {len(videos)}"
-                    content_list.append({"type": "video", **videos[video_offset]})
+                    video = videos[video_offset]
+                    if isinstance(video, dict):
+                        content_list.append({"type": "video", **video})
+                    elif isinstance(video, str | os.PathLike):
+                        content_list.append({"type": "video", "video": os.fspath(video)})
+                    elif isinstance(video, list):
+                        video = [os.fspath(frame) if isinstance(frame, os.PathLike) else frame for frame in video]
+                        content_list.append({"type": "video", "video": video})
+                    else:
+                        raise TypeError(
+                            f"video must be dict, list, or path-like, unsupported video type: {type(video)}"
+                        )
                     video_offset += 1
                 elif segment == "<audio>":
                     assert audio_offset < len(audios), f"audio_offset {audio_offset} >= len(audios) {len(audios)}"

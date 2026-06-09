@@ -16,6 +16,7 @@
 # limitations under the License.
 
 import warnings
+from inspect import signature
 from typing import Callable
 
 import torch
@@ -31,8 +32,10 @@ try:
     from megatron.core.transformer.multi_token_prediction import process_mtp_loss as _process_mtp_loss
 
     _HAS_PROCESS_MTP_LOSS = True
+    _PROCESS_MTP_LOSS_PARAMS = set(signature(_process_mtp_loss).parameters)
 except ImportError:
     _HAS_PROCESS_MTP_LOSS = False
+    _PROCESS_MTP_LOSS_PARAMS = set()
 
 try:
     from megatron.core.utils import unwrap_model
@@ -80,12 +83,15 @@ def _megatron_gptmodel_postprocess(
     loss_mask=None,
     decoder_input=None,
     attention_mask=None,
+    padding_mask=None,
     inference_params=None,
     packed_seq_params=None,
     sequence_len_offset=None,
     runtime_gather_output=None,
     extra_block_kwargs=None,
     inference_context=None,
+    output_processor=None,
+    output_processor_context=None,
     is_spec_decode=None,
 ):
     """Postprocesses decoder hidden states to generate logits or compute loss.
@@ -100,6 +106,11 @@ def _megatron_gptmodel_postprocess(
         output_weight = self.shared_embedding_or_output_weight()
 
     if mtp_in_postprocess and labels is not None:
+        mtp_kwargs = dict(extra_block_kwargs or {})
+        if not hasattr(self.mtp, "_forward_has_padding_mask"):
+            self.mtp._forward_has_padding_mask = "padding_mask" in signature(self.mtp.forward).parameters
+        if self.mtp._forward_has_padding_mask:
+            mtp_kwargs["padding_mask"] = padding_mask
         hidden_states = self.mtp(
             input_ids=input_ids,
             position_ids=position_ids,
@@ -112,7 +123,7 @@ def _megatron_gptmodel_postprocess(
             packed_seq_params=packed_seq_params,
             sequence_len_offset=sequence_len_offset,
             embedding=self.embedding,
-            **(extra_block_kwargs or {}),
+            **mtp_kwargs,
         )
 
     if not self.post_process:
@@ -123,24 +134,32 @@ def _megatron_gptmodel_postprocess(
         if _HAS_PROCESS_MTP_LOSS:
             # New Megatron API (>= verl megatron fork with process_mtp_loss):
             # process_mtp_loss handles chunking, rolling, loss scaling all internally.
-            cp_group = getattr(self, "cp_group", None) or (
-                self.pg_collection.cp if hasattr(self, "pg_collection") else None
-            )
+            pg_collection = getattr(self, "pg_collection", None)
+            cp_group = getattr(self, "cp_group", None) or (pg_collection.cp if pg_collection is not None else None)
             scale_logits_fn = self._scale_logits if (hasattr(self, "_scale_logits") and self.config.use_mup) else None
-            hidden_states = _process_mtp_loss(
-                hidden_states=hidden_states,
-                labels=labels,
-                loss_mask=loss_mask,
-                output_layer=self.output_layer,
-                output_weight=output_weight,
-                runtime_gather_output=runtime_gather_output,
-                is_training=self.training,
-                compute_language_model_loss=self.compute_language_model_loss,
-                config=self.config,
-                cp_group=cp_group,
-                packed_seq_params=packed_seq_params,
-                scale_logits_fn=scale_logits_fn,
-            )
+            process_mtp_loss_kwargs = {
+                "hidden_states": hidden_states,
+                "labels": labels,
+                "loss_mask": loss_mask,
+                "output_layer": self.output_layer,
+                "output_weight": output_weight,
+                "runtime_gather_output": runtime_gather_output,
+                "is_training": self.training,
+                "compute_language_model_loss": self.compute_language_model_loss,
+                "config": self.config,
+                "cp_group": cp_group,
+                "packed_seq_params": packed_seq_params,
+                "scale_logits_fn": scale_logits_fn,
+                "input_ids": input_ids,
+            }
+            if "tp_group" in _PROCESS_MTP_LOSS_PARAMS:
+                process_mtp_loss_kwargs["tp_group"] = getattr(self, "tp_group", None) or (
+                    pg_collection.tp if pg_collection is not None else None
+                )
+            process_mtp_loss_kwargs = {
+                key: val for key, val in process_mtp_loss_kwargs.items() if key in _PROCESS_MTP_LOSS_PARAMS
+            }
+            hidden_states = _process_mtp_loss(**process_mtp_loss_kwargs)
         else:
             # Legacy Megatron API: manual rolling + detached output-layer functional_call.
             mtp_labels = labels.clone()
@@ -234,11 +253,17 @@ def patch_mtp_layer_get_embeddings(model: torch.nn.Module):
                 target_layers.append(layer)
 
     if target_layers:
+        patched_count = 0
         for layer in target_layers:
+            if hasattr(layer, "_get_embeddings_backup"):
+                continue
+            layer._get_embeddings_has_padding_mask = "padding_mask" in signature(layer._get_embeddings).parameters
             layer._get_embeddings_backup = layer._get_embeddings
             layer._get_embeddings = _patched_get_embeddings_for_detach.__get__(layer, layer.__class__)
-        print(f"Found and patched {len(target_layers)} MTP layer(s) in any of the actor modules")
-        return True
+            patched_count += 1
+        if patched_count:
+            print(f"Found and patched {patched_count} MTP layer(s) in any of the actor modules")
+        return patched_count > 0
     else:
         print("No MTP layers found to patch in any of the actor modules")
         return False
@@ -267,11 +292,22 @@ def patch_mtp_layer_checkpointed_forward(model: torch.nn.Module):
                 target_layers.append(layer)
 
     if target_layers:
+        patched_count = 0
         for layer in target_layers:
+            if hasattr(layer, "_checkpointed_forward_backup"):
+                continue
+            try:
+                params = list(signature(layer._checkpointed_forward).parameters)
+            except (TypeError, ValueError):
+                params = ["forward_func"]
+            if not params or params[0] != "forward_func":
+                continue
             layer._checkpointed_forward_backup = layer._checkpointed_forward
             layer._checkpointed_forward = _patched_checkpointed_forward.__get__(layer, layer.__class__)
-        print(f"Found and patched checkpointed forward for {len(target_layers)} MTP layer(s)")
-        return True
+            patched_count += 1
+        if patched_count:
+            print(f"Found and patched checkpointed forward for {patched_count} MTP layer(s)")
+        return patched_count > 0
     else:
         print("No MTP layers found to patch checkpointed forward")
         return False
@@ -305,6 +341,8 @@ def unpatch_mtp_layer_get_embeddings(model: torch.nn.Module):
         if hasattr(layer, "_get_embeddings_backup"):
             layer._get_embeddings = layer._get_embeddings_backup
             delattr(layer, "_get_embeddings_backup")
+            if hasattr(layer, "_get_embeddings_has_padding_mask"):
+                delattr(layer, "_get_embeddings_has_padding_mask")
             unpatched_count += 1
 
     if unpatched_count > 0:
@@ -356,6 +394,7 @@ def _patched_get_embeddings_for_detach(
     embedding: Callable,
     hidden_states: torch.Tensor,
     packed_seq_params=None,
+    padding_mask=None,
 ):
     """
     Patched version of _get_embeddings method for MultiTokenPredictionLayer.
@@ -375,21 +414,31 @@ def _patched_get_embeddings_for_detach(
     from megatron.core.transformer.multi_token_prediction import roll_tensor
     from megatron.core.utils import make_viewless_tensor
 
+    cp_group = getattr(self, "cp_group", None)
+
     # Calc logits for the current Multi-Token Prediction (MTP) layers.
     input_ids, _ = roll_tensor(
         input_ids,
         shifts=-1,  # You can modify this shift value
         dims=-1,
-        cp_group=self.cp_group,
+        cp_group=cp_group,
         packed_seq_params=packed_seq_params,
     )
     position_ids, _ = roll_tensor(
         position_ids,
         shifts=-1,  # You can modify this shift value
         dims=-1,
-        cp_group=self.cp_group,
+        cp_group=cp_group,
         packed_seq_params=packed_seq_params,
     )
+    if padding_mask is not None:
+        padding_mask, _ = roll_tensor(
+            padding_mask,
+            shifts=-1,
+            dims=-1,
+            cp_group=cp_group,
+            packed_seq_params=packed_seq_params,
+        )
 
     # embedding computation - you can modify this part
     decoder_input = embedding(input_ids=input_ids, position_ids=position_ids)
@@ -401,6 +450,8 @@ def _patched_get_embeddings_for_detach(
     decoder_input = decoder_input.detach()
     hidden_states = make_viewless_tensor(inp=hidden_states, requires_grad=True, keep_graph=False)
 
+    if getattr(self, "_get_embeddings_has_padding_mask", False):
+        return input_ids, position_ids, padding_mask, decoder_input, hidden_states
     return input_ids, position_ids, decoder_input, hidden_states
 
 

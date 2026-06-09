@@ -50,6 +50,7 @@ from verl.workers.rollout.vllm_rollout.utils import (
     VLLM_LORA_PATH,
     SuppressSignalInThread,
     build_cli_args_from_config,
+    build_mtp_speculative_config,
     extract_prompt_logprobs,
     get_vllm_max_lora_rank,
 )
@@ -135,6 +136,7 @@ class vLLMHttpServer:
         self.nnodes = nnodes
         # model weights version, set by ServerAdapter when update weights.
         self.global_steps = None
+        self._warned_missing_spec_decode_stats = False
 
         if self.rollout_mode != RolloutMode.HYBRID and self.config.load_format == "dummy":
             logger.warning(f"rollout mode is {self.rollout_mode}, load_format is dummy, set to auto")
@@ -296,11 +298,11 @@ class vLLMHttpServer:
                 args["served_model_name"] = served_model_name
 
         if self.config.mtp is not None and self.config.mtp.enable and self.config.mtp.enable_rollout:
-            speculative_config = {
-                "method": self.config.mtp.method,
-                "num_speculative_tokens": self.config.mtp.num_speculative_tokens,
-            }
-            args["speculative_config"] = speculative_config
+            args["speculative_config"] = build_mtp_speculative_config(
+                self.config.mtp.method,
+                self.config.mtp.num_speculative_tokens,
+                args.get("speculative_config"),
+            )
 
         if self.config.data_parallel_size > 1:
             assert self.gpus_per_node % self.config.tensor_model_parallel_size == 0, (
@@ -587,12 +589,18 @@ class vLLMHttpServer:
 
         # Re-key backend spec-decoding stats to the rollout-common names.
         if self.config.mtp is not None and self.config.mtp.enable and self.config.mtp.enable_rollout:
-            if final_res.metrics is None or final_res.metrics.request_spec_decode_stats is None:
-                raise RuntimeError("vLLM MTP rollout requires request_spec_decode_stats; set disable_log_stats=False.")
-            spec_decode_stats = final_res.metrics.request_spec_decode_stats
-            extra_fields["spec_num_draft_tokens"] = spec_decode_stats.num_draft_tokens
-            extra_fields["spec_num_accepted_tokens"] = spec_decode_stats.num_accepted_tokens
-            extra_fields["spec_num_verify_steps"] = spec_decode_stats.num_verify_steps
+            spec_decode_stats = getattr(final_res.metrics, "request_spec_decode_stats", None)
+            if spec_decode_stats is None:
+                if not self._warned_missing_spec_decode_stats:
+                    logger.warning(
+                        "vLLM MTP rollout metrics do not include request_spec_decode_stats; "
+                        "speculative decoding acceptance metrics will be skipped."
+                    )
+                    self._warned_missing_spec_decode_stats = True
+            else:
+                extra_fields["spec_num_draft_tokens"] = spec_decode_stats.num_draft_tokens
+                extra_fields["spec_num_accepted_tokens"] = spec_decode_stats.num_accepted_tokens
+                extra_fields["spec_num_verify_steps"] = spec_decode_stats.num_verify_steps
         return TokenOutput(
             token_ids=token_ids,
             log_probs=log_probs,

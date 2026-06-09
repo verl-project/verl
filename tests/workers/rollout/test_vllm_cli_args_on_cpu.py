@@ -13,10 +13,15 @@
 # limitations under the License.
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
-from verl.workers.rollout.vllm_rollout.utils import build_cli_args_from_config
+from verl.workers.rollout.vllm_rollout.utils import (
+    _resolve_vllm_weight_sync_local_rank,
+    build_cli_args_from_config,
+    vLLMColocateWorkerExtension,
+)
 
 
 class TestBuildCliArgsFromConfig:
@@ -127,6 +132,62 @@ class TestBuildCliArgsFromConfig:
         config = {"sizes": [42]}
         result = build_cli_args_from_config(config)
         assert result == ["--sizes", "42"]
+
+
+class TestVllmColocateZmqHandle:
+    def test_dp_local_rank_offsets_tensor_parallel_rank(self):
+        """DP workers on the same node must not reuse the same TP-local socket."""
+        parallel_config = SimpleNamespace(
+            tensor_parallel_size=2,
+            data_parallel_size=4,
+            data_parallel_size_local=2,
+            data_parallel_rank_local=1,
+        )
+
+        assert _resolve_vllm_weight_sync_local_rank(1, parallel_config) == 3
+        assert _resolve_vllm_weight_sync_local_rank(3, parallel_config) == 3
+
+    def test_single_dp_keeps_local_rank(self):
+        """The old single-DP handle layout remains unchanged."""
+        parallel_config = SimpleNamespace(
+            tensor_parallel_size=2,
+            data_parallel_size=1,
+            data_parallel_size_local=1,
+            data_parallel_rank_local=0,
+        )
+
+        assert _resolve_vllm_weight_sync_local_rank(1, parallel_config) == 1
+
+    def test_uses_global_dp_rank_when_local_rank_is_unset(self):
+        parallel_config = SimpleNamespace(
+            tensor_parallel_size=2,
+            data_parallel_size=4,
+            data_parallel_size_local=2,
+            data_parallel_rank_local=None,
+            data_parallel_rank=3,
+        )
+
+        assert _resolve_vllm_weight_sync_local_rank(0, parallel_config) == 2
+
+    def test_zmq_handle_uses_resolved_dp_rank(self, monkeypatch):
+        parallel_config = SimpleNamespace(
+            tensor_parallel_size=2,
+            data_parallel_size=4,
+            data_parallel_size_local=2,
+            data_parallel_rank_local=1,
+        )
+        worker = SimpleNamespace(
+            local_rank=1,
+            model_runner=SimpleNamespace(
+                vllm_config=SimpleNamespace(parallel_config=parallel_config),
+            ),
+        )
+        monkeypatch.setenv("VERL_REPLICA_RANK", "2")
+        monkeypatch.setenv("VERL_RAY_JOB_ID", "job-123")
+
+        handle = vLLMColocateWorkerExtension._get_zmq_handle(worker)
+
+        assert handle == "ipc:///tmp/rl-colocate-zmq-job-123-replica-2-rank-3.sock"
 
 
 if __name__ == "__main__":

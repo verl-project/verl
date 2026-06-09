@@ -21,7 +21,7 @@ import torch
 import torch.distributed as dist
 from tensordict import TensorDict
 from torch.distributed.tensor import DTensor
-from veomni.arguments import OpsImplementationConfig
+from veomni.arguments import MixedPrecisionConfig, OpsImplementationConfig
 from veomni.distributed import parallel_state
 from veomni.distributed.offloading import build_activation_offloading_context
 from veomni.distributed.torch_parallelize import build_parallelize_model
@@ -279,11 +279,13 @@ class VeOmniEngine(FSDPEngine):
             load_balancing_loss_implementation=self.engine_config.load_balancing_loss_implementation,
         )
 
+        veomni_mixed_precision_config = MixedPrecisionConfig(enable=self.engine_config.mixed_precision)
+
         # Load base model with specified configuration and dtype
         module = build_foundation_model(
             config_path=self._get_model_config_path(),
             weights_path=self.model_config.local_path,
-            torch_dtype="float32" if self.engine_config.mixed_precision else "bfloat16",
+            torch_dtype="float32" if veomni_mixed_precision_config.enable else "bfloat16",
             attn_implementation=self.engine_config.attn_implementation,
             ops_implementation=ops_implementation,
             init_device=self.engine_config.init_device,
@@ -297,7 +299,7 @@ class VeOmniEngine(FSDPEngine):
             init_device=self.engine_config.init_device,
             weights_path=self.model_config.local_path,
             enable_full_shard=self.engine_config.enable_full_shard,
-            enable_mixed_precision=self.engine_config.mixed_precision,
+            mixed_precision=veomni_mixed_precision_config,
             enable_gradient_checkpointing=self.model_config.enable_gradient_checkpointing,
             enable_fsdp_offload=self.engine_config.enable_fsdp_offload,
             basic_modules=list(
