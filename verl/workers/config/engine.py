@@ -274,7 +274,6 @@ class VeOmniEngineConfig(EngineConfig):
     Args:
         param_offload (bool): Whether to offload parameters to CPU, default False
         optimizer_offload (bool): Whether to offload optimizer states to CPU, default False
-        offload_policy (bool): Whether to offload policy model parameters, default False
         fsdp_size (int): FSDP group size. -1 means use all available GPUs, default -1
         ulysses_parallel_size (int): Ulysses sequence parallel size, default 1
         expert_parallel_size (int): Expert parallel size, default 1
