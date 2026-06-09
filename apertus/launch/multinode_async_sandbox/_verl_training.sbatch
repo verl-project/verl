@@ -41,12 +41,14 @@ PROJECT_NAME="${PROJECT_NAME:-apertus-rl-tests}"
 MODEL_NAME_OR_PATH="${MODEL_NAME_OR_PATH:-swiss-ai/Apertus-8B-Instruct-2509}"
 TOKENIZER_NAME_OR_PATH="${TOKENIZER_NAME_OR_PATH:-}"
 CONFIG_NAME="${CONFIG_NAME:-async}"
+VAL_BEFORE_TRAIN="${VAL_BEFORE_TRAIN:-true}"
 ROLLOUT_N="${ROLLOUT_N:-8}"
 SEED="${SEED:-85}"
 USE_GROUP_FILTERING="${USE_GROUP_FILTERING:-true}"
 ENABLE_THINKING="${ENABLE_THINKING:-false}"
 FORCE_THINKING="${FORCE_THINKING:-false}"
 THINK_PREFIX_TOKEN="${THINK_PREFIX_TOKEN:-<think>}"
+WANDB_ENTITY="${WANDB_ENTITY:-apertus}"
 
 TRAIN_NNODES="${TRAIN_NNODES:-1}"
 ROLLOUT_NNODES="${ROLLOUT_NNODES:-1}"
@@ -159,6 +161,7 @@ build_overrides() {
     "trainer.experiment_name=${RUN_NAME}"
     "trainer.default_local_dir=${RUN_DIR}"
     "trainer.validation_data_dir=${RUN_DIR}/validation"
+    "trainer.val_before_train=${VAL_BEFORE_TRAIN}"
     "trainer.nnodes=${TRAIN_NNODES}"
     "trainer.n_gpus_per_node=${TRAIN_GPUS_PER_NODE}"
     "+ray_kwargs.ray_init.address=${ip_head}"
@@ -168,6 +171,7 @@ build_overrides() {
     "+ray_kwargs.ray_init.runtime_env.env_vars.NLTK_DATA=${NLTK_DATA_DIR}"
     "+ray_kwargs.ray_init.runtime_env.env_vars.MATH_VERIFY_PYTHONPATH=${PY_DEPS_DIR}"
     "+ray_kwargs.ray_init.runtime_env.env_vars.SCHEDULER_URL=${SCHEDULER_URL}"
+    "+ray_kwargs.ray_init.runtime_env.env_vars.WANDB_ENTITY=${WANDB_ENTITY}"
   )
 
   if [ -n "${RESOLVED_TOKENIZER}" ]; then
@@ -286,6 +290,7 @@ export NNODES
 
 export WANDB_RUN_GROUP="${JOB_NAME:-${RUN_NAME}}"
 export WANDB_NAME="${RUN_NAME}"
+export WANDB_ENTITY
 
 nodes_array=($(scontrol show hostnames "${SLURM_JOB_NODELIST}"))
 if [ "${#nodes_array[@]}" -lt "${NNODES}" ]; then

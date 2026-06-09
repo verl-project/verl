@@ -142,7 +142,7 @@ trainer:
   nnodes: 1
   n_gpus_per_node: 2
   log_val_generations: 5
-  val_before_train: false # TODO: modify
+  val_before_train: true
   default_local_dir: ./outputs/${trainer.project_name}/${trainer.experiment_name}
   validation_data_dir: ${trainer.default_local_dir}/validation/
 
