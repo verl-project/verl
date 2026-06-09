@@ -139,6 +139,20 @@ class CheckpointEngineConfig(BaseConfig):
     # backend is instantiated, allowing custom backends to register themselves
     # in CheckpointEngineRegistry.
     custom_backend_module: Optional[str] = None
+    # Debug option: compare initial rollout backend-loaded weights with the source HF checkpoint.
+    check_weight_sync: bool = False
+    # If true, trainers that support it exit after the initial weight-sync check.
+    check_weight_sync_only: bool = False
+    # Dtype used when loading the reference HF checkpoint for comparison.
+    check_weight_sync_dtype: str = "bfloat16"
+    check_weight_sync_rtol: float = 1e-5
+    check_weight_sync_atol: float = 1e-8
+    check_weight_sync_max_mismatches: int = 10
+    check_weight_sync_timeout: Optional[float] = 300.0
+
+    def __post_init__(self):
+        if self.check_weight_sync_only and not self.check_weight_sync:
+            raise ValueError("`check_weight_sync_only=True` requires `check_weight_sync=True`.")
 
 
 @dataclass

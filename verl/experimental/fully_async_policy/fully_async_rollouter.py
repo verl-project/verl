@@ -375,6 +375,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         # Rollouter parameter configuration
         self.message_queue_client = None
 
+        self.llm_server_manager = None
         self.async_rollout_manager = None
 
         # Elastic worker group (injected via set_hybrid_worker_group before init_workers)
@@ -425,6 +426,17 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         """Set message queue client"""
         async with self.lock:
             self.message_queue_client = message_queue_client
+
+    async def shutdown(self):
+        """Shutdown rollout-side services created for fully async rollout."""
+        if hasattr(self, "lock"):
+            async with self.lock:
+                self.running = False
+                self.paused = False
+                self._resume_event.set()
+
+        if self.llm_server_manager is not None:
+            await self.llm_server_manager.shutdown()
 
     async def set_max_required_samples(self):
         async with self.lock:
@@ -598,6 +610,11 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         """
         self._init_async_objects()
         self._create_worker_classes()
+        if self.config.actor_rollout_ref.rollout.checkpoint_engine.get("check_weight_sync_only", False):
+            await self._init_llm_server_manager()
+            SkipManager.init(self.config)
+            return
+
         await self._create_reward_loop_manager()
         await self._create_teacher_model_manager()
         await self._init_async_rollout_manager()
@@ -673,9 +690,9 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
             for batch_dict in iterator:
                 yield epoch, batch_dict
 
-    async def _init_async_rollout_manager(self):
+    async def _init_llm_server_manager(self):
         """
-        Create the server manager and agent loop manager for fully async training.
+        Create the server manager for fully async rollout.
 
         Uses :class:`FullyAsyncLLMServerManager` which supports two-phase init:
         - Phase 1: hybrid replicas on trainer GPUs (sleeping)
@@ -685,6 +702,18 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         registry) serves as the single source of truth for handle mapping and
         routing.  Clients look up handles atomically — no per-worker notification
         needed on hybrid add/remove.
+        """
+        assert self.config.actor_rollout_ref.rollout.mode == "async"
+
+        self.async_rollout_mode = True
+        self.llm_server_manager = await FullyAsyncLLMServerManager.create(
+            config=self.config,
+            worker_group=self.get_hybrid_worker_group(),
+        )
+
+    async def _init_async_rollout_manager(self):
+        """
+        Create the server manager and agent loop manager for fully async training.
         """
         # infrastructure overview: https://verl.readthedocs.io/en/latest/advance/reward_loop.html#architecture-design
         # agent_reward_loop: streaming reward computation with actor rollout
@@ -696,15 +725,9 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         reward_loop_worker_handles = self.reward_loop_manager.reward_loop_workers if enable_agent_reward_loop else None
 
         # create async rollout manager and request scheduler
-        assert self.config.actor_rollout_ref.rollout.mode == "async"
+        if self.llm_server_manager is None:
+            await self._init_llm_server_manager()
 
-        self.async_rollout_mode = True
-        # Use FullyAsyncLLMServerManager for two-phase (hybrid + standalone) init.
-        # It creates GlobalRequestLoadBalancer (with merged handle registry) internally.
-        self.llm_server_manager = await FullyAsyncLLMServerManager.create(
-            config=self.config,
-            worker_group=self.get_hybrid_worker_group(),
-        )
         self.async_rollout_manager = await FullyAsyncAgentLoopManager.create(
             config=self.config,
             llm_client=self.llm_server_manager.get_client(client_cls=FullyAsyncLLMServerClient),

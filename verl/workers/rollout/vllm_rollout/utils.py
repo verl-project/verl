@@ -219,6 +219,57 @@ class vLLMColocateWorkerExtension:
             if draft_cfg is not None:
                 yield self._get_drafter_model(), draft_cfg
 
+    @torch.no_grad()
+    def check_loaded_weights_equal(
+        self,
+        model_path: str,
+        trust_remote_code: bool = False,
+        torch_dtype: str = "bfloat16",
+        rtol: float = 1e-5,
+        atol: float = 1e-8,
+        max_mismatches: int = 10,
+    ) -> dict[str, Any]:
+        """Compare vLLM-loaded weights against a HuggingFace checkpoint.
+
+        This debug helper is intended for TP=1 exact checks. With tensor
+        parallelism, vLLM stores sharded tensors and direct state_dict allclose
+        is not meaningful without applying each layer's sharding rule.
+        """
+        from transformers import AutoModelForCausalLM
+
+        from verl.checkpoint_engine.weight_sync import assert_weight_sync_equal
+        from verl.utils.fs import copy_to_local
+
+        parallel_config = self.model_runner.vllm_config.parallel_config
+        if parallel_config.tensor_parallel_size != 1:
+            raise NotImplementedError(
+                "vLLM loaded-weight equality check currently supports tensor_parallel_size=1 only. "
+                f"Got tensor_parallel_size={parallel_config.tensor_parallel_size}."
+            )
+
+        local_path = copy_to_local(model_path)
+        dtype = getattr(torch, torch_dtype)
+        expected_model = AutoModelForCausalLM.from_pretrained(
+            local_path,
+            torch_dtype=dtype,
+            device_map="cpu",
+            trust_remote_code=trust_remote_code,
+        )
+        expected_state_dict = expected_model.state_dict()
+        actual_state_dict = self.model_runner.model.state_dict()
+        result = assert_weight_sync_equal(
+            expected_state_dict=expected_state_dict,
+            actual_state_dict=actual_state_dict,
+            num_hidden_layers=getattr(expected_model.config, "num_hidden_layers", 0),
+            tie_word_embeddings=getattr(expected_model.config, "tie_word_embeddings", False),
+            rtol=rtol,
+            atol=atol,
+            max_mismatches=max_mismatches,
+        )
+
+        del expected_model
+        return result
+
     def monkey_patch_model(self, vocab_size: int):
         for model in self._iter_all_models():
             # patch compute_logits to avoid sampling OOV token

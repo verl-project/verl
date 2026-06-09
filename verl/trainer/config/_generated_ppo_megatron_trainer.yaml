@@ -340,6 +340,13 @@ actor_rollout_ref:
       update_weights_bucket_megabytes: 2048
       engine_kwargs: {}
       custom_backend_module: null
+      check_weight_sync: false
+      check_weight_sync_only: false
+      check_weight_sync_dtype: bfloat16
+      check_weight_sync_rtol: 1.0e-05
+      check_weight_sync_atol: 1.0e-08
+      check_weight_sync_max_mismatches: 10
+      check_weight_sync_timeout: 300
     trace:
       _target_: verl.workers.config.TraceConfig
       project_name: ${oc.select:trainer.project_name,null}

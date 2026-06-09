@@ -1382,6 +1382,10 @@ class RayPPOTrainer:
         # load checkpoint and update weights before doing anything
         self._load_checkpoint()
         self.checkpoint_manager.update_weights(self.global_steps)
+        if self.config.actor_rollout_ref.rollout.checkpoint_engine.get("check_weight_sync_only", False):
+            print("Weight sync check completed. Exit because check_weight_sync_only=True.")
+            self._shutdown_dump_executor()
+            return
 
         current_epoch = self.global_steps // len(self.train_dataloader)
 
