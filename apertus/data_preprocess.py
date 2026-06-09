@@ -140,6 +140,18 @@ TRAIN_DATASETS = [
     ),
     DatasetConfig(
         enabled=True,
+        name="apps",
+        dataset_id="ReactiveAI/codeparrot-apps-reupload",
+        split="train",
+        adapter="apps",
+        data_source="apps",
+        question_key="question",
+        answer_key="input_output",
+        solution_key="solutions",
+        sample_size=None,
+    ),
+    DatasetConfig(
+        enabled=True,
         name="code_contests",
         dataset_id="deepmind/code_contests",
         split="train",
@@ -147,6 +159,16 @@ TRAIN_DATASETS = [
         data_source="codecontests",
         question_key="description",
         solution_key="solutions",
+        sample_size=None,
+    ),
+    DatasetConfig(
+        enabled=True,
+        name="open_r1_codeforces",
+        dataset_id="open-r1/codeforces",
+        subset="verifiable",
+        split="train",
+        adapter="open_r1_codeforces",
+        data_source="codeforces",
         sample_size=None,
     ),
 ]
@@ -324,7 +346,7 @@ def parse_json_maybe(value: Any, default: Any = None) -> Any:
     if isinstance(value, str):
         try:
             return json.loads(value)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, ValueError):
             return default
     return value
 
@@ -465,20 +487,6 @@ def adapt_code_contests(
         "input_output": json_dumps(test_cases),
         "prime_code_input_output": json_dumps(test_cases),
         "sandbox_data_source": "lighteval/code_generation_lite",
-        "cf_contest_id": get_value(example, "cf_contest_id"),
-        "cf_index": normalize_text(get_value(example, "cf_index")),
-        "cf_points": get_value(example, "cf_points"),
-        "cf_rating": get_value(example, "cf_rating"),
-        "cf_tags": json_dumps(get_value(example, "cf_tags", [])),
-        "num_public_tests": len(
-            get_test_values(get_value(example, "public_tests"), "input")
-        ),
-        "num_private_tests": len(
-            get_test_values(get_value(example, "private_tests"), "input")
-        ),
-        "num_generated_tests": len(
-            get_test_values(get_value(example, "generated_tests"), "input")
-        ),
         "num_used_tests": len(test_cases["inputs"]),
     }
     return make_row(
@@ -488,6 +496,74 @@ def adapt_code_contests(
         prompt=prompt,
         ability="code",
         ground_truth=reference_solution,
+        extra_info=extra_info,
+    )
+
+
+@register_adapter("apps")
+def adapt_apps(
+    example: dict[str, Any], idx: int, split: str, config: DatasetConfig
+) -> dict[str, Any]:
+    question = normalize_text(get_value(example, config.question_key))
+    starter_code = normalize_text(get_value(example, "starter_code"))
+    raw_test_cases = parse_json_maybe(get_value(example, config.answer_key), default={})
+    prime_code_test_cases = normalize_prime_code_test_cases(raw_test_cases)
+    raw_solutions = get_value(example, config.solution_key)
+    solutions = parse_json_maybe(raw_solutions, default=raw_solutions)
+    reference_solution = first_solution(solutions)
+    prompt = make_prompt(format_code_prompt(question, starter_code))
+    extra_info = {
+        "question": question,
+        "starter_code": starter_code,
+        "difficulty": normalize_text(get_value(example, "difficulty")),
+        "url": normalize_text(get_value(example, "url")),
+        "problem_id": normalize_text(get_value(example, "problem_id")),
+        "reference_solution": reference_solution,
+        "language": "python",
+        "input_output": json_dumps(raw_test_cases),
+        "prime_code_input_output": json_dumps(prime_code_test_cases),
+        "sandbox_data_source": "lighteval/code_generation_lite",
+    }
+    return make_row(
+        config=config,
+        split=split,
+        index=idx,
+        prompt=prompt,
+        ability="code",
+        ground_truth=reference_solution,
+        extra_info=extra_info,
+    )
+
+
+@register_adapter("open_r1_codeforces")
+def adapt_codeforces(
+    example: dict[str, Any], idx: int, split: str, config: DatasetConfig
+) -> dict[str, Any]:
+    question = format_codeforces_prompt(example)
+    test_cases = normalize_codeforces_test_cases(example)
+    prompt = make_prompt(format_code_prompt(question, ""))
+    ground_truth = json_dumps(test_cases)
+    extra_info = {
+        "question": question,
+        "problem_id": normalize_text(get_value(example, "id")),
+        "contest_id": normalize_text(get_value(example, "contest_id")),
+        "cf_index": normalize_text(get_value(example, "index")),
+        "title": normalize_text(get_value(example, "title")),
+        "difficulty": normalize_text(get_value(example, "rating")),
+        "tags": json_dumps(get_value(example, "tags", [])),
+        "num_used_tests": len(test_cases["inputs"]),
+        "language": "python",
+        "input_output": json_dumps(test_cases),
+        "prime_code_input_output": json_dumps(test_cases),
+        "sandbox_data_source": "lighteval/code_generation_lite",
+    }
+    return make_row(
+        config=config,
+        split=split,
+        index=idx,
+        prompt=prompt,
+        ability="code",
+        ground_truth=ground_truth,
         extra_info=extra_info,
     )
 
@@ -644,6 +720,52 @@ def format_code_prompt(question: str, starter_code: str) -> str:
     return f"{question}\n\n{CODE_FINAL_ANSWER_INSTRUCTION}"
 
 
+def format_codeforces_prompt(example: dict[str, Any]) -> str:
+    sections = []
+    title = normalize_text(get_value(example, "title"))
+    if title:
+        sections.append(title)
+
+    description = normalize_text(get_value(example, "description"))
+    if description:
+        sections.append(description)
+
+    # TODO: should we debias the prompt from Input/Output format?
+    input_format = normalize_text(get_value(example, "input_format"))
+    if input_format:
+        sections.append(f"Input\n{input_format}")
+
+    output_format = normalize_text(get_value(example, "output_format"))
+    if output_format:
+        sections.append(f"Output\n{output_format}")
+
+    examples = get_value(example, "examples", []) or []
+    example_text = format_codeforces_examples(examples)
+    if example_text:
+        sections.append(f"Examples\n{example_text}")
+
+    note = normalize_text(get_value(example, "note"))
+    if note:
+        sections.append(f"Note\n{note}")
+
+    return "\n\n".join(sections)
+
+
+def format_codeforces_examples(examples: Any) -> str:
+    if not isinstance(examples, list):
+        return ""
+    formatted = []
+    for example in examples:
+        if not isinstance(example, dict):
+            continue
+        test_input = normalize_text(example.get("input"))
+        test_output = normalize_text(example.get("output"))
+        if not test_input and not test_output:
+            continue
+        formatted.append(f"Input\n{test_input}\n\nOutput\n{test_output}")
+    return "\n\n".join(formatted)
+
+
 def first_solution(solutions: Any) -> str:
     if isinstance(solutions, list) and solutions:
         return normalize_text(solutions[0])
@@ -684,6 +806,7 @@ def normalize_code_contests_test_cases(example: dict[str, Any]) -> dict[str, lis
     for key, max_cases in (
         ("public_tests", None),
         ("private_tests", None),
+        # These are not AI-generated, they are obtained by mutating existing test inputs
         ("generated_tests", CODE_CONTESTS_MAX_GENERATED_TESTS),
     ):
         test_group = get_value(example, key)
@@ -697,6 +820,26 @@ def normalize_code_contests_test_cases(example: dict[str, Any]) -> dict[str, lis
             outputs.append(normalize_text(test_output))
     if not inputs:
         raise ValueError("CodeContests example has no usable tests")
+    return {"inputs": inputs, "outputs": outputs}
+
+
+def normalize_codeforces_test_cases(
+    example: dict[str, Any],
+) -> dict[str, list[str]]:
+    """Convert Open-R1 Codeforces official tests into the code-gym stdio schema."""
+    inputs: list[str] = []
+    outputs: list[str] = []
+    official_tests = get_value(example, "official_tests", []) or []
+    for test_case in official_tests:
+        if not isinstance(test_case, dict):
+            continue
+        test_input = normalize_text(test_case.get("input"))
+        test_output = normalize_text(test_case.get("output"))
+        if test_input or test_output:
+            inputs.append(test_input)
+            outputs.append(test_output)
+    if not inputs:
+        raise ValueError("Open-R1 Codeforces example has no usable official tests")
     return {"inputs": inputs, "outputs": outputs}
 
 
@@ -717,6 +860,35 @@ def code_contests_has_tests(example: dict[str, Any]) -> bool:
         if any(True for _ in zip(test_inputs, test_outputs)):
             return True
     return False
+
+
+def apps_has_tests(example: dict[str, Any]) -> bool:
+    test_cases = parse_json_maybe(get_value(example, "input_output"), default={})
+    if not isinstance(test_cases, dict):
+        return False
+    inputs = test_cases.get("inputs", [])
+    outputs = test_cases.get("outputs", [])
+    return bool(inputs) and len(inputs) == len(outputs)
+
+
+def codeforces_has_tests(example: dict[str, Any]) -> bool:
+    """Keep rows whose official tests can be checked by code-gym's stdio diff runner."""
+    if normalize_text(get_value(example, "input_mode")) != "stdio":
+        return False
+    if normalize_text(get_value(example, "interaction_format")):
+        return False
+    if normalize_text(get_value(example, "generated_checker")):
+        return False
+    # TODO: decide whether or not to also keep problems with incomplete official tests
+    # if get_value(example, "official_tests_complete") is not True:
+    #     return False
+    official_tests = get_value(example, "official_tests", []) or []
+    return bool(official_tests) and all(
+        isinstance(test_case, dict)
+        and "input" in test_case
+        and "output" in test_case
+        for test_case in official_tests
+    )
 
 
 def get_test_values(test_group: Any, key: str) -> list[Any]:
@@ -812,6 +984,19 @@ def load_raw_dataset(config: DatasetConfig) -> datasets.Dataset:
     if config.adapter == "code_contests":
         rows_before_filter = len(raw_dataset)
         raw_dataset = raw_dataset.filter(code_contests_has_tests)
+        filtered = rows_before_filter - len(raw_dataset)
+        if filtered:
+            print(f"Filtered {filtered} rows from {config.name}.", flush=True)
+    if config.adapter == "apps":
+        rows_before_filter = len(raw_dataset)
+        raw_dataset = raw_dataset.filter(apps_has_tests)
+        filtered = rows_before_filter - len(raw_dataset)
+        if filtered:
+            print(f"Filtered {filtered} rows from {config.name}.", flush=True)
+    if config.adapter == "open_r1_codeforces":
+        rows_before_filter = len(raw_dataset)
+        # Remove all interactive, file-I/O, or custom-checker tasks.
+        raw_dataset = raw_dataset.filter(codeforces_has_tests)
         filtered = rows_before_filter - len(raw_dataset)
         if filtered:
             print(f"Filtered {filtered} rows from {config.name}.", flush=True)
