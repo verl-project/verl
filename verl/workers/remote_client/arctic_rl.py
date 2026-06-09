@@ -111,6 +111,7 @@ class ArcticRLClientWrapper(RemoteBackend):
         self._backend_config = config.remote_backend
         self._client = None
         self.zorro_train_enable = self._backend_config.zorro_train.enable
+        self.zorro_train_max_rollouts = self._backend_config.zorro_train.max_rollouts
         self.use_liger = self.config.actor_rollout_ref.model.use_liger
         # Static, config-derived engineering value Arctic needs on every
         # `compute_log_prob` / `update_actor` call. Cached here at init
@@ -183,6 +184,7 @@ class ArcticRLClientWrapper(RemoteBackend):
         batch, max_prompt_len, max_response_len = _prepare_padded_arctic_batch_dict(data, pad_token_id)
         meta = dict(
             zorro_train_enable=self.zorro_train_enable,
+            zorro_train_max_rollouts=self.zorro_train_max_rollouts,
             rollout_n=rollout_n,
             max_prompt_len=max_prompt_len,
             max_response_len=max_response_len,
@@ -242,6 +244,7 @@ class ArcticRLClientWrapper(RemoteBackend):
             max_token_len_per_gpu=self._max_token_len_per_gpu,
             temperature=data["temperature"],
             zorro_train_enable=self.zorro_train_enable,
+            zorro_train_max_rollouts=self.zorro_train_max_rollouts,
             global_batch_size=data["global_batch_size"],
             rollout_is_weights=data.get("rollout_is_weights", None),
             batch_num_tokens=data["loss_mask"].sum(),
