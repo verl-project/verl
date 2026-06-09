@@ -30,6 +30,12 @@ from verl.experimental.fully_async_policy.detach_utils import (
     assemble_batch_from_rollout_samples,
 )
 from verl.experimental.fully_async_policy.message_queue import MessageQueueClient
+from verl.experimental.fully_async_policy.scaling_metrics import (
+    DEFAULT_STEADY_WARMUP_STEPS,
+    compute_scale_config_metrics,
+    compute_scale_step_metrics,
+    compute_steady_summary,
+)
 from verl.experimental.separation.ray_trainer import SeparateRayPPOTrainer
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.trainer.ppo import core_algos
@@ -154,6 +160,14 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             + config.rollout.nnodes * config.rollout.n_gpus_per_node
         )
         self.metrics_aggregator = MetricsAggregator(total_gpus=total_gpus)
+        self.scale_config_metrics = compute_scale_config_metrics(self.config)
+        steady_warmup_steps = self.config.async_training.get(
+            "steady_warmup_steps",
+            DEFAULT_STEADY_WARMUP_STEPS,
+        )
+        self.scale_summary_warmup_steps = max(0, int(steady_warmup_steps))
+        self.scale_metric_history: list[dict[str, float]] = []
+        self.pending_rollouter_timing: dict[str, float] = {}
 
         # Reference to rollouter for parameter synchronization
         self.rollouter = None
@@ -522,17 +536,32 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
 
         # Reset staleness in rollouter
         timing_raw = await asyncio.wrap_future(self.rollouter.reset_staleness.remote().future())
-        self.logger.log(
-            data=timing_raw,
-            step=self.current_param_version,
-        )
+        self.pending_rollouter_timing = timing_raw
 
-        # Log aggregated training metrics
+    def _log_pending_version_metrics(self):
+        aggregated_metrics = self.metrics_aggregator.get_aggregated_metrics()
+        if not aggregated_metrics:
+            return
+
+        version_metrics = {
+            **self.scale_config_metrics,
+            **aggregated_metrics,
+            **self.pending_rollouter_timing,
+        }
+        version_metrics.update(compute_scale_step_metrics(version_metrics))
+        self.scale_metric_history.append(dict(version_metrics))
+        version_metrics.update(
+            compute_steady_summary(
+                self.scale_metric_history,
+                warmup_steps=self.scale_summary_warmup_steps,
+            )
+        )
         self.logger.log(
-            data=self.metrics_aggregator.get_aggregated_metrics(),
+            data=version_metrics,
             step=self.current_param_version,
         )
         self.metrics_aggregator.reset()
+        self.pending_rollouter_timing = {}
 
     async def _fit_validate(self, val_before_train=False):
         if self.local_trigger_step != 1:
@@ -630,6 +659,9 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         )
 
         if self.local_trigger_step == 1:
+            # Log version-aligned metrics only after the current step has been added
+            # so sync-boundary aggregates match the parameter version being emitted.
+            self._log_pending_version_metrics()
             self.progress_bar.update(1)
 
     def _save_checkpoint(self):
