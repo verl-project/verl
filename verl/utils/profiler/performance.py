@@ -15,15 +15,22 @@
 import datetime
 import inspect
 import logging
+import os
+import time
+from collections import defaultdict
 from contextlib import contextmanager
 from typing import Any, Optional
 
+import ray
 import torch
 import torch.distributed as dist
 from codetiming import Timer
 
 from verl.utils.device import get_device_id, get_torch_device
 from verl.utils.logger import DecoratorLoggerBase
+
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 def _get_current_mem_info(unit: str = "GB", precision: int = 2) -> tuple[str]:
@@ -260,3 +267,103 @@ def gather_timing(timing_raw: dict[str, float]) -> dict[str, list[float]]:
     }
 
     return timing_generate
+
+
+TRANSFER_TIME_LOGGER_HANDLE = None
+
+
+@ray.remote
+class TransferTimeLogger:
+    def __init__(self):
+        self.task_start_time: dict[str | int, float] = {}
+        self.task_end_time: dict[str | int, list[float]] = defaultdict(list)
+        self.last_started_task = None
+
+    def log_transfer_start(self, task_name: str):
+        self.last_started_task = task_name
+        self.task_start_time[task_name] = time.perf_counter()
+
+    def log_transfer_end(self, task_name: Optional[str] = None):
+        if task_name:
+            self.task_end_time[task_name].append(time.perf_counter())
+        elif self.last_started_task:
+            self.task_end_time[self.last_started_task].append(time.perf_counter())
+
+    def flush_log(self):
+        output_logs = {}
+        task_name_keys = list(self.task_end_time.keys())
+        for task in task_name_keys:
+            if len(self.task_end_time[task]) > 0 and task in self.task_start_time:
+                transfer_durations = max(self.task_end_time[task]) - self.task_start_time[task]
+                output_logs[f"timing_s/transfer_time/{task}"] = transfer_durations
+
+        # Clean up flushed data
+        self.task_end_time.clear()
+        self.task_start_time.clear()
+        self.last_started_task = None
+
+        return output_logs
+
+
+def log_transfer_start(task_name: str):
+    """Log the start time of a transfer task.
+
+    Initializes the `TransferTimeLogger` Ray actor if it has not been created yet,
+    and records the start timestamp for the given task.
+
+    Args:
+        task_name (str): The name of the transfer task to start timing.
+    """
+    try:
+        global TRANSFER_TIME_LOGGER_HANDLE
+        if TRANSFER_TIME_LOGGER_HANDLE is None:
+            TRANSFER_TIME_LOGGER_HANDLE = ray.get_actor("TransferTimeLogger")
+    except ValueError:
+        TRANSFER_TIME_LOGGER_HANDLE = TransferTimeLogger.options(name="TransferTimeLogger").remote()
+
+    ray.get(TRANSFER_TIME_LOGGER_HANDLE.log_transfer_start.remote(task_name))
+
+
+def log_transfer_end(task_name: Optional[str] = None):
+    """Log the end time of a transfer task.
+
+    Retrieves the `TransferTimeLogger` Ray actor handler and records the end timestamp.
+    If `task_name` is not provided, the end time is logged for the most recently
+    started task.
+
+    Args:
+        task_name (Optional[str]): The name of the transfer task to end timing.
+            Defaults to None, which uses the last started task.
+    """
+    try:
+        global TRANSFER_TIME_LOGGER_HANDLE
+        if TRANSFER_TIME_LOGGER_HANDLE is None:
+            TRANSFER_TIME_LOGGER_HANDLE = ray.get_actor("TransferTimeLogger")
+    except ValueError:
+        logger.info("TransferTimeLogger not initialized. Ignoring `log_transfer_end`.")
+        return
+
+    ray.get(TRANSFER_TIME_LOGGER_HANDLE.log_transfer_end.remote(task_name))
+
+
+def flush_transfer_time():
+    """Flush all recorded transfer timings and return the computed durations.
+
+    Calculates the transfer duration for each completed task as the difference
+    between its start time and the maximum of its recorded end times. Clears
+    all stored timing data after flushing.
+
+    Returns:
+        dict[str, float]: A mapping from metric names (e.g.
+            ``timing_s/transfer_time/{task_name}``) to their transfer durations.
+            Returns an empty dict if the logger is not initialized.
+    """
+    try:
+        global TRANSFER_TIME_LOGGER_HANDLE
+        if TRANSFER_TIME_LOGGER_HANDLE is None:
+            TRANSFER_TIME_LOGGER_HANDLE = ray.get_actor("TransferTimeLogger")
+    except ValueError:
+        logger.info("TransferTimeLogger not initialized. Ignoring `flush_transfer_time` by returning empty logs.")
+        return {}
+
+    return ray.get(TRANSFER_TIME_LOGGER_HANDLE.flush_log.remote())

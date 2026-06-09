@@ -293,7 +293,7 @@ def collect_lazy_compute_data_proto(mesh_name, worker_group, *args, **kwargs):
 
     # a boolean of whether the dp_rank is used for collect
     collect_mask = worker_group._collect_info[mesh_name]
-    # perform dispatch
+    # perform collect
     return collect_nd_compute_dataproto(collect_mask, worker_group, *args, **kwargs)
 
 
