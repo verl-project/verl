@@ -1,4 +1,5 @@
 #!/bin/bash
+ulimit -n 65535
 set -xeuo pipefail
 
 # Baseline
@@ -16,12 +17,13 @@ exp_name=${EXPERIMENT_NAME:-qwen3_30b_a3b_vllm_megatron_r3}
 NNODES=${NNODES:-1}
 NPUS_PER_NODE=${NPUS_PER_NODE:-16}
 
+# Weight Load
+USE_MBRIDGE=${USE_MBRIDGE:-True}
+USE_DIST_CKPT=${USE_DIST_CKPT:-False}
+
 # Model Weights Paths
 MODEL_ID=${MODEL_ID:-Qwen/Qwen3-30B-A3B}
 MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/models/${MODEL_ID}}
-MCORE_MODEL_PATH=${MCORE_MODEL_PATH:-${HOME}/.cache/models/${MODEL_ID}-dist}
-
-torchrun --nproc_per_node 16 --nnodes 1 --node_rank 0 converter_hf_to_mcore.py --hf_model_path ${MODEL_PATH} --output_path ${MCORE_MODEL_PATH}
 
 # File System Paths
 TRAIN_FILE=$HOME/data/gsm8k/train.parquet
@@ -92,6 +94,7 @@ ALGORITHM_CONFIG=(
 
 # Actor Model Configuration
 ACTOR_CONFIG=(
+    actor_rollout_ref.actor.megatron.use_mbridge=${USE_MBRIDGE}
     actor_rollout_ref.actor.use_torch_compile=False
     actor_rollout_ref.actor.use_dynamic_bsz=${use_dynamic_bsz}
     actor_rollout_ref.actor.use_kl_loss=${use_kl_loss}
@@ -115,10 +118,9 @@ ACTOR_CONFIG=(
     actor_rollout_ref.actor.megatron.param_offload=${all_offload}
     actor_rollout_ref.actor.megatron.optimizer_offload=${all_offload}
     actor_rollout_ref.actor.megatron.grad_offload=${all_offload}
-    actor_rollout_ref.actor.megatron.dist_checkpointing_path=${MCORE_MODEL_PATH}
-    actor_rollout_ref.actor.megatron.use_dist_checkpointing=True
+    actor_rollout_ref.actor.megatron.use_dist_checkpointing=${USE_DIST_CKPT}
     actor_rollout_ref.rollout.calculate_log_probs=True
-    actor_rollout_ref.actor.router_replay.model=R3
+    actor_rollout_ref.actor.router_replay.mode=R3
     actor_rollout_ref.rollout.enable_rollout_routing_replay=True
     +actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn=True
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform
@@ -138,8 +140,7 @@ REF_CONFIG=(
     actor_rollout_ref.ref.megatron.expert_model_parallel_size=${train_ep}
     actor_rollout_ref.ref.megatron.expert_tensor_parallel_size=${train_etp}
     actor_rollout_ref.ref.megatron.param_offload=${all_offload}
-    actor_rollout_ref.ref.megatron.dist_checkpointing_path=${MCORE_MODEL_PATH}
-    actor_rollout_ref.ref.megatron.use_dist_checkpointing=True
+    actor_rollout_ref.ref.megatron.use_dist_checkpointing=${USE_DIST_CKPT}
 )
 
 # Rollout Configuration
@@ -205,6 +206,3 @@ cur = float(${CUR_R3_ROLLOUT_PROBS_DIFF_MEAN})
 err = round(abs(cur - base) / base, 4)
 assert err <= 0.05, f'{base=}, {cur=}, {err=}'
 "
-
-rm -rf ${MCORE_MODEL_PATH}
-
