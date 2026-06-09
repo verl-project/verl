@@ -285,6 +285,7 @@ actor_rollout_ref:
       num_workers: 8
       default_agent_loop: single_turn_agent
       agent_loop_config_path: null
+      turn_penalty_coef: 0.0
       custom_async_server:
         _target_: verl.workers.config.CustomAsyncServerConfig
         path: null

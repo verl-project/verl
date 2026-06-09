@@ -248,6 +248,10 @@ agent:
   #   max_terms: 6
   agent_loop_config_path: null
 
+  # Linear turn penalty coefficient for GUI/multi-turn agent loops that opt into it.
+  # The GUI agent applies: final_reward = base_reward - coef * (turn - 1) / max_assistant_turns.
+  turn_penalty_coef: 0.0
+
   # custom async server configs
   custom_async_server:
 
