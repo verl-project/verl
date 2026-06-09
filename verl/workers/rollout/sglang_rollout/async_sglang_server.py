@@ -316,7 +316,7 @@ class SGLangHttpServer:
             "mm_attention_backend": mm_attention_backend,
             "attention_backend": attention_backend,
             "skip_tokenizer_init": self.config.skip_tokenizer_init,
-            "skip_server_warmup": False,
+            "skip_server_warmup": True,
             "quantization": quantization,
             "json_model_override_args": json.dumps({"quantization_config": fp8_block_quant_kwargs})
             if quantization == "fp8"
