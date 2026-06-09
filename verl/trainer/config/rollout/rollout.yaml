@@ -187,6 +187,11 @@ multi_turn:
   # null disables this code path.
   function_tool_path: null
 
+  # Tool calls that should end the trajectory without executing the tool or
+  # appending a tool response. The parsed JSON arguments are exposed as
+  # `terminal_tool_arguments` for reward/verifier code.
+  terminal_tool_names: []
+
   # null for no limit (default max_length // 3)
   max_user_turns: null
 

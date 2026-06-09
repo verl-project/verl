@@ -12,67 +12,34 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import re
 from typing import Any
 
+from math_verify.grader import verify
+from math_verify.parser import StringExtractionConfig, parse
 
-def _normalize_text(value: Any) -> str:
+CHOICE_LETTERS = tuple("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+CHOICE_EXTRACTION_TARGETS = (StringExtractionConfig(strings=CHOICE_LETTERS),)
+
+
+def _as_text(value: Any) -> str:
     if value is None:
         return ""
-    if isinstance(value, str):
-        return value.strip()
-    return str(value).strip()
+    return str(value).strip().upper()
 
 
-def _completion_text(solution_str: str) -> str:
-    text = _normalize_text(solution_str)
-    for marker in ("<|assistant_start|>", "<|im_start|>assistant", "assistant\n"):
-        if marker in text:
-            text = text.rsplit(marker, 1)[-1]
-    for marker in ("<|assistant_end|>", "<|im_end|>"):
-        if marker in text:
-            text = text.split(marker, 1)[0]
-    return re.sub(r"(?:<pad>|\s)+$", "", text, flags=re.IGNORECASE).strip()
-
-
-def extract_choice_letter(solution_str: str) -> str | None:
-    """Extract a multiple-choice answer letter from a model response.
-
-    Accepted answer formats include <answer>...</answer> tags,
-    JSON-ish answer fields (`"answer": "C"`), boxed answers (`\\boxed{C}`),
-    explicit phrases such as `Answer: C`, `Final answer is C`,
-    `Choice: C`, `Option C`, or `Letter C`, a single answer line containing
-    only the letter, and a single option-style completion line such as
-    `C. option text` or `C) option text`. If a prompt and completion are both
-    present, known assistant markers are used to ignore prompt options.
-    """
-    text = _completion_text(solution_str).upper()
-    patterns = [
-        r"<ANSWER>\s*([A-Z])\s*</ANSWER>",
-        r"['\"]ANSWER['\"]\s*:\s*['\"]?([A-Z])['\"]?",
-        r"\\BOXED\{\s*([A-Z])\s*\}",
-        r"\bCHOICE\s*[:\-]\s*([A-Z])\b",
-        r"\bOPTION\s*[:\-]\s*([A-Z])\b",
-        r"\bANSWER\s*[:\-]\s*([A-Z])\b",
-        r"\bFINAL\s+ANSWER\s*[:\-]?\s*([A-Z])\b",
-        r"\bFINAL\s+ANSWER\s+IS\s+([A-Z])\b",
-        r"\bTHE\s+ANSWER\s+IS\s+([A-Z])\b",
-        r"\b(?:OPTION|CHOICE|LETTER)\s+([A-Z])\b",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, text)
-        if match:
-            return match.group(1)
-    option_line_matches = re.findall(r"(?m)^\s*([A-Z])\s*[\).:\-]\s+\S", text)
-    if len(set(option_line_matches)) == 1:
-        return option_line_matches[0]
-    exact_line_matches = re.findall(r"(?m)^\s*([A-Z])\s*$", text)
-    return exact_line_matches[-1] if exact_line_matches else None
-
-
-def compute_score(solution_str: str, ground_truth: Any, format_score: float = 0.0, score: float = 1.0) -> float:
-    predicted = extract_choice_letter(solution_str)
-    gold = _normalize_text(ground_truth).upper()
-    if predicted is None:
+def compute_score(
+    solution_str: str, ground_truth: Any, format_score: float = 0.0, score: float = 1.0
+) -> float:
+    try:
+        extracted_gold = parse(_as_text(ground_truth), CHOICE_EXTRACTION_TARGETS)
+        extracted_pred = parse(_as_text(solution_str), CHOICE_EXTRACTION_TARGETS)
+    except Exception as e:
+        print(f"Error in multiple_choice string extraction: {e}")
         return format_score
-    return score if predicted == gold else 0.0
+
+    if not extracted_gold or not extracted_pred:
+        return format_score
+    return max(
+        score if any(verify(gold, pred) for gold in extracted_gold) else 0.0
+        for pred in extracted_pred
+    )

@@ -93,7 +93,10 @@ class DAPORewardManager(AbstractRewardManager):
 
             data_source = data_item.non_tensor_batch[self.reward_fn_key]
 
-            extra_info = data_item.non_tensor_batch.get("extra_info", {})
+            extra_info = dict(data_item.non_tensor_batch.get("extra_info", {}) or {})
+            terminal_tool_arguments = data_item.non_tensor_batch.get("terminal_tool_arguments", None)
+            if terminal_tool_arguments is not None:
+                extra_info["terminal_tool_arguments"] = terminal_tool_arguments
 
             rollout_reward_scores = data_item.non_tensor_batch.get("reward_scores", {})
 

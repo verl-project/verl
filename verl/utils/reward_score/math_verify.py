@@ -28,13 +28,15 @@ def _get_pool():
     if _pool is None:
         with _pool_lock:
             if _pool is None:
-                _pool = ProcessPoolExecutor(max_workers=4, mp_context=multiprocessing.get_context("spawn"))
+                _pool = ProcessPoolExecutor(
+                    max_workers=4, mp_context=multiprocessing.get_context("spawn")
+                )
     return _pool
 
 
 def _verify_in_subprocess(ground_truth_boxed: str, model_output: str) -> float:
     """Run math_verify in a subprocess where signal.alarm() works."""
-    # TODO: Find a better dependency isolation strategy 
+    # TODO: Find a better dependency isolation strategy
     # This patch forces subprocesses to load math_verify
     # from the shared path instead of whatever Ray/container imports first
     math_verify_pythonpath = os.environ.get("MATH_VERIFY_PYTHONPATH")
@@ -62,15 +64,25 @@ def _verify_in_subprocess(ground_truth_boxed: str, model_output: str) -> float:
     extracted_gold = parse(ground_truth_boxed, gold_targets)
     extracted_pred = parse(model_output, pred_targets)
     if extracted_gold and extracted_pred:
-        return max(1.0 if any(verify(g, p) for g in extracted_gold) else 0.0 for p in extracted_pred)
+        return max(
+            1.0 if any(verify(g, p) for g in extracted_gold) else 0.0
+            for p in extracted_pred
+        )
     return 0.0
 
 
-def compute_score(model_output: str, ground_truth: str, timeout_score: float = 0, timeout: float = 30.0) -> float:
+def compute_score(
+    model_output: str,
+    ground_truth: str,
+    timeout_score: float = 0,
+    timeout: float = 30.0,
+) -> float:
     ret_score = 0.0
     ground_truth_boxed = "\\boxed{" + ground_truth + "}"
     try:
-        future = _get_pool().submit(_verify_in_subprocess, ground_truth_boxed, model_output)
+        future = _get_pool().submit(
+            _verify_in_subprocess, ground_truth_boxed, model_output
+        )
         ret_score = future.result(timeout=timeout)
     except FuturesTimeoutError:
         ret_score = timeout_score

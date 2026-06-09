@@ -125,6 +125,79 @@ class HermesToolParser(ToolParser):
         return content, function_calls
 
 
+@ToolParser.register("apertus2509")
+class Apertus2509ToolParser(ToolParser):
+    """Parser for Apertus 2509 tool calls.
+
+    Format:
+    ``<|tools_prefix|>[{"tool_name": {...}}]<|tools_suffix|>``
+    """
+
+    def __init__(self, tokenizer) -> None:
+        super().__init__(tokenizer)
+        self.bot = "<|tools_prefix|>["
+        self.suffix = "<|tools_suffix|>"
+
+    @rollout_trace_op
+    async def extract_tool_calls(
+        self, responses_ids: list[int], tools: list[OpenAIFunctionToolSchema] = None
+    ) -> tuple[str, list[FunctionCall]]:
+        loop = get_event_loop()
+        text = await loop.run_in_executor(None, lambda: self.tokenizer.decode(responses_ids, skip_special_tokens=False))
+        if tools is not None and not tools:
+            return text, []
+        if self.bot not in text:
+            return text, []
+
+        tool_names = {tool.function.name for tool in tools or []}
+        calls = []
+        normal_parts = []
+        cursor = 0
+
+        while True:
+            start = text.find(self.bot, cursor)
+            if start == -1:
+                normal_parts.append(text[cursor:])
+                break
+
+            normal_parts.append(text[cursor:start])
+            parsed_arr, json_end = self._parse_tool_array(text[start:])
+            if parsed_arr is None:
+                normal_parts.append(text[start:])
+                break
+
+            suffix_pos = text.find(self.suffix, start + json_end)
+            if suffix_pos == -1:
+                normal_parts.append(text[start:])
+                break
+
+            for item in parsed_arr:
+                if not isinstance(item, dict) or not item:
+                    continue
+                name = next(iter(item.keys()))
+                if tool_names and name not in tool_names:
+                    logger.warning(f"Model attempted to call undefined function: {name}")
+                    continue
+                arguments = item.get(name) or {}
+                calls.append(FunctionCall(name=name, arguments=json.dumps(arguments, ensure_ascii=False)))
+
+            cursor = suffix_pos + len(self.suffix)
+
+        if not calls:
+            return text, []
+        return "".join(normal_parts).strip(), calls
+
+    def _parse_tool_array(self, text: str) -> tuple[Any | None, int]:
+        try:
+            parsed, end_idx = json.JSONDecoder().raw_decode(text, len(self.bot) - 1)
+        except json.JSONDecodeError:
+            return None, 0
+
+        if isinstance(parsed, list):
+            return parsed, end_idx
+        return [parsed], end_idx
+
+
 @ToolParser.register("gpt-oss")
 class GptOssToolParser(ToolParser):
     """

@@ -53,11 +53,7 @@ def default_compute_score(
     Raises:
         NotImplementedError: If the reward function is not implemented for the given data source.
     """
-    if data_source == "openai/gsm8k":
-        from . import gsm8k
-
-        res = gsm8k.compute_score(solution_str, ground_truth, method="flexible")
-    elif data_source in [
+    if data_source in [
         "lighteval/MATH",
         "DigitalLearningGmbH/MATH-lighteval",
         "HuggingFaceH4/MATH-500",
@@ -72,6 +68,7 @@ def default_compute_score(
         "aime2025",
         "aime2026",
         "beyondaime",
+        "openai/gsm8k",
         "gsm8k_boxed",
         "dapo_en",
         "hendrycks-math-12k",
@@ -101,29 +98,11 @@ def default_compute_score(
             solution_str, ground_truth, extra_info=extra_info
         )
     elif data_source in [
-        "math_dapo",
-        "math",
-        "math_dapo_reasoning",
-    ] or data_source.startswith("aime"):
-        from . import math_dapo
-
-        res = math_dapo.compute_score(solution_str, ground_truth)
-    elif data_source in [
-        "numina_aops_forum",
-        "numina_synthetic_math",
-        "numina_amc_aime",
-        "numina_synthetic_amc",
-        "numina_cn_k12",
-        "numina_olympiads",
-    ]:
-        from . import prime_math
-
-        res = prime_math.compute_score(solution_str, ground_truth)
-    elif data_source in [
         "humaneval",
         "openai/openai_humaneval",
     ]:
         from . import prime_code
+
         res = prime_code.compute_score(solution_str, ground_truth, continuous=True)
     elif data_source in [
         "taco",
@@ -150,24 +129,11 @@ def default_compute_score(
         else:
             # Fallback to prime code scoring
             from . import prime_code
+
             test_cases = _code_test_cases_for_prime_code(ground_truth, extra_info)
-            res = prime_code.compute_score(solution_str, test_cases, continuous=continuous)
-    elif data_source in ["hiyouga/geometry3k"]:
-        from . import geo3k
-
-        res = geo3k.compute_score(solution_str, ground_truth)
-    elif data_source in [
-        "searchR1_nq",
-        "searchR1_triviaqa",
-        "searchR1_popqa",
-        "searchR1_hotpotqa",
-        "searchR1_2wikimultihopqa",
-        "searchR1_musique",
-        "searchR1_bamboogle",
-    ]:
-        from . import search_r1_like_qa_em
-
-        res = search_r1_like_qa_em.compute_score(solution_str, ground_truth)
+            res = prime_code.compute_score(
+                solution_str, test_cases, continuous=continuous
+            )
     elif data_source == "rgym":
         from . import rgym
 
@@ -175,10 +141,13 @@ def default_compute_score(
     elif isinstance(data_source, str) and data_source.startswith("tablegpt/"):
         from . import table_gpt
 
-        res = table_gpt.compute_score(data_source, solution_str, ground_truth, extra_info)
-
+        res = table_gpt.compute_score(
+            data_source, solution_str, ground_truth, extra_info
+        )
     else:
-        raise NotImplementedError(f"Reward function is not implemented for {data_source=}")
+        raise NotImplementedError(
+            f"Reward function is not implemented for {data_source=}"
+        )
 
     if isinstance(res, dict):
         return res
@@ -202,7 +171,13 @@ def _default_compute_score(
     Legacy function API to be deprecated. Please use `default_compute_score` instead.
     """
     return default_compute_score(
-        data_source, solution_str, ground_truth, extra_info, sandbox_fusion_url, concurrent_semaphore, memory_limit_mb
+        data_source,
+        solution_str,
+        ground_truth,
+        extra_info,
+        sandbox_fusion_url,
+        concurrent_semaphore,
+        memory_limit_mb,
     )
 
 

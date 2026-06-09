@@ -89,6 +89,9 @@ class AgentData:
 
         # Temporary state for tool calls
         self.tool_calls: list[FunctionCall] = []
+        self.active_tools: dict[str, Any] = {}
+        self.active_tool_schemas: list[dict[str, Any]] = []
+        self.apply_chat_template_kwargs: dict[str, Any] = {}
 
         self.routed_experts = None
 
@@ -109,13 +112,25 @@ class ToolAgentLoop(AgentLoopBase):
         self.max_user_turns = self.rollout_config.multi_turn.max_user_turns
         self.max_assistant_turns = self.rollout_config.multi_turn.max_assistant_turns
         self.max_parallel_calls = self.rollout_config.multi_turn.max_parallel_calls
-        self.max_tool_response_length = self.rollout_config.multi_turn.max_tool_response_length
-        self.tool_response_truncate_side = self.rollout_config.multi_turn.tool_response_truncate_side
+        self.max_tool_response_length = (
+            self.rollout_config.multi_turn.max_tool_response_length
+        )
+        self.tool_response_truncate_side = (
+            self.rollout_config.multi_turn.tool_response_truncate_side
+        )
+        self.terminal_tool_names = set(
+            self.rollout_config.multi_turn.terminal_tool_names or []
+        )
 
         tool_list = tools.tools if tools else []
         self.tools = {tool.name: tool for tool in tool_list}
-        self.tool_schemas = [tool.tool_schema.model_dump(exclude_unset=True, exclude_none=True) for tool in tool_list]
-        self.tool_parser = ToolParser.get_tool_parser(self.rollout_config.multi_turn.format, self.tokenizer)
+        self.tool_schemas = [
+            tool.tool_schema.model_dump(exclude_unset=True, exclude_none=True)
+            for tool in tool_list
+        ]
+        self.tool_parser = ToolParser.get_tool_parser(
+            self.rollout_config.multi_turn.format, self.tokenizer
+        )
         self.tool_parser_name = self.rollout_config.multi_turn.format
 
         self.prompt_length = self.rollout_config.prompt_length
@@ -135,6 +150,8 @@ class ToolAgentLoop(AgentLoopBase):
         metrics = {}
         request_id = uuid4().hex
         tools_kwargs = kwargs.get("tools_kwargs", {})
+        extra_info = kwargs.get("extra_info", {}) or {}
+        apply_chat_template_kwargs = extra_info.get("apply_chat_template_kwargs", {})
 
         agent_data = AgentData(
             messages=messages,
@@ -146,19 +163,23 @@ class ToolAgentLoop(AgentLoopBase):
             request_id=request_id,
             tools_kwargs=tools_kwargs,
         )
+        agent_data.apply_chat_template_kwargs = apply_chat_template_kwargs
 
         # Per-sample tool selection: filter global tools by extra_info.tool_selection
-        extra_info = kwargs.get("extra_info", {}) or {}
-        tool_selection = extra_info.get("tool_selection")
-        if tool_selection and self.tools:
-            selected = {name: self.tools[name] for name in tool_selection if name in self.tools}
-            agent_data._active_tools = selected
-            agent_data._active_tool_schemas = [
-                t.tool_schema.model_dump(exclude_unset=True, exclude_none=True) for t in selected.values()
+        if "tool_selection" in extra_info:
+            selected = {
+                name: self.tools[name]
+                for name in (extra_info.get("tool_selection") or [])
+                if name in self.tools
+            }
+            agent_data.active_tools = selected
+            agent_data.active_tool_schemas = [
+                t.tool_schema.model_dump(exclude_unset=True, exclude_none=True)
+                for t in selected.values()
             ]
         else:
-            agent_data._active_tools = self.tools
-            agent_data._active_tool_schemas = self.tool_schemas
+            agent_data.active_tools = self.tools
+            agent_data.active_tool_schemas = self.tool_schemas
 
         # State machine loop
         state = AgentState.PENDING
@@ -175,7 +196,9 @@ class ToolAgentLoop(AgentLoopBase):
 
         # Finalize output
         response_ids = agent_data.prompt_ids[-len(agent_data.response_mask) :]
-        prompt_ids = agent_data.prompt_ids[: len(agent_data.prompt_ids) - len(agent_data.response_mask)]
+        prompt_ids = agent_data.prompt_ids[
+            : len(agent_data.prompt_ids) - len(agent_data.response_mask)
+        ]
         multi_modal_data = {}
         if agent_data.image_data is not None:
             multi_modal_data["images"] = agent_data.image_data
@@ -202,30 +225,47 @@ class ToolAgentLoop(AgentLoopBase):
             ),
             extra_fields=agent_data.extra_fields,
         )
-        output.extra_fields.update({"turn_scores": agent_data.turn_scores, "tool_rewards": agent_data.tool_rewards})
+        output.extra_fields.update(
+            {
+                "turn_scores": agent_data.turn_scores,
+                "tool_rewards": agent_data.tool_rewards,
+            }
+        )
         return output
 
-    async def _handle_pending_state(self, agent_data: AgentData, sampling_params: dict[str, Any]) -> AgentState:
+    async def _handle_pending_state(
+        self, agent_data: AgentData, sampling_params: dict[str, Any]
+    ) -> AgentState:
         """Handle the pending state: prepare the prompt and start generation."""
-        schemas = getattr(agent_data, "_active_tool_schemas", self.tool_schemas)
         prompt_ids = await self.apply_chat_template(
             agent_data.messages,
-            tools=schemas,
+            tools=agent_data.active_tool_schemas,
             images=agent_data.image_data,
             videos=agent_data.video_data,
             audios=agent_data.audio_data,
             mm_processor_kwargs=agent_data.mm_processor_kwargs,
+            apply_chat_template_kwargs=getattr(
+                agent_data, "apply_chat_template_kwargs", None
+            ),
         )
         agent_data.prompt_ids = prompt_ids
         return AgentState.GENERATING
 
     async def _handle_generating_state(
-        self, agent_data: AgentData, sampling_params: dict[str, Any], ignore_termination: bool = False
+        self,
+        agent_data: AgentData,
+        sampling_params: dict[str, Any],
+        ignore_termination: bool = False,
     ) -> AgentState:
         """Handle the generating state: generate model response and check for tool calls."""
         # Inject tool parser stop tokens so generation halts after each tool call
         if self.tool_parser.stop_token_ids:
-            stop_token_ids = list(set((sampling_params.get("stop_token_ids") or []) + self.tool_parser.stop_token_ids))
+            stop_token_ids = list(
+                set(
+                    (sampling_params.get("stop_token_ids") or [])
+                    + self.tool_parser.stop_token_ids
+                )
+            )
             sampling_params = {**sampling_params, "stop_token_ids": stop_token_ids}
 
         with simple_timer("generate_sequences", agent_data.metrics):
@@ -240,10 +280,14 @@ class ToolAgentLoop(AgentLoopBase):
             )
         # first time to set num_preempted
         if agent_data.metrics.get("num_preempted") is None:
-            agent_data.metrics["num_preempted"] = output.num_preempted if output.num_preempted is not None else -1
+            agent_data.metrics["num_preempted"] = (
+                output.num_preempted if output.num_preempted is not None else -1
+            )
         # then add num_preempted to the metrics
         else:
-            agent_data.metrics["num_preempted"] += output.num_preempted if output.num_preempted is not None else 0
+            agent_data.metrics["num_preempted"] += (
+                output.num_preempted if output.num_preempted is not None else 0
+            )
 
         if not agent_data.extra_fields:
             agent_data.extra_fields.update(output.extra_fields)
@@ -254,7 +298,9 @@ class ToolAgentLoop(AgentLoopBase):
                 agent_data.extra_fields["max_global_steps"] = max_global_steps
             for key in SPEC_DECODE_EXTRA_KEYS:
                 if key in output.extra_fields and key in agent_data.extra_fields:
-                    agent_data.extra_fields[key] = int(agent_data.extra_fields[key]) + int(output.extra_fields[key])
+                    agent_data.extra_fields[key] = int(
+                        agent_data.extra_fields[key]
+                    ) + int(output.extra_fields[key])
 
         agent_data.assistant_turns += 1
         agent_data.response_ids = output.token_ids
@@ -267,17 +313,38 @@ class ToolAgentLoop(AgentLoopBase):
             agent_data.routed_experts = output.routed_experts
 
         # Check termination conditions
-        if not ignore_termination and len(agent_data.response_mask) >= self.response_length:
-            return AgentState.TERMINATED
-        if self.max_assistant_turns and agent_data.assistant_turns >= self.max_assistant_turns:
-            return AgentState.TERMINATED
-        if self.max_user_turns and agent_data.user_turns >= self.max_user_turns:
+        if (
+            not ignore_termination
+            and len(agent_data.response_mask) >= self.response_length
+        ):
             return AgentState.TERMINATED
 
         # Extract tool calls (use per-sample tools if routed)
-        active_tools = getattr(agent_data, "_active_tools", self.tools)
-        tools = [tool.tool_schema for tool in active_tools.values()]
-        _, agent_data.tool_calls = await self.tool_parser.extract_tool_calls(agent_data.response_ids, tools)
+        if agent_data.active_tools:
+            tools = [tool.tool_schema for tool in agent_data.active_tools.values()]
+            _, agent_data.tool_calls = await self.tool_parser.extract_tool_calls(
+                agent_data.response_ids, tools
+            )
+        else:
+            agent_data.tool_calls = []
+
+        for tool_call in agent_data.tool_calls:
+            if tool_call.name not in self.terminal_tool_names:
+                continue
+            try:
+                arguments = json.loads(tool_call.arguments)
+            except (json.JSONDecodeError, TypeError):
+                arguments = {}
+            agent_data.extra_fields["terminal_tool_arguments"] = arguments
+            return AgentState.TERMINATED
+
+        if (
+            self.max_assistant_turns
+            and agent_data.assistant_turns >= self.max_assistant_turns
+        ):
+            return AgentState.TERMINATED
+        if self.max_user_turns and agent_data.user_turns >= self.max_user_turns:
+            return AgentState.TERMINATED
 
         if agent_data.tool_calls:
             return AgentState.PROCESSING_TOOLS
@@ -287,12 +354,16 @@ class ToolAgentLoop(AgentLoopBase):
     async def _handle_processing_tools_state(self, agent_data: AgentData) -> AgentState:
         """Handle the processing tools state: execute tool calls and prepare tool responses."""
         add_messages: list[dict[str, Any]] = []
-        new_images_this_turn: list[Any] = []  # Local variable instead of agent_data attribute
+        new_images_this_turn: list[
+            Any
+        ] = []  # Local variable instead of agent_data attribute
 
         tasks = []
         tool_call_names = []
         for tool_call in agent_data.tool_calls[: self.max_parallel_calls]:
-            tasks.append(self._call_tool(tool_call, agent_data.tools_kwargs, agent_data))
+            tasks.append(
+                self._call_tool(tool_call, agent_data.tools_kwargs, agent_data)
+            )
             tool_call_names.append(tool_call.name)
 
         with simple_timer("tool_calls", agent_data.metrics):
@@ -330,17 +401,23 @@ class ToolAgentLoop(AgentLoopBase):
                 if isinstance(tool_response.image, list):
                     # Ensure all elements in the list are valid image objects
                     for img in tool_response.image:
-                        if img is not None:  # Add a check to ensure the image is not None
+                        if (
+                            img is not None
+                        ):  # Add a check to ensure the image is not None
                             new_images_this_turn.append(img)  # Using local variable
                 else:
                     # Ensure the image is not None
                     if tool_response.image is not None:
-                        new_images_this_turn.append(tool_response.image)  # Using local variable
+                        new_images_this_turn.append(
+                            tool_response.image
+                        )  # Using local variable
 
             # Handle video data
             if tool_response.video:
                 # Currently not supported, raise informative error
-                logger.warning("Multimedia type 'video' is not currently supported. Only 'image' is supported.")
+                logger.warning(
+                    "Multimedia type 'video' is not currently supported. Only 'image' is supported."
+                )
                 raise NotImplementedError(
                     "Multimedia type 'video' is not currently supported. Only 'image' is supported."
                 )
@@ -352,9 +429,14 @@ class ToolAgentLoop(AgentLoopBase):
 
         if self.tool_parser_name == "gpt-oss":
             logger.info("manually format tool responses for gpt-oss")
-            tool_response_text = build_gpt_oss_tool_response_text(add_messages, tool_call_names)
+            tool_response_text = build_gpt_oss_tool_response_text(
+                add_messages, tool_call_names
+            )
             response_ids = await self.loop.run_in_executor(
-                None, lambda: self.tokenizer.encode(tool_response_text, add_special_tokens=False)
+                None,
+                lambda: self.tokenizer.encode(
+                    tool_response_text, add_special_tokens=False
+                ),
             )
         elif self.tool_parser_name == "gemma4":
             # Gemma4's chat template drops tool responses when passed without the preceding
@@ -364,13 +446,30 @@ class ToolAgentLoop(AgentLoopBase):
             for msg, name in zip(add_messages, tool_call_names, strict=True):
                 content = msg.get("content", "")
                 if isinstance(content, list):
-                    content = "".join([item.get("text", "") for item in content if item.get("type") == "text"])
+                    content = "".join(
+                        [
+                            item.get("text", "")
+                            for item in content
+                            if item.get("type") == "text"
+                        ]
+                    )
                 if isinstance(content, list):
-                    content = "".join([item.get("text", "") for item in content if item.get("type") == "text"])
-                parts.append(f'<|tool_response>response:{name}{{value:<|"|>{content}<|"|>}}<tool_response|>')
+                    content = "".join(
+                        [
+                            item.get("text", "")
+                            for item in content
+                            if item.get("type") == "text"
+                        ]
+                    )
+                parts.append(
+                    f'<|tool_response>response:{name}{{value:<|"|>{content}<|"|>}}<tool_response|>'
+                )
             tool_response_text = "".join(parts)
             response_ids = await self.loop.run_in_executor(
-                None, lambda: self.tokenizer.encode(tool_response_text, add_special_tokens=False)
+                None,
+                lambda: self.tokenizer.encode(
+                    tool_response_text, add_special_tokens=False
+                ),
             )
         else:
             # Note that we have to pass None to the images and videos if there are no new images / videos
@@ -404,7 +503,10 @@ class ToolAgentLoop(AgentLoopBase):
         return AgentState.GENERATING
 
     async def _call_tool(
-        self, tool_call: FunctionCall, tools_kwargs: dict[str, Any], agent_data: AgentData
+        self,
+        tool_call: FunctionCall,
+        tools_kwargs: dict[str, Any],
+        agent_data: AgentData,
     ) -> tuple[ToolResponse, float, dict]:
         """Call tool and return tool response.
 
@@ -413,7 +515,7 @@ class ToolAgentLoop(AgentLoopBase):
           parsed arguments; no lifecycle.
         - ``BaseTool`` subclass: stateful tool with full lifecycle.
         """
-        active_tools = getattr(agent_data, "_active_tools", self.tools)
+        active_tools = getattr(agent_data, "active_tools", self.tools)
 
         # Validate tool name
         tool_name = tool_call.name
@@ -442,31 +544,52 @@ class ToolAgentLoop(AgentLoopBase):
                 # ignored here. Function tools are stateless and per-trajectory state
                 # injection is not supported by design; use a BaseTool subclass instead.
                 raw = await tool.call(tool_args)
-                tool_execution_response, tool_reward, res = normalize_function_tool_return(raw)
+                tool_execution_response, tool_reward, res = (
+                    normalize_function_tool_return(raw)
+                )
             else:
                 # BaseTool subclass
                 kwargs = tools_kwargs.get(tool_name, {})
-                instance_id, _ = await tool.create(create_kwargs=kwargs.get("create_kwargs", {}))
+                instance_id, _ = await tool.create(
+                    create_kwargs=kwargs.get("create_kwargs", {})
+                )
                 tool_execution_response, tool_reward, res = await tool.execute(
                     instance_id, tool_args, agent_data=agent_data
                 )
         except Exception as e:
             logger.warning(f"Error executing tool '{tool_name}': {e}")
-            return ToolResponse(text=f"Error executing tool '{tool_name}': {e}"), 0.0, {}
+            return (
+                ToolResponse(text=f"Error executing tool '{tool_name}': {e}"),
+                0.0,
+                {},
+            )
         finally:
             # Only BaseTool instances need release (function tools never set instance_id).
             if tool and instance_id and not isinstance(tool, FunctionTool):
                 await tool.release(instance_id)
 
         tool_response_text = tool_execution_response.text
-        if tool_response_text and len(tool_response_text) > self.max_tool_response_length:
+        if (
+            tool_response_text
+            and len(tool_response_text) > self.max_tool_response_length
+        ):
             if self.tool_response_truncate_side == "left":
-                tool_response_text = "(truncated)..." + tool_response_text[-self.max_tool_response_length :]
+                tool_response_text = (
+                    "(truncated)..."
+                    + tool_response_text[-self.max_tool_response_length :]
+                )
             elif self.tool_response_truncate_side == "right":
-                tool_response_text = tool_response_text[: self.max_tool_response_length] + "...(truncated)"
+                tool_response_text = (
+                    tool_response_text[: self.max_tool_response_length]
+                    + "...(truncated)"
+                )
             else:
                 length = self.max_tool_response_length // 2
-                tool_response_text = tool_response_text[:length] + "...(truncated)..." + tool_response_text[-length:]
+                tool_response_text = (
+                    tool_response_text[:length]
+                    + "...(truncated)..."
+                    + tool_response_text[-length:]
+                )
 
         # Create ToolResponse from tool execution result
         tool_response_kwargs = {"text": tool_response_text}

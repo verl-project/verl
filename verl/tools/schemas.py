@@ -24,6 +24,7 @@ class OpenAIFunctionPropertySchema(BaseModel):
     # Union's type is list[str], e.g. ["integer", "number"] for int | float unions.
     type: str | list[str]
     description: str | None = None
+    items: dict[str, Any] | None = None
     # JSON Schema's ``enum`` accepts any JSON value, not just strings, so
     # ``Literal[1, 2, 3]`` -> ``enum: [1, 2, 3]`` is a valid schema.
     enum: list[Any] | None = None
