@@ -41,6 +41,17 @@ zorro_train:
 # ray or http: ray would be much faster for payload comms in the on-prem use case
 comm_protocol: ray
 
+# Zero-copy CUDA IPC weight sync between training and rollout engines.
+# Only effective with colocate=True (both engines on the same GPU). Avoids
+# the NCCL handshake path entirely.
+cuda_ipc_weight_sync: False
+
+# Stream one gathered param at a time during CUDA IPC weight sync so peak extra
+# GPU memory is one full param per GPU instead of the whole model (avoids OOM
+# on large models, at the cost of more round-trips). Only effective when
+# cuda_ipc_weight_sync=True and colocate=True.
+low_memory_weight_sync: False
+
 # DeepSpeed ZeRO-style sharding for the training engine
 zero_optimization:
 

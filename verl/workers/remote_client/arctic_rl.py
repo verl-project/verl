@@ -112,6 +112,10 @@ class ArcticRLClientWrapper(RemoteBackend):
         self._client = None
         self.zorro_train_enable = self._backend_config.zorro_train.enable
         self.zorro_train_max_rollouts = self._backend_config.zorro_train.max_rollouts
+        # Weight-sync transport selection. CUDA-IPC bypasses the NCCL
+        # all_reduce path entirely; only valid when colocate=True.
+        self.cuda_ipc_weight_sync = self._backend_config.get("cuda_ipc_weight_sync", False)
+        self.low_memory_weight_sync = self._backend_config.get("low_memory_weight_sync", False)
         self.use_liger = self.config.actor_rollout_ref.model.use_liger
         # Static, config-derived engineering value Arctic needs on every
         # `compute_log_prob` / `update_actor` call. Cached here at init
@@ -407,10 +411,14 @@ class ArcticRLClientWrapper(RemoteBackend):
         "max_tokens": 1024,
     }
 
-    async def generate(self, prompt_ids, sampling_params) -> list:
+    async def generate(self, prompt_ids, sampling_params, routing_key=None) -> list:
         prompts = [self.tokenizer.decode(prompt_ids)]
         merged_params = {**self._default_sampling_params, **sampling_params}
-        return await self._client.async_generate(prompts=prompts, sampling_params=merged_params)
+        return await self._client.generate(
+            prompts=prompts,
+            sampling_params=merged_params,
+            routing_key=routing_key,
+        )
 
     # ------------------------------------------------------------------ #
     # Arctic wire helpers (private; not on `RemoteBackend`)
@@ -460,7 +468,10 @@ class ArcticRLClientWrapper(RemoteBackend):
         return await self._client.save_checkpoint()
 
     async def update_weights(self):
-        return await self._client.sync_weights()
+        return await self._client.sync_weights(
+            cuda_ipc=self.cuda_ipc_weight_sync,
+            low_memory=self.low_memory_weight_sync,
+        )
 
     async def destroy(self) -> None:
         if self._client is not None:
