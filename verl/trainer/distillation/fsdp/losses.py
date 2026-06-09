@@ -23,7 +23,6 @@ from verl.utils.ulysses import (
 from verl.workers.config import DistillationConfig, DistillationLossConfig
 
 
-
 def _chunked_topk_log_probs(
     logits: torch.Tensor,
     topk_ids: torch.Tensor,
@@ -46,8 +45,8 @@ def _chunked_topk_log_probs(
     """
     B, T, V = logits.shape
     K = topk_ids.shape[-1]
-    flat_logits = logits.reshape(-1, V)        # [N, V]
-    flat_topk = topk_ids.reshape(-1, K)         # [N, K]
+    flat_logits = logits.reshape(-1, V)  # [N, V]
+    flat_topk = topk_ids.reshape(-1, K)  # [N, K]
     N = flat_logits.shape[0]
 
     # Edge case: empty input (e.g. fully-padded micro-batch).
@@ -58,7 +57,7 @@ def _chunked_topk_log_probs(
     for s in range(0, N, chunk_size):
         e = min(s + chunk_size, N)
         chunk_logits_fp32 = flat_logits[s:e].float()
-        log_z = torch.logsumexp(chunk_logits_fp32, dim=-1, keepdim=True)         # [c, 1]
+        log_z = torch.logsumexp(chunk_logits_fp32, dim=-1, keepdim=True)  # [c, 1]
         chunk_topk_logits = torch.gather(chunk_logits_fp32, dim=-1, index=flat_topk[s:e])
         out[s:e] = (chunk_topk_logits - log_z).to(logits.dtype)
     return out.reshape(B, T, K)

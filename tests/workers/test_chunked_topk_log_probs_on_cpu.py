@@ -119,9 +119,7 @@ def test_chunk_size_invariance(chunk_size):
     out = _chunked_topk_log_probs(logits, topk_ids, chunk_size=chunk_size)
 
     max_diff = (out - out_single).abs().max().item()
-    assert max_diff <= 5e-6, (
-        f"Result depends on chunk_size={chunk_size}: max diff vs single-chunk = {max_diff:.2e}"
-    )
+    assert max_diff <= 5e-6, f"Result depends on chunk_size={chunk_size}: max diff vs single-chunk = {max_diff:.2e}"
 
 
 def test_gradient_correctness():
@@ -159,6 +157,7 @@ def test_handles_small_chunk_size():
     out = _chunked_topk_log_probs(logits, topk_ids, chunk_size=1)
 
     assert (ref - out).abs().max().item() <= 5e-6
+
 
 def test_empty_input():
     """Edge case: N=0 (fully-padded micro-batch) returns empty tensor without error."""
