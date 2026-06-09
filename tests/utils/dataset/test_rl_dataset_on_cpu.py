@@ -13,6 +13,8 @@
 # limitations under the License.
 import json
 import os
+from copy import deepcopy
+from pathlib import Path
 
 import pytest
 import torch
@@ -23,6 +25,16 @@ from torch.utils.data import DataLoader
 from verl import DataProto
 from verl.utils import hf_processor, hf_tokenizer
 from verl.utils.dataset.rl_dataset import RLHFDataset, collate_fn
+
+
+def _mock_rlhf_dataset():
+    dataset = RLHFDataset.__new__(RLHFDataset)
+    dataset.prompt_key = "prompt"
+    dataset.image_key = "images"
+    dataset.video_key = "videos"
+    dataset.audio_key = "audios"
+    dataset.processor = object()
+    return dataset
 
 
 def get_gsm8k_data():
@@ -78,6 +90,101 @@ def test_rl_dataset_with_max_samples():
     )
     dataset = RLHFDataset(data_files=local_path, tokenizer=tokenizer, config=config, max_samples=5)
     assert len(dataset) == 5
+
+
+def test_build_messages_accepts_image_path():
+    dataset = _mock_rlhf_dataset()
+    image_path = "file:///tmp/image.jpg"
+    example = {
+        "prompt": [{"role": "user", "content": "Describe <image>"}],
+        "images": [image_path],
+    }
+
+    messages = dataset._build_messages(example, key=dataset.prompt_key)
+
+    assert messages[0]["content"] == [
+        {"type": "text", "text": "Describe "},
+        {"type": "image", "image": image_path},
+    ]
+
+
+@pytest.mark.parametrize(
+    ("videos", "expected_video"),
+    [
+        (["file:///tmp/video.mp4"], "file:///tmp/video.mp4"),
+        ([["file:///tmp/frame1.jpg", "file:///tmp/frame2.jpg"]], ["file:///tmp/frame1.jpg", "file:///tmp/frame2.jpg"]),
+        ([[Path("/tmp/frame1.jpg"), Path("/tmp/frame2.jpg")]], ["/tmp/frame1.jpg", "/tmp/frame2.jpg"]),
+    ],
+)
+def test_build_messages_accepts_video_path_or_frame_list(videos, expected_video):
+    dataset = _mock_rlhf_dataset()
+    example = {
+        "prompt": [{"role": "user", "content": "Describe <video>"}],
+        "videos": videos,
+    }
+
+    messages = dataset._build_messages(example, key=dataset.prompt_key)
+
+    assert messages[0]["content"] == [
+        {"type": "text", "text": "Describe "},
+        {"type": "video", "video": expected_video},
+    ]
+
+
+def test_maybe_filter_out_long_prompts_accepts_image_path(monkeypatch):
+    class FakeDataFrame(list):
+        def filter(self, fn, num_proc=None, desc=None):
+            return FakeDataFrame([doc for doc in self if fn(doc)])
+
+    class FakeProcessor:
+        def apply_chat_template(self, messages, add_generation_prompt=True, tokenize=False, **kwargs):
+            return "formatted prompt"
+
+        def __call__(self, **kwargs):
+            assert kwargs["images"] == ["processed-image"]
+            return {"input_ids": [[1, 2, 3]]}
+
+    captured = {}
+
+    def fake_process_multi_modal_info(cls, messages, image_patch_size, config):
+        captured["messages"] = deepcopy(messages)
+        return ["processed-image"], None, None
+
+    monkeypatch.setattr(
+        RLHFDataset,
+        "_process_multi_modal_info",
+        classmethod(fake_process_multi_modal_info),
+    )
+
+    dataset = _mock_rlhf_dataset()
+    dataset.processor = FakeProcessor()
+    dataset.tokenizer = None
+    dataset.filter_overlong_prompts = True
+    dataset.apply_chat_template_kwargs = {}
+    dataset.tool_schemas = None
+    dataset.image_patch_size = 14
+    dataset.config = OmegaConf.create({})
+    dataset.max_prompt_length = 10
+    dataset.mm_processor_kwargs = {}
+    dataset.num_workers = None
+
+    image_path = "file:///tmp/image.jpg"
+    dataframe = FakeDataFrame(
+        [
+            {
+                "prompt": [{"role": "user", "content": "Describe <image>"}],
+                "images": [image_path],
+            }
+        ]
+    )
+
+    filtered = dataset.maybe_filter_out_long_prompts(dataframe)
+
+    assert len(filtered) == 1
+    assert captured["messages"][0]["content"] == [
+        {"type": "text", "text": "Describe "},
+        {"type": "image", "image": image_path},
+    ]
 
 
 def test_image_rl_data():

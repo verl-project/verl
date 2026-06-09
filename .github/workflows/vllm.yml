@@ -107,7 +107,11 @@ jobs:
       - name: Install the current repository
         run: |
           pip3 install -r requirements-test.txt
+          pip3 install -r requirements.txt
           pip3 install --no-deps -e .
+      - name: Check final pip list
+        run: |
+          pip3 list
       #      - name: Download Model to Use
       #        run: |
       #          hf download Qwen/Qwen2.5-0.5B-Instruct --local-dir ${HOME}/models/Qwen/Qwen2.5-0.5B-Instruct
@@ -145,6 +149,9 @@ jobs:
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
           pip3 install cupy-cuda13x==13.6.0
+      - name: Check final pip list
+        run: |
+          pip3 list
       - name: Test vLLM ServerAdapter with Checkpoint Engine (NCCL)
         run: |
           ROLLOUT_NAME=vllm pytest -svvv tests/checkpoint_engine/test_special_server_adapter.py

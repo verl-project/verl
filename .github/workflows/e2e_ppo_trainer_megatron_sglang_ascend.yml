@@ -108,6 +108,9 @@ jobs:
       UV_HTTP_TIMEOUT: 120
       UV_NO_CACHE: "1"
       UV_SYSTEM_PYTHON: "1"
+      UV_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
+      PIP_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
+      PIP_TRUSTED_HOST: "cache-service.nginx-pypi-cache.svc.cluster.local"
     steps:
       - name: Check npu and CANN info
         run: |
@@ -126,7 +129,7 @@ jobs:
       - name: Install the current repository
         run: |
           uv pip install pytest pytest-asyncio
-          uv pip install git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@0a21da4 --no-deps --no-build-isolation  --ignore-requires-python
+          pip install git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@0a21da4 --no-deps --no-build-isolation --ignore-requires-python
           uv pip install git+https://github.com/ISEEKYAN/mbridge.git@main --no-deps --no-build-isolation
           uv pip install --no-deps --no-build-isolation -e .
       - name: Check final pip list

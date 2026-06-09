@@ -18,12 +18,14 @@ import os
 import platform
 import signal
 import threading
+from collections.abc import Mapping
 from types import MethodType
 from typing import Any, Literal, Optional, get_args
 
 import torch
 from vllm.outputs import RequestOutput
 
+from verl.plugin.platform import get_platform
 from verl.utils.device import is_npu_available
 from verl.utils.vllm import TensorLoRARequest, VLLMHijack
 from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
@@ -38,6 +40,32 @@ VLLM_LORA_NAME = "123"
 VLLM_LORA_PATH = "simon_lora_path"
 
 VLLM_ASCEND_REQUIRED_ENV_VARS = {"VLLM_ALL2ALL_BACKEND": "flashinfer_all2allv", "VLLM_ASCEND_ENABLE_NZ": "0"}
+
+
+def _resolve_vllm_weight_sync_local_rank(worker_local_rank: int, parallel_config: Any) -> int:
+    worker_local_rank = int(worker_local_rank)
+    if parallel_config is None:
+        return worker_local_rank
+
+    tp_size = max(int(getattr(parallel_config, "tensor_parallel_size", 1) or 1), 1)
+    dp_size = int(getattr(parallel_config, "data_parallel_size", 1) or 1)
+    dp_local_size = int(getattr(parallel_config, "data_parallel_size_local", 1) or 1)
+    if dp_size <= 1 and dp_local_size <= 1:
+        return worker_local_rank
+
+    dp_local_rank = getattr(parallel_config, "data_parallel_rank_local", None)
+    if dp_local_rank is None:
+        dp_rank = getattr(parallel_config, "data_parallel_rank", None)
+        if dp_rank is None:
+            dp_rank = getattr(parallel_config, "data_parallel_index", None)
+        if dp_rank is not None and dp_local_size > 0:
+            dp_local_rank = int(dp_rank) % dp_local_size
+
+    if dp_local_rank is None:
+        return worker_local_rank
+
+    tp_rank = worker_local_rank % tp_size
+    return int(dp_local_rank) * tp_size + tp_rank
 
 
 def set_death_signal():
@@ -62,7 +90,10 @@ def get_device_uuid(device_id: int) -> str:
         else:
             return f"NPU-{device_id}"
     else:
-        return current_platform.get_device_uuid(device_id)
+        try:
+            return current_platform.get_device_uuid(device_id)
+        except Exception:
+            return get_platform().get_device_uuid(device_id=device_id)
 
 
 def get_vllm_max_lora_rank(lora_rank: int):
@@ -289,16 +320,15 @@ class vLLMColocateWorkerExtension:
 
     def _get_zmq_handle(self) -> str:
         """Get ZMQ handle for communication.
-        Uses Ray job id + replica_rank + local_rank to form the handle so it
-        matches the sender side regardless of CUDA_VISIBLE_DEVICES differences,
-        avoids collisions when multiple replicas share the same node, and is
-        unique per Ray job to avoid cross-job collisions on shared hosts. The
-        job id is forwarded by the vLLMHttpServer actor as VERL_RAY_JOB_ID and
-        inherited by this vLLM worker subprocess.
+        Uses Ray job id + replica_rank + rollout-local rank to match the sender
+        side and avoid cross-job collisions on shared hosts.
         """
         replica_rank = os.environ.get("VERL_REPLICA_RANK", "0")
         job_id = os.environ.get("VERL_RAY_JOB_ID", "0")
-        return f"ipc:///tmp/rl-colocate-zmq-{job_id}-replica-{replica_rank}-rank-{self.local_rank}.sock"
+        vllm_config = getattr(self.model_runner, "vllm_config", None)
+        parallel_config = getattr(vllm_config, "parallel_config", None)
+        local_rank = _resolve_vllm_weight_sync_local_rank(self.local_rank, parallel_config)
+        return f"ipc:///tmp/rl-colocate-zmq-{job_id}-replica-{replica_rank}-rank-{local_rank}.sock"
 
 
 class SuppressSignalInThread:
@@ -357,6 +387,24 @@ def build_cli_args_from_config(config: dict[str, Any]) -> list[str]:
             # Use json.dumps for dict to ensure valid JSON format
             cli_args.append(json.dumps(v) if isinstance(v, dict) else str(v))
     return cli_args
+
+
+def build_mtp_speculative_config(
+    method: str, num_speculative_tokens: int, engine_speculative_config: Any = None
+) -> dict[str, Any]:
+    """Build vLLM's MTP speculative config, applying rollout engine overrides."""
+    if engine_speculative_config is None:
+        engine_speculative_config = {}
+    if isinstance(engine_speculative_config, str):
+        engine_speculative_config = json.loads(engine_speculative_config)
+    if not isinstance(engine_speculative_config, Mapping):
+        raise TypeError("rollout.engine_kwargs.vllm.speculative_config must be a mapping when MTP rollout is enabled")
+
+    return {
+        "method": method,
+        "num_speculative_tokens": num_speculative_tokens,
+        **{key: val for key, val in engine_speculative_config.items() if val is not None},
+    }
 
 
 def extract_prompt_logprobs(output: RequestOutput, num_prompt_logprobs: Optional[int], result_dict: dict[str, list]):

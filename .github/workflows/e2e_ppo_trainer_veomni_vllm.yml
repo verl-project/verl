@@ -116,9 +116,13 @@ jobs:
       - name: Install the current repository
         run: |
           pip3 install -r requirements-test.txt
+          pip3 install -r requirements.txt
           pip3 install --no-deps -e .
           pip3 install veomni==0.1.11 --ignore-requires-python --no-deps --index-url https://pypi.org/simple/
           pip3 install transformers==5.3.0
+      - name: Check final pip list
+        run: |
+          pip3 list
       - name: Prepare GSM8K dataset
         run: |
           ray stop --force
@@ -135,6 +139,9 @@ jobs:
         run: |
           ray stop --force
           MODEL_ID=Qwen/Qwen3-VL-2B-Instruct TRAIN_FILES=${HOME}/data/geo3k/train.parquet VAL_FILES=${HOME}/data/gsm8k/test.parquet FSDP_SIZE=8 SP_SIZE=1 bash tests/special_e2e/run_ppo_trainer_veomni.sh
+      - name: Test export unfused experts
+        run: |
+          torchrun --nproc_per_node=8 tests/utils/veomni/test_special_export_unfused_experts.py
 
   cleanup:
     runs-on: ubuntu-latest

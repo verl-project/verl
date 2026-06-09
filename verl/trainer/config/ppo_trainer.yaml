@@ -371,6 +371,42 @@ transfer_queue:
       # Leave empty to let Mooncake auto-select available devices.
       device_name: ""
 
+# configs for SkipManager
+skip:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.utils.skip.SkipManagerConfig
+
+  # configs for RolloutSkip 
+  rollout:
+
+    # Whether to enable RolloutSkip
+    enable: False
+
+    # Directory to save rollout data
+    dump_dir: "~/.verl/rollout_dump"
+
+    # Steps to skip rollout
+    steps: []
+
+    # Action to take when rollout is skipped, refer to verl.utils.skip.base_skip.SkipAction
+    action: cache
+
+  # configs for AsyncRolloutSkip (fully async policy)
+  async_rollout:
+
+    # Whether to enable AsyncRolloutSkip
+    enable: False
+
+    # Directory to save rollout data
+    dump_dir: "~/.verl/rollout_dump"
+
+    # Steps to skip rollout (rollouter global_steps from sample_id)
+    steps: []
+
+    # Action to take when rollout is skipped, refer to verl.utils.skip.base_skip.SkipAction
+    action: cache
+
 # configs related to ray
 ray_kwargs:
 

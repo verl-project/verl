@@ -122,10 +122,14 @@ jobs:
       - name: Install the current repository
         run: |
           pip3 install -r requirements-test.txt
-          pip3 install --no-deps --force-reinstall .
+          pip3 install -r requirements.txt
+          pip3 install --no-deps -e .
           pip3 install git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@0a21da4 --no-deps --no-build-isolation
           pip3 install git+https://github.com/NVIDIA/Megatron-LM.git@b2a8ec7 --no-deps --no-build-isolation
           pip3 install "nvidia-modelopt[torch]>=0.37.0"
+      - name: Check final pip list
+        run: |
+          pip3 list
       - name: Prepare GSM8K dataset
         run: |
           python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
