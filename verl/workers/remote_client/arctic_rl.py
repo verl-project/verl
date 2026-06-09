@@ -460,4 +460,4 @@ class ArcticRLClientWrapper(RemoteBackend):
 
     async def destroy(self) -> None:
         if self._client is not None:
-            self._client.shutdown()
+            await self._client.shutdown()
