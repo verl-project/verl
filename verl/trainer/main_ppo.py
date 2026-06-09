@@ -143,10 +143,11 @@ class TaskRunner:
                 # so it registers with `RemoteBackendRegistry`; the
                 # registry no longer carries a lazy `MODULES` table.
                 if backend_name == "arctic":
-                    from verl.workers.remote_client import arctic_rl  # noqa: F401
                     from verl.remote_backend.workers.arctic_rl import (
                         ArcticRLActorRolloutRefWorker,
                     )
+                    from verl.workers.remote_client import arctic_rl  # noqa: F401
+
                     actor_rollout_cls = ArcticRLActorRolloutRefWorker
                 else:
                     raise ValueError(

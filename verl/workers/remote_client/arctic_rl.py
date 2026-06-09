@@ -1,11 +1,23 @@
+# Copyright 2026 Bytedance Ltd. and/or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 import os
 from typing import Any
 
 import torch
-from transformers import AutoTokenizer
-
 from arctic_training.arctic_rl import ArcticRLClientConfig, create_arctic_rl_client
 from arctic_training.arctic_rl.ray_server import ArcticRLRayServerState
+from transformers import AutoTokenizer
 
 from verl.remote_backend.base import RemoteBackend, RemoteBackendRegistry
 
@@ -18,6 +30,7 @@ def _no_padding_2_padding_prompt_response(tensor: torch.Tensor, data, pad_token_
     stays untouched.
     """
     import torch.nn.functional as F
+
     from verl.utils import tensordict_utils as tu
 
     values = tensor.values() if tensor.is_nested else tensor
@@ -38,22 +51,20 @@ def _no_padding_2_padding_prompt_response(tensor: torch.Tensor, data, pad_token_
     else:
         assert not attention_mask.is_nested
         prompt_lens = attention_mask[:, : prompt_ids.shape[1]].sum(dim=1)
-        response_lens = attention_mask[:, prompt_ids.shape[1]:].sum(dim=1)
+        response_lens = attention_mask[:, prompt_ids.shape[1] :].sum(dim=1)
         max_prompt_len = prompt_ids.shape[1]
         max_response_len = response_ids.shape[1]
 
     sequence_lens = prompt_lens + response_lens
     sequence_offsets = sequence_lens.cumsum(dim=0)
-    assert sequence_offsets[-1].item() == values.shape[0], (
-        f"{sequence_offsets[-1].item()} != {values.shape[0]}"
-    )
+    assert sequence_offsets[-1].item() == values.shape[0], f"{sequence_offsets[-1].item()} != {values.shape[0]}"
 
     rows = []
     for prompt_len, resp_len, seq_offset in zip(prompt_lens, response_lens, sequence_offsets, strict=True):
         prompt_pad = max_prompt_len - prompt_len
         response_pad = max_response_len - resp_len
-        prompt = values[seq_offset - prompt_len - resp_len: seq_offset - resp_len]
-        response = values[seq_offset - resp_len: seq_offset]
+        prompt = values[seq_offset - prompt_len - resp_len : seq_offset - resp_len]
+        response = values[seq_offset - resp_len : seq_offset]
         prompt_padded_left = F.pad(prompt, (prompt_pad, 0), value=pad_token_id)
         response_padded_right = F.pad(response, (0, response_pad), value=pad_token_id)
         rows.append(torch.cat((prompt_padded_left, response_padded_right)))
@@ -70,9 +81,7 @@ def _prepare_padded_arctic_batch_dict(data, pad_token_id):
     input_ids, max_prompt_len, max_response_len = _no_padding_2_padding_prompt_response(
         tensor=input_ids, data=data, pad_token_id=pad_token_id
     )
-    position_ids, _, _ = _no_padding_2_padding_prompt_response(
-        tensor=position_ids, data=data, pad_token_id=0
-    )
+    position_ids, _, _ = _no_padding_2_padding_prompt_response(tensor=position_ids, data=data, pad_token_id=0)
 
     batch_dict = dict(
         input_ids=input_ids,
@@ -81,7 +90,6 @@ def _prepare_padded_arctic_batch_dict(data, pad_token_id):
         prompts=data["prompts"],
     )
     return batch_dict, max_prompt_len, max_response_len
-
 
 
 @RemoteBackendRegistry.register("arctic")
@@ -108,9 +116,7 @@ class ArcticRLClientWrapper(RemoteBackend):
         # `compute_log_prob` / `update_actor` call. Cached here at init
         # time so the verl-side forwarder doesn't have to re-inject it
         # into every batch.
-        self._max_token_len_per_gpu = (
-            self.config.actor_rollout_ref.actor.ppo_max_token_len_per_gpu
-        )
+        self._max_token_len_per_gpu = self.config.actor_rollout_ref.actor.ppo_max_token_len_per_gpu
         self.tokenizer = AutoTokenizer.from_pretrained(self.config.actor_rollout_ref.model.path)
         self._client = self._initialize_client(reconnect_job_config, rl_server_state)
 
@@ -187,9 +193,7 @@ class ArcticRLClientWrapper(RemoteBackend):
         )
         payload = dict(batch=batch, meta=meta)
 
-        response = await (
-            self._send_compute_ref_log_prob(payload) if ref else self._send_compute_log_prob(payload)
-        )
+        response = await (self._send_compute_ref_log_prob(payload) if ref else self._send_compute_log_prob(payload))
 
         model_output = {"log_probs": response["batch"]["log_probs"]}
         if calculate_entropy and "entropy" in response["batch"]:
@@ -290,7 +294,6 @@ class ArcticRLClientWrapper(RemoteBackend):
             },
         }
 
-
     def reconnect_config(self):
         return self._client.reconnect_config()
 
@@ -298,10 +301,12 @@ class ArcticRLClientWrapper(RemoteBackend):
         return self._client.get_server_state()
 
     def _create_ds_worker_config(self):
-
+        attn_implementation = self.config.actor_rollout_ref.model.override_config.get(
+            "attn_implementation", "flash_attention_2"
+        )
         ds_worker_config = dict(
             use_liger=self.use_liger,
-            attn_implementation=self.config.actor_rollout_ref.model.override_config.get('attn_implementation', 'flash_attention_2'),
+            attn_implementation=attn_implementation,
         )
 
         if self.use_zorro:
@@ -320,7 +325,6 @@ class ArcticRLClientWrapper(RemoteBackend):
 
         return ds_worker_config
 
-
     def _initialize_client(self, reconnect_job_config: dict = None, rl_server_state: ArcticRLRayServerState = None):
         if rl_server_state is not None:
             return create_arctic_rl_client(reconnect_job_config, rl_server_state)
@@ -333,9 +337,7 @@ class ArcticRLClientWrapper(RemoteBackend):
         n_sampling_gpus = self._backend_config.get("sampling_gpus", self.config.trainer.n_gpus_per_node)
         n_log_prob_gpus = self._backend_config.get("log_prob_gpus", self.config.trainer.n_gpus_per_node)
         colocate = self._backend_config.get("colocate", True)
-        attn_implementation = self.config.actor_rollout_ref.model.override_config.get(
-            'attn_implementation', 'eager'
-        )
+        attn_implementation = self.config.actor_rollout_ref.model.override_config.get("attn_implementation", "eager")
 
         actor_cfg = self.config.actor_rollout_ref.actor
         optim_cfg = actor_cfg.optim
@@ -394,9 +396,6 @@ class ArcticRLClientWrapper(RemoteBackend):
 
         return create_arctic_rl_client(rl_config)
 
-
-
-
     _default_sampling_params = {
         "temperature": 0.0,
         "top_p": 1.0,
@@ -408,9 +407,6 @@ class ArcticRLClientWrapper(RemoteBackend):
         prompts = [self.tokenizer.decode(prompt_ids)]
         merged_params = {**self._default_sampling_params, **sampling_params}
         return await self._client.async_generate(prompts=prompts, sampling_params=merged_params)
-
-
-
 
     # ------------------------------------------------------------------ #
     # Arctic wire helpers (private; not on `RemoteBackend`)

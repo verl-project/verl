@@ -1,3 +1,16 @@
+# Copyright 2026 Bytedance Ltd. and/or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """Backend-agnostic tensor + metric helpers shared across per-backend
 forwarder workers under :mod:`verl.remote_backend.workers`.
 
@@ -38,10 +51,7 @@ def make_njt(data: TensorDict, tensor: Tensor) -> Tensor:
     cu_seqlens = data["input_ids"].offsets()
     seq_lengths = cu_seqlens.diff()
     starts = data["attention_mask"].long().argmax(dim=1)
-    pieces = [
-        tensor[b, starts[b].item() : starts[b].item() + seq_lengths[b].item()]
-        for b in range(tensor.shape[0])
-    ]
+    pieces = [tensor[b, starts[b].item() : starts[b].item() + seq_lengths[b].item()] for b in range(tensor.shape[0])]
     flat = torch.cat(pieces, dim=0)
     return torch.nested.nested_tensor_from_jagged(flat, cu_seqlens)
 

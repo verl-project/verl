@@ -1,30 +1,39 @@
-import ray
-from typing import Any, Optional
-from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer
-
+# Copyright 2026 Bytedance Ltd. and/or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 import argparse
-from typing import Any, Optional
-from verl.workers.remote_client.arctic_rl import ArcticRLClientWrapper
 from collections.abc import AsyncGenerator
+from typing import Any, Optional
 
 import ray
 from ray.actor import ActorHandle
-from vllm import SamplingParams
+from transformers import AutoTokenizer
 from vllm.inputs import TokensPrompt
 from vllm.lora.request import LoRARequest
-from vllm.outputs import RequestOutput, CompletionOutput
+from vllm.outputs import CompletionOutput, RequestOutput
 
+from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.tokenizer import normalize_token_ids
 from verl.workers.config import HFModelConfig, RolloutConfig
+from verl.workers.remote_client.arctic_rl import ArcticRLClientWrapper
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
+from verl.workers.rollout.utils import get_max_position_embeddings
 from verl.workers.rollout.vllm_rollout.utils import (
     VLLM_LORA_INT_ID,
     VLLM_LORA_NAME,
     VLLM_LORA_PATH,
 )
-from transformers import AutoTokenizer
-from verl.utils.config import omega_conf_to_dataclass
-from verl.workers.rollout.utils import get_max_position_embeddings
+from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer
 
 
 class ArcticLLMEngine:
@@ -47,31 +56,32 @@ class ArcticLLMEngine:
         priority: int = 0,
     ) -> AsyncGenerator[RequestOutput, None]:
         gen_batch_output = await self.arctic_rl_client.generate(
-            prompt_ids=prompt['prompt_token_ids'],
+            prompt_ids=prompt["prompt_token_ids"],
             sampling_params=sampling_params,
         )
 
-        raw_prompt = self.tokenizer.decode(prompt['prompt_token_ids'])
+        raw_prompt = self.tokenizer.decode(prompt["prompt_token_ids"])
         completed_outputs = []
         for i, output in enumerate(gen_batch_output):
-            completed_outputs.append(CompletionOutput(
+            completed_outputs.append(
+                CompletionOutput(
                     index=i,
-                    text=output['text'],
-                    token_ids=output['token_ids'],
-                    finish_reason=output['finish_reason'],
+                    text=output["text"],
+                    token_ids=output["token_ids"],
+                    finish_reason=output["finish_reason"],
                     cumulative_logprob=None,
-                    logprobs=None
+                    logprobs=None,
                 )
             )
 
         yield RequestOutput(
-                request_id=request_id,
-                outputs=completed_outputs,
-                prompt=raw_prompt,
-                prompt_logprobs=None,
-                prompt_token_ids=prompt['prompt_token_ids'],
-                # finished=completed_output.finish_reason == "stop",
-                finished=True,
+            request_id=request_id,
+            outputs=completed_outputs,
+            prompt=raw_prompt,
+            prompt_logprobs=None,
+            prompt_token_ids=prompt["prompt_token_ids"],
+            # finished=completed_output.finish_reason == "stop",
+            finished=True,
         )
 
 
@@ -88,7 +98,7 @@ class ArcticLLMServer(vLLMHttpServer):
         model_config: HFModelConfig,
         rollout_mode: RolloutMode,
         arctic_rl_client: ArcticRLClientWrapper,
-        workers: list[ActorHandle] = [],
+        workers: list[ActorHandle] | None = None,
         replica_rank: int = 0,
         node_rank: int = 0,
         gpus_per_node: int = 1,
@@ -119,7 +129,7 @@ class ArcticLLMServer(vLLMHttpServer):
                 )
 
         self.rollout_mode = rollout_mode
-        self.workers = workers
+        self.workers = workers if workers is not None else []
 
         self.replica_rank = replica_rank
         self.node_rank = node_rank
@@ -131,7 +141,6 @@ class ArcticLLMServer(vLLMHttpServer):
         if self.rollout_mode != RolloutMode.HYBRID and self.config.load_format == "dummy":
             # logger.warning(f"rollout mode is {self.rollout_mode}, load_format is dummy, set to auto")
             self.config.load_format = "auto"
-
 
         self._master_address = None
         self._master_port = None
@@ -150,12 +159,15 @@ class ArcticLLMServer(vLLMHttpServer):
         #     f"data_parallel_rpc_port: {self._dp_rpc_port}, data_parallel_master_port: {self._dp_master_port}"
         # )
 
-    def get_master_address(self): pass
+    def get_master_address(self):
+        pass
 
-    def get_server_address(self): pass
+    def get_server_address(self):
+        pass
 
     @property
-    def lora_as_adapter(self) -> bool: pass
+    def lora_as_adapter(self) -> bool:
+        pass
 
     async def collective_rpc(
         self,
@@ -168,7 +180,6 @@ class ArcticLLMServer(vLLMHttpServer):
 
     async def run_server(self, args: argparse.Namespace):
         pass
-
 
     async def generate(
         self,
@@ -229,7 +240,10 @@ class ArcticLLMServer(vLLMHttpServer):
                     lora_name=VLLM_LORA_NAME, lora_int_id=VLLM_LORA_INT_ID, lora_path=VLLM_LORA_PATH
                 )
         # import pdb; pdb.set_trace()
-        # print(f"[ArcticLLMServer] generate INPUT: {prompt=}, {sampling_params=}, {request_id=}, {lora_request=}, {priority=}")
+        # print(  # noqa: E501
+        #     f"[ArcticLLMServer] generate INPUT: {prompt=}, {sampling_params=}, "
+        #     f"{request_id=}, {lora_request=}, {priority=}"
+        # )
         generator = self.engine.generate(
             prompt=prompt,
             sampling_params=sampling_params,
@@ -250,7 +264,7 @@ class ArcticLLMServer(vLLMHttpServer):
 
         token_ids = final_res.outputs[0].token_ids
         log_probs = None
-        if sampling_params["logprobs"]  is not None:
+        if sampling_params["logprobs"] is not None:
             log_probs = [logprobs[token_ids[i]].logprob for i, logprobs in enumerate(final_res.outputs[0].logprobs)]
 
         routed_experts = None
@@ -281,8 +295,6 @@ class ArcticLLMServer(vLLMHttpServer):
         )
 
 
-
-
 class ArcticReplica(RolloutReplica):
     def __init__(
         self,
@@ -303,14 +315,11 @@ class ArcticReplica(RolloutReplica):
             kwargs["main_config"], handle=kwargs["backend_handle"]
         )
 
-
     def rollout_worker_use_gpu(self) -> bool:
         return False
 
-
     async def launch_servers(self):
-        server = self.server_class.options(
-        ).remote(
+        server = self.server_class.options().remote(
             replica_rank=self.replica_rank,
             config=self.config,
             model_config=self.model_config,
@@ -319,7 +328,6 @@ class ArcticReplica(RolloutReplica):
         )
         self.servers.append(server)
         self._server_handle = server
-
 
     async def wake_up(self):
         pass

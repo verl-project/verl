@@ -348,6 +348,7 @@ def _load_trtllm():
 
     return TRTLLMReplica
 
+
 def _load_arctic():
     from verl.workers.rollout.remote_rollout.arctic_rollout.arctic_rollout import ArcticReplica
 

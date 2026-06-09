@@ -216,7 +216,11 @@ class ResourcePoolManager:
 
     def get_n_gpus(self) -> int:
         """Get the number of gpus in this cluster."""
-        process_on_gpu_nodes = [process_on_nodes for pool_name, process_on_nodes in self.resource_pool_spec.items() if pool_name in self.gpu_resource_pool_dict]
+        process_on_gpu_nodes = [
+            process_on_nodes
+            for pool_name, process_on_nodes in self.resource_pool_spec.items()
+            if pool_name in self.gpu_resource_pool_dict
+        ]
         return sum([n_gpus for process_on_nodes in process_on_gpu_nodes for n_gpus in process_on_nodes])
 
     def _check_resource_available(self):

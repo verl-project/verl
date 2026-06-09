@@ -1,3 +1,16 @@
+# Copyright 2026 Bytedance Ltd. and/or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """Arctic-RL forwarder worker.
 
 Per-backend worker that drives the Arctic adapter
@@ -24,13 +37,6 @@ from omegaconf import DictConfig
 from tensordict import TensorDict
 
 from verl.remote_backend.base import RemoteBackend, RemoteBackendRegistry
-
-# Eager import so the adapter registers with `RemoteBackendRegistry` in
-# every process that loads this worker — including Ray child procs, which
-# do not inherit the driver's import side-effects. The driver also
-# imports this adapter explicitly (see `verl.trainer.main_ppo`).
-from verl.workers.remote_client import arctic_rl  # noqa: F401
-
 from verl.remote_backend.worker_utils import make_njt, normalize_backend_metrics
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import (
@@ -46,10 +52,16 @@ from verl.utils.profiler import DistProfiler, DistProfilerExtension
 from verl.utils.py_functional import append_to_dict
 from verl.workers.config import ActorConfig, HFModelConfig
 
+# Eager import so the adapter registers with `RemoteBackendRegistry` in
+# every process that loads this worker — including Ray child procs, which
+# do not inherit the driver's import side-effects. The driver also
+# imports this adapter explicitly (see `verl.trainer.main_ppo`).
+from verl.workers.remote_client import arctic_rl  # noqa: F401
 
 # ---------------------------------------------------------------------- #
 # Arctic-RL forwarder worker
 # ---------------------------------------------------------------------- #
+
 
 class ArcticRLActorRolloutRefWorker(Worker, DistProfilerExtension):
     """CPU-only forwarder for the Arctic backend.
@@ -81,10 +93,7 @@ class ArcticRLActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         backend_name = self.main_config.trainer.get("remote_backend")
         if backend_name is None:
-            raise ValueError(
-                "ArcticRLActorRolloutRefWorker requires "
-                "main_config.trainer.remote_backend to be set."
-            )
+            raise ValueError("ArcticRLActorRolloutRefWorker requires main_config.trainer.remote_backend to be set.")
 
         # Registry has no lazy `MODULES` table any more (per @zw0610): the
         # adapter module is imported explicitly by `main_ppo.py` when the
@@ -94,13 +103,9 @@ class ArcticRLActorRolloutRefWorker(Worker, DistProfilerExtension):
         # the handle is what makes this a re-attach rather than a fresh
         # init.
         backend_cls = RemoteBackendRegistry.get(backend_name)
-        self.backend: RemoteBackend = backend_cls.from_config(
-            self.main_config, handle=backend_handle
-        )
+        self.backend: RemoteBackend = backend_cls.from_config(self.main_config, handle=backend_handle)
 
-        DistProfilerExtension.__init__(
-            self, DistProfiler(rank=self.rank, config=None, tool_config=None)
-        )
+        DistProfilerExtension.__init__(self, DistProfiler(rank=self.rank, config=None, tool_config=None))
 
         if self._is_actor:
             self.model_config: HFModelConfig = omega_conf_to_dataclass(self.config.model)
