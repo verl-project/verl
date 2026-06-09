@@ -1,0 +1,37 @@
+task:
+  name: classification_small
+  output_dir_name: classification_small_cpr_paper
+  label_smoothing: 0.1
+  train_transforms:
+    trivial_augment:
+      use: false
+optimizer:
+  - name: adamw_baseline
+    learning_rate: [1.e-1, 1.e-2, 1.e-3, 1.e-4]
+    # learning_rate: [1.e-1, 3.16e-2, 1.e-2, 3.16e-3, 1.e-3]  # finer grid
+    weight_decay: [1, 1.e-1, 1.e-2, 1.e-3, 1.e-4, 0]
+    warmup_factor: 0.025
+    eta_min_factor: 0.1
+  - name: adamcpr_fast
+    learning_rate: [1.e-1, 1.e-2, 1.e-3, 1.e-4]
+    # learning_rate: [1.e-1, 3.16e-2, 1.e-2, 3.16e-3, 1.e-3]  # finer grid
+    kappa_init_param: [0.5, 1, 2, 4, 8, 16, 32]
+    warmup_factor: 0.025
+    eta_min_factor: 0.1
+engine:
+  seed: [1, 2, 3]
+  # data_dir: ./data
+  # output_dir: ./experiments
+  plot: false
+  silent: true
+  sbatch_script_template: baselines/sbatch_template.sh  # adapt the template to your needs
+  run_scheduler: slurm_array
+  sbatch_time_factor: 1.8  # increase this for slower machine
+  sbatch_args:
+    partition: single  # adapt to your cluster
+evaluation:
+  output_types: [pdf]
+  plot:
+    x_axis:
+      - optimizer.kappa_init_param
+      - optimizer.weight_decay
