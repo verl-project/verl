@@ -42,6 +42,7 @@ from sglang.srt.managers.io_struct import (
 )
 from sglang.srt.managers.tokenizer_manager import ServerStatus
 
+from verl.plugin.platform import get_platform
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import get_visible_devices_keyword
 from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
@@ -256,9 +257,11 @@ class SGLangHttpServer:
         attention_backend = engine_kwargs.pop("attention_backend", None)
         mm_attention_backend = engine_kwargs.pop("mm_attention_backend", None)
         if attention_backend is None:
-            # FA3 CUDA-graph capture is broken on sglang>=0.5.12 (#22800);
-            # default to flashinfer (users can opt into fa4 via engine_kwargs).
-            if version.parse(sglang.__version__) >= version.parse("0.5.12"):
+            if torch.version.hip is not None:
+                attention_backend = "aiter"
+            elif version.parse(sglang.__version__) >= version.parse("0.5.12"):
+                # FA3 CUDA-graph capture is broken on sglang>=0.5.12 (#22800);
+                # default to flashinfer (users can opt into fa4 via engine_kwargs).
                 attention_backend = "flashinfer"
             else:
                 attention_backend = "fa3"
@@ -791,7 +794,12 @@ class SGLangReplica(RolloutReplica):
                     node_id=node_id,
                     soft=False,
                 ),
-                runtime_env={"env_vars": {f"RAY_EXPERIMENTAL_NOSET_{visible_devices_keyword}": "1"}},
+                runtime_env={
+                    "env_vars": {
+                        **{var: "1" for var in get_platform().ray_noset_envvars()},
+                        **get_platform().rollout_env_vars(),
+                    }
+                },
                 name=name,
                 max_concurrency=self.max_concurrency,
             ).remote(
