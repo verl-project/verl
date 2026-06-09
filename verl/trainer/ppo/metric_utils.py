@@ -238,8 +238,6 @@ def aggregate_generation_sample_metrics(
             {
                 metric_name("degeneration/ttr_mean"): float(np.mean(ttr)),
                 metric_name("degeneration/ttr_median"): float(np.median(ttr)),
-                metric_name("degeneration/ttr_p75"): float(np.percentile(ttr, 75)),
-                metric_name("degeneration/ttr_p90"): float(np.percentile(ttr, 90)),
             }
         )
 

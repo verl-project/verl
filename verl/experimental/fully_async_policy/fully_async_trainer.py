@@ -39,6 +39,7 @@ from verl.experimental.fully_async_policy.scaling_metrics import (
 from verl.experimental.separation.ray_trainer import SeparateRayPPOTrainer
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.trainer.ppo import core_algos
+from verl.trainer.ppo.metric_utils import aggregate_generation_sample_metrics, compute_generation_sample_metrics
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager
 from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_reward_model
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, should_save_ckpt_esi
@@ -473,6 +474,18 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             if batch is None:
                 raise TrainingStopException("Training terminated: queue returned None")
             self._collect_metrics_from_samples(batch, metrics)
+        generation_sample_metrics = compute_generation_sample_metrics(
+            batch,
+            tokenizer=self.tokenizer,
+            prompt_thinking_start_tokens=self._prompt_thinking_start_tokens(),
+        )
+        metrics.update(
+            aggregate_generation_sample_metrics(
+                generation_sample_metrics,
+                prefix="generation/",
+                include_response_length=False,
+            )
+        )
         batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
         return batch
 
