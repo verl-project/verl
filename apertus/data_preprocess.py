@@ -30,6 +30,7 @@ from typing import Any
 
 import datasets
 
+from table_gpt_data import TABLE_GPT_DATASET_ID, load_table_gpt_mix
 from verl.utils.reward_score.gsm8k import extract_solution as extract_gsm8k_solution
 
 LOCAL_SAVE_DIR = "./data/apertus_demo_rl"
@@ -148,6 +149,16 @@ TRAIN_DATASETS = [
         question_key="question",
         answer_key="input_output",
         solution_key="solutions",
+        sample_size=None,
+    ),
+    DatasetConfig(
+        enabled=True,
+        name="table_gpt",
+        dataset_id=TABLE_GPT_DATASET_ID,
+        split="mixed",
+        adapter="table_gpt",
+        prompt_key="prompt",
+        answer_key="completion",
         sample_size=None,
     ),
     DatasetConfig(
@@ -380,6 +391,42 @@ def make_row(
     if extra_info:
         row["extra_info"].update(extra_info)
     return row
+
+
+@register_adapter("table_gpt")
+def adapt_table_gpt(
+    example: dict[str, Any], idx: int, split: str, config: DatasetConfig
+) -> dict[str, Any]:
+    task = normalize_text(get_value(example, "task")) or normalize_text(
+        get_value(example, "_table_gpt_task")
+    )
+    prompt_text = normalize_text(get_value(example, config.prompt_key))
+    ground_truth = get_value(example, config.answer_key)
+    if not isinstance(ground_truth, str):
+        ground_truth = json_dumps(ground_truth)
+
+    metadata = parse_json_maybe(get_value(example, "metadata"), default={})
+    if not isinstance(metadata, dict):
+        metadata = {}
+    metadata = json_dumps(metadata)
+    source_split = normalize_text(get_value(example, "_table_gpt_split")) or split
+
+    return {
+        "data_source": f"tablegpt/{task}",
+        "prompt": make_prompt(prompt_text),
+        "ability": task,
+        "reward_model": {
+            "style": "rule",
+            "ground_truth": ground_truth,
+        },
+        "extra_info": {
+            "split": source_split,
+            "index": idx,
+            "task": task,
+            "dataset": normalize_text(get_value(example, "dataset")),
+            "metadata": metadata,
+        },
+    }
 
 
 @register_adapter("math")
@@ -969,12 +1016,25 @@ def load_raw_dataset(config: DatasetConfig) -> datasets.Dataset:
     load_kwargs = {}
     if config.subset is not None:
         load_kwargs["name"] = config.subset
-    raw_dataset = datasets.load_dataset(
-        config.dataset_id,
-        split=config.split,
-        cache_dir=os.path.expanduser(DATASETS_CACHE_DIR),
-        **load_kwargs,
-    )
+    if config.adapter == "table_gpt":
+        raw_dataset = load_table_gpt_mix(
+            config.dataset_id,
+            cache_dir=os.path.expanduser(DATASETS_CACHE_DIR),
+        )
+    elif os.path.isfile(os.path.expanduser(config.dataset_id)):
+        raw_dataset = datasets.load_dataset(
+            "parquet",
+            data_files=os.path.expanduser(config.dataset_id),
+            split=config.split,
+            cache_dir=os.path.expanduser(DATASETS_CACHE_DIR),
+        )
+    else:
+        raw_dataset = datasets.load_dataset(
+            config.dataset_id,
+            split=config.split,
+            cache_dir=os.path.expanduser(DATASETS_CACHE_DIR),
+            **load_kwargs,
+        )
     print(f"Loaded {len(raw_dataset)} rows for {config.name}.", flush=True)
 
     if config.filter_key is not None:
