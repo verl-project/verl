@@ -15,8 +15,8 @@ import os
 from typing import Any
 
 import torch
-from arctic_training.arctic_rl import ArcticRLClientConfig, create_arctic_rl_client
-from arctic_training.arctic_rl.ray_server import ArcticRLRayServerState
+from arctic_training.rl import ArcticRLClientConfig, create_arctic_rl_client
+from arctic_training.rl.ray_server import ArcticRLRayServerState
 from transformers import AutoTokenizer
 
 from verl.remote_backend.base import RemoteBackend, RemoteBackendRegistry
@@ -110,7 +110,7 @@ class ArcticRLClientWrapper(RemoteBackend):
         # names the backend, so no extra `arctic:` nesting is needed.
         self._backend_config = config.remote_backend
         self._client = None
-        self.use_zorro = self._backend_config.use_zorro
+        self.zorro_train_enable = self._backend_config.zorro_train.enable
         self.use_liger = self.config.actor_rollout_ref.model.use_liger
         # Static, config-derived engineering value Arctic needs on every
         # `compute_log_prob` / `update_actor` call. Cached here at init
@@ -182,7 +182,7 @@ class ArcticRLClientWrapper(RemoteBackend):
     ) -> dict:
         batch, max_prompt_len, max_response_len = _prepare_padded_arctic_batch_dict(data, pad_token_id)
         meta = dict(
-            use_zorro=self.use_zorro,
+            zorro_train_enable=self.zorro_train_enable,
             rollout_n=rollout_n,
             max_prompt_len=max_prompt_len,
             max_response_len=max_response_len,
@@ -241,7 +241,7 @@ class ArcticRLClientWrapper(RemoteBackend):
             max_response_len=max_response_len,
             max_token_len_per_gpu=self._max_token_len_per_gpu,
             temperature=data["temperature"],
-            use_zorro=self.use_zorro,
+            zorro_train_enable=self.zorro_train_enable,
             global_batch_size=data["global_batch_size"],
             rollout_is_weights=data.get("rollout_is_weights", None),
             batch_num_tokens=data["loss_mask"].sum(),
@@ -309,12 +309,12 @@ class ArcticRLClientWrapper(RemoteBackend):
             attn_implementation=attn_implementation,
         )
 
-        if self.use_zorro:
+        if self.zorro_train_enable:
             # XXX: can't find where it's configured
             use_unpad = True
 
             ds_worker_config.update(
-                use_zorro=True,
+                zorro_train_enable=True,
                 response_len=self.config.data.max_response_length,
                 max_token_len=self.config.actor_rollout_ref.rollout.max_num_batched_tokens,
                 rollout_n=self.config.actor_rollout_ref.rollout.n,
@@ -384,6 +384,7 @@ class ArcticRLClientWrapper(RemoteBackend):
             },
             ds_worker_config=self._create_ds_worker_config(),
             vllm_config=vllm_config,
+            checkpoint_path=self.config.trainer.default_local_dir,
         )
 
         # ArcticRLClient is constructed as a ray remote actor with num_gpus=0,

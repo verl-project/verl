@@ -26,8 +26,17 @@ log_prob_gpus: 1
 # tensor-parallel size for the sampling engine
 sampling_tp_size: 1
 
-# whether to use zorro packing for off-policy log-probs
-use_zorro: False
+# Grouped block for the ZoRRO training path. The arctic_training
+# server reads `zorro_train_enable` from `ds_worker_config` and
+# per-call request metas, so this adapter forwards `enable` as that
+# flat kwarg rather than passing the nested dict.
+zorro_train:
+
+  # whether to use zorro packing for off-policy log-probs
+  enable: False
+
+  # should equal actor_rollout_ref.rollout.n for best perf
+  max_rollouts: ${actor_rollout_ref.rollout.n}
 
 # ray or http: ray would be much faster for payload comms in the on-prem use case
 comm_protocol: ray
