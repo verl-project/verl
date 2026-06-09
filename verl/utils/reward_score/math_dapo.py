@@ -190,9 +190,7 @@ def is_correct_minerva(
     return (pred == gt), pred
 
 
-def is_correct_strict_box(
-    pred: str, gt: str, pause_tokens_index: Optional[list[int]] = None
-) -> tuple[int, Optional[str]]:
+def is_correct_strict_box(pred: str, gt: str, pause_tokens_index: Optional[list[int]] = None) -> tuple[bool, str]:
     """Check if the prediction is correct using strict boxed answer criteria.
 
     Args:
@@ -201,7 +199,7 @@ def is_correct_strict_box(
         pause_tokens_index: Indices of pause tokens
 
     Returns:
-        Tuple of (score, extracted_prediction)
+        Tuple of (is_correct, extracted_prediction)
     """
     # Extract the relevant part of the prediction
     if pause_tokens_index is not None:
@@ -212,14 +210,14 @@ def is_correct_strict_box(
 
     # Extract and check the boxed answer
     boxed_pred = last_boxed_only_string(pred)
-    extracted_pred = remove_boxed(boxed_pred) if boxed_pred is not None else None
+    extracted_pred = remove_boxed(boxed_pred) if boxed_pred is not None else "[INVALID]"
 
-    return 1 if (extracted_pred == gt) else -1, extracted_pred
+    return (extracted_pred == gt), extracted_pred
 
 
 def verify(
     solution_str: str, answer: str, strict_box_verify: bool = False, pause_tokens_index: Optional[list[int]] = None
-) -> bool:
+) -> tuple[bool, str]:
     """Verify if the solution is correct.
 
     Args:
@@ -229,13 +227,13 @@ def verify(
         pause_tokens_index: Indices of pause tokens
 
     Returns:
-        True if the solution is correct, False otherwise
+        Tuple of (is_correct, extracted_prediction)
     """
     if strict_box_verify:
         correct, pred = is_correct_strict_box(solution_str, answer, pause_tokens_index)
-        return correct == 1, pred
+    else:
+        correct, pred = is_correct_minerva(solution_str, answer)
 
-    correct, pred = is_correct_minerva(solution_str, answer)
     return correct, pred
 
 
@@ -244,7 +242,7 @@ def compute_score(
     ground_truth: str,
     strict_box_verify: bool = False,
     pause_tokens_index: Optional[list[int]] = None,
-) -> float:
+) -> dict:
     """Compute the reward score for a solution.
 
     Args:
@@ -254,7 +252,7 @@ def compute_score(
         pause_tokens_index: Indices of pause tokens
 
     Returns:
-        Reward score (1.0 for correct, -1.0 for incorrect)
+        Dictionary containing score (1.0 for correct, -1.0 for incorrect), accuracy, and prediction
     """
     # Limit solution length for efficiency
     solution_str = solution_str[-300:]  # The longest answer in MATH-500 has 159 characters
