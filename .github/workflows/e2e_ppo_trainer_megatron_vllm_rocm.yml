@@ -102,12 +102,7 @@ jobs:
     runs-on: [self-hosted, rocm-mi300]
     timeout-minutes: 60 # Increase this timeout value as needed
     container:
-      # NOTE: container.image cannot reference the `env` context, so the image is
-      # hardcoded here (the `env` context is unavailable for jobs.<id>.container).
       image: "verlai/verl:rocm702-vllm020-te210-20260518"
-      # Mirrors the local `docker run` used for ROCm MI300 dev. Note: --network,
-      # --name, -w/--workdir and -itd are managed by the Actions runner and must
-      # NOT be set here (the runner forces its own network/workdir/detach).
       options: >-
         --device /dev/kfd
         --device /dev/dri
@@ -128,7 +123,6 @@ jobs:
       HOME: "/root"
     steps:
       - name: Check ROCm and GPU info
-      # TODO: confirm the ROCm tooling available in the image.
         run: |
           rocm-smi || true
           rocminfo || true
@@ -187,4 +181,93 @@ jobs:
         run: |
           ray stop --force
           CUSTOM_REWARD_FN=True ADV_ESTIMATOR=grpo USE_KL=True bash tests/special_e2e/ppo_trainer/run_function_reward.sh
-      # TODO: LoRA tests， not supported on ROCm yet
+      - name: Clean up
+        run: |
+          rm -rf checkpoints
+
+  e2e_ppo_trainer_megatron-moe-expert-parallel_rocm:
+    # TODO: change back to 'verl-project' before upstreaming. Set to your fork
+    # owner so the job runs during local validation.
+    if: github.repository_owner == 'PeterYang12'
+    # Must match a label you give the self-hosted runner during `config.sh`.
+    runs-on: [self-hosted, rocm-mi300]
+    timeout-minutes: 60 # Increase this timeout value as needed
+    container:
+      image: "verlai/verl:rocm702-vllm020-te210-20260518"
+      options: >-
+        --device /dev/kfd
+        --device /dev/dri
+        --privileged
+        --group-add video
+        --cap-add SYS_PTRACE
+        --security-opt seccomp=unconfined
+        --shm-size 2048g
+        --ulimit memlock=-1
+        --ulimit stack=67108864
+        -v /data/models:/root/models
+        -v /data/data:/root/data
+    env:
+      HF_HUB_ENABLE_HF_TRANSFER: "0"
+      HOME: "/root"
+    steps:
+      - name: Check ROCm and GPU info
+        run: |
+          rocm-smi || true
+          rocminfo || true
+      - name: Check initial pip list from image
+        run: |
+          pip list
+      - name: Checkout verl-project/verl repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          clean: true
+      - name: Install the current repository
+        run: |
+          pip install --no-deps -e .
+      - name: Check final pip list
+        run: |
+          pip list
+      - name: Prepare GSM8K dataset
+        run: |
+          ray stop --force
+          python3 examples/data_preprocess/gsm8k.py --local_dir ${HOME}/models/hf_data/gsm8k
+      - name: Running GSM8K E2E training tests with 3D parallelism on 8 MI300 GPUs with Megatron-Bridge (Qwen3-30B-A3B-Instruct-2507)
+        run: |
+          ray stop --force
+          ADV_ESTIMATOR=grpo USE_DUMMY_MODEL=True DUMMY_MODEL_CONFIG_PATH=tests/special_e2e/ppo_trainer/expert_parallel/qwen2moe_minimal.json \
+          PPO_MAX_TOKEN_LEN=1024 FWD_MAX_TOKEN_LEN=1024 \
+          MAX_PROMPT_LENGTH=512 MAX_RESPONSE_LENGTH=512 \
+          MODEL_ID=Qwen/Qwen3-30B-A3B-Instruct-2507 USE_MBRIDGE=True VANILLA_MBRIDGE=True VALUE_VANILLA_MBRIDGE=True \
+          COMMON_PP=2 COMMON_VPP=null COMMON_CP=1 COMMON_TP=4 COMMON_EP=4 COMMON_ETP=1 INFER_TP=8 \
+          USE_DIST_CKPT=False ALL_OFFLOAD=True SKIP_SAVE_HF_MODEL=1 \
+          bash tests/special_e2e/run_ppo_trainer_megatron.sh \
+          global_profiler.tool=null actor_rollout_ref.actor.profiler.tool=null actor_rollout_ref.ref.profiler.tool=null actor_rollout_ref.rollout.profiler.tool=null critic.profiler.tool=null
+      - name: Running GSM8K E2E training tests with 3D parallelism with FP8 rollout on 8 MI300 GPUs with Megatron-Bridge (Qwen3-30B-A3B-Instruct-2507)
+        run: |
+          ray stop --force
+          ADV_ESTIMATOR=grpo USE_DUMMY_MODEL=True DUMMY_MODEL_CONFIG_PATH=tests/special_e2e/ppo_trainer/expert_parallel/qwen2moe_minimal.json \
+          PPO_MAX_TOKEN_LEN=1024 FWD_MAX_TOKEN_LEN=1024 \
+          MAX_PROMPT_LENGTH=512 MAX_RESPONSE_LENGTH=512 \
+          MODEL_ID=Qwen/Qwen3-30B-A3B-Instruct-2507 USE_MBRIDGE=True VANILLA_MBRIDGE=True VALUE_VANILLA_MBRIDGE=True \
+          COMMON_PP=2 COMMON_VPP=null COMMON_CP=1 COMMON_TP=4 COMMON_EP=4 COMMON_ETP=1 INFER_TP=2 \
+          USE_DIST_CKPT=False ALL_OFFLOAD=True SKIP_SAVE_HF_MODEL=1 ROLLOUT_QUANTIZATION=fp8 \
+          bash tests/special_e2e/run_ppo_trainer_megatron.sh \
+          global_profiler.tool=null actor_rollout_ref.actor.profiler.tool=null actor_rollout_ref.ref.profiler.tool=null actor_rollout_ref.rollout.profiler.tool=null critic.profiler.tool=null
+      - name: clean up
+        run: |
+          rm -rf checkpoints
+
+  cleanup_rocm:
+    needs:
+      - e2e_ppo_trainer_fsdp_vllm_rocm
+      - e2e_ppo_trainer_megatron-moe-expert-parallel_rocm
+    # TODO: change back to "always() && github.repository_owner == 'verl-project'"
+    if: ${{ always() && github.repository_owner == 'PeterYang12' }}
+    runs-on: [self-hosted, rocm-mi300]
+    container:
+      image: "verlai/verl:rocm702-vllm020-te210-20260518"
+    steps:
+      - name: Clean up leftover checkpoints
+        run: |
+          rm -rf checkpoints
