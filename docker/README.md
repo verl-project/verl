@@ -55,19 +55,37 @@ Pre-built images for GB200 (aarch64) are not yet published. Users should build l
 docker build -f docker/Dockerfile.stable.vllm -t verl:vllm-arm64 .
 ```
 
-## Multi-backend uv image (`Dockerfile_uv`)
+## uv image (`Dockerfile.uv.cu130`)
 
-`Dockerfile_uv` builds one image with a separate venv per non-Ascend backend
-under `/workspace/verl/.venvs/`. Build with BuildKit so the per-backend uv
-cache mount is honored:
+`docker/Dockerfile.uv.cu130` builds one image around verl's universal
+`uv.lock` (GPU: CUDA 13.0 / torch 2.11 — vllm, sglang, fsdp, megatron — plus
+the GPU-free `cpu` slice). The build **bakes the full uv package cache for
+every backend** into the image (the `prefetch` stage); it does *not* bake a
+fixed `.venv`. Build with BuildKit:
 
 ```sh
-DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile_uv -t verl:uv .
+DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile.uv.cu130 -t verl:uv-cu130 .
 ```
 
-For the cache layout, `TARGETS` slimming, and the recipe for bind-mounting
-`~/.cache/uv` at runtime to quickly resync packages in a running container,
-see the **"Install from multi-backend uv image (Dockerfile_uv)"** section in
+You pick the backend combination at **run** time (not build time) by syncing it
+yourself (it must be conflict-free; see `[tool.uv].conflicts`). The container
+starts in a shell — `manage_envs.py sync` `uv sync`s the requested extras into
+`/workspace/verl/.venv` from the baked cache (fast / offline), and that venv is
+already on `PATH`:
+
+```sh
+docker run --rm -it --gpus all verl:uv-cu130 bash
+# then, inside the container:
+python3 manage_envs.py sync sglang megatron -- --frozen
+python3 -m verl.trainer.main_ppo ...
+```
+
+Optional named stages: `--target=prefetch` builds just the baked cache (every
+backend, no source), and `--target=lock` regenerates `uv.lock`. A companion
+`docker/Dockerfile.uv.cu129` builds the cu12.9 / torch-2.9.1 backends (veomni,
+nemoautomodel) the same way; trtllm stays deferred. For the full story — the
+manual sync flow, the baked-cache mechanics, and re-locking — see the
+**"Install from the uv images"** section in
 [`docs/start/install.rst`](../docs/start/install.rst).
 
 ## Installation from Docker

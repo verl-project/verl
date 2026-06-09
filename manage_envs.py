@@ -12,191 +12,168 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Per-backend uv environment driver for verl.
+"""Universal-lock uv environment driver for verl.
 
-Each backend has its own independent lockfile under
-``requirements/<backend>.lock``, generated from ``[project.optional-dependencies].<backend>``
-in ``pyproject.toml``. There is intentionally no universal ``uv.lock``:
-``manage_envs.py sync vllm`` resolves *only* the vllm extra and never
-fetches another backend's git sources or URL-pinned wheels.
+verl uses **one** ``uv.lock`` for the whole project. Every backend is a PEP
+621 extra in ``pyproject.toml``; mutually exclusive ones are declared in
+``[tool.uv].conflicts`` so a single ``uv lock`` resolves all of them into the
+one lockfile. At runtime you materialize exactly one conflict-free
+combination of extras into the project venv (``.venv``) and run everything —
+every Ray worker group — from it. There is no per-backend lockfile and no Ray
+``py_executable`` switching.
 
-Two-step pipeline per backend::
+Typical flow::
 
-    # 1. Compile pyproject extra -> requirements lockfile (when missing
-    #    or when --recompile is passed)
-    uv pip compile pyproject.toml --extra <backend> \\
-        --python <python-version> \\
-        --output-file requirements/<backend>.lock
+    python manage_envs.py lock                       # (re)generate uv.lock
+    python manage_envs.py sync fsdp vllm             # build .venv for a run
+    source .venv/bin/activate                        # or: manage_envs.py shell ...
+    python -m verl.trainer.main_ppo trainer.n_gpus_per_node=8 ...
 
-    # 2. Sync venv from the lockfile, then install verl editable
-    uv venv .venvs/.venv-<backend> --python <python-version>
-    uv pip sync requirements/<backend>.lock \\
-        --python .venvs/.venv-<backend>/bin/python \\
-        --link-mode=copy
-    uv pip install -e . --no-deps \\
-        --python .venvs/.venv-<backend>/bin/python
+    # one-shot equivalent (uv resolves + runs from .venv):
+    python manage_envs.py run fsdp vllm -- python -m verl.trainer.main_ppo ...
 
-What that buys:
+Commands::
 
-  * ``manage_envs.py sync vllm`` only resolves vllm extras (no megatron /
-    apex / TE / flash-attn etc. appear during lock or install),
-  * lockfiles can be checked in for reproducibility,
-  * pyproject.toml stays the single source of truth for backend recipes,
-  * ``[tool.uv.sources]`` per-extra URL / index routing still applies.
+    lock                 # uv lock  -> regenerate the universal uv.lock
+    sync   <extras...>   # uv sync --extra ...  -> materialize .venv (runtime)
+    run    <extras...> -- <cmd...>   # uv run --extra ... -- <cmd>
+    shell  <extras...>   # sync, then open a shell with .venv activated
+    list                 # extras, conflict rules, .venv state, prefetch plan
+    clean                # remove .venv
+    prefetch             # FIRST-TIME / Docker only: warm the uv cache with
+                         #   every backend's wheels & source builds (see below)
 
-Usage::
-
-    python manage_envs.py sync vllm
-    python manage_envs.py sync inference
-    python manage_envs.py sync all
-    python manage_envs.py lock vllm                # (re)compile only
-    python manage_envs.py lock all --recompile     # refresh every lockfile
-    python manage_envs.py list
-    python manage_envs.py clean vllm
-    python manage_envs.py shell vllm
-    python manage_envs.py path vllm
-
-Anything after ``--`` on ``sync`` / ``lock`` is forwarded to the underlying
-``uv pip ...`` invocation::
+Anything after ``--`` on ``lock`` / ``sync`` / ``prefetch`` is forwarded to
+the underlying ``uv`` invocation, e.g.::
 
     python manage_envs.py sync megatron -- --reinstall -v
+
+Keeping internal packages out of uv's hands
+--------------------------------------------
+If your site ships its own build of some package (e.g. an internal ``ray`` or
+``wandb``) that ``uv sync`` must not overwrite or delete, set
+``VERL_UV_NO_INSTALL`` to a space/comma-separated list of distribution names::
+
+    export VERL_UV_NO_INSTALL="ray wandb"
+    python manage_envs.py sync fsdp vllm     # everything except ray / wandb
+    uv pip install <your internal ray / wandb wheels>   # then add your builds
+
+``sync`` / ``shell`` then pass ``--no-install-package <name>`` (uv won't install
+or replace it) plus ``--inexact`` (uv won't remove an already-installed build),
+and ``run`` adds ``--no-sync`` so it executes in your curated ``.venv``
+untouched. Only the named distribution is skipped — not its dependencies — and
+an empty / unset value keeps uv's default exact sync. (uv has no env var of its
+own for this, which is why it lives here.)
+
+`sync` vs `prefetch`
+--------------------
+``sync`` is the **runtime** command: it installs one conflict-free extra
+combination into ``.venv`` so you can train/serve. ``prefetch`` is a
+**first-time / image-build** helper: it downloads & builds *every* backend's
+dependencies into the uv cache (``$UV_CACHE_DIR``, default ``~/.cache/uv``) so
+later ``sync`` runs are fast/offline. Because the backends conflict,
+``prefetch`` cannot produce a single usable env — it syncs throwaway envs
+purely to populate the cache (passing ``--no-install-project`` so only
+dependencies are cached, not verl itself) and never creates or modifies
+``.venv``.
+
+In Docker this is what makes one image serve any backend: bake ``prefetch``
+as a real layer (point ``UV_CACHE_DIR`` at an in-image path and do **not** use
+a ``--mount=type=cache``) so the cache ships *inside* the image. The container
+then picks its combination at run time — ``sync <extras...>`` builds ``.venv``
+from the baked cache, offline — instead of hard-coding one combo at build
+time. Do **not** use ``prefetch`` as a runtime sync; use ``sync <extras...>``
+for that.
+
+This driver exposes two GPU torch "worlds" plus a CPU slice, all in one lock:
+the cu13.0 / torch-2.11 backends (vllm, sglang, fsdp, megatron), the cu12.9 /
+torch-2.9.1 backends (veomni, nemoautomodel), and the GPU-free ``cpu`` slice.
+They never mix in one ``.venv`` (see the conflict sets). ``prefetch`` can be
+scoped to one world via the ``cu130`` / ``cu129`` shortcuts so each Docker
+image bakes only its own backends. trtllm is deferred in pyproject.toml (a
+CUDA-13 RC sdist; see docker/Dockerfile.uv.cu129) and absent here.
 
 Re-locking after a dependency change
 ------------------------------------
 Edit ``pyproject.toml`` (and the matching apt deb in
-``docker/Dockerfile.uv.cu{130,129}`` if it's a system lib), then::
+``docker/Dockerfile.uv.cu130`` if it's a system lib), then::
 
-    python manage_envs.py lock <backend> --recompile  # refresh that lockfile
-    python manage_envs.py sync <backend>              # validate locally
-    git add pyproject.toml requirements/<backend>.lock
-
-Cross-venv runtime
-------------------
-For disaggregated jobs ``launch`` *appends Hydra overrides* (one per role)
-to the user's command — verl reads those at job start to route each Ray
-worker group at the right venv's Python. Per-role flags map to per-role
-``*.venv`` Hydra fields (see :mod:`verl.utils.venv` for the resolution
-rules). ``--trainer`` is a global fallback for trainer-side groups whose
-role-level field is left null.
-
-Common case (one venv for all training, one for inference)::
-
-    python manage_envs.py launch --rollout vllm --trainer megatron -- \\
-        python -m verl.trainer.main_ppo trainer.n_gpus_per_node=8 ...
-
-Disaggregated case (mix engines per role)::
-
-    python manage_envs.py launch --rollout vllm --actor megatron \\
-        --ref fsdp --critic fsdp -- python -m verl.trainer.main_ppo ...
+    python manage_envs.py lock          # refresh uv.lock
+    python manage_envs.py sync <combo>  # validate locally
+    git add pyproject.toml uv.lock
 """
 
 from __future__ import annotations
 
 import argparse
 import os
-import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
-INFERENCE_BACKENDS: list[str] = ["vllm", "sglang", "trtllm"]
-TRAINING_BACKENDS: list[str] = ["fsdp", "megatron", "veomni", "nemoautomodel"]
-# `cpu` is a CI / unit-test / dev-sanity env (no GPU runtime) — kept out
-# of the inference/training groups but still a first-class backend.
+# Active extras in the universal lock. Two GPU torch "worlds" + a CPU slice:
+#   * cu13.0 / torch 2.11  : vllm, sglang (inference) + fsdp, megatron (training)
+#   * cu12.9 / torch 2.9.1 : veomni, nemoautomodel (training)
+#   * cpu   / torch 2.11   : GPU-free CI / unit-test / dev-sanity slice
+# trtllm is deferred in pyproject.toml (a CUDA-13 RC) and not listed here.
+INFERENCE_BACKENDS: list[str] = ["vllm", "sglang"]
+TRAINING_BACKENDS: list[str] = ["fsdp", "megatron"]
+# cu12.9 / torch 2.9.1 training backends (their own torch world).
+CU129_BACKENDS: list[str] = ["veomni", "nemoautomodel"]
+# `cpu` is the GPU-free CI / unit-test / dev-sanity slice.
 DEV_BACKENDS: list[str] = ["cpu"]
-ALL_BACKENDS: list[str] = INFERENCE_BACKENDS + TRAINING_BACKENDS + DEV_BACKENDS
+ALL_EXTRAS: list[str] = INFERENCE_BACKENDS + TRAINING_BACKENDS + CU129_BACKENDS + DEV_BACKENDS
 
-# Per-backend CUDA major. The lockfile has two parallel cu forks (declared
-# in pyproject.toml's [tool.uv.sources] / override-dependencies markers),
-# each backed by a matching Docker base image:
-#
-#   * cu13 (docker/Dockerfile.uv.cu130, cuda:13.0.2) — torch 2.11 / cu130
-#     wheels; matching apt cuDNN-cuda-13 / nccl-cuda13.0 debs.
-#   * cu12.9 (docker/Dockerfile.uv.cu129, cuda:12.9.1) — torch 2.9.x-2.10
-#     / cu129 wheels; matching apt cuDNN-cuda-12 / nccl-cuda12.9 debs.
-#     Used for backends whose upstream pins still trail torch 2.11
-#     (trtllm, veomni, nemoautomodel).
-#
-# Use this map to validate "image vs backend" combos and to drive the
-# Dockerfile.uv.cu* TARGETS defaults. `cpu` carries no CUDA dep so it is
-# valid in both images.
-BACKEND_CUDA_MAJOR: dict[str, str] = {
-    "vllm": "13",
-    "sglang": "13",
-    "fsdp": "13",
-    "megatron": "13",
-    "trtllm": "12",
-    "veomni": "12",
-    "nemoautomodel": "12",
-    "cpu": "any",
-}
+# Mutually exclusive extras — must mirror [tool.uv].conflicts in pyproject.toml.
+# At most one member of each set may be synced into a single .venv. The three
+# torch worlds never mix, so the cu12.9 backends join every set: vllm / sglang
+# are competing inference engines; cpu is GPU-free; veomni / nemoautomodel pin a
+# different torch. fsdp / megatron may co-exist with one cu130 inference engine.
+# (The flash-attn-* URL-routing sub-extras also conflict in pyproject.toml, but
+# they are internal and never synced directly, so they are omitted here.)
+CONFLICT_SETS: list[set[str]] = [
+    {"vllm", "sglang", "cpu", "veomni", "nemoautomodel"},
+    {"fsdp", "cpu", "veomni", "nemoautomodel"},
+    {"megatron", "cpu", "veomni", "nemoautomodel"},
+]
 
-# PyTorch wheel index for ``uv pip sync``. ``uv pip compile`` reads
-# ``[tool.uv.sources]`` from pyproject.toml, but sync only sees the lockfile —
-# pass ``--torch-backend`` so ``torch==*+cu130`` / ``+cu129`` wheels resolve.
-# See https://docs.astral.sh/uv/guides/integration/pytorch/
-BACKEND_TORCH_BACKEND: dict[str, str] = {
-    "vllm": "cu130",
-    "sglang": "cu130",
-    "fsdp": "cu130",
-    "megatron": "cu130",
-    "trtllm": "cu129",
-    "veomni": "cu129",
-    "nemoautomodel": "cu129",
-    "cpu": "cpu",
-}
+# Single interpreter for the whole project (matches [tool.uv].environments,
+# which pins python_full_version >= '3.12').
+PYTHON_VERSION = "3.12"
 
-# Per-backend python version. Every supported backend currently targets
-# CUDA-on-x86_64-Linux + Python 3.12; Ascend NPU and aarch64 GPU variants
-# are out of scope for the uv flow (see [tool.uv].environments).
-PYTHON_VERSION: dict[str, str] = {
-    "vllm": "3.12",
-    "sglang": "3.12",
-    "trtllm": "3.12",
-    "fsdp": "3.12",
-    "megatron": "3.12",
-    "veomni": "3.12",
-    "nemoautomodel": "3.12",
-    "cpu": "3.12",
-}
-
-# Recommended build-time env vars per backend. Only `megatron` source-builds
-# today (apex + TE v2.15); every other backend installs only prebuilt wheels
-# (flash-attn 2.8.3 from mjun0812/flash-attention-prebuild-wheels, torch /
-# vllm / sglang / trtllm from PyPI / pytorch indexes). MAX_JOBS=32 is the
-# floor that succeeds everywhere; bump via `MAX_JOBS=128 python
-# manage_envs.py sync megatron` on big hosts.
+# Recommended build-time env vars, keyed by extra. `megatron` source-builds
+# apex + TE v2.15; the cu12.9 backends (veomni / nemoautomodel) source-build
+# flash-attn 2.8.3 against torch 2.9.1 (there is no cu129 prebuilt wheel — uv
+# can't fork a second direct URL, uv#13073). Every other extra is prebuilt
+# wheels only (cu130 flash-attn, torch / vllm / sglang from the pytorch / PyPI
+# indexes). MAX_JOBS=32 is the floor that succeeds everywhere; bump via e.g.
+# `MAX_JOBS=128 python manage_envs.py sync megatron` on big hosts.
 BUILD_ENV: dict[str, dict[str, str]] = {
     "megatron": {
         "MAX_JOBS": "32",
         "NVTE_FRAMEWORK": "pytorch",
         "NVTE_BUILD_THREADS_PER_JOB": "4",
     },
+    # flash-attn source build honors MAX_JOBS (heavy nvcc compile).
+    "veomni": {"MAX_JOBS": "32"},
+    "nemoautomodel": {"MAX_JOBS": "32"},
 }
 
 GROUPS: dict[str, list[str]] = {
-    "all": ALL_BACKENDS,
+    "all": ALL_EXTRAS,
     "inference": INFERENCE_BACKENDS,
     "training": TRAINING_BACKENDS,
     "dev": DEV_BACKENDS,
+    # CUDA-world shortcuts, used to scope `prefetch` per Docker image so each
+    # image bakes only the backends it can actually run on its CUDA base.
+    "cu130": INFERENCE_BACKENDS + TRAINING_BACKENDS,  # torch 2.11 GPU backends
+    "cu129": CU129_BACKENDS,                          # torch 2.9.1 GPU backends
 }
 
 VERL_DIR = Path(__file__).resolve().parent
-VENVS_DIR = (VERL_DIR / ".venvs").resolve()
-REQUIREMENTS_DIR = (VERL_DIR / "requirements").resolve()
-
-
-def _venv_path(backend: str) -> Path:
-    return VENVS_DIR / f".venv-{backend}"
-
-
-def _venv_python(backend: str) -> Path:
-    return _venv_path(backend) / "bin" / "python"
-
-
-def _lock_path(backend: str) -> Path:
-    return REQUIREMENTS_DIR / f"{backend}.lock"
+VENV_DIR = (VERL_DIR / ".venv").resolve()
 
 
 def _require_uv() -> None:
@@ -205,322 +182,313 @@ def _require_uv() -> None:
 
 
 def _expand(items: list[str]) -> list[str]:
+    """Expand group shortcuts (all/inference/training/dev) to extras, dedup,
+    preserve order."""
     out: list[str] = []
     for item in items:
         if item in GROUPS:
             out.extend(GROUPS[item])
-        elif item in ALL_BACKENDS:
+        elif item in ALL_EXTRAS:
             out.append(item)
         else:
-            sys.exit(f"error: unknown backend {item!r}. valid: {', '.join(ALL_BACKENDS)} (or all/inference/training)")
+            sys.exit(
+                f"error: unknown extra {item!r}. valid: {', '.join(ALL_EXTRAS)} "
+                "(or shortcuts: all, inference, training, dev)"
+            )
     seen: set[str] = set()
-    return [b for b in out if not (b in seen or seen.add(b))]
+    return [e for e in out if not (e in seen or seen.add(e))]
 
 
-def _run(cmd: list[str], env_overrides: dict[str, str] | None = None) -> int:
+def _conflict_in(extras: list[str]) -> tuple[str, str] | None:
+    """Return the first conflicting pair found in ``extras`` (or None)."""
+    chosen = set(extras)
+    for cs in CONFLICT_SETS:
+        clash = sorted(chosen & cs)
+        if len(clash) > 1:
+            return clash[0], clash[1]
+    return None
+
+
+def _validate_combo(extras: list[str]) -> None:
+    clash = _conflict_in(extras)
+    if clash:
+        sys.exit(
+            f"error: extras {clash[0]!r} and {clash[1]!r} are mutually exclusive "
+            "(see [tool.uv].conflicts in pyproject.toml). A single .venv can hold "
+            "at most one of each conflict set:\n  "
+            + "\n  ".join("{" + ", ".join(sorted(cs)) + "}" for cs in CONFLICT_SETS)
+        )
+
+
+def _extra_flags(extras: list[str]) -> list[str]:
+    flags: list[str] = []
+    for e in extras:
+        flags += ["--extra", e]
+    return flags
+
+
+def _build_env(extras: list[str]) -> dict[str, str]:
+    """Merge recommended build-time env vars for the selected extras."""
+    env: dict[str, str] = {}
+    for e in extras:
+        env.update(BUILD_ENV.get(e, {}))
+    return env
+
+
+def _no_install_packages() -> list[str]:
+    """Distribution names the operator wants uv to leave alone, parsed from the
+    ``VERL_UV_NO_INSTALL`` env var (space/comma-separated). Empty by default."""
+    return os.environ.get("VERL_UV_NO_INSTALL", "").replace(",", " ").split()
+
+
+def _no_install_flags() -> list[str]:
+    """``uv sync`` flags that keep ``_no_install_packages()`` untouched: skip
+    (re)installing each one (``--no-install-package``) and don't remove an
+    already-installed build (``--inexact``, since otherwise an exact sync would
+    delete it as extraneous). Empty when nothing is configured, so the default
+    exact sync is preserved. Install the internal builds yourself afterwards,
+    e.g. ``uv pip install <wheel>``."""
+    pkgs = _no_install_packages()
+    if not pkgs:
+        return []
+    flags = ["--inexact"]
+    for pkg in pkgs:
+        flags += ["--no-install-package", pkg]
+    return flags
+
+
+def _run(cmd: list[str], env_overrides: dict[str, str | None] | None = None) -> int:
+    """Run ``cmd`` in VERL_DIR. ``env_overrides`` values that are ``None``
+    *unset* the variable (used to drop a stale ``VIRTUAL_ENV`` so uv doesn't
+    warn when we target a throwaway env)."""
     if env_overrides:
-        prefix = " ".join(f"{k}={v}" for k, v in env_overrides.items())
-        print(f"$ {prefix} {' '.join(cmd)}", flush=True)
+        shown = " ".join(f"{k}={'' if v is None else v}" for k, v in env_overrides.items())
+        print(f"$ {shown} {' '.join(cmd)}", flush=True)
     else:
         print(f"$ {' '.join(cmd)}", flush=True)
-    env = {**os.environ, **(env_overrides or {})}
+    env = dict(os.environ)
+    for k, v in (env_overrides or {}).items():
+        if v is None:
+            env.pop(k, None)
+        else:
+            env[k] = v
     return subprocess.run(cmd, env=env, cwd=str(VERL_DIR)).returncode
 
 
-def _compile_lockfile(
-    backend: str,
-    *,
-    extra_args: list[str] | None = None,
-    env_overrides: dict[str, str] | None = None,
-) -> int:
-    """Run ``uv pip compile pyproject.toml --extra <backend>`` and write
-    the resolved requirements to ``requirements/<backend>.lock``.
+def _covering_combos(extras: list[str] | None = None) -> list[list[str]]:
+    """Pack ``extras`` into the fewest conflict-free combinations.
 
-    Resolution is scoped to a single extra: only that extra's transitive
-    closure is fetched. Other backends' git sources / URL wheels are
-    never touched.
+    The returned combos together touch every extra in ``extras`` (default
+    ``ALL_EXTRAS``) while each one is valid for a single ``uv sync`` (no
+    internal conflict). Syncing them in turn therefore fetches / builds every
+    distribution those extras need in ``uv.lock`` into the shared uv cache.
+    Greedy first-fit stays correct if the conflict topology in
+    ``CONFLICT_SETS`` changes (over ALL_EXTRAS it yields
+    ``[[vllm, fsdp, megatron], [sglang], [veomni], [nemoautomodel], [cpu]]``;
+    over ``cu130`` it yields ``[[vllm, fsdp, megatron], [sglang]]``).
     """
-    REQUIREMENTS_DIR.mkdir(parents=True, exist_ok=True)
-    lock = _lock_path(backend)
-    cmd = [
-        "uv",
-        "pip",
-        "compile",
-        "pyproject.toml",
-        "--extra",
-        backend,
-        "--python",
-        PYTHON_VERSION[backend],
-        "--output-file",
-        str(lock),
-        *(extra_args or []),
-    ]
-    return _run(cmd, env_overrides)
+    combos: list[list[str]] = []
+    for extra in extras if extras is not None else ALL_EXTRAS:
+        for combo in combos:
+            if _conflict_in([*combo, extra]) is None:
+                combo.append(extra)
+                break
+        else:
+            combos.append([extra])
+    return combos
 
 
 def cmd_lock(args: argparse.Namespace) -> int:
-    """(Re)compile per-backend lockfiles via ``uv pip compile``.
-
-    Without ``--recompile``, only missing lockfiles are generated. With
-    ``--recompile``, every requested backend is re-resolved (use this
-    after bumping a pin in ``pyproject.toml``).
-    """
-    backends = _expand(args.backends)
+    """Regenerate the universal ``uv.lock`` (``uv lock``)."""
     _require_uv()
-    for backend in backends:
-        lock = _lock_path(backend)
-        if lock.is_file() and not args.recompile:
-            print(f"(skip) {lock} already exists; pass --recompile to refresh", flush=True)
-            continue
-        rc = _compile_lockfile(backend)
-        if rc:
-            print(f"error: uv pip compile failed for {backend}", file=sys.stderr)
-            return rc
-    return 0
+    return _run(["uv", "lock", "--python", PYTHON_VERSION, *args.uv_args])
 
 
 def cmd_sync(args: argparse.Namespace) -> int:
-    """Create or refresh per-backend venvs.
+    """Materialize ``.venv`` for one conflict-free extra combination.
 
-    For each backend:
-
-    1. Ensure ``requirements/<backend>.lock`` exists (compile from
-       ``[project.optional-dependencies].<backend>`` if missing).
-    2. ``uv venv .venvs/.venv-<backend> --python <python-version>``
-       (skipped if the venv already exists, so a re-run after a failed
-       ``pip sync`` reuses it; use ``clean`` to force a rebuild).
-    3. ``uv pip sync <lock> --python <venv-python> --link-mode=copy
-       --torch-backend <cu130|cu129|cpu>`` — installs *exactly* what the
-       lockfile says. The torch-backend flag is required so PyTorch CUDA
-       wheels (``torch==*+cu130`` etc.) resolve from the right index;
-       ``uv pip compile`` already knows the index via pyproject.toml, but
-       sync does not read pyproject.toml.
-    4. ``uv pip install -e . --no-deps --python <venv-python>`` to put
-       verl itself into the venv in editable mode (deps come from the
-       lockfile, so ``--no-deps`` is correct here).
-
-    Step (1) is what makes ``sync vllm`` only touch vllm: the compile is
-    scoped to a single extra. Step (3) installs only what is in
-    ``requirements/<backend>.lock`` — verbatim — so other backends'
-    packages can never leak in.
+    Runs ``uv sync --extra <a> --extra <b> ...`` against the universal
+    ``uv.lock``, installing exactly that combination's slice into the project
+    venv plus verl itself (editable). This is the **runtime** command — the
+    resulting ``.venv`` is what you train / serve from. Honors
+    ``VERL_UV_NO_INSTALL`` (see module docstring) to leave internal builds of
+    the listed packages alone.
     """
-    backends = _expand(args.backends)
     _require_uv()
-    VENVS_DIR.mkdir(parents=True, exist_ok=True)
-    REQUIREMENTS_DIR.mkdir(parents=True, exist_ok=True)
-    for backend in backends:
-        lock = _lock_path(backend)
-        venv = _venv_path(backend)
-        py = PYTHON_VERSION[backend]
-        env_overrides = {**BUILD_ENV.get(backend, {})}
-
-        if not lock.is_file():
-            print(f"info: {lock} missing — compiling from pyproject.toml [{backend}]", flush=True)
-            rc = _compile_lockfile(backend)
-            if rc:
-                print(f"error: uv pip compile failed for {backend}", file=sys.stderr)
-                return rc
-
-        if _venv_python(backend).exists():
-            # Idempotent re-run: a prior `sync` may have failed mid-`pip sync`
-            # (e.g. a transient wheel download error) and left the venv behind.
-            # `uv venv` refuses an existing dir without --clear, so skip
-            # creation and let `uv pip sync` below reconcile it to the lock.
-            # Use `clean <backend>` first to force a from-scratch rebuild.
-            print(f"(reuse) venv already exists at {venv}; skipping uv venv", flush=True)
-        else:
-            rc = _run(["uv", "venv", str(venv), "--python", py, "--link-mode=copy"])
-            if rc:
-                print(f"error: uv venv failed for {backend}", file=sys.stderr)
-                return rc
-
-        venv_py = str(_venv_python(backend))
-        rc = _run(
-            [
-                "uv",
-                "pip",
-                "sync",
-                str(lock),
-                "--python",
-                venv_py,
-                "--link-mode=copy",
-                "--torch-backend",
-                BACKEND_TORCH_BACKEND[backend],
-                *args.uv_args,
-            ],
-            env_overrides,
-        )
-        if rc:
-            print(f"error: uv pip sync failed for {backend}", file=sys.stderr)
-            return rc
-
-        rc = _run(
-            [
-                "uv",
-                "pip",
-                "install",
-                "-e",
-                ".",
-                "--no-deps",
-                "--python",
-                venv_py,
-                "--link-mode=copy",
-            ],
-            env_overrides,
-        )
-        if rc:
-            print(f"error: editable verl install failed for {backend}", file=sys.stderr)
-            return rc
-    return 0
+    rest = list(args.rest)
+    if "--" in rest:
+        sep = rest.index("--")
+        backends, uv_args = rest[:sep], rest[sep + 1:]
+    else:
+        backends, uv_args = rest, []
+    if not backends:
+        sys.exit("error: usage: manage_envs.py sync <extras...> [-- uv args...]")
+    extras = _expand(backends)
+    _validate_combo(extras)
+    cmd = ["uv", "sync", "--python", PYTHON_VERSION, *_extra_flags(extras), *_no_install_flags(), *uv_args]
+    rc = _run(cmd, _build_env(extras) or None)
+    if rc == 0:
+        print(f"\n.venv ready ({', '.join(extras)}). Activate: source .venv/bin/activate", flush=True)
+    return rc
 
 
-def cmd_clean(args: argparse.Namespace) -> int:
-    if "all" in args.backends:
-        if VENVS_DIR.exists():
-            shutil.rmtree(VENVS_DIR)
-            print(f"removed {VENVS_DIR}")
-        return 0
-    for backend in _expand(args.backends):
-        venv = _venv_path(backend)
-        if venv.exists():
-            shutil.rmtree(venv)
-            print(f"removed {venv}")
-        else:
-            print(f"(no-op) {venv} does not exist")
-    return 0
+def cmd_run(args: argparse.Namespace) -> int:
+    """``uv run --extra ... -- <command>`` for a conflict-free combination.
 
-
-def cmd_list(_args: argparse.Namespace) -> int:
-    fmt = "{:<16} {:<10} {:<10} {}"
-    print(fmt.format("BACKEND", "INSTALLED", "PYTHON", "PATH"))
-    for backend in ALL_BACKENDS:
-        venv = _venv_path(backend)
-        py = _venv_python(backend)
-        if py.exists():
-            try:
-                ver = subprocess.check_output(
-                    [str(py), "-c", "import sys;print('%d.%d.%d'%sys.version_info[:3])"],
-                    text=True,
-                ).strip()
-            except subprocess.CalledProcessError:
-                ver = "?"
-            print(fmt.format(backend, "yes", ver, str(venv)))
-        else:
-            print(fmt.format(backend, "no", "-", str(venv)))
-    return 0
-
-
-def cmd_path(args: argparse.Namespace) -> int:
-    print(_venv_path(args.backend))
-    return 0
+    Everything after ``--`` is the command. uv ensures ``.venv`` matches the
+    requested extras (syncing if needed), then runs the command inside it. When
+    ``VERL_UV_NO_INSTALL`` is set, ``--no-sync`` is added so uv runs in your
+    already-prepared ``.venv`` without clobbering those internal builds (``uv
+    run`` has no ``--no-install-package``), so ``sync`` + ``uv pip install``
+    them first.
+    """
+    _require_uv()
+    rest = list(args.rest)
+    if "--" not in rest:
+        sys.exit("error: usage: manage_envs.py run <extras...> -- <command...>")
+    sep = rest.index("--")
+    extras = _expand(rest[:sep])
+    command = rest[sep + 1:]
+    if not extras:
+        sys.exit("error: no extras given before `--`")
+    if not command:
+        sys.exit("error: nothing to run after `--`")
+    _validate_combo(extras)
+    cmd = ["uv", "run", "--python", PYTHON_VERSION, *_extra_flags(extras)]
+    if _no_install_packages():
+        cmd.append("--no-sync")
+    cmd += ["--", *command]
+    return _run(cmd, _build_env(extras) or None)
 
 
 def cmd_shell(args: argparse.Namespace) -> int:
-    venv = _venv_path(args.backend)
-    if not _venv_python(args.backend).exists():
-        sys.exit(f"error: venv missing at {venv}. Run 'python manage_envs.py sync {args.backend}' first.")
+    """Sync the requested combination, then spawn a shell with ``.venv`` active."""
+    _require_uv()
+    extras = _expand(args.backends)
+    _validate_combo(extras)
+    rc = _run(
+        ["uv", "sync", "--python", PYTHON_VERSION, *_extra_flags(extras), *_no_install_flags()],
+        _build_env(extras) or None,
+    )
+    if rc:
+        return rc
     shell = os.environ.get("SHELL", "/bin/bash")
-    print(f"spawning {shell} inside .venv-{args.backend} (exit to leave)")
+    print(f"spawning {shell} inside .venv [{', '.join(extras)}] (exit to leave)", flush=True)
     env = {
         **os.environ,
-        "VIRTUAL_ENV": str(venv),
-        "PATH": f"{venv / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}",
-        "PS1": f"(verl-{args.backend}) {os.environ.get('PS1', '$ ')}",
+        "VIRTUAL_ENV": str(VENV_DIR),
+        "PATH": f"{VENV_DIR / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}",
+        "PS1": f"(verl:{'+'.join(extras)}) {os.environ.get('PS1', '$ ')}",
     }
     return subprocess.run([shell], env=env).returncode
 
 
-def _resolve_role_venv(spec: str, role: str) -> str:
-    """Validate ``spec`` and return whatever string should go into
-    ``VERL_*_VENV``. Accepts the same forms as :mod:`verl.utils.venv`:
-    backend name, absolute venv directory, absolute python interpreter, or
-    a full command line such as ``"uv run --project /abs/path/to/verl"``
-    (Ray's ``py_executable`` accepts arguments — see
-    https://docs.ray.io/en/latest/ray-core/handling-dependencies.html#using-uv-for-package-management).
+def cmd_clean(_args: argparse.Namespace) -> int:
+    """Remove the project ``.venv`` (and the legacy ``.venvs/`` dir if present)."""
+    removed = False
+    for path in (VENV_DIR, VERL_DIR / ".venvs"):
+        if path.exists():
+            shutil.rmtree(path)
+            print(f"removed {path}")
+            removed = True
+    if not removed:
+        print("(no-op) no .venv to remove")
+    return 0
+
+
+def cmd_list(_args: argparse.Namespace) -> int:
+    """Show available extras, conflict rules, .venv state, and prefetch plan."""
+    print("extras (one universal uv.lock; three torch worlds):")
+    print(f"  inference (cu130/torch-2.11) : {', '.join(INFERENCE_BACKENDS)}")
+    print(f"  training  (cu130/torch-2.11) : {', '.join(TRAINING_BACKENDS)}")
+    print(f"  cu129     (torch-2.9.1)      : {', '.join(CU129_BACKENDS)}")
+    print(f"  dev       (cpu/torch-2.11)   : {', '.join(DEV_BACKENDS)}")
+    print("\nmutually exclusive (at most one per `sync`):")
+    for cs in CONFLICT_SETS:
+        print("  {" + ", ".join(sorted(cs)) + "}")
+
+    print("\nproject .venv:")
+    py = VENV_DIR / "bin" / "python"
+    if py.exists():
+        try:
+            ver = subprocess.check_output(
+                [str(py), "-c", "import sys;print('%d.%d.%d' % sys.version_info[:3])"],
+                text=True,
+            ).strip()
+        except subprocess.CalledProcessError:
+            ver = "?"
+        print(f"  present (python {ver}) at {VENV_DIR}")
+    else:
+        print(f"  absent — run `python manage_envs.py sync <extras...>` to create {VENV_DIR}")
+
+    combos = _covering_combos()
+    print("\nprefetch plan (cache-warm combos covering every extra):")
+    for combo in combos:
+        print(f"  uv sync --extra {' --extra '.join(combo)}")
+    print("  (scope per Docker image: `prefetch cu130` | `prefetch cu129`)")
+    return 0
+
+
+def cmd_prefetch(args: argparse.Namespace) -> int:
+    """Warm the uv cache with backend packages — first-time / Docker only.
+
+    NOT a runtime sync. Warms the cache for the requested extras (positional
+    args; default all of ``ALL_EXTRAS``, or a CUDA world via the ``cu130`` /
+    ``cu129`` shortcuts to bake one Docker image's backends). Because the
+    backends conflict, there is no single env that holds them all, so this syncs
+    the conflict-free covering combos from ``_covering_combos()`` into
+    **throwaway** environments purely to download and build their third-party
+    distributions into the uv cache (``$UV_CACHE_DIR``, default ``~/.cache/uv``).
+    It passes ``--no-install-project`` so only dependencies are fetched/built —
+    verl itself is skipped (it is local source, rebuilt cheaply by the real
+    ``sync``), which keeps this step independent of the verl source tree. The
+    project ``.venv`` is never created or touched.
+
+    Use it once after cloning, or in a Docker layer so the cache ships *inside*
+    the image: bake it as a real layer (no ``--mount=type=cache``) and a later
+    ``sync <extras...>`` resolves from it offline. For an actual runtime env use
+    ``sync <extras...>``.
     """
-    tokens = shlex.split(spec)
-    if len(tokens) > 1:
-        head = tokens[0]
-        head_path = Path(head).expanduser()
-        if head_path.is_absolute():
-            if not head_path.is_file() or not os.access(head_path, os.X_OK):
-                sys.exit(f"error: --{role} {spec!r}: head {head!r} is not an executable file")
-        elif shutil.which(head) is None:
-            sys.exit(f"error: --{role} {spec!r}: head {head!r} is not on $PATH")
-        return spec
+    _require_uv()
+    # rest = [extras/groups...] [-- uv args...]; split on the first `--` so the
+    # optional scope args don't collide with forwarded uv flags (argparse can't
+    # cleanly separate a `nargs="*"` positional from a REMAINDER across `--`).
+    rest = list(args.rest)
+    if "--" in rest:
+        sep = rest.index("--")
+        scope_args, uv_args = rest[:sep], rest[sep + 1:]
+    else:
+        scope_args, uv_args = rest, []
+    requested = _expand(scope_args) if scope_args else ALL_EXTRAS
+    combos = _covering_combos(requested)
+    scope = "every extra" if not scope_args else ", ".join(requested)
+    print(f"prefetch: warming the uv cache for {scope} (throwaway envs; .venv untouched).")
+    print("covering combos:")
+    for combo in combos:
+        print(f"  {' + '.join(combo)}")
+    print()
 
-    p = Path(spec).expanduser()
-    if p.is_absolute():
-        if p.is_file() and os.access(p, os.X_OK):
-            return str(p.resolve())
-        candidate = p / "bin" / "python"
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            return str(p.resolve())
-        sys.exit(
-            f"error: --{role} {spec!r}: not a valid venv (no executable bin/python under {p}, "
-            "and the path itself is not an executable interpreter)"
-        )
-    if spec not in ALL_BACKENDS:
-        sys.exit(
-            f"error: --{role} {spec!r}: unknown backend. "
-            f"valid: {', '.join(ALL_BACKENDS)} (or pass an absolute venv path / "
-            "a 'uv run --project ...' command line)"
-        )
-    if not _venv_python(spec).exists():
-        sys.exit(
-            f"error: --{role} {spec!r}: venv missing at {_venv_path(spec)}. "
-            f"Run 'python manage_envs.py sync {spec}' first."
-        )
-    return str(_venv_path(spec))
-
-
-# Per-role launch flags → Hydra paths. Mirrors ``_ROLE_VENV_PATH`` in
-# ``verl/utils/venv.py``; keep them in sync. ``trainer`` is the legacy-shape
-# fallback and only emits ``trainer.venv=...``.
-_LAUNCH_ROLE_KEYS: dict[str, str] = {
-    "rollout": "actor_rollout_ref.rollout.venv",
-    "actor": "actor_rollout_ref.actor.venv",
-    "ref": "actor_rollout_ref.ref.venv",
-    "critic": "critic.venv",
-    "trainer": "trainer.venv",
-}
-
-
-def cmd_launch(args: argparse.Namespace) -> int:
-    """Run a verl command with each role routed at a separate venv by
-    appending Hydra-style config overrides to the user's command.
-
-    Per-role flags accepted: ``--rollout``, ``--actor``, ``--ref``,
-    ``--critic``, ``--trainer``. Each maps to the matching ``*.venv`` field
-    (see ``_LAUNCH_ROLE_KEYS``). ``--trainer`` is the global fallback for any
-    trainer-side group whose role-level field is left null. Pass ``--*-key``
-    to override the Hydra path emitted for any role.
-    """
-    if not args.command:
-        sys.exit(
-            "error: nothing to run after `--`. Try:\n"
-            "  launch --rollout vllm --trainer megatron -- python -m ...\n"
-            "  launch --rollout vllm --actor megatron --critic fsdp -- python -m ..."
-        )
-    overrides: list[str] = []
-    keys = {
-        "rollout": args.rollout_key,
-        "actor": args.actor_key,
-        "ref": args.ref_key,
-        "critic": args.critic_key,
-        "trainer": args.trainer_key,
-    }
-    for role, hydra_key in keys.items():
-        spec = getattr(args, role, None)
-        if not spec:
-            continue
-        resolved = _resolve_role_venv(spec, role=role)
-        overrides.append(f"{hydra_key}={resolved}")
-    if not overrides:
-        sys.exit("error: at least one of --rollout/--actor/--ref/--critic/--trainer must be set")
-    cmd = [*args.command, *overrides]
-    print(f"$ {' '.join(shlex.quote(c) for c in cmd)}", flush=True)
-    return subprocess.run(cmd, cwd=str(VERL_DIR)).returncode
+    with tempfile.TemporaryDirectory(prefix="verl-prefetch-") as tmp:
+        # Route uv at a throwaway env and drop any stale VIRTUAL_ENV so uv
+        # doesn't warn about a mismatch with the active shell venv. Only the
+        # shared uv cache (UV_CACHE_DIR) is the durable output here.
+        proj_env: dict[str, str | None] = {
+            "UV_PROJECT_ENVIRONMENT": str(Path(tmp) / ".venv"),
+            "VIRTUAL_ENV": None,
+        }
+        for combo in combos:
+            # --no-install-project: cache deps only; skip building verl (local
+            # source) so the cache layer doesn't depend on the verl tree.
+            cmd = [
+                "uv", "sync", "--python", PYTHON_VERSION,
+                "--no-install-project", *_extra_flags(combo), *uv_args,
+            ]
+            rc = _run(cmd, {**proj_env, **_build_env(combo)})
+            if rc:
+                print(f"error: prefetch failed while warming {combo}", file=sys.stderr)
+                return rc
+    print(f"\nuv cache warmed for: {scope}.")
+    return 0
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -531,98 +499,78 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    backends_help = (
-        "backend name(s); shortcuts: all, "
-        "inference (vllm sglang trtllm), "
-        "training (fsdp megatron veomni nemoautomodel), "
-        "dev (cpu). x86_64 Linux only. Backends are split between two "
-        "CUDA majors (see BACKEND_CUDA_MAJOR): vllm/sglang/fsdp/megatron "
-        "build against cu13 (Dockerfile.uv.cu130, torch 2.11); "
-        "trtllm/veomni/nemoautomodel build against cu12.9 "
-        "(Dockerfile.uv.cu129, torch 2.9.x-2.10) until upstream catches "
-        "up. Ascend NPU and aarch64 GPU variants are out of scope here."
+    extras_help = (
+        "extra name(s); shortcuts: all, inference (vllm sglang), "
+        "training (fsdp megatron), cu129 (veomni nemoautomodel), dev (cpu). "
+        "x86_64 Linux + Python 3.12 only. Mutually exclusive sets (at most one "
+        "each per sync): {vllm, sglang, cpu, veomni, nemoautomodel}, "
+        "{fsdp, cpu, veomni, nemoautomodel}, {megatron, cpu, veomni, "
+        "nemoautomodel}. trtllm is deferred (a CUDA-13 RC; see pyproject.toml)."
     )
+
+    lk = sub.add_parser("lock", help="(re)generate the universal uv.lock (uv lock)")
+    lk.add_argument(
+        "uv_args",
+        nargs=argparse.REMAINDER,
+        help="anything after `--` is forwarded to `uv lock`",
+    )
+    lk.set_defaults(func=cmd_lock)
 
     s = sub.add_parser(
         "sync",
-        help="create or refresh one or more backend venvs (per-backend lockfile + uv pip sync)",
+        help="materialize .venv for one conflict-free extra combination (runtime)",
     )
-    s.add_argument("backends", nargs="+", help=backends_help)
     s.add_argument(
-        "uv_args",
+        "rest",
         nargs=argparse.REMAINDER,
-        help="anything after `--` is forwarded to the underlying `uv pip sync`",
+        help="<extras...> [-- uv args...]: anything after `--` is forwarded to "
+        "`uv sync`. " + extras_help,
     )
     s.set_defaults(func=cmd_sync)
 
-    lk = sub.add_parser(
-        "lock",
-        help="(re)compile per-backend lockfiles in requirements/<backend>.lock",
+    r = sub.add_parser(
+        "run",
+        help="uv run --extra ... -- <command> for a conflict-free combination",
     )
-    lk.add_argument(
-        "--recompile",
-        action="store_true",
-        help="re-resolve and overwrite each lockfile (default: only compile missing ones)",
+    r.add_argument(
+        "rest",
+        nargs=argparse.REMAINDER,
+        help="<extras...> -- <command...>",
     )
-    lk.add_argument("backends", nargs="+", help=backends_help)
-    lk.set_defaults(func=cmd_lock)
+    r.set_defaults(func=cmd_run)
 
-    c = sub.add_parser("clean", help="remove one or more backend venvs")
-    c.add_argument("backends", nargs="+", help=backends_help)
-    c.set_defaults(func=cmd_clean)
-
-    sub.add_parser("list", help="show every backend venv and its python version").set_defaults(func=cmd_list)
-
-    sh = sub.add_parser("shell", help="spawn an interactive shell with the venv on PATH")
-    sh.add_argument("backend", choices=ALL_BACKENDS)
+    sh = sub.add_parser("shell", help="sync a combination then open a shell with .venv active")
+    sh.add_argument("backends", nargs="+", help=extras_help)
     sh.set_defaults(func=cmd_shell)
 
-    p = sub.add_parser("path", help="print the path of a backend venv")
-    p.add_argument("backend", choices=ALL_BACKENDS)
-    p.set_defaults(func=cmd_path)
+    sub.add_parser("list", help="show extras, conflict rules, .venv state, prefetch plan").set_defaults(
+        func=cmd_list
+    )
 
-    lh = sub.add_parser(
-        "launch",
-        help="run a command with each role routed at a separate venv (cross-venv runtime)",
+    sub.add_parser("clean", help="remove the project .venv").set_defaults(func=cmd_clean)
+
+    pf = sub.add_parser(
+        "prefetch",
+        help="FIRST-TIME / Docker only: warm the uv cache with backend deps (NOT a runtime sync)",
         description=(
-            "Appends Hydra config overrides for one or more role venvs to the user's command. "
-            "Each --<role> flag accepts a backend name (vllm/megatron/...), an absolute venv "
-            "path / python path, or a 'uv run --project ...' command line. --trainer is the "
-            "global fallback for any trainer-side worker group whose role-level field is null."
+            "Download & build backend dependencies into the uv cache "
+            "($UV_CACHE_DIR, default ~/.cache/uv) by syncing conflict-free "
+            "covering combos into throwaway envs (with --no-install-project). "
+            "Pass extras/groups to scope it (default: all); use the cu130 / "
+            "cu129 shortcuts to bake one CUDA world per Docker image. The "
+            "project .venv is never created or modified. Use once after "
+            "cloning, or bake it into a Docker image layer; for a runtime env "
+            "use `sync`."
         ),
     )
-    lh.add_argument("--rollout", default=None, help="rollout/inference venv spec")
-    lh.add_argument("--actor", default=None, help="actor (PPO trainer) venv spec")
-    lh.add_argument("--ref", default=None, help="reference-policy venv spec (disaggregated only)")
-    lh.add_argument("--critic", default=None, help="critic venv spec")
-    lh.add_argument("--trainer", default=None, help="fallback venv for any trainer-side group with no per-role spec")
-    lh.add_argument(
-        "--rollout-key",
-        default=_LAUNCH_ROLE_KEYS["rollout"],
-        help="Hydra path for the rollout venv override (default: %(default)s)",
+    pf.add_argument(
+        "rest",
+        nargs=argparse.REMAINDER,
+        help="[extras/groups...] [-- uv args...]: optional extras/groups scope "
+        "the cache warm (default: all; e.g. `cu130` or `cu129` to bake one "
+        "CUDA world); anything after `--` is forwarded to each `uv sync`",
     )
-    lh.add_argument(
-        "--actor-key",
-        default=_LAUNCH_ROLE_KEYS["actor"],
-        help="Hydra path for the actor venv override (default: %(default)s)",
-    )
-    lh.add_argument(
-        "--ref-key",
-        default=_LAUNCH_ROLE_KEYS["ref"],
-        help="Hydra path for the ref venv override (default: %(default)s)",
-    )
-    lh.add_argument(
-        "--critic-key",
-        default=_LAUNCH_ROLE_KEYS["critic"],
-        help="Hydra path for the critic venv override (default: %(default)s)",
-    )
-    lh.add_argument(
-        "--trainer-key",
-        default=_LAUNCH_ROLE_KEYS["trainer"],
-        help="Hydra path for the trainer-fallback venv override (default: %(default)s)",
-    )
-    lh.add_argument("command", nargs=argparse.REMAINDER, help="command to run after `--`")
-    lh.set_defaults(func=cmd_launch)
+    pf.set_defaults(func=cmd_prefetch)
 
     return parser
 
@@ -631,8 +579,6 @@ def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     if hasattr(args, "uv_args") and args.uv_args and args.uv_args[0] == "--":
         args.uv_args = args.uv_args[1:]
-    if hasattr(args, "command") and args.command and args.command[0] == "--":
-        args.command = args.command[1:]
     return args.func(args)
 
 

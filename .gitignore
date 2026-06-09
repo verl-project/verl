@@ -122,9 +122,8 @@ ENV/
 
 # ckpt
 *.lock
-# per-backend uv lockfiles (requirements/<backend>.lock) are checked in for
-# reproducibility — see manage_envs.py
-!requirements/*.lock
+# the universal uv lockfile is checked in for reproducibility — see manage_envs.py
+!uv.lock
 
 # data
 *.parquet
