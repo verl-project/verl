@@ -499,17 +499,15 @@ class AgentLoopWorker:
 
         tasks = []
         # Limit concurrency to avoid exhausting desktop-env container pools.
-        # Training rollouts are gated by FullyAsyncRollouter.max_concurrent_rollouts,
-        # but generate_sequences (used by validation) launches all samples at once.
-        # The semaphore caps the number of concurrent agent loops (each holds an
-        # env session). Falls back to batch size when running on a single worker.
-        max_concurrent = len(batch)
-        try:
-            user_cap = int(self.config.async_training.get("max_concurrent_rollouts", 0) or 0)
-            if user_cap > 0:
-                max_concurrent = min(max_concurrent, user_cap)
-        except Exception:
-            pass
+        # Training rollouts are already gated by FullyAsyncRollouter, but
+        # generate_sequences (used by validation) launches all samples at once.
+        # The semaphore caps concurrent agent loops; each GUI loop holds one
+        # env session.
+        max_concurrent = self._resolve_max_concurrent_agent_loops(
+            self.config,
+            batch_size=len(batch),
+            validate=batch.meta_info.get("validate", False),
+        )
         sem = asyncio.Semaphore(max_concurrent)
 
         async def _run_with_semaphore(coro):
@@ -656,6 +654,43 @@ class AgentLoopWorker:
                 # ``_postprocess`` below filters these out before batching.
                 return None
             return await self._agent_loop_postprocess(output, trajectory["validate"], **kwargs)
+
+    @staticmethod
+    def _resolve_max_concurrent_agent_loops(config: Any, *, batch_size: int, validate: bool) -> int:
+        """Resolve agent-loop concurrency for train/eval batches.
+
+        ``max_concurrent_rollouts`` is the existing training rollout cap.
+        Validation can be much larger than a rollout batch (for GUI tasks the
+        whole test set may be hundreds of env sessions), so it gets an
+        independent ``max_concurrent_eval_rollouts`` cap. When unset, validation
+        falls back to the existing rollout cap for backwards compatibility.
+        """
+        max_concurrent = int(batch_size)
+        if max_concurrent <= 0:
+            return 0
+        try:
+            async_training = getattr(config, "async_training", None)
+            if async_training is None and isinstance(config, dict):
+                async_training = config.get("async_training")
+            if async_training is None:
+                return max_concurrent
+
+            def _get_cap(name: str) -> int:
+                if hasattr(async_training, "get"):
+                    return int(async_training.get(name, 0) or 0)
+                return int(getattr(async_training, name, 0) or 0)
+
+            if validate:
+                user_cap = _get_cap("max_concurrent_eval_rollouts")
+                if user_cap <= 0:
+                    user_cap = _get_cap("max_concurrent_rollouts")
+            else:
+                user_cap = _get_cap("max_concurrent_rollouts")
+            if user_cap > 0:
+                max_concurrent = min(max_concurrent, user_cap)
+        except Exception:
+            pass
+        return max_concurrent
 
     async def _agent_loop_postprocess(self, output, validate, **kwargs) -> _InternalAgentLoopOutput:
         """Perform post-processing operations on the output of each individual agent loop."""
