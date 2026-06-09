@@ -128,28 +128,33 @@ def default_compute_score(
     elif data_source in [
         "taco",
         "likaixin/TACO-verified",
+        "lighteval/code_generation_lite",
         "codecontests",
         "deepmind/code_contests",
         "apps",
         "codeforces",
     ]:
-        scheduler_url = sandbox_fusion_url or os.environ.get("SCHEDULER_URL")
-        if scheduler_url:
-            from . import codegym_sandbox
+        sandbox_url = (
+            sandbox_fusion_url
+            or os.environ.get("KUBERNETES_SANDBOX_URL")
+            or os.environ.get("SCHEDULER_URL")
+        )
+        if sandbox_url:
+            from . import kubernetes_sandbox
 
-            res = codegym_sandbox.compute_score(
+            res = kubernetes_sandbox.compute_score(
                 data_source=data_source,
                 solution_str=solution_str,
                 ground_truth=ground_truth,
                 extra_info=extra_info,
-                sandbox_fusion_url=scheduler_url,
+                sandbox_fusion_url=sandbox_url,
                 concurrent_semaphore=concurrent_semaphore,
                 memory_limit_mb=memory_limit_mb,
                 continuous=continuous,
             )
         else:
-            # Fallback to prime code scoring
             from . import prime_code
+
             test_cases = _code_test_cases_for_prime_code(ground_truth, extra_info)
             res = prime_code.compute_score(solution_str, test_cases, continuous=continuous)
     elif data_source in ["hiyouga/geometry3k"]:

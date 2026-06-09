@@ -4,7 +4,7 @@
 #SBATCH --nodes=2
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=4
-#SBATCH --cpus-per-task=64
+#SBATCH --cpus-per-task=288
 #SBATCH --time=12:00:00
 #SBATCH --reservation=SD-69241-apertus-1-5-0
 #SBATCH --output=%x_%j.out
@@ -22,11 +22,6 @@ clear_inherited_pyxis_options() {
 }
 
 clear_inherited_pyxis_options
-
-if [[ -z "${SCHEDULER_URL:-}" ]]; then
-    echo "SCHEDULER_URL must be set by multinode_async_sandbox_split.sh" >&2
-    exit 1
-fi
 
 ulimit -c 0
 
@@ -49,6 +44,9 @@ ENABLE_THINKING="${ENABLE_THINKING:-false}"
 FORCE_THINKING="${FORCE_THINKING:-false}"
 THINK_PREFIX_TOKEN="${THINK_PREFIX_TOKEN:-<think>}"
 WANDB_ENTITY="${WANDB_ENTITY:-apertus}"
+KUBERNETES_SANDBOX_URL="${KUBERNETES_SANDBOX_URL:-https://sandbox-dev.swissai.svc.cscs.ch/harness-test}"
+KUBERNETES_SANDBOX_URL="${KUBERNETES_SANDBOX_URL%/}"
+SCHEDULER_URL="${KUBERNETES_SANDBOX_URL}"
 
 TRAIN_NNODES="${TRAIN_NNODES:-1}"
 ROLLOUT_NNODES="${ROLLOUT_NNODES:-1}"
@@ -63,14 +61,14 @@ GPUS_PER_NODE="${GPUS_PER_NODE%%(*}"
 GPUS_PER_NODE="${GPUS_PER_NODE##*:}"
 TRAIN_GPUS_PER_NODE="${TRAIN_GPUS_PER_NODE:-${GPUS_PER_NODE}}"
 ROLLOUT_GPUS_PER_NODE="${ROLLOUT_GPUS_PER_NODE:-${GPUS_PER_NODE}}"
-CPUS_PER_TASK="${SLURM_CPUS_PER_TASK:-64}"
+CPUS_PER_TASK="${SLURM_CPUS_PER_TASK:-288}"
 ENVIRONMENT_PATH="${ENVIRONMENT_PATH:-/users/${USERNAME}/.edf/async.toml}"
 SRUN_ENV=(--environment="${ENVIRONMENT_PATH}" --container-writable)
 
 # Sandbox and code reward settings
 DEFAULT_MEMORY_LIMIT_MB="${DEFAULT_MEMORY_LIMIT_MB:-512}"
-CODEGYM_REWARD_MAX_CONCURRENT="${CODEGYM_REWARD_MAX_CONCURRENT:-64}"
-CODEGYM_REWARD_CONTINUOUS="${CODEGYM_REWARD_CONTINUOUS:-false}"
+SANDBOX_REWARD_MAX_CONCURRENT="${SANDBOX_REWARD_MAX_CONCURRENT:-96}"
+SANDBOX_REWARD_CONTINUOUS="${SANDBOX_REWARD_CONTINUOUS:-false}"
 
 # Extra packages needed for scoring are installed once into a target dir 
 # so every node can use them and avoid repeated installations
@@ -153,10 +151,10 @@ build_overrides() {
     "actor_rollout_ref.rollout.gpu_memory_utilization=0.8"
     "rollout.nnodes=${ROLLOUT_NNODES}"
     "rollout.n_gpus_per_node=${ROLLOUT_GPUS_PER_NODE}"
-    "reward.sandbox_fusion.url=${SCHEDULER_URL}"
+    "reward.sandbox_fusion.url=${KUBERNETES_SANDBOX_URL}"
     "reward.sandbox_fusion.memory_limit_mb=${DEFAULT_MEMORY_LIMIT_MB}"
-    "reward.sandbox_fusion.max_concurrent=${CODEGYM_REWARD_MAX_CONCURRENT}"
-    "+reward.sandbox_fusion.continuous=${CODEGYM_REWARD_CONTINUOUS}"
+    "reward.sandbox_fusion.max_concurrent=${SANDBOX_REWARD_MAX_CONCURRENT}"
+    "+reward.sandbox_fusion.continuous=${SANDBOX_REWARD_CONTINUOUS}"
     "trainer.project_name=${PROJECT_NAME}"
     "trainer.experiment_name=${RUN_NAME}"
     "trainer.default_local_dir=${RUN_DIR}"
@@ -170,7 +168,8 @@ build_overrides() {
     "+ray_kwargs.ray_init.runtime_env.env_vars.PYTHONPATH=${PY_DEPS_DIR}:${WORKING_DIR}:${PYTHONPATH:-}"
     "+ray_kwargs.ray_init.runtime_env.env_vars.NLTK_DATA=${NLTK_DATA_DIR}"
     "+ray_kwargs.ray_init.runtime_env.env_vars.MATH_VERIFY_PYTHONPATH=${PY_DEPS_DIR}"
-    "+ray_kwargs.ray_init.runtime_env.env_vars.SCHEDULER_URL=${SCHEDULER_URL}"
+    "+ray_kwargs.ray_init.runtime_env.env_vars.KUBERNETES_SANDBOX_URL=${KUBERNETES_SANDBOX_URL}"
+    "+ray_kwargs.ray_init.runtime_env.env_vars.SCHEDULER_URL=${KUBERNETES_SANDBOX_URL}"
     "+ray_kwargs.ray_init.runtime_env.env_vars.WANDB_ENTITY=${WANDB_ENTITY}"
   )
 
@@ -288,9 +287,11 @@ export DEPS_STAMP_DIR
 export DEPS_STAMP
 export DEPS_LOCK
 export EXTRA_PIP_PACKAGES
+export KUBERNETES_SANDBOX_URL
 export SCHEDULER_URL
 export DEFAULT_MEMORY_LIMIT_MB
-export CODEGYM_REWARD_MAX_CONCURRENT
+export SANDBOX_REWARD_MAX_CONCURRENT
+export SANDBOX_REWARD_CONTINUOUS
 export PYTHONUNBUFFERED="1"
 # export RAY_DEDUP_LOGS="0"
 export NNODES

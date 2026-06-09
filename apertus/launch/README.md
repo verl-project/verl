@@ -5,17 +5,14 @@ different Slurm configurations.
 
 ## Multi-node Async Training With Sandbox Rewards
 
-The [`multinode_async_sandbox/`](./multinode_async_sandbox/) launcher starts a
-code-gym sandbox scheduler and then submits a multi-node async VERL training job
-that uses the scheduler for reward evaluation.
+The [`multinode_async_sandbox/`](./multinode_async_sandbox/) launcher submits a
+multi-node async VERL training job that uses the Kubernetes sandbox service for
+code reward evaluation.
 
-The launcher is split into three files:
+The launcher is split into two files:
 
 - [`launch.sh`](./multinode_async_sandbox/launch.sh) configures the experiment,
-  submits the sandbox scheduler, waits for it to become reachable, and then
-  submits the training job.
-- [`_sandbox_scheduler.sbatch`](./multinode_async_sandbox/_sandbox_scheduler.sbatch)
-  runs the code-gym scheduler and native sandbox workers.
+  sets the Kubernetes sandbox endpoint, and submits the training job.
 - [`_verl_training.sbatch`](./multinode_async_sandbox/_verl_training.sbatch)
   starts Ray across the training and rollout nodes, then runs
   `verl.experimental.fully_async_policy.fully_async_main`.
@@ -28,19 +25,24 @@ configuration by default.
 
 Before launching, check the path variables near the top of
 [`launch.sh`](./multinode_async_sandbox/launch.sh). Update them if your VERL
-checkout, cache directories, code-gym checkout, or training data live elsewhere.
+checkout, cache directories, r-gym checkout, or training data live elsewhere.
 
 ```bash
 WORKING_DIR=/iopsstor/scratch/cscs/$USER/projects/verl
 HOME=/iopsstor/scratch/cscs/$USER
 HF_HOME=/iopsstor/scratch/cscs/$USER/huggingface
-CODE_GYM_DIR=/iopsstor/scratch/cscs/$USER/projects/code-gym
+REASONING_GYM_DIR=/iopsstor/scratch/cscs/$USER/projects/r-gym
 TRAINING_DATA_DIR=/capstor/store/cscs/swissai/infra01/reasoning/data/RL-prod/apertus_demo_rl
+KUBERNETES_SANDBOX_URL=https://sandbox-dev.swissai.svc.cscs.ch/harness-test
 ```
 
 The default `TRAINING_DATA_DIR` points to preprocessed parquet files. You can
 also create the training data locally with
 [`data_preprocess.py`](../data_preprocess.py).
+
+The Kubernetes sandbox endpoint is expected to expose `/evaluate` with the
+scheduler-compatible request and response schema. The default endpoint is only
+reachable from the allowed ETH/EPFL/CSCS network or VPN.
 
 ## Configure The Experiment
 
@@ -58,25 +60,13 @@ values to review are:
 - `ROLLOUT_N`, `SEED`, and `USE_GROUP_FILTERING`: rollout and optimization
   settings.
 
-The launcher writes scheduler and training Slurm logs into the generated
-`RUN_DIR` under:
+The launcher writes training Slurm logs into the generated `RUN_DIR` under:
 
 ```text
 ${WORKING_DIR}/outputs/${PROJECT_NAME}/${RUN_NAME}
 ```
 
 ## Prepare gyms
-### Prepare code-gym
-> ⚠️ *soon to be deprecated in favor of sandbox env running on Kubernetes*
-
-Clone the `code-gym` repository at the path configured by `CODE_GYM_DIR`:
-
-```bash
-git clone https://github.com/swiss-ai/code-gym.git /iopsstor/scratch/cscs/$USER/projects/code-gym
-```
-
-If you choose a different location, update `CODE_GYM_DIR` in `launch.sh`.
-
 ### Prepare r-gym
 Clone the `r-gym` repository at the path configured by `REASONING_GYM_DIR` and checkout the `translate` branch. This repository contains more tasks than the one supported by `reasoning_gym` package.
 
@@ -96,11 +86,13 @@ cd apertus/launch/multinode_async_sandbox
 bash launch.sh
 ```
 
-`launch.sh` submits the scheduler first, waits until it is running, builds the
-scheduler URL, and then submits the training job with `SCHEDULER_URL` injected.
+`launch.sh` submits the training job with `KUBERNETES_SANDBOX_URL` injected.
+The training script also exports the same value as `SCHEDULER_URL` for backward
+compatibility with existing reward config plumbing.
 
-To reuse an already running scheduler, set `SCHEDULER_URL` before launching:
+To use a different Kubernetes sandbox endpoint, set `KUBERNETES_SANDBOX_URL`
+before launching:
 
 ```bash
-SCHEDULER_URL=http://<scheduler-node>:8000 bash launch.sh
+KUBERNETES_SANDBOX_URL=https://<host>/<prefix> bash launch.sh
 ```
