@@ -24,12 +24,16 @@ from verl.trainer.ppo.core_algos import (
     compute_gae_advantage_return,
     compute_grpo_outcome_advantage,
     compute_grpo_vectorized_outcome_advantage,
+    compute_policy_loss_clip_cov,
+    compute_policy_loss_geo_mean,
+    compute_policy_loss_kl_cov,
     compute_rloo_outcome_advantage,
     compute_rloo_vectorized_outcome_advantage,
     get_adv_estimator_fn,
     kl_penalty,
     register_adv_est,
 )
+from verl.workers.config.actor import ActorConfig
 
 
 def mock_test_fn():
@@ -379,6 +383,41 @@ def test_kl_penalty_k3_plus_uses_k2_gradient():
     (grad_k2,) = torch.autograd.grad(out_k2, logprob_k2)
 
     assert torch.allclose(grad_plus, grad_k2)
+
+
+@pytest.mark.parametrize(
+    ("loss_fn", "expected_ppo_kl"),
+    [
+        (compute_policy_loss_clip_cov, -20.0),
+        (compute_policy_loss_kl_cov, 20.0),
+        (compute_policy_loss_geo_mean, -20.0),
+    ],
+)
+def test_policy_loss_variants_clamp_negative_approx_kl_for_stability(loss_fn, expected_ppo_kl):
+    config = ActorConfig(
+        strategy="fsdp",
+        rollout_n=1,
+        ppo_micro_batch_size_per_gpu=1,
+        clip_ratio=1000.0,
+        clip_ratio_low=1000.0,
+        clip_ratio_high=1000.0,
+    )
+    old_log_prob = torch.zeros((2, 2))
+    log_prob = torch.full((2, 2), 1000.0)
+    advantages = -torch.ones((2, 2))
+    response_mask = torch.ones((2, 2))
+
+    pg_loss, metrics = loss_fn(
+        old_log_prob=old_log_prob,
+        log_prob=log_prob,
+        advantages=advantages,
+        response_mask=response_mask,
+        loss_agg_mode="token-mean",
+        config=config,
+    )
+
+    assert torch.isfinite(pg_loss)
+    assert metrics["actor/ppo_kl"] == pytest.approx(expected_ppo_kl)
 
 
 if __name__ == "__main__":

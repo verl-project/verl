@@ -1787,6 +1787,8 @@ def compute_policy_loss_clip_cov(
     assert clip_cov_ratio > 0, "clip_ratio should be larger than 0."
 
     negative_approx_kl = log_prob - old_log_prob
+    # Clamp negative_approx_kl for stability
+    negative_approx_kl = torch.clamp(negative_approx_kl, min=-20.0, max=20.0)
     ratio = torch.exp(negative_approx_kl)
     ppo_kl = verl_F.masked_mean(-negative_approx_kl, response_mask)
 
@@ -1879,6 +1881,8 @@ def compute_policy_loss_kl_cov(
     assert kl_cov_ratio > 0, "kl_cov_ratio should be larger than 0."
 
     negative_approx_kl = log_prob - old_log_prob
+    # Clamp negative_approx_kl for stability
+    negative_approx_kl = torch.clamp(negative_approx_kl, min=-20.0, max=20.0)
     abs_kl = negative_approx_kl.abs()
     ratio = torch.exp(negative_approx_kl)
     ppo_kl_abs = verl_F.masked_mean(negative_approx_kl.abs(), response_mask)
@@ -1961,8 +1965,8 @@ def compute_policy_loss_geo_mean(
         cliprange_high = cliprange
 
     negative_approx_kl = log_prob - old_log_prob
-    # Clamp negative_approx_kl for stability (uncomment it if you like)
-    # negative_approx_kl = torch.clamp(negative_approx_kl, min=-20.0, max=20.0)
+    # Clamp negative_approx_kl for stability
+    negative_approx_kl = torch.clamp(negative_approx_kl, min=-20.0, max=20.0)
     ppo_kl = verl_F.masked_mean(-negative_approx_kl, response_mask)
 
     # Clipping at token-level & Clipping wider
