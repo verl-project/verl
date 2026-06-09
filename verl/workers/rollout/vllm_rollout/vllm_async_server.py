@@ -36,12 +36,12 @@ from vllm.v1.engine.async_llm import AsyncLLM
 
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import get_resource_name, get_visible_devices_keyword, is_torch_npu_available
-from verl.workers.config.rollout import ensure_rollout_config
 from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
 from verl.utils.profiler import DistProfiler, build_vllm_profiler_args
 from verl.utils.tokenizer import normalize_token_ids
 from verl.utils.vllm.vllm_fp8_utils import apply_vllm_fp8_patches
 from verl.workers.config import HFModelConfig, RolloutConfig
+from verl.workers.config.rollout import ensure_rollout_config
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
 from verl.workers.rollout.utils import get_max_position_embeddings, qwen2_5_vl_dedup_image_tokens, run_uvicorn
 from verl.workers.rollout.vllm_rollout.utils import (
@@ -308,8 +308,7 @@ class vLLMHttpServer:
                     self.config.tensor_model_parallel_size * self.config.pipeline_model_parallel_size
                 )
                 assert self.gpus_per_node % model_parallel_size_per_dp_group == 0, (
-                    "gpus_per_node should be divisible by "
-                    "tensor_model_parallel_size * pipeline_model_parallel_size"
+                    "gpus_per_node should be divisible by tensor_model_parallel_size * pipeline_model_parallel_size"
                 )
                 data_parallel_size_local = self.gpus_per_node // model_parallel_size_per_dp_group
                 assert len(self.workers) == data_parallel_size_local * model_parallel_size_per_dp_group, (
