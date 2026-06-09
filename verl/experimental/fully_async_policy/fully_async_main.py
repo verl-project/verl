@@ -46,6 +46,9 @@ class FullyAsyncTaskRunner:
     def run(self, config):
         print("[ASYNC MAIN] Starting fully async PPO training...")
         self._initialize_components(config)
+        if self.components.get("check_weight_sync_only_done", False):
+            self._cleanup_components()
+            return
         self._run_training_loop()
 
     def _initialize_components(self, config) -> None:
@@ -107,7 +110,13 @@ class FullyAsyncTaskRunner:
         ray.get(self.components["rollouter"].load_checkpoint.remote())
 
         print("[ASYNC MAIN] Param sync before fit..")
-        ray.get(self.components["trainer"]._fit_update_weights.remote())
+        did_update_weights = ray.get(self.components["trainer"]._fit_update_weights.remote())
+        if did_update_weights and config.actor_rollout_ref.rollout.checkpoint_engine.get(
+            "check_weight_sync_only", False
+        ):
+            print("[ASYNC MAIN] Weight sync check completed. Exit because check_weight_sync_only=True.")
+            self.components["check_weight_sync_only_done"] = True
+            return
 
         if config.trainer.get("val_before_train", True):
             ray.get(self.components["trainer"]._fit_validate.remote(True))
@@ -207,6 +216,21 @@ class FullyAsyncTaskRunner:
         finally:
             asyncio.run(self.components["message_queue_client"].clear_queue())
             print("[ASYNC MAIN] Training completed or interrupted")
+
+    def _cleanup_components(self):
+        rollouter = self.components.get("rollouter")
+        if rollouter is not None:
+            try:
+                ray.get(rollouter.shutdown.remote())
+            except Exception as e:
+                print(f"[ASYNC MAIN] Failed to shutdown rollouter: {e}")
+
+        message_queue_client = self.components.get("message_queue_client")
+        if message_queue_client is not None:
+            try:
+                asyncio.run(message_queue_client.shutdown())
+            except Exception as e:
+                print(f"[ASYNC MAIN] Failed to shutdown message queue: {e}")
 
 
 @hydra.main(config_path="config", config_name="fully_async_ppo_trainer", version_base=None)

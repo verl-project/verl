@@ -500,7 +500,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
 
     async def _fit_update_weights(self):
         if self.local_trigger_step != 1:
-            return
+            return False
 
         steps = self.config.global_profiler.steps
         last_profiler_step = self.current_param_version
@@ -533,6 +533,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             step=self.current_param_version,
         )
         self.metrics_aggregator.reset()
+        return True
 
     async def _fit_validate(self, val_before_train=False):
         if self.local_trigger_step != 1:

@@ -291,6 +291,23 @@ checkpoint_engine:
   # in CheckpointEngineRegistry.
   custom_backend_module: null
 
+  # Compare initial rollout backend-loaded weights with the source HF checkpoint.
+  # Currently implemented for vLLM backend checks with tensor_model_parallel_size=1.
+  check_weight_sync: False
+
+  # Exit after the initial weight-sync check. Requires check_weight_sync=True.
+  # Use this to debug weight sync without running PPO.
+  check_weight_sync_only: False
+
+  # Reference HF checkpoint dtype used during weight comparison.
+  check_weight_sync_dtype: bfloat16
+
+  # Tolerances and error sample limit for weight comparison.
+  check_weight_sync_rtol: 1e-5
+  check_weight_sync_atol: 1e-8
+  check_weight_sync_max_mismatches: 10
+  check_weight_sync_timeout: 300
+
 # trace rollout data
 trace:
 

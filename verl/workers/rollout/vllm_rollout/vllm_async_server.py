@@ -198,7 +198,7 @@ class vLLMHttpServer:
         args: tuple = (),
         kwargs: dict[str, Any] | None = None,
     ):
-        await self.engine.collective_rpc(
+        return await self.engine.collective_rpc(
             method=method,
             timeout=timeout,
             args=args,
@@ -431,7 +431,29 @@ class vLLMHttpServer:
             logger.info(f"Initializing a V1 LLM engine with config: {vllm_config}")
 
         self.engine = engine_client
-        self._server_port, self._server_task = await run_uvicorn(app, args, self._server_address)
+        self._server_port, self._server_task, self._server = await run_uvicorn(app, args, self._server_address)
+
+    async def shutdown(self):
+        """Stop the HTTP server and vLLM engine before the Ray actor exits."""
+        server = getattr(self, "_server", None)
+        if server is not None:
+            server.should_exit = True
+
+        server_task = getattr(self, "_server_task", None)
+        if server_task is not None and not server_task.done():
+            try:
+                await asyncio.wait_for(server_task, timeout=5)
+            except asyncio.TimeoutError:
+                server_task.cancel()
+                await asyncio.gather(server_task, return_exceptions=True)
+
+        engine = getattr(self, "engine", None)
+        if engine is not None:
+            shutdown = getattr(engine, "shutdown", None)
+            if shutdown is not None:
+                result = shutdown()
+                if inspect.isawaitable(result):
+                    await result
 
     async def run_headless(self, args: argparse.Namespace):
         """Run headless server in a separate thread."""
@@ -1115,6 +1137,10 @@ class vLLMReplica(RolloutReplica):
         # before we touch engine.release_kv_cache()
         await self.servers[0].wait_for_requests_to_drain.remote()
         await asyncio.gather(*[server.release_kv_cache.remote() for server in self.servers])
+
+    async def shutdown(self):
+        """Shutdown all server actors in this replica."""
+        await asyncio.gather(*[server.shutdown.remote() for server in self.servers], return_exceptions=True)
 
     # -----------------------------------------------------------------------
     # Hook methods for subclass overrides

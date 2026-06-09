@@ -38,7 +38,34 @@ If you are using CANN version >= 8.5.0 on Ascend devices, you must set the follo
 export HCCL_INTRA_ROCE_ENABLE=1
 ```
 
+### Weight sync check
+
+Enable `check_weight_sync` on a PPO/GRPO command to verify the initial
+trainer-to-rollout weight synchronization after `CheckpointEngineManager.update_weights()`
+and the rollout backend's `load_weights()` path. Add these overrides to an existing
+training command:
+
+```bash
+actor_rollout_ref.rollout.name=vllm \
+actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
+actor_rollout_ref.rollout.checkpoint_engine.backend=nccl \
+actor_rollout_ref.rollout.checkpoint_engine.check_weight_sync=True
+```
+
+Use `check_weight_sync_only=True` to exit after the initial weight-sync check instead
+of running rollout generation or PPO training:
+
+```bash
+actor_rollout_ref.rollout.checkpoint_engine.check_weight_sync=True \
+actor_rollout_ref.rollout.checkpoint_engine.check_weight_sync_only=True
+```
+
+The check currently supports vLLM exact allclose with rollout tensor parallel size 1.
+It reports missing, unexpected, and mismatched keys when the initial backend-loaded
+weights do not match the source HuggingFace checkpoint.
+
 ### Benchmark
+
 1. benchmark setup
 - model: Qwen/Qwen3-30B-A3B-Base
 - trainer: fsdp world_size=2 (since Ascend 910C has 64GB of HBM, we set world_size=4)
