@@ -32,9 +32,6 @@
 name: e2e_ppo_trainer_megatron_vllm_rocm
 
 on:
-  # Allow manually triggering the workflow from the Actions tab while validating
-  # on a personal fork. TODO: remove before upstreaming to verl-project/verl.
-  workflow_dispatch:
   # Trigger the workflow on push or pull request,
   # but only for the main branch.
   # For push, for now only anti-patterns are specified so it is more conservative
@@ -43,12 +40,8 @@ on:
     branches:
       - main
       - v0.*
-      - ci/rocm-e2e # TODO: temporary, remove before upstreaming (fork validation)
     paths:
       - "**/*.py"
-      # TODO: temporary, remove before upstreaming. Lets yml-only edits on the
-      # ci/rocm-e2e branch trigger the workflow during fork validation.
-      - ".github/workflows/e2e_ppo_trainer_megatron_vllm_rocm.yml"
       # Other entrypoints
       - "!verl/trainer/fsdp_sft_trainer.py"
       # FSDP
@@ -95,11 +88,8 @@ permissions:
 
 jobs:
   e2e_ppo_trainer_fsdp_vllm_rocm:
-    # TODO: change back to 'verl-project' before upstreaming. Set to your fork
-    # owner so the job runs during local validation.
-    if: github.repository_owner == 'PeterYang12'
-    # Must match a label you give the self-hosted runner during `config.sh`.
-    runs-on: [self-hosted, rocm-mi300]
+    if: github.repository_owner == 'verl-project'
+    runs-on: [rocm-mi300]
     timeout-minutes: 60 # Increase this timeout value as needed
     container:
       image: "verlai/verl:rocm702-vllm020-te210-20260518"
@@ -145,11 +135,11 @@ jobs:
           ray stop --force
           python3 examples/data_preprocess/gsm8k.py --local_dir ${HOME}/models/hf_data/gsm8k
       # Function RM
-      - name: Running GSM8K E2E training tests on 8 L20 GPUs with rmpad using function rm with validation and saving (FSDP_SIZE=8)
+      - name: Running GSM8K E2E training tests on 8 MI300 GPUs with rmpad using function rm with validation and saving (FSDP_SIZE=8)
         run: |
           ray stop --force
           VAL_BEFORE_TRAIN=True TEST_FREQ=1 SAVE_FREQ=1 SAVE_HF_MODEL=True VERL_EXP_NAME="qwen2.5-0.5b-function-reward-minimal-fsdp-size8" bash tests/special_e2e/ppo_trainer/run_function_reward.sh
-      - name: Running GSM8K E2E training tests on 8 L20 GPUs with rmpad using function rm after resuming
+      - name: Running GSM8K E2E training tests on 8 MI300 GPUs with rmpad using function rm after resuming
         run: |
           ray stop --force
           RESUME_MODE=auto VERL_EXP_NAME="qwen2.5-0.5b-function-reward-minimal-fsdp-size8" bash tests/special_e2e/ppo_trainer/run_function_reward.sh
@@ -157,7 +147,7 @@ jobs:
         run: |
           exp_name="qwen2.5-0.5b-function-reward-minimal-fsdp-size8"
           python -m verl.model_merger test --backend fsdp --local_dir checkpoints/verl-test/${exp_name}/global_step_1/actor --test_hf_dir checkpoints/verl-test/${exp_name}/global_step_1/actor/huggingface
-      - name: Running GSM8K E2E training tests on 8 L20 GPUs with rmpad using function rm with validation and saving (DDP_SIZE=2, FSDP_SIZE=4)
+      - name: Running GSM8K E2E training tests on 8 MI300 GPUs with rmpad using function rm with validation and saving (DDP_SIZE=2, FSDP_SIZE=4)
         run: |
           ray stop --force
           VAL_BEFORE_TRAIN=True TEST_FREQ=1 SAVE_FREQ=1 SAVE_HF_MODEL=True FSDP_SIZE=4 USE_KL=True VERL_EXP_NAME="qwen2.5-0.5b-function-reward-minimal-ddp-size2-fsdp-size4" bash tests/special_e2e/ppo_trainer/run_function_reward.sh
@@ -165,7 +155,7 @@ jobs:
         run: |
           exp_name="qwen2.5-0.5b-function-reward-minimal-ddp-size2-fsdp-size4"
           python -m verl.model_merger test --backend fsdp --local_dir checkpoints/verl-test/${exp_name}/global_step_1/actor --test_hf_dir checkpoints/verl-test/${exp_name}/global_step_1/actor/huggingface
-      - name: Running GSM8K E2E training tests on 8 L20 GPUs with rmpad using function rm with validation and saving (FSDP2)
+      - name: Running GSM8K E2E training tests on 8 MI300 GPUs with rmpad using function rm with validation and saving (FSDP2)
         run: |
           ray stop --force
           VAL_BEFORE_TRAIN=True TEST_FREQ=1 SAVE_FREQ=1 SAVE_HF_MODEL=True VERL_EXP_NAME="qwen2.5-0.5b-function-reward-minimal-fsdp2-size8" STRATEGY=fsdp2 bash tests/special_e2e/ppo_trainer/run_function_reward.sh
@@ -177,7 +167,7 @@ jobs:
         run: |
           ray stop --force
           RM_PAD=False bash tests/special_e2e/ppo_trainer/run_function_reward.sh
-      - name: Running GSM8K E2E training tests on 8 L20 GPUs with rmpad using function rm (GRPO)
+      - name: Running GSM8K E2E training tests on 8 MI300 GPUs with rmpad using function rm (GRPO)
         run: |
           ray stop --force
           CUSTOM_REWARD_FN=True ADV_ESTIMATOR=grpo USE_KL=True bash tests/special_e2e/ppo_trainer/run_function_reward.sh
@@ -186,11 +176,8 @@ jobs:
           rm -rf checkpoints
 
   e2e_ppo_trainer_megatron-moe-expert-parallel_rocm:
-    # TODO: change back to 'verl-project' before upstreaming. Set to your fork
-    # owner so the job runs during local validation.
-    if: github.repository_owner == 'PeterYang12'
-    # Must match a label you give the self-hosted runner during `config.sh`.
-    runs-on: [self-hosted, rocm-mi300]
+    if: github.repository_owner == 'verl-project'
+    runs-on: [rocm-mi300]
     timeout-minutes: 60 # Increase this timeout value as needed
     container:
       image: "verlai/verl:rocm702-vllm020-te210-20260518"
@@ -262,9 +249,8 @@ jobs:
     needs:
       - e2e_ppo_trainer_fsdp_vllm_rocm
       - e2e_ppo_trainer_megatron-moe-expert-parallel_rocm
-    # TODO: change back to "always() && github.repository_owner == 'verl-project'"
-    if: ${{ always() && github.repository_owner == 'PeterYang12' }}
-    runs-on: [self-hosted, rocm-mi300]
+    if: ${{ always() && github.repository_owner == 'verl-project' }}
+    runs-on: [rocm-mi300]
     container:
       image: "verlai/verl:rocm702-vllm020-te210-20260518"
     steps:
