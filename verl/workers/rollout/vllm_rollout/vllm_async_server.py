@@ -342,6 +342,20 @@ class vLLMHttpServer:
             }
             if self.model_config.lora.get("fully_sharded_loras", False):
                 lora_args["fully_sharded_loras"] = True
+
+            # Enable tower connector LoRA for VLMs when vision components are trainable.
+            # Detection follows the same pattern as trtllm_async_server.py: check if
+            # hf_config has a vision_config attribute. The freeze flags are read from
+            # the lora dict with defaults matching megatron_peft.py (True = frozen),
+            # so non-VLM models or VLMs with frozen vision towers are unaffected.
+            # Note: enable_tower_connector_lora requires vLLM >= 0.14.0.
+            is_vlm = hasattr(self.model_config.hf_config, "vision_config")
+            if is_vlm and _VLLM_VERSION >= version.parse("0.14.0"):
+                vision_frozen = self.model_config.lora.get("freeze_vision_model", True) and \
+                                self.model_config.lora.get("freeze_vision_projection", True)
+                if not vision_frozen:
+                    lora_args["enable_tower_connector_lora"] = True
+
             args.update(lora_args)
 
         if self.config.enable_rollout_routing_replay:
