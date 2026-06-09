@@ -1,0 +1,34 @@
+attn_implementation=flash_attention_3
+
+python3 -m verl.trainer.main_ppo \
+  algorithm.adv_estimator=grpo \
+  data.train_files=$HOME/data/gsm8k/train.parquet \
+  data.val_files=$HOME/data/gsm8k/test.parquet \
+  data.train_batch_size=256  \
+  data.max_prompt_length=512 \
+  data.max_response_length=256  \
+  actor_rollout_ref.model.path=Qwen/Qwen3-0.6B \
+  +actor_rollout_ref.model.override_config.attn_implementation=$attn_implementation \
+  actor_rollout_ref.model.use_remove_padding=True \
+  actor_rollout_ref.model.use_fused_kernels=True \
+  actor_rollout_ref.model.fused_kernel_options.impl_backend=torch \
+  actor_rollout_ref.actor.optim.lr=1e-6 \
+  actor_rollout_ref.actor.ppo_mini_batch_size=64 \
+  actor_rollout_ref.actor.use_dynamic_bsz=True \
+  actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True \
+  actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True \
+  actor_rollout_ref.actor.ppo_max_token_len_per_gpu=4096 \
+  actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=4096 \
+  actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=4096 \
+  actor_rollout_ref.rollout.name=vllm \
+  actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
+  actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
+  actor_rollout_ref.actor.fsdp_config.param_offload=True \
+  actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
+  trainer.logger=['console'] \
+  algorithm.use_kl_in_reward=False \
+  trainer.val_before_train=False \
+  trainer.n_gpus_per_node=1 \
+  trainer.nnodes=1 \
+  trainer.use_legacy_worker_impl=disable \
+  trainer.total_training_steps=2

@@ -1,0 +1,23 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+
+# uv
+.python-version
+!uv.lock
+
+# Ray / training outputs
+outputs/
+/tmp/
+
+# Data
+data/
+*.json
+*.jsonl
+*.parquet
+
+# Misc
+.DS_Store
+*.nsys-rep*
+*.deb
