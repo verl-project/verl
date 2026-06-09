@@ -1,27 +1,32 @@
 # Build the cu12.9 (CUDA 12.9) slice of verl's uv-managed multi-backend image.
 #
-# This Dockerfile pairs with docker/Dockerfile.uv.cu130; together they
-# cover verl's full GPU backend matrix:
+# verl uses one universal uv.lock for the whole project; this Dockerfile
+# builds its cu12.9 (CUDA 12.9 / torch 2.9.1) slice. Backends are PEP 621
+# extras, and mutually exclusive ones are declared in pyproject.toml's
+# [tool.uv].conflicts, so a single committed uv.lock resolves them all:
 #
-#   * Dockerfile.uv.cu130               — base nvidia/cuda:13.0.2; backends
-#     pinned on torch 2.11 / cu130: vllm, sglang, fsdp, megatron, cpu.
-#   * Dockerfile.uv.cu129 (this file)   — base nvidia/cuda:12.9.1; backends
-#     pinned on torch 2.9.x-2.10 / cu129: trtllm, veomni, nemoautomodel,
-#     cpu (upstream stacks not yet on torch 2.11).
+#   * cu12.9 (this file, base nvidia/cuda:12.9.1): veomni, nemoautomodel —
+#     both on torch 2.9.1 / cu129. They source-build flash-attn 2.8.3 (there
+#     is no cu129 prebuilt wheel, and uv can't fork a second direct URL —
+#     uv#13073). veomni and nemoautomodel share this torch world but pin it
+#     differently, so they conflict — pick exactly one at run time.
+#   * The torch-2.11 / cu13.0 backends (vllm, sglang, fsdp, megatron, cpu)
+#     live in the SAME uv.lock but are baked by docker/Dockerfile.uv.cu130.
+#   * DEFERRED — trtllm (tensorrt-llm) is a CUDA-13 RC sdist whose dependency
+#     tree explodes uv's resolver, so it is commented out in pyproject.toml.
+#     When it ships a stable release it belongs in the cu13.0 image (it needs
+#     cuda-python >= 13), not here.
 #
-# Each backend has its own independent lockfile under
-# requirements/<backend>.lock (compiled from the matching extra in
-# pyproject.toml's [project.optional-dependencies]). There is no universal
-# uv.lock — `manage_envs.py sync trtllm` only resolves trtllm's slice and
-# never fetches another backend's git sources or URL-pinned wheels.
-#
-# The build clones the verl source into /workspace/verl and runs
-# `manage_envs.py sync ...` for every cu12.9 backend, leaving one venv per
-# backend under /workspace/verl/.venvs/.venv-<backend>/. The uv flow is
-# x86_64 Linux only — Ascend NPU (vllm-ascend / sglang-ascend / mindspeed)
-# and aarch64 GPU variants (e.g. Grace-Blackwell) are out of scope for
-# now; for Ascend, see `docker/ascend/Dockerfile.ascend_8.5.0_a2` and
-# friends instead.
+# At build time we BAKE the cu12.9 uv cache — the veomni & nemoautomodel wheels
+# and built artifacts (including the source-built flash-attn), resolved from
+# the committed uv.lock — into the image (the `prefetch cu129` stage). The
+# image does NOT bake a fixed .venv. At container start you materialize the
+# backend you want with `manage_envs.py sync` — it `uv sync`s the requested
+# extra from that baked cache (fast / offline) into a single project venv at
+# /workspace/verl/.venv (already on PATH). There is no per-backend venv
+# and no Ray py_executable switching — every role runs from that one .venv.
+# The uv flow is x86_64 Linux + Python 3.12 only — Ascend NPU and aarch64 GPU
+# variants are out of scope (for Ascend see docker/ascend/... instead).
 #
 # The base layer is a superset of the "basic" stages of the upstream
 # `sglang/docker/Dockerfile` and `vllm/docker/Dockerfile`, so the resulting
@@ -33,34 +38,37 @@
 #                  uv tunables (UV_HTTP_TIMEOUT / UV_INDEX_STRATEGY /
 #                  UV_LINK_MODE) and CUDA forward-compat toggle.
 #
-# No build context is needed; the repo is fetched at build time:
+# The build context is the verl repo (it COPYs `.`, which must include the
+# committed uv.lock):
 #
 #     docker build -f docker/Dockerfile.uv.cu129 -t verl:uv-cu129 .
 #
-# This always builds the full cu12.9 backend set (trtllm + veomni +
-# nemoautomodel + cpu). The image is intentionally not slim-able via
-# build args — pick the Dockerfile, get every backend that is known to
-# work against that CUDA major. To compile just the lockfiles (no venvs),
-# build the named `lock` stage:
+# Pick the backend at RUN time (not build time) by syncing it yourself — one
+# of veomni / nemoautomodel (they conflict; see [tool.uv].conflicts):
+#
+#     docker run --rm -it --gpus all verl:uv-cu129 bash
+#     # then, inside the container:
+#     python3 manage_envs.py sync veomni -- --frozen
+#     python3 -m verl.trainer.main_ppo ...
+#
+# Optional named stages:
+#   * --target=prefetch : just the baked cu12.9 uv cache, no source.
+#   * --target=lock     : regenerate the (whole, universal) uv.lock.
 #
 #     docker build -f docker/Dockerfile.uv.cu129 --target=lock -t verl:uv-cu129-lock .
 #
 # Useful build args:
 #
-#     --build-arg VERL_REF=v0.7.1                  # branch / tag / commit
-#     --build-arg VERL_REPO=https://github.com/your-fork/verl.git
-#     --build-arg MAX_JOBS=128                     # bump for big build hosts
-#     --build-arg CUDA_VERSION=12.9.1              # alternative CUDA dev base
-#     --build-arg UBUNTU_MIRROR=...                # apt mirror (sglang-style)
-#     --build-arg PIP_DEFAULT_INDEX=...            # pip global index URL
-#     --build-arg GITHUB_ARTIFACTORY=github.com    # github mirror
+#     --build-arg MAX_JOBS=128                   # bump for big build hosts
+#     --build-arg CUDA_VERSION=12.9.1            # alternative CUDA dev base
+#     --build-arg UBUNTU_MIRROR=...              # apt mirror (sglang-style)
+#     --build-arg PIP_DEFAULT_INDEX=...          # pip global index URL
+#     --build-arg GITHUB_ARTIFACTORY=github.com  # github mirror
 #
-# Build with BuildKit so the uv cache mount below is honored. Each backend
-# RUN is a `manage_envs.py sync <backend>` call, which compiles
-# requirements/<backend>.lock (if missing) then runs `uv pip sync` against
-# it — only the requested backend's deps are ever touched. See the "Install
-# from multi-backend uv image" section in docs/start/install.rst for the
-# full cache story (build-time reuse + bind-mount for in-container resync).
+# Build with BuildKit. The `prefetch` stage bakes the uv cache into the image
+# (deliberately no cache mount), so the runtime `uv sync` is offline; the
+# `lock` and apt steps still use BuildKit cache mounts for faster rebuilds.
+# See the "Install from the uv image" section in docs/start/install.rst.
 
 ARG CUDA_VERSION=12.9.1
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu24.04 AS base
@@ -69,28 +77,28 @@ ARG CUDA_VERSION
 ARG TARGETARCH
 ARG DEBIAN_FRONTEND=noninteractive
 
-# Build parallelism for source-built packages (apex / TransformerEngine /
-# megatron-core). 32 is conservative and survives most CI hosts; raise
-# via --build-arg MAX_JOBS=128 on big machines. flash-attn ships as a
-# prebuilt wheel (mjun0812 v0.7.11) and does not honor MAX_JOBS.
+# Build parallelism for source-built packages. The cu12.9 backends (veomni /
+# nemoautomodel) source-build flash-attn 2.8.3 against torch 2.9.1 — there is
+# no cu129 prebuilt wheel and uv can't fork a second direct URL (uv#13073) —
+# and that nvcc compile honors MAX_JOBS. 32 is conservative and survives most
+# CI hosts; raise via --build-arg MAX_JOBS=128 on big machines.
 ARG MAX_JOBS=32
 ENV MAX_JOBS=${MAX_JOBS}
 
 # cuDNN / NCCL — see https://developer.nvidia.com/cudnn-downloads
 # These ARGs control the apt deb versions installed below and MUST match
-# whatever uv resolves into requirements/<backend>.lock. Backend pyproject
-# extras don't pin cuDNN / NCCL — torch's wheel pins them transitively.
-# For cu12.9 backends (torch 2.9.1 / 2.10), pyproject overrides cudnn-cu12
-# to 9.16.0.29 in [tool.uv].override-dependencies so the resolved version
-# clears the torch 2.9.1 conv3d bug
-# (https://github.com/pytorch/pytorch/issues/168167). After bumping a
-# backend's torch pin and re-running
-# `python manage_envs.py lock <backend> --recompile`, grep the resolved
-# versions out of the lockfile and update these ARGs:
+# whatever uv resolves into uv.lock for the cu12.9 / torch-2.9.1 fork. The
+# backend extras don't pin cuDNN / NCCL — torch's wheel pins them transitively
+# (torch 2.9.1+cu129 -> nvidia-nccl-cu12==2.27.5), except we override
+# nvidia-cudnn-cu12==9.16.0.29 in pyproject.toml's
+# [tool.uv].override-dependencies to clear the torch 2.9.1 conv3d bug
+# (https://github.com/pytorch/pytorch/issues/168167). After a torch/cudnn bump
+# and re-running `python manage_envs.py lock`, grep the resolved versions out
+# of uv.lock and update these ARGs:
 #
-#     grep -E '^(nvidia-cudnn-cu12|nvidia-nccl-cu12)==' requirements/veomni.lock
+#     grep -E 'nvidia-(cudnn|nccl)-cu12' uv.lock
 ARG CUDNN_VERSION=9.16.0.29-1
-ARG NCCL_VERSION=2.28.3-1
+ARG NCCL_VERSION=2.27.5-1
 
 # Source to build from. Override VERL_REF for tags / commits.
 ARG VERL_REPO=https://github.com/verl-project/verl.git
@@ -201,8 +209,9 @@ ENV LANG=en_US.UTF-8 \
 # ---------------------------------------------------------------------------
 # cuDNN + NCCL — actively installed following https://developer.nvidia.com/cudnn-downloads
 # The base image is -devel (no cuDNN); we install it explicitly so the version
-# is visible, pinned, and reproducible. manage_envs.py auto-detects these
-# system versions and force-installs the matching pip packages per-venv.
+# is visible, pinned, and reproducible. When cu12.9 is re-enabled these system
+# libs must match the nvidia-cudnn-cu12 / nvidia-nccl-cu12 pip wheels resolved
+# into uv.lock (CUDNN_VERSION / NCCL_VERSION ARGs above).
 # ---------------------------------------------------------------------------
 RUN CUDA_VERSION_MAJOR=$(echo ${CUDA_VERSION} | cut -d '.' -f 1) \
     && apt-get update && apt-get install -y --no-install-recommends --allow-change-held-packages \
@@ -236,14 +245,17 @@ RUN mkdir -p /tmp/gdrcopy && cd /tmp \
 RUN ln -sf /usr/lib/$(uname -m)-linux-gnu/libmlx5.so.1 /usr/lib/$(uname -m)-linux-gnu/libmlx5.so
 
 # ---------------------------------------------------------------------------
-# uv — single static binary. We use one venv per backend (manage_envs.py),
-# not the single /opt/venv that vllm's base creates, so we just put uv on
+# uv — single static binary. We bake the cu12.9 uv cache from the committed
+# uv.lock via manage_envs.py (the `prefetch cu129` stage); at run time you sync
+# the backend you want into .venv from it with `manage_envs.py sync`. Put uv on
 # PATH and copy across the uv tunables that vllm sets.
 # ---------------------------------------------------------------------------
 RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
 
-# UV_CACHE_DIR pins the cache so the per-backend BuildKit mounts below land
-# at a known path; UV_LINK_MODE=copy is required across the mount boundary.
+# UV_CACHE_DIR pins the cache to a known path; the `prefetch` stage bakes it
+# into the image there (no cache mount) so the runtime `uv sync` resolves
+# offline. UV_LINK_MODE=copy lets that runtime venv copy out of the baked
+# (read-only) cache layer.
 ENV UV_HTTP_TIMEOUT=500 \
     UV_INDEX_STRATEGY="unsafe-best-match" \
     UV_LINK_MODE=copy \
@@ -255,54 +267,71 @@ ENV UV_HTTP_TIMEOUT=500 \
 ENV VLLM_ENABLE_CUDA_COMPATIBILITY=0
 
 # ---------------------------------------------------------------------------
-# verl source + per-backend venvs.
+# deps: dependency metadata only (pyproject.toml + uv.lock) plus the uv driver.
+# Copying these *before* the full source keeps the expensive `prefetch` cache
+# bake below from being invalidated by unrelated source edits — it rebuilds
+# only when the dependencies actually change. (Verified sufficient: `uv sync
+# --frozen --no-install-project` needs only these two files.)
 # ---------------------------------------------------------------------------
-WORKDIR /workspace
-COPY . /workspace/verl
+FROM base AS deps
 WORKDIR /workspace/verl
+COPY pyproject.toml uv.lock manage_envs.py ./
 
-# `lock` stage: compile requirements/<backend>.lock for every cu12.9
-# backend whose lockfile isn't already in the COPY'd source. Each
-# invocation only resolves that one extra (no other backend's git
-# sources / URL wheels are fetched). Stop here with `--target=lock` to
-# extract the lockfiles without paying for any venv builds:
+# ---------------------------------------------------------------------------
+# prefetch: BAKE the cu12.9 uv cache into the image. `manage_envs.py prefetch
+# cu129` syncs the conflict-free covering combos (veomni, then nemoautomodel)
+# into throwaway envs purely to fill UV_CACHE_DIR (/root/.cache/uv) with every
+# wheel & built artifact those backends need from uv.lock — flash-attn 2.8.3 is
+# source-compiled against torch 2.9.1 here, once. The `cu129` scope keeps this
+# image to its own torch world: the universal lock also holds the torch-2.11
+# backends, but those are baked by Dockerfile.uv.cu130 and must not be built
+# against this CUDA-12.9 toolkit. It passes --no-install-project, so only deps
+# are cached and this layer is independent of the verl source tree. NOTE:
+# unlike every other uv step there is deliberately NO `--mount=type=cache`
+# here, so the warmed cache is committed as an image layer and ships *inside*
+# the image; the runtime `uv sync` then resolves from it offline.
+# ---------------------------------------------------------------------------
+FROM deps AS prefetch
+RUN python3 manage_envs.py prefetch cu129 -- --frozen
+
+# ---------------------------------------------------------------------------
+# source / lock: full source tree, used only to (re)generate the universal
+# uv.lock (the same lock the cu130 image uses). Build `--target=lock` to
+# refresh the lockfile and copy it back out:
 #
 #     docker build -f docker/Dockerfile.uv.cu129 --target=lock -t verl:uv-cu129-lock .
 #     docker create --name verl-tmp verl:uv-cu129-lock
-#     docker cp verl-tmp:/workspace/verl/requirements ./requirements
+#     docker cp verl-tmp:/workspace/verl/uv.lock ./uv.lock
 #     docker rm verl-tmp
-FROM base AS lock
+# ---------------------------------------------------------------------------
+FROM base AS source
+WORKDIR /workspace/verl
+COPY . /workspace/verl
+
+FROM source AS lock
 RUN --mount=type=cache,target=/root/.cache/uv,id=verl-uv-cache \
-    python3 manage_envs.py lock trtllm veomni nemoautomodel cpu
+    python3 manage_envs.py lock
 
 # ---------------------------------------------------------------------------
-# Per-backend venvs (cu12.9 set: trtllm + veomni + nemoautomodel + cpu).
+# final: the runtime image. Inherits the baked cu12.9 uv cache from `prefetch`,
+# adds the verl source, and bakes NO fixed .venv. The container starts in a
+# shell; materialize the backend you want with `manage_envs.py sync` — it
+# `uv sync`s the requested extra into /workspace/verl/.venv from the baked
+# cache (fast / offline, no network). That venv's bin is already on PATH, so it
+# activates in place. Pick one of veomni / nemoautomodel (they conflict; see
+# [tool.uv].conflicts), e.g.:
+#
+#     docker run --rm -it --gpus all verl:uv-cu129 bash
+#     # then, inside the container:
+#     python3 manage_envs.py sync nemoautomodel -- --frozen
+#     python3 -m verl.trainer.main_ppo ...
+#
+# The cuDNN / NCCL pip wheels installed by that sync (nvidia-cudnn-cu12 /
+# nvidia-nccl-cu12, from torch's transitive pins + the cudnn override) must
+# match the apt debs above.
 # ---------------------------------------------------------------------------
-FROM lock AS final
-
-# One RUN per backend so each venv lands in its own Docker layer: editing
-# one pin only invalidates that backend's layer, and a partial build keeps
-# every previously-finished venv. Each manage_envs.py invocation runs
-# `uv pip sync requirements/<backend>.lock` followed by an editable verl
-# install — only the requested backend's deps are touched. The cuDNN /
-# NCCL pip wheels (nvidia-cudnn-cu12 / nvidia-nccl-cu12) are inlined in
-# each cu12 backend extra in pyproject.toml and must already match the
-# apt deb versions above. All per-backend RUNs share a BuildKit cache at
-# UV_CACHE_DIR (id=verl-uv-cache) so wheels are downloaded once across
-# rebuilds and across backends — see docs/start/install.rst.
-RUN --mount=type=cache,target=/root/.cache/uv,id=verl-uv-cache \
-    python3 manage_envs.py sync trtllm
-RUN --mount=type=cache,target=/root/.cache/uv,id=verl-uv-cache \
-    python3 manage_envs.py sync veomni
-RUN --mount=type=cache,target=/root/.cache/uv,id=verl-uv-cache \
-    python3 manage_envs.py sync nemoautomodel
-RUN --mount=type=cache,target=/root/.cache/uv,id=verl-uv-cache \
-    python3 manage_envs.py sync cpu
-
-# Default PATH points at the veomni venv — the typical RL trainer driver
-# in the cu12.9 backend set. Switch at runtime by sourcing or prepending
-# another:
-#   docker run -e PATH=/workspace/verl/.venvs/.venv-trtllm/bin:$PATH ...
-ENV PATH="/workspace/verl/.venvs/.venv-veomni/bin:${PATH}"
-
+FROM prefetch AS final
+COPY . /workspace/verl
+ENV VIRTUAL_ENV="/workspace/verl/.venv" \
+    PATH="/workspace/verl/.venv/bin:${PATH}"
 CMD ["bash"]

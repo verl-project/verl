@@ -102,11 +102,6 @@ class CriticConfig(BaseConfig):
     checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
     profiler: ProfilerConfig = field(default_factory=ProfilerConfig)
 
-    # Cross-venv runtime: route critic Ray actors at a specific Python
-    # interpreter / venv. Falls back to ``trainer.venv`` when null. See
-    # :mod:`verl.utils.venv` for the accepted spec format.
-    venv: Optional[str] = None
-
     def __post_init__(self):
         """Validate critic configuration parameters."""
         assert self.strategy != MISSING

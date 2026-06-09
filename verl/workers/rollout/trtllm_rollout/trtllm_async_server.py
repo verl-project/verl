@@ -28,7 +28,6 @@ from verl.single_controller.ray import SubRayResourcePool
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.net_utils import is_valid_ipv6_address
 from verl.utils.profiler import DistProfiler
-from verl.utils.venv import inject_py_executable, resolve_py_executable
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
 from verl.workers.rollout.utils import get_max_position_embeddings, qwen2_5_vl_dedup_image_tokens, run_uvicorn
@@ -603,10 +602,7 @@ class TRTLLMReplica(RolloutReplica):
                 node_id=node_id,
                 soft=False,
             ),
-            runtime_env=inject_py_executable(
-                {"env_vars": _server_env_vars},
-                resolve_py_executable(self.config.venv, role="rollout", auto_hint=self.config.name),
-            ),
+            runtime_env={"env_vars": _server_env_vars},
             name=name,
             max_concurrency=self.max_concurrency,
         ).remote(

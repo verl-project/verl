@@ -193,12 +193,6 @@ class ActorConfig(BaseConfig):
     global_batch_info: dict = field(default_factory=dict)
     qat: QATConfig = field(default_factory=QATConfig)
 
-    # Cross-venv runtime: route this role's Ray actors at a specific Python
-    # interpreter / venv. Inherited by ``actor_rollout_ref.ref`` (which uses
-    # the same dataclass). Falls back to ``trainer.venv`` when null. See
-    # :mod:`verl.utils.venv` for the accepted spec format.
-    venv: Optional[str] = None
-
     def __post_init__(self):
         """Validate actor configuration parameters."""
         assert self.strategy != MISSING

@@ -142,7 +142,6 @@ actor_rollout_ref:
       - re:.*mlp.gate$
       activation_observer: static_minmax
       quantization_config_path: null
-    venv: null
   ref:
     optim:
       _target_: verl.workers.config.TorchtitanOptimizerConfig
@@ -232,7 +231,6 @@ actor_rollout_ref:
       mode: disabled
       record_file: null
       replay_file: null
-    venv: null
     _target_: verl.workers.config.TorchTitanActorConfig
   rollout:
     _target_: verl.workers.config.RolloutConfig
@@ -576,7 +574,6 @@ critic:
         steps: null
         stages: ${oc.select:global_profiler.global_tool_config.precision_debugger.stages,null}
         strict: ${oc.select:global_profiler.global_tool_config.precision_debugger.strict,False}
-  venv: null
   model:
     _target_: verl.workers.config.HFModelConfig
     path: ~/models/deepseek-llm-7b-chat
@@ -871,7 +868,6 @@ trainer:
         path: null
         name: null
       sampler_kwargs: {}
-  venv: null
 global_profiler:
   _target_: verl.utils.profiler.ProfilerConfig
   tool: null

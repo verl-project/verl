@@ -87,7 +87,6 @@ from verl.utils.py_functional import rename_dict
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.skip import SkipManager
 from verl.utils.tracking import Tracking, ValidationGenerationsLogger
-from verl.utils.venv import resolve_group_py_executable
 from verl.workers.config import CriticConfig, DistillationConfig
 from verl.workers.engine_workers import ActorRolloutRefWorker, TrainingWorker, TrainingWorkerConfig
 from verl.workers.rollout.llm_server import LLMServerClient, LLMServerManager
@@ -228,21 +227,11 @@ class PPOTrainer(ABC):
         for resource_pool, class_dict in self.resource_pool_to_cls.items():
             if not class_dict:
                 continue
-            # Cross-venv runtime: route this group's Ray actors at the venv
-            # picked by per-role ``*.venv`` fields (with ``trainer.venv`` as
-            # the fallback). Roles colocated in one Ray actor must agree on
-            # the resolved value — the resolver raises otherwise. In the
-            # hybrid/colocated path actor+rollout share the actor anyway, so
-            # only the actor-side spec matters there.
-            group_py_executable = resolve_group_py_executable(class_dict.keys(), self.config)
-            group_kwargs = dict(wg_kwargs)
-            if group_py_executable is not None:
-                group_kwargs["worker_py_executable"] = group_py_executable
             worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
             wg_dict = RayWorkerGroup(
                 resource_pool=resource_pool,
                 ray_cls_with_init=worker_dict_cls,
-                **group_kwargs,
+                **wg_kwargs,
             )
             spawn_wg = wg_dict.spawn(prefix_set=class_dict.keys())
             all_wg.update(spawn_wg)

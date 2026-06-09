@@ -77,13 +77,13 @@ jobs:
         uses: astral-sh/setup-uv@v3
         with:
           enable-cache: true
-      - name: Sync cpu venv (uses requirements/cpu.lock)
+      - name: Sync cpu venv (universal uv.lock)
         run: python manage_envs.py sync cpu
       # Most sanity checks now run via pre-commit (see .pre-commit-config.yaml
       # and .github/workflows/pre-commit.yml). Only checks that need the full
       # verl installation or CI-only context remain here.
       - name: Run sanity test
         run: |
-          .venvs/.venv-cpu/bin/pytest -s -x tests/special_sanity
+          .venv/bin/pytest -s -x tests/special_sanity
       - name: Assert documentation requirement for functions
-        run: .venvs/.venv-cpu/bin/python tests/special_sanity/validate_imported_docs.py
+        run: .venv/bin/python tests/special_sanity/validate_imported_docs.py

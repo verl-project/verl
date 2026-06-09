@@ -10,36 +10,48 @@ license = {text = "Apache-2.0"}
 readme = {file = "README.md", content-type = "text/markdown"}
 requires-python = ">=3.10,<3.13"
 
-# Per-backend recipes live as PEP 621 extras. Each backend gets its own
-# independent lockfile under requirements/<backend>.lock, generated via
-#   `uv pip compile pyproject.toml --extra <backend> -o requirements/<backend>.lock`
-# (or `python manage_envs.py sync <backend>`, which runs compile + sync).
-# This way `sync vllm` only ever resolves vllm's slice — no other backend's
-# git sources or URL wheels are fetched. Backend / torch / Docker map:
+# One universal uv.lock for the whole project. Each backend is a PEP 621
+# extra; mutually exclusive ones are declared in [tool.uv].conflicts (below)
+# so a single `uv lock` resolves them all into one lockfile. At runtime you
+# materialize exactly one conflict-free combination into the project venv:
+#
+#   uv sync --extra fsdp --extra vllm     # or: python manage_envs.py sync fsdp vllm
+#
+# There is no per-backend lockfile and no Ray py_executable switching — every
+# Ray worker group runs from the same .venv. Backend / torch / Docker map
+# (GPU first):
 #
 #   cu13.0 (docker/Dockerfile.uv.cu130) — torch 2.11.0:
 #     vllm, sglang, fsdp, megatron
-#   cu12.9 (docker/Dockerfile.uv.cu129) — torch 2.10.0 / 2.9.1:
-#     trtllm (2.10.0), veomni / nemoautomodel (2.9.1)
-#   cpu — torch 2.11.0 cpu wheels
+#   cu12.9 (docker/Dockerfile.uv.cu129) — torch 2.9.1:
+#     veomni, nemoautomodel
+#   cpu — torch 2.11.0 cpu wheels (CI / unit tests / dev sanity)
 #
-# cuDNN / NCCL pip wheels are NOT pinned here — torch's wheel already
-# transitively pins them (e.g. torch 2.11.0+cu130 -> nvidia-cudnn-cu13==9.19.0.56).
-# What matters is that the apt debs in the Dockerfiles match whatever
-# version uv resolves into the lockfile. After
-# `python manage_envs.py lock <backend> --recompile`, grep the resolved
-# `nvidia-cudnn-cu1{2,3}==X` / `nvidia-nccl-cu1{2,3}==Y` lines in
-# `requirements/<backend>.lock` and update `CUDNN_VERSION` / `NCCL_VERSION`
-# in the matching `docker/Dockerfile.uv.cu1{29,30}`.
+# All three torch lines (2.11.0+cu130, 2.9.1+cu129, 2.11.0+cpu) coexist in this
+# one lock: [tool.uv].conflicts forks the resolution so each "world" pins its
+# own torch. uv can hold multiple *versions* of a package across conflict forks,
+# but only ONE direct *URL* per package (uv#13073) — that is why the cu12.9
+# world source-builds flash-attn instead of using a second prebuilt wheel; see
+# [tool.uv.sources].flash-attn.
+#
+# DEFERRED — trtllm only. tensorrt-llm 1.3.0rc14 needs cuda-python>=13, so it is
+# really a CUDA-13 backend (torch 2.10.0+cu130, built in Dockerfile.uv.cu130) —
+# but that release is an unstable RC sdist whose tightly-pinned tree makes
+# `uv lock` explode (>17 min, no completion). Its recipe is preserved below
+# (commented out) to re-enable once tensorrt-llm ships a stable release.
+#
+# cuDNN / NCCL pip wheels: torch's own wheel transitively pins them (e.g. torch
+# 2.11.0+cu130 -> nvidia-cudnn-cu13==9.19.0.56; torch 2.9.1+cu129 ->
+# nvidia-cudnn-cu12, floored by the override below). What matters is that the
+# apt debs in each Dockerfile match whatever uv resolves into uv.lock. After
+# `uv lock` (or `python manage_envs.py lock`), grep the resolved
+# `nvidia-cudnn-*==X` / `nvidia-nccl-*==Y` lines in uv.lock and update
+# CUDNN_VERSION / NCCL_VERSION in the matching docker/Dockerfile.uv.cu13{0,9}.
 [project.optional-dependencies]
 
 # ---- legacy small extras (kept verbatim from setup.py) ---------------------
 test          = ["pytest", "pre-commit", "py-spy", "pytest-asyncio", "pytest-rerunfailures"]
-prime         = ["pyext"]
-geo           = ["mathruler", "torchvision", "qwen_vl_utils"]
-gpu           = ["liger-kernel", "flash-attn"]
 math          = ["math-verify"]
-trl           = ["trl<=0.9.6"]
 mcore         = ["mbridge"]
 transferqueue = ["TransferQueue @ git+https://github.com/Ascend/TransferQueue.git@main"]
 
@@ -73,11 +85,11 @@ verl-core = [
     "pytest-rerunfailures",
 ]
 
-# Internal sub-extras for flash-attn URL routing (deduplicate the prebuilt
+# Internal sub-extra for flash-attn URL routing (deduplicate the prebuilt
 # wheel URL across parent extras). Routed in [tool.uv.sources].flash-attn
 # below. Don't install alone — needs the parent extra's torch / cuDNN pins.
 flash-attn-cu130torch211 = ["flash-attn==2.8.3"]
-flash-attn-cu129torch29  = ["flash-attn==2.8.3"]
+flash-attn-cu129torch29 = ["flash-attn==2.8.3"]
 
 # ---- inference backends ----------------------------------------------------
 vllm = [
@@ -100,16 +112,25 @@ sglang = [
     "transformers==5.3.0",
 ]
 
-# trtllm sticks on cu12.9 / torch 2.10 (no cu13 / torch-2.11 wheel yet).
-trtllm = [
-    "verl[verl-core]",
-    "torch==2.10.0",
-    "tensorrt-llm==1.3.0rc14 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "mbridge",
-    "transformers==5.3.0",
-    "numpy>=2.0.0,<2.4",
-    "ray[default]==2.54.1",
-]
+# DEFERRED — trtllm is a CUDA-13 backend, NOT cu12.9. tensorrt-llm 1.3.0rc14
+# requires cuda-python>=13 (cuda-bindings 13.x), so its torch 2.10.0 must come
+# from the cu130 index and it would build in docker/Dockerfile.uv.cu130 (torch
+# 2.10 fork, conflict-gated against the torch-2.11 backends). We defer it because
+# that release is an unstable RC sdist whose large, tightly-pinned CUDA-13 tree
+# (tensorrt~=10.15.1, cuda-python>=13, triton==3.6.0, nvidia-modelopt, cuda-tile,
+# mpi4py, ...) makes `uv lock` explode (>17 min, no completion). To re-enable
+# once tensorrt-llm ships a stable release: uncomment this extra, add the cu130
+# torch routing + `{ extra = "trtllm" }` conflict entries (both flagged below),
+# and re-lock — pinning cuda-python/tensorrt if backtracking is still slow.
+# trtllm = [
+#     "verl[verl-core]",
+#     "torch==2.10.0",   # route to pytorch-cu130 (CUDA 13), see [tool.uv.sources]
+#     "tensorrt-llm==1.3.0rc14 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+#     "mbridge",
+#     "transformers==5.3.0",
+#     "numpy>=2.0.0,<2.4",
+#     "ray[default]==2.54.1",
+# ]
 
 # ---- training backends -----------------------------------------------------
 fsdp = [
@@ -146,7 +167,10 @@ megatron = [
     "transformers==5.3.0",
 ]
 
-# veomni v0.1.9a5 not yet on torch 2.11 / cu13.
+# cu12.9 / torch 2.9.1. veomni v0.1.9a5 and NeMo-Automodel v0.3.0 both cap
+# torch <= 2.10; conflict-gated against the torch-2.11 (cu130) and torch-2.10
+# (trtllm) backends so they resolve in their own torch-2.9.1 fork. Built by
+# docker/Dockerfile.uv.cu129.
 veomni = [
     "verl[verl-core]",
     "verl[flash-attn-cu129torch29]",
@@ -158,8 +182,6 @@ veomni = [
     "liger-kernel",
     "hf_transfer",
 ]
-
-# NeMo-Automodel v0.3.0 caps torch at 2.10 → highest in-range is 2.9.1.
 nemoautomodel = [
     "verl[verl-core]",
     "verl[flash-attn-cu129torch29]",
@@ -255,25 +277,50 @@ verl = [
   "experimental/*/config/*.yaml",
 ]
 
-# See docs/start/install.rst for the full reference. manage_envs.py wraps
-# `uv pip compile pyproject.toml --extra <backend>` -> requirements/<backend>.lock
-# followed by `uv pip sync requirements/<backend>.lock` per backend, so each
-# backend has its own independent lockfile. There is intentionally no
-# universal uv.lock (no [tool.uv].conflicts / no `uv sync` project mode):
-# `manage_envs.py sync vllm` only resolves vllm's slice and never touches
-# other backends' git sources or URL-pinned wheels.
+# One universal uv.lock. `uv lock` resolves every extra at once; mutually
+# exclusive extras (see `conflicts` below) co-exist in the lock but never in
+# a single synced venv. `uv sync --extra <a> --extra <b>` then materializes
+# one conflict-free combination into .venv. See docs/start/install.rst.
 [tool.uv]
-# x86_64 Linux only — Ascend NPU and aarch64 GPU are out of scope.
+# x86_64 Linux + Python 3.12 only — Ascend NPU, aarch64 GPU, and other Python
+# versions are out of scope for the uv flow (keeps the lock single-variant).
 environments = [
-    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "python_full_version >= '3.12' and sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+
+# Mutually exclusive extras — at most one of each set per `uv sync`. Distinct
+# torch "worlds" never mix in one venv (cu130/torch-2.11: vllm sglang fsdp
+# megatron; cpu/torch-2.11; veomni nemoautomodel/torch-2.9.1+cu129), so the
+# cu12.9 backends are added to every set below. uv resolves each world in its
+# own fork, which is what lets one lock hold torch 2.11.0 and 2.9.1 at once
+# (and torch 2.10.0 too, once the DEFERRED trtllm backend rejoins).
+#   * vllm / sglang are competing inference engines and both pin torch 2.11.0;
+#     cpu is the GPU-free CI slice. The three are mutually exclusive.
+#   * cpu additionally excludes the GPU training backends fsdp / megatron.
+# fsdp and megatron are NOT mutually exclusive with a (cu130) inference engine,
+# so a training run can sync e.g. `--extra megatron --extra vllm` into one venv.
+conflicts = [
+    # (trtllm DEFERRED — re-add `{ extra = "trtllm" }` to each set below when it
+    #  rejoins the lock as a CUDA-13 backend; see the trtllm extra note above.)
+    [{ extra = "vllm" }, { extra = "sglang" }, { extra = "cpu" }, { extra = "veomni" }, { extra = "nemoautomodel" }],
+    [{ extra = "fsdp" }, { extra = "cpu" }, { extra = "veomni" }, { extra = "nemoautomodel" }],
+    [{ extra = "megatron" }, { extra = "cpu" }, { extra = "veomni" }, { extra = "nemoautomodel" }],
+    # flash-attn differs per torch world: the cu130 world uses the prebuilt wheel
+    # URL in [tool.uv.sources].flash-attn (gated by flash-attn-cu130torch211),
+    # while the cu12.9 world source-builds it (flash-attn-cu129torch29, no URL —
+    # uv can't fork a second direct URL, uv#13073). Declaring the two sub-extras
+    # conflicting keeps them in separate forks so the single prebuilt URL never
+    # collides with the source build.
+    [{ extra = "flash-attn-cu130torch211" }, { extra = "flash-attn-cu129torch29" }],
 ]
 
 # Global override pins:
 #   * transformers 5.3.0 across every backend (overrides upstream `<5` caps).
-#   * nvidia-cudnn-cu12==9.16.0.29 forces 9.15+ on cu12.9 backends to dodge
-#     the torch 2.9.1 conv3d bug (https://github.com/pytorch/pytorch/issues/168167);
-#     torch 2.9.1's wheel transitively pins cudnn-cu12==9.10. cu13 backends
-#     accept torch 2.11.0's transitive nvidia-cudnn-cu13==9.19.0.56 unmodified.
+#   * numpy>=2.0.0 floor for every backend.
+#   * nvidia-cudnn-cu12==9.16.0.29 floors cuDNN for the cu12.9 backends (veomni /
+#     nemoautomodel), whose torch 2.9.1 needs cudnn 9.15+ to dodge the conv3d
+#     bug (https://github.com/pytorch/pytorch/issues/168167). It is inert in the
+#     cu130 + cpu scope (those stacks use cudnn-cu13 / no cudnn).
 override-dependencies = [
     "transformers==5.3.0",
     "nvidia-cudnn-cu12==9.16.0.29",
@@ -286,6 +333,9 @@ no-build-isolation-package = [
     "apex",
     "transformer-engine",
     "transformer-engine-torch",
+    # cu12.9 only: source-built against the fork's torch 2.9.1 (the cu130 world
+    # uses the prebuilt wheel in [tool.uv.sources].flash-attn instead).
+    "flash-attn",
 ]
 
 # Inject the project's runtime torch into the build env (no re-resolve).
@@ -293,6 +343,7 @@ no-build-isolation-package = [
 apex                     = [{ requirement = "torch", match-runtime = true }]
 transformer-engine       = [{ requirement = "torch", match-runtime = true }]
 transformer-engine-torch = [{ requirement = "torch", match-runtime = true }]
+flash-attn               = [{ requirement = "torch", match-runtime = true }]
 
 # Skip lock-time metadata-extraction builds for git-source packages whose
 # upstreams have no [project] section or use dynamic version. uv trusts
@@ -324,6 +375,7 @@ name = "mbridge"
 version = "0.15.1"
 requires-dist = []
 
+# Metadata for the cu12.9 git-source backends (skips lock-time build).
 [[tool.uv.dependency-metadata]]
 name = "veomni"
 version = "0.1.9a5"
@@ -339,7 +391,6 @@ requires-dist = [
     "setuptools",
     "einops>=0.8.1",
 ]
-
 [[tool.uv.dependency-metadata]]
 name = "nemo-automodel"
 version = "0.3.0"
@@ -373,9 +424,10 @@ requires-dist = ["torch"]
 apex               = { git = "https://github.com/NVIDIA/apex.git" }
 transformer-engine = { git = "https://github.com/NVIDIA/TransformerEngine.git", tag = "v2.15" }
 mbridge            = { git = "https://github.com/ISEEKYAN/mbridge.git",         rev = "641a5a0" }
-veomni             = { git = "https://github.com/ByteDance-Seed/VeOmni.git",    tag = "v0.1.9a5" }
-nemo-automodel     = { git = "https://github.com/NVIDIA-NeMo/Automodel.git",    tag = "v0.3.0" }
 megatron-core      = { git = "https://github.com/NVIDIA/Megatron-LM.git",       tag = "core_v0.16.1" }
+# cu12.9 git sources:
+veomni         = { git = "https://github.com/ByteDance-Seed/VeOmni.git", tag = "v0.1.9a5" }
+nemo-automodel = { git = "https://github.com/NVIDIA-NeMo/Automodel.git", tag = "v0.3.0" }
 
 # flash-attn 2.8.3 prebuilt wheels from
 # https://github.com/mjun0812/flash-attention-prebuild-wheels/releases.
@@ -383,9 +435,13 @@ megatron-core      = { git = "https://github.com/NVIDIA/Megatron-LM.git",       
 # (CUDA, torch, cp-abi) tuple and update the parent extra's torch pin.
 # If no prebuilt exists, add `flash-attn` to no-build-isolation-package,
 # list `flash-attn==2.8.3` directly in the parent extra, and uv source-builds.
+# Only ONE direct URL is allowed per package across the whole lock — uv does
+# NOT fork direct URLs by conflicting extras (astral-sh/uv#13073). So the
+# primary cu130 world keeps the fast prebuilt wheel here, while the cu12.9
+# world (veomni / nemoautomodel) source-builds flash-attn from PyPI against its
+# torch 2.9.1 (see flash-attn-cu129torch29 below + no-build-isolation-package).
 flash-attn = [
     { url = "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.4/flash_attn-2.8.3%2Bcu130torch2.11-cp312-cp312-linux_x86_64.whl",  extra = "flash-attn-cu130torch211" },
-    { url = "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.7.11/flash_attn-2.8.3%2Bcu129torch2.9-cp312-cp312-linux_x86_64.whl", extra = "flash-attn-cu129torch29"  },
 ]
 
 # Per-extra routing to the matching pytorch wheel index.
@@ -394,28 +450,29 @@ torch = [
     { index = "pytorch-cu130", extra = "sglang" },
     { index = "pytorch-cu130", extra = "fsdp" },
     { index = "pytorch-cu130", extra = "megatron" },
-    { index = "pytorch-cu129", extra = "trtllm" },
+    { index = "pytorch-cpu",   extra = "cpu" },
+    # trtllm (DEFERRED) would route to CUDA 13 here:
+    #   { index = "pytorch-cu130", extra = "trtllm" },
     { index = "pytorch-cu129", extra = "veomni" },
     { index = "pytorch-cu129", extra = "nemoautomodel" },
-    { index = "pytorch-cpu",   extra = "cpu" },
 ]
 torchvision = [
     { index = "pytorch-cu130", extra = "vllm" },
     { index = "pytorch-cu130", extra = "sglang" },
     { index = "pytorch-cu130", extra = "fsdp" },
     { index = "pytorch-cu130", extra = "megatron" },
+    { index = "pytorch-cpu",   extra = "cpu" },
     { index = "pytorch-cu129", extra = "veomni" },
     { index = "pytorch-cu129", extra = "nemoautomodel" },
-    { index = "pytorch-cpu",   extra = "cpu" },
 ]
 torchaudio = [
     { index = "pytorch-cu130", extra = "vllm" },
     { index = "pytorch-cu130", extra = "sglang" },
     { index = "pytorch-cu130", extra = "fsdp" },
     { index = "pytorch-cu130", extra = "megatron" },
+    { index = "pytorch-cpu",   extra = "cpu" },
     { index = "pytorch-cu129", extra = "veomni" },
     { index = "pytorch-cu129", extra = "nemoautomodel" },
-    { index = "pytorch-cpu",   extra = "cpu" },
 ]
 
 [[tool.uv.index]]

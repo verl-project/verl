@@ -93,11 +93,11 @@ jobs:
           fetch-depth: 0
       # Phase 1 of the uv migration: install verl via `uv pip install --system`
       # into the prebuilt image's system Python. This adopts uv as the install
-      # tool but does NOT use the per-backend requirements/<backend>.lock
-      # files yet — the system Python is already populated by the image, and
-      # we only overlay test deps + editable verl. Phase 2 (follow-up PR,
-      # after the CI image is rebuilt from docker/Dockerfile.uv.cu130) will
-      # switch to `source .venvs/.venv-cpu/bin/activate` to gain lockfile-grade
+      # tool but does NOT use the universal uv.lock yet — the system Python is
+      # already populated by the image, and we only overlay test deps +
+      # editable verl. Phase 2 (follow-up PR, after the CI image is rebuilt
+      # from docker/Dockerfile.uv.cu130) will switch to a project venv synced
+      # via `python manage_envs.py sync cpu` to gain lockfile-grade
       # reproducibility.
       - name: Install the current repository
         run: |

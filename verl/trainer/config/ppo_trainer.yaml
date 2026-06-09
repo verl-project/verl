@@ -247,15 +247,6 @@ trainer:
       # Additional kwargs for the custom sampler
       sampler_kwargs: {}
 
-  # Cross-venv runtime spec used as the fallback for any trainer-side Ray
-  # worker group (actor, critic, ref, ...) whose role-level ``venv`` field is
-  # null. Per-role overrides live at ``actor_rollout_ref.actor.venv``,
-  # ``actor_rollout_ref.ref.venv``, ``critic.venv``, and (for inference)
-  # ``actor_rollout_ref.rollout.venv`` / nested rollout configs. Null here
-  # leaves any unset role on the driver's interpreter (legacy single-venv
-  # behaviour). See verl/utils/venv.py for the spec format.
-  venv: null
-
 # profiler configs
 global_profiler:
 
