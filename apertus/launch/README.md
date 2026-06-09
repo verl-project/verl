@@ -65,7 +65,9 @@ The launcher writes scheduler and training Slurm logs into the generated
 ${WORKING_DIR}/outputs/${PROJECT_NAME}/${RUN_NAME}
 ```
 
-## Prepare code-gym
+## Prepare gyms
+### Prepare code-gym
+> ⚠️ *soon to be deprecated in favor of sandbox env running on Kubernetes*
 
 Clone the `code-gym` repository at the path configured by `CODE_GYM_DIR`:
 
@@ -74,6 +76,16 @@ git clone https://github.com/swiss-ai/code-gym.git /iopsstor/scratch/cscs/$USER/
 ```
 
 If you choose a different location, update `CODE_GYM_DIR` in `launch.sh`.
+
+### Prepare r-gym
+Clone the `r-gym` repository at the path configured by `REASONING_GYM_DIR` and checkout the `translate` branch. This repository contains more tasks than the one supported by `reasoning_gym` package.
+
+```bash
+git clone https://github.com/EduardDurech/r-gym.git /iopsstor/scratch/cscs/$USER/projects/r-gym
+git checkout translate
+```
+
+If you choose a different location, update `REASONING_GYM_DIR` in `launch.sh`.
 
 ## Launch
 
