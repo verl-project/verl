@@ -81,7 +81,7 @@ DEPS_STAMP_DIR="${PY_DEPS_ROOT}/.stamps"
 DEPS_STAMP="${DEPS_STAMP_DIR}/apertus_reward_py312.ready"
 DEPS_LOCK="${DEPS_STAMP_DIR}/apertus_reward_py312.lock"
 
-EXTRA_PIP_PACKAGES="${EXTRA_PIP_PACKAGES:-immutabledict nltk langdetect absl-py emoji syllapy antlr4-python3-runtime==4.9.3 requests math_verify}"
+EXTRA_PIP_PACKAGES="${EXTRA_PIP_PACKAGES:-immutabledict nltk langdetect absl-py emoji syllapy antlr4-python3-runtime==4.9.3 requests math_verify reasoning_gym}"
 
 
 DATA_DIR="${TRAINING_DATA_DIR:-${WORKING_DIR}/data/apertus_demo_rl}"
@@ -249,13 +249,7 @@ prepare_shared_python_deps() {
       exit 0
     fi
 
-    if [ ! -d "${REASONING_GYM_DIR}" ]; then
-      echo "REASONING_GYM_DIR=${REASONING_GYM_DIR} does not exist. Clone https://github.com/EduardDurech/r-gym.git and check out the translate branch there, or set REASONING_GYM_DIR." >&2
-      exit 1
-    fi
-
     python3 -m pip install --no-cache-dir --upgrade --target "${PY_DEPS_DIR}" ${EXTRA_PIP_PACKAGES}
-    python3 -m pip install --no-cache-dir --upgrade --force-reinstall --target "${PY_DEPS_DIR}" "${REASONING_GYM_DIR}"
     python3 -c "import nltk; [nltk.download(pkg, download_dir=\"${NLTK_DATA_DIR}\", quiet=True) for pkg in (\"punkt\", \"punkt_tab\", \"stopwords\", \"averaged_perceptron_tagger_eng\")]"
     python3 -c "import sys; sys.path[:0] = [\"${PY_DEPS_DIR}\", \"${WORKING_DIR}\"]; import absl, emoji, immutabledict, langdetect, math_verify, nltk, reasoning_gym, requests, syllapy, verl; print(\"Using shared deps from\", \"${PY_DEPS_DIR}\"); print(\"Using verl from\", verl.__file__)"
     touch "${DEPS_STAMP}"
@@ -282,7 +276,6 @@ export ENVIRONMENT_PATH
 export PY_DEPS_ROOT
 export PY_DEPS_DIR
 export NLTK_DATA_DIR
-export REASONING_GYM_DIR
 export DEPS_STAMP_DIR
 export DEPS_STAMP
 export DEPS_LOCK
