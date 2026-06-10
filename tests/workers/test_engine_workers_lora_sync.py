@@ -54,27 +54,44 @@ async def _update_weights(
         per_tensor_param, _ = actor_engine.get_per_tensor_param()
         return
 
-    # 1. resume weights (conditional on sleep_level)
-    if free_cache_engine:
-        if getattr(rollout, "sleep_level", 2) != 1:
-            await rollout.resume(tags=["weights"])
+    def materialize_weights_to_cpu(weights):
+        return [
+            (name, tensor.detach().cpu() if hasattr(tensor, "detach") else tensor)
+            for name, tensor in weights
+        ]
 
-    # 2. probe adapter-mode params first so we can discover peft_config
+    # 1. probe adapter-mode params first so we can discover peft_config
     per_tensor_param, peft_config = actor_engine.get_per_tensor_param(
         layered_summon=layered_summon, base_sync_done=True
     )
 
-    # 3. determine base sync need
+    # 2. determine base sync need
     do_lora_base_sync = False
     if not peft_merge and peft_config is not None:
         rollout.sleep_level = 1
         do_lora_base_sync = not base_sync_done
 
-    # 4. sync weights
+    # 3. prepare base sync params before actor offload
+    per_tensor_param_base = None
     if do_lora_base_sync:
-        per_tensor_param_base, peft_config = actor_engine.get_per_tensor_param(
+        per_tensor_param_base, peft_config_base = actor_engine.get_per_tensor_param(
             layered_summon=layered_summon, base_sync_done=False
         )
+        peft_config = peft_config_base
+
+    # 4. offload actor model before rollout weight resume
+    if actor_engine.is_param_offload_enabled:
+        per_tensor_param = materialize_weights_to_cpu(per_tensor_param)
+        if per_tensor_param_base is not None:
+            per_tensor_param_base = materialize_weights_to_cpu(per_tensor_param_base)
+        actor_engine.to("cpu", model=True, optimizer=False, grad=False)
+
+    # 5. resume weights after actor offload
+    if free_cache_engine:
+        await rollout.resume(tags=["weights"])
+
+    # 6. sync weights
+    if do_lora_base_sync:
         await rollout.update_weights(
             per_tensor_param_base, peft_config=peft_config, base_sync_done=False, global_steps=global_steps
         )
@@ -83,7 +100,7 @@ async def _update_weights(
         per_tensor_param, peft_config=peft_config, base_sync_done=True, global_steps=global_steps
     )
 
-    # 5. resume kv_cache
+    # 7. resume kv_cache
     if free_cache_engine:
         await rollout.resume(tags=["kv_cache"])
 
@@ -105,6 +122,7 @@ def _make_mocks(peft_config=None, params_by_base_sync_done=None):
         params_by_base_sync_done = {False: "fake_params", True: "fake_params"}
 
     actor_engine = MagicMock()
+    actor_engine.is_param_offload_enabled = False
 
     def _get_per_tensor_param(*args, **kwargs):
         base_sync_done = kwargs.get("base_sync_done", True)
@@ -234,8 +252,8 @@ class TestAdapterModeSubsequentIterations:
         assert rollout.update_weights.call_count == 1
         assert rollout.update_weights.call_args.kwargs["base_sync_done"] is True
 
-    def test_skips_weight_resume(self):
-        """With sleep_level=1, weight resume is skipped."""
+    def test_resumes_weight_memory(self):
+        """Weight memory is resumed before adapter deltas are synced."""
         peft_cfg = MagicMock()
         rollout, engine = _make_mocks(peft_config=peft_cfg)
         rollout.sleep_level = 1
@@ -250,9 +268,8 @@ class TestAdapterModeSubsequentIterations:
             )
         )
 
-        # Only kv_cache resume, no weight resume
         resume_calls = rollout.resume.call_args_list
-        assert call(tags=["weights"]) not in resume_calls
+        assert call(tags=["weights"]) in resume_calls
         assert call(tags=["kv_cache"]) in resume_calls
 
 
@@ -410,6 +427,53 @@ class TestEdgeCases:
         # Filter to only resume and update_weights calls
         actual = [c for c in rollout.mock_calls if c[0] in ("resume", "update_weights")]
         assert actual == expected
+
+    def test_actor_offload_before_weight_resume(self):
+        """Actor params are offloaded before rollout wakes weight memory."""
+        events = []
+
+        class FakeTensor:
+            def detach(self):
+                return self
+
+            def cpu(self):
+                events.append("materialize_weight")
+                return self
+
+        def fake_weights():
+            events.append("consume_generator")
+            yield "weight", FakeTensor()
+
+        rollout, engine = _make_mocks(
+            peft_config=None,
+            params_by_base_sync_done={False: fake_weights(), True: fake_weights()},
+        )
+        engine.is_param_offload_enabled = True
+        engine.to.side_effect = lambda *args, **kwargs: events.append(("actor_offload", args, kwargs))
+
+        async def _resume(*args, **kwargs):
+            events.append(("rollout_resume", args, kwargs))
+
+        rollout.resume.side_effect = _resume
+
+        asyncio.run(
+            _update_weights(
+                rollout=rollout,
+                actor_engine=engine,
+                peft_merge=False,
+                base_sync_done=True,
+                free_cache_engine=True,
+            )
+        )
+
+        assert events[0] == "consume_generator"
+        assert events[1] == "materialize_weight"
+        assert events[2] == (
+            "actor_offload",
+            ("cpu",),
+            {"model": True, "optimizer": False, "grad": False},
+        )
+        assert events[3] == ("rollout_resume", (), {"tags": ["weights"]})
 
     def test_global_steps_forwarded(self):
         """Verify global_steps is passed through to update_weights."""
