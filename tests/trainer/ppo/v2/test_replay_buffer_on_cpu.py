@@ -13,13 +13,22 @@
 # limitations under the License.
 """Unit tests for :class:`verl.trainer.ppo.v2.replay_buffer.ReplayBuffer`.
 
-The tests run against a real (CPU-only) TransferQueue instance. Each test uses a
-unique ``partition_id`` so that data written by one test never leaks into the
-metadata polled by another (``async_kv_list`` returns *all* partitions, but
-``ReplayBuffer`` tracks keys per partition).
+The tests run against a real (CPU-only) TransferQueue instance. ``ReplayBuffer``
+is fully synchronous: :meth:`ReplayBuffer.sample` blocks the calling thread,
+re-polling TransferQueue every ``poll_interval`` seconds until ``batch_size``
+terminal (``finished``/``failure``) prompts are available.
+
+To exercise the blocking consumer without deadlocking the test, the *producer*
+side -- the rollout that feeds TransferQueue -- runs in a dedicated thread (see
+:class:`RolloutProducer`). The producer mirrors the real ordering: it writes
+every trajectory of a GRPO group first, and only then marks the prompt terminal,
+so the consumer never observes a terminal prompt before its trajectories exist.
+
+Each test uses a unique ``partition_id`` so that data written by one test never
+leaks into another (``_sync_metadata_from_transfer_queue`` lists *all*
+partitions, but ``ReplayBuffer`` tracks keys per partition).
 """
 
-import asyncio
 import threading
 import time
 import uuid
@@ -28,10 +37,11 @@ from dataclasses import dataclass, field
 import pytest
 import torch
 import transfer_queue as tq
+from transfer_queue import KVBatchMeta
 
 from verl.trainer.ppo.v2.replay_buffer import ReplayBuffer
 
-# Small poll interval so the background task reflects TransferQueue changes quickly.
+# Small poll interval so the blocking consumer reacts to producer writes quickly.
 POLL_INTERVAL = 0.05
 
 
@@ -60,7 +70,7 @@ def _trajectory_key(uid: str, session_id: int = 0, index: int = 0) -> str:
 @dataclass
 class PromptSpec:
     """One GRPO group to produce: ``sessions`` trajectories followed by a terminal
-    prompt status."""
+    prompt status (``finished``/``failure``/``running``/``pending``)."""
 
     uid: str
     status: str
@@ -71,14 +81,13 @@ class PromptSpec:
 class RolloutProducer(threading.Thread):
     """Simulates the rollout side feeding TransferQueue from a *separate thread*.
 
-    It mirrors the real producer ordering in ``main_ppo_sync`` (``_run_prompt``):
-    every trajectory of a GRPO group is written *first*, and only then is the
-    prompt marked terminal (``finished``/``failure``). Writing the prompt status
-    last guarantees that whenever the consumer observes a terminal prompt, all of
-    its trajectories are already present -- avoiding a producer/consumer race.
+    For every spec it writes all trajectory values first and only then writes the
+    prompt status. Writing the prompt status last guarantees that whenever the
+    consumer observes a terminal prompt, all of its trajectories are already
+    present -- avoiding a producer/consumer race.
 
-    Uses the synchronous ``tq.kv_put`` API which talks to the client directly and
-    is therefore safe to call from a non-asyncio thread.
+    Uses the synchronous ``tq.kv_put`` API which is safe to call from a plain
+    (non-asyncio) thread.
     """
 
     def __init__(self, partition_id: str, specs: list[PromptSpec], delay: float = 0.0):
@@ -117,104 +126,93 @@ class RolloutProducer(threading.Thread):
             raise self.error
 
 
+class SampleConsumer(threading.Thread):
+    """Runs the blocking ``ReplayBuffer.sample`` in a background thread so the test
+    can assert that it stays blocked until the producer supplies enough data."""
+
+    def __init__(self, rb: ReplayBuffer, partition_id: str, batch_size: int):
+        super().__init__(daemon=True)
+        self.rb = rb
+        self.partition_id = partition_id
+        self.batch_size = batch_size
+        self.result: KVBatchMeta | None = None
+        self.error: Exception | None = None
+
+    def run(self) -> None:
+        try:
+            self.result = self.rb.sample(self.partition_id, self.batch_size)
+        except Exception as e:
+            self.error = e
+
+    def result_or_raise(self, timeout: float = 10.0) -> KVBatchMeta:
+        self.join(timeout)
+        assert not self.is_alive(), "SampleConsumer thread did not finish in time"
+        if self.error is not None:
+            raise self.error
+        assert self.result is not None
+        return self.result
+
+
 def _produce(partition_id: str, specs: list[PromptSpec], delay: float = 0.0) -> RolloutProducer:
     producer = RolloutProducer(partition_id, specs, delay=delay)
     producer.start()
     return producer
 
 
-async def _clear_partition(partition_id: str):
+def _clear_partition(partition_id: str) -> None:
     """Best-effort cleanup of every key written into a partition."""
-    data = await tq.async_kv_list(partition_id=partition_id)
-    keys = list(data.get(partition_id, {}).keys())
+    keys = list(tq.kv_list(partition_id=partition_id).get(partition_id, {}).keys())
     if keys:
-        await tq.async_kv_clear(partition_id=partition_id, keys=keys)
-
-
-async def _make_buffer(poll_interval: float = POLL_INTERVAL) -> ReplayBuffer:
-    return ReplayBuffer(poll_interval=poll_interval)
+        tq.kv_clear(keys=keys, partition_id=partition_id)
 
 
 def _uids_of(keys: list[str]) -> set[str]:
     return {key.split("_")[0] for key in keys}
 
 
-async def _wait_for_poll_to_drop(rb: ReplayBuffer, partition_id: str, gone_uids: set[str], timeout: float = 10.0):
-    """Wait until the background poll refreshes terminal tracking so that already
-    sampled prompts are no longer selectable.
-
-    ``sample`` only clears the sampled *prompt* keys in TransferQueue; the in-memory
-    ``finished_keys`` / ``failure_keys`` are refreshed by the next background poll.
-    The real trainer always has a training gap between two ``sample`` calls, during
-    which the poll runs; this helper reproduces that gap deterministically so a
-    follow-up ``sample`` cannot re-select consumed prompts.
-    """
-    deadline = asyncio.get_event_loop().time() + timeout
-    while asyncio.get_event_loop().time() < deadline:
-        live = rb.finished_keys[partition_id] | rb.failure_keys[partition_id]
-        if not (gone_uids & live):
-            return
-        await asyncio.sleep(POLL_INTERVAL)
-    raise TimeoutError("background poll did not drop sampled prompts in time")
-
-
 # --------------------------------------------------------------------------- #
-# _update_date: pure classification logic (no TransferQueue interaction).
+# _sync_metadata_from_transfer_queue: classification of polled metadata.
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.asyncio
-async def test_update_date_classifies_keys(tq_init):
-    """_update_date splits prompts by status and collects trajectory tags."""
-    rb = await _make_buffer(poll_interval=1e6)  # effectively disable background polling
-    await rb.close()  # stop background task; we drive _update_date manually below
+def test_sync_metadata_classifies_keys(tq_init, partition_id):
+    """The poll splits prompts by status and collects trajectory tags."""
+    pending = PromptSpec(uid=_uid(), status="pending", sessions=0)
+    running = PromptSpec(uid=_uid(), status="running", sessions=1)
+    finished = PromptSpec(uid=_uid(), status="finished", sessions=2)
+    failure = PromptSpec(uid=_uid(), status="failure", sessions=1)
+    _produce(partition_id, [pending, running, finished, failure]).join_and_check()
 
-    data = {
-        "train": {
-            "p0": {"is_prompt": True, "status": "pending"},
-            "p1": {"is_prompt": True, "status": "running"},
-            "p2": {"is_prompt": True, "status": "finished"},
-            "p3": {"is_prompt": True, "status": "failure"},
-            "p2_0_0": {"is_prompt": False, "seq_len": 10},
-            "p2_0_1": {"is_prompt": False, "seq_len": 11},
-            # missing "is_prompt" key defaults to a trajectory.
-            "p3_0_0": {"seq_len": 12},
-        }
-    }
-    rb._update_date(data)
+    rb = ReplayBuffer(poll_interval=POLL_INTERVAL)
+    try:
+        rb._sync_metadata_from_transfer_queue()
 
-    assert rb.pending_keys["train"] == {"p0"}
-    assert rb.running_keys["train"] == {"p1"}
-    assert rb.finished_keys["train"] == {"p2"}
-    assert rb.failure_keys["train"] == {"p3"}
-    assert set(rb.partitions["train"].keys()) == {"p2_0_0", "p2_0_1", "p3_0_0"}
-    # The full tag dict is retained for trajectories (including the is_prompt flag).
-    assert rb.partitions["train"]["p2_0_0"] == {"is_prompt": False, "seq_len": 10}
-    assert rb.partitions["train"]["p3_0_0"] == {"seq_len": 12}
+        assert rb.pending_keys[partition_id] == {pending.uid}
+        assert rb.running_keys[partition_id] == {running.uid}
+        assert rb.finished_keys[partition_id] == {finished.uid}
+        assert rb.failure_keys[partition_id] == {failure.uid}
+
+        # All trajectory keys (and only those) land in the partition value map.
+        expected_traj = set(running.trajectory_keys) | set(finished.trajectory_keys) | set(failure.trajectory_keys)
+        assert set(rb.partitions[partition_id].keys()) == expected_traj
+        for key in expected_traj:
+            assert rb.partitions[partition_id][key] == {"is_prompt": False, "seq_len": 3}
+    finally:
+        _clear_partition(partition_id)
 
 
-@pytest.mark.asyncio
-async def test_update_date_none_clears_state(tq_init):
-    """Polling None (empty metadata) resets all tracking structures."""
-    rb = await _make_buffer(poll_interval=1e6)
-    await rb.close()
+def test_sync_metadata_unknown_status_raises(tq_init, partition_id):
+    """An unrecognized prompt status is a hard error during the poll."""
+    _produce(partition_id, [PromptSpec(uid=_uid(), status="bogus", sessions=0)]).join_and_check()
 
-    rb._update_date({"train": {"p0": {"is_prompt": True, "status": "finished"}}})
-    assert rb.finished_keys["train"] == {"p0"}
-
-    rb._update_date(None)
-    assert rb.finished_keys == {}
-    assert rb.partitions == {}
-
-
-@pytest.mark.asyncio
-async def test_update_date_unknown_status_raises(tq_init):
-    """An unrecognized prompt status is a hard error."""
-    rb = await _make_buffer(poll_interval=1e6)
-    await rb.close()
-
-    with pytest.raises(ValueError, match="Unknown status"):
-        rb._update_date({"train": {"p0": {"is_prompt": True, "status": "bogus"}}})
+    rb = ReplayBuffer(poll_interval=POLL_INTERVAL)
+    try:
+        with pytest.raises(ValueError, match="Unknown status"):
+            rb._sync_metadata_from_transfer_queue()
+    finally:
+        # The bogus prompt must be removed: every poll lists *all* partitions, so
+        # leaving it behind would break unrelated tests.
+        _clear_partition(partition_id)
 
 
 # --------------------------------------------------------------------------- #
@@ -222,8 +220,7 @@ async def test_update_date_unknown_status_raises(tq_init):
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.asyncio
-async def test_sample_returns_finished_and_failure_trajectories(tq_init, partition_id):
+def test_sample_returns_finished_and_failure_trajectories(tq_init, partition_id):
     """sample picks trajectories belonging to finished/failure prompts and clears
     the sampled prompt keys from TransferQueue."""
     finished = PromptSpec(uid=_uid(), status="finished", sessions=2)
@@ -231,97 +228,84 @@ async def test_sample_returns_finished_and_failure_trajectories(tq_init, partiti
     # Running prompt's trajectory must NOT be sampled.
     running = PromptSpec(uid=_uid(), status="running", sessions=1)
 
-    # Producer thread writes everything; join so all data is in TransferQueue.
-    producer = _produce(partition_id, [finished, failure, running])
-    producer.join_and_check()
-
+    _produce(partition_id, [finished, failure, running]).join_and_check()
     expected_keys = set(finished.trajectory_keys) | set(failure.trajectory_keys)
 
-    rb = await _make_buffer()
+    rb = ReplayBuffer(poll_interval=POLL_INTERVAL)
     try:
-        batch = await asyncio.wait_for(rb.sample(partition_id, batch_size=2), timeout=10)
+        batch = rb.sample(partition_id, batch_size=2)
 
         assert batch.partition_id == partition_id
         assert set(batch.keys) == expected_keys
         assert len(batch.tags) == len(batch.keys)
 
-        # The two sampled prompt keys are consumed from TransferQueue.
-        remaining = (await tq.async_kv_list(partition_id=partition_id)).get(partition_id, {})
+        # The two sampled prompt keys are consumed from TransferQueue; the running
+        # prompt and all trajectory values remain.
+        remaining = tq.kv_list(partition_id=partition_id).get(partition_id, {})
         assert finished.uid not in remaining
         assert failure.uid not in remaining
         assert running.uid in remaining
     finally:
-        await rb.close()
-        await _clear_partition(partition_id)
+        _clear_partition(partition_id)
 
 
-@pytest.mark.asyncio
-async def test_sample_blocks_until_enough_then_unblocks(tq_init, partition_id):
-    """sample waits while fewer than batch_size prompts are ready, and returns once
-    enough finished prompts appear.
+def test_sample_blocks_until_enough_then_unblocks(tq_init, partition_id):
+    """sample stays blocked while fewer than batch_size prompts are ready and
+    returns once the producer thread supplies the missing group."""
+    # One group ready up front -> not enough for batch_size=2.
+    _produce(partition_id, [PromptSpec(uid=_uid(), status="finished", sessions=1)]).join_and_check()
 
-    The producer thread writes each group's trajectories before its terminal status,
-    so a terminal prompt is never observed without its trajectories already present.
-    """
-    rb = await _make_buffer()
+    rb = ReplayBuffer(poll_interval=POLL_INTERVAL)
+    consumer = SampleConsumer(rb, partition_id, batch_size=2)
     try:
-        # First group fully produced -> exactly one prompt ready.
+        consumer.start()
+
+        # Give the consumer time to poll a few times; it must still be blocked.
+        time.sleep(POLL_INTERVAL * 5)
+        assert consumer.is_alive(), "sample returned before batch_size prompts were ready"
+
+        # The producer thread supplies a second group; sample can now complete.
         _produce(partition_id, [PromptSpec(uid=_uid(), status="finished", sessions=1)]).join_and_check()
 
-        # batch_size=2 with a single ready prompt -> must stay blocked (times out).
-        with pytest.raises(asyncio.TimeoutError):
-            await asyncio.wait_for(rb.sample(partition_id, batch_size=2), timeout=0.5)
-
-        # A second group arrives from the producer thread; sample can now complete.
-        producer = _produce(partition_id, [PromptSpec(uid=_uid(), status="finished", sessions=1)])
-        batch = await asyncio.wait_for(rb.sample(partition_id, batch_size=2), timeout=10)
-        producer.join_and_check()
-
+        batch = consumer.result_or_raise()
         assert len(batch.keys) == 2
     finally:
-        await rb.close()
-        await _clear_partition(partition_id)
+        consumer.join(timeout=10.0)
+        _clear_partition(partition_id)
 
 
-@pytest.mark.asyncio
-async def test_sample_concurrent_with_streaming_producer(tq_init, partition_id):
+def test_sample_concurrent_with_streaming_producer(tq_init, partition_id):
     """sample(batch_size=N) returns as soon as a slow streaming producer has emitted
     N terminal groups, even though the consumer started waiting first."""
-    rb = await _make_buffer()
     batch_size = 3
     specs = [PromptSpec(uid=_uid(), status="finished", sessions=2) for _ in range(batch_size)]
-    # Stream groups one-by-one with a delay; consumer is already waiting in sample().
+
+    rb = ReplayBuffer(poll_interval=POLL_INTERVAL)
+    # Stream groups one-by-one with a delay; consumer blocks in sample() meanwhile.
     producer = _produce(partition_id, specs, delay=0.1)
     try:
-        batch = await asyncio.wait_for(rb.sample(partition_id, batch_size=batch_size), timeout=15)
+        batch = rb.sample(partition_id, batch_size=batch_size)
         producer.join_and_check()
 
         expected_keys = {k for spec in specs for k in spec.trajectory_keys}
         assert set(batch.keys) == expected_keys
         assert len(batch.keys) == batch_size * 2
     finally:
-        await rb.close()
-        await _clear_partition(partition_id)
+        producer.join(timeout=10.0)
+        _clear_partition(partition_id)
 
 
-# --------------------------------------------------------------------------- #
-# Scenario: synchronous PPO/GRPO step (main_ppo_sync).
-# A step submits exactly batch_size prompts, each a GRPO group of n sessions;
-# once they all finish, a single sample must return every trajectory as whole
-# groups (the sampling unit is the prompt, not the trajectory).
-# --------------------------------------------------------------------------- #
-
-
-@pytest.mark.asyncio
-async def test_sync_grpo_step_returns_complete_groups(tq_init, partition_id):
+def test_sync_grpo_step_returns_complete_groups(tq_init, partition_id):
+    """A synchronous PPO/GRPO step submits batch_size prompts, each a GRPO group of
+    n sessions; one sample must return every trajectory as whole groups."""
     n_prompts = 3
     n_sessions = 4  # GRPO rollout.n
     specs = [PromptSpec(uid=_uid(), status="finished", sessions=n_sessions) for _ in range(n_prompts)]
     _produce(partition_id, specs).join_and_check()
 
-    rb = await _make_buffer()
+    rb = ReplayBuffer(poll_interval=POLL_INTERVAL)
     try:
-        batch = await asyncio.wait_for(rb.sample(partition_id, batch_size=n_prompts), timeout=10)
+        batch = rb.sample(partition_id, batch_size=n_prompts)
 
         # Every prompt's full GRPO group is present, nothing more, nothing less.
         assert len(batch.keys) == n_prompts * n_sessions
@@ -332,21 +316,19 @@ async def test_sync_grpo_step_returns_complete_groups(tq_init, partition_id):
             per_uid[key.split("_")[0]] = per_uid.get(key.split("_")[0], 0) + 1
         assert set(per_uid.values()) == {n_sessions}
     finally:
-        await rb.close()
-        await _clear_partition(partition_id)
+        _clear_partition(partition_id)
 
 
-# --------------------------------------------------------------------------- #
-# Scenario: fully-async rollouter over-production.
-# The rollouter keeps producing ahead of the trainer, so more finished prompts
-# accumulate than a single batch. sample(batch_size) must take exactly
-# batch_size *complete groups*, leave the surplus for later, and sequential
-# samples must drain the surplus without ever re-selecting a consumed prompt.
-# --------------------------------------------------------------------------- #
+def test_async_overproduction_drains_in_batches_without_duplicates(tq_init, partition_id):
+    """An async rollouter over-produces; sequential samples drain the surplus
+    batch_size complete groups at a time without ever re-selecting a prompt.
 
-
-@pytest.mark.asyncio
-async def test_async_overproduction_drains_in_batches_without_duplicates(tq_init, partition_id):
+    ``sample`` only re-polls TransferQueue while it is under-filled, and it clears
+    just the sampled *prompt* keys (trajectory values stay). The real trainer
+    re-polls metadata in the gap between two ``sample`` calls; we reproduce that
+    gap deterministically by re-syncing so a follow-up ``sample`` cannot re-select
+    consumed prompts.
+    """
     n_prompts = 5
     n_sessions = 2
     batch_size = 2
@@ -354,37 +336,34 @@ async def test_async_overproduction_drains_in_batches_without_duplicates(tq_init
     _produce(partition_id, specs).join_and_check()
     all_uids = {spec.uid for spec in specs}
 
-    rb = await _make_buffer()
+    rb = ReplayBuffer(poll_interval=POLL_INTERVAL)
     try:
         collected_keys: list[str] = []
         consumed_uids: set[str] = set()
 
         # Drain 2 + 2 + 1 prompts across three samples.
         for bs in (batch_size, batch_size, n_prompts - 2 * batch_size):
-            batch = await asyncio.wait_for(rb.sample(partition_id, batch_size=bs), timeout=10)
+            batch = rb.sample(partition_id, batch_size=bs)
 
             sampled_uids = _uids_of(batch.keys)
-            # Each sample takes exactly `bs` complete groups.
             assert len(sampled_uids) == bs
             assert len(batch.keys) == bs * n_sessions
-            # No prompt is ever handed out twice.
-            assert not (sampled_uids & consumed_uids)
+            assert not (sampled_uids & consumed_uids), "a prompt was handed out twice"
 
             collected_keys.extend(batch.keys)
             consumed_uids |= sampled_uids
-            await _wait_for_poll_to_drop(rb, partition_id, sampled_uids)
+            # Mimic the trainer's metadata refresh between two sample() calls.
+            rb._sync_metadata_from_transfer_queue()
 
         # The whole surplus was drained exactly once.
         assert consumed_uids == all_uids
         assert len(collected_keys) == n_prompts * n_sessions
         assert len(set(collected_keys)) == len(collected_keys)
     finally:
-        await rb.close()
-        await _clear_partition(partition_id)
+        _clear_partition(partition_id)
 
 
-@pytest.mark.asyncio
-async def test_async_overproduction_leaves_surplus_available(tq_init, partition_id):
+def test_async_overproduction_leaves_surplus_available(tq_init, partition_id):
     """A single sample consumes only batch_size prompts; the surplus stays in
     TransferQueue (and remains sampleable)."""
     n_prompts = 4
@@ -392,65 +371,29 @@ async def test_async_overproduction_leaves_surplus_available(tq_init, partition_
     specs = [PromptSpec(uid=_uid(), status="finished", sessions=1) for _ in range(n_prompts)]
     _produce(partition_id, specs).join_and_check()
 
-    rb = await _make_buffer()
+    rb = ReplayBuffer(poll_interval=POLL_INTERVAL)
     try:
-        batch = await asyncio.wait_for(rb.sample(partition_id, batch_size=batch_size), timeout=10)
+        batch = rb.sample(partition_id, batch_size=batch_size)
         sampled_uids = _uids_of(batch.keys)
         assert len(sampled_uids) == batch_size
 
         # Surplus prompts are NOT cleared from TransferQueue.
-        remaining = (await tq.async_kv_list(partition_id=partition_id)).get(partition_id, {})
+        remaining = tq.kv_list(partition_id=partition_id).get(partition_id, {})
         remaining_finished = {
             key for key, tag in remaining.items() if tag.get("is_prompt") and tag.get("status") == "finished"
         }
         assert remaining_finished == ({spec.uid for spec in specs} - sampled_uids)
         assert len(remaining_finished) == n_prompts - batch_size
     finally:
-        await rb.close()
-        await _clear_partition(partition_id)
+        _clear_partition(partition_id)
 
 
-@pytest.mark.asyncio
-async def test_sample_zero_batch_size_raises_on_empty_clear(tq_init, partition_id):
+def test_sample_zero_batch_size_raises_on_empty_clear(tq_init, partition_id):
     """batch_size=0 selects no prompts; clearing an empty key list is rejected by
     TransferQueue, so sample surfaces a ValueError (degenerate, documented case)."""
-    rb = await _make_buffer()
+    rb = ReplayBuffer(poll_interval=POLL_INTERVAL)
     try:
         with pytest.raises(ValueError, match="empty list"):
-            await asyncio.wait_for(rb.sample(partition_id, batch_size=0), timeout=10)
+            rb.sample(partition_id, batch_size=0)
     finally:
-        await rb.close()
-        await _clear_partition(partition_id)
-
-
-# --------------------------------------------------------------------------- #
-# Background task / lifecycle error handling.
-# --------------------------------------------------------------------------- #
-
-
-@pytest.mark.asyncio
-async def test_close_propagates_background_error(tq_init, partition_id):
-    """A bad prompt status surfaced by the background poll is re-raised on close."""
-    _produce(partition_id, [PromptSpec(uid=_uid(), status="bogus", sessions=0)]).join_and_check()
-    try:
-        rb = await _make_buffer()
-        # Wait for the background task to poll and fail.
-        for _ in range(200):
-            if rb.background_error is not None:
-                break
-            await asyncio.sleep(0.05)
-
-        with pytest.raises(ValueError, match="Unknown status"):
-            await rb.close()
-    finally:
-        await _clear_partition(partition_id)
-
-
-@pytest.mark.asyncio
-async def test_close_is_clean_without_errors(tq_init):
-    """Closing a healthy buffer stops the background task and does not raise."""
-    rb = await _make_buffer()
-    await asyncio.sleep(POLL_INTERVAL * 2)  # let it poll at least once
-    await rb.close()
-    assert rb.stop_event.is_set()
-    assert rb.background_task.done()
+        _clear_partition(partition_id)

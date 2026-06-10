@@ -26,8 +26,6 @@ import json
 import logging
 import math
 import os
-import threading
-import time
 import uuid
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
@@ -39,18 +37,12 @@ import hydra
 import numpy as np
 import ray
 import torch
-
-try:
-    import transfer_queue as tq
-    from transfer_queue import KVBatchMeta
-except ImportError:
-    print("Please install TQ by calling `pip install TransferQueue==0.1.8` and try again.")
-    from verl.utils.transferqueue_utils import KVBatchMeta, tq
-
+import transfer_queue as tq
 from omegaconf import DictConfig, OmegaConf, open_dict
 from tensordict import NonTensorData, NonTensorStack, TensorDict
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
+from transfer_queue import KVBatchMeta
 
 from verl.checkpoint_engine import CheckpointEngineManager
 from verl.experimental.agent_loop import (
@@ -83,6 +75,7 @@ from verl.trainer.ppo.padding_utils import upsample_batch_to_divisible_size
 from verl.trainer.ppo.ray_trainer import apply_kl_penalty, compute_advantage, compute_spec_decode_metrics
 from verl.trainer.ppo.rollout_corr_helper import compute_rollout_correction_and_add_to_batch
 from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_teacher_policy
+from verl.trainer.ppo.v2.replay_buffer import ReplayBuffer
 from verl.utils import hf_processor, hf_tokenizer
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
@@ -191,109 +184,6 @@ def compute_advantage_for_multi_trajectories(
     return data
 
 
-class ReplayBuffer:
-    """Replay buffer periodically polls metadata from transfer queue.
-
-    Args:
-        poll_interval (float, optional): Poll interval in seconds. Defaults to 1.0.
-    """
-
-    def __init__(self, poll_interval: float = 1.0):
-        # partition_id => {key: tags}
-        self.partitions: dict[str, dict[str, dict]] = defaultdict(dict)
-
-        self.poll_interval = poll_interval
-        self.lock = threading.Lock()
-        self._stop_event = threading.Event()
-        self.poll_thread = threading.Thread(target=self._poll_from_transfer_queue, daemon=True)
-        self.poll_thread.start()
-
-    def _poll_from_transfer_queue(self):
-        """Periodically poll metadata from transfer queue."""
-        try:
-            while not self._stop_event.is_set():
-                data = tq.kv_list()
-                if data is not None:
-                    for partition_id, items in data.items():
-                        self.add(partition_id, items)
-                self._stop_event.wait(self.poll_interval)
-        except Exception as e:
-            if not self._stop_event.is_set():
-                logger.error(f"Error in _poll_from_transfer_queue: {e}")
-                os._exit(1)
-
-    def close(self):
-        """Stop the background polling thread."""
-        if not self.poll_thread.is_alive():
-            return
-        self._stop_event.set()
-        self.poll_thread.join(timeout=self.poll_interval + 1.0)
-        if self.poll_thread.is_alive():
-            logger.warning("ReplayBuffer poll thread did not stop within timeout")
-
-    def add(self, partition_id: str, items: dict[str, dict]):
-        """Add items to the replay buffer.
-
-        Args:
-            partition_id (str): Partition of transfer queue, e.g. "train" or "val".
-            items (dict[str, dict]): Items to add, e.g. {"key": {"tag": "value"}}.
-        """
-        with self.lock:
-            partition = self.partitions[partition_id]
-            for key, tags in items.items():
-                if key not in partition:
-                    partition[key] = {}
-                partition[key].update(tags)
-
-    def remove(self, partition_id: str, keys: list[str]):
-        """Remove items from the replay buffer.
-
-        Args:
-            partition_id (str): Partition of transfer queue, e.g. "train" or "val".
-            keys (list[str]): Keys to remove.
-        """
-        with self.lock:
-            partition = self.partitions[partition_id]
-            for key in keys:
-                if key in partition:
-                    del partition[key]
-
-    def sample(self, partition_id: str, global_steps: int = None, batch_size: int = None) -> KVBatchMeta:
-        """Sample a batch of data from the replay buffer.
-
-        Args:
-            partition_id (str): Partition of transfer queue, e.g. "train" or "val".
-            global_steps (int, optional): Global training steps. If not None, wait until all prompts of
-                this global steps have finished.
-            batch_size (int, optional): Batch size. Defaults to None.
-
-        Returns:
-            KVBatchMeta: A batch of data.
-        """
-        assert (global_steps is not None or batch_size) and (not (global_steps is not None and batch_size)), (
-            "Either global_steps or batch_size must be specified, but not both."
-        )
-
-        while True:
-            time.sleep(self.poll_interval)
-            with self.lock:
-                keys, tags = [], []
-                should_wait = False
-                partition = self.partitions[partition_id]
-                for key, tag in partition.items():
-                    if tag["global_steps"] == global_steps:
-                        if tag["status"] == "running":
-                            should_wait = True
-                            break
-                        elif tag["status"] == "success":
-                            keys.append(key)
-                            tags.append(tag)
-                        else:
-                            logger.debug(f"Unknown status {tag['status']} for key {key}")
-                if not should_wait:
-                    return KVBatchMeta(partition_id=partition_id, keys=keys, tags=tags)
-
-
 @ray.remote
 class AgentLoopWorkerTQ(AgentLoopWorker):
     def __init__(self, *args, **kwargs):
@@ -352,6 +242,7 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
     async def _run_prompt(self, prompt: dict, sampling_params: dict, trajectory: dict, trace: bool = False) -> None:
         """Spawn multiple agent loops in parallel according to rollout.n or rollout.val_kwargs.n."""
         uid, partition_id = prompt["uid"], "train" if not trajectory["validate"] else "val"
+        await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "running"})
         try:
             # NOTE: user can dynamically adjust n for each sample here, e.g according to task difficulty.
             config = self.config.actor_rollout_ref.rollout
@@ -433,7 +324,6 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
             prompt_len, response_len = field["prompts"].size(0), field["responses"].size(0)
             tags.append(
                 {
-                    "global_steps": kwargs["global_steps"],
                     "status": "success",
                     "prompt_len": prompt_len,
                     "response_len": response_len,
@@ -450,25 +340,15 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
 
 
 class AgentLoopManagerTQ(AgentLoopManager):
-    def __init__(self, *args, replay_buffer: ReplayBuffer, **kwargs):
+    def __init__(self, *args, **kwargs):
         self.agent_loop_workers_class = AgentLoopWorkerTQ
         super().__init__(*args, **kwargs)
-        self.replay_buffer = replay_buffer
 
     @classmethod
     @auto_await
-    async def create(
-        cls,
-        *args,
-        replay_buffer: ReplayBuffer = None,
-        **kwargs,
-    ):
+    async def create(cls, *args, **kwargs):
         """Create agent loop manager."""
-        instance = cls(
-            *args,
-            **kwargs,
-            replay_buffer=replay_buffer,
-        )
+        instance = cls(*args, **kwargs)
         await instance._init_agent_loop_workers()
         return instance
 
@@ -480,12 +360,6 @@ class AgentLoopManagerTQ(AgentLoopManager):
         Args:
             prompts (TensorDict): Input batch from train or validation dataset.
         """
-        # mark prompts as pending in replay buffer
-        global_steps = prompts["global_steps"]
-        partition_id = "train" if "validate" not in prompts else "val"
-        items = {uid: {"global_steps": global_steps, "status": "running"} for uid in prompts["uid"]}
-        self.replay_buffer.add(partition_id, items)
-
         chunkes = prompts.chunk(len(self.agent_loop_workers))
         ray.get(
             [
@@ -514,12 +388,14 @@ class PPOTrainer:
         resource_pool_manager: ResourcePoolManager,
     ):
         self.config = config
+        if config.algorithm.adv_estimator == core_algos.AdvantageEstimator.REMAX:
+            raise NotImplementedError("ReMax advantage estimator is not supported by the synchronous PPO trainer.")
         self.role_worker_mapping = role_worker_mapping
         self.resource_pool_manager = resource_pool_manager
         self.use_critic = need_critic(self.config)
         self.use_reference_policy = need_reference_policy(self.config)
         self.use_teacher_policy = need_teacher_policy(self.config)
-        self.replay_buffer = ReplayBuffer()
+        self.replay_buffer = ReplayBuffer(poll_interval=1.0)
         if self.config.algorithm.use_kl_in_reward:
             self.kl_ctrl_in_reward = core_algos.get_kl_controller(self.config.algorithm.kl_ctrl)
 
@@ -723,7 +599,6 @@ class PPOTrainer:
             llm_client=self.llm_server_manager.get_client(),
             teacher_client=self.teacher_model_manager.get_client() if self.use_teacher_policy else None,
             reward_loop_worker_handles=self.reward_loop_manager.reward_loop_workers,
-            replay_buffer=self.replay_buffer,
         )
         logger.info("agent loop manager initialized")
 
@@ -878,10 +753,13 @@ class PPOTrainer:
             batch = tu.get_tensordict(batch_dict)
             tu.assign_non_tensor_data(batch, "global_steps", self.global_steps)
             tu.assign_non_tensor_data(batch, "validate", True)
+            # Register each prompt (GRPO group) in TransferQueue as a tag-only status marker
+            tags = [{"is_prompt": True, "status": "pending"}] * len(batch)
+            tq.kv_batch_put(keys=list(batch["uid"]), partition_id="val", tags=tags)
             self.async_rollout_manager.generate_sequences(batch)
 
-            # 2. sample batch from replay buffer
-            batch = self.replay_buffer.sample(partition_id="val", global_steps=self.global_steps)
+            # 2. sample batch from replay buffer: one prompt (GRPO group) per submitted row.
+            batch = self.replay_buffer.sample(partition_id="val", batch_size=len(batch))
 
             # 3. [OPTIONAL] compute reward score with colocated reward model
             if self.reward_loop_manager.reward_loop_worker_handles is None:
@@ -961,9 +839,8 @@ class PPOTrainer:
             dump_all_outputs.extend(all_outputs)
             dump_all_keys.extend(batch.keys)
 
-            # 5. cleanup transfer queue and replay buffer
+            # 5. cleanup transfer queue
             tq.kv_clear(keys=batch.keys, partition_id=batch.partition_id)
-            self.replay_buffer.remove(batch.partition_id, batch.keys)
 
         # logger to wandb
         self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
@@ -1209,51 +1086,6 @@ class PPOTrainer:
         # TODO: add reward model
         raise NotImplementedError
 
-    def _add_remax_reward_baselines(self, batch: KVBatchMeta) -> KVBatchMeta:
-        """Attach one greedy baseline reward to every sampled ReMax trajectory."""
-        baseline_prefix = "remax_baseline_"
-        sampled_keys, sampled_tags = [], []
-        all_baseline_keys = []
-        final_baseline_key_by_uid: dict[str, tuple[int, str]] = {}
-        for key, tag in zip(batch.keys, batch.tags, strict=True):
-            uid, _, index = key.rsplit("_", 2)
-            if uid.startswith(baseline_prefix):
-                all_baseline_keys.append(key)
-                output_index = int(index)
-                if uid not in final_baseline_key_by_uid or final_baseline_key_by_uid[uid][0] < output_index:
-                    final_baseline_key_by_uid[uid] = (output_index, key)
-            else:
-                sampled_keys.append(key)
-                sampled_tags.append(tag)
-
-        assert final_baseline_key_by_uid, "ReMax requires greedy baseline rollout outputs, but none were found."
-        baseline_keys = [key for _, key in final_baseline_key_by_uid.values()]
-        baseline_data = tq.kv_batch_get(
-            keys=baseline_keys, partition_id=batch.partition_id, select_fields=["uid", "rm_scores"]
-        )
-        baseline_scores = baseline_data["rm_scores"].sum(dim=-1)
-        baseline_by_uid = {
-            uid.removeprefix(baseline_prefix): score
-            for uid, score in zip(list(baseline_data["uid"]), baseline_scores, strict=True)
-        }
-
-        sampled_data = tq.kv_batch_get(keys=sampled_keys, partition_id=batch.partition_id, select_fields=["uid"])
-        reward_baselines = torch.stack([baseline_by_uid[uid] for uid in list(sampled_data["uid"])])
-        tq.kv_batch_put(
-            keys=sampled_keys,
-            partition_id=batch.partition_id,
-            fields=TensorDict({"reward_baselines": reward_baselines}, batch_size=len(sampled_keys)),
-        )
-        tq.kv_clear(keys=all_baseline_keys, partition_id=batch.partition_id)
-        self.replay_buffer.remove(batch.partition_id, all_baseline_keys)
-        return KVBatchMeta(
-            keys=sampled_keys,
-            tags=sampled_tags,
-            partition_id=batch.partition_id,
-            fields=batch.fields,
-            extra_info=batch.extra_info,
-        )
-
     def _get_required_batch_multiple(self, dp_size: int) -> int:
         """Return the global batch multiple required by downstream train steps(e.g. critics, actors)."""
         required_multiple = dp_size
@@ -1405,8 +1237,6 @@ class PPOTrainer:
     def _compute_advantage(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
         """Compute the advantage of the batch."""
         fields = ["uid", "response_mask", "rm_scores", "rollout_log_probs", "old_log_probs", "ref_log_prob", "values"]
-        if self.config.algorithm.adv_estimator == core_algos.AdvantageEstimator.REMAX:
-            fields.append("reward_baselines")
         data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=fields)
 
         response_mask = data["response_mask"]
@@ -1669,9 +1499,8 @@ class PPOTrainer:
                 if rollout_data_dir:
                     self._log_rollout_data(batch, timing_raw, rollout_data_dir)
 
-                # 7. cleanup transfer queue and replay buffer
+                # 7. cleanup transfer queue
                 tq.kv_clear(keys=batch.keys, partition_id=batch.partition_id)
-                self.replay_buffer.remove(batch.partition_id, batch.keys)
 
                 self.logger.log(data=metrics, step=self.global_steps)
                 progress_bar.update(1)
@@ -1688,26 +1517,16 @@ class PPOTrainer:
     def step(self, batch_dict: dict, metrics: dict, timing_raw: dict) -> KVBatchMeta:
         # 1. put batch to agent loop manager
         batch_dict["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch_dict["raw_prompt"]))], dtype=object)
-        if self.config.algorithm.adv_estimator == core_algos.AdvantageEstimator.REMAX:
-            rollout_n = self.config.actor_rollout_ref.rollout.n
-            sampled_batch_dict = batch_dict.copy()
-            sampled_batch_dict["__do_sample__"] = np.ones(len(batch_dict["raw_prompt"]), dtype=bool)
-            sampled_batch_dict["__rollout_n__"] = np.full(len(batch_dict["raw_prompt"]), rollout_n, dtype=np.int64)
-
-            baseline_batch_dict = batch_dict.copy()
-            baseline_batch_dict["uid"] = np.array([f"remax_baseline_{uid}" for uid in batch_dict["uid"]], dtype=object)
-            baseline_batch_dict["__do_sample__"] = np.zeros(len(batch_dict["raw_prompt"]), dtype=bool)
-            baseline_batch_dict["__rollout_n__"] = np.ones(len(batch_dict["raw_prompt"]), dtype=np.int64)
-
-            batch = torch.cat([tu.get_tensordict(sampled_batch_dict), tu.get_tensordict(baseline_batch_dict)], dim=0)
-        else:
-            batch = tu.get_tensordict(batch_dict)
+        batch = tu.get_tensordict(batch_dict)
         tu.assign_non_tensor_data(batch, "global_steps", self.global_steps)
+        # Register each prompt (GRPO group) in TransferQueue as a tag-only status marker
+        tags = [{"is_prompt": True, "status": "pending"}] * len(batch)
+        tq.kv_batch_put(keys=list(batch["uid"]), partition_id="train", tags=tags)
         self.async_rollout_manager.generate_sequences(batch)
 
         # 2. sample batch from replay buffer
         with marked_timer("gen", timing_raw, color="red"):
-            batch = self.replay_buffer.sample(partition_id="train", global_steps=self.global_steps)
+            batch = self.replay_buffer.sample(partition_id="train", batch_size=len(batch))
         batch.extra_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
         self.checkpoint_manager.sleep_replicas()
 
@@ -1715,9 +1534,6 @@ class PPOTrainer:
         if self.reward_loop_manager.reward_loop_worker_handles is None:
             with marked_timer("reward", timing_raw, color="yellow"):
                 batch = self._compute_reward_colocate(batch)
-
-        if self.config.algorithm.adv_estimator == core_algos.AdvantageEstimator.REMAX:
-            batch = self._add_remax_reward_baselines(batch)
 
         # 4. balance batch across data parallel groups
         batch = self._balance_batch(batch, metrics=metrics)
@@ -1835,8 +1651,6 @@ class TaskRunner:
             trainer.init_workers()
             trainer.fit()
         finally:
-            if trainer:
-                trainer.replay_buffer.close()
             tq.close()
 
 
