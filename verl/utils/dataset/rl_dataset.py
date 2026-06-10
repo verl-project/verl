@@ -176,6 +176,8 @@ class RLHFDataset(Dataset):
             dataframes.append(dataframe)
         self.dataframe: datasets.Dataset = datasets.concatenate_datasets(dataframes)
 
+        self.dataframe = self.maybe_filter_by_ability(self.dataframe)
+
         total = len(self.dataframe)
         print(f"dataset len: {len(self.dataframe)}")
 
@@ -190,6 +192,45 @@ class RLHFDataset(Dataset):
             print(f"selected {self.max_samples} random samples out of {total}")
 
         self.dataframe = self.maybe_filter_out_long_prompts(self.dataframe)
+
+    def maybe_filter_by_ability(self, dataframe: datasets.Dataset) -> datasets.Dataset:
+        exclude_raw = self.config.get("exclude_abilities", None)
+        if not exclude_raw:
+            return dataframe
+
+        if "ability" not in getattr(dataframe, "column_names", []):
+            logger.warning(
+                "exclude_abilities=%r set but dataset has no 'ability' column; skipping filter",
+                exclude_raw,
+            )
+            return dataframe
+
+        if isinstance(exclude_raw, str):
+            exclude = {exclude_raw}
+        else:
+            try:
+                exclude = {str(item) for item in exclude_raw if str(item)}
+            except TypeError:
+                exclude = {str(exclude_raw)}
+
+        if not exclude:
+            return dataframe
+
+        before = len(dataframe)
+
+        def keep(ability: Any) -> bool:
+            if ability is None:
+                return True
+            return str(ability) not in exclude
+
+        filtered = dataframe.filter(
+            keep,
+            input_columns=["ability"],
+            num_proc=self.num_workers if self.num_workers and self.num_workers > 1 else None,
+        )
+        after = len(filtered)
+        logger.info("Filtered dataset by abilities %s: %d -> %d rows", sorted(exclude), before, after)
+        return filtered
 
     def maybe_filter_out_long_prompts(self, dataframe: datasets.Dataset = None):
         # filter out too long prompts

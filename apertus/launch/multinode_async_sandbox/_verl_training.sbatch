@@ -23,11 +23,6 @@ clear_inherited_pyxis_options() {
 
 clear_inherited_pyxis_options
 
-if [[ -z "${SCHEDULER_URL:-}" ]]; then
-    echo "SCHEDULER_URL must be set by multinode_async_sandbox_split.sh" >&2
-    exit 1
-fi
-
 ulimit -c 0
 
 USERNAME="$(whoami)"
@@ -48,6 +43,7 @@ USE_GROUP_FILTERING="${USE_GROUP_FILTERING:-true}"
 FORCE_THINKING="${FORCE_THINKING:-false}"
 THINK_PREFIX_TOKEN="${THINK_PREFIX_TOKEN:-<think>}"
 WANDB_ENTITY="${WANDB_ENTITY:-apertus}"
+NO_CODE="${NO_CODE:-false}"
 
 TRAIN_NNODES="${TRAIN_NNODES:-1}"
 ROLLOUT_NNODES="${ROLLOUT_NNODES:-1}"
@@ -167,7 +163,6 @@ build_overrides() {
     "+actor_rollout_ref.rollout.engine_kwargs.sglang.grammar_backend=llguidance"
     "rollout.nnodes=${ROLLOUT_NNODES}"
     "rollout.n_gpus_per_node=${ROLLOUT_GPUS_PER_NODE}"
-    "reward.sandbox_fusion.url=${SCHEDULER_URL}"
     "reward.sandbox_fusion.memory_limit_mb=${DEFAULT_MEMORY_LIMIT_MB}"
     "reward.sandbox_fusion.max_concurrent=${CODEGYM_REWARD_MAX_CONCURRENT}"
     "+reward.sandbox_fusion.continuous=${CODEGYM_REWARD_CONTINUOUS}"
@@ -184,9 +179,19 @@ build_overrides() {
     "+ray_kwargs.ray_init.runtime_env.env_vars.PYTHONPATH=${PY_DEPS_DIR}:${WORKING_DIR}:${PYTHONPATH:-}"
     "+ray_kwargs.ray_init.runtime_env.env_vars.NLTK_DATA=${NLTK_DATA_DIR}"
     "+ray_kwargs.ray_init.runtime_env.env_vars.MATH_VERIFY_PYTHONPATH=${PY_DEPS_DIR}"
-    "+ray_kwargs.ray_init.runtime_env.env_vars.SCHEDULER_URL=${SCHEDULER_URL}"
     "+ray_kwargs.ray_init.runtime_env.env_vars.WANDB_ENTITY=${WANDB_ENTITY}"
   )
+
+  if [ -n "${SCHEDULER_URL:-}" ]; then
+    overrides+=(
+      "reward.sandbox_fusion.url='${SCHEDULER_URL}'"
+      "+ray_kwargs.ray_init.runtime_env.env_vars.SCHEDULER_URL='${SCHEDULER_URL}'"
+    )
+  fi
+
+  if [ "${NO_CODE}" = "true" ]; then
+    overrides+=("+data.exclude_abilities=[code]")
+  fi
 
   if [ -n "${RESOLVED_TOKENIZER}" ]; then
     overrides+=("actor_rollout_ref.model.tokenizer_path=${RESOLVED_TOKENIZER}")

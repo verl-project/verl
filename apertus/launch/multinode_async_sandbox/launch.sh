@@ -48,7 +48,13 @@ PORT=8000
 POLL_SECS=3
 MAX_WAIT=$((60 * 10))
 GIVEN_URL="${SCHEDULER_URL:-}"  # potentially reuse running scheduler
+NO_CODE="${NO_CODE:-false}"  # exclude code tasks (no sandbox required)
+SKIP_SANDBOX_SCHEDULER="${SKIP_SANDBOX_SCHEDULER:-false}"  # don't start/probe scheduler when true
 CODEGYM_REWARD_CONTINUOUS=false # default is binary reward
+
+if [[ "${NO_CODE}" == "true" ]]; then
+  SKIP_SANDBOX_SCHEDULER="true"
+fi
 
 log(){ echo -e "$*" >&2; }
 
@@ -119,7 +125,12 @@ clear_inherited_pyxis_options
 # ==========================================
 # STEP 1 & 2: Scheduler logic (or skip)
 # ==========================================
-if [[ -z "${GIVEN_URL}" ]]; then
+if [[ "${SKIP_SANDBOX_SCHEDULER}" == "true" ]]; then
+  log "\n[1/4 & 2/4] Sandbox scheduler disabled for this run"
+  URL=""
+  NODE_CLEAN="n/a"
+  SCHED_ID="skipped"
+elif [[ -z "${GIVEN_URL}" ]]; then
   [[ -f "${SCHED_SCRIPT}" ]] || { echo "Missing ${SCHED_SCRIPT}" >&2; exit 1; }
 
   log "\n[1/4] Submit sandbox scheduler"
@@ -171,16 +182,20 @@ else
 fi
 
 # ==========================================
-# STEP 3: Probe TCP (Runs regardless)
+# STEP 3: Probe TCP (Skip when scheduler disabled)
 # ==========================================
-log "\n[3/4] Probe scheduler ${NODE_CLEAN}:${PORT}"
-elapsed=0
-until probe_ok "${NODE_CLEAN}" "${PORT}" "${URL}"; do
-  (( elapsed += POLL_SECS ))
-  (( elapsed > MAX_WAIT )) && { echo "Port never opened: ${NODE_CLEAN}:${PORT}" >&2; exit 1; }
-  sleep "${POLL_SECS}"
-done
-log "  -> Scheduler reachable at ${URL}"
+if [[ -n "${URL}" ]]; then
+  log "\n[3/4] Probe scheduler ${NODE_CLEAN}:${PORT}"
+  elapsed=0
+  until probe_ok "${NODE_CLEAN}" "${PORT}" "${URL}"; do
+    (( elapsed += POLL_SECS ))
+    (( elapsed > MAX_WAIT )) && { echo "Port never opened: ${NODE_CLEAN}:${PORT}" >&2; exit 1; }
+    sleep "${POLL_SECS}"
+  done
+  log "  -> Scheduler reachable at ${URL}"
+else
+  log "\n[3/4] No scheduler probe needed"
+fi
 
 # ==========================================
 # STEP 4: Submit VeRL Job
@@ -191,7 +206,11 @@ log "  -> config=${CONFIG_NAME} model=${MODEL_NAME_OR_PATH}"
 log "  -> data=${TRAINING_DATA_DIR} seed=${SEED} rollout_n=${ROLLOUT_N}"
 log "  -> group_filtering=${USE_GROUP_FILTERING} force_thinking=${FORCE_THINKING}"
 log "  -> output=${RUN_DIR}"
-log "  -> scheduler=${URL} code-gym continuous=${CODEGYM_REWARD_CONTINUOUS}"
+if [[ -n "${URL}" ]]; then
+  log "  -> scheduler=${URL} code-gym continuous=${CODEGYM_REWARD_CONTINUOUS}"
+else
+  log "  -> scheduler=disabled code-gym continuous=${CODEGYM_REWARD_CONTINUOUS}"
+fi
 log "  -> reasoning-gym=${REASONING_GYM_DIR:-PyPI reasoning-gym}"
 
 TRAIN_SUBMIT="$(sbatch \
@@ -200,7 +219,7 @@ TRAIN_SUBMIT="$(sbatch \
   --time="${SLURM_TIME}" \
   --output="${RUN_DIR}/multinode_async_sandbox_%j.out" \
   --error="${RUN_DIR}/multinode_async_sandbox_%j.err" \
-  --export=ALL,SCHEDULER_URL="${URL}",CODEGYM_REWARD_CONTINUOUS="${CODEGYM_REWARD_CONTINUOUS}",MODEL_NAME_OR_PATH="${MODEL_NAME_OR_PATH}",TOKENIZER_NAME_OR_PATH="${TOKENIZER_NAME_OR_PATH}",CONFIG_NAME="${CONFIG_NAME}",NNODES="${NNODES}",TRAIN_NNODES="${TRAIN_NNODES}",ROLLOUT_NNODES="${ROLLOUT_NNODES}",TRAINING_DATA_DIR="${TRAINING_DATA_DIR}",FORCE_THINKING="${FORCE_THINKING}",THINK_PREFIX_TOKEN="${THINK_PREFIX_TOKEN}",SEED="${SEED}",ROLLOUT_N="${ROLLOUT_N}",USE_GROUP_FILTERING="${USE_GROUP_FILTERING}",PROJECT_NAME="${PROJECT_NAME}",RUN_NAME="${RUN_NAME}",RUN_DIR="${RUN_DIR}",WORKING_DIR="${WORKING_DIR}",HOME="${HOME}",HF_HOME="${HF_HOME}",ENVIRONMENT_PATH="${ENVIRONMENT_PATH}",REASONING_GYM_DIR="${REASONING_GYM_DIR}",JOB_NAME="${JOB_NAME}" \
+  --export=ALL,SCHEDULER_URL="${URL}",CODEGYM_REWARD_CONTINUOUS="${CODEGYM_REWARD_CONTINUOUS}",MODEL_NAME_OR_PATH="${MODEL_NAME_OR_PATH}",TOKENIZER_NAME_OR_PATH="${TOKENIZER_NAME_OR_PATH}",CONFIG_NAME="${CONFIG_NAME}",NNODES="${NNODES}",TRAIN_NNODES="${TRAIN_NNODES}",ROLLOUT_NNODES="${ROLLOUT_NNODES}",TRAINING_DATA_DIR="${TRAINING_DATA_DIR}",NO_CODE="${NO_CODE}",FORCE_THINKING="${FORCE_THINKING}",THINK_PREFIX_TOKEN="${THINK_PREFIX_TOKEN}",SEED="${SEED}",ROLLOUT_N="${ROLLOUT_N}",USE_GROUP_FILTERING="${USE_GROUP_FILTERING}",PROJECT_NAME="${PROJECT_NAME}",RUN_NAME="${RUN_NAME}",RUN_DIR="${RUN_DIR}",WORKING_DIR="${WORKING_DIR}",HOME="${HOME}",HF_HOME="${HF_HOME}",ENVIRONMENT_PATH="${ENVIRONMENT_PATH}",REASONING_GYM_DIR="${REASONING_GYM_DIR}",JOB_NAME="${JOB_NAME}" \
   "${TRAIN_SCRIPT}" "$@")"
 TRAIN_ID="$(awk '{print $NF}' <<<"${TRAIN_SUBMIT}")"
 [[ "${TRAIN_ID}" =~ ^[0-9]+$ ]] || { echo "Failed to parse training job id: ${TRAIN_SUBMIT}" >&2; exit 1; }
