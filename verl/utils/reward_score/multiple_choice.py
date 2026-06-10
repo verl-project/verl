@@ -24,7 +24,7 @@ CHOICE_EXTRACTION_TARGETS = (StringExtractionConfig(strings=CHOICE_LETTERS),)
 def _as_text(value: Any) -> str:
     if value is None:
         return ""
-    return str(value).strip().upper()
+    return str(value).strip()
 
 
 def compute_score(

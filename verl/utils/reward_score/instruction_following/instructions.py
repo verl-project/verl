@@ -22,6 +22,7 @@ import string
 from collections.abc import Sequence
 
 import langdetect
+from langdetect import detector_factory
 from absl import logging
 
 from . import instructions_util
@@ -29,6 +30,12 @@ from . import instructions_util
 _InstructionArgsDtype = dict[str, int | str | Sequence[str]] | None
 
 _LANGUAGES = instructions_util.LANGUAGE_CODES
+
+# langdetect lazily initializes a process-global factory on first detect().
+# Reward scoring can call detect() from multiple executor threads, which can
+# race while profiles are still loading and raise "Need to load profiles."
+detector_factory.DetectorFactory.seed = 0
+detector_factory.init_factory()
 
 # The relational operation for comparison.
 _COMPARISON_RELATION = ("less than", "at least")

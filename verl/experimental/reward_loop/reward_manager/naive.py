@@ -106,9 +106,7 @@ class NaiveRewardManager(RewardManagerBase):
         if len(results) == 1:
             return results[0]
 
-        scores = [self._score_from_result(result) for result in results]
-        score = min(scores)
-        return {"score": score, "acc": score}
+        return min(results, key=self._score_from_result)
 
     async def run_single(self, data: DataProto) -> dict:
         data = data[
