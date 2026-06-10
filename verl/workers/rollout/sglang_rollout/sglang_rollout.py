@@ -380,8 +380,11 @@ class ServerAdapter(BaseRollout):
             # model weights. On a large GPU where SGLang has consumed nearly all free
             # memory for KV cache, this causes OOM. Releasing the KV pool first frees
             # enough headroom for the temporary weight buffers.
-            logger.info("[NCCL weight sync] update_weights_nccl: releasing KV cache memory before weight update")
-            await self._engine.release_memory_occupation(tags=["kv_cache"])
+
+            # Note: disabling KV cache release/resume as it might cause issues with other mem allocations
+            # logger.info("[NCCL weight sync] update_weights_nccl: releasing KV cache memory before weight update")
+            # await self._engine.release_memory_occupation(tags=["kv_cache"])
+
             # Launch broadcasts in thread executor; await HTTP in the event loop.
             loop = asyncio.get_running_loop()
             logger.info("[NCCL weight sync] update_weights_nccl: launching broadcast thread + SGLang HTTP recv")
@@ -394,8 +397,11 @@ class ServerAdapter(BaseRollout):
             )
             logger.info("[NCCL weight sync] update_weights_nccl: SGLang HTTP done, awaiting broadcast thread")
             await broadcast_task
-            logger.info("[NCCL weight sync] update_weights_nccl: resuming KV cache memory after weight update")
-            await self._engine.resume_memory_occupation(tags=["kv_cache"])
+
+            # Note: disabling KV cache release/resume as it might cause issues with other mem allocations
+            # logger.info("[NCCL weight sync] update_weights_nccl: resuming KV cache memory after weight update")
+            # await self._engine.resume_memory_occupation(tags=["kv_cache"])
+
             if global_steps is not None:
                 await self.server_actor.set_global_steps.remote(global_steps)
             logger.info("[NCCL weight sync] update_weights_nccl: done")
