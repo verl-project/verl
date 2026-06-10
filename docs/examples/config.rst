@@ -606,7 +606,7 @@ Trainer
 - ``trainer.total_epochs``: Number of epochs in training.
 - ``trainer.project_name``: For wandb, swanlab, mlflow
 - ``trainer.experiment_name``: For wandb, swanlab, mlflow
-- ``trainer.logger``: Support console and wandb, swanlab, mlflow, tensorboard, trackio
+- ``trainer.logger``: Support console, wandb, swanlab, mlflow, tensorboard, trackio, and rl_insight.
 - ``trainer.log_val_generations``: The number of logged generation during validation (default ``0``)
 - ``trainer.nnodes``: Number of nodes used in the training.
 - ``trainer.n_gpus_per_node``: Number of GPUs per node.

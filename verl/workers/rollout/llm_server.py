@@ -31,6 +31,7 @@ from omegaconf import DictConfig
 
 from verl.single_controller.ray.base import RayResourcePool, RayWorkerGroup
 from verl.utils import normalize_token_ids
+from verl.utils.profiler import build_context_monitors
 from verl.utils.ray_utils import auto_await
 from verl.utils.rollout_trace import rollout_trace_op
 from verl.workers.rollout.replica import RolloutReplica, TokenOutput, get_rollout_replica_class
@@ -439,6 +440,18 @@ class LLMServerManager:
             if self.rollout_config.disable_log_stats:
                 raise ValueError("PROMETHEUS needs disable_log_stats==False, but it is currently True.")
             update_prometheus_config(self.rollout_config.prometheus, self.server_addresses, self.rollout_config.name)
+
+        context_monitors = build_context_monitors(self.config.trainer.logger)
+        if context_monitors:
+            if self.rollout_config.disable_log_stats:
+                logger.error("metric monitors need disable_log_stats==False, but it is currently True.")
+            for monitor in context_monitors:
+                monitor.add_prometheus_server_addresses(
+                    self.config,
+                    self.server_addresses,
+                    self.rollout_config.name,
+                    [server.replica_rank for server in self.rollout_replicas],
+                )
 
     async def _init_global_load_balancer(self) -> None:
         self.global_load_balancer = GlobalRequestLoadBalancer.remote(
