@@ -17,6 +17,10 @@ ranks: []
 # profile results saving path
 save_path: "outputs/profile"
 
+# Online context monitor tools. By default this follows trainer.logger and only
+# registered tools such as rl_insight will take effect.
+context_monitor_tool: ${oc.select:trainer.logger,[]}
+
 tool_config:
   npu:
     # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs

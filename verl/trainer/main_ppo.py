@@ -131,6 +131,7 @@ class TaskRunnerV1:
         import transfer_queue as tq
 
         from verl.trainer.ppo.v1 import get_trainer_cls
+        from verl.utils.profiler.context_monitor_tool import notify_transfer_queue_initialized
 
         trainer_cls = get_trainer_cls(config.trainer.v1.trainer_mode)
 
@@ -141,6 +142,9 @@ class TaskRunnerV1:
 
         # initialize transfer queue
         tq.init(config.transfer_queue)
+        print("tmc debug tq.init")
+        notify_transfer_queue_initialized(config)
+        print("tmc debug notify_transfer_queue_initialized")
         try:
             self.trainer = trainer_cls(config=config)
             self.trainer.init()
