@@ -295,25 +295,46 @@ def _run(cmd: list[str], env_overrides: dict[str, str | None] | None = None) -> 
 
 
 def _covering_combos(extras: list[str] | None = None) -> list[list[str]]:
-    """Pack ``extras`` into the fewest conflict-free combinations.
+    """Cache-warm combos: one inference engine + one training backend each.
 
-    The returned combos together touch every extra in ``extras`` (default
-    ``ALL_EXTRAS``) while each one is valid for a single ``uv sync`` (no
-    internal conflict). Syncing them in turn therefore fetches / builds every
-    distribution those extras need in ``uv.lock`` into the shared uv cache.
-    Greedy first-fit stays correct if the conflict topology in
-    ``CONFLICT_SETS`` changes (over ALL_EXTRAS it yields
-    ``[[vllm, fsdp, megatron], [sglang], [veomni], [nemoautomodel], [cpu]]``;
-    over ``cu130`` it yields ``[[vllm, fsdp, megatron], [sglang]]``).
+    A real RL run syncs exactly ONE inference engine and ONE training backend
+    (e.g. ``sync vllm megatron``), so the combos that matter are the
+    ``INFERENCE_BACKENDS x TRAINING_BACKENDS`` cross-product. We deliberately do
+    NOT bundle both trainers into one maximal env: ``fsdp + megatron`` is never
+    a real runtime selection, and because ``megatron`` is conflict-gated, the
+    ``{vllm, fsdp, megatron}`` resolution fork it would warm is one nobody syncs
+    — while the ``{vllm, fsdp}`` / ``{vllm, megatron}`` forks people actually
+    use would go uncached and miss offline. Pairing each inference engine with
+    each trainer warms exactly those runtime forks.
+
+    Backends with no counterpart role in their torch world are warmed
+    standalone: the cu12.9 trainers (``veomni`` / ``nemoautomodel``), which have
+    no inference engine in their world, and the GPU-free ``cpu`` slice — each
+    mutually exclusive with everything else. The same fallback emits singletons
+    when a scope contains only one cu130 role (e.g. ``prefetch inference``).
+
+    Over ``cu130`` it yields ``[[vllm, fsdp], [vllm, megatron], [sglang, fsdp],
+    [sglang, megatron]]``; over ``ALL_EXTRAS`` it appends ``[veomni],
+    [nemoautomodel], [cpu]``. (Inference-only or training-only runs are not
+    pre-warmed — sync one inference engine + one trainer, per the RL flow.)
     """
+    pool = list(extras) if extras is not None else list(ALL_EXTRAS)
+    pset = set(pool)
+    inference = [e for e in INFERENCE_BACKENDS if e in pset]
+    training = [e for e in TRAINING_BACKENDS if e in pset]
     combos: list[list[str]] = []
-    for extra in extras if extras is not None else ALL_EXTRAS:
-        for combo in combos:
-            if _conflict_in([*combo, extra]) is None:
-                combo.append(extra)
-                break
-        else:
-            combos.append([extra])
+    paired: set[str] = set()
+    if inference and training:
+        # cu130 RL pairs; inference and trainers never share a conflict set,
+        # so every pair is conflict-free (guard keeps that true if it changes).
+        for inf in inference:
+            for tr in training:
+                if _conflict_in([inf, tr]) is None:
+                    combos.append([inf, tr])
+                    paired.update((inf, tr))
+    # Whatever the cross-product didn't consume is warmed on its own: the
+    # cu12.9 trainers, the cpu slice, or a lone cu130 role with no partner.
+    combos += [[e] for e in pool if e not in paired]
     return combos
 
 
@@ -441,7 +462,7 @@ def cmd_list(_args: argparse.Namespace) -> int:
         print(f"  absent — run `python manage_envs.py sync <extras...>` to create {VENV_DIR}")
 
     combos = _covering_combos()
-    print("\nprefetch plan (cache-warm combos covering every extra):")
+    print("\nprefetch plan (cache-warm combos; 1 inference + 1 training each):")
     for combo in combos:
         print(f"  uv sync --extra {' --extra '.join(combo)}")
     print("  (scope per Docker image: `prefetch cu130` | `prefetch cu129`)")
@@ -513,15 +534,26 @@ def cmd_prefetch(args: argparse.Namespace) -> int:
         print(f"  {' + '.join(combo)}")
     print()
 
-    with tempfile.TemporaryDirectory(prefix="verl-prefetch-") as tmp:
-        # Route uv at a throwaway env and drop any stale VIRTUAL_ENV so uv
-        # doesn't warn about a mismatch with the active shell venv. Only the
-        # shared uv cache (UV_CACHE_DIR) is the durable output here.
-        proj_env: dict[str, str | None] = {
-            "UV_PROJECT_ENVIRONMENT": str(Path(tmp) / ".venv"),
-            "VIRTUAL_ENV": None,
-        }
-        for combo in combos:
+    # A FRESH throwaway env per combo. The combos are mutually exclusive, so
+    # reusing one env would force every sync to *uninstall* the previous
+    # combo's packages before installing its own (e.g. the `cpu` combo tearing
+    # out every CUDA wheel, or torch swapping cu130<->cpu). Syncing each into
+    # its own empty env makes every sync a pure *append* — it only installs
+    # what that combo needs and never removes anything — which also mirrors
+    # exactly what a real runtime `uv sync <combo>` does. Only the shared uv
+    # cache (UV_CACHE_DIR) is durable: wheels download once and source builds
+    # (apex / TE) build once, then later combos hardlink them from the cache
+    # instead of rebuilding. Peak disk is one env at a time (each tempdir is
+    # torn down before the next).
+    for combo in combos:
+        with tempfile.TemporaryDirectory(prefix="verl-prefetch-") as tmp:
+            env_dir = Path(tmp) / ".venv"
+            # Route uv at the throwaway env and drop any stale VIRTUAL_ENV so uv
+            # doesn't warn about a mismatch with the active shell venv.
+            proj_env: dict[str, str | None] = {
+                "UV_PROJECT_ENVIRONMENT": str(env_dir),
+                "VIRTUAL_ENV": None,
+            }
             # --no-install-project: cache deps only; skip building verl (local
             # source) so the cache layer doesn't depend on the verl tree.
             cmd = [
@@ -533,7 +565,7 @@ def cmd_prefetch(args: argparse.Namespace) -> int:
                 *_extra_flags(combo),
                 *uv_args,
             ]
-            rc = _run(cmd, {**proj_env, **_build_env(combo, Path(tmp) / ".venv")})
+            rc = _run(cmd, {**proj_env, **_build_env(combo, env_dir)})
             if rc:
                 print(f"error: prefetch failed while warming {combo}", file=sys.stderr)
                 return rc
