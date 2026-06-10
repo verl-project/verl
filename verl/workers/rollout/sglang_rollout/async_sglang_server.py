@@ -291,8 +291,8 @@ class SGLangHttpServer:
             # prevent resume_memory_occupation from re-creating the KV cache VMM at
             # its original size (cu_mem_create OOM). On multi-node InfiniBand setups
             # with many ranks, NCCL staging + IB proxy buffers can reach ~1-2 GB.
-            # Reserve 5% headroom (~1.9 GiB on 95 GiB) to accommodate this.
-            mem_fraction_static = mem_fraction_static - 0.05
+            # Reserve 10% headroom (~4 GiB on 95 GiB) to accommodate this.
+            mem_fraction_static = mem_fraction_static - 0.1
         args = {
             "model_path": self.model_config.local_path,
             "dtype": self.config.dtype,
