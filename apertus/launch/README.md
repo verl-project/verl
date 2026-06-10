@@ -86,6 +86,7 @@ git checkout translate
 ```
 
 If you choose a different location, update `REASONING_GYM_DIR` in `launch.sh`.
+If you do not have access to this repository, set `REASONING_GYM_DIR=""` to install `reasoning-gym` from PyPI instead.
 
 ## Launch
 

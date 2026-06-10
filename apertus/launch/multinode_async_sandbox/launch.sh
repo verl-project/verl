@@ -41,6 +41,7 @@ JOB_NAME="debug"
 # Sandbox configuration
 ###############################################################################
 
+# Set REASONING_GYM_DIR="" to install reasoning-gym from PyPI.
 REASONING_GYM_DIR=/iopsstor/scratch/cscs/${USER}/projects/r-gym
 CODE_GYM_DIR=/iopsstor/scratch/cscs/${USER}/projects/code-gym
 PORT=8000
@@ -191,7 +192,7 @@ log "  -> data=${TRAINING_DATA_DIR} seed=${SEED} rollout_n=${ROLLOUT_N}"
 log "  -> group_filtering=${USE_GROUP_FILTERING} force_thinking=${FORCE_THINKING}"
 log "  -> output=${RUN_DIR}"
 log "  -> scheduler=${URL} code-gym continuous=${CODEGYM_REWARD_CONTINUOUS}"
-log "  -> reasoning-gym=${REASONING_GYM_DIR}"
+log "  -> reasoning-gym=${REASONING_GYM_DIR:-PyPI reasoning-gym}"
 
 TRAIN_SUBMIT="$(sbatch \
   --job-name="${TRAIN_JOB_NAME}" \
