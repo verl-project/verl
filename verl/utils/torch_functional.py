@@ -90,6 +90,7 @@ def prescale_hidden_by_per_sample_temperature(hidden: torch.Tensor, temperature:
     return hidden_scaled
 
 
+@torch.compiler.disable
 def resolve_temperature_for_fused_kernel(
     hidden: torch.Tensor, temperature: float | torch.Tensor
 ) -> tuple[torch.Tensor, float]:
@@ -104,6 +105,9 @@ def resolve_temperature_for_fused_kernel(
       return ``scalar_temperature == 1.0``.
     - Otherwise (Python float or 0-/1-element tensor), pass ``hidden`` through
       and return ``float(temperature)``.
+
+    This function is excluded from ``torch.compile`` because its data-dependent
+    branch (``numel() > 1``) is not compatible with Dynamo tracing.
     """
     if isinstance(temperature, torch.Tensor) and temperature.dim() > 0 and temperature.numel() > 1:
         return prescale_hidden_by_per_sample_temperature(hidden, temperature), 1.0
