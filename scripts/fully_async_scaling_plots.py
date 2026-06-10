@@ -45,7 +45,7 @@ def _summary_dict(run: Any) -> dict[str, Any]:
 
 def collect_runs_dataframe(args: argparse.Namespace) -> pd.DataFrame:
     api = wandb.Api()
-    metric_names = sorted({metric for pair in iter_plot_pairs() for metric in pair})
+    metric_names = sorted({metric for pair in iter_plot_pairs() for metric in pair} | set(args.extra_metric or []))
     rows: list[dict[str, Any]] = []
     for run in api.runs(args.source_project):
         if not _matches_filters(run, args):
@@ -172,6 +172,12 @@ def main() -> None:
         type=int,
         default=None,
         help="Maximum number of matching runs to inspect.",
+    )
+    parser.add_argument(
+        "--extra-metric",
+        action="append",
+        default=[],
+        help="Repeatable extra summary metric to include in the exported table.",
     )
     parser.add_argument(
         "--output-csv",

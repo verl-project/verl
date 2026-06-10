@@ -23,6 +23,9 @@ PLOT_SECTIONS: dict[str, tuple[tuple[str, str], ...]] = {
         ("scale/rollout_trainer_ratio", "steady/rollouter_idle_mean"),
         ("scale/rollout_trainer_ratio", "steady/idle_imbalance_mean"),
         ("scale/rollout_trainer_ratio", "steady/param_sync_frac_median"),
+        ("scale/rollout_trainer_ratio", "steady/queue_fill_frac_mean"),
+        ("scale/rollout_trainer_ratio", "steady/active_tasks_fill_frac_mean"),
+        ("scale/rollout_trainer_ratio", "steady/dropped_stale_frac"),
         ("scale/rollout_trainer_ratio", "steady/dropped_stale_samples_delta"),
     ),
     "scale": (
@@ -33,6 +36,9 @@ PLOT_SECTIONS: dict[str, tuple[tuple[str, str], ...]] = {
         ("scale/total_nodes", "steady/trainer_idle_mean"),
         ("scale/total_nodes", "steady/rollouter_idle_mean"),
         ("scale/total_nodes", "steady/idle_imbalance_mean"),
+        ("scale/total_nodes", "steady/queue_fill_frac_mean"),
+        ("scale/total_nodes", "steady/active_tasks_fill_frac_mean"),
+        ("scale/total_nodes", "steady/dropped_stale_frac"),
         ("scale/total_nodes", "steady/dropped_stale_samples_delta"),
     ),
 }
@@ -45,6 +51,8 @@ STEADY_REDUCERS: tuple[tuple[str, str, Any], ...] = (
     ("steady/trainer_idle_mean", "fully_async/trainer/idle_ratio", mean),
     ("steady/rollouter_idle_mean", "fully_async/rollouter/idle_ratio", mean),
     ("steady/idle_imbalance_mean", "scale/idle_imbalance", mean),
+    ("steady/queue_fill_frac_mean", "scale/queue_fill_frac", mean),
+    ("steady/active_tasks_fill_frac_mean", "scale/active_tasks_fill_frac", mean),
     ("steady/pending_queue_mean", "fully_async/monitor/queue/pending_queue_size", mean),
 )
 
@@ -83,6 +91,13 @@ def _compact(metrics: Mapping[str, float | None]) -> dict[str, float]:
     return {key: value for key, value in metrics.items() if value is not None}
 
 
+def _first_metric(metrics: Mapping[str, Any], *names: str) -> Any:
+    for name in names:
+        if name in metrics:
+            return metrics.get(name)
+    return None
+
+
 def iter_plot_pairs(
     sections: Mapping[str, Sequence[tuple[str, str]]] | None = None,
 ) -> list[tuple[str, str]]:
@@ -108,7 +123,13 @@ def compute_scale_config_metrics(config: Any) -> dict[str, float]:
 
 def compute_scale_step_metrics(metrics: Mapping[str, Any]) -> dict[str, float]:
     update_actor_s = _num(metrics.get("timing_s/update_actor"))
-    param_sync_s = _num(metrics.get("timing_s/param_sync"))
+    param_sync_s = _num(
+        _first_metric(
+            metrics,
+            "timing_s/param_sync",
+            "timing_s/timing_s/param_sync",
+        )
+    )
     update_plus_sync_s = None if update_actor_s is None or param_sync_s is None else update_actor_s + param_sync_s
     trainer_idle = _num(metrics.get("fully_async/trainer/idle_ratio"))
     rollouter_idle = _num(metrics.get("fully_async/rollouter/idle_ratio"))
@@ -131,6 +152,14 @@ def compute_scale_step_metrics(metrics: Mapping[str, Any]) -> dict[str, float]:
             "scale/active_tasks_per_rollout_node": _div(
                 metrics.get("fully_async/monitor/active_tasks_size"),
                 metrics.get("scale/rollout_nodes"),
+            ),
+            "scale/queue_fill_frac": _div(
+                metrics.get("fully_async/monitor/queue/pending_queue_size"),
+                metrics.get("fully_async/static/max_queue_size"),
+            ),
+            "scale/active_tasks_fill_frac": _div(
+                metrics.get("fully_async/monitor/active_tasks_size"),
+                metrics.get("fully_async/static/max_concurrent_samples"),
             ),
         }
     )
@@ -159,4 +188,10 @@ def compute_steady_summary(
     }
     if dropped_stale := _series(steady_history, "fully_async/count/dropped_stale_samples"):
         summary["steady/dropped_stale_samples_delta"] = dropped_stale[-1] - dropped_stale[0]
+        if total_generated := _series(steady_history, "fully_async/count/total_generated_samples"):
+            generated_delta = total_generated[-1] - total_generated[0]
+            if generated_delta > 0:
+                summary["steady/dropped_stale_frac"] = (
+                    summary["steady/dropped_stale_samples_delta"] / generated_delta
+                )
     return summary

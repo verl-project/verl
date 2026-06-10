@@ -33,6 +33,7 @@ async_training:
   staleness_threshold: 0.2
   trigger_parameter_sync_step: 1
   require_batches: 2  # NOTE: train_batch_size = require_batches * ppo_mini_batch_size
+  steady_warmup_steps: 5
   partial_rollout: true
   use_rollout_log_probs: true
   compute_prox_log_prob: false
