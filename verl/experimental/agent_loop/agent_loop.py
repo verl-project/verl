@@ -609,6 +609,14 @@ class AgentLoopWorker:
         return_attention_mask: bool,
     ) -> dict[str, torch.Tensor]:
         """Right/left pad a flat list of token ids to a ``(1, max_length)`` tensor."""
+        # tokenizer.pad() with empty input returns dict with list values
+        # instead of tensors, which breaks downstream .dim() calls.
+        if not tokens:
+            pad_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else 0
+            result = {"input_ids": torch.full((1, max_length), pad_id, dtype=torch.long)}
+            if return_attention_mask:
+                result["attention_mask"] = torch.zeros((1, max_length), dtype=torch.long)
+            return result
         self.tokenizer.padding_side = padding_side
         padded = self.tokenizer.pad(
             {"input_ids": tokens},
