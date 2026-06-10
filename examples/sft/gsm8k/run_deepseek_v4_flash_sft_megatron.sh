@@ -49,9 +49,12 @@ ckpts_home=${ckpts_home:-~/verl/test/gsm8k-sft-deepseek-v4-flash-${backend}}
 # verl/models/mcore/mtp_patch.py (included in this PR).
 PYPATH=$HOME/pythonpath
 mkdir -p "$PYPATH" && cd "$PYPATH"
-# Megatron-Core: fetch PR #5011's head (carries the dev SBHD base + the THD support).
+# Megatron-Core: validated main2dev commit (DSv4 hybrid attention + THD from #5011).
+# Pinned because pull/5011/head is rebased over time and can drop main-side symbols
+# (e.g. megatron.core._rank_utils.safe_get_world_size) that megatron.bridge imports.
+MCORE_COMMIT=ed6b1f65502aec7f2fe27e14a1245c29e435c2a6
 [ -d Megatron-LM ] || { git clone https://github.com/NVIDIA/Megatron-LM && \
-    (cd Megatron-LM && git fetch origin pull/5011/head:dsv4-thd && git checkout dsv4-thd); }
+    (cd Megatron-LM && git fetch origin "$MCORE_COMMIT" && git checkout "$MCORE_COMMIT"); }
 # Megatron-Bridge: provides megatron.bridge (the DSv4 AutoBridge / recipes).
 [ -d Megatron-Bridge ] || { git clone https://github.com/NVIDIA-NeMo/Megatron-Bridge && \
     (cd Megatron-Bridge && git fetch origin pull/4131/head:dsv4-sft && git checkout dsv4-sft); }
