@@ -180,6 +180,15 @@ TRAIN_DATASETS = [
         tool_selection=("display_answers",),    # TODO: if verification is ok, can choose to only activate on some samples
     ),
     DatasetConfig(
+        name="vrl",
+        dataset_id="/capstor/store/cscs/swissai/infra01/reasoning/data/RL-prod/vrl/train.parquet",
+        split="train",
+        adapter="vrl",
+        data_source="blindtasks_rl",
+        prompt_key="prompt",
+        tool_selection=("display_answers",),
+    ),
+    DatasetConfig(
         name="code_contests",
         dataset_id="deepmind/code_contests",
         split="train",
@@ -478,6 +487,35 @@ def adapt_table_gpt(
             **prompt_controls(config),
         },
     }
+
+
+@register_adapter("vrl")
+def adapt_vrl(
+    example: dict[str, Any], idx: int, split: str, config: DatasetConfig
+) -> dict[str, Any]:
+    reward_model = parse_json_maybe(get_value(example, "reward_model"), default={})
+    if not isinstance(reward_model, dict):
+        reward_model = {}
+    ground_truth = reward_model.get(
+        "ground_truth", get_value(example, config.answer_key)
+    )
+    if not isinstance(ground_truth, str):
+        ground_truth = json_dumps(ground_truth)
+
+    extra_info = parse_json_maybe(get_value(example, "extra_info"), default={})
+    if not isinstance(extra_info, dict):
+        extra_info = {}
+    row = make_row(
+        config=config,
+        split=split,
+        index=idx,
+        prompt=normalize_messages(get_value(example, config.prompt_key)),
+        ability=normalize_text(get_value(example, "ability")) or "vision.blindtasks",
+        ground_truth=ground_truth,
+        extra_info=dict(extra_info),
+    )
+    row["reward_model"]["style"] = reward_model.get("style", "rule")
+    return row
 
 
 @register_adapter("math")

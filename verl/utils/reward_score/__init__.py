@@ -144,9 +144,15 @@ def default_compute_score(
         res = table_gpt.compute_score(
             data_source, solution_str, ground_truth, extra_info
         )
+    elif isinstance(data_source, str) and data_source.startswith("blindtasks"):
+        from . import blindtasks
+
+        res = blindtasks.compute_score(
+            data_source, solution_str, ground_truth, extra_info
+        )
     else:
         raise NotImplementedError(
-            f"Reward function is not implemented for {data_source=}"
+            f"Reward function is not implemented for {data_source}"
         )
 
     if isinstance(res, dict):

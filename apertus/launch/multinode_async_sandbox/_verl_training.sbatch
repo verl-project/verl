@@ -78,7 +78,7 @@ DEPS_STAMP_DIR="${PY_DEPS_ROOT}/.stamps"
 DEPS_STAMP="${DEPS_STAMP_DIR}/apertus_reward_py312.ready"
 DEPS_LOCK="${DEPS_STAMP_DIR}/apertus_reward_py312.lock"
 
-EXTRA_PIP_PACKAGES="${EXTRA_PIP_PACKAGES:-immutabledict nltk langdetect absl-py emoji syllapy antlr4-python3-runtime==4.9.3 requests math_verify}"
+EXTRA_PIP_PACKAGES="${EXTRA_PIP_PACKAGES:-immutabledict nltk langdetect absl-py emoji syllapy antlr4-python3-runtime==4.9.3 requests math_verify numpy pillow}"
 REASONING_GYM_DIR="${REASONING_GYM_DIR:-}"
 
 
