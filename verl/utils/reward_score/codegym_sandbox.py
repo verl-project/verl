@@ -25,8 +25,8 @@ from verl.utils.import_utils import deprecated
 logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = float(os.environ.get("DEFAULT_TIMEOUT", "10"))
-DEFAULT_MEMORY_LIMIT_MB = int(os.environ.get("DEFAULT_MEMORY_LIMIT_MB", "1024"))
-REQUEST_TIMEOUT_SECONDS = float(os.environ.get("CODEGYM_REQUEST_TIMEOUT", "15"))
+DEFAULT_MEMORY_LIMIT_MB = int(os.environ.get("DEFAULT_MEMORY_LIMIT_MB", "2048")) # Before we had: 1024
+REQUEST_TIMEOUT_SECONDS = float(os.environ.get("CODEGYM_REQUEST_TIMEOUT", "30")) # Before we had: 15
 
 _FENCE_RE = re.compile(r"```(?P<lang>[^\n`]*)\n(?P<code>[\s\S]*?)```", re.MULTILINE)
 
