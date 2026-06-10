@@ -40,8 +40,9 @@ Commands::
     shell  <extras...>   # sync, then open a shell with .venv activated
     list                 # extras, conflict rules, .venv state, prefetch plan
     clean                # remove .venv
-    prefetch             # FIRST-TIME / Docker only: warm the uv cache with
-                         #   every backend's wheels & source builds (see below)
+    prefetch             # FIRST-TIME / Docker only: generate uv.lock, then
+                         #   warm the uv cache with every backend's wheels &
+                         #   source builds (see below)
 
 Anything after ``--`` on ``lock`` / ``sync`` / ``prefetch`` is forwarded to
 the underlying ``uv`` invocation, e.g.::
@@ -69,13 +70,14 @@ own for this, which is why it lives here.)
 --------------------
 ``sync`` is the **runtime** command: it installs one conflict-free extra
 combination into ``.venv`` so you can train/serve. ``prefetch`` is a
-**first-time / image-build** helper: it downloads & builds *every* backend's
-dependencies into the uv cache (``$UV_CACHE_DIR``, default ``~/.cache/uv``) so
-later ``sync`` runs are fast/offline. Because the backends conflict,
-``prefetch`` cannot produce a single usable env — it syncs throwaway envs
-purely to populate the cache (passing ``--no-install-project`` so only
+**first-time / image-build** helper: it first resolves the universal
+``uv.lock`` from ``pyproject.toml`` (``uv lock``), then downloads & builds
+*every* backend's dependencies into the uv cache (``$UV_CACHE_DIR``, default
+``~/.cache/uv``) so later ``sync`` runs are fast/offline. Because the backends
+conflict, ``prefetch`` cannot produce a single usable env — it syncs throwaway
+envs purely to populate the cache (passing ``--no-install-project`` so only
 dependencies are cached, not verl itself) and never creates or modifies
-``.venv``.
+``.venv``. The lock it produces is what every later ``sync`` consumes.
 
 In Docker this is what makes one image serve any backend: bake ``prefetch``
 as a real layer (point ``UV_CACHE_DIR`` at an in-image path and do **not** use
@@ -496,23 +498,32 @@ def _purge_stale_uv_git_builds() -> None:
 
 
 def cmd_prefetch(args: argparse.Namespace) -> int:
-    """Warm the uv cache with backend packages — first-time / Docker only.
+    """Generate ``uv.lock`` and warm the uv cache — first-time / Docker only.
 
-    NOT a runtime sync. Warms the cache for the requested extras (positional
-    args; default all of ``ALL_EXTRAS``, or a CUDA world via the ``cu130`` /
-    ``cu129`` shortcuts to bake one Docker image's backends). Because the
-    backends conflict, there is no single env that holds them all, so this syncs
-    the conflict-free covering combos from ``_covering_combos()`` into
-    **throwaway** environments purely to download and build their third-party
-    distributions into the uv cache (``$UV_CACHE_DIR``, default ``~/.cache/uv``).
-    It passes ``--no-install-project`` so only dependencies are fetched/built —
-    verl itself is skipped (it is local source, rebuilt cheaply by the real
-    ``sync``), which keeps this step independent of the verl source tree. The
-    project ``.venv`` is never created or touched.
+    Two steps. (1) Resolve the universal ``uv.lock`` from ``pyproject.toml``
+    (``uv lock``) so prefetch OWNS the lockfile: pyproject is the single source
+    of truth and no pre-existing lock is required (it is a no-op rewrite when
+    the lock is already current). (2) Warm the cache for the requested extras
+    (positional args; default all of ``ALL_EXTRAS``, or a CUDA world via the
+    ``cu130`` / ``cu129`` shortcuts to bake one Docker image's backends).
+    Because the backends conflict, there is no single env that holds them all,
+    so it syncs the conflict-free runtime combos from ``_covering_combos()``
+    (one inference engine + one training backend each) into **throwaway**
+    environments purely to download and build their third-party distributions
+    into the uv cache (``$UV_CACHE_DIR``, default ``~/.cache/uv``), pinned with
+    ``--frozen`` to the lock from step 1. ``--no-install-project`` skips verl
+    itself (local source, rebuilt cheaply by the real ``sync``), keeping this
+    step independent of the verl source tree. The project ``.venv`` is never
+    created or touched.
 
-    Use it once after cloning, or in a Docker layer so the cache ships *inside*
-    the image: bake it as a real layer (no ``--mount=type=cache``) and a later
-    ``sync <extras...>`` resolves from it offline. For an actual runtime env use
+    ``uv lock`` reads only ``pyproject.toml`` + the declared
+    ``[tool.uv.dependency-metadata]``, so it triggers NO source build — apex /
+    TE / megatron-core are compiled in step 2, not here.
+
+    Use it once after cloning, or in a Docker layer so both the lock and the
+    cache ship *inside* the image: bake it as a real layer (no
+    ``--mount=type=cache``) and a later ``sync <extras...>`` resolves from the
+    baked ``uv.lock`` + cache offline. For an actual runtime env use
     ``sync <extras...>``.
     """
     _require_uv()
@@ -528,10 +539,24 @@ def cmd_prefetch(args: argparse.Namespace) -> int:
     requested = _expand(scope_args) if scope_args else ALL_EXTRAS
     combos = _covering_combos(requested)
     scope = "every extra" if not scope_args else ", ".join(requested)
-    print(f"prefetch: warming the uv cache for {scope} (throwaway envs; .venv untouched).")
-    print("covering combos:")
+    print(f"prefetch: generating uv.lock + warming the uv cache for {scope} (throwaway envs; .venv untouched).")
+    print("combos (1 inference + 1 training each):")
     for combo in combos:
         print(f"  {' + '.join(combo)}")
+    print()
+
+    # 1) Resolve the universal uv.lock from pyproject.toml. prefetch OWNS the
+    # lock: rather than requiring a pre-committed lockfile it generates one here
+    # so pyproject.toml is the single source of truth. This reads only
+    # pyproject.toml + the declared [tool.uv.dependency-metadata] (no source
+    # build) and is a no-op rewrite when the lock is already current. `--frozen`
+    # is intentionally NOT passed here — it would forbid the resolution — but it
+    # does pin the per-combo cache-warming syncs below.
+    print("resolving universal uv.lock (uv lock)...", flush=True)
+    rc = _run(["uv", "lock", "--python", PYTHON_VERSION], {"VIRTUAL_ENV": None})
+    if rc:
+        print("error: prefetch failed to resolve uv.lock", file=sys.stderr)
+        return rc
     print()
 
     # A FRESH throwaway env per combo. The combos are mutually exclusive, so
@@ -554,6 +579,7 @@ def cmd_prefetch(args: argparse.Namespace) -> int:
                 "UV_PROJECT_ENVIRONMENT": str(env_dir),
                 "VIRTUAL_ENV": None,
             }
+            # --frozen: pin to the uv.lock resolved in step 1 (no re-resolve).
             # --no-install-project: cache deps only; skip building verl (local
             # source) so the cache layer doesn't depend on the verl tree.
             cmd = [
@@ -561,6 +587,7 @@ def cmd_prefetch(args: argparse.Namespace) -> int:
                 "sync",
                 "--python",
                 PYTHON_VERSION,
+                "--frozen",
                 "--no-install-project",
                 *_extra_flags(combo),
                 *uv_args,
@@ -569,7 +596,7 @@ def cmd_prefetch(args: argparse.Namespace) -> int:
             if rc:
                 print(f"error: prefetch failed while warming {combo}", file=sys.stderr)
                 return rc
-    print(f"\nuv cache warmed for: {scope}.")
+    print(f"\nuv.lock generated; uv cache warmed for: {scope}.")
     return 0
 
 
@@ -630,16 +657,17 @@ def _build_parser() -> argparse.ArgumentParser:
 
     pf = sub.add_parser(
         "prefetch",
-        help="FIRST-TIME / Docker only: warm the uv cache with backend deps (NOT a runtime sync)",
+        help="FIRST-TIME / Docker only: generate uv.lock + warm the uv cache with backend deps (NOT a runtime sync)",
         description=(
-            "Download & build backend dependencies into the uv cache "
-            "($UV_CACHE_DIR, default ~/.cache/uv) by syncing conflict-free "
-            "covering combos into throwaway envs (with --no-install-project). "
-            "Pass extras/groups to scope it (default: all); use the cu130 / "
-            "cu129 shortcuts to bake one CUDA world per Docker image. The "
-            "project .venv is never created or modified. Use once after "
-            "cloning, or bake it into a Docker image layer; for a runtime env "
-            "use `sync`."
+            "Generate the universal uv.lock from pyproject.toml (uv lock), then "
+            "download & build backend dependencies into the uv cache "
+            "($UV_CACHE_DIR, default ~/.cache/uv) by syncing the conflict-free "
+            "runtime combos (1 inference + 1 training each) into throwaway envs "
+            "(--frozen --no-install-project). Pass extras/groups to scope the "
+            "cache warm (default: all); use the cu130 / cu129 shortcuts to bake "
+            "one CUDA world per Docker image. The project .venv is never created "
+            "or modified. Use once after cloning, or bake it into a Docker image "
+            "layer; for a runtime env use `sync`."
         ),
     )
     pf.add_argument(
