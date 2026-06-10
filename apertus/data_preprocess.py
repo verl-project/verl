@@ -31,6 +31,7 @@ LOCAL_SAVE_DIR = "./data/apertus_demo_rl"
 DATASETS_CACHE_DIR = "./data/apertus_demo_rl/.hf_datasets_cache"
 SEED = 85
 CODE_CONTESTS_MAX_GENERATED_TESTS = 50
+PREPROCESS_NUM_PROC = 48
 
 CODE_FINAL_ANSWER_INSTRUCTION = (
     "You may reason before answering. End your response with a Python 3 code "
@@ -159,6 +160,16 @@ TRAIN_DATASETS = [
         solution_key="solutions",
     ),
     DatasetConfig(
+        name="rgym",
+        dataset_id="/capstor/store/cscs/swissai/infra01/reasoning/data/RL-prod/rgym/train.parquet",
+        split="train",
+        adapter="rgym",
+        data_source="rgym",
+        prompt_key="prompt",
+        sample_size=50_000,
+        tool_selection=("display_answers",),
+    ),
+    DatasetConfig(
         name="table_gpt",
         dataset_id=TABLE_GPT_DATASET_ID,
         split="mixed",
@@ -166,6 +177,7 @@ TRAIN_DATASETS = [
         data_source="table_gpt",
         prompt_key="prompt",
         answer_key="completion",
+        tool_selection=("display_answers",),    # TODO: if verification is ok, can choose to only activate on some samples
     ),
     DatasetConfig(
         name="code_contests",
@@ -418,6 +430,20 @@ def make_row(
     }
     if extra_info:
         row["extra_info"].update(extra_info)
+    return row
+
+
+@register_adapter("rgym")
+def adapt_rgym(
+    example: dict[str, Any], idx: int, split: str, config: DatasetConfig
+) -> dict[str, Any]:
+    row = dict(example)
+    row["prompt"] = normalize_messages(get_value(example, config.prompt_key))
+    row["data_source"] = config.data_source
+    extra_info = dict(parse_json_maybe(get_value(example, "extra_info"), default={}) or {})
+    extra_info.update(prompt_controls(config))
+    extra_info["source_dataset"] = normalize_text(get_value(example, "data_source"))
+    row["extra_info"] = extra_info
     return row
 
 
@@ -956,6 +982,13 @@ def load_raw_dataset(config: DatasetConfig) -> datasets.Dataset:
             config.dataset_id,
             cache_dir=os.path.expanduser(DATASETS_CACHE_DIR),
         )
+    elif config.dataset_id.endswith(".parquet"):
+        raw_dataset = datasets.load_dataset(
+            "parquet",
+            data_files={config.split: config.dataset_id},
+            split=config.split,
+            cache_dir=os.path.expanduser(DATASETS_CACHE_DIR),
+        )
     else:
         raw_dataset = datasets.load_dataset(
             config.dataset_id,
@@ -983,18 +1016,54 @@ def load_raw_dataset(config: DatasetConfig) -> datasets.Dataset:
     return raw_dataset
 
 
+def preprocess_example(
+    example: dict[str, Any], idx: int, config: DatasetConfig
+) -> dict[str, Any]:
+    adapter = ADAPTERS[config.adapter]
+    example = dict(example)
+    row = adapter(example, idx, config.split, config)
+    row["extra_info"].update(source_controls(example))
+    return row
+
+
+def normalize_feature_types(feature: Any) -> Any:
+    """Normalize Arrow feature types that block concatenating processed datasets."""
+    if isinstance(feature, datasets.Value) and feature.dtype == "large_string":
+        return datasets.Value("string")
+    if isinstance(feature, datasets.List):
+        return datasets.List(
+            normalize_feature_types(feature.feature),
+            length=feature.length,
+            id=feature.id,
+        )
+    if isinstance(feature, dict):
+        return {key: normalize_feature_types(value) for key, value in feature.items()}
+    return feature
+
+
+def cast_output_features(dataset: datasets.Dataset) -> datasets.Dataset:
+    """Cast output schema while preserving runtime values such as empty tool lists."""
+    features = datasets.Features(normalize_feature_types(dataset.features))
+    if "extra_info" not in features or "tool_selection" not in features["extra_info"]:
+        return dataset.cast(features)
+    features["extra_info"]["tool_selection"] = datasets.Sequence(datasets.Value("string"))
+    return dataset.cast(features)
+
+
 def preprocess_dataset(config: DatasetConfig) -> datasets.Dataset:
     if config.adapter not in ADAPTERS:
         raise KeyError(f"No adapter registered for {config.adapter!r}")
     print(f"Loading {config.name} from {config.dataset_id}...", flush=True)
-    adapter = ADAPTERS[config.adapter]
-    rows = []
-    for idx, example in enumerate(load_raw_dataset(config)):
-        example = dict(example)
-        row = adapter(example, idx, config.split, config)
-        row["extra_info"].update(source_controls(example))
-        rows.append(row)
-    return datasets.Dataset.from_list(rows)
+    raw_dataset = load_raw_dataset(config)
+    dataset = raw_dataset.map(
+        preprocess_example,
+        with_indices=True,
+        fn_kwargs={"config": config},
+        remove_columns=raw_dataset.column_names,
+        num_proc=PREPROCESS_NUM_PROC,
+        desc=f"Preprocessing {config.name}",
+    )
+    return cast_output_features(dataset)
 
 
 def concatenate_named(
