@@ -15,42 +15,43 @@ USERNAME="$(whoami)"
 ###############################################################################
 # Experiment configuration
 ###############################################################################
-PROJECT_NAME=apertus-rl-tests
-WORKING_DIR="/iopsstor/scratch/cscs/${USER}/projects/verl"
-HOME=/iopsstor/scratch/cscs/${USER}
-HF_HOME=/iopsstor/scratch/cscs/${USER}/huggingface
-ENVIRONMENT_PATH=/capstor/store/cscs/swissai/infra01/reasoning/raas/docker/vs:251215-patched/env.toml
+PROJECT_NAME="${PROJECT_NAME:-apertus-rl-tests}"
+SCRATCH_HOME="${SCRATCH_HOME:-/iopsstor/scratch/cscs/${USER}}"
+WORKING_DIR="${WORKING_DIR:-${SCRATCH_HOME}/projects/verl}"
+HOME="${SCRATCH_HOME}"
+HF_HOME="${HF_HOME:-${SCRATCH_HOME}/huggingface}"
+ENVIRONMENT_PATH="${ENVIRONMENT_PATH:-/capstor/store/cscs/swissai/infra01/reasoning/raas/docker/vs:251215-patched/env.toml}"
 
-MODEL_NAME_OR_PATH=/capstor/store/cscs/swissai/infra01/reasoning/models/Apertus-1p5-8B-sft-capfilter-linear-it8816
-TOKENIZER_NAME_OR_PATH=/capstor/store/cscs/swissai/infra01/MLLM/tokenizer/apertus_emu3.5_wavtok_instruct_thinking_token_fixed
-CONFIG_NAME=async
-SLURM_TIME=04:00:00
-TRAIN_NNODES=4
-ROLLOUT_NNODES=2
-NNODES=$((TRAIN_NNODES + ROLLOUT_NNODES))
-TRAINING_DATA_DIR=/users/jgarcagi/iopsstor/projects/verl/apertus/data/apertus_demo_rl
+MODEL_NAME_OR_PATH="${MODEL_NAME_OR_PATH:-/capstor/store/cscs/swissai/infra01/reasoning/models/Apertus-1p5-8B-sft-capfilter-linear-it8816}"
+TOKENIZER_NAME_OR_PATH="${TOKENIZER_NAME_OR_PATH:-/capstor/store/cscs/swissai/infra01/MLLM/tokenizer/apertus_emu3.5_wavtok_instruct_thinking_token_fixed}"
+CONFIG_NAME="${CONFIG_NAME:-async}"
+SLURM_TIME="${SLURM_TIME:-04:00:00}"
+TRAIN_NNODES="${TRAIN_NNODES:-4}"
+ROLLOUT_NNODES="${ROLLOUT_NNODES:-2}"
+NNODES="${NNODES:-$((TRAIN_NNODES + ROLLOUT_NNODES))}"
+TRAINING_DATA_DIR="${TRAINING_DATA_DIR:-/users/jgarcagi/iopsstor/projects/verl/apertus/data/apertus_demo_rl}"
 # TRAINING_DATA_DIR=/capstor/store/cscs/swissai/infra01/reasoning/data/RL-prod/apertus_demo_rl
-FORCE_THINKING=false
-THINK_PREFIX_TOKEN="<|inner_prefix|>"
-SEED=85
-ROLLOUT_N=8
-USE_GROUP_FILTERING=true
-JOB_NAME="debug"
+FORCE_THINKING="${FORCE_THINKING:-false}"
+THINK_PREFIX_TOKEN="${THINK_PREFIX_TOKEN:-<|inner_prefix|>}"
+SEED="${SEED:-85}"
+ROLLOUT_N="${ROLLOUT_N:-8}"
+USE_GROUP_FILTERING="${USE_GROUP_FILTERING:-true}"
+JOB_NAME="${JOB_NAME:-debug}"
 
 ###############################################################################
 # Sandbox configuration
 ###############################################################################
 
 # Set REASONING_GYM_DIR="" to install reasoning-gym from PyPI.
-REASONING_GYM_DIR=/iopsstor/scratch/cscs/${USER}/projects/r-gym
-CODE_GYM_DIR=/iopsstor/scratch/cscs/${USER}/projects/code-gym
-PORT=8000
-POLL_SECS=3
-MAX_WAIT=$((60 * 10))
+REASONING_GYM_DIR="${REASONING_GYM_DIR-${SCRATCH_HOME}/projects/r-gym}"
+CODE_GYM_DIR="${CODE_GYM_DIR:-${SCRATCH_HOME}/projects/code-gym}"
+PORT="${PORT:-8000}"
+POLL_SECS="${POLL_SECS:-3}"
+MAX_WAIT="${MAX_WAIT:-$((60 * 10))}"
 GIVEN_URL="${SCHEDULER_URL:-}"  # potentially reuse running scheduler
 NO_CODE="${NO_CODE:-false}"  # exclude code tasks (no sandbox required)
 SKIP_SANDBOX_SCHEDULER="${SKIP_SANDBOX_SCHEDULER:-false}"  # don't start/probe scheduler when true
-CODEGYM_REWARD_CONTINUOUS=false # default is binary reward
+CODEGYM_REWARD_CONTINUOUS="${CODEGYM_REWARD_CONTINUOUS:-false}" # default is binary reward
 
 if [[ "${NO_CODE}" == "true" ]]; then
   SKIP_SANDBOX_SCHEDULER="true"
