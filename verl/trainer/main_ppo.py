@@ -48,6 +48,10 @@ def run_ppo(config, task_runner_class) -> None:
         os.environ["VLLM_BATCH_INVARIANT"] = "1"
         os.environ["PYTHONHASHSEED"] = str(rollout_cfg.seed)
 
+    trainer_logger = config.trainer.get("logger", [])
+    if "rl_insight" in ([trainer_logger] if isinstance(trainer_logger, str) else trainer_logger or []):
+        os.environ["VERL_RL_INSIGHT_ENABLE"] = "1"
+
     # Check if Ray is not initialized
     if not ray.is_initialized():
         # Initialize Ray with a local cluster configuration

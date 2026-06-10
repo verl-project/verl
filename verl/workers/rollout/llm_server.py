@@ -33,6 +33,7 @@ from verl.single_controller.ray.base import RayResourcePool, RayWorkerGroup
 from verl.utils import normalize_token_ids
 from verl.utils.ray_utils import auto_await
 from verl.utils.rollout_trace import rollout_trace_op
+from verl.utils.tracking import RLInsightLogger
 from verl.workers.rollout.replica import RolloutReplica, TokenOutput, get_rollout_replica_class
 from verl.workers.rollout.utils import update_prometheus_config
 
@@ -469,11 +470,22 @@ class LLMServerManager:
         self.server_addresses = [server._server_address for server in self.rollout_replicas]
         print(f"LLMServerManager: {self.server_addresses}")
 
-        # Update Prometheus configuration with server addresses
-        if self.rollout_config.prometheus.enable:
-            if self.rollout_config.disable_log_stats:
-                raise ValueError("PROMETHEUS needs disable_log_stats==False, but it is currently True.")
-            update_prometheus_config(self.rollout_config.prometheus, self.server_addresses, self.rollout_config.name)
+        # Update Prometheus / rl-insight metrics with server addresses
+        needs_metrics = self.rollout_config.prometheus.enable or RLInsightLogger.enabled()
+        if self.rollout_config.disable_log_stats:
+            if needs_metrics:
+                raise ValueError("Metrics monitoring requires disable_log_stats=False, but it is currently True.")
+        if not self.rollout_config.disable_log_stats:
+            if self.rollout_config.prometheus.enable:
+                update_prometheus_config(
+                    self.rollout_config.prometheus, self.server_addresses, self.rollout_config.name
+                )
+            if RLInsightLogger.enabled():
+                RLInsightLogger.register_rollout_metrics(
+                    self.server_addresses,
+                    self.rollout_config.name,
+                    labels=[{"replica": server.replica_rank} for server in self.rollout_replicas],
+                )
 
     async def _init_global_load_balancer(self) -> None:
         self.global_load_balancer = GlobalRequestLoadBalancer.remote(
