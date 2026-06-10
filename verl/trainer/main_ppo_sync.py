@@ -1297,7 +1297,6 @@ class PPOTrainer:
             seqlen_list=global_seqlen_lst.tolist(), partitions=global_partition_lst, prefix=logging_prefix
         )
         metrics.update(global_balance_stats)
-        return batch
 
     def _compute_old_log_prob(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
         """Compute the old log prob of the batch."""
@@ -1468,10 +1467,10 @@ class PPOTrainer:
     def _update_critic(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
         """Update the critic network."""
         ppo_mini_batch_size = self.config.critic.ppo_mini_batch_size
-        ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
+        num_prompts = len(set(k.rsplit("_", 2)[0] for k in batch.keys))
+        num_mini_batch = max(1, num_prompts // ppo_mini_batch_size)
         extra_info = {
-            "global_batch_size": ppo_mini_batch_size,
-            "mini_batch_size": ppo_mini_batch_size,
+            "num_mini_batch": num_mini_batch,
             "epochs": self.config.critic.ppo_epochs,
             "seed": self.config.critic.data_loader_seed,
             "dataloader_kwargs": {"shuffle": self.config.critic.shuffle},
@@ -1490,7 +1489,8 @@ class PPOTrainer:
     def _update_actor(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
         """Update the actor network."""
         ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
-        ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
+        num_prompts = len(set(k.rsplit("_", 2)[0] for k in batch.keys))
+        num_mini_batch = max(1, num_prompts // ppo_mini_batch_size)
         calculate_entropy = self.config.actor_rollout_ref.actor.calculate_entropy or (
             self.config.actor_rollout_ref.actor.entropy_coeff != 0.0
         )
@@ -1502,8 +1502,7 @@ class PPOTrainer:
         extra_info = {
             "calculate_entropy": calculate_entropy,
             "distillation_use_topk": distillation_use_topk,
-            "global_batch_size": ppo_mini_batch_size,
-            "mini_batch_size": ppo_mini_batch_size,
+            "num_mini_batch": num_mini_batch,
             "epochs": self.config.actor_rollout_ref.actor.ppo_epochs,
             "seed": self.config.actor_rollout_ref.actor.data_loader_seed,
             "dataloader_kwargs": {"shuffle": self.config.actor_rollout_ref.actor.shuffle},
@@ -1720,7 +1719,7 @@ class PPOTrainer:
             batch = self._add_remax_reward_baselines(batch)
 
         # 4. balance batch across data parallel groups
-        batch = self._balance_batch(batch, metrics=metrics)
+        self._balance_batch(batch, metrics=metrics)
 
         # 5. compute old_log_prob
         with marked_timer("old_log_prob", timing_raw, color="blue"):
