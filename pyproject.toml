@@ -345,6 +345,18 @@ transformer-engine       = [{ requirement = "torch", match-runtime = true }]
 transformer-engine-torch = [{ requirement = "torch", match-runtime = true }]
 flash-attn               = [{ requirement = "torch", match-runtime = true }]
 
+# apex's setup.py builds a Python-ONLY package unless the C++/CUDA extensions
+# are explicitly requested — without this it links nothing and "builds" in
+# seconds, leaving Megatron's fused kernels (FusedLayerNorm, FusedAdam, ...)
+# missing. The reference Dockerfiles pass `--build-option=--cpp_ext/--cuda_ext`
+# to pip; the PEP 517 equivalent apex honors (see its ENV_TO_FLAG map) is these
+# env vars, so `uv sync`/`prefetch` actually run nvcc. Cache-tracked: changing
+# them forces an apex rebuild. nvcc must be on PATH at build time (it is in the
+# CUDA `devel` base used by docker/Dockerfile.uv.cu130); compile parallelism is
+# MAX_JOBS, set per the megatron extra in manage_envs.py (BUILD_ENV).
+[tool.uv.extra-build-variables]
+apex = { APEX_CPP_EXT = "1", APEX_CUDA_EXT = "1" }
+
 # Skip lock-time metadata-extraction builds for git-source packages whose
 # upstreams have no [project] section or use dynamic version. uv trusts
 # these declarations; sync-time builds still run normally. Versions track
