@@ -41,6 +41,7 @@ from verl.utils.profiler import DistProfiler, build_vllm_profiler_args
 from verl.utils.tokenizer import normalize_token_ids
 from verl.utils.vllm.vllm_fp8_utils import apply_vllm_fp8_patches
 from verl.workers.config import HFModelConfig, RolloutConfig
+from verl.workers.config.rollout import ensure_rollout_config
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
 from verl.workers.rollout.utils import get_max_position_embeddings, qwen2_5_vl_dedup_image_tokens, run_uvicorn
 from verl.workers.rollout.vllm_rollout.utils import (
@@ -302,14 +303,29 @@ class vLLMHttpServer:
             args["speculative_config"] = speculative_config
 
         if self.config.data_parallel_size > 1:
-            assert self.gpus_per_node % self.config.tensor_model_parallel_size == 0, (
-                "gpus_per_node should be divisible by tensor_model_parallel_size"
-            )
-            data_parallel_size_local = self.gpus_per_node // self.config.tensor_model_parallel_size
-            assert len(self.workers) == data_parallel_size_local * self.config.tensor_model_parallel_size, (
-                f"num workers ({len(self.workers)}) should be equal to "
-                f"dp_size_local ({data_parallel_size_local}) * tp_size ({self.config.tensor_model_parallel_size})"
-            )
+            if is_torch_npu_available(check_device=False):
+                model_parallel_size_per_dp_group = (
+                    self.config.tensor_model_parallel_size * self.config.pipeline_model_parallel_size
+                )
+                assert self.gpus_per_node % model_parallel_size_per_dp_group == 0, (
+                    "gpus_per_node should be divisible by tensor_model_parallel_size * pipeline_model_parallel_size"
+                )
+                data_parallel_size_local = self.gpus_per_node // model_parallel_size_per_dp_group
+                assert len(self.workers) == data_parallel_size_local * model_parallel_size_per_dp_group, (
+                    f"num workers ({len(self.workers)}) should be equal to "
+                    f"dp_size_local ({data_parallel_size_local}) * model_parallel_size_per_dp_group "
+                    f"({model_parallel_size_per_dp_group})"
+                )
+            else:
+                assert self.gpus_per_node % self.config.tensor_model_parallel_size == 0, (
+                    "gpus_per_node should be divisible by tensor_model_parallel_size"
+                )
+                data_parallel_size_local = self.gpus_per_node // self.config.tensor_model_parallel_size
+                assert len(self.workers) == data_parallel_size_local * self.config.tensor_model_parallel_size, (
+                    f"num workers ({len(self.workers)}) should be equal to "
+                    f"dp_size_local ({data_parallel_size_local}) * tp_size "
+                    f"({self.config.tensor_model_parallel_size})"
+                )
             dp_args = {
                 "data_parallel_size": self.config.data_parallel_size,
                 "data_parallel_size_local": data_parallel_size_local,
@@ -801,6 +817,8 @@ class vLLMHttpServer:
 
     def _init_config(self, config):
         """Initialise config. Override when a specific dataclass_type is needed."""
+        if is_torch_npu_available(check_device=False):
+            return ensure_rollout_config(config)
         return omega_conf_to_dataclass(config)
 
     def _init_model_config(self, model_config):

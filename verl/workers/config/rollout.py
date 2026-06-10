@@ -18,6 +18,7 @@ from typing import Optional
 from omegaconf import MISSING
 
 from verl.base_config import BaseConfig
+from verl.utils.device import is_torch_npu_available
 from verl.utils.profiler import ProfilerConfig
 from verl.workers.config.disaggregation import DisaggregationConfig
 from verl.workers.config.model import MtpConfig
@@ -167,6 +168,7 @@ class RolloutConfig(BaseConfig):
         "response_length",
         "expert_parallel_size",
         "moe_tensor_parallel_size",
+        "pipeline_model_parallel_size",
     }
 
     name: Optional[str] = MISSING
@@ -322,8 +324,33 @@ class RolloutConfig(BaseConfig):
                     f"tensor_model_parallel_size={self.tensor_model_parallel_size})"
                 )
 
+        if self.name == "vllm" and is_torch_npu_available(check_device=False):
+            vllm_engine_kwargs = (self.engine_kwargs or {}).get("vllm") or {}
+            pp_from_engine_kwargs = vllm_engine_kwargs.get("pipeline_parallel_size")
+            if pp_from_engine_kwargs is not None:
+                pp_from_engine_kwargs = int(pp_from_engine_kwargs)
+                if self.pipeline_model_parallel_size not in (1, pp_from_engine_kwargs):
+                    raise ValueError(
+                        "Conflicting pipeline parallel sizes: "
+                        f"rollout.pipeline_model_parallel_size="
+                        f"{self.pipeline_model_parallel_size} vs "
+                        f"engine_kwargs.vllm.pipeline_parallel_size="
+                        f"{pp_from_engine_kwargs}. On NPU, configure PP via "
+                        "+actor_rollout_ref.rollout.engine_kwargs.vllm.pipeline_parallel_size only."
+                    )
+                if self.pipeline_model_parallel_size == 1:
+                    object.__setattr__(
+                        self,
+                        "pipeline_model_parallel_size",
+                        pp_from_engine_kwargs,
+                    )
+
         if self.pipeline_model_parallel_size > 1:
-            if self.name == "vllm" or self.name == "sglang" or self.name == "trtllm":
+            if self.name == "sglang" or self.name == "trtllm":
+                raise NotImplementedError(
+                    f"Current rollout {self.name=} not implemented pipeline_model_parallel_size > 1 yet."
+                )
+            if self.name == "vllm" and not is_torch_npu_available(check_device=False):
                 raise NotImplementedError(
                     f"Current rollout {self.name=} not implemented pipeline_model_parallel_size > 1 yet."
                 )
@@ -351,3 +378,31 @@ class RolloutConfig(BaseConfig):
                 f"rollout.disaggregation.enabled=True is currently only supported with "
                 f"rollout.name='sglang'; got {self.name!r}. (vLLM PD is a tracked follow-up.)"
             )
+
+
+def ensure_rollout_config(config) -> RolloutConfig:
+    """Coerce rollout config to RolloutConfig (NPU: syncs PP from engine_kwargs)."""
+    if isinstance(config, RolloutConfig):
+        return config
+    from verl.utils.config import omega_conf_to_dataclass
+
+    return omega_conf_to_dataclass(config, dataclass_type=RolloutConfig)
+
+
+def get_rollout_parallel_world_size(config) -> int:
+    """Return rollout TP * DP * PP (NPU: PP synced from engine_kwargs.vllm)."""
+    rollout_config = ensure_rollout_config(config)
+    disagg = rollout_config.disaggregation
+    if disagg.enabled:
+        prefill_tp = rollout_config.tensor_model_parallel_size
+        decode_tp = disagg.decode_tensor_model_parallel_size or prefill_tp
+        return (
+            (prefill_tp * disagg.prefill_replicas + decode_tp * disagg.decode_replicas)
+            * rollout_config.data_parallel_size
+            * rollout_config.pipeline_model_parallel_size
+        )
+    return (
+        rollout_config.tensor_model_parallel_size
+        * rollout_config.data_parallel_size
+        * rollout_config.pipeline_model_parallel_size
+    )

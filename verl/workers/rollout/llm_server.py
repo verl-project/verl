@@ -29,8 +29,10 @@ from cachetools import LRUCache
 from omegaconf import DictConfig
 
 from verl.single_controller.ray.base import RayResourcePool, RayWorkerGroup
+from verl.utils.device import is_torch_npu_available
 from verl.utils.ray_utils import auto_await
 from verl.utils.rollout_trace import rollout_trace_op
+from verl.workers.config.rollout import ensure_rollout_config, get_rollout_parallel_world_size
 from verl.workers.rollout.replica import RolloutReplica, TokenOutput, get_rollout_replica_class
 from verl.workers.rollout.utils import update_prometheus_config
 
@@ -240,7 +242,10 @@ class LLMServerManager:
         rollout_resource_pool: RayResourcePool = None,
     ):
         self.config = config
-        self.rollout_config = config.actor_rollout_ref.rollout
+        if is_torch_npu_available(check_device=False):
+            self.rollout_config = ensure_rollout_config(config.actor_rollout_ref.rollout)
+        else:
+            self.rollout_config = config.actor_rollout_ref.rollout
         self.model_config = config.actor_rollout_ref.model
         self.worker_group = worker_group
         self.rollout_resource_pool = rollout_resource_pool
@@ -273,33 +278,48 @@ class LLMServerManager:
                 Ray named-actor collisions when hybrid and standalone replicas
                 coexist.
         """
-        rollout_world_size = (
-            self.rollout_config.tensor_model_parallel_size
-            * self.rollout_config.data_parallel_size
-            * self.rollout_config.pipeline_model_parallel_size
-        )
-        # PD inflates per-replica footprint; miss this and init_hybrid slices
-        # past worker_group → empty workers on replica_rank>=1.
-        disagg = getattr(self.rollout_config, "disaggregation", None)
-        if disagg is not None and getattr(disagg, "enabled", False):
-            prefill_tp = self.rollout_config.tensor_model_parallel_size
-            # Inline decode_tp default: OmegaConf/Ray serialization drops dataclass methods.
-            decode_tp = (
-                disagg.decode_tensor_model_parallel_size
-                if disagg.decode_tensor_model_parallel_size is not None
-                else prefill_tp
+        if is_torch_npu_available(check_device=False):
+            rollout_world_size = get_rollout_parallel_world_size(self.rollout_config)
+            world_size = (
+                self.worker_group.world_size
+                if self.worker_group
+                else self.rollout_config.n_gpus_per_node * self.rollout_config.nnodes
             )
+            if world_size % rollout_world_size != 0:
+                raise ValueError(
+                    f"Total worker count ({world_size}) must be divisible by rollout parallel "
+                    f"world size ({rollout_world_size}). Check tensor_model_parallel_size and "
+                    f"engine_kwargs.vllm.pipeline_parallel_size."
+                )
+            num_replicas = world_size // rollout_world_size
+        else:
             rollout_world_size = (
-                (prefill_tp * disagg.prefill_replicas + decode_tp * disagg.decode_replicas)
+                self.rollout_config.tensor_model_parallel_size
                 * self.rollout_config.data_parallel_size
                 * self.rollout_config.pipeline_model_parallel_size
             )
-        world_size = (
-            self.worker_group.world_size
-            if self.worker_group
-            else self.rollout_config.n_gpus_per_node * self.rollout_config.nnodes
-        )
-        num_replicas = world_size // rollout_world_size
+            # PD inflates per-replica footprint; miss this and init_hybrid slices
+            # past worker_group → empty workers on replica_rank>=1.
+            disagg = getattr(self.rollout_config, "disaggregation", None)
+            if disagg is not None and getattr(disagg, "enabled", False):
+                prefill_tp = self.rollout_config.tensor_model_parallel_size
+                # Inline decode_tp default: OmegaConf/Ray serialization drops dataclass methods.
+                decode_tp = (
+                    disagg.decode_tensor_model_parallel_size
+                    if disagg.decode_tensor_model_parallel_size is not None
+                    else prefill_tp
+                )
+                rollout_world_size = (
+                    (prefill_tp * disagg.prefill_replicas + decode_tp * disagg.decode_replicas)
+                    * self.rollout_config.data_parallel_size
+                    * self.rollout_config.pipeline_model_parallel_size
+                )
+            world_size = (
+                self.worker_group.world_size
+                if self.worker_group
+                else self.rollout_config.n_gpus_per_node * self.rollout_config.nnodes
+            )
+            num_replicas = world_size // rollout_world_size
 
         self.rollout_replicas = [
             self.rollout_replica_class(
