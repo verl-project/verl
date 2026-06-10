@@ -448,6 +448,32 @@ def cmd_list(_args: argparse.Namespace) -> int:
     return 0
 
 
+def _purge_stale_uv_git_builds() -> None:
+    """Best-effort: drop leftover CMake build trees from uv's git-source
+    checkouts so a previously *interrupted* source build can't poison this run.
+
+    Packages such as TransformerEngine (pulled in by ``megatron``) write their
+    CMake build tree *inside* the uv git checkout
+    (``$UV_CACHE_DIR/git-v0/checkouts/<repo>/<rev>/build``) and cache absolute
+    toolchain paths in it — notably ``CMAKE_MAKE_PROGRAM`` pointing at the build
+    env's ``bin/ninja``. ``prefetch`` builds in a throwaway env, so once a build
+    is interrupted that cached ninja path dangles and every later attempt dies
+    in CMake's reconfigure with ``Running '.../.venv/bin/ninja' '--version'
+    failed with: no such file or directory`` — even though ninja is installed in
+    the *current* env. Removing the ``build`` dir forces a clean reconfigure
+    against the current toolchain. It is safe: a cached wheel makes uv skip the
+    build entirely, so this only ever affects an actual rebuild, and none of the
+    pinned git sources track a top-level ``build/`` in their tree. Never raises
+    (uv's cache layout is an implementation detail); if it finds nothing, the
+    deterministic env path below still keeps newly-baked paths valid on retry."""
+    cache = Path(os.environ.get("UV_CACHE_DIR") or (Path.home() / ".cache" / "uv"))
+    checkouts = cache / "git-v0" / "checkouts"
+    if not checkouts.is_dir():
+        return
+    for build_dir in checkouts.glob("*/*/build"):
+        shutil.rmtree(build_dir, ignore_errors=True)
+
+
 def cmd_prefetch(args: argparse.Namespace) -> int:
     """Warm the uv cache with backend packages — first-time / Docker only.
 
