@@ -169,7 +169,7 @@ GROUPS: dict[str, list[str]] = {
     # CUDA-world shortcuts, used to scope `prefetch` per Docker image so each
     # image bakes only the backends it can actually run on its CUDA base.
     "cu130": INFERENCE_BACKENDS + TRAINING_BACKENDS,  # torch 2.11 GPU backends
-    "cu129": CU129_BACKENDS,                          # torch 2.9.1 GPU backends
+    "cu129": CU129_BACKENDS,  # torch 2.9.1 GPU backends
 }
 
 VERL_DIR = Path(__file__).resolve().parent
@@ -227,11 +227,30 @@ def _extra_flags(extras: list[str]) -> list[str]:
     return flags
 
 
-def _build_env(extras: list[str]) -> dict[str, str]:
-    """Merge recommended build-time env vars for the selected extras."""
+def _build_env(extras: list[str], env_path: Path) -> dict[str, str]:
+    """Merge recommended build-time env vars for the selected extras.
+
+    ``env_path`` is the venv uv builds into (the project ``.venv`` for ``sync`` /
+    ``run`` / ``shell``; the throwaway env for ``prefetch``). For ``megatron`` it
+    also puts the NCCL + cuDNN headers from the pip ``nvidia-*`` wheels on the
+    compiler include path. TransformerEngine's source build auto-discovers most
+    CUDA pip wheels but NOT NCCL (NVIDIA/TransformerEngine#2331), so
+    ``#include "nccl.h"`` (and sometimes ``cudnn.h``) fails on hosts without the
+    system ``libnccl-dev`` / ``libcudnn-dev`` debs. Since ``--no-build-isolation``
+    builds TE inside ``env_path`` (where uv has already installed torch and its
+    transitive ``nvidia-nccl-cu13`` / ``nvidia-cudnn-cu13`` wheels), pointing
+    CPATH there fixes the build offline and keeps NCCL/cuDNN version-matched to
+    torch. It is harmless where the dev debs exist, and the compiler silently
+    ignores CPATH entries that don't exist."""
     env: dict[str, str] = {}
     for e in extras:
         env.update(BUILD_ENV.get(e, {}))
+    if "megatron" in extras:
+        nvidia = env_path / "lib" / f"python{PYTHON_VERSION}" / "site-packages" / "nvidia"
+        includes = [str(nvidia / pkg / "include") for pkg in ("nccl", "cudnn")]
+        for var in ("CPATH", "CPLUS_INCLUDE_PATH"):
+            prev = os.environ.get(var, "")
+            env[var] = os.pathsep.join([*includes, prev]) if prev else os.pathsep.join(includes)
     return env
 
 
@@ -318,7 +337,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
     rest = list(args.rest)
     if "--" in rest:
         sep = rest.index("--")
-        backends, uv_args = rest[:sep], rest[sep + 1:]
+        backends, uv_args = rest[:sep], rest[sep + 1 :]
     else:
         backends, uv_args = rest, []
     if not backends:
@@ -326,7 +345,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
     extras = _expand(backends)
     _validate_combo(extras)
     cmd = ["uv", "sync", "--python", PYTHON_VERSION, *_extra_flags(extras), *_no_install_flags(), *uv_args]
-    rc = _run(cmd, _build_env(extras) or None)
+    rc = _run(cmd, _build_env(extras, VENV_DIR) or None)
     if rc == 0:
         print(f"\n.venv ready ({', '.join(extras)}). Activate: source .venv/bin/activate", flush=True)
     return rc
@@ -348,7 +367,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         sys.exit("error: usage: manage_envs.py run <extras...> -- <command...>")
     sep = rest.index("--")
     extras = _expand(rest[:sep])
-    command = rest[sep + 1:]
+    command = rest[sep + 1 :]
     if not extras:
         sys.exit("error: no extras given before `--`")
     if not command:
@@ -358,7 +377,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     if _no_install_packages():
         cmd.append("--no-sync")
     cmd += ["--", *command]
-    return _run(cmd, _build_env(extras) or None)
+    return _run(cmd, _build_env(extras, VENV_DIR) or None)
 
 
 def cmd_shell(args: argparse.Namespace) -> int:
@@ -368,7 +387,7 @@ def cmd_shell(args: argparse.Namespace) -> int:
     _validate_combo(extras)
     rc = _run(
         ["uv", "sync", "--python", PYTHON_VERSION, *_extra_flags(extras), *_no_install_flags()],
-        _build_env(extras) or None,
+        _build_env(extras, VENV_DIR) or None,
     )
     if rc:
         return rc
@@ -456,7 +475,7 @@ def cmd_prefetch(args: argparse.Namespace) -> int:
     rest = list(args.rest)
     if "--" in rest:
         sep = rest.index("--")
-        scope_args, uv_args = rest[:sep], rest[sep + 1:]
+        scope_args, uv_args = rest[:sep], rest[sep + 1 :]
     else:
         scope_args, uv_args = rest, []
     requested = _expand(scope_args) if scope_args else ALL_EXTRAS
@@ -480,10 +499,15 @@ def cmd_prefetch(args: argparse.Namespace) -> int:
             # --no-install-project: cache deps only; skip building verl (local
             # source) so the cache layer doesn't depend on the verl tree.
             cmd = [
-                "uv", "sync", "--python", PYTHON_VERSION,
-                "--no-install-project", *_extra_flags(combo), *uv_args,
+                "uv",
+                "sync",
+                "--python",
+                PYTHON_VERSION,
+                "--no-install-project",
+                *_extra_flags(combo),
+                *uv_args,
             ]
-            rc = _run(cmd, {**proj_env, **_build_env(combo)})
+            rc = _run(cmd, {**proj_env, **_build_env(combo, Path(tmp) / ".venv")})
             if rc:
                 print(f"error: prefetch failed while warming {combo}", file=sys.stderr)
                 return rc
@@ -523,8 +547,7 @@ def _build_parser() -> argparse.ArgumentParser:
     s.add_argument(
         "rest",
         nargs=argparse.REMAINDER,
-        help="<extras...> [-- uv args...]: anything after `--` is forwarded to "
-        "`uv sync`. " + extras_help,
+        help="<extras...> [-- uv args...]: anything after `--` is forwarded to `uv sync`. " + extras_help,
     )
     s.set_defaults(func=cmd_sync)
 
@@ -543,9 +566,7 @@ def _build_parser() -> argparse.ArgumentParser:
     sh.add_argument("backends", nargs="+", help=extras_help)
     sh.set_defaults(func=cmd_shell)
 
-    sub.add_parser("list", help="show extras, conflict rules, .venv state, prefetch plan").set_defaults(
-        func=cmd_list
-    )
+    sub.add_parser("list", help="show extras, conflict rules, .venv state, prefetch plan").set_defaults(func=cmd_list)
 
     sub.add_parser("clean", help="remove the project .venv").set_defaults(func=cmd_clean)
 
