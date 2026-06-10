@@ -582,6 +582,10 @@ def cmd_prefetch(args: argparse.Namespace) -> int:
             # --frozen: pin to the uv.lock resolved in step 1 (no re-resolve).
             # --no-install-project: cache deps only; skip building verl (local
             # source) so the cache layer doesn't depend on the verl tree.
+            # Both are hardcoded; uv rejects a flag passed twice, so drop them
+            # from any forwarded uv_args (e.g. a now-redundant `-- --frozen`)
+            # before appending the rest.
+            warm_args = [a for a in uv_args if a not in ("--frozen", "--no-install-project")]
             cmd = [
                 "uv",
                 "sync",
@@ -590,7 +594,7 @@ def cmd_prefetch(args: argparse.Namespace) -> int:
                 "--frozen",
                 "--no-install-project",
                 *_extra_flags(combo),
-                *uv_args,
+                *warm_args,
             ]
             rc = _run(cmd, {**proj_env, **_build_env(combo, env_dir)})
             if rc:
