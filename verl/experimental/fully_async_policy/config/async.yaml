@@ -7,7 +7,7 @@ defaults:
   - _self_
 
 algorithm:
-  adv_estimator: maxrl
+  adv_estimator: rloo_vectorized
   norm_adv_by_std_in_grpo: false
   filter_groups:
     enable: true
