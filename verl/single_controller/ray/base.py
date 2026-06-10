@@ -187,8 +187,9 @@ class ResourcePoolManager:
     resource_pool_spec: dict[str, list[int]]
     mapping: dict[int, str]
     resource_pool_dict: dict[str, RayResourcePool] = field(default_factory=dict)
+    gpu_resource_pool_dict: dict[str, RayResourcePool] = field(default_factory=dict)
 
-    def create_resource_pool(self):
+    def create_resource_pool(self, use_gpu: bool = True):
         """Create Ray resource pools for distributed training.
 
         Initializes resource pools based on the resource pool specification,
@@ -202,10 +203,11 @@ class ResourcePoolManager:
             # For Megatron backend, we recommend using max_colocate_count>1
             # that can utilize different WorkerGroup for differnt models
             resource_pool = RayResourcePool(
-                process_on_nodes=process_on_nodes, use_gpu=True, max_colocate_count=3, name_prefix=resource_pool_name
+                process_on_nodes=process_on_nodes, use_gpu=use_gpu, max_colocate_count=3, name_prefix=resource_pool_name
             )
             self.resource_pool_dict[resource_pool_name] = resource_pool
-
+            if use_gpu:
+                self.gpu_resource_pool_dict[resource_pool_name] = resource_pool
         self._check_resource_available()
 
     def get_resource_pool(self, role) -> RayResourcePool:
@@ -214,7 +216,12 @@ class ResourcePoolManager:
 
     def get_n_gpus(self) -> int:
         """Get the number of gpus in this cluster."""
-        return sum([n_gpus for process_on_nodes in self.resource_pool_spec.values() for n_gpus in process_on_nodes])
+        process_on_gpu_nodes = [
+            process_on_nodes
+            for pool_name, process_on_nodes in self.resource_pool_spec.items()
+            if pool_name in self.gpu_resource_pool_dict
+        ]
+        return sum([n_gpus for process_on_nodes in process_on_gpu_nodes for n_gpus in process_on_nodes])
 
     def _check_resource_available(self):
         """Check if the resource pool can be satisfied in this ray cluster."""
@@ -226,9 +233,7 @@ class ResourcePoolManager:
 
         # check total required gpus can be satisfied
         total_available_gpus = sum(node_available_gpus.values())
-        total_required_gpus = sum(
-            [n_gpus for process_on_nodes in self.resource_pool_spec.values() for n_gpus in process_on_nodes]
-        )
+        total_required_gpus = self.get_n_gpus()
         if total_available_gpus < total_required_gpus:
             raise ValueError(
                 f"Total available GPUs {total_available_gpus} is less than total desired GPUs {total_required_gpus}"

@@ -134,6 +134,30 @@ class TaskRunner:
             actor_rollout_cls = ActorRolloutRefWorker
             ray_worker_group_cls = RayWorkerGroup
 
+            backend_name = config.trainer.get("remote_backend")
+            if backend_name:
+                # Per @zw0610: each remote backend ships its own
+                # per-backend worker (under `verl/remote_backend/workers/
+                # <name>/`) and adapter (under `verl/workers/
+                # remote_client/`). We import the adapter explicitly here
+                # so it registers with `RemoteBackendRegistry`; the
+                # registry no longer carries a lazy `MODULES` table.
+                if backend_name == "arctic":
+                    from verl.remote_backend.workers.arctic_rl import (
+                        ArcticRLActorRolloutRefWorker,
+                    )
+                    from verl.workers.remote_client import arctic_rl  # noqa: F401
+
+                    actor_rollout_cls = ArcticRLActorRolloutRefWorker
+                else:
+                    raise ValueError(
+                        f"Unknown trainer.remote_backend={backend_name!r}. "
+                        "Known: 'arctic'. Plug in a new backend by adding "
+                        "verl/workers/remote_client/<name>.py + "
+                        "verl/remote_backend/workers/<name>/worker.py and "
+                        "wiring it here."
+                    )
+
             lora_rank = config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
             if lora_rank <= 0:
                 lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
@@ -339,8 +363,16 @@ class TaskRunner:
         )
         train_sampler = create_rl_sampler(config.data, train_dataset)
 
-        # Initialize the PPO trainer.
-        trainer = RayPPOTrainer(
+        # Pick the trainer: `RemoteBackendTrainer` when a remote backend
+        # is selected via `trainer.remote_backend = "<name>"`, otherwise
+        # the standard in-process `RayPPOTrainer`.
+        if config.trainer.get("remote_backend"):
+            from verl.remote_backend.trainer import RemoteBackendTrainer
+
+            ppo_trainer_cls = RemoteBackendTrainer
+        else:
+            ppo_trainer_cls = RayPPOTrainer
+        trainer = ppo_trainer_cls(
             config=config,
             tokenizer=tokenizer,
             processor=processor,
@@ -356,7 +388,12 @@ class TaskRunner:
         trainer.init_workers()
 
         # Start the training process.
-        trainer.fit()
+        try:
+            trainer.fit()
+        finally:
+            # Ensure remote services shutdown gracefully
+            if hasattr(trainer, "destroy"):
+                trainer.destroy()
 
 
 def create_rl_dataset(data_paths, data_config, tokenizer, processor, is_train=True, max_samples: int = -1):

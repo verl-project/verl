@@ -29,6 +29,12 @@ defaults:
   # Critic model config.
   - critic@critic: ${model_engine}_critic
 
+  # Remote backend config (optional). Opt in with `remote_backend=arctic`
+  # (loads `trainer/config/remote_backend/arctic.yaml` into the
+  # `remote_backend` key). Default leaves the field unset so the regular
+  # FSDP/Megatron actor/rollout/ref worker stack stays in charge.
+  - optional remote_backend@remote_backend: null
+
   # legacy reward impl config, for backward compatibility
   - legacy_reward_impl
 
@@ -203,6 +209,12 @@ trainer:
   #  mode: "auto", "enable", or "disable"
   use_legacy_worker_impl: auto
 
+  # Remote-backend selector. Set to a registered backend name
+  # (e.g. "arctic") to route training/rollout/log-prob/sync/ckpt through
+  # `verl.remote_backend.RemoteBackend` instead of an in-process engine.
+  # Leave null for the standard in-process verl path.
+  remote_backend: null
+
 # profiler configs
 global_profiler:
 
@@ -310,3 +322,11 @@ ray_kwargs:
 
   # Path to save Ray timeline JSON for performance profiling
   timeline_json_file: null
+
+
+# Per-backend `remote_backend` config lives in its own file under
+# `trainer/config/remote_backend/<name>.yaml` (loaded via the Hydra
+# defaults entry above). To plug in a new backend (e.g. "tinker"), add
+# `trainer/config/remote_backend/tinker.yaml` and opt in with
+# `+remote_backend@remote_backend=tinker` — no changes needed to this
+# file or `main_ppo.py`.
