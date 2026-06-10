@@ -79,26 +79,36 @@ class ResumeResult:
 
 
 def _get_nccl_lib() -> Optional[ctypes.CDLL]:
-    """Lazily load ``libnccl.so.2`` and resolve ``ncclCommSuspend`` / ``ncclCommResume``.
+    """Resolve and dlopen the ``libnccl.so.2`` torch already loaded.
 
-    Returns ``None`` (cached) if the library can't be loaded or the suspend/resume
-    symbols aren't present (NCCL < 2.29.7).
+    Must match torch's copy — ``ncclComm_t`` handles point into the lib's
+    internal state. Returns ``None`` if absent or NCCL < 2.29.7.
     """
     global _nccl_lib, _lib_load_attempted
     if _lib_load_attempted:
         return _nccl_lib
     _lib_load_attempted = True
 
+    import psutil
+
+    nccl_path = next(
+        (m.path for m in psutil.Process().memory_maps() if "libnccl.so" in m.path.lower()),
+        None,
+    )
+    if nccl_path is None:
+        logger.warning("libnccl not found in process memory maps; NCCL suspend/resume disabled.")
+        return None
+
     try:
-        lib = ctypes.CDLL("libnccl.so.2")
-    except OSError:
-        logger.warning("Failed to load libnccl.so.2; NCCL suspend/resume disabled.")
+        lib = ctypes.CDLL(nccl_path)
+    except OSError as e:
+        logger.warning("Failed to load %s: %s; NCCL suspend/resume disabled.", nccl_path, e)
         return None
 
     if not hasattr(lib, "ncclCommSuspend") or not hasattr(lib, "ncclCommResume"):
         logger.warning(
-            "libnccl.so.2 does not export ncclCommSuspend/ncclCommResume; "
-            "NCCL suspend/resume disabled. Requires NCCL >= 2.29.7."
+            "NCCL at %s lacks ncclCommSuspend/Resume; disabled. Requires NCCL >= 2.29.7.",
+            nccl_path,
         )
         return None
 
@@ -107,6 +117,7 @@ def _get_nccl_lib() -> Optional[ctypes.CDLL]:
     lib.ncclCommResume.argtypes = [ctypes.c_void_p]
     lib.ncclCommResume.restype = ctypes.c_int
 
+    logger.info("NCCL suspend/resume enabled via %s", nccl_path)
     _nccl_lib = lib
     return lib
 
