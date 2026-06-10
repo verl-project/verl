@@ -248,9 +248,6 @@ def make_megatron_module(
         if override_model_config.get("moe_config", {}).get("freeze_moe_router", False):
             post_model_creation_callbacks.append(freeze_moe_router)
         if provider is not None:
-            from megatron.bridge.peft.utils import create_peft_hook, load_peft_adapter_checkpoint
-            from megatron.bridge.training.utils.config_utils import create_ddp_config
-
             # When using PEFT with Megatron-Bridge, we must apply PEFT transformation
             # BEFORE wrapping the model in DDP. This is required because:
             # 1. PEFT freezes base model parameters (requires_grad=False)
@@ -261,6 +258,8 @@ def make_megatron_module(
             # Register PEFT transformation as pre-wrap hook if peft_cls is specified
             # This must happen BEFORE DDP wrapping to avoid KeyError with frozen parameters
             if peft_cls is not None:
+                from megatron.bridge.peft.utils import create_peft_hook, load_peft_adapter_checkpoint
+
                 from verl.utils.megatron_peft_utils import print_adapter_info
 
                 provider.register_pre_wrap_hook(create_peft_hook(peft_cls, training=True))
@@ -292,12 +291,36 @@ def make_megatron_module(
                 provider.register_pre_wrap_hook(callback)
 
             # Create DDP config if needed
-            ddp_config = create_ddp_config(
-                wrap_with_ddp=wrap_config.wrap_with_ddp,
-                use_distributed_optimizer=wrap_config.use_distributed_optimizer,
-                use_megatron_fsdp=wrap_config.use_megatron_fsdp,
-                overrides=override_ddp_config,
-            )
+
+            # Megatron-Bridge >= v0.5.0 provides apply_overrides_and_finalize.
+            # Megatron-Bridge <  v0.5.0 does not, so we fall back to manual setattr + finalize.
+            try:
+                from megatron.bridge.training.utils.config_utils import create_ddp_config
+
+                ddp_config = create_ddp_config(
+                    wrap_with_ddp=wrap_config.wrap_with_ddp,
+                    use_distributed_optimizer=wrap_config.use_distributed_optimizer,
+                    use_megatron_fsdp=wrap_config.use_megatron_fsdp,
+                    overrides=override_ddp_config,
+                )
+            except ImportError:
+                ddp_config = None
+                if wrap_config.wrap_with_ddp:
+                    from megatron.bridge.training.config import DistributedDataParallelConfig
+
+                    ddp_config_dict = {
+                        "use_distributed_optimizer": wrap_config.use_distributed_optimizer,
+                    }
+                    if wrap_config.use_megatron_fsdp:
+                        ddp_config_dict["use_distributed_optimizer"] = True
+                        ddp_config_dict.setdefault("check_for_nan_in_grad", True)
+                        ddp_config_dict.setdefault("use_megatron_fsdp", True)
+                        ddp_config_dict.setdefault("data_parallel_sharding_strategy", "optim_grads_params")
+                        ddp_config_dict.setdefault("overlap_grad_reduce", True)
+                    if override_ddp_config is not None:
+                        ddp_config_dict.update(override_ddp_config)
+                    ddp_config = DistributedDataParallelConfig(**ddp_config_dict)
+                    ddp_config.finalize()
 
             # Now call provide_distributed_model with all hooks registered
             # Hooks will be applied automatically before DDP wrapping
