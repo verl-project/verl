@@ -11,3 +11,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+from .trainer_base import PPOTrainer, get_trainer_cls, register_trainer
+from .trainer_colocate_async import PPOTrainerColocateAsync
+from .trainer_separate_async import PPOTrainerSeparateAsync
+from .trainer_sync import PPOTrainerSync
+
+__all__ = [
+    "PPOTrainer",
+    "register_trainer",
+    "get_trainer_cls",
+    "PPOTrainerSync",
+    "PPOTrainerColocateAsync",
+    "PPOTrainerSeparateAsync",
+]

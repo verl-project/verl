@@ -197,6 +197,33 @@ trainer:
   # Device to run training on (e.g., "cuda", "cpu")
   device: cuda
 
+  # Whether to use V1 trainer
+  use_v1: false
+
+  # V1 trainer mode configs
+  v1:
+
+    # Trainer mode: "sync", "colocate_async", "separate_async"
+    trainer_mode: sync
+
+    # Synchronous PPO trainer
+    sync: {}
+
+    # Asynchronous PPO trainer with colocated trainer and rollout
+    colocate_async:
+
+      # Number of warmup batches to add before training loop starts
+      num_warmup_batches: 1
+
+    # Asynchronous PPO trainer with separate trainer and rollout
+    separate_async:
+
+      # Number of warmup batches to add before training loop starts
+      num_warmup_batches: 4
+
+      # Frequency of parameter synchronization between trainer and rollout,
+      parameter_sync_step: 4
+
 # profiler configs
 global_profiler:
 

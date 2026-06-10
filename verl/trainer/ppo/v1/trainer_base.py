@@ -11,46 +11,30 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""
-Synchronous PPO trainer with colocated actor and rollout.
 
-Differs from original PPO trainer in main_ppo.py:
-1. Use TransferQueue to zero-padding and zero-copy data transfer.
-2. Use ReplayBuffer to sample data from TransferQueue.
-3. Support different `n` sampling for each prompt.
-4. Support multiple outputs for each agent loop.
-"""
-
-import asyncio
 import json
 import logging
 import math
 import os
 import uuid
+from abc import ABC, abstractmethod
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from pprint import pprint
 from typing import Any
 
-import hydra
 import numpy as np
 import ray
 import torch
 import transfer_queue as tq
 from omegaconf import DictConfig, OmegaConf, open_dict
-from tensordict import NonTensorData, NonTensorStack, TensorDict
+from tensordict import TensorDict
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 from transfer_queue import KVBatchMeta
 
 from verl.checkpoint_engine import CheckpointEngineManager
-from verl.experimental.agent_loop import (
-    AgentLoopManager,
-    AgentLoopOutput,
-    AgentLoopWorker,
-    get_trajectory_info,
-)
 from verl.experimental.reward_loop import RewardLoopManager
 from verl.experimental.teacher_loop import MultiTeacherModelManager
 from verl.protocol import DataProto, DataProtoFuture
@@ -61,7 +45,7 @@ from verl.single_controller.ray import (
     create_colocated_worker_cls,
 )
 from verl.trainer.distillation import is_distillation_enabled
-from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler, run_ppo
+from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import agg_loss
 from verl.trainer.ppo.metric_utils import (
@@ -72,25 +56,24 @@ from verl.trainer.ppo.metric_utils import (
     process_validation_metrics,
 )
 from verl.trainer.ppo.padding_utils import upsample_batch_to_divisible_size
-from verl.trainer.ppo.ray_trainer import apply_kl_penalty, compute_advantage, compute_spec_decode_metrics
+from verl.trainer.ppo.ray_trainer import apply_kl_penalty, compute_spec_decode_metrics
 from verl.trainer.ppo.rollout_corr_helper import compute_rollout_correction_and_add_to_batch
-from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_teacher_policy
+from verl.trainer.ppo.utils import Role, need_critic, need_reference_policy, need_teacher_policy
+from verl.trainer.ppo.v1.agent_loop_tq import AgentLoopManagerTQ
 from verl.trainer.ppo.v1.replay_buffer import ReplayBuffer
+from verl.trainer.ppo.v1.utils import compute_advantage_for_multi_trajectories
 from verl.utils import hf_processor, hf_tokenizer
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
-from verl.utils.config import omega_conf_to_dataclass, validate_config
+from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.dataset.rl_dataset import collate_fn
 from verl.utils.debug import marked_timer
 from verl.utils.debug.metrics import calculate_debug_metrics
-from verl.utils.device import auto_set_device
 from verl.utils.fs import copy_to_local
 from verl.utils.import_utils import load_class_from_fqn
 from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
-from verl.utils.ray_utils import auto_await
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
-from verl.utils.tensordict_utils import list_of_dict_to_tensordict
 from verl.utils.tracking import Tracking, ValidationGenerationsLogger
 from verl.workers.config import CriticConfig, DistillationConfig
 from verl.workers.engine_workers import ActorRolloutRefWorker, TrainingWorker, TrainingWorkerConfig
@@ -109,384 +92,40 @@ logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
-# ======================================= USER SECTION BEGIN =======================================
-
-
-def compute_advantage_for_multi_trajectories(
-    data: DataProto,
-    batch_keys: list[str],
-    adv_estimator,
-    gamma: float = 1.0,
-    lam: float = 1.0,
-    num_repeat: int = 1,
-    norm_adv_by_std_in_grpo: bool = True,
-    config: Any = None,
-) -> DataProto:
-    """Compute GRPO advantages from each session's final output. For non-GRPO
-    estimators, such as GAE, are delegated to the original compute_advantage() unchanged.
-
-    For GRPO, only the final output in each ``{uid}_{session_id}`` group participates
-    in advantage computation, and the result is broadcast to the other outputs in
-    the same session. Sessions whose AgentLoop returns ``None`` simply do not appear
-    in ``batch_keys``. Non-GRPO estimators, such as GAE, are delegated to the
-    original ``compute_advantage()`` unchanged.
-    """
-    if adv_estimator != core_algos.AdvantageEstimator.GRPO:
-        return compute_advantage(
-            data,
-            adv_estimator=adv_estimator,
-            gamma=gamma,
-            lam=lam,
-            num_repeat=num_repeat,
-            norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
-            config=config,
-        )
-
-    # final session of each agent loop: {uid}_{session_id} => (index, row_index)
-    final_sessions: dict[str, tuple[int, int]] = {}
-    row_session_keys = []
-    for i, key in enumerate(batch_keys):
-        fields = key.rsplit("_", 2)
-        assert len(fields) == 3, f"Unexpected key format: {key}"
-        uid, session_id, index = fields[0], fields[1], int(fields[2])
-        session_key = f"{uid}_{session_id}"
-        row_session_keys.append(session_key)
-        if session_key not in final_sessions or final_sessions[session_key][0] < index:
-            final_sessions[session_key] = (index, i)
-
-    # final session indices in batch data
-    final_indices = []
-    session_key_to_local_index = {}
-    for session_key, (_, row_index) in final_sessions.items():
-        final_indices.append(row_index)
-        session_key_to_local_index[session_key] = len(final_indices) - 1
-    row_to_local_index = [session_key_to_local_index[session_key] for session_key in row_session_keys]
-
-    # select final sessions from batch data for group relative advantage computation
-    final_data = compute_advantage(
-        data.select_idxs(final_indices),
-        adv_estimator=adv_estimator,
-        gamma=gamma,
-        lam=lam,
-        num_repeat=num_repeat,
-        norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
-        config=config,
-    )
-    first_nnz_indices = final_data.batch["response_mask"].argmax(dim=1)
-    final_scores = final_data.batch["advantages"][torch.arange(len(final_data)), first_nnz_indices]
-
-    # scatter final scores to all rows in batch data
-    scores = final_scores[row_to_local_index]
-    scores = scores.unsqueeze(-1) * data.batch["response_mask"]
-
-    data.batch["advantages"] = scores
-    data.batch["returns"] = scores
-    return data
-
-
-@ray.remote
-class AgentLoopWorkerTQ(AgentLoopWorker):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        tq.init()
-        self.background_tasks = set()
-
-    async def generate_sequences(self, batch: TensorDict) -> None:
-        """Spawn agent loop for each sample in the batch without waiting for the results."""
-        validate = batch["validate"] if "validate" in batch else False
-        batch.pop("validate", None)
-        config = self.config.actor_rollout_ref.rollout
-        sampling_params = dict(
-            temperature=config.temperature,
-            top_p=config.top_p,
-            top_k=config.top_k,
-            repetition_penalty=1.0,
-            logprobs=config.calculate_log_probs,
-        )
-
-        # override sampling params for validation
-        if validate:
-            sampling_params["top_p"] = config.val_kwargs.top_p
-            sampling_params["top_k"] = config.val_kwargs.top_k
-            sampling_params["temperature"] = config.val_kwargs.temperature
-
-        # by default, we assume it's a single turn agent
-        if "agent_name" not in batch:
-            default_agent_loop = config.agent.default_agent_loop
-            batch["agent_name"] = NonTensorData(default_agent_loop)
-
-        trajectory_info = await get_trajectory_info(batch["global_steps"], batch["index"], validate)
-
-        # create background tasks for each sample in the batch
-        for i in range(len(batch)):
-            # TODO(wuxibin): add trace support
-            trace_this_sample = False
-            prompt = {}
-            for k, v in batch.items():
-                if isinstance(v, torch.Tensor):
-                    prompt[k] = v[i]
-                elif isinstance(v, NonTensorStack):
-                    prompt[k] = v[i].data
-                elif isinstance(v, NonTensorData):
-                    prompt[k] = v.data
-                else:
-                    logger.exception(f"Unsupported type {type(v)} for key {k}")
-
-            # “fire-and-forget” background tasks
-            task = asyncio.create_task(
-                self._run_prompt(prompt, sampling_params, trajectory=trajectory_info[i], trace=trace_this_sample)
-            )
-            self.background_tasks.add(task)
-            task.add_done_callback(self.background_tasks.discard)
-
-    async def _run_prompt(self, prompt: dict, sampling_params: dict, trajectory: dict, trace: bool = False) -> None:
-        """Spawn multiple agent loops in parallel according to rollout.n or rollout.val_kwargs.n."""
-        uid, partition_id = prompt["uid"], "train" if not trajectory["validate"] else "val"
-        await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "running"})
-        try:
-            # NOTE: user can dynamically adjust n for each sample here, e.g according to task difficulty.
-            config = self.config.actor_rollout_ref.rollout
-            n = prompt.pop("__rollout_n__", config.n if not trajectory["validate"] else config.val_kwargs.n)
-            do_sample = prompt.pop("__do_sample__", True)
-
-            run_sampling_params = dict(sampling_params)
-            if not trajectory["validate"] and not do_sample:
-                apply_greedy_sampling_params(run_sampling_params)
-
-            tasks = []
-            for i in range(n):
-                task = asyncio.create_task(
-                    self._run_agent_loop(
-                        run_sampling_params, trajectory=trajectory, trace=trace, session_id=i, **prompt
-                    )
-                )
-                tasks.append(task)
-            await asyncio.gather(*tasks)
-            await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "finished"})
-        except Exception as e:
-            logger.exception(f"Error in _run_prompt: {e}")
-            await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "failure"})
-
-    async def _agent_loop_postprocess(
-        self, output: AgentLoopOutput | list[AgentLoopOutput], validate, **kwargs
-    ) -> None:
-        """Put agent loop outputs into TransferQueue."""
-        uid, session_id = kwargs["uid"], kwargs["session_id"]
-        outputs = output if isinstance(output, list) else [output]
-        if not outputs:
-            logger.warning(f"Empty output for prompt {uid}_{session_id}")
-            return
-
-        await self._compute_score(outputs, kwargs=kwargs)
-
-        final_output = outputs[-1]
-        # TODO: Support output:list[AgentLoopOutput]
-        await self._compute_teacher_logprobs(
-            final_output,
-            prompt_ids=final_output.prompt_ids,
-            response_ids=final_output.response_ids,
-            validate=validate,
-            sample_kwargs=kwargs,
-        )
-
-        if final_output.reward_score is not None:
-            for output in outputs[:-1]:
-                output.reward_score = final_output.reward_score
-                output.extra_fields["reward_extra_info"] = final_output.extra_fields["reward_extra_info"]
-
-        # NOTE: agent loop may has multiple outputs, put each output into TransferQueue.
-        # key format: {uid}_{session_id}_{index}
-        # - uid: raw prompt uid from dataset
-        # - session_id: session id for rollout.n sampling
-        # - index: index of agent loop output
-        keys, fields, tags = [], [], []
-        for i, output in enumerate(outputs):
-            prompts = torch.tensor(output.prompt_ids, dtype=torch.int64)
-            responses = torch.tensor(output.response_ids, dtype=torch.int64)
-            input_ids = torch.cat([prompts, responses], dim=0)
-            attention_mask = torch.ones_like(input_ids, dtype=torch.int64)
-            multi_modal_inputs = self._compute_multi_modal_inputs(output, input_ids)
-            position_ids = self._compute_position_ids(
-                input_ids.unsqueeze(0), attention_mask.unsqueeze(0), multi_modal_inputs
-            ).squeeze(0)
-
-            keys.append(f"{uid}_{session_id}_{i}")
-            field = output.as_dict()
-            field.update(kwargs)
-            # do not store raw image/video
-            field.pop("multi_modal_data", None)
-            # TODO: uniform response_mask and loss_mask
-            field["loss_mask"] = field["response_mask"]
-            field["input_ids"] = input_ids
-            field["position_ids"] = position_ids
-            field["multi_modal_inputs"] = multi_modal_inputs
-            fields.append(field)
-            prompt_len, response_len = field["prompts"].size(0), field["responses"].size(0)
-            tags.append(
-                {
-                    "status": "success",
-                    "prompt_len": prompt_len,
-                    "response_len": response_len,
-                    "seq_len": prompt_len + response_len,
-                    # These tags are used for off-policy staleness control, if a trajectory
-                    # spans too many global steps, we need to filter it out.
-                    # global_steps: which global steps this sample is from dataloader
-                    "global_steps": kwargs["global_steps"],
-                    # min_global_steps: start generation model weights version of this trajectory
-                    "min_global_steps": field["extra_fields"].get("min_global_steps"),
-                    # max_global_steps: end generation model weights version of this trajectory
-                    "max_global_steps": field["extra_fields"].get("max_global_steps"),
-                }
-            )
-
-        await tq.async_kv_batch_put(
-            keys=keys,
-            fields=list_of_dict_to_tensordict(fields),
-            tags=tags,
-            partition_id="train" if not validate else "val",
-        )
-
-
-class AgentLoopManagerTQ(AgentLoopManager):
-    def __init__(self, *args, **kwargs):
-        self.agent_loop_workers_class = AgentLoopWorkerTQ
-        super().__init__(*args, **kwargs)
-
-    @classmethod
-    @auto_await
-    async def create(cls, *args, **kwargs):
-        """Create agent loop manager."""
-        instance = cls(*args, **kwargs)
-        await instance._init_agent_loop_workers()
-        return instance
-
-    def generate_sequences(self, prompts: TensorDict) -> None:
-        """
-        Dispatch input batch to agent loop workers without blocking. Workers should put agent loop outputs
-        into TransferQueue once an agent loop finished.
-
-        Args:
-            prompts (TensorDict): Input batch from train or validation dataset.
-        """
-        chunkes = prompts.chunk(len(self.agent_loop_workers))
-        ray.get(
-            [
-                worker.generate_sequences.remote(chunk)
-                for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=False)
-            ]
-        )
-
-
-# ======================================= USER SECTION END =======================================
-
-
-class PPOTrainer:
-    """PPO Trainer with TransferQueue and ReplayBuffer.
+class PPOTrainer(ABC):
+    """Base class for PPO trainer.
 
     Args:
         config: DictConfig from yaml config file.
-        role_worker_mapping: dict[Role, WorkerType]
-        resource_pool_manager: ResourcePoolManager
     """
 
-    def __init__(
-        self,
-        config: DictConfig,
-        role_worker_mapping: dict[Role, WorkerType],
-        resource_pool_manager: ResourcePoolManager,
-    ):
+    def __init__(self, config: DictConfig):
         self.config = config
-        if config.algorithm.adv_estimator == core_algos.AdvantageEstimator.REMAX:
-            raise NotImplementedError("ReMax advantage estimator is not supported by the synchronous PPO trainer.")
-        self.role_worker_mapping = role_worker_mapping
-        self.resource_pool_manager = resource_pool_manager
         self.use_critic = need_critic(self.config)
         self.use_reference_policy = need_reference_policy(self.config)
         self.use_teacher_policy = need_teacher_policy(self.config)
-        self.replay_buffer = ReplayBuffer(poll_interval=1.0)
         if self.config.algorithm.use_kl_in_reward:
             self.kl_ctrl_in_reward = core_algos.get_kl_controller(self.config.algorithm.kl_ctrl)
 
+        self.replay_buffer = ReplayBuffer()
+
+    def init(self):
+        """Initialize all components of the trainer.
+
+        1. WorkerGroup: actor, critic, reference with model engine: FSDP/Megatron/VeOmni/...
+        2. LLMServerManager: launch and manage LLM server replicas for generation.
+        3. CheckpointEngineManager: sync weights between worker group and LLM server replicas.
+        4. RewardLoopManager: reward workers for rule-based reward, optional LLM server for model-based reward.
+        5. [Optional] MultiTeacherModelManager: LLM teacher servers for one-policy distillation.
+        """
+        self._setup()
+        self.on_init_end()
+
+    def _setup(self):
         self._init_tokenizer()
         self._init_dataloader()
         self._init_dump_executor()
-
-    def _init_tokenizer(self):
-        """Initialize tokenizer."""
-        # Download the checkpoint from HDFS to the local machine.
-        # `use_shm` determines whether to use shared memory, which could lead to faster model loading if turned on
-        local_path = copy_to_local(
-            self.config.actor_rollout_ref.model.path, use_shm=self.config.actor_rollout_ref.model.get("use_shm", False)
-        )
-        trust_remote_code = self.config.data.get("trust_remote_code", False)
-        self.tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
-        # Used for multimodal LLM, could be None
-        self.processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
-
-    def _init_dataloader(self):
-        """Initialize train and validate dataloader."""
-        self.train_dataset = create_rl_dataset(
-            self.config.data.train_files,
-            self.config.data,
-            self.tokenizer,
-            self.processor,
-            is_train=True,
-            max_samples=self.config.data.get("train_max_samples", -1),
-        )
-        self.val_dataset = create_rl_dataset(
-            self.config.data.val_files,
-            self.config.data,
-            self.tokenizer,
-            self.processor,
-            is_train=False,
-            max_samples=self.config.data.get("val_max_samples", -1),
-        )
-
-        self.train_dataloader = StatefulDataLoader(
-            dataset=self.train_dataset,
-            batch_size=self.config.data.get("gen_batch_size", self.config.data.train_batch_size),
-            num_workers=self.config.data["dataloader_num_workers"],
-            drop_last=True,
-            collate_fn=collate_fn,
-            sampler=create_rl_sampler(self.config.data, self.train_dataset),
-        )
-        self.val_dataloader = StatefulDataLoader(
-            dataset=self.val_dataset,
-            batch_size=self.config.data.val_batch_size or len(self.val_dataset),
-            num_workers=self.config.data["dataloader_num_workers"],
-            shuffle=self.config.data.get("validation_shuffle", True),
-            drop_last=False,
-            collate_fn=collate_fn,
-        )
-        logger.info(
-            f"train and validate dataloader initialized, train dataset size: "
-            f"{len(self.train_dataset)}, val dataset size: {len(self.val_dataset)}"
-        )
-
-        # adjust total_training_steps
-        total_training_steps = len(self.train_dataloader) * self.config.trainer.total_epochs
-        if self.config.trainer.total_training_steps is not None:
-            total_training_steps = self.config.trainer.total_training_steps
-        self.total_training_steps = total_training_steps
-        logger.info(f"Total training steps: {self.total_training_steps}")
-
-        try:
-            OmegaConf.set_struct(self.config, True)
-            with open_dict(self.config):
-                if OmegaConf.select(self.config, "actor_rollout_ref.actor.optim"):
-                    self.config.actor_rollout_ref.actor.optim.total_training_steps = total_training_steps
-                if OmegaConf.select(self.config, "critic.optim"):
-                    self.config.critic.optim.total_training_steps = total_training_steps
-        except Exception as e:
-            logger.warning(f"Warning: Could not set total_training_steps in config. Structure missing? Error: {e}")
-
-    def init_workers(self):
-        """Initialize distributed training workers using Ray backend.
-
-        Creates:
-        1. Ray resource pools from configuration
-        2. Worker groups for each role (actor, critic, etc.)
-        """
+        self._init_resource_pool_mgr()
         self.resource_pool_manager.create_resource_pool()
         self.resource_pool_to_cls = {pool: {} for pool in self.resource_pool_manager.resource_pool_dict.values()}
 
@@ -602,7 +241,7 @@ class PPOTrainer:
             agent_loop_manager_cls = load_class_from_fqn(manager_class_fqn, "AgentLoopManager")
         else:
             agent_loop_manager_cls = AgentLoopManagerTQ
-        self.async_rollout_manager = agent_loop_manager_cls.create(
+        self.agent_loop_manager = agent_loop_manager_cls.create(
             config=self.config,
             llm_client=self.llm_server_manager.get_client(),
             teacher_client=self.teacher_model_manager.get_client() if self.use_teacher_policy else None,
@@ -621,8 +260,324 @@ class PPOTrainer:
 
         # sleep all replicas to load checkpoint
         self.checkpoint_manager.sleep_replicas()
+        self._load_checkpoint()
 
         logger.info("all initialize finished, ready to fit")
+
+    def fit(self):
+        self.logger = Tracking(
+            project_name=self.config.trainer.project_name,
+            experiment_name=self.config.trainer.experiment_name,
+            default_backend=self.config.trainer.logger,
+            config=OmegaConf.to_container(self.config, resolve=True),
+        )
+        self.validation_generations_logger = ValidationGenerationsLogger(
+            project_name=self.config.trainer.project_name,
+            experiment_name=self.config.trainer.experiment_name,
+        )
+
+        # perform validation before training
+        if self.config.trainer.get("val_before_train", True):
+            self.on_validate_begin()
+            val_metrics = self._validate()
+            self.on_validate_end()
+            assert val_metrics, f"{val_metrics=}"
+            pprint(f"Initial validation metrics: {val_metrics}")
+            self.logger.log(data=val_metrics, step=self.global_steps)
+            if self.config.trainer.get("val_only", False):
+                self._shutdown_dump_executor()
+                return
+
+        current_epoch = self.global_steps // len(self.train_dataloader)
+        progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
+
+        # we start from step 1
+        self.global_steps += 1
+        self.prev_step_profile = False
+        self.curr_step_profile = (
+            self.global_steps in self.config.global_profiler.steps
+            if self.config.global_profiler.steps is not None
+            else False
+        )
+        self.next_step_profile = False
+
+        self.on_train_begin()
+        last_val_metrics = None
+        while current_epoch < self.config.trainer.total_epochs and self.global_steps <= self.total_training_steps:
+            is_last_step = self.global_steps >= self.total_training_steps
+            metrics = {}
+            self.timing_raw = {}
+
+            # 1. perform rollout and actor/critic training
+            with marked_timer("step", self.timing_raw):
+                self.on_step_begin()
+
+                self._start_profiling()
+                batch = self.step(metrics, self.timing_raw)
+                self._stop_profiling()
+
+                # 2. save checkpoint
+                if self.config.trainer.save_freq > 0 and (
+                    is_last_step or self.global_steps % self.config.trainer.save_freq == 0
+                ):
+                    with marked_timer("save_checkpoint", self.timing_raw, color="green"):
+                        self._save_checkpoint()
+
+                self.on_step_end()
+
+            # 4. validate
+            if self.config.trainer.test_freq > 0 and (
+                is_last_step or self.global_steps % self.config.trainer.test_freq == 0
+            ):
+                with marked_timer("testing", self.timing_raw, color="green"):
+                    self.on_validate_begin()
+                    val_metrics: dict = self._validate()
+                    self.on_validate_end()
+                    if is_last_step:
+                        last_val_metrics = val_metrics
+                metrics.update(val_metrics)
+
+            # 5. record metrics
+            self._compute_metrics(batch, metrics, self.timing_raw, global_steps=self.global_steps, epoch=current_epoch)
+
+            # 6. dump rollout generations if enabled
+            rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
+            if rollout_data_dir:
+                self._log_rollout_data(batch, self.timing_raw, rollout_data_dir)
+
+            # 7. cleanup transfer queue
+            tq.kv_clear(keys=batch.keys, partition_id=batch.partition_id)
+
+            self.logger.log(data=metrics, step=self.global_steps)
+            progress_bar.update(1)
+            self.global_steps += 1
+            current_epoch = (self.global_steps - 1) // len(self.train_dataloader)
+            if is_last_step:
+                self._shutdown_dump_executor()
+                pprint(f"Final validation metrics: {last_val_metrics}")
+                progress_bar.close()
+                return
+
+        self.on_train_end()
+        # Ensure dump executor is shut down when training loop ends without reaching is_last_step
+        self._shutdown_dump_executor()
+
+    def step(self, metrics: dict, timing_raw: dict) -> KVBatchMeta:
+        # 1. add batch to generate
+        self._add_batch_to_generate()
+
+        # 2. sample batch from replay buffer
+        with marked_timer("gen", timing_raw, color="red"):
+            self.on_sample_begin()
+            batch = self.replay_buffer.sample(partition_id="train", batch_size=self.config.data.train_batch_size)
+            batch.extra_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
+            self.on_sample_end()
+
+        # 3. [OPTIONAL] compute reward score with colocated reward model
+        if self.reward_loop_manager.reward_loop_worker_handles is None:
+            with marked_timer("reward", timing_raw, color="yellow"):
+                batch = self._compute_reward_colocate(batch)
+
+        # 4. balance batch across data parallel groups
+        batch = self._balance_batch(batch, metrics=metrics)
+
+        # 5. compute old_log_prob
+        with marked_timer("old_log_prob", timing_raw, color="blue"):
+            batch = self._compute_old_log_prob(batch, metrics=metrics)
+
+        # 6. [OPTIONAL] compute ref_log_prob
+        if self.use_reference_policy:
+            with marked_timer("ref", timing_raw, color="olive"):
+                batch = self._compute_ref_log_prob(batch, metrics=metrics)
+
+        # 7. [OPTIONAL] compute critic values
+        if self.use_critic:
+            with marked_timer("values", timing_raw, color="cyan"):
+                batch = self._compute_values(batch, metrics=metrics)
+
+        # 8. compute advantage and return
+        with marked_timer("adv", timing_raw, color="brown"):
+            batch = self._compute_advantage(batch, metrics=metrics)
+
+        # 9. [OPTIONAL] update critic
+        if self.use_critic:
+            with marked_timer("update_critic", timing_raw, color="pink"):
+                batch = self._update_critic(batch, metrics=metrics)
+
+        # 10. update actor
+        if self.config.trainer.critic_warmup <= self.global_steps:
+            with marked_timer("update_actor", timing_raw, color="red"):
+                batch = self._update_actor(batch, metrics=metrics)
+
+        return batch
+
+    # ------------------------------ abstract methods ------------------------------
+
+    def on_init_end(self):
+        """Called after the initialization ends."""
+        return
+
+    def on_train_begin(self):
+        """Called before the training loop starts."""
+        return
+
+    def on_train_end(self):
+        """Called after the training loop ends."""
+        return
+
+    def on_validate_begin(self):
+        """Called before the validation loop starts."""
+        return
+
+    def on_validate_end(self):
+        """Called after the validation loop ends."""
+        return
+
+    def on_step_begin(self):
+        """Called at the beginning of each training step."""
+        return
+
+    @abstractmethod
+    def on_step_end(self):
+        """Called at the end of each training step."""
+        return
+
+    def on_sample_begin(self):
+        """Called at the beginning of sampling batch from replay buffer."""
+        return
+
+    @abstractmethod
+    def on_sample_end(self):
+        """Called after sampling a batch from replay buffer."""
+        return
+
+    # ------------------------------ common methods ------------------------------
+
+    def _init_tokenizer(self):
+        """Initialize tokenizer."""
+        # Download the checkpoint from HDFS to the local machine.
+        # `use_shm` determines whether to use shared memory, which could lead to faster model loading if turned on
+        local_path = copy_to_local(
+            self.config.actor_rollout_ref.model.path, use_shm=self.config.actor_rollout_ref.model.get("use_shm", False)
+        )
+        trust_remote_code = self.config.data.get("trust_remote_code", False)
+        self.tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
+        # Used for multimodal LLM, could be None
+        self.processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
+
+    def _init_dataloader(self):
+        """Initialize train and validate dataloader."""
+        self.train_dataset = create_rl_dataset(
+            self.config.data.train_files,
+            self.config.data,
+            self.tokenizer,
+            self.processor,
+            is_train=True,
+            max_samples=self.config.data.get("train_max_samples", -1),
+        )
+        self.val_dataset = create_rl_dataset(
+            self.config.data.val_files,
+            self.config.data,
+            self.tokenizer,
+            self.processor,
+            is_train=False,
+            max_samples=self.config.data.get("val_max_samples", -1),
+        )
+
+        self.train_dataloader = StatefulDataLoader(
+            dataset=self.train_dataset,
+            batch_size=self.config.data.train_batch_size,
+            num_workers=self.config.data["dataloader_num_workers"],
+            drop_last=True,
+            collate_fn=collate_fn,
+            sampler=create_rl_sampler(self.config.data, self.train_dataset),
+        )
+        self.train_dataloader_it = None
+        self.val_dataloader = StatefulDataLoader(
+            dataset=self.val_dataset,
+            batch_size=self.config.data.val_batch_size or len(self.val_dataset),
+            num_workers=self.config.data["dataloader_num_workers"],
+            shuffle=self.config.data.get("validation_shuffle", True),
+            drop_last=False,
+            collate_fn=collate_fn,
+        )
+        logger.info(
+            f"train and validate dataloader initialized, train dataset size: "
+            f"{len(self.train_dataset)}, val dataset size: {len(self.val_dataset)}"
+        )
+
+        # adjust total_training_steps
+        total_training_steps = len(self.train_dataloader) * self.config.trainer.total_epochs
+        if self.config.trainer.total_training_steps is not None:
+            total_training_steps = self.config.trainer.total_training_steps
+        self.total_training_steps = total_training_steps
+        logger.info(f"Total training steps: {self.total_training_steps}")
+
+        try:
+            OmegaConf.set_struct(self.config, True)
+            with open_dict(self.config):
+                if OmegaConf.select(self.config, "actor_rollout_ref.actor.optim"):
+                    self.config.actor_rollout_ref.actor.optim.total_training_steps = total_training_steps
+                if OmegaConf.select(self.config, "critic.optim"):
+                    self.config.critic.optim.total_training_steps = total_training_steps
+        except Exception as e:
+            logger.warning(f"Warning: Could not set total_training_steps in config. Structure missing? Error: {e}")
+
+    def _init_resource_pool_mgr(self):
+        config = self.config
+        # role => worker class
+        self.role_worker_mapping = {}
+        # role => resource pool
+        self.mapping = {}
+
+        # Add actor rollout worker to mapping
+        lora_rank = config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
+        if lora_rank <= 0:
+            lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
+        ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
+
+        role = Role.ActorRolloutRef if need_reference_policy(config) and not ref_in_actor else Role.ActorRollout
+        self.role_worker_mapping[role] = ray.remote(ActorRolloutRefWorker)
+        self.mapping[role] = "global_pool"
+
+        # Add critic worker to mapping.
+        if need_critic(config):
+            self.role_worker_mapping[Role.Critic] = ray.remote(TrainingWorker)
+            self.mapping[Role.Critic] = "global_pool"
+
+        # Global resource pool is used for actor, rollout, critic, ref
+        global_pool_id = "global_pool"
+        resource_pool_spec = {
+            global_pool_id: [config.trainer.n_gpus_per_node] * config.trainer.nnodes,
+        }
+
+        # Add separate resource pool for reward model if enabled
+        if config.reward.reward_model.enable_resource_pool:
+            if config.reward.reward_model.n_gpus_per_node <= 0:
+                raise ValueError("config.reward.reward_model.n_gpus_per_node must be greater than 0")
+            if config.reward.reward_model.nnodes <= 0:
+                raise ValueError("config.reward.reward_model.nnodes must be greater than 0")
+
+            reward_pool = [config.reward.reward_model.n_gpus_per_node] * config.reward.reward_model.nnodes
+            resource_pool_spec["reward_pool"] = reward_pool
+            self.mapping[Role.RewardModel] = "reward_pool"
+        else:
+            config.reward.reward_model.nnodes = config.trainer.nnodes
+            config.reward.reward_model.n_gpus_per_node = config.trainer.n_gpus_per_node
+            self.mapping[Role.RewardModel] = "global_pool"
+
+        distillation_config = config.get("distillation")
+        if is_distillation_enabled(distillation_config):
+            if distillation_config.n_gpus_per_node <= 0:
+                raise ValueError("config.distillation.n_gpus_per_node must be greater than 0")
+            if distillation_config.nnodes <= 0:
+                raise ValueError("config.distillation.nnodes must be greater than 0")
+
+            teacher_pool = [distillation_config.n_gpus_per_node] * distillation_config.nnodes
+            resource_pool_spec["teacher_pool"] = teacher_pool
+            self.mapping[Role.TeacherModel] = "teacher_pool"
+
+        self.resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=self.mapping)
 
     def _load_checkpoint(self):
         self.global_steps = 0
@@ -764,7 +719,7 @@ class PPOTrainer:
             # Register each prompt (GRPO group) in TransferQueue as a tag-only status marker
             tags = [{"is_prompt": True, "status": "pending"}] * len(batch)
             tq.kv_batch_put(keys=list(batch["uid"]), partition_id="val", tags=tags)
-            self.async_rollout_manager.generate_sequences(batch)
+            self.agent_loop_manager.generate_sequences(batch)
 
             # 2. sample batch from replay buffer: one prompt (GRPO group) per submitted row.
             batch = self.replay_buffer.sample(partition_id="val", batch_size=len(batch))
@@ -1089,6 +1044,27 @@ class PPOTrainer:
             if self.use_critic:
                 self.critic_wg.stop_profile()
 
+    def _add_batch_to_generate(self):
+        """Sample a batch from dataloader and add to AgentLoopManager."""
+        try:
+            if self.train_dataloader_it is None:
+                self.train_dataloader_it = iter(self.train_dataloader)
+            batch_dict = next(self.train_dataloader_it)
+        except StopIteration:
+            self.train_dataloader_it = iter(self.train_dataloader)
+            batch_dict = next(self.train_dataloader_it)
+
+        batch_dict["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch_dict["raw_prompt"]))], dtype=object)
+        batch = tu.get_tensordict(batch_dict)
+        tu.assign_non_tensor_data(batch, "global_steps", self.global_steps)
+
+        # Register each prompt (GRPO group) in TransferQueue as a tag-only status marker
+        tags = [{"is_prompt": True, "status": "pending", "global_steps": self.global_steps}] * len(batch)
+        tq.kv_batch_put(keys=list(batch["uid"]), partition_id="train", tags=tags)
+
+        # add batch to agent loop manager
+        self.agent_loop_manager.generate_sequences(batch)
+
     def _compute_reward_colocate(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
         """Compute the reward with colocate reward model."""
         # TODO: add reward model
@@ -1153,7 +1129,7 @@ class PPOTrainer:
             )
             data["old_log_probs"] = data.pop("rollout_log_probs")
             tq.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=data)
-            return
+            return batch
 
         # 1. compute log probs
         batch.extra_info.update(
@@ -1424,265 +1400,32 @@ class PPOTrainer:
         # see compute_spec_decode_metrics in verl/trainer/ppo/ray_trainer.py).
         metrics.update(compute_spec_decode_metrics(spec_drafts, spec_accepts, spec_verifies, non_padding_mask))
 
-    def fit(self):
-        if self._dump_executor._shutdown:
-            self._init_dump_executor()
 
-        self.logger = Tracking(
-            project_name=self.config.trainer.project_name,
-            experiment_name=self.config.trainer.experiment_name,
-            default_backend=self.config.trainer.logger,
-            config=OmegaConf.to_container(self.config, resolve=True),
-        )
-        self.validation_generations_logger = ValidationGenerationsLogger(
-            project_name=self.config.trainer.project_name,
-            experiment_name=self.config.trainer.experiment_name,
-        )
-
-        # load checkpoint and update weights before doing anything
-        self._load_checkpoint()
-        self.checkpoint_manager.update_weights()
-
-        # perform validation before training
-        if self.config.trainer.get("val_before_train", True):
-            val_metrics = self._validate()
-            assert val_metrics, f"{val_metrics=}"
-            pprint(f"Initial validation metrics: {val_metrics}")
-            self.logger.log(data=val_metrics, step=self.global_steps)
-            if self.config.trainer.get("val_only", False):
-                self._shutdown_dump_executor()
-                return
-
-        current_epoch = self.global_steps // len(self.train_dataloader)
-        progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
-
-        # we start from step 1
-        self.global_steps += 1
-        self.prev_step_profile = False
-        self.curr_step_profile = (
-            self.global_steps in self.config.global_profiler.steps
-            if self.config.global_profiler.steps is not None
-            else False
-        )
-        self.next_step_profile = False
-
-        last_val_metrics = None
-        for epoch in range(current_epoch, self.config.trainer.total_epochs):
-            for batch_dict in self.train_dataloader:
-                is_last_step = self.global_steps >= self.total_training_steps
-                metrics, timing_raw = {}, {}
-
-                # 1. perform rollout and actor/critic training
-                self._start_profiling()
-                with marked_timer("step", timing_raw):
-                    batch = self.step(batch_dict, metrics, timing_raw)
-
-                    # 2. save checkpoint
-                    if self.config.trainer.save_freq > 0 and (
-                        is_last_step or self.global_steps % self.config.trainer.save_freq == 0
-                    ):
-                        with marked_timer("save_checkpoint", timing_raw, color="green"):
-                            self._save_checkpoint()
-
-                    # 3. update weights from trainer to rollout
-                    with marked_timer("update_weights", timing_raw, color="red"):
-                        self.checkpoint_manager.update_weights()
-                self._stop_profiling()
-
-                # 4. validate
-                if self.config.trainer.test_freq > 0 and (
-                    is_last_step or self.global_steps % self.config.trainer.test_freq == 0
-                ):
-                    with marked_timer("testing", timing_raw, color="green"):
-                        val_metrics: dict = self._validate()
-                        if is_last_step:
-                            last_val_metrics = val_metrics
-                    metrics.update(val_metrics)
-
-                # 5. record metrics
-                self._compute_metrics(batch, metrics, timing_raw, global_steps=self.global_steps, epoch=epoch)
-
-                # 6. dump rollout generations if enabled
-                rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
-                if rollout_data_dir:
-                    self._log_rollout_data(batch, timing_raw, rollout_data_dir)
-
-                # 7. cleanup transfer queue
-                tq.kv_clear(keys=batch.keys, partition_id=batch.partition_id)
-
-                self.logger.log(data=metrics, step=self.global_steps)
-                progress_bar.update(1)
-                self.global_steps += 1
-                if is_last_step:
-                    self._shutdown_dump_executor()
-                    pprint(f"Final validation metrics: {last_val_metrics}")
-                    progress_bar.close()
-                    return
-
-        # Ensure dump executor is shut down when training loop ends without reaching is_last_step
-        self._shutdown_dump_executor()
-
-    def step(self, batch_dict: dict, metrics: dict, timing_raw: dict) -> KVBatchMeta:
-        # 1. put batch to agent loop manager
-        batch_dict["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch_dict["raw_prompt"]))], dtype=object)
-        batch = tu.get_tensordict(batch_dict)
-        tu.assign_non_tensor_data(batch, "global_steps", self.global_steps)
-        # Register each prompt (GRPO group) in TransferQueue as a tag-only status marker
-        tags = [{"is_prompt": True, "status": "pending"}] * len(batch)
-        tq.kv_batch_put(keys=list(batch["uid"]), partition_id="train", tags=tags)
-        self.async_rollout_manager.generate_sequences(batch)
-
-        # 2. sample batch from replay buffer
-        with marked_timer("gen", timing_raw, color="red"):
-            batch = self.replay_buffer.sample(partition_id="train", batch_size=len(batch))
-        batch.extra_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
-        self.checkpoint_manager.sleep_replicas()
-
-        # 3. [OPTIONAL] compute reward score with colocated reward model
-        if self.reward_loop_manager.reward_loop_worker_handles is None:
-            with marked_timer("reward", timing_raw, color="yellow"):
-                batch = self._compute_reward_colocate(batch)
-
-        # 4. balance batch across data parallel groups
-        batch = self._balance_batch(batch, metrics=metrics)
-
-        # 5. compute old_log_prob
-        with marked_timer("old_log_prob", timing_raw, color="blue"):
-            batch = self._compute_old_log_prob(batch, metrics=metrics)
-
-        # 6. [OPTIONAL] compute ref_log_prob
-        if self.use_reference_policy:
-            with marked_timer("ref", timing_raw, color="olive"):
-                batch = self._compute_ref_log_prob(batch, metrics=metrics)
-
-        # 7. [OPTIONAL] compute critic values
-        if self.use_critic:
-            with marked_timer("values", timing_raw, color="cyan"):
-                batch = self._compute_values(batch, metrics=metrics)
-
-        # 8. compute advantage and return
-        with marked_timer("adv", timing_raw, color="brown"):
-            batch = self._compute_advantage(batch, metrics=metrics)
-
-        # 9. [OPTIONAL] update critic
-        if self.use_critic:
-            with marked_timer("update_critic", timing_raw, color="pink"):
-                batch = self._update_critic(batch, metrics=metrics)
-
-        # 10. update actor
-        if self.config.trainer.critic_warmup <= self.global_steps:
-            with marked_timer("update_actor", timing_raw, color="red"):
-                batch = self._update_actor(batch, metrics=metrics)
-
-        return batch
+TRAINER_REGISTRY: dict[str, type[PPOTrainer]] = {}
 
 
-@ray.remote
-class TaskRunner:
-    def __init__(self) -> None:
-        # role => worker class
-        self.role_worker_mapping = {}
-        # role => resource pool
-        self.mapping = {}
+def register_trainer(name: str):
+    """Class decorator that registers a :class:`PPOTrainer` subclass under ``name``."""
 
-    def add_actor_rollout_worker(self, config):
-        """Add actor rollout worker to mapping."""
-        lora_rank = config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
-        if lora_rank <= 0:
-            lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
-        ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
-
-        role = Role.ActorRolloutRef if need_reference_policy(config) and not ref_in_actor else Role.ActorRollout
-        self.role_worker_mapping[role] = ray.remote(ActorRolloutRefWorker)
-        self.mapping[role] = "global_pool"
-
-    def add_critic_worker(self, config):
-        """Add critic worker to mapping."""
-        if need_critic(config):
-            self.role_worker_mapping[Role.Critic] = ray.remote(TrainingWorker)
-            self.mapping[Role.Critic] = "global_pool"
-
-    def init_resource_pool_mgr(self, config):
-        """Initialize resource pool manager."""
-
-        # Global resource pool is used for actor, rollout, critic, ref
-        global_pool_id = "global_pool"
-        resource_pool_spec = {
-            global_pool_id: [config.trainer.n_gpus_per_node] * config.trainer.nnodes,
-        }
-
-        # Add separate resource pool for reward model if enabled
-        if config.reward.reward_model.enable_resource_pool:
-            if config.reward.reward_model.n_gpus_per_node <= 0:
-                raise ValueError("config.reward.reward_model.n_gpus_per_node must be greater than 0")
-            if config.reward.reward_model.nnodes <= 0:
-                raise ValueError("config.reward.reward_model.nnodes must be greater than 0")
-
-            reward_pool = [config.reward.reward_model.n_gpus_per_node] * config.reward.reward_model.nnodes
-            resource_pool_spec["reward_pool"] = reward_pool
-            self.mapping[Role.RewardModel] = "reward_pool"
-        else:
-            config.reward.reward_model.nnodes = config.trainer.nnodes
-            config.reward.reward_model.n_gpus_per_node = config.trainer.n_gpus_per_node
-            self.mapping[Role.RewardModel] = "global_pool"
-
-        distillation_config = config.get("distillation")
-        if is_distillation_enabled(distillation_config):
-            if distillation_config.n_gpus_per_node <= 0:
-                raise ValueError("config.distillation.n_gpus_per_node must be greater than 0")
-            if distillation_config.nnodes <= 0:
-                raise ValueError("config.distillation.nnodes must be greater than 0")
-
-            teacher_pool = [distillation_config.n_gpus_per_node] * distillation_config.nnodes
-            resource_pool_spec["teacher_pool"] = teacher_pool
-            self.mapping[Role.TeacherModel] = "teacher_pool"
-
-        self.resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=self.mapping)
-
-    def run(self, config):
-        pprint(OmegaConf.to_container(config, resolve=True))
-        OmegaConf.resolve(config)
-
-        # initialize transfer queue
-        tq.init(config.transfer_queue)
-        trainer = None
-        try:
-            self.add_actor_rollout_worker(config)
-            self.add_critic_worker(config)
-            self.init_resource_pool_mgr(config)
-
-            trainer = PPOTrainer(
-                config=config,
-                role_worker_mapping=self.role_worker_mapping,
-                resource_pool_manager=self.resource_pool_manager,
+    def decorator(cls: type[PPOTrainer]) -> type[PPOTrainer]:
+        if not (isinstance(cls, type) and issubclass(cls, PPOTrainer)):
+            raise TypeError(f"register_trainer expected a PPOTrainer subclass, got {cls!r}")
+        existing = TRAINER_REGISTRY.get(name)
+        if existing is not None and existing is not cls:
+            raise ValueError(
+                f"Trainer name '{name}' is already registered to {existing.__name__}; "
+                f"cannot re-register it to {cls.__name__}."
             )
-            trainer.init_workers()
-            trainer.fit()
-        finally:
-            tq.close()
+        TRAINER_REGISTRY[name] = cls
+        return cls
+
+    return decorator
 
 
-@hydra.main(config_path="config", config_name="ppo_trainer", version_base=None)
-def main(config):
-    """Main entry point for PPO training with Hydra configuration management.
-
-    Args:
-        config: Hydra configuration dictionary containing training parameters.
-    """
-    # Automatically set `config.trainer.device = npu` when running on Ascend NPU.
-    auto_set_device(config)
-
-    config.transfer_queue.enable = True
-
-    # validate config
-    validate_config(
-        config=config,
-        use_reference_policy=need_reference_policy(config),
-        use_critic=need_critic(config),
-    )
-
-    run_ppo(config, task_runner_class=TaskRunner)
-
-
-if __name__ == "__main__":
-    main()
+def get_trainer_cls(name: str) -> type[PPOTrainer]:
+    """Return the :class:`PPOTrainer` subclass registered under ``name``."""
+    try:
+        return TRAINER_REGISTRY[name]
+    except KeyError:
+        available = ", ".join(sorted(TRAINER_REGISTRY)) or "<none>"
+        raise ValueError(f"Unknown trainer '{name}'. Available trainers: {available}.") from None
