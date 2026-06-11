@@ -1287,6 +1287,17 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 loss = torch.tensor(1.0, device=device_name)
                 metrics = {}
 
+            # Detach model outputs before they are appended to forward_backward_batch's
+            # output_lst: they are only consumed for metrics/postprocessing after backward,
+            # and keeping their grad_fn alive retains part of every micro-batch's autograd
+            # graph until the whole batch finishes. With PEFT (enable_input_require_grads)
+            # this pins the checkpointed embedding output plus its gradient buffer per
+            # micro-batch (~2 x [total_nnz, hidden] for long sequences), which accumulates
+            # across micro-batches and OOMs the actor update.
+            model_output = {
+                key: value.detach() if torch.is_tensor(value) and value.grad_fn is not None else value
+                for key, value in model_output.items()
+            }
             output = {
                 "model_output": model_output,
                 "loss": loss.detach().item(),
