@@ -31,8 +31,15 @@ def compute_score(
     solution_str: str, ground_truth: Any, format_score: float = 0.0, score: float = 1.0
 ) -> float:
     try:
-        extracted_gold = parse(_as_text(ground_truth), CHOICE_EXTRACTION_TARGETS)
-        extracted_pred = parse(_as_text(solution_str), CHOICE_EXTRACTION_TARGETS)
+        # NOTE: math_verify.parse/verify default to signal-based timeouts (signal.alarm),
+        # which fails when compute_score runs in a threadpool (Ray reward workers).
+        # Multiple-choice extraction is regex-only, so we can safely disable timeouts.
+        extracted_gold = parse(
+            _as_text(ground_truth), CHOICE_EXTRACTION_TARGETS, parsing_timeout=None
+        )
+        extracted_pred = parse(
+            _as_text(solution_str), CHOICE_EXTRACTION_TARGETS, parsing_timeout=None
+        )
     except Exception as e:
         print(f"Error in multiple_choice string extraction: {e}")
         return format_score
@@ -40,6 +47,8 @@ def compute_score(
     if not extracted_gold or not extracted_pred:
         return format_score
     return max(
-        score if any(verify(gold, pred) for gold in extracted_gold) else 0.0
+        score
+        if any(verify(gold, pred, timeout_seconds=None) for gold in extracted_gold)
+        else 0.0
         for pred in extracted_pred
     )

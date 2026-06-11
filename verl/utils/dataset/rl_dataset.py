@@ -119,8 +119,20 @@ class RLHFDataset(Dataset):
 
         # Mirror AgentLoopWorker's tool loading so length filtering sees the
         # same schemas the rollout will.
-        self.tool_config_path = config.get("tool_config_path", None)
-        self.function_tool_path = config.get("function_tool_path", None)
+        no_format = os.environ.get("NO_FORMAT", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "y",
+            "on",
+        }
+        if no_format:
+            # When NO_FORMAT is enabled we intentionally run legacy, tool-free
+            self.tool_config_path = None
+            self.function_tool_path = None
+        else:
+            self.tool_config_path = config.get("tool_config_path", None)
+            self.function_tool_path = config.get("function_tool_path", None)
         self.tool_schemas = None
         if self.tool_config_path or self.function_tool_path:
             try:

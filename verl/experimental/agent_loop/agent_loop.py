@@ -77,6 +77,16 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 DEFAULT_ROUTING_CACHE_SIZE = 10000
 
 
+_TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "y", "on"})
+
+
+def _env_flag(name: str) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return False
+    return value.strip().lower() in _TRUTHY_ENV_VALUES
+
+
 class AgentLoopMetrics(BaseModel):
     """Agent loop performance metrics."""
 
@@ -575,9 +585,13 @@ class AgentLoopWorker:
             sampling_params["top_k"] = config.val_kwargs.top_k
             sampling_params["temperature"] = config.val_kwargs.temperature
 
+        no_format = _env_flag("NO_FORMAT")
+
         # by default, we assume it's a single turn agent
         if "agent_name" not in batch.non_tensor_batch:
             default_agent_loop = config.agent.default_agent_loop
+            if no_format:
+                default_agent_loop = "single_turn_agent"
             batch.non_tensor_batch["agent_name"] = np.array(
                 [default_agent_loop] * len(batch), dtype=object
             )
@@ -628,7 +642,7 @@ class AgentLoopWorker:
             }
             sample_sampling_params = dict(sampling_params)
             extra_info = kwargs.get("extra_info")
-            if isinstance(extra_info, dict):
+            if isinstance(extra_info, dict) and not no_format:
                 sample_sampling_params.update(extra_info.get("sampling_params") or {})
             if (
                 not validate

@@ -44,6 +44,7 @@ FORCE_THINKING="${FORCE_THINKING:-false}"
 THINK_PREFIX_TOKEN="${THINK_PREFIX_TOKEN:-<think>}"
 WANDB_ENTITY="${WANDB_ENTITY:-apertus}"
 NO_CODE="${NO_CODE:-false}"
+NO_FORMAT="${NO_FORMAT:-false}"
 
 TRAIN_NNODES="${TRAIN_NNODES:-1}"
 ROLLOUT_NNODES="${ROLLOUT_NNODES:-1}"
@@ -136,6 +137,15 @@ resolve_hf_path() {
   printf '%s' "${input_path}"
 }
 
+is_truthy() {
+  local v="${1:-}"
+  v="$(tr '[:upper:]' '[:lower:]' <<<"${v}")"
+  case "${v}" in
+    1|true|yes|y|on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 build_overrides() {
   overrides=(
     "--config-name=${CONFIG_NAME}"
@@ -146,15 +156,7 @@ build_overrides() {
     "+data.thinking_prefix_token='${THINK_PREFIX_TOKEN}'"
     "actor_rollout_ref.model.path=${RESOLVED_MODEL}"
     "actor_rollout_ref.rollout.n=${ROLLOUT_N}"
-    "actor_rollout_ref.rollout.multi_turn.enable=True"
-    "actor_rollout_ref.rollout.multi_turn.format=apertus2509"
-    "actor_rollout_ref.rollout.multi_turn.max_assistant_turns=1"
-    "+actor_rollout_ref.rollout.multi_turn.terminal_tool_names=[display_answers]"
-    "actor_rollout_ref.rollout.multi_turn.tool_config_path=null"
-    "actor_rollout_ref.rollout.multi_turn.function_tool_path=${APERTUS_FUNCTION_TOOL_PATH}"
-    "actor_rollout_ref.rollout.agent.default_agent_loop=tool_agent"
     "data.tool_config_path=null"
-    "data.function_tool_path=${APERTUS_FUNCTION_TOOL_PATH}"
     "actor_rollout_ref.actor.data_loader_seed=${SEED}"
     "actor_rollout_ref.rollout.max_num_batched_tokens=8192"
     "actor_rollout_ref.rollout.max_num_seqs=256"
@@ -180,7 +182,30 @@ build_overrides() {
     "+ray_kwargs.ray_init.runtime_env.env_vars.NLTK_DATA=${NLTK_DATA_DIR}"
     "+ray_kwargs.ray_init.runtime_env.env_vars.MATH_VERIFY_PYTHONPATH=${PY_DEPS_DIR}"
     "+ray_kwargs.ray_init.runtime_env.env_vars.WANDB_ENTITY=${WANDB_ENTITY}"
+    "+ray_kwargs.ray_init.runtime_env.env_vars.NO_FORMAT='${NO_FORMAT}'"
   )
+
+  if is_truthy "${NO_FORMAT}"; then
+    overrides+=(
+      "actor_rollout_ref.rollout.multi_turn.enable=false"
+      "actor_rollout_ref.rollout.agent.default_agent_loop=single_turn_agent"
+      "data.function_tool_path=null"
+      "actor_rollout_ref.rollout.multi_turn.tool_config_path=null"
+      "actor_rollout_ref.rollout.multi_turn.function_tool_path=null"
+      "actor_rollout_ref.rollout.multi_turn.terminal_tool_names=[]"
+    )
+  else
+    overrides+=(
+      "actor_rollout_ref.rollout.multi_turn.enable=true"
+      "actor_rollout_ref.rollout.multi_turn.format=apertus2509"
+      "actor_rollout_ref.rollout.multi_turn.max_assistant_turns=1"
+      "+actor_rollout_ref.rollout.multi_turn.terminal_tool_names=[display_answers]"
+      "actor_rollout_ref.rollout.multi_turn.tool_config_path=null"
+      "actor_rollout_ref.rollout.multi_turn.function_tool_path=${APERTUS_FUNCTION_TOOL_PATH}"
+      "actor_rollout_ref.rollout.agent.default_agent_loop=tool_agent"
+      "data.function_tool_path=${APERTUS_FUNCTION_TOOL_PATH}"
+    )
+  fi
 
   if [ -n "${SCHEDULER_URL:-}" ]; then
     overrides+=(
@@ -313,6 +338,7 @@ export EXTRA_PIP_PACKAGES
 export SCHEDULER_URL
 export DEFAULT_MEMORY_LIMIT_MB
 export CODEGYM_REWARD_MAX_CONCURRENT
+export NO_FORMAT
 export PYTHONUNBUFFERED="1"
 # export RAY_DEDUP_LOGS="0"
 export NNODES

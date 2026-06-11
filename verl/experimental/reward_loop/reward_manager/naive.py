@@ -13,12 +13,23 @@
 # limitations under the License.
 
 import inspect
+import os
 from collections.abc import Mapping
 
 from verl import DataProto
 from verl.experimental.reward_loop.reward_manager import register
 from verl.experimental.reward_loop.reward_manager.base import RewardManagerBase
 from verl.utils.reward_score import default_compute_score
+
+
+_TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "y", "on"})
+
+
+def _env_flag(name: str) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return False
+    return value.strip().lower() in _TRUTHY_ENV_VALUES
 
 
 @register("naive")
@@ -49,6 +60,8 @@ class NaiveRewardManager(RewardManagerBase):
 
     def _display_answers_responses(self, extra_info: dict) -> list[str] | None:
         """Return terminal display_answers responses, or None to decode normally."""
+        if _env_flag("NO_FORMAT"):
+            return None
         if "display_answers" not in self._get_terminal_tool_names():
             return None
 

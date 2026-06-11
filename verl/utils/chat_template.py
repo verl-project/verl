@@ -66,6 +66,53 @@ def extract_system_prompt_and_generation(tokenizer, **apply_chat_template_kwargs
     return system_prompt, generate_prompt
 
 
+def _normalize_tools_for_chat_template(tools):
+    """Normalize tool schemas for chat templates.
+
+    Transformers tokenizers accept arbitrary tool payloads and render them inside
+    the model-specific Jinja2 `chat_template`. Different templates expect
+    different shapes:
+
+    - OpenAI-compatible: {"type": "function", "function": {"name", "description", "parameters"}}
+    - Flattened:         {"name", "description", "parameters"}
+
+    This helper accepts either and ensures the flattened keys exist (in addition
+    to any existing OpenAI keys), so templates can safely reference
+    `tool.name/description/parameters` without breaking OpenAI-style callers.
+    """
+    if not tools:
+        return tools
+
+    normalized = []
+    for tool in tools:
+        if tool is None:
+            continue
+        if not isinstance(tool, dict):
+            normalized.append(tool)
+            continue
+
+        out = dict(tool)
+        fn = out.get("function")
+        if isinstance(fn, dict):
+            out.setdefault("name", fn.get("name"))
+            desc = fn.get("description")
+            out.setdefault("description", "" if desc is None else str(desc))
+            params = fn.get("parameters")
+            out.setdefault("parameters", {} if params is None else params)
+        else:
+            name = out.get("name")
+            if name is not None:
+                out["name"] = str(name)
+            desc = out.get("description")
+            out["description"] = "" if desc is None else str(desc)
+            params = out.get("parameters")
+            out["parameters"] = {} if params is None else params
+
+        normalized.append(out)
+
+    return normalized
+
+
 def apply_chat_template(
     processor: PreTrainedTokenizerBase | ProcessorMixin,
     messages: list[dict],
@@ -91,6 +138,7 @@ def apply_chat_template(
     Returns:
         list[int] | str: tokenized ids or text string.
     """
+    tools = _normalize_tools_for_chat_template(tools)
     try:
         return processor.apply_chat_template(
             messages,
