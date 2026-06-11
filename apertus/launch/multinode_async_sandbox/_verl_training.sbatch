@@ -158,6 +158,7 @@ build_overrides() {
     "actor_rollout_ref.rollout.n=${ROLLOUT_N}"
     "data.tool_config_path=null"
     "actor_rollout_ref.actor.data_loader_seed=${SEED}"
+    "actor_rollout_ref.actor.calculate_entropy=true"
     "actor_rollout_ref.rollout.max_num_batched_tokens=8192"
     "actor_rollout_ref.rollout.max_num_seqs=256"
     "actor_rollout_ref.rollout.gpu_memory_utilization=0.8"

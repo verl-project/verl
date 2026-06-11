@@ -594,7 +594,21 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             await self._trainer_side_validate()
         else:
             val_metrics = await self.rollouter.do_validate.remote()
+            samples = None
+            if isinstance(val_metrics, dict):
+                samples = val_metrics.pop("__val_generation_samples__", None)
             self.logger.log(data=val_metrics, step=self.current_param_version)
+            if samples:
+                from verl.utils.tracking import ValidationGenerationsLogger
+
+                if self.validation_generations_logger is None:
+                    self.validation_generations_logger = ValidationGenerationsLogger(
+                        project_name=self.config.trainer.project_name,
+                        experiment_name=self.config.trainer.experiment_name,
+                    )
+                self.validation_generations_logger.log(
+                    self.config.trainer.logger, samples, self.current_param_version
+                )
 
     async def _trainer_side_validate(self):
         """Run trainer-side validation using hybrid rollout replicas."""
@@ -620,7 +634,21 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         # ================================================================
         print("[FullyAsyncTrainer] Phase 2: Running validation")
         val_metrics = await self.rollouter.do_validate.remote()
+        samples = None
+        if isinstance(val_metrics, dict):
+            samples = val_metrics.pop("__val_generation_samples__", None)
         self.logger.log(data=val_metrics, step=self.current_param_version)
+        if samples:
+            from verl.utils.tracking import ValidationGenerationsLogger
+
+            if self.validation_generations_logger is None:
+                self.validation_generations_logger = ValidationGenerationsLogger(
+                    project_name=self.config.trainer.project_name,
+                    experiment_name=self.config.trainer.experiment_name,
+                )
+            self.validation_generations_logger.log(
+                self.config.trainer.logger, samples, self.current_param_version
+            )
 
         # ================================================================
         # Phase 3: Switch hybrid GPUs back to TRAIN mode

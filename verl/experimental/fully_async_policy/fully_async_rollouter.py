@@ -437,6 +437,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
             project_name=self.config.trainer.project_name,
             experiment_name=self.config.trainer.experiment_name,
         )
+        self._val_generation_samples: list[tuple[str, str, float]] | None = None
 
         self.ref_in_actor = False
         self.kl_ctrl_in_reward = False
@@ -613,7 +614,35 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         timing_raw = {}
         with marked_timer("rollouter/validate_time", timing_raw, color="green"):
             val_metrics: dict = self._validate()
+        # Attach sampled generations for trainer-side W&B logging.
+        samples = self._val_generation_samples
+        if samples:
+            val_metrics = dict(val_metrics)
+            val_metrics["__val_generation_samples__"] = samples
+            self._val_generation_samples = None
         return timing_raw | val_metrics
+
+    def _maybe_log_val_generations(self, inputs, outputs, scores):
+        """Sample val generations and return them via do_validate().
+
+        In fully-async mode the rollouter runs in a separate Ray process which does
+        not own the W&B run, so we cannot reliably log `val/generations` here.
+        """
+        generations_to_log = int(getattr(self.config.trainer, "log_val_generations", 0) or 0)
+        if generations_to_log <= 0:
+            self._val_generation_samples = None
+            return
+
+        import numpy as np
+
+        samples = list(zip(inputs, outputs, scores, strict=True))
+        samples.sort(key=lambda x: x[0])
+        rng = np.random.RandomState(42)
+        rng.shuffle(samples)
+        samples = samples[:generations_to_log]
+        self._val_generation_samples = [
+            (str(inp), str(out), float(score)) for (inp, out, score) in samples
+        ]
 
     async def save_checkpoint(self, local_global_step_folder: str):
         # WARNING!: Due to the asynchronous nature, there are some in-flight samples
