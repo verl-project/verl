@@ -149,7 +149,7 @@ build_overrides() {
     "actor_rollout_ref.rollout.multi_turn.enable=True"
     "actor_rollout_ref.rollout.multi_turn.format=apertus2509"
     "actor_rollout_ref.rollout.multi_turn.max_assistant_turns=1"
-    "actor_rollout_ref.rollout.multi_turn.terminal_tool_names=[display_answers]"
+    "+actor_rollout_ref.rollout.multi_turn.terminal_tool_names=[display_answers]"
     "actor_rollout_ref.rollout.multi_turn.tool_config_path=null"
     "actor_rollout_ref.rollout.multi_turn.function_tool_path=${APERTUS_FUNCTION_TOOL_PATH}"
     "actor_rollout_ref.rollout.agent.default_agent_loop=tool_agent"

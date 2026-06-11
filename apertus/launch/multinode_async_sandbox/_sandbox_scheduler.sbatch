@@ -15,8 +15,9 @@
 set -euo pipefail
 
 USERNAME="$(whoami)"
+SCRATCH_HOME="${SCRATCH_HOME:-/iopsstor/scratch/cscs/${USERNAME}}"
 PORT="${PORT:-8000}"
-CODE_GYM_DIR="${CODE_GYM_DIR:-/users/${USERNAME}/scratch/code-gym}"
+CODE_GYM_DIR="${CODE_GYM_DIR:-${SCRATCH_HOME}/projects/code-gym}"
 
 # Native mode runs user snippets in lightweight enroot workers behind the
 # scheduler. Keep these values aligned with the CPU count requested above.
@@ -24,15 +25,34 @@ SANDBOX_MODE="${SANDBOX_MODE:-native}"
 SANDBOX_WORKERS="${SANDBOX_WORKERS:-130}"
 SANDBOX_CPUS_PER_WORKER="${SANDBOX_CPUS_PER_WORKER:-1}"
 SANDBOX_BASE_PORT="${SANDBOX_BASE_PORT:-11990}"
-NATIVE_SQSH_PATH="${NATIVE_SQSH_PATH:-/capstor/store/cscs/swissai/infra01/reasoning/data/codegym/python+3.11-slim.sqsh}"
-SANDBOX_SQSH_PATH="${SANDBOX_SQSH_PATH:-/capstor/store/cscs/swissai/infra01/reasoning/imgs/sandbox/sandbox.sqsh}"
+SANDBOX_READY_TIMEOUT="${SANDBOX_READY_TIMEOUT:-300}"
 
+DEFAULT_NATIVE_SQSH_PATH="/capstor/store/cscs/swissai/infra01/reasoning/data/codegym/python+3.11-slim.sqsh"
+DEFAULT_SANDBOX_SQSH_PATH="/capstor/store/cscs/swissai/infra01/reasoning/imgs/sandbox/sandbox.sqsh"
+
+# Prefer scratch-local images when available (useful for rapid iteration)
+SCRATCH_NATIVE_SQSH_PATH="${SCRATCH_HOME}/images/codegym/python+3.11-slim.sqsh"
+SCRATCH_SANDBOX_SQSH_PATH="${SCRATCH_HOME}/images/sandbox/sandbox.sqsh"
+if [[ -f "${SCRATCH_NATIVE_SQSH_PATH}" ]]; then
+  DEFAULT_NATIVE_SQSH_PATH="${SCRATCH_NATIVE_SQSH_PATH}"
+fi
+if [[ -f "${SCRATCH_SANDBOX_SQSH_PATH}" ]]; then
+  DEFAULT_SANDBOX_SQSH_PATH="${SCRATCH_SANDBOX_SQSH_PATH}"
+fi
+
+NATIVE_SQSH_PATH="${NATIVE_SQSH_PATH:-${DEFAULT_NATIVE_SQSH_PATH}}"
+SANDBOX_SQSH_PATH="${SANDBOX_SQSH_PATH:-${DEFAULT_SANDBOX_SQSH_PATH}}"
+
+echo "SCRATCH_HOME=${SCRATCH_HOME}"
 echo "CODE_GYM_DIR=${CODE_GYM_DIR}"
 echo "PORT=${PORT}"
 echo "SANDBOX_MODE=${SANDBOX_MODE}"
 echo "SANDBOX_WORKERS=${SANDBOX_WORKERS}"
 echo "SANDBOX_CPUS_PER_WORKER=${SANDBOX_CPUS_PER_WORKER}"
 echo "SANDBOX_BASE_PORT=${SANDBOX_BASE_PORT}"
+echo "SANDBOX_READY_TIMEOUT=${SANDBOX_READY_TIMEOUT}"
+echo "NATIVE_SQSH_PATH=${NATIVE_SQSH_PATH}"
+echo "SANDBOX_SQSH_PATH=${SANDBOX_SQSH_PATH}"
 
 [[ -d "${CODE_GYM_DIR}" ]] || { echo "Missing CODE_GYM_DIR=${CODE_GYM_DIR}" >&2; exit 1; }
 [[ -f "${CODE_GYM_DIR}/src/backend/scheduler.py" ]] || { echo "Missing code-gym scheduler.py" >&2; exit 1; }
@@ -90,4 +110,5 @@ exec python src/backend/scheduler.py \
   --mode "${SANDBOX_MODE}" \
   --workers "${SANDBOX_WORKERS}" \
   --base-port "${SANDBOX_BASE_PORT}" \
+  --ready-timeout "${SANDBOX_READY_TIMEOUT}" \
   --cpus "${SANDBOX_CPUS_PER_WORKER}"
