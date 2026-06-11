@@ -106,6 +106,23 @@ def unpad_dataproto(data: "DataProto", pad_size):
     return data
 
 
+def _append_metrics(all_metrics: list[dict], metrics: dict | list[dict]) -> None:
+    """Append metrics while accepting both list-of-dicts and dict-of-lists layouts."""
+    if isinstance(metrics, list):
+        all_metrics.extend(metrics)
+        return
+
+    values = list(metrics.values())
+    if values and all(isinstance(value, list) for value in values):
+        lengths = {len(value) for value in values}
+        if len(lengths) == 1:
+            for idx in range(lengths.pop()):
+                all_metrics.append({key: value[idx] for key, value in metrics.items()})
+            return
+
+    all_metrics.append(metrics)
+
+
 def union_tensor_dict(tensor_dict1: TensorDict, tensor_dict2: TensorDict) -> TensorDict:
     """Union two tensordicts."""
     assert tensor_dict1.batch_size == tensor_dict2.batch_size, (
@@ -942,10 +959,7 @@ class DataProto:
                 for k, v in d.meta_info.items():
                     if k == "metrics":
                         if v is not None:
-                            if isinstance(v, list):
-                                all_metrics.extend(v)
-                            else:
-                                all_metrics.append(v)
+                            _append_metrics(all_metrics, v)
                     else:
                         if k in merged_meta_info:
                             # Ensure consistency for overlapping non-metric keys

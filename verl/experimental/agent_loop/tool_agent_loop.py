@@ -17,7 +17,6 @@ import logging
 import os
 from enum import Enum
 from typing import Any, Optional
-from uuid import uuid4
 
 import torch
 from PIL import Image
@@ -26,6 +25,7 @@ from verl.experimental.agent_loop.agent_loop import (
     AgentLoopBase,
     AgentLoopOutput,
     ToolListWrap,
+    get_generation_request_id,
     register,
 )
 from verl.experimental.agent_loop.tool_parser import FunctionCall, ToolParser
@@ -148,7 +148,7 @@ class ToolAgentLoop(AgentLoopBase):
         mm_processor_kwargs = self._get_mm_processor_kwargs(audios)
 
         metrics = {}
-        request_id = uuid4().hex
+        request_id = get_generation_request_id(self.rollout_config, kwargs)
         tools_kwargs = kwargs.get("tools_kwargs", {})
         extra_info = kwargs.get("extra_info", {}) or {}
         apply_chat_template_kwargs = extra_info.get("apply_chat_template_kwargs", {})

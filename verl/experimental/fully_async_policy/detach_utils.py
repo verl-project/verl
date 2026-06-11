@@ -79,6 +79,27 @@ def prepare_single_generation_data(batch_dict, config) -> DataProto:
     return full_batch
 
 
+def validate_inverse_batch(rollout_config) -> None:
+    """Validate fully async inverse-batch rollout settings."""
+    rollout_n = int(rollout_config.n)
+    n_per_round = int(rollout_config.n_per_round)
+
+    if rollout_n < 1:
+        raise ValueError(f"actor_rollout_ref.rollout.n must be >= 1, got {rollout_n}")
+    if n_per_round < 1:
+        raise ValueError(f"actor_rollout_ref.rollout.n_per_round must be >= 1, got {n_per_round}")
+    if n_per_round > rollout_n:
+        raise ValueError(
+            "actor_rollout_ref.rollout.n_per_round must be <= actor_rollout_ref.rollout.n, "
+            f"got n_per_round={n_per_round}, n={rollout_n}"
+        )
+    if rollout_n % n_per_round != 0:
+        raise ValueError(
+            "actor_rollout_ref.rollout.n_per_round must divide actor_rollout_ref.rollout.n, "
+            f"got n_per_round={n_per_round}, n={rollout_n}"
+        )
+
+
 def validate_async_filter_groups_config(config, logger=None):
     """Validate filter_groups settings in config."""
     filter_groups_config = config.algorithm.get("filter_groups", None)
@@ -146,8 +167,12 @@ def should_keep_async_filter_group(batch: DataProto, filter_groups_config) -> bo
 def addition_process(output: DataProto):
     """collect metirics"""
     metrics = output.meta_info.pop("metrics")  # List[Dict[str, str]]
-    processing_times_list = [item["generate_sequences"] for item in metrics]
-    tool_calls_times_list = [item["tool_calls"] for item in metrics]
+    if isinstance(metrics, dict):
+        processing_times_list = metrics["generate_sequences"]
+        tool_calls_times_list = metrics["tool_calls"]
+    else:
+        processing_times_list = [item["generate_sequences"] for item in metrics]
+        tool_calls_times_list = [item["tool_calls"] for item in metrics]
     output.non_tensor_batch["processing_times"] = processing_times_list
     output.non_tensor_batch["tool_calls_times"] = tool_calls_times_list
     return output

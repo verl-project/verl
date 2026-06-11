@@ -80,6 +80,21 @@ DEFAULT_ROUTING_CACHE_SIZE = 10000
 _TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "y", "on"})
 
 
+def get_generation_request_id(rollout_config, kwargs: dict[str, Any]) -> str:
+    """Return the rollout-server load-balancer key for one generation request.
+
+    The key is consumed by `LLMServerClient` for sticky routing only.
+    In inverse batching, all rounds for one prompt share `uid` so they route to the
+    same server and can reuse that server's prefix cache.
+    """
+    rollout_n = int(rollout_config.n)
+    n_per_round = int(getattr(rollout_config, "n_per_round", rollout_n))
+    uid = kwargs.get("uid")
+    if uid is not None and n_per_round < rollout_n:
+        return str(uid)
+    return uuid4().hex
+
+
 def _env_flag(name: str) -> bool:
     value = os.environ.get(name)
     if value is None:

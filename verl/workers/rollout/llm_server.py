@@ -206,6 +206,8 @@ class LLMServerClient:
                 multimodal_kwargs["audio_data"] = audio_data
             if mm_processor_kwargs:
                 multimodal_kwargs["mm_processor_kwargs"] = mm_processor_kwargs
+            # The caller's request_id is only a sticky-routing key for this client.
+            # The backend still receives a fresh request id for every generation.
             output: TokenOutput = await server.generate.remote(
                 request_id=uuid4().hex,  # use new request_id for each turn
                 prompt_ids=prompt_ids,
