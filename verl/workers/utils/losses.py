@@ -113,17 +113,10 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
 
     # AggregationType.MEAN for pg metrics: assumes policy_loss_fn normalizes by local_bsz/local_tokens
     # Ex: in compute_policy_loss_vanilla, pg_metrics are pg_clipfrac, ppo_kl, pg_clipfrac_lower
-    # Detach metric tensors: metrics are reporting-only, and storing tensors that still carry
-    # grad_fn (pg_loss, ppo_kl, ...) retains each micro-batch's autograd graph in
-    # forward_backward_batch's output_lst until the whole batch finishes.
-    pg_metrics = {
-        key: value.detach() if torch.is_tensor(value) and value.grad_fn is not None else value
-        for key, value in pg_metrics.items()
-    }
     pg_metrics = Metric.from_dict(pg_metrics, aggregation=AggregationType.MEAN)
 
     metrics.update(pg_metrics)
-    metrics["actor/pg_loss"] = Metric(value=pg_loss.detach(), aggregation=metric_aggregation)
+    metrics["actor/pg_loss"] = Metric(value=pg_loss, aggregation=metric_aggregation)
     policy_loss = pg_loss
 
     # add entropy loss
@@ -133,7 +126,7 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         )
         entropy_coeff = config.entropy_coeff
         policy_loss -= entropy_coeff * entropy_loss
-        metrics["actor/entropy_loss"] = Metric(value=entropy_loss.detach(), aggregation=metric_aggregation)
+        metrics["actor/entropy_loss"] = Metric(value=entropy_loss, aggregation=metric_aggregation)
 
     # add kl loss
     if config.use_kl_loss:
@@ -145,7 +138,7 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         )
 
         policy_loss += kl_loss * config.kl_loss_coef
-        metrics["kl_loss"] = Metric(value=kl_loss.detach(), aggregation=metric_aggregation)
+        metrics["kl_loss"] = Metric(value=kl_loss, aggregation=metric_aggregation)
         metrics["kl_coef"] = config.kl_loss_coef
 
     return policy_loss, metrics
