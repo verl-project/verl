@@ -108,6 +108,7 @@ class ToolAgentLoop(AgentLoopBase):
 
         self.max_user_turns = self.rollout_config.multi_turn.max_user_turns
         self.max_assistant_turns = self.rollout_config.multi_turn.max_assistant_turns
+        self.max_assistant_response_length = self.rollout_config.multi_turn.max_assistant_response_length
         self.max_parallel_calls = self.rollout_config.multi_turn.max_parallel_calls
         self.max_tool_response_length = self.rollout_config.multi_turn.max_tool_response_length
         self.tool_response_truncate_side = self.rollout_config.multi_turn.tool_response_truncate_side
@@ -228,11 +229,15 @@ class ToolAgentLoop(AgentLoopBase):
             stop_token_ids = list(set((sampling_params.get("stop_token_ids") or []) + self.tool_parser.stop_token_ids))
             sampling_params = {**sampling_params, "stop_token_ids": stop_token_ids}
 
+        turn_sampling_params = self._get_turn_sampling_params(agent_data, sampling_params)
+        if turn_sampling_params is None:
+            return AgentState.TERMINATED
+
         with simple_timer("generate_sequences", agent_data.metrics):
             output: TokenOutput = await self.server_manager.generate(
                 request_id=agent_data.request_id,
                 prompt_ids=agent_data.prompt_ids,
-                sampling_params=sampling_params,
+                sampling_params=turn_sampling_params,
                 image_data=agent_data.image_data,
                 video_data=agent_data.video_data,
                 audio_data=agent_data.audio_data,
@@ -283,6 +288,30 @@ class ToolAgentLoop(AgentLoopBase):
             return AgentState.PROCESSING_TOOLS
         else:
             return AgentState.TERMINATED
+
+    def _get_turn_sampling_params(
+        self, agent_data: AgentData, sampling_params: dict[str, Any]
+    ) -> Optional[dict[str, Any]]:
+        remaining = self.response_length - len(agent_data.response_mask)
+        if remaining <= 0:
+            return None
+
+        max_turn = self.max_assistant_response_length
+        if max_turn is None and "max_tokens" not in sampling_params:
+            return sampling_params
+
+        effective = remaining
+        if max_turn is not None:
+            effective = min(effective, max_turn)
+        if "max_tokens" in sampling_params:
+            effective = min(effective, sampling_params["max_tokens"])
+
+        if sampling_params.get("max_tokens") == effective:
+            return sampling_params
+
+        turn_sampling_params = dict(sampling_params)
+        turn_sampling_params["max_tokens"] = effective
+        return turn_sampling_params
 
     async def _handle_processing_tools_state(self, agent_data: AgentData) -> AgentState:
         """Handle the processing tools state: execute tool calls and prepare tool responses."""

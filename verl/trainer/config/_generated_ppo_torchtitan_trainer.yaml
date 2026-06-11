@@ -280,6 +280,7 @@ actor_rollout_ref:
       _target_: verl.workers.config.MultiTurnConfig
       enable: false
       max_assistant_turns: null
+      max_assistant_response_length: null
       tool_config_path: null
       function_tool_path: null
       max_user_turns: null
