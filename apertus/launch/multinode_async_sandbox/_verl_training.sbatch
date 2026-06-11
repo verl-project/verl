@@ -81,7 +81,7 @@ DEPS_STAMP_DIR="${PY_DEPS_ROOT}/.stamps"
 DEPS_STAMP="${DEPS_STAMP_DIR}/apertus_reward_py312.ready"
 DEPS_LOCK="${DEPS_STAMP_DIR}/apertus_reward_py312.lock"
 
-EXTRA_PIP_PACKAGES="${EXTRA_PIP_PACKAGES:-immutabledict nltk langdetect absl-py emoji syllapy antlr4-python3-runtime==4.9.3 requests math_verify reasoning_gym}"
+EXTRA_PIP_PACKAGES="${EXTRA_PIP_PACKAGES:-immutabledict nltk langdetect absl-py emoji syllapy antlr4-python3-runtime==4.9.3 requests math_verify}"
 
 
 DATA_DIR="${TRAINING_DATA_DIR:-${WORKING_DIR}/data/apertus_demo_rl}"
@@ -151,6 +151,7 @@ build_overrides() {
     "actor_rollout_ref.rollout.gpu_memory_utilization=0.8"
     "rollout.nnodes=${ROLLOUT_NNODES}"
     "rollout.n_gpus_per_node=${ROLLOUT_GPUS_PER_NODE}"
+    "reward.num_workers=1"
     "reward.sandbox_fusion.url=${KUBERNETES_SANDBOX_URL}"
     "reward.sandbox_fusion.memory_limit_mb=${DEFAULT_MEMORY_LIMIT_MB}"
     "reward.sandbox_fusion.max_concurrent=${SANDBOX_REWARD_MAX_CONCURRENT}"
@@ -251,7 +252,7 @@ prepare_shared_python_deps() {
 
     python3 -m pip install --no-cache-dir --upgrade --target "${PY_DEPS_DIR}" ${EXTRA_PIP_PACKAGES}
     python3 -c "import nltk; [nltk.download(pkg, download_dir=\"${NLTK_DATA_DIR}\", quiet=True) for pkg in (\"punkt\", \"punkt_tab\", \"stopwords\", \"averaged_perceptron_tagger_eng\")]"
-    python3 -c "import sys; sys.path[:0] = [\"${PY_DEPS_DIR}\", \"${WORKING_DIR}\"]; import absl, emoji, immutabledict, langdetect, math_verify, nltk, reasoning_gym, requests, syllapy, verl; print(\"Using shared deps from\", \"${PY_DEPS_DIR}\"); print(\"Using verl from\", verl.__file__)"
+    python3 -c "import sys; sys.path[:0] = [\"${PY_DEPS_DIR}\", \"${WORKING_DIR}\"]; import absl, emoji, immutabledict, langdetect, math_verify, nltk, requests, syllapy, verl; print(\"Using shared deps from\", \"${PY_DEPS_DIR}\"); print(\"Using verl from\", verl.__file__)"
     touch "${DEPS_STAMP}"
   '
 }
@@ -267,7 +268,7 @@ fi
 export HOME
 export HF_HOME
 export HF_HUB_CACHE="${HF_HUB_CACHE_DIR}"
-export HF_HUB_OFFLINE="1"
+export HF_HUB_OFFLINE="0"
 export TRANSFORMERS_OFFLINE="1"
 export NLTK_DATA="${NLTK_DATA_DIR}"
 export PYTHONPATH="${PY_DEPS_DIR}:${WORKING_DIR}:${PYTHONPATH:-}"
@@ -305,7 +306,7 @@ fi
 head_node="${nodes_array[0]}"
 prepare_shared_python_deps
 srun "${SRUN_ENV[@]}" --nodes=1 --ntasks=1 -w "${head_node}" \
-  bash -lc "python3 -c \"import sys; sys.path[:0] = ['${PY_DEPS_DIR}', '${WORKING_DIR}']; import reasoning_gym, requests; print('Using requests from', requests.__file__)\""
+  bash -lc "python3 -c \"import sys; sys.path[:0] = ['${PY_DEPS_DIR}', '${WORKING_DIR}']; import requests; print('Using requests from', requests.__file__)\""
 
 head_node_ip="$(srun "${SRUN_ENV[@]}" --nodes=1 --ntasks=1 -w "${head_node}" \
   bash -lc "cd '${WORKING_DIR}' && hostname --ip-address")"

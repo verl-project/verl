@@ -14,15 +14,17 @@ import os
 import re
 import threading
 import time
+
+from verl.utils.reward_score.harness import HarnessFactory
 from typing import Any
 
 import requests
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_TIMEOUT = float(os.environ.get("DEFAULT_TIMEOUT", "10"))
-DEFAULT_MEMORY_LIMIT_MB = int(os.environ.get("DEFAULT_MEMORY_LIMIT_MB", "512"))
-REQUEST_TIMEOUT_SECONDS = float(os.environ.get("KUBERNETES_SANDBOX_REQUEST_TIMEOUT", "15"))
+DEFAULT_TIMEOUT = float("25") #float(os.environ.get("DEFAULT_TIMEOUT", "10"))
+DEFAULT_MEMORY_LIMIT_MB = int("1024") #int(os.environ.get("DEFAULT_MEMORY_LIMIT_MB", "512"))
+REQUEST_TIMEOUT_SECONDS = float("30") #float(os.environ.get("KUBERNETES_SANDBOX_REQUEST_TIMEOUT", "15"))
 
 _FENCE_RE = re.compile(r"```(?P<lang>[^\n`]*)\n(?P<code>[\s\S]*?)```", re.MULTILINE)
 # FIXME: remove this tmp instrumentation for measuring throughput
@@ -30,6 +32,53 @@ _THROUGHPUT_LOCK = threading.Lock()
 _VERIFICATION_STARTED_AT: float | None = None
 _VERIFICATION_COUNT = 0
 _VERIFICATION_SUCCESS_COUNT = 0
+
+def safe_json_loads(text: str):
+    text = text.strip()
+    if not text:
+        return []
+
+    decoder = json.JSONDecoder()
+
+    # try direct parse first
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+
+    # find all possible JSON starts and try from the end (most robust for mixed stdout)
+    candidates = []
+    for i, ch in enumerate(text):
+        if ch in "[{":
+            try:
+                obj, _ = decoder.raw_decode(text[i:])
+                candidates.append(obj)
+            except Exception:
+                continue
+
+    if not candidates:
+        raise ValueError(f"No valid JSON found in stdout:\n{text[:500]}")
+
+    return candidates[-1]  # take last valid JSON block
+
+def parse_response(response):
+    """
+    Parses Harness stdout JSON and returns:
+    - original results
+    - passed / total / failed summary
+    """
+    results = safe_json_loads(response.text)
+    stdout = safe_json_loads(results['run_result']['stdout'])
+    total = passed = 0
+    for msg in stdout:
+        if "success" in msg:
+            total += 1
+            passed += bool(msg["success"])
+    return {
+        **results,
+        "passed": passed,
+        "total": total,
+    }
 
 
 def _record_verification_throughput(started_at: float, elapsed_seconds: float, success: bool) -> None:
@@ -157,14 +206,14 @@ def _service_data_source(data_source: str, input_output: dict[str, Any]) -> str:
     return data_source
 
 
-def prepare_payload(
+def prepare_harness(
     data_source: str,
     solution_str: str,
     ground_truth: Any,
     extra_info: dict[str, Any] | None = None,
     memory_limit_mb: int | None = None,
     timeout: float | None = None,
-) -> dict[str, Any]:
+):
     """Build the Kubernetes harness request body for one coding sample."""
     extra_info = extra_info or {}
     language = _normalize_language(extra_info.get("language", "python"))
@@ -182,22 +231,21 @@ def prepare_payload(
     if not isinstance(test_cases, list):
         test_cases = [test_cases]
 
-    payload = {
-        "language": language,
-        "data_source": extra_info.get("sandbox_data_source")
-        or _service_data_source(data_source, input_output),
-        "solution_str": extract_code_for_language(solution_str, language),
-        "test_cases": test_cases,
-        "input_output": input_output,
-        "timeout": float(extra_info.get("timeout", timeout or DEFAULT_TIMEOUT)),
-        "memory_limit_mb": int(extra_info.get("memory_limit_mb", memory_limit_mb or DEFAULT_MEMORY_LIMIT_MB)),
-    }
-    return _to_json_safe(payload)
+    harness = HarnessFactory.generate_scripts(
+        language=language,
+        solution_str=extract_code_for_language(solution_str, language),
+        input_output=input_output,
+        test_cases=test_cases,
+        data_source="test" if len(test_cases) > 0 else "input_output",
+        memory_limit_mb=int(DEFAULT_MEMORY_LIMIT_MB),
+        timeout=float(DEFAULT_TIMEOUT),
+    )
+    return harness[0]
 
 
-def request_unit_tests(
+def run_code(
     sandbox_url: str,
-    payload: dict[str, Any],
+    payload,
     concurrent_semaphore: Any = None,
 ) -> dict[str, Any]:
     """
@@ -212,7 +260,7 @@ def request_unit_tests(
     Returns:
         The parsed JSON response dictionary, or an empty dictionary on failure.
     """
-    url = f"{sandbox_url.rstrip('/')}/evaluate"
+    url = f"{sandbox_url.rstrip('/')}/run_code"
     started_at = time.perf_counter()
     success = False
     try:
@@ -224,7 +272,7 @@ def request_unit_tests(
             with concurrent_semaphore:
                 response = requests.post(url, json=payload, timeout=REQUEST_TIMEOUT_SECONDS)
         response.raise_for_status()
-        result = response.json()
+        result = parse_response(response)
         success = isinstance(result, dict)
         # FIXME: remove
         if isinstance(result, dict):
@@ -262,7 +310,7 @@ def compute_score(
         print("[KUBERNETES_SANDBOX_DEBUG] compute_score no_url")
         return 0.0
 
-    payload = prepare_payload(
+    harness = prepare_harness(
         data_source,
         solution_str,
         ground_truth,
@@ -270,5 +318,9 @@ def compute_score(
         memory_limit_mb=memory_limit_mb,
         timeout=timeout,
     )
-    result = request_unit_tests(url, payload, concurrent_semaphore)
+    payload = {
+        "language": "python",
+        "code": harness,
+    }
+    result = run_code(url, payload, concurrent_semaphore)
     return _score_from_result(result, continuous=continuous)

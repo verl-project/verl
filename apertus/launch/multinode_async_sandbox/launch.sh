@@ -13,19 +13,19 @@ USERNAME="$(whoami)"
 # Experiment configuration
 ###############################################################################
 PROJECT_NAME=apertus-rl-tests
-WORKING_DIR="/iopsstor/scratch/cscs/${USER}/projects/verl"
+WORKING_DIR="/iopsstor/scratch/cscs/${USER}/verl"
 HOME=/iopsstor/scratch/cscs/${USER}
 HF_HOME=/iopsstor/scratch/cscs/${USER}/huggingface
 ENVIRONMENT_PATH=/capstor/store/cscs/swissai/infra01/reasoning/raas/docker/vs:251215-patched/env.toml
 
-MODEL_NAME_OR_PATH=/capstor/store/cscs/swissai/infra01/reasoning/models/Apertus-1p5-8B-sft-capfilter-linear-it8816
-TOKENIZER_NAME_OR_PATH=/capstor/store/cscs/swissai/infra01/MLLM/tokenizer/apertus_emu3.5_wavtok_instruct_thinking_token_fixed
+MODEL_NAME_OR_PATH=swiss-ai/Apertus-8B-Instruct-2509
+TOKENIZER_NAME_OR_PATH=""
 CONFIG_NAME=async
 SLURM_TIME=04:00:00
 TRAIN_NNODES=2
 ROLLOUT_NNODES=2
 NNODES=$((TRAIN_NNODES + ROLLOUT_NNODES))
-TRAINING_DATA_DIR=/iopsstor/scratch/cscs/${USER}/apertus_rl/data/code
+TRAINING_DATA_DIR=/iopsstor/scratch/cscs/rmachace/verl/apertus/data/code
 ENABLE_THINKING=false
 FORCE_THINKING=false
 THINK_PREFIX_TOKEN="<|inner_prefix|>"
@@ -38,7 +38,7 @@ JOB_NAME=""
 # Sandbox configuration
 ###############################################################################
 
-KUBERNETES_SANDBOX_URL=https://sandbox-dev.swissai.svc.cscs.ch/harness-test
+KUBERNETES_SANDBOX_URL=https://sandbox-dev.swissai.svc.cscs.ch
 SANDBOX_REWARD_CONTINUOUS=false # default is binary reward
 
 log(){ echo -e "$*" >&2; }
