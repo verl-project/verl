@@ -23,10 +23,13 @@ from dataclasses import dataclass
 from typing import Any
 
 import datasets
-from utils.rgym import strip_rgym_format_instructions
-from utils.table_gpt import load_table_gpt_mix, TABLE_GPT_DATASET_ID
-
 from verl.utils.reward_score.gsm8k import extract_solution as extract_gsm8k_solution
+
+from utils.LEXam_mcq import normalize_lexam_mcq_sample
+from utils.riddle_sense import normalize_riddle_sense_sample
+from utils.rgym import strip_rgym_format_instructions
+from utils.table_gpt import TABLE_GPT_DATASET_ID, load_table_gpt_mix
+
 
 LOCAL_SAVE_DIR = "./data/apertus_demo_rl"
 DATASETS_CACHE_DIR = "./data/apertus_demo_rl/.hf_datasets_cache"
@@ -171,6 +174,32 @@ TRAIN_DATASETS = [
         tool_selection=("display_answers",),
     ),
     DatasetConfig(
+        name="riddle_sense",
+        dataset_id="INK-USC/riddle_sense",
+        split="train",
+        adapter="riddle_sense",
+        data_source="riddle_sense",
+        question_key="question",
+        choices_key="choices",
+        answer_key="answerKey",
+        enable_thinking=False,
+        tool_selection=("display_answers",),
+    ),
+    DatasetConfig(
+        name="lexam_mcq",
+        dataset_id="LEXam-Benchmark/LEXam",
+        subset="mcq_4_choices",
+        split="test",
+        adapter="lexam_mcq",
+        data_source="lexam_mcq",
+        question_key="question",
+        choices_key="choices",
+        answer_key="gold",
+        subject_key="area",
+        enable_thinking=False,
+        tool_selection=("display_answers",),
+    ),
+    DatasetConfig(
         name="table_gpt",
         dataset_id=TABLE_GPT_DATASET_ID,
         split="mixed",
@@ -178,7 +207,8 @@ TRAIN_DATASETS = [
         data_source="table_gpt",
         prompt_key="prompt",
         answer_key="completion",
-        tool_selection=("display_answers",),    # TODO: if verification is ok, can choose to only activate on some samples
+        # TODO: if verification is ok, can choose to only activate on some samples.
+        tool_selection=("display_answers",),
     ),
     DatasetConfig(
         name="vrl",
@@ -812,6 +842,63 @@ def adapt_multiple_choice(
         ability="knowledge",
         ground_truth=answer_letter,
         extra_info=extra_info,
+    )
+
+
+@register_adapter("riddle_sense")
+def adapt_riddle_sense(
+    example: dict[str, Any], idx: int, split: str, config: DatasetConfig
+) -> dict[str, Any]:
+    normalized = normalize_riddle_sense_sample(example)
+    choices, answer_letter = maybe_shuffle_choices(
+        normalized["choices"], normalized["answer_index"], config, idx
+    )
+    return make_row(
+        config=config,
+        split=split,
+        index=idx,
+        prompt=make_prompt(
+            format_multiple_choice_prompt(normalized["question"], choices)
+        ),
+        ability="knowledge",
+        ground_truth=answer_letter,
+        extra_info={
+            "question": normalized["question"],
+            "choices": choices,
+            "answer_index": answer_letter,
+            "answer_text": normalized["answer_text"],
+            **normalized["metadata"],
+        },
+    )
+
+
+@register_adapter("lexam_mcq")
+def adapt_lexam_mcq(
+    example: dict[str, Any], idx: int, split: str, config: DatasetConfig
+) -> dict[str, Any]:
+    normalized = normalize_lexam_mcq_sample(example)
+    choices, answer_letter = maybe_shuffle_choices(
+        normalized["choices"], normalized["answer_index"], config, idx
+    )
+    metadata = dict(normalized["metadata"])
+    if config.subject_key and config.subject_key in metadata:
+        metadata["subject"] = normalize_text(metadata[config.subject_key])
+    return make_row(
+        config=config,
+        split=split,
+        index=idx,
+        prompt=make_prompt(
+            format_multiple_choice_prompt(normalized["question"], choices)
+        ),
+        ability="knowledge",
+        ground_truth=answer_letter,
+        extra_info={
+            "question": normalized["question"],
+            "choices": choices,
+            "answer_index": answer_letter,
+            "answer_text": normalized["answer_text"],
+            **metadata,
+        },
     )
 
 

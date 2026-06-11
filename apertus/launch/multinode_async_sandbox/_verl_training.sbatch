@@ -90,7 +90,7 @@ TEST_FILE="${DATA_DIR}/val.parquet"
 APERTUS_DIR="${APERTUS_DIR:-${WORKING_DIR}/apertus}"
 # display_answers is a stateless @function_tool, so it is loaded through
 # function_tool_path. tool_config_path is only for BaseTool subclasses.
-APERTUS_FUNCTION_TOOL_PATH="${APERTUS_FUNCTION_TOOL_PATH:-${APERTUS_DIR}/display_answer_tools.py}"
+APERTUS_FUNCTION_TOOL_PATH="${APERTUS_FUNCTION_TOOL_PATH:-${APERTUS_DIR}/utils/display_answer_tools.py}"
 OUTPUT_ROOT="${WORKING_DIR}/outputs/${PROJECT_NAME}"
 RUN_NAME="${RUN_NAME:-}"
 RUN_DIR="${RUN_DIR:-}"
