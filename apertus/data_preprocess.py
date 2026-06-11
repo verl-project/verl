@@ -23,8 +23,9 @@ from dataclasses import dataclass
 from typing import Any
 
 import datasets
+from utils.rgym import strip_rgym_format_instructions
+from utils.table_gpt import load_table_gpt_mix, TABLE_GPT_DATASET_ID
 
-from table_gpt_data import TABLE_GPT_DATASET_ID, load_table_gpt_mix
 from verl.utils.reward_score.gsm8k import extract_solution as extract_gsm8k_solution
 
 LOCAL_SAVE_DIR = "./data/apertus_demo_rl"
@@ -209,6 +210,15 @@ TRAIN_DATASETS = [
 
 EVAL_DATASETS = [
     DatasetConfig(
+        name="rgym",
+        dataset_id="/capstor/store/cscs/swissai/infra01/reasoning/data/RL-prod/rgym/val_mini.parquet",
+        split="val_mini",
+        adapter="rgym",
+        data_source="rgym",
+        prompt_key="prompt",
+        sample_size=200,
+    ),
+    DatasetConfig(
         name="gsm8k",
         dataset_id="openai/gsm8k",
         subset="main",
@@ -388,6 +398,20 @@ def normalize_messages(messages: Any) -> list[dict[str, str]]:
     return normalized
 
 
+def maybe_strip_rgym_format_instructions(
+    prompt: list[dict[str, str]], config: DatasetConfig, language: str | None = None
+) -> list[dict[str, str]]:
+    """Strips out the output format instructions if "display_answers" tool is selected"""
+    if "display_answers" not in config.tool_selection:
+        return prompt
+
+    normalized = []
+    for message in prompt:
+        content, _ = strip_rgym_format_instructions(message["content"], language)
+        normalized.append({**message, "content": content})
+    return normalized
+
+
 def prompt_controls(config: DatasetConfig) -> dict[str, Any]:
     controls = {
         "tool_selection": list(config.tool_selection),
@@ -447,9 +471,13 @@ def adapt_rgym(
     example: dict[str, Any], idx: int, split: str, config: DatasetConfig
 ) -> dict[str, Any]:
     row = dict(example)
-    row["prompt"] = normalize_messages(get_value(example, config.prompt_key))
-    row["data_source"] = config.data_source
+    prompt = normalize_messages(get_value(example, config.prompt_key))
     extra_info = dict(parse_json_maybe(get_value(example, "extra_info"), default={}) or {})
+    prompt = maybe_strip_rgym_format_instructions(
+        prompt, config, normalize_text(extra_info.get("language")) or None
+    )
+    row["prompt"] = prompt
+    row["data_source"] = config.data_source
     extra_info.update(prompt_controls(config))
     extra_info["source_dataset"] = normalize_text(get_value(example, "data_source"))
     row["extra_info"] = extra_info
