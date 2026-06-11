@@ -8,6 +8,8 @@ on ROCm, following a "CUDA base + ROCm extensions" model (always extend the
 parent via ``super()`` rather than re-implementing it).
 """
 
+import os
+
 import torch
 
 from .platform_cuda import PlatformCUDA
@@ -35,7 +37,12 @@ class PlatformROCm(PlatformCUDA):
     def rollout_env_vars(self) -> dict[str, str]:
         # Extend CUDA's rollout env vars with ROCm-specific ones. SGLANG_USE_AITER
         # routes SGLang's non-attention kernels (RMSNorm/RoPE/MoE/quant) through AITER.
-        return {**super().rollout_env_vars(), "SGLANG_USE_AITER": "1"}
+        # Default to "1" but honor an explicit user override (e.g. SGLANG_USE_AITER=0
+        # to fall back to vLLM kernels).
+        return {
+            **super().rollout_env_vars(),
+            "SGLANG_USE_AITER": os.environ.get("SGLANG_USE_AITER", "1"),
+        }
 
     def ray_noset_envvars(self) -> list[str]:
         # On ROCm, HIP_VISIBLE_DEVICES takes precedence over CUDA_VISIBLE_DEVICES,
