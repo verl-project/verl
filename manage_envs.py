@@ -87,13 +87,13 @@ from the baked cache, offline — instead of hard-coding one combo at build
 time. Do **not** use ``prefetch`` as a runtime sync; use ``sync <extras...>``
 for that.
 
-This driver exposes two GPU torch "worlds" plus a CPU slice, all in one lock:
-the cu13.0 / torch-2.11 backends (vllm, sglang, fsdp, megatron), the cu12.9 /
-torch-2.9.1 backends (veomni, nemoautomodel), and the GPU-free ``cpu`` slice.
-They never mix in one ``.venv`` (see the conflict sets). ``prefetch`` can be
-scoped to one world via the ``cu130`` / ``cu129`` shortcuts so each Docker
-image bakes only its own backends. trtllm is deferred in pyproject.toml (a
-CUDA-13 RC sdist; see docker/Dockerfile.uv.cu129) and absent here.
+This driver exposes one GPU torch "world" plus a CPU slice, all in one lock:
+the cu13.0 / torch-2.11 backends (vllm, sglang, fsdp, megatron) and the
+GPU-free ``cpu`` slice. They never mix in one ``.venv`` (see the conflict
+sets). ``prefetch`` scopes the cache warm via the ``cu130`` shortcut so the
+Docker image bakes only its backends. DEFERRED (commented out in
+pyproject.toml until they support torch-2.11 / cu130): the cu12.9 /
+torch-2.9.1 world (veomni, nemoautomodel) and trtllm (a CUDA-13 RC sdist).
 
 Re-locking after a dependency change
 ------------------------------------
@@ -115,30 +115,34 @@ import sys
 import tempfile
 from pathlib import Path
 
-# Active extras in the universal lock. Two GPU torch "worlds" + a CPU slice:
+# Active extras in the universal lock. One GPU torch "world" + a CPU slice:
 #   * cu13.0 / torch 2.11  : vllm, sglang (inference) + fsdp, megatron (training)
-#   * cu12.9 / torch 2.9.1 : veomni, nemoautomodel (training)
 #   * cpu   / torch 2.11   : GPU-free CI / unit-test / dev-sanity slice
-# trtllm is deferred in pyproject.toml (a CUDA-13 RC) and not listed here.
+# DEFERRED and absent from the active lock: the cu12.9 / torch-2.9.1 world
+# (veomni, nemoautomodel) and trtllm (a CUDA-13 RC). Both stay commented out in
+# pyproject.toml until those packages support torch-2.11 / cu130.
 INFERENCE_BACKENDS: list[str] = ["vllm", "sglang"]
 TRAINING_BACKENDS: list[str] = ["fsdp", "megatron"]
-# cu12.9 / torch 2.9.1 training backends (their own torch world).
-CU129_BACKENDS: list[str] = ["veomni", "nemoautomodel"]
+# DEFERRED — cu12.9 / torch 2.9.1 training backends (["veomni", "nemoautomodel"]).
+# Re-add the names here and re-enable their extras in pyproject.toml when they
+# support torch-2.11 / cu130.
+CU129_BACKENDS: list[str] = []
 # `cpu` is the GPU-free CI / unit-test / dev-sanity slice.
 DEV_BACKENDS: list[str] = ["cpu"]
 ALL_EXTRAS: list[str] = INFERENCE_BACKENDS + TRAINING_BACKENDS + CU129_BACKENDS + DEV_BACKENDS
 
 # Mutually exclusive extras — must mirror [tool.uv].conflicts in pyproject.toml.
-# At most one member of each set may be synced into a single .venv. The three
-# torch worlds never mix, so the cu12.9 backends join every set: vllm / sglang
-# are competing inference engines; cpu is GPU-free; veomni / nemoautomodel pin a
-# different torch. fsdp / megatron may co-exist with one cu130 inference engine.
-# (The flash-attn-* URL-routing sub-extras also conflict in pyproject.toml, but
-# they are internal and never synced directly, so they are omitted here.)
+# At most one member of each set may be synced into a single .venv. vllm / sglang
+# are competing inference engines; cpu is GPU-free. fsdp / megatron may co-exist
+# with one cu130 inference engine. (The flash-attn-* URL-routing sub-extras also
+# conflict in pyproject.toml, but they are internal and never synced directly,
+# so they are omitted here.)
+# DEFERRED (cu12.9): re-add "veomni", "nemoautomodel" to every set when the
+# torch-2.9.1 world returns — they pin a different torch, so they conflict with all.
 CONFLICT_SETS: list[set[str]] = [
-    {"vllm", "sglang", "cpu", "veomni", "nemoautomodel"},
-    {"fsdp", "cpu", "veomni", "nemoautomodel"},
-    {"megatron", "cpu", "veomni", "nemoautomodel"},
+    {"vllm", "sglang", "cpu"},
+    {"fsdp", "cpu"},
+    {"megatron", "cpu"},
 ]
 
 # Single interpreter for the whole project (matches [tool.uv].environments,
@@ -146,11 +150,9 @@ CONFLICT_SETS: list[set[str]] = [
 PYTHON_VERSION = "3.12"
 
 # Recommended build-time env vars, keyed by extra. `megatron` source-builds
-# apex + TE v2.15; the cu12.9 backends (veomni / nemoautomodel) source-build
-# flash-attn 2.8.3 against torch 2.9.1 (there is no cu129 prebuilt wheel — uv
-# can't fork a second direct URL, uv#13073). Every other extra is prebuilt
-# wheels only (cu130 flash-attn, torch / vllm / sglang from the pytorch / PyPI
-# indexes). MAX_JOBS=32 is the floor that succeeds everywhere; bump via e.g.
+# apex + TE v2.15. Every other cu130 extra uses prebuilt wheels only (cu130
+# flash-attn, torch / vllm / sglang from the pytorch / PyPI indexes).
+# MAX_JOBS=32 is the floor that succeeds everywhere; bump via e.g.
 # `MAX_JOBS=128 python manage_envs.py sync megatron` on big hosts.
 BUILD_ENV: dict[str, dict[str, str]] = {
     "megatron": {
@@ -158,9 +160,11 @@ BUILD_ENV: dict[str, dict[str, str]] = {
         "NVTE_FRAMEWORK": "pytorch",
         "NVTE_BUILD_THREADS_PER_JOB": "4",
     },
-    # flash-attn source build honors MAX_JOBS (heavy nvcc compile).
-    "veomni": {"MAX_JOBS": "32"},
-    "nemoautomodel": {"MAX_JOBS": "32"},
+    # DEFERRED (cu12.9): veomni / nemoautomodel source-build flash-attn 2.8.3
+    # against torch 2.9.1 (no cu129 prebuilt wheel; uv can't fork a 2nd direct
+    # URL, uv#13073). Re-add when that world returns.
+    # "veomni": {"MAX_JOBS": "32"},
+    # "nemoautomodel": {"MAX_JOBS": "32"},
 }
 
 GROUPS: dict[str, list[str]] = {
@@ -171,7 +175,7 @@ GROUPS: dict[str, list[str]] = {
     # CUDA-world shortcuts, used to scope `prefetch` per Docker image so each
     # image bakes only the backends it can actually run on its CUDA base.
     "cu130": INFERENCE_BACKENDS + TRAINING_BACKENDS,  # torch 2.11 GPU backends
-    "cu129": CU129_BACKENDS,  # torch 2.9.1 GPU backends
+    # DEFERRED (cu12.9): "cu129": CU129_BACKENDS,  # torch 2.9.1 GPU backends
 }
 
 VERL_DIR = Path(__file__).resolve().parent
@@ -309,16 +313,16 @@ def _covering_combos(extras: list[str] | None = None) -> list[list[str]]:
     use would go uncached and miss offline. Pairing each inference engine with
     each trainer warms exactly those runtime forks.
 
-    Backends with no counterpart role in their torch world are warmed
-    standalone: the cu12.9 trainers (``veomni`` / ``nemoautomodel``), which have
-    no inference engine in their world, and the GPU-free ``cpu`` slice — each
-    mutually exclusive with everything else. The same fallback emits singletons
-    when a scope contains only one cu130 role (e.g. ``prefetch inference``).
+    Backends with no counterpart role are warmed standalone: the GPU-free
+    ``cpu`` slice, mutually exclusive with everything else. The same fallback
+    emits singletons when a scope contains only one cu130 role (e.g.
+    ``prefetch inference``). (DEFERRED: the cu12.9 trainers veomni /
+    nemoautomodel were also warmed standalone; they return with that world.)
 
     Over ``cu130`` it yields ``[[vllm, fsdp], [vllm, megatron], [sglang, fsdp],
-    [sglang, megatron]]``; over ``ALL_EXTRAS`` it appends ``[veomni],
-    [nemoautomodel], [cpu]``. (Inference-only or training-only runs are not
-    pre-warmed — sync one inference engine + one trainer, per the RL flow.)
+    [sglang, megatron]]``; over ``ALL_EXTRAS`` it appends ``[cpu]``.
+    (Inference-only or training-only runs are not pre-warmed — sync one
+    inference engine + one trainer, per the RL flow.)
     """
     pool = list(extras) if extras is not None else list(ALL_EXTRAS)
     pset = set(pool)
@@ -440,11 +444,11 @@ def cmd_clean(_args: argparse.Namespace) -> int:
 
 def cmd_list(_args: argparse.Namespace) -> int:
     """Show available extras, conflict rules, .venv state, and prefetch plan."""
-    print("extras (one universal uv.lock; three torch worlds):")
+    print("extras (one universal uv.lock; cu130/torch-2.11 + cpu):")
     print(f"  inference (cu130/torch-2.11) : {', '.join(INFERENCE_BACKENDS)}")
     print(f"  training  (cu130/torch-2.11) : {', '.join(TRAINING_BACKENDS)}")
-    print(f"  cu129     (torch-2.9.1)      : {', '.join(CU129_BACKENDS)}")
     print(f"  dev       (cpu/torch-2.11)   : {', '.join(DEV_BACKENDS)}")
+    print("  cu129     (torch-2.9.1)      : DEFERRED (veomni, nemoautomodel)")
     print("\nmutually exclusive (at most one per `sync`):")
     for cs in CONFLICT_SETS:
         print("  {" + ", ".join(sorted(cs)) + "}")
@@ -467,7 +471,7 @@ def cmd_list(_args: argparse.Namespace) -> int:
     print("\nprefetch plan (cache-warm combos; 1 inference + 1 training each):")
     for combo in combos:
         print(f"  uv sync --extra {' --extra '.join(combo)}")
-    print("  (scope per Docker image: `prefetch cu130` | `prefetch cu129`)")
+    print("  (scope per Docker image: `prefetch cu130`)")
     return 0
 
 
@@ -504,8 +508,8 @@ def cmd_prefetch(args: argparse.Namespace) -> int:
     (``uv lock``) so prefetch OWNS the lockfile: pyproject is the single source
     of truth and no pre-existing lock is required (it is a no-op rewrite when
     the lock is already current). (2) Warm the cache for the requested extras
-    (positional args; default all of ``ALL_EXTRAS``, or a CUDA world via the
-    ``cu130`` / ``cu129`` shortcuts to bake one Docker image's backends).
+    (positional args; default all of ``ALL_EXTRAS``, or the ``cu130`` shortcut
+    to bake the Docker image's backends).
     Because the backends conflict, there is no single env that holds them all,
     so it syncs the conflict-free runtime combos from ``_covering_combos()``
     (one inference engine + one training backend each) into **throwaway**
@@ -614,11 +618,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
     extras_help = (
         "extra name(s); shortcuts: all, inference (vllm sglang), "
-        "training (fsdp megatron), cu129 (veomni nemoautomodel), dev (cpu). "
-        "x86_64 Linux + Python 3.12 only. Mutually exclusive sets (at most one "
-        "each per sync): {vllm, sglang, cpu, veomni, nemoautomodel}, "
-        "{fsdp, cpu, veomni, nemoautomodel}, {megatron, cpu, veomni, "
-        "nemoautomodel}. trtllm is deferred (a CUDA-13 RC; see pyproject.toml)."
+        "training (fsdp megatron), dev (cpu). x86_64 Linux + Python 3.12 only. "
+        "Mutually exclusive sets (at most one each per sync): "
+        "{vllm, sglang, cpu}, {fsdp, cpu}, {megatron, cpu}. DEFERRED (see "
+        "pyproject.toml): the cu12.9 world (veomni, nemoautomodel) and trtllm "
+        "(a CUDA-13 RC)."
     )
 
     lk = sub.add_parser("lock", help="(re)generate the universal uv.lock (uv lock)")
@@ -668,8 +672,8 @@ def _build_parser() -> argparse.ArgumentParser:
             "($UV_CACHE_DIR, default ~/.cache/uv) by syncing the conflict-free "
             "runtime combos (1 inference + 1 training each) into throwaway envs "
             "(--frozen --no-install-project). Pass extras/groups to scope the "
-            "cache warm (default: all); use the cu130 / cu129 shortcuts to bake "
-            "one CUDA world per Docker image. The project .venv is never created "
+            "cache warm (default: all); use the cu130 shortcut to bake the "
+            "cu130 world per Docker image. The project .venv is never created "
             "or modified. Use once after cloning, or bake it into a Docker image "
             "layer; for a runtime env use `sync`."
         ),
@@ -678,8 +682,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "rest",
         nargs=argparse.REMAINDER,
         help="[extras/groups...] [-- uv args...]: optional extras/groups scope "
-        "the cache warm (default: all; e.g. `cu130` or `cu129` to bake one "
-        "CUDA world); anything after `--` is forwarded to each `uv sync`",
+        "the cache warm (default: all; e.g. `cu130` to bake the cu130 world); "
+        "anything after `--` is forwarded to each `uv sync`",
     )
     pf.set_defaults(func=cmd_prefetch)
 
