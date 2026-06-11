@@ -69,13 +69,15 @@ class NaiveRewardManager(RewardManagerBase):
         if tool_selection is not None and "display_answers" not in tool_selection:
             return None
 
-        terminal_tool_arguments = extra_info.get("terminal_tool_arguments")
-        if terminal_tool_arguments is None:
+        display_answers_arguments = extra_info.get("display_answers_arguments")
+        if display_answers_arguments is None:
+            display_answers_arguments = extra_info.get("terminal_tool_arguments")
+        if display_answers_arguments is None:
             return [""] if tool_selection is not None else None
-        if not isinstance(terminal_tool_arguments, dict):
+        if not isinstance(display_answers_arguments, dict):
             return [""]
 
-        answers = terminal_tool_arguments.get("answers")
+        answers = display_answers_arguments.get("answers")
         if isinstance(answers, list):
             return [str(answer) for answer in answers] or [""]
         if isinstance(answers, str):

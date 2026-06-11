@@ -1196,6 +1196,7 @@ class AgentLoopWorker:
             "max_global_steps",
             "extras",
             "terminal_tool_arguments",
+            "display_answers_arguments",
         }
         all_keys = (
             set(key for input_item in inputs for key in input_item.extra_fields)

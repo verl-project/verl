@@ -98,7 +98,9 @@ class HermesToolParser(ToolParser):
 
         self.tool_call_start_token: str = "<tool_call>"
         self.tool_call_end_token: str = "</tool_call>"
-        self.tool_call_regex = regex.compile(r"<tool_call>(.*?)</tool_call>", regex.DOTALL)
+        self.tool_call_regex = regex.compile(
+            r"<tool_call>(.*?)</tool_call>", regex.DOTALL
+        )
 
     @rollout_trace_op
     async def extract_tool_calls(
@@ -106,7 +108,10 @@ class HermesToolParser(ToolParser):
     ) -> tuple[str, list[FunctionCall]]:
         loop = get_event_loop()
         text = await loop.run_in_executor(None, self.tokenizer.decode, responses_ids)
-        if self.tool_call_start_token not in text or self.tool_call_end_token not in text:
+        if (
+            self.tool_call_start_token not in text
+            or self.tool_call_end_token not in text
+        ):
             return text, []
 
         matches = self.tool_call_regex.findall(text)
@@ -115,7 +120,11 @@ class HermesToolParser(ToolParser):
             try:
                 function_call = json.loads(match)
                 name, arguments = function_call["name"], function_call["arguments"]
-                function_calls.append(FunctionCall(name=name, arguments=json.dumps(arguments, ensure_ascii=False)))
+                function_calls.append(
+                    FunctionCall(
+                        name=name, arguments=json.dumps(arguments, ensure_ascii=False)
+                    )
+                )
             except Exception as e:
                 logger.error(f"Failed to decode tool call: {e}")
 
@@ -143,7 +152,10 @@ class Apertus2509ToolParser(ToolParser):
         self, responses_ids: list[int], tools: list[OpenAIFunctionToolSchema] = None
     ) -> tuple[str, list[FunctionCall]]:
         loop = get_event_loop()
-        text = await loop.run_in_executor(None, lambda: self.tokenizer.decode(responses_ids, skip_special_tokens=False))
+        text = await loop.run_in_executor(
+            None,
+            lambda: self.tokenizer.decode(responses_ids, skip_special_tokens=False),
+        )
         if tools is not None and not tools:
             return text, []
         if self.bot not in text:
@@ -176,10 +188,16 @@ class Apertus2509ToolParser(ToolParser):
                     continue
                 name = next(iter(item.keys()))
                 if tool_names and name not in tool_names:
-                    logger.warning(f"Model attempted to call undefined function: {name}")
+                    logger.warning(
+                        f"Model attempted to call undefined function: {name}"
+                    )
                     continue
                 arguments = item.get(name) or {}
-                calls.append(FunctionCall(name=name, arguments=json.dumps(arguments, ensure_ascii=False)))
+                calls.append(
+                    FunctionCall(
+                        name=name, arguments=json.dumps(arguments, ensure_ascii=False)
+                    )
+                )
 
             cursor = suffix_pos + len(self.suffix)
 
@@ -212,10 +230,13 @@ class GptOssToolParser(ToolParser):
         super().__init__(tokenizer)
         # check https://cookbook.openai.com/articles/openai-harmony for more details.
         self.cot_pattern = regex.compile(
-            r"<\|start\|>assistant<\|channel\|>analysis<\|message\|>.*?<\|end\|>", regex.DOTALL
+            r"<\|start\|>assistant<\|channel\|>analysis<\|message\|>.*?<\|end\|>",
+            regex.DOTALL,
         )
         # <|start|>assistant may be pre-appended in prompts, so we need to remove it.
-        self.partial_cot_pattern = regex.compile(r"<\|channel\|>analysis<\|message\|>(.*?)<\|end\|>", regex.DOTALL)
+        self.partial_cot_pattern = regex.compile(
+            r"<\|channel\|>analysis<\|message\|>(.*?)<\|end\|>", regex.DOTALL
+        )
         self.tool_call_pattern = regex.compile(
             r"<\|start\|>assistant<\|channel\|>[^<]* to=functions\.([^<]+) "
             r"<\|constrain\|>json<\|message\|>(.*?)<\|call\|>",
@@ -228,7 +249,10 @@ class GptOssToolParser(ToolParser):
     ) -> tuple[str, list[FunctionCall]]:
         loop = get_event_loop()
         # We need to keep special tokens for gpt-oss model for better tool call extraction.
-        text = await loop.run_in_executor(None, lambda: self.tokenizer.decode(responses_ids, skip_special_tokens=False))
+        text = await loop.run_in_executor(
+            None,
+            lambda: self.tokenizer.decode(responses_ids, skip_special_tokens=False),
+        )
         # Need to remove padding tokens for better tool call extraction.
         text = text.replace(self.tokenizer.pad_token, "")
         # Need to reomve COT since COT may contain tool call tokens.But they are not valid tool calls.
@@ -272,10 +296,18 @@ class Qwen3XMLToolParser(ToolParser):
         self.tool_call_end_token: str = "</tool_call>"
         self.tool_call_prefix: str = "<function="
 
-        self.tool_call_complete_regex = regex.compile(r"<tool_call>(.*?)</tool_call>", regex.DOTALL)
-        self.tool_call_regex = regex.compile(r"<tool_call>(.*?)</tool_call>|<tool_call>(.*?)$", regex.DOTALL)
-        self.tool_call_function_regex = regex.compile(r"<function=(.*?)</function>|<function=(.*)$", regex.DOTALL)
-        self.tool_call_parameter_regex = regex.compile(r"<parameter=(.*?)</parameter>|<parameter=(.*?)$", regex.DOTALL)
+        self.tool_call_complete_regex = regex.compile(
+            r"<tool_call>(.*?)</tool_call>", regex.DOTALL
+        )
+        self.tool_call_regex = regex.compile(
+            r"<tool_call>(.*?)</tool_call>|<tool_call>(.*?)$", regex.DOTALL
+        )
+        self.tool_call_function_regex = regex.compile(
+            r"<function=(.*?)</function>|<function=(.*)$", regex.DOTALL
+        )
+        self.tool_call_parameter_regex = regex.compile(
+            r"<parameter=(.*?)</parameter>|<parameter=(.*?)$", regex.DOTALL
+        )
 
     def _parse_xml_function_call(
         self, function_call_str: str, tools: Optional[list[OpenAIFunctionToolSchema]]
@@ -288,7 +320,9 @@ class Qwen3XMLToolParser(ToolParser):
             logger.warning(f"Tool '{func_name}' is not defined in the tools list.")
             return {}
 
-        def convert_param_value(param_value: str, param_name: str, param_config: dict, func_name: str) -> Any:
+        def convert_param_value(
+            param_value: str, param_name: str, param_config: dict, func_name: str
+        ) -> Any:
             # Handle null value for any type
             if param_value.lower() == "null":
                 return None
@@ -301,7 +335,10 @@ class Qwen3XMLToolParser(ToolParser):
                     )
                 return param_value
 
-            if isinstance(param_config[param_name], dict) and "type" in param_config[param_name]:
+            if (
+                isinstance(param_config[param_name], dict)
+                and "type" in param_config[param_name]
+            ):
                 param_type = str(param_config[param_name]["type"]).strip().lower()
             else:
                 param_type = "string"
@@ -326,7 +363,9 @@ class Qwen3XMLToolParser(ToolParser):
                 try:
                     float_param_value = float(param_value)
                     param_value = (
-                        float_param_value if float_param_value - int(float_param_value) != 0 else int(float_param_value)
+                        float_param_value
+                        if float_param_value - int(float_param_value) != 0
+                        else int(float_param_value)
                     )
                 except Exception:
                     logger.warning(
@@ -378,13 +417,19 @@ class Qwen3XMLToolParser(ToolParser):
             if param_value.endswith("\n"):
                 param_value = param_value[:-1]
 
-            param_dict[param_name] = convert_param_value(param_value, param_name, param_config, function_name)
-        return FunctionCall(name=function_name, arguments=json.dumps(param_dict, ensure_ascii=False))
+            param_dict[param_name] = convert_param_value(
+                param_value, param_name, param_config, function_name
+            )
+        return FunctionCall(
+            name=function_name, arguments=json.dumps(param_dict, ensure_ascii=False)
+        )
 
     def _get_function_calls(self, model_output: str) -> list[str]:
         # Find all tool calls
         matched_ranges = self.tool_call_regex.findall(model_output)
-        raw_tool_calls = [match[0] if match[0] else match[1] for match in matched_ranges]
+        raw_tool_calls = [
+            match[0] if match[0] else match[1] for match in matched_ranges
+        ]
 
         # Back-off strategy if no tool_call tags found
         if len(raw_tool_calls) == 0:
@@ -394,7 +439,9 @@ class Qwen3XMLToolParser(ToolParser):
         for tool_call in raw_tool_calls:
             raw_function_calls.extend(self.tool_call_function_regex.findall(tool_call))
 
-        function_calls = [match[0] if match[0] else match[1] for match in raw_function_calls]
+        function_calls = [
+            match[0] if match[0] else match[1] for match in raw_function_calls
+        ]
         return function_calls
 
     @rollout_trace_op
@@ -412,12 +459,17 @@ class Qwen3XMLToolParser(ToolParser):
                 return text, []
 
             tool_calls = [
-                self._parse_xml_function_call(function_call_str, tools) for function_call_str in function_calls
+                self._parse_xml_function_call(function_call_str, tools)
+                for function_call_str in function_calls
             ]
 
             # Extract content before tool calls
             content_index = text.find(self.tool_call_start_token)
-            content_index = content_index if content_index >= 0 else text.find(self.tool_call_prefix)
+            content_index = (
+                content_index
+                if content_index >= 0
+                else text.find(self.tool_call_prefix)
+            )
             content = text[:content_index]  # .rstrip()
 
             return content, tool_calls
@@ -440,7 +492,9 @@ class Gemma4ToolParser(ToolParser):
         self.tool_call_start_token = "<|tool_call>"
         self.tool_call_end_token = "<tool_call|>"
         self._stop_token_id = tokenizer.convert_tokens_to_ids("<tool_call|>")
-        self.tool_call_regex = regex.compile(r"<\|tool_call>call:(\w+)\{(.*?)\}<tool_call\|>", regex.DOTALL)
+        self.tool_call_regex = regex.compile(
+            r"<\|tool_call>call:(\w+)\{(.*?)\}<tool_call\|>", regex.DOTALL
+        )
         self.arg_regex = regex.compile(r'(\w+):(?:<\|"\|>(.*?)<\|"\|>|([^,}]*))')
 
     @property
@@ -479,7 +533,10 @@ class Gemma4ToolParser(ToolParser):
         self, responses_ids: list[int], tools: list[OpenAIFunctionToolSchema] = None
     ) -> tuple[str, list[FunctionCall]]:
         loop = get_event_loop()
-        text = await loop.run_in_executor(None, lambda: self.tokenizer.decode(responses_ids, skip_special_tokens=False))
+        text = await loop.run_in_executor(
+            None,
+            lambda: self.tokenizer.decode(responses_ids, skip_special_tokens=False),
+        )
         if self.tokenizer.pad_token:
             text = text.replace(self.tokenizer.pad_token, "")
 
@@ -494,7 +551,11 @@ class Gemma4ToolParser(ToolParser):
         for name, args_str in matches:
             try:
                 arguments = self._parse_arguments(args_str)
-                function_calls.append(FunctionCall(name=name, arguments=json.dumps(arguments, ensure_ascii=False)))
+                function_calls.append(
+                    FunctionCall(
+                        name=name, arguments=json.dumps(arguments, ensure_ascii=False)
+                    )
+                )
             except Exception as e:
                 logger.error(f"Failed to parse Gemma4 tool call: {e}")
 

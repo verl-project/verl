@@ -89,6 +89,7 @@ class AgentData:
 
         # Temporary state for tool calls
         self.tool_calls: list[FunctionCall] = []
+        self.close_assistant_after_tools = False
         self.active_tools: dict[str, Any] = {}
         self.active_tool_schemas: list[dict[str, Any]] = []
         self.apply_chat_template_kwargs: dict[str, Any] = {}
@@ -258,6 +259,8 @@ class ToolAgentLoop(AgentLoopBase):
         ignore_termination: bool = False,
     ) -> AgentState:
         """Handle the generating state: generate model response and check for tool calls."""
+        is_apertus = self.tool_parser_name == "apertus2509"
+
         # Inject tool parser stop tokens so generation halts after each tool call
         if self.tool_parser.stop_token_ids:
             stop_token_ids = list(
@@ -302,7 +305,8 @@ class ToolAgentLoop(AgentLoopBase):
                         agent_data.extra_fields[key]
                     ) + int(output.extra_fields[key])
 
-        agent_data.assistant_turns += 1
+        if not is_apertus:
+            agent_data.assistant_turns += 1
         agent_data.response_ids = output.token_ids
         agent_data.prompt_ids += agent_data.response_ids
         agent_data.response_mask += [1] * len(agent_data.response_ids)
@@ -317,6 +321,8 @@ class ToolAgentLoop(AgentLoopBase):
             not ignore_termination
             and len(agent_data.response_mask) >= self.response_length
         ):
+            if is_apertus:
+                agent_data.assistant_turns += 1
             return AgentState.TERMINATED
 
         # Extract tool calls (use per-sample tools if routed)
@@ -328,7 +334,17 @@ class ToolAgentLoop(AgentLoopBase):
         else:
             agent_data.tool_calls = []
 
+        if is_apertus and not agent_data.tool_calls:
+            agent_data.assistant_turns += 1
+
         for tool_call in agent_data.tool_calls:
+            if tool_call.name == "display_answers":
+                try:
+                    agent_data.extra_fields["display_answers_arguments"] = json.loads(
+                        tool_call.arguments
+                    )
+                except (json.JSONDecodeError, TypeError):
+                    agent_data.extra_fields["display_answers_arguments"] = {}
             if tool_call.name not in self.terminal_tool_names:
                 continue
             try:
@@ -336,6 +352,9 @@ class ToolAgentLoop(AgentLoopBase):
             except (json.JSONDecodeError, TypeError):
                 arguments = {}
             agent_data.extra_fields["terminal_tool_arguments"] = arguments
+            if is_apertus:
+                agent_data.close_assistant_after_tools = True
+                continue
             return AgentState.TERMINATED
 
         if (
@@ -353,6 +372,7 @@ class ToolAgentLoop(AgentLoopBase):
 
     async def _handle_processing_tools_state(self, agent_data: AgentData) -> AgentState:
         """Handle the processing tools state: execute tool calls and prepare tool responses."""
+        is_apertus = self.tool_parser_name == "apertus2509"
         add_messages: list[dict[str, Any]] = []
         new_images_this_turn: list[
             Any
@@ -471,6 +491,22 @@ class ToolAgentLoop(AgentLoopBase):
                     tool_response_text, add_special_tokens=False
                 ),
             )
+        elif is_apertus:
+            parts = []
+            for msg in add_messages:
+                content = msg.get("content", "")
+                if isinstance(content, list):
+                    content = "".join(item.get("text", "") for item in content if item.get("type") == "text")
+                parts.append(json.dumps(str(content), ensure_ascii=False))
+            tool_response_text = f"<|tool_output_start|>{', '.join(parts)}<|tool_output_end|>"
+            if agent_data.close_assistant_after_tools:
+                tool_response_text += "<|assistant_end|>"
+            response_ids = await self.loop.run_in_executor(
+                None,
+                lambda: self.tokenizer.encode(
+                    tool_response_text, add_special_tokens=False
+                ),
+            )
         else:
             # Note that we have to pass None to the images and videos if there are no new images / videos
             # to stay compatible with downstream image processing logic!
@@ -499,7 +535,13 @@ class ToolAgentLoop(AgentLoopBase):
         agent_data.response_mask += [0] * len(response_ids)
         if agent_data.response_logprobs:
             agent_data.response_logprobs += [0.0] * len(response_ids)
-        agent_data.user_turns += 1
+
+        if not is_apertus:
+            agent_data.user_turns += 1
+        if agent_data.close_assistant_after_tools:
+            agent_data.assistant_turns += 1
+            agent_data.close_assistant_after_tools = False
+            return AgentState.TERMINATED
         return AgentState.GENERATING
 
     async def _call_tool(
