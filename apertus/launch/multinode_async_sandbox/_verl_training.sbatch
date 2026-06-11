@@ -155,7 +155,7 @@ build_overrides() {
     "data.seed=${SEED}"
     "+data.force_thinking_prefix=${FORCE_THINKING}"
     "+data.thinking_prefix_token='${THINK_PREFIX_TOKEN}'"
-    "+data.apply_chat_template_kwargs.enable_thinking=${ENABLE_THINKING}"
+    "data.apply_chat_template_kwargs.enable_thinking=${ENABLE_THINKING}"
     "actor_rollout_ref.model.path=${RESOLVED_MODEL}"
     "actor_rollout_ref.rollout.n=${ROLLOUT_N}"
     "data.tool_config_path=null"
