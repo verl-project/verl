@@ -121,7 +121,7 @@ torchrun --nnodes=${NNODES} --node_rank=${RANK} --nproc_per_node=${NUM_GPUS} \
     data.use_dynamic_bsz=False \
     data.messages_key=messages \
     data.num_workers=0 \
-    model.custom_chat_template="@${CHAT_TEMPLATE_FILE}" \
+    model.custom_chat_template="\"$(cat "$CHAT_TEMPLATE_FILE")\"" \
     model.path=$MODEL_PATH \
     model.use_remove_padding=False \
     model.trust_remote_code=True \
