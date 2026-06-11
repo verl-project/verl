@@ -385,6 +385,14 @@ class SGLangHttpServer:
             args["enable_weights_cpu_backup"] = True
             args["enable_draft_weights_cpu_backup"] = True
 
+        base_port = int(os.getenv("SGLANG_PORT", "30000"))
+        role_idx = {"null": 0, "prefill": 1, "decode": 2}.get(self._disaggregation_role, 0)
+        server_rank = (self.replica_rank * 3 + role_idx) * self.nnodes + self.node_rank
+        sglang_port = base_port + server_rank * 2
+        args["port"] = sglang_port
+        if "nccl_port" in [f.name for f in dataclasses.fields(ServerArgs)]:
+            args["nccl_port"] = sglang_port + 1
+
         # NOTE: We can't directly call SGLang's launch_server since it's not an async function.
         # https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/entrypoints/http_server.py
         sglang.srt.entrypoints.engine._set_envs_and_config = _set_envs_and_config
