@@ -110,5 +110,4 @@ exec python src/backend/scheduler.py \
   --mode "${SANDBOX_MODE}" \
   --workers "${SANDBOX_WORKERS}" \
   --base-port "${SANDBOX_BASE_PORT}" \
-  --ready-timeout "${SANDBOX_READY_TIMEOUT}" \
   --cpus "${SANDBOX_CPUS_PER_WORKER}"
