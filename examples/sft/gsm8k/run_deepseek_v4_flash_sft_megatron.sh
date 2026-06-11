@@ -27,8 +27,17 @@ RANK=${RANK:-0}
 
 ENTRYPOINT=${ENTRYPOINT:-"-m verl.trainer.sft_trainer"}
 
-# Prepare GSM8K first: python examples/data_preprocess/gsm8k.py
-DATASET_DIR=${DATASET_DIR:-$HOME/data/gsm8k}
+# Prepare GSM8K first: python examples/data_preprocess/gsm8k_multiturn_sft.py
+# (the SFT preprocess — emits a "messages" column with assistant turns for supervision)
+DATASET_DIR=${DATASET_DIR:-$HOME/data/gsm8k_sft}
+
+# DeepSeek-V4-Flash ships NO chat_template in its HF tokenizer, so SFT message rendering
+# requires one. This minimal template uses only tokens that exist in the tokenizer
+# (bos/eos; V4-Flash has no role tokens). Replace with your own template if you have one.
+CHAT_TEMPLATE_FILE=${CHAT_TEMPLATE_FILE:-$HOME/data/dsv4_chat_template.jinja}
+[ -f "$CHAT_TEMPLATE_FILE" ] || cat > "$CHAT_TEMPLATE_FILE" <<'JINJA'
+{{ bos_token }}{% for message in messages %}{% if message['role'] == 'system' %}{{ message['content'] + '\n' }}{% elif message['role'] == 'user' %}{{ 'User: ' + message['content'] + '\n' }}{% elif message['role'] == 'assistant' %}{{ 'Assistant: ' + message['content'] + eos_token }}{% endif %}{% endfor %}{% if add_generation_prompt %}{{ 'Assistant: ' }}{% endif %}
+JINJA
 TRAIN_FILES=${DATASET_DIR}/train.parquet
 VAL_FILES=${DATASET_DIR}/test.parquet
 
@@ -110,8 +119,9 @@ torchrun --nnodes=${NNODES} --node_rank=${RANK} --nproc_per_node=${NUM_GPUS} \
     data.truncation=error \
     data.max_length=1024 \
     data.use_dynamic_bsz=False \
-    data.messages_key=prompt \
+    data.messages_key=messages \
     data.num_workers=0 \
+    model.custom_chat_template="@${CHAT_TEMPLATE_FILE}" \
     model.path=$MODEL_PATH \
     model.use_remove_padding=False \
     model.trust_remote_code=True \
