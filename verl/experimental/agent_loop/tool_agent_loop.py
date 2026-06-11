@@ -338,13 +338,6 @@ class ToolAgentLoop(AgentLoopBase):
             agent_data.assistant_turns += 1
 
         for tool_call in agent_data.tool_calls:
-            if tool_call.name == "display_answers":
-                try:
-                    agent_data.extra_fields["display_answers_arguments"] = json.loads(
-                        tool_call.arguments
-                    )
-                except (json.JSONDecodeError, TypeError):
-                    agent_data.extra_fields["display_answers_arguments"] = {}
             if tool_call.name not in self.terminal_tool_names:
                 continue
             try:
