@@ -40,6 +40,8 @@ class RewardManagerBase(ABC):
         Args:
             config (DictConfig): YAML config.
             tokenizer (AutoTokenizer): Tokenizer for tokenize messages.
+            compute_score (RawRewardFn): Function used to compute the reward score.
+
         """
         self.config = config
         self.tokenizer = tokenizer
@@ -56,6 +58,15 @@ class RewardManagerBase(ABC):
 
     @abstractmethod
     async def run_single(self, data: DataProto):
+        """Compute the reward for a single sample.
+
+        Args:
+            data (DataProto): A single-sample DataProto to score.
+
+        Returns:
+            dict: The computed reward result.
+
+        """
         raise NotImplementedError
 
     @classmethod
@@ -72,6 +83,7 @@ class RewardManagerBase(ABC):
         Returns:
             torch.Tensor: The ``rm_scores`` tensor with leading dimension equal to
             ``len(data)``.
+
         """
         prompt_length = data.batch["prompts"].size(1)
         valid_response_length = data.batch["attention_mask"][:, prompt_length:].sum(dim=1)

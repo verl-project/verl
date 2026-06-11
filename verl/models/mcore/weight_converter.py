@@ -28,6 +28,7 @@ class McoreToHFWeightConverterBase:
         self.mcore_config = mcore_config
 
     def convert_param(self, name: str, params_one_group: list[torch.Tensor]) -> torch.Tensor:
+        """Convert a Megatron-Core parameter group to HuggingFace format."""
         raise NotImplementedError
 
 
@@ -84,6 +85,16 @@ class McoreToHFWeightConverterDense(McoreToHFWeightConverterBase):
         return convert_names, params
 
     def convert_param(self, name: str, params_one_group: list[torch.Tensor]) -> tuple[list[str], list[torch.Tensor]]:
+        """Convert a Megatron-Core parameter group to HuggingFace names and tensors.
+
+        Args:
+            name: The Megatron-Core parameter name.
+            params_one_group: The tensors associated with the parameter name.
+
+        Returns:
+            A tuple of the HuggingFace parameter names and their tensors.
+
+        """
         direct_name_mapping = {
             "embedding.word_embeddings.weight": "model.embed_tokens.weight",
             "decoder.final_layernorm.weight": "model.norm.weight",
@@ -149,6 +160,16 @@ class McoreToHFWeightConverterQwen2Moe(McoreToHFWeightConverterDense):
 
 class McoreToHFWeightConverterQwen2_5_VL(McoreToHFWeightConverterDense):
     def convert_param(self, name: str, params_one_group: list[torch.Tensor]) -> tuple[list[str], list[torch.Tensor]]:
+        """Convert a Megatron-Core parameter group to HuggingFace names and tensors.
+
+        Args:
+            name: The Megatron-Core parameter name.
+            params_one_group: The tensors associated with the parameter name.
+
+        Returns:
+            A tuple of the HuggingFace parameter names and their tensors.
+
+        """
         direct_name_mapping = {
             "language_model.embedding.word_embeddings.weight": "model.embed_tokens.weight",
             "language_model.decoder.final_layernorm.weight": "model.norm.weight",
@@ -402,6 +423,16 @@ class McoreToHFWeightConverterDpskv3(McoreToHFWeightConverterBase):
         return convert_names, params
 
     def convert_param(self, name: str, params_one_group: list[torch.Tensor]) -> tuple[list[str], list[torch.Tensor]]:
+        """Convert a Megatron-Core parameter group to HuggingFace names and tensors.
+
+        Args:
+            name: The Megatron-Core parameter name.
+            params_one_group: The tensors associated with the parameter name.
+
+        Returns:
+            A tuple of the HuggingFace parameter names and their tensors.
+
+        """
         direct_name_mapping = {
             "embedding.word_embeddings.weight": "model.embed_tokens.weight",
             "decoder.final_layernorm.weight": "model.norm.weight",

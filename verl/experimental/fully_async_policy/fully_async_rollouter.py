@@ -79,6 +79,7 @@ class FullyAsyncLLMServerClient(LLMServerClient):
 
         Returns:
             TokenOutput: token output
+
         """
         prompt_ids = normalize_token_ids(prompt_ids)
 
@@ -238,6 +239,7 @@ class FullyAsyncLLMServerManager(LLMServerManager):
 
         Returns:
             Number of successfully activated replicas.
+
         """
         # Filter out already-active and missing replicas.
         servers_to_add: dict[str, ray.actor.ActorHandle] = {}
@@ -300,6 +302,7 @@ class FullyAsyncLLMServerManager(LLMServerManager):
 
         Returns:
             Number of successfully deactivated replicas.
+
         """
         # Filter out missing replicas and collect server addresses.
         server_ids_to_remove: list[str] = []
@@ -376,6 +379,7 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
             prompts (DataProto): Input batch. Single sample data
         Returns:
             DataProto: Output batch.
+
         """
         worker = self._select_best_worker()
         output_future = worker.generate_sequences.remote(prompts)
@@ -529,6 +533,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
             self.message_queue_client = message_queue_client
 
     async def set_max_required_samples(self):
+        """Compute and set the sample/queue/step limits based on the current config."""
         async with self.lock:
             self.max_required_samples = int(
                 self.required_samples
@@ -558,9 +563,11 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         return self.llm_server_manager.get_replicas()
 
     def get_max_queue_size(self):
+        """Return the maximum message queue size."""
         return self.max_queue_size
 
     def get_total_train_steps(self):
+        """Return the total number of training steps."""
         return self.total_train_steps
 
     async def reset_staleness(self):
@@ -612,6 +619,12 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         return timing_raw | val_metrics
 
     async def save_checkpoint(self, local_global_step_folder: str):
+        """Save the rollouter checkpoint to the given folder.
+
+        Args:
+            local_global_step_folder (str): Destination folder for the checkpoint.
+
+        """
         # WARNING!: Due to the asynchronous nature, there are some in-flight samples
         # (pending/cancel/result queue and message queue).
         # Therefore, directly saving the state of the dataloader will result in losing these
@@ -1107,6 +1120,12 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         return False
 
     async def get_statistics(self) -> dict:
+        """Return runtime statistics about samples, queues, and configuration.
+
+        Returns:
+            dict: Mapping of monitor, counting, and static statistics.
+
+        """
         queue_stats = await self.message_queue_client.get_statistics()
 
         stats = {
@@ -1140,9 +1159,27 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         return self._hybrid_worker_group
 
     async def add_replicas(self, resource_ids: list[str]) -> int:
+        """Add rollout replicas for the given resource ids.
+
+        Args:
+            resource_ids (list[str]): Resource ids to add as replicas.
+
+        Returns:
+            int: The number of replicas added.
+
+        """
         return await self.llm_server_manager.add_replicas(resource_ids)
 
     async def remove_replicas(self, resource_ids: list[str]) -> int:
+        """Remove rollout replicas for the given resource ids.
+
+        Args:
+            resource_ids (list[str]): Resource ids to remove from replicas.
+
+        Returns:
+            int: The number of replicas removed.
+
+        """
         return await self.llm_server_manager.remove_replicas(resource_ids)
 
     def get_hybrid_replica(self, resource_id: str):

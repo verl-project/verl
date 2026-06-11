@@ -107,6 +107,7 @@ from verl.workers.utils.padding import response_from_nested, response_to_nested
 
 
 def apply_greedy_sampling_params(params: dict[str, Any]) -> None:
+    """Apply greedy decoding parameters to the sampling configuration."""
     params["top_p"] = 1.0
     params["top_k"] = -1
     params["temperature"] = 0
@@ -196,6 +197,7 @@ class ReplayBuffer:
 
     Args:
         poll_interval (float, optional): Poll interval in seconds. Defaults to 1.0.
+
     """
 
     def __init__(self, poll_interval: float = 1.0):
@@ -237,6 +239,7 @@ class ReplayBuffer:
         Args:
             partition_id (str): Partition of transfer queue, e.g. "train" or "val".
             items (dict[str, dict]): Items to add, e.g. {"key": {"tag": "value"}}.
+
         """
         with self.lock:
             partition = self.partitions[partition_id]
@@ -251,6 +254,7 @@ class ReplayBuffer:
         Args:
             partition_id (str): Partition of transfer queue, e.g. "train" or "val".
             keys (list[str]): Keys to remove.
+
         """
         with self.lock:
             partition = self.partitions[partition_id]
@@ -269,6 +273,7 @@ class ReplayBuffer:
 
         Returns:
             KVBatchMeta: A batch of data.
+
         """
         assert (global_steps is not None or batch_size) and (not (global_steps is not None and batch_size)), (
             "Either global_steps or batch_size must be specified, but not both."
@@ -479,6 +484,7 @@ class AgentLoopManagerTQ(AgentLoopManager):
 
         Args:
             prompts (TensorDict): Input batch from train or validation dataset.
+
         """
         # mark prompts as pending in replay buffer
         global_steps = prompts["global_steps"]
@@ -505,6 +511,7 @@ class PPOTrainer:
         config: DictConfig from yaml config file.
         role_worker_mapping: dict[Role, WorkerType]
         resource_pool_manager: ResourcePoolManager
+
     """
 
     def __init__(
@@ -1587,6 +1594,7 @@ class PPOTrainer:
         metrics.update(compute_spec_decode_metrics(spec_drafts, spec_accepts, spec_verifies, non_padding_mask))
 
     def fit(self):
+        """Run the PPO training loop with rollout, training, and validation."""
         if self._dump_executor._shutdown:
             self._init_dump_executor()
 
@@ -1686,6 +1694,7 @@ class PPOTrainer:
         self._shutdown_dump_executor()
 
     def step(self, batch_dict: dict, metrics: dict, timing_raw: dict) -> KVBatchMeta:
+        """Execute a single training step including rollout and model updates."""
         # 1. put batch to agent loop manager
         batch_dict["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch_dict["raw_prompt"]))], dtype=object)
         if self.config.algorithm.adv_estimator == core_algos.AdvantageEstimator.REMAX:
@@ -1816,6 +1825,7 @@ class TaskRunner:
         self.resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=self.mapping)
 
     def run(self, config):
+        """Run the full PPO training pipeline."""
         pprint(OmegaConf.to_container(config, resolve=True))
         OmegaConf.resolve(config)
 
@@ -1846,6 +1856,7 @@ def main(config):
 
     Args:
         config: Hydra configuration dictionary containing training parameters.
+
     """
     # Automatically set `config.trainer.device = npu` when running on Ascend NPU.
     auto_set_device(config)

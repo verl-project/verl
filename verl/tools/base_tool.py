@@ -41,6 +41,7 @@ class BaseTool:
         print(json.dumps(self.tool_schema.model_dump(exclude_unset=True, exclude_none=True), indent=2))
 
     def get_openai_tool_schema(self) -> OpenAIFunctionToolSchema:
+        """Return the OpenAI-format tool schema for this tool."""
         return self.tool_schema
 
     async def create(self, instance_id: Optional[str] = None, **kwargs) -> tuple[str, ToolResponse]:
@@ -48,10 +49,12 @@ class BaseTool:
 
         Args:
             instance_id: The instance id of the tool.
+            **kwargs: Additional keyword arguments for tool creation.
 
         Returns:
             The instance id of the tool.
             tool_creation_response: The response of the tool when creating the instance.
+
         """
         if instance_id is None:
             return str(uuid4()), ToolResponse()
@@ -65,11 +68,13 @@ class BaseTool:
         Args:
             instance_id: The instance id of the tool.
             parameters: The json string of the parameters of the tool.
+            **kwargs: Additional keyword arguments for tool execution.
 
         Returns: tool_response, tool_reward_score, tool_metrics
             tool_response: The ToolResponse object containing text, image, and/or video content.
             tool_reward_score: The step reward score of the tool.
             tool_metrics: The metrics of the tool.
+
         """
         return ToolResponse(text="Updated the tool state."), 0.0, {}
 
@@ -78,9 +83,11 @@ class BaseTool:
 
         Args:
             instance_id: The instance id of the tool.
+            **kwargs: Additional keyword arguments for reward calculation.
 
         Returns:
             The reward of the tool.
+
         """
         return 0.0
 
@@ -89,5 +96,7 @@ class BaseTool:
 
         Args:
             instance_id: The instance id of the tool.
+            **kwargs: Additional keyword arguments for releasing the tool.
+
         """
         pass

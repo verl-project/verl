@@ -72,17 +72,30 @@ class ToolParser(ABC):
 
         Returns:
             Tuple[str, List[FunctionCall]]: Content and extracted tool calls.
+
         """
         raise NotImplementedError
 
     @classmethod
     def get_tool_parser(cls, name: str, tokenizer):
+        """Instantiate a registered tool parser by name.
+
+        Args:
+            name (str): The registered tool parser name.
+            tokenizer: The tokenizer passed to the parser constructor.
+
+        Returns:
+            ToolParser: An instance of the requested tool parser.
+
+        """
         if name not in cls._registry:
             raise ValueError(f"Unknown tool parser: {name}")
         return cls._registry[name](tokenizer)
 
     @classmethod
     def register(cls, name: str):
+        """Return a decorator that registers a tool parser subclass under ``name``."""
+
         def decorator(subclass: type[ToolParser]) -> type[ToolParser]:
             cls._registry[name] = subclass
             return subclass
@@ -105,6 +118,16 @@ class HermesToolParser(ToolParser):
     async def extract_tool_calls(
         self, responses_ids: list[int], tools: list[OpenAIFunctionToolSchema] = None
     ) -> tuple[str, list[FunctionCall]]:
+        """Extract content and tool calls from the decoded response ids.
+
+        Args:
+            responses_ids (list[int]): The ids of the responses.
+            tools (list[OpenAIFunctionToolSchema], optional): OpenAI function tool schema.
+
+        Returns:
+            tuple[str, list[FunctionCall]]: Content and extracted tool calls.
+
+        """
         loop = get_event_loop()
         text = await loop.run_in_executor(None, self.tokenizer.decode, responses_ids)
         if self.tool_call_start_token not in text or self.tool_call_end_token not in text:
@@ -134,6 +157,7 @@ class GptOssToolParser(ToolParser):
 
     Args:
         tokenizer: The tokenizer to use.
+
     """
 
     def __init__(self, tokenizer) -> None:
@@ -154,6 +178,16 @@ class GptOssToolParser(ToolParser):
     async def extract_tool_calls(
         self, responses_ids: list[int], tools: list[OpenAIFunctionToolSchema] = None
     ) -> tuple[str, list[FunctionCall]]:
+        """Extract content and tool calls from the decoded response ids.
+
+        Args:
+            responses_ids (list[int]): The ids of the responses.
+            tools (list[OpenAIFunctionToolSchema], optional): OpenAI function tool schema.
+
+        Returns:
+            tuple[str, list[FunctionCall]]: Content and extracted tool calls.
+
+        """
         loop = get_event_loop()
         # We need to keep special tokens for gpt-oss model for better tool call extraction.
         text = await loop.run_in_executor(None, lambda: self.tokenizer.decode(responses_ids, skip_special_tokens=False))
@@ -191,6 +225,7 @@ class Qwen3XMLToolParser(ToolParser):
 
     Args:
         tokenizer: The tokenizer to use.
+
     """
 
     def __init__(self, tokenizer):
@@ -332,6 +367,16 @@ class Qwen3XMLToolParser(ToolParser):
     async def extract_tool_calls(
         self, responses_ids: list[int], tools: list[OpenAIFunctionToolSchema] = None
     ) -> tuple[str, list[FunctionCall]]:
+        """Extract content and tool calls from the decoded response ids.
+
+        Args:
+            responses_ids (list[int]): The ids of the responses.
+            tools (list[OpenAIFunctionToolSchema], optional): OpenAI function tool schema.
+
+        Returns:
+            tuple[str, list[FunctionCall]]: Content and extracted tool calls.
+
+        """
         loop = get_event_loop()
         text = await loop.run_in_executor(None, self.tokenizer.decode, responses_ids)
         if self.tool_call_start_token not in text:
@@ -409,6 +454,16 @@ class Gemma4ToolParser(ToolParser):
     async def extract_tool_calls(
         self, responses_ids: list[int], tools: list[OpenAIFunctionToolSchema] = None
     ) -> tuple[str, list[FunctionCall]]:
+        """Extract content and tool calls from the decoded response ids.
+
+        Args:
+            responses_ids (list[int]): The ids of the responses.
+            tools (list[OpenAIFunctionToolSchema], optional): OpenAI function tool schema.
+
+        Returns:
+            tuple[str, list[FunctionCall]]: Content and extracted tool calls.
+
+        """
         loop = get_event_loop()
         text = await loop.run_in_executor(None, lambda: self.tokenizer.decode(responses_ids, skip_special_tokens=False))
         if self.tokenizer.pad_token:

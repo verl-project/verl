@@ -50,6 +50,7 @@ def _get_patching_model(model: torch.nn.Module):
 
 
 def patch_fused_forward(model: torch.nn.Module):
+    """Patch the model's forward with the fused GPTModel forward implementation."""
     assert version.parse(mcore.__version__) >= version.parse("0.13.0"), (
         "Fused forward patching requires mecore >= 0.13.0"
     )
@@ -60,12 +61,23 @@ def patch_fused_forward(model: torch.nn.Module):
 
 
 def unpatch_fused_forward(model: torch.nn.Module):
+    """Restore the model's original forward, undoing a fused forward patch."""
     model = _get_patching_model(model)
     if model is not None:
         model.forward = model.forward_backup
 
 
 def fused_forward_model_gen(vision_model: bool = False):
+    """Build a fused forward function for a (optionally vision) GPT model.
+
+    Args:
+        vision_model: Whether the target model is a vision-language model.
+
+    Returns:
+        A forward callable that runs the model with sequence packing.
+
+    """
+
     def fused_forward_model(
         model,
         input_ids: Tensor,
@@ -138,6 +150,16 @@ def fused_forward_model_gen(vision_model: bool = False):
 
 
 def fused_forward_model_engine(vision_model: bool = False):
+    """Build a fused forward function for the engine-style (optionally vision) GPT model.
+
+    Args:
+        vision_model: Whether the target model is a vision-language model.
+
+    Returns:
+        A forward callable that runs the model with sequence packing.
+
+    """
+
     def fused_forward_model_engine_inner(
         model,
         input_ids: Tensor,

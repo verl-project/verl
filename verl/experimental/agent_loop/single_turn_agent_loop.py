@@ -36,6 +36,16 @@ class SingleTurnAgentLoop(AgentLoopBase):
 
     @rollout_trace_op
     async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
+        """Run a single-turn chat completion and return the agent loop output.
+
+        Args:
+            sampling_params (dict[str, Any]): Sampling parameters for generation.
+            **kwargs: Additional inputs such as ``raw_prompt``.
+
+        Returns:
+            AgentLoopOutput: The result of the single-turn rollout.
+
+        """
         messages = list(kwargs["raw_prompt"])
 
         # 1. extract multimodal inputs from messages

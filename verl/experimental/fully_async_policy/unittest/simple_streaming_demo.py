@@ -28,6 +28,7 @@ class SimpleStreamingSystem:
 
     # Data stream coroutine
     async def data_stream(self):
+        """Produce test data into the stream, simulating an ongoing data source."""
         # Add initial data
         # Prepare test data
         test_data = [{"id": f"task_{i}", "content": f"data_{i}"} for i in range(8)]

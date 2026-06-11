@@ -306,6 +306,7 @@ class SFTTrainer:
         return batch_seqlens
 
     def fit(self):
+        """Run the full SFT training loop with validation and checkpointing."""
         is_logging = self.engine.is_mp_src_rank_with_outputs() and self.engine.get_data_parallel_rank() == 0
 
         # TODO: add a unified tracking
@@ -446,6 +447,7 @@ class SFTTrainer:
 
 
 def run_sft(config):
+    """Initialize distributed process group and run the SFT trainer."""
     from verl.utils.distributed import initialize_global_process_group
 
     initialize_global_process_group()
@@ -456,6 +458,7 @@ def run_sft(config):
 
 @hydra.main(config_path="config", config_name="sft_trainer_engine", version_base=None)
 def main(config):
+    """Run SFT training with Hydra configuration."""
     # Automatically set `config.trainer.device = npu` when running on Ascend NPU.
     auto_set_device(config)
     run_sft(config)

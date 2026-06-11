@@ -41,6 +41,7 @@ def main(config):
 
     Args:
         config: Hydra configuration dictionary containing training parameters.
+
     """
     # Automatically set `config.trainer.device = npu` when running on Ascend NPU.
     auto_set_device(config)
@@ -57,6 +58,7 @@ def run_ppo(config, task_runner_class=None) -> None:
                 for distributed PPO training including Ray initialization settings,
                 model paths, and training hyperparameters.
         task_runner_class: For recipe to change TaskRunner.
+
     """
     # Check if Ray is not initialized
     if not ray.is_initialized():
@@ -117,6 +119,7 @@ class TaskRunner:
     Attributes:
         role_worker_mapping: Dictionary mapping Role enums to Ray remote worker classes
         mapping: Dictionary mapping Role enums to resource pool IDs for GPU allocation
+
     """
 
     def __init__(self):
@@ -229,6 +232,7 @@ class TaskRunner:
         Args:
             config: Training configuration object containing all parameters needed
                    for setting up and running the PPO training process.
+
         """
         # Print the initial configuration. `resolve=True` will evaluate symbolic values.
         from pprint import pprint
@@ -323,9 +327,12 @@ def create_rl_dataset(data_paths, data_config, tokenizer, processor, is_train=Tr
         data_config: The data config.
         tokenizer (Tokenizer): The tokenizer.
         processor (Processor): The processor.
+        is_train (bool): Whether the dataset is for training. Defaults to True.
+        max_samples (int): Maximum number of samples to use, -1 means no limit. Defaults to -1.
 
     Returns:
         dataset (Dataset): The dataset.
+
     """
 
     from verl.utils.dataset.rl_dataset import get_dataset_class
@@ -354,6 +361,7 @@ def create_rl_sampler(data_config, dataset):
 
     Returns:
         sampler (Sampler): The sampler.
+
     """
     import torch
     from torch.utils.data import SequentialSampler

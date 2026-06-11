@@ -62,6 +62,7 @@ class WorkerHelper:
             return sock.getsockname()[1]
 
     def get_availale_master_addr_port(self):
+        """Return the master address and free port (deprecated, misspelled alias)."""
         warnings.warn(
             "This function is deprecated due to typo in name; Please use `get_available_master_addr_port` instead",
             stacklevel=2,
@@ -69,6 +70,7 @@ class WorkerHelper:
         return self.get_available_master_addr_port()
 
     def get_available_master_addr_port(self):
+        """Return the node IP address and an available free port for the master."""
         return self._get_node_ip().strip("[]"), str(self._get_free_port())
 
 
@@ -93,6 +95,7 @@ class Worker(WorkerHelper):
                 dp_rank to register for the given mesh name.
             is_collect (bool):
                 Whether the dp_rank is used for collect.
+
         """
         if mesh_name in self.__dispatch_dp_rank or mesh_name in self.__collect_dp_rank:
             raise ValueError(f"mesh_name {mesh_name} has been registered")
@@ -110,6 +113,7 @@ class Worker(WorkerHelper):
         Returns:
             int:
                 The dp_rank for the given mesh name.
+
         """
         assert mesh_name in self.__dispatch_dp_rank, f"{mesh_name} is not registered in {self.__class__.__name__}"
         # note that each rank store its own dp_rank
@@ -129,6 +133,7 @@ class Worker(WorkerHelper):
         Returns:
             bool:
                 Whether the dp_rank is used for collect.
+
         """
         assert mesh_name in self.__collect_dp_rank, f"{mesh_name} is not registered in {self.__class__.__name__}"
         return self.__collect_dp_rank[mesh_name]
@@ -141,6 +146,7 @@ class Worker(WorkerHelper):
                 A dictionary mapping mesh names to their dispatch dp_ranks.
             dict[str, bool]:
                 A dictionary mapping mesh names to whether they are used for collect.
+
         """
         return {"dispatch_dp_rank": self.__dispatch_dp_rank, "collect_dp_rank": self.__collect_dp_rank}
 
@@ -153,6 +159,7 @@ class Worker(WorkerHelper):
                 A dictionary mapping mesh names to their dispatch dp_ranks.
             collect_dp_rank (dict[str, bool]):
                 A dictionary mapping mesh names to whether they are used for collect.
+
         """
         assert mesh_name not in self.__dispatch_dp_rank, (
             f"{mesh_name} is already registered, {self.__dispatch_dp_rank.keys()}"
@@ -184,6 +191,7 @@ class Worker(WorkerHelper):
         Args:
             cuda_visible_devices (str, optional):
                 CUDA visible devices configuration. Defaults to None.
+
         """
         # construct a meta from environment variable. Note that the import must be inside the class because
         # it is executed remotely
@@ -225,6 +233,7 @@ class Worker(WorkerHelper):
         Args:
             worker_name (str):
                 Name of the worker to retrieve
+
         """
         return self.fused_worker_dict.get(worker_name, None)
 
@@ -328,6 +337,7 @@ class Worker(WorkerHelper):
                 Positional arguments for the function
             **kwargs:
                 Keyword arguments for the function
+
         """
         ret_proto = func(self, *args, **kwargs)
         return ret_proto
@@ -343,6 +353,7 @@ class Worker(WorkerHelper):
                 Positional arguments for the function
             **kwargs:
                 Keyword arguments for the function
+
         """
         result = func(*args, **kwargs)
         return result

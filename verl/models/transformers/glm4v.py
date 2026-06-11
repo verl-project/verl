@@ -184,6 +184,7 @@ def get_rope_index(
 def prepare_fa2_from_position_ids(
     query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, position_ids: torch.Tensor
 ):
+    """Build cumulative sequence lengths from position ids for flash attention varlen."""
     assert position_ids.ndim == 2  # (batch_size, seq_length)
     query = query.contiguous().view(-1, query.size(-2), query.size(-1))
     key = key.contiguous().view(-1, key.size(-2), key.size(-1))
@@ -288,6 +289,7 @@ def glm4v_attn_forward(
     position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
     **kwargs,
 ) -> tuple[torch.Tensor, None, None]:
+    """Compute the GLM4V attention forward pass with Ulysses-aware flash attention."""
     from transformers.models.glm4v.modeling_glm4v import apply_multimodal_rotary_pos_emb, repeat_kv
 
     bsz, q_len, _ = hidden_states.size()  # q_len = seq_length / sp_size
@@ -398,6 +400,7 @@ def _get_input_embeds(
 
 
 def process_position_ids(position_ids: torch.Tensor) -> torch.Tensor:
+    """Validate the 4D position ids tensor shape for GLM4V."""
     if position_ids.ndim != 3 or position_ids.size(0) != 4:
         # we concat the text position ids with the 3D vision position ids by default
         # see https://github.com/huggingface/transformers/pull/39447
@@ -423,6 +426,7 @@ def glm4v_base_forward(
     video_grid_thw: Optional[torch.LongTensor] = None,
     **kwargs,
 ):
+    """Run the GLM4V base model after embedding multimodal inputs."""
     kwargs["inputs_embeds"], kwargs["attention_mask"] = _get_input_embeds(
         self, input_ids, attention_mask, pixel_values, pixel_values_videos, image_grid_thw, video_grid_thw
     )  # avoid lora module having multiple keyword arguments
@@ -443,6 +447,7 @@ def glm4v_forward(
     video_grid_thw: Optional[torch.LongTensor] = None,
     **kwargs,
 ):
+    """Run the GLM4V model forward pass with processed position ids."""
     return self.model(
         input_ids=input_ids,
         attention_mask=attention_mask,
@@ -462,6 +467,7 @@ def forward_with_normal_backend(
     temperature: float = 1.0,
     **kwargs,
 ) -> "Glm4vCausalLMOutputWithPast":
+    """Compute logits using the standard (non-fused) backend."""
     outputs = glm4v_forward(self, input_ids, **kwargs)
     hidden_states = outputs[0]
     logits = self.lm_head(hidden_states)
@@ -480,6 +486,7 @@ def forward_with_torch_backend(
     shift_labels: Optional[torch.LongTensor] = None,
     **kwargs,
 ) -> tuple | Glm4vCausalLMOutputForPPO:
+    """Compute log probs and entropy for PPO using the fused torch backend."""
     from verl.utils.experimental.torch_functional import FusedLinearForPPO
 
     outputs = glm4v_forward(self, input_ids, **kwargs)
@@ -518,6 +525,7 @@ def forward_with_triton_backend(
     shift_labels: Optional[torch.LongTensor] = None,
     **kwargs,
 ) -> tuple | Glm4vCausalLMOutputForPPO:
+    """Compute log probs and entropy for PPO using the Triton backend."""
     from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy
 
     outputs = glm4v_forward(self, input_ids, **kwargs)

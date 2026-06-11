@@ -92,6 +92,7 @@ class TiledMLP(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, fn, module, x, shards, compute_params):
+        """Run the MLP forward pass in tiles to reduce peak memory usage."""
         ctx.fn = fn
         ctx.module = module
         ctx.shards = shards
@@ -107,6 +108,7 @@ class TiledMLP(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, *grads):
+        """Run the MLP backward pass in tiles, accumulating parameter gradients."""
         fn = ctx.fn
         (x,) = ctx.saved_tensors
         module = ctx.module
@@ -192,6 +194,7 @@ def apply_tiled_mlp_monkey_patch(
 
     Returns:
         List of patched class names.
+
     """
     if model_type is None:
         types_to_patch = list(_MODEL_TYPE_TO_MLP_CLASS.keys())

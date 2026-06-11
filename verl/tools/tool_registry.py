@@ -39,6 +39,15 @@ class ToolType(Enum):
 
 
 def get_tool_class(cls_name):
+    """Import and return the tool class given its fully qualified name.
+
+    Args:
+        cls_name (str): The fully qualified class name (e.g. ``module.ClassName``).
+
+    Returns:
+        type: The resolved tool class.
+
+    """
     module_name, class_name = cls_name.rsplit(".", 1)
     if module_name not in sys.modules:
         spec = importlib.util.find_spec(module_name)

@@ -31,6 +31,7 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
 def fast_pos_embed_interpolate(self, grid_thw):
+    """Interpolate vision position embeddings for the given grid sizes."""
     grid_thw_list = grid_thw.tolist()
     grid_ts = [row[0] for row in grid_thw_list]
     grid_hs = [row[1] for row in grid_thw_list]
@@ -313,6 +314,7 @@ def qwen3_vl_base_forward(
     video_grid_thw: Optional[torch.LongTensor] = None,
     **kwargs,
 ):
+    """Run the Qwen3-VL base model after embedding multimodal inputs."""
     input_kwargs = _get_input_embeds(
         self, input_ids, attention_mask, pixel_values, pixel_values_videos, image_grid_thw, video_grid_thw
     )  # avoid lora module having multiple keyword arguments
@@ -330,6 +332,7 @@ def forward_with_normal_backend(
     temperature: float = 1.0,
     **kwargs,
 ) -> "Qwen3VLCausalLMOutputForPPO":
+    """Compute logits using the standard (non-fused) backend."""
     outputs = self.model(input_ids, **kwargs)
     hidden_states = outputs[0]
     logits = self.lm_head(hidden_states)
@@ -348,6 +351,7 @@ def forward_with_torch_backend(
     shift_labels: Optional[torch.LongTensor] = None,
     **kwargs,
 ) -> "Qwen3VLCausalLMOutputForPPO":
+    """Compute log probs and entropy for PPO using the fused torch backend."""
     from verl.utils.experimental.torch_functional import FusedLinearForPPO
 
     outputs = self.model(input_ids, **kwargs)
@@ -387,6 +391,7 @@ def forward_with_triton_backend(
     shift_labels: Optional[torch.LongTensor] = None,
     **kwargs,
 ) -> "Qwen3VLCausalLMOutputForPPO":
+    """Compute log probs and entropy for PPO using the Triton backend."""
     from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy
 
     outputs = self.model(input_ids, **kwargs)

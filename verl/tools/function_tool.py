@@ -98,6 +98,7 @@ def function_tool(
             ``OpenAIFunctionToolSchema`` (or a dict matching that shape) as-is.
             Use this only if your function's signature can't be expressed in
             JSON Schema -- the normal path is to fix the function.
+
     """
 
     def _make_decorator(tool_name_override: Optional[str]):

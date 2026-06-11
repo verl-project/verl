@@ -56,6 +56,7 @@ class CheckpointEngineRegistry:
 
         Args:
             backend: The backend of the checkpoint engine.
+
         """
 
         def wrapper(cls: type["CheckpointEngine"]):
@@ -73,6 +74,7 @@ class CheckpointEngineRegistry:
 
         Returns:
             The checkpoint engine class.
+
         """
         return cls._registry[backend]
 
@@ -87,6 +89,7 @@ class CheckpointEngineRegistry:
 
         Returns:
             A new checkpoint engine instance.
+
         """
         if backend not in cls._registry:
             raise ValueError(f"Checkpoint engine {backend} not registered")
@@ -120,6 +123,7 @@ class CheckpointEngine(ABC):
 
         Returns:
             A dictionary that contains the metadata of the worker group.
+
         """
         raise NotImplementedError
 
@@ -148,6 +152,7 @@ class CheckpointEngine(ABC):
                 "master_metadata": [metadata[0]] * world_size,
             }
             ```
+
         """
         raise NotImplementedError
 
@@ -157,6 +162,7 @@ class CheckpointEngine(ABC):
 
         Args:
             **kwargs: Keyword arguments from `build_topology`.
+
         """
         raise NotImplementedError
 
@@ -181,6 +187,7 @@ class CheckpointEngine(ABC):
         Args:
             weights: A generator that yields the name of the weight tensor and the tensor itself.
             global_steps: Optional trainer step/version associated with this weight update.
+
         """
         raise NotImplementedError
 
@@ -196,6 +203,7 @@ class CheckpointEngine(ABC):
 
         Yields:
             A tuple of the name of the weight tensor and the tensor itself.
+
         """
         raise NotImplementedError
 
@@ -213,6 +221,7 @@ class CheckpointEngineWithCache(CheckpointEngine):
 
         Yields:
             A tuple of the name of the weight tensor and the tensor itself.
+
         """
         raise NotImplementedError
 
@@ -234,16 +243,20 @@ class ColocatedCheckpointEngine(CheckpointEngine):
         self.is_master = is_master
 
     def prepare(self):
+        """Prepare the colocated checkpoint engine."""
         raise NotImplementedError
 
     def init_process_group(self, **kwargs):
+        """Initialize process group for the colocated engine."""
         raise NotImplementedError
 
     def finalize(self):
+        """Finalize the colocated checkpoint engine."""
         raise NotImplementedError
 
     @classmethod
     def build_topology(cls, *args, **kwargs):
+        """Build communication topology for the colocated engine."""
         raise NotImplementedError
 
     def send_weights(
@@ -256,6 +269,7 @@ class ColocatedCheckpointEngine(CheckpointEngine):
         Args:
             weights: A generator that yields the name of the weight tensor and the tensor itself.
             global_steps: Optional trainer step/version associated with this weight update.
+
         """
         self.weights = weights
 
@@ -270,6 +284,7 @@ class ColocatedCheckpointEngine(CheckpointEngine):
 
         Yields:
             A tuple of the name of the weight tensor and the tensor itself.
+
         """
         yield from self.weights
         self.weights = None
@@ -282,6 +297,7 @@ class CheckpointEngineWorker(Worker):
         rollout_config: The rollout configuration.
         model_config: The model configuration.
         server_adapter: The server adapter to update weights.
+
     """
 
     def __init__(
@@ -321,11 +337,13 @@ class CheckpointEngineWorker(Worker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     async def update_weights(self, global_steps: int = None):
+        """Receive weights from the checkpoint engine and update the server adapter."""
         weights = self.checkpoint_engine.receive_weights(global_steps=global_steps)
         await self.server_adapter.update_weights(weights, global_steps=global_steps)
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE, blocking=False)
     def execute_checkpoint_engine(self, method: str, *args, **kwargs):
+        """Execute a named method on the underlying checkpoint engine."""
         return getattr(self.checkpoint_engine, method)(*args, **kwargs)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
@@ -369,6 +387,7 @@ class CheckpointEngineManager:
         config: The checkpoint engine config.
         trainer: The trainer worker group.
         replicas: The list of rollout replicas.
+
     """
 
     def __init__(
@@ -385,7 +404,12 @@ class CheckpointEngineManager:
         self.replicas = replicas
 
     def build_process_group(self, rollout: RayWorkerGroup):
-        """Build process group for trainer and rollout replicas."""
+        """Build process group for trainer and rollout replicas.
+
+        Args:
+            rollout: The rollout worker group to build communication with.
+
+        """
         trainer = self.trainer
 
         # 1. prepare all workers
@@ -416,6 +440,7 @@ class CheckpointEngineManager:
 
         Args:
             replicas: The list of rollout replicas to add.
+
         """
         self.replicas.extend(replicas)
 
@@ -424,6 +449,7 @@ class CheckpointEngineManager:
 
         Args:
             replicas: The list of rollout replicas to remove.
+
         """
         replicas_set = set(replicas)
         self.replicas = [r for r in self.replicas if r not in replicas_set]
@@ -472,6 +498,7 @@ class CheckpointEngineManager:
 
         Args:
             global_steps: The global steps of the trainer.
+
         """
 
         # 0. update weights for sync training with colocated trainer and rollout
@@ -525,6 +552,7 @@ async def split_weight_chunks(
 
     Yields:
         A tuple of the weight chunk metadata and the buffer.
+
     """
     async for name, weight in ensure_async_iterator(weights):
         buffer = weight.view(-1).view(torch.uint8)
@@ -554,6 +582,7 @@ async def merge_weight_chunks(
 
     Yields:
         A tuple of the name of the weight tensor and the tensor itself.
+
     """
     merge_name, merge_weight, merge_buffer, merge_offset = None, None, None, 0
     async for tensor_meta, chunk in chunks:

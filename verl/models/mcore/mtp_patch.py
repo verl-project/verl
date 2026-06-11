@@ -56,6 +56,7 @@ def _get_patching_model(model: torch.nn.Module):
 
 
 def patch_postprocess(model: torch.nn.Module):
+    """Patch the model's _postprocess to support MTP and 1f1b overlap features."""
     model = _get_patching_model(model)
     if model is not None:
         model._postprocess_backup = model._postprocess
@@ -63,6 +64,7 @@ def patch_postprocess(model: torch.nn.Module):
 
 
 def unpatch_postprocess(model: torch.nn.Module):
+    """Restore the model's original _postprocess, undoing a postprocess patch."""
     model = _get_patching_model(model)
     if model is not None:
         model._postprocess = model._postprocess_backup

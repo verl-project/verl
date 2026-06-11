@@ -81,6 +81,7 @@ def construct_minimal_padding_template(
 
     Returns:
         A tuple of (template_sample, template_tag) ready for padding.
+
     """
     # Copy the sample template from an existing sample.
     template_sample = {}
@@ -144,6 +145,7 @@ def upsample_batch_to_divisible_size(
 
     Returns:
         The (possibly enlarged) KVBatchMeta.
+
     """
     remainder = len(batch) % batch_multiple
     if remainder == 0:

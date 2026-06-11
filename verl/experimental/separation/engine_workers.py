@@ -53,6 +53,7 @@ class DetachActorWorker(ActorRolloutRefWorker):
             role: The role of the worker (e.g., 'actor', 'rollout', 'ref').
             distillation_config: Optional distillation configuration for OPD support.
             **kwargs: Additional arguments passed to ActorRolloutRefWorker.
+
         """
         ActorRolloutRefWorker.__init__(self, config, role, distillation_config=distillation_config, **kwargs)
         self._strategy_handlers = None
@@ -66,6 +67,7 @@ class DetachActorWorker(ActorRolloutRefWorker):
 
         Raises:
             NotImplementedError: If the strategy is not supported.
+
         """
         if self._strategy_handlers is not None:
             return self._strategy_handlers
@@ -120,6 +122,7 @@ class DetachActorWorker(ActorRolloutRefWorker):
 
         Args:
             n: Identifier/Key for the saved model state.
+
         """
         if not hasattr(self, "cpu_saved_models"):
             self.cpu_saved_models = {}
@@ -137,6 +140,7 @@ class DetachActorWorker(ActorRolloutRefWorker):
 
         Args:
             n: Identifier/Key for the saved model state to restore.
+
         """
         if n in self.cpu_saved_models:
             strategy = self.config.actor.strategy
@@ -154,6 +158,7 @@ class DetachActorWorker(ActorRolloutRefWorker):
 
         Args:
             n: Identifier/Key for the saved model state to remove.
+
         """
         if n in self.cpu_saved_models:
             del self.cpu_saved_models[n]

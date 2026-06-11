@@ -34,6 +34,7 @@ def resolve_config_path(config_path: str) -> str:
 
     Raises:
         FileNotFoundError: If the configuration file cannot be found
+
     """
     # Return absolute paths unchanged
     if os.path.isabs(config_path):
@@ -83,6 +84,7 @@ def format_gpt_oss_tool_response_manually(tool_response: str, tool_call_name: st
 
     Returns:
         Formatted tool response string
+
     """
     return f"<|start|>functions.{tool_call_name} to=assistant<|channel|>commentary<|message|>{tool_response}<|end|>"
 
@@ -94,6 +96,7 @@ def add_generation_prompt_for_gpt_oss(message_content: str) -> str:
 
     Returns:
         Message content string with generation prompt
+
     """
     return message_content + "<|start|>assistant"
 

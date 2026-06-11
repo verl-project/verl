@@ -75,11 +75,13 @@ def pad_dataproto_to_divisor(data: "DataProto", size_divisor: int):
     """Pad a DataProto to size divisible by size_divisor
 
     Args:
+        data (DataProto): the DataProto to pad
         size_divisor (int): size divisor
 
     Returns:
         data: (DataProto): the padded DataProto
         pad_size (int)
+
     """
     assert isinstance(data, DataProto), "data must be a DataProto"
     if len(data) % size_divisor != 0:
@@ -131,9 +133,11 @@ def _array_equal(array1: np.ndarray, array2: np.ndarray, visited: set[int]) -> b
     Args:
         array1: The first NumPy array.
         array2: The second NumPy array.
+        visited: A set of object ids already visited, used to detect circular references.
 
     Returns:
         True if the arrays' dtypes, shapes, and all elements are equal.
+
     """
     # Check dtype and shape first, as this is the fastest failure path.
     if array1.dtype != array2.dtype or array1.shape != array2.shape:
@@ -355,6 +359,7 @@ class DataProto:
         Returns:
             DataProto: For all indexing types except single integers
             DataProtoItem: Only for single integer indices
+
         """
         # Case 1: Slice object - use the slice method
         if isinstance(item, slice):
@@ -424,16 +429,37 @@ class DataProto:
         self.meta_info = meta_info
 
     def save_to_disk(self, filepath):
+        """Serialize this DataProto to disk via pickle.
+
+        Args:
+            filepath: The path to write the serialized object to.
+
+        """
         with open(filepath, "wb") as f:
             pickle.dump(self, f)
 
     @staticmethod
     def load_from_disk(filepath) -> "DataProto":
+        """Load a DataProto previously serialized to disk.
+
+        Args:
+            filepath: The path to read the serialized object from.
+
+        Returns:
+            DataProto: The deserialized DataProto instance.
+
+        """
         with open(filepath, "rb") as f:
             data = pickle.load(f)
             return data
 
     def print_size(self, prefix=""):
+        """Print the memory size of the batch and non-tensor data.
+
+        Args:
+            prefix (str): An optional prefix to prepend to the printed message.
+
+        """
         size_of_tensordict = 0
         if self.batch is not None:
             for _, tensor in self.batch.items():
@@ -602,10 +628,13 @@ class DataProto:
 
         Args:
             batch_keys (list, optional): a list of strings indicating the keys in batch to select
+            non_tensor_batch_keys (list, optional): a list of keys indicating the non-tensor batch to select
             meta_info_keys (list, optional): a list of keys indicating the meta info to select
+            deepcopy (bool, optional): whether to deepcopy the selected non-tensor batch and meta info
 
         Returns:
             DataProto: the DataProto with the selected batch_keys and meta_info_keys
+
         """
         # TODO (zhangchi.usc1992) whether to copy
         if batch_keys is not None:
@@ -641,6 +670,7 @@ class DataProto:
 
         Returns:
             DataProto: A new DataProto containing only the selected indices
+
         """
         if isinstance(idxs, list):
             idxs = torch.tensor(idxs)
@@ -699,6 +729,7 @@ class DataProto:
 
             # Single index still returns DataProtoItem
             single_item = data_proto[5]
+
         """
         # Create a slice object
         slice_obj = slice(start, end, step)
@@ -723,10 +754,12 @@ class DataProto:
 
         Args:
             batch_keys (list, optional): a list of strings indicating the keys in batch to pop
+            non_tensor_batch_keys (list, optional): a list of keys indicating the non-tensor batch to pop
             meta_info_keys (list, optional): a list of keys indicating the meta info to pop
 
         Returns:
             DataProto: the DataProto with the poped batch_keys and meta_info_keys
+
         """
         if batch_keys is None:
             batch_keys = []
@@ -791,6 +824,7 @@ class DataProto:
 
         Returns:
             DataProto: the DataProto after union
+
         """
         self.batch = union_tensor_dict(self.batch, other.batch)
         self.non_tensor_batch = union_numpy_dict(self.non_tensor_batch, other.non_tensor_batch)
@@ -806,12 +840,14 @@ class DataProto:
             mini_batch_size (int): mini-batch size when iterating the dataset. We require that
                 ``batch.batch_size[0] % mini_batch_size == 0``.
             epochs (int): number of epochs when iterating the dataset.
+            seed (int, optional): random seed used to shuffle the dataloader. Defaults to None.
             dataloader_kwargs (Any): internally, it returns a DataLoader over the batch. The
                 dataloader_kwargs is the kwargs passed to the DataLoader.
 
         Returns:
             Iterator: an iterator that yields a mini-batch data at a time. The total number of iteration
                 steps is ``self.batch.batch_size * epochs // mini_batch_size``
+
         """
         assert self.batch.batch_size[0] % mini_batch_size == 0, f"{self.batch.batch_size[0]} % {mini_batch_size} != 0"
         # we can directly create a dataloader from TensorDict
@@ -842,6 +878,7 @@ class DataProto:
         Check if padding is enabled for the DataProto.
         Returns:
             bool: True if padding is enabled, False otherwise.
+
         """
         dataproto_specific_padding = self.meta_info.get(DataProtoConfig.auto_padding_key, False)
         return dataproto_specific_padding or DataProtoConfig.auto_padding
@@ -852,6 +889,7 @@ class DataProto:
         Args:
             padding_size (int): the number of repeated padding_candidate
             padding_candidate: the item to be repeated and appended to the DataProto, only supporting ["first", "last"]
+
         """
         if padding_size == 0:
             return
@@ -869,6 +907,7 @@ class DataProto:
 
         Returns:
             List[DataProto]: a list of DataProto after splitting
+
         """
         if not self.is_padding_enabled():
             assert len(self) % chunks == 0, (
@@ -910,6 +949,7 @@ class DataProto:
 
         Returns:
             List[DataProto]: a list of DataProto after splitting
+
         """
         return [self[i : i + split_size] for i in range(0, len(self), split_size)]
 
@@ -923,6 +963,7 @@ class DataProto:
 
         Returns:
             DataProto: concatenated DataProto
+
         """
         batch_lst = []
         for batch in data:
@@ -978,6 +1019,7 @@ class DataProto:
 
         Returns:
             DataProto: A new DataProto with repeated data.
+
         """
         if self.batch is not None:
             if interleave:
@@ -1060,6 +1102,7 @@ class DataProto:
 
         Returns:
             DataProto: A new DataProto with repeated data.
+
         """
         if isinstance(repeat_times, tuple):
             repeat_times = list(repeat_times)
@@ -1130,6 +1173,7 @@ class DataProto:
 
         Returns:
             str: Formatted string showing tensor details and recursive metadata types
+
         """
         info = ["batch"]
 

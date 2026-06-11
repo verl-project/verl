@@ -164,6 +164,7 @@ def get_rope_index(
 def prepare_fa2_from_position_ids(
     query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, position_ids: torch.Tensor
 ):
+    """Build cumulative sequence lengths from position ids for flash attention varlen."""
     assert position_ids.ndim == 2  # (batch_size, seq_length)
     query = query.contiguous().view(-1, query.size(-2), query.size(-1))
     key = key.contiguous().view(-1, key.size(-2), key.size(-1))
@@ -273,6 +274,7 @@ def qwen2_vl_attn_forward(
     position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
     **kwargs,
 ) -> tuple[torch.Tensor, None, None]:
+    """Compute the Qwen2-VL attention forward pass with Ulysses-aware flash attention."""
     from transformers.models.qwen2_vl.modeling_qwen2_vl import apply_multimodal_rotary_pos_emb, repeat_kv
 
     bsz, q_len, _ = hidden_states.size()  # q_len = seq_length / sp_size
@@ -400,6 +402,7 @@ def _get_input_embeds(
 
 
 def process_position_ids(position_ids: torch.Tensor) -> torch.Tensor:
+    """Validate and normalize the 4D position ids for the configured transformers version."""
     if position_ids.ndim != 3 or position_ids.size(0) != 4:
         # we concat the text position ids with the 3D vision position ids by default
         # see https://github.com/huggingface/transformers/pull/39447
@@ -429,6 +432,7 @@ def qwen2_vl_base_forward(
     video_grid_thw: Optional[torch.LongTensor] = None,
     **kwargs,
 ):
+    """Run the Qwen2-VL base model after embedding multimodal inputs."""
     kwargs["inputs_embeds"], kwargs["attention_mask"] = _get_input_embeds(
         self, input_ids, attention_mask, pixel_values, pixel_values_videos, image_grid_thw, video_grid_thw
     )  # avoid lora module having multiple keyword arguments
@@ -446,6 +450,7 @@ def qwen2_vl_forward(
     video_grid_thw: Optional[torch.LongTensor] = None,
     **kwargs,
 ):
+    """Run the Qwen2-VL model forward pass, handling transformers version differences."""
     if is_transformers_version_in_range(min_version="4.52.0"):
         return self.model(
             input_ids=input_ids,
@@ -477,6 +482,7 @@ def forward_with_normal_backend(
     temperature: float = 1.0,
     **kwargs,
 ) -> "Qwen2VLCausalLMOutputWithPast":
+    """Compute logits using the standard (non-fused) backend."""
     outputs = qwen2_vl_forward(self, input_ids, **kwargs)
     hidden_states = outputs[0]
     logits = self.lm_head(hidden_states)
@@ -495,6 +501,7 @@ def forward_with_torch_backend(
     shift_labels: Optional[torch.LongTensor] = None,
     **kwargs,
 ) -> tuple | Qwen2VLCausalLMOutputForPPO:
+    """Compute log probs and entropy for PPO using the fused torch backend."""
     from verl.utils.experimental.torch_functional import FusedLinearForPPO
 
     outputs = qwen2_vl_forward(self, input_ids, **kwargs)
@@ -533,6 +540,7 @@ def forward_with_triton_backend(
     shift_labels: Optional[torch.LongTensor] = None,
     **kwargs,
 ) -> tuple | Qwen2VLCausalLMOutputForPPO:
+    """Compute log probs and entropy for PPO using the Triton backend."""
     from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy
 
     outputs = qwen2_vl_forward(self, input_ids, **kwargs)

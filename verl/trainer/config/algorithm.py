@@ -31,6 +31,7 @@ class KLControlConfig(BaseConfig):
         kl_coef (float): Initial coefficient for KL penalty.
         horizon (int): Horizon value for adaptive controller.
         target_kl (float): Target KL divergence for adaptive controller.
+
     """
 
     type: str = "fixed"
@@ -49,6 +50,7 @@ class FilterGroupsConfig(BaseConfig):
         enable (bool): Whether to enable filter groups.
         metric (Optional[str]): Metric to use for filtering: "acc", "score", "seq_reward", "seq_final_reward", etc.
         max_num_gen_batches (int): Non-positive values mean no upper limit.
+
     """
 
     enable: bool = False
@@ -170,6 +172,7 @@ class RolloutCorrectionConfig(BaseConfig):
         Liu, Li, Fu, Wang, Liu, Shen (2025)
         "When Speed Kills Stability: Demystifying RL Collapse from the Training-Inference Mismatch"
         https://richardli.xyz/rl-collapse
+
     """
 
     rollout_is: Optional[str] = "sequence"
@@ -191,6 +194,7 @@ class RolloutCorrectionConfig(BaseConfig):
 
         Returns:
             RolloutCorrectionConfig configured for decoupled mode with token-level IS
+
         """
         return cls(rollout_is="token", rollout_is_threshold=threshold, rollout_rs=None)
 
@@ -205,6 +209,7 @@ class RolloutCorrectionConfig(BaseConfig):
 
         Returns:
             RolloutCorrectionConfig configured for decoupled mode with sequence-level IS
+
         """
         return cls(rollout_is="sequence", rollout_is_threshold=threshold, rollout_rs=None)
 
@@ -226,6 +231,7 @@ class RolloutCorrectionConfig(BaseConfig):
 
         Returns:
             RolloutCorrectionConfig configured for decoupled mode with token-level IcePop
+
         """
         return cls(rollout_is="token", rollout_is_threshold=f"{threshold_lower}_{threshold}", rollout_rs=None)
 
@@ -246,6 +252,7 @@ class RolloutCorrectionConfig(BaseConfig):
 
         Returns:
             RolloutCorrectionConfig configured for decoupled mode with sequence IS + RS
+
         """
         return cls(
             rollout_is="sequence",
@@ -270,6 +277,7 @@ class RolloutCorrectionConfig(BaseConfig):
 
         Returns:
             RolloutCorrectionConfig configured for decoupled mode with Geo-RS
+
         """
         return cls(
             rollout_is=None,
@@ -288,6 +296,7 @@ class RolloutCorrectionConfig(BaseConfig):
 
         Returns:
             RolloutCorrectionConfig configured for bypass mode with PPO-clip
+
         """
         return cls(
             rollout_is=None,
@@ -311,6 +320,7 @@ class RolloutCorrectionConfig(BaseConfig):
 
         Returns:
             RolloutCorrectionConfig configured for bypass mode with PPO-clip + Geo-RS
+
         """
         return cls(
             rollout_is=None,
@@ -336,6 +346,7 @@ class RolloutCorrectionConfig(BaseConfig):
 
         Returns:
             RolloutCorrectionConfig configured for bypass mode with PPO-clip + K3-RS
+
         """
         return cls(
             rollout_is=None,
@@ -357,6 +368,7 @@ class RolloutCorrectionConfig(BaseConfig):
 
         Returns:
             RolloutCorrectionConfig configured for bypass mode with REINFORCE + IS
+
         """
         return cls(
             rollout_is="sequence",
@@ -383,6 +395,7 @@ class RolloutCorrectionConfig(BaseConfig):
 
         Returns:
             RolloutCorrectionConfig configured for bypass mode with REINFORCE + token-level IcePop
+
         """
         return cls(
             rollout_is="token",
@@ -407,6 +420,7 @@ class RolloutCorrectionConfig(BaseConfig):
 
         Returns:
             RolloutCorrectionConfig configured for bypass mode with REINFORCE + Geo-RS
+
         """
         return cls(
             rollout_is=None,
@@ -433,6 +447,7 @@ class RolloutCorrectionConfig(BaseConfig):
 
         Returns:
             RolloutCorrectionConfig configured for Geo-RS-Seq-TIS
+
         """
         return cls(
             rollout_is="sequence",
@@ -458,6 +473,7 @@ class RolloutCorrectionConfig(BaseConfig):
 
         Returns:
             RolloutCorrectionConfig configured for Geo-RS-Token-TIS
+
         """
         return cls(
             rollout_is="token",
@@ -484,6 +500,7 @@ class RolloutCorrectionConfig(BaseConfig):
 
         Returns:
             RolloutCorrectionConfig configured for bypass mode with REINFORCE + Geo-RS + Seq-TIS
+
         """
         return cls(
             rollout_is="sequence",
@@ -514,6 +531,7 @@ class RolloutCorrectionConfig(BaseConfig):
 
         Returns:
             RolloutCorrectionConfig configured for bypass mode with REINFORCE + Geo-RS + Token-TIS
+
         """
         return cls(
             rollout_is="token",
@@ -543,6 +561,7 @@ class RolloutCorrectionConfig(BaseConfig):
 
         Returns:
             RolloutCorrectionConfig configured for K3 RS
+
         """
         return cls(
             rollout_is=None,
@@ -567,6 +586,7 @@ class RolloutCorrectionConfig(BaseConfig):
 
         Returns:
             RolloutCorrectionConfig configured for K3-RS-Seq-TIS
+
         """
         return cls(
             rollout_is="sequence",
@@ -593,6 +613,7 @@ class RolloutCorrectionConfig(BaseConfig):
 
         Returns:
             RolloutCorrectionConfig configured for K3-RS-Token-TIS
+
         """
         return cls(
             rollout_is="token",
@@ -609,6 +630,7 @@ class RolloutCorrectionConfig(BaseConfig):
 
         Returns:
             RolloutCorrectionConfig with all correction disabled
+
         """
         return cls(rollout_is=None, rollout_rs=None)
 
@@ -646,6 +668,7 @@ class AlgoConfig(BaseConfig):
 
             For backward compatibility, you can still pass a dict, which will be converted to
             RolloutCorrectionConfig automatically.
+
     """
 
     gamma: float = 1.0

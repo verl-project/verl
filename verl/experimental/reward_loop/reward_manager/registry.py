@@ -27,6 +27,7 @@ def register(name: str) -> Callable[[type[RewardManagerBase]], type[RewardManage
     Args:
         name: `(str)`
             The name of the reward manager.
+
     """
 
     def decorator(cls: type[RewardManagerBase]) -> type[RewardManagerBase]:
@@ -47,6 +48,7 @@ def get_reward_manager_cls(name: str) -> type[RewardManagerBase]:
 
     Returns:
         `(type)`: The reward manager class.
+
     """
     if name not in REWARD_MANAGER:
         raise ValueError(f"Unknown reward manager: {name}")

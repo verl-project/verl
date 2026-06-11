@@ -79,6 +79,7 @@ class NixlAgent:
             return attr
 
     def get_agent_metadata(self) -> NixlAgentMetadata:
+        """Return metadata describing this agent for remote connection."""
         return NixlAgentMetadata(
             agent_name=self.agent_name,
             agent_metadata=self.agent.get_agent_metadata(),
@@ -87,6 +88,7 @@ class NixlAgent:
         )
 
     def start_zmq_server(self):
+        """Start the ZeroMQ PULL server for receiving messages."""
         self.ip = ray.util.get_node_ip_address().strip("[]")
         self.listen_port, _ = get_free_port(self.ip)
 
@@ -101,6 +103,7 @@ class NixlAgent:
         self.socket.bind(address)
 
     def add_remote_agent(self, metadata: NixlAgentMetadata) -> str:
+        """Register a remote agent and establish a ZeroMQ connection to it."""
         agent_name = self.agent.add_remote_agent(metadata.agent_metadata).decode("utf-8")
         assert agent_name == metadata.agent_name, f"Agent name {agent_name} not equal to {metadata.agent_name}"
 
@@ -117,21 +120,25 @@ class NixlAgent:
         return agent_name
 
     def remove_remote_agent(self, agent_name: str):
+        """Remove a remote agent and close its ZeroMQ socket."""
         self.agent.remove_remote_agent(agent_name)
         socket = self.zmq_clients.pop(agent_name)
         socket.close()
 
     def send_message(self, agent_name, message: dict):
+        """Send a message to the specified remote agent via ZeroMQ."""
         socket = self.zmq_clients[agent_name]
         socket.send_pyobj((self.agent_name, message), zmq.DONTWAIT)
 
     async def read_message(self, agent_name: str) -> dict:
+        """Read a message from the specified remote agent asynchronously."""
         while len(self.messages[agent_name]) == 0:
             recv_agent_name, message = await self.socket.recv_pyobj()
             self.messages[recv_agent_name].append(message)
         return self.messages[agent_name].popleft()
 
     async def get_notification(self, remote_name: str) -> bytes:
+        """Wait for and return a notification from the specified remote agent."""
         while len(self.notifications[remote_name]) == 0:
             notifs = self.agent.get_new_notifs()
             for remote_name, notif in notifs.items():
@@ -151,6 +158,7 @@ class ReadableOperation:
         local_descs (nixl_bindings.nixlXferDList): The local transfer descriptors.
         metadata (dict): Metadata for the read operation.
         bucket_size (int): The size of the bucket in bytes.
+
     """
 
     def __init__(
@@ -185,6 +193,7 @@ class ReadOperation:
         remote_agent (str): The name of the remote agent.
         local_descs (nixl_bindings.nixlXferDList): The local transfer descriptors.
         bucket_size (int): The size of the bucket in bytes.
+
     """
 
     def __init__(self, agent: NixlAgent, remote_agent: str, local_descs: nixl_bindings.nixlXferDList, bucket_size: int):
@@ -202,6 +211,7 @@ class ReadOperation:
 
         Returns:
             dict: Metadata from the remote agent.
+
         """
         metadata = await self.agent.read_message(self.remote_agent)
         self.remote_descs = metadata.pop("remote_descs")
@@ -247,6 +257,7 @@ class NIXLCheckpointEngine(CheckpointEngine):
             two buffer to send and recv weights at same time, so the device memory overhead is 2 * bucket_size.
         device (str): The device to use for the checkpoint engine, "cpu" or "cuda".
         rollout_dtype (torch.dtype): The dtype of the weights received from rollout workers. Defaults to torch.bfloat16.
+
     """
 
     def __init__(
@@ -267,6 +278,7 @@ class NIXLCheckpointEngine(CheckpointEngine):
 
         Returns:
             NixlAgentMetadata: The metadata of the current nixl agent.
+
         """
         # For master process, use cupy instead of torch to avoid memory register error
         # when `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`.
@@ -287,6 +299,7 @@ class NIXLCheckpointEngine(CheckpointEngine):
 
     @classmethod
     def build_topology(cls, trainer_world_size: int, rollout_world_size: int, metadata: list[dict]):
+        """Build a chain topology connecting trainer rank 0 to all rollout workers."""
         trainer_kwargs = {
             "method": ["init_process_group"] * trainer_world_size,
             "rank": [0] + [-1] * (trainer_world_size - 1),
@@ -314,6 +327,7 @@ class NIXLCheckpointEngine(CheckpointEngine):
             world_size (int): The total number of processes.
             prev_agent_metadata (NixlAgentMetadata): The metadata of the previous nixl agent.
             next_agent_metadata (NixlAgentMetadata): The metadata of the next nixl agent.
+
         """
         if rank < 0:
             assert not prev_agent_metadata and not next_agent_metadata, (
@@ -377,6 +391,8 @@ class NIXLCheckpointEngine(CheckpointEngine):
 
         Args:
             weights: A generator that yields the name of the weight tensor and the tensor itself.
+            global_steps (int, optional): The current global training step. Defaults to None.
+
         """
         assert self.rank <= 0, "Trainer workers other than rank 0 should not send weights."
 
@@ -445,6 +461,7 @@ class NIXLCheckpointEngine(CheckpointEngine):
 
         Yields:
             A tuple of the name of the weight tensor and the tensor itself.
+
         """
         async for name, weight in merge_weight_chunks(self._receive_weight_chunks(), self.bucket_size):
             yield name, weight
@@ -454,6 +471,7 @@ class NIXLCheckpointEngine(CheckpointEngine):
 
         Yields:
             A tuple of the chunk metadata and the chunk buffer view in send_buf.
+
         """
         assert self.prev_agent is not None, "Previous agent is not set."
         send_buf, recv_buf = self.send_buf, self.recv_buf

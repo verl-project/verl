@@ -111,6 +111,7 @@ class RewardLoopWorker:
         Args:
             config: DictConfig, the config for reward loop worker.
             reward_router_address: str, the address of reward router.
+
         """
         self.config = config
         self.reward_router_address = reward_router_address
@@ -136,6 +137,15 @@ class RewardLoopWorker:
         )
 
     async def compute_score_batch(self, data: DataProto) -> list[dict]:
+        """Compute reward scores for each sample in the batch concurrently.
+
+        Args:
+            data (DataProto): A batch of samples to score.
+
+        Returns:
+            list[dict]: One score dict per sample in the batch.
+
+        """
         tasks = []
         for i in range(len(data)):
             tasks.append(asyncio.create_task(self.compute_score(data[i : i + 1])))
@@ -143,6 +153,15 @@ class RewardLoopWorker:
         return outputs
 
     async def compute_score(self, data: DataProto) -> dict:
+        """Compute the reward score for a single sample.
+
+        Args:
+            data (DataProto): A single-sample DataProto to score.
+
+        Returns:
+            dict: The computed reward score.
+
+        """
         if self.config.reward.custom_reward_function.path is not None:
             # directly use user-customized reward function
             return await self.reward_manager.run_single(data)
@@ -229,6 +248,15 @@ class RewardLoopWorker:
         return rm_prompt
 
     async def compute_score_disrm(self, data: DataProto) -> dict:
+        """Compute the reward score for a single sample using a discriminative reward model.
+
+        Args:
+            data (DataProto): A single-sample DataProto to score.
+
+        Returns:
+            dict: The computed reward score.
+
+        """
         disrm_prompt = await self._preprocess_reward_inputs(data)
         engine_name = self.config.reward.reward_model.rollout.name
         model_name = self.config.reward.reward_model.model_path
@@ -321,6 +349,15 @@ class RewardLoopManager:
             )
 
     def compute_rm_score(self, data: DataProto) -> DataProto:
+        """Compute reward model scores across reward loop workers.
+
+        Args:
+            data (DataProto): The batch of samples to score.
+
+        Returns:
+            DataProto: The samples annotated with reward model scores.
+
+        """
         if self.reward_model_manager is not None:
             self.reward_model_manager.wake_up()
 

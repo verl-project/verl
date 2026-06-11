@@ -46,6 +46,7 @@ def prepare_single_generation_data(batch_dict, config) -> DataProto:
 
     Returns:
         tuple: (original_batch_dict, gen_data_for_single_sample)
+
     """
 
     full_batch = DataProto.from_single_dict(batch_dict)
@@ -99,6 +100,7 @@ def assemble_batch_from_rollout_samples(
 
     Raises:
         ValueError: If rollout_samples is empty
+
     """
     start_time = time.time()
 
@@ -366,6 +368,7 @@ def safe_create_task(coro, name: str, task_set: set = None):
 
     Returns:
         The created asyncio.Task
+
     """
     task = asyncio.create_task(coro, name=name)
     task.add_done_callback(task_exception_handler)

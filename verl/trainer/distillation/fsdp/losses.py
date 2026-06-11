@@ -42,6 +42,7 @@ def _chunked_topk_log_probs(
 
     Returns:
         [B, T, K] tensor with the same dtype as `logits`.
+
     """
     B, T, V = logits.shape
     K = topk_ids.shape[-1]
@@ -85,12 +86,14 @@ def compute_forward_kl_topk(
         student_logits: (bsz, seqlen/sp_size, vocab_size).
         teacher_topk_log_probs: (bsz, seqlen, topk).
         teacher_topk_ids: (bsz, seqlen, topk).
+        config: DistillationConfig controlling the distillation loss behavior.
         data_format: "thd" or "bshd", models not support THD format, e.g GPT-OSS, Qwen3.5
 
     Returns:
     - distillation_losses: (bsz, seqlen/sp_size)
     - student_mass: (bsz, seqlen/sp_size)
     - teacher_mass: (bsz, seqlen/sp_size)
+
     """
     assert teacher_topk_log_probs.is_nested and teacher_topk_ids.is_nested
     teacher_topk_log_probs = teacher_topk_log_probs.values().unsqueeze(0)  # (1, total_nnz, topk)

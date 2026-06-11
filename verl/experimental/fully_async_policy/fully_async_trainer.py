@@ -254,6 +254,12 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         await self._setup_hybrid_checkpoint_manager()
 
     def set_total_train_steps(self, total_training_steps):
+        """Set the total number of training steps and propagate it into the config.
+
+        Args:
+            total_training_steps: The total number of training steps.
+
+        """
         self.total_train_steps = total_training_steps
 
         try:
@@ -279,6 +285,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
 
         Returns:
             tuple: (epoch, batch_dict, gen_batch_output)
+
         """
         print(
             f"[FullyAsyncTrainer] Requesting {self.required_samples} samples from queue",
@@ -420,6 +427,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
 
         Args:
             batch_dict: Raw data dictionary
+
         """
         self.metrics = {"training/global_step": self.global_steps, "training/epoch": self.epoch}
         self.timing_raw = {}
@@ -696,6 +704,12 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             f.write(str(self.current_param_version))
 
     async def load_checkpoint(self):
+        """Load the trainer checkpoint and return the resumed global step.
+
+        Returns:
+            int: The global step to resume from, or 0 if resuming is disabled.
+
+        """
         if self.config.trainer.resume_mode == "disable":
             return 0
 

@@ -32,6 +32,7 @@ from verl.utils.fs import copy_to_local
 
 @ray.remote
 def process_item(config, data_source, response_lst, reward_data):
+    """Compute reward scores for a single item using the custom reward function."""
     reward_fn = get_custom_reward_fn(config)
     ground_truth = reward_data["ground_truth"]
     score_lst = [reward_fn(data_source, r, ground_truth) for r in response_lst]
@@ -40,6 +41,7 @@ def process_item(config, data_source, response_lst, reward_data):
 
 @hydra.main(config_path="config", config_name="evaluation", version_base=None)
 def main(config):
+    """Evaluate generated responses using reward model and ground truth verifier."""
     local_path = copy_to_local(config.data.path, use_shm=config.data.get("use_shm", False))
     dataset = pd.read_parquet(local_path)
     responses = dataset[config.data.response_key]

@@ -61,6 +61,7 @@ class MessageQueue:
 
         Returns:
             bool: Whether the sample was successfully put into the queue
+
         """
         async with self._lock:
             # If queue is full, remove the oldest sample (rarely happens)
@@ -88,6 +89,7 @@ class MessageQueue:
 
         Returns:
             Any: Single sample data or None if queue is closed
+
         """
         async with self._lock:
             while len(self.queue) == 0 and self.running:
@@ -166,10 +168,12 @@ class MessageQueue:
             }
 
     async def put_validate(self, data):
+        """Append validation data to the validation queue."""
         async with self._lock:
             self.val_queue.append(data)
 
     async def get_validate(self):
+        """Pop and return the next validation data, or None if the queue is empty."""
         async with self._lock:
             if self.val_queue:
                 return self.val_queue.popleft()
@@ -189,10 +193,12 @@ class MessageQueueClient:
         return await asyncio.wrap_future(future.future())
 
     async def put_validate(self, data: Any) -> bool:
+        """Put validation data into the queue actor (async)."""
         future = self.queue_actor.put_validate.remote(data)
         return await asyncio.wrap_future(future.future())
 
     def get_validate_sync(self) -> Any | None:
+        """Get validation data from the queue actor synchronously."""
         return ray.get(self.queue_actor.get_validate.remote())
 
     async def get_sample(self) -> Any | None:

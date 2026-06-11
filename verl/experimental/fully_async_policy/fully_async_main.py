@@ -44,6 +44,12 @@ class FullyAsyncTaskRunner:
         self.shutdown_event = threading.Event()
 
     def run(self, config):
+        """Initialize components and run the fully async PPO training loop.
+
+        Args:
+            config: The training configuration.
+
+        """
         print("[ASYNC MAIN] Starting fully async PPO training...")
         self._initialize_components(config)
         self._run_training_loop()
@@ -211,6 +217,7 @@ class FullyAsyncTaskRunner:
 
 @hydra.main(config_path="config", config_name="fully_async_ppo_trainer", version_base=None)
 def main(config):
+    """Hydra entrypoint that validates config and launches fully async PPO training."""
     from verl.trainer.main_ppo import run_ppo
 
     # Ensure async training config exists

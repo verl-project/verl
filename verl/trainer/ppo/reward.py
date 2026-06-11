@@ -65,6 +65,7 @@ def get_custom_reward_fn(config: DictConfig) -> Optional[RawRewardFn]:
         FileNotFoundError: If the specified reward function file doesn't exist.
         RuntimeError: If there's an error loading the module from file.
         AttributeError: If the specified function name isn't found in the module.
+
     """
 
     reward_fn_config = config.reward.get("custom_reward_function") or {}
@@ -119,6 +120,7 @@ def load_reward_manager(config: DictConfig, tokenizer: Any, **reward_kwargs: Any
 
     Returns:
         An instance of the specified reward manager class.
+
     """
 
     # Try to get a custom reward function based on the configuration

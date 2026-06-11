@@ -38,6 +38,7 @@ from verl.workers.rollout.replica import get_rollout_replica_class
 
 
 async def start_server(config):
+    """Start rollout server replicas and return their handles and addresses."""
     tp_size = config.actor_rollout_ref.rollout.tensor_model_parallel_size
     num_replicas = (config.trainer.n_gpus_per_node * config.trainer.nnodes) // tp_size
     rollout_config = config.actor_rollout_ref.rollout
@@ -64,6 +65,7 @@ async def start_server(config):
 
 
 async def submit_request(server_address, **chat_complete_request):
+    """Submit a single chat completion request to the server."""
     try:
         extra_headers = chat_complete_request.pop("extra_headers", {})
         timeout = aiohttp.ClientTimeout(total=None)
@@ -80,6 +82,7 @@ async def submit_request(server_address, **chat_complete_request):
 
 
 async def generate_per_replica(server_address, model_path: str, n_samples: int, sampling_params: dict, chat_lst: list):
+    """Generate completions for a list of chats on a single replica."""
     # here we should sample n_samples for each chat_lst.
     # we use aiohttp to avoid hang in AsyncOpenAI when the number of requests is large.
 
@@ -106,6 +109,7 @@ async def generate_per_replica(server_address, model_path: str, n_samples: int, 
 async def generate(
     server_addresses: list, model_path: str, n_samples: int, sampling_params: dict, chat_numpy: np.ndarray
 ):
+    """Distribute generation across all server replicas and gather results."""
     num_replicas = len(server_addresses)
     chat_sub_array = np.array_split(chat_numpy, num_replicas)
     chat_sub_array = [chat.tolist() for chat in chat_sub_array]
@@ -121,6 +125,7 @@ async def generate(
 
 @hydra.main(config_path="config", config_name="ppo_trainer", version_base=None)
 def main(config):
+    """Run generation server with Hydra configuration."""
     ray.init(runtime_env={"env_vars": {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN", "VLLM_USE_V1": "1"}})
 
     pprint(OmegaConf.to_container(config, resolve=True))  # resolve=True will eval symbol values

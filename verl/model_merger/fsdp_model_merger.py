@@ -63,6 +63,7 @@ class FSDPModelMerger(BaseModelMerger):
         merger = FSDPModelMerger(config)
         merger.merge_and_save()
         ```
+
     """
 
     def _get_world_size(self) -> int:
@@ -71,6 +72,7 @@ class FSDPModelMerger(BaseModelMerger):
 
         Returns:
             int: world size
+
         """
         config_path = Path(self.config.local_dir) / "fsdp_config.json"
         if not config_path.exists():
@@ -204,6 +206,7 @@ class FSDPModelMerger(BaseModelMerger):
         return state_dict
 
     def merge_and_save(self):
+        """Merge the FSDP sharded checkpoints and save the result."""
         world_size = self._get_world_size()
         rank_zero_state_dict = self._load_rank_zero_state_dict(world_size)
 

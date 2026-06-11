@@ -42,6 +42,24 @@ def gptmodel_forward_1f1b_overlap(
     logits_processor_args: Optional[dict] = None,
     temperature: float = 1.0,
 ) -> TransformerModelChunkSchedulePlan:
+    """Run a GPT model forward pass and build a 1f1b-overlap schedule plan.
+
+    Args:
+        model: The Megatron-Core GPT model to run.
+        input_ids: The input token ids.
+        position_ids: The position ids.
+        attention_mask: The attention mask.
+        labels: Optional target labels.
+        labels_mask: Optional mask selecting valid label positions.
+        multi_modal_inputs: Optional multimodal inputs for vision-language models.
+        logits_processor: Optional callable to post-process logits (fused kernel only).
+        logits_processor_args: Optional arguments for the logits processor.
+        temperature: The sampling temperature applied to the logits.
+
+    Returns:
+        The schedule plan for the model chunk supporting 1f1b overlap.
+
+    """
     pre_process: bool = unwrap_model(model).pre_process
     post_process: bool = unwrap_model(model).post_process
     assert logits_processor is None, "only support fused kernel"

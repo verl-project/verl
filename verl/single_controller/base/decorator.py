@@ -36,6 +36,7 @@ class Dispatch(DynamicEnum):
 
 
 def init_predefined_dispatch_mode():
+    """Register the predefined dispatch modes in the Dispatch enum."""
     Dispatch.register("RANK_ZERO")
     Dispatch.register("ONE_TO_ALL")
     Dispatch.register("ALL_TO_ALL")
@@ -59,6 +60,7 @@ class Execute(DynamicEnum):
 
 
 def init_predefined_execute_mode():
+    """Register the predefined execute modes in the Execute enum."""
     Execute.register("ALL")
     Execute.register("RANK_ZERO")
 
@@ -118,20 +120,34 @@ def _split_args_kwargs_data_proto_with_auto_padding(chunks, *args, **kwargs):
 
 
 def dispatch_one_to_all(worker_group, *args, **kwargs):
+    """Broadcast the same arguments to every worker in the group.
+
+    Args:
+        worker_group: The worker group to dispatch to.
+        *args: Positional arguments to broadcast.
+        **kwargs: Keyword arguments to broadcast.
+
+    Returns:
+        A tuple of (args, kwargs) where each value is replicated for all workers.
+
+    """
     args = tuple([arg] * worker_group.world_size for arg in args)
     kwargs = {k: [v] * worker_group.world_size for k, v in kwargs.items()}
     return args, kwargs
 
 
 def dummy_direct_rollout_call(worker_group, *args, **kwargs):
+    """Raise an error to forbid direct rollout calls."""
     raise NotImplementedError("Direct rollout call is forbidden.")
 
 
 def dispatch_all_to_all(worker_group, *args, **kwargs):
+    """Pass arguments through unchanged for all-to-all dispatch."""
     return args, kwargs
 
 
 def collect_all_to_all(worker_group, output):
+    """Return the worker output unchanged for all-to-all collection."""
     return output
 
 
@@ -146,6 +162,17 @@ def _concat_data_proto_or_future(output: list):
 
 
 def dispatch_dp_compute(worker_group, *args, **kwargs):
+    """Dispatch arguments to workers for data-parallel computation.
+
+    Args:
+        worker_group: The worker group to dispatch to.
+        *args: Per-worker positional arguments sized to the world size.
+        **kwargs: Per-worker keyword arguments sized to the world size.
+
+    Returns:
+        A tuple of (args, kwargs) ready for data-parallel execution.
+
+    """
     from verl.single_controller.base.worker_group import WorkerGroup
 
     assert isinstance(worker_group, WorkerGroup)
@@ -157,6 +184,7 @@ def dispatch_dp_compute(worker_group, *args, **kwargs):
 
 
 def collect_dp_compute(worker_group, output):
+    """Collect data-parallel outputs from all workers in the group."""
     from verl.single_controller.base.worker_group import WorkerGroup
 
     assert isinstance(worker_group, WorkerGroup)
@@ -165,6 +193,7 @@ def collect_dp_compute(worker_group, output):
 
 
 def dispatch_dp_compute_data_proto(worker_group, *args, **kwargs):
+    """Dispatch DataProto arguments to workers with automatic padding."""
     from verl.single_controller.base.worker_group import WorkerGroup
 
     assert isinstance(worker_group, WorkerGroup)
@@ -178,6 +207,17 @@ def dispatch_dp_compute_data_proto(worker_group, *args, **kwargs):
 
 
 def dispatch_dp_compute_data_proto_with_func(worker_group, *args, **kwargs):
+    """Dispatch DataProto arguments with a leading function to all workers.
+
+    Args:
+        worker_group: The worker group to dispatch to.
+        *args: The first argument must be the function, followed by DataProto args.
+        **kwargs: Keyword DataProto arguments to chunk across workers.
+
+    Returns:
+        A tuple of (args, kwargs) where the function is replicated for all workers.
+
+    """
     from verl.single_controller.base.worker_group import WorkerGroup
 
     assert isinstance(worker_group, WorkerGroup)
@@ -189,6 +229,7 @@ def dispatch_dp_compute_data_proto_with_func(worker_group, *args, **kwargs):
 
 
 def collect_dp_compute_data_proto(worker_group, output):
+    """Collect and concatenate DataProto outputs from all workers."""
     from verl.protocol import BatchData
 
     assert BatchData(output).is_concatable(), (
@@ -200,6 +241,19 @@ def collect_dp_compute_data_proto(worker_group, output):
 
 
 def dispatch_nd_compute(dp_rank_mapping: list[int], dp_size, worker_group, *args, **kwargs):
+    """Dispatch arguments to workers based on an N-D data-parallel rank mapping.
+
+    Args:
+        dp_rank_mapping: Mapping from global rank to local data-parallel rank.
+        dp_size: Size of the data-parallel dimension.
+        worker_group: The worker group to dispatch to.
+        *args: Positional arguments to distribute across workers.
+        **kwargs: Keyword arguments to distribute across workers.
+
+    Returns:
+        A tuple of (args, kwargs) arranged per worker according to the mapping.
+
+    """
     import os
 
     from verl.single_controller.base.worker_group import WorkerGroup
@@ -234,6 +288,17 @@ def dispatch_nd_compute(dp_rank_mapping: list[int], dp_size, worker_group, *args
 
 
 def collect_nd_compute(collect_mask: list[bool], worker_group, output):
+    """Collect outputs from workers selected by an N-D collect mask.
+
+    Args:
+        collect_mask: Per-rank flags indicating which workers to collect from.
+        worker_group: The worker group to collect from.
+        output: The list of outputs from all workers.
+
+    Returns:
+        A list of outputs from the masked-in workers.
+
+    """
     from verl.single_controller.base.worker_group import WorkerGroup
 
     assert isinstance(worker_group, WorkerGroup)
@@ -248,11 +313,13 @@ def collect_nd_compute(collect_mask: list[bool], worker_group, output):
 
 
 def dispatch_nd_compute_dataproto(dp_rank_mapping: list[int], dp_size, worker_group, *args, **kwargs):
+    """Chunk DataProto arguments and dispatch them using an N-D rank mapping."""
     splitted_args, splitted_kwargs = _split_args_kwargs_data_proto(dp_size, *args, **kwargs)
     return dispatch_nd_compute(dp_rank_mapping, dp_size, worker_group, *splitted_args, **splitted_kwargs)
 
 
 def collect_nd_compute_dataproto(collect_mask: list[bool], worker_group, output):
+    """Collect N-D worker outputs and concatenate them into a single DataProto."""
     output = collect_nd_compute(collect_mask, worker_group, output)
 
     from verl.protocol import BatchData
@@ -264,6 +331,7 @@ def collect_nd_compute_dataproto(collect_mask: list[bool], worker_group, output)
 
 
 def dispatch_lazy_compute_data_proto(mesh_name, worker_group, *args, **kwargs):
+    """Dispatch DataProto arguments using lazily queried mesh dispatch info."""
     from verl.single_controller.base.worker_group import WorkerGroup
 
     assert isinstance(worker_group, WorkerGroup)
@@ -280,6 +348,7 @@ def dispatch_lazy_compute_data_proto(mesh_name, worker_group, *args, **kwargs):
 
 
 def collect_lazy_compute_data_proto(mesh_name, worker_group, *args, **kwargs):
+    """Collect DataProto outputs using lazily queried mesh collect info."""
     from verl.single_controller.base.worker_group import WorkerGroup
 
     assert isinstance(worker_group, WorkerGroup)
@@ -298,6 +367,7 @@ def collect_lazy_compute_data_proto(mesh_name, worker_group, *args, **kwargs):
 
 
 def make_nd_compute_dataproto_dispatch_fn(mesh_name):
+    """Build dispatch and collect functions bound to a given mesh name."""
     return {
         "dispatch_fn": partial(dispatch_lazy_compute_data_proto, mesh_name),
         "collect_fn": partial(collect_lazy_compute_data_proto, mesh_name),
@@ -332,6 +402,7 @@ DISPATCH_MODE_FN_REGISTRY = {
 
 
 def get_predefined_dispatch_fn(dispatch_mode):
+    """Return the registered dispatch and collect functions for a dispatch mode."""
     return DISPATCH_MODE_FN_REGISTRY[dispatch_mode]
 
 
@@ -416,6 +487,7 @@ def register(dispatch_mode=Dispatch.ALL_TO_ALL, execute_mode=Execute.ALL, blocki
     Returns:
         A decorator that wraps the original function with distributed execution
         configuration.
+
     """
 
     _check_dispatch_mode(dispatch_mode=dispatch_mode)

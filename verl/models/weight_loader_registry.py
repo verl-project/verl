@@ -14,6 +14,15 @@
 
 
 def get_weight_loader(arch: str):
+    """Return the Megatron weight loader function for the given model architecture.
+
+    Args:
+        arch: The model architecture name (e.g. ``"LlamaForCausalLM"``).
+
+    Returns:
+        The loader callable registered for the architecture.
+
+    """
     from verl.models.mcore.loader import load_state_dict_to_megatron_gptmodel
 
     _MODEL_WEIGHT_MEGATRON_LOADER_REGISTRY = {
@@ -30,6 +39,15 @@ def get_weight_loader(arch: str):
 
 
 def get_weight_saver(arch: str):
+    """Return the Megatron checkpoint saver function for the given model architecture.
+
+    Args:
+        arch: The model architecture name (e.g. ``"LlamaForCausalLM"``).
+
+    Returns:
+        The saver callable registered for the architecture.
+
+    """
     from verl.models.mcore.saver import (
         merge_megatron_ckpt_gptmodel,
         merge_megatron_ckpt_gptmodel_dpskv3,

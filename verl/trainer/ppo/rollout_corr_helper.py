@@ -229,6 +229,7 @@ def compute_rollout_rejection_mask(
             modified_response_mask: Response mask with trust region violations masked (0=rejected),
                 shape (batch_size, seq_length).
             metrics: Dictionary of trust region metrics (all scalars).
+
     """
     if rollout_rs is None or not isinstance(rollout_rs, str):
         raise ValueError("rollout_rs must be a non-empty string (comma separated for multiple options).")
@@ -435,6 +436,7 @@ def compute_rs_metrics(
         rollout_rs_threshold: Upper threshold.
         rollout_rs_threshold_lower: Lower threshold (ignored if ``apply_lower_threshold`` is False).
         apply_lower_threshold: Whether to mask/log metrics for values below the lower threshold.
+
     """
     if not response_mask.any():
         raise ValueError("response_mask must contain at least one valid token (1).")
@@ -558,6 +560,7 @@ def compute_rollout_correction_weights(
                 - rollout_is_eff_sample_size: Effective sample size (ESS)
                 - rollout_is_seq_*: Sequence-level weight statistics
                 - rollout_is_batch_norm_factor: Normalization factor (only if batch_normalize=True)
+
     """
     # Validate input parameters
     valid_is_levels = {"token", "sequence"}
@@ -680,9 +683,12 @@ def compute_is_metrics(
             shape (batch_size, seq_length).
         rollout_is: IS weight aggregation level (matches compute_rollout_correction_weights).
         rollout_is_threshold: Upper threshold for truncated IS weights.
+        rollout_is_threshold_lower: Lower threshold for truncated IS weights.
+            Defaults to the reciprocal of ``rollout_is_threshold`` when None.
 
     Returns:
         Dictionary of IS weight metrics (all scalars).
+
     """
     if not response_mask.any():
         raise ValueError("response_mask must contain at least one valid token (1).")
@@ -825,6 +831,7 @@ def compute_rollout_correction_and_rejection_mask(
                 - IS weight statistics
                 - Rejection sampling rates
                 - Policy mismatch metrics (KL, PPL, etc.)
+
     """
     # Validate input masks
     if not response_mask.any():
@@ -928,6 +935,7 @@ def compute_offpolicy_metrics(
 
     Returns:
         Dictionary of off-policy metrics (without prefix)
+
     """
     # Validate that we have at least one valid token
     assert response_mask.any(), "Expected at least one valid token in response_mask"
@@ -1022,6 +1030,7 @@ def compute_rollout_correction_and_add_to_batch(
 
     Args:
         batch: DataProto with old_log_probs, rollout_log_probs, response_mask
+        rollout_corr_config: RolloutCorrectionConfig controlling IS weighting and rejection sampling.
 
     Returns:
         Tuple of (updated_batch, metrics):
@@ -1030,6 +1039,7 @@ def compute_rollout_correction_and_add_to_batch(
 
     Note:
         The implementation is copied from szrlee <szrlee@gmail.com>.
+
     """
     # Get new API parameters directly from config
     rollout_is = rollout_corr_config.get("rollout_is", None)
@@ -1080,6 +1090,7 @@ def compute_rollout_corr_metrics_from_logprobs(
 
     Returns:
         Dictionary of metrics with "rollout_corr/" prefix
+
     """
     # Compute off-policy diagnostic metrics
     offpolicy_metrics = compute_offpolicy_metrics(
@@ -1118,6 +1129,7 @@ def apply_bypass_mode(
 
     Note:
         The implementation is copied from szrlee <szrlee@gmail.com>.
+
     """
     from omegaconf import open_dict
 
