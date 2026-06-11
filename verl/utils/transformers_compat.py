@@ -38,6 +38,19 @@ except ImportError:
 
 @lru_cache
 def is_transformers_version_in_range(min_version: Optional[str] = None, max_version: Optional[str] = None) -> bool:
+    """Check whether the installed transformers version is within the given range.
+
+    Args:
+        min_version: Inclusive lower bound for the version. If None, no lower bound is enforced.
+        max_version: Inclusive upper bound for the version. If None, no upper bound is enforced.
+
+    Returns:
+        True if the installed transformers version satisfies both bounds, False otherwise.
+
+    Raises:
+        ModuleNotFoundError: If the transformers package is not installed.
+
+    """
     try:
         # Get the installed version of the transformers library
         transformers_version_str = importlib.metadata.version("transformers")

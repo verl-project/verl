@@ -11,8 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""
-Adapted from Cruise.
+"""Precision type utilities adapted from Cruise.
+
+Provides helpers to convert between string/int precision identifiers and
+``torch.dtype`` objects.
 """
 
 import torch
@@ -39,26 +41,80 @@ class PrecisionType:
 
     @staticmethod
     def supported_type(precision: str | int) -> bool:
+        """Check if a precision value is supported.
+
+        Args:
+            precision: The precision identifier to check.
+
+        Returns:
+            bool: True if the precision is recognized.
+
+        """
         return any(x == precision for x in PrecisionType)
 
     @staticmethod
     def supported_types() -> list[str]:
+        """Return a list of all supported precision type strings.
+
+        Returns:
+            list[str]: Supported precision type values.
+
+        """
         return [x.value for x in PrecisionType]
 
     @staticmethod
     def is_fp16(precision):
+        """Check if precision represents float16.
+
+        Args:
+            precision: A precision identifier (int, str, or torch.dtype).
+
+        Returns:
+            bool: True if precision corresponds to float16.
+
+        """
         return precision in HALF_LIST
 
     @staticmethod
     def is_fp32(precision):
+        """Check if precision represents float32.
+
+        Args:
+            precision: A precision identifier (int, str, or torch.dtype).
+
+        Returns:
+            bool: True if precision corresponds to float32.
+
+        """
         return precision in FLOAT_LIST
 
     @staticmethod
     def is_bf16(precision):
+        """Check if precision represents bfloat16.
+
+        Args:
+            precision: A precision identifier (int, str, or torch.dtype).
+
+        Returns:
+            bool: True if precision corresponds to bfloat16.
+
+        """
         return precision in BFLOAT_LIST
 
     @staticmethod
     def to_dtype(precision):
+        """Convert a precision identifier to the corresponding ``torch.dtype``.
+
+        Args:
+            precision: A precision identifier (int, str, or torch.dtype).
+
+        Returns:
+            torch.dtype: The corresponding PyTorch dtype.
+
+        Raises:
+            RuntimeError: If the precision is not recognized.
+
+        """
         if precision in HALF_LIST:
             return torch.float16
         elif precision in FLOAT_LIST:
@@ -70,6 +126,18 @@ class PrecisionType:
 
     @staticmethod
     def to_str(precision):
+        """Convert a ``torch.dtype`` to its short string representation.
+
+        Args:
+            precision: A ``torch.dtype`` value.
+
+        Returns:
+            str: One of ``"fp16"``, ``"fp32"``, or ``"bf16"``.
+
+        Raises:
+            RuntimeError: If the precision is not recognized.
+
+        """
         if precision == torch.float16:
             return "fp16"
         elif precision == torch.float32:

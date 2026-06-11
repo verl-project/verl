@@ -167,6 +167,18 @@ class PrecisionDebuggerProfiler:
         return True
 
     def start(self, stage: Optional[str] = None, global_step: Optional[int] = None, model=None, **kwargs) -> bool:
+        """Start precision debugging for the given stage and model.
+
+        Args:
+            stage: The training stage name (e.g. ``actor_update``).
+            global_step: The current global training step.
+            model: The model to attach the debugger to.
+            **kwargs: Additional keyword arguments including ``profile_step``.
+
+        Returns:
+            True if the debugger was successfully started.
+
+        """
         profile_step = kwargs.get("global_step", kwargs.get("profile_step"))
         if profile_step is not None:
             self._current_global_step = profile_step
@@ -213,6 +225,12 @@ class PrecisionDebuggerProfiler:
             return False
 
     def stop(self, started: bool = False) -> None:
+        """Stop the precision debugger and reset its internal state.
+
+        Args:
+            started: Whether the debugger was actually started; skip if False.
+
+        """
         if not started:
             return
         if not self._available:
@@ -230,6 +248,19 @@ class PrecisionDebuggerProfiler:
         category: Optional[str] = None,
         **kwargs_outer,
     ):
+        """Decorate a function to automatically start/stop precision debugging.
+
+        Args:
+            message: Unused; kept for interface compatibility.
+            color: Unused; kept for interface compatibility.
+            domain: Unused; kept for interface compatibility.
+            category: Unused; kept for interface compatibility.
+            **kwargs_outer: Must include ``role`` to identify the stage.
+
+        Returns:
+            A decorator that wraps the function with precision debugging.
+
+        """
         _ = (message, color, domain, category)
         stage = self._normalize_stage(kwargs_outer.get("role"))
         if stage is None:

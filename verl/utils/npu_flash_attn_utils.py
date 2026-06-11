@@ -20,8 +20,21 @@ from einops import rearrange, repeat
 
 # Copied from https://github.com/Dao-AILab/flash-attention/blob/main/flash_attn/bert_padding.py
 class IndexFirstAxis(torch.autograd.Function):
+    """Autograd function that gathers rows from the first axis by indices."""
+
     @staticmethod
     def forward(ctx, input, indices):
+        """Gather rows of the first axis of ``input`` at the given ``indices``.
+
+        Args:
+            ctx: Autograd context used to save tensors for the backward pass.
+            input (torch.Tensor): Input tensor of shape ``(first_axis_dim, ...)``.
+            indices (torch.Tensor): 1D tensor of row indices to gather.
+
+        Returns:
+            torch.Tensor: The gathered rows reshaped to ``(len(indices), ...)``.
+
+        """
         ctx.save_for_backward(indices)
         assert input.ndim >= 2
         ctx.first_axis_dim, other_shape = input.shape[0], input.shape[1:]
@@ -34,6 +47,16 @@ class IndexFirstAxis(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
+        """Scatter the gradient back to the original first-axis positions.
+
+        Args:
+            ctx: Autograd context holding the saved ``indices``.
+            grad_output (torch.Tensor): Gradient w.r.t. the gathered output.
+
+        Returns:
+            tuple: Gradient w.r.t. ``input`` and ``None`` for ``indices``.
+
+        """
         (indices,) = ctx.saved_tensors
         assert grad_output.ndim >= 2
         other_shape = grad_output.shape[1:]
@@ -54,8 +77,22 @@ index_first_axis = IndexFirstAxis.apply
 
 # Copied from https://github.com/Dao-AILab/flash-attention/blob/main/flash_attn/bert_padding.py
 class IndexPutFirstAxis(torch.autograd.Function):
+    """Autograd function that scatters values into the first axis by indices."""
+
     @staticmethod
     def forward(ctx, values, indices, first_axis_dim):
+        """Place ``values`` into a zero tensor at the given first-axis ``indices``.
+
+        Args:
+            ctx: Autograd context used to save tensors for the backward pass.
+            values (torch.Tensor): Values to scatter, of shape ``(len(indices), ...)``.
+            indices (torch.Tensor): 1D tensor of target row indices.
+            first_axis_dim (int): Size of the first axis of the output tensor.
+
+        Returns:
+            torch.Tensor: Output tensor of shape ``(first_axis_dim, ...)``.
+
+        """
         ctx.save_for_backward(indices)
         assert indices.ndim == 1
         assert values.ndim >= 2
@@ -67,6 +104,16 @@ class IndexPutFirstAxis(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
+        """Gather the gradient at the positions that were scattered in forward.
+
+        Args:
+            ctx: Autograd context holding the saved ``indices``.
+            grad_output (torch.Tensor): Gradient w.r.t. the scattered output.
+
+        Returns:
+            tuple: Gradient w.r.t. ``values`` and ``None`` for the other inputs.
+
+        """
         (indices,) = ctx.saved_tensors
         # TD [2022-03-04] For some reason torch.gather is a bit faster than indexing.
         grad_values = grad_output[indices]
@@ -87,6 +134,7 @@ def pad_input(hidden_states, indices, batch, seqlen):
         seqlen: int, maximum sequence length for the padded sequence.
     Return:
         hidden_states: (batch, seqlen, ...)
+
     """
     # dim = hidden_states.shape[-1]
     # output = torch.zeros((batch * seqlen), dim, device=hidden_states.device, dtype=hidden_states.dtype)
@@ -108,6 +156,7 @@ def unpad_input(hidden_states, attention_mask, unused_mask=None):
         cu_seqlens: (batch + 1), the cumulative sequence lengths, used to index into hidden_states.
         max_seqlen_in_batch: int
         seqused: (batch), returns the number of tokens selected in attention_mask + unused_mask.
+
     """
     all_masks = (attention_mask + unused_mask) if unused_mask is not None else attention_mask
     seqlens_in_batch = all_masks.sum(dim=-1, dtype=torch.int32)

@@ -21,10 +21,25 @@ def mark_start_range(
     domain: Optional[str] = None,
     category: Optional[str] = None,
 ) -> None:
+    """Start a profiling range marker (no-op placeholder).
+
+    Args:
+        message: Message to associate with the range marker.
+        color: Color for the marker visualization.
+        domain: Domain for the marker.
+        category: Category for the marker.
+
+    """
     pass
 
 
 def mark_end_range(range_id: str) -> None:
+    """End a profiling range marker (no-op placeholder).
+
+    Args:
+        range_id: Identifier of the range to end.
+
+    """
     pass
 
 
@@ -34,6 +49,19 @@ def mark_annotate(
     domain: Optional[str] = None,
     category: Optional[str] = None,
 ) -> Callable:
+    """Decorate a function with profiling annotation (no-op placeholder).
+
+    Args:
+        message: Message to associate with the annotation.
+        color: Color for the marker visualization.
+        domain: Domain for the marker.
+        category: Category for the marker.
+
+    Returns:
+        A decorator that returns the original function unchanged.
+
+    """
+
     def decorator(func):
         return func
 

@@ -83,12 +83,14 @@ def call_sandbox_api(
         stdin: The standard input string.
         compile_timeout: Compile timeout in seconds.
         run_timeout: Run timeout in seconds.
+        memory_limit_mb: Memory limit in megabytes for sandbox execution.
         language: The programming language of the code (e.g., "python", "cpp", "java"). Defaults to "python".
 
     Returns:
         A tuple (response_json, error_message).
         If successful, response_json is the API's returned JSON object, error_message is None.
         If failed after retries, response_json is None, error_message contains the error information.
+
     """
     request_id = str(uuid.uuid4())  # <-- Generate request_id internally
     log_prefix = f"[Request ID: {request_id}] "  # <-- Create log prefix
@@ -464,7 +466,9 @@ def check_correctness(
         in_outs: Dictionary containing "inputs" and "outputs" lists.
         generation: The generated code string.
         timeout: Timeout for each test case (compile and run share this timeout).
+        memory_limit_mb: Memory limit in megabytes for sandbox execution.
         language: The programming language of the code.
+        concurrent_semaphore: Optional threading semaphore to limit concurrent sandbox API calls.
 
     Returns:
         A tuple (results, metadata_list).
@@ -473,6 +477,7 @@ def check_correctness(
                  Results are ordered corresponding to the inputs.
         metadata_list: A list containing metadata dictionaries for each test case,
                        ordered corresponding to the inputs.
+
     """
     logger.info("Starting correctness check for generation.")
 

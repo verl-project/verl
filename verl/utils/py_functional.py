@@ -70,6 +70,7 @@ def timeout_limit(seconds: float, use_signals: bool = False):
         TimeoutError: If the function execution exceeds the specified time.
         RuntimeError: If the child process exits with an error (multiprocessing mode).
         NotImplementedError: If the OS is not POSIX (signals are only supported on POSIX).
+
     """
 
     def decorator(func):
@@ -152,10 +153,11 @@ def union_two_dict(dict1: dict, dict2: dict):
     """Union two dict. Will throw an error if there is an item not the same object with the same key.
 
     Args:
-        dict1:
-        dict2:
+        dict1 (dict): The base dictionary to merge into.
+        dict2 (dict): The dictionary to merge from.
 
     Returns:
+        dict: The merged dictionary.
 
     """
     for key, val in dict2.items():
@@ -193,9 +195,11 @@ def append_to_dict(data: dict, new_data: dict, prefix: str = ""):
     Args:
         data (Dict): The target dictionary containing lists as values.
         new_data (Dict): The source dictionary with values to append.
+        prefix (str): Optional prefix to prepend to keys from new_data.
 
     Returns:
         None: The function modifies data in-place.
+
     """
     for key, val in new_data.items():
         new_key = f"{prefix}{key}" if not key.startswith(prefix) else key
@@ -221,6 +225,7 @@ class NestedNamespace(SimpleNamespace):
     Args:
         dictionary: The dictionary to convert to a nested namespace.
         **kwargs: Additional attributes to set on the namespace.
+
     """
 
     def __init__(self, dictionary, **kwargs):
@@ -233,6 +238,8 @@ class NestedNamespace(SimpleNamespace):
 
 
 class DynamicEnumMeta(type):
+    """Metaclass enabling iteration, containment checks, and subscript access on enum classes."""
+
     def __iter__(cls) -> Iterator[Any]:
         return iter(cls._registry.values())
 
@@ -250,13 +257,17 @@ class DynamicEnumMeta(type):
         return getattr, (importlib.import_module(cls.__module__), cls.__name__)
 
     def names(cls):
+        """Return a list of all registered member names."""
         return list(cls._registry.keys())
 
     def values(cls):
+        """Return a list of all registered member instances."""
         return list(cls._registry.values())
 
 
 class DynamicEnum(metaclass=DynamicEnumMeta):
+    """Enum-like class supporting dynamic member registration at runtime."""
+
     _registry: dict[str, "DynamicEnum"] = {}
     _next_value: int = 0
 
@@ -278,6 +289,18 @@ class DynamicEnum(metaclass=DynamicEnumMeta):
 
     @classmethod
     def register(cls, name: str) -> "DynamicEnum":
+        """Register a new member with the given name.
+
+        Args:
+            name: The member name (will be uppercased).
+
+        Returns:
+            DynamicEnum: The newly created member.
+
+        Raises:
+            ValueError: If the name is already registered.
+
+        """
         key = name.upper()
         if key in cls._registry:
             raise ValueError(f"{key} already registered")
@@ -289,6 +312,15 @@ class DynamicEnum(metaclass=DynamicEnumMeta):
 
     @classmethod
     def remove(cls, name: str):
+        """Remove a registered member by name.
+
+        Args:
+            name: The member name to remove (will be uppercased).
+
+        Returns:
+            DynamicEnum: The removed member.
+
+        """
         key = name.upper()
         member = cls._registry.pop(key)
         delattr(cls, key)
@@ -296,6 +328,15 @@ class DynamicEnum(metaclass=DynamicEnumMeta):
 
     @classmethod
     def from_name(cls, name: str) -> Optional["DynamicEnum"]:
+        """Look up a member by name, returning None if not found.
+
+        Args:
+            name: The member name to look up (will be uppercased).
+
+        Returns:
+            DynamicEnum or None: The member if found, otherwise None.
+
+        """
         return cls._registry.get(name.upper())
 
 
@@ -318,6 +359,7 @@ def temp_env_var(key: str, value: str):
         ...     # MY_VAR is set to "test_value"
         ...     do_something()
         ... # MY_VAR is restored to its original value or removed if it didn't exist
+
     """
     original = os.environ.get(key)
     os.environ[key] = value
@@ -344,6 +386,15 @@ def convert_to_regular_types(obj):
 
 
 def convert_nested_value_to_list_recursive(data_item):
+    """Recursively convert numpy arrays to nested Python lists.
+
+    Args:
+        data_item: A nested structure of dicts, lists, and numpy arrays.
+
+    Returns:
+        The same structure with all numpy arrays converted to Python lists.
+
+    """
     if isinstance(data_item, dict):
         return {k: convert_nested_value_to_list_recursive(v) for k, v in data_item.items()}
     elif isinstance(data_item, list):
@@ -357,6 +408,15 @@ def convert_nested_value_to_list_recursive(data_item):
 
 
 def list_of_dict_to_dict_of_list(list_of_dict: list[dict]):
+    """Transpose a list of dicts into a dict of lists.
+
+    Args:
+        list_of_dict: A list of dictionaries with identical keys.
+
+    Returns:
+        dict: A dictionary mapping each key to a list of corresponding values.
+
+    """
     if len(list_of_dict) == 0:
         return {}
     keys = list_of_dict[0].keys()

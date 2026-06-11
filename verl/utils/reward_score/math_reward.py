@@ -15,6 +15,16 @@
 
 
 def compute_score(solution_str, ground_truth) -> float:
+    """Compute a binary score for a math solution by checking the boxed answer.
+
+    Args:
+        solution_str: The model-generated solution string.
+        ground_truth: The expected ground truth answer.
+
+    Returns:
+        1.0 if the extracted boxed answer is equivalent to the ground truth, else 0.0.
+
+    """
     retval = 0.0
     try:
         string_in_last_boxed = last_boxed_only_string(solution_str)
@@ -30,6 +40,17 @@ def compute_score(solution_str, ground_truth) -> float:
 
 # string normalization from https://github.com/EleutherAI/lm-evaluation-harness/blob/master/lm_eval/tasks/hendrycks_math.py
 def is_equiv(str1, str2, verbose=False):
+    """Determine whether two math answer strings are equivalent after normalization.
+
+    Args:
+        str1: First answer string.
+        str2: Second answer string.
+        verbose: If True, print the stripped strings for debugging.
+
+    Returns:
+        True if the normalized strings are equal.
+
+    """
     if str1 is None and str2 is None:
         print("WARNING: Both None")
         return True
@@ -47,6 +68,15 @@ def is_equiv(str1, str2, verbose=False):
 
 
 def remove_boxed(s):
+    r"""Remove the ``\boxed{}`` wrapper and return the inner content.
+
+    Args:
+        s: A LaTeX string starting with ``\boxed{`` or ``\boxed ``.
+
+    Returns:
+        The content inside the boxed command.
+
+    """
     if "\\boxed " in s:
         left = "\\boxed "
         assert s[: len(left)] == left
@@ -61,6 +91,15 @@ def remove_boxed(s):
 
 
 def last_boxed_only_string(string):
+    r"""Extract the last ``\boxed{...}`` expression from a string.
+
+    Args:
+        string: The full solution string potentially containing boxed answers.
+
+    Returns:
+        The last boxed substring, or None if no boxed expression is found.
+
+    """
     idx = string.rfind("\\boxed")
     if "\\boxed " in string:
         return "\\boxed " + string.split("\\boxed ")[-1].split("$")[0]
@@ -88,6 +127,17 @@ def last_boxed_only_string(string):
 
 
 def fix_fracs(string):
+    r"""Normalize shorthand ``\frac`` notation to proper brace-delimited form.
+
+    Converts patterns like ``\frac12`` to ``\frac{1}{2}``.
+
+    Args:
+        string: A LaTeX math string.
+
+    Returns:
+        The string with fractions in canonical ``\frac{a}{b}`` form.
+
+    """
     substrs = string.split("\\frac")
     new_str = substrs[0]
     if len(substrs) > 1:
@@ -120,6 +170,17 @@ def fix_fracs(string):
 
 
 def fix_a_slash_b(string):
+    r"""Convert a simple ``a/b`` fraction to ``\frac{a}{b}`` notation.
+
+    Only converts when both parts are integers.
+
+    Args:
+        string: A potential fraction string like ``3/4``.
+
+    Returns:
+        The LaTeX fraction form if applicable, otherwise the original string.
+
+    """
     if len(string.split("/")) != 2:
         return string
     a = string.split("/")[0]
@@ -135,6 +196,15 @@ def fix_a_slash_b(string):
 
 
 def remove_right_units(string):
+    r"""Remove unit annotations (``\text{ ... }``) from the right side of an expression.
+
+    Args:
+        string: A LaTeX math string potentially containing unit text.
+
+    Returns:
+        The string with trailing unit text removed.
+
+    """
     # "\\text{ " only ever occurs (at least in the val set) when describing units
     if "\\text{ " in string:
         splits = string.split("\\text{ ")
@@ -145,6 +215,17 @@ def remove_right_units(string):
 
 
 def fix_sqrt(string):
+    r"""Normalize shorthand ``\sqrt`` notation to brace-delimited form.
+
+    Converts ``\sqrt3`` to ``\sqrt{3}``.
+
+    Args:
+        string: A LaTeX math string.
+
+    Returns:
+        The string with square roots in canonical ``\sqrt{x}`` form.
+
+    """
     if "\\sqrt" not in string:
         return string
     splits = string.split("\\sqrt")
@@ -160,6 +241,19 @@ def fix_sqrt(string):
 
 
 def strip_string(string):
+    """Normalize a LaTeX math string for equivalence comparison.
+
+    Applies a series of transformations including removing whitespace,
+    fixing fractions and square roots, removing units, and standardizing
+    common notation variants.
+
+    Args:
+        string: A raw LaTeX math answer string.
+
+    Returns:
+        A normalized string suitable for direct equality comparison.
+
+    """
     # linebreaks
     string = string.replace("\n", "")
 

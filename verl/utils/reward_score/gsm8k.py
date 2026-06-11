@@ -18,6 +18,17 @@ _SOLUTION_CLIP_CHARS = 300
 
 
 def extract_solution(solution_str, method="strict"):
+    """Extract the numeric answer from a GSM8k-style solution string.
+
+    Args:
+        solution_str: The solution text, potentially very long.
+        method: Extraction strategy — ``'strict'`` looks for ``#### <number>``,
+            ``'flexible'`` finds the last number in the string.
+
+    Returns:
+        The extracted answer string, or None if no answer is found.
+
+    """
     assert method in ["strict", "flexible"]
 
     # Optimization: Regular expression matching on very long strings can be slow.
@@ -61,6 +72,7 @@ def compute_score(solution_str, ground_truth, method="strict", format_score=0.0,
         method: the method to extract the solution, choices are 'strict' and 'flexible'
         format_score: the score for the format
         score: the score for the correct answer
+
     """
     answer = extract_solution(solution_str=solution_str, method=method)
     if answer is None:

@@ -37,6 +37,17 @@ from pyext import RuntimeModule
 
 
 def truncatefn(s, length=300):
+    """Truncate a string to a maximum length, keeping head and tail.
+
+    Args:
+        s: Input string to truncate.
+        length: Maximum allowed length before truncation.
+
+    Returns:
+        The original string if within length, otherwise a truncated version
+        with head and tail joined by an ellipsis marker.
+
+    """
     assert isinstance(s, str)
     if len(s) <= length:
         return s
@@ -45,6 +56,8 @@ def truncatefn(s, length=300):
 
 
 class CODE_TYPE(Enum):
+    """Enumeration of code execution types for test evaluation."""
+
     call_based = 0
     standard_input = 1
 
@@ -53,6 +66,12 @@ class CODE_TYPE(Enum):
 # from https://stackoverflow.com/a/16571630/6416660
 # alternative use redirect_stdout() from contextlib
 class Capturing(list):
+    """Context manager that captures stdout output into a list.
+
+    Redirects sys.stdout to a StringIO buffer and appends the captured
+    content to the list upon exiting the context.
+    """
+
     def __enter__(self):
         self._stdout = sys.stdout
         sys.stdout = self._stringio = StringIO()
@@ -67,18 +86,30 @@ class Capturing(list):
 
 
 def only_int_check(val):
+    """Check whether a value is strictly an integer type."""
     return isinstance(val, int)
 
 
 def string_int_check(val):
+    """Check whether a value is a string representation of a non-negative integer."""
     return isinstance(val, str) and val.isdigit()
 
 
 def combined_int_check(val):
+    """Check whether a value is an integer or a string of digits."""
     return only_int_check(val) or string_int_check(val)
 
 
 def clean_traceback(error_traceback):
+    """Clean a traceback string to start from the generated code frame.
+
+    Args:
+        error_traceback: Raw traceback string from the executed code.
+
+    Returns:
+        A cleaned traceback starting from the ``File "<string>"`` frame.
+
+    """
     file_start = error_traceback.find('File "<string>"')
     # print(file_start)
     error_traceback = "Traceback (most recent call last):\n  " + error_traceback[file_start:]
@@ -554,6 +585,16 @@ def run_test(in_outs, test=None, debug=False, timeout=15):
 
 
 def custom_compare_(output, ground_truth):
+    """Compare output lines against ground truth using stripped string matching.
+
+    Args:
+        output: Captured output, typically a list of strings.
+        ground_truth: Expected output string.
+
+    Returns:
+        True if the joined and stripped output matches the ground truth.
+
+    """
     if isinstance(output, list):
         output_1 = "\n".join(output)
         if stripped_string_compare(output_1, ground_truth):
@@ -569,12 +610,23 @@ def custom_compare_(output, ground_truth):
 
 
 def stripped_string_compare(s1, s2):
+    """Compare two strings after stripping leading and trailing whitespace."""
     s1 = s1.lstrip().rstrip()
     s2 = s2.lstrip().rstrip()
     return s1 == s2
 
 
 def call_method(method, inputs):
+    """Invoke a method with mocked stdin and builtins.open for standard-input problems.
+
+    Args:
+        method: The callable to invoke (typically the generated ``code()`` function).
+        inputs: Input data as a string or list of strings to feed via stdin.
+
+    Returns:
+        The return value of the invoked method.
+
+    """
     if isinstance(inputs, list):
         inputs = "\n".join(inputs)
 
@@ -610,6 +662,7 @@ def reliability_guard(maximum_memory_bytes=None):
     generated code, should not be blindly executed outside of one. See the
     Codex paper for more information about OpenAI's code sandbox, and proceed
     with caution.
+
     """
 
     if maximum_memory_bytes is not None:

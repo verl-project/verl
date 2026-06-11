@@ -18,6 +18,8 @@ from verl.utils.device import get_device_id
 
 
 class MemoryBuffer:
+    """Pre-allocated GPU buffer for contiguous gradient or parameter storage."""
+
     def __init__(self, numel, numel_padded, dtype):
         self.numel = numel
         self.numel_padded = numel_padded

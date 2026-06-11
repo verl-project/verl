@@ -31,6 +31,7 @@ def omega_conf_to_dataclass(config: DictConfig | dict, dataclass_type: Optional[
 
     Returns:
         The dataclass instance.
+
     """
     # Got an empty config
     if not config:
@@ -66,6 +67,13 @@ def omega_conf_to_dataclass(config: DictConfig | dict, dataclass_type: Optional[
 
 
 def update_dict_with_config(dictionary: dict, config: DictConfig):
+    """Update dictionary values in-place from a DictConfig for matching keys.
+
+    Args:
+        dictionary: Target dictionary to update.
+        config: Source DictConfig whose attributes override matching keys.
+
+    """
     for key in dictionary:
         if hasattr(config, key):
             dictionary[key] = getattr(config, key)
@@ -82,6 +90,7 @@ def validate_config(
         config (DictConfig): The OmegaConf DictConfig to validate.
         use_reference_policy (bool): is ref policy needed
         use_critic (bool): is critic needed
+
     """
     # number of GPUs total
     n_gpus = config.trainer.n_gpus_per_node * config.trainer.nnodes
@@ -127,6 +136,7 @@ def validate_config(
 
         Raises:
             ValueError: If both parameters are set or neither is set.
+
         """
         settings = {
             "actor_rollout_ref.ref": "log_prob_micro_batch_size",

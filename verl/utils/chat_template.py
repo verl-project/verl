@@ -20,6 +20,7 @@ def initialize_system_prompt(tokenizer, **apply_chat_template_kwargs) -> list[in
 
     Returns:
         List of token IDs for the system prompt, or empty list if not supported
+
     """
     token1 = normalize_token_ids(
         tokenizer.apply_chat_template(
@@ -40,6 +41,18 @@ def initialize_system_prompt(tokenizer, **apply_chat_template_kwargs) -> list[in
 
 
 def extract_system_prompt_and_generation(tokenizer, **apply_chat_template_kwargs):
+    """Extract the system prompt and generation prompt token ids from a tokenizer's chat template.
+
+    Args:
+        tokenizer: The tokenizer whose chat template is inspected.
+        **apply_chat_template_kwargs: Extra keyword arguments forwarded to ``apply_chat_template``.
+
+    Returns:
+        A tuple ``(system_prompt, generate_prompt)`` of token id lists, where ``system_prompt``
+        holds the tokens prepended before user messages and ``generate_prompt`` holds the tokens
+        appended to trigger generation.
+
+    """
     token1 = normalize_token_ids(
         tokenizer.apply_chat_template(
             [{"role": "user", "content": ""}], add_generation_prompt=False, tokenize=True, **apply_chat_template_kwargs
@@ -90,6 +103,7 @@ def apply_chat_template(
 
     Returns:
         list[int] | str: tokenized ids or text string.
+
     """
     try:
         return processor.apply_chat_template(

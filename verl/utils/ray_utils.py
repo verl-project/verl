@@ -26,6 +26,15 @@ import ray
 
 
 def ray_noset_visible_devices(env_vars=os.environ):
+    """Check whether any Ray NOSET_VISIBLE_DEVICES environment variable is set.
+
+    Args:
+        env_vars: Mapping of environment variables to inspect.
+
+    Returns:
+        True if any Ray no-set visible devices env var is truthy.
+
+    """
     # Refer to
     # https://github.com/ray-project/ray/blob/161849364a784442cc659fb9780f1a6adee85fce/python/ray/_private/accelerators/nvidia_gpu.py#L95-L96
     # https://github.com/ray-project/ray/blob/161849364a784442cc659fb9780f1a6adee85fce/python/ray/_private/accelerators/amd_gpu.py#L102-L103
@@ -60,6 +69,7 @@ def parallel_put(data_list: list[Any], max_workers: Optional[int] = None):
     Returns:
         List[ray.ObjectRef]: A list of Ray object references corresponding to the input data_list,
                              maintaining the original order.
+
     """
     assert len(data_list) > 0, "data_list must not be empty"
 
@@ -85,6 +95,12 @@ def parallel_put(data_list: list[Any], max_workers: Optional[int] = None):
 
 
 def get_event_loop():
+    """Return the current asyncio event loop, creating one if none exists.
+
+    Returns:
+        The current or newly created asyncio event loop.
+
+    """
     try:
         loop = asyncio.get_event_loop()
     except RuntimeError:

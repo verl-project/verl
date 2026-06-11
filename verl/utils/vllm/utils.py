@@ -29,13 +29,25 @@ from verl.third_party.vllm import get_version
 
 
 class TensorLoRARequest(LoRARequest):
+    """Extended LoRA request that carries adapter tensors in memory.
+
+    Attributes:
+        peft_config: The PEFT configuration dictionary for the adapter.
+        lora_tensors: Mapping of parameter names to in-memory LoRA weight tensors.
+
+    """
+
     peft_config: dict = field(default=None)
     lora_tensors: dict = field(default=None)
 
 
 class VLLMHijack:
+    """Utility for monkey-patching vLLM to support tensor-based LoRA loading."""
+
     @staticmethod
     def hijack():
+        """Apply monkey-patches to vLLM LoRA manager for tensor-based adapter loading."""
+
         def hijack__load_adapter(self, lora_request: TensorLoRARequest) -> LoRAModel:
             """
             based on vllm.lora.worker_manager.WorkerLoRAManager._load_adapter, support load adapter with lora tensors

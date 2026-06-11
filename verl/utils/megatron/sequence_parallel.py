@@ -19,10 +19,12 @@ from megatron.core import parallel_state as mpu
 
 
 def mark_parameter_as_sequence_parallel(parameter):
+    """Tag a parameter as belonging to a sequence-parallel partition."""
     parameter.sequence_parallel = True
 
 
 def is_sequence_parallel_param(param):
+    """Check whether a parameter is marked as sequence-parallel."""
     return hasattr(param, "sequence_parallel") and param.sequence_parallel
 
 

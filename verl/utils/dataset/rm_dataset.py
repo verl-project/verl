@@ -24,6 +24,15 @@ from verl.utils import hf_tokenizer
 
 
 def download_files_distributed(download_fn):
+    """Run a download function once across distributed ranks.
+
+    When torch distributed is initialized, only rank 0 executes ``download_fn`` and all other ranks
+    wait at a barrier. Otherwise the function is executed unconditionally.
+
+    Args:
+        download_fn: A zero-argument callable that performs the download.
+
+    """
     import torch.distributed
 
     if torch.distributed.is_initialized():
@@ -38,6 +47,8 @@ def download_files_distributed(download_fn):
 
 
 class RMDataset(Dataset):
+    """Dataset for reward model training with chosen/rejected response pairs."""
+
     def __init__(
         self,
         parquet_files: str | list[str],

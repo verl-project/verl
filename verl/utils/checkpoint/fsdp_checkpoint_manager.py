@@ -48,6 +48,7 @@ class FSDPConfig:
     Args:
         FSDP_version (int): Version of FSDP being used.
         world_size (int): Number of processes in the distributed training setup.
+
     """
 
     FSDP_version: int
@@ -72,6 +73,7 @@ class FSDPCheckpointManager(BaseCheckpointManager):
             - 'load': Components to load; must contain 'model'. Defaults to ['model', 'optimizer', 'extra'].
             - 'save': Components to save; must contain 'model'. Defaults to ['model', 'optimizer', 'extra'].
         trust_remote_code: Whether to trust_remote_code when loading the model configuration
+
     """
 
     def __init__(
@@ -147,6 +149,7 @@ class FSDPCheckpointManager(BaseCheckpointManager):
             local_path: Directory with per-rank checkpoint files.
             hdfs_path: Unused (for API compatibility).
             del_local_after_load: Remove local files after loading.
+
         """
         if local_path is None:
             return
@@ -234,6 +237,7 @@ class FSDPCheckpointManager(BaseCheckpointManager):
             hdfs_path: Unused (for API compatibility).
             global_step: Current training step (used for bookkeeping).
             max_ckpt_to_keep: Number of recent checkpoints to retain.
+
         """
         if local_path is None:
             return

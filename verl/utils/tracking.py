@@ -41,6 +41,7 @@ class Tracking:
     Attributes:
         supported_backend: List of supported tracking backends.
         logger: Dictionary of initialized logger instances for each backend.
+
     """
 
     supported_backend = [
@@ -181,6 +182,15 @@ class Tracking:
             self.logger["file"] = FileLogger(project_name, experiment_name)
 
     def log(self, data, step, backend=None):
+        """Log data to the configured tracking backends at the given step.
+
+        Args:
+            data: Mapping of metric names to values to log.
+            step: The current step or iteration associated with the data.
+            backend: Optional collection of backend names to restrict logging to. If None,
+                logs to all configured backends.
+
+        """
         for default_backend, logger_instance in self.logger.items():
             if backend is None or default_backend in backend:
                 logger_instance.log(data=data, step=step)
@@ -203,6 +213,15 @@ class Tracking:
 
 
 class ClearMLLogger:
+    """Tracking backend that logs metrics and tables to ClearML.
+
+    Args:
+        project_name: The ClearML project name.
+        experiment_name: The ClearML task/experiment name.
+        config: Hyperparameter configuration to attach to the task.
+
+    """
+
     def __init__(self, project_name: str, experiment_name: str, config):
         self.project_name = project_name
         self.experiment_name = experiment_name
@@ -222,6 +241,13 @@ class ClearMLLogger:
         return self._task.get_logger()
 
     def log(self, data, step):
+        """Log scalar and table data to ClearML at the given step.
+
+        Args:
+            data: Mapping of "title/series" keys to scalar or DataFrame values.
+            step: The current step or iteration associated with the data.
+
+        """
         import numpy as np
         import pandas as pd
 
@@ -251,6 +277,7 @@ class ClearMLLogger:
                 )
 
     def finish(self):
+        """Close the ClearML task and finalize logging."""
         self._task.close()
 
 
@@ -269,6 +296,14 @@ class _TrackioLoggingAdapter:
 
 
 class FileLogger:
+    """Tracking backend that appends metrics as JSON lines to a local file.
+
+    Args:
+        project_name: The project name used to construct the log directory.
+        experiment_name: The experiment name used as the log filename.
+
+    """
+
     def __init__(self, project_name: str, experiment_name: str):
         self.project_name = project_name
         self.experiment_name = experiment_name
@@ -283,10 +318,18 @@ class FileLogger:
         self.fp = open(self.filepath, "wb", buffering=0)
 
     def log(self, data, step):
+        """Append the data as a JSON line to the log file.
+
+        Args:
+            data: Mapping of metric names to values to log.
+            step: The current step or iteration associated with the data.
+
+        """
         data = {"step": step, "data": data}
         self.fp.write(orjson.dumps(data, option=orjson.OPT_SERIALIZE_NUMPY) + b"\n")
 
     def finish(self):
+        """Close the underlying log file."""
         self.fp.close()
 
 
@@ -302,10 +345,18 @@ class _TensorboardAdapter:
         self.writer = SummaryWriter(tensorboard_dir)
 
     def log(self, data, step):
+        """Log scalar metrics to TensorBoard.
+
+        Args:
+            data: Mapping of metric names to scalar values.
+            step: The current step or iteration.
+
+        """
         for key in data:
             self.writer.add_scalar(key, data[key], step)
 
     def finish(self):
+        """Close the TensorBoard SummaryWriter."""
         self.writer.close()
 
 
@@ -344,6 +395,13 @@ class _MlflowLoggingAdapter:
         return sanitized
 
     def log(self, data, step):
+        """Log metrics to MLflow with automatic key sanitization and retry logic.
+
+        Args:
+            data: Mapping of metric names to numeric values.
+            step: The current step or iteration.
+
+        """
         import mlflow
 
         results = {self._sanitize_key(k): v for k, v in data.items()}
@@ -398,10 +456,26 @@ def _flatten_dict(raw: dict[str, Any], *, sep: str) -> dict[str, Any]:
 
 @dataclasses.dataclass
 class ValidationGenerationsLogger:
+    """Logger for validation generation samples across multiple tracking backends.
+
+    Attributes:
+        project_name: The project name for backend initialization.
+        experiment_name: The experiment name for backend initialization.
+
+    """
+
     project_name: str = None
     experiment_name: str = None
 
     def log(self, loggers, samples, step):
+        """Log validation generation samples to the requested backends.
+
+        Args:
+            loggers: Collection of backend names to log the samples to.
+            samples: The validation generation samples to log.
+            step: The current step or iteration associated with the samples.
+
+        """
         if "wandb" in loggers:
             self.log_generations_to_wandb(samples, step)
         if "swanlab" in loggers:
@@ -420,11 +494,25 @@ class ValidationGenerationsLogger:
             self.log_generations_to_vemlp_wandb(samples, step)
 
     def log_generations_to_vemlp_wandb(self, samples, step):
+        """Log generation samples to VeMLP WandB as a table.
+
+        Args:
+            samples: The validation generation samples to log.
+            step: The current step or iteration associated with the samples.
+
+        """
         from volcengine_ml_platform import wandb as vemlp_wandb
 
         self._log_generations_to_wandb(samples, step, vemlp_wandb)
 
     def log_generations_to_wandb(self, samples, step):
+        """Log generation samples to WandB as a table.
+
+        Args:
+            samples: The validation generation samples to log.
+            step: The current step or iteration associated with the samples.
+
+        """
         import wandb
 
         self._log_generations_to_wandb(samples, step, wandb)

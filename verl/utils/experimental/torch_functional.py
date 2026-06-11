@@ -85,6 +85,13 @@ def _fused_linear_for_ppo_bwd(
 
 
 class FusedLinearForPPOFunction(torch.autograd.Function):
+    """Custom autograd function for memory-efficient fused linear PPO computation.
+
+    Computes per-token log probabilities and entropy in a chunked manner to
+    reduce peak memory usage when the vocabulary size is large.
+
+    """
+
     @staticmethod
     def forward(
         ctx,
@@ -94,6 +101,21 @@ class FusedLinearForPPOFunction(torch.autograd.Function):
         temperature: float = 1.0,
         chunk_size: int = 512,
     ) -> tuple[torch.FloatTensor, torch.FloatTensor]:
+        """Compute per-token log probabilities and entropy in a chunked, memory-efficient manner.
+
+        Args:
+            ctx: The autograd context used to stash tensors for the backward pass.
+            hidden_states: Hidden states of shape ``[T, D]`` or ``[B, T, D]``.
+            vocab_weights: The output (vocabulary) projection weights.
+            input_ids: Target token ids matching the leading dimensions of ``hidden_states``.
+            temperature: Temperature applied to the logits before computing log probabilities.
+            chunk_size: Number of tokens processed per chunk to bound memory usage.
+
+        Returns:
+            A tuple ``(log_probs, entropy)`` with shapes matching the (flattened) token layout of
+            the inputs.
+
+        """
         ctx.set_materialize_grads(False)
 
         # Cast to a 2D tensor of the shape [T, D] for ease of working
@@ -143,6 +165,18 @@ class FusedLinearForPPOFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dlog_probs: Optional[torch.FloatTensor], dentropy: Optional[torch.FloatTensor]):
+        """Compute gradients for the fused linear PPO forward pass.
+
+        Args:
+            ctx: The autograd context holding tensors saved during the forward pass.
+            dlog_probs: Upstream gradient w.r.t. the log probabilities, or None.
+            dentropy: Upstream gradient w.r.t. the entropy, or None.
+
+        Returns:
+            A tuple of gradients aligned with the forward inputs:
+            ``(dhidden_states, dvocab_weights, None, None, None)``.
+
+        """
         assert dlog_probs is not None or dentropy is not None
 
         hidden_states, vocab_weights, input_ids = ctx.saved_tensors
@@ -207,6 +241,13 @@ class FusedLinearForPPOFunction(torch.autograd.Function):
 
 
 class FusedLinearForPPO(torch.nn.Module):
+    """Module wrapper for chunked fused linear PPO log-probability and entropy computation.
+
+    Args:
+        chunk_size: Number of tokens processed per chunk to bound memory usage.
+
+    """
+
     def __init__(self, chunk_size: int = 512):
         super().__init__()
 
@@ -219,6 +260,18 @@ class FusedLinearForPPO(torch.nn.Module):
         input_ids: torch.LongTensor,
         temperature: float = 1.0,
     ) -> tuple[torch.FloatTensor, torch.FloatTensor]:
+        """Compute per-token log probabilities and entropy using the chunked fused kernel.
+
+        Args:
+            hidden_states: Hidden states of shape ``[T, D]`` or ``[B, T, D]``.
+            vocab_weights: The output (vocabulary) projection weights.
+            input_ids: Target token ids matching the leading dimensions of ``hidden_states``.
+            temperature: Temperature applied to the logits before computing log probabilities.
+
+        Returns:
+            A tuple ``(log_probs, entropy)``.
+
+        """
         input_ids = input_ids.to(torch.int64)
         return FusedLinearForPPOFunction.apply(
             hidden_states,

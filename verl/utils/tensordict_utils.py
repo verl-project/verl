@@ -40,6 +40,7 @@ def assign_non_tensor_data(tensor_dict: TensorDict, key, val):
     Example:
         >>> td = TensorDict({"obs": torch.randn(3, 4)}, batch_size=[3])
         >>> assign_non_tensor_data(td, "experiment_name", "run_001")
+
     """
     assert isinstance(tensor_dict, TensorDict), "input dict must be a TensorDict"
     tensor_dict[key] = NonTensorData(val)
@@ -65,6 +66,7 @@ def assign_non_tensor_stack(tensor_dict: TensorDict, key, val: list):
         >>> turn_scores = [[], [0.5, 0.8], [0.9]]
         >>> assign_non_tensor_stack(td, "turn_scores", turn_scores)
         >>> # Now td["turn_scores"] contains the nested data
+
     """
     # Convert list to NonTensorStack to handle nested structures
     # This wraps each item in NonTensorData to preserve complex objects
@@ -93,6 +95,7 @@ def assign_non_tensor(tensor_dict: TensorDict, **kwargs):
         ...     metadata="experiment_1",  # Simple value
         ...     turn_scores=[[], [0.5, 0.8], [0.9]]  # Nested list
         ... )
+
     """
     assert isinstance(tensor_dict, TensorDict), "input dict must be a TensorDict"
     for key, val in kwargs.items():
@@ -126,6 +129,7 @@ def unwrap_non_tensor_data(data):
         'hello'
         >>> unwrap_non_tensor_data(42)  # Non-wrapped value
         42
+
     """
     if isinstance(data, NonTensorData):
         return data.data
@@ -154,12 +158,14 @@ def get_non_tensor_data(data: TensorDict, key: str, default):
         {'lr': 0.01}
         >>> get_non_tensor_data(td, "missing", "default_value")
         'default_value'
+
     """
     output = data.get(key, default)
     return unwrap_non_tensor_data(output)
 
 
 def nested_tensor_from_tensor_list(tensors: list[torch.Tensor], ragged_idx: int | None = None) -> torch.Tensor:
+    """Create a jagged nested tensor from a list of tensors with varying sizes."""
     assert len(tensors) > 0, "Must provide at least one tensor"
     sample_dim = tensors[0].dim()
     if ragged_idx is None:
@@ -205,6 +211,7 @@ def concat_nested_tensors(tensors: list[torch.Tensor]) -> torch.Tensor:
         >>> t2 = torch.nested.as_nested_tensor([torch.randn(2), torch.randn(4)], layout=torch.jagged)
         >>> result = concat_nested_tensors([t1, t2])
         >>> # result contains 4 rows: lengths [3, 5, 2, 4]
+
     """
     for tensor in tensors:
         assert tensor.is_nested and tensor.is_contiguous()
@@ -237,6 +244,7 @@ def concat_tensordict_with_none_bsz(data: list[TensorDict]):
     Note:
         This is used internally by concat_tensordict when handling
         TensorDicts that contain only non-tensor metadata.
+
     """
     for d in data:
         assert len(d.batch_size) == 0
@@ -266,6 +274,7 @@ def concat_tensordict(data: list[TensorDict]) -> TensorDict:
         - For TensorDicts with empty batch_size, returns the first one
         - Nested tensors are handled specially via concat_nested_tensors
         - Regular tensors use TensorDict.cat for efficient concatenation
+
     """
     assert len(data) > 0, "Must have at least one tensordict"
 
@@ -337,6 +346,7 @@ def chunk_tensordict(td: TensorDict, chunks: int) -> list[TensorDict]:
         NestedTensors using the original ragged lengths from ``offsets``.
 
         See https://github.com/pytorch/pytorch/issues/153238
+
     """
     assert isinstance(td, TensorDict) and len(td) % chunks == 0, (
         f"expecting td with length divisible by chunks, but got {len(td)} and {chunks}"
@@ -398,6 +408,7 @@ def get_tensordict(tensor_dict: dict[str, torch.Tensor | list], non_tensor_dict:
         ...     },
         ...     non_tensor_dict={"experiment": "test"}
         ... )
+
     """
     tensor_dict = tensor_dict.copy()
     if non_tensor_dict is None:
@@ -478,6 +489,7 @@ def index_select_tensor_dict(batch: TensorDict, indices: torch.Tensor | list[int
         - Nested tensors are unbound, indexed, and rebound
         - NonTensorStack is indexed by batch dimension
         - NonTensorData (scalar metadata) is preserved unchanged
+
     """
     if isinstance(indices, list):
         indices = torch.tensor(indices)
@@ -534,6 +546,7 @@ def union_tensor_dict(tensor_dict1: TensorDict, tensor_dict2: TensorDict) -> Ten
         >>> result = union_tensor_dict(td1, td2)
         >>> list(result.keys())
         ['a', 'b']
+
     """
     assert tensor_dict1.batch_size == tensor_dict2.batch_size, (
         f"Two tensor dict must have identical batch size. Got {tensor_dict1.batch_size} and {tensor_dict2.batch_size}"
@@ -582,6 +595,7 @@ def make_iterator(tensordict: TensorDict, mini_batch_size, epochs, seed=None, da
         >>> for batch in make_iterator(td, mini_batch_size=10, epochs=2):
         ...     # batch is a TensorDict with batch_size=[10]
         ...     pass
+
     """
     from torch.utils.data import DataLoader
 
@@ -631,6 +645,7 @@ def assert_tensordict_eq(tensordict1: TensorDict, tensordict2: TensorDict):
         - Regular tensors are compared element-wise
         - Nested tensors are unbound and compared component by component
         - Non-tensor values are compared with standard equality
+
     """
     tensordict1_key_set = set(tensordict1.keys())
     tensordict2_key_set = set(tensordict2.keys())
@@ -681,6 +696,7 @@ def get(tensordict: TensorDict, key: str, default=None) -> Any:
         >>> get(td, "obs")  # Returns torch.Tensor
         >>> get(td, "labels")  # Returns ["a", "b", "c"] as a list
         >>> get(td, "missing", "default")  # Returns "default"
+
     """
     if key not in tensordict:
         return default
@@ -716,6 +732,7 @@ def get_keys(tensordict: TensorDict, keys: Iterable[str]) -> TensorDict:
         >>> subset = get_keys(td, ["a", "c"])
         >>> list(subset.keys())
         ['a', 'c']
+
     """
     tensor_output = {}
     non_tensor_output = {}
@@ -754,6 +771,7 @@ def pop(tensordict: TensorDict, key: str, default=None) -> Any:
         >>> labels = pop(td, "labels")  # Returns ["a", "b", "c"], removes from td
         >>> "labels" in td.keys()
         False
+
     """
     _sentinel = object()
     output = tensordict.pop(key, _sentinel)
@@ -792,6 +810,7 @@ def pop_keys(tensordict: TensorDict, keys: Iterable[str]) -> TensorDict:
         ['b']
         >>> list(popped.keys())
         ['a', 'c']
+
     """
     tensor_output = {}
     non_tensor_output = {}
@@ -836,6 +855,7 @@ def pad_to_divisor(data: TensorDict, size_divisor: int):
         12
         >>> pad_size
         2
+
     """
     assert isinstance(data, TensorDict), "data must be a TensorDict"
     if len(data) % size_divisor != 0:
@@ -874,6 +894,7 @@ def unpad(data: TensorDict, pad_size):
         >>> unpadded = unpad(td, pad_size=2)
         >>> len(unpadded)
         10
+
     """
     if pad_size != 0:
         data = data[:-pad_size]
@@ -908,6 +929,7 @@ def contiguous(data: TensorDict) -> TensorDict:
 
 
 def maybe_fix_3d_position_ids(data: TensorDict):
+    """Fix ragged index for 3D nested position_ids after pickle roundtrip."""
     # note for tensordict with pickle/unpickle. nested tensor in tensordict after consolidate and pickle/unpickle
     # will incur indexing error for ragged tensor. This only happens when using 3D position ids in VLMs.
     # This is likely a bug in tensordict. As a workaround, we manually set _ragged_index.

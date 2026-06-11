@@ -33,14 +33,26 @@ def _get_collective_module():
 
 @ray.remote
 class NCCLIDStore:
+    """Ray actor that holds and serves an NCCL unique ID for rendezvous."""
+
     def __init__(self, nccl_id):
         self._nccl_id = nccl_id
 
     def get(self):
+        """Return the stored NCCL unique identifier."""
         return self._nccl_id
 
 
 def get_nccl_id_store_by_name(name):
+    """Look up a named NCCLIDStore Ray actor by its registered name.
+
+    Args:
+        name: The registered actor name to search for.
+
+    Returns:
+        The actor handle if exactly one match is found, otherwise None.
+
+    """
     all_actors = list_named_actors(all_namespaces=True)
     matched_actors = [actor for actor in all_actors if actor.get("name", None) == name]
     if len(matched_actors) == 1:
@@ -56,6 +68,18 @@ def get_nccl_id_store_by_name(name):
 def create_nccl_communicator_in_ray(
     rank: int, world_size: int, group_name: str, max_retries: int = 100, interval_s: int = 5
 ):
+    """Create an NCCL communicator across Ray workers using a shared ID store.
+
+    Args:
+        rank: The rank of the current process in the communicator.
+        world_size: Total number of processes in the communicator.
+        group_name: Name used to register the NCCL ID store actor.
+        max_retries: Maximum number of retries for non-rank-0 processes.
+        interval_s: Sleep interval in seconds between retries.
+
+    Returns:
+        An initialized NcclCommunicator instance.
+    """
     collective = _get_collective_module()
     NcclCommunicator = collective.NcclCommunicator
     get_unique_id = collective.get_unique_id

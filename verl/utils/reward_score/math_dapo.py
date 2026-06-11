@@ -25,6 +25,7 @@ def last_boxed_only_string(string: str) -> Optional[str]:
 
     Returns:
         The last boxed expression or None if not found
+
     """
     idx = string.rfind("\\boxed{")
     if idx < 0:
@@ -48,13 +49,14 @@ def last_boxed_only_string(string: str) -> Optional[str]:
 
 
 def remove_boxed(s: str) -> str:
-    """Remove the LaTeX boxed command from a string.
+    r"""Remove the LaTeX boxed command from a string.
 
     Args:
         s: String with format "\\boxed{content}"
 
     Returns:
         The content inside the boxed command
+
     """
     left = "\\boxed{"
     assert s[: len(left)] == left, f"box error: {s}"
@@ -129,6 +131,7 @@ def normalize_final_answer(final_answer: str) -> str:
 
     Returns:
         Normalized answer string
+
     """
     final_answer = final_answer.split("=")[-1]
 
@@ -175,6 +178,7 @@ def is_correct_minerva(
 
     Returns:
         Tuple of (is_correct, normalized_prediction)
+
     """
     # Extract answer from solution
     match = re.findall(answer_pattern, solution_str)
@@ -202,6 +206,7 @@ def is_correct_strict_box(
 
     Returns:
         Tuple of (score, extracted_prediction)
+
     """
     # Extract the relevant part of the prediction
     if pause_tokens_index is not None:
@@ -230,6 +235,7 @@ def verify(
 
     Returns:
         True if the solution is correct, False otherwise
+
     """
     if strict_box_verify:
         correct, pred = is_correct_strict_box(solution_str, answer, pause_tokens_index)
@@ -255,6 +261,7 @@ def compute_score(
 
     Returns:
         Reward score (1.0 for correct, -1.0 for incorrect)
+
     """
     # Limit solution length for efficiency
     solution_str = solution_str[-300:]  # The longest answer in MATH-500 has 159 characters

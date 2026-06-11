@@ -11,8 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""
-Utilities to check if packages are available.
+"""Utilities to check if packages are available.
+
 We assume package availability won't change during runtime.
 """
 
@@ -26,6 +26,12 @@ from typing import Optional
 
 @cache
 def is_megatron_core_available():
+    """Check whether Megatron-Core is installed and importable.
+
+    Returns:
+        bool: True if ``megatron.core`` can be found, False otherwise.
+
+    """
     try:
         mcore_spec = importlib.util.find_spec("megatron.core")
     except ModuleNotFoundError:
@@ -35,6 +41,12 @@ def is_megatron_core_available():
 
 @cache
 def is_vllm_available():
+    """Check whether vLLM is installed and importable.
+
+    Returns:
+        bool: True if ``vllm`` can be found, False otherwise.
+
+    """
     try:
         vllm_spec = importlib.util.find_spec("vllm")
     except ModuleNotFoundError:
@@ -44,6 +56,12 @@ def is_vllm_available():
 
 @cache
 def is_sglang_available():
+    """Check whether SGLang is installed and importable.
+
+    Returns:
+        bool: True if ``sglang`` can be found, False otherwise.
+
+    """
     try:
         sglang_spec = importlib.util.find_spec("sglang")
     except ModuleNotFoundError:
@@ -53,6 +71,12 @@ def is_sglang_available():
 
 @cache
 def is_nvtx_available():
+    """Check whether NVTX is installed and importable.
+
+    Returns:
+        bool: True if ``nvtx`` can be found, False otherwise.
+
+    """
     try:
         nvtx_spec = importlib.util.find_spec("nvtx")
     except ModuleNotFoundError:
@@ -62,6 +86,12 @@ def is_nvtx_available():
 
 @cache
 def is_trl_available():
+    """Check whether TRL is installed and importable.
+
+    Returns:
+        bool: True if ``trl`` can be found, False otherwise.
+
+    """
     try:
         trl_spec = importlib.util.find_spec("trl")
     except ModuleNotFoundError:
@@ -71,6 +101,12 @@ def is_trl_available():
 
 @cache
 def is_msprobe_available():
+    """Check whether msprobe is installed and importable.
+
+    Returns:
+        bool: True if ``msprobe`` can be found, False otherwise.
+
+    """
     try:
         msprobe_spec = importlib.util.find_spec("msprobe")
     except ModuleNotFoundError:
@@ -79,6 +115,13 @@ def is_msprobe_available():
 
 
 def import_external_libs(external_libs=None):
+    """Import one or more external libraries by name.
+
+    Args:
+        external_libs: A single module name or a list of module names to import.
+            If None, this function is a no-op.
+
+    """
     if external_libs is None:
         return
     if not isinstance(external_libs, list):
@@ -107,6 +150,7 @@ def load_module(module_path: str, module_name: Optional[str] = None) -> object:
         module_name (str, optional):
             The name of the module to added to ``sys.modules``. If not provided, the module will not be added,
                 thus will not be cached and directly ``import``able.
+
     """
     if not module_path:
         return None
@@ -155,7 +199,7 @@ def _get_qualified_name(func):
 
 
 def deprecated(replacement: str = ""):
-    """Decorator to mark functions or classes as deprecated."""
+    """Mark a function or class as deprecated."""
 
     def decorator(obj):
         qualified_name = _get_qualified_name(obj)
@@ -196,6 +240,7 @@ def load_extern_object(module_path: str, object_name: str) -> object:
         module_path (str): See :func:`load_module`.
         object_name (str):
             The name of the object to load with ``getattr(module, object_name)``.
+
     """
     module = load_module(module_path)
 
@@ -223,6 +268,7 @@ def load_class_from_fqn(fqn: str, description: str = "class") -> type:
     Example:
         >>> cls = load_class_from_fqn("verl.experimental.agent_loop.AgentLoopManager")
         >>> instance = cls(config=config, ...)
+
     """
     if "." not in fqn:
         raise ValueError(
@@ -240,5 +286,5 @@ def load_class_from_fqn(fqn: str, description: str = "class") -> type:
 
 @deprecated(replacement="load_module(file_path); getattr(module, type_name)")
 def load_extern_type(file_path: str, type_name: str) -> type:
-    """DEPRECATED. Directly use `load_extern_object` instead."""
+    """Load an external type (deprecated, use ``load_extern_object`` instead)."""
     return load_extern_object(file_path, type_name)

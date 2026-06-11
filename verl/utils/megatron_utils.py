@@ -52,6 +52,15 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
 def get_model_config(model):
+    """Return the config attribute of a (possibly wrapped) Megatron model.
+
+    Args:
+        model: The model whose ``config`` attribute is retrieved, even if wrapped.
+
+    Returns:
+        The model configuration object.
+
+    """
     return get_attr_wrapped_model(model, "config", allow_none=False)
 
 
@@ -222,6 +231,23 @@ def make_megatron_module(
     peft_cls: Any = None,
     peft_config: Any = None,
 ):
+    """Build a Megatron module from the given wrapper and transformer configs.
+
+    Args:
+        wrap_config: Configuration describing how to wrap the module (e.g. value model flag).
+        tf_config: The Megatron ``TransformerConfig`` for the module.
+        hf_config: The HuggingFace ``PretrainedConfig`` for the underlying model.
+        bridge: Optional Megatron-Bridge instance used to construct the model.
+        provider: Optional model provider used together with ``bridge``.
+        override_model_config: Optional dict of model config overrides.
+        override_ddp_config: Optional dict of DDP config overrides.
+        peft_cls: Optional PEFT callable applied before DDP wrapping.
+        peft_config: Optional PEFT configuration.
+
+    Returns:
+        The constructed (and optionally wrapped) Megatron module.
+
+    """
     from verl.models.mcore.config_converter import get_hf_rope_theta
 
     hf_config.rope_theta = get_hf_rope_theta(hf_config)
@@ -372,6 +398,16 @@ except ImportError:
 
 
 def unwrap_model(model, module_instances=ALL_MODULE_WRAPPER_CLASSNAMES):
+    """Unwrap a model (or list of models) from known Megatron wrapper classes.
+
+    Args:
+        model: A single model or list of models that may be wrapped.
+        module_instances: The wrapper classes to unwrap from.
+
+    Returns:
+        The unwrapped model, or a list of unwrapped models if a list was given.
+
+    """
     return_list = True
     if not isinstance(model, list):
         model = [model]
@@ -395,6 +431,7 @@ def convert_config(hf_config: PretrainedConfig, megatron_config) -> TransformerC
 
     Returns:
         TransformerConfig: _description_
+
     """
 
     warnings.warn("[deprecated] use config converter for more model support", stacklevel=2)
@@ -446,6 +483,16 @@ def mcore_model_parallel_config(
     sequence_parallel: bool,
     params_dtype: torch.dtype,
 ) -> ModelParallelConfig:
+    """Build a Megatron ``ModelParallelConfig`` from the current parallel state.
+
+    Args:
+        sequence_parallel: Whether sequence parallelism is enabled.
+        params_dtype: The dtype used for model parameters.
+
+    Returns:
+        A populated ``ModelParallelConfig``.
+
+    """
     # WARNING: Code should not reach this point. This function is deprecated and will be removed.
     # Please use hf_to_mcore_config_dense() from verl.models.mcore.config_converter instead.
     warnings.warn(
@@ -582,6 +629,7 @@ def load_megatron_model_to_gpu(models, load_grad=True, load_frozen_params=True):
         models: The model to load.
         load_grad: Whether to load gradients.
         load_frozen_params: Whether to load frozen parameters.
+
     """
     for model_chunk in models:
         if isinstance(model_chunk, DDP):
@@ -630,6 +678,7 @@ def offload_megatron_copy_params(optimizers):
 
     Args:
         optimizers: The optimizer or ChainedOptimizer instance.
+
     """
 
     def _iter_opts(opt):
@@ -670,6 +719,7 @@ def load_megatron_copy_params(optimizers):
 
     Args:
         optimizers: Optimizer or ChainedOptimizer instance.
+
     """
 
     def _iter_opts(opt):
@@ -706,6 +756,13 @@ def load_megatron_copy_params(optimizers):
 
 @torch.no_grad()
 def offload_megatron_optimizer(optimizers):
+    """Offload Megatron optimizer parameters and states to CPU memory.
+
+    Args:
+        optimizers: A Megatron optimizer or ``ChainedOptimizer`` whose state is moved to CPU.
+
+    """
+
     def _iter_opts(opt):
         if isinstance(opt, ChainedOptimizer):
             return opt.chained_optimizers
@@ -756,6 +813,13 @@ def offload_megatron_optimizer(optimizers):
 
 @torch.no_grad()
 def load_megatron_optimizer(optimizers):
+    """Load Megatron optimizer parameters and states back onto the device.
+
+    Args:
+        optimizers: A Megatron optimizer or ``ChainedOptimizer`` whose state is moved to the device.
+
+    """
+
     def _iter_opts(opt):
         if isinstance(opt, ChainedOptimizer):
             return opt.chained_optimizers
@@ -1067,6 +1131,18 @@ def convert_megatron_model_to_transformers_model(
 
 
 def broadcast_from_megatron_pp(tensor: torch.Tensor):
+    """Broadcast a tensor from the single pipeline-parallel rank that holds it.
+
+    Args:
+        tensor: The tensor on the owning pipeline rank, or None on all other ranks.
+
+    Returns:
+        The broadcast tensor, materialized on every pipeline-parallel rank.
+
+    Raises:
+        ValueError: If the tensor exists on more than one pipeline rank.
+
+    """
     # tensor is not None only in one of the pp ranks
     if tensor is not None:
         shape = tensor.shape
@@ -1104,6 +1180,18 @@ def broadcast_from_megatron_pp(tensor: torch.Tensor):
 
 
 def broadcast_str_from_megatron_pp(obj: Any):
+    """Broadcast a picklable object from the single pipeline-parallel rank that holds it.
+
+    Args:
+        obj: The object on the owning pipeline rank, or None on all other ranks.
+
+    Returns:
+        The broadcast object, available on every pipeline-parallel rank.
+
+    Raises:
+        ValueError: If the object exists on more than one pipeline rank.
+
+    """
     obj_output = [None] * mpu.get_pipeline_model_parallel_world_size()
     torch.distributed.all_gather_object(object_list=obj_output, obj=obj, group=mpu.get_pipeline_model_parallel_group())
 
@@ -1219,6 +1307,23 @@ def per_tensor_generator(
     layer_name_mapping,
     convert_qkv_gate_up_by_simple_split=True,
 ):
+    """Yield HuggingFace-format ``(name, tensor)`` pairs from a Megatron model.
+
+    Parameters are gathered across tensor/expert parallel groups and converted into the
+    HuggingFace layout one tensor at a time to bound peak memory usage.
+
+    Args:
+        actor_module: The (virtual) pipeline list of Megatron model chunks.
+        model_config: The model configuration.
+        weight_converter: Converter that maps Megatron weights to the HuggingFace layout.
+        transformer_config: The Megatron transformer configuration.
+        layer_name_mapping: Mapping between Megatron and HuggingFace layer names.
+        convert_qkv_gate_up_by_simple_split: Whether to split fused QKV/gate-up weights simply.
+
+    Yields:
+        Tuples of ``(name, tensor)`` in HuggingFace naming and layout.
+
+    """
     from megatron.core import parallel_state as mpu
 
     pp_rank = mpu.get_pipeline_model_parallel_rank()
@@ -1502,6 +1607,13 @@ def get_transformer_layer_offset(pipeline_rank, vp_stage, config: TransformerCon
 
 
 def register_megatron_training_hooks(model: list[torch.nn.Module], optimizer):
+    """Register Megatron grad-scale, grad-sync, and param-sync callbacks on the model config.
+
+    Args:
+        model: The list of Megatron model chunks to configure.
+        optimizer: The optimizer providing loss scaling and config used to set up the hooks.
+
+    """
     from megatron.core.distributed import finalize_model_grads
     from megatron.core.utils import get_model_config
 
@@ -1540,6 +1652,15 @@ def register_megatron_training_hooks(model: list[torch.nn.Module], optimizer):
 
 
 def mapping_string_to_attn_backend(args: dict) -> dict:
+    """Convert a string ``attention_backend`` entry into its ``AttnBackend`` enum value.
+
+    Args:
+        args: A dict that may contain an ``attention_backend`` key holding a string.
+
+    Returns:
+        The same dict with ``attention_backend`` converted to the enum when applicable.
+
+    """
     if "attention_backend" in args and isinstance(args["attention_backend"], str):
         from megatron.core.transformer.enums import AttnBackend
 
@@ -1548,6 +1669,15 @@ def mapping_string_to_attn_backend(args: dict) -> dict:
 
 
 def get_megatron_mtp_loss(n_micro_batch):
+    """Compute multi-token-prediction (MTP) loss metrics for logging.
+
+    Args:
+        n_micro_batch: The number of micro-batches used to scale the MTP loss.
+
+    Returns:
+        A dict mapping ``mtp_losses/<name>`` keys to scalar loss values.
+
+    """
     # Calculate MTP loss scale similar to Megatron-LM implementation
     mtp_loss_scale = 1.0 / n_micro_batch
 
@@ -1571,6 +1701,15 @@ def get_megatron_mtp_loss(n_micro_batch):
 
 
 def get_megatron_module_device(models: list[Any]) -> str:
+    """Determine the device type on which the Megatron model parameters reside.
+
+    Args:
+        models: The list of Megatron model chunks to inspect.
+
+    Returns:
+        The device type string (e.g. ``"gpu"`` or ``"cpu"``).
+
+    """
     if not models:
         return "cpu"
 
@@ -1741,6 +1880,7 @@ def patch_engine_mtp(module, model_config):
     Args:
         module: The model module to patch. Can be a single module or a list of modules.
         model_config: The model configuration containing MTP settings.
+
     """
     logger.warning("Applying mtp patch...")
     from verl.models.mcore.mtp_patch import (
@@ -1771,6 +1911,7 @@ def copy_megatron_model_to_cpu(models):
 
     Returns:
         dict: CPU state containing copied parameters and buffers
+
     """
     cpu_state = {}
 
@@ -1815,6 +1956,7 @@ def restore_megatron_model_from_cpu(models, cpu_state):
     Args:
         models: List of model chunks to restore to
         cpu_state: CPU state dict returned from copy_megatron_model_to_cpu
+
     """
     for model_idx, model_chunk in enumerate(models):
         chunk_key = f"model_chunk_{model_idx}"

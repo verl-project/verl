@@ -20,6 +20,17 @@ from PIL import Image
 
 
 def process_image(image: dict | Image.Image, image_patch_size: int = 14) -> Image.Image:
+    """Normalize an image specification into a PIL image.
+
+    Args:
+        image: Either a PIL image or a dict describing the image (e.g. containing ``bytes`` or an
+            ``image`` field) as accepted by ``qwen_vl_utils.fetch_image``.
+        image_patch_size: The patch size used when fetching and resizing the image.
+
+    Returns:
+        The processed PIL image.
+
+    """
     from qwen_vl_utils import fetch_image
 
     if isinstance(image, Image.Image):
@@ -107,6 +118,24 @@ def process_video(
 
 
 def process_multi_modal_inputs_for_minicpmo(input_ids, attention_mask, position_ids, cu_seqlens, multi_modal_inputs):
+    """Reshape multi-modal inputs into the layout expected by MiniCPM-o.
+
+    Image bounds are shifted to account for left padding and cumulative sequence lengths, and
+    pixel values, target sizes, and image bounds are flattened/stacked for vision-language
+    alignment.
+
+    Args:
+        input_ids: The batched input token ids.
+        attention_mask: The attention mask used to determine left padding lengths.
+        position_ids: The position ids for the batch.
+        cu_seqlens: Cumulative sequence lengths used to offset image bounds.
+        multi_modal_inputs: A dict of multi-modal inputs containing ``image_bound``,
+            ``pixel_values``, and ``tgt_sizes``.
+
+    Returns:
+        A dict with a single ``data`` key holding the reshaped multi-modal inputs.
+
+    """
     # Adjust image bounds based on left padding and cumulative sequence lengths
     # This is necessary for MiniCPM-o's vision-language alignment
     left_padding_length = torch.argmax(attention_mask, dim=1)

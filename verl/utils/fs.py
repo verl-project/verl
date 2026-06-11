@@ -39,6 +39,7 @@ def is_non_local(path):
 
     Returns:
         bool: True if the path is an HDFS path, False otherwise.
+
     """
     return path.startswith(_HDFS_PREFIX)
 
@@ -54,6 +55,7 @@ def md5_encode(path: str) -> str:
 
     Returns:
         str: The hexadecimal MD5 hash of the path.
+
     """
     return hashlib.md5(path.encode()).hexdigest()
 
@@ -70,6 +72,7 @@ def get_local_temp_path(hdfs_path: str, cache_dir: str) -> str:
     Returns:
         str: Absolute local filesystem path in format:
             {cache_dir}/{md5(hdfs_path)}/{basename(hdfs_path)}
+
     """
     # make a base64 encoding of hdfs_path to avoid directory conflict
     encoded_hdfs_path = md5_encode(hdfs_path)
@@ -85,6 +88,7 @@ def verify_copy(src: str, dest: str) -> bool:
 
     return:
         bool: True if the copy is verified, False otherwise.
+
     """
     if not os.path.exists(src):
         return False
@@ -207,6 +211,7 @@ def copy_to_local(
 
     Returns:
         str: Local filesystem path to copied resource
+
     """
     # Save to a local path for persistence.
     local_path = copy_local_path_from_hdfs(src, cache_dir, filelock, verbose, always_recopy)
@@ -281,6 +286,7 @@ def local_mkdir_safe(path):
 
     Args:
         path (str): The path to create a directory at.
+
     """
 
     from filelock import FileLock

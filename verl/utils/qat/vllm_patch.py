@@ -52,6 +52,7 @@ class ParamMetaDict(dict):
         Args:
             model: vLLM model (may be wrapped in ModelRunner)
             device: Device for created parameters
+
         """
         super().__init__()
         self.device = device
@@ -119,6 +120,7 @@ class ParamMetaDict(dict):
 
         Returns:
             Rebuilt parameter or None if cannot rebuild
+
         """
         # Extract layer name and param name
         parts = key.rsplit(".", 1)
@@ -760,6 +762,7 @@ def prepare_qat_for_load_weights(model, device=None):
     Args:
         model: vLLM model
         device: Device for created parameters
+
     """
     inner_model = model
     if hasattr(model, "model"):

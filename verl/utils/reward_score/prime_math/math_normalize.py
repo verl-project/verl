@@ -42,6 +42,18 @@ from typing import Optional
 
 
 def normalize_answer(answer: Optional[str]) -> Optional[str]:
+    r"""Normalize a math answer string for comparison.
+
+    Strip whitespace, remove enclosing ``\text{}``, and apply various
+    LaTeX simplifications (fractions, square roots, units, etc.).
+
+    Args:
+        answer: The raw answer string, or None.
+
+    Returns:
+        The normalized answer string, or None if the input is None.
+
+    """
     if answer is None:
         return None
     answer = answer.strip()

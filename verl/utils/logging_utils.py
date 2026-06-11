@@ -26,6 +26,12 @@ def set_basic_config(level):
 
 
 def log_to_file(string):
+    """Print a string and append it to a per-rank log file under ``logs/``.
+
+    Args:
+        string: The message to print and log.
+
+    """
     print(string)
     if os.path.isdir("logs"):
         with open(f"logs/log_{torch.distributed.get_rank()}", "a+") as f:

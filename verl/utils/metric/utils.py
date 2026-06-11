@@ -45,6 +45,7 @@ def reduce_metrics(metrics: dict[str, Union["Metric", list[Any]]]) -> dict[str, 
         ... }
         >>> reduce_metrics(metrics)
         {"loss": 2.0, "accuracy": 0.8, "max_reward": 8.0, "min_error": 0.05}
+
     """
     for key, val in metrics.items():
         if isinstance(val, Metric):
@@ -59,6 +60,8 @@ def reduce_metrics(metrics: dict[str, Union["Metric", list[Any]]]) -> dict[str, 
 
 
 class AggregationType(Enum):
+    """Supported aggregation strategies for metric reduction."""
+
     MEAN = "mean"
     SUM = "sum"
     MIN = "min"
@@ -87,6 +90,7 @@ class Metric:
         >>> metric.append(3.0)
         >>> metric.aggregate()
         2.0
+
     """
 
     def __init__(self, aggregation: str | AggregationType, value: Optional[Numeric | list[Numeric]] = None) -> None:
@@ -101,6 +105,7 @@ class Metric:
             self.append(value)
 
     def append(self, value: Union[Numeric, "Metric"]) -> None:
+        """Append a numeric value or merge another Metric instance."""
         if isinstance(value, Metric):
             self.extend(value)
             return
@@ -113,6 +118,7 @@ class Metric:
         self.values.append(value)
 
     def extend(self, values: Union["Metric", list[Numeric]]) -> None:
+        """Extend this metric with values from another Metric or a list."""
         if isinstance(values, Metric):
             if values.aggregation != self.aggregation:
                 raise ValueError(f"Aggregation type mismatch: {self.aggregation} != {values.aggregation}")
@@ -121,6 +127,7 @@ class Metric:
             self.append(value)
 
     def aggregate(self) -> float:
+        """Compute and return the aggregated value."""
         return self._aggregate(self.values, self.aggregation)
 
     @classmethod
@@ -137,6 +144,7 @@ class Metric:
 
     @classmethod
     def aggregate_dp(cls, metric_lists: list["Metric"]) -> float:
+        """Aggregate metrics across data-parallel ranks."""
         if not metric_lists:
             raise ValueError("Cannot aggregate an empty list of metrics.")
         value_lists = [ml.values for ml in metric_lists]
@@ -157,7 +165,9 @@ class Metric:
 
     @classmethod
     def from_dict(cls, data: dict[str, Numeric], aggregation: str | AggregationType) -> dict[str, "Metric"]:
+        """Create a dictionary of Metric instances from a dictionary of values."""
         return {key: cls(value=value, aggregation=aggregation) for key, value in data.items()}
 
     def init_list(self) -> "Metric":
+        """Return a new empty Metric with the same aggregation type."""
         return Metric(aggregation=self.aggregation)

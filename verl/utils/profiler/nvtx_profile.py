@@ -42,6 +42,7 @@ def mark_start_range(
             The domain of the range. Defaults to None.
         category (str, optional):
             The category of the range. Defaults to None.
+
     """
     return nvtx.start_range(message=message, color=color, domain=domain, category=category)
 
@@ -52,6 +53,7 @@ def mark_end_range(range_id: str) -> None:
     Args:
         range_id (str):
             The id of the mark range to end.
+
     """
     return nvtx.end_range(range_id)
 
@@ -73,6 +75,7 @@ def mark_annotate(
             The domain of the range. Defaults to None.
         category (str, optional):
             The category of the range. Defaults to None.
+
     """
 
     def decorator(func):
@@ -104,6 +107,7 @@ def marked_timer(
 
     Yields:
         None: This is a context manager that yields control back to the code block.
+
     """
     mark_range = mark_start_range(message=name, color=color, domain=domain, category=category)
     from .performance import _timer
@@ -121,6 +125,9 @@ class NsightSystemsProfiler(DistProfiler):
         Args:
             rank (int): The rank of the current process.
             config (Optional[ProfilerConfig]): Configuration for the profiler. If None, a default configuration is used.
+            tool_config (Optional[NsightToolConfig]): Nsight tool-specific configuration.
+            **kwargs: Additional keyword arguments.
+
         """
         # If no configuration is provided, create a default ProfilerConfig with an empty list of ranks
         if not config:
@@ -130,10 +137,17 @@ class NsightSystemsProfiler(DistProfiler):
         self.discrete: bool = tool_config.discrete
 
     def start(self, **kwargs):
+        """Start the CUDA profiler in continuous mode.
+
+        Args:
+            **kwargs: Additional keyword arguments (unused).
+
+        """
         if not self.discrete:
             get_platform().profiler_start()
 
     def stop(self):
+        """Stop the CUDA profiler in continuous mode."""
         if not self.discrete:
             get_platform().profiler_stop()
 
@@ -159,6 +173,8 @@ class NsightSystemsProfiler(DistProfiler):
                 The domain of the range. Defaults to None.
             category (str, optional):
                 The category of the range. Defaults to None.
+            **kwargs_outer: Additional keyword arguments passed to the decorator.
+
         """
 
         def decorator(func):

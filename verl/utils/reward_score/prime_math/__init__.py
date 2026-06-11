@@ -191,6 +191,17 @@ def _normalize(expr: str) -> str:
 
 
 def count_unknown_letters_in_expr(expr: str):
+    """Count the number of distinct alphabetic characters in an expression.
+
+    Ignores common function names (``sqrt``, ``frac``) before counting.
+
+    Args:
+        expr: The mathematical expression string.
+
+    Returns:
+        The number of unique letters remaining in the expression.
+
+    """
     expr = expr.replace("sqrt", "")
     expr = expr.replace("frac", "")
     letters_in_expr = set([x for x in expr if x.isalpha()])
@@ -198,6 +209,18 @@ def count_unknown_letters_in_expr(expr: str):
 
 
 def should_allow_eval(expr: str):
+    """Determine whether an expression is safe to evaluate with sympy.
+
+    Reject expressions with more than two unknown letters or containing
+    patterns known to cause sympy to hang.
+
+    Args:
+        expr: The expression string to check.
+
+    Returns:
+        True if the expression is safe to evaluate.
+
+    """
     # we don't want to try parsing unknown text or functions of more than two variables
     if count_unknown_letters_in_expr(expr) > 2:
         return False
@@ -211,6 +234,16 @@ def should_allow_eval(expr: str):
 
 @timeout_limit(seconds=10)
 def are_equal_under_sympy(ground_truth_normalized: str, given_normalized: str):
+    """Check whether two normalized expressions are equal under sympy simplification.
+
+    Args:
+        ground_truth_normalized: The normalized ground truth expression.
+        given_normalized: The normalized predicted expression.
+
+    Returns:
+        True if sympy simplifies their difference to zero.
+
+    """
     are_equal = False
     try:
         expr = f"({ground_truth_normalized})-({given_normalized})"
@@ -305,6 +338,15 @@ def grade_answer(given_answer: str, ground_truth: str) -> bool:
 
 
 def remove_boxed(s):
+    r"""Remove the ``\boxed{}`` wrapper from a LaTeX string.
+
+    Args:
+        s: The string expected to be wrapped in ``\boxed{...}``.
+
+    Returns:
+        The inner content, or None if the format does not match.
+
+    """
     left = "\\boxed{"
     try:
         assert s[: len(left)] == left
@@ -345,6 +387,18 @@ def _last_boxed_only_string(string):
 
 
 def match_answer(response):
+    r"""Extract the final answer from a model response using heuristic markers.
+
+    Look for common answer indicators (e.g. "answer is", ``\boxed{}``) and
+    extract the relevant substring.
+
+    Args:
+        response: The full model response string.
+
+    Returns:
+        A tuple of (is_matched, extracted_answer).
+
+    """
     is_matched = False
     for ans_marker in ["answer:", "answer is", "answers are"]:
         ans_idx = response.lower().rfind(ans_marker)
@@ -387,6 +441,19 @@ def match_answer(response):
 
 
 def compute_score(model_output: str, ground_truth: str) -> bool:
+    """Score a model output against the ground truth using math grading.
+
+    Attempt simple algebra grading first, then fall back to symbolic
+    equality with optional pi substitution.
+
+    Args:
+        model_output: The raw model output string.
+        ground_truth: The expected ground truth answer.
+
+    Returns:
+        A tuple of (is_correct, format_correctness, extracted_output).
+
+    """
     model_output = str(model_output)
     ground_truth = str(ground_truth)
 

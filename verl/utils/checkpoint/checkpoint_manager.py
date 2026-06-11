@@ -127,19 +127,52 @@ class BaseCheckpointManager:
         return "hf_model" in self.checkpoint_load_contents
 
     def load_checkpoint(self, local_path: str, hdfs_path: str = None, del_local_after_load: bool = False):
+        """Load a checkpoint from the given path.
+
+        Args:
+            local_path: Local directory containing the checkpoint.
+            hdfs_path: Optional HDFS path to download from.
+            del_local_after_load: If True, delete the local copy after loading.
+
+        """
         raise NotImplementedError
 
     def save_checkpoint(
         self, local_path: str, hdfs_path: str = None, global_step: int = 0, max_ckpt_to_keep: int = None
     ):
+        """Save a checkpoint to the given path.
+
+        Args:
+            local_path: Local directory to save the checkpoint.
+            hdfs_path: Optional HDFS path to upload to.
+            global_step: The current global training step.
+            max_ckpt_to_keep: Maximum number of checkpoints to retain.
+
+        """
         raise NotImplementedError
 
     @staticmethod
     def checkpath(local_path: str, hdfs_path: str):
+        """Validate and resolve the checkpoint path.
+
+        Args:
+            local_path: Local filesystem path.
+            hdfs_path: HDFS path.
+
+        Returns:
+            A tuple of (is_local, resolved_path).
+
+        """
         assert local_path is not None or hdfs_path is not None, "local_path and hdfs_path cannot be both None"
         return local_path is not None, local_path if local_path is not None else hdfs_path
 
     def remove_previous_save_local_path(self, path):
+        """Remove previously saved checkpoint directories from disk.
+
+        Args:
+            path: A single path string or list of paths to remove.
+
+        """
         if isinstance(path, str):
             path = [path]
         for p in path:
@@ -181,6 +214,12 @@ class BaseCheckpointManager:
 
     @staticmethod
     def get_rng_state():
+        """Collect the current RNG states for CPU, numpy, random, and device.
+
+        Returns:
+            A dictionary mapping source names to their RNG state objects.
+
+        """
         rng_state = {
             "cpu": torch.get_rng_state(),
             "numpy": np.random.get_state(),
@@ -194,6 +233,12 @@ class BaseCheckpointManager:
 
     @staticmethod
     def load_rng_state(rng_state):
+        """Restore RNG states from a previously saved state dict.
+
+        Args:
+            rng_state: A dictionary mapping source names to their RNG state objects.
+
+        """
         torch.set_rng_state(rng_state["cpu"])
         np.random.set_state(rng_state["numpy"])
         random.setstate(rng_state["random"])
@@ -214,6 +259,7 @@ def find_latest_ckpt_path(path, directory_format="global_step_{}"):
     Returns:
         str or None: Full path to the latest checkpoint directory, or
         None if the tracker or checkpoint folder is missing.
+
     """
     if path is None:
         return None
@@ -250,6 +296,7 @@ def should_save_ckpt_esi(max_steps_duration: float, save_ckpt_duration: float = 
         max_steps_duration: Max estimated time (seconds) required to complete one training step
         save_ckpt_duration: Estimated time (seconds) required to save checkpoint (default: 60)
         redundant_time: Additional buffer time (seconds) for unexpected delays (default: 0)
+
     """
     exp_ts_mlp = os.getenv("MLP_CURRENT_CAPACITY_BLOCK_EXPIRATION_TIMESTAMP")  # vemlp
     exp_ts_aws = os.getenv("SAGEMAKER_CURRENT_CAPACITY_BLOCK_EXPIRATION_TIMESTAMP")  # aws

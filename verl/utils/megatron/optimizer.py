@@ -24,6 +24,7 @@ from verl.utils.logger import print_rank_0
 def init_megatron_optim_config(
     optim_config: dict, use_distributed_optimizer: bool = True, fp16: bool = False
 ) -> OptimizerConfig:
+    """Build a Megatron ``OptimizerConfig`` from a user-facing config dict."""
     optim_args = {
         "optimizer": optim_config.optimizer,
         "lr": optim_config.lr,
@@ -66,6 +67,7 @@ def get_megatron_optimizer(
     model,
     config: OptimizerConfig,
 ):
+    """Create a Megatron-native optimizer for the given model chunks."""
     # Base optimizer.
     return get_megatron_optimizer_native(
         config=config,

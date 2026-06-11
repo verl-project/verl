@@ -33,7 +33,8 @@ def compute_score(
 
     Args:
         sandbox_fusion_url: The URL of the sandbox_fusion service, eg: "https://<your service endpoint>/run_code"
-
+        concurrent_semaphore: A threading semaphore to limit concurrent sandbox API calls.
+        memory_limit_mb: Memory limit in megabytes for sandbox execution.
         completion: The completion string containing the code.
         test_cases: JSON string or dictionary containing "inputs" and "outputs".
         continuous: Whether to compute a continuous score (based on the first N test cases).
@@ -43,6 +44,7 @@ def compute_score(
         A tuple (score, metadata_list).
         score: Float score (0.0 to 1.0).
         metadata_list: List containing execution metadata for each test case.
+
     """
     solution = completion
     if "```python" in completion:

@@ -26,6 +26,13 @@ from verl.utils.net_utils import is_ipv6
 
 
 def set_numa_affinity():
+    """Bind the current process to the NUMA node of its local accelerator.
+
+    Use ``libnuma`` and ``pynvml`` to set the CPU affinity of the current process
+    according to the local device index. The call is skipped on NPU platforms and
+    degrades gracefully if the required libraries are unavailable.
+
+    """
     if is_npu_available:
         # TODO (FightingZhen) libnuma.so is not available in e2e_ascend CI image, remove this code after image update.
         return
@@ -58,6 +65,16 @@ def set_numa_affinity():
 
 
 def initialize_global_process_group(timeout_second=36000):
+    """Initialize the global distributed process group from environment variables.
+
+    Args:
+        timeout_second (int): Timeout in seconds for collective operations.
+            Defaults to 36000.
+
+    Returns:
+        tuple: A ``(local_rank, rank, world_size)`` tuple read from the environment.
+
+    """
     torch.distributed.init_process_group(
         get_nccl_backend(),
         timeout=timedelta(seconds=timeout_second),
@@ -73,11 +90,21 @@ def initialize_global_process_group(timeout_second=36000):
 
 
 def destroy_global_process_group():
+    """Destroy the global distributed process group if it has been initialized."""
     if torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
 
 
 def initialize_global_process_group_ray(timeout_second=None, backend=None):
+    """Initialize the global process group for use within a Ray environment.
+
+    Args:
+        timeout_second (int, optional): Timeout in seconds for collective
+            operations. Defaults to None, which uses the backend default.
+        backend (str, optional): The distributed backend specification. Defaults
+            to None, which selects a CPU/accelerator backend automatically.
+
+    """
     # in current ray environment, LOCAL_RANK is always zero.
 
     import torch.distributed

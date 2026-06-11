@@ -38,13 +38,35 @@ def _get_unique_tensor_key(tensor):
 
 
 class FSDPParameterFilter:
+    """Tensor filter that excludes tracked FSDP model parameters from being offloaded.
+
+    Attributes:
+        model_parameters_storage (set): Storage data pointers of the tracked model parameters.
+
+    """
+
     def __init__(self):
         self.model_parameters_storage = set()
 
     def __call__(self, tensor):
+        """Return whether the tensor should be offloaded.
+
+        Args:
+            tensor (torch.Tensor): The candidate tensor to check.
+
+        Returns:
+            bool: True if the tensor is not a tracked model parameter, otherwise False.
+
+        """
         return tensor.untyped_storage().data_ptr() not in self.model_parameters_storage
 
     def update_model_parameters(self, model):
+        """Refresh the set of tracked model parameter storages.
+
+        Args:
+            model (torch.nn.Module): The model whose parameter storages are recorded.
+
+        """
         new_storage = set()
         for p in model.parameters():
             new_storage.add(p.data.untyped_storage().data_ptr())
@@ -79,10 +101,28 @@ class CpuOffloadHookWithOffloadHandler:
         torch._C._autograd._pop_saved_tensors_default_hooks()
 
     def on_save_for_backward(self, tensor: torch.Tensor) -> Any:
+        """Offload a tensor saved for backward and return its retrieval identifier.
+
+        Args:
+            tensor (torch.Tensor): The tensor saved for the backward pass.
+
+        Returns:
+            Any: An identifier used later to recover the tensor.
+
+        """
         retrieve_identifier = self.offload_handler.tensor_push(tensor, **self.handler_extra_kwargs)
         return retrieve_identifier
 
     def on_get_saved_tensor(self, saved_state: Any) -> torch.Tensor:
+        """Recover a previously offloaded tensor for the backward pass.
+
+        Args:
+            saved_state (Any): The identifier returned by ``on_save_for_backward``.
+
+        Returns:
+            torch.Tensor: The recovered tensor.
+
+        """
         tensor = self.offload_handler.tensor_pop(saved_state, **self.handler_extra_kwargs)
         return tensor
 
@@ -117,7 +157,17 @@ class GroupCommitFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, tensor, cpu_offload_handler):
-        # pylint: disable=missing-function-docstring
+        """Mark a forward group-commit point and pass the input tensor through.
+
+        Args:
+            ctx: Autograd context used to store the offload handler.
+            tensor (torch.Tensor): The input tensor, returned unchanged.
+            cpu_offload_handler: The handler that performs the group commit.
+
+        Returns:
+            torch.Tensor: The identical input tensor.
+
+        """
         cpu_offload_handler.on_group_commit_forward()
         ctx.cpu_offload_handler = cpu_offload_handler
         # return the identical tensor
@@ -125,7 +175,16 @@ class GroupCommitFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        # pylint: disable=missing-function-docstring
+        """Mark a backward group-commit point and pass the gradient through.
+
+        Args:
+            ctx: Autograd context holding the offload handler.
+            grad_output (torch.Tensor): The incoming gradient, returned unchanged.
+
+        Returns:
+            tuple: The gradient w.r.t. the input tensor and ``None`` for the handler.
+
+        """
         cpu_offload_handler = ctx.cpu_offload_handler
         cpu_offload_handler.on_group_commit_backward()
         return grad_output, None
@@ -261,6 +320,16 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
         self.h2d_stream = get_torch_device().Stream()
 
     def tensor_push(self, tensor: torch.Tensor, **kwargs) -> Any:
+        """Register a tensor for offloading and return its tracking tag.
+
+        Args:
+            tensor (torch.Tensor): The tensor to track and potentially offload.
+            **kwargs: Additional handler-specific options.
+
+        Returns:
+            Any: A tag identifying the stored tensor, or the tensor itself when not offloaded.
+
+        """
         torch_stray_tensor = isinstance(
             tensor,
             torch._subclasses.fake_tensor.FakeTensor | torch._subclasses.functional_tensor.FunctionalTensor,
@@ -371,6 +440,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
                     self.tensor_tag_to_state[tensor_label] = recovered_tensor
 
     def on_group_commit_backward(self):
+        """Reload offloaded groups and synchronize streams during the backward pass."""
         # first decrement the current group.
         # after last commit in forward, the group will +1; in backward it -1.
         # Finally it should be decremented to 0.
@@ -398,6 +468,19 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
 def get_activation_offload_context(
     num_layers: int = 1, model_layers: int = 1, tensor_need_offloading_checker=(lambda t: True)
 ):
+    """Create a CPU activation offloading context and its group-commit function.
+
+    Args:
+        num_layers (int): Number of layer groups to offload. Defaults to 1.
+        model_layers (int): Total number of model layers. Defaults to 1.
+        tensor_need_offloading_checker (Callable): Predicate deciding whether a
+            tensor should be offloaded. Defaults to always True.
+
+    Returns:
+        tuple: A ``(CpuOffloadHookWithOffloadHandler, group_prefetch_offload_commit_async)``
+        pair used to enable and synchronize activation offloading.
+
+    """
     cpu_offload_handler = AsyncDoubleBufferGroupOffloadHandler(
         num_offload_group=num_layers,
         num_model_group=model_layers,
@@ -405,6 +488,15 @@ def get_activation_offload_context(
     )
 
     def group_prefetch_offload_commit_async(tensor):
+        """Commit an asynchronous group prefetch/offload for the given tensor.
+
+        Args:
+            tensor (torch.Tensor): The tensor marking the group-commit point.
+
+        Returns:
+            torch.Tensor: The tensor passed through after the commit.
+
+        """
         return group_prefetch_offload_commit(tensor, cpu_offload_handler)
 
     return (
@@ -414,6 +506,16 @@ def get_activation_offload_context(
 
 
 class ActivationHandler:
+    """Manage activation offloading and optional checkpointing around a module's forward pass.
+
+    Args:
+        offload_ctx: The context manager that performs activation offloading.
+        sync_func (Callable): Function that marks the group-commit synchronization point.
+        tensor_filter (FSDPParameterFilter): Filter deciding which tensors to offload.
+        enable_ckpt (bool): Whether activation checkpointing is enabled.
+
+    """
+
     def __init__(self, offload_ctx, sync_func, tensor_filter, enable_ckpt):
         self._offload_ctx = offload_ctx
         self._sync_func = sync_func
@@ -426,11 +528,23 @@ class ActivationHandler:
             )
 
     def pre_forward(self, module):
+        """Enter the offload context before a training forward pass.
+
+        Args:
+            module (torch.nn.Module): The module about to run its forward pass.
+
+        """
         if module.training:
             self._offload_ctx.__enter__()
             self._tensor_filter.update_model_parameters(module)
 
     def post_forward(self, module):
+        """Exit the offload context after a training forward pass.
+
+        Args:
+            module (torch.nn.Module): The module that finished its forward pass.
+
+        """
         if module.training:
             self._offload_ctx.__exit__(None, None, None)
 
@@ -455,6 +569,7 @@ class ActivationHandler:
         flat_args, kwarg_keys = self._pack_kwargs(*args, **kwargs)
 
         def my_function(*inputs):
+            """Unpack flattened inputs and invoke the original forward method."""
             # unpack back into args and kwargs
             nonlocal forward_method, kwarg_keys
             unpacked_args, unpacked_kwargs = self._unpack_kwargs(inputs, kwarg_keys)
@@ -467,6 +582,18 @@ class ActivationHandler:
         )
 
     def forward(self, module, forward_method, *args, **kwargs):
+        """Run the module forward pass with optional checkpointing and offload sync.
+
+        Args:
+            module (torch.nn.Module): The module being executed.
+            forward_method (Callable): The original forward method to invoke.
+            *args: Positional arguments forwarded to ``forward_method``.
+            **kwargs: Keyword arguments forwarded to ``forward_method``.
+
+        Returns:
+            Any: The output of ``forward_method``, with the group-commit sync applied.
+
+        """
         if not module.training:
             return forward_method(*args, **kwargs)
         if not self._enable_ckpt:
@@ -483,11 +610,18 @@ class ActivationHandler:
         return final_ret
 
     def wrap_module_forward_method(self, module):
+        """Wrap a module's forward method to apply activation offloading hooks.
+
+        Args:
+            module (torch.nn.Module): The module whose forward method is wrapped in place.
+
+        """
         orig_method = module.forward
         handler = self
 
         @functools.wraps(orig_method)
         def wrapped_method(model_self, *args, **kwargs):
+            """Run pre/post forward offload hooks around the original forward method."""
             nonlocal handler
             handler.pre_forward(model_self)
             out = handler.forward(model_self, orig_method, *args, **kwargs)
@@ -522,6 +656,12 @@ def enable_activation_offloading(model, strategy, enable_ckpt=False):
     layers = []
 
     def get_layers(module):
+        """Recursively collect FSDP-wrapped transformer layers eligible for offloading.
+
+        Args:
+            module (torch.nn.Module): The module to traverse for FSDP-wrapped layers.
+
+        """
         for name, child in module.named_children():
             if not isinstance(child, FSDP | FSDP2):
                 get_layers(child)

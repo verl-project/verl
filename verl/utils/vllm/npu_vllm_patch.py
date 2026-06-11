@@ -22,6 +22,16 @@ from verl.utils.device import is_torch_npu_available
 
 
 def vllm_ascend_v011_select_moe_comm_method_wrapper(fn):
+    """Wrap the v0.11 MoE communication method selector for Ascend A2 compatibility.
+
+    Args:
+        fn: The original select_moe_comm_method function to wrap.
+
+    Returns:
+        A wrapped function that overrides MC2 on A2 hardware.
+
+    """
+
     @wraps(fn)
     def wrapper(self, num_tokens, with_prefill):
         moe_comm_method = fn(self, num_tokens, with_prefill)
@@ -51,6 +61,16 @@ def vllm_ascend_v011_select_moe_comm_method_wrapper(fn):
 
 
 def vllm_ascend_v011_matmul_and_reduce_wrapper(fn):
+    """Wrap the v0.11 matmul_and_reduce to disable MMRS fusion on Ascend A2.
+
+    Args:
+        fn: The original matmul_and_reduce function to wrap.
+
+    Returns:
+        A wrapped function that disables MMRS fusion on A2 hardware.
+
+    """
+
     @wraps(fn)
     def wrapper(self, *args, **kwargs):
         from vllm_ascend.utils import AscendSocVersion, get_ascend_soc_version
@@ -72,6 +92,12 @@ def vllm_ascend_v011_matmul_and_reduce_wrapper(fn):
 
 
 def check_vllm_ascend_before_server_launch():
+    """Validate Ascend environment settings before launching the vLLM server.
+
+    Raises:
+        AssertionError: If unsupported configuration is detected on A2 hardware.
+
+    """
     import torch_npu
     import vllm
 
@@ -122,6 +148,16 @@ def check_vllm_ascend_before_server_launch():
 
 
 def vllm_ascend_v013_select_moe_comm_method_wrapper(fn):
+    """Wrap the v0.13 MoE communication method selector for Ascend A2 compatibility.
+
+    Args:
+        fn: The original select_moe_comm_method function to wrap.
+
+    Returns:
+        A wrapped function that overrides MC2 on A2 hardware.
+
+    """
+
     @wraps(fn)
     def wrapper(*args, **kwargs):
         moe_comm_method = fn(*args, **kwargs)
@@ -140,6 +176,16 @@ def vllm_ascend_v013_select_moe_comm_method_wrapper(fn):
 
 
 def vllm_ascend_v013_matmul_and_reduce_wrapper(fn):
+    """Wrap the v0.13 matmul_and_reduce to disable MMRS fusion on Ascend A2.
+
+    Args:
+        fn: The original matmul_and_reduce function to wrap.
+
+    Returns:
+        A wrapped function that disables MMRS fusion on A2 hardware.
+
+    """
+
     @wraps(fn)
     def wrapper(self, *args, **kwargs):
         from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
@@ -161,6 +207,16 @@ def vllm_ascend_v013_matmul_and_reduce_wrapper(fn):
 
 
 def vllm_v013_weight_loader_method_wrapper(fn):
+    """Wrap the v0.13 FusedMoE weight_loader to transpose weights before loading.
+
+    Args:
+        fn: The original weight_loader method to wrap.
+
+    Returns:
+        A wrapped function that transposes expert weight dimensions as needed.
+
+    """
+
     @wraps(fn)
     def wrapper(self, param, loaded_weight, weight_name, shard_id, expert_id, return_success=False):
         if (shard_id in ("w1", "w3") and param.shape[1] == self.hidden_size) or (
@@ -173,6 +229,7 @@ def vllm_v013_weight_loader_method_wrapper(fn):
 
 
 def patch_vllm013_rotary_emb():
+    """Patch the vLLM 0.13 rotary embedding to disable flash_attn on NPU."""
     from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 
     def vllm013_npu_rotary_embedding_init_impl(

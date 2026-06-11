@@ -24,6 +24,16 @@ import torch
 
 
 def concat_dict_to_str(dict: dict, step):
+    """Concatenate numeric values of a dict into a single log string.
+
+    Args:
+        dict (dict): Mapping of metric names to values; only numeric values are included.
+        step: The current step prefixed at the start of the output string.
+
+    Returns:
+        str: A formatted string joining the step and numeric metrics with ``-``.
+
+    """
     output = [f"step:{step}"]
     for k, v in dict.items():
         if isinstance(v, numbers.Number):
@@ -38,15 +48,28 @@ class LocalLogger:
 
     Args:
         print_to_console (bool): Whether to print to the console.
+
     """
 
     def __init__(self, print_to_console=True):
         self.print_to_console = print_to_console
 
     def flush(self):
+        """Flush the logger.
+
+        This is a no-op for the local logger and exists for interface compatibility.
+
+        """
         pass
 
     def log(self, data, step):
+        """Log the given data for a step to the console.
+
+        Args:
+            data (dict): Mapping of metric names to values to log.
+            step: The current step associated with the data.
+
+        """
         if self.print_to_console:
             print(concat_dict_to_str(data, step=step), flush=True)
 
@@ -61,6 +84,7 @@ class DecoratorLoggerBase:
         level (int): The logging level.
         rank (int): The rank of the process.
         log_only_rank_0 (bool): If True, only log for rank 0.
+
     """
 
     def __init__(
@@ -76,10 +100,25 @@ class DecoratorLoggerBase:
             self.logging_function = self.log_by_print
 
     def log_by_print(self, log_str):
+        """Log a message by printing it to standard output.
+
+        Args:
+            log_str (str): The message to print, prefixed with the logger role.
+
+        """
         if not self.log_only_rank_0 or self.rank == 0:
             print(f"{self.role} {log_str}", flush=True)
 
     def log_by_logging(self, log_str):
+        """Log a message using the configured logging.Logger instance.
+
+        Args:
+            log_str (str): The message to log, prefixed with the logger role.
+
+        Raises:
+            ValueError: If the logger has not been initialized.
+
+        """
         if self.logger is None:
             raise ValueError("Logger is not initialized")
         if not self.log_only_rank_0 or self.rank == 0:
@@ -104,6 +143,7 @@ def print_with_rank(message: str, rank: int = 0, log_only_rank_0: bool = False):
         message (str): _description_
         rank (int, optional): _description_. Defaults to 0.
         log_only_rank_0 (bool, optional): _description_. Defaults to False.
+
     """
     if not log_only_rank_0 or rank == 0:
         print(f"[Rank {rank}] {message}", flush=True)
@@ -118,6 +158,7 @@ def print_with_rank_and_timer(message: str, rank: int = 0, log_only_rank_0: bool
         message (str): _description_
         rank (int, optional): _description_. Defaults to 0.
         log_only_rank_0 (bool, optional): _description_. Defaults to False.
+
     """
     now = datetime.datetime.now()
     message = f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] [Rank {rank}] {message}"
@@ -135,6 +176,7 @@ def log_with_rank(message: str, rank, logger: logging.Logger, level=logging.INFO
         logger (logging.Logger): The logger instance to use for logging.
         level (int, optional): The logging level. Defaults to logging.INFO.
         log_only_rank_0 (bool, optional): If True, only log for rank 0. Defaults to False.
+
     """
     if not log_only_rank_0 or rank == 0:
         logger.log(level, f"[Rank {rank}] {message}")

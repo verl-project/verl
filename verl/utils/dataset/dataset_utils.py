@@ -40,6 +40,18 @@ class SFTTensorCollator:
         self.pad_mode = pad_mode
 
     def __call__(self, batch: list[dict[str, any]]) -> dict[str, any]:
+        """Collate a list of samples into a batch according to the configured pad mode.
+
+        Args:
+            batch: A list of dictionary samples from the dataset.
+
+        Returns:
+            A dictionary representing the batched data.
+
+        Raises:
+            NotImplementedError: If the configured ``pad_mode`` is not supported.
+
+        """
         if self.pad_mode == DatasetPadMode.NO_PADDING:
             return self.collate_variable_batch(batch)
         elif self.pad_mode in [DatasetPadMode.RIGHT, DatasetPadMode.LEFT_RIGHT]:
@@ -59,6 +71,7 @@ class SFTTensorCollator:
         Returns:
             A dictionary representing the batched data, with variable-length
             sequences converted to NestedTensors.
+
         """
 
         final_batch = {}

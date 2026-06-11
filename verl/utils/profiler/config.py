@@ -75,6 +75,7 @@ class TorchMemoryToolConfig(BaseConfig):
     Args:
         trace_alloc_max_entries (int): Maximum number of memory allocation entries to track.
         stack_depth (int): Stack trace depth for memory allocations.
+
     """
 
     trace_alloc_max_entries: int = 100_000
@@ -173,6 +174,7 @@ class ProfilerConfig(BaseConfig):
         all_ranks (bool): Whether to profile all ranks.
         ranks (list[int]): The ranks that will be profiled. Defaults to [].
         global_tool_config (Any): Global tool configuration for all profiling tools.
+
     """
 
     tool: Optional[str] = MISSING
@@ -184,6 +186,15 @@ class ProfilerConfig(BaseConfig):
     global_tool_config: Optional[Any] = None  # Global tool configuration for all profiling tools
 
     def union(self, other: "ProfilerConfig") -> "ProfilerConfig":
+        """Merge two configs, enabling profiling if either config enables it.
+
+        Args:
+            other: The other configuration to merge with.
+
+        Returns:
+            A new :class:`ProfilerConfig` with combined settings.
+
+        """
         assert self.tool == other.tool, f"Cannot union ProfilerConfig with different tools: {self.tool} vs {other.tool}"
         return ProfilerConfig(
             tool=self.tool,
@@ -196,6 +207,15 @@ class ProfilerConfig(BaseConfig):
         )
 
     def intersect(self, other: "ProfilerConfig") -> "ProfilerConfig":
+        """Intersect two configs, enabling profiling only if both configs enable it.
+
+        Args:
+            other: The other configuration to intersect with.
+
+        Returns:
+            A new :class:`ProfilerConfig` with intersected settings.
+
+        """
         assert self.tool == other.tool, (
             f"Cannot intersect ProfilerConfig with different tools: {self.tool} vs {other.tool}"
         )
@@ -230,6 +250,7 @@ def build_vllm_profiler_args(profiler_config: ProfilerConfig, tool_config: BaseC
 
     Returns:
         dict: A dictionary of arguments to be passed to vLLM's start_profile method.
+
     """
     if not profiler_config or not tool_config or not hasattr(tool_config, "contents"):
         return {}
@@ -283,6 +304,7 @@ def build_sglang_profiler_args(profiler_config: ProfilerConfig, tool_config: Bas
 
     Returns:
         dict: A dictionary of arguments suitable for starting the SGLang profiler.
+
     """
     if not profiler_config or not tool_config or not hasattr(tool_config, "contents"):
         return {}

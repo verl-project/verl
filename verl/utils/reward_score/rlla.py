@@ -44,6 +44,24 @@ def match_score(list1, list2):
 def customize_format_reward_func(
     completions, answer, step, max_possible_reward, min_possible_reward, do_print, **kwargs
 ):
+    """Compute format rewards based on structural compliance of responses.
+
+    Check whether each response follows the expected XML-like format
+    (``<think>``, ``<response>``, ``<tool_call>``) matching the ground truth.
+
+    Args:
+        completions: List of completion message lists.
+        answer: List of ground truth answer strings.
+        step: The current training step (unused).
+        max_possible_reward: Reward for correct format.
+        min_possible_reward: Reward for incorrect format.
+        do_print: If True, print debug information.
+        **kwargs: Additional keyword arguments (unused).
+
+    Returns:
+        A list of reward floats, one per completion.
+
+    """
     rewards = []
     responses = [completion[0]["content"] for completion in completions]
 
@@ -98,6 +116,22 @@ def customize_format_reward_func(
 
 
 def compute_tool_call_reward(gt_tools, pd_tools, max_possible_reward, min_possible_reward, do_print):
+    """Compute a reward for tool call correctness by comparing predicted and ground truth tools.
+
+    Score is based on name matching, parameter key overlap, and parameter
+    value correctness, normalized to the reward range.
+
+    Args:
+        gt_tools: List of ground truth tool dicts with ``name`` and ``parameters``.
+        pd_tools: List of predicted tool dicts with ``name`` and ``parameters``.
+        max_possible_reward: Maximum reward value.
+        min_possible_reward: Minimum reward value.
+        do_print: If True, print scoring details.
+
+    Returns:
+        A float reward in [min_possible_reward, max_possible_reward].
+
+    """
     if gt_tools == pd_tools:
         if do_print:
             print("Max possible score:", "Exact Match!")
@@ -155,6 +189,24 @@ def compute_tool_call_reward(gt_tools, pd_tools, max_possible_reward, min_possib
 def customize_correctness_reward_tool(
     completions, answer, step, max_possible_reward, min_possible_reward, do_print, **kwargs
 ):
+    """Compute correctness rewards for tool call predictions.
+
+    Parse tool calls from each response and compare against the ground truth
+    using :func:`compute_tool_call_reward`.
+
+    Args:
+        completions: List of completion message lists.
+        answer: List of ground truth answer strings containing tool calls.
+        step: The current training step (unused).
+        max_possible_reward: Maximum reward value.
+        min_possible_reward: Minimum reward value.
+        do_print: If True, print debug information.
+        **kwargs: Additional keyword arguments (unused).
+
+    Returns:
+        A list of reward floats, one per completion.
+
+    """
     responses = [completion[0]["content"] for completion in completions]
     rewards = []
 
@@ -203,11 +255,15 @@ def compute_score(data_source, solution_str, ground_truth, extra_info, step=0):
     Computational Linguistics (Volume 1: Long Papers). 2024.
 
     Args:
+        data_source: the data source identifier
         solution_str: the solution text
         ground_truth: the ground truth
+        extra_info: additional information dict (e.g., experiment_name)
+        step: the current step number (default 0)
         method: the method to extract the solution, choices are 'strict' and 'flexible'
         format_score: the score for the format
         score: the score for the correct answer
+
     """
     exp_name = extra_info.get("experiment_name", "")
     if "llama" in exp_name:
