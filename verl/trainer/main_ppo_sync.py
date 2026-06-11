@@ -119,6 +119,45 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 # ======================================= USER SECTION BEGIN =======================================
 
 
+def _parse_agent_loop_output_key(key: str) -> tuple[str, str] | None:
+    """Parse agent-loop output keys formatted as ``{uid}_{session_id}_{index}``."""
+    parts = key.rsplit("_", 2)
+    if len(parts) != 3:
+        return None
+    uid, session_id, index = parts
+    if not session_id.isdigit() or not index.isdigit():
+        return None
+    return uid, session_id
+
+
+def _format_rollout_batch_error(
+    partition_id: str,
+    global_steps: int,
+    failures: dict[str, dict],
+    incomplete_rollouts: dict[str, tuple[int, int]],
+) -> str:
+    details = []
+    if failures:
+        failed_roots = ", ".join(f"{key}={tag.get('status')}" for key, tag in sorted(failures.items()))
+        details.append(f"terminal failures: {failed_roots}")
+    if incomplete_rollouts:
+        incomplete_roots = ", ".join(
+            f"{key}: expected {expected}, got {actual}"
+            for key, (expected, actual) in sorted(incomplete_rollouts.items())
+        )
+        details.append(f"incomplete rollouts: {incomplete_roots}")
+    reason = "; ".join(details)
+    return (
+        f"Incomplete rollout batch for partition={partition_id!r}, global_steps={global_steps}: {reason}. "
+        "Failing closed because partial agent-loop rollout groups can skew advantage computation."
+    )
+
+
+def _get_transfer_queue_cleanup_keys(batch: KVBatchMeta) -> list[str]:
+    root_keys = batch.extra_info.get("rollout_root_keys", [])
+    return list(dict.fromkeys([*batch.keys, *root_keys]))
+
+
 def compute_advantage_for_multi_trajectories(
     data: DataProto,
     batch_keys: list[str],
@@ -279,19 +318,53 @@ class ReplayBuffer:
             with self.lock:
                 keys, tags = [], []
                 should_wait = False
+                failures = {}
+                expected_rollouts = {}
+                root_keys = []
+                successful_sessions = defaultdict(set)
                 partition = self.partitions[partition_id]
                 for key, tag in partition.items():
                     if tag["global_steps"] == global_steps:
-                        if tag["status"] == "running":
+                        status = tag["status"]
+                        if status == "running":
                             should_wait = True
                             break
-                        elif tag["status"] == "success":
+                        elif status == "success":
                             keys.append(key)
                             tags.append(tag)
+                            parsed_key = _parse_agent_loop_output_key(key)
+                            if parsed_key is not None:
+                                uid, session_id = parsed_key
+                                successful_sessions[uid].add(session_id)
+                        elif status == "finished":
+                            expected = tag.get("expected_rollouts")
+                            if expected is not None:
+                                expected_rollouts[key] = int(expected)
+                                root_keys.append(key)
+                            else:
+                                logger.debug(f"Unknown status {status} for key {key}")
+                        elif status == "failure":
+                            failures[key] = tag
                         else:
-                            logger.debug(f"Unknown status {tag['status']} for key {key}")
+                            logger.debug(f"Unknown status {status} for key {key}")
                 if not should_wait:
-                    return KVBatchMeta(partition_id=partition_id, keys=keys, tags=tags)
+                    incomplete_rollouts = {
+                        key: (expected, len(successful_sessions[key]))
+                        for key, expected in expected_rollouts.items()
+                        if len(successful_sessions[key]) < expected
+                    }
+                    if failures or incomplete_rollouts:
+                        raise RuntimeError(
+                            _format_rollout_batch_error(
+                                partition_id=partition_id,
+                                global_steps=global_steps,
+                                failures=failures,
+                                incomplete_rollouts=incomplete_rollouts,
+                            )
+                        )
+                    batch = KVBatchMeta(partition_id=partition_id, keys=keys, tags=tags)
+                    batch.extra_info["rollout_root_keys"] = root_keys
+                    return batch
 
 
 @ray.remote
@@ -472,6 +545,13 @@ class AgentLoopManagerTQ(AgentLoopManager):
         await instance._init_agent_loop_workers()
         return instance
 
+    def _get_expected_rollouts(self, prompts: TensorDict, partition_id: str) -> list[int]:
+        if "__rollout_n__" in prompts:
+            return [int(rollout_n) for rollout_n in prompts["__rollout_n__"]]
+
+        default_n = self.rollout_config.n if partition_id == "train" else self.rollout_config.val_kwargs.n
+        return [int(default_n)] * len(prompts["uid"])
+
     def generate_sequences(self, prompts: TensorDict) -> None:
         """
         Dispatch input batch to agent loop workers without blocking. Workers should put agent loop outputs
@@ -483,7 +563,11 @@ class AgentLoopManagerTQ(AgentLoopManager):
         # mark prompts as pending in replay buffer
         global_steps = prompts["global_steps"]
         partition_id = "train" if "validate" not in prompts else "val"
-        items = {uid: {"global_steps": global_steps, "status": "running"} for uid in prompts["uid"]}
+        expected_rollouts = self._get_expected_rollouts(prompts, partition_id)
+        items = {
+            uid: {"global_steps": global_steps, "status": "running", "expected_rollouts": expected_rollout}
+            for uid, expected_rollout in zip(prompts["uid"], expected_rollouts, strict=True)
+        }
         self.replay_buffer.add(partition_id, items)
 
         chunkes = prompts.chunk(len(self.agent_loop_workers))
@@ -962,8 +1046,9 @@ class PPOTrainer:
             dump_all_keys.extend(batch.keys)
 
             # 5. cleanup transfer queue and replay buffer
-            tq.kv_clear(keys=batch.keys, partition_id=batch.partition_id)
-            self.replay_buffer.remove(batch.partition_id, batch.keys)
+            cleanup_keys = _get_transfer_queue_cleanup_keys(batch)
+            tq.kv_clear(keys=cleanup_keys, partition_id=batch.partition_id)
+            self.replay_buffer.remove(batch.partition_id, cleanup_keys)
 
         # logger to wandb
         self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
@@ -1670,8 +1755,9 @@ class PPOTrainer:
                     self._log_rollout_data(batch, timing_raw, rollout_data_dir)
 
                 # 7. cleanup transfer queue and replay buffer
-                tq.kv_clear(keys=batch.keys, partition_id=batch.partition_id)
-                self.replay_buffer.remove(batch.partition_id, batch.keys)
+                cleanup_keys = _get_transfer_queue_cleanup_keys(batch)
+                tq.kv_clear(keys=cleanup_keys, partition_id=batch.partition_id)
+                self.replay_buffer.remove(batch.partition_id, cleanup_keys)
 
                 self.logger.log(data=metrics, step=self.global_steps)
                 progress_bar.update(1)
