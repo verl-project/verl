@@ -6,14 +6,14 @@
 # [tool.uv].conflicts, so a single committed uv.lock resolves them all:
 #
 #   * cu13.0 (this file, base nvidia/cuda:13.0.2): vllm, sglang, fsdp,
-#     megatron, cpu — all on torch 2.11 / cu130.
-#   * cu12.9 (torch 2.9.1): veomni, nemoautomodel live in the SAME uv.lock
-#     (a separate torch world, kept apart by [tool.uv].conflicts) but are
-#     baked by docker/Dockerfile.uv.cu129. This file bakes only its torch-2.11
-#     world, so the `prefetch` below is scoped to `cu130 dev`.
-#   * DEFERRED — trtllm (tensorrt-llm) is a CUDA-13 RC sdist whose dependency
-#     tree explodes uv's resolver, so it is commented out in pyproject.toml.
-#     Revisit (here, on the cu130 stack) when it ships a stable release.
+#     megatron, cpu — all on torch 2.11 / cu130. The `prefetch` below is
+#     scoped to `cu130 dev`.
+#   * DEFERRED in pyproject.toml (commented out, re-enable later):
+#     - the cu12.9 / torch-2.9.1 world (veomni, nemoautomodel) — its image
+#       docker/Dockerfile.uv.cu129 was removed; recover it from git history.
+#     - trtllm (tensorrt-llm), a CUDA-13 RC sdist whose dependency tree
+#       explodes uv's resolver. Revisit on the cu130 stack when it ships a
+#       stable release.
 #
 # At build time we BAKE the full uv cache — every backend combination's wheels
 # & built artifacts, resolved from the committed uv.lock — into the image (the
@@ -275,14 +275,13 @@ COPY pyproject.toml uv.lock manage_envs.py ./
 
 # ---------------------------------------------------------------------------
 # prefetch: BAKE this image's uv cache. `manage_envs.py prefetch cu130 dev`
-# syncs the conflict-free covering combos (vllm+fsdp+megatron, sglang, cpu)
-# into throwaway envs purely to fill UV_CACHE_DIR (/root/.cache/uv) with every
-# wheel & built artifact those backends need from uv.lock — apex /
-# TransformerEngine / megatron-core are compiled here, once. The `cu130 dev`
-# scope keeps this image to its own torch world: the universal lock also holds
-# the cu12.9 / torch-2.9.1 backends (veomni, nemoautomodel), but those are
-# baked by Dockerfile.uv.cu129 and must not be built against this CUDA-13
-# toolkit. It passes --no-install-project, so only deps are cached and this
+# syncs the conflict-free runtime combos (vllm+fsdp, vllm+megatron, sglang+fsdp,
+# sglang+megatron, cpu) into throwaway envs purely to fill UV_CACHE_DIR
+# (/root/.cache/uv) with every wheel & built artifact those backends need from
+# uv.lock — apex / TransformerEngine / megatron-core are compiled here, once.
+# The `cu130 dev` scope keeps this image to its torch-2.11 world. (The deferred
+# cu12.9 / torch-2.9.1 world is commented out in pyproject.toml.) It passes
+# --no-install-project, so only deps are cached and this
 # layer is independent of the verl source tree. NOTE: unlike every other uv
 # step there is deliberately NO `--mount=type=cache` here, so the warmed cache
 # is committed as an image layer and ships *inside* the image; the runtime
