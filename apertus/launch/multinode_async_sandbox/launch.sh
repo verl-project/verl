@@ -33,6 +33,7 @@ TRAINING_DATA_DIR="${TRAINING_DATA_DIR:-/users/jgarcagi/iopsstor/projects/verl/a
 # TRAINING_DATA_DIR=/capstor/store/cscs/swissai/infra01/reasoning/data/RL-prod/apertus_demo_rl
 FORCE_THINKING="${FORCE_THINKING:-false}"
 THINK_PREFIX_TOKEN="${THINK_PREFIX_TOKEN:-<|inner_prefix|>}"
+ENABLE_THINKING="${ENABLE_THINKING:-false}"
 SEED="${SEED:-85}"
 ROLLOUT_N="${ROLLOUT_N:-8}"
 USE_GROUP_FILTERING="${USE_GROUP_FILTERING:-true}"
@@ -92,6 +93,9 @@ resolve_run_name_and_dir() {
     group_filtering_tag="dapo-"
   fi
   thinking_tag=""
+  if [[ "${ENABLE_THINKING}" == "true" ]]; then
+    thinking_tag="${thinking_tag}-think"
+  fi
   if [[ "${FORCE_THINKING}" == "true" ]]; then
     thinking_tag="-force${thinking_tag}"
   fi
@@ -206,7 +210,7 @@ log "\n[4/4] Submit multi-node async VERL training"
 log "  -> job-name=${TRAIN_JOB_NAME} time=${SLURM_TIME} train=${TRAIN_NNODES} rollout=${ROLLOUT_NNODES} total=${NNODES}"
 log "  -> config=${CONFIG_NAME} model=${MODEL_NAME_OR_PATH}"
 log "  -> data=${TRAINING_DATA_DIR} seed=${SEED} rollout_n=${ROLLOUT_N}"
-log "  -> group_filtering=${USE_GROUP_FILTERING} force_thinking=${FORCE_THINKING}"
+log "  -> group_filtering=${USE_GROUP_FILTERING} enable_thinking=${ENABLE_THINKING} force_thinking=${FORCE_THINKING}"
 log "  -> no_format=${NO_FORMAT} no_code=${NO_CODE}"
 log "  -> output=${RUN_DIR}"
 if [[ -n "${URL}" ]]; then
@@ -222,7 +226,7 @@ TRAIN_SUBMIT="$(sbatch \
   --time="${SLURM_TIME}" \
   --output="${RUN_DIR}/multinode_async_sandbox_%j.out" \
   --error="${RUN_DIR}/multinode_async_sandbox_%j.err" \
-  --export=ALL,SCHEDULER_URL="${URL}",CODEGYM_REWARD_CONTINUOUS="${CODEGYM_REWARD_CONTINUOUS}",MODEL_NAME_OR_PATH="${MODEL_NAME_OR_PATH}",TOKENIZER_NAME_OR_PATH="${TOKENIZER_NAME_OR_PATH}",CONFIG_NAME="${CONFIG_NAME}",NNODES="${NNODES}",TRAIN_NNODES="${TRAIN_NNODES}",ROLLOUT_NNODES="${ROLLOUT_NNODES}",TRAINING_DATA_DIR="${TRAINING_DATA_DIR}",NO_CODE="${NO_CODE}",NO_FORMAT="${NO_FORMAT}",FORCE_THINKING="${FORCE_THINKING}",THINK_PREFIX_TOKEN="${THINK_PREFIX_TOKEN}",SEED="${SEED}",ROLLOUT_N="${ROLLOUT_N}",USE_GROUP_FILTERING="${USE_GROUP_FILTERING}",PROJECT_NAME="${PROJECT_NAME}",RUN_NAME="${RUN_NAME}",RUN_DIR="${RUN_DIR}",WORKING_DIR="${WORKING_DIR}",HOME="${HOME}",HF_HOME="${HF_HOME}",ENVIRONMENT_PATH="${ENVIRONMENT_PATH}",REASONING_GYM_DIR="${REASONING_GYM_DIR}",JOB_NAME="${JOB_NAME}" \
+  --export=ALL,SCHEDULER_URL="${URL}",CODEGYM_REWARD_CONTINUOUS="${CODEGYM_REWARD_CONTINUOUS}",MODEL_NAME_OR_PATH="${MODEL_NAME_OR_PATH}",TOKENIZER_NAME_OR_PATH="${TOKENIZER_NAME_OR_PATH}",CONFIG_NAME="${CONFIG_NAME}",NNODES="${NNODES}",TRAIN_NNODES="${TRAIN_NNODES}",ROLLOUT_NNODES="${ROLLOUT_NNODES}",TRAINING_DATA_DIR="${TRAINING_DATA_DIR}",NO_CODE="${NO_CODE}",NO_FORMAT="${NO_FORMAT}",ENABLE_THINKING="${ENABLE_THINKING}",FORCE_THINKING="${FORCE_THINKING}",THINK_PREFIX_TOKEN="${THINK_PREFIX_TOKEN}",SEED="${SEED}",ROLLOUT_N="${ROLLOUT_N}",USE_GROUP_FILTERING="${USE_GROUP_FILTERING}",PROJECT_NAME="${PROJECT_NAME}",RUN_NAME="${RUN_NAME}",RUN_DIR="${RUN_DIR}",WORKING_DIR="${WORKING_DIR}",HOME="${HOME}",HF_HOME="${HF_HOME}",ENVIRONMENT_PATH="${ENVIRONMENT_PATH}",REASONING_GYM_DIR="${REASONING_GYM_DIR}",JOB_NAME="${JOB_NAME}" \
   "${TRAIN_SCRIPT}" "$@")"
 TRAIN_ID="$(awk '{print $NF}' <<<"${TRAIN_SUBMIT}")"
 [[ "${TRAIN_ID}" =~ ^[0-9]+$ ]] || { echo "Failed to parse training job id: ${TRAIN_SUBMIT}" >&2; exit 1; }
