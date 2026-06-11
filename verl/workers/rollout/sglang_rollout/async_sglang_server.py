@@ -246,6 +246,12 @@ class SGLangHttpServer:
         if self._disaggregation_role != "null":
             self._prepend_cu12_lib_to_ld_library_path()
 
+        if self._master_sock is not None:
+            try:
+                self._master_sock.close()
+            finally:
+                self._master_sock = None
+
         if self.nnodes > 1:
             if self.node_rank != 0:
                 assert master_address and master_port, "non-master node should provide master address and port"
