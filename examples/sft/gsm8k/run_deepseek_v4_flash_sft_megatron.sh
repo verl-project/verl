@@ -65,8 +65,7 @@ MCORE_COMMIT=ed6b1f65502aec7f2fe27e14a1245c29e435c2a6
 [ -d Megatron-LM ] || { git clone https://github.com/NVIDIA/Megatron-LM && \
     (cd Megatron-LM && git fetch origin "$MCORE_COMMIT" && git checkout "$MCORE_COMMIT"); }
 # Megatron-Bridge: provides megatron.bridge (the DSv4 AutoBridge / recipes).
-[ -d Megatron-Bridge ] || { git clone https://github.com/NVIDIA-NeMo/Megatron-Bridge && \
-    (cd Megatron-Bridge && git fetch origin pull/4131/head:dsv4-sft && git checkout dsv4-sft); }
+[ -d Megatron-Bridge ] || git clone https://github.com/NVIDIA-NeMo/Megatron-Bridge
 cd -
 export PYTHONPATH=${PYTHONPATH:-}:$PYPATH/Megatron-Bridge/src:$PYPATH/Megatron-LM
 
