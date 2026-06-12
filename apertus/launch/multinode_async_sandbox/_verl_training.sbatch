@@ -44,6 +44,12 @@ FORCE_THINKING="${FORCE_THINKING:-false}"
 THINK_PREFIX_TOKEN="${THINK_PREFIX_TOKEN:-<think>}"
 ENABLE_THINKING="${ENABLE_THINKING:-false}"
 WANDB_ENTITY="${WANDB_ENTITY:-apertus}"
+WANDB_BACKGROUND_SYNC="${WANDB_BACKGROUND_SYNC:-false}"
+WANDB_MODE="${WANDB_MODE:-}"
+WANDB_SYNC_INTERVAL_SECONDS="${WANDB_SYNC_INTERVAL_SECONDS:-60}"
+WANDB_REQUIRE_SERVICE="${WANDB_REQUIRE_SERVICE:-}"
+WANDB_DISABLE_SERVICE="${WANDB_DISABLE_SERVICE:-}"
+WANDB_SYNC_UPLOAD_MODE="${WANDB_SYNC_UPLOAD_MODE:-}"
 NO_CODE="${NO_CODE:-false}"
 NO_FORMAT="${NO_FORMAT:-false}"
 ACTOR_PPO_MINI_BATCH_SIZE="${ACTOR_PPO_MINI_BATCH_SIZE:-}"
@@ -216,6 +222,38 @@ build_overrides() {
     "+ray_kwargs.ray_init.runtime_env.env_vars.SANDBOX_BACKEND='${SANDBOX_BACKEND}'"
   )
 
+  if is_truthy "${WANDB_BACKGROUND_SYNC}"; then
+    WANDB_MODE="${WANDB_MODE:-offline}"
+    WANDB_SYNC_UPLOAD_MODE="${WANDB_SYNC_UPLOAD_MODE:-online}"
+    # W&B service can hang on some HPC filesystems/network setups; offline mode
+    # does not need the service. Keep logs local and avoid init timeouts.
+    WANDB_DISABLE_SERVICE="${WANDB_DISABLE_SERVICE:-true}"
+    WANDB_DIR="${WANDB_DIR:-${RUN_DIR}}"
+
+    overrides+=(
+      "+ray_kwargs.ray_init.runtime_env.env_vars.WANDB_MODE=${WANDB_MODE}"
+      "+ray_kwargs.ray_init.runtime_env.env_vars.WANDB_DIR='${WANDB_DIR}'"
+      "+ray_kwargs.ray_init.runtime_env.env_vars.WANDB_SYNC_UPLOAD_MODE='${WANDB_SYNC_UPLOAD_MODE}'"
+      "+ray_kwargs.ray_init.runtime_env.env_vars.WANDB_DISABLE_SERVICE='${WANDB_DISABLE_SERVICE}'"
+    )
+    if [ -n "${WANDB_REQUIRE_SERVICE}" ]; then
+      overrides+=("+ray_kwargs.ray_init.runtime_env.env_vars.WANDB_REQUIRE_SERVICE='${WANDB_REQUIRE_SERVICE}'")
+    fi
+  else
+    if [ -n "${WANDB_MODE}" ]; then
+      overrides+=("+ray_kwargs.ray_init.runtime_env.env_vars.WANDB_MODE=${WANDB_MODE}")
+    fi
+    if [ -n "${WANDB_DIR:-}" ]; then
+      overrides+=("+ray_kwargs.ray_init.runtime_env.env_vars.WANDB_DIR='${WANDB_DIR}'")
+    fi
+    if [ -n "${WANDB_DISABLE_SERVICE}" ]; then
+      overrides+=("+ray_kwargs.ray_init.runtime_env.env_vars.WANDB_DISABLE_SERVICE='${WANDB_DISABLE_SERVICE}'")
+    fi
+    if [ -n "${WANDB_REQUIRE_SERVICE}" ]; then
+      overrides+=("+ray_kwargs.ray_init.runtime_env.env_vars.WANDB_REQUIRE_SERVICE='${WANDB_REQUIRE_SERVICE}'")
+    fi
+  fi
+
   if is_truthy "${NO_FORMAT}"; then
     overrides+=(
       "actor_rollout_ref.rollout.multi_turn.enable=false"
@@ -312,12 +350,50 @@ cleanup_ray() {
     bash -lc "cd '${WORKING_DIR}' && ray stop --force"
 }
 
+cleanup_wandb_sync() {
+  set +e
+  if [ -n "${WANDB_SYNC_PID:-}" ]; then
+    kill "${WANDB_SYNC_PID}" 2>/dev/null || true
+    wait "${WANDB_SYNC_PID}" 2>/dev/null || true
+  fi
+}
+
+finalize_wandb_sync() {
+  set +e
+  if ! is_truthy "${WANDB_BACKGROUND_SYNC}"; then
+    return
+  fi
+  if [ -z "${head_node:-}" ]; then
+    return
+  fi
+  python3 -c "import wandb" >/dev/null 2>&1 || { echo "wandb not installed; skipping WANDB finalize sync" >&2; return; }
+  srun --overlap "${SRUN_ENV[@]}" --nodes=1 --ntasks=1 -w "${head_node}" \
+    bash -lc "mkdir -p '${WANDB_DIR}' && cd '${WANDB_DIR}' && export WANDB_MODE='${WANDB_SYNC_UPLOAD_MODE}' && python3 -m wandb sync --sync-all" || true
+}
+
 cleanup_all() {
   local exit_code=$?
+  cleanup_wandb_sync
+  finalize_wandb_sync
   cleanup_ray
   exit "${exit_code}"
 }
 trap cleanup_all EXIT
+
+start_wandb_sync_loop() {
+  if ! is_truthy "${WANDB_BACKGROUND_SYNC}"; then
+    return
+  fi
+  if [ "${WANDB_SYNC_INTERVAL_SECONDS}" -le 0 ]; then
+    return
+  fi
+  python3 -c "import wandb" >/dev/null 2>&1 || { echo "wandb not installed; skipping WANDB background sync loop" >&2; return; }
+  mkdir -p "${WANDB_DIR}"
+  echo "Starting periodic W&B sync from ${WANDB_DIR} every ${WANDB_SYNC_INTERVAL_SECONDS}s"
+  srun --overlap "${SRUN_ENV[@]}" --nodes=1 --ntasks=1 -w "${head_node}" \
+    bash -lc "set -euo pipefail; mkdir -p '${WANDB_DIR}'; export WANDB_MODE='${WANDB_SYNC_UPLOAD_MODE}'; export WANDB_DIR='${WANDB_DIR}'; while true; do printf '[%s] wandb sync from ${WANDB_DIR}\n' \"\$(date)\"; cd '${WANDB_DIR}' && python3 -m wandb sync --sync-all || true; sleep '${WANDB_SYNC_INTERVAL_SECONDS}'; done" &
+  WANDB_SYNC_PID=$!
+}
 
 wait_for_ray_cluster() {
   local attempt
@@ -386,6 +462,9 @@ prepare_shared_python_deps() {
 }
 
 resolve_run_name
+if is_truthy "${WANDB_BACKGROUND_SYNC}"; then
+  WANDB_DIR="${WANDB_DIR:-${RUN_DIR}}"
+fi
 RESOLVED_MODEL="$(resolve_hf_path "${MODEL_NAME_OR_PATH}")"
 RESOLVED_TOKENIZER=""
 if [ -n "${TOKENIZER_NAME_OR_PATH}" ]; then
@@ -431,6 +510,13 @@ export NNODES
 export WANDB_RUN_GROUP="${JOB_NAME:-${RUN_NAME}}"
 export WANDB_NAME="${RUN_NAME}"
 export WANDB_ENTITY
+export WANDB_BACKGROUND_SYNC
+export WANDB_MODE
+export WANDB_DIR
+export WANDB_SYNC_INTERVAL_SECONDS
+export WANDB_REQUIRE_SERVICE
+export WANDB_DISABLE_SERVICE
+export WANDB_SYNC_UPLOAD_MODE
 
 nodes_array=($(scontrol show hostnames "${SLURM_JOB_NODELIST}"))
 if [ "${#nodes_array[@]}" -lt "${NNODES}" ]; then
@@ -483,6 +569,7 @@ done
 
 wait_for_ray_cluster
 build_overrides
+start_wandb_sync_loop
 
 srun --overlap "${SRUN_ENV[@]}" --nodes=1 --ntasks=1 -w "${head_node}" \
   bash -lc "cd '${WORKING_DIR}' && HYDRA_FULL_ERROR=1 python3 -m verl.experimental.fully_async_policy.fully_async_main \"\$@\"" -- \
