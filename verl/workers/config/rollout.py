@@ -127,6 +127,8 @@ class CheckpointEngineConfig(BaseConfig):
     Configuration for checkpoint engine to update weights from trainer to rollout
     """
 
+    _mutable_fields = {"backend"}
+
     # Backend for checkpoint engine: naive, nccl, nixl, hccl
     backend: Optional[str] = "naive"
     # Bucket size in MB to transfer multiple weights at one time

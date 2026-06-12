@@ -11,6 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+# TODO: move this file to verl.experimental.agent_loop after V1 is stable
+"""TransferQueue adapter for AgentLoopManager and AgentLoopWorker"""
+
 import asyncio
 import logging
 import os

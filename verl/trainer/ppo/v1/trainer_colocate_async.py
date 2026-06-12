@@ -35,7 +35,7 @@ class PPOTrainerColocateAsync(PPOTrainer):
     def on_train_begin(self):
         num_warmup_batches = self.config.trainer.v1.colocate_async.num_warmup_batches
         for _ in range(num_warmup_batches):
-            self.add_batch_to_generate()
+            self._add_batch_to_generate()
         logger.info(f"Added {num_warmup_batches} warmup batches to the agent loop manager")
 
     def on_step_end(self):

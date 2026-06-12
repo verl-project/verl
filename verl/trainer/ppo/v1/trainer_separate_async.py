@@ -41,6 +41,8 @@ class PPOTrainerSeparateAsync(PPOTrainer):
     """
 
     def __init__(self, config: DictConfig):
+        raise NotImplementedError("separate async training is still under development")
+
         train_batch_size = config.data.train_batch_size
         ppo_mini_batch_size = config.actor_rollout_ref.actor.ppo_mini_batch_size
         assert train_batch_size == ppo_mini_batch_size, (
@@ -50,6 +52,9 @@ class PPOTrainerSeparateAsync(PPOTrainer):
         assert config.actor_rollout_ref.rollout.nnodes > 0, "nnodes must be > 0 in separate async training"
         assert config.actor_rollout_ref.rollout.n_gpus_per_node > 0, (
             "n_gpus_per_node must be > 0 in separate async training"
+        )
+        assert config.actor_rollout_ref.rollout.checkpoint_engine.backend != "naive", (
+            "please use nccl/nixl/mooncake, etc. backend for separate async training"
         )
 
         # TODO: Support Decoupled PPO: https://arxiv.org/abs/2505.24298
@@ -62,7 +67,7 @@ class PPOTrainerSeparateAsync(PPOTrainer):
 
         # initialize standalone rollout
         # TODO: make initialization parallel with super().init()
-        self.standalone_server_manager = LLMServerManager.create(config=self.config)
+        self.standalone_server_manager: LLMServerManager = LLMServerManager.create(config=self.config)
 
         # create checkpoint engine manager for trainer and standalone rollout
         checkpoint_engine_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
@@ -76,6 +81,10 @@ class PPOTrainerSeparateAsync(PPOTrainer):
         self.current_mode = HybridEngineMode.ROLLOUT
         self.add_replicas_to_balancer()
 
+    def get_llm_client(self):
+        # get server client from standalone rollout
+        return self.standalone_server_manager.get_client()
+
     def on_init_end(self):
         # update weights after loading checkpoint
         self.standalone_checkpoint_manager.update_weights(self.global_steps)
@@ -84,7 +93,7 @@ class PPOTrainerSeparateAsync(PPOTrainer):
     def on_train_begin(self):
         num_warmup_batches = self.config.trainer.v1.colocate_async.num_warmup_batches
         for _ in range(num_warmup_batches):
-            self.add_batch_to_generate()
+            self._add_batch_to_generate()
         logger.info(f"Added {num_warmup_batches} warmup batches to the agent loop manager")
 
     def on_validate_begin(self):

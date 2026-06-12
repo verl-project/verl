@@ -22,7 +22,7 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from pprint import pprint
-from typing import Any
+from typing import Any, Optional
 
 import numpy as np
 import ray
@@ -35,6 +35,7 @@ from tqdm import tqdm
 from transfer_queue import KVBatchMeta
 
 from verl.checkpoint_engine import CheckpointEngineManager
+from verl.experimental.agent_loop import AgentLoopManager
 from verl.experimental.reward_loop import RewardLoopManager
 from verl.experimental.teacher_loop import MultiTeacherModelManager
 from verl.protocol import DataProto, DataProtoFuture
@@ -45,7 +46,6 @@ from verl.single_controller.ray import (
     create_colocated_worker_cls,
 )
 from verl.trainer.distillation import is_distillation_enabled
-from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import agg_loss
 from verl.trainer.ppo.metric_utils import (
@@ -58,8 +58,14 @@ from verl.trainer.ppo.metric_utils import (
 from verl.trainer.ppo.padding_utils import upsample_batch_to_divisible_size
 from verl.trainer.ppo.ray_trainer import apply_kl_penalty, compute_spec_decode_metrics
 from verl.trainer.ppo.rollout_corr_helper import compute_rollout_correction_and_add_to_batch
-from verl.trainer.ppo.utils import Role, need_critic, need_reference_policy, need_teacher_policy
-from verl.trainer.ppo.v1.agent_loop_tq import AgentLoopManagerTQ
+from verl.trainer.ppo.utils import (
+    Role,
+    create_rl_dataset,
+    create_rl_sampler,
+    need_critic,
+    need_reference_policy,
+    need_teacher_policy,
+)
 from verl.trainer.ppo.v1.replay_buffer import ReplayBuffer
 from verl.trainer.ppo.v1.utils import compute_advantage_for_multi_trajectories
 from verl.utils import hf_processor, hf_tokenizer
@@ -70,14 +76,13 @@ from verl.utils.dataset.rl_dataset import collate_fn
 from verl.utils.debug import marked_timer
 from verl.utils.debug.metrics import calculate_debug_metrics
 from verl.utils.fs import copy_to_local
-from verl.utils.import_utils import load_class_from_fqn
 from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.tracking import Tracking, ValidationGenerationsLogger
 from verl.workers.config import CriticConfig, DistillationConfig
 from verl.workers.engine_workers import ActorRolloutRefWorker, TrainingWorker, TrainingWorkerConfig
-from verl.workers.rollout.llm_server import LLMServerManager
+from verl.workers.rollout.llm_server import LLMServerClient, LLMServerManager
 from verl.workers.utils.losses import value_loss
 from verl.workers.utils.padding import response_from_nested, response_to_nested
 
@@ -232,26 +237,14 @@ class PPOTrainer(ABC):
             self.distillation_config = None
 
         # 9. initialize agent loop manager
-        self.llm_server_manager = LLMServerManager.create(
+        self.llm_server_manager: LLMServerManager = LLMServerManager.create(
             config=self.config, worker_group=self.actor_rollout_wg, rollout_resource_pool=actor_rollout_resource_pool
         )
 
-        manager_class_fqn = self.config.actor_rollout_ref.rollout.get("agent", {}).get("agent_loop_manager_class")
-        if manager_class_fqn:
-            agent_loop_manager_cls = load_class_from_fqn(manager_class_fqn, "AgentLoopManager")
-        else:
-            agent_loop_manager_cls = AgentLoopManagerTQ
-        self.agent_loop_manager = agent_loop_manager_cls.create(
-            config=self.config,
-            llm_client=self.llm_server_manager.get_client(),
-            teacher_client=self.teacher_model_manager.get_client() if self.use_teacher_policy else None,
-            reward_loop_worker_handles=self.reward_loop_manager.reward_loop_workers,
-        )
-        logger.info("agent loop manager initialized")
-
         # 10. initialize checkpoint engine manager
         checkpoint_engine_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
-        self.checkpoint_manager = CheckpointEngineManager(
+        checkpoint_engine_config.backend = "naive"
+        self.checkpoint_manager: CheckpointEngineManager = CheckpointEngineManager(
             config=checkpoint_engine_config,
             trainer=self.actor_rollout_wg,
             replicas=self.llm_server_manager.get_replicas(),
@@ -264,7 +257,30 @@ class PPOTrainer(ABC):
 
         logger.info("all initialize finished, ready to fit")
 
-    def fit(self):
+    def get_llm_client(self) -> LLMServerClient:
+        """Get the LLM server client for rollout generation."""
+        return self.llm_server_manager.get_client()
+
+    def get_teacher_client(self) -> Optional[dict[str, LLMServerClient]]:
+        """Get the One-Policy Distillation teacher server clients.
+
+        Returns:
+            dict[str, LLMServerClient]: The teacher server clients.
+        """
+        return self.teacher_model_manager.get_client() if self.use_teacher_policy else None
+
+    def get_reward_handles(self) -> list[ray.actor.ActorHandle]:
+        """Get the handles of reward loop workers."""
+        return self.reward_loop_manager.reward_loop_worker_handles
+
+    def fit(self, agent_loop_manager: AgentLoopManager):
+        """Fit the trainer with the agent loop manager.
+
+        Args:
+            agent_loop_manager: The agent loop manager to generate sequences.
+        """
+        self.agent_loop_manager = agent_loop_manager
+
         self.logger = Tracking(
             project_name=self.config.trainer.project_name,
             experiment_name=self.config.trainer.experiment_name,
