@@ -39,7 +39,7 @@ import torch
 import transfer_queue as tq
 from transfer_queue import KVBatchMeta
 
-from verl.trainer.ppo.v2.replay_buffer import ReplayBuffer
+from verl.trainer.ppo.v1.replay_buffer import ReplayBuffer
 
 # Small poll interval so the blocking consumer reacts to producer writes quickly.
 POLL_INTERVAL = 0.05

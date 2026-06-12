@@ -19,7 +19,6 @@ import logging
 import multiprocessing as mp
 import os
 from dataclasses import asdict
-from importlib.metadata import PackageNotFoundError
 from typing import Generator
 
 import ray
@@ -85,7 +84,7 @@ def _set_envs_and_config(server_args: ServerArgs):
                 "0.1.1",
                 "Please reinstall the latest version with `pip install follow https://sgl-project.github.io/get_started/install.html#for-cuda-13`",
             )
-        except PackageNotFoundError:
+        except Exception:
             assert_pkg_version(
                 "sgl_kernel",
                 "0.1.1",
