@@ -39,6 +39,12 @@ RUN export NVTE_FRAMEWORK=pytorch && MAX_JOBS=128 NVTE_BUILD_THREADS_PER_JOB=4 p
 
 RUN pip install codetiming mathruler pylatexenc cachetools pytest-asyncio
 
+RUN if [ "$(uname -m)" = "aarch64" ]; then \
+        pip show "flash-attn-4"; \
+    else \
+        pip uninstall -y "flash-attn-4"; \
+    fi
+
 RUN pip install --no-build-isolation flash_attn==2.8.3
 
 RUN NSIGHT_VERSION=2025.6.1_2025.6.1.190-1_$(if [ "$(uname -m)" = "aarch64" ]; then echo "arm64"; else echo "amd64"; fi) && \
@@ -60,13 +66,6 @@ RUN pip3 install nvtx matplotlib liger_kernel
 RUN pip install torchcodec --index-url=https://download.pytorch.org/whl/cu130
 
 RUN pip install qwen-vl-utils==0.0.14
-
-RUN if [ "$(uname -m)" = "aarch64" ]; then \
-        pip show "flash-attn-4"; \
-    else \
-        pip uninstall -y "flash-attn-4" && \
-        pip install "flash-attn-4[cu13]"; \
-    fi
 
 RUN if [ "$(uname -m)" = "aarch64" ]; then \
         pip show "sglang-kernel"; \
