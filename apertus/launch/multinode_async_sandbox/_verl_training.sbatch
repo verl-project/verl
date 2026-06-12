@@ -218,6 +218,11 @@ build_overrides() {
     "+ray_kwargs.ray_init.runtime_env.env_vars.NLTK_DATA=${NLTK_DATA_DIR}"
     "+ray_kwargs.ray_init.runtime_env.env_vars.MATH_VERIFY_PYTHONPATH=${PY_DEPS_DIR}"
     "+ray_kwargs.ray_init.runtime_env.env_vars.WANDB_ENTITY=${WANDB_ENTITY}"
+    "+ray_kwargs.ray_init.runtime_env.env_vars.RAY_enable_open_telemetry='false'"
+    "+ray_kwargs.ray_init.runtime_env.env_vars.OTEL_SDK_DISABLED='true'"
+    "+ray_kwargs.ray_init.runtime_env.env_vars.OTEL_METRICS_EXPORTER='none'"
+    "+ray_kwargs.ray_init.runtime_env.env_vars.OTEL_TRACES_EXPORTER='none'"
+    "+ray_kwargs.ray_init.runtime_env.env_vars.OTEL_LOGS_EXPORTER='none'"
     "+ray_kwargs.ray_init.runtime_env.env_vars.NO_FORMAT='${NO_FORMAT}'"
     "+ray_kwargs.ray_init.runtime_env.env_vars.SANDBOX_BACKEND='${SANDBOX_BACKEND}'"
   )
