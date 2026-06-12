@@ -124,7 +124,6 @@ def default_compute_score(
         "lighteval/code_generation_lite",
         "codecontests",
         "deepmind/code_contests",
-        "kodcode",
         "code_contests",
         "apps",
         "codeforces",

@@ -163,19 +163,6 @@ TRAIN_DATASETS = [
         answer_key="input_output",
         solution_key="solutions",
     ),
-    # TODO: replace the path with a shared one and uncomment this dataset config
-    # DatasetConfig(
-    #     enabled=True,
-    #     name="KodCode-verified",
-    #     dataset_id="/iopsstor/scratch/cscs/rmachace/code-gym/src/kodcode_50k_verified",
-    #     split="train",
-    #     adapter="kodcode",
-    #     data_source="kodcode",
-    #     question_key="question",
-    #     solution_key="solution",
-    #     answer_key="test_cases",
-    #     sample_size=None,
-    # ),
     DatasetConfig(
         name="rgym",
         dataset_id="/capstor/store/cscs/swissai/infra01/reasoning/data/RL-prod/rgym/train.parquet",
@@ -686,33 +673,6 @@ def adapt_apps(
     example: dict[str, Any], idx: int, split: str, config: DatasetConfig
 ) -> dict[str, Any]:
     return make_code_row(example, idx, split, config, "likaixin/TACO-verified")
-
-
-@register_adapter("kodcode")
-def adapt_kodcode(
-    example: dict[str, Any], idx: int, split: str, config: DatasetConfig
-) -> dict[str, Any]:
-    question = normalize_text(get_value(example, "question"))
-    test_cases = get_value(example, "test_cases")
-    prompt = make_prompt(format_code_prompt(question, ""))
-    ground_truth = json_dumps(test_cases)
-    extra_info = {
-        "question": question,
-        "question_id": normalize_text(get_value(example, "question_id")),
-        "test_cases": test_cases,
-        "num_used_tests": len(test_cases),
-        "language": "python",
-        "sandbox_data_source": "Muennighoff/mbpp",
-    }
-    return make_row(
-        config=config,
-        split=split,
-        index=idx,
-        prompt=prompt,
-        ability="code",
-        ground_truth=ground_truth,
-        extra_info=extra_info,
-    )
 
 
 @register_adapter("code_contests")
