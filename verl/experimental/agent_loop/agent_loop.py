@@ -51,6 +51,8 @@ from verl.tools.tool_registry import load_all_tools
 from verl.trainer.distillation import is_distillation_enabled
 from verl.utils.chat_template import apply_chat_template, initialize_system_prompt
 from verl.utils.config import omega_conf_to_dataclass
+from verl.utils.continuous_token import MergeResult
+from verl.utils.continuous_token_wiring import create_continuous_token_builder
 from verl.utils.dataset.rl_dataset import RLHFDataset, get_dataset_class
 from verl.utils.model import compute_position_id_with_mask
 from verl.utils.profiler import simple_timer
@@ -225,7 +227,24 @@ class AgentLoopBase(ABC):
         self.apply_chat_template_kwargs = self.data_config.get("apply_chat_template_kwargs", {})
         self.mm_processor_kwargs = self.data_config.get("mm_processor_kwargs", {})
         processing_class = self.processor if self.processor is not None else self.tokenizer
-        self.system_prompt = initialize_system_prompt(processing_class, **self.apply_chat_template_kwargs)
+        self.continuous_token_builder = None
+        continuous_token_config = self.rollout_config.multi_turn.continuous_token
+        if continuous_token_config.enable and self.processor is None:
+            model_config = self.config.actor_rollout_ref.model
+            self.continuous_token_builder = create_continuous_token_builder(
+                self.tokenizer,
+                model_family=continuous_token_config.model_family,
+                model_path=model_config.path,
+                tokenizer_name_or_path=model_config.tokenizer_path,
+                chat_template_kwargs=self.apply_chat_template_kwargs,
+                custom_builder_module=continuous_token_config.custom_builder_module,
+            )
+        elif continuous_token_config.enable:
+            logger.warning("Continuous Token is enabled but processor is set; falling back to legacy multimodal path.")
+        if self.continuous_token_builder is not None:
+            self.system_prompt = []
+        else:
+            self.system_prompt = initialize_system_prompt(processing_class, **self.apply_chat_template_kwargs)
         self.loop = get_event_loop()
 
     def _get_mm_processor_kwargs(self, audio_data: Optional[list[Any]] = None) -> dict[str, Any]:
@@ -269,6 +288,120 @@ class AgentLoopBase(ABC):
                 multi_modal_data["audios"] = audios
 
         return multi_modal_data
+
+    async def build_ct_initial_prompt(
+        self,
+        messages: list[dict],
+        tools: list[dict] = None,
+    ) -> list[int]:
+        prompt_ids = await self.loop.run_in_executor(
+            None,
+            lambda: self.continuous_token_builder.build_initial_tokens(messages, tools=tools),
+        )
+        return self._cap_text_prompt_length(prompt_ids)
+
+    async def merge_ct_non_assistant_msg(
+        self,
+        previous_messages: list[dict],
+        next_messages: list[dict],
+        runtime_token_ids: list[int],
+        response_mask: list[int],
+        response_logprobs: Optional[list[float]] = None,
+        tools: list[dict] = None,
+    ):
+        merge_result = await self.loop.run_in_executor(
+            None,
+            lambda: self.continuous_token_builder.merge_tokens(
+                previous_messages,
+                next_messages,
+                runtime_token_ids,
+                tools=tools,
+            ),
+        )
+        aligned_response_mask, aligned_response_logprobs = self._align_continuous_token_response_metadata(
+            merge_result, response_mask, response_logprobs
+        )
+        return merge_result, aligned_response_mask, aligned_response_logprobs
+
+    async def merge_ct_assistant_token(
+        self,
+        runtime_token_ids: list[int],
+        assistant_token_ids: list[int],
+        response_mask: list[int],
+        response_logprobs: Optional[list[float]] = None,
+        assistant_logprobs: Optional[list[float]] = None,
+    ):
+        merge_result = await self.loop.run_in_executor(
+            None,
+            lambda: self.continuous_token_builder.append_assistant_tokens(
+                runtime_token_ids,
+                assistant_token_ids,
+            ),
+        )
+        aligned_response_mask, aligned_response_logprobs = self._align_continuous_token_response_metadata(
+            merge_result,
+            response_mask,
+            response_logprobs,
+            assistant_logprobs=assistant_logprobs,
+        )
+        return merge_result, aligned_response_mask, aligned_response_logprobs
+
+    @staticmethod
+    def _align_continuous_token_response_metadata(
+        merge_result: MergeResult,
+        response_mask: list[int],
+        response_logprobs: Optional[list[float]] = None,
+        *,
+        assistant_logprobs: Optional[list[float]] = None,
+    ) -> tuple[list[int], Optional[list[float]]]:
+        aligned_mask = list(response_mask)
+        aligned_logprobs = list(response_logprobs) if response_logprobs is not None else None
+        if aligned_logprobs is None and assistant_logprobs is not None:
+            aligned_logprobs = []
+
+        if merge_result.removed_prefix_token_count:
+            aligned_mask = aligned_mask[: -merge_result.removed_prefix_token_count]
+            if aligned_logprobs is not None:
+                aligned_logprobs = aligned_logprobs[: -merge_result.removed_prefix_token_count]
+
+        # Inserted tokens are CT-created boundary tokens, not tokens generated by the model.
+        inserted_token_count = len(merge_result.inserted_token_ids)
+        aligned_mask += [0] * inserted_token_count
+        if aligned_logprobs is not None:
+            aligned_logprobs += [0.0] * inserted_token_count
+
+        if merge_result.kind == "assistant":
+            aligned_mask += [1] * merge_result.appended_token_count
+            if aligned_logprobs is not None:
+                if assistant_logprobs is None:
+                    if merge_result.appended_token_count:
+                        raise ValueError("assistant_logprobs is required for assistant Continuous Token alignment")
+                    assistant_logprobs = []
+                if len(assistant_logprobs) != merge_result.appended_token_count:
+                    raise ValueError(
+                        "assistant_logprobs length must match appended assistant token count, "
+                        f"got {len(assistant_logprobs)} and {merge_result.appended_token_count}"
+                    )
+                aligned_logprobs += list(assistant_logprobs)
+        elif merge_result.kind == "non_assistant":
+            aligned_mask += [0] * merge_result.appended_token_count
+            if aligned_logprobs is not None:
+                aligned_logprobs += [0.0] * merge_result.appended_token_count
+        else:
+            raise ValueError(f"Unknown Continuous Token merge kind: {merge_result.kind!r}")
+
+        return aligned_mask, aligned_logprobs
+
+    def _cap_text_prompt_length(self, prompt_ids: list[int]) -> list[int]:
+        prompt_length = self.rollout_config.prompt_length
+        if len(prompt_ids) > prompt_length:
+            logger.warning(
+                "Prompt of %d tokens exceeds rollout.prompt_length=%d; left-truncating.",
+                len(prompt_ids),
+                prompt_length,
+            )
+            return prompt_ids[-prompt_length:]
+        return prompt_ids
 
     async def apply_chat_template(
         self,
@@ -349,12 +482,7 @@ class AgentLoopBase(ABC):
                     f"(e.g. ``total_pixels`` / ``max_pixels`` / fps / number of frames) or "
                     f"increase ``rollout.prompt_length``."
                 )
-            logger.warning(
-                "Prompt of %d tokens exceeds rollout.prompt_length=%d; left-truncating.",
-                len(prompt_ids),
-                prompt_length,
-            )
-            prompt_ids = prompt_ids[-prompt_length:]
+            prompt_ids = self._cap_text_prompt_length(prompt_ids)
 
         return prompt_ids
 
