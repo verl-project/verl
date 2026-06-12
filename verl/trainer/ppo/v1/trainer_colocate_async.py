@@ -16,6 +16,7 @@ import os
 
 from verl.trainer.ppo.v1.trainer_base import PPOTrainer, register_trainer
 from verl.utils.debug import marked_timer
+from verl.workers.rollout.llm_server import FullyAsyncLLMServerClient
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -27,6 +28,10 @@ class PPOTrainerColocateAsync(PPOTrainer):
     1. Trainer and rollout are colocated.
     2. Partial rollout is enabled.
     """
+
+    def get_llm_client(self):
+        """Get the LLM server client for rollout generation."""
+        return self.llm_server_manager.get_client(client_cls=FullyAsyncLLMServerClient)
 
     def on_init_end(self):
         # update weights after loading checkpoint

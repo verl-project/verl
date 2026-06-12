@@ -22,7 +22,7 @@ from verl.checkpoint_engine import CheckpointEngineManager
 from verl.trainer.ppo.v1.trainer_base import PPOTrainer, register_trainer
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
-from verl.workers.rollout.llm_server import LLMServerManager
+from verl.workers.rollout.llm_server import FullyAsyncLLMServerClient, LLMServerManager
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -83,7 +83,7 @@ class PPOTrainerSeparateAsync(PPOTrainer):
 
     def get_llm_client(self):
         # get server client from standalone rollout
-        return self.standalone_server_manager.get_client()
+        return self.standalone_server_manager.get_client(client_cls=FullyAsyncLLMServerClient)
 
     def on_init_end(self):
         # update weights after loading checkpoint
