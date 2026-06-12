@@ -3,7 +3,7 @@
 Using Checkpoints to Support Fault Tolerance Training
 =====================================================
 
-Last updated: 04/23/2026.
+Last updated: 06/08/2026.
 
 There could be training errors or machine failure during the whole RLHF training process, 
 so it is recommended to enable checkpoints to minimize your loss.
@@ -223,6 +223,40 @@ Recommended Configurations
 - **Hybrid (resume + HF export)**: ``use_mbridge=True``, ``use_dist_checkpointing=True``, and
   e.g. ``save_contents=['model', 'hf_model', 'optimizer', 'extra']`` to write both
   ``model/dist_ckpt/`` and ``model/huggingface/`` in one step.
+
+Check Trainer-to-Rollout Weight Sync
+------------------------------------
+
+When adapting a model or checkpoint-engine backend, enable the weight-sync check
+on a PPO/GRPO command. The check runs after the initial
+``CheckpointEngineManager.update_weights()`` call and after the rollout backend
+has loaded the weights from the source HuggingFace checkpoint:
+
+.. code:: bash
+
+    actor_rollout_ref.rollout.name=vllm \
+    actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
+    actor_rollout_ref.rollout.checkpoint_engine.backend=nccl \
+    actor_rollout_ref.rollout.checkpoint_engine.check_weight_sync=True
+
+Use ``check_weight_sync_only=True`` to stop after the initial check instead of
+running rollout generation or PPO training:
+
+.. code:: bash
+
+    actor_rollout_ref.rollout.checkpoint_engine.check_weight_sync=True \
+    actor_rollout_ref.rollout.checkpoint_engine.check_weight_sync_only=True
+
+The check compares the initial rollout backend-loaded weights with the source
+HuggingFace checkpoint and reports missing, unexpected, and mismatched keys.
+Strict equality currently supports vLLM with rollout tensor and data parallel
+sizes 1, after casting the reference checkpoint tensors to the loaded rollout
+tensor dtype.
+
+This check validates the checkpoint-engine weight conversion and transfer path,
+including vLLM ``load_weights`` for tensor and data parallel sizes 1. It does
+not validate rollout generation quality or backend-specific inference kernel
+behavior.
 
 Convert FSDP and Megatron Checkpoints to HuggingFace Format Model
 -----------------------------------------------------------------

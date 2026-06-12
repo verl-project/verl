@@ -316,7 +316,7 @@ class TRTLLMHttpServer:
             )
 
         app = trtllm_server.app
-        self._server_port, self._server_task = await run_uvicorn(app, None, self._server_address)
+        self._server_port, self._server_task, _ = await run_uvicorn(app, None, self._server_address)
 
     async def generate(
         self,

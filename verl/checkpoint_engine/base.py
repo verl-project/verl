@@ -338,6 +338,29 @@ class CheckpointEngineWorker(Worker):
         """Get leader rank flag from the underlying rollout server adapter."""
         return self.server_adapter.is_leader_rank
 
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    async def check_loaded_weights_equal(
+        self,
+        model_path: str | None = None,
+        trust_remote_code: bool | None = None,
+        torch_dtype: str = "bfloat16",
+        max_mismatches: int = 10,
+        timeout: float | None = None,
+    ):
+        """Check backend-loaded rollout weights against a HuggingFace checkpoint."""
+        check_fn = getattr(self.server_adapter, "check_loaded_weights_equal", None)
+        if check_fn is None:
+            raise NotImplementedError(
+                f"Rollout backend {self.rollout_config.name!r} does not support loaded-weight equality checks."
+            )
+        return await check_fn(
+            model_path=model_path or self.model_config.path,
+            trust_remote_code=self.model_config.trust_remote_code if trust_remote_code is None else trust_remote_code,
+            torch_dtype=torch_dtype,
+            max_mismatches=max_mismatches,
+            timeout=timeout,
+        )
+
 
 _worker_cls = ray.remote(CheckpointEngineWorker)
 
@@ -428,6 +451,26 @@ class CheckpointEngineManager:
         replicas_set = set(replicas)
         self.replicas = [r for r in self.replicas if r not in replicas_set]
 
+    def check_loaded_weights_equal(self, rollout: RayWorkerGroup):
+        """Check rollout backend-loaded weights when debug checking is enabled."""
+        if not self.config.check_weight_sync:
+            return None
+
+        summaries = rollout.check_loaded_weights_equal(
+            torch_dtype=self.config.check_weight_sync_dtype,
+            max_mismatches=self.config.check_weight_sync_max_mismatches,
+            timeout=self.config.check_weight_sync_timeout,
+        )
+        summaries = [summary for summary in summaries if summary is not None]
+        print(f"[CheckpointEngineManager] weight sync check passed: {summaries}")
+        return summaries
+
+    def _should_check_loaded_weights_equal(self, global_steps: int | None) -> bool:
+        """Whether this update should be compared with the source HF checkpoint."""
+        if not self.config.check_weight_sync:
+            return False
+        return self.config.check_weight_sync_only or global_steps in (None, 0)
+
     @auto_await
     async def sleep_replicas(self):
         """Sleep all rollout replicas: free weight and kv_cache device memory."""
@@ -477,6 +520,10 @@ class CheckpointEngineManager:
         # 0. update weights for sync training with colocated trainer and rollout
         if self.backend == "naive":
             ray.get(self.trainer.update_weights(global_steps=global_steps, mode=self.backend))
+            if self._should_check_loaded_weights_equal(global_steps):
+                raise NotImplementedError(
+                    "Weight sync checking is not supported for checkpoint engine backend='naive'."
+                )
             return
 
         # 1. abort and save all unfinished requests for partial rollout
@@ -507,10 +554,14 @@ class CheckpointEngineManager:
             + rollout.execute_checkpoint_engine(["finalize"] * rollout.world_size)
         )
 
-        # 7. restore kv_cache after weight sync
+        # 7. optionally validate the initial backend-loaded weights before generation resumes
+        if self._should_check_loaded_weights_equal(global_steps):
+            self.check_loaded_weights_equal(rollout)
+
+        # 8. restore kv_cache after weight sync
         await self.resume_kv_cache_replicas()
 
-        # 8. resume all unfinished requests for partial rollout
+        # 9. resume all unfinished requests for partial rollout
         await self.resume_generation_replicas()
 
 
