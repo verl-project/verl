@@ -235,15 +235,15 @@ class vLLMColocateWorkerExtension:
         """
         from transformers import AutoModelForCausalLM
 
-        from verl.checkpoint_engine.weight_sync import assert_weight_sync_equal
+        from verl.checkpoint_engine.weight_sync import (
+            assert_vllm_weight_sync_supported_parallelism,
+            assert_weight_sync_equal,
+        )
         from verl.utils.fs import copy_to_local
 
         parallel_config = self.model_runner.vllm_config.parallel_config
-        if parallel_config.tensor_parallel_size != 1:
-            raise NotImplementedError(
-                "vLLM loaded-weight equality check currently supports tensor_parallel_size=1 only. "
-                f"Got tensor_parallel_size={parallel_config.tensor_parallel_size}."
-            )
+        # vLLM collective_rpc reaches only one DP shard, so DP>1 is not covered yet.
+        assert_vllm_weight_sync_supported_parallelism(parallel_config)
 
         local_path = copy_to_local(model_path)
         dtype = getattr(torch, torch_dtype)

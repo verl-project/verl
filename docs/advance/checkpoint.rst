@@ -249,13 +249,14 @@ running rollout generation or PPO training:
 
 The check compares the initial rollout backend-loaded weights with the source
 HuggingFace checkpoint and reports missing, unexpected, and mismatched keys.
-Strict equality currently supports vLLM with rollout tensor parallel size 1,
-after casting the reference checkpoint tensors to the loaded rollout tensor
-dtype.
+Strict equality currently supports vLLM with rollout tensor and data parallel
+sizes 1, after casting the reference checkpoint tensors to the loaded rollout
+tensor dtype.
 
 This check validates the checkpoint-engine weight conversion and transfer path,
-including vLLM ``load_weights`` for tensor parallel size 1. It does not validate
-rollout generation quality or backend-specific inference kernel behavior.
+including vLLM ``load_weights`` for tensor and data parallel sizes 1. It does
+not validate rollout generation quality or backend-specific inference kernel
+behavior.
 
 Convert FSDP and Megatron Checkpoints to HuggingFace Format Model
 -----------------------------------------------------------------
