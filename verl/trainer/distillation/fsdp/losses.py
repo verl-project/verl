@@ -109,13 +109,14 @@ def compute_forward_kl_topk(
     # F.log_softmax path OOMs. See ``DistillationLossConfig.use_chunked_topk``
     # for trade-offs and benchmark numbers.
     loss_config: DistillationLossConfig = config.distillation_loss
-    if loss_config.use_chunked_topk:
+    use_chunked_topk = getattr(loss_config, "use_chunked_topk", False)
+    if use_chunked_topk:
         # log_softmax is monotonic, so topk(logits) == topk(log_softmax(logits)).
         student_topk_ids = torch.topk(student_logits, k=teacher_topk_ids.shape[-1], dim=-1).indices
         student_topk_log_probs = _chunked_topk_log_probs(
             student_logits,
             teacher_topk_ids,
-            chunk_size=loss_config.chunked_topk_chunk_size,
+            chunk_size=getattr(loss_config, "chunked_topk_chunk_size", 4096),
         )
     else:
         student_log_probs = F.log_softmax(student_logits, dim=-1)
