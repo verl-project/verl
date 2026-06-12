@@ -84,7 +84,12 @@ def _set_envs_and_config(server_args: ServerArgs):
                 "0.1.1",
                 "Please reinstall the latest version with `pip install follow https://sgl-project.github.io/get_started/install.html#for-cuda-13`",
             )
-        except AssertionError:
+        except Exception:
+            # assert_pkg_version raises a plain Exception (not AssertionError) when the
+            # package is absent (importlib.metadata.PackageNotFoundError), and only
+            # raises AssertionError when the installed version is too low. Older sglang
+            # (e.g. 0.5.9) ships `sgl_kernel`, not `sglang_kernel`, so the first check
+            # raises a bare Exception; catch it and fall back to the legacy name.
             assert_pkg_version(
                 "sgl_kernel",
                 "0.1.1",
