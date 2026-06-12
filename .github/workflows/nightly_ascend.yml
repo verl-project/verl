@@ -342,3 +342,45 @@ jobs:
         run: |
           ray stop --force
           bash tests/special_npu/nightly_ci_ascend/run_grpo_qwen3_30b_megatron_sglang_npu.sh
+  
+  # Test grpo qwen3_5_2b fsdp2 vllm
+  nightlyCI_grpo_qwen3_5_2b_fsdp2_vllm_ascend:
+    if: github.repository_owner == 'verl-project'
+    runs-on: linux-aarch64-a3-16
+    timeout-minutes: 180 # Increase this timeout value as needed
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-8.5.2-a3-ubuntu22.04-py3.11-qwen3-5
+      options: >-
+        --shm-size 16g
+    env:
+      HF_ENDPOINT: "https://hf-mirror.com"
+      HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+    steps:
+      - name: Check npu and CANN info
+        run: |
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+          npu-smi info
+      - name: Check initial pip list from image
+        run: |
+          pip list
+      - name: Checkout verl-project/verl repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          clean: true
+      - name: Install the current repository
+        run: |
+          pip install --no-deps -e .
+      - name: Check final pip list
+        run: |
+          pip list
+      - name: Prepare weights
+        run: |
+          ln -s /root/.cache/models ~/models
+      - name: Preprocess geo3k dataset
+        run: |
+          python examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/.cache/datasets/hiyouga/geometry3k
+      - name: Running nightlyCI_grpo_qwen3_5_2b_fsdp2_vllm_ascend
+        run: |
+          ray stop --force
+          bash tests/special_npu/nightly_ci_ascend/run_grpo_qwen3_5_2b_fsdp2_npu.sh

@@ -12,8 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import signal
 from collections import defaultdict
-from typing import Any
+from contextlib import contextmanager
+from typing import Any, Optional
 
 import torch
 
@@ -23,11 +25,49 @@ from verl.workers.reward_manager import register
 from verl.workers.reward_manager.abstract import AbstractRewardManager
 
 
+@contextmanager
+def _score_timeout(seconds: Optional[float]):
+    """Raise ``TimeoutError`` if the wrapped block runs longer than ``seconds``.
+
+    A single ``compute_score`` call on a pathological model output (e.g. a long,
+    degenerate RL rollout that triggers catastrophic regex backtracking or a slow
+    symbolic comparison) can run for a very long time. Because ``NaiveRewardManager``
+    scores samples serially in the driver process, one such call blocks the entire
+    training loop. This guard bounds the wall-clock time of each call.
+
+    Implemented with ``SIGALRM``, so it only takes effect on the main thread. If a
+    handler cannot be installed (e.g. called from a non-main thread), it degrades to
+    a no-op so reward computation still runs -- just without the timeout.
+    """
+    if not seconds or seconds <= 0:
+        yield
+        return
+
+    def _handler(signum, frame):
+        raise TimeoutError(f"compute_score timed out after {seconds}s")
+
+    try:
+        old_handler = signal.signal(signal.SIGALRM, _handler)
+    except ValueError:
+        # Not in the main thread -> SIGALRM is unavailable; run without a timeout.
+        yield
+        return
+
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old_handler)
+
+
 @register("naive")
 class NaiveRewardManager(AbstractRewardManager):
     """The reward manager."""
 
-    def __init__(self, tokenizer, num_examine, compute_score=None, reward_fn_key="data_source") -> None:
+    def __init__(
+        self, tokenizer, num_examine, compute_score=None, reward_fn_key="data_source", compute_score_timeout=None
+    ) -> None:
         """
         Initialize the NaiveRewardManager instance.
 
@@ -37,11 +77,15 @@ class NaiveRewardManager(AbstractRewardManager):
             compute_score: A function to compute the reward score. If None, `default_compute_score` will be used.
             reward_fn_key: The key used to access the data source in the non-tensor batch data. Defaults to
                 "data_source".
+            compute_score_timeout: Optional per-sample timeout (in seconds) for `compute_score`. If set, a single
+                scoring call that exceeds this limit is aborted, assigned a reward of 0.0, and training continues,
+                instead of blocking the whole loop. Defaults to None (no timeout, unchanged behavior).
         """
         self.tokenizer = tokenizer  # Store the tokenizer for decoding token IDs
         self.num_examine = num_examine  # the number of batches of decoded responses to print to the console
         self.compute_score = compute_score or default_compute_score
         self.reward_fn_key = reward_fn_key  # Store the key for accessing the data source
+        self.compute_score_timeout = compute_score_timeout  # per-sample timeout (seconds) for compute_score
 
     def __call__(self, data: DataProto, return_dict: bool = False) -> torch.Tensor | dict[str, Any]:
         """We will expand this function gradually based on the available datasets"""
@@ -82,12 +126,21 @@ class NaiveRewardManager(AbstractRewardManager):
             extra_info["num_turns"] = num_turns
             extra_info["rollout_reward_scores"] = rollout_reward_scores
 
-            score = self.compute_score(
-                data_source=data_source,
-                solution_str=response_str,
-                ground_truth=ground_truth,
-                extra_info=extra_info,
-            )
+            try:
+                with _score_timeout(self.compute_score_timeout):
+                    score = self.compute_score(
+                        data_source=data_source,
+                        solution_str=response_str,
+                        ground_truth=ground_truth,
+                        extra_info=extra_info,
+                    )
+            except TimeoutError:
+                print(
+                    f"[NaiveRewardManager] compute_score exceeded "
+                    f"{self.compute_score_timeout}s for data_source={data_source}; "
+                    f"assigning reward 0.0 and continuing."
+                )
+                score = 0.0
 
             if isinstance(score, dict):
                 reward = score["score"]

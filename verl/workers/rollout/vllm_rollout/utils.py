@@ -305,7 +305,9 @@ class vLLMColocateWorkerExtension:
 
     def _update_weights(self, weights: list[tuple[str, torch.Tensor]], peft_config: dict, base_sync_done: bool):
         if peft_config and base_sync_done:
-            weights = dict(weights)
+            # Clone out of the receiver's reused IPC bucket buffer: add_lora keeps these tensors
+            # past this callback, so views into the freed/overwritten buffer crash later (#6454).
+            weights = {name: tensor.clone() for name, tensor in weights}
             lora_request = TensorLoRARequest(
                 lora_name=VLLM_LORA_NAME,
                 lora_int_id=VLLM_LORA_INT_ID,
