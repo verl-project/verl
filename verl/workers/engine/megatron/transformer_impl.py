@@ -241,8 +241,7 @@ class MegatronEngine(BaseEngine):
                 provider.bf16 = self.param_dtype == torch.bfloat16
                 for name, value in provider_overrides.items():
                     setattr(provider, name, value)
-                if hasattr(provider, "finalize"):
-                    provider.finalize()
+                provider.finalize()
             self.provider = provider
             tf_config = None  # Will be set after model creation
         self.bridge = bridge
