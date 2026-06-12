@@ -272,7 +272,13 @@ cleanup_ray() {
   srun --overlap "${SRUN_ENV[@]}" --nodes="${NNODES}" --ntasks="${NNODES}" \
     bash -lc "cd '${WORKING_DIR}' && ray stop --force"
 }
-trap cleanup_ray EXIT
+
+cleanup_all() {
+  local exit_code=$?
+  cleanup_ray
+  exit "${exit_code}"
+}
+trap cleanup_all EXIT
 
 wait_for_ray_cluster() {
   local attempt
@@ -295,7 +301,7 @@ raise SystemExit(0 if alive >= expected else 1)'"'"''; then
 
 release_deps_lock() {
   rmdir "${DEPS_LOCK}" 2>/dev/null || true
-  trap cleanup_ray EXIT
+  trap cleanup_all EXIT
 }
 
 prepare_shared_python_deps() {
@@ -351,8 +357,15 @@ fi
 export HOME
 export HF_HOME
 export HF_HUB_CACHE="${HF_HUB_CACHE_DIR}"
-export HF_HUB_OFFLINE="1"
-export TRANSFORMERS_OFFLINE="1"
+if is_truthy "${HF_ONLINE:-}"; then
+  export HF_HUB_OFFLINE="0"
+  export TRANSFORMERS_OFFLINE="0"
+  export HF_DATASETS_OFFLINE="0"
+else
+  export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
+  export TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-1}"
+  export HF_DATASETS_OFFLINE="${HF_DATASETS_OFFLINE:-1}"
+fi
 export NLTK_DATA="${NLTK_DATA_DIR}"
 export PYTHONPATH="${PY_DEPS_DIR}:${WORKING_DIR}:${PYTHONPATH:-}"
 export MATH_VERIFY_PYTHONPATH="${PY_DEPS_DIR}"

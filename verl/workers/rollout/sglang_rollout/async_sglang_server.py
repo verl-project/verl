@@ -807,6 +807,8 @@ class SGLangReplica(RolloutReplica):
                 ),
                 runtime_env={"env_vars": {f"RAY_EXPERIMENTAL_NOSET_{visible_devices_keyword}": "1"}},
                 name=name,
+                max_restarts=3,
+                max_task_retries=3,
                 max_concurrency=self.max_concurrency,
             ).remote(
                 config=self.config,
