@@ -31,6 +31,11 @@ ARG PIP_NO_CACHE_DIR=1
 
 RUN pip install pybind11 nvidia-mathdx
 
+# Override NCCL to >= 2.29.7 for ncclCommSuspend / ncclCommResume
+# (RFC: https://github.com/verl-project/verl/issues/6266).
+# TODO(xiefan46): remove once torch pin bumps to >= 2.12.0.
+RUN pip install --no-deps --upgrade "nvidia-nccl-cu13>=2.29.7,<3.0"
+
 RUN MAX_JOBS=128 pip install -v --disable-pip-version-check --no-build-isolation --config-settings "--build-option=--cpp_ext" --config-settings "--build-option=--cuda_ext" git+https://github.com/NVIDIA/apex.git
 
 RUN export NVTE_FRAMEWORK=pytorch && MAX_JOBS=128 NVTE_BUILD_THREADS_PER_JOB=4 pip3 install --resume-retries 999 --no-build-isolation git+https://github.com/NVIDIA/TransformerEngine.git@${TRANSFORMER_ENGINE_VERSION}
