@@ -17,6 +17,10 @@ from typing import Any
 from math_verify.grader import verify
 from math_verify.parser import StringExtractionConfig, parse
 
+from .logging_utils import get_reward_logger, log_reward_error
+
+logger = get_reward_logger(__name__)
+
 CHOICE_LETTERS = tuple("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
 CHOICE_EXTRACTION_TARGETS = (StringExtractionConfig(strings=CHOICE_LETTERS),)
 
@@ -28,7 +32,11 @@ def _as_text(value: Any) -> str:
 
 
 def compute_score(
-    solution_str: str, ground_truth: Any, format_score: float = 0.0, score: float = 1.0
+    solution_str: str,
+    ground_truth: Any,
+    format_score: float = 0.0,
+    score: float = 1.0,
+    data_source: str | None = None,
 ) -> float:
     try:
         # NOTE: math_verify.parse/verify default to signal-based timeouts (signal.alarm),
@@ -40,8 +48,14 @@ def compute_score(
         extracted_pred = parse(
             _as_text(solution_str), CHOICE_EXTRACTION_TARGETS, parsing_timeout=None
         )
-    except Exception as e:
-        print(f"Error in multiple_choice string extraction: {e}")
+    except Exception as exc:
+        log_reward_error(
+            logger,
+            "multiple_choice",
+            "string extraction failed",
+            data_source=data_source,
+            exc=exc,
+        )
         return format_score
 
     if not extracted_gold or not extracted_pred:

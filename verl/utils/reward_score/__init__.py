@@ -80,7 +80,7 @@ def default_compute_score(
 
         from . import math_verify
 
-        res = math_verify.compute_score(solution_str, ground_truth)
+        res = math_verify.compute_score(solution_str, ground_truth, data_source=data_source)
     elif data_source in [
         "mmlu",
         "gpqa_diamond",
@@ -91,7 +91,7 @@ def default_compute_score(
     ]:
         from . import multiple_choice
 
-        res = multiple_choice.compute_score(solution_str, ground_truth)
+        res = multiple_choice.compute_score(solution_str, ground_truth, data_source=data_source)
     elif data_source in [
         "allenai/IF_multi_constraints_upto5",
         "swiss-ai/if-rl-singleturn-prompts",
@@ -102,7 +102,7 @@ def default_compute_score(
         from . import instruction_following
 
         res = instruction_following.compute_score(
-            solution_str, ground_truth, extra_info=extra_info
+            solution_str, ground_truth, extra_info=extra_info, data_source=data_source
         )
     elif data_source in [
         "humaneval",
@@ -110,7 +110,7 @@ def default_compute_score(
     ]:
         from . import prime_code
 
-        res = prime_code.compute_score(solution_str, ground_truth, continuous=True)
+        res = prime_code.compute_score(solution_str, ground_truth, continuous=True, data_source=data_source)
     elif data_source in [
         "taco",
         "likaixin/TACO-verified",
@@ -139,7 +139,7 @@ def default_compute_score(
 
             test_cases = _code_test_cases_for_prime_code(ground_truth, extra_info)
             res = prime_code.compute_score(
-                solution_str, test_cases, continuous=continuous
+                solution_str, test_cases, continuous=continuous, data_source=data_source
             )
     elif data_source == "rgym":
         from . import rgym

@@ -6,7 +6,10 @@ Credits: https://github.com/swiss-ai/vrl/tree/vlmsareblind
 import json
 from typing import Any
 
+from ..logging_utils import get_reward_logger, log_reward_warning
 from .scorer import score
+
+logger = get_reward_logger(__name__)
 
 
 def _parse_ground_truth(ground_truth: Any) -> dict[str, Any] | None:
@@ -45,17 +48,21 @@ def compute_score(
     """
     task_name = _task_name_from_inputs(data_source, extra_info)
     if task_name is None:
-        print(
-            "Warning: BlindTasks reward requires extra_info['task_name']; "
-            "returning 0 reward."
+        log_reward_warning(
+            logger,
+            "blindtasks",
+            "missing task_name; returning 0 reward",
+            data_source=data_source,
         )
         return 0.0
 
     gt = _parse_ground_truth(ground_truth)
     if gt is None:
-        print(
-            "Warning: BlindTasks ground_truth is not a JSON object; "
-            "returning 0 reward."
+        log_reward_warning(
+            logger,
+            "blindtasks",
+            f"ground_truth is not a JSON object; task_name={task_name}; returning 0 reward",
+            data_source=data_source,
         )
         return 0.0
 
@@ -72,8 +79,11 @@ def compute_score(
             )
         )
     except (KeyError, TypeError, ValueError) as exc:
-        print(
-            f"Warning: BlindTasks scoring failed for data_source={data_source!r}, "
-            f"task_name={task_name!r}; returning 0 reward. Error: {exc}"
+        log_reward_warning(
+            logger,
+            "blindtasks",
+            f"scoring failed; task_name={task_name}; returning 0 reward",
+            data_source=data_source,
+            exc=exc,
         )
         return 0.0

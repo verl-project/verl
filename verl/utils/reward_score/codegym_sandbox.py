@@ -10,7 +10,6 @@ https://github.com/bytedance/SandboxFusion
 from __future__ import annotations
 
 import json
-import logging
 import math
 import os
 import re
@@ -18,7 +17,9 @@ from typing import Any
 
 import requests
 
-logger = logging.getLogger(__name__)
+from .logging_utils import get_reward_logger, log_reward_error
+
+logger = get_reward_logger(__name__)
 
 DEFAULT_TIMEOUT = float(os.environ.get("DEFAULT_TIMEOUT", "10"))
 DEFAULT_MEMORY_LIMIT_MB = int(os.environ.get("DEFAULT_MEMORY_LIMIT_MB", "1024"))
@@ -162,6 +163,7 @@ def request_unit_tests(
     scheduler_url: str,
     payload: dict[str, Any],
     concurrent_semaphore: Any = None,
+    data_source: str | None = None,
 ) -> dict[str, Any]:
     url = f"{scheduler_url.rstrip('/')}/evaluate_test_cases"
     try:
@@ -176,7 +178,13 @@ def request_unit_tests(
         result = response.json()
         return result if isinstance(result, dict) else {}
     except Exception as exc:
-        logger.error("code-gym scheduler request failed: %s", exc)
+        log_reward_error(
+            logger,
+            "codegym_sandbox",
+            f"scheduler request failed; scheduler_url={scheduler_url}; returning 0 reward",
+            data_source=data_source,
+            exc=exc,
+        )
         return {}
 
 
@@ -209,5 +217,5 @@ def compute_score(
         memory_limit_mb=memory_limit_mb,
         timeout=timeout,
     )
-    result = request_unit_tests(url, payload, concurrent_semaphore)
+    result = request_unit_tests(url, payload, concurrent_semaphore, data_source=data_source)
     return _score_from_result(result, continuous=continuous)

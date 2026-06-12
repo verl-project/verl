@@ -23,9 +23,11 @@ from collections.abc import Sequence
 
 import langdetect
 from langdetect import detector_factory
-from absl import logging
 
+from ..logging_utils import get_reward_logger, log_reward_error
 from . import instructions_util
+
+logger = get_reward_logger(__name__)
 
 _InstructionArgsDtype = dict[str, int | str | Sequence[str]] | None
 
@@ -188,7 +190,12 @@ class ResponseLanguageChecker(Instruction):
             return langdetect.detect(value) == self._language
         except langdetect.LangDetectException as e:
             # Count as instruction is followed.
-            logging.error("Unable to detect language for text %s due to %s", value, e)  # refex: disable=pytotw.037
+            log_reward_error(
+                logger,
+                "instruction_following",
+                f"language detection failed; constraint={self.id}; returning constraint as followed",
+                exc=e,
+            )
             return True
 
 
@@ -1365,7 +1372,12 @@ class CapitalLettersEnglishChecker(Instruction):
             return value.isupper() and langdetect.detect(value) == "en"
         except langdetect.LangDetectException as e:
             # Count as instruction is followed.
-            logging.error("Unable to detect language for text %s due to %s", value, e)  # refex: disable=pytotw.037
+            log_reward_error(
+                logger,
+                "instruction_following",
+                f"language detection failed; constraint={self.id}; returning constraint as followed",
+                exc=e,
+            )
             return True
 
 
@@ -1394,7 +1406,12 @@ class LowercaseLettersEnglishChecker(Instruction):
             return value.islower() and langdetect.detect(value) == "en"
         except langdetect.LangDetectException as e:
             # Count as instruction is followed.
-            logging.error("Unable to detect language for text %s due to %s", value, e)  # refex: disable=pytotw.037
+            log_reward_error(
+                logger,
+                "instruction_following",
+                f"language detection failed; constraint={self.id}; returning constraint as followed",
+                exc=e,
+            )
             return True
 
 

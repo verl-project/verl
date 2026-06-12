@@ -9,6 +9,10 @@ from typing import Any
 from reasoning_gym import get_score_answer_fn
 from reasoning_gym.utils import extract_answer
 
+from .logging_utils import get_reward_logger, log_reward_warning
+
+logger = get_reward_logger(__name__)
+
 
 def compute_score(
     data_source: str,
@@ -25,9 +29,12 @@ def compute_score(
     try:
         score_fn = get_score_answer_fn(source_dataset)
     except Exception as exc:
-        print(
-            f"Warning: Reasoning Gym dataset {source_dataset!r} is not registered; "
-            f"returning 0 reward. Error: {exc}"
+        log_reward_warning(
+            logger,
+            "rgym",
+            f"Reasoning Gym dataset is not registered; source_dataset={source_dataset}; returning 0 reward",
+            data_source=data_source,
+            exc=exc,
         )
         return 0.0
     dataset = getattr(score_fn, "__self__", None)

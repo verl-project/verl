@@ -17,10 +17,12 @@
 import multiprocessing
 import os
 import sys
-import traceback
 from typing import Optional
 
+from ..logging_utils import get_reward_logger, log_reward_error, log_reward_warning
 from .testing_util import run_test
+
+logger = get_reward_logger(__name__)
 
 
 def _temp_run(sample, generation, debug, result_conn, timeout):
@@ -30,15 +32,19 @@ def _temp_run(sample, generation, debug, result_conn, timeout):
         try:
             res, metadata = run_test(in_outs=sample, test=generation, debug=debug, timeout=timeout)
             result_conn.send((res, metadata))
-        except Exception:
-            # print(e) # some tracebacks are extremely long.
-            traceback.print_exc(10)
+        except Exception as exc:
+            log_reward_error(
+                logger,
+                "prime_code",
+                "subprocess correctness check failed",
+                exc=exc,
+            )
             result_conn.send(([-1 for i in range(len(sample["inputs"]))], {}))
         finally:
             result_conn.close()
 
 
-def check_correctness(in_outs: Optional[dict], generation, timeout=10, debug=True):
+def check_correctness(in_outs: Optional[dict], generation, timeout=10, debug=True, data_source=None):
     """Check correctness of code generation with a global timeout.
     The global timeout is to catch some extreme/rare cases not handled by the timeouts
     inside `run_test`"""
@@ -54,7 +60,12 @@ def check_correctness(in_outs: Optional[dict], generation, timeout=10, debug=Tru
     if not result_conn.poll():
         # consider that all tests failed
         if debug:
-            print("global timeout")
+            log_reward_warning(
+                logger,
+                "prime_code",
+                f"global timeout; timeout={timeout}; marking tests failed",
+                data_source=data_source,
+            )
         return [-1 for i in range(len(in_outs["inputs"]))], []
     result, metadata = result_conn.recv()
     return result, [metadata]

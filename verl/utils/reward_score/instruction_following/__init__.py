@@ -91,6 +91,7 @@ def compute_score(
     solution_str: str,
     ground_truth: Any,
     extra_info: dict[str, Any] | None = None,
+    data_source: str | None = None,
     **kwargs,
 ) -> float:
     constraint_dict = _constraint_from_inputs(ground_truth, extra_info)

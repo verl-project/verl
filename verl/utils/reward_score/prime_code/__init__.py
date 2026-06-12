@@ -16,20 +16,30 @@ import json
 import multiprocessing
 import traceback
 
+from ..logging_utils import get_reward_logger, log_reward_error, log_reward_warning
 from .testing_util import reliability_guard
 from .utils import check_correctness as apps_check_correctness
 
+logger = get_reward_logger(__name__)
+
 MAX_MEMORY_BYTES = 1024 * 1024 * 1024  # 1 GB
 
-def compute_score(completion, test_cases, continuous=False):
+
+def compute_score(completion, test_cases, continuous=False, data_source=None):
     # try to get code solution from completion. if the completion is pure code, this will not take effect.
     solution = extract_python_solution(completion)
     try:
         try:
             if not isinstance(test_cases, dict):
                 test_cases = json.loads(test_cases)
-        except Exception as e:
-            print(f"Error:{e}")
+        except Exception as exc:
+            log_reward_warning(
+                logger,
+                "prime_code",
+                "test case JSON parsing failed; continuing with original test cases",
+                data_source=data_source,
+                exc=exc,
+            )
 
         if is_humaneval_test_cases(test_cases):
             success, metadata = compute_humaneval_score(solution, test_cases)
@@ -37,7 +47,13 @@ def compute_score(completion, test_cases, continuous=False):
 
         # Complete check on all in-out pairs first. If there is no failure, per-sample test can be skipped.
         try:
-            res, metadata = apps_check_correctness(in_outs=test_cases, generation=solution, timeout=5, debug=False)
+            res, metadata = apps_check_correctness(
+                in_outs=test_cases,
+                generation=solution,
+                timeout=5,
+                debug=False,
+                data_source=data_source,
+            )
             metadata = dict(enumerate(metadata))[0]
             success = all(map(lambda x: x is True, res))
             if success:
@@ -57,7 +73,13 @@ def compute_score(completion, test_cases, continuous=False):
             metadata_list = []
             res_list = []
             for test_case_id, test_case in enumerate(test_cases_list):
-                res, metadata = apps_check_correctness(in_outs=test_case, generation=solution, timeout=10, debug=False)
+                res, metadata = apps_check_correctness(
+                    in_outs=test_case,
+                    generation=solution,
+                    timeout=10,
+                    debug=False,
+                    data_source=data_source,
+                )
                 try:
                     metadata = dict(enumerate(metadata))[0]  # metadata can be empty occasionally
                 except Exception:
@@ -74,7 +96,6 @@ def compute_score(completion, test_cases, continuous=False):
             res_count = len(res_list) if len(res_list) > 0 else 1
             success = sum(map(lambda x: x is True, res_list)) / res_count
     except Exception:
-        traceback.print_exc(10)
         success = False
         metadata_list = None
     return success, metadata_list

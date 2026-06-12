@@ -1,16 +1,3 @@
-# Copyright 2026 The VERL Team and individual contributors.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 """Rule-based reward function for Table-GPT rows."""
 
 from __future__ import annotations
@@ -20,6 +7,10 @@ import re
 from typing import Any
 
 from sklearn.metrics import f1_score
+
+from .logging_utils import get_reward_logger, log_reward_warning
+
+logger = get_reward_logger(__name__)
 
 JSON_PARSING_ERROR = "JSONParsingError"
 
@@ -70,7 +61,12 @@ def compute_score(
     answer_key = ANSWER_KEYS.get(task)
     eval_fn = _get_evaluate_fn(task)
     if answer_key is None or eval_fn is None:
-        print(f"Warning: Table-GPT task {task!r} is not supported; returning 0 reward.")
+        log_reward_warning(
+            logger,
+            "table_gpt",
+            f"unsupported task; task={task}; returning 0 reward",
+            data_source=data_source,
+        )
         return 0.0
 
     y_true = [extract_json_answer(ground_truth, answer_key)]
@@ -78,9 +74,12 @@ def compute_score(
     try:
         return float(eval_fn(y_true, y_pred))
     except Exception as exc:
-        print(
-            f"Warning: Table-GPT scoring failed for task {task!r}; "
-            f"returning 0 reward. Error: {exc}"
+        log_reward_warning(
+            logger,
+            "table_gpt",
+            f"scoring failed; task={task}; returning 0 reward",
+            data_source=data_source,
+            exc=exc,
         )
         return 0.0
 

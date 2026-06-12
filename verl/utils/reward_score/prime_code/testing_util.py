@@ -34,6 +34,10 @@ from unittest.mock import mock_open, patch
 
 import numpy as np
 
+from ..logging_utils import get_reward_logger, log_reward_error
+
+logger = get_reward_logger(__name__)
+
 MAX_MEMORY_BYTES = 1024 * 1024 * 1024  # 1 GB
 
 
@@ -213,7 +217,12 @@ def run_test(in_outs, test=None, debug=False, timeout=15):
             signal.alarm(0)
             error_traceback = traceback.format_exc()
             error_info = sys.exc_info()
-            print(f"unable to get function error = {error_info}")
+            log_reward_error(
+                logger,
+                "prime_code",
+                "unable to get solution function",
+                exc=error_info[1],
+            )
             results.append(-2)
             return results, {
                 "error": repr(error_info),
@@ -332,7 +341,12 @@ def run_test(in_outs, test=None, debug=False, timeout=15):
                         # runtime error or took too long
                         signal.alarm(0)
                         error_traceback = traceback.format_exc()
-                        print(f"Call-based runtime error or time limit exceeded error = {repr(e)}{e}")
+                        log_reward_error(
+                            logger,
+                            "prime_code",
+                            "Call-based runtime error or limit exceeded",
+                            exc=e,
+                        )
                         results.append(-1)
                         return results, {
                             "error": repr(e),

@@ -19,6 +19,10 @@ import threading
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 
+from .logging_utils import get_reward_logger, log_reward_error
+
+logger = get_reward_logger(__name__)
+
 _pool = None
 _pool_lock = threading.Lock()
 
@@ -76,6 +80,7 @@ def compute_score(
     ground_truth: str,
     timeout_score: float = 0,
     timeout: float = 30.0,
+    data_source: str | None = None,
 ) -> float:
     ret_score = 0.0
     ground_truth_boxed = "\\boxed{" + ground_truth + "}"
@@ -86,6 +91,12 @@ def compute_score(
         ret_score = future.result(timeout=timeout)
     except FuturesTimeoutError:
         ret_score = timeout_score
-    except Exception as e:
-        print(f"Error in math_verify compute_score: {e}")
+    except Exception as exc:
+        log_reward_error(
+            logger,
+            "math_verify",
+            "returning 0 reward",
+            data_source=data_source,
+            exc=exc,
+        )
     return ret_score
