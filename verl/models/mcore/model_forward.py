@@ -36,6 +36,16 @@ from .util import (
 
 
 def model_forward_gen(vision_model: bool = False):
+    """Build a forward function for a (optionally vision) GPT model.
+
+    Args:
+        vision_model: Whether the target model is a vision-language model.
+
+    Returns:
+        A forward callable that runs the model with sequence packing.
+
+    """
+
     def model_forward(
         model,
         input_ids,
@@ -187,6 +197,7 @@ def _convert_to_nested_tensor(v, input_ids_lengths):
 
     Returns:
         Converted NestedTensor
+
     """
     if isinstance(v, NestedTensor):
         return v

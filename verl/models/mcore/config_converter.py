@@ -45,6 +45,7 @@ def _get_base_transformer_config(
 
     Returns:
         TransformerConfig with common parameters
+
     """
 
     # Common parallel state parameters
@@ -113,6 +114,7 @@ def _get_mla_transformer_config(
 
     Returns:
         MLATransformerConfig with common parameters
+
     """
     base_config = _get_base_transformer_config(hf_config=hf_config, dtype=dtype, **override_transformer_config_kwargs)
     mla_config = {
@@ -142,9 +144,11 @@ def check_and_construct_configs(original_config: dict, cls: type[T]) -> T:
 
     Args:
         original_config (dict): The original model configuration.
+        cls (type[T]): The target dataclass type to validate against.
 
     Returns:
         dict: The updated model configuration with incompatible settings disabled.
+
     """
     removed_keys = []
     for key in original_config.keys():
@@ -167,6 +171,19 @@ def check_and_construct_configs(original_config: dict, cls: type[T]) -> T:
 def hf_to_mcore_config_dense(
     hf_config: PretrainedConfig, dtype: torch.dtype, **override_transformer_config_kwargs
 ) -> TransformerConfig:
+    """Convert a HuggingFace dense model config to a Megatron-Core TransformerConfig.
+
+    Supports dense architectures such as LlamaForCausalLM, Qwen2ForCausalLM and Qwen3.
+
+    Args:
+        hf_config: The HuggingFace model configuration.
+        dtype: The parameter dtype to use for the model.
+        **override_transformer_config_kwargs: Extra fields overriding the derived config.
+
+    Returns:
+        The corresponding Megatron-Core TransformerConfig.
+
+    """
     # for LlamaForCausalLM or Qwen2ForCausalLM
     qkv_bias = True if "Qwen2" in hf_config.architectures[0] else getattr(hf_config, "attention_bias", False)
     qk_layernorm = True if "Qwen3" in hf_config.architectures[0] else False
@@ -187,6 +204,17 @@ def hf_to_mcore_config_dense(
 def hf_to_mcore_config_qwen2moe(
     hf_config: PretrainedConfig, dtype: torch.dtype, **override_transformer_config_kwargs
 ) -> TransformerConfig:
+    """Convert a HuggingFace Qwen2 MoE config to a Megatron-Core TransformerConfig.
+
+    Args:
+        hf_config: The HuggingFace model configuration.
+        dtype: The parameter dtype to use for the model.
+        **override_transformer_config_kwargs: Extra fields overriding the derived config.
+
+    Returns:
+        The corresponding Megatron-Core TransformerConfig.
+
+    """
     args: dict = _get_base_transformer_config(
         hf_config=hf_config,
         dtype=dtype,
@@ -221,6 +249,17 @@ def hf_to_mcore_config_qwen2moe(
 def hf_to_mcore_config_mixtral(
     hf_config: PretrainedConfig, dtype: torch.dtype, **override_transformer_config_kwargs
 ) -> TransformerConfig:
+    """Convert a HuggingFace Mixtral MoE config to a Megatron-Core TransformerConfig.
+
+    Args:
+        hf_config: The HuggingFace model configuration.
+        dtype: The parameter dtype to use for the model.
+        **override_transformer_config_kwargs: Extra fields overriding the derived config.
+
+    Returns:
+        The corresponding Megatron-Core TransformerConfig.
+
+    """
     args: dict = _get_base_transformer_config(
         hf_config=hf_config,
         dtype=dtype,
@@ -307,6 +346,17 @@ def hf_to_mcore_config_qwen3moe(
 def hf_to_mcore_config_dpskv3(
     hf_config: PretrainedConfig, dtype: torch.dtype, **override_transformer_config_kwargs
 ) -> MLATransformerConfig:
+    """Convert a HuggingFace DeepSeek-V3 config to a Megatron-Core MLATransformerConfig.
+
+    Args:
+        hf_config: The HuggingFace model configuration.
+        dtype: The parameter dtype to use for the model.
+        **override_transformer_config_kwargs: Extra fields overriding the derived config.
+
+    Returns:
+        The corresponding Megatron-Core MLATransformerConfig.
+
+    """
     # DeepseekV3ForCausalLM
     from megatron.core.config import set_experimental_flag
     from megatron.core.transformer.enums import AttnBackend
@@ -391,6 +441,17 @@ def hf_to_mcore_config_dpskv3(
 def hf_to_mcore_config_qwen2_5_vl(
     hf_config: PretrainedConfig, dtype: torch.dtype, **override_transformer_config_kwargs
 ) -> TransformerConfig:
+    """Convert a HuggingFace Qwen2.5-VL config to a Megatron-Core TransformerConfig.
+
+    Args:
+        hf_config: The HuggingFace model configuration.
+        dtype: The parameter dtype to use for the model.
+        **override_transformer_config_kwargs: Extra fields overriding the derived config.
+
+    Returns:
+        The corresponding Megatron-Core TransformerConfig.
+
+    """
     # Qwen2_5_VLForConditionalGeneration
 
     args = _get_base_transformer_config(
@@ -410,11 +471,31 @@ def hf_to_mcore_config_qwen2_5_vl(
 def hf_to_mcore_config_llama4(
     hf_config: PretrainedConfig, dtype: torch.dtype, **override_transformer_config_kwargs
 ) -> TransformerConfig:
+    """Convert a HuggingFace Llama4 config to a Megatron-Core TransformerConfig.
+
+    Args:
+        hf_config: The HuggingFace model configuration.
+        dtype: The parameter dtype to use for the model.
+        **override_transformer_config_kwargs: Extra fields overriding the derived config.
+
+    Returns:
+        The corresponding Megatron-Core TransformerConfig.
+
+    """
     # Llama4ForConditionalGeneration
     raise NotImplementedError("Llama4ForConditionalGeneration is not supported yet")
 
 
 def mapping_string_to_attn_backend(args: dict) -> dict:
+    """Map a string ``attention_backend`` value in ``args`` to the AttnBackend enum.
+
+    Args:
+        args: A config kwargs dict that may contain a string ``attention_backend``.
+
+    Returns:
+        The same dict with ``attention_backend`` converted to an AttnBackend enum.
+
+    """
     if "attention_backend" in args and isinstance(args["attention_backend"], str):
         from megatron.core.transformer.enums import AttnBackend
 

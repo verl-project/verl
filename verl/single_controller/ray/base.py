@@ -283,6 +283,7 @@ def split_resource_pool(
 
     Returns:
         list[SubRayResourcePool]: A list of SubRayResourcePool after splitting.
+
     """
     # convert split_size to list[int]
     if isinstance(split_size, int):
@@ -355,6 +356,7 @@ class RayClassWithInitArgs(ClassWithInitArgs):
 
         Args:
             additional_resource: Dictionary specifying additional resource requirements
+
         """
         self._additional_resource = additional_resource
 
@@ -363,6 +365,7 @@ class RayClassWithInitArgs(ClassWithInitArgs):
 
         Args:
             options: Dictionary of options to update
+
         """
         self._options.update(options)
 
@@ -387,6 +390,7 @@ class RayClassWithInitArgs(ClassWithInitArgs):
 
         Returns:
             A Ray actor handle with the configured options
+
         """
         if sharing_with is not None:
             target_node_id = ray.get(sharing_with.get_node_id.remote())
@@ -444,8 +448,10 @@ class RayWorkerGroup(WorkerGroup):
             name_prefix: Prefix for worker names
             detached: Whether workers should be detached
             worker_names: Names of existing workers to attach to
+            worker_handles: Handles of existing Ray actors to attach to
             ray_wait_register_center_timeout: Timeout for waiting on register center
             **kwargs: Additional keyword arguments
+
         """
         self._master_addr = kwargs.pop("master_addr", None)
         self._master_port = kwargs.pop("master_port", None)
@@ -504,6 +510,7 @@ class RayWorkerGroup(WorkerGroup):
 
         Returns:
             bool: True if the worker is alive, False otherwise
+
         """
         worker_state_dict = get_actor(worker._actor_id.hex())
         return worker_state_dict.get("state", "undefined") == "ALIVE" if worker_state_dict is not None else False
@@ -550,6 +557,8 @@ class RayWorkerGroup(WorkerGroup):
             ray_cls_with_init: Class with initialization arguments for workers
             bin_pack: Whether to use strict bin packing for resource allocation
             detached: Whether workers should be detached
+            worker_env: Extra environment variables to set on each worker
+
         """
         self.resource_pool = resource_pool
         strategy = "PACK"
@@ -587,6 +596,8 @@ class RayWorkerGroup(WorkerGroup):
             ray_cls_with_init: Class with initialization arguments for workers
             bin_pack: Whether to use strict bin packing for resource allocation
             detached: Whether workers should be detached
+            worker_env: Extra environment variables to set on each worker
+
         """
         strategy = "PACK"
         if bin_pack:
@@ -700,10 +711,13 @@ class RayWorkerGroup(WorkerGroup):
         Args:
             name_prefix: Prefix for worker names
             worker_names: Names of existing workers to attach to
+            worker_handles: Handles of existing Ray actors to attach to
             ray_cls_with_init: Class with initialization arguments for workers
+            **kwargs: Additional keyword arguments forwarded to the constructor
 
         Returns:
             A new RayWorkerGroup instance
+
         """
         worker_group = cls(
             resource_pool=None,
@@ -723,6 +737,7 @@ class RayWorkerGroup(WorkerGroup):
 
         Returns:
             Dictionary of worker groups keyed by prefix
+
         """
         if self.fused_worker_used:
             return self.spawn_fused(prefix_set)
@@ -758,6 +773,7 @@ class RayWorkerGroup(WorkerGroup):
 
         Returns:
             Dictionary of worker groups keyed by prefix
+
         """
         wg_dict = dict()
         for key in prefix_set:
@@ -772,6 +788,7 @@ class RayWorkerGroup(WorkerGroup):
 
         Args:
             prefix_set: Set of prefixes to fuse into the worker group
+
         """
         if self.wg_dict is None:
             self.wg_dict = self.spawn(prefix_set)
@@ -790,6 +807,7 @@ class RayWorkerGroup(WorkerGroup):
 
         Returns:
             Remote object reference to the method execution
+
         """
         if self.fused_worker_used and method_name not in self.method_names:
             remote_call = getattr(worker, self.fused_worker_execute_fn_name)
@@ -808,6 +826,7 @@ class RayWorkerGroup(WorkerGroup):
 
         Returns:
             Result of the method execution
+
         """
         return ray.get(self.execute_rank_zero_async(method_name, *args, **kwargs))
 
@@ -821,6 +840,7 @@ class RayWorkerGroup(WorkerGroup):
 
         Returns:
             Remote object reference to the method execution
+
         """
         return self._execute_remote_single_worker(self._workers[0], method_name, *args, **kwargs)
 
@@ -834,6 +854,7 @@ class RayWorkerGroup(WorkerGroup):
 
         Returns:
             Remote object reference to the method execution
+
         """
         return self.execute_rank_zero_async(method_name, *args, **kwargs)
 
@@ -847,6 +868,7 @@ class RayWorkerGroup(WorkerGroup):
 
         Returns:
             List of remote object references to the method executions
+
         """
         return self.execute_all_async(method_name, *args, **kwargs)
 
@@ -860,6 +882,7 @@ class RayWorkerGroup(WorkerGroup):
 
         Returns:
             List of results from all workers
+
         """
         return ray.get(self.execute_all_async(method_name, *args, **kwargs))
 
@@ -873,6 +896,7 @@ class RayWorkerGroup(WorkerGroup):
 
         Returns:
             List of remote object references to the method executions
+
         """
         # Here, we assume that if all arguments in args and kwargs are lists,
         # and their lengths match len(self._workers), we'll distribute each

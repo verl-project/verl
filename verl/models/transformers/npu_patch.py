@@ -57,10 +57,12 @@ def apply_rotary_pos_emb_npu(q, k, cos, sin, position_ids=None, unsqueeze_dim=1)
 
 
 def qwen3_next_rms_norm_forward_npu(self, x):
+    """NPU optimized RMSNorm forward for Qwen3-Next style gated norms."""
     return torch_npu.npu_rms_norm(x.float(), 1.0 + self.weight.float(), epsilon=self.eps)[0].type_as(x)
 
 
 def qwen3_next_rms_norm_forward_gated_npu(self, hidden_states, gate=None):
+    """NPU optimized gated RMSNorm forward for Qwen3-Next style norms."""
     input_dtype = hidden_states.dtype
     hidden_states = hidden_states.to(torch.float32)
     hidden_states = torch_npu.npu_rms_norm(hidden_states, self.weight.float(), epsilon=self.variance_epsilon)[0]
@@ -69,6 +71,7 @@ def qwen3_next_rms_norm_forward_gated_npu(self, hidden_states, gate=None):
 
 
 def qwen3_next_apply_rotary_pos_emb_npu(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
+    """NPU optimized partial RoPE for Qwen3-Next style attention."""
     cos = cos.unsqueeze(unsqueeze_dim)
     sin = sin.unsqueeze(unsqueeze_dim)
 
@@ -91,11 +94,14 @@ class NPUGmmFunction(torch.autograd.Function):
         Grouped Matmul(GMM) for Ascend NPU.
 
         Args:
+            ctx: Autograd context for saving tensors needed in backward.
             x (torch.Tensor): Input tensor, shape (tokens_num * top_k, hidden_size)
             weight (torch.Tensor): Expert weights, shape (n_experts, hidden_size, intermediate_size)
             group_list (torch.Tensor): Expert token counts, shape (n_experts,)
                 - type 0: cumsum of tokens per expert
                 - type 1: direct tokens per expert (default)
+            group_list_type (int): Format of group_list (0=cumsum, 1=direct counts).
+
         """
         ctx.save_for_backward(x, weight)
         ctx.group_list = group_list
@@ -109,6 +115,7 @@ class NPUGmmFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
+        """Compute input and weight gradients for the grouped matmul."""
         x, weight = ctx.saved_tensors
         group_list = ctx.group_list
         group_list_type = ctx.group_list_type
@@ -142,6 +149,7 @@ def _qwen3_sparse_moe_routed_forward_npu(self, hidden_states: torch.Tensor):
 
     Returns:
         tuple: (flattened_input, routed_hidden_states, router_logits)
+
     """
     hidden_dim = hidden_states.shape[-1]
     hidden_states = hidden_states.view(-1, hidden_dim)
@@ -227,6 +235,7 @@ class NPUQwen3VLMoeTextExperts(nn.Module):
             router_indices (torch.Tensor): (batch_size * token_num, top_k)
         Returns:
             torch.Tensor
+
         """
         batch_size = hidden_states.shape[0]
         hidden_states = hidden_states.reshape(-1, self.hidden_size)  # (num_tokens, hidden_size)
@@ -273,6 +282,7 @@ class NPUQwen3VLMoeTextSparseMoeBlock(nn.Module):
         self.experts = NPUQwen3VLMoeTextExperts(config)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Route tokens to experts and compute the sparse MoE output on NPU."""
         batch_size = hidden_states.shape[0]
         hidden_states = hidden_states.reshape(-1, self.hidden_size)
         router_logits = self.gate(hidden_states)
@@ -292,6 +302,7 @@ def qwen3_5_moe_experts_forward_npu(
     top_k_index: torch.Tensor,
     top_k_weights: torch.Tensor,
 ) -> torch.Tensor:
+    """NPU optimized expert computation for Qwen3.5 MoE blocks."""
     selected_experts = top_k_index
     routing_weights = top_k_weights
     gate_up_proj = self.gate_up_proj.permute(0, 2, 1).contiguous()

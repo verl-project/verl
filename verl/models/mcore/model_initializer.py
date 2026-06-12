@@ -63,9 +63,11 @@ class BaseModelInitializer(ABC):
             post_process (bool): including an output layer.
             share_embeddings_and_output_weights (bool): input embeddings and output logit weights are shared.
             value (bool): add an extra linear layer for classification or regression.
+            **extra_kwargs: Additional keyword arguments passed to the GPTModel constructor.
 
         Returns:
             GPTModel: An initialized GPT model instance
+
         """
         vp_stage = extra_kwargs.get("vp_stage", None)
         transformer_layer_spec = self.get_transformer_layer_spec(vp_stage=vp_stage)
@@ -100,6 +102,7 @@ class DenseModel(BaseModelInitializer):
     """Initializer for dense models like Llama and Qwen2."""
 
     def get_transformer_layer_spec(self, vp_stage=None):
+        """Build the transformer decoder block spec for the dense model."""
         assert self.tfconfig.normalization == "RMSNorm", "only RMSNorm is supported for now"
         extra_kwargs = {} if not self.has_vp_stage else {"vp_stage": vp_stage}
         return get_gpt_decoder_block_spec(self.tfconfig, use_transformer_engine=True, **extra_kwargs)
@@ -109,6 +112,7 @@ class Qwen2MoEModel(BaseModelInitializer):
     """Initializer for Qwen2 MoE models."""
 
     def get_transformer_layer_spec(self, vp_stage=None):
+        """Build the transformer decoder block spec with shared-expert gating enabled."""
         assert self.tfconfig.normalization == "RMSNorm", "only RMSNorm is supported for now"
         extra_kwargs = {} if not self.has_vp_stage else {"vp_stage": vp_stage}
         transformer_layer_spec = get_gpt_decoder_block_spec(self.tfconfig, use_transformer_engine=True, **extra_kwargs)
@@ -120,6 +124,7 @@ class Qwen2MoEModel(BaseModelInitializer):
         return transformer_layer_spec
 
     def initialize(self, **kwargs):
+        """Initialize the model and optionally freeze the MoE router weights."""
         # Qwen default freeze_moe_router: true
         model = super().initialize(**kwargs)
         freeze_moe_router = kwargs.get("freeze_moe_router", True)
@@ -133,12 +138,14 @@ class MixtralModel(BaseModelInitializer):
     """Initializer for Mixtral models."""
 
     def get_transformer_layer_spec(self, vp_stage=None):
+        """Build the transformer decoder block spec for the Mixtral model."""
         assert self.tfconfig.normalization == "RMSNorm", "only RMSNorm is supported for now"
         extra_kwargs = {} if not self.has_vp_stage else {"vp_stage": vp_stage}
         transformer_layer_spec = get_gpt_decoder_block_spec(self.tfconfig, use_transformer_engine=True, **extra_kwargs)
         return transformer_layer_spec
 
     def initialize(self, **kwargs):
+        """Initialize the model and optionally freeze the MoE router weights."""
         model = super().initialize(**kwargs)
         freeze_moe_router = kwargs.get("freeze_moe_router", False)
         if freeze_moe_router:
@@ -151,12 +158,14 @@ class Qwen3MoEModel(BaseModelInitializer):
     """Initializer for Qwen3 MoE models."""
 
     def get_transformer_layer_spec(self, vp_stage=None):
+        """Build the transformer decoder block spec for the Qwen3 MoE model."""
         assert self.tfconfig.normalization == "RMSNorm", "only RMSNorm is supported for now"
         extra_kwargs = {} if not self.has_vp_stage else {"vp_stage": vp_stage}
         transformer_layer_spec = get_gpt_decoder_block_spec(self.tfconfig, use_transformer_engine=True, **extra_kwargs)
         return transformer_layer_spec
 
     def initialize(self, **kwargs):
+        """Initialize the model and optionally freeze the MoE router weights."""
         # Qwen default freeze_moe_router: true
         model = super().initialize(**kwargs)
         freeze_moe_router = kwargs.get("freeze_moe_router", True)
@@ -170,6 +179,7 @@ class DeepseekV3Model(BaseModelInitializer):
     """Initializer for DeepseekV3 models."""
 
     def get_transformer_layer_spec(self, vp_stage=None):
+        """Build the transformer decoder block spec for the DeepSeek-V3 model."""
         extra_kwargs = {} if not self.has_vp_stage else {"vp_stage": vp_stage}
         transformer_layer_spec = get_gpt_decoder_block_spec(self.tfconfig, use_transformer_engine=True, **extra_kwargs)
         return transformer_layer_spec
@@ -183,6 +193,7 @@ class DeepseekV3Model(BaseModelInitializer):
         self,
         **kwargs,
     ):
+        """Initialize the model with optional MTP blocks and frozen MoE router."""
         vp_stage = kwargs.get("vp_stage", None)
         freeze_moe_router = kwargs.get("freeze_moe_router", True)
         if freeze_moe_router:

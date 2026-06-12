@@ -30,6 +30,12 @@ AutoModelForVision2Seq = get_auto_model_for_vision2seq()
 
 
 def parse_args():
+    """Parse command line arguments for the model merger.
+
+    Returns:
+        argparse.Namespace: The parsed command line arguments.
+
+    """
     parser = argparse.ArgumentParser(description="verl model merger")
     subparsers = parser.add_subparsers(dest="operation", required=True, help="Specify 'merge' or 'test' operation.")
 
@@ -98,6 +104,7 @@ class ModelMergerConfig:
         hf_model_config_path (Optional[str]): Path to HuggingFace model configuration files. Defaults to None.
         hf_upload (bool): Whether to upload to HuggingFace (computed automatically). Not for initialization.
         use_cpu_initialization (bool): Whether to use CPU initialization for large models. Defaults to False.
+
     """
 
     operation: str  # 'merge' or 'test'
@@ -138,6 +145,15 @@ def _default_hf_model_config_path(backend: str, local_dir: str) -> str:
 
 
 def generate_config_from_args(args: argparse.Namespace) -> ModelMergerConfig:
+    """Build a ModelMergerConfig from parsed command line arguments.
+
+    Args:
+        args (argparse.Namespace): The parsed command line arguments.
+
+    Returns:
+        ModelMergerConfig: The configuration constructed from the arguments.
+
+    """
     common_config_args = {
         "operation": args.operation,
         "backend": args.backend,
@@ -192,6 +208,7 @@ class BaseModelMerger(ABC):
         config (ModelMergerConfig): The configuration object passed during initialization.
         hf_model_config_path (str): Path to the HuggingFace model configuration files.
         model_config (PretrainedConfig): Loaded HuggingFace model configuration.
+
     """
 
     def __init__(self, config: ModelMergerConfig):
@@ -202,6 +219,12 @@ class BaseModelMerger(ABC):
         )
 
     def get_transformers_auto_model_class(self):
+        """Determine the appropriate transformers auto model class for the model.
+
+        Returns:
+            type: The transformers auto model class to use for loading the model.
+
+        """
         has_remote_code = hasattr(self.model_config, "auto_map") and any(
             self.model_config.architectures[0] in val for val in self.model_config.auto_map.values()
         )
@@ -297,6 +320,7 @@ class BaseModelMerger(ABC):
 
         Note:
             This function change the 'state_dict' in place.
+
         """
         lora_params_names = [name for name in state_dict.keys() if "lora_" in name]
 
@@ -388,6 +412,12 @@ class BaseModelMerger(ABC):
         return lora_path
 
     def save_hf_model_and_tokenizer(self, state_dict: dict[str, torch.Tensor]):
+        """Save the model and tokenizer in HuggingFace format to the target directory.
+
+        Args:
+            state_dict (dict[str, torch.Tensor]): The merged model state dict to save.
+
+        """
         auto_model_class = self.get_transformers_auto_model_class()
         with init_empty_weights():
             model = auto_model_class.from_config(
@@ -417,6 +447,7 @@ class BaseModelMerger(ABC):
             tokenizer.save_pretrained(self.config.target_dir)
 
     def upload_to_huggingface(self):
+        """Upload the merged model in the target directory to the HuggingFace Hub."""
         import requests
         from huggingface_hub import HfApi
         from huggingface_hub.utils import HfHubHTTPError, RepositoryNotFoundError
@@ -455,8 +486,10 @@ class BaseModelMerger(ABC):
 
     @abstractmethod
     def merge_and_save(self):
+        """Merge the model checkpoints and save the result."""
         raise NotImplementedError("Subclasses should implement this method")
 
     @abstractmethod
     def cleanup(self):
+        """Clean up any resources held by the merger."""
         raise NotImplementedError("Subclasses should implement this method to clean up resources if needed")

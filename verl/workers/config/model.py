@@ -244,4 +244,5 @@ class HFModelConfig(BaseConfig):
                         )
 
     def get_processor(self):
+        """Return the processor if available, otherwise fall back to the tokenizer."""
         return self.processor if self.processor is not None else self.tokenizer

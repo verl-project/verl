@@ -36,6 +36,7 @@ class CheckpointConfig(BaseConfig):
         load_contents (list[str]): Contents to load from checkpoint. Defaults to same as save_contents.
         async_save (bool): Whether to save checkpoints asynchronously. Only implemented for Megatron as of now.
         strict (bool): Whether to perform strict validation during weight export
+
     """
 
     save_contents: list[str] = field(default_factory=lambda: ["model", "optimizer", "extra"])
@@ -55,6 +56,7 @@ class ProfileConfig(BaseConfig):
         step_start (int): Starting step for profiling.
         step_end (int): Ending step for profiling.
         save_path (Optional[str]): Path to save profiling results.
+
     """
 
     profile_ranks: Optional[list[int]] = None
@@ -75,6 +77,7 @@ class BaseModelConfig(BaseConfig):
         external_lib (Optional[str]): External model implementation (optional).
         trust_remote_code (bool): Whether to trust remote code from Hugging Face models.
         lora (dict[str, Any]): LoRA configuration dictionary.
+
     """
 
     path: str = "~/models/deepseek-llm-7b-chat"
@@ -94,6 +97,7 @@ class ModuleConfig(BaseConfig):
         name (str, optional): Name of the module to ``import``. Format: ``"import.path.to.module"``.
             If ``None``, the module will be loaded with a hased name and
                 will not be added to ``sys.modules``, thus can not be ``import``ed as ``name``.
+
     """
 
     path: Optional[str] = None

@@ -115,6 +115,7 @@ def pg_forward(
     calculate_entropy=False,
     entropy_fn=None,
 ):
+    """Perform a forward pass through the model using PrefixGrouper."""
     logits = model(
         input_ids=concat_input_ids,
         attention_mask=attention_mask,
@@ -170,6 +171,7 @@ def forward_micro_batch_with_prefix_grouper(
 
     Returns:
         tuple: (entropy, log_probs) where entropy may be None if not calculated.
+
     """
     import verl.utils.torch_functional as verl_F
 

@@ -29,6 +29,7 @@ def create_resource_pool_manager(config, roles: list) -> ResourcePoolManager:
 
     Returns:
         ResourcePoolManager: Resource pool manager
+
     """
     resource_pool_spec = {}
     mapping = {}
@@ -68,6 +69,7 @@ def create_role_worker_mapping(config):
 
     Returns:
         dict: Mapping from roles to worker classes
+
     """
     # Always use the unified model engine worker implementation.
     from verl.experimental.separation.engine_workers import DetachActorWorker

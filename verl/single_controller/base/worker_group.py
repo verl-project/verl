@@ -38,6 +38,7 @@ class ResourcePool:
             process_on_nodes (List[int], optional): List of process counts per node. Defaults to empty list.
             max_colocate_count (int, optional): Maximum number of processes that can be colocated. Defaults to 10.
             n_gpus_per_node (int, optional): Number of GPUs available per node. Defaults to 8.
+
         """
         if process_on_nodes is None:
             process_on_nodes = []
@@ -46,6 +47,7 @@ class ResourcePool:
         self.n_gpus_per_node = n_gpus_per_node  # this is left for future huawei GPU that contains 16 GPUs per node
 
     def add_node(self, process_count):
+        """Add a node with the given process count to the pool."""
         self._store.append(process_count)
 
     @property
@@ -54,10 +56,12 @@ class ResourcePool:
         return sum(self._store)
 
     def __call__(self) -> Any:
+        """Return the underlying list of process counts per node."""
         return self._store
 
     @property
     def store(self):
+        """The list of process counts per node."""
         return self._store
 
     def local_world_size_list(self) -> list[int]:
@@ -87,6 +91,7 @@ class ClassWithInitArgs:
             cls: The class to be instantiated later
             *args: Positional arguments for the class constructor
             **kwargs: Keyword arguments for the class constructor
+
         """
         self.cls = cls
         self.args = args
@@ -109,6 +114,7 @@ def check_workers_alive(workers: list, is_alive: Callable, gap_time: float = 1) 
             Function to check if a worker is alive
         gap_time (float):
             Time interval between checks
+
     """
     import time
 
@@ -168,6 +174,7 @@ class WorkerGroup:
 
         Args:
             every_n_seconds (int): Interval between aliveness checks
+
         """
         # before starting checking worker aliveness, make sure all workers are already alive
         self._block_until_all_workers_alive()
@@ -191,6 +198,7 @@ class WorkerGroup:
 
         Returns:
             List[str]: List of method names that were successfully bound
+
         """
         method_names = []
         for method_name in dir(user_defined_cls):

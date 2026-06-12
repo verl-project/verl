@@ -45,6 +45,7 @@ def reduce_metrics(metrics: dict[str, list[Any]]) -> dict[str, Any]:
         >>> metrics = {"loss": [1.0, 2.0, 3.0], "accuracy": [0.8, 0.9, 0.7]}
         >>> reduce_metrics(metrics)
         {"loss": 2.0, "accuracy": 0.8}
+
     """
     from verl.utils.metric import reduce_metrics
 
@@ -65,6 +66,7 @@ def _compute_response_info(batch: DataProto) -> dict[str, Any]:
             - response_mask: Attention mask for the response tokens
             - prompt_length: Tensor of prompt lengths for each item in the batch
             - response_length: Tensor of response lengths for each item in the batch
+
     """
     if "prompt_length" in batch.batch and "response_length" in batch.batch:
         return dict(
@@ -109,6 +111,7 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
             - response_length/mean, max, min, clip_ratio: Statistics about response lengths
             - prompt_length/mean, max, min, clip_ratio: Statistics about prompt lengths
             - num_turns/mean, max, min: Statistics about the number of multi-turn conversations
+
     """
     sequence_score = batch.batch["token_level_scores"].sum(-1)
     sequence_reward = batch.batch["token_level_rewards"].sum(-1)
@@ -290,6 +293,7 @@ def compute_timing_metrics(batch: DataProto, timing_raw: dict[str, float]) -> di
         - "gen" uses only response tokens
         - Other stages ("ref", "values", "adv", "update_critic", "update_actor") use all tokens
           (prompt + response)
+
     """
     response_info = _compute_response_info(batch)
     num_prompt_tokens = torch.sum(response_info["prompt_length"]).item()
@@ -333,6 +337,7 @@ def compute_throughout_metrics(batch: DataProto, timing_raw: dict[str, float], n
     Note:
         The throughput is calculated as total_tokens / (time * n_gpus) to normalize
         across different GPU counts.
+
     """
     total_num_tokens = sum(batch.meta_info["global_token_num"])
     time = timing_raw["step"]
@@ -489,6 +494,7 @@ def bootstrap_metric(
         >>> reduce_fns = [np.mean, np.max]
         >>> bootstrap_metric(data, 3, reduce_fns)
         [(3.0, 0.5), (4.5, 0.3)]  # Example values
+
     """
     np.random.seed(seed)
     data_np = np.array(data, dtype=object)
@@ -538,6 +544,7 @@ def calc_maj_val(data: list[dict[str, Any]], vote_key: str, val_key: str) -> flo
         ... ]
         >>> calc_maj_val(data, vote_key="pred", val_key="val")
         0.9  # Returns the first "val" for the majority vote "A"
+
     """
     vote2vals = defaultdict(list)
     for d in data:
@@ -594,6 +601,7 @@ def process_validation_metrics(
         >>> infos_dict = {"score": [0.8, 0.9, 0.7], "pred": ["A", "A", "B"]}
         >>> result = process_validation_metrics(data_sources, sample_uids, infos_dict)
         >>> # result will contain statistics for each data source and variable
+
     """
     # Group metrics by data source, prompt and variable
     data_src2uid2var2vals = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))

@@ -34,6 +34,7 @@ class RewardComputeWorker:
         self.compute_score_fn = compute_score_fn
 
     def compute_score(self, **kwargs) -> dict:
+        """Compute the reward score by delegating to the wrapped score function."""
         return self.compute_score_fn(**kwargs)
 
 
@@ -70,9 +71,19 @@ class RemoteRewardManager(RewardManagerBase):
         self.reward_worker_pool = itertools.cycle(self.reward_worker)
 
     def choose_reward_worker(self):
+        """Return the next reward worker from the round-robin pool."""
         return next(self.reward_worker_pool)
 
     async def run_single(self, data: DataProto) -> dict:
+        """Compute the reward for a single sample.
+
+        Args:
+            data (DataProto): A single-sample DataProto to score.
+
+        Returns:
+            dict: The computed reward result.
+
+        """
         data = data[-1:]  # for multi-sequence outputs, we only compute reward based on the last sequence
         data_item = data[0]
         response_ids = data_item.batch["responses"]

@@ -77,6 +77,7 @@ class OneStepOffRayTrainer(SeparateRayPPOTrainer):
             collate_fn: Function to collate data samples into batches.
             train_sampler (Optional[Sampler], optional): Sampler for the training dataset. Defaults to None.
             device_name (str, optional): Device name for training (e.g., "cuda", "cpu"). Defaults to None.
+
         """
 
         # Store the tokenizer for text processing
@@ -331,6 +332,8 @@ class OneStepOffRayTrainer(SeparateRayPPOTrainer):
 
         Args:
             batch_data_future: batch future
+            continuous_iterator: iterator yielding batches across epochs
+
         """
         self.metrics = {"training/global_step": self.global_steps, "training/epoch": self.epoch}
         self.timing_raw = {}

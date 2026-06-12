@@ -203,6 +203,7 @@ class AgentLoopBase(ABC):
         processor (AutoProcessor): Processor for process messages.
         dataset_cls (type[Dataset]): Dataset class for creating dataset, Defaults to RLHFDataset.
         data_config (DictConfigWrap): Dataset config.
+
     """
 
     def __init__(
@@ -248,6 +249,7 @@ class AgentLoopBase(ABC):
 
         Returns:
             dict: Multi-modal data with keys like "images", "videos" and "audios".
+
         """
         multi_modal_data = {}
         if self.processor is not None:
@@ -287,10 +289,13 @@ class AgentLoopBase(ABC):
             tools (list[dict], optional): Tools schemas. Defaults to None.
             images (list[Image.Image], optional): Input images. Defaults to None.
             videos (list[tuple[torch.Tensor, dict]], optional): Input videos. Defaults to None.
+            audios (list[Any], optional): Input audios. Defaults to None.
+            mm_processor_kwargs (dict[str, Any], optional): Extra kwargs for the multimodal processor. Defaults to None.
             remove_system_prompt (bool, optional): Whether to remove system prompt. Defaults to False.
 
         Returns:
             list[int]: Prompt token ids.
+
         """
         if self.processor is not None:
             raw_prompt = await self.loop.run_in_executor(
@@ -368,6 +373,7 @@ class AgentLoopBase(ABC):
 
         Returns:
             AgentLoopOutput: Agent loop output.
+
         """
         raise NotImplementedError
 
@@ -399,6 +405,7 @@ class AgentLoopWorker:
         llm_client (LLMServerClient): Client for the LLM server.
         teacher_client (dict[str, LLMServerClient]): Client for multiple teacher servers.
         reward_loop_worker_handles (List[ray.actor.ActorHandle]): Actor handles for streaming reward computation.
+
     """
 
     def __init__(
@@ -491,6 +498,7 @@ class AgentLoopWorker:
             For multi-turn conversations:
             responses:     |<- LLM generation ->|<- tool_calls ->|<- LLM generation ->|<- padding ->|
             response_mask: | 1, 1, 1, ..., 1, 1 | 0, 0, .., 0, 0 | 1, 1, 1, ..., 1, 1 | 0, 0, ..., 0|
+
         """
         config = self.rollout_config
         validate = batch.meta_info.get("validate", False)
@@ -1030,6 +1038,7 @@ async def get_trajectory_info(step, index, validate):
 
     Returns:
         list: trajectory.
+
     """
     trajectory_info = []
     rollout_n = 0
@@ -1050,6 +1059,7 @@ class AgentLoopManager:
         llm_client (LLMServerClient): Client for the LLM server.
         teacher_client (dict[str, LLMServerClient]): Client for multiple teacher servers.
         reward_loop_worker_handles (List[ray.actor.ActorHandle]): Actor handles for streaming reward computation.
+
     """
 
     def __init__(
@@ -1109,6 +1119,7 @@ class AgentLoopManager:
 
         Returns:
             DataProto: Output batch.
+
         """
         chunkes = prompts.chunk(len(self.agent_loop_workers))
         outputs = await asyncio.gather(

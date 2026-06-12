@@ -73,6 +73,17 @@ class OpenAIFunctionCallSchema(BaseModel):
     def from_openai_function_parsed_schema(
         parsed_schema: OpenAIFunctionParsedSchema,
     ) -> tuple["OpenAIFunctionCallSchema", bool]:
+        """Build a call schema from a parsed OpenAI function schema.
+
+        Args:
+            parsed_schema (OpenAIFunctionParsedSchema): The parsed function schema
+                whose arguments are a JSON string.
+
+        Returns:
+            tuple[OpenAIFunctionCallSchema, bool]: The constructed call schema and a
+                flag indicating whether decoding the arguments failed.
+
+        """
         has_decode_error = False
         try:
             arguments = json.loads(parsed_schema.arguments)
@@ -105,6 +116,15 @@ class ToolResponse(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def initialize_request(cls, values):
+        """Validate that image and video fields are lists before model creation.
+
+        Args:
+            values: The raw input values passed to the model.
+
+        Returns:
+            The validated input values.
+
+        """
         if "image" in values and not isinstance(values["image"], list):
             raise ValueError(
                 f"Image must be a list, but got {type(values['image'])}. Please check the tool.execute(). "
@@ -121,7 +141,9 @@ class ToolResponse(BaseModel):
         return values
 
     def is_empty(self) -> bool:
+        """Return whether the response has no text, image, or video content."""
         return not self.text and not self.image and not self.video
 
     def is_text_only(self) -> bool:
+        """Return whether the response contains only text content."""
         return self.text and not self.image and not self.video

@@ -41,6 +41,7 @@ def ckpt_get_named_tensor_buckets(
     rank_id: int,
     rollout_dtype: torch.dtype = torch.bfloat16,
 ) -> dict[str, torch.Tensor]:
+    """Yield buckets of named tensors assigned to the given rank."""
     if bucket_bytes <= 0:
         raise ValueError(f"bucket_bytes must be greater than 0, got {bucket_bytes}")
 
@@ -71,6 +72,7 @@ async def receive_tensor(
     bucket_size: int = 2 << 30,
     disable_h2d_buffer: bool = False,
 ) -> AsyncGenerator[tuple[str, torch.Tensor], None]:
+    """Receive tensors from remote ranks via broadcast and yield them."""
     assert len(self._current_global_parameter_metas) != 0, "parameter metas is empty"
     assert dist.is_initialized(), "process group is not initialized"
     assert self._p2p_store is not None, "p2p store is not initialized"
@@ -188,6 +190,7 @@ class BroadcastOperation:
         ranks_group (int): The process group's value.
         bucket (torch.Tensor): The tensor to broadcast.
         metadata (list[ParameterMeta]): The metadata of the tensor.
+
     """
 
     def __init__(
@@ -214,6 +217,7 @@ class BroadcastOperation:
 
         Returns:
             list[ParameterMeta]: The bucket meta after broadcast.
+
         """
         await self._task
         return self.metadata
@@ -229,6 +233,7 @@ class KIMICheckpointEngine(CheckpointEngine):
         rebuild_group (bool): Whether to rebuild the process group in each update. Defaults to False.
         is_master (bool): Whether the current process is the master process. Defaults to False.
         rollout_dtype (torch.dtype): The dtype of the weights received from rollout workers. Defaults to torch.bfloat16.
+
     """
 
     def __init__(
@@ -246,6 +251,7 @@ class KIMICheckpointEngine(CheckpointEngine):
         self.checkpoint_name = "kimi_checkpoint_engine"
 
     def prepare(self) -> MasterMetadata:
+        """Prepare the master metadata for process group initialization."""
         if self.is_master:
             self.ip = ray.util.get_node_ip_address().strip("[]")
             self.listen_port, _ = get_free_port(self.ip)
@@ -266,6 +272,7 @@ class KIMICheckpointEngine(CheckpointEngine):
 
     @classmethod
     def build_topology(cls, trainer_world_size: int, rollout_world_size: int, metadata: list[dict]):
+        """Build a broadcast topology connecting all trainer and rollout workers."""
         trainer_kwargs = {
             "method": ["init_process_group"] * trainer_world_size,
             "rank": list(range(0, trainer_world_size)),
@@ -293,7 +300,10 @@ class KIMICheckpointEngine(CheckpointEngine):
 
         Args:
             rank (int): The rank of the current process.
-            world_size (int): The total number of processes.
+            trainer_world_size (int): The number of trainer processes.
+            rollout_world_size (int): The number of rollout processes.
+            master_metadata (MasterMetadata): Metadata of the master process used to set up the group.
+
         """
         self.rank = rank
         self.trainer_world_size = trainer_world_size
@@ -327,6 +337,8 @@ class KIMICheckpointEngine(CheckpointEngine):
 
         Args:
             weights: A generator that yields the name of the weight tensor and the tensor itself.
+            global_steps (int, optional): The current global training step. Defaults to None.
+
         """
 
         def offload_cpu(name: str, tensor: torch.Tensor) -> tuple[str, torch.Tensor]:
@@ -371,6 +383,7 @@ class KIMICheckpointEngine(CheckpointEngine):
 
         Yields:
             A tuple of the name of the weight tensor and the tensor itself.
+
         """
         self.parameter_server.gather_metas(self.checkpoint_name)
 

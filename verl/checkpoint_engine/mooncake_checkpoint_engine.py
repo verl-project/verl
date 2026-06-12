@@ -40,6 +40,7 @@ class MooncakeCheckpointEngine(CheckpointEngine):
         device (str): The device to use for the checkpoint engine, "cpu" or "cuda".
         rollout_dtype (torch.dtype): The dtype of the weights received from rollout workers.
         device_name (str): Mooncake device name filter.
+
     """
 
     def __init__(
@@ -96,6 +97,7 @@ class MooncakeCheckpointEngine(CheckpointEngine):
 
     @classmethod
     def build_topology(cls, trainer_world_size: int, rollout_world_size: int, metadatas: list[dict]):
+        """Build a point-to-point topology connecting trainer rank 0 to rollout workers."""
         trainer_kwargs = {
             "rank": [0] + [-1] * (trainer_world_size - 1),
             "world_size": [rollout_world_size + 1] * trainer_world_size,
@@ -109,6 +111,7 @@ class MooncakeCheckpointEngine(CheckpointEngine):
         return trainer_kwargs, rollout_kwargs
 
     def init_process_group(self, rank: int, world_size: int, metadata: dict[str, Any]):
+        """Initialize the stateless process group and exchange buffer info."""
         self.rank = rank
         self.world_size = world_size
         if rank < 0:
@@ -140,6 +143,7 @@ class MooncakeCheckpointEngine(CheckpointEngine):
         logger.info(f"finalize rank={self.rank}")
 
     async def wait_for_complete(self, buf: torch.Tensor):
+        """Wait until the magic bytes appear in the buffer indicating transfer completion."""
         magic = torch.tensor([0xAB, 0xDC, 0xEF, 0x88], dtype=torch.uint8, device=self.device)
         while True:
             if torch.equal(buf[:4], magic):

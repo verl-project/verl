@@ -51,6 +51,7 @@ from .base_model_merger import BaseModelMerger, ModelMergerConfig
 
 @contextmanager
 def noop_context() -> Any:
+    """Provide a context manager that does nothing."""
     yield
 
 
@@ -63,6 +64,7 @@ def get_dynamic_pipeline_shards(layer_num: int, pp_size: int) -> list[int]:
 
     Returns:
         layer number of each pp rank. Make the sharding of the pipeline as uniform as possible.
+
     """
     if layer_num < pp_size:
         raise ValueError(f"layer_num {layer_num} must be greater than pp_size {pp_size}.")
@@ -138,6 +140,7 @@ class MegatronModelMerger(BaseModelMerger):
         merger = MegatronModelMerger(config)
         merger.merge_and_save()
         ```
+
     """
 
     def __init__(self, config: ModelMergerConfig):
@@ -226,6 +229,7 @@ class MegatronModelMerger(BaseModelMerger):
 
         Returns:
             State dict containing the model parameters.
+
         """
 
         # init hf config
@@ -420,6 +424,12 @@ class MegatronModelMerger(BaseModelMerger):
         return state_dict
 
     def save_hf_model_and_tokenizer(self, merged_state_dict):
+        """Save the merged model and tokenizer in HuggingFace format.
+
+        Args:
+            merged_state_dict: The merged model state dict to save.
+
+        """
         if self.world_size == 1:
             return super().save_hf_model_and_tokenizer(merged_state_dict)
 
@@ -489,6 +499,7 @@ class MegatronModelMerger(BaseModelMerger):
                 tokenizer.save_pretrained(self.config.target_dir)
 
     def merge_and_save(self):
+        """Merge the Megatron distributed checkpoints and save the result."""
         from verl.utils.megatron_utils import get_model_dist_checkpoint_path
 
         model_ckpt_path = get_model_dist_checkpoint_path(self.config.local_dir)
@@ -543,4 +554,5 @@ class MegatronModelMerger(BaseModelMerger):
         return None  # Return None if no mapping found
 
     def cleanup(self):
+        """Destroy the distributed process group to free resources."""
         torch.distributed.destroy_process_group()

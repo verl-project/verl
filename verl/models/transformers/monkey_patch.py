@@ -105,7 +105,11 @@ def _ulysses_flash_attention_forward(
         query_states (torch.Tensor): (batch_size, seqlen/sp_size, nheads, head_dim)
         key_states (torch.Tensor): (batch_size, seqlen/sp_size, nheads_k, head_dim)
         value_states (torch.Tensor): (batch_size, seqlen/sp_size, nheads_k, head_dim)
+        attention_mask (Optional[torch.Tensor]): Attention mask for the forward pass.
+        query_length (int): Length of the query sequence after ulysses all2all.
+        *args: Additional positional arguments passed to the underlying attention.
         position_ids (torch.Tensor, optional): (batch_size, seqlen/sp_size)
+        **kwargs: Additional keyword arguments passed to the underlying attention.
 
     Returns:
         torch.Tensor: (batch_size, seqlen/sp_size, nheads, head_dim)
@@ -242,6 +246,7 @@ def patch_forward_with_backends(
         model (PreTrainedModel): The model to apply the monkey patch.
         use_fused_kernels (bool): Whether to use fused kernels.
         fused_kernels_backend (str): The backend to use for fused kernels.
+
     """
     if not use_fused_kernels or fused_kernels_backend not in ["triton", "torch"]:
         print(
@@ -310,8 +315,10 @@ def apply_monkey_patch(
         use_remove_padding: Whether to use remove padding.
         use_fused_kernels: Whether to use fused kernels.
         fused_kernels_backend: The backend to use for fused kernels.
+        use_prefix_grouper: Whether to enable the prefix grouper patch.
         use_tiled_mlp: Whether to use TiledMLP for memory-efficient MLP computation.
         tiled_mlp_shards: Number of shards for TiledMLP (higher = lower memory, slightly slower).
+
     """
 
     # Apply TiledMLP monkey patch for memory-efficient MLP computation

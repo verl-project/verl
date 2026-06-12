@@ -43,6 +43,17 @@ _MODELS = {
 class ModelRegistry:
     @staticmethod
     def load_model_cls(model_arch: str, value=False) -> Optional[type[nn.Module]]:
+        """Load and return the model class for the given architecture.
+
+        Args:
+            model_arch: The model architecture name (e.g. ``"LlamaForCausalLM"``).
+            value: Whether to load the value-head variant (critic/rm) instead of
+                the actor/ref variant.
+
+        Returns:
+            The resolved model class, or ``None`` if the architecture is unsupported.
+
+        """
         if model_arch not in _MODELS:
             return None
 
@@ -59,4 +70,5 @@ class ModelRegistry:
 
     @staticmethod
     def get_supported_archs() -> list[str]:
+        """Return the list of supported model architecture names."""
         return list(_MODELS.keys())

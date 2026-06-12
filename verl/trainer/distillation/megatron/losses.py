@@ -74,6 +74,7 @@ class _VocabParallelKLDivergence(torch.autograd.Function):
           - `target_topk_*` (indices/logprobs) are in *global vocab* coordinates.
           - `vp_logits` are the *local shard* of the vocab-parallel logits on this TP rank.
           This function masks out target top-k entries that do not belong to the local shard.
+
         """
         from megatron.core.parallel_state import (
             get_tensor_model_parallel_group,
@@ -274,12 +275,14 @@ def compute_forward_kl_topk(
         student_logits: (bsz, seqlen/cp_size, vocab_size/tp_size).
         teacher_topk_log_probs: (bsz, seqlen, topk).
         teacher_topk_ids: (bsz, seqlen, topk).
+        config: DistillationConfig controlling the distillation loss behavior.
         data_format: "thd" or "bshd", models not support THD format, e.g GPT-OSS, Qwen3.5
 
     Returns:
     - distillation_losses: (bsz, seqlen/cp_size)
     - student_mass: (bsz, seqlen/cp_size)
     - teacher_mass: (bsz, seqlen/cp_size)
+
     """
     assert teacher_topk_log_probs.is_nested and teacher_topk_ids.is_nested
 

@@ -38,6 +38,7 @@ class RewardModelManager:
         Args:
             config (RewardModelConfig): Reward model configuration.
             resource_pool (RayResourcePool, optional): Resource pool. Defaults to None.
+
         """
         self.config = config
         self.resource_pool = resource_pool
@@ -107,6 +108,7 @@ class RewardModelManager:
         self.router_address, _ = launch_router_process(worker_urls=worker_urls)
 
     def get_router_address(self):
+        """Return the address of the launched router."""
         return self.router_address
 
     def wake_up(self):

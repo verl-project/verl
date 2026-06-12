@@ -50,6 +50,7 @@ from .base_model_merger import generate_config_from_args, parse_args
 
 
 def main():
+    """Run the model merger from command line arguments."""
     args = parse_args()
     config = generate_config_from_args(args)
     print(f"config: {config}")

@@ -151,6 +151,7 @@ class DistillationTeacherModelConfig(BaseConfig):
 
     @property
     def per_replica_world_size(self) -> int:
+        """Return the number of GPUs used by a single teacher replica."""
         return (
             self.inference.tensor_model_parallel_size
             * self.inference.data_parallel_size
@@ -159,9 +160,11 @@ class DistillationTeacherModelConfig(BaseConfig):
 
     @property
     def world_size(self) -> int:
+        """Return the total number of GPUs across all teacher replicas."""
         return self.num_replicas * self.per_replica_world_size
 
     def check_configured(self):
+        """Validate that required teacher model config fields are set."""
         if self.model_path is None:
             raise ValueError("model_path must be specified for distillation teacher model config.")
         if self.key is None:
@@ -170,6 +173,12 @@ class DistillationTeacherModelConfig(BaseConfig):
             raise ValueError("num_replicas must be specified for distillation teacher model config.")
 
     def validate_and_prepare_for_distillation(self, use_topk: bool, topk: Optional[int]) -> None:
+        """Validate context-length limits and adjust inference config for distillation.
+
+        Args:
+            use_topk: Whether top-k logprob extraction is enabled.
+            topk: Number of top logprobs to request from the teacher, if any.
+        """
         # Prompt + Response from student are fed into teacher as context
         max_model_len = self.inference.max_model_len
         student_prompt_length = self.inference.prompt_length

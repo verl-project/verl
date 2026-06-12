@@ -78,6 +78,7 @@ class AsyncTokenBucket:
         3. If tokens >= num_tokens: consume tokens and return
         4. Otherwise: calculate wait_time = tokens_needed / rate_limit, then sleep
         5. Retry after sleep (loop back to step 1)
+
     """
 
     def __init__(self, rate_limit: float, max_tokens: float = None):
@@ -119,6 +120,7 @@ class AsyncTokenBucket:
             - Lock is released during sleep to allow other coroutines to proceed
             - Tokens are refilled continuously based on elapsed time
             - For requests > max_tokens, allows temporary negative balance
+
         """
         # Handle requests larger than max_tokens separately
         if num_tokens > self.max_tokens:
@@ -249,6 +251,7 @@ class RateLimitedRewardManager(RewardManagerBase):
         - AsyncTokenBucket: Token bucket implementation for rate limiting
         - RewardManagerBase: Base class for reward managers
         - verl.utils.reward_score.default_compute_score: Default scoring function
+
     """
 
     # Class-level state for global rate limiting
@@ -396,6 +399,15 @@ class RateLimitedRewardManager(RewardManagerBase):
             )
 
     async def run_single(self, data: DataProto) -> dict:
+        """Compute the reward for a single sample.
+
+        Args:
+            data (DataProto): A single-sample DataProto to score.
+
+        Returns:
+            dict: The computed reward result.
+
+        """
         data = data[-1:]  # for multi-sequence outputs, we only compute reward based on the last sequence
         data_item = data[0]
 
@@ -484,6 +496,7 @@ class RateLimitedRewardManager(RewardManagerBase):
                                 with rewards. If return_dict is True, returns a dict with:
                                 - reward_tensor: The reward tensor
                                 - reward_extra_info: Dict containing extra information about rewards
+
         """
         from collections import defaultdict
 

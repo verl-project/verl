@@ -57,6 +57,7 @@ class Role(Enum):
 
     @classmethod
     def from_string(cls, name: str):
+        """Create a Role enum from its string representation."""
         string_mapping = {
             "actor": cls.Actor,
             "rollout": cls.Rollout,

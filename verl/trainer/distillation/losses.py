@@ -52,6 +52,7 @@ class DistillationLossSettings(BaseConfig):
         names (str | list[str]): Name(s) to register the distillation loss function under.
         use_topk (bool): Whether the loss function uses top-k log probabilities.
         use_estimator (bool): Whether the loss function uses single-sample KL estimators.
+
     """
 
     names: str | list[str] = field(default_factory=list)
@@ -133,6 +134,7 @@ def compute_topk_loss(
     - distillation_losses: (bsz, seqlen/cp_size)
     - student_mass: (bsz, seqlen/cp_size)
     - teacher_mass: (bsz, seqlen/cp_size)
+
     """
     match config.strategy:
         # VeOmni uses FSDP2 internally, so its loss computation is identical to FSDP.
@@ -192,12 +194,14 @@ def distillation_ppo_loss(
         data: Micro input batch, contains
           - teacher_logprobs: (bsz, seqlen, topk)
           - teacher_ids: (bsz, seqlen, topk)
+        dp_group: Data parallel process group used for cross-rank reductions.
         student_logits: (bsz, seqlen/cp_size, vocab_size/tp_size).
         data_format: "thd" or "bshd", models not support THD format, e.g GPT-OSS, Qwen3.5
 
     Returns:
     - student_logits is not None, return the topk loss tensor (bsz, seqlen/cp_size).
     - student_logits is None, return the final policy loss scalar and metrics.
+
     """
 
     # Called as logits processor
@@ -234,6 +238,7 @@ def distillation_loss(
     Returns:
     - distillation_loss: Aggregated distillation loss scalar.
     - distillation_metrics: Dictionary of metrics.
+
     """
     assert distillation_config is not None
     loss_config: DistillationLossConfig = distillation_config.distillation_loss
@@ -303,6 +308,7 @@ def compute_forward_kl_topk(
     Returns:
     - distillation_losses: (bsz, resp_len)
     - distillation_metrics: Dictionary of metrics.
+
     """
     # topk loss has been computed in logits processor
     distillation_losses = no_padding_2_padding(model_output["distillation_losses"], data)
@@ -374,6 +380,7 @@ def compute_distillation_loss_reverse_kl_estimator(
     Returns:
     - distillation_losses: (bsz, resp_len)
     - distillation_metrics: Dictionary of metrics.
+
     """
     student_log_probs = no_padding_2_padding(model_output["log_probs"], data)
     teacher_log_probs = no_padding_2_padding(data["teacher_logprobs"], data).squeeze(-1)

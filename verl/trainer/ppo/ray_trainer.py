@@ -88,6 +88,7 @@ def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, 
         tuple: A tuple containing:
             - The updated data with token-level rewards adjusted by KL penalty
             - A dictionary of metrics related to the KL penalty
+
     """
     response_mask = data.batch["response_mask"]
     token_level_scores = data.batch["token_level_scores"]
@@ -126,6 +127,7 @@ def compute_response_mask(data: DataProto):
 
     Returns:
         torch.Tensor: The attention mask for the response tokens.
+
     """
     responses = data.batch["responses"]
     response_length = responses.size(1)
@@ -208,6 +210,7 @@ def compute_advantage(
 
     Returns:
         DataProto: The updated data with computed advantages and returns.
+
     """
     # Back-compatible with trainers that do not compute response mask in fit
     if "response_mask" not in data.batch.keys():
@@ -323,6 +326,7 @@ class RayPPOTrainer:
             collate_fn: Function to collate data samples into batches.
             train_sampler (Optional[Sampler], optional): Sampler for the training dataset. Defaults to None.
             device_name (str, optional): Device name for training (e.g., "cuda", "cpu"). Defaults to None.
+
         """
 
         # Store the tokenizer for text processing
@@ -523,6 +527,7 @@ class RayPPOTrainer:
             reward_extra_infos_dict (dict): Additional reward information to log
             timing_raw (dict): Timing information for profiling
             rollout_data_dir (str): Directory path to save the rollout data
+
         """
         with marked_timer("dump_rollout_generations", timing_raw, color="green"):
             inputs = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
@@ -1137,6 +1142,7 @@ class RayPPOTrainer:
 
         Returns:
             The data parallel size (number of DP ranks).
+
         """
         if role not in worker_group._dispatch_info:
             dp_rank_mapping = worker_group._query_dispatch_info(role)

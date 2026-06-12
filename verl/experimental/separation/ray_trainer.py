@@ -341,6 +341,7 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
 
         Args:
             batch_dict: Raw data dictionary
+
         """
         self.metrics = {"training/global_step": self.global_steps, "training/epoch": self.epoch}
         self.timing_raw = {}

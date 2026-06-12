@@ -33,6 +33,18 @@ def launch_router_process(
     max_wait_time: int = 300,
     timeout: int = 30,
 ) -> str:
+    """Launch an SGLang router process for the given worker URLs.
+
+    Args:
+        worker_urls (list[str]): URLs of the backend workers to route to.
+        request_timeout (int): Per-request timeout in seconds.
+        max_wait_time (int): Maximum time to wait for the router to start.
+        timeout (int): Connection timeout in seconds.
+
+    Returns:
+        str: The address of the launched router.
+
+    """
     router_ip = ray.util.get_node_ip_address().strip("[]")
     router_port, _ = get_free_port(router_ip)
     router_address = (

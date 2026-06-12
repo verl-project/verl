@@ -34,6 +34,12 @@ from verl.utils.device import auto_set_device
 @ray.remote(num_cpus=10, max_concurrency=100)  # please make sure main_task is not scheduled on head
 class OneStepTaskRunner:
     def run(self, config):
+        """Run the one-step off-policy PPO training task.
+
+        Args:
+            config: The training configuration.
+
+        """
         # Print the initial configuration. `resolve=True` will evaluate symbolic values.
         from pprint import pprint
 
@@ -109,6 +115,7 @@ class OneStepTaskRunner:
 
 @hydra.main(config_path="config", config_name="one_step_off_ppo_trainer", version_base=None)
 def main(config):
+    """Hydra entrypoint that launches one-step off-policy PPO training."""
     from time import time
 
     from verl.trainer.main_ppo import run_ppo

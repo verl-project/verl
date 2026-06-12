@@ -102,7 +102,10 @@ class ToolAgentLoop(AgentLoopBase):
         """Initialize the tool agent loop.
 
         Args:
+            *args: Positional arguments forwarded to the parent agent loop.
             tools: Tools to use for the tool agent loop.
+            **kwargs: Keyword arguments forwarded to the parent agent loop.
+
         """
         super().__init__(*args, **kwargs)
 
@@ -123,6 +126,16 @@ class ToolAgentLoop(AgentLoopBase):
 
     @rollout_trace_op
     async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
+        """Run the multi-turn tool-calling agent loop and return its output.
+
+        Args:
+            sampling_params (dict[str, Any]): Sampling parameters for generation.
+            **kwargs: Additional inputs such as ``raw_prompt`` and ``tools_kwargs``.
+
+        Returns:
+            AgentLoopOutput: The result of the multi-turn rollout.
+
+        """
         messages = list(kwargs["raw_prompt"])
 
         # extract multimodal inputs from messages

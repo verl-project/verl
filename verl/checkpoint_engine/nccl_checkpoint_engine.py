@@ -56,6 +56,7 @@ class BroadcastOperation:
         metadata (dict[str, TensorMeta]): The metadata of the tensor.
         socket (zmq.Socket): The zeromq socket to communicate with master.
         topic (str): The topic to subscribe.
+
     """
 
     def __init__(
@@ -94,6 +95,7 @@ class BroadcastOperation:
 
         Returns:
             dict[str, TensorMeta]: The bucket meta after broadcast.
+
         """
         await self._task
         return self.metadata
@@ -110,6 +112,7 @@ class NCCLCheckpointEngine(CheckpointEngine):
         rebuild_group (bool): Whether to rebuild the NCCL process group in each update. Defaults to False.
         is_master (bool): Whether the current process is the master process. Defaults to False.
         rollout_dtype (torch.dtype): The dtype of the weights received from rollout workers. Defaults to torch.bfloat16.
+
     """
 
     def __init__(
@@ -132,6 +135,7 @@ class NCCLCheckpointEngine(CheckpointEngine):
             self._start_zmq_server()
 
     def prepare(self) -> MasterMetadata:
+        """Allocate send and recv buffers and return master metadata."""
         # For master process, use cupy instead of torch to avoid memory register error
         # when `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`.
         if self.is_master:
@@ -158,6 +162,7 @@ class NCCLCheckpointEngine(CheckpointEngine):
 
     @classmethod
     def build_topology(cls, trainer_world_size: int, rollout_world_size: int, metadata: list[dict]):
+        """Build a broadcast topology connecting trainer rank 0 to all rollout workers."""
         trainer_kwargs = {
             "rank": [0] + [-1] * (trainer_world_size - 1),
             "world_size": [rollout_world_size + 1] * trainer_world_size,
@@ -203,6 +208,8 @@ class NCCLCheckpointEngine(CheckpointEngine):
         Args:
             rank (int): The rank of the current process.
             world_size (int): The total number of processes.
+            master_metadata (MasterMetadata): Metadata of the master process used to set up the group.
+
         """
         # For trainer workers other than rank 0, their rank should be -1.
         if rank < 0:
@@ -236,6 +243,8 @@ class NCCLCheckpointEngine(CheckpointEngine):
 
         Args:
             weights: A generator that yields the name of the weight tensor and the tensor itself.
+            global_steps (int, optional): The current global training step. Defaults to None.
+
         """
         assert self.rank <= 0, "Trainer workers other than rank 0 should not send weights."
 
@@ -307,6 +316,7 @@ class NCCLCheckpointEngine(CheckpointEngine):
 
         Yields:
             A tuple of the name of the weight tensor and the tensor itself.
+
         """
         async for name, weight in merge_weight_chunks(self._receive_weight_chunks(), self.bucket_size):
             yield name, weight
@@ -316,6 +326,7 @@ class NCCLCheckpointEngine(CheckpointEngine):
 
         Yields:
             A tuple of the name of the weight tensor and the chunk itself.
+
         """
         assert self.rank > 0, "Rank 0 should not receive weights."
         send_buf, recv_buf = self.send_buf, self.recv_buf

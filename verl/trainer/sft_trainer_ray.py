@@ -245,6 +245,7 @@ class SFTTrainer:
         return batch_seqlens
 
     def fit(self):
+        """Run the full SFT training loop with validation and checkpointing."""
         tracking = Tracking(
             project_name=self.config.trainer.project_name,
             experiment_name=self.config.trainer.experiment_name,
@@ -380,6 +381,7 @@ class SFTTrainer:
 
 
 def run_sft(config):
+    """Initialize Ray and run the SFT trainer."""
     ray.init()
     trainer = SFTTrainer(config=config)
     trainer.fit()
@@ -387,6 +389,7 @@ def run_sft(config):
 
 @hydra.main(config_path="config", config_name="sft_trainer_engine", version_base=None)
 def main(config):
+    """Run SFT training with Hydra configuration."""
     # Automatically set `config.trainer.device = npu` when running on Ascend NPU.
     auto_set_device(config)
     run_sft(config)

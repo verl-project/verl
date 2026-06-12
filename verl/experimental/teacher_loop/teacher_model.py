@@ -50,6 +50,7 @@ class TeacherModelManager:
             distillation_config (DistillationConfig): Distillation configuration.
             teacher_model_config (DistillationTeacherModelConfig): Teacher model configuration.
             resource_pool (RayResourcePool): Dedicated teacher resource pool.
+
         """
 
         # Need dataclass conversion for max_logprobs handling in post_init
@@ -165,6 +166,7 @@ class MultiTeacherModelManager:
         Args:
             config (DictConfig): Full configuration.
             resource_pool (RayResourcePool): Combined resource pool for all teachers.
+
         """
         self.config = config
         self.distillation_config: DistillationConfig = omega_conf_to_dataclass(config.distillation)

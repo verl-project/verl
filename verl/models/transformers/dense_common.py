@@ -86,6 +86,7 @@ def forward_with_torch_backend(
     shift_labels: Optional[torch.LongTensor] = None,
     **loss_kwargs,
 ) -> tuple | CausalLMOutputForPPO:
+    """Compute log probs and entropy for PPO using the fused torch backend."""
     from verl.utils.experimental.torch_functional import FusedLinearForPPO
 
     outputs = forward_base_model(
@@ -154,6 +155,7 @@ def forward_with_triton_backend(
     shift_labels: Optional[torch.LongTensor] = None,
     **loss_kwargs,
 ) -> tuple | CausalLMOutputForPPO:
+    """Compute log probs and entropy for PPO using the Triton backend."""
     from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy
 
     outputs = forward_base_model(

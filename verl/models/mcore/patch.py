@@ -18,6 +18,7 @@
 
 
 def apply_patch():
+    """Patch mcore 0.12 MLA attention to fix packed_seq_params handling."""
     import megatron.core
     import torch
     import torch.nn.functional as F
@@ -361,6 +362,7 @@ def apply_patch():
 
 
 def apply_patch_mbridge():
+    """Patch mcore utils to provide get_tensor_model_parallel_group_if_none for mbridge."""
     try:
         from megatron.core.utils import get_tensor_model_parallel_group_if_none
     except ImportError:
@@ -391,6 +393,7 @@ def apply_patch_mbridge():
 
 
 def apply_patch_megatron_v012_with_torch_v28_v29() -> None:
+    """Patch megatron v0.12 checkpoint writing to work with torch 2.8/2.9."""
     # Error due to missing serialization_format in _write_item of megatron v012;
     # resolved by using megatron v013's implementation.
     import inspect
@@ -429,14 +432,17 @@ def apply_patch_megatron_v012_with_torch_v28_v29() -> None:
         Performs actual data saving to storage.
 
         Args:
+            transform_list: list of transforms to apply before writing data.
             local_proc_idx (int): index of a local process that performs writing
             write_bucket (WriteBucket): data to write to storage
             results_queue (mp.Queue): queue to return the write results
                 to the proxy checkpoint process.
             count_queue (mp.JoinableQueue): queue to marks worker task as completed
             use_fsync (bool): if True, calls os.fsync at the end of saving
+            **kwargs: Additional keyword arguments (e.g., use_msc).
 
         Returns: None, the write result are put into the `queue`
+
         """
         logger = logging.getLogger(__name__)
         logger.debug(f"{local_proc_idx} started")
@@ -492,6 +498,7 @@ def apply_patch_megatron_v012_with_torch_v28_v29() -> None:
 
 
 def apply_mtp_inference_patch():
+    """Patch GPTModel postprocessing to disable MTP layers during inference."""
     from megatron.core.models.gpt.gpt_model import GPTModel
 
     _original_postprocess = GPTModel._postprocess
@@ -512,6 +519,7 @@ def apply_mtp_inference_patch():
 # input tensors and their grads will stay in gpu memory after forward_backward completes.
 # see https://github.com/NVIDIA/Megatron-LM/pull/3267
 def apply_patch_megatron_recomputation_backward():
+    """Patch megatron recomputation backward to free MoE input grads from GPU memory."""
     import megatron.core.tensor_parallel.random as rd
     import torch
 

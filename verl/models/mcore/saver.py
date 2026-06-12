@@ -94,6 +94,7 @@ def merge_megatron_ckpt_gptmodel(wrapped_models, config, dtype, is_value_model=F
     Returns:
         state_dict (dict):
             The merged state_dict in rank 0, and an empty dictionary in other ranks.
+
     """
     start_time = time.time()
 
@@ -478,20 +479,24 @@ def merge_megatron_ckpt_gptmodel(wrapped_models, config, dtype, is_value_model=F
 def merge_megatron_ckpt_gptmodel_qwen_moe(
     wrapped_models, config, dtype, is_value_model=False, tie_word_embeddings=False
 ):
+    """Merge sharded Megatron checkpoint parameters for Qwen MoE models."""
     raise NotImplementedError("merge_megatron_ckpt_gptmodel_qwen_moe is not implemented")
 
 
 def merge_megatron_ckpt_gptmodel_qwen2_5_vl(
     wrapped_models, config, dtype, is_value_model=False, tie_word_embeddings=False
 ):
+    """Merge sharded Megatron checkpoint parameters for Qwen2.5-VL models."""
     raise NotImplementedError("merge_megatron_ckpt_gptmodel_qwen2_5_vl is not implemented")
 
 
 def merge_megatron_ckpt_gptmodel_dpskv3(wrapped_models, config, dtype, is_value_model=False, tie_word_embeddings=False):
+    """Merge sharded Megatron checkpoint parameters for DeepSeek-V3 models."""
     raise NotImplementedError("merge_megatron_ckpt_gptmodel_dpskv3 is not implemented")
 
 
 def merge_megatron_ckpt_gptmodel_mixtral(
     wrapped_models, config, dtype, is_value_model=False, tie_word_embeddings=False
 ):
+    """Merge sharded Megatron checkpoint parameters for Mixtral models."""
     raise NotImplementedError("merge_megatron_ckpt_gptmodel_mixtral is not implemented")

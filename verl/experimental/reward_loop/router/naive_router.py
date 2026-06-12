@@ -51,6 +51,15 @@ async def _read_async_response(resp: aiohttp.ClientResponse) -> dict[str, Any]:
 def launch_router_process(
     worker_urls: list[str],
 ):
+    """Launch a naive router process for the given worker URLs.
+
+    Args:
+        worker_urls (list[str]): URLs of the backend workers to route to.
+
+    Returns:
+        tuple[str, multiprocessing.Process]: The router address and its process.
+
+    """
     router_ip = ray.util.get_node_ip_address().strip("[]")
     router_port, _ = get_free_port(router_ip)
     router_address = (
@@ -75,6 +84,14 @@ def launch_router_process(
 
 
 def run_router(router_ip: str, router_port: int, worker_urls: list[str]):
+    """Run the naive router server.
+
+    Args:
+        router_ip (str): IP address to bind the router to.
+        router_port (int): Port to bind the router to.
+        worker_urls (list[str]): URLs of the backend workers to route to.
+
+    """
     router = NaiveRouter(worker_urls=worker_urls, verbose=False)
     uvicorn.run(router.app, host=router_ip, port=router_port, log_level="warning")
 

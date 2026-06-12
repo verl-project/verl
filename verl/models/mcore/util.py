@@ -269,6 +269,7 @@ def postprocess_packed_seqs_for_dict_output(
     For fused kernels, the output is a dictionary with keys like 'log_probs', 'entropy', etc.
     This function post-processes each tensor in the output dictionary.
     Args:
+        labels_mask (torch.Tensor): Boolean mask indicating valid label positions.
         output (CausalLMOutputForPPO): _description_
         packed_seq_params (PackedSeqParams): _description_
         attention_mask (torch.Tensor): _description_
@@ -277,6 +278,7 @@ def postprocess_packed_seqs_for_dict_output(
         post_process (bool, optional): _description_. Defaults to True.
     Returns:
         CausalLMOutputForPPO: _description_
+
     """
     ret = {}
     output.entropy = output.entropy.view(1, -1)
@@ -292,6 +294,7 @@ def postprocess_packed_seqs_for_dict_output(
 
 
 def preprocess_for_mindspeed(input_ids, cu_seqlens_padded, seqlens_in_batch_padded, batch_size):
+    """Set the actual sequence lengths and position ids for MindSpeed on NPU."""
     if not is_npu_available:
         return
     try:
@@ -745,6 +748,16 @@ def postprocess_bshd_engine(
 
 
 def build_vlm_attn_mask_thd(input_ids: torch.Tensor, pad_token_id: int = None):
+    """Build a THD-layout padded input and attention mask for vision-language models.
+
+    Args:
+        input_ids: A nested tensor of token ids per sequence.
+        pad_token_id: The token id used for padding.
+
+    Returns:
+        A tuple of the padded input ids and the boolean attention mask.
+
+    """
     input_ids_rmpad = input_ids.to_padded_tensor(pad_token_id)
 
     if is_npu_available:
@@ -759,6 +772,17 @@ def build_vlm_attn_mask_thd(input_ids: torch.Tensor, pad_token_id: int = None):
 
 
 def build_vlm_attn_mask_bshd(input_ids: torch.Tensor, batch_size: int, pad_token_id: int = None):
+    """Build a BSHD-layout padded input and attention mask for vision-language models.
+
+    Args:
+        input_ids: A nested tensor of token ids per sequence.
+        batch_size: The number of sequences in the batch.
+        pad_token_id: The token id used for padding.
+
+    Returns:
+        A tuple of the padded input ids and the boolean attention mask.
+
+    """
     seqlens_in_batch = input_ids.offsets().diff()
     max_seqlen = seqlens_in_batch.max().item()
 

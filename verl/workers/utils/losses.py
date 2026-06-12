@@ -26,6 +26,17 @@ from verl.workers.utils.padding import no_padding_2_padding
 
 
 def sft_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None):
+    """Compute the SFT loss averaged over all tokens across data parallel groups.
+
+    Args:
+        config: Actor configuration controlling the loss behavior.
+        model_output: Model forward output containing ``log_probs``.
+        data: Batch tensordict with loss masks and token-count metadata.
+        dp_group: Optional data parallel process group used for reduction.
+
+    Returns:
+        The computed scalar loss tensor along with associated metrics.
+    """
     pad_mode = tu.get_non_tensor_data(data=data, key="pad_mode", default=DatasetPadMode.NO_PADDING)
     dp_size = data["dp_size"]
     batch_num_tokens = data["batch_num_tokens"]
