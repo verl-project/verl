@@ -294,15 +294,20 @@ class ReplayBuffer:
                     return KVBatchMeta(partition_id=partition_id, keys=keys, tags=tags)
 
 
-@ray.remote
 class AgentLoopWorkerTQ(AgentLoopWorker):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         tq.init()
         self.background_tasks = set()
 
-    async def generate_sequences(self, batch: TensorDict) -> None:
-        """Spawn agent loop for each sample in the batch without waiting for the results."""
+    async def generate_sequences(self, batch: TensorDict, wait: bool = False) -> None:
+        """Spawn agent loop for each sample in the batch.
+
+        Args:
+            batch: Input batch containing prompts and metadata.
+            wait: If True, await all tasks before returning.
+                If False (default), fire-and-forget for backward compatibility.
+        """
         validate = batch["validate"] if "validate" in batch else False
         batch.pop("validate", None)
         config = self.config.actor_rollout_ref.rollout
@@ -327,6 +332,9 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
 
         trajectory_info = await get_trajectory_info(batch["global_steps"], batch["index"], validate)
 
+        # Track tasks for optional waiting
+        tasks = []
+
         # create background tasks for each sample in the batch
         for i in range(len(batch)):
             # TODO(wuxibin): add trace support
@@ -342,12 +350,22 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
                 else:
                     logger.exception(f"Unsupported type {type(v)} for key {k}")
 
-            # “fire-and-forget” background tasks
             task = asyncio.create_task(
                 self._run_prompt(prompt, sampling_params, trajectory=trajectory_info[i], trace=trace_this_sample)
             )
-            self.background_tasks.add(task)
-            task.add_done_callback(self.background_tasks.discard)
+            tasks.append(task)
+
+            if not wait:
+                # Fire-and-forget mode (backward compatible)
+                self.background_tasks.add(task)
+                task.add_done_callback(self.background_tasks.discard)
+
+        # Optional: wait for all tasks to complete
+        if wait:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    print(f"[AgentLoopWorkerTQ] Task {i} raised exception: {result}", flush=True)
 
     async def _run_prompt(self, prompt: dict, sampling_params: dict, trajectory: dict, trace: bool = False) -> None:
         """Spawn multiple agent loops in parallel according to rollout.n or rollout.val_kwargs.n."""
@@ -438,6 +456,9 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
                     "prompt_len": prompt_len,
                     "response_len": response_len,
                     "seq_len": prompt_len + response_len,
+                    "uid": uid,
+                    "min_global_steps": output.extra_fields.get("min_global_steps"),
+                    "max_global_steps": output.extra_fields.get("max_global_steps"),
                 }
             )
 
@@ -451,7 +472,7 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
 
 class AgentLoopManagerTQ(AgentLoopManager):
     def __init__(self, *args, replay_buffer: ReplayBuffer, **kwargs):
-        self.agent_loop_workers_class = AgentLoopWorkerTQ
+        self.agent_loop_workers_class = ray.remote(AgentLoopWorkerTQ)
         super().__init__(*args, **kwargs)
         self.replay_buffer = replay_buffer
 
@@ -1313,7 +1334,7 @@ class PPOTrainer:
             )
             data["old_log_probs"] = data.pop("rollout_log_probs")
             tq.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=data)
-            return
+            return batch
 
         # 1. compute log probs
         batch.extra_info.update(
@@ -1670,6 +1691,18 @@ class PPOTrainer:
                     self._log_rollout_data(batch, timing_raw, rollout_data_dir)
 
                 # 7. cleanup transfer queue and replay buffer
+
+                # Clear uid status : 'uid': {'status': 'finished'} or  {'status': 'failure'}
+                uid_keys: set[str] = set()
+                for key, tag in zip(batch.keys, batch.tags, strict=False):
+                    uid = tag.get("uid", "") if isinstance(tag, dict) else ""
+                    if uid and uid not in uid_keys:
+                        uid_keys.add(uid)
+
+                # Clear uid-deduped keys from TQ and RB
+                tq.kv_clear(keys=list(uid_keys), partition_id=batch.partition_id)
+                self.replay_buffer.remove(batch.partition_id, list(uid_keys))
+
                 tq.kv_clear(keys=batch.keys, partition_id=batch.partition_id)
                 self.replay_buffer.remove(batch.partition_id, batch.keys)
 

@@ -49,7 +49,6 @@ class TrainingStopException(Exception):
     pass
 
 
-@ray.remote(num_cpus=10)
 class FullyAsyncTrainer(SeparateRayPPOTrainer):
     """
     A fully asynchronous PPO trainer that obtains samples from a MessageQueue for training.
@@ -521,7 +520,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             await asyncio.wrap_future(self.rollouter._start_profiling.remote().future())
 
         # Reset staleness in rollouter
-        timing_raw = await asyncio.wrap_future(self.rollouter.reset_staleness.remote().future())
+        timing_raw = await self.rollouter.reset_staleness.remote()
         self.logger.log(
             data=timing_raw,
             step=self.current_param_version,
