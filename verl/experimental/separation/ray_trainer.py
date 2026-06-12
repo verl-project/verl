@@ -127,6 +127,7 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
             config=omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine),
             trainer=self.actor_rollout_wg,
             replicas=self.llm_server_manager.get_replicas(),
+            suspend_nccl_comms=self.config.actor_rollout_ref.actor.suspend_nccl_comms,
         )
 
     def _init_resource_pools(self):

@@ -311,3 +311,7 @@ qat:
   # Path to vLLM quantization config JSON file
   quantization_config_path: null
 
+# Release idle training NCCL comms between rollout/training phases to free
+# GPU memory for KV cache. Requires NCCL >= 2.29.7; engine support varies.
+suspend_nccl_comms: false
+
