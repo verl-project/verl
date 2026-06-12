@@ -69,9 +69,9 @@ def _make_engine_stub():
     eng._autocast_dtype = torch.float32  # skip autocast
     eng.module = _TinyCheckpointedLM().to(get_device_id())
     eng.prepare_model_inputs = lambda micro_batch: ({"input_ids": micro_batch["input_ids"]}, {})
-    eng.prepare_model_outputs = (
-        lambda output, output_args, micro_batch, logits_processor_func: {"log_probs": output.hidden.sum(-1)}
-    )
+    eng.prepare_model_outputs = lambda output, output_args, micro_batch, logits_processor_func: {
+        "log_probs": output.hidden.sum(-1)
+    }
     eng.get_data_parallel_group = lambda: None
     return eng
 
