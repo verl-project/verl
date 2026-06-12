@@ -302,9 +302,7 @@ checkpoint_engine:
   # Reference HF checkpoint dtype used during weight comparison.
   check_weight_sync_dtype: bfloat16
 
-  # Tolerances and error sample limit for weight comparison.
-  check_weight_sync_rtol: 1e-5
-  check_weight_sync_atol: 1e-8
+  # Error sample limit for weight comparison.
   check_weight_sync_max_mismatches: 10
   check_weight_sync_timeout: 300
 

@@ -249,7 +249,9 @@ running rollout generation or PPO training:
 
 The check compares the initial rollout backend-loaded weights with the source
 HuggingFace checkpoint and reports missing, unexpected, and mismatched keys.
-Exact allclose currently supports vLLM with rollout tensor parallel size 1.
+Strict equality currently supports vLLM with rollout tensor parallel size 1,
+after casting the reference checkpoint tensors to the loaded rollout tensor
+dtype.
 
 This check validates the checkpoint-engine weight conversion and transfer path,
 including vLLM ``load_weights`` for tensor parallel size 1. It does not validate

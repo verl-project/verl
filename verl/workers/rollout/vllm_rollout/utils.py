@@ -225,14 +225,12 @@ class vLLMColocateWorkerExtension:
         model_path: str,
         trust_remote_code: bool = False,
         torch_dtype: str = "bfloat16",
-        rtol: float = 1e-5,
-        atol: float = 1e-8,
         max_mismatches: int = 10,
     ) -> dict[str, Any]:
         """Compare vLLM-loaded weights against a HuggingFace checkpoint.
 
         This debug helper is intended for TP=1 exact checks. With tensor
-        parallelism, vLLM stores sharded tensors and direct state_dict allclose
+        parallelism, vLLM stores sharded tensors and direct state_dict comparison
         is not meaningful without applying each layer's sharding rule.
         """
         from transformers import AutoModelForCausalLM
@@ -262,8 +260,6 @@ class vLLMColocateWorkerExtension:
             actual_state_dict=actual_state_dict,
             num_hidden_layers=getattr(expected_model.config, "num_hidden_layers", 0),
             tie_word_embeddings=getattr(expected_model.config, "tie_word_embeddings", False),
-            rtol=rtol,
-            atol=atol,
             max_mismatches=max_mismatches,
         )
 

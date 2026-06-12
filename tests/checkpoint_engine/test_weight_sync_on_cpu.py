@@ -50,6 +50,19 @@ def test_assert_weight_sync_equal_accepts_direct_state_dict():
     assert result == {"checked": 1, "missing": 0, "unexpected": 0, "mismatched": 0}
 
 
+def test_assert_weight_sync_equal_rejects_any_value_mismatch():
+    expected_state_dict = {"model.embed_tokens.weight": torch.ones(2, 3)}
+    actual_state_dict = {"model.embed_tokens.weight": torch.ones(2, 3)}
+    actual_state_dict["model.embed_tokens.weight"][0, 0] += 1e-6
+
+    with pytest.raises(AssertionError, match="mismatched"):
+        assert_weight_sync_equal(
+            expected_state_dict=expected_state_dict,
+            actual_state_dict=actual_state_dict,
+            num_hidden_layers=0,
+        )
+
+
 def test_assert_weight_sync_equal_accepts_vllm_fused_state_dict():
     prefix = "model.layers.0"
     q_proj = torch.arange(8, dtype=torch.float32).view(2, 4)

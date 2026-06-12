@@ -143,8 +143,6 @@ class CheckpointEngineConfig(BaseConfig):
     check_weight_sync_only: bool = False
     # Dtype used when loading the reference HF checkpoint for comparison.
     check_weight_sync_dtype: str = "bfloat16"
-    check_weight_sync_rtol: float = 1e-5
-    check_weight_sync_atol: float = 1e-8
     check_weight_sync_max_mismatches: int = 10
     check_weight_sync_timeout: Optional[float] = 300.0
 
