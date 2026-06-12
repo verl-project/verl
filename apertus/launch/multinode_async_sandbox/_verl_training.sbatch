@@ -46,7 +46,14 @@ ENABLE_THINKING="${ENABLE_THINKING:-false}"
 WANDB_ENTITY="${WANDB_ENTITY:-apertus}"
 NO_CODE="${NO_CODE:-false}"
 NO_FORMAT="${NO_FORMAT:-false}"
-
+ACTOR_PPO_MINI_BATCH_SIZE="${ACTOR_PPO_MINI_BATCH_SIZE:-}"
+ROLLOUT_TOTAL_ROLLOUT_STEPS="${ROLLOUT_TOTAL_ROLLOUT_STEPS:-}"
+TRAINER_TEST_FREQ="${TRAINER_TEST_FREQ:-}"
+TRAINER_SAVE_FREQ="${TRAINER_SAVE_FREQ:-}"
+ASYNC_REQUIRE_BATCHES="${ASYNC_REQUIRE_BATCHES:-}"
+ASYNC_TRIGGER_PARAMETER_SYNC_STEP="${ASYNC_TRIGGER_PARAMETER_SYNC_STEP:-}"
+ASYNC_STALENESS_THRESHOLD="${ASYNC_STALENESS_THRESHOLD:-}"
+ASYNC_STEADY_WARMUP_STEPS="${ASYNC_STEADY_WARMUP_STEPS:-}"
 TRAIN_NNODES="${TRAIN_NNODES:-1}"
 ROLLOUT_NNODES="${ROLLOUT_NNODES:-1}"
 NNODES="${NNODES:-$((TRAIN_NNODES + ROLLOUT_NNODES))}"
@@ -250,6 +257,38 @@ build_overrides() {
 
   if [ -n "${RESOLVED_TOKENIZER}" ]; then
     overrides+=("actor_rollout_ref.model.tokenizer_path=${RESOLVED_TOKENIZER}")
+  fi
+
+  if [ -n "${ACTOR_PPO_MINI_BATCH_SIZE}" ]; then
+    overrides+=("actor_rollout_ref.actor.ppo_mini_batch_size=${ACTOR_PPO_MINI_BATCH_SIZE}")
+  fi
+
+  if [ -n "${ROLLOUT_TOTAL_ROLLOUT_STEPS}" ]; then
+    overrides+=("rollout.total_rollout_steps=${ROLLOUT_TOTAL_ROLLOUT_STEPS}")
+  fi
+
+  if [ -n "${TRAINER_TEST_FREQ}" ]; then
+    overrides+=("trainer.test_freq=${TRAINER_TEST_FREQ}")
+  fi
+
+  if [ -n "${TRAINER_SAVE_FREQ}" ]; then
+    overrides+=("trainer.save_freq=${TRAINER_SAVE_FREQ}")
+  fi
+
+  if [ -n "${ASYNC_REQUIRE_BATCHES}" ]; then
+    overrides+=("async_training.require_batches=${ASYNC_REQUIRE_BATCHES}")
+  fi
+
+  if [ -n "${ASYNC_TRIGGER_PARAMETER_SYNC_STEP}" ]; then
+    overrides+=("async_training.trigger_parameter_sync_step=${ASYNC_TRIGGER_PARAMETER_SYNC_STEP}")
+  fi
+
+  if [ -n "${ASYNC_STALENESS_THRESHOLD}" ]; then
+    overrides+=("async_training.staleness_threshold=${ASYNC_STALENESS_THRESHOLD}")
+  fi
+
+  if [ -n "${ASYNC_STEADY_WARMUP_STEPS}" ]; then
+    overrides+=("async_training.steady_warmup_steps=${ASYNC_STEADY_WARMUP_STEPS}")
   fi
 
   if [ "${USE_GROUP_FILTERING}" = "true" ]; then

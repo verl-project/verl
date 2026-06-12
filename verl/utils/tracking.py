@@ -73,6 +73,17 @@ class Tracking:
 
             import wandb
 
+            require_service = os.environ.get("WANDB_REQUIRE_SERVICE", "").strip()
+            if require_service:
+                try:
+                    wandb.require(require_service)
+                except Exception as exc:
+                    logger.warning(
+                        "wandb.require(%r) failed, continuing with default backend: %s",
+                        require_service,
+                        exc,
+                    )
+
             settings = None
             if config and config["trainer"].get("wandb_proxy", None):
                 settings = wandb.Settings(https_proxy=config["trainer"]["wandb_proxy"])
