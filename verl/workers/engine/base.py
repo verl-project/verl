@@ -110,6 +110,20 @@ class BaseEngine:
         """
         raise NotImplementedError
 
+    def forward_backward(self, data: TensorDict, loss_function: Callable) -> Any:
+        """
+        Perform forward and backward on a batch without stepping the optimizer.
+
+        Args:
+            data: The input data for training, typically containing tensors and metadata.
+            loss_function: A function that computes the loss and metrics given a batch and predictions.
+
+        Returns:
+            dict[str, torch.Tensor]: A dictionary containing the aggregated training metrics for the batch.
+        """
+        maybe_fix_3d_position_ids(data)
+        return self.forward_backward_batch(data, loss_function, forward_only=False)
+
     def train_batch(self, data: TensorDict, loss_function: Callable) -> Any:
         """
         Perform a training step on a batch of data.
@@ -121,10 +135,8 @@ class BaseEngine:
         Returns:
             dict[str, torch.Tensor]: A dictionary containing the aggregated training metrics for the batch.
         """
-        maybe_fix_3d_position_ids(data)
-
         self.optimizer_zero_grad()
-        outputs = self.forward_backward_batch(data, loss_function, forward_only=False)
+        outputs = self.forward_backward(data, loss_function)
         grad_norm = self.optimizer_step()
         if self.is_mp_src_rank_with_outputs():
             assert "grad_norm" not in outputs["metrics"]
@@ -239,6 +251,7 @@ class BaseEngineCtx:
         self.mode = mode
         assert self.mode in ("train", "eval")
         self.disable_auto_offload = kwargs.pop("disable_auto_offload", False)
+        self.zero_grad_on_exit = kwargs.pop("zero_grad_on_exit", True)
 
     def _context_switch(self, device):
         if self.disable_auto_offload:
