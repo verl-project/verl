@@ -895,7 +895,11 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 multi_modal_inputs=multi_modal_inputs,
                 temperature=temperature_value,
                 calculate_entropy=calculate_entropy,
-                pad_token_id=self.model_config.tokenizer.pad_token_id,
+                pad_token_id=(
+                    self.model_config.tokenizer.pad_token_id
+                    if self.model_config.tokenizer is not None
+                    else self.model_config.hf_config.pad_token_id
+                ),
             )
         else:
             if not isinstance(temperature, torch.Tensor):
@@ -957,7 +961,11 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 logits_processor=logits_processor,
                 logits_processor_args=logits_processor_args,
                 vision_model=hasattr(self.model_config.hf_config, "vision_config"),
-                pad_token_id=self.model_config.tokenizer.pad_token_id,
+                pad_token_id=(
+                    self.model_config.tokenizer.pad_token_id
+                    if self.model_config.tokenizer is not None
+                    else self.model_config.hf_config.pad_token_id
+                ),
                 data_format=data_format,
                 mtp_enable_train=self.model_config.mtp.enable and self.model_config.mtp.enable_train,
                 local_cp_size=local_cp_size,
@@ -1036,7 +1044,11 @@ class MegatronEngineWithValueHead(MegatronEngineWithLMHead):
             multi_modal_inputs,
             value_model=True,
             vision_model=hasattr(self.model_config.hf_config, "vision_config"),
-            pad_token_id=self.model_config.tokenizer.pad_token_id,
+            pad_token_id=(
+                self.model_config.tokenizer.pad_token_id
+                if self.model_config.tokenizer is not None
+                else self.model_config.hf_config.pad_token_id
+            ),
             data_format="thd" if self.engine_config.use_remove_padding else "bshd",
         )
 

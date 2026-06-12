@@ -489,8 +489,12 @@ class AgentLoopWorker:
         self.model_config: HFModelConfig = omega_conf_to_dataclass(model_config)
 
         self.dataset_cls = get_dataset_class(config.data)
-        self.tokenizer = self.model_config.tokenizer
-        self.processor = self.model_config.processor
+        if self.model_config.load_tokenizer:
+            self.tokenizer = self.model_config.get_tokenizer()
+            self.processor = self.model_config.processor
+        else:
+            self.tokenizer = None
+            self.processor = None
         self.mm_processor_kwargs = config.data.get("mm_processor_kwargs", {})
 
         # Online policy distillation
@@ -526,13 +530,11 @@ class AgentLoopWorker:
             for agent_loop_config in agent_loop_configs:
                 _agent_loop_registry[agent_loop_config.name] = agent_loop_config
         if self.model_config.get("custom_chat_template", None) is not None:
-            if self.model_config.processor is not None:
-                self.model_config.processor.chat_template = (
-                    self.model_config.custom_chat_template
-                )
-            self.model_config.tokenizer.chat_template = (
-                self.model_config.custom_chat_template
-            )
+            _tok = self.model_config.get_tokenizer()
+            _proc = self.model_config.processor
+            if _proc is not None:
+                _proc.chat_template = self.model_config.custom_chat_template
+            _tok.chat_template = self.model_config.custom_chat_template
 
         trace_config = self.rollout_config.trace
         RolloutTraceConfig.init(
@@ -949,7 +951,7 @@ class AgentLoopWorker:
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
     ) -> torch.Tensor:
         """Compute position ids for multi-modal inputs."""
-        if self.processor is None:
+        if self.processor is None or not hasattr(self.processor, "get_rope_index"):
             return compute_position_id_with_mask(attention_mask)  # (1, seq_len)
 
         multi_modal_kwargs = {

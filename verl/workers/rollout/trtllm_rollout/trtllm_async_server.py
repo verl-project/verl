@@ -70,6 +70,8 @@ def _resolve_chat_stop_tokens(model_config) -> tuple[int, list[int]]:
                     all_stop_ids.append(tid)
                 if chat_end_id is None:
                     chat_end_id = tid
+    elif getattr(model_config, "lazy_tokenizer", False) and getattr(model_config, "load_tokenizer", False):
+        pass
 
     primary_end_id = chat_end_id if chat_end_id is not None else eos_token_id
     logger.warning(f"TRT-LLM stop token IDs: {all_stop_ids}, end_id: {primary_end_id}")

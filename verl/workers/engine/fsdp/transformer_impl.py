@@ -194,7 +194,11 @@ class FSDPEngine(BaseEngine):
             model=self.module,
             optimizer=self.optimizer,
             lr_scheduler=self.lr_scheduler,
-            processing_class=self.model_config.get_processor(),
+            processing_class=(
+                None
+                if getattr(self.model_config, "lazy_tokenizer", False) or not getattr(self.model_config, "load_tokenizer", True)
+                else self.model_config.get_processor()
+            ),
             checkpoint_config=self.checkpoint_config,
             trust_remote_code=self.model_config.trust_remote_code,
         )

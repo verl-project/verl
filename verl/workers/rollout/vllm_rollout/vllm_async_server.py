@@ -400,8 +400,13 @@ class vLLMHttpServer:
 
         # Don't keep the dummy data in memory
         await engine_client.reset_mm_cache()
+        vocab_size = getattr(self.model_config.hf_config, "vocab_size", None)
+        if vocab_size is None and self.model_config.tokenizer is not None:
+            vocab_size = len(self.model_config.tokenizer)
+        if vocab_size is None:
+            vocab_size = len(self.model_config.get_tokenizer())
         await engine_client.collective_rpc(
-            method="monkey_patch_model", kwargs={"vocab_size": len(self.model_config.tokenizer)}
+            method="monkey_patch_model", kwargs={"vocab_size": int(vocab_size)}
         )
 
         build_app_sig = inspect.signature(build_app)

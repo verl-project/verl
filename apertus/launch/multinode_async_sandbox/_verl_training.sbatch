@@ -300,6 +300,7 @@ build_overrides() {
 
   if [ -n "${RESOLVED_TOKENIZER}" ]; then
     overrides+=("actor_rollout_ref.model.tokenizer_path=${RESOLVED_TOKENIZER}")
+    overrides+=("+actor_rollout_ref.model.lazy_tokenizer=true")
   fi
 
   if [ -n "${ACTOR_PPO_MINI_BATCH_SIZE}" ]; then
@@ -474,6 +475,41 @@ RESOLVED_MODEL="$(resolve_hf_path "${MODEL_NAME_OR_PATH}")"
 RESOLVED_TOKENIZER=""
 if [ -n "${TOKENIZER_NAME_OR_PATH}" ]; then
   RESOLVED_TOKENIZER="$(resolve_hf_path "${TOKENIZER_NAME_OR_PATH}")"
+fi
+
+if [ -n "${RESOLVED_TOKENIZER}" ] && [ -d "${RESOLVED_TOKENIZER}" ]; then
+  token_key="$(python3 -c "import hashlib,sys; print(hashlib.md5(sys.argv[1].encode()).hexdigest())" "${RESOLVED_TOKENIZER}")"
+  TOK_STAGE_ROOT="/tmp/verl-tokenizer-cache/${token_key}"
+  TOK_STAGE_PATH="${TOK_STAGE_ROOT}/$(basename "${RESOLVED_TOKENIZER}")"
+  echo "Staging tokenizer to ${TOK_STAGE_PATH} on all nodes..."
+  srun --overlap "${SRUN_ENV[@]}" --nodes="${NNODES}" --ntasks="${NNODES}" \
+    bash -lc "set -euo pipefail
+      src='${RESOLVED_TOKENIZER}'
+      dst='${TOK_STAGE_PATH}'
+      root='${TOK_STAGE_ROOT}'
+      ok=\"\${dst}/.staged.ok\"
+      lock=\"\${root}/.lock\"
+      if [ -f \"\${ok}\" ]; then
+        exit 0
+      fi
+      mkdir -p \"\${root}\"
+      while ! mkdir \"\${lock}\" 2>/dev/null; do
+        sleep 1
+      done
+      trap 'rmdir \"\${lock}\" 2>/dev/null || true' EXIT
+      if [ -f \"\${ok}\" ]; then
+        exit 0
+      fi
+      rm -rf \"\${dst}\"
+      mkdir -p \"\${dst}\"
+      if command -v rsync >/dev/null 2>&1; then
+        rsync -a \"\${src}/\" \"\${dst}/\"
+      else
+        cp -a \"\${src}/.\" \"\${dst}/\"
+      fi
+      touch \"\${ok}\"
+    "
+  RESOLVED_TOKENIZER="${TOK_STAGE_PATH}"
 fi
 
 # Shared HuggingFace cache prevents repeated downloads across runs/workers.
