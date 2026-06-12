@@ -132,6 +132,20 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         entropy_coeff = config.entropy_coeff
         policy_loss -= entropy_coeff * entropy_loss
         metrics["actor/entropy_loss"] = Metric(value=entropy_loss, aggregation=metric_aggregation)
+        response_token_index = response_mask.to(torch.long).cumsum(dim=-1)
+        first_30_response_mask = response_mask & (response_token_index <= 30)
+        first_30_entropy_loss = agg_loss(
+            loss_mat=entropy,
+            loss_mask=first_30_response_mask,
+            loss_agg_mode=loss_agg_mode,
+            **config.global_batch_info,
+        )
+        first_30_token_count = first_30_response_mask.sum().clamp(min=1)
+        first_30_token_mean = masked_sum(entropy, first_30_response_mask) / first_30_token_count
+        metrics["actor/entropy_first_30_loss"] = Metric(value=first_30_entropy_loss, aggregation=metric_aggregation)
+        metrics["actor/entropy_first_30_token_mean"] = Metric(
+            value=first_30_token_mean, aggregation=AggregationType.MEAN
+        )
 
     # add kl loss
     if config.use_kl_loss:
