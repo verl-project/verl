@@ -204,8 +204,6 @@ class ServerAdapter(BaseRollout):
         model_path: str,
         trust_remote_code: bool = False,
         torch_dtype: str = "bfloat16",
-        rtol: float = 1e-5,
-        atol: float = 1e-8,
         max_mismatches: int = 10,
         timeout: float | None = None,
     ):
@@ -217,8 +215,6 @@ class ServerAdapter(BaseRollout):
                 "model_path": model_path,
                 "trust_remote_code": trust_remote_code,
                 "torch_dtype": torch_dtype,
-                "rtol": rtol,
-                "atol": atol,
                 "max_mismatches": max_mismatches,
             },
         )

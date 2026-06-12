@@ -22,8 +22,6 @@ def assert_weight_sync_equal(
     actual_state_dict: dict[str, torch.Tensor],
     num_hidden_layers: int,
     tie_word_embeddings: bool = False,
-    rtol: float = 1e-5,
-    atol: float = 1e-8,
     max_mismatches: int = 10,
 ) -> dict[str, Any]:
     """Compare source HF weights against backend-loaded weights.
@@ -48,7 +46,7 @@ def assert_weight_sync_equal(
             return
 
         expected_weight = expected_weight.to(device=actual_weight.device, dtype=actual_weight.dtype)
-        if not torch.allclose(expected_weight, actual_weight, rtol=rtol, atol=atol):
+        if not torch.equal(expected_weight, actual_weight):
             max_abs_diff = (expected_weight - actual_weight).abs().max().item()
             mismatched.append(f"{name}: max_abs_diff={max_abs_diff}")
 

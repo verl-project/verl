@@ -344,8 +344,6 @@ class CheckpointEngineWorker(Worker):
         model_path: str | None = None,
         trust_remote_code: bool | None = None,
         torch_dtype: str = "bfloat16",
-        rtol: float = 1e-5,
-        atol: float = 1e-8,
         max_mismatches: int = 10,
         timeout: float | None = None,
     ):
@@ -359,8 +357,6 @@ class CheckpointEngineWorker(Worker):
             model_path=model_path or self.model_config.path,
             trust_remote_code=self.model_config.trust_remote_code if trust_remote_code is None else trust_remote_code,
             torch_dtype=torch_dtype,
-            rtol=rtol,
-            atol=atol,
             max_mismatches=max_mismatches,
             timeout=timeout,
         )
@@ -462,8 +458,6 @@ class CheckpointEngineManager:
 
         summaries = rollout.check_loaded_weights_equal(
             torch_dtype=self.config.check_weight_sync_dtype,
-            rtol=self.config.check_weight_sync_rtol,
-            atol=self.config.check_weight_sync_atol,
             max_mismatches=self.config.check_weight_sync_max_mismatches,
             timeout=self.config.check_weight_sync_timeout,
         )
