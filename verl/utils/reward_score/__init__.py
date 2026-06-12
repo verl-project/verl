@@ -18,6 +18,13 @@ import os
 from verl.utils.import_utils import deprecated
 
 
+def _code_sandbox_backend():
+    backend = os.environ.get("SANDBOX_BACKEND", "kubernetes")
+    if backend not in {"kubernetes", "codegym"}:
+        raise ValueError("SANDBOX_BACKEND must be 'kubernetes' or 'codegym'")
+    return backend
+
+
 def _code_test_cases_for_prime_code(ground_truth, extra_info):
     if isinstance(extra_info, dict):
         for key in ("prime_code_input_output", "input_output"):
@@ -114,27 +121,37 @@ def default_compute_score(
     elif data_source in [
         "taco",
         "likaixin/TACO-verified",
+        "lighteval/code_generation_lite",
         "codecontests",
         "deepmind/code_contests",
+        "kodcode",
+        "code_contests",
         "apps",
         "codeforces",
     ]:
-        scheduler_url = sandbox_fusion_url or os.environ.get("SCHEDULER_URL")
-        if scheduler_url:
-            from . import codegym_sandbox
+        # Select code evaluation sandbox backend
+        sandbox_backend = _code_sandbox_backend()
+        if sandbox_backend == "kubernetes":
+            sandbox_url = sandbox_fusion_url or os.environ.get("KUBERNETES_SANDBOX_URL")
+            from . import kubernetes_sandbox as code_sandbox
+        elif sandbox_backend == "codegym":
+            sandbox_url = sandbox_fusion_url or os.environ.get("SCHEDULER_URL")
+            from . import codegym_sandbox as code_sandbox
+        else:
+            sandbox_url = None
 
-            res = codegym_sandbox.compute_score(
+        if sandbox_url:
+            res = code_sandbox.compute_score(
                 data_source=data_source,
                 solution_str=solution_str,
                 ground_truth=ground_truth,
                 extra_info=extra_info,
-                sandbox_fusion_url=scheduler_url,
+                sandbox_fusion_url=sandbox_url,
                 concurrent_semaphore=concurrent_semaphore,
                 memory_limit_mb=memory_limit_mb,
                 continuous=continuous,
             )
         else:
-            # Fallback to prime code scoring
             from . import prime_code
 
             test_cases = _code_test_cases_for_prime_code(ground_truth, extra_info)

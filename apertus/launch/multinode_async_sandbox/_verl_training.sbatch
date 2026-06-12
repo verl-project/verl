@@ -65,9 +65,13 @@ ENVIRONMENT_PATH="${ENVIRONMENT_PATH:-/users/${USERNAME}/.edf/async.toml}"
 SRUN_ENV=(--environment="${ENVIRONMENT_PATH}" --container-writable)
 
 # Sandbox and code reward settings
+## sandbox backend and url
+SANDBOX_BACKEND="${SANDBOX_BACKEND:-kubernetes}"
+KUBERNETES_SANDBOX_URL="${KUBERNETES_SANDBOX_URL:-}"
+## sandbox parameters
 DEFAULT_MEMORY_LIMIT_MB="${DEFAULT_MEMORY_LIMIT_MB:-512}"
-CODEGYM_REWARD_MAX_CONCURRENT="${CODEGYM_REWARD_MAX_CONCURRENT:-64}"
-CODEGYM_REWARD_CONTINUOUS="${CODEGYM_REWARD_CONTINUOUS:-false}"
+SANDBOX_REWARD_MAX_CONCURRENT="${SANDBOX_REWARD_MAX_CONCURRENT:-64}"
+SANDBOX_REWARD_CONTINUOUS="${SANDBOX_REWARD_CONTINUOUS:-false}"
 
 # Extra packages needed for scoring are installed once into a target dir 
 # so every node can use them and avoid repeated installations
@@ -148,6 +152,22 @@ is_truthy() {
 }
 
 build_overrides() {
+  local reward_sandbox_url=""
+  case "${SANDBOX_BACKEND}" in
+    kubernetes)
+      reward_sandbox_url="${KUBERNETES_SANDBOX_URL:-}"
+      ;;
+    codegym)
+      reward_sandbox_url="${SCHEDULER_URL:-}"
+      ;;
+    none)
+      ;;
+    *)
+      echo "Unsupported SANDBOX_BACKEND=${SANDBOX_BACKEND}. Use codegym, kubernetes, or none." >&2
+      exit 1
+      ;;
+  esac
+
   overrides=(
     "--config-name=${CONFIG_NAME}"
     "data.train_files=['${TRAIN_FILE}']"
@@ -169,8 +189,8 @@ build_overrides() {
     "rollout.nnodes=${ROLLOUT_NNODES}"
     "rollout.n_gpus_per_node=${ROLLOUT_GPUS_PER_NODE}"
     "reward.sandbox_fusion.memory_limit_mb=${DEFAULT_MEMORY_LIMIT_MB}"
-    "reward.sandbox_fusion.max_concurrent=${CODEGYM_REWARD_MAX_CONCURRENT}"
-    "+reward.sandbox_fusion.continuous=${CODEGYM_REWARD_CONTINUOUS}"
+    "reward.sandbox_fusion.max_concurrent=${SANDBOX_REWARD_MAX_CONCURRENT}"
+    "+reward.sandbox_fusion.continuous=${SANDBOX_REWARD_CONTINUOUS}"
     "trainer.project_name=${PROJECT_NAME}"
     "trainer.experiment_name=${RUN_NAME}"
     "trainer.default_local_dir=${RUN_DIR}"
@@ -186,6 +206,7 @@ build_overrides() {
     "+ray_kwargs.ray_init.runtime_env.env_vars.MATH_VERIFY_PYTHONPATH=${PY_DEPS_DIR}"
     "+ray_kwargs.ray_init.runtime_env.env_vars.WANDB_ENTITY=${WANDB_ENTITY}"
     "+ray_kwargs.ray_init.runtime_env.env_vars.NO_FORMAT='${NO_FORMAT}'"
+    "+ray_kwargs.ray_init.runtime_env.env_vars.SANDBOX_BACKEND='${SANDBOX_BACKEND}'"
   )
 
   if is_truthy "${NO_FORMAT}"; then
@@ -210,14 +231,20 @@ build_overrides() {
     )
   fi
 
-  if [ -n "${SCHEDULER_URL:-}" ]; then
+  if [ -n "${reward_sandbox_url}" ]; then
     overrides+=(
-      "reward.sandbox_fusion.url='${SCHEDULER_URL}'"
-      "+ray_kwargs.ray_init.runtime_env.env_vars.SCHEDULER_URL='${SCHEDULER_URL}'"
+      "reward.sandbox_fusion.url='${reward_sandbox_url}'"
     )
   fi
+  if [ -n "${SCHEDULER_URL:-}" ]; then
+    overrides+=("+ray_kwargs.ray_init.runtime_env.env_vars.SCHEDULER_URL='${SCHEDULER_URL}'")
+  fi
+  if [ -n "${KUBERNETES_SANDBOX_URL:-}" ]; then
+    overrides+=("+ray_kwargs.ray_init.runtime_env.env_vars.KUBERNETES_SANDBOX_URL='${KUBERNETES_SANDBOX_URL}'")
+  fi
 
-  if [ "${NO_CODE}" = "true" ]; then
+  if [ "${SANDBOX_BACKEND}" = "none" ]; then
+    echo "SANDBOX_BACKEND=none, disabling code data and skipping sandbox configuration." >&2
     overrides+=("+data.exclude_abilities=[code]")
   fi
 
@@ -339,8 +366,11 @@ export DEPS_STAMP
 export DEPS_LOCK
 export EXTRA_PIP_PACKAGES
 export SCHEDULER_URL
+export KUBERNETES_SANDBOX_URL
+export SANDBOX_BACKEND
 export DEFAULT_MEMORY_LIMIT_MB
-export CODEGYM_REWARD_MAX_CONCURRENT
+export SANDBOX_REWARD_MAX_CONCURRENT
+export SANDBOX_REWARD_CONTINUOUS
 export NO_FORMAT
 export PYTHONUNBUFFERED="1"
 # export RAY_DEDUP_LOGS="0"

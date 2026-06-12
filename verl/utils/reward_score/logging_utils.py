@@ -40,6 +40,25 @@ def log_reward_warning(
     )
 
 
+def log_reward_info(
+    logger: logging.Logger,
+    verifier: str,
+    message: str,
+    *,
+    data_source: str | None = None,
+    exc: BaseException | None = None,
+) -> None:
+    _log_reward_event(
+        logger,
+        logging.INFO,
+        "info",
+        verifier,
+        message,
+        data_source=data_source,
+        exc=exc,
+    )
+
+
 def log_reward_error(
     logger: logging.Logger,
     verifier: str,

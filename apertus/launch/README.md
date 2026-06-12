@@ -6,16 +6,18 @@ different Slurm configurations.
 ## Multi-node Async Training With Sandbox Rewards
 
 The [`multinode_async_sandbox/`](./multinode_async_sandbox/) launcher starts a
-code-gym sandbox scheduler and then submits a multi-node async VERL training job
-that uses the scheduler for reward evaluation.
+multi-node async VERL training job with sandbox-backed code rewards. It now uses
+the Kubernetes sandbox service by default; code-gym is still available as an
+explicit backend.
 
 The launcher is split into three files:
 
 - [`launch.sh`](./multinode_async_sandbox/launch.sh) configures the experiment,
-  submits the sandbox scheduler, waits for it to become reachable, and then
-  submits the training job.
+  checks or starts the configured sandbox backend, and then submits the training
+  job.
 - [`_sandbox_scheduler.sbatch`](./multinode_async_sandbox/_sandbox_scheduler.sbatch)
-  runs the code-gym scheduler and native sandbox workers.
+  runs the code-gym scheduler and native sandbox workers, **only when
+  `SANDBOX_BACKEND=codegym`** (by default the backend is `kubernetes`).
 - [`_verl_training.sbatch`](./multinode_async_sandbox/_verl_training.sbatch)
   starts Ray across the training and rollout nodes, then runs
   `verl.experimental.fully_async_policy.fully_async_main`.
@@ -28,13 +30,14 @@ configuration by default.
 
 Before launching, check the path variables near the top of
 [`launch.sh`](./multinode_async_sandbox/launch.sh). Update them if your VERL
-checkout, cache directories, code-gym checkout, or training data live elsewhere.
+checkout, cache directories, sandbox backend, or training data live elsewhere.
 
 ```bash
 WORKING_DIR=/iopsstor/scratch/cscs/$USER/projects/verl
 HOME=/iopsstor/scratch/cscs/$USER
 HF_HOME=/iopsstor/scratch/cscs/$USER/huggingface
-CODE_GYM_DIR=/iopsstor/scratch/cscs/$USER/projects/code-gym
+SANDBOX_BACKEND=kubernetes
+KUBERNETES_SANDBOX_URL=https://sandbox-dev.swissai.svc.cscs.ch/harness-test
 TRAINING_DATA_DIR=/capstor/store/cscs/swissai/infra01/reasoning/data/RL-prod/apertus_demo_rl
 ```
 
@@ -53,6 +56,14 @@ values to review are:
 - `CONFIG_NAME`: VERL config name, defaults to `async`.
 - `TRAIN_NNODES` and `ROLLOUT_NNODES`: number of training and rollout nodes.
 - `SLURM_TIME`: scheduler and training job time limit.
+- `SANDBOX_BACKEND`: `kubernetes`, `codegym`, or `none`. `none` excludes code
+  tasks.
+- `KUBERNETES_SANDBOX_URL`: Kubernetes sandbox service URL when using
+  `SANDBOX_BACKEND=kubernetes`.
+- `CODE_GYM_DIR` or `SCHEDULER_URL`: code-gym checkout or existing scheduler URL
+  when using `SANDBOX_BACKEND=codegym`.
+- `SANDBOX_REWARD_CONTINUOUS`: whether code rewards are fractional instead of
+  binary.
 - `ENABLE_THINKING`, `FORCE_THINKING`, and `THINK_PREFIX_TOKEN`: thinking-token
   controls for the data/chat template.
 - `ROLLOUT_N`, `SEED`, and `USE_GROUP_FILTERING`: rollout and optimization
@@ -66,8 +77,15 @@ ${WORKING_DIR}/outputs/${PROJECT_NAME}/${RUN_NAME}
 ```
 
 ## Prepare gyms
+### Kubernetes sandbox
+
+The default backend is the Kubernetes sandbox. `launch.sh` checks
+`KUBERNETES_SANDBOX_URL` with `curl` before submitting the training job.
+The code evaluation endpoint on kubernetes is only reachable with EPFL/ETH VPNs or CSCS network.
+
 ### Prepare code-gym
-> ⚠️ *soon to be deprecated in favor of sandbox env running on Kubernetes*
+
+Use this only when running with `SANDBOX_BACKEND=codegym`.
 
 Clone the `code-gym` repository at the path configured by `CODE_GYM_DIR`:
 
@@ -75,7 +93,8 @@ Clone the `code-gym` repository at the path configured by `CODE_GYM_DIR`:
 git clone https://github.com/swiss-ai/code-gym.git /iopsstor/scratch/cscs/$USER/projects/code-gym
 ```
 
-If you choose a different location, update `CODE_GYM_DIR` in `launch.sh`.
+If you choose a different location, update `CODE_GYM_DIR` in `launch.sh`, or set
+`SCHEDULER_URL` to reuse an already running code-gym scheduler.
 
 ### Prepare r-gym
 Clone the `r-gym` repository at the path configured by `REASONING_GYM_DIR` and checkout the `translate` branch. This repository contains more tasks than the one supported by `reasoning_gym` package.
@@ -97,11 +116,14 @@ cd apertus/launch/multinode_async_sandbox
 bash launch.sh
 ```
 
-`launch.sh` submits the scheduler first, waits until it is running, builds the
-scheduler URL, and then submits the training job with `SCHEDULER_URL` injected.
+With the default Kubernetes backend, `launch.sh` checks the configured
+`KUBERNETES_SANDBOX_URL` and then submits the training job. With
+`SANDBOX_BACKEND=codegym`, it submits or reuses a code-gym scheduler and injects
+`SCHEDULER_URL` into training.
 
-To reuse an already running scheduler, set `SCHEDULER_URL` before launching:
+To reuse an already running code-gym scheduler, set `SANDBOX_BACKEND=codegym`
+and `SCHEDULER_URL` before launching:
 
 ```bash
-SCHEDULER_URL=http://<scheduler-node>:8000 bash launch.sh
+SANDBOX_BACKEND=codegym SCHEDULER_URL=http://<scheduler-node>:8000 bash launch.sh
 ```

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# Submit a code-gym sandbox scheduler job and, once reachable, submit the
-# multi-node VERL training job with SCHEDULER_URL injected.
+# Submit a multi-node VERL training job with either a code-gym scheduler or a
+# Kubernetes sandbox service configured for code reward evaluation.
 # 
 # Credits: https://github.com/swiss-ai/code-gym/tree/main
 
@@ -45,19 +45,15 @@ JOB_NAME="${JOB_NAME:-debug}"
 
 # Set REASONING_GYM_DIR="" to install reasoning-gym from PyPI.
 REASONING_GYM_DIR="${REASONING_GYM_DIR-${SCRATCH_HOME}/projects/r-gym}"
-CODE_GYM_DIR="${CODE_GYM_DIR:-${SCRATCH_HOME}/projects/code-gym}"
+SANDBOX_BACKEND="kubernetes"  # kubernetes, codegym, or none
+KUBERNETES_SANDBOX_URL="https://sandbox-dev.swissai.svc.cscs.ch"
+CODE_GYM_DIR="" # ${SCRATCH_HOME}/projects/code-gym}  # Not needed if using kubernetes
 PORT="${PORT:-8000}"
 POLL_SECS="${POLL_SECS:-3}"
 MAX_WAIT="${MAX_WAIT:-$((60 * 10))}"
-GIVEN_URL="${SCHEDULER_URL:-}"  # potentially reuse running scheduler
-NO_CODE="${NO_CODE:-false}"  # exclude code tasks (no sandbox required)
+GIVEN_URL="${SCHEDULER_URL:-}"  # potentially reuse a running code-gym scheduler
 NO_FORMAT="${NO_FORMAT:-false}"  # disable tool-formatting (legacy plain-text rollouts)
-SKIP_SANDBOX_SCHEDULER="${SKIP_SANDBOX_SCHEDULER:-false}"  # don't start/probe scheduler when true
-CODEGYM_REWARD_CONTINUOUS="${CODEGYM_REWARD_CONTINUOUS:-false}" # default is binary reward
-
-if [[ "${NO_CODE}" == "true" ]]; then
-  SKIP_SANDBOX_SCHEDULER="true"
-fi
+SANDBOX_REWARD_CONTINUOUS="${SANDBOX_REWARD_CONTINUOUS:-false}" # default is binary reward
 
 log(){ echo -e "$*" >&2; }
 
@@ -125,21 +121,55 @@ probe_ok() {
   fi
 }
 
+resolve_sandbox_backend() {
+  case "${SANDBOX_BACKEND}" in
+    codegym|kubernetes)
+      ;;
+    none)
+      ;;
+    *)
+      echo "Unsupported SANDBOX_BACKEND=${SANDBOX_BACKEND}. Use codegym, kubernetes, or none." >&2
+      exit 1
+      ;;
+  esac
+
+  if [[ "${SANDBOX_BACKEND}" == "kubernetes" ]]; then
+    if [[ -z "${KUBERNETES_SANDBOX_URL}" ]]; then
+      echo "KUBERNETES_SANDBOX_URL must be set when using SANDBOX_BACKEND=kubernetes." >&2
+      exit 1
+    fi
+    KUBERNETES_SANDBOX_URL="${KUBERNETES_SANDBOX_URL%/}"
+  elif [[ "${SANDBOX_BACKEND}" == "codegym" && -z "${CODE_GYM_DIR}" && -z "${GIVEN_URL}" ]]; then
+    echo "CODE_GYM_DIR or SCHEDULER_URL must be set when using SANDBOX_BACKEND=codegym." >&2
+    exit 1
+  fi
+}
+
 resolve_run_name_and_dir
 clear_inherited_pyxis_options
+resolve_sandbox_backend
 
 # ==========================================
-# STEP 1 & 2: Scheduler logic (or skip)
+# STEP 1 & 2: Sandbox setup
 # ==========================================
-if [[ "${SKIP_SANDBOX_SCHEDULER}" == "true" ]]; then
-  log "\n[1/4 & 2/4] Sandbox scheduler disabled for this run"
+if [[ "${SANDBOX_BACKEND}" == "none" ]]; then
+  log "\n[1/4 & 2/4] Code sandbox disabled for this run"
   URL=""
+  NODE_CLEAN="n/a"
+  SCHED_ID="skipped"
+elif [[ "${SANDBOX_BACKEND}" == "kubernetes" ]]; then
+  log "\n[1/4 & 2/4] Check Kubernetes sandbox"
+  if ! curl -fsS --max-time 10 "${KUBERNETES_SANDBOX_URL}/" >/dev/null; then
+    echo "Kubernetes sandbox is not reachable at ${KUBERNETES_SANDBOX_URL}" >&2
+    exit 1
+  fi
+  URL="${KUBERNETES_SANDBOX_URL}"
   NODE_CLEAN="n/a"
   SCHED_ID="skipped"
 elif [[ -z "${GIVEN_URL}" ]]; then
   [[ -f "${SCHED_SCRIPT}" ]] || { echo "Missing ${SCHED_SCRIPT}" >&2; exit 1; }
 
-  log "\n[1/4] Submit sandbox scheduler"
+  log "\n[1/4] Submit code-gym sandbox scheduler"
   log "  -> job-name=${SCHED_JOB_NAME} time=${SLURM_TIME}"
   SCHED_SUBMIT="$(sbatch \
     --job-name="${SCHED_JOB_NAME}" \
@@ -175,9 +205,11 @@ elif [[ -z "${GIVEN_URL}" ]]; then
 
   NODE_CLEAN="$(sed -E 's/[\[\],]//g; s/ .*//g' <<<"${node}")"
   URL="http://${NODE_CLEAN}:${PORT}"
+  SCHEDULER_URL="${URL}"
 else
-  log "\n[1/4 & 2/4] Reusing scheduler ${GIVEN_URL}"
+  log "\n[1/4 & 2/4] Reusing code-gym scheduler ${GIVEN_URL}"
   URL="${GIVEN_URL%/}"
+  SCHEDULER_URL="${URL}"
   SCHED_ID="skipped"
   HOST_PORT="${URL#*://}"
   NODE_CLEAN="${HOST_PORT%:*}"
@@ -188,10 +220,10 @@ else
 fi
 
 # ==========================================
-# STEP 3: Probe TCP (Skip when scheduler disabled)
+# STEP 3: Report sandbox endpoint
 # ==========================================
-if [[ -n "${URL}" ]]; then
-  log "\n[3/4] Probe scheduler ${NODE_CLEAN}:${PORT}"
+if [[ -n "${URL}" && "${SANDBOX_BACKEND}" == "codegym" ]]; then
+  log "\n[3/4] Probe code-gym scheduler ${NODE_CLEAN}:${PORT}"
   elapsed=0
   until probe_ok "${NODE_CLEAN}" "${PORT}" "${URL}"; do
     (( elapsed += POLL_SECS ))
@@ -199,8 +231,10 @@ if [[ -n "${URL}" ]]; then
     sleep "${POLL_SECS}"
   done
   log "  -> Scheduler reachable at ${URL}"
+elif [[ -n "${URL}" ]]; then
+  log "\n[3/4] Kubernetes sandbox reachable at ${URL}"
 else
-  log "\n[3/4] No scheduler probe needed"
+  log "\n[3/4] No sandbox probe needed"
 fi
 
 # ==========================================
@@ -211,12 +245,12 @@ log "  -> job-name=${TRAIN_JOB_NAME} time=${SLURM_TIME} train=${TRAIN_NNODES} ro
 log "  -> config=${CONFIG_NAME} model=${MODEL_NAME_OR_PATH}"
 log "  -> data=${TRAINING_DATA_DIR} seed=${SEED} rollout_n=${ROLLOUT_N}"
 log "  -> group_filtering=${USE_GROUP_FILTERING} enable_thinking=${ENABLE_THINKING} force_thinking=${FORCE_THINKING}"
-log "  -> no_format=${NO_FORMAT} no_code=${NO_CODE}"
+log "  -> no_format=${NO_FORMAT}"
 log "  -> output=${RUN_DIR}"
 if [[ -n "${URL}" ]]; then
-  log "  -> scheduler=${URL} code-gym continuous=${CODEGYM_REWARD_CONTINUOUS}"
+  log "  -> sandbox_backend=${SANDBOX_BACKEND} sandbox_url=${URL} continuous=${SANDBOX_REWARD_CONTINUOUS}"
 else
-  log "  -> scheduler=disabled code-gym continuous=${CODEGYM_REWARD_CONTINUOUS}"
+  log "  -> sandbox_backend=${SANDBOX_BACKEND} sandbox_url=disabled continuous=${SANDBOX_REWARD_CONTINUOUS}"
 fi
 log "  -> reasoning-gym=${REASONING_GYM_DIR:-PyPI reasoning-gym}"
 
@@ -235,8 +269,10 @@ join_export_vars() {
 
 EXPORT_VARS=(
   "ALL"
-  "SCHEDULER_URL=${URL}"
-  "CODEGYM_REWARD_CONTINUOUS=${CODEGYM_REWARD_CONTINUOUS}"
+  "SANDBOX_BACKEND=${SANDBOX_BACKEND}"
+  "SCHEDULER_URL=${SCHEDULER_URL:-}"
+  "KUBERNETES_SANDBOX_URL=${KUBERNETES_SANDBOX_URL:-}"
+  "SANDBOX_REWARD_CONTINUOUS=${SANDBOX_REWARD_CONTINUOUS}"
   "MODEL_NAME_OR_PATH=${MODEL_NAME_OR_PATH}"
   "TOKENIZER_NAME_OR_PATH=${TOKENIZER_NAME_OR_PATH}"
   "CONFIG_NAME=${CONFIG_NAME}"
@@ -244,7 +280,6 @@ EXPORT_VARS=(
   "TRAIN_NNODES=${TRAIN_NNODES}"
   "ROLLOUT_NNODES=${ROLLOUT_NNODES}"
   "TRAINING_DATA_DIR=${TRAINING_DATA_DIR}"
-  "NO_CODE=${NO_CODE}"
   "NO_FORMAT=${NO_FORMAT}"
   "ENABLE_THINKING=${ENABLE_THINKING}"
   "FORCE_THINKING=${FORCE_THINKING}"

@@ -1,6 +1,8 @@
 """
-Reward client for the code-gym scheduler + fusion sandbox.
+Deprecated reward client for the code-gym scheduler + fusion sandbox.
 Evaluate generated code via the /evaluate_test_cases API.
+
+Use verl.utils.reward_score.kubernetes_sandbox for new code reward evaluation.
 
 Credits:
 https://github.com/swiss-ai/code-gym/tree/main
@@ -16,6 +18,8 @@ import re
 from typing import Any
 
 import requests
+
+from verl.utils.import_utils import deprecated
 
 from .logging_utils import get_reward_logger, log_reward_error
 
@@ -188,6 +192,7 @@ def request_unit_tests(
         return {}
 
 
+@deprecated("verl.utils.reward_score.kubernetes_sandbox.compute_score")
 def compute_score(
     data_source: str,
     solution_str: str,

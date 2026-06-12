@@ -163,6 +163,19 @@ TRAIN_DATASETS = [
         answer_key="input_output",
         solution_key="solutions",
     ),
+    # TODO: replace the path with a shared one and uncomment this dataset config
+    # DatasetConfig(
+    #     enabled=True,
+    #     name="KodCode-verified",
+    #     dataset_id="/iopsstor/scratch/cscs/rmachace/code-gym/src/kodcode_50k_verified",
+    #     split="train",
+    #     adapter="kodcode",
+    #     data_source="kodcode",
+    #     question_key="question",
+    #     solution_key="solution",
+    #     answer_key="test_cases",
+    #     sample_size=None,
+    # ),
     DatasetConfig(
         name="rgym",
         dataset_id="/capstor/store/cscs/swissai/infra01/reasoning/data/RL-prod/rgym/train.parquet",
@@ -672,7 +685,34 @@ def adapt_taco(
 def adapt_apps(
     example: dict[str, Any], idx: int, split: str, config: DatasetConfig
 ) -> dict[str, Any]:
-    return make_code_row(example, idx, split, config, "lighteval/code_generation_lite")
+    return make_code_row(example, idx, split, config, "likaixin/TACO-verified")
+
+
+@register_adapter("kodcode")
+def adapt_kodcode(
+    example: dict[str, Any], idx: int, split: str, config: DatasetConfig
+) -> dict[str, Any]:
+    question = normalize_text(get_value(example, "question"))
+    test_cases = get_value(example, "test_cases")
+    prompt = make_prompt(format_code_prompt(question, ""))
+    ground_truth = json_dumps(test_cases)
+    extra_info = {
+        "question": question,
+        "question_id": normalize_text(get_value(example, "question_id")),
+        "test_cases": test_cases,
+        "num_used_tests": len(test_cases),
+        "language": "python",
+        "sandbox_data_source": "Muennighoff/mbpp",
+    }
+    return make_row(
+        config=config,
+        split=split,
+        index=idx,
+        prompt=prompt,
+        ability="code",
+        ground_truth=ground_truth,
+        extra_info=extra_info,
+    )
 
 
 @register_adapter("code_contests")
@@ -700,7 +740,7 @@ def adapt_code_contests(
             "language": "python",
             "input_output": json_dumps(test_cases),
             "prime_code_input_output": json_dumps(test_cases),
-            "sandbox_data_source": "lighteval/code_generation_lite",
+            "sandbox_data_source": "likaixin/TACO-verified",
             "num_used_tests": len(test_cases["inputs"]),
         },
     )
@@ -732,7 +772,7 @@ def adapt_codeforces(
             "language": "python",
             "input_output": ground_truth,
             "prime_code_input_output": ground_truth,
-            "sandbox_data_source": "lighteval/code_generation_lite",
+            "sandbox_data_source": "likaixin/TACO-verified",
         },
     )
 
@@ -1141,6 +1181,10 @@ def load_raw_dataset(config: DatasetConfig) -> datasets.Dataset:
             data_files={config.split: config.dataset_id},
             split=config.split,
             cache_dir=os.path.expanduser(DATASETS_CACHE_DIR),
+        )
+    elif os.path.isdir(config.dataset_id):
+        raw_dataset = datasets.load_from_disk(
+            config.dataset_id, 
         )
     else:
         raw_dataset = datasets.load_dataset(
