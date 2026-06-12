@@ -17,6 +17,20 @@ from typing import Any
 import torch
 
 
+def assert_vllm_weight_sync_supported_parallelism(parallel_config: Any) -> None:
+    """Validate the vLLM parallelism modes covered by loaded-weight checks."""
+    tp_size = int(getattr(parallel_config, "tensor_parallel_size", 1) or 1)
+    dp_size = int(getattr(parallel_config, "data_parallel_size", 1) or 1)
+    dp_local_size = int(getattr(parallel_config, "data_parallel_size_local", 1) or 1)
+    if tp_size != 1 or dp_size != 1 or dp_local_size != 1:
+        raise NotImplementedError(
+            "vLLM loaded-weight equality check currently supports "
+            "tensor_parallel_size=1 and data_parallel_size=1 only. "
+            f"Got tensor_parallel_size={tp_size}, data_parallel_size={dp_size}, "
+            f"data_parallel_size_local={dp_local_size}."
+        )
+
+
 def assert_weight_sync_equal(
     expected_state_dict: dict[str, torch.Tensor],
     actual_state_dict: dict[str, torch.Tensor],

@@ -12,11 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
 from verl.checkpoint_engine.base import CheckpointEngineManager
-from verl.checkpoint_engine.weight_sync import assert_weight_sync_equal
+from verl.checkpoint_engine.weight_sync import assert_vllm_weight_sync_supported_parallelism, assert_weight_sync_equal
 from verl.workers.config import CheckpointEngineConfig
 
 
@@ -35,6 +37,26 @@ def test_checkpoint_engine_manager_checks_initial_sync_only():
 
     manager.config = CheckpointEngineConfig(check_weight_sync=True, check_weight_sync_only=True)
     assert manager._should_check_loaded_weights_equal(1)
+
+
+def test_vllm_weight_sync_parallelism_check_accepts_tp1_dp1():
+    parallel_config = SimpleNamespace(tensor_parallel_size=1, data_parallel_size=1, data_parallel_size_local=1)
+
+    assert_vllm_weight_sync_supported_parallelism(parallel_config)
+
+
+@pytest.mark.parametrize(
+    "parallel_config",
+    [
+        SimpleNamespace(tensor_parallel_size=2, data_parallel_size=1, data_parallel_size_local=1),
+        SimpleNamespace(tensor_parallel_size=1, data_parallel_size=2, data_parallel_size_local=1),
+        SimpleNamespace(tensor_parallel_size=1, data_parallel_size=2, data_parallel_size_local=2),
+        SimpleNamespace(tensor_parallel_size=1, data_parallel_size=1, data_parallel_size_local=2),
+    ],
+)
+def test_vllm_weight_sync_parallelism_check_rejects_uncovered_parallelism(parallel_config):
+    with pytest.raises(NotImplementedError, match="tensor_parallel_size=1 and data_parallel_size=1"):
+        assert_vllm_weight_sync_supported_parallelism(parallel_config)
 
 
 def test_assert_weight_sync_equal_accepts_direct_state_dict():

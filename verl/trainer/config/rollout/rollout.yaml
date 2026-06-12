@@ -292,7 +292,8 @@ checkpoint_engine:
   custom_backend_module: null
 
   # Compare initial rollout backend-loaded weights with the source HF checkpoint.
-  # Currently implemented for vLLM backend checks with tensor_model_parallel_size=1.
+  # Currently implemented for vLLM backend checks with tensor_model_parallel_size=1
+  # and data_parallel_size=1.
   check_weight_sync: False
 
   # Exit after the initial weight-sync check. Requires check_weight_sync=True.

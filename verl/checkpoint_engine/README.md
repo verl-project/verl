@@ -60,7 +60,7 @@ actor_rollout_ref.rollout.checkpoint_engine.check_weight_sync=True \
 actor_rollout_ref.rollout.checkpoint_engine.check_weight_sync_only=True
 ```
 
-The check currently supports vLLM strict equality with rollout tensor parallel size 1.
+The check currently supports vLLM strict equality with rollout tensor and data parallel sizes 1.
 It reports missing, unexpected, and mismatched keys when the initial backend-loaded
 weights do not match the source HuggingFace checkpoint.
 The comparison is strict after casting the reference checkpoint tensors to the
