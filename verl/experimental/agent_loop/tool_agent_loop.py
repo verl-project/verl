@@ -31,7 +31,7 @@ from verl.experimental.agent_loop.agent_loop import (
 from verl.experimental.agent_loop.tool_parser import FunctionCall, ToolParser
 from verl.experimental.agent_loop.utils import build_gpt_oss_tool_response_text
 from verl.tools.function_tool import FunctionTool, normalize_function_tool_return
-from verl.tools.schemas import ToolResponse
+from verl.tools.schemas import OpenAIFunctionCallSchema, OpenAIFunctionParsedSchema, ToolResponse
 from verl.utils.profiler import simple_timer
 from verl.utils.rollout_trace import rollout_trace_op
 from verl.workers.rollout.replica import TokenOutput
@@ -89,6 +89,7 @@ class AgentData:
 
         # Temporary state for tool calls
         self.tool_calls: list[FunctionCall] = []
+        self.tool_call_ids: list[str | None] = []
 
         self.routed_experts = None
 
@@ -208,14 +209,17 @@ class ToolAgentLoop(AgentLoopBase):
     async def _handle_pending_state(self, agent_data: AgentData, sampling_params: dict[str, Any]) -> AgentState:
         """Handle the pending state: prepare the prompt and start generation."""
         schemas = getattr(agent_data, "_active_tool_schemas", self.tool_schemas)
-        prompt_ids = await self.apply_chat_template(
-            agent_data.messages,
-            tools=schemas,
-            images=agent_data.image_data,
-            videos=agent_data.video_data,
-            audios=agent_data.audio_data,
-            mm_processor_kwargs=agent_data.mm_processor_kwargs,
-        )
+        if self.continuous_token_builder is not None:
+            prompt_ids = await self.build_ct_initial_prompt(agent_data.messages, tools=schemas)
+        else:
+            prompt_ids = await self.apply_chat_template(
+                agent_data.messages,
+                tools=schemas,
+                images=agent_data.image_data,
+                videos=agent_data.video_data,
+                audios=agent_data.audio_data,
+                mm_processor_kwargs=agent_data.mm_processor_kwargs,
+            )
         agent_data.prompt_ids = prompt_ids
         return AgentState.GENERATING
 
@@ -258,10 +262,23 @@ class ToolAgentLoop(AgentLoopBase):
 
         agent_data.assistant_turns += 1
         agent_data.response_ids = output.token_ids
-        agent_data.prompt_ids += agent_data.response_ids
-        agent_data.response_mask += [1] * len(agent_data.response_ids)
-        if output.log_probs:
-            agent_data.response_logprobs += output.log_probs
+        if self.continuous_token_builder is not None:
+            merge_result, response_mask, response_logprobs = await self.merge_ct_assistant_token(
+                agent_data.prompt_ids,
+                agent_data.response_ids,
+                agent_data.response_mask,
+                agent_data.response_logprobs if (agent_data.response_logprobs or output.log_probs) else None,
+                assistant_logprobs=output.log_probs if output.log_probs else None,
+            )
+            agent_data.prompt_ids = merge_result.token_ids
+            agent_data.response_mask = response_mask
+            if response_logprobs is not None:
+                agent_data.response_logprobs = response_logprobs
+        else:
+            agent_data.prompt_ids += agent_data.response_ids
+            agent_data.response_mask += [1] * len(agent_data.response_ids)
+            if output.log_probs:
+                agent_data.response_logprobs += output.log_probs
 
         if output.routed_experts is not None:
             agent_data.routed_experts = output.routed_experts
@@ -277,7 +294,10 @@ class ToolAgentLoop(AgentLoopBase):
         # Extract tool calls (use per-sample tools if routed)
         active_tools = getattr(agent_data, "_active_tools", self.tools)
         tools = [tool.tool_schema for tool in active_tools.values()]
-        _, agent_data.tool_calls = await self.tool_parser.extract_tool_calls(agent_data.response_ids, tools)
+        assistant_content, agent_data.tool_calls = await self.tool_parser.extract_tool_calls(agent_data.response_ids, tools)
+        agent_data.tool_call_ids = self._last_parsed_tool_call_ids(len(agent_data.tool_calls))
+        if self.continuous_token_builder is not None:
+            agent_data.messages.append(self._build_assistant_message(assistant_content, agent_data))
 
         if agent_data.tool_calls:
             return AgentState.PROCESSING_TOOLS
@@ -288,12 +308,16 @@ class ToolAgentLoop(AgentLoopBase):
         """Handle the processing tools state: execute tool calls and prepare tool responses."""
         add_messages: list[dict[str, Any]] = []
         new_images_this_turn: list[Any] = []  # Local variable instead of agent_data attribute
+        previous_messages = list(agent_data.messages)
 
         tasks = []
         tool_call_names = []
-        for tool_call in agent_data.tool_calls[: self.max_parallel_calls]:
+        tool_call_ids = []
+        for index, tool_call in enumerate(agent_data.tool_calls[: self.max_parallel_calls]):
             tasks.append(self._call_tool(tool_call, agent_data.tools_kwargs, agent_data))
             tool_call_names.append(tool_call.name)
+            raw_tool_call_id = agent_data.tool_call_ids[index] if index < len(agent_data.tool_call_ids) else None
+            tool_call_ids.append(raw_tool_call_id)
 
         with simple_timer("tool_calls", agent_data.metrics):
             responses = await asyncio.gather(*tasks)
@@ -321,6 +345,11 @@ class ToolAgentLoop(AgentLoopBase):
             else:
                 # Text-only content
                 message = {"role": "tool", "content": tool_response.text or ""}
+            tool_index = len(add_messages)
+            tool_call_id = tool_call_ids[tool_index]
+            message["name"] = tool_call_names[tool_index]
+            if tool_call_id is not None:
+                message["tool_call_id"] = tool_call_id
 
             add_messages.append(message)
 
@@ -372,6 +401,24 @@ class ToolAgentLoop(AgentLoopBase):
             response_ids = await self.loop.run_in_executor(
                 None, lambda: self.tokenizer.encode(tool_response_text, add_special_tokens=False)
             )
+        elif self.continuous_token_builder is not None and not new_images_this_turn:
+            schemas = getattr(agent_data, "_active_tool_schemas", self.tool_schemas)
+            merge_result, response_mask, response_logprobs = await self.merge_ct_non_assistant_msg(
+                previous_messages,
+                agent_data.messages,
+                agent_data.prompt_ids,
+                agent_data.response_mask,
+                agent_data.response_logprobs if agent_data.response_logprobs else None,
+                tools=schemas,
+            )
+            if len(response_mask) >= self.response_length:
+                return AgentState.TERMINATED
+            agent_data.prompt_ids = merge_result.token_ids
+            agent_data.response_mask = response_mask
+            if agent_data.response_logprobs:
+                agent_data.response_logprobs = response_logprobs or []
+            agent_data.user_turns += 1
+            return AgentState.GENERATING
         else:
             # Note that we have to pass None to the images and videos if there are no new images / videos
             # to stay compatible with downstream image processing logic!
@@ -402,6 +449,41 @@ class ToolAgentLoop(AgentLoopBase):
             agent_data.response_logprobs += [0.0] * len(response_ids)
         agent_data.user_turns += 1
         return AgentState.GENERATING
+
+    def _last_parsed_tool_call_ids(self, tool_call_count: int) -> list[str | None]:
+        parsed_ids = getattr(self.tool_parser, "last_tool_call_ids", [])
+        if not isinstance(parsed_ids, list):
+            return [None] * tool_call_count
+        return [
+            parsed_ids[index] if index < len(parsed_ids) and isinstance(parsed_ids[index], str) else None
+            for index in range(tool_call_count)
+        ]
+
+    def _build_assistant_message(self, content: str, agent_data: AgentData) -> dict[str, Any]:
+        message: dict[str, Any] = {"role": "assistant", "content": content or ""}
+        if not agent_data.tool_calls:
+            return message
+
+        tool_calls = []
+        for index, tool_call in enumerate(agent_data.tool_calls[: self.max_parallel_calls]):
+            raw_tool_call_id = agent_data.tool_call_ids[index] if index < len(agent_data.tool_call_ids) else None
+            function_call, has_decode_error = OpenAIFunctionCallSchema.from_openai_function_parsed_schema(
+                OpenAIFunctionParsedSchema(name=tool_call.name, arguments=tool_call.arguments)
+            )
+            if has_decode_error:
+                raise ValueError(
+                    f"Invalid tool call arguments for '{tool_call.name}': expected a JSON object string, "
+                    f"got {tool_call.arguments!r}"
+                )
+            tool_call_message = {
+                "type": "function",
+                "function": function_call.model_dump(),
+            }
+            if raw_tool_call_id is not None:
+                tool_call_message["id"] = raw_tool_call_id
+            tool_calls.append(tool_call_message)
+        message["tool_calls"] = tool_calls
+        return message
 
     async def _call_tool(
         self, tool_call: FunctionCall, tools_kwargs: dict[str, Any], agent_data: AgentData
