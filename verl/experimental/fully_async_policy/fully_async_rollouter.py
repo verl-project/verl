@@ -38,6 +38,7 @@ from verl.trainer.ppo.utils import need_reward_model
 from verl.utils import normalize_token_ids
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.profiler import marked_timer
+from verl.utils.ray_utils import auto_await
 from verl.utils.rollout_trace import rollout_trace_op
 from verl.utils.skip import SkipManager
 from verl.utils.tracking import ValidationGenerationsLogger
@@ -365,6 +366,22 @@ class FullyAsyncLLMServerManager(LLMServerManager):
     def get_active_server_count(self) -> int:
         """Total active rollout servers (standalone + hybrid)."""
         return len(self.rollout_replicas) + len(self.alive_replicas)
+
+    @auto_await
+    async def shutdown(self):
+        """Shutdown standalone and registered hybrid rollout replicas."""
+        shutdown_tasks = []
+        seen_replica_ids = set()
+        for replica in list(self.rollout_replicas) + list(self.hybrid_replicas.values()):
+            replica_id = id(replica)
+            if replica_id in seen_replica_ids:
+                continue
+            seen_replica_ids.add(replica_id)
+            shutdown = getattr(replica, "shutdown", None)
+            if shutdown is not None:
+                shutdown_tasks.append(shutdown())
+        if shutdown_tasks:
+            await asyncio.gather(*shutdown_tasks, return_exceptions=True)
 
 
 class FullyAsyncAgentLoopManager(AgentLoopManager):
