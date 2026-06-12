@@ -18,7 +18,7 @@ from omegaconf import MISSING
 from transformers import AutoConfig
 
 from verl.base_config import BaseConfig
-from verl.utils import hf_processor, hf_tokenizer
+from verl.utils import hf_tokenizer_and_processor
 from verl.utils.fs import copy_to_local
 from verl.utils.import_utils import import_external_libs
 from verl.utils.model import get_generation_config, update_model_config
@@ -158,8 +158,10 @@ class HFModelConfig(BaseConfig):
         # construct tokenizer
         if self.load_tokenizer:
             self.local_tokenizer_path = copy_to_local(self.tokenizer_path, use_shm=self.use_shm)
-            self.tokenizer = hf_tokenizer(self.local_tokenizer_path, trust_remote_code=self.trust_remote_code)
-            self.processor = hf_processor(self.local_tokenizer_path, trust_remote_code=self.trust_remote_code)
+            self.tokenizer, self.processor = hf_tokenizer_and_processor(
+                self.local_tokenizer_path,
+                trust_remote_code=self.trust_remote_code,
+            )
 
         # For base models (e.g. Qwen3.5-2b-Base), the processor may not have a chat_template
         # while the tokenizer does. Sync it so that processor.apply_chat_template() works.

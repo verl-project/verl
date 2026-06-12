@@ -20,6 +20,7 @@ from .tokenizer import (
     get_processor_token_id,
     hf_processor,
     hf_tokenizer,
+    hf_tokenizer_and_processor,
     normalize_token_ids,
 )
 
@@ -31,6 +32,7 @@ __all__ = (
         "get_processor_token_id",
         "hf_processor",
         "hf_tokenizer",
+        "hf_tokenizer_and_processor",
         "normalize_token_ids",
         "omega_conf_to_dataclass",
         "validate_config",

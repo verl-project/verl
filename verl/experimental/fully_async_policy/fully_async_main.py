@@ -70,16 +70,13 @@ class FullyAsyncTaskRunner:
             or config.actor_rollout_ref.model.path
         )
         local_tokenizer_path = copy_to_local(tokenizer_path, use_shm=use_shm)
-        from verl.utils import hf_processor, hf_tokenizer
+        from verl.utils import hf_tokenizer_and_processor
 
         trust_remote_code = config.data.get("trust_remote_code", False)
-        tokenizer = hf_tokenizer(
-            local_tokenizer_path, trust_remote_code=trust_remote_code
-        )
-
-        # Used for multimodal LLM, could be None
-        processor = hf_processor(
-            local_tokenizer_path, trust_remote_code=trust_remote_code, use_fast=True
+        tokenizer, processor = hf_tokenizer_and_processor(
+            local_tokenizer_path,
+            trust_remote_code=trust_remote_code,
+            processor_kwargs={"use_fast": True},
         )
 
         self.components["tokenizer"] = tokenizer

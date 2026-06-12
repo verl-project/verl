@@ -19,6 +19,7 @@ import warnings
 __all__ = [
     "hf_tokenizer",
     "hf_processor",
+    "hf_tokenizer_and_processor",
     "normalize_token_ids",
     "build_multimodal_processor_inputs",
     "get_processor_token_id",
@@ -127,7 +128,11 @@ def build_multimodal_processor_inputs(
         processor_kwargs.setdefault("video_metadata", video_metadata)
         processor_kwargs.setdefault("do_sample_frames", False)
 
-    processor_inputs = {"text": text, "images": images, "videos": videos, **processor_kwargs}
+    processor_inputs = {"text": text, **processor_kwargs}
+    if images is not None:
+        processor_inputs["images"] = images
+    if videos is not None:
+        processor_inputs["videos"] = videos
     if audio is not None:
         processor_inputs["audio"] = audio
 
@@ -242,3 +247,39 @@ def hf_processor(name_or_path, **kwargs):
         processor = None
 
     return processor
+
+
+def hf_tokenizer_and_processor(
+    name_or_path,
+    *,
+    trust_remote_code: bool = False,
+    processor_kwargs: dict | None = None,
+    tokenizer_kwargs: dict | None = None,
+    correct_pad_token: bool = True,
+    correct_gemma2: bool = True,
+):
+    """Load processor + tokenizer without duplicated work.
+
+    For multimodal models, the HF processor typically already includes a tokenizer.
+    This helper prefers that tokenizer and only falls back to `hf_tokenizer()` if
+    the processor is `None` or does not expose a tokenizer.
+    """
+    processor_kwargs = dict(processor_kwargs or {})
+    tokenizer_kwargs = dict(tokenizer_kwargs or {})
+
+    processor = hf_processor(name_or_path, trust_remote_code=trust_remote_code, **processor_kwargs)
+    tokenizer = getattr(processor, "tokenizer", None) if processor is not None else None
+
+    if tokenizer is None:
+        tokenizer = hf_tokenizer(
+            name_or_path,
+            correct_pad_token=correct_pad_token,
+            correct_gemma2=correct_gemma2,
+            trust_remote_code=trust_remote_code,
+            **tokenizer_kwargs,
+        )
+    else:
+        if correct_pad_token:
+            set_pad_token_id(tokenizer)
+
+    return tokenizer, processor

@@ -83,7 +83,7 @@ from verl.trainer.ppo.padding_utils import upsample_batch_to_divisible_size
 from verl.trainer.ppo.ray_trainer import apply_kl_penalty, compute_advantage, compute_spec_decode_metrics
 from verl.trainer.ppo.rollout_corr_helper import compute_rollout_correction_and_add_to_batch
 from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_teacher_policy
-from verl.utils import hf_processor, hf_tokenizer
+from verl.utils import hf_tokenizer_and_processor
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.config import omega_conf_to_dataclass, validate_config
@@ -535,9 +535,11 @@ class PPOTrainer:
             self.config.actor_rollout_ref.model.path, use_shm=self.config.actor_rollout_ref.model.get("use_shm", False)
         )
         trust_remote_code = self.config.data.get("trust_remote_code", False)
-        self.tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
-        # Used for multimodal LLM, could be None
-        self.processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
+        self.tokenizer, self.processor = hf_tokenizer_and_processor(
+            local_path,
+            trust_remote_code=trust_remote_code,
+            processor_kwargs={"use_fast": True},
+        )
 
     def _init_dataloader(self):
         """Initialize train and validate dataloader."""

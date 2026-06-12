@@ -265,12 +265,14 @@ class TaskRunner:
         )
 
         # Instantiate the tokenizer and processor.
-        from verl.utils import hf_processor, hf_tokenizer
+        from verl.utils import hf_tokenizer_and_processor
 
         trust_remote_code = config.data.get("trust_remote_code", False)
-        tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
-        # Used for multimodal LLM, could be None
-        processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
+        tokenizer, processor = hf_tokenizer_and_processor(
+            local_path,
+            trust_remote_code=trust_remote_code,
+            processor_kwargs={"use_fast": True},
+        )
 
         resource_pool_manager = self.init_resource_pool_mgr(config)
 
