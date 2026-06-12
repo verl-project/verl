@@ -38,6 +38,7 @@ from verl.trainer.ppo.utils import need_reward_model
 from verl.utils import normalize_token_ids
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.profiler import marked_timer
+from verl.utils.ray_utils import auto_await
 from verl.utils.rollout_trace import rollout_trace_op
 from verl.utils.skip import SkipManager
 from verl.utils.tracking import ValidationGenerationsLogger
@@ -54,6 +55,10 @@ class FullyAsyncLLMServerClient(LLMServerClient):
     invisible to the AgentLoop.
     """
 
+    def __init__(self, *args, **kwargs):
+        self._model_engine_manager = kwargs.pop("model_engine_manager", None)
+        super().__init__(*args, **kwargs)
+
     @rollout_trace_op
     async def generate(
         self,
@@ -65,6 +70,7 @@ class FullyAsyncLLMServerClient(LLMServerClient):
         video_data: Optional[list[Any]] = None,
         audio_data: Optional[list[Any]] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
+        **kwargs: Any,
     ) -> TokenOutput:
         """Generate tokens from prompt ids.
 
@@ -80,6 +86,7 @@ class FullyAsyncLLMServerClient(LLMServerClient):
         Returns:
             TokenOutput: token output
         """
+        engine_server_keys = kwargs.pop("engine_server_keys", ())
         prompt_ids = normalize_token_ids(prompt_ids)
 
         limit_key = None
@@ -97,16 +104,20 @@ class FullyAsyncLLMServerClient(LLMServerClient):
         min_global_steps, max_global_steps = None, None
 
         while True:
-            # 1. generate tokens
+            context_prompt_ids = prompt_ids + final_output.token_ids
             output = await super().generate(
                 request_id=request_id,
-                prompt_ids=prompt_ids + final_output.token_ids,
+                prompt_ids=context_prompt_ids,
                 sampling_params=sampling_params,
                 image_data=image_data,
                 video_data=video_data,
                 audio_data=audio_data,
                 mm_processor_kwargs=mm_processor_kwargs,
             )
+
+            # Compute log probs immediately after this chunk with current model weights.
+            if len(engine_server_keys) > 0 and self._model_engine_manager is not None:
+                await self._compute_chunk_log_probs(output, context_prompt_ids, sampling_params)
 
             # 2. merge output into final_output
             final_output.token_ids.extend(output.token_ids)
@@ -126,7 +137,11 @@ class FullyAsyncLLMServerClient(LLMServerClient):
                 final_output.num_preempted += output.num_preempted
             final_output.stop_reason = output.stop_reason
 
-            # update model weights version
+            for key in engine_server_keys:
+                if output.extra_fields.get(key) is not None:
+                    final_output.extra_fields.setdefault(key, [])
+                    final_output.extra_fields[key].extend(output.extra_fields[key])
+
             global_steps = output.extra_fields.get("global_steps", None)
             if min_global_steps is None:
                 min_global_steps = global_steps
@@ -150,6 +165,15 @@ class FullyAsyncLLMServerClient(LLMServerClient):
         final_output.extra_fields["max_global_steps"] = max_global_steps
         return final_output
 
+    async def _compute_chunk_log_probs(
+        self, output: TokenOutput, context_prompt_ids: list[int], sampling_params: dict
+    ) -> None:
+        if len(output.token_ids) == 0:
+            return
+        temperature = sampling_params.get("temperature", 1.0)
+        results = await self._model_engine_manager.compute_log_probs(context_prompt_ids, output.token_ids, temperature)
+        output.extra_fields.update(results)
+
 
 class FullyAsyncLLMServerManager(LLMServerManager):
     """Extension of :class:`LLMServerManager` for fully async training with hybrid scaling."""
@@ -161,6 +185,7 @@ class FullyAsyncLLMServerManager(LLMServerManager):
         rollout_resource_pool: RayResourcePool = None,
     ):
         super().__init__(config, worker_group, rollout_resource_pool)
+        self._model_engine_manager = None
         # Pre-registered hybrid replicas: bound at init time but still sleeping.
         # Keyed by resource_id; populated during _initialize_llm_servers().
         self.hybrid_replicas: dict[str, RolloutReplica] = {}
@@ -174,6 +199,35 @@ class FullyAsyncLLMServerManager(LLMServerManager):
         # Timing / counters
         self.last_hybrid_add_time: float = 0.0
         self.last_hybrid_remove_time: float = 0.0
+
+    @classmethod
+    @auto_await
+    async def create(cls, *args, **kwargs):
+        instance = cls(*args, **kwargs)
+        await instance._initialize_llm_servers()
+        await instance._init_global_load_balancer()
+        if getattr(instance.config, "model_engine_server", None) and instance.config.model_engine_server.get(
+            "enable", False
+        ):
+            await instance._init_model_engine_replica()
+        return instance
+
+    async def _init_model_engine_replica(self):
+        from verl.workers.rollout.model_engine_server import ModelEngineServerManager
+
+        self._model_engine_manager = ModelEngineServerManager(full_config=self.config)
+        await self._model_engine_manager.initialize()
+
+    def get_engine_replicas_for_weight_sync(self) -> list:
+        if self._model_engine_manager is None:
+            return []
+        if self._model_engine_manager._has_old_instance:
+            return [self._model_engine_manager._old_instance]
+        return []
+
+    def get_client(self, client_cls=LLMServerClient, **kwargs) -> LLMServerClient:
+        kwargs.setdefault("model_engine_manager", self._model_engine_manager)
+        return super().get_client(client_cls=client_cls, **kwargs)
 
     async def _initialize_llm_servers(self, start_rank: int = 0):
         # ── Step 1: hybrid replicas first (replica_rank 0 … N_e-1) ──────────
@@ -555,7 +609,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
 
     def get_replicas(self):
         """Get rollout worker group"""
-        return self.llm_server_manager.get_replicas()
+        return self.llm_server_manager.get_replicas() + self.llm_server_manager.get_engine_replicas_for_weight_sync()
 
     def get_max_queue_size(self):
         return self.max_queue_size

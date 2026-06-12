@@ -473,6 +473,13 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         If local_trigger_step == 2, 3, ..., restore the parameters of version 1 to calculate the old_log_prob,
         then restore the parameters of the current version.
         """
+        if "old_logprobs" in batch.batch:
+            batch_dict = {"old_log_probs": batch.batch.pop("old_logprobs")}
+            if "old_entropys" in batch.batch:
+                batch_dict["entropys"] = batch.batch.pop("old_entropys")
+            old_log_prob = DataProto.from_dict(batch_dict)
+            return old_log_prob, 0.0
+
         if self.local_trigger_step == 1:
             self.actor_rollout_wg.save_model_to_cpu(1)
             old_log_prob, old_log_prob_mfu = super()._compute_old_log_prob(batch)
@@ -483,6 +490,18 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             self.actor_rollout_wg.restore_model_from_cpu(self.local_trigger_step)
             self.actor_rollout_wg.clear_cpu_model(self.local_trigger_step)
         return old_log_prob, old_log_prob_mfu
+
+    def _fit_compute_ref_log_prob(self, batch: DataProto) -> DataProto:
+        if "ref_logprobs" in batch.batch:
+            ref_log_prob = DataProto.from_dict(
+                {
+                    "ref_log_prob": batch.batch.pop("ref_logprobs"),
+                }
+            )
+            if "ref_entropys" in batch.batch:
+                batch.batch.pop("ref_entropys")
+            return batch.union(ref_log_prob)
+        return super()._fit_compute_ref_log_prob(batch)
 
     def _fit_update_local_step(self):
         time_str = datetime.now().strftime("%H:%M:%S.%f")[:-3]

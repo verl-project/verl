@@ -466,6 +466,7 @@ class vLLMHttpServer:
         audio_data: Optional[list[Any]] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
         priority: int = 0,
+        **kwargs,
     ) -> TokenOutput:
         """Generate sequence with token-in-token-out."""
         prompt_ids = normalize_token_ids(prompt_ids)

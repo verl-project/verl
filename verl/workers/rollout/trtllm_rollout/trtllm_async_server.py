@@ -327,6 +327,7 @@ class TRTLLMHttpServer:
         video_data: Optional[list[Any]] = None,
         audio_data: Optional[list[Any]] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
+        **kwargs,
     ) -> TokenOutput:
         from tensorrt_llm.llmapi import SamplingParams
 

@@ -872,6 +872,9 @@ class FSDPEngine(BaseEngine):
         peft_config_dict = peft_config.to_dict() if peft_config is not None else None
         return per_tensor_param, peft_config_dict
 
+    async def set_param_from_async_generator(self, weight_generator) -> None:
+        raise NotImplementedError("set_param_from_async_generator is not yet supported for FSDP engine")
+
     def disable_adapter(self) -> ContextManager:
         return self.module.disable_adapter()
 

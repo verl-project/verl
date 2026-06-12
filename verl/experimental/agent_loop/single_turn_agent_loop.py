@@ -65,10 +65,15 @@ class SingleTurnAgentLoop(AgentLoopBase):
                 video_data=videos,
                 audio_data=audios,
                 mm_processor_kwargs=mm_processor_kwargs,
+                **kwargs,
             )
         if metrics.get("num_preempted") is None:
             metrics["num_preempted"] = output.num_preempted if output.num_preempted is not None else -1
         response_mask = [1] * len(output.token_ids)
+
+        for key in kwargs.get("engine_server_keys", ()):
+            if output.extra_fields.get(key):
+                output.extra_fields[key] = output.extra_fields[key][: self.response_length]
 
         output: AgentLoopOutput = AgentLoopOutput(
             prompt_ids=prompt_ids,
