@@ -14,11 +14,12 @@
 """Regression coverage for verl#6492."""
 
 import importlib.util
-import pytest
 import sys
-import torch
 import types
 from pathlib import Path
+
+import pytest
+import torch
 
 import verl.utils.device as device_module
 
@@ -193,9 +194,7 @@ def test_preprocess_thd_engine_fp8_cp_no_crash_on_cpu(monkeypatch):
         new code: `if d.numel() < seqlen_padded_i` (5 < 512)   → pad to 512 → OK
     """
     for cp_rank in range(2):
-        mcore_util = _load_thd_engine_util(
-            monkeypatch, tp_size=1, cp_size=2, cp_rank=cp_rank
-        )
+        mcore_util = _load_thd_engine_util(monkeypatch, tp_size=1, cp_size=2, cp_rank=cp_rank)
         # seqlen=5 is intentionally much shorter than seqlen_padded to trigger the bug
         input_ids = _make_thd_input([5])
         ids_rmpad, _, pos_ids = mcore_util.preprocess_thd_engine(
@@ -223,13 +222,11 @@ def test_preprocess_thd_engine_fp8_cp_correct_content_on_cpu(monkeypatch):
     half_seqlen = 128  # seqlen_per_rank=256 // 2
 
     # ---- cp_rank=0 ----
-    mcore_util_r0 = _load_thd_engine_util(
-        monkeypatch, tp_size=1, cp_size=2, cp_rank=0
-    )
+    mcore_util_r0 = _load_thd_engine_util(monkeypatch, tp_size=1, cp_size=2, cp_rank=0)
     ids_r0, _, pos_r0 = mcore_util_r0.preprocess_thd_engine(
         _make_thd_input([seqlen_orig]), pre_process=True, need_roll=False, use_fp8_padding=True
     )
-    ids_r0 = ids_r0[0]   # [seqlen_per_rank]
+    ids_r0 = ids_r0[0]  # [seqlen_per_rank]
     pos_r0 = pos_r0[0]
     # first chunk [0:128]: token ids and positions = 0..127
     torch.testing.assert_close(ids_r0[:half_seqlen], torch.arange(0, half_seqlen, dtype=torch.long))
@@ -238,22 +235,16 @@ def test_preprocess_thd_engine_fp8_cp_correct_content_on_cpu(monkeypatch):
     assert ids_r0[half_seqlen:].sum().item() == 0, "remain chunk for cp_rank=0 should be all-zero padding"
 
     # ---- cp_rank=1 ----
-    mcore_util_r1 = _load_thd_engine_util(
-        monkeypatch, tp_size=1, cp_size=2, cp_rank=1
-    )
+    mcore_util_r1 = _load_thd_engine_util(monkeypatch, tp_size=1, cp_size=2, cp_rank=1)
     ids_r1, _, pos_r1 = mcore_util_r1.preprocess_thd_engine(
         _make_thd_input([seqlen_orig]), pre_process=True, need_roll=False, use_fp8_padding=True
     )
-    ids_r1 = ids_r1[0]   # [seqlen_per_rank]
+    ids_r1 = ids_r1[0]  # [seqlen_per_rank]
     pos_r1 = pos_r1[0]
     valid_in_first = seqlen_orig - half_seqlen  # 200 - 128 = 72 valid tokens
     # first chunk: valid tokens [128:200], padding [200:256]
-    torch.testing.assert_close(
-        ids_r1[:valid_in_first], torch.arange(half_seqlen, seqlen_orig, dtype=torch.long)
-    )
-    torch.testing.assert_close(
-        pos_r1[:valid_in_first], torch.arange(half_seqlen, seqlen_orig, dtype=torch.long)
-    )
+    torch.testing.assert_close(ids_r1[:valid_in_first], torch.arange(half_seqlen, seqlen_orig, dtype=torch.long))
+    torch.testing.assert_close(pos_r1[:valid_in_first], torch.arange(half_seqlen, seqlen_orig, dtype=torch.long))
     assert ids_r1[valid_in_first:half_seqlen].sum().item() == 0, "padding after valid first-chunk tokens"
     # remain chunk [128:256]: remain_start=256, remain_end=min(384, 200)=200 < 256 → remain_len=0
     assert ids_r1[half_seqlen:].sum().item() == 0, "remain chunk for cp_rank=1 should be all-zero"

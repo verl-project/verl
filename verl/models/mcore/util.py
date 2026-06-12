@@ -446,9 +446,7 @@ def preprocess_thd_engine(
             if need_roll:
                 # Handle roll for cp_size > 1 case
                 saved_roll_dict[start_idx + half_seqlen - 1] = d[(cp_rank + 1) * half_seqlen]
-                saved_position_roll_dict[start_idx + half_seqlen - 1] = position_ids_rmpad[
-                    start_idx + half_seqlen - 1
-                ]
+                saved_position_roll_dict[start_idx + half_seqlen - 1] = position_ids_rmpad[start_idx + half_seqlen - 1]
                 if remain_len > 0:
                     if remain_end == d.shape[0]:
                         saved_roll_dict[start_idx + half_seqlen + remain_len - 1] = d[0]
