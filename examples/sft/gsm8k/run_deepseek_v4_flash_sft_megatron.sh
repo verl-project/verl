@@ -96,6 +96,10 @@ MEGATRON_ENGINE_CONFIG="\
     engine.use_dist_checkpointing=False \
     +engine.override_transformer_config.apply_rope_fusion=True \
     +engine.override_transformer_config.use_fused_mhc=False \
+    `# Blackwell (SM100+) only -- the pinned mcore asserts on Hopper; apply_dsa_kernel_fusion` \
+    `# additionally needs flash_mla (github.com/deepseek-ai/FlashMLA tree nv_dev):` \
+    `#   +engine.override_transformer_config.use_fused_mhc=True` \
+    `#   +engine.override_transformer_config.apply_dsa_kernel_fusion=True` \
     +engine.override_transformer_config.recompute_granularity=full \
     +engine.override_transformer_config.recompute_method=uniform \
     +engine.override_transformer_config.recompute_num_layers=1 \
