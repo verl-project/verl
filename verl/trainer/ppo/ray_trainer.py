@@ -52,6 +52,8 @@ from verl.trainer.ppo.reward import extract_reward
 from verl.trainer.ppo.utils import (
     Role,
     WorkerType,
+    create_rl_dataset,
+    create_rl_sampler,
     need_critic,
     need_reference_policy,
     need_reward_model,
@@ -375,9 +377,6 @@ class RayPPOTrainer:
         """
         Creates the train and validation dataloaders.
         """
-        # TODO: we have to make sure the batch size is divisible by the dp size
-        from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler
-
         if train_dataset is None:
             train_dataset = create_rl_dataset(
                 self.config.data.train_files,

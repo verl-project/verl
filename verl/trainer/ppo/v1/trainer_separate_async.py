@@ -91,7 +91,7 @@ class PPOTrainerSeparateAsync(PPOTrainer):
         self.checkpoint_manager.update_weights(self.global_steps)
 
     def on_train_begin(self):
-        num_warmup_batches = self.config.trainer.v1.colocate_async.num_warmup_batches
+        num_warmup_batches = self.config.trainer.v1.separate_async.num_warmup_batches
         for _ in range(num_warmup_batches):
             self._add_batch_to_generate()
         logger.info(f"Added {num_warmup_batches} warmup batches to the agent loop manager")

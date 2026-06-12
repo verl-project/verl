@@ -34,7 +34,11 @@ from verl.experimental.fully_async_policy.message_queue import MessageQueueClien
 from verl.experimental.separation.ray_trainer import SeparateRayPPOTrainer
 from verl.protocol import DataProto
 from verl.single_controller.ray import RayResourcePool, RayWorkerGroup, ResourcePoolManager
-from verl.trainer.ppo.utils import need_reward_model
+from verl.trainer.ppo.utils import (
+    create_rl_dataset,
+    create_rl_sampler,
+    need_reward_model,
+)
 from verl.utils import normalize_token_ids
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.profiler import marked_timer
@@ -446,7 +450,6 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         # ==================== fully async config ====================
 
         print("[FullyAsyncRollouter] Creating datasets...")
-        from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler
         from verl.utils.dataset.rl_dataset import collate_fn
 
         train_dataset = create_rl_dataset(
