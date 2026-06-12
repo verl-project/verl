@@ -127,6 +127,7 @@ if _TRITON_AVAILABLE:
                 - quantized_tensor: FP8 quantized tensor of shape (M, N)
                 - scale_tensor: Per-block scale factors of shape (ceil(M/BLOCK_M), ceil(N/BLOCK_N))
                                This is the inverse scale (multiply to dequantize).
+
         """
         assert x.dim() == 2, f"Expected 2D tensor, got {x.dim()}D"
 
@@ -190,6 +191,7 @@ def scaled_fp8_blockwise_triton(
 
     Raises:
         RuntimeError: If Triton is not available.
+
     """
     if not _TRITON_AVAILABLE:
         raise RuntimeError("Triton is required for scaled_fp8_blockwise_triton but is not available")
@@ -243,6 +245,7 @@ def _scaled_fp8_blockwise_pytorch(
         Tuple of (fp8_data, descale):
             - fp8_data: FP8 quantized tensor
             - descale: Per-block descale factors for dequantization
+
     """
     block_size0 = weight_block_size[0]
     block_size1 = weight_block_size[1]
@@ -330,6 +333,7 @@ def scaled_fp8_blockwise(
         Tuple of (fp8_data, descale):
             - fp8_data: FP8 quantized tensor
             - descale: Per-block descale factors for dequantization
+
     """
     assert len(data_hp.shape) == 2, "Only 2d input tensor is supported"
 

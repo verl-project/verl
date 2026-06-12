@@ -31,9 +31,11 @@ def exists(path: str, **kwargs) -> bool:
 
     Args:
         path (str): path to test
+        **kwargs: Additional keyword arguments passed to the underlying implementation.
 
     Returns:
         bool: True if the path exists, False otherwise
+
     """
     if _is_non_local(path):
         return _exists(path, **kwargs)

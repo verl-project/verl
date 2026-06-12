@@ -28,11 +28,13 @@ if TYPE_CHECKING:
 
 
 def update_kwargs_with_config(dictionary: dict, config: "ModelParallelConfig"):
+    """Insert a ModelParallelConfig into a kwargs dictionary and return it."""
     dictionary["config"] = config
     return dictionary
 
 
 def get_default_kwargs_for_model_parallel_config():
+    """Return default kwargs for constructing a ``ModelParallelConfig``."""
     model_parallel_config_kwargs = {
         "params_dtype": torch.float32,
         "use_cpu_initialization": False,
@@ -44,12 +46,14 @@ def get_default_kwargs_for_model_parallel_config():
 
 
 def get_default_model_parallel_config():
+    """Create a ``ModelParallelConfig`` with default settings."""
     from megatron.core import ModelParallelConfig
 
     return ModelParallelConfig(**get_default_kwargs_for_model_parallel_config())
 
 
 def get_common_default_kwargs_for_parallel_linear():
+    """Return common default kwargs shared by column and row parallel linear layers."""
     default_model_parallel_config = get_default_model_parallel_config()
     common_default_kwargs = {
         "init_method": init.xavier_normal_,
@@ -61,6 +65,7 @@ def get_common_default_kwargs_for_parallel_linear():
 
 
 def get_default_kwargs_for_column_parallel_linear():
+    """Return default kwargs for ``ColumnParallelLinear``."""
     from megatron.core import ModelParallelConfig
 
     model_parallel_config_kwargs = get_default_kwargs_for_model_parallel_config()
@@ -77,11 +82,13 @@ def get_default_kwargs_for_column_parallel_linear():
 
 
 def get_default_kwargs_for_row_parallel_linear():
+    """Return default kwargs for ``RowParallelLinear``."""
     common_default_kwargs = get_common_default_kwargs_for_parallel_linear()
     return common_default_kwargs
 
 
 def get_default_kwargs_for_parallel_embedding():
+    """Return default kwargs for ``VocabParallelEmbedding``."""
     from megatron.core import ModelParallelConfig
 
     model_parallel_config_kwargs = get_default_kwargs_for_model_parallel_config()
@@ -93,15 +100,18 @@ def get_default_kwargs_for_parallel_embedding():
 
 
 def is_tensor_parallel_param(param):
+    """Check whether a parameter is marked as tensor-parallel."""
     return hasattr(param, "tensor_model_parallel") and param.tensor_model_parallel
 
 
 def get_tensor_parallel_partition_dim(param):
+    """Return the partition dimension of a tensor-parallel parameter."""
     assert is_tensor_parallel_param(param)
     return param.partition_dim
 
 
 def get_tensor_parallel_partition_stride(param):
+    """Return the partition stride of a tensor-parallel parameter."""
     assert is_tensor_parallel_param(param)
     return param.partition_stride
 
@@ -109,6 +119,8 @@ def get_tensor_parallel_partition_stride(param):
 class _VocabParallelEntropy(torch.autograd.Function):
     @staticmethod
     def forward(ctx, vocab_parallel_logits: torch.Tensor) -> torch.Tensor:
+        """Compute entropy from TP-sharded logits using numerically stable softmax."""
+
         @torch.compile(dynamic=True)
         def mul_reduce(a, b):
             return (a * b).sum(dim=-1, keepdim=True)
@@ -128,6 +140,7 @@ class _VocabParallelEntropy(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> torch.Tensor:
+        """Compute gradient of entropy with respect to the TP-sharded logits."""
         vocab_parallel_logits, softmax_logits, sum_softmax_times_logits = ctx.saved_tensors
         # reuse softmax_logits as grad
         vocab_parallel_logits.sub_(sum_softmax_times_logits)
@@ -165,6 +178,7 @@ def vocab_parallel_sum_pi_squared(vocab_parallel_logits: torch.Tensor) -> torch.
     Implementation is non-destructive (does not mutate ``vocab_parallel_logits``) so it
     can be safely called before ``vocab_parallel_entropy`` / ``vocab_parallel_log_probs``
     which would otherwise consume the same tensor.
+
     """
     tp_group = mpu.get_tensor_model_parallel_group()
 

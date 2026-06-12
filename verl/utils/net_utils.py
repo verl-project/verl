@@ -37,6 +37,7 @@ def is_ipv4(ip_str: str) -> bool:
 
     Returns:
         bool: Returns True if it's an IPv4 address, False otherwise
+
     """
     try:
         ipaddress.IPv4Address(ip_str)
@@ -54,6 +55,7 @@ def is_ipv6(ip_str: str) -> bool:
 
     Returns:
         bool: Returns True if it's an IPv6 address, False otherwise
+
     """
     try:
         ipaddress.IPv6Address(ip_str)
@@ -63,6 +65,15 @@ def is_ipv6(ip_str: str) -> bool:
 
 
 def is_valid_ipv6_address(address: str) -> bool:
+    """Check whether the given string is a valid IPv6 address.
+
+    Args:
+        address: The string to validate as an IPv6 address.
+
+    Returns:
+        True if the string is a valid IPv6 address, False otherwise.
+
+    """
     try:
         ipaddress.IPv6Address(address)
         return True

@@ -44,6 +44,7 @@ def is_torch_npu_available(check_device=True) -> bool:
 
     Returns:
         bool: True if NPU is available, False otherwise.
+
     """
     try:
         if not hasattr(torch, "npu"):
@@ -106,6 +107,7 @@ def get_torch_device():
 
     Returns:
         module: The PyTorch device module (torch.cuda, torch.npu, etc.).
+
     """
     return get_platform().device_module
 
@@ -115,6 +117,7 @@ def get_device_id() -> int:
 
     Returns:
         int: The current device index (e.g., 0 for 'cuda:0').
+
     """
     return get_platform().current_device()
 
@@ -152,6 +155,7 @@ def auto_set_device(config) -> None:
 
     Args:
         config: Configuration object with trainer.device attribute.
+
     """
     if config and hasattr(config, "trainer") and hasattr(config.trainer, "device"):
         detected = get_platform().device_name
@@ -190,6 +194,7 @@ def get_npu_versions() -> tuple[str, str]:
 
     Raises:
         RuntimeError: If unable to retrieve version information
+
     """
     # Check npu-smi software version
     try:
@@ -283,6 +288,7 @@ def check_ipc_version_support(software_version: str, cann_version: str) -> bool:
 
     Raises:
         RuntimeError: If version format is invalid
+
     """
     # For software_version like "25.3.rc1.2", "25.5.0", or "25.5.t3.b001",
     # we need to extract the base version
@@ -330,6 +336,7 @@ def is_support_ipc() -> bool:
 
     Returns:
         bool: True if IPC is supported, False otherwise.
+
     """
     return get_platform().is_ipc_supported()
 

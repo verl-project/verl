@@ -22,7 +22,7 @@ try:
 except ImportError:
 
     class TimeoutException(Exception):
-        pass
+        """Fallback timeout exception when math_verify is not installed."""
 
     print("To use Math-Verify, please install it first by running `pip install math-verify`.")
 
@@ -55,6 +55,20 @@ def _verify_in_subprocess(ground_truth_boxed: str, model_output: str) -> float:
 
 
 def compute_score(model_output: str, ground_truth: str, timeout_score: float = 0, timeout: float = 30.0) -> float:
+    r"""Compute a reward score using the math-verify library in a subprocess.
+
+    Runs verification in a separate process to allow signal-based timeouts.
+
+    Args:
+        model_output: The model-generated solution text.
+        ground_truth: The expected answer (without ``\boxed{}`` wrapper).
+        timeout_score: Score to return when verification times out.
+        timeout: Maximum seconds to wait for verification.
+
+    Returns:
+        1.0 if the answer is verified correct, *timeout_score* on timeout, else 0.0.
+
+    """
     ret_score = 0.0
     ground_truth_boxed = "\\boxed{" + ground_truth + "}"
     try:

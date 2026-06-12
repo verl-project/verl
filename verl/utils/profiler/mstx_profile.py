@@ -33,6 +33,7 @@ def mark_start_range(message: Optional[str] = None) -> None:
     Args:
         message (str, optional):
             The message to be displayed in the profiler. Defaults to None.
+
     """
     return mstx.range_start(message=message)
 
@@ -43,6 +44,7 @@ def mark_end_range(range_id: str) -> None:
     Args:
         range_id (str):
             The id of the mark range to end.
+
     """
     return mstx.range_end(range_id)
 
@@ -53,6 +55,7 @@ def mark_annotate(message: Optional[str] = None) -> Callable:
     Args:
         message (str, optional):
             The message to be displayed in the profiler. Defaults to None.
+
     """
 
     def decorator(func):
@@ -72,9 +75,12 @@ def marked_timer(name: str, timing_raw: dict[str, float], *args: Any, **kwargs: 
     Args:
         name (str): The name/identifier for this timing measurement.
         timing_raw (Dict[str, float]): Dictionary to store timing information.
+        *args: Additional positional arguments (unused).
+        **kwargs: Additional keyword arguments (unused).
 
     Yields:
         None: This is a context manager that yields control back to the code block.
+
     """
     if args:
         logging.warning(f"Args are not supported in mstx_profile, but received: {args}")
@@ -112,6 +118,7 @@ def get_npu_profiler(
             The role of the current data collection. Defaults to None.
         profile_step(str, optional):
             The current training step. Defaults to None.
+
     """
     if profile_level == "level_none":
         level = torch_npu.profiler.ProfilerLevel.Level_none
@@ -173,6 +180,8 @@ class NPUProfiler(DistProfiler):
             rank (int): The rank of the current process.
             config (Optional[ProfilerConfig]): Configuration for the profiler. If None, a default configuration is used.
             tool_config (NPUToolConfig): The config to control npu profiler behavior.
+            **kwargs: Additional keyword arguments (unused).
+
         """
         if not config:
             config = ProfilerConfig(ranks=[], enable=False)
@@ -186,6 +195,12 @@ class NPUProfiler(DistProfiler):
         self.analysis = tool_config.analysis
 
     def start(self, **kwargs):
+        """Start the NPU profiler in continuous mode.
+
+        Args:
+            **kwargs: Keyword arguments; ``role`` specifies the profiling role.
+
+        """
         role = kwargs.get("role", None)
         if not self.discrete and NPUProfiler._define_count == 0:
             self.profile_npu = get_npu_profiler(
@@ -199,6 +214,7 @@ class NPUProfiler(DistProfiler):
             NPUProfiler._define_count += 1
 
     def stop(self):
+        """Stop the NPU profiler and export the trace in continuous mode."""
         if not self.discrete and NPUProfiler._define_count == 1:
             self.profile_npu.step()
             self.profile_npu.stop()
@@ -215,6 +231,8 @@ class NPUProfiler(DistProfiler):
                 The message to be displayed in the profiler. Defaults to None.
             role (str, optional):
                 The role of the current data collection. Defaults to None.
+            **kwargs_outer: Additional keyword arguments (unused).
+
         """
 
         def decorator(func):

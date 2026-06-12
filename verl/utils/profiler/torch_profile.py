@@ -30,6 +30,20 @@ def get_torch_profiler(
     save_file_prefix: Optional[str] = None,
     rank: int = 0,
 ):
+    """Create a configured PyTorch profiler instance.
+
+    Args:
+        contents: List of profiling options (e.g. ``cpu``, ``cuda``, ``memory``,
+            ``shapes``, ``stack``).
+        save_path: Directory path to save the profiling trace.
+        role: Optional role name used as a subdirectory.
+        save_file_prefix: Optional prefix for the trace filename.
+        rank: The rank of the current process.
+
+    Returns:
+        A ``torch.profiler.profile`` context manager ready to be started.
+
+    """
     if role:
         save_path = os.path.join(save_path, role)
 
@@ -77,6 +91,7 @@ class Profiler(DistProfiler):
 
     Args:
         config: Configuration object containing profiling parameters
+
     """
 
     _define_count = 0
@@ -105,9 +120,16 @@ class Profiler(DistProfiler):
         self.discrete = getattr(self.tool_config, "discrete", False)
 
     def check(self):
+        """Return whether the profiler is currently active."""
         return self.prof is not None
 
     def start(self, **kwargs):
+        """Start the torch profiler for the current rank.
+
+        Args:
+            **kwargs: Keyword arguments; ``role`` specifies the profiling role.
+
+        """
         role = kwargs.get("role", None)
         if not self.discrete and Profiler._define_count == 0:
             self.prof = get_torch_profiler(
@@ -122,10 +144,12 @@ class Profiler(DistProfiler):
             Profiler._define_count += 1
 
     def step(self):
+        """Signal a profiler step boundary."""
         if self.check():
             self.prof.step()
 
     def stop(self):
+        """Stop the torch profiler and export the trace."""
         if not self.discrete and Profiler._define_count == 1:
             self.step()
             print(f"[Profiler] stopped for rank {self.rank}")
@@ -143,6 +167,8 @@ class Profiler(DistProfiler):
                 The message to be displayed in the profiler. Defaults to None.
             role (str, optional):
                 The role of the current data collection. Defaults to None.
+            **kwargs_outer: Additional keyword arguments passed to the decorator.
+
         """
 
         def decorator(func):

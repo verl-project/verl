@@ -26,6 +26,8 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 class FP8QuantizerHelper:
+    """Base helper for determining which model parameters should be FP8-quantized."""
+
     def __init__(self, quant_config):
         self.quant_config = quant_config
 
@@ -93,6 +95,7 @@ class FP8QuantizerHelper:
 
         Yields:
             Tuples of (name, tensor) for each weight and its scale
+
         """
         if isinstance(self.quant_config, dict):
             weight_block_size = self.quant_config.get("weight_block_size")

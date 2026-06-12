@@ -54,6 +54,15 @@ else:
 
 
 def init_fn(x: torch.nn.Module):
+    """Initialize a module on non-rank-0 processes by moving it to an empty device tensor.
+
+    Args:
+        x: The module to initialize.
+
+    Returns:
+        The initialized module.
+
+    """
     if torch.distributed.get_rank() != 0:
         x = x.to_empty(device=get_device_id(), recurse=False)
         get_torch_device().empty_cache()
@@ -61,6 +70,16 @@ def init_fn(x: torch.nn.Module):
 
 
 def get_init_weight_context_manager(use_meta_tensor=True, mesh: DeviceMesh = None):
+    """Return a context manager for initializing model weights.
+
+    Args:
+        use_meta_tensor: Whether to use meta tensors for non-rank-0 processes.
+        mesh: Optional device mesh for determining rank.
+
+    Returns:
+        A context manager for weight initialization.
+
+    """
     from accelerate import init_empty_weights
 
     cpu_init_weights = lambda: torch.device("cpu")
@@ -83,6 +102,7 @@ def get_fsdp_wrap_policy(module, config=None, is_lora=False):
         module: The module to get wrap policy for
         config: Configuration for wrap policy
         is_lora: Whether to enable lambda policy for LoRA modules
+
     """
     if config is None:
         config = {}
@@ -113,6 +133,15 @@ def get_fsdp_wrap_policy(module, config=None, is_lora=False):
     if is_lora:
 
         def lambda_policy_fn(module):
+            """Return whether the leaf module has a trainable weight (e.g. a LoRA module).
+
+            Args:
+                module (torch.nn.Module): The module to evaluate.
+
+            Returns:
+                bool: True if the module is a trainable leaf with a weight, otherwise False.
+
+            """
             return bool(
                 len(list(module.named_children())) == 0
                 and getattr(module, "weight", None) is not None
@@ -165,6 +194,13 @@ def get_fsdp_wrap_policy(module, config=None, is_lora=False):
 
 @torch.no_grad()
 def offload_fsdp_model_to_cpu(model: FSDP, empty_cache: bool = True):
+    """Offload FSDP model parameters from GPU to CPU.
+
+    Args:
+        model: The FSDP-wrapped model to offload.
+        empty_cache: Whether to empty the device cache after offloading.
+
+    """
     if fsdp_version(model) == 2 or fsdp_version(model) == 0:
         offload_fsdp2_model_to_cpu(model, empty_cache)
         return
@@ -192,6 +228,13 @@ def offload_fsdp_model_to_cpu(model: FSDP, empty_cache: bool = True):
 
 @torch.no_grad()
 def offload_fsdp2_model_to_cpu(model, empty_cache: bool = True):
+    """Offload an FSDP2 model to CPU.
+
+    Args:
+        model: The FSDP2 model to offload.
+        empty_cache: Whether to empty the device cache after offloading.
+
+    """
     model.cpu()
     if empty_cache:
         get_torch_device().empty_cache()
@@ -199,6 +242,12 @@ def offload_fsdp2_model_to_cpu(model, empty_cache: bool = True):
 
 @torch.no_grad()
 def load_fsdp_model_to_gpu(model: FSDP):
+    """Load FSDP model parameters from CPU back to GPU.
+
+    Args:
+        model: The FSDP-wrapped model to load onto GPU.
+
+    """
     if fsdp_version(model) == 2 or fsdp_version(model) == 0:
         load_fsdp2_model_to_gpu(model)
         return
@@ -219,12 +268,24 @@ def load_fsdp_model_to_gpu(model: FSDP):
 
 @torch.no_grad()
 def load_fsdp2_model_to_gpu(model):
+    """Load an FSDP2 model to GPU.
+
+    Args:
+        model: The FSDP2 model to load onto GPU.
+
+    """
     device = get_device_id()
     model.to(device)
 
 
 @torch.no_grad()
 def offload_fsdp_optimizer(optimizer):
+    """Offload optimizer state tensors from GPU to CPU.
+
+    Args:
+        optimizer: The optimizer whose state should be offloaded.
+
+    """
     if not optimizer.state:
         return
     for param_group in optimizer.param_groups:
@@ -237,6 +298,13 @@ def offload_fsdp_optimizer(optimizer):
 
 @torch.no_grad()
 def load_fsdp_optimizer(optimizer, device_id):
+    """Load optimizer state tensors from CPU back to the specified device.
+
+    Args:
+        optimizer: The optimizer whose state should be loaded.
+        device_id: The target device identifier.
+
+    """
     if not optimizer.state:
         return
     for param_group in optimizer.param_groups:
@@ -261,6 +329,14 @@ def meta_device_init():
     registered = set()
 
     def register_empty_parameter(module, name, param):
+        """Register a parameter and move newly seen ones to the meta device.
+
+        Args:
+            module (torch.nn.Module): The module owning the parameter.
+            name (str): The parameter name.
+            param (torch.nn.Parameter): The parameter being registered.
+
+        """
         old_register_parameter(module, name, param)
         # we will skip register shared parameters as it
         # is already registered previously
@@ -346,6 +422,7 @@ def parallel_init_module_fn(module: torch.nn.Module, shard_states: dict[str, tor
 
     Returns:
         init_fn (Callable): a function to initialize sub-modules in the `module` with `shard_states`
+
     """
 
     state2fqn = {}
@@ -359,6 +436,17 @@ def parallel_init_module_fn(module: torch.nn.Module, shard_states: dict[str, tor
 
     @torch.no_grad()
     def create_and_sync_state(param_name, state, is_param):
+        """Create a parameter/buffer and broadcast its values from the owning rank.
+
+        Args:
+            param_name (str): The fully qualified name of the state to create.
+            state (torch.Tensor): The meta tensor describing the target shape and dtype.
+            is_param (bool): Whether the state is a parameter (True) or buffer (False).
+
+        Returns:
+            torch.Tensor: The materialized and synchronized parameter or buffer.
+
+        """
         assert param_name in shard_states, f"{param_name} not loaded"
         device = get_device_id()
         if is_param:
@@ -378,6 +466,16 @@ def parallel_init_module_fn(module: torch.nn.Module, shard_states: dict[str, tor
         return param
 
     def init_fn(sub_mod: torch.nn.Module, recurse: bool = True):
+        """Materialize meta parameters and buffers of a sub-module from shard states.
+
+        Args:
+            sub_mod (torch.nn.Module): The sub-module to initialize.
+            recurse (bool): Whether to recurse into child modules. Defaults to True.
+
+        Returns:
+            torch.nn.Module: The initialized sub-module.
+
+        """
         param_and_buffers = tuple(sub_mod.named_parameters(recurse=False)) + tuple(sub_mod.named_buffers(recurse=False))
         # param_and_buffers = sorted(sub_mod.named_parameters(recurse=False), key=lambda x: x[0])
         for name, state in param_and_buffers:
@@ -420,6 +518,15 @@ def parallel_init_module_fn(module: torch.nn.Module, shard_states: dict[str, tor
 
 
 def fsdp_version(model):
+    """Return the FSDP version used by the model.
+
+    Args:
+        model: The model to check.
+
+    Returns:
+        1 for FSDP v1, 2 for FSDP v2 (FSDPModule), or 0 otherwise.
+
+    """
     if isinstance(model, FSDP):
         return 1
     elif isinstance(model, FSDPModule):
@@ -429,6 +536,18 @@ def fsdp_version(model):
 
 
 def get_fsdp_state_ctx(model, state_type, state_cfg, optim_cfg):
+    """Return the appropriate state dict context manager for the model's FSDP version.
+
+    Args:
+        model: The FSDP model.
+        state_type: The state dict type.
+        state_cfg: The state dict configuration.
+        optim_cfg: The optimizer state dict configuration.
+
+    Returns:
+        A context manager for state dict operations.
+
+    """
     if fsdp_version(model) == 1:
         return FSDP.state_dict_type(model, state_type, state_cfg, optim_cfg)
     else:
@@ -449,6 +568,7 @@ def get_fsdp_full_state_dict(model: torch.nn.Module, offload_to_cpu: bool = True
 
     Raises:
         NotImplementedError: If the FSDP version is unknown
+
     """
     if fsdp_version(model) == 1:
         from torch.distributed.fsdp import FullStateDictConfig, StateDictType
@@ -479,6 +599,9 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_state: dict, device_
     Args:
         model (`torch.nn.Module`): The model to load the state dict into
         full_state (`dict`): The full state dict to load, can only be on rank 0
+        device_mesh: Optional device mesh describing the sharding layout of the model.
+        cpu_offload: Optional CPU offload setting controlling whether parameters are offloaded to CPU.
+
     """
 
     if version.parse(torch.__version__) >= version.parse("2.7.0"):
@@ -515,6 +638,15 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_state: dict, device_
 
 @contextmanager
 def maybe_patch_fsdp_module(model):
+    """Temporarily patch FSDPModule to support ABC-based models if needed.
+
+    Args:
+        model: The model that may require FSDPModule patching.
+
+    Yields:
+        None
+
+    """
     if fully_shard_module is None:
         yield
         return
@@ -522,6 +654,8 @@ def maybe_patch_fsdp_module(model):
     orig_fsdp_module = fully_shard_module.FSDPModule
 
     class FSDPModuleABC(ABC, orig_fsdp_module):
+        """FSDPModule subclass mixing in ABC so abstract FSDP models pass isinstance checks."""
+
         pass
 
     try:
@@ -603,6 +737,15 @@ def get_shard_placement_fn(fsdp_size):
     """Choose the dimension that can divide fsdp_size to avoid padding"""
 
     def shard_placement_fn(param):
+        """Pick a shard dimension divisible by fsdp_size to avoid padding.
+
+        Args:
+            param (torch.Tensor): The parameter to be sharded.
+
+        Returns:
+            Shard: The placement specifying the chosen shard dimension.
+
+        """
         shape = list(param.shape)
         for i in range(len(shape)):
             if shape[i] % fsdp_size == 0:
@@ -629,6 +772,15 @@ def fsdp2_clip_grad_norm_(parameters, max_norm, norm_type=2.0, error_if_nonfinit
 
 
 def layered_summon_lora_params(fsdp_module) -> OrderedDict:
+    """Extract LoRA parameters layer-by-layer from an FSDP module to reduce memory usage.
+
+    Args:
+        fsdp_module: The FSDP-wrapped module containing LoRA adapters.
+
+    Returns:
+        An ordered dictionary mapping parameter names to CPU tensors.
+
+    """
     from peft.utils.save_and_load import get_peft_model_state_dict
 
     def __prefix_submodules(module, prefix):
@@ -736,9 +888,11 @@ def replace_lora_wrapper(k, peft_config):
 
     Args:
         k (str): Original parameter key name.
+        peft_config: The PEFT/LoRA configuration used to identify target and excluded modules.
 
     Returns:
         str: Transformed parameter key for base layer.
+
     """
     stacked_params = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
     if k.endswith(".weight"):
@@ -766,6 +920,7 @@ def set_reshard_after_forward(module: FSDPModule, reshard_after_forward: bool, r
     to ``True`` for training.
 
     Args:
+        module (FSDPModule): The FSDP module whose reshard-after-forward behavior is set.
         reshard_after_forward (bool): Whether to reshard parameters after
             forward.
         recurse (bool): Whether to set for all FSDP submodules or just the
@@ -774,6 +929,7 @@ def set_reshard_after_forward(module: FSDPModule, reshard_after_forward: bool, r
     ---
     Copied from https://github.com/pytorch/pytorch/blob/main/torch/distributed/fsdp/_fully_shard/_fully_shard.py to
     address the absence of the set_reshard_after_forward function in torch versions earlier than 2.8.0.
+
     """
 
     if not isinstance(reshard_after_forward, bool):
@@ -819,6 +975,7 @@ def _merge_or_unmerge_lora_(module, merge: bool):
     Args:
         module: The module containing LoRA layers
         merge: If True, merge LoRA into base model; if False, unmerge LoRA
+
     """
     from peft.tuners.lora import LoraLayer
 
@@ -854,6 +1011,7 @@ def fsdp_merge_unmerge(module: nn.Module, do_merge: bool):
     Args:
         module: The FSDP module to merge/unmerge LoRA adapters
         do_merge: If True, merge LoRA into base model; if False, unmerge LoRA
+
     """
     version = fsdp_version(module)
     assert version in [1, 2], f"fsdp_merge_unmerge requires FSDP module, got version {version}"
@@ -890,6 +1048,7 @@ def collect_merged_lora_params(module: nn.Module) -> OrderedDict:
 
     Returns:
         OrderedDict mapping HF parameter names to CPU tensors.
+
     """
     ver = fsdp_version(module)
     assert ver in [1, 2], f"collect_merged_lora_params requires FSDP module, got version {ver}"
@@ -969,6 +1128,7 @@ def backup_base_model_weights(module):
 
     Returns:
         dict: Dictionary mapping parameter name to CPU tensor backup of base model weights
+
     """
     from peft import PeftModel
 
@@ -998,6 +1158,7 @@ def restore_base_model_weights(module, backup):
     Args:
         module: The PEFT model with LoRA adapters
         backup: Dictionary mapping parameter name to CPU tensor backup of base model weights
+
     """
     with torch.no_grad():
         for name, param in module.named_parameters():
@@ -1020,6 +1181,7 @@ def merged_lora_context(actor, backup_adapters=False):
 
     Yields:
         None
+
     """
     base_weights_backup = None
     if backup_adapters:
@@ -1054,6 +1216,7 @@ def fsdp2_sharded_save_to_cpu(
         cpu_sharded_state: Dictionary of CPU shards for the current process.
                           Key = parameter name, Value = (CPU shard tensor, original DTensorSpec)
         global_spec: DTensorSpec of the first parameter (used to verify global rules during loading)
+
     """
     cpu_sharded_state = {}
     global_spec = None  # Record global sharding rules (all parameters follow the same spec)
@@ -1097,6 +1260,7 @@ def fsdp2_sharded_load_from_cpu(
         cpu_sharded_state: Shard data read from CPU memory by the current process
                           (from fsdp2_sharded_save_to_cpu)
         target_spec: Global DTensorSpec from saving (used to verify sharding rule consistency)
+
     """
     # Verify device_mesh consistency (core: ensure loaded shards map to original GPUs)
     current_device_mesh = None

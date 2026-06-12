@@ -36,6 +36,8 @@ import torch.distributed as dist
 
 
 class LinearCrossEntropy(torch.autograd.Function):
+    """Fused linear projection and cross-entropy loss with Triton kernels."""
+
     @staticmethod
     def forward(
         ctx,
@@ -46,19 +48,20 @@ class LinearCrossEntropy(torch.autograd.Function):
         reduction: typing.Optional[str] = "none",
         dist_process_group: typing.Optional[dist.ProcessGroup] = None,
     ) -> list[torch.Tensor]:
-        """_summary_
+        """Compute fused linear cross-entropy loss in the forward pass.
 
         Args:
-            ctx (_type_): _description_
-            hidden (torch.Tensor): (batch_size, num_tokens, hidden_size) -> (batch_size * num_tokens, hidden_size)
-            weight (torch.Tensor): (vocab_size, hidden_size)
-            labels (torch.Tensor): (batch_size, num_tokens) -> (batch_size * num_tokens, )
-            temperature (typing.Optional[float], optional): _description_. Defaults to 1.0.
-            reduction (typing.Optional[str], optional): _description_. Defaults to "none".
-            dist_process_group (typing.Optional[dist.ProcessGroup], optional): _description_. Defaults to None.
+            ctx: Autograd context for saving tensors.
+            hidden: Hidden states, shape ``(batch_size, num_tokens, hidden_size)``.
+            weight: Vocabulary projection weights, shape ``(vocab_size, hidden_size)``.
+            labels: Ground-truth token ids, shape ``(batch_size, num_tokens)``.
+            temperature: Softmax temperature scaling factor.
+            reduction: Reduction mode (``"none"``, ``"mean"``, or ``"sum"``).
+            dist_process_group: Optional process group for distributed vocab parallelism.
 
         Returns:
-            typing.List[torch.Tensor]: _description_
+            Tuple of log-probabilities and entropy tensors.
+
         """
 
         assert isinstance(temperature, float), f"temperature must be a float, but got {type(temperature)}"
@@ -88,6 +91,17 @@ class LinearCrossEntropy(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dlogprobs: torch.Tensor, dentropy: torch.Tensor) -> list[torch.Tensor]:
+        """Compute gradients for the linear cross entropy operation.
+
+        Args:
+            ctx: Autograd context with saved tensors from the forward pass.
+            dlogprobs: Gradient with respect to the log-probabilities output.
+            dentropy: Gradient with respect to the entropy output.
+
+        Returns:
+            Gradients for hidden, weight, and None for non-differentiable inputs.
+
+        """
         from . import kernels
 
         with torch.cuda.nvtx.range("LinearCrossEntropy-backward"):

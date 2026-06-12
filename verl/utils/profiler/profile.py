@@ -31,6 +31,7 @@ def mark_start_range(
         color (Optional[str]): Color for the marker visualization.
         domain (Optional[str]): Domain for the marker.
         category (Optional[str]): Category for the marker.
+
     """
     pass
 
@@ -40,6 +41,7 @@ def mark_end_range(range_id: str) -> None:
 
     Args:
         range_id (str): Identifier of the range to end.
+
     """
     pass
 
@@ -60,6 +62,7 @@ def mark_annotate(
 
     Returns:
         Callable: Decorator function that returns the original function unchanged.
+
     """
 
     def decorator(func):
@@ -185,6 +188,16 @@ class DistProfiler:
 
         The wrapped function is executed directly if profiling is disabled,
         not selected for current rank/step, or backend annotate fails.
+
+        Args:
+            message: Annotation message for the profiling marker.
+            color: Color for the profiling marker visualization.
+            domain: Domain name for grouping profiling annotations.
+            category: Category for the profiling annotation.
+            **kwargs_outer: Additional keyword arguments passed to the profiler.
+
+        Returns:
+            A decorator that wraps the method with profiling annotations.
         """
 
         def decorator(func):
@@ -217,10 +230,14 @@ class DistProfiler:
 
 
 class _NoOpProfiler:
+    """A no-op profiler used as a fallback when no tool is configured."""
+
     def start(self, **kwargs):
+        """No-op start."""
         return
 
     def stop(self):
+        """No-op stop."""
         return
 
 
@@ -234,6 +251,7 @@ class DistProfilerExtension:
 
     Args:
         profiler (DistProfiler): The base distributed profiler instance to extend
+
     """
 
     def __init__(self, profiler: DistProfiler):

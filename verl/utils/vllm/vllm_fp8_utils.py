@@ -36,6 +36,15 @@ logger = logging.getLogger(__name__)
 # Ref: https://github.com/NVIDIA-NeMo/RL/commit/bc24887c72a6e1b2699a228bc87c588546dfe6b7
 @dataclass()
 class FP8State:
+    """Cache of FP8 parameter metadata and vLLM patches used during FP8 weight handling.
+
+    Attributes:
+        seen_params (set): Parameter names that have already been inspected.
+        fp8_param_names (set): Parameter names identified as FP8 weights.
+        vllm_patches (list): Applied vLLM patches related to FP8 support.
+
+    """
+
     # A cache of fp8 parameter names, we can check this cache to see if a
     # param name corresponds to a fp8 weight
     seen_params: set = field(default_factory=lambda: set())
@@ -47,6 +56,15 @@ fp8_state: FP8State = FP8State()
 
 
 def is_fp8_model(vllm_config):
+    """Check whether the given vLLM config uses FP8 quantization.
+
+    Args:
+        vllm_config: The vLLM configuration object to inspect.
+
+    Returns:
+        True if the model uses FP8 quantization, False otherwise.
+
+    """
     from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 
     if hasattr(vllm_config, "quant_config"):
@@ -59,6 +77,16 @@ def is_fp8_model(vllm_config):
 
 
 def get_module_from_param_name(model, name: str):
+    """Retrieve the module corresponding to a given parameter name in the model.
+
+    Args:
+        model: The model to traverse.
+        name: Dot-separated parameter name (e.g., 'layers.0.self_attn.q_proj.weight').
+
+    Returns:
+        The module that owns the specified parameter.
+
+    """
     # Split the name into parts (e.g., 'layers', '0', 'self_attn', 'q_proj', 'weight')
     # The module path is all but the last part (the parameter's own name)
     path_parts = name.split(".")
@@ -89,6 +117,16 @@ def get_module_from_param_name(model, name: str):
 
 
 def is_fp8_weight(name, model):
+    """Determine whether a named parameter is an FP8-quantized weight.
+
+    Args:
+        name: The parameter name to check.
+        model: The model used for module lookup.
+
+    Returns:
+        True if the parameter is an FP8 weight, False otherwise.
+
+    """
     if name not in fp8_state.seen_params:
         fp8_state.seen_params.add(name)
         # Filter out bias params
@@ -106,6 +144,15 @@ def is_fp8_weight(name, model):
 
 
 def is_mxfp8_vllm_ascend(quant_config):
+    """Check whether the quantization config is an Ascend MXFP8 configuration.
+
+    Args:
+        quant_config: The quantization configuration object to inspect.
+
+    Returns:
+        True if the config is an Ascend MXFP8 configuration, False otherwise.
+
+    """
     try:
         from vllm_ascend.quantization.modelslim_config import AscendModelSlimConfig
 
@@ -119,6 +166,12 @@ def is_mxfp8_vllm_ascend(quant_config):
 
 
 def restore_mxfp8_weights_for_loading(model):
+    """Restore MXFP8 weight shapes to their original layout before reloading.
+
+    Args:
+        model: The model whose MXFP8-transformed modules should be restored.
+
+    """
     for name, module in model.named_modules():
         if (
             hasattr(module, "_mxfp8_transformed")
@@ -165,6 +218,7 @@ def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
 
     Yields:
         Tuples of (name, tensor) for each weight and its scale
+
     """
 
     fp8_state.seen_params.clear()
@@ -214,6 +268,17 @@ def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
 
 
 def load_quanted_weights(weights, model_runner, is_drafter=False):
+    """Load and quantize weights into a vLLM model runner.
+
+    Args:
+        weights: Generator or iterable of (name, tensor) weight pairs.
+        model_runner: The vLLM model runner containing model and config.
+        is_drafter: If True, load weights into the drafter model
+            (``model_runner.drafter.model``) instead of the main model.
+
+    Returns:
+        The set of parameter names that were successfully loaded.
+    """
     if is_drafter:
         drafter = getattr(model_runner, "drafter", None)
         model = drafter.model if drafter is not None and hasattr(drafter, "model") else None
@@ -622,6 +687,13 @@ def process_weights_after_loading_moe_for_vllm11(self, layer) -> None:
 
 
 def process_weights_after_loading_moe_for_vllm14(self, layer) -> None:
+    """Process FusedMoE weights after loading for vLLM >= 0.14.
+
+    Args:
+        self: The Fp8MoEMethod instance.
+        layer: The FusedMoE layer whose weights are being processed.
+
+    """
     # removed the reentrancy guard here for refit
     from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
         convert_to_fp8_moe_kernel_format,
@@ -698,6 +770,7 @@ def process_weights_after_loading_moe_for_vllm14(self, layer) -> None:
 
 
 def apply_vllm_fp8_patches():
+    """Apply monkey-patches for FP8 blockwise quantization in vLLM."""
     logger.info("Applying vllm fp8 patches for blockwise quantization")
     vllm_ver = version.parse(vllm.__version__)
     if fp8_state.vllm_patches:

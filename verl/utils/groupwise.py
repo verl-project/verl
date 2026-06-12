@@ -36,6 +36,7 @@ Notes:
 - group_mean_std: pure-PyTorch per-group mean/std with Bessel correction for variance
   (denominator max(count-1, 1)). Singleton groups fallback to mean=0, std=1 for
   compatibility with common “native” conventions.
+
 """
 
 from __future__ import annotations
@@ -98,6 +99,7 @@ def as_torch_index(index: Any, device: torch.device | str | None = None) -> torc
 
     Returns:
         torch.LongTensor with shape (N,)
+
     """
     target = _resolve_device(device)
 
@@ -185,6 +187,7 @@ def group_mean_std(
         mean_g: (G,) float32
         std_g : (G,) float32
         count : (G,) float32
+
     """
     target = _resolve_device(device)
 

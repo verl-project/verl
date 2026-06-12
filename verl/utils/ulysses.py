@@ -119,6 +119,19 @@ def _unpad_tensor(x: Tensor, dim: int, padding_size: int) -> Tensor:
 
 
 def slice_input_tensor(x: Tensor, dim: int, padding: bool = True, group: ProcessGroup = None) -> Tensor:
+    """Slice the local shard of a tensor along ``dim`` for the current sequence parallel rank.
+
+    Args:
+        x (Tensor): Input tensor to slice.
+        dim (int): Dimension along which to slice.
+        padding (bool): Whether to pad the tensor to be divisible by the SP world size
+            before slicing. Defaults to True.
+        group (ProcessGroup, optional): Process group. If None, uses the Ulysses SP group.
+
+    Returns:
+        Tensor: The contiguous local shard for the current rank.
+
+    """
     group = get_ulysses_sequence_parallel_group() if group is None else group
     sp_world_size = dist.get_world_size(group)
     sp_rank = get_ulysses_sequence_parallel_rank()
@@ -141,6 +154,19 @@ def all_to_all_tensor(
     group: Optional[dist.ProcessGroup] = None,
     async_op: bool = False,
 ):
+    """Perform an all-to-all on a tensor, scattering one dimension and gathering another.
+
+    Args:
+        local_input (Tensor): Local input tensor.
+        scatter_dim (int): Dimension to scatter across ranks.
+        gather_dim (int): Dimension to gather across ranks.
+        group (ProcessGroup, optional): Process group. If None, uses the Ulysses SP group.
+        async_op (bool): Whether to perform the communication asynchronously. Defaults to False.
+
+    Returns:
+        Tensor: The redistributed tensor, or a ``wait`` callable returning it when ``async_op``.
+
+    """
     group = get_ulysses_sequence_parallel_group() if group is None else group
     seq_world_size = dist.get_world_size(group)
     input_list = [t.contiguous() for t in torch.tensor_split(local_input, seq_world_size, scatter_dim)]
@@ -149,6 +175,7 @@ def all_to_all_tensor(
     if async_op:
 
         def wait():
+            """Wait for the async all-to-all to finish and return the gathered tensor."""
             comm.wait()
             return torch.cat(output_list, dim=gather_dim).contiguous()
 
@@ -157,6 +184,17 @@ def all_to_all_tensor(
 
 
 def all_gather_tensor(local_tensor: Tensor, group: Optional[dist.ProcessGroup] = None, async_op: bool = False):
+    """All-gather a tensor along the first dimension across the process group.
+
+    Args:
+        local_tensor (Tensor): Local tensor to gather.
+        group (ProcessGroup, optional): Process group. If None, uses the Ulysses SP group.
+        async_op (bool): Whether to perform the communication asynchronously. Defaults to False.
+
+    Returns:
+        Tensor: The gathered tensor.
+
+    """
     group = get_ulysses_sequence_parallel_group() if group is None else group
     sp_world_size = dist.get_world_size(group=group)
     output_shape = list(local_tensor.shape)
@@ -167,6 +205,8 @@ def all_gather_tensor(local_tensor: Tensor, group: Optional[dist.ProcessGroup] =
 
 
 class SeqAllToAll(torch.autograd.Function):
+    """Autograd function performing an all-to-all sequence redistribution with gradient support."""
+
     @staticmethod
     def forward(
         ctx: Any,
@@ -176,6 +216,7 @@ class SeqAllToAll(torch.autograd.Function):
         gather_dim: int,
         async_op: bool = False,
     ) -> Tensor:
+        """Apply an all-to-all redistribution in the forward pass."""
         ctx.group = group
         ctx.scatter_dim = scatter_dim
         ctx.gather_dim = gather_dim
@@ -184,6 +225,7 @@ class SeqAllToAll(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx: Any, *grad_output: Tensor) -> tuple[None, Tensor, None, None]:
+        """Apply the inverse all-to-all redistribution on the gradient."""
         input_t = torch.cat(grad_output[1:], dim=ctx.gather_dim).contiguous() if ctx.async_op else grad_output[0]
         return (
             None,
@@ -196,6 +238,8 @@ class SeqAllToAll(torch.autograd.Function):
 
 
 class Gather(torch.autograd.Function):
+    """Autograd function that all-gathers tensors across ranks with gradient support."""
+
     @staticmethod
     def forward(
         ctx: Any,
@@ -205,6 +249,7 @@ class Gather(torch.autograd.Function):
         grad_scaler: bool = True,
         async_op=False,
     ) -> Tensor:
+        """All-gather the local tensor along ``gather_dim`` in the forward pass."""
         ctx.group = group
         ctx.gather_dim = gather_dim
         ctx.grad_scaler = grad_scaler
@@ -226,6 +271,7 @@ class Gather(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx: Any, grad_output: Tensor) -> Any:
+        """Scatter the gradient back to the local shard, optionally scaling it."""
         if ctx.grad_scaler:
             grad_output = grad_output * ctx.sp_world_size
         return (
@@ -239,6 +285,7 @@ class Gather(torch.autograd.Function):
 
 
 def gather_outpus_and_unpad(*args, **kwargs):
+    """Raise an error directing callers to the correctly spelled ``gather_outputs_and_unpad``."""
     raise RuntimeError(
         "please use verl.utils.ulysses.gather_outputs_and_unpad instead of verl.utils.ulysses.gather_outpus_and_unpad"
     )
@@ -266,6 +313,7 @@ def gather_outputs_and_unpad(
 
     Returns:
         Tensor: The gathered tensor, with padding removed if requested.
+
     """
     group = get_ulysses_sequence_parallel_group() if group is None else group
     if group is None:
@@ -282,6 +330,18 @@ def gather_outputs_and_unpad(
 def ulysses_pad(
     input_ids_rmpad: torch.Tensor, position_ids_rmpad: Optional[torch.Tensor] = None, sp_size: int = 1, pad_value=0
 ):
+    """Pad input_ids and position_ids so their sequence length is divisible by ``sp_size``.
+
+    Args:
+        input_ids_rmpad (torch.Tensor): Input ids of shape [bsz, seqlen].
+        position_ids_rmpad (torch.Tensor, optional): Position ids of shape [bsz, seqlen].
+        sp_size (int): Ulysses sequence parallelism size. Defaults to 1.
+        pad_value: Value used to pad ``input_ids_rmpad``. Defaults to 0.
+
+    Returns:
+        tuple: The padded input_ids, padded position_ids, and the pad size.
+
+    """
     if position_ids_rmpad is not None:
         assert position_ids_rmpad.size(-2) == 1
         assert input_ids_rmpad.size(-1) == position_ids_rmpad.size(-1)
@@ -319,11 +379,13 @@ def ulysses_pad_and_slice_inputs(
         position_ids_rmpad: shape of [bsz, seqlen], where bsz must be 1
         sp_size (int): ulysses sequence parallelism size
         skip_position_ids_rmpad: whether to skip position_ids_rmpad for VeOmniEngine
+        pad_value (int): The value used for padding. Defaults to 0.
 
     Returns:
         torch.Tensor: padded and sliced input_ids
         torch.Tensor: padded and sliced position_ids
         int: pad size
+
     """
     input_ids_rmpad, position_ids_rmpad, pad_size = ulysses_pad(
         input_ids_rmpad, position_ids_rmpad, sp_size, pad_value=pad_value
@@ -335,6 +397,7 @@ def ulysses_pad_and_slice_inputs(
 
 
 def validate_ulysses_config(num_heads, ulysses_sequence_size):
+    """Validate that ``num_heads`` is divisible by the Ulysses sequence parallelism size."""
     if ulysses_sequence_size > 1:
         assert num_heads % ulysses_sequence_size == 0, (
             f"num_heads ({num_heads}) must be divisible by ulysses sequence size({ulysses_sequence_size})"
@@ -354,9 +417,11 @@ class BaseShardingManager:
         pass
 
     def preprocess_data(self, data: "DataProto") -> "DataProto":
+        """Preprocess data before computation. Returns the data unchanged by default."""
         return data
 
     def postprocess_data(self, data: "DataProto") -> "DataProto":
+        """Postprocess data after computation. Returns the data unchanged by default."""
         return data
 
 

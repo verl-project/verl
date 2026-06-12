@@ -19,6 +19,22 @@ from .utils import check_correctness as apps_check_correctness
 
 
 def compute_score(completion, test_cases, continuous=False):
+    """Evaluate a code completion against test cases.
+
+    Extract the Python solution from the completion and run it against the
+    provided input/output test cases.
+
+    Args:
+        completion: The model-generated code completion string.
+        test_cases: A dict (or JSON string) with ``inputs`` and ``outputs`` lists.
+        continuous: If True, compute a fractional score over the first 10 test
+            cases instead of a binary pass/fail.
+
+    Returns:
+        A tuple of (success, metadata) where *success* is a bool or float and
+        *metadata* contains execution details.
+
+    """
     # try to get code solution from completion. if the completion is pure code, this will not take effect.
     solution = completion.split("```python")[-1].split("```")[0]
     try:

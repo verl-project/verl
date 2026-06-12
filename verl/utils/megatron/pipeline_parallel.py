@@ -20,6 +20,7 @@ from .sequence_parallel import pad_to_sequence_parallel
 
 
 def compute_transformers_input_shapes(batches, meta_info):
+    """Compute per-microbatch input shapes for pipeline-parallel transformer stages."""
     from flash_attn.bert_padding import unpad_input  # flash 2 is a must for Megatron
 
     # pre-compute input shapes for each micro-batch at each pp stage
@@ -60,6 +61,7 @@ def make_batch_generator(batches, vpp_size):
 
     Returns:
         An iterator or a list of iterators over the micro-batches.
+
     """
     if vpp_size > 1:
         # has vpp

@@ -52,10 +52,12 @@ def get_device_flops(unit="T", device_name=None):
             "G" - Giga (1e9)
             "T" - Tera (1e12, default)
             "P" - Peta (1e15)
+        device_name (str): Optional device name to look up FLOPS for; defaults to the current device when None.
 
     Returns:
         float: The theoretical FLOPS capacity of the current device in the specified unit.
         Returns float('inf') for unknown GPU types.
+
     """
 
     def unit_convert(number, level):
@@ -591,10 +593,12 @@ class FlopsCounter:
             batch_seqlens (List[int]): A list where each element represents the number of valid tokens in the
                 current batch.
             delta_time (float): The time taken to process the batch, in seconds.
+            **kargs: Additional keyword arguments forwarded to the model-specific FLOPS estimation function.
 
         Returns:
             estimated_flops (float): The estimated FLOPS based on the input tokens and time.
             promised_flops (float): The expected FLOPS of the current device.
+
         """
         tokens_sum = sum(batch_seqlens)
         func = ESTIMATE_FUNC.get(self.config.model_type, _estimate_unknown_flops)

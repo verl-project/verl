@@ -38,6 +38,7 @@ def _get_current_mem_info(unit: str = "GB", precision: int = 2) -> tuple[str]:
     Returns:
         tuple[str]: A tuple containing memory allocated, memory reserved, memory used, and memory total
         in the specified unit.
+
     """
     assert unit in ["GB", "MB", "KB"]
     device = get_torch_device()
@@ -68,6 +69,7 @@ def log_gpu_memory_usage(head: str, logger: logging.Logger = None, level=logging
         logger (logging.Logger, optional): Logger instance to use for logging. If None, prints to stdout.
         level: Logging level to use. Defaults to logging.DEBUG.
         rank (int): The rank of the process to log memory for. Defaults to 0.
+
     """
     if (not dist.is_initialized()) or (rank is None) or (dist.get_rank() == rank):
         mem_allocated, mem_reserved, mem_used, mem_total = _get_current_mem_info()
@@ -91,6 +93,7 @@ class GPUMemoryLogger(DecoratorLoggerBase):
         >>> def update_actor(self, batch):
         ...     # real actor update logics
         ...     return
+
     """
 
     def __init__(self, role: str, logger: logging.Logger = None, level=logging.DEBUG, log_only_rank_0: bool = True):
@@ -101,12 +104,30 @@ class GPUMemoryLogger(DecoratorLoggerBase):
         super().__init__(role, logger, level, rank, log_only_rank_0)
 
     def __call__(self, decorated_function: callable):
+        """Wrap a function to log GPU memory usage around its execution.
+
+        Args:
+            decorated_function: The function to decorate with memory logging.
+
+        """
+
         def f(*args, **kwargs):
             return self.log(decorated_function, *args, **kwargs)
 
         return f
 
     def log(self, func, *args, **kwargs):
+        """Log GPU memory usage before and after executing a function.
+
+        Args:
+            func: The function to execute and log around.
+            *args: Positional arguments forwarded to *func*.
+            **kwargs: Keyword arguments forwarded to *func*.
+
+        Returns:
+            The return value of *func*.
+
+        """
         name = func.__name__
         mem_allocated, mem_reserved, mem_used, mem_total = _get_current_mem_info()
         message = (
@@ -128,6 +149,12 @@ class GPUMemoryLogger(DecoratorLoggerBase):
 
 
 def log_print(ctn: Any):
+    """Print a message with timestamp, filename, line number, and function name.
+
+    Args:
+        ctn: The content to print.
+
+    """
     current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     frame = inspect.currentframe().f_back
@@ -143,6 +170,7 @@ def _timer(name: str, timing_raw: dict[str, float]):
     Args:
         name (str): The name/identifier for this timing measurement.
         timing_raw (Dict[str, float]): Dictionary to store timing information.
+
     """
     with Timer(name=name, logger=None) as timer:
         yield
@@ -164,6 +192,7 @@ def simple_timer(name: str, timing_raw: dict[str, float]):
 
     Yields:
         None: This is a context manager that yields control back to the code block.
+
     """
     yield from _timer(name, timing_raw)
 
@@ -191,6 +220,7 @@ def marked_timer(
 
     Yields:
         None: This is a context manager that yields control back to the code block.
+
     """
     yield from _timer(name, timing_raw)
 
@@ -205,9 +235,11 @@ def reduce_timing(
 
     Args:
         timing_raw (Dict[str, float]): Dictionary containing timing information.
+        reduce_op (torch.distributed.ReduceOp): The reduction operation to apply. Defaults to AVG.
 
     Returns:
         Dict[str, float]: Reduced timing information.
+
     """
     if not dist.is_initialized():
         return timing_raw
@@ -241,6 +273,15 @@ def topk_reduce_ratio_min_max(timing: float, k: int = 10) -> tuple[float, float,
 
 
 def gather_timing(timing_raw: dict[str, float]) -> dict[str, list[float]]:
+    """Gather timing information from all ranks into per-key lists.
+
+    Args:
+        timing_raw: Dictionary mapping timer names to elapsed seconds.
+
+    Returns:
+        A dictionary mapping each timer name to a list of values from all ranks.
+
+    """
     if not dist.is_initialized():
         return {k: [v] for k, v in timing_raw.items()}
 

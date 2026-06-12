@@ -60,6 +60,7 @@ def get_num_layers_to_build(
 
     Returns:
         int: The number of layers to be built for the current pipeline stage.
+
     """
     # If we have a custom PP layout, straightforwardly
     # return the number of decoders in the layout array.
@@ -174,6 +175,7 @@ def get_num_layers_to_build(
 
 
 def is_moe_layer(tf_config, layer_idx):
+    """Determine whether the layer at *layer_idx* is a Mixture-of-Experts layer."""
     moe_layer_freq = getattr(tf_config, "moe_layer_freq", None)
 
     if isinstance(moe_layer_freq, int):
@@ -197,6 +199,7 @@ def get_moe_num_layers_to_build(
         pp_rank: Pipeline-parallel rank (None defaults to current).
     Returns:
         Number of MoE layers on the specified rank/stage.
+
     """
     total_layers = get_num_layers_to_build(config, vp_stage=vp_stage, pp_rank=pp_rank)
 
@@ -235,6 +238,7 @@ def merge_router_topk_indices(attention_mask, input_ids, mini_layer_topk_idx_lis
     Returns:
         None: The function has side effects only; it appends a tensor of shape
         [1, dynamic_bs_all, layer_num, topk] to mini_layer_topk_idx_list.
+
     """
     with torch.no_grad():
         router_instances_list = RouterReplayHelper.get_micro_batch_router_list(tf_config, vp_rank)
@@ -291,6 +295,7 @@ def set_router_replay_data(layers_topk_idx, attention_mask, tf_config, vp_rank=N
 
     Returns:
         None: The function updates internal RouterReplay instances in-place.
+
     """
     with torch.no_grad():
         fp8 = tf_config.fp8
@@ -365,6 +370,7 @@ def reorder_and_merge_vpp_layers(
     Raises:
         ValueError: If input tensor dimensionality or expected sizes do not match.
         RuntimeError: If the computed output shape is unexpected or the schedule length mismatches.
+
     """
     # 1) Build schedule table: map each virtual_microbatch_id -> (microbatch_id, model_chunk_id)
     schedule_table = get_schedule_table(num_microbatches, vpp_size, microbatch_group_size_per_vp_stage)
@@ -401,6 +407,7 @@ def get_current_rank_layer_info(tf_config, vp_rank=None):
     Returns:
         Tuple[dict, dict]: A tuple of (local_assignment, all_assignments) where local_assignment contains
         keys {"start", "end", "count"} for the current (pp_rank, vp_stage).
+
     """
     if vp_rank is None:
         vp_rank = 0
@@ -431,6 +438,7 @@ def pp_gather(local_layers_router_map, tf_config):
 
     Returns:
         torch.Tensor: Global router map of shape [bs, max_seq_len, num_layers, topk] placed on CPU.
+
     """
     pp_size = tf_config.pipeline_model_parallel_size
     if pp_size <= 1:
@@ -502,6 +510,7 @@ class RouterReplayHelper:
                 rank from Megatron parallel state is used when available.
         Returns:
             list: A contiguous sublist of RouterReplay.router_instances for the local layer range.
+
         """
         vp_size = tf_config.virtual_pipeline_model_parallel_size
         if vp_size is not None:

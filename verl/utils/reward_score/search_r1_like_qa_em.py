@@ -21,6 +21,16 @@ import string
 
 
 def normalize_answer(s):
+    """Normalize an answer string by lowercasing, removing articles and punctuation.
+
+    Args:
+        s: The raw answer string.
+
+    Returns:
+        The normalized answer string.
+
+    """
+
     def remove_articles(text):
         return re.sub(r"\b(a|an|the)\b", " ", text)
 
@@ -38,6 +48,16 @@ def normalize_answer(s):
 
 
 def em_check(prediction, golden_answers):
+    """Check exact match between a prediction and a set of golden answers.
+
+    Args:
+        prediction: The predicted answer string.
+        golden_answers: A single answer string or list of acceptable answers.
+
+    Returns:
+        1 if any golden answer matches exactly, else 0.
+
+    """
     if isinstance(golden_answers, str):
         golden_answers = [golden_answers]
     normalized_prediction = normalize_answer(prediction)
@@ -51,6 +71,16 @@ def em_check(prediction, golden_answers):
 
 
 def subem_check(prediction, golden_answers):
+    """Check whether any golden answer is a substring of the prediction.
+
+    Args:
+        prediction: The predicted answer string.
+        golden_answers: A single answer string or list of acceptable answers.
+
+    Returns:
+        1 if any golden answer is found within the prediction, else 0.
+
+    """
     if isinstance(golden_answers, str):
         golden_answers = [golden_answers]
     normalized_prediction = normalize_answer(prediction)
@@ -87,6 +117,15 @@ def extract_solution(solution_str):
 
 
 def count_answer_tags(text):
+    """Count the number of ``<answer>`` and ``</answer>`` tags in a text.
+
+    Args:
+        text: The text to scan.
+
+    Returns:
+        A tuple of (opening_count, closing_count).
+
+    """
     opening_tags = text.count("<answer>")
     closing_tags = text.count("</answer>")
 
@@ -102,6 +141,7 @@ def compute_score(solution_str, ground_truth, method="strict", format_score=0.0,
         method: the method to extract the solution, choices are 'strict' and 'flexible'
         format_score: the score for the format
         score: the score for the correct answer
+
     """
     answer = extract_solution(solution_str=solution_str)
     open_count, close_count = count_answer_tags(solution_str)
@@ -137,6 +177,7 @@ def compute_score_subem(solution_str, ground_truth, method="strict", format_scor
         method: the method to extract the solution, choices are 'strict' and 'flexible'
         format_score: the score for the format
         score: the score for the correct answer
+
     """
     answer = extract_solution(solution_str=solution_str)
     do_print = random.randint(1, 64) == 1

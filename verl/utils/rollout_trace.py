@@ -44,6 +44,7 @@ class RolloutTraceConfig:
             per worker per step. If None, all samples are traced. If set, each worker will randomly
             select up to this many unique samples to trace (including all their rollouts for GRPO).
             Total traces = max_samples_per_step_per_worker * num_workers * n_rollouts_per_sample.
+
     """
 
     _instance: Optional["RolloutTraceConfig"] = None
@@ -56,6 +57,7 @@ class RolloutTraceConfig:
     max_samples_per_step_per_worker: int | None = None
 
     def __new__(cls, *args, **kwargs):
+        """Create or return the singleton instance."""
         if cls._instance is None:
             cls._instance = super().__new__(cls)
             cls._instance._initialized = False
@@ -63,6 +65,7 @@ class RolloutTraceConfig:
 
     @classmethod
     def get_instance(cls) -> "RolloutTraceConfig":
+        """Return the singleton configuration instance, creating it if needed."""
         if cls._instance is None:
             cls._instance = cls()
         return cls._instance
@@ -76,6 +79,16 @@ class RolloutTraceConfig:
         token2text: bool = False,
         max_samples_per_step_per_worker: int | None = None,
     ):
+        """Initialize the rollout trace configuration with the specified backend.
+
+        Args:
+            project_name: Name of the tracing project.
+            experiment_name: Name of the experiment.
+            backend: Tracing backend identifier ('weave', 'mlflow', or None).
+            token2text: Whether to convert tokens to text in traces.
+            max_samples_per_step_per_worker: Maximum unique samples to trace per worker per step.
+
+        """
         config = cls.get_instance()
         if config._initialized:
             return
@@ -114,18 +127,22 @@ class RolloutTraceConfig:
 
     @classmethod
     def get_backend(cls) -> str | None:
+        """Return the configured tracing backend name."""
         return cls.get_instance().backend
 
     @classmethod
     def get_client(cls) -> object | None:
+        """Return the tracing client instance for the configured backend."""
         return cls.get_instance().client
 
     @classmethod
     def enable_token2text(cls) -> bool | None:
+        """Return whether token-to-text conversion is enabled."""
         return cls.get_instance().token2text
 
     @classmethod
     def reset(cls):
+        """Reset the singleton instance, allowing re-initialization."""
         cls._instance = None
 
 
@@ -142,6 +159,7 @@ def rollout_trace_attr(
         name: Name for the trace span (used by mlflow backend).
         validate: Whether this is a validation run.
         trace: If False, disables tracing for the duration of the context.
+
     """
     backend = RolloutTraceConfig.get_backend()
 
@@ -316,6 +334,16 @@ def _current_trace_attributes():
 
 
 def rollout_trace_op(func):
+    """Decorate a method to emit trace spans for rollout operations.
+
+    Args:
+        func: The async or sync method to instrument with tracing.
+
+    Returns:
+        A wrapped function that records inputs and outputs as trace spans.
+
+    """
+
     @functools.wraps(func)
     async def async_wrapper(self, *args, **kwargs):
         if not _trace_enabled.get():

@@ -32,6 +32,7 @@ def save_dist_checkpointing(
     async_save=False,
     content_metadata=None,
 ):
+    """Save a sharded state dict using Megatron distributed checkpointing."""
     validate_sharding_integrity = True
     # Get checkpointing strategies
     save_strategy = get_default_save_sharded_strategy("torch_dist")
@@ -54,6 +55,7 @@ def save_dist_checkpointing(
 
 
 def load_dist_checkpointing(sharded_state_dict, ckpt_dir):
+    """Load a sharded state dict from a Megatron distributed checkpoint directory."""
     # Get checkpointing strategies
     load_strategy = get_default_load_sharded_strategy(ckpt_dir)
     load_strategy = FullyParallelLoadStrategyWrapper(

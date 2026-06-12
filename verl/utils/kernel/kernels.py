@@ -59,6 +59,7 @@ if not HAVE_TRITON:
 
     @contextmanager
     def null_decorator(*args, **kwargs):
+        """Provide a no-op decorator fallback when Triton is unavailable."""
         if len(kwargs) == 0 and len(args) == 1 and callable(args[0]):
             return args[0]
         else:
@@ -76,6 +77,17 @@ if not HAVE_TRITON:
 elif SUPPORT_CUDA_TMA:
     # TMA descriptors require a global memory allocation
     def alloc_fn(size: int, alignment: int, stream: typing.Optional[int]):
+        """Allocate device memory for Triton TMA descriptors.
+
+        Args:
+            size: Number of bytes to allocate.
+            alignment: Required memory alignment in bytes.
+            stream: Optional CUDA stream for the allocation.
+
+        Returns:
+            A byte tensor allocated on the current device.
+
+        """
         return torch.empty(size, device=get_device_name(), dtype=torch.int8)
 
     # https://github.com/triton-lang/triton/commit/43625fc968b693ab51884ca95adbcf3e43483fd0
@@ -163,6 +175,7 @@ class Config:
     Args:
         _backward (BackwardEnum): Backward computation method. Defaults to BackwardEnum._Split_Dlogits_N.
         _use_triton (bool): Whether to use Triton kernels for computation. Defaults to True.
+
     """
 
     _backward: BackwardEnum = BackwardEnum._Split_Dlogits_N
@@ -464,6 +477,7 @@ def efficient_entropy_triton_kernel_epilogue_tp(
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
 ):
+    """Perform forward epilogue reduction for tensor-parallel cross entropy."""
     pid_m = tl.program_id(axis=0)
 
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
@@ -532,6 +546,7 @@ def efficient_entropy_triton_epilogue_tp_update(
     reduction: int,
     BLOCK_SIZE_M: tl.constexpr,
 ):
+    """Update log-probabilities and entropy after tensor-parallel all-reduce."""
     pid_m = tl.program_id(axis=0)
 
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
@@ -1137,6 +1152,7 @@ def efficient_entropy_backward_kernel_d_weight(
     BLOCK_SIZE_K: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
 ):
+    """Compute backward gradient with respect to the weight matrix."""
     pid = tl.program_id(axis=0)
     num_pid_n = tl.cdiv(vocab_size, BLOCK_SIZE_N)
     pid_n = pid % num_pid_n
@@ -1421,6 +1437,7 @@ def efficient_entropy_backward_kernel_general_d_logits_split_N(
     GROUP_SIZE_M: tl.constexpr,
     USE_TMA: tl.constexpr,
 ):
+    """Compute backward d_logits with vocabulary split along the N dimension."""
     pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(num_tokens, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(vocab_per_split, BLOCK_SIZE_N)

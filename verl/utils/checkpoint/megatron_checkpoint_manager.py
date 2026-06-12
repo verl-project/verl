@@ -151,6 +151,30 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             shards for the ``model`` slot. Mirrors ``*.megatron.use_dist_checkpointing``.
         bridge: mbridge / Megatron-Bridge instance for HF save/load; required whenever
             checkpoint contents request HF-format model weights.
+
+    Attributes:
+        model: Reference to the Megatron model being checkpointed
+        optimizer: Reference to the optimizer (if provided)
+        lr_scheduler: Reference to the learning rate scheduler (if provided)
+        rank: Current process rank in the distributed setup
+
+    Example:
+        ```python
+        checkpoint_manager = MegatronCheckpointManager(
+            model=megatron_model,
+            optimizer=optimizer,
+            lr_scheduler=scheduler
+        )
+
+        checkpoint_manager.save_checkpoint(
+            local_path="checkpoints/step_1000",
+            global_step=1000
+        )
+
+        checkpoint_manager.load_checkpoint(
+            local_path="checkpoints/step_1000"
+        )
+        ```
     """
 
     def __init__(
@@ -808,6 +832,14 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         return None
 
     def load_rng_states(self, rng_states, data_parallel_random_init=False, use_dist_ckpt=True):
+        """Restore random number generator states from a checkpoint.
+
+        Args:
+            rng_states: The saved RNG state dict or sharded object.
+            data_parallel_random_init: If True, use per-DP-rank RNG states.
+            use_dist_ckpt: Whether distributed checkpointing format is used.
+
+        """
         if self.use_megatron_fsdp:
             pp_rank = mpu.get_pipeline_model_parallel_rank()
             tp_rank = mpu.get_tensor_model_parallel_rank()
@@ -860,6 +892,11 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         ``optimizer/dist_ckpt/``, ``extra/dist_ckpt/``) is loaded
         independently, and any pre-v2 layout is rejected upfront with a
         pointer at the migration script.
+
+        Args:
+            local_path: Local directory containing the checkpoint.
+            hdfs_path: Optional HDFS path (unused during load).
+            del_local_after_load: If True, delete the local checkpoint after loading.
         """
         if local_path is not None:
             assert os.path.exists(local_path), f"Checkpoint path {local_path} does not exist."
@@ -1189,7 +1226,14 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         fully-complete save (including async dist_checkpointing writes).
         See ``docs/advance/checkpoint.rst`` ("Locating saved contents") for
         the manifest schema.
+
+        Args:
+            local_path: Local directory to save the checkpoint.
+            hdfs_path: Optional HDFS path to upload the checkpoint to.
+            global_step: The current global training step.
+            max_ckpt_to_keep: Maximum number of checkpoints to retain.
         """
+        # record the previous global step
         self.previous_global_step = global_step
 
         if not self.checkpoint_config.async_save:

@@ -60,15 +60,19 @@ _VARLEN_MULTI_MODAL_KEYS = {"input_features", "feature_attention_mask"}
 
 
 class LambdaLayer(nn.Module):
+    """Wrap an arbitrary callable as a ``torch.nn.Module``."""
+
     def __init__(self, fn):
         super().__init__()
         self.fn = fn
 
     def forward(self, *args, **kwargs):
+        """Apply the wrapped function to the inputs."""
         return self.fn(*args, **kwargs)
 
 
 def squeeze(x):
+    """Squeeze the last dimension of a tensor."""
     return torch.squeeze(x, dim=-1)
 
 
@@ -77,6 +81,7 @@ def update_model_config(module_config, override_config_kwargs):
     Args:
         module_config: The module config from Huggingface Transformers.
         override_config_kwargs: The kwargs to override the module config.
+
     """
     for key, val in override_config_kwargs.items():
         if isinstance(val, dict):
@@ -86,6 +91,17 @@ def update_model_config(module_config, override_config_kwargs):
 
 
 def get_huggingface_actor_config(model_name: str, override_config_kwargs=None, trust_remote_code=False) -> dict:
+    """Load a HuggingFace model config and apply optional overrides.
+
+    Args:
+        model_name: HuggingFace model name or path.
+        override_config_kwargs: Dict of config attributes to override.
+        trust_remote_code: Whether to trust remote code in the model repo.
+
+    Returns:
+        The modified ``PretrainedConfig`` object.
+
+    """
     if override_config_kwargs is None:
         override_config_kwargs = {}
     assert isinstance(override_config_kwargs, dict), (
@@ -101,6 +117,16 @@ def get_generation_config(
     model: str,
     trust_remote_code: bool = False,
 ) -> Optional[GenerationConfig]:
+    """Load a GenerationConfig for the given model, returning None if unavailable.
+
+    Args:
+        model: HuggingFace model name or path.
+        trust_remote_code: Whether to trust remote code in the model repo.
+
+    Returns:
+        GenerationConfig or None: The generation config if found.
+
+    """
     try:
         return GenerationConfig.from_pretrained(model)
     except OSError:  # Not found
@@ -118,8 +144,9 @@ def create_huggingface_actor(model_name: str, override_config_kwargs=None, autom
     """
 
     Args:
-        model_name:
-        override_config_kwargs:
+        model_name: The name or path of the HuggingFace pretrained model.
+        override_config_kwargs: Optional dict of config fields to override on the model config.
+        automodel_kwargs: Optional dict of keyword arguments passed to ``AutoModelForCausalLM.from_config``.
 
     Returns:
 
@@ -142,8 +169,9 @@ def create_huggingface_critic(model_name: str, override_config_kwargs=None, auto
     """
 
     Args:
-        model_name:
-        override_config_kwargs:
+        model_name: The name or path of the HuggingFace pretrained model.
+        override_config_kwargs: Optional dict of config fields to override on the model config.
+        automodel_kwargs: Optional dict of keyword arguments passed to ``AutoModelForCausalLM.from_config``.
 
     Returns:
 
@@ -161,6 +189,16 @@ def create_huggingface_critic(model_name: str, override_config_kwargs=None, auto
 
 
 def get_model_size(model: nn.Module, scale="auto"):
+    """Compute the number of parameters in a model with human-readable scaling.
+
+    Args:
+        model: The PyTorch model to measure.
+        scale: One of ``"auto"``, ``"B"``, ``"M"``, ``"K"``, or ``""``.
+
+    Returns:
+        tuple: A tuple of (scaled_param_count, scale_suffix).
+
+    """
     n_params = sum(p.numel() for p in model.parameters())
 
     if scale == "auto":
@@ -188,6 +226,13 @@ def get_model_size(model: nn.Module, scale="auto"):
 
 
 def print_model_size(model: nn.Module, name: str = None):
+    """Print the number of parameters in a model to stdout.
+
+    Args:
+        model: The PyTorch model to measure.
+        name: Display name for the model. Defaults to the class name.
+
+    """
     n_params, scale = get_model_size(model, scale="auto")
     if name is None:
         name = model.__class__.__name__
@@ -209,6 +254,9 @@ def create_random_mask(
     Args:
         input_ids:
             shape (batch_size, seq_len)
+        max_ratio_of_valid_token: Maximum fraction of the sequence length allowed to be valid (non-padding) tokens.
+        max_ratio_of_left_padding: Maximum fraction of the sequence length allowed to be left padding.
+        min_ratio_of_valid_token: Minimum fraction of the sequence length required to be valid tokens.
 
     Returns:
 
@@ -238,10 +286,29 @@ def create_random_mask(
 
 
 def compute_position_id_with_mask(mask):
+    """Compute position IDs from an attention mask via cumulative sum.
+
+    Args:
+        mask: Binary attention mask of shape (batch_size, seq_len).
+
+    Returns:
+        torch.Tensor: Position IDs of the same shape, starting from 0.
+
+    """
     return torch.clip(torch.cumsum(mask, dim=-1) - 1, min=0, max=None)
 
 
 def convert_weight_keys(state_dict: dict[str, torch.Tensor], model: PreTrainedModel):
+    """Convert state dict keys using the model's checkpoint conversion mapping.
+
+    Args:
+        state_dict: Original state dict with potentially new-format keys.
+        model: A HuggingFace model that may define ``_checkpoint_conversion_mapping``.
+
+    Returns:
+        dict[str, torch.Tensor]: State dict with keys converted to the model's expected format.
+
+    """
     # convert state dict keys: https://github.com/huggingface/transformers/pull/38385
     if not hasattr(model, "_checkpoint_conversion_mapping"):
         return state_dict
@@ -273,6 +340,7 @@ def check_exclude_modules(config, key: str) -> bool:
 
     Returns:
         True of match object if key matches any exclude modules from config, False if no match found
+
     """
     if hasattr(config, "exclude_modules") and config.exclude_modules:
         if isinstance(config.exclude_modules, str):
@@ -296,6 +364,7 @@ def check_target_modules(config, key: str) -> bool:
 
     Returns:
         True of match object if key matches any target modules from config, False if no match found
+
     """
     if isinstance(config.target_modules, str):
         target_module_found = re.fullmatch(config.target_modules, key)
@@ -384,6 +453,20 @@ def normalize_pp_vpp_params(params, num_hidden_layers, layer_name="layers"):
 def get_parallel_model_from_config(
     config, megatron_config, pre_process=None, post_process=None, share_embeddings_and_output_weights=False, value=False
 ):
+    """Create a parallel model from a HuggingFace config and Megatron parallel config.
+
+    Args:
+        config: HuggingFace ``PretrainedConfig``.
+        megatron_config: Megatron ``ModelParallelConfig``.
+        pre_process: Whether this rank handles input embedding.
+        post_process: Whether this rank handles the output layer.
+        share_embeddings_and_output_weights: Whether to tie embedding and output weights.
+        value: If True, create a value model (scalar output).
+
+    Returns:
+        nn.Module: The instantiated parallel model.
+
+    """
     from megatron.core import ModelParallelConfig
 
     assert isinstance(megatron_config, ModelParallelConfig)
@@ -467,6 +550,15 @@ def _load_hf_model(config, model_config, is_value_model):
 
 
 def get_hf_model_path(config):
+    """Resolve the local path for a HuggingFace model, downloading from HDFS if needed.
+
+    Args:
+        config: Configuration object with ``config.model.path``.
+
+    Returns:
+        str: Local filesystem path to the model.
+
+    """
     if config.model.path.startswith("hdfs:"):
         from verl.utils.fs import copy_to_local
 
@@ -522,6 +614,7 @@ def pad_packed_inputs(unpad_tokens: torch.Tensor, cu_seqlens, max_seqlen_in_batc
         unpad_tokens: (total_nnz, ...). Tokens after removing padding
         cu_seqlens: (total_nnz + 1,)
         max_seqlen_in_batch: int
+        size: The divisor that the total token length is padded to be a multiple of.
 
     Returns:
 
@@ -548,6 +641,15 @@ def pad_packed_inputs(unpad_tokens: torch.Tensor, cu_seqlens, max_seqlen_in_batc
 
 
 def load_mcore_dist_weights(parallel_model, dist_weight_path, is_value_model=False, prefix=""):
+    """Load distributed checkpoint weights into a Megatron-Core parallel model.
+
+    Args:
+        parallel_model: List of model chunks (one per virtual pipeline stage).
+        dist_weight_path: Path to the distributed checkpoint directory.
+        is_value_model: If True, skip loading the output layer.
+        prefix: Optional prefix for the sharded state dict keys.
+
+    """
     from megatron.core import dist_checkpointing
     from megatron.core.dist_checkpointing.serialization import StrictHandling
 
@@ -569,6 +671,20 @@ def load_mcore_dist_weights(parallel_model, dist_weight_path, is_value_model=Fal
 def get_parallel_gptmodel_from_config(
     tfconfig, hf_config, pre_process=None, post_process=None, share_embeddings_and_output_weights=False, value=False
 ):
+    """Create a Megatron-Core GPTModel from transformer and HuggingFace configs.
+
+    Args:
+        tfconfig: Megatron ``TransformerConfig``.
+        hf_config: HuggingFace ``PretrainedConfig`` for vocab/position info.
+        pre_process: Whether this rank handles input embedding.
+        post_process: Whether this rank handles the output layer.
+        share_embeddings_and_output_weights: Whether to tie embedding and output weights.
+        value: If True, replace the output layer with a scalar head.
+
+    Returns:
+        GPTModel: The instantiated Megatron-Core GPT model.
+
+    """
     from megatron.core.models.gpt.gpt_layer_specs import get_gpt_decoder_block_spec
     from megatron.core.models.gpt.gpt_model import GPTModel
 
@@ -605,6 +721,12 @@ def get_parallel_gptmodel_from_config(
 
 
 def patch_valuehead_model(model) -> None:
+    """Patch a TRL value-head model to work with verl's weight saving and generation.
+
+    Args:
+        model: An ``AutoModelForCausalLMWithValueHead`` instance to patch.
+
+    """
     from types import MethodType
 
     from transformers import PreTrainedModel
@@ -635,6 +757,18 @@ def patch_valuehead_model(model) -> None:
 
 
 def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_code):
+    """Load a value/reward model, falling back to TRL's value-head wrapper if needed.
+
+    Args:
+        local_path: Local path to the pretrained model.
+        torch_dtype: Torch dtype for model weights.
+        model_config: HuggingFace model configuration.
+        trust_remote_code: Whether to trust remote code.
+
+    Returns:
+        nn.Module: The loaded value model.
+
+    """
     from transformers import AutoModelForCausalLM, AutoModelForTokenClassification
 
     try:
@@ -684,6 +818,15 @@ _architecture_to_auto_class = {
 
 
 def get_hf_auto_model_class(hf_config):
+    """Determine the appropriate HuggingFace AutoModel class for a given config.
+
+    Args:
+        hf_config: A HuggingFace ``PretrainedConfig`` with architecture info.
+
+    Returns:
+        type: The AutoModel class (e.g., ``AutoModelForCausalLM``).
+
+    """
     has_remote_code = hasattr(hf_config, "auto_map") and any(
         hf_config.architectures[0] in val for val in hf_config.auto_map.values()
     )
@@ -815,6 +958,7 @@ def get_lora_rank_from_adapter(adapter_path: str | os.PathLike) -> int:
     Raises:
         FileNotFoundError: If adapter path or config file doesn't exist
         ValueError: If config file is invalid or missing rank
+
     """
     adapter_path = os.path.abspath(os.path.expanduser(str(adapter_path)))
 
@@ -839,5 +983,7 @@ def get_lora_rank_from_adapter(adapter_path: str | os.PathLike) -> int:
 
 @dataclass
 class CausalLMOutputForPPO(CausalLMOutputWithPast):
+    """Extend ``CausalLMOutputWithPast`` with log-probabilities and entropy for PPO."""
+
     log_probs: Optional[torch.FloatTensor] = None
     entropy: Optional[torch.FloatTensor] = None

@@ -178,10 +178,32 @@ class STEFP4QuantTriton(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x: torch.Tensor, global_amax: torch.Tensor, block_size: int) -> torch.Tensor:
+        """Apply FP4 fake quantization in the forward pass.
+
+        Args:
+            ctx: Autograd context (unused).
+            x: Input tensor to quantize.
+            global_amax: Global absolute maximum for scaling.
+            block_size: Block size for quantization.
+
+        Returns:
+            Fake-quantized tensor with the same shape as ``x``.
+
+        """
         return fp4_fake_quant_weight(x, global_amax=global_amax, block_size=block_size)
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> tuple:
+        """Pass gradients straight through (STE).
+
+        Args:
+            ctx: Autograd context (unused).
+            grad_output: Upstream gradient.
+
+        Returns:
+            Tuple of gradient for ``x`` and None for non-differentiable inputs.
+
+        """
         return grad_output, None, None
 
 
@@ -378,6 +400,7 @@ class QATLinear(nn.Linear):
         return F.linear(x_fq, weight_fq, self.bias)
 
     def extra_repr(self) -> str:
+        """Return a string representation of the module configuration."""
         return (
             f"in_features={self.in_features}, out_features={self.out_features}, "
             f"bias={self.bias is not None}, mode={self.mode.value}, "

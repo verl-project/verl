@@ -21,6 +21,17 @@ logger = logging.getLogger(__file__)
 
 
 def calculate_token_list_diff(tensor1: torch.Tensor, tensor2: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """Calculate per-sample token difference counts between two tensors under a mask.
+
+    Args:
+        tensor1: First token tensor.
+        tensor2: Second token tensor.
+        mask: Binary mask indicating valid positions.
+
+    Returns:
+        Tensor of per-sample counts of differing tokens.
+
+    """
     # verify inputs
     if tensor1.numel() == 0 or tensor2.numel() == 0:
         return torch.zeros(tensor1.shape[0], dtype=torch.long, device=tensor1.device)
@@ -46,6 +57,19 @@ def calculate_token_list_diff(tensor1: torch.Tensor, tensor2: torch.Tensor, mask
 
 
 def pearson_correlation_coefficient(tensor1: torch.Tensor, tensor2: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """Compute the Pearson correlation coefficient between two tensors under a mask.
+
+    Reference: https://arxiv.org/pdf/2506.13585
+
+    Args:
+        tensor1: First value tensor.
+        tensor2: Second value tensor.
+        mask: Boolean mask selecting valid positions.
+
+    Returns:
+        Scalar Pearson correlation coefficient, or 0 if shapes mismatch.
+
+    """
     # implemention of https://arxiv.org/pdf/2506.13585
     if tensor1.shape != tensor2.shape or mask.shape != tensor1.shape or mask.shape != tensor2.shape:
         return 0
@@ -56,6 +80,17 @@ def pearson_correlation_coefficient(tensor1: torch.Tensor, tensor2: torch.Tensor
 
 
 def calculate_log_prob_diff(log_probs1: torch.Tensor, log_probs2: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """Compute the absolute log-probability differences at masked positions.
+
+    Args:
+        log_probs1: First log-probability tensor.
+        log_probs2: Second log-probability tensor.
+        mask: Boolean mask selecting valid positions.
+
+    Returns:
+        1-D tensor of absolute differences at masked positions.
+
+    """
     full_diff = torch.abs(log_probs1 - log_probs2)
     return torch.masked_select(full_diff, mask)
 
@@ -78,6 +113,7 @@ def calculate_debug_metrics(data: DataProto) -> dict:
             "training/rollout_probs_diff_mean": mean value of logprob diff of rollout vs. actor
             "training/rollout_probs_diff_std": std value of logprob diff of rollout vs. actor
             "training/rollout_actor_probs_pearson_corr": logprob's pearson corrcoef of rollout vs. actor, reference to https://arxiv.org/pdf/2506.13585
+
     """
 
     rollout_old_log_probs = data.batch["rollout_log_probs"]

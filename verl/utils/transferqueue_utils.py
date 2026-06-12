@@ -41,9 +41,13 @@ try:
 except ImportError:
 
     class BatchMeta:
+        """Fallback placeholder for transfer_queue.BatchMeta when the package is not installed."""
+
         pass
 
     class KVBatchMeta:
+        """Fallback placeholder for transfer_queue.KVBatchMeta when the package is not installed."""
+
         pass
 
     # Mock transfer_queue module when not installed
@@ -82,12 +86,22 @@ def _run_async_in_temp_loop(async_func: Callable[..., Any], *args, **kwargs) -> 
     )
 
     def run_coroutine(coroutine):
+        """Run a coroutine on the temporary event loop and return its result.
+
+        Args:
+            coroutine: The coroutine to schedule on the temporary event loop.
+
+        Returns:
+            The result produced by the coroutine.
+
+        """
         if not thread.is_alive():
             thread.start()
         future = asyncio.run_coroutine_threadsafe(coroutine, tmp_event_loop)
         return future.result()
 
     async def stop_loop():
+        """Stop the temporary event loop."""
         tmp_event_loop.stop()
 
     try:
@@ -182,6 +196,7 @@ def _compute_need_collect(dispatch_mode: "dict | Dispatch", args: list) -> bool:
         Otherwise, returns True. For the lazy compute case, checks the worker's
         data parallel rank for the mesh specified in collect_fn.args[0] to determine
         if this worker should collect data.
+
     """
     from verl.single_controller.base.decorator import Dispatch
     from verl.single_controller.base.worker import Worker
@@ -237,6 +252,7 @@ def _postprocess_common(output, put_data, need_collect):
         This function is used in the tqbridge decorator to normalize return values
         across different execution paths and avoid redundant data operations in
         distributed scenarios.
+
     """
     from verl.protocol import DataProto
 
@@ -251,6 +267,7 @@ def _postprocess_common(output, put_data, need_collect):
 
 
 async def async_kv_batch_meta2batch_meta(meta: KVBatchMeta) -> BatchMeta:
+    """Convert a KVBatchMeta to a BatchMeta asynchronously."""
     global TQ_INITIALIZED
     if not TQ_INITIALIZED:
         tq.init()
@@ -268,10 +285,12 @@ async def async_kv_batch_meta2batch_meta(meta: KVBatchMeta) -> BatchMeta:
 
 
 def kv_batch_meta2batch_meta(meta: KVBatchMeta):
+    """Convert a KVBatchMeta to a BatchMeta synchronously."""
     return _run_async_in_temp_loop(async_kv_batch_meta2batch_meta, meta)
 
 
 async def async_batch_meta2kv_batch_meta(meta: BatchMeta) -> KVBatchMeta:
+    """Convert a BatchMeta to a KVBatchMeta asynchronously."""
     global TQ_INITIALIZED
     if not TQ_INITIALIZED:
         tq.init()
@@ -292,6 +311,7 @@ async def async_batch_meta2kv_batch_meta(meta: BatchMeta) -> KVBatchMeta:
 
 
 def batch_meta2kv_batch_meta(meta: BatchMeta):
+    """Convert a BatchMeta to a KVBatchMeta synchronously."""
     return _run_async_in_temp_loop(async_batch_meta2kv_batch_meta, meta)
 
 
@@ -312,6 +332,7 @@ def tqbridge(dispatch_mode: "dict | Dispatch" = None):
 
     Returns:
         A decorator function used to decorate target functions (synchronous or asynchronous).
+
     """
     # TODO: move to the top
     from verl.single_controller.base.decorator import _check_dispatch_mode
@@ -320,10 +341,20 @@ def tqbridge(dispatch_mode: "dict | Dispatch" = None):
         _check_dispatch_mode(dispatch_mode)
 
     def decorator(func):
+        """Wrap the target function with TransferQueue bridging logic.
+
+        Args:
+            func: The target function (sync or async) to decorate.
+
+        Returns:
+            The wrapped function with meta/TensorDict conversion applied.
+
+        """
         pid = os.getpid()
 
         @wraps(func)
         def inner(*args, **kwargs):
+            """Synchronous wrapper that bridges BatchMeta and TensorDict around the target function."""
             batch_meta = _find_meta(*args, **kwargs)
             if batch_meta is None:
                 return func(*args, **kwargs)
@@ -371,6 +402,7 @@ def tqbridge(dispatch_mode: "dict | Dispatch" = None):
 
         @wraps(func)
         async def async_inner(*args, **kwargs):
+            """Asynchronous wrapper that bridges BatchMeta and TensorDict around the target function."""
             batch_meta = _find_meta(*args, **kwargs)
             if batch_meta is None:
                 return await func(*args, **kwargs)

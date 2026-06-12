@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 
 
 def collate_fn(data_list: list[dict]) -> dict:
-    """
+    r"""
     Collate a batch of sample dicts into batched tensors and arrays.
 
     Args:
@@ -48,6 +48,7 @@ def collate_fn(data_list: list[dict]) -> dict:
         Dict where tensor entries are stacked into a torch.Tensor of shape
         (batch_size, \\*dims) and non-tensor entries are converted to
         np.ndarray of dtype object with shape (batch_size,).
+
     """
     tensors = defaultdict(list)
     non_tensors = defaultdict(list)
@@ -83,6 +84,7 @@ class RLHFDataset(Dataset):
         tokenizer (PreTrainedTokenizer): For the tokenization of text to token IDs.
         config (DictConfig): Options like cache_dir, prompt_key, max_prompt_length, truncation, etc.
         processor (ProcessorMixin, optional): Multimodal preprocessor for images/videos.
+
     """
 
     def __init__(
@@ -194,6 +196,7 @@ class RLHFDataset(Dataset):
         self.dataframe = self.maybe_filter_out_long_prompts(self.dataframe)
 
     def maybe_filter_out_long_prompts(self, dataframe: datasets.Dataset = None):
+        """Filter out prompts exceeding the maximum prompt length."""
         # filter out too long prompts
         if self.filter_overlong_prompts:
             tokenizer = self.tokenizer
@@ -274,6 +277,7 @@ class RLHFDataset(Dataset):
         return dataframe
 
     def resume_dataset_state(self):
+        """Resume dataset state from checkpoint by re-downloading and re-tokenizing."""
         self.serialize_dataset = not hasattr(self, "original_data_files")
         # resume dataframe if not it's serialized in data.pt
         if not self.serialize_dataset:
@@ -305,9 +309,11 @@ class RLHFDataset(Dataset):
 
         Args:
             example: Row dictionary from dataframe.
+            key: The key in the example dict that contains the messages list.
 
         Returns:
             messages: List of messages with replaced placeholder.
+
         """
         messages: list = example[key]
         # When concatenating multimodal datasets, get will return None for samples without a modality column.
@@ -437,6 +443,7 @@ class RLHFDataset(Dataset):
         Returns:
             images: List of images.
             videos: List of videos, each video is a tuple of (video_tensor, video_metadata).
+
         """
         from qwen_vl_utils import process_vision_info
 
@@ -491,6 +498,7 @@ class RLHFDataset(Dataset):
         image_patch_size,
         config: DictConfig,
     ) -> tuple[list[Image.Image], list[Any], list[Any]]:
+        """Extract images, videos, and audios from messages asynchronously."""
         return cls._process_multi_modal_info(messages, image_patch_size=image_patch_size, config=config)
 
     def split(self, num_splits: int):
@@ -557,6 +565,7 @@ def get_dataset_class(data_config: DictConfig):
 
     Returns:
         dataset_cls: The dataset class.
+
     """
 
     # Check if a custom dataset class is specified in the data configuration

@@ -36,6 +36,7 @@ def aggressive_empty_cache(force_sync: bool = True, max_retries: int = 3) -> Non
     Args:
         force_sync: Whether to force device synchronization
         max_retries: Maximum number of retries
+
     """
     device = get_torch_device()
     if not device.is_available():
@@ -173,6 +174,7 @@ def enable_memory_visualize(
             memory history. `None` enables it for the current default device.
         record_context (bool): Whether to record context information for
             allocations. Required by older PyTorch versions.
+
     """
     # Memory history recording is accelerator-specific functionality
     device = get_torch_device()
@@ -239,6 +241,13 @@ def enable_memory_visualize(
 
 
 def clear_memory_history(trace_alloc_max_entries: int = 200_000, stack_depth: int = 32):
+    """Clear memory history and re-enable recording with fresh settings.
+
+    Args:
+        trace_alloc_max_entries: Maximum number of allocation entries to trace.
+        stack_depth: Maximum stack depth to record for each allocation.
+
+    """
     device = get_torch_device()
     if not device.is_available():
         logger.warning("[memory_visualize] Memory history recording is only available on accelerator devices")
@@ -260,6 +269,7 @@ class MemorySnapshotSampler:
     Args:
         out_dir (str): The directory where the snapshots will be saved.
         tag (str): A tag for the snapshot filenames.
+
     """
 
     def __init__(self, out_dir: str = "./mem_snapshots", tag: str = "periodic"):
@@ -277,6 +287,7 @@ class MemorySnapshotSampler:
                 The directory is created if it does not exist.
             tag (str): A string tag to prepend to the filename for easier identification.
             sub_dir (str): A subdirectory to place the snapshot file in.
+
         """
         if sub_dir is None:
             timestamp = datetime.now().strftime("%Y%m%d-%H%M")

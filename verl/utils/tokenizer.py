@@ -153,13 +153,12 @@ def hf_tokenizer(name_or_path, correct_pad_token=True, correct_gemma2=True, **kw
     """Create a huggingface pretrained tokenizer which correctness handles eos and pad tokens.
 
     Args:
-
-        name (str): The name of the tokenizer.
+        name_or_path (str): The name or path of the pretrained tokenizer.
         correct_pad_token (bool): Whether to correct the pad token id.
         correct_gemma2 (bool): Whether to correct the gemma2 tokenizer.
+        **kwargs: Additional keyword arguments passed to AutoTokenizer.from_pretrained.
 
     Returns:
-
         transformers.PreTrainedTokenizer: The pretrained tokenizer.
 
     """
@@ -184,11 +183,13 @@ def hf_processor(name_or_path, **kwargs):
 
     Args:
         name_or_path (str): The name of the processor.
+        **kwargs: Additional keyword arguments passed to AutoProcessor.from_pretrained.
 
     Returns:
         Optional[transformers.ProcessorMixin]: The pretrained multimodal processor.
         Returns ``None`` for text-only models (including AutoProcessor fallbacks to
         tokenizer backends such as ``TokenizersBackend``).
+
     """
     from transformers import AutoConfig, AutoProcessor, PreTrainedTokenizerBase
 

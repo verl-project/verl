@@ -31,6 +31,15 @@ from verl.workers.engine import BaseEngine
 
 
 def extract_step(path):
+    """Extract the global step number from a checkpoint path.
+
+    Args:
+        path: A filesystem path containing a ``global_step_<N>`` segment.
+
+    Returns:
+        The integer step number, or None if no match is found.
+
+    """
     match = re.search(r"global_step_(\d+)", path)
     if match:
         return int(match.group(1))
@@ -42,6 +51,8 @@ logger.setLevel(os.getenv("VERL_SFT_LOGGING_LEVEL", "WARN"))
 
 
 class OrchestrationMode(Enum):
+    """Orchestration modes for checkpoint handling."""
+
     SPMD = 0
     RAY = 1
 
@@ -141,6 +152,16 @@ class CheckpointHandler:
             torch.distributed.barrier()
 
     def load_checkpoint(self):
+        """Load a checkpoint and return the resumed global step.
+
+        Determine the resume path from configuration, load model and
+        dataloader states, and return the step number to resume from.
+
+        Returns:
+            The global step to resume training from, or 0 if no checkpoint
+            is found.
+
+        """
         # Determine resume path based on configuration
         checkpoint_path = self._determine_resume_path()
 

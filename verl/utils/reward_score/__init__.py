@@ -33,6 +33,10 @@ def default_compute_score(
         solution_str (str): The solution string to be evaluated.
         ground_truth (str): The ground truth answer for comparison.
         extra_info (dict, optional): Additional information that might be needed for scoring. Defaults to None.
+        sandbox_fusion_url (str, optional): URL for the sandbox fusion service.
+        concurrent_semaphore (asyncio.Semaphore, optional): Semaphore for concurrency control.
+        memory_limit_mb (int, optional): Memory limit in megabytes for sandbox execution.
+        **kwargs: Additional keyword arguments forwarded to the scoring function.
 
     Returns:
         float: The computed score as a floating point number. If the result is a dictionary,
@@ -40,6 +44,7 @@ def default_compute_score(
 
     Raises:
         NotImplementedError: If the reward function is not implemented for the given data source.
+
     """
     if data_source == "openai/gsm8k":
         from . import gsm8k

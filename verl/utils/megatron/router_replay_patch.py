@@ -36,6 +36,8 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 
 
 class RouterReplayAction(Enum):
+    """Enumeration of possible router replay actions for MoE routing."""
+
     RECORD = "record"
     REPLAY_FORWARD = "replay_forward"
     REPLAY_BACKWARD = "replay_backward"
@@ -267,12 +269,16 @@ def patched_routing(self, logits: torch.Tensor, *args, **kwargs):
     """Top-k routing function
 
     Args:
+        self: The router module instance.
         logits (torch.Tensor): Logits tensor after gating.
+        *args: Positional arguments passed to the routing function.
+        **kwargs: Additional keyword arguments passed to the routing function.
 
     Returns:
         probs (torch.Tensor): The probabilities of token to experts assignment.
         routing_map (torch.Tensor): The mapping of token to experts assignment,
             with shape [num_tokens, num_experts].
+
     """
     seq_length, bsz = logits.shape[:2]
     logits = logits.view(-1, self.config.num_moe_experts)

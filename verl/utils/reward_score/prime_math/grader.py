@@ -107,6 +107,17 @@ from verl.utils.py_functional import timeout_limit
 
 
 def is_digit(s):
+    """Check whether a value can be interpreted as a number.
+
+    Handles comma-formatted numbers (e.g. ``1{,}000``).
+
+    Args:
+        s: The value to check.
+
+    Returns:
+        A tuple of (is_numeric, parsed_float).
+
+    """
     try:
         if "{,}" in str(s):
             num = float(str(s).replace("{,}", ""))
@@ -119,6 +130,16 @@ def is_digit(s):
 
 
 def normalize(answer, pi) -> str:
+    r"""Normalize an answer by removing currency symbols, percentages, and handling pi.
+
+    Args:
+        answer: The raw answer value.
+        pi: The numeric value to substitute for ``\pi``.
+
+    Returns:
+        The normalized answer as a string or numeric value.
+
+    """
     # checking if answer is $<number> and removing $ in that case to compare
     if isinstance(answer, str) and bool(re.match(r"\$\d+(\.\d+)?", answer)):
         return answer[1:]
@@ -139,6 +160,15 @@ def normalize(answer, pi) -> str:
 
 
 def handle_base(x) -> str:
+    """Strip base notation (e.g. ``10_2``) and return the numeric prefix.
+
+    Args:
+        x: The value to process.
+
+    Returns:
+        The integer prefix if base notation is detected, otherwise *x* unchanged.
+
+    """
     if isinstance(x, str) and "_" in x:
         # Due to base
         x = x.split("_")[0]
@@ -148,6 +178,16 @@ def handle_base(x) -> str:
 
 
 def handle_pi(string, pi):
+    r"""Replace ``\pi`` occurrences with a numeric value and evaluate the expression.
+
+    Args:
+        string: The expression string potentially containing ``\pi``.
+        pi: The numeric value to substitute for ``\pi``.
+
+    Returns:
+        The evaluated result if successful, otherwise the modified string.
+
+    """
     if isinstance(string, str) and "\\pi" in string:
         # Find the first occurrence of "\pi"
         idx = string.find("\\pi")
@@ -322,6 +362,22 @@ def math_equal(
 
 
 def symbolic_equal(a, b, tolerance, timeout=10.0):
+    """Check symbolic equality of two expressions using sympy.
+
+    Attempt to parse both expressions and verify that their difference
+    simplifies to zero or that their numeric evaluations are close.
+
+    Args:
+        a: First expression string.
+        b: Second expression string.
+        tolerance: Relative tolerance for numeric comparison.
+        timeout: Maximum seconds for each parsing/simplification step.
+
+    Returns:
+        True if the expressions are symbolically or numerically equal.
+
+    """
+
     def _parse(s):
         for f in [parse_expr, parse_latex]:
             try:
@@ -360,6 +416,15 @@ def symbolic_equal(a, b, tolerance, timeout=10.0):
 
 
 def format_intervals(prediction):
+    """Convert sympy Interval notation to standard bracket notation.
+
+    Args:
+        prediction: The prediction string potentially using sympy Interval syntax.
+
+    Returns:
+        The prediction with Interval expressions converted to bracket form.
+
+    """
     patterns = {
         "Interval(": r"^Interval\((.*)\)$",
         "Interval.Ropen(": r"^Interval\.Ropen\((.*)\)$",

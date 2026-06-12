@@ -80,6 +80,7 @@ class MultiTurnSFTDataset(Dataset):
         config (DictConfig): Options like cache_dir, prompt_key, max_prompt_length, truncation, etc.
         processor (ProcessorMixin, optional): Multimodal preprocessor for images/videos.
         max_samples (int, optional): Limit the number of samples. Defaults to -1 (use all).
+
     """
 
     def __init__(
@@ -198,13 +199,13 @@ class MultiTurnSFTDataset(Dataset):
         Args:
             index: turn index in the conversation
             message: A single message dictionary
-            images: List of images to be used
-            videos: List of videos to be used
+            full_message: The full conversation message list for context
             tools: List of tools to be used
             enable_thinking: Whether to enable thinking mode
 
         Returns:
             Tuple of (input_ids, loss_mask, attention_mask, dict[str, torch.Tensor])
+
         """
         processor = self.processor if self.processor is not None else self.tokenizer
         apply_chat_template_kwargs = {**self.apply_chat_template_kwargs}
@@ -251,6 +252,7 @@ class MultiTurnSFTDataset(Dataset):
 
         Returns:
             messages: List of messages with replaced placeholder.
+
         """
         messages: list = convert_nested_value_to_list_recursive(example[self.messages_key])
         images = example[self.image_key] if self.image_key in example else []

@@ -76,6 +76,7 @@ def count_adapter_parameters(model):
 
     Returns:
         Tuple of (adapter_params, total_params, percentage)
+
     """
     from verl.utils.megatron_utils import unwrap_model
 
@@ -117,6 +118,7 @@ def convert_megatron_to_hf_target_modules(megatron_modules: list[str]) -> list[s
 
     Returns:
         List of HF-style module names with duplicates removed.
+
     """
     hf_target_modules = []
     for module in megatron_modules:
@@ -136,6 +138,7 @@ def build_peft_config_for_vllm(lora_config: dict) -> dict:
 
     Returns:
         A dictionary compatible with vLLM's PEFTHelper.from_dict().
+
     """
     from peft import TaskType
 
@@ -165,6 +168,7 @@ def add_base_layer_suffix(
     Args:
         params: Iterator of (param_name, tensor)
         model_type: The type of the model (e.g., "llama").
+
     """
     stacked_params = STACKED_PARAMS
     # TODO: other models may have more special treatment, or integrate this into Megatron-Bridge
