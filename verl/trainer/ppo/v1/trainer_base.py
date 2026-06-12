@@ -246,7 +246,7 @@ class PPOTrainer(ABC):
         checkpoint_engine_config.backend = "naive"
         self.checkpoint_manager: CheckpointEngineManager = CheckpointEngineManager(
             config=checkpoint_engine_config,
-            trainer=self.actor_rollout_wg,
+            actor_wg=self.actor_rollout_wg,
             replicas=self.llm_server_manager.get_replicas(),
         )
         logger.info("checkpoint engine manager initialized")

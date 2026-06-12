@@ -286,13 +286,13 @@ class NIXLCheckpointEngine(CheckpointEngine):
         return self.agent.get_agent_metadata()
 
     @classmethod
-    def build_topology(cls, trainer_world_size: int, rollout_world_size: int, metadata: list[dict]):
-        trainer_kwargs = {
-            "method": ["init_process_group"] * trainer_world_size,
-            "rank": [0] + [-1] * (trainer_world_size - 1),
-            "world_size": [rollout_world_size + 1] * trainer_world_size,
-            "prev_agent_metadata": [None] * trainer_world_size,
-            "next_agent_metadata": [metadata[-rollout_world_size]] + [None] * (trainer_world_size - 1),
+    def build_topology(cls, actor_wg_world_size: int, rollout_world_size: int, metadata: list[dict]):
+        actor_wg_kwargs = {
+            "method": ["init_process_group"] * actor_wg_world_size,
+            "rank": [0] + [-1] * (actor_wg_world_size - 1),
+            "world_size": [rollout_world_size + 1] * actor_wg_world_size,
+            "prev_agent_metadata": [None] * actor_wg_world_size,
+            "next_agent_metadata": [metadata[-rollout_world_size]] + [None] * (actor_wg_world_size - 1),
         }
 
         rollout_kwargs = {
@@ -302,7 +302,7 @@ class NIXLCheckpointEngine(CheckpointEngine):
             "prev_agent_metadata": [metadata[0]] + metadata[-rollout_world_size:-1],
             "next_agent_metadata": metadata[-rollout_world_size + 1 :] + [None],
         }
-        return trainer_kwargs, rollout_kwargs
+        return actor_wg_kwargs, rollout_kwargs
 
     def init_process_group(
         self, rank: int, world_size: int, prev_agent_metadata: NixlAgentMetadata, next_agent_metadata: NixlAgentMetadata
@@ -380,7 +380,7 @@ class NIXLCheckpointEngine(CheckpointEngine):
         """
         assert self.rank <= 0, "Trainer workers other than rank 0 should not send weights."
 
-        # For trainer workers other than rank 0, just consume weights and do nothing.
+        # For actor workers other than rank 0, just consume weights and do nothing.
         if self.rank < 0:
             for name, weight in weights:
                 pass
