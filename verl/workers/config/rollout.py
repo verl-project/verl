@@ -32,6 +32,7 @@ __all__ = [
     "PrometheusConfig",
     "RolloutConfig",
     "CheckpointEngineConfig",
+    "RouterConfig",
 ]
 
 
@@ -137,6 +138,20 @@ class CheckpointEngineConfig(BaseConfig):
     # backend is instantiated, allowing custom backends to register themselves
     # in CheckpointEngineRegistry.
     custom_backend_module: Optional[str] = None
+
+
+@dataclass
+class RouterConfig(BaseConfig):
+    """Configuration for rollout request load balancing.
+
+    Two modes:
+    - ``global_sticky_inflight``: Built-in sticky-session + least-inflight strategy.
+    - ``plugin_extension``: User-defined custom strategy. ``router_config_path`` must
+      point to a YAML file containing ``router_class`` and optional kwargs.
+    """
+
+    router_strategy: str = "global_sticky_inflight"
+    router_config_path: Optional[str] = None
 
 
 @dataclass
@@ -259,6 +274,8 @@ class RolloutConfig(BaseConfig):
     qat: Optional[dict] = None
 
     disaggregation: DisaggregationConfig = field(default_factory=DisaggregationConfig)
+
+    router: RouterConfig = field(default_factory=RouterConfig)
 
     def __post_init__(self):
         """Validate the rollout config"""
