@@ -182,6 +182,7 @@ class ProfilerConfig(BaseConfig):
     save_path: Optional[str] = MISSING
     tool_config: Any = MISSING  # Just a placeholder, will use configs above directly
     global_tool_config: Optional[Any] = None  # Global tool configuration for all profiling tools
+    context_monitor_tool: list[str] = field(default_factory=list)
 
     def union(self, other: "ProfilerConfig") -> "ProfilerConfig":
         assert self.tool == other.tool, f"Cannot union ProfilerConfig with different tools: {self.tool} vs {other.tool}"
@@ -193,6 +194,7 @@ class ProfilerConfig(BaseConfig):
             save_path=self.save_path,
             tool_config=self.tool_config,
             global_tool_config=self.global_tool_config or other.global_tool_config,
+            context_monitor_tool=list(set(self.context_monitor_tool or []) | set(other.context_monitor_tool or [])),
         )
 
     def intersect(self, other: "ProfilerConfig") -> "ProfilerConfig":
@@ -207,12 +209,16 @@ class ProfilerConfig(BaseConfig):
             save_path=self.save_path,
             tool_config=self.tool_config,
             global_tool_config=self.global_tool_config if self.global_tool_config else other.global_tool_config,
+            context_monitor_tool=list(set(self.context_monitor_tool or []) & set(other.context_monitor_tool or [])),
         )
 
     def __post_init__(self) -> None:
         """config validation logics go here"""
         assert isinstance(self.ranks, set | list | tuple), (
             f"Profiler ranks must be of type list, got {type(self.ranks)}"
+        )
+        assert isinstance(self.context_monitor_tool, set | list | tuple), (
+            f"context_monitor_tool must be of type list, got {type(self.context_monitor_tool)}"
         )
 
 

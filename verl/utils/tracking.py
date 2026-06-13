@@ -53,6 +53,7 @@ class Tracking:
         "clearml",
         "trackio",
         "file",
+        "rl_insight",
     ]
 
     def __init__(self, project_name, experiment_name, default_backend: str | list[str] = "console", config=None):
@@ -180,6 +181,9 @@ class Tracking:
         if "file" in default_backend:
             self.logger["file"] = FileLogger(project_name, experiment_name)
 
+        if "rl_insight" in default_backend:
+            self.logger["rl_insight"] = RLInsightLogger(project_name, experiment_name)
+
     def log(self, data, step, backend=None):
         for default_backend, logger_instance in self.logger.items():
             if backend is None or default_backend in backend:
@@ -200,6 +204,37 @@ class Tracking:
             self.logger["trackio"].finish()
         if "file" in self.logger:
             self.logger["file"].finish()
+        if "rl_insight" in self.logger:
+            self.logger["rl_insight"].finish()
+
+
+class RLInsightLogger:
+    """Logger backend that exports scalar training metrics to rl-insight.
+
+    rl-insight reads its connection settings from environment variables (e.g.
+    ``RL_INSIGHT_SERVICE_IP``); metric emission is a no-op until it is configured,
+    so no extra trainer config is required.
+    """
+
+    def __init__(self, project_name, experiment_name):
+        from rl_insight import init
+
+        init(project=project_name, experiment_name=experiment_name)
+
+    def log(self, data, step):
+        from rl_insight import metric_value
+
+        for key, value in data.items():
+            try:
+                scalar = float(value)
+            except (TypeError, ValueError):
+                continue
+            metric_value(str(key).replace("/", "_"), scalar)
+
+    def finish(self):
+        from rl_insight import close
+
+        close()
 
 
 class ClearMLLogger:

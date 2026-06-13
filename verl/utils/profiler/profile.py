@@ -13,9 +13,11 @@
 # limitations under the License.
 
 import functools
-from typing import Callable, Optional
+from contextlib import ExitStack, contextmanager
+from typing import Any, Callable, Generator, Optional
 
 from .config import ProfilerConfig
+from .context_monitor_tool import build_context_monitors
 
 
 def mark_start_range(
@@ -89,6 +91,7 @@ class DistProfiler:
         if tool_config is None:
             tool_config = config.tool_config
 
+        self.rank = rank
         self.config = config
         self.tool_config = tool_config
 
@@ -96,6 +99,7 @@ class DistProfiler:
         self._tool = getattr(config, "tool", None)
         self._enable = config.enable
         self._this_step = False
+        self._monitors = build_context_monitors(getattr(config, "context_monitor_tool", None))
 
         # Normalize rank selection
         self._this_rank = False
@@ -172,6 +176,16 @@ class DistProfiler:
             self._this_step = False
             return getattr(self._impl, "stop", lambda: None)()
 
+    @contextmanager
+    def annotate_context_record(self, **kwargs: Any) -> Generator[None, None, None]:
+        """Record the wrapped block via profiler backend and configured context monitors."""
+        with ExitStack() as stack:
+            if fn := getattr(self._impl, "annotate_context_record", None):
+                stack.enter_context(fn(**kwargs))
+            for monitor in self._monitors:
+                stack.enter_context(monitor.annotate_context_record(**kwargs))
+            yield
+
     @classmethod
     def annotate(
         cls,
@@ -191,25 +205,28 @@ class DistProfiler:
             @functools.wraps(func)
             def wrapper(self_instance, *args, **kwargs_inner):
                 profiler = getattr(self_instance, "profiler", None)
-                if (
-                    not profiler
-                    or not profiler.check_enable()
-                    or not profiler.check_this_step()
-                    or not profiler.check_this_rank()
-                ):
-                    return func(self_instance, *args, **kwargs_inner)
+                if profiler is None:
+                    with profiler.annotate_context_record(
+                        message=message, color=color, domain=domain, category=category, **kwargs_outer
+                    ):
+                        if (
+                            not profiler.check_enable()
+                            or not profiler.check_this_step()
+                            or not profiler.check_this_rank()
+                        ):
+                            return func(self_instance, *args, **kwargs_inner)
 
-                impl = profiler._impl
-                if hasattr(impl, "annotate"):
-                    try:
-                        actual_decorator = impl.annotate(
-                            message=message, color=color, domain=domain, category=category, **kwargs_outer
-                        )
+                        impl = profiler._impl
+                        if hasattr(impl, "annotate"):
+                            try:
+                                actual_decorator = impl.annotate(
+                                    message=message, color=color, domain=domain, category=category, **kwargs_outer
+                                )
 
-                        return actual_decorator(func)(self_instance, *args, **kwargs_inner)
-                    except Exception:
+                                return actual_decorator(func)(self_instance, *args, **kwargs_inner)
+                            except Exception:
+                                return func(self_instance, *args, **kwargs_inner)
                         return func(self_instance, *args, **kwargs_inner)
-                return func(self_instance, *args, **kwargs_inner)
 
             return wrapper
 
