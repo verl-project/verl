@@ -1943,7 +1943,8 @@ def compute_policy_loss_geo_mean(
         response_mask (torch.Tensor):
             Mask indicating which tokens to include in the loss, shape (batch_size, response_length).
         loss_agg_mode (str, optional):
-            not used
+            Not directly used (geo_mean operates at sequence level); aggregation is
+            performed via agg_loss with "seq-mean-token-sum" mode.
     """
 
     assert config is not None
@@ -1989,7 +1990,15 @@ def compute_policy_loss_geo_mean(
         )
         pg_losses = pg_losses * seq_is_weights
 
-    pg_loss = torch.mean(pg_losses)
+    # DP-aware sequence-level aggregation using the existing agg_loss helper.
+    # pg_losses is 1D (per-sequence), so we reshape it to 2D and use "seq-mean-token-sum"
+    # to correctly compute the sequence-level mean.
+    pg_loss = agg_loss(
+        loss_mat=pg_losses.unsqueeze(-1),
+        loss_mask=(response_mask.sum(dim=-1) > 0).float().unsqueeze(-1),
+        loss_agg_mode="seq-mean-token-sum",
+        **config.global_batch_info,
+    )
 
     # higher: ratio is too large that need clamp to clip_high (when adv > 0)
     clipped = torch.ne(negative_approx_kl, negative_approx_kl_clamp)
