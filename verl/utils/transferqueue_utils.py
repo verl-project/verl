@@ -38,7 +38,10 @@ try:
         KVBatchMeta,
     )
 
+    _TRANSFER_QUEUE_AVAILABLE = True
+
 except ImportError:
+    _TRANSFER_QUEUE_AVAILABLE = False
 
     class BatchMeta:
         pass
@@ -69,6 +72,103 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 TQ_INITIALIZED = False
 
+_TQ_FORCE_NESTED_READBACK_ENV = "VERL_FORCE_TQ_NESTED_READBACK"
+
+_TQ_SEQUENCE_FIELDS_REQUIRING_NESTED = {
+    "prompts",
+    "responses",
+    "response_mask",
+    "loss_mask",
+    "input_ids",
+    "attention_mask",
+    "position_ids",
+    "rollout_log_probs",
+    "old_log_probs",
+    "ref_log_prob",
+    "rm_scores",
+    "token_level_scores",
+    "token_level_rewards",
+    "advantages",
+    "returns",
+    "values",
+    "log_probs",
+    "entropy",
+    "teacher_logprobs",
+    "teacher_ids",
+    "routed_experts",
+}
+
+
+def _force_tq_nested_readback_enabled() -> bool:
+    return os.getenv(_TQ_FORCE_NESTED_READBACK_ENV, "").lower() in {"1", "true", "yes", "on"}
+
+
+def force_tq_sequence_fields_nested(data: TensorDict) -> TensorDict:
+    """Restore nested semantics for sequence fields read from TransferQueue.
+
+    TransferQueue 0.1.6 may return a dense tensor when all samples in a field
+    have the same shape, even if that field was originally written as a jagged
+    NestedTensor.  No-padding VERL workers expect token sequence fields to stay
+    nested, so opt-in jobs can normalize known sequence fields at the TQ bridge.
+    """
+    if not isinstance(data, TensorDict):
+        return data
+
+    for key in _TQ_SEQUENCE_FIELDS_REQUIRING_NESTED:
+        if key not in data.keys():
+            continue
+
+        value = data[key]
+        if not isinstance(value, torch.Tensor) or value.is_nested or value.dim() < 2 or value.size(0) == 0:
+            continue
+
+        rows = list(value.unbind(0))
+        ragged_idx = 2 if key == "position_ids" and rows[0].dim() == 2 else None
+        data[key] = tu.nested_tensor_from_tensor_list(rows, ragged_idx=ragged_idx)
+
+    return data
+
+
+def _wrap_tq_sync_batch_get(func):
+    if getattr(func, "_verl_force_nested_sequence_fields", False):
+        return func
+
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        return force_tq_sequence_fields_nested(func(*args, **kwargs))
+
+    wrapper._verl_force_nested_sequence_fields = True
+    return wrapper
+
+
+def _wrap_tq_async_batch_get(func):
+    if getattr(func, "_verl_force_nested_sequence_fields", False):
+        return func
+
+    @wraps(func)
+    async def wrapper(*args, **kwargs):
+        return force_tq_sequence_fields_nested(await func(*args, **kwargs))
+
+    wrapper._verl_force_nested_sequence_fields = True
+    return wrapper
+
+
+def _install_tq_nested_readback_wrappers() -> None:
+    if not _TRANSFER_QUEUE_AVAILABLE or not _force_tq_nested_readback_enabled():
+        return
+
+    for name in ("kv_batch_get", "kv_batch_get_by_meta"):
+        func = getattr(tq, name, None)
+        if func is not None:
+            setattr(tq, name, _wrap_tq_sync_batch_get(func))
+
+    for name in ("async_kv_batch_get", "async_kv_batch_get_by_meta"):
+        func = getattr(tq, name, None)
+        if func is not None:
+            setattr(tq, name, _wrap_tq_async_batch_get(func))
+
+
+_install_tq_nested_readback_wrappers()
 
 # TODO (TQ): verl will make all actor async, so this can be cleanup later.
 def _run_async_in_temp_loop(async_func: Callable[..., Any], *args, **kwargs) -> Any:
@@ -119,6 +219,8 @@ async def _async_meta_to_realdata(meta: BatchMeta | KVBatchMeta) -> TensorDict:
 
     tq_client = tq.get_client()
     tensordict = await tq_client.async_get_data(meta)
+    if _force_tq_nested_readback_enabled():
+        force_tq_sequence_fields_nested(tensordict)
 
     for key, val in meta_info.items():
         if isinstance(val, (NonTensorData | NonTensorStack)):

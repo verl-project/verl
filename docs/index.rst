@@ -146,6 +146,7 @@ verl is fast with:
    advance/rollout_trace.rst
    advance/skip_manager.rst
    advance/agent_loop
+   advance/agent_framework
    advance/reward_loop
    data/transfer_queue.md
    advance/grafana_prometheus.md
