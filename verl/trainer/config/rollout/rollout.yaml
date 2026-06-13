@@ -214,6 +214,24 @@ multi_turn:
   # - ignore_strippable: ignore strippable tokens when checking tokenization sanity
   tokenization_sanity_check_mode: strict
 
+  # Continuous Token keeps the runtime token stream across multi-turn rollout instead of
+  # reconstructing previous assistant turns from text. Disabled by default for compatibility.
+  continuous_token:
+
+    # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+    _target_: verl.workers.config.ContinuousTokenConfig
+
+    # Enable Continuous Token for multi-turn agent rollout.
+    enable: False
+
+    # Model-family specific boundary handling. auto infers from model path/tokenizer name.
+    # Options: auto, default, qwen, qwen25, qwen3, qwen35, minimax, glm47
+    model_family: auto
+
+    # Optional Python module to import before creating the Continuous Token builder.
+    # The module can register a custom builder via verl.utils.continuous_token_wiring.ContinuousTokenBuilderRegistry.
+    custom_builder_module: null
+
   # Format of the multi-turn rollout. Options: hermes, llama3_json, ...
   format: hermes
 
