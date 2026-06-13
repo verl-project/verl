@@ -74,6 +74,32 @@ from verl.workers.config import DistillationConfig, EngineConfig
 from verl.workers.rollout.llm_server import LLMServerManager
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
 
+# ── Determinism debug helper (remove after debugging) ──
+_DETERMINISM_DEBUG = os.environ.get("VERL_DETERMINISM_DEBUG", "0") == "1"
+
+
+def _dbg_checksum(tensor: torch.Tensor, label: str, step: int) -> None:
+    """Print a short checksum for a tensor so two runs can be compared."""
+    if not _DETERMINISM_DEBUG:
+        return
+    if tensor is None:
+        print(f"[DETERMINISM] step={step} {label}: None")
+        return
+    flat = tensor.flatten().float()
+    print(
+        f"[DETERMINISM] step={step} {label}: dtype={tensor.dtype} shape={tensor.shape} "
+        f"sum={flat.sum().item():.8f} mean={flat.mean().item():.8f} "
+        f"min={flat.min().item():.8f} max={flat.max().item():.8f}"
+    )
+    # For rm_scores / reward tensors with ≤64 rows, print per-sample sums
+    # so we can pinpoint which sample diverges.
+    if "rm_score" in label or "reward" in label and tensor.dim() == 2 and tensor.size(0) <= 64:
+        per_sample = tensor.sum(dim=-1).float()
+        print(f"[DETERMINISM] step={step} {label}_per_sample: [{', '.join(f'{v:.8f}' for v in per_sample.tolist())}]")
+
+
+# ── End determinism debug helper ──
+
 
 def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, kl_penalty="kl"):
     """Apply KL penalty to the token-level rewards.
@@ -639,11 +665,21 @@ class RayPPOTrainer:
             test_gen_batch_padded, pad_size = pad_dataproto_to_divisor(test_gen_batch, size_divisor)
             test_output_gen_batch_padded = self.async_rollout_manager.generate_sequences(test_gen_batch_padded)
 
+            # ── Determinism debug: validation rollout ──
+            _dbg_checksum(test_output_gen_batch_padded.batch.get("responses"), "val_responses", self.global_steps)
+            _dbg_checksum(
+                test_output_gen_batch_padded.batch.get("rollout_log_probs"), "val_rollout_log_probs", self.global_steps
+            )
+            # ── End determinism debug ──
+
             if self.use_rm and "rm_scores" not in test_output_gen_batch_padded.batch.keys():
                 # for colocate reward models, we need to sleep rollout model
                 # to spare GPU memory for reward model
                 self.checkpoint_manager.sleep_replicas()
                 batch_reward = self._compute_reward_colocate(test_output_gen_batch_padded)
+                # ── Determinism debug: validation RM scores ──
+                _dbg_checksum(batch_reward.batch.get("rm_scores"), "val_rm_scores", self.global_steps)
+                # ── End determinism debug ──
                 test_output_gen_batch_padded = test_output_gen_batch_padded.union(batch_reward)
                 # wake up rollout model
                 # replace with wake_up method once supported
@@ -1476,6 +1512,13 @@ class RayPPOTrainer:
                     if "__do_sample__" in gen_batch_output.non_tensor_batch:
                         gen_batch_output.pop(non_tensor_batch_keys=["__do_sample__"])
 
+                    # ── Determinism debug: after rollout ──
+                    _dbg_checksum(gen_batch_output.batch.get("responses"), "responses", self.global_steps)
+                    _dbg_checksum(
+                        gen_batch_output.batch.get("rollout_log_probs"), "rollout_log_probs", self.global_steps
+                    )
+                    # ── End determinism debug ──
+
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                         gen_baseline_output = combined_gen_output.slice(num_sampled_prompts, None)
                         if "__do_sample__" in gen_baseline_output.non_tensor_batch:
@@ -1518,8 +1561,16 @@ class RayPPOTrainer:
                             batch_reward = self._compute_reward_colocate(batch)
                             batch = batch.union(batch_reward)
 
+                        # ── Determinism debug: after RM scoring ──
+                        _dbg_checksum(batch.batch.get("rm_scores"), "rm_scores", self.global_steps)
+                        # ── End determinism debug ──
+
                         # extract reward_tensor and reward_extra_infos_dict for training
                         reward_tensor, reward_extra_infos_dict = extract_reward(batch)
+
+                        # ── Determinism debug: after extract_reward ──
+                        _dbg_checksum(reward_tensor, "reward_tensor", self.global_steps)
+                        # ── End determinism debug ──
 
                     # Operating Mode Selection:
                     # - Bypass mode: Sets old_log_probs = rollout_log_probs (2 policies: π_rollout, π_θ)
@@ -1569,6 +1620,9 @@ class RayPPOTrainer:
                                 metrics.update(calculate_debug_metrics(batch))
 
                     assert "old_log_probs" in batch.batch, f'"old_log_prob" not in {batch.batch.keys()=}'
+                    # ── Determinism debug: after old_log_prob ──
+                    _dbg_checksum(batch.batch.get("old_log_probs"), "old_log_probs", self.global_steps)
+                    # ── End determinism debug ──
 
                     if self.use_reference_policy:
                         # compute reference log_prob
@@ -1628,6 +1682,9 @@ class RayPPOTrainer:
                             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
                             config=self.config.algorithm,
                         )
+                        # ── Determinism debug: after advantage ──
+                        _dbg_checksum(batch.batch.get("advantages"), "advantages", self.global_steps)
+                        # ── End determinism debug ──
 
                     # update critic
                     if self.use_critic:

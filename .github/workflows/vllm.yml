@@ -129,6 +129,13 @@ jobs:
       - name: Test vllm server abort functionality
         run: |
           pytest tests/workers/rollout/rollout_vllm/test_vllm_abort.py -v -s
+      - name: Test vllm rollout generation determinism (e2e MoE + multi-prompt + e2e VLM)
+        run: |
+          VLLM_DETERMINISM_MODEL_PATH=${HOME}/models/Qwen/Qwen3-30B-A3B-Instruct-2507 \
+          VLLM_DETERMINISM_N_GPUS=8 \
+          VLLM_DETERMINISM_TP_SIZE=4 \
+          VLLM_DETERMINISM_VLM_MODEL_PATH=${HOME}/models/Qwen/Qwen3-VL-2B-Instruct \
+          pytest tests/workers/rollout/rollout_vllm/test_vllm_generation_determinism.py -v -s
 
   vllm_checkpoint_engine:
     needs: setup

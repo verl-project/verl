@@ -471,7 +471,7 @@ class AgentLoopWorker:
                 mm_processor_kwargs["sampling_rate"] = int(sampling_rate)
         return mm_processor_kwargs
 
-    async def generate_sequences(self, batch: DataProto) -> DataProto:
+    async def generate_sequences(self, batch: DataProto, global_priority_offset: int = 0) -> DataProto:
         """Generate sequences from agent loop.
 
         Args:
@@ -555,7 +555,13 @@ class AgentLoopWorker:
                 apply_greedy_sampling_params(sample_sampling_params)
             tasks.append(
                 asyncio.create_task(
-                    self._run_agent_loop(sample_sampling_params, trajectory_info[i], trace=trace_this_sample, **kwargs)
+                    self._run_agent_loop(
+                        sample_sampling_params,
+                        trajectory_info[i],
+                        trace=trace_this_sample,
+                        priority=global_priority_offset + i,
+                        **kwargs,
+                    )
                 )
             )
         outputs = await asyncio.gather(*tasks)
@@ -572,6 +578,7 @@ class AgentLoopWorker:
         *,
         agent_name: str,
         trace: bool = True,
+        priority: int = 0,
         **kwargs,
     ) -> _InternalAgentLoopOutput:
         with rollout_trace_attr(
@@ -597,7 +604,7 @@ class AgentLoopWorker:
                 data_config=DictConfigWrap(self.config.data),
                 tools=ToolListWrap(self.tools),
             )
-            output: AgentLoopOutput = await agent_loop.run(sampling_params, **kwargs)
+            output: AgentLoopOutput = await agent_loop.run(sampling_params, priority=priority, **kwargs)
             return await self._agent_loop_postprocess(output, trajectory["validate"], **kwargs)
 
     def _pad_token_ids(
@@ -1111,10 +1118,15 @@ class AgentLoopManager:
             DataProto: Output batch.
         """
         chunkes = prompts.chunk(len(self.agent_loop_workers))
+        offsets = []
+        offset = 0
+        for chunk in chunkes:
+            offsets.append(offset)
+            offset += len(chunk)
         outputs = await asyncio.gather(
             *[
-                worker.generate_sequences.remote(chunk)
-                for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=True)
+                worker.generate_sequences.remote(chunk, global_priority_offset=offsets[i])
+                for i, (worker, chunk) in enumerate(zip(self.agent_loop_workers, chunkes, strict=True))
             ]
         )
         output = DataProto.concat(outputs)

@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import asyncio
+import hashlib
 import logging
 import os
 
@@ -238,8 +239,17 @@ class RewardLoopWorker:
                 "input": disrm_prompt,
                 "use_activation": False,
             }
+            # ── Determinism debug: log per-request RM details ──
+            _det_dbg = os.environ.get("VERL_DETERMINISM_DEBUG", "0") == "1"
+            prompt_sha = hashlib.sha256(disrm_prompt.encode("utf-8")).hexdigest()[:16] if _det_dbg else None
+            if _det_dbg:
+                print(f"[DETERMINISM-RM] prompt_len={len(disrm_prompt)} prompt_sha256={prompt_sha}")
             output = await self._post_request(payloads, "classify")
             rm_score = output["data"][-1]["probs"][-1]
+            if _det_dbg:
+                probs = output["data"][-1]["probs"]
+                probs_str = ", ".join(f"{p:.8f}" for p in probs)
+                print(f"[DETERMINISM-RM] prompt_sha256={prompt_sha} rm_score={rm_score:.8f} probs=[{probs_str}]")
         elif engine_name == "sglang":
             payloads = {
                 "model": model_name,
@@ -335,6 +345,16 @@ class RewardLoopManager:
 
         # compute rm score
         scores = [item["reward_score"] for item in outputs_flat]
+        # ── Determinism debug: log assembled score list ──
+        _det_dbg = os.environ.get("VERL_DETERMINISM_DEBUG", "0") == "1"
+        if _det_dbg:
+            scores_arr = np.array(scores, dtype=np.float32)
+            print(
+                f"[DETERMINISM-RM] assembled scores: n={len(scores)} "
+                f"sum={scores_arr.sum():.8f} mean={scores_arr.mean():.8f} "
+                f"min={scores_arr.min():.8f} max={scores_arr.max():.8f} "
+                f"first5={[f'{s:.8f}' for s in scores[:5]]}"
+            )
         rm_scores = self.reward_manager_cls.assemble_rm_scores(data, scores)
         batch = TensorDict({"rm_scores": rm_scores}, batch_size=len(data))
 

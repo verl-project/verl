@@ -35,7 +35,7 @@ class SingleTurnAgentLoop(AgentLoopBase):
         self.response_length = self.rollout_config.response_length
 
     @rollout_trace_op
-    async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
+    async def run(self, sampling_params: dict[str, Any], priority: int = 0, **kwargs) -> AgentLoopOutput:
         messages = list(kwargs["raw_prompt"])
 
         # 1. extract multimodal inputs from messages
@@ -61,6 +61,7 @@ class SingleTurnAgentLoop(AgentLoopBase):
                 request_id=uuid4().hex,
                 prompt_ids=prompt_ids,
                 sampling_params=sampling_params,
+                priority=priority,
                 image_data=images,
                 video_data=videos,
                 audio_data=audios,

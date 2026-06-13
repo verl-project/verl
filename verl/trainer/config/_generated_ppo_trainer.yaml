@@ -242,6 +242,8 @@ actor_rollout_ref:
     temperature: 1.0
     top_k: -1
     top_p: 1
+    full_determinism: false
+    seed: 42
     prompt_length: ${oc.select:data.max_prompt_length,512}
     response_length: ${oc.select:data.max_response_length,512}
     dtype: bfloat16
@@ -718,6 +720,8 @@ reward:
       load_format: auto
       layered_summon: false
       scheduling_policy: fcfs
+      full_determinism: false
+      seed: 42
       multi_stage_wake_up: false
       engine_kwargs: {}
       limit_images: null
