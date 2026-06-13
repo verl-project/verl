@@ -87,6 +87,14 @@ _ROLLOUT_REGISTRY = {
 }
 
 
+def register_rollout_adapter(name: str, mode: str, adapter_path: str) -> None:
+    """Register a rollout server adapter (dotted path) for ``(name, mode)``.
+
+    Public hook for external plugins so they need not touch ``_ROLLOUT_REGISTRY``.
+    """
+    _ROLLOUT_REGISTRY.setdefault((name, mode), adapter_path)
+
+
 def get_rollout_class(rollout_name: str, mode: str = "async") -> type[BaseRollout]:
     """Get the rollout class by name.
 

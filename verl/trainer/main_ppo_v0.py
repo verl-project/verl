@@ -155,6 +155,13 @@ class TaskRunner:
 
         from verl.utils.fs import copy_to_local
 
+        # Load external verl plugins (e.g. verl-omni) inside this actor so their
+        # registrations / patches (rollout adapter, hf_processor, model auto-class)
+        # are applied before the rollout lookup and tokenizer/processor below.
+        from verl.utils.plugins import load_plugins
+
+        load_plugins()
+
         print(f"TaskRunner hostname: {socket.gethostname()}, PID: {os.getpid()}")
         pprint(OmegaConf.to_container(config, resolve=True))
         OmegaConf.resolve(config)
