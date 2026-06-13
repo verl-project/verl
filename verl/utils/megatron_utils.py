@@ -1705,10 +1705,12 @@ def check_mtp_config(model_config: HFModelConfig, engine_config: McoreEngineConf
     Check and configure MTP (Multi-Token Prediction) settings.
 
     Cases:
-        - mtp.enable == False and no MTP layers: force provider MTP config to None
-        - mtp.enable == False and has MTP layers: clear HF MTP fields and force provider MTP config to None
-        - mtp.enable == True and no MTP layers: raise ValueError
-        - mtp.enable == True and has MTP layers: configure override_transformer_config
+        - mtp.enable == False: clear supported HF MTP layer-count fields,
+          force the provider MTP config to None, and remove stale loss scaling.
+        - mtp.enable == True and MTP layers are configured: keep the existing
+          layer counts and populate ``override_transformer_config`` as needed.
+        - mtp.enable == True and no MTP layers are configured: raise
+          ``ValueError``.
     """
     hf_config = model_config.hf_config
     mtp_num_layers = _get_mtp_num_layers(hf_config)

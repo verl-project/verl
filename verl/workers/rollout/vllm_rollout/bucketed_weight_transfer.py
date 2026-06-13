@@ -263,7 +263,8 @@ class BucketedWeightReceiver:
         Receive weights from sender and process each bucket via callback.
 
         Args:
-            on_bucket_received: Callback function(weights: list[(name, tensor)]) called per bucket.
+            on_bucket_received: Callback function called per bucket as
+                on_bucket_received(weights, is_last=metadata["is_last"]).
         """
         try:
             self._init_socket()
@@ -284,10 +285,35 @@ class BucketedWeightReceiver:
                     if self.use_shm:
                         tensor = tensor.to(self.device)
                     weights.append((name, tensor))
-                on_bucket_received(weights)
+                on_bucket_received(weights, is_last=metadata["is_last"])
                 get_torch_device().synchronize()
                 self.socket.send(b"")
                 del weights, tensor
+                if metadata["is_last"]:
+                    break
+        finally:
+            self._cleanup()
+
+    def iter_weights(self):
+        """Yield received weights one-by-one while preserving bucket backpressure."""
+        try:
+            self._init_socket()
+            self._init_buffer()
+
+            while True:
+                metadata = self.socket.recv_pyobj()
+                for name, meta in metadata["bucket_meta"].items():
+                    shape, dtype, offset, handle = meta["shape"], meta["dtype"], meta["offset"], meta["handle"]
+                    if handle is not None:
+                        yield name, rebuild_ipc(handle, self.device.index)
+                        continue
+                    size = dtype.itemsize * shape.numel()
+                    tensor = self.buffer[offset : offset + size].view(dtype=dtype).view(shape)
+                    if self.use_shm:
+                        tensor = tensor.to(self.device)
+                    yield name, tensor
+                get_torch_device().synchronize()
+                self.socket.send(b"")
                 if metadata["is_last"]:
                     break
         finally:
