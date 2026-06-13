@@ -18,12 +18,19 @@ from typing import Optional
 from omegaconf import MISSING
 
 from verl.base_config import BaseConfig
+from verl.utils.continuous_token_wiring import (
+    CONTINUOUS_TOKEN_BUILDER_FAMILIES,
+    CONTINUOUS_TOKEN_MODEL_FAMILY_OPTIONS,
+)
 from verl.utils.profiler import ProfilerConfig
 from verl.workers.config.disaggregation import DisaggregationConfig
 from verl.workers.config.model import MtpConfig
 
 __all__ = [
     "SamplingConfig",
+    "CONTINUOUS_TOKEN_BUILDER_FAMILIES",
+    "CONTINUOUS_TOKEN_MODEL_FAMILY_OPTIONS",
+    "ContinuousTokenConfig",
     "MultiTurnConfig",
     "CustomAsyncServerConfig",
     "AgentLoopConfig",
@@ -45,6 +52,17 @@ class SamplingConfig(BaseConfig):
 
 
 @dataclass
+class ContinuousTokenConfig(BaseConfig):
+    enable: bool = False
+    model_family: str = "auto"
+    custom_builder_module: Optional[str] = None
+
+    def __post_init__(self):
+        if not isinstance(self.model_family, str) or not self.model_family:
+            raise ValueError("continuous_token.model_family must be a non-empty string")
+
+
+@dataclass
 class MultiTurnConfig(BaseConfig):
     _mutable_fields = {"max_assistant_turns", "max_user_turns"}
 
@@ -58,6 +76,7 @@ class MultiTurnConfig(BaseConfig):
     tool_response_truncate_side: str = "middle"
     use_inference_chat_template: bool = False
     tokenization_sanity_check_mode: str = "strict"
+    continuous_token: ContinuousTokenConfig = field(default_factory=ContinuousTokenConfig)
     format: str = "hermes"
     num_repeat_rollouts: Optional[int] = None
 
