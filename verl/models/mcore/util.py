@@ -400,42 +400,44 @@ def preprocess_thd_engine(
             seqlen = seqlen_padded_i // cp_size
             half_seqlen = seqlen // 2
             start_idx = cu_seqlens_padded_cpu[i] // cp_size
-            # split to 2 chunks
+            # Split into two zigzag CP chunks. When FP8 padding extends the logical
+            # sequence length, pad the nested tensor so chunk slicing stays in-bounds.
             d = input_ids[i]
-            # If the number of elements in `d` is smaller than the required
-            # alignment size, pad the tensor with zeros so that its total
-            # length matches `align_size`. This ensures size alignment for
-            # downstream operations (e.g., communication or memory alignment).
-            if d.numel() < align_size:
+            if d.numel() < seqlen_padded_i:
                 original_size = d.numel()
-                pad = torch.zeros(align_size - d.numel(), dtype=d.dtype, device=d.device)
+                pad = torch.zeros(seqlen_padded_i - d.numel(), dtype=d.dtype, device=d.device)
                 d = torch.cat([d, pad], dim=0)
                 logger.warning_once(
                     f"Padding tensor for context parallel alignment, original_size={original_size}, "
-                    f"align_size={align_size}"
+                    f"padded_size={seqlen_padded_i}"
                 )
 
-            input_ids_rmpad[start_idx : start_idx + half_seqlen] = d[
-                half_seqlen * cp_rank : half_seqlen * (cp_rank + 1)
-            ]
+            first_start = half_seqlen * cp_rank
+            first_end = min(half_seqlen * (cp_rank + 1), d.shape[0])
+            first_len = max(first_end - first_start, 0)
+            if first_len > 0:
+                input_ids_rmpad[start_idx : start_idx + first_len] = d[first_start:first_end]
 
-            # Build position_ids for the first chunk
-            position_ids_rmpad[start_idx : start_idx + half_seqlen] = torch.arange(
-                half_seqlen * cp_rank, half_seqlen * (cp_rank + 1), dtype=torch.long, device=input_ids.device
-            )
+            # Build position_ids for valid tokens only; padded tokens remain zero.
+            first_pos_end = min(first_end, seqlen_orig_i)
+            first_pos_len = max(first_pos_end - first_start, 0)
+            if first_pos_len > 0:
+                position_ids_rmpad[start_idx : start_idx + first_pos_len] = torch.arange(
+                    first_start, first_pos_end, dtype=torch.long, device=input_ids.device
+                )
 
             remain_start = seqlen_padded_i - half_seqlen * (cp_rank + 1)
             remain_end = seqlen_padded_i - half_seqlen * cp_rank
             remain_end = min(remain_end, d.shape[0])
-            remain_len = remain_end - remain_start
+            remain_len = max(remain_end - remain_start, 0)
             if remain_len > 0:
                 input_ids_rmpad[start_idx + half_seqlen : start_idx + half_seqlen + remain_len] = d[
                     remain_start:remain_end
                 ]
                 # Build position_ids for the remaining chunk: use remain_start as base,
-                # clamped to original seqlen to avoid exceeding seqlen-1 for padded positions
+                # clamped to original seqlen to avoid exceeding seqlen-1 for padded positions.
                 pos_end = min(remain_end, seqlen_orig_i)
-                valid_pos_len = pos_end - remain_start
+                valid_pos_len = max(pos_end - remain_start, 0)
                 if valid_pos_len > 0:
                     position_ids_rmpad[start_idx + half_seqlen : start_idx + half_seqlen + valid_pos_len] = (
                         torch.arange(remain_start, pos_end, dtype=torch.long, device=input_ids.device)
