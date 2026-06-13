@@ -134,6 +134,7 @@ class RLHFDataset(Dataset):
             self.tool_config_path = config.get("tool_config_path", None)
             self.function_tool_path = config.get("function_tool_path", None)
         self.tool_schemas = None
+        self.tool_schemas_by_name = None
         if self.tool_config_path or self.function_tool_path:
             try:
                 from verl.tools.tool_registry import load_all_tools
@@ -145,6 +146,9 @@ class RLHFDataset(Dataset):
                 self.tool_schemas = [
                     tool.tool_schema.model_dump(exclude_unset=True, exclude_none=True) for tool in tool_list
                 ]
+                self.tool_schemas_by_name = {
+                    tool.name: tool.tool_schema.model_dump(exclude_unset=True, exclude_none=True) for tool in tool_list
+                }
             except Exception as e:
                 logger.warning(
                     "Failed to initialize tools (tool_config_path=%s, function_tool_path=%s): %s",
@@ -153,6 +157,7 @@ class RLHFDataset(Dataset):
                     e,
                 )
                 self.tool_schemas = None
+                self.tool_schemas_by_name = None
 
         self.num_workers = config.get("filter_overlong_prompts_workers", max(1, os.cpu_count() // 4))
         self.num_workers = min(self.num_workers, os.cpu_count()) if self.num_workers is not None else None
@@ -251,6 +256,16 @@ class RLHFDataset(Dataset):
             processor = self.processor
             prompt_key = self.prompt_key
 
+            def selected_tool_schemas(doc) -> list[dict[str, Any]] | None:
+                schemas_by_name = self.tool_schemas_by_name
+                if schemas_by_name is None:
+                    return self.tool_schemas
+                extra_info = doc.get("extra_info", {}) or {}
+                tool_selection = extra_info.get("tool_selection") if isinstance(extra_info, dict) else None
+                if tool_selection is None:
+                    return self.tool_schemas
+                return [schemas_by_name[name] for name in tool_selection if name in schemas_by_name]
+
             if processor is not None:
 
                 def doc2len(doc) -> int:
@@ -258,8 +273,9 @@ class RLHFDataset(Dataset):
                         messages = self._build_messages(doc, key=self.prompt_key)
                         # pass tool schemas if available so the processor can format prompts
                         apply_kwargs = dict(**self.apply_chat_template_kwargs)
-                        if self.tool_schemas is not None:
-                            apply_kwargs["tools"] = self.tool_schemas
+                        tool_schemas = selected_tool_schemas(doc)
+                        if tool_schemas is not None:
+                            apply_kwargs["tools"] = tool_schemas
 
                         raw_prompt = self.processor.apply_chat_template(
                             messages, add_generation_prompt=True, tokenize=False, **apply_kwargs
@@ -298,8 +314,9 @@ class RLHFDataset(Dataset):
                 def doc2len(doc) -> int:
                     try:
                         apply_kwargs = dict(**self.apply_chat_template_kwargs)
-                        if self.tool_schemas is not None:
-                            apply_kwargs["tools"] = self.tool_schemas
+                        tool_schemas = selected_tool_schemas(doc)
+                        if tool_schemas is not None:
+                            apply_kwargs["tools"] = tool_schemas
 
                         # Keep explicit tokenization to avoid transformers version default changes.
                         apply_kwargs.pop("tokenize", None)

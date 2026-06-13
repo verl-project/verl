@@ -42,33 +42,11 @@ CODE_FINAL_ANSWER_INSTRUCTION = (
     "block containing the complete solution."
 )
 
-DISPLAY_ANSWERS_EBNF = """%llguidance {}
-start: (text_or_thinking)? tool_calls
-text_or_thinking: TEXT | (<|inner_prefix|> TEXT <|inner_suffix|>)
-
-tool_calls: <|tools_prefix|> %json {
-    "type": "array",
-    "minItems": 1,
-    "items": {
-        "type": "object",
-        "properties": {
-            "display_answers": {
-                "type": "object",
-                "properties": {
-                    "answers": {
-                        "type": "array",
-                        "items": {"type": "string"}
-                    }
-                },
-                "required": ["answers"]
-            }
-        },
-        "required": ["display_answers"]
-    }
-} <|tools_suffix|>
-
-TEXT: /(.|\\n)+/
-"""
+# DISPLAY_ANSWERS_EBNF = r"""%llguidance {}
+# start: (TEXT | tool_block)*
+# tool_block: <|tools_prefix|> %json { "type": "array", "minItems": 1, "items": { "type": "object" } } <|tools_suffix|>
+# TEXT: /(?:(?!<\|tools_prefix\|>)(.|\n))+/
+# """
 
 
 @dataclass(frozen=True)
@@ -236,6 +214,15 @@ TRAIN_DATASETS = [
         adapter="open_r1_codeforces",
         data_source="codeforces",
     ),
+    # DatasetConfig(
+    #     name="toolgym_len1",
+    #     dataset_id="/capstor/store/cscs/swissai/infra01/reasoning/data/RL-prod/toolgym_test_v2/len1/verl.jsonl",
+    #     split="train",
+    #     adapter="tools",
+    #     data_source="toolgym",
+    #     enable_thinking=False,
+    #     # tool_selection is done in the adapter
+    # ),
 ]
 
 EVAL_DATASETS = [
@@ -447,16 +434,28 @@ def prompt_controls(config: DatasetConfig) -> dict[str, Any]:
         "tool_selection": list(config.tool_selection),
         "apply_chat_template_kwargs": {"enable_thinking": config.enable_thinking},
     }
-    if "display_answers" in config.tool_selection:
-        controls["sampling_params"] = {"ebnf": DISPLAY_ANSWERS_EBNF}
+    # if "display_answers" in config.tool_selection:
+    #     controls["sampling_params"] = {"ebnf": DISPLAY_ANSWERS_EBNF}
+    # controls["sampling_params"] = {"ebnf": DISPLAY_ANSWERS_EBNF}
     return controls
+
+
+def agent_name(config: DatasetConfig) -> str:
+    return agent_name_for_tools(config.tool_selection)
+
+
+def agent_name_for_tools(tool_selection: Any) -> str:
+    if tool_selection:
+        return "tool_agent"
+    return "single_turn_agent"
 
 
 def source_controls(example: dict[str, Any]) -> dict[str, Any]:
     extra_info = parse_json_maybe(example.get("extra_info"), default={})
     if not isinstance(extra_info, dict):
         return {}
-    keys = ("tool_selection", "apply_chat_template_kwargs", "sampling_params")
+    # keys = ("tool_selection", "apply_chat_template_kwargs", "sampling_params")
+    keys = ("tool_selection", "apply_chat_template_kwargs")
     return {key: extra_info[key] for key in keys if key in extra_info}
 
 
@@ -478,6 +477,7 @@ def make_row(
 ) -> dict[str, Any]:
     row = {
         "data_source": config.data_source,
+        # "agent_name": agent_name(config),
         "prompt": prompt,
         "ability": ability,
         "reward_model": {"style": "rule", "ground_truth": ground_truth},
@@ -502,12 +502,15 @@ def adapt_rgym(
 ) -> dict[str, Any]:
     row = dict(example)
     prompt = normalize_messages(get_value(example, config.prompt_key))
-    extra_info = dict(parse_json_maybe(get_value(example, "extra_info"), default={}) or {})
+    extra_info = dict(
+        parse_json_maybe(get_value(example, "extra_info"), default={}) or {}
+    )
     prompt = maybe_strip_rgym_format_instructions(
         prompt, config, normalize_text(extra_info.get("language")) or None
     )
     row["prompt"] = prompt
     row["data_source"] = config.data_source
+    # row["agent_name"] = agent_name(config)
     extra_info.update(prompt_controls(config))
     extra_info["source_dataset"] = normalize_text(get_value(example, "data_source"))
     row["extra_info"] = extra_info
@@ -529,6 +532,7 @@ def adapt_table_gpt(
         metadata = {}
     return {
         "data_source": f"tablegpt/{task}",
+        # "agent_name": agent_name(config),
         "prompt": make_prompt(normalize_text(get_value(example, config.prompt_key))),
         "ability": task,
         "reward_model": {"style": "rule", "ground_truth": ground_truth},
@@ -573,6 +577,25 @@ def adapt_vrl(
         extra_info=dict(extra_info),
     )
     row["reward_model"]["style"] = reward_model.get("style", "rule")
+    return row
+
+
+@register_adapter("tools")
+def adapt_tools(
+    example: dict[str, Any], idx: int, split: str, config: DatasetConfig
+) -> dict[str, Any]:
+    row = dict(example)
+    extra_info = dict(row.get("extra_info") or {})
+    extra_info["index"] = idx
+    reward_model = dict(row.get("reward_model") or {})
+    ground_truth = reward_model.get("ground_truth")
+    if not isinstance(ground_truth, str):
+        reward_model["ground_truth"] = json_dumps(ground_truth)
+    row["data_source"] = config.data_source
+    row["reward_model"] = reward_model
+    row["extra_info"] = extra_info
+    # row["agent_name"] = agent_name_for_tools(extra_info.get("tool_selection"))
+    row.pop("tools", None)
     return row
 
 
@@ -1142,9 +1165,16 @@ def load_raw_dataset(config: DatasetConfig) -> datasets.Dataset:
             split=config.split,
             cache_dir=os.path.expanduser(DATASETS_CACHE_DIR),
         )
+    elif config.dataset_id.endswith((".json", ".jsonl")):
+        raw_dataset = datasets.load_dataset(
+            "json",
+            data_files={config.split: config.dataset_id},
+            split=config.split,
+            cache_dir=os.path.expanduser(DATASETS_CACHE_DIR),
+        )
     elif os.path.isdir(config.dataset_id):
         raw_dataset = datasets.load_from_disk(
-            config.dataset_id, 
+            config.dataset_id,
         )
     else:
         raw_dataset = datasets.load_dataset(
@@ -1180,6 +1210,7 @@ def preprocess_example(
     example = dict(example)
     row = adapter(example, idx, config.split, config)
     row["extra_info"].update(source_controls(example))
+    # row["agent_name"] = agent_name_for_tools(row["extra_info"].get("tool_selection"))
     return row
 
 
@@ -1203,7 +1234,9 @@ def cast_output_features(dataset: datasets.Dataset) -> datasets.Dataset:
     features = datasets.Features(normalize_feature_types(dataset.features))
     if "extra_info" not in features or "tool_selection" not in features["extra_info"]:
         return dataset.cast(features)
-    features["extra_info"]["tool_selection"] = datasets.Sequence(datasets.Value("string"))
+    features["extra_info"]["tool_selection"] = datasets.Sequence(
+        datasets.Value("string")
+    )
     return dataset.cast(features)
 
 

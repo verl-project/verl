@@ -42,16 +42,15 @@ ROLLOUT_N="${ROLLOUT_N:-8}"
 SEED="${SEED:-85}"
 USE_GROUP_FILTERING="${USE_GROUP_FILTERING:-true}"
 FORCE_THINKING="${FORCE_THINKING:-false}"
-THINK_PREFIX_TOKEN="${THINK_PREFIX_TOKEN:-<think>}"
+THINK_PREFIX_TOKEN="${THINK_PREFIX_TOKEN:-<|inner_prefix|>}"
 ENABLE_THINKING="${ENABLE_THINKING:-false}"
 WANDB_ENTITY="${WANDB_ENTITY:-apertus}"
 WANDB_BACKGROUND_SYNC="${WANDB_BACKGROUND_SYNC:-false}"
-WANDB_MODE="${WANDB_MODE:-}"
+WANDB_MODE="${WANDB_MODE:-offline}"
 WANDB_SYNC_INTERVAL_SECONDS="${WANDB_SYNC_INTERVAL_SECONDS:-60}"
 WANDB_REQUIRE_SERVICE="${WANDB_REQUIRE_SERVICE:-}"
 WANDB_DISABLE_SERVICE="${WANDB_DISABLE_SERVICE:-}"
 WANDB_SYNC_UPLOAD_MODE="${WANDB_SYNC_UPLOAD_MODE:-}"
-NO_CODE="${NO_CODE:-false}"
 NO_FORMAT="${NO_FORMAT:-false}"
 ACTOR_PPO_MINI_BATCH_SIZE="${ACTOR_PPO_MINI_BATCH_SIZE:-}"
 ROLLOUT_TOTAL_ROLLOUT_STEPS="${ROLLOUT_TOTAL_ROLLOUT_STEPS:-}"
@@ -86,6 +85,8 @@ KUBERNETES_SANDBOX_URL="${KUBERNETES_SANDBOX_URL:-}"
 DEFAULT_MEMORY_LIMIT_MB="${DEFAULT_MEMORY_LIMIT_MB:-512}"
 SANDBOX_REWARD_MAX_CONCURRENT="${SANDBOX_REWARD_MAX_CONCURRENT:-64}"
 SANDBOX_REWARD_CONTINUOUS="${SANDBOX_REWARD_CONTINUOUS:-false}"
+TOOL_GYM_DIR="${TOOL_GYM_DIR:-/iopsstor/scratch/cscs/${USERNAME}/projects/tool-gym}"
+TOOL_GYM_FUNCTION_TOOL_PATH="${TOOL_GYM_FUNCTION_TOOL_PATH:-/capstor/store/cscs/swissai/infra01/reasoning/data/RL-prod/toolgym_test_v2/apertus_function_tools.py}"
 
 # Extra packages needed for scoring are installed once into a target dir 
 # so every node can use them and avoid repeated installations
@@ -125,7 +126,7 @@ fi
 # Optional high-priority overlay packages installed *after* the default deps.
 # Keep this as a simple list for one-off testing (e.g. temporarily bumping a pkg)
 # without editing the base list above.
-DEFAULT_EXTRA_PIP_PACKAGES_OVERLAY=()
+DEFAULT_EXTRA_PIP_PACKAGES_OVERLAY=("starlette==0.50.0")
 PIP_CONSTRAINTS="${PIP_CONSTRAINTS:-huggingface-hub>=0.34.0,<1.0}"
 
 # If the user provides EXTRA_PIP_PACKAGES / EXTRA_PIP_PACKAGES_OVERLAY as strings,
@@ -139,12 +140,12 @@ fi
 
 REASONING_GYM_DIR="${REASONING_GYM_DIR:-}"
 
-DEPS_KEY="$(python3 -c "import hashlib,sys; print(hashlib.md5(sys.argv[1].encode()).hexdigest())" "${EXTRA_PIP_PACKAGES}__${REASONING_GYM_DIR}__${PIP_CONSTRAINTS}")"
+DEPS_KEY="$(python3 -c "import hashlib,sys; print(hashlib.md5(sys.argv[1].encode()).hexdigest())" "${EXTRA_PIP_PACKAGES}__${REASONING_GYM_DIR}__${TOOL_GYM_DIR}__${PIP_CONSTRAINTS}")"
 DEPS_STAMP="${DEPS_STAMP_DIR}/apertus_reward_py312.${DEPS_KEY}.ready"
 DEPS_LOCK="${DEPS_STAMP_DIR}/apertus_reward_py312.${DEPS_KEY}.lock"
 
 export PY_DEPS_DIR NLTK_DATA_DIR DEPS_STAMP_DIR DEPS_STAMP DEPS_LOCK
-export EXTRA_PIP_PACKAGES EXTRA_PIP_PACKAGES_OVERLAY REASONING_GYM_DIR DEPS_KEY
+export EXTRA_PIP_PACKAGES EXTRA_PIP_PACKAGES_OVERLAY REASONING_GYM_DIR TOOL_GYM_DIR DEPS_KEY
 export PIP_CONSTRAINTS MULTIMODAL
 
 
@@ -154,7 +155,6 @@ TEST_FILE="${DATA_DIR}/val.parquet"
 APERTUS_DIR="${APERTUS_DIR:-${WORKING_DIR}/apertus}"
 # display_answers is a stateless @function_tool, so it is loaded through
 # function_tool_path. tool_config_path is only for BaseTool subclasses.
-APERTUS_FUNCTION_TOOL_PATH="${APERTUS_FUNCTION_TOOL_PATH:-${APERTUS_DIR}/utils/display_answer_tools.py}"
 OUTPUT_ROOT="${WORKING_DIR}/outputs/${PROJECT_NAME}"
 RUN_NAME="${RUN_NAME:-}"
 RUN_DIR="${RUN_DIR:-}"
@@ -322,9 +322,9 @@ build_overrides() {
       "actor_rollout_ref.rollout.multi_turn.max_assistant_turns=1"
       "+actor_rollout_ref.rollout.multi_turn.terminal_tool_names=[display_answers]"
       "actor_rollout_ref.rollout.multi_turn.tool_config_path=null"
-      "actor_rollout_ref.rollout.multi_turn.function_tool_path=${APERTUS_FUNCTION_TOOL_PATH}"
+      "actor_rollout_ref.rollout.multi_turn.function_tool_path=${TOOL_GYM_FUNCTION_TOOL_PATH}"
       "actor_rollout_ref.rollout.agent.default_agent_loop=tool_agent"
-      "data.function_tool_path=${APERTUS_FUNCTION_TOOL_PATH}"
+      "data.function_tool_path=${TOOL_GYM_FUNCTION_TOOL_PATH}"
     )
   fi
 
@@ -543,6 +543,15 @@ prepare_shared_python_deps() {
       else
         python3 -m pip install --no-cache-dir --upgrade --force-reinstall --target "${PY_DEPS_DIR}" "${pip_constraints[@]}" reasoning-gym
       fi
+      if [ -n "${TOOL_GYM_DIR}" ]; then
+        if [ ! -d "${TOOL_GYM_DIR}" ]; then
+          echo "TOOL_GYM_DIR=${TOOL_GYM_DIR} does not exist. Clone tool-gym there or set TOOL_GYM_DIR to the correct path." >&2
+          exit 1
+        fi
+        python3 -m pip install --no-cache-dir --upgrade --force-reinstall --target "${PY_DEPS_DIR}" "${pip_constraints[@]}" "${TOOL_GYM_DIR}"
+      else
+        python3 -m pip install --no-cache-dir --upgrade --force-reinstall --target "${PY_DEPS_DIR}" "${pip_constraints[@]}" tool-gym
+      fi
       python3 -c "import nltk; [nltk.download(pkg, download_dir=\"${NLTK_DATA_DIR}\", quiet=True) for pkg in (\"punkt\", \"punkt_tab\", \"stopwords\", \"averaged_perceptron_tagger_eng\")]"
       touch "${DEPS_STAMP}"
     fi
@@ -552,7 +561,7 @@ prepare_shared_python_deps() {
       python3 -m pip install --no-cache-dir --upgrade --force-reinstall --target "${PY_DEPS_DIR}" "${pip_constraints[@]}" ${EXTRA_PIP_PACKAGES_OVERLAY}
       touch "${overlay_stamp}"
     fi
-    python3 -c "import sys; sys.path[:0] = [\"${PY_DEPS_DIR}\", \"${WORKING_DIR}\"]; import absl, emoji, immutabledict, langdetect, math_verify, nltk, reasoning_gym, requests, syllapy, verl; print(\"Using shared deps from\", \"${PY_DEPS_DIR}\"); print(\"Using verl from\", verl.__file__)"
+    python3 -c "import sys; sys.path[:0] = [\"${PY_DEPS_DIR}\", \"${WORKING_DIR}\"]; import absl, emoji, immutabledict, langdetect, math_verify, nltk, reasoning_gym, tool_gym, requests, syllapy, verl; print(\"Using shared deps from\", \"${PY_DEPS_DIR}\"); print(\"Using verl from\", verl.__file__)"
   '
 }
 
@@ -622,6 +631,7 @@ export PY_DEPS_ROOT
 export PY_DEPS_DIR
 export NLTK_DATA_DIR
 export REASONING_GYM_DIR
+export TOOL_GYM_DIR
 export DEPS_STAMP_DIR
 export DEPS_STAMP
 export DEPS_LOCK
@@ -660,7 +670,7 @@ fi
 head_node="${nodes_array[0]}"
 prepare_shared_python_deps
 srun "${SRUN_ENV[@]}" --nodes=1 --ntasks=1 -w "${head_node}" \
-  bash -lc "python3 -c \"import sys; sys.path[:0] = ['${PY_DEPS_DIR}', '${WORKING_DIR}']; import reasoning_gym, requests; print('Using requests from', requests.__file__)\""
+  bash -lc "python3 -c \"import sys; sys.path[:0] = ['${PY_DEPS_DIR}', '${WORKING_DIR}']; import reasoning_gym, tool_gym, requests; print('Using requests from', requests.__file__)\""
 
 head_node_ip="$(srun "${SRUN_ENV[@]}" --nodes=1 --ntasks=1 -w "${head_node}" \
   bash -lc "cd '${WORKING_DIR}' && hostname --ip-address")"

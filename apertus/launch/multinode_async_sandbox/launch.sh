@@ -39,8 +39,8 @@ SLURM_TIME="${SLURM_TIME:-04:00:00}"
 TRAIN_NNODES="${TRAIN_NNODES:-4}"
 ROLLOUT_NNODES="${ROLLOUT_NNODES:-2}"
 NNODES="${NNODES:-$((TRAIN_NNODES + ROLLOUT_NNODES))}"
-TRAINING_DATA_DIR="${TRAINING_DATA_DIR:-/users/jgarcagi/iopsstor/projects/verl/apertus/data/apertus_demo_rl}"
-# TRAINING_DATA_DIR=/capstor/store/cscs/swissai/infra01/reasoning/data/RL-prod/apertus_demo_rl
+TRAINING_DATA_DIR="${TRAINING_DATA_DIR:-/capstor/store/cscs/swissai/infra01/reasoning/data/RL-prod/apertus_demo_rl_tools}"
+# TRAINING_DATA_DIR=/users/jgarcagi/iopsstor/projects/verl/apertus/data/apertus_demo_rl_tools
 FORCE_THINKING="${FORCE_THINKING:-false}"
 THINK_PREFIX_TOKEN="${THINK_PREFIX_TOKEN:-<|inner_prefix|>}"
 ENABLE_THINKING="${ENABLE_THINKING:-false}"
@@ -52,7 +52,7 @@ VAL_BEFORE_TRAIN="${VAL_BEFORE_TRAIN:-true}"
 
 WANDB_ENTITY="${WANDB_ENTITY:-apertus}"
 WANDB_BACKGROUND_SYNC="${WANDB_BACKGROUND_SYNC:-false}"
-WANDB_MODE="${WANDB_MODE:-}"
+WANDB_MODE="${WANDB_MODE:-online}"
 WANDB_SYNC_INTERVAL_SECONDS="${WANDB_SYNC_INTERVAL_SECONDS:-60}"
 WANDB_REQUIRE_SERVICE="${WANDB_REQUIRE_SERVICE:-}"
 WANDB_DISABLE_SERVICE="${WANDB_DISABLE_SERVICE:-}"
@@ -74,6 +74,8 @@ ASYNC_STEADY_WARMUP_STEPS="${ASYNC_STEADY_WARMUP_STEPS:-}"
 
 # Set REASONING_GYM_DIR="" to install reasoning-gym from PyPI.
 REASONING_GYM_DIR="${REASONING_GYM_DIR-${SCRATCH_HOME}/projects/r-gym}"
+TOOL_GYM_DIR="${TOOL_GYM_DIR:-${SCRATCH_HOME}/projects/tool-gym}"
+TOOL_GYM_FUNCTION_TOOL_PATH="${TOOL_GYM_FUNCTION_TOOL_PATH:-/capstor/store/cscs/swissai/infra01/reasoning/data/RL-prod/toolgym_test_v2/apertus_function_tools.py}"
 SANDBOX_BACKEND="kubernetes"  # kubernetes, codegym, or none
 KUBERNETES_SANDBOX_URL="https://sandbox-dev.swissai.svc.cscs.ch"
 CODE_GYM_DIR="" # ${SCRATCH_HOME}/projects/code-gym}  # Not needed if using kubernetes
@@ -85,15 +87,6 @@ NO_FORMAT="${NO_FORMAT:-false}"  # disable tool-formatting (legacy plain-text ro
 SANDBOX_REWARD_CONTINUOUS="${SANDBOX_REWARD_CONTINUOUS:-false}" # default is binary reward
 
 log(){ echo -e "$*" >&2; }
-
-clear_inherited_pyxis_options() {
-  local name
-  while IFS='=' read -r name _; do
-    case "${name}" in
-      SLURM_SPANK__SLURM_SPANK_OPTION_pyxis_*) unset "${name}" ;;
-    esac
-  done < <(env)
-}
 
 sanitize_job_name() {
   local value="$1"
@@ -175,7 +168,6 @@ resolve_sandbox_backend() {
 }
 
 resolve_run_name_and_dir
-clear_inherited_pyxis_options
 resolve_sandbox_backend
 
 # ==========================================
@@ -276,7 +268,7 @@ log "  -> data=${TRAINING_DATA_DIR} seed=${SEED} rollout_n=${ROLLOUT_N}"
 log "  -> group_filtering=${USE_GROUP_FILTERING} enable_thinking=${ENABLE_THINKING} force_thinking=${FORCE_THINKING}"
 log "  -> no_format=${NO_FORMAT}"
 if [[ "${WANDB_BACKGROUND_SYNC}" == "true" ]]; then
-  log "  -> output=${RUN_DIR} wandb_mode=${WANDB_MODE:-offline} wandb_sync_interval=${WANDB_SYNC_INTERVAL_SECONDS}s"
+  log "  -> output=${RUN_DIR} wandb_mode=${WANDB_MODE} wandb_sync_interval=${WANDB_SYNC_INTERVAL_SECONDS}s"
 else
   log "  -> output=${RUN_DIR}"
 fi
@@ -286,6 +278,8 @@ else
   log "  -> sandbox_backend=${SANDBOX_BACKEND} sandbox_url=disabled continuous=${SANDBOX_REWARD_CONTINUOUS}"
 fi
 log "  -> reasoning-gym=${REASONING_GYM_DIR:-PyPI reasoning-gym}"
+log "  -> tool-gym=${TOOL_GYM_DIR}"
+log "  -> tool-gym function tools=${TOOL_GYM_FUNCTION_TOOL_PATH}"
 
 join_export_vars() {
   local out=""
@@ -348,6 +342,8 @@ EXPORT_VARS=(
   "HF_HOME=${HF_HOME}"
   "ENVIRONMENT_PATH=${ENVIRONMENT_PATH}"
   "REASONING_GYM_DIR=${REASONING_GYM_DIR}"
+  "TOOL_GYM_DIR=${TOOL_GYM_DIR}"
+  "TOOL_GYM_FUNCTION_TOOL_PATH=${TOOL_GYM_FUNCTION_TOOL_PATH}"
   "JOB_NAME=${JOB_NAME}"
 )
 

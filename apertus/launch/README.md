@@ -38,6 +38,9 @@ HOME=/iopsstor/scratch/cscs/$USER
 HF_HOME=/iopsstor/scratch/cscs/$USER/huggingface
 SANDBOX_BACKEND=kubernetes
 KUBERNETES_SANDBOX_URL=https://sandbox-dev.swissai.svc.cscs.ch/harness-test
+REASONING_GYM_DIR=/iopsstor/scratch/cscs/$USER/projects/r-gym
+TOOL_GYM_DIR=/iopsstor/scratch/cscs/$USER/projects/tool-gym
+TOOL_GYM_FUNCTION_TOOL_PATH=/capstor/store/cscs/swissai/infra01/reasoning/data/RL-prod/toolgym_test_v2/apertus_function_tools.py
 TRAINING_DATA_DIR=/capstor/store/cscs/swissai/infra01/reasoning/data/RL-prod/apertus_demo_rl
 ```
 
@@ -106,6 +109,18 @@ git checkout translate
 
 If you choose a different location, update `REASONING_GYM_DIR` in `launch.sh`.
 If you do not have access to this repository, set `REASONING_GYM_DIR=""` to install `reasoning-gym` from PyPI instead.
+
+### Prepare tool-gym
+Clone the `tool-gym` repository at the path configured by `TOOL_GYM_DIR` and checkout the `fix-verl-packaging-paths` branch.
+
+```bash
+git clone https://github.com/swiss-ai/tool-gym.git /iopsstor/scratch/cscs/$USER/projects/tool-gym
+# Checkout to verl branch (pending push to fix-verl-packaging-paths)
+# git checkout fix-verl-packaging-paths
+git checkout verl
+```
+
+If you choose a different location, update `TOOL_GYM_DIR` in `launch.sh`. Please also define `TOOL_GYM_FUNCTION_TOOL_PATH` pointing to the file with tool implementations.
 
 ## Launch
 

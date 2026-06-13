@@ -11,8 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# from . import gsm8k, math, prime_math, prime_code
-
 import os
 
 from verl.utils.import_utils import deprecated
@@ -87,7 +85,9 @@ def default_compute_score(
 
         from . import math_verify
 
-        res = math_verify.compute_score(solution_str, ground_truth, data_source=data_source)
+        res = math_verify.compute_score(
+            solution_str, ground_truth, data_source=data_source
+        )
     elif data_source in [
         "mmlu",
         "gpqa_diamond",
@@ -98,7 +98,9 @@ def default_compute_score(
     ]:
         from . import multiple_choice
 
-        res = multiple_choice.compute_score(solution_str, ground_truth, data_source=data_source)
+        res = multiple_choice.compute_score(
+            solution_str, ground_truth, data_source=data_source
+        )
     elif data_source in [
         "allenai/IF_multi_constraints_upto5",
         "swiss-ai/if-rl-singleturn-prompts",
@@ -117,7 +119,9 @@ def default_compute_score(
     ]:
         from . import prime_code
 
-        res = prime_code.compute_score(solution_str, ground_truth, continuous=True, data_source=data_source)
+        res = prime_code.compute_score(
+            solution_str, ground_truth, continuous=True, data_source=data_source
+        )
     elif data_source in [
         "taco",
         "likaixin/TACO-verified",
@@ -172,6 +176,16 @@ def default_compute_score(
 
         res = blindtasks.compute_score(
             data_source, solution_str, ground_truth, extra_info
+        )
+    elif data_source == "toolgym":
+        from . import toolgym
+
+        res = toolgym.compute_score(
+            data_source,
+            solution_str,
+            ground_truth,
+            extra_info,
+            **kwargs,
         )
     else:
         raise NotImplementedError(
