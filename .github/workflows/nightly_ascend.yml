@@ -87,8 +87,8 @@ jobs:
           bash tests/special_npu/nightly_ci_ascend/run_ppo_qwen3-8b_fsdp_npu.sh
       - name: Running nightlyCI_ppo-qwen3-8b-fsdp-vllm_ascend checking script
         run: |
-          cd /root/.cache/nightly_log/run_ppo_qwen3-8b_fsdp_npu/
-          python check_ppo_qwen3-8b_fsdp_npu.py --log run_ppo_qwen3-8b_fsdp_npu.log --base baseline_ppo_qwen3-8b_fsdp_npu.txt
+          cd /root/.cache/nightly_log/
+          python check_npu.py --log run_ppo_qwen3-8b_fsdp_npu/run_ppo_qwen3-8b_fsdp_npu.log --base run_ppo_qwen3-8b_fsdp_npu/baseline_ppo_qwen3-8b_fsdp_npu.txt
 
   # Test grpo qwen3_vl_8b_Instruct fsdp2 vllm
   nightlyCI_grpo_qwen3_vl_8b_Instruct_fsdp2_vllm_ascend:
@@ -131,6 +131,10 @@ jobs:
         run: |
           ray stop --force
           bash tests/special_npu/run_qwen3_vl_8b_Instruct_fsdp2_npu.sh
+      - name: Running nightlyCI_grpo_qwen3_vl_8b_Instruct_fsdp2_vllm_ascend checking script
+        run: |
+          cd /root/.cache/nightly_log/
+          python check_npu.py --log run_qwen3_vl_8b_Instruct_fsdp2_npu/run_qwen3_vl_8b_Instruct_fsdp2_npu.log --base run_qwen3_vl_8b_Instruct_fsdp2_npu/baseline_run_qwen3_vl_8b_Instruct_fsdp2_npu.txt
   
   # Test grpo qwen3-8b mindspeedllm sglang
   nightlyCI_grpo-qwen3-8b-mindspeedllm-sglang:
@@ -194,6 +198,10 @@ jobs:
           export PYTHONPATH=$PYTHONPATH:/MindSpeed-LLM
           rm -rf /root/.cache/torch_extensions/py311_cpu/npu_rotary_position_embedding
           bash tests/special_npu/nightly_ci_ascend/run_grpo_qwen3_8b_mindspeedllm_npu.sh
+      - name: Running nightlyCI_grpo-qwen3-8b-mindspeedllm-sglang checking script
+        run: |
+          cd /root/.cache/nightly_log/
+          python check_npu.py --log run_grpo_qwen3_8b_mindspeedllm_npu/run_grpo_qwen3_8b_mindspeedllm_npu.log --base run_grpo_qwen3_8b_mindspeedllm_npu/baseline_grpo_qwen3_8b_mindspeedllm_npu.txt
 
   # Test dapo moonlight-16b megatron vllm
   nightlyCI_dapo-moonlight-16b-megatron-vllm_ascend:
@@ -297,6 +305,10 @@ jobs:
         run: |
           ray stop --force
           bash tests/special_npu/nightly_ci_ascend/run_gspo_qwen3_30b_megatron_npu.sh
+      - name: Running nightlyCI_gspo-qwen3-30b-megatron-vllm_ascend checking script
+        run: |
+          cd /root/.cache/nightly_log/
+          python check_npu.py --log run_gspo_qwen3_30b_megatron_npu/run_gspo_qwen3_30b_megatron_npu.log --base run_gspo_qwen3_30b_megatron_npu/baseline_gspo_qwen3_30b_megatron_npu.txt
 
   # Test grpo qwen3-30b megatron sglang
   nightlyCI_grpo-qwen3-30b-megatron-sglang_ascend:
