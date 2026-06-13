@@ -95,11 +95,57 @@ PY_DEPS_DIR="${PY_DEPS_DIR:-${PY_DEPS_ROOT}/apertus_reward_py312}"
 NLTK_DATA_DIR="${NLTK_DATA_DIR:-/iopsstor/scratch/cscs/${USERNAME}/nltk_data}"
 
 DEPS_STAMP_DIR="${PY_DEPS_ROOT}/.stamps"
-DEPS_STAMP="${DEPS_STAMP_DIR}/apertus_reward_py312.ready"
-DEPS_LOCK="${DEPS_STAMP_DIR}/apertus_reward_py312.lock"
+MULTIMODAL="${MULTIMODAL:-false}"
+multimodal_flag="0"
+case "$(echo "${MULTIMODAL}" | tr "[:upper:]" "[:lower:]")" in
+  1|true|yes|y|on) multimodal_flag="1" ;;
+esac
 
-EXTRA_PIP_PACKAGES="${EXTRA_PIP_PACKAGES:-immutabledict nltk langdetect absl-py emoji syllapy antlr4-python3-runtime==4.9.3 requests math_verify numpy pillow}"
+DEFAULT_EXTRA_PIP_PACKAGES=(
+  immutabledict
+  nltk
+  langdetect
+  absl-py
+  emoji
+  syllapy
+  antlr4-python3-runtime==4.9.3
+  requests
+  math_verify
+  numpy
+  pillow
+)
+
+if [ "${multimodal_flag}" = "1" ]; then
+  DEFAULT_EXTRA_PIP_PACKAGES+=(
+    tokenizers==0.22.2
+    "huggingface-hub>=0.34.0,<1.0"
+  )
+fi
+
+# Optional high-priority overlay packages installed *after* the default deps.
+# Keep this as a simple list for one-off testing (e.g. temporarily bumping a pkg)
+# without editing the base list above.
+DEFAULT_EXTRA_PIP_PACKAGES_OVERLAY=()
+PIP_CONSTRAINTS="${PIP_CONSTRAINTS:-huggingface-hub>=0.34.0,<1.0}"
+
+# If the user provides EXTRA_PIP_PACKAGES / EXTRA_PIP_PACKAGES_OVERLAY as strings,
+# use them as-is; otherwise join the defaults above.
+if [ -z "${EXTRA_PIP_PACKAGES:-}" ]; then
+  EXTRA_PIP_PACKAGES="${DEFAULT_EXTRA_PIP_PACKAGES[*]}"
+fi
+if [ -z "${EXTRA_PIP_PACKAGES_OVERLAY:-}" ]; then
+  EXTRA_PIP_PACKAGES_OVERLAY="${DEFAULT_EXTRA_PIP_PACKAGES_OVERLAY[*]}"
+fi
+
 REASONING_GYM_DIR="${REASONING_GYM_DIR:-}"
+
+DEPS_KEY="$(python3 -c "import hashlib,sys; print(hashlib.md5(sys.argv[1].encode()).hexdigest())" "${EXTRA_PIP_PACKAGES}__${REASONING_GYM_DIR}__${PIP_CONSTRAINTS}")"
+DEPS_STAMP="${DEPS_STAMP_DIR}/apertus_reward_py312.${DEPS_KEY}.ready"
+DEPS_LOCK="${DEPS_STAMP_DIR}/apertus_reward_py312.${DEPS_KEY}.lock"
+
+export PY_DEPS_DIR NLTK_DATA_DIR DEPS_STAMP_DIR DEPS_STAMP DEPS_LOCK
+export EXTRA_PIP_PACKAGES EXTRA_PIP_PACKAGES_OVERLAY REASONING_GYM_DIR DEPS_KEY
+export PIP_CONSTRAINTS MULTIMODAL
 
 
 DATA_DIR="${TRAINING_DATA_DIR:-${WORKING_DIR}/data/apertus_demo_rl}"
@@ -440,37 +486,73 @@ prepare_shared_python_deps() {
     }
     trap release_deps_lock EXIT
 
-    if [ -f "${DEPS_STAMP}" ]; then
-      exit 0
+    overlay_stamp=""
+    if [ -n "${EXTRA_PIP_PACKAGES_OVERLAY}" ]; then
+      overlay_key="$(python3 -c "import hashlib,sys; print(hashlib.md5(sys.argv[1].encode()).hexdigest())" "${EXTRA_PIP_PACKAGES_OVERLAY}")"
+      overlay_stamp="${DEPS_STAMP_DIR}/apertus_reward_py312.${DEPS_KEY}.overlay.${overlay_key}.ready"
+      if [ -f "${overlay_stamp}" ]; then
+        exit 0
+      fi
+    else
+      if [ -f "${DEPS_STAMP}" ]; then
+        exit 0
+      fi
     fi
 
     mkdir -p "${PY_DEPS_DIR}" "${NLTK_DATA_DIR}" "${DEPS_STAMP_DIR}"
 
     while ! mkdir "${DEPS_LOCK}" 2>/dev/null; do
-      if [ -f "${DEPS_STAMP}" ]; then
-        exit 0
+      if [ -n "${overlay_stamp}" ]; then
+        if [ -f "${overlay_stamp}" ]; then
+          exit 0
+        fi
+      else
+        if [ -f "${DEPS_STAMP}" ]; then
+          exit 0
+        fi
       fi
       echo "Waiting for shared Python deps to be prepared by another process..."
       sleep 10
     done
 
-    if [ -f "${DEPS_STAMP}" ]; then
-      exit 0
+    if [ -n "${overlay_stamp}" ]; then
+      if [ -f "${overlay_stamp}" ]; then
+        exit 0
+      fi
+    else
+      if [ -f "${DEPS_STAMP}" ]; then
+        exit 0
+      fi
     fi
 
-    python3 -m pip install --no-cache-dir --upgrade --target "${PY_DEPS_DIR}" ${EXTRA_PIP_PACKAGES}
-    if [ -n "${REASONING_GYM_DIR}" ]; then
-      if [ ! -d "${REASONING_GYM_DIR}" ]; then
-        echo "REASONING_GYM_DIR=${REASONING_GYM_DIR} does not exist. Clone https://github.com/EduardDurech/r-gym.git and check out the translate branch there, or set REASONING_GYM_DIR=\"\" to install reasoning-gym from PyPI." >&2
-        exit 1
+    if [ ! -f "${DEPS_STAMP}" ]; then
+      pip_constraints=()
+      if [ -n "${PIP_CONSTRAINTS}" ]; then
+        constraints_file="/tmp/verl-pip-constraints.${DEPS_KEY}.txt"
+        printf "%s\n" ${PIP_CONSTRAINTS} > "${constraints_file}"
+        pip_constraints=(--constraint "${constraints_file}")
       fi
-      python3 -m pip install --no-cache-dir --upgrade --force-reinstall --target "${PY_DEPS_DIR}" "${REASONING_GYM_DIR}"
-    else
-      python3 -m pip install --no-cache-dir --upgrade --force-reinstall --target "${PY_DEPS_DIR}" reasoning-gym
+
+      python3 -m pip install --no-cache-dir --upgrade --target "${PY_DEPS_DIR}" "${pip_constraints[@]}" ${EXTRA_PIP_PACKAGES}
+      if [ -n "${REASONING_GYM_DIR}" ]; then
+        if [ ! -d "${REASONING_GYM_DIR}" ]; then
+          echo "REASONING_GYM_DIR=${REASONING_GYM_DIR} does not exist. Clone https://github.com/EduardDurech/r-gym.git and check out the translate branch there, or set REASONING_GYM_DIR=\"\" to install reasoning-gym from PyPI." >&2
+          exit 1
+        fi
+        python3 -m pip install --no-cache-dir --upgrade --force-reinstall --target "${PY_DEPS_DIR}" "${pip_constraints[@]}" "${REASONING_GYM_DIR}"
+      else
+        python3 -m pip install --no-cache-dir --upgrade --force-reinstall --target "${PY_DEPS_DIR}" "${pip_constraints[@]}" reasoning-gym
+      fi
+      python3 -c "import nltk; [nltk.download(pkg, download_dir=\"${NLTK_DATA_DIR}\", quiet=True) for pkg in (\"punkt\", \"punkt_tab\", \"stopwords\", \"averaged_perceptron_tagger_eng\")]"
+      touch "${DEPS_STAMP}"
     fi
-    python3 -c "import nltk; [nltk.download(pkg, download_dir=\"${NLTK_DATA_DIR}\", quiet=True) for pkg in (\"punkt\", \"punkt_tab\", \"stopwords\", \"averaged_perceptron_tagger_eng\")]"
+
+    if [ -n "${EXTRA_PIP_PACKAGES_OVERLAY}" ]; then
+      # Force reinstall so we can override already-stamped deps (e.g. bump tokenizers).
+      python3 -m pip install --no-cache-dir --upgrade --force-reinstall --target "${PY_DEPS_DIR}" "${pip_constraints[@]}" ${EXTRA_PIP_PACKAGES_OVERLAY}
+      touch "${overlay_stamp}"
+    fi
     python3 -c "import sys; sys.path[:0] = [\"${PY_DEPS_DIR}\", \"${WORKING_DIR}\"]; import absl, emoji, immutabledict, langdetect, math_verify, nltk, reasoning_gym, requests, syllapy, verl; print(\"Using shared deps from\", \"${PY_DEPS_DIR}\"); print(\"Using verl from\", verl.__file__)"
-    touch "${DEPS_STAMP}"
   '
 }
 
