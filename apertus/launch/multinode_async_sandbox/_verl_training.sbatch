@@ -44,6 +44,8 @@ USE_GROUP_FILTERING="${USE_GROUP_FILTERING:-true}"
 FORCE_THINKING="${FORCE_THINKING:-false}"
 THINK_PREFIX_TOKEN="${THINK_PREFIX_TOKEN:-<|inner_prefix|>}"
 ENABLE_THINKING="${ENABLE_THINKING:-false}"
+DEGENERATION_EARLY_STOP="${DEGENERATION_EARLY_STOP:-false}"
+DEGENERATION_EARLY_STOP_STRIDE="${DEGENERATION_EARLY_STOP_STRIDE:-128}"
 WANDB_ENTITY="${WANDB_ENTITY:-apertus}"
 WANDB_BACKGROUND_SYNC="${WANDB_BACKGROUND_SYNC:-false}"
 WANDB_MODE="${WANDB_MODE:-offline}"
@@ -273,6 +275,19 @@ build_overrides() {
     "+ray_kwargs.ray_init.runtime_env.env_vars.NO_FORMAT='${NO_FORMAT}'"
     "+ray_kwargs.ray_init.runtime_env.env_vars.SANDBOX_BACKEND='${SANDBOX_BACKEND}'"
   )
+
+  if is_truthy "${DEGENERATION_EARLY_STOP}" && [ -n "${DEGEN_STOP_CUSTOM_LOGIT_PROCESSOR:-}" ]; then
+    overrides+=(
+      "+actor_rollout_ref.rollout.engine_kwargs.sglang.enable_custom_logit_processor=true"
+      "+actor_rollout_ref.rollout.custom.custom_logit_processor='${DEGEN_STOP_CUSTOM_LOGIT_PROCESSOR}'"
+      "+actor_rollout_ref.rollout.custom.custom_params.ngram_n=2"
+      "+actor_rollout_ref.rollout.custom.custom_params.window=512"
+      "+actor_rollout_ref.rollout.custom.custom_params.ttr_threshold=0.2"
+      "+actor_rollout_ref.rollout.custom.custom_params.min_output_tokens=512"
+      "+actor_rollout_ref.rollout.custom.custom_params.stride=${DEGENERATION_EARLY_STOP_STRIDE}"
+      "+actor_rollout_ref.rollout.custom.custom_params.eos_token_id=${DEGEN_STOP_EOS_TOKEN_ID}"
+    )
+  fi
 
   if is_truthy "${WANDB_BACKGROUND_SYNC}"; then
     WANDB_MODE="${WANDB_MODE:-offline}"
@@ -564,6 +579,57 @@ prepare_shared_python_deps() {
     python3 -c "import sys; sys.path[:0] = [\"${PY_DEPS_DIR}\", \"${WORKING_DIR}\"]; import absl, emoji, immutabledict, langdetect, math_verify, nltk, reasoning_gym, tool_gym, requests, syllapy, verl; print(\"Using shared deps from\", \"${PY_DEPS_DIR}\"); print(\"Using verl from\", verl.__file__)"
   '
 }
+
+# ====================
+# Optional: build degeneration early-stop processor string.
+# (No dist-packages patching; images may bake the processor class.)
+# ====================
+if is_truthy "${DEGENERATION_EARLY_STOP}"; then
+  head_node="$(
+    scontrol show hostnames "${SLURM_JOB_NODELIST:-${SLURM_NODELIST:-}}" 2>/dev/null | head -n 1
+  )"
+  if [ -z "${head_node}" ]; then
+    echo "Failed to resolve head_node for degeneration early-stop." >&2
+    exit 1
+  fi
+  DEGEN_STOP_CUSTOM_LOGIT_PROCESSOR="$(
+    srun --overlap "${SRUN_ENV[@]}" --nodes=1 --ntasks=1 -w "${head_node}" \
+      bash -lc "python3 -c \"from sglang.srt.sampling.custom_logit_processor import DegenerationTTRStopLogitProcessor as P; print(P.to_str())\""
+  )"
+  DEGEN_STOP_EOS_TOKEN_ID="$(
+    srun --overlap "${SRUN_ENV[@]}" --nodes=1 --ntasks=1 -w "${head_node}" \
+      bash -lc "python3 - <<'PY'
+import json, os
+from tokenizers import Tokenizer
+
+p = '${RESOLVED_TOKENIZER:-${TOKENIZER_NAME_OR_PATH}}'
+eos = None
+for fn in ('special_tokens_map.json', 'tokenizer_config.json'):
+    fp = os.path.join(p, fn)
+    if not os.path.exists(fp):
+        continue
+    try:
+        d = json.load(open(fp, 'r', encoding='utf-8'))
+    except Exception:
+        continue
+    eos = d.get('eos_token') or eos
+    if eos:
+        break
+if eos is None:
+    raise SystemExit('eos_token_not_found')
+tok = Tokenizer.from_file(os.path.join(p, 'tokenizer.json'))
+eid = tok.token_to_id(eos)
+if eid is None:
+    raise SystemExit('eos_token_id_not_found')
+print(int(eid))
+PY"
+  )"
+  if [ -z "${DEGEN_STOP_CUSTOM_LOGIT_PROCESSOR:-}" ] || [ -z "${DEGEN_STOP_EOS_TOKEN_ID:-}" ]; then
+    echo "Degeneration early-stop requested, but processor/eos_token_id resolution failed." >&2
+    exit 1
+  fi
+  export DEGEN_STOP_CUSTOM_LOGIT_PROCESSOR DEGEN_STOP_EOS_TOKEN_ID
+fi
 
 resolve_run_name
 if is_truthy "${WANDB_BACKGROUND_SYNC}"; then

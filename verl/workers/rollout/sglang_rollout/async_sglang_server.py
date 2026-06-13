@@ -633,6 +633,20 @@ class SGLangHttpServer:
             # video_data=video_data,
         }
 
+        # Optional custom logit processor injection via config.
+        # `custom_logit_processor` must be a serialized `CustomLogitProcessor` string
+        # (i.e. `SomeProcessor.to_str()` in sglang).
+        custom_cfg = getattr(self.config, "custom", None) or {}
+        custom_logit_processor = custom_cfg.get("custom_logit_processor")
+        if custom_logit_processor:
+            request["custom_logit_processor"] = custom_logit_processor
+            custom_params = custom_cfg.get("custom_params")
+            if custom_params:
+                # Merge into per-request sampling_params.
+                sampling_params.setdefault("custom_params", {})
+                if isinstance(sampling_params["custom_params"], dict) and isinstance(custom_params, dict):
+                    sampling_params["custom_params"].update(custom_params)
+
         if prompt_logprobs is not None:
             request["logprob_start_len"] = 0
             if prompt_logprobs > 0:
