@@ -115,9 +115,7 @@ Clone the `tool-gym` repository at the path configured by `TOOL_GYM_DIR` and che
 
 ```bash
 git clone https://github.com/swiss-ai/tool-gym.git /iopsstor/scratch/cscs/$USER/projects/tool-gym
-# Checkout to verl branch (pending push to fix-verl-packaging-paths)
-# git checkout fix-verl-packaging-paths
-git checkout verl
+git checkout fix-verl-packaging-paths
 ```
 
 If you choose a different location, update `TOOL_GYM_DIR` in `launch.sh`. Please also define `TOOL_GYM_FUNCTION_TOOL_PATH` pointing to the file with tool implementations.
