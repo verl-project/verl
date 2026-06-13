@@ -15,7 +15,6 @@ import ast
 import json
 import logging
 import os
-from abc import ABC, abstractmethod
 from typing import Any, Optional
 
 import regex
@@ -42,11 +41,33 @@ class FunctionCall(BaseModel):
     """The name of the function to call."""
 
 
-class ToolParser(ABC):
+class ToolParser:
+    """Base class for tool-call extractors.
+
+    Subclasses register under a name with ``@ToolParser.register("name")``
+    and override ``_extract_tool_calls`` (recommended — inherits the
+    reasoning-strip preprocessing the base class applies before dispatch)
+    or ``extract_tool_calls`` directly (legacy — bypasses the strip layer).
+    The default ``_extract_tool_calls`` raises ``NotImplementedError`` so
+    parsers that override neither method fail loudly at first use rather
+    than silently no-op.
+    """
+
     _registry: dict[str, type["ToolParser"]] = {}
 
-    def __init__(self, tokenizer) -> None:
+    def __init__(self, tokenizer, reasoning_parser: Optional["ReasoningParser"] = None) -> None:  # noqa: F821
         self.tokenizer = tokenizer
+        # Optional reasoning parser; when set, ``extract_tool_calls`` strips
+        # reasoning blocks (e.g. ``<think>...</think>``) before delegating to
+        # ``_extract_tool_calls`` so tool-call patterns inside the chain of
+        # thought are not picked up as real invocations. The strip layer
+        # lives on ``ToolParser`` (rather than on each agent-loop call site)
+        # so any caller that constructs the parser with
+        # ``reasoning_parser=...`` -- including custom ``AgentLoop``
+        # subclasses such as ``SWEAgentLoop`` / ``GUIAgentLoop`` --
+        # inherits the same preprocessing without re-implementing
+        # decode → strip → re-encode.
+        self.reasoning_parser = reasoning_parser
 
     @property
     def stop_token_ids(self) -> list[int]:
@@ -60,26 +81,98 @@ class ToolParser(ABC):
         """
         return []
 
-    @abstractmethod
     async def extract_tool_calls(
-        self, responses_ids: list[int], tools: list[OpenAIFunctionToolSchema] = None
+        self, responses_ids: list[int], tools: list[OpenAIFunctionToolSchema] = None, **kwargs
     ) -> tuple[str, list[FunctionCall]]:
         """Extract tool calls from the responses.
+
+        Public entry point. Strips reasoning blocks first when a
+        ``reasoning_parser`` was supplied at construction, then delegates to
+        the subclass-provided ``_extract_tool_calls`` for the actual tool
+        parsing. Subclasses should override ``_extract_tool_calls`` rather
+        than this method so all callers (including custom ``AgentLoop``
+        implementations) automatically benefit from the reasoning-strip
+        preprocessing. Subclasses that override ``extract_tool_calls``
+        directly remain backward compatible — the default
+        ``_extract_tool_calls`` raises ``NotImplementedError``, so the
+        legacy path is only reached via the override itself.
 
         Args:
             responses_ids (List[int]): The ids of the responses.
             tools (List[OpenAIFunctionToolSchema], optional): OpenAI function tool schema.
+            **kwargs: Forwarded to ``ReasoningParser.extract_content`` so
+                model-specific knobs (Qwen3 ``enable_thinking``, etc.) flow
+                through from the agent loop's ``apply_chat_template_kwargs``
+                without per-parser conditioning.
 
         Returns:
             Tuple[str, List[FunctionCall]]: Content and extracted tool calls.
         """
-        raise NotImplementedError
+        if self.reasoning_parser is not None:
+            responses_ids = await self._maybe_strip_reasoning(responses_ids, **kwargs)
+        return await self._extract_tool_calls(responses_ids, tools)
+
+    async def _maybe_strip_reasoning(self, responses_ids: list[int], **kwargs) -> list[int]:
+        """Decode → strip reasoning blocks → re-encode.
+
+        Returns the original ``responses_ids`` unchanged when stripping is a
+        no-op (no reasoning markers in the decoded text), so the common
+        non-reasoning path avoids the encode round-trip.
+
+        ``skip_special_tokens=False`` preserves control tokens that
+        downstream tool parsers (``gpt-oss``, ``gemma4``) require — the
+        ``<think>`` markers reasoning parsers strip on are plain text and
+        visible regardless of the flag. ``add_special_tokens=False`` on the
+        re-encode keeps the result byte-aligned with what ``responses_ids``
+        looked like before reasoning was injected (no extra BOS/EOS).
+
+        ``**kwargs`` are forwarded to ``ReasoningParser.extract_content``
+        so flags like ``enable_thinking`` (from the agent loop's
+        ``apply_chat_template_kwargs``) reach the model-specific parser
+        and short-circuit stripping when the chat template injected an
+        empty think opener.
+        """
+        loop = get_event_loop()
+        decoded = await loop.run_in_executor(
+            None, lambda: self.tokenizer.decode(responses_ids, skip_special_tokens=False)
+        )
+        stripped = self.reasoning_parser.extract_content(decoded, **kwargs)
+        if stripped == decoded:
+            return responses_ids
+        return await loop.run_in_executor(None, lambda: self.tokenizer.encode(stripped, add_special_tokens=False))
+
+    async def _extract_tool_calls(
+        self, responses_ids: list[int], tools: list[OpenAIFunctionToolSchema] = None
+    ) -> tuple[str, list[FunctionCall]]:
+        """Subclass implementation of tool-call extraction.
+
+        Public callers should invoke ``extract_tool_calls`` (which applies
+        reasoning-strip preprocessing first and then dispatches here).
+        Default raises ``NotImplementedError`` rather than being marked
+        ``@abstractmethod`` so legacy subclasses that only override
+        ``extract_tool_calls`` directly remain valid concrete classes —
+        they simply bypass the new reasoning-strip layer until they opt
+        in by overriding ``_extract_tool_calls`` instead.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} must override either `extract_tool_calls` "
+            f"(legacy) or `_extract_tool_calls` (recommended — inherits the "
+            f"reasoning-strip preprocessing applied by the base class)."
+        )
 
     @classmethod
-    def get_tool_parser(cls, name: str, tokenizer):
+    def get_tool_parser(cls, name: str, tokenizer, reasoning_parser=None):
         if name not in cls._registry:
             raise ValueError(f"Unknown tool parser: {name}")
-        return cls._registry[name](tokenizer)
+        subclass = cls._registry[name]
+        if reasoning_parser is None:
+            # Stay on the legacy two-arg constructor when reasoning is not
+            # configured, so externally-registered ``ToolParser`` subclasses
+            # whose ``__init__`` predates the ``reasoning_parser`` kwarg keep
+            # working. New in-tree subclasses accept ``reasoning_parser=None``
+            # as a default and behave identically under either call shape.
+            return subclass(tokenizer)
+        return subclass(tokenizer, reasoning_parser=reasoning_parser)
 
     @classmethod
     def register(cls, name: str):
@@ -94,15 +187,15 @@ class ToolParser(ABC):
 class HermesToolParser(ToolParser):
     """Adapted from https://github.com/vllm-project/vllm/blob/v0.9.1/vllm/entrypoints/openai/tool_parsers/hermes_tool_parser.py"""
 
-    def __init__(self, tokenizer) -> None:
-        super().__init__(tokenizer)
+    def __init__(self, tokenizer, reasoning_parser=None) -> None:
+        super().__init__(tokenizer, reasoning_parser=reasoning_parser)
 
         self.tool_call_start_token: str = "<tool_call>"
         self.tool_call_end_token: str = "</tool_call>"
         self.tool_call_regex = regex.compile(r"<tool_call>(.*?)</tool_call>", regex.DOTALL)
 
     @rollout_trace_op
-    async def extract_tool_calls(
+    async def _extract_tool_calls(
         self, responses_ids: list[int], tools: list[OpenAIFunctionToolSchema] = None
     ) -> tuple[str, list[FunctionCall]]:
         loop = get_event_loop()
@@ -136,8 +229,8 @@ class GptOssToolParser(ToolParser):
         tokenizer: The tokenizer to use.
     """
 
-    def __init__(self, tokenizer) -> None:
-        super().__init__(tokenizer)
+    def __init__(self, tokenizer, reasoning_parser=None) -> None:
+        super().__init__(tokenizer, reasoning_parser=reasoning_parser)
         # check https://cookbook.openai.com/articles/openai-harmony for more details.
         self.cot_pattern = regex.compile(
             r"<\|start\|>assistant<\|channel\|>analysis<\|message\|>.*?<\|end\|>", regex.DOTALL
@@ -151,7 +244,7 @@ class GptOssToolParser(ToolParser):
         )
 
     @rollout_trace_op
-    async def extract_tool_calls(
+    async def _extract_tool_calls(
         self, responses_ids: list[int], tools: list[OpenAIFunctionToolSchema] = None
     ) -> tuple[str, list[FunctionCall]]:
         loop = get_event_loop()
@@ -193,8 +286,8 @@ class Qwen3XMLToolParser(ToolParser):
         tokenizer: The tokenizer to use.
     """
 
-    def __init__(self, tokenizer):
-        super().__init__(tokenizer)
+    def __init__(self, tokenizer, reasoning_parser=None):
+        super().__init__(tokenizer, reasoning_parser=reasoning_parser)
 
         self.tool_call_start_token: str = "<tool_call>"
         self.tool_call_end_token: str = "</tool_call>"
@@ -329,7 +422,7 @@ class Qwen3XMLToolParser(ToolParser):
         return function_calls
 
     @rollout_trace_op
-    async def extract_tool_calls(
+    async def _extract_tool_calls(
         self, responses_ids: list[int], tools: list[OpenAIFunctionToolSchema] = None
     ) -> tuple[str, list[FunctionCall]]:
         loop = get_event_loop()
@@ -366,8 +459,8 @@ class Gemma4ToolParser(ToolParser):
     Reference: https://ai.google.dev/gemma/docs/capabilities/text/function-calling-gemma4
     """
 
-    def __init__(self, tokenizer) -> None:
-        super().__init__(tokenizer)
+    def __init__(self, tokenizer, reasoning_parser=None) -> None:
+        super().__init__(tokenizer, reasoning_parser=reasoning_parser)
         self.tool_call_start_token = "<|tool_call>"
         self.tool_call_end_token = "<tool_call|>"
         self._stop_token_id = tokenizer.convert_tokens_to_ids("<tool_call|>")
@@ -406,7 +499,7 @@ class Gemma4ToolParser(ToolParser):
         return result
 
     @rollout_trace_op
-    async def extract_tool_calls(
+    async def _extract_tool_calls(
         self, responses_ids: list[int], tools: list[OpenAIFunctionToolSchema] = None
     ) -> tuple[str, list[FunctionCall]]:
         loop = get_event_loop()

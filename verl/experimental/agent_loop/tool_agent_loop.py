@@ -28,6 +28,7 @@ from verl.experimental.agent_loop.agent_loop import (
     ToolListWrap,
     register,
 )
+from verl.experimental.agent_loop.reasoning_parser import ReasoningParser
 from verl.experimental.agent_loop.tool_parser import FunctionCall, ToolParser
 from verl.experimental.agent_loop.utils import build_gpt_oss_tool_response_text
 from verl.tools.function_tool import FunctionTool, normalize_function_tool_return
@@ -115,7 +116,27 @@ class ToolAgentLoop(AgentLoopBase):
         tool_list = tools.tools if tools else []
         self.tools = {tool.name: tool for tool in tool_list}
         self.tool_schemas = [tool.tool_schema.model_dump(exclude_unset=True, exclude_none=True) for tool in tool_list]
-        self.tool_parser = ToolParser.get_tool_parser(self.rollout_config.multi_turn.format, self.tokenizer)
+
+        # Optional reasoning parser to strip think-block content (e.g. Qwen3
+        # ``<think>...</think>`` or DeepSeek-R1) before tool extraction so
+        # tool-call patterns inside the chain-of-thought are not executed as
+        # real calls. ``None`` (default) keeps legacy behavior. See
+        # ``verl/experimental/agent_loop/reasoning_parser.py``.
+        #
+        # The parser is handed to ``ToolParser`` rather than applied here so
+        # custom ``AgentLoop`` subclasses (``SWEAgentLoop`` / ``GUIAgentLoop``
+        # / etc.) automatically inherit reasoning-aware tool extraction
+        # without re-implementing decode → strip → re-encode plumbing.
+        reasoning_parser_name = self.rollout_config.multi_turn.reasoning_parser
+        self.reasoning_parser: Optional[ReasoningParser] = (
+            ReasoningParser.get_reasoning_parser(reasoning_parser_name) if reasoning_parser_name else None
+        )
+
+        self.tool_parser = ToolParser.get_tool_parser(
+            self.rollout_config.multi_turn.format,
+            self.tokenizer,
+            reasoning_parser=self.reasoning_parser,
+        )
         self.tool_parser_name = self.rollout_config.multi_turn.format
 
         self.prompt_length = self.rollout_config.prompt_length
@@ -277,7 +298,18 @@ class ToolAgentLoop(AgentLoopBase):
         # Extract tool calls (use per-sample tools if routed)
         active_tools = getattr(agent_data, "_active_tools", self.tools)
         tools = [tool.tool_schema for tool in active_tools.values()]
-        _, agent_data.tool_calls = await self.tool_parser.extract_tool_calls(agent_data.response_ids, tools)
+        # ``tool_parser.extract_tool_calls`` internally strips reasoning
+        # blocks (when configured) before delegating to the parser-specific
+        # extraction logic. Threading ``apply_chat_template_kwargs`` through
+        # lets the reasoning parser see model-specific knobs (e.g. Qwen3
+        # ``enable_thinking``) so a chat template that injected an empty
+        # think opener does not get incorrectly stripped. Centralizing the
+        # strip on ``ToolParser`` lets custom ``AgentLoop`` subclasses
+        # inherit reasoning-aware extraction for free; see
+        # ``ToolParser._maybe_strip_reasoning``.
+        _, agent_data.tool_calls = await self.tool_parser.extract_tool_calls(
+            agent_data.response_ids, tools, **self.apply_chat_template_kwargs
+        )
 
         if agent_data.tool_calls:
             return AgentState.PROCESSING_TOOLS
