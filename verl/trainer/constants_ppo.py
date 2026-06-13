@@ -15,6 +15,7 @@
 import json
 import os
 
+import torch
 from ray._private.runtime_env.constants import RAY_JOB_CONFIG_JSON_ENV_VAR
 
 from verl.utils.device import get_device_capability
@@ -26,6 +27,14 @@ _major, _ = get_device_capability()
 _gb200_nccl_env = {}
 if (_major or 0) >= 10 and os.environ.get("TLLM_DISABLE_NVLS_MNNVL", "0") == "1":
     _gb200_nccl_env = {"NCCL_NVLS_ENABLE": "0", "NCCL_MNNVL_ENABLE": "0"}
+
+# On ROCm, Ray 2.x force-clears accelerator visibility for num_gpus=0 actors
+# (e.g. the SGLang server actor), leaving them unable to see any GPU. Disable
+# that override so the actor keeps its HIP visibility. Scoped to ROCm to avoid
+# changing Ray's default behavior on other platforms.
+_rocm_ray_env = {}
+if torch.version.hip is not None:
+    _rocm_ray_env = {"RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO": "0"}
 
 PPO_RAY_RUNTIME_ENV = {
     "env_vars": {
@@ -43,6 +52,7 @@ PPO_RAY_RUNTIME_ENV = {
         "HCCL_NPU_SOCKET_PORT_RANGE": "auto",
         "HSA_NO_SCRATCH_RECLAIM": "1",
         **_gb200_nccl_env,
+        **_rocm_ray_env,
     },
 }
 
