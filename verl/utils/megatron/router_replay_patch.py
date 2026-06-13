@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import inspect
+import logging
 import types
 import warnings
 from enum import Enum
@@ -33,6 +34,8 @@ from megatron.core.transformer.moe.router import TopKRouter
 from megatron.core.transformer.transformer_config import TransformerConfig
 
 # https://github.com/THUDM/slime/blob/main/slime/utils/routing_replay.py
+
+logger = logging.getLogger(__name__)
 
 
 class RouterReplayAction(Enum):
@@ -84,15 +87,23 @@ class RouterReplay:
     def __init__(self):
         """Initializes a RouterReplay instance for a specific layer."""
         self.target_topk_idx = None  # For replay
+        self.target_replay_mask = None  # Optional per-token replay gate
         self.recorded_topk_idx = None  # For recording
         self.router_replay_action = None  # Router replay action for this layer
         self.replay_backward_list = []  # List of tensors for backward pass replay
+        self.replay_backward_mask_list = []  # List of optional replay gates
         RouterReplay.router_instances.append(self)
 
-    def set_target_indices(self, topk_indices: torch.Tensor):
+    def set_target_indices(
+        self,
+        topk_indices: torch.Tensor,
+        replay_mask: torch.Tensor | None = None,
+    ):
         """Sets the target topk indices for replay."""
         self.target_topk_idx = topk_indices
+        self.target_replay_mask = replay_mask
         self.replay_backward_list.append(topk_indices)
+        self.replay_backward_mask_list.append(replay_mask)
 
     def get_recorded_indices(self):
         """Returns the recorded topk indices."""
@@ -106,7 +117,9 @@ class RouterReplay:
         """Clears the recorded and target topk indices."""
         self.recorded_topk_idx = None
         self.target_topk_idx = None
+        self.target_replay_mask = None
         self.replay_backward_list = []
+        self.replay_backward_mask_list = []
 
     def set_router_replay_action(self, router_replay_action: RouterReplayAction):
         """Sets the router replay action for this layer."""
@@ -129,6 +142,30 @@ class RouterReplay:
             router.clear_router_replay_action()
 
 
+def _apply_router_replay_indices(
+    native_top_indices: torch.Tensor,
+    target_topk_idx: torch.Tensor,
+    replay_mask: torch.Tensor | None,
+    error_prefix: str,
+) -> torch.Tensor:
+    target_topk_idx = target_topk_idx.to(native_top_indices.device)
+    if target_topk_idx.shape != native_top_indices.shape:
+        raise RuntimeError(
+            f"{error_prefix}: target_topk_idx shape {tuple(target_topk_idx.shape)} "
+            f"does not match native top-k shape {tuple(native_top_indices.shape)}."
+        )
+    if replay_mask is None:
+        return target_topk_idx
+
+    replay_mask = replay_mask.to(native_top_indices.device).bool()
+    if replay_mask.shape[0] != target_topk_idx.shape[0]:
+        raise RuntimeError(
+            f"{error_prefix}: replay_mask has {replay_mask.shape[0]} rows "
+            f"but target_topk_idx has {target_topk_idx.shape[0]} rows."
+        )
+    return torch.where(replay_mask.unsqueeze(-1), target_topk_idx, native_top_indices)
+
+
 def _patched_topk_routing_with_score_function(
     logits: torch.Tensor,
     topk: int,
@@ -137,7 +174,6 @@ def _patched_topk_routing_with_score_function(
     group_topk: int,
     score_function: str,
     expert_bias: torch.Tensor,
-    fused: bool,
     router_replay: RouterReplay,
     scaling_factor: float,
 ):
@@ -173,46 +209,49 @@ def _patched_topk_routing_with_score_function(
                 router_replay.record_indices(top_indices)
             return probs, top_indices
 
-        elif routing_action == RouterReplayAction.REPLAY_FORWARD:
-            if router_replay is None or router_replay.target_topk_idx is None:
-                # Fallback if replay data is not available
-                return _compute_topk(scores, topk, num_groups=num_groups, group_topk=group_topk)
-
-            # Use the provided indices for replay
-            top_indices = router_replay.target_topk_idx
-            # Ensure indices are on the correct device
-            top_indices = top_indices.to(scores.device)
-            # Gather the scores for the replayed indices to get the probabilities
+        def replay_topk(target_topk_idx, replay_mask):
+            _, native_top_indices = _compute_topk(scores, topk, num_groups=num_groups, group_topk=group_topk)
+            top_indices = _apply_router_replay_indices(
+                native_top_indices, target_topk_idx, replay_mask, "router_replay REPLAY"
+            )
             probs = scores.gather(1, top_indices)
             return probs, top_indices
+
+        if routing_action == RouterReplayAction.REPLAY_FORWARD:
+            if router_replay.target_topk_idx is None:
+                raise RuntimeError("router_replay REPLAY_FORWARD requires target top-k indices.")
+
+            return replay_topk(
+                router_replay.target_topk_idx,
+                router_replay.target_replay_mask,
+            )
         elif routing_action == RouterReplayAction.REPLAY_BACKWARD:
-            if router_replay is None or not router_replay.replay_backward_list:
-                # Fallback if replay data is not available
-                return _compute_topk(scores, topk, num_groups=num_groups, group_topk=group_topk)
+            if not router_replay.replay_backward_list:
+                raise RuntimeError("router_replay REPLAY_BACKWARD requires queued top-k indices.")
 
             # Use the last recorded indices for backward replay
             top_indices = router_replay.replay_backward_list.pop(0)
-            # Ensure indices are on the correct device
-            top_indices = top_indices.to(scores.device)
-            # Gather the scores for the replayed indices to get the probabilities
-            probs = scores.gather(1, top_indices)
-            return probs, top_indices
-        else:  # Unknown action, fallback
-            return _compute_topk(scores, topk, num_groups=num_groups, group_topk=group_topk)
+            replay_mask = router_replay.replay_backward_mask_list.pop(0)
+            return replay_topk(top_indices, replay_mask)
+        else:
+            raise RuntimeError(f"Unknown router replay action: {routing_action}.")
 
     if score_function == "softmax":
         if use_pre_softmax:
-            scores = torch.softmax(logits, dim=-1, dtype=torch.float32).type_as(logits)
+            scores = torch.softmax(logits, dim=-1, dtype=torch.float32)
             probs, top_indices = compute_topk(scores, topk, num_groups, group_topk)
         else:
             scores, top_indices = compute_topk(logits, topk, num_groups, group_topk)
-            probs = torch.softmax(scores, dim=-1, dtype=torch.float32).type_as(logits)
-    elif score_function == "sigmoid":
-        scores = torch.sigmoid(logits.float()).type_as(logits)
+            probs = torch.softmax(scores, dim=-1, dtype=torch.float32)
+    elif score_function in ("sigmoid", "sqrtsoftplus"):
+        if score_function == "sigmoid":
+            scores = torch.sigmoid(logits.float())
+        else:
+            scores = torch.nn.functional.softplus(logits.float()).sqrt()
         if expert_bias is not None:
-            scores_for_routing = scores + expert_bias
+            scores_for_routing = scores + expert_bias.float()
             _, top_indices = compute_topk(scores_for_routing, topk, num_groups, group_topk)
-            scores = torch.gather(scores, dim=1, index=top_indices).type_as(logits)
+            scores = torch.gather(scores, dim=1, index=top_indices)
         else:
             scores, top_indices = compute_topk(scores, topk, num_groups, group_topk)
         probs = scores / (scores.sum(dim=-1, keepdim=True) + 1e-20) if topk > 1 else scores
@@ -221,6 +260,8 @@ def _patched_topk_routing_with_score_function(
 
     if scaling_factor:
         probs = probs * scaling_factor
+
+    probs = probs.type_as(logits)
 
     if torch.are_deterministic_algorithms_enabled():
         # build [num_tokens, num_experts] from [num_tokens, topk]
@@ -263,6 +304,59 @@ def _is_aux_loss_enabled(_self) -> bool:
     return False
 
 
+def _hash_routing_with_replay(self, logits: torch.Tensor, input_ids: torch.Tensor):
+    """Hash-based DSv4 routing with optional router replay substitution."""
+    if self.score_function == "softmax":
+        scores = torch.softmax(logits, dim=-1, dtype=torch.float32)
+    elif self.score_function == "sigmoid":
+        scores = torch.sigmoid(logits.float())
+    elif self.score_function == "sqrtsoftplus":
+        scores = torch.nn.functional.softplus(logits.float()).sqrt()
+    else:
+        raise ValueError(f"Invalid score_function: {self.score_function}")
+
+    flat_ids = input_ids.T.reshape(-1)
+    native_top_indices = self.tid2eid[flat_ids].long()
+    top_indices = native_top_indices
+
+    router_replay = getattr(self, "router_replay", None)
+    routing_action = router_replay.router_replay_action if router_replay is not None else None
+    if routing_action == RouterReplayAction.RECORD:
+        router_replay.record_indices(native_top_indices)
+    elif routing_action == RouterReplayAction.REPLAY_FORWARD:
+        if router_replay.target_topk_idx is None:
+            raise RuntimeError("router_replay hash REPLAY_FORWARD requires target top-k indices.")
+        top_indices = _apply_router_replay_indices(
+            native_top_indices,
+            router_replay.target_topk_idx,
+            router_replay.target_replay_mask,
+            "router_replay hash REPLAY",
+        )
+    elif routing_action == RouterReplayAction.REPLAY_BACKWARD:
+        if not router_replay.replay_backward_list:
+            raise RuntimeError("router_replay hash REPLAY_BACKWARD requires queued top-k indices.")
+        top_indices = _apply_router_replay_indices(
+            native_top_indices,
+            router_replay.replay_backward_list.pop(0),
+            router_replay.replay_backward_mask_list.pop(0),
+            "router_replay hash REPLAY",
+        )
+    elif routing_action is not None:
+        raise RuntimeError(f"Unknown router replay action: {routing_action}.")
+
+    probs = scores.gather(1, top_indices)
+    if self.score_function != "softmax":
+        probs = probs / (probs.sum(dim=-1, keepdim=True) + 1e-20)
+    if self.config.moe_router_topk_scaling_factor:
+        probs = probs * self.config.moe_router_topk_scaling_factor
+    probs = probs.type_as(logits)
+
+    routing_probs = torch.zeros_like(logits).scatter(1, top_indices, probs)
+    routing_map = torch.zeros_like(logits).int().scatter(1, top_indices, 1).bool()
+
+    return routing_probs, routing_map
+
+
 def patched_routing(self, logits: torch.Tensor, *args, **kwargs):
     """Top-k routing function
 
@@ -274,11 +368,20 @@ def patched_routing(self, logits: torch.Tensor, *args, **kwargs):
         routing_map (torch.Tensor): The mapping of token to experts assignment,
             with shape [num_tokens, num_experts].
     """
+    padding_mask = kwargs.pop("padding_mask", None)
+    input_ids = kwargs.pop("input_ids", None)
+    if len(args) > 0:
+        padding_mask = args[0]
+    if len(args) > 1:
+        input_ids = args[1]
+
     seq_length, bsz = logits.shape[:2]
     logits = logits.view(-1, self.config.num_moe_experts)
+    if padding_mask is not None:
+        padding_mask = padding_mask.reshape(-1)
 
     # Apply Z-Loss
-    logits = self.apply_z_loss(logits)
+    logits = self.apply_z_loss(logits, padding_mask=padding_mask)
 
     # Megatron versions before 0.14.0 do not have 'moe_router_fusion' in TransformerConfig.
     # We use getattr with a default value of False to ensure compatibility across different
@@ -286,7 +389,11 @@ def patched_routing(self, logits: torch.Tensor, *args, **kwargs):
     moe_router_fusion = getattr(self.config, "moe_router_fusion", False)
 
     # Calculate probs and routing_map for token dispatching
-    if self.routing_type == "sinkhorn":
+    if getattr(self, "is_hash_layer", False):
+        if input_ids is None:
+            raise RuntimeError("input_ids is required for hash-based router replay.")
+        probs, routing_map = _hash_routing_with_replay(self, logits, input_ids)
+    elif self.routing_type == "sinkhorn":
         probs, routing_map = self.sinkhorn_load_balancing(logits)
     else:
         probs, routing_map = _patched_topk_routing_with_score_function(
@@ -298,7 +405,6 @@ def patched_routing(self, logits: torch.Tensor, *args, **kwargs):
             scaling_factor=self.config.moe_router_topk_scaling_factor,
             score_function=self.score_function,
             expert_bias=self.expert_bias,
-            fused=moe_router_fusion,
             router_replay=getattr(self, "router_replay", None),
         )
 
@@ -319,17 +425,30 @@ def patched_routing(self, logits: torch.Tensor, *args, **kwargs):
     if self.training and torch.is_grad_enabled() and self.is_aux_loss_enabled():
         # Calculate scores and routing_map for aux loss
         routing_map_for_aux_loss, scores_for_aux_loss = compute_routing_scores_for_aux_loss(
-            logits, self.topk, self.score_function, fused=self.config.moe_router_fusion
+            logits,
+            self.topk,
+            self.score_function,
+            fused=moe_router_fusion,
+            padding_mask=padding_mask,
         )
-        probs = self._apply_aux_loss(probs, scores_for_aux_loss, routing_map_for_aux_loss)
-        probs = self._apply_seq_aux_loss(probs, scores_for_aux_loss, routing_map_for_aux_loss, seq_length, bsz)
-        probs = self._apply_global_aux_loss(probs, scores_for_aux_loss, routing_map_for_aux_loss)
+        probs = self._apply_aux_loss(
+            probs, scores_for_aux_loss, routing_map_for_aux_loss, with_padding_mask=padding_mask is not None
+        )
+        probs = self._apply_seq_aux_loss(
+            probs,
+            scores_for_aux_loss,
+            routing_map_for_aux_loss,
+            seq_length,
+            bsz,
+            with_padding_mask=padding_mask is not None,
+        )
+        probs = self._apply_global_aux_loss(
+            probs, scores_for_aux_loss, routing_map_for_aux_loss, with_padding_mask=padding_mask is not None
+        )
 
     # Update expert bias and tokens_per_expert
     # Prevent extra local tokens accumulation on evaluation or activation recomputation
-    if self.enable_expert_bias and torch.is_grad_enabled():
-        with torch.no_grad():
-            self.local_tokens_per_expert += routing_map.sum(dim=0)
+    self._apply_expert_bias(routing_map, padding_mask=padding_mask)
 
     return probs, routing_map
 
@@ -337,10 +456,10 @@ def patched_routing(self, logits: torch.Tensor, *args, **kwargs):
 def apply_router_replay_patch():
     """
     Applies the monkey patch for MoE Router Replay functionality.
-    This patch dynamically adds the 'enable_routing_replay' attribute to TransformerConfig
+    This patch dynamically adds the fallback 'enable_routing_replay' attribute to TransformerConfig
     and modifies the TopKRouter to support recording and replaying of routing decisions.
     """
-    print("Applying Router Replay Patch...")
+    logger.info("Applying Router Replay Patch...")
     # Clear router instances to avoid state leakage between model initializations.
     RouterReplay.router_instances.clear()
     # Step 1: Patch TransformerConfig to include the feature flag
@@ -370,7 +489,7 @@ def apply_router_replay_patch():
         try:
             TransformerConfig.__init__.__signature__ = sig.replace(parameters=params)
         except Exception as e:
-            print(f"Failed to update signature metadata: {e}")
+            logger.warning("Failed to update signature metadata: %s", e)
 
     if not hasattr(TransformerConfig, "_verl_router_patched"):
         # Store original __init__ method

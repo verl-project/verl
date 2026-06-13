@@ -48,7 +48,7 @@ run_<model>_<train-backend>[_<platform-or-variant>].sh
 Where:
 - `<model>` is the canonical size for a model family
   (`qwen3_8b` for dense text, `qwen3_30b_a3b` for MoE, `qwen2_5_vl_7b` / `qwen3_vl_8b` for vision,
-  `qwen3_235b_a22b` / `deepseek_v3_671b` for scale demos).
+  `qwen3_235b_a22b` / `deepseek_v3_671b` / `deepseek_v4_flash` for scale demos).
 - `<train-backend>` ∈ {`fsdp`, `megatron`, `mindspeed`}.
 - `<platform-or-variant>` is used only for hardware-specific variants such as `gb200`, `fp8`, `veomni`,
   or MindSpeed NPU scripts.
@@ -88,6 +88,7 @@ bash examples/grpo_trainer/run_qwen3_8b_fsdp.sh
 | Qwen3.5-35B-A3B (MoE) |        | ✓        |          | VeOmni          | nvidia    |
 | Qwen3.5-122B-A10B     | ✓      |          |          | Megatron        | nvidia    |
 | DeepSeek-V3 671B      | ✓      |          |          | Megatron        | nvidia    |
+| DeepSeek-V4-Flash     | ✓      |          |          | Megatron        | nvidia    |
 | GLM-4.1V-9B           | ✓      |          |          | FSDP            | nvidia    |
 | MiniCPM-o-2.6         | ✓      |          |          | FSDP            | nvidia    |
 | Moonlight-16B-A3B     | ✓      |          |          | Megatron        | nvidia    |

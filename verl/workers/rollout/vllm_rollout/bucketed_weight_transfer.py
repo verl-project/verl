@@ -25,6 +25,7 @@ from typing import Callable, TypedDict
 
 import torch
 import zmq
+import zmq.asyncio
 from torch.multiprocessing.reductions import reduce_tensor
 
 from verl.utils.device import get_device_id, get_device_name, get_torch_device
@@ -39,6 +40,11 @@ class TensorMetadata(TypedDict):
     dtype: torch.dtype
     offset: int
     handle: tuple
+
+
+def _align_offset(offset: int, alignment: int) -> int:
+    alignment = max(alignment, 1)
+    return ((offset + alignment - 1) // alignment) * alignment
 
 
 # copy from https://github.com/vllm-project/vllm/blob/main/examples/offline_inference/rlhf_utils.py
@@ -95,7 +101,7 @@ class BucketedWeightSender:
         self.bucket_size = int(bucket_size_mb) << 20
         self.use_shm = use_shm
 
-        self.zmq_context = zmq.Context.instance()
+        self.zmq_context = zmq.asyncio.Context.instance()
         self.socket = None
         self.buffer = None
         self.shm = None
@@ -111,7 +117,7 @@ class BucketedWeightSender:
 
         try:
             self._init_socket()
-            self._init_buffer()
+            await self._init_buffer()
 
             # send bucket weights
             offset = 0
@@ -125,22 +131,27 @@ class BucketedWeightSender:
                 # transfer volume.
                 # weight = weight.to(dtype, non_blocking=True)
 
+                weight_nbytes = weight.nbytes
+                alignment = max(weight.element_size(), 1)
+                aligned_offset = _align_offset(offset, alignment)
+
                 # fill the tensor bucket
-                if offset + weight.nbytes > self.bucket_size and len(bucket_meta) > 0:
+                if aligned_offset + weight_nbytes > self.bucket_size and len(bucket_meta) > 0:
                     get_torch_device().synchronize()
-                    self.socket.send_pyobj({"bucket_meta": bucket_meta, "is_last": False})
-                    self.socket.recv()
+                    await self._send_bucket(bucket_meta, is_last=False)
                     bucket_meta = {}
                     offset = 0
+                    aligned_offset = 0
 
-                if offset + weight.nbytes > self.bucket_size:
+                if aligned_offset + weight_nbytes > self.bucket_size:
                     assert not self.use_shm, (
                         f"Weight {name}({weight.shape}, {weight.dtype}) is too large to fit in the bucket."
                         f"Please increase rollout.update_weights_bucket_megabytes({self.bucket_size_mb} MB)."
                     )
-                    self._direct_send_large_weight(name, weight)
+                    await self._direct_send_large_weight(name, weight)
                     continue
 
+                offset = aligned_offset
                 bucket_meta[name] = {
                     "name": name,
                     "shape": weight.shape,
@@ -148,13 +159,12 @@ class BucketedWeightSender:
                     "offset": offset,
                     "handle": None,
                 }
-                self.buffer[offset : offset + weight.nbytes].copy_(weight.view(-1).view(torch.uint8), non_blocking=True)
-                offset += weight.nbytes
+                self.buffer[offset : offset + weight_nbytes].copy_(weight.view(-1).view(torch.uint8), non_blocking=True)
+                offset += weight_nbytes
 
             # send the last bucket
             get_torch_device().synchronize()
-            self.socket.send_pyobj({"bucket_meta": bucket_meta, "is_last": True})
-            self.socket.recv()
+            await self._send_bucket(bucket_meta, is_last=True)
         finally:
             self._cleanup()
 
@@ -169,13 +179,13 @@ class BucketedWeightSender:
         self.socket = self.zmq_context.socket(zmq.REQ)
         self.socket.bind(self.zmq_handle)
 
-    def _init_buffer(self):
+    async def _init_buffer(self):
         """build communication buffer"""
         buffer, shm = None, None
         if not self.use_shm:
             buffer = torch.empty(self.bucket_size, dtype=torch.uint8, device=f"{get_device_name()}:{get_device_id()}")
             handle = reduce_tensor(buffer)
-            self.socket.send_pyobj(handle)
+            await self.socket.send_pyobj(handle)
         else:
             import uuid
 
@@ -185,9 +195,9 @@ class BucketedWeightSender:
             buffer = torch.frombuffer(shm.buf, dtype=torch.uint8)
 
             comm_metadata = {"name": shm_name, "size": self.bucket_size}
-            self.socket.send_pyobj(comm_metadata)
+            await self.socket.send_pyobj(comm_metadata)
 
-        self.socket.recv()
+        await self.socket.recv()
         self.buffer = buffer
         self.shm = shm
 
@@ -213,7 +223,11 @@ class BucketedWeightSender:
         get_torch_device().ipc_collect()
         get_torch_device().empty_cache()
 
-    def _direct_send_large_weight(self, name: str, weight: torch.Tensor):
+    async def _send_bucket(self, bucket_meta: dict[str, TensorMetadata], is_last: bool):
+        await self.socket.send_pyobj({"bucket_meta": bucket_meta, "is_last": is_last})
+        await self.socket.recv()
+
+    async def _direct_send_large_weight(self, name: str, weight: torch.Tensor):
         """Send a weight larger than the bucket size via cuda ipc or share memory."""
         logger.debug(f"Direct sending large weight {name}({weight.shape}, {weight.dtype})")
         # TODO: support fallback to shared memory
@@ -226,8 +240,7 @@ class BucketedWeightSender:
             "offset": 0,
             "handle": handle,
         }
-        self.socket.send_pyobj({"bucket_meta": bucket_meta, "is_last": False})
-        self.socket.recv()
+        await self._send_bucket(bucket_meta, is_last=False)
 
 
 class BucketedWeightReceiver:

@@ -40,6 +40,7 @@ from verl.utils.device import get_resource_name, get_visible_devices_keyword, is
 from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
 from verl.utils.profiler import DistProfiler, build_vllm_profiler_args
 from verl.utils.tokenizer import normalize_token_ids
+from verl.utils.vllm.routed_experts_compat import apply_vllm_routed_experts_buffer_patch
 from verl.utils.vllm.vllm_fp8_utils import apply_vllm_fp8_patches
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
@@ -358,6 +359,8 @@ class vLLMHttpServer:
             args.update(lora_args)
 
         if self.config.enable_rollout_routing_replay:
+            os.environ["VERL_VLLM_ROUTED_EXPERTS_BUFFER_PATCH"] = "1"
+            apply_vllm_routed_experts_buffer_patch()
             args.update({"enable_return_routed_experts": True})
 
         server_args = ["serve", self.model_config.local_path] + build_cli_args_from_config(args)
@@ -868,6 +871,24 @@ class vLLMHttpServer:
         """Process quantization config. Returns (quantization_str, hf_overrides)."""
         quantization = self.config.quantization
         hf_overrides = {}
+        hf_config = self.model_config.hf_config
+        if not self.model_config.mtp.enable:
+            for field in ("num_nextn_predict_layers", "mtp_num_hidden_layers"):
+                if hasattr(hf_config, field):
+                    hf_overrides[field] = 0
+        rope_scaling = getattr(hf_config, "rope_scaling", None)
+        if rope_scaling is not None and hasattr(rope_scaling, "to_dict"):
+            rope_scaling = rope_scaling.to_dict()
+        if isinstance(rope_scaling, dict):
+            rope_type = rope_scaling.get("rope_type") or rope_scaling.get("type")
+            if rope_type == "yarn":
+                rope_scaling_override = dict(rope_scaling)
+                rope_scaling_override["rope_type"] = rope_type
+                rope_scaling_override["type"] = rope_type
+                for key in ("factor", "beta_fast", "beta_slow"):
+                    if rope_scaling_override.get(key) is not None:
+                        rope_scaling_override[key] = float(rope_scaling_override[key])
+                hf_overrides["rope_scaling"] = rope_scaling_override
 
         if is_torch_npu_available(check_device=False):
             from verl.utils.vllm.npu_vllm_patch import check_vllm_ascend_before_server_launch
