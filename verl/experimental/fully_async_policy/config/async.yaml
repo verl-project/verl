@@ -67,7 +67,7 @@ actor_rollout_ref:
     use_rollout_log_probs: ${oc.select:async_training.use_rollout_log_probs,true}
     ppo_mini_batch_size: 128  # NOTE: train_batch_size = require_batches * ppo_mini_batch_size
     use_dynamic_bsz: true
-    ppo_max_token_len_per_gpu: 40960
+    ppo_max_token_len_per_gpu: 16384
     ulysses_sequence_parallel_size: 4
     entropy_from_logits_with_chunking: true
     entropy_checkpointing: true
@@ -83,6 +83,7 @@ actor_rollout_ref:
         bf16_stochastic_round: true
     strategy: fsdp2
     fsdp_config:
+      forward_prefetch: true
       strategy: fsdp2
       param_offload: false
       optimizer_offload: false
