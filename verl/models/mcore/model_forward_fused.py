@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from collections import OrderedDict
 from typing import Optional
 
@@ -253,6 +254,14 @@ def _fused_GPTModel_forward(
     )
 
     (decoder_input, rotary_pos_emb, rotary_pos_cos, rotary_pos_sin, sequence_len_offset) = preproc_output[:5]
+    if (
+        os.environ.get("VERL_MEGATRON_LORA_RECOMPUTE_INPUT_GRAD", "1") != "0"
+        and torch.is_grad_enabled()
+        and getattr(model, "training", False)
+        and decoder_input is not None
+        and not decoder_input.requires_grad
+    ):
+        decoder_input.requires_grad_(True)
 
     # Run decoder.
     hidden_states = model.decoder(

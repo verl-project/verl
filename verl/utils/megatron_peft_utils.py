@@ -13,6 +13,8 @@
 # limitations under the License.
 """Utilities for PEFT (Parameter-Efficient Fine-Tuning) of Megatron in VERL."""
 
+import os
+import re
 from typing import Iterator
 
 import torch
@@ -66,6 +68,16 @@ STACKED_PARAMS = [
     ".wk.weight",
     ".weights_proj.weight",
 ]
+
+_MOE_EXPERT_LORA_RE = re.compile(
+    r"^(?P<prefix>.*\.mlp\.experts\.)(?P<expert_id>\d+)"
+    r"(?P<suffix>\.(?:gate_proj|up_proj|down_proj)\.lora_[AB]\.weight)$"
+)
+_MOE_EXPERT_LORA_3D_RE = re.compile(
+    r"^(?P<prefix>.*\.mlp\.experts\.)(?P<expert_id>\d+)\."
+    r"(?P<proj>gate_proj|up_proj|down_proj)\.lora_(?P<side>[AB])\.weight$"
+)
+_QWEN3_OMNI_3D_MOE_MODEL_TYPES = {"qwen3_omni_moe"}
 
 
 def count_adapter_parameters(model):
@@ -182,10 +194,185 @@ def add_base_layer_suffix(
         yield name, param
 
 
+def _get_expert_parallel_info() -> tuple[int, int, object | None]:
+    try:
+        from megatron.core import parallel_state
+    except Exception:
+        return 1, 0, None
+
+    if not torch.distributed.is_available() or not torch.distributed.is_initialized():
+        return 1, 0, None
+
+    try:
+        ep_size = parallel_state.get_expert_model_parallel_world_size()
+        ep_rank = parallel_state.get_expert_model_parallel_rank()
+        ep_group = parallel_state.get_expert_model_parallel_group()
+    except Exception:
+        return 1, 0, None
+
+    if ep_size is None or ep_size <= 1 or ep_group is None:
+        return 1, 0, None
+    return ep_size, ep_rank, ep_group
+
+
+def _all_gather_tensor_for_ep(tensor: torch.Tensor, ep_size: int, ep_group) -> list[torch.Tensor]:
+    src = tensor.detach().contiguous()
+    original_device = src.device
+    gather_src = src
+    if not gather_src.is_cuda and torch.cuda.is_available():
+        gather_src = gather_src.to(torch.cuda.current_device(), non_blocking=True)
+
+    gathered = [torch.empty_like(gather_src) for _ in range(ep_size)]
+    torch.distributed.all_gather(gathered, gather_src, group=ep_group)
+
+    if original_device.type == "cpu":
+        gathered = [item.cpu() for item in gathered]
+    return gathered
+
+
+def gather_ep_lora_adapter_weights_for_vllm(
+    params: Iterator[tuple[str, torch.Tensor]],
+) -> Iterator[tuple[str, torch.Tensor]]:
+    """Gather EP-local MoE LoRA tensors and rename them to global expert ids."""
+    ep_size, _ep_rank, ep_group = _get_expert_parallel_info()
+    materialized = list(params)
+    if ep_size <= 1:
+        yield from materialized
+        return
+
+    expert_ids = []
+    for name, _param in materialized:
+        match = _MOE_EXPERT_LORA_RE.match(name)
+        if match:
+            expert_ids.append(int(match.group("expert_id")))
+
+    if not expert_ids:
+        yield from materialized
+        return
+
+    enabled = os.getenv("VERL_MEGATRON_LORA_GATHER_EP_ADAPTER_WEIGHTS", "1").lower()
+    if enabled in {"0", "false", "no", "off"}:
+        yield from materialized
+        return
+
+    local_expert_count = max(expert_ids) + 1
+    debug = os.getenv("VERL_MEGATRON_LORA_GATHER_EP_ADAPTER_DEBUG", "0").lower() in {"1", "true", "yes"}
+    gathered_expert_tensors = 0
+    passthrough_tensors = 0
+
+    for name, param in materialized:
+        match = _MOE_EXPERT_LORA_RE.match(name)
+        if match is None:
+            passthrough_tensors += 1
+            yield name, param
+            continue
+
+        local_expert_id = int(match.group("expert_id"))
+        gathered = _all_gather_tensor_for_ep(param, ep_size, ep_group)
+        for gathered_ep_rank, gathered_param in enumerate(gathered):
+            global_expert_id = gathered_ep_rank * local_expert_count + local_expert_id
+            yield f"{match.group('prefix')}{global_expert_id}{match.group('suffix')}", gathered_param
+            gathered_expert_tensors += 1
+
+    if debug:
+        print(
+            "[verl.megatron_lora] gathered EP adapter tensors for vLLM: "
+            f"ep_size={ep_size} local_experts={local_expert_count} "
+            f"expert_tensors_out={gathered_expert_tensors} passthrough={passthrough_tensors}",
+            flush=True,
+        )
+
+
+def pack_3d_moe_lora_adapter_weights_for_vllm(
+    params: Iterator[tuple[str, torch.Tensor]],
+    model_type: str,
+) -> Iterator[tuple[str, torch.Tensor]]:
+    """Pack Qwen3-Omni per-expert LoRA tensors into vLLM's 3D MoE layout."""
+    materialized = list(params)
+    enabled = os.getenv("VERL_MEGATRON_LORA_PACK_3D_MOE_ADAPTER_WEIGHTS", "1").lower()
+    if model_type not in _QWEN3_OMNI_3D_MOE_MODEL_TYPES or enabled in {"0", "false", "no", "off"}:
+        yield from materialized
+        return
+
+    grouped: dict[str, dict[int, dict[tuple[str, str], tuple[int, torch.Tensor]]]] = {}
+    for index, (name, tensor) in enumerate(materialized):
+        match = _MOE_EXPERT_LORA_3D_RE.match(name)
+        if match is None:
+            continue
+        grouped.setdefault(match.group("prefix"), {}).setdefault(int(match.group("expert_id")), {})[
+            (match.group("proj"), match.group("side"))
+        ] = (index, tensor)
+
+    required = {
+        ("gate_proj", "A"),
+        ("gate_proj", "B"),
+        ("up_proj", "A"),
+        ("up_proj", "B"),
+        ("down_proj", "A"),
+        ("down_proj", "B"),
+    }
+    replacements: dict[int, list[tuple[str, torch.Tensor]]] = {}
+    consumed_indices: set[int] = set()
+    packed_groups = 0
+    packed_tensors = 0
+
+    for prefix, experts in grouped.items():
+        if not experts or any(set(tensors) != required for tensors in experts.values()):
+            continue
+
+        expert_ids = sorted(experts)
+        first_index = min(index for tensors in experts.values() for index, _tensor in tensors.values())
+        gate_up_a = []
+        gate_up_b = []
+        down_a = []
+        down_b = []
+        for expert_id in expert_ids:
+            tensors = experts[expert_id]
+            gate_a = tensors[("gate_proj", "A")][1]
+            up_a = tensors[("up_proj", "A")][1]
+            if gate_a.shape != up_a.shape or not torch.equal(gate_a, up_a):
+                raise ValueError(
+                    "Cannot pack Qwen3-Omni 3D MoE LoRA tensors for vLLM because "
+                    f"expert {expert_id} has different gate_proj and up_proj lora_A weights."
+                )
+            gate_up_a.append(gate_a)
+            gate_up_b.append(torch.cat([tensors[("gate_proj", "B")][1], tensors[("up_proj", "B")][1]], dim=0))
+            down_a.append(tensors[("down_proj", "A")][1])
+            down_b.append(tensors[("down_proj", "B")][1])
+            consumed_indices.update(index for index, _tensor in tensors.values())
+
+        base_name = prefix.rstrip(".")
+        replacements[first_index] = [
+            (f"{base_name}.base_layer.lora_A.weight", torch.cat(gate_up_a, dim=0)),
+            (f"{base_name}.base_layer.lora_B.weight", torch.cat(gate_up_b, dim=1)),
+            (f"{base_name}.lora_A.weight", torch.cat(down_a, dim=0)),
+            (f"{base_name}.lora_B.weight", torch.cat(down_b, dim=1)),
+        ]
+        packed_groups += 1
+        packed_tensors += len(replacements[first_index])
+
+    for index, item in enumerate(materialized):
+        if index in replacements:
+            yield from replacements[index]
+        if index not in consumed_indices:
+            yield item
+
+    debug = os.getenv("VERL_MEGATRON_LORA_PACK_3D_MOE_ADAPTER_DEBUG", "0").lower() in {"1", "true", "yes"}
+    if debug:
+        print(
+            "[verl.megatron_lora] packed 3D MoE adapter tensors for vLLM: "
+            f"model_type={model_type} groups={packed_groups} "
+            f"expert_tensors_in={len(consumed_indices)} packed_tensors_out={packed_tensors}",
+            flush=True,
+        )
+
+
 __all__ = [
     "count_adapter_parameters",
     "print_adapter_info",
     "convert_megatron_to_hf_target_modules",
     "build_peft_config_for_vllm",
     "add_base_layer_suffix",
+    "gather_ep_lora_adapter_weights_for_vllm",
+    "pack_3d_moe_lora_adapter_weights_for_vllm",
 ]

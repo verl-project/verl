@@ -48,7 +48,12 @@ from verl.utils.megatron.tensor_parallel import (
     vocab_parallel_log_probs_from_logits,
     vocab_parallel_sum_pi_squared,
 )
-from verl.utils.megatron_peft_utils import add_base_layer_suffix, build_peft_config_for_vllm
+from verl.utils.megatron_peft_utils import (
+    add_base_layer_suffix,
+    build_peft_config_for_vllm,
+    gather_ep_lora_adapter_weights_for_vllm,
+    pack_3d_moe_lora_adapter_weights_for_vllm,
+)
 from verl.utils.megatron_utils import (
     check_mtp_config,
     get_megatron_module_device,
@@ -732,6 +737,10 @@ class MegatronEngine(BaseEngine):
             per_tensor_param = self.bridge.export_weights(self.module)
         elif adapter_only:
             per_tensor_param = self.bridge.export_adapter_weights(self.module)
+            per_tensor_param = gather_ep_lora_adapter_weights_for_vllm(per_tensor_param)
+            per_tensor_param = pack_3d_moe_lora_adapter_weights_for_vllm(
+                per_tensor_param, model_type=self.model_config.hf_config.model_type
+            )
         else:
             per_tensor_param = (
                 self.bridge.export_hf_weights(self.module, merge_adapter_weights=False)
