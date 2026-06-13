@@ -105,23 +105,12 @@ case "$(echo "${MULTIMODAL}" | tr "[:upper:]" "[:lower:]")" in
 esac
 
 DEFAULT_EXTRA_PIP_PACKAGES=(
-  immutabledict
-  nltk
-  langdetect
   absl-py
-  emoji
-  syllapy
   antlr4-python3-runtime==4.9.3
-  requests
-  math_verify
-  numpy
-  pillow
 )
 
 if [ "${multimodal_flag}" = "1" ]; then
   DEFAULT_EXTRA_PIP_PACKAGES+=(
-    tokenizers==0.22.2
-    "huggingface-hub>=0.34.0,<1.0"
   )
 fi
 
@@ -129,7 +118,7 @@ fi
 # Keep this as a simple list for one-off testing (e.g. temporarily bumping a pkg)
 # without editing the base list above.
 DEFAULT_EXTRA_PIP_PACKAGES_OVERLAY=("starlette==0.50.0")
-PIP_CONSTRAINTS="${PIP_CONSTRAINTS:-huggingface-hub>=0.34.0,<1.0}"
+PIP_CONSTRAINTS="${PIP_CONSTRAINTS:-}"
 
 # If the user provides EXTRA_PIP_PACKAGES / EXTRA_PIP_PACKAGES_OVERLAY as strings,
 # use them as-is; otherwise join the defaults above.
@@ -548,7 +537,9 @@ prepare_shared_python_deps() {
         pip_constraints=(--constraint "${constraints_file}")
       fi
 
-      python3 -m pip install --no-cache-dir --upgrade --target "${PY_DEPS_DIR}" "${pip_constraints[@]}" ${EXTRA_PIP_PACKAGES}
+      if [ -n "${EXTRA_PIP_PACKAGES//[[:space:]]/}" ]; then
+        python3 -m pip install --no-cache-dir --upgrade --target "${PY_DEPS_DIR}" "${pip_constraints[@]}" ${EXTRA_PIP_PACKAGES}
+      fi
       if [ -n "${REASONING_GYM_DIR}" ]; then
         if [ ! -d "${REASONING_GYM_DIR}" ]; then
           echo "REASONING_GYM_DIR=${REASONING_GYM_DIR} does not exist. Clone https://github.com/EduardDurech/r-gym.git and check out the translate branch there, or set REASONING_GYM_DIR=\"\" to install reasoning-gym from PyPI." >&2
