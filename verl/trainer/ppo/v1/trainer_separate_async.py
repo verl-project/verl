@@ -73,7 +73,7 @@ class PPOTrainerSeparateAsync(PPOTrainer):
         checkpoint_engine_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
         self.standalone_checkpoint_manager = CheckpointEngineManager(
             config=checkpoint_engine_config,
-            trainer=self.actor_rollout_wg,
+            actor_wg=self.actor_rollout_wg,
             replicas=self.standalone_server_manager.get_replicas(),
         )
 

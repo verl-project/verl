@@ -195,15 +195,15 @@ async def test_server_adapter(init_config):
         init_config.actor_rollout_ref.rollout.checkpoint_engine
     )
     trainer_pool = RayResourcePool(process_on_nodes=[init_config.trainer.n_gpus_per_node], max_colocate_count=3)
-    trainer = create_trainer_worker_group(trainer_pool, model_config, checkpoint_engine_config)
-    trainer.reset()
+    actor_wg = create_trainer_worker_group(trainer_pool, model_config, checkpoint_engine_config)
+    actor_wg.reset()
 
     # 2. create standalone rollout with AgentLoopManager
     llm_server_manager = await LLMServerManager.create(config=init_config)
 
     # 3. create checkpoint engine manager
     checkpoint_manager = CheckpointEngineManager(
-        config=checkpoint_engine_config, trainer=trainer, replicas=llm_server_manager.get_replicas()
+        config=checkpoint_engine_config, actor_wg=actor_wg, replicas=llm_server_manager.get_replicas()
     )
 
     n = 4
