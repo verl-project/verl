@@ -1007,16 +1007,23 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         rollout_sample.full_batch.non_tensor_batch["uid"] = np.array(
             [f"uid_{rollout_sample.sample_id}"] * len(rollout_sample.full_batch), dtype=object
         )
+        preserved_non_tensor_batch = {
+            key: rollout_sample.full_batch.non_tensor_batch[key]
+            for key in ("data_source", "reward_model")
+            if key in rollout_sample.full_batch.non_tensor_batch
+        }
         ret = await _generate_sequences_inverse_batch(
             self.async_rollout_manager,
             rollout_sample.full_batch,
             self.n_per_round,
         )
         rollout_sample.full_batch = ret
-        # Re-set uid on output — agent loop worker returns a new DataProto without the input's non_tensor_batch
+        # Re-set input metadata on output — agent loop worker returns a new DataProto without the input's non_tensor_batch.
         rollout_sample.full_batch.non_tensor_batch["uid"] = np.array(
             [f"uid_{rollout_sample.sample_id}"] * len(rollout_sample.full_batch), dtype=object
         )
+        for key, value in preserved_non_tensor_batch.items():
+            rollout_sample.full_batch.non_tensor_batch[key] = value
         rollout_sample.rollout_status = await self.get_statistics()
 
         filter_groups_config = self.config.algorithm.get("filter_groups", None)

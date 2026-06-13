@@ -38,6 +38,9 @@ HOME=/iopsstor/scratch/cscs/$USER
 HF_HOME=/iopsstor/scratch/cscs/$USER/huggingface
 SANDBOX_BACKEND=kubernetes
 KUBERNETES_SANDBOX_URL=https://sandbox-dev.swissai.svc.cscs.ch/harness-test
+REASONING_GYM_DIR=/iopsstor/scratch/cscs/$USER/projects/r-gym
+QA_GYM_RERANKER_URL=https://api.swissai.svc.cscs.ch/v1/score
+CSCS_SERVING_API=<token>
 TRAINING_DATA_DIR=/capstor/store/cscs/swissai/infra01/reasoning/data/RL-prod/apertus_demo_rl
 ```
 
@@ -64,6 +67,8 @@ values to review are:
   when using `SANDBOX_BACKEND=codegym`.
 - `SANDBOX_REWARD_CONTINUOUS`: whether code rewards are fractional instead of
   binary.
+- `QA_GYM_RERANKER_URL`: Qwen3 reranker score endpoint used by QA Gym rewards.
+- `CSCS_SERVING_API`: bearer token used for the QA Gym reranker service.
 - `ENABLE_THINKING`, `FORCE_THINKING`, and `THINK_PREFIX_TOKEN`: thinking-token
   controls for the data/chat template.
 - `ROLLOUT_N`, `SEED`, and `USE_GROUP_FILTERING`: rollout and optimization
@@ -82,6 +87,19 @@ ${WORKING_DIR}/outputs/${PROJECT_NAME}/${RUN_NAME}
 The default backend is the Kubernetes sandbox. `launch.sh` checks
 `KUBERNETES_SANDBOX_URL` with `curl` before submitting the training job.
 The code evaluation endpoint on kubernetes is only reachable with EPFL/ETH VPNs or CSCS network.
+
+### QA Gym reranker
+
+QA Gym answer verification uses the Qwen3 reranker score endpoint. Set
+`CSCS_SERVING_API` before launching. The launcher sends a minimal scoring
+request to `QA_GYM_RERANKER_URL` before submitting the Slurm job.
+
+```bash
+curl -fsS -X POST "${QA_GYM_RERANKER_URL:-https://api.swissai.svc.cscs.ch/v1/score}" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer ${CSCS_SERVING_API}" \
+  -d '{"model":"tomaarsen/Qwen3-Reranker-8B-seq-cls","text_1":"<|im_start|>system\n\nShould <Response_B> truthful answering <Question> base on <Response_A> truthful answer <Question>\n\n\"yes\"or\"no\".\n\n<|im_end|>\n<|im_start|>user\n\n<Question>: What is the capital of France?\n<Response_A>: Paris\n<Question>: What is the capital of France?\n<Response_B>: ","text_2":["The capital is Paris.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think><answer>\""]}'
+```
 
 ### Prepare code-gym
 

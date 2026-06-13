@@ -556,6 +556,9 @@ class RayPPOTrainer:
             outputs = [decode_keep_special_tokens_without_pad(self.tokenizer, ids) for ids in output_ids]
             scores = batch.batch["token_level_scores"].sum(-1).cpu().tolist()
             sample_gts = [item.non_tensor_batch.get("reward_model", {}).get("ground_truth", None) for item in batch]
+            data_sources = batch.non_tensor_batch.get("data_source", ["unknown"] * len(batch))
+            if hasattr(data_sources, "tolist"):
+                data_sources = data_sources.tolist()
 
             reward_extra_infos_to_dump = {
                 k: (v.tolist() if hasattr(v, "tolist") else v) for k, v in reward_extra_infos_dict.items()
@@ -573,6 +576,10 @@ class RayPPOTrainer:
                 scores=scores,
                 reward_extra_infos_dict=reward_extra_infos_to_dump,
                 dump_path=rollout_data_dir,
+                extra_fields={
+                    "data_source": data_sources,
+                    "ground_truth": sample_gts,
+                },
             )
 
     def _maybe_log_val_generations(self, inputs, outputs, scores):

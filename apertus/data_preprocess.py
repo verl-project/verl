@@ -26,8 +26,9 @@ import datasets
 from verl.utils.reward_score.gsm8k import extract_solution as extract_gsm8k_solution
 
 from utils.LEXam_mcq import normalize_lexam_mcq_sample
-from utils.riddle_sense import normalize_riddle_sense_sample
+from utils.qa_gym import load_qa_gym_rl_pairs_jsonl
 from utils.rgym import strip_rgym_format_instructions
+from utils.riddle_sense import normalize_riddle_sense_sample
 from utils.table_gpt import TABLE_GPT_DATASET_ID, load_table_gpt_mix
 
 
@@ -175,7 +176,7 @@ TRAIN_DATASETS = [
     ),
     DatasetConfig(
         name="riddle_sense",
-        dataset_id="INK-USC/riddle_sense",
+        dataset_id="/capstor/store/cscs/swissai/infra01/reasoning/data/RL-prod/riddle_sense/train.parquet",
         split="train",
         adapter="riddle_sense",
         data_source="riddle_sense",
@@ -207,7 +208,15 @@ TRAIN_DATASETS = [
         data_source="table_gpt",
         prompt_key="prompt",
         answer_key="completion",
-        # TODO: if verification is ok, can choose to only activate on some samples.
+    ),
+    DatasetConfig(
+        name="qa_gym",
+        dataset_id="/capstor/store/cscs/swissai/infra01/reasoning/data/RL-prod/qa_gym/eval10_hybrid_multihop_rl_pairs.jsonl",
+        split="train",
+        adapter="qa_gym",
+        data_source="qa_gym",
+        question_key="question",
+        sample_size=None,
         tool_selection=("display_answers",),
     ),
     DatasetConfig(
@@ -494,6 +503,28 @@ def make_row(
     if extra_info:
         row["extra_info"].update(extra_info)
     return row
+
+
+@register_adapter("qa_gym")
+def adapt_qa_gym(
+    example: dict[str, Any], idx: int, split: str, config: DatasetConfig
+) -> dict[str, Any]:
+    prompt = normalize_text(get_value(example, config.prompt_key))
+    question = normalize_text(get_value(example, config.question_key)) or prompt
+    answer = normalize_text(get_value(example, config.answer_key))
+    extra_info = {
+        "question": question,
+        "qa_id": normalize_text(get_value(example, "id")),
+    }
+    return make_row(
+        config=config,
+        split=split,
+        index=idx,
+        prompt=make_prompt(prompt),
+        ability="long_context_qa",
+        ground_truth=answer,
+        extra_info=extra_info,
+    )
 
 
 @register_adapter("rgym")
@@ -1135,6 +1166,8 @@ def load_raw_dataset(config: DatasetConfig) -> datasets.Dataset:
             config.dataset_id,
             cache_dir=os.path.expanduser(DATASETS_CACHE_DIR),
         )
+    elif config.adapter == "qa_gym":
+        raw_dataset = load_qa_gym_rl_pairs_jsonl(config.dataset_id)
     elif config.dataset_id.endswith(".parquet"):
         raw_dataset = datasets.load_dataset(
             "parquet",

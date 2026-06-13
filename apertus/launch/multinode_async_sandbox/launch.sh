@@ -46,13 +46,13 @@ THINK_PREFIX_TOKEN="${THINK_PREFIX_TOKEN:-<|inner_prefix|>}"
 ENABLE_THINKING="${ENABLE_THINKING:-false}"
 SEED="${SEED:-85}"
 ROLLOUT_N="${ROLLOUT_N:-8}"
-USE_GROUP_FILTERING="${USE_GROUP_FILTERING:-true}"
+N_PER_ROUND="${N_PER_ROUND:-${ROLLOUT_N}}"
 JOB_NAME="${JOB_NAME:-debug}"
 VAL_BEFORE_TRAIN="${VAL_BEFORE_TRAIN:-true}"
 
 WANDB_ENTITY="${WANDB_ENTITY:-apertus}"
 WANDB_BACKGROUND_SYNC="${WANDB_BACKGROUND_SYNC:-false}"
-WANDB_MODE="${WANDB_MODE:-}"
+WANDB_MODE="${WANDB_MODE:-offline}"
 WANDB_SYNC_INTERVAL_SECONDS="${WANDB_SYNC_INTERVAL_SECONDS:-60}"
 WANDB_REQUIRE_SERVICE="${WANDB_REQUIRE_SERVICE:-}"
 WANDB_DISABLE_SERVICE="${WANDB_DISABLE_SERVICE:-}"
@@ -83,6 +83,7 @@ MAX_WAIT="${MAX_WAIT:-$((60 * 10))}"
 GIVEN_URL="${SCHEDULER_URL:-}"  # potentially reuse a running code-gym scheduler
 NO_FORMAT="${NO_FORMAT:-false}"  # disable tool-formatting (legacy plain-text rollouts)
 SANDBOX_REWARD_CONTINUOUS="${SANDBOX_REWARD_CONTINUOUS:-false}" # default is binary reward
+QA_GYM_RERANKER_URL="${QA_GYM_RERANKER_URL:-https://api.swissai.svc.cscs.ch/v1/score}"
 
 log(){ echo -e "$*" >&2; }
 
@@ -150,6 +151,29 @@ probe_ok() {
   fi
 }
 
+check_qa_gym_reranker() {
+  if [[ -z "${QA_GYM_RERANKER_URL}" ]]; then
+    return 0
+  fi
+  if [[ -z "${CSCS_SERVING_API:-}" ]]; then
+    echo "CSCS_SERVING_API must be set to use the QA Gym reranker service." >&2
+    exit 1
+  fi
+
+  local payload
+  payload='{"model":"tomaarsen/Qwen3-Reranker-8B-seq-cls","text_1":"<|im_start|>system\n\nShould <Response_B> truthful answering <Question> base on <Response_A> truthful answer <Question>\n\n\"yes\"or\"no\".\n\n<|im_end|>\n<|im_start|>user\n\n<Question>: What is the capital of France?\n<Response_A>: Paris\n<Question>: What is the capital of France?\n<Response_B>: ","text_2":["The capital is Paris.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think><answer>\""]}'
+
+  log "  -> Checking QA Gym reranker at ${QA_GYM_RERANKER_URL}"
+  if ! curl -fsS --max-time 10 \
+    -X POST "${QA_GYM_RERANKER_URL}" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer ${CSCS_SERVING_API}" \
+    -d "${payload}" >/dev/null; then
+    echo "QA Gym reranker is not reachable at ${QA_GYM_RERANKER_URL}" >&2
+    exit 1
+  fi
+}
+
 resolve_sandbox_backend() {
   case "${SANDBOX_BACKEND}" in
     codegym|kubernetes)
@@ -177,6 +201,7 @@ resolve_sandbox_backend() {
 resolve_run_name_and_dir
 clear_inherited_pyxis_options
 resolve_sandbox_backend
+check_qa_gym_reranker
 
 # ==========================================
 # STEP 1 & 2: Sandbox setup
@@ -280,6 +305,7 @@ if [[ "${WANDB_BACKGROUND_SYNC}" == "true" ]]; then
 else
   log "  -> output=${RUN_DIR}"
 fi
+log "  -> qa_gym_reranker_url=${QA_GYM_RERANKER_URL}"
 if [[ -n "${URL}" ]]; then
   log "  -> sandbox_backend=${SANDBOX_BACKEND} sandbox_url=${URL} continuous=${SANDBOX_REWARD_CONTINUOUS}"
 else
@@ -307,6 +333,7 @@ EXPORT_VARS=(
   "SCHEDULER_URL=${SCHEDULER_URL:-}"
   "KUBERNETES_SANDBOX_URL=${KUBERNETES_SANDBOX_URL:-}"
   "SANDBOX_REWARD_CONTINUOUS=${SANDBOX_REWARD_CONTINUOUS}"
+  "QA_GYM_RERANKER_URL=${QA_GYM_RERANKER_URL}"
   "MODEL_NAME_OR_PATH=${MODEL_NAME_OR_PATH}"
   "TOKENIZER_NAME_OR_PATH=${TOKENIZER_NAME_OR_PATH}"
   "CONFIG_NAME=${CONFIG_NAME}"
@@ -349,6 +376,7 @@ EXPORT_VARS=(
   "ENVIRONMENT_PATH=${ENVIRONMENT_PATH}"
   "REASONING_GYM_DIR=${REASONING_GYM_DIR}"
   "JOB_NAME=${JOB_NAME}"
+  "N_PER_ROUND=${N_PER_ROUND}"
 )
 
 EXPORT_SPEC="$(join_export_vars "${EXPORT_VARS[@]}")"
