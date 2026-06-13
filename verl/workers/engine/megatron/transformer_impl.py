@@ -16,7 +16,7 @@ import inspect
 import logging
 import os
 from functools import partial
-from typing import Any, Callable, ContextManager, Iterator, Optional
+from typing import Any, Callable, ContextManager, Iterator
 
 import torch
 import torch.distributed
@@ -180,7 +180,11 @@ class MegatronEngine(BaseEngine):
             # https://github.com/xiaoyao0115/Megatron-LM/blob/88733ab6614e3e91b9d095172f41e7d8b5d8e9d4/megatron/core/pipeline_parallel/dynamic_cp_schedule.py#L552-L553
             # but it does not affect the functionality of dynamic CP, so we can use it to avoid the coupling.
             override_transformer_config["dynamic_context_parallel"] = False
-            override_transformer_config["context_parallel_size"] = mpu.get_data_parallel_world_size()
+            try:
+                dcp_world_size = mpu.get_data_parallel_world_size(with_context_parallel=True)
+            except TypeError:
+                dcp_world_size = mpu.get_data_parallel_world_size() * mpu.get_context_parallel_world_size()
+            override_transformer_config["context_parallel_size"] = dcp_world_size
         self.provider = None
         self.vanilla_bridge = self.engine_config.vanilla_mbridge
 
@@ -536,19 +540,13 @@ class MegatronEngine(BaseEngine):
             raise ValueError(f"Invalid device type: {device}")
 
     def get_data_parallel_rank(self):
-        if self.engine_config.dynamic_context_parallel:
-            # in order to let every dp-cp group has full data to split, we set dp=1
-            return 0
         return mpu.get_data_parallel_rank()
 
     def get_data_parallel_size(self):
-        if self.engine_config.dynamic_context_parallel:
-            # in order to let every dp-cp group has full data to split, we set dp=1
-            return 1
         return mpu.get_data_parallel_world_size()
 
-    def get_data_parallel_group(self):
-        return mpu.get_data_parallel_group()
+    def get_data_parallel_group(self, with_context_parallel: bool = False):
+        return mpu.get_data_parallel_group(with_context_parallel=with_context_parallel)
 
     def get_model_parallel_group(self):
         return mpu.get_model_parallel_group()
@@ -559,9 +557,9 @@ class MegatronEngine(BaseEngine):
     def save_checkpoint(
         self,
         local_path: str,
-        hdfs_path: Optional[str] = None,
+        hdfs_path: str | None = None,
         global_step: int = 0,
-        max_ckpt_to_keep: Optional[int] = None,
+        max_ckpt_to_keep: int | None = None,
         **kwargs,
     ) -> None:
         """
@@ -584,7 +582,7 @@ class MegatronEngine(BaseEngine):
             offload_megatron_model_to_cpu(self.module)
 
     def load_checkpoint(
-        self, local_path: str, hdfs_path: Optional[str] = None, del_local_after_load: bool = True, **kwargs
+        self, local_path: str, hdfs_path: str | None = None, del_local_after_load: bool = True, **kwargs
     ) -> None:
         """
         Load model, optimizer, and scheduler states from a checkpoint.
@@ -608,7 +606,11 @@ class MegatronEngine(BaseEngine):
         tu.assign_non_tensor(data, sp_size=self.engine_config.context_parallel_size)
 
         # compute num_tokens in global batch for loss normalization
-        batch_num_tokens = data["loss_mask"].sum().to(get_device_id())
+        loss_mask_data = data.get("loss_mask", None)
+        if loss_mask_data is not None:
+            batch_num_tokens = loss_mask_data.sum().to(get_device_id())
+        else:
+            batch_num_tokens = torch.tensor(1.0, device=get_device_id())
         torch.distributed.all_reduce(
             batch_num_tokens, op=torch.distributed.ReduceOp.SUM, group=self.get_data_parallel_group()
         )
@@ -621,19 +623,69 @@ class MegatronEngine(BaseEngine):
         else:
             num_batches_divided_by = None
 
-        micro_batches, indices = prepare_micro_batches(
-            data=data,
-            dp_group=self.get_data_parallel_group(),
-            num_batches_divided_by=num_batches_divided_by,
-            same_micro_num_in_dp=True,
-            min_num_micro_batch=None,
-        )
+        dcp_routing_info = None
+        if self.engine_config.dynamic_context_parallel:
+            # Use dynamic CP scheduler: collect global seqlens, schedule, all-to-all route
+            from verl.utils.dynamic_cp_scheduler import DynamicCPScheduler
+
+            dp_group = self.get_data_parallel_group()
+            dcp_group = self.get_data_parallel_group(with_context_parallel=True)
+            scheduler = DynamicCPScheduler(
+                max_seqlen_per_dp_cp_rank=self.engine_config.max_seqlen_per_dp_cp_rank,
+                dp_size=dp_group.size(),
+                cp_size=mpu.get_context_parallel_world_size(),
+                min_cp_size=1,
+                microbatch_group_size_per_vp_stage=num_batches_divided_by,
+            )
+            # Collect non-tensor data to propagate to micro-batches
+            non_tensor_data = {}
+            for key in [
+                "use_dynamic_bsz",
+                "use_fused_kernels",
+                "calculate_entropy",
+                "calculate_sum_pi_squared",
+                "pad_mode",
+                "sp_size",
+                "batch_num_tokens",
+                "dp_size",
+                "enable_routing_replay",
+                "distillation_use_topk",
+                "global_batch_size",
+                "mini_batch_size",
+                "compute_loss",
+                "loss_scale_factor",
+            ]:
+                val = tu.get_non_tensor_data(data, key=key, default=None)
+                if val is not None:
+                    non_tensor_data[key] = val
+
+            micro_batches, dcp_routing_info = scheduler.schedule(
+                batch=data,
+                dp_group=dp_group,
+                dcp_group=dcp_group,
+                non_tensor_data=non_tensor_data,
+            )
+            indices = None
+        else:
+            micro_batches, indices = prepare_micro_batches(
+                data=data,
+                dp_group=self.get_data_parallel_group(),
+                num_batches_divided_by=num_batches_divided_by,
+                same_micro_num_in_dp=True,
+                min_num_micro_batch=None,
+            )
 
         if num_batches_divided_by is not None:
             assert len(micro_batches) % num_batches_divided_by == 0, (
                 f"micro_batches {micro_batches} must be divisible by num_batches_divided_by "
                 f"{num_batches_divided_by} for megatron backend"
             )
+
+        # Broadcast dynamic CP metadata to middle PP stages
+        if dcp_routing_info is not None and mpu.get_pipeline_model_parallel_world_size() > 2:
+            from verl.utils.dynamic_cp_scheduler import broadcast_dcp_metadata_to_pp
+
+            micro_batches = broadcast_dcp_metadata_to_pp(micro_batches, mpu.get_pipeline_model_parallel_group())
 
         # compute input shapes for pp stages
         n_micro_batch = len(micro_batches)
@@ -715,6 +767,16 @@ class MegatronEngine(BaseEngine):
             output = postprocess_batch_func(output_lst=losses_reduced, indices=indices, data=data)
             if RouterReplayHelper.is_r2_record_action(self.tf_config):
                 output["model_output"]["routed_experts"] = layers_topk_idx
+            # Reverse-route outputs back to original DP ranks after dynamic CP scheduling
+            if dcp_routing_info is not None and "model_output" in output:
+                from verl.utils.dynamic_cp_scheduler import reverse_route_outputs
+
+                output["model_output"] = reverse_route_outputs(
+                    output["model_output"],
+                    dcp_routing_info,
+                    self.get_data_parallel_group(),
+                    self.get_data_parallel_group(with_context_parallel=True),
+                )
         if enable_routing_replay:
             RouterReplay.clear_global_indices()
             RouterReplay.clear_global_router_replay_action()
@@ -798,7 +860,8 @@ class EngineTrainModeCtx(BaseEngineCtx):
 class MegatronEngineWithLMHead(MegatronEngine):
     def prepare_model_inputs(self, batch: TensorDict):
         input_ids = batch["input_ids"]
-        loss_mask = batch["loss_mask"].to(bool)
+        loss_mask_val = batch.get("loss_mask", None)
+        loss_mask = loss_mask_val.to(bool) if loss_mask_val is not None else None
         multi_modal_inputs = extract_multi_modal_inputs(batch.get("multi_modal_inputs", []))
 
         routed_experts = batch.get("routed_experts", None)
@@ -820,15 +883,19 @@ class MegatronEngineWithLMHead(MegatronEngine):
         batch: TensorDict = next(batch_iter)
 
         if self.engine_config.dynamic_context_parallel:
-            # split the batch and give the sub-batches to each dp-cp group
-            from verl.utils.megatron_utils import dynamic_cp_split_batch
+            # If the scheduler has already set local_cp_size, skip the legacy split.
+            # The DynamicCPScheduler handles data routing via all-to-all.
+            _already_scheduled = tu.get_non_tensor_data(data=batch, key="local_cp_size", default=None)
+            if _already_scheduled is None:
+                # Fallback to legacy per-microbatch split (should not happen with scheduler)
+                from verl.utils.megatron_utils import dynamic_cp_split_batch
 
-            batch = dynamic_cp_split_batch(
-                batch=batch,
-                engine_config=self.engine_config,
-                dp_size=mpu.get_data_parallel_world_size(),
-                dp_rank=mpu.get_data_parallel_rank(),
-            )
+                batch = dynamic_cp_split_batch(
+                    batch=batch,
+                    engine_config=self.engine_config,
+                    dp_size=mpu.get_data_parallel_world_size(),
+                    dp_rank=mpu.get_data_parallel_rank(),
+                )
 
         batch = batch.to(get_device_id())
         use_fused_kernels = tu.get_non_tensor_data(batch, key="use_fused_kernels", default=False)
@@ -842,13 +909,13 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 "fused kernels do not materialize the full logits tensor needed for Σπ²."
             )
         pad_mode = tu.get_non_tensor_data(batch, key="pad_mode", default=DatasetPadMode.NO_PADDING)
-        temperature = batch["temperature"]
+        temperature = batch.get("temperature", None)
         model_inputs = self.prepare_model_inputs(batch)
         input_ids = model_inputs["input_ids"]
         attention_mask = model_inputs["attention_mask"]
         multi_modal_inputs = model_inputs["multi_modal_inputs"]
         local_cp_size = tu.get_non_tensor_data(data=batch, key="local_cp_size", default=None)
-        loss_mask = model_inputs["loss_mask"]
+        loss_mask = model_inputs.get("loss_mask", None)
 
         unwrapped_model = unwrap_model(model)
         if hasattr(unwrapped_model, "vp_stage"):
@@ -876,8 +943,12 @@ class MegatronEngineWithLMHead(MegatronEngine):
                     "Fused kernels require `use_remove_padding=True` for Megatron engine. Falling back to non-fused."
                 )
                 use_fused_kernels = False
+            elif temperature is None:
+                temperature_value = 1.0
             elif isinstance(temperature, torch.Tensor):
-                if temperature.numel() != 1:
+                if temperature.numel() == 0:
+                    temperature_value = 1.0
+                elif temperature.numel() != 1:
                     logger.warning_once(
                         "Fused kernels do not support per-sample temperature. Falling back to non-fused."
                     )
@@ -901,10 +972,28 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 pad_token_id=self.model_config.tokenizer.pad_token_id,
             )
         else:
-            if not isinstance(temperature, torch.Tensor):
+            if temperature is None:
+                temperature = torch.ones(input_ids.shape[0], device=input_ids.device, dtype=torch.float32)
+            elif not isinstance(temperature, torch.Tensor):
                 temperature = torch.tensor([temperature] * input_ids.shape[0], device=input_ids.device)
 
             temperature = temperature.to(torch.float32)
+            if temperature.numel() == 0:
+                temperature = torch.ones(input_ids.shape[0], device=input_ids.device, dtype=torch.float32)
+            elif temperature.ndim == 0:
+                temperature = temperature.expand(input_ids.shape[0])
+            elif temperature.numel() == 1:
+                temperature = temperature.reshape(1).expand(input_ids.shape[0])
+            elif temperature.ndim > 1:
+                if temperature.numel() == input_ids.shape[0]:
+                    temperature = temperature.reshape(input_ids.shape[0])
+                elif all(dim == 1 for dim in temperature.shape[1:]):
+                    temperature = temperature.reshape(input_ids.shape[0])
+                else:
+                    raise ValueError(
+                        "Megatron THD path expects scalar or per-sample temperature with shape [batch_size]. "
+                        f"Got temperature shape {tuple(temperature.shape)} for batch size {input_ids.shape[0]}."
+                    )
             assert temperature.shape[0] == input_ids.shape[0]
             temperature = verl_F.expand_as_nested(temperature, input_ids)  # (bsz, j1)
             from verl.models.mcore import get_mcore_engine_forward_fn
@@ -999,15 +1088,19 @@ class MegatronEngineWithLMHead(MegatronEngine):
             scaled_loss = loss
             metrics = {}
         if local_cp_size is not None:
-            # aggregate model_output by DP-CP groups
-            from verl.utils.megatron_utils import dynamic_cp_merge_output
+            # Skip legacy merge when the DynamicCPScheduler handled routing;
+            # reverse routing happens at batch level in forward_backward_batch.
+            _dcp_scheduled = tu.get_non_tensor_data(data=data, key="_dcp_scheduled", default=False)
+            if not _dcp_scheduled:
+                # Legacy path: aggregate model_output by DP-CP groups
+                from verl.utils.megatron_utils import dynamic_cp_merge_output
 
-            model_output = dynamic_cp_merge_output(
-                model_output,
-                dp_size=mpu.get_data_parallel_world_size(),
-                dp_rank=mpu.get_data_parallel_rank(),
-                local_cp_size=local_cp_size,
-            )
+                model_output = dynamic_cp_merge_output(
+                    model_output,
+                    dp_size=mpu.get_data_parallel_world_size(),
+                    dp_rank=mpu.get_data_parallel_rank(),
+                    local_cp_size=local_cp_size,
+                )
 
         output = {
             "model_output": model_output,
