@@ -25,7 +25,15 @@ PY_DEPS_ROOT="${PY_DEPS_ROOT:-}"
 PY_DEPS_DIR="${PY_DEPS_DIR:-}"
 
 MODEL_NAME_OR_PATH="${MODEL_NAME_OR_PATH:-/capstor/store/cscs/swissai/infra01/reasoning/models/Apertus-1p5-8B-sft-capfilter-linear-it8816}"
-TOKENIZER_NAME_OR_PATH="${TOKENIZER_NAME_OR_PATH:-/capstor/store/cscs/swissai/infra01/MLLM/tokenizer/apertus_emu3.5_wavtok_instruct_thinking_token_fixed}"
+TOKENIZERS_ROOT="${TOKENIZERS_ROOT:-/capstor/store/cscs/swissai/infra01/reasoning/models/tokenizers}"
+MULTIMODAL="${MULTIMODAL:-false}"
+if [[ -z "${TOKENIZER_NAME_OR_PATH:-}" ]]; then
+  if [[ "${MULTIMODAL}" == "true" ]]; then
+    TOKENIZER_NAME_OR_PATH="${TOKENIZERS_ROOT}/apertus_emu3.5_wavtok_instruct_thinking_token_fixed"
+  else
+    TOKENIZER_NAME_OR_PATH="${TOKENIZERS_ROOT}/apertus_emu3.5_wavtok_text_only"
+  fi
+fi
 CONFIG_NAME="${CONFIG_NAME:-async}"
 SLURM_TIME="${SLURM_TIME:-04:00:00}"
 TRAIN_NNODES="${TRAIN_NNODES:-4}"
@@ -294,6 +302,7 @@ join_export_vars() {
 
 EXPORT_VARS=(
   "ALL"
+  "MULTIMODAL=${MULTIMODAL}"
   "SANDBOX_BACKEND=${SANDBOX_BACKEND}"
   "SCHEDULER_URL=${SCHEDULER_URL:-}"
   "KUBERNETES_SANDBOX_URL=${KUBERNETES_SANDBOX_URL:-}"

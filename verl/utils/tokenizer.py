@@ -253,6 +253,7 @@ def hf_tokenizer_and_processor(
     name_or_path,
     *,
     trust_remote_code: bool = False,
+    load_processor: bool = True,
     processor_kwargs: dict | None = None,
     tokenizer_kwargs: dict | None = None,
     correct_pad_token: bool = True,
@@ -267,7 +268,9 @@ def hf_tokenizer_and_processor(
     processor_kwargs = dict(processor_kwargs or {})
     tokenizer_kwargs = dict(tokenizer_kwargs or {})
 
-    processor = hf_processor(name_or_path, trust_remote_code=trust_remote_code, **processor_kwargs)
+    processor = None
+    if load_processor:
+        processor = hf_processor(name_or_path, trust_remote_code=trust_remote_code, **processor_kwargs)
     tokenizer = getattr(processor, "tokenizer", None) if processor is not None else None
 
     if tokenizer is None:

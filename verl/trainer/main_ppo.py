@@ -77,7 +77,16 @@ def run_ppo(config, task_runner_class=None) -> None:
         runtime_env = OmegaConf.merge(default_runtime_env, runtime_env_kwargs)
         ray_init_kwargs = OmegaConf.create({**ray_init_kwargs, "runtime_env": runtime_env})
         print(f"ray init kwargs: {ray_init_kwargs}")
-        ray.init(**OmegaConf.to_container(ray_init_kwargs))
+        ray_init_container = OmegaConf.to_container(ray_init_kwargs, resolve=True)
+        runtime_env_container = ray_init_container.get("runtime_env") or {}
+        env_vars = runtime_env_container.get("env_vars")
+        if isinstance(env_vars, dict):
+            # Ray requires runtime_env["env_vars"] to be Dict[str, str], but Hydra/OmegaConf
+            # may parse values like 0/1 as ints when provided via CLI overrides
+            runtime_env_container["env_vars"] = {str(k): str(v) for k, v in env_vars.items()}
+            ray_init_container["runtime_env"] = runtime_env_container
+
+        ray.init(**ray_init_container)
 
     if task_runner_class is None:
         task_runner_class = ray.remote(num_cpus=1)(TaskRunner)  # please make sure main_task is not scheduled on head

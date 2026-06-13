@@ -35,6 +35,7 @@ cd "${WORKING_DIR}"
 PROJECT_NAME="${PROJECT_NAME:-apertus-rl-tests}"
 MODEL_NAME_OR_PATH="${MODEL_NAME_OR_PATH:-swiss-ai/Apertus-8B-Instruct-2509}"
 TOKENIZER_NAME_OR_PATH="${TOKENIZER_NAME_OR_PATH:-}"
+MULTIMODAL="${MULTIMODAL:-false}"
 CONFIG_NAME="${CONFIG_NAME:-async}"
 VAL_BEFORE_TRAIN="${VAL_BEFORE_TRAIN:-true}"
 ROLLOUT_N="${ROLLOUT_N:-8}"
@@ -300,7 +301,13 @@ build_overrides() {
 
   if [ -n "${RESOLVED_TOKENIZER}" ]; then
     overrides+=("actor_rollout_ref.model.tokenizer_path=${RESOLVED_TOKENIZER}")
-    overrides+=("+actor_rollout_ref.model.lazy_tokenizer=true")
+    overrides+=("actor_rollout_ref.model.lazy_tokenizer=true")
+  fi
+
+  if is_truthy "${MULTIMODAL}"; then
+    overrides+=("actor_rollout_ref.model.load_processor=true")
+  else
+    overrides+=("actor_rollout_ref.model.load_processor=false")
   fi
 
   if [ -n "${ACTOR_PPO_MINI_BATCH_SIZE}" ]; then
@@ -503,9 +510,9 @@ if [ -n "${RESOLVED_TOKENIZER}" ] && [ -d "${RESOLVED_TOKENIZER}" ]; then
       rm -rf \"\${dst}\"
       mkdir -p \"\${dst}\"
       if command -v rsync >/dev/null 2>&1; then
-        rsync -a \"\${src}/\" \"\${dst}/\"
+        rsync -aL \"\${src}/\" \"\${dst}/\"
       else
-        cp -a \"\${src}/.\" \"\${dst}/\"
+        cp -aL \"\${src}/.\" \"\${dst}/\"
       fi
       touch \"\${ok}\"
     "

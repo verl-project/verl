@@ -15,6 +15,15 @@ hf_config_path: null
 # path to the huggingface tokenizer. In case it is not the same as path
 tokenizer_path: null
 
+# whether to load tokenizer
+load_tokenizer: True
+
+# whether to lazily materialize tokenizer/processor
+lazy_tokenizer: False
+
+# whether to load multimodal processor (AutoProcessor)
+load_processor: True
+
 # whether to use shared memory for model loading
 use_shm: False
 

@@ -99,6 +99,7 @@ class HFModelConfig(BaseConfig):
     load_tokenizer: bool = True
 
     lazy_tokenizer: bool = False
+    load_processor: bool = True
 
     hf_config: Any = None
     generation_config: Any = None
@@ -164,6 +165,7 @@ class HFModelConfig(BaseConfig):
                 self.tokenizer, self.processor = hf_tokenizer_and_processor(
                     self.local_tokenizer_path,
                     trust_remote_code=self.trust_remote_code,
+                    load_processor=self.load_processor,
                 )
 
         # For base models (e.g. Qwen3.5-2b-Base), the processor may not have a chat_template
@@ -273,4 +275,5 @@ class HFModelConfig(BaseConfig):
         self.tokenizer, self.processor = hf_tokenizer_and_processor(
             self.local_tokenizer_path,
             trust_remote_code=self.trust_remote_code,
+            load_processor=self.load_processor,
         )

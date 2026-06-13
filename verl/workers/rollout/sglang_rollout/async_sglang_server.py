@@ -170,6 +170,11 @@ class SGLangHttpServer:
         # model weights version, set by ServerAdapter when update weights.
         self.global_steps = None
 
+        self.tokenizer_manager = None
+        self.template_manager = None
+        self.scheduler_info = None
+        self._launch_lock = asyncio.Lock()
+
         # PD peer linkage populated post-launch by SGLangPDReplica.set_pd_peer.
         self._pd_decode_peers: list[ActorHandle] = []
         self._pd_bootstrap_host: Optional[str] = None
@@ -290,6 +295,7 @@ class SGLangHttpServer:
         infer_tp = self.config.tensor_model_parallel_size * self.config.data_parallel_size
         args = {
             "model_path": self.model_config.local_path,
+            "tokenizer_path": self.model_config.local_tokenizer_path,
             "dtype": self.config.dtype,
             "mem_fraction_static": self.config.gpu_memory_utilization,
             "disable_cuda_graph": self.config.enforce_eager,
@@ -452,6 +458,26 @@ class SGLangHttpServer:
 
         self._server_port, self._server_task = await run_uvicorn(app, server_args, self._server_address)
         self.tokenizer_manager.server_status = ServerStatus.Up
+
+    async def _ensure_tokenizer_manager(self) -> None:
+        """Ensure SGLang tokenizer_manager exists before serving requests."""
+        if getattr(self, "tokenizer_manager", None) is not None:
+            return
+
+        async with self._launch_lock:
+            if getattr(self, "tokenizer_manager", None) is not None:
+                return
+
+            # Best-effort lazy launch. For multi-node replicas, non-zero ranks
+            # require master address/port to be provided by the caller.
+            if self.nnodes > 1 and self.node_rank != 0 and (not self._master_address or not self._master_port):
+                raise RuntimeError(
+                    "SGLangHttpServer is not launched (tokenizer_manager missing) and cannot be lazily launched "
+                    "on a non-master node without master_address/master_port."
+                )
+            await self.launch_server(master_address=self._master_address, master_port=self._master_port)
+            if getattr(self, "tokenizer_manager", None) is None:
+                raise RuntimeError("SGLangHttpServer launch_server did not create tokenizer_manager.")
 
     async def wake_up(self):
         if self.node_rank != 0:
@@ -626,7 +652,7 @@ class SGLangHttpServer:
         # Add lora request
         if self.model_config.lora_rank > 0:
             generate_request.lora_path = SGLANG_LORA_NAME
-
+        await self._ensure_tokenizer_manager()
         output = await self.tokenizer_manager.generate_request(generate_request, None).__anext__()
         meta_info = output.get("meta_info", {})
         finish_reason = meta_info.get("finish_reason")
@@ -699,11 +725,13 @@ class SGLangHttpServer:
     async def abort_all_requests(self):
         if self.node_rank != 0:
             return
+        await self._ensure_tokenizer_manager()
         await self.tokenizer_manager.pause_generation(PauseGenerationReqInput(mode="abort"))
 
     async def resume_generation(self):
         if self.node_rank != 0:
             return
+        await self._ensure_tokenizer_manager()
         await self.tokenizer_manager.continue_generation(ContinueGenerationReqInput())
 
     async def start_profile(self, **kwargs):
