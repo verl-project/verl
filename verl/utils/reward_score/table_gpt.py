@@ -6,8 +6,6 @@ import json
 import re
 from typing import Any
 
-from sklearn.metrics import f1_score
-
 from .logging_utils import get_reward_logger, log_reward_warning
 
 logger = get_reward_logger(__name__)
@@ -122,44 +120,46 @@ def _f1_from_counts(tp_count: int, fp_count: int, fn_count: int) -> float:
 
 
 def evaluate_em(y_true: list[Any], y_pred: list[Any]) -> float:
-    y_true = [int(str(x).lower() == "yes") for x in y_true]
-    y_pred = [int(str(x).lower() == "yes") for x in y_pred]
-    return f1_score(y_true, y_pred, zero_division=0)
+    """EntityMatching is a per-row Yes/No label task."""
+    corrects = [
+        int(str(y_t).strip().lower() == str(y_p).strip().lower())
+        for y_t, y_p in zip(y_true, y_pred, strict=False)
+    ]
+    return sum(corrects) / len(corrects) if corrects else 0.0
 
 
 def evaluate_ed(y_true: list[Any], y_pred: list[Any]) -> float:
-    tp_count = 0
-    fp_count = 0
-    fn_count = 0
-
-    def preprocess(y: Any) -> set[Any]:
-        if y == JSON_PARSING_ERROR or y is None:
+    """ErrorDetection labels are either explicit "None" or a cell-value pair."""
+    def preprocess(y: Any) -> set[Any] | None:
+        if y == JSON_PARSING_ERROR:
+            return None
+        if y is None:
             y = []
         elif isinstance(y, str):
-            if y.lower() == "none":
+            if y.strip().lower() == "none":
                 y = []
             else:
                 y = [y]
-        return set(y)
+        return {str(item).strip() for item in y}
 
+    scores = []
     for y_t, y_p in zip(y_true, y_pred, strict=False):
         y_true_set = preprocess(y_t)
         y_pred_set = preprocess(y_p)
-        tp_set = list(y_true_set.intersection(y_pred_set))[:1]
-
-        n_p = min(len(y_true_set), 1)
-        n_tp = min(len(tp_set), 1)
-        n_fp = 0
-        for y_pred_item in y_pred_set:
-            if y_pred_item not in y_true_set:
-                n_fp += 1
-        n_fn = n_p - n_tp
-
-        tp_count += len(tp_set)
-        fp_count += n_fp
-        fn_count += n_fn
-
-    return _f1_from_counts(tp_count, fp_count, fn_count)
+        # If either is unparsable we assign 0
+        if y_true_set is None or y_pred_set is None:
+            scores.append(0.0)
+            continue
+        # If both are empty, it's a perfect match
+        if not y_true_set and not y_pred_set:
+            scores.append(1.0)
+            continue
+        # Else we compute F1 based on the overlap of the sets
+        tp_count = len(y_true_set.intersection(y_pred_set))
+        fp_count = len(y_pred_set - y_true_set)
+        fn_count = len(y_true_set - y_pred_set)
+        scores.append(_f1_from_counts(tp_count, fp_count, fn_count))
+    return sum(scores) / len(scores) if scores else 0.0
 
 
 def evaluate_cf(y_true: list[Any], y_pred: list[Any]) -> float:
@@ -225,34 +225,12 @@ def evaluate_sm(y_true: list[Any], y_pred: list[Any]) -> float:
 
 
 def evaluate_cta(y_true: list[Any], y_pred: list[Any]) -> float:
-    tp_count = 0
-    fp_count = 0
-    fn_count = 0
-
-    for y_t, y_p in zip(y_true, y_pred, strict=False):
-        if str(y_t) == "None":
-            n_p = 0
-        else:
-            n_p = 1
-
-        if str(y_p) != "None" and y_p == y_t:
-            n_tp = 1
-        else:
-            n_tp = 0
-
-        if str(y_p) == "None":
-            n_pp = 0
-        else:
-            n_pp = 1
-
-        n_fp = n_pp - n_tp
-        n_fn = n_p - n_tp
-
-        tp_count += n_tp
-        fp_count += n_fp
-        fn_count += n_fn
-
-    return _f1_from_counts(tp_count, fp_count, fn_count)
+    # ColumnTypeAnnotation treats "None" as an ordinary semantic-type label
+    corrects = [
+        int(str(y_t).strip().lower() == str(y_p).strip().lower())
+        for y_t, y_p in zip(y_true, y_pred, strict=False)
+    ]
+    return sum(corrects) / len(corrects) if corrects else 0.0
 
 
 def evaluate_mvi(y_true: list[Any], y_pred: list[Any]) -> float:

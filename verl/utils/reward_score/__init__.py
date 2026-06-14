@@ -165,6 +165,10 @@ def default_compute_score(
         from . import rgym
 
         res = rgym.compute_score(data_source, solution_str, ground_truth, extra_info)
+    elif data_source == "qa_gym":
+        from . import qa_gym
+
+        res = qa_gym.compute_score(data_source, solution_str, ground_truth, extra_info)
     elif isinstance(data_source, str) and data_source.startswith("tablegpt/"):
         from . import table_gpt
 

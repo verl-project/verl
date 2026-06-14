@@ -39,6 +39,7 @@ MULTIMODAL="${MULTIMODAL:-false}"
 CONFIG_NAME="${CONFIG_NAME:-async}"
 VAL_BEFORE_TRAIN="${VAL_BEFORE_TRAIN:-true}"
 ROLLOUT_N="${ROLLOUT_N:-8}"
+N_PER_ROUND="${N_PER_ROUND:-${ROLLOUT_N}}"
 SEED="${SEED:-85}"
 USE_GROUP_FILTERING="${USE_GROUP_FILTERING:-true}"
 FORCE_THINKING="${FORCE_THINKING:-false}"
@@ -87,6 +88,7 @@ KUBERNETES_SANDBOX_URL="${KUBERNETES_SANDBOX_URL:-}"
 DEFAULT_MEMORY_LIMIT_MB="${DEFAULT_MEMORY_LIMIT_MB:-512}"
 SANDBOX_REWARD_MAX_CONCURRENT="${SANDBOX_REWARD_MAX_CONCURRENT:-64}"
 SANDBOX_REWARD_CONTINUOUS="${SANDBOX_REWARD_CONTINUOUS:-false}"
+QA_GYM_RERANKER_URL="${QA_GYM_RERANKER_URL:-https://api.swissai.svc.cscs.ch/v1/score}"
 TOOL_GYM_DIR="${TOOL_GYM_DIR:-/iopsstor/scratch/cscs/${USERNAME}/projects/tool-gym}"
 TOOL_GYM_FUNCTION_TOOL_PATH="${TOOL_GYM_FUNCTION_TOOL_PATH:-/capstor/store/cscs/swissai/infra01/reasoning/data/RL-prod/toolgym_test_v2/apertus_function_tools.py}"
 
@@ -229,12 +231,10 @@ build_overrides() {
     "data.apply_chat_template_kwargs.enable_thinking=${ENABLE_THINKING}"
     "actor_rollout_ref.model.path=${RESOLVED_MODEL}"
     "actor_rollout_ref.rollout.n=${ROLLOUT_N}"
+    "actor_rollout_ref.rollout.n_per_round=${N_PER_ROUND}"
     "data.tool_config_path=null"
     "actor_rollout_ref.actor.data_loader_seed=${SEED}"
     "actor_rollout_ref.actor.calculate_entropy=true"
-    "actor_rollout_ref.rollout.max_num_batched_tokens=8192"
-    "actor_rollout_ref.rollout.max_num_seqs=256"
-    "actor_rollout_ref.rollout.gpu_memory_utilization=0.8"
     "actor_rollout_ref.rollout.skip_tokenizer_init=False"
     "+actor_rollout_ref.rollout.engine_kwargs.sglang.grammar_backend=llguidance"
     "rollout.nnodes=${ROLLOUT_NNODES}"
@@ -263,7 +263,12 @@ build_overrides() {
     "+ray_kwargs.ray_init.runtime_env.env_vars.OTEL_LOGS_EXPORTER='none'"
     "+ray_kwargs.ray_init.runtime_env.env_vars.NO_FORMAT='${NO_FORMAT}'"
     "+ray_kwargs.ray_init.runtime_env.env_vars.SANDBOX_BACKEND='${SANDBOX_BACKEND}'"
+    "+ray_kwargs.ray_init.runtime_env.env_vars.QA_GYM_RERANKER_URL='${QA_GYM_RERANKER_URL}'"
   )
+
+  if [ -n "${CSCS_SERVING_API:-}" ]; then
+    overrides+=("+ray_kwargs.ray_init.runtime_env.env_vars.CSCS_SERVING_API='${CSCS_SERVING_API}'")
+  fi
 
   if is_truthy "${DEGENERATION_EARLY_STOP}" && [ -n "${DEGEN_STOP_CUSTOM_LOGIT_PROCESSOR:-}" ]; then
     overrides+=(
@@ -699,6 +704,7 @@ export SANDBOX_BACKEND
 export DEFAULT_MEMORY_LIMIT_MB
 export SANDBOX_REWARD_MAX_CONCURRENT
 export SANDBOX_REWARD_CONTINUOUS
+export QA_GYM_RERANKER_URL
 export NO_FORMAT
 export PYTHONUNBUFFERED="1"
 # export RAY_DEDUP_LOGS="0"
