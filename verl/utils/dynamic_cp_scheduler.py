@@ -22,7 +22,8 @@ on sequence lengths, and redistributes data across DP ranks via all-to-all.
 
 import logging
 import os
-from collections import deque
+import time
+from collections import Counter, deque
 from functools import lru_cache
 from math import ceil, log2
 from typing import Callable
@@ -38,6 +39,33 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 MAX_SHAPE_DIMS = 8
+
+
+def _dcp_profile_enabled() -> bool:
+    return os.getenv("VERL_DCP_PROFILE", "0").lower() in {"1", "true", "yes", "on"}
+
+
+def _profile_now() -> float:
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    return time.perf_counter()
+
+
+def _profile_elapsed_ms(start: float, group=None) -> float:
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    elapsed_ms = (time.perf_counter() - start) * 1000.0
+    if group is not None and torch.distributed.is_available() and torch.distributed.is_initialized():
+        dev = torch.cuda.current_device() if torch.cuda.is_available() else "cpu"
+        elapsed = torch.tensor(elapsed_ms, dtype=torch.float64, device=dev)
+        torch.distributed.all_reduce(elapsed, op=torch.distributed.ReduceOp.MAX, group=group)
+        elapsed_ms = float(elapsed.item())
+    return elapsed_ms
+
+
+def _profile_log(group, message: str) -> None:
+    if group is None or group.rank() == 0:
+        logger.info(message)
 
 
 # =============================================================================
@@ -142,6 +170,7 @@ def next_hdp_group(
     make_buckets_equal_fn: Callable,
     max_seq_len_per_rank: float,
     get_total_workload_fn: Callable,
+    max_token_len_per_rank: float | None = None,
     delta: float = 0.05,
     strategy: str = "dp",
     eps_bucket: float = 0.10,
@@ -157,8 +186,10 @@ def next_hdp_group(
         total_gpus: Total number of DPxCP GPUs.
         gpus_needed_fn: Callable(seq_len) -> number of GPUs needed.
         make_buckets_equal_fn: Callable to create balanced buckets.
-        max_seq_len_per_rank: Max tokens per rank for packing.
+        max_seq_len_per_rank: Max sequence length per rank for selecting CP size.
         get_total_workload_fn: Callable(seq_len, cp_size) -> workload.
+        max_token_len_per_rank: Max packed tokens per rank for a micro-batch.
+            Defaults to max_seq_len_per_rank for backward compatibility.
         delta: Balance threshold (default 5%).
         strategy: "dp" or "pp" scan strategy.
         eps_bucket: Bucket balance tolerance (default 10%).
@@ -177,6 +208,8 @@ def next_hdp_group(
             [0.0 for _ in range(total_gpus)],
             [[] for _ in range(total_gpus)],
         )
+    if max_token_len_per_rank is None:
+        max_token_len_per_rank = max_seq_len_per_rank
 
     buckets = make_buckets_equal_fn(sample_seqlens, compute_estimator)
 
@@ -209,7 +242,11 @@ def next_hdp_group(
             cand_seq_len = cand_tuple[1]
             needed = gpus_needed_fn(cand_seq_len)
 
-            candidate_gids = [gid for gid, sz in group_size.items() if sz == needed]
+            candidate_gids = [
+                gid
+                for gid, sz in group_size.items()
+                if sz == needed and packing_sequence_len[gid] + cand_seq_len / needed <= max_token_len_per_rank
+            ]
             free_ranks = [r for r, gid in enumerate(gpu_group_id) if gid is None]
             if candidate_gids or len(free_ranks) >= needed:
                 sample_seq_tuple, bucket_idx = cand_tuple, idx
@@ -230,7 +267,7 @@ def next_hdp_group(
         candidate_gids = [
             gid
             for gid, sz in group_size.items()
-            if sz == needed and packing_sequence_len[gid] + seq_len / needed <= max_seq_len_per_rank
+            if sz == needed and packing_sequence_len[gid] + seq_len / needed <= max_token_len_per_rank
         ]
         if candidate_gids:
             best_gid, best_load = min(
@@ -467,6 +504,26 @@ def align_sample_id_groups(sample_id_groups: list, microbatch_group_size_per_vp_
     return sample_id_groups
 
 
+def _count_cp_groups(sample_id_groups: list[list[list[int]]]) -> dict[int, int]:
+    """Count global CP group sizes from scheduler assignments."""
+    counts = Counter()
+    for sample_id_group in sample_id_groups:
+        rank = 0
+        total_ranks = len(sample_id_group)
+        while rank < total_ranks:
+            rank_ids = sample_id_group[rank]
+            if not rank_ids:
+                rank += 1
+                continue
+            first_sample_id = rank_ids[0]
+            cp_size = 0
+            while rank + cp_size < total_ranks and first_sample_id in sample_id_group[rank + cp_size]:
+                cp_size += 1
+            counts[cp_size] += 1
+            rank += cp_size
+    return dict(sorted(counts.items()))
+
+
 # =============================================================================
 # Data collection: gather global sequence lengths
 # =============================================================================
@@ -691,6 +748,8 @@ def _reroute_samples(
     all_keys = _unique_keys(tensor_keys + scalar_keys + padded_keys)
     recv_samples = [{k: None for k in all_keys} for _ in range(sum(recv_counts))]
     dev = torch.cuda.current_device()
+    profile = _dcp_profile_enabled()
+    profile_key_ms: dict[str, float] = {}
 
     def _pack_key_payload(key: str):
         parts = []
@@ -720,6 +779,7 @@ def _reroute_samples(
 
     shape_width = MAX_SHAPE_DIMS + 1
     for key in all_keys:
+        key_start = _profile_now() if profile else None
         send_tensor, send_numels, send_shapes = _pack_key_payload(key)
 
         recv_numels = torch.empty(sum(recv_counts), dtype=torch.int64, device=dev)
@@ -775,6 +835,16 @@ def _reroute_samples(
             shape = _shape_from_row(recv_shapes[i])
             recv_samples[i][key] = recv_tensor[cursor : cursor + numel].reshape(shape)
             cursor += numel
+        if profile:
+            profile_key_ms[key] = _profile_elapsed_ms(key_start, dcp_group)
+
+    if profile:
+        _profile_log(
+            dcp_group,
+            "DCP profile reroute_samples: "
+            f"rank={dcp_rank}, send_counts={send_num_per_rank}, recv_counts={recv_counts}, "
+            f"keys_ms={profile_key_ms}",
+        )
 
     return {recv_id: recv_samples[i] for i, recv_id in enumerate(recv_ids_sorted)}
 
@@ -811,8 +881,13 @@ def _build_micro_batches_from_samples(
 
     for i in range(num_micro_batches):
         my_ids = sample_id_groups[i][dcp_rank]
+        if not my_ids:
+            raise ValueError(
+                "Dynamic CP scheduler produced an empty rank assignment "
+                f"for micro-batch {i} on DCP rank {dcp_rank}: {sample_id_groups[i]}"
+            )
         # local_cp_size = number of ranks that share the same first sample
-        first_id = my_ids[0] if my_ids else -1
+        first_id = my_ids[0]
         cp_size = sum(1 for rank_ids in sample_id_groups[i] if first_id in rank_ids)
         local_cp_sizes.append(cp_size)
 
@@ -1036,6 +1111,7 @@ def reverse_route_outputs(
     routing_info: dict,
     dp_group,
     dcp_group=None,
+    merge_duplicate_gids: bool = False,
 ) -> dict[str, torch.Tensor]:
     """Reverse-route outputs back to original DP ranks via all-to-all.
 
@@ -1047,6 +1123,10 @@ def reverse_route_outputs(
         model_output: Dict of NestedTensors (keys like 'log_probs', 'entropy').
         routing_info: Dict returned by DynamicCPScheduler.schedule().
         dp_group: Data parallel process group.
+        merge_duplicate_gids: If True, outputs from duplicated CP ranks for the
+            same sample are merged instead of keeping the last one. Compact DCP
+            outputs are reconstructed from token indices when present; otherwise
+            zero-filled full-sequence local outputs are added.
 
     Returns:
         Dict of NestedTensors in the original sample order for this rank.
@@ -1063,15 +1143,13 @@ def reverse_route_outputs(
     send_counts = [len(send_by_dest[d]) for d in range(total_dcp_gpus)]
     recv_counts = [len(recv_by_src[d]) for d in range(total_dcp_gpus)]
 
-    # All-to-all for each output key
-    reversed_output = {}
+    original_gids_sorted = sorted(int(g) for g in routing_info["global_ids_this_rank"])
     shape_width = MAX_SHAPE_DIMS + 1
+    profile = _dcp_profile_enabled()
+    profile_total_start = _profile_now() if profile else None
+    profile_key_ms: dict[str, float] = {}
 
-    for key, val in model_output.items():
-        if not isinstance(val, torch.Tensor):
-            reversed_output[key] = val
-            continue
-
+    def _route_tensor_values(val: torch.Tensor) -> dict[int, list[torch.Tensor]]:
         per_sample = list(val.unbind()) if val.is_nested else [val[i] for i in range(val.shape[0])]
         gid_to_out = {}
         for i, gid in enumerate(my_output_gids):
@@ -1136,22 +1214,124 @@ def reverse_route_outputs(
             group=dcp_group,
         )
 
-        gid_to_result = {}
+        gid_to_result: dict[int, list[torch.Tensor]] = {}
         cursor = 0
         for i, gid in enumerate(recv_ids_flat):
             n = int(recv_numels[i].item())
+            if n == 0:
+                continue
             shape = _shape_from_row(recv_shapes[i])
-            gid_to_result[gid] = recv_tensor[cursor : cursor + n].reshape(shape)
+            result = recv_tensor[cursor : cursor + n].reshape(shape)
+            gid_to_result.setdefault(gid, []).append(result)
             cursor += n
 
-        # Rebuild in original order (sorted by global_id within this rank)
-        original_gids_sorted = sorted(int(g) for g in routing_info["global_ids_this_rank"])
-        result_tensors = [gid_to_result[gid] for gid in original_gids_sorted if gid in gid_to_result]
+        return gid_to_result
 
-        if result_tensors:
-            reversed_output[key] = torch.nested.as_nested_tensor(result_tensors, layout=torch.jagged)
-        else:
+    def _merge_duplicate_results(gid: int, results: list[torch.Tensor]) -> torch.Tensor:
+        result = results[0]
+        for other in results[1:]:
+            if result.shape != other.shape:
+                raise ValueError(
+                    f"Cannot merge DCP outputs for gid={gid}: "
+                    f"shape mismatch {tuple(result.shape)} vs {tuple(other.shape)}"
+                )
+            if result.dtype == torch.bool:
+                result = result | other
+            else:
+                result = result + other
+        return result
+
+    def _rebuild_nested(gid_to_result: dict[int, torch.Tensor], fallback: torch.Tensor) -> torch.Tensor:
+        missing = [gid for gid in original_gids_sorted if gid not in gid_to_result]
+        if missing:
+            if not gid_to_result:
+                return fallback
+            raise ValueError(f"Missing DCP reverse-routed outputs for global ids: {missing}")
+        result_tensors = [gid_to_result[gid] for gid in original_gids_sorted]
+        return torch.nested.as_nested_tensor(result_tensors, layout=torch.jagged)
+
+    def _reconstruct_compact_results(
+        routed_values: dict[int, list[torch.Tensor]],
+        routed_indices: dict[int, list[torch.Tensor]],
+        routed_lens: dict[int, list[torch.Tensor]],
+    ) -> dict[int, torch.Tensor]:
+        gid_to_result = {}
+        for gid, value_parts in routed_values.items():
+            index_parts = routed_indices.get(gid, [])
+            if len(index_parts) != len(value_parts):
+                raise ValueError(
+                    f"Cannot reconstruct compact DCP output for gid={gid}: "
+                    f"{len(value_parts)} value parts but {len(index_parts)} index parts"
+                )
+            if gid not in routed_lens:
+                raise ValueError(f"Missing full sequence length for compact DCP output gid={gid}")
+
+            full_len = int(routed_lens[gid][0].reshape(-1)[0].item())
+            trailing_shape = tuple(value_parts[0].shape[1:])
+            result = value_parts[0].new_zeros((full_len, *trailing_shape))
+            for values, indices in zip(value_parts, index_parts, strict=True):
+                indices = indices.to(device=result.device, dtype=torch.long).reshape(-1)
+                if values.shape[0] != indices.numel():
+                    raise ValueError(
+                        f"Cannot reconstruct compact DCP output for gid={gid}: "
+                        f"value length {values.shape[0]} != index length {indices.numel()}"
+                    )
+                if indices.numel() == 0:
+                    continue
+                result[indices] = values
+            gid_to_result[gid] = result
+        return gid_to_result
+
+    compact_indices = model_output.get("_dcp_local_token_indices", None)
+    compact_lens = model_output.get("_dcp_full_seq_lens", None)
+    compact_route = merge_duplicate_gids and compact_indices is not None and compact_lens is not None
+
+    # All-to-all for each output key
+    reversed_output = {}
+    if compact_route:
+        profile_start = _profile_now() if profile else None
+        routed_indices = _route_tensor_values(compact_indices)
+        if profile:
+            profile_key_ms["_dcp_local_token_indices"] = _profile_elapsed_ms(profile_start, dcp_group)
+        profile_start = _profile_now() if profile else None
+        routed_lens = _route_tensor_values(compact_lens)
+        if profile:
+            profile_key_ms["_dcp_full_seq_lens"] = _profile_elapsed_ms(profile_start, dcp_group)
+    else:
+        routed_indices = {}
+        routed_lens = {}
+
+    for key, val in model_output.items():
+        if key in {"_dcp_local_token_indices", "_dcp_full_seq_lens"}:
+            continue
+        if not isinstance(val, torch.Tensor):
             reversed_output[key] = val
+            continue
+
+        profile_start = _profile_now() if profile else None
+        routed_values = _route_tensor_values(val)
+        if compact_route:
+            gid_to_result = _reconstruct_compact_results(routed_values, routed_indices, routed_lens)
+            reversed_output[key] = _rebuild_nested(gid_to_result, val)
+            if profile:
+                profile_key_ms[key] = _profile_elapsed_ms(profile_start, dcp_group)
+            continue
+
+        gid_to_result = {}
+        for gid, results in routed_values.items():
+            gid_to_result[gid] = _merge_duplicate_results(gid, results) if merge_duplicate_gids else results[-1]
+        reversed_output[key] = _rebuild_nested(gid_to_result, val)
+        if profile:
+            profile_key_ms[key] = _profile_elapsed_ms(profile_start, dcp_group)
+
+    if profile:
+        total_ms = _profile_elapsed_ms(profile_total_start, dcp_group)
+        _profile_log(
+            dcp_group,
+            "DCP profile reverse_route_outputs: "
+            f"merge_duplicate_gids={merge_duplicate_gids}, compact_route={compact_route}, "
+            f"send_counts={send_counts}, recv_counts={recv_counts}, keys_ms={profile_key_ms}, total_ms={total_ms:.3f}",
+        )
 
     return reversed_output
 
@@ -1257,15 +1437,33 @@ class DynamicCPScheduler:
 
     Args:
         max_seqlen_per_dp_cp_rank: Max sequence length per DPxCP rank.
+        max_token_len_per_rank: Max packed tokens per DPxCP rank. Defaults to
+            ``max_seqlen_per_dp_cp_rank`` to match Megatron-LM's default dynamic
+            CP scheduler. This is intentionally independent from verl's
+            PPO dynamic-batch token cap: dynamic CP uses this per-rank sequence
+            cap both to choose CP size and to bound packing in each scheduled
+            group.
         dp_size: Data parallel world size.
         min_cp_size: Minimum CP group size (default 1).
         microbatch_group_size_per_vp_stage: For VPP alignment (default None).
     """
 
-    # verl data keys
-    # Core keys that are always routed if present.
-    # Additional NestedTensor keys in the batch are auto-detected in schedule().
-    TENSOR_KEYS = ["input_ids", "position_ids", "loss_mask", "prompts", "responses", "attention_mask"]
+    # verl data keys. Keep routing narrow: DCP all-to-all is paid once for each
+    # tensor key, so only send tensors that model forward or the local loss can
+    # actually consume on the scheduled rank.
+    FORWARD_KEYS = ["input_ids"]
+    TRAIN_LOSS_KEYS = [
+        "loss_mask",
+        "response_mask",
+        "old_log_probs",
+        "advantages",
+        "rollout_is_weights",
+        "ref_log_prob",
+        "values",
+        "returns",
+    ]
+    ROUTER_REPLAY_KEYS = ["routed_experts"]
+    DISTILLATION_KEYS = ["teacher_logprobs", "teacher_ids"]
     SCALAR_KEYS = ["temperature"]
 
     def __init__(
@@ -1274,14 +1472,39 @@ class DynamicCPScheduler:
         dp_size: int,
         cp_size: int = 1,
         min_cp_size: int = 1,
+        max_token_len_per_rank: int | None = None,
         microbatch_group_size_per_vp_stage: int | None = None,
     ):
         self.max_seqlen_per_dp_cp_rank = max_seqlen_per_dp_cp_rank
+        self.max_token_len_per_rank = max_token_len_per_rank or max_seqlen_per_dp_cp_rank
         self.dp_size = dp_size
         self.cp_size = cp_size
         self.total_dcp_gpus = dp_size * cp_size
         self.min_cp_size = min_cp_size
         self.microbatch_group_size_per_vp_stage = microbatch_group_size_per_vp_stage
+
+    def _routing_key_order(self, batch: TensorDict, non_tensor_data: dict) -> list[str]:
+        """Return tensor keys that should be routed for this batch."""
+        compute_loss = bool(non_tensor_data.get("compute_loss", False))
+        route_router_replay = bool(non_tensor_data.get("enable_routing_replay", False))
+        route_distillation = bool(non_tensor_data.get("distillation_use_topk", False))
+        route_position_ids = bool(non_tensor_data.get("_dcp_route_position_ids", False))
+        route_attention_mask = bool(non_tensor_data.get("_dcp_route_attention_mask", False))
+
+        keys = list(self.FORWARD_KEYS)
+        if compute_loss:
+            keys.extend(self.TRAIN_LOSS_KEYS)
+        if route_router_replay:
+            keys.extend(self.ROUTER_REPLAY_KEYS)
+        if route_distillation:
+            keys.extend(self.DISTILLATION_KEYS)
+        if route_position_ids:
+            keys.append("position_ids")
+        if route_attention_mask:
+            keys.append("attention_mask")
+        keys.extend(self.SCALAR_KEYS)
+
+        return _unique_keys([key for key in keys if key in batch.keys()])
 
     def _get_groups_and_subsamples(self, sample_id_seqlens: list[tuple[int, int]]) -> list[list[list[int]]]:
         """Schedule samples into micro-batch groups with dynamic CP sizes.
@@ -1296,11 +1519,7 @@ class DynamicCPScheduler:
         mslpr = self.max_seqlen_per_dp_cp_rank
         min_cp = self.min_cp_size
 
-        workload_fn = lambda seq_len, cp_size=None: dcp_get_total_workload(seq_len, mslpr, cp_size, min_cp)
         gpus_fn = lambda seq_len: dcp_gpus_needed(seq_len, mslpr, min_cp)
-        buckets_fn = lambda sample_seqlens, compute_est: dcp_make_buckets_equal(
-            sample_seqlens, compute_est, mslpr, min_cp
-        )
 
         sample_id_groups = []
         sample_id_seqlens = sorted(sample_id_seqlens, key=lambda x: x[1], reverse=True)
@@ -1316,16 +1535,23 @@ class DynamicCPScheduler:
                 f"{self.total_dcp_gpus}. Increase max_seqlen_per_dp_cp_rank or the DPxCP group size."
             )
 
+        workload_fn = lambda seq_len, cp_size=None: dcp_get_total_workload(seq_len, mslpr, cp_size, min_cp)
+        gpus_fn = lambda seq_len: dcp_gpus_needed(seq_len, mslpr, min_cp)
+        buckets_fn = lambda sample_seqlens, compute_est: dcp_make_buckets_equal(
+            sample_seqlens, compute_est, mslpr, min_cp
+        )
+
         while sample_id_seqlens:
             num_left_before = len(sample_id_seqlens)
-            mb, sample_id_seqlens, exec_times, sample_ids = next_hdp_group(
+            _mb, sample_id_seqlens, exec_times, sample_ids = next_hdp_group(
                 sample_id_seqlens,
-                workload_fn,
-                self.total_dcp_gpus,
+                compute_estimator=workload_fn,
+                total_gpus=self.total_dcp_gpus,
                 gpus_needed_fn=gpus_fn,
                 make_buckets_equal_fn=buckets_fn,
                 max_seq_len_per_rank=mslpr,
                 get_total_workload_fn=workload_fn,
+                max_token_len_per_rank=self.max_token_len_per_rank,
             )
             if len(sample_id_seqlens) == num_left_before:
                 raise RuntimeError(
@@ -1368,12 +1594,16 @@ class DynamicCPScheduler:
             f"DCP group size {dcp_group.size()} does not match dp_size * cp_size "
             f"({self.dp_size} * {self.cp_size} = {self.total_dcp_gpus})"
         )
+        profile = _dcp_profile_enabled()
+        profile_total_start = _profile_now() if profile else None
+        profile_ms: dict[str, float] = {}
 
-        # Determine which keys exist in this batch. Known verl fields keep a
-        # stable order, but their actual tensor layout still decides routing:
-        # jagged NestedTensors are sent as variable-length tensors; dense tensors
-        # with batch dimension are routed as per-sample padded tensors.
-        ordered_keys = _unique_keys([k for k in self.TENSOR_KEYS if k in batch.keys()] + list(batch.keys()))
+        # Determine which keys are required on the scheduled rank. Their actual
+        # tensor layout still decides routing: jagged NestedTensors are sent as
+        # variable-length tensors; dense tensors with batch dimension are routed
+        # as per-sample padded tensors.
+        profile_start = _profile_now() if profile else None
+        ordered_keys = self._routing_key_order(batch, non_tensor_data)
         tensor_keys = []
         padded_keys = []
         scalar_keys = []
@@ -1387,18 +1617,30 @@ class DynamicCPScheduler:
                 tensor_keys.append(k)
             elif val.dim() >= 1:
                 padded_keys.append(k)
+        if profile:
+            profile_ms["classify_keys"] = _profile_elapsed_ms(profile_start, dcp_group)
 
         # Step 1: Convert NestedTensor batch to per-sample format
+        profile_start = _profile_now() if profile else None
         local_samples, local_seqlens = _nested_tensor_to_samples(batch, tensor_keys, scalar_keys, padded_keys)
+        if profile:
+            profile_ms["to_samples"] = _profile_elapsed_ms(profile_start, dcp_group)
 
         # Step 2: Gather global sequence lengths from all DP ranks
+        profile_start = _profile_now() if profile else None
         local_seqlens_gpu = local_seqlens.to(dtype=torch.int32, device=get_device_id())
         global_id_seqlens, global_ids_this_rank, offsets = _get_global_seqlens_and_ids(local_seqlens_gpu, dp_group)
+        if profile:
+            profile_ms["gather_seqlens"] = _profile_elapsed_ms(profile_start, dcp_group)
 
         # Step 3: Schedule samples into groups
+        profile_start = _profile_now() if profile else None
         sample_id_groups = self._get_groups_and_subsamples(global_id_seqlens)
+        if profile:
+            profile_ms["schedule_groups"] = _profile_elapsed_ms(profile_start, dcp_group)
 
         # Validate: all samples are assigned
+        profile_start = _profile_now() if profile else None
         assigned = set()
         for group in sample_id_groups:
             for rank_ids in group:
@@ -1406,8 +1648,11 @@ class DynamicCPScheduler:
         assert len(assigned) == len(global_id_seqlens), (
             f"Scheduling assigned {len(assigned)} samples but expected {len(global_id_seqlens)}"
         )
+        if profile:
+            profile_ms["validate_assignment"] = _profile_elapsed_ms(profile_start, dcp_group)
 
         # Step 4: Reroute samples via all-to-all
+        profile_start = _profile_now() if profile else None
         samples_this_rank = _reroute_samples(
             local_samples,
             global_ids_this_rank,
@@ -1420,12 +1665,15 @@ class DynamicCPScheduler:
             scalar_keys,
             padded_keys,
         )
+        if profile:
+            profile_ms["reroute_samples"] = _profile_elapsed_ms(profile_start, dcp_group)
 
         # Add _seq_len to received samples
         for gid, sample in samples_this_rank.items():
             sample["_seq_len"] = global_id_seqlens[gid][1]
 
         # Step 5: Build packed micro-batches
+        profile_start = _profile_now() if profile else None
         dcp_rank = dcp_group.rank()
         packed_batches, local_cp_sizes = _build_micro_batches_from_samples(
             samples_this_rank,
@@ -1435,11 +1683,14 @@ class DynamicCPScheduler:
             scalar_keys,
             padded_keys,
         )
+        if profile:
+            profile_ms["build_micro_batches"] = _profile_elapsed_ms(profile_start, dcp_group)
 
         # Mark micro-batches as scheduler-managed (skip legacy dynamic_cp_merge_output)
         non_tensor_data["_dcp_scheduled"] = True
 
         # Step 6: Convert packed batches to TensorDict with NestedTensor
+        profile_start = _profile_now() if profile else None
         micro_batches = []
         for i, (packed, cp_size) in enumerate(zip(packed_batches, local_cp_sizes, strict=True)):
             td = _samples_to_nested_tensor_batch(
@@ -1452,6 +1703,8 @@ class DynamicCPScheduler:
                 non_tensor_data=non_tensor_data,
             )
             micro_batches.append(td)
+        if profile:
+            profile_ms["to_tensordict"] = _profile_elapsed_ms(profile_start, dcp_group)
 
         # Build routing info for reverse_route_outputs()
         routing_info = {
@@ -1464,7 +1717,19 @@ class DynamicCPScheduler:
         logger.info(
             f"DynamicCPScheduler: {len(global_id_seqlens)} samples -> "
             f"{len(micro_batches)} micro-batches, "
-            f"local_cp_sizes={local_cp_sizes}"
+            f"local_cp_sizes={local_cp_sizes}, "
+            f"global_cp_size_counts={_count_cp_groups(sample_id_groups)}, "
+            f"max_seqlen_per_rank={self.max_seqlen_per_dp_cp_rank}, "
+            f"packing_cap_per_rank={self.max_token_len_per_rank}"
         )
+        if profile:
+            profile_ms["total"] = _profile_elapsed_ms(profile_total_start, dcp_group)
+            _profile_log(
+                dcp_group,
+                "DCP profile schedule: "
+                f"samples={len(global_id_seqlens)}, micro_batches={len(micro_batches)}, "
+                f"local_cp_sizes={local_cp_sizes}, tensor_keys={tensor_keys}, padded_keys={padded_keys}, "
+                f"scalar_keys={scalar_keys}, ms={profile_ms}",
+            )
 
         return micro_batches, routing_info

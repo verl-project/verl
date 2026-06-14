@@ -36,12 +36,15 @@ def sft_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         # log_prob and loss mask are nested tensors of shape [bsz, j1]
         # for each sample, loss mask shape is [1, prompt_length + response_length]
         loss_mask = data["loss_mask"]
+        dcp_local_token_mask = model_output.get("_dcp_local_token_mask", None)
 
         log_prob_flatten = log_prob.values()
         loss_mask_flatten = loss_mask.values()
 
         # left-shift the loss mask by one token to align with log_prob
         loss_mask_flatten = torch.roll(loss_mask_flatten, shifts=-1, dims=0)
+        if dcp_local_token_mask is not None:
+            loss_mask_flatten = loss_mask_flatten * dcp_local_token_mask.values().to(dtype=loss_mask_flatten.dtype)
 
         # NOTE: loss is averaged over all tokens in the batch across all data parallel groups,
         # For FSDP backend, the loss is directly used for backward; while for Megatron backend,
@@ -60,6 +63,10 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     entropy = model_output.get("entropy", None)
     if entropy is not None:
         entropy = no_padding_2_padding(entropy, data)
+    dcp_local_response_mask = None
+    dcp_local_token_mask = model_output.get("_dcp_local_token_mask", None)
+    if dcp_local_token_mask is not None:
+        dcp_local_response_mask = no_padding_2_padding(dcp_local_token_mask.to(dtype=torch.float32), data).to(bool)
 
     # global batch info for loss aggregation
     config.global_batch_info["dp_size"] = data["dp_size"]
@@ -111,6 +118,11 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         advantages = advantages[:, :_dcp_response_len]
         if entropy is not None:
             entropy = entropy[:, :_dcp_response_len]
+        if dcp_local_response_mask is not None:
+            dcp_local_response_mask = dcp_local_response_mask[:, :_dcp_response_len]
+
+    if dcp_local_response_mask is not None:
+        response_mask = response_mask & dcp_local_response_mask
 
     loss_agg_mode = config.loss_agg_mode
 
@@ -179,12 +191,18 @@ def value_loss(config: CriticConfig, model_output, data: TensorDict, dp_group=No
         value loss
     """
     vpreds = no_padding_2_padding(model_output["values"], data)  # (bsz, response_length)
+    dcp_local_response_mask = None
+    dcp_local_token_mask = model_output.get("_dcp_local_token_mask", None)
+    if dcp_local_token_mask is not None:
+        dcp_local_response_mask = no_padding_2_padding(dcp_local_token_mask.to(dtype=torch.float32), data).to(bool)
 
     # select fields and convert to padded tensor
     data = data.select("values", "returns", "response_mask").to_padded_tensor()
     values = data["values"]
     returns = data["returns"]
     response_mask = data["response_mask"].to(bool)
+    if dcp_local_response_mask is not None:
+        response_mask = response_mask & dcp_local_response_mask
 
     vf_loss, vf_clipfrac = compute_value_loss(
         vpreds=vpreds,

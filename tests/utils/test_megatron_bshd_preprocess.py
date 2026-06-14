@@ -125,3 +125,55 @@ def test_preprocess_bshd_engine_preserves_topk_dense_dim_on_gpu(monkeypatch):
     if not torch.cuda.is_available():
         pytest.skip("Requires CUDA")
     _check_topk_preprocess(monkeypatch, torch.device("cuda"))
+
+
+def test_dcp_local_thd_postprocess_matches_local_token_mask(monkeypatch):
+    mcore_util = _load_mcore_util_with_stubbed_megatron(monkeypatch, tp_size=1)
+    monkeypatch.setattr(torch.distributed, "get_rank", lambda group=None: 1)
+
+    input_ids = _nested_tensor([torch.arange(16, dtype=torch.long)])
+    packed_seq_params = types.SimpleNamespace(
+        cu_seqlens_q_padded=torch.tensor([0, 16], dtype=torch.int32),
+        cp_group=object(),
+    )
+    local_output = torch.tensor([[10.0, 11.0, 12.0, 13.0]])
+
+    postprocessed = mcore_util.postprocess_thd_engine_local(
+        local_output,
+        packed_seq_params,
+        input_ids,
+        batch_size=1,
+        local_cp_size=4,
+    )
+    local_mask = mcore_util.build_thd_local_token_mask(
+        packed_seq_params,
+        input_ids,
+        batch_size=1,
+        local_cp_size=4,
+    )
+    compact = mcore_util.postprocess_thd_engine_local(
+        local_output,
+        packed_seq_params,
+        input_ids,
+        batch_size=1,
+        local_cp_size=4,
+        compact=True,
+    )
+    local_indices = mcore_util.build_thd_local_token_indices(
+        packed_seq_params,
+        input_ids,
+        batch_size=1,
+        local_cp_size=4,
+    )
+    full_seq_lens = mcore_util.build_thd_full_seq_lens(input_ids)
+
+    expected = torch.zeros(16)
+    expected[[2, 3, 12, 13]] = torch.tensor([10.0, 11.0, 12.0, 13.0])
+    expected_mask = torch.zeros(16, dtype=torch.bool)
+    expected_mask[[2, 3, 12, 13]] = True
+
+    torch.testing.assert_close(postprocessed.unbind()[0], expected)
+    torch.testing.assert_close(local_mask.unbind()[0], expected_mask)
+    torch.testing.assert_close(compact.unbind()[0], torch.tensor([10.0, 11.0, 12.0, 13.0]))
+    torch.testing.assert_close(local_indices.unbind()[0], torch.tensor([2, 3, 12, 13]))
+    torch.testing.assert_close(full_seq_lens.unbind()[0], torch.tensor([16]))
