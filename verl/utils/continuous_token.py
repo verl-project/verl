@@ -74,12 +74,12 @@ class ContinuousTokenBuilder:
     def tokenize_incremental_messages(
         self,
         previous_messages: list[dict[str, Any]],
-        next_messages: list[dict[str, Any]],
+        updated_messages: list[dict[str, Any]],
         *,
         tools: list[dict[str, Any]] | None = None,
     ) -> list[int]:
-        self._assert_append_only(previous_messages, next_messages)
-        appended_messages = next_messages[len(previous_messages) :]
+        self._assert_append_only(previous_messages, updated_messages)
+        appended_messages = updated_messages[len(previous_messages) :]
         incremental_ids: list[int] = []
 
         for group in self._iter_append_groups(appended_messages):
@@ -92,18 +92,18 @@ class ContinuousTokenBuilder:
             else:
                 raise ValueError(f"Unsupported Continuous Token append role: {role!r}")
 
-        incremental_ids.extend(self.render_delta_token_id(next_messages, [], add_generation_prompt=True, tools=tools))
+        incremental_ids.extend(self.render_delta_token_id(updated_messages, [], add_generation_prompt=True, tools=tools))
         return incremental_ids
 
     def merge_tokens(
         self,
         previous_messages: list[dict[str, Any]],
-        next_messages: list[dict[str, Any]],
+        updated_messages: list[dict[str, Any]],
         runtime_token_ids: list[int],
         *,
         tools: list[dict[str, Any]] | None = None,
     ) -> MergeResult:
-        appended_ids = self.tokenize_incremental_messages(previous_messages, next_messages, tools=tools)
+        appended_ids = self.tokenize_incremental_messages(previous_messages, updated_messages, tools=tools)
         return self._merge_token_ids(runtime_token_ids, appended_ids)
 
     def append_assistant_tokens(self, runtime_token_ids: list[int], assistant_token_ids: list[int]) -> MergeResult:
@@ -212,13 +212,13 @@ class ContinuousTokenBuilder:
     def _assert_append_only(
         self,
         previous_messages: list[dict[str, Any]],
-        next_messages: list[dict[str, Any]],
+        updated_messages: list[dict[str, Any]],
     ) -> None:
-        if len(next_messages) < len(previous_messages):
-            raise ValueError("Continuous Token messages must be append-only; next_messages is shorter")
-        if next_messages[: len(previous_messages)] != previous_messages:
+        if len(updated_messages) < len(previous_messages):
+            raise ValueError("Continuous Token messages must be append-only; updated_messages is shorter")
+        if updated_messages[: len(previous_messages)] != previous_messages:
             raise ValueError("Continuous Token messages must be append-only; prefix messages changed")
-        for message in next_messages[len(previous_messages) :]:
+        for message in updated_messages[len(previous_messages) :]:
             role = message.get("role")
             if role not in self.allowed_append_roles:
                 raise ValueError(
