@@ -219,7 +219,7 @@ class vLLMHttpServer:
         engine_kwargs = {key: val for key, val in engine_kwargs.items() if val is not None}
         if self.config.get("limit_images", None):  # support for multi-image data
             engine_kwargs["limit_mm_per_prompt"] = {"image": self.config.get("limit_images")}
-        if self.config.cudagraph_capture_sizes:
+        if self.config.cudagraph_capture_sizes and _VLLM_VERSION <= version.parse("0.11.0"):
             engine_kwargs["cuda_graph_sizes"] = self.config.cudagraph_capture_sizes
 
         self._preprocess_engine_kwargs(engine_kwargs)
@@ -251,6 +251,8 @@ class vLLMHttpServer:
                 dcp_size,
             )
             compilation_config["cudagraph_mode"] = "PIECEWISE"
+        if self.config.cudagraph_capture_sizes and _VLLM_VERSION > version.parse("0.11.0"):
+            compilation_config["cudagraph_capture_sizes"] = self.config.cudagraph_capture_sizes
 
         compilation_config = json.dumps(compilation_config)
         args = {
