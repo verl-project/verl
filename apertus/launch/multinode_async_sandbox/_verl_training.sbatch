@@ -53,8 +53,9 @@ WANDB_MODE="${WANDB_MODE:-offline}"
 WANDB_SYNC_INTERVAL_SECONDS="${WANDB_SYNC_INTERVAL_SECONDS:-60}"
 WANDB_REQUIRE_SERVICE="${WANDB_REQUIRE_SERVICE:-}"
 WANDB_DISABLE_SERVICE="${WANDB_DISABLE_SERVICE:-}"
-WANDB_SYNC_UPLOAD_MODE="${WANDB_SYNC_UPLOAD_MODE:-}"
+WANDB_SYNC_UPLOAD_MODE="${WANDB_SYNC_UPLOAD_MODE:-online}"
 NO_FORMAT="${NO_FORMAT:-false}"
+LONG_CONTEXT="${LONG_CONTEXT:-false}"
 ACTOR_PPO_MINI_BATCH_SIZE="${ACTOR_PPO_MINI_BATCH_SIZE:-}"
 ROLLOUT_TOTAL_ROLLOUT_STEPS="${ROLLOUT_TOTAL_ROLLOUT_STEPS:-}"
 TRAINER_TEST_FREQ="${TRAINER_TEST_FREQ:-}"
@@ -206,6 +207,8 @@ is_truthy() {
 
 build_overrides() {
   local reward_sandbox_url=""
+  local excluded_abilities=()
+  local excluded_abilities_override=""
   case "${SANDBOX_BACKEND}" in
     kubernetes)
       reward_sandbox_url="${KUBERNETES_SANDBOX_URL:-}"
@@ -350,9 +353,31 @@ build_overrides() {
     overrides+=("+ray_kwargs.ray_init.runtime_env.env_vars.KUBERNETES_SANDBOX_URL='${KUBERNETES_SANDBOX_URL}'")
   fi
 
+  if [ "${LONG_CONTEXT}" = "true" ]; then
+    overrides+=(
+      "data.max_prompt_length=32768"
+      "data.truncation=error"
+      "actor_rollout_ref.actor.ppo_max_token_len_per_gpu=10240"
+      "actor_rollout_ref.actor.ulysses_sequence_parallel_size=4"
+      "actor_rollout_ref.actor.entropy_from_logits_with_chunking=true"
+      "actor_rollout_ref.actor.entropy_checkpointing=true"
+      "actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=40960"
+      "actor_rollout_ref.rollout.max_num_batched_tokens=8192"
+      "actor_rollout_ref.rollout.max_num_seqs=64"
+      "actor_rollout_ref.rollout.gpu_memory_utilization=0.7"
+    )
+  else
+    excluded_abilities+=(long_context_qa)
+  fi
+
   if [ "${SANDBOX_BACKEND}" = "none" ]; then
     echo "SANDBOX_BACKEND=none, disabling code data and skipping sandbox configuration." >&2
-    overrides+=("+data.exclude_abilities=[code]")
+    excluded_abilities+=(code)
+  fi
+
+  if [ "${#excluded_abilities[@]}" -gt 0 ]; then
+    excluded_abilities_override="$(IFS=,; printf '%s' "${excluded_abilities[*]}")"
+    overrides+=("+data.exclude_abilities=[${excluded_abilities_override}]")
   fi
 
   if [ -n "${RESOLVED_TOKENIZER}" ]; then

@@ -25,9 +25,9 @@ data:
   val_files: ./data/apertus_demo_rl/val.parquet
   train_batch_size: 0
   gen_batch_size: 1
-  max_prompt_length: 32768
+  max_prompt_length: 2048
   max_response_length: 8192
-  truncation: middle
+  truncation: left
 
 async_training:
   staleness_threshold: 0.2
@@ -67,10 +67,10 @@ actor_rollout_ref:
     use_rollout_log_probs: ${oc.select:async_training.use_rollout_log_probs,true}
     ppo_mini_batch_size: 128  # NOTE: train_batch_size = require_batches * ppo_mini_batch_size
     use_dynamic_bsz: true
-    ppo_max_token_len_per_gpu: 10240
-    ulysses_sequence_parallel_size: 4
-    entropy_from_logits_with_chunking: true
-    entropy_checkpointing: true
+    ppo_max_token_len_per_gpu: 32768
+    ulysses_sequence_parallel_size: 1
+    entropy_from_logits_with_chunking: false
+    entropy_checkpointing: false
 
 
     optim:
@@ -105,10 +105,10 @@ actor_rollout_ref:
     nnodes: ${rollout.nnodes}
     n_gpus_per_node: ${rollout.n_gpus_per_node}
     log_prob_use_dynamic_bsz: true
-    log_prob_max_token_len_per_gpu: 40960
+    log_prob_max_token_len_per_gpu: 32768
     max_num_batched_tokens: 8192
-    max_num_seqs: 64
-    gpu_memory_utilization: 0.7
+    max_num_seqs: 256
+    gpu_memory_utilization: 0.8
     tensor_model_parallel_size: 1
     n: 8
     name: sglang
@@ -136,7 +136,7 @@ trainer:
   # NOTE: as we have DAPO group filtering, completing one epoch
   # may not correspond to going through the entire dataset.
   total_epochs: 2
-  total_training_steps: 689 # 176213 samples / 256 effective async batch size = ~689
+  total_training_steps: 689 # TODO: recompute this based on all data
   save_freq: 20
   test_freq: 10
   max_actor_ckpt_to_keep: 10

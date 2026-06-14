@@ -47,4 +47,5 @@ def load_table_gpt_mix(
         )
         selected.append(subset)
 
-    return datasets.concatenate_datasets(selected)
+    concat = datasets.concatenate_datasets(selected)
+    return concat.filter(lambda x: x["prompt_setting"] == "zero-shot")
