@@ -293,7 +293,7 @@ class AgentLoopBase(ABC):
 
         return multi_modal_data
 
-    async def build_ct_initial_prompt(
+    async def ct_build_initial_prompt(
         self,
         messages: list[dict],
         tools: list[dict] = None,
@@ -304,7 +304,7 @@ class AgentLoopBase(ABC):
         )
         return self._cap_text_prompt_length(prompt_ids)
 
-    async def merge_ct_non_assistant_msg(
+    async def ct_merge_non_assistant_msg(
         self,
         previous_messages: list[dict],
         next_messages: list[dict],
@@ -322,12 +322,12 @@ class AgentLoopBase(ABC):
                 tools=tools,
             ),
         )
-        aligned_response_mask, aligned_response_logprobs = self._align_continuous_token_response_metadata(
+        aligned_response_mask, aligned_response_logprobs = self.ct_align_response_metadata(
             merge_result, response_mask, response_logprobs
         )
         return merge_result, aligned_response_mask, aligned_response_logprobs
 
-    async def merge_ct_assistant_token(
+    async def ct_merge_assistant_token(
         self,
         runtime_token_ids: list[int],
         assistant_token_ids: list[int],
@@ -342,7 +342,7 @@ class AgentLoopBase(ABC):
                 assistant_token_ids,
             ),
         )
-        aligned_response_mask, aligned_response_logprobs = self._align_continuous_token_response_metadata(
+        aligned_response_mask, aligned_response_logprobs = self.ct_align_response_metadata(
             merge_result,
             response_mask,
             response_logprobs,
@@ -351,7 +351,7 @@ class AgentLoopBase(ABC):
         return merge_result, aligned_response_mask, aligned_response_logprobs
 
     @staticmethod
-    def _align_continuous_token_response_metadata(
+    def ct_align_response_metadata(
         merge_result: MergeResult,
         response_mask: list[int],
         response_logprobs: Optional[list[float]] = None,
