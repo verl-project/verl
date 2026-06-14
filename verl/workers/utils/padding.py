@@ -128,14 +128,21 @@ def no_padding_2_padding(tensor: torch.Tensor, data: TensorDict) -> torch.Tensor
             response_lens = attention_mask[:, prompt_ids.shape[1] :].sum(dim=1)
             max_response_len = response_ids.shape[1]
     else:
-        # DCP path: no prompts/responses, use loss_mask (response_mask) and NestedTensor offsets
+        # DCP path: no prompts/responses after scheduler routing. Prefer
+        # response_mask for response lengths; loss_mask may be an SFT/tool mask
+        # and does not necessarily describe the full response span.
         if tensor.is_nested:
             seq_lens = tensor.offsets().diff()
             num_seqs = len(seq_lens)
-            loss_mask = data.get("loss_mask", data.get("response_mask", None))
-            if loss_mask is not None and not loss_mask.is_nested:
-                # loss_mask is padded (num_seqs, padded_len): sum to get response_lens
-                response_lens = loss_mask.sum(dim=-1).to(seq_lens.dtype).to(seq_lens.device)
+            response_mask = data.get("response_mask", None)
+            loss_mask = data.get("loss_mask", None)
+            length_mask = response_mask if response_mask is not None else loss_mask
+            if length_mask is not None and length_mask.is_nested:
+                response_lens = length_mask.offsets().diff().to(seq_lens.dtype).to(seq_lens.device)
+                prompt_lens = seq_lens - response_lens
+            elif length_mask is not None:
+                # response_mask is padded (num_seqs, max_response_len): sum to get response_lens
+                response_lens = length_mask.sum(dim=-1).to(seq_lens.dtype).to(seq_lens.device)
                 prompt_lens = seq_lens - response_lens
             else:
                 # Fallback: treat all tokens as response

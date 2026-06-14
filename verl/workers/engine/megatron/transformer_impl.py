@@ -765,6 +765,9 @@ class MegatronEngine(BaseEngine):
                 val = tu.get_non_tensor_data(data, key=key, default=None)
                 if val is not None:
                     non_tensor_data[key] = val
+            non_tensor_data.setdefault("compute_loss", loss_function is not None)
+            if self.model_config.mtp.enable and self.model_config.mtp.enable_train:
+                non_tensor_data["_dcp_route_attention_mask"] = True
 
             micro_batches, dcp_routing_info = scheduler.schedule(
                 batch=data,
@@ -816,6 +819,7 @@ class MegatronEngine(BaseEngine):
             self.forward_step,
             logits_processor_func=loss_function,
             postprocess_micro_batch_func=postprocess_micro_batch_func,
+            forward_only=forward_only,
         )
 
         enable_routing_replay = tu.get_non_tensor_data(data, key="enable_routing_replay", default=False)
@@ -877,14 +881,16 @@ class MegatronEngine(BaseEngine):
             if RouterReplayHelper.is_r2_record_action(self.tf_config):
                 output["model_output"]["routed_experts"] = layers_topk_idx
             # Reverse-route outputs back to original DP ranks after dynamic CP scheduling
-            if dcp_routing_info is not None and "model_output" in output:
+            if dcp_routing_info is not None and output.get("model_output"):
                 from verl.utils.dynamic_cp_scheduler import reverse_route_outputs
 
+                merge_duplicate_gids = bool(output.pop("_dcp_merge_duplicate_gids", False))
                 output["model_output"] = reverse_route_outputs(
                     output["model_output"],
                     dcp_routing_info,
                     self.get_data_parallel_group(),
                     self.get_data_parallel_group(with_context_parallel=True),
+                    merge_duplicate_gids=merge_duplicate_gids,
                 )
         if enable_routing_replay:
             RouterReplay.clear_global_indices()
@@ -987,7 +993,7 @@ class MegatronEngine(BaseEngine):
     def disable_adapter(self) -> ContextManager:
         return self.peft_cls.disable_adapter(self.module)
 
-    def forward_step(self, batch_iter, model, logits_processor_func, postprocess_micro_batch_func):
+    def forward_step(self, batch_iter, model, logits_processor_func, postprocess_micro_batch_func, forward_only=False):
         raise NotImplementedError("forward_step must be implemented in subclass")
 
     def postprocess_micro_batch_func(self, output, data: TensorDict, forward_only: bool, loss_function):
@@ -1102,7 +1108,12 @@ class MegatronEngineWithLMHead(MegatronEngine):
         return ret
 
     def forward_step(
-        self, batch_iter: Iterator[TensorDict], model, logits_processor_func, postprocess_micro_batch_func
+        self,
+        batch_iter: Iterator[TensorDict],
+        model,
+        logits_processor_func,
+        postprocess_micro_batch_func,
+        forward_only=False,
     ):
         batch: TensorDict = next(batch_iter)
 
@@ -1127,6 +1138,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
         calculate_sum_pi_squared = tu.get_non_tensor_data(batch, key="calculate_sum_pi_squared", default=False)
         distillation_use_topk = tu.get_non_tensor_data(batch, key="distillation_use_topk", default=False)
         distillation_only = tu.get_non_tensor_data(batch, key="distillation_only", default=False)
+        dcp_local_output_only = False
 
         if calculate_sum_pi_squared and use_fused_kernels:
             raise NotImplementedError(
@@ -1236,6 +1248,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
 
             forward_fn = get_mcore_engine_forward_fn(self.model_config.hf_config)
             data_format = "thd" if self.engine_config.use_remove_padding else "bshd"
+            dcp_local_output_only = self.engine_config.dynamic_context_parallel and local_cp_size is not None
 
             logits_processor = partial(
                 self._lm_head_logits_processor,
@@ -1271,8 +1284,10 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 local_cp_size=local_cp_size,
                 forced_max_seqlen=tu.get_non_tensor_data(data=batch, key="forced_max_seqlen", default=None),
                 cp_layout=cp_layout,
+                return_dcp_local_token_mask=dcp_local_output_only and not forward_only,
+                dcp_local_output_only=dcp_local_output_only,
+                dcp_compact_output_only=dcp_local_output_only and forward_only,
             )
-
         # Router replay: record routing decisions for R2 mode
         if RouterReplayHelper.is_r2_record_action(self.tf_config, vp_rank):
             merge_router_topk_indices(None, input_ids, self.mini_layer_topk_idx_list, self.tf_config, vp_rank)
@@ -1283,10 +1298,21 @@ class MegatronEngineWithLMHead(MegatronEngine):
             for router in router_instance_list:
                 router.set_router_replay_action(RouterReplayAction.REPLAY_BACKWARD)
 
-        return output, partial(postprocess_micro_batch_func, data=batch, local_cp_size=local_cp_size)
+        return output, partial(
+            postprocess_micro_batch_func,
+            data=batch,
+            local_cp_size=local_cp_size,
+            dcp_local_output_only=dcp_local_output_only,
+        )
 
     def postprocess_micro_batch_func(
-        self, output, data: TensorDict, forward_only: bool, loss_function, local_cp_size=None
+        self,
+        output,
+        data: TensorDict,
+        forward_only: bool,
+        loss_function,
+        local_cp_size=None,
+        dcp_local_output_only: bool = False,
     ):
         # For memory efficiency
         # We move calculation of entropy to compute_log_probs, forward_only == True
@@ -1305,10 +1331,12 @@ class MegatronEngineWithLMHead(MegatronEngine):
             loss = torch.tensor(1.0, device=device)
             scaled_loss = loss
             metrics = {}
+
+        _dcp_scheduled = False
         if local_cp_size is not None:
+            _dcp_scheduled = tu.get_non_tensor_data(data=data, key="_dcp_scheduled", default=False)
             # Skip legacy merge when the DynamicCPScheduler handled routing;
             # reverse routing happens at batch level in forward_backward_batch.
-            _dcp_scheduled = tu.get_non_tensor_data(data=data, key="_dcp_scheduled", default=False)
             if not _dcp_scheduled:
                 # Legacy path: aggregate model_output by DP-CP groups
                 from verl.utils.megatron_utils import dynamic_cp_merge_output
@@ -1321,10 +1349,13 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 )
 
         output = {
-            "model_output": model_output,
             "loss": loss.detach().item(),
             "metrics": metrics,
         }
+        if forward_only or not _dcp_scheduled:
+            output["model_output"] = model_output
+        if forward_only and _dcp_scheduled and dcp_local_output_only:
+            output["_dcp_merge_duplicate_gids"] = True
 
         # calculate_per_token_loss=True (auto-enabled by Megatron-Bridge at CP>1) puts
         # Megatron in its per-token regime: loss_func must return (loss_sum, num_tokens,
@@ -1381,13 +1412,27 @@ class MegatronEngineWithLMHead(MegatronEngine):
 @EngineRegistry.register(model_type="value_model", backend="megatron")
 class MegatronEngineWithValueHead(MegatronEngineWithLMHead):
     # for value head
-    def forward_step(self, batch_iter, model, logits_processor_func, postprocess_micro_batch_func):
+    def forward_step(self, batch_iter, model, logits_processor_func, postprocess_micro_batch_func, forward_only=False):
         batch: TensorDict = next(batch_iter)
+        if self.engine_config.dynamic_context_parallel:
+            _already_scheduled = tu.get_non_tensor_data(data=batch, key="local_cp_size", default=None)
+            if _already_scheduled is None:
+                from verl.utils.megatron_utils import dynamic_cp_split_batch
+
+                batch = dynamic_cp_split_batch(
+                    batch=batch,
+                    engine_config=self.engine_config,
+                    dp_size=mpu.get_data_parallel_world_size(),
+                    dp_rank=mpu.get_data_parallel_rank(),
+                )
+
         batch = batch.to(get_device_id())
         model_inputs = self.prepare_model_inputs(batch)
         input_ids = model_inputs["input_ids"]
         multi_modal_inputs = model_inputs["multi_modal_inputs"]
         cp_layout = self._get_context_parallel_layout(unwrap_model(model))
+        local_cp_size = tu.get_non_tensor_data(data=batch, key="local_cp_size", default=None)
+        dcp_local_output_only = self.engine_config.dynamic_context_parallel and local_cp_size is not None
 
         from verl.models.mcore import get_mcore_engine_forward_fn
 
@@ -1403,9 +1448,20 @@ class MegatronEngineWithValueHead(MegatronEngineWithLMHead):
             data_format="thd" if self.engine_config.use_remove_padding else "bshd",
             forced_max_seqlen=tu.get_non_tensor_data(data=batch, key="forced_max_seqlen", default=None),
             cp_layout=cp_layout,
+            local_cp_size=local_cp_size,
+            return_dcp_local_token_mask=dcp_local_output_only and not forward_only,
+            dcp_local_output_only=dcp_local_output_only,
+            dcp_compact_output_only=dcp_local_output_only and forward_only,
         )
 
-        return output, partial(postprocess_micro_batch_func, data=batch)
+        return output, partial(
+            postprocess_micro_batch_func,
+            data=batch,
+            local_cp_size=local_cp_size,
+            dcp_local_output_only=dcp_local_output_only,
+        )
 
     def prepare_model_outputs(self, output: dict | torch.Tensor, data: TensorDict):
+        if isinstance(output, dict):
+            return output
         return {"values": output}
