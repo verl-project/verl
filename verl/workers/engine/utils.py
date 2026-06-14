@@ -118,9 +118,11 @@ def postprocess_batch_func(output_lst, indices, data: TensorDict):
     model_output = {}
     losses = []
     aggregated_metrics = {}
+    merge_duplicate_gids = False
 
     # model output
     for o in output_lst:
+        merge_duplicate_gids = merge_duplicate_gids or bool(o.get("_dcp_merge_duplicate_gids", False))
         if "model_output" in o:
             for key, val in o["model_output"].items():
                 if key not in model_output:
@@ -155,5 +157,7 @@ def postprocess_batch_func(output_lst, indices, data: TensorDict):
         "loss": losses,
         "metrics": aggregated_metrics,
     }
+    if merge_duplicate_gids:
+        output["_dcp_merge_duplicate_gids"] = True
 
     return output

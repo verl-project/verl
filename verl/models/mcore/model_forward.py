@@ -13,7 +13,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Optional
 
 import torch
 from torch.nested._internal.nested_tensor import NestedTensor
@@ -22,12 +21,16 @@ from verl.utils.megatron_utils import unwrap_model
 from verl.workers.config import MtpConfig
 
 from .util import (
+    build_thd_full_seq_lens,
+    build_thd_local_token_indices,
+    build_thd_local_token_mask,
     build_vlm_attn_mask_bshd,
     build_vlm_attn_mask_thd,
     postprocess_bshd,
     postprocess_bshd_engine,
     postprocess_packed_seqs,
     postprocess_thd_engine,
+    postprocess_thd_engine_local,
     preprocess_bshd,
     preprocess_bshd_engine,
     preprocess_packed_seqs,
@@ -274,6 +277,9 @@ def gptmodel_forward_model_engine(
     mtp_enable_train: bool = False,
     local_cp_size: Optional[int] = None,
     forced_max_seqlen: Optional[int] = None,
+    return_dcp_local_token_mask: bool = False,
+    dcp_local_output_only: bool = False,
+    dcp_compact_output_only: bool = False,
 ):
     """Default forward pass for GPT models with optional sequence packing."""
 
@@ -359,21 +365,79 @@ def gptmodel_forward_model_engine(
                 for k, v in logits_processor_args.items()
             }
             output_dict = logits_processor(output_orig, **args)
-            output = {
-                k: postprocess_thd_engine(
-                    v, packed_seq_params, input_ids, batch_size, post_process=post_process, local_cp_size=local_cp_size
+            postprocess_fn = (
+                postprocess_thd_engine_local
+                if dcp_local_output_only and local_cp_size is not None
+                else postprocess_thd_engine
+            )
+            output = {}
+            for k, v in output_dict.items():
+                postprocess_kwargs = {}
+                if postprocess_fn is postprocess_thd_engine_local:
+                    postprocess_kwargs["compact"] = dcp_compact_output_only
+                output[k] = postprocess_fn(
+                    v,
+                    packed_seq_params,
+                    input_ids,
+                    batch_size,
+                    post_process=post_process,
+                    local_cp_size=local_cp_size,
+                    **postprocess_kwargs,
                 )
-                for k, v in output_dict.items()
-            }
+            if dcp_compact_output_only and local_cp_size is not None:
+                output["_dcp_local_token_indices"] = build_thd_local_token_indices(
+                    packed_seq_params,
+                    input_ids,
+                    batch_size,
+                    post_process=post_process,
+                    local_cp_size=local_cp_size,
+                )
+                output["_dcp_full_seq_lens"] = build_thd_full_seq_lens(input_ids, post_process=post_process)
+            if return_dcp_local_token_mask and local_cp_size is not None:
+                output["_dcp_local_token_mask"] = build_thd_local_token_mask(
+                    packed_seq_params,
+                    input_ids,
+                    batch_size,
+                    post_process=post_process,
+                    local_cp_size=local_cp_size,
+                )
         else:
-            output = postprocess_thd_engine(
+            postprocess_fn = (
+                postprocess_thd_engine_local
+                if dcp_local_output_only and local_cp_size is not None
+                else postprocess_thd_engine
+            )
+            postprocess_kwargs = {}
+            if postprocess_fn is postprocess_thd_engine_local:
+                postprocess_kwargs["compact"] = dcp_compact_output_only
+            output = postprocess_fn(
                 output_orig,
                 packed_seq_params,
                 input_ids,
                 batch_size,
                 post_process=post_process,
                 local_cp_size=local_cp_size,
+                **postprocess_kwargs,
             )
+            if value_model and dcp_local_output_only and local_cp_size is not None:
+                output = {"values": output}
+                if dcp_compact_output_only:
+                    output["_dcp_local_token_indices"] = build_thd_local_token_indices(
+                        packed_seq_params,
+                        input_ids,
+                        batch_size,
+                        post_process=post_process,
+                        local_cp_size=local_cp_size,
+                    )
+                    output["_dcp_full_seq_lens"] = build_thd_full_seq_lens(input_ids, post_process=post_process)
+                if return_dcp_local_token_mask:
+                    output["_dcp_local_token_mask"] = build_thd_local_token_mask(
+                        packed_seq_params,
+                        input_ids,
+                        batch_size,
+                        post_process=post_process,
+                        local_cp_size=local_cp_size,
+                    )
     else:
         """
         data_format: "thd" or "bshd", default is "thd",
@@ -458,6 +522,9 @@ def gptmodel_forward_model_engine(
         # while using nested tensor, the advanced indexing operation above will result in an error at backward, i.e.
         # ValueError: NestedTensor _nested_select_backward_default(grad_output: t, self: jt_all, dim: any, index: any)
         # so we use `squeeze` to remove the last dimension
-        output = output.squeeze(-1)
+        if isinstance(output, dict):
+            output["values"] = output["values"].squeeze(-1)
+        else:
+            output = output.squeeze(-1)
 
     return output

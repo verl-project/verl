@@ -16,7 +16,6 @@
 import logging
 import math
 import os
-from typing import Optional
 
 import torch
 from megatron.core import parallel_state as mpu
@@ -494,7 +493,7 @@ def postprocess_thd_engine(
     input_ids: torch.Tensor,
     batch_size: int,
     post_process: bool = True,
-    local_cp_size: Optional[int] = None,
+    local_cp_size: int | None = None,
 ) -> torch.Tensor:
     """
     Postprocess packed sequences
@@ -558,6 +557,181 @@ def postprocess_thd_engine(
     output_new_tensor = torch.nested.as_nested_tensor(output_new, layout=torch.jagged)
 
     return output_new_tensor
+
+
+def postprocess_thd_engine_local(
+    output: torch.Tensor,
+    packed_seq_params: PackedSeqParams,
+    input_ids: torch.Tensor,
+    batch_size: int,
+    post_process: bool = True,
+    local_cp_size: int | None = None,
+    compact: bool = False,
+) -> torch.Tensor:
+    """Postprocess only the tokens owned by this CP rank, without CP all-gather."""
+    if not post_process:
+        return output
+
+    cu_padded_cpu: list[int] = packed_seq_params.cu_seqlens_q_padded.tolist()
+    cu_seqlens = input_ids.offsets()
+    seq_lens_cpu: list[int] = cu_seqlens.diff().tolist()
+
+    if local_cp_size is not None:
+        cp_size = local_cp_size
+        cp_group = packed_seq_params.cp_group
+        cp_rank = torch.distributed.get_rank(group=cp_group)
+    else:
+        cp_size = mpu.get_context_parallel_world_size()
+        cp_rank = mpu.get_context_parallel_rank()
+
+    output_new = []
+    for i in range(batch_size):
+        s_len = seq_lens_cpu[i]
+        if cp_size <= 1:
+            start_idx = cu_padded_cpu[i]
+            output_new.append(output[0][start_idx : start_idx + s_len])
+            continue
+
+        s_len_padded_chunk = (cu_padded_cpu[i + 1] - cu_padded_cpu[i]) // cp_size
+        half_seqlen = s_len_padded_chunk // 2
+        s_len_padded = s_len_padded_chunk * cp_size
+        packed_start_idx = cu_padded_cpu[i] // cp_size
+
+        o0 = output[0][packed_start_idx : packed_start_idx + half_seqlen]
+        o1 = output[0][packed_start_idx + half_seqlen : packed_start_idx + s_len_padded_chunk]
+        if compact:
+            chunks = []
+            front_start = cp_rank * half_seqlen
+            front_end = min((cp_rank + 1) * half_seqlen, s_len)
+            if front_start < front_end:
+                chunks.append(o0[: front_end - front_start])
+
+            back_start = s_len_padded - (cp_rank + 1) * half_seqlen
+            back_end = s_len_padded - cp_rank * half_seqlen
+            valid_back_start = max(back_start, 0)
+            valid_back_end = min(back_end, s_len)
+            if valid_back_start < valid_back_end:
+                chunks.append(o1[valid_back_start - back_start : valid_back_end - back_start])
+
+            if chunks:
+                output_new.append(torch.cat(chunks, dim=0))
+            else:
+                output_new.append(output.new_empty((0, *output.shape[2:])))
+            continue
+
+        tmp = output.new_zeros((s_len_padded, *output.shape[2:]))
+        tmp[cp_rank * half_seqlen : (cp_rank + 1) * half_seqlen] = o0
+        tmp[s_len_padded - (cp_rank + 1) * half_seqlen : s_len_padded - cp_rank * half_seqlen] = o1
+        output_new.append(tmp[:s_len])
+
+    return torch.nested.as_nested_tensor(output_new, layout=torch.jagged)
+
+
+def build_thd_local_token_indices(
+    packed_seq_params: PackedSeqParams,
+    input_ids: torch.Tensor,
+    batch_size: int,
+    post_process: bool = True,
+    local_cp_size: int | None = None,
+) -> torch.Tensor:
+    """Build nested sequence indices for tokens owned by the current CP rank."""
+    if not post_process:
+        indices = [torch.arange(input_ids.shape[1], dtype=torch.int64, device=input_ids.device)]
+        return torch.nested.as_nested_tensor(indices, layout=torch.jagged)
+
+    cu_padded_cpu: list[int] = packed_seq_params.cu_seqlens_q_padded.tolist()
+    cu_seqlens = input_ids.offsets()
+    seq_lens_cpu: list[int] = cu_seqlens.diff().tolist()
+
+    if local_cp_size is not None:
+        cp_size = local_cp_size
+        cp_group = packed_seq_params.cp_group
+        cp_rank = torch.distributed.get_rank(group=cp_group)
+    else:
+        cp_size = mpu.get_context_parallel_world_size()
+        cp_rank = mpu.get_context_parallel_rank()
+
+    indices = []
+    for i in range(batch_size):
+        s_len = seq_lens_cpu[i]
+        if cp_size <= 1:
+            indices.append(torch.arange(s_len, dtype=torch.int64, device=input_ids.device))
+            continue
+
+        s_len_padded_chunk = (cu_padded_cpu[i + 1] - cu_padded_cpu[i]) // cp_size
+        half_seqlen = s_len_padded_chunk // 2
+        s_len_padded = s_len_padded_chunk * cp_size
+        parts = []
+
+        front_start = cp_rank * half_seqlen
+        front_end = min((cp_rank + 1) * half_seqlen, s_len)
+        if front_start < front_end:
+            parts.append(torch.arange(front_start, front_end, dtype=torch.int64, device=input_ids.device))
+
+        back_start = s_len_padded - (cp_rank + 1) * half_seqlen
+        back_end = min(s_len_padded - cp_rank * half_seqlen, s_len)
+        if back_start < back_end:
+            parts.append(torch.arange(max(back_start, 0), back_end, dtype=torch.int64, device=input_ids.device))
+
+        if parts:
+            indices.append(torch.cat(parts, dim=0))
+        else:
+            indices.append(torch.empty(0, dtype=torch.int64, device=input_ids.device))
+
+    return torch.nested.as_nested_tensor(indices, layout=torch.jagged)
+
+
+def build_thd_full_seq_lens(input_ids: torch.Tensor, post_process: bool = True) -> torch.Tensor:
+    """Build per-sample full sequence lengths as a jagged tensor for DCP output routing."""
+    if not post_process:
+        lens = [
+            torch.tensor([input_ids.shape[1]], dtype=torch.int64, device=input_ids.device)
+            for _ in range(input_ids.shape[0])
+        ]
+    else:
+        lens = [seq_len.reshape(1).to(dtype=torch.int64) for seq_len in input_ids.offsets().diff()]
+    return torch.nested.as_nested_tensor(lens, layout=torch.jagged)
+
+
+def build_thd_local_token_mask(
+    packed_seq_params: PackedSeqParams,
+    input_ids: torch.Tensor,
+    batch_size: int,
+    post_process: bool = True,
+    local_cp_size: int | None = None,
+) -> torch.Tensor:
+    """Build a nested mask for tokens owned by the current CP rank after THD postprocess."""
+    if not post_process:
+        return torch.ones(input_ids.shape, dtype=torch.bool, device=input_ids.device)
+
+    cu_padded_cpu: list[int] = packed_seq_params.cu_seqlens_q_padded.tolist()
+    cu_seqlens = input_ids.offsets()
+    seq_lens_cpu: list[int] = cu_seqlens.diff().tolist()
+
+    if local_cp_size is not None:
+        cp_size = local_cp_size
+        cp_group = packed_seq_params.cp_group
+        cp_rank = torch.distributed.get_rank(group=cp_group)
+    else:
+        cp_size = mpu.get_context_parallel_world_size()
+        cp_rank = mpu.get_context_parallel_rank()
+
+    masks = []
+    for i in range(batch_size):
+        s_len = seq_lens_cpu[i]
+        if cp_size <= 1:
+            masks.append(torch.ones(s_len, dtype=torch.bool, device=input_ids.device))
+            continue
+
+        s_len_padded_chunk = (cu_padded_cpu[i + 1] - cu_padded_cpu[i]) // cp_size
+        half_seqlen = s_len_padded_chunk // 2
+        s_len_padded = s_len_padded_chunk * cp_size
+        mask = torch.zeros(s_len_padded, dtype=torch.bool, device=input_ids.device)
+        mask[cp_rank * half_seqlen : (cp_rank + 1) * half_seqlen] = True
+        mask[s_len_padded - (cp_rank + 1) * half_seqlen : s_len_padded - cp_rank * half_seqlen] = True
+        masks.append(mask[:s_len])
+
+    return torch.nested.as_nested_tensor(masks, layout=torch.jagged)
 
 
 def _build_npu_attn_mask(original_attention_mask: torch.Tensor) -> torch.Tensor:
