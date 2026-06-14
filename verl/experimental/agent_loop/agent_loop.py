@@ -361,7 +361,7 @@ class AgentLoopBase(ABC):
         aligned_mask = list(response_mask)
         aligned_logprobs = list(response_logprobs) if response_logprobs is not None else None
         if aligned_logprobs is None and assistant_logprobs is not None:
-            aligned_logprobs = []
+            raise ValueError("response_logprobs is required when assistant_logprobs is provided")
 
         if merge_result.removed_prefix_token_count:
             aligned_mask = aligned_mask[: -merge_result.removed_prefix_token_count]
