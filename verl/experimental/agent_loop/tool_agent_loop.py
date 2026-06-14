@@ -209,7 +209,7 @@ class ToolAgentLoop(AgentLoopBase):
     async def _handle_pending_state(self, agent_data: AgentData, sampling_params: dict[str, Any]) -> AgentState:
         """Handle the pending state: prepare the prompt and start generation."""
         schemas = getattr(agent_data, "_active_tool_schemas", self.tool_schemas)
-        if self.continuous_token_builder is not None:
+        if self.enable_continuous_token:
             prompt_ids = await self.build_ct_initial_prompt(agent_data.messages, tools=schemas)
         else:
             prompt_ids = await self.apply_chat_template(
@@ -262,7 +262,7 @@ class ToolAgentLoop(AgentLoopBase):
 
         agent_data.assistant_turns += 1
         agent_data.response_ids = output.token_ids
-        if self.continuous_token_builder is not None:
+        if self.enable_continuous_token:
             merge_result, response_mask, response_logprobs = await self.merge_ct_assistant_token(
                 agent_data.prompt_ids,
                 agent_data.response_ids,
@@ -296,7 +296,7 @@ class ToolAgentLoop(AgentLoopBase):
         tools = [tool.tool_schema for tool in active_tools.values()]
         assistant_content, agent_data.tool_calls = await self.tool_parser.extract_tool_calls(agent_data.response_ids, tools)
         agent_data.tool_call_ids = self._last_parsed_tool_call_ids(len(agent_data.tool_calls))
-        if self.continuous_token_builder is not None:
+        if self.enable_continuous_token:
             agent_data.messages.append(self._build_assistant_message(assistant_content, agent_data))
 
         if agent_data.tool_calls:
@@ -401,7 +401,7 @@ class ToolAgentLoop(AgentLoopBase):
             response_ids = await self.loop.run_in_executor(
                 None, lambda: self.tokenizer.encode(tool_response_text, add_special_tokens=False)
             )
-        elif self.continuous_token_builder is not None and not new_images_this_turn:
+        elif self.enable_continuous_token and not new_images_this_turn:
             schemas = getattr(agent_data, "_active_tool_schemas", self.tool_schemas)
             merge_result, response_mask, response_logprobs = await self.merge_ct_non_assistant_msg(
                 previous_messages,

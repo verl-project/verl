@@ -226,8 +226,8 @@ class AgentLoopBase(ABC):
         self.data_config = data_config.config
         self.apply_chat_template_kwargs = self.data_config.get("apply_chat_template_kwargs", {})
         self.mm_processor_kwargs = self.data_config.get("mm_processor_kwargs", {})
-        processing_class = self.processor if self.processor is not None else self.tokenizer
         self.continuous_token_builder = None
+        self.enable_continuous_token = False
         continuous_token_config = self.rollout_config.multi_turn.continuous_token
         if continuous_token_config.enable and self.processor is None:
             model_config = self.config.actor_rollout_ref.model
@@ -239,11 +239,15 @@ class AgentLoopBase(ABC):
                 chat_template_kwargs=self.apply_chat_template_kwargs,
                 custom_builder_module=continuous_token_config.custom_builder_module,
             )
-        elif continuous_token_config.enable:
-            logger.warning("Continuous Token is enabled but processor is set; falling back to legacy multimodal path.")
-        if self.continuous_token_builder is not None:
-            self.system_prompt = []
+            self.enable_continuous_token = True
+            # Continuous Token doesn't use the legacy removable system prompt.
+            self.system_prompt = None
         else:
+            if continuous_token_config.enable and self.processor is not None:
+                logger.warning(
+                    "Continuous Token is enabled but processor is set; falling back to legacy multimodal path."
+                )
+            processing_class = self.processor if self.processor is not None else self.tokenizer
             self.system_prompt = initialize_system_prompt(processing_class, **self.apply_chat_template_kwargs)
         self.loop = get_event_loop()
 
