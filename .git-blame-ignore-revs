@@ -1,0 +1,13 @@
+# Local uasge: git config blame.ignoreRevsFile .git-blame-ignore-revs
+
+# [dev] feat: immigrate from yapf & pylint to ruff based on pre-commit
+# Changed 268 files, +10k/-9k lines. This is the biggest formatter change.
+b00f77d8559b48d57a33c0132a5ba1c81891a536
+
+# [ci] refactor: reduce ruff line-length from 300 to 120
+# Changed 238 files, +6k/-1k lines. Global formatting change.
+00a10a8ef389556f957a2f36132b2358fd6a109f
+
+# [Lint] fix: linting errors in all files
+# Changed 179 files, +1k/-3k lines. Global lint fix.
+8e5ad4688a13de81727c014a3c2e2fb26324bc20

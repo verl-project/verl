@@ -1,0 +1,49 @@
+_target_: verl.workers.config.McoreOptimizerConfig
+
+# Learning rate
+lr: 1e-3
+
+# LR warmup steps ratio
+lr_warmup_steps_ratio: 0.0
+
+# Total training steps
+total_training_steps: -1
+
+# Weight decay
+weight_decay: 0.01
+
+# LR warmup steps
+lr_warmup_steps: -1
+
+# Betas for Adam optimizer
+betas: [0.9, 0.999]
+
+# Clip gradient
+clip_grad: 1.0
+
+# optimizer type
+optimizer: adam
+
+# initial learning rate for warmup, default to 0.0
+lr_warmup_init: 0.0
+
+lr_decay_steps: null
+
+# select from constant/linear/cosine/inverse_square_root
+lr_decay_style: constant
+
+# minimum learning rate, default to 0.0
+min_lr: 0.0
+
+# select from constant/linear/cosine
+weight_decay_incr_style: constant
+
+# select from constant/exponential/cosine
+lr_wsd_decay_style: exponential
+
+lr_wsd_decay_steps: null
+
+# use checkpoint optimizer parameter scheduler
+use_checkpoint_opt_param_scheduler: False
+
+override_optimizer_config: {}

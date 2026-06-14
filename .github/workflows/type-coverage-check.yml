@@ -1,0 +1,31 @@
+name: Type Annotation and Docstring Coverage
+
+on:
+  pull_request:
+    paths:
+      - '**/*.py'
+      - '.github/workflows/type-coverage-check.yml'
+
+jobs:
+  type-coverage-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # 🚨 Important: fetch full history so `origin/main` is available
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          pip3 install -r requirements.txt
+          pip3 install --no-deps -e .
+      - name: Run type annotation coverage check
+        run: |
+          python3 tests/special_sanity/type_coverage_check.py
+      - name: Run docstring coverage check
+        run: |
+          python3 tests/special_sanity/check_api_docs.py verl

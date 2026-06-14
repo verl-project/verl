@@ -1,0 +1,36 @@
+# Start from the verl base image
+# Dockerfile.base
+FROM verlai/verl:base-verl0.5-preview-cu128-cudnn9.8-torch2.7.1-fa2.8.0-fi0.2.6
+
+# Define environments
+ENV MAX_JOBS=8
+ENV VLLM_WORKER_MULTIPROC_METHOD=spawn
+ENV DEBIAN_FRONTEND=noninteractive
+ENV NODE_OPTIONS=""
+ENV PIP_ROOT_USER_ACTION=ignore
+ENV HF_HUB_ENABLE_HF_TRANSFER="1"
+
+# Install sglang-0.4.8 and torch-memory-saver
+# Install FlashInfer Python package
+RUN pip install --resume-retries 999 --no-cache-dir --no-build-isolation flashinfer-python==0.2.6.post1
+RUN pip install --resume-retries 999  --no-cache-dir "sglang[all]==0.4.8" && pip install torch-memory-saver --no-cache-dir
+
+# Fix packages
+RUN pip install --no-cache-dir "tensordict==0.6.2" "transformers[hf_xet]>=4.51.0" accelerate datasets peft hf-transfer \
+    "numpy<2.0.0" "pyarrow>=19.0.1" pandas \
+    ray[default] codetiming hydra-core pylatexenc qwen-vl-utils wandb dill pybind11 liger-kernel mathruler blobfile xgrammar \
+    pytest py-spy pre-commit ruff
+
+RUN pip uninstall -y pynvml nvidia-ml-py && \
+    pip install --resume-retries 999 --no-cache-dir --upgrade "nvidia-ml-py>=12.560.30" "fastapi[standard]>=0.115.0" "optree>=0.13.0" "pydantic>=2.9" "grpcio>=1.62.1"
+
+RUN pip install --resume-retries 999 --no-cache-dir nvidia-cudnn-cu12==9.8.0.87
+
+# Install TransformerEngine
+RUN export NVTE_FRAMEWORK=pytorch && pip3 install --resume-retries 999 --no-deps --no-cache-dir --no-build-isolation git+https://github.com/NVIDIA/TransformerEngine.git@release_v2.5
+
+# Install Megatron-LM
+RUN pip3 install --no-deps --no-cache-dir --no-build-isolation git+https://github.com/NVIDIA/Megatron-LM.git@core_r0.13.0
+
+# Install mbridge
+RUN pip3 install --no-cache-dir mbridge

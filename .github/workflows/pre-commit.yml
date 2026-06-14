@@ -1,0 +1,41 @@
+# c.f. https://github.com/pre-commit/action?tab=readme-ov-file#using-this-action
+name: pre-commit
+
+# No need to avoid / cancel lightweight pre-commit jobs
+on:
+  schedule:
+    - cron: "0 0 * * 0"
+  pull_request:
+  push:
+    branches:
+      - main
+      - v0.*
+  # Allow manual triggering
+  workflow_dispatch:
+
+# Declare permissions just read content.
+permissions:
+  contents: read
+
+jobs:
+  pre-commit:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.12"]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install the current repository
+        run: |
+          pip install pre-commit hydra-core
+          pip install --no-deps -e .
+      - name: Set ruff --output-format=github
+        run: |
+          sed -i 's/--output-format=full/--output-format=github/' .pre-commit-config.yaml
+          git add .pre-commit-config.yaml
+      # Check "--all-files" by default
+      - uses: pre-commit/action@v3.0.1

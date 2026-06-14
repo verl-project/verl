@@ -1,0 +1,108 @@
+# Start from the NVIDIA official image (ubuntu-24.04 + cuda-12.8 + python-3.12)
+# https://docs.nvidia.com/deeplearning/frameworks/pytorch-release-notes/rel-25-03.html
+FROM nvcr.io/nvidia/pytorch:25.03-py3
+
+# Define environments
+ENV MAX_JOBS=32
+ENV VLLM_WORKER_MULTIPROC_METHOD=spawn
+ENV DEBIAN_FRONTEND=noninteractive
+ENV NODE_OPTIONS=""
+ENV PIP_ROOT_USER_ACTION=ignore
+ENV HF_HUB_ENABLE_HF_TRANSFER="1"
+ENV PIP_CONSTRAINT=""
+
+ARG PIP_INDEX=https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+
+# Change pip source
+RUN pip config set global.index-url "${PIP_INDEX}" && \
+    pip config set global.extra-index-url "${PIP_INDEX}" && \
+    pip config set global.no-cache-dir "true" && \
+    python -m pip install --upgrade pip
+
+# Install systemctl
+RUN apt-get update && \
+    apt-get install -y -o Dpkg::Options::="--force-confdef" systemd && \
+    apt-get clean
+
+# Install libxml2
+RUN apt-get update && \
+    apt-get install -y libxml2 aria2 && \
+    apt-get clean
+
+# Uninstall nv-pytorch fork
+RUN pip uninstall -y torch torchvision torchaudio \
+    pytorch-quantization pytorch-triton torch-tensorrt \
+    transformer_engine flash_attn apex megatron-core \
+    xgboost opencv grpcio
+
+# Fix packages
+RUN pip install --no-cache-dir tensordict torchdata "transformers[hf_xet]==4.55.4" accelerate datasets peft hf-transfer \
+    "numpy<2.0.0" "pyarrow>=19.0.1" pandas \
+    ray[default] codetiming hydra-core pylatexenc qwen-vl-utils wandb dill pybind11 liger-kernel mathruler blobfile xgrammar \
+    pytest py-spy pre-commit ruff
+
+# Fix cv2
+RUN rm -rf /usr/local/lib/python3.11/dist-packages/cv2
+
+# Install torch
+RUN pip install --no-cache-dir torch==2.8.0 --index-url https://download.pytorch.org/whl/cu128
+
+# Install flash-attn
+RUN pip install --no-cache-dir --no-build-isolation flash_attn==2.7.4.post1
+
+# Install DeepEP
+# the dependency of IBGDA
+RUN ln -s /usr/lib/x86_64-linux-gnu/libmlx5.so.1 /usr/lib/x86_64-linux-gnu/libmlx5.so
+
+# Clone and build deepep and deepep-nvshmem
+RUN git clone -b v2.3.1 https://github.com/NVIDIA/gdrcopy.git && \
+    git clone https://github.com/deepseek-ai/DeepEP.git  && \
+    cd DeepEP && git checkout a84a248
+
+# Prepare nvshmem
+RUN wget https://developer.nvidia.com/downloads/assets/secure/nvshmem/nvshmem_src_3.2.5-1.txz && \
+    tar -xvf nvshmem_src_3.2.5-1.txz && mv nvshmem_src deepep-nvshmem && \
+    cd deepep-nvshmem && git apply ../DeepEP/third-party/nvshmem.patch
+
+## Build deepep-nvshmem
+RUN apt-get install -y ninja-build cmake
+
+ENV CUDA_HOME=/usr/local/cuda
+### Set MPI environment variables. Having errors when not set.
+ENV CPATH=/usr/local/mpi/include:$CPATH
+ENV LD_LIBRARY_PATH=/usr/local/mpi/lib:$LD_LIBRARY_PATH
+ENV LD_LIBRARY_PATH=/usr/local/x86_64-linux-gnu:$LD_LIBRARY_PATH
+ENV GDRCOPY_HOME=/workspace/gdrcopy
+ENV GDRCOPY_INCLUDE=/workspace/gdrcopy/include
+
+RUN cd deepep-nvshmem && \
+    NVSHMEM_SHMEM_SUPPORT=0 \
+    NVSHMEM_UCX_SUPPORT=0 \
+    NVSHMEM_USE_NCCL=0 \
+    NVSHMEM_MPI_SUPPORT=0 \
+    NVSHMEM_IBGDA_SUPPORT=1 \
+    NVSHMEM_PMIX_SUPPORT=0 \
+    NVSHMEM_TIMEOUT_DEVICE_POLLING=0 \
+    NVSHMEM_USE_GDRCOPY=1 \
+    cmake -G Ninja -S . -B build/ -DCMAKE_INSTALL_PREFIX=/workspace/deepep-nvshmem/install && cmake --build build/ --target install
+
+ENV NVSHMEM_DIR=/workspace/deepep-nvshmem/install
+ENV LD_LIBRARY_PATH=$NVSHMEM_DIR/lib:$LD_LIBRARY_PATH
+ENV PATH=$NVSHMEM_DIR/bin:$PATH
+
+## Build deepep
+RUN cd DeepEP && \
+    python setup.py install
+
+# Install Apex
+RUN pip install -v --disable-pip-version-check --no-cache-dir --no-build-isolation --config-settings "--build-option=--cpp_ext" --config-settings "--build-option=--cuda_ext" git+https://github.com/NVIDIA/apex.git
+
+# Install TransformerEngine
+RUN export NVTE_FRAMEWORK=pytorch && pip3 install --no-deps --no-cache-dir --no-build-isolation git+https://github.com/NVIDIA/TransformerEngine.git@v2.2.1
+
+# Install Megatron-LM
+RUN git clone -b core_v0.13.0 https://github.com/NVIDIA/Megatron-LM.git && \
+    cd Megatron-LM && pip3 install --no-deps -e .
+
+# Install mbridge
+RUN pip3 install --no-cache-dir git+https://github.com/ISEEKYAN/mbridge.git

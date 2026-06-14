@@ -1,0 +1,55 @@
+# Base Image support aws EFA
+# Build Image with frameworks based on this
+FROM verlai/verl:app-verl0.6-transformers4.56.1-sglang0.5.2-mcore0.13.0-te2.2
+
+# For aws instances with EFA net interface (Sagemaker AI Pod)
+#     install EFA driver:
+######## AWS EFA ############
+ENV NCCL_VERSION=2.25.1-1
+ENV DEBIAN_FRONTEND=noninteractive
+ENV EFA_INSTALLER_VERSION=1.40.0
+ENV AWS_OFI_NCCL_VERSION=1.14.2
+ENV FI_EFA_SET_CUDA_SYNC_MEMOPS=0
+ENV FI_PROVIDER=efa
+
+RUN apt update && apt install -y linux-image-generic libhwloc-dev
+
+RUN cd /tmp && \
+    curl -O https://efa-installer.amazonaws.com/aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz  && \
+    tar -xf aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz && \
+    cd aws-efa-installer && \
+    ./efa_installer.sh -y -g --skip-kmod --skip-limit-conf --no-verify && \
+    ldconfig && \
+    rm -rf /tmp/aws-efa-installer /var/lib/apt/lists/*
+
+# NCCL EFA Plugin
+RUN cd /tmp && \
+    curl -LO https://github.com/aws/aws-ofi-nccl/archive/refs/tags/v${AWS_OFI_NCCL_VERSION}.tar.gz && \
+    tar -xzf /tmp/v${AWS_OFI_NCCL_VERSION}.tar.gz && \
+    rm /tmp/v${AWS_OFI_NCCL_VERSION}.tar.gz && \
+    mv aws-ofi-nccl-${AWS_OFI_NCCL_VERSION} aws-ofi-nccl && \
+    cd /tmp/aws-ofi-nccl && \
+    ./autogen.sh && \
+    ./configure --prefix=/opt/amazon/efa \
+    --with-libfabric=/opt/amazon/efa \
+    --with-cuda=/usr/local/cuda \
+    --enable-platform-aws \
+    --with-mpi=/opt/amazon/openmpi && \
+    make -j$(nproc) install && \
+    rm -rf /tmp/aws-ofi/nccl
+
+# NCCL
+RUN echo "/usr/local/lib"      >> /etc/ld.so.conf.d/local.conf && \
+    echo "/opt/amazon/openmpi/lib" >> /etc/ld.so.conf.d/efa.conf && \
+    ldconfig
+
+ENV OMPI_MCA_pml=^cm,ucx            \
+    OMPI_MCA_btl=tcp,self           \
+    OMPI_MCA_btl_tcp_if_exclude=lo,docker0,veth_def_agent \
+    OPAL_PREFIX=/opt/amazon/openmpi \
+    NCCL_SOCKET_IFNAME=^docker,lo,veth_def_agent  \
+    FI_EFA_USE_HUGE_PAGE=0
+
+# docker build -t verl:awsefa --label "commit=$(git rev-parse --short HEAD)" .
+# on aws:
+# docker run --ipc=host --privileged --name verldev --gpus all --network=host --shm-size=1800gb -itd verl:awsefa

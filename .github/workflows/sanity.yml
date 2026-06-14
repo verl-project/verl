@@ -1,0 +1,89 @@
+# # Tests layout
+
+# Each folder under tests/ corresponds to a test category for a sub-namespace in verl. For instance:
+# - `tests/trainer` for testing functionality related to `verl/trainer`
+# - `tests/models` for testing functionality related to `verl/models`
+# - ...
+
+# There are a few folders with `special_` prefix, created for special purposes:
+# - `special_distributed`: unit tests that must run with multiple GPUs
+# - `special_e2e`: end-to-end tests with training/generation scripts
+# - `special_npu`: tests for NPUs
+# - `special_sanity`: a suite of quick sanity tests
+# - `special_standalone`: a set of test that are designed to run in dedicated environments
+
+# Accelerators for tests
+# - By default tests are run with GPU available, except for the ones under `special_npu`, and any test script whose name ends with `on_cpu.py`.
+# - For test scripts with `on_cpu.py` name suffix would be tested on CPU resources in linux environment.
+
+# # Workflow layout
+
+# All CI tests are configured by yaml files in `.github/workflows/`. Here's an overview of all test configs:
+# 1. A list of always triggered CPU sanity tests: `check-pr-title.yml`, `secrets_scan.yml`, `check-pr-title,yml`, `pre-commit.yml`, `doc.yml`
+# 2. Some heavy multi-GPU unit tests, such as `model.yml`, `vllm.yml`, `sgl.yml`
+# 3. End-to-end tests: `e2e_*.yml`
+# 4. Unit tests
+#   - `cpu_unit_tests.yml`, run pytest on all scripts with file name pattern `tests/**/test_*_on_cpu.py`
+#   - `gpu_unit_tests.yml`, run pytest on all scripts with file without the `on_cpu.py` suffix.
+#   - Since cpu/gpu unit tests by default runs all tests under `tests`, please make sure tests are manually excluded in them when
+#     - new workflow yaml is added to `.github/workflows`
+#     - new tests are added to workflow mentioned in 2.
+# name: Check PR Title
+
+name: sanity
+
+on:
+  # Trigger the workflow on push or pull request,
+  # but only for the main branch
+  push:
+    branches:
+      - main
+      - v0.*
+  pull_request:
+    branches:
+      - main
+      - v0.*
+    paths:
+      - "**/*.py"
+      - .github/workflows/sanity.yml
+      - "tests/special_sanity/**"
+
+# Cancel jobs on the same ref if a new one is triggered
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+# Declare permissions just read content.
+permissions:
+  contents: read
+
+jobs:
+  sanity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5 # Increase this timeout value as needed
+    strategy:
+      matrix:
+        python-version: ["3.10"]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install the current repository
+        run: |
+          pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          pip3 install -r requirements-test.txt
+          pip3 install -r requirements.txt
+          pip3 install --no-deps -e .
+      - name: Check final pip list
+        run: |
+          pip3 list
+      # Most sanity checks now run via pre-commit (see .pre-commit-config.yaml
+      # and .github/workflows/pre-commit.yml). Only checks that need the full
+      # verl installation or CI-only context remain here.
+      - name: Run sanity test
+        run: |
+          pytest -s -x tests/special_sanity
+      - name: Assert documentation requirement for functions
+        run: python3 tests/special_sanity/validate_imported_docs.py

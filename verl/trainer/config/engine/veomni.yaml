@@ -1,0 +1,100 @@
+# Target class for this configuration
+_target_: verl.workers.config.VeOmniEngineConfig
+
+# Whether to offload model parameters to CPU
+param_offload: False
+
+# Whether to offload optimizer state to CPU
+optimizer_offload: False
+
+# FSDP group size. -1 means use all available GPUs.
+fsdp_size: -1
+
+ulysses_parallel_size: 1
+
+expert_parallel_size: 1
+
+mixed_precision: true
+
+# Random seed for reproducibility.
+seed: 42
+
+# Whether to enable full determinism for distributed training, only for debugging.
+full_determinism: false
+
+init_device: meta
+
+enable_full_shard: true
+
+ckpt_manager: dcp
+
+# Path to load checkpoint from, if any
+load_checkpoint_path: null
+
+# Only for FSDP1: FSDP1 configuration, prefetch the next forward-pass all-gather
+# before the current forward computation.
+forward_prefetch: true
+
+strategy: veomni
+
+# Whether to use torch compile in fsdp.
+use_torch_compile: false
+
+# Whether to use entropy_from_logits_with_chunking in fsdp.
+entropy_from_logits_with_chunking: false
+
+# Whether to use entropy checkpointing in fsdp.
+entropy_checkpointing: false
+
+# Whether to use forward only in fsdp.
+forward_only: false
+
+enable_fsdp_offload: false
+
+enable_reentrant: false
+
+# support eager, sdpa, flash_attention_2, flash_attention_3, veomni_flash_attention_2_with_sp,
+# veomni_flash_attention_3_with_sp and native-sparse
+attn_implementation: flash_attention_2
+
+# eager or fused
+moe_implementation: fused
+
+# Kernel backends consumed by VeOmni's per-model device_patch
+# (apply_per_model_patches → OpsImplementationConfig). Defaults match VeOmni's
+# defaults; set rms_norm_implementation=triton + rotary_pos_emb_implementation=triton
+# on DeepSeek-V3 / Moonlight to keep the FSDP actor bitwise-aligned with vexact's
+# rollout. See VeOmni docs/design/kernel_selection.md for the full backend matrix.
+cross_entropy_loss_implementation: eager
+rms_norm_implementation: eager
+swiglu_mlp_implementation: eager
+rotary_pos_emb_implementation: eager
+rms_norm_gated_implementation: eager
+causal_conv1d_implementation: eager
+chunk_gated_delta_rule_implementation: eager
+load_balancing_loss_implementation: eager
+
+force_use_huggingface: false
+
+activation_gpu_limit: 0.0
+
+# List of basic modules to use
+basic_modules: []
+
+# MoE expert-load monitor interval. When > 0, attach VeOmni's MoERouterMonitor.
+# Scalar metrics flow through Tracking; heatmap images go to wandb on rank 0.
+moe_load_balance_monitor_interval: 0
+
+router_replay:
+
+  # Target dataclass for this configuration
+  _target_: verl.workers.config.EngineRouterReplayConfig
+
+  # Router replay mode: disabled, R2, R3
+  # - R2: record top-k indices in compute_log_prob (forward-only) and
+  #       replay them in the actor update. No rollout-side change required.
+  # - R3: record top-k indices at the rollout backend and replay them in
+  #       both compute_log_prob and the actor update. Requires
+  #       ``rollout.enable_rollout_routing_replay=True`` and rollout backend
+  #       support for returning the selected indices.
+  mode: disabled

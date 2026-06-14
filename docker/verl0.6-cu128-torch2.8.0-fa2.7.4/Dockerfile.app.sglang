@@ -1,0 +1,4 @@
+FROM verlai/verl:base-verl0.6-cu128-cudnn9.8-torch2.8.0-fa2.7.4
+
+RUN pip install --no-cache-dir "sglang[all]==0.5.2"
+RUN pip install --no-cache-dir "torch-memory-saver==0.0.9rc1"

@@ -1,0 +1,34 @@
+# Options for the npu profiler
+options:
+
+  # Storage path of collected data.
+  save_path: ./profiler_data
+
+  # The roles that will be profiled. Only takes effect in discrete mode.
+  # optional values: all, rollout_generate, actor_compute_log_prob, actor_update and ref_compute_log_prob.
+  # "all" means all roles will be profiled.
+  roles: ["all"]
+
+  # Collection level, optional values: level_none, level0, level1, level2.
+  level: level0
+
+  # Whether to enable memory analysis.
+  with_memory: False
+
+  # Whether to record tensor shape.
+  record_shapes: False
+
+  # Whether to record Device-side performance data.
+  with_npu: True
+
+  # Whether to record Host-side performance data.
+  with_cpu: True
+
+  # Whether to record Python call stack information.
+  with_module: False
+
+  # Whether to record operator call stack information.
+  with_stack: False
+
+  # Whether to automatically parse the data.
+  analysis: True

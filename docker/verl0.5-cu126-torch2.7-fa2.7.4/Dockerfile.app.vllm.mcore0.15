@@ -1,0 +1,39 @@
+# Start from the verl base image
+# Dockerfile.base
+FROM iseekyan/verl:base-verl0.5-cu126-cudnn9.8-torch2.7.1-fa2.7.4-h100
+
+# Define environments
+ENV MAX_JOBS=32
+ENV VLLM_WORKER_MULTIPROC_METHOD=spawn
+ENV DEBIAN_FRONTEND=noninteractive
+ENV NODE_OPTIONS=""
+ENV PIP_ROOT_USER_ACTION=ignore
+ENV HF_HUB_ENABLE_HF_TRANSFER="1"
+
+# Install torch-2.7.1+cu126 + vllm-0.10.0
+RUN pip install --resume-retries 999 --no-cache-dir vllm==0.10.0
+
+# Fix packages
+# transformers 4.54.0 still not support
+RUN pip install --no-cache-dir "tensordict==0.6.2" "transformers[hf_xet]>=4.55.4" accelerate datasets peft hf-transfer \
+    "numpy<2.0.0" "pyarrow>=19.0.1" pandas \
+    ray[default] codetiming hydra-core pylatexenc qwen-vl-utils wandb dill pybind11 liger-kernel mathruler blobfile xgrammar \
+    pytest py-spy pyext pre-commit ruff
+
+RUN pip uninstall -y pynvml nvidia-ml-py && \
+    pip install --resume-retries 999 --no-cache-dir --upgrade "nvidia-ml-py>=12.560.30" "fastapi[standard]>=0.115.0" "optree>=0.13.0" "pydantic>=2.9" "grpcio>=1.62.1"
+
+RUN pip install --resume-retries 999 --no-cache-dir nvidia-cudnn-cu12==9.8.0.87
+
+# Install TransformerEngine
+RUN export NVTE_FRAMEWORK=pytorch && pip3 install --resume-retries 999 --no-deps --no-cache-dir --no-build-isolation git+https://github.com/NVIDIA/TransformerEngine.git@release_v2.7
+RUN pip install onnxscript
+
+# Install Megatron-LM
+RUN pip3 install --no-deps --no-cache-dir --no-build-isolation git+https://github.com/NVIDIA/Megatron-LM.git@core_v0.15.0rc4
+
+# Install mbridge
+RUN pip3 install --no-cache-dir mbridge==v0.15.0
+
+# Fix qwen vl
+RUN pip3 install --no-cache-dir --no-deps trl

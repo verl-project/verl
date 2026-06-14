@@ -1,0 +1,313 @@
+# Format checks enforced on CI:
+# 1. Comments must appear above each field.
+# 2. There must be a blank line between each field.
+# 3. Inline comments (after a field on the same line) are not allowed.
+# 4. Indentation level is respected for nested fields.
+
+# Target class for this configuration
+_target_: verl.workers.config.ActorConfig
+
+# Number of rollouts per update (mirrors actor rollout_n)
+rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
+
+# the abstract actor configs
+# fsdp, fsdp2 or megatron. must be set.
+strategy: ???
+
+# Split each sample into sub-batches of this size for PPO
+ppo_mini_batch_size: 256
+
+# [Deprecated] Global micro batch size
+ppo_micro_batch_size: null
+
+# Local per-GPU micro batch size
+ppo_micro_batch_size_per_gpu: null
+
+# Whether to automatically adjust batch size at runtime
+# oc.select: the default val for ref.log_prob_use_dynamic_bsz
+use_dynamic_bsz: false
+
+# Max tokens per GPU in one PPO batch; affects gradient accumulation
+# Typically it should be: n * ${data.max_prompt_length} + ${data.max_response_length}
+# oc.select: the default val for ref.log_prob_max_token_len_per_gpu
+ppo_max_token_len_per_gpu: 16384
+
+# PPO clip ratio
+clip_ratio: 0.2
+
+# Lower bound for asymmetric clipping (used in dual-clip PPO)
+clip_ratio_low: 0.2
+
+# Upper bound for asymmetric clipping (used in dual-clip PPO)
+clip_ratio_high: 0.2
+
+# Positive and negative tau for smoothing function in SAPO (https://arxiv.org/pdf/2511.20347)
+# default values used in the paper with Qwen3-30B-A3B-Base
+tau_pos: 1.0
+
+# negative tau for smoothing function in SAPO
+tau_neg: 1.05
+
+# Whether to freeze vision model, if set true, it will be freeze vision model
+freeze_vision_tower: false
+
+# policy loss config
+policy_loss:
+
+  # # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.workers.config.PolicyLossConfig
+
+  # Loss function mode: vanilla / clip-cov / kl-cov /gpg from https://arxiv.org/abs/2505.22617
+  loss_mode: "vanilla"
+
+  # Ratio of tokens to be clipped for clip-cov loss
+  clip_cov_ratio: 0.0002
+
+  # Lower bound for clip-cov loss
+  clip_cov_lb: 1.0
+
+  # Upper bound for clip-cov loss
+  clip_cov_ub: 5.0
+
+  # Ratio of tokens to be applied kl penalty for kl-cov loss
+  kl_cov_ratio: 0.0002
+
+  # KL divergence penalty coefficient
+  ppo_kl_coef: 0.1
+
+# Constant C in Dual-clip PPO; clips when advantage < 0 and ratio > C
+clip_ratio_c: 3.0
+
+# Loss aggregation mode: "token-mean", "seq-mean-token-sum", "seq-mean-token-mean", or "seq-mean-token-sum-norm"
+loss_agg_mode: token-mean
+
+# Scale factor for "seq-mean-token-sum-norm" loss aggregation mode.
+# If null, uses response_length. Set to a constant to ensure consistent normalization.
+loss_scale_factor: null
+
+# Entropy regularization coefficient in PPO loss
+entropy_coeff: 0
+
+# When true, the actor forward will request entropy from the model
+calculate_entropy: false
+
+# This computes Σπ² needed for the Logit-Gradient Norm proxy W(τ) = Σ_t[1 - 2π_t + Σπ²]
+# c.f. https://yingru.notion.site/The-Optimal-Token-Baseline-399211a558b782cfa936014c0d42dfb8
+calculate_sum_pi_squared: false
+
+# Whether to use KL loss instead of KL reward penalty. True for GRPO
+use_kl_loss: false
+
+# Whether to enable PrefixGrouper shared-prefix forward
+use_prefix_grouper: false
+
+# Whether to use torch.compile()
+# oc.select: the default val for ref.use_torch_compile
+use_torch_compile: true
+
+# KL loss coefficient when use_kl_loss is enabled. For GRPO
+kl_loss_coef: 0.001
+
+# Type of KL divergence loss. Options: "kl"(k1), "abs", "mse"(k2), "low_var_kl"(k3), "full"
+kl_loss_type: low_var_kl
+
+# Number of PPO epochs per batch
+ppo_epochs: 1
+
+# Shuffle training data across PPO epochs
+shuffle: false
+
+# The seed used to construct mini-batch
+data_loader_seed: 42
+
+# checkpoint configs
+checkpoint:
+
+  # Target dataclass for this configuration
+  _target_: verl.trainer.config.CheckpointConfig
+
+  # What to include in saved checkpoints
+  # with 'hf_model' you can save whole model as hf format, now only use sharded model checkpoint to save space
+  save_contents: ['model', 'optimizer', 'extra']
+
+  # For more flexibility, you can specify the contents to load from the checkpoint.
+  # .xxx refers to the local variable xxx from the same level of hierarchy similar to python pkg
+  load_contents: ${.save_contents}
+
+  # Whether to save checkpoints asynchronously. Only effective for Megatron as of now.
+  async_save: False
+
+  # Whether to perform strict validation during weight export
+  strict: True
+
+# optimizer configs
+optim:
+
+  # Learning rate
+  lr: 1e-6
+
+  # Warmup steps ratio (used if lr_warmup_steps is 0 or negative)
+  lr_warmup_steps_ratio: 0.0
+
+  # Total training steps (must be overridden at runtime)
+  total_training_steps: -1
+
+  # Weight decay
+  weight_decay: 0.01
+
+  # Prioritized. None, 0 or Negative values mean delegating to lr_warmup_steps_ratio.
+  lr_warmup_steps: -1
+
+
+# Whether to use custom fused kernels (e.g., FlashAttention, fused MLP)
+use_fused_kernels: ${oc.select:actor_rollout_ref.model.use_fused_kernels,false}
+
+# profile the actor model in `update_policy` 
+profiler:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.utils.profiler.ProfilerConfig
+
+  # profiler tool, default same as profiler.tool in global config
+  # choices: nsys, npu, torch
+  tool: ${oc.select:global_profiler.tool,null}
+
+  # whether enable profile on Actor
+  enable: False
+  
+  # Whether to profile all ranks.
+  all_ranks: False
+
+  # The ranks that will be profiled. [] or [0,1,...]
+  ranks: []
+
+  # profile results saving path
+  save_path: ${oc.select:global_profiler.save_path,null}
+
+  # specific tool config which only related to the role
+  tool_config:
+
+    # nsys tool config
+    nsys:
+
+      # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+      _target_: verl.utils.profiler.config.NsightToolConfig
+    
+      # True for each task has its own database, False for all tasks in one training step share one database.
+      discrete: ${oc.select:global_profiler.global_tool_config.nsys.discrete}
+    
+    # npu config
+    npu:
+
+      # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+      _target_: verl.utils.profiler.config.NPUToolConfig
+
+      # Contents to profile, can be empty
+      # options: npu, cpu, memory, shapes, module, stack
+      contents: []
+
+      # Collection level, optional values: level_none, level0, level1, level2.
+      level: "level0"
+
+      # Whether to automatically parse the data.
+      analysis: True
+
+      # True for each task has its own database, False for all tasks in one training step share one database.
+      discrete: False
+    
+    # torch profiler config
+    torch:
+
+      # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+      _target_: verl.utils.profiler.config.TorchProfilerToolConfig
+
+      # Contents to profile, can be empty
+      # options: cuda, cpu, memory, shapes, stack
+      contents: []
+
+      # True for each task has its own database, False for all tasks in one training step share one database.
+      discrete: false
+
+    # torch memory profiler config
+    torch_memory:
+
+      # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+      _target_: verl.utils.profiler.config.TorchMemoryToolConfig
+
+      # Maximum number of memory allocation entries to track
+      trace_alloc_max_entries: ${oc.select:global_profiler.global_tool_config.torch_memory.trace_alloc_max_entries,100000}
+
+      # Stack trace depth for memory allocations
+      stack_depth: ${oc.select:global_profiler.global_tool_config.torch_memory.stack_depth,32}
+
+    # msprobe precision debugger config
+    precision_debugger:
+
+      # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+      _target_: verl.utils.profiler.config.PrecisionDebuggerToolConfig
+
+      # Path to msprobe config json
+      config_path: ${oc.select:global_profiler.global_tool_config.precision_debugger.config_path,null}
+
+      # Deprecated and ignored. Use global_profiler.steps.
+      steps: null
+
+      # Profile stages
+      # Supported stages: actor_update, actor_compute_log_prob, ref_compute_log_prob,
+      # compute_values, critic_update, compute_rm_score
+      stages: ${oc.select:global_profiler.global_tool_config.precision_debugger.stages,null}
+
+      # Whether to fail on unknown stage or missing msprobe
+      strict: ${oc.select:global_profiler.global_tool_config.precision_debugger.strict,False}
+
+# Router replay configuration for MoE models
+router_replay:
+
+  # Target dataclass for this configuration
+  _target_: verl.workers.config.RouterReplayConfig
+
+  # Router replay mode: disabled, R2, R3
+  # - R2: Use R2 routing strategy (record mode)
+  # - R3: Use R3 routing strategy (record mode)
+  mode: disabled
+
+  # File path to save recorded routing decisions
+  # Required when mode is 'record', 'R2', or 'R3'
+  record_file: null
+
+  # File path to load recorded routing decisions for replay
+  # Required when mode is 'replay'
+  replay_file: null
+
+# QAT (Quantization-Aware Training) configuration
+# When enabled:
+#   - QAT is automatically applied to actor model during training
+#   - Fused scales (QKV/GateUp) are automatically enabled for training-inference consistency
+#   - Fast quantization is used when syncing weights to vLLM rollout
+# Supported modes: "w4a16" (NVFP4 weight-only)
+# Note: "w4a4" mode is included in the code but currently has KL divergence issues and is NOT recommended for use.
+# For usage examples, see: https://github.com/verl-project/verl-recipe/blob/main/qat/README.md
+qat:
+
+  # Whether to enable QAT
+  enable: false
+
+  # Quantization mode: "w4a16" (weight-only). "w4a4" is experimental and not recommended.
+  mode: "w4a16"
+
+  # Quantization group size (NVFP4 requires 16)
+  group_size: 16
+
+  # Patterns to ignore (e.g., lm_head, embed_tokens)
+  ignore_patterns:
+
+    - "lm_head"
+    - "embed_tokens"
+    - "re:.*mlp.gate$"
+
+  # Activation observer for W4A4 mode: "static_minmax", "memoryless_minmax", or "minmax"
+  activation_observer: "static_minmax"
+
+  # Path to vLLM quantization config JSON file
+  quantization_config_path: null
+

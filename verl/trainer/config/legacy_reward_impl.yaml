@@ -1,0 +1,46 @@
+custom_reward_function:
+  path: null
+  name: null
+
+reward_model:
+  num_workers: null
+  reward_manager: null
+  enable: null
+  enable_resource_pool: null
+  n_gpus_per_node: null
+  nnodes: null
+  reward_loop_source: null
+  reward_loop_module_path: null
+  reward_loop_class_name: null
+  model:
+    path: null
+    external_lib: null
+    trust_remote_code: null
+  rollout:
+    name: null
+    dtype: null
+    gpu_memory_utilization: null
+    enforce_eager: null
+    cudagraph_capture_sizes: null
+    free_cache_engine: null
+    data_parallel_size: null
+    expert_parallel_size: null
+    tensor_model_parallel_size: null
+    max_num_batched_tokens: null
+    max_model_len: null
+    max_num_seqs: null
+    load_format: null
+    engine_kwargs: null
+    limit_images: null
+    enable_chunked_prefill: null
+    enable_prefix_caching: null
+    disable_log_stats: null
+    skip_tokenizer_init: null
+
+    prompt_length: null
+    response_length: null
+
+sandbox_fusion:
+  url: null
+  max_concurrent: null
+  memory_limit_mb: null

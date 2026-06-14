@@ -1,0 +1,143 @@
+# Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+_target_: verl.workers.config.McoreEngineConfig
+
+# Whether to offload model parameters to CPU
+param_offload: False
+
+# Whether to offload gradients to CPU
+grad_offload: False
+
+# Whether to offload optimizer state to CPU
+optimizer_offload: False
+
+# tensor model parallel size
+tensor_model_parallel_size: 1
+
+# expert model parallel size
+expert_model_parallel_size: 1
+
+# expert tensor parallel size (null to be same as TP)
+expert_tensor_parallel_size: null
+
+# pipeline model parallel size
+pipeline_model_parallel_size: 1
+
+# virtual pipeline model parallel size
+virtual_pipeline_model_parallel_size: null
+
+# context parallel size
+context_parallel_size: 1
+
+# sequence parallel
+sequence_parallel: True
+
+# Whether to use distributed optimizer
+use_distributed_optimizer: True
+
+# Whether to use distributed checkpointing
+use_dist_checkpointing: False
+
+# distributed checkpointing path
+dist_checkpointing_path: null
+
+# Whether to use hybrid context parallelism
+dynamic_context_parallel: False
+
+# Maximum sequence length per DPxCP rank
+max_seqlen_per_dp_cp_rank: null
+
+# distributed checkpointing prefix, e.g. Nemo2 will append prefix 'module.' to the state dict keys
+dist_checkpointing_prefix: ''
+
+# Make optimizer distributed checkpoint fully reshardable (TP/PP/EP/DP) as opposed to plain DP reshardability
+dist_ckpt_optim_fully_reshardable: False
+
+# Use as little memory as possible during save and load by using Gloo.
+# Has effect only when `dist_ckpt_optim_fully_reshardable` is enabled
+distrib_optim_fully_reshardable_mem_efficient: False
+
+# oc.select: default val for ref.megatron.seed
+seed: 42
+
+# Allow to override Distributed Data Parallel (DDP) config
+override_ddp_config: {}
+
+# additional transformer config like: num_layers_in_first(/last)_pipeline_stage
+# oc.select: default val for ref.megatron.override_transformer_config
+override_transformer_config:
+  # Recompute configuration, same as in megatron.training.arguments
+  # default use minimal performance-interference recompute methods
+  # Recompute granualarity, choices: ["full", "selective"]
+  recompute_granularity: null
+
+  # Recompute modules, multiple choices: ["core_attn", "moe_act", "layernorm", "mla_up_proj", "mlp", "moe"]
+  # Please use correct module in matched model
+  recompute_modules: ["core_attn"]
+
+  # 'uniform', 'block'
+  # 'uniform' divides the total number of transformer layers and checkpoints the input activation of each chunk
+  # 'block' checkpoints the specified number of layers per pipeline stage at the specified granularity
+  recompute_method: null
+
+  # 'full' will checkpoint the entire transformer layer and 'selective' only checkpoints memory intensive part of attention
+  recompute_num_layers: null
+
+  # Attention backend to use (flash,fused,unfused,local,auto). Defaults to auto in mcore, flash in verl
+  attention_backend: flash
+
+override_mcore_model_config: {}
+
+# oc.select: default val for ref.megatron.use_mbridge
+use_mbridge: True
+
+# oc.select: default val for ref.megatron.vanilla_mbridge
+vanilla_mbridge: True
+
+# whether to use thd format (sequence packing), if not, use bshd format, padding the input_ids to the longest sequence length
+use_remove_padding: True
+
+# Whether to use Megatron-FSDP (Zero-3 sharding)
+use_megatron_fsdp: False
+
+# whether to use forward only
+forward_only: False
+
+# Mixed precision training param dtype
+dtype: bfloat16 # ["bfloat16", "float16"]
+
+# Router replay configuration for MoE models
+router_replay:
+
+  # Target dataclass for this configuration
+  _target_: verl.workers.config.EngineRouterReplayConfig
+
+  # Router replay mode: disabled, R2, R3
+  # - R2: Use R2 routing strategy (record mode)
+  # - R3: Use R3 routing strategy (record mode)
+  mode: disabled
+
+  # File path to save recorded routing decisions
+  # Required when mode is 'record', 'R2', or 'R3'
+  record_file: null
+
+  # File path to load recorded routing decisions for replay
+  # Required when mode is 'replay'
+  replay_file: null
+
+# QAT (Quantization-Aware Training) configuration
+qat:
+  _target_: verl.workers.config.QATEngineConfig
+  # Whether to enable QAT
+  enable: false
+  # Quantization mode: "w4a16" (weight-only FP4) or "w4a4" (weight + activation FP4)
+  mode: "w4a16"
+  # Group size for blockwise quantization (NVFP4 requires 16)
+  group_size: 16
+  # Module name patterns to exclude from quantization (fnmatch style for Megatron)
+  ignore_patterns:
+    - "lm_head"
+    - "*mlp.gate"
+  # Activation observer strategy (W4A4 only): "static_minmax", "memoryless_minmax", "minmax"
+  activation_observer: null
+  # Path to quantization config JSON for vLLM weight export
+  quantization_config_path: null

@@ -1,0 +1,6 @@
+# [Deprecated] This file is for backward compatibility, please use ppo_trainer.yaml instead.
+# python3 -m verl.trainer.main_ppo model_engine=megatron ...
+defaults:
+  - ppo_trainer
+  - override model_engine: megatron
+  - _self_

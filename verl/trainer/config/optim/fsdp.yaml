@@ -1,0 +1,53 @@
+# Target class for this configuration
+_target_: verl.workers.config.FSDPOptimizerConfig
+
+# Optimizer class name (e.g., "AdamW", "AdamW8bit", "_AdamW", "Adam")
+optimizer: AdamW
+
+# Module path to import optimizer
+# Examples: "torch.optim", "torchao.optim", "bitsandbytes.optim"
+optimizer_impl: torch.optim
+
+# Learning rate
+lr: 1e-3
+
+# LR warmup steps ratio
+lr_warmup_steps_ratio: 0.0
+
+# Total training steps
+total_training_steps: -1
+
+# Weight decay
+weight_decay: 0.01
+
+# LR warmup steps
+lr_warmup_steps: -1
+
+# Betas for Adam optimizer
+betas: [0.9, 0.999]
+
+# Clip gradient
+clip_grad: 1.0
+
+# Minimum LR ratio for cosine schedule
+min_lr_ratio: 0.0
+
+# Number of cosine cycles in LR schedule
+num_cycles: 0.5
+
+# LR scheduler type: "constant" or "cosine"
+lr_scheduler_type: constant
+
+# Whether the LR schedule uses 0-indexed steps
+zero_indexed_step: true
+
+# deprecated
+warmup_style: null
+
+# Additional optimizer-specific keyword arguments
+# Example for torchao with bf16 stochastic rounding:
+# optimizer_impl: torchao.optim
+# optimizer: _AdamW
+# override_optimizer_config:
+#   bf16_stochastic_round: true
+override_optimizer_config: null

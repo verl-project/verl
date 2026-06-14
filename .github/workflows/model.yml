@@ -1,0 +1,187 @@
+# # Tests layout
+
+# Each folder under tests/ corresponds to a test category for a sub-namespace in verl. For instance:
+# - `tests/trainer` for testing functionality related to `verl/trainer`
+# - `tests/models` for testing functionality related to `verl/models`
+# - ...
+
+# There are a few folders with `special_` prefix, created for special purposes:
+# - `special_distributed`: unit tests that must run with multiple GPUs
+# - `special_e2e`: end-to-end tests with training/generation scripts
+# - `special_npu`: tests for NPUs
+# - `special_sanity`: a suite of quick sanity tests
+# - `special_standalone`: a set of test that are designed to run in dedicated environments
+
+# Accelerators for tests
+# - By default tests are run with GPU available, except for the ones under `special_npu`, and any test script whose name ends with `on_cpu.py`.
+# - For test scripts with `on_cpu.py` name suffix would be tested on CPU resources in linux environment.
+
+# # Workflow layout
+
+# All CI tests are configured by yaml files in `.github/workflows/`. Here's an overview of all test configs:
+# 1. A list of always triggered CPU sanity tests: `check-pr-title.yml`, `secrets_scan.yml`, `check-pr-title,yml`, `pre-commit.yml`, `doc.yml`
+# 2. Some heavy multi-GPU unit tests, such as `model.yml`, `vllm.yml`, `sgl.yml`
+# 3. End-to-end tests: `e2e_*.yml`
+# 4. Unit tests
+#   - `cpu_unit_tests.yml`, run pytest on all scripts with file name pattern `tests/**/test_*_on_cpu.py`
+#   - `gpu_unit_tests.yml`, run pytest on all scripts with file without the `on_cpu.py` suffix.
+#   - Since cpu/gpu unit tests by default runs all tests under `tests`, please make sure tests are manually excluded in them when
+#     - new workflow yaml is added to `.github/workflows`
+#     - new tests are added to workflow mentioned in 2.
+# name: Check PR Title
+
+name: model
+
+on:
+  # Trigger the workflow on push or pull request,
+  # but only for the main branch
+  push:
+    branches:
+      - main
+      - v0.*
+  pull_request:
+    branches:
+      - main
+      - v0.*
+    paths:
+      - "verl/**/*.py"
+      # Entrypoints
+      - ".github/workflows/model.yml"
+      - "tests/special_distributed/test_fsdp_ckpt.py"
+      - "tests/special_distributed/test_tensor_dict.py"
+      - "tests/models/**"
+      - "tests/special_distributed/run_all.sh"
+
+# Declare permissions just read content.
+permissions:
+  contents: read
+
+# Cancel jobs on the same ref if a new one is triggered
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm020.dev1"
+  DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
+
+jobs:
+  setup:
+    if: github.repository_owner == 'verl-project'
+    runs-on: ubuntu-latest
+    outputs:
+      runner-label: ${{ steps.create-runner.outputs.runner-label }}
+      mlp-task-id: ${{ steps.create-runner.outputs.mlp-task-id }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: create-runner
+        uses: volcengine/vemlp-github-runner@v1
+        with:
+          mode: "create"
+          faas-url: "${{ env.DYNAMIC_RUNNER_ENDPOINT }}"
+          mlp-image: "${{ env.IMAGE }}"
+
+  model_rmpad:
+    needs: setup
+    runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
+    timeout-minutes: 20 # Increase this timeout value as needed
+    env:
+      HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
+      NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
+      HF_ENDPOINT: "https://hf-mirror.com"
+      HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - name: Install the current repository and upgrade to latest transformers
+        run: |
+          pip3 install -r requirements-test.txt
+          pip3 install -r requirements.txt
+          pip3 install --no-deps -e .
+      - name: Check final pip list
+        run: |
+          pip3 list
+      - name: Running rmpad model tests on 8 L20 GPUs + flash_attn 2.5.8
+        run: |
+          pytest -s tests/models/test_transformer.py
+      - name: Running rmpad model tests on 8 L20 GPUs + latest flash_attn
+        run: |
+          pytest -s tests/models/test_transformer.py
+      - name: Running FSDP rmpad model tests on 8 L20 GPUs + latest flash_attn
+        run: |
+          STRATEGY=fsdp torchrun --nproc_per_node=8 tests/special_distributed/test_fsdp_ckpt.py
+      - name: Running transformers ulysses tests on 8 L20 GPUs + latest transformers
+        run: |
+          torchrun --nproc_per_node=8 -m pytest tests/models/test_transformers_ulysses.py
+      - name: Running transformers ulysses tests on 8 L20 GPUs + transformers 4.54.1
+        run: |
+          pip3 install transformers==4.54.1
+          torchrun --nproc_per_node=8 -m pytest tests/models/test_transformers_ulysses.py
+      - name: Run distributed test
+        run: |
+          bash tests/special_distributed/run_all.sh
+      - name: Clean up and recover transformers
+        run: |
+          pip3 install --upgrade "transformers==5.3.0"
+
+  # TODO: Move this back to model_rmpad once FSDP2 is stable.
+  # NOTE: List as an independent job to make rerun easier.
+  model_rmpad_fsdp2_unstable:
+    needs: setup
+    runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
+    timeout-minutes: 20 # Increase this timeout value as needed
+    env:
+      HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
+      NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
+      HF_ENDPOINT: "https://hf-mirror.com"
+      HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - name: Install the current repository and upgrade to latest transformers/flash_attn
+        run: |
+          pip3 install -r requirements-test.txt
+          pip3 install --no-deps -e .
+      - name: Running FSDP2 rmpad model tests on 8 L20 GPUs + latest flash_attn
+        run: |
+          STRATEGY=fsdp2 torchrun --nproc_per_node=8 tests/special_distributed/test_fsdp_ckpt.py
+
+  model_engine:
+    needs: setup
+    runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
+    timeout-minutes: 20 # Increase this timeout value as needed
+    env:
+      HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
+      NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
+      HF_ENDPOINT: "https://hf-mirror.com"
+      HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - name: Install the current repository
+        run: |
+          pip3 install -r requirements-test.txt
+          pip3 install --no-deps -e .
+          pip3 install --upgrade "accelerate>=1.13.0"
+      - name: Download model config files
+        run: |
+          hf download Qwen/Qwen2.5-0.5B-Instruct --local-dir $HOME/models/Qwen/Qwen2.5-0.5B-Instruct
+      - name: Running mcore engine tests on 8 L20 GPUs
+        run: |
+          ray stop --force
+          pytest -s -x tests/models/test_engine.py
+
+  cleanup:
+    runs-on: ubuntu-latest
+    needs: [setup, model_rmpad, model_rmpad_fsdp2_unstable, model_engine]
+    if: always()
+    steps:
+      - id: destroy-runner
+        uses: volcengine/vemlp-github-runner@v1
+        with:
+          mode: "destroy"
+          faas-url: "${{ env.DYNAMIC_RUNNER_ENDPOINT }}"
+          mlp-task-id: "${{ needs.setup.outputs.mlp-task-id }}"

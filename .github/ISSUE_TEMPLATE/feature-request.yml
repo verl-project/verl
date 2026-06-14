@@ -1,0 +1,32 @@
+# modified from https://github.com/huggingface/transformers/blob/main/.github/ISSUE_TEMPLATE/feature-request.yml?plain=1
+name: "\U0001F680 Feature request"
+description: Submit a proposal/request for a new verl feature
+labels: [ "Feature request" ]
+body:
+  - type: textarea
+    id: feature-request
+    validations:
+      required: true
+    attributes:
+      label: Feature request
+      description: |
+        A clear and concise description of the feature proposal. Please provide a link to the paper and code in case they exist.
+
+  - type: textarea
+    id: motivation
+    validations:
+      required: true
+    attributes:
+      label: Motivation
+      description: |
+        Please outline the motivation for the proposal. Is your feature request related to a problem? e.g., I'm always frustrated when [...]. If this is related to another GitHub issue, please link here too.
+
+
+  - type: textarea
+    id: contribution
+    validations:
+      required: true
+    attributes:
+      label: Your contribution
+      description: |
+        Is there any way that you could help, e.g. by submitting a PR? Make sure to read the CONTRIBUTING.MD [readme](https://github.com/verl-project/verl/blob/main/CONTRIBUTING.md)

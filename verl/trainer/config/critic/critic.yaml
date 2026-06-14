@@ -1,0 +1,179 @@
+# Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+_target_: verl.workers.config.CriticConfig
+
+# Number of rollouts per update (mirrors actor rollout_n)
+rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
+
+# fsdp or fsdp2 strategy used for critic model training
+strategy: ???
+
+# whether to enable the critic worker.
+# by default it is only enabled if advantage estimator is gae
+# set it to True manually if you always want to enable critic worker
+enable: null
+
+# optimizer configs
+optim:
+
+  # Learning rate
+  lr: 1e-5
+
+  # Warmup steps ratio; total steps will be injected at runtime
+  lr_warmup_steps_ratio: 0.0
+
+  # Total training steps (must be overridden at runtime)
+  total_training_steps: -1
+
+  # Weight decay
+  weight_decay: 0.01
+
+  # Prioritized. None, 0 or Negative values mean delegating to lr_warmup_steps_ratio.
+  lr_warmup_steps: -1
+
+# PPO mini-batch size per update
+ppo_mini_batch_size: ${oc.select:actor_rollout_ref.actor.ppo_mini_batch_size,256}
+
+# [Deprecated] Global micro batch size
+ppo_micro_batch_size: null
+
+# Local per-GPU micro batch size
+ppo_micro_batch_size_per_gpu: ${oc.select:.ppo_micro_batch_size,null}
+
+# Whether to automatically adjust batch size at runtime
+use_dynamic_bsz: ${oc.select:actor_rollout_ref.actor.use_dynamic_bsz,false}
+
+# Max tokens per GPU in one PPO batch (doubled for critic)
+ppo_max_token_len_per_gpu: 32768
+
+# Max token length per GPU in forward pass
+forward_max_token_len_per_gpu: ${.ppo_max_token_len_per_gpu}
+
+# Number of PPO epochs per batch
+ppo_epochs: ${oc.select:actor_rollout_ref.actor.ppo_epochs,1}
+
+# Shuffle training data across PPO epochs
+shuffle: ${oc.select:actor_rollout_ref.actor.shuffle,false}
+
+# The seed used to construct mini-batch
+data_loader_seed: 42
+
+# PPO value function clipping range
+cliprange_value: 0.5
+
+# Loss aggregation mode: "token-mean", "seq-mean-token-sum", or "seq-mean-token-mean"
+loss_agg_mode: ${oc.select:actor_rollout_ref.actor.loss_agg_mode,token-mean}
+
+# checkpoint configs
+checkpoint:
+
+  # Target dataclass for this configuration
+  _target_: verl.trainer.config.CheckpointConfig
+
+  # What to include in saved checkpoints
+  # with 'hf_model' you can save whole model as hf format, now only use sharded model checkpoint to save space
+  save_contents: ['model', 'optimizer', 'extra']
+
+  # What to include when loading checkpoints
+  load_contents: ${.save_contents}
+
+  # Whether to save checkpoints asynchronously. Only effective for Megatron as of now.
+  async_save: False
+
+# profile the critic model in `update_critic`
+profiler:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.utils.profiler.ProfilerConfig
+
+  # profiler tool, default same as profiler.tool in global config
+  # choices: nsys, npu, torch, torch_memory
+  tool: ${oc.select:global_profiler.tool,null}
+
+  # whether enable profile on Critic
+  enable: False
+
+  # Whether to profile all ranks.
+  all_ranks: False
+
+  # The ranks that will be profiled. [] or [0,1,...]
+  ranks: []
+
+  # profile results saving path
+  save_path: ${oc.select:global_profiler.save_path,null}
+
+  # specific tool config which only related to the role
+  tool_config:
+
+    # nsys tool config
+    nsys:
+
+      # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+      _target_: verl.utils.profiler.config.NsightToolConfig
+    
+      # True for each task has its own database, False for all tasks in one training step share one database.
+      discrete: ${oc.select:global_profiler.global_tool_config.nsys.discrete}
+    
+    # npu config
+    npu:
+
+      # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+      _target_: verl.utils.profiler.config.NPUToolConfig
+
+      # Contents to profile, can be empty
+      # options: npu, cpu, memory, shapes, module, stack
+      contents: []
+
+      # Collection level, optional values: level_none, level0, level1, level2.
+      level: "level0"
+
+      # Whether to automatically parse the data.
+      analysis: True
+
+      # True for each task has its own database, False for all tasks in one training step share one database.
+      discrete: False
+    
+    # torch profiler config
+    torch:
+
+      # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+      _target_: verl.utils.profiler.config.TorchProfilerToolConfig
+
+      # Contents to profile, can be empty
+      # options: cuda, cpu, memory, shapes, stack
+      contents: []
+
+      # True for each task has its own database, False for all tasks in one training step share one database.
+      discrete: false
+
+    # torch memory profiler config
+    torch_memory:
+
+      # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+      _target_: verl.utils.profiler.config.TorchMemoryToolConfig
+
+      # Maximum number of memory allocation entries to track
+      trace_alloc_max_entries: ${oc.select:global_profiler.global_tool_config.torch_memory.trace_alloc_max_entries,100000}
+
+      # Stack trace depth for memory allocations
+      stack_depth: ${oc.select:global_profiler.global_tool_config.torch_memory.stack_depth,32}
+
+    # msprobe precision debugger config
+    precision_debugger:
+
+      # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+      _target_: verl.utils.profiler.config.PrecisionDebuggerToolConfig
+
+      # Path to msprobe config json
+      config_path: ${oc.select:global_profiler.global_tool_config.precision_debugger.config_path,null}
+
+      # Deprecated and ignored. Use global_profiler.steps.
+      steps: null
+
+      # Profile stages
+      # Supported stages: actor_update, actor_compute_log_prob, ref_compute_log_prob,
+      # compute_values, critic_update, compute_rm_score
+      stages: ${oc.select:global_profiler.global_tool_config.precision_debugger.stages,null}
+
+      # Whether to fail on unknown stage or missing msprobe
+      strict: ${oc.select:global_profiler.global_tool_config.precision_debugger.strict,False}
+      

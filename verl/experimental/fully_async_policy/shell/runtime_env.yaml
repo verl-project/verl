@@ -1,0 +1,4 @@
+env_vars:
+  VLLM_USE_V1: "1"
+  NCCL_DEBUG: "INFO"
+  HYDRA_FULL_ERROR: "1"

@@ -1,0 +1,39 @@
+# Format checks enforced on CI:
+# 1. Comments must appear above each field.
+# 2. There must be a blank line between each field.
+# 3. Inline comments (after a field on the same line) are not allowed.
+# 4. Indentation level is respected for nested fields.
+
+# defaults specify the default config from each component
+defaults:
+
+  # fsdp optimizer config
+  - ../optim@optim: fsdp
+
+  # fsdp engine config
+  - ../engine@fsdp: fsdp
+
+  # dp actor config, inheriting from trainer/config/critic/critic.yaml
+  - critic
+
+  # load the reference default config, then apply the fields in the current yaml
+  - _self_
+
+# Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+_target_: verl.workers.config.FSDPCriticConfig
+
+# distribution strategy. Options: fsdp (deprecating), fsdp2
+strategy: fsdp
+
+# Forward-only batch size during inference (global)
+forward_micro_batch_size: ${oc.select:.ppo_micro_batch_size,null}
+
+# Forward-only batch size during inference (per GPU)
+forward_micro_batch_size_per_gpu: ${oc.select:.ppo_micro_batch_size_per_gpu,null}
+
+# Sequence parallelism size for Ulysses-style model parallelism
+# [DEPRECATED] use fsdp_config.ulysses_sequence_parallel_size instead
+ulysses_sequence_parallel_size: 1
+
+# Gradient clipping for critic updates
+grad_clip: 1.0

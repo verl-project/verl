@@ -1,0 +1,30 @@
+# defaults specify the default config from each component
+defaults:
+
+  # dp ref config, inheriting from trainer/config/ref/ref.yaml
+  - ref
+  
+  # fsdp engine config
+  - ../engine@fsdp_config: fsdp
+
+  # load the reference default config, then apply the fields in the current yaml
+  - _self_
+
+# Target class for this configuration
+_target_: verl.workers.config.FSDPActorConfig
+
+# fsdp config
+fsdp_config:
+
+  # ref model is forward only
+  forward_only: True
+
+# sequence parallel size
+# same as actor_rollout_ref.actor.ulysses_sequence_parallel_size if it exists, otherwise 1
+ulysses_sequence_parallel_size: ${oc.select:actor_rollout_ref.actor.ulysses_sequence_parallel_size,1}
+
+# calculate entropy with chunking to reduce memory peak
+entropy_from_logits_with_chunking: False
+
+# recompute entropy
+entropy_checkpointing: False

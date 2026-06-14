@@ -1,0 +1,140 @@
+# Number of rollouts per update (mirrors actor rollout_n)
+rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
+
+# actor_rollout_ref.ref: FSDP config same as actor. For models larger than 7B, it’s recommended to turn on offload for ref by default
+strategy: ${actor_rollout_ref.actor.strategy}
+
+# whether to enable torch.compile
+# same as actor_rollout_ref.actor.use_torch_compile if it exists, otherwise 1
+use_torch_compile: ${oc.select:actor_rollout_ref.actor.use_torch_compile,true}
+
+# [Will be deprecated, use log_prob_micro_batch_size_per_gpu]
+# The batch size for one forward pass in the computation of log_prob. Global batch size.
+log_prob_micro_batch_size: null
+
+# The batch size for one forward pass in the computation of log_prob. Local batch size per GPU.
+log_prob_micro_batch_size_per_gpu: null
+
+# enable dynamic batch size (sequence packing) for log_prob computation
+# same as actor_rollout_ref.actor.use_dynamic_bsz if it exists, otherwise false
+log_prob_use_dynamic_bsz: ${oc.select:actor_rollout_ref.actor.use_dynamic_bsz,false}
+
+# the max token length per GPU
+# same as actor_rollout_ref.actor.ppo_max_token_len_per_gpu if it exists, otherwise 16384
+log_prob_max_token_len_per_gpu: ${oc.select:actor_rollout_ref.actor.ppo_max_token_len_per_gpu,16384}
+
+# profile the ref model in `compute_log_prob`
+profiler:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.utils.profiler.ProfilerConfig
+
+  # choices: nsys, npu, torch, torch_memory
+  tool: ${oc.select:global_profiler.tool,null}
+
+  # whether enable profile on Ref
+  enable: False
+
+  # Whether to profile all ranks.
+  all_ranks: False
+
+  # The ranks that will be profiled. [] or [0,1,...]
+  ranks: []
+
+  # profile results saving path
+  save_path: ${oc.select:global_profiler.save_path,null}
+
+  # specific tool config which only related to the role
+  tool_config:
+
+    # nsys tool config
+    nsys:
+
+      # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+      _target_: verl.utils.profiler.config.NsightToolConfig
+
+      # True for each task has its own database, False for all tasks in one training step share one database.
+      discrete: ${oc.select:global_profiler.global_tool_config.nsys.discrete}
+
+    # npu config
+    npu:
+
+      # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+      _target_: verl.utils.profiler.config.NPUToolConfig
+
+      # Contents to profile, can be empty
+      # options: npu, cpu, memory, shapes, module, stack
+      contents: []
+
+      # Collection level, optional values: level_none, level0, level1, level2.
+      level: "level0"
+
+      # Whether to automatically parse the data.
+      analysis: True
+
+      # True for each task has its own database, False for all tasks in one training step share one database.
+      discrete: False
+
+    # torch profiler config
+    torch:
+
+      # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+      _target_: verl.utils.profiler.config.TorchProfilerToolConfig
+
+      # Contents to profile, can be empty
+      # options: cuda, cpu, memory, shapes, stack
+      contents: []
+
+      # True for each task has its own database, False for all tasks in one training step share one database.
+      discrete: false
+
+    # torch memory profiler config
+    torch_memory:
+
+      # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+      _target_: verl.utils.profiler.config.TorchMemoryToolConfig
+
+      # Maximum number of memory allocation entries to track
+      trace_alloc_max_entries: ${oc.select:global_profiler.global_tool_config.torch_memory.trace_alloc_max_entries,100000}
+
+      # Stack trace depth for memory allocations
+      stack_depth: ${oc.select:global_profiler.global_tool_config.torch_memory.stack_depth,32}
+
+    # msprobe precision debugger config
+    precision_debugger:
+
+      # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+      _target_: verl.utils.profiler.config.PrecisionDebuggerToolConfig
+
+      # Path to msprobe config json
+      config_path: ${oc.select:global_profiler.global_tool_config.precision_debugger.config_path,null}
+
+      # Deprecated and ignored. Use global_profiler.steps.
+      steps: null
+
+      # Profile stages
+      # Supported stages: actor_update, actor_compute_log_prob, ref_compute_log_prob,
+      # compute_values, critic_update, compute_rm_score
+      stages: ${oc.select:global_profiler.global_tool_config.precision_debugger.stages,null}
+
+      # Whether to fail on unknown stage or missing msprobe
+      strict: ${oc.select:global_profiler.global_tool_config.precision_debugger.strict,False}
+
+# Router replay configuration for MoE models
+router_replay:
+
+  # Target dataclass for this configuration
+  _target_: verl.workers.config.RouterReplayConfig
+
+  # Router replay mode: disabled, R2, R3
+  # - R2: Use R2 routing strategy (record mode)
+  # - R3: Use R3 routing strategy (record mode)
+  mode: disabled
+
+  # File path to save recorded routing decisions
+  # Required when mode is 'record', 'R2', or 'R3'
+  record_file: null
+
+  # File path to load recorded routing decisions for replay
+  # Required when mode is 'replay'
+  replay_file: null

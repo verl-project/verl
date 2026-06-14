@@ -1,0 +1,15 @@
+FROM nvcr.io/nvidia/nemo:25.07.gpt_oss
+
+RUN git clone -b v0.11.0 --depth 1 https://github.com/vllm-project/vllm.git /opt/vllm
+
+RUN pip install setuptools_scm
+
+RUN cd /opt/vllm && pip install --no-deps --no-build-isolation --no-cache-dir -e .
+
+RUN pip install cbor2 setproctitle blake3 openai_harmony pybase64 msgspec partial_json_parser py-cpuinfo diskcache gguf
+
+RUN pip install --upgrade transformers tokenizers
+
+RUN pip install codetiming tensordict mathruler pylatexenc
+
+RUN pip3 install --no-cache-dir mbridge

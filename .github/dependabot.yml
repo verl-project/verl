@@ -1,0 +1,9 @@
+## Enabled the dependabot to check the dependencies of the project
+## Dependabot will open pull requests to update dependencies automatically
+
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly

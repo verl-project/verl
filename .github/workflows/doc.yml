@@ -1,0 +1,101 @@
+# # Tests layout
+
+# Each folder under tests/ corresponds to a test category for a sub-namespace in verl. For instance:
+# - `tests/trainer` for testing functionality related to `verl/trainer`
+# - `tests/models` for testing functionality related to `verl/models`
+# - ...
+
+# There are a few folders with `special_` prefix, created for special purposes:
+# - `special_distributed`: unit tests that must run with multiple GPUs
+# - `special_e2e`: end-to-end tests with training/generation scripts
+# - `special_npu`: tests for NPUs
+# - `special_sanity`: a suite of quick sanity tests
+# - `special_standalone`: a set of test that are designed to run in dedicated environments
+
+# Accelerators for tests 
+# - By default tests are run with GPU available, except for the ones under `special_npu`, and any test script whose name ends with `on_cpu.py`.
+# - For test scripts with `on_cpu.py` name suffix would be tested on CPU resources in linux environment.
+
+# # Workflow layout
+
+# All CI tests are configured by yaml files in `.github/workflows/`. Here's an overview of all test configs:
+# 1. A list of always triggered CPU sanity tests: `check-pr-title.yml`, `secrets_scan.yml`, `check-pr-title,yml`, `pre-commit.yml`, `doc.yml`
+# 2. Some heavy multi-GPU unit tests, such as `model.yml`, `vllm.yml`, `sgl.yml`
+# 3. End-to-end tests: `e2e_*.yml`
+# 4. Unit tests
+#   - `cpu_unit_tests.yml`, run pytest on all scripts with file name pattern `tests/**/test_*_on_cpu.py`
+#   - `gpu_unit_tests.yml`, run pytest on all scripts with file without the `on_cpu.py` suffix.
+#   - Since cpu/gpu unit tests by default runs all tests under `tests`, please make sure tests are manually excluded in them when
+#     - new workflow yaml is added to `.github/workflows`
+#     - new tests are added to workflow mentioned in 2.
+
+
+name: doc_test
+
+on:
+  # Trigger the workflow on push or pull request,
+  # but only for the main branch
+  push:
+    branches:
+      - main
+      - v0.*
+  pull_request:
+    branches:
+      - main
+      - v0.*
+    paths:
+      - "**/*.py"
+      - "docs/**"
+      - .github/workflows/doc.yml
+
+# Cancel jobs on the same ref if a new one is triggered
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+# Declare permissions just read content.
+permissions:
+  contents: read      # for checkout
+  pages: write        # for deploy-pages
+  id-token: write     # for deploy-pages
+
+jobs:
+  doc_test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5 # Increase this timeout value as needed
+    strategy:
+      matrix:
+        python-version: ["3.10"]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install the current repository
+        run: |
+          pip3 install -r requirements-test.txt
+          pip3 install --no-deps -e .
+          pip install -r docs/requirements-docs.txt
+
+      - name: Run doc make html
+        run: |
+          cd docs 
+          make clean
+          make html SPHINXOPTS="--keep-going -w _build/sphinx.log"
+          if grep -q ": ERROR:" _build/sphinx.log; then
+            echo "🚨 Sphinx doc build contained ERRORs - see _build/sphinx.log"
+            exit 1
+          fi
+          if grep -q "WARNING: document isn't included in any toctree" _build/sphinx.log; then
+            echo "🚨 Sphinx doc build contained WARNING. Please include newly added docs in index.rst. See _build/sphinx.log for details"
+            exit 1
+          fi
+          if grep -q "WARNING: Inline emphasis" _build/sphinx.log; then
+            echo "🚨 Sphinx doc build contained WARNING. Please check inline emphasis is correct. See _build/sphinx.log for details"
+            exit 1
+          fi
+          if grep -q "WARNING: Definition list ends without a blank line" _build/sphinx.log; then
+            echo "🚨 Sphinx doc build contained WARNING. Please check if the indentation is correct. See _build/sphinx.log for details"
+            exit 1
+          fi
