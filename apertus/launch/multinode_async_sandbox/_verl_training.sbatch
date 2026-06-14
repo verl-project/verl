@@ -237,6 +237,7 @@ build_overrides() {
     "actor_rollout_ref.actor.calculate_entropy=true"
     "actor_rollout_ref.rollout.skip_tokenizer_init=False"
     "+actor_rollout_ref.rollout.engine_kwargs.sglang.grammar_backend=llguidance"
+    "actor_rollout_ref.rollout.reasoning_format=apertus2509"
     "rollout.nnodes=${ROLLOUT_NNODES}"
     "rollout.n_gpus_per_node=${ROLLOUT_GPUS_PER_NODE}"
     "reward.sandbox_fusion.memory_limit_mb=${DEFAULT_MEMORY_LIMIT_MB}"

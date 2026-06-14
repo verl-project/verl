@@ -9,9 +9,6 @@ from typing import Any
 from . import instructions_registry
 
 
-_COT_END_MARKERS = ("</think>", "<|inner_suffix|>")
-
-
 def _get_instruction_cls(instruction_key: str):
     if instruction_key in instructions_registry.INSTRUCTION_DICT:
         return instructions_registry.INSTRUCTION_DICT[instruction_key]
@@ -44,17 +41,6 @@ def _parse_constraint(value: Any) -> dict[str, Any]:
     raise TypeError(
         f"Unsupported instruction-following constraint type: {type(value)!r}"
     )
-
-
-def _extract_answer(prediction: str) -> str:
-    marker_ends = [
-        marker_index + len(marker)
-        for marker in _COT_END_MARKERS
-        if (marker_index := prediction.rfind(marker)) != -1
-    ]
-    if not marker_ends:
-        return prediction.strip()
-    return prediction[max(marker_ends) :].strip()
 
 
 def _constraint_from_inputs(
@@ -95,7 +81,7 @@ def compute_score(
     **kwargs,
 ) -> float:
     constraint_dict = _constraint_from_inputs(ground_truth, extra_info)
-    answer = _extract_answer(solution_str)
+    answer = solution_str.strip()
     instruction_keys = constraint_dict["instruction_id"]
     args_list = constraint_dict["kwargs"]
 

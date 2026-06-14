@@ -232,6 +232,10 @@ multi_turn:
 # "Truncated importance sampling" requires rollout log probs, set to True when turning on Truncated importance sampling
 calculate_log_probs: False
 
+# Optional completed-generation reasoning parser. null stores the full decoded generation as response_text.
+# Supported: null, apertus2509
+reasoning_format: null
+
 # [Experimental] agent loop based rollout configs
 agent:
 

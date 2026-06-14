@@ -208,6 +208,8 @@ class RolloutConfig(BaseConfig):
 
     calculate_log_probs: bool = False
 
+    reasoning_format: Optional[str] = None
+
     agent: AgentLoopConfig = field(default_factory=AgentLoopConfig)
 
     trace: TraceConfig = field(default_factory=TraceConfig)

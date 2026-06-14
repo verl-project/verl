@@ -45,36 +45,48 @@ class BatchRewardManager(AbstractRewardManager):
         self.reward_kwargs = reward_kwargs
 
     def verify(self, data):
-        prompt_ids = data.batch["prompts"]
-        response_ids = data.batch["responses"]
-        attention_mask = data.batch["attention_mask"]
-
-        prompt_len = prompt_ids.shape[-1]
-        valid_response_lengths = attention_mask[:, prompt_len:].sum(dim=-1)
-
-        responses_str = []
-        for i in range(len(data)):
-            valid_len = valid_response_lengths[i]
-            valid_response_ids = response_ids[i][:valid_len]
-            response_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
-            responses_str.append(response_str)
-
         ground_truths = [item.non_tensor_batch["reward_model"].get("ground_truth", None) for item in data]
         data_sources = data.non_tensor_batch[self.reward_fn_key]
         rollout_reward_scores = data.non_tensor_batch.get("reward_scores", [{} for _ in range(len(data))])
-        extras = data.non_tensor_batch.get("extra_info", [{} for _ in range(len(data))])
+        extras = [
+            dict(extra or {}) for extra in data.non_tensor_batch.get("extra_info", [{} for _ in range(len(data))])
+        ]
+        response_texts = data.non_tensor_batch.get("response_text", [None for _ in range(len(data))])
 
+        flat_data_sources = []
+        flat_responses_str = []
+        flat_ground_truths = []
+        flat_extras = []
+        response_counts = []
         for i in range(len(data)):
+            if response_texts[i] is not None:
+                extras[i]["response_text"] = response_texts[i]
             extras[i]["rollout_reward_scores"] = rollout_reward_scores[i]
 
-        scores = self.compute_score(
-            data_sources=data_sources,
-            solution_strs=responses_str,
-            ground_truths=ground_truths,
-            extra_infos=extras,
+            response_text = response_texts[i]
+            if response_text is None:
+                raise KeyError("response_text is required for reward verification")
+            response_strs = response_text or [""]
+            response_counts.append(len(response_strs))
+            flat_data_sources.extend([data_sources[i]] * len(response_strs))
+            flat_responses_str.extend(response_strs)
+            flat_ground_truths.extend([ground_truths[i]] * len(response_strs))
+            flat_extras.extend([extras[i]] * len(response_strs))
+
+        flat_scores = self.compute_score(
+            data_sources=flat_data_sources,
+            solution_strs=flat_responses_str,
+            ground_truths=flat_ground_truths,
+            extra_infos=flat_extras,
             **self.reward_kwargs,
         )
 
+        scores = []
+        cursor = 0
+        for count in response_counts:
+            results = list(flat_scores[cursor : cursor + count])
+            scores.append(min(results, key=lambda result: result["score"] if isinstance(result, dict) else result) if len(results) > 1 else results[0])
+            cursor += count
         return scores
 
     def __call__(self, data: DataProto, return_dict: bool = False) -> torch.Tensor | dict[str, Any]:
@@ -111,8 +123,8 @@ class BatchRewardManager(AbstractRewardManager):
 
             data_source = data_sources[i]
             if already_printed.get(data_source, 0) < self.num_examine:
-                response_str = self.tokenizer.decode(data.batch["responses"][i][:length], skip_special_tokens=True)
                 prompt_str = self.tokenizer.decode(data.batch["prompts"][i], skip_special_tokens=True)
+                response_str = data.non_tensor_batch["response_text"][i]
                 ground_truth = data[i].non_tensor_batch["reward_model"].get("ground_truth", None)
                 print("[prompt]", prompt_str)
                 print("[response]", response_str)

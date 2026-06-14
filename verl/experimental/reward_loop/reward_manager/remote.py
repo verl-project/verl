@@ -75,26 +75,24 @@ class RemoteRewardManager(RewardManagerBase):
     async def run_single(self, data: DataProto) -> dict:
         data = data[-1:]  # for multi-sequence outputs, we only compute reward based on the last sequence
         data_item = data[0]
-        response_ids = data_item.batch["responses"]
-        response_length = response_ids.shape[-1]
-        valid_response_length = data_item.batch["attention_mask"][-response_length:].sum()
-        valid_response_ids = response_ids[:valid_response_length]
-
         data_source = data_item.non_tensor_batch["data_source"]
         ground_truth = data_item.non_tensor_batch["reward_model"]["ground_truth"]
         extra_info = data_item.non_tensor_batch.get("extra_info", {})
         tool_extra_fields = data_item.non_tensor_batch.get("tool_extra_fields", None)
         if tool_extra_fields is not None:
-            extra_info.update(tool_extra_fields.items())
+            for key, value in tool_extra_fields.items():
+                if key != "reasoning_text":
+                    extra_info[key] = value
 
         num_turns = data_item.non_tensor_batch.get("__num_turns__", None)
         rollout_reward_scores = data_item.non_tensor_batch.get("reward_scores", {})
         extra_info["num_turns"] = num_turns
         extra_info["rollout_reward_scores"] = rollout_reward_scores
 
-        response_str = await self.loop.run_in_executor(
-            None, lambda: self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
-        )
+        response_text = extra_info.get("response_text")
+        if response_text is None:
+            raise KeyError("response_text is required for reward verification")
+        response_strs = response_text or [""]
 
         extra_reward_kwargs = (
             {
@@ -105,14 +103,18 @@ class RemoteRewardManager(RewardManagerBase):
             else {}
         )
 
-        reward_worker = self.choose_reward_worker()
-        result = await reward_worker.compute_score.remote(
-            data_source=data_source,
-            solution_str=response_str,
-            ground_truth=ground_truth,
-            extra_info=extra_info,
-            **extra_reward_kwargs,
-        )
+        results = []
+        for response_str in response_strs:
+            reward_worker = self.choose_reward_worker()
+            result = await reward_worker.compute_score.remote(
+                data_source=data_source,
+                solution_str=response_str,
+                ground_truth=ground_truth,
+                extra_info=extra_info,
+                **extra_reward_kwargs,
+            )
+            results.append(result)
+        result = min(results, key=lambda result: result["score"] if isinstance(result, dict) else result) if len(results) > 1 else results[0]
 
         reward_extra_info = {}
 

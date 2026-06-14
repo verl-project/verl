@@ -78,36 +78,37 @@ class DAPORewardManager(AbstractRewardManager):
             valid_prompt_length = data_item.batch["attention_mask"][:prompt_length].sum()
             valid_prompt_ids = prompt_ids[-valid_prompt_length:]
 
-            response_ids = data_item.batch["responses"]
             valid_response_length = data_item.batch["attention_mask"][prompt_length:].sum()
-            valid_response_ids = response_ids[:valid_response_length]
 
-            # decode
             prompt_str = self.tokenizer.decode(valid_prompt_ids, skip_special_tokens=True)
-            response_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
-            eos_token = self.tokenizer.eos_token
-            if response_str.endswith(eos_token):
-                response_str = response_str[: -len(eos_token)]
 
             ground_truth = data_item.non_tensor_batch["reward_model"]["ground_truth"]
 
             data_source = data_item.non_tensor_batch[self.reward_fn_key]
 
             extra_info = dict(data_item.non_tensor_batch.get("extra_info", {}) or {})
-            terminal_tool_arguments = data_item.non_tensor_batch.get("terminal_tool_arguments", None)
-            if terminal_tool_arguments is not None:
-                extra_info["terminal_tool_arguments"] = terminal_tool_arguments
+            response_text = data_item.non_tensor_batch.get("response_text", None)
+            if response_text is not None:
+                extra_info["response_text"] = response_text
+            if response_text is None:
+                raise KeyError("response_text is required for reward verification")
+            response_strs = response_text or [""]
+            verifier_response_str = "\n".join(response_strs)
 
             rollout_reward_scores = data_item.non_tensor_batch.get("reward_scores", {})
 
             extra_info["rollout_reward_scores"] = rollout_reward_scores
 
-            result = self.compute_score(
-                data_source=data_source,
-                solution_str=response_str,
-                ground_truth=ground_truth,
-                extra_info=extra_info,
-            )
+            results = [
+                self.compute_score(
+                    data_source=data_source,
+                    solution_str=response_str,
+                    ground_truth=ground_truth,
+                    extra_info=extra_info,
+                )
+                for response_str in response_strs
+            ]
+            result = min(results, key=lambda result: result["score"] if isinstance(result, dict) else result) if len(results) > 1 else results[0]
 
             score: float
             if isinstance(result, dict):
@@ -140,7 +141,7 @@ class DAPORewardManager(AbstractRewardManager):
             if already_print_data_sources[data_source] < self.num_examine:
                 already_print_data_sources[data_source] += 1
                 print("[prompt]", prompt_str)
-                print("[response]", response_str)
+                print("[response]", verifier_response_str)
                 print("[ground_truth]", ground_truth)
                 if isinstance(result, dict):
                     for key, value in result.items():

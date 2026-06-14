@@ -45,6 +45,7 @@ from pydantic import BaseModel, ConfigDict
 from tensordict import TensorDict
 from transformers import AutoProcessor, AutoTokenizer
 
+from verl.experimental.agent_loop.reasoning_parser import ReasoningParser
 from verl.experimental.agent_loop.utils import resolve_config_path
 from verl.protocol import DataProto
 from verl.tools.tool_registry import load_all_tools
@@ -75,8 +76,6 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 DEFAULT_ROUTING_CACHE_SIZE = 10000
-
-
 _TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "y", "on"})
 
 
@@ -487,6 +486,11 @@ class AgentLoopWorker:
         )
         self.rollout_config: RolloutConfig = omega_conf_to_dataclass(rollout_config)
         self.model_config: HFModelConfig = omega_conf_to_dataclass(model_config)
+        self.reasoning_parser = (
+            ReasoningParser.get_reasoning_parser(self.rollout_config.reasoning_format)
+            if self.rollout_config.reasoning_format
+            else None
+        )
 
         self.dataset_cls = get_dataset_class(config.data)
         if self.model_config.load_tokenizer:
@@ -751,6 +755,7 @@ class AgentLoopWorker:
     ) -> _InternalAgentLoopOutput:
         """Perform post-processing operations on the output of each individual agent loop."""
         output.extra_fields["raw_prompt"] = kwargs["raw_prompt"]
+        self._set_response_text_fields(output, kwargs.get("extra_info"))
 
         # Some AgentLoop may have already computed the reward score, e.g SWE-agent.
 
@@ -904,6 +909,46 @@ class AgentLoopWorker:
             metrics=output.metrics,
             extra_fields=output.extra_fields,
         )
+
+    @staticmethod
+    def _env_flag(name: str) -> bool:
+        value = os.environ.get(name)
+        if value is None:
+            return False
+        return value.strip().lower() in _TRUTHY_ENV_VALUES
+
+    @classmethod
+    def _display_answers_selected(cls, extra_info: Any) -> bool:
+        if cls._env_flag("NO_FORMAT"):
+            return False
+        if not isinstance(extra_info, dict):
+            return False
+        tool_selection = extra_info.get("tool_selection")
+        return isinstance(tool_selection, (list, tuple, set)) and "display_answers" in tool_selection
+
+    def _set_response_text_fields(self, output: AgentLoopOutput, extra_info: Any = None) -> None:
+        response_text = self.tokenizer.decode(output.response_ids, skip_special_tokens=True)
+        if self.reasoning_parser is None:
+            output.extra_fields["response_text"] = [response_text]
+            output.extra_fields["reasoning_text"] = ""
+        else:
+            parsed = self.reasoning_parser.parse(response_text)
+            output.extra_fields["response_text"] = [parsed.response_text]
+            output.extra_fields["reasoning_text"] = parsed.reasoning_text
+
+        if not self._display_answers_selected(extra_info):
+            return
+
+        terminal_tool_arguments = output.extra_fields.get("terminal_tool_arguments")
+        if not isinstance(terminal_tool_arguments, dict):
+            output.extra_fields["response_text"] = [""]
+            return
+
+        answers = terminal_tool_arguments.get("answers")
+        if isinstance(answers, list):
+            output.extra_fields["response_text"] = [str(answer) for answer in answers] or [""]
+        else:
+            output.extra_fields["response_text"] = [""]
 
     def _compute_multi_modal_inputs(self, output, input_ids) -> dict[str, torch.Tensor]:
         """Compute multi-modal inputs with image, video and audio."""
@@ -1198,6 +1243,8 @@ class AgentLoopWorker:
             "max_global_steps",
             "extras",
             "terminal_tool_arguments",
+            "response_text",
+            "reasoning_text",
         }
         all_keys = (
             set(key for input_item in inputs for key in input_item.extra_fields)

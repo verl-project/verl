@@ -35,19 +35,20 @@ class GDPORewardManager(RewardManagerBase):
     async def run_single(self, data: DataProto) -> dict:
         data = data[-1:]  # for multi-sequence outputs, we only compute reward based on the last sequence
         data_item = data[0]
-        response_ids = data_item.batch["responses"]
-        response_length = response_ids.shape[-1]
-        valid_response_length = data_item.batch["attention_mask"][-response_length:].sum()
-        valid_response_ids = response_ids[:valid_response_length]
-
         data_source = data_item.non_tensor_batch["data_source"]
         ground_truth = data_item.non_tensor_batch["reward_model"]["ground_truth"]
         extra_info = data_item.non_tensor_batch.get("extra_info", {})
+        tool_extra_fields = data_item.non_tensor_batch.get("tool_extra_fields", None)
+        if tool_extra_fields is not None:
+            for key, value in tool_extra_fields.items():
+                if key != "reasoning_text":
+                    extra_info[key] = value
         extra_info["experiment_name"] = self.config.trainer.experiment_name
 
-        response_str = await self.loop.run_in_executor(
-            None, lambda: self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
-        )
+        response_text = extra_info.get("response_text")
+        if response_text is None:
+            raise KeyError("response_text is required for reward verification")
+        response_strs = response_text or [""]
         extra_reward_kwargs = (
             {
                 "reward_router_address": self.reward_router_address,
@@ -56,25 +57,29 @@ class GDPORewardManager(RewardManagerBase):
             if self.reward_router_address is not None
             else {}
         )
-        if self.is_async_reward_score:
-            result = await self.compute_score(
-                data_source=data_source,
-                solution_str=response_str,
-                ground_truth=ground_truth,
-                extra_info=extra_info,
-                **extra_reward_kwargs,
-            )
-        else:
-            result = await self.loop.run_in_executor(
-                None,
-                lambda: self.compute_score(
+        results = []
+        for response_str in response_strs:
+            if self.is_async_reward_score:
+                result = await self.compute_score(
                     data_source=data_source,
                     solution_str=response_str,
                     ground_truth=ground_truth,
                     extra_info=extra_info,
                     **extra_reward_kwargs,
-                ),
-            )
+                )
+            else:
+                result = await self.loop.run_in_executor(
+                    None,
+                    lambda response_str=response_str: self.compute_score(
+                        data_source=data_source,
+                        solution_str=response_str,
+                        ground_truth=ground_truth,
+                        extra_info=extra_info,
+                        **extra_reward_kwargs,
+                    ),
+                )
+            results.append(result)
+        result = min(results, key=lambda result: result["score"] if isinstance(result, dict) else result) if len(results) > 1 else results[0]
 
         reward_extra_info = {}
 
