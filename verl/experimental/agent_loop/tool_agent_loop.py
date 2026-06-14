@@ -89,7 +89,6 @@ class AgentData:
 
         # Temporary state for tool calls
         self.tool_calls: list[FunctionCall] = []
-        self.tool_call_ids: list[str | None] = []
 
         self.routed_experts = None
 
@@ -295,7 +294,6 @@ class ToolAgentLoop(AgentLoopBase):
         active_tools = getattr(agent_data, "_active_tools", self.tools)
         tools = [tool.tool_schema for tool in active_tools.values()]
         assistant_content, agent_data.tool_calls = await self.tool_parser.extract_tool_calls(agent_data.response_ids, tools)
-        agent_data.tool_call_ids = self._last_parsed_tool_call_ids(len(agent_data.tool_calls))
         if self.enable_continuous_token:
             agent_data.messages.append(self._build_assistant_message(assistant_content, agent_data))
 
@@ -311,20 +309,16 @@ class ToolAgentLoop(AgentLoopBase):
         previous_messages = list(agent_data.messages)
 
         tasks = []
-        tool_call_names = []
-        tool_call_ids = []
-        for index, tool_call in enumerate(agent_data.tool_calls[: self.max_parallel_calls]):
+        for tool_call in agent_data.tool_calls[: self.max_parallel_calls]:
             tasks.append(self._call_tool(tool_call, agent_data.tools_kwargs, agent_data))
-            tool_call_names.append(tool_call.name)
-            raw_tool_call_id = agent_data.tool_call_ids[index] if index < len(agent_data.tool_call_ids) else None
-            tool_call_ids.append(raw_tool_call_id)
 
         with simple_timer("tool_calls", agent_data.metrics):
             responses = await asyncio.gather(*tasks)
 
         # Process tool responses and update multi_modal_data
         # Removed: agent_data.new_images_this_turn = []
-        for tool_response, tool_reward, _ in responses:
+        for tool_index, (tool_response, tool_reward, _) in enumerate(responses):
+            tool_call = agent_data.tool_calls[tool_index]
             # Create message from tool response
             if tool_response.image or tool_response.video:
                 # Multi-modal content with structured format
@@ -345,11 +339,9 @@ class ToolAgentLoop(AgentLoopBase):
             else:
                 # Text-only content
                 message = {"role": "tool", "content": tool_response.text or ""}
-            tool_index = len(add_messages)
-            tool_call_id = tool_call_ids[tool_index]
-            message["name"] = tool_call_names[tool_index]
-            if tool_call_id is not None:
-                message["tool_call_id"] = tool_call_id
+            message["name"] = tool_call.name
+            if tool_call.tool_call_id is not None:
+                message["tool_call_id"] = tool_call.tool_call_id
 
             add_messages.append(message)
 
@@ -381,7 +373,7 @@ class ToolAgentLoop(AgentLoopBase):
 
         if self.tool_parser_name == "gpt-oss":
             logger.info("manually format tool responses for gpt-oss")
-            tool_response_text = build_gpt_oss_tool_response_text(add_messages, tool_call_names)
+            tool_response_text = build_gpt_oss_tool_response_text(add_messages)
             response_ids = await self.loop.run_in_executor(
                 None, lambda: self.tokenizer.encode(tool_response_text, add_special_tokens=False)
             )
@@ -390,13 +382,13 @@ class ToolAgentLoop(AgentLoopBase):
             # assistant tool_call message. Manually format the response tokens.
             # Format: <|tool_response>response:func_name{value:<|"|>content<|"|>}<tool_response|>
             parts = []
-            for msg, name in zip(add_messages, tool_call_names, strict=True):
+            for msg in add_messages:
                 content = msg.get("content", "")
                 if isinstance(content, list):
                     content = "".join([item.get("text", "") for item in content if item.get("type") == "text"])
                 if isinstance(content, list):
                     content = "".join([item.get("text", "") for item in content if item.get("type") == "text"])
-                parts.append(f'<|tool_response>response:{name}{{value:<|"|>{content}<|"|>}}<tool_response|>')
+                parts.append(f'<|tool_response>response:{msg["name"]}{{value:<|"|>{content}<|"|>}}<tool_response|>')
             tool_response_text = "".join(parts)
             response_ids = await self.loop.run_in_executor(
                 None, lambda: self.tokenizer.encode(tool_response_text, add_special_tokens=False)
@@ -450,15 +442,6 @@ class ToolAgentLoop(AgentLoopBase):
         agent_data.user_turns += 1
         return AgentState.GENERATING
 
-    def _last_parsed_tool_call_ids(self, tool_call_count: int) -> list[str | None]:
-        parsed_ids = getattr(self.tool_parser, "last_tool_call_ids", [])
-        if not isinstance(parsed_ids, list):
-            return [None] * tool_call_count
-        return [
-            parsed_ids[index] if index < len(parsed_ids) and isinstance(parsed_ids[index], str) else None
-            for index in range(tool_call_count)
-        ]
-
     def _build_assistant_message(self, content: str, agent_data: AgentData) -> dict[str, Any]:
         message: dict[str, Any] = {"role": "assistant", "content": content or ""}
         if not agent_data.tool_calls:
@@ -466,7 +449,6 @@ class ToolAgentLoop(AgentLoopBase):
 
         tool_calls = []
         for index, tool_call in enumerate(agent_data.tool_calls[: self.max_parallel_calls]):
-            raw_tool_call_id = agent_data.tool_call_ids[index] if index < len(agent_data.tool_call_ids) else None
             function_call, has_decode_error = OpenAIFunctionCallSchema.from_openai_function_parsed_schema(
                 OpenAIFunctionParsedSchema(name=tool_call.name, arguments=tool_call.arguments)
             )
@@ -479,8 +461,8 @@ class ToolAgentLoop(AgentLoopBase):
                 "type": "function",
                 "function": function_call.model_dump(),
             }
-            if raw_tool_call_id is not None:
-                tool_call_message["id"] = raw_tool_call_id
+            if tool_call.tool_call_id is not None:
+                tool_call_message["id"] = tool_call.tool_call_id
             tool_calls.append(tool_call_message)
         message["tool_calls"] = tool_calls
         return message

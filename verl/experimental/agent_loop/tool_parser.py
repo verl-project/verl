@@ -41,6 +41,9 @@ class FunctionCall(BaseModel):
     name: str
     """The name of the function to call."""
 
+    tool_call_id: Optional[str] = None
+    """The model-emitted tool call identifier, if available."""
+
 
 class ToolParser(ABC):
     _registry: dict[str, type["ToolParser"]] = {}
@@ -549,7 +552,6 @@ class KimiToolParser(ToolParser):
 
     def __init__(self, tokenizer) -> None:
         super().__init__(tokenizer)
-        self.last_tool_call_ids: list[str] = []
         self.tool_calls_section_start_token = "<|tool_calls_section_begin|>"
         self.tool_calls_section_end_token = "<|tool_calls_section_end|>"
         self.tool_call_begin_token = "<|tool_call_begin|>"
@@ -614,17 +616,16 @@ class KimiToolParser(ToolParser):
             lambda: self.tokenizer.decode(responses_ids, skip_special_tokens=False),
         )
         if self.tool_calls_section_start_token not in text:
-            self.last_tool_call_ids = []
             return text, []
 
         function_calls: list[FunctionCall] = []
-        self.last_tool_call_ids = []
         for raw_name, raw_arguments in self.tool_call_regex.findall(text):
             raw_name = raw_name.strip()
             arguments = self._parse_arguments(raw_arguments)
             name = self._infer_tool_name(raw_name, arguments, tools)
-            self.last_tool_call_ids.append(raw_name)
-            function_calls.append(FunctionCall(name=name, arguments=json.dumps(arguments, ensure_ascii=False)))
+            function_calls.append(
+                FunctionCall(name=name, arguments=json.dumps(arguments, ensure_ascii=False), tool_call_id=raw_name)
+            )
 
         content_index = text.find(self.tool_calls_section_start_token)
         content = text[:content_index] if content_index >= 0 else text
