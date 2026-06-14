@@ -84,6 +84,7 @@ POLL_SECS="${POLL_SECS:-3}"
 MAX_WAIT="${MAX_WAIT:-$((60 * 10))}"
 GIVEN_URL="${SCHEDULER_URL:-}"  # potentially reuse a running code-gym scheduler
 NO_FORMAT="${NO_FORMAT:-false}"  # disable tool-formatting (legacy plain-text rollouts)
+LONG_CONTEXT="${LONG_CONTEXT:-false}"  # enable QA-gym data and long-context config parameters
 SANDBOX_REWARD_CONTINUOUS="${SANDBOX_REWARD_CONTINUOUS:-false}" # default is binary reward
 QA_GYM_RERANKER_URL="${QA_GYM_RERANKER_URL:-https://api.swissai.svc.cscs.ch/v1/score}"
 
@@ -193,7 +194,9 @@ resolve_sandbox_backend() {
 
 resolve_run_name_and_dir
 resolve_sandbox_backend
-check_qa_gym_reranker
+if [[ "${LONG_CONTEXT}" == "true" ]]; then
+  check_qa_gym_reranker
+fi
 
 # ==========================================
 # STEP 1 & 2: Sandbox setup
@@ -291,7 +294,7 @@ log "  -> job-name=${TRAIN_JOB_NAME} time=${SLURM_TIME} train=${TRAIN_NNODES} ro
 log "  -> config=${CONFIG_NAME} model=${MODEL_NAME_OR_PATH}"
 log "  -> data=${TRAINING_DATA_DIR} seed=${SEED} rollout_n=${ROLLOUT_N}"
 log "  -> group_filtering=${USE_GROUP_FILTERING} enable_thinking=${ENABLE_THINKING} force_thinking=${FORCE_THINKING}"
-log "  -> no_format=${NO_FORMAT}"
+log "  -> no_format=${NO_FORMAT} long_context=${LONG_CONTEXT}"
 if [[ "${WANDB_BACKGROUND_SYNC}" == "true" ]]; then
   log "  -> output=${RUN_DIR} wandb_mode=${WANDB_MODE} wandb_sync_interval=${WANDB_SYNC_INTERVAL_SECONDS}s"
 else
@@ -336,6 +339,7 @@ EXPORT_VARS=(
   "ROLLOUT_NNODES=${ROLLOUT_NNODES}"
   "TRAINING_DATA_DIR=${TRAINING_DATA_DIR}"
   "NO_FORMAT=${NO_FORMAT}"
+  "LONG_CONTEXT=${LONG_CONTEXT}"
   "ENABLE_THINKING=${ENABLE_THINKING}"
   "FORCE_THINKING=${FORCE_THINKING}"
   "THINK_PREFIX_TOKEN=${THINK_PREFIX_TOKEN}"
