@@ -223,15 +223,15 @@ TRAIN_DATASETS = [
         adapter="open_r1_codeforces",
         data_source="codeforces",
     ),
-    # DatasetConfig(
-    #     name="toolgym_len1",
-    #     dataset_id="/capstor/store/cscs/swissai/infra01/reasoning/data/RL-prod/toolgym_test_v2/len1/verl.jsonl",
-    #     split="train",
-    #     adapter="tools",
-    #     data_source="toolgym",
-    #     enable_thinking=False,
-    #     # tool_selection is done in the adapter
-    # ),
+    DatasetConfig(
+        name="toolgym",
+        dataset_id="/capstor/store/cscs/swissai/infra01/reasoning/data/RL-prod/toolgym_test_v2/dataset/train.parquet",
+        split="train",
+        adapter="tools",
+        data_source="tool_gym",
+        enable_thinking=True,
+        # tool_selection is done in the adapter
+    ),
 ]
 
 EVAL_DATASETS = [
@@ -353,6 +353,15 @@ EVAL_DATASETS = [
         data_source="allenai/IFBench_test",
         prompt_key="prompt",
         sample_size=100,
+    ),
+    DatasetConfig(
+        name="toolgym",
+        dataset_id="/capstor/store/cscs/swissai/infra01/reasoning/data/RL-prod/toolgym_test_v2/dataset/val.parquet",
+        split="train",
+        adapter="tools",
+        data_source="tool_gym",
+        enable_thinking=False,
+        # tool_selection is done in the adapter
     ),
 ]
 
@@ -622,7 +631,7 @@ def adapt_tools(
     ground_truth = reward_model.get("ground_truth")
     if not isinstance(ground_truth, str):
         reward_model["ground_truth"] = json_dumps(ground_truth)
-    row["data_source"] = config.data_source
+    row["data_source"] = normalize_text(row.get("data_source")) or config.data_source
     row["reward_model"] = reward_model
     row["extra_info"] = extra_info
     # row["agent_name"] = agent_name_for_tools(extra_info.get("tool_selection"))

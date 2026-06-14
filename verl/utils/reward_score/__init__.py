@@ -181,7 +181,7 @@ def default_compute_score(
         res = blindtasks.compute_score(
             data_source, solution_str, ground_truth, extra_info
         )
-    elif data_source == "toolgym":
+    elif isinstance(data_source, str) and data_source.startswith("tool_gym"):
         from . import toolgym
 
         res = toolgym.compute_score(

@@ -930,11 +930,9 @@ class AgentLoopWorker:
         response_text = self.tokenizer.decode(output.response_ids, skip_special_tokens=True)
         if self.reasoning_parser is None:
             output.extra_fields["response_text"] = [response_text]
-            output.extra_fields["reasoning_text"] = ""
         else:
             parsed = self.reasoning_parser.parse(response_text)
             output.extra_fields["response_text"] = [parsed.response_text]
-            output.extra_fields["reasoning_text"] = parsed.reasoning_text
 
         if not self._display_answers_selected(extra_info):
             return
@@ -1244,7 +1242,6 @@ class AgentLoopWorker:
             "extras",
             "terminal_tool_arguments",
             "response_text",
-            "reasoning_text",
         }
         all_keys = (
             set(key for input_item in inputs for key in input_item.extra_fields)

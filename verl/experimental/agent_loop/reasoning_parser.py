@@ -2,12 +2,17 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import Literal
+
+
+ReasoningBlockKind = Literal["text", "reasoning"]
+ReasoningBlock = tuple[ReasoningBlockKind, str]
 
 
 @dataclass(frozen=True)
 class ReasoningParseResult:
+    blocks: tuple[ReasoningBlock, ...]
     response_text: str
-    reasoning_text: str
 
 
 class ReasoningParser(ABC):
@@ -38,34 +43,46 @@ class Apertus2509ReasoningParser(ReasoningParser):
     end_token = "<|inner_suffix|>"
 
     def parse(self, text: str) -> ReasoningParseResult:
-        response_parts: list[str] = []
-        reasoning_parts: list[str] = []
+        blocks: list[ReasoningBlock] = []
         cursor = 0
 
         while True:
             start = text.find(self.start_token, cursor)
             if start == -1:
-                response_parts.append(text[cursor:])
+                self._append_block(blocks, "text", text[cursor:])
                 break
 
-            response_parts.append(text[cursor:start])
+            self._append_block(blocks, "text", text[cursor:start])
             reasoning_start = start + len(self.start_token)
             end = text.find(self.end_token, reasoning_start)
             if end == -1:
-                reasoning_parts.append(text[reasoning_start:])
+                self._append_block(blocks, "reasoning", text[reasoning_start:])
                 break
 
-            reasoning_parts.append(text[reasoning_start:end])
+            self._append_block(blocks, "reasoning", text[reasoning_start:end])
             cursor = end + len(self.end_token)
 
-        return ReasoningParseResult(
-            response_text="".join(response_parts),
-            reasoning_text="".join(reasoning_parts),
+        response_text = next(
+            (block_text for kind, block_text in reversed(blocks) if kind == "text"),
+            "",
         )
+        return ReasoningParseResult(
+            blocks=tuple(blocks),
+            response_text=response_text,
+        )
+
+    @staticmethod
+    def _append_block(
+        blocks: list[ReasoningBlock], kind: ReasoningBlockKind, text: str
+    ) -> None:
+        if text:
+            blocks.append((kind, text))
 
 
 __all__ = [
     "Apertus2509ReasoningParser",
+    "ReasoningBlock",
+    "ReasoningBlockKind",
     "ReasoningParseResult",
     "ReasoningParser",
 ]

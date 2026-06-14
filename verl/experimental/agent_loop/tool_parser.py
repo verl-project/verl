@@ -206,9 +206,22 @@ class Apertus2509ToolParser(ToolParser):
         return "".join(normal_parts).strip(), calls
 
     def _parse_tool_array(self, text: str) -> tuple[Any | None, int]:
+        def parse_int(value: str) -> int:
+            if len(value) > 4300:
+                raise ValueError(
+                    f"tool call integer literal has {len(value)} digits, exceeding "
+                    "Python's default 4300 digit limit"
+                )
+            return int(value)
+
         try:
-            parsed, end_idx = json.JSONDecoder().raw_decode(text, len(self.bot) - 1)
+            parsed, end_idx = json.JSONDecoder(parse_int=parse_int).raw_decode(
+                text, len(self.bot) - 1
+            )
         except json.JSONDecodeError:
+            return None, 0
+        except (RecursionError, ValueError, TypeError) as e:
+            logger.warning(f"Failed to parse Apertus tool call: {e}")
             return None, 0
 
         if isinstance(parsed, list):
