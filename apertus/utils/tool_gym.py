@@ -69,7 +69,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--source-dir",
-        default="/capstor/store/cscs/swissai/infra01/reasoning/data/RL-prod/toolgym_test_v2",
+        default="/capstor/store/cscs/swissai/infra01/reasoning/data/RL-prod/toolgym_test_v3",
         help="Directory containing per-subset */verl.jsonl files.",
     )
     parser.add_argument(

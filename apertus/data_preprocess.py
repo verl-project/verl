@@ -225,11 +225,11 @@ TRAIN_DATASETS = [
     ),
     DatasetConfig(
         name="toolgym",
-        dataset_id="/capstor/store/cscs/swissai/infra01/reasoning/data/RL-prod/toolgym_test_v2/dataset/train.parquet",
+        dataset_id="/capstor/store/cscs/swissai/infra01/reasoning/data/RL-prod/toolgym_test_v3/dataset/train.parquet",
         split="train",
         adapter="tools",
         data_source="tool_gym",
-        enable_thinking=True,
+        enable_thinking=False,
         # tool_selection is done in the adapter
     ),
 ]
@@ -356,7 +356,7 @@ EVAL_DATASETS = [
     ),
     DatasetConfig(
         name="toolgym",
-        dataset_id="/capstor/store/cscs/swissai/infra01/reasoning/data/RL-prod/toolgym_test_v2/dataset/val.parquet",
+        dataset_id="/capstor/store/cscs/swissai/infra01/reasoning/data/RL-prod/toolgym_test_v3/dataset/val.parquet",
         split="train",
         adapter="tools",
         data_source="tool_gym",
@@ -625,15 +625,15 @@ def adapt_tools(
     example: dict[str, Any], idx: int, split: str, config: DatasetConfig
 ) -> dict[str, Any]:
     row = dict(example)
-    extra_info = dict(row.get("extra_info") or {})
-    extra_info["index"] = idx
+    extra_info = {**prompt_controls(config), **dict(row.get("extra_info") or {})}
+    extra_info.update({"index": idx, "question": row["prompt"][-1]["content"]})
     reward_model = dict(row.get("reward_model") or {})
     ground_truth = reward_model.get("ground_truth")
     if not isinstance(ground_truth, str):
         reward_model["ground_truth"] = json_dumps(ground_truth)
     row["data_source"] = normalize_text(row.get("data_source")) or config.data_source
     row["reward_model"] = reward_model
-    row["extra_info"] = {**extra_info, "question": row["prompt"][-1]["content"]}
+    row["extra_info"] = extra_info
     # row["agent_name"] = agent_name_for_tools(extra_info.get("tool_selection"))
     row.pop("tools", None)
     return row
