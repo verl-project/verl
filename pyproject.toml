@@ -321,13 +321,6 @@ requires-dist = ["torch"]
 [[tool.uv.dependency-metadata]]
 name = "transformer-engine"
 version = "2.15.0"
-# onnxscript: TE's pytorch module imports it UNCONDITIONALLY (see
-# transformer_engine/pytorch/onnx_extensions.py) yet TE does not declare it, so
-# `import transformer_engine.pytorch` — and therefore `import megatron.core` —
-# dies with ModuleNotFoundError: No module named 'onnxscript'. This metadata
-# block REPLACES TE's real metadata (it exists to skip the lock-time build), so
-# the missing dep must be re-added HERE. The reference Dockerfiles paper over the
-# same TE quirk with a standalone `pip install onnxscript` after a --no-deps TE.
 requires-dist = ["torch", "pydantic", "onnxscript"]
 provides-extras = ["pytorch"]
 

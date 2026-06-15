@@ -149,6 +149,16 @@ CONFLICT_SETS: list[set[str]] = [
 # which pins python_full_version >= '3.12').
 PYTHON_VERSION = "3.12"
 
+# uv resolver policy applied to every resolve. `flash-attn-4` — dragged in
+# transitively by `sglang` — publishes ONLY pre-releases (4.0.0bN); under uv's
+# default policy a *transitive* pre-release is refused, so a plain `uv lock`
+# dies with "only flash-attn-4<4.0.0b9 is available" (0.0.1 is the lone stable,
+# and it's below what sglang pins). "allow" lets the resolver take the betas.
+# Applied to lock AND the re-resolving runtime commands (sync / run / shell) so
+# their resolution agrees with the lock; the prefetch cache-warm syncs are
+# `--frozen` (lock-only, no resolve) so they deliberately omit it.
+PRERELEASE_ARGS: list[str] = ["--prerelease", "allow"]
+
 # Recommended build-time env vars, keyed by extra. `megatron` source-builds
 # apex + TE v2.15. Every other cu130 extra uses prebuilt wheels only (cu130
 # flash-attn, torch / vllm / sglang from the pytorch / PyPI indexes).
@@ -347,7 +357,7 @@ def _covering_combos(extras: list[str] | None = None) -> list[list[str]]:
 def cmd_lock(args: argparse.Namespace) -> int:
     """Regenerate the universal ``uv.lock`` (``uv lock``)."""
     _require_uv()
-    return _run(["uv", "lock", "--python", PYTHON_VERSION, *args.uv_args])
+    return _run(["uv", "lock", "--python", PYTHON_VERSION, *PRERELEASE_ARGS, *args.uv_args])
 
 
 def cmd_sync(args: argparse.Namespace) -> int:
@@ -371,7 +381,16 @@ def cmd_sync(args: argparse.Namespace) -> int:
         sys.exit("error: usage: manage_envs.py sync <extras...> [-- uv args...]")
     extras = _expand(backends)
     _validate_combo(extras)
-    cmd = ["uv", "sync", "--python", PYTHON_VERSION, *_extra_flags(extras), *_no_install_flags(), *uv_args]
+    cmd = [
+        "uv",
+        "sync",
+        "--python",
+        PYTHON_VERSION,
+        *_extra_flags(extras),
+        *PRERELEASE_ARGS,
+        *_no_install_flags(),
+        *uv_args,
+    ]
     rc = _run(cmd, _build_env(extras, VENV_DIR) or None)
     if rc == 0:
         print(f"\n.venv ready ({', '.join(extras)}). Activate: source .venv/bin/activate", flush=True)
@@ -400,7 +419,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     if not command:
         sys.exit("error: nothing to run after `--`")
     _validate_combo(extras)
-    cmd = ["uv", "run", "--python", PYTHON_VERSION, *_extra_flags(extras)]
+    cmd = ["uv", "run", "--python", PYTHON_VERSION, *_extra_flags(extras), *PRERELEASE_ARGS]
     if _no_install_packages():
         cmd.append("--no-sync")
     cmd += ["--", *command]
@@ -413,7 +432,7 @@ def cmd_shell(args: argparse.Namespace) -> int:
     extras = _expand(args.backends)
     _validate_combo(extras)
     rc = _run(
-        ["uv", "sync", "--python", PYTHON_VERSION, *_extra_flags(extras), *_no_install_flags()],
+        ["uv", "sync", "--python", PYTHON_VERSION, *_extra_flags(extras), *PRERELEASE_ARGS, *_no_install_flags()],
         _build_env(extras, VENV_DIR) or None,
     )
     if rc:
@@ -557,7 +576,7 @@ def cmd_prefetch(args: argparse.Namespace) -> int:
     # is intentionally NOT passed here — it would forbid the resolution — but it
     # does pin the per-combo cache-warming syncs below.
     print("resolving universal uv.lock (uv lock)...", flush=True)
-    rc = _run(["uv", "lock", "--python", PYTHON_VERSION], {"VIRTUAL_ENV": None})
+    rc = _run(["uv", "lock", "--python", PYTHON_VERSION, *PRERELEASE_ARGS], {"VIRTUAL_ENV": None})
     if rc:
         print("error: prefetch failed to resolve uv.lock", file=sys.stderr)
         return rc
