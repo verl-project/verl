@@ -27,6 +27,7 @@ from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, Ra
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import is_torch_npu_available
 from verl.workers.config import HFModelConfig, RolloutConfig
+from verl.workers.config.rollout import ensure_rollout_config
 
 logger = logging.getLogger(__file__)
 
@@ -101,7 +102,10 @@ class RolloutReplica(ABC):
         name_suffix: str = "",
     ) -> None:
         self.replica_rank = replica_rank
-        self.config: RolloutConfig = omega_conf_to_dataclass(config)
+        if is_torch_npu_available(check_device=False):
+            self.config: RolloutConfig = ensure_rollout_config(config)
+        else:
+            self.config: RolloutConfig = omega_conf_to_dataclass(config)
         self.model_config: HFModelConfig = model_config
 
         self.world_size = (
