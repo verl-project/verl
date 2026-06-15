@@ -18,18 +18,12 @@ from typing import Optional
 from omegaconf import MISSING
 
 from verl.base_config import BaseConfig
-from verl.utils.continuous_token_wiring import (
-    CONTINUOUS_TOKEN_BUILDER_FAMILIES,
-    CONTINUOUS_TOKEN_MODEL_FAMILY_OPTIONS,
-)
 from verl.utils.profiler import ProfilerConfig
 from verl.workers.config.disaggregation import DisaggregationConfig
 from verl.workers.config.model import MtpConfig
 
 __all__ = [
     "SamplingConfig",
-    "CONTINUOUS_TOKEN_BUILDER_FAMILIES",
-    "CONTINUOUS_TOKEN_MODEL_FAMILY_OPTIONS",
     "ContinuousTokenConfig",
     "MultiTurnConfig",
     "CustomAsyncServerConfig",
@@ -55,7 +49,6 @@ class SamplingConfig(BaseConfig):
 class ContinuousTokenConfig(BaseConfig):
     enable: bool = False
     model_family: str = "auto"
-    custom_builder_module: Optional[str] = None
 
     def __post_init__(self):
         if not isinstance(self.model_family, str) or not self.model_family:

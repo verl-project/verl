@@ -271,14 +271,6 @@ class QwenContinuousTokenBuilder(ContinuousTokenBuilder):
         )
 
 
-class Qwen3ContinuousTokenBuilder(QwenContinuousTokenBuilder):
-    """Backward-compatible alias for Qwen ChatML boundary behavior."""
-
-
-class Qwen35ContinuousTokenBuilder(QwenContinuousTokenBuilder):
-    """Backward-compatible alias for Qwen ChatML boundary behavior."""
-
-
 class MiniMaxContinuousTokenBuilder(ContinuousTokenBuilder):
     """MiniMax boundary handling.
 
@@ -309,7 +301,7 @@ class MiniMaxContinuousTokenBuilder(ContinuousTokenBuilder):
         )
 
 
-class GLM47ContinuousTokenBuilder(ContinuousTokenBuilder):
+class GLMContinuousTokenBuilder(ContinuousTokenBuilder):
     """GLM observation/user boundary handling.
 
     ``<|observation|>`` and ``<|user|>`` can be both assistant stop tokens and
