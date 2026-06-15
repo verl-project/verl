@@ -633,7 +633,7 @@ def adapt_tools(
         reward_model["ground_truth"] = json_dumps(ground_truth)
     row["data_source"] = normalize_text(row.get("data_source")) or config.data_source
     row["reward_model"] = reward_model
-    row["extra_info"] = extra_info
+    row["extra_info"] = {**extra_info, "question": row["prompt"][-1]["content"]}
     # row["agent_name"] = agent_name_for_tools(extra_info.get("tool_selection"))
     row.pop("tools", None)
     return row
