@@ -9,7 +9,7 @@ ARG TORCH_VERSION=2.11.0
 ARG TORCH_VISION_VERSION=0.26.0
 ARG TORCH_AUDIO_VERSION=2.11.0
 ARG TRANSFORMERS_VERSION=5.3.0
-ARG VLLM_VERSION=0.20.2
+ARG VLLM_VERSION=0.23.0
 ARG TRL_VERSION=0.27.0
 ARG TRANSFORMER_ENGINE_VERSION=v2.15
 ARG FLASH_ATTENTION_VERSION=2.8.3
@@ -122,7 +122,12 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/* && \
     pip install --ignore-installed PyJWT
 
-RUN pip install vllm==${VLLM_VERSION}
+RUN git clone https://github.com/vllm-project/vllm.git && git checkout -b v0.23.0_fix v0.23.0 && \
+    git fetch origin pull/44483/head:pr-44483 && \
+    git cherry-pick v0.23.0_fix..pr-44483 && \
+    git fetch origin pull/45589/head:pr-44589 && \
+    git cherry-pick v0.23.0_fix..pr-44589 && \
+    pip install -e .
 
 RUN pip3 install --no-deps trl==${TRL_VERSION}
 

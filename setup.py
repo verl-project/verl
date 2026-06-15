@@ -38,7 +38,9 @@ install_requires = [
     "ray[default]>=2.41.0",
     "torchdata",
     "tensordict>=0.8.0,<=0.10.0,!=0.9.0",
-    "transformers",
+    # 5.6.0 ships a broken flash-attention path (crashes on s_aux=None for
+    # sink-less models); fixed in 5.6.1. See huggingface/transformers#45588.
+    "transformers!=5.6.0",
     "wandb",
     "packaging>=20.0",
     "tensorboard",
