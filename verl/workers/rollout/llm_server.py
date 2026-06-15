@@ -217,6 +217,9 @@ class LLMServerClient:
                 **multimodal_kwargs,
                 **kwargs,
             )
+            global_steps = output.extra_fields.get("global_steps")
+            output.extra_fields.setdefault("min_global_steps", global_steps)
+            output.extra_fields.setdefault("max_global_steps", global_steps)
             return output
         finally:
             self._release_server(server_id)
