@@ -134,7 +134,7 @@ jobs:
       - name: Running nightlyCI_grpo_qwen3_vl_8b_Instruct_fsdp2_vllm_ascend checking script
         run: |
           cd /root/.cache/nightly_log/
-          python check_npu.py --log run_qwen3_vl_8b_Instruct_fsdp2_npu/run_qwen3_vl_8b_Instruct_fsdp2_npu.log --base run_qwen3_vl_8b_Instruct_fsdp2_npu/baseline_run_qwen3_vl_8b_Instruct_fsdp2_npu.txt
+          python check_npu.py --log run_qwen3_vl_8b_Instruct_fsdp2_npu/run_qwen3_vl_8b_Instruct_fsdp2_npu.log --base run_qwen3_vl_8b_Instruct_fsdp2_npu/baseline_qwen3_vl_8b_Instruct_fsdp2_npu.txt
   
   # Test grpo qwen3-8b mindspeedllm sglang
   nightlyCI_grpo-qwen3-8b-mindspeedllm-sglang:
