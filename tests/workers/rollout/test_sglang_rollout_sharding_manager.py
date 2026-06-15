@@ -16,7 +16,7 @@
 import pytest
 import torch
 
-from verl.workers.rollout.sglang_rollout.utils import get_named_tensor_buckets
+from verl.workers.rollout.sglang_rollout.utils import _compact_for_bucket, get_named_tensor_buckets
 
 _TENSOR_1MB = torch.zeros(512, 512)
 _BYTES_1MB = 1 << 20
@@ -56,3 +56,45 @@ async def test_get_named_tensor_buckets(named_tensors, bucket_size_mb, gt_groups
         assert len(group) == len(gt_group)
         for (name, _), (gt_name) in zip(group, gt_group, strict=True):
             assert name == gt_name
+
+
+def test_compact_for_bucket_skips_clone_for_owned_contiguous_tensor():
+    # A freshly-allocated contiguous tensor owns tight storage (the DTensor.full_tensor() case).
+    # It must be returned as-is so bucketing does not transiently double its peak memory.
+    tensor = torch.randn(128, 64)
+    assert _compact_for_bucket(tensor) is tensor
+
+
+def test_compact_for_bucket_clones_view_into_larger_buffer():
+    # A contiguous view that spans only part of a larger backing buffer must be compacted,
+    # otherwise the whole buffer stays resident / gets shipped.
+    base = torch.randn(256, 64)
+    view = base[:128]
+    assert view.is_contiguous()
+    out = _compact_for_bucket(view)
+    assert out is not view
+    assert out.untyped_storage().nbytes() == out.numel() * out.element_size()
+    assert torch.equal(out, view)
+
+
+def test_compact_for_bucket_clones_non_contiguous_tensor():
+    tensor = torch.randn(64, 128).t()
+    assert not tensor.is_contiguous()
+    out = _compact_for_bucket(tensor)
+    assert out is not tensor
+    assert out.data_ptr() != tensor.data_ptr()  # cloned into its own fresh storage
+    assert torch.equal(out, tensor)
+
+
+@pytest.mark.asyncio
+async def test_get_named_tensor_buckets_preserves_values():
+    # The conditional clone must not change the data that ends up in the buckets.
+    named_tensors = [("a", torch.randn(64, 64)), ("b", torch.randn(64, 64)), ("c", torch.randn(64, 64))]
+    expected = {name: tensor.clone() for name, tensor in named_tensors}
+    flat = {}
+    async for group in get_named_tensor_buckets(iter(named_tensors), 0.5 * _BYTES_1MB):
+        for name, tensor in group:
+            flat[name] = tensor
+    assert set(flat) == set(expected)
+    for name, tensor in expected.items():
+        assert torch.equal(flat[name], tensor)
