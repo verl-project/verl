@@ -1535,6 +1535,173 @@ def compute_policy_loss_dppo_kl(
     return pg_loss, pg_metrics
 
 
+@register_policy_loss("cppo")
+def compute_policy_loss_cppo(
+    old_log_prob: torch.Tensor,
+    log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    response_mask: torch.Tensor,
+    loss_agg_mode: str = "token-mean",
+    config: Optional[ActorConfig] = None,
+    rollout_is_weights: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """Compute the policy objective for CPPO (Cumulative Prefix-divergence Policy Optimization).
+
+    CPPO (Binary-TV variant) keeps the DPPO token-level ratio-advantage surrogate but
+    replaces DPPO's uniform per-token threshold with a position-weighted token-level
+    threshold and a cumulative prefix budget. The only change versus DPPO is the masking
+    decision; the loss term is identical.
+
+    See "Beyond Uniform Token-Level Trust Region in LLM Reinforcement Learning" (cppo.pdf),
+    Eq. (9)-(11) and Appendix D for the batched mask construction this implements.
+
+    For a single response of length ``T`` (Algorithm 1 of the paper; ``T`` is the padded
+    response length and ``t`` the 1-based absolute token position, matching the reference
+    implementation):
+
+        D_t = |pi(y_t|s_t) - mu(y_t|s_t)|              (Binary-TV per-token divergence)
+        w_t = w_min + (1 - w_min) * (T - t) / (T - 1)  (decreasing position weight, w_t in [w_min, 1])
+        Z_t = w_t * D_t
+        S_t = sum_{j<=t} Z_j ,  W_t = sum_{j<=t} w_j    (prefix sums; S_0 = W_0 = 0)
+        c_t = min(delta, delta + delta_b * W_{t-1} - S_{t-1})   (effective threshold, Eq. 8)
+        keep token t  iff  A_t * (rho_t - 1) <= 0   OR   Z_t <= c_t      (Eq. 10)
+
+    The first clause always keeps update terms that move pi back toward mu; the budget only
+    restricts terms that move pi farther from mu.
+
+    delta (the token-level threshold scale) is read from ``config.clip_ratio`` exactly as
+    DPPO does (paper default 0.15 for dense models, 0.20 for the 30B-A3B MoE model).
+
+    The prefix-average threshold delta_b is calibrated per sequence from its own divergence
+    statistics (paper Eq. 22, Base-model warm-up calibration)::
+
+        delta_b^seq = clamp(delta_b_k * quantile(D_{1:T}, delta_b_q), delta_b_min, 2 * delta_b_min)
+
+    where ``delta_b_min`` is ``cppo.cppo_delta_b``. The quantile ``delta_b_q`` (``cppo.cppo_delta_b_q``)
+    and the scale ``delta_b_k`` (``cppo.cppo_delta_b_k``) default to ``(0.9, 1.0)``, reproducing the
+    paper's P90 calibration; e.g. ``(q=0.95, k=0.5)`` calibrates from half the 95th percentile.
+
+    Args:
+        old_log_prob (torch.Tensor):
+            Log-probabilities under the rollout policy mu, shape (batch_size, response_length).
+        log_prob (torch.Tensor):
+            Log-probabilities under the current policy pi, shape (batch_size, response_length).
+        advantages (torch.Tensor):
+            Advantage estimates for each token, shape (batch_size, response_length).
+        response_mask (torch.Tensor):
+            Mask indicating response tokens, shape (batch_size, response_length).
+        loss_agg_mode (str, optional):
+            Aggregation mode for ``agg_loss``. Defaults to "token-mean".
+        config: (verl.workers.config.ActorConfig): actor config.
+        rollout_is_weights (torch.Tensor | None):
+            Optional rollout-correction importance weights, shape (batch_size, response_length).
+    """
+
+    assert config is not None
+    assert not isinstance(config, AlgoConfig)
+
+    pl = config.policy_loss
+    cppo = pl.cppo
+    # delta: token-level threshold scale, shared with DPPO via clip_ratio (paper Sec. 4.1).
+    delta = float(config.clip_ratio)
+    # w_min: weight floor of the linear position schedule (paper default 0.8).
+    w_min = float(cppo.get("cppo_w_min", 0.8))
+    # delta_b: floor of the per-sequence dynamic prefix-average budget delta_b_min (paper Eq. 22).
+    delta_b = float(cppo.get("cppo_delta_b", 0.02))
+    # delta_b_q: quantile of the per-sequence divergence used to calibrate the budget (Eq. 22
+    # uses the 90th percentile). delta_b_k: scale applied to that quantile. Together they give
+    #   delta_b^seq = clamp(delta_b_k * quantile(D, delta_b_q), delta_b, 2 * delta_b),
+    # so e.g. (q=0.95, k=0.5) calibrates from half the 95th percentile. Defaults (0.9, 1.0)
+    # reproduce the paper's P90 calibration.
+    delta_b_q = float(cppo.get("cppo_delta_b_q", 0.9))
+    delta_b_k = float(cppo.get("cppo_delta_b_k", 1.0))
+    assert 0.0 < w_min <= 1.0, f"cppo.cppo_w_min must be in (0, 1]; got {w_min}."
+    assert delta_b >= 0.0, f"cppo.cppo_delta_b must be >= 0; got {delta_b}."
+    assert 0.0 <= delta_b_q <= 1.0, f"cppo.cppo_delta_b_q must be in [0, 1]; got {delta_b_q}."
+    assert delta_b_k >= 0.0, f"cppo.cppo_delta_b_k must be >= 0; got {delta_b_k}."
+
+    negative_approx_kl = log_prob - old_log_prob
+    negative_approx_kl = torch.clamp(negative_approx_kl, min=-20.0, max=20.0)
+    ratio = torch.exp(negative_approx_kl)
+    ppo_kl = verl_F.masked_mean(-negative_approx_kl, response_mask)
+
+    # Truncated importance sampling instead of dual-clip PPO (same idiom as DPPO).
+    clip_ratio_c = config.get("clip_ratio_c", 20.0)
+    truncated_ratio = torch.clamp(ratio, max=clip_ratio_c)
+    truncated_ratio = truncated_ratio.detach()
+
+    # ── CPPO mask construction (no_grad: it is a trust-region gate, not part of the loss) ──
+    with torch.no_grad():
+        response_mask_f = response_mask.float()
+
+        # Binary-TV per-token divergence D_t = |pi(y_t) - mu(y_t)| (same signal as DPPO-Binary-TV).
+        prob = torch.exp(log_prob)
+        old_prob = torch.exp(old_log_prob)
+        D_t = (prob - old_prob).abs() * response_mask_f
+
+        # Position weight w_t in [w_min, 1], decreasing along the response (Eq. 9):
+        #   w_t = w_min + (1 - w_min) * (T - t) / (T - 1)  ==  1 - (1 - w_min) / (T - 1) * (t - 1)
+        # T is the (padded) response length and t is the 1-based absolute token position. This
+        # matches the reference CPPO implementation, which keys the schedule on the fixed padded
+        # length rather than each sequence's valid length; responses are right-padded, so padded
+        # positions are zeroed by response_mask below.
+        bs, resp_len = response_mask_f.shape
+        T_fixed = float(resp_len)
+        pos = torch.arange(1, resp_len + 1, device=log_prob.device).unsqueeze(0).expand(bs, -1).float()
+        frac = ((T_fixed - pos) / max(T_fixed - 1.0, 1.0)).clamp(0.0, 1.0)
+        w_t = (w_min + (1.0 - w_min) * frac) * response_mask_f
+
+        Z_t = w_t * D_t  # weighted divergence
+
+        # Prefix sums with one-token right shift so the decision at t uses only the
+        # preceding prefix (S_{t-1}, W_{t-1}); S_0 = W_0 = 0 (Appendix D batched form).
+        S_cum = torch.cumsum(Z_t, dim=-1)
+        W_cum = torch.cumsum(w_t, dim=-1)
+        S_prev = torch.cat([torch.zeros_like(S_cum[:, :1]), S_cum[:, :-1]], dim=-1)
+        W_prev = torch.cat([torch.zeros_like(W_cum[:, :1]), W_cum[:, :-1]], dim=-1)
+
+        # Per-sequence dynamic prefix budget (Eq. 22):
+        #   delta_b^seq = clamp(delta_b_k * quantile(D, delta_b_q), delta_b, 2 * delta_b).
+        # delta_b_q / delta_b_k default to (0.9, 1.0) = the paper's P90 calibration.
+        D_for_q = torch.where(response_mask_f.bool(), D_t, torch.full_like(D_t, float("nan")))
+        q_seq = torch.nanquantile(D_for_q, q=delta_b_q, dim=-1)  # (B,)
+        # Empty sequence -> NaN -> fall back to the floor.
+        q_seq = torch.nan_to_num(q_seq, nan=delta_b)
+        delta_b_seq = (delta_b_k * q_seq).clamp(min=delta_b, max=2.0 * delta_b).unsqueeze(-1)  # (B, 1)
+
+        # Effective threshold c_t = min(delta, delta + delta_b * W_{t-1} - S_{t-1}) (Eq. 8).
+        c_t = (delta + delta_b_seq * W_prev - S_prev).clamp(max=delta)
+
+        # I_t: budget feasibility. Keep tokens moving pi back toward mu unconditionally,
+        # otherwise only if within the effective threshold (Eq. 10).
+        feasible = Z_t <= c_t
+        toward_mu = (advantages * (ratio - 1.0)) <= 0.0
+        valid_mask = (toward_mu | feasible).detach().float() * response_mask_f
+
+    pg_losses = -advantages * truncated_ratio * log_prob * valid_mask
+
+    # Apply rollout correction weights if provided.
+    if rollout_is_weights is not None:
+        pg_losses = pg_losses * rollout_is_weights
+
+    pg_loss = agg_loss(
+        loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **config.global_batch_info
+    )
+
+    # Fraction of response tokens rejected by the CPPO mask (excludes the always-kept
+    # toward-mu tokens), matching DPPO's pg_clipfrac semantics.
+    rejected = (1.0 - valid_mask) * response_mask_f
+    pg_clipfrac = verl_F.masked_mean(rejected, response_mask_f)
+    pg_clipfrac_lower = verl_F.masked_mean((ratio > clip_ratio_c).float() * valid_mask, response_mask_f)
+
+    pg_metrics = {
+        "actor/pg_clipfrac": pg_clipfrac.detach().item(),
+        "actor/ppo_kl": ppo_kl.detach().item(),
+        "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
+    }
+    return pg_loss, pg_metrics
+
+
 @register_policy_loss("gspo")
 def compute_policy_loss_gspo(
     old_log_prob: torch.Tensor,
