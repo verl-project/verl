@@ -481,14 +481,3 @@ class LLMServerManager:
     async def stop_profile(self):
         """Stop profiling on all rollout replicas."""
         await asyncio.gather(*[replica.stop_profile() for replica in self.rollout_replicas])
-
-    @auto_await
-    async def shutdown(self):
-        """Shutdown rollout replicas that expose a shutdown hook."""
-        shutdown_tasks = []
-        for replica in self.rollout_replicas:
-            shutdown = getattr(replica, "shutdown", None)
-            if shutdown is not None:
-                shutdown_tasks.append(shutdown())
-        if shutdown_tasks:
-            await asyncio.gather(*shutdown_tasks, return_exceptions=True)

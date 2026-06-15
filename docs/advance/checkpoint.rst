@@ -236,16 +236,9 @@ has loaded the weights from the source HuggingFace checkpoint:
 
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
+    actor_rollout_ref.rollout.data_parallel_size=1 \
     actor_rollout_ref.rollout.checkpoint_engine.backend=nccl \
     actor_rollout_ref.rollout.checkpoint_engine.check_weight_sync=True
-
-Use ``check_weight_sync_only=True`` to stop after the initial check instead of
-running rollout generation or PPO training:
-
-.. code:: bash
-
-    actor_rollout_ref.rollout.checkpoint_engine.check_weight_sync=True \
-    actor_rollout_ref.rollout.checkpoint_engine.check_weight_sync_only=True
 
 The check compares the initial rollout backend-loaded weights with the source
 HuggingFace checkpoint and reports missing, unexpected, and mismatched keys.

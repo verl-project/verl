@@ -48,16 +48,9 @@ training command:
 ```bash
 actor_rollout_ref.rollout.name=vllm \
 actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
+actor_rollout_ref.rollout.data_parallel_size=1 \
 actor_rollout_ref.rollout.checkpoint_engine.backend=nccl \
 actor_rollout_ref.rollout.checkpoint_engine.check_weight_sync=True
-```
-
-Use `check_weight_sync_only=True` to exit after the initial weight-sync check instead
-of running rollout generation or PPO training:
-
-```bash
-actor_rollout_ref.rollout.checkpoint_engine.check_weight_sync=True \
-actor_rollout_ref.rollout.checkpoint_engine.check_weight_sync_only=True
 ```
 
 The check currently supports vLLM strict equality with rollout tensor and data parallel sizes 1.

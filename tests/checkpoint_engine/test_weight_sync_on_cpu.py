@@ -22,11 +22,6 @@ from verl.checkpoint_engine.weight_sync import assert_vllm_weight_sync_supported
 from verl.workers.config import CheckpointEngineConfig
 
 
-def test_checkpoint_engine_config_rejects_check_only_without_check():
-    with pytest.raises(ValueError, match="check_weight_sync_only=True"):
-        CheckpointEngineConfig(check_weight_sync_only=True)
-
-
 def test_checkpoint_engine_manager_checks_initial_sync_only():
     manager = object.__new__(CheckpointEngineManager)
     manager.config = CheckpointEngineConfig(check_weight_sync=True)
@@ -34,9 +29,6 @@ def test_checkpoint_engine_manager_checks_initial_sync_only():
     assert manager._should_check_loaded_weights_equal(None)
     assert manager._should_check_loaded_weights_equal(0)
     assert not manager._should_check_loaded_weights_equal(1)
-
-    manager.config = CheckpointEngineConfig(check_weight_sync=True, check_weight_sync_only=True)
-    assert manager._should_check_loaded_weights_equal(1)
 
 
 def test_vllm_weight_sync_parallelism_check_accepts_tp1_dp1():

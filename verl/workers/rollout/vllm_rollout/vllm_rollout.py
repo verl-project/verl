@@ -203,19 +203,13 @@ class ServerAdapter(BaseRollout):
         self,
         model_path: str,
         trust_remote_code: bool = False,
-        torch_dtype: str = "bfloat16",
-        max_mismatches: int = 10,
-        timeout: float | None = None,
     ):
         """Check vLLM worker weights against a HuggingFace checkpoint."""
         return await self._execute_method(
             "check_loaded_weights_equal",
-            timeout=timeout,
             kwargs={
                 "model_path": model_path,
                 "trust_remote_code": trust_remote_code,
-                "torch_dtype": torch_dtype,
-                "max_mismatches": max_mismatches,
             },
         )
 

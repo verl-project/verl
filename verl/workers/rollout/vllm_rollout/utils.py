@@ -224,8 +224,6 @@ class vLLMColocateWorkerExtension:
         self,
         model_path: str,
         trust_remote_code: bool = False,
-        torch_dtype: str = "bfloat16",
-        max_mismatches: int = 10,
     ) -> dict[str, Any]:
         """Compare vLLM-loaded weights against a HuggingFace checkpoint.
 
@@ -246,10 +244,8 @@ class vLLMColocateWorkerExtension:
         assert_vllm_weight_sync_supported_parallelism(parallel_config)
 
         local_path = copy_to_local(model_path)
-        dtype = getattr(torch, torch_dtype)
         expected_model = AutoModelForCausalLM.from_pretrained(
             local_path,
-            torch_dtype=dtype,
             device_map="cpu",
             trust_remote_code=trust_remote_code,
         )
@@ -260,7 +256,6 @@ class vLLMColocateWorkerExtension:
             actual_state_dict=actual_state_dict,
             num_hidden_layers=getattr(expected_model.config, "num_hidden_layers", 0),
             tie_word_embeddings=getattr(expected_model.config, "tie_word_embeddings", False),
-            max_mismatches=max_mismatches,
         )
 
         del expected_model

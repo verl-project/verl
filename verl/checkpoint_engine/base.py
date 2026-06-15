@@ -343,9 +343,6 @@ class CheckpointEngineWorker(Worker):
         self,
         model_path: str | None = None,
         trust_remote_code: bool | None = None,
-        torch_dtype: str = "bfloat16",
-        max_mismatches: int = 10,
-        timeout: float | None = None,
     ):
         """Check backend-loaded rollout weights against a HuggingFace checkpoint."""
         check_fn = getattr(self.server_adapter, "check_loaded_weights_equal", None)
@@ -356,9 +353,6 @@ class CheckpointEngineWorker(Worker):
         return await check_fn(
             model_path=model_path or self.model_config.path,
             trust_remote_code=self.model_config.trust_remote_code if trust_remote_code is None else trust_remote_code,
-            torch_dtype=torch_dtype,
-            max_mismatches=max_mismatches,
-            timeout=timeout,
         )
 
 
@@ -456,11 +450,7 @@ class CheckpointEngineManager:
         if not self.config.check_weight_sync:
             return None
 
-        summaries = rollout.check_loaded_weights_equal(
-            torch_dtype=self.config.check_weight_sync_dtype,
-            max_mismatches=self.config.check_weight_sync_max_mismatches,
-            timeout=self.config.check_weight_sync_timeout,
-        )
+        summaries = rollout.check_loaded_weights_equal()
         summaries = [summary for summary in summaries if summary is not None]
         print(f"[CheckpointEngineManager] weight sync check passed: {summaries}")
         return summaries
@@ -469,7 +459,7 @@ class CheckpointEngineManager:
         """Whether this update should be compared with the source HF checkpoint."""
         if not self.config.check_weight_sync:
             return False
-        return self.config.check_weight_sync_only or global_steps in (None, 0)
+        return global_steps in (None, 0)
 
     @auto_await
     async def sleep_replicas(self):
