@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+from enum import StrEnum
 import logging
 import re
 from typing import Any
@@ -30,26 +31,44 @@ from verl.utils.continuous_token import (
 
 logger = logging.getLogger(__name__)
 
-_CONTINUOUS_TOKEN_BUILDER_REGISTRY: dict[str, type[Any]] = {
-    "default": ContinuousTokenBuilder,
-    "qwen": QwenContinuousTokenBuilder,
-    "qwen25": QwenContinuousTokenBuilder,
-    "qwen3": QwenContinuousTokenBuilder,
-    "qwen35": QwenContinuousTokenBuilder,
-    "minimax": MiniMaxContinuousTokenBuilder,
-    "minimaxm2": MiniMaxContinuousTokenBuilder,
-    "minimaxm25": MiniMaxContinuousTokenBuilder,
-    "minimaxm27": MiniMaxContinuousTokenBuilder,
-    "glm47": GLMContinuousTokenBuilder,
-    "glm5": GLMContinuousTokenBuilder,
-    "gemma4": Gemma4ContinuousTokenBuilder,
-    "gptoss": GptOssContinuousTokenBuilder,
+
+class ContinuousTokenModelFamily(StrEnum):
+    AUTO = "auto"
+    DEFAULT = "default"
+    QWEN = "qwen"
+    QWEN25 = "qwen25"
+    QWEN3 = "qwen3"
+    QWEN35 = "qwen35"
+    MINIMAX = "minimax"
+    MINIMAX_M2 = "minimaxm2"
+    MINIMAX_M25 = "minimaxm25"
+    MINIMAX_M27 = "minimaxm27"
+    GLM47 = "glm47"
+    GLM5 = "glm5"
+    GEMMA4 = "gemma4"
+    GPTOSS = "gptoss"
+
+
+_CONTINUOUS_TOKEN_BUILDER_REGISTRY: dict[ContinuousTokenModelFamily, type[Any]] = {
+    ContinuousTokenModelFamily.DEFAULT: ContinuousTokenBuilder,
+    ContinuousTokenModelFamily.QWEN: QwenContinuousTokenBuilder,
+    ContinuousTokenModelFamily.QWEN25: QwenContinuousTokenBuilder,
+    ContinuousTokenModelFamily.QWEN3: QwenContinuousTokenBuilder,
+    ContinuousTokenModelFamily.QWEN35: QwenContinuousTokenBuilder,
+    ContinuousTokenModelFamily.MINIMAX: MiniMaxContinuousTokenBuilder,
+    ContinuousTokenModelFamily.MINIMAX_M2: MiniMaxContinuousTokenBuilder,
+    ContinuousTokenModelFamily.MINIMAX_M25: MiniMaxContinuousTokenBuilder,
+    ContinuousTokenModelFamily.MINIMAX_M27: MiniMaxContinuousTokenBuilder,
+    ContinuousTokenModelFamily.GLM47: GLMContinuousTokenBuilder,
+    ContinuousTokenModelFamily.GLM5: GLMContinuousTokenBuilder,
+    ContinuousTokenModelFamily.GEMMA4: Gemma4ContinuousTokenBuilder,
+    ContinuousTokenModelFamily.GPTOSS: GptOssContinuousTokenBuilder,
 }
 
-CONTINUOUS_TOKEN_BUILDER_FAMILIES = tuple(_CONTINUOUS_TOKEN_BUILDER_REGISTRY)
+CONTINUOUS_TOKEN_BUILDER_FAMILIES = tuple(family.value for family in _CONTINUOUS_TOKEN_BUILDER_REGISTRY)
 
 
-def get_continuous_token_builder_class(model_family: str) -> type[Any]:
+def get_continuous_token_builder_class(model_family: str | ContinuousTokenModelFamily) -> type[Any]:
     family = _normalize_model_family(model_family)
     try:
         return _CONTINUOUS_TOKEN_BUILDER_REGISTRY[family]
@@ -65,15 +84,15 @@ def list_continuous_token_builder_families() -> tuple[str, ...]:
 
 
 def resolve_continuous_token_model_family(
-    model_family: str,
+    model_family: str | ContinuousTokenModelFamily,
     *,
     model_path: str | None = None,
     tokenizer: Any | None = None,
     tokenizer_name_or_path: str | None = None,
-) -> str:
+) -> ContinuousTokenModelFamily:
     """Resolve ``auto`` to a concrete family, or canonicalize an explicit family."""
     family = _normalize_model_family(model_family)
-    if family != "auto":
+    if family != ContinuousTokenModelFamily.AUTO:
         logger.info("Using explicit Continuous Token builder family: %s", family)
         return family
 
@@ -96,7 +115,7 @@ def infer_continuous_token_model_family(
     model_path: str | None = None,
     tokenizer: Any | None = None,
     tokenizer_name_or_path: str | None = None,
-) -> str:
+) -> ContinuousTokenModelFamily:
     """Infer a built-in model family from model/tokenizer names.
 
     Unknown models intentionally fall back to ``default`` so enabling
@@ -107,42 +126,42 @@ def infer_continuous_token_model_family(
     compact = re.sub(r"[^a-z0-9]+", "", haystack)
 
     if any(marker in haystack for marker in ("glm-5", "glm_5")) or "glm5" in compact:
-        return "glm5"
+        return ContinuousTokenModelFamily.GLM5
     if any(marker in haystack for marker in ("glm-4.7", "glm_4.7", "glm4.7")) or "glm47" in compact:
-        return "glm47"
+        return ContinuousTokenModelFamily.GLM47
     if any(marker in haystack for marker in ("gemma-4", "gemma_4")) or any(
         marker in compact for marker in ("gemma4", "gemma4unified")
     ):
-        return "gemma4"
+        return ContinuousTokenModelFamily.GEMMA4
     if any(marker in haystack for marker in ("gpt-oss", "gpt_oss")) or "gptoss" in compact:
-        return "gptoss"
+        return ContinuousTokenModelFamily.GPTOSS
     if "minimaxm27" in compact:
-        return "minimaxm27"
+        return ContinuousTokenModelFamily.MINIMAX_M27
     if "minimaxm25" in compact:
-        return "minimaxm25"
+        return ContinuousTokenModelFamily.MINIMAX_M25
     if "minimaxm2" in compact:
-        return "minimaxm2"
+        return ContinuousTokenModelFamily.MINIMAX_M2
     if "minimax" in compact:
-        return "minimax"
+        return ContinuousTokenModelFamily.MINIMAX
     if any(marker in haystack for marker in ("qwen3.5", "qwen3_5", "qwen3-5")) or "qwen35" in compact:
-        return "qwen35"
+        return ContinuousTokenModelFamily.QWEN35
     if any(marker in haystack for marker in ("qwen2.5", "qwen2_5", "qwen2-5")) or "qwen25" in compact:
-        return "qwen25"
+        return ContinuousTokenModelFamily.QWEN25
     if "qwen3" in compact:
-        return "qwen3"
+        return ContinuousTokenModelFamily.QWEN3
     logger.warning(
         "No model-specific Continuous Token builder matched model_path=%r, tokenizer_name_or_path=%r; "
         "falling back to the default ContinuousTokenBuilder.",
         model_path,
         tokenizer_name_or_path or _tokenizer_name_or_path(tokenizer),
     )
-    return "default"
+    return ContinuousTokenModelFamily.DEFAULT
 
 
 def create_continuous_token_builder(
     tokenizer: Any,
     *,
-    model_family: str,
+    model_family: str | ContinuousTokenModelFamily,
     model_path: str | None = None,
     tokenizer_name_or_path: str | None = None,
     chat_template_kwargs: dict[str, Any] | None = None,
@@ -160,13 +179,22 @@ def create_continuous_token_builder(
     return builder_cls(tokenizer, chat_template_kwargs=chat_template_kwargs, **builder_kwargs)
 
 
-def _normalize_model_family(model_family: str) -> str:
+def _normalize_model_family(model_family: str | ContinuousTokenModelFamily) -> ContinuousTokenModelFamily:
+    if isinstance(model_family, ContinuousTokenModelFamily):
+        return model_family
     if not isinstance(model_family, str) or not model_family:
         raise ValueError("Continuous Token model_family must be a non-empty string")
     family = model_family.strip().lower()
     if not family:
         raise ValueError("Continuous Token model_family must be a non-empty string")
-    return re.sub(r"[^a-z0-9]+", "", family)
+    family = re.sub(r"[^a-z0-9]+", "", family)
+    try:
+        return ContinuousTokenModelFamily(family)
+    except ValueError as exc:
+        raise ValueError(
+            f"Unknown Continuous Token model_family {model_family!r}. "
+            f"Supported families: {(ContinuousTokenModelFamily.AUTO.value, *CONTINUOUS_TOKEN_BUILDER_FAMILIES)}."
+        ) from exc
 
 
 def _tokenizer_name_or_path(tokenizer: Any | None) -> str | None:
