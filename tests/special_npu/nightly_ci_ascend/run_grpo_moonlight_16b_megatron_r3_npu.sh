@@ -5,26 +5,26 @@ set -xeuo pipefail
 export RAY_DEDUP_LOGS=0
 
 # Baseline
-RELEASE071_R3_ROLLOUT_PROBS_DIFF_MEAN=${RELEASE071_R3_ROLLOUT_PROBS_DIFF_MEAN:-0.008714}
+RELEASE071_R3_ROLLOUT_PROBS_DIFF_MEAN=${RELEASE071_R3_ROLLOUT_PROBS_DIFF_MEAN:-0.004656}
 
 # Log Path
-LOG_NAME=${LOG_NAME:-grpo_qwen3_30b_a3b_r3.log}
+LOG_NAME=${LOG_NAME:-grpo_moonlight_16b_a3b_r3.log}
 LOG_PATH=${LOG_PATH:-${HOME}/.cache/nightly_log/${LOG_NAME}}
 
 # Project Configuration
-project_name=${PROJECT_NAME:-verl_grpo_qwen3_moe_r3}
-exp_name=${EXPERIMENT_NAME:-qwen3_30b_a3b_vllm_megatron_r3}
+project_name=${PROJECT_NAME:-verl_grpo_moonlight_16b_a3b_r3}
+exp_name=${EXPERIMENT_NAME:-moonlight_16b_a3b_vllm_megatron_r3}
 
 # Node Info
 NNODES=${NNODES:-1}
-NPUS_PER_NODE=${NPUS_PER_NODE:-16}
+NPUS_PER_NODE=${NPUS_PER_NODE:-8}
 
 # Weight Load
 USE_MBRIDGE=${USE_MBRIDGE:-True}
 USE_DIST_CKPT=${USE_DIST_CKPT:-False}
 
 # Model Weights Paths
-MODEL_ID=${MODEL_ID:-Qwen/Qwen3-30B-A3B}
+MODEL_ID=${MODEL_ID:-moonshotai/Moonlight-16B-A3B}
 MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/models/${MODEL_ID}}
 
 # File System Paths
@@ -55,19 +55,22 @@ infer_ppo_max_token_len=$(((max_prompt_length + max_response_length)))
 optimizer_offload_fraction=1
 
 # Megatron Configuration
-train_tp=2
-train_ep=8
+train_tp=1
+train_ep=2
 train_etp=1
-train_pp=2
-train_cp=1
+train_pp=4
+train_cp=2
 
 # vLLM Configuration
-gen_tp=8
+gen_tp=4
 gen_dp=1
-gen_ep=8
 gpu_memory_utilization=0.7
 max_model_len=$((max_prompt_length + max_response_length))
 max_num_batched_tokens=$(((max_prompt_length + max_response_length) * 1))
+
+# Moonlight Configuration
+first_layer=7
+last_layer=6
 
 # Data Configuration
 DATA_CONFIG=(
@@ -79,12 +82,15 @@ DATA_CONFIG=(
     data.max_response_length=${max_response_length}
     data.filter_overlong_prompts=False
     data.truncation='left'
+    data.trust_remote_code=True
 )
 
 # Model Configuration
 MODEL_CONFIG=(
     actor_rollout_ref.model.path="${MODEL_PATH}"
     actor_rollout_ref.model.use_remove_padding=True
+    actor_rollout_ref.model.use_fused_kernels=False
+    actor_rollout_ref.model.trust_remote_code=True
 )
 
 # Algorithm Configuration
@@ -96,6 +102,7 @@ ALGORITHM_CONFIG=(
 
 # Actor Model Configuration
 ACTOR_CONFIG=(
+    actor_rollout_ref.actor.policy_loss.loss_mode=vanilla \
     actor_rollout_ref.actor.megatron.use_mbridge=${USE_MBRIDGE}
     actor_rollout_ref.actor.use_torch_compile=False
     actor_rollout_ref.actor.use_dynamic_bsz=${use_dynamic_bsz}
@@ -112,6 +119,9 @@ ACTOR_CONFIG=(
     +actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_offload_fraction=${optimizer_offload_fraction}
     +actor_rollout_ref.actor.optim.override_optimizer_config.use_precision_aware_optimizer=True
     +actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_cpu_offload=True
+    +actor_rollout_ref.actor.megatron.override_transformer_config.num_layers_in_first_pipeline_stage=$first_layer \
+    +actor_rollout_ref.actor.megatron.override_transformer_config.num_layers_in_last_pipeline_stage=$last_layer \
+    +actor_rollout_ref.actor.megatron.override_transformer_config.multi_latent_attention=True \
     actor_rollout_ref.actor.megatron.tensor_model_parallel_size=${train_tp}
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=${train_pp}
     actor_rollout_ref.actor.megatron.context_parallel_size=${train_cp}
@@ -128,6 +138,7 @@ ACTOR_CONFIG=(
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1
+    ++actor_rollout_ref.actor.megatron.override_transformer_config.attention_backend=fused \
 )
 
 # Reference Model Configuration
@@ -147,6 +158,7 @@ REF_CONFIG=(
 
 # Rollout Configuration
 ROLLOUT_CONFIG=(
+    actor_rollout_ref.rollout.load_format=safetensors \
     actor_rollout_ref.rollout.name=vllm
     actor_rollout_ref.rollout.n=${n_resp_per_prompt}
     actor_rollout_ref.rollout.top_p=1.0
@@ -160,9 +172,7 @@ ROLLOUT_CONFIG=(
     actor_rollout_ref.rollout.max_model_len=${max_model_len}
     actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp}
     actor_rollout_ref.rollout.data_parallel_size=${gen_dp}
-    actor_rollout_ref.rollout.expert_parallel_size=${gen_ep}
-    actor_rollout_ref.rollout.enable_chunked_prefill=True
-    actor_rollout_ref.rollout.enable_prefix_caching=True
+    actor_rollout_ref.rollout.enable_chunked_prefill=False
     actor_rollout_ref.rollout.enforce_eager=True
     actor_rollout_ref.rollout.free_cache_engine=True
     actor_rollout_ref.rollout.val_kwargs.n=1
