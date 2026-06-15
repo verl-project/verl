@@ -73,6 +73,8 @@ class ReplayBuffer:
         self.running_keys: dict[str, set] = defaultdict(set)
         self.finished_keys: dict[str, set] = defaultdict(set)
         self.failure_keys: dict[str, set] = defaultdict(set)
+        # partition_id => {prompt_key: global_steps}, used to prioritize older samples.
+        self.prompt_global_steps: dict[str, dict[str, int]] = defaultdict(dict)
 
     def _sync_metadata_from_transfer_queue(self):
         """Sync the metadata from TransferQueue."""
@@ -81,6 +83,7 @@ class ReplayBuffer:
         self.running_keys.clear()
         self.finished_keys.clear()
         self.failure_keys.clear()
+        self.prompt_global_steps.clear()
 
         data = tq.kv_list()
         if data is None:
@@ -91,6 +94,7 @@ class ReplayBuffer:
             for key, tag in items.items():
                 if tag.get("is_prompt", False):
                     # see: [GRPO group sampling control]
+                    self.prompt_global_steps[partition_id][key] = tag.get("global_steps", 0)
                     match tag["status"]:
                         case "pending":
                             self.pending_keys[partition_id].add(key)
@@ -137,7 +141,10 @@ class ReplayBuffer:
         # TODO: should we filter out samples with some of their sessions failed?
         finished_keys = self.finished_keys[partition_id]
         failure_keys = self.failure_keys[partition_id]
-        selected_prompt_uids = list(finished_keys.union(failure_keys))[:batch_size]
+        # Prioritize sampling the oldest prompts (smallest global_steps first) to reduce staleness.
+        prompt_global_steps = self.prompt_global_steps[partition_id]
+        sampleable_keys = sorted(finished_keys.union(failure_keys), key=lambda key: prompt_global_steps.get(key, 0))
+        selected_prompt_uids = sampleable_keys[:batch_size]
         tq.kv_clear(partition_id=partition_id, keys=selected_prompt_uids)
 
         keys, tags = [], []

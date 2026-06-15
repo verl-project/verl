@@ -313,9 +313,7 @@ class FullyAsyncLLMServerClient(LLMServerClient):
                     break
 
             # 4. check stop reason
-            if output.stop_reason not in ("aborted", "abort") or not (
-                hasattr(self.config, "async_training") and self.config.async_training.partial_rollout
-            ):
+            if output.stop_reason not in ("aborted", "abort"):
                 break
 
             await asyncio.sleep(1)

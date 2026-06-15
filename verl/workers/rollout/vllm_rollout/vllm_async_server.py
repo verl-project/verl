@@ -551,6 +551,7 @@ class vLLMHttpServer:
             final_res = output
         assert final_res is not None
 
+        extra_fields = {"global_steps": self.global_steps}
         # Handle abort case: when the request is aborted by pause_generation(abort),
         # outputs may be empty. Return empty results with stop_reason="aborted"
         # instead of crashing with "IndexError: list index out of range".
@@ -560,9 +561,9 @@ class vLLMHttpServer:
                 log_probs=None,
                 routed_experts=None,
                 stop_reason="aborted",
+                extra_fields=extra_fields,
             )
 
-        extra_fields = {"global_steps": self.global_steps}
         extract_prompt_logprobs(
             output=final_res,
             num_prompt_logprobs=sampling_params.prompt_logprobs,

@@ -121,7 +121,7 @@ class PPOTrainer(ABC):
         2. LLMServerManager: launch and manage LLM server replicas for generation.
         3. CheckpointEngineManager: sync weights between worker group and LLM server replicas.
         4. RewardLoopManager: reward workers for rule-based reward, optional LLM server for model-based reward.
-        5. [Optional] MultiTeacherModelManager: LLM teacher servers for one-policy distillation.
+        5. [Optional] MultiTeacherModelManager: LLM teacher servers for on-policy distillation.
         """
         self._setup()
         self.on_init_end()
@@ -262,7 +262,7 @@ class PPOTrainer(ABC):
         return self.llm_server_manager.get_client()
 
     def get_teacher_client(self) -> Optional[dict[str, LLMServerClient]]:
-        """Get the One-Policy Distillation teacher server clients.
+        """Get the On-Policy Distillation teacher server clients.
 
         Returns:
             dict[str, LLMServerClient]: The teacher server clients.
@@ -1368,6 +1368,8 @@ class PPOTrainer(ABC):
         prompt_length = data["prompts"].offsets().diff()
         response_length = data["responses"].offsets().diff()
         global_token_num = (prompt_length + response_length).tolist()
+        min_global_steps = np.array([tag["min_global_steps"] for tag in batch.tags], dtype=int)
+        max_global_steps = np.array([tag["max_global_steps"] for tag in batch.tags], dtype=int)
 
         # Only fetch speculative decoding stats when rollout writes them.
         spec_drafts = spec_accepts = spec_verifies = None
@@ -1415,6 +1417,32 @@ class PPOTrainer(ABC):
         # 4. per-request speculative-decoding aggregation (same metrics async PPO logs;
         # see compute_spec_decode_metrics in verl/trainer/ppo/ray_trainer.py).
         metrics.update(compute_spec_decode_metrics(spec_drafts, spec_accepts, spec_verifies, non_padding_mask))
+
+        # 5. off-policy staleness metrics
+        #   - trajectory_spans: how many distinct model versions a single trajectory was
+        #     generated across (1 == fully generated on a single version). This captures the
+        #     within-trajectory policy inconsistency caused by partial rollout / continuation.
+        #   - trajectory_staleness: how many training steps the trajectory lags behind the
+        #     *current* policy. A trajectory spans versions [min_global_steps, max_global_steps],
+        #     so the lag is a range: the freshest weights used give the lower bound
+        #     (global_steps - max_global_steps) and the oldest weights the worst case
+        #     (global_steps - min_global_steps). We log the lower bound as the primary metric.
+        trajectory_spans = max_global_steps - min_global_steps + 1
+        trajectory_staleness = (global_steps - 1) - max_global_steps
+        trajectory_staleness_worst = (global_steps - 1) - min_global_steps
+        metrics.update(
+            {
+                "training/off_policy/trajectory_spans/mean": trajectory_spans.mean(),
+                "training/off_policy/trajectory_spans/max": trajectory_spans.max(),
+                "training/off_policy/trajectory_spans/min": trajectory_spans.min(),
+                "training/off_policy/trajectory_staleness/mean": trajectory_staleness.mean(),
+                "training/off_policy/trajectory_staleness/max": trajectory_staleness.max(),
+                "training/off_policy/trajectory_staleness/min": trajectory_staleness.min(),
+                "training/off_policy/trajectory_staleness_worst/mean": trajectory_staleness_worst.mean(),
+                "training/off_policy/trajectory_staleness_worst/max": trajectory_staleness_worst.max(),
+                "training/off_policy/trajectory_staleness_worst/min": trajectory_staleness_worst.min(),
+            }
+        )
 
 
 TRAINER_REGISTRY: dict[str, type[PPOTrainer]] = {}

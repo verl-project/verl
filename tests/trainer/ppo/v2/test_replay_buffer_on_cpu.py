@@ -75,6 +75,7 @@ class PromptSpec:
     uid: str
     status: str
     sessions: int = 1
+    global_steps: int = 0
     trajectory_keys: list[str] = field(default_factory=list)
 
 
@@ -112,7 +113,7 @@ class RolloutProducer(threading.Thread):
                 tq.kv_put(
                     key=spec.uid,
                     partition_id=self.partition_id,
-                    tag={"is_prompt": True, "status": spec.status},
+                    tag={"is_prompt": True, "status": spec.status, "global_steps": spec.global_steps},
                 )
                 if self.delay:
                     time.sleep(self.delay)
@@ -215,6 +216,21 @@ def test_sync_metadata_unknown_status_raises(tq_init, partition_id):
         _clear_partition(partition_id)
 
 
+def test_sync_metadata_records_prompt_global_steps(tq_init, partition_id):
+    """The poll records each prompt's ``global_steps`` tag for staleness ordering."""
+    a = PromptSpec(uid=_uid(), status="finished", sessions=1, global_steps=7)
+    b = PromptSpec(uid=_uid(), status="failure", sessions=1, global_steps=3)
+    _produce(partition_id, [a, b]).join_and_check()
+
+    rb = ReplayBuffer(poll_interval=POLL_INTERVAL)
+    try:
+        rb._sync_metadata_from_transfer_queue()
+
+        assert rb.prompt_global_steps[partition_id] == {a.uid: 7, b.uid: 3}
+    finally:
+        _clear_partition(partition_id)
+
+
 # --------------------------------------------------------------------------- #
 # sample: end-to-end against a real TransferQueue.
 # --------------------------------------------------------------------------- #
@@ -245,6 +261,46 @@ def test_sample_returns_finished_and_failure_trajectories(tq_init, partition_id)
         assert finished.uid not in remaining
         assert failure.uid not in remaining
         assert running.uid in remaining
+    finally:
+        _clear_partition(partition_id)
+
+
+def test_sample_prioritizes_smallest_global_steps(tq_init, partition_id):
+    """When more prompts are ready than ``batch_size``, sample must hand out the
+    oldest ones first (smallest ``global_steps``), leaving the newer surplus."""
+    # Produced out of step order on purpose; selection must follow global_steps.
+    oldest = PromptSpec(uid=_uid(), status="finished", sessions=1, global_steps=1)
+    middle = PromptSpec(uid=_uid(), status="finished", sessions=1, global_steps=2)
+    newest = PromptSpec(uid=_uid(), status="finished", sessions=1, global_steps=5)
+    _produce(partition_id, [newest, oldest, middle]).join_and_check()
+
+    rb = ReplayBuffer(poll_interval=POLL_INTERVAL)
+    try:
+        batch = rb.sample(partition_id, batch_size=2)
+
+        # The two smallest-step prompts are picked; the newest is left behind.
+        assert _uids_of(batch.keys) == {oldest.uid, middle.uid}
+
+        remaining = tq.kv_list(partition_id=partition_id).get(partition_id, {})
+        assert oldest.uid not in remaining
+        assert middle.uid not in remaining
+        assert newest.uid in remaining
+    finally:
+        _clear_partition(partition_id)
+
+
+def test_sample_orders_by_global_steps_across_finished_and_failure(tq_init, partition_id):
+    """Ordering by ``global_steps`` spans both finished and failure prompts, not
+    just within a single status bucket."""
+    failure_old = PromptSpec(uid=_uid(), status="failure", sessions=1, global_steps=0)
+    finished_mid = PromptSpec(uid=_uid(), status="finished", sessions=1, global_steps=4)
+    finished_new = PromptSpec(uid=_uid(), status="finished", sessions=1, global_steps=9)
+    _produce(partition_id, [finished_new, failure_old, finished_mid]).join_and_check()
+
+    rb = ReplayBuffer(poll_interval=POLL_INTERVAL)
+    try:
+        batch = rb.sample(partition_id, batch_size=2)
+        assert _uids_of(batch.keys) == {failure_old.uid, finished_mid.uid}
     finally:
         _clear_partition(partition_id)
 
