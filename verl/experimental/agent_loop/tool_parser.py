@@ -580,7 +580,9 @@ class KimiToolParser(ToolParser):
         return arguments if isinstance(arguments, dict) else {}
 
     @staticmethod
-    def _infer_tool_name(raw_name: str, arguments: dict[str, Any], tools: Optional[list[OpenAIFunctionToolSchema]]) -> str:
+    def _infer_tool_name(
+        raw_name: str, arguments: dict[str, Any], tools: Optional[list[OpenAIFunctionToolSchema]]
+    ) -> str:
         if not tools:
             return raw_name
 

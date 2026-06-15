@@ -297,6 +297,7 @@ class AgentLoopBase(ABC):
         messages: list[dict],
         tools: list[dict] = None,
     ) -> list[int]:
+        """Build the initial prompt token ids with Continuous Token."""
         prompt_ids = await self.loop.run_in_executor(
             None,
             lambda: self.continuous_token_builder.build_initial_tokens(messages, tools=tools),
@@ -312,6 +313,7 @@ class AgentLoopBase(ABC):
         response_logprobs: Optional[list[float]] = None,
         tools: list[dict] = None,
     ):
+        """Merge appended non-assistant messages into runtime tokens and metadata."""
         merge_result = await self.loop.run_in_executor(
             None,
             lambda: self.continuous_token_builder.merge_tokens(
@@ -334,6 +336,7 @@ class AgentLoopBase(ABC):
         response_logprobs: Optional[list[float]] = None,
         assistant_logprobs: Optional[list[float]] = None,
     ):
+        """Append assistant-generated tokens and align response metadata."""
         merge_result = await self.loop.run_in_executor(
             None,
             lambda: self.continuous_token_builder.append_assistant_tokens(
@@ -357,6 +360,7 @@ class AgentLoopBase(ABC):
         *,
         assistant_logprobs: Optional[list[float]] = None,
     ) -> tuple[list[int], Optional[list[float]]]:
+        """Align response masks and logprobs after a Continuous Token merge."""
         aligned_mask = list(response_mask)
         aligned_logprobs = list(response_logprobs) if response_logprobs is not None else None
         if aligned_logprobs is None and assistant_logprobs is not None:

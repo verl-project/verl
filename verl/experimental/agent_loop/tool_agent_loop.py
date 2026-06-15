@@ -293,7 +293,9 @@ class ToolAgentLoop(AgentLoopBase):
         # Extract tool calls (use per-sample tools if routed)
         active_tools = getattr(agent_data, "_active_tools", self.tools)
         tools = [tool.tool_schema for tool in active_tools.values()]
-        assistant_content, agent_data.tool_calls = await self.tool_parser.extract_tool_calls(agent_data.response_ids, tools)
+        assistant_content, agent_data.tool_calls = await self.tool_parser.extract_tool_calls(
+            agent_data.response_ids, tools
+        )
         if self.enable_continuous_token:
             agent_data.messages.append(self._build_assistant_message(assistant_content, agent_data))
 
