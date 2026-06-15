@@ -371,29 +371,7 @@ class ToolAgentLoop(AgentLoopBase):
 
         agent_data.messages.extend(add_messages)
 
-        if self.tool_parser_name == "gpt-oss":
-            logger.info("manually format tool responses for gpt-oss")
-            tool_response_text = build_gpt_oss_tool_response_text(add_messages)
-            response_ids = await self.loop.run_in_executor(
-                None, lambda: self.tokenizer.encode(tool_response_text, add_special_tokens=False)
-            )
-        elif self.tool_parser_name == "gemma4":
-            # Gemma4's chat template drops tool responses when passed without the preceding
-            # assistant tool_call message. Manually format the response tokens.
-            # Format: <|tool_response>response:func_name{value:<|"|>content<|"|>}<tool_response|>
-            parts = []
-            for msg in add_messages:
-                content = msg.get("content", "")
-                if isinstance(content, list):
-                    content = "".join([item.get("text", "") for item in content if item.get("type") == "text"])
-                if isinstance(content, list):
-                    content = "".join([item.get("text", "") for item in content if item.get("type") == "text"])
-                parts.append(f'<|tool_response>response:{msg["name"]}{{value:<|"|>{content}<|"|>}}<tool_response|>')
-            tool_response_text = "".join(parts)
-            response_ids = await self.loop.run_in_executor(
-                None, lambda: self.tokenizer.encode(tool_response_text, add_special_tokens=False)
-            )
-        elif self.enable_continuous_token and not new_images_this_turn:
+        if self.enable_continuous_token and not new_images_this_turn:
             schemas = getattr(agent_data, "_active_tool_schemas", self.tool_schemas)
             merge_result, response_mask, response_logprobs = await self.ct_merge_non_assistant_msg(
                 previous_messages,
@@ -411,6 +389,26 @@ class ToolAgentLoop(AgentLoopBase):
                 agent_data.response_logprobs = response_logprobs or []
             agent_data.user_turns += 1
             return AgentState.GENERATING
+        elif self.tool_parser_name == "gpt-oss":
+            logger.info("manually format tool responses for gpt-oss")
+            tool_response_text = build_gpt_oss_tool_response_text(add_messages)
+            response_ids = await self.loop.run_in_executor(
+                None, lambda: self.tokenizer.encode(tool_response_text, add_special_tokens=False)
+            )
+        elif self.tool_parser_name == "gemma4":
+            # Gemma4's chat template drops tool responses when passed without the preceding
+            # assistant tool_call message. Manually format the response tokens.
+            # Format: <|tool_response>response:func_name{value:<|"|>content<|"|>}<tool_response|>
+            parts = []
+            for msg in add_messages:
+                content = msg.get("content", "")
+                if isinstance(content, list):
+                    content = "".join([item.get("text", "") for item in content if item.get("type") == "text"])
+                parts.append(f'<|tool_response>response:{msg["name"]}{{value:<|"|>{content}<|"|>}}<tool_response|>')
+            tool_response_text = "".join(parts)
+            response_ids = await self.loop.run_in_executor(
+                None, lambda: self.tokenizer.encode(tool_response_text, add_special_tokens=False)
+            )
         else:
             # Note that we have to pass None to the images and videos if there are no new images / videos
             # to stay compatible with downstream image processing logic!
