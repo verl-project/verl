@@ -237,7 +237,6 @@ class AgentLoopBase(ABC):
                 model_path=model_config.path,
                 tokenizer_name_or_path=model_config.tokenizer_path,
                 chat_template_kwargs=self.apply_chat_template_kwargs,
-                custom_builder_module=continuous_token_config.custom_builder_module,
             )
             self.enable_continuous_token = True
             # Continuous Token doesn't use the legacy removable system prompt.
