@@ -43,6 +43,58 @@ class MergeResult:
     removed_prefix_token_count: int = 0
 
 
+def ct_align_response_metadata(
+    merge_result: MergeResult,
+    response_mask: list[int],
+    response_logprobs: list[float] | None = None,
+    *,
+    assistant_logprobs: list[float] | None = None,
+) -> tuple[list[int], list[float] | None]:
+    """Align response masks and logprobs after a Continuous Token merge.
+
+    ``MergeResult`` describes token edits at the runtime-prefix boundary. This
+    helper mirrors those edits for response-side metadata so downstream agent
+    loops can reuse Continuous Token without depending on ``AgentLoopBase``.
+    """
+    aligned_mask = list(response_mask)
+    aligned_logprobs = list(response_logprobs) if response_logprobs is not None else None
+    if aligned_logprobs is None and assistant_logprobs is not None:
+        raise ValueError("response_logprobs is required when assistant_logprobs is provided")
+
+    if merge_result.removed_prefix_token_count:
+        aligned_mask = aligned_mask[: -merge_result.removed_prefix_token_count]
+        if aligned_logprobs is not None:
+            aligned_logprobs = aligned_logprobs[: -merge_result.removed_prefix_token_count]
+
+    # Inserted tokens are CT-created boundary tokens, not model-generated tokens.
+    inserted_token_count = len(merge_result.inserted_token_ids)
+    aligned_mask += [0] * inserted_token_count
+    if aligned_logprobs is not None:
+        aligned_logprobs += [0.0] * inserted_token_count
+
+    if merge_result.kind == "assistant":
+        aligned_mask += [1] * merge_result.appended_token_count
+        if aligned_logprobs is not None:
+            if assistant_logprobs is None:
+                if merge_result.appended_token_count:
+                    raise ValueError("assistant_logprobs is required for assistant Continuous Token alignment")
+                assistant_logprobs = []
+            if len(assistant_logprobs) != merge_result.appended_token_count:
+                raise ValueError(
+                    "assistant_logprobs length must match appended assistant token count, "
+                    f"got {len(assistant_logprobs)} and {merge_result.appended_token_count}"
+                )
+            aligned_logprobs += list(assistant_logprobs)
+    elif merge_result.kind == "non_assistant":
+        aligned_mask += [0] * merge_result.appended_token_count
+        if aligned_logprobs is not None:
+            aligned_logprobs += [0.0] * merge_result.appended_token_count
+    else:
+        raise ValueError(f"Unknown Continuous Token merge kind: {merge_result.kind!r}")
+
+    return aligned_mask, aligned_logprobs
+
+
 class ContinuousTokenBuilder:
     """Continuous Token builder for runtime prefix reuse."""
 
@@ -63,6 +115,21 @@ class ContinuousTokenBuilder:
             if unknown_roles:
                 raise ValueError(f"Unsupported Continuous Token append roles: {sorted(unknown_roles)}")
             self.allowed_append_roles = allowed_roles
+
+    @staticmethod
+    def align_response_metadata(
+        merge_result: MergeResult,
+        response_mask: list[int],
+        response_logprobs: list[float] | None = None,
+        *,
+        assistant_logprobs: list[float] | None = None,
+    ) -> tuple[list[int], list[float] | None]:
+        return ct_align_response_metadata(
+            merge_result,
+            response_mask,
+            response_logprobs,
+            assistant_logprobs=assistant_logprobs,
+        )
 
     def build_initial_tokens(
         self,
