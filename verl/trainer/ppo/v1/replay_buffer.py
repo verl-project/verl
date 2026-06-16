@@ -16,7 +16,9 @@ import os
 import time
 from collections import defaultdict
 
+import numpy as np
 import transfer_queue as tq
+from omegaconf import DictConfig
 from transfer_queue import KVBatchMeta
 
 logger = logging.getLogger(__name__)
@@ -27,7 +29,6 @@ VERL_REPLAY_BUFFER_DEBUG_INTERVAL_SECONDS = int(os.getenv("VERL_REPLAY_BUFFER_DE
 
 # TODO: Pass custom sampler to TransferQueue:
 # https://github.com/Ascend/TransferQueue/blob/main/tutorial/05_custom_sampler.py
-# TODO: make sampling strategy customizable.
 
 
 class ReplayBuffer:
@@ -61,11 +62,37 @@ class ReplayBuffer:
     Only prompt with status `finished` or `failure`, its trajectories can be sampled by replay buffer.
 
     Args:
+        trainer_mode (str): Trainer mode.
+        trainer_config (DictConfig): Trainer configuration.
+        max_off_policy_threshold (int): Maximum number of model versions that trajectory can span.
+        max_off_policy_strategy (str): How to handle trajectory that exceeds the maximum number of model versions.
+        sampler_kwargs (dict): Additional kwargs for the custom sampler.
         poll_interval (float, optional): Poll interval in seconds. Defaults to 2.0.
     """
 
-    def __init__(self, poll_interval: float = 2.0):
+    def __init__(
+        self,
+        trainer_mode: str,
+        trainer_config: DictConfig,
+        max_off_policy_threshold: int,
+        max_off_policy_strategy: str,
+        sampler_kwargs: DictConfig,
+        poll_interval: float = 2.0,
+    ):
+        self.trainer_mode = trainer_mode
+        self.trainer_config = trainer_config
+        self.max_off_policy_threshold = max_off_policy_threshold
+        self.max_off_policy_strategy = max_off_policy_strategy
+        self.sampler_kwargs = sampler_kwargs
         self.poll_interval = poll_interval
+        self.parameter_sync_step = trainer_config.get("parameter_sync_step", 1)
+
+        assert isinstance(self.max_off_policy_threshold, int) and self.max_off_policy_threshold > 0, (
+            f"Invalid max off policy threshold: {self.max_off_policy_threshold}, must be an integer greater than 0"
+        )
+        assert self.max_off_policy_strategy in ["drop", "wait"], (
+            f"Invalid max off policy strategy: {self.max_off_policy_strategy}, must be one of ['drop', 'wait']"
+        )
 
         # partition_id => {key: tag}
         self.partitions: dict[str, dict[str, dict]] = defaultdict(dict)
@@ -94,7 +121,7 @@ class ReplayBuffer:
             for key, tag in items.items():
                 if tag.get("is_prompt", False):
                     # see: [GRPO group sampling control]
-                    self.prompt_global_steps[partition_id][key] = tag.get("global_steps", 0)
+                    self.prompt_global_steps[partition_id][key] = tag["global_steps"]
                     match tag["status"]:
                         case "pending":
                             self.pending_keys[partition_id].add(key)
@@ -112,20 +139,70 @@ class ReplayBuffer:
                         partition[key] = {}
                     partition[key].update(tag)
 
-    def sample(self, partition_id: str, batch_size: int) -> KVBatchMeta:
+    def _has_enough_samples(self, global_steps: int, partition_id: str, batch_size: int) -> bool:
+        # For wait strategy, we need to wait all trajectories that reach threshold to finish
+        if self.max_off_policy_strategy == "wait":
+            for key in self.pending_keys[partition_id] | self.running_keys[partition_id]:
+                prompt_global_steps = self.prompt_global_steps[partition_id][key]
+                if (global_steps - prompt_global_steps + 1) / self.parameter_sync_step >= self.max_off_policy_threshold:
+                    return False
+
+        return len(self.finished_keys[partition_id]) + len(self.failure_keys[partition_id]) >= batch_size
+
+    def _drop_max_off_policy_samples(
+        self, global_steps: int, partition_id: str, batch: KVBatchMeta
+    ) -> tuple[KVBatchMeta, dict]:
+        if not self.max_off_policy_strategy == "drop":
+            return batch, {}
+
+        kept_keys, kept_tags = [], []
+        dropped_keys, dropped_tags = [], []
+        for key, tag in zip(batch.keys, batch.tags, strict=False):
+            prompt_global_steps = tag["global_steps"]
+            if (global_steps - prompt_global_steps + 1) / self.parameter_sync_step > self.max_off_policy_threshold:
+                dropped_keys.append(key)
+                dropped_tags.append(tag)
+            else:
+                kept_keys.append(key)
+                kept_tags.append(tag)
+
+        # Remove dropped keys from TransferQueue
+        metrics = {}
+        if len(dropped_keys) > 0:
+            # TODO: should we drop the entire GRPO group if any of its sessions exceeds the threshold?
+            tq.kv_clear(partition_id=batch.partition_id, keys=dropped_keys)
+            logger.warning(f"Dropped {len(dropped_keys)} max off policy samples from partition {batch.partition_id}")
+            dropped_global_steps = np.array([tag["global_steps"] for tag in dropped_tags])
+            trajectory_staleness = (global_steps - dropped_global_steps + 1) / self.parameter_sync_step
+            prefix = "training" if partition_id == "train" else "validation"
+            metrics[f"{prefix}/off_policy/dropped_samples"] = len(dropped_keys)
+            metrics[f"{prefix}/off_policy/dropped_samples_staleness/mean"] = trajectory_staleness.mean()
+            metrics[f"{prefix}/off_policy/dropped_samples_staleness/max"] = trajectory_staleness.max()
+            metrics[f"{prefix}/off_policy/dropped_samples_staleness/min"] = trajectory_staleness.min()
+
+        return KVBatchMeta(partition_id=batch.partition_id, keys=kept_keys, tags=kept_tags), metrics
+
+    def sample(self, global_steps: int, partition_id: str, batch_size: int) -> KVBatchMeta:
         """Sample a batch of data from the replay buffer.
 
+        NOTE: user can customize sampling strategy by setting:
+        ```bash
+        trainer.v1.sampler.custom_sampler.path = "path/to/your/sampler.py"
+        trainer.v1.sampler.custom_sampler.name = "UserCustomReplayBuffer"
+        ```
 
         Args:
+            global_steps (int): Global steps of the current training.
             partition_id (str): Partition of TransferQueue, e.g. "train" or "val".
             batch_size (int, optional): Batch size.
 
         Returns:
             KVBatchMeta: A batch of data.
+            dict: Auxiliary metrics.
         """
         last_debug_time = time.time()
         self._sync_metadata_from_transfer_queue()
-        while len(self.finished_keys[partition_id]) + len(self.failure_keys[partition_id]) < batch_size:
+        while not self._has_enough_samples(global_steps, partition_id, batch_size):
             time.sleep(self.poll_interval)
             self._sync_metadata_from_transfer_queue()
 
@@ -154,4 +231,6 @@ class ReplayBuffer:
             if uid in selected:
                 keys.append(key)
                 tags.append(tag)
-        return KVBatchMeta(partition_id=partition_id, keys=keys, tags=tags)
+
+        batch = KVBatchMeta(partition_id=partition_id, keys=keys, tags=tags)
+        return self._drop_max_off_policy_samples(global_steps, partition_id, batch)

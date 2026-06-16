@@ -76,6 +76,7 @@ from verl.utils.dataset.rl_dataset import collate_fn
 from verl.utils.debug import marked_timer
 from verl.utils.debug.metrics import calculate_debug_metrics
 from verl.utils.fs import copy_to_local
+from verl.utils.import_utils import load_extern_type
 from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
@@ -112,7 +113,29 @@ class PPOTrainer(ABC):
         if self.config.algorithm.use_kl_in_reward:
             self.kl_ctrl_in_reward = core_algos.get_kl_controller(self.config.algorithm.kl_ctrl)
 
-        self.replay_buffer = ReplayBuffer()
+        self.trainer_mode = self.config.trainer.v1.trainer_mode
+        self.parameter_sync_step = self.config.trainer.v1.get(self.trainer_mode, {}).get("parameter_sync_step", 1)
+        self.replay_buffer = self._build_replay_buffer()
+
+    def _build_replay_buffer(self) -> ReplayBuffer:
+        """Instantiate the replay buffer (or a user-provided custom sampler).
+
+        Set ``trainer.v1.sampler.custom_sampler.{path,name}`` to plug in a custom
+        ``ReplayBuffer`` subclass; otherwise the built-in implementation is used.
+        """
+        sampler_config = self.config.trainer.v1.sampler
+        custom_sampler = sampler_config.get("custom_sampler", None)
+        sampler_cls = ReplayBuffer
+        if custom_sampler is not None and custom_sampler.get("path") and custom_sampler.get("name"):
+            sampler_cls = load_extern_type(custom_sampler.path, custom_sampler.name)
+
+        return sampler_cls(
+            trainer_mode=self.trainer_mode,
+            trainer_config=self.config.trainer.v1.get(self.trainer_mode, {}),
+            max_off_policy_threshold=sampler_config.max_off_policy_threshold,
+            max_off_policy_strategy=sampler_config.max_off_policy_strategy,
+            sampler_kwargs=sampler_config.sampler_kwargs,
+        )
 
     def init(self):
         """Initialize all components of the trainer.
@@ -385,7 +408,12 @@ class PPOTrainer(ABC):
         # 2. sample batch from replay buffer
         with marked_timer("gen", timing_raw, color="red"):
             self.on_sample_begin()
-            batch = self.replay_buffer.sample(partition_id="train", batch_size=self.config.data.train_batch_size)
+            batch, off_policy_metrics = self.replay_buffer.sample(
+                global_steps=self.global_steps,
+                partition_id="train",
+                batch_size=self.config.data.train_batch_size,
+            )
+            metrics.update(off_policy_metrics)
             batch.extra_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
             self.on_sample_end()
 
@@ -732,13 +760,16 @@ class PPOTrainer(ABC):
             batch = tu.get_tensordict(batch_dict)
             tu.assign_non_tensor_data(batch, "global_steps", self.global_steps)
             tu.assign_non_tensor_data(batch, "validate", True)
-            # Register each prompt (GRPO group) in TransferQueue as a tag-only status marker
-            tags = [{"is_prompt": True, "status": "pending"}] * len(batch)
+            # Register each prompt (GRPO group) in TransferQueue as a tag-only status marker.
+            # global_steps is required by ReplayBuffer's metadata sync / staleness ordering.
+            tags = [{"is_prompt": True, "status": "pending", "global_steps": self.global_steps}] * len(batch)
             tq.kv_batch_put(keys=list(batch["uid"]), partition_id="val", tags=tags)
             self.agent_loop_manager.generate_sequences(batch)
 
             # 2. sample batch from replay buffer: one prompt (GRPO group) per submitted row.
-            batch = self.replay_buffer.sample(partition_id="val", batch_size=len(batch))
+            batch, _ = self.replay_buffer.sample(
+                global_steps=self.global_steps, partition_id="val", batch_size=len(batch)
+            )
 
             # 3. [OPTIONAL] compute reward score with colocated reward model
             if self.reward_loop_manager.reward_loop_worker_handles is None:
@@ -1427,9 +1458,9 @@ class PPOTrainer(ABC):
         #     so the lag is a range: the freshest weights used give the lower bound
         #     (global_steps - max_global_steps) and the oldest weights the worst case
         #     (global_steps - min_global_steps). We log the lower bound as the primary metric.
-        trajectory_spans = max_global_steps - min_global_steps + 1
-        trajectory_staleness = (global_steps - 1) - max_global_steps
-        trajectory_staleness_worst = (global_steps - 1) - min_global_steps
+        trajectory_spans = (max_global_steps - min_global_steps + 1) / self.parameter_sync_step
+        trajectory_staleness = ((global_steps - 1) - max_global_steps) / self.parameter_sync_step
+        trajectory_staleness_worst = ((global_steps - 1) - min_global_steps) / self.parameter_sync_step
         metrics.update(
             {
                 "training/off_policy/trajectory_spans/mean": trajectory_spans.mean(),

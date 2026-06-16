@@ -11,12 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Unit tests for :class:`verl.trainer.ppo.v2.replay_buffer.ReplayBuffer`.
+"""Unit tests for :class:`verl.trainer.ppo.v1.replay_buffer.ReplayBuffer`.
 
 The tests run against a real (CPU-only) TransferQueue instance. ``ReplayBuffer``
 is fully synchronous: :meth:`ReplayBuffer.sample` blocks the calling thread,
-re-polling TransferQueue every ``poll_interval`` seconds until ``batch_size``
-terminal (``finished``/``failure``) prompts are available.
+re-polling TransferQueue every ``poll_interval`` seconds until enough terminal
+(``finished``/``failure``) prompts are available, then returns a
+``(KVBatchMeta, metrics)`` tuple.
 
 To exercise the blocking consumer without deadlocking the test, the *producer*
 side -- the rollout that feeds TransferQueue -- runs in a dedicated thread (see
@@ -27,6 +28,17 @@ so the consumer never observes a terminal prompt before its trajectories exist.
 Each test uses a unique ``partition_id`` so that data written by one test never
 leaks into another (``_sync_metadata_from_transfer_queue`` lists *all*
 partitions, but ``ReplayBuffer`` tracks keys per partition).
+
+### Off-policy control
+
+``ReplayBuffer`` measures a trajectory's staleness (number of model versions it
+spans) as ``(global_steps - prompt_global_steps + 1) / parameter_sync_step`` and
+supports two strategies once a trajectory crosses ``max_off_policy_threshold``:
+
+- ``drop``: train eagerly, dropping any sampled trajectory strictly above the
+  threshold (``staleness > threshold``) and reporting drop metrics.
+- ``wait``: never drop -- block sampling while any in-flight (pending/running)
+  prompt has reached the threshold (``staleness >= threshold``).
 """
 
 import threading
@@ -58,6 +70,35 @@ def partition_id():
     return f"test-{uuid.uuid4().hex}"
 
 
+def _make_rb(
+    *,
+    max_off_policy_threshold: int = 8,
+    max_off_policy_strategy: str = "drop",
+    parameter_sync_step: int = 1,
+    poll_interval: float = POLL_INTERVAL,
+) -> ReplayBuffer:
+    """Construct a ReplayBuffer with test-friendly defaults.
+
+    Defaults (drop strategy, threshold 8, sync step 1) make the off-policy
+    filter a no-op for the generic tests that ``sample`` at ``global_steps=0``
+    over freshly produced trajectories.
+    """
+    return ReplayBuffer(
+        trainer_mode="sync",
+        trainer_config={"parameter_sync_step": parameter_sync_step},
+        max_off_policy_threshold=max_off_policy_threshold,
+        max_off_policy_strategy=max_off_policy_strategy,
+        sampler_kwargs={},
+        poll_interval=poll_interval,
+    )
+
+
+def _sample(rb: ReplayBuffer, partition_id: str, batch_size: int, global_steps: int = 0) -> KVBatchMeta:
+    """Call ``sample`` and return just the batch (dropping the metrics dict)."""
+    batch, _metrics = rb.sample(global_steps=global_steps, partition_id=partition_id, batch_size=batch_size)
+    return batch
+
+
 def _uid() -> str:
     # uid must not contain "_" because ReplayBuffer derives it via key.split("_")[0].
     return uuid.uuid4().hex
@@ -65,6 +106,20 @@ def _uid() -> str:
 
 def _trajectory_key(uid: str, session_id: int = 0, index: int = 0) -> str:
     return f"{uid}_{session_id}_{index}"
+
+
+def _set_prompt_status(partition_id: str, uid: str, status: str, global_steps: int) -> None:
+    """Transition an existing prompt to a new status (e.g. running -> finished).
+
+    Mirrors the rollout side flipping a GRPO group's status once it terminates.
+    The prompt key is rewritten in place; its trajectory values are untouched.
+    """
+    tq.kv_clear(keys=[uid], partition_id=partition_id)
+    tq.kv_put(
+        key=uid,
+        partition_id=partition_id,
+        tag={"is_prompt": True, "status": status, "global_steps": global_steps},
+    )
 
 
 @dataclass
@@ -87,6 +142,10 @@ class RolloutProducer(threading.Thread):
     consumer observes a terminal prompt, all of its trajectories are already
     present -- avoiding a producer/consumer race.
 
+    Trajectory tags carry ``global_steps`` (the dataloader dispatch step) exactly
+    like the real producer (see ``agent_loop_tq.py``); ``ReplayBuffer`` reads it
+    to decide which trajectories to drop.
+
     Uses the synchronous ``tq.kv_put`` API which is safe to call from a plain
     (non-asyncio) thread.
     """
@@ -107,7 +166,7 @@ class RolloutProducer(threading.Thread):
                         key=key,
                         partition_id=self.partition_id,
                         fields={"input_ids": torch.tensor([1, 2, 3])},
-                        tag={"is_prompt": False, "seq_len": 3},
+                        tag={"is_prompt": False, "seq_len": 3, "global_steps": spec.global_steps},
                     )
                     spec.trajectory_keys.append(key)
                 tq.kv_put(
@@ -131,17 +190,23 @@ class SampleConsumer(threading.Thread):
     """Runs the blocking ``ReplayBuffer.sample`` in a background thread so the test
     can assert that it stays blocked until the producer supplies enough data."""
 
-    def __init__(self, rb: ReplayBuffer, partition_id: str, batch_size: int):
+    def __init__(self, rb: ReplayBuffer, partition_id: str, batch_size: int, global_steps: int = 0):
         super().__init__(daemon=True)
         self.rb = rb
         self.partition_id = partition_id
         self.batch_size = batch_size
+        self.global_steps = global_steps
         self.result: KVBatchMeta | None = None
+        self.metrics: dict | None = None
         self.error: Exception | None = None
 
     def run(self) -> None:
         try:
-            self.result = self.rb.sample(self.partition_id, self.batch_size)
+            self.result, self.metrics = self.rb.sample(
+                global_steps=self.global_steps,
+                partition_id=self.partition_id,
+                batch_size=self.batch_size,
+            )
         except Exception as e:
             self.error = e
 
@@ -172,6 +237,23 @@ def _uids_of(keys: list[str]) -> set[str]:
 
 
 # --------------------------------------------------------------------------- #
+# __init__: configuration validation.
+# --------------------------------------------------------------------------- #
+
+
+def test_init_rejects_non_positive_threshold():
+    """max_off_policy_threshold must be a positive integer."""
+    with pytest.raises(AssertionError, match="max off policy threshold"):
+        _make_rb(max_off_policy_threshold=0)
+
+
+def test_init_rejects_unknown_strategy():
+    """max_off_policy_strategy must be one of {drop, wait}."""
+    with pytest.raises(AssertionError, match="max off policy strategy"):
+        _make_rb(max_off_policy_strategy="bogus")
+
+
+# --------------------------------------------------------------------------- #
 # _sync_metadata_from_transfer_queue: classification of polled metadata.
 # --------------------------------------------------------------------------- #
 
@@ -184,7 +266,7 @@ def test_sync_metadata_classifies_keys(tq_init, partition_id):
     failure = PromptSpec(uid=_uid(), status="failure", sessions=1)
     _produce(partition_id, [pending, running, finished, failure]).join_and_check()
 
-    rb = ReplayBuffer(poll_interval=POLL_INTERVAL)
+    rb = _make_rb()
     try:
         rb._sync_metadata_from_transfer_queue()
 
@@ -197,7 +279,7 @@ def test_sync_metadata_classifies_keys(tq_init, partition_id):
         expected_traj = set(running.trajectory_keys) | set(finished.trajectory_keys) | set(failure.trajectory_keys)
         assert set(rb.partitions[partition_id].keys()) == expected_traj
         for key in expected_traj:
-            assert rb.partitions[partition_id][key] == {"is_prompt": False, "seq_len": 3}
+            assert rb.partitions[partition_id][key] == {"is_prompt": False, "seq_len": 3, "global_steps": 0}
     finally:
         _clear_partition(partition_id)
 
@@ -206,7 +288,7 @@ def test_sync_metadata_unknown_status_raises(tq_init, partition_id):
     """An unrecognized prompt status is a hard error during the poll."""
     _produce(partition_id, [PromptSpec(uid=_uid(), status="bogus", sessions=0)]).join_and_check()
 
-    rb = ReplayBuffer(poll_interval=POLL_INTERVAL)
+    rb = _make_rb()
     try:
         with pytest.raises(ValueError, match="Unknown status"):
             rb._sync_metadata_from_transfer_queue()
@@ -222,13 +304,47 @@ def test_sync_metadata_records_prompt_global_steps(tq_init, partition_id):
     b = PromptSpec(uid=_uid(), status="failure", sessions=1, global_steps=3)
     _produce(partition_id, [a, b]).join_and_check()
 
-    rb = ReplayBuffer(poll_interval=POLL_INTERVAL)
+    rb = _make_rb()
     try:
         rb._sync_metadata_from_transfer_queue()
 
         assert rb.prompt_global_steps[partition_id] == {a.uid: 7, b.uid: 3}
     finally:
         _clear_partition(partition_id)
+
+
+# --------------------------------------------------------------------------- #
+# _has_enough_samples: gating logic for the two strategies (pure, no TransferQueue).
+# --------------------------------------------------------------------------- #
+
+
+def test_has_enough_samples_drop_ignores_inflight():
+    """drop gates purely on the terminal count, regardless of in-flight staleness."""
+    rb = _make_rb(max_off_policy_strategy="drop", max_off_policy_threshold=2)
+    pid = "p"
+    rb.finished_keys[pid] |= {"a", "b"}
+    # A very stale in-flight prompt must not influence the drop gate.
+    rb.running_keys[pid] |= {"c"}
+    rb.prompt_global_steps[pid]["c"] = 0
+
+    assert rb._has_enough_samples(1000, pid, batch_size=2) is True
+    assert rb._has_enough_samples(1000, pid, batch_size=3) is False
+
+
+def test_has_enough_samples_wait_blocks_on_stale_inflight():
+    """wait blocks while any in-flight prompt has reached the staleness threshold."""
+    rb = _make_rb(max_off_policy_strategy="wait", max_off_policy_threshold=2, parameter_sync_step=1)
+    pid = "p"
+    rb.finished_keys[pid] |= {"a", "b"}
+    rb.running_keys[pid] |= {"c"}
+    rb.prompt_global_steps[pid]["c"] = 0
+
+    # staleness = (g - 0 + 1) / 1; >= 2 (threshold) exactly at g == 1.
+    assert rb._has_enough_samples(global_steps=1, partition_id=pid, batch_size=2) is False
+    # g == 0 -> staleness 1 < 2 -> in-flight is fresh, terminal count suffices.
+    assert rb._has_enough_samples(global_steps=0, partition_id=pid, batch_size=2) is True
+    # wait still needs the terminal count even when nothing is stale.
+    assert rb._has_enough_samples(global_steps=0, partition_id=pid, batch_size=5) is False
 
 
 # --------------------------------------------------------------------------- #
@@ -247,9 +363,9 @@ def test_sample_returns_finished_and_failure_trajectories(tq_init, partition_id)
     _produce(partition_id, [finished, failure, running]).join_and_check()
     expected_keys = set(finished.trajectory_keys) | set(failure.trajectory_keys)
 
-    rb = ReplayBuffer(poll_interval=POLL_INTERVAL)
+    rb = _make_rb()
     try:
-        batch = rb.sample(partition_id, batch_size=2)
+        batch = _sample(rb, partition_id, batch_size=2)
 
         assert batch.partition_id == partition_id
         assert set(batch.keys) == expected_keys
@@ -274,9 +390,9 @@ def test_sample_prioritizes_smallest_global_steps(tq_init, partition_id):
     newest = PromptSpec(uid=_uid(), status="finished", sessions=1, global_steps=5)
     _produce(partition_id, [newest, oldest, middle]).join_and_check()
 
-    rb = ReplayBuffer(poll_interval=POLL_INTERVAL)
+    rb = _make_rb()
     try:
-        batch = rb.sample(partition_id, batch_size=2)
+        batch = _sample(rb, partition_id, batch_size=2)
 
         # The two smallest-step prompts are picked; the newest is left behind.
         assert _uids_of(batch.keys) == {oldest.uid, middle.uid}
@@ -297,9 +413,9 @@ def test_sample_orders_by_global_steps_across_finished_and_failure(tq_init, part
     finished_new = PromptSpec(uid=_uid(), status="finished", sessions=1, global_steps=9)
     _produce(partition_id, [finished_new, failure_old, finished_mid]).join_and_check()
 
-    rb = ReplayBuffer(poll_interval=POLL_INTERVAL)
+    rb = _make_rb()
     try:
-        batch = rb.sample(partition_id, batch_size=2)
+        batch = _sample(rb, partition_id, batch_size=2)
         assert _uids_of(batch.keys) == {failure_old.uid, finished_mid.uid}
     finally:
         _clear_partition(partition_id)
@@ -311,7 +427,7 @@ def test_sample_blocks_until_enough_then_unblocks(tq_init, partition_id):
     # One group ready up front -> not enough for batch_size=2.
     _produce(partition_id, [PromptSpec(uid=_uid(), status="finished", sessions=1)]).join_and_check()
 
-    rb = ReplayBuffer(poll_interval=POLL_INTERVAL)
+    rb = _make_rb()
     consumer = SampleConsumer(rb, partition_id, batch_size=2)
     try:
         consumer.start()
@@ -336,11 +452,11 @@ def test_sample_concurrent_with_streaming_producer(tq_init, partition_id):
     batch_size = 3
     specs = [PromptSpec(uid=_uid(), status="finished", sessions=2) for _ in range(batch_size)]
 
-    rb = ReplayBuffer(poll_interval=POLL_INTERVAL)
+    rb = _make_rb()
     # Stream groups one-by-one with a delay; consumer blocks in sample() meanwhile.
     producer = _produce(partition_id, specs, delay=0.1)
     try:
-        batch = rb.sample(partition_id, batch_size=batch_size)
+        batch = _sample(rb, partition_id, batch_size=batch_size)
         producer.join_and_check()
 
         expected_keys = {k for spec in specs for k in spec.trajectory_keys}
@@ -359,9 +475,9 @@ def test_sync_grpo_step_returns_complete_groups(tq_init, partition_id):
     specs = [PromptSpec(uid=_uid(), status="finished", sessions=n_sessions) for _ in range(n_prompts)]
     _produce(partition_id, specs).join_and_check()
 
-    rb = ReplayBuffer(poll_interval=POLL_INTERVAL)
+    rb = _make_rb()
     try:
-        batch = rb.sample(partition_id, batch_size=n_prompts)
+        batch = _sample(rb, partition_id, batch_size=n_prompts)
 
         # Every prompt's full GRPO group is present, nothing more, nothing less.
         assert len(batch.keys) == n_prompts * n_sessions
@@ -392,14 +508,14 @@ def test_async_overproduction_drains_in_batches_without_duplicates(tq_init, part
     _produce(partition_id, specs).join_and_check()
     all_uids = {spec.uid for spec in specs}
 
-    rb = ReplayBuffer(poll_interval=POLL_INTERVAL)
+    rb = _make_rb()
     try:
         collected_keys: list[str] = []
         consumed_uids: set[str] = set()
 
         # Drain 2 + 2 + 1 prompts across three samples.
         for bs in (batch_size, batch_size, n_prompts - 2 * batch_size):
-            batch = rb.sample(partition_id, batch_size=bs)
+            batch = _sample(rb, partition_id, batch_size=bs)
 
             sampled_uids = _uids_of(batch.keys)
             assert len(sampled_uids) == bs
@@ -427,9 +543,9 @@ def test_async_overproduction_leaves_surplus_available(tq_init, partition_id):
     specs = [PromptSpec(uid=_uid(), status="finished", sessions=1) for _ in range(n_prompts)]
     _produce(partition_id, specs).join_and_check()
 
-    rb = ReplayBuffer(poll_interval=POLL_INTERVAL)
+    rb = _make_rb()
     try:
-        batch = rb.sample(partition_id, batch_size=batch_size)
+        batch = _sample(rb, partition_id, batch_size=batch_size)
         sampled_uids = _uids_of(batch.keys)
         assert len(sampled_uids) == batch_size
 
@@ -447,9 +563,155 @@ def test_async_overproduction_leaves_surplus_available(tq_init, partition_id):
 def test_sample_zero_batch_size_raises_on_empty_clear(tq_init, partition_id):
     """batch_size=0 selects no prompts; clearing an empty key list is rejected by
     TransferQueue, so sample surfaces a ValueError (degenerate, documented case)."""
-    rb = ReplayBuffer(poll_interval=POLL_INTERVAL)
+    rb = _make_rb()
     try:
         with pytest.raises(ValueError, match="empty list"):
-            rb.sample(partition_id, batch_size=0)
+            _sample(rb, partition_id, batch_size=0)
+    finally:
+        _clear_partition(partition_id)
+
+
+# --------------------------------------------------------------------------- #
+# sample: off-policy "drop" strategy.
+# --------------------------------------------------------------------------- #
+
+
+def test_drop_filters_stale_trajectories_and_reports_metrics(tq_init, partition_id):
+    """drop removes sampled trajectories whose staleness strictly exceeds the
+    threshold, clears them from TransferQueue, and reports drop metrics."""
+    # staleness = (global_steps - prompt_global_steps + 1) / parameter_sync_step;
+    # drop when staleness > threshold(=2). At global_steps=5, sync=1:
+    #   stale    gs=0 -> 6 > 2 -> dropped
+    #   boundary gs=4 -> 2 not > 2 -> kept (boundary is inclusive on the keep side)
+    #   fresh    gs=5 -> 1 -> kept
+    stale = PromptSpec(uid=_uid(), status="finished", sessions=1, global_steps=0)
+    boundary = PromptSpec(uid=_uid(), status="finished", sessions=1, global_steps=4)
+    fresh = PromptSpec(uid=_uid(), status="finished", sessions=1, global_steps=5)
+    _produce(partition_id, [stale, boundary, fresh]).join_and_check()
+
+    rb = _make_rb(max_off_policy_strategy="drop", max_off_policy_threshold=2, parameter_sync_step=1)
+    try:
+        batch, metrics = rb.sample(global_steps=5, partition_id=partition_id, batch_size=3)
+
+        assert _uids_of(batch.keys) == {boundary.uid, fresh.uid}
+        assert set(batch.keys) == set(boundary.trajectory_keys) | set(fresh.trajectory_keys)
+
+        # The dropped trajectory value is removed from TransferQueue too.
+        remaining = tq.kv_list(partition_id=partition_id).get(partition_id, {})
+        assert stale.trajectory_keys[0] not in remaining
+
+        # Non-"train" partitions are reported under the "validation" prefix.
+        assert metrics["validation/off_policy/dropped_samples"] == 1
+        assert metrics["validation/off_policy/dropped_samples_staleness/mean"] == 6
+        assert metrics["validation/off_policy/dropped_samples_staleness/max"] == 6
+        assert metrics["validation/off_policy/dropped_samples_staleness/min"] == 6
+    finally:
+        _clear_partition(partition_id)
+
+
+def test_drop_keeps_all_within_threshold_without_metrics(tq_init, partition_id):
+    """When nothing exceeds the threshold, drop keeps the full batch and emits no
+    drop metrics."""
+    specs = [PromptSpec(uid=_uid(), status="finished", sessions=1, global_steps=5) for _ in range(2)]
+    _produce(partition_id, specs).join_and_check()
+
+    rb = _make_rb(max_off_policy_strategy="drop", max_off_policy_threshold=2, parameter_sync_step=1)
+    try:
+        batch, metrics = rb.sample(global_steps=5, partition_id=partition_id, batch_size=2)
+
+        assert _uids_of(batch.keys) == {spec.uid for spec in specs}
+        assert metrics == {}
+    finally:
+        _clear_partition(partition_id)
+
+
+def test_drop_respects_parameter_sync_step(tq_init, partition_id):
+    """parameter_sync_step scales staleness: a larger sync step tolerates a wider
+    span of dataloader steps before a trajectory is dropped."""
+    # staleness = (10 - gs + 1) / 4; drop when > 2 (i.e. raw span > 8).
+    #   stale gs=0 -> 11/4 = 2.75 > 2 -> dropped
+    #   fresh gs=8 -> 3/4 = 0.75      -> kept
+    stale = PromptSpec(uid=_uid(), status="finished", sessions=1, global_steps=0)
+    fresh = PromptSpec(uid=_uid(), status="finished", sessions=1, global_steps=8)
+    _produce(partition_id, [stale, fresh]).join_and_check()
+
+    rb = _make_rb(max_off_policy_strategy="drop", max_off_policy_threshold=2, parameter_sync_step=4)
+    try:
+        batch, metrics = rb.sample(global_steps=10, partition_id=partition_id, batch_size=2)
+
+        assert _uids_of(batch.keys) == {fresh.uid}
+        assert metrics["validation/off_policy/dropped_samples"] == 1
+    finally:
+        _clear_partition(partition_id)
+
+
+# --------------------------------------------------------------------------- #
+# sample: off-policy "wait" (dropless) strategy.
+# --------------------------------------------------------------------------- #
+
+
+def test_wait_blocks_until_stale_inflight_finishes(tq_init, partition_id):
+    """wait holds back a full batch while a stale in-flight prompt exists, then
+    proceeds (without dropping it) once it terminates."""
+    threshold, sync, g = 2, 1, 5
+    fresh = [PromptSpec(uid=_uid(), status="finished", sessions=1, global_steps=g) for _ in range(2)]
+    # In-flight prompt: staleness (5 - 0 + 1) / 1 = 6 >= 2 -> blocks sampling.
+    stale = PromptSpec(uid=_uid(), status="running", sessions=1, global_steps=0)
+    _produce(partition_id, fresh + [stale]).join_and_check()
+
+    rb = _make_rb(max_off_policy_strategy="wait", max_off_policy_threshold=threshold, parameter_sync_step=sync)
+    consumer = SampleConsumer(rb, partition_id, batch_size=2, global_steps=g)
+    try:
+        consumer.start()
+
+        time.sleep(POLL_INTERVAL * 5)
+        assert consumer.is_alive(), "wait must block while a stale in-flight prompt exists"
+
+        # The stale group terminates -> no in-flight prompt at threshold -> unblock.
+        # (clear+put is not atomic, so the consumer may proceed on the two fresh
+        # groups the instant the running prompt disappears; either way it returns a
+        # full batch_size batch -- droplessness is asserted separately below.)
+        _set_prompt_status(partition_id, stale.uid, "finished", global_steps=0)
+
+        batch = consumer.result_or_raise()
+        assert len(_uids_of(batch.keys)) == 2
+    finally:
+        consumer.join(timeout=10.0)
+        _clear_partition(partition_id)
+
+
+def test_wait_keeps_stale_terminal_trajectories(tq_init, partition_id):
+    """wait is dropless: a finished-but-very-stale group that ``drop`` would
+    discard is still returned, with no drop metrics."""
+    # staleness (100 - 0 + 1) / 1 = 101, far above threshold=2; "drop" would
+    # remove it, "wait" keeps it. No in-flight prompts, so sampling never blocks.
+    stale = PromptSpec(uid=_uid(), status="finished", sessions=1, global_steps=0)
+    _produce(partition_id, [stale]).join_and_check()
+
+    rb = _make_rb(max_off_policy_strategy="wait", max_off_policy_threshold=2, parameter_sync_step=1)
+    try:
+        batch, metrics = rb.sample(global_steps=100, partition_id=partition_id, batch_size=1)
+
+        assert set(batch.keys) == set(stale.trajectory_keys)
+        assert metrics == {}
+    finally:
+        _clear_partition(partition_id)
+
+
+def test_wait_does_not_block_when_inflight_is_fresh(tq_init, partition_id):
+    """wait proceeds immediately when every in-flight prompt is below threshold,
+    and never drops (no drop metrics)."""
+    threshold, sync, g = 4, 1, 3
+    finished = [PromptSpec(uid=_uid(), status="finished", sessions=1, global_steps=g) for _ in range(2)]
+    # In-flight prompt staleness (3 - 3 + 1) / 1 = 1 < 4 -> does not block.
+    inflight = PromptSpec(uid=_uid(), status="running", sessions=1, global_steps=g)
+    _produce(partition_id, finished + [inflight]).join_and_check()
+
+    rb = _make_rb(max_off_policy_strategy="wait", max_off_policy_threshold=threshold, parameter_sync_step=sync)
+    try:
+        batch, metrics = rb.sample(global_steps=g, partition_id=partition_id, batch_size=2)
+
+        assert _uids_of(batch.keys) == {spec.uid for spec in finished}
+        assert metrics == {}
     finally:
         _clear_partition(partition_id)
