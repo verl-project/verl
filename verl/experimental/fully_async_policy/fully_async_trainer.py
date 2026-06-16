@@ -253,34 +253,9 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         await self._setup_checkpoint_manager()
         await self._setup_hybrid_checkpoint_manager()
 
-    def set_total_train_steps(self, total_training_steps):
+    def set_total_train_steps_for_progress_bar(self, total_training_steps):
         self.total_train_steps = total_training_steps
-
-        self._set_total_training_steps_in_config(total_training_steps)
-
         self.progress_bar = tqdm(total=self.total_train_steps, initial=0, desc="Training Progress")
-
-    def _set_total_training_steps_in_config(self, total_training_steps):
-        try:
-            OmegaConf.set_struct(self.config, True)
-            with open_dict(self.config):
-                if OmegaConf.select(self.config, "actor_rollout_ref.actor.optim"):
-                    self.config.actor_rollout_ref.actor.optim.total_training_steps = total_training_steps
-                if OmegaConf.select(self.config, "critic.optim"):
-                    self.config.critic.optim.total_training_steps = total_training_steps
-        except Exception as e:
-            print(f"Warning: Could not set total_training_steps in config. Structure missing? Error: {e}")
-
-    def _resolve_total_training_steps_before_init(self):
-        rollout_total_steps = self.config.rollout.total_rollout_steps
-        if rollout_total_steps is None:
-            return None
-
-        required_samples = (
-            self.config.actor_rollout_ref.actor.ppo_mini_batch_size * self.config.async_training.require_batches
-        )
-        steps_per_sync = required_samples * self.config.async_training.trigger_parameter_sync_step
-        return int(rollout_total_steps / steps_per_sync)
 
     def get_actor_wg(self):
         """Get actor worker group"""
@@ -382,10 +357,6 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         1. Ray resource pools from configuration
         2. Worker groups for each role (actor, critic, etc.)
         """
-        total_training_steps = self._resolve_total_training_steps_before_init()
-        if total_training_steps is not None:
-            self._set_total_training_steps_in_config(total_training_steps)
-
         self._init_resource_pools()
         self._create_worker_classes()
         self._init_worker_groups()

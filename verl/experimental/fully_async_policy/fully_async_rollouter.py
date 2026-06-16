@@ -563,6 +563,9 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
     def get_total_train_steps(self):
         return self.total_train_steps
 
+    def get_optim_total_train_steps(self):
+        return int(self.total_rollout_steps / self.required_samples)
+
     async def reset_staleness(self):
         """
         Reset staleness samples after parameter update.

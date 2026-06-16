@@ -20,7 +20,7 @@ from pprint import pprint
 
 import hydra
 import ray
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, open_dict
 
 from verl.experimental.fully_async_policy.fully_async_rollouter import FullyAsyncRollouter
 from verl.experimental.fully_async_policy.fully_async_trainer import FullyAsyncTrainer
@@ -74,6 +74,11 @@ class FullyAsyncTaskRunner:
         self.components["role_worker_mapping"] = role_worker_mapping
         self.components["ray_worker_group_cls"] = ray_worker_group_cls
 
+        self._init_rollouter_before_trainer(config)
+
+        optim_total_train_steps = ray.get(self.components["rollouter"].get_optim_total_train_steps.remote())
+        self._set_total_training_steps_for_optimizer(config, optim_total_train_steps)
+
         print("[ASYNC MAIN] Creating FullyAsyncTrainer first (needed for hybrid worker group injection)...")
         self._create_trainer(config)
 
@@ -89,7 +94,7 @@ class FullyAsyncTaskRunner:
         # sync total_train_steps between rollouter and trainer
         total_train_steps = ray.get(self.components["rollouter"].get_total_train_steps.remote())
         print(f"total_train_steps {total_train_steps}")
-        ray.get(self.components["trainer"].set_total_train_steps.remote(total_train_steps))
+        ray.get(self.components["trainer"].set_total_train_steps_for_progress_bar.remote(total_train_steps))
 
         # max_queue_size
         max_queue_size = ray.get(self.components["rollouter"].get_max_queue_size.remote())
@@ -114,14 +119,39 @@ class FullyAsyncTaskRunner:
 
         print("[ASYNC MAIN] All components initialized successfully")
 
-    def _create_rollouter(self, config) -> None:
-        print("[ASYNC MAIN] Starting create rollouter...")
+    def _set_total_training_steps_for_optimizer(self, config, optim_total_train_steps):
+        try:
+            OmegaConf.set_struct(config, True)
+            with open_dict(config):
+                if OmegaConf.select(config, "actor_rollout_ref.actor.optim"):
+                    config.actor_rollout_ref.actor.optim.total_training_steps = optim_total_train_steps
+                if OmegaConf.select(config, "critic.optim"):
+                    config.critic.optim.total_training_steps = optim_total_train_steps
+        except Exception as e:
+            print(f"Warning: Could not set total_training_steps in config. Structure missing? Error: {e}")
+
+    def _init_rollouter_before_trainer(self, config) -> None:
+        """
+        Run __init__ for rollouter. Does NOT call init_workers or set_max_required_samples yet.
+        This must be called BEFORE _create_trainer so the trainer can read the correct
+        total_train_steps from the rollouter.
+        """
+        print("[ASYNC MAIN] Creating rollouter init (dataloader + compute total_train_steps)")
         rollouter = FullyAsyncRollouter.remote(
             config=config,
             tokenizer=self.components["tokenizer"],
             processor=self.components["processor"],
             device_name=config.trainer.device,
         )
+        self.components["rollouter"] = rollouter
+        print("[ASYNC MAIN] Rollouter init completed (dataloader created + total_train_steps computed)")
+
+    def _create_rollouter(self, config) -> None:
+        """
+        Complete rollouter setup: inject hybrid WG, init workers, set max required samples.
+        """
+        print("[ASYNC MAIN] Starting create rollouter...")
+        rollouter = self.components["rollouter"]
 
         # set_hybrid_worker_group must be called BEFORE init_workers() so that
         # _init_async_rollout_manager can pass the hybrid WG to ALM.create().
@@ -131,8 +161,6 @@ class FullyAsyncTaskRunner:
 
         ray.get(rollouter.init_workers.remote())
         ray.get(rollouter.set_max_required_samples.remote())
-
-        self.components["rollouter"] = rollouter
         print("[ASYNC MAIN] Rollouter created and initialized successfully")
 
     def _create_trainer(self, config) -> None:
