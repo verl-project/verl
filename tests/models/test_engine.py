@@ -24,6 +24,8 @@ import ray
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
+from tensordict import TensorDict
+from torch.distributed.tensor import DTensor
 from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
@@ -54,7 +56,8 @@ from verl.workers.config import (
     McoreEngineConfig,
     McoreOptimizerConfig,
 )
-from verl.workers.engine_workers import TrainingWorker, TrainingWorkerConfig
+from verl.workers.engine_workers import ActorRolloutRefWorker, TrainingWorker, TrainingWorkerConfig
+from verl.workers.engine_workers_tinker import TinkerActorRolloutRefWorker, TinkerTrainingWorker
 from verl.workers.utils.losses import ppo_loss, sft_loss, value_loss
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
 
@@ -66,6 +69,17 @@ def get_test_language_model(device_count):
         model = "~/models/Qwen/Qwen2.5-0.5B"
     model = os.path.expanduser(model)
     return model
+
+
+def test_tinker_workers_expose_split_training_primitives():
+    assert issubclass(TinkerTrainingWorker, TrainingWorker)
+    assert issubclass(TinkerActorRolloutRefWorker, ActorRolloutRefWorker)
+
+    for name in ("optimizer_zero_grad", "forward_backward", "optimizer_step"):
+        assert name not in TrainingWorker.__dict__
+        assert name in TinkerTrainingWorker.__dict__
+        assert name not in ActorRolloutRefWorker.__dict__
+        assert name in TinkerActorRolloutRefWorker.__dict__
 
 
 def create_training_config(model_type, strategy, device_count, model):
@@ -508,6 +522,188 @@ def _autocast_dtype_worker(rank: int, world_size: int, rendezvous_file: str, mod
 
     dist.barrier()
     dist.destroy_process_group()
+
+
+def _local_tensor(tensor: torch.Tensor) -> torch.Tensor:
+    if isinstance(tensor, DTensor):
+        return tensor.to_local()
+    return tensor
+
+
+def _snapshot_trainable_params(module):
+    return [_local_tensor(param).detach().float().clone() for param in module.parameters() if param.requires_grad]
+
+
+def _param_delta_norm(module, before) -> torch.Tensor:
+    device = torch.device("cuda", torch.cuda.current_device())
+    total = torch.zeros((), device=device)
+    for param, param_before in zip((p for p in module.parameters() if p.requires_grad), before, strict=True):
+        param_local = _local_tensor(param).detach().float()
+        total += (param_local - param_before.to(param_local.device)).pow(2).sum()
+    dist.all_reduce(total, op=dist.ReduceOp.SUM)
+    return total.sqrt()
+
+
+def _grad_norm(module) -> torch.Tensor:
+    device = torch.device("cuda", torch.cuda.current_device())
+    total = torch.zeros((), device=device)
+    for param in module.parameters():
+        if param.grad is None:
+            continue
+        grad = _local_tensor(param.grad).detach().float()
+        total += grad.pow(2).sum()
+    dist.all_reduce(total, op=dist.ReduceOp.SUM)
+    return total.sqrt()
+
+
+def _has_any_grad(module) -> bool:
+    any_grad = torch.tensor(
+        int(any(param.grad is not None for param in module.parameters())),
+        device=torch.device("cuda", torch.cuda.current_device()),
+    )
+    dist.all_reduce(any_grad, op=dist.ReduceOp.SUM)
+    return any_grad.item() > 0
+
+
+def _make_split_step_batch(config: HFModelConfig, engine_config: FSDPEngineConfig, world_size: int) -> TensorDict:
+    batch_size = 2
+    seq_len = 8
+    response_length = 4
+    input_ids = torch.arange(batch_size * seq_len, dtype=torch.long).reshape(batch_size, seq_len)
+    input_ids = input_ids.remainder(config.hf_config.vocab_size)
+    attention_mask = torch.ones_like(input_ids)
+    position_ids = torch.arange(seq_len, dtype=torch.long).expand(batch_size, seq_len)
+    responses = input_ids[:, -response_length:]
+    response_mask = torch.ones_like(responses)
+
+    data = DataProto.from_single_dict(
+        {
+            "input_ids": input_ids,
+            "prompts": input_ids[:, : seq_len - response_length],
+            "attention_mask": attention_mask,
+            "position_ids": position_ids,
+            "responses": responses,
+            "response_mask": response_mask,
+            "old_log_probs": torch.zeros_like(responses, dtype=torch.float32),
+            "advantages": torch.ones_like(responses, dtype=torch.float32),
+        },
+        meta_info={"temperature": 1.0},
+    )
+    data_td = left_right_2_no_padding(data.to_tensordict())
+    tu.assign_non_tensor(
+        data_td,
+        global_batch_size=batch_size * world_size,
+        use_remove_padding=config.get("use_remove_padding", False),
+        use_dynamic_bsz=engine_config.use_dynamic_bsz,
+        max_token_len_per_gpu=engine_config.max_token_len_per_gpu,
+        micro_batch_size_per_gpu=engine_config.micro_batch_size_per_gpu,
+        use_fused_kernels=engine_config.use_fused_kernels,
+    )
+    return data_td
+
+
+def _split_training_primitives_fsdp_worker(
+    rank: int, world_size: int, rendezvous_file: str, model_path: str, strategy: str
+):
+    torch.cuda.set_device(rank)
+    dist.init_process_group(
+        backend="nccl",
+        init_method=f"file://{rendezvous_file}",
+        rank=rank,
+        world_size=world_size,
+    )
+
+    from verl.workers.engine import BaseEngine, EngineRegistry
+
+    model_config = HFModelConfig(
+        path=model_path,
+        load_tokenizer=False,
+        override_config={"attn_implementation": "sdpa"},
+        use_remove_padding=True,
+    )
+    engine_config = FSDPEngineConfig(
+        forward_only=False,
+        fsdp_size=world_size,
+        strategy=strategy,
+        ulysses_sequence_parallel_size=1,
+        use_remove_padding=True,
+        use_dynamic_bsz=False,
+        micro_batch_size_per_gpu=2,
+        max_token_len_per_gpu=128,
+    )
+    engine: BaseEngine = EngineRegistry.new(
+        model_type="language_model",
+        backend=engine_config.strategy,
+        model_config=model_config,
+        engine_config=engine_config,
+        optimizer_config=FSDPOptimizerConfig(lr=1e-3, lr_scheduler_type="constant"),
+        checkpoint_config=CheckpointConfig(),
+    )
+    engine.initialize()
+
+    actor_config = ActorConfig(strategy=strategy, rollout_n=1, ppo_micro_batch_size_per_gpu=-1)
+    loss_fn = partial(ppo_loss, config=actor_config)
+    before = _snapshot_trainable_params(engine.module)
+
+    with engine.train_mode(zero_grad_on_exit=False):
+        engine.optimizer_zero_grad()
+        output_1 = engine.forward_backward_batch(
+            _make_split_step_batch(model_config, engine_config, world_size),
+            loss_function=loss_fn,
+            forward_only=False,
+        )
+    if engine.is_mp_src_rank_with_outputs():
+        assert "grad_norm" not in output_1["metrics"]
+    grad_norm_1 = _grad_norm(engine.module)
+    assert grad_norm_1.item() > 0
+    assert _param_delta_norm(engine.module, before).item() == pytest.approx(0.0, abs=0.0)
+
+    with engine.train_mode(zero_grad_on_exit=False):
+        output_2 = engine.forward_backward_batch(
+            _make_split_step_batch(model_config, engine_config, world_size),
+            loss_function=loss_fn,
+            forward_only=False,
+        )
+    if engine.is_mp_src_rank_with_outputs():
+        assert "grad_norm" not in output_2["metrics"]
+    grad_norm_2 = _grad_norm(engine.module)
+    assert grad_norm_2.item() > grad_norm_1.item() * 1.5
+    assert _param_delta_norm(engine.module, before).item() == pytest.approx(0.0, abs=0.0)
+
+    with engine.train_mode(zero_grad_on_exit=True):
+        grad_norm = engine.optimizer_step()
+
+    assert grad_norm > 0
+    assert _param_delta_norm(engine.module, before).item() > 0
+    assert not _has_any_grad(engine.module)
+
+    dist.barrier()
+    dist.destroy_process_group()
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires at least 2 CUDA devices")
+@pytest.mark.parametrize("strategy", ["fsdp", "fsdp2"])
+def test_fsdp_engine_split_forward_backward_and_optimizer_step(strategy, tmp_path):
+    world_size = 2
+    rendezvous_file = str(tmp_path / f"rdzv_split_training_primitives_{strategy}")
+    os.makedirs(os.path.dirname(rendezvous_file), exist_ok=True)
+    model_path = create_actor_model(
+        tmp_path,
+        Qwen3Config(
+            vocab_size=128,
+            hidden_size=64,
+            intermediate_size=128,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=4,
+        ),
+    )
+    mp.spawn(
+        fn=_split_training_primitives_fsdp_worker,
+        args=(world_size, rendezvous_file, model_path, strategy),
+        nprocs=world_size,
+        join=True,
+    )
 
 
 @pytest.mark.parametrize("world_size", [8])
