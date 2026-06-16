@@ -27,7 +27,6 @@ from verl.trainer.ppo.utils import create_rl_dataset, create_rl_sampler, need_cr
 from verl.utils.config import validate_config
 
 
-@ray.remote
 class TaskRunner:
     """Ray remote class for executing distributed PPO training tasks.
 
