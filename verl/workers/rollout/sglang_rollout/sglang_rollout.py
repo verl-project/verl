@@ -37,7 +37,9 @@ from sglang.srt.utils import (
 from sglang.srt.weight_sync.utils import _preprocess_tensor_for_update_weights
 from sglang.srt.weight_sync.utils import update_weights as sgl_update_weights
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
+from torch.distributed.tensor import DTensor
 
+from verl.utils.device import get_device_id
 from verl.utils.net_utils import is_valid_ipv6_address
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.base import BaseRollout
@@ -344,31 +346,55 @@ class ServerAdapter(BaseRollout):
         assert hasattr(self, "_weight_sync_group"), "weight_sync_group not set — call init_weight_sync_group first"
         logger.info("[NCCL weight sync] update_weights_nccl: collecting weights  global_steps=%s", global_steps)
 
-        # Buffer all metadata and tensor references. The HTTP call to SGLang must be
-        # issued BEFORE any NCCL broadcast — SGLang TP workers enter their recv loop
-        # only after receiving the HTTP request, so we need the full metadata list first.
-        names, dtypes, shapes, tensors = [], [], [], []
+        # Phase 1 — collect metadata only.
+        # weights yields raw DTensors (materialize=False in get_per_tensor_param), so
+        # full_tensor() has NOT been called yet.  DTensor.shape is the global shape and
+        # .dtype is the param dtype — both are available without all-gathering.
+        #
+        # Crucially, we do NOT accumulate the materialized full tensors here.  For a
+        # 70B model the full parameter set is 140 GB; keeping all of them alive before
+        # any broadcast starts causes an OOM on 95 GB GPUs.  Instead we keep only the
+        # DTensor shard references (~4.4 GB for 70B/32 ranks) and materialize each
+        # parameter one at a time inside do_broadcasts().
+        all_params: list = []
+        names, dtypes, shapes = [], [], []
         for name, param in weights:
+            all_params.append(param)
             names.append(name)
-            dtypes.append(str(param.dtype).replace("torch.", ""))
+            # DTensor reports the global shape; non-DTensors already have the right shape.
             shapes.append(list(param.shape))
-            tensors.append(param.detach())
+            # We always cast DTensors to bfloat16 during the broadcast below.
+            if isinstance(param, DTensor):
+                dtypes.append("bfloat16")
+            else:
+                dtypes.append(str(param.dtype).replace("torch.", ""))
 
-        logger.info("[NCCL weight sync] update_weights_nccl: collected %d params", len(names))
+        logger.info("[NCCL weight sync] update_weights_nccl: collected metadata for %d params", len(names))
 
-        # NCCL broadcast and the SGLang HTTP call must run concurrently:
-        #   - The HTTP call triggers SGLang TP workers to enter their NCCL recv loop.
-        #   - The broadcasts must be in flight while SGLang is recving.
-        # A single asyncio.sleep(0) is not enough because the HTTP adapter was just
-        # created and the TCP connection hasn't been established yet.  Running the
-        # broadcasts in a thread executor keeps the event loop free to complete the
-        # full TCP handshake + HTTP round-trip while NCCL proceeds in parallel.
+        # Phase 2 — concurrent HTTP trigger + streaming NCCL broadcasts.
+        #
+        # The HTTP call tells SGLang TP workers to enter their NCCL recv loop for all
+        # parameters (metadata sent upfront).  The broadcasts run in a thread executor
+        # so the event loop stays free to complete the HTTP round-trip.  Each parameter
+        # is all-gathered (full_tensor) and broadcast one at a time; the full tensor is
+        # deleted immediately after the broadcast to cap peak GPU memory at roughly
+        # FSDP-model-size + ONE full parameter tensor at any moment.
         weight_sync_group = self._weight_sync_group
+        device = get_device_id()
 
         def do_broadcasts():
-            logger.info("[NCCL weight sync] update_weights_nccl: starting NCCL broadcasts for %d params", len(tensors))
-            for tensor in tensors:
+            logger.info(
+                "[NCCL weight sync] update_weights_nccl: starting NCCL broadcasts for %d params", len(all_params)
+            )
+            for param in all_params:
+                if isinstance(param, DTensor):
+                    # full_tensor() triggers an all-gather across all FSDP ranks.
+                    # All ranks must call this for the same parameter in lock-step.
+                    tensor = param.to(device, non_blocking=False).full_tensor().to(torch.bfloat16, non_blocking=False)
+                else:
+                    tensor = param.detach()
                 torch.distributed.broadcast(tensor, src=0, group=weight_sync_group)
+                del tensor  # release immediately — do not accumulate
             logger.info("[NCCL weight sync] update_weights_nccl: broadcasts complete")
 
         if self._is_server_tp_leader():

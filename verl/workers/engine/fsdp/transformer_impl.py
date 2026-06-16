@@ -791,7 +791,7 @@ class FSDPEngine(BaseEngine):
         if self._is_offload_optimizer:
             offload_fsdp_optimizer(self.optimizer)
 
-    def get_per_tensor_param(self, layered_summon=False, base_sync_done=False, **kwargs):
+    def get_per_tensor_param(self, layered_summon=False, base_sync_done=False, materialize=True, **kwargs):
         log_gpu_memory_usage("Before load_fsdp_model_to_gpu", logger=logger)
 
         # FSDP2 CPUOffloadPolicy owns CPU<->GPU placement; calling model.to(device) here
@@ -834,16 +834,25 @@ class FSDPEngine(BaseEngine):
             per_tensor_param = params.items()
         else:
             device = get_device_id()  # used when fsdp2 set cpu_offload_policy
-            # TODO: cast fp32 to bf16 to reduce weight sync overhead, need more fine-grained control, e.g MoE gate
-            per_tensor_param = (
-                (
-                    name,
-                    param.to(device, non_blocking=True).full_tensor().to(torch.bfloat16, non_blocking=True)
-                    if isinstance(param, DTensor)
-                    else param,
+            if materialize:
+                # Default path (HTTP weight sync): all-gather each parameter to a full
+                # tensor immediately. The caller batches these tensors and sends them via HTTP.
+                # TODO: cast fp32 to bf16 to reduce weight sync overhead, need more fine-grained control, e.g MoE gate
+                per_tensor_param = (
+                    (
+                        name,
+                        param.to(device, non_blocking=True).full_tensor().to(torch.bfloat16, non_blocking=True)
+                        if isinstance(param, DTensor)
+                        else param,
+                    )
+                    for name, param in params.items()
                 )
-                for name, param in params.items()
-            )
+            else:
+                # NCCL streaming path: yield raw DTensors so the caller can all-gather
+                # and broadcast one parameter at a time (avoids accumulating the entire
+                # model in GPU memory before any broadcast starts).
+                # DTensor.shape is the global (full) shape; .dtype is the param dtype.
+                per_tensor_param = iter(params.items())
 
         if self._qat_enabled:
             from verl.utils.qat.quantizer import QATQuantizer

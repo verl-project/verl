@@ -771,8 +771,14 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         aggressive_empty_cache(force_sync=False)
 
         # 2. determine if we need a base weight sync (adapter path only)
+        # For the NCCL path, request raw DTensors (materialize=False) so that
+        # update_weights_nccl can all-gather and broadcast one parameter at a time
+        # instead of accumulating the full 70B parameter set (~140 GB) in GPU memory
+        # before any broadcast starts.
+        standalone_nnodes = self.config.rollout.nnodes
+        is_nccl_path = standalone_nnodes > 0 and hasattr(self.rollout, "_weight_sync_group")
         per_tensor_param, peft_config = self.actor.engine.get_per_tensor_param(
-            layered_summon=self.layered_summon, base_sync_done=True
+            layered_summon=self.layered_summon, base_sync_done=True, materialize=not is_nccl_path
         )
 
         do_lora_base_sync = False
@@ -790,8 +796,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             )
 
         # Use NCCL broadcast for standalone mode (cross-node), HTTP for hybrid
-        standalone_nnodes = self.config.rollout.nnodes
-        if standalone_nnodes > 0 and hasattr(self.rollout, "_weight_sync_group"):
+        if is_nccl_path:
             await self.rollout.update_weights_nccl(per_tensor_param, global_steps=global_steps)
         else:
             await self.rollout.update_weights(
