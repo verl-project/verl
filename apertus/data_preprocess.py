@@ -32,8 +32,8 @@ from utils.riddle_sense import normalize_riddle_sense_sample
 from utils.table_gpt import TABLE_GPT_DATASET_ID, load_table_gpt_mix
 
 
-LOCAL_SAVE_DIR = "./data/apertus_demo_rl"
-DATASETS_CACHE_DIR = "./data/apertus_demo_rl/.hf_datasets_cache"
+LOCAL_SAVE_DIR = "/capstor/store/cscs/swissai/infra01/reasoning/data/RL-prod/apertus_1p5_incogitans/"
+DATASETS_CACHE_DIR = "./data/apertus_1p5_incogitans/.hf_datasets_cache"
 SEED = 85
 CODE_CONTESTS_MAX_GENERATED_TESTS = 50
 PREPROCESS_NUM_PROC = 48
@@ -108,7 +108,7 @@ TRAIN_DATASETS = [
         prompt_key="messages",
         answer_key="ground_truth",
         subject_key="constraint_type",
-        sample_size=40_000,
+        sample_size=60_000,
     ),
     DatasetConfig(
         name="if_rl_singleturn_hard",
@@ -119,7 +119,7 @@ TRAIN_DATASETS = [
         prompt_key="messages",
         answer_key="ground_truth",
         subject_key="constraint_type",
-        sample_size=10_000,
+        sample_size=20_000,
     ),
     DatasetConfig(
         name="taco_verified",
@@ -187,16 +187,16 @@ TRAIN_DATASETS = [
         prompt_key="prompt",
         answer_key="completion",
     ),
-    DatasetConfig(
-        name="qa_gym",
-        dataset_id="/capstor/store/cscs/swissai/infra01/reasoning/data/RL-prod/qa_gym/eval10_hybrid_multihop_rl_pairs.jsonl",
-        split="train",
-        adapter="qa_gym",
-        data_source="qa_gym",
-        question_key="question",
-        sample_size=None,
-        tool_selection=("display_answers",),
-    ),
+    # DatasetConfig(
+    #     name="qa_gym",
+    #     dataset_id="/capstor/store/cscs/swissai/infra01/reasoning/data/RL-prod/qa_gym/eval10_hybrid_multihop_rl_pairs.jsonl",
+    #     split="train",
+    #     adapter="qa_gym",
+    #     data_source="qa_gym",
+    #     question_key="question",
+    #     sample_size=None,
+    #     tool_selection=("display_answers",),
+    # ),
     DatasetConfig(
         name="vrl",
         dataset_id="/capstor/store/cscs/swissai/infra01/reasoning/data/RL-prod/vrl/train.parquet",

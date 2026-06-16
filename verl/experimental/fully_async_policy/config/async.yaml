@@ -135,8 +135,8 @@ critic:
 trainer:
   # NOTE: as we have DAPO group filtering, completing one epoch
   # may not correspond to going through the entire dataset.
-  total_epochs: 2
-  total_training_steps: 689 # TODO: recompute this based on all data
+  total_epochs: 100 # not a relevant value, just set a large number for now
+  total_training_steps: 10000 # not a relevant value, just set a large number for now
   save_freq: 20
   test_freq: 10
   max_actor_ckpt_to_keep: 10
