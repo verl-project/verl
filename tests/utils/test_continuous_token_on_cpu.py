@@ -33,6 +33,7 @@ from verl.utils.continuous_token_wiring import (
     list_continuous_token_builder_families,
     resolve_continuous_token_model_family,
 )
+from verl.workers.config.rollout import ContinuousTokenConfig
 
 
 class _DummyTokenizer:
@@ -61,6 +62,62 @@ class _TemplateTokenizer:
         rendered = "".join(f"<{message['role']}>{message.get('content', '')}\n" for message in messages)
         if add_generation_prompt:
             rendered += "<assistant>"
+        if tokenize:
+            return self.encode(rendered, add_special_tokens=False)
+        return rendered
+
+
+class _RecordingTemplateTokenizer(_TemplateTokenizer):
+    def __init__(self):
+        self.calls = []
+
+    def apply_chat_template(
+        self,
+        messages,
+        tokenize=True,
+        add_generation_prompt=True,
+        tools=None,
+        return_dict=False,
+        **kwargs,
+    ):
+        self.calls.append(
+            {
+                "messages": list(messages),
+                "add_generation_prompt": add_generation_prompt,
+                "tools": tools,
+                "kwargs": dict(kwargs),
+            }
+        )
+        return super().apply_chat_template(
+            messages,
+            tokenize=tokenize,
+            add_generation_prompt=add_generation_prompt,
+            tools=tools,
+            return_dict=return_dict,
+            **kwargs,
+        )
+
+
+class _NonPrefixStableTokenizer(_TemplateTokenizer):
+    def apply_chat_template(
+        self,
+        messages,
+        tokenize=True,
+        add_generation_prompt=True,
+        tools=None,
+        return_dict=False,
+        **kwargs,
+    ):
+        rendered = super().apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=add_generation_prompt,
+            tools=tools,
+            return_dict=return_dict,
+            **kwargs,
+        )
+        if len(messages) > 1:
+            rendered = "mutated-prefix:" + rendered
         if tokenize:
             return self.encode(rendered, add_special_tokens=False)
         return rendered
@@ -132,6 +189,34 @@ class _Gemma4BoundaryTokenizer(_TemplateTokenizer):
 class _MissingSpecialTokenTokenizer(_TemplateTokenizer):
     def convert_tokens_to_ids(self, token):
         return None
+
+
+class _ListSpecialTokenQwenTokenizer(_QwenBoundaryTokenizer):
+    def convert_tokens_to_ids(self, token):
+        if token == "<|im_end|>":
+            return [self.im_end_id]
+        return super().convert_tokens_to_ids(token)
+
+
+class _MultiIdSpecialTokenQwenTokenizer(_QwenBoundaryTokenizer):
+    def convert_tokens_to_ids(self, token):
+        if token == "<|im_end|>":
+            return [self.im_end_id, self.im_end_id + 1]
+        return super().convert_tokens_to_ids(token)
+
+
+class _InvalidSpecialTokenQwenTokenizer(_QwenBoundaryTokenizer):
+    def convert_tokens_to_ids(self, token):
+        if token == "<|im_end|>":
+            return -1
+        return super().convert_tokens_to_ids(token)
+
+
+class _MultiTokenNewlineQwenTokenizer(_QwenBoundaryTokenizer):
+    def encode(self, text, add_special_tokens=False):
+        if text == "\n":
+            return [self.newline_id, self.newline_id + 1]
+        return super().encode(text, add_special_tokens=add_special_tokens)
 
 
 def test_builtin_family_surface():
@@ -216,6 +301,13 @@ def test_explicit_family_is_not_rewritten():
     )
 
 
+def test_auto_family_resolution_uses_tokenizer_name_or_path():
+    assert (
+        resolve_continuous_token_model_family("auto", tokenizer_name_or_path="openai/gpt-oss-120b")
+        == ContinuousTokenModelFamily.GPTOSS
+    )
+
+
 def test_auto_family_is_resolved_at_factory_time():
     builder = create_continuous_token_builder(_QwenBoundaryTokenizer(), model_family="auto")
     assert isinstance(builder, QwenContinuousTokenBuilder)
@@ -231,6 +323,22 @@ def test_default_builder_creation_forwards_kwargs():
     assert isinstance(builder, ContinuousTokenBuilder)
     assert builder.chat_template_kwargs == {"enable_thinking": False}
     assert builder.allowed_append_roles == frozenset({"tool"})
+
+
+def test_builder_forwards_template_kwargs_and_tools_when_rendering_initial_prompt():
+    tokenizer = _RecordingTemplateTokenizer()
+    tools = [{"type": "function", "function": {"name": "lookup"}}]
+    builder = create_continuous_token_builder(
+        tokenizer,
+        model_family="default",
+        chat_template_kwargs={"enable_thinking": False},
+    )
+
+    builder.build_initial_tokens([{"role": "user", "content": "question"}], tools=tools)
+
+    assert tokenizer.calls[-1]["add_generation_prompt"] is True
+    assert tokenizer.calls[-1]["tools"] is tools
+    assert tokenizer.calls[-1]["kwargs"] == {"enable_thinking": False}
 
 
 def test_default_builder_is_available_from_builtin_registry():
@@ -363,6 +471,37 @@ def test_gpt_oss_builder_formats_tool_responses_with_resolved_tool_name():
     assert token_ids == [ord(char) for char in expected]
 
 
+def test_gpt_oss_builder_formats_multiple_tool_responses_by_position_and_default_name():
+    builder = create_continuous_token_builder(_TemplateTokenizer(), model_family="gptoss")
+    context_messages = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"type": "function", "function": {"name": "search"}},
+                {"type": "function", "function": {"name": "calculate"}},
+            ],
+        }
+    ]
+    tool_messages = [
+        {"role": "tool", "content": "hits"},
+        {"role": "tool", "content": "42"},
+    ]
+
+    token_ids = builder._tokenize_tool_group(tool_messages, context_messages=context_messages)
+    fallback_ids = builder._tokenize_tool_group([{"role": "tool", "content": "fallback"}])
+
+    expected = (
+        '<|start|>functions.search to=assistant<|channel|>commentary<|message|>"hits"<|end|>'
+        '<|start|>functions.calculate to=assistant<|channel|>commentary<|message|>"42"<|end|>'
+    )
+    expected_fallback = (
+        '<|start|>functions.continuous_token_tool to=assistant<|channel|>commentary<|message|>"fallback"<|end|>'
+    )
+    assert token_ids == [ord(char) for char in expected]
+    assert fallback_ids == [ord(char) for char in expected_fallback]
+
+
 def test_default_builder_merges_append_only_non_assistant_messages():
     tokenizer = _TemplateTokenizer()
     builder = ContinuousTokenBuilder(tokenizer)
@@ -384,6 +523,20 @@ def test_default_builder_merges_append_only_non_assistant_messages():
     )
     assert aligned_mask == [1, 1, 1] + [0] * len(expected_incremental)
     assert aligned_logprobs == [0.1, 0.2, 0.3] + [0.0] * len(expected_incremental)
+
+
+def test_default_builder_tokenizes_system_and_user_appends_with_generation_prompt():
+    builder = ContinuousTokenBuilder(_TemplateTokenizer())
+    old_messages = [{"role": "user", "content": "question"}]
+    new_messages = old_messages + [
+        {"role": "system", "content": "policy"},
+        {"role": "user", "content": "retry"},
+    ]
+
+    incremental = builder.tokenize_incremental_messages(old_messages, new_messages)
+
+    expected = "<system>policy\n<user>retry\n<assistant>"
+    assert incremental == [ord(char) for char in expected]
 
 
 def test_default_builder_appends_assistant_tokens_to_runtime_stream():
@@ -435,6 +588,13 @@ def test_builder_alignment_wrapper_delegates_to_public_helper():
     assert ContinuousTokenBuilder.align_response_metadata(result, [1, 1], [0.1, 0.2]) == expected
 
 
+def test_alignment_rejects_unknown_merge_kind():
+    result = MergeResult(token_ids=[1], appended_token_count=0, kind="unknown")
+
+    with pytest.raises(ValueError, match="Unknown Continuous Token merge kind"):
+        ct_align_response_metadata(result, [1])
+
+
 def test_default_builder_rejects_mutated_message_prefix():
     builder = ContinuousTokenBuilder(_TemplateTokenizer())
     old_messages = [{"role": "user", "content": "question"}]
@@ -442,6 +602,20 @@ def test_default_builder_rejects_mutated_message_prefix():
 
     with pytest.raises(ValueError, match="prefix messages changed"):
         builder.tokenize_incremental_messages(old_messages, changed_messages)
+
+    with pytest.raises(ValueError, match="updated_messages is shorter"):
+        builder.tokenize_incremental_messages(old_messages, [])
+
+
+def test_default_builder_rejects_non_prefix_stable_template_deltas():
+    builder = ContinuousTokenBuilder(_NonPrefixStableTokenizer())
+
+    with pytest.raises(ValueError, match="token-id suffix diff failed"):
+        builder.render_delta_token_id(
+            [{"role": "user", "content": "question"}],
+            [{"role": "tool", "content": "answer"}],
+            add_generation_prompt=True,
+        )
 
 
 def test_subclass_only_overrides_token_level_merge_hook():
@@ -498,6 +672,9 @@ def test_builder_rejects_unsupported_append_roles():
             [{"role": "user", "content": "question"}, {"role": "user", "content": "retry"}],
         )
 
+    with pytest.raises(ValueError, match="Unsupported Continuous Token append roles"):
+        ContinuousTokenBuilder(_TemplateTokenizer(), allowed_append_roles=["assistant"])
+
 
 def test_model_specific_builders_validate_required_special_tokens():
     with pytest.raises(ValueError, match="required token '<\\|im_end\\|>'"):
@@ -513,6 +690,34 @@ def test_model_specific_builders_validate_required_special_tokens():
         Gemma4ContinuousTokenBuilder(_MissingSpecialTokenTokenizer())
 
 
+def test_model_specific_builders_validate_special_token_id_shape():
+    builder = QwenContinuousTokenBuilder(_ListSpecialTokenQwenTokenizer())
+    assert builder._merge_token_ids([1, builder._im_end_id], [2]).token_ids == [1, builder._im_end_id, 198, 2]
+
+    with pytest.raises(ValueError, match="returned multiple ids"):
+        QwenContinuousTokenBuilder(_MultiIdSpecialTokenQwenTokenizer())
+
+    with pytest.raises(ValueError, match="returned invalid id"):
+        QwenContinuousTokenBuilder(_InvalidSpecialTokenQwenTokenizer())
+
+    with pytest.raises(ValueError, match="Expected Qwen newline"):
+        QwenContinuousTokenBuilder(_MultiTokenNewlineQwenTokenizer())
+
+
 def test_unknown_family_fails_during_resolution():
     with pytest.raises(ValueError, match="Unknown Continuous Token model_family"):
         create_continuous_token_builder(_DummyTokenizer(), model_family="missing_custom_family")
+
+
+@pytest.mark.parametrize("model_family", ["", "   ", None])
+def test_empty_family_fails_during_resolution(model_family):
+    with pytest.raises(ValueError, match="model_family must be a non-empty string"):
+        resolve_continuous_token_model_family(model_family)
+
+
+@pytest.mark.parametrize("model_family", ["", None])
+def test_continuous_token_rollout_config_validates_model_family(model_family):
+    with pytest.raises(ValueError, match="continuous_token.model_family must be a non-empty string"):
+        ContinuousTokenConfig(model_family=model_family)
+
+    ContinuousTokenConfig(enable=True, model_family="auto")
