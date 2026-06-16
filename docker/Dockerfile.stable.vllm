@@ -122,12 +122,21 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/* && \
     pip install --ignore-installed PyJWT
 
-RUN git clone https://github.com/vllm-project/vllm.git && git checkout -b v0.23.0_fix v0.23.0 && \
-    git fetch origin pull/44483/head:pr-44483 && \
-    git cherry-pick v0.23.0_fix..pr-44483 && \
-    git fetch origin pull/45589/head:pr-44589 && \
-    git cherry-pick v0.23.0_fix..pr-44589 && \
-    pip install -e .
+# Apply two unmerged vLLM fixes required by verl weight-sync flows by patching in each
+# PR's cumulative diff (GitHub ".diff") with `git apply --3way`, rather than cherry-picking
+# commits or ranges. These PR branches are periodically rebased and even contain
+# "Merge branch 'main'" commits, so a "v${VLLM_VERSION}_fix..pr" range replays hundreds of
+# unrelated main commits and aborts on an empty/merge commit. The net diff carries only the
+# PR's own changes, so it stays small and stable regardless of how the branch is rebased.
+#   #44483: illegal memory access during a partial wake_up (sleep mode).
+#   #45589: FlashInfer-TRTLLM MoE load OOM.
+RUN git clone https://github.com/vllm-project/vllm.git && cd vllm && \
+    git checkout v${VLLM_VERSION} && \
+    curl -fsSL https://github.com/vllm-project/vllm/pull/44483.diff -o /tmp/vllm-pr-44483.diff && \
+    git apply --3way --whitespace=nowarn /tmp/vllm-pr-44483.diff && \
+    curl -fsSL https://github.com/vllm-project/vllm/pull/45589.diff -o /tmp/vllm-pr-45589.diff && \
+    git apply --3way --whitespace=nowarn /tmp/vllm-pr-45589.diff && \
+    MAX_JOBS=256 pip install -e .
 
 RUN pip3 install --no-deps trl==${TRL_VERSION}
 
