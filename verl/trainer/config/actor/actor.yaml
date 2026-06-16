@@ -75,17 +75,22 @@ policy_loss:
   # KL divergence penalty coefficient
   ppo_kl_coef: 0.1
 
-  # CPPO (cppo.pdf). Only consumed when loss_mode == "cppo". The token-level threshold
-  # delta is read from actor.clip_ratio (same convention as DPPO). These add the
-  # position weight and the cumulative prefix budget.
+  # CPPO (cppo.pdf) parameters, grouped under this section. Only consumed when
+  # loss_mode == "cppo". The token-level threshold delta is read from actor.clip_ratio
+  # (same convention as DPPO); these add the position weight and the cumulative prefix budget.
   cppo:
+
     # Weight floor of the linear position schedule w_t in [cppo_w_min, 1] (paper default 0.8)
     cppo_w_min: 0.8
+
     # Floor delta_b_min of the per-sequence dynamic budget
     # delta_b = clamp(cppo_delta_b_k * quantile(D_t, cppo_delta_b_q), delta_b, 2*delta_b) (paper Eq. 22)
     cppo_delta_b: 0.02
-    # Quantile and scale of the budget calibration; (0.9, 1.0) = paper P90, e.g. (0.95, 0.5) = half the 95th pct
+
+    # Quantile of the per-sequence divergence used to calibrate the budget (0.9 = paper P90)
     cppo_delta_b_q: 0.9
+
+    # Scale applied to that quantile; e.g. (cppo_delta_b_q, cppo_delta_b_k)=(0.95, 0.5) = half the 95th pct
     cppo_delta_b_k: 1.0
 
 # Constant C in Dual-clip PPO; clips when advantage < 0 and ratio > C
