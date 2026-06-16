@@ -186,7 +186,9 @@ def _qwen3_sparse_moe_routed_forward_npu(self, hidden_states: torch.Tensor):
         w3 = torch.stack(down_weight_list).transpose(1, 2).to(input_dtype)
 
     permuted_tokens, row_ids_map = torch_npu.npu_moe_token_permute(hidden_states, selected_experts.to(torch.int32))
-    num_experts = getattr(self, "num_experts", getattr(self.experts, "num_experts", getattr(self.gate, "out_features", None)))
+    num_experts = getattr(
+        self, "num_experts", getattr(self.experts, "num_experts", getattr(self.gate, "out_features", None))
+    )
     if num_experts is None:
         num_experts = self.gate.weight.shape[0]
     tokens_per_expert = torch.histc(selected_experts, bins=num_experts, min=0, max=num_experts)
