@@ -765,6 +765,14 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             await self.rollout.resume(tags=["weights"])
         log_gpu_memory_usage("After resume weights", logger=logger)
 
+        # Flush the PyTorch allocator cache before state_dict. The cache can hold
+        # several GB of "reserved but unallocated" memory in fragmented blocks.
+        # With expandable_segments=False the FSDP all-gather + clone needs a
+        # contiguous block equal to the largest per-layer flat_param (~4 GB for
+        # a 70B model), which fails when only the cache fragments are available.
+        # Releasing the cache back to CUDA first gives the allocator a clean run.
+        aggressive_empty_cache(force_sync=False)
+
         # 2. determine if we need a base weight sync (adapter path only)
         per_tensor_param, peft_config = self.actor.engine.get_per_tensor_param(
             layered_summon=self.layered_summon, base_sync_done=True
