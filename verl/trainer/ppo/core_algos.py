@@ -1602,17 +1602,14 @@ def compute_policy_loss_cppo(
 
     pl = config.policy_loss
     cppo = pl.cppo
-    # delta: token-level threshold scale, shared with DPPO via clip_ratio (paper Sec. 4.1).
+    # Note: like DPPO, the token-level threshold delta is read from clip_ratio (paper Sec. 4.1).
     delta = float(config.clip_ratio)
-    # w_min: weight floor of the linear position schedule (paper default 0.8).
+    # Weight floor of the linear position schedule (paper default 0.8).
     w_min = float(cppo.get("cppo_w_min", 0.8))
-    # delta_b: floor of the per-sequence dynamic prefix-average budget delta_b_min (paper Eq. 22).
+    # Floor of the per-sequence dynamic prefix-average budget delta_b_min (paper Eq. 22).
     delta_b = float(cppo.get("cppo_delta_b", 0.02))
-    # delta_b_q: quantile of the per-sequence divergence used to calibrate the budget (Eq. 22
-    # uses the 90th percentile). delta_b_k: scale applied to that quantile. Together they give
-    #   delta_b^seq = clamp(delta_b_k * quantile(D, delta_b_q), delta_b, 2 * delta_b),
-    # so e.g. (q=0.95, k=0.5) calibrates from half the 95th percentile. Defaults (0.9, 1.0)
-    # reproduce the paper's P90 calibration.
+    # Quantile and scale of the budget calibration; see Eq. 22 in the docstring. Defaults
+    # (0.9, 1.0) reproduce the paper's P90 calibration.
     delta_b_q = float(cppo.get("cppo_delta_b_q", 0.9))
     delta_b_k = float(cppo.get("cppo_delta_b_k", 1.0))
     assert 0.0 < w_min <= 1.0, f"cppo.cppo_w_min must be in (0, 1]; got {w_min}."
@@ -1621,6 +1618,7 @@ def compute_policy_loss_cppo(
     assert delta_b_k >= 0.0, f"cppo.cppo_delta_b_k must be >= 0; got {delta_b_k}."
 
     negative_approx_kl = log_prob - old_log_prob
+    # Clamp negative_approx_kl for stability
     negative_approx_kl = torch.clamp(negative_approx_kl, min=-20.0, max=20.0)
     ratio = torch.exp(negative_approx_kl)
     ppo_kl = verl_F.masked_mean(-negative_approx_kl, response_mask)
@@ -1630,7 +1628,7 @@ def compute_policy_loss_cppo(
     truncated_ratio = torch.clamp(ratio, max=clip_ratio_c)
     truncated_ratio = truncated_ratio.detach()
 
-    # ── CPPO mask construction (no_grad: it is a trust-region gate, not part of the loss) ──
+    # Construct the CPPO mask under no_grad: it is a trust-region gate, not part of the loss.
     with torch.no_grad():
         response_mask_f = response_mask.float()
 
@@ -1640,7 +1638,7 @@ def compute_policy_loss_cppo(
         D_t = (prob - old_prob).abs() * response_mask_f
 
         # Position weight w_t in [w_min, 1], decreasing along the response (Eq. 9):
-        #   w_t = w_min + (1 - w_min) * (T - t) / (T - 1)  ==  1 - (1 - w_min) / (T - 1) * (t - 1)
+        #   w_t = w_min + (1 - w_min) * (T - t) / (T - 1)
         # T is the (padded) response length and t is the 1-based absolute token position. This
         # matches the reference CPPO implementation, which keys the schedule on the fixed padded
         # length rather than each sequence's valid length; responses are right-padded, so padded
@@ -1651,7 +1649,8 @@ def compute_policy_loss_cppo(
         frac = ((T_fixed - pos) / max(T_fixed - 1.0, 1.0)).clamp(0.0, 1.0)
         w_t = (w_min + (1.0 - w_min) * frac) * response_mask_f
 
-        Z_t = w_t * D_t  # weighted divergence
+        # Weighted divergence Z_t = w_t * D_t.
+        Z_t = w_t * D_t
 
         # Prefix sums with one-token right shift so the decision at t uses only the
         # preceding prefix (S_{t-1}, W_{t-1}); S_0 = W_0 = 0 (Appendix D batched form).
@@ -1662,7 +1661,6 @@ def compute_policy_loss_cppo(
 
         # Per-sequence dynamic prefix budget (Eq. 22):
         #   delta_b^seq = clamp(delta_b_k * quantile(D, delta_b_q), delta_b, 2 * delta_b).
-        # delta_b_q / delta_b_k default to (0.9, 1.0) = the paper's P90 calibration.
         D_for_q = torch.where(response_mask_f.bool(), D_t, torch.full_like(D_t, float("nan")))
         q_seq = torch.nanquantile(D_for_q, q=delta_b_q, dim=-1)  # (B,)
         # Empty sequence -> NaN -> fall back to the floor.
@@ -1672,15 +1670,15 @@ def compute_policy_loss_cppo(
         # Effective threshold c_t = min(delta, delta + delta_b * W_{t-1} - S_{t-1}) (Eq. 8).
         c_t = (delta + delta_b_seq * W_prev - S_prev).clamp(max=delta)
 
-        # I_t: budget feasibility. Keep tokens moving pi back toward mu unconditionally,
-        # otherwise only if within the effective threshold (Eq. 10).
+        # Keep tokens moving pi back toward mu unconditionally, otherwise only if within
+        # the effective threshold (Eq. 10).
         feasible = Z_t <= c_t
         toward_mu = (advantages * (ratio - 1.0)) <= 0.0
         valid_mask = (toward_mu | feasible).detach().float() * response_mask_f
 
     pg_losses = -advantages * truncated_ratio * log_prob * valid_mask
 
-    # Apply rollout correction weights if provided.
+    # Apply rollout correction weights if provided
     if rollout_is_weights is not None:
         pg_losses = pg_losses * rollout_is_weights
 
