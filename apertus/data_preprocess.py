@@ -67,7 +67,7 @@ class DatasetConfig:
     subject_key: str | None = None
     solution_key: str | None = None
     shuffle_choices: bool = False
-    enable_thinking: bool = False
+    enable_thinking: float = 0.0  # 0.0 means never enable, 1.0 means always enable
     tool_selection: tuple[str, ...] = ()
 
 
@@ -82,7 +82,7 @@ TRAIN_DATASETS = [
         answer_key="answer",
         subject_key="domain",
         sample_size=50_000,
-        enable_thinking=False,
+        enable_thinking=0.0,
         tool_selection=("display_answers",),
     ),
     DatasetConfig(
@@ -96,7 +96,7 @@ TRAIN_DATASETS = [
         solution_key="r1_solution_1",
         subject_key="topic",
         sample_size=50_000,
-        enable_thinking=False,
+        enable_thinking=0.0,
         tool_selection=("display_answers",),
     ),
     DatasetConfig(
@@ -161,7 +161,7 @@ TRAIN_DATASETS = [
         question_key="question",
         choices_key="choices",
         answer_key="answerKey",
-        enable_thinking=False,
+        enable_thinking=0.0,
         tool_selection=("display_answers",),
     ),
     DatasetConfig(
@@ -175,7 +175,7 @@ TRAIN_DATASETS = [
         choices_key="choices",
         answer_key="gold",
         subject_key="area",
-        enable_thinking=False,
+        enable_thinking=0.0,
         tool_selection=("display_answers",),
     ),
     DatasetConfig(
@@ -229,7 +229,7 @@ TRAIN_DATASETS = [
         split="train",
         adapter="tools",
         data_source="tool_gym",
-        enable_thinking=False,
+        enable_thinking=0.0,
         # tool_selection is done in the adapter
     ),
 ]
@@ -254,7 +254,7 @@ EVAL_DATASETS = [
         question_key="question",
         answer_key="answer",
         sample_size=100,
-        enable_thinking=False,
+        enable_thinking=0.0,
         tool_selection=("display_answers",),
     ),
     DatasetConfig(
@@ -268,7 +268,7 @@ EVAL_DATASETS = [
         subject_key="subject",
         solution_key="solution",
         sample_size=50,
-        enable_thinking=False,
+        enable_thinking=0.0,
         tool_selection=("display_answers",),
     ),
     DatasetConfig(
@@ -280,7 +280,7 @@ EVAL_DATASETS = [
         question_key="problem",
         answer_key="answer",
         solution_key="solution",
-        enable_thinking=False,
+        enable_thinking=0.0,
         tool_selection=("display_answers",),
     ),
     DatasetConfig(
@@ -291,7 +291,7 @@ EVAL_DATASETS = [
         data_source="aime2025",
         question_key="problem",
         answer_key="answer",
-        enable_thinking=False,
+        enable_thinking=0.0,
         tool_selection=("display_answers",),
     ),
     DatasetConfig(
@@ -305,7 +305,7 @@ EVAL_DATASETS = [
         answer_key="Correct Answer",
         shuffle_choices=True,
         sample_size=100,
-        enable_thinking=False,
+        enable_thinking=0.0,
         tool_selection=("display_answers",),
     ),
     DatasetConfig(
@@ -320,7 +320,7 @@ EVAL_DATASETS = [
         answer_key="answer",
         subject_key="subject",
         sample_size=100,
-        enable_thinking=False,
+        enable_thinking=0.0,
         tool_selection=("display_answers",),
     ),
     DatasetConfig(
@@ -360,7 +360,7 @@ EVAL_DATASETS = [
         split="train",
         adapter="tools",
         data_source="tool_gym",
-        enable_thinking=False,
+        enable_thinking=0.0,
         # tool_selection is done in the adapter
     ),
 ]
@@ -447,10 +447,20 @@ def maybe_strip_rgym_format_instructions(
     return normalized
 
 
+def should_enable_thinking(config: DatasetConfig) -> bool:
+    if not 0.0 <= config.enable_thinking <= 1.0:
+        raise ValueError(
+            f"enable_thinking must be between 0.0 and 1.0, got {config.enable_thinking}"
+        )
+    return random.random() < config.enable_thinking
+
+
 def prompt_controls(config: DatasetConfig) -> dict[str, Any]:
     controls = {
         "tool_selection": list(config.tool_selection),
-        "apply_chat_template_kwargs": {"enable_thinking": config.enable_thinking},
+        "apply_chat_template_kwargs": {
+            "enable_thinking": should_enable_thinking(config)
+        },
     }
     # if "display_answers" in config.tool_selection:
     #     controls["sampling_params"] = {"ebnf": DISPLAY_ANSWERS_EBNF}
@@ -625,7 +635,10 @@ def adapt_tools(
     example: dict[str, Any], idx: int, split: str, config: DatasetConfig
 ) -> dict[str, Any]:
     row = dict(example)
-    extra_info = {**prompt_controls(config), **dict(row.get("extra_info") or {})}
+    extra_info = {
+        **prompt_controls(config),
+        **dict(row.get("extra_info") or {}),
+    }
     extra_info.update({"index": idx, "question": row["prompt"][-1]["content"]})
     reward_model = dict(row.get("reward_model") or {})
     ground_truth = reward_model.get("ground_truth")
