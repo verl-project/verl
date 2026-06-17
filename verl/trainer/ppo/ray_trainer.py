@@ -1090,6 +1090,23 @@ class RayPPOTrainer:
         )
         metrics.update(global_balance_stats)
 
+    def _model_output_shift(self) -> int:
+        """Return the slice offset for `no_padding_2_padding` given the
+        worker backend.
+
+        * shift=-1 (legacy "predict-next"): model emits log P(token[i+1]) at
+          slot i, so we shift left by one when extracting the response.
+        * shift=0 (response-aligned): the model output already lines up with
+          the response token at each slot (used by Arctic's zorro fast path,
+          which extracts logits-that-predict-response inside the patcher).
+        """
+        # newshape PR #6 routes zorro config under `remote_backend.zorro_train.enable`
+        # (rl_share_v0.7.1 per-backend yaml layout) instead of legacy `arctic_rl.use_zorro`.
+        backend_cfg = self.config.get("remote_backend", None) if hasattr(self.config, "get") else None
+        zorro_cfg = backend_cfg.get("zorro_train", None) if backend_cfg is not None else None
+        use_zorro = bool(zorro_cfg.get("enable", False)) if zorro_cfg is not None else False
+        return 0 if use_zorro else -1
+
     def _compute_values(self, batch: DataProto) -> DataProto:
         if self.use_legacy_worker_impl == "disable":
             batch_td = batch.to_tensordict()
@@ -1125,7 +1142,7 @@ class RayPPOTrainer:
             # gather output
             log_probs = tu.get(output, "log_probs")
             # step 4. No padding to padding
-            log_probs = no_padding_2_padding(log_probs, batch_td)
+            log_probs = no_padding_2_padding(log_probs, batch_td, shift=self._model_output_shift())
             # step 5: rebuild a tensordict and convert to dataproto
             ref_log_prob = tu.get_tensordict({"ref_log_prob": log_probs.float()})
             ref_log_prob = DataProto.from_tensordict(ref_log_prob)
@@ -1150,8 +1167,9 @@ class RayPPOTrainer:
             routed_experts = tu.get(output, "routed_experts")
             old_log_prob_mfu = tu.get(output, "metrics")["mfu"]
             # step 4. No padding to padding
-            entropy = no_padding_2_padding(entropy, batch_td)
-            log_probs = no_padding_2_padding(log_probs, batch_td)
+            shift = self._model_output_shift()
+            entropy = no_padding_2_padding(entropy, batch_td, shift=shift)
+            log_probs = no_padding_2_padding(log_probs, batch_td, shift=shift)
             # step 5: rebuild a tensordict and convert to dataproto
             if routed_experts is not None:
                 old_log_prob = tu.get_tensordict(
