@@ -15,8 +15,8 @@ import os
 from typing import Any
 
 import torch
-from arctic_training.rl import ArcticRLClientConfig, create_arctic_rl_client
-from arctic_training.rl.ray_server import ArcticRLRayServerState
+from arctic_platform.rl import ArcticRLClientConfig, create_arctic_rl_client
+from arctic_platform.rl.ray_server import ArcticRLRayServerState
 from transformers import AutoTokenizer
 
 from verl.remote_backend.base import RemoteBackend, RemoteBackendRegistry
@@ -72,23 +72,25 @@ def _no_padding_2_padding_prompt_response(tensor: torch.Tensor, data, pad_token_
     return torch.stack(rows, dim=0), max_prompt_len, max_response_len
 
 
-def _prepare_padded_arctic_batch_dict(data, pad_token_id):
-    """Convert verl's nested-jagged ``input_ids`` / ``position_ids`` into
-    the dense padded shape Arctic expects on the wire, and report the
-    max prompt / response lengths."""
+def _prepare_padded_arctic_batch_dict(data, pad_token_id, *, drop_position_ids: bool = False):
+    """Convert verl's nested-jagged ``input_ids`` / ``position_ids`` into the dense padded shape Arctic expects on the
+    wire, and report the max prompt / response lengths. With ``drop_position_ids=True`` the server reconstructs
+    position_ids from attention_mask (set False for mrope / 3D rope)."""
     input_ids = data["input_ids"]
-    position_ids = data["position_ids"]
     input_ids, max_prompt_len, max_response_len = _no_padding_2_padding_prompt_response(
         tensor=input_ids, data=data, pad_token_id=pad_token_id
     )
-    position_ids, _, _ = _no_padding_2_padding_prompt_response(tensor=position_ids, data=data, pad_token_id=0)
 
     batch_dict = dict(
         input_ids=input_ids,
-        position_ids=position_ids,
         attention_mask=data["attention_mask"],
         prompts=data["prompts"],
     )
+    if not drop_position_ids:
+        position_ids, _, _ = _no_padding_2_padding_prompt_response(
+            tensor=data["position_ids"], data=data, pad_token_id=0
+        )
+        batch_dict["position_ids"] = position_ids
     return batch_dict, max_prompt_len, max_response_len
 
 
@@ -112,6 +114,15 @@ class ArcticRLClientWrapper(RemoteBackend):
         self._client = None
         self.zorro_train_enable = self._backend_config.zorro_train.enable
         self.zorro_train_max_rollouts = self._backend_config.zorro_train.max_rollouts
+        # Set False for non-arange position_ids (mrope / 3D rope).
+        self.drop_position_ids = self._backend_config.get("drop_position_ids", True)
+        self.logits_optimization = self._backend_config.get("logits_optimization", "none")
+        self.logits_optimization_peak_mem_size_in_gib = self._backend_config.get(
+            "logits_optimization_peak_mem_size_in_gib", 4
+        )
+        self.logits_compute_in_fp32 = self._backend_config.get("logits_compute_in_fp32", False)
+        # No server consumer yet; forwarded for forward-compat with group-balanced routing.
+        self.zorro_train_load_balancer = self._backend_config.zorro_train.get("load_balancer", True)
         # Weight-sync transport selection. CUDA-IPC bypasses the NCCL
         # all_reduce path entirely; only valid when colocate=True.
         self.cuda_ipc_weight_sync = self._backend_config.get("cuda_ipc_weight_sync", False)
@@ -185,10 +196,13 @@ class ArcticRLClientWrapper(RemoteBackend):
         temperature,
         pad_token_id: int,
     ) -> dict:
-        batch, max_prompt_len, max_response_len = _prepare_padded_arctic_batch_dict(data, pad_token_id)
+        batch, max_prompt_len, max_response_len = _prepare_padded_arctic_batch_dict(
+            data, pad_token_id, drop_position_ids=self.drop_position_ids
+        )
         meta = dict(
             zorro_train_enable=self.zorro_train_enable,
             zorro_train_max_rollouts=self.zorro_train_max_rollouts,
+            zorro_train_load_balancer=self.zorro_train_load_balancer,
             rollout_n=rollout_n,
             max_prompt_len=max_prompt_len,
             max_response_len=max_response_len,
@@ -196,6 +210,10 @@ class ArcticRLClientWrapper(RemoteBackend):
             temperature=data["temperature"],
             calculate_entropy=calculate_entropy,
             pad_token_id=pad_token_id,
+            drop_position_ids=self.drop_position_ids,
+            logits_optimization=self.logits_optimization,
+            logits_optimization_peak_mem_size_in_gib=self.logits_optimization_peak_mem_size_in_gib,
+            logits_compute_in_fp32=self.logits_compute_in_fp32,
         )
         payload = dict(batch=batch, meta=meta)
 
@@ -224,13 +242,9 @@ class ArcticRLClientWrapper(RemoteBackend):
         input_ids, max_prompt_len, max_response_len = _no_padding_2_padding_prompt_response(
             tensor=data["input_ids"], data=data, pad_token_id=pad_token_id
         )
-        position_ids, _, _ = _no_padding_2_padding_prompt_response(
-            tensor=data["position_ids"], data=data, pad_token_id=0
-        )
 
         batch = dict(
             input_ids=input_ids,
-            position_ids=position_ids,
             attention_mask=data["attention_mask"],
             prompts=data["prompts"],
             responses=data["responses"],
@@ -238,22 +252,34 @@ class ArcticRLClientWrapper(RemoteBackend):
             old_log_probs=data["old_log_probs"],
             advantages=data["advantages"],
         )
+        if not self.drop_position_ids:
+            position_ids, _, _ = _no_padding_2_padding_prompt_response(
+                tensor=data["position_ids"], data=data, pad_token_id=0
+            )
+            batch["position_ids"] = position_ids
         if actor_config.use_kl_loss:
             batch["ref_log_prob"] = data["ref_log_prob"]
 
+        # Per-chunk loss normalizers (mirror recipe/rl-correctness arctic_workers.train_global_batch).
+        per_step_global_bsz = self.config.actor_rollout_ref.actor.ppo_mini_batch_size * rollout_n
         meta = dict(
+            zorro_train_enable=self.zorro_train_enable,
+            zorro_train_max_rollouts=self.zorro_train_max_rollouts,
+            zorro_train_load_balancer=self.zorro_train_load_balancer,
             rollout_n=rollout_n,
             max_prompt_len=max_prompt_len,
             max_response_len=max_response_len,
             max_token_len_per_gpu=self._max_token_len_per_gpu,
             temperature=data["temperature"],
-            zorro_train_enable=self.zorro_train_enable,
-            zorro_train_max_rollouts=self.zorro_train_max_rollouts,
-            global_batch_size=data["global_batch_size"],
-            rollout_is_weights=data.get("rollout_is_weights", None),
-            batch_num_tokens=data["loss_mask"].sum(),
             calculate_entropy=actor_config.calculate_entropy,
             pad_token_id=pad_token_id,
+            drop_position_ids=self.drop_position_ids,
+            logits_optimization=self.logits_optimization,
+            logits_optimization_peak_mem_size_in_gib=self.logits_optimization_peak_mem_size_in_gib,
+            logits_compute_in_fp32=self.logits_compute_in_fp32,
+            global_batch_size=per_step_global_bsz,
+            batch_num_tokens=batch["response_mask"].sum(),
+            rollout_is_weights=data.get("rollout_is_weights", None),
         )
 
         def _safe_serialize(obj):
@@ -328,6 +354,10 @@ class ArcticRLClientWrapper(RemoteBackend):
                 temperature=self.config.actor_rollout_ref.rollout.temperature,
                 tiled_logits_compute=self._backend_config.get("tiled_logits_compute", True),
                 use_unpad=use_unpad,
+                # Server reads these from ds_worker_config (arctic_platform/rl/deepspeed_worker.py), not per-call meta.
+                logits_optimization=self.logits_optimization,
+                logits_optimization_peak_mem_size_in_gib=self.logits_optimization_peak_mem_size_in_gib,
+                logits_compute_in_fp32=self.logits_compute_in_fp32,
             )
 
         return ds_worker_config
@@ -412,12 +442,12 @@ class ArcticRLClientWrapper(RemoteBackend):
     }
 
     async def generate(self, prompt_ids, sampling_params, routing_key=None) -> list:
+        # `routing_key` kept for caller-API compat; arctic_platform.rl handles routing internally.
         prompts = [self.tokenizer.decode(prompt_ids)]
         merged_params = {**self._default_sampling_params, **sampling_params}
         return await self._client.generate(
             prompts=prompts,
             sampling_params=merged_params,
-            routing_key=routing_key,
         )
 
     # ------------------------------------------------------------------ #
