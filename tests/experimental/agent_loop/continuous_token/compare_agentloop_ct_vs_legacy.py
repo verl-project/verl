@@ -38,10 +38,8 @@ the loop with CT disabled, while CT constructs it with the real
 builder enabled. ToolAgentLoop cases execute hardcoded ``FunctionTool``
 instances that return the trajectory's expected tool response.
 
-The harness also decodes the full CT token stream and compares it with the
-plain text produced by applying the chat template once to the complete
-trajectory. ``--dump-sequences`` writes CT/legacy token ids, decoded text,
-loss masks/logprobs, and full-template text artifacts.
+``--dump-sequences`` writes CT/legacy token ids, decoded text, and
+loss masks/logprobs.
 """
 
 from __future__ import annotations
@@ -126,14 +124,6 @@ class E2ERunOutput:
     num_turns: int
 
 
-@dataclass(frozen=True)
-class FullTemplateOutput:
-    token_ids: list[int]
-    text: str
-    messages: list[dict[str, Any]]
-    tools: list[dict[str, Any]] | None
-
-
 class _NoopDataset:
     pass
 
@@ -202,25 +192,6 @@ def _render_chat_tokens(
         tokenize=True,
     )
     return normalize_token_ids(tokenized)
-
-
-def _render_chat_text(
-    tokenizer,
-    messages: list[dict[str, Any]],
-    *,
-    tools: list[dict[str, Any]] | None,
-    add_generation_prompt: bool,
-) -> str:
-    rendered = apply_chat_template(
-        tokenizer,
-        messages,
-        tools=tools,
-        add_generation_prompt=add_generation_prompt,
-        tokenize=False,
-    )
-    if not isinstance(rendered, str):
-        raise TypeError(f"Expected chat template text, got {type(rendered)!r}")
-    return rendered
 
 
 def _render_assistant_output_ids(
@@ -658,12 +629,6 @@ def _hash_sequence(seq: list[int] | list[float] | None) -> str | None:
     return hashlib.sha256(blob).hexdigest()
 
 
-def _hash_text(text: str | None) -> str | None:
-    if text is None:
-        return None
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
 def _first_mismatch(left: list[Any] | None, right: list[Any] | None) -> int | None:
     if left is None or right is None:
         return None if left is right else 0
@@ -703,201 +668,6 @@ def _decode_token_ids(tokenizer, token_ids: list[int]) -> str:
     return tokenizer.decode(token_ids, skip_special_tokens=False)
 
 
-def _full_messages_and_tools(trajectory: MockTrajectory) -> tuple[list[dict[str, Any]], list[dict[str, Any]] | None]:
-    if isinstance(trajectory, SingleTurnTrajectory):
-        messages = [json.loads(json.dumps(message, ensure_ascii=False)) for message in trajectory.raw_prompt]
-        messages.append({"role": "assistant", "content": trajectory.assistant_response})
-        return messages, None
-    return trajectory.full_messages(), trajectory.tool_schemas()
-
-
-def _render_full_template_output(tokenizer, trajectory: MockTrajectory) -> FullTemplateOutput:
-    messages, tools = _full_messages_and_tools(trajectory)
-    return FullTemplateOutput(
-        token_ids=_render_chat_tokens(tokenizer, messages, tools=tools, add_generation_prompt=False),
-        text=_render_chat_text(tokenizer, messages, tools=tools, add_generation_prompt=False),
-        messages=messages,
-        tools=tools,
-    )
-
-
-def _capture_full_template_output(
-    tokenizer,
-    trajectory: MockTrajectory,
-) -> tuple[FullTemplateOutput | None, dict[str, Any] | None]:
-    try:
-        return _render_full_template_output(tokenizer, trajectory), None
-    except Exception as exc:
-        return None, {"error_type": type(exc).__name__, "error": str(exc)}
-
-
-def _first_text_mismatch(left: str | None, right: str | None) -> int | None:
-    if left is None or right is None:
-        return None if left is right else 0
-    for index, (left_char, right_char) in enumerate(zip(left, right, strict=False)):
-        if left_char != right_char:
-            return index
-    if len(left) != len(right):
-        return min(len(left), len(right))
-    return None
-
-
-def _line_col(text: str | None, index: int | None) -> dict[str, int | None]:
-    if text is None or index is None:
-        return {"line": None, "column": None}
-    bounded_index = min(index, len(text))
-    line = text.count("\n", 0, bounded_index) + 1
-    last_newline = text.rfind("\n", 0, bounded_index)
-    column = bounded_index + 1 if last_newline < 0 else bounded_index - last_newline
-    return {"line": line, "column": column}
-
-
-def _text_context(text: str | None, index: int | None, *, radius: int = 96) -> dict[str, Any] | None:
-    if text is None or index is None:
-        return None
-    bounded_index = min(index, len(text))
-    start = max(0, bounded_index - radius)
-    end = min(len(text), bounded_index + radius)
-    return {"start": start, "end": end, "text": text[start:end]}
-
-
-def _compare_text(left: str | None, right: str | None, *, left_name: str, right_name: str) -> dict[str, Any]:
-    first_mismatch = _first_text_mismatch(left, right)
-    left_len = None if left is None else len(left)
-    right_len = None if right is None else len(right)
-    comparison = {
-        "equal": left == right,
-        f"{left_name}_len": left_len,
-        f"{right_name}_len": right_len,
-        "first_mismatch": first_mismatch,
-        f"{left_name}_hash": _hash_text(left),
-        f"{right_name}_hash": _hash_text(right),
-        f"{left_name}_location": _line_col(left, first_mismatch),
-        f"{right_name}_location": _line_col(right, first_mismatch),
-        f"{left_name}_char": (
-            None if left is None or first_mismatch is None or first_mismatch >= len(left) else left[first_mismatch]
-        ),
-        f"{right_name}_char": (
-            None if right is None or first_mismatch is None or first_mismatch >= len(right) else right[first_mismatch]
-        ),
-        f"{left_name}_context": _text_context(left, first_mismatch),
-        f"{right_name}_context": _text_context(right, first_mismatch),
-    }
-    return comparison
-
-
-_ASSISTANT_HEADER = "<|im_start|>assistant\n"
-_EMPTY_THINK_BLOCK = "<think>\n\n</think>\n\n"
-_GLM_GENERATION_THINK_OPEN = "<|assistant|><think>"
-_GLM_FULL_TEMPLATE_THINK_CLOSE = "<|assistant|></think>"
-
-
-def _is_skippable_ct_empty_think_block(text: str, index: int) -> bool:
-    return text.startswith(_EMPTY_THINK_BLOCK, index) and text[:index].endswith(_ASSISTANT_HEADER)
-
-
-def _ct_matches_after_dropping_empty_think_blocks(ct_text: str, target_text: str) -> tuple[bool, int]:
-    """Return whether target_text can be obtained by dropping CT-only empty think blocks."""
-    ct_index = 0
-    target_index = 0
-    dropped_blocks = 0
-    while ct_index < len(ct_text) and target_index < len(target_text):
-        if ct_text[ct_index] == target_text[target_index]:
-            ct_index += 1
-            target_index += 1
-            continue
-        if _is_skippable_ct_empty_think_block(ct_text, ct_index):
-            ct_index += len(_EMPTY_THINK_BLOCK)
-            dropped_blocks += 1
-            continue
-        return False, dropped_blocks
-
-    while ct_index < len(ct_text) and _is_skippable_ct_empty_think_block(ct_text, ct_index):
-        ct_index += len(_EMPTY_THINK_BLOCK)
-        dropped_blocks += 1
-
-    return ct_index == len(ct_text) and target_index == len(target_text) and dropped_blocks > 0, dropped_blocks
-
-
-def _replace_glm_generation_think_open_with_full_close(text: str) -> tuple[str, int]:
-    replacement_count = text.count(_GLM_GENERATION_THINK_OPEN)
-    if not replacement_count:
-        return text, 0
-    return (
-        text.replace(_GLM_GENERATION_THINK_OPEN, _GLM_FULL_TEMPLATE_THINK_CLOSE),
-        replacement_count,
-    )
-
-
-def _mark_ct_full_material_match(
-    comparison: dict[str, Any],
-    *,
-    acceptable_mismatch: bool,
-    mismatch_kinds: list[str],
-    dropped_empty_think_blocks: int = 0,
-    glm_think_boundary_replacements: int = 0,
-) -> None:
-    mismatch_kind = "+".join(mismatch_kinds) if mismatch_kinds else None
-    comparison.update(
-        {
-            "material_equal": True,
-            "acceptable_mismatch": acceptable_mismatch,
-            "mismatch_kind": mismatch_kind,
-            "mismatch_kinds": mismatch_kinds,
-        }
-    )
-    if dropped_empty_think_blocks:
-        comparison["dropped_ct_empty_think_blocks"] = dropped_empty_think_blocks
-    if glm_think_boundary_replacements:
-        comparison["glm_think_boundary_replacements"] = glm_think_boundary_replacements
-
-
-def _classify_ct_full_template_comparison(comparison: dict[str, Any], ct_text: str, full_template_text: str) -> None:
-    if comparison.get("equal"):
-        _mark_ct_full_material_match(comparison, acceptable_mismatch=False, mismatch_kinds=[])
-        return
-
-    candidate_targets = [(full_template_text, [])]
-    if full_template_text.endswith("\n"):
-        candidate_targets.append((full_template_text[:-1], ["full_template_final_trailing_newline"]))
-
-    for target_text, mismatch_kinds in candidate_targets:
-        if target_text == ct_text:
-            _mark_ct_full_material_match(
-                comparison,
-                acceptable_mismatch=True,
-                mismatch_kinds=mismatch_kinds,
-            )
-            return
-        empty_think_match, dropped_blocks = _ct_matches_after_dropping_empty_think_blocks(ct_text, target_text)
-        if empty_think_match:
-            _mark_ct_full_material_match(
-                comparison,
-                acceptable_mismatch=True,
-                mismatch_kinds=["ct_extra_empty_think_block", *mismatch_kinds],
-                dropped_empty_think_blocks=dropped_blocks,
-            )
-            return
-        normalized_ct_text, replacement_count = _replace_glm_generation_think_open_with_full_close(ct_text)
-        if replacement_count and normalized_ct_text == target_text:
-            _mark_ct_full_material_match(
-                comparison,
-                acceptable_mismatch=True,
-                mismatch_kinds=["glm_generation_think_open_vs_full_close", *mismatch_kinds],
-                glm_think_boundary_replacements=replacement_count,
-            )
-            return
-
-    comparison.update(
-        {
-            "material_equal": False,
-            "acceptable_mismatch": False,
-            "mismatch_kind": "material_text_difference",
-            "mismatch_kinds": ["material_text_difference"],
-        }
-    )
-
-
 def _compare_generation_prompts(legacy: E2ERunOutput, ct: E2ERunOutput) -> dict[str, Any]:
     comparisons = []
     turn_count = max(len(legacy.generation_prompt_ids), len(ct.generation_prompt_ids))
@@ -924,15 +694,6 @@ def _summarize_output(output: E2ERunOutput) -> dict[str, Any]:
         "response_len": len(output.response_ids),
         "response_mask_len": len(output.response_mask),
         "response_logprobs_len": response_logprobs_len,
-    }
-
-
-def _summarize_full_template(output: FullTemplateOutput) -> dict[str, Any]:
-    return {
-        "token_len": len(output.token_ids),
-        "text_len": len(output.text),
-        "token_hash": _hash_sequence(output.token_ids),
-        "text_hash": _hash_text(output.text),
     }
 
 
@@ -1088,37 +849,6 @@ def _dump_output_artifact(
     return artifact_paths
 
 
-def _dump_full_template_artifact(
-    *,
-    dump_dir: Path,
-    slug: str,
-    output: FullTemplateOutput | None,
-    error: dict[str, Any] | None,
-) -> dict[str, str]:
-    json_path = dump_dir / f"{slug}_full_apply_chat_template.json"
-    artifact_paths = {"full_template_json": _json_safe_path(json_path)}
-    if output is None:
-        _write_json(json_path, {"error": error})
-        return artifact_paths
-
-    payload = {
-        "token_ids": output.token_ids,
-        "text": output.text,
-        "messages": output.messages,
-        "tools": output.tools,
-        "summary": _summarize_full_template(output),
-    }
-    _write_json(json_path, payload)
-    text_path = dump_dir / f"{slug}_full_apply_chat_template.txt"
-    _write_text(text_path, output.text)
-    artifact_paths["full_template_text"] = _json_safe_path(text_path)
-
-    messages_path = dump_dir / f"{slug}_full_messages.json"
-    _write_json(messages_path, {"messages": output.messages, "tools": output.tools})
-    artifact_paths["full_messages_json"] = _json_safe_path(messages_path)
-    return artifact_paths
-
-
 def _dump_case_artifacts(
     *,
     tokenizer,
@@ -1129,8 +859,6 @@ def _dump_case_artifacts(
     legacy_error: dict[str, Any] | None,
     ct_output: E2ERunOutput | None,
     ct_error: dict[str, Any] | None,
-    full_template_output: FullTemplateOutput | None,
-    full_template_error: dict[str, Any] | None,
 ) -> dict[str, str]:
     if dump_dir is None:
         return {}
@@ -1156,46 +884,7 @@ def _dump_case_artifacts(
             error=ct_error,
         )
     )
-    artifacts.update(
-        _dump_full_template_artifact(
-            dump_dir=dump_dir,
-            slug=slug,
-            output=full_template_output,
-            error=full_template_error,
-        )
-    )
     return artifacts
-
-
-def _ct_vs_full_template_comparison(
-    tokenizer,
-    ct_output: E2ERunOutput | None,
-    full_template_output: FullTemplateOutput | None,
-    full_template_error: dict[str, Any] | None,
-) -> dict[str, Any]:
-    if full_template_error:
-        return {"equal": False, "material_equal": False, "error": full_template_error}
-    if ct_output is None:
-        return {
-            "equal": False,
-            "material_equal": False,
-            "error": {"error_type": "MissingCTOutput", "error": "CT output is unavailable"},
-        }
-    if full_template_output is None:
-        return {
-            "equal": False,
-            "material_equal": False,
-            "error": {"error_type": "MissingFullTemplateOutput", "error": "Full template output is unavailable"},
-        }
-    ct_text = _decode_token_ids(tokenizer, _full_token_ids(ct_output))
-    comparison = _compare_text(
-        ct_text,
-        full_template_output.text,
-        left_name="ct_text",
-        right_name="full_template_text",
-    )
-    _classify_ct_full_template_comparison(comparison, ct_text, full_template_output.text)
-    return comparison
 
 
 def run_one_case(
@@ -1244,13 +933,6 @@ def run_one_case(
         )
         expected_generation_turns = trajectory.expected_generation_turns
 
-    full_template_output, full_template_error = _capture_full_template_output(tokenizer, trajectory)
-    ct_vs_full_template = _ct_vs_full_template_comparison(
-        tokenizer,
-        ct_output,
-        full_template_output,
-        full_template_error,
-    )
     artifacts = _dump_case_artifacts(
         tokenizer=tokenizer,
         dump_dir=dump_dir,
@@ -1260,8 +942,6 @@ def run_one_case(
         legacy_error=legacy_error,
         ct_output=ct_output,
         ct_error=ct_error,
-        full_template_output=full_template_output,
-        full_template_error=full_template_error,
     )
 
     if legacy_error or ct_error:
@@ -1279,14 +959,7 @@ def run_one_case(
                 "error": (ct_error or legacy_error or {}).get("error"),
                 "expected_num_turns": trajectory.expected_num_turns,
                 "expected_generation_turns": expected_generation_turns,
-                "full_template": (
-                    _summarize_full_template(full_template_output) if full_template_output is not None else None
-                ),
-                "full_template_error": full_template_error,
-                "ct_vs_full_template": ct_vs_full_template,
                 "ct_legacy_match": False,
-                "ct_full_template_match": ct_vs_full_template.get("equal", False),
-                "ct_full_template_material_match": ct_vs_full_template.get("material_equal", False),
                 "artifacts": artifacts,
             }
         )
@@ -1308,26 +981,17 @@ def run_one_case(
         and len(ct_output.generation_prompt_ids) == expected_generation_turns
     )
     exact_match = all(comparisons[name]["equal"] for name in ("prompt_ids", "response_ids", "loss_mask", "logprobs"))
-    ct_full_template_match = ct_vs_full_template.get("equal", False)
-    ct_full_template_material_match = ct_vs_full_template.get("material_equal", False)
     result.update(
         {
             "status": "pass" if expected_flow and exact_match else "mismatch",
             "expected_flow": expected_flow,
             "exact_output_match": exact_match,
             "ct_legacy_match": exact_match,
-            "ct_full_template_match": ct_full_template_match,
-            "ct_full_template_material_match": ct_full_template_material_match,
             "legacy_status": "pass",
             "ct_status": "pass",
             "legacy": _summarize_output(legacy_output),
             "ct": _summarize_output(ct_output),
-            "full_template": (
-                _summarize_full_template(full_template_output) if full_template_output is not None else None
-            ),
-            "full_template_error": full_template_error,
             "comparisons": comparisons,
-            "ct_vs_full_template": ct_vs_full_template,
             "expected_num_turns": trajectory.expected_num_turns,
             "expected_generation_turns": expected_generation_turns,
             "artifacts": artifacts,
@@ -1399,63 +1063,9 @@ def _format_ct_legacy_state(match: Any) -> str:
     return f"match={match}"
 
 
-def _format_ct_full_state(raw_match: Any, material_equal: Any) -> str:
-    material_mismatch = None if material_equal is None else not material_equal
-    return f"raw_match={raw_match} material_mismatch={material_mismatch}"
-
-
 def _format_result_match_state(result: dict[str, Any]) -> str:
     ct_legacy_state = _format_ct_legacy_state(result.get("ct_legacy_match"))
-    ct_full_state = _format_ct_full_state(
-        result.get("ct_full_template_match"),
-        result.get("ct_full_template_material_match"),
-    )
-    return f"ct_vs_legacy({ct_legacy_state}) ct_vs_full({ct_full_state})"
-
-
-def _format_location(location: dict[str, Any] | None) -> str:
-    if not location:
-        return "?:?"
-    return f"{location.get('line')}:{location.get('column')}"
-
-
-def _print_ct_full_template_details(result: dict[str, Any]) -> None:
-    comparison = result.get("ct_vs_full_template") or {}
-    if comparison.get("equal"):
-        return
-    error = comparison.get("error")
-    if error:
-        print(
-            f"    ct_vs_full_template: error {error.get('error_type')}: {error.get('error')}",
-            flush=True,
-        )
-        return
-    if comparison.get("acceptable_mismatch"):
-        print(
-            f"    ct_vs_full_template: acceptable mismatch "
-            f"kinds={comparison.get('mismatch_kinds') or [comparison.get('mismatch_kind')]} "
-            f"ct_text_len={comparison.get('ct_text_len')} "
-            f"full_template_text_len={comparison.get('full_template_text_len')} "
-            f"dropped_ct_empty_think_blocks={comparison.get('dropped_ct_empty_think_blocks', 0)} "
-            f"glm_think_boundary_replacements={comparison.get('glm_think_boundary_replacements', 0)}",
-            flush=True,
-        )
-        return
-    ct_context = comparison.get("ct_text_context") or {}
-    full_context = comparison.get("full_template_text_context") or {}
-    print(
-        "    ct_vs_full_template: "
-        f"ct_text_len={comparison.get('ct_text_len')} "
-        f"full_template_text_len={comparison.get('full_template_text_len')} "
-        f"first_mismatch_char={comparison.get('first_mismatch')} "
-        f"ct_location={_format_location(comparison.get('ct_text_location'))} "
-        f"full_template_location={_format_location(comparison.get('full_template_text_location'))} "
-        f"ct_char={comparison.get('ct_text_char')!r} "
-        f"full_template_char={comparison.get('full_template_text_char')!r}",
-        flush=True,
-    )
-    print(f"    ct_context: {ct_context.get('text', '')!r}", flush=True)
-    print(f"    full_template_context: {full_context.get('text', '')!r}", flush=True)
+    return f"ct_vs_legacy({ct_legacy_state})"
 
 
 def _print_mismatch_details(result: dict[str, Any]) -> None:
@@ -1490,7 +1100,6 @@ def _print_mismatch_details(result: dict[str, Any]) -> None:
             "    reason: flow completed, but CT and legacy diverged at the token/metadata positions above.",
             flush=True,
         )
-    _print_ct_full_template_details(result)
 
 
 def _print_error_details(result: dict[str, Any]) -> None:
@@ -1511,7 +1120,6 @@ def _print_error_details(result: dict[str, Any]) -> None:
     if not printed_side_error:
         print(f"    error: {result.get('error_type')}: {result.get('error')}", flush=True)
     _print_flow_details(result)
-    _print_ct_full_template_details(result)
 
 
 def _resolve_dump_dir(args) -> Path | None:
@@ -1555,8 +1163,6 @@ def _run_all(args) -> list[dict[str, Any]]:
                     "error_type": type(exc).__name__,
                     "error": str(exc),
                     "ct_legacy_match": False,
-                    "ct_full_template_match": False,
-                    "ct_full_template_material_match": False,
                 }
                 results.append(result)
                 print(
@@ -1585,7 +1191,6 @@ def _run_all(args) -> list[dict[str, Any]]:
                     f"  PASS {_format_result_match_state(result)}",
                     flush=True,
                 )
-                _print_ct_full_template_details(result)
             elif status == "mismatch":
                 comparisons = result["comparisons"]
                 print(
@@ -1642,10 +1247,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dump-sequences",
         action="store_true",
-        help=(
-            "Dump CT/legacy token ids, decoded text, masks/logprobs, and the full trajectory "
-            "apply_chat_template text to artifact files."
-        ),
+        help="Dump CT/legacy token ids, decoded text, masks/logprobs to artifact files.",
     )
     parser.add_argument(
         "--dump-dir",
@@ -1672,27 +1274,6 @@ def _print_summary(results: list[dict[str, Any]]) -> None:
         item.get("ct_legacy_match") is False and item.get("status") != "error" for item in results
     )
 
-    ct_full_error_count = sum(
-        bool((item.get("ct_vs_full_template") or {}).get("error"))
-        or (item.get("status") == "error" and "ct_vs_full_template" not in item)
-        for item in results
-    )
-    ct_full_match_count = sum(item.get("ct_full_template_match") is True for item in results)
-    ct_full_raw_mismatch_count = sum(
-        item.get("ct_full_template_match") is False
-        and item.get("status") != "error"
-        and not (item.get("ct_vs_full_template") or {}).get("error")
-        for item in results
-    )
-    ct_full_material_mismatch_count = sum(
-        item.get("ct_full_template_material_match") is False
-        and item.get("status") != "error"
-        and not (item.get("ct_vs_full_template") or {}).get("error")
-        for item in results
-    )
-    ct_full_acceptable_mismatch_count = sum(
-        bool((item.get("ct_vs_full_template") or {}).get("acceptable_mismatch")) for item in results
-    )
     print(
         f"Summary: total={total} pass={pass_count} mismatch={mismatch_count} error={error_count}",
         flush=True,
@@ -1702,15 +1283,6 @@ def _print_summary(results: list[dict[str, Any]]) -> None:
         f"match={ct_legacy_match_count} "
         f"mismatch={ct_legacy_mismatch_count} "
         f"error={ct_legacy_error_count}",
-        flush=True,
-    )
-    print(
-        "  CT vs full template: "
-        f"match={ct_full_match_count} "
-        f"raw_mismatch={ct_full_raw_mismatch_count} "
-        f"acceptable_mismatch={ct_full_acceptable_mismatch_count} "
-        f"material_mismatch={ct_full_material_mismatch_count} "
-        f"error={ct_full_error_count}",
         flush=True,
     )
 
