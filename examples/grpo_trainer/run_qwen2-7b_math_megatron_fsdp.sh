@@ -97,7 +97,14 @@ TRAINER=(
 
 ########################### Launch ###########################
 
-python3 -m verl.trainer.main_ppo \
+# uv (set VERL_USE_UV=0 for system python): sync the vllm × megatron venv from the committed uv.lock, then run from it
+# without re-syncing (run from the verl repo root so uv finds pyproject / uv.lock).
+LAUNCH=(python3)
+if [ "${VERL_USE_UV:-1}" != 0 ]; then
+    uv sync --extra vllm --extra megatron --frozen
+    LAUNCH=(uv run --frozen --no-sync python3)
+fi
+"${LAUNCH[@]}" -m verl.trainer.main_ppo \
     --config-path=config \
     --config-name='ppo_megatron_trainer.yaml' \
     "${DATA[@]}" \

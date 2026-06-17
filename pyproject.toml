@@ -283,9 +283,18 @@ conflicts = [
 # Global override pins:
 #   * transformers 5.3.0 across every backend (overrides upstream `<5` caps).
 #   * numpy>=2.0.0 floor for every backend.
+#   * kernels>=0.10.2,<0.11 — sglang depends on `kernels` UNBOUNDED, so the
+#     resolver otherwise grabs the newest (0.15.x). kernels>=0.15 makes a
+#     version/revision MANDATORY for Hub-backed LayerRepository entries, which
+#     transformers 5.3.0's integrations/hub_kernels.py does not pass, so it dies
+#     at import ("Either a revision or a version must be specified"; see
+#     huggingface/transformers#46291). Pin to the exact window transformers 5.3.0
+#     itself declares for its `kernels` extra (>=0.10.2,<0.11); sglang's dep is
+#     unbounded so this satisfies it too.
 override-dependencies = [
     "transformers==5.3.0",
     "numpy>=2.0.0",
+    "kernels>=0.10.2,<0.11",
 ]
 
 # Source-build inside the venv (no isolated build env): apex / TE need to

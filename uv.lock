@@ -21,6 +21,7 @@ conflicts = [[
 
 [manifest]
 overrides = [
+    { name = "kernels", specifier = ">=0.10.2,<0.11" },
     { name = "numpy", specifier = ">=2.0.0" },
     { name = "transformers", specifier = "==5.3.0" },
 ]
@@ -1419,28 +1420,16 @@ wheels = [
 
 [[package]]
 name = "kernels"
-version = "0.15.2"
+version = "0.10.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "huggingface-hub", marker = "python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "kernels-data", marker = "python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "packaging", marker = "python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "pyyaml", marker = "python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "tomlkit", marker = "python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/85/b4/32f2aaf2e6d6b89477ecaf27b7e3aa22edfa9ccd98c705fb0a9b69773cab/kernels-0.15.2.tar.gz", hash = "sha256:5af4fab4a2d4eb67f01522dffabfdc3a4bcfc167ce68f7549c0d2828a73cbc19", size = 65065, upload-time = "2026-06-03T08:55:42.937Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a1/5a/92b08df5ba5e103c59978348fa03d2fd4d6c58573af3fdeb749f6149aca3/kernels-0.10.5.tar.gz", hash = "sha256:a4ce25eb73022b1313f2bb270b494c4679bc71088ff22252bd156d17d38d4973", size = 47493, upload-time = "2025-12-04T09:14:25.612Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a1/9d/1fc63a78fec897de35bc822dfd388985804a72040c75db811bf67dd9b8fe/kernels-0.15.2-py3-none-any.whl", hash = "sha256:2a66497d94152896b74c841089e3ee685708b8ddc21d4f4751a0505a0b693c91", size = 58698, upload-time = "2026-06-03T08:55:41.608Z" },
-]
-
-[[package]]
-name = "kernels-data"
-version = "0.15.2"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/77/2d/0c7a70c65aea2a614b75d20141b7622711dd5b000d99c4ac2ed6d06a661d/kernels_data-0.15.2.tar.gz", hash = "sha256:ebcf3c4c09a979d76ea5abf5e5132f8c055ff6afd7464510f84d65b14f5c33b9", size = 40664, upload-time = "2026-06-03T08:42:52.597Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/58/c4/68b443fcfcaf4b2f46a5c72b79a359c2927f88cdac3b6074905bf492b6bd/kernels_data-0.15.2-cp38-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:28c9a087236d3aece45c52f06db35c6926fa574f5b92a8f727e85b9fe722c399", size = 1169185, upload-time = "2026-06-03T08:42:26.455Z" },
-    { url = "https://files.pythonhosted.org/packages/7e/fc/9e9e24fcb25c333bc02af548d65d40f63c6ad0406a3d4f7bbb3785be2d0f/kernels_data-0.15.2-cp38-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:ddd627f85d05ff0b49cd88c7fcfe80f6a8b3b261bd5d38d20f4484e60c6110c2", size = 1408204, upload-time = "2026-06-03T08:42:51.456Z" },
+    { url = "https://files.pythonhosted.org/packages/36/8c/3f415326e52a52c8696f22fb112c82c65628c615c84b3b19a6a2ccac47c4/kernels-0.10.5-py3-none-any.whl", hash = "sha256:39936236c5067a0931f1f58b04478b2a36d14e7d93320092aac61d450b40ddc3", size = 40444, upload-time = "2025-12-04T09:14:24.421Z" },
 ]
 
 [[package]]
@@ -3829,15 +3818,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/33/42/7b3042e937c00b6689537ebe0f0e7129687ef27815af9e35e9c1853fb0d8/tokenspeed_triton-3.7.10.post20260531-cp310-cp310-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:186adc96af2a1565b5676ec922f61265d7febb9a4ae8a2bfe62a138a060c27b6", size = 85882529, upload-time = "2026-05-31T01:28:55.409Z" },
     { url = "https://files.pythonhosted.org/packages/5b/ce/2069485cd8b4a8d8468ab65322416de1ecd0b1d7676441b4c3a69fc8d53e/tokenspeed_triton-3.7.10.post20260531-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:52be096ddc5225c6f2345e0d090ad2b56466a85bbeb866cc11a20e0fe3dde1bf", size = 85883121, upload-time = "2026-05-31T01:29:10.452Z" },
     { url = "https://files.pythonhosted.org/packages/d7/49/7bae94729bfd7a3f331795251302f0b0c8e54a7ec25b3af5d5bfe133367c/tokenspeed_triton-3.7.10.post20260531-cp312-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:b90ac41e7f15933797545ff1a9e803a9d8beb4ca9ba70f6d41a9e0fc26484f5c", size = 85888791, upload-time = "2026-05-31T01:29:25.584Z" },
-]
-
-[[package]]
-name = "tomlkit"
-version = "0.15.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/51/db/03eaf4331631ef6b27d6e3c9b68c54dc6f0d63d87201fed600cc409307fd/tomlkit-0.15.0.tar.gz", hash = "sha256:7d1a9ecba3086638211b13814ea79c90dd54dd11993564376f3aa92271f5c7a3", size = 161875, upload-time = "2026-05-10T07:38:22.245Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/6a/43/8bd850ee71a191bf072e31302c73a66be413fecdd98fdcd111ecbcce13ca/tomlkit-0.15.0-py3-none-any.whl", hash = "sha256:4dbc8f0fc024412b57ced8757ac7461305126a648ff8c2c807fcb8e133a78738", size = 41328, upload-time = "2026-05-10T07:38:23.517Z" },
 ]
 
 [[package]]

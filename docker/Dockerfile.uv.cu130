@@ -325,6 +325,25 @@ RUN --mount=type=cache,target=/root/.cache/uv,id=verl-uv-cache \
 # nvidia-nccl-cu13, from torch's transitive pins) must match the apt debs above.
 # ---------------------------------------------------------------------------
 FROM prefetch AS final
+
+# ---------------------------------------------------------------------------
+# Runtime host compiler — gcc-13 (CUDA 13.0 supports gcc <= 15).
+#
+# `base` pins the default compiler to gcc-10 (mirrors vllm's basic stage), which
+# is fine for the prefetch source builds (apex / TransformerEngine / megatron-core
+# all compile with it). But sglang JIT-compiles its custom kernels (e.g.
+# custom_all_reduce_push) at RUNTIME in C++20, which uses std::bit_cast — a
+# libstdc++ feature that only exists in GCC >= 11. With gcc-10 as nvcc's host
+# compiler that JIT dies with `namespace "std" has no member "bit_cast"`, surfaced
+# by sglang as `Capture cuda graph failed: ninja exited with status 2`. Flip the
+# RUNTIME default to gcc-13 (already present via build-essential). This lives in
+# `final`, DOWNSTREAM of `prefetch`, so it does NOT invalidate the expensive
+# apex/TE/megatron build cache — only this cheap layer rebuilds. The trailing
+# `--version` calls fail the build loudly if gcc-13 is somehow absent.
+RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-13 130 --slave /usr/bin/g++ g++ /usr/bin/g++-13 \
+    && update-alternatives --set gcc /usr/bin/gcc-13 \
+    && gcc --version && g++ --version
+
 COPY . /workspace/verl
 ENV VIRTUAL_ENV="/workspace/verl/.venv" \
     PATH="/workspace/verl/.venv/bin:${PATH}"
