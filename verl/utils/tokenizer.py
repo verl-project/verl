@@ -179,6 +179,43 @@ def hf_tokenizer(name_or_path, correct_pad_token=True, correct_gemma2=True, **kw
     return tokenizer
 
 
+# ------------------------------------------------------------------
+# Custom processor registry
+#
+# Models listed here do not ship a standard HuggingFace
+# :class:`ProcessorMixin` subclass, so :class:`AutoProcessor` either
+# falls back to a tokenizer backend or raises.  Register the factory
+# class here; the helper below handles import + instantiation.
+# ------------------------------------------------------------------
+
+_CUSTOM_PROCESSOR_CLASSES: dict[str, str] = {
+    # model_type -> "module.path:ClassName"
+    "internvl_chat": "verl.utils.internvl_processor.InternVLProcessor",
+}
+
+
+def _maybe_load_custom_processor(model_type, name_or_path, config, tokenizer, **kwargs):
+    """Load a custom processor registered in ``_CUSTOM_PROCESSOR_CLASSES``.
+
+    Returns the processor if ``model_type`` is registered, ``None`` otherwise.
+    """
+    if model_type not in _CUSTOM_PROCESSOR_CLASSES:
+        return None
+
+    module_path, class_name = _CUSTOM_PROCESSOR_CLASSES[model_type].rsplit(".", 1)
+    from importlib import import_module
+
+    mod = import_module(module_path)
+    cls = getattr(mod, class_name)
+
+    if tokenizer is None:
+        tokenizer = hf_tokenizer(name_or_path, **kwargs)
+    return cls(tokenizer, config)
+
+
+# ------------------------------------------------------------------
+
+
 def hf_processor(name_or_path, **kwargs):
     """Create a huggingface processor to process multimodal data.
 
@@ -198,6 +235,11 @@ def hf_processor(name_or_path, **kwargs):
         # tokenizer backend (e.g. TokenizersBackend) for text-only models.
         # Treat it as "no multimodal processor" and let callers use hf_tokenizer.
         if isinstance(processor, PreTrainedTokenizerBase):
+            config = AutoConfig.from_pretrained(name_or_path, **kwargs)
+            model_type = getattr(config, "model_type", None)
+            custom = _maybe_load_custom_processor(model_type, name_or_path, config, processor, **kwargs)
+            if custom is not None:
+                return custom
             return None
 
         config = AutoConfig.from_pretrained(name_or_path, **kwargs)
@@ -235,11 +277,15 @@ def hf_processor(name_or_path, **kwargs):
             processor.get_rope_index = types.MethodType(model_class.get_rope_index, processor)
             if hasattr(model_class, "get_vision_position_ids"):
                 processor.get_vision_position_ids = types.MethodType(model_class.get_vision_position_ids, processor)
-    except Exception as e:
-        processor = None
-        # TODO(haibin.lin): try-catch should be removed after adding transformer version req to setup.py to avoid
-        # silent failure
-        warnings.warn(f"Failed to create processor: {e}. This may affect multimodal processing", stacklevel=1)
+    except Exception:
+        # AutoProcessor.from_pretrained may raise for models without a standard
+        # HF processor (e.g. InternVL).  Try the custom registry before giving up.
+        config = AutoConfig.from_pretrained(name_or_path, **kwargs)
+        model_type = getattr(config, "model_type", None)
+        custom = _maybe_load_custom_processor(model_type, name_or_path, config, None, **kwargs)
+        if custom is not None:
+            return custom
+        raise
     # Avoid load tokenizer, see:
     # https://github.com/huggingface/transformers/blob/v4.49.0/src/transformers/models/auto/processing_auto.py#L344
     if processor is not None and "Processor" not in processor.__class__.__name__:
