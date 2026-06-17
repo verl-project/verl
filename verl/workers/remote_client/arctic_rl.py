@@ -359,6 +359,7 @@ class ArcticRLClientWrapper(RemoteBackend):
         )
         ds_worker_config = dict(
             use_liger=self.use_liger,
+            enable_gradient_checkpointing=self.config.actor_rollout_ref.model.enable_gradient_checkpointing,
             attn_implementation=attn_implementation,
         )
 
