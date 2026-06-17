@@ -110,7 +110,7 @@ jobs:
           pip3 install -r requirements.txt
           pip3 install --no-deps -e .
           pip3 install cupy-cuda13x==13.6.0 pytest-asyncio
-          pip3 install --ignore-installed blinker
+          pip3 install --ignore-installed blinker mlflow
       - name: Check final pip list
         run: |
           pip3 list
