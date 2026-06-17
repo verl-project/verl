@@ -119,12 +119,14 @@ class PPOTrainerSeparateAsync(PPOTrainer):
                 self.standalone_checkpoint_manager.update_weights(self.global_steps)
 
     def switch_to_rollout(self):
+        # TODO: disable auto offload in config and offload according to the switch strategy
         self.checkpoint_manager.update_weights(self.global_steps)
         self.checkpoint_manager.resume_generation_replicas()
         self.add_replicas_to_balancer()
         self.current_mode = HybridEngineMode.ROLLOUT
 
     def switch_to_trainer(self):
+        # TODO: disable auto offload in config and offload according to the switch strategy
         self.remove_replicas_from_balancer()
         self.checkpoint_manager.abort_replicas()
         self.checkpoint_manager.sleep_replicas()
@@ -142,4 +144,5 @@ class PPOTrainerSeparateAsync(PPOTrainer):
         ray.get(global_load_balancer.remove_servers.remote(self.llm_server_manager.server_addresses))
 
     def should_switch_to_rollout(self):
+        # TODO: Implement switch strategy by checking replay buffer and switch overhead
         return False
