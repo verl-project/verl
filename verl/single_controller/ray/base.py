@@ -22,7 +22,7 @@ from typing import Any, Optional
 import numpy as np
 import ray
 from ray.experimental.state.api import get_actor
-from ray.util.placement_group import PlacementGroup, placement_group
+from ray.util.placement_group import PlacementGroup, placement_group, remove_placement_group
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy, PlacementGroupSchedulingStrategy
 
 from verl.plugin.platform import get_platform
@@ -119,6 +119,7 @@ class RayResourcePool(ResourcePool):
         max_colocate_count: int = 10,
         detached=False,
         accelerator_type: Optional[str] = None,
+        custom_resources: Optional[dict[str, float]] = None,
     ) -> None:
         super().__init__(process_on_nodes, max_colocate_count)
         self.use_gpu = use_gpu
@@ -127,6 +128,7 @@ class RayResourcePool(ResourcePool):
         self.pgs = None
         self.detached = detached
         self.accelerator_type = accelerator_type
+        self.custom_resources = custom_resources or {}
 
     def get_placement_groups(self, strategy="STRICT_PACK", name=None, device_name="cuda"):
         if self.pgs is not None:
@@ -148,6 +150,8 @@ class RayResourcePool(ResourcePool):
             bundle[device_name] = 1
             if self.accelerator_type is not None:
                 bundle[self.accelerator_type] = 1e-4
+            for resource_name, quantity in self.custom_resources.items():
+                bundle[resource_name] = quantity
         pg_scheme = [[bundle.copy() for _ in range(process_count)] for process_count in self._store]
 
         lifetime = "detached" if self.detached else None
@@ -161,6 +165,22 @@ class RayResourcePool(ResourcePool):
 
         self.pgs = sort_placement_group_by_node_ip(pgs)
         return pgs
+
+    def release_placement_groups(self) -> None:
+        """Release placement groups owned by this resource pool.
+
+        Ray placement groups reserve GPU bundles independently from the actor
+        handles that use them. Killing workers is therefore not enough for
+        phase-level resource reuse; the placement groups must be removed too.
+        """
+        if self.pgs is None:
+            return
+        for pg in self.pgs:
+            try:
+                remove_placement_group(pg)
+            except Exception:
+                logger.exception("failed to remove placement group %s", pg)
+        self.pgs = None
 
 
 class SubRayResourcePool(RayResourcePool):
@@ -190,6 +210,8 @@ class ResourcePoolManager:
     resource_pool_spec: dict[str, list[int]]
     mapping: dict[int, str]
     max_colocate_count: int = 3
+    accelerator_types: dict[str, str] = field(default_factory=dict)
+    custom_resources: dict[str, dict[str, float]] = field(default_factory=dict)
     resource_pool_dict: dict[str, RayResourcePool] = field(default_factory=dict)
 
     def create_resource_pool(self):
@@ -210,10 +232,21 @@ class ResourcePoolManager:
                 use_gpu=True,
                 max_colocate_count=self.max_colocate_count,
                 name_prefix=resource_pool_name,
+                accelerator_type=self.accelerator_types.get(resource_pool_name),
+                custom_resources=self.custom_resources.get(resource_pool_name),
             )
             self.resource_pool_dict[resource_pool_name] = resource_pool
 
         self._check_resource_available()
+
+    def release_resource_pool(self, resource_pool_name: str) -> None:
+        resource_pool = self.resource_pool_dict.pop(resource_pool_name, None)
+        if resource_pool is not None:
+            resource_pool.release_placement_groups()
+
+    def release_all_resource_pools(self) -> None:
+        for resource_pool_name in list(self.resource_pool_dict):
+            self.release_resource_pool(resource_pool_name)
 
     def get_resource_pool(self, role) -> RayResourcePool:
         """Get the resource pool of the worker_cls"""
@@ -507,6 +540,26 @@ class RayWorkerGroup(WorkerGroup):
         """
         worker_state_dict = get_actor(worker._actor_id.hex())
         return worker_state_dict.get("state", "undefined") == "ALIVE" if worker_state_dict is not None else False
+
+    def shutdown(self, *, release_resource_pool: bool = False) -> None:
+        """Kill Ray actors in this worker group and optionally release its PGs.
+
+        Spawned role-specific worker groups often share the same actors and do
+        not own a resource pool. Callers that own the pool can either pass
+        ``release_resource_pool=True`` on the root group or release the pool
+        explicitly after killing the shared workers.
+        """
+        for worker in getattr(self, "_workers", []):
+            try:
+                ray.kill(worker, no_restart=True)
+            except Exception:
+                logger.exception("failed to kill worker %s", worker)
+        self._workers = []
+        self._worker_names = []
+
+        resource_pool = getattr(self, "resource_pool", None)
+        if release_resource_pool and resource_pool is not None:
+            resource_pool.release_placement_groups()
 
     def _init_with_detached_workers(self, worker_names, worker_handles):
         # ray.get_actor holds a weak reference to the actor, which causes actors garbage collected unexpectedly

@@ -16,11 +16,17 @@ import logging
 import os
 import time
 from dataclasses import dataclass
-from typing import AsyncGenerator, Generator
+from typing import Any, AsyncGenerator, Generator
 from unittest.mock import patch
 
-with patch("importlib.metadata.distributions", return_value=[]):
-    import cupy as cp
+try:
+    with patch("importlib.metadata.distributions", return_value=[]):
+        import cupy as cp
+except Exception as exc:
+    cp = None
+    _CUPY_IMPORT_ERROR = exc
+else:
+    _CUPY_IMPORT_ERROR = None
 
 import ray
 import ray.util.collective as collective
@@ -52,7 +58,7 @@ class BroadcastOperation:
     Args:
         rank (int): The rank of the current process.
         group_name (str): The name of the NCCL process group.
-        bucket (cp.ndarray | torch.Tensor): The tensor to broadcast.
+        bucket: The tensor to broadcast.
         metadata (dict[str, TensorMeta]): The metadata of the tensor.
         socket (zmq.Socket): The zeromq socket to communicate with master.
         topic (str): The topic to subscribe.
@@ -62,7 +68,7 @@ class BroadcastOperation:
         self,
         rank: int,
         group_name: str,
-        bucket: cp.ndarray | torch.Tensor,
+        bucket: Any,
         metadata: dict[str, TensorMeta],
         socket: zmq.Socket,
         topic: str,
@@ -134,10 +140,12 @@ class NCCLCheckpointEngine(CheckpointEngine):
     def prepare(self) -> MasterMetadata:
         # For master process, use cupy instead of torch to avoid memory register error
         # when `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`.
-        if self.is_master:
+        if self.is_master and cp is not None:
             self.send_buf = cp.zeros(self.bucket_size, dtype=cp.uint8)
             self.recv_buf = cp.zeros(self.bucket_size, dtype=cp.uint8)
         else:
+            if self.is_master and cp is None:
+                logger.warning("CuPy is unavailable for NCCL buffers; falling back to torch: %s", _CUPY_IMPORT_ERROR)
             self.send_buf = torch.zeros(self.bucket_size, dtype=torch.uint8, device="cuda")
             self.recv_buf = torch.zeros(self.bucket_size, dtype=torch.uint8, device="cuda")
 

@@ -19,8 +19,10 @@ This trainer supports model-agonistic model initialization with huggingface
 """
 
 import json
+import logging
 import os
 import uuid
+from contextlib import contextmanager
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from pprint import pprint
@@ -71,6 +73,36 @@ from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.config import DistillationConfig, EngineConfig
 from verl.workers.rollout.llm_server import LLMServerManager
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
+
+logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def stage_scheduler_lease(config, stage: str, pool: str, global_step: int):
+    """Optionally acquire a coarse cluster stage lease.
+
+    Disabled unless STAGE_SCHEDULER_URL is set. This keeps upstream verl
+    behavior unchanged while allowing an outer scheduler to serialize
+    rollout/train stages across heterogeneous GPU pools.
+    """
+    scheduler_url = os.environ.get("STAGE_SCHEDULER_URL", "").strip()
+    if not scheduler_url:
+        yield None
+        return
+
+    try:
+        from scheduler.stage_client import stage_lease
+    except Exception:
+        logger.exception("STAGE_SCHEDULER_URL is set but scheduler client is unavailable")
+        yield None
+        return
+
+    project = getattr(config.trainer, "project_name", "verl")
+    experiment = getattr(config.trainer, "experiment_name", "default")
+    job_id = os.environ.get("VERL_JOB_ID", f"{project}:{experiment}")
+    lease_stage = f"{stage}:step-{global_step}"
+    with stage_lease(job_id=job_id, stage=lease_stage, pool=pool):
+        yield None
 
 
 def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, kl_penalty="kl"):
@@ -1467,7 +1499,14 @@ class RayPPOTrainer:
                     with marked_timer("gen", timing_raw, color="red"):
                         if curr_step_profile:
                             self.llm_server_manager.start_profile()
-                        combined_gen_output = self.async_rollout_manager.generate_sequences(combined_gen_batch)
+                        rollout_pool = os.environ.get("VERL_ROLLOUT_POOL", "l20-rollout")
+                        with stage_scheduler_lease(
+                            self.config,
+                            stage="rollout",
+                            pool=rollout_pool,
+                            global_step=self.global_steps,
+                        ):
+                            combined_gen_output = self.async_rollout_manager.generate_sequences(combined_gen_batch)
                         self.checkpoint_manager.sleep_replicas()
                         if curr_step_profile:
                             self.llm_server_manager.stop_profile()
@@ -1646,7 +1685,14 @@ class RayPPOTrainer:
                     else:
                         # update actor
                         with marked_timer("update_actor", timing_raw, color="red"):
-                            actor_output = self._update_actor(batch)
+                            train_pool = os.environ.get("VERL_TRAIN_POOL", "a10-train")
+                            with stage_scheduler_lease(
+                                self.config,
+                                stage="train",
+                                pool=train_pool,
+                                global_step=self.global_steps,
+                            ):
+                                actor_output = self._update_actor(batch)
 
                         # Check if the ESI (Elastic Server Instance)/training plan is close to expiration.
                         esi_close_to_expiration = should_save_ckpt_esi(

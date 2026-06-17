@@ -371,3 +371,14 @@ class LLMServerManager:
     async def stop_profile(self):
         """Stop profiling on all rollout replicas."""
         await asyncio.gather(*[replica.stop_profile() for replica in self.rollout_replicas])
+
+    @auto_await
+    async def shutdown(self, release_resource_pool: bool = True):
+        """Tear down rollout replicas and release their placement groups."""
+        await asyncio.gather(
+            *[replica.shutdown(release_resource_pool=release_resource_pool) for replica in self.rollout_replicas]
+        )
+        self.rollout_replicas = []
+        self.server_handles = []
+        self.server_addresses = []
+        self.global_load_balancer = None

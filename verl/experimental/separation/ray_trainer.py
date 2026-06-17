@@ -20,6 +20,9 @@ This trainer supports model-agonistic model initialization with huggingface
 """
 
 import uuid
+import os
+from contextlib import contextmanager
+from contextlib import nullcontext
 from pprint import pprint
 from typing import Any, Optional
 
@@ -47,6 +50,28 @@ from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
 from verl.utils.import_utils import load_class_from_fqn
 from verl.utils.metric import reduce_metrics
+
+
+@contextmanager
+def _stage_scheduler_lease(config, stage: str, pool: str, global_step: int, task_id: str | None = None):
+    scheduler_url = os.environ.get("STAGE_SCHEDULER_URL", "").strip()
+    if not scheduler_url:
+        yield None
+        return
+
+    try:
+        from scheduler.stage_client import stage_lease
+    except Exception:
+        yield None
+        return
+
+    project = getattr(config.trainer, "project_name", "verl")
+    experiment = getattr(config.trainer, "experiment_name", "default")
+    job_prefix = os.environ.get("VERL_JOB_ID", f"{project}:{experiment}")
+    job_id = f"{job_prefix}:{task_id}" if task_id else job_prefix
+    lease_stage = f"{stage}:{task_id}:step-{global_step}" if task_id else f"{stage}:step-{global_step}"
+    with stage_lease(job_id=job_id, stage=lease_stage, pool=pool):
+        yield None
 
 
 class SeparateRayPPOTrainer(RayPPOTrainer):
@@ -218,6 +243,8 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
         wg_kwargs["device_name"] = self.device_name
 
         for resource_pool, class_dict in self.resource_pool_to_cls.items():
+            if not class_dict:
+                continue
             worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
             wg_dict = self.ray_worker_group_cls(
                 resource_pool=resource_pool,
@@ -631,7 +658,19 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
         if self.config.trainer.critic_warmup <= self.global_steps:
             # update actor
             with marked_timer("update_actor", timing_raw, color="red"):
-                actor_output = self._update_actor(batch)
+                if getattr(self, "_phase_train_lease_active", False):
+                    lease_context = nullcontext()
+                else:
+                    train_pool = os.environ.get("VERL_TRAIN_POOL", "a10-train")
+                    lease_context = _stage_scheduler_lease(
+                        self.config,
+                        stage="train",
+                        pool=train_pool,
+                        global_step=self.global_steps,
+                        task_id=getattr(self, "current_phase_task_id", None),
+                    )
+                with lease_context:
+                    actor_output = self._update_actor(batch)
 
             actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
             metrics.update(actor_output_metrics)

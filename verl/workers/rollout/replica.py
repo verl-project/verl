@@ -199,10 +199,15 @@ class RolloutReplica(ABC):
         resource_pool_spec = {
             resource_pool_name: [self.gpus_per_replica_node] * self.nnodes,
         }
+        custom = self.config.custom or {}
+        custom_resources = custom.get("ray_custom_resources", {})
+        accelerator_type = custom.get("ray_accelerator_type", None)
         resource_pool_manager = ResourcePoolManager(
             resource_pool_spec=resource_pool_spec,
             mapping=None,
             max_colocate_count=2,
+            custom_resources={resource_pool_name: custom_resources},
+            accelerator_types={resource_pool_name: accelerator_type} if accelerator_type else {},
         )
         resource_pool_manager.create_resource_pool()
         self.resource_pool = resource_pool_manager.resource_pool_dict[resource_pool_name]
@@ -297,6 +302,27 @@ class RolloutReplica(ABC):
     async def stop_profile(self):
         """Stop profiling on the replica."""
         await asyncio.gather(*[server.stop_profile.remote() for server in self.servers])
+
+    async def shutdown(self, release_resource_pool: bool = True):
+        """Terminate rollout servers/workers and release standalone PGs."""
+        actors = list(self.servers)
+        for worker in self.workers:
+            if worker not in actors:
+                actors.append(worker)
+        for actor in actors:
+            try:
+                ray.kill(actor, no_restart=True)
+            except Exception:
+                logger.exception("failed to kill rollout actor %s", actor)
+
+        self.servers = []
+        self.workers = []
+        self._server_handle = None
+        self._server_address = None
+
+        if release_resource_pool and self.resource_pool is not None:
+            self.resource_pool.release_placement_groups()
+            self.resource_pool = None
 
 
 class RolloutReplicaRegistry:

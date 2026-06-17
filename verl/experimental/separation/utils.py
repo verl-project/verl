@@ -14,9 +14,19 @@
 
 
 import ray
+from omegaconf import OmegaConf
 
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager
 from verl.trainer.ppo.utils import Role, need_reference_policy
+
+
+def _optional_dict(config, path: str) -> dict:
+    value = OmegaConf.select(config, path)
+    if value is None:
+        return {}
+    if OmegaConf.is_config(value):
+        return dict(OmegaConf.to_container(value, resolve=True))
+    return dict(value)
 
 
 def create_resource_pool_manager(config, roles: list) -> ResourcePoolManager:
@@ -32,6 +42,8 @@ def create_resource_pool_manager(config, roles: list) -> ResourcePoolManager:
     """
     resource_pool_spec = {}
     mapping = {}
+    custom_resources = {}
+    accelerator_types = {}
 
     # Actor/Critic resource pool
     training_roles = [Role.Actor, Role.ActorRollout, Role.Critic, Role.RefPolicy]
@@ -41,22 +53,33 @@ def create_resource_pool_manager(config, roles: list) -> ResourcePoolManager:
 
         trainer_pool = [config.trainer.n_gpus_per_node] * config.trainer.nnodes
         resource_pool_spec["trainer_pool"] = trainer_pool
+        custom_resources["trainer_pool"] = _optional_dict(config, "trainer.phase_train_ray_custom_resources")
+        if not custom_resources["trainer_pool"]:
+            custom_resources["trainer_pool"] = _optional_dict(
+                config,
+                "actor_rollout_ref.actor.global_batch_info.ray_custom_resources",
+            )
+        accelerator_type = OmegaConf.select(config, "trainer.phase_train_ray_accelerator_type")
+        if not accelerator_type:
+            accelerator_type = OmegaConf.select(config, "actor_rollout_ref.actor.global_batch_info.ray_accelerator_type")
+        if accelerator_type:
+            accelerator_types["trainer_pool"] = str(accelerator_type)
 
         for role in training_roles:
             if role in roles:
                 mapping[role] = "trainer_pool"
-
-    # Rollout resource pool
-    if Role.Rollout in roles:
-        assert config.rollout.n_gpus_per_node > 0, "config.rollout.n_gpus_per_node must be greater than 0"
-        assert config.rollout.nnodes > 0, "config.rollout.nnodes must be greater than 0"
 
     if Role.RewardModel in roles:
         rm_cfg = config.reward.reward_model
         assert rm_cfg.n_gpus_per_node > 0, "config.reward.reward_model.n_gpus_per_node must be greater than 0"
         assert rm_cfg.nnodes > 0, "config.reward.reward_model.nnodes must be greater than 0"
 
-    return ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
+    return ResourcePoolManager(
+        resource_pool_spec=resource_pool_spec,
+        mapping=mapping,
+        custom_resources=custom_resources,
+        accelerator_types=accelerator_types,
+    )
 
 
 def create_role_worker_mapping(config):

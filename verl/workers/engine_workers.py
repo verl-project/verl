@@ -449,6 +449,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self.actor: TrainingWorker = None
         self.ref: TrainingWorker = None
         self.rollout: BaseRollout = None
+        self.base_sync_done: bool = True
+        self.layered_summon: bool = False
+        self.peft_merge: bool = False
         assert self.role in ["actor", "rollout", "ref", "actor_rollout", "actor_rollout_ref"]
         self._is_actor = self.role in ["actor", "actor_rollout", "actor_rollout_ref"]
         self._is_rollout = self.role in ["rollout", "actor_rollout", "actor_rollout_ref"]
