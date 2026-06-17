@@ -129,7 +129,7 @@ The stop-gradient is required because the reward is used inside a policy-gradien
 
 ### Multi-Teacher OPD
 
-Multi-teacher OPD (MOPD) extends OPD to multiple domain-specialized teachers [5,6,7,8]. This is useful when distilling knowledge to a student across multiple domains. In each domain, such as math, coding, or instruction following, different teachers specialized to the domain can be used.
+Multi-teacher OPD (MOPD) extends OPD to multiple domain-specialized teachers [4,5,6,7]. This is useful when distilling knowledge to a student across multiple domains. In each domain, such as math, coding, or instruction following, different teachers specialized to the domain can be used.
 
 A base model can be trained or adapted independently on each domain, producing one expert teacher per domain. The student is then trained on a mixture of domains. For each example, the routing key selects the corresponding teacher, and the student matches that teacher's log-probabilities on student-induced states.
 
