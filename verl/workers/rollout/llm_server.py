@@ -338,6 +338,7 @@ class LLMServerManager:
         worker_group (RayWorkerGroup): Worker group for the server replicas. If not none, init hybrid server,
             else init standalone server with a new resource pool.
         rollout_resource_pool (RayResourcePool): Resource pool for the server replicas, only needed for TensorRT-LLM.
+        start_rank (int): First ``replica_rank`` to assign.  Defaults to 0.
     """
 
     def __init__(
@@ -345,12 +346,14 @@ class LLMServerManager:
         config: DictConfig,
         worker_group: RayWorkerGroup = None,
         rollout_resource_pool: RayResourcePool = None,
+        start_rank: int = 0,
     ):
         self.config = config
         self.rollout_config = config.actor_rollout_ref.rollout
         self.model_config = config.actor_rollout_ref.model
         self.worker_group = worker_group
         self.rollout_resource_pool = rollout_resource_pool
+        self.start_rank = start_rank
 
         assert worker_group is not None or self.rollout_config.nnodes > 0, "nnodes must be > 0 in standalone mode"
 
@@ -370,16 +373,16 @@ class LLMServerManager:
         await instance._init_global_load_balancer()
         return instance
 
-    async def _initialize_llm_servers(self, start_rank: int = 0):
+    async def _initialize_llm_servers(self, start_rank: int = None):
         """Initialize the LLM server replicas.
 
         Args:
-            start_rank: First ``replica_rank`` to assign.  Defaults to 0 so that
-                existing callers are unaffected.  Subclasses (e.g.
-                ``FullyAsyncLLMServerManager``) may pass a non-zero value to avoid
-                Ray named-actor collisions when hybrid and standalone replicas
-                coexist.
+            start_rank: First ``replica_rank`` to assign.  Defaults to ``self.start_rank``
+                so standalone replicas can avoid Ray named-actor collisions with hybrid
+                replicas (which start at 0) when both coexist (e.g. separate async).
         """
+        if start_rank is None:
+            start_rank = self.start_rank
         rollout_world_size = (
             self.rollout_config.tensor_model_parallel_size
             * self.rollout_config.data_parallel_size
