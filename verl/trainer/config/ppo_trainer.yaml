@@ -502,5 +502,14 @@ ray_kwargs:
     # Number of CPUs for Ray. Use a fixed number instead of null when using SLURM.
     num_cpus: null
 
+    # Ray runtime_env, merged on top of verl's defaults and passed to ray.init.
+    runtime_env:
+
+      # Interpreter used to launch Ray workers (Ray's runtime_env py_executable plugin). Set it to a
+      # direct interpreter path, e.g. /abs/path/verl/.venv/bin/python3, when the launcher relocates the
+      # working dir before starting Ray so the worker cwd has no resolvable uv/venv (uv is not required
+      # at that path). Inherited by the TaskRunner and every worker actor. null -> Ray's default.
+      py_executable: null
+
   # Path to save Ray timeline JSON for performance profiling
   timeline_json_file: null

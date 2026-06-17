@@ -59,7 +59,14 @@ TEST_FILE=${TEST_FILE:-"${RAY_DATA_HOME}/data/aime-2024.parquet"}
 actor_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 2))
 infer_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 3))
 
-python -m verl.experimental.fully_async_policy.fully_async_main \
+# uv (set VERL_USE_UV=0 for system python): sync the sglang × megatron venv from the
+# committed uv.lock, then run from it without re-syncing (run from the verl repo root).
+LAUNCH=(python)
+if [ "${VERL_USE_UV:-1}" != 0 ]; then
+    uv sync --extra sglang --extra megatron --frozen
+    LAUNCH=(uv run --frozen --no-sync python)
+fi
+"${LAUNCH[@]}" -m verl.experimental.fully_async_policy.fully_async_main \
     --config-path=config \
     --config-name='fully_async_ppo_megatron_trainer.yaml' \
     data.train_files="${TRAIN_FILE}" \

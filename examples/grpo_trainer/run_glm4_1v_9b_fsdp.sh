@@ -94,7 +94,14 @@ EXTRA=(
 )
 
 ########################### launch ###########################
-python3 -m verl.trainer.main_ppo \
+# uv (set VERL_USE_UV=0 for system python): GPU vllm/sglang × fsdp use the uv venv (synced once from uv.lock, then
+# reused, no re-sync); other backends / NPU fall back to ambient python. Run from repo root.
+LAUNCH=(python3)
+if [ "${VERL_USE_UV:-1}" != 0 ] && [ "${DEVICE:-gpu}" = gpu ] && { [ "${INFER_BACKEND}" = vllm ] || [ "${INFER_BACKEND}" = sglang ]; }; then
+    uv sync --extra "${INFER_BACKEND}" --extra fsdp --frozen
+    LAUNCH=(uv run --frozen --no-sync python3)
+fi
+"${LAUNCH[@]}" -m verl.trainer.main_ppo \
     "${DATA[@]}" \
     "${MODEL[@]}" \
     "${ACTOR[@]}" \

@@ -180,7 +180,14 @@ echo "Starting Training with:"
 echo "Project: ${PROJECT_NAME}, Exp: ${EXPERIMENT_NAME}"
 echo "Rollout N: ${rollout_n}, Batch Size: ${train_batch_size}, LR: ${learning_rate}"
 
-python3 -m verl.trainer.main_ppo \
+# uv (set VERL_USE_UV=0 for system python): on GPU, sync the vllm × fsdp venv from uv.lock and run from it (no
+# re-sync); NPU falls back to ambient python. Run from the verl repo root.
+LAUNCH=(python3)
+if [ "${VERL_USE_UV:-1}" != 0 ] && [ "${DEVICE:-gpu}" = gpu ]; then
+    uv sync --extra vllm --extra fsdp --frozen
+    LAUNCH=(uv run --frozen --no-sync python3)
+fi
+"${LAUNCH[@]}" -m verl.trainer.main_ppo \
     "${DATA[@]}" \
     "${ACTOR[@]}" \
     "${ROLLOUT[@]}" \

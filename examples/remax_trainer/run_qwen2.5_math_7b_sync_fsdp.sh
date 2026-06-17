@@ -103,7 +103,14 @@ EXTRA=(
 )
 
 ########################### launch ###########################
-python3 -m verl.trainer.main_ppo_sync \
+# uv (set VERL_USE_UV=0 for system python): sync this combo's venv from the committed
+# uv.lock, then run from it without re-syncing (run from the verl repo root).
+LAUNCH=(python3)
+if [ "${VERL_USE_UV:-1}" != 0 ]; then
+    uv sync --extra vllm --extra fsdp --frozen
+    LAUNCH=(uv run --frozen --no-sync python3)
+fi
+"${LAUNCH[@]}" -m verl.trainer.main_ppo_sync \
     "${DATA[@]}" \
     "${MODEL[@]}" \
     "${ACTOR[@]}" \
