@@ -123,6 +123,7 @@ class ArcticRLClientWrapper(RemoteBackend):
             "logits_optimization_peak_mem_size_in_gib", 4
         )
         self.logits_compute_in_fp32 = self._backend_config.get("logits_compute_in_fp32", False)
+        self.logits_compute_from_fp32_inputs = self._backend_config.get("logits_compute_from_fp32_inputs", False)
         # No server consumer yet; forwarded for forward-compat with group-balanced routing.
         self.zorro_train_load_balancer = self._backend_config.zorro_train.get("load_balancer", True)
         # Weight-sync transport selection. CUDA-IPC bypasses the NCCL
@@ -380,6 +381,7 @@ class ArcticRLClientWrapper(RemoteBackend):
                 # Server reads these from ds_worker_config (arctic_platform/rl/deepspeed_worker.py), not per-call meta.
                 logits_optimization=self.logits_optimization,
                 logits_optimization_peak_mem_size_in_gib=self.logits_optimization_peak_mem_size_in_gib,
+                logits_compute_from_fp32_inputs=self.logits_compute_from_fp32_inputs,
                 logits_compute_in_fp32=self.logits_compute_in_fp32,
             )
 
