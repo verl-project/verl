@@ -123,11 +123,6 @@ def no_padding_2_padding(tensor: torch.Tensor, data: TensorDict, shift: int = -1
     response_list = []
     for resp_len, seq_offset in zip(response_lens, sequence_offsets, strict=True):
         pad_size = max_response_len - resp_len
-        # Default shift=-1 implements the legacy "predict-next" convention
-        # where model output at index i is log P(token[i+1]); shift=0 is for
-        # the response-aligned convention used by the zorro fast path.
-        # Original (legacy) slice was values[seq_offset - resp_len - 1 : seq_offset - 1]
-        # which corresponds to shift=-1.
         start = seq_offset - resp_len + shift
         end = seq_offset + shift
         response_list.append(F.pad(values[start:end], (0, pad_size)))

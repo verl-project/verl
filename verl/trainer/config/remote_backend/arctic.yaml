@@ -69,7 +69,8 @@ low_memory_weight_sync: False
 # Mirrors recipe/rl-correctness arctic_rl.deepspeed.
 deepspeed:
 
-  # Torch Autocast (bfloat16 forward); off by default on PyPI DS 0.19.2 — DS engine may not respect autocast cleanly without Tunji's branch.
+  # Torch Autocast (bfloat16 forward). Disabled by default: PyPI DeepSpeed 0.19.2 does not
+  # respect autocast cleanly; enable only on a DS build that supports it (see HANDOFF.md for the pinned clone).
   torch_autocast:
 
     enabled: False
@@ -79,8 +80,9 @@ deepspeed:
   # Communication data type for cross-GPU all_reduce / all_gather
   communication_data_type: fp32
 
-  # Gradient accumulation dtype; `fp32` keeps grads in float32 (requires deepspeed sfc-gh-truwase/fp32_grads branch).
-  # Use `bf16` on PyPI DS 0.19.2 to avoid the unrecognized config branch.
+  # Gradient accumulation dtype; `fp32` keeps grads in float32 but requires a DS build that
+  # recognises the `data_types` block (see HANDOFF.md for the pinned clone). Use `bf16` on
+  # stock PyPI DeepSpeed 0.19.2 to avoid the unrecognized-config branch.
   data_types:
 
     grad_accum_dtype: bf16

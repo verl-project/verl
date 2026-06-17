@@ -108,10 +108,8 @@ class ArcticRLClientWrapper(RemoteBackend):
 
     def __init__(self, config, reconnect_job_config: dict = None, rl_server_state: ArcticRLRayServerState = None):
         self.config = config
-        # Per @sfc-gh-truwase (PR #4): the per-backend yaml
-        # (`trainer/config/remote_backend/arctic.yaml`) is loaded into
-        # `config.remote_backend` as a flat block — the file name already
-        # names the backend, so no extra `arctic:` nesting is needed.
+        # Per-backend yaml is loaded flat at `config.remote_backend`; the file
+        # name (arctic.yaml) names the backend, so no extra nesting is needed.
         self._backend_config = config.remote_backend
         self._client = None
         self.zorro_train_enable = self._backend_config.zorro_train.enable
@@ -126,15 +124,10 @@ class ArcticRLClientWrapper(RemoteBackend):
         self.logits_compute_from_fp32_inputs = self._backend_config.get("logits_compute_from_fp32_inputs", False)
         # No server consumer yet; forwarded for forward-compat with group-balanced routing.
         self.zorro_train_load_balancer = self._backend_config.zorro_train.get("load_balancer", True)
-        # Weight-sync transport selection. CUDA-IPC bypasses the NCCL
-        # all_reduce path entirely; only valid when colocate=True.
+        # CUDA-IPC bypasses NCCL for weight sync; only valid when colocate=True.
         self.cuda_ipc_weight_sync = self._backend_config.get("cuda_ipc_weight_sync", False)
         self.low_memory_weight_sync = self._backend_config.get("low_memory_weight_sync", False)
         self.use_liger = self.config.actor_rollout_ref.model.use_liger
-        # Static, config-derived engineering value Arctic needs on every
-        # `compute_log_prob` / `update_actor` call. Cached here at init
-        # time so the verl-side forwarder doesn't have to re-inject it
-        # into every batch.
         self._max_token_len_per_gpu = self.config.actor_rollout_ref.actor.ppo_max_token_len_per_gpu
         self.tokenizer = AutoTokenizer.from_pretrained(self.config.actor_rollout_ref.model.path)
         self._client = self._initialize_client(reconnect_job_config, rl_server_state)

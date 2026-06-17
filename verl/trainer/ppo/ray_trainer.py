@@ -1091,20 +1091,13 @@ class RayPPOTrainer:
         metrics.update(global_balance_stats)
 
     def _model_output_shift(self) -> int:
-        """Return the slice offset for `no_padding_2_padding` given the
-        worker backend.
+        """Slice offset for `no_padding_2_padding`.
 
-        * shift=-1 (legacy "predict-next"): model emits log P(token[i+1]) at
-          slot i, so we shift left by one when extracting the response.
-        * shift=0 (response-aligned): the model output already lines up with
-          the response token at each slot (used by Arctic's zorro fast path,
-          which extracts logits-that-predict-response inside the patcher).
+        * shift=-1 (legacy "predict-next"): model emits log P(token[i+1]) at slot i.
+        * shift= 0 (response-aligned): model output already lines up with the response
+          token at each slot (Arctic zorro fast path).
         """
-        # newshape PR #6 routes zorro config under `remote_backend.zorro_train.enable`
-        # (rl_share_v0.7.1 per-backend yaml layout) instead of legacy `arctic_rl.use_zorro`.
-        backend_cfg = self.config.get("remote_backend", None) if hasattr(self.config, "get") else None
-        zorro_cfg = backend_cfg.get("zorro_train", None) if backend_cfg is not None else None
-        use_zorro = bool(zorro_cfg.get("enable", False)) if zorro_cfg is not None else False
+        use_zorro = OmegaConf.select(self.config, "remote_backend.zorro_train.enable", default=False)
         return 0 if use_zorro else -1
 
     def _compute_values(self, batch: DataProto) -> DataProto:
