@@ -624,7 +624,10 @@ class AutomodelEngineWithLMHead(AutomodelEngine):
 
                 if calculate_entropy:
                     if not self.engine_config.entropy_checkpointing:
-                        entropy_rmpad = self.compute_entropy_from_logits(logits_rmpad)
+                        entropy_rmpad = self.compute_entropy_from_logits(
+                            logits_rmpad,
+                            chunk_size=self.engine_config.entropy_from_logits_chunk_size,
+                        )
                     else:
                         entropy_rmpad = torch.utils.checkpoint.checkpoint(
                             self.compute_entropy_from_logits, logits_rmpad
