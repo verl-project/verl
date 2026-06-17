@@ -12,11 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
+from copy import deepcopy
 from typing import Any
 
 import torch
 from arctic_platform.rl import ArcticRLClientConfig, create_arctic_rl_client
 from arctic_platform.rl.ray_server import ArcticRLRayServerState
+from omegaconf import OmegaConf
 from transformers import AutoTokenizer
 
 from verl.remote_backend.base import RemoteBackend, RemoteBackendRegistry
@@ -306,26 +308,44 @@ class ArcticRLClientWrapper(RemoteBackend):
             "global_token_num": global_token_num,
         }
 
-    def _create_ds_config(self, n_gpus: int) -> dict[str, Any]:
+    def _create_ds_config(self, n_gpus: int, training: bool = True) -> dict[str, Any]:
+        # Pass the entire `remote_backend.deepspeed` YAML block through to the
+        # DS engine (torch_autocast / communication_data_type / data_types /
+        # zero_optimization / log_level / ...) and merge in the per-step batch
+        # sizing. Matches recipe/rl-correctness arctic_rl_client._create_ds_config.
         actor_cfg = self.config.actor_rollout_ref.actor
         data_cfg = self.config.data
-        zero_optimization_config = self._backend_config.zero_optimization
+        rollout_n = self.config.actor_rollout_ref.rollout.n
+        deepspeed_config = OmegaConf.to_container(self._backend_config.deepspeed, resolve=True)
 
         micro_batch_size = actor_cfg.ppo_micro_batch_size_per_gpu or 1
-        train_batch_size = data_cfg.train_batch_size * self.config.actor_rollout_ref.rollout.n
+        # DS train_batch_size = samples consumed per optimizer step.
+        # We do one optimizer step per PPO mini-batch (matching verl baseline's
+        # dp_actor.update_policy loop), not per global batch, so the DS engine's
+        # gradient-accumulation gating must reflect one mini-batch, not BSZ.
+        global_batch_size = data_cfg.train_batch_size * rollout_n
+        train_batch_size = actor_cfg.ppo_mini_batch_size * rollout_n
+        assert global_batch_size % train_batch_size == 0, (
+            f"data.train_batch_size ({data_cfg.train_batch_size}) must be divisible by "
+            f"actor.ppo_mini_batch_size ({actor_cfg.ppo_mini_batch_size}); "
+            f"got global={global_batch_size}, per-step={train_batch_size}"
+        )
         grad_accum_steps = max(1, train_batch_size // (micro_batch_size * n_gpus))
         train_seq_parallel_size = actor_cfg.fsdp_config.get("ulysses_sequence_parallel_size", 1)
-        return {
-            "train_micro_batch_size_per_gpu": micro_batch_size,
-            "train_batch_size": train_batch_size,
-            "gradient_accumulation_steps": grad_accum_steps,
-            "sequence_parallel_size": train_seq_parallel_size,
-            "zero_optimization": {
-                "stage": zero_optimization_config.stage,
-                "offload_optimizer": {"device": zero_optimization_config.offload_optimizer.device},
-                "offload_param": {"device": zero_optimization_config.offload_param.device},
-            },
-        }
+
+        ds_config = deepcopy(deepspeed_config)
+        ds_config.update(
+            {
+                "train_micro_batch_size_per_gpu": micro_batch_size,
+                "train_batch_size": train_batch_size,
+                "gradient_accumulation_steps": grad_accum_steps,
+                "sequence_parallel_size": train_seq_parallel_size,
+            }
+        )
+        if not training:
+            ds_config.pop("data_types", None)
+
+        return ds_config
 
     def reconnect_config(self):
         return self._client.reconnect_config()
@@ -346,25 +366,20 @@ class ArcticRLClientWrapper(RemoteBackend):
             # XXX: can't find where it's configured
             use_unpad = True
 
-            mp = self._backend_config.get("mixed_precision", None)
-            use_autocast = bool(mp.get("autocast", False)) if mp is not None else False
-            fp32_gradients = bool(mp.get("fp32_gradients", False)) if mp is not None else False
             ds_worker_config.update(
                 zorro_train_enable=True,
                 response_len=self.config.data.max_response_length,
-                max_token_len=self.config.actor_rollout_ref.rollout.max_num_batched_tokens,
+                # Matches recipe/rl-correctness: read per-GPU token budget
+                # from actor.ppo_max_token_len_per_gpu (the budget the train
+                # engine sees), not rollout.max_num_batched_tokens.
+                max_token_len=self.config.actor_rollout_ref.actor.ppo_max_token_len_per_gpu,
                 rollout_n=self.config.actor_rollout_ref.rollout.n,
                 temperature=self.config.actor_rollout_ref.rollout.temperature,
-                tiled_logits_compute=self._backend_config.get("tiled_logits_compute", True),
                 use_unpad=use_unpad,
                 # Server reads these from ds_worker_config (arctic_platform/rl/deepspeed_worker.py), not per-call meta.
                 logits_optimization=self.logits_optimization,
                 logits_optimization_peak_mem_size_in_gib=self.logits_optimization_peak_mem_size_in_gib,
                 logits_compute_in_fp32=self.logits_compute_in_fp32,
-                # Mixed precision (autocast + fp32 grads). fp32_gradients requires the deepspeed
-                # sfc-gh-truwase/fp32_grads branch; default off so we run cleanly on PyPI 0.19.2.
-                use_autocast=use_autocast,
-                fp32_gradients=fp32_gradients,
             )
 
         return ds_worker_config

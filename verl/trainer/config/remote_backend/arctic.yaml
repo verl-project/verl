@@ -60,27 +60,42 @@ cuda_ipc_weight_sync: False
 # whole model. Only with cuda_ipc_weight_sync=True and colocate=True.
 low_memory_weight_sync: False
 
-# Mixed-precision controls forwarded to the DS worker (zorro path only).
-mixed_precision:
+# DeepSpeed engine config: passed through (OmegaConf.to_container) into the DS engine,
+# merged with train_micro_batch_size_per_gpu / train_batch_size / grad_accum / sequence_parallel_size.
+# Mirrors recipe/rl-correctness arctic_rl.deepspeed.
+deepspeed:
 
-  # bfloat16 autocast for the forward pass
-  autocast: False
+  # Torch Autocast (bfloat16 forward); off by default on PyPI DS 0.19.2 — DS engine may not respect autocast cleanly without Tunji's branch.
+  torch_autocast:
 
-  # keep gradients in fp32 (requires deepspeed sfc-gh-truwase/fp32_grads branch); leave False on PyPI DS 0.19.2
-  fp32_gradients: False
+    enabled: False
 
-# DeepSpeed ZeRO-style sharding for the training engine
-zero_optimization:
+    dtype: bfloat16
 
-  # 2 for optim + grad sharding; 3 also shards weights
-  stage: 0
+  # Communication data type for cross-GPU all_reduce / all_gather
+  communication_data_type: fp32
 
-  offload_optimizer:
+  # Gradient accumulation dtype; `fp32` keeps grads in float32 (requires deepspeed sfc-gh-truwase/fp32_grads branch).
+  # Use `bf16` on PyPI DS 0.19.2 to avoid the unrecognized config branch.
+  data_types:
 
-    # `none` keeps the optimizer state on GPU; `cpu` offloads it
-    device: none
+    grad_accum_dtype: bf16
 
-  offload_param:
+  # ZeRO sharding stage + offload knobs
+  zero_optimization:
 
-    # `none` keeps params on GPU; `cpu` offloads them
-    device: none
+    # 2 for optim + grad sharding; 3 also shards weights
+    stage: 0
+
+    offload_optimizer:
+
+      # `none` keeps the optimizer state on GPU; `cpu` offloads it
+      device: none
+
+    offload_param:
+
+      # `none` keeps params on GPU; `cpu` offloads them
+      device: none
+
+  # DeepSpeed engine log level
+  log_level: INFO
