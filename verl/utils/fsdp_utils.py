@@ -27,6 +27,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 from packaging import version
+from peft.utils.save_and_load import get_peft_model_state_dict
 from torch.distributed import DeviceMesh
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp._runtime_utils import _lazy_init
@@ -109,10 +110,8 @@ def get_fsdp_wrap_policy(module, config=None, is_lora=False):
 
     from torch.distributed.fsdp.wrap import _or_policy, lambda_auto_wrap_policy
 
-    # Add lambda policy for LoRA modules if is_lora is True. Skip when
-    # min_num_params > 0: combining size policy with lambda policy creates
-    # nested FSDP units whose allgather order can diverge across ranks under
-    # variable input lengths (use_remove_padding), causing NCCL deadlocks.
+    # LoRA lambda policy, but only when min_num_params == 0: mixing it with the
+    # size policy nests FSDP units whose allgather order can diverge (NCCL deadlock).
     if is_lora and min_num_params == 0:
 
         def lambda_policy_fn(module):
@@ -644,8 +643,6 @@ def layered_summon_lora_params(fsdp_module) -> OrderedDict:
     Sharded entries collected first get overwritten when the child unit is
     summoned later, so every LoRA tensor is gathered exactly once.
     """
-    from peft.utils.save_and_load import get_peft_model_state_dict
-
     lora_params = OrderedDict()
     peft_model = getattr(fsdp_module, "_fsdp_wrapped_module", fsdp_module)
 
@@ -661,10 +658,8 @@ def layered_summon_lora_params(fsdp_module) -> OrderedDict:
         if clean_prefix.endswith(".model") or clean_prefix.endswith(".layers"):
             continue
 
-        # FSDP1 needs the explicit summon context + ``_is_root`` toggling;
-        # FSDP2 modules expose params as ``DTensor`` and ``param.full_tensor()``
-        # all-gathers on demand, so no context is required and they have no
-        # ``_is_root`` attribute.
+        # FSDP1 needs the explicit summon context; FSDP2 ``DTensor`` params
+        # all-gather on demand via ``param.full_tensor()``, so no context.
         is_fsdp1 = fsdp_version(submodule) == 1
 
         # Exclude nested FSDP children from both the pre-check and the state_dict so
@@ -680,13 +675,12 @@ def layered_summon_lora_params(fsdp_module) -> OrderedDict:
 
         if is_fsdp1:
             submodule._is_root = True
-        summon_ctx = (
-            FSDP.summon_full_params(submodule, writeback=False) if is_fsdp1 else nullcontext()
-        )
+        summon_ctx = FSDP.summon_full_params(submodule, writeback=False) if is_fsdp1 else nullcontext()
 
         with summon_ctx:
             sub_state_dict = {
-                n: p for n, p in submodule.named_parameters()
+                n: p
+                for n, p in submodule.named_parameters()
                 if not any(n.startswith(f"{nn}.") for nn in nested_fsdp_names)
             }
             sub_lora_params = get_peft_model_state_dict(peft_model, state_dict=sub_state_dict)
@@ -706,9 +700,7 @@ def layered_summon_lora_params(fsdp_module) -> OrderedDict:
     return lora_params
 
 
-def collect_lora_params(
-    module: FSDP, layered_summon: bool, base_sync_done: bool
-) -> OrderedDict:
+def collect_lora_params(module: FSDP, layered_summon: bool, base_sync_done: bool) -> OrderedDict:
     """
     collect lora params or full params if base model is not ready in vllm
     work with if isinstance(self.module._fsdp_wrapped_module, PeftModel)
@@ -729,14 +721,11 @@ def collect_lora_params(
                 import logging
 
                 logging.getLogger(__name__).warning("layered_summon returned empty, falling back to full summon")
-                # FSDP2 ``DTensor`` params don't need a summon context;
-                # ``param.full_tensor()`` below does the all-gather. FSDP1
-                # still needs the explicit context.
+                # FSDP2 ``DTensor`` params all-gather via ``param.full_tensor()``;
+                # only FSDP1 needs the explicit summon context.
                 is_fsdp1 = fsdp_version(module) == 1
                 summon_ctx = (
-                    FSDP.summon_full_params(module, writeback=False, offload_to_cpu=True)
-                    if is_fsdp1
-                    else nullcontext()
+                    FSDP.summon_full_params(module, writeback=False, offload_to_cpu=True) if is_fsdp1 else nullcontext()
                 )
                 with summon_ctx:
                     state_dict = {n: p for n, p in peft_model.named_parameters()}

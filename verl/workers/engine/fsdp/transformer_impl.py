@@ -343,9 +343,8 @@ class FSDPEngine(BaseEngine):
             }
             module = get_peft_model(module, LoraConfig(**lora_config))
 
-            # Mixed bf16 base + fp32 adapter trips FSDP's "all params in a flat
-            # group must share dtype" assertion. Cast adapter params to base
-            # dtype only when they actually differ.
+            # FSDP requires all params in a flat group to share dtype: cast a
+            # fp32 adapter to the bf16 base dtype only when they actually differ.
             base_dtype = next((p.dtype for p in module.parameters() if not p.requires_grad), None)
             if base_dtype is not None:
                 mismatched = [p for p in module.parameters() if p.requires_grad and p.dtype != base_dtype]

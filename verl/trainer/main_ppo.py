@@ -39,15 +39,6 @@ def run_ppo(config, task_runner_class) -> None:
                 model paths, and training hyperparameters.
         task_runner_class: For recipe to change TaskRunner.
     """
-    # Load external verl plugins (e.g. verl-omni) in the launcher process so their
-    # registrations are available here; the TaskRunner actor and each GPU worker
-    # load them again. Plugins are intentionally NOT loaded via a Ray
-    # worker_process_setup_hook: importing them at worker startup (before the GPU
-    # is narrowed) can initialize CUDA on device 0 in every worker.
-    from verl.utils.plugins import load_plugins
-
-    load_plugins()
-
     # Check if Ray is not initialized
     if not ray.is_initialized():
         # Initialize Ray with a local cluster configuration
