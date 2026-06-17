@@ -739,7 +739,8 @@ def collect_lora_params(
                     else nullcontext()
                 )
                 with summon_ctx:
-                    lora_params = get_peft_model_state_dict(peft_model)
+                    state_dict = {n: p for n, p in peft_model.named_parameters()}
+                    lora_params = get_peft_model_state_dict(peft_model, state_dict=state_dict)
                     lora_params = {
                         name: param.full_tensor().detach().cpu()
                         if hasattr(param, "full_tensor")
