@@ -60,6 +60,15 @@ cuda_ipc_weight_sync: False
 # whole model. Only with cuda_ipc_weight_sync=True and colocate=True.
 low_memory_weight_sync: False
 
+# Mixed-precision controls forwarded to the DS worker (zorro path only).
+mixed_precision:
+
+  # bfloat16 autocast for the forward pass
+  autocast: False
+
+  # keep gradients in fp32 (requires deepspeed sfc-gh-truwase/fp32_grads branch); leave False on PyPI DS 0.19.2
+  fp32_gradients: False
+
 # DeepSpeed ZeRO-style sharding for the training engine
 zero_optimization:
 

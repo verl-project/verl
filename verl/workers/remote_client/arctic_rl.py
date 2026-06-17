@@ -346,6 +346,9 @@ class ArcticRLClientWrapper(RemoteBackend):
             # XXX: can't find where it's configured
             use_unpad = True
 
+            mp = self._backend_config.get("mixed_precision", None)
+            use_autocast = bool(mp.get("autocast", False)) if mp is not None else False
+            fp32_gradients = bool(mp.get("fp32_gradients", False)) if mp is not None else False
             ds_worker_config.update(
                 zorro_train_enable=True,
                 response_len=self.config.data.max_response_length,
@@ -358,6 +361,10 @@ class ArcticRLClientWrapper(RemoteBackend):
                 logits_optimization=self.logits_optimization,
                 logits_optimization_peak_mem_size_in_gib=self.logits_optimization_peak_mem_size_in_gib,
                 logits_compute_in_fp32=self.logits_compute_in_fp32,
+                # Mixed precision (autocast + fp32 grads). fp32_gradients requires the deepspeed
+                # sfc-gh-truwase/fp32_grads branch; default off so we run cleanly on PyPI 0.19.2.
+                use_autocast=use_autocast,
+                fp32_gradients=fp32_gradients,
             )
 
         return ds_worker_config
@@ -382,6 +389,29 @@ class ArcticRLClientWrapper(RemoteBackend):
 
         max_length = data_cfg.max_prompt_length + data_cfg.max_response_length
 
+        # LR-scheduler horizon = global_steps * ppo_epochs * num_minibatches
+        # (matches recipe/rl-correctness arctic_rl_client.py). verl injects
+        # actor.optim.total_training_steps after dataloader build; fall back
+        # to trainer.total_training_steps for early-construction paths.
+        global_training_steps = optim_cfg.get("total_training_steps", None)
+        if not global_training_steps or int(global_training_steps) <= 0:
+            global_training_steps = self.config.trainer.get("total_training_steps", None)
+        assert global_training_steps and int(global_training_steps) > 0, (
+            "total_training_steps not populated before Arctic client build; expected "
+            "ray_trainer._create_dataloader to inject actor.optim.total_training_steps"
+        )
+        num_minibatches = data_cfg.train_batch_size // actor_cfg.ppo_mini_batch_size
+        opt_steps_per_global_step = actor_cfg.ppo_epochs * num_minibatches
+        training_horizon = int(global_training_steps) * opt_steps_per_global_step
+        lr_scheduler_type = optim_cfg.get("lr_scheduler_type", "constant")
+        print(
+            f"[ArcticRLClientWrapper] lr_scheduler: type={lr_scheduler_type} "
+            f"training_horizon={training_horizon} (global_steps={int(global_training_steps)} "
+            f"x ppo_epochs={actor_cfg.ppo_epochs} x num_minibatches={num_minibatches}); "
+            f"warmup_steps={int(optim_cfg.lr_warmup_steps_ratio * training_horizon)}",
+            flush=True,
+        )
+
         rollout_cfg = self.config.actor_rollout_ref.rollout
         vllm_config = {
             "tensor_parallel_size": self._backend_config.sampling_tp_size,
@@ -393,6 +423,26 @@ class ArcticRLClientWrapper(RemoteBackend):
         }
         if rollout_cfg.get("quantization"):
             vllm_config["quantization"] = rollout_cfg.quantization
+
+        # Forward grad_clip to the DeepSpeed engine so it clips global grad-norm
+        # to the same threshold verl applies in the FSDP path (otherwise DS
+        # defaults to no clipping -> trajectory divergence vs verl baseline).
+        optimizer_config = {
+            "lr": optim_cfg.lr,
+            "weight_decay": optim_cfg.weight_decay,
+            "betas": list(optim_cfg.betas),
+        }
+        grad_clip = optim_cfg.get("clip_grad", None)
+        if grad_clip is None:
+            grad_clip = actor_cfg.get("grad_clip", None)
+        if grad_clip is not None and float(grad_clip) > 0:
+            optimizer_config["gradient_clipping"] = float(grad_clip)
+
+        lr_scheduler_config = {
+            "type": lr_scheduler_type,
+            "warmup_ratio": optim_cfg.lr_warmup_steps_ratio,
+            "min_lr_ratio": optim_cfg.get("min_lr_ratio", None),
+        }
 
         rl_config = ArcticRLClientConfig(
             host=None if self._backend_config.comm_protocol == "ray" else "localhost",
@@ -408,13 +458,9 @@ class ArcticRLClientWrapper(RemoteBackend):
             ds_config=self._create_ds_config(n_training_gpus),
             log_prob_ds_config=None if n_log_prob_gpus == 0 else self._create_ds_config(n_log_prob_gpus),
             training_config={
-                "optimizer": {
-                    "lr": optim_cfg.lr,
-                    "weight_decay": optim_cfg.weight_decay,
-                    "betas": list(optim_cfg.betas),
-                },
-                "lr_scheduler": {"warmup_ratio": optim_cfg.lr_warmup_steps_ratio},
-                "training_horizon": self.config.trainer.total_epochs,
+                "training_horizon": training_horizon,
+                "optimizer": optimizer_config,
+                "lr_scheduler": lr_scheduler_config,
                 "max_length": max_length,
                 "model_config": None,
                 "attn_implementation": attn_implementation,
