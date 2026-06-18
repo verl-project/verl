@@ -32,6 +32,8 @@ license_head_huawei = "Copyright (c) 2025 Huawei Technologies Co., Ltd. All Righ
 license_head_huawei_26 = "Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved."
 license_head_nvidia = "Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved."
 license_head_baai = "Copyright (c) 2026 BAAI. All rights reserved."
+# Vendored under apertus/ifgym/ifgym_instructions (swiss-ai/if-gym, derived from Google's IFEval).
+license_head_google_research = "Copyright 2024 The Google Research Authors"
 license_headers = [
     license_head_bytedance,
     license_head_bytedance_25,
@@ -48,6 +50,7 @@ license_headers = [
     license_head_huawei_26,
     license_head_nvidia,
     license_head_baai,
+    license_head_google_research,
 ]
 
 

@@ -1,0 +1,29 @@
+# IFGym multi-turn instruction-following PPO config.
+# Builds on verl's ppo_trainer config; overrides set the multi-turn IFGym agent
+# loop. Algorithm-specific overrides (adv_estimator, etc.) come from run_mt.sh.
+hydra:
+  searchpath:
+    - pkg://verl.trainer.config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+data:
+  max_prompt_length: 16384
+  max_response_length: 16384
+  train_batch_size: 64
+  return_raw_chat: True
+
+actor_rollout_ref:
+  hybrid_engine: True
+  rollout:
+    name: sglang
+    mode: async
+    multi_turn:
+      enable: True
+      max_user_turns: 10
+    agent:
+      default_agent_loop: ifgym_agent
+      agent_loop_config_path: null  # set via CLI to apertus/ifgym/ifgym_agent.yaml
+      num_workers: 8

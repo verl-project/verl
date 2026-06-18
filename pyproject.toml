@@ -30,7 +30,11 @@ requires-python = ">=3.10"
 # Note: While the formatter will attempt to format lines such that they remain within the line-length,
 # it isn't a hard upper bound, and formatted lines may exceed the line-length.
 line-length = 120
-exclude = ["scripts/legacy_model_merger.py"]
+exclude = [
+    "scripts/legacy_model_merger.py",
+    # Vendored verbatim from swiss-ai/if-gym; keep diff-able with upstream.
+    "apertus/ifgym/ifgym_instructions",
+]
 
 [tool.ruff.lint]
 isort = {known-first-party = ["verl"]}

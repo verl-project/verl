@@ -1205,6 +1205,33 @@ class AgentLoopWorker:
             rm_scores[torch.arange(response_mask.size(0)), response_length] = (
                 torch.tensor(scores, dtype=torch.float32)
             )
+            # Per-turn credit assignment: if an input carries non-empty
+            # ``turn_scores`` (e.g. the IFGym multi-turn agent loop), place each
+            # turn score at the last token of its assistant turn instead of one
+            # scalar at the last response token. Assistant turns are the
+            # contiguous runs of 1s in ``response_mask``; this matches how the
+            # ifgym_per_turn_* advantage estimators re-segment turns. Gated on
+            # ``turn_scores`` so single/tool agent loops are unaffected.
+            for i, input in enumerate(inputs):
+                ts = (input.extra_fields or {}).get("turn_scores")
+                if not ts:
+                    continue
+                row = response_mask[i]
+                ends, in_run = [], False
+                for p in range(row.shape[-1]):
+                    m = int(row[p].item())
+                    if m == 1 and not in_run:
+                        in_run = True
+                    elif m == 0 and in_run:
+                        ends.append(p - 1)
+                        in_run = False
+                if in_run:
+                    ends.append(row.shape[-1] - 1)
+                if not ends:
+                    continue
+                rm_scores[i].zero_()
+                for j in range(min(len(ends), len(ts))):
+                    rm_scores[i, ends[j]] = float(ts[j])
             batch["rm_scores"] = rm_scores
 
         non_tensor_batch = {

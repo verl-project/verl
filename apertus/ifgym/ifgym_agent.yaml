@@ -1,0 +1,4 @@
+# Agent loop registry for the IFGym multi-turn recipe.
+# Referenced via actor_rollout_ref.rollout.agent.agent_loop_config_path.
+- name: ifgym_agent
+  _target_: apertus.ifgym.ifgym_agent_loop.IfgymAgentLoop

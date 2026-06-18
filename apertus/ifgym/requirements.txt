@@ -1,0 +1,10 @@
+# Extra deps for the IFGym instruction-following constraint checker
+# (apertus/ifgym/ifgym_instructions). Install on top of verl's requirements.
+immutabledict
+nltk
+langdetect
+syllapy
+pythainlp
+absl-py
+# nltk needs the punkt tokenizer data at runtime:
+#   python -c "import nltk; nltk.download('punkt'); nltk.download('punkt_tab')"
