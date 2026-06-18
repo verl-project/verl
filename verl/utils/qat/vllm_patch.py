@@ -28,6 +28,7 @@ from typing import Optional
 from unittest.mock import patch
 
 import torch
+from packaging import version
 from torch.nn import Parameter
 
 from verl.utils.device import get_device_name
@@ -275,6 +276,57 @@ def _check_first_call(layer: torch.nn.Module) -> bool:
     return count == 0
 
 
+def _is_vllm_ge_012() -> bool:
+    import vllm
+
+    return version.parse(vllm.__version__) >= version.parse("0.12.0")
+
+
+# NOTE: a wrapper of vllm._custom_ops.gptq_marlin_repack
+# which passes arguments based on vllm version compatibility
+# `is_a_8bit` is an argument proposed after vllm v0.12.0
+def _gptq_marlin_repack(
+    ops,
+    b_q_weight: torch.Tensor,
+    perm: torch.Tensor,
+    size_k: int,
+    size_n: int,
+    num_bits: int,
+    is_a_8bit: bool = False,
+):
+    """Call gptq_marlin_repack across vLLM versions."""
+    kwargs = {
+        "b_q_weight": b_q_weight,
+        "perm": perm,
+        "size_k": size_k,
+        "size_n": size_n,
+        "num_bits": num_bits,
+    }
+    if _is_vllm_ge_012():
+        kwargs["is_a_8bit"] = is_a_8bit
+    return ops.gptq_marlin_repack(**kwargs)
+
+
+def _marlin_permute_scales(
+    marlin_permute_scales,
+    s: torch.Tensor,
+    size_k: int,
+    size_n: int,
+    group_size: int,
+    is_a_8bit: bool = False,
+):
+    """Call marlin_permute_scales across vLLM versions."""
+    kwargs = {
+        "s": s,
+        "size_k": size_k,
+        "size_n": size_n,
+        "group_size": group_size,
+    }
+    if _is_vllm_ge_012():
+        kwargs["is_a_8bit"] = is_a_8bit
+    return marlin_permute_scales(**kwargs)
+
+
 # Dense W4A16 Patches
 def patched_w4a16_process_weights_after_loading(self, layer: torch.nn.Module) -> None:
     """Patched process_weights_after_loading for W4A16 Dense layer."""
@@ -318,7 +370,8 @@ def patched_w4a16_process_weights_after_loading(self, layer: torch.nn.Module) ->
     # Convert to Marlin format
     perm = torch.empty(0, dtype=torch.int, device=device)
     qweight = weight_packed_hf.view(torch.int32).T.contiguous()
-    marlin_weight = ops.gptq_marlin_repack(
+    marlin_weight = _gptq_marlin_repack(
+        ops,
         b_q_weight=qweight,
         perm=perm,
         size_k=part_size_k,
@@ -328,7 +381,8 @@ def patched_w4a16_process_weights_after_loading(self, layer: torch.nn.Module) ->
     )
 
     weight_scale = weight_scale_hf.T.contiguous().to(param_dtype)
-    weight_scale_permuted = marlin_permute_scales(
+    weight_scale_permuted = _marlin_permute_scales(
+        marlin_permute_scales,
         s=weight_scale,
         size_k=part_size_k,
         size_n=part_size_n,
@@ -459,7 +513,8 @@ def _marlin_repack_experts(packed, perm, size_k, size_n, num_experts):
     for i in range(num_experts):
         qweight = packed[i].view(torch.int32).T.contiguous()
         result.append(
-            ops.gptq_marlin_repack(
+            _gptq_marlin_repack(
+                ops,
                 b_q_weight=qweight,
                 perm=perm,
                 size_k=size_k,
@@ -481,7 +536,8 @@ def _marlin_process_scales_experts(scale_hf, param_dtype, size_k, size_n, group_
     result = []
     scales = scale_hf.to(param_dtype)
     for i in range(num_experts):
-        s = marlin_permute_scales(
+        s = _marlin_permute_scales(
+            marlin_permute_scales,
             s=scales[i].T,
             size_k=size_k,
             size_n=size_n,
