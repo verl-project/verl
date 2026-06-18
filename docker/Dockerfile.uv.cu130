@@ -264,15 +264,26 @@ ENV UV_HTTP_TIMEOUT=500 \
 ENV VLLM_ENABLE_CUDA_COMPATIBILITY=0
 
 # ---------------------------------------------------------------------------
-# deps: dependency metadata only (pyproject.toml + uv.lock) plus the uv driver.
-# Copying these *before* the full source keeps the expensive `prefetch` cache
-# bake below from being invalidated by unrelated source edits — it rebuilds
-# only when the dependencies actually change. (Verified sufficient: `uv sync
-# --frozen --no-install-project` needs only these two files.)
+# deps: dependency metadata + the uv driver + the extra inputs `uv lock` needs
+# to build verl's OWN metadata. Staged *before* the full source so the expensive
+# `prefetch` cache bake below is invalidated only when the dependencies actually
+# change, not on unrelated source edits.
+#
+# verl's [project] (pyproject.toml) declares version/dependencies/authors/urls
+# as DYNAMIC, supplied by setup.py + verl/version/version — so pyproject.toml +
+# uv.lock alone are NOT enough: the `prefetch` step below first runs `uv lock`,
+# which drives the setuptools build backend to extract that metadata and fails
+# without those files ("No configuration found for dynamic 'authors'"). Stage
+# them too. The verl *package* tree is still absent (find_packages() returns [],
+# fine for metadata-only resolution); README.md is only read for the package
+# long-description, so a stub stands in — which also keeps README edits from
+# busting the prefetch cache. (`final` COPYs the real verl tree over these.)
 # ---------------------------------------------------------------------------
 FROM base AS deps
 WORKDIR /workspace/verl
-COPY pyproject.toml uv.lock manage_envs.py ./
+COPY pyproject.toml uv.lock manage_envs.py setup.py ./
+COPY verl/version/version ./verl/version/version
+RUN printf 'verl\n' > README.md
 
 # ---------------------------------------------------------------------------
 # prefetch: BAKE this image's uv cache. `manage_envs.py prefetch cu130 dev`
