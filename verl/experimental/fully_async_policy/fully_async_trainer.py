@@ -253,6 +253,23 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         await self._setup_checkpoint_manager()
         await self._setup_hybrid_checkpoint_manager()
 
+    @staticmethod
+    def set_total_training_steps_for_optimizer(config, total_training_steps):
+
+        try:
+            OmegaConf.set_struct(config, True)
+            with open_dict(config):
+                if OmegaConf.select(config, "actor_rollout_ref.actor.optim"):
+                    config.actor_rollout_ref.actor.optim.total_training_steps = total_training_steps
+                if OmegaConf.select(config, "critic.optim"):
+                    config.critic.optim.total_training_steps = total_training_steps
+            print(
+                f"[FullyAsyncTrainer] set_total_training_steps_for_optimizer: "
+                f"config.optim.total_training_steps = {total_training_steps}"
+            )
+        except Exception as e:
+            print(f"Warning: Could not set total_training_steps in config. Structure missing? Error: {e}")
+
     def set_total_train_steps_for_progress_bar(self, total_training_steps):
         self.total_train_steps = total_training_steps
         self.progress_bar = tqdm(total=self.total_train_steps, initial=0, desc="Training Progress")

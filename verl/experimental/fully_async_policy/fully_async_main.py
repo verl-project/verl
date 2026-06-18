@@ -20,7 +20,7 @@ from pprint import pprint
 
 import hydra
 import ray
-from omegaconf import OmegaConf, open_dict
+from omegaconf import OmegaConf
 
 from verl.experimental.fully_async_policy.fully_async_rollouter import FullyAsyncRollouter
 from verl.experimental.fully_async_policy.fully_async_trainer import FullyAsyncTrainer
@@ -77,7 +77,7 @@ class FullyAsyncTaskRunner:
         self._init_rollouter_before_trainer(config)
 
         optim_total_train_steps = ray.get(self.components["rollouter"].get_optim_total_train_steps.remote())
-        self._set_total_training_steps_for_optimizer(config, optim_total_train_steps)
+        FullyAsyncTrainer.set_total_training_steps_for_optimizer(config, optim_total_train_steps)
 
         print("[ASYNC MAIN] Creating FullyAsyncTrainer first (needed for hybrid worker group injection)...")
         self._create_trainer(config)
@@ -118,17 +118,6 @@ class FullyAsyncTaskRunner:
             ray.get(self.components["trainer"]._fit_validate.remote(True))
 
         print("[ASYNC MAIN] All components initialized successfully")
-
-    def _set_total_training_steps_for_optimizer(self, config, optim_total_train_steps):
-        try:
-            OmegaConf.set_struct(config, True)
-            with open_dict(config):
-                if OmegaConf.select(config, "actor_rollout_ref.actor.optim"):
-                    config.actor_rollout_ref.actor.optim.total_training_steps = optim_total_train_steps
-                if OmegaConf.select(config, "critic.optim"):
-                    config.critic.optim.total_training_steps = optim_total_train_steps
-        except Exception as e:
-            print(f"Warning: Could not set total_training_steps in config. Structure missing? Error: {e}")
 
     def _init_rollouter_before_trainer(self, config) -> None:
         """
