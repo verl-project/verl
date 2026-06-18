@@ -95,18 +95,18 @@ class MooncakeCheckpointEngine(CheckpointEngine):
         return {"addr": self.hostname, "port": port}
 
     @classmethod
-    def build_topology(cls, trainer_world_size: int, rollout_world_size: int, metadatas: list[dict]):
-        trainer_kwargs = {
-            "rank": [0] + [-1] * (trainer_world_size - 1),
-            "world_size": [rollout_world_size + 1] * trainer_world_size,
-            "metadata": [metadatas[0]] * trainer_world_size,
+    def build_topology(cls, actor_wg_world_size: int, rollout_world_size: int, metadatas: list[dict]):
+        actor_wg_kwargs = {
+            "rank": [0] + [-1] * (actor_wg_world_size - 1),
+            "world_size": [rollout_world_size + 1] * actor_wg_world_size,
+            "metadata": [metadatas[0]] * actor_wg_world_size,
         }
         rollout_kwargs = {
             "rank": list(range(1, rollout_world_size + 1)),
             "world_size": [rollout_world_size + 1] * rollout_world_size,
             "metadata": [metadatas[0]] * rollout_world_size,
         }
-        return trainer_kwargs, rollout_kwargs
+        return actor_wg_kwargs, rollout_kwargs
 
     def init_process_group(self, rank: int, world_size: int, metadata: dict[str, Any]):
         self.rank = rank
@@ -147,7 +147,11 @@ class MooncakeCheckpointEngine(CheckpointEngine):
             await asyncio.sleep(0)
 
     @torch.no_grad()
-    async def send_weights(self, weights: Generator[tuple[str, torch.Tensor], None, None]):
+    async def send_weights(
+        self,
+        weights: Generator[tuple[str, torch.Tensor], None, None],
+        global_steps: int | None = None,
+    ):
         """Send weights using Mooncake TransferEngine"""
         if self.rank < 0:
             for name, weight in weights:
@@ -219,7 +223,10 @@ class MooncakeCheckpointEngine(CheckpointEngine):
         )
 
     @torch.no_grad()
-    async def receive_weights(self) -> AsyncGenerator[tuple[str, torch.Tensor], None]:
+    async def receive_weights(
+        self,
+        global_steps: int | None = None,
+    ) -> AsyncGenerator[tuple[str, torch.Tensor], None]:
         """Receive weights using Mooncake TransferEngine"""
         start_time = time.time()
         total_bytes = 0

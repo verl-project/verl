@@ -21,6 +21,8 @@ from pathlib import Path
 import pytest
 import torch
 
+import verl.utils.device as device_module
+
 
 def _load_mcore_util_with_stubbed_megatron(monkeypatch, tp_size: int = 4):
     megatron = types.ModuleType("megatron")
@@ -39,6 +41,7 @@ def _load_mcore_util_with_stubbed_megatron(monkeypatch, tp_size: int = 4):
     monkeypatch.setitem(sys.modules, "megatron.core", core)
     monkeypatch.setitem(sys.modules, "megatron.core.parallel_state", parallel_state)
     monkeypatch.setitem(sys.modules, "megatron.core.packed_seq_params", packed_seq_params)
+    monkeypatch.setattr(device_module, "is_npu_available", False)
 
     util_path = Path(__file__).parents[2] / "verl" / "models" / "mcore" / "util.py"
     spec = importlib.util.spec_from_file_location("mcore_util_regression", util_path)

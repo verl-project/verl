@@ -468,6 +468,28 @@ def mcore_model_parallel_config(
     )
 
 
+def _can_safely_resize_storage(tensor: torch.Tensor) -> bool:
+    """Check whether it is safe to call ``storage().resize_(0)`` on *tensor*.
+
+    Resizing the underlying storage to zero immediately frees the GPU memory
+    but also invalidates **every** tensor that shares the same storage
+    (e.g. views, tied weights stored as different Python objects, or slices
+    of a DDP flat buffer).  This function returns True only when the tensor
+    exclusively owns its entire storage, making ``resize_(0)`` safe.
+    """
+    return (
+        # Storage holds exactly the elements of this tensor – no room for
+        # other tensors sharing the same storage.
+        tensor.storage().size() == tensor.numel()
+        # Tensor starts at the beginning of the storage – not a slice/view
+        # offset into a larger buffer.
+        and tensor.storage_offset() == 0
+        # Tensor is contiguous in memory – rules out transposed or
+        # non-contiguous views that only occupy part of the storage layout.
+        and tensor.is_contiguous()
+    )
+
+
 @torch.no_grad()
 def offload_megatron_model_to_cpu(models):
     """
@@ -538,9 +560,16 @@ def offload_megatron_model_to_cpu(models):
         else:
             # we need this for ref module
             for _, param in model_chunk.named_parameters():
-                param.data = param.data.to("cpu", non_blocking=True)
+                old_data = param.data
+                param.data = param.data.to("cpu")
+                if _can_safely_resize_storage(old_data):
+                    old_data.storage().resize_(0)
                 if param.grad is not None:
-                    param.grad = param.grad.to("cpu", non_blocking=True)
+                    old_grad = param.grad
+                    param.grad = param.grad.to("cpu")
+                    if _can_safely_resize_storage(old_grad):
+                        old_grad.storage().resize_(0)
+
     gc.collect()
     get_torch_device().empty_cache()
 
@@ -704,6 +733,10 @@ def offload_megatron_optimizer(optimizers):
                         v["exp_avg"] = v["exp_avg"].to("cpu", non_blocking=True)
                     if "exp_avg_sq" in v:
                         v["exp_avg_sq"] = v["exp_avg_sq"].to("cpu", non_blocking=True)
+                    # Offload additional optimizer state that is stored under
+                    # "master_param" when use_precision_aware_optimizer=True.
+                    if "master_param" in v:
+                        v["master_param"] = v["master_param"].to("cpu", non_blocking=True)
 
         try:
             # Free TransformerEngine's dummy weight gradients cache
@@ -742,25 +775,155 @@ def load_megatron_optimizer(optimizers):
                         v["exp_avg"] = v["exp_avg"].to(get_device_id(), non_blocking=True)
                     if "exp_avg_sq" in v:
                         v["exp_avg_sq"] = v["exp_avg_sq"].to(get_device_id(), non_blocking=True)
+                    # Load additional optimizer state that is stored under
+                    # "master_param" when use_precision_aware_optimizer=True.
+                    if "master_param" in v:
+                        v["master_param"] = v["master_param"].to(get_device_id(), non_blocking=True)
         gc.collect()
         get_torch_device().empty_cache()
 
 
-def get_dist_checkpoint_path(checkpoint_path):
+# ---------------------------------------------------------------------------
+# Megatron checkpoint layout
+# ---------------------------------------------------------------------------
+#
+# Each Megatron checkpoint directory (``local_path``) has the following shape::
+#
+#     local_path/
+#     ├── ckpt_contents.json           # manifest (authoritative mapping)
+#     ├── transformer_config.json      # rank-0, when 'extra' is saved
+#     ├── model/
+#     │   ├── huggingface/             # mbridge-saved HF weights + config + tokenizer
+#     │   └── dist_ckpt/               # Megatron sharded model shards (mbridge off or PEFT)
+#     ├── optimizer/
+#     │   └── dist_ckpt/               # optimizer state + lr_scheduler
+#     └── extra/
+#         └── dist_ckpt/               # rng_state
+#
+# All helpers below return the canonical path for a given component.  They
+# do not check whether the directory contains data — callers decide whether
+# to read it based on the manifest / save_contents.
+
+
+_MODEL_SUBDIR = "model"
+_OPTIMIZER_SUBDIR = "optimizer"
+_EXTRA_SUBDIR = "extra"
+_DIST_CKPT_SUBDIR = "dist_ckpt"
+_HUGGINGFACE_SUBDIR = "huggingface"
+
+
+def get_model_checkpoint_path(checkpoint_path):
+    """Directory holding model-weight artifacts (HF and/or Megatron shards)."""
     local_mkdir_safe(checkpoint_path)
-    local_mkdir_safe(os.path.join(checkpoint_path, "dist_ckpt"))
-    return os.path.join(checkpoint_path, "dist_ckpt")
+    p = os.path.join(checkpoint_path, _MODEL_SUBDIR)
+    local_mkdir_safe(p)
+    return p
+
+
+def get_optimizer_checkpoint_path(checkpoint_path):
+    """Directory holding optimizer + lr_scheduler dist_checkpointing shards."""
+    local_mkdir_safe(checkpoint_path)
+    p = os.path.join(checkpoint_path, _OPTIMIZER_SUBDIR)
+    local_mkdir_safe(p)
+    return p
+
+
+def get_extra_checkpoint_path(checkpoint_path):
+    """Directory holding 'extra' artifacts (rng_state)."""
+    local_mkdir_safe(checkpoint_path)
+    p = os.path.join(checkpoint_path, _EXTRA_SUBDIR)
+    local_mkdir_safe(p)
+    return p
+
+
+def get_model_dist_checkpoint_path(checkpoint_path):
+    """``model/dist_ckpt/`` — used when mbridge is disabled or for PEFT adapter shards."""
+    p = os.path.join(get_model_checkpoint_path(checkpoint_path), _DIST_CKPT_SUBDIR)
+    local_mkdir_safe(p)
+    return p
+
+
+def get_optimizer_dist_checkpoint_path(checkpoint_path):
+    """``optimizer/dist_ckpt/`` — optimizer + lr_scheduler dist_checkpointing directory."""
+    p = os.path.join(get_optimizer_checkpoint_path(checkpoint_path), _DIST_CKPT_SUBDIR)
+    local_mkdir_safe(p)
+    return p
+
+
+def get_extra_dist_checkpoint_path(checkpoint_path):
+    """``extra/dist_ckpt/`` — rng_state dist_checkpointing directory."""
+    p = os.path.join(get_extra_checkpoint_path(checkpoint_path), _DIST_CKPT_SUBDIR)
+    local_mkdir_safe(p)
+    return p
 
 
 def get_hf_model_checkpoint_path(checkpoint_path):
-    local_mkdir_safe(checkpoint_path)
-    local_mkdir_safe(os.path.join(checkpoint_path, "huggingface"))
-    return os.path.join(checkpoint_path, "huggingface")
+    """``model/huggingface/`` — HuggingFace-format weights, config, and tokenizer.
+
+    Historically this lived at ``<checkpoint>/huggingface``; as of layout
+    schema v2 it is nested under ``model/``.  See
+    :py:func:`verl.utils.checkpoint.megatron_checkpoint_manager.MegatronCheckpointManager._raise_for_old_layout`
+    for old-layout detection.
+    """
+    p = os.path.join(get_model_checkpoint_path(checkpoint_path), _HUGGINGFACE_SUBDIR)
+    local_mkdir_safe(p)
+    return p
 
 
 def get_transformer_config_checkpoint_path(checkpoint_path):
+    """``transformer_config.json`` at the checkpoint root (written by rank 0)."""
     os.makedirs(checkpoint_path, exist_ok=True)
     return os.path.join(checkpoint_path, "transformer_config.json")
+
+
+def get_checkpoint_contents_manifest_path(checkpoint_path):
+    """Path to the ``ckpt_contents.json`` manifest describing saved contents.
+
+    The manifest is a human- and tool-readable mapping from logical content
+    (e.g. ``model``, ``optimizer``, ``hf_model``) to its on-disk location
+    inside ``checkpoint_path``.  Users looking for a specific artifact in a
+    Megatron checkpoint should consult this file first — see
+    ``docs/advance/checkpoint.rst`` ("Locating saved contents") for the
+    schema, and
+    :py:meth:`verl.utils.checkpoint.megatron_checkpoint_manager.MegatronCheckpointManager._build_checkpoint_manifest`
+    for the implementation.
+    """
+    os.makedirs(checkpoint_path, exist_ok=True)
+    return os.path.join(checkpoint_path, "ckpt_contents.json")
+
+
+# --- Legacy (pre-v2) helpers ------------------------------------------------
+#
+# Old layouts put ``dist_ckpt/`` and ``huggingface/`` directly at the
+# checkpoint root.  These helpers are retained **only** so that the
+# migration script (``scripts/migrate_megatron_checkpoint_layout.py``) and
+# the old-layout detector can address those paths without hardcoding
+# literals.  New code must not call them.
+
+
+def get_legacy_dist_checkpoint_path(checkpoint_path):
+    return os.path.join(checkpoint_path, _DIST_CKPT_SUBDIR)
+
+
+def get_legacy_hf_model_checkpoint_path(checkpoint_path):
+    return os.path.join(checkpoint_path, _HUGGINGFACE_SUBDIR)
+
+
+def get_dist_checkpoint_path(checkpoint_path):  # pragma: no cover - back-compat shim
+    """Deprecated — kept only so stale imports fail loudly via the layout detector.
+
+    In the v2 layout there is no longer a single ``dist_ckpt/`` directory;
+    optimizer, extra, and (optionally) model live in separate subtrees.
+    Use the explicit ``get_{model,optimizer,extra}_dist_checkpoint_path``
+    helpers instead.
+    """
+    raise RuntimeError(
+        "get_dist_checkpoint_path is deprecated. The Megatron checkpoint layout "
+        "now splits optimizer/extra/(model) into separate directories. Use the "
+        "explicit helpers: get_model_dist_checkpoint_path, "
+        "get_optimizer_dist_checkpoint_path, get_extra_dist_checkpoint_path. "
+        "To migrate an old checkpoint, run scripts/migrate_megatron_checkpoint_layout.py."
+    )
 
 
 def convert_megatron_model_to_transformers_model(
@@ -1420,6 +1583,12 @@ def get_megatron_module_device(models: list[Any]) -> str:
             return "cpu"
 
     buffer = model_chunk.buffers[0]
+    if buffer.param_data is None:
+        # use_distributed_optimizer=False: no flat param buffer, check module params directly
+        try:
+            return next(model_chunk.module.parameters()).device.type
+        except StopIteration:
+            return "cpu"
     if buffer.param_data.storage().size() == 0:
         return "cpu"
     else:
@@ -1525,9 +1694,9 @@ def _set_mtp_num_layers(hf_config, value: int):
     """Set MTP layer count in the appropriate config field."""
     if hasattr(hf_config, "num_nextn_predict_layers"):
         hf_config.num_nextn_predict_layers = value
-    elif hasattr(hf_config, "mtp_num_hidden_layers"):
+    if hasattr(hf_config, "mtp_num_hidden_layers"):
         hf_config.mtp_num_hidden_layers = value
-    elif hasattr(hf_config, "text_config") and hasattr(hf_config.text_config, "mtp_num_hidden_layers"):
+    if hasattr(hf_config, "text_config") and hasattr(hf_config.text_config, "mtp_num_hidden_layers"):
         hf_config.text_config.mtp_num_hidden_layers = value
 
 
@@ -1536,21 +1705,25 @@ def check_mtp_config(model_config: HFModelConfig, engine_config: McoreEngineConf
     Check and configure MTP (Multi-Token Prediction) settings.
 
     Cases:
-        - mtp.enable == False and no MTP layers: return directly
-        - mtp.enable == False and has MTP layers: set num_nextn_predict_layers = 0
-        - mtp.enable == True and has MTP layers: configure override_transformer_config
+        - mtp.enable == False and no MTP layers: force provider MTP config to None
+        - mtp.enable == False and has MTP layers: clear HF MTP fields and force provider MTP config to None
         - mtp.enable == True and no MTP layers: raise ValueError
+        - mtp.enable == True and has MTP layers: configure override_transformer_config
     """
     hf_config = model_config.hf_config
     mtp_num_layers = _get_mtp_num_layers(hf_config)
     has_mtp = mtp_num_layers > 0
     enable_mtp = model_config.mtp.enable
 
-    if not enable_mtp and not has_mtp:
-        return
-    elif not enable_mtp and has_mtp:
+    if not enable_mtp:
         _set_mtp_num_layers(hf_config, 0)
-        engine_config.override_transformer_config["mtp_num_layers"] = 0
+
+        # The non-vanilla Megatron-Bridge path reloads the HF config from local_path.
+        # Force the provider override so MTP remains disabled after that reload.
+        engine_config.override_transformer_config["mtp_num_layers"] = None
+        engine_config.override_transformer_config.pop("mtp_loss_scaling_factor", None)
+        return
+
     elif enable_mtp and not has_mtp:
         raise ValueError("enable mtp while model has no mtp layer, please use a model with mtp layer")
     elif enable_mtp and has_mtp:

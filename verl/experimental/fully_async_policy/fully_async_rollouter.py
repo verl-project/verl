@@ -17,7 +17,6 @@ import logging
 import os
 import time
 from pprint import pformat
-from typing import Any, Optional
 
 import numpy as np
 import ray
@@ -34,120 +33,21 @@ from verl.experimental.fully_async_policy.message_queue import MessageQueueClien
 from verl.experimental.separation.ray_trainer import SeparateRayPPOTrainer
 from verl.protocol import DataProto
 from verl.single_controller.ray import RayResourcePool, RayWorkerGroup, ResourcePoolManager
-from verl.trainer.ppo.utils import need_reward_model
-from verl.utils import normalize_token_ids
+from verl.trainer.ppo.utils import (
+    create_rl_dataset,
+    create_rl_sampler,
+    need_reward_model,
+)
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.profiler import marked_timer
-from verl.utils.rollout_trace import rollout_trace_op
+from verl.utils.skip import SkipManager
 from verl.utils.tracking import ValidationGenerationsLogger
-from verl.workers.rollout.llm_server import LLMServerClient, LLMServerManager
-from verl.workers.rollout.replica import RolloutReplica, TokenOutput
+from verl.workers.rollout.llm_server import FullyAsyncLLMServerClient, LLMServerManager
+from verl.workers.rollout.replica import RolloutReplica
 from verl.workers.rollout.utils import update_prometheus_config
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
-
-
-class FullyAsyncLLMServerClient(LLMServerClient):
-    """FullyLLMServerClient supports resume generation on partial rollout, making rollout interruption
-    invisible to the AgentLoop.
-    """
-
-    @rollout_trace_op
-    async def generate(
-        self,
-        request_id,
-        *,
-        prompt_ids: list[int],
-        sampling_params: dict[str, Any],
-        image_data: Optional[list[Any]] = None,
-        video_data: Optional[list[Any]] = None,
-        audio_data: Optional[list[Any]] = None,
-        mm_processor_kwargs: Optional[dict[str, Any]] = None,
-    ) -> TokenOutput:
-        """Generate tokens from prompt ids.
-
-        Args:
-            request_id (str): request id for sticky session.
-            prompt_ids (List[int]): List of prompt token ids.
-            sampling_params (Dict[str, Any]): Sampling parameters for the chat completion.
-            image_data (Optional[List[Any]]): Image data for the chat completion.
-            video_data (Optional[List[Any]]): Video data for the chat completion.
-            audio_data (Optional[List[Any]]): Audio data for the chat completion.
-            mm_processor_kwargs (Optional[Dict[str, Any]]): Multimodal processor kwargs.
-
-        Returns:
-            TokenOutput: token output
-        """
-        prompt_ids = normalize_token_ids(prompt_ids)
-
-        limit_key = None
-        if "max_tokens" in sampling_params:
-            limit_key = "max_tokens"
-        elif "max_new_tokens" in sampling_params:
-            limit_key = "max_new_tokens"
-        original_max_tokens = sampling_params.get(limit_key) if limit_key else None
-
-        final_output = TokenOutput(
-            token_ids=[],
-            log_probs=[],
-            num_preempted=0,
-        )
-        min_global_steps, max_global_steps = None, None
-
-        while True:
-            # 1. generate tokens
-            output = await super().generate(
-                request_id=request_id,
-                prompt_ids=prompt_ids + final_output.token_ids,
-                sampling_params=sampling_params,
-                image_data=image_data,
-                video_data=video_data,
-                audio_data=audio_data,
-                mm_processor_kwargs=mm_processor_kwargs,
-            )
-
-            # 2. merge output into final_output
-            final_output.token_ids.extend(output.token_ids)
-            if output.log_probs is not None:
-                final_output.log_probs.extend(output.log_probs)
-            # On partial rollout resume the model version may differ, so keep
-            # existing routing and only append routing for newly generated tokens.
-            if output.routed_experts is not None and len(output.token_ids) > 0:
-                if final_output.routed_experts is None:
-                    final_output.routed_experts = output.routed_experts
-                else:
-                    final_output.routed_experts = torch.cat(
-                        [final_output.routed_experts, output.routed_experts[-len(output.token_ids) :]],
-                        dim=0,
-                    )
-            if output.num_preempted is not None:
-                final_output.num_preempted += output.num_preempted
-            final_output.stop_reason = output.stop_reason
-
-            # update model weights version
-            global_steps = output.extra_fields.get("global_steps", None)
-            if min_global_steps is None:
-                min_global_steps = global_steps
-            max_global_steps = global_steps
-
-            # 3. update max_new_tokens
-            if original_max_tokens is not None:
-                sampling_params[limit_key] = original_max_tokens - len(final_output.token_ids)
-                if len(final_output.token_ids) >= original_max_tokens:
-                    final_output.stop_reason = "length"
-                    break
-
-            # 4. check stop reason
-            if output.stop_reason not in ("aborted", "abort") or not self.config.async_training.partial_rollout:
-                break
-
-            await asyncio.sleep(1)
-
-        final_output.extra_fields["global_steps"] = global_steps
-        final_output.extra_fields["min_global_steps"] = min_global_steps
-        final_output.extra_fields["max_global_steps"] = max_global_steps
-        return final_output
 
 
 class FullyAsyncLLMServerManager(LLMServerManager):
@@ -367,6 +267,7 @@ class FullyAsyncLLMServerManager(LLMServerManager):
 
 
 class FullyAsyncAgentLoopManager(AgentLoopManager):
+    @SkipManager.annotate(role="async_rollout")
     async def generate_sequences_single(self, prompts: DataProto) -> DataProto:
         """Split input batch and dispatch to agent loop workers.
 
@@ -444,7 +345,6 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         # ==================== fully async config ====================
 
         print("[FullyAsyncRollouter] Creating datasets...")
-        from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler
         from verl.utils.dataset.rl_dataset import collate_fn
 
         train_dataset = create_rl_dataset(
@@ -701,6 +601,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         await self._create_reward_loop_manager()
         await self._create_teacher_model_manager()
         await self._init_async_rollout_manager()
+        SkipManager.init(self.config)
 
     async def _create_reward_loop_manager(self):
         """Create RewardLoopManager for the rollouter.
@@ -933,8 +834,13 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
     async def _process_single_sample_streaming(self, rollout_sample: RolloutSample):
         """Process a single sample streamingly"""
         # Calling asynchronous generation methods
+        # Embed sample_id into prompts for skip management
+        rollout_sample.full_batch.non_tensor_batch["uid"] = np.array(
+            [f"uid_{rollout_sample.sample_id}"] * len(rollout_sample.full_batch), dtype=object
+        )
         ret = await self.async_rollout_manager.generate_sequences_single(rollout_sample.full_batch)
         rollout_sample.full_batch = ret
+        # Re-set uid on output — agent loop worker returns a new DataProto without the input's non_tensor_batch
         rollout_sample.full_batch.non_tensor_batch["uid"] = np.array(
             [f"uid_{rollout_sample.sample_id}"] * len(rollout_sample.full_batch), dtype=object
         )

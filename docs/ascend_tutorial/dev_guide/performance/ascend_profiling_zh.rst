@@ -55,6 +55,8 @@ Last updated: 12/20/2025.
 
 -  analysis: 启用自动数据解析。
 -  discrete: 使用离散模式。
+-  profile_token_start：仅在 rollout role 下生效，用于指定 rollout 解码阶段的采集起始 response token；参数合法时生效（从 0 开始，满足 ``profile_token_end > profile_token_start``，且区间在 response 长度内）。
+-  profile_token_end：仅在 rollout role 下生效，用于指定 rollout 解码阶段的采集结束 response token（右边界不包含）；参数合法时生效（从 0 开始，满足 ``profile_token_end > profile_token_start``，且区间在 response 长度内）。
 
 示例
 ----
@@ -114,6 +116,9 @@ Last updated: 12/20/2025.
                tool_config:
                   npu:
                      discrete: True  # Agent Loop 模式下必须开启离散模式
+                     # 可选：按 response token 区间采集；不设置 start/stop 时采集整个 rollout 阶段
+                     profile_token_start: 12
+                     profile_token_end: 46
          # ref follow actor settings
 
 **Agent Loop 模式说明**：
@@ -138,7 +143,7 @@ Last updated: 12/20/2025.
 
 采集后的数据存放在用户设置的save_path下，可通过 `MindStudio Insight <https://www.hiascend.com/document/detail/zh/mindstudio/80RC1/GUI_baseddevelopmenttool/msascendinsightug/Insight_userguide_0002.html>`_ 工具进行可视化。
 
-另外在Linux环境下，MindStudio Insight工具提供了 `JupyterLab插件 <https://www.hiascend.com/document/detail/zh/mindstudio/82RC1/GUI_baseddevelopmenttool/msascendinsightug/Insight_userguide_0130.html>`_ 形态，提供更直观和交互式强的操作界面。JupyterLab插件优势如下：
+另外在Linux环境下，MindStudio Insight工具提供了 [JupyterLab插件](https://www.hiascend.com/document/detail/zh/mindstudio/82RC1/GUI_baseddevelopmenttool/msascendinsightug/Insight_userguide_0130.html) 形态，提供更直观和交互式强的操作界面。JupyterLab插件优势如下：
 
 - 无缝集成：支持在Jupyter环境中直接运行MindStudio Insight工具，无需切换平台，无需拷贝服务器上的数据，实现数据即采即用。
 - 快速启动：通过JupyterLab的命令行或图形界面，可快速启动MindStudio Insight工具。

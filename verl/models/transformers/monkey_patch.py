@@ -330,9 +330,11 @@ def apply_monkey_patch(
     try:
         num_attention_heads, num_key_value_heads = model.config.num_attention_heads, model.config.num_key_value_heads
     except AttributeError:
+        # Some multimodal configs nest text_config differently; fall back to get_text_config().
+        text_config = getattr(model.config, "text_config", None) or model.config.get_text_config()
         num_attention_heads, num_key_value_heads = (
-            model.config.text_config.num_attention_heads,
-            model.config.text_config.num_key_value_heads,
+            text_config.num_attention_heads,
+            text_config.num_key_value_heads,
         )
 
     assert num_attention_heads % ulysses_sp_size == 0, (
@@ -345,7 +347,10 @@ def apply_monkey_patch(
     )
 
     if is_trl_available():
-        from trl import AutoModelForCausalLMWithValueHead  # type: ignore
+        try:
+            from trl.experimental.ppo import AutoModelForCausalLMWithValueHead  # type: ignore
+        except ImportError:
+            from trl import AutoModelForCausalLMWithValueHead  # type: ignore
 
         def state_dict(self, *args, **kwargs):
             return torch.nn.Module.state_dict(self, *args, **kwargs)

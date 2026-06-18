@@ -1,8 +1,8 @@
 # 训练配置参数与指标说明
 
-Last updated: 05/12/2026.
+Last updated: 05/29/2026.
 
-verl 通过层级化的 YAML 配置文件管理所有参数，涉及到的所有配置文件均在 `verl\trainer\config` 目录下。
+verl 通过层级化的 YAML 配置文件管理所有参数，涉及到的所有配置文件均在 `verl/trainer/config` 目录下。
 
 ---
 
@@ -57,6 +57,7 @@ verl 通过层级化的 YAML 配置文件管理所有参数，涉及到的所有
 | `actor_rollout_ref.actor.grad_clip` | `1.0` | 梯度裁剪值 |
 | `actor_rollout_ref.actor.ulysses_sequence_parallel_size` | `1` | Ulysses 序列并行大小 |
 | `actor_rollout_ref.actor.entropy_from_logits_with_chunking` | `false` | 是否使用分块方式从 logits 计算熵 |
+| `actor_rollout_ref.actor.entropy_from_logits_chunk_size` | `2048` | 熵计算分块大小 |
 | `actor_rollout_ref.actor.entropy_checkpointing` | `false` | 是否对熵计算使用梯度检查点 |
 | `actor_rollout_ref.actor.use_remove_padding` | 引用自 `model.use_remove_padding` | 是否移除 padding |
 | `actor_rollout_ref.actor.calculate_sum_pi_squared` | `false` | 是否计算策略概率平方和 |
@@ -115,8 +116,6 @@ verl 通过层级化的 YAML 配置文件管理所有参数，涉及到的所有
 | `actor_rollout_ref.rollout.over_sample_rate` | `0` | 过采样率 |
 | `actor_rollout_ref.rollout.multi_stage_wake_up` | `false` | 是否启用多阶段唤醒 |
 | `actor_rollout_ref.rollout.calculate_log_probs` | `false` | 是否在 rollout 阶段计算 log probs |
-| `actor_rollout_ref.rollout.skip_rollout` | `false` | 是否跳过 rollout |
-| `actor_rollout_ref.rollout.skip_dump_dir` | `/tmp/rollout_dump` | 跳过 rollout 时的 dump 目录 |
 | `actor_rollout_ref.rollout.skip_tokenizer_init` | `true` | 是否跳过分词器初始化 |
 | `actor_rollout_ref.rollout.enable_rollout_routing_replay` | `false` | 是否启用 rollout 路由重放 |
 | `actor_rollout_ref.rollout.quantization` | `null` | 量化方式 |
@@ -225,16 +224,16 @@ verl 通过层级化的 YAML 配置文件管理所有参数，涉及到的所有
 | `critic.ppo_micro_batch_size_per_gpu` | `null` | 每 GPU 的 PPO micro batch 大小 |
 | `critic.use_dynamic_bsz` | 引用自 `actor.use_dynamic_bsz` | 是否使用动态 batch size |
 | `critic.ppo_max_token_len_per_gpu` | `32768` | 每 GPU 的 PPO 最大 token 长度 |
-| `critic.forward_max_token_len_per_gpu` | 引用自 `.ppo_max_token_len_per_gpu` | 前向计算每 GPU 最大 token 长度 |
+| `critic.forward_max_token_len_per_gpu` | 引用自 `critic.ppo_max_token_len_per_gpu` | 前向计算每 GPU 最大 token 长度 |
 | `critic.ppo_epochs` | 引用自 `actor.ppo_epochs` | PPO 更新轮数 |
 | `critic.shuffle` | 引用自 `actor.shuffle` | 是否 shuffle |
 | `critic.data_loader_seed` | `42` / 引用自 `actor.data_loader_seed` | 数据加载器随机种子 |
-| `critic.cliprange_value` | `0.5` | Critic 值函数裁剪范围，一般取值范围 [0.1, 0.3] |
+| `critic.cliprange_value` | `0.5` | Critic 值函数裁剪范围 |
 | `critic.loss_agg_mode` | 引用自 `actor.loss_agg_mode` | 损失聚合模式 |
 | `critic.grad_clip` | `1.0` | 梯度裁剪值 |
 | `critic.ulysses_sequence_parallel_size` | `1` | Ulysses 序列并行大小 |
-| `critic.forward_micro_batch_size` | 引用自 `.ppo_micro_batch_size` | 前向计算 micro batch 大小 |
-| `critic.forward_micro_batch_size_per_gpu` | 引用自 `.ppo_micro_batch_size_per_gpu` | 前向计算每 GPU micro batch 大小 |
+| `critic.forward_micro_batch_size` | 引用自 `critic.ppo_micro_batch_size` | 前向计算 micro batch 大小 |
+| `critic.forward_micro_batch_size_per_gpu` | 引用自 `critic.ppo_micro_batch_size_per_gpu` | 前向计算每 GPU micro batch 大小 |
 
 #### 1.1.14 Critic 模型配置
 
@@ -606,7 +605,7 @@ verl 通过层级化的 YAML 配置文件管理所有参数，涉及到的所有
 | 参数名 | 默认值 | 说明 |
 |--------|--------|------|
 | `checkpoint.save_contents` | `[model, optimizer, extra]` | Checkpoint 保存内容 |
-| `checkpoint.load_contents` | 引用自 `.save_contents` | Checkpoint 加载内容 |
+| `checkpoint.load_contents` | 引用自 `checkpoint.save_contents` | Checkpoint 加载内容 |
 | `checkpoint.async_save` | `false` | 是否异步保存 Checkpoint |
 | `checkpoint.mbridge_config` | `{}` | mBridge 配置 |
 

@@ -93,7 +93,7 @@ def init_agent_loop_manager(config: DictConfig) -> AgentLoopManager | RayWorkerG
     )
     checkpoint_manager = CheckpointEngineManager(
         config=omega_conf_to_dataclass(config.actor_rollout_ref.rollout.checkpoint_engine),
-        trainer=actor_rollout_wg,
+        actor_wg=actor_rollout_wg,
         replicas=llm_server_manager.get_replicas(),
     )
     checkpoint_manager.sleep_replicas()

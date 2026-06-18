@@ -1,7 +1,7 @@
 # Base image from NGC TensorRT-LLM, which includes a pre-installed TensorRT-LLM.
 # For available images, visit: https://nvidia.github.io/TensorRT-LLM/installation/containers.html
-# Use TRTLLM_BASE_IMAGE to specify the base image (default: release:1.2.0rc6)
-ARG TRTLLM_BASE_IMAGE=nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc14
+# Use TRTLLM_BASE_IMAGE to specify the base image (default: release:1.3.0rc15)
+ARG TRTLLM_BASE_IMAGE=nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc15
 FROM ${TRTLLM_BASE_IMAGE}
 
 # Clear TORCH_CUDA_ARCH_LIST inherited from the base image so that
@@ -34,10 +34,13 @@ RUN git clone -b v2.5.1 https://github.com/NVIDIA/gdrcopy.git && \
 
 # Install Python dependencies
 RUN pip3 install --no-cache-dir --no-deps trl==0.27.0 && \
-    pip3 install --no-cache-dir nvtx matplotlib liger_kernel cachetools && \
+    pip3 install --no-cache-dir transformers==5.3.0 && \
+    pip3 install --no-cache-dir nvtx matplotlib liger_kernel cachetools annotated-doc && \
     pip3 install --no-cache-dir cupy-cuda12x==14.0.1 && \
     pip install --no-cache-dir -U git+https://github.com/ISEEKYAN/mbridge.git@641a5a0 && \
-    pip install --no-deps --no-cache-dir git+https://github.com/NVIDIA/Megatron-LM.git@core_v0.16.0
+    pip install --no-deps --no-cache-dir megatron-core==0.17.0 && \
+    pip install --no-deps --no-cache-dir megatron-bridge==0.4.1 && \
+    pip install --no-deps --no-cache-dir nvidia-resiliency-ext==0.6.0
 
 
 # ==============================================================================
@@ -48,8 +51,55 @@ RUN pip uninstall -y verl
 RUN pip install "verl[mcore] @ git+https://github.com/verl-project/verl.git@v0.7.1"
 RUN pip uninstall -y verl
 
+# Bake in accelerate patches (idempotent; exits 1 if target text is missing)
+RUN python3 - <<'PY'
+from pathlib import Path
+# (a) lazy-import bnb in accelerate/utils/__init__.py
+path = Path("/usr/local/lib/python3.12/dist-packages/accelerate/utils/__init__.py")
+text = path.read_text()
+old = "from .bnb import has_4bit_bnb_layers, load_and_quantize_model\n"
+new = (
+    "def has_4bit_bnb_layers(*args, **kwargs):\n"
+    "    from .bnb import has_4bit_bnb_layers as _has_4bit_bnb_layers\n"
+    "    return _has_4bit_bnb_layers(*args, **kwargs)\n\n\n"
+    "def load_and_quantize_model(*args, **kwargs):\n"
+    "    from .bnb import load_and_quantize_model as _load_and_quantize_model\n"
+    "    return _load_and_quantize_model(*args, **kwargs)\n"
+)
+if old in text:
+    path.write_text(text.replace(old, new, 1)); print("Patched accelerate.utils bnb lazy imports")
+elif "def load_and_quantize_model(*args, **kwargs):" in text:
+    print("accelerate.utils bnb lazy import patch already present")
+else:
+    raise RuntimeError("accelerate.utils bnb import patch target not found")
+# (b) numpy multiarray lookup in accelerate/utils/other.py
+other_path = Path("/usr/local/lib/python3.12/dist-packages/accelerate/utils/other.py")
+text = other_path.read_text()
+old = (
+    'np_core = np._core if is_numpy_available("2.0.0") else np.core\n'
+    "TORCH_SAFE_GLOBALS = [\n"
+    "    # numpy arrays are just numbers, not objects, so we can reconstruct them safely\n"
+    "    np_core.multiarray._reconstruct,\n"
+)
+new = (
+    'np_core = np._core if is_numpy_available("2.0.0") else np.core\n'
+    "np_multiarray = getattr(np_core, \"multiarray\", None)\n"
+    "if np_multiarray is None:\n"
+    "    np_multiarray = np_core._multiarray_umath\n"
+    "TORCH_SAFE_GLOBALS = [\n"
+    "    # numpy arrays are just numbers, not objects, so we can reconstruct them safely\n"
+    "    np_multiarray._reconstruct,\n"
+)
+if old in text:
+    other_path.write_text(text.replace(old, new, 1)); print("Patched accelerate.utils.other numpy multiarray lookup")
+elif "np_multiarray = getattr(np_core" in text:
+    print("accelerate.utils.other numpy multiarray patch already present")
+else:
+    raise RuntimeError("accelerate.utils.other numpy patch target not found")
+PY
+RUN python3 -c "import transformers, accelerate; print('transformers:', transformers.__version__, 'accelerate:', accelerate.__version__)"
 
-# Pin Ray to a version compatible with TRT-LLM 1.3.0rc14
+# Pin Ray to a version compatible with TRT-LLM 1.3.0rc15
 RUN pip install --no-cache-dir "ray[default]==2.54.1"
 
 # ==============================================================================

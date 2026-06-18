@@ -77,7 +77,8 @@ jobs:
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
           pip install -r docs/requirements-docs.txt
-
+      - name: Check final pip list
+          pip3 list
       - name: Run doc make html
         run: |
           cd docs 

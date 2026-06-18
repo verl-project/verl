@@ -45,6 +45,7 @@ from verl.utils.megatron.router_replay_utils import (
 )
 from verl.utils.megatron.tensor_parallel import (
     vocab_parallel_entropy,
+    vocab_parallel_entropy_with_chunking,
     vocab_parallel_log_probs_from_logits,
     vocab_parallel_sum_pi_squared,
 )
@@ -221,7 +222,10 @@ class MegatronEngine(BaseEngine):
             for key, value in override_transformer_config.items():
                 provider_overrides[key] = value
             if self.enable_routing_replay:
-                provider_overrides["enable_routing_replay"] = True
+                if hasattr(provider, "moe_enable_routing_replay"):
+                    provider_overrides["moe_enable_routing_replay"] = True
+                else:
+                    provider_overrides["enable_routing_replay"] = True
 
             if self._qat_enabled:
                 from megatron.bridge.models.gpt_provider import modelopt_transformer_layer_spec
@@ -429,10 +433,10 @@ class MegatronEngine(BaseEngine):
             optimizer_scheduler=self.lr_scheduler,
             use_distributed_optimizer=self.engine_config.use_distributed_optimizer,
             use_checkpoint_opt_param_scheduler=self.optimizer_config.use_checkpoint_opt_param_scheduler,
+            use_dist_checkpointing=self.engine_config.use_dist_checkpointing,
             bridge=self.bridge,
             provider=self.provider,
             peft_cls=self.peft_cls,
-            use_dist_checkpointing=self.engine_config.use_dist_checkpointing,
             use_megatron_fsdp=self.engine_config.use_megatron_fsdp,
         )
 
@@ -787,7 +791,8 @@ class EngineTrainModeCtx(BaseEngineCtx):
 
     def __exit__(self, exc_type, exc_value, traceback):
         assert isinstance(self.engine, MegatronEngine)
-        self.engine.optimizer_zero_grad()
+        if self.zero_grad_on_exit or exc_type is not None:
+            self.engine.optimizer_zero_grad()
         super().__exit__(exc_type, exc_value, traceback)
 
 
@@ -928,7 +933,14 @@ class MegatronEngineWithLMHead(MegatronEngine):
                     #         "`actor_rollout_ref.model.use_fused_kernels=True`. "
                     #         "The current `clone()` operation ensures correctness but increases memory usage."
                     #     )
-                    entropy = vocab_parallel_entropy(logits)
+                    if self.engine_config.entropy_from_logits_with_chunking:
+                        entropy = vocab_parallel_entropy_with_chunking(
+                            logits,
+                            chunk_size=self.engine_config.entropy_from_logits_chunk_size,
+                        )
+                    else:
+                        entropy = vocab_parallel_entropy(logits)
+
                     ret["entropy"] = entropy
                 else:
                     logits_bak = logits

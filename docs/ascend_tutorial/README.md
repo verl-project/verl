@@ -1,7 +1,7 @@
-
+# Ascend Tutorial
 ## 简介
 
-昇腾全面支持 Verl 使用与开发，本文档全面介绍了如何在华为昇腾芯片 NPU 上使用 Verl。
+昇腾全面支持 verl 使用与开发，本文档全面介绍了如何在华为昇腾芯片 NPU 上使用 verl。
 
 Last updated: 05/14/2026.
 
@@ -18,12 +18,12 @@ ascend_tutorial/
 ```
 ## 最新消息
 - [verl-ascend-recipe 建仓](https://github.com/verl-project/verl-ascend-recipe) - 新增昇腾recipe
-- [verl on ascend 2026Q2 roadmap](https://github.com/verl-project/verl/issues/5526) - 2026Q2 RoadMap 已发布
+- [verl on Ascend 2026Q2 roadmap](https://github.com/verl-project/verl/issues/5526) - 2026Q2 RoadMap 已发布
 
 ## 快速开始
 - [Docker 构建使用指南](./get_start/dockerfile_build_guidance.rst) - 构建并使用昇腾环境的 Docker 镜像  
-- [自定义环境安装](./get_start/install_guidance.rst) - 在昇腾 NPU 上自定义安装 Verl                                                    
-- [快速上手](./get_start/quick_start.rst) - 快速上手在昇腾 NPU 上运行 Verl
+- [自定义环境安装](./get_start/install_guidance.rst) - 在昇腾 NPU 上自定义安装 verl                                                    
+- [快速上手](./get_start/quick_start.rst) - 快速上手在昇腾 NPU 上运行 verl
 
 ## 特性支持说明
 
@@ -60,10 +60,10 @@ ascend_tutorial/
 3. 联系昇腾技术支持
 
 ## 贡献指南
-- [verl 社区贡献](../contributing) - Verl 社区贡献指南
+- [verl 社区贡献](../contributing) - verl 社区贡献指南
 - [昇腾 CI 指南](./contribution_guide/ascend_ci_guide_zh.rst) - 昇腾环境 CI 配置与测试
 
 ## 相关资源
 
-- [Verl 官方文档](https://verl.readthedocs.io/)
+- [verl 官方文档](https://verl.readthedocs.io/)
 - [昇腾开发者社区](https://www.hiascend.com/)

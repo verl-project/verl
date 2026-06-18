@@ -121,7 +121,7 @@ def test_hybrid_rollout_with_ep(init_config):
     agent_loop_manager = init_agent_loop_manager(init_config)
     checkpoint_manager = CheckpointEngineManager(
         config=omega_conf_to_dataclass(init_config.actor_rollout_ref.rollout.checkpoint_engine),
-        trainer=agent_loop_manager.worker_group,
+        actor_wg=agent_loop_manager.worker_group,
         replicas=agent_loop_manager.rollout_replicas,
     )
     checkpoint_manager.sleep_replicas()

@@ -255,6 +255,14 @@ class FSDPEngine(BaseEngine):
                     config=self.model_config.hf_config,
                     trust_remote_code=self.model_config.trust_remote_code,
                 )
+
+                # Strip sub-modules listed in _verl_strip_modules (e.g.
+                # talker / code2wav for Qwen3-Omni Thinker-only training).
+                _strip_list = getattr(module, "_verl_strip_modules", [])
+                for attr in _strip_list:
+                    if hasattr(module, attr):
+                        delattr(module, attr)
+                        logger.info(f"Stripped unused sub-module '{attr}' to reduce memory")
             else:
                 from verl.utils.model import load_valuehead_model
 
@@ -334,6 +342,19 @@ class FSDPEngine(BaseEngine):
                 "bias": "none",
             }
             module = get_peft_model(module, LoraConfig(**lora_config))
+
+            # FSDP requires all params in a flat group to share dtype: cast a
+            # fp32 adapter to the bf16 base dtype only when they actually differ.
+            base_dtype = next((p.dtype for p in module.parameters() if not p.requires_grad), None)
+            if base_dtype is not None:
+                mismatched = [p for p in module.parameters() if p.requires_grad and p.dtype != base_dtype]
+                if mismatched:
+                    logger.info(
+                        f"Casting {len(mismatched)} LoRA adapter params from "
+                        f"{mismatched[0].dtype} to {base_dtype} to match base."
+                    )
+                    for param in mismatched:
+                        param.data = param.data.to(base_dtype)
 
         return module
 
@@ -758,7 +779,9 @@ class FSDPEngine(BaseEngine):
         Save FSDP checkpoint, handling parameter offload as needed.
         """
         origin_module_device = next(self.module.parameters()).device.type
-        if self._is_offload_param or origin_module_device == "cpu":
+        if (self._is_offload_param or origin_module_device == "cpu") and not getattr(
+            self, "_uses_fsdp2_cpu_offload_policy", False
+        ):
             load_fsdp_model_to_gpu(self.module)
 
         self.checkpoint_manager.save_checkpoint(
@@ -914,7 +937,8 @@ class EngineTrainModeCtx(BaseEngineCtx):
     def __exit__(self, exc_type, exc_value, traceback):
         assert isinstance(self.engine, FSDPEngine)
         set_ulysses_sequence_parallel_group(self.prev_sp_group)
-        self.engine.optimizer_zero_grad()
+        if self.zero_grad_on_exit or exc_type is not None:
+            self.engine.optimizer_zero_grad()
         super().__exit__(exc_type, exc_value, traceback)
 
 
@@ -1092,6 +1116,21 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 # temperature is singleton
                 log_probs = output.log_probs.squeeze(0)  # (total_nnz,)
                 entropy_rmpad = output.entropy.squeeze(0)  # (total_nnz,)
+
+                # When the fused kernel also computed top-K distillation
+                # (veomni's chunk_topk_distill path), extract the per-token
+                # distillation outputs and store them as nested tensors —
+                # same model_output keys as the eager logit-processor path.
+                if distillation_use_topk:
+                    aux_outputs = getattr(output, "fused_linear_aux", None)
+                    if aux_outputs is not None and aux_outputs.distillation_losses is not None:
+                        cu_seqlens = input_ids.offsets()
+                        for field_name in ("distillation_losses", "student_mass", "teacher_mass"):
+                            v = getattr(aux_outputs, field_name).squeeze(0)
+                            if self.use_ulysses_sp:
+                                pad_size = output_args["pad_size"]
+                                v = gather_outputs_and_unpad(v, gather_dim=0, unpad_dim=0, padding_size=pad_size)
+                            model_output[field_name] = torch.nested.nested_tensor_from_jagged(v, cu_seqlens)
             else:
                 logits_rmpad = output.logits.squeeze(0)  # (total_nnz, vocab_size)
                 logits_rmpad.div_(temperature_rmpad.clamp(min=1e-8).unsqueeze(-1).to(logits_rmpad.dtype))
@@ -1109,7 +1148,13 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 # compute entropy
                 if calculate_entropy:
                     if not self.engine_config.entropy_checkpointing:
-                        entropy_rmpad = self.compute_entropy_from_logits(logits_rmpad)  # ((total_nnz / sp) + pad)
+                        if self.engine_config.entropy_from_logits_with_chunking:
+                            entropy_rmpad = self.compute_entropy_from_logits(
+                                logits_rmpad,
+                                chunk_size=self.engine_config.entropy_from_logits_chunk_size,
+                            )  # ((total_nnz / sp) + pad)
+                        else:
+                            entropy_rmpad = self.compute_entropy_from_logits(logits_rmpad)
                     else:
                         entropy_rmpad = torch.utils.checkpoint.checkpoint(
                             self.compute_entropy_from_logits, logits_rmpad
@@ -1270,6 +1315,17 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 loss = torch.tensor(1.0, device=device_name)
                 metrics = {}
 
+            # Detach model outputs before they are appended to forward_backward_batch's
+            # output_lst: they are only consumed for metrics/postprocessing after backward,
+            # and keeping their grad_fn alive retains part of every micro-batch's autograd
+            # graph until the whole batch finishes. With PEFT (enable_input_require_grads)
+            # this pins the checkpointed embedding output plus its gradient buffer per
+            # micro-batch (~2 x [total_nnz, hidden] for long sequences), which accumulates
+            # across micro-batches and OOMs the actor update.
+            model_output = {
+                key: value.detach() if torch.is_tensor(value) and value.grad_fn is not None else value
+                for key, value in model_output.items()
+            }
             output = {
                 "model_output": model_output,
                 "loss": loss.detach().item(),

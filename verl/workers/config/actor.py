@@ -22,6 +22,7 @@ from verl.trainer.config import CheckpointConfig, RolloutCorrectionConfig
 from verl.utils.profiler.config import ProfilerConfig
 from verl.utils.qat import QATConfig
 
+from .checkpoint import McoreCheckpointConfig, MindSpeedCheckpointConfig
 from .engine import (
     FSDPEngineConfig,
     McoreEngineConfig,
@@ -264,16 +265,19 @@ class McoreActorConfig(ActorConfig):
 
     Args:
         strategy (str): Training strategy set to 'megatron' for Megatron parallelism.
-        load_weight (bool): Whether to load model weights from checkpoint.
         megatron (dict[str, Any]): Configuration for Megatron parallelism settings.
         profile (dict[str, Any]): Configuration for profiling settings.
+        checkpoint (McoreCheckpointConfig): Megatron-specific checkpoint config
+            that adds ``mbridge_config`` on top of the base checkpoint fields.
     """
 
     strategy: str = "megatron"
-    load_weight: bool = True
+    entropy_from_logits_with_chunking: bool = False
+    entropy_from_logits_chunk_size: int = 2048
     megatron: McoreEngineConfig = field(default_factory=McoreEngineConfig)
     profile: dict[str, Any] = field(default_factory=dict)
     use_rollout_log_probs: bool = False
+    checkpoint: McoreCheckpointConfig = field(default_factory=McoreCheckpointConfig)
 
     def __post_init__(self):
         """Validate FSDP actor configuration parameters."""
@@ -302,6 +306,7 @@ class FSDPActorConfig(ActorConfig):
     grad_clip: float = 1.0
     ulysses_sequence_parallel_size: int = 1
     entropy_from_logits_with_chunking: bool = False
+    entropy_from_logits_chunk_size: int = 2048
     entropy_checkpointing: bool = False
     fsdp_config: FSDPEngineConfig = field(default_factory=FSDPEngineConfig)
     use_remove_padding: bool = False
@@ -323,6 +328,14 @@ class FSDPActorConfig(ActorConfig):
     def validate(self, n_gpus: int, train_batch_size: int, model_config: dict = None):
         """Validate FSDP actor configuration with runtime parameters."""
         super().validate(n_gpus, train_batch_size, model_config)
+        if (
+            self.ulysses_sequence_parallel_size > 1
+            and model_config
+            and not model_config.get("use_remove_padding", False)
+        ):
+            raise ValueError(
+                "When using sequence parallelism for actor/ref policy, you must enable `use_remove_padding`."
+            )
 
 
 @dataclass
@@ -388,17 +401,18 @@ class MindSpeedActorConfig(ActorConfig):
 
     Args:
         strategy (str): Training strategy set to 'mindspeed' for mindspeed parallelism.
-        load_weight (bool): Whether to load model weights from checkpoint.
         mindspeed (dict[str, Any]): Configuration for mindspeed parallelism settings.
         profile (dict[str, Any]): Configuration for profiling settings.
         use_rollout_log_probs (bool): Whether to use log probabilities from rollout engine.
+        checkpoint (MindSpeedCheckpointConfig): MindSpeed-specific checkpoint config
+            (inherits ``mbridge_config`` from :class:`McoreCheckpointConfig`).
     """
 
     strategy: str = "mindspeed"
-    load_weight: bool = True
     mindspeed: MindSpeedEngineConfig = field(default_factory=MindSpeedEngineConfig)
     profile: dict[str, Any] = field(default_factory=dict)
     use_rollout_log_probs: bool = False
+    checkpoint: MindSpeedCheckpointConfig = field(default_factory=MindSpeedCheckpointConfig)
 
     def __post_init__(self):
         """Validate MindSpeed actor configuration parameters."""

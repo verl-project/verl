@@ -1,10 +1,10 @@
 Ascend Dockerfile Build Guidance
 ===================================
 
-Last updated: 05/19/2026.
+Last updated：05/19/2026.
 
 
-镜像获取 & 公开镜像地址
+镜像获取与公开镜像地址
 --------------------------
 
 昇腾在 `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_ 中托管每日构建的 A2/A3 镜像，基于 `Dockerfile <../../../docker/ascend>`_ 构建，具体说明见 ``Dockerfile构建镜像脚本清单`` 。
@@ -39,8 +39,8 @@ torch_npu          2.9.0
 torchvision        0.24.0
 vLLM               0.18.0
 vLLM-ascend        0.18.0
-Megatron-LM        v0.12.1
-MindSpeed          2.3.0_core_r0.12.1
+Megatron-LM        core_r0.16.0
+MindSpeed          core_r0.16.0
 triton-ascend      3.2.1
 mbridge            0.15.1
 SGLang             v0.5.10
@@ -59,8 +59,8 @@ Dockerfile构建镜像脚本清单
 ============== ==================== ============== ==============================================================
 设备类型         CANN基础镜像版本     推理后端        参考文件
 ============== ==================== ============== ==============================================================
-A2              9.0.0                  vLLM            `Dockerfile.ascend_9.0.0_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.0_a2>`_
-A3              9.0.0                  vLLM            `Dockerfile.ascend_9.0.0_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.0_a3>`_
+A2              9.0.0                  vLLM            `Dockerfile.ascend_9.0.0_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_9.0.0_a2>`_
+A3              9.0.0                  vLLM            `Dockerfile.ascend_9.0.0_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_9.0.0_a3>`_
 A2              8.5.0                  vLLM            `Dockerfile.ascend_8.5.0_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.0_a2>`_
 A3              8.5.0                  vLLM            `Dockerfile.ascend_8.5.0_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.0_a3>`_
 A2              8.5.0                  SGLang          `Dockerfile.ascend.sglang_8.5.0_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend.sglang_8.5.0_a2>`_

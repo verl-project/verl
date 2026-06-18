@@ -21,7 +21,7 @@ import torch
 import torch.distributed as dist
 from tensordict import TensorDict
 from torch.distributed.tensor import DTensor
-from veomni.arguments import OpsImplementationConfig
+from veomni.arguments import MixedPrecisionConfig, OpsImplementationConfig
 from veomni.distributed import parallel_state
 from veomni.distributed.offloading import build_activation_offloading_context
 from veomni.distributed.torch_parallelize import build_parallelize_model
@@ -277,13 +277,18 @@ class VeOmniEngine(FSDPEngine):
             swiglu_mlp_implementation=self.engine_config.swiglu_mlp_implementation,
             rotary_pos_emb_implementation=self.engine_config.rotary_pos_emb_implementation,
             load_balancing_loss_implementation=self.engine_config.load_balancing_loss_implementation,
+            rms_norm_gated_implementation=self.engine_config.rms_norm_gated_implementation,
+            causal_conv1d_implementation=self.engine_config.causal_conv1d_implementation,
+            chunk_gated_delta_rule_implementation=self.engine_config.chunk_gated_delta_rule_implementation,
         )
+
+        veomni_mixed_precision_config = MixedPrecisionConfig(enable=self.engine_config.mixed_precision)
 
         # Load base model with specified configuration and dtype
         module = build_foundation_model(
             config_path=self._get_model_config_path(),
             weights_path=self.model_config.local_path,
-            torch_dtype="float32" if self.engine_config.mixed_precision else "bfloat16",
+            torch_dtype="float32" if veomni_mixed_precision_config.enable else "bfloat16",
             attn_implementation=self.engine_config.attn_implementation,
             ops_implementation=ops_implementation,
             init_device=self.engine_config.init_device,
@@ -297,7 +302,7 @@ class VeOmniEngine(FSDPEngine):
             init_device=self.engine_config.init_device,
             weights_path=self.model_config.local_path,
             enable_full_shard=self.engine_config.enable_full_shard,
-            enable_mixed_precision=self.engine_config.mixed_precision,
+            mixed_precision=veomni_mixed_precision_config,
             enable_gradient_checkpointing=self.model_config.enable_gradient_checkpointing,
             enable_fsdp_offload=self.engine_config.enable_fsdp_offload,
             basic_modules=list(
@@ -652,10 +657,9 @@ class VeOmniEngine(FSDPEngine):
         if self._is_offload_param:
             offload_veomni_model_to_cpu(self.module)
 
-        device = get_device_id()
         ps = parallel_state.get_parallel_state()
         model_type = getattr(self.module.config, "model_type", "default")
-        process_func = MOE_PARAM_HANDERS.get(model_type, lambda n, t: iter([(n, t)]))
+        process_func = MOE_PARAM_HANDERS.get(model_type, lambda n, t, ep_rank: iter([(n, t)]))
 
         def param_generator():
             for name, param in params.items():
@@ -665,18 +669,16 @@ class VeOmniEngine(FSDPEngine):
                 is_proj = any(p in name for p in ["down_proj", "gate_proj", "up_proj", "gate_up_proj"])
 
                 if is_expert_layer and is_proj and ps.ep_enabled:
-                    output_shape = list(unsharded_tensor.shape)
-                    output_shape[0] *= ps.extra_parallel_sizes["ep"]
-                    stacked_tensor = torch.empty(output_shape, dtype=unsharded_tensor.dtype, device=device)
+                    ep_rank, ep_size = ps.ep_rank, ps.ep_size
+                    buffer = torch.empty_like(unsharded_tensor)  # [num_experts/ep_size, H, I]
+                    for src_ep_rank in range(ep_size):
+                        tensor = unsharded_tensor if src_ep_rank == ep_rank else buffer
+                        torch.distributed.broadcast(tensor, group_src=src_ep_rank, group=ps.ep_group)
+                        yield from process_func(name, tensor, ep_rank=src_ep_rank)
 
-                    # all gather expert tensors [32, H, I] -> [128, H, I]
-                    torch.distributed.all_gather_into_tensor(stacked_tensor, unsharded_tensor, group=ps.ep_group)
-                    yield from process_func(name, stacked_tensor)
-
-                    del stacked_tensor
                 else:
                     if is_expert_layer:
-                        yield from process_func(name, unsharded_tensor)
+                        yield from process_func(name, unsharded_tensor, ep_rank=0)
                     else:
                         yield name, unsharded_tensor
 
@@ -726,7 +728,8 @@ class EngineTrainModeCtx(BaseEngineCtx):
     def __exit__(self, exc_type, exc_value, traceback):
         assert isinstance(self.engine, VeOmniEngine)
         set_ulysses_sequence_parallel_group(self.prev_sp_group)
-        self.engine.optimizer_zero_grad()
+        if self.zero_grad_on_exit or exc_type is not None:
+            self.engine.optimizer_zero_grad()
         super().__exit__(exc_type, exc_value, traceback)
 
 
@@ -860,6 +863,31 @@ class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
             model_inputs["labels"] = input_ids_rmpad
             model_inputs["shift_labels"] = shift_labels
             model_inputs["return_log_probs"] = True
+
+            # Pass teacher top-K tensors so ForCausalLMLoss routes to
+            # chunk_topk_distill_function for fused distillation. TD keys
+            # teacher_ids / teacher_logprobs are populated by verl's native
+            # distillation pipeline (see verl/trainer/distillation/losses.py).
+            distillation_use_topk = tu.get_non_tensor_data(data=micro_batch, key="distillation_use_topk", default=False)
+            if distillation_use_topk and "teacher_ids" in micro_batch.keys():
+                if "teacher_logprobs" not in micro_batch.keys():
+                    raise ValueError(
+                        "teacher_ids present without teacher_logprobs; "
+                        "both must be provided together for fused top-K distillation."
+                    )
+                # Kernel kwarg names follow veomni's chunk_topk_distill_function API.
+                teacher_topk_ids = micro_batch["teacher_ids"].values().unsqueeze(0)
+                teacher_topk_log_probs = micro_batch["teacher_logprobs"].values().unsqueeze(0)
+                # SP-slice along seqlen (dim=1); teacher tensors are 3D
+                # (1, total_nnz, K) so use slice_input_tensor directly —
+                # ulysses_pad_and_slice_inputs hardcodes 2D.
+                if self.use_ulysses_sp:
+                    from verl.utils.ulysses import slice_input_tensor
+
+                    teacher_topk_ids = slice_input_tensor(teacher_topk_ids, dim=1, padding=True)
+                    teacher_topk_log_probs = slice_input_tensor(teacher_topk_log_probs, dim=1, padding=True)
+                model_inputs["teacher_topk_ids"] = teacher_topk_ids
+                model_inputs["teacher_topk_log_probs"] = teacher_topk_log_probs
 
         # Router replay plumbing. Two responsibilities:
         #   (1) snapshot the ulysses pad_size for this micro-batch so
@@ -1029,7 +1057,7 @@ class VeOmniEngineWithValueHead(VeOmniEngine, FSDPEngineWithValueHead):
         config.hidden_dropout = "0"
         config.summary_dropout_prob = 0.0
         config.tie_word_embeddings = False
-        token_cls = AutoModelForTokenClassification._model_mapping.get(type(config))
+        token_cls = AutoModelForTokenClassification._model_mapping.get(type(config), None)
         if token_cls is None:
             raise ValueError(f"No ForTokenClassification class in transformers for {type(config).__name__}.")
         config.architectures = [token_cls.__name__]
