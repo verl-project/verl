@@ -131,7 +131,6 @@ python -m verl.experimental.fully_async_policy.fully_async_main \
     actor_rollout_ref.rollout.name=${rollout_name} \
     actor_rollout_ref.rollout.prompt_length=${max_prompt_length} \
     actor_rollout_ref.rollout.response_length=$(((max_prompt_length + max_response_length) * max_turns - max_prompt_length)) \
-    actor_rollout_ref.rollout.single_turn_response_length=${max_response_length} \
     algorithm.adv_estimator=${adv_estimator} \
     algorithm.use_kl_in_reward=${use_kl_in_reward} \
     algorithm.kl_ctrl.kl_coef=${kl_coef} \
