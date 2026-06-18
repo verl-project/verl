@@ -90,6 +90,14 @@ def default_compute_score(
         from . import geo3k
 
         res = geo3k.compute_score(solution_str, ground_truth)
+    elif data_source == "lmms-lab/multimodal-open-r1-8k-verified":
+        from . import openr1mm
+
+        res = openr1mm.compute_score(solution_str, ground_truth)
+    elif data_source == "Zhang199/TinyLLaVA-Video-R1-training-data":
+        from . import tinyllava_video_r1
+
+        res = tinyllava_video_r1.compute_score(solution_str, ground_truth)
     elif data_source in [
         "searchR1_nq",
         "searchR1_triviaqa",

@@ -831,6 +831,15 @@ class AgentLoopWorker:
                 mm_token_type_ids[0][input_ids[0] == video_token_id] = 2
             multi_modal_kwargs["mm_token_type_ids"] = mm_token_type_ids
 
+        # Split video_grid_thw so each temporal patch gets its own entry,
+        # matching how the tokenizer segments video tokens into per-patch
+        # blocks separated by <|vision_end|> <|vision_start|> markers.
+        video_grid_thw = multi_modal_kwargs.get("video_grid_thw")
+        if video_grid_thw is not None:
+            video_grid_thw = torch.repeat_interleave(video_grid_thw, video_grid_thw[:, 0], dim=0)
+            video_grid_thw[:, 0] = 1
+            multi_modal_kwargs["video_grid_thw"] = video_grid_thw
+
         # Model's get_rope_index has been dynamically bind to the processor.
         vision_position_ids, _ = self.processor.get_rope_index(
             input_ids=input_ids,
