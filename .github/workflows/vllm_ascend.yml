@@ -119,3 +119,6 @@ jobs:
       - name: Test vllm server abort functionality
         run: |
           pytest tests/workers/rollout/rollout_vllm/test_vllm_abort.py -v -s
+      - name: Test vllm server abort functionality
+        run: |
+          pytest tests/workers/rollout/rollout_vllm/test_vllm_abort.py -v -s
