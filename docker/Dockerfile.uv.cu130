@@ -93,7 +93,6 @@ ENV MAX_JOBS=${MAX_JOBS}
 # versions out of the lockfile and update these ARGs:
 #
 #     grep -E 'nvidia-(cudnn|nccl)-cu13' uv.lock
-ARG CUDNN_VERSION=9.19.0.56-1
 ARG NCCL_VERSION=2.28.3-1
 
 # Source to build from. Override VERL_REF for tags / commits.
@@ -210,9 +209,11 @@ ENV LANG=en_US.UTF-8 \
 # in uv.lock (CUDNN_VERSION / NCCL_VERSION ARGs above).
 # ---------------------------------------------------------------------------
 RUN CUDA_VERSION_MAJOR=$(echo ${CUDA_VERSION} | cut -d '.' -f 1) \
-    && apt-get update && apt-get install -y --no-install-recommends --allow-change-held-packages \
-        libcudnn9-cuda-${CUDA_VERSION_MAJOR}=${CUDNN_VERSION} \
-        libcudnn9-dev-cuda-${CUDA_VERSION_MAJOR}=${CUDNN_VERSION} \
+    && apt-get update && apt-get install -y --no-install-recommends --allow-downgrades --allow-change-held-packages \
+        cudnn9-cuda-${CUDA_VERSION_MAJOR} \
+        libcudnn9-cuda-${CUDA_VERSION_MAJOR} \
+        libcudnn9-dev-cuda-${CUDA_VERSION_MAJOR} \
+        libcudnn9-headers-cuda-${CUDA_VERSION_MAJOR} \
         libnccl2=${NCCL_VERSION}+cuda${CUDA_VERSION%.*} \
         libnccl-dev=${NCCL_VERSION}+cuda${CUDA_VERSION%.*} \
     && rm -rf /var/lib/apt/lists/* \
