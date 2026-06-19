@@ -400,6 +400,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         self.global_steps = 1
         self.idle_start_time = time.time()
         self.step_start_time = time.time()
+        self.accumulated_idle_time = 0.0
 
         # Concurrency control
         # Modified by self.pause() or self._should_pause_generation()
@@ -475,12 +476,13 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
             self.staleness_samples = len(self.active_tasks) + await self.message_queue_client.get_queue_size()
             timing_raw = {}
             rollout_version_time = max(time.time() - self.step_start_time, 1e-6)
+            # Sum all fully-drained idle periods already recorded in this version period,
+            # plus any currently-open idle period (rollouter idle right now at reset time).
+            total_idle_time = self.accumulated_idle_time
             if self.idle_start_time > self.step_start_time:
-                rollout_active_time = self.idle_start_time - self.step_start_time
-                idle_ratio = 1 - rollout_active_time / rollout_version_time
-            else:
-                rollout_active_time = rollout_version_time
-                idle_ratio = 0
+                total_idle_time += time.time() - self.idle_start_time
+            idle_ratio = min(total_idle_time / rollout_version_time, 1.0)
+            rollout_active_time = rollout_version_time - total_idle_time
             timing_raw["fully_async/rollouter/active_time"] = rollout_active_time
             timing_raw["fully_async/rollouter/version_time"] = rollout_version_time
             timing_raw["fully_async/rollouter/idle_ratio"] = idle_ratio
@@ -491,6 +493,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
                 f"idle_ratio: {timing_raw['fully_async/rollouter/idle_ratio']:.4f}"
             )
             self.step_start_time = time.time()
+            self.accumulated_idle_time = 0.0
 
         return timing_raw
 
@@ -787,6 +790,13 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
                     if not resume_future.done():
                         self.idle_start_time = time.time()
                         await resume_future
+                        # We were truly idle (all tasks drained, resume arrived late).
+                        # Accumulate this idle period so reset_staleness can account for
+                        # multiple pause/idle cycles within a single version period.
+                        async with self.lock:
+                            if self.idle_start_time > self.step_start_time:
+                                self.accumulated_idle_time += time.time() - self.idle_start_time
+                            self.idle_start_time = 0  # consumed into accumulated_idle_time
                 finally:
                     if not resume_future.done():
                         resume_future.cancel()
