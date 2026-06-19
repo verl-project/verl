@@ -69,6 +69,7 @@ from verl.utils.chat_template import apply_chat_template  # noqa: E402
 from verl.utils.continuous_token_wiring import (  # noqa: E402
     CONTINUOUS_TOKEN_BUILDER_FAMILIES,
     create_continuous_token_builder,
+    get_continuous_token_builder_class,
     resolve_continuous_token_model_family,
 )
 from verl.utils.test_utils.mock_trajectories import (  # noqa: E402
@@ -404,6 +405,7 @@ def run_continuous_token_checks(
     model_family: str,
     custom_builder_module: str | None,
     chat_template_kwargs: dict[str, Any],
+    processor: Any | None = None,
 ) -> list[CheckResult]:
     """Run an end-to-end Continuous Token reconstruction check.
 
@@ -429,6 +431,7 @@ def run_continuous_token_checks(
             model_path=model,
             tokenizer_name_or_path=model,
             chat_template_kwargs=chat_template_kwargs,
+            processor=processor,
         )
     except Exception as exc:
         return [
@@ -591,6 +594,11 @@ def parse_args() -> argparse.Namespace:
         help="Allow AutoTokenizer to download missing tokenizer files. Default requires local cache.",
     )
     parser.add_argument(
+        "--enable-multimodal",
+        action="store_true",
+        help="Load an AutoProcessor for multimodal (VL) builder families. Requires the model to have a processor.",
+    )
+    parser.add_argument(
         "--show-traceback",
         action="store_true",
         help="Print full traceback if tokenizer loading or setup fails.",
@@ -603,6 +611,7 @@ def main() -> int:
     args = parse_args()
     chat_template_kwargs = dict(args.chat_template_kwargs or {})
 
+    processor = None
     try:
         tokenizer = _load_tokenizer(args.model, local_files_only=not args.allow_download, template_path=args.template)
         resolved_family = resolve_continuous_token_model_family(
@@ -611,6 +620,24 @@ def main() -> int:
             tokenizer=tokenizer,
             tokenizer_name_or_path=args.model,
         )
+
+        # Load processor for VL families
+        builder_cls = get_continuous_token_builder_class(resolved_family)
+        needs_processor = hasattr(builder_cls, "supports_multimodal") and builder_cls.supports_multimodal()
+        if args.enable_multimodal or needs_processor:
+            from transformers import AutoProcessor
+
+            processor = AutoProcessor.from_pretrained(
+                args.model,
+                trust_remote_code=True,
+                local_files_only=not args.allow_download,
+            )
+            print(f"Processor loaded:      {type(processor).__name__}")
+        elif needs_processor and not args.enable_multimodal:
+            print(
+                f"WARNING: Model family {resolved_family!r} requires a processor for multimodal. "
+                f"Pass --enable-multimodal to load one, or text-only checks will be run."
+            )
     except Exception as exc:
         print(f"Failed to initialize checker: {type(exc).__name__}: {exc}")
         if args.show_traceback:
@@ -638,6 +665,7 @@ def main() -> int:
                 model_family=args.model_family,
                 custom_builder_module=args.custom_builder_module,
                 chat_template_kwargs=chat_template_kwargs,
+                processor=processor,
             )
         )
 
