@@ -292,11 +292,15 @@ class SGLangHttpServer:
             # SGLang sizes the KV cache VMM at startup to fill all remaining GPU memory,
             # so these buffers prevent resume_memory_occupation from re-creating the VMM
             # at its original size after a weight sync (cu_mem_create OOM). Reserve a
-            # small headroom to accommodate them.
+            # headroom to accommodate them.
+            # On GH200 (96 GB) with Slingshot interconnect, NCCL communicator init
+            # consumes ~11-12 GB, and the first broadcast allocates ~3-4 GB more of
+            # persistent staging buffers — total ~14-17 GB. A 0.2 reduction leaves a
+            # 24 GB headroom (~0.25 * 96 GB) which comfortably covers this.
             # NOTE: do NOT apply this in HYBRID mode — there the FSDP training model
             # already occupies most of the GPU, so reducing mem_fraction further leaves
             # almost nothing for the KV cache (avail_mem drops to ~3 GB).
-            mem_fraction_static = mem_fraction_static - 0.1
+            mem_fraction_static = mem_fraction_static - 0.2
         args = {
             "model_path": self.model_config.local_path,
             "dtype": self.config.dtype,
