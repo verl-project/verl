@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, Sequence
 
 _SUPPORTED_APPEND_ROLES = frozenset({"tool", "user", "system"})
 _SYNTHETIC_SYSTEM_MESSAGE: dict[str, Any] = {"role": "system", "content": "continuous token synthetic system"}
@@ -41,6 +41,23 @@ class MergeResult:
     kind: MergeKind = "non_assistant"
     inserted_token_ids: list[int] = field(default_factory=list)
     removed_prefix_token_count: int = 0
+
+    # --- Multimodal fields (added for VL continuous token support) ---
+    pixel_values: Any = None
+    """Preprocessed pixel tensor(s) for all images in the merged sequence.
+    Shape is model-dependent. None when text-only or images unchanged."""
+
+    image_grid_thw: list[tuple[int, int, int]] = field(default_factory=list)
+    """Per-image (temporal, height_grid, width_grid) after processor rescaling.
+    Empty list when text-only. Length equals number of images in merged sequence."""
+
+    image_token_spans: list[tuple[int, int]] = field(default_factory=list)
+    """(start, end) half-open index pairs locating each image's pad tokens in
+    token_ids. Empty list when text-only. Length == len(image_grid_thw)."""
+
+    mm_processor_kwargs: dict[str, Any] = field(default_factory=dict)
+    """Extra kwargs for the processor / rollout engine (e.g. min_pixels).
+    Empty dict when unused."""
 
 
 def ct_align_response_metadata(
@@ -329,6 +346,85 @@ class ContinuousTokenBuilder:
             "reasoning_content": _ASSISTANT_REASONING_CONTENT,
             "tool_calls": tool_calls,
         }
+
+
+    # === Multimodal hooks (VL subclasses override these) ===
+
+    @classmethod
+    def supports_multimodal(cls) -> bool:
+        """Whether this builder handles vision inputs.
+
+        VL subclasses override this to return True. Used by the wiring layer
+        to decide whether to pass images through the CT pipeline.
+        """
+        return False
+
+    def count_vision_tokens(self, image_grid_thw_row: tuple[int, int, int]) -> int:
+        """Compute how many pad tokens one image occupies given its grid dims.
+
+        Args:
+            image_grid_thw_row: (temporal, grid_h, grid_w) for a single image,
+                as returned by the processor's image preprocessing.
+
+        Returns:
+            Number of image placeholder tokens for this image.
+
+        Raises:
+            NotImplementedError: Unless overridden by a VL subclass.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement count_vision_tokens. "
+            "Override supports_multimodal() and this method for VL models."
+        )
+
+    def extract_vision_placeholders(self, token_ids: Sequence[int]) -> list[tuple[int, int]]:
+        """Find all (start, end) spans of vision placeholder tokens.
+
+        Args:
+            token_ids: Full token ID sequence to scan.
+
+        Returns:
+            List of [start, end) index pairs, one per image, in appearance order.
+
+        Raises:
+            NotImplementedError: Unless overridden by a VL subclass.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement extract_vision_placeholders."
+        )
+
+    def render_tokens_with_mm(
+        self,
+        messages: list[dict[str, Any]],
+        images: list[Any],
+        *,
+        add_generation_prompt: bool = True,
+        mm_processor_kwargs: dict[str, Any] | None = None,
+    ) -> tuple[list[int], dict[str, Any]]:
+        """Render messages with images through the processor.
+
+        Unlike ``_render_tokens`` which uses only the tokenizer, this method
+        invokes the full multimodal processor to produce both token IDs and
+        pixel tensors.
+
+        Args:
+            messages: OpenAI-format message list with image content items.
+            images: List of PIL images (or paths), one per image content item.
+            add_generation_prompt: Whether to append the generation prompt.
+            mm_processor_kwargs: Extra kwargs for the processor (min/max pixels).
+
+        Returns:
+            (token_ids, mm_extras) where mm_extras contains at minimum:
+                - "pixel_values": processed pixel tensor
+                - "image_grid_thw": list of (t, h, w) tuples per image
+            Additional model-specific keys may be present.
+
+        Raises:
+            NotImplementedError: Unless overridden by a VL subclass.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement render_tokens_with_mm."
+        )
 
 
 class GptOssContinuousTokenBuilder(ContinuousTokenBuilder):
