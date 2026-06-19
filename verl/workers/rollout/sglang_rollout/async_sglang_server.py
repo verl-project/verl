@@ -283,16 +283,17 @@ class SGLangHttpServer:
                 raise ValueError(f"Currently only support fp8 quantization, got: {quantization}")
         infer_tp = self.config.tensor_model_parallel_size * self.config.data_parallel_size
         mem_fraction_static = self.config.gpu_memory_utilization
-        if self.nnodes > 0:
-            # In standalone mode, NCCL weight sync allocates non-PyTorch GPU buffers
-            # during the first broadcast. These persist for the communicator lifetime
-            # and are invisible to torch.cuda.empty_cache(). SGLang sizes the KV cache
-            # to consume all remaining GPU memory at startup, so these NCCL buffers
-            # prevent resume_memory_occupation from re-creating the KV cache VMM at
-            # its original size (cu_mem_create OOM). On multi-node InfiniBand setups
-            # with many ranks, NCCL staging + IB proxy buffers can reach ~1-2 GB.
-            # Reserve 50% headroom (~20 GiB on 95 GiB) to accommodate this.
-            mem_fraction_static = mem_fraction_static - 0.5
+        if self.rollout_mode == RolloutMode.STANDALONE:
+            # STANDALONE NCCL weight sync allocates persistent non-PyTorch GPU buffers
+            # (NCCL staging + IB proxy) that are invisible to torch.cuda.empty_cache().
+            # SGLang sizes the KV cache VMM at startup to fill all remaining GPU memory,
+            # so these buffers prevent resume_memory_occupation from re-creating the VMM
+            # at its original size after a weight sync (cu_mem_create OOM). Reserve a
+            # small headroom to accommodate them.
+            # NOTE: do NOT apply this in HYBRID mode — there the FSDP training model
+            # already occupies most of the GPU, so reducing mem_fraction further leaves
+            # almost nothing for the KV cache (avail_mem drops to ~3 GB).
+            mem_fraction_static = mem_fraction_static - 0.1
         args = {
             "model_path": self.model_config.local_path,
             "dtype": self.config.dtype,
