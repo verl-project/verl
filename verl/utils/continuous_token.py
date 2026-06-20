@@ -804,6 +804,49 @@ class QwenVLContinuousTokenBuilder(QwenContinuousTokenBuilder):
         self._last_mm_extras = mm_extras
         return token_ids
 
+    def _render_incremental_with_mm(
+        self,
+        messages: list[dict[str, Any]],
+        images: list[Any],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> tuple[list[int], dict[str, Any]]:
+        """Render incremental messages via synthetic prefix + trim (single processor call)."""
+        from verl.utils.chat_template import apply_chat_template
+        from verl.utils.tokenizer import build_multimodal_processor_inputs, normalize_token_ids
+
+        template_kwargs = dict(self.chat_template_kwargs)
+        if tools:
+            template_kwargs["tools"] = tools
+
+        prefix_msgs = [_SYNTHETIC_SYSTEM_MESSAGE, _SYNTHETIC_USER_MESSAGE]
+        prefix_text = apply_chat_template(
+            self.tokenizer, prefix_msgs, tokenize=False, add_generation_prompt=False, **template_kwargs,
+        )
+        trim_length = len(self.tokenizer.encode(prefix_text, add_special_tokens=False))
+
+        full_text = apply_chat_template(
+            self.tokenizer, prefix_msgs + messages, tokenize=False, add_generation_prompt=True, **template_kwargs,
+        )
+        processor_output = build_multimodal_processor_inputs(
+            self.processor, text=full_text, images=images if images else None,
+        )
+
+        all_ids = normalize_token_ids(processor_output["input_ids"])
+        appended_ids = list(all_ids[trim_length:])
+
+        mm_extras: dict[str, Any] = {}
+        if "pixel_values" in processor_output:
+            mm_extras["pixel_values"] = processor_output["pixel_values"]
+        if "image_grid_thw" in processor_output:
+            grid_thw = processor_output["image_grid_thw"]
+            if hasattr(grid_thw, "tolist"):
+                mm_extras["image_grid_thw"] = [tuple(row) for row in grid_thw.tolist()]
+            else:
+                mm_extras["image_grid_thw"] = list(grid_thw)
+
+        return appended_ids, mm_extras
+
     def merge_tokens(
         self,
         previous_messages: list[dict[str, Any]],
@@ -814,9 +857,9 @@ class QwenVLContinuousTokenBuilder(QwenContinuousTokenBuilder):
     ) -> MergeResult:
         """Merge tokens with multimodal awareness.
 
-        If new images appear, renders the full message list for correct token_ids,
-        but obtains pixel_values incrementally (only new images) to avoid
-        re-processing old images through the vision encoder.
+        If new images appear, uses a single processor call with a synthetic
+        prefix (dummy+trim pattern) to obtain both incremental token_ids and
+        pixel_values without re-processing old images.
         """
         self._assert_append_only(previous_messages, updated_messages)
         appended_messages = updated_messages[len(previous_messages):]
@@ -829,34 +872,23 @@ class QwenVLContinuousTokenBuilder(QwenContinuousTokenBuilder):
             result = self._merge_token_ids(runtime_token_ids, appended_ids)
             return result
 
-        # Full render for correct token_ids (chat template needs full context)
-        all_images = self._extract_images_from_messages(updated_messages)
-        full_token_ids, _ = self.render_tokens_with_mm(
-            updated_messages, all_images, add_generation_prompt=True, tools=tools
+        # Single processor call: synthetic prefix + appended messages with new images
+        appended_token_ids, delta_mm_extras = self._render_incremental_with_mm(
+            appended_messages, new_images, tools=tools
         )
 
-        # Incremental render: only new images for pixel_values (O(1) per new image)
-        delta_token_ids, delta_mm_extras = self.render_tokens_with_mm(
-            appended_messages, new_images, add_generation_prompt=True, tools=tools
-        )
-
-        # Compute appended tokens via prefix diff
-        # full_token_ids already has correct boundaries from the template render,
-        # so we use direct concatenation (not _merge_token_ids which would double-insert)
-        prefix_len = len(runtime_token_ids)
-        appended_token_ids = list(full_token_ids[prefix_len:])
-        merged_token_ids = list(runtime_token_ids) + appended_token_ids
+        merge_result = self._merge_token_ids(runtime_token_ids, appended_token_ids)
 
         prev_images = self._extract_images_from_messages(previous_messages)
-        all_spans = self.extract_vision_placeholders(merged_token_ids)
+        all_spans = self.extract_vision_placeholders(merge_result.token_ids)
         image_token_spans = all_spans[len(prev_images):]
 
         return MergeResult(
-            token_ids=merged_token_ids,
-            appended_token_count=len(appended_token_ids),
-            kind="non_assistant",
-            inserted_token_ids=[],
-            removed_prefix_token_count=0,
+            token_ids=merge_result.token_ids,
+            appended_token_count=merge_result.appended_token_count,
+            kind=merge_result.kind,
+            inserted_token_ids=merge_result.inserted_token_ids,
+            removed_prefix_token_count=merge_result.removed_prefix_token_count,
             pixel_values=delta_mm_extras.get("pixel_values"),
             image_grid_thw=delta_mm_extras.get("image_grid_thw", []),
             image_token_spans=image_token_spans,
@@ -1081,6 +1113,50 @@ class MiMoVLContinuousTokenBuilder(QwenContinuousTokenBuilder):
         self._last_mm_extras = mm_extras
         return token_ids
 
+    def _render_incremental_with_mm(
+        self,
+        messages: list[dict[str, Any]],
+        images: list[Any],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> tuple[list[int], dict[str, Any]]:
+        """Render incremental messages via synthetic prefix + trim (single processor call)."""
+        from verl.utils.chat_template import apply_chat_template
+        from verl.utils.tokenizer import build_multimodal_processor_inputs, normalize_token_ids
+
+        template_kwargs = dict(self.chat_template_kwargs)
+        if tools:
+            template_kwargs["tools"] = tools
+
+        flat_messages = self._flatten_multimodal_content(messages)
+        prefix_msgs = [_SYNTHETIC_SYSTEM_MESSAGE, _SYNTHETIC_USER_MESSAGE]
+        prefix_text = apply_chat_template(
+            self.tokenizer, prefix_msgs, tokenize=False, add_generation_prompt=False, **template_kwargs,
+        )
+        trim_length = len(self.tokenizer.encode(prefix_text, add_special_tokens=False))
+
+        full_text = apply_chat_template(
+            self.tokenizer, prefix_msgs + flat_messages, tokenize=False, add_generation_prompt=True, **template_kwargs,
+        )
+        processor_output = build_multimodal_processor_inputs(
+            self.processor, text=full_text, images=images if images else None,
+        )
+
+        all_ids = normalize_token_ids(processor_output["input_ids"])
+        appended_ids = list(all_ids[trim_length:])
+
+        mm_extras: dict[str, Any] = {}
+        if "pixel_values" in processor_output:
+            mm_extras["pixel_values"] = processor_output["pixel_values"]
+        if "image_grid_thw" in processor_output:
+            grid_thw = processor_output["image_grid_thw"]
+            if hasattr(grid_thw, "tolist"):
+                mm_extras["image_grid_thw"] = [tuple(row) for row in grid_thw.tolist()]
+            else:
+                mm_extras["image_grid_thw"] = list(grid_thw)
+
+        return appended_ids, mm_extras
+
     def merge_tokens(
         self,
         previous_messages: list[dict[str, Any]],
@@ -1100,29 +1176,21 @@ class MiMoVLContinuousTokenBuilder(QwenContinuousTokenBuilder):
             )
             return self._merge_token_ids(runtime_token_ids, appended_ids)
 
-        all_images = self._extract_images_from_messages(updated_messages)
-
-        full_token_ids, _ = self.render_tokens_with_mm(
-            updated_messages, all_images, add_generation_prompt=True, tools=tools
+        appended_token_ids, delta_mm_extras = self._render_incremental_with_mm(
+            appended_messages, new_images, tools=tools
         )
 
-        delta_token_ids, delta_mm_extras = self.render_tokens_with_mm(
-            appended_messages, new_images, add_generation_prompt=True, tools=tools
-        )
-
-        prefix_len = len(runtime_token_ids)
-        appended_token_ids = list(full_token_ids[prefix_len:])
-        merged_token_ids = list(runtime_token_ids) + appended_token_ids
+        merge_result = self._merge_token_ids(runtime_token_ids, appended_token_ids)
         prev_images = self._extract_images_from_messages(previous_messages)
-        all_spans = self.extract_vision_placeholders(merged_token_ids)
+        all_spans = self.extract_vision_placeholders(merge_result.token_ids)
         image_token_spans = all_spans[len(prev_images):]
 
         return MergeResult(
-            token_ids=merged_token_ids,
-            appended_token_count=len(appended_token_ids),
-            kind="non_assistant",
-            inserted_token_ids=[],
-            removed_prefix_token_count=0,
+            token_ids=merge_result.token_ids,
+            appended_token_count=merge_result.appended_token_count,
+            kind=merge_result.kind,
+            inserted_token_ids=merge_result.inserted_token_ids,
+            removed_prefix_token_count=merge_result.removed_prefix_token_count,
             pixel_values=delta_mm_extras.get("pixel_values"),
             image_grid_thw=delta_mm_extras.get("image_grid_thw", []),
             image_token_spans=image_token_spans,
@@ -1283,6 +1351,49 @@ class GLM4VContinuousTokenBuilder(GLMContinuousTokenBuilder):
         self._last_mm_extras = mm_extras
         return token_ids
 
+    def _render_incremental_with_mm(
+        self,
+        messages: list[dict[str, Any]],
+        images: list[Any],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> tuple[list[int], dict[str, Any]]:
+        """Render incremental messages via synthetic prefix + trim (single processor call)."""
+        from verl.utils.chat_template import apply_chat_template
+        from verl.utils.tokenizer import build_multimodal_processor_inputs, normalize_token_ids
+
+        template_kwargs = dict(self.chat_template_kwargs)
+        if tools:
+            template_kwargs["tools"] = tools
+
+        prefix_msgs = [_SYNTHETIC_SYSTEM_MESSAGE, _SYNTHETIC_USER_MESSAGE]
+        prefix_text = apply_chat_template(
+            self.tokenizer, prefix_msgs, tokenize=False, add_generation_prompt=False, **template_kwargs,
+        )
+        trim_length = len(self.tokenizer.encode(prefix_text, add_special_tokens=False))
+
+        full_text = apply_chat_template(
+            self.tokenizer, prefix_msgs + messages, tokenize=False, add_generation_prompt=True, **template_kwargs,
+        )
+        processor_output = build_multimodal_processor_inputs(
+            self.processor, text=full_text, images=images if images else None,
+        )
+
+        all_ids = normalize_token_ids(processor_output["input_ids"])
+        appended_ids = list(all_ids[trim_length:])
+
+        mm_extras: dict[str, Any] = {}
+        if "pixel_values" in processor_output:
+            mm_extras["pixel_values"] = processor_output["pixel_values"]
+        if "image_grid_thw" in processor_output:
+            grid_thw = processor_output["image_grid_thw"]
+            if hasattr(grid_thw, "tolist"):
+                mm_extras["image_grid_thw"] = [tuple(row) for row in grid_thw.tolist()]
+            else:
+                mm_extras["image_grid_thw"] = list(grid_thw)
+
+        return appended_ids, mm_extras
+
     def merge_tokens(
         self,
         previous_messages: list[dict[str, Any]],
@@ -1292,35 +1403,37 @@ class GLM4VContinuousTokenBuilder(GLMContinuousTokenBuilder):
         tools: list[dict[str, Any]] | None = None,
     ) -> MergeResult:
         self._assert_append_only(previous_messages, updated_messages)
-        new_images = self._extract_images_from_messages(updated_messages[len(previous_messages):])
+        appended_messages = updated_messages[len(previous_messages):]
+        new_images = self._extract_images_from_messages(appended_messages)
         if not new_images:
             appended_ids = self.tokenize_incremental_messages(
                 previous_messages, updated_messages, tools=tools,
             )
             return self._merge_token_ids(runtime_token_ids, appended_ids)
 
+        # GLM boundary handling deletes tokens from runtime, so full render is
+        # needed for correct token_ids. Incremental render gets pixel_values only.
         all_images = self._extract_images_from_messages(updated_messages)
-
         full_token_ids, _ = self.render_tokens_with_mm(
             updated_messages, all_images, add_generation_prompt=True, tools=tools,
         )
-        delta_token_ids, delta_mm_extras = self.render_tokens_with_mm(
-            updated_messages[len(previous_messages):], new_images, add_generation_prompt=True, tools=tools,
+        _, delta_mm_extras = self._render_incremental_with_mm(
+            appended_messages, new_images, tools=tools,
         )
 
         prefix_len = len(runtime_token_ids)
         appended_token_ids = list(full_token_ids[prefix_len:])
-        merged_token_ids = list(runtime_token_ids) + appended_token_ids
+        merge_result = self._merge_token_ids(runtime_token_ids, appended_token_ids)
         prev_images = self._extract_images_from_messages(previous_messages)
-        all_spans = self.extract_vision_placeholders(merged_token_ids)
+        all_spans = self.extract_vision_placeholders(merge_result.token_ids)
         image_token_spans = all_spans[len(prev_images):]
 
         return MergeResult(
-            token_ids=merged_token_ids,
-            appended_token_count=len(appended_token_ids),
-            kind="non_assistant",
-            inserted_token_ids=[],
-            removed_prefix_token_count=0,
+            token_ids=merge_result.token_ids,
+            appended_token_count=merge_result.appended_token_count,
+            kind=merge_result.kind,
+            inserted_token_ids=merge_result.inserted_token_ids,
+            removed_prefix_token_count=merge_result.removed_prefix_token_count,
             pixel_values=delta_mm_extras.get("pixel_values"),
             image_grid_thw=delta_mm_extras.get("image_grid_thw", []),
             image_token_spans=image_token_spans,
@@ -1468,6 +1581,49 @@ class KimiVLContinuousTokenBuilder(ContinuousTokenBuilder):
         self._last_mm_extras = mm_extras
         return token_ids
 
+    def _render_incremental_with_mm(
+        self,
+        messages: list[dict[str, Any]],
+        images: list[Any],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> tuple[list[int], dict[str, Any]]:
+        """Render incremental messages via synthetic prefix + trim (single processor call)."""
+        from verl.utils.chat_template import apply_chat_template
+        from verl.utils.tokenizer import build_multimodal_processor_inputs, normalize_token_ids
+
+        template_kwargs = dict(self.chat_template_kwargs)
+        if tools:
+            template_kwargs["tools"] = tools
+
+        prefix_msgs = [_SYNTHETIC_SYSTEM_MESSAGE, _SYNTHETIC_USER_MESSAGE]
+        prefix_text = apply_chat_template(
+            self.tokenizer, prefix_msgs, tokenize=False, add_generation_prompt=False, **template_kwargs,
+        )
+        trim_length = len(self.tokenizer.encode(prefix_text, add_special_tokens=False))
+
+        full_text = apply_chat_template(
+            self.tokenizer, prefix_msgs + messages, tokenize=False, add_generation_prompt=True, **template_kwargs,
+        )
+        processor_output = build_multimodal_processor_inputs(
+            self.processor, text=full_text, images=images if images else None,
+        )
+
+        all_ids = normalize_token_ids(processor_output["input_ids"])
+        appended_ids = list(all_ids[trim_length:])
+
+        mm_extras: dict[str, Any] = {}
+        if "pixel_values" in processor_output:
+            mm_extras["pixel_values"] = processor_output["pixel_values"]
+        if "image_grid_thw" in processor_output:
+            grid_thw = processor_output["image_grid_thw"]
+            if hasattr(grid_thw, "tolist"):
+                mm_extras["image_grid_thw"] = [tuple(row) for row in grid_thw.tolist()]
+            else:
+                mm_extras["image_grid_thw"] = list(grid_thw)
+
+        return appended_ids, mm_extras
+
     def merge_tokens(
         self,
         previous_messages: list[dict[str, Any]],
@@ -1484,28 +1640,22 @@ class KimiVLContinuousTokenBuilder(ContinuousTokenBuilder):
             )
             return self._merge_token_ids(runtime_token_ids, appended_ids)
 
-        all_images = self._extract_images_from_messages(updated_messages)
-
-        full_token_ids, _ = self.render_tokens_with_mm(
-            updated_messages, all_images, add_generation_prompt=True, tools=tools,
-        )
-        delta_token_ids, delta_mm_extras = self.render_tokens_with_mm(
-            updated_messages[len(previous_messages):], new_images, add_generation_prompt=True, tools=tools,
+        appended_messages = updated_messages[len(previous_messages):]
+        appended_token_ids, delta_mm_extras = self._render_incremental_with_mm(
+            appended_messages, new_images, tools=tools,
         )
 
-        prefix_len = len(runtime_token_ids)
-        appended_token_ids = list(full_token_ids[prefix_len:])
-        merged_token_ids = list(runtime_token_ids) + appended_token_ids
+        merge_result = self._merge_token_ids(runtime_token_ids, appended_token_ids)
         prev_images = self._extract_images_from_messages(previous_messages)
-        all_spans = self.extract_vision_placeholders(merged_token_ids)
+        all_spans = self.extract_vision_placeholders(merge_result.token_ids)
         image_token_spans = all_spans[len(prev_images):]
 
         return MergeResult(
-            token_ids=merged_token_ids,
-            appended_token_count=len(appended_token_ids),
-            kind="non_assistant",
-            inserted_token_ids=[],
-            removed_prefix_token_count=0,
+            token_ids=merge_result.token_ids,
+            appended_token_count=merge_result.appended_token_count,
+            kind=merge_result.kind,
+            inserted_token_ids=merge_result.inserted_token_ids,
+            removed_prefix_token_count=merge_result.removed_prefix_token_count,
             pixel_values=delta_mm_extras.get("pixel_values"),
             image_grid_thw=delta_mm_extras.get("image_grid_thw", []),
             image_token_spans=image_token_spans,
