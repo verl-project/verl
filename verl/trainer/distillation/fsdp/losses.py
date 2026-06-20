@@ -123,7 +123,10 @@ def compute_forward_kl_topk(
     # for trade-offs and benchmark numbers.
     loss_config: DistillationLossConfig = config.distillation_loss
     use_chunked_topk = getattr(loss_config, "use_chunked_topk", False)
+    loss_temperature = getattr(loss_config, "loss_temperature", None)
     if use_chunked_topk:
+        if loss_temperature is not None:
+            raise NotImplementedError("loss_temperature is not supported together with use_chunked_topk.")
         # log_softmax is monotonic, so topk(logits) == topk(log_softmax(logits)).
         student_topk_ids = torch.topk(student_logits, k=teacher_topk_ids.shape[-1], dim=-1).indices
         student_topk_log_probs = _chunked_topk_log_probs(
@@ -135,8 +138,21 @@ def compute_forward_kl_topk(
         student_log_probs = F.log_softmax(student_logits, dim=-1)
         student_topk_ids = torch.topk(student_log_probs, k=teacher_topk_ids.shape[-1], dim=-1).indices
         student_topk_log_probs = torch.gather(student_log_probs, dim=-1, index=teacher_topk_ids)
+    # Diagnostic masses are reported at T=1 (full-vocab gathered log-probs), before any
+    # temperature renormalization below, so student_mass/teacher_mass stay interpretable.
     student_mass = student_topk_log_probs.exp().sum(dim=-1)
     teacher_mass = teacher_topk_log_probs.exp().sum(dim=-1)
+
+    if loss_temperature is not None:
+        # Reference OPSD parity (siyan-zhao/OPSD generalized_jsd_loss top-k path): divide BOTH logits by the
+        # distillation temperature T and renormalize over the teacher's top-k support before the KL. For the
+        # teacher we only hold top-k log-probs (vLLM, T=1), but softmax over the top-k set is invariant to the
+        # unknown full-vocab normalizer, so log_softmax(teacher_topk_log_probs / T) exactly recovers the
+        # temperature-scaled, top-k-renormalized teacher distribution. As topk -> vocab this -> full-vocab.
+        student_topk_logits = torch.gather(student_logits, dim=-1, index=teacher_topk_ids)
+        student_topk_log_probs = F.log_softmax(student_topk_logits / loss_temperature, dim=-1)
+        teacher_topk_log_probs = F.log_softmax(teacher_topk_log_probs / loss_temperature, dim=-1)
+
     if loss_config.log_prob_min_clamp is not None:
         student_topk_log_probs = student_topk_log_probs.clamp_min(loss_config.log_prob_min_clamp)
         teacher_topk_log_probs = teacher_topk_log_probs.clamp_min(loss_config.log_prob_min_clamp)

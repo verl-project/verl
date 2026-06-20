@@ -351,7 +351,11 @@ def compute_forward_kl_topk(
     }
 
     # Due to use of top-k, student and teacher distributions don't sum to 1 -> divergences can be negative.
-    distillation_losses = distillation_losses.clamp_min(0.0)
+    # Reference OPSD (siyan-zhao/OPSD) does NOT floor the per-token loss: with per-vocab clip_tau the
+    # per-position sum is allowed to go negative, keeping gradient on tokens where the student already
+    # over-covers the teacher. Gate the floor so we can reproduce that behavior (clamp_negative_to_zero=False).
+    if getattr(distillation_config.distillation_loss, "clamp_negative_to_zero", True):
+        distillation_losses = distillation_losses.clamp_min(0.0)
 
     return distillation_losses, distillation_metrics
 

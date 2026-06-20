@@ -44,6 +44,16 @@ distillation_loss:
   # Distinct from loss_max_clamp (whole-position, post-sum). FSDP forward_kl_topk only.
   clip_tau: null
 
+  # OPSD reference parity (siyan-zhao/OPSD). When false, the per-token top-k divergence is
+  # NOT floored at 0, so (with clip_tau) it may go negative and keep gradient on tokens where
+  # the student already over-covers the teacher. true == original verl behavior. FSDP forward_kl_topk only.
+  clamp_negative_to_zero: true
+
+  # Softmax temperature applied to BOTH student and teacher logits before the top-k KL, matching the
+  # reference (student_logits/T, teacher_logits/T, renormalized over top-k). null == no scaling (T=1).
+  # FSDP forward_kl_topk only.
+  loss_temperature: null
+
   # Whether to incorporate distillation loss as a reward.
   use_policy_gradient: false
 

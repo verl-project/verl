@@ -81,6 +81,20 @@ class DistillationLossConfig(BaseConfig):
     # only in cut 1; Megatron raises NotImplementedError if set.
     clip_tau: Optional[float] = None
 
+    # OPSD reference parity (siyan-zhao/OPSD) knobs.
+    #
+    # clamp_negative_to_zero: when True (default, original verl behavior) the per-token
+    #   top-k divergence is floored at 0 (``distillation_losses.clamp_min(0.0)``). The
+    #   reference OPSD does NOT floor it: with per-vocab ``clip_tau`` the per-position sum
+    #   is allowed to go negative, which keeps gradient flowing on tokens where the student
+    #   already over-covers the teacher. Set False to reproduce the reference.
+    # loss_temperature: softmax temperature applied to BOTH student and teacher logits before
+    #   the top-k KL, matching the reference (``student_logits/T``, ``teacher_logits/T``).
+    #   None (default) == no scaling (T=1). The reference 1.7B run used 1.1. Only consumed by
+    #   ``loss_mode='forward_kl_topk'`` on the FSDP backend.
+    clamp_negative_to_zero: bool = True
+    loss_temperature: Optional[float] = None
+
     # Chunked top-K log-probs (opt-in, avoids [B, T, V] log_softmax buffer
     # at long context). Only consumed by ``loss_mode='forward_kl_topk'``.
     # Default ``False`` to preserve short-context performance (chunked path
