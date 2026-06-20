@@ -669,15 +669,13 @@ class QwenVLContinuousTokenBuilder(QwenContinuousTokenBuilder):
     spatial_merge_size source) via the processor/config.
     """
 
-    def __init__(self, tokenizer: Any, processor: Any, *, model_type: str = "qwen2_5_vl", **kwargs: Any):
+    def __init__(self, tokenizer: Any, processor: Any, **kwargs: Any):
         super().__init__(tokenizer, **kwargs)
         self.processor = processor
-        self.model_type = model_type
 
         # Vision special token IDs
         self._vision_start_id = _require_token_id(tokenizer, "<|vision_start|>")
         self._vision_end_id = _require_token_id(tokenizer, "<|vision_end|>")
-        self._image_pad_id = _require_token_id(tokenizer, "<|image_pad|>")
 
         # Spatial merge size — determines how many pad tokens per image
         if hasattr(processor, "image_processor") and hasattr(processor.image_processor, "merge_size"):
@@ -911,6 +909,7 @@ class QwenVLContinuousTokenBuilder(QwenContinuousTokenBuilder):
         return {
             "pixel_values": delta_pixel_values,
             "image_grid_thw": delta_grid_thw,
+            "mm_processor_kwargs": full_mm_extras.get("mm_processor_kwargs", {}),
         }
 
 
@@ -924,15 +923,13 @@ class MiMoVLContinuousTokenBuilder(QwenContinuousTokenBuilder):
     Kept as independent class for structural clarity.
     """
 
-    def __init__(self, tokenizer: Any, processor: Any, *, model_type: str = "mimo_vl", **kwargs: Any):
+    def __init__(self, tokenizer: Any, processor: Any, **kwargs: Any):
         super().__init__(tokenizer, **kwargs)
         self.processor = processor
-        self.model_type = model_type
 
         # Vision special token IDs (same as Qwen)
         self._vision_start_id = _require_token_id(tokenizer, "<|vision_start|>")
         self._vision_end_id = _require_token_id(tokenizer, "<|vision_end|>")
-        self._image_pad_id = _require_token_id(tokenizer, "<|image_pad|>")
 
         # Spatial merge size
         if hasattr(processor, "image_processor") and hasattr(processor.image_processor, "merge_size"):
@@ -1171,6 +1168,7 @@ class MiMoVLContinuousTokenBuilder(QwenContinuousTokenBuilder):
         return {
             "pixel_values": delta_pixel_values,
             "image_grid_thw": delta_grid_thw,
+            "mm_processor_kwargs": full_mm_extras.get("mm_processor_kwargs", {}),
         }
 
 
@@ -1186,7 +1184,6 @@ class GLM4VContinuousTokenBuilder(GLMContinuousTokenBuilder):
     def __init__(self, tokenizer: Any, processor: Any, **kwargs: Any):
         super().__init__(tokenizer, **kwargs)
         self.processor = processor
-        self._image_token_id = _require_token_id(tokenizer, "<|image|>")
         self._begin_image_id = _require_token_id(tokenizer, "<|begin_of_image|>")
         self._end_image_id = _require_token_id(tokenizer, "<|end_of_image|>")
         self._spatial_merge_size = int(getattr(getattr(processor, "image_processor", None), "merge_size", 2))
@@ -1354,7 +1351,7 @@ class GLM4VContinuousTokenBuilder(GLMContinuousTokenBuilder):
                 delta_pixel_values = None
         else:
             delta_pixel_values = None
-        return {"pixel_values": delta_pixel_values, "image_grid_thw": delta_grid_thw}
+        return {"pixel_values": delta_pixel_values, "image_grid_thw": delta_grid_thw, "mm_processor_kwargs": full_mm_extras.get("mm_processor_kwargs", {})}
 
 
 class KimiVLContinuousTokenBuilder(ContinuousTokenBuilder):
@@ -1370,7 +1367,6 @@ class KimiVLContinuousTokenBuilder(ContinuousTokenBuilder):
         self.processor = processor
         self._media_start_id = _require_token_id(tokenizer, "<|media_start|>")
         self._media_end_id = _require_token_id(tokenizer, "<|media_end|>")
-        self._media_pad_id = _require_token_id(tokenizer, "<|media_pad|>")
         merge_kernel = getattr(getattr(processor, "image_processor", None), "merge_kernel_size", None)
         if isinstance(merge_kernel, (list, tuple)):
             merge_kernel = merge_kernel[0]
@@ -1526,7 +1522,11 @@ class KimiVLContinuousTokenBuilder(ContinuousTokenBuilder):
         if not grid_thw and pixel_values is not None:
             if prev_image_count == 0:
                 return full_mm_extras
-            return {"pixel_values": None}
+            logger.warning(
+                "Kimi-VL: no image_grid_thw available for delta slicing; "
+                "passing full pixel_values (prev_image_count=%d)", prev_image_count,
+            )
+            return {"pixel_values": pixel_values, "mm_processor_kwargs": full_mm_extras.get("mm_processor_kwargs", {})}
 
         if prev_image_count == 0:
             return full_mm_extras
@@ -1545,4 +1545,4 @@ class KimiVLContinuousTokenBuilder(ContinuousTokenBuilder):
                 delta_pixel_values = None
         else:
             delta_pixel_values = None
-        return {"pixel_values": delta_pixel_values, "image_grid_thw": delta_grid_thw}
+        return {"pixel_values": delta_pixel_values, "image_grid_thw": delta_grid_thw, "mm_processor_kwargs": full_mm_extras.get("mm_processor_kwargs", {})}

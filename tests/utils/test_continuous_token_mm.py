@@ -470,7 +470,7 @@ class TestQwenVLBuildInitialTokens:
         self.tokenizer = _MockQwenVLTokenizer()
         self.processor = _MockQwenVLProcessor()
         self.builder = QwenVLContinuousTokenBuilder(
-            self.tokenizer, self.processor, model_type="qwen2_5_vl"
+            self.tokenizer, self.processor
         )
 
     def test_build_initial_no_images(self):
@@ -511,7 +511,7 @@ class TestQwenVLMergeTokens:
         self.tokenizer = _MockQwenVLTokenizer()
         self.processor = _MockQwenVLProcessor()
         self.builder = QwenVLContinuousTokenBuilder(
-            self.tokenizer, self.processor, model_type="qwen2_5_vl"
+            self.tokenizer, self.processor
         )
 
     def test_merge_no_new_images(self):
@@ -559,7 +559,7 @@ class TestQwenVLSliceMmDelta:
         self.tokenizer = _MockQwenVLTokenizer()
         self.processor = _MockQwenVLProcessor()
         self.builder = QwenVLContinuousTokenBuilder(
-            self.tokenizer, self.processor, model_type="qwen2_5_vl"
+            self.tokenizer, self.processor
         )
 
     def test_all_images_new(self):
