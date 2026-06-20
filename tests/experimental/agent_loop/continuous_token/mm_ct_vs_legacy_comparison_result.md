@@ -22,7 +22,10 @@ A correct CT implementation must produce **identical token sequences** to the le
 | Model | Family | Builder Class |
 |-------|--------|---------------|
 | Qwen/Qwen2.5-VL-7B-Instruct | `qwen25vl` | QwenVLContinuousTokenBuilder |
+| Qwen/Qwen3-VL-2B-Instruct | `qwen3vl` | QwenVLContinuousTokenBuilder |
 | XiaomiMiMo/MiMo-VL-7B-RL | `mimovl` | MiMoVLContinuousTokenBuilder |
+| zai-org/GLM-4.5V | `glm4v` | GLM4VContinuousTokenBuilder |
+| moonshotai/Kimi-VL-A3B-Instruct | `kimivl` | KimiVLContinuousTokenBuilder |
 
 ## Scenarios
 
@@ -51,12 +54,28 @@ A correct CT implementation must produce **identical token sequences** to the le
 | multi_turn_new_image | 138 | 138 | **MATCH** |
 | text_after_image | 112 | 112 | **MATCH** |
 
+### GLM-4.5V (zai-org/GLM-4.5V)
+
+| Scenario | CT tokens | Legacy tokens | Result |
+|----------|-----------|---------------|--------|
+| single_image | 74 | 74 | **MATCH** |
+| multi_turn_new_image | 112 | 112 | **MATCH** |
+| text_after_image | 87 | 87 | **MATCH** |
+
+### Kimi-VL-A3B (moonshotai/Kimi-VL-A3B-Instruct)
+
+| Scenario | CT tokens | Legacy tokens | Result |
+|----------|-----------|---------------|--------|
+| single_image | 86 | 86 | **MATCH** |
+| multi_turn_new_image | 127 | 127 | **MATCH** |
+| text_after_image | 100 | 100 | **MATCH** |
+
 ## Summary
 
 | Metric | Value |
 |--------|-------|
-| Total scenarios tested | 6 |
-| Matches | **6** |
+| Total scenarios tested | 12 |
+| Matches | **12** |
 | Mismatches | **0** |
 
 ## Conclusion

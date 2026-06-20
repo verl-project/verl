@@ -87,17 +87,18 @@ A `_cap_text_prompt_length` safety guard skips truncation for VL builders to avo
 
 ## Model Support
 
-### VL Families (Phase 1)
+### VL Families
 
 | Family | Models | Status |
 |--------|--------|--------|
 | `qwen25vl` / `qwen3vl` | Qwen2.5-VL-*, Qwen3-VL-* | Verified on H100 |
 | `mimovl` | MiMo-VL-* | Verified on H100 (with template flattening) |
+| `glm4v` | GLM-4.5V, GLM-4.1V | Verified on H100 |
+| `kimivl` | Kimi-VL-* | Verified on H100 |
 
-### Future (Phase 2/3)
+### Future
 
-- GLM-4.5-VL (needs `<|observation|>` handling)
-- Kimi-VL (needs `<image>` token support)
+- DeepSeek-VL2 (non-standard processor, complex tiling)
 
 ## Correctness Verification
 
