@@ -539,10 +539,10 @@ class _MockQwenVLProcessor:
 
         result = {"input_ids": [token_ids]}
         if num_images > 0:
-            # pixel_values: 4 patches per image, 3 channels, simplified
+            # pixel_values dim0 = raw patches (t*h*w = 1*4*4 = 16 per image)
             import numpy as np
 
-            result["pixel_values"] = np.zeros((num_images * 4, 3, 14, 14), dtype=np.float32)
+            result["pixel_values"] = np.zeros((num_images * 16, 3, 14, 14), dtype=np.float32)
             # image_grid_thw: each image is (1, 4, 4)
             result["image_grid_thw"] = np.array([[1, 4, 4]] * num_images, dtype=np.int64)
 
@@ -696,32 +696,34 @@ class TestQwenVLSliceMmDelta:
         import numpy as np
 
         full_extras = {
-            "pixel_values": np.zeros((8, 3, 14, 14)),
+            "pixel_values": np.zeros((32, 3, 14, 14)),
             "image_grid_thw": [(1, 4, 4), (1, 4, 4)],
         }
         delta = self.builder._slice_mm_delta(prev_image_count=0, full_mm_extras=full_extras)
-        assert delta is full_extras  # Same object (no copy needed)
+        assert delta is full_extras
 
     def test_partial_delta(self):
         """prev_image_count=1 with 2 total should return only second image."""
         import numpy as np
 
+        # pixel_values dim0 = raw patches (t*h*w), not merged tokens
+        # grid (1,4,4) -> raw patches = 1*4*4 = 16 per image, total = 32
         full_extras = {
-            "pixel_values": np.zeros((8, 3, 14, 14)),  # 2 images x 4 patches
+            "pixel_values": np.zeros((32, 3, 14, 14)),
             "image_grid_thw": [(1, 4, 4), (1, 4, 4)],
         }
         delta = self.builder._slice_mm_delta(prev_image_count=1, full_mm_extras=full_extras)
         assert len(delta["image_grid_thw"]) == 1
         assert delta["image_grid_thw"][0] == (1, 4, 4)
-        # pixel_values should be sliced: 4 patches (from index 4 onwards)
-        assert delta["pixel_values"].shape == (4, 3, 14, 14)
+        # pixel_values sliced at raw patch boundary: 16 patches for second image
+        assert delta["pixel_values"].shape == (16, 3, 14, 14)
 
     def test_no_new_images(self):
         """prev_image_count >= total should return empty."""
         import numpy as np
 
         full_extras = {
-            "pixel_values": np.zeros((4, 3, 14, 14)),
+            "pixel_values": np.zeros((16, 3, 14, 14)),
             "image_grid_thw": [(1, 4, 4)],
         }
         delta = self.builder._slice_mm_delta(prev_image_count=1, full_mm_extras=full_extras)

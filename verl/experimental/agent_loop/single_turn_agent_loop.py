@@ -46,7 +46,7 @@ class SingleTurnAgentLoop(AgentLoopBase):
         mm_processor_kwargs = self._get_mm_processor_kwargs(audios)
 
         # 2. apply chat template and tokenize
-        use_continuous_token = self.enable_continuous_token and (
+        use_continuous_token = self.enable_continuous_token and self.continuous_token_builder is not None and (
             not multi_modal_data or self.continuous_token_builder.supports_multimodal()
         )
         if use_continuous_token:

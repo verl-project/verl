@@ -16,8 +16,11 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Literal, Sequence
+
+logger = logging.getLogger(__name__)
 
 _SUPPORTED_APPEND_ROLES = frozenset({"tool", "user", "system"})
 _SYNTHETIC_SYSTEM_MESSAGE: dict[str, Any] = {"role": "system", "content": "continuous token synthetic system"}
@@ -810,13 +813,13 @@ class QwenVLContinuousTokenBuilder(QwenContinuousTokenBuilder):
         n = len(token_ids)
         while i < n:
             if token_ids[i] == self._vision_start_id:
-                # Find matching vision_end
                 j = i + 1
                 while j < n and token_ids[j] != self._vision_end_id:
                     j += 1
                 if j < n:
-                    # Span covers the image_pad tokens (exclusive of start/end markers)
                     spans.append((i + 1, j))
+                else:
+                    logger.warning("Unmatched <|vision_start|> at position %d", i)
                 i = j + 1
             else:
                 i += 1
@@ -829,21 +832,24 @@ class QwenVLContinuousTokenBuilder(QwenContinuousTokenBuilder):
         *,
         add_generation_prompt: bool = True,
         mm_processor_kwargs: dict[str, Any] | None = None,
+        tools: list[dict[str, Any]] | None = None,
     ) -> tuple[list[int], dict[str, Any]]:
         """Render messages through the Qwen VL processor."""
         from verl.utils.chat_template import apply_chat_template
         from verl.utils.tokenizer import build_multimodal_processor_inputs, normalize_token_ids
 
-        # Step 1: Render text template (with single image_pad placeholders)
+        template_kwargs = dict(self.chat_template_kwargs)
+        if tools:
+            template_kwargs["tools"] = tools
+
         text = apply_chat_template(
             self.tokenizer,
             messages,
             tokenize=False,
             add_generation_prompt=add_generation_prompt,
-            **self.chat_template_kwargs,
+            **template_kwargs,
         )
 
-        # Step 2: Run through processor to expand image_pad and get pixel_values
         proc_kwargs = dict(mm_processor_kwargs or {})
         processor_output = build_multimodal_processor_inputs(
             self.processor,
@@ -852,19 +858,19 @@ class QwenVLContinuousTokenBuilder(QwenContinuousTokenBuilder):
             mm_processor_kwargs=proc_kwargs if proc_kwargs else None,
         )
 
-        # Step 3: Extract token_ids and mm_extras
         token_ids = normalize_token_ids(processor_output["input_ids"])
 
         mm_extras: dict[str, Any] = {}
         if "pixel_values" in processor_output:
             mm_extras["pixel_values"] = processor_output["pixel_values"]
         if "image_grid_thw" in processor_output:
-            # Convert tensor to list of tuples for MergeResult compatibility
             grid_thw = processor_output["image_grid_thw"]
             if hasattr(grid_thw, "tolist"):
                 mm_extras["image_grid_thw"] = [tuple(row) for row in grid_thw.tolist()]
             else:
                 mm_extras["image_grid_thw"] = list(grid_thw)
+        if proc_kwargs:
+            mm_extras["mm_processor_kwargs"] = proc_kwargs
 
         return token_ids, mm_extras
 
@@ -875,8 +881,14 @@ class QwenVLContinuousTokenBuilder(QwenContinuousTokenBuilder):
             content = msg.get("content")
             if isinstance(content, list):
                 for block in content:
-                    if isinstance(block, dict) and block.get("type") == "image":
-                        image_ref = block.get("image") or block.get("image_url", {}).get("url")
+                    if isinstance(block, dict) and block.get("type") in ("image", "image_url"):
+                        image_ref = block.get("image")
+                        if not image_ref:
+                            image_url = block.get("image_url")
+                            if isinstance(image_url, dict):
+                                image_ref = image_url.get("url")
+                            elif isinstance(image_url, str):
+                                image_ref = image_url
                         if image_ref is not None:
                             images.append(image_ref)
         return images
@@ -899,7 +911,7 @@ class QwenVLContinuousTokenBuilder(QwenContinuousTokenBuilder):
             return self._render_tokens(messages, add_generation_prompt=True, tools=tools)
 
         token_ids, mm_extras = self.render_tokens_with_mm(
-            messages, images, add_generation_prompt=True
+            messages, images, add_generation_prompt=True, tools=tools
         )
         self._last_mm_extras = mm_extras
         return token_ids
@@ -935,7 +947,7 @@ class QwenVLContinuousTokenBuilder(QwenContinuousTokenBuilder):
         prev_images = self._extract_images_from_messages(previous_messages)
 
         full_token_ids, full_mm_extras = self.render_tokens_with_mm(
-            updated_messages, all_images, add_generation_prompt=True
+            updated_messages, all_images, add_generation_prompt=True, tools=tools
         )
 
         # Slice mm_extras: only the delta (new images) portion
@@ -951,8 +963,9 @@ class QwenVLContinuousTokenBuilder(QwenContinuousTokenBuilder):
         # Apply boundary handling (newline after im_end from QwenBuilder)
         merge_result = self._merge_token_ids(runtime_token_ids, appended_token_ids)
 
-        # Populate MM fields in the result
-        image_token_spans = self.extract_vision_placeholders(merge_result.token_ids)
+        # Populate MM fields — only spans for new images to align with delta pixel_values
+        all_spans = self.extract_vision_placeholders(merge_result.token_ids)
+        image_token_spans = all_spans[len(prev_images):]
 
         return MergeResult(
             token_ids=merge_result.token_ids,
@@ -989,17 +1002,19 @@ class QwenVLContinuousTokenBuilder(QwenContinuousTokenBuilder):
         # Slice grid_thw
         delta_grid_thw = grid_thw[prev_image_count:]
 
-        # Slice pixel_values: each image contributes count_vision_tokens patches
+        # Slice pixel_values: dim0 is raw patches (t*h*w), NOT merged tokens
         if pixel_values is not None:
-            # Compute cumulative patch counts to find split point
             prev_patch_count = sum(
-                self.count_vision_tokens(tuple(row)) for row in grid_thw[:prev_image_count]
+                row[0] * row[1] * row[2] for row in grid_thw[:prev_image_count]
             )
             if hasattr(pixel_values, "__getitem__"):
-                # Tensor-like slicing (numpy/torch)
                 delta_pixel_values = pixel_values[prev_patch_count:]
             else:
-                delta_pixel_values = pixel_values
+                logger.warning(
+                    "pixel_values type %s does not support slicing; delta will be None",
+                    type(pixel_values).__name__,
+                )
+                delta_pixel_values = None
         else:
             delta_pixel_values = None
 
@@ -1057,6 +1072,8 @@ class MiMoVLContinuousTokenBuilder(MiMoContinuousTokenBuilder):
                     j += 1
                 if j < n:
                     spans.append((i + 1, j))
+                else:
+                    logger.warning("Unmatched <|vision_start|> at position %d", i)
                 i = j + 1
             else:
                 i += 1
@@ -1069,17 +1086,23 @@ class MiMoVLContinuousTokenBuilder(MiMoContinuousTokenBuilder):
         *,
         add_generation_prompt: bool = True,
         mm_processor_kwargs: dict[str, Any] | None = None,
+        tools: list[dict[str, Any]] | None = None,
     ) -> tuple[list[int], dict[str, Any]]:
         """Render messages through the MiMo-VL processor (Qwen2.5-VL compatible)."""
         from verl.utils.chat_template import apply_chat_template
         from verl.utils.tokenizer import build_multimodal_processor_inputs, normalize_token_ids
 
+        template_kwargs = dict(self.chat_template_kwargs)
+        if tools:
+            template_kwargs["tools"] = tools
+
+        flat_messages = self._flatten_multimodal_content(messages)
         text = apply_chat_template(
             self.tokenizer,
-            messages,
+            flat_messages,
             tokenize=False,
             add_generation_prompt=add_generation_prompt,
-            **self.chat_template_kwargs,
+            **template_kwargs,
         )
 
         proc_kwargs = dict(mm_processor_kwargs or {})
@@ -1101,6 +1124,8 @@ class MiMoVLContinuousTokenBuilder(MiMoContinuousTokenBuilder):
                 mm_extras["image_grid_thw"] = [tuple(row) for row in grid_thw.tolist()]
             else:
                 mm_extras["image_grid_thw"] = list(grid_thw)
+        if proc_kwargs:
+            mm_extras["mm_processor_kwargs"] = proc_kwargs
 
         return token_ids, mm_extras
 
@@ -1111,11 +1136,49 @@ class MiMoVLContinuousTokenBuilder(MiMoContinuousTokenBuilder):
             content = msg.get("content")
             if isinstance(content, list):
                 for block in content:
-                    if isinstance(block, dict) and block.get("type") == "image":
-                        image_ref = block.get("image") or block.get("image_url", {}).get("url")
+                    if isinstance(block, dict) and block.get("type") in ("image", "image_url"):
+                        image_ref = block.get("image")
+                        if not image_ref:
+                            image_url = block.get("image_url")
+                            if isinstance(image_url, dict):
+                                image_ref = image_url.get("url")
+                            elif isinstance(image_url, str):
+                                image_ref = image_url
                         if image_ref is not None:
                             images.append(image_ref)
         return images
+
+    def _flatten_multimodal_content(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Flatten list-format content to string with vision placeholders for MiMo-VL's template."""
+        flat: list[dict[str, Any]] = []
+        for msg in messages:
+            content = msg.get("content")
+            if not isinstance(content, list):
+                flat.append(msg)
+                continue
+            parts: list[str] = []
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                btype = block.get("type", "")
+                if btype in ("image", "image_url"):
+                    parts.append("<|vision_start|><|image_pad|><|vision_end|>")
+                elif btype == "video":
+                    parts.append("<|vision_start|><|video_pad|><|vision_end|>")
+                elif btype == "text":
+                    parts.append(block.get("text", ""))
+            flat.append({**msg, "content": "".join(parts)})
+        return flat
+
+    def _render_tokens(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        add_generation_prompt: bool = False,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> list[int]:
+        flat = self._flatten_multimodal_content(messages)
+        return super()._render_tokens(flat, add_generation_prompt=add_generation_prompt, tools=tools)
 
     def build_initial_tokens(
         self,
@@ -1130,7 +1193,7 @@ class MiMoVLContinuousTokenBuilder(MiMoContinuousTokenBuilder):
             return self._render_tokens(messages, add_generation_prompt=True, tools=tools)
 
         token_ids, mm_extras = self.render_tokens_with_mm(
-            messages, images, add_generation_prompt=True
+            messages, images, add_generation_prompt=True, tools=tools
         )
         self._last_mm_extras = mm_extras
         return token_ids
@@ -1158,7 +1221,7 @@ class MiMoVLContinuousTokenBuilder(MiMoContinuousTokenBuilder):
         prev_images = self._extract_images_from_messages(previous_messages)
 
         full_token_ids, full_mm_extras = self.render_tokens_with_mm(
-            updated_messages, all_images, add_generation_prompt=True
+            updated_messages, all_images, add_generation_prompt=True, tools=tools
         )
 
         delta_mm_extras = self._slice_mm_delta(
@@ -1169,7 +1232,8 @@ class MiMoVLContinuousTokenBuilder(MiMoContinuousTokenBuilder):
         prefix_len = len(runtime_token_ids)
         appended_token_ids = full_token_ids[prefix_len:]
         merge_result = self._merge_token_ids(runtime_token_ids, appended_token_ids)
-        image_token_spans = self.extract_vision_placeholders(merge_result.token_ids)
+        all_spans = self.extract_vision_placeholders(merge_result.token_ids)
+        image_token_spans = all_spans[len(prev_images):]
 
         return MergeResult(
             token_ids=merge_result.token_ids,
@@ -1201,12 +1265,16 @@ class MiMoVLContinuousTokenBuilder(MiMoContinuousTokenBuilder):
 
         if pixel_values is not None:
             prev_patch_count = sum(
-                self.count_vision_tokens(tuple(row)) for row in grid_thw[:prev_image_count]
+                row[0] * row[1] * row[2] for row in grid_thw[:prev_image_count]
             )
             if hasattr(pixel_values, "__getitem__"):
                 delta_pixel_values = pixel_values[prev_patch_count:]
             else:
-                delta_pixel_values = pixel_values
+                logger.warning(
+                    "pixel_values type %s does not support slicing; delta will be None",
+                    type(pixel_values).__name__,
+                )
+                delta_pixel_values = None
         else:
             delta_pixel_values = None
 
