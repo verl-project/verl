@@ -841,21 +841,22 @@ class QwenVLContinuousTokenBuilder(QwenContinuousTokenBuilder):
         )
 
         # Compute appended tokens via prefix diff
+        # full_token_ids already has correct boundaries from the template render,
+        # so we use direct concatenation (not _merge_token_ids which would double-insert)
         prefix_len = len(runtime_token_ids)
-        appended_token_ids = full_token_ids[prefix_len:]
-
-        merge_result = self._merge_token_ids(runtime_token_ids, appended_token_ids)
+        appended_token_ids = list(full_token_ids[prefix_len:])
+        merged_token_ids = list(runtime_token_ids) + appended_token_ids
 
         prev_images = self._extract_images_from_messages(previous_messages)
-        all_spans = self.extract_vision_placeholders(merge_result.token_ids)
+        all_spans = self.extract_vision_placeholders(merged_token_ids)
         image_token_spans = all_spans[len(prev_images):]
 
         return MergeResult(
-            token_ids=merge_result.token_ids,
-            appended_token_count=merge_result.appended_token_count,
-            kind=merge_result.kind,
-            inserted_token_ids=merge_result.inserted_token_ids,
-            removed_prefix_token_count=merge_result.removed_prefix_token_count,
+            token_ids=merged_token_ids,
+            appended_token_count=len(appended_token_ids),
+            kind="non_assistant",
+            inserted_token_ids=[],
+            removed_prefix_token_count=0,
             pixel_values=delta_mm_extras.get("pixel_values"),
             image_grid_thw=delta_mm_extras.get("image_grid_thw", []),
             image_token_spans=image_token_spans,
@@ -1110,18 +1111,18 @@ class MiMoVLContinuousTokenBuilder(QwenContinuousTokenBuilder):
         )
 
         prefix_len = len(runtime_token_ids)
-        appended_token_ids = full_token_ids[prefix_len:]
-        merge_result = self._merge_token_ids(runtime_token_ids, appended_token_ids)
+        appended_token_ids = list(full_token_ids[prefix_len:])
+        merged_token_ids = list(runtime_token_ids) + appended_token_ids
         prev_images = self._extract_images_from_messages(previous_messages)
-        all_spans = self.extract_vision_placeholders(merge_result.token_ids)
+        all_spans = self.extract_vision_placeholders(merged_token_ids)
         image_token_spans = all_spans[len(prev_images):]
 
         return MergeResult(
-            token_ids=merge_result.token_ids,
-            appended_token_count=merge_result.appended_token_count,
-            kind=merge_result.kind,
-            inserted_token_ids=merge_result.inserted_token_ids,
-            removed_prefix_token_count=merge_result.removed_prefix_token_count,
+            token_ids=merged_token_ids,
+            appended_token_count=len(appended_token_ids),
+            kind="non_assistant",
+            inserted_token_ids=[],
+            removed_prefix_token_count=0,
             pixel_values=delta_mm_extras.get("pixel_values"),
             image_grid_thw=delta_mm_extras.get("image_grid_thw", []),
             image_token_spans=image_token_spans,
@@ -1308,17 +1309,18 @@ class GLM4VContinuousTokenBuilder(GLMContinuousTokenBuilder):
         )
 
         prefix_len = len(runtime_token_ids)
-        merge_result = self._merge_token_ids(runtime_token_ids, full_token_ids[prefix_len:])
+        appended_token_ids = list(full_token_ids[prefix_len:])
+        merged_token_ids = list(runtime_token_ids) + appended_token_ids
         prev_images = self._extract_images_from_messages(previous_messages)
-        all_spans = self.extract_vision_placeholders(merge_result.token_ids)
+        all_spans = self.extract_vision_placeholders(merged_token_ids)
         image_token_spans = all_spans[len(prev_images):]
 
         return MergeResult(
-            token_ids=merge_result.token_ids,
-            appended_token_count=merge_result.appended_token_count,
-            kind=merge_result.kind,
-            inserted_token_ids=merge_result.inserted_token_ids,
-            removed_prefix_token_count=merge_result.removed_prefix_token_count,
+            token_ids=merged_token_ids,
+            appended_token_count=len(appended_token_ids),
+            kind="non_assistant",
+            inserted_token_ids=[],
+            removed_prefix_token_count=0,
             pixel_values=delta_mm_extras.get("pixel_values"),
             image_grid_thw=delta_mm_extras.get("image_grid_thw", []),
             image_token_spans=image_token_spans,
@@ -1492,17 +1494,18 @@ class KimiVLContinuousTokenBuilder(ContinuousTokenBuilder):
         )
 
         prefix_len = len(runtime_token_ids)
-        merge_result = self._merge_token_ids(runtime_token_ids, full_token_ids[prefix_len:])
+        appended_token_ids = list(full_token_ids[prefix_len:])
+        merged_token_ids = list(runtime_token_ids) + appended_token_ids
         prev_images = self._extract_images_from_messages(previous_messages)
-        all_spans = self.extract_vision_placeholders(merge_result.token_ids)
+        all_spans = self.extract_vision_placeholders(merged_token_ids)
         image_token_spans = all_spans[len(prev_images):]
 
         return MergeResult(
-            token_ids=merge_result.token_ids,
-            appended_token_count=merge_result.appended_token_count,
-            kind=merge_result.kind,
-            inserted_token_ids=merge_result.inserted_token_ids,
-            removed_prefix_token_count=merge_result.removed_prefix_token_count,
+            token_ids=merged_token_ids,
+            appended_token_count=len(appended_token_ids),
+            kind="non_assistant",
+            inserted_token_ids=[],
+            removed_prefix_token_count=0,
             pixel_values=delta_mm_extras.get("pixel_values"),
             image_grid_thw=delta_mm_extras.get("image_grid_thw", []),
             image_token_spans=image_token_spans,
