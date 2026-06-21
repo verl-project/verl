@@ -625,6 +625,20 @@ def _require_token_id(tokenizer: Any, token: str) -> int:
     return token_id
 
 
+def _token_suffix_after_prefix(
+    prefix_token_ids: Sequence[int],
+    full_token_ids: Sequence[int],
+    *,
+    context: str,
+) -> list[int]:
+    """Return the token suffix after asserting the prefix is unchanged."""
+    prefix = list(prefix_token_ids)
+    full = list(full_token_ids)
+    if full[: len(prefix)] != prefix:
+        raise ValueError(f"Continuous Token token-id suffix diff failed for {context}")
+    return full[len(prefix) :]
+
+
 def _stringify_tool_content(content: Any) -> str:
     if content is None:
         return ""
@@ -868,7 +882,7 @@ class QwenVLContinuousTokenBuilder(QwenContinuousTokenBuilder):
             add_generation_prompt=False,
             **template_kwargs,
         )
-        trim_length = len(self.tokenizer.encode(prefix_text, add_special_tokens=False))
+        prefix_token_ids = normalize_token_ids(self.tokenizer.encode(prefix_text, add_special_tokens=False))
 
         full_text = apply_chat_template(
             self.tokenizer,
@@ -884,7 +898,11 @@ class QwenVLContinuousTokenBuilder(QwenContinuousTokenBuilder):
         )
 
         all_ids = normalize_token_ids(processor_output["input_ids"])
-        return list(all_ids[trim_length:])
+        return _token_suffix_after_prefix(
+            prefix_token_ids,
+            all_ids,
+            context="multimodal synthetic prefix",
+        )
 
     def merge_tokens(
         self,
@@ -1093,7 +1111,7 @@ class MiMoVLContinuousTokenBuilder(QwenContinuousTokenBuilder):
             add_generation_prompt=False,
             **template_kwargs,
         )
-        trim_length = len(self.tokenizer.encode(prefix_text, add_special_tokens=False))
+        prefix_token_ids = normalize_token_ids(self.tokenizer.encode(prefix_text, add_special_tokens=False))
 
         full_text = apply_chat_template(
             self.tokenizer,
@@ -1109,7 +1127,11 @@ class MiMoVLContinuousTokenBuilder(QwenContinuousTokenBuilder):
         )
 
         all_ids = normalize_token_ids(processor_output["input_ids"])
-        return list(all_ids[trim_length:])
+        return _token_suffix_after_prefix(
+            prefix_token_ids,
+            all_ids,
+            context="multimodal synthetic prefix",
+        )
 
     def merge_tokens(
         self,
@@ -1268,7 +1290,7 @@ class GLM4VContinuousTokenBuilder(GLMContinuousTokenBuilder):
             add_generation_prompt=False,
             **template_kwargs,
         )
-        trim_length = len(self.tokenizer.encode(prefix_text, add_special_tokens=False))
+        prefix_token_ids = normalize_token_ids(self.tokenizer.encode(prefix_text, add_special_tokens=False))
 
         full_text = apply_chat_template(
             self.tokenizer,
@@ -1284,7 +1306,11 @@ class GLM4VContinuousTokenBuilder(GLMContinuousTokenBuilder):
         )
 
         all_ids = normalize_token_ids(processor_output["input_ids"])
-        return list(all_ids[trim_length:])
+        return _token_suffix_after_prefix(
+            prefix_token_ids,
+            all_ids,
+            context="multimodal synthetic prefix",
+        )
 
     def merge_tokens(
         self,
@@ -1451,7 +1477,7 @@ class KimiVLContinuousTokenBuilder(ContinuousTokenBuilder):
             add_generation_prompt=False,
             **template_kwargs,
         )
-        trim_length = len(self.tokenizer.encode(prefix_text, add_special_tokens=False))
+        prefix_token_ids = normalize_token_ids(self.tokenizer.encode(prefix_text, add_special_tokens=False))
 
         full_text = apply_chat_template(
             self.tokenizer,
@@ -1467,7 +1493,11 @@ class KimiVLContinuousTokenBuilder(ContinuousTokenBuilder):
         )
 
         all_ids = normalize_token_ids(processor_output["input_ids"])
-        return list(all_ids[trim_length:])
+        return _token_suffix_after_prefix(
+            prefix_token_ids,
+            all_ids,
+            context="multimodal synthetic prefix",
+        )
 
     def merge_tokens(
         self,

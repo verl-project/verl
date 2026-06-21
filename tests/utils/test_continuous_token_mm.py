@@ -356,9 +356,10 @@ class _MockQwenVLProcessor:
         # We simulate by counting images and producing deterministic output
         num_images = len(images) if images else 0
 
-        # Token IDs: produce a fixed sequence with vision spans expanded
-        # Simplified: [BOS, vision_start, pad*4, vision_end, ..., text_tokens]
-        token_ids = [151643]  # BOS
+        # Token IDs: produce a fixed sequence with vision spans expanded.
+        # The leading tokens simulate the synthetic prefix used by incremental
+        # rendering, so prefix trimming can assert the invariant explicitly.
+        token_ids = [1000, 1001, 1002]
         for _ in range(num_images):
             token_ids.append(151652)  # vision_start
             token_ids.extend([151655] * 4)  # 4 image_pad tokens
@@ -395,6 +396,12 @@ class _MockQwenVLTokenizer:
             "<|vision_start|>": 151652,
             "<|vision_end|>": 151653,
             "<|image_pad|>": 151655,
+            "<|observation|>": 151333,
+            "<|user|>": 151336,
+            "<|begin_of_image|>": 151700,
+            "<|end_of_image|>": 151701,
+            "<|media_start|>": 151800,
+            "<|media_end|>": 151801,
         }
         return mapping.get(token, 0)
 
@@ -493,3 +500,67 @@ class TestQwenVLMergeTokens:
         assert isinstance(result, MergeResult)
         assert result.kind == "non_assistant"
         assert 151655 in result.token_ids
+
+    def test_merge_with_new_images_rejects_non_prefix_processor_output(self):
+        """Synthetic-prefix trimming should fail fast if processor output is not append-only."""
+
+        class BadPrefixProcessor(_MockQwenVLProcessor):
+            def __call__(self, *, text=None, images=None, return_tensors=None, **kwargs):
+                result = super().__call__(text=text, images=images, return_tensors=return_tensors, **kwargs)
+                result["input_ids"][0][0] = 9999
+                return result
+
+        from verl.utils.continuous_token import QwenVLContinuousTokenBuilder
+
+        builder = QwenVLContinuousTokenBuilder(self.tokenizer, BadPrefixProcessor())
+        previous = [{"role": "user", "content": "Hi"}]
+        updated = [
+            {"role": "user", "content": "Hi"},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": "new_image.png"},
+                    {"type": "text", "text": "Look at this"},
+                ],
+            },
+        ]
+        runtime_ids = [151644, 1000, 1001, 1002, 151645, 151644]
+        with pytest.raises(ValueError, match="multimodal synthetic prefix"):
+            builder.merge_tokens(previous, updated, runtime_ids)
+
+
+@pytest.mark.parametrize(
+    "builder_name",
+    [
+        "MiMoVLContinuousTokenBuilder",
+        "GLM4VContinuousTokenBuilder",
+        "KimiVLContinuousTokenBuilder",
+    ],
+)
+def test_other_vl_builders_reject_non_prefix_processor_output(builder_name):
+    """All VL builders should validate the synthetic-prefix token invariant."""
+
+    class BadPrefixProcessor(_MockQwenVLProcessor):
+        def __call__(self, *, text=None, images=None, return_tensors=None, **kwargs):
+            result = super().__call__(text=text, images=images, return_tensors=return_tensors, **kwargs)
+            result["input_ids"][0][0] = 9999
+            return result
+
+    import verl.utils.continuous_token as continuous_token
+
+    builder_cls = getattr(continuous_token, builder_name)
+    builder = builder_cls(_MockQwenVLTokenizer(), BadPrefixProcessor())
+    previous = [{"role": "user", "content": "Hi"}]
+    updated = [
+        {"role": "user", "content": "Hi"},
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": "new_image.png"},
+                {"type": "text", "text": "Look at this"},
+            ],
+        },
+    ]
+    runtime_ids = [151644, 1000, 1001, 1002, 151645, 151644]
+    with pytest.raises(ValueError, match="multimodal synthetic prefix"):
+        builder.merge_tokens(previous, updated, runtime_ids)
