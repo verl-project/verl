@@ -315,7 +315,7 @@ class AgentLoopBase(ABC):
         """Merge appended non-assistant messages into runtime tokens and metadata."""
         merge_result = await self.loop.run_in_executor(
             None,
-            lambda: self.continuous_token_builder.merge_tokens(
+            lambda: self.continuous_token_builder.merge_non_assistant_tokens(
                 previous_messages,
                 updated_messages,
                 runtime_token_ids,
@@ -335,10 +335,10 @@ class AgentLoopBase(ABC):
         response_logprobs: Optional[list[float]] = None,
         assistant_logprobs: Optional[list[float]] = None,
     ):
-        """Append assistant-generated tokens and align response metadata."""
+        """Merge assistant-generated tokens and align response metadata."""
         merge_result = await self.loop.run_in_executor(
             None,
-            lambda: self.continuous_token_builder.append_assistant_tokens(
+            lambda: self.continuous_token_builder.merge_assistant_tokens(
                 runtime_token_ids,
                 assistant_token_ids,
             ),

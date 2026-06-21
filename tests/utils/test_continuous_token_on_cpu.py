@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
+
 import pytest
 
 from verl.utils.continuous_token import (
@@ -22,7 +24,6 @@ from verl.utils.continuous_token import (
     MergeResult,
     MiniMaxContinuousTokenBuilder,
     QwenContinuousTokenBuilder,
-    ct_align_response_metadata,
 )
 from verl.utils.continuous_token_wiring import (
     CONTINUOUS_TOKEN_BUILDER_FAMILIES,
@@ -351,13 +352,13 @@ def test_qwen3_builder_inserts_missing_newline_after_im_end():
     builder = create_continuous_token_builder(tokenizer, model_family="qwen3")
 
     assert isinstance(builder, QwenContinuousTokenBuilder)
-    result = builder._merge_token_ids([1, tokenizer.im_end_id], [2, 3])
+    result = builder._merge_non_assistant_token_ids([1, tokenizer.im_end_id], [2, 3])
 
     assert result.token_ids == [1, tokenizer.im_end_id, tokenizer.newline_id, 2, 3]
     assert result.inserted_token_ids == [tokenizer.newline_id]
     assert result.appended_token_count == 2
     assert result.kind == "non_assistant"
-    aligned_mask, aligned_logprobs = ct_align_response_metadata(
+    aligned_mask, aligned_logprobs = builder.align_response_metadata(
         result,
         [1, 1],
         [-0.1, -0.2],
@@ -371,7 +372,7 @@ def test_qwen35_builder_uses_qwen3_newline_boundary_logic():
     builder = create_continuous_token_builder(tokenizer, model_family="qwen35")
 
     assert isinstance(builder, QwenContinuousTokenBuilder)
-    result = builder._merge_token_ids([1, tokenizer.im_end_id], [2])
+    result = builder._merge_non_assistant_token_ids([1, tokenizer.im_end_id], [2])
 
     assert result.token_ids == [1, tokenizer.im_end_id, tokenizer.newline_id, 2]
     assert result.inserted_token_ids == [tokenizer.newline_id]
@@ -384,13 +385,13 @@ def test_minimax_builder_inserts_missing_newline_after_eos():
     builder = create_continuous_token_builder(tokenizer, model_family="minimaxm2")
 
     assert isinstance(builder, MiniMaxContinuousTokenBuilder)
-    result = builder._merge_token_ids([1, tokenizer.eos_id], [2, 3])
+    result = builder._merge_non_assistant_token_ids([1, tokenizer.eos_id], [2, 3])
 
     assert result.token_ids == [1, tokenizer.eos_id, tokenizer.newline_id, 2, 3]
     assert result.inserted_token_ids == [tokenizer.newline_id]
     assert result.appended_token_count == 2
     assert result.kind == "non_assistant"
-    aligned_mask, aligned_logprobs = ct_align_response_metadata(
+    aligned_mask, aligned_logprobs = builder.align_response_metadata(
         result,
         [1, 1],
         [-0.1, -0.2],
@@ -404,13 +405,13 @@ def test_glm47_builder_removes_ambiguous_boundary_token():
     builder = create_continuous_token_builder(tokenizer, model_family="glm47")
 
     assert isinstance(builder, GLMContinuousTokenBuilder)
-    result = builder._merge_token_ids([1, tokenizer.observation_id], [tokenizer.user_id, 2])
+    result = builder._merge_non_assistant_token_ids([1, tokenizer.observation_id], [tokenizer.user_id, 2])
 
     assert result.token_ids == [1, tokenizer.user_id, 2]
     assert result.removed_prefix_token_count == 1
     assert result.appended_token_count == 2
     assert result.kind == "non_assistant"
-    aligned_mask, aligned_logprobs = ct_align_response_metadata(
+    aligned_mask, aligned_logprobs = builder.align_response_metadata(
         result,
         [1, 1],
         [-0.1, -0.2],
@@ -425,7 +426,7 @@ def test_gemma4_builder_inserts_tool_response_boundary_for_appended_messages():
     previous_messages = [{"role": "user", "content": "question"}]
     updated_messages = previous_messages + [{"role": "tool", "content": "answer", "name": "lookup"}]
 
-    result = builder.merge_tokens(previous_messages, updated_messages, [1, 2, 3])
+    result = builder.merge_non_assistant_tokens(previous_messages, updated_messages, [1, 2, 3])
 
     assert isinstance(builder, Gemma4ContinuousTokenBuilder)
     assert result.token_ids[:4] == [1, 2, 3, tokenizer.tool_response_id]
@@ -440,16 +441,38 @@ def test_gemma4_builder_does_not_duplicate_existing_tool_response_boundary():
     previous_messages = [{"role": "user", "content": "question"}]
     updated_messages = previous_messages + [{"role": "tool", "content": "answer", "name": "lookup"}]
 
-    result = builder.merge_tokens(previous_messages, updated_messages, [1, tokenizer.tool_response_id])
+    result = builder.merge_non_assistant_tokens(previous_messages, updated_messages, [1, tokenizer.tool_response_id])
 
     assert result.token_ids[:2] == [1, tokenizer.tool_response_id]
     assert result.inserted_token_ids == []
     assert result.kind == "non_assistant"
 
 
+def test_gemma4_builder_formats_tool_response_by_position_with_warning(caplog):
+    builder = create_continuous_token_builder(_Gemma4BoundaryTokenizer(), model_family="gemma4")
+    previous_messages = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"type": "function", "function": {"name": "lookup"}}],
+        }
+    ]
+    tool_messages = [{"role": "tool", "content": "answer"}]
+
+    with caplog.at_level(logging.WARNING):
+        token_ids = builder._tokenize_tool_group(
+            tool_messages,
+            previous_messages=previous_messages,
+        )
+
+    expected = '<|tool_response>response:lookup{value:<|"|>answer<|"|>}<tool_response|>'
+    assert token_ids == [ord(char) for char in expected]
+    assert "resolving a tool response name by position" in caplog.text
+
+
 def test_gpt_oss_builder_formats_tool_responses_with_resolved_tool_name():
     builder = create_continuous_token_builder(_TemplateTokenizer(), model_family="gptoss")
-    context_messages = [
+    previous_messages = [
         {
             "role": "assistant",
             "content": "",
@@ -464,16 +487,39 @@ def test_gpt_oss_builder_formats_tool_responses_with_resolved_tool_name():
     ]
     tool_messages = [{"role": "tool", "tool_call_id": "call_0", "content": [{"type": "text", "text": "ok"}]}]
 
-    token_ids = builder._tokenize_tool_group(tool_messages, context_messages=context_messages)
+    token_ids = builder._tokenize_tool_group(tool_messages, previous_messages=previous_messages)
 
-    expected = '<|start|>functions.lookup to=assistant<|channel|>commentary<|message|>"ok"<|end|>'
+    expected = "<|start|>functions.lookup to=assistant<|channel|>commentary<|message|>ok<|end|>"
     assert isinstance(builder, GptOssContinuousTokenBuilder)
     assert token_ids == [ord(char) for char in expected]
 
 
-def test_gpt_oss_builder_formats_multiple_tool_responses_by_position_and_default_name():
+def test_gpt_oss_builder_prefers_tool_message_name_over_context_id():
     builder = create_continuous_token_builder(_TemplateTokenizer(), model_family="gptoss")
-    context_messages = [
+    previous_messages = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_0",
+                    "type": "function",
+                    "function": {"name": "from_context"},
+                }
+            ],
+        }
+    ]
+    tool_messages = [{"role": "tool", "tool_call_id": "call_0", "name": "from_message", "content": "ok"}]
+
+    token_ids = builder._tokenize_tool_group(tool_messages, previous_messages=previous_messages)
+
+    expected = "<|start|>functions.from_message to=assistant<|channel|>commentary<|message|>ok<|end|>"
+    assert token_ids == [ord(char) for char in expected]
+
+
+def test_gpt_oss_builder_formats_multiple_tool_responses_by_position_with_warning(caplog):
+    builder = create_continuous_token_builder(_TemplateTokenizer(), model_family="gptoss")
+    previous_messages = [
         {
             "role": "assistant",
             "content": "",
@@ -488,18 +534,111 @@ def test_gpt_oss_builder_formats_multiple_tool_responses_by_position_and_default
         {"role": "tool", "content": "42"},
     ]
 
-    token_ids = builder._tokenize_tool_group(tool_messages, context_messages=context_messages)
-    fallback_ids = builder._tokenize_tool_group([{"role": "tool", "content": "fallback"}])
+    with caplog.at_level(logging.WARNING):
+        token_ids = builder._tokenize_tool_group(tool_messages, previous_messages=previous_messages)
 
     expected = (
-        '<|start|>functions.search to=assistant<|channel|>commentary<|message|>"hits"<|end|>'
-        '<|start|>functions.calculate to=assistant<|channel|>commentary<|message|>"42"<|end|>'
-    )
-    expected_fallback = (
-        '<|start|>functions.continuous_token_tool to=assistant<|channel|>commentary<|message|>"fallback"<|end|>'
+        "<|start|>functions.search to=assistant<|channel|>commentary<|message|>hits<|end|>"
+        "<|start|>functions.calculate to=assistant<|channel|>commentary<|message|>42<|end|>"
     )
     assert token_ids == [ord(char) for char in expected]
-    assert fallback_ids == [ord(char) for char in expected_fallback]
+    assert "resolving a tool response name by position" in caplog.text
+
+
+def test_gpt_oss_builder_rejects_ambiguous_positional_tool_name_resolution():
+    builder = create_continuous_token_builder(_TemplateTokenizer(), model_family="gptoss")
+    previous_messages = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"type": "function", "function": {"name": "search"}},
+                {"type": "function", "function": {"name": "calculate"}},
+            ],
+        }
+    ]
+
+    with pytest.raises(ValueError, match="cannot resolve tool name by position"):
+        builder._tokenize_tool_group([{"role": "tool", "content": "hits"}], previous_messages=previous_messages)
+
+    with pytest.raises(ValueError, match="cannot resolve tool name by position"):
+        builder._tokenize_tool_group([{"role": "tool", "content": "fallback"}], previous_messages=[])
+
+
+def test_gpt_oss_builder_does_not_use_older_assistant_tool_calls_for_position():
+    builder = create_continuous_token_builder(_TemplateTokenizer(), model_family="gptoss")
+    previous_messages = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"type": "function", "function": {"name": "old_lookup"}}],
+        },
+        {"role": "assistant", "content": "new answer without tools"},
+    ]
+
+    with pytest.raises(ValueError, match="latest assistant has 0 tool calls"):
+        builder._tokenize_tool_group([{"role": "tool", "content": "answer"}], previous_messages=previous_messages)
+
+
+@pytest.mark.parametrize(
+    ("builder", "expected_error"),
+    [
+        (
+            create_continuous_token_builder(_TemplateTokenizer(), model_family="gptoss"),
+            "got 2 tool response messages but the latest assistant has 4 tool calls",
+        ),
+        (
+            create_continuous_token_builder(_Gemma4BoundaryTokenizer(), model_family="gemma4"),
+            "got 2 tool response messages but the latest assistant has 4 tool calls",
+        ),
+    ],
+)
+def test_strict_tool_name_builders_reject_split_positional_tool_groups(builder, expected_error):
+    previous_messages = [
+        {"role": "user", "content": "question"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"type": "function", "function": {"name": "search"}},
+                {"type": "function", "function": {"name": "calculate"}},
+                {"type": "function", "function": {"name": "lookup_order"}},
+                {"type": "function", "function": {"name": "get_weather"}},
+            ],
+        },
+    ]
+    appended_messages = [
+        {"role": "tool", "content": "hits"},
+        {"role": "tool", "content": "42"},
+        {"role": "user", "content": "please continue"},
+        {"role": "tool", "content": "order shipped"},
+    ]
+
+    with pytest.raises(ValueError, match=expected_error):
+        builder.tokenize_non_assistant_incremental_messages(previous_messages, previous_messages + appended_messages)
+
+
+def test_default_builder_builds_dummy_assistant_from_tool_messages_only():
+    tokenizer = _RecordingTemplateTokenizer()
+    builder = ContinuousTokenBuilder(tokenizer)
+    tool_messages = [
+        {"role": "tool", "content": "answer", "name": "from_message"},
+        {"role": "tool", "content": "fallback"},
+    ]
+
+    builder._tokenize_tool_group(tool_messages, previous_messages=[])
+
+    synthetic_assistant = tokenizer.calls[0]["messages"][2]
+    assert synthetic_assistant["tool_calls"][0] == {
+        "id": "continuous_token_call_0",
+        "type": "function",
+        "function": {"name": "from_message", "arguments": {}},
+    }
+    assert synthetic_assistant["tool_calls"][1] == {
+        "id": "continuous_token_call_1",
+        "type": "function",
+        "function": {"name": "continuous_token_tool", "arguments": {}},
+    }
 
 
 def test_default_builder_merges_append_only_non_assistant_messages():
@@ -509,14 +648,14 @@ def test_default_builder_merges_append_only_non_assistant_messages():
     new_messages = old_messages + [{"role": "tool", "content": "answer", "tool_call_id": "call_0", "name": "lookup"}]
     runtime_ids = [1, 2, 3]
 
-    result = builder.merge_tokens(old_messages, new_messages, runtime_ids)
-    expected_incremental = builder.tokenize_incremental_messages(old_messages, new_messages)
+    result = builder.merge_non_assistant_tokens(old_messages, new_messages, runtime_ids)
+    expected_incremental = builder.tokenize_non_assistant_incremental_messages(old_messages, new_messages)
 
     assert isinstance(result, MergeResult)
     assert result.token_ids == runtime_ids + expected_incremental
     assert result.appended_token_count == len(expected_incremental)
     assert result.kind == "non_assistant"
-    aligned_mask, aligned_logprobs = ct_align_response_metadata(
+    aligned_mask, aligned_logprobs = builder.align_response_metadata(
         result,
         [1, 1, 1],
         [0.1, 0.2, 0.3],
@@ -533,21 +672,37 @@ def test_default_builder_tokenizes_system_and_user_appends_with_generation_promp
         {"role": "user", "content": "retry"},
     ]
 
-    incremental = builder.tokenize_incremental_messages(old_messages, new_messages)
+    incremental = builder.tokenize_non_assistant_incremental_messages(old_messages, new_messages)
 
     expected = "<system>policy\n<user>retry\n<assistant>"
     assert incremental == [ord(char) for char in expected]
 
 
+def test_default_builder_rejects_multi_message_user_or_system_groups():
+    class BadGroupingBuilder(ContinuousTokenBuilder):
+        def _iter_append_groups(self, appended_messages):
+            return [appended_messages]
+
+    builder = BadGroupingBuilder(_TemplateTokenizer())
+    old_messages = [{"role": "user", "content": "question"}]
+    new_messages = old_messages + [
+        {"role": "user", "content": "retry"},
+        {"role": "user", "content": "more context"},
+    ]
+
+    with pytest.raises(ValueError, match="expects one 'user' message per append group"):
+        builder.tokenize_non_assistant_incremental_messages(old_messages, new_messages)
+
+
 def test_default_builder_appends_assistant_tokens_to_runtime_stream():
     builder = ContinuousTokenBuilder(_TemplateTokenizer())
 
-    result = builder.append_assistant_tokens([1, 2, 3], [4, 5])
+    result = builder.merge_assistant_tokens([1, 2, 3], [4, 5])
 
     assert result.token_ids == [1, 2, 3, 4, 5]
     assert result.appended_token_count == 2
     assert result.kind == "assistant"
-    aligned_mask, aligned_logprobs = ct_align_response_metadata(
+    aligned_mask, aligned_logprobs = builder.align_response_metadata(
         result,
         [0, 1],
         [0.0, -0.1],
@@ -558,23 +713,24 @@ def test_default_builder_appends_assistant_tokens_to_runtime_stream():
 
 
 def test_assistant_alignment_validates_logprobs():
+    builder = ContinuousTokenBuilder(_TemplateTokenizer())
     result = MergeResult(token_ids=[1, 2, 3], appended_token_count=2, kind="assistant")
 
-    aligned_mask, aligned_logprobs = ct_align_response_metadata(result, [1])
+    aligned_mask, aligned_logprobs = builder.align_response_metadata(result, [1])
     assert aligned_mask == [1, 1, 1]
     assert aligned_logprobs is None
 
     with pytest.raises(ValueError, match="response_logprobs is required"):
-        ct_align_response_metadata(result, [1], assistant_logprobs=[-0.1, -0.2])
+        builder.align_response_metadata(result, [1], assistant_logprobs=[-0.1, -0.2])
 
     with pytest.raises(ValueError, match="assistant_logprobs is required"):
-        ct_align_response_metadata(result, [1], [0.0])
+        builder.align_response_metadata(result, [1], [0.0])
 
     with pytest.raises(ValueError, match="assistant_logprobs length must match"):
-        ct_align_response_metadata(result, [1], [0.0], assistant_logprobs=[-0.1])
+        builder.align_response_metadata(result, [1], [0.0], assistant_logprobs=[-0.1])
 
 
-def test_builder_alignment_wrapper_delegates_to_public_helper():
+def test_builder_align_response_metadata_handles_inserted_boundary_tokens():
     builder = ContinuousTokenBuilder(_TemplateTokenizer())
     result = MergeResult(
         token_ids=[1, 2, 99, 3],
@@ -582,17 +738,19 @@ def test_builder_alignment_wrapper_delegates_to_public_helper():
         kind="non_assistant",
         inserted_token_ids=[99],
     )
-    expected = ct_align_response_metadata(result, [1, 1], [0.1, 0.2])
 
-    assert builder.align_response_metadata(result, [1, 1], [0.1, 0.2]) == expected
-    assert ContinuousTokenBuilder.align_response_metadata(result, [1, 1], [0.1, 0.2]) == expected
+    aligned_mask, aligned_logprobs = builder.align_response_metadata(result, [1, 1], [0.1, 0.2])
+
+    assert aligned_mask == [1, 1, 0, 0]
+    assert aligned_logprobs == [0.1, 0.2, 0.0, 0.0]
 
 
 def test_alignment_rejects_unknown_merge_kind():
+    builder = ContinuousTokenBuilder(_TemplateTokenizer())
     result = MergeResult(token_ids=[1], appended_token_count=0, kind="unknown")
 
     with pytest.raises(ValueError, match="Unknown Continuous Token merge kind"):
-        ct_align_response_metadata(result, [1])
+        builder.align_response_metadata(result, [1])
 
 
 def test_default_builder_rejects_mutated_message_prefix():
@@ -601,10 +759,17 @@ def test_default_builder_rejects_mutated_message_prefix():
     changed_messages = [{"role": "user", "content": "different"}]
 
     with pytest.raises(ValueError, match="prefix messages changed"):
-        builder.tokenize_incremental_messages(old_messages, changed_messages)
+        builder.tokenize_non_assistant_incremental_messages(old_messages, changed_messages)
 
     with pytest.raises(ValueError, match="updated_messages is shorter"):
-        builder.tokenize_incremental_messages(old_messages, [])
+        builder.tokenize_non_assistant_incremental_messages(old_messages, [])
+
+
+def test_default_builder_returns_empty_delta_when_no_message_is_appended():
+    builder = ContinuousTokenBuilder(_TemplateTokenizer())
+    messages = [{"role": "user", "content": "question"}]
+
+    assert builder.tokenize_non_assistant_incremental_messages(messages, messages) == []
 
 
 def test_default_builder_rejects_non_prefix_stable_template_deltas():
@@ -620,7 +785,7 @@ def test_default_builder_rejects_non_prefix_stable_template_deltas():
 
 def test_subclass_only_overrides_token_level_merge_hook():
     class BoundaryBuilder(ContinuousTokenBuilder):
-        def _merge_token_ids(self, runtime_token_ids, appended_token_ids):
+        def _merge_non_assistant_token_ids(self, runtime_token_ids, appended_token_ids):
             return MergeResult(
                 token_ids=list(runtime_token_ids) + [99] + list(appended_token_ids),
                 appended_token_count=len(appended_token_ids),
@@ -631,9 +796,9 @@ def test_subclass_only_overrides_token_level_merge_hook():
     builder = BoundaryBuilder(_TemplateTokenizer())
     old_messages = [{"role": "user", "content": "question"}]
     new_messages = old_messages + [{"role": "tool", "content": "answer"}]
-    incremental = builder.tokenize_incremental_messages(old_messages, new_messages)
+    incremental = builder.tokenize_non_assistant_incremental_messages(old_messages, new_messages)
 
-    result = builder.merge_tokens(old_messages, new_messages, [1, 2, 3])
+    result = builder.merge_non_assistant_tokens(old_messages, new_messages, [1, 2, 3])
 
     assert result.token_ids == [1, 2, 3, 99] + incremental
     assert result.appended_token_count == len(incremental)
@@ -642,6 +807,7 @@ def test_subclass_only_overrides_token_level_merge_hook():
 
 
 def test_non_assistant_alignment_handles_boundary_inserts_and_trims():
+    builder = ContinuousTokenBuilder(_TemplateTokenizer())
     result = MergeResult(
         token_ids=[1, 2, 99, 3, 4],
         appended_token_count=2,
@@ -650,7 +816,7 @@ def test_non_assistant_alignment_handles_boundary_inserts_and_trims():
         removed_prefix_token_count=1,
     )
 
-    aligned_mask, aligned_logprobs = ct_align_response_metadata(
+    aligned_mask, aligned_logprobs = builder.align_response_metadata(
         result,
         [1, 1, 1],
         [0.1, 0.2, 0.3],
@@ -658,7 +824,7 @@ def test_non_assistant_alignment_handles_boundary_inserts_and_trims():
     assert aligned_mask == [1, 1, 0, 0, 0]
     assert aligned_logprobs == [0.1, 0.2, 0.0, 0.0, 0.0]
 
-    aligned_mask, aligned_logprobs = ct_align_response_metadata(result, [1, 1, 1])
+    aligned_mask, aligned_logprobs = builder.align_response_metadata(result, [1, 1, 1])
     assert aligned_mask == [1, 1, 0, 0, 0]
     assert aligned_logprobs is None
 
@@ -667,7 +833,7 @@ def test_builder_rejects_unsupported_append_roles():
     builder = ContinuousTokenBuilder(_TemplateTokenizer(), allowed_append_roles=["tool"])
 
     with pytest.raises(ValueError, match="got 'user'"):
-        builder.tokenize_incremental_messages(
+        builder.tokenize_non_assistant_incremental_messages(
             [{"role": "user", "content": "question"}],
             [{"role": "user", "content": "question"}, {"role": "user", "content": "retry"}],
         )
@@ -692,7 +858,12 @@ def test_model_specific_builders_validate_required_special_tokens():
 
 def test_model_specific_builders_validate_special_token_id_shape():
     builder = QwenContinuousTokenBuilder(_ListSpecialTokenQwenTokenizer())
-    assert builder._merge_token_ids([1, builder._im_end_id], [2]).token_ids == [1, builder._im_end_id, 198, 2]
+    assert builder._merge_non_assistant_token_ids([1, builder._im_end_id], [2]).token_ids == [
+        1,
+        builder._im_end_id,
+        198,
+        2,
+    ]
 
     with pytest.raises(ValueError, match="returned multiple ids"):
         QwenContinuousTokenBuilder(_MultiIdSpecialTokenQwenTokenizer())

@@ -15,8 +15,7 @@
 """Check chat-template append-only.
 
 The checker runs the mock trajectories in
-``verl.utils.test_utils.mock_trajectories`` through two
-layers:
+``scripts.chat_template_mock_trajectories`` through two layers:
 
 1. raw template prefix diagnostics at token-id level. This is a quick checker that
    indicates whether applying the raw chat template to a prefix produces token
@@ -65,17 +64,17 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from scripts.chat_template_mock_trajectories import (  # noqa: E402
+    TRAJECTORIES,
+    MockTrajectory,
+    SingleTurnTrajectory,
+    ToolAgentTrajectory,
+)
 from verl.utils.chat_template import apply_chat_template  # noqa: E402
 from verl.utils.continuous_token_wiring import (  # noqa: E402
     CONTINUOUS_TOKEN_BUILDER_FAMILIES,
     create_continuous_token_builder,
     resolve_continuous_token_model_family,
-)
-from verl.utils.test_utils.mock_trajectories import (  # noqa: E402
-    TRAJECTORIES,
-    MockTrajectory,
-    SingleTurnTrajectory,
-    ToolAgentTrajectory,
 )
 from verl.utils.tokenizer import normalize_token_ids  # noqa: E402
 
@@ -473,7 +472,7 @@ def run_continuous_token_checks(
                 tools=tools,
                 chat_template_kwargs=chat_template_kwargs,
             )
-            merge_result = builder.append_assistant_tokens(runtime_ids, assistant_ids)
+            merge_result = builder.merge_assistant_tokens(runtime_ids, assistant_ids)
             runtime_ids = merge_result.token_ids
         except Exception as exc:
             results.append(
@@ -493,7 +492,9 @@ def run_continuous_token_checks(
             roles = "_".join(message.get("role", "unknown") for message in appended_messages)
             next_messages = messages_with_assistant + appended_messages
             try:
-                merge_result = builder.merge_tokens(messages_with_assistant, next_messages, runtime_ids, tools=tools)
+                merge_result = builder.merge_non_assistant_tokens(
+                    messages_with_assistant, next_messages, runtime_ids, tools=tools
+                )
                 runtime_ids = merge_result.token_ids
             except Exception as exc:
                 results.append(
