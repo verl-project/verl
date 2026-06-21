@@ -86,8 +86,9 @@ SUPPORTED_ROLLOUT_RS_OPTIONS: set[str] = {
     "seq_mean_k3",
     "seq_max_k2",
     "seq_max_k3",
+    "binary_kl",
 }
-TOKEN_LEVEL_ROLLOUT_RS_OPTIONS: set[str] = {"token_k1", "token_k2", "token_k3"}
+TOKEN_LEVEL_ROLLOUT_RS_OPTIONS: set[str] = {"token_k1", "token_k2", "token_k3", "binary_kl"}
 
 
 def _parse_rollout_is_threshold(threshold_spec: str | float) -> tuple[float, Optional[float]]:
@@ -192,11 +193,42 @@ def _parse_rollout_rs_thresholds(
     return thresholds
 
 
+def compute_binary_kl_divergence(
+    log_p: torch.Tensor,
+    log_q: torch.Tensor,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """Bernoulli KL divergence KL(P||Q) parameterized by log-probabilities.
+
+    Treats each token as a Bernoulli distribution P = [p, 1-p], Q = [q, 1-q]:
+        KL(P||Q) = p * log(p / q) + (1 - p) * log((1 - p) / (1 - q))
+
+    The inputs are upcast to float32 and clamped with ``eps = 1e-6`` so that
+    ``1 - q`` cannot round to exactly 0 in float32 (machine epsilon ~1.19e-7),
+    which would otherwise produce NaNs during training.
+
+    Args:
+        log_p: Log-probabilities of distribution P, any shape.
+        log_q: Log-probabilities of distribution Q, broadcastable to ``log_p``.
+        eps: Clamp bound keeping probabilities strictly inside (0, 1).
+
+    Returns:
+        Token-level Bernoulli KL divergence, cast back to the input dtype.
+    """
+    orig_dtype = log_p.dtype
+    p = torch.clamp(torch.exp(log_p.float()), eps, 1.0 - eps)
+    q = torch.clamp(torch.exp(log_q.float()), eps, 1.0 - eps)
+    kl = p * torch.log(p / q) + (1 - p) * torch.log((1 - p) / (1 - q))
+    return kl.to(orig_dtype)
+
+
 def compute_rollout_rejection_mask(
     log_ratio: torch.Tensor,
     response_mask: torch.Tensor,
     rollout_rs: str = "token_k1",
     rollout_rs_threshold: Optional[str | float] = None,
+    old_log_prob: Optional[torch.Tensor] = None,
+    rollout_log_prob: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """Compute hard trust region mask using divergence estimators.
 
@@ -212,6 +244,9 @@ def compute_rollout_rejection_mask(
     - "seq_sum_k{1,2,3}": Sum of token divergences per sequence.
     - "seq_mean_k{1,2,3}": Mean of token divergences per sequence.
     - "seq_max_k{2,3}": Maximum token divergence per sequence.
+    - "binary_kl": KPop. Token-level bidirectional Bernoulli KL between the training and
+      rollout policies; keeps tokens where max(KL_fwd, KL_rev) <= upper bound (phi).
+      Requires ``old_log_prob`` and ``rollout_log_prob`` to be passed in.
 
     Args:
         log_ratio: Log ratio of training policy probability to rollout policy probability,
@@ -317,6 +352,14 @@ def compute_rollout_rejection_mask(
             token_keep_bool = per_token_stat <= upper_value
         elif option_name == "token_k3":
             per_token_stat = token_k3
+            token_keep_bool = per_token_stat <= upper_value
+        elif option_name == "binary_kl":
+            # KPop: bidirectional Bernoulli KL between training (old) and rollout policies.
+            if old_log_prob is None or rollout_log_prob is None:
+                raise ValueError("rollout_rs option 'binary_kl' requires both old_log_prob and rollout_log_prob.")
+            kl_fwd = compute_binary_kl_divergence(old_log_prob, rollout_log_prob)
+            kl_rev = compute_binary_kl_divergence(rollout_log_prob, old_log_prob)
+            per_token_stat = torch.maximum(kl_fwd, kl_rev)
             token_keep_bool = per_token_stat <= upper_value
         elif option_name.startswith("seq_sum"):
             if option_name.endswith("k1"):
@@ -867,6 +910,8 @@ def compute_rollout_correction_and_rejection_mask(
             response_mask=response_mask,
             rollout_rs=rollout_rs,
             rollout_rs_threshold=rollout_rs_threshold,
+            old_log_prob=old_log_prob,
+            rollout_log_prob=rollout_log_prob,
         )
         metrics.update(rs_metrics)
 
