@@ -139,6 +139,42 @@ def compute_topk_loss(
     - student_mass: (bsz, seqlen/cp_size)
     - teacher_mass: (bsz, seqlen/cp_size)
     """
+    # One-shot debug dump (env-gated, no-op unless OPSD_DUMP_DIR is set) of the exact tensors
+    # entering the distillation loss, to diff verl's real-run intermediates against the reference.
+    import os as _os
+
+    if _os.environ.get("OPSD_DUMP_DIR") and not getattr(compute_topk_loss, "_opsd_dumped", False):
+        try:
+            _dir = _os.environ["OPSD_DUMP_DIR"]
+            _os.makedirs(_dir, exist_ok=True)
+
+            def _cpu(_v):
+                if _v is None:
+                    return None
+                if getattr(_v, "is_nested", False):
+                    _v = _v.values()
+                return _v.detach().float().cpu()
+
+            _payload = {
+                "student_logits": _cpu(student_logits),
+                "teacher_logprobs": _cpu(data["teacher_logprobs"]),
+                "teacher_ids": _cpu(data["teacher_ids"]),
+                "student_logits_temperature": _cpu(student_logits_temperature),
+                "data_format": data_format,
+                "data_keys": list(data.keys()),
+            }
+            for _k in ("input_ids", "responses", "response_mask", "attention_mask", "position_ids", "prompts"):
+                if _k in data.keys():
+                    _payload[_k] = _cpu(data[_k])
+            import torch as _torch
+
+            _torch.save(_payload, _os.path.join(_dir, "verl_dump.pt"))
+            compute_topk_loss._opsd_dumped = True
+            print(f"[OPSD_DUMP] saved verl loss-input tensors -> {_dir}/verl_dump.pt "
+                  f"student_logits={tuple(student_logits.shape)}", flush=True)
+        except Exception as _e:  # never break training because of the debug dump
+            print(f"[OPSD_DUMP] dump failed: {_e!r}", flush=True)
+
     match config.strategy:
         # VeOmni uses FSDP2 internally, so its loss computation is identical to FSDP.
         case "fsdp" | "veomni":
