@@ -57,7 +57,12 @@ from verl.workers.config import (
     McoreOptimizerConfig,
 )
 from verl.workers.engine_workers import ActorRolloutRefWorker, TrainingWorker, TrainingWorkerConfig
-from verl.workers.engine_workers_tinker import TinkerActorRolloutRefWorker, TinkerTrainingWorker
+from verl.workers.engine_workers_tinker import (
+    OptimStepParams,
+    TinkerActorRolloutRefWorker,
+    TinkerTrainingWorker,
+    _apply_optim_step_params,
+)
 from verl.workers.utils.losses import ppo_loss, sft_loss, value_loss
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
 
@@ -670,10 +675,22 @@ def _split_training_primitives_fsdp_worker(
     assert grad_norm_2.item() > grad_norm_1.item() * 1.5
     assert _param_delta_norm(engine.module, before).item() == pytest.approx(0.0, abs=0.0)
 
+    optim_step_params: OptimStepParams = {
+        "lr": 5e-4,
+        "betas": (0.8, 0.9),
+        "eps": 1e-7,
+        "weight_decay": 0.02,
+    }
     with engine.train_mode(zero_grad_on_exit=True):
+        _apply_optim_step_params(engine.optimizer, optim_step_params)
         grad_norm = engine.optimizer_step()
 
     assert grad_norm > 0
+    for param_group in engine.optimizer.param_groups:
+        assert param_group["lr"] == pytest.approx(optim_step_params["lr"])
+        assert param_group["betas"] == pytest.approx(optim_step_params["betas"])
+        assert param_group["eps"] == pytest.approx(optim_step_params["eps"])
+        assert param_group["weight_decay"] == pytest.approx(optim_step_params["weight_decay"])
     assert _param_delta_norm(engine.module, before).item() > 0
     assert not _has_any_grad(engine.module)
 

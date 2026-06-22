@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import copy
 import logging
 import os
@@ -440,7 +441,20 @@ class RLHFDataset(Dataset):
         """
         from qwen_vl_utils import process_vision_info
 
-        images, videos = process_vision_info(messages, image_patch_size=image_patch_size, return_video_metadata=True)
+        # When called from an AgentLoop, many trajectory coroutines share one
+        # event loop. ``process_vision_info`` does synchronous PNG decode +
+        # smart_resize (CPU-heavy); running it inline blocks the loop and starves
+        # every sibling coroutine's socket I/O (manifests as connect timeouts /
+        # zero-window stalls under concurrency). Offload to a thread: PIL/numpy
+        # release the GIL during decode/resize, so the loop stays responsive and
+        # the work parallelizes across threads. This method is ``async`` and only
+        # ever awaited from an AgentLoop (which always has a running loop), so
+        # ``get_running_loop()`` is safe here.
+        loop = asyncio.get_running_loop()
+        images, videos = await loop.run_in_executor(
+            None,
+            lambda: process_vision_info(messages, image_patch_size=image_patch_size, return_video_metadata=True),
+        )
         return images, videos
 
     @classmethod

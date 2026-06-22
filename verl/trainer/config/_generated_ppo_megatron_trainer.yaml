@@ -46,6 +46,8 @@ actor_rollout_ref:
       dist_checkpointing_prefix: ''
       dist_ckpt_optim_fully_reshardable: false
       distrib_optim_fully_reshardable_mem_efficient: false
+      entropy_from_logits_with_chunking: ${oc.select:actor_rollout_ref.actor.entropy_from_logits_with_chunking,False}
+      entropy_from_logits_chunk_size: ${oc.select:actor_rollout_ref.actor.entropy_from_logits_chunk_size,2048}
       seed: 42
       override_ddp_config: {}
       override_transformer_config:
@@ -170,6 +172,8 @@ actor_rollout_ref:
       - re:.*mlp.gate$
       activation_observer: static_minmax
       quantization_config_path: null
+    entropy_from_logits_with_chunking: false
+    entropy_from_logits_chunk_size: 2048
   ref:
     rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
     strategy: megatron
@@ -234,6 +238,8 @@ actor_rollout_ref:
       dist_checkpointing_prefix: ''
       dist_ckpt_optim_fully_reshardable: false
       distrib_optim_fully_reshardable_mem_efficient: false
+      entropy_from_logits_with_chunking: ${oc.select:actor_rollout_ref.actor.entropy_from_logits_with_chunking,False}
+      entropy_from_logits_chunk_size: ${oc.select:actor_rollout_ref.actor.entropy_from_logits_chunk_size,2048}
       seed: ${oc.select:actor_rollout_ref.actor.megatron.seed,42}
       override_ddp_config: {}
       override_transformer_config: ${oc.select:actor_rollout_ref.actor.megatron.override_transformer_config,{}}
@@ -260,6 +266,8 @@ actor_rollout_ref:
         activation_observer: null
         quantization_config_path: null
     _target_: verl.workers.config.McoreActorConfig
+    entropy_from_logits_with_chunking: ${oc.select:actor_rollout_ref.actor.entropy_from_logits_with_chunking,False}
+    entropy_from_logits_chunk_size: ${oc.select:actor_rollout_ref.actor.entropy_from_logits_chunk_size,2048}
   rollout:
     _target_: verl.workers.config.RolloutConfig
     name: ???
@@ -536,6 +544,8 @@ critic:
     dist_checkpointing_prefix: ''
     dist_ckpt_optim_fully_reshardable: false
     distrib_optim_fully_reshardable_mem_efficient: false
+    entropy_from_logits_with_chunking: false
+    entropy_from_logits_chunk_size: 2048
     seed: 42
     override_ddp_config: {}
     override_transformer_config:

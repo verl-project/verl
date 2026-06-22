@@ -27,6 +27,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 from packaging import version
+from peft.utils.save_and_load import get_peft_model_state_dict
 from torch.distributed import DeviceMesh
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp._runtime_utils import _lazy_init
@@ -109,8 +110,9 @@ def get_fsdp_wrap_policy(module, config=None, is_lora=False):
 
     from torch.distributed.fsdp.wrap import _or_policy, lambda_auto_wrap_policy
 
-    # Add lambda policy for LoRA modules if is_lora is True
-    if is_lora:
+    # LoRA lambda policy, but only when min_num_params == 0: mixing it with the
+    # size policy nests FSDP units whose allgather order can diverge (NCCL deadlock).
+    if is_lora and min_num_params == 0:
 
         def lambda_policy_fn(module):
             return bool(
@@ -629,44 +631,72 @@ def fsdp2_clip_grad_norm_(parameters, max_norm, norm_type=2.0, error_if_nonfinit
 
 
 def layered_summon_lora_params(fsdp_module) -> OrderedDict:
-    from peft.utils.save_and_load import get_peft_model_state_dict
+    """Collect LoRA params one FSDP unit at a time to keep peak GPU memory low.
 
-    def __prefix_submodules(module, prefix):
-        for name, submodule in module.named_modules():
-            if name.startswith(prefix) and "." not in name[len(prefix) :]:
-                yield name, submodule
+    Iterates every FSDP unit (parent before child via named_modules order) and
+    summons each one individually. Works for any wrap granularity (layer, MLP,
+    expert) — including MoE models where wrap typically lands at
+    ``layers.<i>.mlp`` rather than the transformer-layer level.
 
+    Safe with nested units: ``submodule.state_dict()`` returns gathered tensors
+    for the unit being summoned but only sharded tensors for nested children.
+    Sharded entries collected first get overwritten when the child unit is
+    summoned later, so every LoRA tensor is gathered exactly once.
+    """
     lora_params = OrderedDict()
-    prefix_list = [
-        # fsdp
-        "_fsdp_wrapped_module.base_model.model.",
-        "_fsdp_wrapped_module.base_model.model.model.",
-        "_fsdp_wrapped_module.base_model.model.model.layers.",
-        "_fsdp_wrapped_module.base_model.model.model.language_model.layers.",
-        # fsdp2
-        "base_model.model.",
-        "base_model.model.model.",
-        "base_model.model.model.layers.",
-        "base_model.model.model.language_model.layers.",
-    ]
     peft_model = getattr(fsdp_module, "_fsdp_wrapped_module", fsdp_module)
-    for prefix in prefix_list:
-        for name, submodule in __prefix_submodules(fsdp_module, prefix):
-            prefix = name.replace("_fsdp_wrapped_module.base_model.model.", "base_model.model.")
-            if name.endswith(".model") or name.endswith(".layers"):
+
+    for name, submodule in fsdp_module.named_modules():
+        if name == "":
+            # Skip root: full summon defeats the purpose.
+            continue
+        if fsdp_version(submodule) == 0:
+            continue
+        # Strip every ``_fsdp_wrapped_module.`` segment to match the names
+        # downstream consumers (vllm LoRA loader, peft state_dict) expect.
+        clean_prefix = name.replace("_fsdp_wrapped_module.", "")
+        if clean_prefix.endswith(".model") or clean_prefix.endswith(".layers"):
+            continue
+
+        # FSDP1 needs the explicit summon context; FSDP2 ``DTensor`` params
+        # all-gather on demand via ``param.full_tensor()``, so no context.
+        is_fsdp1 = fsdp_version(submodule) == 1
+
+        # Exclude nested FSDP children from both the pre-check and the state_dict so
+        # their params are not gathered here and again when their own unit is visited.
+        nested_fsdp_names = {n for n, m in submodule.named_modules() if n != "" and fsdp_version(m) > 0}
+
+        if not any(
+            "lora_" in n
+            for n, _ in submodule.named_parameters()
+            if not any(n.startswith(f"{nn}.") for nn in nested_fsdp_names)
+        ):
+            continue
+
+        if is_fsdp1:
+            submodule._is_root = True
+        summon_ctx = FSDP.summon_full_params(submodule, writeback=False) if is_fsdp1 else nullcontext()
+
+        with summon_ctx:
+            sub_state_dict = {
+                n: p
+                for n, p in submodule.named_parameters()
+                if not any(n.startswith(f"{nn}.") for nn in nested_fsdp_names)
+            }
+            sub_lora_params = get_peft_model_state_dict(peft_model, state_dict=sub_state_dict)
+            if not sub_lora_params:
                 continue
-            if fsdp_version(submodule) > 0:
-                with FSDP.summon_full_params(submodule, writeback=False):
-                    sub_lora_params = get_peft_model_state_dict(peft_model, state_dict=submodule.state_dict())
-                    sub_lora_params = {
-                        f"{prefix}.{name}": param.full_tensor().detach().cpu()
-                        if hasattr(param, "full_tensor")
-                        else param.detach().cpu()
-                        for name, param in sub_lora_params.items()
-                    }
-                    lora_params.update(sub_lora_params)
-                    submodule._is_root = False
-                get_torch_device().empty_cache()
+            sub_lora_params = {
+                f"{clean_prefix}.{key}": (
+                    param.full_tensor().detach().cpu() if hasattr(param, "full_tensor") else param.detach().cpu()
+                )
+                for key, param in sub_lora_params.items()
+            }
+            lora_params.update(sub_lora_params)
+            if is_fsdp1:
+                submodule._is_root = False
+        get_torch_device().empty_cache()
+
     return lora_params
 
 
@@ -687,6 +717,26 @@ def collect_lora_params(module: FSDP, layered_summon: bool, base_sync_done: bool
                     "rollout.load_format=safetensors"
                 )
             lora_params = layered_summon_lora_params(module)
+            if not lora_params:
+                import logging
+
+                logging.getLogger(__name__).warning("layered_summon returned empty, falling back to full summon")
+                # FSDP2 ``DTensor`` params all-gather via ``param.full_tensor()``;
+                # only FSDP1 needs the explicit summon context.
+                is_fsdp1 = fsdp_version(module) == 1
+                summon_ctx = (
+                    FSDP.summon_full_params(module, writeback=False, offload_to_cpu=True) if is_fsdp1 else nullcontext()
+                )
+                with summon_ctx:
+                    state_dict = {n: p for n, p in peft_model.named_parameters()}
+                    lora_params = get_peft_model_state_dict(peft_model, state_dict=state_dict)
+                    lora_params = {
+                        name: param.full_tensor().detach().cpu()
+                        if hasattr(param, "full_tensor")
+                        else param.detach().cpu()
+                        for name, param in lora_params.items()
+                    }
+                get_torch_device().empty_cache()
         else:
             with FSDP.summon_full_params(module, writeback=False):
                 if base_sync_done:

@@ -129,7 +129,7 @@ The stop-gradient is required because the reward is used inside a policy-gradien
 
 ### Multi-Teacher OPD
 
-Multi-teacher OPD (MOPD) extends OPD to multiple domain-specialized teachers [5,6,7,8]. This is useful when distilling knowledge to a student across multiple domains. In each domain, such as math, coding, or instruction following, different teachers specialized to the domain can be used.
+Multi-teacher OPD (MOPD) extends OPD to multiple domain-specialized teachers [4,5,6,7]. This is useful when distilling knowledge to a student across multiple domains. In each domain, such as math, coding, or instruction following, different teachers specialized to the domain can be used.
 
 A base model can be trained or adapted independently on each domain, producing one expert teacher per domain. The student is then trained on a mixture of domains. For each example, the routing key selects the corresponding teacher, and the student matches that teacher's log-probabilities on student-induced states.
 
@@ -151,9 +151,7 @@ MOPD consolidates multiple specialized policies into a single student model whil
 
 [7] Yang, Zhuolin, et al. "Nemotron-Cascade 2: Post-Training LLMs with Cascade RL and Multi-Domain On-Policy Distillation." arXiv preprint arXiv:2603.19220, 2026.
 
-[8] DeepSeek-AI. "DeepSeek-V4: Towards Highly Efficient Million-Token Context Intelligence." 2026.
-
-[9] Li, Yaxuan, et al. "Rethinking On-Policy Distillation of Large Language Models: Phenomenology, Mechanism, and Recipe." arXiv preprint arXiv:2604.13016, 2026.
+[8] Li, Yaxuan, et al. "Rethinking On-Policy Distillation of Large Language Models: Phenomenology, Mechanism, and Recipe." arXiv preprint arXiv:2604.13016, 2026.
 
 ## Configuration Parameters
 
@@ -606,7 +604,7 @@ These metrics are logged for top-$k$ loss modes such as `forward_kl_topk`.
 
 `student_mass` indicates how much probability the student assigns to the teacher-preferred tokens. 
 
-The overlap metrics follow the token-level top-$k$ overlap analysis in [9].
+The overlap metrics follow the token-level top-$k$ overlap analysis in [8].
 They are logging-only diagnostics and do not change the distillation loss or
 gradient.
 

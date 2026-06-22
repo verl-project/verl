@@ -32,6 +32,7 @@ actor_rollout_ref:
       mixed_precision: false
       use_torch_compile: true
       entropy_from_logits_with_chunking: false
+      entropy_from_logits_chunk_size: 2048
       entropy_checkpointing: false
       data_parallel_size: 1
       data_parallel_replicate_size: 1
@@ -167,6 +168,7 @@ actor_rollout_ref:
       mixed_precision: false
       use_torch_compile: true
       entropy_from_logits_with_chunking: false
+      entropy_from_logits_chunk_size: 2048
       entropy_checkpointing: false
       data_parallel_size: ${oc.select:actor_rollout_ref.actor.torchtitan.data_parallel_size,1}
       data_parallel_replicate_size: ${oc.select:actor_rollout_ref.actor.torchtitan.data_parallel_replicate_size,1}
@@ -488,6 +490,7 @@ critic:
     mixed_precision: false
     use_torch_compile: true
     entropy_from_logits_with_chunking: false
+    entropy_from_logits_chunk_size: 2048
     entropy_checkpointing: false
     data_parallel_size: 1
     data_parallel_replicate_size: 1

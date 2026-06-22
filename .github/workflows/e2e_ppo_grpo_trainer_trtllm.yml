@@ -129,14 +129,13 @@ jobs:
         run: |
           unset TORCH_CUDA_ARCH_LIST
           pip3 install --force-reinstall --no-deps flashinfer-python
-      - name: Check final pip list
-        run: |
-          pip3 list
       - name: Install the current repository
         run: |
           pip3 install pytest-asyncio
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
+      - name: Check final pip list
+          pip3 list
       - name: Run TRTLLM unit tests
         run: |
           unset TORCH_CUDA_ARCH_LIST  # Let TRT-LLM CUTLASS DSL auto-detect runtime GPU arch
@@ -228,6 +227,8 @@ jobs:
           pip3 install --no-deps -e .
           pip3 install qwen_vl_utils
           pip3 install mathruler
+      - name: Check final pip list
+          pip3 list
       - name: Prepare GEO3K dataset
         run: |
           python3 examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/models/hf_data/hiyouga/geometry3k --local_save_dir ${PWD}/data/geo3k

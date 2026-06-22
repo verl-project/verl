@@ -255,6 +255,14 @@ class FSDPEngine(BaseEngine):
                     config=self.model_config.hf_config,
                     trust_remote_code=self.model_config.trust_remote_code,
                 )
+
+                # Strip sub-modules listed in _verl_strip_modules (e.g.
+                # talker / code2wav for Qwen3-Omni Thinker-only training).
+                _strip_list = getattr(module, "_verl_strip_modules", [])
+                for attr in _strip_list:
+                    if hasattr(module, attr):
+                        delattr(module, attr)
+                        logger.info(f"Stripped unused sub-module '{attr}' to reduce memory")
             else:
                 from verl.utils.model import load_valuehead_model
 
@@ -334,6 +342,19 @@ class FSDPEngine(BaseEngine):
                 "bias": "none",
             }
             module = get_peft_model(module, LoraConfig(**lora_config))
+
+            # FSDP requires all params in a flat group to share dtype: cast a
+            # fp32 adapter to the bf16 base dtype only when they actually differ.
+            base_dtype = next((p.dtype for p in module.parameters() if not p.requires_grad), None)
+            if base_dtype is not None:
+                mismatched = [p for p in module.parameters() if p.requires_grad and p.dtype != base_dtype]
+                if mismatched:
+                    logger.info(
+                        f"Casting {len(mismatched)} LoRA adapter params from "
+                        f"{mismatched[0].dtype} to {base_dtype} to match base."
+                    )
+                    for param in mismatched:
+                        param.data = param.data.to(base_dtype)
 
         return module
 
@@ -1127,7 +1148,13 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 # compute entropy
                 if calculate_entropy:
                     if not self.engine_config.entropy_checkpointing:
-                        entropy_rmpad = self.compute_entropy_from_logits(logits_rmpad)  # ((total_nnz / sp) + pad)
+                        if self.engine_config.entropy_from_logits_with_chunking:
+                            entropy_rmpad = self.compute_entropy_from_logits(
+                                logits_rmpad,
+                                chunk_size=self.engine_config.entropy_from_logits_chunk_size,
+                            )  # ((total_nnz / sp) + pad)
+                        else:
+                            entropy_rmpad = self.compute_entropy_from_logits(logits_rmpad)
                     else:
                         entropy_rmpad = torch.utils.checkpoint.checkpoint(
                             self.compute_entropy_from_logits, logits_rmpad
