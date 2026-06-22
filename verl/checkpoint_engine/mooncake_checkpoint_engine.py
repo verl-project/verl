@@ -78,9 +78,12 @@ class MooncakeCheckpointEngine(CheckpointEngine):
 
         self.buf = torch.empty(2 * self.bucket_size, dtype=torch.uint8, device=self.device)
         self.magic_buf = torch.empty(4 * 1024, dtype=torch.uint8, device=self.device)
+        # Separate buffer for receiving magic completion signals (one 4-byte slot per double-buffer)
+        # This prevents the next rank's magic write from corrupting data buffer contents.
+        self.magic_recv = torch.zeros(8, dtype=torch.uint8, device=self.device)
         ret = self.engine.batch_register_memory(
-            [self.buf.data_ptr(), self.magic_buf.data_ptr()],
-            [2 * self.bucket_size, 4 * 1024],
+            [self.buf.data_ptr(), self.magic_buf.data_ptr(), self.magic_recv.data_ptr()],
+            [2 * self.bucket_size, 4 * 1024, 8],
         )
         assert ret == 0, f"batch_register_memory failed ret={ret}"
         logger.info(f"__init__ session_id={self.session_id}")
@@ -143,6 +146,7 @@ class MooncakeCheckpointEngine(CheckpointEngine):
         magic = torch.tensor([0xAB, 0xDC, 0xEF, 0x88], dtype=torch.uint8, device=self.device)
         while True:
             if torch.equal(buf[:4], magic):
+                buf[:4] = 0  # reset for next use
                 break
             await asyncio.sleep(0)
 
@@ -165,6 +169,7 @@ class MooncakeCheckpointEngine(CheckpointEngine):
         offset = 0
         should_wait = False
         bufs = [self.buf[: self.bucket_size], self.buf[self.bucket_size :]]
+        magic_slots = [self.magic_recv[:4], self.magic_recv[4:]]
         idx = 0
         current = bufs[idx]
 
@@ -177,6 +182,7 @@ class MooncakeCheckpointEngine(CheckpointEngine):
                 info = {
                     "bucket_meta": bucket_meta,
                     "ptr": current.data_ptr(),
+                    "magic_ptr": magic_slots[idx].data_ptr(),
                     "len": offset,
                     "is_last": False,
                 }
@@ -189,7 +195,7 @@ class MooncakeCheckpointEngine(CheckpointEngine):
                 offset = 0
 
                 if should_wait:
-                    await self.wait_for_complete(current)
+                    await self.wait_for_complete(magic_slots[idx])
                 should_wait = True
 
             assert offset + weight.nbytes <= self.bucket_size, (
@@ -209,11 +215,12 @@ class MooncakeCheckpointEngine(CheckpointEngine):
         info = {
             "bucket_meta": bucket_meta,
             "ptr": current.data_ptr(),
+            "magic_ptr": magic_slots[idx].data_ptr(),
             "len": offset,
             "is_last": True,
         }
         self.store.send_obj(info, 1)
-        await self.wait_for_complete(current)
+        await self.wait_for_complete(magic_slots[idx])
 
         time_cost = time.time() - start_time
         bandwidth = total_bytes / time_cost / (1024 * 1024 * 1024)
@@ -239,9 +246,10 @@ class MooncakeCheckpointEngine(CheckpointEngine):
             # 1 receive info from previous rank
             info = self.store.recv_obj(self.rank - 1)
             if idx >= 2 and self.rank < self.world_size - 1:
-                await self.wait_for_complete(current)
+                await self.wait_for_complete(self.magic_recv[(idx - 2) % 2 * 4 : (idx - 2) % 2 * 4 + 4])
 
             ptr = info["ptr"]
+            magic_ptr = info["magic_ptr"]
             ret = self.engine.transfer_sync_read(
                 self.buffer_info["session_id"],
                 current.data_ptr(),
@@ -253,6 +261,7 @@ class MooncakeCheckpointEngine(CheckpointEngine):
 
             # 2 send info to next rank
             info["ptr"] = current.data_ptr()
+            info["magic_ptr"] = self.magic_recv[idx % 2 * 4 : idx % 2 * 4 + 4].data_ptr()
             if self.rank < self.world_size - 1:
                 self.store.send_obj(info, self.rank + 1)
 
@@ -263,11 +272,11 @@ class MooncakeCheckpointEngine(CheckpointEngine):
                 tensor = current[meta["offset"] : meta["offset"] + size].view(dtype=dtype).view(shape)
                 yield name, tensor
 
-            # 4 write magic data to previous rank
+            # 4 write magic to dedicated magic_ptr instead of data buffer ptr
             ret = self.engine.transfer_sync_write(
                 self.buffer_info["session_id"],
                 self.magic_buf.data_ptr(),
-                ptr,
+                magic_ptr,
                 4,
             )
             assert ret == 0, f"transfer_sync_write failed {ret}"
