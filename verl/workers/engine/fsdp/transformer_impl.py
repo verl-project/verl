@@ -505,6 +505,16 @@ class FSDPEngine(BaseEngine):
                 num_cycles=num_cycles,
                 zero_indexed_step=zero_indexed_step,
             )
+        elif lr_scheduler_type == "linear":
+            # Linear warmup + linear decay to 0 over total_steps; reuse HF's helper so OPSD
+            # distillation runs match the reference (siyan-zhao/OPSD, HF Trainer lr_scheduler_type=linear).
+            from transformers import get_linear_schedule_with_warmup
+
+            lr_scheduler = get_linear_schedule_with_warmup(
+                optimizer=optimizer,
+                num_warmup_steps=num_warmup_steps,
+                num_training_steps=total_steps,
+            )
         else:
             raise NotImplementedError(f"LR scheduler type {lr_scheduler_type} is not supported")
         return lr_scheduler
