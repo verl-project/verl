@@ -46,13 +46,19 @@ class SingleTurnAgentLoop(AgentLoopBase):
         mm_processor_kwargs = self._get_mm_processor_kwargs(audios)
 
         # 2. apply chat template and tokenize
-        prompt_ids = await self.apply_chat_template(
-            messages,
-            images=images,
-            videos=videos,
-            audios=audios,
-            mm_processor_kwargs=mm_processor_kwargs,
+        use_continuous_token = self.enable_continuous_token and self.continuous_token_builder is not None and (
+            not multi_modal_data or self.continuous_token_builder.supports_multimodal()
         )
+        if use_continuous_token:
+            prompt_ids = await self.ct_build_initial_tokens(messages)
+        else:
+            prompt_ids = await self.apply_chat_template(
+                messages,
+                images=images,
+                videos=videos,
+                audios=audios,
+                mm_processor_kwargs=mm_processor_kwargs,
+            )
 
         # 3. generate sequences
         metrics = {}
@@ -68,13 +74,27 @@ class SingleTurnAgentLoop(AgentLoopBase):
             )
         if metrics.get("num_preempted") is None:
             metrics["num_preempted"] = output.num_preempted if output.num_preempted is not None else -1
-        response_mask = [1] * len(output.token_ids)
+
+        if use_continuous_token:
+            merge_result, response_mask, response_logprobs = await self.ct_merge_assistant_token(
+                prompt_ids,
+                output.token_ids,
+                [],
+                [] if output.log_probs else None,
+                assistant_logprobs=output.log_probs if output.log_probs else None,
+            )
+            response_ids = merge_result.token_ids[-len(response_mask) :] if response_mask else []
+            prompt_ids = merge_result.token_ids[: len(merge_result.token_ids) - len(response_mask)]
+        else:
+            response_ids = output.token_ids
+            response_mask = [1] * len(output.token_ids)
+            response_logprobs = output.log_probs
 
         output: AgentLoopOutput = AgentLoopOutput(
             prompt_ids=prompt_ids,
-            response_ids=output.token_ids[: self.response_length],
+            response_ids=response_ids[: self.response_length],
             response_mask=response_mask[: self.response_length],
-            response_logprobs=output.log_probs[: self.response_length] if output.log_probs else None,
+            response_logprobs=response_logprobs[: self.response_length] if response_logprobs else None,
             routed_experts=(
                 output.routed_experts[: len(prompt_ids) + self.response_length]
                 if output.routed_experts is not None

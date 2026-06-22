@@ -300,6 +300,10 @@ actor_rollout_ref:
       tool_response_truncate_side: middle
       use_inference_chat_template: false
       tokenization_sanity_check_mode: strict
+      continuous_token:
+        _target_: verl.workers.config.ContinuousTokenConfig
+        enable: false
+        model_family: auto
       format: hermes
       num_repeat_rollouts: null
     calculate_log_probs: true
