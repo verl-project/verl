@@ -18,6 +18,7 @@ import pytest
 
 from verl.utils.continuous_token import (
     ContinuousTokenBuilder,
+    DeepSeekContinuousTokenBuilder,
     Gemma4ContinuousTokenBuilder,
     GLM4VContinuousTokenBuilder,
     GLMContinuousTokenBuilder,
@@ -239,6 +240,7 @@ def test_builtin_family_surface():
         "glm5",
         "gemma4",
         "gptoss",
+        "deepseek",
         "qwenvl",
         "qwen25vl",
         "qwen3vl",
@@ -265,6 +267,7 @@ def test_builtin_family_surface():
         (ContinuousTokenModelFamily.GLM5, GLMContinuousTokenBuilder),
         (ContinuousTokenModelFamily.GEMMA4, Gemma4ContinuousTokenBuilder),
         (ContinuousTokenModelFamily.GPTOSS, GptOssContinuousTokenBuilder),
+        (ContinuousTokenModelFamily.DEEPSEEK, DeepSeekContinuousTokenBuilder),
         (ContinuousTokenModelFamily.QWEN_VL, QwenVLContinuousTokenBuilder),
         (ContinuousTokenModelFamily.QWEN25_VL, QwenVLContinuousTokenBuilder),
         (ContinuousTokenModelFamily.QWEN3_VL, QwenVLContinuousTokenBuilder),
@@ -291,7 +294,8 @@ def test_builtin_family_class_mapping(family, builder_cls):
         ("Qwen/Qwen3.5-35B-A3B", ContinuousTokenModelFamily.QWEN35),
         ("Qwen/Qwen2.5-7B-Instruct", ContinuousTokenModelFamily.QWEN25),
         ("Qwen/Qwen3-8B", ContinuousTokenModelFamily.QWEN3),
-        ("deepseek-ai/DeepSeek-R1", ContinuousTokenModelFamily.DEFAULT),
+        ("deepseek-ai/DeepSeek-R1", ContinuousTokenModelFamily.DEEPSEEK),
+        ("deepseek-ai/DeepSeek-V3", ContinuousTokenModelFamily.DEEPSEEK),
         # VL families
         ("Qwen/Qwen2.5-VL-7B-Instruct", ContinuousTokenModelFamily.QWEN25_VL),
         ("Qwen/Qwen3-VL-4B", ContinuousTokenModelFamily.QWEN3_VL),

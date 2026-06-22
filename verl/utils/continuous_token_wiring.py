@@ -22,6 +22,7 @@ from typing import Any
 
 from verl.utils.continuous_token import (
     ContinuousTokenBuilder,
+    DeepSeekContinuousTokenBuilder,
     Gemma4ContinuousTokenBuilder,
     GLM4VContinuousTokenBuilder,
     GLMContinuousTokenBuilder,
@@ -51,6 +52,7 @@ class ContinuousTokenModelFamily(StrEnum):
     GLM5 = "glm5"
     GEMMA4 = "gemma4"
     GPTOSS = "gptoss"
+    DEEPSEEK = "deepseek"
     # Multimodal (VL) families
     QWEN_VL = "qwenvl"
     QWEN25_VL = "qwen25vl"
@@ -74,6 +76,7 @@ _CONTINUOUS_TOKEN_BUILDER_REGISTRY: dict[ContinuousTokenModelFamily, type[Any]] 
     ContinuousTokenModelFamily.GLM5: GLMContinuousTokenBuilder,
     ContinuousTokenModelFamily.GEMMA4: Gemma4ContinuousTokenBuilder,
     ContinuousTokenModelFamily.GPTOSS: GptOssContinuousTokenBuilder,
+    ContinuousTokenModelFamily.DEEPSEEK: DeepSeekContinuousTokenBuilder,
     # Multimodal (VL) families
     ContinuousTokenModelFamily.QWEN_VL: QwenVLContinuousTokenBuilder,
     ContinuousTokenModelFamily.QWEN25_VL: QwenVLContinuousTokenBuilder,
@@ -174,6 +177,9 @@ def infer_continuous_token_model_family(
         return ContinuousTokenModelFamily.GEMMA4
     if any(marker in haystack for marker in ("gpt-oss", "gpt_oss")) or "gptoss" in compact:
         return ContinuousTokenModelFamily.GPTOSS
+    # DeepSeek text models (V2/V3/R1) — match if not VL2
+    if "deepseek" in compact and "vl" not in compact:
+        return ContinuousTokenModelFamily.DEEPSEEK
     if "minimaxm27" in compact:
         return ContinuousTokenModelFamily.MINIMAX_M27
     if "minimaxm25" in compact:

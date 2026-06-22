@@ -731,6 +731,50 @@ def _tool_call_function_name(tool_call: dict[str, Any]) -> str | None:
     return None
 
 
+class DeepSeekContinuousTokenBuilder(ContinuousTokenBuilder):
+    """DeepSeek V3/R1 boundary handling.
+
+    DeepSeek uses direct concatenation at boundaries (no separator between
+    ``<|end_of_sentence|>`` and the next role marker). The subclass validates
+    key special tokens use correct Unicode (fullwidth vertical line U+FF5C
+    and lower one-eighth block U+2581) to catch encoding regressions early.
+    """
+
+    # DeepSeek special tokens use fullwidth vertical line and lower one-eighth block
+    _EOS_TOKEN = "<\uff5cend\u2581of\u2581sentence\uff5c>"
+    _BOS_TOKEN = "<\uff5cbegin\u2581of\u2581sentence\uff5c>"
+    _USER_TOKEN = "<\uff5cUser\uff5c>"
+    _ASSISTANT_TOKEN = "<\uff5cAssistant\uff5c>"
+
+    def __init__(self, tokenizer: Any, **kwargs: Any):
+        super().__init__(tokenizer, **kwargs)
+        # EOS is the only token guaranteed across V2/V3/R1
+        self._eos_id = _require_token_id(tokenizer, self._EOS_TOKEN)
+        # V3/R1-specific tokens — lookup but tolerate absence (V2-Lite has none)
+        self._bos_id = self._optional_token_id(tokenizer, self._BOS_TOKEN)
+        self._user_id = self._optional_token_id(tokenizer, self._USER_TOKEN)
+        self._assistant_id = self._optional_token_id(tokenizer, self._ASSISTANT_TOKEN)
+
+    @staticmethod
+    def _optional_token_id(tokenizer: Any, token: str) -> int | None:
+        token_id = tokenizer.convert_tokens_to_ids(token)
+        unk = getattr(tokenizer, "unk_token_id", None)
+        if token_id is None or token_id == unk:
+            return None
+        return int(token_id)
+
+    def _merge_non_assistant_token_ids(
+        self, runtime_token_ids: list[int], appended_token_ids: list[int]
+    ) -> MergeResult:
+        # Direct concatenation — DeepSeek template has no inter-turn separator
+        merged_token_ids = list(runtime_token_ids) + list(appended_token_ids)
+        return MergeResult(
+            token_ids=merged_token_ids,
+            appended_token_count=len(appended_token_ids),
+            kind="non_assistant",
+        )
+
+
 # =============================================================================
 # Multimodal (VL) subclasses — Phase 1
 # =============================================================================
