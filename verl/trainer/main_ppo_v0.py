@@ -26,19 +26,7 @@ from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 from verl.trainer.ppo.utils import create_rl_dataset, create_rl_sampler, need_critic, need_reference_policy
 from verl.utils.config import validate_config
 
-
-@ray.remote
-class TaskRunner:
-    """Ray remote class for executing distributed PPO training tasks.
-
-    This class encapsulates the main training logic and runs as a Ray remote actor
-    to enable distributed execution across multiple nodes and GPUs.
-
-    Attributes:
-        role_worker_mapping: Dictionary mapping Role enums to Ray remote worker classes
-        mapping: Dictionary mapping Role enums to resource pool IDs for GPU allocation
-    """
-
+class BaseTaskRunner:
     def __init__(self):
         self.role_worker_mapping = {}
         self.mapping = {}
@@ -139,6 +127,24 @@ class TaskRunner:
         the actor/rollout.
         """
         return
+
+    def run(self, config):
+        pass
+
+@ray.remote
+class TaskRunner(BaseTaskRunner):
+    """Ray remote class for executing distributed PPO training tasks.
+
+    This class encapsulates the main training logic and runs as a Ray remote actor
+    to enable distributed execution across multiple nodes and GPUs.
+
+    Attributes:
+        role_worker_mapping: Dictionary mapping Role enums to Ray remote worker classes
+        mapping: Dictionary mapping Role enums to resource pool IDs for GPU allocation
+    """
+
+    def __init__(self):
+        super().__init__()
 
     def run(self, config):
         """Execute the main PPO training workflow.
