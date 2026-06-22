@@ -25,6 +25,10 @@ actor_rollout_ref:
       lr_wsd_decay_style: exponential
       lr_wsd_decay_steps: null
       use_checkpoint_opt_param_scheduler: false
+      use_precision_aware_optimizer: false
+      main_grads_dtype: fp32
+      exp_avg_dtype: fp32
+      exp_avg_sq_dtype: fp32
       override_optimizer_config: {}
     megatron:
       _target_: verl.workers.config.McoreEngineConfig
@@ -526,6 +530,10 @@ critic:
     lr_wsd_decay_style: exponential
     lr_wsd_decay_steps: null
     use_checkpoint_opt_param_scheduler: false
+    use_precision_aware_optimizer: false
+    main_grads_dtype: fp32
+    exp_avg_dtype: fp32
+    exp_avg_sq_dtype: fp32
     override_optimizer_config: {}
   megatron:
     _target_: verl.workers.config.McoreEngineConfig
