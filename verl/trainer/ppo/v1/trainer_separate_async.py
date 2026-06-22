@@ -41,8 +41,6 @@ class PPOTrainerSeparateAsync(PPOTrainer):
     """
 
     def __init__(self, config: DictConfig):
-        raise NotImplementedError("separate async training is still under development")
-
         train_batch_size = config.data.train_batch_size
         ppo_mini_batch_size = config.actor_rollout_ref.actor.ppo_mini_batch_size
         assert train_batch_size == ppo_mini_batch_size, (
@@ -57,17 +55,20 @@ class PPOTrainerSeparateAsync(PPOTrainer):
             "please use nccl/nixl/mooncake, etc. backend for separate async training"
         )
 
+        super().__init__(config)
+
         # TODO: Support Decoupled PPO: https://arxiv.org/abs/2505.24298
         self.config.algorithm.rollout_correction.bypass_mode = True
-
-        super().__init__(config)
 
     def _setup(self):
         super()._setup()
 
         # initialize standalone rollout
         # TODO: make initialization parallel with super().init()
-        self.standalone_server_manager: LLMServerManager = LLMServerManager.create(config=self.config)
+        hybrid_num_replicas = len(self.llm_server_manager.rollout_replicas)
+        self.standalone_server_manager: LLMServerManager = LLMServerManager.create(
+            config=self.config, start_rank=hybrid_num_replicas
+        )
 
         # create checkpoint engine manager for trainer and standalone rollout
         checkpoint_engine_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
@@ -101,11 +102,6 @@ class PPOTrainerSeparateAsync(PPOTrainer):
             logger.info("Switching hybrid engine to rollout mode for validation")
             self.switch_to_rollout()
 
-    def on_validate_end(self):
-        if self.current_mode == HybridEngineMode.ROLLOUT:
-            logger.info("Switching hybrid engine to trainer mode for training")
-            self.switch_to_trainer()
-
     def on_sample_begin(self):
         if self.current_mode == HybridEngineMode.TRAINER and self.should_switch_to_rollout():
             logger.info("Switching hybrid engine to rollout mode for generation")
@@ -123,12 +119,14 @@ class PPOTrainerSeparateAsync(PPOTrainer):
                 self.standalone_checkpoint_manager.update_weights(self.global_steps)
 
     def switch_to_rollout(self):
+        # TODO: disable auto offload in config and offload according to the switch strategy
         self.checkpoint_manager.update_weights(self.global_steps)
         self.checkpoint_manager.resume_generation_replicas()
         self.add_replicas_to_balancer()
         self.current_mode = HybridEngineMode.ROLLOUT
 
     def switch_to_trainer(self):
+        # TODO: disable auto offload in config and offload according to the switch strategy
         self.remove_replicas_from_balancer()
         self.checkpoint_manager.abort_replicas()
         self.checkpoint_manager.sleep_replicas()

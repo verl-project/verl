@@ -127,6 +127,8 @@ jobs:
       - name: Install the current repository
         run: |
           pip install --no-deps -e .[test]
+      - name: Check final pip list
+          pip3 list
       - name: Prepare weights
         run: |
           ln -s /root/.cache/models ~/models
