@@ -50,7 +50,24 @@ class MergeResult:
 
 
 class ContinuousTokenBuilder:
-    """Continuous Token builder for runtime prefix reuse."""
+    """Build and update continuous-token runtime prompts for multi-turn rollouts.
+
+    This class exposes two API layers:
+
+    AgentLoop-facing runtime APIs:
+        ``build_initial_tokens`` renders the first prompt, ``merge_non_assistant_tokens``
+        merges append-only tool/user/system messages, ``merge_assistant_tokens``
+        appends model-generated assistant tokens, and ``align_response_metadata``
+        applies the recorded token edits to masks/logprobs.
+
+    Developer extension APIs:
+        Model-specific builders should subclass this class and keep the runtime
+        API contracts above stable. Chat template specific behavior belongs in hooks
+        such as ``_tokenize_tool_group``, ``_tokenize_single_non_tool``,
+        ``_tokenize_generation_prompt_delta``, and ``_merge_non_assistant_token_ids``.
+        ``render_delta_token_id`` is the shared suffix-diff helper those hooks can
+        reuse.
+    """
 
     allowed_append_roles: frozenset[str] = _SUPPORTED_APPEND_ROLES
 
