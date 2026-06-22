@@ -781,8 +781,14 @@ _PATCH_TARGETS = [
     ),
     # MoE NVFP4
     (
-        "vllm.model_executor.layers.quantization.compressed_tensors."
-        "compressed_tensors_moe.CompressedTensorsW4A4Nvfp4MoEMethod.process_weights_after_loading",
+        (
+            # this is used in `vllm>=0.12`
+            "vllm.model_executor.layers.quantization.compressed_tensors."
+            "compressed_tensors_moe.CompressedTensorsW4A4Nvfp4MoEMethod.process_weights_after_loading",
+            # this is used in `vllm<0.12`
+            "vllm.model_executor.layers.quantization.compressed_tensors."
+            "compressed_tensors_moe.CompressedTensorsW4A4MoeMethod.process_weights_after_loading",
+        ),
         patched_nvfp4_moe_process_weights_after_loading,
     ),
 ]
@@ -801,9 +807,19 @@ def apply_qat_patches():
     logger.info("Applying NVFP4 patches for dynamic weight loading...")
 
     for target, replacement in _PATCH_TARGETS:
-        p = patch(target, replacement)
-        _applied_patches.append(p)
-        p.start()
+        targets = target if isinstance(target, tuple) else (target,)
+        for candidate in targets:
+            p = patch(candidate, replacement)
+            try:
+                p.start()
+            except AttributeError as exc:
+                last_error = exc
+                continue
+            _applied_patches.append(p)
+            logger.info(f"Applied QAT patch: {candidate}")
+            break
+        else:
+            raise last_error
 
     logger.info(f"Applied {len(_applied_patches)} NVFP4 patches for dynamic weight loading")
     return _applied_patches

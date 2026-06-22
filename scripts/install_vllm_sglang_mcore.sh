@@ -9,7 +9,7 @@ echo "1. install inference frameworks and pytorch they need"
 if [ $USE_SGLANG -eq 1 ]; then
     pip install "sglang[all]==0.5.2" --no-cache-dir && pip install torch-memory-saver --no-cache-dir
 fi
-pip install --no-cache-dir "vllm==0.11.0"
+pip install --no-cache-dir "vllm==0.12.0"
 
 echo "2. install basic packages"
 pip install "transformers[hf_xet]>=4.51.0" accelerate datasets peft hf-transfer \
