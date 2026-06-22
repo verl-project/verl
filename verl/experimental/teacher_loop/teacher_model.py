@@ -147,7 +147,9 @@ class TeacherModelManager:
         from verl.workers.rollout.llm_server import GlobalRequestLoadBalancer
 
         self.load_balancer_handle = GlobalRequestLoadBalancer.remote(
-            servers=dict(zip(self.server_addresses, self.server_handles, strict=True))
+            servers=dict(zip(self.server_addresses, self.server_handles, strict=True)),
+            balance_abs_threshold=self.teacher_model_config.inference.balance_abs_threshold,
+            balance_rel_threshold=self.teacher_model_config.inference.balance_rel_threshold,
         )
 
 

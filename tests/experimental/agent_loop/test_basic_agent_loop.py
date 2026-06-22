@@ -558,3 +558,86 @@ class TestLoadBalancerHybrid:
         status = ray.get(lb.get_status.remote())
         assert status["active_servers"] == 2  # s0 and s2
         assert status["total_inflight"] == 0
+
+
+class TestLoadBalancerImbalanceGate:
+    """Sticky-vs-balance tradeoff: re-pin sticky sessions once load is skewed.
+
+    Adapted from sglang's cache-aware router dual-threshold rule. The gate is
+    enabled by default and can be disabled with ``balance_abs_threshold=0``.
+    """
+
+    @staticmethod
+    def _make_skewed(lb, total_requests: int):
+        """Drive a 2-server LB into a skewed state and return the s0 request IDs.
+
+        Acquires ``total_requests`` distinct requests (least-loaded alternates
+        s0/s1/...), then releases the requests pinned to s1. The remaining
+        request IDs are the ones pinned to s0.
+        """
+        pinned = {}
+        for i in range(total_requests):
+            rid = f"r{i}"
+            pinned[rid] = ray.get(lb.acquire_server.remote(request_id=rid))[0]
+        # r0/r2/... -> s0, r1/r3/... -> s1 (deterministic least-loaded tie-break).
+        for rid, sid in pinned.items():
+            if sid == "s1":
+                ray.get(lb.release_server.remote(server_id=sid))
+        s0_reqs = [rid for rid, sid in pinned.items() if sid == "s0"]
+        return s0_reqs
+
+    def test_default_enabled_repins_under_imbalance(self, ray_for_lb):
+        """Default thresholds enable the gate, so a hot sticky session is re-pinned."""
+        lb = GlobalRequestLoadBalancer.remote(servers={"s0": None, "s1": None})
+        s0_reqs = self._make_skewed(lb, total_requests=130)
+        moved = ray.get(lb.acquire_server.remote(request_id=s0_reqs[0]))[0]
+        assert moved == "s1"  # re-pinned to least-loaded under the default gate
+
+    def test_explicit_disable_keeps_sticky_under_imbalance(self, ray_for_lb):
+        """Setting balance_abs_threshold=0 disables the gate and preserves sticky."""
+        lb = GlobalRequestLoadBalancer.remote(
+            servers={"s0": None, "s1": None},
+            balance_abs_threshold=0,
+        )
+        s0_reqs = self._make_skewed(lb, total_requests=6)
+        # {s0: 3, s1: 0} is heavily imbalanced, but the gate is explicitly off.
+        for rid in s0_reqs:
+            assert ray.get(lb.acquire_server.remote(request_id=rid))[0] == "s0"
+
+    def test_tied_minimum_keeps_sticky_when_imbalanced(self, ray_for_lb):
+        """A sticky server already at the minimum load should not be moved."""
+        lb = GlobalRequestLoadBalancer.remote(
+            servers={"s0": None, "s1": None, "s2": None},
+            balance_abs_threshold=3,
+            balance_rel_threshold=1.5,
+        )
+        assert ray.get(lb.acquire_server.remote(request_id="r0"))[0] == "s0"
+        assert ray.get(lb.acquire_server.remote(request_id="r1"))[0] == "s1"
+        assert ray.get(lb.acquire_server.remote(request_id="r2"))[0] == "s2"
+        for _ in range(4):
+            assert ray.get(lb.acquire_server.remote(request_id="r2"))[0] == "s2"
+        status = ray.get(lb.get_status.remote())
+        assert status["servers"] == {"s0": 1, "s1": 1, "s2": 5}
+        # s1 is tied for minimum load, so it should stay sticky even though the pool
+        # is imbalanced because of s2.
+        assert ray.get(lb.acquire_server.remote(request_id="r1"))[0] == "s1"
+
+    def test_relative_threshold_guards_uniformly_busy_pool(self, ray_for_lb):
+        """A busy-but-proportional pool is not treated as imbalanced (rel guard)."""
+        lb = GlobalRequestLoadBalancer.remote(
+            servers={"s0": None, "s1": None},
+            balance_abs_threshold=1,
+            balance_rel_threshold=1.5,
+        )
+        # Build {s0: 10, s1: 8} from distinct *new* requests (each routed purely by
+        # least-loaded, so the gate is never consulted during construction) plus
+        # two releases on s1. r0 stays pinned to s0 and in-flight throughout.
+        for i in range(20):
+            ray.get(lb.acquire_server.remote(request_id=f"r{i}"))  # alternates -> {10, 10}
+        ray.get(lb.release_server.remote(server_id="s1"))
+        ray.get(lb.release_server.remote(server_id="s1"))
+        status = ray.get(lb.get_status.remote())
+        assert status["servers"] == {"s0": 10, "s1": 8}
+        # (10 - 8) = 2 > 1, but 10 > 8 * 1.5 = 12 is False -> balanced.
+        # r0 (pinned to s0) must stay on s0 despite the absolute gap.
+        assert ray.get(lb.acquire_server.remote(request_id="r0"))[0] == "s0"
