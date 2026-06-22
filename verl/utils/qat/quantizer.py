@@ -25,7 +25,13 @@ import re
 from typing import Generator, Iterable, Optional
 
 import torch
-from compressed_tensors.compressors.quantized_compressors.fp4_quantized import NVFP4PackedCompressor
+
+try:
+    # this is used for `compressed-tensors<=0.13.0`
+    from compressed_tensors.compressors.quantized_compressors.nvfp4_quantized import NVFP4PackedCompressor
+except ImportError:
+    # this is used for `compressed-tensors==0.14.x`
+    from compressed_tensors.compressors.quantized_compressors.fp4_quantized import NVFP4PackedCompressor
 from compressed_tensors.quantization.quant_args import (
     FP4_E2M1_DATA,
     FP8_E4M3_DATA,
@@ -118,6 +124,23 @@ def fuse_global_scales(
     return fused_scales
 
 
+def get_quantization_args(num_bits, type, symmetric, strategy, group_size, scale_dtype):
+    import compressed_tensors
+    from packaging import version
+
+    kwargs = {
+        "num_bits": num_bits,
+        "type": type,
+        "symmetric": symmetric,
+        "strategy": strategy,
+        "group_size": group_size,
+    }
+    if version.parse(compressed_tensors.__version__) >= version.parse("0.13.0"):
+        # `scale_dtype` argument is introduced after `compressed-tensors v0.13.0`
+        kwargs["scale_dtype"] = scale_dtype
+    return QuantizationArgs(**kwargs)
+
+
 class QATQuantizer:
     """Quantizer for QAT-trained weights using compressed_tensors APIs."""
 
@@ -137,7 +160,7 @@ class QATQuantizer:
         self.param_dtype = param_dtype
 
         self._compressor = NVFP4PackedCompressor()
-        self._quant_args = QuantizationArgs(
+        self._quant_args = get_quantization_args(
             num_bits=4,
             type=QuantizationType.FLOAT,
             symmetric=True,
