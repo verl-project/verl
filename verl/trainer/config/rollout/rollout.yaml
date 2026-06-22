@@ -217,6 +217,14 @@ multi_turn:
   # Format of the multi-turn rollout. Options: hermes, llama3_json, ...
   format: hermes
 
+  # Optional reasoning parser name (e.g. "qwen3", "deepseek_r1") used to strip
+  # think-block content (``<think>...</think>``) from the decoded model
+  # response before tool-call extraction. ``null`` keeps legacy behavior (no
+  # stripping) and is backward-compatible. See
+  # ``verl/experimental/agent_loop/reasoning_parser.py`` for built-in parsers
+  # and the ``@ReasoningParser.register`` decorator for custom ones.
+  reasoning_parser: null
+
   # Number of repeat rollouts for each sample
   num_repeat_rollouts: null
 
