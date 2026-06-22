@@ -164,6 +164,23 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         # Initialized in _setup_hybrid_checkpoint_manager_and_sleep() via set_rollouter().
         self.hybrid_checkpoint_manager = None
 
+        # Experience replay buffer (default off, controlled by algorithm.experience_replay.enable).
+        replay_config = config.algorithm.get("experience_replay", None)
+        if replay_config and replay_config.get("enable", False):
+            from verl.experimental.fully_async_policy.replay_buffer import ReplayBuffer
+
+            self.replay_buffer = ReplayBuffer(
+                buffer_size=replay_config.get("buffer_size", 64),
+                reward_threshold=replay_config.get("reward_threshold", 0.1),
+            )
+            logger.info(
+                f"[FullyAsyncTrainer] Experience replay enabled: "
+                f"buffer_size={self.replay_buffer.buffer_size}, "
+                f"threshold={self.replay_buffer.reward_threshold}"
+            )
+        else:
+            self.replay_buffer = None
+
     async def _setup_checkpoint_manager(self):
         """Setup checkpoint manager after rollouter is initialized"""
         replicas = await self.rollouter.get_replicas.remote()
@@ -435,6 +452,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         with marked_timer("step", self.timing_raw):
             batch = await self._fit_generate(None)
             batch = self._fit_compute_reward(batch)
+            batch = self._fit_apply_replay(batch)
             batch = self._fit_compute_log_prob(batch)
             batch = self._fit_compute_ref_log_prob(batch)
             batch = self._fit_compute_critic(batch)
@@ -460,6 +478,63 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
                 raise TrainingStopException("Training terminated: queue returned None")
             self._collect_metrics_from_samples(batch, metrics)
         batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
+        return batch
+
+    def _fit_apply_replay(self, batch: DataProto) -> DataProto:
+        """Store positive samples and inject replay into all-negative GRPO groups."""
+        if self.replay_buffer is None:
+            return batch
+
+        from collections import defaultdict
+
+        self.replay_buffer.update(batch)
+
+        uids = batch.non_tensor_batch["uid"]
+        scores = batch.batch["rm_scores"].sum(dim=-1)
+        replay_config = self.config.algorithm.experience_replay
+        threshold = replay_config.get("reward_threshold", 0.1)
+
+        uid_to_indices = defaultdict(list)
+        for i, uid in enumerate(uids):
+            uid_to_indices[uid].append(i)
+
+        injected_count = 0
+        for uid, indices in uid_to_indices.items():
+            group_scores = scores[indices]
+            if group_scores.max().item() > threshold:
+                continue
+
+            pos_samples = self.replay_buffer.get_positive(n=1)
+            if pos_samples is None:
+                continue
+
+            worst_local_idx = group_scores.argmin().item()
+            worst_global_idx = indices[worst_local_idx]
+            replay_sample = pos_samples[0]
+
+            for key in replay_sample.batch.keys():
+                if key not in batch.batch.keys():
+                    continue
+                batch.batch[key][worst_global_idx] = replay_sample.batch[key]
+
+            for key in replay_sample.non_tensor_batch.keys():
+                # Keep the injected sample in the same GRPO group and rollout slot.
+                if key in ("uid", "__agent_loop_source_index__"):
+                    continue
+                if key not in batch.non_tensor_batch:
+                    continue
+                batch.non_tensor_batch[key][worst_global_idx] = replay_sample.non_tensor_batch[key]
+
+            injected_count += 1
+
+        self.metrics["replay/injected_count"] = injected_count
+        self.metrics["replay/buffer_total_size"] = self.replay_buffer.total_size()
+        if injected_count > 0:
+            logger.info(
+                f"[ExperienceReplay] Injected {injected_count} replay samples, "
+                f"buffer size: {self.replay_buffer.total_size()}"
+            )
+
         return batch
 
     def _compute_old_log_prob(self, batch: DataProto):

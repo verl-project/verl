@@ -14,6 +14,7 @@
 
 import asyncio
 import logging
+import os
 from collections import deque
 from typing import Any
 
@@ -21,6 +22,20 @@ import ray
 from omegaconf import DictConfig
 
 logger = logging.getLogger(__name__)
+
+
+def _queue_backpressure_enabled(config: DictConfig | None = None) -> bool:
+    """Return whether producers should wait instead of dropping samples when the queue is full."""
+    value = os.environ.get("GUI_ASYNC_QUEUE_BACKPRESSURE")
+    if value is None:
+        value = os.environ.get("VERL_ASYNC_QUEUE_BACKPRESSURE")
+    if value is None:
+        value = os.environ.get("ASYNC_QUEUE_BACKPRESSURE")
+    if value is None and config is not None:
+        value = config.async_training.get("queue_backpressure", None) if hasattr(config, "async_training") else None
+    if value is None:
+        return True
+    return str(value).strip().lower() not in {"0", "false", "no", "off"}
 
 
 @ray.remote(num_cpus=2, max_concurrency=20)
@@ -44,13 +59,15 @@ class MessageQueue:
         # async safe
         self._lock = asyncio.Lock()
         self._consumer_condition = asyncio.Condition(self._lock)
+        self._producer_condition = asyncio.Condition(self._lock)
+        self.backpressure = _queue_backpressure_enabled(config)
 
         # statistic message
         self.total_produced = 0
         self.total_consumed = 0
         self.dropped_samples = 0
 
-        print(f"[MessageQueue] initialized with max_queue_size={max_queue_size}")
+        print(f"[MessageQueue] initialized with max_queue_size={max_queue_size} backpressure={self.backpressure}")
 
     async def put_sample(self, sample: Any) -> bool:
         """
@@ -63,6 +80,11 @@ class MessageQueue:
             bool: Whether the sample was successfully put into the queue
         """
         async with self._lock:
+            while self.backpressure and len(self.queue) >= self.max_queue_size and self.running:
+                await self._producer_condition.wait()
+            if not self.running:
+                return False
+
             # If queue is full, remove the oldest sample (rarely happens)
             is_drop = False
             if len(self.queue) >= self.max_queue_size:
@@ -100,6 +122,7 @@ class MessageQueue:
             # Get one sample
             data = self.queue.popleft()
             self.total_consumed += 1
+            self._producer_condition.notify_all()
             return data, len(self.queue)
 
     async def get_queue_size(self) -> int:
@@ -123,6 +146,7 @@ class MessageQueue:
         async with self._lock:
             cleared_count = len(self.queue)
             self.queue.clear()
+            self._producer_condition.notify_all()
             logger.info(f"Cleared {cleared_count} samples from queue")
 
     async def shutdown(self):
@@ -131,6 +155,7 @@ class MessageQueue:
             self.running = False
             # Notify all waiting coroutines so they can exit
             self._consumer_condition.notify_all()
+            self._producer_condition.notify_all()
         logger.info("MessageQueue shutdown")
 
     async def get_memory_usage(self) -> dict:
