@@ -24,7 +24,7 @@ USE_MBRIDGE=${USE_MBRIDGE:-True}
 USE_DIST_CKPT=${USE_DIST_CKPT:-False}
 
 # Model Weights Paths
-MODEL_ID=${MODEL_ID:-moonshotai/Moonlight-16B-A3B}
+MODEL_ID=${MODEL_ID:-moonshotai/Moonlight-16B-A3B-Instruct}
 MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/models/${MODEL_ID}}
 
 # File System Paths
