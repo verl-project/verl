@@ -26,6 +26,7 @@ from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 from verl.trainer.ppo.utils import create_rl_dataset, create_rl_sampler, need_critic, need_reference_policy
 from verl.utils.config import validate_config
 
+
 class BaseTaskRunner:
     def __init__(self):
         self.role_worker_mapping = {}
@@ -130,6 +131,7 @@ class BaseTaskRunner:
 
     def run(self, config):
         pass
+
 
 @ray.remote
 class TaskRunner(BaseTaskRunner):
