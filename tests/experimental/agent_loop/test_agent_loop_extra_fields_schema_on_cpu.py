@@ -182,6 +182,7 @@ async def test_agent_loop_extra_fields_schema_stable_for_training_concat_on_cpu(
             "data": {
                 "tool_config_path": None,
                 "apply_chat_template_kwargs": {},
+                "continuous_token": {"enable": False, "model_family": "auto"},
             },
         }
     )

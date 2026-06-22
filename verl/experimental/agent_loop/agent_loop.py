@@ -227,7 +227,7 @@ class AgentLoopBase(ABC):
         self.mm_processor_kwargs = self.data_config.get("mm_processor_kwargs", {})
         self.continuous_token_builder = None
         self.enable_continuous_token = False
-        continuous_token_config = self.rollout_config.multi_turn.continuous_token
+        continuous_token_config = self.data_config.continuous_token
         if continuous_token_config.enable and self.processor is None:
             model_config = self.config.actor_rollout_ref.model
             self.continuous_token_builder = create_continuous_token_builder(

@@ -34,7 +34,6 @@ from verl.utils.tokenizer.continuous_token_wiring import (
     list_continuous_token_builder_families,
     resolve_continuous_token_model_family,
 )
-from verl.workers.config.rollout import ContinuousTokenConfig
 
 
 class _DummyTokenizer:
@@ -884,11 +883,3 @@ def test_unknown_family_fails_during_resolution():
 def test_empty_family_fails_during_resolution(model_family):
     with pytest.raises(ValueError, match="model_family must be a non-empty string"):
         resolve_continuous_token_model_family(model_family)
-
-
-@pytest.mark.parametrize("model_family", ["", None])
-def test_continuous_token_rollout_config_validates_model_family(model_family):
-    with pytest.raises(ValueError, match="continuous_token.model_family must be a non-empty string"):
-        ContinuousTokenConfig(model_family=model_family)
-
-    ContinuousTokenConfig(enable=True, model_family="auto")

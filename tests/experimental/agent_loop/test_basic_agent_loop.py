@@ -60,8 +60,8 @@ def init_config() -> DictConfig:
     config.actor_rollout_ref.rollout.agent.num_workers = 2
     config.actor_rollout_ref.rollout.skip_tokenizer_init = True
     if os.getenv("ENABLE_CONTINUOUS_TOKEN") in {"1", "true", "True"}:
-        config.actor_rollout_ref.rollout.multi_turn.continuous_token.enable = True
-        config.actor_rollout_ref.rollout.multi_turn.continuous_token.model_family = "auto"
+        config.data.continuous_token.enable = True
+        config.data.continuous_token.model_family = "auto"
 
     return config
 
