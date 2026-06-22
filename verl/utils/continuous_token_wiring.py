@@ -23,6 +23,7 @@ from typing import Any
 from verl.utils.continuous_token import (
     ContinuousTokenBuilder,
     DeepSeekContinuousTokenBuilder,
+    DeepSeekVL2ContinuousTokenBuilder,
     Gemma4ContinuousTokenBuilder,
     GLM4VContinuousTokenBuilder,
     GLMContinuousTokenBuilder,
@@ -60,6 +61,7 @@ class ContinuousTokenModelFamily(StrEnum):
     MIMO_VL = "mimovl"
     KIMI_VL = "kimivl"
     GLM4V = "glm4v"
+    DEEPSEEK_VL2 = "deepseekvl2"
 
 
 _CONTINUOUS_TOKEN_BUILDER_REGISTRY: dict[ContinuousTokenModelFamily, type[Any]] = {
@@ -84,6 +86,7 @@ _CONTINUOUS_TOKEN_BUILDER_REGISTRY: dict[ContinuousTokenModelFamily, type[Any]] 
     ContinuousTokenModelFamily.MIMO_VL: MiMoVLContinuousTokenBuilder,
     ContinuousTokenModelFamily.KIMI_VL: KimiVLContinuousTokenBuilder,
     ContinuousTokenModelFamily.GLM4V: GLM4VContinuousTokenBuilder,
+    ContinuousTokenModelFamily.DEEPSEEK_VL2: DeepSeekVL2ContinuousTokenBuilder,
 }
 
 CONTINUOUS_TOKEN_BUILDER_FAMILIES = tuple(family.value for family in _CONTINUOUS_TOKEN_BUILDER_REGISTRY)
@@ -177,6 +180,9 @@ def infer_continuous_token_model_family(
         return ContinuousTokenModelFamily.GEMMA4
     if any(marker in haystack for marker in ("gpt-oss", "gpt_oss")) or "gptoss" in compact:
         return ContinuousTokenModelFamily.GPTOSS
+    # DeepSeek-VL2
+    if "deepseek" in compact and "vl" in compact:
+        return ContinuousTokenModelFamily.DEEPSEEK_VL2
     # DeepSeek text models (V2/V3/R1) — match if not VL2
     if "deepseek" in compact and "vl" not in compact:
         return ContinuousTokenModelFamily.DEEPSEEK

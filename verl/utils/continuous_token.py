@@ -1060,3 +1060,145 @@ class KimiVLContinuousTokenBuilder(VLContinuousTokenMixin, ContinuousTokenBuilde
     vision_start_token = "<|media_start|>"
     vision_end_token = "<|media_end|>"
     merge_size_attr = "merge_kernel_size"
+
+
+
+
+
+class DeepSeekVL2ContinuousTokenBuilder(DeepSeekContinuousTokenBuilder):
+    """DeepSeek-VL2 continuous token builder.
+
+    VL2 uses its own DeepseekVLV2Processor that handles both conversation
+    formatting and image token expansion in a single __call__. It does NOT
+    support standard apply_chat_template, so all rendering goes through the
+    processor directly.
+
+    The processor produces stable prefixes: full_render[:len(prev)] == prev,
+    so we use full render + prefix diff (like the original CT approach).
+    """
+
+    def __init__(self, tokenizer: Any, processor: Any, **kwargs: Any):
+        super().__init__(tokenizer, **kwargs)
+        self.processor = processor
+        self._image_token_id = _require_token_id(tokenizer, "<image>")
+
+    @classmethod
+    def supports_multimodal(cls) -> bool:
+        return True
+
+    def count_vision_tokens(self, spatial_crop_row: tuple[int, int]) -> int:
+        """VL2 formula: 211 + 196*m*n + 14*m."""
+        m, n = spatial_crop_row
+        return 211 + 196 * m * n + 14 * m
+
+    def extract_vision_placeholders(self, token_ids: Sequence[int]) -> list[tuple[int, int]]:
+        """Find contiguous runs of <image> tokens."""
+        spans: list[tuple[int, int]] = []
+        i = 0
+        n = len(token_ids)
+        while i < n:
+            if token_ids[i] == self._image_token_id:
+                j = i + 1
+                while j < n and token_ids[j] == self._image_token_id:
+                    j += 1
+                spans.append((i, j))
+                i = j
+            else:
+                i += 1
+        return spans
+
+    def _extract_images_from_messages(self, messages: list[dict[str, Any]]) -> list[Any]:
+        """Extract image references from content blocks."""
+        images: list[Any] = []
+        for msg in messages:
+            content = msg.get("content")
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") in ("image", "image_url"):
+                        image_ref = block.get("image")
+                        if not image_ref:
+                            image_url = block.get("image_url")
+                            if isinstance(image_url, dict):
+                                image_ref = image_url.get("url")
+                            elif isinstance(image_url, str):
+                                image_ref = image_url
+                        if image_ref is not None:
+                            images.append(image_ref)
+        return images
+
+    def _to_vl2_conversation(
+        self, messages: list[dict[str, Any]], images: list[Any], add_generation_prompt: bool = True,
+    ) -> tuple[list[dict[str, Any]], list[Any]]:
+        """Convert OpenAI-style messages to VL2 conversation format."""
+        conv: list[dict[str, Any]] = []
+        img_idx = 0
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                parts: list[str] = []
+                msg_images: list[Any] = []
+                for block in content:
+                    if isinstance(block, dict):
+                        btype = block.get("type", "")
+                        if btype in ("image", "image_url") and img_idx < len(images):
+                            parts.append("<image>")
+                            msg_images.append(images[img_idx])
+                            img_idx += 1
+                        elif btype == "text":
+                            parts.append(block.get("text", ""))
+                content = "".join(parts)
+            else:
+                msg_images = []
+
+            if role == "user":
+                conv.append({"role": "<|User|>", "content": content, "images": msg_images})
+            elif role == "assistant":
+                conv.append({"role": "<|Assistant|>", "content": content})
+            elif role == "system":
+                conv.append({"role": "<|User|>", "content": content, "images": []})
+
+        if add_generation_prompt:
+            if not conv or conv[-1].get("role") != "<|Assistant|>" or conv[-1].get("content"):
+                conv.append({"role": "<|Assistant|>", "content": ""})
+        return conv, images
+
+    def _render_via_processor(
+        self, messages: list[dict[str, Any]], images: list[Any], add_generation_prompt: bool = True,
+    ) -> list[int]:
+        """Render messages through DeepseekVLV2Processor."""
+        from verl.utils.tokenizer import normalize_token_ids
+        conv, all_images = self._to_vl2_conversation(messages, images, add_generation_prompt)
+        out = self.processor.__call__(conversations=conv, images=all_images, force_batchify=True)
+        return normalize_token_ids(out.input_ids[0].tolist())
+
+    def build_initial_tokens(
+        self, messages: list[dict[str, Any]], *, tools: list[dict[str, Any]] | None = None,
+    ) -> list[int]:
+        images = self._extract_images_from_messages(messages)
+        if not images:
+            return self._render_tokens(messages, add_generation_prompt=True, tools=tools)
+        return self._render_via_processor(messages, images, add_generation_prompt=True)
+
+    def merge_non_assistant_tokens(
+        self,
+        previous_messages: list[dict[str, Any]],
+        updated_messages: list[dict[str, Any]],
+        runtime_token_ids: list[int],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> MergeResult:
+        """Merge tokens: always use processor + prefix diff for VL2.
+
+        VL2 tokenizer has no chat_template, so all rendering goes through
+        the processor. Prefix stability is guaranteed by the processor.
+        """
+        self._assert_append_only(previous_messages, updated_messages)
+
+        # Always use full render + prefix diff (VL2 has no apply_chat_template)
+        all_images = self._extract_images_from_messages(updated_messages)
+        full_token_ids = self._render_via_processor(updated_messages, all_images, add_generation_prompt=True)
+
+        prefix_len = len(runtime_token_ids)
+        appended_token_ids = full_token_ids[prefix_len:]
+        return self._merge_non_assistant_token_ids(runtime_token_ids, appended_token_ids)

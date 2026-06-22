@@ -19,6 +19,7 @@ import pytest
 from verl.utils.continuous_token import (
     ContinuousTokenBuilder,
     DeepSeekContinuousTokenBuilder,
+    DeepSeekVL2ContinuousTokenBuilder,
     Gemma4ContinuousTokenBuilder,
     GLM4VContinuousTokenBuilder,
     GLMContinuousTokenBuilder,
@@ -247,6 +248,7 @@ def test_builtin_family_surface():
         "mimovl",
         "kimivl",
         "glm4v",
+        "deepseekvl2",
     )
     assert list_continuous_token_builder_families() == CONTINUOUS_TOKEN_BUILDER_FAMILIES
 
@@ -274,6 +276,7 @@ def test_builtin_family_surface():
         (ContinuousTokenModelFamily.MIMO_VL, MiMoVLContinuousTokenBuilder),
         (ContinuousTokenModelFamily.KIMI_VL, KimiVLContinuousTokenBuilder),
         (ContinuousTokenModelFamily.GLM4V, GLM4VContinuousTokenBuilder),
+        (ContinuousTokenModelFamily.DEEPSEEK_VL2, DeepSeekVL2ContinuousTokenBuilder),
     ],
 )
 def test_builtin_family_class_mapping(family, builder_cls):
@@ -303,6 +306,7 @@ def test_builtin_family_class_mapping(family, builder_cls):
         ("XiaomiMiMo/MiMo-VL-7B", ContinuousTokenModelFamily.MIMO_VL),
         ("moonshotai/Kimi-VL-A3B-Instruct", ContinuousTokenModelFamily.KIMI_VL),
         ("zai-org/GLM-4.5V", ContinuousTokenModelFamily.GLM4V),
+        ("deepseek-ai/deepseek-vl2-tiny", ContinuousTokenModelFamily.DEEPSEEK_VL2),
     ],
 )
 def test_auto_family_inference(model_path, expected):
