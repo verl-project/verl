@@ -132,7 +132,7 @@ CPPO adds two hyperparameters on top of the shared DPPO token-level threshold sc
 
 The prefix-average budget is calibrated per sequence from its own divergence statistics
 (Base-model warm-up):
-`delta_b^seq = clamp(cppo_delta_b_k * quantile(D_t, cppo_delta_b_q), delta_b_min, 2 * delta_b_min)`.
+`delta_b^seq = clamp(cppo_delta_b_k * quantile(D_t, cppo_delta_b_q), delta_b_min, 5 * delta_b_min)`.
 The defaults `(q, k) = (0.9, 1.0)` reproduce the paper's P90 calibration; for example
 `cppo.cppo_delta_b_q=0.95 cppo.cppo_delta_b_k=0.5` calibrates from half the 95th percentile.
 

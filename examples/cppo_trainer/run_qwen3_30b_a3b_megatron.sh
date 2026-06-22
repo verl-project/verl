@@ -21,7 +21,7 @@ clip_ratio=${CLIP_RATIO:-0.20}
 # Position weight floor w_t in [w_min, 1].
 cppo_w_min=${CPPO_W_MIN:-0.8}
 # Floor delta_b_min of the per-sequence dynamic prefix budget
-# delta_b = clamp(cppo_delta_b_k * quantile(D_t, cppo_delta_b_q), delta_b_min, 2*delta_b_min).
+# delta_b = clamp(cppo_delta_b_k * quantile(D_t, cppo_delta_b_q), delta_b_min, 5*delta_b_min).
 cppo_delta_b=${CPPO_DELTA_B:-0.02}
 # Quantile and scale of the budget calibration; (0.9, 1.0) = paper P90,
 # e.g. CPPO_DELTA_B_Q=0.95 CPPO_DELTA_B_K=0.5 uses half the 95th percentile.

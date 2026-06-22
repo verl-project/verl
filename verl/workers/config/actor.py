@@ -90,7 +90,7 @@ class CPPOConfig(BaseConfig):
         cppo_w_min (float): Weight floor of the linear position schedule w_t in [w_min, 1] (Eq. 9;
             paper default 0.8).
         cppo_delta_b (float): Floor delta_b_min of the per-sequence dynamic prefix budget
-            delta_b = clamp(delta_b_k * quantile(D_t, delta_b_q), delta_b, 2*delta_b) (Eq. 22).
+            delta_b = clamp(delta_b_k * quantile(D_t, delta_b_q), delta_b, 5*delta_b) (Eq. 22).
         cppo_delta_b_q (float): Quantile of the budget calibration; (0.9, 1.0) is the paper's P90.
         cppo_delta_b_k (float): Scale of the budget calibration; e.g. (0.95, 0.5) uses half the 95th percentile.
     """

@@ -84,7 +84,7 @@ policy_loss:
     cppo_w_min: 0.8
 
     # Floor delta_b_min of the per-sequence dynamic budget
-    # delta_b = clamp(cppo_delta_b_k * quantile(D_t, cppo_delta_b_q), delta_b, 2*delta_b) (paper Eq. 22)
+    # delta_b = clamp(cppo_delta_b_k * quantile(D_t, cppo_delta_b_q), delta_b, 5*delta_b) (paper Eq. 22)
     cppo_delta_b: 0.02
 
     # Quantile of the per-sequence divergence used to calibrate the budget (0.9 = paper P90)

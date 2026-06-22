@@ -1575,7 +1575,7 @@ def compute_policy_loss_cppo(
     The prefix-average threshold delta_b is calibrated per sequence from its own divergence
     statistics (paper Eq. 22, Base-model warm-up calibration)::
 
-        delta_b^seq = clamp(delta_b_k * quantile(D_{1:T}, delta_b_q), delta_b_min, 2 * delta_b_min)
+        delta_b^seq = clamp(delta_b_k * quantile(D_{1:T}, delta_b_q), delta_b_min, 5 * delta_b_min)
 
     where ``delta_b_min`` is ``cppo.cppo_delta_b``. The quantile ``delta_b_q`` (``cppo.cppo_delta_b_q``)
     and the scale ``delta_b_k`` (``cppo.cppo_delta_b_k``) default to ``(0.9, 1.0)``, reproducing the
@@ -1660,12 +1660,12 @@ def compute_policy_loss_cppo(
         W_prev = torch.cat([torch.zeros_like(W_cum[:, :1]), W_cum[:, :-1]], dim=-1)
 
         # Per-sequence dynamic prefix budget (Eq. 22):
-        #   delta_b^seq = clamp(delta_b_k * quantile(D, delta_b_q), delta_b, 2 * delta_b).
+        #   delta_b^seq = clamp(delta_b_k * quantile(D, delta_b_q), delta_b, 5 * delta_b).
         D_for_q = torch.where(response_mask_f.bool(), D_t, torch.full_like(D_t, float("nan")))
         q_seq = torch.nanquantile(D_for_q, q=delta_b_q, dim=-1)  # (B,)
         # Empty sequence -> NaN -> fall back to the floor.
         q_seq = torch.nan_to_num(q_seq, nan=delta_b)
-        delta_b_seq = (delta_b_k * q_seq).clamp(min=delta_b, max=2.0 * delta_b).unsqueeze(-1)  # (B, 1)
+        delta_b_seq = (delta_b_k * q_seq).clamp(min=delta_b, max=5.0 * delta_b).unsqueeze(-1)  # (B, 1)
 
         # Effective threshold c_t = min(delta, delta + delta_b * W_{t-1} - S_{t-1}) (Eq. 8).
         c_t = (delta + delta_b_seq * W_prev - S_prev).clamp(max=delta)
