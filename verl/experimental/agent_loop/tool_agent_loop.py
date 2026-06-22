@@ -118,6 +118,15 @@ class ToolAgentLoop(AgentLoopBase):
         self.tool_parser = ToolParser.get_tool_parser(self.rollout_config.multi_turn.format, self.tokenizer)
         self.tool_parser_name = self.rollout_config.multi_turn.format
 
+        # Detect gpt-oss tokenizer by presence of <|channel|> special token.
+        # When detected, tool responses must be manually formatted (bypassing apply_chat_template)
+        # regardless of the tool parser, since the gpt-oss jinja template does not support
+        # standard role:tool messages.
+        _channel_token_id = self.tokenizer.convert_tokens_to_ids("<|channel|>")
+        self._is_gpt_oss_tokenizer = (
+            _channel_token_id is not None and _channel_token_id != self.tokenizer.unk_token_id
+        )
+
         self.prompt_length = self.rollout_config.prompt_length
         self.response_length = self.rollout_config.response_length
 
@@ -350,9 +359,15 @@ class ToolAgentLoop(AgentLoopBase):
 
         agent_data.messages.extend(add_messages)
 
-        if self.tool_parser_name == "gpt-oss":
+        if self.tool_parser_name == "gpt-oss" or self._is_gpt_oss_tokenizer:
             logger.info("manually format tool responses for gpt-oss")
-            tool_response_text = build_gpt_oss_tool_response_text(add_messages, tool_call_names)
+            text_only_messages = []
+            for msg in add_messages:
+                content = msg.get("content", "")
+                if isinstance(content, list):
+                    content = "".join([item.get("text", "") for item in content if item.get("type") == "text"])
+                text_only_messages.append({**msg, "content": content})
+            tool_response_text = build_gpt_oss_tool_response_text(text_only_messages, tool_call_names)
             response_ids = await self.loop.run_in_executor(
                 None, lambda: self.tokenizer.encode(tool_response_text, add_special_tokens=False)
             )
