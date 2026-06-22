@@ -87,7 +87,7 @@ permissions:
   contents: read
 
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm023.dev1"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:uv.cu130"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
 
 jobs:
@@ -119,18 +119,22 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
+      # uv migration: sync the project .venv from the committed uv.lock using
+      # the baked uv cache in the uv.cu130 image (offline), then expose .venv to
+      # subsequent steps. Megatron-Bridge / Megatron-LM@b2a8ec7 / nvidia-modelopt
+      # are not in the lock, so add them on top.
       - name: Install the current repository
         run: |
-          pip3 install -r requirements-test.txt
-          pip3 install -r requirements.txt
-          pip3 install --no-deps -e .
-          pip3 uninstall -y mbridge
-          pip3 install git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@e2cfe7e --ignore-requires-python --no-deps --no-build-isolation
-          pip3 install git+https://github.com/NVIDIA/Megatron-LM.git@0823c73 --ignore-requires-python --no-deps --no-build-isolation
-          pip3 install "nvidia-modelopt>=0.37.0"
+          python3 manage_envs.py sync vllm megatron -- --frozen
+          echo "VIRTUAL_ENV=${GITHUB_WORKSPACE}/.venv" >> "$GITHUB_ENV"
+          echo "${GITHUB_WORKSPACE}/.venv/bin" >> "$GITHUB_PATH"
+          source "${GITHUB_WORKSPACE}/.venv/bin/activate"
+          uv pip install git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@0a21da4 --no-deps --no-build-isolation
+          uv pip install git+https://github.com/NVIDIA/Megatron-LM.git@b2a8ec7 --no-deps --no-build-isolation
+          uv pip install "nvidia-modelopt[torch]>=0.37.0"
       - name: Check final pip list
         run: |
-          pip3 list
+          uv pip list
       - name: Prepare GSM8K dataset
         run: |
           python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
@@ -181,14 +185,14 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
+      # uv migration: sync the project .venv from the committed uv.lock using
+      # the baked uv cache in the uv.cu130 image (offline), then expose .venv to
+      # subsequent steps.
       - name: Install the current repository
         run: |
-          pip3 install -r requirements-test.txt
-          pip3 install --no-deps -e .
-          pip3 install --no-deps TransferQueue==0.1.8
-      - name: Check final pip list
-        run: |
-          pip3 list
+          python3 manage_envs.py sync vllm megatron -- --frozen
+          echo "VIRTUAL_ENV=${GITHUB_WORKSPACE}/.venv" >> "$GITHUB_ENV"
+          echo "${GITHUB_WORKSPACE}/.venv/bin" >> "$GITHUB_PATH"
       - name: Prepare GSM8K dataset
         run: |
           ray stop --force
@@ -267,14 +271,14 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
+      # uv migration: sync the project .venv from the committed uv.lock using
+      # the baked uv cache in the uv.cu130 image (offline), then expose .venv to
+      # subsequent steps.
       - name: Install the current repository
         run: |
-          pip3 install -r requirements-test.txt
-          pip3 install --no-deps -e .
-          pip3 install --no-deps TransferQueue==0.1.8
-      - name: Check final pip list
-        run: |
-          pip3 list
+          python3 manage_envs.py sync vllm megatron -- --frozen
+          echo "VIRTUAL_ENV=${GITHUB_WORKSPACE}/.venv" >> "$GITHUB_ENV"
+          echo "${GITHUB_WORKSPACE}/.venv/bin" >> "$GITHUB_PATH"
       # Geo3k
       - name: Prepare GEO3K dataset
         run: |

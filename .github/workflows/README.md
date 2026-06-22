@@ -31,7 +31,7 @@ permissions:
   contents: read
 
 env:
-  IMAGE: "your vemlp image" # e.g. "verl-ci-cn-beijing.cr.volces.com/verlai/verl:sgl0512.dev2"
+  IMAGE: "your vemlp image" # e.g. "verl-ci-cn-beijing.cr.volces.com/verlai/verl:uv.cu130"
   DYNAMIC_RUNNER_URL: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner" # public veFaas api
 
 jobs:
@@ -54,7 +54,22 @@ jobs:
     needs: setup
     runs-on: ["${{ needs.setup.outputs.runner-label || 'default-runner' }}"]
     steps:
-      xxxx # your jobs
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # With the uv image (verl:uv.cu130), install verl by syncing the project
+      # .venv from the committed uv.lock using the baked uv cache (offline), then
+      # expose it to subsequent steps. Pick one inference engine + one training
+      # backend, e.g. `vllm megatron`, `sglang megatron`, or `cpu` for CPU-only.
+      - name: Install the current repository
+        run: |
+          python3 manage_envs.py sync vllm megatron -- --frozen
+          echo "VIRTUAL_ENV=${GITHUB_WORKSPACE}/.venv" >> "$GITHUB_ENV"
+          echo "${GITHUB_WORKSPACE}/.venv/bin" >> "$GITHUB_PATH"
+          # deps not in the lock can be layered on with: uv pip install <pkg>
+      - name: Run your tests
+        run: |
+          xxxx # your jobs
 
   cleanup:
     runs-on: ubuntu-latest

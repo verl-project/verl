@@ -140,6 +140,7 @@ RUN --mount=type=cache,target=/var/cache/apt,id=verl-uv-apt \
         build-essential \
         ccache \
         cmake \
+        ninja-build \
         perl \
         patchelf \
         git \

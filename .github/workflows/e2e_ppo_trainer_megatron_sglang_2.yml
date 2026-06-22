@@ -86,7 +86,7 @@ permissions:
   contents: read
 
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:sgl0512.dev2"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:uv.cu130"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
 
 jobs:
@@ -118,14 +118,14 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
+      # uv migration: sync the project .venv from the committed uv.lock using
+      # the baked uv cache in the uv.cu130 image (offline), then expose .venv to
+      # subsequent steps.
       - name: Install the current repository
         run: |
-          pip3 install -r requirements-test.txt
-          pip3 install --no-deps -e .
-          pip3 install --no-deps TransferQueue==0.1.8
-      - name: Check final pip list
-        run: |
-          pip3 list
+          python3 manage_envs.py sync sglang megatron -- --frozen
+          echo "VIRTUAL_ENV=${GITHUB_WORKSPACE}/.venv" >> "$GITHUB_ENV"
+          echo "${GITHUB_WORKSPACE}/.venv/bin" >> "$GITHUB_PATH"
       - name: Prepare gsm8k dataset
         run: |
           ray stop --force
@@ -148,14 +148,17 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
+      # uv migration: sync the project .venv from the committed uv.lock using
+      # the baked uv cache in the uv.cu130 image (offline), then expose .venv to
+      # subsequent steps.
       - name: Install the current repository
         run: |
-          pip3 install -r requirements-test.txt
-          pip3 install -r requirements.txt
-          pip3 install --no-deps -e .
+          python3 manage_envs.py sync sglang megatron -- --frozen
+          echo "VIRTUAL_ENV=${GITHUB_WORKSPACE}/.venv" >> "$GITHUB_ENV"
+          echo "${GITHUB_WORKSPACE}/.venv/bin" >> "$GITHUB_PATH"
       - name: Check final pip list
         run: |
-          pip3 list
+          uv pip list
       # Geo3k
       - name: Prepare GEO3K dataset
         run: |

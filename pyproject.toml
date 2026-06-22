@@ -101,12 +101,11 @@ sglang = [
     "torchvision==0.26.0",
     "torchaudio==2.11.0",
     "sglang==0.5.12",
-    # sglang pulls flash-attn-4 transitively, but that project publishes ONLY
-    # pre-releases (4.0.0bN). Declaring it here as a DIRECT dep with a pre-release
-    # specifier flips uv's default policy to accept betas for flash-attn-4 ALONE
-    # (uv's "explicit" rule), so we avoid a project-wide --prerelease=allow that
-    # would also drag dev/rc builds of cutlass, onnxscript, etc. into the lock.
-    "flash-attn-4>=4.0.0b9",
+    # sglang hard-depends on flash-attn-4, but we deliberately EXCLUDE it (the
+    # project ships only buggy betas; see [tool.uv].override-dependencies below).
+    # It is imported lazily — only the "fa4" attention backend pulls it in
+    # (attention_registry.py) — so the default backends work without it. To
+    # re-enable fa4, see the exclusion note in override-dependencies.
     "mbridge",
     "transformers==5.3.0",
 ]
