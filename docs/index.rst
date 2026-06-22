@@ -115,6 +115,7 @@ verl is fast with:
 
    advance/fsdp_extension
    advance/megatron_extension
+   advance/megatron_lite_backend
 
 .. toctree::
    :maxdepth: 1

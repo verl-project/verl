@@ -45,6 +45,7 @@ from verl.utils.megatron.router_replay_utils import (
 )
 from verl.utils.megatron.tensor_parallel import (
     vocab_parallel_entropy,
+    vocab_parallel_entropy_with_chunking,
     vocab_parallel_log_probs_from_logits,
     vocab_parallel_sum_pi_squared,
 )
@@ -790,7 +791,8 @@ class EngineTrainModeCtx(BaseEngineCtx):
 
     def __exit__(self, exc_type, exc_value, traceback):
         assert isinstance(self.engine, MegatronEngine)
-        self.engine.optimizer_zero_grad()
+        if self.zero_grad_on_exit or exc_type is not None:
+            self.engine.optimizer_zero_grad()
         super().__exit__(exc_type, exc_value, traceback)
 
 
@@ -931,7 +933,14 @@ class MegatronEngineWithLMHead(MegatronEngine):
                     #         "`actor_rollout_ref.model.use_fused_kernels=True`. "
                     #         "The current `clone()` operation ensures correctness but increases memory usage."
                     #     )
-                    entropy = vocab_parallel_entropy(logits)
+                    if self.engine_config.entropy_from_logits_with_chunking:
+                        entropy = vocab_parallel_entropy_with_chunking(
+                            logits,
+                            chunk_size=self.engine_config.entropy_from_logits_chunk_size,
+                        )
+                    else:
+                        entropy = vocab_parallel_entropy(logits)
+
                     ret["entropy"] = entropy
                 else:
                     logits_bak = logits

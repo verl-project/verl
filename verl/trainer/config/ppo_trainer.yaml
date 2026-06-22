@@ -224,6 +224,29 @@ trainer:
       # Frequency of parameter synchronization between trainer and rollout,
       parameter_sync_step: 4
 
+    # Replay buffer sampling strategy
+    sampler:
+
+      # Maximum number of model versions that trajectory can span
+      max_off_policy_threshold: 8
+
+      # How to handle trajectory that exceeds the maximum number of model versions
+      # drop: drop the trajectory
+      # wait: dropless, wait all trajectories that reach threshold to finish
+      max_off_policy_strategy: drop
+
+      # Custom sampler config
+      custom_sampler:
+
+        # Path to the custom sampler class
+        path: null
+
+        # Name of the custom sampler class
+        name: null
+
+      # Additional kwargs for the custom sampler
+      sampler_kwargs: {}
+
 # profiler configs
 global_profiler:
 

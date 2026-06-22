@@ -87,7 +87,7 @@ permissions:
   contents: read
 
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm020.dev1"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm023.dev1"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
 
 jobs:
@@ -184,6 +184,8 @@ jobs:
         run: |
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
+      - name: Check final pip list
+          pip3 list
       - name: Prepare GSM8K dataset
         run: |
           ray stop --force
@@ -266,6 +268,8 @@ jobs:
         run: |
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
+      - name: Check final pip list
+          pip3 list
       # Geo3k
       - name: Prepare GEO3K dataset
         run: |

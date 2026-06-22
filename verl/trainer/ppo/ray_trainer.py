@@ -961,7 +961,7 @@ class RayPPOTrainer:
             from verl.checkpoint_engine import CheckpointEngineManager
         self.checkpoint_manager = CheckpointEngineManager(
             config=checkpoint_engine_config,
-            trainer=self.actor_rollout_wg,
+            actor_wg=self.actor_rollout_wg,
             replicas=self.llm_server_manager.get_replicas(),
         )
 

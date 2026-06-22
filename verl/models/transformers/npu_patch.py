@@ -136,6 +136,15 @@ class NPUGmmFunction(torch.autograd.Function):
         return dx, dw, None, None
 
 
+def _qwen3_sparse_moe_uses_legacy_block_api(self) -> bool:
+    """Return True for transformers 4.57.x-style Qwen3 MoE blocks."""
+    return (
+        isinstance(getattr(self, "gate", None), nn.Linear)
+        and hasattr(self, "top_k")
+        and hasattr(self, "norm_topk_prob")
+    )
+
+
 def _qwen3_sparse_moe_routed_forward_npu(self, hidden_states: torch.Tensor):
     """
     Shared NPU routed-expert path for Qwen3Moe/Qwen3Next sparse MoE blocks.
@@ -145,28 +154,44 @@ def _qwen3_sparse_moe_routed_forward_npu(self, hidden_states: torch.Tensor):
     """
     hidden_dim = hidden_states.shape[-1]
     hidden_states = hidden_states.view(-1, hidden_dim)
-    # router_logits: (batch * sequence_length, n_experts)
-    router_logits = self.gate(hidden_states)
+    gate_output = self.gate(hidden_states)
+    if isinstance(gate_output, tuple) and len(gate_output) == 3:
+        router_logits, routing_weights, selected_experts = gate_output
+    else:
+        router_logits = gate_output
+        top_k = getattr(self.gate, "top_k", getattr(self, "top_k", getattr(self, "num_experts_per_tok", 2)))
+        routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
+        routing_weights, selected_experts = torch.topk(routing_weights, top_k, dim=-1)
 
-    routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
-    routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
-    if self.norm_topk_prob:  # only diff with mixtral sparse moe block!
-        routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
+        norm_topk_prob = getattr(self.gate, "norm_topk_prob", getattr(self, "norm_topk_prob", True))
+        if norm_topk_prob:  # only diff with mixtral sparse moe block!
+            routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
     # we cast back to the input dtype
     routing_weights = routing_weights.to(hidden_states.dtype)
 
     # Loop over all available experts in the model and perform the computation on each expert
     # Concat all weights
     input_dtype = hidden_states.dtype
-    up_weight_list = [e.up_proj.weight for e in self.experts]
-    gate_weight_list = [e.gate_proj.weight for e in self.experts]
-    down_weight_list = [e.down_proj.weight for e in self.experts]
-    w1 = torch.stack(up_weight_list).transpose(1, 2).to(input_dtype)
-    w2 = torch.stack(gate_weight_list).transpose(1, 2).to(input_dtype)
-    w3 = torch.stack(down_weight_list).transpose(1, 2).to(input_dtype)
+    if hasattr(self.experts, "gate_up_proj") and hasattr(self.experts, "down_proj"):
+        gate_proj_weight, up_proj_weight = self.experts.gate_up_proj.chunk(2, dim=1)
+        w1 = up_proj_weight.transpose(1, 2).to(input_dtype)
+        w2 = gate_proj_weight.transpose(1, 2).to(input_dtype)
+        w3 = self.experts.down_proj.transpose(1, 2).to(input_dtype)
+    else:
+        up_weight_list = [e.up_proj.weight for e in self.experts]
+        gate_weight_list = [e.gate_proj.weight for e in self.experts]
+        down_weight_list = [e.down_proj.weight for e in self.experts]
+        w1 = torch.stack(up_weight_list).transpose(1, 2).to(input_dtype)
+        w2 = torch.stack(gate_weight_list).transpose(1, 2).to(input_dtype)
+        w3 = torch.stack(down_weight_list).transpose(1, 2).to(input_dtype)
 
     permuted_tokens, row_ids_map = torch_npu.npu_moe_token_permute(hidden_states, selected_experts.to(torch.int32))
-    tokens_per_expert = torch.histc(selected_experts, bins=self.num_experts, min=0, max=self.num_experts)
+    num_experts = getattr(
+        self, "num_experts", getattr(self.experts, "num_experts", getattr(self.gate, "out_features", None))
+    )
+    if num_experts is None:
+        num_experts = self.gate.weight.shape[0]
+    tokens_per_expert = torch.histc(selected_experts, bins=num_experts, min=0, max=num_experts)
 
     up_res = NPUGmmFunction.apply(permuted_tokens, w1, tokens_per_expert)
     gate_res = NPUGmmFunction.apply(permuted_tokens, w2, tokens_per_expert)
@@ -178,15 +203,21 @@ def _qwen3_sparse_moe_routed_forward_npu(self, hidden_states: torch.Tensor):
     return hidden_states, routed_hidden_states, router_logits
 
 
-def qwen3_moe_sparse_moe_block_forward_npu(self, hidden_states: torch.Tensor) -> torch.Tensor:
+def qwen3_moe_sparse_moe_block_forward_npu(
+    self, hidden_states: torch.Tensor
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """NPU optimized implementation for `forward` in Qwen3MoeSparseMoeBlock."""
     output_shape = hidden_states.shape
     _, routed_hidden_states, router_logits = _qwen3_sparse_moe_routed_forward_npu(self, hidden_states)
     final_hidden_states = routed_hidden_states.reshape(output_shape)
-    return final_hidden_states, router_logits
+    if _qwen3_sparse_moe_uses_legacy_block_api(self):
+        return final_hidden_states, router_logits
+    return final_hidden_states
 
 
-def qwen3_next_sparse_moe_block_forward_npu(self, hidden_states: torch.Tensor) -> torch.Tensor:
+def qwen3_next_sparse_moe_block_forward_npu(
+    self, hidden_states: torch.Tensor
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """NPU optimized implementation for `forward` in Qwen3NextSparseMoeBlock."""
     output_shape = hidden_states.shape
     hidden_states, routed_hidden_states, router_logits = _qwen3_sparse_moe_routed_forward_npu(self, hidden_states)
@@ -195,7 +226,9 @@ def qwen3_next_sparse_moe_block_forward_npu(self, hidden_states: torch.Tensor) -
     shared_expert_output = torch.sigmoid(self.shared_expert_gate(hidden_states)) * shared_expert_output
 
     final_hidden_states = (routed_hidden_states + shared_expert_output).reshape(output_shape)
-    return final_hidden_states, router_logits
+    if _qwen3_sparse_moe_uses_legacy_block_api(self):
+        return final_hidden_states, router_logits
+    return final_hidden_states
 
 
 class NPUQwen3VLMoeTextExperts(nn.Module):
