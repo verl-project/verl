@@ -103,6 +103,7 @@ jobs:
       - name: Install the current repository
         run: |
           uv pip install --no-deps -e .
+          uv pip install --no-deps TransferQueue==0.1.8
       - name: Check final pip list
         run: |
           uv pip list
@@ -171,6 +172,7 @@ jobs:
       - name: Install the current repository
         run: |
           uv pip install --no-deps --no-build-isolation -e .
+          uv pip install --no-deps TransferQueue==0.1.8
       - name: Check final pip list
         run: |
           uv pip list
@@ -229,6 +231,7 @@ jobs:
       - name: Install the current repository
         run: |
           pip install --no-deps -e .
+          pip install --no-deps TransferQueue==0.1.8
       - name: Check final pip list
         run: |
           pip list
