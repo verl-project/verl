@@ -337,7 +337,6 @@ class TrainingWorker(Worker, DistProfilerExtension):
             max_token_len_per_gpu=self.engine_config.max_token_len_per_gpu,
             micro_batch_size_per_gpu=self.engine_config.micro_batch_size_per_gpu,
             use_fused_kernels=self.engine_config.use_fused_kernels,
-            temperature=1.0,
         )
 
         for key, val in default_keys.items():
@@ -392,7 +391,6 @@ class TrainingWorker(Worker, DistProfilerExtension):
             max_token_len_per_gpu=self.engine_config.infer_max_token_len_per_gpu,
             micro_batch_size_per_gpu=self.engine_config.infer_micro_batch_size_per_gpu,
             use_fused_kernels=self.engine_config.use_fused_kernels,
-            temperature=1.0,
         )
 
         for key, val in default_keys.items():

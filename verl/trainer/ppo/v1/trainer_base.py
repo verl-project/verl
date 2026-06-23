@@ -1307,6 +1307,7 @@ class PPOTrainer(ABC):
     def _compute_values(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
         """Compute the values of the batch."""
         # 1. compute value
+        batch.extra_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
         output = self.critic_wg.infer_batch(batch)
         # TODO: DataProtoFuture support KVBatchMeta
         ray.get(output.futures)
@@ -1391,6 +1392,7 @@ class PPOTrainer(ABC):
             "epochs": self.config.critic.ppo_epochs,
             "seed": self.config.critic.data_loader_seed,
             "dataloader_kwargs": {"shuffle": self.config.critic.shuffle},
+            "temperature": self.config.actor_rollout_ref.rollout.temperature,
         }
         batch.extra_info.update(extra_info)
 
