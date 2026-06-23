@@ -1,0 +1,28 @@
+# Selcube-specific dependencies for Rubik's Cube training environment
+# Core scientific computing (beyond base requirements)
+scipy>=1.10.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
+pandas>=2.0.0
+
+# ML and training dependencies
+torch>=2.0.0
+transformers>=4.30.0
+wandb>=0.15.0
+
+# 3D visualization and cube rendering
+plotly>=5.14.0
+imageio>=2.31.0
+
+# Environment configuration
+pyyaml>=6.0
+tqdm>=4.65.0
+pydantic>=2.0.2
+
+# Web interface for demonstrations
+flask>=2.3.2
+pillow>=9.5.0
+
+# HTML visualization generation
+jinja2>=3.1.2
+beautifulsoup4>=4.12.2
