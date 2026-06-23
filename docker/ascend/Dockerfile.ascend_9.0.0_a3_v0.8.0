@@ -64,7 +64,7 @@ RUN MBRIDGE_PATH=$(pip show mbridge | grep Location | awk '{print $2}') && \
     sed -i '34s/cuda/npu/;51s/cuda/npu/' "$TARGET_FILE"
 
 # Prepare and install verl (verl is release/v0.8.0)
-RUN git clone -b release/v0.7.1 https://github.com/verl-project/verl.git && cd verl && \
+RUN git clone -b release/v0.8.0 https://github.com/verl-project/verl.git && cd verl && \
     git submodule update --init --recursive --remote && \
     pip install -r requirements-npu.txt && pip install -v -e . && cd .. && \
     # Clear extra files
