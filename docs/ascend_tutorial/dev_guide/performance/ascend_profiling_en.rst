@@ -61,7 +61,7 @@ Use parameters in each role's ``profiler.tool_config.npu`` to control npu profil
    -  module: Whether to record framework-layer Python call stack information. It is recommended to use 'module' instead of 'stack' for recording call stack information, as it costs less performance overhead.
    -  stack: Whether to record operator call stack information.
 
--  analysis: Enables automatic data parsing.
+-  analysis: Whether to enable automatic data parsing.
 -  discrete: Whether to enable discrete mode.
 -  profile_token_start: Effective only for the rollout role; defines the start response-token index for rollout decoding collection. It is applied only when valid (0-based, ``profile_token_end > profile_token_start``, and the window is within response length).
 -  profile_token_end: Effective only for the rollout role; defines the stop response-token index (exclusive) for rollout decoding collection. It is applied only when valid (0-based, ``profile_token_end > profile_token_start``, and the window is within response length).
@@ -73,61 +73,50 @@ Examples
 Disabling collection
 ~~~~~~~~~~~~~~~~~~~~
 
-.. code:: yaml
+.. code:: bash
 
-      global_profiler:
-         steps: null # disable profile
+            global_profiler.steps=null
 
 End-to-End collection
 ~~~~~~~~~~~~~~~~~~~~~
 
-.. code:: yaml
+.. code:: bash
 
-      global_profiler:
-         steps: [1, 2, 5]
-         save_path: ./outputs/profile
-      actor_rollout_ref:
-         actor:  # Set actor role profiler collection configuration parameters
-            profiler:
-               enable: True
-               all_ranks: True
-               tool_config:
-                  npu:
-                     discrete: False
-                     contents: [npu, cpu]  # Control collection list, default cpu, npu, can configure memory, shapes, module, etc.
+        global_profiler.tool=npu
+        global_profiler.steps="[1, 2, 5]" # Number of steps to be collected.
+        global_profiler.save_path=./outputs/profile
+        actor_rollout_ref.actor.profiler.enable=True
+        actor_rollout_ref.actor.profiler.all_ranks=False
+        actor_rollout_ref.actor.profiler.ranks="[0]" # Only collect rank 0 data.
+        actor_rollout_ref.actor.profiler.tool_config.npu.discrete=True # The discrete mode is recommended, in which data of each phase is stored separately.
+        actor_rollout_ref.actor.profiler.tool_config.npu.contents="['npu','cpu']" # Control collection list, default cpu, npu, can configure memory, shapes, module, etc.
+        actor_rollout_ref.actor.profiler.tool_config.npu.level=level1
+        actor_rollout_ref.actor.profiler.tool_config.npu.analysis=False # Disabling automatic data parsing
         # rollout & ref follow actor settings
 
-
-Discrete Mode Collection
+Separation of Training and Inference Collection
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. code:: yaml
+.. code:: bash
 
-      global_profiler:
-         steps: [1, 2, 5]
-         save_path: ./outputs/profile
-      actor_rollout_ref:
-         actor:
-            profiler:
-               enable: True  # Set to True to profile training
-               all_ranks: False
-               ranks: [0]  # Global Rank 0
-               tool_config:
-                  npu:
-                     discrete: True
-                     contents: [npu, cpu]
-         rollout:
-            profiler:
-               enable: True  # Set to True to profile inference
-               all_ranks: False
-               ranks: [0]  # In Agent Loop mode, this is the Replica Rank (e.g., 0-th instance)
-               tool_config:
-                  npu:
-                     discrete: True  # Must be enabled in Agent Loop mode
-                     # Optional response-token window for engine-side collection; if not set, the entire rollout stage is collected
-                     profile_token_start: 12
-                     profile_token_end: 46
-         # ref follow actor settings
+      global_profiler.tool=npu
+      global_profiler.steps="[1, 2, 5]" # Number of steps to be collected.
+      global_profiler.save_path=./outputs/profile
+      actor_rollout_ref.actor.profiler.enable=True
+      actor_rollout_ref.actor.profiler.all_ranks=False
+      actor_rollout_ref.actor.profiler.ranks="[0]" # Only collect rank 0 data.
+      actor_rollout_ref.actor.profiler.tool_config.npu.discrete=True # The discrete mode is recommended, in which data of each phase is stored separately.
+      actor_rollout_ref.actor.profiler.tool_config.npu.contents="['npu','cpu']" # Control collection list, default cpu, npu, can configure memory, shapes, module, etc.
+      actor_rollout_ref.actor.profiler.tool_config.npu.level=level1
+      actor_rollout_ref.actor.profiler.tool_config.npu.analysis=False # Disabling automatic data parsing
+
+      actor_rollout_ref.rollout.profiler.enable=True
+      actor_rollout_ref.rollout.profiler.all_ranks=False
+      actor_rollout_ref.rollout.profiler.ranks="[0]" # Only collect rank 0 data.
+      # (Optional) Collect data by response token. If start and stop are not set, the entire rollout phase is collected.
+      actor_rollout_ref.rollout.profiler.tool_config.npu.profile_token_start=12
+      actor_rollout_ref.rollout.profiler.tool_config.npu.profile_token_end=46
+      # ref follow actor settings
 
 **Agent Loop Mode Description**:
 
