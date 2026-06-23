@@ -79,8 +79,8 @@ A3              8.2.RC1                vLLM            `Dockerfile.ascend_8.2.rc
 ============== ==================== ============== ============== ==============================================================
 设备类型         CANN基础镜像版本     推理后端        verl版本       参考文件                                
 ============== ==================== ============== ============== ==============================================================
-A2              9.0.0                vLLM          release/v0.7.1 `Dockerfile.ascend_9.0.0_a2_v0.8.0 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_9.0.0_a2_v0.8.0>`_     
-A3              9.0.0                vLLM          release/v0.7.1 `Dockerfile.ascend_9.0.0_a3_v0.8.0 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_9.0.0_a3_v0.8.0>`_ 
+A2              9.0.0                vLLM          release/v0.8.0 `Dockerfile.ascend_9.0.0_a2_v0.8.0 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_9.0.0_a2_v0.8.0>`_     
+A3              9.0.0                vLLM          release/v0.8.0 `Dockerfile.ascend_9.0.0_a3_v0.8.0 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_9.0.0_a3_v0.8.0>`_ 
 A2              8.5.0                vLLM          release/v0.7.1 `Dockerfile.ascend_8.5.0_a2_v0.7.1 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.0_a2_v0.7.1>`_     
 A3              8.5.0                vLLM          release/v0.7.1 `Dockerfile.ascend_8.5.0_a3_v0.7.1 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.0_a3_v0.7.1>`_ 
 ============== ==================== ============== ============== ==============================================================
