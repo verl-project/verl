@@ -55,7 +55,6 @@ class PPOTrainerSeparateAsync(PPOTrainer):
         assert config.actor_rollout_ref.rollout.checkpoint_engine.backend != "naive", (
             "please use nccl/nixl/mooncake, etc. backend for separate async training"
         )
-
         if need_reward_model(config):
             assert config.reward.reward_model.enable_resource_pool, (
                 "Colocate reward model (reward.reward_model.enable_resource_pool=False) is not supported "
