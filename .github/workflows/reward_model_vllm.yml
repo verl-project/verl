@@ -48,6 +48,7 @@ on:
       # Entrypoints
       - ".github/workflows/reward_model_vllm.yml"
       - "tests/experimental/reward_loop/**"
+      - "tests/special_e2e/run_v1_colocate_async_disrm.sh"
 
 # Cancel jobs on the same ref if a new one is triggered
 concurrency:
@@ -119,6 +120,10 @@ jobs:
       - name: Running vllm agent loop with reward model colocate tests on 8 L20 GPUs
         run: |
           ROLLOUT_NAME=vllm pytest -s -x tests/experimental/reward_loop/test_agent_reward_loop_colocate.py
+      - name: Running V1 colocate_async trainer with colocated disRM e2e on 8 L20 GPUs
+        run: |
+          ray stop --force
+          NUM_GPUS=8 ROLLOUT_NAME=vllm bash tests/special_e2e/run_v1_colocate_async_disrm.sh
 
   cleanup:
     runs-on: ubuntu-latest
