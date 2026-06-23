@@ -75,12 +75,15 @@ logits_compute_in_fp32: False
 # numerical precision at the cost of extra compute/memory for the head. ZoRRO path only.
 logits_compute_from_fp32_inputs: False
 
-# Zero-copy CUDA IPC weight sync between train and rollout engines (bypasses NCCL). Only with colocate=True.
-cuda_ipc_weight_sync: False
+# Weight-sync options between the train and rollout engines.
+weight_sync:
 
-# Stream one param at a time during CUDA-IPC sync to bound peak extra GPU mem to one full param/GPU instead of the
-# whole model. Only with cuda_ipc_weight_sync=True and colocate=True.
-low_memory_weight_sync: False
+  # Zero-copy CUDA IPC weight sync (bypasses NCCL). Only with colocate=True.
+  cuda_ipc: False
+
+  # Stream one param at a time during CUDA-IPC sync to bound peak extra GPU mem to one full
+  # param/GPU instead of the whole model. Only with cuda_ipc=True and colocate=True.
+  low_memory: False
 
 # DeepSpeed engine config: passed through (OmegaConf.to_container) into the DS engine,
 # merged with train_micro_batch_size_per_gpu / train_batch_size / grad_accum / sequence_parallel_size.

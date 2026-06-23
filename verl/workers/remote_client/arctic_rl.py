@@ -125,8 +125,8 @@ class ArcticRLClientWrapper(RemoteBackend):
         # No server consumer yet; forwarded for forward-compat with group-balanced routing.
         self.zorro_train_load_balancer = self._backend_config.zorro_train.get("load_balancer", True)
         # CUDA-IPC bypasses NCCL for weight sync; only valid when colocate=True.
-        self.cuda_ipc_weight_sync = self._backend_config.get("cuda_ipc_weight_sync", False)
-        self.low_memory_weight_sync = self._backend_config.get("low_memory_weight_sync", False)
+        self.cuda_ipc_weight_sync = self._backend_config.weight_sync.cuda_ipc
+        self.low_memory_weight_sync = self._backend_config.weight_sync.low_memory
         self.use_liger = self.config.actor_rollout_ref.model.use_liger
         self._max_token_len_per_gpu = self.config.actor_rollout_ref.actor.ppo_max_token_len_per_gpu
         self.tokenizer = AutoTokenizer.from_pretrained(self.config.actor_rollout_ref.model.path)
