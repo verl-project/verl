@@ -21,7 +21,11 @@ from typing import Any, AsyncGenerator, Generator
 import ray
 import torch
 from mooncake.engine import TransferEngine
-from vllm.distributed.utils import StatelessProcessGroup
+
+try:
+    from vllm.distributed.utils import StatelessProcessGroup
+except ImportError:
+    from sglang.srt.distributed.utils import StatelessProcessGroup
 
 from verl.checkpoint_engine.base import CheckpointEngine, CheckpointEngineRegistry, TensorMeta
 from verl.utils.device import get_torch_device
@@ -234,54 +238,66 @@ class MooncakeCheckpointEngine(CheckpointEngine):
         self,
         global_steps: int | None = None,
     ) -> AsyncGenerator[tuple[str, torch.Tensor], None]:
-        """Receive weights using Mooncake TransferEngine"""
+        """Receive weights from the previous rank via RDMA.
+
+        Protocol:
+        1. Recv metadata from prev rank via TCPStore
+        2. RDMA-read data from prev rank's buffer
+        3. Forward metadata to next rank (if not last)
+        4. Yield weights to consumer
+        5. Write magic completion signal to prev rank's magic_ptr
+           (a dedicated magic_recv slot, NOT the data buffer, to avoid
+           transfer_sync_write local GPU side-effect corruption)
+        """
+        _magic = torch.tensor([0xAB, 0xDC, 0xEF, 0x88], dtype=torch.uint8, device=self.device)
+
         start_time = time.time()
         total_bytes = 0
         bufs = [self.buf[: self.bucket_size], self.buf[self.bucket_size :]]
+        magic_slots = [self.magic_recv[:4], self.magic_recv[4:]]
         idx = 0
         current = bufs[idx]
-        self.magic_buf[:4] = torch.tensor([0xAB, 0xDC, 0xEF, 0x88], dtype=torch.uint8, device=self.device)
+        self.magic_buf[:4] = _magic.clone()
 
         while True:
-            # 1 receive info from previous rank
             info = self.store.recv_obj(self.rank - 1)
             if idx >= 2 and self.rank < self.world_size - 1:
-                await self.wait_for_complete(self.magic_recv[(idx - 2) % 2 * 4 : (idx - 2) % 2 * 4 + 4])
+                await self.wait_for_complete(magic_slots[idx % 2])
 
-            ptr = info["ptr"]
-            magic_ptr = info["magic_ptr"]
+            prev_ptr = info["ptr"]
+            prev_magic_ptr = info.get("magic_ptr")
+
             ret = self.engine.transfer_sync_read(
-                self.buffer_info["session_id"],
-                current.data_ptr(),
-                ptr,
-                info["len"],
+                self.buffer_info["session_id"], current.data_ptr(), prev_ptr, info["len"],
             )
-            assert ret == 0, f"transfer_sync_read failed {ret}"
+            assert ret == 0
+
             total_bytes += info["len"]
 
-            # 2 send info to next rank
             info["ptr"] = current.data_ptr()
-            info["magic_ptr"] = self.magic_recv[idx % 2 * 4 : idx % 2 * 4 + 4].data_ptr()
+            info["magic_ptr"] = magic_slots[idx % 2].data_ptr()
             if self.rank < self.world_size - 1:
                 self.store.send_obj(info, self.rank + 1)
 
-            # 3 yield tensor from current buffer
             for name, meta in info["bucket_meta"].items():
                 dtype, shape = meta["dtype"], meta["shape"]
                 size = dtype.itemsize * shape.numel()
                 tensor = current[meta["offset"] : meta["offset"] + size].view(dtype=dtype).view(shape)
                 yield name, tensor
 
-            # 4 write magic to dedicated magic_ptr instead of data buffer ptr
-            ret = self.engine.transfer_sync_write(
-                self.buffer_info["session_id"],
-                self.magic_buf.data_ptr(),
-                magic_ptr,
-                4,
-            )
-            assert ret == 0, f"transfer_sync_write failed {ret}"
+            get_torch_device().synchronize()
 
-            # 5 swap buffer
+            if prev_magic_ptr is not None:
+                ret = self.engine.transfer_sync_write(
+                    self.buffer_info["session_id"], self.magic_buf.data_ptr(), prev_magic_ptr, 4,
+                )
+                assert ret == 0
+            else:
+                ret = self.engine.transfer_sync_write(
+                    self.buffer_info["session_id"], self.magic_buf.data_ptr(), prev_ptr, 4,
+                )
+                assert ret == 0
+
             idx += 1
             current = bufs[idx % 2]
             get_torch_device().synchronize()
