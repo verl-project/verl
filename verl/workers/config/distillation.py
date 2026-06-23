@@ -81,6 +81,11 @@ class DistillationLossConfig(BaseConfig):
     # overhead (saved-tensor total stays constant either way).
     chunked_topk_chunk_size: int = 4096
 
+    # KL direction for ``loss_mode='forward_kl_topk'``: "forward" =
+    # KL(teacher||student) (the default); "reverse" = KL(student||teacher),
+    # used by short-context self-distillation (OPSDL). FSDP backend only.
+    kl_direction: str = "forward"
+
     use_policy_gradient: bool = True
     policy_loss_mode: str = "vanilla"
     clip_ratio: float = 0.2
@@ -102,6 +107,9 @@ class DistillationLossConfig(BaseConfig):
         from verl.trainer.distillation.losses import DistillationLossSettings, get_distillation_loss_settings
 
         self.loss_settings: DistillationLossSettings = get_distillation_loss_settings(self.loss_mode)
+
+        if self.kl_direction not in ("forward", "reverse"):
+            raise ValueError(f"kl_direction must be 'forward' or 'reverse', got {self.kl_direction!r}.")
 
         if self.policy_loss_mode != "vanilla":
             raise NotImplementedError(

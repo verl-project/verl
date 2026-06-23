@@ -127,7 +127,11 @@ def compute_forward_kl_topk(
     if loss_config.log_prob_min_clamp is not None:
         student_topk_log_probs = student_topk_log_probs.clamp_min(loss_config.log_prob_min_clamp)
         teacher_topk_log_probs = teacher_topk_log_probs.clamp_min(loss_config.log_prob_min_clamp)
-    distillation_losses = kl_divergence(log_q=student_topk_log_probs, log_p=teacher_topk_log_probs)
+    if getattr(loss_config, "kl_direction", "forward") == "reverse":
+        # KL(student||teacher): mode-seeking, used by short-context OPSDL.
+        distillation_losses = kl_divergence(log_q=teacher_topk_log_probs, log_p=student_topk_log_probs)
+    else:
+        distillation_losses = kl_divergence(log_q=student_topk_log_probs, log_p=teacher_topk_log_probs)
 
     # Diagnostics for tracking teacher/student top-k overlap in OPD, following
     # "Rethinking On-Policy Distillation of Large Language Models" (arXiv:2604.13016).

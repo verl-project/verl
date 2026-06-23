@@ -141,6 +141,8 @@ def compute_topk_loss(
 
             distillation_loss_fn = fsdp_losses.compute_forward_kl_topk
         case "megatron":
+            if distillation_config.distillation_loss.kl_direction == "reverse":
+                raise NotImplementedError("reverse kl_direction is not yet implemented for the megatron backend")
             import verl.trainer.distillation.megatron.losses as megatron_losses
 
             distillation_loss_fn = megatron_losses.compute_forward_kl_topk
