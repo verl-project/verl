@@ -184,6 +184,7 @@ jobs:
         run: |
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
+          pip3 install --no-deps TransferQueue==0.1.8
       - name: Check final pip list
           pip3 list
       - name: Prepare GSM8K dataset
@@ -268,6 +269,7 @@ jobs:
         run: |
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
+          pip3 install --no-deps TransferQueue==0.1.8
       - name: Check final pip list
           pip3 list
       # Geo3k
