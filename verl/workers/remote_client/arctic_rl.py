@@ -435,6 +435,17 @@ class ArcticRLClientWrapper(RemoteBackend):
         if rollout_cfg.get("quantization"):
             vllm_config["quantization"] = rollout_cfg.quantization
 
+        # Arctic inference signals (FCA / speculative decoding) are NOT vLLM
+        # engine args: the server (arctic_platform.rl) expands this block via
+        # `parse_arctic_inference_rollout` and treats None/empty as "Arctic
+        # inference off". Pass the whole `remote_backend.rollout` sub-config
+        # through; the server keys on `zorro_inference.enable` /
+        # `speculative_decoding.model`.
+        rollout_inference_cfg = self._backend_config.get("rollout", None)
+        arctic_inference_config = (
+            OmegaConf.to_container(rollout_inference_cfg, resolve=True) if rollout_inference_cfg is not None else None
+        )
+
         # Forward grad_clip to the DeepSpeed engine so it clips global grad-norm
         # to the same threshold verl applies in the FSDP path (otherwise DS
         # defaults to no clipping -> trajectory divergence vs verl baseline).
@@ -478,6 +489,7 @@ class ArcticRLClientWrapper(RemoteBackend):
             },
             ds_worker_config=self._create_ds_worker_config(),
             vllm_config=vllm_config,
+            arctic_inference_config=arctic_inference_config or None,
             checkpoint_path=self.config.trainer.default_local_dir,
         )
 

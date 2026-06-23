@@ -35,6 +35,24 @@ zorro_train:
   # should equal actor_rollout_ref.rollout.n for best perf
   max_rollouts: ${actor_rollout_ref.rollout.n}
 
+# Rollout-side Arctic Inference optimizations. Passed straight through to the
+# server as `arctic_inference_config` (parse_arctic_inference_rollout); the server
+# treats an all-disabled block as "off". Requires a matching vllm + ArcticInference
+# plugin build (https://github.com/snowflakedb/ArcticInference).
+rollout:
+
+  # Forest Cascade Attention (FCA) for efficient rollout
+  zorro_inference:
+
+    # whether to enable FCA on the sampling engine
+    enable: False
+
+  # Arctic speculative decoding draft model (empty disables speculative decoding)
+  speculative_decoding:
+
+    # path or name of the draft model
+    model: ""
+
 # ray or http: ray would be much faster for payload comms in the on-prem use case
 comm_protocol: ray
 
