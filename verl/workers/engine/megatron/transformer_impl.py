@@ -656,6 +656,16 @@ class MegatronEngine(BaseEngine):
         tu.assign_non_tensor(data, batch_num_tokens=batch_num_tokens.item())
         tu.assign_non_tensor(data, dp_size=self.get_data_parallel_size())
 
+        # Global routed-token count for the per-token-loss regime (consumed in
+        # postprocess_micro_batch_func). attention_mask is CP-replicated, so a single
+        # all-reduce over the DP group gives the global value.
+        if self.tf_config is not None and self.tf_config.calculate_per_token_loss:
+            routed_num_tokens = data["attention_mask"].sum().to(get_device_id())
+            torch.distributed.all_reduce(
+                routed_num_tokens, op=torch.distributed.ReduceOp.SUM, group=self.get_data_parallel_group()
+            )
+            tu.assign_non_tensor(data, routed_num_tokens=routed_num_tokens.item())
+
         # BSHD path only: pad every micro-batch to the mini-batch's global max seq_len so the
         # padded `s_q` is shared -> cuDNN plan built once per shape. Raw (unaligned)
         # max; TP/CP/FP8 alignment is applied inside preprocess_bshd_engine.
@@ -1125,6 +1135,50 @@ class MegatronEngineWithLMHead(MegatronEngine):
             "loss": loss.detach().item(),
             "metrics": metrics,
         }
+
+        # calculate_per_token_loss=True (auto-enabled by Megatron-Bridge at CP>1) puts
+        # Megatron in its per-token regime: loss_func must return (loss_sum, num_tokens,
+        # output), and finalize_model_grads divides every gradient by the accumulated
+        # total_num_tokens. That division is what cancels the MoE router's pre-multiplication
+        # of the aux/z loss by num_tokens; a 2-tuple leaves total_num_tokens=0, so the factor
+        # is never cancelled (the ~1e4 grad_norm blow-up at CP>1).
+        if self.tf_config is not None and self.tf_config.calculate_per_token_loss and loss_function is not None:
+            # seq-mean-token-mean is the one incompatible agg mode: its per-sequence 1/n_s
+            # uses CP-local shard counts that diverge from the global normalization. The
+            # other modes compose correctly across CP shards.
+            if hasattr(loss_function, "keywords") and "config" in loss_function.keywords:
+                _agg_mode = getattr(loss_function.keywords["config"], "loss_agg_mode", None)
+                if _agg_mode == "seq-mean-token-mean":
+                    raise ValueError(
+                        "loss_agg_mode='seq-mean-token-mean' is incompatible with "
+                        "calculate_per_token_loss=True (auto-enabled by Megatron-Bridge "
+                        "under CP>1). The per-sequence inner division by n_s requires "
+                        "local-shard counts that diverge from global under CP. Use one "
+                        "of: 'token-mean', 'seq-mean-token-sum', 'seq-mean-token-sum-norm'."
+                    )
+            # verl never passes a router padding_mask, so the MoE router normalizes the
+            # aux/z loss by logits.shape[0]. THD packs padding out -> that equals the real
+            # token count; BSHD leaves it at B*S (padding-inclusive), while gradients are
+            # divided by the real token count -> a padding-ratio mis-normalization.
+            if not self.engine_config.use_remove_padding:
+                raise ValueError(
+                    "calculate_per_token_loss=True requires use_remove_padding=True. "
+                    "verl does not pass a padding_mask to the MoE router, so in BSHD it "
+                    "normalizes the aux/z loss by the padding-inclusive token count (B*S) "
+                    "while gradients are divided by the real token count. Use THD "
+                    "(use_remove_padding=True) or disable CP."
+                )
+            # n_i is the global routed-token count (all-reduced in forward_backward_batch);
+            # scaling loss by the same value makes Sum(L_i)/Sum(n_i) recover the loss. Falls
+            # back to local counts when not plumbed (single-rank / tests).
+            attention_mask = data["attention_mask"] if "attention_mask" in data.keys() else data["response_mask"]
+            local_num_tokens = attention_mask.sum().to(torch.int)
+            routed_num_tokens = data["routed_num_tokens"] if "routed_num_tokens" in data.keys() else None
+            if routed_num_tokens is None:
+                routed_num_tokens = local_num_tokens
+            dp_size = data["dp_size"] if "dp_size" in data.keys() else 1
+            local_sum = loss * routed_num_tokens / dp_size
+            return local_sum, local_num_tokens, output
 
         # return loss and stats
         return scaled_loss, output
