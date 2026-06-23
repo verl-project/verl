@@ -28,3 +28,12 @@ checkpoint:
   # set `mbridge_config.distributed_filesystem=True` and `mbridge_config.memory_efficient=True` to
   # speed up the checkpoint saving by 10x speed.
   mbridge_config: {}
+# Whether to use chunked entropy computation
+entropy_from_logits_with_chunking: False
+
+# Chunk size used by chunked entropy computation
+entropy_from_logits_chunk_size: 2048
+
+megatron:
+  entropy_from_logits_with_chunking: ${oc.select:actor_rollout_ref.actor.entropy_from_logits_with_chunking,False}
+  entropy_from_logits_chunk_size: ${oc.select:actor_rollout_ref.actor.entropy_from_logits_chunk_size,2048}

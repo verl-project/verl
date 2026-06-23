@@ -144,6 +144,10 @@ def get_model(
         model = [Float16Module(config, model_module) for model_module in model]
 
     if wrap_with_ddp:
+        # Default to reducing grads in fp32. When the precision-aware optimizer is
+        # opted into with a sub-fp32 `main_grads_dtype`, the engine injects
+        # `grad_reduce_in_fp32=False` via `override_ddp_config` so the DDP grad
+        # bucket dtype matches the optimizer's grad buffer. User overrides still win.
         ddp_models = []
         ddp_config_dict = {
             "use_distributed_optimizer": use_distributed_optimizer,
@@ -1694,9 +1698,9 @@ def _set_mtp_num_layers(hf_config, value: int):
     """Set MTP layer count in the appropriate config field."""
     if hasattr(hf_config, "num_nextn_predict_layers"):
         hf_config.num_nextn_predict_layers = value
-    elif hasattr(hf_config, "mtp_num_hidden_layers"):
+    if hasattr(hf_config, "mtp_num_hidden_layers"):
         hf_config.mtp_num_hidden_layers = value
-    elif hasattr(hf_config, "text_config") and hasattr(hf_config.text_config, "mtp_num_hidden_layers"):
+    if hasattr(hf_config, "text_config") and hasattr(hf_config.text_config, "mtp_num_hidden_layers"):
         hf_config.text_config.mtp_num_hidden_layers = value
 
 
@@ -1705,21 +1709,25 @@ def check_mtp_config(model_config: HFModelConfig, engine_config: McoreEngineConf
     Check and configure MTP (Multi-Token Prediction) settings.
 
     Cases:
-        - mtp.enable == False and no MTP layers: return directly
-        - mtp.enable == False and has MTP layers: set num_nextn_predict_layers = 0
-        - mtp.enable == True and has MTP layers: configure override_transformer_config
+        - mtp.enable == False and no MTP layers: force provider MTP config to None
+        - mtp.enable == False and has MTP layers: clear HF MTP fields and force provider MTP config to None
         - mtp.enable == True and no MTP layers: raise ValueError
+        - mtp.enable == True and has MTP layers: configure override_transformer_config
     """
     hf_config = model_config.hf_config
     mtp_num_layers = _get_mtp_num_layers(hf_config)
     has_mtp = mtp_num_layers > 0
     enable_mtp = model_config.mtp.enable
 
-    if not enable_mtp and not has_mtp:
-        return
-    elif not enable_mtp and has_mtp:
+    if not enable_mtp:
         _set_mtp_num_layers(hf_config, 0)
-        engine_config.override_transformer_config["mtp_num_layers"] = 0
+
+        # The non-vanilla Megatron-Bridge path reloads the HF config from local_path.
+        # Force the provider override so MTP remains disabled after that reload.
+        engine_config.override_transformer_config["mtp_num_layers"] = None
+        engine_config.override_transformer_config.pop("mtp_loss_scaling_factor", None)
+        return
+
     elif enable_mtp and not has_mtp:
         raise ValueError("enable mtp while model has no mtp layer, please use a model with mtp layer")
     elif enable_mtp and has_mtp:

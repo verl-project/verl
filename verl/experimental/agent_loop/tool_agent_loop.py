@@ -31,7 +31,7 @@ from verl.experimental.agent_loop.agent_loop import (
 from verl.experimental.agent_loop.tool_parser import FunctionCall, ToolParser
 from verl.experimental.agent_loop.utils import build_gpt_oss_tool_response_text
 from verl.tools.function_tool import FunctionTool, normalize_function_tool_return
-from verl.tools.schemas import ToolResponse
+from verl.tools.schemas import OpenAIFunctionCallSchema, OpenAIFunctionParsedSchema, ToolResponse
 from verl.utils.profiler import simple_timer
 from verl.utils.rollout_trace import rollout_trace_op
 from verl.workers.rollout.replica import TokenOutput
@@ -208,14 +208,17 @@ class ToolAgentLoop(AgentLoopBase):
     async def _handle_pending_state(self, agent_data: AgentData, sampling_params: dict[str, Any]) -> AgentState:
         """Handle the pending state: prepare the prompt and start generation."""
         schemas = getattr(agent_data, "_active_tool_schemas", self.tool_schemas)
-        prompt_ids = await self.apply_chat_template(
-            agent_data.messages,
-            tools=schemas,
-            images=agent_data.image_data,
-            videos=agent_data.video_data,
-            audios=agent_data.audio_data,
-            mm_processor_kwargs=agent_data.mm_processor_kwargs,
-        )
+        if self.enable_continuous_token:
+            prompt_ids = await self.ct_build_initial_tokens(agent_data.messages, tools=schemas)
+        else:
+            prompt_ids = await self.apply_chat_template(
+                agent_data.messages,
+                tools=schemas,
+                images=agent_data.image_data,
+                videos=agent_data.video_data,
+                audios=agent_data.audio_data,
+                mm_processor_kwargs=agent_data.mm_processor_kwargs,
+            )
         agent_data.prompt_ids = prompt_ids
         return AgentState.GENERATING
 
@@ -258,10 +261,23 @@ class ToolAgentLoop(AgentLoopBase):
 
         agent_data.assistant_turns += 1
         agent_data.response_ids = output.token_ids
-        agent_data.prompt_ids += agent_data.response_ids
-        agent_data.response_mask += [1] * len(agent_data.response_ids)
-        if output.log_probs:
-            agent_data.response_logprobs += output.log_probs
+        if self.enable_continuous_token:
+            merge_result, response_mask, response_logprobs = await self.ct_merge_assistant_token(
+                agent_data.prompt_ids,
+                agent_data.response_ids,
+                agent_data.response_mask,
+                agent_data.response_logprobs if (agent_data.response_logprobs or output.log_probs) else None,
+                assistant_logprobs=output.log_probs if output.log_probs else None,
+            )
+            agent_data.prompt_ids = merge_result.token_ids
+            agent_data.response_mask = response_mask
+            if response_logprobs is not None:
+                agent_data.response_logprobs = response_logprobs
+        else:
+            agent_data.prompt_ids += agent_data.response_ids
+            agent_data.response_mask += [1] * len(agent_data.response_ids)
+            if output.log_probs:
+                agent_data.response_logprobs += output.log_probs
 
         if output.routed_experts is not None:
             agent_data.routed_experts = output.routed_experts
@@ -277,7 +293,11 @@ class ToolAgentLoop(AgentLoopBase):
         # Extract tool calls (use per-sample tools if routed)
         active_tools = getattr(agent_data, "_active_tools", self.tools)
         tools = [tool.tool_schema for tool in active_tools.values()]
-        _, agent_data.tool_calls = await self.tool_parser.extract_tool_calls(agent_data.response_ids, tools)
+        assistant_content, agent_data.tool_calls = await self.tool_parser.extract_tool_calls(
+            agent_data.response_ids, tools
+        )
+        if self.enable_continuous_token:
+            agent_data.messages.append(self._build_assistant_message(assistant_content, agent_data))
 
         if agent_data.tool_calls:
             return AgentState.PROCESSING_TOOLS
@@ -288,6 +308,7 @@ class ToolAgentLoop(AgentLoopBase):
         """Handle the processing tools state: execute tool calls and prepare tool responses."""
         add_messages: list[dict[str, Any]] = []
         new_images_this_turn: list[Any] = []  # Local variable instead of agent_data attribute
+        previous_messages = list(agent_data.messages)
 
         tasks = []
         tool_call_names = []
@@ -300,7 +321,8 @@ class ToolAgentLoop(AgentLoopBase):
 
         # Process tool responses and update multi_modal_data
         # Removed: agent_data.new_images_this_turn = []
-        for tool_response, tool_reward, _ in responses:
+        for tool_index, (tool_response, tool_reward, _) in enumerate(responses):
+            tool_call = agent_data.tool_calls[tool_index]
             # Create message from tool response
             if tool_response.image or tool_response.video:
                 # Multi-modal content with structured format
@@ -321,6 +343,8 @@ class ToolAgentLoop(AgentLoopBase):
             else:
                 # Text-only content
                 message = {"role": "tool", "content": tool_response.text or ""}
+            if tool_call.tool_call_id is not None:
+                message["tool_call_id"] = tool_call.tool_call_id
 
             add_messages.append(message)
 
@@ -350,7 +374,25 @@ class ToolAgentLoop(AgentLoopBase):
 
         agent_data.messages.extend(add_messages)
 
-        if self.tool_parser_name == "gpt-oss":
+        if self.enable_continuous_token and not new_images_this_turn:
+            schemas = getattr(agent_data, "_active_tool_schemas", self.tool_schemas)
+            merge_result, response_mask, response_logprobs = await self.ct_merge_non_assistant_msg(
+                previous_messages,
+                agent_data.messages,
+                agent_data.prompt_ids,
+                agent_data.response_mask,
+                agent_data.response_logprobs if agent_data.response_logprobs else None,
+                tools=schemas,
+            )
+            if len(response_mask) >= self.response_length:
+                return AgentState.TERMINATED
+            agent_data.prompt_ids = merge_result.token_ids
+            agent_data.response_mask = response_mask
+            if agent_data.response_logprobs:
+                agent_data.response_logprobs = response_logprobs or []
+            agent_data.user_turns += 1
+            return AgentState.GENERATING
+        elif self.tool_parser_name == "gpt-oss":
             logger.info("manually format tool responses for gpt-oss")
             tool_response_text = build_gpt_oss_tool_response_text(add_messages, tool_call_names)
             response_ids = await self.loop.run_in_executor(
@@ -363,8 +405,6 @@ class ToolAgentLoop(AgentLoopBase):
             parts = []
             for msg, name in zip(add_messages, tool_call_names, strict=True):
                 content = msg.get("content", "")
-                if isinstance(content, list):
-                    content = "".join([item.get("text", "") for item in content if item.get("type") == "text"])
                 if isinstance(content, list):
                     content = "".join([item.get("text", "") for item in content if item.get("type") == "text"])
                 parts.append(f'<|tool_response>response:{name}{{value:<|"|>{content}<|"|>}}<tool_response|>')
@@ -402,6 +442,31 @@ class ToolAgentLoop(AgentLoopBase):
             agent_data.response_logprobs += [0.0] * len(response_ids)
         agent_data.user_turns += 1
         return AgentState.GENERATING
+
+    def _build_assistant_message(self, content: str, agent_data: AgentData) -> dict[str, Any]:
+        message: dict[str, Any] = {"role": "assistant", "content": content or ""}
+        if not agent_data.tool_calls:
+            return message
+
+        tool_calls = []
+        for index, tool_call in enumerate(agent_data.tool_calls[: self.max_parallel_calls]):
+            function_call, has_decode_error = OpenAIFunctionCallSchema.from_openai_function_parsed_schema(
+                OpenAIFunctionParsedSchema(name=tool_call.name, arguments=tool_call.arguments)
+            )
+            if has_decode_error:
+                raise ValueError(
+                    f"Invalid tool call arguments for '{tool_call.name}': expected a JSON object string, "
+                    f"got {tool_call.arguments!r}"
+                )
+            tool_call_message = {
+                "type": "function",
+                "function": function_call.model_dump(),
+            }
+            if tool_call.tool_call_id is not None:
+                tool_call_message["id"] = tool_call.tool_call_id
+            tool_calls.append(tool_call_message)
+        message["tool_calls"] = tool_calls
+        return message
 
     async def _call_tool(
         self, tool_call: FunctionCall, tools_kwargs: dict[str, Any], agent_data: AgentData

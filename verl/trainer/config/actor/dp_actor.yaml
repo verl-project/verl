@@ -36,8 +36,23 @@ ulysses_sequence_parallel_size: 1
 # calculate entropy with chunking to reduce memory peak
 entropy_from_logits_with_chunking: False
 
+# chunk size for entropy from logits with chunking
+entropy_from_logits_chunk_size: 2048
+
 # recompute entropy
 entropy_checkpointing: False
+
+# fsdp config
+fsdp_config:
+
+  # Whether to use chunked entropy computation
+  entropy_from_logits_with_chunking: ${oc.select:actor_rollout_ref.actor.entropy_from_logits_with_chunking,False}
+
+  # Chunk size used by chunked entropy computation
+  entropy_from_logits_chunk_size: ${oc.select:actor_rollout_ref.actor.entropy_from_logits_chunk_size,2048}
+
+  # Whether to recompute entropy
+  entropy_checkpointing: ${oc.select:actor_rollout_ref.actor.entropy_checkpointing,False}
 
 # Whether to remove padding tokens in inputs during training
 use_remove_padding: ${oc.select:actor_rollout_ref.model.use_remove_padding,false}

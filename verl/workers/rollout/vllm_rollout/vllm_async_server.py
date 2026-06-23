@@ -127,6 +127,15 @@ class vLLMHttpServer:
         self.model_config = self._init_model_config(model_config)
         self._validate_configs()
 
+        if self.config.full_determinism:
+            from verl.workers.engine.utils import enable_full_determinism
+
+            rollout_seed = replica_rank + self.config.seed
+            enable_full_determinism(seed=rollout_seed)
+            os.environ["VERL_FULL_DETERMINISM"] = "1"
+            os.environ["VERL_SEED"] = str(rollout_seed)
+            os.environ["VLLM_BATCH_INVARIANT"] = "1"
+
         self.rollout_mode = rollout_mode
         self.workers = workers
 
@@ -219,7 +228,7 @@ class vLLMHttpServer:
         engine_kwargs = {key: val for key, val in engine_kwargs.items() if val is not None}
         if self.config.get("limit_images", None):  # support for multi-image data
             engine_kwargs["limit_mm_per_prompt"] = {"image": self.config.get("limit_images")}
-        if self.config.cudagraph_capture_sizes:
+        if self.config.cudagraph_capture_sizes and _VLLM_VERSION <= version.parse("0.11.0"):
             engine_kwargs["cuda_graph_sizes"] = self.config.cudagraph_capture_sizes
 
         self._preprocess_engine_kwargs(engine_kwargs)
@@ -251,6 +260,8 @@ class vLLMHttpServer:
                 dcp_size,
             )
             compilation_config["cudagraph_mode"] = "PIECEWISE"
+        if self.config.cudagraph_capture_sizes and _VLLM_VERSION > version.parse("0.11.0"):
+            compilation_config["cudagraph_capture_sizes"] = self.config.cudagraph_capture_sizes
 
         compilation_config = json.dumps(compilation_config)
         args = {
@@ -271,7 +282,7 @@ class vLLMHttpServer:
             "gpu_memory_utilization": self.config.gpu_memory_utilization,
             "disable_log_stats": self.config.disable_log_stats,
             "tensor_parallel_size": self.config.tensor_model_parallel_size,
-            "seed": self.replica_rank + (self.config.get("seed") or 0),
+            "seed": self.replica_rank + self.config.seed,
             "override_generation_config": json.dumps(override_generation_config),
             "quantization": quantization,
             "hf_overrides": hf_overrides,
@@ -505,6 +516,10 @@ class vLLMHttpServer:
         )
         sampling_params["logprobs"] = 0 if sampling_params.pop("logprobs", False) else None
         sampling_params.setdefault("repetition_penalty", self.config.get("repetition_penalty", 1.0))
+        sampling_params.setdefault("ignore_eos", self.config.get("ignore_eos", False))
+        # Inject per-request seed for deterministic sampling when full_determinism is enabled.
+        if self.config.full_determinism:
+            sampling_params.setdefault("seed", self.replica_rank + self.config.seed)
         sampling_params = SamplingParams(max_tokens=max_tokens, **sampling_params)
         prompt_ids = qwen2_5_vl_dedup_image_tokens(prompt_ids, self.model_config.processor)
         multi_modal_data = {}
@@ -547,6 +562,7 @@ class vLLMHttpServer:
             final_res = output
         assert final_res is not None
 
+        extra_fields = {"global_steps": self.global_steps}
         # Handle abort case: when the request is aborted by pause_generation(abort),
         # outputs may be empty. Return empty results with stop_reason="aborted"
         # instead of crashing with "IndexError: list index out of range".
@@ -556,9 +572,9 @@ class vLLMHttpServer:
                 log_probs=None,
                 routed_experts=None,
                 stop_reason="aborted",
+                extra_fields=extra_fields,
             )
 
-        extra_fields = {"global_steps": self.global_steps}
         extract_prompt_logprobs(
             output=final_res,
             num_prompt_logprobs=sampling_params.prompt_logprobs,
@@ -944,7 +960,7 @@ class vLLMHttpServer:
         return ["kv_cache", "weights"]
 
     async def _sleep_hybrid(self):
-        """HYBRID sleep: lora adapters only need level=1; full weights need level=2.
+        """HYBRID sleep: adapters and MTP need level=1; full weights need level=2.
 
         Uses engine.sleep() instead of engine.collective_rpc("sleep") to ensure
         that sleep is properly propagated to all data-parallel worker processes.
@@ -952,9 +968,17 @@ class vLLMHttpServer:
         leaving other DP shards' weights unreleased, which causes OOM during
         FSDP training backward when DP > 1.
         """
+        mtp_config = getattr(self.config, "mtp", None)
+        mtp_rollout_enabled = (
+            mtp_config is not None
+            and getattr(mtp_config, "enable", False)
+            and getattr(mtp_config, "enable_rollout", False)
+        )
+        # MTP drafter-only weights are initialized by vLLM and are not guaranteed
+        # to be restored by actor weight sync after level 2 sleep discards them.
         # lora only update adapter weights, so set sleep level to 1
         # vllm_ascend not support sleep_level now. Enabling EP during training may lead to accuracy issues.
-        if self.lora_as_adapter or is_torch_npu_available(check_device=False):
+        if mtp_rollout_enabled or self.lora_as_adapter or is_torch_npu_available(check_device=False):
             sleep_level = 1
         else:
             sleep_level = 2

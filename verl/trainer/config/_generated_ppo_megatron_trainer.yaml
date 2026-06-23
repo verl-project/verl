@@ -25,6 +25,10 @@ actor_rollout_ref:
       lr_wsd_decay_style: exponential
       lr_wsd_decay_steps: null
       use_checkpoint_opt_param_scheduler: false
+      use_precision_aware_optimizer: false
+      main_grads_dtype: fp32
+      exp_avg_dtype: fp32
+      exp_avg_sq_dtype: fp32
       override_optimizer_config: {}
     megatron:
       _target_: verl.workers.config.McoreEngineConfig
@@ -46,6 +50,8 @@ actor_rollout_ref:
       dist_checkpointing_prefix: ''
       dist_ckpt_optim_fully_reshardable: false
       distrib_optim_fully_reshardable_mem_efficient: false
+      entropy_from_logits_with_chunking: ${oc.select:actor_rollout_ref.actor.entropy_from_logits_with_chunking,False}
+      entropy_from_logits_chunk_size: ${oc.select:actor_rollout_ref.actor.entropy_from_logits_chunk_size,2048}
       seed: 42
       override_ddp_config: {}
       override_transformer_config:
@@ -170,6 +176,8 @@ actor_rollout_ref:
       - re:.*mlp.gate$
       activation_observer: static_minmax
       quantization_config_path: null
+    entropy_from_logits_with_chunking: false
+    entropy_from_logits_chunk_size: 2048
   ref:
     rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
     strategy: megatron
@@ -234,6 +242,8 @@ actor_rollout_ref:
       dist_checkpointing_prefix: ''
       dist_ckpt_optim_fully_reshardable: false
       distrib_optim_fully_reshardable_mem_efficient: false
+      entropy_from_logits_with_chunking: ${oc.select:actor_rollout_ref.actor.entropy_from_logits_with_chunking,False}
+      entropy_from_logits_chunk_size: ${oc.select:actor_rollout_ref.actor.entropy_from_logits_chunk_size,2048}
       seed: ${oc.select:actor_rollout_ref.actor.megatron.seed,42}
       override_ddp_config: {}
       override_transformer_config: ${oc.select:actor_rollout_ref.actor.megatron.override_transformer_config,{}}
@@ -260,6 +270,8 @@ actor_rollout_ref:
         activation_observer: null
         quantization_config_path: null
     _target_: verl.workers.config.McoreActorConfig
+    entropy_from_logits_with_chunking: ${oc.select:actor_rollout_ref.actor.entropy_from_logits_with_chunking,False}
+    entropy_from_logits_chunk_size: ${oc.select:actor_rollout_ref.actor.entropy_from_logits_chunk_size,2048}
   rollout:
     _target_: verl.workers.config.RolloutConfig
     name: ???
@@ -269,6 +281,8 @@ actor_rollout_ref:
     temperature: 1.0
     top_k: -1
     top_p: 1
+    full_determinism: false
+    seed: 42
     prompt_length: ${oc.select:data.max_prompt_length,512}
     response_length: ${oc.select:data.max_response_length,512}
     dtype: bfloat16
@@ -493,6 +507,9 @@ data:
     name: null
   return_multi_modal_inputs: true
   apply_chat_template_kwargs: {}
+  continuous_token:
+    enable: false
+    model_family: auto
   mm_processor_kwargs: {}
 critic:
   optim:
@@ -515,6 +532,10 @@ critic:
     lr_wsd_decay_style: exponential
     lr_wsd_decay_steps: null
     use_checkpoint_opt_param_scheduler: false
+    use_precision_aware_optimizer: false
+    main_grads_dtype: fp32
+    exp_avg_dtype: fp32
+    exp_avg_sq_dtype: fp32
     override_optimizer_config: {}
   megatron:
     _target_: verl.workers.config.McoreEngineConfig
@@ -536,6 +557,8 @@ critic:
     dist_checkpointing_prefix: ''
     dist_ckpt_optim_fully_reshardable: false
     distrib_optim_fully_reshardable_mem_efficient: false
+    entropy_from_logits_with_chunking: false
+    entropy_from_logits_chunk_size: 2048
     seed: 42
     override_ddp_config: {}
     override_transformer_config:
@@ -764,6 +787,8 @@ reward:
       load_format: auto
       layered_summon: false
       scheduling_policy: fcfs
+      full_determinism: false
+      seed: 42
       multi_stage_wake_up: false
       engine_kwargs: {}
       limit_images: null
@@ -899,6 +924,22 @@ trainer:
   max_critic_ckpt_to_keep: null
   ray_wait_register_center_timeout: 300
   device: cuda
+  use_v1: false
+  v1:
+    trainer_mode: sync
+    sync: {}
+    colocate_async:
+      num_warmup_batches: 1
+    separate_async:
+      num_warmup_batches: 4
+      parameter_sync_step: 4
+    sampler:
+      max_off_policy_threshold: 8
+      max_off_policy_strategy: drop
+      custom_sampler:
+        path: null
+        name: null
+      sampler_kwargs: {}
 global_profiler:
   _target_: verl.utils.profiler.ProfilerConfig
   tool: null

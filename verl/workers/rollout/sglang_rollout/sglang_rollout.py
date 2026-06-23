@@ -84,7 +84,7 @@ def _set_envs_and_config(server_args: ServerArgs):
                 "0.1.1",
                 "Please reinstall the latest version with `pip install follow https://sgl-project.github.io/get_started/install.html#for-cuda-13`",
             )
-        except AssertionError:
+        except Exception:
             assert_pkg_version(
                 "sgl_kernel",
                 "0.1.1",

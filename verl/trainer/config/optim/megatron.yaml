@@ -46,4 +46,19 @@ lr_wsd_decay_steps: null
 # use checkpoint optimizer parameter scheduler
 use_checkpoint_opt_param_scheduler: False
 
+# Enable Megatron's precision-aware optimizer (bf16 training only, opt-in).
+# When True, the grad-accumulation buffer and Adam moments follow the dtypes
+# below instead of fp32, trimming optimizer-state memory. Requires TE FusedAdam.
+use_precision_aware_optimizer: False
+
+# dtype of the main-grad / grad-accumulation buffer when use_precision_aware_optimizer
+# is enabled. Also drives the DDP grad-bucket dtype. select from fp32/bf16
+main_grads_dtype: fp32
+
+# dtype of the Adam first moment (m) when use_precision_aware_optimizer is enabled. fp32/bf16
+exp_avg_dtype: fp32
+
+# dtype of the Adam second moment (v) when use_precision_aware_optimizer is enabled. fp32/bf16
+exp_avg_sq_dtype: fp32
+
 override_optimizer_config: {}

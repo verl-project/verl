@@ -277,6 +277,9 @@ class VeOmniEngine(FSDPEngine):
             swiglu_mlp_implementation=self.engine_config.swiglu_mlp_implementation,
             rotary_pos_emb_implementation=self.engine_config.rotary_pos_emb_implementation,
             load_balancing_loss_implementation=self.engine_config.load_balancing_loss_implementation,
+            rms_norm_gated_implementation=self.engine_config.rms_norm_gated_implementation,
+            causal_conv1d_implementation=self.engine_config.causal_conv1d_implementation,
+            chunk_gated_delta_rule_implementation=self.engine_config.chunk_gated_delta_rule_implementation,
         )
 
         veomni_mixed_precision_config = MixedPrecisionConfig(enable=self.engine_config.mixed_precision)
@@ -725,7 +728,8 @@ class EngineTrainModeCtx(BaseEngineCtx):
     def __exit__(self, exc_type, exc_value, traceback):
         assert isinstance(self.engine, VeOmniEngine)
         set_ulysses_sequence_parallel_group(self.prev_sp_group)
-        self.engine.optimizer_zero_grad()
+        if self.zero_grad_on_exit or exc_type is not None:
+            self.engine.optimizer_zero_grad()
         super().__exit__(exc_type, exc_value, traceback)
 
 

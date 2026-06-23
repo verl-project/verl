@@ -63,12 +63,12 @@ async def test_hccl_checkpoint_engine(
     resource_pool = RayResourcePool(process_on_nodes=[num_gpus_per_node] * num_nodes, max_colocate_count=3)
     resource_pool.get_placement_groups(device_name=get_device_name())
     trainer_pool, rollout_pool = split_resource_pool(resource_pool, [num_trainer, num_rollout])
-    trainer = create_trainer_worker_group(trainer_pool, model_config, checkpoint_engine_config)
-    trainer.reset()
+    actor_wg = create_trainer_worker_group(trainer_pool, model_config, checkpoint_engine_config)
+    actor_wg.reset()
     rollout, replicas = await create_rollout_worker_group(rollout_pool, model_config, rollout_config, check_allclose)
 
     # create checkpoint engine manager
-    checkpoint_manager = CheckpointEngineManager(config=checkpoint_engine_config, trainer=trainer, replicas=replicas)
+    checkpoint_manager = CheckpointEngineManager(config=checkpoint_engine_config, actor_wg=actor_wg, replicas=replicas)
     for _ in range(3):
         await checkpoint_manager.update_weights()
         rollout.check_weights()
@@ -110,12 +110,12 @@ async def test_kimi_checkpoint_engine(
     resource_pool = RayResourcePool(process_on_nodes=[num_gpus_per_node] * num_nodes, max_colocate_count=3)
     resource_pool.get_placement_groups(device_name=get_device_name())
     trainer_pool, rollout_pool = split_resource_pool(resource_pool, [num_trainer, num_rollout])
-    trainer = create_trainer_worker_group(trainer_pool, model_config, checkpoint_engine_config)
-    trainer.reset()
+    actor_wg = create_trainer_worker_group(trainer_pool, model_config, checkpoint_engine_config)
+    actor_wg.reset()
     rollout, replicas = await create_rollout_worker_group(rollout_pool, model_config, rollout_config, check_allclose)
 
     # create checkpoint engine manager
-    checkpoint_manager = CheckpointEngineManager(config=checkpoint_engine_config, trainer=trainer, replicas=replicas)
+    checkpoint_manager = CheckpointEngineManager(config=checkpoint_engine_config, actor_wg=actor_wg, replicas=replicas)
     for _ in range(3):
         await checkpoint_manager.update_weights()
         rollout.check_weights()
@@ -158,12 +158,12 @@ async def test_mooncake_checkpoint_engine(
     resource_pool = RayResourcePool(process_on_nodes=[num_gpus_per_node] * num_nodes, max_colocate_count=3)
     resource_pool.get_placement_groups(device_name=get_device_name())
     trainer_pool, rollout_pool = split_resource_pool(resource_pool, [num_trainer, num_rollout])
-    trainer = create_trainer_worker_group(trainer_pool, model_config, checkpoint_engine_config)
-    trainer.reset()
+    actor_wg = create_trainer_worker_group(trainer_pool, model_config, checkpoint_engine_config)
+    actor_wg.reset()
     rollout, replicas = await create_rollout_worker_group(rollout_pool, model_config, rollout_config, check_allclose)
 
     # create checkpoint engine manager
-    checkpoint_manager = CheckpointEngineManager(config=checkpoint_engine_config, trainer=trainer, replicas=replicas)
+    checkpoint_manager = CheckpointEngineManager(config=checkpoint_engine_config, actor_wg=actor_wg, replicas=replicas)
     for _ in range(3):
         await checkpoint_manager.update_weights()
         rollout.check_weights()
