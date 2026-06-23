@@ -64,15 +64,14 @@ permissions:
   contents: read
  
 jobs:
-  llm_rl_job:
+  nightlyCI_grpo-qwen3-30b-megatron-vllm_ascend-r3:
     if: github.repository_owner == 'verl-project'
-    name: E2E Ascend testing for RL training scenarios of LLM models
-    runs-on: linux-aarch64-a3-8
-    timeout-minutes: 120
+    runs-on: linux-aarch64-a3-16
+    timeout-minutes: 180 # Increase this timeout value as needed
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-9.0.0-a3-ubuntu22.04-py3.11-latest
+      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:verl-9.0.0-a3-ubuntu22.04-py3.11-latest
       options: >-
-        --shm-size 16g
+        --shm-size 60g
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
@@ -99,115 +98,24 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          submodules: recursive
           clean: true
-      - name: Install the current repository
+      - name: Prepare weights
         run: |
-          uv pip install --no-deps -e .
-      - name: Check final pip list
-        run: |
-          uv pip list
+          ln -s /root/.cache/models ~/models
       - name: Preprocess gsm8k dataset
         run: |
           python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
-      - name: Running gsm8k e2e training tests with PPO on ASCEND NPU (FSDP backend)
+      - name: Running nightlyCI_grpo-qwen3-30b-megatron-vllm_ascend-r3
         run: |
           ray stop --force
-          bash tests/special_npu/run_qwen3_06b_ppo.sh
-          rm -rf $HOME/ckpts
-      - name: Running gsm8k e2e training tests with GRPO on ASCEND NPU (FSDP backend)
-        run: |
-          ray stop --force
-          bash tests/special_npu/run_qwen3_8b_grpo_profiling.sh
-          python3 "tests/utils/test_check_profiler_output.py" --profiler_dir="./profiler_data-dis" --device="npu"
-          rm -rf ./profiler_data-dis
-          rm -rf $HOME/ckpts
-      - name: Running gsm8k e2e training tests with GRPO on ASCEND NPU (MindSpeed backend)
-        run: |
-          ray stop --force
-          USE_DIST_CKPT=True bash tests/special_npu/run_qwen3_06b_grpo_mindspeed.sh
-          rm -rf $HOME/dist_ckpt/qwen3_06b_grpo_mindspeed
-          rm -rf $HOME/ckpts
-      - name: Running gsm8k e2e training tests with GRPO on ASCEND NPU (MindSpeed backend, MoE Model)
-        run: |
-          ray stop --force
-          USE_DIST_CKPT=True USE_DUMMY_MODEL=True DUMMY_MODEL_CONFIG_PATH=tests/special_e2e/ppo_trainer/expert_parallel/qwen3moe_minimal.json DUMMY_MODEL_PATH=$HOME/dist_ckpt/qwen3_30b_grpo_mindspeed bash tests/special_npu/run_qwen3_30b_grpo_mindspeed.sh
-
-  engine_mindspeed_llm_rl_job:
+          bash tests/special_npu/nightly_ci_ascend/run_grpo_qwen3_30b_megatron_r3_npu.sh
+  nightlyCI_grpo-moonlight-16b-megatron-vllm_ascend_r3:
     if: github.repository_owner == 'verl-project'
-    name: E2E Ascend testing for RL training scenarios of LLM models using MindSpeed_LLM engine
-    runs-on: linux-aarch64-a3-8
-    timeout-minutes: 120
-    container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-sglang-8.3.rc1-a3-ubuntu22.04-py3.11-latest
-      options: >-
-        --shm-size 16g
-    env:
-      HF_ENDPOINT: "https://hf-mirror.com"
-      HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
-      UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi"
-      UV_INDEX_STRATEGY: unsafe-best-match
-      UV_INSECURE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
-      UV_HTTP_TIMEOUT: 120
-      UV_NO_CACHE: "1"
-      UV_SYSTEM_PYTHON: "1"
-      UV_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
-      PIP_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
-      PIP_TRUSTED_HOST: "cache-service.nginx-pypi-cache.svc.cluster.local"
-    steps:
-      - name: Check npu and CANN info
-        run: |
-          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
-          npu-smi info
-      - name: Install uv
-        run: pip install uv
-      - name: Check initial pip list from image
-        run: |
-          uv pip list
-      - name: Checkout verl-project/verl repo
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          clean: true
-      - name: Install the current repository
-        run: |
-          uv pip install --no-deps --no-build-isolation -e .
-      - name: Check final pip list
-        run: |
-          uv pip list
-      - name: Configure related dependencies
-        run: |
-          git clone --depth 1 --branch core_v0.12.1 https://github.com/NVIDIA/Megatron-LM.git /Megatron-LM
-          rm -rf /MindSpeed
-          git clone https://gitcode.com/ascend/MindSpeed.git /MindSpeed
-          git clone https://gitcode.com/ascend/MindSpeed-LLM.git /MindSpeed-LLM
-      - name: Preprocess gsm8k dataset
-        run: |
-          python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
-      - name: Running gsm8k e2e training tests with GRPO on ASCEND NPU (MindSpeedLLM backend)
-        run: |
-          ray stop --force
-          export PYTHONPATH=$PYTHONPATH:/Megatron-LM
-          export PYTHONPATH=$PYTHONPATH:/MindSpeed
-          export PYTHONPATH=$PYTHONPATH:/MindSpeed-LLM
-          rm -rf /root/.cache/torch_extensions/py311_cpu/npu_rotary_position_embedding
-          bash tests/special_npu/run_qwen3_8b_grpo_mindspeedllm.sh
-      - name: Running gsm8k e2e training tests with GRPO on ASCEND NPU (MindSpeedLLM backend, MoE Model)
-        run: |
-          ray stop --force
-          export PYTHONPATH=$PYTHONPATH:/Megatron-LM
-          export PYTHONPATH=$PYTHONPATH:/MindSpeed
-          export PYTHONPATH=$PYTHONPATH:/MindSpeed-LLM
-          rm -rf /root/.cache/torch_extensions/py311_cpu/npu_rotary_position_embedding
-          USE_DUMMY_MODEL=True DUMMY_MODEL_CONFIG_PATH=tests/special_e2e/ppo_trainer/expert_parallel/qwen3moe_minimal.json DUMMY_MODEL_PATH=$HOME/dist_ckpt/qwen3_30b_grpo_mindspeedllm bash tests/special_npu/run_qwen3_30b_grpo_mindspeedllm.sh
-          rm -rf $HOME/dist_ckpt/qwen3_30b_grpo_mindspeedllm
-
-  vlm_rl_job:
-    if: github.repository_owner == 'verl-project'
-    name: E2E Ascend testing for RL training scenarios of VLM models
     runs-on: linux-aarch64-a2b3-8
-    timeout-minutes: 120
+    timeout-minutes: 180 # Increase this timeout value as needed
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-9.0.0-910b-ubuntu22.04-py3.11-latest
+      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:verl-9.0.0-910b-ubuntu22.04-py3.11-latest
       options: >-
         --shm-size 16g
     env:
@@ -225,18 +133,29 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          submodules: recursive
           clean: true
       - name: Install the current repository
         run: |
+          pip install -r requirements-npu.txt
           pip install --no-deps -e .
       - name: Check final pip list
         run: |
           pip list
+      - name: Prepare weights
+        run: |
+          ln -s /root/.cache/models ~/models
       - name: Preprocess geo3k dataset
         run: |
-          python examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/.cache/datasets/hiyouga/geometry3k
-      - name: Running geo3k e2e training tests with GRPO on ASCEND NPU
+          python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
+      - name: update mbridge
+        run: |
+          # get mbridge path
+          MBRIDGE_PATH=$(pip show mbridge | grep Location | awk '{print $2}')
+          # cuda to npu
+          TARGET_FILE="${MBRIDGE_PATH}/mbridge/models/ext/deepseek_v3/dequant_fp8_safetensor_io.py"
+          sed -i '34s/cuda/npu/;51s/cuda/npu/' "$TARGET_FILE"
+      - name: Running nightlyCI_grpo-moonlight-16b-megatron-vllm_ascend
         run: |
           ray stop --force
-          TOTAL_TRAINING_STEPS=1 bash tests/special_npu/run_qwen3_vl_8b_Instruct_fsdp2_npu.sh
-          rm -rf $HOME/ckpts
+          bash tests/special_npu/nightly_ci_ascend/run_grpo_moonlight_16b_megatron_r3_npu.sh
