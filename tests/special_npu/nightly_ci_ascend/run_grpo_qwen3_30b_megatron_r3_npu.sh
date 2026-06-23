@@ -128,6 +128,7 @@ ACTOR_CONFIG=(
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1
+    ++actor_rollout_ref.actor.megatron.override_transformer_config.attention_backend=fused
 )
 
 # Reference Model Configuration
@@ -147,6 +148,7 @@ REF_CONFIG=(
 
 # Rollout Configuration
 ROLLOUT_CONFIG=(
+    actor_rollout_ref.rollout.load_format=safetensors
     actor_rollout_ref.rollout.name=vllm
     actor_rollout_ref.rollout.n=${n_resp_per_prompt}
     actor_rollout_ref.rollout.top_p=1.0
@@ -161,7 +163,7 @@ ROLLOUT_CONFIG=(
     actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp}
     actor_rollout_ref.rollout.data_parallel_size=${gen_dp}
     actor_rollout_ref.rollout.expert_parallel_size=${gen_ep}
-    actor_rollout_ref.rollout.enable_chunked_prefill=True
+    actor_rollout_ref.rollout.enable_chunked_prefill=False
     actor_rollout_ref.rollout.enable_prefix_caching=True
     actor_rollout_ref.rollout.enforce_eager=True
     actor_rollout_ref.rollout.free_cache_engine=True
