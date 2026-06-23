@@ -420,7 +420,7 @@ class PPOTrainer(ABC):
         # 3. [OPTIONAL] compute reward score with colocated reward model
         if self.reward_loop_manager.reward_loop_worker_handles is None:
             with marked_timer("reward", timing_raw, color="yellow"):
-                batch = self._compute_reward_colocate(batch)
+                batch = self._compute_reward_colocate(batch, metrics=metrics)
 
         # 4. balance batch across data parallel groups
         batch = self._balance_batch(batch, metrics=metrics)
@@ -1112,10 +1112,61 @@ class PPOTrainer(ABC):
         # add batch to agent loop manager
         self.agent_loop_manager.generate_sequences(batch)
 
-    def _compute_reward_colocate(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
-        """Compute the reward with colocate reward model."""
-        # TODO: add reward model
-        raise NotImplementedError
+    def _compute_reward_colocate(self, batch: KVBatchMeta, metrics: dict | None = None) -> KVBatchMeta:
+        """Compute the reward score with a colocated reward model."""
+        assert self.reward_loop_manager is not None, "RewardLoopManager is None"
+
+        # 1. read the fields required by the reward model from TransferQueue.
+        fields = ["prompts", "responses", "raw_prompt"]
+        data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=fields)
+
+        prompt_lengths = data["prompts"].offsets().diff()
+        response_lengths = data["responses"].offsets().diff()
+        prompts = data["prompts"].to_padded_tensor(padding=self.tokenizer.pad_token_id)
+        responses = data["responses"].to_padded_tensor(padding=self.tokenizer.pad_token_id)
+
+        # 2. rebuild the attention mask aligned with the [prompts | responses] layout.
+        prompt_mask = self._lengths_to_mask(prompt_lengths, prompts.size(1))
+        response_mask = self._lengths_to_mask(response_lengths, responses.size(1))
+        attention_mask = torch.cat([prompt_mask, response_mask], dim=1)
+
+        raw_prompts = data["raw_prompt"].tolist()
+        raw_prompt_arr = np.empty(len(raw_prompts), dtype=object)
+        raw_prompt_arr[:] = raw_prompts
+
+        rm_input = DataProto(
+            batch=TensorDict(
+                {"prompts": prompts, "responses": responses, "attention_mask": attention_mask},
+                batch_size=len(batch),
+            ),
+            non_tensor_batch={"raw_prompt": raw_prompt_arr},
+        )
+
+        # 3. run the reward model (wakes/sleeps the reward model internally).
+        rm_output = self.reward_loop_manager.compute_rm_score(rm_input)
+
+        # 4. write rm_scores (and reward extra info) back to TransferQueue.
+        padded_rm_scores = rm_output.batch["rm_scores"]
+        rm_scores = torch.nested.as_nested_tensor(
+            [padded_rm_scores[i, : response_lengths[i]] for i in range(len(batch))],
+            layout=torch.jagged,
+        )
+        write_back = {"rm_scores": rm_scores}
+        for key in rm_output.meta_info.get("reward_extra_keys", []):
+            write_back[key] = rm_output.non_tensor_batch[key]
+        tq.kv_batch_put(
+            keys=batch.keys,
+            partition_id=batch.partition_id,
+            fields=tu.get_tensordict(write_back),
+        )
+
+        return batch
+
+    @staticmethod
+    def _lengths_to_mask(lengths: torch.Tensor, width: int) -> torch.Tensor:
+        """Build a right-padded mask of shape (len(lengths), width) from per-row valid lengths."""
+        positions = torch.arange(width, device=lengths.device).unsqueeze(0)
+        return (positions < lengths.unsqueeze(1)).to(torch.int64)
 
     def _get_required_batch_multiple(self, dp_size: int) -> int:
         """Return the global batch multiple required by downstream train steps(e.g. critics, actors)."""
