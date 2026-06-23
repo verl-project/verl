@@ -83,17 +83,13 @@ def left_right_2_no_padding(data: TensorDict) -> TensorDict:
     return data
 
 
-def no_padding_2_padding(tensor: torch.Tensor, data: TensorDict, shift: int = -1) -> torch.Tensor:
+def no_padding_2_padding(tensor: torch.Tensor, data: TensorDict) -> torch.Tensor:
     """Slice response from unpad model output.
 
     Args:
         tensor: a nested tensor or a 1D tensor in shape (total_nnz,),
             total_nnz is the total number of tokens across all sequences in the batch
         data: TensorDict with "prompts", "responses", "attention_mask"
-        shift: -1 for the legacy "predict-next" convention where model output at
-            position i contains log P(token[i+1]); 0 for the response-aligned
-            convention (used by the zorro fast path) where model output at the
-            response position already contains the log prob of that token.
 
     Returns:
         tensor: sliced response tensor of shape [bsz, max_response_len]
@@ -123,9 +119,8 @@ def no_padding_2_padding(tensor: torch.Tensor, data: TensorDict, shift: int = -1
     response_list = []
     for resp_len, seq_offset in zip(response_lens, sequence_offsets, strict=True):
         pad_size = max_response_len - resp_len
-        start = seq_offset - resp_len + shift
-        end = seq_offset + shift
-        response_list.append(F.pad(values[start:end], (0, pad_size)))
+        # left-shift model output by one token for log_probs/values
+        response_list.append(F.pad(values[seq_offset - resp_len - 1 : seq_offset - 1], (0, pad_size)))
 
     output = torch.stack(response_list, dim=0)
     return output
