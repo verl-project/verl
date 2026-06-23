@@ -1,6 +1,19 @@
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import logging
 import os
-from typing import Generator, Optional
 
 import torch
 
@@ -19,13 +32,24 @@ class _W8A8DynamicQuantDescription(dict):
     """
 
     _QUANT_PATTERNS = [
-        "q_proj", "k_proj", "v_proj", "o_proj",
-        "gate_proj", "up_proj", "down_proj",
-        "fc1", "fc2",
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "o_proj",
+        "gate_proj",
+        "up_proj",
+        "down_proj",
+        "fc1",
+        "fc2",
     ]
     _SKIP_PATTERNS = [
-        "embed_tokens", "lm_head", "layernorm", "norm", "ln_",
-        "embeddings", "mlp.gate.weight",
+        "embed_tokens",
+        "lm_head",
+        "layernorm",
+        "norm",
+        "ln_",
+        "embeddings",
+        "mlp.gate.weight",
     ]
 
     def __missing__(self, key):
@@ -51,9 +75,7 @@ def is_int8_ascend_model(vllm_config) -> bool:
         return False
     if isinstance(quant_desc, _W8A8DynamicQuantDescription):
         return True
-    if isinstance(quant_desc, dict) and any(
-        v == "W8A8_DYNAMIC" for v in quant_desc.values()
-    ):
+    if isinstance(quant_desc, dict) and any(v == "W8A8_DYNAMIC" for v in quant_desc.values()):
         return True
     return False
 
@@ -179,12 +201,17 @@ def build_int8_ascend_quant_description(model_config) -> dict:
     desc["lm_head.weight"] = "FLOAT"
 
     quant_proj_names = [
-        "self_attn.q_proj", "self_attn.k_proj",
-        "self_attn.v_proj", "self_attn.o_proj",
-        "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj",
+        "self_attn.q_proj",
+        "self_attn.k_proj",
+        "self_attn.v_proj",
+        "self_attn.o_proj",
+        "mlp.gate_proj",
+        "mlp.up_proj",
+        "mlp.down_proj",
     ]
     float_names = [
-        "input_layernorm", "post_attention_layernorm",
+        "input_layernorm",
+        "post_attention_layernorm",
     ]
 
     for layer_idx in range(num_layers):

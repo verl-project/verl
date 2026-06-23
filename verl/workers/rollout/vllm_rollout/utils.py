@@ -190,10 +190,10 @@ class vLLMColocateWorkerExtension:
         if peft_config and base_sync_done:
             self.remove_lora(VLLM_LORA_INT_ID)
 
-        use_standard_weight_load = not (peft_config and base_sync_done) and not is_fp8_model(
-            self.model_runner.vllm_config
-        ) and not is_int8_ascend_model(
-            self.model_runner.vllm_config
+        use_standard_weight_load = (
+            not (peft_config and base_sync_done)
+            and not is_fp8_model(self.model_runner.vllm_config)
+            and not is_int8_ascend_model(self.model_runner.vllm_config)
         )
 
         if self._is_qat_model:
@@ -262,9 +262,7 @@ class vLLMColocateWorkerExtension:
             elif is_int8_ascend_model(self.model_runner.vllm_config):
                 logger.info("INT8-Ascend (W8A8_DYNAMIC) model detected (async)")
                 vllm_dtype = self.model_runner.vllm_config.model_config.dtype
-                loaded_params = load_int8_ascend_weights(
-                    weights, self.model_runner.model, dtype=vllm_dtype
-                )
+                loaded_params = load_int8_ascend_weights(weights, self.model_runner.model, dtype=vllm_dtype)
                 logger.info(f"INT8-Ascend weights loaded (async), loaded_params: {len(loaded_params)}")
             else:
                 logger.info("Loading standard weights (non-FP8, async)")

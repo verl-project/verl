@@ -203,6 +203,7 @@ if is_torch_npu_available(check_device=False):
 
     try:
         from vllm_ascend.worker.worker_v1 import NPUWorker as _NPUWorker
+
         _orig_warm_up_atb = _NPUWorker._warm_up_atb
 
         def _safe_warm_up_atb(self):
@@ -242,6 +243,7 @@ if is_torch_npu_available(check_device=False):
                 )
             except (ImportError, RuntimeError) as e:
                 import logging as _logging
+
                 _logging.getLogger(__name__).warning(
                     "Skipping vllm_ascend v0.11 MC2 patches due to import error: %s", e
                 )

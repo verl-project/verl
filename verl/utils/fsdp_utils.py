@@ -478,6 +478,7 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_state: dict, device_
         # All ranks have full weights on CPU. Manually load each FSDP2 shard
         # to avoid HCCL collectives that fail on large tensors (CANN AICPU bug).
         from torch.distributed.tensor import DTensor
+
         device = get_device_id()
         get_torch_device().empty_cache()
         cpu_offload_flag = cpu_offload is not None
@@ -488,7 +489,7 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_state: dict, device_
                     local_tensor = param.to_local()
                     spec = param._spec
                     chunk = full_tensor
-                    for placement, mesh_dim in zip(spec.placements, range(spec.mesh.ndim)):
+                    for placement, mesh_dim in zip(spec.placements, range(spec.mesh.ndim), strict=False):
                         if isinstance(placement, Shard):
                             num_chunks = spec.mesh.size(mesh_dim)
                             coord = spec.mesh.get_local_rank(mesh_dim)
