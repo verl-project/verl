@@ -63,7 +63,7 @@ RUN MBRIDGE_PATH=$(pip show mbridge | grep Location | awk '{print $2}') && \
     TARGET_FILE="${MBRIDGE_PATH}/mbridge/models/ext/deepseek_v3/dequant_fp8_safetensor_io.py" && \
     sed -i '34s/cuda/npu/;51s/cuda/npu/' "$TARGET_FILE"
 
-# Prepare and install verl (recipe update frequently, verl is release/v0.8.0)
+# Prepare and install verl (verl is release/v0.8.0)
 RUN git clone -b release/v0.7.1 https://github.com/verl-project/verl.git && cd verl && \
     git submodule update --init --recursive --remote && \
     pip install -r requirements-npu.txt && pip install -v -e . && cd .. && \
