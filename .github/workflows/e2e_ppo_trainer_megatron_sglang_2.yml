@@ -124,6 +124,7 @@ jobs:
           pip3 install --no-deps -e .
           pip3 install --no-deps TransferQueue==0.1.8
       - name: Check final pip list
+        run: |
           pip3 list
       - name: Prepare gsm8k dataset
         run: |

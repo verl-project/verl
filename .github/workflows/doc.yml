@@ -78,6 +78,7 @@ jobs:
           pip3 install --no-deps -e .
           pip install -r docs/requirements-docs.txt
       - name: Check final pip list
+        run: |
           pip3 list
       - name: Run doc make html
         run: |
