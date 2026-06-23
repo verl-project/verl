@@ -175,7 +175,7 @@ class PPOTrainer(ABC):
             critic_cfg.engine.max_token_len_per_gpu = critic_cfg.ppo_infer_max_token_len_per_gpu
             worker_cfg = TrainingWorkerConfig(
                 model_type="value_model",
-                model_config=critic_cfg.model_config,
+                model_config=critic_cfg.model,
                 engine_config=critic_cfg.engine,
                 optimizer_config=critic_cfg.optim,
                 checkpoint_config=critic_cfg.checkpoint,

@@ -74,7 +74,7 @@ class CriticConfig(BaseConfig):
         "ppo_mini_batch_size",
         "ppo_micro_batch_size",
         "engine",
-        "model_config",
+        "model",
     }
 
     strategy: str = MISSING
