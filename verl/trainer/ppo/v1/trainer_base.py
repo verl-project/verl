@@ -1130,7 +1130,11 @@ class PPOTrainer(ABC):
         response_mask = self._lengths_to_mask(response_lengths, responses.size(1))
         attention_mask = torch.cat([prompt_mask, response_mask], dim=1)
 
-        raw_prompts = data["raw_prompt"].tolist()
+        # `raw_prompt` is a non-tensor field; depending on the TransferQueue backend it
+        # comes back as a tensordict LinkedList (a `list` subclass), a NonTensorStack or a
+        # numpy array. `list(...)` normalizes all of them to a plain list where each element
+        # is one sample's chat-message list (whereas `.tolist()` only exists on numpy/tensors).
+        raw_prompts = list(data["raw_prompt"])
         raw_prompt_arr = np.empty(len(raw_prompts), dtype=object)
         raw_prompt_arr[:] = raw_prompts
 

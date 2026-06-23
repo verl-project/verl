@@ -163,6 +163,10 @@ class TestRawPromptObjectArray:
 
     @staticmethod
     def _build(raw_prompts):
+        # Mirror the production normalization in _compute_reward_colocate: the TransferQueue
+        # field may be a tensordict LinkedList (list subclass), NonTensorStack or numpy array,
+        # so it is wrapped with list(...) (not .tolist(), which only exists on numpy/tensors).
+        raw_prompts = list(raw_prompts)
         arr = np.empty(len(raw_prompts), dtype=object)
         arr[:] = raw_prompts
         return arr
@@ -201,3 +205,22 @@ class TestRawPromptObjectArray:
         assert len(chunks) == 2
         first_item = chunks[0][0]
         assert list(first_item) == [{"role": "user", "content": "0"}]
+
+    def test_list_subclass_input_like_tensordict_linkedlist(self):
+        # Regression: TransferQueue may return raw_prompt as a tensordict LinkedList,
+        # which is a `list` subclass without `.tolist()`. The production code uses
+        # list(...) to normalize it; verify that path yields a correct 1-D object array.
+        class _FakeLinkedList(list):
+            """Stand-in for tensordict.utils.LinkedList (a list subclass)."""
+
+        raw_prompts = _FakeLinkedList(
+            [
+                [{"role": "user", "content": "a"}],
+                [{"role": "user", "content": "b"}],
+            ]
+        )
+        assert not hasattr(raw_prompts, "tolist")  # the exact cause of the original crash
+        arr = self._build(raw_prompts)
+        assert arr.shape == (2,)
+        assert list(arr[0]) == [{"role": "user", "content": "a"}]
+        assert list(arr[1]) == [{"role": "user", "content": "b"}]
