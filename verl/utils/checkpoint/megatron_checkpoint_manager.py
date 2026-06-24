@@ -1269,6 +1269,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         # ── 2. HF config / tokenizer (rank 0) ───────────────────────────────
         if self.should_save_hf_model:
             self._save_hf_config_and_tokenizer(local_path)
+            torch.distributed.barrier()
 
         # ── 3. Save model weights in HF format via bridge ───────────────────
         if self.should_save_hf_model:
