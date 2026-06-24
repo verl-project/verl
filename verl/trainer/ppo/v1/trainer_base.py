@@ -76,6 +76,7 @@ from verl.utils.dataset.rl_dataset import collate_fn
 from verl.utils.debug import marked_timer
 from verl.utils.debug.metrics import calculate_debug_metrics
 from verl.utils.fs import copy_to_local
+from verl.utils.import_utils import load_extern_type
 from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
@@ -112,7 +113,29 @@ class PPOTrainer(ABC):
         if self.config.algorithm.use_kl_in_reward:
             self.kl_ctrl_in_reward = core_algos.get_kl_controller(self.config.algorithm.kl_ctrl)
 
-        self.replay_buffer = ReplayBuffer()
+        self.trainer_mode = self.config.trainer.v1.trainer_mode
+        self.parameter_sync_step = self.config.trainer.v1.get(self.trainer_mode, {}).get("parameter_sync_step", 1)
+        self.replay_buffer = self._build_replay_buffer()
+
+    def _build_replay_buffer(self) -> ReplayBuffer:
+        """Instantiate the replay buffer (or a user-provided custom sampler).
+
+        Set ``trainer.v1.sampler.custom_sampler.{path,name}`` to plug in a custom
+        ``ReplayBuffer`` subclass; otherwise the built-in implementation is used.
+        """
+        sampler_config = self.config.trainer.v1.sampler
+        custom_sampler = sampler_config.get("custom_sampler", None)
+        sampler_cls = ReplayBuffer
+        if custom_sampler is not None and custom_sampler.get("path") and custom_sampler.get("name"):
+            sampler_cls = load_extern_type(custom_sampler.path, custom_sampler.name)
+
+        return sampler_cls(
+            trainer_mode=self.trainer_mode,
+            trainer_config=self.config.trainer.v1.get(self.trainer_mode, {}),
+            max_off_policy_threshold=sampler_config.max_off_policy_threshold,
+            max_off_policy_strategy=sampler_config.max_off_policy_strategy,
+            sampler_kwargs=sampler_config.sampler_kwargs,
+        )
 
     def init(self):
         """Initialize all components of the trainer.
@@ -385,14 +408,19 @@ class PPOTrainer(ABC):
         # 2. sample batch from replay buffer
         with marked_timer("gen", timing_raw, color="red"):
             self.on_sample_begin()
-            batch = self.replay_buffer.sample(partition_id="train", batch_size=self.config.data.train_batch_size)
+            batch, off_policy_metrics = self.replay_buffer.sample(
+                global_steps=self.global_steps,
+                partition_id="train",
+                batch_size=self.config.data.train_batch_size,
+            )
+            metrics.update(off_policy_metrics)
             batch.extra_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
             self.on_sample_end()
 
         # 3. [OPTIONAL] compute reward score with colocated reward model
         if self.reward_loop_manager.reward_loop_worker_handles is None:
             with marked_timer("reward", timing_raw, color="yellow"):
-                batch = self._compute_reward_colocate(batch)
+                batch = self._compute_reward_colocate(batch, metrics=metrics)
 
         # 4. balance batch across data parallel groups
         batch = self._balance_batch(batch, metrics=metrics)
@@ -732,13 +760,16 @@ class PPOTrainer(ABC):
             batch = tu.get_tensordict(batch_dict)
             tu.assign_non_tensor_data(batch, "global_steps", self.global_steps)
             tu.assign_non_tensor_data(batch, "validate", True)
-            # Register each prompt (GRPO group) in TransferQueue as a tag-only status marker
-            tags = [{"is_prompt": True, "status": "pending"}] * len(batch)
+            # Register each prompt (GRPO group) in TransferQueue as a tag-only status marker.
+            # global_steps is required by ReplayBuffer's metadata sync / staleness ordering.
+            tags = [{"is_prompt": True, "status": "pending", "global_steps": self.global_steps}] * len(batch)
             tq.kv_batch_put(keys=list(batch["uid"]), partition_id="val", tags=tags)
             self.agent_loop_manager.generate_sequences(batch)
 
             # 2. sample batch from replay buffer: one prompt (GRPO group) per submitted row.
-            batch = self.replay_buffer.sample(partition_id="val", batch_size=len(batch))
+            batch, _ = self.replay_buffer.sample(
+                global_steps=self.global_steps, partition_id="val", batch_size=len(batch)
+            )
 
             # 3. [OPTIONAL] compute reward score with colocated reward model
             if self.reward_loop_manager.reward_loop_worker_handles is None:
@@ -1081,10 +1112,65 @@ class PPOTrainer(ABC):
         # add batch to agent loop manager
         self.agent_loop_manager.generate_sequences(batch)
 
-    def _compute_reward_colocate(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
-        """Compute the reward with colocate reward model."""
-        # TODO: add reward model
-        raise NotImplementedError
+    def _compute_reward_colocate(self, batch: KVBatchMeta, metrics: dict | None = None) -> KVBatchMeta:
+        """Compute the reward score with a colocated reward model."""
+        assert self.reward_loop_manager is not None, "RewardLoopManager is None"
+
+        # 1. read the fields required by the reward model from TransferQueue.
+        fields = ["prompts", "responses", "raw_prompt"]
+        data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=fields)
+
+        prompt_lengths = data["prompts"].offsets().diff()
+        response_lengths = data["responses"].offsets().diff()
+        prompts = data["prompts"].to_padded_tensor(padding=self.tokenizer.pad_token_id)
+        responses = data["responses"].to_padded_tensor(padding=self.tokenizer.pad_token_id)
+
+        # 2. rebuild the attention mask aligned with the [prompts | responses] layout.
+        prompt_mask = self._lengths_to_mask(prompt_lengths, prompts.size(1))
+        response_mask = self._lengths_to_mask(response_lengths, responses.size(1))
+        attention_mask = torch.cat([prompt_mask, response_mask], dim=1)
+
+        # `raw_prompt` is a non-tensor field; depending on the TransferQueue backend it
+        # comes back as a tensordict LinkedList (a `list` subclass), a NonTensorStack or a
+        # numpy array. `list(...)` normalizes all of them to a plain list where each element
+        # is one sample's chat-message list (whereas `.tolist()` only exists on numpy/tensors).
+        raw_prompts = list(data["raw_prompt"])
+        raw_prompt_arr = np.empty(len(raw_prompts), dtype=object)
+        raw_prompt_arr[:] = raw_prompts
+
+        rm_input = DataProto(
+            batch=TensorDict(
+                {"prompts": prompts, "responses": responses, "attention_mask": attention_mask},
+                batch_size=len(batch),
+            ),
+            non_tensor_batch={"raw_prompt": raw_prompt_arr},
+        )
+
+        # 3. run the reward model (wakes/sleeps the reward model internally).
+        rm_output = self.reward_loop_manager.compute_rm_score(rm_input)
+
+        # 4. write rm_scores (and reward extra info) back to TransferQueue.
+        padded_rm_scores = rm_output.batch["rm_scores"]
+        rm_scores = torch.nested.as_nested_tensor(
+            [padded_rm_scores[i, : response_lengths[i]] for i in range(len(batch))],
+            layout=torch.jagged,
+        )
+        write_back = {"rm_scores": rm_scores}
+        for key in rm_output.meta_info.get("reward_extra_keys", []):
+            write_back[key] = rm_output.non_tensor_batch[key]
+        tq.kv_batch_put(
+            keys=batch.keys,
+            partition_id=batch.partition_id,
+            fields=tu.get_tensordict(write_back),
+        )
+
+        return batch
+
+    @staticmethod
+    def _lengths_to_mask(lengths: torch.Tensor, width: int) -> torch.Tensor:
+        """Build a right-padded mask of shape (len(lengths), width) from per-row valid lengths."""
+        positions = torch.arange(width, device=lengths.device).unsqueeze(0)
+        return (positions < lengths.unsqueeze(1)).to(torch.int64)
 
     def _get_required_batch_multiple(self, dp_size: int) -> int:
         """Return the global batch multiple required by downstream train steps(e.g. critics, actors)."""
@@ -1427,9 +1513,9 @@ class PPOTrainer(ABC):
         #     so the lag is a range: the freshest weights used give the lower bound
         #     (global_steps - max_global_steps) and the oldest weights the worst case
         #     (global_steps - min_global_steps). We log the lower bound as the primary metric.
-        trajectory_spans = max_global_steps - min_global_steps + 1
-        trajectory_staleness = (global_steps - 1) - max_global_steps
-        trajectory_staleness_worst = (global_steps - 1) - min_global_steps
+        trajectory_spans = (max_global_steps - min_global_steps + 1) / self.parameter_sync_step
+        trajectory_staleness = ((global_steps - 1) - max_global_steps) / self.parameter_sync_step
+        trajectory_staleness_worst = ((global_steps - 1) - min_global_steps) / self.parameter_sync_step
         metrics.update(
             {
                 "training/off_policy/trajectory_spans/mean": trajectory_spans.mean(),

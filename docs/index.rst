@@ -39,6 +39,7 @@ verl is fast with:
    :maxdepth: 2
    :caption: Programming guide
 
+   extend_guide
    hybrid_flow
    single_controller
 
@@ -115,6 +116,7 @@ verl is fast with:
 
    advance/fsdp_extension
    advance/megatron_extension
+   advance/megatron_lite_backend
 
 .. toctree::
    :maxdepth: 1
@@ -150,6 +152,7 @@ verl is fast with:
    data/transfer_queue.md
    advance/grafana_prometheus.md
    advance/mtp.md
+   advance/determinism.md
 
 .. toctree::
    :maxdepth: 1

@@ -56,6 +56,12 @@ dist_ckpt_optim_fully_reshardable: False
 # Has effect only when `dist_ckpt_optim_fully_reshardable` is enabled
 distrib_optim_fully_reshardable_mem_efficient: False
 
+# Whether to use entropy from logits with chunking
+entropy_from_logits_with_chunking: False
+
+# Chunk size for entropy from logits with chunking
+entropy_from_logits_chunk_size: 2048
+
 # oc.select: default val for ref.megatron.seed
 seed: 42
 

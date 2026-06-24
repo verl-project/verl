@@ -25,7 +25,7 @@ RUN ARCH=$(uname -m) && \
     # Clone libs
     git clone https://github.com/sgl-project/sglang.git && cd sglang && git checkout v0.5.10 && cd .. && \
     git clone https://gitcode.com/Ascend/MindSpeed.git && \
-    cd MindSpeed && git checkout 2.3.0_core_r0.12.1 && cd .. 
+    cd MindSpeed && git checkout core_r0.16.0 && cd .. 
 
 # Install repositories with low update frequency
 RUN cd sglang && \
@@ -48,7 +48,7 @@ RUN ARCH=$(uname -m) && wget --no-check-certificate https://github.com/sgl-proje
 
 # Install MindSpeed & Megatron
 RUN pip install -e MindSpeed && \
-    pip install git+https://github.com/NVIDIA/Megatron-LM.git@core_v0.12.1 && \
+    pip install git+https://github.com/NVIDIA/Megatron-LM.git@core_r0.16.0 && \
     # Remove existing triton or triton-ascend installed by some third-party packages
     pip uninstall -y triton timm && \
     # Install mbridge

@@ -45,6 +45,7 @@ from verl.utils.megatron.router_replay_utils import (
 )
 from verl.utils.megatron.tensor_parallel import (
     vocab_parallel_entropy,
+    vocab_parallel_entropy_with_chunking,
     vocab_parallel_log_probs_from_logits,
     vocab_parallel_sum_pi_squared,
 )
@@ -260,6 +261,28 @@ class MegatronEngine(BaseEngine):
             model_config=self.model_config, bridge=self.bridge, provider=self.provider, dtype=self.param_dtype
         )
 
+    def _resolve_override_ddp_config(self):
+        """Keep the DDP grad-bucket dtype consistent with the optimizer's grad buffer.
+
+        When the precision-aware optimizer is opted into with a sub-fp32
+        ``main_grads_dtype``, the DDP grad bucket must reduce grads in the same
+        dtype, so inject ``grad_reduce_in_fp32=False`` unless the user set it
+        explicitly via ``override_ddp_config``. Default (opt-out) leaves the fp32
+        grad bucket untouched, preserving prior behavior.
+        """
+        from verl.utils.torch_dtypes import PrecisionType
+
+        override_ddp_config = dict(self.engine_config.override_ddp_config or {})
+        opt_cfg = self.optimizer_config
+        if (
+            opt_cfg is not None
+            and getattr(opt_cfg, "use_precision_aware_optimizer", False)
+            and PrecisionType.to_dtype(getattr(opt_cfg, "main_grads_dtype", "fp32")) != torch.float32
+            and "grad_reduce_in_fp32" not in override_ddp_config
+        ):
+            override_ddp_config["grad_reduce_in_fp32"] = False
+        return override_ddp_config
+
     def _build_megatron_module(self):
         from verl.utils.megatron_utils import McoreModuleWrapperConfig, make_megatron_module
         from verl.utils.model import print_model_size
@@ -279,6 +302,8 @@ class MegatronEngine(BaseEngine):
         if self.is_value_model:
             self.model_config.hf_config.tie_word_embeddings = False
 
+        override_ddp_config = self._resolve_override_ddp_config()
+
         module, updated_tf_config = make_megatron_module(
             wrap_config=wrap_config,
             tf_config=self.tf_config,
@@ -286,7 +311,7 @@ class MegatronEngine(BaseEngine):
             bridge=self.bridge,
             provider=self.provider,
             override_model_config=self.engine_config.override_mcore_model_config,
-            override_ddp_config=self.engine_config.override_ddp_config,
+            override_ddp_config=override_ddp_config,
             peft_cls=self.peft_cls,
             peft_config=self.model_config.get("lora", None),
         )
@@ -339,6 +364,7 @@ class MegatronEngine(BaseEngine):
             self.optimizer_config,
             use_distributed_optimizer=self.engine_config.use_distributed_optimizer,
             fp16=self.param_dtype == torch.float16,
+            bf16=self.param_dtype == torch.bfloat16,
         )
         optimizer = get_megatron_optimizer(model=self.module, config=optim_config_megatron)
         register_megatron_training_hooks(self.module, optimizer)
@@ -932,7 +958,14 @@ class MegatronEngineWithLMHead(MegatronEngine):
                     #         "`actor_rollout_ref.model.use_fused_kernels=True`. "
                     #         "The current `clone()` operation ensures correctness but increases memory usage."
                     #     )
-                    entropy = vocab_parallel_entropy(logits)
+                    if self.engine_config.entropy_from_logits_with_chunking:
+                        entropy = vocab_parallel_entropy_with_chunking(
+                            logits,
+                            chunk_size=self.engine_config.entropy_from_logits_chunk_size,
+                        )
+                    else:
+                        entropy = vocab_parallel_entropy(logits)
+
                     ret["entropy"] = entropy
                 else:
                     logits_bak = logits

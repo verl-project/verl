@@ -4,7 +4,7 @@ import os
 
 from transformers import PreTrainedTokenizerBase, ProcessorMixin
 
-from verl.utils.tokenizer import normalize_token_ids
+from .tokenizer import normalize_token_ids
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))

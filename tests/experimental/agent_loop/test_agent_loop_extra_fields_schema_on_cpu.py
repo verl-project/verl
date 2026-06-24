@@ -45,8 +45,9 @@ class _FakeServerManager:
         video_data: Optional[list[Any]] = None,
         audio_data: Optional[list[Any]] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
+        **kwargs: Any,
     ) -> TokenOutput:
-        del request_id, sampling_params, image_data, video_data, audio_data, mm_processor_kwargs
+        del request_id, sampling_params, image_data, video_data, audio_data, mm_processor_kwargs, kwargs
         # Return a short, deterministic "generation" for testing.
         return TokenOutput(token_ids=prompt_ids[-1:] + [11, 12, 13], log_probs=[0.0, 0.0, 0.0, 0.0])
 
@@ -182,6 +183,7 @@ async def test_agent_loop_extra_fields_schema_stable_for_training_concat_on_cpu(
             "data": {
                 "tool_config_path": None,
                 "apply_chat_template_kwargs": {},
+                "continuous_token": {"enable": False, "model_family": "auto"},
             },
         }
     )

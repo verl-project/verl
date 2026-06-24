@@ -39,6 +39,15 @@ def run_ppo(config, task_runner_class) -> None:
                 model paths, and training hyperparameters.
         task_runner_class: For recipe to change TaskRunner.
     """
+    # Propagate determinism env vars from config before ray.init() so
+    # get_ppo_ray_runtime_env() forwards them to all Ray actors.
+    rollout_cfg = config.actor_rollout_ref.rollout
+    rm_rollout_cfg = config.reward.reward_model.rollout
+    if rollout_cfg.full_determinism or (config.reward.reward_model.enable and rm_rollout_cfg.full_determinism):
+        os.environ["VERL_FULL_DETERMINISM"] = "1"
+        os.environ["VLLM_BATCH_INVARIANT"] = "1"
+        os.environ["PYTHONHASHSEED"] = str(rollout_cfg.seed)
+
     # Check if Ray is not initialized
     if not ray.is_initialized():
         # Initialize Ray with a local cluster configuration

@@ -39,6 +39,12 @@ RUN export NVTE_FRAMEWORK=pytorch && MAX_JOBS=128 NVTE_BUILD_THREADS_PER_JOB=4 p
 
 RUN pip install codetiming mathruler pylatexenc cachetools pytest-asyncio
 
+RUN if [ "$(uname -m)" = "aarch64" ]; then \
+        pip show "flash-attn-4"; \
+    else \
+        pip uninstall -y "flash-attn-4"; \
+    fi
+
 RUN pip install --no-build-isolation flash_attn==2.8.3
 
 RUN NSIGHT_VERSION=2025.6.1_2025.6.1.190-1_$(if [ "$(uname -m)" = "aarch64" ]; then echo "arm64"; else echo "amd64"; fi) && \
@@ -62,13 +68,6 @@ RUN pip install torchcodec --index-url=https://download.pytorch.org/whl/cu130
 RUN pip install qwen-vl-utils==0.0.14
 
 RUN if [ "$(uname -m)" = "aarch64" ]; then \
-        pip show "flash-attn-4"; \
-    else \
-        pip uninstall -y "flash-attn-4" && \
-        pip install "flash-attn-4[cu13]"; \
-    fi
-
-RUN if [ "$(uname -m)" = "aarch64" ]; then \
         pip show "sglang-kernel"; \
     else \
         wget https://github.com/sgl-project/whl/releases/download/v0.4.2.post2/sglang_kernel-0.4.2.post2+cu130-cp310-abi3-manylinux2014_x86_64.whl#sha256=4e7ce619274234d182b20da883fcf1d20e7e55cbea90d62244e2b6a3d6c0fc85 && \
@@ -90,3 +89,8 @@ RUN CUDA_VERSION_MAJOR=$(echo ${CUDA_VERSION} | cut -d '.' -f 1) && \
         CUDNN_VERSION=$(grep -E '^#define CUDNN_(MAJOR|MINOR|PATCHLEVEL) ' "${CUDNN_HDR}" | awk '{print $3}' | paste -sd. -); \
     fi && \
     pip install "nvidia-cudnn-cu${CUDA_VERSION_MAJOR}>=${CUDNN_VERSION}"
+
+# Override NCCL to >= 2.29.7 for ncclCommSuspend / ncclCommResume
+# (RFC: https://github.com/verl-project/verl/issues/6266).
+# TODO(xiefan46): remove once torch pin bumps to >= 2.12.0.
+RUN pip install --no-deps --upgrade "nvidia-nccl-cu13>=2.29.7,<3.0"

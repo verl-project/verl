@@ -144,6 +144,10 @@ def get_model(
         model = [Float16Module(config, model_module) for model_module in model]
 
     if wrap_with_ddp:
+        # Default to reducing grads in fp32. When the precision-aware optimizer is
+        # opted into with a sub-fp32 `main_grads_dtype`, the engine injects
+        # `grad_reduce_in_fp32=False` via `override_ddp_config` so the DDP grad
+        # bucket dtype matches the optimizer's grad buffer. User overrides still win.
         ddp_models = []
         ddp_config_dict = {
             "use_distributed_optimizer": use_distributed_optimizer,

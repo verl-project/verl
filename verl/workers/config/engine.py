@@ -189,6 +189,8 @@ class McoreEngineConfig(EngineConfig):
     virtual_pipeline_model_parallel_size: Optional[int] = None
     context_parallel_size: int = 1
     dynamic_context_parallel: bool = False
+    entropy_from_logits_with_chunking: bool = False
+    entropy_from_logits_chunk_size: int = 2048
     max_seqlen_per_dp_cp_rank: Optional[int] = None
     sequence_parallel: bool = True
     use_distributed_optimizer: bool = True
@@ -255,6 +257,7 @@ class FSDPEngineConfig(EngineConfig):
     mixed_precision: Optional[dict[str, Any]] = None
     ulysses_sequence_parallel_size: int = 1
     entropy_from_logits_with_chunking: bool = False
+    entropy_from_logits_chunk_size: int = 2048
     use_torch_compile: bool = True
     entropy_checkpointing: bool = False
     strategy: str = "fsdp"
@@ -349,6 +352,7 @@ class VeOmniEngineConfig(EngineConfig):
 
     forward_prefetch: bool = False
     entropy_from_logits_with_chunking: bool = False
+    entropy_from_logits_chunk_size: int = 2048
     use_torch_compile: bool = True
     entropy_checkpointing: bool = False
     strategy: str = "veomni"
@@ -443,6 +447,7 @@ class TorchtitanEngineConfig(EngineConfig):
     offload_policy: bool = False
     use_torch_compile: bool = True
     entropy_from_logits_with_chunking: bool = False
+    entropy_from_logits_chunk_size: int = 2048
     entropy_checkpointing: bool = False
     data_parallel_size: int = 1
     data_parallel_replicate_size: int = 1
@@ -572,6 +577,7 @@ class AutomodelEngineConfig(EngineConfig):
     mp_output_dtype: str = "bf16"
     # Entropy computation
     entropy_from_logits_with_chunking: bool = False
+    entropy_from_logits_chunk_size: int = 2048
     use_torch_compile: bool = True
     entropy_checkpointing: bool = False
 

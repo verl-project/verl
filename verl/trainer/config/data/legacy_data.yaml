@@ -115,5 +115,16 @@ return_multi_modal_inputs: True
 # Additional kwargs when calling tokenizer.apply_chat_template
 apply_chat_template_kwargs: {}
 
+# Continuous Token keeps the runtime token stream across multi-turn rollout instead of reconstructing previous assistant turns from text.
+# Disabled by default for compatibility.
+continuous_token:
+
+  # Enable Continuous Token for text-only multi-turn PPO rollout.
+  enable: False
+
+  # Model-family specific boundary handling. auto infers from model path/tokenizer name.
+  # Options: auto, default, qwen, qwen25, qwen3, qwen35, minimax, minimaxm2, minimaxm25, minimaxm27, glm47, glm5, gemma4, gptoss
+  model_family: auto
+
 # Additional kwargs passed to multimodal processors/backends.
 mm_processor_kwargs: {}

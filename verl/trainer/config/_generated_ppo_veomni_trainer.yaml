@@ -247,6 +247,8 @@ actor_rollout_ref:
     temperature: 1.0
     top_k: -1
     top_p: 1
+    full_determinism: false
+    seed: 42
     prompt_length: ${oc.select:data.max_prompt_length,512}
     response_length: ${oc.select:data.max_response_length,512}
     dtype: bfloat16
@@ -471,6 +473,9 @@ data:
     name: null
   return_multi_modal_inputs: true
   apply_chat_template_kwargs: {}
+  continuous_token:
+    enable: false
+    model_family: auto
   mm_processor_kwargs: {}
 critic:
   optim:
@@ -724,6 +729,8 @@ reward:
       load_format: auto
       layered_summon: false
       scheduling_policy: fcfs
+      full_determinism: false
+      seed: 42
       multi_stage_wake_up: false
       engine_kwargs: {}
       limit_images: null
@@ -868,6 +875,13 @@ trainer:
     separate_async:
       num_warmup_batches: 4
       parameter_sync_step: 4
+    sampler:
+      max_off_policy_threshold: 8
+      max_off_policy_strategy: drop
+      custom_sampler:
+        path: null
+        name: null
+      sampler_kwargs: {}
 global_profiler:
   _target_: verl.utils.profiler.ProfilerConfig
   tool: null
