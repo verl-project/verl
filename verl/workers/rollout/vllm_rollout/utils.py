@@ -32,6 +32,15 @@ from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
 from verl.utils.vllm.vllm_fp8_utils import apply_vllm_fp8_patches, is_fp8_model, load_quanted_weights
 from verl.workers.rollout.vllm_rollout.weight_update_utils import apply_buffer_updates, split_buffer_updates
 
+try:
+    from verl.utils.vllm.vllm_int8_ascend_utils import is_int8_ascend_model, load_int8_ascend_weights
+except ImportError:
+
+    def is_int8_ascend_model(*args, **kwargs):
+        return False
+
+    load_int8_ascend_weights = None
+
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
@@ -252,8 +261,10 @@ class vLLMColocateWorkerExtension:
         if peft_config and base_sync_done:
             self.remove_lora(VLLM_LORA_INT_ID)
 
-        use_standard_weight_load = not (peft_config and base_sync_done) and not is_fp8_model(
-            self.model_runner.vllm_config
+        use_standard_weight_load = (
+            not (peft_config and base_sync_done)
+            and not is_fp8_model(self.model_runner.vllm_config)
+            and not is_int8_ascend_model(self.model_runner.vllm_config)
         )
 
         if self._is_qat_model:
@@ -336,14 +347,21 @@ class vLLMColocateWorkerExtension:
             # Check if FP8 quantization is enabled and apply appropriate weight loading
             if is_fp8_model(self.model_runner.vllm_config):
                 logger.info(f"FP8 model detected (async): {self.model_runner.vllm_config.quant_config}")
-                # Convert bf16 weights to fp8 format before loading
                 loaded_params = load_quanted_weights(param_updates, self.model_runner) if param_updates else []
-                # Keep the draft model in sync when present.
                 if self._use_mtp_drafter_weight_sync() and param_updates:
                     load_quanted_weights(param_updates, self.model_runner, is_drafter=True)
                 loaded_buffers = self._apply_buffer_updates_all_models(buffer_updates, named_buffers)
                 logger.info(
                     f"FP8 weights loaded (async), loaded_params: {len(loaded_params)}, loaded_buffers: {loaded_buffers}"
+                )
+            elif is_int8_ascend_model(self.model_runner.vllm_config):
+                logger.info("INT8-Ascend (W8A8_DYNAMIC) model detected (async)")
+                vllm_dtype = self.model_runner.vllm_config.model_config.dtype
+                loaded_params = load_int8_ascend_weights(param_updates, self.model_runner.model, dtype=vllm_dtype)
+                loaded_buffers = self._apply_buffer_updates_all_models(buffer_updates, named_buffers)
+                logger.info(
+                    f"INT8-Ascend weights loaded (async), "
+                    f"loaded_params: {len(loaded_params)}, loaded_buffers: {loaded_buffers}"
                 )
             else:
                 if param_updates:

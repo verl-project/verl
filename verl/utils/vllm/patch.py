@@ -21,56 +21,56 @@ try:
 
     SUPPORTED_MOE_MODELS.append(DeepseekV2ForCausalLM)
     SUPPORTED_MOE_MODELS.append(DeepseekV3ForCausalLM)
-except ImportError:
+except (ImportError, RuntimeError):
     pass
 
 try:
     from vllm.model_executor.models.mixtral import MixtralForCausalLM
 
     SUPPORTED_MOE_MODELS.append(MixtralForCausalLM)
-except ImportError:
+except (ImportError, RuntimeError):
     pass
 
 try:
     from vllm.model_executor.models.qwen2_moe import Qwen2MoeForCausalLM
 
     SUPPORTED_MOE_MODELS.append(Qwen2MoeForCausalLM)
-except ImportError:
+except (ImportError, RuntimeError):
     pass
 
 try:
     from vllm.model_executor.models.qwen3_moe import Qwen3MoeForCausalLM
 
     SUPPORTED_MOE_MODELS.append(Qwen3MoeForCausalLM)
-except ImportError:
+except (ImportError, RuntimeError):
     pass
 
 try:
     from vllm.model_executor.models.qwen3_vl_moe import Qwen3MoeLLMForCausalLM
 
     SUPPORTED_MOE_MODELS.append(Qwen3MoeLLMForCausalLM)
-except ImportError:
+except (ImportError, RuntimeError):
     pass
 
 try:
     from vllm.model_executor.models.qwen3_next import Qwen3NextForCausalLM
 
     SUPPORTED_MOE_MODELS.append(Qwen3NextForCausalLM)
-except ImportError:
+except (ImportError, RuntimeError):
     pass
 
 try:
     from vllm.model_executor.models.kimi_vl import KimiVLForConditionalGeneration
 
     SUPPORTED_MOE_MODELS.append(KimiVLForConditionalGeneration)
-except ImportError:
+except (ImportError, RuntimeError):
     pass
 
 try:
     from vllm.model_executor.models.qwen3_5 import Qwen3_5MoeForCausalLM
 
     SUPPORTED_MOE_MODELS.append(Qwen3_5MoeForCausalLM)
-except ImportError:
+except (ImportError, RuntimeError):
     pass
 
 

@@ -55,7 +55,8 @@ else:
 
 
 def init_fn(x: torch.nn.Module):
-    if torch.distributed.get_rank() != 0:
+    skip_meta = os.environ.get("VERL_LOAD_ALL_RANKS", "0") == "1"
+    if not skip_meta and torch.distributed.get_rank() != 0:
         x = x.to_empty(device=get_device_id(), recurse=False)
         get_torch_device().empty_cache()
     return x
@@ -65,7 +66,10 @@ def get_init_weight_context_manager(use_meta_tensor=True, mesh: DeviceMesh = Non
     from accelerate import init_empty_weights
 
     cpu_init_weights = lambda: torch.device("cpu")
-    if use_meta_tensor:
+    skip_meta = os.environ.get("VERL_LOAD_ALL_RANKS", "0") == "1"
+    if skip_meta:
+        init_context = cpu_init_weights
+    elif use_meta_tensor:
         if mesh is None:
             init_context = init_empty_weights if torch.distributed.get_rank() != 0 else cpu_init_weights
         else:
@@ -491,13 +495,50 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_state: dict, device_
         from verl.third_party.torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
 
     # To broadcast, it needs to be instantiated in the GPU.
-    if dist.get_rank() == 0:
+    skip_broadcast = os.environ.get("VERL_LOAD_ALL_RANKS", "0") == "1"
+    if skip_broadcast:
+        # All ranks have full weights on CPU. Manually load each FSDP2 shard
+        # to avoid HCCL collectives that fail on large tensors (CANN AICPU bug).
+        from torch.distributed.tensor import DTensor
+
+        device = get_device_id()
+        get_torch_device().empty_cache()
+        cpu_offload_flag = cpu_offload is not None
+        for name, param in model.named_parameters():
+            if name in full_state:
+                full_tensor = full_state[name]
+                if isinstance(param, DTensor):
+                    local_tensor = param.to_local()
+                    spec = param._spec
+                    chunk = full_tensor
+                    for placement, mesh_dim in zip(spec.placements, range(spec.mesh.ndim), strict=False):
+                        if isinstance(placement, Shard):
+                            num_chunks = spec.mesh.size(mesh_dim)
+                            coord = spec.mesh.get_local_rank(mesh_dim)
+                            chunks = chunk.chunk(num_chunks, dim=placement.dim)
+                            chunk = chunks[min(coord, len(chunks) - 1)]
+                    local_tensor.data.copy_(chunk.to(local_tensor.dtype).to(device))
+                else:
+                    param.data.copy_(full_tensor.to(param.dtype).to(device))
+        for name, buf in model.named_buffers():
+            if name in full_state:
+                buf.data.copy_(full_state[name].to(buf.dtype).to(device))
+            elif buf.device.type == "meta":
+                buf.data = torch.empty_like(buf, device=device)
+        if cpu_offload_flag:
+            model.to("cpu", non_blocking=True)
+            for buf in model.buffers():
+                buf.data = buf.data.to(device)
+        del full_state
+        return
+    elif dist.get_rank() == 0:
         model = model.to(device=get_device_id(), non_blocking=True)
     else:
         model = model.to_empty(device=get_device_id())
 
     cpu_offload = cpu_offload is not None
-    options = StateDictOptions(full_state_dict=True, cpu_offload=cpu_offload, broadcast_from_rank0=True)
+    broadcast = not skip_broadcast
+    options = StateDictOptions(full_state_dict=True, cpu_offload=cpu_offload, broadcast_from_rank0=broadcast)
     set_model_state_dict(model, full_state, options=options)
 
     # rotary_emb is not in state_dict, so we need to broadcast it manually
@@ -505,9 +546,10 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_state: dict, device_
     # named_buffers() in different order on different ranks. Gemma4 has heterogeneous
     # rotary embedding buffers (256 vs 128 elements) so mismatched order = size
     # mismatch on the same broadcast collective = NCCL deadlock.
-    bufs = sorted(model.named_buffers(), key=lambda x: x[0])
-    for name, buf in bufs:
-        dist.broadcast(buf, src=0)
+    if not skip_broadcast:
+        bufs = sorted(model.named_buffers(), key=lambda x: x[0])
+        for name, buf in bufs:
+            dist.broadcast(buf, src=0)
 
     if cpu_offload:
         model.to("cpu", non_blocking=True)
@@ -1011,14 +1053,11 @@ def collect_merged_lora_params(module: nn.Module) -> OrderedDict:
 def backup_base_model_weights(module):
     """Backup base model weights to CPU with LoRA temporarily disabled.
 
-    This function temporarily disables LoRA adapters, backs up the clean base model weights
-    to CPU, then re-enables the adapters.
-
     Args:
-        module: The PEFT model with LoRA adapters
+        module: The PEFT model with LoRA adapters.
 
     Returns:
-        dict: Dictionary mapping parameter name to CPU tensor backup of base model weights
+        dict: {param_name: cpu_tensor} backup of base model weights.
     """
     from peft import PeftModel
 
@@ -1042,12 +1081,9 @@ def backup_base_model_weights(module):
 def restore_base_model_weights(module, backup):
     """Restore base model weights from CPU backup.
 
-    This function restores the base model weights from the CPU backup, effectively
-    undoing any LoRA merge operations.
-
     Args:
-        module: The PEFT model with LoRA adapters
-        backup: Dictionary mapping parameter name to CPU tensor backup of base model weights
+        module: The PEFT model with LoRA adapters.
+        backup: {param_name: cpu_tensor} from backup_base_model_weights.
     """
     with torch.no_grad():
         for name, param in module.named_parameters():
@@ -1094,39 +1130,30 @@ def merged_lora_context(actor, backup_adapters=False):
 def fsdp2_sharded_save_to_cpu(
     model: torch.nn.Module,
 ) -> tuple[dict[str, tuple[torch.Tensor, DTensorSpec]], DTensorSpec]:
-    """
-    Sharded Save: Each process only saves the local DTensor shard from its own GPU to CPU memory.
+    """Save each rank's local DTensor shard to CPU memory.
 
     Args:
-        model: FSDP2-wrapped model whose parameters are of DTensor type.
+        model: FSDP2-wrapped model whose parameters are DTensors.
 
     Returns:
-        cpu_sharded_state: Dictionary of CPU shards for the current process.
-                          Key = parameter name, Value = (CPU shard tensor, original DTensorSpec)
-        global_spec: DTensorSpec of the first parameter (used to verify global rules during loading)
+        cpu_sharded_state: {param_name: (cpu_shard, DTensorSpec | None)}
+        global_spec: DTensorSpec of the first DTensor parameter.
     """
     cpu_sharded_state = {}
-    global_spec = None  # Record global sharding rules (all parameters follow the same spec)
+    global_spec = None
 
     for param_name, param in model.named_parameters():
-        # Only process sharded parameters of DTensor type (core parameters of FSDP2)
         if not isinstance(param, DTensor):
-            # Save non-sharded parameters (e.g., running_mean of BatchNorm) as local data
             cpu_tensor = param.detach().cpu()
             cpu_sharded_state[param_name] = (cpu_tensor, None)
             continue
 
-        # Record global sharding rules (take spec of the first DTensor to ensure consistency)
         if global_spec is None:
             global_spec = param._spec
             assert hasattr(global_spec, "device_mesh"), "DTensorSpec must contain 'device_mesh' attribute"
             assert hasattr(global_spec, "placements"), "DTensorSpec must contain 'placements' attribute"
 
-        # 1. Extract local shard data from the current GPU (_local_tensor)
-        local_gpu_tensor = param._local_tensor  # Local shard attribute defined in your DTensor class
-        # 2. Move to CPU memory and detach from computation graph
-        local_cpu_tensor = local_gpu_tensor.detach().cpu()
-        # 3. Save CPU shard + original DTensorSpec (ensure sharding rules remain unchanged)
+        local_cpu_tensor = param._local_tensor.detach().cpu()
         cpu_sharded_state[param_name] = (local_cpu_tensor, param._spec)
 
     assert global_spec is not None, "No DTensor-type parameters found in the model. FSDP2 sharding may not be enabled."
@@ -1138,17 +1165,13 @@ def fsdp2_sharded_load_from_cpu(
     cpu_sharded_state: dict[str, tuple[torch.Tensor, Optional[DTensorSpec]]],
     target_spec: DTensorSpec,
 ) -> None:
-    """
-    Sharded Load: Each process only loads the CPU shard it is responsible for to the GPU,
-                  keeping sharding rules unchanged.
+    """Load each rank's CPU shard back to the corresponding GPU.
 
     Args:
-        model: FSDP2 model to be restored (must have the same structure as when saved)
-        cpu_sharded_state: Shard data read from CPU memory by the current process
-                          (from fsdp2_sharded_save_to_cpu)
-        target_spec: Global DTensorSpec from saving (used to verify sharding rule consistency)
+        model: FSDP2 model (must match the structure used during save).
+        cpu_sharded_state: Output of fsdp2_sharded_save_to_cpu.
+        target_spec: Global DTensorSpec from the save call.
     """
-    # Verify device_mesh consistency (core: ensure loaded shards map to original GPUs)
     current_device_mesh = None
     for param in model.parameters():
         if isinstance(param, DTensor):
@@ -1160,32 +1183,21 @@ def fsdp2_sharded_load_from_cpu(
     )
 
     for param_name, param in model.named_parameters():
-        # Skip parameters not in the saved state (e.g., newly added parameters)
         if param_name not in cpu_sharded_state:
             continue
 
-        # Extract CPU shard data and original Spec
         local_cpu_tensor, saved_spec = cpu_sharded_state[param_name]
 
-        # Handle different parameter types: DTensor sharded parameters vs. regular parameters
         if isinstance(param, DTensor):
-            # 1. Verify sharding rule consistency (placements must match original Spec)
             assert saved_spec is not None, f"DTensorSpec missing in saved state for parameter {param_name}"
             assert saved_spec.placements == target_spec.placements, (
                 f"Sharding strategy mismatch for parameter {param_name} (conflicts with global rules)!"
             )
 
-            # 2. Move CPU shard data to the current GPU (device of param._local_tensor)
             target_device = param._local_tensor.device
-            local_gpu_tensor = local_cpu_tensor.to(target_device)
-
-            # 3. Restore to DTensor's local shard (directly copy to _local_tensor, keep spec unchanged)
-            param._local_tensor.copy_(local_gpu_tensor)
-
+            param._local_tensor.copy_(local_cpu_tensor.to(target_device))
         else:
-            # Regular parameters: load directly to original device
             target_device = param.device
             param.data.copy_(local_cpu_tensor.to(target_device))
 
-    # Process synchronization: ensure all processes complete loading before proceeding
     dist.barrier()
