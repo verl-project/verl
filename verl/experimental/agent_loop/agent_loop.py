@@ -519,6 +519,9 @@ class AgentLoopWorker:
                 config=config,
                 teacher_client=teacher_client,
             )
+            self.use_task_rewards: bool = config.distillation.distillation_loss.use_task_rewards
+        else:
+            self.use_task_rewards = True
 
         # Load tools once per worker; each trajectory just reuses self.tools.
         tool_config_path = self.rollout_config.multi_turn.tool_config_path
@@ -811,7 +814,8 @@ class AgentLoopWorker:
                 output.multi_modal_data.get("audios") if output.multi_modal_data else None
             ),
         )
-        await self._compute_score([output], kwargs=kwargs)
+        if self.use_task_rewards:
+            await self._compute_score([output], kwargs=kwargs)
         await self._compute_teacher_logprobs(
             output,
             prompt_ids=output.prompt_ids,
