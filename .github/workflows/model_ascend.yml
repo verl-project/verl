@@ -127,9 +127,15 @@ jobs:
       - name: Install the current repository
         run: |
           pip install --no-deps -e .[test]
+          pip install -r requirements-test.txt
+          pip3 install --upgrade "accelerate>=1.13.0"
       - name: Prepare weights
         run: |
           ln -s /root/.cache/models ~/models
       - name: Running FSDP2 rmpad model tests on 8 NPUs
         run: |
           STRATEGY=fsdp2 torchrun --nproc_per_node=8 tests/special_distributed/test_fsdp_ckpt.py
+      - name: Running model_engine_ascend
+        run: |
+          ray stop --force
+          pytest tests/models/test_engine.py
