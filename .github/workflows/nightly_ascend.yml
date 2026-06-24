@@ -249,6 +249,11 @@ jobs:
           # cuda to npu
           TARGET_FILE="${MBRIDGE_PATH}/mbridge/models/ext/deepseek_v3/dequant_fp8_safetensor_io.py"
           sed -i '34s/cuda/npu/;51s/cuda/npu/' "$TARGET_FILE"
+      - name: Running run_vllm_process_weights_test
+        run: |
+          ray stop --force
+          export HCCL_OP_EXPANSION_MODE="AIV"
+          bash tests/special_npu/nightly_ci_ascend/run_vllm_process_weights_test.sh
       - name: Running nightlyCI_dapo-moonlight-16b-megatron-vllm_ascend
         run: |
           ray stop --force
