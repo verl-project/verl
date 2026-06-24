@@ -24,7 +24,9 @@ import os
 import re
 from typing import Generator, Iterable, Optional
 
+import compressed_tensors
 import torch
+from packaging import version
 
 try:
     # this is used for `compressed-tensors<=0.13.0`
@@ -47,6 +49,7 @@ logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 _LAYER_IDX_RE = re.compile(r"layers\.(\d+)\.")
+COMPRESSED_TENSORS_GE_013 = version.parse(compressed_tensors.__version__) >= version.parse("0.13.0")
 
 
 def compute_blockwise_scale(
@@ -125,8 +128,7 @@ def fuse_global_scales(
 
 
 def get_quantization_args(num_bits, type, symmetric, strategy, group_size, scale_dtype):
-    import compressed_tensors
-    from packaging import version
+    global COMPRESSED_TENSORS_GE_013
 
     kwargs = {
         "num_bits": num_bits,
@@ -135,7 +137,7 @@ def get_quantization_args(num_bits, type, symmetric, strategy, group_size, scale
         "strategy": strategy,
         "group_size": group_size,
     }
-    if version.parse(compressed_tensors.__version__) >= version.parse("0.13.0"):
+    if COMPRESSED_TENSORS_GE_013:
         # `scale_dtype` argument is introduced after `compressed-tensors v0.13.0`
         kwargs["scale_dtype"] = scale_dtype
     return QuantizationArgs(**kwargs)

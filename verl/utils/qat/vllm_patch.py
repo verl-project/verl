@@ -28,6 +28,7 @@ from typing import Optional
 from unittest.mock import patch
 
 import torch
+import vllm
 from packaging import version
 from torch.nn import Parameter
 
@@ -35,6 +36,7 @@ from verl.utils.device import get_device_name
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+_VLLM_GE_012 = version.parse(vllm.__version__) >= version.parse("0.12.0")
 
 
 class ParamMetaDict(dict):
@@ -276,12 +278,6 @@ def _check_first_call(layer: torch.nn.Module) -> bool:
     return count == 0
 
 
-def _is_vllm_ge_012() -> bool:
-    import vllm
-
-    return version.parse(vllm.__version__) >= version.parse("0.12.0")
-
-
 # NOTE: a wrapper of vllm._custom_ops.gptq_marlin_repack
 # which passes arguments based on vllm version compatibility
 # `is_a_8bit` is an argument proposed after vllm v0.12.0
@@ -295,6 +291,8 @@ def _gptq_marlin_repack(
     is_a_8bit: bool = False,
 ):
     """Call gptq_marlin_repack across vLLM versions."""
+    global _VLLM_GE_012
+
     kwargs = {
         "b_q_weight": b_q_weight,
         "perm": perm,
@@ -302,7 +300,7 @@ def _gptq_marlin_repack(
         "size_n": size_n,
         "num_bits": num_bits,
     }
-    if _is_vllm_ge_012():
+    if _VLLM_GE_012:
         kwargs["is_a_8bit"] = is_a_8bit
     return ops.gptq_marlin_repack(**kwargs)
 
@@ -316,13 +314,15 @@ def _marlin_permute_scales(
     is_a_8bit: bool = False,
 ):
     """Call marlin_permute_scales across vLLM versions."""
+    global _VLLM_GE_012
+
     kwargs = {
         "s": s,
         "size_k": size_k,
         "size_n": size_n,
         "group_size": group_size,
     }
-    if _is_vllm_ge_012():
+    if _VLLM_GE_012:
         kwargs["is_a_8bit"] = is_a_8bit
     return marlin_permute_scales(**kwargs)
 
