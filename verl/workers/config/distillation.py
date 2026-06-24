@@ -264,6 +264,16 @@ class DistillationConfig(BaseConfig):
     nnodes: int = 0
     teacher_models: dict[str, DistillationTeacherModelConfig] = field(default_factory=dict)
     teacher_key: str = "data_source"
+    # On-Policy Self-Distillation (OPSD): the teacher shares the student's weights but
+    # additionally conditions on the ground-truth solution (privileged context); the
+    # student sees only the problem. Point a single teacher at the student checkpoint
+    # (teacher.model_path == student path) to make it a frozen self-teacher.
+    self_distillation: bool = False
+    # Non-tensor batch field holding the ground-truth solution text.
+    privileged_solution_key: str = "ground_truth"
+    # Marker text wrapping the privileged solution in the teacher's input.
+    privileged_prefix: str = "\n\nReference solution:\n"
+    privileged_suffix: str = "\n\nNow evaluate the response:\n"
     distillation_loss: DistillationLossConfig = field(default_factory=DistillationLossConfig)
 
     def __post_init__(self):
