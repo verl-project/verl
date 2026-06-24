@@ -533,10 +533,16 @@ class FSDPEngine(BaseEngine):
             print_model_size(module)
         log_gpu_memory_usage("After init model from HF AutoModel", logger=logger)
 
-        # Wrap model with FSDP for distributed training (sharding, mixed precision, etc.)
-        log_gpu_memory_usage("Before FSDP", logger=None)
-        module = self._build_fsdp_module(module)
-        log_gpu_memory_usage("After FSDP", logger=None)
+        if not self.engine_config.forward_only:
+            # Wrap model with FSDP for distributed training (sharding, mixed precision, etc.)
+            log_gpu_memory_usage("Before FSDP", logger=None)
+            module = self._build_fsdp_module(module)
+            log_gpu_memory_usage("After FSDP", logger=None)
+        else:
+            # Forward-only (e.g. ref model): no sharding needed, place model on device directly.
+            self._is_offload_param = False
+            self._is_offload_optimizer = False
+            module = module.to(get_device_id())
 
         if not self.engine_config.forward_only:
             # Initialize optimizer with model parameters and config settings
@@ -1042,7 +1048,6 @@ class FSDPEngineWithLMHead(FSDPEngine):
                     labels=input_ids_rmpad_rolled,
                     inplace_backward=inplace_backward,
                 )
-
                 # compute entropy
                 if calculate_entropy:
                     if not self.engine_config.entropy_checkpointing:
@@ -1138,17 +1143,14 @@ class FSDPEngineWithLMHead(FSDPEngine):
         # actually, we should avoid assigning like this...
         micro_batch = micro_batch.to(get_device_id())
         model_inputs, output_args = self.prepare_model_inputs(micro_batch=micro_batch)
-
         with torch.autocast(device_type=device_name, dtype=torch.bfloat16):
             raw_output = self.module(
                 **model_inputs,
                 use_cache=False,
             )  # prevent model thinks we are generating
-
             model_output = self.prepare_model_outputs(
                 output=raw_output, output_args=output_args, micro_batch=micro_batch, logits_processor_func=loss_function
             )
-
             if loss_function is not None:
                 loss, metrics = loss_function(
                     model_output=model_output, data=micro_batch, dp_group=self.get_data_parallel_group()
@@ -1157,7 +1159,6 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 assert forward_only, "forward_only must be True when loss_function is None"
                 loss = torch.tensor(1.0, device=device_name)
                 metrics = {}
-
             output = {
                 "model_output": model_output,
                 "loss": loss.detach().item(),

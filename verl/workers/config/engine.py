@@ -34,6 +34,7 @@ __all__ = [
     "EngineRouterReplayConfig",
     "QATEngineConfig",
     "MindSpeedEngineConfig",
+    "HyperParallelEngineConfig",
 ]
 
 
@@ -249,7 +250,7 @@ class FSDPEngineConfig(EngineConfig):
     entropy_from_logits_with_chunking: bool = False
     use_torch_compile: bool = True
     entropy_checkpointing: bool = False
-    strategy: str = "fsdp"
+    strategy: str = "fsdp2"
     qat: QATEngineConfig = field(default_factory=QATEngineConfig)
 
     def __post_init__(self):
@@ -560,3 +561,55 @@ class TrainingWorkerConfig(BaseConfig):
     # This function takes model config and the device name as parameter.
     # Users can pass in a higher-order function to take more parameters
     auto_select_engine_optim_fn: Callable[["HFModelConfig", str], tuple["EngineConfig", "OptimizerConfig"]] = None
+
+
+@dataclass
+class HyperParallelEngineConfig(EngineConfig):
+    """HyperParallel引擎配置
+
+    命名与TorchtitanEngineConfig、McoreEngineConfig保持完全一致。
+    """
+    
+    _mutable_fields = EngineConfig._mutable_fields | {
+        "tensor_parallel_size",
+        "pipeline_parallel_size",
+        "fsdp_size",
+        "context_parallel_size",
+        "expert_parallel_size",
+    }
+    
+    # ===== 并行策略配置 =====
+    # 与TorchtitanEngineConfig命名对齐
+    dp_size: int = 1                          # 数据并行size
+    fsdp_size: int = -1                      # FSDP分片size（-1表示使用全部GPU，与FSDPEngineConfig一致）
+    tensor_parallel_size: int = 1             # 张量并行size
+    pipeline_parallel_size: int = 1           # 流水线并行size
+    context_parallel_size: int = 1            # 上下文并行size
+    expert_parallel_size: int = 1             # 专家并行size（MoE）
+
+    # ===== FSDP/HSDP配置 =====
+    reshard_after_forward: bool = True
+    use_hsdp: bool = False                    # Hybrid Sharding
+    
+    # ===== 高级特性 =====
+    offload_policy: bool = False
+    mixed_precision: Optional[dict[str, Any]] = None
+    ulysses_sequence_parallel_size: int = 1   # 与FSDPEngineConfig对齐
+    entropy_from_logits_with_chunking: bool = False
+    use_torch_compile: bool = True
+    entropy_checkpointing: bool = False
+    # ===== 模型加载精度 =====
+    # 模型加载时的权重精度（master weights），默认 fp32 与 FSDP baseline 一致。
+    # mixed precision 由 dtype 控制 forward 时的参数精度。
+    model_dtype: str = "fp32"
+
+    # ===== QAT支持 =====
+    qat: QATEngineConfig = field(default_factory=QATEngineConfig)
+
+    # ===== 策略标识 =====
+    strategy: str = "hyperparallel"
+
+    def __post_init__(self):
+        super().__post_init__()
+        assert self.strategy == "hyperparallel", f"strategy must be 'hyperparallel'"
+        assert self.dtype in ["bfloat16", "float16"], f"dtype {self.dtype} not supported"

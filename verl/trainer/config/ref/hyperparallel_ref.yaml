@@ -1,0 +1,21 @@
+# hyperparallel ref config, inheriting from trainer/config/ref/ref.yaml
+defaults:
+  # fsdp optimizer config (reuse fsdp optimizer)
+  - ../optim@optim: fsdp
+
+  # hyperparallel engine config
+  - ../engine@hyperparallel_config: hyperparallel
+
+  - ref
+
+  # load the reference default config, then apply the fields in the current yaml
+  - _self_
+
+_target_: verl.workers.config.HyperParallelActorConfig
+
+strategy: hyperparallel
+
+hyperparallel_config:
+
+  # ref model is forward only
+  forward_only: True

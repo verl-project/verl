@@ -21,6 +21,14 @@ __all__ = [
     "FSDPEngineWithLMHead",
 ]
 
+try:
+    from .hyperparallel import HyperParallelEngine, HyperParallelEngineWithLMHead
+
+    __all__ += ["HyperParallelEngine", "HyperParallelEngineWithLMHead"]
+except ImportError:
+    HyperParallelEngine = None
+    HyperParallelEngineWithLMHead = None
+
 if DiffusersFSDPEngine is not None:
     __all__.append("DiffusersFSDPEngine")
 

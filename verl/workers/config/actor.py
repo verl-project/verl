@@ -24,6 +24,7 @@ from verl.utils.qat import QATConfig
 
 from .engine import (
     FSDPEngineConfig,
+    HyperParallelEngineConfig,
     McoreEngineConfig,
     MindSpeedEngineConfig,
     TorchtitanEngineConfig,
@@ -37,6 +38,7 @@ __all__ = [
     "RouterReplayConfig",
     "ActorConfig",
     "FSDPActorConfig",
+    "HyperParallelActorConfig",
     "McoreActorConfig",
     "VeOmniActorConfig",
     "QATConfig",
@@ -403,3 +405,23 @@ class MindSpeedActorConfig(ActorConfig):
         """Validate MindSpeed actor configuration parameters."""
         super().__post_init__()
         self.engine = self.mindspeed
+
+
+@dataclass
+class HyperParallelActorConfig(ActorConfig):
+    """Configuration for HyperParallel actor models.
+
+    Follows the same pattern as FSDPActorConfig, TorchTitanActorConfig, etc.
+    All parallel dimensions are managed by HyperParallelEngineConfig.
+    """
+
+    strategy: str = "hyperparallel"
+    grad_clip: float = 1.0
+    hyperparallel_config: HyperParallelEngineConfig = field(default_factory=HyperParallelEngineConfig)
+    use_remove_padding: bool = False
+    use_rollout_log_probs: bool = False
+
+    def __post_init__(self):
+        """Validate HyperParallel actor configuration parameters."""
+        super().__post_init__()
+        self.engine = self.hyperparallel_config

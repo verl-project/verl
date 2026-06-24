@@ -35,7 +35,8 @@ def extract_solution(solution_str, method="strict"):
             # take the last solution
             final_answer = solutions[-1].replace(",", "").replace("$", "")
     elif method == "flexible":
-        answer = re.findall("(\\-?[0-9\\.\\,]+)", solution_str)
+        # 改进：匹配更多可能的答案格式，包括负号和货币符号
+        answer = re.findall("(?<!\d)\-?\$?\d+(?:,\d{3})*(?:\.\d+)?", solution_str)
         final_answer = None
         if len(answer) == 0:
             # no reward is there is no answer
@@ -43,8 +44,10 @@ def extract_solution(solution_str, method="strict"):
         else:
             invalid_str = ["", "."]
             # find the last number that is not '.'
-            for final_answer in reversed(answer):
-                if final_answer not in invalid_str:
+            for candidate in reversed(answer):
+                if candidate.strip() not in invalid_str:
+                    # format the answer like in strict mode
+                    final_answer = candidate.replace(",", "").replace("$", "").strip()
                     break
     return final_answer
 

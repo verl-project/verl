@@ -23,7 +23,7 @@ defaults:
 _target_: verl.workers.config.FSDPActorConfig
 
 # TODO(haibin.lin): switch to fsdp2
-strategy: fsdp
+strategy: fsdp2
 
 # Gradient clipping for actor updates, specific to the strategy.
 grad_clip: 1.0

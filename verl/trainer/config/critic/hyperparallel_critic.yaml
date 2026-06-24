@@ -1,0 +1,23 @@
+# hyperparallel critic config
+defaults:
+  # fsdp optimizer config
+  - ../optim@optim: fsdp
+
+  # hyperparallel engine config
+  - ../engine@hyperparallel: hyperparallel
+
+  # critic base config
+  - critic
+
+  # load the reference default config, then apply the fields in the current yaml
+  - _self_
+
+_target_: verl.workers.config.FSDPCriticConfig
+
+strategy: fsdp
+
+forward_micro_batch_size: 1
+
+forward_micro_batch_size_per_gpu: 1
+
+grad_clip: 1.0

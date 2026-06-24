@@ -1,0 +1,63 @@
+# Target class for this configuration
+_target_: verl.workers.config.HyperParallelEngineConfig
+
+# Whether to offload model parameters to CPU
+param_offload: false
+
+# Whether to offload optimizer state to CPU
+optimizer_offload: false
+
+# FSDP group size; -1 means use all available devices
+fsdp_size: -1
+
+# Reshard after forward pass
+reshard_after_forward: true
+
+# Data parallel size
+dp_size: 1
+
+# Tensor parallel size
+tensor_parallel_size: 1
+
+# Pipeline parallel size
+pipeline_parallel_size: 1
+
+# Context parallel size
+context_parallel_size: 1
+
+# Expert parallel size
+expert_parallel_size: 1
+
+# Hybrid Sharding
+use_hsdp: false
+
+# Ulysses sequence parallel size
+ulysses_sequence_parallel_size: 1
+
+# Whether to use torch compile
+use_torch_compile: true
+
+# Whether to use entropy_from_logits_with_chunking
+entropy_from_logits_with_chunking: false
+
+# Whether to use entropy checkpointing
+entropy_checkpointing: false
+
+# Strategy
+strategy: hyperparallel
+
+# Whether to use forward only
+forward_only: false
+
+# Model loading dtype (master weights). Default fp32 matches FSDP baseline.
+# Mixed precision (bf16 forward) is configured via MixedPrecisionPolicy in code.
+model_dtype: fp32
+
+# Mixed precision training param dtype (forward computation)
+dtype: bfloat16
+
+# Random seed
+seed: 42
+
+# Full determinism (debug only)
+full_determinism: false

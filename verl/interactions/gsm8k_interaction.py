@@ -78,7 +78,7 @@ class Gsm8kInteraction(BaseInteraction):
         return gsm8k.compute_score(
             self._instance_dict[instance_id]["response"],
             self._instance_dict[instance_id]["ground_truth"],
-            method="strict",
+            method="flexible",
             format_score=0.0,
             score=1.0,
         )

@@ -1,0 +1,18 @@
+# hyperparallel actor config, inheriting from trainer/config/actor/actor.yaml
+defaults:
+  # fsdp optimizer config (reuse fsdp optimizer)
+  - ../optim@optim: fsdp
+
+  # hyperparallel engine config
+  - ../engine@hyperparallel_config: hyperparallel
+
+  - actor
+
+  # load the reference default config, then apply the fields in the current yaml
+  - _self_
+
+_target_: verl.workers.config.HyperParallelActorConfig
+
+strategy: hyperparallel
+
+grad_clip: 1.0
