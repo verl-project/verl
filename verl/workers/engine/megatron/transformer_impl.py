@@ -660,7 +660,8 @@ class MegatronEngine(BaseEngine):
         # postprocess_micro_batch_func). attention_mask is CP-replicated, so a single
         # all-reduce over the DP group gives the global value.
         if self.tf_config is not None and self.tf_config.calculate_per_token_loss:
-            routed_num_tokens = data["attention_mask"].sum().to(get_device_id())
+            attention_mask = data["attention_mask"] if "attention_mask" in data.keys() else data["response_mask"]
+            routed_num_tokens = attention_mask.sum().to(get_device_id())
             torch.distributed.all_reduce(
                 routed_num_tokens, op=torch.distributed.ReduceOp.SUM, group=self.get_data_parallel_group()
             )
