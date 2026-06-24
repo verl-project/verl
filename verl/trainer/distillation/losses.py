@@ -16,10 +16,12 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 import torch
+import torch.nn.functional as F
 from tensordict import TensorDict
 
 from verl.base_config import BaseConfig
 from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
+from verl.utils import tensordict_utils as tu
 from verl.utils.metric import AggregationType, Metric
 from verl.workers.config import ActorConfig, DistillationConfig, DistillationLossConfig
 from verl.workers.utils.losses import ppo_loss
@@ -134,6 +136,23 @@ def compute_topk_loss(
     - student_mass: (bsz, seqlen/cp_size)
     - teacher_mass: (bsz, seqlen/cp_size)
     """
+    # FSDP-teacher first pass: the trainer stamps ``compute_student_topk_only=True``
+    # to get the student's own top-K before the teacher forward. Short-circuit and
+    # return the student top-K log-probs and IDs, with no teacher data dependency.
+    if tu.get_non_tensor_data(data=data, key="compute_student_topk_only", default=False):
+        topk = distillation_config.distillation_loss.topk
+        if topk is None:
+            raise ValueError(
+                "distillation_loss.topk must be set when compute_student_topk_only=True; "
+                "the FSDP teacher pipeline uses it as the student-top-K width."
+            )
+        student_log_probs = F.log_softmax(student_logits, dim=-1)
+        topk_out = torch.topk(student_log_probs, k=topk, dim=-1)
+        return {
+            "student_topk_log_probs": topk_out.values,
+            "student_topk_ids": topk_out.indices.to(torch.int64),
+        }
+
     loss_mode = distillation_config.distillation_loss.loss_mode
 
     if loss_mode == "forward_kl_topk":

@@ -1135,12 +1135,16 @@ class FSDPEngineWithLMHead(FSDPEngine):
                     sum_pi_squared_rmpad = verl_F.calculate_sum_pi_squared_from_logits(logits_rmpad)
 
                 # logits_processor_func return tensors with shape (1, total_nnz/sp_size)
+                # or (1, total_nnz/sp_size, K) when the processor emits per-token, top-K
+                # outputs (e.g. the FSDP-teacher reverse-KL pipeline's student-top-K stage).
                 if distillation_use_topk:
                     outputs = logits_processor_func(student_logits=logits_rmpad.unsqueeze(0), data=micro_batch)
                     cu_seqlens = input_ids.offsets()
                     for k, v in outputs.items():
                         v = v.squeeze(0)
-                        assert v.shape == log_probs.shape, f"log_probs shape: {log_probs.shape}, {k} shape: {v.shape}"
+                        assert v.shape[0] == log_probs.shape[0], (
+                            f"log_probs shape: {log_probs.shape}, {k} shape: {v.shape}"
+                        )
                         if self.use_ulysses_sp:
                             pad_size = output_args["pad_size"]
                             v = gather_outputs_and_unpad(v, gather_dim=0, unpad_dim=0, padding_size=pad_size)
@@ -1222,7 +1226,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
                         outputs = logits_processor_func(student_logits=logits_rmpad.unsqueeze(0), data=micro_batch)
                         for k, v in outputs.items():
                             v = v.squeeze(0)
-                            assert v.shape == log_probs.shape, (
+                            assert v.shape[0] == log_probs.shape[0], (
                                 f"log_probs shape: {log_probs.shape}, {k} shape: {v.shape}"
                             )
                             model_output[k] = torch.nested.nested_tensor_from_jagged(v, cu_seqlens)
