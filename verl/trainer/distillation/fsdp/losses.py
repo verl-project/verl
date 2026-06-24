@@ -32,6 +32,27 @@ def kl_divergence(log_q: torch.Tensor, log_p: torch.Tensor) -> torch.Tensor:
     return kld.sum(dim=-1)
 
 
+def reverse_kl_divergence(log_q: torch.Tensor, log_p: torch.Tensor) -> torch.Tensor:
+    """Compute reverse KL divergence on a shared support.
+
+    Computes KL(Q || P) with the expectation taken under Q (the "student" distribution),
+    which is the mode-seeking direction discussed in
+    "Rethinking On-Policy Distillation of Large Language Models" (arXiv:2604.13016)
+    and verl issue #6676.
+
+    Args:
+        log_q: Student log-probabilities at the shared support, shape ``(..., K)``.
+        log_p: Teacher log-probabilities at the same support, shape ``(..., K)``.
+
+    Returns:
+        Token-wise KL(Q || P), shape ``(...,)`` (the trailing K axis is reduced).
+    """
+    log_q = log_q.float()
+    log_p = log_p.float()
+    q = log_q.exp()
+    return (q * (log_q - log_p)).sum(dim=-1)
+
+
 def compute_forward_kl_topk(
     student_logits: torch.Tensor,
     teacher_topk_log_probs: torch.Tensor,
@@ -91,4 +112,70 @@ def compute_forward_kl_topk(
         "teacher_mass": teacher_mass,
         "overlap_count": overlap_count,
         "overlap_token_advantage": overlap_token_advantage,
+    }
+
+
+def compute_reverse_kl_topk(
+    student_logits: torch.Tensor,
+    teacher_on_student_logp: torch.Tensor,
+    student_topk_ids: torch.Tensor,
+    config: DistillationConfig,
+    data_format: str,
+) -> dict[str, torch.Tensor]:
+    """Compute student-top-K reverse KL distillation loss.
+
+    The support is the student's own top-K and the expectation is taken under the
+    student distribution Q; ``L_t = sum_{i in TopK_student} q_i * (log q_i - log p_i)``.
+    The teacher log-probabilities at those IDs are precomputed by the FSDP teacher
+    worker, so no full ``[B, T, V]`` tensor is materialized here.
+
+    Args:
+        student_logits: ``(bsz, seqlen/sp_size, vocab_size)``.
+        teacher_on_student_logp: ``(bsz, seqlen, K)`` — teacher log-probabilities
+            gathered at ``student_topk_ids``.
+        student_topk_ids: ``(bsz, seqlen, K)`` — the student's current-step top-K IDs.
+        config: Distillation config (used for the ``log_prob_min_clamp`` guard).
+        data_format: kept for API symmetry with :func:`compute_forward_kl_topk`;
+            not consumed here.
+
+    Returns:
+        dict with ``distillation_losses`` (per-token KL(Q || P)) and the
+        ``student_mass`` / ``teacher_mass`` diagnostics (student- and teacher-side
+        probability on the student-top-K; ``teacher_mass`` should rise in training).
+    """
+    del data_format  # unused; kept for parity with compute_forward_kl_topk's signature
+    # 1. unwrap nested layouts from the rmpad pipeline
+    if teacher_on_student_logp.is_nested:
+        teacher_on_student_logp = teacher_on_student_logp.values().unsqueeze(0)
+    if student_topk_ids.is_nested:
+        student_topk_ids = student_topk_ids.values().unsqueeze(0)
+
+    # 2. split across sp groups
+    if get_ulysses_sequence_parallel_world_size() > 1:
+        teacher_on_student_logp = slice_input_tensor(teacher_on_student_logp, dim=1)
+        student_topk_ids = slice_input_tensor(student_topk_ids, dim=1)
+    assert teacher_on_student_logp.shape[:2] == student_topk_ids.shape[:2] == student_logits.shape[:2]
+    assert teacher_on_student_logp.shape[-1] == student_topk_ids.shape[-1]
+
+    # 3. gather student log-probs at the student's own top-K ids
+    student_log_probs = F.log_softmax(student_logits, dim=-1)
+    student_topk_log_probs = torch.gather(student_log_probs, dim=-1, index=student_topk_ids)
+
+    student_mass = student_topk_log_probs.exp().sum(dim=-1)
+    teacher_mass = teacher_on_student_logp.exp().sum(dim=-1)
+
+    loss_config: DistillationLossConfig = config.distillation_loss
+    if loss_config.log_prob_min_clamp is not None:
+        student_topk_log_probs = student_topk_log_probs.clamp_min(loss_config.log_prob_min_clamp)
+        teacher_on_student_logp = teacher_on_student_logp.clamp_min(loss_config.log_prob_min_clamp)
+
+    distillation_losses = reverse_kl_divergence(
+        log_q=student_topk_log_probs,
+        log_p=teacher_on_student_logp,
+    )
+
+    return {
+        "distillation_losses": distillation_losses,
+        "student_mass": student_mass,
+        "teacher_mass": teacher_mass,
     }
