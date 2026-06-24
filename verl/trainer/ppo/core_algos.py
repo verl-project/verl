@@ -212,6 +212,10 @@ def get_kl_controller(kl_ctrl):
         raise NotImplementedError
 
 
+def _valid_response_rows(response_mask: torch.Tensor) -> torch.Tensor:
+    return response_mask.sum(dim=-1) > 0
+
+
 @register_adv_est(AdvantageEstimator.GAE)  # or simply: @register_adv_est("gae")
 def compute_gae_advantage_return(
     token_level_rewards: torch.Tensor,
@@ -302,6 +306,8 @@ def compute_grpo_outcome_advantage(
             shape is (bs, response_length)
     """
     scores = token_level_rewards.sum(dim=-1)
+    valid_response = _valid_response_rows(response_mask)
+    valid_response_list = valid_response.detach().cpu().tolist()
 
     id2score = defaultdict(list)
     id2mean = {}
@@ -310,11 +316,13 @@ def compute_grpo_outcome_advantage(
     with torch.no_grad():
         bsz = scores.shape[0]
         for i in range(bsz):
+            if not valid_response_list[i]:
+                continue
             id2score[index[i]].append(scores[i])
         for idx in id2score:
             if len(id2score[idx]) == 1:
-                id2mean[idx] = torch.tensor(0.0)
-                id2std[idx] = torch.tensor(1.0)
+                id2mean[idx] = scores.new_tensor(0.0)
+                id2std[idx] = scores.new_tensor(1.0)
             elif len(id2score[idx]) > 1:
                 scores_tensor = torch.stack(id2score[idx])
                 id2mean[idx] = torch.mean(scores_tensor)
@@ -322,6 +330,9 @@ def compute_grpo_outcome_advantage(
             else:
                 raise ValueError(f"no score in prompt index: {idx}")
         for i in range(bsz):
+            if not valid_response_list[i]:
+                scores[i] = 0
+                continue
             if norm_adv_by_std_in_grpo:
                 scores[i] = (scores[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
             else:
@@ -348,12 +359,17 @@ def compute_grpo_vectorized_outcome_advantage(
     """
     with torch.no_grad():
         scores = token_level_rewards.sum(dim=-1)
+        valid_response = _valid_response_rows(response_mask)
         g = as_torch_index(index, device=scores.device)
-        mean_g, std_g, _ = group_mean_std(scores, g, eps=0.0, device=scores.device)
-        if norm_adv_by_std_in_grpo:
-            scalars = (scores - mean_g[g]) / (std_g[g] + epsilon)
-        else:
-            scalars = scores - mean_g[g]
+        scalars = torch.zeros_like(scores)
+        if torch.any(valid_response):
+            mean_g, std_g, _ = group_mean_std(scores[valid_response], g[valid_response], eps=0.0, device=scores.device)
+            if norm_adv_by_std_in_grpo:
+                scalars[valid_response] = (scores[valid_response] - mean_g[g[valid_response]]) / (
+                    std_g[g[valid_response]] + epsilon
+                )
+            else:
+                scalars[valid_response] = scores[valid_response] - mean_g[g[valid_response]]
         advantages = scalars.unsqueeze(-1) * response_mask
         return advantages, advantages
 
@@ -499,8 +515,11 @@ def compute_grpo_passk_outcome_advantage(
     # if True, normalize advantage by std within group
     norm_adv_by_std_in_grpo = config.get("norm_adv_by_std_in_grpo", True)
     scores = token_level_rewards.sum(dim=-1)  # (bs,)
+    valid_response = _valid_response_rows(response_mask)
+    valid_response_list = valid_response.detach().cpu().tolist()
     advantages = torch.zeros_like(scores)
 
+    id2total_count: defaultdict[Any, int] = defaultdict(int)
     id2scores = defaultdict(list)
     id2indices = defaultdict(list)
 
@@ -508,15 +527,20 @@ def compute_grpo_passk_outcome_advantage(
         bsz = scores.shape[0]
         for i in range(bsz):
             idx = index[i]
+            id2total_count[idx] += 1
+            if not valid_response_list[i]:
+                continue
             id2scores[idx].append(scores[i])
             id2indices[idx].append(i)
 
         for idx in id2scores:
             rewards = torch.stack(id2scores[idx])  # (k,)
             if rewards.numel() < 2:
-                raise ValueError(
-                    f"Pass@k requires at least 2 samples per group. Got {rewards.numel()} for group {idx}."
-                )
+                if id2total_count[idx] < 2:
+                    raise ValueError(
+                        f"Pass@k requires at least 2 samples per group. Got {id2total_count[idx]} for group {idx}."
+                    )
+                continue
             topk, topk_idx = torch.topk(rewards, 2)
             r_max, r_second_max = topk[0], topk[1]
             i_max = id2indices[idx][topk_idx[0].item()]
@@ -560,6 +584,8 @@ def compute_reinforce_plus_plus_baseline_outcome_advantage(
     """
     response_length = token_level_rewards.shape[-1]
     scores = token_level_rewards.sum(dim=-1)
+    valid_response = _valid_response_rows(response_mask)
+    valid_response_list = valid_response.detach().cpu().tolist()
 
     id2score = defaultdict(list)
     id2mean = {}
@@ -567,15 +593,20 @@ def compute_reinforce_plus_plus_baseline_outcome_advantage(
     with torch.no_grad():
         bsz = scores.shape[0]
         for i in range(bsz):
+            if not valid_response_list[i]:
+                continue
             id2score[index[i]].append(scores[i])
         for idx in id2score:
             if len(id2score[idx]) == 1:
-                id2mean[idx] = torch.tensor(0.0)
+                id2mean[idx] = scores.new_tensor(0.0)
             elif len(id2score[idx]) > 1:
                 id2mean[idx] = torch.mean(torch.stack(id2score[idx]))
             else:
                 raise ValueError(f"no score in prompt index: {idx}")
         for i in range(bsz):
+            if not valid_response_list[i]:
+                scores[i] = 0
+                continue
             scores[i] = scores[i] - id2mean[index[i]]
 
         scores = scores.unsqueeze(-1).tile([1, response_length]) * response_mask
@@ -610,6 +641,8 @@ def compute_rloo_outcome_advantage(
             shape: (bs, response_length)
     """
     scores = token_level_rewards.sum(dim=-1)
+    valid_response = _valid_response_rows(response_mask)
+    valid_response_list = valid_response.detach().cpu().tolist()
 
     id2score = defaultdict(list)
     id2mean = {}
@@ -617,15 +650,20 @@ def compute_rloo_outcome_advantage(
     with torch.no_grad():
         bsz = scores.shape[0]
         for i in range(bsz):
+            if not valid_response_list[i]:
+                continue
             id2score[index[i]].append(scores[i])
         for idx in id2score:
             if len(id2score[idx]) == 1:
-                id2mean[idx] = torch.tensor(0.0)
+                id2mean[idx] = scores.new_tensor(0.0)
             elif len(id2score[idx]) > 1:
                 id2mean[idx] = torch.mean(torch.stack(id2score[idx]))
             else:
                 raise ValueError(f"no score in prompt index: {idx}")
         for i in range(bsz):
+            if not valid_response_list[i]:
+                scores[i] = 0
+                continue
             response_num = len(id2score[index[i]])
             if response_num > 1:
                 scores[i] = scores[i] * response_num / (response_num - 1) - id2mean[index[i]] * response_num / (
@@ -663,6 +701,8 @@ def compute_opo_outcome_advantage(
     """
     response_length = response_mask.sum(dim=-1)
     scores = token_level_rewards.sum(dim=-1)
+    valid_response = _valid_response_rows(response_mask)
+    valid_response_list = valid_response.detach().cpu().tolist()
 
     id2score = defaultdict(list)
     id2len = defaultdict(list)
@@ -671,12 +711,14 @@ def compute_opo_outcome_advantage(
     with torch.no_grad():
         bsz = scores.shape[0]
         for i in range(bsz):
+            if not valid_response_list[i]:
+                continue
             id2score[index[i]].append(scores[i])
             id2len[index[i]].append(response_length[i])
 
         for idx in id2score:
             if len(id2score[idx]) == 1:
-                id2bsl[idx] = torch.tensor(0.0)
+                id2bsl[idx] = scores.new_tensor(0.0)
             elif len(id2score[idx]) > 1:
                 score_tensor = torch.stack(id2score[idx])
                 len_tensor = torch.stack(id2len[idx])
@@ -684,6 +726,9 @@ def compute_opo_outcome_advantage(
             else:
                 raise ValueError(f"no score in prompt index: {idx}")
         for i in range(bsz):
+            if not valid_response_list[i]:
+                scores[i] = 0
+                continue
             scores[i] = scores[i] - id2bsl[index[i]]
         scores = scores.unsqueeze(-1) * response_mask
 
@@ -798,6 +843,8 @@ def compute_gpg_outcome_advantage(
             shape: (bs, response_length)
     """
     scores = token_level_rewards.sum(dim=-1)
+    valid_response = _valid_response_rows(response_mask)
+    valid_response_list = valid_response.detach().cpu().tolist()
 
     id2score = defaultdict(list)
     id2mean = {}
@@ -805,16 +852,19 @@ def compute_gpg_outcome_advantage(
 
     with torch.no_grad():
         bsz = scores.shape[0]
-        m = torch.count_nonzero(scores)
-        alpha = bsz / m.clamp(min=1)
+        valid_scores = scores[valid_response]
+        m = torch.count_nonzero(valid_scores)
+        alpha = int(valid_response.sum().item()) / m.clamp(min=1)
 
         for i in range(bsz):
+            if not valid_response_list[i]:
+                continue
             id2score[index[i]].append(scores[i])
 
         for idx in id2score:
             if len(id2score[idx]) == 1:
-                id2mean[idx] = torch.tensor(0.0)
-                id2std[idx] = torch.tensor(1.0)
+                id2mean[idx] = scores.new_tensor(0.0)
+                id2std[idx] = scores.new_tensor(1.0)
             elif len(id2score[idx]) > 1:
                 scores_tensor = torch.stack(id2score[idx])
                 id2mean[idx] = torch.mean(scores_tensor)
@@ -822,6 +872,9 @@ def compute_gpg_outcome_advantage(
             else:
                 raise ValueError(f"no score in prompt index: {idx}")
         for i in range(bsz):
+            if not valid_response_list[i]:
+                scores[i] = 0
+                continue
             scores[i] = alpha * (scores[i] - id2mean[index[i]]) / (f_norm)
         scores = scores.unsqueeze(-1) * response_mask
 
@@ -856,10 +909,18 @@ def compute_rloo_vectorized_outcome_advantage(
     scores = token_level_rewards.sum(dim=-1)
 
     with torch.no_grad():
-        inv = torch.from_numpy(np.unique(index, return_inverse=True)[1]).to(scores.device)
+        valid_response = _valid_response_rows(response_mask)
+        adv = torch.zeros_like(scores)
+        if torch.any(valid_response):
+            inv = as_torch_index(index, device=scores.device)
+            valid_inv = inv[valid_response]
+            valid_scores = scores[valid_response]
 
-        c = torch.bincount(inv)[inv].to(scores.dtype)
-        adv = ((c * scores - torch.bincount(inv, weights=scores)[inv]) / (c - 1).clamp_min(1)) * (c > 1)
+            c = torch.bincount(valid_inv)[valid_inv].to(scores.dtype)
+            valid_adv = (
+                (c * valid_scores - torch.bincount(valid_inv, weights=valid_scores)[valid_inv]) / (c - 1).clamp_min(1)
+            ) * (c > 1)
+            adv[valid_response] = valid_adv
 
         adv = adv.unsqueeze(-1) * response_mask
 
