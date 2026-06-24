@@ -159,6 +159,13 @@ class ServerAdapter(BaseRollout):
             tags: weights or kv_cache.
         """
         if self.config.free_cache_engine and self._ensure_server_handle():
+            if "kv_cache" in tags:
+                # Release PyTorch-cached GPU memory in every vLLM worker before
+                # wake_up allocates the KV-cache arena via cuMemCreate.  Without
+                # this, the CUDA virtual-memory allocator cannot reuse pages that
+                # the PyTorch allocator still holds after update_weights_from_ipc,
+                # which causes cuMemCreate to fail with an OOM error.
+                await self._execute_method("empty_cache")
             await self.server_handle.wake_up.remote(tags=tags)
 
     async def release(self):
