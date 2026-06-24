@@ -49,6 +49,10 @@ from verl.experimental.agent_loop.utils import resolve_config_path
 from verl.protocol import DataProto
 from verl.tools.tool_registry import load_all_tools
 from verl.trainer.distillation import is_distillation_enabled
+from verl.trainer.distillation.privileged_context import (
+    build_privileged_sequence,
+    slice_privileged_teacher_to_student,
+)
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.dataset.rl_dataset import RLHFDataset, get_dataset_class
 from verl.utils.model import compute_position_id_with_mask
@@ -515,6 +519,17 @@ class AgentLoopWorker:
             from verl.experimental.teacher_loop.teacher_manager import AsyncTeacherLLMServerManager
 
             self.teacher_key: str = config.distillation.teacher_key
+            self.self_distillation: bool = config.distillation.self_distillation
+            self.privileged_solution_key: str = config.distillation.privileged_solution_key
+            self._privileged_prefix_ids: list[int] = []
+            self._privileged_suffix_ids: list[int] = []
+            if self.self_distillation:
+                self._privileged_prefix_ids = self.tokenizer.encode(
+                    config.distillation.privileged_prefix, add_special_tokens=False
+                )
+                self._privileged_suffix_ids = self.tokenizer.encode(
+                    config.distillation.privileged_suffix, add_special_tokens=False
+                )
             self.teacher_server_manager = AsyncTeacherLLMServerManager(
                 config=config,
                 teacher_client=teacher_client,
@@ -1008,17 +1023,35 @@ class AgentLoopWorker:
         """Compute teacher logprobs for single sample."""
         if self.distillation_enabled and not validate:
             routing_key = None
+            solution_ids = None
             if sample_kwargs is not None:
                 routing_value = sample_kwargs.get(self.teacher_key)
                 if routing_value is not None:
                     # Non-tensor batch values arrive as 0-d numpy objects / arrays; normalize to Python.
                     routing_key = routing_value.item() if hasattr(routing_value, "item") else routing_value
+                if self.self_distillation:
+                    solution = sample_kwargs.get(self.privileged_solution_key)
+                    if solution is not None:
+                        solution = solution.item() if hasattr(solution, "item") else solution
+                        solution_ids = self.tokenizer.encode(str(solution), add_special_tokens=False)
+            if solution_ids is not None:
+                # OPSD: the teacher conditions on the privileged ground-truth solution.
+                sequence_ids = build_privileged_sequence(
+                    prompt_ids, response_ids, solution_ids, self._privileged_prefix_ids, self._privileged_suffix_ids
+                )
+            else:
+                sequence_ids = prompt_ids + response_ids
             teacher_ids, teacher_logprobs = await self.teacher_server_manager.compute_teacher_logprobs_single(
-                sequence_ids=prompt_ids + response_ids,
+                sequence_ids=sequence_ids,
                 multi_modal_data=output.multi_modal_data,
                 mm_processor_kwargs=output.mm_processor_kwargs,
                 routing_key=routing_key,
             )
+            if solution_ids is not None:
+                # Realign the teacher's privileged-context scores onto the student's positions.
+                teacher_ids, teacher_logprobs = slice_privileged_teacher_to_student(
+                    teacher_ids, teacher_logprobs, len(prompt_ids), len(response_ids), self.tokenizer.pad_token_id
+                )
             output.extra_fields["teacher_ids"] = teacher_ids
             output.extra_fields["teacher_logprobs"] = teacher_logprobs
 
