@@ -895,6 +895,14 @@ distillation:
         response_length: ${oc.select:actor_rollout_ref.rollout.response_length}
         temperature: ${oc.select:actor_rollout_ref.rollout.temperature}
   teacher_key: data_source
+  self_distillation: false
+  privileged_solution_key: ground_truth
+  privileged_prefix: '
+
+    Reference solution: '
+  privileged_suffix: '
+
+    Now evaluate the response: '
 trainer:
   balance_batch: true
   total_epochs: 30
