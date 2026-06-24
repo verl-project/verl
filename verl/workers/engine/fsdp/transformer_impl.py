@@ -1214,10 +1214,23 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 raise NotImplementedError(f"pad_mode {pad_mode} not implemented")
 
         else:  # not using rmpad and no ulysses sp
-            response_length = tu.get_non_tensor_data(data=micro_batch, key="max_response_length", default=1024)
             if use_fused_kernels:
-                log_probs = output.log_probs[:, -response_length - 1 : -1]
-                entropy = output.entropy[:, -response_length - 1 : -1]  # (bsz, response_length)
+                if pad_mode == DatasetPadMode.NO_PADDING:
+                    # Re-wrap dense fused (bsz, seqlen) outputs as nested/jagged, as the non-fused branch does.
+                    cu_seqlens = input_ids.offsets()
+                    seq_lengths = cu_seqlens.diff()
+                    starts = torch.zeros_like(seq_lengths, dtype=torch.int64)
+
+                    log_probs = torch.nested.narrow(output.log_probs, 1, starts, seq_lengths, layout=torch.jagged)
+                    log_probs = torch.cat([t for t in log_probs.unbind()])
+                    log_probs = torch.nested.nested_tensor_from_jagged(log_probs, cu_seqlens)
+
+                    if calculate_entropy:
+                        entropy = torch.nested.narrow(output.entropy, 1, starts, seq_lengths, layout=torch.jagged)
+                        entropy = torch.cat([t for t in entropy.unbind()])
+                        entropy = torch.nested.nested_tensor_from_jagged(entropy, cu_seqlens)
+                else:
+                    raise NotImplementedError(f"pad_mode {pad_mode} not implemented")
 
             else:
                 logits = output.logits  # (bsz, response_length, vocab_size)
