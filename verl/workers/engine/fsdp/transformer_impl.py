@@ -423,7 +423,10 @@ class FSDPEngine(BaseEngine):
                 "offload_policy": offload_policy,
                 "reshard_after_forward": self.engine_config.reshard_after_forward,
             }
-            full_state = module.state_dict()
+            # Only rank 0 holds the full state dict; fsdp2_load_full_state_dict
+            # broadcasts it to all other ranks via broadcast_from_rank0=True.
+            # Loading on every rank would OOM for large models (e.g. 4 workers × 140 GB = 560 GB).
+            full_state = module.state_dict() if torch.distributed.get_rank() == 0 else {}
             apply_fsdp2(module, fsdp_kwargs, self.engine_config)
             fsdp2_load_full_state_dict(module, full_state, fsdp_mesh, offload_policy)
         else:
