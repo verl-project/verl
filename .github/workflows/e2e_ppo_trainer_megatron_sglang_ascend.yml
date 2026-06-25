@@ -126,7 +126,7 @@ jobs:
         with:
           fetch-depth: 0
           clean: true
-      - name: Install the current repository
+      - name: Install the current repository 
         run: |
           uv pip install pytest pytest-asyncio
           uv pip install --no-deps --no-build-isolation -e .
