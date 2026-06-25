@@ -404,10 +404,14 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
                 break
 
         self.progress_bar.close()
-        if self.current_param_version % self.config.trainer.test_freq != 0 or self.local_trigger_step > 1:
-            await self._fit_update_weights()
-            await self._fit_validate()
-        self._fit_save_checkpoint(force=True)
+        try:
+            if self.current_param_version % self.config.trainer.test_freq != 0 or self.local_trigger_step > 1:
+                await self._fit_update_weights()
+                await self._fit_validate()
+            self._fit_save_checkpoint(force=True)
+        finally:
+            if hasattr(self, "logger"):
+                self.logger.finish()
 
     async def fit_step(self, batch_dict: dict = None):
         """
