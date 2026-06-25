@@ -239,9 +239,13 @@ class FSDPEngine(BaseEngine):
 
         torch_dtype = PrecisionType.to_dtype(torch_dtype)
 
-        init_context = get_init_weight_context_manager(
-            use_meta_tensor=not self.model_config.hf_config.tie_word_embeddings, mesh=self.device_mesh
+        # fsdp2 uses broadcast_from_rank0 in fsdp2_load_full_state_dict, so only rank 0 needs
+        # real weights. Force meta tensors on non-rank-0 workers regardless of tie_word_embeddings
+        # (fsdp1 with tied embeddings still needs cpu_init_weights on all ranks for sync_module_states).
+        use_meta_tensor = (self.engine_config.strategy == "fsdp2") or (
+            not self.model_config.hf_config.tie_word_embeddings
         )
+        init_context = get_init_weight_context_manager(use_meta_tensor=use_meta_tensor, mesh=self.device_mesh)
 
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
