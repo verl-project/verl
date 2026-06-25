@@ -117,14 +117,12 @@ teacher_key: data_source
 # single teacher at the student checkpoint (teacher_model.model_path == student
 # path) to make it a frozen self-teacher.
 self_distillation: false
-# Non-tensor batch field holding the ground-truth solution text.
-privileged_solution_key: ground_truth
+# Non-tensor batch field holding the ground-truth solution. verl stores it nested
+# at reward_model.ground_truth; a dotted key reaches into the nested dict.
+privileged_solution_key: reward_model.ground_truth
 # Marker text wrapping the privileged solution in the teacher input.
-privileged_prefix: "
-
-Reference solution:
-"
-privileged_suffix: "
-
-Now evaluate the response:
-"
+privileged_prefix: "\n\nReference solution:\n"
+privileged_suffix: "\n\nNow evaluate the response:\n"
+# Optional: insert the solution before the last occurrence of this marker text in
+# the prompt (e.g. the assistant-turn opener) instead of appending. Empty = append.
+privileged_insert_before: ""

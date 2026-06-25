@@ -51,6 +51,7 @@ from verl.tools.tool_registry import load_all_tools
 from verl.trainer.distillation import is_distillation_enabled
 from verl.trainer.distillation.privileged_context import (
     build_privileged_sequence,
+    resolve_privileged_solution,
     slice_privileged_teacher_to_student,
 )
 from verl.utils.config import omega_conf_to_dataclass
@@ -523,6 +524,7 @@ class AgentLoopWorker:
             self.privileged_solution_key: str = config.distillation.privileged_solution_key
             self._privileged_prefix_ids: list[int] = []
             self._privileged_suffix_ids: list[int] = []
+            self._privileged_insert_before_ids: Optional[list[int]] = None
             if self.self_distillation:
                 self._privileged_prefix_ids = self.tokenizer.encode(
                     config.distillation.privileged_prefix, add_special_tokens=False
@@ -530,6 +532,10 @@ class AgentLoopWorker:
                 self._privileged_suffix_ids = self.tokenizer.encode(
                     config.distillation.privileged_suffix, add_special_tokens=False
                 )
+                if config.distillation.privileged_insert_before:
+                    self._privileged_insert_before_ids = self.tokenizer.encode(
+                        config.distillation.privileged_insert_before, add_special_tokens=False
+                    )
             self.teacher_server_manager = AsyncTeacherLLMServerManager(
                 config=config,
                 teacher_client=teacher_client,
@@ -1029,15 +1035,24 @@ class AgentLoopWorker:
                 if routing_value is not None:
                     # Non-tensor batch values arrive as 0-d numpy objects / arrays; normalize to Python.
                     routing_key = routing_value.item() if hasattr(routing_value, "item") else routing_value
-                if self.self_distillation:
-                    solution = sample_kwargs.get(self.privileged_solution_key)
-                    if solution is not None:
-                        solution = solution.item() if hasattr(solution, "item") else solution
-                        solution_ids = self.tokenizer.encode(str(solution), add_special_tokens=False)
+            if self.self_distillation:
+                solution = resolve_privileged_solution(sample_kwargs, self.privileged_solution_key)
+                if not solution:
+                    raise ValueError(
+                        f"self_distillation is enabled but no privileged solution resolved at "
+                        f"'{self.privileged_solution_key}'; verl's ground truth is usually at "
+                        f"'reward_model.ground_truth'."
+                    )
+                solution_ids = self.tokenizer.encode(solution, add_special_tokens=False)
             if solution_ids is not None:
                 # OPSD: the teacher conditions on the privileged ground-truth solution.
                 sequence_ids = build_privileged_sequence(
-                    prompt_ids, response_ids, solution_ids, self._privileged_prefix_ids, self._privileged_suffix_ids
+                    prompt_ids,
+                    response_ids,
+                    solution_ids,
+                    self._privileged_prefix_ids,
+                    self._privileged_suffix_ids,
+                    self._privileged_insert_before_ids,
                 )
             else:
                 sequence_ids = prompt_ids + response_ids
