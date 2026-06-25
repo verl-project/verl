@@ -113,6 +113,7 @@ jobs:
           pip3 install pytest-asyncio
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
+          pip3 install --no-deps TransferQueue==0.1.8
       - name: Run TRT-LLM async unit tests
         run: |
           unset TORCH_CUDA_ARCH_LIST

@@ -175,7 +175,7 @@ class PPOTrainer(ABC):
             critic_cfg.engine.max_token_len_per_gpu = critic_cfg.ppo_infer_max_token_len_per_gpu
             worker_cfg = TrainingWorkerConfig(
                 model_type="value_model",
-                model_config=critic_cfg.model_config,
+                model_config=critic_cfg.model,
                 engine_config=critic_cfg.engine,
                 optimizer_config=critic_cfg.optim,
                 checkpoint_config=critic_cfg.checkpoint,
@@ -232,8 +232,10 @@ class PPOTrainer(ABC):
         if lora_rank <= 0:
             lora_rank = self.config.actor_rollout_ref.model.get("lora_rank", 0)
         self.ref_in_actor = lora_rank > 0 or self.config.actor_rollout_ref.model.get("lora_adapter_path") is not None
-        if self.use_reference_policy:
-            self.ref_policy_wg = all_wg[str(Role.ActorRolloutRef)]
+        if self.use_reference_policy and not self.ref_in_actor:
+            self.ref_policy_wg = all_wg[str(actor_role)]
+        if self.ref_in_actor:
+            self.ref_policy_wg = self.actor_rollout_wg
 
         # 7. initialize reward loop manager
         resource_pool = (
@@ -1307,6 +1309,12 @@ class PPOTrainer(ABC):
     def _compute_values(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
         """Compute the values of the batch."""
         # 1. compute value
+        batch.extra_info.update(
+            {
+                "compute_loss": False,
+                "temperature": self.config.actor_rollout_ref.rollout.temperature,
+            }
+        )
         output = self.critic_wg.infer_batch(batch)
         # TODO: DataProtoFuture support KVBatchMeta
         ray.get(output.futures)
@@ -1391,6 +1399,7 @@ class PPOTrainer(ABC):
             "epochs": self.config.critic.ppo_epochs,
             "seed": self.config.critic.data_loader_seed,
             "dataloader_kwargs": {"shuffle": self.config.critic.shuffle},
+            "temperature": self.config.actor_rollout_ref.rollout.temperature,
         }
         batch.extra_info.update(extra_info)
 

@@ -130,7 +130,8 @@ jobs:
           pip install -r requirements-test.txt
           pip install --upgrade "accelerate>=1.13.0"
       - name: Check final pip list
-          pip list
+        run: |
+          pip3 list
       - name: Prepare weights
         run: |
           ln -s /root/.cache/models ~/models

@@ -103,6 +103,7 @@ jobs:
       - name: Install the current repository
         run: |
           uv pip install --no-deps -e .
+          uv pip install --no-deps TransferQueue==0.1.8
       - name: Check final pip list
         run: |
           uv pip list
@@ -171,6 +172,7 @@ jobs:
       - name: Install the current repository
         run: |
           uv pip install --no-deps --no-build-isolation -e .
+          uv pip install --no-deps TransferQueue==0.1.8
       - name: Check final pip list
         run: |
           uv pip list
@@ -209,7 +211,7 @@ jobs:
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-9.0.0-910b-ubuntu22.04-py3.11-latest
       options: >-
-        --shm-size 16g
+        --shm-size 64g
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
@@ -229,6 +231,7 @@ jobs:
       - name: Install the current repository
         run: |
           pip install --no-deps -e .
+          pip install --no-deps TransferQueue==0.1.8
       - name: Check final pip list
         run: |
           pip list

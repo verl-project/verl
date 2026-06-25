@@ -865,7 +865,7 @@ trainer:
   max_critic_ckpt_to_keep: null
   ray_wait_register_center_timeout: 300
   device: cuda
-  use_v1: false
+  use_v1: true
   v1:
     trainer_mode: sync
     sync: {}

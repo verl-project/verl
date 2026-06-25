@@ -145,6 +145,7 @@ jobs:
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
       - name: Check final pip list
+        run: |
           pip3 list
       - name: Running FSDP2 rmpad model tests on 8 L20 GPUs + latest flash_attn
         run: |
@@ -169,6 +170,7 @@ jobs:
           pip3 install --no-deps -e .
           pip3 install --upgrade "accelerate>=1.13.0"
       - name: Check final pip list
+        run: |
           pip3 list
       - name: Download model config files
         run: |

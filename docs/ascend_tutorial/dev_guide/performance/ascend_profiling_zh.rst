@@ -53,8 +53,8 @@ Last updated: 12/20/2025.
    -  module: 是否记录框架层Python调用栈信息。相较于stack，更推荐使用module记录调用栈信息，因其产生的性能膨胀更低。
    -  stack: 是否记录算子调用栈信息。
 
--  analysis: 启用自动数据解析。
--  discrete: 使用离散模式。
+-  analysis: 是否启用自动数据解析。
+-  discrete: 是否使用离散模式。
 -  profile_token_start：仅在 rollout role 下生效，用于指定 rollout 解码阶段的采集起始 response token；参数合法时生效（从 0 开始，满足 ``profile_token_end > profile_token_start``，且区间在 response 长度内）。
 -  profile_token_end：仅在 rollout role 下生效，用于指定 rollout 解码阶段的采集结束 response token（右边界不包含）；参数合法时生效（从 0 开始，满足 ``profile_token_end > profile_token_start``，且区间在 response 长度内）。
 
@@ -64,62 +64,51 @@ Last updated: 12/20/2025.
 禁用采集
 ~~~~~~~~~~~~~~~~~~~~
 
-.. code:: yaml
+.. code:: bash
 
-      global_profiler:
-         steps: null # disable profile
+            global_profiler.steps=null
 
 端到端采集
 ~~~~~~~~~~~~~~~~~~~~~
 
-.. code:: yaml
+.. code:: bash
 
-      global_profiler:
-         steps: [1, 2, 5]
-         save_path: ./outputs/profile
-      actor_rollout_ref:
-         actor:  # 设置 actor role 的 profiler 采集配置参数
-            profiler:
-               enable: True
-               all_ranks: True
-               tool_config:
-                  npu:
-                     discrete: False
-                     contents: [npu, cpu]  # 控制采集列表，默认cpu、npu，可配置memory、shapes、module等
-
+        global_profiler.tool=npu
+        global_profiler.steps="[1, 2, 5]" # 采集步数
+        global_profiler.save_path=./outputs/profile
+        actor_rollout_ref.actor.profiler.enable=True
+        actor_rollout_ref.actor.profiler.all_ranks=False
+        actor_rollout_ref.actor.profiler.ranks="[0]" # 只采集rank0
+        actor_rollout_ref.actor.profiler.tool_config.npu.discrete=True # 推荐使用离散模式，各阶段数据分开存储
+        actor_rollout_ref.actor.profiler.tool_config.npu.contents="['npu','cpu']" # 控制采集列表，默认cpu、npu，可配置memory、shapes、module等
+        actor_rollout_ref.actor.profiler.tool_config.npu.level=level1
+        actor_rollout_ref.actor.profiler.tool_config.npu.analysis=False # 禁用自动数据解析
         # rollout & ref follow actor settings
 
 
-离散模式采集
+训练和推理阶段分离
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. code:: yaml
+.. code:: bash
 
-      global_profiler:
-         steps: [1, 2, 5]
-         save_path: ./outputs/profile
-      actor_rollout_ref:
-         actor:
-            profiler:
-               enable: True  # 设置为 True 以采集训练阶段
-               all_ranks: False
-               ranks: [0]  # 全局 Rank 0
-               tool_config:
-                  npu:
-                     discrete: True
-                     contents: [npu, cpu]
-         rollout:
-            profiler:
-               enable: True  # 设置为 True 以采集推理阶段
-               all_ranks: False
-               ranks: [0]  # 在 Agent Loop 模式下，此处指推理实例的 Replica Rank (例如第 0 个实例)
-               tool_config:
-                  npu:
-                     discrete: True  # Agent Loop 模式下必须开启离散模式
-                     # 可选：按 response token 区间采集；不设置 start/stop 时采集整个 rollout 阶段
-                     profile_token_start: 12
-                     profile_token_end: 46
-         # ref follow actor settings
+      global_profiler.tool=npu
+      global_profiler.steps="[1, 2, 5]" # 采集步数
+      global_profiler.save_path=./outputs/profile
+      actor_rollout_ref.actor.profiler.enable=True
+      actor_rollout_ref.actor.profiler.all_ranks=False
+      actor_rollout_ref.actor.profiler.ranks="[0]" # 只采集rank0
+      actor_rollout_ref.actor.profiler.tool_config.npu.discrete=True # 推荐使用离散模式，各阶段数据分开存储
+      actor_rollout_ref.actor.profiler.tool_config.npu.contents="['npu','cpu']" # 控制采集列表，默认cpu、npu，可配置memory、shapes、module等
+      actor_rollout_ref.actor.profiler.tool_config.npu.level=level1
+      actor_rollout_ref.actor.profiler.tool_config.npu.analysis=False # 禁用自动数据解析
+
+      actor_rollout_ref.rollout.profiler.enable=True
+      actor_rollout_ref.rollout.profiler.all_ranks=False
+      actor_rollout_ref.rollout.profiler.ranks="[0]" # 只采集rank0
+      # 可选：按 response token 区间采集；不设置 start/stop 时采集整个 rollout 阶段
+      actor_rollout_ref.rollout.profiler.tool_config.npu.profile_token_start=12
+      actor_rollout_ref.rollout.profiler.tool_config.npu.profile_token_end=46
+      # ref follow actor settings
 
 **Agent Loop 模式说明**：
 
