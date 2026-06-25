@@ -18,6 +18,7 @@
 
 import hashlib
 import os
+import re
 import shutil
 import tempfile
 
@@ -41,6 +42,58 @@ def is_non_local(path):
         bool: True if the path is an HDFS path, False otherwise.
     """
     return path.startswith(_HDFS_PREFIX)
+
+
+# A URL scheme like "gs", "s3", "hdfs", "file". Local paths and bare ids (e.g. an HF
+# model id "Qwen/Qwen3-0.6B") have no scheme.
+_SCHEME_RE = re.compile(r"^([a-zA-Z][a-zA-Z0-9+.\-]*)://")
+# Schemes that are NOT fetched via fsspec: local files and hdfs:// (handled by hdfs_io).
+_NON_FSSPEC_SCHEMES = {"file", "hdfs"}
+
+
+def is_fsspec_path(path: str) -> bool:
+    """Check if a path is a remote object-store URL handled via fsspec (e.g. gs://, s3://).
+
+    This is distinct from ``is_non_local`` (hdfs://, fetched by hdfs_io) and from local
+    paths / Hugging Face model ids (no scheme). Fetching such a path requires the matching
+    fsspec backend installed (e.g. ``gcsfs`` for gs://, ``s3fs`` for s3://).
+
+    Args:
+        path (str): The path to check.
+
+    Returns:
+        bool: True if ``path`` has a remote fsspec scheme, False otherwise.
+    """
+    m = _SCHEME_RE.match(path)
+    return bool(m) and m.group(1).lower() not in _NON_FSSPEC_SCHEMES
+
+
+def _fetch_remote(src: str, dst: str) -> None:
+    """Download a remote ``src`` to local ``dst``: hdfs:// via hdfs_io, otherwise fsspec."""
+    if is_fsspec_path(src):
+        # A missing backend (gcsfs/s3fs) surfaces at get_fs_token_paths, not at import, so
+        # wrap both to always emit the install hint instead of a raw ImportError/ValueError.
+        try:
+            import fsspec
+
+            fs, _, paths = fsspec.get_fs_token_paths(src)
+        except (ImportError, ValueError) as e:
+            raise RuntimeError(
+                f"fsspec and a compatible backend are required to read {src!r}. Install fsspec "
+                f"and the matching backend (e.g. `gcsfs` for gs://, `s3fs` for s3://)."
+            ) from e
+        # A glob (e.g. gs://bucket/train-*.parquet) expands to many paths; downloading only
+        # paths[0] would silently use one shard. Fail loud — pass a single file/dir or an
+        # explicit list of paths instead.
+        if len(paths) != 1:
+            raise ValueError(
+                f"{src!r} matched {len(paths)} paths; globs are not supported. Pass a single "
+                f"file or directory, or an explicit list of paths."
+            )
+        rpath = paths[0]
+        fs.get(rpath, dst, recursive=fs.isdir(rpath))
+    else:
+        copy(src, dst)
 
 
 def md5_encode(path: str) -> str:
@@ -235,10 +288,16 @@ def copy_local_path_from_hdfs(
     """Deprecated. Please use copy_to_local instead."""
     from filelock import FileLock
 
+    # Object-store directory URLs are commonly written with a trailing slash
+    # (gs://bucket/ckpt/); strip it so the cache basename is correct and the assert below
+    # (which guards the hdfs/local basename logic) passes.
+    if is_fsspec_path(src):
+        src = src.rstrip("/")
+
     assert src[-1] != "/", f"Make sure the last char in src is not / because it will cause error. Got {src}"
 
-    if is_non_local(src):
-        # download from hdfs to local
+    if is_non_local(src) or is_fsspec_path(src):
+        # download from a remote store to local: hdfs:// via hdfs_io, gs:///s3:///... via fsspec
         if cache_dir is None:
             # get a temp folder
             cache_dir = tempfile.gettempdir()
@@ -257,7 +316,7 @@ def copy_local_path_from_hdfs(
             if not os.path.exists(local_path):
                 if verbose:
                     print(f"Copy from {src} to {local_path}")
-                copy(src, local_path)
+                _fetch_remote(src, local_path)
                 if os.path.isdir(local_path):
                     _record_directory_structure(local_path)
             elif os.path.isdir(local_path):
@@ -267,7 +326,7 @@ def copy_local_path_from_hdfs(
                     if verbose:
                         print(f"Recopy from {src} to {local_path} due to missing files or directories.")
                     shutil.rmtree(local_path, ignore_errors=True)
-                    copy(src, local_path)
+                    _fetch_remote(src, local_path)
                     _record_directory_structure(local_path)
         return local_path
     else:
