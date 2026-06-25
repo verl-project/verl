@@ -1139,18 +1139,10 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 logits_rmpad.div_(temperature_rmpad.clamp(min=1e-8).unsqueeze(-1).to(logits_rmpad.dtype))
 
                 log_probs = None
-                if not distillation_only:
-                    # if use_sp: ((total_nnz / sp) + pad) ; if not use_sp: (batch, seqlen)
-                    inplace_backward = True
-                    if calculate_entropy:
-                        inplace_backward = False
-                    log_probs = logprobs_from_logits(
-                        logits=logits_rmpad,
-                        labels=input_ids_rmpad_rolled,
-                        inplace_backward=inplace_backward,
-                    )
 
-                # compute entropy
+                if calculate_sum_pi_squared:
+                    sum_pi_squared_rmpad = verl_F.calculate_sum_pi_squared_from_logits(logits_rmpad)
+
                 if calculate_entropy:
                     if not self.engine_config.entropy_checkpointing:
                         if self.engine_config.entropy_from_logits_with_chunking:
@@ -1165,28 +1157,30 @@ class FSDPEngineWithLMHead(FSDPEngine):
                             self.compute_entropy_from_logits, logits_rmpad
                         )
 
-                # compute sum_pi_squared (Σπ²) for optimal-baseline advantage estimators
-                if calculate_sum_pi_squared:
-                    sum_pi_squared_rmpad = verl_F.calculate_sum_pi_squared_from_logits(logits_rmpad)
-
                 # logits_processor_func return tensors with shape (1, total_nnz/sp_size)
                 if distillation_use_topk:
                     outputs = logits_processor_func(student_logits=logits_rmpad.unsqueeze(0), data=micro_batch)
                     cu_seqlens = input_ids.offsets()
                     for k, v in outputs.items():
                         v = v.squeeze(0)
-                        if distillation_only:
-                            assert v.shape == (logits_rmpad.shape[0],), (
-                                f"logits_rmpad len: {logits_rmpad.shape[0]}, {k} shape: {v.shape}"
-                            )
-                        else:
-                            assert v.shape == log_probs.shape, (
-                                f"log_probs shape: {log_probs.shape}, {k} shape: {v.shape}"
-                            )
+                        assert v.shape == (logits_rmpad.shape[0],), (
+                            f"logits_rmpad len: {logits_rmpad.shape[0]}, {k} shape: {v.shape}"
+                        )
                         if self.use_ulysses_sp:
                             pad_size = output_args["pad_size"]
                             v = gather_outputs_and_unpad(v, gather_dim=0, unpad_dim=0, padding_size=pad_size)
                         model_output[k] = torch.nested.nested_tensor_from_jagged(v, cu_seqlens)
+
+                if not distillation_only:
+                    # if use_sp: ((total_nnz / sp) + pad) ; if not use_sp: (batch, seqlen)
+                    inplace_backward = True
+                    if calculate_entropy:
+                        inplace_backward = False
+                    log_probs = logprobs_from_logits(
+                        logits=logits_rmpad,
+                        labels=input_ids_rmpad_rolled,
+                        inplace_backward=inplace_backward,
+                    )
 
             # gather log_prob if sp > 1
             if self.use_ulysses_sp:
@@ -1270,9 +1264,6 @@ class FSDPEngineWithLMHead(FSDPEngine):
                     logits = torch.nested.narrow(logits, 1, starts, seq_lengths, layout=torch.jagged)
                     logits_rmpad = torch.cat([t for t in logits.unbind()])
                     input_ids_rmpad_rolled = output_args["input_ids_rmpad_rolled"]
-                    log_probs = None
-                    if not distillation_only:
-                        log_probs = logprobs_from_logits(logits=logits_rmpad, labels=input_ids_rmpad_rolled)
 
                     # Mirror the use_remove_padding=True branch (see verl#6293).
                     # No Ulysses SP gather here: this branch is the no-SP path
@@ -1283,15 +1274,14 @@ class FSDPEngineWithLMHead(FSDPEngine):
                         outputs = logits_processor_func(student_logits=logits_rmpad.unsqueeze(0), data=micro_batch)
                         for k, v in outputs.items():
                             v = v.squeeze(0)
-                            if distillation_only:
-                                assert v.shape == (logits_rmpad.shape[0],), (
-                                    f"logits_rmpad len: {logits_rmpad.shape[0]}, {k} shape: {v.shape}"
-                                )
-                            else:
-                                assert v.shape == log_probs.shape, (
-                                    f"log_probs shape: {log_probs.shape}, {k} shape: {v.shape}"
-                                )
+                            assert v.shape == (logits_rmpad.shape[0],), (
+                                f"logits_rmpad len: {logits_rmpad.shape[0]}, {k} shape: {v.shape}"
+                            )
                             model_output[k] = torch.nested.nested_tensor_from_jagged(v, cu_seqlens)
+
+                    log_probs = None
+                    if not distillation_only:
+                        log_probs = logprobs_from_logits(logits=logits_rmpad, labels=input_ids_rmpad_rolled)
 
                     # (bsz, j1), for each sample, length of each sample: [real_prompt_length + real_response_length]
                     if not distillation_only:
