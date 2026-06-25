@@ -66,6 +66,7 @@ from verl.trainer.ppo.utils import (
     need_reference_policy,
     need_teacher_policy,
 )
+from verl.trainer.ppo.v1.agent_loop_tq import AgentLoopManagerTQ
 from verl.trainer.ppo.v1.replay_buffer import ReplayBuffer
 from verl.trainer.ppo.v1.utils import compute_advantage_for_multi_trajectories
 from verl.utils import hf_processor, hf_tokenizer
@@ -75,9 +76,8 @@ from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.dataset.rl_dataset import collate_fn
 from verl.utils.debug import marked_timer
 from verl.utils.debug.metrics import calculate_debug_metrics
-from verl.utils.device import auto_set_device
 from verl.utils.fs import copy_to_local
-from verl.utils.import_utils import load_extern_type
+from verl.utils.import_utils import load_class_from_fqn, load_extern_type
 from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
@@ -264,9 +264,9 @@ class PPOTrainer(ABC):
 
         # 9. initialize agent loop manager
         self.llm_server_manager: LLMServerManager = LLMServerManager.create(
-            config=self.config, 
-            worker_group=None if self.config.actor_rollout_ref.rollout.get("nnodes", 0) > 0 else self.actor_rollout_wg, 
-            rollout_resource_pool=actor_rollout_resource_pool
+            config=self.config,
+            worker_group=None if self.config.actor_rollout_ref.rollout.get("nnodes", 0) > 0 else self.actor_rollout_wg,
+            rollout_resource_pool=actor_rollout_resource_pool,
         )
 
         # For standalone mode: initialize NCCL weight sync group

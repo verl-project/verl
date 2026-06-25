@@ -409,12 +409,13 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
                 weights_updated = await self._fit_update_weights()
                 if weights_updated:
                     self._fit_log_aggregated_training_metrics()
+                await self._fit_update_weights()
                 await self._fit_validate()
             self._fit_save_checkpoint(force=True)
         finally:
             if hasattr(self, "logger"):
                 self.logger.finish()
-        
+
     async def fit_step(self, batch_dict: dict = None):
         """
         Single-step training template method. Handles all logic for one training step.
