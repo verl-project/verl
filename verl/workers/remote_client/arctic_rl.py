@@ -112,18 +112,18 @@ class ArcticRLClientWrapper(RemoteBackend):
         # name (arctic.yaml) names the backend, so no extra nesting is needed.
         self._backend_config = config.remote_backend
         self._client = None
-        self.zorro_train_enable = self._backend_config.zorro_train.enable
-        self.zorro_train_max_rollouts = self._backend_config.zorro_train.max_rollouts
+        _train_cfg = self._backend_config.train
+        _logits_cfg = _train_cfg.logits
+        self.zorro_train_enable = _train_cfg.zorro_train.enable
+        self.zorro_train_max_rollouts = _train_cfg.zorro_train.max_rollouts
         # Set False for non-arange position_ids (mrope / 3D rope).
-        self.drop_position_ids = self._backend_config.get("drop_position_ids", True)
-        self.logits_optimization = self._backend_config.get("logits_optimization", "none")
-        self.logits_optimization_peak_mem_size_in_gib = self._backend_config.get(
-            "logits_optimization_peak_mem_size_in_gib", 4
-        )
-        self.logits_compute_in_fp32 = self._backend_config.get("logits_compute_in_fp32", False)
-        self.logits_compute_from_fp32_inputs = self._backend_config.get("logits_compute_from_fp32_inputs", False)
-        # No server consumer yet; forwarded for forward-compat with group-balanced routing.
-        self.zorro_train_load_balancer = self._backend_config.zorro_train.get("load_balancer", True)
+        self.drop_position_ids = self._backend_config.comms.get("drop_position_ids", True)
+        self.logits_optimization = _logits_cfg.get("optimization", "none")
+        self.logits_optimization_peak_mem_size_in_gib = _logits_cfg.get("optimization_peak_mem_size_in_gib", 4)
+        self.logits_compute_in_fp32 = _logits_cfg.get("compute_in_fp32", False)
+        self.logits_compute_from_fp32_inputs = _logits_cfg.get("compute_from_fp32_inputs", False)
+        # Zorro-group load balancer (zorro-agnostic): server reorgs the global batch when set.
+        self.load_balancer = _train_cfg.get("load_balancer", True)
         # CUDA-IPC bypasses NCCL for weight sync; only valid when colocate=True.
         self.cuda_ipc_weight_sync = self._backend_config.weight_sync.cuda_ipc
         self.low_memory_weight_sync = self._backend_config.weight_sync.low_memory
@@ -198,7 +198,7 @@ class ArcticRLClientWrapper(RemoteBackend):
         meta = dict(
             zorro_train_enable=self.zorro_train_enable,
             zorro_train_max_rollouts=self.zorro_train_max_rollouts,
-            zorro_train_load_balancer=self.zorro_train_load_balancer,
+            load_balancer=self.load_balancer,
             rollout_n=rollout_n,
             max_prompt_len=max_prompt_len,
             max_response_len=max_response_len,
@@ -261,7 +261,7 @@ class ArcticRLClientWrapper(RemoteBackend):
         meta = dict(
             zorro_train_enable=self.zorro_train_enable,
             zorro_train_max_rollouts=self.zorro_train_max_rollouts,
-            zorro_train_load_balancer=self.zorro_train_load_balancer,
+            load_balancer=self.load_balancer,
             rollout_n=rollout_n,
             max_prompt_len=max_prompt_len,
             max_response_len=max_response_len,
@@ -303,14 +303,11 @@ class ArcticRLClientWrapper(RemoteBackend):
         }
 
     def _create_ds_config(self, n_gpus: int, training: bool = True) -> dict[str, Any]:
-        # Pass the entire `remote_backend.deepspeed` YAML block through to the
-        # DS engine (torch_autocast / communication_data_type / data_types /
-        # zero_optimization / log_level / ...) and merge in the per-step batch
-        # sizing. Matches recipe/rl-correctness arctic_rl_client._create_ds_config.
+        # Pass the entire `remote_backend.train.deepspeed` YAML block through to the DS engine (torch_autocast/communication_data_type/data_types/zero_optimization/log_level/...) and merge in per-step batch sizing. Matches recipe/rl-correctness arctic_rl_client._create_ds_config.
         actor_cfg = self.config.actor_rollout_ref.actor
         data_cfg = self.config.data
         rollout_n = self.config.actor_rollout_ref.rollout.n
-        deepspeed_config = OmegaConf.to_container(self._backend_config.deepspeed, resolve=True)
+        deepspeed_config = OmegaConf.to_container(self._backend_config.train.deepspeed, resolve=True)
 
         micro_batch_size = actor_cfg.ppo_micro_batch_size_per_gpu or 1
         # DS train_batch_size = samples consumed per optimizer step.
@@ -467,9 +464,9 @@ class ArcticRLClientWrapper(RemoteBackend):
         }
 
         rl_config = ArcticRLClientConfig(
-            host=None if self._backend_config.comm_protocol == "ray" else "localhost",
-            port=None if self._backend_config.comm_protocol == "ray" else 7000,
-            comm_protocol=self._backend_config.comm_protocol,
+            host=None if self._backend_config.comms.protocol == "ray" else "localhost",
+            port=None if self._backend_config.comms.protocol == "ray" else 7000,
+            comm_protocol=self._backend_config.comms.protocol,
             backend="local",
             training_gpus=n_training_gpus,
             sampling_gpus=n_sampling_gpus,
@@ -491,6 +488,8 @@ class ArcticRLClientWrapper(RemoteBackend):
             vllm_config=vllm_config,
             arctic_inference_config=arctic_inference_config or None,
             checkpoint_path=self.config.trainer.default_local_dir,
+            full_determinism=self._backend_config.train.determinism.get("full", False),
+            seed=self._backend_config.train.determinism.get("seed", 42),
         )
 
         # ArcticRLClient is constructed as a ray remote actor with num_gpus=0,
@@ -571,6 +570,15 @@ class ArcticRLClientWrapper(RemoteBackend):
             cuda_ipc=self.cuda_ipc_weight_sync,
             low_memory=self.low_memory_weight_sync,
         )
+
+    async def wake_up_inference(self, tags: list[str] = None):
+        return await self._client.wake_inference(tags=tags)
+
+    async def sleep_inference(self, level: int = 1):
+        return await self._client.sleep_inference(level=level)
+
+    async def reset_prefix_cache(self):
+        return await self._client.reset_prefix_cache()
 
     async def destroy(self) -> None:
         if self._client is not None:

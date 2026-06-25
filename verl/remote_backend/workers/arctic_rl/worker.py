@@ -99,19 +99,12 @@ class ArcticRLActorRolloutRefWorker(Worker, DistProfilerExtension):
         if backend_name is None:
             raise ValueError("ArcticRLActorRolloutRefWorker requires main_config.trainer.remote_backend to be set.")
 
-        # Zorro fast path emits response-aligned model output; the forwarder shifts
-        # it back to "predict-next" so `no_padding_2_padding` uses one uniform slice.
+        # Zorro fast path emits response-aligned model output; the forwarder shifts it back to "predict-next" so `no_padding_2_padding` uses one uniform slice.
         self.zorro_train_enable = bool(
-            OmegaConf.select(self.main_config, "remote_backend.zorro_train.enable", default=False)
+            OmegaConf.select(self.main_config, "remote_backend.train.zorro_train.enable", default=False)
         )
 
-        # Registry has no lazy `MODULES` table any more (per @zw0610): the
-        # adapter module is imported explicitly by `main_ppo.py` when the
-        # corresponding backend is selected, which decorates the class
-        # with `@RemoteBackendRegistry.register(...)`. Here we only look
-        # it up. `from_config(handle=...)` is the sole public constructor;
-        # the handle is what makes this a re-attach rather than a fresh
-        # init.
+        # Registry has no lazy `MODULES` table any more (per @zw0610): the adapter module is imported explicitly by `main_ppo.py` when the backend is selected, which decorates the class with `@RemoteBackendRegistry.register(...)`. Here we only look it up. `from_config(handle=...)` is the sole public constructor; the handle is what makes this a re-attach rather than a fresh init.
         backend_cls = RemoteBackendRegistry.get(backend_name)
         self.backend: RemoteBackend = backend_cls.from_config(self.main_config, handle=backend_handle)
 
