@@ -45,9 +45,11 @@ from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
 from verl.trainer.ppo.metric_utils import (
     compute_data_metrics,
+    compute_rollout_moe_load_balance_metrics,
     compute_throughout_metrics,
     compute_timing_metrics,
     compute_variance_proxy_metrics,
+    infer_moe_num_experts,
     process_validation_metrics,
 )
 from verl.trainer.ppo.reward import compute_reward, compute_reward_async
@@ -1447,6 +1449,17 @@ class RayPPOTrainer:
 
                     if "response_mask" not in batch.batch.keys():
                         batch.batch["response_mask"] = compute_response_mask(batch)
+                    moe_lb_metrics_interval = getattr(
+                        self.config.actor_rollout_ref.rollout, "moe_load_balance_metrics_interval", 0
+                    )
+                    if moe_lb_metrics_interval > 0 and self.global_steps % moe_lb_metrics_interval == 0:
+                        metrics.update(
+                            compute_rollout_moe_load_balance_metrics(
+                                routed_experts=batch.batch.get("routed_experts", None),
+                                response_mask=batch.batch.get("response_mask", None),
+                                num_experts=infer_moe_num_experts(self.config.actor_rollout_ref.model),
+                            )
+                        )
                     # Balance the number of valid tokens across DP ranks.
                     # NOTE: This usually changes the order of data in the `batch`,
                     # which won't affect the advantage calculation (since it's based on uid),
