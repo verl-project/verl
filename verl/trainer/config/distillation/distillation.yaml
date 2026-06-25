@@ -122,7 +122,7 @@ self_distillation: false
 privileged_solution_key: reward_model.ground_truth
 # Marker text wrapping the privileged solution in the teacher input.
 privileged_prefix: "\n\nReference solution:\n"
-privileged_suffix: "\n\nNow evaluate the response:\n"
+privileged_suffix: "\n\nUsing this as a reference, derive the answer yourself. Think step by step.\n"
 # Optional: insert the solution before the last occurrence of this marker text in
 # the prompt (e.g. the assistant-turn opener) instead of appending. Empty = append.
 privileged_insert_before: ""
