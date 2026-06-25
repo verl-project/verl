@@ -847,7 +847,7 @@ distillation:
   privileged_suffix: '
 
 
-    Now evaluate the response:
+    Using this as a reference, derive the answer yourself. Think step by step.
 
     '
   privileged_insert_before: ''

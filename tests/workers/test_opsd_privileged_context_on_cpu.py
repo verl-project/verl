@@ -75,7 +75,9 @@ def test_build_privileged_sequence_insert_before_marker():
 
 
 def test_build_privileged_sequence_insert_marker_not_found_falls_back():
-    seq = build_privileged_sequence([1, 2], [9], [5], [100], [200], insert_before_token_ids=[42])
+    seq = build_privileged_sequence(
+        [1, 2], [9], [5], [100], [200], insert_before_token_ids=[42]
+    )
     assert seq == [1, 2, 100, 5, 200, 9]  # append fallback
 
 
@@ -128,4 +130,31 @@ def test_slice_preserves_dtype_and_pad_value():
 
 def test_slice_negative_response_length_raises():
     with pytest.raises(ValueError):
-        slice_privileged_teacher_to_student(torch.arange(6).reshape(3, 2), torch.randn(3, 2), 1, -1, 0)
+        slice_privileged_teacher_to_student(
+            torch.arange(6).reshape(3, 2), torch.randn(3, 2), 1, -1, 0
+        )
+
+
+def test_privileged_slice_aligns_response_rows_after_padding():
+    """End-to-end alignment: after the privileged slice + the same left/right pad
+    that ``_pad_teacher_outputs`` applies, response token ``j`` lands at absolute
+    row ``prompt_width + j`` -- the privileged teacher's score for that token. The
+    pad is replicated inline (``F.pad``) so we don't import the heavy
+    teacher_manager package."""
+    import torch.nn.functional as F
+
+    prompt_len, block_len, resp_len, k = 3, 4, 2, 2
+    prompt_width, response_width = 5, 4  # batch widths (>= the per-sample lengths)
+    n = prompt_len + block_len + resp_len  # teacher scores prompt + block + response
+    teacher_ids = torch.arange(n * k).reshape(n, k)
+    teacher_logprobs = torch.randn(n, k)
+
+    ids, _ = slice_privileged_teacher_to_student(
+        teacher_ids, teacher_logprobs, prompt_len, resp_len, pad_token_id=0
+    )
+    # _pad_teacher_outputs: left-pad the prompt region, right-pad the response region
+    padded = F.pad(ids, (0, 0, prompt_width - prompt_len, response_width - resp_len), value=0)
+    assert padded.shape[0] == prompt_width + response_width
+    for j in range(resp_len):
+        # absolute row prompt_width+j == the teacher's privileged score for response token j
+        assert torch.equal(padded[prompt_width + j], teacher_ids[prompt_len + block_len + j])

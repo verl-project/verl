@@ -267,13 +267,18 @@ class DistillationConfig(BaseConfig):
     # On-Policy Self-Distillation (OPSD): the teacher shares the student's weights but
     # additionally conditions on the ground-truth solution (privileged context); the
     # student sees only the problem. Point a single teacher at the student checkpoint
-    # (teacher.model_path == student path) to make it a frozen self-teacher.
+    # (teacher.model_path == student path) to make it a frozen self-teacher. OPSD is
+    # a supervised signal: pair with distillation_loss.use_policy_gradient=False and
+    # use_task_rewards=False.
     self_distillation: bool = False
-    # Non-tensor batch field holding the ground-truth solution text.
+    # Non-tensor batch field with the privileged solution; dotted to reach nested
+    # dicts (verl stores ground truth at reward_model.ground_truth). NOTE: on some
+    # datasets (e.g. gsm8k) ground_truth is only the final answer -- point this at
+    # the full worked solution (e.g. extra_info.answer) for a stronger signal.
     privileged_solution_key: str = "reward_model.ground_truth"
     # Marker text wrapping the privileged solution in the teacher's input.
     privileged_prefix: str = "\n\nReference solution:\n"
-    privileged_suffix: str = "\n\nNow evaluate the response:\n"
+    privileged_suffix: str = "\n\nUsing this as a reference, derive the answer yourself. Think step by step.\n"
     # Optional: insert the privileged solution before the last occurrence of this
     # marker text in the prompt (e.g. the assistant-turn opener) instead of appending
     # it. Empty = append after the prompt.
