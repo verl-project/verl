@@ -42,10 +42,12 @@ from verl.trainer.distillation.losses import is_distillation_enabled
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
 from verl.trainer.ppo.metric_utils import (
+    RolloutMoELoadBalanceMetricsAccumulator,
     compute_data_metrics,
     compute_throughout_metrics,
     compute_timing_metrics,
     compute_variance_proxy_metrics,
+    infer_moe_num_experts,
     process_validation_metrics,
 )
 from verl.trainer.ppo.reward import extract_reward
@@ -370,6 +372,7 @@ class RayPPOTrainer:
 
         self.checkpoint_manager = None
         self._init_dump_executor()
+        self._rollout_moe_lb_metrics_accumulator = RolloutMoELoadBalanceMetricsAccumulator()
 
     def _create_dataloader(self, train_dataset, val_dataset, collate_fn, train_sampler: Optional[Sampler]):
         """
@@ -1496,6 +1499,17 @@ class RayPPOTrainer:
 
                     if "response_mask" not in batch.batch.keys():
                         batch.batch["response_mask"] = compute_response_mask(batch)
+                    moe_lb_metrics_interval = getattr(
+                        self.config.actor_rollout_ref.rollout, "moe_load_balance_metrics_interval", 0
+                    )
+                    if moe_lb_metrics_interval > 0:
+                        self._rollout_moe_lb_metrics_accumulator.update(
+                            routed_experts=batch.batch.get("routed_experts", None),
+                            response_mask=batch.batch.get("response_mask", None),
+                            num_experts=infer_moe_num_experts(self.config.actor_rollout_ref.model),
+                        )
+                        if self.global_steps % moe_lb_metrics_interval == 0:
+                            metrics.update(self._rollout_moe_lb_metrics_accumulator.pop_metrics())
                     # Balance the number of valid tokens across DP ranks.
                     # NOTE: This usually changes the order of data in the `batch`,
                     # which won't affect the advantage calculation (since it's based on uid),

@@ -29,6 +29,8 @@ from verl.utils.import_utils import deprecated
 
 logger = logging.getLogger(__name__)
 
+_NUM_LOCAL_EXPERTS_MODEL_TYPES = {"gpt_oss", "mixtral"}
+
 
 @deprecated("verl.utils.metric.reduce_metrics")
 def reduce_metrics(metrics: dict[str, list[Any]]) -> dict[str, Any]:
@@ -84,6 +86,185 @@ def _compute_response_info(batch: DataProto) -> dict[str, Any]:
         prompt_length=prompt_length,
         response_length=response_length,
     )
+
+
+def _get_nested_attr(obj: Any, name: str) -> Any:
+    if hasattr(obj, "get"):
+        return obj.get(name)
+    return getattr(obj, name, None)
+
+
+def infer_moe_num_experts(model_config: Any) -> int | None:
+    """Infer the global number of routed experts from a model config-like object."""
+    candidates = [model_config]
+    hf_config = _get_nested_attr(model_config, "hf_config")
+    text_config = _get_nested_attr(model_config, "text_config")
+    override_config = _get_nested_attr(model_config, "override_config")
+    if hf_config is not None:
+        candidates.append(hf_config)
+        hf_text_config = _get_nested_attr(hf_config, "text_config")
+        if hf_text_config is not None:
+            candidates.append(hf_text_config)
+    if text_config is not None:
+        candidates.append(text_config)
+    if override_config is not None:
+        candidates.append(override_config)
+        override_model_config = _get_nested_attr(override_config, "model_config")
+        if override_model_config is not None:
+            candidates.append(override_model_config)
+        override_text_config = _get_nested_attr(override_config, "text_config")
+        if override_text_config is not None:
+            candidates.append(override_text_config)
+
+    for candidate in candidates:
+        for attr in ("num_experts", "n_routed_experts"):
+            value = _get_nested_attr(candidate, attr)
+            if value is not None:
+                return int(value)
+        if _get_nested_attr(candidate, "model_type") in _NUM_LOCAL_EXPERTS_MODEL_TYPES:
+            value = _get_nested_attr(candidate, "num_local_experts")
+            if value is not None:
+                return int(value)
+    return None
+
+
+def _compute_rollout_moe_load_balance_metrics_from_counts(
+    load_counts: torch.Tensor | None,
+    prefix: str = "rollout/moe",
+) -> dict[str, Any]:
+    if load_counts is None or load_counts.numel() == 0:
+        return {}
+
+    load_matrix = load_counts.float()
+    load_matrix = load_matrix / load_matrix.sum(dim=1, keepdim=True).clamp_min(1.0)
+    num_experts = load_matrix.shape[1]
+    deviation = load_matrix * num_experts - 1.0
+    max_vio = deviation.max(dim=1).values
+    min_vio = deviation.min(dim=1).values
+    avg_vio = deviation.abs().mean(dim=1)
+
+    metrics: dict[str, Any] = {}
+    for i in range(load_matrix.shape[0]):
+        metrics[f"{prefix}/max_vio/layer_{i}"] = max_vio[i].detach().item()
+        metrics[f"{prefix}/min_vio/layer_{i}"] = min_vio[i].detach().item()
+        metrics[f"{prefix}/avg_vio/layer_{i}"] = avg_vio[i].detach().item()
+    metrics[f"{prefix}/max_vio/max"] = max_vio.max().detach().item()
+    metrics[f"{prefix}/max_vio/avg"] = max_vio.mean().detach().item()
+    metrics[f"{prefix}/min_vio/max"] = min_vio.max().detach().item()
+    metrics[f"{prefix}/min_vio/avg"] = min_vio.mean().detach().item()
+    metrics[f"{prefix}/avg_vio/max"] = avg_vio.max().detach().item()
+    metrics[f"{prefix}/avg_vio/avg"] = avg_vio.mean().detach().item()
+    return metrics
+
+
+def _compute_rollout_moe_load_counts(
+    routed_experts: torch.Tensor | None,
+    response_mask: torch.Tensor | None,
+    num_experts: int | None,
+) -> torch.Tensor | None:
+    """Count routed experts in response tokens as [num_layers, num_experts]."""
+    if routed_experts is None or response_mask is None or num_experts is None or num_experts <= 0:
+        return None
+    if routed_experts.dim() != 4:
+        logger.warning("Expected routed_experts with shape [bsz, seqlen, layers, topk], got %s", routed_experts.shape)
+        return None
+    if response_mask.dim() != 2 or response_mask.shape[0] != routed_experts.shape[0]:
+        logger.warning(
+            "Response mask shape %s is incompatible with routed_experts %s", response_mask.shape, routed_experts.shape
+        )
+        return None
+
+    response_len = response_mask.shape[1]
+    if routed_experts.shape[1] < response_len:
+        logger.warning(
+            "routed_experts sequence length %s is shorter than response length %s",
+            routed_experts.shape[1],
+            response_len,
+        )
+        return None
+
+    response_routed_experts = routed_experts[:, -response_len:]
+    response_mask = response_mask.to(device=response_routed_experts.device, dtype=torch.bool)
+    selected = response_routed_experts[response_mask]
+    selected = selected.detach().to(device="cpu", dtype=torch.long)
+    if selected.numel() == 0:
+        return None
+    if selected.min() < 0 or selected.max() >= num_experts:
+        logger.warning(
+            "Skipping rollout MoE load-balance metrics because routed expert ids are outside [0, %s): min=%s max=%s",
+            num_experts,
+            selected.min().item(),
+            selected.max().item(),
+        )
+        return None
+
+    # selected: [num_response_tokens, num_layers, topk]. Count every top-k slot
+    # without materializing a large [tokens, layers, topk, experts] one-hot tensor.
+    return torch.stack(
+        [
+            torch.bincount(selected[:, layer_idx, :].flatten(), minlength=num_experts)
+            for layer_idx in range(selected.shape[1])
+        ]
+    )
+
+
+def compute_rollout_moe_load_balance_metrics(
+    routed_experts: torch.Tensor | None,
+    response_mask: torch.Tensor | None,
+    num_experts: int | None,
+    prefix: str = "rollout/moe",
+) -> dict[str, Any]:
+    """Compute rollout MoE load-balance metrics from returned routed expert ids."""
+    load_counts = _compute_rollout_moe_load_counts(
+        routed_experts=routed_experts,
+        response_mask=response_mask,
+        num_experts=num_experts,
+    )
+    return _compute_rollout_moe_load_balance_metrics_from_counts(load_counts, prefix=prefix)
+
+
+class RolloutMoELoadBalanceMetricsAccumulator:
+    """Accumulate rollout MoE routed expert counts across a logging interval."""
+
+    def __init__(self):
+        self.load_counts: torch.Tensor | None = None
+
+    def update(
+        self,
+        routed_experts: torch.Tensor | None,
+        response_mask: torch.Tensor | None,
+        num_experts: int | None,
+    ) -> bool:
+        load_counts = _compute_rollout_moe_load_counts(
+            routed_experts=routed_experts,
+            response_mask=response_mask,
+            num_experts=num_experts,
+        )
+        if load_counts is None:
+            return False
+        if self.load_counts is None:
+            self.load_counts = load_counts
+        elif self.load_counts.shape == load_counts.shape:
+            self.load_counts += load_counts
+        else:
+            logger.warning(
+                "Resetting rollout MoE load-balance accumulator because count shape changed from %s to %s",
+                self.load_counts.shape,
+                load_counts.shape,
+            )
+            self.load_counts = load_counts
+        return True
+
+    def compute(self, prefix: str = "rollout/moe") -> dict[str, Any]:
+        return _compute_rollout_moe_load_balance_metrics_from_counts(self.load_counts, prefix=prefix)
+
+    def reset(self) -> None:
+        self.load_counts = None
+
+    def pop_metrics(self, prefix: str = "rollout/moe") -> dict[str, Any]:
+        metrics = self.compute(prefix=prefix)
+        self.reset()
+        return metrics
 
 
 def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str, Any]:
