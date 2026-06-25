@@ -270,13 +270,22 @@ class DistillationConfig(BaseConfig):
     # (teacher.model_path == student path) to make it a frozen self-teacher.
     self_distillation: bool = False
     # Non-tensor batch field holding the ground-truth solution text.
-    privileged_solution_key: str = "ground_truth"
+    privileged_solution_key: str = "reward_model.ground_truth"
     # Marker text wrapping the privileged solution in the teacher's input.
     privileged_prefix: str = "\n\nReference solution:\n"
     privileged_suffix: str = "\n\nNow evaluate the response:\n"
+    # Optional: insert the privileged solution before the last occurrence of this
+    # marker text in the prompt (e.g. the assistant-turn opener) instead of appending
+    # it. Empty = append after the prompt.
+    privileged_insert_before: str = ""
     distillation_loss: DistillationLossConfig = field(default_factory=DistillationLossConfig)
 
     def __post_init__(self):
+        if self.self_distillation:
+            if not self.enabled:
+                raise ValueError("self_distillation requires distillation.enabled=True.")
+            if not self.privileged_solution_key:
+                raise ValueError("self_distillation requires a non-empty privileged_solution_key.")
         if not self.enabled:
             return
 

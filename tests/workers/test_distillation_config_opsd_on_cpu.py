@@ -19,14 +19,13 @@ from verl.workers.config.distillation import DistillationConfig
 def test_opsd_defaults_are_off_and_backward_compatible():
     c = DistillationConfig()
     assert c.self_distillation is False
-    assert c.privileged_solution_key == "ground_truth"
+    assert c.privileged_solution_key == "reward_model.ground_truth"
     # markers default to newline-wrapped text so the solution is set off from the prompt
     assert c.privileged_prefix.strip() and c.privileged_suffix.strip()
 
 
-def test_opsd_fields_settable_without_enabling_distillation():
-    # enabled=False short-circuits teacher-pool validation, so OPSD fields can be
-    # exercised standalone.
-    c = DistillationConfig(self_distillation=True, privileged_solution_key="solution")
-    assert c.self_distillation is True
-    assert c.privileged_solution_key == "solution"
+def test_self_distillation_requires_enabled():
+    import pytest
+
+    with pytest.raises(ValueError):
+        DistillationConfig(self_distillation=True)  # enabled defaults to False
