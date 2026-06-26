@@ -67,7 +67,6 @@ from verl.workers.engine_workers_tinker import (
 from verl.workers.utils.losses import ppo_loss, sft_loss, value_loss
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
 
-
 device_name = get_device_name()
 
 
