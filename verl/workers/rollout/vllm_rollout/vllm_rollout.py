@@ -58,6 +58,48 @@ def _check_vllm_version_for_sleep_level():
     return vs.parse(current_version) >= vs.parse(minver)
 
 
+def _should_expand_vllm_moe_params() -> bool:
+    current_version = get_version("vllm")
+    if not current_version:
+        return False
+
+    try:
+        return vs.parse(current_version) <= vs.parse("0.24.0")
+    except vs.InvalidVersion:
+        return False
+
+
+async def _iter_vllm_compatible_moe_params(weights):
+    """Expand Transformers 5 packed MoE expert tensors to vLLM checkpoint keys.
+
+    Transformers 5 stores Qwen-style MoE experts as packed 3D parameters:
+    ``mlp.experts.gate_up_proj`` with shape
+    ``[num_experts, 2 * intermediate_size, hidden_size]`` and
+    ``mlp.experts.down_proj`` with shape
+    ``[num_experts, hidden_size, intermediate_size]``. vLLM's Qwen MoE reload
+    path still accepts the original per-expert checkpoint keys during live
+    weight sync, so stream those keys without materializing a full dict.
+    """
+    from verl.workers.rollout.utils import ensure_async_iterator
+
+    async for name, tensor in ensure_async_iterator(weights):
+        if name.endswith(".mlp.experts.gate_up_proj") and tensor.dim() == 3:
+            gate, up = tensor.chunk(2, dim=1)
+            base = name.removesuffix(".gate_up_proj")
+            for expert_id in range(tensor.size(0)):
+                yield f"{base}.{expert_id}.gate_proj.weight", gate[expert_id].contiguous()
+                yield f"{base}.{expert_id}.up_proj.weight", up[expert_id].contiguous()
+            continue
+
+        if name.endswith(".mlp.experts.down_proj") and tensor.dim() == 3:
+            base = name.removesuffix(".down_proj")
+            for expert_id in range(tensor.size(0)):
+                yield f"{base}.{expert_id}.down_proj.weight", tensor[expert_id].contiguous()
+            continue
+
+        yield name, tensor
+
+
 class ServerAdapter(BaseRollout):
     """
     vLLM server adapter used in native async mode, serve as a client to request vLLM server
@@ -185,6 +227,10 @@ class ServerAdapter(BaseRollout):
             bucket_size_mb=bucket_size_mb,
             use_shm=self.use_shm,
         )
+        if _should_expand_vllm_moe_params() and not (
+            kwargs.get("peft_config") is not None and kwargs.get("base_sync_done", False)
+        ):
+            weights = _iter_vllm_compatible_moe_params(weights)
         await sender.async_send_weights(weights)
 
         if future is not None:
