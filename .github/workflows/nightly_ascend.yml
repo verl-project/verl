@@ -174,7 +174,7 @@ jobs:
           clean: true
       - name: Install the current repository
         run: |
-          uv pip install --no-deps --no-build-isolation -e .
+          uv pip install -r requirements-npu.txt && pip install -v -e .
       - name: Check final pip list
         run: |
           uv pip list
@@ -382,7 +382,7 @@ jobs:
           clean: true
       - name: Install the current repository
         run: |
-          pip install --no-deps -e .
+          pip install -r requirements-npu.txt && pip install -v -e .
       - name: Check final pip list
         run: |
           pip list

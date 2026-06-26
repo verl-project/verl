@@ -45,6 +45,7 @@ from verl import DataProto
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
 from verl.trainer.config import CheckpointConfig
 from verl.utils import tensordict_utils as tu
+from verl.utils.device import *
 from verl.utils.model import compute_position_id_with_mask, create_random_mask
 from verl.utils.torch_functional import logprobs_from_logits_naive
 from verl.workers.config import (
@@ -65,7 +66,8 @@ from verl.workers.engine_workers_tinker import (
 )
 from verl.workers.utils.losses import ppo_loss, sft_loss, value_loss
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
-from verl.utils.device import *
+
+
 device_name = get_device_name()
 
 
@@ -386,7 +388,7 @@ def create_actor_model(tmp_path, config):
 
 
 def _worker(rank: int, world_size: int, rendezvous_file: str, strategy: str, model_path: str):
-    get_torch_device().set_device()
+    get_torch_device().set_device(rank)
     dist.init_process_group(
         backend=get_nccl_backend(),
         init_method=f"file://{rendezvous_file}",
@@ -475,7 +477,7 @@ def test_per_tensor_generator(world_size, tmp_path, config, strategy):
 def _autocast_dtype_worker(rank: int, world_size: int, rendezvous_file: str, model_path: str):
     # Regression test for #5932: FSDP engine must resolve autocast dtype from
     # mixed_precision.param_dtype rather than hardcoding bfloat16.
-    get_torch_device().set_device()
+    get_torch_device().set_device(rank)
     dist.init_process_group(
         backend=get_nccl_backend(),
         init_method=f"file://{rendezvous_file}",
