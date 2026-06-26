@@ -33,6 +33,7 @@ from tensordict import TensorDict
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 from transfer_queue import KVBatchMeta
+from transformers import AutoConfig
 
 from verl.checkpoint_engine import CheckpointEngineManager
 from verl.experimental.agent_loop import AgentLoopManager
@@ -80,6 +81,7 @@ from verl.utils.debug.metrics import calculate_debug_metrics
 from verl.utils.fs import copy_to_local
 from verl.utils.import_utils import load_extern_type
 from verl.utils.metric import reduce_metrics
+from verl.utils.model import update_model_config
 from verl.utils.py_functional import rename_dict
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.tracking import Tracking, ValidationGenerationsLogger
@@ -119,6 +121,8 @@ class PPOTrainer(ABC):
         self.parameter_sync_step = self.config.trainer.v1.get(self.trainer_mode, {}).get("parameter_sync_step", 1)
         self.replay_buffer = self._build_replay_buffer()
         self._rollout_moe_lb_metrics_accumulator = RolloutMoELoadBalanceMetricsAccumulator()
+        self._rollout_moe_num_experts = None
+        self._rollout_moe_num_experts_initialized = False
         self._warned_missing_rollout_moe_lb_metrics = False
 
     def _build_replay_buffer(self) -> ReplayBuffer:
@@ -514,6 +518,54 @@ class PPOTrainer(ABC):
         self.tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
         # Used for multimodal LLM, could be None
         self.processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
+
+    def _get_actor_model_config_value(self, key: str, default: Any = None) -> Any:
+        model_config = self.config.actor_rollout_ref.model
+        if hasattr(model_config, "get"):
+            return model_config.get(key, default)
+        return getattr(model_config, key, default)
+
+    def _infer_rollout_moe_num_experts(self) -> int | None:
+        if self._rollout_moe_num_experts_initialized:
+            return self._rollout_moe_num_experts
+
+        model_config = self.config.actor_rollout_ref.model
+        num_experts = infer_moe_num_experts(model_config)
+        if num_experts is None:
+            hf_config_path = (
+                self._get_actor_model_config_value("local_hf_config_path")
+                or self._get_actor_model_config_value("hf_config_path")
+                or self._get_actor_model_config_value("path")
+            )
+            if hf_config_path is not None:
+                try:
+                    local_hf_config_path = copy_to_local(
+                        hf_config_path, use_shm=self._get_actor_model_config_value("use_shm", False)
+                    )
+                    hf_config = AutoConfig.from_pretrained(
+                        local_hf_config_path,
+                        trust_remote_code=self._get_actor_model_config_value("trust_remote_code", False),
+                    )
+                    override_config = self._get_actor_model_config_value("override_config", {})
+                    if isinstance(override_config, DictConfig):
+                        override_config = OmegaConf.to_container(override_config, resolve=True)
+                    if override_config:
+                        update_model_config(hf_config, override_config)
+                    num_experts = infer_moe_num_experts(hf_config)
+                except Exception as exc:
+                    if not self._warned_missing_rollout_moe_lb_metrics:
+                        logger.warning("Failed to infer rollout MoE num_experts from model config: %s", exc)
+                        self._warned_missing_rollout_moe_lb_metrics = True
+
+        self._rollout_moe_num_experts = num_experts
+        self._rollout_moe_num_experts_initialized = True
+        if num_experts is None and not self._warned_missing_rollout_moe_lb_metrics:
+            logger.warning(
+                "Skipping rollout MoE load-balance metrics because num_experts could not be inferred "
+                "from actor_rollout_ref.model or the Hugging Face config."
+            )
+            self._warned_missing_rollout_moe_lb_metrics = True
+        return num_experts
 
     def _init_dataloader(self):
         """Initialize train and validate dataloader."""
@@ -1514,13 +1566,18 @@ class PPOTrainer(ABC):
         # 2. compute metrics
         metrics.update({"training/global_step": global_steps, "training/epoch": epoch})
         if moe_lb_metrics_interval > 0 and has_routed_experts:
-            self._rollout_moe_lb_metrics_accumulator.update(
+            updated_moe_lb_metrics = self._rollout_moe_lb_metrics_accumulator.update(
                 routed_experts=metrics_batch.batch.get("routed_experts", None),
                 response_mask=metrics_batch.batch.get("response_mask", None),
-                num_experts=infer_moe_num_experts(self.config.actor_rollout_ref.model),
+                num_experts=self._infer_rollout_moe_num_experts(),
             )
             if global_steps % moe_lb_metrics_interval == 0:
                 metrics.update(self._rollout_moe_lb_metrics_accumulator.pop_metrics())
+                if not updated_moe_lb_metrics and not self._warned_missing_rollout_moe_lb_metrics:
+                    logger.warning(
+                        "Skipping rollout MoE load-balance metrics because no routed expert counts were found."
+                    )
+                    self._warned_missing_rollout_moe_lb_metrics = True
 
         metrics.update(compute_data_metrics(batch=metrics_batch, use_critic=self.use_critic))
         metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
