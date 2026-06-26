@@ -846,9 +846,11 @@ class RayPPOTrainer:
             teacher_training_config = self._build_fsdp_teacher_training_config()
             teacher_resource_pool = self.resource_pool_manager.get_resource_pool(Role.TeacherModel)
 
+            import ray
+
             from verl.workers.teacher import TeacherFSDPWorker
 
-            teacher_cls = RayClassWithInitArgs(cls=TeacherFSDPWorker, config=teacher_training_config)
+            teacher_cls = RayClassWithInitArgs(cls=ray.remote(TeacherFSDPWorker), config=teacher_training_config)
             self.resource_pool_to_cls[teacher_resource_pool][str(Role.TeacherModel)] = teacher_cls
             self._fsdp_teacher_pending = True
 
@@ -1405,8 +1407,12 @@ class RayPPOTrainer:
         tu.assign_non_tensor(
             teacher_input,
             teacher_chunk_size=self.distillation_config.teacher_chunk_size,
+            # FSDP engine requires temperature; use T=1.0 for the raw teacher distribution.
+            temperature=1.0,
         )
         teacher_output = self.teacher_model_manager.compute_logprobs_at_ids(teacher_input)
+        # compute_logprobs_at_ids is non-blocking; materialize the future.
+        teacher_output = teacher_output.get()
         teacher_on_student_logp = tu.get(teacher_output, "teacher_on_student_logp")  # nested (B, T_i, K)
 
         # Phase 3: nested -> dense (B, max_response_len, K), union into batch so the engine

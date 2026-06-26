@@ -246,6 +246,10 @@ def distillation_ppo_loss(
     if student_logits is not None:
         return compute_topk_loss(config, distillation_config, data, student_logits, data_format)
 
+    # FSDP-teacher first pass: only emit student top-K, skip the policy loss.
+    if tu.get_non_tensor_data(data=data, key="compute_student_topk_only", default=False):
+        return torch.zeros((), device=model_output["log_probs"].device), {}
+
     # Called as final policy loss
     distillation_loss_config = distillation_config.distillation_loss
     distill_loss, distill_metrics = distillation_loss(config, distillation_config, model_output, data)

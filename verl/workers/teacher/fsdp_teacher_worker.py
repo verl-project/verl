@@ -137,6 +137,8 @@ class TeacherFSDPWorker(TrainingWorker):
             )
 
             cu_seqlens = data["input_ids"].offsets()
+            # Move offsets to the same device as values for nested_tensor_from_jagged.
+            cu_seqlens = cu_seqlens.to(teacher_logp_rmpad.device)
             teacher_on_student_logp = torch.nested.nested_tensor_from_jagged(
                 teacher_logp_rmpad, cu_seqlens
             )

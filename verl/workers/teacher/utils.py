@@ -51,7 +51,8 @@ def chunked_gather_logprobs(
     k = topk_ids.shape[-1]
 
     flat_logits = logits.reshape(-1, vocab_size)
-    flat_topk = topk_ids.reshape(-1, k)
+    # topk_ids may arrive on CPU; gather requires it on logits.device.
+    flat_topk = topk_ids.reshape(-1, k).to(flat_logits.device)
     n = flat_logits.size(0)
     out = torch.empty((n, k), dtype=logits.dtype, device=logits.device)
 
