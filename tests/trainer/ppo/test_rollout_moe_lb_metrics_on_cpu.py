@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import math
+from types import SimpleNamespace
 
 import torch
 
@@ -90,3 +91,36 @@ def test_infer_moe_num_experts_from_nested_config():
     assert infer_moe_num_experts({"model_type": "gpt_oss", "num_local_experts": 16}) == 16
     assert infer_moe_num_experts({"model_type": "qwen3_moe", "num_local_experts": 4}) is None
     assert infer_moe_num_experts({"model_type": "mixtral", "num_experts": 4, "num_local_experts": 8}) == 4
+
+
+def test_trainer_infers_moe_num_experts_with_nested_override_config(monkeypatch):
+    from verl.trainer.ppo.v1 import trainer_base
+
+    class DummyTrainer(trainer_base.PPOTrainer):
+        def on_step_end(self):
+            return
+
+        def on_sample_end(self):
+            return
+
+    trainer = object.__new__(DummyTrainer)
+    trainer.config = SimpleNamespace(
+        actor_rollout_ref=SimpleNamespace(
+            model={
+                "path": "dummy-model",
+                "override_config": {"model_config": {"max_position_embeddings": 32768}},
+            }
+        )
+    )
+    trainer._rollout_moe_num_experts_initialized = False
+    trainer._rollout_moe_num_experts = None
+    trainer._warned_missing_rollout_moe_lb_metrics = False
+
+    monkeypatch.setattr(trainer_base, "copy_to_local", lambda path, use_shm=False: path)
+    monkeypatch.setattr(
+        trainer_base.AutoConfig,
+        "from_pretrained",
+        lambda *args, **kwargs: SimpleNamespace(num_experts=64, max_position_embeddings=8192),
+    )
+
+    assert trainer._infer_rollout_moe_num_experts() == 64

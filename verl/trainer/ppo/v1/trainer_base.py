@@ -98,6 +98,16 @@ def apply_greedy_sampling_params(params: dict[str, Any]) -> None:
     params["temperature"] = 0
 
 
+def _get_hf_config_override_kwargs(override_config: Any) -> dict[str, Any]:
+    if isinstance(override_config, DictConfig):
+        override_config = OmegaConf.to_container(override_config, resolve=True)
+    if not override_config:
+        return {}
+    if "model_config" in override_config:
+        return override_config["model_config"]
+    return override_config
+
+
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
@@ -546,9 +556,9 @@ class PPOTrainer(ABC):
                         local_hf_config_path,
                         trust_remote_code=self._get_actor_model_config_value("trust_remote_code", False),
                     )
-                    override_config = self._get_actor_model_config_value("override_config", {})
-                    if isinstance(override_config, DictConfig):
-                        override_config = OmegaConf.to_container(override_config, resolve=True)
+                    override_config = _get_hf_config_override_kwargs(
+                        self._get_actor_model_config_value("override_config", {})
+                    )
                     if override_config:
                         update_model_config(hf_config, override_config)
                     num_experts = infer_moe_num_experts(hf_config)
