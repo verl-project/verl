@@ -42,6 +42,8 @@ def narrow_routed_experts(routed_experts):
         return None
 
     if isinstance(routed_experts, torch.Tensor):
+        if routed_experts.is_cuda:
+            return routed_experts
         if routed_experts.numel() == 0:
             return routed_experts.to(torch.uint8)
         min_id = routed_experts.min().item()
@@ -122,9 +124,10 @@ def _r3_per_traj_item_to_tensor(item):
 
 def _align_r3_per_traj_tensors(per_traj_list, seqlens, target_device):
     aligned = []
+    seqlens_cpu = seqlens.tolist()
     for i, item in enumerate(per_traj_list):
         tensor = _r3_per_traj_item_to_tensor(item).to(device=target_device)
-        target_len = int(seqlens[i].item())
+        target_len = int(seqlens_cpu[i])
         if tensor.shape[0] > target_len:
             tensor = tensor[:target_len]
         elif tensor.shape[0] < target_len:
@@ -190,7 +193,7 @@ def left_right_2_no_padding(data: TensorDict) -> TensorDict:
         per_traj_stack = data.pop("routed_experts_per_traj")
         per_traj_list = normalize_r3_per_traj_list(per_traj_stack)
         tensors = _align_r3_per_traj_tensors(per_traj_list, attention_mask.sum(dim=-1), input_ids_rmpad.device)
-        flat = narrow_routed_experts(torch.cat(tensors, dim=0))
+        flat = torch.cat(tensors, dim=0)
         data["routed_experts"] = torch.nested.nested_tensor_from_jagged(flat, offsets=cu_seqlens)
     elif routed_experts is not None and not routed_experts.is_nested:
         if r3_speedup_enabled():

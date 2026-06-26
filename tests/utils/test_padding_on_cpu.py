@@ -18,6 +18,7 @@ import torch
 from tensordict import TensorDict
 
 from verl.utils import tensordict_utils as tu
+from verl.workers.utils import padding as padding_utils
 from verl.workers.utils.padding import (
     build_attention_mask_from_nested,
     embeds_padding_2_no_padding,
@@ -209,6 +210,70 @@ def test_padding_conversion_uses_r3_per_traj_routed_experts(monkeypatch):
     assert routed.is_nested
     torch.testing.assert_close(routed[0].squeeze(-1).squeeze(-1), torch.tensor([1, 2, 3, 4], dtype=torch.uint8))
     torch.testing.assert_close(routed[1].squeeze(-1).squeeze(-1), torch.tensor([5, 6, 7, 0, 0], dtype=torch.uint8))
+
+
+def test_padding_conversion_does_not_renarrow_concatenated_r3_tensor(monkeypatch):
+    monkeypatch.setenv("VERL_R3_SPEEDUP", "1")
+
+    original_narrow = padding_utils.narrow_routed_experts
+
+    def fail_on_tensor(routed_experts):
+        if isinstance(routed_experts, torch.Tensor):
+            raise AssertionError("per-traj fast path should not renarrow the concatenated tensor")
+        return original_narrow(routed_experts)
+
+    monkeypatch.setattr(padding_utils, "narrow_routed_experts", fail_on_tensor)
+
+    batch_size = 2
+    max_seq_len = 4
+    input_ids = torch.arange(batch_size * max_seq_len).reshape(batch_size, max_seq_len)
+    attention_mask = torch.ones(batch_size, max_seq_len, dtype=torch.long)
+    response_mask = torch.ones(batch_size, 2, dtype=torch.long)
+    position_ids = torch.arange(max_seq_len).unsqueeze(0).expand(batch_size, -1)
+
+    data = TensorDict(
+        {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "response_mask": response_mask,
+            "position_ids": position_ids,
+        },
+        batch_size=[batch_size],
+    )
+    rows = [
+        torch.ones((4, 2, 1), dtype=torch.uint8),
+        torch.full((4, 2, 1), 2, dtype=torch.uint8),
+    ]
+    tu.assign_non_tensor_stack(data, "routed_experts_per_traj", rows)
+
+    converted = left_right_2_no_padding(data)
+
+    assert converted["routed_experts"].is_nested
+
+
+def test_align_r3_per_traj_tensors_reads_seqlens_once_via_tolist():
+    class _FakeSeqLens:
+        def __init__(self):
+            self.tolist_called = False
+
+        def tolist(self):
+            self.tolist_called = True
+            return [2, 4]
+
+        def __getitem__(self, index):
+            raise AssertionError(f"unexpected per-item seqlen lookup: {index}")
+
+    seqlens = _FakeSeqLens()
+    rows = [
+        torch.arange(3, dtype=torch.uint8).reshape(3, 1, 1),
+        torch.arange(4, dtype=torch.uint8).reshape(4, 1, 1),
+    ]
+
+    aligned = padding_utils._align_r3_per_traj_tensors(rows, seqlens, torch.device("cpu"))
+
+    assert seqlens.tolist_called
+    torch.testing.assert_close(aligned[0].squeeze(-1).squeeze(-1), torch.tensor([0, 1], dtype=torch.uint8))
+    torch.testing.assert_close(aligned[1].squeeze(-1).squeeze(-1), torch.tensor([0, 1, 2, 3], dtype=torch.uint8))
 
 
 def test_padding_roundtrip():
