@@ -59,6 +59,19 @@ logger.setLevel(logging.INFO)
 visible_devices_keyword = get_visible_devices_keyword()
 
 
+def _normalize_sglang_engine_kwargs(engine_kwargs: dict[str, Any]) -> bool:
+    deterministic_inference = bool(engine_kwargs.pop("enable_deterministic_inference", False))
+
+    rl_on_policy_target = engine_kwargs.get("rl_on_policy_target", None)
+    if rl_on_policy_target is None or rl_on_policy_target is False:
+        engine_kwargs.pop("rl_on_policy_target", None)
+        return deterministic_inference
+    if rl_on_policy_target == "fsdp":
+        engine_kwargs.pop("rl_on_policy_target", None)
+        return True
+    raise ValueError("SGLang rl_on_policy_target must be None, False, or 'fsdp'.")
+
+
 def _extract_prompt_logprobs_sglang(
     meta_info: dict,
     num_prompt_logprobs: int,
@@ -253,9 +266,15 @@ class SGLangHttpServer:
                 self._master_address = master_address
                 self._master_port = master_port
 
-        engine_kwargs = self.config.get("engine_kwargs", {}).get("sglang", {}) or {}
+        engine_kwargs = dict((self.config.get("engine_kwargs", {}) or {}).get("sglang", {}) or {})
         attention_backend = engine_kwargs.pop("attention_backend", None)
         mm_attention_backend = engine_kwargs.pop("mm_attention_backend", None)
+        deterministic_sampling = _normalize_sglang_engine_kwargs(engine_kwargs)
+        if deterministic_sampling:
+            sampling_backend = engine_kwargs.get("sampling_backend") or "pytorch"
+            if sampling_backend != "pytorch":
+                raise ValueError("SGLang deterministic sampling_seed requires sampling_backend='pytorch'.")
+            engine_kwargs["sampling_backend"] = "pytorch"
         if attention_backend is None:
             if torch.version.hip is not None:
                 attention_backend = "aiter"
