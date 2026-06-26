@@ -56,6 +56,22 @@ def make_njt(data: TensorDict, tensor: Tensor) -> Tensor:
     return torch.nested.nested_tensor_from_jagged(flat, cu_seqlens)
 
 
+def shift_nested_response_aligned_to_predict_next(njt: Tensor) -> Tensor:
+    """Convert a response-aligned nested tensor back to the legacy
+    "predict-next" convention by left-shifting each sequence by one.
+
+    The Arctic zorro fast path emits model output already aligned with the
+    response token at each slot (slot i holds the log prob of token[i]). Shift it
+    left so slot i holds log P(token[i+1]); ``no_padding_2_padding`` can then apply
+    a single uniform ``shift=-1`` slice for both the zorro and standard paths,
+    instead of branching the slice on a per-call ``shift`` argument."""
+    v = njt.values()
+    v_new = torch.empty_like(v)
+    v_new[:-1] = v[1:]
+    v_new[-1] = 0  # trailing slot of last seq; never read by the shift=-1 slice
+    return torch.nested.nested_tensor_from_jagged(v_new, njt.offsets())
+
+
 def normalize_backend_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
     """Normalise backend metrics into verl's :class:`Metric` type.
 

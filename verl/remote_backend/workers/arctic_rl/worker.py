@@ -33,11 +33,15 @@ from typing import Any
 
 import torch
 from codetiming import Timer
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from tensordict import TensorDict
 
 from verl.remote_backend.base import RemoteBackend, RemoteBackendRegistry
-from verl.remote_backend.worker_utils import make_njt, normalize_backend_metrics
+from verl.remote_backend.worker_utils import (
+    make_njt,
+    normalize_backend_metrics,
+    shift_nested_response_aligned_to_predict_next,
+)
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import (
     Dispatch,
@@ -95,13 +99,12 @@ class ArcticRLActorRolloutRefWorker(Worker, DistProfilerExtension):
         if backend_name is None:
             raise ValueError("ArcticRLActorRolloutRefWorker requires main_config.trainer.remote_backend to be set.")
 
-        # Registry has no lazy `MODULES` table any more (per @zw0610): the
-        # adapter module is imported explicitly by `main_ppo.py` when the
-        # corresponding backend is selected, which decorates the class
-        # with `@RemoteBackendRegistry.register(...)`. Here we only look
-        # it up. `from_config(handle=...)` is the sole public constructor;
-        # the handle is what makes this a re-attach rather than a fresh
-        # init.
+        # Zorro fast path emits response-aligned model output; the forwarder shifts it back to "predict-next" so `no_padding_2_padding` uses one uniform slice.
+        self.zorro_train_enable = bool(
+            OmegaConf.select(self.main_config, "remote_backend.train.zorro_train.enable", default=False)
+        )
+
+        # Registry has no lazy `MODULES` table any more (per @zw0610): the adapter module is imported explicitly by `main_ppo.py` when the backend is selected, which decorates the class with `@RemoteBackendRegistry.register(...)`. Here we only look it up. `from_config(handle=...)` is the sole public constructor; the handle is what makes this a re-attach rather than a fresh init.
         backend_cls = RemoteBackendRegistry.get(backend_name)
         self.backend: RemoteBackend = backend_cls.from_config(self.main_config, handle=backend_handle)
 
@@ -201,9 +204,15 @@ class ArcticRLActorRolloutRefWorker(Worker, DistProfilerExtension):
         model_output_raw = result.get("model_output", {})
         model_output: dict[str, Any] = {}
         if "log_probs" in model_output_raw:
-            model_output["log_probs"] = make_njt(data, model_output_raw["log_probs"])
+            log_probs = make_njt(data, model_output_raw["log_probs"])
+            if self.zorro_train_enable:
+                log_probs = shift_nested_response_aligned_to_predict_next(log_probs)
+            model_output["log_probs"] = log_probs
         if calculate_entropy and "entropy" in model_output_raw:
-            model_output["entropy"] = make_njt(data, model_output_raw["entropy"])
+            entropy = make_njt(data, model_output_raw["entropy"])
+            if self.zorro_train_enable:
+                entropy = shift_nested_response_aligned_to_predict_next(entropy)
+            model_output["entropy"] = entropy
 
         metrics = dict(result.get("metrics", {}))
         metrics.setdefault("mfu", 0.0)

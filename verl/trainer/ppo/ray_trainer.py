@@ -1090,16 +1090,6 @@ class RayPPOTrainer:
         )
         metrics.update(global_balance_stats)
 
-    def _model_output_shift(self) -> int:
-        """Slice offset for `no_padding_2_padding`.
-
-        * shift=-1 (legacy "predict-next"): model emits log P(token[i+1]) at slot i.
-        * shift= 0 (response-aligned): model output already lines up with the response
-          token at each slot (Arctic zorro fast path).
-        """
-        use_zorro = OmegaConf.select(self.config, "remote_backend.zorro_train.enable", default=False)
-        return 0 if use_zorro else -1
-
     def _compute_values(self, batch: DataProto) -> DataProto:
         if self.use_legacy_worker_impl == "disable":
             batch_td = batch.to_tensordict()
@@ -1135,7 +1125,7 @@ class RayPPOTrainer:
             # gather output
             log_probs = tu.get(output, "log_probs")
             # step 4. No padding to padding
-            log_probs = no_padding_2_padding(log_probs, batch_td, shift=self._model_output_shift())
+            log_probs = no_padding_2_padding(log_probs, batch_td)
             # step 5: rebuild a tensordict and convert to dataproto
             ref_log_prob = tu.get_tensordict({"ref_log_prob": log_probs.float()})
             ref_log_prob = DataProto.from_tensordict(ref_log_prob)
@@ -1160,9 +1150,8 @@ class RayPPOTrainer:
             routed_experts = tu.get(output, "routed_experts")
             old_log_prob_mfu = tu.get(output, "metrics")["mfu"]
             # step 4. No padding to padding
-            shift = self._model_output_shift()
-            entropy = no_padding_2_padding(entropy, batch_td, shift=shift)
-            log_probs = no_padding_2_padding(log_probs, batch_td, shift=shift)
+            entropy = no_padding_2_padding(entropy, batch_td)
+            log_probs = no_padding_2_padding(log_probs, batch_td)
             # step 5: rebuild a tensordict and convert to dataproto
             if routed_experts is not None:
                 old_log_prob = tu.get_tensordict(
