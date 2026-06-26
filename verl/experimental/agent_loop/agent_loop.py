@@ -1029,7 +1029,6 @@ class AgentLoopWorker:
         """Compute teacher logprobs for single sample."""
         if self.distillation_enabled and not validate:
             routing_key = None
-            solution_ids = None
             if sample_kwargs is not None:
                 routing_value = sample_kwargs.get(self.teacher_key)
                 if routing_value is not None:
@@ -1044,8 +1043,6 @@ class AgentLoopWorker:
                         f"'reward_model.ground_truth'."
                     )
                 solution_ids = self.tokenizer.encode(solution, add_special_tokens=False)
-            if solution_ids is not None:
-                # OPSD: the teacher conditions on the privileged ground-truth solution.
                 sequence_ids = build_privileged_sequence(
                     prompt_ids,
                     response_ids,
@@ -1062,7 +1059,7 @@ class AgentLoopWorker:
                 mm_processor_kwargs=output.mm_processor_kwargs,
                 routing_key=routing_key,
             )
-            if solution_ids is not None:
+            if self.self_distillation:
                 # Realign the teacher's privileged-context scores onto the student's positions.
                 teacher_ids, teacher_logprobs = slice_privileged_teacher_to_student(
                     teacher_ids, teacher_logprobs, len(prompt_ids), len(response_ids), self.tokenizer.pad_token_id
