@@ -84,6 +84,16 @@ class ArcticLLMEngine:
             finished=True,
         )
 
+    async def wake_up(self, tags: list[str] = None):
+        await self.arctic_rl_client.wake_up_inference(tags=tags)
+        await self.reset_prefix_cache()
+
+    async def sleep(self, level: int = 1):
+        await self.arctic_rl_client.sleep_inference(level=level)
+
+    async def reset_prefix_cache(self):
+        await self.arctic_rl_client.reset_prefix_cache()
+
 
 class ArcticLLMServer(vLLMHttpServer):
     """vLLM http server in single node, this is equivalent to launch server with command line:
@@ -294,6 +304,39 @@ class ArcticLLMServer(vLLMHttpServer):
             extra_info={"global_steps": self.global_steps},
         )
 
+    async def wake_up(self):
+        print("[ArcticLLMServer] Waking up")
+        if self.node_rank != 0 or not self.config.free_cache_engine:
+            return
+
+        if self.rollout_mode == RolloutMode.HYBRID:
+            # In hybrid mode, rollout is woken up inside `update_weights`.
+            raise ValueError(f"wake_up not support rollout_mode {self.rollout_mode}")
+        elif self.rollout_mode == RolloutMode.COLOCATED:
+            # Directly wake the inference engine without a weight sync.
+            await self.engine.wake_up(tags=["kv_cache", "weights"])
+            await self.engine.reset_prefix_cache()
+        elif self.rollout_mode == RolloutMode.STANDALONE:
+            print("[ArcticLLMServer] skip wake_up in standalone mode")
+
+    async def sleep(self):
+        if self.node_rank != 0 or not self.config.free_cache_engine:
+            print(
+                f"[ArcticLLMServer] skip sleep {self.rollout_mode}: "
+                f"node_rank={self.node_rank} free_cache_engine={self.config.free_cache_engine}"
+            )
+            return
+
+        print(f"[ArcticLLMServer] Sleeping {self.rollout_mode}")
+        if self.rollout_mode in (RolloutMode.HYBRID, RolloutMode.COLOCATED):
+            await self.engine.sleep(level=1)
+        elif self.rollout_mode == RolloutMode.STANDALONE:
+            print("[ArcticLLMServer] skip sleep in standalone mode")
+
+    async def clear_kv_cache(self):
+        if self.node_rank == 0:
+            await self.engine.reset_prefix_cache()
+
 
 class ArcticReplica(RolloutReplica):
     def __init__(
@@ -329,11 +372,7 @@ class ArcticReplica(RolloutReplica):
         self.servers.append(server)
         self._server_handle = server
 
-    async def wake_up(self):
-        pass
-
-    async def sleep(self):
-        pass
+    # NOTE: wake_up()/sleep() intentionally NOT overridden -- base RolloutReplica fans them out to each ArcticLLMServer.wake_up/sleep (drives colocate KV-cache sleep/wake); no-op overrides kept vLLM's KV reservation resident during training -> OOM.
 
     async def abort_request(self, request_id: str) -> dict[str, Any]:
         return {"aborted": True, "request_id": 0}

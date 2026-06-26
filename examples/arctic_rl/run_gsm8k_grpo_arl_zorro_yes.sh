@@ -70,10 +70,10 @@ python3 -m verl.trainer.main_ppo \
     remote_backend.training_gpus=1 \
     remote_backend.sampling_gpus=1 \
     remote_backend.log_prob_gpus=0 \
-    remote_backend.zero_optimization.stage=2 \
-    remote_backend.zero_optimization.offload_optimizer.device=none \
-    remote_backend.zero_optimization.offload_param.device=none \
-    remote_backend.zorro_train.enable=True \
+    remote_backend.train.deepspeed.zero_optimization.stage=2 \
+    remote_backend.train.deepspeed.zero_optimization.offload_optimizer.device=none \
+    remote_backend.train.deepspeed.zero_optimization.offload_param.device=none \
+    remote_backend.train.zorro_train.enable=True \
     trainer.critic_warmup=0 \
     trainer.logger="['console']" \
     trainer.experiment_name=gsm8k_grpo_qwen3_0p6b_ngpu1_gbs16_rolln5_zorroTrue \

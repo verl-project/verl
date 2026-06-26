@@ -12,11 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
+from copy import deepcopy
 from typing import Any
 
 import torch
-from arctic_training.rl import ArcticRLClientConfig, create_arctic_rl_client
-from arctic_training.rl.ray_server import ArcticRLRayServerState
+from arctic_platform.rl import ArcticRLClientConfig, create_arctic_rl_client
+from arctic_platform.rl.ray_server import ArcticRLRayServerState
+from omegaconf import OmegaConf
 from transformers import AutoTokenizer
 
 from verl.remote_backend.base import RemoteBackend, RemoteBackendRegistry
@@ -72,23 +74,25 @@ def _no_padding_2_padding_prompt_response(tensor: torch.Tensor, data, pad_token_
     return torch.stack(rows, dim=0), max_prompt_len, max_response_len
 
 
-def _prepare_padded_arctic_batch_dict(data, pad_token_id):
-    """Convert verl's nested-jagged ``input_ids`` / ``position_ids`` into
-    the dense padded shape Arctic expects on the wire, and report the
-    max prompt / response lengths."""
+def _prepare_padded_arctic_batch_dict(data, pad_token_id, *, drop_position_ids: bool = False):
+    """Convert verl's nested-jagged ``input_ids`` / ``position_ids`` into the dense padded shape Arctic expects on the
+    wire, and report the max prompt / response lengths. With ``drop_position_ids=True`` the server reconstructs
+    position_ids from attention_mask (set False for mrope / 3D rope)."""
     input_ids = data["input_ids"]
-    position_ids = data["position_ids"]
     input_ids, max_prompt_len, max_response_len = _no_padding_2_padding_prompt_response(
         tensor=input_ids, data=data, pad_token_id=pad_token_id
     )
-    position_ids, _, _ = _no_padding_2_padding_prompt_response(tensor=position_ids, data=data, pad_token_id=0)
 
     batch_dict = dict(
         input_ids=input_ids,
-        position_ids=position_ids,
         attention_mask=data["attention_mask"],
         prompts=data["prompts"],
     )
+    if not drop_position_ids:
+        position_ids, _, _ = _no_padding_2_padding_prompt_response(
+            tensor=data["position_ids"], data=data, pad_token_id=0
+        )
+        batch_dict["position_ids"] = position_ids
     return batch_dict, max_prompt_len, max_response_len
 
 
@@ -104,23 +108,26 @@ class ArcticRLClientWrapper(RemoteBackend):
 
     def __init__(self, config, reconnect_job_config: dict = None, rl_server_state: ArcticRLRayServerState = None):
         self.config = config
-        # Per @sfc-gh-truwase (PR #4): the per-backend yaml
-        # (`trainer/config/remote_backend/arctic.yaml`) is loaded into
-        # `config.remote_backend` as a flat block — the file name already
-        # names the backend, so no extra `arctic:` nesting is needed.
+        # Per-backend yaml is loaded flat at `config.remote_backend`; the file
+        # name (arctic.yaml) names the backend, so no extra nesting is needed.
         self._backend_config = config.remote_backend
         self._client = None
-        self.zorro_train_enable = self._backend_config.zorro_train.enable
-        self.zorro_train_max_rollouts = self._backend_config.zorro_train.max_rollouts
-        # Weight-sync transport selection. CUDA-IPC bypasses the NCCL
-        # all_reduce path entirely; only valid when colocate=True.
-        self.cuda_ipc_weight_sync = self._backend_config.get("cuda_ipc_weight_sync", False)
-        self.low_memory_weight_sync = self._backend_config.get("low_memory_weight_sync", False)
+        _train_cfg = self._backend_config.train
+        _logits_cfg = _train_cfg.logits
+        self.zorro_train_enable = _train_cfg.zorro_train.enable
+        self.zorro_train_max_rollouts = _train_cfg.zorro_train.max_rollouts
+        # Set False for non-arange position_ids (mrope / 3D rope).
+        self.drop_position_ids = self._backend_config.comms.get("drop_position_ids", True)
+        self.logits_optimization = _logits_cfg.get("optimization", "none")
+        self.logits_optimization_peak_mem_size_in_gib = _logits_cfg.get("optimization_peak_mem_size_in_gib", 4)
+        self.logits_compute_in_fp32 = _logits_cfg.get("compute_in_fp32", False)
+        self.logits_compute_from_fp32_inputs = _logits_cfg.get("compute_from_fp32_inputs", False)
+        # Zorro-group load balancer (zorro-agnostic): server reorgs the global batch when set.
+        self.load_balancer = _train_cfg.get("load_balancer", True)
+        # CUDA-IPC bypasses NCCL for weight sync; only valid when colocate=True.
+        self.cuda_ipc_weight_sync = self._backend_config.weight_sync.cuda_ipc
+        self.low_memory_weight_sync = self._backend_config.weight_sync.low_memory
         self.use_liger = self.config.actor_rollout_ref.model.use_liger
-        # Static, config-derived engineering value Arctic needs on every
-        # `compute_log_prob` / `update_actor` call. Cached here at init
-        # time so the verl-side forwarder doesn't have to re-inject it
-        # into every batch.
         self._max_token_len_per_gpu = self.config.actor_rollout_ref.actor.ppo_max_token_len_per_gpu
         self.tokenizer = AutoTokenizer.from_pretrained(self.config.actor_rollout_ref.model.path)
         self._client = self._initialize_client(reconnect_job_config, rl_server_state)
@@ -185,10 +192,13 @@ class ArcticRLClientWrapper(RemoteBackend):
         temperature,
         pad_token_id: int,
     ) -> dict:
-        batch, max_prompt_len, max_response_len = _prepare_padded_arctic_batch_dict(data, pad_token_id)
+        batch, max_prompt_len, max_response_len = _prepare_padded_arctic_batch_dict(
+            data, pad_token_id, drop_position_ids=self.drop_position_ids
+        )
         meta = dict(
             zorro_train_enable=self.zorro_train_enable,
             zorro_train_max_rollouts=self.zorro_train_max_rollouts,
+            load_balancer=self.load_balancer,
             rollout_n=rollout_n,
             max_prompt_len=max_prompt_len,
             max_response_len=max_response_len,
@@ -196,6 +206,10 @@ class ArcticRLClientWrapper(RemoteBackend):
             temperature=data["temperature"],
             calculate_entropy=calculate_entropy,
             pad_token_id=pad_token_id,
+            drop_position_ids=self.drop_position_ids,
+            logits_optimization=self.logits_optimization,
+            logits_optimization_peak_mem_size_in_gib=self.logits_optimization_peak_mem_size_in_gib,
+            logits_compute_in_fp32=self.logits_compute_in_fp32,
         )
         payload = dict(batch=batch, meta=meta)
 
@@ -224,13 +238,9 @@ class ArcticRLClientWrapper(RemoteBackend):
         input_ids, max_prompt_len, max_response_len = _no_padding_2_padding_prompt_response(
             tensor=data["input_ids"], data=data, pad_token_id=pad_token_id
         )
-        position_ids, _, _ = _no_padding_2_padding_prompt_response(
-            tensor=data["position_ids"], data=data, pad_token_id=0
-        )
 
         batch = dict(
             input_ids=input_ids,
-            position_ids=position_ids,
             attention_mask=data["attention_mask"],
             prompts=data["prompts"],
             responses=data["responses"],
@@ -238,22 +248,34 @@ class ArcticRLClientWrapper(RemoteBackend):
             old_log_probs=data["old_log_probs"],
             advantages=data["advantages"],
         )
+        if not self.drop_position_ids:
+            position_ids, _, _ = _no_padding_2_padding_prompt_response(
+                tensor=data["position_ids"], data=data, pad_token_id=0
+            )
+            batch["position_ids"] = position_ids
         if actor_config.use_kl_loss:
             batch["ref_log_prob"] = data["ref_log_prob"]
 
+        # Per-chunk loss normalizers (mirror recipe/rl-correctness arctic_workers.train_global_batch).
+        per_step_global_bsz = self.config.actor_rollout_ref.actor.ppo_mini_batch_size * rollout_n
         meta = dict(
+            zorro_train_enable=self.zorro_train_enable,
+            zorro_train_max_rollouts=self.zorro_train_max_rollouts,
+            load_balancer=self.load_balancer,
             rollout_n=rollout_n,
             max_prompt_len=max_prompt_len,
             max_response_len=max_response_len,
             max_token_len_per_gpu=self._max_token_len_per_gpu,
             temperature=data["temperature"],
-            zorro_train_enable=self.zorro_train_enable,
-            zorro_train_max_rollouts=self.zorro_train_max_rollouts,
-            global_batch_size=data["global_batch_size"],
-            rollout_is_weights=data.get("rollout_is_weights", None),
-            batch_num_tokens=data["loss_mask"].sum(),
             calculate_entropy=actor_config.calculate_entropy,
             pad_token_id=pad_token_id,
+            drop_position_ids=self.drop_position_ids,
+            logits_optimization=self.logits_optimization,
+            logits_optimization_peak_mem_size_in_gib=self.logits_optimization_peak_mem_size_in_gib,
+            logits_compute_in_fp32=self.logits_compute_in_fp32,
+            global_batch_size=per_step_global_bsz,
+            batch_num_tokens=batch["response_mask"].sum(),
+            rollout_is_weights=data.get("rollout_is_weights", None),
         )
 
         def _safe_serialize(obj):
@@ -280,26 +302,41 @@ class ArcticRLClientWrapper(RemoteBackend):
             "global_token_num": global_token_num,
         }
 
-    def _create_ds_config(self, n_gpus: int) -> dict[str, Any]:
+    def _create_ds_config(self, n_gpus: int, training: bool = True) -> dict[str, Any]:
+        # Pass the entire `remote_backend.train.deepspeed` YAML block through to the DS engine (torch_autocast/communication_data_type/data_types/zero_optimization/log_level/...) and merge in per-step batch sizing. Matches recipe/rl-correctness arctic_rl_client._create_ds_config.
         actor_cfg = self.config.actor_rollout_ref.actor
         data_cfg = self.config.data
-        zero_optimization_config = self._backend_config.zero_optimization
+        rollout_n = self.config.actor_rollout_ref.rollout.n
+        deepspeed_config = OmegaConf.to_container(self._backend_config.train.deepspeed, resolve=True)
 
         micro_batch_size = actor_cfg.ppo_micro_batch_size_per_gpu or 1
-        train_batch_size = data_cfg.train_batch_size * self.config.actor_rollout_ref.rollout.n
+        # DS train_batch_size = samples consumed per optimizer step.
+        # We do one optimizer step per PPO mini-batch (matching verl baseline's
+        # dp_actor.update_policy loop), not per global batch, so the DS engine's
+        # gradient-accumulation gating must reflect one mini-batch, not BSZ.
+        global_batch_size = data_cfg.train_batch_size * rollout_n
+        train_batch_size = actor_cfg.ppo_mini_batch_size * rollout_n
+        assert global_batch_size % train_batch_size == 0, (
+            f"data.train_batch_size ({data_cfg.train_batch_size}) must be divisible by "
+            f"actor.ppo_mini_batch_size ({actor_cfg.ppo_mini_batch_size}); "
+            f"got global={global_batch_size}, per-step={train_batch_size}"
+        )
         grad_accum_steps = max(1, train_batch_size // (micro_batch_size * n_gpus))
         train_seq_parallel_size = actor_cfg.fsdp_config.get("ulysses_sequence_parallel_size", 1)
-        return {
-            "train_micro_batch_size_per_gpu": micro_batch_size,
-            "train_batch_size": train_batch_size,
-            "gradient_accumulation_steps": grad_accum_steps,
-            "sequence_parallel_size": train_seq_parallel_size,
-            "zero_optimization": {
-                "stage": zero_optimization_config.stage,
-                "offload_optimizer": {"device": zero_optimization_config.offload_optimizer.device},
-                "offload_param": {"device": zero_optimization_config.offload_param.device},
-            },
-        }
+
+        ds_config = deepcopy(deepspeed_config)
+        ds_config.update(
+            {
+                "train_micro_batch_size_per_gpu": micro_batch_size,
+                "train_batch_size": train_batch_size,
+                "gradient_accumulation_steps": grad_accum_steps,
+                "sequence_parallel_size": train_seq_parallel_size,
+            }
+        )
+        if not training:
+            ds_config.pop("data_types", None)
+
+        return ds_config
 
     def reconnect_config(self):
         return self._client.reconnect_config()
@@ -313,6 +350,7 @@ class ArcticRLClientWrapper(RemoteBackend):
         )
         ds_worker_config = dict(
             use_liger=self.use_liger,
+            enable_gradient_checkpointing=self.config.actor_rollout_ref.model.enable_gradient_checkpointing,
             attn_implementation=attn_implementation,
         )
 
@@ -323,11 +361,18 @@ class ArcticRLClientWrapper(RemoteBackend):
             ds_worker_config.update(
                 zorro_train_enable=True,
                 response_len=self.config.data.max_response_length,
-                max_token_len=self.config.actor_rollout_ref.rollout.max_num_batched_tokens,
+                # Matches recipe/rl-correctness: read per-GPU token budget
+                # from actor.ppo_max_token_len_per_gpu (the budget the train
+                # engine sees), not rollout.max_num_batched_tokens.
+                max_token_len=self.config.actor_rollout_ref.actor.ppo_max_token_len_per_gpu,
                 rollout_n=self.config.actor_rollout_ref.rollout.n,
                 temperature=self.config.actor_rollout_ref.rollout.temperature,
-                tiled_logits_compute=self._backend_config.get("tiled_logits_compute", True),
                 use_unpad=use_unpad,
+                # Server reads these from ds_worker_config (arctic_platform/rl/deepspeed_worker.py), not per-call meta.
+                logits_optimization=self.logits_optimization,
+                logits_optimization_peak_mem_size_in_gib=self.logits_optimization_peak_mem_size_in_gib,
+                logits_compute_from_fp32_inputs=self.logits_compute_from_fp32_inputs,
+                logits_compute_in_fp32=self.logits_compute_in_fp32,
             )
 
         return ds_worker_config
@@ -352,6 +397,29 @@ class ArcticRLClientWrapper(RemoteBackend):
 
         max_length = data_cfg.max_prompt_length + data_cfg.max_response_length
 
+        # LR-scheduler horizon = global_steps * ppo_epochs * num_minibatches
+        # (matches recipe/rl-correctness arctic_rl_client.py). verl injects
+        # actor.optim.total_training_steps after dataloader build; fall back
+        # to trainer.total_training_steps for early-construction paths.
+        global_training_steps = optim_cfg.get("total_training_steps", None)
+        if not global_training_steps or int(global_training_steps) <= 0:
+            global_training_steps = self.config.trainer.get("total_training_steps", None)
+        assert global_training_steps and int(global_training_steps) > 0, (
+            "total_training_steps not populated before Arctic client build; expected "
+            "ray_trainer._create_dataloader to inject actor.optim.total_training_steps"
+        )
+        num_minibatches = data_cfg.train_batch_size // actor_cfg.ppo_mini_batch_size
+        opt_steps_per_global_step = actor_cfg.ppo_epochs * num_minibatches
+        training_horizon = int(global_training_steps) * opt_steps_per_global_step
+        lr_scheduler_type = optim_cfg.get("lr_scheduler_type", "constant")
+        print(
+            f"[ArcticRLClientWrapper] lr_scheduler: type={lr_scheduler_type} "
+            f"training_horizon={training_horizon} (global_steps={int(global_training_steps)} "
+            f"x ppo_epochs={actor_cfg.ppo_epochs} x num_minibatches={num_minibatches}); "
+            f"warmup_steps={int(optim_cfg.lr_warmup_steps_ratio * training_horizon)}",
+            flush=True,
+        )
+
         rollout_cfg = self.config.actor_rollout_ref.rollout
         vllm_config = {
             "tensor_parallel_size": self._backend_config.sampling_tp_size,
@@ -364,10 +432,41 @@ class ArcticRLClientWrapper(RemoteBackend):
         if rollout_cfg.get("quantization"):
             vllm_config["quantization"] = rollout_cfg.quantization
 
+        # Arctic inference signals (FCA / speculative decoding) are NOT vLLM
+        # engine args: the server (arctic_platform.rl) expands this block via
+        # `parse_arctic_inference_rollout` and treats None/empty as "Arctic
+        # inference off". Pass the whole `remote_backend.rollout` sub-config
+        # through; the server keys on `zorro_inference.enable` /
+        # `speculative_decoding.model`.
+        rollout_inference_cfg = self._backend_config.get("rollout", None)
+        arctic_inference_config = (
+            OmegaConf.to_container(rollout_inference_cfg, resolve=True) if rollout_inference_cfg is not None else None
+        )
+
+        # Forward grad_clip to the DeepSpeed engine so it clips global grad-norm
+        # to the same threshold verl applies in the FSDP path (otherwise DS
+        # defaults to no clipping -> trajectory divergence vs verl baseline).
+        optimizer_config = {
+            "lr": optim_cfg.lr,
+            "weight_decay": optim_cfg.weight_decay,
+            "betas": list(optim_cfg.betas),
+        }
+        grad_clip = optim_cfg.get("clip_grad", None)
+        if grad_clip is None:
+            grad_clip = actor_cfg.get("grad_clip", None)
+        if grad_clip is not None and float(grad_clip) > 0:
+            optimizer_config["gradient_clipping"] = float(grad_clip)
+
+        lr_scheduler_config = {
+            "type": lr_scheduler_type,
+            "warmup_ratio": optim_cfg.lr_warmup_steps_ratio,
+            "min_lr_ratio": optim_cfg.get("min_lr_ratio", None),
+        }
+
         rl_config = ArcticRLClientConfig(
-            host=None if self._backend_config.comm_protocol == "ray" else "localhost",
-            port=None if self._backend_config.comm_protocol == "ray" else 7000,
-            comm_protocol=self._backend_config.comm_protocol,
+            host=None if self._backend_config.comms.protocol == "ray" else "localhost",
+            port=None if self._backend_config.comms.protocol == "ray" else 7000,
+            comm_protocol=self._backend_config.comms.protocol,
             backend="local",
             training_gpus=n_training_gpus,
             sampling_gpus=n_sampling_gpus,
@@ -378,20 +477,19 @@ class ArcticRLClientWrapper(RemoteBackend):
             ds_config=self._create_ds_config(n_training_gpus),
             log_prob_ds_config=None if n_log_prob_gpus == 0 else self._create_ds_config(n_log_prob_gpus),
             training_config={
-                "optimizer": {
-                    "lr": optim_cfg.lr,
-                    "weight_decay": optim_cfg.weight_decay,
-                    "betas": list(optim_cfg.betas),
-                },
-                "lr_scheduler": {"warmup_ratio": optim_cfg.lr_warmup_steps_ratio},
-                "training_horizon": self.config.trainer.total_epochs,
+                "training_horizon": training_horizon,
+                "optimizer": optimizer_config,
+                "lr_scheduler": lr_scheduler_config,
                 "max_length": max_length,
                 "model_config": None,
                 "attn_implementation": attn_implementation,
             },
             ds_worker_config=self._create_ds_worker_config(),
             vllm_config=vllm_config,
+            arctic_inference_config=arctic_inference_config or None,
             checkpoint_path=self.config.trainer.default_local_dir,
+            full_determinism=self._backend_config.train.determinism.get("full", False),
+            seed=self._backend_config.train.determinism.get("seed", 42),
         )
 
         # ArcticRLClient is constructed as a ray remote actor with num_gpus=0,
@@ -412,12 +510,12 @@ class ArcticRLClientWrapper(RemoteBackend):
     }
 
     async def generate(self, prompt_ids, sampling_params, routing_key=None) -> list:
+        # `routing_key` kept for caller-API compat; arctic_platform.rl handles routing internally.
         prompts = [self.tokenizer.decode(prompt_ids)]
         merged_params = {**self._default_sampling_params, **sampling_params}
         return await self._client.generate(
             prompts=prompts,
             sampling_params=merged_params,
-            routing_key=routing_key,
         )
 
     # ------------------------------------------------------------------ #
@@ -472,6 +570,15 @@ class ArcticRLClientWrapper(RemoteBackend):
             cuda_ipc=self.cuda_ipc_weight_sync,
             low_memory=self.low_memory_weight_sync,
         )
+
+    async def wake_up_inference(self, tags: list[str] = None):
+        return await self._client.wake_inference(tags=tags)
+
+    async def sleep_inference(self, level: int = 1):
+        return await self._client.sleep_inference(level=level)
+
+    async def reset_prefix_cache(self):
+        return await self._client.reset_prefix_cache()
 
     async def destroy(self) -> None:
         if self._client is not None:
