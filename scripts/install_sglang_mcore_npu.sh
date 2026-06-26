@@ -41,7 +41,7 @@ if [ $USE_MEGATRON -eq 1 ]; then
 fi
 
 echo "5. install verl "
-cd verl/recipe && git checkout main && cd .. && \
+cd verl/recipe && git checkout e477deff9 && cd .. && \
 pip install -r requirements-npu.txt --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn
 pip install -v -e . && cd .. &&
 
