@@ -1415,10 +1415,27 @@ class RayPPOTrainer:
         teacher_output = teacher_output.get()
         teacher_on_student_logp = tu.get(teacher_output, "teacher_on_student_logp")  # nested (B, T_i, K)
 
-        # Phase 3: nested -> dense (B, max_response_len, K), union into batch so the engine
-        # left_right_2_no_padding'es them back to nested when update_actor micro-batches run.
-        student_topk_ids_padded = no_padding_2_padding(student_topk_ids, batch_td)
-        teacher_on_student_logp_padded = no_padding_2_padding(teacher_on_student_logp, batch_td)
+        # Phase 3: nested -> left-right padded dense (B, max_seq_len, K), unioned into
+        # batch so update_actor's left_right_2_no_padding re-nests them aligned to input_ids.
+        # NOTE: no_padding_2_padding is wrong here — it slices response-only and left-shifts.
+        indices = tu.get_non_tensor_data(data=batch_td, key="indices", default=None)
+        max_seq_len = tu.get_non_tensor_data(data=batch_td, key="max_seq_len", default=None)
+        assert indices is not None and max_seq_len is not None, (
+            "left_right_2_no_padding must run before _inject_fsdp_teacher_data Phase 3."
+        )
+        batch_size = student_topk_ids.size(0)
+
+        def _to_left_right_padded(nested: torch.Tensor) -> torch.Tensor:
+            # Scatter jagged (B, T_i, K) values back to left-right padded dense
+            # (B, max_seq_len, K); padding slots are dropped again on the next unpad.
+            values = nested.values()  # (total_nnz, K)
+            k = values.shape[-1]
+            flat = values.new_zeros((batch_size * max_seq_len, k))
+            flat[indices.to(flat.device)] = values
+            return flat.reshape(batch_size, max_seq_len, k)
+
+        student_topk_ids_padded = _to_left_right_padded(student_topk_ids)
+        teacher_on_student_logp_padded = _to_left_right_padded(teacher_on_student_logp)
         extras = tu.get_tensordict(
             {
                 "student_topk_ids": student_topk_ids_padded,
