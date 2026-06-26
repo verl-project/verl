@@ -769,9 +769,14 @@ def compute_is_metrics(
         seq_deviation: torch.Tensor = (seq_mean_weights - 1.0).abs()
         metrics["rollout_is_seq_max_deviation"] = seq_deviation.max().item()
 
-        # Fraction of sequences with extreme weights
-        metrics["rollout_is_seq_fraction_high"] = (seq_mean_weights > rollout_is_threshold).float().mean().item()
-        metrics["rollout_is_seq_fraction_low"] = (seq_mean_weights < rollout_is_threshold_lower).float().mean().item()
+        # Fraction of sequences with extreme weights. Use the raw (pre-truncation)
+        # per-sequence mean: every clamped weight is <= rollout_is_threshold, so a mean
+        # of clamped weights can never exceed it and the high fraction would be dead.
+        raw_seq_mean_weights: torch.Tensor = verl_F.masked_mean(raw_rollout_is_weights, response_mask, axis=-1)
+        metrics["rollout_is_seq_fraction_high"] = (raw_seq_mean_weights > rollout_is_threshold).float().mean().item()
+        metrics["rollout_is_seq_fraction_low"] = (
+            (raw_seq_mean_weights < rollout_is_threshold_lower).float().mean().item()
+        )
 
     return metrics
 
