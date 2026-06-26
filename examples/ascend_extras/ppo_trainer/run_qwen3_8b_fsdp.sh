@@ -6,7 +6,7 @@ python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=gae \
     data.train_files=$HOME/data/gsm8k/train.parquet \
     data.val_files=$HOME/data/gsm8k/test.parquet \
-    data.train_batch_size=32 \
+    data.train_batch_size=64 \
     data.max_prompt_length=2000 \
     data.max_response_length=2000 \
     data.shuffle=False \
@@ -14,7 +14,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.optim.lr=1e-6 \
-    actor_rollout_ref.actor.ppo_mini_batch_size=32 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=64 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
@@ -32,7 +32,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
     actor_rollout_ref.rollout.enforce_eager=False \
-    actor_rollout_ref.rollout.calculate_log_probs=True \
+    actor_rollout_ref.rollout.calculate_log_probs=False \
     critic.optim.lr=1e-5 \
     critic.model.use_remove_padding=True \
     critic.model.path="${MODEL_PATH}" \
