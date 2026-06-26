@@ -59,7 +59,7 @@ from verl.utils.fsdp_utils import (
     offload_fsdp_optimizer,
     replace_lora_wrapper,
 )
-from verl.utils.model import convert_weight_keys, extract_multi_modal_inputs
+from verl.utils.model import convert_weight_keys, extract_multi_modal_inputs, iter_vllm_compatible_moe_params
 from verl.utils.py_functional import convert_to_regular_types
 from verl.utils.torch_functional import logprobs_from_logits
 from verl.utils.ulysses import (
@@ -834,16 +834,18 @@ class FSDPEngine(BaseEngine):
             per_tensor_param = params.items()
         else:
             device = get_device_id()  # used when fsdp2 set cpu_offload_policy
+
             # TODO: cast fp32 to bf16 to reduce weight sync overhead, need more fine-grained control, e.g MoE gate
-            per_tensor_param = (
-                (
-                    name,
-                    param.to(device, non_blocking=True).full_tensor().to(torch.bfloat16, non_blocking=True)
-                    if isinstance(param, DTensor)
-                    else param,
-                )
-                for name, param in params.items()
-            )
+            def param_generator():
+                for name, param in params.items():
+                    tensor = (
+                        param.to(device, non_blocking=True).full_tensor().to(torch.bfloat16, non_blocking=True)
+                        if isinstance(param, DTensor)
+                        else param
+                    )
+                    yield from iter_vllm_compatible_moe_params(name, tensor)
+
+            per_tensor_param = param_generator()
 
         if self._qat_enabled:
             from verl.utils.qat.quantizer import QATQuantizer
