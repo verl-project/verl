@@ -19,6 +19,7 @@ import json
 import os
 import re
 import warnings
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Optional
 
@@ -260,6 +261,34 @@ def convert_weight_keys(state_dict: dict[str, torch.Tensor], model: PreTrainedMo
         original_weights[key] = value
 
     return original_weights
+
+
+def iter_vllm_compatible_moe_params(name: str, tensor: torch.Tensor) -> Iterable[tuple[str, torch.Tensor]]:
+    """Expand Transformers 5 packed MoE expert tensors to vLLM checkpoint keys.
+
+    Transformers 5 stores Qwen-style MoE experts as packed 3D parameters:
+    ``mlp.experts.gate_up_proj`` with shape
+    ``[num_experts, 2 * intermediate_size, hidden_size]`` and
+    ``mlp.experts.down_proj`` with shape
+    ``[num_experts, hidden_size, intermediate_size]``. vLLM's Qwen MoE reload
+    path still accepts the original per-expert checkpoint keys during live
+    weight sync, so stream those keys without materializing a full dict.
+    """
+    if name.endswith(".mlp.experts.gate_up_proj") and tensor.dim() == 3:
+        gate, up = tensor.chunk(2, dim=1)
+        base = name.removesuffix(".gate_up_proj")
+        for expert_id in range(tensor.size(0)):
+            yield f"{base}.{expert_id}.gate_proj.weight", gate[expert_id].contiguous()
+            yield f"{base}.{expert_id}.up_proj.weight", up[expert_id].contiguous()
+        return
+
+    if name.endswith(".mlp.experts.down_proj") and tensor.dim() == 3:
+        base = name.removesuffix(".down_proj")
+        for expert_id in range(tensor.size(0)):
+            yield f"{base}.{expert_id}.down_proj.weight", tensor[expert_id].contiguous()
+        return
+
+    yield name, tensor
 
 
 def check_exclude_modules(config, key: str) -> bool:
