@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import warnings
 from typing import Any, Optional
 
@@ -256,6 +257,86 @@ async def test_agent_loop_extra_fields_schema_stable_for_training_concat_on_cpu(
     # And the list-typed fields are actually lists (not missing / scalar).
     assert merged.non_tensor_batch["turn_scores"][0] == []
     assert merged.non_tensor_batch["tool_rewards"][0] == []
+
+
+def test_agent_loop_postprocess_emits_r3_per_traj_routed_experts(monkeypatch):
+    monkeypatch.setenv("VERL_R3_SPEEDUP", "1")
+
+    inputs = []
+    for idx, length in enumerate([4, 3]):
+        internal = _to_internal(
+            output_prompt_ids=[101, 102],
+            output_response_ids=[11, 12],
+            output_response_mask=[1, 1],
+            metrics=AgentLoopMetrics(),
+            extra_fields={},
+            num_turns=1,
+            prompt_len=4,
+            response_len=4,
+        )
+        internal.routed_experts = torch.full((length, 2, 1), idx + 1, dtype=torch.uint8)
+        inputs.append(internal)
+
+    dummy_worker = type(
+        "_DummyWorker",
+        (),
+        {"reward_loop_worker_handles": None, "distillation_enabled": False},
+    )()
+
+    merged = AgentLoopWorker._postprocess(dummy_worker, inputs=inputs)
+
+    assert "routed_experts" not in merged.batch.keys()
+    routed = merged.non_tensor_batch["routed_experts_per_traj"]
+    assert routed.shape == (2,)
+    assert routed.dtype == object
+    assert routed[0].shape == (4, 2, 1)
+    assert routed[1].shape == (3, 2, 1)
+    np.testing.assert_array_equal(routed[0], inputs[0].routed_experts.numpy())
+    np.testing.assert_array_equal(routed[1], inputs[1].routed_experts.numpy())
+
+
+def test_agent_loop_postprocess_keeps_r3_routed_experts_unpadded(monkeypatch):
+    monkeypatch.setenv("VERL_R3_SPEEDUP", "1")
+
+    class _DummyWorker:
+        _compute_multi_modal_inputs = AgentLoopWorker._compute_multi_modal_inputs
+        _compute_position_ids = AgentLoopWorker._compute_position_ids
+        _get_mm_processor_kwargs = AgentLoopWorker._get_mm_processor_kwargs
+        _compute_score = AgentLoopWorker._compute_score
+        _compute_teacher_logprobs = AgentLoopWorker._compute_teacher_logprobs
+        _pad_token_ids = AgentLoopWorker._pad_token_ids
+        distillation_enabled = False
+
+        def __init__(self):
+            self.tokenizer = _FakeTokenizer()
+            self.rollout_config = OmegaConf.create({"prompt_length": 4, "response_length": 4})
+            self.processor = None
+            self.mm_processor_kwargs = {}
+            self.reward_loop_worker_handles = None
+
+    routed_experts = np.arange(8, dtype=np.int64).reshape(4, 2, 1)
+    output = AgentLoopOutput(
+        prompt_ids=[101, 102],
+        response_ids=[11, 12],
+        response_mask=[1, 1],
+        routed_experts=routed_experts,
+        metrics=AgentLoopMetrics(),
+        extra_fields={},
+    )
+
+    internal = asyncio.run(
+        AgentLoopWorker._agent_loop_postprocess(
+            _DummyWorker(),
+            output,
+            validate=False,
+            raw_prompt=[{"role": "user", "content": "hi"}],
+        )
+    )
+
+    assert internal.routed_experts is not None
+    assert internal.routed_experts.shape == (4, 2, 1)
+    assert internal.routed_experts.dtype == torch.uint8
+    torch.testing.assert_close(internal.routed_experts, torch.tensor(routed_experts, dtype=torch.uint8))
 
 
 @pytest.mark.asyncio

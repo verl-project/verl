@@ -13,14 +13,18 @@
 # limitations under the License.
 import random
 
+import numpy as np
 import torch
 from tensordict import TensorDict
 
+from verl.utils import tensordict_utils as tu
 from verl.workers.utils.padding import (
     build_attention_mask_from_nested,
     embeds_padding_2_no_padding,
     left_right_2_no_padding,
+    make_r3_per_traj_object_array,
     no_padding_2_padding,
+    normalize_r3_per_traj_list,
     response_from_nested,
     response_to_nested,
 )
@@ -133,6 +137,78 @@ def test_padding_conversion_without_log_probs():
     assert data_converted["position_ids"].is_nested
     assert "old_log_probs" not in data_converted
     assert "ref_log_prob" not in data_converted
+
+
+def test_r3_per_traj_object_array_preserves_equal_shape_samples():
+    rows = [
+        torch.zeros((2, 3, 1), dtype=torch.uint8).numpy(),
+        torch.ones((2, 3, 1), dtype=torch.uint8).numpy(),
+    ]
+
+    packed = make_r3_per_traj_object_array(rows)
+
+    assert packed.shape == (2,)
+    assert packed.dtype == object
+    assert isinstance(packed[0], np.ndarray)
+    assert packed[0].shape == (2, 3, 1)
+    assert packed[1].shape == (2, 3, 1)
+
+
+def test_r3_per_traj_normalize_recovers_collated_equal_shape_object_array():
+    rows = [
+        torch.zeros((2, 3, 1), dtype=torch.uint8).numpy(),
+        torch.ones((2, 3, 1), dtype=torch.uint8).numpy(),
+    ]
+    collated = np.array(rows, dtype=object)
+
+    normalized = normalize_r3_per_traj_list(collated)
+
+    assert len(normalized) == 2
+    assert all(isinstance(row, np.ndarray) for row in normalized)
+    assert normalized[0].dtype == np.uint8
+    assert normalized[0].shape == (2, 3, 1)
+    np.testing.assert_array_equal(normalized[0], rows[0])
+    np.testing.assert_array_equal(normalized[1], rows[1])
+
+
+def test_padding_conversion_uses_r3_per_traj_routed_experts(monkeypatch):
+    monkeypatch.setenv("VERL_R3_SPEEDUP", "1")
+
+    batch_size = 2
+    max_seq_len = 6
+    max_response_len = 3
+
+    input_ids = torch.arange(batch_size * max_seq_len).reshape(batch_size, max_seq_len)
+    attention_mask = torch.tensor(
+        [
+            [1, 1, 1, 1, 0, 0],
+            [1, 1, 1, 1, 1, 0],
+        ],
+        dtype=torch.long,
+    )
+    response_mask = torch.ones(batch_size, max_response_len, dtype=torch.long)
+    position_ids = torch.arange(max_seq_len).unsqueeze(0).expand(batch_size, -1)
+
+    row0 = torch.tensor([1, 2, 3, 4, 99, 100], dtype=torch.int64).reshape(6, 1, 1).numpy()
+    row1 = torch.tensor([5, 6, 7], dtype=torch.int64).reshape(3, 1, 1).numpy()
+
+    data = TensorDict(
+        {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "response_mask": response_mask,
+            "position_ids": position_ids,
+        },
+        batch_size=[batch_size],
+    )
+    tu.assign_non_tensor_stack(data, "routed_experts_per_traj", [row0, row1])
+
+    converted = left_right_2_no_padding(data)
+    routed = converted["routed_experts"]
+
+    assert routed.is_nested
+    torch.testing.assert_close(routed[0].squeeze(-1).squeeze(-1), torch.tensor([1, 2, 3, 4], dtype=torch.uint8))
+    torch.testing.assert_close(routed[1].squeeze(-1).squeeze(-1), torch.tensor([5, 6, 7, 0, 0], dtype=torch.uint8))
 
 
 def test_padding_roundtrip():

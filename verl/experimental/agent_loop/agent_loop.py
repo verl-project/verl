@@ -71,11 +71,20 @@ from verl.workers.config import (
     RolloutConfig,
 )
 from verl.workers.rollout.llm_server import LLMServerClient
+from verl.workers.utils.padding import make_r3_per_traj_object_array, r3_speedup_enabled, routed_experts_to_tensor
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 DEFAULT_ROUTING_CACHE_SIZE = 10000
+
+
+def _routed_experts_to_numpy(routed_experts):
+    if isinstance(routed_experts, np.ndarray):
+        return routed_experts
+    if isinstance(routed_experts, torch.Tensor):
+        return routed_experts.detach().cpu().numpy()
+    return np.asarray(routed_experts)
 
 
 class AgentLoopMetrics(BaseModel):
@@ -776,29 +785,33 @@ class AgentLoopWorker:
         routed_experts = None
         if output.routed_experts is not None:
             total_length = input_ids.shape[1]
-            length, layer_num, topk_num = output.routed_experts.shape
-            if isinstance(output.routed_experts, np.ndarray):
-                routed_experts_array = output.routed_experts
-                if not routed_experts_array.flags.writeable:
-                    routed_experts_array = routed_experts_array.copy()
-                experts_tensor = torch.from_numpy(routed_experts_array)
-            elif isinstance(output.routed_experts, torch.Tensor):
-                experts_tensor = output.routed_experts
+            if r3_speedup_enabled():
+                experts_tensor = routed_experts_to_tensor(output.routed_experts)
+                routed_experts = experts_tensor.contiguous()
             else:
-                raise TypeError(f"Unsupported type for routed_experts: {type(output.routed_experts)}")
-            routed_experts = torch.zeros(1, total_length, layer_num, topk_num, dtype=experts_tensor.dtype)
+                length, layer_num, topk_num = output.routed_experts.shape
+                if isinstance(output.routed_experts, np.ndarray):
+                    routed_experts_array = output.routed_experts
+                    if not routed_experts_array.flags.writeable:
+                        routed_experts_array = routed_experts_array.copy()
+                    experts_tensor = torch.from_numpy(routed_experts_array)
+                elif isinstance(output.routed_experts, torch.Tensor):
+                    experts_tensor = output.routed_experts
+                else:
+                    raise TypeError(f"Unsupported type for routed_experts: {type(output.routed_experts)}")
+                routed_experts = torch.zeros(1, total_length, layer_num, topk_num, dtype=experts_tensor.dtype)
 
-            # Calculate start position: left padding means original prompt starts at the end
-            start_pos = prompt_output["input_ids"].shape[1] - len(output.prompt_ids)
-            end_pos = min(start_pos + length, total_length)
+                # Calculate start position: left padding means original prompt starts at the end
+                start_pos = prompt_output["input_ids"].shape[1] - len(output.prompt_ids)
+                end_pos = min(start_pos + length, total_length)
 
-            # Add boundary checks for robustness
-            if start_pos < 0 or end_pos > total_length:
-                raise ValueError(
-                    f"Invalid position range: start_pos={start_pos}, end_pos={end_pos}, total_length={total_length}"
-                )
+                # Add boundary checks for robustness
+                if start_pos < 0 or end_pos > total_length:
+                    raise ValueError(
+                        f"Invalid position range: start_pos={start_pos}, end_pos={end_pos}, total_length={total_length}"
+                    )
 
-            routed_experts[:, start_pos:end_pos] = experts_tensor.unsqueeze(0)
+                routed_experts[:, start_pos:end_pos] = experts_tensor.unsqueeze(0)
 
         multi_modal_inputs = self._compute_multi_modal_inputs(output, input_ids)
         position_ids = self._compute_position_ids(
@@ -1039,7 +1052,7 @@ class AgentLoopWorker:
         optional_outputs = {}
         if inputs[0].response_logprobs is not None:
             optional_outputs["rollout_log_probs"] = torch.cat([input.response_logprobs for input in inputs], dim=0)
-        if inputs[0].routed_experts is not None:
+        if inputs[0].routed_experts is not None and not r3_speedup_enabled():
             optional_outputs["routed_experts"] = torch.cat([input.routed_experts for input in inputs], dim=0)
         if inputs[0].teacher_logprobs is not None and inputs[0].teacher_ids is not None:
             optional_outputs["teacher_logprobs"] = torch.cat([input.teacher_logprobs for input in inputs], dim=0)
@@ -1069,6 +1082,14 @@ class AgentLoopWorker:
         non_tensor_batch = {
             "__num_turns__": np.array([input.num_turns for input in inputs], dtype=np.int32),
         }
+        if r3_speedup_enabled():
+            has_routed_experts = [input.routed_experts is not None for input in inputs]
+            if any(has_routed_experts) and not all(has_routed_experts):
+                raise ValueError("routed_experts must be present for either all inputs or no inputs")
+            if all(has_routed_experts):
+                non_tensor_batch["routed_experts_per_traj"] = make_r3_per_traj_object_array(
+                    _routed_experts_to_numpy(input.routed_experts) for input in inputs
+                )
         if self.reward_loop_worker_handles is None and input_non_tensor_batch:
             non_tensor_batch.update(input_non_tensor_batch)
 

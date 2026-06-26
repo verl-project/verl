@@ -12,12 +12,127 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+
+import numpy as np
 import torch
 import torch.nn.functional as F
 from tensordict import TensorDict
 
 from verl.utils import tensordict_utils as tu
 from verl.utils.attention_utils import index_first_axis, unpad_input
+
+
+def r3_speedup_enabled() -> bool:
+    """Return whether the R3 per-trajectory routing trace fast path is enabled."""
+    raw = os.environ.get("VERL_R3_SPEEDUP", "0").strip().lower()
+    if raw in {"", "0", "false", "no", "off"}:
+        return False
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    try:
+        return int(raw) >= 1
+    except ValueError:
+        return False
+
+
+def narrow_routed_experts(routed_experts):
+    """Convert routed expert ids to the smallest integer dtype that preserves their values."""
+    if routed_experts is None:
+        return None
+
+    if isinstance(routed_experts, torch.Tensor):
+        if routed_experts.numel() == 0:
+            return routed_experts.to(torch.uint8)
+        min_id = routed_experts.min().item()
+        max_id = routed_experts.max().item()
+        if min_id >= 0 and max_id <= torch.iinfo(torch.uint8).max:
+            return routed_experts.to(torch.uint8)
+        if min_id >= torch.iinfo(torch.int16).min and max_id <= torch.iinfo(torch.int16).max:
+            return routed_experts.to(torch.int16)
+        if min_id >= torch.iinfo(torch.int32).min and max_id <= torch.iinfo(torch.int32).max:
+            return routed_experts.to(torch.int32)
+        return routed_experts.to(torch.int64)
+
+    arr = np.asarray(routed_experts)
+    if arr.size == 0:
+        return arr.astype(np.uint8, copy=False)
+    min_id = arr.min()
+    max_id = arr.max()
+    if min_id >= 0 and max_id <= np.iinfo(np.uint8).max:
+        return arr.astype(np.uint8, copy=False)
+    if min_id >= np.iinfo(np.int16).min and max_id <= np.iinfo(np.int16).max:
+        return arr.astype(np.int16, copy=False)
+    if min_id >= np.iinfo(np.int32).min and max_id <= np.iinfo(np.int32).max:
+        return arr.astype(np.int32, copy=False)
+    return arr.astype(np.int64, copy=False)
+
+
+def routed_experts_to_tensor(routed_experts):
+    if routed_experts is None:
+        return None
+    if isinstance(routed_experts, np.ndarray):
+        if not routed_experts.flags.writeable:
+            routed_experts = routed_experts.copy()
+        routed_experts = torch.from_numpy(routed_experts)
+    elif not isinstance(routed_experts, torch.Tensor):
+        routed_experts = torch.as_tensor(routed_experts)
+    return narrow_routed_experts(routed_experts)
+
+
+def make_r3_per_traj_object_array(per_traj_items):
+    per_traj_items = list(per_traj_items)
+    output = np.empty(len(per_traj_items), dtype=object)
+    for i, item in enumerate(per_traj_items):
+        output[i] = item
+    return output
+
+
+def _normalize_r3_object_array_item(item):
+    if hasattr(item, "data") and not isinstance(item, np.ndarray | torch.Tensor):
+        item = item.data
+    if isinstance(item, np.ndarray) and item.dtype == object:
+        item = np.asarray(item.tolist())
+    if isinstance(item, np.ndarray):
+        return narrow_routed_experts(item)
+    return item
+
+
+def normalize_r3_per_traj_list(per_traj_stack):
+    if isinstance(per_traj_stack, np.ndarray):
+        return [_normalize_r3_object_array_item(item) for item in per_traj_stack]
+    return [_normalize_r3_object_array_item(item) for item in list(per_traj_stack)]
+
+
+def _r3_per_traj_item_to_tensor(item):
+    if hasattr(item, "data") and not isinstance(item, np.ndarray | torch.Tensor):
+        item = item.data
+    if isinstance(item, memoryview):
+        item = np.asarray(item)
+    if isinstance(item, np.ndarray):
+        if item.dtype == object:
+            item = _normalize_r3_object_array_item(item)
+        if not item.flags.writeable:
+            item = item.copy()
+        return torch.from_numpy(item)
+    if isinstance(item, torch.Tensor):
+        return item
+    return torch.as_tensor(item)
+
+
+def _align_r3_per_traj_tensors(per_traj_list, seqlens, target_device):
+    aligned = []
+    for i, item in enumerate(per_traj_list):
+        tensor = _r3_per_traj_item_to_tensor(item).to(device=target_device)
+        target_len = int(seqlens[i].item())
+        if tensor.shape[0] > target_len:
+            tensor = tensor[:target_len]
+        elif tensor.shape[0] < target_len:
+            pad_shape = (target_len - tensor.shape[0], *tensor.shape[1:])
+            pad = torch.zeros(pad_shape, dtype=tensor.dtype, device=tensor.device)
+            tensor = torch.cat([tensor, pad], dim=0)
+        aligned.append(tensor)
+    return aligned
 
 
 def left_right_2_no_padding(data: TensorDict) -> TensorDict:
@@ -71,8 +186,16 @@ def left_right_2_no_padding(data: TensorDict) -> TensorDict:
     data["loss_mask"] = data["response_mask"]
 
     routed_experts = data.get("routed_experts", None)
-    if routed_experts is not None and not routed_experts.is_nested:
-        if routed_experts.max() <= 255:
+    if r3_speedup_enabled() and "routed_experts_per_traj" in data.keys():
+        per_traj_stack = data.pop("routed_experts_per_traj")
+        per_traj_list = normalize_r3_per_traj_list(per_traj_stack)
+        tensors = _align_r3_per_traj_tensors(per_traj_list, attention_mask.sum(dim=-1), input_ids_rmpad.device)
+        flat = narrow_routed_experts(torch.cat(tensors, dim=0))
+        data["routed_experts"] = torch.nested.nested_tensor_from_jagged(flat, offsets=cu_seqlens)
+    elif routed_experts is not None and not routed_experts.is_nested:
+        if r3_speedup_enabled():
+            routed_experts = narrow_routed_experts(routed_experts)
+        elif routed_experts.max() <= 255:
             routed_experts = routed_experts.to(torch.uint8)
         routed_experts_rmpad = index_first_axis(routed_experts.unsqueeze(-1).flatten(0, 1), indices)
         routed_experts_nested = torch.nested.nested_tensor_from_jagged(
