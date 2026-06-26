@@ -1565,19 +1565,25 @@ class PPOTrainer(ABC):
 
         # 2. compute metrics
         metrics.update({"training/global_step": global_steps, "training/epoch": epoch})
+        updated_moe_lb_metrics = False
         if moe_lb_metrics_interval > 0 and has_routed_experts:
             updated_moe_lb_metrics = self._rollout_moe_lb_metrics_accumulator.update(
                 routed_experts=metrics_batch.batch.get("routed_experts", None),
                 response_mask=metrics_batch.batch.get("response_mask", None),
                 num_experts=self._infer_rollout_moe_num_experts(),
             )
-            if global_steps % moe_lb_metrics_interval == 0:
-                metrics.update(self._rollout_moe_lb_metrics_accumulator.pop_metrics())
-                if not updated_moe_lb_metrics and not self._warned_missing_rollout_moe_lb_metrics:
-                    logger.warning(
-                        "Skipping rollout MoE load-balance metrics because no routed expert counts were found."
-                    )
-                    self._warned_missing_rollout_moe_lb_metrics = True
+        if moe_lb_metrics_interval > 0 and global_steps % moe_lb_metrics_interval == 0:
+            routed_expert_assignments = self._rollout_moe_lb_metrics_accumulator.total_assignments()
+            metrics.update(self._rollout_moe_lb_metrics_accumulator.pop_metrics())
+            metrics["rollout/moe/routed_experts_found"] = float(routed_expert_assignments > 0)
+            metrics["rollout/moe/routed_expert_assignments"] = routed_expert_assignments
+            if (
+                not updated_moe_lb_metrics
+                and routed_expert_assignments == 0
+                and not self._warned_missing_rollout_moe_lb_metrics
+            ):
+                logger.warning("Skipping rollout MoE load-balance metrics because no routed expert counts were found.")
+                self._warned_missing_rollout_moe_lb_metrics = True
 
         metrics.update(compute_data_metrics(batch=metrics_batch, use_critic=self.use_critic))
         metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))

@@ -72,11 +72,13 @@ def test_rollout_moe_load_balance_accumulator_spans_updates():
         routed_experts = torch.tensor([[[[expert_id]]]], dtype=torch.long)
         assert accumulator.update(routed_experts=routed_experts, response_mask=response_mask, num_experts=4)
 
+    assert accumulator.total_assignments() == 4
     metrics = accumulator.pop_metrics()
 
     assert math.isclose(metrics["rollout/moe/max_vio/layer_0"], 0.0)
     assert math.isclose(metrics["rollout/moe/min_vio/layer_0"], 0.0)
     assert math.isclose(metrics["rollout/moe/avg_vio/layer_0"], 0.0)
+    assert accumulator.total_assignments() == 0
     assert accumulator.compute() == {}
 
 

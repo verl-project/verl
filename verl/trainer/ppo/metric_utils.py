@@ -258,6 +258,11 @@ class RolloutMoELoadBalanceMetricsAccumulator:
     def compute(self, prefix: str = "rollout/moe") -> dict[str, Any]:
         return _compute_rollout_moe_load_balance_metrics_from_counts(self.load_counts, prefix=prefix)
 
+    def total_assignments(self) -> int:
+        if self.load_counts is None:
+            return 0
+        return int(self.load_counts.sum().item())
+
     def reset(self) -> None:
         self.load_counts = None
 
