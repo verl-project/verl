@@ -45,7 +45,7 @@ pip install -r requirements-npu.txt --extra-index-url https://triton-ascend.osin
 pip install -v -e .
 # （可选）提示：为了更佳的使用体验，最好将 recipe 子模块更新至最新 commit
 cd recipe
-git checkout main
+git checkout e477deff9
 cd ..
 
 echo "5. May need to check other neccessary packages"
