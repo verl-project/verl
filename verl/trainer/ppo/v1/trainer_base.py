@@ -49,10 +49,12 @@ from verl.trainer.distillation import is_distillation_enabled
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import agg_loss
 from verl.trainer.ppo.metric_utils import (
+    RolloutMoELoadBalanceMetricsAccumulator,
     compute_data_metrics,
     compute_throughout_metrics,
     compute_timing_metrics,
     compute_variance_proxy_metrics,
+    infer_moe_num_experts,
     process_validation_metrics,
 )
 from verl.trainer.ppo.padding_utils import upsample_batch_to_divisible_size
@@ -116,6 +118,8 @@ class PPOTrainer(ABC):
         self.trainer_mode = self.config.trainer.v1.trainer_mode
         self.parameter_sync_step = self.config.trainer.v1.get(self.trainer_mode, {}).get("parameter_sync_step", 1)
         self.replay_buffer = self._build_replay_buffer()
+        self._rollout_moe_lb_metrics_accumulator = RolloutMoELoadBalanceMetricsAccumulator()
+        self._warned_missing_rollout_moe_lb_metrics = False
 
     def _build_replay_buffer(self) -> ReplayBuffer:
         """Instantiate the replay buffer (or a user-provided custom sampler).
@@ -1458,7 +1462,34 @@ class PPOTrainer(ABC):
             "token_level_rewards",
             "num_turns",
         ]
+        moe_lb_metrics_interval = getattr(self.config.actor_rollout_ref.rollout, "moe_load_balance_metrics_interval", 0)
+
         data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=fields)
+        has_routed_experts = False
+        should_fetch_routed_experts = moe_lb_metrics_interval > 0 and (
+            batch.fields is None or "routed_experts" in batch.fields
+        )
+        if should_fetch_routed_experts:
+            try:
+                moe_lb_data = tq.kv_batch_get(
+                    keys=batch.keys,
+                    partition_id=batch.partition_id,
+                    select_fields=["routed_experts"],
+                )
+            except ValueError as exc:
+                if not self._warned_missing_rollout_moe_lb_metrics:
+                    logger.warning("Skipping rollout MoE load-balance metrics: %s", exc)
+                    self._warned_missing_rollout_moe_lb_metrics = True
+            else:
+                data["routed_experts"] = moe_lb_data["routed_experts"]
+                has_routed_experts = True
+        elif moe_lb_metrics_interval > 0 and not self._warned_missing_rollout_moe_lb_metrics:
+            logger.warning(
+                "moe_load_balance_metrics_interval is set, but TransferQueue batch does not contain routed_experts; "
+                "skipping rollout MoE load-balance metrics."
+            )
+            self._warned_missing_rollout_moe_lb_metrics = True
+
         num_turns = np.array(data.pop("num_turns").tolist())
         prompt_length = data["prompts"].offsets().diff()
         response_length = data["responses"].offsets().diff()
@@ -1491,6 +1522,15 @@ class PPOTrainer(ABC):
 
         # 2. compute metrics
         metrics.update({"training/global_step": global_steps, "training/epoch": epoch})
+        if moe_lb_metrics_interval > 0 and has_routed_experts:
+            self._rollout_moe_lb_metrics_accumulator.update(
+                routed_experts=metrics_batch.batch.get("routed_experts", None),
+                response_mask=metrics_batch.batch.get("response_mask", None),
+                num_experts=infer_moe_num_experts(self.config.actor_rollout_ref.model),
+            )
+            if global_steps % moe_lb_metrics_interval == 0:
+                metrics.update(self._rollout_moe_lb_metrics_accumulator.pop_metrics())
+
         metrics.update(compute_data_metrics(batch=metrics_batch, use_critic=self.use_critic))
         metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
         n_gpus = self.resource_pool_manager.get_n_gpus()
