@@ -1466,10 +1466,7 @@ class PPOTrainer(ABC):
 
         data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=fields)
         has_routed_experts = False
-        should_fetch_routed_experts = moe_lb_metrics_interval > 0 and (
-            batch.fields is None or "routed_experts" in batch.fields
-        )
-        if should_fetch_routed_experts:
+        if moe_lb_metrics_interval > 0:
             try:
                 moe_lb_data = tq.kv_batch_get(
                     keys=batch.keys,
@@ -1483,12 +1480,6 @@ class PPOTrainer(ABC):
             else:
                 data["routed_experts"] = moe_lb_data["routed_experts"]
                 has_routed_experts = True
-        elif moe_lb_metrics_interval > 0 and not self._warned_missing_rollout_moe_lb_metrics:
-            logger.warning(
-                "moe_load_balance_metrics_interval is set, but TransferQueue batch does not contain routed_experts; "
-                "skipping rollout MoE load-balance metrics."
-            )
-            self._warned_missing_rollout_moe_lb_metrics = True
 
         num_turns = np.array(data.pop("num_turns").tolist())
         prompt_length = data["prompts"].offsets().diff()
