@@ -45,7 +45,7 @@ from verl import DataProto
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
 from verl.trainer.config import CheckpointConfig
 from verl.utils import tensordict_utils as tu
-from verl.utils.device import *
+from verl.utils.device import get_device_name, get_torch_device, get_nccl_backend
 from verl.utils.model import compute_position_id_with_mask, create_random_mask
 from verl.utils.torch_functional import logprobs_from_logits_naive
 from verl.workers.config import (
@@ -212,7 +212,7 @@ def test_actor_engine(strategy):
         hf_output.logits[:, -response_length - 1 : -1, :].float(), input_ids[:, -response_length:]
     )
     hf_logprobs_mean = torch.mean(hf_logprobs * response_mask)
-    mcore_logprobs_mean = torch.mean(output.batch["old_log_probs"] * response_mask).float()
+    mcore_logprobs_mean = torch.mean(output.batch["old_log_probs"] * response_mask)
 
     torch.testing.assert_close(hf_logprobs_mean, mcore_logprobs_mean, atol=1e-3, rtol=1e-2)
 
