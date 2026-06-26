@@ -133,7 +133,7 @@ CANN是NPU上的异构计算架构, 以下为arm平台A3安装指令，请参照
 源码安装
 ^^^^^^^^^^^^^^^^^^^^^^^^
 
-我们提供了基于conda一键部署安装脚本, 脚本分步骤安装环境，如果中途遇到安装报错，请根据当前步骤报错信息提示查看原因，或通过issue给我们留言，我们将尽快解决
+我们提供了基于conda一键部署 `安装脚本 <../../../scripts/install_vllm_mcore_npu.sh>`_ , 脚本分步骤安装环境，如果中途遇到安装报错，请根据当前步骤报错信息提示查看原因，或通过issue给我们留言，我们将尽快解决
 
 .. code:: bash
 
@@ -144,7 +144,7 @@ CANN是NPU上的异构计算架构, 以下为arm平台A3安装指令，请参照
    source /usr/local/Ascend/nnal/atb/set_env.sh
    conda create -n verl-vllm-npu python=3.11 -y
    conda activate verl-vllm-npu
-   git clone --recursive https://github.com/verl-project/verl.git
+   git clone --recursive https://github.com/verl-project/verl.git -b release/v0.8.0
    bash verl/scripts/install_vllm_mcore_npu.sh
    # 如果您仅需要使用FSDP后端
    # USE_MEGATRON=0 bash scripts/install_vllm_mcore_npu.sh
@@ -199,7 +199,7 @@ CANN是NPU上的异构计算架构, 以下为arm平台A3安装指令，请参照
 源码安装
 ^^^^^^^^^^^^^^^^^^^^^^^^
 
-我们提供了基于conda一键部署安装脚本, 脚本分步骤安装环境，如果中途遇到安装报错，请根据当前步骤报错信息提示查看原因，或通过issue给我们留言，我们将尽快解决
+我们提供了基于conda一键部署 `安装脚本 <../../../scripts/install_sglang_mcore_npu.sh>`_ , 脚本分步骤安装环境，如果中途遇到安装报错，请根据当前步骤报错信息提示查看原因，或通过issue给我们留言，我们将尽快解决
 
 .. code:: bash
 
@@ -210,7 +210,7 @@ CANN是NPU上的异构计算架构, 以下为arm平台A3安装指令，请参照
    source /usr/local/Ascend/nnal/atb/set_env.sh
    conda create -n verl-sgl-npu python=3.11 -y
    conda activate verl-sgl-npu
-   git clone --recursive https://github.com/verl-project/verl.git
+   git clone --recursive https://github.com/verl-project/verl.git -b release/v0.8.0
    bash verl/scripts/install_sglang_mcore_npu.sh
    # 如果您仅需要使用FSDP后端
    # USE_MEGATRON=0 bash verl/scripts/install_sglang_mcore_npu.sh
