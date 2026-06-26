@@ -536,8 +536,14 @@ def forward_with_normal_backend(
     input_ids: torch.LongTensor = None,
     labels: Optional[torch.LongTensor] = None,
     temperature: float = 1.0,
+    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens_cpu: Optional[torch.LongTensor] = None,
     **kwargs,
 ) -> "Qwen3_5CausalLMOutputForPPO":
+    if cu_seqlens is not None:
+        kwargs["cu_seqlens"] = cu_seqlens
+    if cu_seqlens_cpu is not None:
+        kwargs["cu_seqlens_cpu"] = cu_seqlens_cpu
     outputs = self.model(input_ids, **kwargs)
     hidden_states = outputs[0]
     logits = self.lm_head(hidden_states)
@@ -553,10 +559,16 @@ def forward_with_torch_backend(
     labels: Optional[torch.LongTensor] = None,
     temperature: float = 1.0,
     shift_labels: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens_cpu: Optional[torch.LongTensor] = None,
     **kwargs,
 ) -> "Qwen3_5CausalLMOutputForPPO":
     from verl.utils.experimental.torch_functional import FusedLinearForPPO
 
+    if cu_seqlens is not None:
+        kwargs["cu_seqlens"] = cu_seqlens
+    if cu_seqlens_cpu is not None:
+        kwargs["cu_seqlens_cpu"] = cu_seqlens_cpu
     outputs = self.model(input_ids, **kwargs)
     hidden_states = outputs[0]
 
@@ -601,10 +613,16 @@ def forward_with_triton_backend(
     labels: Optional[torch.LongTensor] = None,
     temperature: float = 1.0,
     shift_labels: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens_cpu: Optional[torch.LongTensor] = None,
     **kwargs,
 ) -> "Qwen3_5CausalLMOutputForPPO":
     from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy
 
+    if cu_seqlens is not None:
+        kwargs["cu_seqlens"] = cu_seqlens
+    if cu_seqlens_cpu is not None:
+        kwargs["cu_seqlens_cpu"] = cu_seqlens_cpu
     outputs = self.model(input_ids, **kwargs)
     hidden_states = outputs[0]
 

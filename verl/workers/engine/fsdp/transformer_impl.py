@@ -20,6 +20,7 @@ import logging
 import os
 import warnings
 from contextlib import nullcontext
+from inspect import signature
 from typing import Callable, ContextManager, Optional
 
 import torch
@@ -545,6 +546,10 @@ class FSDPEngine(BaseEngine):
 
         # Load base model with specified configuration and dtype
         module = self._build_module()
+        try:
+            self.pass_packed_cu_seqlens = "cu_seqlens" in signature(module.forward).parameters
+        except (TypeError, ValueError):
+            self.pass_packed_cu_seqlens = False
         # Apply LoRA adapters if low-rank adaptation is enabled
         if self._is_lora:
             module = self._build_lora_module(module)
@@ -937,8 +942,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
         multi_modal_inputs = extract_multi_modal_inputs(micro_batch.get("multi_modal_inputs", []))
         input_ids = micro_batch["input_ids"]
         position_ids = micro_batch["position_ids"]
-        hf_model_type = getattr(self.model_config.hf_config, "model_type", None)
-        pass_packed_cu_seqlens = hf_model_type in {"qwen3_5", "qwen3_5_moe"}
+        pass_packed_cu_seqlens = getattr(self, "pass_packed_cu_seqlens", False)
 
         if not isinstance(temperature, torch.Tensor):
             temperature = torch.tensor([temperature] * input_ids.shape[0], device=input_ids.device)
