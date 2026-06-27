@@ -45,7 +45,7 @@ from verl import DataProto
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
 from verl.trainer.config import CheckpointConfig
 from verl.utils import tensordict_utils as tu
-from verl.utils.device import get_device_name, get_torch_device, get_nccl_backend
+from verl.utils.device import get_device_name, get_nccl_backend, get_torch_device
 from verl.utils.model import compute_position_id_with_mask, create_random_mask
 from verl.utils.torch_functional import logprobs_from_logits_naive
 from verl.workers.config import (
