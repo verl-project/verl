@@ -50,6 +50,10 @@ from verl.workers.config import HFModelConfig, McoreEngineConfig
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
+# `ModelType.encoder_and_decoder` was removed from Megatron-LM (NVIDIA/Megatron-LM#3836).
+# Guard references to it so verl stays compatible with both old and new Megatron-LM versions.
+_HAS_ENCODER_AND_DECODER = hasattr(ModelType, "encoder_and_decoder")
+
 
 def get_model_config(model):
     return get_attr_wrapped_model(model, "config", allow_none=False)
@@ -69,9 +73,10 @@ def get_model(
         mpu.get_pipeline_model_parallel_world_size() > 1
         and mpu.get_virtual_pipeline_model_parallel_world_size() is not None
     ):
-        assert model_type != ModelType.encoder_and_decoder, (
-            "Interleaved schedule not supported for model with both encoder and decoder"
-        )
+        if _HAS_ENCODER_AND_DECODER:
+            assert model_type != ModelType.encoder_and_decoder, (
+                "Interleaved schedule not supported for model with both encoder and decoder"
+            )
         model = []
         has_vp_stage = inspect.signature(mpu.is_pipeline_first_stage).parameters.get("vp_stage", None) is not None
         for i in range(mpu.get_virtual_pipeline_model_parallel_world_size()):
@@ -89,8 +94,9 @@ def get_model(
         post_process = mpu.is_pipeline_last_stage()
         add_encoder = True
         add_decoder = True
-        assert model_type != ModelType.encoder_and_decoder, "Model type encoder_and_decoder is not supported"
-        if model_type == ModelType.encoder_and_decoder:
+        if _HAS_ENCODER_AND_DECODER:
+            assert model_type != ModelType.encoder_and_decoder, "Model type encoder_and_decoder is not supported"
+        if _HAS_ENCODER_AND_DECODER and model_type == ModelType.encoder_and_decoder:
             if mpu.get_pipeline_model_parallel_world_size() > 1:
                 assert mpu.get_pipeline_model_parallel_split_rank() is not None, (
                     "Split rank needs to be specified for model with both encoder and decoder"
