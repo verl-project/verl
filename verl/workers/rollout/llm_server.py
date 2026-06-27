@@ -220,6 +220,8 @@ class LLMServerClient:
             TokenOutput | DiffusionOutput: token or diffusion output
         """
         server_id, server = await self._acquire_server(request_id)
+        inner_request_id = uuid4().hex  # hoisted from the .remote() call so subclasses can record it
+        self._on_dispatch(request_id, inner_request_id, server)
         try:
             multimodal_kwargs = {}
             if audio_data is not None:
@@ -232,7 +234,7 @@ class LLMServerClient:
                 {"priority": priority} if priority != 0 and self.config.actor_rollout_ref.rollout.name == "vllm" else {}
             )
             output: TokenOutput = await server.generate.remote(
-                request_id=uuid4().hex,  # use new request_id for each turn
+                request_id=inner_request_id,
                 prompt_ids=prompt_ids,
                 sampling_params=sampling_params,
                 image_data=image_data,
@@ -246,7 +248,15 @@ class LLMServerClient:
             output.extra_fields.setdefault("max_global_steps", global_steps)
             return output
         finally:
+            self._on_complete(request_id)
             self._release_server(server_id)
+
+    def _on_dispatch(self, request_id, inner_request_id, server):
+        """Hook fired after the inner vLLM request_id is assigned, before awaiting generation.
+        Default no-op; subclasses may record (request_id/inner_request_id, server) to enable abort."""
+
+    def _on_complete(self, request_id):
+        """Hook fired when generation finishes or raises. Default no-op."""
 
 
 class FullyAsyncLLMServerClient(LLMServerClient):
@@ -351,6 +361,48 @@ class FullyAsyncLLMServerClient(LLMServerClient):
         final_output.extra_fields["min_global_steps"] = min_global_steps
         final_output.extra_fields["max_global_steps"] = max_global_steps
         return final_output
+
+
+class AbortableLLMServerClient(LLMServerClient):
+    """LLMServerClient that tracks in-flight requests so individual ones can be aborted.
+
+    Enables selective (per-request) abort, e.g. cancelling a single timed-out rollout or
+    letting a custom AgentLoopWorker/AgentLoopManager interrupt a specific request. This is
+    complementary to the broadcast ``abort_all_requests`` on the rollout replica.
+
+    Inherits the base (non-resuming) ``generate``: once a request is aborted it returns with
+    ``stop_reason="aborted"`` rather than resuming, which matches hard-abort semantics.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # request_id -> (inner_request_id, server handle). asyncio is single-threaded,
+        # so a plain dict needs no locking.
+        self._inflight: dict[str, tuple[str, ray.actor.ActorHandle]] = {}
+
+    def _on_dispatch(self, request_id, inner_request_id, server):
+        self._inflight[request_id] = (inner_request_id, server)
+
+    def _on_complete(self, request_id):
+        # Sole owner of removal: fires from generate()'s finally on success, abort, or error.
+        self._inflight.pop(request_id, None)
+
+    async def abort(self, request_id: str) -> None:
+        """Abort a single in-flight request by its (outer) request_id.
+
+        No-op if the request is unknown (already finished, aborted, or not yet dispatched).
+        The in-flight entry is *not* removed here; the aborted ``generate`` returns via its
+        ``finally`` clause which calls ``_on_complete``.
+
+        Note for callers: abort the request *before* cancelling the local ``generate`` coroutine.
+        Cancelling first runs ``_on_complete`` (dropping the entry), so a subsequent ``abort``
+        would no-op while the server-side request keeps consuming compute.
+        """
+        entry = self._inflight.get(request_id)
+        if entry is None:
+            return
+        inner_request_id, server = entry
+        await server.abort_request.remote(inner_request_id)
 
 
 class LLMServerManager:
