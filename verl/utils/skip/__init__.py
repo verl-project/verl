@@ -19,4 +19,13 @@ from .config import SkipManagerConfig
 from .rollout_skip import AsyncRolloutSkip, RolloutSkip
 from .skip_manager import SkipManager
 
-__all__ = ["BaseSkip", "SkipManager", "SkipManagerConfig", "RolloutSkip", "AsyncRolloutSkip"]
+from .rollout_skip import RolloutTqSkip
+
+__all__ = [
+    "BaseSkip",
+    "SkipManager",
+    "SkipManagerConfig",
+    "RolloutSkip",
+    "RolloutTqSkip",
+    "AsyncRolloutSkip",
+]

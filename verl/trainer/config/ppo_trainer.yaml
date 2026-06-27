@@ -439,7 +439,22 @@ skip:
     # Steps to skip rollout
     steps: []
 
-    # Action to take when rollout is skipped, refer to verl.utils.skip.base_skip.SkipAction
+  # Action to take when rollout is skipped, refer to verl.utils.skip.base_skip.SkipAction
+    action: cache
+
+  # configs for RolloutTqSkip (V1 TransferQueue-based trainer)
+  rollout_tq:
+
+    # Whether to enable RolloutTqSkip
+    enable: False
+
+    # Directory to save rollout data
+    dump_dir: "~/.verl/rollout_dump"
+
+    # Steps to skip rollout
+    steps: []
+
+    # Action to take when rollout is skipped (cache | repeat)
     action: cache
 
   # configs for AsyncRolloutSkip (fully async policy)

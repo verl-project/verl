@@ -83,6 +83,7 @@ from verl.utils.import_utils import load_extern_type
 from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
+from verl.utils.skip import SkipManager
 from verl.utils.tracking import Tracking, ValidationGenerationsLogger
 from verl.workers.config import CriticConfig, DistillationConfig
 from verl.workers.engine_workers import ActorRolloutRefWorker, TrainingWorker, TrainingWorkerConfig
@@ -312,6 +313,9 @@ class PPOTrainer(ABC):
         """
         self.agent_loop_manager = agent_loop_manager
 
+        # initialize SkipManager for V1 rollout skip support
+        SkipManager.init(self.config)
+
         self.logger = Tracking(
             project_name=self.config.trainer.project_name,
             experiment_name=self.config.trainer.experiment_name,
@@ -340,6 +344,7 @@ class PPOTrainer(ABC):
 
         # we start from step 1
         self.global_steps += 1
+        SkipManager.set_step(self.global_steps)
         self.prev_step_profile = False
         self.curr_step_profile = (
             self.global_steps in self.config.global_profiler.steps
@@ -398,6 +403,7 @@ class PPOTrainer(ABC):
             self.logger.log(data=metrics, step=self.global_steps)
             progress_bar.update(1)
             self.global_steps += 1
+            SkipManager.set_step(self.global_steps)
             current_epoch = (self.global_steps - 1) // len(self.train_dataloader)
             if is_last_step:
                 self._shutdown_dump_executor()
@@ -450,6 +456,14 @@ class PPOTrainer(ABC):
             batch.extra_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
             self.on_sample_end()
 
+            # Skip: save batch to disk when no cached data exists yet (phase one)
+            skip_inst = SkipManager.skip_instances.get("rollout_tq")
+            if skip_inst and skip_inst.should_save(self.global_steps, batch.partition_id):
+                skip_inst.prepare_data(
+                    step=self.global_steps,
+                    batch=batch,
+                    global_steps=self.global_steps,
+                )
         # 2. [OPTIONAL] compute reward score with colocated reward model
         if self.reward_loop_manager.reward_loop_worker_handles is None:
             with marked_timer("reward", timing_raw, color="yellow"):
@@ -1141,6 +1155,18 @@ class PPOTrainer(ABC):
         batch_dict["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch_dict["raw_prompt"]))], dtype=object)
         batch = tu.get_tensordict(batch_dict)
         tu.assign_non_tensor_data(batch, "global_steps", self.global_steps)
+
+        # Skip: if V1 rollout skip is enabled and cached data exists, inject into TQ directly
+        skip_inst = SkipManager.skip_instances.get("rollout_tq")
+        if skip_inst and skip_inst.meet_precondition(self.global_steps):
+            skip_inst.load_dump_data(
+                step=self.global_steps,
+                new_prompt_uids=list(batch["uid"]),
+                n=self.config.actor_rollout_ref.rollout.n,
+                global_steps=self.global_steps,
+                partition_id="train",
+            )
+            return
 
         # Register each prompt (GRPO group) in TransferQueue as a tag-only status marker
         tags = [{"is_prompt": True, "status": "pending", "global_steps": self.global_steps}] * len(batch)
