@@ -247,6 +247,13 @@ class LLMServerClient:
             output.extra_fields.setdefault("min_global_steps", global_steps)
             output.extra_fields.setdefault("max_global_steps", global_steps)
             return output
+        except asyncio.CancelledError:
+            # Client-side cancellation (e.g. asyncio.wait_for/timeout) does not reach the
+            # server, so the server-side request would keep consuming compute. Fire this
+            # hook while the in-flight entry still exists (before the finally clause runs
+            # _on_complete) so subclasses can abort it on the server.
+            self._on_cancel(request_id)
+            raise
         finally:
             self._on_complete(request_id)
             self._release_server(server_id)
@@ -257,6 +264,9 @@ class LLMServerClient:
 
     def _on_complete(self, request_id):
         """Hook fired when generation finishes or raises. Default no-op."""
+
+    def _on_cancel(self, request_id):
+        """Hook fired when generation is cancelled (CancelledError). Default no-op."""
 
 
 class FullyAsyncLLMServerClient(LLMServerClient):
@@ -387,22 +397,36 @@ class AbortableLLMServerClient(LLMServerClient):
         # Sole owner of removal: fires from generate()'s finally on success, abort, or error.
         self._inflight.pop(request_id, None)
 
-    async def abort(self, request_id: str) -> None:
-        """Abort a single in-flight request by its (outer) request_id.
+    def _on_cancel(self, request_id):
+        # Cancellation (e.g. timeout) never reaches the server on its own; fire-and-forget an
+        # abort so the server-side request stops. We cannot safely await during cancellation,
+        # and removal is still handled by _on_complete in the finally clause.
+        self._send_abort(request_id)
 
-        No-op if the request is unknown (already finished, aborted, or not yet dispatched).
-        The in-flight entry is *not* removed here; the aborted ``generate`` returns via its
-        ``finally`` clause which calls ``_on_complete``.
+    def _send_abort(self, request_id: str):
+        """Dispatch an abort RPC for ``request_id`` to the owning server (does not await).
 
-        Note for callers: abort the request *before* cancelling the local ``generate`` coroutine.
-        Cancelling first runs ``_on_complete`` (dropping the entry), so a subsequent ``abort``
-        would no-op while the server-side request keeps consuming compute.
+        Returns the abort ObjectRef, or ``None`` if the request is unknown (already finished,
+        aborted, or not yet dispatched). Does not remove the in-flight entry; ``_on_complete``
+        owns removal.
         """
         entry = self._inflight.get(request_id)
         if entry is None:
-            return
+            return None
         inner_request_id, server = entry
-        await server.abort_request.remote(inner_request_id)
+        return server.abort_request.remote(inner_request_id)
+
+    async def abort(self, request_id: str) -> None:
+        """Abort a single in-flight request by its (outer) request_id and await the result.
+
+        No-op if the request is unknown. The in-flight entry is removed by ``_on_complete``
+        when the aborted ``generate`` returns through its finally clause. Client-side
+        cancellation of ``generate`` (e.g. ``asyncio.wait_for``) is handled automatically via
+        ``_on_cancel``, so callers do not need to abort before cancelling.
+        """
+        ref = self._send_abort(request_id)
+        if ref is not None:
+            await ref
 
 
 class LLMServerManager:

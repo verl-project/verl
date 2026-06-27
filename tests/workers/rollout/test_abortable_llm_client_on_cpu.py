@@ -53,9 +53,14 @@ class _FakeServer:
             await self.release.wait()
             return TokenOutput(token_ids=[1, 2, 3], stop_reason=self._stop_reason, extra_fields={})
 
-        async def _abort(request_id):
+        def _abort(request_id):
+            # Record synchronously (like a Ray .remote() dispatch) so fire-and-forget callers
+            # that never await still register the abort. Return a resolved future so awaiting
+            # callers (abort()) work too.
             self.aborted.append(request_id)
-            return {"aborted": True}
+            fut = asyncio.get_running_loop().create_future()
+            fut.set_result({"aborted": True})
+            return fut
 
         self.generate = _FakeRemoteMethod(_generate)
         self.abort_request = _FakeRemoteMethod(_abort)
@@ -129,3 +134,22 @@ async def test_abort_unknown_request_is_noop():
 
     await client.abort("does-not-exist")
     assert server.aborted == []
+
+
+@pytest.mark.asyncio
+async def test_cancellation_aborts_server_and_clears_inflight():
+    """Cancelling generate() (e.g. timeout) aborts the server-side request, no leak."""
+    server = _FakeServer()
+    client = _make_client(server)
+
+    task = asyncio.create_task(client.generate(request_id="req-3", prompt_ids=[1], sampling_params={}))
+    await asyncio.wait_for(server.started.wait(), timeout=1.0)
+    inner_request_id, _ = client._inflight["req-3"]
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # _on_cancel fired the abort to the server, and _on_complete cleared the entry.
+    assert server.aborted == [inner_request_id]
+    assert "req-3" not in client._inflight
