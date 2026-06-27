@@ -66,8 +66,12 @@ class SkipManager:
     @classmethod
     def _should_bypass_for_validation(cls, args, kwargs) -> bool:
         prompts = cls._get_prompts_batch(args, kwargs)
+        if prompts is None and len(args) > 1:
+            return cls._should_bypass_for_validation_tensordict(args, kwargs)
         if prompts is None:
             return False
+        if hasattr(prompts, "non_tensor_data"):
+            return cls._should_bypass_for_validation_tensordict(args, kwargs)
         meta_info = getattr(prompts, "meta_info", None) or {}
         return bool(meta_info.get("validate", False))
 
@@ -119,3 +123,16 @@ class SkipManager:
             return sync_wrapper
 
         return decorator
+
+    @staticmethod
+    def _should_bypass_for_validation_tensordict(args, kwargs) -> bool:
+        """Check ``validate`` flag in TensorDict's non_tensor_data for V1 path."""
+        prompts = kwargs.get("prompts", None)
+        if prompts is None and len(args) > 1:
+            prompts = args[1]
+        if prompts is None:
+            return False
+        try:
+            return bool(getattr(prompts, "non_tensor_data", {}).get("validate", False))
+        except Exception:
+            return False
