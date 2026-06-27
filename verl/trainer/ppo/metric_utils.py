@@ -22,10 +22,14 @@ from typing import Any, Callable
 
 import numpy as np
 import torch
+from omegaconf import DictConfig, OmegaConf
+from transformers import AutoConfig
 
 import verl.utils.torch_functional as verl_F
 from verl import DataProto
+from verl.utils.fs import copy_to_local
 from verl.utils.import_utils import deprecated
+from verl.utils.model import update_model_config
 
 logger = logging.getLogger(__name__)
 
@@ -94,8 +98,24 @@ def _get_nested_attr(obj: Any, name: str) -> Any:
     return getattr(obj, name, None)
 
 
+def get_hf_config_override_kwargs(override_config: Any) -> dict[str, Any]:
+    if isinstance(override_config, DictConfig):
+        override_config = OmegaConf.to_container(override_config, resolve=True)
+    if not override_config:
+        return {}
+    if "model_config" in override_config:
+        return override_config["model_config"]
+    return override_config
+
+
+def _get_config_value(config: Any, key: str, default: Any = None) -> Any:
+    if hasattr(config, "get"):
+        return config.get(key, default)
+    return getattr(config, key, default)
+
+
 def infer_moe_num_experts(model_config: Any) -> int | None:
-    """Infer the global number of routed experts from a model config-like object."""
+    """Infer the global number of routed experts from an in-memory config-like object."""
     candidates = [model_config]
     hf_config = _get_nested_attr(model_config, "hf_config")
     text_config = _get_nested_attr(model_config, "text_config")
@@ -126,6 +146,31 @@ def infer_moe_num_experts(model_config: Any) -> int | None:
             if value is not None:
                 return int(value)
     return None
+
+
+def infer_rollout_moe_num_experts(model_config: Any) -> int | None:
+    """Infer rollout MoE num_experts, loading the HF config only when needed."""
+    num_experts = infer_moe_num_experts(model_config)
+    if num_experts is not None:
+        return num_experts
+
+    hf_config_path = (
+        _get_config_value(model_config, "local_hf_config_path")
+        or _get_config_value(model_config, "hf_config_path")
+        or _get_config_value(model_config, "path")
+    )
+    if hf_config_path is None:
+        return None
+
+    local_hf_config_path = copy_to_local(hf_config_path, use_shm=_get_config_value(model_config, "use_shm", False))
+    hf_config = AutoConfig.from_pretrained(
+        local_hf_config_path,
+        trust_remote_code=_get_config_value(model_config, "trust_remote_code", False),
+    )
+    override_config = get_hf_config_override_kwargs(_get_config_value(model_config, "override_config", {}))
+    if override_config:
+        update_model_config(hf_config, override_config)
+    return infer_moe_num_experts(hf_config)
 
 
 def _compute_rollout_moe_load_balance_metrics_from_counts(
@@ -223,18 +268,109 @@ def compute_rollout_moe_load_balance_metrics(
     return _compute_rollout_moe_load_balance_metrics_from_counts(load_counts, prefix=prefix)
 
 
+def get_metric_data_with_optional_routed_experts(
+    keys: list[str],
+    partition_id: str,
+    fields: list[str],
+    moe_lb_metrics_interval: int,
+    global_steps: int,
+    accumulator: "RolloutMoELoadBalanceMetricsAccumulator",
+    kv_batch_get: Callable[..., Any],
+):
+    if moe_lb_metrics_interval <= 0 or not accumulator.should_request_routed_experts(global_steps):
+        return kv_batch_get(keys=keys, partition_id=partition_id, select_fields=fields)
+
+    fields_with_routed_experts = [*fields, "routed_experts"]
+    try:
+        return kv_batch_get(keys=keys, partition_id=partition_id, select_fields=fields_with_routed_experts)
+    except ValueError as exc:
+        if "routed_experts" not in str(exc):
+            raise
+        accumulator.defer_routed_experts_retry(global_steps, moe_lb_metrics_interval)
+        accumulator.warn_skip_once("missing_routed_experts", f"Skipping rollout MoE load-balance metrics: {exc}")
+        return kv_batch_get(keys=keys, partition_id=partition_id, select_fields=fields)
+
+
+def compute_moe_lb_metrics(
+    metrics_batch: DataProto,
+    moe_lb_metrics_interval: int,
+    global_steps: int,
+    accumulator: "RolloutMoELoadBalanceMetricsAccumulator",
+) -> dict[str, Any]:
+    if moe_lb_metrics_interval <= 0:
+        return {}
+
+    updated_moe_lb_metrics = accumulator.update(
+        routed_experts=metrics_batch.batch.get("routed_experts", None),
+        response_mask=metrics_batch.batch.get("response_mask", None),
+    )
+    if global_steps % moe_lb_metrics_interval != 0:
+        return {}
+
+    routed_expert_assignments = accumulator.total_assignments()
+    metrics = accumulator.pop_metrics()
+    metrics["rollout/moe/routed_experts_found"] = float(routed_expert_assignments > 0)
+    metrics["rollout/moe/routed_expert_assignments"] = routed_expert_assignments
+    if not updated_moe_lb_metrics and routed_expert_assignments == 0:
+        accumulator.warn_skip_once(
+            "no_routed_expert_counts",
+            "Skipping rollout MoE load-balance metrics because no routed expert counts were found.",
+        )
+    return metrics
+
+
 class RolloutMoELoadBalanceMetricsAccumulator:
     """Accumulate rollout MoE routed expert counts across a logging interval."""
 
-    def __init__(self):
+    def __init__(self, model_config: Any | None = None):
+        self.model_config = model_config
         self.load_counts: torch.Tensor | None = None
+        self.num_experts: int | None = None
+        self.num_experts_initialized = False
+        self.routed_experts_retry_after_step = 0
+        self.warned_skip_keys: set[str] = set()
+
+    def should_request_routed_experts(self, global_steps: int) -> bool:
+        return global_steps >= self.routed_experts_retry_after_step
+
+    def defer_routed_experts_retry(self, global_steps: int, interval: int) -> None:
+        self.routed_experts_retry_after_step = global_steps + max(interval, 1)
+
+    def _infer_num_experts(self) -> int | None:
+        if self.num_experts_initialized:
+            return self.num_experts
+
+        if self.model_config is not None:
+            try:
+                self.num_experts = infer_rollout_moe_num_experts(self.model_config)
+            except Exception as exc:
+                self.warn_skip_once(
+                    "num_experts_exception", f"Failed to infer rollout MoE num_experts from model config: {exc}"
+                )
+
+        self.num_experts_initialized = True
+        if self.num_experts is None:
+            self.warn_skip_once(
+                "num_experts_missing",
+                "Skipping rollout MoE load-balance metrics because num_experts could not be inferred "
+                "from actor_rollout_ref.model or the Hugging Face config.",
+            )
+        return self.num_experts
+
+    def warn_skip_once(self, key: str, message: str) -> None:
+        if key in self.warned_skip_keys:
+            return
+        logger.warning(message)
+        self.warned_skip_keys.add(key)
 
     def update(
         self,
         routed_experts: torch.Tensor | None,
         response_mask: torch.Tensor | None,
-        num_experts: int | None,
+        num_experts: int | None = None,
     ) -> bool:
+        if num_experts is None:
+            num_experts = self._infer_num_experts()
         load_counts = _compute_rollout_moe_load_counts(
             routed_experts=routed_experts,
             response_mask=response_mask,

@@ -30,7 +30,7 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 # Define a function to run the PPO-like training process
-def run_ppo(config, task_runner_class, *, use_v1_trainer: bool = False) -> None:
+def run_ppo(config, task_runner_class) -> None:
     """Initialize Ray cluster and run distributed PPO training process.
 
     Args:
@@ -38,11 +38,7 @@ def run_ppo(config, task_runner_class, *, use_v1_trainer: bool = False) -> None:
                 for distributed PPO training including Ray initialization settings,
                 model paths, and training hyperparameters.
         task_runner_class: For recipe to change TaskRunner.
-        use_v1_trainer: Whether the task runner uses the v1 PPO trainer.
     """
-    if getattr(config.actor_rollout_ref.rollout, "moe_load_balance_metrics_interval", 0) > 0 and not use_v1_trainer:
-        raise ValueError("actor_rollout_ref.rollout.moe_load_balance_metrics_interval requires trainer.use_v1=True.")
-
     # Propagate determinism env vars from config before ray.init() so
     # get_ppo_ray_runtime_env() forwards them to all Ray actors.
     rollout_cfg = config.actor_rollout_ref.rollout
@@ -172,7 +168,7 @@ def main(config):
     )
 
     if config.trainer.use_v1:
-        run_ppo(config, task_runner_class=TaskRunnerV1, use_v1_trainer=True)
+        run_ppo(config, task_runner_class=TaskRunnerV1)
     else:
         from verl.trainer.main_ppo_v0 import TaskRunner
 

@@ -17,10 +17,15 @@ from types import SimpleNamespace
 
 import torch
 
+import verl.trainer.ppo.metric_utils as metric_utils
 from verl.trainer.ppo.metric_utils import (
     RolloutMoELoadBalanceMetricsAccumulator,
+    compute_moe_lb_metrics,
     compute_rollout_moe_load_balance_metrics,
+    get_hf_config_override_kwargs,
+    get_metric_data_with_optional_routed_experts,
     infer_moe_num_experts,
+    infer_rollout_moe_num_experts,
 )
 
 
@@ -83,6 +88,110 @@ def test_rollout_moe_load_balance_accumulator_spans_updates():
     assert accumulator.compute() == {}
 
 
+def test_rollout_moe_load_balance_accumulator_infers_num_experts(monkeypatch):
+    accumulator = RolloutMoELoadBalanceMetricsAccumulator(model_config={"num_experts": 4})
+    response_mask = torch.tensor([[True]], dtype=torch.bool)
+    routed_experts = torch.tensor([[[[1]]]], dtype=torch.long)
+
+    monkeypatch.setattr(
+        metric_utils,
+        "infer_rollout_moe_num_experts",
+        lambda model_config: model_config["num_experts"],
+    )
+
+    assert accumulator.update(routed_experts=routed_experts, response_mask=response_mask)
+    assert accumulator.total_assignments() == 1
+
+
+def test_compute_moe_lb_metrics_accumulates_until_interval():
+    accumulator = RolloutMoELoadBalanceMetricsAccumulator(model_config={"num_experts": 2})
+    batch = SimpleNamespace(
+        batch={
+            "routed_experts": torch.tensor([[[[0]], [[1]]]], dtype=torch.long),
+            "response_mask": torch.tensor([[True, True]], dtype=torch.bool),
+        }
+    )
+
+    assert compute_moe_lb_metrics(batch, moe_lb_metrics_interval=2, global_steps=1, accumulator=accumulator) == {}
+
+    metrics = compute_moe_lb_metrics(batch, moe_lb_metrics_interval=2, global_steps=2, accumulator=accumulator)
+
+    assert metrics["rollout/moe/routed_experts_found"] == 1.0
+    assert metrics["rollout/moe/routed_expert_assignments"] == 4
+    assert accumulator.total_assignments() == 0
+
+
+def test_get_metric_data_with_optional_routed_experts_falls_back():
+    calls = []
+
+    def fake_kv_batch_get(keys, partition_id, select_fields):
+        calls.append(select_fields)
+        if "routed_experts" in select_fields:
+            raise ValueError("field routed_experts not found")
+        return {"responses": "ok"}
+
+    accumulator = RolloutMoELoadBalanceMetricsAccumulator()
+
+    data = get_metric_data_with_optional_routed_experts(
+        keys=["k"],
+        partition_id="train",
+        fields=["responses"],
+        moe_lb_metrics_interval=1,
+        global_steps=1,
+        accumulator=accumulator,
+        kv_batch_get=fake_kv_batch_get,
+    )
+
+    assert data == {"responses": "ok"}
+    assert calls == [["responses", "routed_experts"], ["responses"]]
+    assert accumulator.routed_experts_retry_after_step == 2
+    assert "missing_routed_experts" in accumulator.warned_skip_keys
+
+    data = get_metric_data_with_optional_routed_experts(
+        keys=["k"],
+        partition_id="train",
+        fields=["responses"],
+        moe_lb_metrics_interval=1,
+        global_steps=1,
+        accumulator=accumulator,
+        kv_batch_get=fake_kv_batch_get,
+    )
+
+    assert data == {"responses": "ok"}
+    assert calls == [["responses", "routed_experts"], ["responses"], ["responses"]]
+
+    data = get_metric_data_with_optional_routed_experts(
+        keys=["k"],
+        partition_id="train",
+        fields=["responses"],
+        moe_lb_metrics_interval=1,
+        global_steps=2,
+        accumulator=accumulator,
+        kv_batch_get=fake_kv_batch_get,
+    )
+
+    assert data == {"responses": "ok"}
+    assert calls == [
+        ["responses", "routed_experts"],
+        ["responses"],
+        ["responses"],
+        ["responses", "routed_experts"],
+        ["responses"],
+    ]
+
+
+def test_rollout_moe_load_balance_accumulator_uses_keyed_warnings(monkeypatch):
+    accumulator = RolloutMoELoadBalanceMetricsAccumulator()
+    messages = []
+    monkeypatch.setattr(metric_utils.logger, "warning", lambda message: messages.append(message))
+
+    accumulator.warn_skip_once("missing_routed_experts", "missing routed experts")
+    accumulator.warn_skip_once("missing_routed_experts", "missing routed experts again")
+    accumulator.warn_skip_once("num_experts_missing", "missing num experts")
+
+    assert messages == ["missing routed experts", "missing num experts"]
+
+
 def test_infer_moe_num_experts_from_nested_config():
     assert infer_moe_num_experts({"hf_config": {"text_config": {"num_experts": 4}}}) == 4
     assert infer_moe_num_experts({"override_config": {"model_config": {"n_routed_experts": 8}}}) == 8
@@ -93,34 +202,30 @@ def test_infer_moe_num_experts_from_nested_config():
     assert infer_moe_num_experts({"model_type": "mixtral", "num_experts": 4, "num_local_experts": 8}) == 4
 
 
-def test_trainer_infers_moe_num_experts_with_nested_override_config(monkeypatch):
-    from verl.trainer.ppo.v1 import trainer_base
+def test_get_hf_config_override_kwargs_unwraps_nested_model_config():
+    assert get_hf_config_override_kwargs({"model_config": {"max_position_embeddings": 32768}}) == {
+        "max_position_embeddings": 32768
+    }
+    assert get_hf_config_override_kwargs({"max_position_embeddings": 32768}) == {"max_position_embeddings": 32768}
+    assert get_hf_config_override_kwargs({}) == {}
 
-    class DummyTrainer(trainer_base.PPOTrainer):
-        def on_step_end(self):
-            return
 
-        def on_sample_end(self):
-            return
+def test_infer_rollout_moe_num_experts_with_nested_override_config(monkeypatch):
+    model_config = {
+        "path": "dummy-model",
+        "override_config": {"model_config": {"max_position_embeddings": 32768}},
+    }
 
-    trainer = object.__new__(DummyTrainer)
-    trainer.config = SimpleNamespace(
-        actor_rollout_ref=SimpleNamespace(
-            model={
-                "path": "dummy-model",
-                "override_config": {"model_config": {"max_position_embeddings": 32768}},
-            }
-        )
-    )
-    trainer._rollout_moe_num_experts_initialized = False
-    trainer._rollout_moe_num_experts = None
-    trainer._warned_missing_rollout_moe_lb_metrics = False
+    monkeypatch.setattr(metric_utils, "copy_to_local", lambda path, use_shm=False: path)
 
-    monkeypatch.setattr(trainer_base, "copy_to_local", lambda path, use_shm=False: path)
+    def fake_update_model_config(config, override_config):
+        config.max_position_embeddings = override_config["max_position_embeddings"]
+
+    monkeypatch.setattr(metric_utils, "update_model_config", fake_update_model_config)
     monkeypatch.setattr(
-        trainer_base.AutoConfig,
+        metric_utils.AutoConfig,
         "from_pretrained",
         lambda *args, **kwargs: SimpleNamespace(num_experts=64, max_position_embeddings=8192),
     )
 
-    assert trainer._infer_rollout_moe_num_experts() == 64
+    assert infer_rollout_moe_num_experts(model_config) == 64
