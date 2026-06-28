@@ -20,7 +20,7 @@ from pprint import pprint
 
 import hydra
 import ray
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, open_dict
 
 from verl.experimental.fully_async_policy.fully_async_rollouter import FullyAsyncRollouter
 from verl.experimental.fully_async_policy.fully_async_trainer import FullyAsyncTrainer
@@ -30,6 +30,44 @@ from verl.experimental.separation.utils import create_resource_pool_manager, cre
 from verl.trainer.ppo.utils import Role
 from verl.utils.device import auto_set_device
 from verl.utils.fs import copy_to_local
+
+
+def _infer_total_train_steps_from_rollout(config):
+    total_rollout_steps = OmegaConf.select(config, "rollout.total_rollout_steps")
+    ppo_mini_batch_size = OmegaConf.select(config, "actor_rollout_ref.actor.ppo_mini_batch_size")
+    require_batches = OmegaConf.select(config, "async_training.require_batches")
+    trigger_parameter_sync_step = OmegaConf.select(config, "async_training.trigger_parameter_sync_step")
+    if (
+        total_rollout_steps is None
+        or ppo_mini_batch_size is None
+        or require_batches is None
+        or trigger_parameter_sync_step is None
+    ):
+        return None
+
+    samples_per_update = ppo_mini_batch_size * require_batches * trigger_parameter_sync_step
+    if samples_per_update <= 0:
+        return None
+    return int(total_rollout_steps / samples_per_update)
+
+
+def _set_fully_async_total_training_steps_before_worker_init(config):
+    total_train_steps = _infer_total_train_steps_from_rollout(config)
+    if total_train_steps is None:
+        return None
+
+    with open_dict(config):
+        if (
+            OmegaConf.select(config, "actor_rollout_ref.actor.optim") is not None
+            and OmegaConf.select(config, "actor_rollout_ref.actor.optim.total_training_steps") == -1
+        ):
+            config.actor_rollout_ref.actor.optim.total_training_steps = total_train_steps
+        if (
+            OmegaConf.select(config, "critic.optim") is not None
+            and OmegaConf.select(config, "critic.optim.total_training_steps") == -1
+        ):
+            config.critic.optim.total_training_steps = total_train_steps
+    return total_train_steps
 
 
 @ray.remote(num_cpus=1)
@@ -73,6 +111,9 @@ class FullyAsyncTaskRunner:
         role_worker_mapping, ray_worker_group_cls = create_role_worker_mapping(config)
         self.components["role_worker_mapping"] = role_worker_mapping
         self.components["ray_worker_group_cls"] = ray_worker_group_cls
+
+        total_train_steps = _set_fully_async_total_training_steps_before_worker_init(config)
+        print(f"[ASYNC MAIN] Pre-init total_train_steps {total_train_steps}")
 
         print("[ASYNC MAIN] Creating FullyAsyncTrainer first (needed for hybrid worker group injection)...")
         self._create_trainer(config)
