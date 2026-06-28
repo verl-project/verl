@@ -18,6 +18,7 @@ import asyncio
 import copy
 import logging
 import os
+import pickle
 import re
 import traceback
 from collections import defaultdict
@@ -36,6 +37,10 @@ from verl.utils.import_utils import load_extern_object
 from verl.utils.tokenizer import build_multimodal_processor_inputs, normalize_token_ids
 
 logger = logging.getLogger(__name__)
+
+
+def _is_multiprocess_pickling_error(exc: Exception) -> bool:
+    return isinstance(exc, pickle.PicklingError) or "pickl" in str(exc).lower()
 
 
 def collate_fn(data_list: list[dict]) -> dict:
@@ -265,11 +270,26 @@ class RLHFDataset(Dataset):
                         traceback.print_exc()
                         return self.max_prompt_length + 1
 
-            dataframe = dataframe.filter(
-                lambda doc: doc2len(doc) <= self.max_prompt_length,
-                num_proc=self.num_workers,
-                desc=f"Filtering prompts longer than {self.max_prompt_length} tokens",
-            )
+            desc = f"Filtering prompts longer than {self.max_prompt_length} tokens"
+
+            def filter_with_num_proc(num_proc):
+                return dataframe.filter(
+                    lambda doc: doc2len(doc) <= self.max_prompt_length,
+                    num_proc=num_proc,
+                    desc=desc,
+                )
+
+            try:
+                dataframe = filter_with_num_proc(self.num_workers)
+            except (AttributeError, TypeError, pickle.PicklingError) as exc:
+                if self.num_workers is None or not _is_multiprocess_pickling_error(exc):
+                    raise
+                logger.warning(
+                    "Falling back to single-process prompt filtering because "
+                    "multiprocessing could not serialize the filter function: %s",
+                    exc,
+                )
+                dataframe = filter_with_num_proc(None)
 
             print(f"filter dataset len: {len(dataframe)}")
         return dataframe

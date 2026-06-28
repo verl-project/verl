@@ -13,6 +13,7 @@
 # limitations under the License.
 import json
 import os
+import pickle
 from copy import deepcopy
 from pathlib import Path
 
@@ -129,6 +130,72 @@ def test_build_messages_accepts_video_path_or_frame_list(videos, expected_video)
         {"type": "text", "text": "Describe "},
         {"type": "video", "video": expected_video},
     ]
+
+
+def _mock_filter_dataset(processor=None, num_workers=2):
+    dataset = _mock_rlhf_dataset()
+    dataset.processor = processor
+    dataset.tokenizer = None if processor is not None else _FakeTokenizer()
+    dataset.filter_overlong_prompts = True
+    dataset.apply_chat_template_kwargs = {}
+    dataset.tool_schemas = None
+    dataset.image_patch_size = 14
+    dataset.config = OmegaConf.create({})
+    dataset.max_prompt_length = 2
+    dataset.mm_processor_kwargs = {}
+    dataset.num_workers = num_workers
+    return dataset
+
+
+class _FakeTokenizer:
+    def apply_chat_template(self, messages, add_generation_prompt=True, tokenize=True, **kwargs):
+        assert add_generation_prompt
+        assert tokenize
+        return list(range(len(messages[0]["content"].split())))
+
+
+@pytest.mark.parametrize("filter_error", [TypeError("cannot pickle 'SSLContext' object"), pickle.PicklingError("boom")])
+def test_maybe_filter_out_long_prompts_falls_back_when_multiprocess_filter_is_not_pickleable(filter_error, caplog):
+    calls = []
+
+    class FakeDataFrame(list):
+        def filter(self, fn, num_proc=None, desc=None):
+            calls.append(num_proc)
+            if num_proc is not None:
+                raise filter_error
+            return FakeDataFrame([doc for doc in self if fn(doc)])
+
+    dataset = _mock_filter_dataset(num_workers=2)
+    dataframe = FakeDataFrame(
+        [
+            {"prompt": [{"role": "user", "content": "short"}]},
+            {"prompt": [{"role": "user", "content": "one two three"}]},
+        ]
+    )
+
+    filtered = dataset.maybe_filter_out_long_prompts(dataframe)
+
+    assert calls == [2, None]
+    assert len(filtered) == 1
+    assert filtered[0]["prompt"][0]["content"] == "short"
+    assert "Falling back to single-process prompt filtering" in caplog.text
+
+
+def test_maybe_filter_out_long_prompts_reraises_non_serialization_filter_errors():
+    calls = []
+
+    class FakeDataFrame(list):
+        def filter(self, fn, num_proc=None, desc=None):
+            calls.append(num_proc)
+            raise TypeError("unrelated filter failure")
+
+    dataset = _mock_filter_dataset(num_workers=2)
+    dataframe = FakeDataFrame([{"prompt": [{"role": "user", "content": "short"}]}])
+
+    with pytest.raises(TypeError, match="unrelated filter failure"):
+        dataset.maybe_filter_out_long_prompts(dataframe)
+
+    assert calls == [2]
 
 
 def test_maybe_filter_out_long_prompts_accepts_image_path(monkeypatch):
