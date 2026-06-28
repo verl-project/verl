@@ -107,17 +107,6 @@ with the autoregressive prefix-to-suffix structure.
 > outside the loss; if you want it, you can wire that up in your own verl fork and feed the
 > Top-K `D_t` into the same mask.
 
-### Anchoring the divergence to the rollout policy
-
-CPPO's per-token divergence is `D_t = |pi(y_t|s_t) - mu(y_t|s_t)|`, where `mu` is the
-**rollout** policy. So the `old_log_prob` fed to the loss must be the rollout log-probs,
-not a recomputed `pi_old`. The script runs the synchronous trainer
-(`verl.trainer.main_ppo_sync`) with `algorithm.rollout_correction.bypass_mode=True`:
-in this trainer, bypass mode simply sets `old_log_probs = rollout_log_probs` and leaves
-`loss_mode` untouched, so CPPO reads `mu` directly and runs its own token mask. This
-requires `rollout.calculate_log_probs=True` (the default) and the TransferQueue backend
-(`pip install TransferQueue`).
-
 ## ⚙️ Key hyperparameters
 
 CPPO adds two hyperparameters on top of the shared DPPO token-level threshold scale.

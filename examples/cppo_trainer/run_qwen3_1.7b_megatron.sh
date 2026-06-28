@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# CPPO | MoE | vLLM rollout | Megatron training | NVIDIA GPUs
+# CPPO | dense | vLLM rollout | Megatron training | NVIDIA GPUs
 # CPPO masks token-level updates with a position-weighted divergence threshold and a
 # cumulative prefix budget (paper: cppo.pdf, "Beyond Uniform Token-Level Trust Region in
 # LLM Reinforcement Learning"). Binary-TV variant.
@@ -10,14 +10,14 @@ export CUDA_DEVICE_MAX_CONNECTIONS=1
 export VLLM_USE_V1=1
 
 # ---- user-adjustable ----
-MODEL_PATH=${MODEL_PATH:-Qwen/Qwen3-30B-A3B-Base}
+MODEL_PATH=${MODEL_PATH:-Qwen/Qwen3-1.7B-Base}
 NNODES=${NNODES:-1}
 NGPUS_PER_NODE=${NGPUS_PER_NODE:-8}
 
-# CPPO hyperparameters (paper Table 3, Qwen3-30B-A3B-Base / MoE).
+# CPPO hyperparameters (paper Table 3).
 # clip_ratio is the token-level divergence threshold scale delta:
-#   delta = 0.20 for the 30B-A3B MoE model (0.15 for dense models).
-clip_ratio=${CLIP_RATIO:-0.20}
+#   delta = 0.15 for dense models (0.20 for the 30B-A3B MoE model).
+clip_ratio=${CLIP_RATIO:-0.15}
 # Position weight floor w_t in [w_min, 1].
 cppo_w_min=${CPPO_W_MIN:-0.8}
 # Floor delta_b_min of the per-sequence dynamic prefix budget
@@ -28,30 +28,28 @@ cppo_delta_b=${CPPO_DELTA_B:-0.02}
 cppo_delta_b_q=${CPPO_DELTA_B_Q:-0.9}
 cppo_delta_b_k=${CPPO_DELTA_B_K:-1.0}
 
-train_batch_size=${TRAIN_BATCH_SIZE:-256}
+train_batch_size=${TRAIN_BATCH_SIZE:-64}
 ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE:-32}
 max_prompt_length=${MAX_PROMPT_LENGTH:-1024}
-max_response_length=${MAX_RESPONSE_LENGTH:-16384}
-ppo_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU:-32768}
+max_response_length=${MAX_RESPONSE_LENGTH:-8192}
+ppo_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU:-16384}
 
 actor_lr=${ACTOR_LR:-1e-6}
 entropy_coeff=${ENTROPY_COEFF:-0}
 
-actor_tp=${ACTOR_TP:-4}
+actor_tp=${ACTOR_TP:-1}
 actor_pp=${ACTOR_PP:-1}
-actor_ep=${ACTOR_EP:-8}
-actor_etp=${ACTOR_ETP:-1}
 
-rollout_tp=${ROLLOUT_TP:-2}
-rollout_gpu_mem_util=${ROLLOUT_GPU_MEM_UTIL:-0.8}
-rollout_n=${ROLLOUT_N:-16}
+rollout_tp=${ROLLOUT_TP:-1}
+rollout_gpu_mem_util=${ROLLOUT_GPU_MEM_UTIL:-0.6}
+rollout_n=${ROLLOUT_N:-8}
 
 total_epochs=${TOTAL_EPOCHS:-10}
 save_freq=${SAVE_FREQ:-50}
 test_freq=${TEST_FREQ:-10}
 
-project_name=${PROJECT_NAME:-verl_cppo_qwen3_moe}
-experiment_name=${EXPERIMENT_NAME:-qwen3_30b_a3b_cppo_vllm_megatron}
+project_name=${PROJECT_NAME:-verl_cppo_qwen3_dense}
+experiment_name=${EXPERIMENT_NAME:-qwen3_1.7b_cppo_vllm_megatron}
 # ---- end user-adjustable ----
 
 train_file=${TRAIN_FILE:-$HOME/data/dapo-math-17k/train.parquet}
@@ -93,17 +91,7 @@ ACTOR=(
     actor_rollout_ref.actor.entropy_coeff=${entropy_coeff}
     actor_rollout_ref.actor.megatron.tensor_model_parallel_size=${actor_tp}
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=${actor_pp}
-    actor_rollout_ref.actor.megatron.expert_model_parallel_size=${actor_ep}
-    actor_rollout_ref.actor.megatron.expert_tensor_parallel_size=${actor_etp}
-    actor_rollout_ref.actor.megatron.param_offload=True
-    actor_rollout_ref.actor.megatron.grad_offload=True
-    actor_rollout_ref.actor.megatron.optimizer_offload=True
     actor_rollout_ref.actor.megatron.use_mbridge=True
-    +actor_rollout_ref.actor.megatron.override_transformer_config.moe_router_dtype=fp32
-    +actor_rollout_ref.actor.megatron.override_transformer_config.moe_permute_fusion=True
-    +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform
-    +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full
-    +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1
 )
 
 ROLLOUT=(
@@ -120,8 +108,6 @@ REF=(
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${ppo_max_token_len_per_gpu}
     actor_rollout_ref.ref.megatron.tensor_model_parallel_size=${actor_tp}
     actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=${actor_pp}
-    actor_rollout_ref.ref.megatron.expert_model_parallel_size=${actor_ep}
-    actor_rollout_ref.ref.megatron.expert_tensor_parallel_size=${actor_etp}
     actor_rollout_ref.ref.megatron.param_offload=True
     actor_rollout_ref.ref.megatron.use_mbridge=True
 )
