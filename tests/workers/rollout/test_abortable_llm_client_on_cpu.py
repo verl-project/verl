@@ -24,6 +24,10 @@ import pytest
 from verl.workers.rollout.llm_server import AbortableLLMServerClient
 from verl.workers.rollout.replica import TokenOutput
 
+# Generous guard against a hung task; not a performance assertion. The first asyncio test
+# in a heavily loaded CI run pays event-loop cold-start cost, so keep this well above 1s.
+WAIT_TIMEOUT = 30.0
+
 
 class _FakeRemoteMethod:
     """Mimics a Ray actor method: ``handle.method.remote(...)``."""
@@ -94,7 +98,7 @@ async def test_record_abort_and_cleanup():
     task = asyncio.create_task(client.generate(request_id="req-1", prompt_ids=[1, 2], sampling_params={}))
 
     # Wait until the request is actually dispatched to the (fake) server.
-    await asyncio.wait_for(server.started.wait(), timeout=1.0)
+    await asyncio.wait_for(server.started.wait(), timeout=WAIT_TIMEOUT)
     assert "req-1" in client._inflight
     inner_request_id, recorded_server = client._inflight["req-1"]
     assert recorded_server is server
@@ -106,7 +110,7 @@ async def test_record_abort_and_cleanup():
 
     # Entry is only cleared once generate() returns through its finally clause.
     server.release.set()
-    output = await asyncio.wait_for(task, timeout=1.0)
+    output = await asyncio.wait_for(task, timeout=WAIT_TIMEOUT)
     assert output.stop_reason == "aborted"
     assert "req-1" not in client._inflight
 
@@ -118,11 +122,11 @@ async def test_inflight_cleared_on_normal_completion():
     client = _make_client(server)
 
     task = asyncio.create_task(client.generate(request_id="req-2", prompt_ids=[1], sampling_params={}))
-    await asyncio.wait_for(server.started.wait(), timeout=1.0)
+    await asyncio.wait_for(server.started.wait(), timeout=WAIT_TIMEOUT)
     assert "req-2" in client._inflight
 
     server.release.set()
-    await asyncio.wait_for(task, timeout=1.0)
+    await asyncio.wait_for(task, timeout=WAIT_TIMEOUT)
     assert "req-2" not in client._inflight
 
 
@@ -143,7 +147,7 @@ async def test_cancellation_aborts_server_and_clears_inflight():
     client = _make_client(server)
 
     task = asyncio.create_task(client.generate(request_id="req-3", prompt_ids=[1], sampling_params={}))
-    await asyncio.wait_for(server.started.wait(), timeout=1.0)
+    await asyncio.wait_for(server.started.wait(), timeout=WAIT_TIMEOUT)
     inner_request_id, _ = client._inflight["req-3"]
 
     task.cancel()
