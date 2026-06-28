@@ -869,6 +869,8 @@ trainer:
   use_v1: true
   v1:
     trainer_mode: sync
+    rollout_level_dispatch: false
+    max_concurrent_rollouts_per_worker: 0
     sync: {}
     colocate_async:
       num_warmup_batches: 1
