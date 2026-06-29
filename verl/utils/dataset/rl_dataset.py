@@ -477,7 +477,9 @@ class RLHFDataset(Dataset):
 
             if self.processor is not None:
                 processor_path = _get_processor_path(self.processor)
-                if use_multiprocessing and processor_path is not None:
+                if processor_path is None:
+                    use_multiprocessing = False
+                if use_multiprocessing:
                     filter_kwargs["processor_path"] = processor_path
                 else:
                     filter_kwargs["processor"] = self.processor
@@ -490,10 +492,15 @@ class RLHFDataset(Dataset):
                         "mm_processor_kwargs": dict(**self.mm_processor_kwargs),
                     }
                 )
+                if not use_multiprocessing:
+                    filter_kwargs["process_multi_modal_info_fn"] = self._process_multi_modal_info
+                    filter_kwargs["config"] = self.config
                 filter_function = _filter_prompt_length_with_processor
             else:
                 tokenizer_path = _get_tokenizer_path(self.tokenizer)
-                if use_multiprocessing and tokenizer_path is not None:
+                if tokenizer_path is None:
+                    use_multiprocessing = False
+                if use_multiprocessing:
                     filter_kwargs["tokenizer_path"] = tokenizer_path
                 else:
                     filter_kwargs["tokenizer"] = self.tokenizer
@@ -501,7 +508,7 @@ class RLHFDataset(Dataset):
 
             dataframe = dataframe.filter(
                 filter_function,
-                num_proc=self.num_workers,
+                num_proc=self.num_workers if use_multiprocessing else None,
                 desc=f"Filtering prompts longer than {self.max_prompt_length} tokens",
                 fn_kwargs=filter_kwargs,
             )

@@ -130,6 +130,65 @@ def test_maybe_filter_out_long_prompts_uses_picklable_multiprocess_processor_fil
     assert filtered[0]["prompt"][0]["content"] == "short"
 
 
+def test_maybe_filter_out_long_prompts_disables_multiprocessing_without_processor_path():
+    calls = []
+
+    class PathlessProcessor(_UnpickleableProcessor):
+        tokenizer = type("PathlessTokenizer", (_FakeTokenizer,), {"name_or_path": None})()
+
+    class FakeDataFrame(list):
+        def filter(self, function, num_proc=None, desc=None, fn_kwargs=None):
+            calls.append(num_proc)
+            assert num_proc is None
+            assert "processor" in fn_kwargs
+            assert "processor_path" not in fn_kwargs
+            return FakeDataFrame([doc for doc in self if function(doc, **(fn_kwargs or {}))])
+
+    dataset = _mock_filter_dataset(processor=PathlessProcessor(), num_workers=2)
+    dataframe = FakeDataFrame(
+        [
+            {"prompt": [{"role": "user", "content": "short"}]},
+            {"prompt": [{"role": "user", "content": "one two three"}]},
+        ]
+    )
+
+    filtered = dataset.maybe_filter_out_long_prompts(dataframe)
+
+    assert calls == [None]
+    assert len(filtered) == 1
+    assert filtered[0]["prompt"][0]["content"] == "short"
+
+
+def test_maybe_filter_out_long_prompts_disables_multiprocessing_without_tokenizer_path():
+    calls = []
+
+    class PathlessTokenizer(_FakeTokenizer):
+        name_or_path = None
+
+    class FakeDataFrame(list):
+        def filter(self, function, num_proc=None, desc=None, fn_kwargs=None):
+            calls.append(num_proc)
+            assert num_proc is None
+            assert "tokenizer" in fn_kwargs
+            assert "tokenizer_path" not in fn_kwargs
+            return FakeDataFrame([doc for doc in self if function(doc, **(fn_kwargs or {}))])
+
+    dataset = _mock_filter_dataset(num_workers=2)
+    dataset.tokenizer = PathlessTokenizer()
+    dataframe = FakeDataFrame(
+        [
+            {"prompt": [{"role": "user", "content": "short"}]},
+            {"prompt": [{"role": "user", "content": "one two three"}]},
+        ]
+    )
+
+    filtered = dataset.maybe_filter_out_long_prompts(dataframe)
+
+    assert calls == [None]
+    assert len(filtered) == 1
+    assert filtered[0]["prompt"][0]["content"] == "short"
+
+
 def test_rl_dataset():
     tokenizer = hf_tokenizer(os.path.expanduser("~/models/deepseek-ai/deepseek-coder-1.3b-instruct"))
     local_path = get_gsm8k_data()
