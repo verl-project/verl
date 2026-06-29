@@ -217,7 +217,7 @@ jobs:
           ln -s /root/.cache/models ~/models
       - name: Prepare GSM8K dataset
         run: |
-          python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
+          python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
       - name: Running GSM8K E2E training tests with 3D parallelism on 8 NPUs with Megatron (Qwen3) testing learning rate scheduler
         run: |
           ray stop --force
