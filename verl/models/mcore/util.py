@@ -41,6 +41,16 @@ def _compute_fp8_thd_align_size(align_size: int) -> tuple[int, int]:
     return math.lcm(16, align_size), align_size * 128
 
 
+def _align_bshd_max_seqlen_for_fp8(
+    max_seqlen: int, batch_size: int, align_size: int, tp_size: int, cp_size: int
+) -> int:
+    """Align BSHD max sequence length for TransformerEngine FP8 block quantization."""
+    fp8_total_align = 128 * tp_size * cp_size
+    fp8_seq_align = fp8_total_align // math.gcd(batch_size, fp8_total_align)
+    fp8_seq_align = math.lcm(fp8_seq_align, align_size)
+    return ((max_seqlen + fp8_seq_align - 1) // fp8_seq_align) * fp8_seq_align
+
+
 def preprocess_packed_seqs(
     input_ids: torch.Tensor, attention_mask: torch.Tensor, pre_process: bool = True, use_fp8_padding: bool = False
 ) -> tuple[torch.Tensor, PackedSeqParams]:
@@ -199,6 +209,7 @@ def preprocess_bshd(
     position_ids: torch.Tensor,
     sequence_parallel: bool = False,
     pre_process: bool = True,
+    use_fp8_padding: bool = False,
 ):
     """
     Remove left padding from input_ids, attention_mask and position_ids
@@ -212,10 +223,13 @@ def preprocess_bshd(
     shape = list(input_ids.shape)  # batch_size, seq_len,...
     seq_lens = attention_mask.sum(dim=1)
     seq_len = seq_lens.max().item()
+    tp_size = mpu.get_tensor_model_parallel_world_size()
     if sequence_parallel:
-        sp_world_size = mpu.get_tensor_model_parallel_world_size()
-        pad_size = (sp_world_size - seq_len % sp_world_size) % sp_world_size
+        pad_size = (tp_size - seq_len % tp_size) % tp_size
         seq_len = seq_len + pad_size
+    if use_fp8_padding:
+        align_size = tp_size * cp_size * 2 if cp_size > 1 else tp_size
+        seq_len = _align_bshd_max_seqlen_for_fp8(seq_len, batch_size, align_size, tp_size, cp_size)
     shape[1] = seq_len
     if pre_process:
         new_input_ids = torch.zeros(dtype=input_ids.dtype, device=input_ids.device, size=shape)
@@ -593,12 +607,7 @@ def preprocess_bshd_engine(
         # We need:
         # 1) max_seqlen aligned for SP/CP splitting.
         # 2) batch_size * max_seqlen % (128 * tp_size * cp_size) == 0.
-        # Compute the required alignment for max_seqlen:
-        fp8_total_align = 128 * tp_size * cp_size
-        fp8_seq_align = fp8_total_align // math.gcd(batch_size, fp8_total_align)
-        # Also ensure SP and CP split alignment.
-        fp8_seq_align = math.lcm(fp8_seq_align, align_size)
-        max_seqlen = ((max_seqlen + fp8_seq_align - 1) // fp8_seq_align) * fp8_seq_align
+        max_seqlen = _align_bshd_max_seqlen_for_fp8(max_seqlen, batch_size, align_size, tp_size, cp_size)
 
     local_max_seqlen = max_seqlen // cp_size if cp_size > 1 else max_seqlen
     attention_mask = torch.zeros(batch_size, local_max_seqlen, dtype=torch.bool, device=input_ids.device)
