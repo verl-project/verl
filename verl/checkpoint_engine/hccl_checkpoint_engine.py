@@ -149,8 +149,7 @@ class HCCLCheckpointEngine(CheckpointEngine):
 
         self.send_buf = None
         self.recv_buf = None
-        from verl.utils.device import get_torch_device
-        get_torch_device().empty_cache()
+        torch.npu.empty_cache()
 
     @classmethod
     def build_topology(cls, actor_wg_world_size: int, rollout_world_size: int, metadata: list[dict]):
