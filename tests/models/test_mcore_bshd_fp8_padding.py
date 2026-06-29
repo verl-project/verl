@@ -16,7 +16,7 @@ from unittest.mock import patch
 
 import torch
 
-from verl.models.mcore.util import preprocess_bshd, postprocess_bshd
+from verl.models.mcore.util import postprocess_bshd, preprocess_bshd
 
 
 def test_preprocess_bshd_fp8_padding_aligns_local_tokens_and_roundtrips():
