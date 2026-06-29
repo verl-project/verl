@@ -91,9 +91,11 @@ class TeacherFSDPWorker(TrainingWorker):
           etc.), copied by the trainer from the actor's engine config.
 
         Returns:
-            A :class:`TensorDict` with the field ``teacher_on_student_logp``
-            (nested ``(bsz, seq_len_i, K)``), or ``None`` when the worker is not the
-            output-collecting rank (matches the :meth:`TrainingWorker.infer_batch` contract).
+            A :class:`TensorDict` with two nested ``(bsz, seq_len_i, K)`` fields:
+            ``teacher_on_student_logp`` (teacher log-probs at the student top-K) and
+            ``teacher_topk_ids`` (the teacher's own top-K IDs, for overlap diagnostics).
+            Returns ``None`` when the worker is not the output-collecting rank
+            (matches the :meth:`TrainingWorker.infer_batch` contract).
         """
         if self.engine.use_ulysses_sp:
             raise NotImplementedError(
@@ -136,18 +138,29 @@ class TeacherFSDPWorker(TrainingWorker):
                 chunk_size=chunk_size,
             )
 
+            # Teacher's own top-K IDs at the same width K, for the overlap diagnostics
+            # only. Indices only — no gradient, no extra V-sized tensor.
+            k = topk_ids_rmpad.shape[-1]
+            teacher_topk_ids_rmpad = torch.topk(logits_rmpad, k=k, dim=-1).indices.to(torch.int64)
+
             cu_seqlens = data["input_ids"].offsets()
             # Move offsets to the same device as values for nested_tensor_from_jagged.
             cu_seqlens = cu_seqlens.to(teacher_logp_rmpad.device)
             teacher_on_student_logp = torch.nested.nested_tensor_from_jagged(
                 teacher_logp_rmpad, cu_seqlens
             )
+            teacher_topk_ids = torch.nested.nested_tensor_from_jagged(
+                teacher_topk_ids_rmpad, cu_seqlens.to(teacher_topk_ids_rmpad.device)
+            )
 
         if not self.engine.is_mp_src_rank_with_outputs():
             return None
 
         out = TensorDict(
-            {"teacher_on_student_logp": teacher_on_student_logp},
+            {
+                "teacher_on_student_logp": teacher_on_student_logp,
+                "teacher_topk_ids": teacher_topk_ids,
+            },
             batch_size=data.batch_size,
         )
         return out.cpu()

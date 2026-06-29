@@ -106,6 +106,14 @@ def left_right_2_no_padding(data: TensorDict) -> TensorDict:
             teacher_on_student_logp_rmpad.squeeze(-1), offsets=cu_seqlens
         )
 
+    # Teacher's own top-K IDs, carried alongside for the overlap diagnostics only.
+    teacher_topk_ids = data.get("teacher_topk_ids", None)
+    if teacher_topk_ids is not None:
+        teacher_topk_ids_rmpad = index_first_axis(teacher_topk_ids.unsqueeze(-1).flatten(0, 1), indices)
+        data["teacher_topk_ids"] = torch.nested.nested_tensor_from_jagged(
+            teacher_topk_ids_rmpad.squeeze(-1), offsets=cu_seqlens
+        )
+
     return data
 
 

@@ -193,6 +193,7 @@ def compute_topk_loss(
             student_topk_ids=data["student_topk_ids"],
             config=distillation_config,
             data_format=data_format,
+            teacher_topk_ids=data.get("teacher_topk_ids", None),
         )
     else:
         raise NotImplementedError(f"Unsupported loss_mode for compute_topk_loss: {loss_mode!r}")
@@ -465,11 +466,34 @@ def compute_reverse_kl_topk(
     distillation_losses = no_padding_2_padding(model_output["distillation_losses"], data)
     student_mass = no_padding_2_padding(model_output["student_mass"], data)
     teacher_mass = no_padding_2_padding(model_output["teacher_mass"], data)
+    overlap_count = model_output.get("overlap_count")
+    overlap_token_advantage = model_output.get("overlap_token_advantage")
+    if overlap_count is not None and overlap_token_advantage is not None:
+        overlap_count = no_padding_2_padding(overlap_count, data)
+        overlap_token_advantage = no_padding_2_padding(overlap_token_advantage, data)
     if data["response_mask"].is_nested:
         response_mask_bool = data["response_mask"].bool().to_padded_tensor(False)
     else:
         response_mask_bool = data["response_mask"].bool()
     assert distillation_losses.shape == student_mass.shape == teacher_mass.shape == response_mask_bool.shape
+
+    overlap_metrics = {}
+    if overlap_count is not None and overlap_token_advantage is not None:
+        assert overlap_count.shape == overlap_token_advantage.shape == response_mask_bool.shape
+        valid_overlap_count = overlap_count[response_mask_bool]
+        k = distillation_config.distillation_loss.topk
+        assert k is not None
+        # Diagnostics for tracking student/teacher top-k overlap in OPD, following
+        # "Rethinking On-Policy Distillation of Large Language Models" (arXiv:2604.13016):
+        # overlap fraction and mean reverse-KL advantage on overlapping tokens.
+        overlap_metrics["distillation/overlap_ratio"] = (valid_overlap_count.float().mean() / k).item()
+        overlap_position_mask = response_mask_bool & (overlap_count > 0)
+        if overlap_position_mask.any():
+            overlap_metrics["distillation/overlap_token_advantage"] = (
+                overlap_token_advantage[overlap_position_mask].mean().item()
+            )
+        else:
+            overlap_metrics["distillation/overlap_token_advantage"] = 0.0
 
     student_mass_valid = student_mass[response_mask_bool]
     teacher_mass_valid = teacher_mass[response_mask_bool]
@@ -480,6 +504,7 @@ def compute_reverse_kl_topk(
         "distillation/teacher_mass": teacher_mass_valid.mean().item(),
         "distillation/teacher_mass_min": Metric(AggregationType.MIN, teacher_mass_valid.min()),
         "distillation/teacher_mass_max": Metric(AggregationType.MAX, teacher_mass_valid.max()),
+        **overlap_metrics,
     }
 
     # clamp small negative drift from the log_prob_min_clamp guard

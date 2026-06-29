@@ -1414,6 +1414,7 @@ class RayPPOTrainer:
         # compute_logprobs_at_ids is non-blocking; materialize the future.
         teacher_output = teacher_output.get()
         teacher_on_student_logp = tu.get(teacher_output, "teacher_on_student_logp")  # nested (B, T_i, K)
+        teacher_topk_ids = tu.get(teacher_output, "teacher_topk_ids")  # nested (B, T_i, K)
 
         # Phase 3: nested -> left-right padded dense (B, max_seq_len, K), unioned into
         # batch so update_actor's left_right_2_no_padding re-nests them aligned to input_ids.
@@ -1436,10 +1437,12 @@ class RayPPOTrainer:
 
         student_topk_ids_padded = _to_left_right_padded(student_topk_ids)
         teacher_on_student_logp_padded = _to_left_right_padded(teacher_on_student_logp)
+        teacher_topk_ids_padded = _to_left_right_padded(teacher_topk_ids)
         extras = tu.get_tensordict(
             {
                 "student_topk_ids": student_topk_ids_padded,
                 "teacher_on_student_logp": teacher_on_student_logp_padded.float(),
+                "teacher_topk_ids": teacher_topk_ids_padded,
             }
         )
         return batch.union(DataProto.from_tensordict(extras))
