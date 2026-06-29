@@ -110,7 +110,7 @@ jobs:
         run: |
           ray stop --force
           python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
-      - name: Test the latest vLLM Rollout async with agent loop
+      - name: Test the latest vLLM Rollout async with agent loop with seed 0(non deter)
         run: |
           export HCCL_HOST_SOCKET_PORT_RANGE=auto
           export HCCL_NPU_SOCKET_PORT_RANGE=auto
