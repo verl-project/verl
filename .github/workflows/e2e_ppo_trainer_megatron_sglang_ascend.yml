@@ -153,7 +153,7 @@ jobs:
         run: |
           ray stop --force
           PROFILE_ENABLE=True ENGINE=sglang ADV_ESTIMATOR=grpo USE_DYNAMIC_BSZ=False USE_REMOVE_PADDING=True MODEL_ID=deepseek-ai/deepseek-coder-1.3b-instruct bash tests/special_e2e/run_ppo_trainer_megatron.sh
-          if [ -z "$( ls -A '/tmp/ray/session_latest/logs/nsight/' )" ]; then
+          if [ -z "$( ls -A "${HOME}/profiling" )" ]; then
             echo "[ERROR] not found any profiling files"
             exit 1
           else
