@@ -945,15 +945,9 @@ class RayPPOTrainer:
         # To stream teacher computation with actor rollout, we instead pass the full manager so that the
         # teacher loop workers can sleep/wake together with rollout workers
         reward_loop_worker_handles = self.reward_loop_manager.reward_loop_workers if enable_agent_reward_loop else None
-
-        # Support custom LLMServerClient via config (mirrors agent_loop_manager_class above)
-        llm_client_class_fqn = self.config.actor_rollout_ref.rollout.get("agent", {}).get("llm_client_class")
-        llm_client_kwargs = (
-            {"client_cls": load_class_from_fqn(llm_client_class_fqn, "LLMServerClient")} if llm_client_class_fqn else {}
-        )
         self.async_rollout_manager = AgentLoopManager.create(
             config=self.config,
-            llm_client=self.llm_server_manager.get_client(**llm_client_kwargs),
+            llm_client=self.llm_server_manager.get_client(),
             teacher_client=self.teacher_model_manager.get_client() if self.use_teacher_policy else None,
             reward_loop_worker_handles=reward_loop_worker_handles,
         )

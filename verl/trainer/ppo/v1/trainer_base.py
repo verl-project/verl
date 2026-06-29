@@ -76,7 +76,7 @@ from verl.utils.dataset.rl_dataset import collate_fn
 from verl.utils.debug import marked_timer
 from verl.utils.debug.metrics import calculate_debug_metrics
 from verl.utils.fs import copy_to_local
-from verl.utils.import_utils import load_extern_type
+from verl.utils.import_utils import load_class_from_fqn, load_extern_type
 from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
@@ -284,7 +284,12 @@ class PPOTrainer(ABC):
 
     def get_llm_client(self) -> LLMServerClient:
         """Get the LLM server client for rollout generation."""
-        return self.llm_server_manager.get_client()
+        # Support custom LLMServerClient via config (mirrors agent_loop_manager_class).
+        llm_client_class_fqn = self.config.actor_rollout_ref.rollout.get("agent", {}).get("llm_client_class")
+        llm_client_kwargs = (
+            {"client_cls": load_class_from_fqn(llm_client_class_fqn, "LLMServerClient")} if llm_client_class_fqn else {}
+        )
+        return self.llm_server_manager.get_client(**llm_client_kwargs)
 
     def get_teacher_client(self) -> Optional[dict[str, LLMServerClient]]:
         """Get the On-Policy Distillation teacher server clients.
