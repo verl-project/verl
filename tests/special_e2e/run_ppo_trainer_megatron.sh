@@ -305,7 +305,6 @@ elif [ -n "$device_name" ] && [ "$device_name" == "npu" ]; then
         "${common_params[@]}" \
         +actor_rollout_ref.actor.megatron.override_transformer_config.context_parallel_size=${ACTOR_CP} \
         +actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn=True \
-        ++actor_rollout_ref.ref.megatron.override_transformer_config.use_flash_attn=True \
         global_profiler.tool=npu \
         actor_rollout_ref.actor.profiler.tool_config.npu.contents=[npu,cpu,memory,shapes,module] \
         actor_rollout_ref.actor.profiler.tool_config.npu.level='level1' \
