@@ -128,8 +128,6 @@ def model_forward_gen(vision_model: bool = False):
             When using the bshd format, we have to add paddings to the input_ids to meet the longest sequence length, 
             so it is recommended to disable dynamic batch size and set batch size to 1
             """
-            assert fp8 is None, "fp8 is not supported for bshd format yet"
-
             batch_size, sequence_length = attention_mask.shape[:2]
             position_ids_for_preprocess = (
                 torch.arange(sequence_length, device=input_ids.device).unsqueeze(0).expand(batch_size, -1)
@@ -143,6 +141,7 @@ def model_forward_gen(vision_model: bool = False):
                 position_ids_for_preprocess,
                 sequence_parallel=sp,
                 pre_process=pre_process_for_bshd,
+                use_fp8_padding=use_fp8_padding,
             )
             output_orig = model(
                 input_ids=new_input_ids,
@@ -153,7 +152,12 @@ def model_forward_gen(vision_model: bool = False):
             if post_process and logits_processor is not None:
                 args = {
                     k: preprocess_bshd(
-                        v, attention_mask, position_ids_for_preprocess, sequence_parallel=sp, pre_process=True
+                        v,
+                        attention_mask,
+                        position_ids_for_preprocess,
+                        sequence_parallel=sp,
+                        pre_process=True,
+                        use_fp8_padding=use_fp8_padding,
                     )[0]
                     for k, v in logits_processor_args.items()
                 }

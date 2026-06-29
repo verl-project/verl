@@ -40,6 +40,21 @@ def _compute_fp8_thd_align_size(align_size: int) -> tuple[int, int]:
     return math.lcm(16, align_size), align_size * 128
 
 
+def _align_bshd_max_seqlen_for_fp8(max_seqlen: int, batch_size: int, tp_size: int, cp_size: int = 1) -> int:
+    """Align BSHD sequence length for TE FP8 block quantization.
+
+    In BSHD format, Transformer Engine sees a local activation extent of
+    ``batch_size * max_seqlen / (tp_size * cp_size)``. Block FP8 kernels require
+    that extent to be divisible by 128, while SP/CP still require the sequence
+    length to split cleanly across their ranks.
+    """
+    align_size = tp_size * cp_size * 2 if cp_size > 1 else tp_size
+    fp8_total_align = 128 * tp_size * cp_size
+    fp8_seq_align = fp8_total_align // math.gcd(batch_size, fp8_total_align)
+    fp8_seq_align = math.lcm(fp8_seq_align, align_size)
+    return ((max_seqlen + fp8_seq_align - 1) // fp8_seq_align) * fp8_seq_align
+
+
 def preprocess_packed_seqs(
     input_ids: torch.Tensor, attention_mask: torch.Tensor, pre_process: bool = True, use_fp8_padding: bool = False
 ) -> tuple[torch.Tensor, PackedSeqParams]:
@@ -196,6 +211,7 @@ def preprocess_bshd(
     position_ids: torch.Tensor,
     sequence_parallel: bool = False,
     pre_process: bool = True,
+    use_fp8_padding: bool = False,
 ):
     """
     Remove left padding from input_ids, attention_mask and position_ids
@@ -213,6 +229,14 @@ def preprocess_bshd(
         sp_world_size = mpu.get_tensor_model_parallel_world_size()
         pad_size = (sp_world_size - seq_len % sp_world_size) % sp_world_size
         seq_len = seq_len + pad_size
+    if use_fp8_padding:
+        tp_size = mpu.get_tensor_model_parallel_world_size()
+        seq_len = _align_bshd_max_seqlen_for_fp8(
+            max_seqlen=seq_len,
+            batch_size=batch_size,
+            tp_size=tp_size,
+            cp_size=cp_size,
+        )
     shape[1] = seq_len
     if pre_process:
         new_input_ids = torch.zeros(dtype=input_ids.dtype, device=input_ids.device, size=shape)
@@ -521,12 +545,12 @@ def preprocess_bshd_no_padding(
     if use_fp8_padding:
         # For FP8 block quantization, batch_size * max_seqlen / tp_size must be divisible by 128.
         # We need: max_seqlen % tp_size == 0 (for SP) AND batch_size * max_seqlen % (128 * tp_size) == 0.
-        # Compute the required alignment for max_seqlen:
-        fp8_total_align = 128 * tp_size
-        fp8_seq_align = fp8_total_align // math.gcd(batch_size, fp8_total_align)
-        # Also ensure tp alignment for SP
-        fp8_seq_align = math.lcm(fp8_seq_align, tp_size)
-        max_seqlen = ((max_seqlen + fp8_seq_align - 1) // fp8_seq_align) * fp8_seq_align
+        max_seqlen = _align_bshd_max_seqlen_for_fp8(
+            max_seqlen=max_seqlen,
+            batch_size=batch_size,
+            tp_size=tp_size,
+            cp_size=cp_size,
+        )
 
     attention_mask = torch.zeros(batch_size, max_seqlen, dtype=torch.bool, device=input_ids.device)
     input_ids_bshd = torch.zeros(batch_size, max_seqlen, dtype=input_ids.dtype, device=input_ids.device)
