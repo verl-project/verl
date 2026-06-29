@@ -362,7 +362,10 @@ class ArcticReplica(RolloutReplica):
         return False
 
     async def launch_servers(self):
-        server = self.server_class.options().remote(
+        server = self.server_class.options(
+            # override ray's default max_concurrency of 1000
+            max_concurrency=4096,
+        ).remote(
             replica_rank=self.replica_rank,
             config=self.config,
             model_config=self.model_config,
