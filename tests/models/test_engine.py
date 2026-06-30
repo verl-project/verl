@@ -201,6 +201,8 @@ def test_actor_engine(strategy):
     output = output.get()
     logprobs_unpad = tu.get(output, "log_probs").cpu()
     logprobs = no_padding_2_padding(logprobs_unpad, data_td)
+    print("logprobs dtype:", logprobs.dtype)
+    print("data_td dtype:", data_td.dtype)
 
     output = DataProto.from_single_dict({"old_log_probs": logprobs})
 
@@ -208,13 +210,20 @@ def test_actor_engine(strategy):
     path = config.model_config.path
     hf_model = AutoModelForCausalLM.from_pretrained(path, torch_dtype=torch.bfloat16)
     hf_output = hf_model(input_ids, attention_mask=attention_mask)
+    print("hf_output.logits dtype:", hf_output.logits[:, -response_length - 1 : -1, :].dtype)
     hf_logprobs = logprobs_from_logits_naive(
         hf_output.logits[:, -response_length - 1 : -1, :].float(), input_ids[:, -response_length:]
     )
+    print("hf_logprobs dtype:", hf_logprobs.dtype)
+    print("output.batch dtype:", output.batch["old_log_probs"].dtype)
+    
     hf_logprobs_mean = torch.mean(hf_logprobs * response_mask)
     mcore_logprobs_mean = torch.mean(output.batch["old_log_probs"] * response_mask)
+    
+    print("hf_logprobs_mean dtype:", hf_logprobs_mean.dtype)
+    print("mcore_logprobs_mean dtype:", mcore_logprobs_mean.dtype)
 
-    torch.testing.assert_close(hf_logprobs_mean, mcore_logprobs_mean, atol=1e-3, rtol=1e-2, check_dtype=False)
+    torch.testing.assert_close(hf_logprobs_mean, mcore_logprobs_mean, atol=1e-3, rtol=1e-2, check_dtype=True)
 
     data = data.union(output)
 

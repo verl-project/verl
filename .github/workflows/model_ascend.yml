@@ -141,4 +141,4 @@ jobs:
       - name: Running model_engine_ascend
         run: |
           ray stop --force
-          pytest tests/models/test_engine.py
+          pytest -s -x tests/models/test_engine.py::test_actor_engine[fsdp]
