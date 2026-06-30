@@ -350,10 +350,18 @@ class vLLMHttpServer:
             # so non-VLM models or VLMs with frozen vision towers are unaffected.
             # Note: enable_tower_connector_lora requires vLLM >= 0.14.0.
             is_vlm = hasattr(self.model_config.hf_config, "vision_config")
-            if is_vlm and _VLLM_VERSION >= version.parse("0.14.0"):
+            if is_vlm:
                 vision_frozen = self.model_config.lora.get("freeze_vision_model", True) and \
                                 self.model_config.lora.get("freeze_vision_projection", True)
                 if not vision_frozen:
+                    if _VLLM_VERSION < version.parse("0.14.0"):
+                        raise ValueError(
+                            "enable_tower_connector_lora requires vLLM >= 0.14.0, "
+                            f"but got vLLM {vllm.__version__}. "
+                            "Please upgrade vLLM, or remove 'freeze_vision_model=False' and "
+                            "'freeze_vision_projection=False' from your config to skip "
+                            "vision tower LoRA training."
+                        )
                     lora_args["enable_tower_connector_lora"] = True
 
             args.update(lora_args)
