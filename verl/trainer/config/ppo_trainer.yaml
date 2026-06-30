@@ -203,7 +203,7 @@ trainer:
   # V1 trainer mode configs
   v1:
 
-    # Trainer mode: "sync", "colocate_async", "separate_async"
+    # Trainer mode: "sync", "colocate_async", "separate_async", "fully_async"
     trainer_mode: sync
 
     # Synchronous PPO trainer
@@ -224,6 +224,32 @@ trainer:
       # Frequency of parameter synchronization between trainer and rollout,
       parameter_sync_step: 4
 
+    # Streaming (fully asynchronous) PPO trainer: an autonomous background feeder continuously
+    # streams prompts into TransferQueue (bounded by a staleness / in-flight budget), while the
+    # trainer step only samples + trains. Builds on separate_async (standalone rollout).
+    fully_async:
+
+      # Number of warmup batches to feed before the autonomous feeder starts. Default 0: under
+      # streaming the feeder is the sole producer and fills the pipeline itself, so warmup is
+      # redundant and only injects a stale gs~0 backlog that ages past the staleness budget.
+      num_warmup_batches: 0
+
+      # Frequency (in training steps) of parameter synchronization between trainer and rollout
+      parameter_sync_step: 4
+
+      # Off-policy staleness budget (in parameter-sync units) used to size the in-flight prompt
+      # budget: max_inflight_prompts = (1 + staleness_threshold) * parameter_sync_step * train_batch_size
+      staleness_threshold: 1
+
+      # Seconds the feeder sleeps when the in-flight budget is full (avoids busy-waiting)
+      feeder_poll_interval: 1.0
+
+      # Per-worker cap on concurrently-executing rollouts (event-loop / GIL pressure knob), read by
+      # the opt-in rollout-level worker (RolloutAgentLoopManagerTQ). Rollouts are dispatched one
+      # session at a time across the worker pool; this bounds how many run at once inside a single
+      # AgentLoopWorker process. 0 = unbounded (legacy behavior).
+      max_concurrent_rollouts_per_worker: 0
+
     # Replay buffer sampling strategy
     sampler:
 
@@ -233,6 +259,8 @@ trainer:
       # How to handle trajectory that exceeds the maximum number of model versions
       # drop: drop the trajectory
       # wait: dropless, wait all trajectories that reach threshold to finish
+      # none: no staleness gate — sample the oldest ready prompts and rely on rollout importance
+      #       sampling (TIS) to correct off-policyness (used by streaming / fully_async)
       max_off_policy_strategy: drop
 
       # Custom sampler config

@@ -99,7 +99,9 @@ class PPOTrainerSeparateAsync(PPOTrainer):
         self.checkpoint_manager.update_weights(self.global_steps)
 
     def on_train_begin(self):
-        num_warmup_batches = self.config.trainer.v1.separate_async.num_warmup_batches
+        # Read from the active trainer mode's config section so subclasses (e.g. fully_async)
+        # pick up their own num_warmup_batches rather than separate_async's.
+        num_warmup_batches = self.config.trainer.v1[self.trainer_mode].num_warmup_batches
         for _ in range(num_warmup_batches):
             self._add_batch_to_generate()
         logger.info(f"Added {num_warmup_batches} warmup batches to the agent loop manager")
@@ -120,7 +122,9 @@ class PPOTrainerSeparateAsync(PPOTrainer):
             self.switch_to_trainer()
 
     def on_step_end(self):
-        if self.global_steps % self.config.trainer.v1.separate_async.parameter_sync_step == 0:
+        # self.parameter_sync_step is resolved from the active mode's config in the base __init__,
+        # so subclasses (e.g. fully_async) sync at their own cadence.
+        if self.global_steps % self.parameter_sync_step == 0:
             with marked_timer("update_weights", self.timing_raw, color="red"):
                 # wake up all replicas to update weights
                 self.standalone_checkpoint_manager.update_weights(self.global_steps)

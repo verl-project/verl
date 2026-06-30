@@ -874,6 +874,12 @@ trainer:
     separate_async:
       num_warmup_batches: 4
       parameter_sync_step: 4
+    fully_async:
+      num_warmup_batches: 0
+      parameter_sync_step: 4
+      staleness_threshold: 1
+      feeder_poll_interval: 1.0
+      max_concurrent_rollouts_per_worker: 0
     sampler:
       max_off_policy_threshold: 8
       max_off_policy_strategy: drop

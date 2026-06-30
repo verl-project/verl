@@ -90,8 +90,8 @@ class ReplayBuffer:
         assert isinstance(self.max_off_policy_threshold, int) and self.max_off_policy_threshold > 0, (
             f"Invalid max off policy threshold: {self.max_off_policy_threshold}, must be an integer greater than 0"
         )
-        assert self.max_off_policy_strategy in ["drop", "wait"], (
-            f"Invalid max off policy strategy: {self.max_off_policy_strategy}, must be one of ['drop', 'wait']"
+        assert self.max_off_policy_strategy in ["drop", "wait", "none"], (
+            f"Invalid max off policy strategy: {self.max_off_policy_strategy}, must be one of ['drop', 'wait', 'none']"
         )
 
         # partition_id => {key: tag}
@@ -139,7 +139,43 @@ class ReplayBuffer:
                         partition[key] = {}
                     partition[key].update(tag)
 
+    def count_inflight(self, partition_id: str = "train") -> dict[str, int]:
+        """Return the current TransferQueue prompt counts, for throttling the streaming feeder.
+
+        - pending + running: prompts that are fed but not yet consumable.
+        - finished + failure: prompts that are ready to be sampled but not yet consumed.
+
+        The streaming feeder bounds the sum of all four (total un-consumed prompts) to keep
+        the rollouter from running arbitrarily far ahead of training.
+
+        Args:
+            partition_id (str): Partition of TransferQueue, e.g. "train" or "val".
+
+        Returns:
+            dict: Counts keyed by "pending", "running", "finished", "failure".
+        """
+        self._sync_metadata_from_transfer_queue()
+        return {
+            "pending": len(self.pending_keys[partition_id]),
+            "running": len(self.running_keys[partition_id]),
+            "finished": len(self.finished_keys[partition_id]),
+            "failure": len(self.failure_keys[partition_id]),
+        }
+
+    def dead_prompt_keys(self, partition_id: str = "train") -> list[str]:
+        """TransferQueue keys of prompts whose every rollout failed (for the feeder to discard).
+
+        No-op for this prompt-level buffer: a failed prompt's status is ``failure`` and it is
+        still sampleable (the legacy behavior collects whatever sessions succeeded), so there is
+        nothing to discard. The opt-in rollout-level :class:`SessionReplayBuffer` overrides this
+        to surface all-failed prompts (every session failed -> no usable trajectory) so the
+        streaming feeder can drop them and feed a replacement.
+        """
+        return []
+
     def _has_enough_samples(self, global_steps: int, partition_id: str, batch_size: int) -> bool:
+        # "none" applies no staleness gate: just wait for batch_size finished prompts and sample
+        # the oldest (streaming bounds staleness via the feeder budget; TIS corrects off-policyness).
         # For wait strategy, we need to wait all trajectories that reach threshold to finish
         if self.max_off_policy_strategy == "wait":
             for key in self.pending_keys[partition_id] | self.running_keys[partition_id]:
