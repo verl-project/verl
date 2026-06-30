@@ -10,6 +10,25 @@ Ascend Quickstart
 - 2026/05/13：将 quick start 和 install guidance 分开。
 - 2025/12/11：verl 存量场景目前支持自动识别 NPU 设备类型，GPU 脚本在昇腾上运行，原则上不再需要显式设置 ``trainer.device=npu`` 参数，新增特性通过设置 ``trainer.device`` 仍可优先使用，逐步适配自动识别能力。
 
+
+目录
+--------
+
+- `硬件支持 <#硬件支持>`_
+- `基础验证场景说明 <#基础验证场景说明>`_
+   - `权重准备 <#权重准备>`_
+   - `数据准备 <#数据准备>`_
+   - `运行方式 <#运行方式>`_
+- `Ascend Quickstart with vLLM+FSDP2 Backend <#ascend-quickstart-with-vllmfsdp2-backend>`_
+- `Ascend Quickstart with vLLM+Megatron Backend <#ascend-quickstart-with-vllmmegatron-backend>`_
+- `SGLang 后端通用说明 <#sglang-后端通用说明>`_
+   - `vLLM 后端脚本转换为 SGLang <#vllm-后端脚本转换为-sglang>`_
+- `Ascend Quickstart with SGLang+FSDP2 Backend <#ascend-quickstart-with-sglangfsdp2-backend>`_
+- `Ascend Quickstart with SGLang+Megatron Backend <#ascend-quickstart-with-sglangmegatron-backend>`_
+
+
+
+
 硬件支持
 --------
 
@@ -19,7 +38,7 @@ Ascend Quickstart
 
 
 
-基础验证场景
+基础验证场景说明
 ------------
 
 本文面向 Ascend NPU 环境，提供基于 GSM8K 和 Qwen3-0.6B 的最小 GRPO 训练验证流程。
@@ -58,7 +77,7 @@ Ascend Quickstart
 - vLLM-Ascend/sglang rollout 是否能生成；
 - 训练链路是否能完成首个 step。
 
-准备 Qwen3-0.6B 权重
+权重准备
 ~~~~~~
 
 权重需自行从huggingface上下载
@@ -68,7 +87,7 @@ Ascend Quickstart
 建议将权重放在该路径下，或者修改脚本中MODEL_PATH指向本地路径
 
 
-准备 GSM8K 数据
+数据准备
 ~~~~~~
 
 .. code-block:: bash
@@ -392,6 +411,10 @@ vLLM 后端推理脚本转换为 SGLang，需要添加或修改以下参数。
    # MoE 模型多 DP 时必须设置为 True
    +actor_rollout_ref.rollout.engine_kwargs.sglang.enable_dp_attention=False \
 
+   # chunked_prefill 默认关闭
+   +actor_rollout_ref.rollout.engine_kwargs.sglang.chunked_prefill_size=-1
+
+
 Ascend Quickstart with SGLang+FSDP2 Backend
 -------------------------------------------
 
@@ -636,6 +659,3 @@ Ascend Quickstart with SGLang+Megatron Backend
        "$@"
 
 
-
-   # chunked_prefill 默认关闭
-   +actor_rollout_ref.rollout.engine_kwargs.sglang.chunked_prefill_size=-1
