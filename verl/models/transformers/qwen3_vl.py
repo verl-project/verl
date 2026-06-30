@@ -365,7 +365,7 @@ def forward_with_torch_backend(
         rolled_labels = torch.roll(input_ids, shifts=-1, dims=-1)
     else:
         raise RuntimeError("To use forward_with_torch_backend, either labels or input_ids must be provided.")
-        
+
     vocab_weights = self.lm_head.weight
     if isinstance(vocab_weights, DTensor):
         vocab_weights = vocab_weights.full_tensor().to(hidden_states.device)
