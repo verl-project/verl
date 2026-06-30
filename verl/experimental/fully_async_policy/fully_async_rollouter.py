@@ -25,9 +25,12 @@ from omegaconf import DictConfig
 
 from verl.experimental.agent_loop.agent_loop import AgentLoopManager
 from verl.experimental.fully_async_policy.detach_utils import (
+    RolloutErrorSignal,
     RolloutSample,
+    first_unexpected_asyncio_exception,
     prepare_single_generation_data,
     safe_create_task,
+    wait_for_task_failure_or_completion,
 )
 from verl.experimental.fully_async_policy.message_queue import MessageQueueClient
 from verl.experimental.separation.ray_trainer import SeparateRayPPOTrainer
@@ -868,6 +871,8 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         self.feed_task = safe_create_task(self._feed_samples(), name="feed_task")
         self.processor_task = safe_create_task(self._processor_worker(), name="processor_task")
 
+        streaming_error = None
+        completed_normally = False
         try:
             # Wait for sample feed to complete
             # Use asyncio.wait to monitor all tasks. If processor exits early,
@@ -891,10 +896,12 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
 
             await self.pending_queue.join()
             print("[FullyAsyncRollouter] pending_queue joined")
+            completed_normally = True
 
         except Exception as e:
+            streaming_error = e
             print(f"[FullyAsyncRollouter] Streaming process exception: {e}")
-            raise e
+            raise
 
         finally:
             if self.feed_task and not self.feed_task.done():
@@ -908,11 +915,21 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
             self.feed_task = None
             self.processor_task = None
 
-            # Send a finish signal
-            await self.message_queue_client.put_sample(sample=None)
-
-            async with self.lock:
-                self.running = False
+            try:
+                if completed_normally:
+                    # Send a normal finish signal.
+                    await self.message_queue_client.put_sample(sample=None)
+                elif streaming_error is not None:
+                    await self.message_queue_client.put_sample(
+                        sample=RolloutErrorSignal.from_exception(streaming_error)
+                    )
+            except Exception as signal_error:
+                if streaming_error is None:
+                    raise
+                print(f"[FullyAsyncRollouter] Failed to publish rollout error signal: {signal_error}")
+            finally:
+                async with self.lock:
+                    self.running = False
 
     async def fit(self):
         """
@@ -935,19 +952,30 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         generation_task = safe_create_task(self._streaming_generation_main(), name="generation_task")
         monitor_task = safe_create_task(self._async_monitor_loop(), name="monitor_task")
 
+        task_failure = None
         try:
             # Run build and monitoring tasks concurrently
-            await asyncio.gather(generation_task, monitor_task, return_exceptions=True)
-        except Exception as e:
-            print(f"[FullyAsyncRollouter] Asynchronous task execution error: {e}")
+            task_failure = await wait_for_task_failure_or_completion([generation_task, monitor_task])
         finally:
+            if task_failure is not None and not generation_task.done():
+                try:
+                    await self.message_queue_client.put_sample(sample=RolloutErrorSignal.from_exception(task_failure))
+                except Exception as signal_error:
+                    print(f"[FullyAsyncRollouter] Failed to publish rollout error signal: {signal_error}")
+
             if not generation_task.done():
                 generation_task.cancel()
             if not monitor_task.done():
                 monitor_task.cancel()
 
             # Wait for the task to complete
-            await asyncio.gather(generation_task, monitor_task, return_exceptions=True)
+            results = await asyncio.gather(generation_task, monitor_task, return_exceptions=True)
+            if task_failure is None:
+                task_failure = first_unexpected_asyncio_exception(results)
+
+        if task_failure is not None:
+            print(f"[FullyAsyncRollouter] Asynchronous task execution error: {task_failure}")
+            raise task_failure
 
         print("[FullyAsyncRollouter] Rollouter fit completed")
 
