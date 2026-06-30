@@ -1156,16 +1156,9 @@ class PPOTrainer(ABC):
         batch = tu.get_tensordict(batch_dict)
         tu.assign_non_tensor_data(batch, "global_steps", self.global_steps)
 
-        # Skip: if V1 rollout skip is enabled and cached data exists, inject into TQ directly
+        # Skip phase two: if cached data exists, inject into TQ and skip real rollout
         skip_inst = SkipManager.skip_instances.get("rollout_tq")
-        if skip_inst and skip_inst.meet_precondition(self.global_steps):
-            skip_inst.load_dump_data(
-                step=self.global_steps,
-                new_prompt_uids=list(batch["uid"]),
-                n=self.config.actor_rollout_ref.rollout.n,
-                global_steps=self.global_steps,
-                partition_id="train",
-            )
+        if skip_inst and skip_inst.maybe_load_and_inject(self.global_steps, list(batch["uid"])):
             return
 
         # Register each prompt (GRPO group) in TransferQueue as a tag-only status marker
