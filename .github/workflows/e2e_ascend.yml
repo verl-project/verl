@@ -89,12 +89,6 @@ jobs:
         with:
           fetch-depth: 0
           clean: true
-      - name: Install the current repository
-        run: |
-          pip install --no-deps -e .
-      - name: Check final pip list
-        run: |
-          pip list
       - name: Prepare weights
         run: |
           ln -s /root/.cache/models ~/models
@@ -131,12 +125,6 @@ jobs:
         with:
           fetch-depth: 0
           clean: true
-      - name: Install the current repository
-        run: |
-          pip install --no-deps -e .
-      - name: Check final pip list
-        run: |
-          pip list
       - name: Prepare weights
         run: |
           ln -s /root/.cache/models ~/models
@@ -173,12 +161,6 @@ jobs:
         with:
           fetch-depth: 0
           clean: true
-      - name: Install the current repository
-        run: |
-          pip install --no-deps -e .
-      - name: Check final pip list
-        run: |
-          pip list
       - name: Prepare weights
         run: |
           ln -s /root/.cache/models ~/models
@@ -215,12 +197,6 @@ jobs:
         with:
           fetch-depth: 0
           clean: true
-      - name: Install the current repository
-        run: |
-          pip install --no-deps -e .
-      - name: Check final pip list
-        run: |
-          pip list
       - name: Prepare weights
         run: |
           ln -s /root/.cache/models ~/models
