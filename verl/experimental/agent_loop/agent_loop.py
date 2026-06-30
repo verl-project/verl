@@ -1141,7 +1141,11 @@ class AgentLoopManager:
         Returns:
             DataProto: Output batch.
         """
-        # worker 展平一对多输出后，Trainer 依靠该全局行号复制对应的 source task。
+        # 把 driver 侧训练 step 和 source 行号显式送入 CPU AgentLoop；项目日志据此按
+        # step 分目录，Trainer 则依靠 source 行号复制对应的 task。
+        prompts.non_tensor_batch["__global_step__"] = np.full(
+            len(prompts), prompts.meta_info.get("global_steps", -1), dtype=np.int64
+        )
         prompts.non_tensor_batch["__source_batch_index__"] = np.arange(len(prompts), dtype=np.int64)
         chunkes = prompts.chunk(len(self.agent_loop_workers))
         outputs = await asyncio.gather(
