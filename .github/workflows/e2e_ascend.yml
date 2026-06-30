@@ -139,10 +139,10 @@ jobs:
   # Test quick start sglang megatron
   quick_start_qwen3_0_6b_megatron_sglang_ascend:
     if: ${{ github.repository_owner == 'verl-project'}}
-    runs-on: linux-aarch64-a2b3-8
+    runs-on: linux-aarch64-a3-8
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-sglang-8.5.0-910b-ubuntu22.04-py3.11-latest
+      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:verl-sglang-8.5.0-a3-ubuntu22.04-py3.11-latest
       options: >-
         --shm-size 16g
     env:
@@ -175,10 +175,10 @@ jobs:
   # Test quick start sglang fsdp2
   quick_start_qwen3_0_6b_fsdp2_sglang_ascend:
     if: ${{ github.repository_owner == 'verl-project'}}
-    runs-on: linux-aarch64-a2b3-8
+    runs-on: linux-aarch64-a3-8
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-sglang-8.5.0-910b-ubuntu22.04-py3.11-latest
+      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:verl-sglang-8.5.0-a3-ubuntu22.04-py3.11-latest
       options: >-
         --shm-size 16g
     env:
