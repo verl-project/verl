@@ -1407,8 +1407,8 @@ class RayPPOTrainer:
         tu.assign_non_tensor(
             teacher_input,
             teacher_chunk_size=self.distillation_config.teacher_chunk_size,
-            # FSDP engine requires temperature; use T=1.0 for the raw teacher distribution.
-            temperature=1.0,
+            # Match the student's rollout temperature so reverse-KL compares like with like.
+            temperature=self.config.actor_rollout_ref.rollout.temperature,
         )
         teacher_output = self.teacher_model_manager.compute_logprobs_at_ids(teacher_input)
         # compute_logprobs_at_ids is non-blocking; materialize the future.
