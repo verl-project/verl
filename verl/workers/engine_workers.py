@@ -700,10 +700,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             return
 
         set_expandable_segments(False)
-        # The actor can leave several GiB in PyTorch's caching allocator after a
-        # long-sequence backward pass. vLLM's CuMem allocator needs physical
-        # memory immediately when remapping its sleeping weights, so clear the
-        # actor cache before wake_up rather than only after weight transfer.
+        # 长序列反向传播结束后，actor 可能在 PyTorch 缓存分配器中残留数 GiB 显存。
+        # vLLM 的 CuMem 分配器在重新映射休眠权重时需要立即取得物理显存，因此必须在
+        # wake_up 之前清理 actor 缓存，不能等到权重传输完成后才清理。
         aggressive_empty_cache(force_sync=True)
         log_gpu_memory_usage("Before resume weights", logger=logger)
 

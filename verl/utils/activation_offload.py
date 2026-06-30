@@ -319,6 +319,12 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
     def synchronize_on_group_commit_forward(self, current_group):
         """Synchronize on group commit forward."""
 
+        # ``num_offload_group`` 有意比被包装的模型组数少一，使最后一组常驻 GPU。
+        # 所有已配置组都完成调度后，最后一组提交不能继续索引
+        # layer_window_map[num_offload_group]。
+        if self.offloaded_group_count >= self.num_offload_group:
+            return
+
         # For the first group, kickstart the offload after we have
         # the first compute completion
         if current_group == 0:

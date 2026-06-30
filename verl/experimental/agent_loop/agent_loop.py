@@ -359,7 +359,9 @@ class AgentLoopBase(ABC):
         return prompt_ids
 
     @abstractmethod
-    async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
+    async def run(
+        self, sampling_params: dict[str, Any], **kwargs
+    ) -> AgentLoopOutput | list[AgentLoopOutput]:
         """Run agent loop to interact with LLM server and environment.
 
         Args:
@@ -558,10 +560,26 @@ class AgentLoopWorker:
                     self._run_agent_loop(sample_sampling_params, trajectory_info[i], trace=trace_this_sample, **kwargs)
                 )
             )
-        outputs = await asyncio.gather(*tasks)
+        task_outputs = await asyncio.gather(*tasks)
+
+        # 状态化任务可以把一次输入展开成多个独立动作序列；这里保留源行索引并统一展平。
+        outputs: list[_InternalAgentLoopOutput] = []
+        source_indices: list[int] = []
+        for source_index, task_output in enumerate(task_outputs):
+            task_output_list = task_output if isinstance(task_output, list) else [task_output]
+            if not task_output_list:
+                raise ValueError(f"AgentLoop 输入 {source_index} 没有返回任何 trajectory")
+            outputs.extend(task_output_list)
+            source_indices.extend([source_index] * len(task_output_list))
+
+        expanded_non_tensor_batch = {
+            key: np.asarray(value)[source_indices] for key, value in batch.non_tensor_batch.items()
+        }
 
         output = self._postprocess(
-            outputs, input_non_tensor_batch=batch.non_tensor_batch, validate=batch.meta_info.get("validate", False)
+            outputs,
+            input_non_tensor_batch=expanded_non_tensor_batch,
+            validate=batch.meta_info.get("validate", False),
         )
         return output
 
@@ -573,7 +591,7 @@ class AgentLoopWorker:
         agent_name: str,
         trace: bool = True,
         **kwargs,
-    ) -> _InternalAgentLoopOutput:
+    ) -> _InternalAgentLoopOutput | list[_InternalAgentLoopOutput]:
         with rollout_trace_attr(
             step=trajectory["step"],
             sample_index=trajectory["sample_index"],
@@ -597,7 +615,16 @@ class AgentLoopWorker:
                 data_config=DictConfigWrap(self.config.data),
                 tools=ToolListWrap(self.tools),
             )
-            output: AgentLoopOutput = await agent_loop.run(sampling_params, **kwargs)
+            output = await agent_loop.run(sampling_params, **kwargs)
+            if isinstance(output, list):
+                if not output:
+                    raise ValueError(f"AgentLoop {agent_name} 返回了空 trajectory 列表")
+                return await asyncio.gather(
+                    *[
+                        self._agent_loop_postprocess(item, trajectory["validate"], **kwargs)
+                        for item in output
+                    ]
+                )
             return await self._agent_loop_postprocess(output, trajectory["validate"], **kwargs)
 
     def _pad_token_ids(
@@ -973,8 +1000,12 @@ class AgentLoopWorker:
         non_tensor_batch = {
             "__num_turns__": np.array([input.num_turns for input in inputs], dtype=np.int32),
         }
-        if self.reward_loop_worker_handles is None and input_non_tensor_batch:
-            non_tensor_batch.update(input_non_tensor_batch)
+        if input_non_tensor_batch:
+            if self.reward_loop_worker_handles is None:
+                non_tensor_batch.update(input_non_tensor_batch)
+            elif "__source_batch_index__" in input_non_tensor_batch:
+                # 即使 reward worker 接管其余 metadata，也必须保留一对多 source 映射。
+                non_tensor_batch["__source_batch_index__"] = input_non_tensor_batch["__source_batch_index__"]
 
         # add reward_extra_info to non_tensor_batch
         reward_extra_infos = [input.extra_fields.get("reward_extra_info", {}) for input in inputs]
@@ -1110,6 +1141,8 @@ class AgentLoopManager:
         Returns:
             DataProto: Output batch.
         """
+        # worker 展平一对多输出后，Trainer 依靠该全局行号复制对应的 source task。
+        prompts.non_tensor_batch["__source_batch_index__"] = np.arange(len(prompts), dtype=np.int64)
         chunkes = prompts.chunk(len(self.agent_loop_workers))
         outputs = await asyncio.gather(
             *[
