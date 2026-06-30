@@ -125,9 +125,13 @@ def compute_reverse_kl_topk(
 ) -> dict[str, torch.Tensor]:
     """Compute student-top-K reverse KL distillation loss.
 
-    The support is the student's own top-K and the expectation is taken under the
-    student distribution Q. The teacher log-probabilities at those IDs are precomputed
-    by the FSDP teacher worker, so no full ``[B, T, V]`` tensor is materialized here.
+    The support is the student's own top-K; teacher log-probabilities at those IDs
+    are precomputed by the FSDP teacher worker, so no full ``[B, T, V]`` tensor is
+    materialized here.
+
+    NOTE: student and teacher are renormalized onto the student-top-K support so the
+    loss is a proper ``KL(Q_K || P_K)`` (otherwise it could be minimized by leaking
+    mass outside the top-K). ``student_mass`` stays un-normalized as a diagnostic.
 
     Args:
         student_logits: ``(bsz, seqlen/sp_size, vocab_size)``.
@@ -141,11 +145,9 @@ def compute_reverse_kl_topk(
             only for the overlap diagnostics. Overlap metrics are skipped when ``None``.
 
     Returns:
-        dict with ``distillation_losses`` (per-token KL(Q || P)) and the
-        ``student_mass`` / ``teacher_mass`` diagnostics (student- and teacher-side
-        probability on the student-top-K; ``teacher_mass`` should rise in training).
-        When ``teacher_topk_ids`` is given, also ``overlap_count`` /
-        ``overlap_token_advantage`` (student/teacher top-K intersection per token).
+        dict with ``distillation_losses`` and the ``student_mass`` / ``teacher_mass``
+        diagnostics; also ``overlap_count`` / ``overlap_token_advantage`` when
+        ``teacher_topk_ids`` is given.
     """
     del data_format  # unused; kept for parity with compute_forward_kl_topk's signature
     # 1. unwrap nested layouts from the rmpad pipeline
@@ -169,8 +171,17 @@ def compute_reverse_kl_topk(
     student_log_probs = F.log_softmax(student_logits, dim=-1)
     student_topk_log_probs = torch.gather(student_log_probs, dim=-1, index=student_topk_ids)
 
+    # Raw mass on the student-top-K support: diagnostics only, not fed to the loss.
     student_mass = student_topk_log_probs.exp().sum(dim=-1)
     teacher_mass = teacher_on_student_logp.exp().sum(dim=-1)
+
+    # Renormalize both sides onto the student-top-K support -> proper KL(Q_K || P_K).
+    student_topk_log_probs = student_topk_log_probs - torch.logsumexp(
+        student_topk_log_probs, dim=-1, keepdim=True
+    )
+    teacher_on_student_logp = teacher_on_student_logp - torch.logsumexp(
+        teacher_on_student_logp, dim=-1, keepdim=True
+    )
 
     loss_config: DistillationLossConfig = config.distillation_loss
     if loss_config.log_prob_min_clamp is not None:

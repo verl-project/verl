@@ -119,12 +119,9 @@ def test_reverse_kl_topk_gradient_flows_to_student():
 
 
 def test_reverse_kl_topk_matches_reference_formula():
-    """The token-wise loss equals the manual reference
-
-        sum_{i in TopK_student}  q_i * (log q_i - log p_i)
-
-    where ``q`` is the student top-K probability gathered from
-    ``softmax(student_logits)``."""
+    """The token-wise loss equals the manual reference reverse-KL computed with ``q~`` /
+    ``p~``, the student / teacher probabilities renormalized onto the shared
+    student-top-K support (softmax over the K gathered logits)."""
     student_logits, student_topk_ids = _student_topk_inputs(B=1, T=4, V=10, K=4, seed=2)
     torch.manual_seed(2)
     teacher_logits = torch.randn(*student_logits.shape)
@@ -139,8 +136,43 @@ def test_reverse_kl_topk_matches_reference_formula():
     )
     student_log_probs = F.log_softmax(student_logits.detach(), dim=-1)
     student_topk_logp = torch.gather(student_log_probs, dim=-1, index=student_topk_ids)
-    expected = (student_topk_logp.exp() * (student_topk_logp - teacher_on_student_logp)).sum(dim=-1)
+    # Renormalize both sides onto the student-top-K support (matches the loss).
+    student_norm = student_topk_logp - torch.logsumexp(student_topk_logp, dim=-1, keepdim=True)
+    teacher_norm = teacher_on_student_logp - torch.logsumexp(teacher_on_student_logp, dim=-1, keepdim=True)
+    expected = (student_norm.exp() * (student_norm - teacher_norm)).sum(dim=-1)
     torch.testing.assert_close(out["distillation_losses"], expected, atol=1e-6, rtol=1e-6)
+
+
+def test_reverse_kl_topk_invariant_to_mass_outside_topk():
+    """Renormalizing onto the student-top-K support makes the loss depend only on
+    the within-top-K logits, so leaking mass outside the top-K must not change it.
+    Regression guard for the de-peaking collapse."""
+    student_logits, student_topk_ids = _student_topk_inputs(B=2, T=3, V=8, K=3, seed=5)
+    torch.manual_seed(9)
+    teacher_logits = torch.randn(*student_logits.shape)
+    teacher_on_student_logp = torch.gather(F.log_softmax(teacher_logits, dim=-1), dim=-1, index=student_topk_ids)
+
+    def _loss(logits):
+        return compute_fsdp_reverse_kl_topk(
+            student_logits=logits,
+            teacher_on_student_logp=teacher_on_student_logp,
+            student_topk_ids=student_topk_ids,
+            config=_config(),
+            data_format="thd",
+        )["distillation_losses"]
+
+    base = _loss(student_logits)
+
+    # Raise every non-top-K logit -> mass leaks outside the (fixed) top-K support.
+    # With renormalization the loss must not move.
+    bumped = student_logits.detach().clone()
+    outside_mask = torch.ones_like(bumped, dtype=torch.bool)
+    outside_mask.scatter_(-1, student_topk_ids, False)
+    bumped[outside_mask] += 5.0
+    bumped.requires_grad_(True)
+
+    torch.testing.assert_close(_loss(bumped), base, atol=1e-5, rtol=1e-5)
+
 
 
 def test_reverse_kl_topk_registered_and_collects_mass_metrics():
