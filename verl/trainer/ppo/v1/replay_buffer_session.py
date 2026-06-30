@@ -41,6 +41,12 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 VERL_REPLAY_BUFFER_DEBUG_INTERVAL_SECONDS = int(os.getenv("VERL_REPLAY_BUFFER_DEBUG_INTERVAL_SECONDS", "60"))
 
+# Per-sample timing breakdown to stdout (off by default). Splits the trainer's ``gen`` time into
+# *waiting for rollout data* (data starvation -> rollout-bound) vs *collecting* the batch from TQ.
+_SAMPLE_PROFILE = os.getenv("VERL_PROFILE", "0") not in ("0", "false", "False", "") or os.getenv(
+    "VERL_STEP_PROFILE", "0"
+) not in ("0", "false", "False", "")
+
 
 def compute_complete_uids(prompt_n: dict, session_done: dict) -> set:
     """Return uids whose all ``n`` GRPO sessions have completed (success or failure).
@@ -180,10 +186,13 @@ class SessionReplayBuffer(ReplayBuffer):
 
     def sample(self, global_steps: int, partition_id: str, batch_size: int) -> KVBatchMeta:
         """Sample a batch of usable prompts (>=1 successful session), oldest first."""
-        last_debug_time = time.time()
+        t_start = time.time()
+        n_polls = 0
+        last_debug_time = t_start
         self._sync_metadata_from_transfer_queue()
         while not self._has_enough_samples(global_steps, partition_id, batch_size):
             time.sleep(self.poll_interval)
+            n_polls += 1
             self._sync_metadata_from_transfer_queue()
 
             if time.time() - last_debug_time > VERL_REPLAY_BUFFER_DEBUG_INTERVAL_SECONDS:
@@ -191,6 +200,7 @@ class SessionReplayBuffer(ReplayBuffer):
                 usable = len(self._usable_uids(partition_id))
                 logger.info(f"prompts in-flight: {total}, usable(ready): {usable}, incomplete: {total - usable}")
                 last_debug_time = time.time()
+        t_wait = time.time() - t_start  # time blocked waiting for enough usable rollout data
 
         # Sample only prompts with >=1 successful session (all-failed prompts are never sampleable;
         # the feeder discards + replaces them). Prioritize the oldest to cut staleness.
@@ -217,4 +227,14 @@ class SessionReplayBuffer(ReplayBuffer):
                 tags.append(tag)
 
         batch = KVBatchMeta(partition_id=partition_id, keys=keys, tags=tags)
-        return self._drop_max_off_policy_samples(global_steps, partition_id, batch)
+        result = self._drop_max_off_policy_samples(global_steps, partition_id, batch)
+        if _SAMPLE_PROFILE:
+            total = len(self.prompt_global_steps[partition_id])
+            # wait dominating the step's gen time => trainer is data-starved (rollout can't keep up).
+            print(
+                f"[SAMPLE_PROFILE] step={global_steps} wait={t_wait:.2f}s "
+                f"collect={time.time() - t_start - t_wait:.2f}s polls={n_polls} "
+                f"selected={len(selected)} usable={len(usable)} in_flight={total} rows={len(keys)}",
+                flush=True,
+            )
+        return result

@@ -42,6 +42,28 @@ from verl.utils import tensordict_utils as tu
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
+# Per-step timing breakdown to stdout (off by default). Enabled by the master VERL_PROFILE switch
+# or the dedicated VERL_STEP_PROFILE, so you can get just the step profile without the verbose
+# postprocess/resolve/rowcheck diagnostics.
+_STEP_PROFILE = os.getenv("VERL_PROFILE", "0") not in ("0", "false", "False", "") or os.getenv(
+    "VERL_STEP_PROFILE", "0"
+) not in ("0", "false", "False", "")
+
+# Leaf phases recorded in self.timing_raw during a step, in pipeline order (some are optional and
+# only present when the corresponding component is enabled).
+_STEP_PHASES = (
+    "gen",
+    "reward",
+    "old_log_prob",
+    "ref",
+    "values",
+    "adv",
+    "update_critic",
+    "update_actor",
+    "update_weights",
+    "save_checkpoint",
+)
+
 
 def compute_max_inflight_prompts(staleness_threshold: float, parameter_sync_step: int, train_batch_size: int) -> int:
     """Compute the in-flight prompt budget for the streaming feeder.
@@ -210,6 +232,24 @@ class PPOTrainerFullyAsync(PPOTrainerSeparateAsync):
                 print(f"Resumed streaming feeder after weight sync at step {self.global_steps}", flush=True)
         with self._param_version_lock:
             self._param_version = self.global_steps
+        if _STEP_PROFILE:
+            # logged here (not in step()) so update_weights/save_checkpoint, which run after step()
+            # returns, are included in self.timing_raw.
+            self._log_step_profile()
+
+    def _log_step_profile(self):
+        """Print a readable per-step timing breakdown (which phase dominates).
+
+        For streaming, ``gen`` is the time ``replay_buffer.sample`` spent — mostly *waiting for
+        rollout data*. So ``gen`` large => trainer is data-starved (rollout-bound); ``update_actor``
+        large => training-compute-bound; ``update_weights`` large => the weight sync dominates. The
+        replay buffer's own ``[SAMPLE_PROFILE]`` line (same step) splits that wait from collection.
+        """
+        t = self.timing_raw
+        items = [(p, t[p]) for p in _STEP_PHASES if p in t]
+        total = sum(v for _, v in items) or 1e-9
+        parts = " ".join(f"{p}={v:.2f}s({v / total * 100:.0f}%)" for p, v in sorted(items, key=lambda kv: -kv[1]))
+        print(f"[STEP_PROFILE] step={self.global_steps} total={total:.2f}s | {parts}", flush=True)
 
     def _save_checkpoint(self):
         # The feeder thread may be iterating the (non-thread-safe) dataloader; serialize against it
