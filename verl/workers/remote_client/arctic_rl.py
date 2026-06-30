@@ -15,6 +15,7 @@ import os
 from copy import deepcopy
 from typing import Any
 
+import numpy as np
 import torch
 from arctic_platform.rl import ArcticRLClientConfig, create_arctic_rl_client
 from arctic_platform.rl.ray_server import ArcticRLRayServerState
@@ -22,6 +23,16 @@ from omegaconf import OmegaConf
 from transformers import AutoTokenizer
 
 from verl.remote_backend.base import RemoteBackend, RemoteBackendRegistry
+
+_ARCTIC_METRIC_REDUCTION_FN = {
+    "actor/pg_clipfrac_lower": np.mean,
+    "actor/pg_clipfrac": np.mean,
+    "actor/pg_loss": np.mean,
+    "actor/ppo_kl": np.mean,
+    "grad_norm": np.mean,
+    "kl_coef": np.mean,
+    "kl_loss": np.mean,
+}
 
 
 def _no_padding_2_padding_prompt_response(tensor: torch.Tensor, data, pad_token_id):
@@ -256,7 +267,6 @@ class ArcticRLClientWrapper(RemoteBackend):
         if actor_config.use_kl_loss:
             batch["ref_log_prob"] = data["ref_log_prob"]
 
-        # Per-chunk loss normalizers (mirror recipe/rl-correctness arctic_workers.train_global_batch).
         per_step_global_bsz = self.config.actor_rollout_ref.actor.ppo_mini_batch_size * rollout_n
         meta = dict(
             zorro_train_enable=self.zorro_train_enable,
@@ -273,9 +283,6 @@ class ArcticRLClientWrapper(RemoteBackend):
             logits_optimization=self.logits_optimization,
             logits_optimization_peak_mem_size_in_gib=self.logits_optimization_peak_mem_size_in_gib,
             logits_compute_in_fp32=self.logits_compute_in_fp32,
-            global_batch_size=per_step_global_bsz,
-            batch_num_tokens=batch["response_mask"].sum(),
-            rollout_is_weights=data.get("rollout_is_weights", None),
         )
 
         def _safe_serialize(obj):
@@ -288,13 +295,72 @@ class ArcticRLClientWrapper(RemoteBackend):
         policy_loss = getattr(actor_config, "policy_loss", None)
         meta["policy_loss_config"] = _safe_serialize(vars(policy_loss)) if policy_loss is not None else {}
 
-        payload = dict(batch=batch, meta=meta)
-        response = await self._send_update_actor(payload)
+        ppo_epochs = self.config.actor_rollout_ref.actor.ppo_epochs
+        assert ppo_epochs >= 1, f"ppo_epochs must be >= 1, got {ppo_epochs}"
+        num_minibatches = (
+            self.config.data.train_batch_size // self.config.actor_rollout_ref.actor.ppo_mini_batch_size
+        )
+        assert num_minibatches >= 1, (
+            f"data.train_batch_size ({self.config.data.train_batch_size}) must be >= "
+            f"actor.ppo_mini_batch_size ({self.config.actor_rollout_ref.actor.ppo_mini_batch_size})"
+        )
+        total_rows = input_ids.shape[0]
+        assert total_rows % num_minibatches == 0, (
+            f"DP-shard rows {total_rows} not divisible by num_minibatches {num_minibatches} "
+            f"(data.train_batch_size={self.config.data.train_batch_size}, "
+            f"actor.ppo_mini_batch_size={self.config.actor_rollout_ref.actor.ppo_mini_batch_size})"
+        )
+        chunk_rows = total_rows // num_minibatches
+        rollout_is_weights_full = data.get("rollout_is_weights", None)
 
-        metrics = dict(response["metrics"])
-        loss = metrics.pop("loss")
-        if "last_lr" in metrics:
-            metrics["lr"] = metrics.pop("last_lr")
+        agg_metrics: dict = {}
+        loss_list: list = []
+
+        for _epoch_idx in range(ppo_epochs):
+            for mb_idx in range(num_minibatches):
+                lo = mb_idx * chunk_rows
+                hi = lo + chunk_rows
+
+                batch_chunk = {
+                    k: (v[lo:hi] if isinstance(v, torch.Tensor) else v) for k, v in batch.items()
+                }
+
+                meta_chunk = dict(meta)
+                meta_chunk["global_batch_size"] = per_step_global_bsz
+                meta_chunk["batch_num_tokens"] = batch_chunk["response_mask"].sum()
+                if rollout_is_weights_full is not None:
+                    meta_chunk["rollout_is_weights"] = (
+                        rollout_is_weights_full[lo:hi]
+                        if isinstance(rollout_is_weights_full, torch.Tensor)
+                        else rollout_is_weights_full
+                    )
+                else:
+                    meta_chunk["rollout_is_weights"] = None
+
+                payload = dict(batch=batch_chunk, meta=meta_chunk)
+                response = await self._send_update_actor(payload)
+
+                mb_metrics = dict(response["metrics"])
+                loss_list.append(mb_metrics.pop("loss"))
+                for k, v in mb_metrics.items():
+                    agg_metrics.setdefault(k, []).append(v)
+
+        last_lr = agg_metrics.pop("last_lr", None)
+
+        metrics: dict = {}
+        for k, v in agg_metrics.items():
+            if k.startswith("mtp_losses"):
+                flat = [sub[0] for sub in v]
+                metrics[k] = sum(flat) / len(flat)
+                continue
+            reduction_fn = _ARCTIC_METRIC_REDUCTION_FN.get(k, np.mean)
+            reduced = reduction_fn(v)
+            metrics[k] = float(reduced) if np.ndim(reduced) == 0 else reduced
+
+        if last_lr is not None:
+            metrics["lr"] = last_lr[-1]
+
+        loss = float(np.mean(loss_list))
 
         return {
             "loss": loss,

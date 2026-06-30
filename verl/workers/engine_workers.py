@@ -666,8 +666,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         log_gpu_memory_usage("After update_weights", logger=logger)
 
-        # 3. offload model to cpu
-        self.actor.engine.to("cpu", model=True, optimizer=False, grad=False)
+        # 3. offload model to cpu (only when param offload is enabled, else params stay on CPU for the next forward)
+        if self.actor.engine.is_param_offload_enabled:
+            self.actor.engine.to("cpu", model=True, optimizer=False, grad=False)
         aggressive_empty_cache(force_sync=True)
 
         # 4. resume kv_cache
