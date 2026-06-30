@@ -124,6 +124,40 @@ class SkipManager:
 
         return decorator
 
+    @classmethod
+    def annotate_tq(cls, role: str):
+        """V1 TransferQueue-based skip decorator for the **sample** phase.
+
+        Unlike V0's :meth:`annotate`, V1's split architecture separates
+        "submit prompts" (``_add_batch_to_generate``) from "sample trajectories"
+        (``ReplayBuffer.sample``).  This decorator handles the sample phase only:
+        after the original ``sample`` runs, if the skip instance says to save,
+        persist the result to disk (phase one / cache-miss).
+
+        The submit phase (phase two / cache-hit short-circuit) is handled inline
+        via ``RolloutTqSkip.maybe_load_and_inject`` because the short-circuit
+        window lies *inside* ``_add_batch_to_generate`` — after uid generation
+        but before rollout submission — and therefore cannot be a pure
+        pre-function decorator.
+        """
+        def decorator(func: Callable) -> Callable:
+            @functools.wraps(func)
+            def wrapper(self, *args, **kwargs):
+                skip_instance = cls.skip_instances.get(role)
+                if skip_instance is None or not skip_instance.is_enabled():
+                    return func(self, *args, **kwargs)
+                result = func(self, *args, **kwargs)
+                # ReplayBuffer.sample returns (batch, off_policy_metrics)
+                batch = result[0] if isinstance(result, tuple) else result
+                step = cls.step
+                if skip_instance.should_save(step, batch.partition_id):
+                    skip_instance.prepare_data(step=step, batch=batch, global_steps=step)
+                return result
+
+            return wrapper
+
+        return decorator
+
     @staticmethod
     def _should_bypass_for_validation_tensordict(args, kwargs) -> bool:
         """Check ``validate`` flag in TensorDict's non_tensor_data for V1 path."""

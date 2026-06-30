@@ -248,6 +248,29 @@ class RolloutTqSkip(RolloutSkip):
             and not self.has_v1_cache(step)
         )
 
+    def maybe_load_and_inject(self, step: int, new_prompt_uids: list[str], partition_id: str = "train") -> bool:
+        """Phase two: load cached data and inject into TransferQueue if cache exists.
+
+        Convenience wrapper that combines ``meet_precondition`` + ``load_dump_data``.
+        Returns ``True`` if cached data was injected (caller should skip real rollout),
+        ``False`` otherwise.
+
+        Args:
+            step: Current training step.
+            new_prompt_uids: Freshly generated uids for the current batch.
+            partition_id: TQ partition (``"train"`` or ``"val"``).
+        """
+        if not self.meet_precondition(step):
+            return False
+        self.load_dump_data(
+            step=step,
+            new_prompt_uids=new_prompt_uids,
+            n=self.n,
+            global_steps=step,
+            partition_id=partition_id,
+        )
+        return True
+
     def prepare_data(self, step: int, batch, global_steps: int) -> None:
         """Phase one: read full batch from TransferQueue and save to disk.
 
