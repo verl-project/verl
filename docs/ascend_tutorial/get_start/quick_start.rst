@@ -81,6 +81,13 @@ gsm8k原始数据集需自行从huggingface上下载
 
 首先进入verl路径： ``cd /your/path/verl``
 
+使能CANN环境: 如果您自定义了CANN的路径，请根据自定义路径修改以下使能命令
+
+.. code-block:: bash
+
+   source /usr/local/Ascend/ascend-toolkit/set_env.sh
+   source /usr/local/Ascend/nnal/atb/set_env.sh
+
 .. list-table::
    :header-rows: 1
    :widths: 20 20 20 60
@@ -111,24 +118,6 @@ gsm8k原始数据集需自行从huggingface上下载
 SGLang 后端通用说明
 -------------------------------------------
 
-当前 NPU 上支持 SGLang 后端必须添加以下环境变量。
-
-.. code-block:: bash
-
-   # 支持 NPU 单卡多进程
-   # https://www.hiascend.com/document/detail/zh/canncommercial/850/commlib/hcclug/hcclug_000091.html
-   export HCCL_HOST_SOCKET_PORT_RANGE=60000-60050
-   export HCCL_NPU_SOCKET_PORT_RANGE=61000-61050
-
-   # 规避 Ray 在 device 侧调用无法根据 is_npu_available 接口识别设备可用性
-   export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
-
-   # 根据当前设备和需要卡数定义
-   export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
-
-   # 使能推理 EP 时需要
-   export SGLANG_DEEPEP_BF16_DISPATCH=1
-
 当前 verl 已解析推理常见参数，详见 `async_sglang_server.py <https://github.com/verl-project/verl/blob/main/verl/workers/rollout/sglang_rollout/async_sglang_server.py>`_ 中 ``ServerArgs`` 初始化传参。
 
 其他 `SGLang 参数 <https://github.com/sgl-project/sglang/blob/main/docs/advanced_features/server_arguments.md>`_ 均可通过 ``engine_kwargs`` 进行参数传递。
@@ -136,7 +125,7 @@ SGLang 后端通用说明
 vLLM 后端脚本转换为 SGLang
 ~~~~~~~~
 
-vLLM 后端推理脚本转换为 SGLang，需要添加或修改以下参数。
+如需自行将 vLLM 后端推理脚本转换为 SGLang，需要添加或修改以下参数。
 
 .. code-block:: bash
 
