@@ -918,13 +918,14 @@ class AgentLoopManager:
         worker_group: RayWorkerGroup = None,
         rollout_resource_pool: RayResourcePool = None,
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
+        **kwargs,
     ):
         self.config = config
         self.rollout_config, self.model_config = _get_rollout_and_model_config(config)
         self.worker_group = worker_group
         self.rollout_resource_pool = rollout_resource_pool
         self.reward_loop_worker_handles = reward_loop_worker_handles
-
+        self.kwargs = kwargs
         assert worker_group is not None or self.rollout_config.nnodes > 0, "nnodes must be > 0 in standalone mode"
 
         # for recipe to change
@@ -941,9 +942,10 @@ class AgentLoopManager:
         worker_group: RayWorkerGroup = None,
         rollout_resource_pool: RayResourcePool = None,
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
+        **kwargs,
     ):
         """Create agent loop manager."""
-        instance = cls(config, worker_group, rollout_resource_pool, reward_loop_worker_handles)
+        instance = cls(config, worker_group, rollout_resource_pool, reward_loop_worker_handles, **kwargs)
         await instance._initialize_llm_servers()
         await instance._init_global_load_balancer()
         await instance._init_agent_loop_workers()
@@ -968,6 +970,7 @@ class AgentLoopManager:
                 config=self.rollout_config,
                 model_config=self.model_config,
                 gpus_per_node=self.rollout_config.n_gpus_per_node,
+                **self.kwargs,
             )
             for replica_rank in range(num_replicas)
         ]

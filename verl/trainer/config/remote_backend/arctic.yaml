@@ -1,0 +1,119 @@
+# Format checks enforced on CI:
+# 1. Comments must appear above each field.
+# 2. There must be a blank line between each field.
+# 3. Inline comments (after a field on the same line) are not allowed.
+# 4. Indentation level is respected for nested fields.
+
+# Per-backend block loaded into `config.remote_backend` via Hydra defaults
+# (`+remote_backend@remote_backend=arctic`). Selected at runtime by `trainer.remote_backend=arctic`. Companion adapter:
+# `verl.workers.remote_client.arctic_rl.ArcticRLClientWrapper`.
+#
+# whether to use colocate mode
+colocate: True
+
+# number of GPUs allocated to the training engine
+training_gpus: 1
+
+# number of GPUs allocated to the sampling/inference engine
+sampling_gpus: 1
+
+# number of GPUs allocated to the log-prob engine; 0 means colocated with training
+log_prob_gpus: 1
+
+# tensor-parallel size for the sampling engine
+sampling_tp_size: 1
+
+# Weight-sync options between the train and rollout engines.
+weight_sync:
+
+  # Zero-copy CUDA IPC weight sync (bypasses NCCL). Only with colocate=True.
+  cuda_ipc: False
+
+  # Stream one param at a time during CUDA-IPC sync (cuda_ipc=True + colocate=True) to bound peak extra GPU mem to one param/GPU instead of the whole model.
+  low_memory: False
+
+# Training-side settings: ZoRRO, logits, determinism, and the DeepSpeed training/log-prob engine config.
+train:
+
+  # Zorro-group load balancer: when True the server reorganizes the global batch across workers (reorg_global_batch) for balanced routing; read unconditionally from per-call meta (`load_balancer`), independent of zorro_train.enable.
+  load_balancer: True
+
+  # ZoRRO training path. Server reads these flat (`zorro_train_<key>`) from ds_worker_config and per-call meta.
+  zorro_train:
+
+    # whether to use zorro packing for off-policy log-probs
+    enable: False
+
+    # should equal actor_rollout_ref.rollout.n for best perf
+    max_rollouts: ${actor_rollout_ref.rollout.n}
+
+  # Logprob/entropy compute strategy over vocab logits; only move off `none` on OOM.
+  logits:
+
+    # none = fused single-call (fastest, ~2x peak logits mem); memory = never manifests full logits, recompute in backward (zorro_train.enable=True only); compute = manifest once then chunk softmax/entropy.
+    optimization: none
+
+    # Per-chunk peak memory budget (GiB) for `memory` / `compute` modes. Smaller -> more chunks, less peak, more compute.
+    optimization_peak_mem_size_in_gib: 4
+
+    # Upcast produced logits to fp32 before logprob/entropy/loss math; no-op if already fp32.
+    compute_in_fp32: False
+
+    # Upcast the LM-head input to fp32 so the logits projection runs in fp32 (better precision, extra head compute/mem); ZoRRO path only.
+    compute_from_fp32_inputs: False
+
+  # Full-determinism controls for the RL server's DeepSpeed worker.
+  determinism:
+
+    # If True, the server calls enable_full_determinism (seeds RNGs + deterministic cuBLAS/cuDNN/NCCL/flash-attn).
+    full: False
+
+    # seed used by enable_full_determinism when full=True
+    seed: 42
+
+  # DeepSpeed engine config: passed through (OmegaConf.to_container) and merged with train_micro_batch_size_per_gpu/train_batch_size/grad_accum/sequence_parallel_size. Mirrors recipe/rl-correctness arctic_rl.train.deepspeed.
+  deepspeed:
+
+
+    # ZeRO sharding stage + offload knobs
+    zero_optimization:
+
+      # 2 for optim + grad sharding; 3 also shards weights
+      stage: 0
+
+      offload_optimizer:
+
+        # `none` keeps the optimizer state on GPU; `cpu` offloads it
+        device: none
+
+      offload_param:
+
+        # `none` keeps params on GPU; `cpu` offloads them
+        device: none
+
+    # DeepSpeed engine log level
+    log_level: INFO
+
+# Rollout-side Arctic Inference optimizations: passed through as `arctic_inference_config` (parse_arctic_inference_rollout); an all-disabled block is treated as "off". Requires a matching vllm + ArcticInference plugin build (https://github.com/snowflakedb/ArcticInference).
+rollout:
+
+  # Forest Cascade Attention (FCA) for efficient rollout
+  zorro_inference:
+
+    # whether to enable FCA on the sampling engine
+    enable: False
+
+  # Arctic speculative decoding draft model (empty disables speculative decoding)
+  speculative_decoding:
+
+    # path or name of the draft model
+    model: ""
+
+# Trainer <-> RL server communication settings.
+comms:
+
+  # ray or http: ray would be much faster for payload comms in the on-prem use case
+  protocol: ray
+
+  # Drop position_ids on the wire; server reconstructs from attention_mask. Set False for mrope / 3D rope.
+  drop_position_ids: True
