@@ -184,7 +184,7 @@ class ReplayBuffer:
 
         return KVBatchMeta(partition_id=batch.partition_id, keys=kept_keys, tags=kept_tags), metrics
 
-    @SkipManager.annotate_tq(role="rollout_tq")
+    @SkipManager.annotate_tq(role="rollout_tq", phase="sample")
     def sample(self, global_steps: int, partition_id: str, batch_size: int) -> KVBatchMeta:
         """Sample a batch of data from the replay buffer.
 

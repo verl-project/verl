@@ -1097,8 +1097,21 @@ class PPOTrainer(ABC):
             if self.use_critic:
                 self.critic_wg.stop_profile()
 
+    @SkipManager.annotate_tq(role="rollout_tq", phase="submit")
     def _add_batch_to_generate(self):
-        """Sample a batch from dataloader and add to AgentLoopManager."""
+        """Sample a batch from dataloader and add to AgentLoopManager.
+
+        When ``rollout_tq`` skip is enabled, the decorator intercepts: it calls
+        ``_next_train_batch`` first (keeping the dataloader aligned), then either
+        injects cached data (cache-hit) or delegates to ``_submit_batch_to_rollout``
+        (cache-miss).  This body only runs when skip is disabled or the current
+        step is outside ``skip.steps``.
+        """
+        batch = self._next_train_batch()
+        self._submit_batch_to_rollout(batch)
+
+    def _next_train_batch(self):
+        """Advance the dataloader and return a batch with fresh uids."""
         try:
             if self.train_dataloader_it is None:
                 self.train_dataloader_it = iter(self.train_dataloader)
@@ -1110,17 +1123,12 @@ class PPOTrainer(ABC):
         batch_dict["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch_dict["raw_prompt"]))], dtype=object)
         batch = tu.get_tensordict(batch_dict)
         tu.assign_non_tensor_data(batch, "global_steps", self.global_steps)
+        return batch
 
-        # Skip phase two: if cached data exists, inject into TQ and skip real rollout
-        skip_inst = SkipManager.skip_instances.get("rollout_tq")
-        if skip_inst and skip_inst.maybe_load_and_inject(self.global_steps, list(batch["uid"])):
-            return
-
-        # Register each prompt (GRPO group) in TransferQueue as a tag-only status marker
+    def _submit_batch_to_rollout(self, batch):
+        """Register prompt tags in TransferQueue and dispatch to AgentLoopManager."""
         tags = [{"is_prompt": True, "status": "pending", "global_steps": self.global_steps}] * len(batch)
         tq.kv_batch_put(keys=list(batch["uid"]), partition_id="train", tags=tags)
-
-        # add batch to agent loop manager
         self.agent_loop_manager.generate_sequences(batch)
 
     def _compute_reward_colocate(self, batch: KVBatchMeta, metrics: dict | None = None) -> KVBatchMeta:

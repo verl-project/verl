@@ -125,20 +125,23 @@ class SkipManager:
         return decorator
 
     @classmethod
-    def annotate_tq(cls, role: str):
-        """V1 TransferQueue-based skip decorator for the **sample** phase.
+    def annotate_tq(cls, role: str, phase: str):
+        """V1 TransferQueue-based skip decorator, unified across both phases.
 
-        Unlike V0's :meth:`annotate`, V1's split architecture separates
-        "submit prompts" (``_add_batch_to_generate``) from "sample trajectories"
-        (``ReplayBuffer.sample``).  This decorator handles the sample phase only:
-        after the original ``sample`` runs, if the skip instance says to save,
-        persist the result to disk (phase one / cache-miss).
+        V1's split architecture separates "submit prompts" (``_add_batch_to_generate``)
+        from "sample trajectories" (``ReplayBuffer.sample``).  This decorator handles
+        both, selected by *phase*:
 
-        The submit phase (phase two / cache-hit short-circuit) is handled inline
-        via ``RolloutTqSkip.maybe_load_and_inject`` because the short-circuit
-        window lies *inside* ``_add_batch_to_generate`` — after uid generation
-        but before rollout submission — and therefore cannot be a pure
-        pre-function decorator.
+        - ``phase="submit"``: decorate ``_add_batch_to_generate``.  The method must be
+          split into ``_next_train_batch`` (dataloader + uid) and ``_submit_batch_to_rollout``
+          (tag registration + generate_sequences).  The decorator always calls
+          ``_next_train_batch`` first (keeping the dataloader aligned even on cache-hit
+          steps), then checks ``meet_precondition``.  On cache-hit it injects cached data
+          into the TQ and returns; on cache-miss it calls ``_submit_batch_to_rollout``.
+
+        - ``phase="sample"``: decorate ``ReplayBuffer.sample``.  After the original
+          ``sample`` runs, if the skip instance says to save, persist the result to disk
+          (phase one / cache-miss).
         """
         def decorator(func: Callable) -> Callable:
             @functools.wraps(func)
@@ -146,10 +149,22 @@ class SkipManager:
                 skip_instance = cls.skip_instances.get(role)
                 if skip_instance is None or not skip_instance.is_enabled():
                     return func(self, *args, **kwargs)
+                step = cls.step
+                if step not in skip_instance.steps:
+                    return func(self, *args, **kwargs)
+
+                if phase == "submit":
+                    # Always prepare batch (keeps dataloader aligned on cache-hit steps)
+                    batch = self._next_train_batch()
+                    if skip_instance.maybe_load_and_inject(step, list(batch["uid"])):
+                        return
+                    self._submit_batch_to_rollout(batch)
+                    return
+
+                # phase == "sample": post-save after original sample runs
                 result = func(self, *args, **kwargs)
                 # ReplayBuffer.sample returns (batch, off_policy_metrics)
                 batch = result[0] if isinstance(result, tuple) else result
-                step = cls.step
                 if skip_instance.should_save(step, batch.partition_id):
                     skip_instance.prepare_data(step=step, batch=batch, global_steps=step)
                 return result
