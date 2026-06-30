@@ -375,8 +375,11 @@ class RolloutTqSkip(RolloutSkip):
                 tag.pop("is_prompt", None)
                 new_tags.append(tag)
 
-        # Select/reorder rows from the saved tensordict to match new_keys.
-        new_fields = data[torch.tensor(traj_indices, dtype=torch.long)]
+        # NestedTensor (jagged prompts/responses) does not support indexing or slicing
+        # on dim=0.  Use index_select_tensor_dict which unbinds, selects, and rebuilds.
+        from verl.utils.tensordict_utils import index_select_tensor_dict
+
+        new_fields = index_select_tensor_dict(data, traj_indices)
 
         # Write trajectory data to TQ
         tq.kv_batch_put(
