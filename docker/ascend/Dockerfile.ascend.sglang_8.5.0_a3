@@ -58,6 +58,9 @@ RUN pip install -e MindSpeed && \
     rm -rf /tmp/* /var/tmp/* && \
     pip cache purge
 
+# Install triton-ascend 3.2.1
+RUN pip install triton-ascend==3.2.1 --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn
+
 # Prepare and install verl (update frequently)
 RUN export PIP_EXTRA_INDEX_URL=https://triton-ascend.osinfra.cn/pypi/simple/ && \
     export PIP_TRUSTED_HOST=triton-ascend.osinfra.cn && \
