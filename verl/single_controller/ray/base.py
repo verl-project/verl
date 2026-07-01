@@ -224,22 +224,51 @@ class ResourcePoolManager:
         return sum([n_gpus for process_on_nodes in self.resource_pool_spec.values() for n_gpus in process_on_nodes])
 
     def _check_resource_available(self):
-        """Check if the resource pool can be satisfied in this ray cluster."""
-        node_available_resources = ray._private.state.available_resources_per_node()
-        node_available_gpus = {
-            node: node_info.get("GPU", 0) if "GPU" in node_info else node_info.get("NPU", 0)
-            for node, node_info in node_available_resources.items()
-        }
+        """Check if the resource pool can be satisfied in this ray cluster.
 
-        # check total required gpus can be satisfied
-        total_available_gpus = sum(node_available_gpus.values())
-        total_required_gpus = sum(
-            [n_gpus for process_on_nodes in self.resource_pool_spec.values() for n_gpus in process_on_nodes]
-        )
-        if total_available_gpus < total_required_gpus:
-            raise ValueError(
-                f"Total available GPUs {total_available_gpus} is less than total desired GPUs {total_required_gpus}"
-            )
+        Uses a per-node First-Fit Decreasing heuristic to verify that each
+        placement group (STRICT_PACK) can find a node with enough GPUs and CPUs.
+        This prevents silent scheduling deadlocks where ``ray.get([pg.ready() ...])``
+        hangs indefinitely because other Ray actors have consumed CPU resources.
+        """
+        node_available_resources = ray._private.state.available_resources_per_node()
+
+        nodes = []
+        for node, node_info in node_available_resources.items():
+            gpu_resource = node_info.get("GPU", 0) if "GPU" in node_info else node_info.get("NPU", 0)
+            cpu_resource = node_info.get("CPU", 0)
+            nodes.append({"node": node, "gpu": gpu_resource, "cpu": cpu_resource})
+
+        requirements = []
+        for resource_pool_name, process_on_nodes in self.resource_pool_spec.items():
+            for process_count in process_on_nodes:
+                requirements.append({
+                    "pool": resource_pool_name,
+                    "gpu": process_count,
+                    "cpu": process_count * self.max_colocate_count,
+                })
+
+        requirements.sort(key=lambda x: (x["gpu"], x["cpu"]), reverse=True)
+
+        for req in requirements:
+            matched_node = None
+            for node in nodes:
+                if node["gpu"] >= req["gpu"] and node["cpu"] >= req["cpu"]:
+                    matched_node = node
+                    break
+            if matched_node is None:
+                max_node_gpu = max((n["gpu"] for n in nodes), default=0)
+                max_node_cpu = max((n["cpu"] for n in nodes), default=0)
+                raise ValueError(
+                    f"Cannot satisfy placement group requirement for pool '{req['pool']}' requiring "
+                    f"{req['gpu']} GPUs and {req['cpu']} CPUs on a single node. "
+                    f"Max available on any single node: {max_node_gpu} GPUs, {max_node_cpu} CPUs. "
+                    f"This can cause a silent scheduling deadlock. Please check if other Ray actors "
+                    f"or tasks are consuming resources on the GPU nodes."
+                )
+            else:
+                matched_node["gpu"] -= req["gpu"]
+                matched_node["cpu"] -= req["cpu"]
 
 
 def extract_pg_from_exist(
