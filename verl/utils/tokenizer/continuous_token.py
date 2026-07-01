@@ -163,8 +163,8 @@ class ContinuousTokenBuilder:
         add_generation_prompt: bool,
         tools: list[dict[str, Any]] | None = None,
     ) -> list[int]:
-        from verl.utils.chat_template import apply_chat_template
-        from verl.utils.tokenizer import normalize_token_ids
+        from .chat_template import apply_chat_template
+        from .tokenizer import normalize_token_ids
 
         tokenized = apply_chat_template(
             self.tokenizer,
@@ -843,8 +843,8 @@ class VLContinuousTokenMixin:
         tools: list[dict[str, Any]] | None = None,
     ) -> list[int]:
         """Render messages through the processor (full render with all media)."""
-        from verl.utils.chat_template import apply_chat_template
-        from verl.utils.tokenizer import build_multimodal_processor_inputs, normalize_token_ids
+        from .chat_template import apply_chat_template
+        from .tokenizer import build_multimodal_processor_inputs, normalize_token_ids
 
         template_kwargs = dict(self.chat_template_kwargs)
         if tools:
@@ -972,8 +972,8 @@ class MiniMaxVLContinuousTokenBuilder(VLContinuousTokenMixin, MiniMaxContinuousT
         the scaffold is the final ``<beginning_of_sentence>...`` block, i.e. every
         token from the last ``<beginning_of_sentence>`` to the end.
         """
-        from verl.utils.chat_template import apply_chat_template
-        from verl.utils.tokenizer import build_multimodal_processor_inputs, normalize_token_ids
+        from .chat_template import apply_chat_template
+        from .tokenizer import build_multimodal_processor_inputs, normalize_token_ids
 
         text = apply_chat_template(
             self.processor,
@@ -1127,7 +1127,7 @@ class DeepSeekVL2ContinuousTokenBuilder(DeepSeekContinuousTokenBuilder):
         add_generation_prompt: bool = True,
     ) -> list[int]:
         """Render messages through DeepseekVLV2Processor."""
-        from verl.utils.tokenizer import normalize_token_ids
+        from .tokenizer import normalize_token_ids
 
         conv, all_images = self._to_vl2_conversation(messages, images, add_generation_prompt)
         out = self.processor.__call__(conversations=conv, images=all_images, force_batchify=True)

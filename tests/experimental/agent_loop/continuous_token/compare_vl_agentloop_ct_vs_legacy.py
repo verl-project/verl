@@ -74,7 +74,7 @@ from verl.experimental.agent_loop.single_turn_agent_loop import SingleTurnAgentL
 from verl.experimental.agent_loop.tool_agent_loop import ToolAgentLoop
 from verl.tools.function_tool import FunctionTool
 from verl.tools.schemas import ToolResponse
-from verl.utils.chat_template import apply_chat_template
+from verl.utils.tokenizer.chat_template import apply_chat_template
 from verl.utils.tokenizer import build_multimodal_processor_inputs, normalize_token_ids
 from verl.workers.rollout.replica import TokenOutput
 

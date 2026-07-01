@@ -20,7 +20,7 @@ import re
 from enum import StrEnum
 from typing import Any
 
-from verl.utils.continuous_token import (
+from .continuous_token import (
     ContinuousTokenBuilder,
     DeepSeekContinuousTokenBuilder,
     DeepSeekVL2ContinuousTokenBuilder,

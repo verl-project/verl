@@ -15,7 +15,7 @@
 
 import pytest
 
-from verl.utils.continuous_token import (
+from verl.utils.tokenizer.continuous_token import (
     ContinuousTokenBuilder,
     MergeResult,
 )
@@ -94,7 +94,7 @@ class TestMultimodalMergeResultWithExistingSubclasses:
 
     def test_qwen_merge_still_works(self):
         """QwenContinuousTokenBuilder merge should produce token-only MergeResult."""
-        from verl.utils.continuous_token import QwenContinuousTokenBuilder
+        from verl.utils.tokenizer.continuous_token import QwenContinuousTokenBuilder
 
         class MockQwenTokenizer:
             def encode(self, text, add_special_tokens=False):
@@ -124,7 +124,7 @@ class TestQwenVLContinuousTokenBuilder:
     """Test QwenVL vision token handling."""
 
     def setup_method(self):
-        from verl.utils.continuous_token import QwenVLContinuousTokenBuilder
+        from verl.utils.tokenizer.continuous_token import QwenVLContinuousTokenBuilder
 
         class MockQwenVLTokenizer:
             def encode(self, text, add_special_tokens=False):
@@ -165,7 +165,7 @@ class TestMiMoVLContinuousTokenBuilder:
     """Test MiMo-VL vision token handling."""
 
     def setup_method(self):
-        from verl.utils.continuous_token import MiMoVLContinuousTokenBuilder
+        from verl.utils.tokenizer.continuous_token import MiMoVLContinuousTokenBuilder
 
         class MockMiMoVLTokenizer:
             def encode(self, text, add_special_tokens=False):
@@ -212,7 +212,7 @@ class TestWiringVLFactory:
 
     def test_vl_family_requires_processor(self):
         """VL families should raise if processor not provided."""
-        from verl.utils.continuous_token_wiring import create_continuous_token_builder
+        from verl.utils.tokenizer.continuous_token_wiring import create_continuous_token_builder
 
         class MockTokenizer:
             name_or_path = "Qwen/Qwen2.5-VL-7B-Instruct"
@@ -239,8 +239,8 @@ class TestWiringVLFactory:
 
     def test_vl_family_succeeds_with_processor(self):
         """VL families should instantiate correctly with processor provided."""
-        from verl.utils.continuous_token import QwenVLContinuousTokenBuilder
-        from verl.utils.continuous_token_wiring import create_continuous_token_builder
+        from verl.utils.tokenizer.continuous_token import QwenVLContinuousTokenBuilder
+        from verl.utils.tokenizer.continuous_token_wiring import create_continuous_token_builder
 
         class MockTokenizer:
             name_or_path = "Qwen/Qwen2.5-VL-7B-Instruct"
@@ -372,7 +372,7 @@ class TestQwenVLBuildInitialTokens:
     """Integration test for QwenVL build_initial_tokens with images."""
 
     def setup_method(self):
-        from verl.utils.continuous_token import QwenVLContinuousTokenBuilder
+        from verl.utils.tokenizer.continuous_token import QwenVLContinuousTokenBuilder
 
         self.tokenizer = _MockQwenVLTokenizer()
         self.processor = _MockQwenVLProcessor()
@@ -405,7 +405,7 @@ class TestQwenVLMergeNonAssistantTokens:
     """Integration test for QwenVL merge_non_assistant_tokens with images in appended messages."""
 
     def setup_method(self):
-        from verl.utils.continuous_token import QwenVLContinuousTokenBuilder
+        from verl.utils.tokenizer.continuous_token import QwenVLContinuousTokenBuilder
 
         self.tokenizer = _MockQwenVLTokenizer()
         self.processor = _MockQwenVLProcessor()
@@ -452,7 +452,7 @@ class TestQwenVLMergeNonAssistantTokens:
                 result["input_ids"][0][0] = 9999
                 return result
 
-        from verl.utils.continuous_token import QwenVLContinuousTokenBuilder
+        from verl.utils.tokenizer.continuous_token import QwenVLContinuousTokenBuilder
 
         builder = QwenVLContinuousTokenBuilder(self.tokenizer, BadPrefixProcessor())
         previous = [{"role": "user", "content": "Hi"}]
@@ -488,7 +488,7 @@ def test_other_vl_builders_reject_non_prefix_processor_output(builder_name):
             result["input_ids"][0][0] = 9999
             return result
 
-    import verl.utils.continuous_token as continuous_token
+    import verl.utils.tokenizer.continuous_token as continuous_token
 
     builder_cls = getattr(continuous_token, builder_name)
     builder = builder_cls(_MockQwenVLTokenizer(), BadPrefixProcessor())

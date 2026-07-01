@@ -49,9 +49,9 @@ from verl.experimental.agent_loop.utils import resolve_config_path
 from verl.protocol import DataProto
 from verl.tools.tool_registry import load_all_tools
 from verl.trainer.distillation import is_distillation_enabled
-from verl.utils.chat_template import apply_chat_template, initialize_system_prompt
+from verl.utils.tokenizer.chat_template import apply_chat_template, initialize_system_prompt
 from verl.utils.config import omega_conf_to_dataclass
-from verl.utils.continuous_token_wiring import create_continuous_token_builder
+from verl.utils.tokenizer.continuous_token_wiring import create_continuous_token_builder
 from verl.utils.dataset.rl_dataset import RLHFDataset, get_dataset_class
 from verl.utils.model import compute_position_id_with_mask
 from verl.utils.profiler import simple_timer
@@ -231,7 +231,7 @@ class AgentLoopBase(ABC):
         if continuous_token_config.enable:
             model_config = self.config.actor_rollout_ref.model
             # Resolve family first to check if VL builder is needed
-            from verl.utils.continuous_token_wiring import (
+            from verl.utils.tokenizer.continuous_token_wiring import (
                 get_continuous_token_builder_class,
                 resolve_continuous_token_model_family,
             )

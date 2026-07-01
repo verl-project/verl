@@ -70,8 +70,8 @@ from scripts.chat_template_mock_trajectories import (  # noqa: E402
     SingleTurnTrajectory,
     ToolAgentTrajectory,
 )
-from verl.utils.chat_template import apply_chat_template  # noqa: E402
-from verl.utils.continuous_token_wiring import (  # noqa: E402
+from verl.utils.tokenizer.chat_template import apply_chat_template  # noqa: E402
+from verl.utils.tokenizer.continuous_token_wiring import (  # noqa: E402
     CONTINUOUS_TOKEN_BUILDER_FAMILIES,
     create_continuous_token_builder,
     get_continuous_token_builder_class,

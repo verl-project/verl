@@ -16,7 +16,7 @@ import logging
 
 import pytest
 
-from verl.utils.continuous_token import (
+from verl.utils.tokenizer.continuous_token import (
     ContinuousTokenBuilder,
     DeepSeekContinuousTokenBuilder,
     DeepSeekVL2ContinuousTokenBuilder,
@@ -31,7 +31,7 @@ from verl.utils.continuous_token import (
     QwenContinuousTokenBuilder,
     QwenVLContinuousTokenBuilder,
 )
-from verl.utils.continuous_token_wiring import (
+from verl.utils.tokenizer.continuous_token_wiring import (
     CONTINUOUS_TOKEN_BUILDER_FAMILIES,
     ContinuousTokenModelFamily,
     create_continuous_token_builder,
