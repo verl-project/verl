@@ -84,6 +84,42 @@ def qwen3_next_apply_rotary_pos_emb_npu(q, k, cos, sin, position_ids=None, unsqu
     return q_embed, k_embed
 
 
+def _get_qwen3_5_gdn_compute_mode(config) -> str:
+    mode = getattr(config, "gdn_compute_mode", None)
+    if mode is None and hasattr(config, "text_config"):
+        mode = getattr(config.text_config, "gdn_compute_mode", None)
+    if mode is None and getattr(config, "use_triton_gdn", False):
+        mode = "triton"
+    if mode is None:
+        return "eager"
+    return str(mode).lower()
+
+
+def _patch_qwen3_5_gated_delta_net_init(modeling_module, class_name: str):
+    cls = getattr(modeling_module, class_name, None)
+    if cls is None or getattr(cls, "_verl_gdn_compute_mode_patched", False):
+        return
+
+    original_init = cls.__init__
+
+    def patched_init(self, config, *args, **kwargs):
+        original_init(self, config, *args, **kwargs)
+        gdn_compute_mode = _get_qwen3_5_gdn_compute_mode(config)
+        if gdn_compute_mode == "eager":
+            return
+        if gdn_compute_mode != "triton":
+            raise ValueError("gdn_compute_mode must be one of: 'eager', 'triton'")
+
+        from verl.models.transformers.gdn.chunk_gated_delta_rule import chunk_gated_delta_rule
+
+        self.gdn_compute_mode = gdn_compute_mode
+        self.chunk_gated_delta_rule = chunk_gated_delta_rule
+        logger.info("Patched %s to use Triton GDN on NPU", class_name)
+
+    cls.__init__ = patched_init
+    cls._verl_gdn_compute_mode_patched = True
+
+
 class NPUGmmFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, weight, group_list, group_list_type=1):
@@ -380,11 +416,13 @@ modeling_qwen3_next.Qwen3NextRMSNorm.forward = qwen3_next_rms_norm_forward_npu
 modeling_qwen3_next.apply_rotary_pos_emb = qwen3_next_apply_rotary_pos_emb_npu
 
 # Patches for Qwen3.5 Model
+_patch_qwen3_5_gated_delta_net_init(modeling_qwen3_5, "Qwen3_5GatedDeltaNet")
 modeling_qwen3_5.Qwen3_5RMSNormGated.forward = qwen3_next_rms_norm_forward_gated_npu
 modeling_qwen3_5.Qwen3_5RMSNorm.forward = qwen3_next_rms_norm_forward_npu
 modeling_qwen3_5.apply_rotary_pos_emb = qwen3_next_apply_rotary_pos_emb_npu
 
 # Patches for Qwen3.5 MoE Model
+_patch_qwen3_5_gated_delta_net_init(modeling_qwen3_5_moe, "Qwen3_5MoeGatedDeltaNet")
 modeling_qwen3_5_moe.Qwen3_5MoeExperts.forward = qwen3_5_moe_experts_forward_npu
 modeling_qwen3_5_moe.Qwen3_5MoeRMSNormGated.forward = qwen3_next_rms_norm_forward_gated_npu
 modeling_qwen3_5_moe.Qwen3_5MoeRMSNorm.forward = qwen3_next_rms_norm_forward_npu

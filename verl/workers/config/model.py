@@ -138,6 +138,9 @@ class HFModelConfig(BaseConfig):
     use_fused_kernels: bool = False
     fused_kernel_options: dict = field(default_factory=dict)
 
+    # Qwen3.5 Gated Delta Net compute mode. None keeps the model default.
+    gdn_compute_mode: Optional[str] = None
+
     # TiledMLP configuration for memory-efficient MLP computation
     tiled_mlp: dict = field(default_factory=lambda: {"enabled": False, "num_shards": 4})
 
@@ -204,6 +207,13 @@ class HFModelConfig(BaseConfig):
         )
         override_config_kwargs.update(override_config)
         update_model_config(self.hf_config, override_config_kwargs=override_config_kwargs)
+
+        if self.gdn_compute_mode is not None:
+            if self.gdn_compute_mode not in ("eager", "triton"):
+                raise ValueError("gdn_compute_mode must be one of: 'eager', 'triton'")
+            self.hf_config.gdn_compute_mode = self.gdn_compute_mode
+            if hasattr(self.hf_config, "text_config"):
+                self.hf_config.text_config.gdn_compute_mode = self.gdn_compute_mode
 
         self.share_embeddings_and_output_weights = getattr(self.hf_config, "tie_word_embeddings", False)
 

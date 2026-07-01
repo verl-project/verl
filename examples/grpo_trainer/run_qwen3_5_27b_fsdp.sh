@@ -17,6 +17,7 @@ GEN_TP=${GEN_TP:-4}
 SP_SIZE=${SP_SIZE:-1}
 FSDP_SIZE=${FSDP_SIZE:-}
 ROLLOUT_GPU_MEM_UTIL=${ROLLOUT_GPU_MEM_UTIL:-0.6}
+GDN_COMPUTE_MODE=${GDN_COMPUTE_MODE:-}
 
 RAY_DATA_HOME=${RAY_DATA_HOME:-"${HOME}/verl"}
 MODEL_PATH=${MODEL_PATH:-"${RAY_DATA_HOME}/models/Qwen3.5-27B"}
@@ -33,12 +34,14 @@ fsdp_size=${FSDP_SIZE:-8}
 
 case "${DEVICE}" in
     gpu)
+        GDN_COMPUTE_MODE=${GDN_COMPUTE_MODE:-eager}
         ;;
     npu)
         export HCCL_CONNECT_TIMEOUT=1500
         export HCCL_HOST_SOCKET_PORT_RANGE=60000-60050
         export HCCL_NPU_SOCKET_PORT_RANGE=61000-61050
         export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
+        GDN_COMPUTE_MODE=${GDN_COMPUTE_MODE:-triton}
         n_devices_per_node=16
         fsdp_size=16
         ;;
@@ -71,6 +74,7 @@ MODEL=(
     actor_rollout_ref.model.path=${MODEL_PATH}
     actor_rollout_ref.model.use_remove_padding=True
     actor_rollout_ref.model.enable_gradient_checkpointing=True
+    actor_rollout_ref.model.gdn_compute_mode=${GDN_COMPUTE_MODE}
 )
 
 ACTOR=(

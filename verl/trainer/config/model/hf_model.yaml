@@ -66,6 +66,9 @@ fused_kernel_options:
   # the implementation backend for fused kernels.
   impl_backend: torch
 
+# Qwen3.5 Gated Delta Net compute mode. Set to triton on Ascend NPU to use the fused Triton path.
+gdn_compute_mode: null
+
 # TiledMLP configuration for memory-efficient MLP computation.
 # Reduces peak memory by processing MLP forward/backward in tiles.
 tiled_mlp:
