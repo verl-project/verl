@@ -11,15 +11,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Delta weight sync primitives for verl rollouts.
+"""Delta weight sync primitives for the checkpoint engine.
 
 This package contains the framework-agnostic core of "send only the elements
-that changed" weight sync. Engine-specific dispatchers live next to each
-rollout backend; this package owns the snapshot, diff, encode, and bucket logic.
+that changed" weight sync: the pinned-CPU snapshot, bytewise diff, encode, and
+bucket logic. :class:`~verl.checkpoint_engine.delta_checkpoint_engine.DeltaCheckpointEngine`
+consumes these flushes and broadcasts them over NCCL; the rollout worker decodes
+them back into full tensors locally.
 
 Design follows THUDM/slime's delta-sync implementation
-(``slime/backends/megatron_utils/update_weight/update_weight_from_distributed_delta.py``)
-and pairs with SGLang's delta receiver (sgl-project/sglang#26519).
+(``slime/backends/megatron_utils/update_weight/update_weight_from_distributed_delta.py``).
 """
 
 from .delta_state import DeltaState, ParamDiff

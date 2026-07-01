@@ -15,8 +15,8 @@
 
 The verl rollout API speaks "generator of (HF name, tensor)". This module
 wraps that generator with the delta machinery and yields one
-:class:`DeltaFlush` per bucket boundary -- the engine dispatcher (NCCL
-broadcast or disk safetensors) consumes those flushes directly.
+:class:`DeltaFlush` per bucket boundary -- the checkpoint engine broadcasts
+those flushes over NCCL directly.
 
 The first call has to seed the snapshot (no flushes emitted, no engine RPCs);
 subsequent calls produce one or more sparse flushes carrying only the
@@ -45,14 +45,14 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class DeltaFlush:
-    """One ready-to-dispatch flush, regardless of transport.
+    """One ready-to-dispatch flush.
 
     * ``positions_cpu`` is a host uint8 tensor (positions are byte-packed at
       encode time; small enough that early D2H is free).
-    * ``values_gpu`` stays on the GPU until the dispatcher needs it on the
-      CPU (disk path) or pushes it via NCCL (nccl path).
-    * ``params`` carries the per-parameter manifest needed for the receiver
-      to decode the blob (passed alongside the data as a ``DeltaSpec``).
+    * ``values_gpu`` stays on the GPU until the checkpoint engine broadcasts it
+      over NCCL.
+    * ``params`` carries the per-parameter manifest the receiver needs to
+      decode the blob (sent alongside the data over the zmq side-channel).
     """
 
     encoding: DeltaEncodingName
@@ -94,8 +94,7 @@ def _materialize_flush(
     params = list(bucket.params)
     bucket.clear()
     # GPU-resident checksum so positions go to the device the values already
-    # live on. NCCL needs the same move anyway; disk gets it for free at the
-    # reduction.
+    # live on -- the NCCL broadcast needs them on-device anyway.
     positions_gpu = positions_cpu.to(values_gpu.device, non_blocking=True)
     cks = _checksum(positions_gpu, values_gpu)
     return DeltaFlush(

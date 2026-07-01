@@ -13,15 +13,12 @@
 # limitations under the License.
 """Position+value encoding and bucketing for delta sync.
 
-Three encodings share one on-wire layout (a uint8 positions blob plus a
+Both encodings share one on-wire layout (a uint8 positions blob plus a
 parameter-dtype values tensor with a per-parameter manifest); decoders
 dispatch on metadata.
 
-* ``indices``     -- int32 absolute positions (4 bytes / nnz)
-* ``deltas``      -- uint16 gap-deltas with uint32 per-parameter fallback
-* ``deltas_zstd`` -- ``deltas`` wrapped in zstd at the file layer (the
-                     compression is applied at safetensors write time;
-                     this module produces the uncompressed gap stream)
+* ``indices`` -- int32 absolute positions (4 bytes / nnz)
+* ``deltas``  -- uint16 gap-deltas with uint32 per-parameter fallback
 
 Values are sent verbatim in the parameter's dtype regardless of encoding.
 """
@@ -37,7 +34,7 @@ import torch
 
 from .delta_state import ParamDiff
 
-DeltaEncodingName = Literal["indices", "deltas", "deltas_zstd"]
+DeltaEncodingName = Literal["indices", "deltas"]
 
 
 # ---------- diff ----------------------------------------------------------
@@ -259,9 +256,7 @@ def encode_chunk(diffs: list[ParamDiff], encoding: DeltaEncodingName) -> Encoded
     """Encode one chunk of per-parameter diffs into an :class:`EncodedChunk`."""
     if encoding == "indices":
         return _encode_indices(diffs)
-    if encoding in ("deltas", "deltas_zstd"):
-        # ``deltas`` and ``deltas_zstd`` share the gap encoder. The zstd wrap is
-        # applied at safetensors write time by the disk transport, not here.
+    if encoding == "deltas":
         return _encode_deltas(diffs)
     raise ValueError(f"unsupported delta encoding: {encoding!r}")
 
@@ -278,8 +273,8 @@ def decode_chunk(
     """Reverse of :func:`encode_chunk`.
 
     Returns full-shape parameter tensors with NaN at unchanged positions. The
-    real receiver lives in SGLang (sgl-project/sglang#26519); this Python
-    decoder exists so we can unit-test bit-identity locally.
+    rollout worker calls this on each received flush and overwrites only the
+    non-NaN positions into its full-weight mirror before pushing to the engine.
     """
     out: dict[str, torch.Tensor] = {}
     pos_np = np.frombuffer(pos_bytes, dtype=np.uint8)
