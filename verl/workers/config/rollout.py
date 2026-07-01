@@ -273,6 +273,8 @@ class RolloutConfig(BaseConfig):
 
     disaggregation: DisaggregationConfig = field(default_factory=DisaggregationConfig)
 
+    venv: Optional[str] = None
+
     def __post_init__(self):
         """Validate the rollout config"""
         # Deprecation warning for mode field - only async mode is supported

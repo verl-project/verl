@@ -13,15 +13,248 @@ build-backend = "setuptools.build_meta"
 # -------------------------------
 [project]
 name = "verl"
-# We'll mark the version as "dynamic" because it's read from the file "verl/version/version" 
-# (PEP 621 calls this "dynamic version"). 
-# The actual version is specified in the [tool.setuptools.dynamic] section below.
-dynamic = ["version", "dependencies", "optional-dependencies", "authors", "urls"]
+# `version` and `dependencies` stay dynamic so setup.py remains the source of
+# truth for `pip install verl` users. `optional-dependencies` is now static
+# below — the per-backend extras need to be declared here for uv to pick them
+# up alongside the [tool.uv] configuration (sources, conflicts, indexes).
+dynamic = ["version", "dependencies", "authors", "urls"]
 
 description = "verl: Volcano Engine Reinforcement Learning for LLM"
 license = {text = "Apache-2.0"}  # Changed from file to text format
 readme = {file = "README.md", content-type = "text/markdown"}
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.13"
+
+# -------------------------------
+# project.optional-dependencies
+# -------------------------------
+# 3 inference + 5 training backends; each pins its own torch/cuda/transformers
+# and gets its own venv (`.venvs/.venv-<extra>/`). Conflicts, source routing,
+# overrides etc. live in [tool.uv] below. See docs/start/install.rst.
+[project.optional-dependencies]
+# ---- legacy setup.py extras (kept for `pip install verl[…]` compatibility) -
+test         = ["pytest", "pre-commit", "py-spy", "pytest-asyncio", "pytest-rerunfailures"]
+prime        = ["pyext"]
+geo          = ["mathruler", "torchvision", "qwen_vl_utils"]
+gpu          = ["liger-kernel", "flash-attn"]
+math         = ["math-verify"]
+trl          = ["trl<=0.9.6"]
+mcore        = ["mbridge"]
+transferqueue = ["TransferQueue==0.1.6"]
+
+# ---- shared verl runtime deps used by every backend extra ------------------
+verl-core = [
+    "accelerate",
+    "codetiming",
+    "datasets",
+    "dill",
+    "hydra-core",
+    "pandas",
+    "peft",
+    "pyarrow>=19.0.0",
+    "pybind11",
+    "pylatexenc",
+    "ray[default]>=2.41.0",
+    "torchdata",
+    "tensordict>=0.8.0,<=0.10.0,!=0.9.0",
+    "wandb",
+    "packaging>=20.0",
+    "tensorboard",
+    "fastapi",
+    "uvicorn",
+    "mathruler",
+    "qwen_vl_utils",
+    "cachetools",
+    "nvtx",
+    "pytest",
+    "pytest-asyncio",
+    "pytest-rerunfailures",
+]
+
+# ---- inference backends ----------------------------------------------------
+# Rollout-only slices of the reference Dockerfiles. `transformers` is
+# overridden to verl's 5.3.0 via [tool.uv] except for sglang, which keeps
+# sglang's hard-pinned 4.57.1.
+
+# verl/docker/Dockerfile.stable.vllm (rollout half)
+vllm = [
+    "verl[verl-core]",
+    "torch==2.10.0",
+    "torchvision==0.25.0",
+    "torchaudio==2.10.0",
+    "vllm==0.18.0",
+    "mbridge",
+    "transformers==5.3.0",
+]
+
+# sglang/docker/Dockerfile + verl/docker/Dockerfile.stable.sglang (rollout half).
+# nvidia-cudnn/nccl pins replicate sglang's `--force-reinstall --no-deps`
+# workarounds; both names are in override-dependencies below so torch 2.9.1's
+# transitive pins lose. The training tools that Dockerfile.stable.sglang adds
+# on top (apex/TE/flash-attn/Megatron-LM/...) live in the `megatron` extra.
+sglang = [
+    "verl[verl-core]",
+    "torch==2.9.1",
+    "torchvision==0.24.1",
+    "torchaudio==2.9.1",
+    "sglang==0.5.9",
+    "mbridge",
+    "transformers==4.57.1",
+    "nvidia-cudnn-cu12==9.16.0.29",
+    "nvidia-nccl-cu12==2.28.3",
+]
+
+# verl/docker/Dockerfile.stable.trtllm — Linux/x86_64/cu13 wheels only.
+# TRT-LLM has its own hard pins (TensorRT-LLM/requirements.txt): transformers
+# ==4.57.3, numpy<2.4, nvidia-nccl-cu13 in [2.28.9, 2.29.2]. ray==2.54.1 is the
+# TRT-LLM-compat pin from Dockerfile.stable.trtllm L53. The verl-wide
+# transformers==5.3.0 does NOT apply to this venv.
+trtllm = [
+    "verl[verl-core]",
+    "torch>=2.10.0,<2.11.0a0",
+    "tensorrt-llm==1.3.0rc14 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "mbridge",
+    "transformers==4.57.3",
+    "numpy>=2.0.0,<2.4",
+    "nvidia-nccl-cu13>=2.28.9,<=2.29.2",
+    "ray[default]==2.54.1",
+]
+
+# verl/docker/ascend/Dockerfile.ascend_8.5.0_a2|a3 (rollout half). vllm built
+# with VLLM_TARGET_DEVICE=empty + vllm-ascend layered on top; torch 2.9.0 /
+# torch-npu 2.9.0 from PyPI matches the qwen3-5 Dockerfile variant L88.
+# torch comes from PyPI default — torch-npu pulls the matching wheel.
+vllm-ascend = [
+    "verl[verl-core]",
+    "torch==2.9.0",
+    "torchvision==0.24.0",
+    "torchaudio==2.9.0",
+    "torch-npu==2.9.0 ; sys_platform == 'linux'",
+    "vllm==0.18.0",
+    "vllm-ascend==0.18.0 ; sys_platform == 'linux'",
+    "transformers==4.57.6",
+    "numpy<2.0.0",
+    "hf_transfer",
+]
+
+# verl/docker/ascend/Dockerfile.ascend.sglang_8.5.0_a2|a3 (rollout half).
+# sglang 0.5.10 from PyPI; the upstream Dockerfile swaps in pyproject_npu.toml
+# but the base deps overlap — we pin the NPU-specific overlay versions
+# (transformers / torchao / timm) directly. sgl-kernel-npu, deep_ep,
+# torch_memory_saver wheels are not on PyPI; install separately from
+# https://github.com/sgl-project/sgl-kernel-npu/releases if you need them.
+sglang-ascend = [
+    "verl[verl-core]",
+    "torch==2.8.0",
+    "torchvision==0.23.0",
+    "torch-npu==2.8.0.post2 ; sys_platform == 'linux'",
+    "sglang==0.5.10",
+    "transformers==5.3.0",
+    "torchao==0.9.0",
+    "timm==1.0.16",
+    "numpy<2.0.0",
+    "hf_transfer",
+]
+
+# ---- training backends -----------------------------------------------------
+# Pure PyTorch FSDP — no third-party engine.
+fsdp = [
+    "verl[verl-core]",
+    "torch==2.10.0",
+    "torchvision==0.25.0",
+    "torchaudio==2.10.0",
+    "flash-attn==2.8.3",
+    "liger-kernel",
+    "trl==0.27.0",
+    "transformers==5.3.0",
+]
+
+# Trainer-side union of Dockerfile.stable.{vllm,sglang,trtllm}. apex / TE /
+# megatron-core come from upstream git (see [tool.uv.sources]) and build from
+# source via no-build-isolation. We standardize on torch 2.10
+# (Dockerfile.stable.vllm) over 2.9.1 (Dockerfile.stable.sglang). cupy-cuda12x
+# is from Dockerfile.stable.trtllm L38 — used for Megatron MoE all-to-all.
+megatron = [
+    "verl[verl-core]",
+    "torch==2.10.0",
+    "torchvision==0.25.0",
+    "torchaudio==2.10.0",
+    "pybind11",
+    "wheel",
+    "ninja",
+    "nvidia-mathdx",
+    "apex",
+    "transformer-engine[pytorch]",
+    "flash-attn==2.8.3",
+    "trl==0.27.0",
+    "matplotlib",
+    "liger-kernel",
+    "mbridge",
+    "megatron-core",
+    "cupy-cuda12x==14.0.1",
+    "transformers==5.3.0",
+]
+
+# Trainer-only slice of verl/docker/ascend/Dockerfile.ascend_8.5.0_a2|a3
+# (Ascend NPU). MindSpeed's own requirements.txt doesn't pin torch — it
+# expects the env to provide torch + torch_npu. The Dockerfile gets them
+# transitively via vllm-ascend (torch 2.9.0 + torch-npu 2.9.0); we pin
+# explicitly so this extra is self-contained and pairs cleanly with the
+# `vllm-ascend` extra.
+mindspeed = [
+    "verl[verl-core]",
+    "torch==2.9.0",
+    "torchvision==0.24.0",
+    "torchaudio==2.9.0",
+    "torch-npu==2.9.0 ; sys_platform == 'linux'",
+    "triton-ascend==3.2.0 ; sys_platform == 'linux'",
+    "mindspeed",
+    "megatron-core",
+    "mbridge",
+    "transformers==4.57.6",
+    "hf_transfer",
+]
+
+# VeOmni v0.1.9a5 `gpu` extra slice. transformers stays at VeOmni's 4.57.3
+# pin (their v5 support is experimental upstream).
+veomni = [
+    "verl[verl-core]",
+    "torch==2.9.1",
+    "torchvision==0.24.1",
+    "torchaudio==2.9.1",
+    "veomni",
+    "transformers==4.57.3",
+    "flash-attn==2.8.3",
+    "liger-kernel",
+    "hf_transfer",
+]
+
+# NeMo-Automodel v0.3.0 — upstream needs torch in [2.6, 2.10] and transformers
+# >=5.0; flash-attn matches their `[fa]` extra cap (<=2.8.3).
+nemoautomodel = [
+    "verl[verl-core]",
+    "torch==2.9.1",
+    "torchvision==0.24.1",
+    "torchaudio==2.9.1",
+    "nemo-automodel",
+    "transformers==5.3.0",
+    "flash-attn==2.8.3",
+]
+
+# ---- pure CPU env for CI / unit tests / dev sanity ------------------------
+# Mirrors verl/.github/workflows/{cpu_unit_tests,sanity}.yml: CPU torch +
+# verl-core + the full requirements-test.txt set. No flash-attn, no apex,
+# no vllm/sglang — works on any Linux/macOS host.
+cpu = [
+    "verl[verl-core]",
+    "torch==2.10.0",
+    "torchvision==0.25.0",
+    "torchaudio==2.10.0",
+    "pytest",
+    "pre-commit",
+    "py-spy",
+    "pytest-asyncio",
+    "pytest-rerunfailures",
+]
 
 # -------------------------------
 # tool.ruff - Linting configuration
@@ -112,3 +345,164 @@ verl = [
   "trainer/config/*/*.yaml",
   "experimental/*/config/*.yaml",
 ]
+
+# =============================================================================
+# tool.uv — see docs/start/install.rst for the full reference.
+#   UV_PROJECT_ENVIRONMENT=.venvs/.venv-<backend> uv sync --extra <backend>
+# (or `python manage_envs.py sync <backend>`)
+# =============================================================================
+[tool.uv]
+# Each backend gets its own venv + its own fork in uv.lock; without this, uv
+# would try to satisfy torch==2.10/2.9.1/2.7.1 in a single resolution.
+conflicts = [[
+    { extra = "vllm" },
+    { extra = "sglang" },
+    { extra = "trtllm" },
+    { extra = "vllm-ascend" },
+    { extra = "sglang-ascend" },
+    { extra = "fsdp" },
+    { extra = "megatron" },
+    { extra = "mindspeed" },
+    { extra = "veomni" },
+    { extra = "nemoautomodel" },
+    { extra = "cpu" },
+]]
+
+# Lock for all platforms a verl user actually targets, so uv.lock is portable
+# across machines (Linux x86_64 for cu12/cu13 GPUs, Linux aarch64 for Grace,
+# macOS for read-only dev resolves of the cpu-routed mindspeed extra).
+environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "sys_platform == 'linux' and platform_machine == 'aarch64'",
+    "sys_platform == 'darwin'",
+]
+
+# These packages `import torch` at build time, so we let them see the torch
+# uv already resolved into the env (uv installs torch first thanks to the
+# dependency-metadata declarations below).
+no-build-isolation-package = [
+    "apex",
+    "transformer-engine",
+    "transformer-engine-torch",
+    "flash-attn",
+    "flash_attn",
+    "megatron-core",
+    "mindspeed",
+    "veomni",
+    "nemo-automodel",
+]
+
+# Relax upstream pins so each extra's version wins. Replaces the Dockerfiles'
+# `--no-deps` / `--force-reinstall` hacks for trl/Megatron/cuDNN/NCCL.
+override-dependencies = [
+    "numpy",
+    "transformers",
+    "torch",
+    "torchvision",
+    "torchaudio",
+    "nvidia-cudnn-cu12",
+    "nvidia-nccl-cu12",
+    "nvidia-nccl-cu13",
+]
+
+# Pass --cpp_ext / --cuda_ext to apex's setup.py so its native CUDA extensions
+# (FusedAdam, FusedSGD, multi_tensor_applier, FusedLayerNorm, FastLayerNormFN)
+# actually compile. Mirrors the `--config-settings "--build-option=--cpp_ext"
+# --config-settings "--build-option=--cuda_ext"` flags from
+# Dockerfile.stable.vllm L55-56. Without these, apex installs as a pure-Python
+# package and Megatron-LM's apex.optimizers / apex.contrib / apex.normalization
+# / apex.multi_tensor_apply imports silently fall back to slow torch ops.
+[tool.uv.config-settings-package]
+apex = { "--build-option" = ["--cpp_ext", "--cuda_ext"] }
+
+# Trimmed metadata for git-only packages with noisy declared deps
+# (Megatron-LM declares nvidia-resiliency-ext / flask / etc.). Equivalent to
+# the Dockerfiles' `pip install --no-deps`.
+[[tool.uv.dependency-metadata]]
+name = "apex"
+version = "0.1.0"
+requires-dist = ["torch", "packaging"]
+
+[[tool.uv.dependency-metadata]]
+name = "transformer-engine"
+version = "2.12.0"
+requires-dist = ["torch", "pybind11", "ninja", "packaging"]
+
+[[tool.uv.dependency-metadata]]
+name = "megatron-core"
+version = "0.16.0"
+requires-dist = ["torch>=2.6.0", "numpy", "packaging>=24.2"]
+
+[[tool.uv.dependency-metadata]]
+name = "mindspeed"
+version = "2.3.0+core-r0.12.1"
+requires-dist = ["torch", "packaging"]
+
+# Git sources (revs match the reference Dockerfiles); PyTorch routed per-extra
+# to the right CUDA wheel index.
+[tool.uv.sources]
+apex               = { git = "https://github.com/NVIDIA/apex.git" }
+transformer-engine = { git = "https://github.com/NVIDIA/TransformerEngine.git", tag = "release_v2.12" }
+mbridge            = { git = "https://github.com/ISEEKYAN/mbridge.git",         rev = "641a5a0" }
+veomni             = { git = "https://github.com/ByteDance-Seed/VeOmni.git",    tag = "v0.1.9a5" }
+nemo-automodel     = { git = "https://github.com/NVIDIA-NeMo/Automodel.git",    tag = "v0.3.0" }
+mindspeed          = { git = "https://gitcode.com/Ascend/MindSpeed.git",        rev = "2.3.0_core_r0.12.1" }
+
+# megatron-core split per-extra: CUDA `megatron` tracks core_v0.16.0
+# (Dockerfile.stable.{vllm,sglang,trtllm}); ascend `mindspeed` tracks
+# core_v0.12.1 to match MindSpeed's `2.3.0_core_r0.12.1` branch name and
+# Dockerfile.ascend.*.
+megatron-core = [
+    { git = "https://github.com/NVIDIA/Megatron-LM.git", tag = "core_v0.16.0", extra = "megatron" },
+    { git = "https://github.com/NVIDIA/Megatron-LM.git", tag = "core_v0.12.1", extra = "mindspeed" },
+]
+
+# NPU extras (vllm-ascend / sglang-ascend / mindspeed) deliberately have no
+# torch index entry: `torch-npu==X` requires `torch==X` and PyPI serves the
+# right wheel (CPU build on aarch64 Atlas A2/A3, default on x86_64). The
+# Dockerfiles match — they only add the cpu wheel index as a fallback on
+# x86_64 hosts, never as a forced override.
+torch = [
+    { index = "pytorch-cu129", extra = "vllm" },
+    { index = "pytorch-cu129", extra = "sglang" },
+    { index = "pytorch-cu130", extra = "trtllm" },
+    { index = "pytorch-cu129", extra = "fsdp" },
+    { index = "pytorch-cu129", extra = "megatron" },
+    { index = "pytorch-cu129", extra = "veomni" },
+    { index = "pytorch-cu129", extra = "nemoautomodel" },
+    { index = "pytorch-cpu",   extra = "cpu" },
+]
+torchvision = [
+    { index = "pytorch-cu129", extra = "vllm" },
+    { index = "pytorch-cu129", extra = "sglang" },
+    { index = "pytorch-cu130", extra = "trtllm" },
+    { index = "pytorch-cu129", extra = "fsdp" },
+    { index = "pytorch-cu129", extra = "megatron" },
+    { index = "pytorch-cu129", extra = "veomni" },
+    { index = "pytorch-cu129", extra = "nemoautomodel" },
+    { index = "pytorch-cpu",   extra = "cpu" },
+]
+torchaudio = [
+    { index = "pytorch-cu129", extra = "vllm" },
+    { index = "pytorch-cu129", extra = "sglang" },
+    { index = "pytorch-cu129", extra = "fsdp" },
+    { index = "pytorch-cu129", extra = "megatron" },
+    { index = "pytorch-cu129", extra = "veomni" },
+    { index = "pytorch-cu129", extra = "nemoautomodel" },
+    { index = "pytorch-cpu",   extra = "cpu" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu129"
+url = "https://download.pytorch.org/whl/cu129"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true

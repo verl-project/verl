@@ -1,0 +1,77 @@
+# Build all non-Ascend uv venvs into a single image.
+#
+# The build clones the verl source into /workspace/verl and runs
+# `manage_envs.py sync ...` for every NVIDIA / CPU backend, leaving one
+# venv per backend under /workspace/verl/.venvs/.venv-<backend>/. Ascend
+# backends (vllm-ascend / sglang-ascend / mindspeed) require an Ascend CANN
+# base image and are deliberately NOT installed here — see
+# `docker/ascend/Dockerfile.ascend_8.5.0_a2` and friends instead.
+#
+# No build context is needed; the repo is fetched at build time:
+#
+#     docker build -f Dockerfile_uv -t verl:uv .
+#
+# Useful build args:
+#
+#     --build-arg VERL_REF=v0.7.1                # branch / tag / commit
+#     --build-arg VERL_REPO=https://github.com/your-fork/verl.git
+#     --build-arg TARGETS="vllm fsdp megatron"   # slim, only these backends
+#     --build-arg MAX_JOBS=128                   # bump for big build hosts
+#     --build-arg CUDA_VERSION=12.9.1            # alternative CUDA dev base
+
+ARG CUDA_VERSION=12.9.1
+FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu24.04 AS base
+
+ARG DEBIAN_FRONTEND=noninteractive
+# Build parallelism for source-built packages (apex / TransformerEngine /
+# flash-attn / megatron-core). 32 is conservative and survives most CI
+# hosts; raise via --build-arg MAX_JOBS=128 on big machines.
+ARG MAX_JOBS=32
+ENV MAX_JOBS=${MAX_JOBS}
+
+# Backends to materialize. By default every non-Ascend extra in
+# pyproject.toml. Override via --build-arg TARGETS="vllm fsdp" for slimmer
+# images. Note: trtllm pins tensorrt-llm whose wheels target CUDA 13;
+# `uv sync` succeeds on this CUDA 12.9 base but actual TRT-LLM inference
+# may need a CUDA-13 base — see docker/Dockerfile.stable.trtllm.
+ARG TARGETS="vllm sglang trtllm fsdp megatron veomni nemoautomodel cpu"
+
+# Source to build from. Override VERL_REF for tags / commits.
+ARG VERL_REPO=https://github.com/verl-project/verl.git
+ARG VERL_REF=main
+
+# System deps: build-essential / nvcc are needed to compile apex+TE+flash-attn
+# from source; ib / numa / rdma libs cover NCCL + GPUDirect runtimes; python3
+# is bootstrapped only to run manage_envs.py — uv provides per-venv pythons.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential ca-certificates curl git wget cmake \
+        libibverbs-dev libnuma-dev librdmacm-dev numactl \
+        openssh-client \
+        python3 python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+# uv (single binary, brings its own python downloads per-venv).
+RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
+
+WORKDIR /workspace
+# Partial clone (--filter=blob:none) keeps the layer small; uv sync only
+# needs the working tree, never historical blobs.
+RUN git clone --filter=blob:none "${VERL_REPO}" verl && \
+    git -C verl checkout "${VERL_REF}"
+WORKDIR /workspace/verl
+
+# Sync every backend in a single layer (TARGETS is a build-arg so we can't
+# split into one-RUN-per-backend without hard-coding the list). uv's own
+# package cache is dropped at the end to keep the image lean.
+RUN set -e; for b in ${TARGETS}; do \
+        echo "=== uv sync ${b} ===" && \
+        python3 manage_envs.py sync ${b}; \
+    done && \
+    uv cache clean
+
+# Default PATH points at the megatron venv — the typical RL trainer driver.
+# Switch at runtime by sourcing or prepending another:
+#   docker run -e PATH=/workspace/verl/.venvs/.venv-vllm/bin:$PATH ...
+ENV PATH="/workspace/verl/.venvs/.venv-megatron/bin:${PATH}"
+
+CMD ["bash"]
