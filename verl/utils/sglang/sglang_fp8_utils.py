@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import os
+import re
 from collections.abc import Iterable
 from typing import Any
 
@@ -70,12 +71,19 @@ def get_sglang_fp8_ignored_layers(quant_config: Any = None) -> list[str]:
 
 
 def _matches_ignored_layer(param_name: str, ignored_layer: str) -> bool:
-    ignored_layer = ignored_layer.lower().strip(".")
+    ignored_layer = ignored_layer.strip()
     if not ignored_layer:
         return False
 
-    name = param_name.lower().strip(".")
-    module_name = name[: -len(".weight")] if name.endswith(".weight") else name
+    name = param_name.strip(".")
+    module_name = name[: -len(".weight")] if name.lower().endswith(".weight") else name
+    if ignored_layer.startswith("re:"):
+        pattern = ignored_layer[3:]
+        return any(re.match(pattern, candidate) for candidate in (name, module_name))
+
+    ignored_layer = ignored_layer.lower().strip(".")
+    name = name.lower()
+    module_name = module_name.lower()
     for candidate in (name, module_name):
         if candidate == ignored_layer:
             return True

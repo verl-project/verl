@@ -78,6 +78,23 @@ def test_sglang_fp8_quant_config_accepts_mapping_like_config(monkeypatch):
     assert not helper.should_quantize_param("model.layers.0.linear_attn.in_proj_ba.weight")
 
 
+def test_sglang_fp8_quantizer_matches_regex_ignored_layers(monkeypatch):
+    monkeypatch.delenv("SGLANG_FP8_IGNORED_LAYERS", raising=False)
+    hf_config = SimpleNamespace(
+        quantization_config={
+            "ignored_layers": ["re:.*linear_attn.*"],
+        }
+    )
+
+    quant_config = build_sglang_fp8_quant_config(hf_config)
+    helper = SGLangFP8QuantizerHelper(quant_config)
+
+    assert quant_config["ignored_layers"] == ["re:.*linear_attn.*"]
+    assert not helper.should_quantize_param("model.layers.0.linear_attn.in_proj_ba.weight")
+    assert not helper.should_quantize_param("model.layers.0.linear_attn.g_proj.weight")
+    assert helper.should_quantize_param("model.layers.0.mlp.experts.0.up_proj.weight")
+
+
 def test_sglang_fp8_quantizer_reads_sglang_env_ignored_layers(monkeypatch):
     monkeypatch.setenv("SGLANG_FP8_IGNORED_LAYERS", "linear_attn")
 
