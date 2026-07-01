@@ -247,6 +247,9 @@ trainer:
       # Additional kwargs for the custom sampler
       sampler_kwargs: {}
 
+  # Cross-venv runtime spec for trainer Ray actors; null inherits the driver's interpreter
+  venv: null
+
 # profiler configs
 global_profiler:
 

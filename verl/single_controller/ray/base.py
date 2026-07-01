@@ -464,6 +464,12 @@ class RayWorkerGroup(WorkerGroup):
         self.profile_steps = kwargs.get("profile_steps", None)
         self.worker_nsight_options = kwargs.get("worker_nsight_options", None)
         self.customized_worker_env = kwargs.get("worker_env", {})
+        # Optional absolute path to a Python interpreter that every actor in
+        # this worker group should run under. Wired via Ray's
+        # ``runtime_env={"py_executable": ...}``. Resolved by the caller via
+        # :mod:`verl.utils.venv`; ``None`` means "inherit the driver's
+        # interpreter" (legacy single-venv behaviour).
+        self.worker_py_executable = kwargs.get("worker_py_executable", None)
         if self.worker_nsight_options is not None and self.worker_nsight_options["capture-range-end"] is None:
             self.worker_nsight_options["capture-range-end"] = f"repeat-shutdown:{6 * len(self.profile_steps)}"
 
@@ -656,17 +662,18 @@ class RayWorkerGroup(WorkerGroup):
         name = f"{self.name_prefix}{cia_name}_{pg_idx}:{local_rank}"  # e.g. Worker_2:5
 
         if self.profile_steps and self.device_name == "cuda":
-            ray_cls_with_init.update_options(
-                {
-                    "runtime_env": {
-                        "env_vars": env_vars,
-                        "nsight": self.worker_nsight_options,
-                    },
-                    "name": name,
-                }
-            )
+            runtime_env = {
+                "env_vars": env_vars,
+                "nsight": self.worker_nsight_options,
+            }
         else:
-            ray_cls_with_init.update_options({"runtime_env": {"env_vars": env_vars}, "name": name})
+            runtime_env = {"env_vars": env_vars}
+        # Route this worker group's actors at a specific Python interpreter
+        # (e.g. .venvs/.venv-megatron/bin/python). Opt-in: see
+        # :mod:`verl.utils.venv` for how callers populate this.
+        if self.worker_py_executable:
+            runtime_env["py_executable"] = self.worker_py_executable
+        ray_cls_with_init.update_options({"runtime_env": runtime_env, "name": name})
 
         if detached:
             ray_cls_with_init.update_options({"lifetime": "detached"})

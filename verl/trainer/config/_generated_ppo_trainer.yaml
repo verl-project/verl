@@ -884,6 +884,7 @@ trainer:
         path: null
         name: null
       sampler_kwargs: {}
+  venv: null
 global_profiler:
   _target_: verl.utils.profiler.ProfilerConfig
   tool: null

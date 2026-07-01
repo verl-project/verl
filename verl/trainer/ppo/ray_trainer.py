@@ -70,6 +70,7 @@ from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_
 from verl.utils.skip.skip_manager import SkipManager
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
+from verl.utils.venv import resolve_py_executable
 from verl.workers.config import DistillationConfig, EngineConfig
 from verl.workers.rollout.llm_server import LLMServerManager
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
@@ -854,6 +855,12 @@ class RayPPOTrainer:
                     OmegaConf.select(self.config.global_profiler.global_tool_config.nsys, "worker_nsight_options")
                 )
         wg_kwargs["device_name"] = self.device_name
+        # Cross-venv runtime: route trainer (actor / critic / ref / rm) workers
+        # at the training venv when ``trainer.venv`` is set in config. ``None``
+        # / unset means Ray inherits the driver's interpreter.
+        trainer_py_executable = resolve_py_executable(OmegaConf.select(self.config.trainer, "venv"), role="trainer")
+        if trainer_py_executable is not None:
+            wg_kwargs["worker_py_executable"] = trainer_py_executable
 
         for resource_pool, class_dict in self.resource_pool_to_cls.items():
             if not class_dict:

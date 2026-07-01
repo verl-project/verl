@@ -95,137 +95,209 @@ After pulling the desired Docker image and installing desired inference and trai
     pip3 install -e ".[sglang]"
 
 
-Install from custom environment
+Install from custom environment (with uv)
 ---------------------------------------------
 
-We recommend to use docker images for convenience. However, if your environment is not compatible with the docker image, you can also install verl in a python environment.
+If your environment is not compatible with the docker images, the
+recommended local install uses `uv <https://docs.astral.sh/uv/>`_ to
+build **one venv per backend** straight from ``verl/pyproject.toml``.
 
-.. note::
+verl supports 5 inference backends (``vllm``, ``sglang``, ``trtllm``,
+``vllm-ascend``, ``sglang-ascend``) and 5 training backends (``fsdp``,
+``megatron``, ``mindspeed``, ``veomni``, ``nemoautomodel``), plus a
+``cpu`` extra for CI / unit-test / sanity work that needs no GPU or
+NPU runtime. ``vllm-ascend`` / ``sglang-ascend`` / ``mindspeed`` target
+Huawei Ascend NPU; the rest target NVIDIA GPUs. Each pins its own
+Python / CUDA / PyTorch and cannot share a venv, so you create one per
+backend you need under ``verl/.venvs/.venv-<backend>/``.
 
-    - Dockerfile provides more details than this installation instructions. You can find examples in each Dockerfile, for example `verl0.6-cu128-torch2.8.0-fa2.7.4 Dockerfile.base <https://github.com/verl-project/verl/blob/v0.6.0/docker/verl0.6-cu128-torch2.8.0-fa2.7.4/Dockerfile.base>`_ .
-
-
-Pre-requisites
-::::::::::::::
-
-For training and inference engines to utilize better and faster hardware support, CUDA/cuDNN and other dependencies are required,
-and some of the dependencies are easy to be overridden when installing other packages,
-so we put them in the :ref:`Post-installation` step.
-
-.. note::
-
-    - The installation steps below are recommended configurations for the latest version of verl.
-
-    If you are trying to customize your own environment, please ignore the strict constraints.
-
-We need to install the following pre-requisites:
-
-- **CUDA**: Version >= 12.8
-- **cuDNN**: Version >= 9.10.0
-- **Apex**
-
-CUDA above 12.8 is recommended to use as the docker image,
-please refer to `NVIDIA's official website <https://developer.nvidia.com/cuda-toolkit-archive>`_ for other version of CUDA.
-
-.. code:: bash
-
-    # change directory to anywher you like, in verl source code directory is not recommended
-    wget https://developer.download.nvidia.com/compute/cuda/12.8.1/local_installers/cuda-repo-ubuntu2204-12-8-local_12.8.1-570.124.06-1_amd64.deb
-    dpkg -i cuda-repo-ubuntu2204-12-8-local_12.8.1-570.124.06-1_amd64.deb
-    cp /var/cuda-repo-ubuntu2204-12-8-local/cuda-*-keyring.gpg /usr/share/keyrings/
-    apt-get update
-    apt-get -y install cuda-toolkit-12-8
-    update-alternatives --set cuda /usr/local/cuda-12-8
-
-
-cuDNN can be installed via the following command,
-please refer to `NVIDIA's official website <https://developer.nvidia.com/rdp/cudnn-archive>`_ for other version of cuDNN.
-
-.. code:: bash
-
-    # change directory to anywher you like, in verl source code directory is not recommended
-    wget https://developer.download.nvidia.com/compute/cudnn/9.10.2/local_installers/cudnn-local-repo-ubuntu2204-9.10.2_1.0-1_amd64.deb
-    dpkg -i cudnn-local-repo-ubuntu2204-9.10.2_1.0-1_amd64.deb
-    cp /var/cudnn-local-repo-ubuntu2204-9.10.2/cudnn-*-keyring.gpg /usr/share/keyrings/
-    apt-get update
-    apt-get -y install cudnn-cuda-12
-
-Install dependencies
+1. Pick a base image
 ::::::::::::::::::::
 
-.. note::
+``uv sync`` installs Python packages only — bring your own OS / CUDA
+base image:
 
-    We recommend to use a fresh new conda environment to install verl and its dependencies.
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
 
-    **Notice that the inference frameworks often strictly limit your pytorch version and will directly override your installed pytorch if not paying enough attention.**
+   * - Backend
+     - Recommended base image
+   * - ``vllm`` / ``fsdp`` / ``megatron`` / ``veomni`` / ``nemoautomodel``
+     - ``nvidia/cuda:12.9.1-devel-ubuntu24.04``
+   * - ``sglang``
+     - ``nvidia/cuda:12.9.1-cudnn-devel-ubuntu24.04``
+   * - ``trtllm``
+     - ``nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc14``
+   * - ``vllm-ascend`` / ``mindspeed`` (Atlas A2)
+     - ``swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:8.5.0-910b-ubuntu22.04-py3.11``
+   * - ``vllm-ascend`` / ``mindspeed`` (Atlas A3)
+     - ``swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:8.5.0-a3-ubuntu22.04-py3.11``
+   * - ``sglang-ascend`` (Atlas A2 / A3)
+     - same Ascend CANN base, plus the off-PyPI ``sgl-kernel-npu`` / ``deep_ep`` / ``torch_memory_saver`` zip from `sgl-kernel-npu releases <https://github.com/sgl-project/sgl-kernel-npu/releases>`_
+   * - ``cpu`` (CI / sanity)
+     - any Linux/macOS host with python ≥3.10; no GPU drivers needed
 
-    As a countermeasure, it is recommended to install inference frameworks first with the pytorch they needed. For vLLM, if you hope to use your existing pytorch,
-    please follow their official instructions
-    `Use an existing PyTorch installation <https://docs.vllm.ai/en/latest/getting_started/installation/gpu.html#build-wheel-from-source>`_ .
+NVIDIA backends: any ``nvcr.io/nvidia/pytorch`` image works too — ``uv
+sync`` replaces its bundled torch. Ascend backends (NPU): ``torch-npu``
+provides the NPU runtime; ``torch`` itself comes from PyPI (the aarch64
+wheel is already CPU-only — no CUDA needed).
 
-
-1. First of all, to manage environment, we recommend using conda:
-
-.. code:: bash
-
-   conda create -n verl python==3.12
-   conda activate verl
-
-
-2. Then, execute the ``install.sh`` script that we provided in verl:
-
-.. code:: bash
-
-    # Make sure you have activated verl conda env
-    # If you need to run with megatron
-    bash scripts/install_vllm_sglang_mcore.sh
-    # Or if you simply need to run with FSDP
-    USE_MEGATRON=0 bash scripts/install_vllm_sglang_mcore.sh
-
-
-If you encounter errors in this step, please check the script and manually follow the steps in the script.
-
-[Optional] NVIDIA Apex is recommended for Megatron-LM training, but it's not needed if you only use FSDP backend.
-You can install it via the following command, but notice that this steps can take a very long time.
-It is recommended to set the ``MAX_JOBS`` environment variable to accelerate the installation process,
-but do not set it too large, otherwise the memory will be overloaded and your machines may hang.
+2. Install uv and sync a backend
+::::::::::::::::::::::::::::::::
 
 .. code:: bash
 
-    # change directory to anywher you like, in verl source code directory is not recommended
-    git clone https://github.com/NVIDIA/apex.git && \
-    cd apex && \
-    MAX_JOB=32 pip install -v --disable-pip-version-check --no-cache-dir --no-build-isolation --config-settings "--build-option=--cpp_ext" --config-settings "--build-option=--cuda_ext" ./
-
-Install verl
-::::::::::::
-
-For installing the latest version of verl, the best way is to clone and
-install it from source. Then you can modify our code to customize your
-own post-training jobs.
-
-.. code:: bash
+   # one-time:
+   curl -LsSf https://astral.sh/uv/install.sh | sh
 
    git clone https://github.com/verl-project/verl.git
    cd verl
-   pip install --no-deps -e .
 
+The simplest entry point is ``manage_envs.py``:
 
-Post-installation
-:::::::::::::::::
+.. code:: bash
 
-Please make sure that the installed packages are not overridden during the installation of other packages.
+   python manage_envs.py sync vllm        # creates .venvs/.venv-vllm
+   python manage_envs.py sync megatron    # creates .venvs/.venv-megatron (sets MAX_JOBS=32 etc.)
 
-The packages worth checking are:
+   python manage_envs.py sync cpu         # creates .venvs/.venv-cpu for CI / sanity tests
 
-- **torch** and torch series
-- **vLLM**
-- **SGLang**
-- **pyarrow**
-- **tensordict**
-- **nvidia-cudnn-cu12**: For Magetron backend
+   # by group:
+   python manage_envs.py sync inference   # vllm + sglang + trtllm + vllm-ascend + sglang-ascend
+   python manage_envs.py sync training    # fsdp + megatron + mindspeed + veomni + nemoautomodel
+   python manage_envs.py sync dev         # cpu
 
-If you encounter issues about package versions during running verl, please update the outdated ones.
+   python manage_envs.py list             # show installed venvs
+   python manage_envs.py clean <backend>  # delete a venv
+   python manage_envs.py --help
+
+It is just a thin wrapper; the equivalent raw ``uv`` invocation is:
+
+.. code:: bash
+
+   UV_PROJECT_ENVIRONMENT=.venvs/.venv-vllm \
+       uv sync --extra vllm --python 3.12 --link-mode=copy
+
+3. Run code in a backend
+::::::::::::::::::::::::
+
+.. code:: bash
+
+   # activate:
+   source .venvs/.venv-vllm/bin/activate
+   python -c 'import vllm; print(vllm.__version__)'
+   deactivate
+
+   # …or no activation:
+   .venvs/.venv-vllm/bin/python -m verl.trainer.main_ppo --help
+
+4. Cross-venv runtime (rollout in one venv, trainer in another)
+:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+
+For **disaggregated** RL jobs verl can route the rollout (inference)
+Ray actors and the trainer Ray actors at *different* Python interpreters
+in the same job — e.g. ``.venvs/.venv-vllm`` for rollout +
+``.venvs/.venv-megatron`` for the trainer. This avoids the impossible
+"single venv with both vLLM and Megatron+TE+Apex" matrix.
+
+It is **opt-in** via two Hydra config fields read at job start:
+
+- ``actor_rollout_ref.rollout.venv`` — used by every rollout / inference
+  Ray actor (defined on
+  :class:`verl.workers.config.RolloutConfig.venv`),
+- ``trainer.venv`` — used by every trainer Ray actor (PPO actor, critic,
+  ref policy, reward model).
+
+Each accepts any of:
+
+* a **backend name** (resolved to ``.venvs/.venv-<name>/bin/python``),
+* an **absolute venv directory** (we append ``bin/python``),
+* an **absolute path** to a Python interpreter,
+* a **full command line** such as ``"uv run --project /abs/path/to/verl"``.
+  Ray's `py_executable
+  <https://docs.ray.io/en/latest/ray-core/handling-dependencies.html#using-uv-for-package-management>`_
+  field accepts a string with arguments, so this is the recommended way
+  to integrate with ``uv run`` (auto-resync from ``pyproject.toml`` /
+  ``uv.lock`` on worker startup, support for editable packages, etc.).
+
+The two simplest usages are equivalent:
+
+.. code:: bash
+
+   # plain Hydra overrides on the verl driver command
+   .venvs/.venv-megatron/bin/python -m verl.trainer.main_ppo \
+       actor_rollout_ref.rollout.venv=vllm \
+       trainer.venv=megatron \
+       trainer.n_gpus_per_node=8 ...
+
+   # convenience wrapper (resolves specs and appends the same overrides)
+   python manage_envs.py launch --rollout vllm --trainer megatron -- \
+       python -m verl.trainer.main_ppo trainer.n_gpus_per_node=8 ...
+
+If you prefer ``uv run``-driven workers (Ray's own recommendation) point
+each role at a different uv project / extra:
+
+.. code:: bash
+
+   uv run --project $(pwd) --extra megatron -m verl.trainer.main_ppo \
+       actor_rollout_ref.rollout.venv="uv run --project $(pwd) --extra vllm" \
+       trainer.venv="uv run --project $(pwd) --extra megatron" \
+       ...
+
+Under the hood, every rollout actor / HTTP server / trainer worker is
+started with Ray's ``runtime_env={"py_executable": <spec>}``. With the
+config fields left as ``null`` (the default), behaviour is unchanged —
+every actor inherits the driver's interpreter (legacy single-venv mode).
+
+Caveats:
+
+- **Hybrid / colocated mode** runs actor + rollout in a single Ray
+  actor and therefore in a single venv; the config fields are ignored
+  for that worker class. Pick a single venv that has both rollout and
+  training packages, or switch to disaggregated mode.
+- The driver process itself isn't switched — only spawned actors are.
+  Run the driver from any venv that has verl installed (typically the
+  trainer venv), or — for the ``uv run`` style — invoke the driver via
+  ``uv run`` so Ray inherits the same executable for any actors whose
+  ``venv`` config field is ``null``.
+- ``py_executable`` is `marked experimental upstream
+  <https://docs.ray.io/en/latest/ray-core/handling-dependencies.html#runtime-environments-api-ref>`_;
+  behaviour may change with newer Ray releases.
+
+Troubleshooting
+:::::::::::::::
+
+- **``uv: command not found``** —
+  ``curl -LsSf https://astral.sh/uv/install.sh | sh``.
+- **``apex`` / ``transformer-engine`` / ``flash-attn`` build fails** —
+  these compile from source against torch + CUDA. Make sure your base
+  image has ``nvcc`` (``nvidia/cuda:*-devel``) and cuDNN.
+  ``manage_envs.py sync megatron`` defaults to ``MAX_JOBS=32`` (safe on
+  most hosts); on big machines, ``MAX_JOBS=128 python manage_envs.py
+  sync megatron`` is faster.
+- **``trtllm`` install fails on macOS / non-x86_64** — ``tensorrt-llm``
+  only ships Linux/x86_64/CUDA 13 wheels; this is by design.
+- **``mindspeed`` / ``vllm-ascend`` / ``sglang-ascend`` env can't find
+  ``torch_npu``** — ``torch-npu`` wheels only publish for Linux
+  (aarch64 + x86_64) on Ascend hosts. The extras are platform-marked
+  with ``sys_platform == 'linux'``; on macOS / Windows you can still
+  resolve a lock entry but actual NPU runs need an Ascend host.
+- **Want to start over?** —
+  ``python manage_envs.py clean all && python manage_envs.py sync <backend>``.
+- **``rollout venv resolver: ... is not an executable Python interpreter``** —
+  the ``actor_rollout_ref.rollout.venv`` / ``trainer.venv`` config field
+  points at something that isn't a real venv. Either run the missing
+  ``python manage_envs.py sync <backend>`` first, leave the field as
+  ``null`` (legacy single-venv mode), or pass an absolute path /
+  ``uv run`` command line.
+
+Optional, not handled by ``uv sync`` (Dockerfile-only steps): system
+deps (``apt-get install`` cuDNN / build-essential / libibverbs-dev /
+…), GDRCopy + DeepEP for MoE all-to-all, Mooncake for sglang KV-cache
+transfer, flashinfer JIT cache, sgl-router. Recipes live in
+``verl/docker/Dockerfile.stable.{vllm,sglang,trtllm}`` and
+``sglang/docker/Dockerfile``.
 
 
 Install with AMD GPUs - ROCM kernel support
