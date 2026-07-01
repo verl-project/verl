@@ -18,6 +18,7 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from verl.utils.profiler.config import (
+    NPUToolConfig,
     ProfilerConfig,
     TorchProfilerToolConfig,
     build_sglang_profiler_args,
@@ -48,6 +49,25 @@ class TestServerProfilerArgs(unittest.TestCase):
             self.assertTrue(profiler_config_dict["torch_profiler_with_stack"])
             self.assertTrue(profiler_config_dict["torch_profiler_record_shapes"])
             self.assertTrue(profiler_config_dict["torch_profiler_with_memory"])
+            self.assertEqual(profiler_config_dict["delay_iterations"], 0)
+            self.assertEqual(profiler_config_dict["max_iterations"], 0)
+
+    def test_build_vllm_profiler_args_with_profile_window(self):
+        tool_config = TorchProfilerToolConfig(contents=["stack"], profile_token_start=12, profile_token_end=46)
+        config = ProfilerConfig(save_path="/tmp/test", tool_config=tool_config)
+
+        args = build_vllm_profiler_args(config, tool_config, rank=1)
+        profiler_config_dict = json.loads(args["profiler_config"])
+        self.assertEqual(profiler_config_dict["delay_iterations"], 12)
+        self.assertEqual(profiler_config_dict["max_iterations"], 34)
+
+    def test_build_vllm_profiler_args_with_npu_profile_window(self):
+        tool_config = NPUToolConfig(contents=["npu"], profile_token_start=5, profile_token_end=13)
+        config = ProfilerConfig(save_path="/tmp/test", tool_config=tool_config)
+        args = build_vllm_profiler_args(config, tool_config, rank=0)
+        profiler_config_dict = json.loads(args["profiler_config"])
+        self.assertEqual(profiler_config_dict["delay_iterations"], 5)
+        self.assertEqual(profiler_config_dict["max_iterations"], 8)
 
     def test_build_sglang_profiler_args(self):
         # Case 1: Basic features
@@ -58,6 +78,15 @@ class TestServerProfilerArgs(unittest.TestCase):
         self.assertEqual(args["output_dir"], "/tmp/test/agent_loop_rollout_replica_0")
         self.assertTrue(args["with_stack"])
         self.assertTrue(args["record_shapes"])
+        self.assertIsNone(args["start_step"])
+        self.assertIsNone(args["num_steps"])
+
+    def test_build_sglang_profiler_args_with_profile_window(self):
+        tool_config = TorchProfilerToolConfig(contents=["stack"], profile_token_start=7, profile_token_end=16)
+        config = ProfilerConfig(save_path="/tmp/test", tool_config=tool_config)
+        args = build_sglang_profiler_args(config, tool_config, rank=0)
+        self.assertEqual(args["start_step"], 7)
+        self.assertEqual(args["num_steps"], 9)
 
 
 class TestServerProfilerFunctionality(unittest.IsolatedAsyncioTestCase):
@@ -79,6 +108,7 @@ class TestServerProfilerFunctionality(unittest.IsolatedAsyncioTestCase):
 
         # Mock self object
         mock_self = MagicMock()
+        mock_self.node_rank = 0
         mock_self.profiler_controller = mock_profiler
         mock_self.engine = mock_engine
 
@@ -89,6 +119,31 @@ class TestServerProfilerFunctionality(unittest.IsolatedAsyncioTestCase):
         # Test stop_profile
         await vLLMHttpServer.stop_profile(mock_self)
         mock_engine.stop_profile.assert_called_once()
+
+    async def test_vllm_start_stop_profile_non_master_node(self):
+        try:
+            from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer
+        except ImportError:
+            self.skipTest("vllm or dependencies not installed")
+            return
+
+        mock_profiler = MagicMock()
+        mock_profiler.check_enable.return_value = True
+        mock_profiler.check_this_rank.return_value = True
+        mock_profiler.is_discrete_mode.return_value = True
+
+        mock_engine = AsyncMock()
+
+        mock_self = MagicMock()
+        mock_self.node_rank = 1  # non-master node, should skip
+        mock_self.profiler_controller = mock_profiler
+        mock_self.engine = mock_engine
+
+        await vLLMHttpServer.start_profile(mock_self)
+        mock_engine.start_profile.assert_not_called()
+
+        await vLLMHttpServer.stop_profile(mock_self)
+        mock_engine.stop_profile.assert_not_called()
 
     async def test_sglang_start_stop_profile(self):
         try:

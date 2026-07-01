@@ -54,7 +54,7 @@ except ImportError:
             def _raise(*args, **kwargs):
                 raise RuntimeError(
                     f"transfer_queue is not installed. Cannot use tq.{name}(). "
-                    "Please install it by calling `pip install TransferQueue==0.1.7`"
+                    "Please install it by calling `pip install TransferQueue==0.1.8`"
                 )
 
             return _raise

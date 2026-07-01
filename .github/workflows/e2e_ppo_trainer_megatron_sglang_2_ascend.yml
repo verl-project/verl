@@ -69,7 +69,7 @@ on:
       - "!verl/model_merger/fsdp_model_merger.py"
       # Entrypoints
       - "verl/worksers/rollout/sglang_rollout/*"
-      - ".github/workflows/e2e_ppo_trainer_megatron_sglang_ascend.yml"
+      - ".github/workflows/e2e_ppo_trainer_megatron_sglang_2_ascend.yml"
       - "examples/data_preprocess/gsm8k.py"
       - "examples/data_preprocess/geo3k.py"
       - "tests/special_e2e/run_ppo_trainer_megatron.sh"
@@ -107,6 +107,9 @@ jobs:
       UV_HTTP_TIMEOUT: 120
       UV_NO_CACHE: "1"
       UV_SYSTEM_PYTHON: "1"
+      UV_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
+      PIP_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
+      PIP_TRUSTED_HOST: "cache-service.nginx-pypi-cache.svc.cluster.local"
     steps:
       - name: Check npu and CANN info
         run: |

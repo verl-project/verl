@@ -239,6 +239,7 @@ class BaseEngineCtx:
         self.mode = mode
         assert self.mode in ("train", "eval")
         self.disable_auto_offload = kwargs.pop("disable_auto_offload", False)
+        self.zero_grad_on_exit = kwargs.pop("zero_grad_on_exit", True)
 
     def _context_switch(self, device):
         if self.disable_auto_offload:

@@ -44,8 +44,15 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 def _mindspeed_repatch(engine_config):
     if repatch is not None:
-        repatch_config = dict(engine_config.get("override_transformer_config", {}))
-        repatch_config.setdefault("use_flash_attn", True)
+        from verl.utils.megatron_utils import mapping_string_to_attn_backend
+
+        repatch_config = mapping_string_to_attn_backend(dict(engine_config.get("override_transformer_config", {})))
+        # flash-attn-npu batch-invariant replaces DotProductAttention.forward; fusion attention
+        # registers the same patch when use_flash_attn=True and causes "the patch of forward exist".
+        if repatch_config.get("use_flash_attn_npu_batch_invariant"):
+            repatch_config["use_flash_attn"] = False
+        else:
+            repatch_config.setdefault("use_flash_attn", True)
         if engine_config.context_parallel_size > 1:
             repatch_config["context_parallel_size"] = engine_config.context_parallel_size
         repatch(repatch_config)
