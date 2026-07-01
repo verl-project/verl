@@ -158,15 +158,20 @@ EXTRA=(
 )
 
 if [ "${DEVICE}" = npu ]; then
+    ACTOR+=(
+        actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1
+    )
+    TRAINER+=(
+        trainer.n_gpus_per_node=16
+    )
+
     EXTRA+=(
+        actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=4
+        actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4
         actor_rollout_ref.rollout.data_parallel_size=${ROLLOUT_DP:-8}
         actor_rollout_ref.rollout.enforce_eager=False
         +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_capture_sizes=[8,16,32,64,128]
         +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode=FULL_DECODE_ONLY
-        # MindSpeed's TransformerConfig still accepts `use_flash_attn`; upstream
-        # Megatron-Core (used on GPU) removed it in favor of `attention_backend`.
-        +actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn=True
-        +actor_rollout_ref.ref.megatron.override_transformer_config.use_flash_attn=True
     )
 elif [ -n "${ROLLOUT_DP}" ]; then
     EXTRA+=(actor_rollout_ref.rollout.data_parallel_size=${ROLLOUT_DP})

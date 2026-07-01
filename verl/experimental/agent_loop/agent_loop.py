@@ -49,7 +49,6 @@ from verl.experimental.agent_loop.utils import resolve_config_path
 from verl.protocol import DataProto
 from verl.tools.tool_registry import load_all_tools
 from verl.trainer.distillation import is_distillation_enabled
-from verl.utils.chat_template import apply_chat_template, initialize_system_prompt
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.dataset.rl_dataset import RLHFDataset, get_dataset_class
 from verl.utils.model import compute_position_id_with_mask
@@ -59,7 +58,14 @@ from verl.utils.rollout_trace import (
     RolloutTraceConfig,
     rollout_trace_attr,
 )
-from verl.utils.tokenizer import normalize_token_ids
+from verl.utils.skip import SkipManager
+from verl.utils.tokenizer import (
+    build_multimodal_processor_inputs,
+    get_processor_token_id,
+    normalize_token_ids,
+)
+from verl.utils.tokenizer.chat_template import apply_chat_template, initialize_system_prompt
+from verl.utils.tokenizer.continuous_token_wiring import create_continuous_token_builder
 from verl.workers.config import (
     HFModelConfig,
     RolloutConfig,
@@ -104,6 +110,8 @@ class AgentLoopOutput(BaseModel):
     """Auxiliary performance metrics"""
     extra_fields: dict[str, Any] = {}
     """Extra fields for dynamic addition."""
+    mm_processor_kwargs: Optional[dict[str, Any]] = None
+    """Processor/backend kwargs that must stay aligned across rollout and training paths."""
 
     def as_dict(self) -> dict[str, Any]:
         """Convert agent loop output to a dictionary."""
@@ -216,29 +224,143 @@ class AgentLoopBase(ABC):
         self.dataset_cls = dataset_cls
         self.data_config = data_config.config
         self.apply_chat_template_kwargs = self.data_config.get("apply_chat_template_kwargs", {})
-        self.system_prompt = initialize_system_prompt(self.tokenizer, **self.apply_chat_template_kwargs)
+        self.mm_processor_kwargs = self.data_config.get("mm_processor_kwargs", {})
+        self.continuous_token_builder = None
+        self.enable_continuous_token = False
+        continuous_token_config = self.data_config.continuous_token
+        if continuous_token_config.enable and self.processor is None:
+            model_config = self.config.actor_rollout_ref.model
+            self.continuous_token_builder = create_continuous_token_builder(
+                self.tokenizer,
+                model_family=continuous_token_config.model_family,
+                model_path=model_config.path,
+                tokenizer_name_or_path=model_config.tokenizer_path,
+                chat_template_kwargs=self.apply_chat_template_kwargs,
+            )
+            self.enable_continuous_token = True
+            # Continuous Token doesn't use the legacy removable system prompt.
+            self.system_prompt = None
+        else:
+            if continuous_token_config.enable and self.processor is not None:
+                logger.warning(
+                    "Continuous Token is enabled but processor is set; falling back to legacy multimodal path."
+                )
+            processing_class = self.processor if self.processor is not None else self.tokenizer
+            self.system_prompt = initialize_system_prompt(processing_class, **self.apply_chat_template_kwargs)
         self.loop = get_event_loop()
 
+    def _get_mm_processor_kwargs(self, audio_data: Optional[list[Any]] = None) -> dict[str, Any]:
+        mm_processor_kwargs = dict(self.mm_processor_kwargs or {})
+        if audio_data is not None and "sampling_rate" not in mm_processor_kwargs:
+            sampling_rate = getattr(getattr(self.processor, "feature_extractor", None), "sampling_rate", None)
+            if sampling_rate is not None:
+                mm_processor_kwargs["sampling_rate"] = int(sampling_rate)
+        return mm_processor_kwargs
+
     async def process_vision_info(self, messages: list[dict]) -> dict:
-        """Extract images and videos from messages.
+        """Backward-compatible wrapper for multi-modal extraction."""
+        return await self.process_multi_modal_info(messages)
+
+    async def process_multi_modal_info(self, messages: list[dict]) -> dict:
+        """Extract images, videos and audios from messages.
 
         Args:
             messages (list[dict]): Input messages.
 
         Returns:
-            dict: Multi-modal data with keys "images" and "videos".
+            dict: Multi-modal data with keys like "images", "videos" and "audios".
         """
         multi_modal_data = {}
         if self.processor is not None:
-            images, videos = await self.dataset_cls.process_vision_info(
-                messages, image_patch_size=self.processor.image_processor.patch_size, config=self.data_config
-            )
+            image_patch_size = getattr(getattr(self.processor, "image_processor", None), "patch_size", 14)
+            if hasattr(self.dataset_cls, "process_multi_modal_info"):
+                images, videos, audios = await self.dataset_cls.process_multi_modal_info(
+                    messages, image_patch_size=image_patch_size, config=self.data_config
+                )
+            else:
+                images, videos = await self.dataset_cls.process_vision_info(
+                    messages, image_patch_size=image_patch_size, config=self.data_config
+                )
+                audios = None
             if images is not None:
                 multi_modal_data["images"] = images
             if videos is not None:
                 multi_modal_data["videos"] = videos
+            if audios is not None:
+                multi_modal_data["audios"] = audios
 
         return multi_modal_data
+
+    async def ct_build_initial_tokens(
+        self,
+        messages: list[dict],
+        tools: list[dict] = None,
+    ) -> list[int]:
+        """Build the initial prompt token ids with Continuous Token."""
+        prompt_ids = await self.loop.run_in_executor(
+            None,
+            lambda: self.continuous_token_builder.build_initial_tokens(messages, tools=tools),
+        )
+        return self._cap_text_prompt_length(prompt_ids)
+
+    async def ct_merge_non_assistant_msg(
+        self,
+        previous_messages: list[dict],
+        updated_messages: list[dict],
+        runtime_token_ids: list[int],
+        response_mask: list[int],
+        response_logprobs: Optional[list[float]] = None,
+        tools: list[dict] = None,
+    ):
+        """Merge appended non-assistant messages into runtime tokens and metadata."""
+        merge_result = await self.loop.run_in_executor(
+            None,
+            lambda: self.continuous_token_builder.merge_non_assistant_tokens(
+                previous_messages,
+                updated_messages,
+                runtime_token_ids,
+                tools=tools,
+            ),
+        )
+        aligned_response_mask, aligned_response_logprobs = self.continuous_token_builder.align_response_metadata(
+            merge_result, response_mask, response_logprobs
+        )
+        return merge_result, aligned_response_mask, aligned_response_logprobs
+
+    async def ct_merge_assistant_token(
+        self,
+        runtime_token_ids: list[int],
+        assistant_token_ids: list[int],
+        response_mask: list[int],
+        response_logprobs: Optional[list[float]] = None,
+        assistant_logprobs: Optional[list[float]] = None,
+    ):
+        """Merge assistant-generated tokens and align response metadata."""
+        merge_result = await self.loop.run_in_executor(
+            None,
+            lambda: self.continuous_token_builder.merge_assistant_tokens(
+                runtime_token_ids,
+                assistant_token_ids,
+            ),
+        )
+        aligned_response_mask, aligned_response_logprobs = self.continuous_token_builder.align_response_metadata(
+            merge_result,
+            response_mask,
+            response_logprobs,
+            assistant_logprobs=assistant_logprobs,
+        )
+        return merge_result, aligned_response_mask, aligned_response_logprobs
+
+    def _cap_text_prompt_length(self, prompt_ids: list[int]) -> list[int]:
+        prompt_length = self.rollout_config.prompt_length
+        if len(prompt_ids) > prompt_length:
+            logger.warning(
+                "Prompt of %d tokens exceeds rollout.prompt_length=%d; left-truncating.",
+                len(prompt_ids),
+                prompt_length,
+            )
+            return prompt_ids[-prompt_length:]
+        return prompt_ids
 
     async def apply_chat_template(
         self,
@@ -246,6 +368,8 @@ class AgentLoopBase(ABC):
         tools: list[dict] = None,
         images: list[Image.Image] = None,
         videos: list[tuple[torch.Tensor, dict]] = None,
+        audios: list[Any] = None,
+        mm_processor_kwargs: Optional[dict[str, Any]] = None,
         remove_system_prompt: bool = False,
     ):
         """Apply chat template to messages with optional tools, images, and videos.
@@ -273,20 +397,15 @@ class AgentLoopBase(ABC):
                 ),
             )
 
-            # split the videos and according metadatas
-            if videos is not None:
-                videos, video_metadatas = zip(*videos, strict=False)
-                videos, video_metadatas = list(videos), list(video_metadatas)
-            else:
-                video_metadatas = None
-
-            model_inputs = self.processor(
+            model_inputs = build_multimodal_processor_inputs(
+                self.processor,
                 text=[raw_prompt],
                 images=images,
                 videos=videos,
-                video_metadata=video_metadatas,
-                return_tensors="pt",
-                do_sample_frames=False,
+                audio=audios,
+                mm_processor_kwargs=mm_processor_kwargs
+                if mm_processor_kwargs is not None
+                else self._get_mm_processor_kwargs(audios),
             )
             prompt_ids = normalize_token_ids(model_inputs.pop("input_ids"))
         else:
@@ -305,6 +424,24 @@ class AgentLoopBase(ABC):
 
         if remove_system_prompt:
             prompt_ids = prompt_ids[len(self.system_prompt) :]
+
+        # Mirror the response-side ``response_ids[:response_length]`` cap on the prompt side:
+        # every prompt produced by the agent loop must fit in ``rollout.prompt_length`` so that
+        # ``_pad_token_ids`` (and downstream ``torch.cat``) can rely on uniform shapes.
+        # Multimodal prompts cannot be sliced here because placeholder tokens must remain
+        # aligned 1:1 with ``multi_modal_inputs`` features, so we fail loudly instead.
+        prompt_length = self.rollout_config.prompt_length
+        if len(prompt_ids) > prompt_length:
+            if images or videos or audios:
+                raise ValueError(
+                    f"Multimodal prompt produced {len(prompt_ids)} tokens, exceeding "
+                    f"rollout.prompt_length={prompt_length}. Truncating multimodal token "
+                    f"sequences corrupts vision/audio feature alignment, so this is treated "
+                    f"as a configuration error. Reduce the multimodal input size "
+                    f"(e.g. ``total_pixels`` / ``max_pixels`` / fps / number of frames) or "
+                    f"increase ``rollout.prompt_length``."
+                )
+            prompt_ids = self._cap_text_prompt_length(prompt_ids)
 
         return prompt_ids
 
@@ -370,6 +507,7 @@ class AgentLoopWorker:
         self.dataset_cls = get_dataset_class(config.data)
         self.tokenizer = self.model_config.tokenizer
         self.processor = self.model_config.processor
+        self.mm_processor_kwargs = config.data.get("mm_processor_kwargs", {})
 
         # Online policy distillation
         self.distillation_enabled = is_distillation_enabled(config.distillation)
@@ -411,6 +549,15 @@ class AgentLoopWorker:
             trace_config.get("max_samples_per_step_per_worker", None),
         )
 
+    def _get_mm_processor_kwargs(self, audio_data: Optional[list[Any]] = None) -> dict[str, Any]:
+        """Return multimodal processor kwargs with audio sampling-rate defaults."""
+        mm_processor_kwargs = dict(self.mm_processor_kwargs or {})
+        if audio_data is not None and "sampling_rate" not in mm_processor_kwargs:
+            sampling_rate = getattr(getattr(self.processor, "feature_extractor", None), "sampling_rate", None)
+            if sampling_rate is not None:
+                mm_processor_kwargs["sampling_rate"] = int(sampling_rate)
+        return mm_processor_kwargs
+
     async def generate_sequences(self, batch: DataProto) -> DataProto:
         """Generate sequences from agent loop.
 
@@ -433,6 +580,7 @@ class AgentLoopWorker:
             response_mask: | 1, 1, 1, ..., 1, 1 | 0, 0, .., 0, 0 | 1, 1, 1, ..., 1, 1 | 0, 0, ..., 0|
         """
         config = self.rollout_config
+        validate = batch.meta_info.get("validate", False)
         sampling_params = dict(
             temperature=config.temperature,
             top_p=config.top_p,
@@ -441,8 +589,13 @@ class AgentLoopWorker:
             logprobs=config.calculate_log_probs,
         )
 
+        def apply_greedy_sampling_params(params: dict[str, Any]) -> None:
+            params["top_p"] = 1.0
+            params["top_k"] = -1
+            params["temperature"] = 0
+
         # override sampling params for validation
-        if batch.meta_info.get("validate", False):
+        if validate:
             sampling_params["top_p"] = config.val_kwargs.top_p
             sampling_params["top_k"] = config.val_kwargs.top_k
             sampling_params["temperature"] = config.val_kwargs.temperature
@@ -477,13 +630,19 @@ class AgentLoopWorker:
             batch.meta_info.get("global_steps", -1), index.tolist(), batch.meta_info.get("validate", False)
         )
 
+        # NOTE: __do_sample__ is an internal per-sample override used by REMAX combined rollout.
+        # Do not forward it to concrete agent loops, which may reject unknown kwargs.
+        per_sample_do_sample = batch.non_tensor_batch.get("__do_sample__")
         tasks = []
         for i in range(len(batch)):
             trace_this_sample = i in traced_indices
-            kwargs = {k: v[i] for k, v in batch.non_tensor_batch.items()}
+            kwargs = {k: v[i] for k, v in batch.non_tensor_batch.items() if k != "__do_sample__"}
+            sample_sampling_params = dict(sampling_params)
+            if not validate and per_sample_do_sample is not None and not bool(per_sample_do_sample[i]):
+                apply_greedy_sampling_params(sample_sampling_params)
             tasks.append(
                 asyncio.create_task(
-                    self._run_agent_loop(sampling_params, trajectory_info[i], trace=trace_this_sample, **kwargs)
+                    self._run_agent_loop(sample_sampling_params, trajectory_info[i], trace=trace_this_sample, **kwargs)
                 )
             )
         outputs = await asyncio.gather(*tasks)
@@ -528,6 +687,37 @@ class AgentLoopWorker:
             output: AgentLoopOutput = await agent_loop.run(sampling_params, **kwargs)
             return await self._agent_loop_postprocess(output, trajectory["validate"], **kwargs)
 
+    def _pad_token_ids(
+        self,
+        tokens: list[int],
+        *,
+        max_length: int,
+        padding_side: str,
+        return_attention_mask: bool,
+    ) -> dict[str, torch.Tensor]:
+        """Right/left pad a flat list of token ids to a ``(1, max_length)`` tensor."""
+        # tokenizer.pad() with empty input returns dict with list values
+        # instead of tensors, which breaks downstream .dim() calls.
+        if not tokens:
+            pad_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else 0
+            result = {"input_ids": torch.full((1, max_length), pad_id, dtype=torch.long)}
+            if return_attention_mask:
+                result["attention_mask"] = torch.zeros((1, max_length), dtype=torch.long)
+            return result
+        self.tokenizer.padding_side = padding_side
+        padded = self.tokenizer.pad(
+            {"input_ids": tokens},
+            padding="max_length",
+            max_length=max_length,
+            return_tensors="pt",
+            return_attention_mask=return_attention_mask,
+        )
+        if padded["input_ids"].dim() == 1:
+            padded["input_ids"] = padded["input_ids"].unsqueeze(0)
+            if return_attention_mask:
+                padded["attention_mask"] = padded["attention_mask"].unsqueeze(0)
+        return padded
+
     async def _agent_loop_postprocess(self, output, validate, **kwargs) -> _InternalAgentLoopOutput:
         """Perform post-processing operations on the output of each individual agent loop."""
         output.extra_fields["raw_prompt"] = kwargs["raw_prompt"]
@@ -553,39 +743,26 @@ class AgentLoopWorker:
         #   e.g., [0,0,0,0,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,0,0,0,0]
 
         # TODO(wuxibin): remove padding and use tensordict.
-        self.tokenizer.padding_side = "left"
-        prompt_output = self.tokenizer.pad(
-            {"input_ids": output.prompt_ids},
-            padding="max_length",
+        prompt_output = self._pad_token_ids(
+            output.prompt_ids,
             max_length=self.rollout_config.prompt_length,
-            return_tensors="pt",
+            padding_side="left",
             return_attention_mask=True,
         )
-        if prompt_output["input_ids"].dim() == 1:
-            prompt_output["input_ids"] = prompt_output["input_ids"].unsqueeze(0)
-            prompt_output["attention_mask"] = prompt_output["attention_mask"].unsqueeze(0)
 
-        self.tokenizer.padding_side = "right"
-        response_output = self.tokenizer.pad(
-            {"input_ids": output.response_ids},
-            padding="max_length",
+        response_output = self._pad_token_ids(
+            output.response_ids,
             max_length=self.rollout_config.response_length,
-            return_tensors="pt",
+            padding_side="right",
             return_attention_mask=True,
         )
-        if response_output["input_ids"].dim() == 1:
-            response_output["input_ids"] = response_output["input_ids"].unsqueeze(0)
-            response_output["attention_mask"] = response_output["attention_mask"].unsqueeze(0)
 
-        response_mask_output = self.tokenizer.pad(
-            {"input_ids": output.response_mask},
-            padding="max_length",
+        response_mask_output = self._pad_token_ids(
+            output.response_mask,
             max_length=self.rollout_config.response_length,
-            return_tensors="pt",
+            padding_side="right",
             return_attention_mask=False,
         )
-        if response_mask_output["input_ids"].dim() == 1:
-            response_mask_output["input_ids"] = response_mask_output["input_ids"].unsqueeze(0)
 
         response_logprobs = None
         if output.response_logprobs is not None:
@@ -624,7 +801,16 @@ class AgentLoopWorker:
             routed_experts[:, start_pos:end_pos] = experts_tensor.unsqueeze(0)
 
         multi_modal_inputs = self._compute_multi_modal_inputs(output, input_ids)
-        position_ids = self._compute_position_ids(input_ids, attention_mask, multi_modal_inputs)
+        position_ids = self._compute_position_ids(
+            input_ids,
+            attention_mask,
+            multi_modal_inputs,
+            output.mm_processor_kwargs
+            if output.mm_processor_kwargs is not None
+            else self._get_mm_processor_kwargs(
+                output.multi_modal_data.get("audios") if output.multi_modal_data else None
+            ),
+        )
         await self._compute_score([output], kwargs=kwargs)
         await self._compute_teacher_logprobs(
             output,
@@ -662,6 +848,7 @@ class AgentLoopWorker:
             routed_experts=routed_experts,
             multi_modal_inputs=multi_modal_inputs,
             multi_modal_data=output.multi_modal_data,
+            mm_processor_kwargs=output.mm_processor_kwargs,
             teacher_logprobs=teacher_logprobs,
             teacher_ids=teacher_ids,
             reward_score=output.reward_score,
@@ -671,27 +858,26 @@ class AgentLoopWorker:
         )
 
     def _compute_multi_modal_inputs(self, output, input_ids) -> dict[str, torch.Tensor]:
-        """Compute multi-modal inputs with image and video."""
+        """Compute multi-modal inputs with image, video and audio."""
         multi_modal_inputs = {}
         if self.processor is None:
             return multi_modal_inputs
 
-        images = output.multi_modal_data.get("images")
-        videos = output.multi_modal_data.get("videos")
-        # split the videos and according metadatas
-        if videos is not None:
-            videos, video_metadatas = zip(*videos, strict=False)
-            videos, video_metadatas = list(videos), list(video_metadatas)
-        else:
-            video_metadatas = None
+        multi_modal_data = output.multi_modal_data or {}
+        images = multi_modal_data.get("images")
+        videos = multi_modal_data.get("videos")
+        audios = multi_modal_data.get("audios")
         current_text = self.tokenizer.decode(input_ids.squeeze(0), skip_special_tokens=True)
-        multi_modal_inputs = self.processor(
+
+        multi_modal_inputs = build_multimodal_processor_inputs(
+            self.processor,
             text=[current_text],
             images=images,
             videos=videos,
-            video_metadata=video_metadatas,
-            return_tensors="pt",
-            do_sample_frames=False,
+            audio=audios,
+            mm_processor_kwargs=output.mm_processor_kwargs
+            if output.mm_processor_kwargs is not None
+            else self._get_mm_processor_kwargs(audios),
         )
         multi_modal_inputs.pop("input_ids", None)
         multi_modal_inputs.pop("attention_mask", None)
@@ -705,9 +891,16 @@ class AgentLoopWorker:
             multi_modal_inputs["images_seqlens"] = images_seqlens
         return multi_modal_inputs
 
-    def _compute_position_ids(self, input_ids, attention_mask, multi_modal_inputs) -> torch.Tensor:
+    def _compute_position_ids(
+        self,
+        input_ids,
+        attention_mask,
+        multi_modal_inputs,
+        mm_processor_kwargs: Optional[dict[str, Any]] = None,
+    ) -> torch.Tensor:
         """Compute position ids for multi-modal inputs."""
-        if self.processor is None:
+        # text-only OR non-M-RoPE multimodal (e.g. Gemma4) -> standard 1D positions
+        if self.processor is None or not hasattr(self.processor, "get_rope_index"):
             return compute_position_id_with_mask(attention_mask)  # (1, seq_len)
 
         multi_modal_kwargs = {
@@ -717,8 +910,12 @@ class AgentLoopWorker:
         # For transformers>=5.3.0, mm_token_type_ids is only used to calculate position ids.
         if multi_modal_inputs.pop("mm_token_type_ids", None) is not None:
             mm_token_type_ids = torch.zeros_like(input_ids)
-            mm_token_type_ids[0][input_ids[0] == self.processor.image_token_id] = 1
-            mm_token_type_ids[0][input_ids[0] == self.processor.video_token_id] = 2
+            image_token_id = get_processor_token_id(self.processor, "image")
+            video_token_id = get_processor_token_id(self.processor, "video")
+            if image_token_id is not None:
+                mm_token_type_ids[0][input_ids[0] == image_token_id] = 1
+            if video_token_id is not None:
+                mm_token_type_ids[0][input_ids[0] == video_token_id] = 2
             multi_modal_kwargs["mm_token_type_ids"] = mm_token_type_ids
 
         # Model's get_rope_index has been dynamically bind to the processor.
@@ -752,7 +949,14 @@ class AgentLoopWorker:
                     attention_mask = torch.ones_like(input_ids, dtype=torch.int64)
                     multi_modal_inputs = self._compute_multi_modal_inputs(output, input_ids)
                     position_ids = self._compute_position_ids(
-                        input_ids.unsqueeze(0), attention_mask.unsqueeze(0), multi_modal_inputs
+                        input_ids.unsqueeze(0),
+                        attention_mask.unsqueeze(0),
+                        multi_modal_inputs,
+                        output.mm_processor_kwargs
+                        if output.mm_processor_kwargs is not None
+                        else self._get_mm_processor_kwargs(
+                            output.multi_modal_data.get("audios") if output.multi_modal_data else None
+                        ),
                     ).squeeze(0)
                     all_prompts.append(prompts)
                     all_responses.append(responses)
@@ -812,6 +1016,7 @@ class AgentLoopWorker:
             teacher_ids, teacher_logprobs = await self.teacher_server_manager.compute_teacher_logprobs_single(
                 sequence_ids=prompt_ids + response_ids,
                 multi_modal_data=output.multi_modal_data,
+                mm_processor_kwargs=output.mm_processor_kwargs,
                 routing_key=routing_key,
             )
             output.extra_fields["teacher_ids"] = teacher_ids
@@ -991,6 +1196,7 @@ class AgentLoopManager:
             )
 
     @auto_await
+    @SkipManager.annotate(role="rollout")
     async def generate_sequences(self, prompts: DataProto) -> DataProto:
         """Split input batch and dispatch to agent loop workers.
 
@@ -1000,6 +1206,12 @@ class AgentLoopManager:
         Returns:
             DataProto: Output batch.
         """
+        # Attach per-sample priority to the batch (like ``uid``) so each sample gets
+        # a globally-unique priority that flows to vLLM request scheduling. Assigned
+        # before chunking so chunks own disjoint ranges without per-worker offsets.
+        if "priority" not in prompts.non_tensor_batch:
+            prompts.non_tensor_batch["priority"] = np.arange(len(prompts), dtype=np.int64)
+
         chunkes = prompts.chunk(len(self.agent_loop_workers))
         outputs = await asyncio.gather(
             *[

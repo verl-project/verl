@@ -25,7 +25,7 @@ RUN ARCH=$(uname -m) && \
     # Clone libs
     git clone https://github.com/sgl-project/sglang.git && cd sglang && git checkout v0.5.10 && cd .. && \
     git clone https://gitcode.com/Ascend/MindSpeed.git && \
-    cd MindSpeed && git checkout 2.3.0_core_r0.12.1 && cd .. 
+    cd MindSpeed && git checkout core_r0.16.0 && cd .. 
 
 # Install repositories with low update frequency
 RUN cd sglang && \
@@ -37,6 +37,7 @@ RUN cd sglang && \
     ARCH=$(uname -m) && wget ${PTA_URL}/${PTA_BASE_VERSION}_${ARCH}.whl && pip install ${PTA_BASE_VERSION}_${ARCH}.whl && \
     echo "[LOG INFO] Torch_npu version is: ${PTA_BASE_VERSION}_${ARCH}.whl" && \
     pip install -e python[all_npu] && \
+    pip install torch==2.8.0 torchvision==0.23.0 && \
     cd .. 
 
 # Install sgl-kernel-npu
@@ -48,7 +49,7 @@ RUN ARCH=$(uname -m) && wget --no-check-certificate https://github.com/sgl-proje
 
 # Install MindSpeed & Megatron
 RUN pip install -e MindSpeed && \
-    pip install git+https://github.com/NVIDIA/Megatron-LM.git@core_v0.12.1 && \
+    pip install git+https://github.com/NVIDIA/Megatron-LM.git@core_r0.16.0 && \
     # Remove existing triton or triton-ascend installed by some third-party packages
     pip uninstall -y triton timm && \
     # Install mbridge
@@ -58,7 +59,9 @@ RUN pip install -e MindSpeed && \
     pip cache purge
 
 # Prepare and install verl (update frequently)
-RUN git clone --recursive https://github.com/volcengine/verl.git && \
+RUN export PIP_EXTRA_INDEX_URL=https://triton-ascend.osinfra.cn/pypi/simple/ && \
+    export PIP_TRUSTED_HOST=triton-ascend.osinfra.cn && \
+    git clone --recursive https://github.com/volcengine/verl.git && \
     cd verl/recipe && git checkout main && cd .. && \
     pip install -r requirements-npu.txt && pip install -v -e . && cd .. && \
     pip install click==8.2.1 cachetools nvtx opencv-python-headless==4.10.0.84 && \
@@ -71,4 +74,3 @@ RUN pip list
 
 # Setting Default Commands
 CMD ["/bin/bash"]
-

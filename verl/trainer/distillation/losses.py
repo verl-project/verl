@@ -207,9 +207,14 @@ def distillation_ppo_loss(
     # Called as final policy loss
     distillation_loss_config = distillation_config.distillation_loss
     distill_loss, distill_metrics = distillation_loss(config, distillation_config, model_output, data)
-    policy_loss, policy_metrics = ppo_loss(config, model_output, data, dp_group)
-    if not distillation_loss_config.use_task_rewards:
+    if not distillation_loss_config.use_task_rewards and not distillation_loss_config.use_policy_gradient:
+        # no need to compute policy loss
         policy_loss = 0.0
+        policy_metrics = {}
+    else:
+        policy_loss, policy_metrics = ppo_loss(config, model_output, data, dp_group)
+        if not distillation_loss_config.use_task_rewards:
+            policy_loss = 0.0
 
     # Combine distillation with policy loss
     policy_metrics.update(distill_metrics)
@@ -308,11 +313,34 @@ def compute_forward_kl_topk(
     distillation_losses = no_padding_2_padding(model_output["distillation_losses"], data)
     student_mass = no_padding_2_padding(model_output["student_mass"], data)
     teacher_mass = no_padding_2_padding(model_output["teacher_mass"], data)
+    overlap_count = model_output.get("overlap_count")
+    overlap_token_advantage = model_output.get("overlap_token_advantage")
+    if overlap_count is not None and overlap_token_advantage is not None:
+        overlap_count = no_padding_2_padding(overlap_count, data)
+        overlap_token_advantage = no_padding_2_padding(overlap_token_advantage, data)
     if data["response_mask"].is_nested:
         response_mask_bool = data["response_mask"].bool().to_padded_tensor(False)
     else:
         response_mask_bool = data["response_mask"].bool()
     assert distillation_losses.shape == student_mass.shape == teacher_mass.shape == response_mask_bool.shape
+
+    overlap_metrics = {}
+    if overlap_count is not None and overlap_token_advantage is not None:
+        assert overlap_count.shape == overlap_token_advantage.shape == response_mask_bool.shape
+        valid_overlap_count = overlap_count[response_mask_bool]
+        k = distillation_config.distillation_loss.topk
+        assert k is not None
+        # Diagnostics for tracking teacher/student top-k overlap in OPD, following
+        # "Rethinking On-Policy Distillation of Large Language Models" (arXiv:2604.13016):
+        # overlap ratio and average teacher-token KL contribution on overlapped tokens.
+        overlap_metrics["distillation/overlap_ratio"] = (valid_overlap_count.float().mean() / k).item()
+        overlap_position_mask = response_mask_bool & (overlap_count > 0)
+        if overlap_position_mask.any():
+            overlap_metrics["distillation/overlap_token_advantage"] = (
+                overlap_token_advantage[overlap_position_mask].mean().item()
+            )
+        else:
+            overlap_metrics["distillation/overlap_token_advantage"] = 0.0
 
     # Log amount of mass in the top-k log probabilities for both student and teacher.
     student_mass = student_mass[response_mask_bool]
@@ -324,6 +352,7 @@ def compute_forward_kl_topk(
         "distillation/teacher_mass": teacher_mass.mean().item(),
         "distillation/teacher_mass_min": Metric(AggregationType.MIN, teacher_mass.min()),
         "distillation/teacher_mass_max": Metric(AggregationType.MAX, teacher_mass.max()),
+        **overlap_metrics,
     }
 
     # Due to use of top-k, student and teacher distributions don't sum to 1 -> divergences can be negative.

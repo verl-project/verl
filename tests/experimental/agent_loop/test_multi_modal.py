@@ -66,6 +66,7 @@ def init_config() -> DictConfig:
     config.actor_rollout_ref.rollout.prompt_length = 10240
     config.actor_rollout_ref.rollout.response_length = 4096
     config.actor_rollout_ref.rollout.n = 4
+    config.actor_rollout_ref.rollout.seed = 0
     config.actor_rollout_ref.rollout.agent.num_workers = 2
     config.actor_rollout_ref.rollout.skip_tokenizer_init = True
 
@@ -164,6 +165,11 @@ def test_multimodal_tool_agent(init_config):
     init_config.actor_rollout_ref.rollout.multi_turn.tool_config_path = tool_config_path
     init_config.actor_rollout_ref.rollout.multi_turn.max_parallel_calls = 1
     init_config.actor_rollout_ref.rollout.multi_turn.max_user_turns = 1
+    # The video sample in this test naturally produces ~60k tokens under transformers 5.x
+    # (much more aggressive multimodal placeholder expansion than 4.x). The agent loop
+    # enforces ``len(prompt_ids) <= rollout.prompt_length`` and refuses to silently
+    # truncate multimodal prompts, so size the budget to fit the natural prompt length.
+    init_config.actor_rollout_ref.rollout.prompt_length = 65536
     agent_loop_manager = init_agent_loop_manager(init_config)
 
     # =========================== 2. Generate sequences with multimodal prompts ===========================
@@ -314,6 +320,10 @@ def test_multimodal_single_turn_agent(init_config):
     init_config.actor_rollout_ref.rollout.n = n
     init_config.actor_rollout_ref.rollout.multi_turn.max_parallel_calls = 1
     init_config.actor_rollout_ref.rollout.multi_turn.max_user_turns = 1
+    # Same as ``test_multimodal_tool_agent``: the video sample exceeds the default 10k
+    # ``prompt_length`` under transformers 5.x, and the agent loop refuses to truncate
+    # multimodal prompts in place, so request a larger budget for this test.
+    init_config.actor_rollout_ref.rollout.prompt_length = 65536
     agent_loop_manager = init_agent_loop_manager(init_config)
 
     # =========================== 2. Generate sequences with multimodal prompts ===========================

@@ -42,7 +42,6 @@ from verl.trainer.ppo.reward import extract_reward
 from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_reward_model
 from verl.utils.debug import marked_timer
 from verl.utils.import_utils import load_class_from_fqn
-from verl.utils.rollout_skip import RolloutSkip
 from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.rollout.llm_server import LLMServerManager
 
@@ -296,10 +295,6 @@ class OneStepOffRayTrainer(SeparateRayPPOTrainer):
             if self.config.trainer.get("val_only", False):
                 return
 
-        if self.config.actor_rollout_ref.rollout.get("skip_rollout", False):
-            rollout_skip = RolloutSkip(self.config, self.actor_rollout_wg)
-            rollout_skip.wrap_generate_sequences()
-
         # add tqdm
         self.progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
 
@@ -402,7 +397,6 @@ class OneStepOffRayTrainer(SeparateRayPPOTrainer):
         # sync weights from actor to rollout
         with marked_timer("sync_rollout_weights", timing_raw, color="purple"):
             self._fit_update_weights()
-            await self.llm_server_manager.clear_kv_cache()
 
         # async next generation
         if not self.is_last_step:

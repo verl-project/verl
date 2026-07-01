@@ -147,30 +147,35 @@ class NaiveRouter:
         body = await request.body()
         headers = dict(request.headers)
 
-        for attempt in range(self.max_attempts):
-            # Send request to worker
-            try:
-                async with self.client.request(request.method, target_url, data=body, headers=headers) as response:
-                    response.raise_for_status()
-                    output = await _read_async_response(response)
-                    self._release_worker(worker_url)
-                    return output
-            except asyncio.TimeoutError:
-                logger.warning(f"Async request to {endpoint} timed out (attempt {attempt + 1})")
-            except aiohttp.ClientConnectorError:
-                logger.warning(f"Connection error for {endpoint} (attempt {attempt + 1})")
-            except aiohttp.ClientResponseError as e:
-                logger.error(f"HTTP error for {endpoint}: {e}")
-                raise
-            except Exception as e:
-                logger.error(f"Unexpected error for {endpoint}: {e}")
-                if attempt == self.max_attempts - 1:
+        try:
+            for attempt in range(self.max_attempts):
+                # Send request to worker
+                try:
+                    async with self.client.request(request.method, target_url, data=body, headers=headers) as response:
+                        response.raise_for_status()
+                        output = await _read_async_response(response)
+                        return output
+                except asyncio.TimeoutError:
+                    logger.warning(f"Async request to {endpoint} timed out (attempt {attempt + 1})")
+                except aiohttp.ClientConnectorError:
+                    logger.warning(f"Connection error for {endpoint} (attempt {attempt + 1})")
+                except aiohttp.ClientResponseError as e:
+                    logger.error(f"HTTP error for {endpoint}: {e}")
                     raise
+                except Exception as e:
+                    logger.error(f"Unexpected error for {endpoint}: {e}")
+                    if attempt == self.max_attempts - 1:
+                        raise
 
-            if attempt < self.max_attempts - 1:
-                await asyncio.sleep(self.retry_delay * (2**attempt))
+                if attempt < self.max_attempts - 1:
+                    await asyncio.sleep(self.retry_delay * (2**attempt))
 
-        raise RuntimeError(f"Failed to complete async request to {endpoint} after {self.max_attempts} attempts")
+            raise RuntimeError(f"Failed to complete async request to {endpoint} after {self.max_attempts} attempts")
+        finally:
+            # Always balance the increment from _select_worker(), even when the
+            # request fails or raises after exhausting retries; otherwise the
+            # worker's count leaks upward and skews load balancing permanently.
+            self._release_worker(worker_url)
 
     def _select_worker(self) -> str:
         """Select the least-loaded worker (simple round-robin by request count)."""

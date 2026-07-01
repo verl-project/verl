@@ -42,6 +42,7 @@ from sglang.srt.managers.io_struct import (
 )
 from sglang.srt.managers.tokenizer_manager import ServerStatus
 
+from verl.plugin.platform import get_platform
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import get_visible_devices_keyword
 from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
@@ -254,6 +255,20 @@ class SGLangHttpServer:
 
         engine_kwargs = self.config.get("engine_kwargs", {}).get("sglang", {}) or {}
         attention_backend = engine_kwargs.pop("attention_backend", None)
+        mm_attention_backend = engine_kwargs.pop("mm_attention_backend", None)
+        if attention_backend is None:
+            if torch.version.hip is not None:
+                attention_backend = "aiter"
+            elif version.parse(sglang.__version__) >= version.parse("0.5.12"):
+                # FA3 CUDA-graph capture is broken on sglang>=0.5.12 (#22800);
+                # default to flashinfer (users can opt into fa4 via engine_kwargs).
+                attention_backend = "flashinfer"
+            else:
+                attention_backend = "fa3"
+        # mm_attention_backend uses a different name space than attention_backend
+        # (e.g. text "flashinfer" vs vision "flashinfer_cudnn"), so don't mirror it.
+        # Leave None to let sglang's VisionAttention auto-pick per device
+        # (triton_attn on Ada, fa3 on Hopper, fa4 on Blackwell).
         quantization = self.config.get("quantization", None)
         if quantization is not None:
             if quantization == "fp8":
@@ -287,8 +302,8 @@ class SGLangHttpServer:
             "trust_remote_code": self.model_config.trust_remote_code,
             "max_running_requests": self.config.get("max_num_seqs", None),
             "log_level": "error",
-            "mm_attention_backend": "fa3",
-            "attention_backend": attention_backend if attention_backend is not None else "fa3",
+            "mm_attention_backend": mm_attention_backend,
+            "attention_backend": attention_backend,
             "skip_tokenizer_init": self.config.skip_tokenizer_init,
             "skip_server_warmup": True,
             "quantization": quantization,
@@ -356,7 +371,7 @@ class SGLangHttpServer:
         # mtp
         if self.config.mtp is not None and self.config.mtp.enable and self.config.mtp.enable_rollout:
             # Enable weights CPU backup for sglang >= 0.5.6
-            if sglang.__version__ < "0.5.6":
+            if version.parse(sglang.__version__) < version.parse("0.5.6"):
                 raise ValueError(f"sglang version {sglang.__version__} is not supported for MTP rollout")
 
             args["speculative_algorithm"] = self.config.mtp.speculative_algorithm
@@ -477,6 +492,21 @@ class SGLangHttpServer:
     async def clear_kv_cache(self):
         if self.node_rank == 0:
             await self.tokenizer_manager.flush_cache()
+
+    async def release_kv_cache(self):
+        """Release only kv_cache GPU memory, keeping model weights intact."""
+        if self.node_rank != 0 or not self.config.free_cache_engine:
+            return
+        obj = ReleaseMemoryOccupationReqInput(tags=["kv_cache"])
+        await self.tokenizer_manager.release_memory_occupation(obj, None)
+
+    async def resume_kv_cache(self):
+        """Restore kv_cache GPU memory after a weight sync. Counterpart to release_kv_cache()."""
+        if self.node_rank != 0 or not self.config.free_cache_engine:
+            return
+        obj = ResumeMemoryOccupationReqInput(tags=["kv_cache"])
+        await self.tokenizer_manager.resume_memory_occupation(obj, None)
+        await self.tokenizer_manager.flush_cache()
 
     async def generate(
         self,
@@ -599,10 +629,12 @@ class SGLangHttpServer:
                 # SGLang may return mismatched lengths (e.g. max_new_tokens=0
                 # produces a phantom logprob entry with empty output_ids), or
                 # an abort may leave an empty logprob payload.
-                assert not token_ids, (
-                    f"output_token_logprobs length ({len(output_token_logprobs)}) != "
-                    f"output_ids length ({len(token_ids)}) for request {request_id}"
-                )
+                if len(output_token_logprobs) != len(token_ids):
+                    logger.error(
+                        f"output_token_logprobs length ({len(output_token_logprobs)}) != "
+                        f"output_ids length ({len(token_ids)}) for request {request_id}"
+                    )
+                token_ids = []
                 log_probs = []
         else:
             token_ids = output["output_ids"]
@@ -634,6 +666,12 @@ class SGLangHttpServer:
                 sequence_length=len(prompt_ids),
                 result_dict=extra_fields,
             )
+
+        # Re-key backend spec-decoding stats to the rollout-common names.
+        if self.config.mtp is not None and self.config.mtp.enable and self.config.mtp.enable_rollout:
+            extra_fields["spec_num_draft_tokens"] = int(meta_info["spec_draft_token_num"])
+            extra_fields["spec_num_accepted_tokens"] = int(meta_info["spec_accept_token_num"])
+            extra_fields["spec_num_verify_steps"] = int(meta_info["spec_verify_ct"])
 
         return TokenOutput(
             token_ids=token_ids,
@@ -756,7 +794,12 @@ class SGLangReplica(RolloutReplica):
                     node_id=node_id,
                     soft=False,
                 ),
-                runtime_env={"env_vars": {f"RAY_EXPERIMENTAL_NOSET_{visible_devices_keyword}": "1"}},
+                runtime_env={
+                    "env_vars": {
+                        **{var: "1" for var in get_platform().ray_noset_envvars()},
+                        **get_platform().rollout_env_vars(),
+                    }
+                },
                 name=name,
                 max_concurrency=self.max_concurrency,
             ).remote(

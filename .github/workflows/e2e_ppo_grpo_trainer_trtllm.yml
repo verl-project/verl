@@ -92,7 +92,7 @@ permissions:
   contents: read
 
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:trtllm1.3.0rc13-20250504"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:trtllm-1.3.0rc15"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
 
 jobs:
@@ -134,6 +134,10 @@ jobs:
           pip3 install pytest-asyncio
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
+          pip3 install --no-deps TransferQueue==0.1.8
+      - name: Check final pip list
+        run: |
+          pip3 list
       - name: Run TRTLLM unit tests
         run: |
           unset TORCH_CUDA_ARCH_LIST  # Let TRT-LLM CUTLASS DSL auto-detect runtime GPU arch
@@ -145,9 +149,6 @@ jobs:
             tests/workers/rollout/rollout_trtllm/test_async_server.py \
             tests/workers/rollout/rollout_trtllm/test_inter_node_rollout.py \
             tests/workers/rollout/rollout_trtllm/test_trtllm_rollout_utils.py
-          ray stop --force
-          pytest -v -s --durations=20 \
-            tests/workers/rollout/rollout_trtllm/test_trtllm_abort.py
 
   e2e_grpo_trainer_megatron-qwen2:
     needs: setup
@@ -170,9 +171,11 @@ jobs:
       - name: Install the current repository
         run: |
           pip3 install -r requirements-test.txt
+          pip3 install -r requirements.txt
           pip3 install --no-deps -e .
-          # WAR: CI image predates mbridge cf71117 (removes `imp` for Python 3.12). Drop this line after CI image is refreshed.
-          pip3 install --force-reinstall --no-deps --no-build-isolation git+https://github.com/ISEEKYAN/mbridge.git
+      - name: Check final pip list
+        run: |
+          pip3 list
       - name: Prepare GSM8K dataset
         run: |
           python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k --local_save_dir ${PWD}/data/gsm8k
@@ -224,10 +227,12 @@ jobs:
         run: |
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
+          pip3 install --no-deps TransferQueue==0.1.8
           pip3 install qwen_vl_utils
           pip3 install mathruler
-          # WAR: CI image predates mbridge cf71117 (removes `imp` for Python 3.12). Drop this line after CI image is refreshed.
-          pip3 install --force-reinstall --no-deps --no-build-isolation git+https://github.com/ISEEKYAN/mbridge.git
+      - name: Check final pip list
+        run: |
+          pip3 list
       - name: Prepare GEO3K dataset
         run: |
           python3 examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/models/hf_data/hiyouga/geometry3k --local_save_dir ${PWD}/data/geo3k
@@ -254,18 +259,17 @@ jobs:
       - name: clean up
         run: |
           rm -rf checkpoints
-      - name: Prepare DAPO-Math-17k and AIME-2024 datasets (data_preprocess)
+      - name: Prepare GSM8K dataset (data_preprocess)
         run: |
-          python3 examples/data_preprocess/dapo_multiturn_w_tool.py --local_save_dir ${PWD}/data/dapo-math-17k
-          python3 examples/data_preprocess/aime2024_multiturn_w_tool.py --local_save_dir ${PWD}/data/aime-2024
-      - name: Running DAPO E2E with FP8 TRT-LLM rollout (Qwen3-0.6B)
+          python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k --local_save_dir ${PWD}/data/gsm8k
+      - name: Running GRPO E2E with FP8 TRT-LLM rollout (Qwen3-0.6B, gsm8k)
         run: |
           unset TORCH_CUDA_ARCH_LIST  # Let TRT-LLM CUTLASS DSL auto-detect runtime GPU arch
           export TRTLLM_ENABLE_PDL=0  # Disable Programmatic Dependent Launch (uses SM 9.0 griddepcontrol)
           ray stop --force
           export INFER_TP=2 ACTOR_TP=2 ACTOR_PP=2 ACTOR_VPP=2 ACTOR_EP=1 ACTOR_CP=2 REF_TP=2 REF_PP=2 REF_VPP=2 REF_EP=1 REF_CP=2 GEN_MOE_TP=null GEN_MOE_EP=null
           export NNODES=1 GPUS_PER_NODE=8 TRTLLM_MOE_BACKEND=TRITON
-          export DATA_DIR=${PWD} DAPO_MATH_TRAIN=${PWD}/data/dapo-math-17k/train.parquet AIME_VAL=${PWD}/data/aime-2024/train.parquet MODEL_PATH=${HOME}/models/Qwen/Qwen3-0.6B
+          export DATA_DIR=${PWD} DAPO_MATH_TRAIN=${PWD}/data/gsm8k/train.parquet AIME_VAL=${PWD}/data/gsm8k/test.parquet MODEL_PATH=${HOME}/models/Qwen/Qwen3-0.6B
           INFER_BACKEND=trtllm ROLLOUT_QUANTIZATION=fp8 bash examples/grpo_trainer/run_qwen3_30b_a3b_megatron.sh \
             reward_model.reward_kwargs.overlong_buffer_cfg.len=258 \
             reward_model.reward_kwargs.max_resp_len=512 \

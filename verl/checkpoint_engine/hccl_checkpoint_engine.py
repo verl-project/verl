@@ -152,18 +152,18 @@ class HCCLCheckpointEngine(CheckpointEngine):
         torch.npu.empty_cache()
 
     @classmethod
-    def build_topology(cls, trainer_world_size: int, rollout_world_size: int, metadata: list[dict]):
-        trainer_kwargs = {
-            "rank": [0] + [-1] * (trainer_world_size - 1),
-            "world_size": [rollout_world_size + 1] * trainer_world_size,
-            "master_metadata": [metadata[0]] * trainer_world_size,
+    def build_topology(cls, actor_wg_world_size: int, rollout_world_size: int, metadata: list[dict]):
+        actor_wg_kwargs = {
+            "rank": [0] + [-1] * (actor_wg_world_size - 1),
+            "world_size": [rollout_world_size + 1] * actor_wg_world_size,
+            "master_metadata": [metadata[0]] * actor_wg_world_size,
         }
         rollout_kwargs = {
             "rank": list(range(1, rollout_world_size + 1)),
             "world_size": [rollout_world_size + 1] * rollout_world_size,
             "master_metadata": [metadata[0]] * rollout_world_size,
         }
-        return trainer_kwargs, rollout_kwargs
+        return actor_wg_kwargs, rollout_kwargs
 
     def _start_zmq_server(self):
         self.ip = ray.util.get_node_ip_address().strip("[]")
@@ -199,7 +199,7 @@ class HCCLCheckpointEngine(CheckpointEngine):
             rank (int): The rank of the current process.
             world_size (int): The total number of processes.
         """
-        # For trainer workers other than rank 0, their rank should be -1.
+        # For actor workers other than rank 0, their rank should be -1.
         if rank < 0:
             self.rank = rank
             self.world_size = world_size
@@ -227,7 +227,11 @@ class HCCLCheckpointEngine(CheckpointEngine):
         logger.info(f"init_process_group rank: {self.rank}, world_size: {self.world_size}")
 
     @torch.no_grad()
-    async def send_weights(self, weights: Generator[tuple[str, torch.Tensor], None, None]):
+    async def send_weights(
+        self,
+        weights: Generator[tuple[str, torch.Tensor], None, None],
+        global_steps: int | None = None,
+    ):
         """Send the weights of the model.
 
         Args:
@@ -235,7 +239,7 @@ class HCCLCheckpointEngine(CheckpointEngine):
         """
         assert self.rank <= 0, "Trainer workers other than rank 0 should not send weights."
 
-        # For trainer rank other than 0, consume weights without sending.
+        # For actor rank other than 0, consume weights without sending.
         if self.rank < 0:
             for name, weight in weights:
                 pass
@@ -300,7 +304,10 @@ class HCCLCheckpointEngine(CheckpointEngine):
         logger.info(f"Rank {self.rank} send weights done, time cost: {time.time() - start_time:.2f}s")
 
     @torch.no_grad()
-    async def receive_weights(self) -> AsyncGenerator[tuple[str, torch.Tensor], None]:
+    async def receive_weights(
+        self,
+        global_steps: int | None = None,
+    ) -> AsyncGenerator[tuple[str, torch.Tensor], None]:
         """Receive the weights of the model.
 
         Yields:

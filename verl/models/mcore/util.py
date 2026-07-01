@@ -567,11 +567,15 @@ def preprocess_bshd_engine(
     """
     Preprocess bshd sequences
     return "input_ids, attention_mask, position_ids"
+
+    The input is a jagged nested tensor with shape [batch, seq, ...]. Any
+    dense dimensions after seq are preserved in the returned padded tensor.
     """
     cp_size = mpu.get_context_parallel_world_size()
     cp_rank = mpu.get_context_parallel_rank()
 
     batch_size = input_ids.shape[0]
+    dense_shape = tuple(input_ids.shape[2:])
     seqlens_in_batch = input_ids.offsets().diff()
     max_seqlen = seqlens_in_batch.max().item()
     tp_size = mpu.get_tensor_model_parallel_world_size()
@@ -598,7 +602,9 @@ def preprocess_bshd_engine(
 
     local_max_seqlen = max_seqlen // cp_size if cp_size > 1 else max_seqlen
     attention_mask = torch.zeros(batch_size, local_max_seqlen, dtype=torch.bool, device=input_ids.device)
-    input_ids_bshd = torch.zeros(batch_size, local_max_seqlen, dtype=input_ids.dtype, device=input_ids.device)
+    input_ids_bshd = torch.zeros(
+        (batch_size, local_max_seqlen, *dense_shape), dtype=input_ids.dtype, device=input_ids.device
+    )
     seqlens_in_batch_cpu: list[int] = seqlens_in_batch.tolist()
     for i in range(batch_size):
         seqlen_i = int(seqlens_in_batch_cpu[i])
@@ -609,7 +615,7 @@ def preprocess_bshd_engine(
 
         seq = input_ids[i]
         if seqlen_i < max_seqlen:
-            seq_padded = torch.zeros(max_seqlen, dtype=seq.dtype, device=seq.device)
+            seq_padded = torch.zeros((max_seqlen, *dense_shape), dtype=seq.dtype, device=seq.device)
             seq_padded[:seqlen_i] = seq
             seq = seq_padded
 
@@ -639,7 +645,7 @@ def preprocess_bshd_engine(
 
     if cp_size <= 1:
         position_ids = torch.arange(local_max_seqlen, dtype=torch.long, device=input_ids.device)
-        position_ids = position_ids.unsqueeze(0).expand_as(input_ids_bshd)
+        position_ids = position_ids.unsqueeze(0).expand_as(attention_mask)
     else:
         chunk_len = max_seqlen // (2 * cp_size)
         first_pos = torch.arange(
@@ -651,7 +657,7 @@ def preprocess_bshd_engine(
             dtype=torch.long,
             device=input_ids.device,
         )
-        position_ids = torch.cat((first_pos, second_pos), dim=0).unsqueeze(0).expand_as(input_ids_bshd)
+        position_ids = torch.cat((first_pos, second_pos), dim=0).unsqueeze(0).expand_as(attention_mask)
     if need_roll and cp_size <= 1:
         input_ids_bshd = torch.roll(input_ids_bshd, shifts=-1, dims=1)
 

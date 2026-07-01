@@ -127,6 +127,8 @@ if [ "${DEVICE}" = npu ]; then
         actor_rollout_ref.actor.fsdp_config.optimizer_offload=True
         actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size=${SP_SIZE}
         actor_rollout_ref.ref.fsdp_config.ulysses_sequence_parallel_size=${SP_SIZE}
+        +actor_rollout_ref.rollout.engine_kwargs.vllm.mm_processor_cache_gb=0
+        actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=20
     )
 else
     EXTRA=(

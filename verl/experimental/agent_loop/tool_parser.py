@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import ast
 import json
 import logging
 import os
@@ -40,12 +41,27 @@ class FunctionCall(BaseModel):
     name: str
     """The name of the function to call."""
 
+    tool_call_id: Optional[str] = None
+    """The model-emitted tool call identifier, if available."""
+
 
 class ToolParser(ABC):
     _registry: dict[str, type["ToolParser"]] = {}
 
     def __init__(self, tokenizer) -> None:
         self.tokenizer = tokenizer
+
+    @property
+    def stop_token_ids(self) -> list[int]:
+        """Token IDs that should stop generation so the parser can run.
+
+        Models like Qwen3 naturally emit EOS after a tool call, so no extra stop
+        tokens are needed. Models like Gemma4 emit <tool_call|> but continue
+        generating without EOS — they need the closing token as an explicit stop.
+
+        Returns empty list by default (rely on model's EOS behavior).
+        """
+        return []
 
     @abstractmethod
     async def extract_tool_calls(
@@ -268,11 +284,14 @@ class Qwen3XMLToolParser(ToolParser):
                             f"JSON object in tool '{func_name}', will try other methods to parse it."
                         )
                 try:
-                    param_value = eval(param_value)
+                    # Use ast.literal_eval instead of eval: the parameter value comes from
+                    # untrusted model output, and eval() would allow arbitrary code execution.
+                    # literal_eval only parses Python literals (lists, tuples, dicts, numbers, ...).
+                    param_value = ast.literal_eval(param_value)
                 except Exception:
                     logger.warning(
                         f"Parsed value '{param_value}' of parameter '{param_name}' cannot be converted "
-                        f"via Python `eval()` in tool '{func_name}', degenerating to string."
+                        f"via `ast.literal_eval()` in tool '{func_name}', degenerating to string."
                     )
                 return param_value
 
@@ -339,3 +358,354 @@ class Qwen3XMLToolParser(ToolParser):
         except Exception as e:
             logger.exception(f"Error in extracting tool call from response: {e}")
             return text, []
+
+
+@ToolParser.register("glm")
+class GLMToolParser(ToolParser):
+    """Tool parser for GLM XML-style function calls."""
+
+    def __init__(self, tokenizer) -> None:
+        super().__init__(tokenizer)
+        self.tool_call_start_token = "<tool_call>"
+        self.tool_call_end_token = "</tool_call>"
+        self.observation_token = "<|observation|>"
+        self.tool_call_regex = regex.compile(r"<tool_call>(.*?)</tool_call>", regex.DOTALL)
+        self.arg_pair_regex = regex.compile(
+            r"<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>",
+            regex.DOTALL,
+        )
+
+    @property
+    def stop_token_ids(self) -> list[int]:
+        token_id = self.tokenizer.convert_tokens_to_ids(self.observation_token)
+        if isinstance(token_id, int) and token_id >= 0:
+            return [token_id]
+        return []
+
+    @staticmethod
+    def _convert_arg_value(raw_value: str) -> Any:
+        value = raw_value.strip()
+        try:
+            return json.loads(value)
+        except Exception:
+            return value
+
+    def _parse_tool_call(self, tool_call_text: str) -> FunctionCall:
+        first_arg_index = tool_call_text.find("<arg_key>")
+        if first_arg_index < 0:
+            name = tool_call_text.strip()
+            arguments: dict[str, Any] = {}
+        else:
+            name = tool_call_text[:first_arg_index].strip()
+            arguments = {
+                key.strip(): self._convert_arg_value(value)
+                for key, value in self.arg_pair_regex.findall(tool_call_text[first_arg_index:])
+            }
+        return FunctionCall(name=name, arguments=json.dumps(arguments, ensure_ascii=False))
+
+    @staticmethod
+    def _strip_thinking_markers(content: str) -> str:
+        content = regex.sub(r"^\s*<think>.*?</think>", "", content, flags=regex.DOTALL)
+        content = regex.sub(r"^\s*</think>", "", content)
+        return content
+
+    @rollout_trace_op
+    async def extract_tool_calls(
+        self, responses_ids: list[int], tools: list[OpenAIFunctionToolSchema] = None
+    ) -> tuple[str, list[FunctionCall]]:
+        del tools
+        loop = get_event_loop()
+        text = await loop.run_in_executor(
+            None,
+            lambda: self.tokenizer.decode(responses_ids, skip_special_tokens=False),
+        )
+        if self.tool_call_start_token not in text or self.tool_call_end_token not in text:
+            return text, []
+
+        matches = self.tool_call_regex.findall(text)
+        function_calls: list[FunctionCall] = []
+        for match in matches:
+            try:
+                function_calls.append(self._parse_tool_call(match))
+            except Exception as e:
+                logger.error(f"Failed to decode GLM tool call: {e}")
+
+        content_index = text.find(self.tool_call_start_token)
+        content = self._strip_thinking_markers(text[:content_index])
+        return content, function_calls
+
+
+@ToolParser.register("seed")
+class SeedToolParser(ToolParser):
+    """Tool parser for ByteDance Seed XML-style function calls."""
+
+    def __init__(self, tokenizer) -> None:
+        super().__init__(tokenizer)
+        self.tool_call_start_token = "<seed:tool_call>"
+        self.tool_call_end_token = "</seed:tool_call>"
+        self.tool_call_regex = regex.compile(r"<seed:tool_call>(.*?)</seed:tool_call>", regex.DOTALL)
+        self.function_regex = regex.compile(r"<function=([^>\n]+)>\s*(.*?)</function>", regex.DOTALL)
+        self.parameter_regex = regex.compile(r"<parameter=([^>\n]+)>(.*?)</parameter>", regex.DOTALL)
+
+    @staticmethod
+    def _convert_parameter_value(raw_value: str) -> Any:
+        value = raw_value.strip()
+        try:
+            return json.loads(value)
+        except Exception:
+            return value
+
+    def _parse_tool_call(self, tool_call_text: str) -> FunctionCall | None:
+        match = self.function_regex.search(tool_call_text)
+        if not match:
+            return None
+
+        name = match.group(1).strip()
+        body = match.group(2)
+        arguments = {
+            key.strip(): self._convert_parameter_value(value) for key, value in self.parameter_regex.findall(body)
+        }
+        return FunctionCall(name=name, arguments=json.dumps(arguments, ensure_ascii=False))
+
+    @rollout_trace_op
+    async def extract_tool_calls(
+        self, responses_ids: list[int], tools: list[OpenAIFunctionToolSchema] = None
+    ) -> tuple[str, list[FunctionCall]]:
+        del tools
+        loop = get_event_loop()
+        text = await loop.run_in_executor(
+            None,
+            lambda: self.tokenizer.decode(responses_ids, skip_special_tokens=False),
+        )
+        if self.tool_call_start_token not in text or self.tool_call_end_token not in text:
+            return text, []
+
+        function_calls: list[FunctionCall] = []
+        for match in self.tool_call_regex.findall(text):
+            try:
+                function_call = self._parse_tool_call(match)
+                if function_call is not None:
+                    function_calls.append(function_call)
+            except Exception as e:
+                logger.error(f"Failed to decode Seed tool call: {e}")
+
+        content_index = text.find(self.tool_call_start_token)
+        return text[:content_index], function_calls
+
+
+@ToolParser.register("minimax")
+class MiniMaxToolParser(ToolParser):
+    """Tool parser for MiniMax XML-style function calls."""
+
+    def __init__(self, tokenizer) -> None:
+        super().__init__(tokenizer)
+        self.tool_call_start_token = "<minimax:tool_call>"
+        self.tool_call_end_token = "</minimax:tool_call>"
+        self.tool_call_regex = regex.compile(r"<minimax:tool_call>(.*?)</minimax:tool_call>", regex.DOTALL)
+        self.invoke_regex = regex.compile(r'<invoke name="([^"]+)">\s*(.*?)</invoke>', regex.DOTALL)
+        self.parameter_regex = regex.compile(r'<parameter name="([^"]+)">(.*?)</parameter>', regex.DOTALL)
+
+    @staticmethod
+    def _convert_parameter_value(raw_value: str) -> Any:
+        value = raw_value.strip()
+        try:
+            return json.loads(value)
+        except Exception:
+            return value
+
+    def _parse_tool_calls(self, tool_call_text: str) -> list[FunctionCall]:
+        function_calls: list[FunctionCall] = []
+        for name, body in self.invoke_regex.findall(tool_call_text):
+            arguments = {
+                key.strip(): self._convert_parameter_value(value) for key, value in self.parameter_regex.findall(body)
+            }
+            function_calls.append(FunctionCall(name=name.strip(), arguments=json.dumps(arguments, ensure_ascii=False)))
+        return function_calls
+
+    @rollout_trace_op
+    async def extract_tool_calls(
+        self, responses_ids: list[int], tools: list[OpenAIFunctionToolSchema] = None
+    ) -> tuple[str, list[FunctionCall]]:
+        del tools
+        loop = get_event_loop()
+        text = await loop.run_in_executor(
+            None,
+            lambda: self.tokenizer.decode(responses_ids, skip_special_tokens=False),
+        )
+        if self.tool_call_start_token not in text or self.tool_call_end_token not in text:
+            return text, []
+
+        function_calls: list[FunctionCall] = []
+        for match in self.tool_call_regex.findall(text):
+            try:
+                function_calls.extend(self._parse_tool_calls(match))
+            except Exception as e:
+                logger.error(f"Failed to decode MiniMax tool call: {e}")
+
+        content_index = text.find(self.tool_call_start_token)
+        return text[:content_index], function_calls
+
+
+@ToolParser.register("kimi")
+class KimiToolParser(ToolParser):
+    """Tool parser for Kimi K2-family special-token function calls."""
+
+    def __init__(self, tokenizer) -> None:
+        super().__init__(tokenizer)
+        self.tool_calls_section_start_token = "<|tool_calls_section_begin|>"
+        self.tool_calls_section_end_token = "<|tool_calls_section_end|>"
+        self.tool_call_begin_token = "<|tool_call_begin|>"
+        self.tool_call_argument_begin_token = "<|tool_call_argument_begin|>"
+        self.tool_call_end_token = "<|tool_call_end|>"
+        self.im_end_token = "<|im_end|>"
+        self.tool_call_regex = regex.compile(
+            r"<\|tool_call_begin\|>(.*?)<\|tool_call_argument_begin\|>(.*?)<\|tool_call_end\|>",
+            regex.DOTALL,
+        )
+
+    @property
+    def stop_token_ids(self) -> list[int]:
+        token_id = self.tokenizer.convert_tokens_to_ids(self.im_end_token)
+        if isinstance(token_id, int) and token_id >= 0:
+            return [token_id]
+        return []
+
+    @staticmethod
+    def _parse_arguments(raw_arguments: str) -> dict[str, Any]:
+        try:
+            arguments = json.loads(raw_arguments.strip())
+        except Exception:
+            logger.warning("Kimi tool-call arguments are not valid JSON; returning an empty argument dict.")
+            return {}
+        return arguments if isinstance(arguments, dict) else {}
+
+    @staticmethod
+    def _infer_tool_name(
+        raw_name: str, arguments: dict[str, Any], tools: Optional[list[OpenAIFunctionToolSchema]]
+    ) -> str:
+        if not tools:
+            return raw_name
+
+        tool_names = [tool.function.name for tool in tools if tool.type == "function"]
+        if raw_name in tool_names:
+            return raw_name
+
+        compact_raw_name = raw_name.lower().replace("-", "_")
+        substring_matches = [name for name in tool_names if name.lower() in compact_raw_name]
+        if len(substring_matches) == 1:
+            return substring_matches[0]
+
+        argument_keys = set(arguments)
+        schema_matches = []
+        for tool in tools:
+            if tool.type != "function":
+                continue
+            required = set(tool.function.parameters.required or [])
+            if required and required.issubset(argument_keys):
+                schema_matches.append(tool.function.name)
+        if len(schema_matches) == 1:
+            return schema_matches[0]
+
+        return raw_name
+
+    @rollout_trace_op
+    async def extract_tool_calls(
+        self, responses_ids: list[int], tools: list[OpenAIFunctionToolSchema] = None
+    ) -> tuple[str, list[FunctionCall]]:
+        loop = get_event_loop()
+        text = await loop.run_in_executor(
+            None,
+            lambda: self.tokenizer.decode(responses_ids, skip_special_tokens=False),
+        )
+        if self.tool_calls_section_start_token not in text:
+            return text, []
+
+        function_calls: list[FunctionCall] = []
+        for raw_name, raw_arguments in self.tool_call_regex.findall(text):
+            raw_name = raw_name.strip()
+            arguments = self._parse_arguments(raw_arguments)
+            name = self._infer_tool_name(raw_name, arguments, tools)
+            function_calls.append(
+                FunctionCall(name=name, arguments=json.dumps(arguments, ensure_ascii=False), tool_call_id=raw_name)
+            )
+
+        content_index = text.find(self.tool_calls_section_start_token)
+        content = text[:content_index] if content_index >= 0 else text
+        return content, function_calls
+
+
+@ToolParser.register("gemma4")
+class Gemma4ToolParser(ToolParser):
+    """Tool parser for Google Gemma 4 models.
+
+    Format: <|tool_call>call:func_name{key:<|"|>str_val<|"|>,key2:num_val}<tool_call|>
+
+    Reference: https://ai.google.dev/gemma/docs/capabilities/text/function-calling-gemma4
+    """
+
+    def __init__(self, tokenizer) -> None:
+        super().__init__(tokenizer)
+        self.tool_call_start_token = "<|tool_call>"
+        self.tool_call_end_token = "<tool_call|>"
+        self._stop_token_id = tokenizer.convert_tokens_to_ids("<tool_call|>")
+        self.tool_call_regex = regex.compile(r"<\|tool_call>call:(\w+)\{(.*?)\}<tool_call\|>", regex.DOTALL)
+        self.arg_regex = regex.compile(r'(\w+):(?:<\|"\|>(.*?)<\|"\|>|([^,}]*))')
+
+    @property
+    def stop_token_ids(self) -> list[int]:
+        """Gemma4 doesn't emit EOS after <tool_call|> — it continues generating.
+        Stop on <tool_call|> so the agent loop can execute the tool between calls."""
+        return [self._stop_token_id]
+
+    def _parse_arguments(self, args_str: str) -> dict:
+        result = {}
+        for match in self.arg_regex.finditer(args_str):
+            key = match.group(1)
+            str_val, bare_val = match.group(2), match.group(3)
+            if str_val is not None:
+                result[key] = str_val
+            elif bare_val is not None:
+                bare_val = bare_val.strip()
+                if bare_val.lower() == "true":
+                    result[key] = True
+                elif bare_val.lower() == "false":
+                    result[key] = False
+                elif bare_val.lower() == "null":
+                    result[key] = None
+                else:
+                    try:
+                        result[key] = int(bare_val)
+                    except ValueError:
+                        try:
+                            result[key] = float(bare_val)
+                        except ValueError:
+                            result[key] = bare_val
+        return result
+
+    @rollout_trace_op
+    async def extract_tool_calls(
+        self, responses_ids: list[int], tools: list[OpenAIFunctionToolSchema] = None
+    ) -> tuple[str, list[FunctionCall]]:
+        loop = get_event_loop()
+        text = await loop.run_in_executor(None, lambda: self.tokenizer.decode(responses_ids, skip_special_tokens=False))
+        if self.tokenizer.pad_token:
+            text = text.replace(self.tokenizer.pad_token, "")
+
+        if self.tool_call_start_token not in text:
+            return text, []
+
+        matches = self.tool_call_regex.findall(text)
+        if not matches:
+            return text, []
+
+        function_calls = []
+        for name, args_str in matches:
+            try:
+                arguments = self._parse_arguments(args_str)
+                function_calls.append(FunctionCall(name=name, arguments=json.dumps(arguments, ensure_ascii=False)))
+            except Exception as e:
+                logger.error(f"Failed to parse Gemma4 tool call: {e}")
+
+        content_idx = text.find(self.tool_call_start_token)
+        content = text[:content_idx] if content_idx >= 0 else text
+        return content, function_calls

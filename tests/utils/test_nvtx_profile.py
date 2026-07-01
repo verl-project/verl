@@ -91,16 +91,18 @@ class TestNsightSystemsProfiler(unittest.TestCase):
         self.assertEqual(self.profiler.check_this_step(), False)
 
     def test_start_stop_profiling(self):
-        with patch("torch.cuda.profiler.start") as mock_start, patch("torch.cuda.profiler.stop") as mock_stop:
+        with patch("verl.utils.profiler.nvtx_profile.get_platform") as mock_get_platform:
+            mock_platform = MagicMock()
+            mock_get_platform.return_value = mock_platform
             # Test start
             self.profiler.start()
             self.assertTrue(self.profiler.check_this_step())
-            mock_start.assert_called_once()
+            mock_platform.profiler_start.assert_called_once()
 
             # Test stop
             self.profiler.stop()
             self.assertFalse(self.profiler.check_this_step())
-            mock_stop.assert_called_once()
+            mock_platform.profiler_stop.assert_called_once()
 
     # def test_discrete_profiling(self):
     #     discrete_config = ProfilerConfig(discrete=True, all_ranks=True)
@@ -118,7 +120,10 @@ class TestNsightSystemsProfiler(unittest.TestCase):
     def test_annotate_decorator(self):
         mock_self = MagicMock()
         mock_self.profiler = self.profiler
-        mock_self.profiler.start()
+        with patch("verl.utils.profiler.nvtx_profile.get_platform") as mock_get_platform:
+            mock_platform = MagicMock()
+            mock_get_platform.return_value = mock_platform
+            mock_self.profiler.start()
         decorator = mock_self.profiler.annotate(message="test")
 
         @decorator
@@ -126,17 +131,18 @@ class TestNsightSystemsProfiler(unittest.TestCase):
             return "result"
 
         with (
-            patch("torch.cuda.profiler.start") as mock_start,
-            patch("torch.cuda.profiler.stop") as mock_stop,
+            patch("verl.utils.profiler.nvtx_profile.get_platform") as mock_get_platform,
             patch("verl.utils.profiler.nvtx_profile.mark_start_range") as mock_start_range,
             patch("verl.utils.profiler.nvtx_profile.mark_end_range") as mock_end_range,
         ):
+            mock_platform = MagicMock()
+            mock_get_platform.return_value = mock_platform
             result = test_func(mock_self)
             self.assertEqual(result, "result")
             mock_start_range.assert_called_once()
             mock_end_range.assert_called_once()
-            mock_start.assert_not_called()  # Not discrete mode
-            mock_stop.assert_not_called()  # Not discrete mode
+            mock_platform.profiler_start.assert_not_called()  # Not discrete mode
+            mock_platform.profiler_stop.assert_not_called()  # Not discrete mode
 
     # def test_annotate_discrete_mode(self):
     #     discrete_config = ProfilerConfig(discrete=True, all_ranks=True)

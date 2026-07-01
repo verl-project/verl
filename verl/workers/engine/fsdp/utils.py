@@ -14,7 +14,6 @@
 import logging
 import os
 
-import torch
 from torch.distributed.device_mesh import init_device_mesh
 
 from verl.utils.device import get_device_name, is_npu_available
@@ -23,16 +22,14 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
-def apply_npu_fsdp_patches():
+def apply_npu_fsdp_patches(model_config=None):
     """Apply NPU patches for FSDP backend if NPU is available."""
     if is_npu_available:
-        try:
-            import verl.models.transformers.npu_patch  # noqa
+        if model_config is not None and model_config.get("use_liger", False):
+            return
+        from verl.models.transformers.npu_patch import apply_npu_patches
 
-            if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:
-                logger.info("Applied NPU patches for FSDP backend")
-        except Exception as e:
-            logger.warning(f"Failed to apply NPU patches: {e}")
+        apply_npu_patches()
 
 
 def create_device_mesh(world_size, fsdp_size):
@@ -56,7 +53,7 @@ def create_device_mesh(world_size, fsdp_size):
     return device_mesh
 
 
-def get_sharding_strategy(device_mesh):
+def get_sharding_strategy(device_mesh, zero3_enable=True):
     """
     Determine the appropriate sharding strategy based on the number of dimensions of the device mesh.
 
@@ -69,12 +66,22 @@ def get_sharding_strategy(device_mesh):
     Raises:
         NotImplementedError: If the number of dimensions of the device mesh is neither 1 nor 2.
     """
+
     from torch.distributed.fsdp import ShardingStrategy
+
+    if zero3_enable:
+        fsdp_strategy = ShardingStrategy.FULL_SHARD
+        hsdp_strategy = ShardingStrategy.HYBRID_SHARD
+    else:
+        fsdp_strategy = ShardingStrategy.SHARD_GRAD_OP
+        hsdp_strategy = ShardingStrategy._HYBRID_SHARD_ZERO2
 
     if device_mesh.ndim == 1:
         sharding_strategy = ShardingStrategy.FULL_SHARD
+        sharding_strategy = fsdp_strategy
     elif device_mesh.ndim == 2:
         sharding_strategy = ShardingStrategy.HYBRID_SHARD
+        sharding_strategy = hsdp_strategy
     else:
         raise NotImplementedError(f"Get device mesh ndim={device_mesh.ndim}, but only support 1 or 2")
     return sharding_strategy

@@ -120,6 +120,24 @@ class TestVocabParallelKLDivergence:
     def to_nested(self, tensor: torch.Tensor) -> torch.Tensor:
         return torch.nested.as_nested_tensor([tensor[i] for i in range(tensor.shape[0])], layout=torch.jagged)
 
+    def pad_for_bshd_preprocess(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Mirror preprocess_bshd_engine's CP=1 sequence padding for student logits."""
+        assert mpu.get_context_parallel_world_size() == 1, "This TP KL test does not initialize context parallelism"
+        align_size = mpu.get_tensor_model_parallel_world_size()
+        pad_size = (align_size - tensor.shape[1] % align_size) % align_size
+        if pad_size == 0:
+            return tensor
+
+        padded = torch.zeros(
+            tensor.shape[0],
+            tensor.shape[1] + pad_size,
+            *tensor.shape[2:],
+            dtype=tensor.dtype,
+            device=tensor.device,
+        )
+        padded[:, : tensor.shape[1]] = tensor
+        return padded
+
     def verify_correctness(self, iterations: int = 5):
         self.cleanup()
         self.generate_hyper()
@@ -138,12 +156,13 @@ class TestVocabParallelKLDivergence:
             dist.broadcast(full_student_logits, src=0, group=self.group)
             dist.broadcast(teacher_topk_logps, src=0, group=self.group)
             dist.broadcast(teacher_topk_ids, src=0, group=self.group)
-            full_student_logits = full_student_logits.reshape(1, -1, self.vocab_size)
+            full_student_logits_bshd = full_student_logits
+            full_student_logits_thd = full_student_logits_bshd.reshape(1, -1, self.vocab_size)
             teacher_topk_logps = self.to_nested(teacher_topk_logps)
             teacher_topk_ids = self.to_nested(teacher_topk_ids)
 
             # VP implementation on sharded logits
-            vp_logits = full_student_logits[..., shard_start:shard_end].contiguous().detach().requires_grad_(True)
+            vp_logits = full_student_logits_thd[..., shard_start:shard_end].contiguous().detach().requires_grad_(True)
             loss_out = compute_forward_kl_topk_vp(
                 student_logits=vp_logits,
                 teacher_topk_log_probs=teacher_topk_logps,
@@ -156,7 +175,7 @@ class TestVocabParallelKLDivergence:
             grad_vp = vp_logits.grad.detach().clone()
 
             # Reference implementation on full logits
-            full_ref = full_student_logits.detach().clone().requires_grad_(True)
+            full_ref = full_student_logits_thd.detach().clone().requires_grad_(True)
             fsdp_loss_out = compute_forward_kl_topk_ref(
                 student_logits=full_ref,
                 teacher_topk_log_probs=teacher_topk_logps,
@@ -168,11 +187,51 @@ class TestVocabParallelKLDivergence:
             ref_loss.sum().backward()
             grad_ref_shard = full_ref.grad[..., shard_start:shard_end].detach().clone()
 
-            # Compare losses
+            # Compare losses and overlap logging metrics
             torch.testing.assert_close(vp_loss, ref_loss, atol=1e-4, rtol=1e-4)
+            torch.testing.assert_close(
+                loss_out["overlap_token_advantage"],
+                fsdp_loss_out["overlap_token_advantage"],
+                atol=1e-4,
+                rtol=1e-4,
+            )
+            torch.testing.assert_close(loss_out["overlap_count"], fsdp_loss_out["overlap_count"])
 
             # Compare gradients
             torch.testing.assert_close(grad_vp, grad_ref_shard, atol=1e-4, rtol=1e-4)
+
+            # BSHD path should preserve the top-k dense dimension when preprocessing teacher tensors.
+            full_student_logits_bshd_padded = self.pad_for_bshd_preprocess(full_student_logits_bshd)
+            vp_logits_bshd = (
+                full_student_logits_bshd_padded[..., shard_start:shard_end].contiguous().detach().requires_grad_(True)
+            )
+            loss_out_bshd = compute_forward_kl_topk_vp(
+                student_logits=vp_logits_bshd,
+                teacher_topk_log_probs=teacher_topk_logps,
+                teacher_topk_ids=teacher_topk_ids,
+                config=cfg,
+                data_format="bshd",
+            )
+            vp_loss_bshd = loss_out_bshd["distillation_losses"]
+            vp_loss_bshd[:, : self.seq_len].sum().backward()
+            grad_vp_bshd = vp_logits_bshd.grad.detach().clone()
+
+            torch.testing.assert_close(vp_loss_bshd[:, : self.seq_len].reshape(1, -1), ref_loss, atol=1e-4, rtol=1e-4)
+            torch.testing.assert_close(
+                loss_out_bshd["overlap_token_advantage"][:, : self.seq_len].reshape(1, -1),
+                fsdp_loss_out["overlap_token_advantage"],
+                atol=1e-4,
+                rtol=1e-4,
+            )
+            torch.testing.assert_close(
+                loss_out_bshd["overlap_count"][:, : self.seq_len].reshape(1, -1), fsdp_loss_out["overlap_count"]
+            )
+            torch.testing.assert_close(
+                grad_vp_bshd[:, : self.seq_len].reshape(1, -1, self.shard_size),
+                grad_ref_shard,
+                atol=1e-4,
+                rtol=1e-4,
+            )
 
         if self.local_rank == 0:
             print(f"[PASS] VP KL divergence correctness verified for test case {self.test_case_idx}")

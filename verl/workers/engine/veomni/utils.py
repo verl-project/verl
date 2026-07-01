@@ -108,13 +108,30 @@ def load_veomni_optimizer(optimizer, device_id):
                         state[key] = value.to(device_id, non_blocking=True)
 
 
-def _map_moe_params_qwen3_moe(name, tensor):
-    for i in range(tensor.size(0)):
-        new_key = name.replace("mlp.experts.", f"mlp.experts.{i}.") + ".weight"
+def _map_moe_params_common(name, tensor, ep_rank):
+    num_experts_per_rank = tensor.size(0)
+    for i in range(num_experts_per_rank):
+        idx = ep_rank * num_experts_per_rank + i
+        new_key = name.replace("mlp.experts.", f"mlp.experts.{idx}.") + ".weight"
         yield new_key, tensor[i].to(get_device_id(), non_blocking=True)
 
 
+def _map_moe_params_qwen3_moe(name, tensor, ep_rank):
+    if "gate_up_proj" in name:
+        gate, up = tensor.chunk(2, dim=1)
+        params = {
+            name.replace("gate_up_proj", "gate_proj"): gate,
+            name.replace("gate_up_proj", "up_proj"): up,
+        }
+    else:
+        params = {name: tensor}
+
+    for key, value in params.items():
+        yield from _map_moe_params_common(key, value, ep_rank)
+
+
 MOE_PARAM_HANDERS = {
-    "qwen3_moe": _map_moe_params_qwen3_moe,
-    "deepseek_v3": _map_moe_params_qwen3_moe,
+    "qwen3_moe": _map_moe_params_common,
+    "deepseek_v3": _map_moe_params_common,
+    "qwen3_5_moe": _map_moe_params_qwen3_moe,
 }

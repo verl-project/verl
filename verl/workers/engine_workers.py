@@ -20,6 +20,7 @@ from functools import partial
 from itertools import chain
 from typing import Optional
 
+import psutil
 import torch
 from codetiming import Timer
 from omegaconf import DictConfig, open_dict
@@ -32,7 +33,7 @@ from verl.single_controller.base.decorator import Dispatch, make_nd_compute_data
 from verl.trainer.distillation import distillation_ppo_loss, is_distillation_enabled
 from verl.utils import tensordict_utils as tu
 from verl.utils.config import omega_conf_to_dataclass
-from verl.utils.device import get_device_name, is_npu_available, set_expandable_segments
+from verl.utils.device import get_device_name, get_torch_device, set_expandable_segments
 from verl.utils.distributed import initialize_global_process_group_ray, set_numa_affinity
 from verl.utils.flops_counter import FlopsCounter
 from verl.utils.import_utils import import_external_libs
@@ -83,11 +84,6 @@ class TrainingWorker(Worker, DistProfilerExtension):
         Worker.__init__(self)
 
         from verl.workers.engine import BaseEngine, EngineRegistry
-
-        # TODO(jhz): Switch to `set_expandable_segments` when the torch_npu library
-        # supports `torch.npu.memory._set_allocator_settings`
-        if is_npu_available:
-            os.environ["PYTORCH_NPU_ALLOC_CONF"] = "expandable_segments:True"
 
         initialize_global_process_group_ray(timeout_second=None)
 
@@ -182,10 +178,6 @@ class TrainingWorker(Worker, DistProfilerExtension):
         Returns:
 
         """
-        # TODO: whether to log memory
-        # metrics["perf/max_memory_allocated_gb"] = get_torch_device().max_memory_allocated() / (1024 ** 3)
-        # metrics["perf/max_memory_reserved_gb"] = get_torch_device().max_memory_reserved() / (1024 ** 3)
-        # metrics["perf/cpu_memory_used_gb"] = psutil.virtual_memory().used / (1024 ** 3)
 
         metrics: dict = output.pop("metrics")
         # perform all gather in dp group to ensure that it's correct.
@@ -213,6 +205,11 @@ class TrainingWorker(Worker, DistProfilerExtension):
             final_metrics["grad_norm"] = grad_norm
         if lr is not None:
             final_metrics["lr"] = lr
+
+        # log memory
+        final_metrics["perf/max_memory_allocated_gb"] = get_torch_device().max_memory_allocated() / (1024**3)
+        final_metrics["perf/max_memory_reserved_gb"] = get_torch_device().max_memory_reserved() / (1024**3)
+        final_metrics["perf/cpu_memory_used_gb"] = psutil.virtual_memory().used / (1024**3)
 
         # TODO: confirm the mtp loss IS same across dp
         for k, v in final_metrics.items():
@@ -281,6 +278,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
             total_num_iterations = data.shape[0] // mini_batch_size_per_gpu * epochs
 
             for batch_idx, mini_batch_td in enumerate(dataloader):
+                maybe_fix_3d_position_ids(mini_batch_td)
                 # add global token num
                 if "input_ids" in mini_batch_td:
                     global_token_num = mini_batch_td["input_ids"].offsets().diff().tolist()  # (total_nnz,)
@@ -441,6 +439,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     NOTE: ActorRolloutRefWorker no longer support spmd mode and run native server mode.
     """
 
+    actor_worker_cls = TrainingWorker
+    ref_worker_cls = TrainingWorker
+
     def __init__(
         self, config: DictConfig, role: str, distillation_config: Optional[DistillationConfig] = None, **kwargs
     ):
@@ -449,8 +450,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self.distillation_config = distillation_config
         self.distillation_enabled = is_distillation_enabled(distillation_config)
         self.role = role
-        self.actor: TrainingWorker = None
-        self.ref: TrainingWorker = None
+        self.actor: TrainingWorker | None = None
+        self.ref: TrainingWorker | None = None
         self.rollout: BaseRollout = None
         assert self.role in ["actor", "rollout", "ref", "actor_rollout", "actor_rollout_ref"]
         self._is_actor = self.role in ["actor", "actor_rollout", "actor_rollout_ref"]
@@ -474,9 +475,17 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         else:
             tool_config = None
 
-        self.enable_routing_replay = (
-            self.config.actor.strategy == "megatron" and self.config.actor.megatron.router_replay.mode != "disabled"
-        )
+        # Router replay is supported on the megatron engine and on the veomni
+        # engine. Both expose `router_replay` on their per-strategy engine
+        # config (the field lives on the shared `EngineConfig` base).
+        actor_strategy = self.config.actor.strategy
+        if actor_strategy == "megatron":
+            rr_mode = self.config.actor.megatron.router_replay.mode
+        elif actor_strategy == "veomni":
+            rr_mode = self.config.actor.veomni.router_replay.mode
+        else:
+            rr_mode = "disabled"
+        self.enable_routing_replay = rr_mode != "disabled"
 
         DistProfilerExtension.__init__(
             self, DistProfiler(rank=self.rank, config=profiler_config, tool_config=tool_config)
@@ -529,7 +538,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             )
             ref_training_config.engine_config.use_remove_padding = model_config.get("use_remove_padding", False)
 
-            self.ref = TrainingWorker(config=ref_training_config)
+            self.ref = self.ref_worker_cls(config=ref_training_config)
             self.ref.reset()
             self.set_dispatch_collect(mesh_name="ref", **self.ref.get_dispatch_collect())
 
@@ -577,7 +586,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 )
             else:
                 self.loss_fn = partial(ppo_loss, config=actor_config)
-            self.actor = TrainingWorker(config=actor_training_config)
+            self.actor = self.actor_worker_cls(config=actor_training_config)
             self.actor.reset()
             self.actor.set_loss_fn(self.loss_fn)
             self.set_dispatch_collect(mesh_name="actor", **self.actor.get_dispatch_collect())
@@ -659,7 +668,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self.actor.save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    async def update_weights(self, global_steps: int = None):
+    async def update_weights(self, global_steps: int = None, mode: str = "auto"):
         """Update weights from trainer to rollout.
 
         1. For sync training with colocated trainer and rollout, update rollout directly from model engine.
@@ -670,12 +679,28 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         LoRA handling: when model.lora.merge=True (peft_merge), LoRA is merged into
         base weights before sync. The engine returns full HF-keyed params with
         peft_config=None, so the rollout receives a standard weight update.
+
+        Args:
+            global_steps: Current global training step count, passed to rollout for logging/tracking.
+            mode: Weight update strategy. Supported values:
+                - ``"auto"``: Automatically resolve to the backend configured in
+                  ``config.rollout.checkpoint_engine.backend`` (default).
+                - ``"naive"``: Direct in-process weight sync between colocated trainer
+                  and rollout. Used for synchronous training where both share the same
+                  process. Rollout must be in sleep mode before this call.
+                - Any other value: Delegates to
+                  :meth:`checkpoint_engine.send_weights` for asynchronous weight
+                  transfer via checkpoint engine, suitable for disaggregated
+                  trainer/rollout deployments.
         """
 
+        # Resolve mode: "auto" falls back to config, explicit values take precedence
+        effective_mode = mode if mode != "auto" else self.config.rollout.checkpoint_engine.backend
+
         # 0. send_weights only for async training with disaggregated trainer and rollout
-        if self.config.rollout.checkpoint_engine.backend != "naive":
+        if effective_mode != "naive":
             per_tensor_param, _ = self.actor.engine.get_per_tensor_param()
-            await self.checkpoint_engine.send_weights(per_tensor_param)
+            await self.checkpoint_engine.send_weights(per_tensor_param, global_steps=global_steps)
             return
 
         set_expandable_segments(False)

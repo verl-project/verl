@@ -35,9 +35,12 @@ actor_rollout_ref:
       init_device: meta
       enable_full_shard: true
       ckpt_manager: dcp
+      load_checkpoint_path: null
       forward_prefetch: true
       strategy: veomni
       use_torch_compile: false
+      entropy_from_logits_with_chunking: false
+      entropy_checkpointing: false
       forward_only: false
       enable_fsdp_offload: false
       enable_reentrant: false
@@ -47,9 +50,16 @@ actor_rollout_ref:
       rms_norm_implementation: eager
       swiglu_mlp_implementation: eager
       rotary_pos_emb_implementation: eager
+      rms_norm_gated_implementation: eager
+      causal_conv1d_implementation: eager
+      chunk_gated_delta_rule_implementation: eager
       load_balancing_loss_implementation: eager
       force_use_huggingface: false
       activation_gpu_limit: 0.0
+      basic_modules: []
+      router_replay:
+        _target_: verl.workers.config.EngineRouterReplayConfig
+        mode: disabled
     _target_: verl.workers.config.VeOmniActorConfig
     rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
     strategy: veomni
@@ -94,7 +104,7 @@ actor_rollout_ref:
       - extra
       load_contents: ${.save_contents}
       async_save: false
-      mbridge_config: {}
+      strict: true
     use_fused_kernels: ${oc.select:actor_rollout_ref.model.use_fused_kernels,false}
     profiler:
       _target_: verl.utils.profiler.ProfilerConfig
@@ -142,6 +152,7 @@ actor_rollout_ref:
       - re:.*mlp.gate$
       activation_observer: static_minmax
       quantization_config_path: null
+    use_remove_padding: ${oc.select:actor_rollout_ref.model.use_remove_padding,false}
   ref:
     rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
     strategy: veomni
@@ -199,9 +210,12 @@ actor_rollout_ref:
       init_device: meta
       enable_full_shard: true
       ckpt_manager: dcp
+      load_checkpoint_path: null
       forward_prefetch: true
       strategy: veomni
       use_torch_compile: false
+      entropy_from_logits_with_chunking: false
+      entropy_checkpointing: false
       forward_only: true
       enable_fsdp_offload: false
       enable_reentrant: false
@@ -211,9 +225,16 @@ actor_rollout_ref:
       rms_norm_implementation: ${oc.select:actor_rollout_ref.actor.veomni.rms_norm_implementation,eager}
       swiglu_mlp_implementation: ${oc.select:actor_rollout_ref.actor.veomni.swiglu_mlp_implementation,eager}
       rotary_pos_emb_implementation: ${oc.select:actor_rollout_ref.actor.veomni.rotary_pos_emb_implementation,eager}
+      rms_norm_gated_implementation: eager
+      causal_conv1d_implementation: eager
+      chunk_gated_delta_rule_implementation: eager
       load_balancing_loss_implementation: ${oc.select:actor_rollout_ref.actor.veomni.load_balancing_loss_implementation,eager}
       force_use_huggingface: false
       activation_gpu_limit: 0.0
+      basic_modules: []
+      router_replay:
+        _target_: verl.workers.config.EngineRouterReplayConfig
+        mode: disabled
     _target_: verl.workers.config.VeOmniActorConfig
   rollout:
     _target_: verl.workers.config.RolloutConfig
@@ -224,6 +245,8 @@ actor_rollout_ref:
     temperature: 1.0
     top_k: -1
     top_p: 1
+    full_determinism: false
+    seed: 42
     prompt_length: ${oc.select:data.max_prompt_length,512}
     response_length: ${oc.select:data.max_response_length,512}
     dtype: bfloat16
@@ -279,7 +302,7 @@ actor_rollout_ref:
       tokenization_sanity_check_mode: strict
       format: hermes
       num_repeat_rollouts: null
-    calculate_log_probs: false
+    calculate_log_probs: true
     agent:
       _target_: verl.workers.config.AgentLoopConfig
       num_workers: 8
@@ -302,14 +325,9 @@ actor_rollout_ref:
       backend: null
       token2text: false
       max_samples_per_step_per_worker: null
-    skip:
-      _target_: verl.workers.config.SkipConfig
-      enable: false
-      dump_dir: ~/.verl/rollout_dump
-      max_dump_step: 1
-      action: cache
     skip_tokenizer_init: true
     enable_rollout_routing_replay: false
+    moe_load_balance_metrics_interval: 0
     profiler:
       _target_: verl.utils.profiler.ProfilerConfig
       tool: ${oc.select:global_profiler.tool,null}
@@ -324,10 +342,14 @@ actor_rollout_ref:
           level: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.npu.level,level0}
           analysis: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.npu.analysis,false}
           discrete: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.npu.discrete,false}
+          profile_token_start: null
+          profile_token_end: null
         torch:
           _target_: verl.utils.profiler.config.TorchProfilerToolConfig
           contents: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.torch.contents,[]}
           discrete: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.torch.discrete,false}
+          profile_token_start: null
+          profile_token_end: null
         precision_debugger:
           _target_: verl.utils.profiler.config.PrecisionDebuggerToolConfig
           config_path: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.precision_debugger.config_path,${oc.select:global_profiler.global_tool_config.precision_debugger.config_path,null}}
@@ -443,12 +465,17 @@ data:
   truncation: error
   image_key: images
   video_key: videos
+  audio_key: audios
   trust_remote_code: false
   custom_cls:
     path: null
     name: null
   return_multi_modal_inputs: true
   apply_chat_template_kwargs: {}
+  continuous_token:
+    enable: false
+    model_family: auto
+  mm_processor_kwargs: {}
 critic:
   optim:
     _target_: verl.workers.config.VeOmniOptimizerConfig
@@ -480,9 +507,12 @@ critic:
     init_device: meta
     enable_full_shard: true
     ckpt_manager: dcp
+    load_checkpoint_path: null
     forward_prefetch: true
     strategy: veomni
     use_torch_compile: false
+    entropy_from_logits_with_chunking: false
+    entropy_checkpointing: false
     forward_only: false
     enable_fsdp_offload: false
     enable_reentrant: false
@@ -492,9 +522,16 @@ critic:
     rms_norm_implementation: eager
     swiglu_mlp_implementation: eager
     rotary_pos_emb_implementation: eager
+    rms_norm_gated_implementation: eager
+    causal_conv1d_implementation: eager
+    chunk_gated_delta_rule_implementation: eager
     load_balancing_loss_implementation: eager
     force_use_huggingface: false
     activation_gpu_limit: 0.0
+    basic_modules: []
+    router_replay:
+      _target_: verl.workers.config.EngineRouterReplayConfig
+      mode: disabled
   _target_: verl.workers.config.VeOmniCriticConfig
   rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
   strategy: veomni
@@ -518,7 +555,6 @@ critic:
     - extra
     load_contents: ${.save_contents}
     async_save: false
-    mbridge_config: {}
   profiler:
     _target_: verl.utils.profiler.ProfilerConfig
     tool: ${oc.select:global_profiler.tool,null}
@@ -691,6 +727,8 @@ reward:
       load_format: auto
       layered_summon: false
       scheduling_policy: fcfs
+      full_determinism: false
+      seed: 42
       multi_stage_wake_up: false
       engine_kwargs: {}
       limit_images: null
@@ -826,6 +864,22 @@ trainer:
   max_critic_ckpt_to_keep: null
   ray_wait_register_center_timeout: 300
   device: cuda
+  use_v1: true
+  v1:
+    trainer_mode: sync
+    sync: {}
+    colocate_async:
+      num_warmup_batches: 1
+    separate_async:
+      num_warmup_batches: 4
+      parameter_sync_step: 4
+    sampler:
+      max_off_policy_threshold: 8
+      max_off_policy_strategy: drop
+      custom_sampler:
+        path: null
+        name: null
+      sampler_kwargs: {}
 global_profiler:
   _target_: verl.utils.profiler.ProfilerConfig
   tool: null
@@ -861,11 +915,35 @@ global_profiler:
       strict: false
 transfer_queue:
   enable: false
+  metrics:
+    enabled: false
+    port: 0
   backend:
     storage_backend: SimpleStorage
     SimpleStorage:
       total_storage_size: 100000
       num_data_storage_units: 8
+    MooncakeStore:
+      auto_init: false
+      metadata_server: localhost:50123
+      master_server_address: localhost:50124
+      local_hostname: localhost
+      protocol: tcp
+      global_segment_size: 4294967296
+      local_buffer_size: 1073741824
+      device_name: ''
+skip:
+  _target_: verl.utils.skip.SkipManagerConfig
+  rollout:
+    enable: false
+    dump_dir: ~/.verl/rollout_dump
+    steps: []
+    action: cache
+  async_rollout:
+    enable: false
+    dump_dir: ~/.verl/rollout_dump
+    steps: []
+    action: cache
 ray_kwargs:
   ray_init:
     num_cpus: null

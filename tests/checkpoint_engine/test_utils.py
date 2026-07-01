@@ -40,9 +40,9 @@ class TrainingWorkerTest(TrainingWorker):
         self.checkpoint_engine = CheckpointEngineRegistry.new(backend, bucket_size=bucket_size, **engine_kwargs)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    async def update_weights(self, global_steps: int = None):
+    async def update_weights(self, global_steps: int = None, mode: str = "auto"):
         per_tensor_param, _ = self.engine.get_per_tensor_param()
-        await self.checkpoint_engine.send_weights(per_tensor_param)
+        await self.checkpoint_engine.send_weights(per_tensor_param, global_steps=global_steps)
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE, blocking=False)
     def execute_checkpoint_engine(self, method: str, *args, **kwargs):

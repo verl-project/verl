@@ -90,14 +90,25 @@ jobs:
       HCCL_HOST_SOCKET_PORT_RANGE: "60000-60050"
       HCCL_NPU_SOCKET_PORT_RANGE: "61000-61050"
       ENGINE: sglang
+      UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi"
+      UV_INDEX_STRATEGY: unsafe-best-match
+      UV_INSECURE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
+      UV_HTTP_TIMEOUT: 120
+      UV_NO_CACHE: "1"
+      UV_SYSTEM_PYTHON: "1"
+      UV_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
+      PIP_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
+      PIP_TRUSTED_HOST: "cache-service.nginx-pypi-cache.svc.cluster.local"
     steps:
       - name: Check npu and CANN info
         run: |
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
           npu-smi info
+      - name: Install uv
+        run: pip install uv
       - name: Check initial pip list from image
         run: |
-          pip list
+          uv pip list
       - name: Checkout verl-project/verl repo
         uses: actions/checkout@v4
         with:
@@ -105,13 +116,13 @@ jobs:
           clean: true
       - name: Install the current repository
         run: |
-          pip3 install pytest pytest-asyncio
-          pip3 install megatron-bridge --no-deps
-          pip3 install git+https://github.com/ISEEKYAN/mbridge.git@main --no-deps --no-build-isolation
-          pip3 install --no-deps --no-build-isolation -e .
+          uv pip install pytest pytest-asyncio
+          uv pip install megatron-bridge --no-deps
+          uv pip install git+https://github.com/ISEEKYAN/mbridge.git@main --no-deps --no-build-isolation
+          uv pip install --no-deps --no-build-isolation -e .
       - name: Check final pip list
         run: |
-          pip list
+          uv pip list
       - name: Prepare weights
         run: |
           ln -s /root/.cache/models ~/models

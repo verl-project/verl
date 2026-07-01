@@ -32,25 +32,7 @@ __all__ = [
     "PrometheusConfig",
     "RolloutConfig",
     "CheckpointEngineConfig",
-    "SkipConfig",
 ]
-
-
-@dataclass
-class SkipConfig(BaseConfig):
-    """
-    Configuration for rollout skip: load/dump previously generated rollout data
-    instead of computing new rollouts (e.g. for debugging or reuse).
-    """
-
-    enable: bool = False
-    dump_dir: str = "~/.verl/rollout_dump"
-    max_dump_step: int = 1
-    action: str = "cache"  # cache | repeat | repeat_last
-
-    def get(self, key: str, default=None):
-        """Dict-like get for compatibility with code that uses skip.get('enable', False)."""
-        return getattr(self, key, default)
 
 
 @dataclass
@@ -145,6 +127,8 @@ class CheckpointEngineConfig(BaseConfig):
     Configuration for checkpoint engine to update weights from trainer to rollout
     """
 
+    _mutable_fields = {"backend"}
+
     # Backend for checkpoint engine: naive, nccl, nixl, hccl
     backend: Optional[str] = "naive"
     # Bucket size in MB to transfer multiple weights at one time
@@ -167,6 +151,8 @@ class RolloutConfig(BaseConfig):
         "response_length",
         "expert_parallel_size",
         "moe_tensor_parallel_size",
+        "full_determinism",
+        "max_num_seqs",
     }
 
     name: Optional[str] = MISSING
@@ -181,6 +167,13 @@ class RolloutConfig(BaseConfig):
     n: int = 1
     repetition_penalty: float = 1.0
 
+    # Whether to enable full determinism for reproducibility.
+    full_determinism: bool = False
+
+    # Random seed for rollout. Used as the seed for vLLM sampling and
+    # enable_full_determinism() when full_determinism is True.
+    seed: int = 42
+
     # Early termination threshold for multi-turn rollout in sglang.
     # Abort remaining requests when (1 - over_sample_rate) * total_requests are completed.
     over_sample_rate: float = 0.0
@@ -191,7 +184,7 @@ class RolloutConfig(BaseConfig):
     dtype: str = "bfloat16"
     gpu_memory_utilization: float = 0.5
     ignore_eos: bool = False
-    enforce_eager: bool = True
+    enforce_eager: bool = False
     cudagraph_capture_sizes: Optional[list] = None
     free_cache_engine: bool = True
     data_parallel_size: int = 1
@@ -246,9 +239,6 @@ class RolloutConfig(BaseConfig):
     # Checkpoint Engine config for update weights from trainer to rollout
     checkpoint_engine: CheckpointEngineConfig = field(default_factory=CheckpointEngineConfig)
 
-    # Rollout skip config (load/dump rollout data)
-    skip: SkipConfig = field(default_factory=SkipConfig)
-
     profiler: Optional[ProfilerConfig] = None
 
     enable_chunked_prefill: bool = True
@@ -265,13 +255,14 @@ class RolloutConfig(BaseConfig):
 
     limit_images: Optional[int] = None
 
-    skip_tokenizer_init: bool = False
+    skip_tokenizer_init: bool = True
 
     quantization: Optional[str] = None
 
     quantization_config_file: Optional[str] = None
 
     enable_rollout_routing_replay: bool = False
+    moe_load_balance_metrics_interval: int = 0
 
     enable_sleep_mode: bool = True
 

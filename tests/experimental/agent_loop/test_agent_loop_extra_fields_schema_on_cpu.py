@@ -43,8 +43,11 @@ class _FakeServerManager:
         sampling_params: dict[str, Any],
         image_data: Optional[list[Any]] = None,
         video_data: Optional[list[Any]] = None,
+        audio_data: Optional[list[Any]] = None,
+        mm_processor_kwargs: Optional[dict[str, Any]] = None,
+        **kwargs: Any,
     ) -> TokenOutput:
-        del request_id, sampling_params, image_data, video_data
+        del request_id, sampling_params, image_data, video_data, audio_data, mm_processor_kwargs, kwargs
         # Return a short, deterministic "generation" for testing.
         return TokenOutput(token_ids=prompt_ids[-1:] + [11, 12, 13], log_probs=[0.0, 0.0, 0.0, 0.0])
 
@@ -56,8 +59,10 @@ class _FakeServerManager:
         sampling_params: dict[str, Any],
         image_data: Optional[list[Any]] = None,
         video_data: Optional[list[Any]] = None,
+        audio_data: Optional[list[Any]] = None,
+        mm_processor_kwargs: Optional[dict[str, Any]] = None,
     ) -> tuple[list[int], list[float], bool]:
-        del request_id, sampling_params, image_data, video_data
+        del request_id, sampling_params, image_data, video_data, audio_data, mm_processor_kwargs
         # Return a short partial generation and "not cancelled".
         response_ids = prompt_ids[-1:] + [21, 22]
         response_logprobs = [0.0] * len(response_ids)
@@ -178,6 +183,7 @@ async def test_agent_loop_extra_fields_schema_stable_for_training_concat_on_cpu(
             "data": {
                 "tool_config_path": None,
                 "apply_chat_template_kwargs": {},
+                "continuous_token": {"enable": False, "model_family": "auto"},
             },
         }
     )
@@ -257,14 +263,17 @@ async def test_agent_loop_postprocess_accepts_read_only_routed_experts_on_cpu():
     class _DummyWorker:
         _compute_multi_modal_inputs = AgentLoopWorker._compute_multi_modal_inputs
         _compute_position_ids = AgentLoopWorker._compute_position_ids
+        _get_mm_processor_kwargs = AgentLoopWorker._get_mm_processor_kwargs
         _compute_score = AgentLoopWorker._compute_score
         _compute_teacher_logprobs = AgentLoopWorker._compute_teacher_logprobs
+        _pad_token_ids = AgentLoopWorker._pad_token_ids
         distillation_enabled = False
 
         def __init__(self):
             self.tokenizer = _FakeTokenizer()
             self.rollout_config = OmegaConf.create({"prompt_length": 4, "response_length": 4})
             self.processor = None
+            self.mm_processor_kwargs = {}
             self.reward_loop_worker_handles = None
 
     routed_experts = np.arange(8, dtype=np.int64).reshape(4, 2, 1)
@@ -299,3 +308,59 @@ async def test_agent_loop_postprocess_accepts_read_only_routed_experts_on_cpu():
     torch.testing.assert_close(internal.routed_experts[:, 2:6], expected)
     assert torch.count_nonzero(internal.routed_experts[:, :2]) == 0
     assert torch.count_nonzero(internal.routed_experts[:, 6:]) == 0
+
+
+class _FakeTokenizerCustomPad:
+    """A minimal tokenizer with a non-zero pad_token_id for testing."""
+
+    pad_token_id = 42
+    padding_side = "right"
+
+    def pad(
+        self,
+        encoded_inputs: dict[str, list[int]],
+        *,
+        padding: str,
+        max_length: int,
+        return_tensors: str,
+        return_attention_mask: bool,
+    ) -> dict[str, torch.Tensor]:
+        del padding, return_tensors
+        input_ids = encoded_inputs["input_ids"]
+        pad_len = max_length - len(input_ids)
+        padded_ids = input_ids + [0] * pad_len
+        attention_mask = [1] * len(input_ids) + [0] * pad_len
+        output = {"input_ids": torch.tensor([padded_ids], dtype=torch.long)}
+        if return_attention_mask:
+            output["attention_mask"] = torch.tensor([attention_mask], dtype=torch.long)
+        return output
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_pad_token_ids_empty_with_non_zero_pad_id():
+    """Regression test: empty token list uses tokenizer's pad_token_id (not hardcoded 0)."""
+    worker = type(
+        "_DummyWorker",
+        (),
+        {
+            "_pad_token_ids": AgentLoopWorker._pad_token_ids,
+            "tokenizer": _FakeTokenizerCustomPad(),
+            "processor": None,
+            "mm_processor_kwargs": {},
+        },
+    )()
+
+    result = worker._pad_token_ids(
+        tokens=[],
+        max_length=8,
+        padding_side="right",
+        return_attention_mask=True,
+    )
+
+    # input_ids should use the tokenizer's pad_token_id (42), not 0
+    expected_input_ids = torch.full((1, 8), 42, dtype=torch.long)
+    torch.testing.assert_close(result["input_ids"], expected_input_ids)
+
+    # attention_mask should be all zeros
+    expected_attention_mask = torch.zeros((1, 8), dtype=torch.long)
+    torch.testing.assert_close(result["attention_mask"], expected_attention_mask)

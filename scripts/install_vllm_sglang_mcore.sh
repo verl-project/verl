@@ -13,7 +13,7 @@ pip install --no-cache-dir "vllm==0.11.0"
 
 echo "2. install basic packages"
 pip install "transformers[hf_xet]>=4.51.0" accelerate datasets peft hf-transfer \
-    "numpy<2.0.0" "pyarrow>=15.0.0" pandas "tensordict>=0.8.0,<=0.10.0,!=0.9.0" torchdata \
+    "numpy>=2.0.0" "pyarrow>=15.0.0" pandas "tensordict>=0.8.0,<=0.10.0,!=0.9.0" torchdata \
     ray[default] codetiming hydra-core pylatexenc qwen-vl-utils wandb dill pybind11 liger-kernel mathruler \
     pytest py-spy pre-commit ruff tensorboard 
 

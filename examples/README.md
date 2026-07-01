@@ -19,9 +19,9 @@ All run scripts follow the same shape:
    - `<model>`: a single canonical size per model family. E.g.
      `qwen3_8b`, `qwen3_30b_a3b`, `qwen3_235b_a22b`, `qwen3_vl_8b`,
      `deepseek_v3`, `mimo_7b`, `nemotron_nano_v3`.
-   - `<train-backend>`: one of `fsdp`, `fsdp2`, `megatron`, `mindspeed`,
-     `automodel`, or `veomni`. **Must be the last underscore-separated
-     token before `.sh`**.
+   - `<train-backend>`: one of `fsdp`, `fsdp2`, `megatron`,
+     `megatron_lite`, `mindspeed`, `automodel`, or `veomni`. **Must be the
+     final suffix before `.sh`**.
 
    Nothing follows `<train-backend>`. Per-example *features* — including
    the inference backend (`vllm`/`sglang`/`trtllm`), the platform
@@ -129,7 +129,6 @@ under `recipe/` instead.
 | `profile/`           | NPU profiler / torch-memory profiler runs.                                               |
 | `sft/`               | Supervised fine-tuning examples.                                                         |
 | `generation/`        | Rollout-only inference launches.                                                         |
-| `sglang_multiturn/`  | SGLang multi-turn rollout examples.                                                      |
 | `vllm_omni/`         | vLLM omni backend examples.                                                              |
 | `data_preprocess/`   | Scripts that produce the `$HOME/data/<dataset>/*.parquet` layout the run scripts expect. |
 | `prefix_grouper/`    | Prefix-grouped rollout examples.                                                         |

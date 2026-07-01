@@ -162,6 +162,26 @@ class ServerAdapter(BaseRollout):
                 ">= 25.3.rc1 and CANN toolkit version >= 8.3.RC1)"
             )
 
+    def _ensure_server_handle(self) -> bool:
+        """Lazy-init server handle. Returns False if this rank should not proceed."""
+        if not self._has_server:
+            return False
+        # Lazy init http server adapter because http server is launched after hybrid engine.
+        if self.server_handle is None:
+            prefix = self._get_server_name_prefix()
+            # PD: each role's TP-rank-0 finds its own actor. Naming aligns with
+            # SGLang PR #6117 (`{prefix}server_{R}_0` for prefill,
+            # `{prefix}server_decode_{R}_{i}` for decode i). Colocated path
+            # falls back to the original `{prefix}server_{R}_{node_rank}`.
+            if self._pd_role == "prefill":
+                actor_name = f"{prefix}server_{self.replica_rank}_0"
+            elif self._pd_role == "decode":
+                actor_name = f"{prefix}server_decode_{self.replica_rank}_{self._pd_server_index}"
+            else:
+                actor_name = f"{prefix}server_{self.replica_rank}_{self.node_rank}"
+            self.server_handle = ray.get_actor(actor_name)
+        return True
+
     async def _execute_method(
         self,
         method: str,
@@ -182,23 +202,8 @@ class ServerAdapter(BaseRollout):
         Returns:
             The result of the method execution, or None if non_block=True.
         """
-        if not self._has_server:
+        if not self._ensure_server_handle():
             return None
-
-        # Lazy init http server adapter because http server is launched after hybrid engine.
-        if self.server_handle is None:
-            prefix = self._get_server_name_prefix()
-            # PD: each role's TP-rank-0 finds its own actor. Naming aligns with
-            # SGLang PR #6117 (`{prefix}server_{R}_0` for prefill,
-            # `{prefix}server_decode_{R}_{i}` for decode i). Colocated path
-            # falls back to the original `{prefix}server_{R}_{node_rank}`.
-            if self._pd_role == "prefill":
-                actor_name = f"{prefix}server_{self.replica_rank}_0"
-            elif self._pd_role == "decode":
-                actor_name = f"{prefix}server_decode_{self.replica_rank}_{self._pd_server_index}"
-            else:
-                actor_name = f"{prefix}server_{self.replica_rank}_{self.node_rank}"
-            self.server_handle = ray.get_actor(actor_name)
 
         future = self.server_handle.collective_rpc.remote(method, timeout=timeout, args=args, kwargs=kwargs)
         return future if non_block else await future
@@ -209,13 +214,13 @@ class ServerAdapter(BaseRollout):
         Args:
             tags: weights or kv_cache.
         """
-        if self.config.free_cache_engine:
-            await self._execute_method("wake_up", kwargs={"tags": tags})
+        if self.config.free_cache_engine and self._ensure_server_handle():
+            await self.server_handle.wake_up.remote(tags=tags)
 
     async def release(self):
         """Release weights and kv cache in GPU memory."""
-        if self.config.free_cache_engine:
-            await self._execute_method("sleep", kwargs={"level": self.sleep_level})
+        if self.config.free_cache_engine and self._ensure_server_handle():
+            await self.server_handle.sleep.remote()
 
     @torch.no_grad()
     async def update_weights(

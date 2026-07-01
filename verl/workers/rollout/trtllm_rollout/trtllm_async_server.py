@@ -23,6 +23,7 @@ from ray.actor import ActorHandle
 from ray.util import placement_group_table
 from ray.util.placement_group import PlacementGroup
 
+from verl.plugin.platform import get_platform
 from verl.single_controller.ray import SubRayResourcePool
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.net_utils import is_valid_ipv6_address
@@ -132,7 +133,13 @@ class TRTLLMHttpServer:
 
         self.profiler_controller = self._init_profiler_controller()
 
-        if self.rollout_mode != RolloutMode.HYBRID and self.config.load_format == "dummy":
+        # Non-HYBRID with load_format=dummy normally needs to load from disk (auto).
+        # Exception: FP8 has no on-disk ckpt; weights are filled during first sync (keep dummy).
+        if (
+            self.rollout_mode != RolloutMode.HYBRID
+            and self.config.load_format == "dummy"
+            and self.config.quantization != "fp8"
+        ):
             logger.warning(f"rollout mode is {self.rollout_mode}, load_format is dummy, set to auto")
             self.config.load_format = "auto"
 
@@ -193,11 +200,12 @@ class TRTLLMHttpServer:
         # otherwise **engine_kwargs unpacking in llm_kwargs would overwrite the entire
         # KvCacheConfig object, losing free_gpu_memory_fraction and enable_block_reuse.
         kv_cache_overrides = engine_kwargs.pop("kv_cache_config", {})
-        kv_cache_config = KvCacheConfig(
-            enable_block_reuse=self.config.enable_prefix_caching,
-            free_gpu_memory_fraction=self.config.gpu_memory_utilization,
+        kv_cache_kwargs = {
+            "enable_block_reuse": self.config.enable_prefix_caching,
+            "free_gpu_memory_fraction": self.config.gpu_memory_utilization,
             **kv_cache_overrides,
-        )
+        }
+        kv_cache_config = KvCacheConfig(**kv_cache_kwargs)
 
         per_worker_gpu_share = 1.0 / self.max_colocate_count
 
@@ -317,6 +325,8 @@ class TRTLLMHttpServer:
         request_id: str,
         image_data: Optional[list[Any]] = None,
         video_data: Optional[list[Any]] = None,
+        audio_data: Optional[list[Any]] = None,
+        mm_processor_kwargs: Optional[dict[str, Any]] = None,
     ) -> TokenOutput:
         from tensorrt_llm.llmapi import SamplingParams
 
@@ -337,6 +347,9 @@ class TRTLLMHttpServer:
         sampling_params.update(self.sampling_args)
 
         trt_llm_sampling_params = SamplingParams(**sampling_params)
+        if audio_data is not None:
+            raise NotImplementedError("TRT-LLM rollout does not support audio inputs yet.")
+
         await self._generation_allowed.wait()
         if self.is_vlm_model and (image_data or video_data):
             deduped_ids = qwen2_5_vl_dedup_image_tokens(prompt_ids, self.model_config.processor)
@@ -344,7 +357,7 @@ class TRTLLMHttpServer:
             input_dict = {
                 "prompt": org_prompt,
                 "multi_modal_data": {},
-                "mm_processor_kwargs": {},
+                "mm_processor_kwargs": dict(mm_processor_kwargs or {}),
             }
             if image_data:
                 input_dict["multi_modal_data"]["image"] = image_data
@@ -398,6 +411,19 @@ class TRTLLMHttpServer:
     async def clear_kv_cache(self):
         """Invalidate prefix cache entries after weight update."""
         await self.llm.collective_rpc("reset_prefix_cache")
+
+    async def release_kv_cache(self):
+        """Release only kv_cache GPU memory, keeping model weights intact.
+
+        This is used during weight sync to free GPU memory for new weights.
+        """
+        if not self.config.free_cache_engine:
+            return
+        await self.llm.release(tags=["kv_cache"])
+
+    async def resume_kv_cache(self):
+        """Restore kv_cache GPU memory after a weight sync. Counterpart to release_kv_cache()."""
+        await self.llm.resume(tags=["kv_cache"])
 
     async def wake_up(self):
         from verl.workers.rollout.trtllm_rollout.trtllm_rollout import ServerAdapter
@@ -560,7 +586,8 @@ class TRTLLMReplica(RolloutReplica):
             if not self.is_reward_model
             else f"trtllm_server_reward_{self.replica_rank}{self.name_suffix}"
         )
-        _server_env_vars = {"RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1"}
+        _server_env_vars = {var: "1" for var in get_platform().ray_noset_envvars()}
+        _server_env_vars.update(get_platform().rollout_env_vars())
         # Propagate profiling env vars to the Ray actor so that RayExecutor
         # (instantiated inside TRTLLMHttpServer) picks them up for inner workers.
         for _prof_var in (

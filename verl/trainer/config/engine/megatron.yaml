@@ -56,6 +56,12 @@ dist_ckpt_optim_fully_reshardable: False
 # Has effect only when `dist_ckpt_optim_fully_reshardable` is enabled
 distrib_optim_fully_reshardable_mem_efficient: False
 
+# Whether to use entropy from logits with chunking
+entropy_from_logits_with_chunking: False
+
+# Chunk size for entropy from logits with chunking
+entropy_from_logits_chunk_size: 2048
+
 # oc.select: default val for ref.megatron.seed
 seed: 42
 
@@ -95,6 +101,9 @@ vanilla_mbridge: True
 
 # whether to use thd format (sequence packing), if not, use bshd format, padding the input_ids to the longest sequence length
 use_remove_padding: True
+
+# Whether to use Megatron-FSDP (Zero-3 sharding)
+use_megatron_fsdp: False
 
 # whether to use forward only
 forward_only: False

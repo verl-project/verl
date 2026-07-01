@@ -74,16 +74,17 @@ class FullyAsyncTaskRunner:
         self.components["role_worker_mapping"] = role_worker_mapping
         self.components["ray_worker_group_cls"] = ray_worker_group_cls
 
-        from concurrent.futures import ThreadPoolExecutor
+        print("[ASYNC MAIN] Creating FullyAsyncTrainer first (needed for hybrid worker group injection)...")
+        self._create_trainer(config)
 
-        print("[ASYNC MAIN] Creating FullyAsyncRollouter and FullyAsyncTrainer in parallel...")
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            # Rollouter does not permit continuous allocation, so we allocate trainer first.
-            trainer_future = executor.submit(self._create_trainer, config)
-            trainer_future.result()
+        print("[ASYNC MAIN] Injecting trainer's worker group into rollouter for hybrid replicas...")
+        self._setup_hybrid_worker_group(config)
 
-            rollouter_future = executor.submit(self._create_rollouter, config)
-            rollouter_future.result()
+        print("[ASYNC MAIN] Creating FullyAsyncRollouter...")
+        self._create_rollouter(config)
+
+        print("[ASYNC MAIN] Setting up rollouter reference on trainer")
+        ray.get(self.components["trainer"].set_rollouter.remote(self.components["rollouter"]))
 
         # sync total_train_steps between rollouter and trainer
         total_train_steps = ray.get(self.components["rollouter"].get_total_train_steps.remote())
@@ -105,9 +106,6 @@ class FullyAsyncTaskRunner:
         ray.get(self.components["trainer"].load_checkpoint.remote())
         ray.get(self.components["rollouter"].load_checkpoint.remote())
 
-        print("[ASYNC MAIN] Setting up parameter synchronization...")
-        ray.get(self.components["trainer"].set_rollouter.remote(self.components["rollouter"]))
-
         print("[ASYNC MAIN] Param sync before fit..")
         ray.get(self.components["trainer"]._fit_update_weights.remote())
 
@@ -118,24 +116,18 @@ class FullyAsyncTaskRunner:
 
     def _create_rollouter(self, config) -> None:
         print("[ASYNC MAIN] Starting create rollouter...")
-        from verl.trainer.distillation.losses import is_distillation_enabled
-
-        rollouter_roles = [Role.Rollout]
-        if is_distillation_enabled(config.get("distillation")):
-            rollouter_roles.append(Role.TeacherModel)
-
-        resource_pool_manager = create_resource_pool_manager(config, roles=rollouter_roles)
-        resource_pool_manager.create_resource_pool()
-
         rollouter = FullyAsyncRollouter.remote(
             config=config,
             tokenizer=self.components["tokenizer"],
-            role_worker_mapping=None,
-            resource_pool_manager=resource_pool_manager,
-            ray_worker_group_cls=self.components["ray_worker_group_cls"],
             processor=self.components["processor"],
             device_name=config.trainer.device,
         )
+
+        # set_hybrid_worker_group must be called BEFORE init_workers() so that
+        # _init_async_rollout_manager can pass the hybrid WG to ALM.create().
+        if "hybrid_worker_group" in self.components:
+            ray.get(rollouter.set_hybrid_worker_group.remote(self.components["hybrid_worker_group"]))
+            print("[ASYNC MAIN] Hybrid worker group injected into rollouter")
 
         ray.get(rollouter.init_workers.remote())
         ray.get(rollouter.set_max_required_samples.remote())
@@ -157,13 +149,29 @@ class FullyAsyncTaskRunner:
             role_worker_mapping=trainer_role_mapping,
             resource_pool_manager=create_resource_pool_manager(config, roles=list(trainer_role_mapping.keys())),
             ray_worker_group_cls=self.components["ray_worker_group_cls"],
-            processor=self.components["processor"],
             device_name=config.trainer.device,
         )
 
         ray.get(trainer.init_workers.remote())
         self.components["trainer"] = trainer
         print("[ASYNC MAIN] FullyAsyncTrainer created and initialized successfully")
+
+    def _setup_hybrid_worker_group(self, config) -> None:
+        """
+        Extract the trainer's actor_rollout_wg and store it for later injection
+        into the rollouter. This WG backs the hybrid rollout replicas
+        used during trainer-side validation (use_trainer_do_validate).
+        """
+        trainer = self.components["trainer"]
+        if config.async_training.use_trainer_do_validate:
+            trainer_wg = ray.get(trainer.get_actor_wg.remote())
+            self.components["hybrid_worker_group"] = trainer_wg
+            print(
+                f"[ASYNC MAIN] Hybrid worker group extracted from trainer "
+                f"(world_size={getattr(trainer_wg, 'world_size', '?')})"
+            )
+        else:
+            print("[ASYNC MAIN] use_trainer_do_validate=False, skipping hybrid worker group setup")
 
     def _run_training_loop(self):
         self.running = True
@@ -208,18 +216,6 @@ def main(config):
     # Ensure async training config exists
     if not hasattr(config, "async_training"):
         raise RuntimeError("must set async_training config")
-
-    assert config.async_training.use_trainer_do_validate is False, "use_trainer_do_validate is not ready to use."
-
-    # TODO: support use_trainer_do_validate with GenRM/DisRM. Currently the trainer cannot
-    # connect to the rollouter's GenRM server for validation reward computation.
-    from verl.trainer.ppo.utils import need_reward_model
-
-    if need_reward_model(config) and config.async_training.use_trainer_do_validate:
-        raise NotImplementedError(
-            "use_trainer_do_validate with GenRM/DisRM is not yet supported. "
-            "The trainer currently cannot share the rollouter's reward model server for validation."
-        )
 
     from time import time
 
