@@ -1147,11 +1147,15 @@ class AgentLoopManager:
             len(prompts), prompts.meta_info.get("global_steps", -1), dtype=np.int64
         )
         prompts.non_tensor_batch["__source_batch_index__"] = np.arange(len(prompts), dtype=np.int64)
-        chunkes = prompts.chunk(len(self.agent_loop_workers))
+        # Validation 的最后一个 batch 不一定能被 worker 数整除。按 source row 做近似均分，
+        # 既不复制 task，也不生成需要事后丢弃的伪 rollout。
+        worker_count = min(len(self.agent_loop_workers), len(prompts))
+        index_chunks = [indices for indices in np.array_split(np.arange(len(prompts)), worker_count) if len(indices)]
+        chunkes = [prompts.select_idxs(indices) for indices in index_chunks]
         outputs = await asyncio.gather(
             *[
                 worker.generate_sequences.remote(chunk)
-                for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=True)
+                for worker, chunk in zip(self.agent_loop_workers[:worker_count], chunkes, strict=True)
             ]
         )
         output = DataProto.concat(outputs)
