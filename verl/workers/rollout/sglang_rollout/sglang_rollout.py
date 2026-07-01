@@ -119,6 +119,7 @@ class ServerAdapter(BaseRollout):
         if self.config.get("quantization", None) == "fp8":
             import sglang
             from packaging import version
+
             from verl.utils.sglang.sglang_fp8_utils import build_sglang_fp8_quant_config
 
             assert version.parse(sglang.__version__) >= version.parse("0.5.5"), (
