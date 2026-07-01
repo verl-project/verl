@@ -129,15 +129,25 @@ def no_padding_2_padding(tensor: torch.Tensor, data: TensorDict) -> torch.Tensor
             max_response_len = response_ids.shape[1]
     else:
         # DCP path: no prompts/responses after scheduler routing. Prefer
-        # response_mask for response lengths; loss_mask may be an SFT/tool mask
-        # and does not necessarily describe the full response span.
+        # the routed response span because response_mask may contain internal
+        # zeros for tool output or rollout rejection.
         if tensor.is_nested:
             seq_lens = tensor.offsets().diff()
             num_seqs = len(seq_lens)
-            response_mask = data.get("response_mask", None)
+            response_lens = data.get("_dcp_response_lengths", None)
+            response_mask = data.get("_dcp_response_mask_for_padding", None)
+            if response_mask is None:
+                response_mask = data.get("response_mask", None)
             loss_mask = data.get("loss_mask", None)
             length_mask = response_mask if response_mask is not None else loss_mask
-            if length_mask is not None and length_mask.is_nested:
+            if response_lens is not None:
+                response_lens = response_lens.to(seq_lens.dtype).to(seq_lens.device)
+                if response_lens.numel() != num_seqs:
+                    raise ValueError(
+                        f"DCP response length count must match nested batch size: {response_lens.numel()} != {num_seqs}"
+                    )
+                prompt_lens = seq_lens - response_lens
+            elif length_mask is not None and length_mask.is_nested:
                 response_lens = length_mask.offsets().diff().to(seq_lens.dtype).to(seq_lens.device)
                 prompt_lens = seq_lens - response_lens
             elif length_mask is not None:
