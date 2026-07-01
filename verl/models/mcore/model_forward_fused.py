@@ -34,7 +34,14 @@ from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy
 from verl.utils.megatron_utils import unwrap_model
 from verl.utils.model import CausalLMOutputForPPO
 
-from .util import postprocess_packed_seqs_for_dict_output, postprocess_thd_engine
+from .util import (
+    build_thd_full_seq_lens,
+    build_thd_local_token_indices,
+    build_thd_local_token_mask,
+    postprocess_packed_seqs_for_dict_output,
+    postprocess_thd_engine,
+    postprocess_thd_engine_local,
+)
 
 
 def _get_patching_model(model: torch.nn.Module):
@@ -146,6 +153,10 @@ def fused_forward_model_engine(vision_model: bool = False):
         temperature: float,
         calculate_entropy: bool,
         pad_token_id: int,
+        local_cp_size: int | None = None,
+        return_dcp_local_token_mask: bool = False,
+        dcp_local_output_only: bool = False,
+        dcp_compact_output_only: bool = False,
     ):
         pre_process = unwrap_model(model).pre_process
         post_process = unwrap_model(model).post_process
@@ -154,7 +165,10 @@ def fused_forward_model_engine(vision_model: bool = False):
         use_fp8_padding = fp8 in ["e4m3", "hybrid"]
 
         input_ids_rmpad, packed_seq_params, _ = preprocess_thd_engine(
-            input_ids, pre_process=pre_process, use_fp8_padding=use_fp8_padding
+            input_ids,
+            pre_process=pre_process,
+            use_fp8_padding=use_fp8_padding,
+            local_cp_size=local_cp_size,
         )
         input_ids_rmpad = input_ids_rmpad.contiguous()
 
@@ -178,7 +192,11 @@ def fused_forward_model_engine(vision_model: bool = False):
             ) < seqlens_in_batch.unsqueeze(1)
 
         labels_rmpad, _, _ = preprocess_thd_engine(
-            labels, pre_process=True, need_roll=True, use_fp8_padding=use_fp8_padding
+            labels,
+            pre_process=True,
+            need_roll=True,
+            use_fp8_padding=use_fp8_padding,
+            local_cp_size=local_cp_size,
         )
         labels_rmpad = labels_rmpad.contiguous()
         output_orig: CausalLMOutputForPPO = model(
@@ -197,8 +215,22 @@ def fused_forward_model_engine(vision_model: bool = False):
         log_probs = output_orig.log_probs
         if log_probs.dim() == 1:
             log_probs = log_probs.unsqueeze(0)
-        log_probs = postprocess_thd_engine(
-            log_probs, packed_seq_params, input_ids, input_ids.shape[0], post_process=post_process
+        postprocess_fn = (
+            postprocess_thd_engine_local
+            if dcp_local_output_only and local_cp_size is not None
+            else postprocess_thd_engine
+        )
+        postprocess_kwargs = (
+            {"compact": dcp_compact_output_only} if postprocess_fn is postprocess_thd_engine_local else {}
+        )
+        log_probs = postprocess_fn(
+            log_probs,
+            packed_seq_params,
+            input_ids,
+            input_ids.shape[0],
+            post_process=post_process,
+            local_cp_size=local_cp_size,
+            **postprocess_kwargs,
         )
 
         output = {"log_probs": log_probs}
@@ -207,10 +239,34 @@ def fused_forward_model_engine(vision_model: bool = False):
             entropy = output_orig.entropy
             if entropy.dim() == 1:
                 entropy = entropy.unsqueeze(0)
-            entropy = postprocess_thd_engine(
-                entropy, packed_seq_params, input_ids, input_ids.shape[0], post_process=post_process
+            entropy = postprocess_fn(
+                entropy,
+                packed_seq_params,
+                input_ids,
+                input_ids.shape[0],
+                post_process=post_process,
+                local_cp_size=local_cp_size,
+                **postprocess_kwargs,
             )
             output["entropy"] = entropy
+
+        if dcp_compact_output_only and local_cp_size is not None:
+            output["_dcp_local_token_indices"] = build_thd_local_token_indices(
+                packed_seq_params,
+                input_ids,
+                input_ids.shape[0],
+                post_process=post_process,
+                local_cp_size=local_cp_size,
+            )
+            output["_dcp_full_seq_lens"] = build_thd_full_seq_lens(input_ids, post_process=post_process)
+        if return_dcp_local_token_mask and local_cp_size is not None:
+            output["_dcp_local_token_mask"] = build_thd_local_token_mask(
+                packed_seq_params,
+                input_ids,
+                input_ids.shape[0],
+                post_process=post_process,
+                local_cp_size=local_cp_size,
+            )
 
         return output
 
