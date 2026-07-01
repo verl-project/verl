@@ -33,7 +33,7 @@ from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.megatron_checkpoint_manager import MegatronCheckpointManager
 from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.utils.debug import log_gpu_memory_usage
-from verl.utils.device import get_device_id, get_device_name
+from verl.utils.device import get_device_id, get_device_name, get_torch_device
 from verl.utils.megatron.pipeline_parallel import make_batch_generator
 from verl.utils.megatron.router_replay_patch import RouterReplay, RouterReplayAction, apply_router_replay_patch
 from verl.utils.megatron.router_replay_utils import (
@@ -511,6 +511,10 @@ class MegatronEngine(BaseEngine):
         Returns:
             grad_norm (float): The norm of the gradients before clipping or update.
         """
+        # forward_kl_topk leaves large fp32 vocab tensors until backward ends;
+        # free cached blocks before grad-norm all_reduce to reduce OOM on tight VRAM.
+        if getattr(self, "_distillation_use_topk_active", False):
+            get_torch_device().empty_cache()
         update_successful, grad_norm, num_zeros_in_grad = self.optimizer.step()
 
         if update_successful:
@@ -631,6 +635,7 @@ class MegatronEngine(BaseEngine):
             offload_megatron_optimizer(self.optimizer)
 
     def forward_backward_batch(self, data: TensorDict, loss_function: Callable, forward_only=False) -> Any:
+        self._distillation_use_topk_active = tu.get_non_tensor_data(data, key="distillation_use_topk", default=False)
         tu.assign_non_tensor(data, sp_size=self.engine_config.context_parallel_size)
 
         # compute num_tokens in global batch for loss normalization
@@ -841,6 +846,58 @@ class MegatronEngineWithLMHead(MegatronEngine):
     def prepare_model_outputs(self, output: dict, data: TensorDict):
         return output
 
+    def _lm_head_logits_processor(
+        self,
+        logits,
+        label,
+        temperature,
+        *,
+        calculate_sum_pi_squared: bool,
+        calculate_entropy: bool,
+        distillation_use_topk: bool,
+        distillation_only: bool,
+        logits_processor_func: Callable,
+        batch: TensorDict,
+        data_format: str,
+    ):
+        assert logits.shape[:2] == label.shape[:2]
+        # avoid non-positive temperature such as padding
+        temperature[temperature <= 0] = 1e-8
+        assert torch.all(temperature > 0).item(), f"temperature tensor must be positive. Got {temperature}"
+        logits.div_(temperature.unsqueeze(dim=-1).to(logits.dtype))
+        ret = {}
+        # sum_pi_squared is non-destructive — must run before vocab_parallel_entropy.
+        if calculate_sum_pi_squared:
+            ret["sum_pi_squared"] = vocab_parallel_sum_pi_squared(logits)
+        if calculate_entropy:
+            logits_bak = logits.clone()
+            # # disable the hint until the fused_kernel is optimized for triton>=3.3
+            # if torch.distributed.get_rank() == 0:
+            #     logger.warning_once(
+            #         "For memory-efficient computation, enable fused kernels via "
+            #         "`actor_rollout_ref.model.use_fused_kernels=True`. "
+            #         "The current `clone()` operation ensures correctness but increases memory usage."
+            #     )
+            if self.engine_config.entropy_from_logits_with_chunking:
+                entropy = vocab_parallel_entropy_with_chunking(
+                    logits,
+                    chunk_size=self.engine_config.entropy_from_logits_chunk_size,
+                )
+            else:
+                entropy = vocab_parallel_entropy(logits)
+
+            ret["entropy"] = entropy
+        else:
+            logits_bak = logits
+
+        # logits_processor_func return tensors with shape (1, total_nnz/cp_size)
+        if distillation_use_topk:
+            ret.update(logits_processor_func(student_logits=logits_bak, data=batch, data_format=data_format))
+        if not distillation_only:
+            ret["log_probs"] = vocab_parallel_log_probs_from_logits(logits_bak, label)
+
+        return ret
+
     def forward_step(
         self, batch_iter: Iterator[TensorDict], model, logits_processor_func, postprocess_micro_batch_func
     ):
@@ -862,6 +919,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
         calculate_entropy = tu.get_non_tensor_data(batch, key="calculate_entropy", default=False)
         calculate_sum_pi_squared = tu.get_non_tensor_data(batch, key="calculate_sum_pi_squared", default=False)
         distillation_use_topk = tu.get_non_tensor_data(batch, key="distillation_use_topk", default=False)
+        distillation_only = tu.get_non_tensor_data(batch, key="distillation_only", default=False)
 
         if calculate_sum_pi_squared and use_fused_kernels:
             raise NotImplementedError(
@@ -939,43 +997,16 @@ class MegatronEngineWithLMHead(MegatronEngine):
             forward_fn = get_mcore_engine_forward_fn(self.model_config.hf_config)
             data_format = "thd" if self.engine_config.use_remove_padding else "bshd"
 
-            def logits_processor(logits, label, temperature):
-                assert logits.shape[:2] == label.shape[:2]
-                # avoid non-positive temperature such as padding
-                temperature[temperature <= 0] = 1e-8
-                assert torch.all(temperature > 0).item(), f"temperature tensor must be positive. Got {temperature}"
-                logits.div_(temperature.unsqueeze(dim=-1).to(logits.dtype))
-                ret = {}
-                # sum_pi_squared is non-destructive — must run before vocab_parallel_entropy.
-                if calculate_sum_pi_squared:
-                    ret["sum_pi_squared"] = vocab_parallel_sum_pi_squared(logits)
-                if calculate_entropy:
-                    logits_bak = logits.clone()
-                    # # disable the hint until the fused_kernel is optimized for triton>=3.3
-                    # if torch.distributed.get_rank() == 0:
-                    #     logger.warning_once(
-                    #         "For memory-efficient computation, enable fused kernels via "
-                    #         "`actor_rollout_ref.model.use_fused_kernels=True`. "
-                    #         "The current `clone()` operation ensures correctness but increases memory usage."
-                    #     )
-                    if self.engine_config.entropy_from_logits_with_chunking:
-                        entropy = vocab_parallel_entropy_with_chunking(
-                            logits,
-                            chunk_size=self.engine_config.entropy_from_logits_chunk_size,
-                        )
-                    else:
-                        entropy = vocab_parallel_entropy(logits)
-
-                    ret["entropy"] = entropy
-                else:
-                    logits_bak = logits
-
-                # logits_processor_func return tensors with shape (1, total_nnz/cp_size)
-                if distillation_use_topk:
-                    ret.update(logits_processor_func(student_logits=logits_bak, data=batch, data_format=data_format))
-                log_probs = vocab_parallel_log_probs_from_logits(logits_bak, label)
-                ret["log_probs"] = log_probs
-                return ret
+            logits_processor = partial(
+                self._lm_head_logits_processor,
+                calculate_sum_pi_squared=calculate_sum_pi_squared,
+                calculate_entropy=calculate_entropy,
+                distillation_use_topk=distillation_use_topk,
+                distillation_only=distillation_only,
+                logits_processor_func=logits_processor_func,
+                batch=batch,
+                data_format=data_format,
+            )
 
             response_attention_mask = None
             if attention_mask is not None and not loss_mask.is_nested:

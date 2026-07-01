@@ -332,6 +332,10 @@ skip_tokenizer_init: True
 # When enabled (True), the rollout will record the routing decisions.
 enable_rollout_routing_replay: False
 
+# Interval for logging rollout MoE load-balance metrics from routing replay data.
+# Set to 0 to disable.
+moe_load_balance_metrics_interval: 0
+
 
 # profile the rollout model in `generate_sequence`
 profiler:

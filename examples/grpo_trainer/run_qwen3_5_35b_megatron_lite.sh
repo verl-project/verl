@@ -9,7 +9,7 @@
 # mlite changes merge upstream. That checkout provides both megatron.lite and
 # the verl_mlite backend glue:
 #
-#   git clone https://github.com/ISEEKYAN/mlite
+#   git clone -b lite https://github.com/verl-project/Megatron-LM mlite
 #   pip install -e mlite/experimental/lite/examples/verl
 #
 # Qwen3.5 uses the Megatron Lite allgather CP path. CP is intentionally kept as

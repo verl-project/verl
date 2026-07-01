@@ -1766,7 +1766,7 @@ def compute_policy_loss_clip_cov(
             Upper clip range for dual-clip PPO. Defaults to same as `cliprange`.
         loss_agg_mode (str, optional):
             Aggregation mode for `agg_loss`. Defaults to "token-mean".
-        clip_cvo_ratio (float, optional):
+        clip_cov_ratio (float, optional):
             Ratio for clipping the covariance. Defaults to 0.0002.
         clip_cov_lb (float, optional):
             Lower bound for clipping covariance. Defaults to 1.0.

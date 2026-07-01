@@ -328,6 +328,7 @@ actor_rollout_ref:
       max_samples_per_step_per_worker: null
     skip_tokenizer_init: true
     enable_rollout_routing_replay: false
+    moe_load_balance_metrics_interval: 0
     profiler:
       _target_: verl.utils.profiler.ProfilerConfig
       tool: ${oc.select:global_profiler.tool,null}

@@ -1,8 +1,10 @@
 # NPU Qwen3-32B GSPO Optimization Practice
 
-Last updated: 02/26/2026.
+Last updated: 06/29/2026.
 
 为保障使用体验，请切换verl commit id 至 252d76908
+
+本实践对应的训练脚本：[run_qwen3_32b_fsdp.sh](../../../../examples/ascend_extras/gspo_trainer/run_qwen3_32b_fsdp.sh)（`examples/ascend_extras/gspo_trainer/run_qwen3_32b_fsdp.sh`）。
 
 ## 算法适配
 
@@ -28,7 +30,7 @@ actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-mean \ # 序列级平均，
 actor_rollout_ref.rollout.n=16 \                  # 每个prompt生成16个响应（组采样）
 ```
 
-一般选择入口函数为 `verl.trainer.main_ppo`
+一般选择入口函数为 `verl.trainer.main_ppo`。完整可运行示例见 [run_qwen3_32b_fsdp.sh](../../../../examples/ascend_extras/gspo_trainer/run_qwen3_32b_fsdp.sh)。
 
 ## 基础环境
 
@@ -198,7 +200,7 @@ fi
 sleep 600
 ```
 
-DEFAULT_SH:修改为训练所用配置 sh 文件路径。在此案例中修改为 [Qwen3-8B](https://github.com/verl-project/verl/blob/main/examples/gspo_trainer/run_qwen3_8b_fsdp.sh) 路径。
+DEFAULT_SH:修改为训练所用配置 sh 文件路径。在此案例中修改为 [run_qwen3_32b_fsdp.sh](../../../../examples/ascend_extras/gspo_trainer/run_qwen3_32b_fsdp.sh)（即 `examples/ascend_extras/gspo_trainer/run_qwen3_32b_fsdp.sh`）。
 
 NNODES 和 NPUS_PER_NODE:修改为使用节点数量和每个节点 NPU 数量。在此案例中分别为4和16。
 
