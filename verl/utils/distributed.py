@@ -18,10 +18,11 @@ import os
 import socket
 from datetime import timedelta
 from typing import Any
+
 import ray
 import torch.distributed
-from torch.distributed import ProcessGroup, Store, TCPStore
-import torch_npu
+from torch.distributed import TCPStore
+
 from verl.utils.device import get_device_name, get_nccl_backend, get_torch_device, is_npu_available
 from verl.utils.net_utils import is_ipv6
 
@@ -167,8 +168,9 @@ def stateless_init_process_group(master_address, master_port, rank, world_size, 
             listen_socket = None
             listen_fd = None
 
-        from packaging import version
         import vllm
+        from packaging import version
+
         _VLLM_VERSION = version.parse(vllm.__version__)
         if _VLLM_VERSION >= version.parse("0.19.0"):
             store = create_tcp_store(
