@@ -30,6 +30,7 @@ from transformers.models.qwen3_next import modeling_qwen3_next
 from transformers.models.qwen3_vl import modeling_qwen3_vl
 from transformers.models.qwen3_vl_moe import modeling_qwen3_vl_moe
 from transformers.utils import logging
+from verl.models.transformers.qwen3_5_gdn_patch import patch_qwen3_5_gdn_class
 
 logger = logging.get_logger(__name__)
 
@@ -380,11 +381,13 @@ modeling_qwen3_next.Qwen3NextRMSNorm.forward = qwen3_next_rms_norm_forward_npu
 modeling_qwen3_next.apply_rotary_pos_emb = qwen3_next_apply_rotary_pos_emb_npu
 
 # Patches for Qwen3.5 Model
+patch_qwen3_5_gdn_class(modeling_qwen3_5.Qwen3_5GatedDeltaNet, logger=logger)
 modeling_qwen3_5.Qwen3_5RMSNormGated.forward = qwen3_next_rms_norm_forward_gated_npu
 modeling_qwen3_5.Qwen3_5RMSNorm.forward = qwen3_next_rms_norm_forward_npu
 modeling_qwen3_5.apply_rotary_pos_emb = qwen3_next_apply_rotary_pos_emb_npu
 
 # Patches for Qwen3.5 MoE Model
+patch_qwen3_5_gdn_class(modeling_qwen3_5_moe.Qwen3_5MoeGatedDeltaNet, logger=logger)
 modeling_qwen3_5_moe.Qwen3_5MoeExperts.forward = qwen3_5_moe_experts_forward_npu
 modeling_qwen3_5_moe.Qwen3_5MoeRMSNormGated.forward = qwen3_next_rms_norm_forward_gated_npu
 modeling_qwen3_5_moe.Qwen3_5MoeRMSNorm.forward = qwen3_next_rms_norm_forward_npu

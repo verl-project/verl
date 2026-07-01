@@ -25,6 +25,7 @@ TRAIN_FILE=${TRAIN_FILE:-"${RAY_DATA_HOME}/data/geo3k/train.parquet"}
 TEST_FILE=${TEST_FILE:-"${RAY_DATA_HOME}/data/geo3k/test.parquet"}
 WORKING_DIR=${WORKING_DIR:-"${PWD}"}
 RUNTIME_ENV=${RUNTIME_ENV:-"${WORKING_DIR}/verl/trainer/runtime_env.yaml"}
+USE_TRITON_GDN=${USE_TRITON_GDN:-auto}
 ########################### end user-adjustable ###########################
 
 ########################### derived defaults ###########################
@@ -72,6 +73,10 @@ MODEL=(
     actor_rollout_ref.model.use_remove_padding=True
     actor_rollout_ref.model.enable_gradient_checkpointing=True
 )
+
+if [[ "${DEVICE}" == "npu" && "${USE_TRITON_GDN}" != "false" && "${USE_TRITON_GDN}" != "0" ]]; then
+    MODEL+=(actor_rollout_ref.model.override_config.text_config.use_triton_gdn=True)
+fi
 
 ACTOR=(
     actor_rollout_ref.actor.optim.lr=1e-6
