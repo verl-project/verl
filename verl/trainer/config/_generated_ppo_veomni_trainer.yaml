@@ -384,6 +384,7 @@ actor_rollout_ref:
     custom_chat_template: null
     external_lib: null
     override_config: {}
+    freeze_module_pattern: null
     enable_gradient_checkpointing: true
     enable_activation_offload: false
     use_remove_padding: true
@@ -596,6 +597,7 @@ critic:
     custom_chat_template: null
     external_lib: null
     override_config: {}
+    freeze_module_pattern: null
     enable_gradient_checkpointing: true
     enable_activation_offload: false
     use_remove_padding: true

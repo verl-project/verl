@@ -110,6 +110,19 @@ class TorchTitanEngine(BaseEngine):
         model_module = importlib.import_module(f"torchtitan.models.{torchtitan_name}")
         model_spec = model_module.model_registry(torchtitan_flavor, attn_backend=self.engine_config.attn_type)
 
+        # Freeze policy: wrap parallelize_fn to freeze before FSDP2 apply
+        if self.model_config.freeze_module_pattern:
+            from verl.utils.freeze_utils import apply_freeze_to_module
+
+            _orig_parallelize = model_spec.parallelize_fn
+            _freeze_pattern = self.model_config.freeze_module_pattern
+
+            def _parallelize_with_freeze(model, *args, **kwargs):
+                apply_freeze_to_module(model, _freeze_pattern)
+                return _orig_parallelize(model, *args, **kwargs)
+
+            model_spec.parallelize_fn = _parallelize_with_freeze
+
         optimizer = OptimizersContainer.Config(
             name=self.optimizer_config.name,
             lr=self.optimizer_config.lr,
