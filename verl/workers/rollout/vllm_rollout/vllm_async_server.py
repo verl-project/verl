@@ -1016,7 +1016,7 @@ class vLLMReplica(RolloutReplica):
 
             if _VLLM_VERSION >= version.parse("0.20.0"):
                 env_vars["ASCEND_RT_VISIBLE_DEVICES"] = node_cuda_visible_devices
-    
+
             if os.environ.get("VLLM_ASCEND_TASK_QUEUE_ENABLE", None):
                 # use VLLM_ASCEND_TASK_QUEUE_ENABLE to support different TASK_QUEUE_ENABLE mode for
                 # train and rollout on Ascend NPU
