@@ -115,8 +115,7 @@ class AsyncTeacherLLMServerManager:
         if max_model_len is not None and len(sequence_ids) + 1 > max_model_len:
             raise ValueError(
                 f"Teacher input ({len(sequence_ids)} tokens, +1 to score) exceeds the teacher's "
-                f"max_model_len ({max_model_len}); with OPSD privileged context this usually means "
-                f"the reference solution is too long -- raise max_model_len or shorten the solution."
+                f"max_model_len ({max_model_len}); raise the teacher's max_model_len or shorten the input."
             )
         teacher_output = await client.generate(
             request_id=uuid4().hex,
