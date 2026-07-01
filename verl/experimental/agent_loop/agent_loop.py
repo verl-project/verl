@@ -28,6 +28,7 @@ and is designed to be fully replaceable by other agent frameworks such as:
 """
 
 import asyncio
+import hashlib
 import logging
 import os
 import random
@@ -76,6 +77,26 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 DEFAULT_ROUTING_CACHE_SIZE = 10000
+
+
+def _stable_sglang_sampling_seed(sample_index: Any, rollout_n: int, step: Any, base_seed: Any) -> int:
+    key = f"{step}|{sample_index}|{rollout_n}|{base_seed}"
+    seed = int(hashlib.sha256(key.encode()).hexdigest()[:8], 16) & 0x7FFFFFFF
+    return seed or 1
+
+
+def _get_sglang_sampling_seed_base(sglang_kwargs: dict[str, Any]) -> Any:
+    base_seed = sglang_kwargs.get("random_seed")
+    rl_on_policy_target = sglang_kwargs.get("rl_on_policy_target", None)
+    if rl_on_policy_target not in (None, False, "fsdp"):
+        raise ValueError("SGLang rl_on_policy_target must be None, False, or 'fsdp'.")
+
+    deterministic_inference = sglang_kwargs.get("enable_deterministic_inference", False) or (
+        rl_on_policy_target == "fsdp"
+    )
+    if deterministic_inference:
+        return 42 if base_seed is None else base_seed
+    return None
 
 
 class AgentLoopMetrics(BaseModel):
@@ -558,7 +579,9 @@ class AgentLoopWorker:
                 mm_processor_kwargs["sampling_rate"] = int(sampling_rate)
         return mm_processor_kwargs
 
-    async def generate_sequences(self, batch: DataProto) -> DataProto:
+    async def generate_sequences(
+        self, batch: DataProto, trajectory_info: list[dict[str, Any]] | None = None
+    ) -> DataProto:
         """Generate sequences from agent loop.
 
         Args:
@@ -626,9 +649,12 @@ class AgentLoopWorker:
         else:
             traced_indices = set(range(len(batch)))
 
-        trajectory_info = await get_trajectory_info(
-            batch.meta_info.get("global_steps", -1), index.tolist(), batch.meta_info.get("validate", False)
-        )
+        if trajectory_info is None:
+            trajectory_info = await get_trajectory_info(
+                batch.meta_info.get("global_steps", -1), index.tolist(), batch.meta_info.get("validate", False)
+            )
+        else:
+            assert len(trajectory_info) == len(batch), "trajectory_info length must match batch size"
 
         # NOTE: __do_sample__ is an internal per-sample override used by REMAX combined rollout.
         # Do not forward it to concrete agent loops, which may reject unknown kwargs.
@@ -661,6 +687,16 @@ class AgentLoopWorker:
         trace: bool = True,
         **kwargs,
     ) -> _InternalAgentLoopOutput:
+        seed_base = _get_sglang_sampling_seed_base((self.rollout_config.engine_kwargs or {}).get("sglang", {}) or {})
+        if seed_base is not None and "sampling_seed" not in sampling_params:
+            sampling_params = dict(sampling_params)
+            sampling_params["sampling_seed"] = _stable_sglang_sampling_seed(
+                sample_index=trajectory.get("sample_index", ""),
+                rollout_n=trajectory.get("rollout_n", 0),
+                step=trajectory.get("step", 0),
+                base_seed=seed_base,
+            )
+
         with rollout_trace_attr(
             step=trajectory["step"],
             sample_index=trajectory["sample_index"],
@@ -1138,6 +1174,19 @@ async def get_trajectory_info(step, index, validate):
     return trajectory_info
 
 
+def _split_trajectory_info_for_chunks(
+    trajectory_info: list[dict[str, Any]], chunk_sizes: list[int]
+) -> list[list[dict[str, Any]]]:
+    chunks = []
+    offset = 0
+    for chunk_size in chunk_sizes:
+        next_offset = offset + chunk_size
+        chunks.append(trajectory_info[offset:next_offset])
+        offset = next_offset
+    assert offset == len(trajectory_info), "chunk sizes must cover trajectory_info"
+    return chunks
+
+
 class AgentLoopManager:
     """Agent loop manager that manages a group of agent loop workers.
 
@@ -1212,11 +1261,22 @@ class AgentLoopManager:
         if "priority" not in prompts.non_tensor_batch:
             prompts.non_tensor_batch["priority"] = np.arange(len(prompts), dtype=np.int64)
 
+        if "index" in prompts.non_tensor_batch:
+            index = prompts.non_tensor_batch["index"]
+        else:
+            index = np.arange(len(prompts))
+        full_trajectory_info = await get_trajectory_info(
+            prompts.meta_info.get("global_steps", -1),
+            index.tolist(),
+            prompts.meta_info.get("validate", False),
+        )
+
         chunkes = prompts.chunk(len(self.agent_loop_workers))
+        traj_chunks = _split_trajectory_info_for_chunks(full_trajectory_info, [len(chunk) for chunk in chunkes])
         outputs = await asyncio.gather(
             *[
-                worker.generate_sequences.remote(chunk)
-                for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=True)
+                worker.generate_sequences.remote(chunk, traj_chunk)
+                for worker, chunk, traj_chunk in zip(self.agent_loop_workers, chunkes, traj_chunks, strict=True)
             ]
         )
         output = DataProto.concat(outputs)
