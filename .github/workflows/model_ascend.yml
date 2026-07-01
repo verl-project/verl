@@ -61,51 +61,51 @@ permissions:
   contents: read
 
 jobs:
-  # model_rmpad_ascend:
-  #   if: github.repository_owner == 'verl-project'
-  #   runs-on: linux-aarch64-a2b3-8
-  #   timeout-minutes: 60 # Increase this timeout value as needed
-  #   container:
-  #     image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-9.0.0-910b-ubuntu22.04-py3.11-latest
-  #     options: >-
-  #       --shm-size 16g
-  #   env:
-  #     HF_ENDPOINT: "https://hf-mirror.com"
-  #     HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
-  #   steps:
-  #     - name: Check npu and CANN info
-  #       run: |
-  #         cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
-  #         npu-smi info
-  #     - name: Check initial pip list from image
-  #       run: |
-  #         pip list
-  #     - name: Checkout verl-project/verl repo
-  #       uses: actions/checkout@v4
-  #       with:
-  #         fetch-depth: 0
-  #         clean: true
-  #     - name: Install the current repository
-  #       run: |
-  #         pip install --no-deps -e .[test]
-  #     - name: Check final pip list
-  #       run: |
-  #         pip list
-  #     - name: Prepare weights
-  #       run: |
-  #         ln -s /root/.cache/models ~/models
-  #     - name: Running rmpad model tests on 8 NPUs
-  #       run: |
-  #         pytest -s tests/models/test_transformer.py
-  #     - name: Running FSDP rmpad model tests on 8 NPUs
-  #       run: |
-  #         STRATEGY=fsdp torchrun --nproc_per_node=8 tests/special_distributed/test_fsdp_ckpt.py
-  #     - name: Running transformers ulysses tests on 8 NPUs
-  #       run: |
-  #         torchrun --nproc_per_node=8 -m pytest tests/models/test_transformers_ulysses.py
-  #     - name: Run distributed test
-  #       run: |
-  #         bash tests/special_distributed/run_all.sh
+  model_rmpad_ascend:
+    if: github.repository_owner == 'verl-project'
+    runs-on: linux-aarch64-a2b3-8
+    timeout-minutes: 60 # Increase this timeout value as needed
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-9.0.0-910b-ubuntu22.04-py3.11-latest
+      options: >-
+        --shm-size 16g
+    env:
+      HF_ENDPOINT: "https://hf-mirror.com"
+      HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+    steps:
+      - name: Check npu and CANN info
+        run: |
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+          npu-smi info
+      - name: Check initial pip list from image
+        run: |
+          pip list
+      - name: Checkout verl-project/verl repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          clean: true
+      - name: Install the current repository
+        run: |
+          pip install --no-deps -e .[test]
+      - name: Check final pip list
+        run: |
+          pip list
+      - name: Prepare weights
+        run: |
+          ln -s /root/.cache/models ~/models
+      - name: Running rmpad model tests on 8 NPUs
+        run: |
+          pytest -s tests/models/test_transformer.py
+      - name: Running FSDP rmpad model tests on 8 NPUs
+        run: |
+          STRATEGY=fsdp torchrun --nproc_per_node=8 tests/special_distributed/test_fsdp_ckpt.py
+      - name: Running transformers ulysses tests on 8 NPUs
+        run: |
+          torchrun --nproc_per_node=8 -m pytest tests/models/test_transformers_ulysses.py
+      - name: Run distributed test
+        run: |
+          bash tests/special_distributed/run_all.sh
 
   # TODO: Move this back to model_rmpad once FSDP2 is stable.
   # NOTE: List as an independent job to make rerun easier.
@@ -141,4 +141,4 @@ jobs:
       - name: Running model_engine_ascend
         run: |
           ray stop --force
-          pytest -s -x tests/models/test_engine.py::test_actor_engine[fsdp]
+          pytest -s -x tests/models/test_engine.py
