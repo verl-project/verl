@@ -131,9 +131,13 @@ class MegatronEngine(BaseEngine):
             apply_mtp_inference_patch()
 
         if is_cuda_available:
-            from verl.models.mcore.patch import apply_patch_megatron_recomputation_backward
+            from verl.models.mcore.patch import (
+                apply_patch_megatron_gated_delta_net,
+                apply_patch_megatron_recomputation_backward,
+            )
 
             apply_patch_megatron_recomputation_backward()
+            apply_patch_megatron_gated_delta_net()
 
     def _init_device_mesh(self):
         # TODO: set different parallelism for actor, critic, ref

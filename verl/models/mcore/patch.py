@@ -571,3 +571,223 @@ def apply_patch_megatron_recomputation_backward():
         return (None, None) + grads
 
     rd.CheckpointFunction.backward = patch_backward
+
+
+def apply_patch_megatron_gated_delta_net():
+    """Enable Megatron GatedDeltaNet for packed THD sequence-parallel inputs.
+
+    Megatron's GatedDeltaNet currently rejects ``packed_seq_params``. verl's
+    packed THD path represents all valid tokens as a packed batch and relies on
+    ``cu_seqlens`` to preserve sequence boundaries. This patch forwards those
+    boundaries to the FLA gated-delta-rule implementation and to a varlen-aware
+    causal convolution path.
+    """
+    try:
+        from megatron.core.ssm.gated_delta_net import GatedDeltaNet, torch_chunk_gated_delta_rule
+    except ImportError:
+        return
+
+    import torch
+    import torch.nn.functional as F
+    from megatron.core.utils import deprecate_inference_params, nvtx_range_pop, nvtx_range_push
+
+    try:
+        from fla.modules.l2norm import l2norm
+        from fla.ops.gated_delta_rule import chunk_gated_delta_rule
+    except ImportError:
+        return
+
+    try:
+        from fla.modules.convolution import causal_conv1d as fla_causal_conv1d
+    except ImportError:
+        fla_causal_conv1d = None
+
+    try:
+        from causal_conv1d import causal_conv1d_fn
+    except ImportError:
+        causal_conv1d_fn = None
+
+    def _get_cu_seqlens(packed_seq_params):
+        if packed_seq_params is None:
+            return None
+        cu_seqlens_padded = getattr(packed_seq_params, "cu_seqlens_q_padded", None)
+        if cu_seqlens_padded is not None:
+            return cu_seqlens_padded
+        return packed_seq_params.cu_seqlens_q
+
+    def _build_seq_idx_from_cu_seqlens(cu_seqlens, total_tokens):
+        if cu_seqlens is None:
+            return None
+        cu_seqlens = torch.cat([cu_seqlens, cu_seqlens.new_tensor([total_tokens])])
+        seq_lengths = cu_seqlens[1:] - cu_seqlens[:-1]
+        return (
+            torch.repeat_interleave(torch.arange(seq_lengths.numel(), device=cu_seqlens.device), seq_lengths)[
+                :total_tokens
+            ]
+            .to(torch.int32)
+            .unsqueeze(0)
+        )
+
+    def patched_forward(
+        self,
+        hidden_states,
+        attention_mask,
+        key_value_states=None,
+        inference_context=None,
+        attention_bias=None,
+        packed_seq_params=None,
+        sequence_len_offset=None,
+        *,
+        inference_params=None,
+        **kwargs,
+    ):
+        inference_context = deprecate_inference_params(inference_context, inference_params)
+
+        seq_len, batch, _ = hidden_states.shape
+        seq_len = seq_len * self.sp_size
+
+        if inference_context is not None:
+            assert inference_context.is_static_batching(), "GDN does not currently support dynamic inference batching."
+            assert not self.config.sequence_parallel
+            raise NotImplementedError("GDN does not support inference for now.")
+
+        cu_seqlens = _get_cu_seqlens(packed_seq_params)
+        seq_idx = getattr(packed_seq_params, "seq_idx", None) if packed_seq_params is not None else None
+        if seq_idx is None and cu_seqlens is not None:
+            seq_idx = _build_seq_idx_from_cu_seqlens(cu_seqlens, seq_len * batch)
+
+        nvtx_range_push(suffix="in_proj")
+        qkvzba, _ = self.in_proj(hidden_states)
+        nvtx_range_pop(suffix="in_proj")
+
+        qkvzba = qkvzba.transpose(0, 1)
+
+        qkv, gate, beta, alpha = torch.split(
+            qkvzba,
+            [
+                (self.qk_dim * 2 + self.v_dim) // self.tp_size,
+                self.v_dim // self.tp_size,
+                self.num_value_heads // self.tp_size,
+                self.num_value_heads // self.tp_size,
+            ],
+            dim=-1,
+        )
+        gate = gate.reshape(batch, seq_len, -1, self.value_head_dim)
+        beta = beta.reshape(batch, seq_len, -1)
+        alpha = alpha.reshape(batch, seq_len, -1)
+
+        nvtx_range_push(suffix="conv1d")
+        if fla_causal_conv1d is not None and not self.config.deterministic_mode:
+            assert self.activation in ["silu", "swish"]
+            qkv = qkv.contiguous()
+            qkv, _ = fla_causal_conv1d(
+                x=qkv,
+                weight=self.conv1d.weight.squeeze(1),
+                bias=self.conv1d.bias,
+                activation=self.activation,
+                initial_state=None,
+                output_final_state=False,
+                cu_seqlens=cu_seqlens,
+            )
+        elif causal_conv1d_fn is not None and not self.config.deterministic_mode:
+            if seq_idx is None:
+                qkv = qkv.transpose(1, 2).contiguous()
+            else:
+                # causal_conv1d_fn's varlen path requires the channel dimension
+                # to be unit-stride and the outer strides to satisfy kernel
+                # alignment constraints. The fused projection slice is not
+                # guaranteed to have that layout.
+                qkv = qkv.contiguous().transpose(1, 2)
+            assert self.activation in ["silu", "swish"]
+            qkv = causal_conv1d_fn(
+                x=qkv,
+                weight=self.conv1d.weight.squeeze(1),
+                bias=self.conv1d.bias,
+                activation=self.activation,
+                seq_idx=seq_idx,
+            )
+            qkv = qkv.transpose(1, 2)
+        else:
+            if seq_idx is not None or cu_seqlens is not None:
+                raise NotImplementedError(
+                    "GDN packed sequence requires fla.modules.convolution.causal_conv1d "
+                    "or causal_conv1d_fn in non-deterministic mode."
+                )
+            qkv = qkv.transpose(1, 2).contiguous()
+            qkv = self.act_fn(self.conv1d(qkv)[..., :seq_len])
+            qkv = qkv.transpose(1, 2)
+        nvtx_range_pop(suffix="conv1d")
+
+        query, key, value = torch.split(
+            qkv,
+            [
+                self.qk_dim // self.tp_size,
+                self.qk_dim // self.tp_size,
+                self.v_dim // self.tp_size,
+            ],
+            dim=-1,
+        )
+        query = query.reshape(batch, seq_len, -1, self.key_head_dim)
+        key = key.reshape(batch, seq_len, -1, self.key_head_dim)
+        value = value.reshape(batch, seq_len, -1, self.value_head_dim)
+        if self.use_qk_l2norm:
+            query = l2norm(query.contiguous())
+            key = l2norm(key.contiguous())
+        if self.num_value_heads // self.num_key_heads > 1:
+            query = query.repeat_interleave(self.num_value_heads // self.num_key_heads, dim=2)
+            key = key.repeat_interleave(self.num_value_heads // self.num_key_heads, dim=2)
+
+        query = query.contiguous()
+        key = key.contiguous()
+        value = value.contiguous()
+        gate = gate.contiguous()
+        beta = beta.contiguous()
+        alpha = alpha.contiguous()
+
+        nvtx_range_push(suffix="g_and_beta")
+        g = -self.A_log.exp() * F.softplus(alpha.float() + self.dt_bias)
+        beta = beta.sigmoid()
+        nvtx_range_pop(suffix="g_and_beta")
+
+        nvtx_range_push(suffix="gated_delta_rule")
+        if self.config.deterministic_mode:
+            if cu_seqlens is not None:
+                raise NotImplementedError("GDN packed sequence is not supported in deterministic mode.")
+            core_attn_out, last_recurrent_state = torch_chunk_gated_delta_rule(
+                query,
+                key,
+                value,
+                g=g,
+                beta=beta,
+                initial_state=None,
+                output_final_state=False,
+                use_qk_l2norm_in_kernel=False,
+            )
+        else:
+            core_attn_out, last_recurrent_state = chunk_gated_delta_rule(
+                query,
+                key,
+                value,
+                g=g,
+                beta=beta,
+                initial_state=None,
+                output_final_state=False,
+                use_qk_l2norm_in_kernel=False,
+                cu_seqlens=cu_seqlens,
+            )
+        nvtx_range_pop(suffix="gated_delta_rule")
+
+        nvtx_range_push(suffix="gated_norm")
+        norm_out = self._apply_gated_norm(core_attn_out, gate)
+        nvtx_range_pop(suffix="gated_norm")
+
+        norm_out = norm_out.reshape(batch, seq_len, -1)
+        norm_out = norm_out.transpose(0, 1).contiguous()
+
+        nvtx_range_push(suffix="out_proj")
+        out, out_bias = self.out_proj(norm_out)
+        nvtx_range_pop(suffix="out_proj")
+
+        return out, out_bias
+
+    GatedDeltaNet.forward = patched_forward
