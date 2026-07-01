@@ -937,6 +937,9 @@ class AgentLoopWorker:
         sample_kwargs: Optional[dict[str, Any]] = None,
     ) -> None:
         """Compute teacher logprobs for single sample."""
+        # Memory-OPD 可以为 teacher 提供与 student 不同、但事实可见性完全一致的 action
+        # prompt。该字段必须在 worker 内消费，不能随一对多 rollout 进入 actor metadata。
+        teacher_prompt_ids = output.extra_fields.pop("teacher_prompt_ids", None)
         if self.distillation_enabled and not validate:
             routing_key = None
             if sample_kwargs is not None:
@@ -944,12 +947,38 @@ class AgentLoopWorker:
                 if routing_value is not None:
                     # Non-tensor batch values arrive as 0-d numpy objects / arrays; normalize to Python.
                     routing_key = routing_value.item() if hasattr(routing_value, "item") else routing_value
+            scoring_prompt_ids = teacher_prompt_ids if teacher_prompt_ids is not None else prompt_ids
             teacher_ids, teacher_logprobs = await self.teacher_server_manager.compute_teacher_logprobs_single(
-                sequence_ids=prompt_ids + response_ids,
+                sequence_ids=scoring_prompt_ids + response_ids,
                 multi_modal_data=output.multi_modal_data,
                 mm_processor_kwargs=output.mm_processor_kwargs,
                 routing_key=routing_key,
             )
+            if teacher_prompt_ids is not None:
+                # teacher prompt 长度与 student prompt 不同。Prompt token 本来就全部被
+                # response_mask 屏蔽，因此只保留 teacher 在自身 prompt 条件下得到的 response
+                # 分数，再用占位前缀对齐到 student 的完整序列坐标。
+                teacher_response_ids = teacher_ids[len(scoring_prompt_ids) :]
+                teacher_response_logprobs = teacher_logprobs[len(scoring_prompt_ids) :]
+                if len(teacher_response_ids) != len(response_ids):
+                    raise ValueError(
+                        "teacher response 对齐失败: "
+                        f"{len(teacher_response_ids)} != {len(response_ids)}"
+                    )
+                prefix_shape = (len(prompt_ids), *teacher_ids.shape[1:])
+                id_prefix = torch.full(
+                    prefix_shape,
+                    self.tokenizer.pad_token_id,
+                    dtype=teacher_ids.dtype,
+                    device=teacher_ids.device,
+                )
+                logprob_prefix = torch.zeros(
+                    prefix_shape,
+                    dtype=teacher_logprobs.dtype,
+                    device=teacher_logprobs.device,
+                )
+                teacher_ids = torch.cat([id_prefix, teacher_response_ids], dim=0)
+                teacher_logprobs = torch.cat([logprob_prefix, teacher_response_logprobs], dim=0)
             output.extra_fields["teacher_ids"] = teacher_ids
             output.extra_fields["teacher_logprobs"] = teacher_logprobs
 
