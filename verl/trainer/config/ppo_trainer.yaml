@@ -267,6 +267,9 @@ global_profiler:
   # Path to save profiling contents
   save_path: "outputs/profile"
 
+  # Online context monitor tools. Defaults to trainer.logger.
+  context_monitor_tool: ${oc.select:trainer.logger,[]}
+
   # Specific tool configs, can use +profiler.tool_config.[tool].xxx to config
   global_tool_config:
 

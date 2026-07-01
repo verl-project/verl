@@ -137,6 +137,7 @@ actor_rollout_ref:
       all_ranks: false
       ranks: []
       save_path: ${oc.select:global_profiler.save_path,null}
+      context_monitor_tool: ${oc.select:global_profiler.context_monitor_tool,${oc.select:trainer.logger,[]}}
       tool_config:
         nsys:
           _target_: verl.utils.profiler.config.NsightToolConfig
@@ -371,6 +372,7 @@ actor_rollout_ref:
       all_ranks: ${oc.select:actor_rollout_ref.actor.profiler.all_ranks,false}
       ranks: ${oc.select:actor_rollout_ref.actor.profiler.ranks,[]}
       save_path: ${oc.select:global_profiler.save_path,null}
+      context_monitor_tool: ${oc.select:global_profiler.context_monitor_tool,${oc.select:trainer.logger,[]}}
       tool_config:
         npu:
           _target_: verl.utils.profiler.config.NPUToolConfig
@@ -622,6 +624,7 @@ critic:
     all_ranks: false
     ranks: []
     save_path: ${oc.select:global_profiler.save_path,null}
+    context_monitor_tool: ${oc.select:global_profiler.context_monitor_tool,${oc.select:trainer.logger,[]}}
     tool_config:
       nsys:
         _target_: verl.utils.profiler.config.NsightToolConfig
@@ -947,6 +950,7 @@ global_profiler:
   steps: null
   profile_continuous_steps: false
   save_path: outputs/profile
+  context_monitor_tool: ${oc.select:trainer.logger,[]}
   global_tool_config:
     nsys:
       _target_: verl.utils.profiler.config.NsightToolConfig

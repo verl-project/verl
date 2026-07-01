@@ -359,6 +359,9 @@ profiler:
   # profile results saving path
   save_path: ${oc.select:global_profiler.save_path,null}
 
+  # Online context monitor tools. Defaults to global_profiler, then trainer.logger.
+  context_monitor_tool: ${oc.select:global_profiler.context_monitor_tool,${oc.select:trainer.logger,[]}}
+
   # specific tool config
   tool_config:
 
