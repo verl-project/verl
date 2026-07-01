@@ -230,6 +230,24 @@ class RolloutCorrectionConfig(BaseConfig):
         return cls(rollout_is="token", rollout_is_threshold=f"{threshold_lower}_{threshold}", rollout_rs=None)
 
     @classmethod
+    def decoupled_token_kpop(
+        cls,
+        phi: float = 2.0,
+    ) -> "RolloutCorrectionConfig":
+        """Decoupled Mode with token-level KPop.
+
+        Bidirectional Bernoulli-KL rejection sampling: keeps response_mask only for
+        tokens where max(KL(train||rollout), KL(rollout||train)) <= phi.
+
+        Args:
+            phi (float): Upper bound on the bidirectional binary KL. Default: 2.0
+
+        Returns:
+            RolloutCorrectionConfig configured for decoupled mode with token-level KPop
+        """
+        return cls(rollout_is=None, rollout_rs="binary_kl", rollout_rs_threshold=phi)
+
+    @classmethod
     def decoupled_seq_is_rs(
         cls,
         is_threshold: float = 2.0,
