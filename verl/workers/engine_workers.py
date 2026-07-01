@@ -668,6 +668,61 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self.actor.save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    def get_master_address(self) -> str:
+        """Return the IP address of this worker (used to find FSDP rank 0 address)."""
+        import socket
+
+        return socket.gethostbyname(socket.gethostname())
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def get_master_address_and_port(self):
+        """Return (address, port) from FSDP rank 0 node for NCCL rendezvous."""
+        import socket
+
+        from verl.utils.net_utils import get_free_port
+
+        if torch.distributed.get_rank() != 0:
+            return None
+        addr = socket.gethostbyname(socket.gethostname())
+        port, _ = get_free_port(addr)
+        return (addr, port)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    def init_weight_sync_group(
+        self,
+        master_address: str,
+        master_port: int,
+        world_size: int,
+        group_name: str = "weight_update_group",
+    ):
+        """Initialize NCCL weight sync group on FSDP workers for standalone rollout."""
+        from sglang.srt.utils import init_custom_process_group
+
+        from verl.utils.device import get_nccl_backend
+
+        my_rank = torch.distributed.get_rank()
+        logger.info(
+            "[NCCL weight sync] FSDP rank %d/%d entering init_custom_process_group: "
+            "master=%s:%d  world_size=%d  group=%s",
+            my_rank,
+            world_size,
+            master_address,
+            master_port,
+            world_size,
+            group_name,
+        )
+        self._weight_sync_group = init_custom_process_group(
+            backend=get_nccl_backend(),
+            init_method=f"tcp://{master_address}:{master_port}",
+            world_size=world_size,
+            rank=my_rank,
+            group_name=group_name,
+        )
+        logger.info("[NCCL weight sync] FSDP rank %d joined group successfully", my_rank)
+        self.rollout._weight_sync_group = self._weight_sync_group
+        logger.info("[NCCL weight sync] FSDP rank %d assigned group to rollout", my_rank)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     async def update_weights(self, global_steps: int = None, mode: str = "auto"):
         """Update weights from trainer to rollout.
 
@@ -711,9 +766,23 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             await self.rollout.resume(tags=["weights"])
         log_gpu_memory_usage("After resume weights", logger=logger)
 
+        # Flush the PyTorch allocator cache before state_dict. The cache can hold
+        # several GB of "reserved but unallocated" memory in fragmented blocks.
+        # With expandable_segments=False the FSDP all-gather + clone needs a
+        # contiguous block equal to the largest per-layer flat_param (~4 GB for
+        # a 70B model), which fails when only the cache fragments are available.
+        # Releasing the cache back to CUDA first gives the allocator a clean run.
+        aggressive_empty_cache(force_sync=False)
+
         # 2. determine if we need a base weight sync (adapter path only)
+        # For the NCCL path, request raw DTensors (materialize=False) so that
+        # update_weights_nccl can all-gather and broadcast one parameter at a time
+        # instead of accumulating the full 70B parameter set (~140 GB) in GPU memory
+        # before any broadcast starts.
+        standalone_nnodes = self.config.rollout.nnodes
+        is_nccl_path = standalone_nnodes > 0 and hasattr(self.rollout, "_weight_sync_group")
         per_tensor_param, peft_config = self.actor.engine.get_per_tensor_param(
-            layered_summon=self.layered_summon, base_sync_done=True
+            layered_summon=self.layered_summon, base_sync_done=True, materialize=not is_nccl_path
         )
 
         do_lora_base_sync = False
@@ -730,9 +799,13 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 per_tensor_param_base, peft_config=peft_config, base_sync_done=False, global_steps=global_steps
             )
 
-        await self.rollout.update_weights(
-            per_tensor_param, peft_config=peft_config, base_sync_done=True, global_steps=global_steps
-        )
+        # Use NCCL broadcast for standalone mode (cross-node), HTTP for hybrid
+        if is_nccl_path:
+            await self.rollout.update_weights_nccl(per_tensor_param, global_steps=global_steps)
+        else:
+            await self.rollout.update_weights(
+                per_tensor_param, peft_config=peft_config, base_sync_done=True, global_steps=global_steps
+            )
 
         log_gpu_memory_usage("After update_weights", logger=logger)
 

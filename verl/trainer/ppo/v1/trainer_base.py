@@ -69,6 +69,7 @@ from verl.trainer.ppo.utils import (
     need_reference_policy,
     need_teacher_policy,
 )
+from verl.trainer.ppo.v1.agent_loop_tq import AgentLoopManagerTQ
 from verl.trainer.ppo.v1.replay_buffer import ReplayBuffer
 from verl.trainer.ppo.v1.utils import compute_advantage_for_multi_trajectories
 from verl.utils import hf_processor, hf_tokenizer
@@ -79,7 +80,7 @@ from verl.utils.dataset.rl_dataset import collate_fn
 from verl.utils.debug import marked_timer
 from verl.utils.debug.metrics import calculate_debug_metrics
 from verl.utils.fs import copy_to_local
-from verl.utils.import_utils import load_extern_type
+from verl.utils.import_utils import load_class_from_fqn, load_extern_type
 from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
@@ -269,8 +270,87 @@ class PPOTrainer(ABC):
 
         # 9. initialize agent loop manager
         self.llm_server_manager: LLMServerManager = LLMServerManager.create(
-            config=self.config, worker_group=self.actor_rollout_wg, rollout_resource_pool=actor_rollout_resource_pool
+            config=self.config,
+            worker_group=None if self.config.actor_rollout_ref.rollout.get("nnodes", 0) > 0 else self.actor_rollout_wg,
+            rollout_resource_pool=actor_rollout_resource_pool,
         )
+
+        # For standalone mode: initialize NCCL weight sync group
+        rollout_nnodes = self.config.actor_rollout_ref.rollout.get("nnodes", 0)
+        if rollout_nnodes > 0:
+            logger.info(
+                "[NCCL init] standalone mode detected (rollout.nnodes=%d), starting NCCL group init", rollout_nnodes
+            )
+            # Get address and free port from FSDP rank 0 node
+            logger.info("[NCCL init] calling get_master_address_and_port on FSDP worker group")
+            _addr_port_results = self.actor_rollout_wg.get_master_address_and_port()
+            head_addr, sync_port = next(r for r in _addr_port_results if r is not None)
+            fsdp_world_size = self.config.trainer.nnodes * self.config.trainer.n_gpus_per_node
+            tp_size = self.config.actor_rollout_ref.rollout.tensor_model_parallel_size
+            n_gpus = self.config.actor_rollout_ref.rollout.n_gpus_per_node
+            total_world_size = fsdp_world_size + rollout_nnodes * n_gpus
+            replicas = self.llm_server_manager.get_replicas()
+            logger.info(
+                "[NCCL init] rendezvous: master=%s:%d  fsdp_world_size=%d  rollout_nnodes=%d  "
+                "n_gpus_per_node=%d  tp_size=%d  total_world_size=%d  num_sglang_replicas=%d",
+                head_addr,
+                sync_port,
+                fsdp_world_size,
+                rollout_nnodes,
+                n_gpus,
+                tp_size,
+                total_world_size,
+                len(replicas),
+            )
+            # Init NCCL group on FSDP workers (they have dist initialized)
+            logger.info("[NCCL init] dispatching init_weight_sync_group to %d FSDP workers", fsdp_world_size)
+            init_group_futures = self.actor_rollout_wg.init_weight_sync_group(
+                master_address=head_addr,
+                master_port=sync_port,
+                world_size=total_world_size,
+                group_name="weight_update_group",
+            )
+            # Simultaneously trigger SGLang servers to join via HTTP
+            sglang_futures = []
+            for i, replica in enumerate(replicas):
+                rank_offset = fsdp_world_size + i * tp_size
+                logger.info(
+                    "[NCCL init] dispatching init_weight_sync_group to SGLang replica %d  rank_offset=%d",
+                    i,
+                    rank_offset,
+                )
+                sglang_futures.append(
+                    replica.server_handle.init_weight_sync_group.remote(
+                        master_address=head_addr,
+                        master_port=sync_port,
+                        rank_offset=rank_offset,
+                        world_size=total_world_size,
+                    )
+                )
+            # Both sides must join the NCCL group simultaneously
+            all_futures = sglang_futures
+            if isinstance(init_group_futures, list):
+                all_futures = all_futures + init_group_futures
+            else:
+                all_futures = all_futures + [init_group_futures]
+            logger.info(
+                "[NCCL init] waiting for all %d futures (FSDP + SGLang) to complete rendezvous", len(all_futures)
+            )
+            ray.get(all_futures)
+            logger.info("[NCCL init] NCCL weight sync group initialized successfully")
+        manager_class_fqn = self.config.actor_rollout_ref.rollout.get("agent", {}).get("agent_loop_manager_class")
+        if manager_class_fqn:
+            agent_loop_manager_cls = load_class_from_fqn(manager_class_fqn, "AgentLoopManager")
+        else:
+            agent_loop_manager_cls = AgentLoopManagerTQ
+        self.async_rollout_manager = agent_loop_manager_cls.create(
+            config=self.config,
+            llm_client=self.llm_server_manager.get_client(),
+            teacher_client=self.teacher_model_manager.get_client() if self.use_teacher_policy else None,
+            reward_loop_worker_handles=self.reward_loop_manager.reward_loop_workers,
+            replay_buffer=self.replay_buffer,
+        )
+        logger.info("agent loop manager initialized")
 
         # 10. initialize checkpoint engine manager
         checkpoint_engine_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)

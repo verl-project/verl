@@ -285,10 +285,26 @@ class SGLangHttpServer:
             else:
                 raise ValueError(f"Currently only support fp8 quantization, got: {quantization}")
         infer_tp = self.config.tensor_model_parallel_size * self.config.data_parallel_size
+        mem_fraction_static = self.config.gpu_memory_utilization
+        if self.rollout_mode == RolloutMode.STANDALONE:
+            # STANDALONE NCCL weight sync allocates persistent non-PyTorch GPU buffers
+            # (NCCL staging + IB proxy) that are invisible to torch.cuda.empty_cache().
+            # SGLang sizes the KV cache VMM at startup to fill all remaining GPU memory,
+            # so these buffers prevent resume_memory_occupation from re-creating the VMM
+            # at its original size after a weight sync (cu_mem_create OOM). Reserve a
+            # headroom to accommodate them.
+            # On GH200 (96 GB) with Slingshot interconnect, NCCL communicator init
+            # consumes ~11-12 GB, and the first broadcast allocates ~3-4 GB more of
+            # persistent staging buffers — total ~14-17 GB. A 0.2 reduction leaves a
+            # 24 GB headroom (~0.25 * 96 GB) which comfortably covers this.
+            # NOTE: do NOT apply this in HYBRID mode — there the FSDP training model
+            # already occupies most of the GPU, so reducing mem_fraction further leaves
+            # almost nothing for the KV cache (avail_mem drops to ~3 GB).
+            mem_fraction_static = mem_fraction_static - 0.2
         args = {
             "model_path": self.model_config.local_path,
             "dtype": self.config.dtype,
-            "mem_fraction_static": self.config.gpu_memory_utilization,
+            "mem_fraction_static": mem_fraction_static,
             "disable_cuda_graph": self.config.enforce_eager,
             "enable_memory_saver": True,
             "base_gpu_id": self.base_gpu_id,
@@ -492,6 +508,43 @@ class SGLangHttpServer:
     async def clear_kv_cache(self):
         if self.node_rank == 0:
             await self.tokenizer_manager.flush_cache()
+
+    async def init_weight_sync_group(
+        self,
+        master_address: str,
+        master_port: int,
+        rank_offset: int,
+        world_size: int,
+        group_name: str = "weight_update_group",
+    ):
+        """Initialize NCCL weight sync group on SGLang TP workers for standalone mode."""
+        from sglang.srt.managers.io_struct import InitWeightsUpdateGroupReqInput
+
+        if self.node_rank != 0:
+            logger.info(f"[NCCL weight sync] SGLang node_rank={self.node_rank} skipping (not node 0)")
+            return
+        obj = InitWeightsUpdateGroupReqInput(
+            master_address=master_address,
+            master_port=master_port,
+            rank_offset=rank_offset,
+            world_size=world_size,
+            group_name=group_name,
+        )
+        logger.info(
+            "[NCCL weight sync] SGLang node_rank=%d calling init_weights_update_group: "
+            "master=%s:%d  rank_offset=%d  world_size=%d  group=%s",
+            self.node_rank,
+            master_address,
+            master_port,
+            rank_offset,
+            world_size,
+            group_name,
+        )
+        await self.tokenizer_manager.init_weights_update_group(obj, None)
+        logger.info(
+            "[NCCL weight sync] SGLang node_rank=%d init_weights_update_group completed",
+            self.node_rank,
+        )
 
     async def release_kv_cache(self):
         """Release only kv_cache GPU memory, keeping model weights intact."""
@@ -794,12 +847,7 @@ class SGLangReplica(RolloutReplica):
                     node_id=node_id,
                     soft=False,
                 ),
-                runtime_env={
-                    "env_vars": {
-                        **{var: "1" for var in get_platform().ray_noset_envvars()},
-                        **get_platform().rollout_env_vars(),
-                    }
-                },
+                runtime_env={"env_vars": {f"RAY_EXPERIMENTAL_NOSET_{visible_devices_keyword}": "1"}},
                 name=name,
                 max_concurrency=self.max_concurrency,
             ).remote(

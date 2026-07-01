@@ -15,6 +15,7 @@
 # limitations under the License.
 from __future__ import annotations
 
+import asyncio
 import logging
 import multiprocessing as mp
 import os
@@ -36,7 +37,9 @@ from sglang.srt.utils import (
 from sglang.srt.weight_sync.utils import _preprocess_tensor_for_update_weights
 from sglang.srt.weight_sync.utils import update_weights as sgl_update_weights
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
+from torch.distributed.tensor import DTensor
 
+from verl.utils.device import get_device_id
 from verl.utils.net_utils import is_valid_ipv6_address
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.base import BaseRollout
@@ -233,6 +236,15 @@ class ServerAdapter(BaseRollout):
         else:
             actor_name = f"sglang_server_{self.replica_rank}_{self.node_rank}"
             timeout_kwargs = {}
+        # In standalone mode, actual server count = nnodes * n_gpus / tp_size
+        # FSDP replica_rank may exceed this, wrap with modulo
+        standalone_nnodes = self.config.nnodes
+        if standalone_nnodes > 0:
+            n_gpus = getattr(self.config, "n_gpus_per_node", 4)
+            tp_size = getattr(self.config, "tensor_model_parallel_size", 1)
+            num_standalone = max(1, standalone_nnodes * n_gpus // tp_size)
+            effective_rank = self.replica_rank % num_standalone
+            actor_name = f"sglang_server_{effective_rank}_{self.node_rank}"
 
         self.server_actor = ray.get_actor(actor_name)
         server_address, server_port = await self.server_actor.get_server_address.remote()
@@ -272,6 +284,10 @@ class ServerAdapter(BaseRollout):
         await self._init_server_adapter()
         if self._engine is None:
             return
+        # In standalone mode weights are always loaded — skip resume
+        standalone_nnodes = self.config.nnodes
+        if standalone_nnodes > 0 and "weights" in tags:
+            return
         if self._is_server_tp_leader() and self.config.free_cache_engine:
             await self._engine.resume_memory_occupation(tags=tags)
 
@@ -291,6 +307,132 @@ class ServerAdapter(BaseRollout):
             else:
                 tags = ["kv_cache", "weights"]
             await self._engine.release_memory_occupation(tags=tags)
+
+    async def init_weight_sync_group(
+        self,
+        master_address: str,
+        master_port: int,
+        rank_offset: int,
+        world_size: int,
+        group_name: str = "weight_update_group",
+    ):
+        """Initialize NCCL weight sync group for standalone mode."""
+        await self._init_server_adapter()
+        if self._engine is None:
+            return
+        if self._is_server_tp_leader():
+            await self._engine.init_weights_update_group(
+                master_address=master_address,
+                master_port=master_port,
+                rank_offset=rank_offset,
+                world_size=world_size,
+                group_name=group_name,
+            )
+
+    async def update_weights_nccl(
+        self,
+        weights,
+        global_steps: int = None,
+        group_name: str = "weight_update_group",
+        **kwargs,
+    ):
+        """Sync weights via NCCL broadcast — works across nodes in standalone mode."""
+        await self._init_server_adapter()
+        # Do NOT return early when self._engine is None. All FSDP ranks must
+        # iterate the weights generator (DTensor.full_tensor() issues all-gathers
+        # on the default process group) and participate in the weight_update_group
+        # broadcast. Only the HTTP dispatch is gated on being a TP leader.
+
+        assert hasattr(self, "_weight_sync_group"), "weight_sync_group not set — call init_weight_sync_group first"
+        logger.info("[NCCL weight sync] update_weights_nccl: collecting weights  global_steps=%s", global_steps)
+
+        # Phase 1 — collect metadata only.
+        # weights yields raw DTensors (materialize=False in get_per_tensor_param), so
+        # full_tensor() has NOT been called yet.  DTensor.shape is the global shape and
+        # .dtype is the param dtype — both are available without all-gathering.
+        #
+        # Crucially, we do NOT accumulate the materialized full tensors here.  For a
+        # 70B model the full parameter set is 140 GB; keeping all of them alive before
+        # any broadcast starts causes an OOM on 95 GB GPUs.  Instead we keep only the
+        # DTensor shard references (~4.4 GB for 70B/32 ranks) and materialize each
+        # parameter one at a time inside do_broadcasts().
+        all_params: list = []
+        names, dtypes, shapes = [], [], []
+        for name, param in weights:
+            all_params.append(param)
+            names.append(name)
+            # DTensor reports the global shape; non-DTensors already have the right shape.
+            shapes.append(list(param.shape))
+            # We always cast DTensors to bfloat16 during the broadcast below.
+            if isinstance(param, DTensor):
+                dtypes.append("bfloat16")
+            else:
+                dtypes.append(str(param.dtype).replace("torch.", ""))
+
+        logger.info("[NCCL weight sync] update_weights_nccl: collected metadata for %d params", len(names))
+
+        # Phase 2 — concurrent HTTP trigger + streaming NCCL broadcasts.
+        #
+        # The HTTP call tells SGLang TP workers to enter their NCCL recv loop for all
+        # parameters (metadata sent upfront).  The broadcasts run in a thread executor
+        # so the event loop stays free to complete the HTTP round-trip.  Each parameter
+        # is all-gathered (full_tensor) and broadcast one at a time; the full tensor is
+        # deleted immediately after the broadcast to cap peak GPU memory at roughly
+        # FSDP-model-size + ONE full parameter tensor at any moment.
+        weight_sync_group = self._weight_sync_group
+        device = get_device_id()
+
+        def do_broadcasts():
+            logger.info(
+                "[NCCL weight sync] update_weights_nccl: starting NCCL broadcasts for %d params", len(all_params)
+            )
+            for param in all_params:
+                if isinstance(param, DTensor):
+                    # full_tensor() triggers an all-gather across all FSDP ranks.
+                    # All ranks must call this for the same parameter in lock-step.
+                    tensor = param.to(device, non_blocking=False).full_tensor().to(torch.bfloat16, non_blocking=False)
+                else:
+                    tensor = param.detach()
+                torch.distributed.broadcast(tensor, src=0, group=weight_sync_group)
+                del tensor  # release immediately — do not accumulate
+            logger.info("[NCCL weight sync] update_weights_nccl: broadcasts complete")
+
+        if self._is_server_tp_leader():
+            # Release the KV cache memory pool before updating weights. Non-leader
+            # ranks block inside torch.distributed.broadcast() until SGLang joins
+            # the collective, so the NCCL timeout (30 min default) is not a concern.
+            # SGLang's update_weights_from_distributed allocates a fresh tensor for
+            # every parameter before loading (not in-place), so peak usage is 2x the
+            # model weights. On a large GPU where SGLang has consumed nearly all free
+            # memory for KV cache, this causes OOM. Releasing the KV pool first frees
+            # enough headroom for the temporary weight buffers.
+
+            # Note: disabling KV cache release/resume as it might cause issues with other mem allocations
+            # logger.info("[NCCL weight sync] update_weights_nccl: releasing KV cache memory before weight update")
+            # await self._engine.release_memory_occupation(tags=["kv_cache"])
+
+            # Launch broadcasts in thread executor; await HTTP in the event loop.
+            loop = asyncio.get_running_loop()
+            logger.info("[NCCL weight sync] update_weights_nccl: launching broadcast thread + SGLang HTTP recv")
+            broadcast_task = loop.run_in_executor(None, do_broadcasts)
+            await self._engine.update_weights_from_distributed(
+                names=names,
+                dtypes=dtypes,
+                shapes=shapes,
+                group_name=group_name,
+            )
+            logger.info("[NCCL weight sync] update_weights_nccl: SGLang HTTP done, awaiting broadcast thread")
+            await broadcast_task
+
+            # Note: disabling KV cache release/resume as it might cause issues with other mem allocations
+            # logger.info("[NCCL weight sync] update_weights_nccl: resuming KV cache memory after weight update")
+            # await self._engine.resume_memory_occupation(tags=["kv_cache"])
+
+            if global_steps is not None:
+                await self.server_actor.set_global_steps.remote(global_steps)
+            logger.info("[NCCL weight sync] update_weights_nccl: done")
+        else:
+            do_broadcasts()
 
     async def update_weights(
         self, weights: Generator[tuple[str, torch.Tensor], None, None], global_steps: int = None, **kwargs

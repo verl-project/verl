@@ -239,22 +239,44 @@ class FSDPEngine(BaseEngine):
 
         torch_dtype = PrecisionType.to_dtype(torch_dtype)
 
-        init_context = get_init_weight_context_manager(
-            use_meta_tensor=not self.model_config.hf_config.tie_word_embeddings, mesh=self.device_mesh
-        )
+        # For fsdp2, only rank 0 loads weights from disk; all others receive via
+        # broadcast_from_rank0 in fsdp2_load_full_state_dict. We bypass from_pretrained
+        # entirely for non-rank-0 because init_empty_weights cannot reliably prevent file
+        # I/O in custom models (e.g. ApertusForCausalLM) that override _load_pretrained_model.
+        is_fsdp2 = self.engine_config.strategy == "fsdp2"
+        if is_fsdp2:
+            _coord = self.device_mesh.get_coordinate() if self.device_mesh is not None else None
+            _is_fsdp2_src = (_coord[-1] == 0) if _coord is not None else (torch.distributed.get_rank() == 0)
 
-        with init_context(), warnings.catch_warnings():
+        # For fsdp1: keep original behaviour (meta tensors when tie_word_embeddings is False)
+        use_meta_tensor = not is_fsdp2 and (not self.model_config.hf_config.tie_word_embeddings)
+        init_context = get_init_weight_context_manager(use_meta_tensor=use_meta_tensor, mesh=self.device_mesh)
+
+        with warnings.catch_warnings():
             warnings.simplefilter("ignore")
 
             if self.model_config.model_type == "language_model":
+                from accelerate import init_empty_weights
+
                 auto_class = get_hf_auto_model_class(hf_config=self.model_config.hf_config)
 
-                module = auto_class.from_pretrained(
-                    pretrained_model_name_or_path=self.model_config.local_path,
-                    torch_dtype=torch_dtype,
-                    config=self.model_config.hf_config,
-                    trust_remote_code=self.model_config.trust_remote_code,
-                )
+                if is_fsdp2 and not _is_fsdp2_src:
+                    # Non-rank-0 for fsdp2: create model structure only.
+                    # Weights are broadcast from rank 0 via fsdp2_load_full_state_dict.
+                    logger.info("fsdp2 non-rank-0: creating model structure from config (no file I/O)")
+                    with init_empty_weights():
+                        module = auto_class.from_config(
+                            self.model_config.hf_config,
+                            trust_remote_code=self.model_config.trust_remote_code,
+                        )
+                else:
+                    with init_context():
+                        module = auto_class.from_pretrained(
+                            pretrained_model_name_or_path=self.model_config.local_path,
+                            torch_dtype=torch_dtype,
+                            config=self.model_config.hf_config,
+                            trust_remote_code=self.model_config.trust_remote_code,
+                        )
 
                 # Strip sub-modules listed in _verl_strip_modules (e.g.
                 # talker / code2wav for Qwen3-Omni Thinker-only training).
@@ -273,12 +295,13 @@ class FSDPEngine(BaseEngine):
                 self.model_config.hf_config.classifier_dropout = 0.0
                 self.model_config.hf_config.hidden_dropout = "0"
                 self.model_config.hf_config.summary_dropout_prob = 0.0
-                module = load_valuehead_model(
-                    local_path=self.model_config.local_path,
-                    torch_dtype=torch_dtype,
-                    model_config=self.model_config.hf_config,
-                    trust_remote_code=self.model_config.trust_remote_code,
-                )
+                with init_context():
+                    module = load_valuehead_model(
+                        local_path=self.model_config.local_path,
+                        torch_dtype=torch_dtype,
+                        model_config=self.model_config.hf_config,
+                        trust_remote_code=self.model_config.trust_remote_code,
+                    )
 
             use_liger = self.model_config.use_liger
             # Apply Liger kernel; disable fused_linear_cross_entropy (conflicts with verl's forward patching)
@@ -444,7 +467,10 @@ class FSDPEngine(BaseEngine):
                 "offload_policy": offload_policy,
                 "reshard_after_forward": self.engine_config.reshard_after_forward,
             }
-            full_state = module.state_dict()
+            # Only rank 0 holds the full state dict; fsdp2_load_full_state_dict
+            # broadcasts it to all other ranks via broadcast_from_rank0=True.
+            # Loading on every rank would OOM for large models (e.g. 4 workers × 140 GB = 560 GB).
+            full_state = module.state_dict() if torch.distributed.get_rank() == 0 else {}
             apply_fsdp2(module, fsdp_kwargs, self.engine_config)
             fsdp2_load_full_state_dict(module, full_state, fsdp_mesh, offload_policy)
         else:
@@ -814,7 +840,7 @@ class FSDPEngine(BaseEngine):
         if self._is_offload_optimizer:
             offload_fsdp_optimizer(self.optimizer)
 
-    def get_per_tensor_param(self, layered_summon=False, base_sync_done=False, **kwargs):
+    def get_per_tensor_param(self, layered_summon=False, base_sync_done=False, materialize=True, **kwargs):
         log_gpu_memory_usage("Before load_fsdp_model_to_gpu", logger=logger)
 
         # FSDP2 CPUOffloadPolicy owns CPU<->GPU placement; calling model.to(device) here
@@ -857,16 +883,25 @@ class FSDPEngine(BaseEngine):
             per_tensor_param = params.items()
         else:
             device = get_device_id()  # used when fsdp2 set cpu_offload_policy
-            # TODO: cast fp32 to bf16 to reduce weight sync overhead, need more fine-grained control, e.g MoE gate
-            per_tensor_param = (
-                (
-                    name,
-                    param.to(device, non_blocking=True).full_tensor().to(torch.bfloat16, non_blocking=True)
-                    if isinstance(param, DTensor)
-                    else param,
+            if materialize:
+                # Default path (HTTP weight sync): all-gather each parameter to a full
+                # tensor immediately. The caller batches these tensors and sends them via HTTP.
+                # TODO: cast fp32 to bf16 to reduce weight sync overhead, need more fine-grained control, e.g MoE gate
+                per_tensor_param = (
+                    (
+                        name,
+                        param.to(device, non_blocking=True).full_tensor().to(torch.bfloat16, non_blocking=True)
+                        if isinstance(param, DTensor)
+                        else param,
+                    )
+                    for name, param in params.items()
                 )
-                for name, param in params.items()
-            )
+            else:
+                # NCCL streaming path: yield raw DTensors so the caller can all-gather
+                # and broadcast one parameter at a time (avoids accumulating the entire
+                # model in GPU memory before any broadcast starts).
+                # DTensor.shape is the global (full) shape; .dtype is the param dtype.
+                per_tensor_param = iter(params.items())
 
         if self._qat_enabled:
             from verl.utils.qat.quantizer import QATQuantizer
