@@ -60,12 +60,14 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     entropy = model_output.get("entropy", None)
     if entropy is not None:
         entropy = no_padding_2_padding(entropy, data)
+    response_token_counts = data.get("response_token_counts", None)
 
     # global batch info for loss aggregation
     config.global_batch_info["dp_size"] = data["dp_size"]
     config.global_batch_info["batch_num_tokens"] = data["batch_num_tokens"]
     config.global_batch_info["global_batch_size"] = data["global_batch_size"]
     config.global_batch_info["loss_scale_factor"] = config.loss_scale_factor
+    config.global_batch_info["sequence_token_counts"] = response_token_counts
 
     # assumes that if any of the global batch info is set, the policy_loss_fn will
     # normalize using dp_size/global_bsz/global_token; in this case, metric aggregation should be SUM
@@ -157,6 +159,19 @@ def value_loss(config: CriticConfig, model_output, data: TensorDict, dp_group=No
         value loss
     """
     vpreds = no_padding_2_padding(model_output["values"], data)  # (bsz, response_length)
+    response_token_counts = data.get("response_token_counts", None)
+    if response_token_counts is not None:
+        dp_size = data.get("dp_size", 1)
+        batch_num_tokens = data.get("batch_num_tokens", None)
+        global_batch_size = data.get("global_batch_size", None)
+        if batch_num_tokens is None:
+            batch_num_tokens = response_token_counts.sum()
+        if global_batch_size is None:
+            global_batch_size = (response_token_counts > 0).sum()
+    else:
+        dp_size = 1
+        batch_num_tokens = None
+        global_batch_size = None
 
     # select fields and convert to padded tensor
     data = data.select("values", "returns", "response_mask").to_padded_tensor()
@@ -171,6 +186,10 @@ def value_loss(config: CriticConfig, model_output, data: TensorDict, dp_group=No
         response_mask=response_mask,
         cliprange_value=config.cliprange_value,
         loss_agg_mode=config.loss_agg_mode,
+        dp_size=dp_size,
+        batch_num_tokens=batch_num_tokens,
+        global_batch_size=global_batch_size,
+        sequence_token_counts=response_token_counts,
     )
 
     metrics = {}

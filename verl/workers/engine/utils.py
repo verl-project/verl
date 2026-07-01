@@ -95,6 +95,33 @@ def prepare_micro_batches(
     return micro_batches, batch_idx_list
 
 
+def prepare_dynamic_cp_micro_batches(
+    data: TensorDict,
+    dp_group,
+    dcp_group,
+    max_seqlen_per_dp_cp_rank: int,
+    cp_size: int,
+    num_batches_divided_by=None,
+    non_tensor_data=None,
+):
+    """Prepare micro-batches with dynamic context parallel routing."""
+    from verl.utils.dynamic_cp_scheduler import DynamicCPScheduler
+
+    scheduler = DynamicCPScheduler(
+        max_seqlen_per_dp_cp_rank=max_seqlen_per_dp_cp_rank,
+        dp_size=dp_group.size(),
+        cp_size=cp_size,
+        min_cp_size=1,
+        microbatch_group_size_per_vp_stage=num_batches_divided_by,
+    )
+    return scheduler.schedule(
+        batch=data,
+        dp_group=dp_group,
+        dcp_group=dcp_group,
+        non_tensor_data=non_tensor_data,
+    )
+
+
 def postprocess_batch_func(output_lst, indices, data: TensorDict):
     """postprocess the output of a forward_backward_batch.
     output_lst is a list of dict containing outputs for each micro-batch
@@ -118,9 +145,11 @@ def postprocess_batch_func(output_lst, indices, data: TensorDict):
     model_output = {}
     losses = []
     aggregated_metrics = {}
+    merge_duplicate_gids = False
 
     # model output
     for o in output_lst:
+        merge_duplicate_gids = merge_duplicate_gids or bool(o.get("_dcp_merge_duplicate_gids", False))
         if "model_output" in o:
             for key, val in o["model_output"].items():
                 if key not in model_output:
@@ -135,8 +164,8 @@ def postprocess_batch_func(output_lst, indices, data: TensorDict):
         else:
             raise NotImplementedError(f"pad_mode {pad_mode} not implemented")
 
-        # reverse with dynamic bsz
-        if use_dynamic_bsz:
+        # reverse with dynamic bsz (skip when indices is None, e.g. DCP scheduler path)
+        if use_dynamic_bsz and indices is not None:
             model_output[key] = restore_dynamic_batch(model_output[key], indices)
 
     # loss
@@ -155,5 +184,7 @@ def postprocess_batch_func(output_lst, indices, data: TensorDict):
         "loss": losses,
         "metrics": aggregated_metrics,
     }
+    if merge_duplicate_gids:
+        output["_dcp_merge_duplicate_gids"] = True
 
     return output
