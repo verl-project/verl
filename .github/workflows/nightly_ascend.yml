@@ -38,6 +38,7 @@ on:
   # and achieves higher coverage.
   schedule:
     - cron: "0 17 * * *"
+    - cron: "0 18 * * *"
 
 # Declare permissions just read content.
 permissions:
@@ -46,7 +47,7 @@ permissions:
 jobs:
   # Test ppo qwen3-8b fsdp vllm
   nightlyCI_ppo-qwen3-8b-fsdp-vllm_ascend:
-    if: github.repository_owner == 'verl-project'
+    if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 17 * * *' }}
     runs-on: linux-aarch64-a2b3-8
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
@@ -92,7 +93,7 @@ jobs:
 
   # Test grpo qwen3_vl_8b_Instruct fsdp2 vllm
   nightlyCI_grpo_qwen3_vl_8b_Instruct_fsdp2_vllm_ascend:
-    if: github.repository_owner == 'verl-project'
+    if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 17 * * *' }}
     runs-on: linux-aarch64-a2b3-8
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
@@ -138,7 +139,7 @@ jobs:
   
   # Test grpo qwen3-8b mindspeedllm sglang
   nightlyCI_grpo-qwen3-8b-mindspeedllm-sglang:
-    if: github.repository_owner == 'verl-project'
+    if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 17 * * *' }}
     runs-on: linux-aarch64-a3-16
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
@@ -175,6 +176,7 @@ jobs:
       - name: Install the current repository
         run: |
           uv pip install --no-deps --no-build-isolation -e .
+          uv pip install --no-deps TransferQueue==0.1.8
       - name: Check final pip list
         run: |
           uv pip list
@@ -205,7 +207,7 @@ jobs:
 
   # Test dapo moonlight-16b megatron vllm
   nightlyCI_dapo-moonlight-16b-megatron-vllm_ascend:
-    if: github.repository_owner == 'verl-project'
+    if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 17 * * *' }}
     runs-on: linux-aarch64-a2b3-8
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
@@ -260,7 +262,7 @@ jobs:
 
   # Test gspo qwen3-30b megatron vllm
   nightlyCI_gspo-qwen3-30b-megatron-vllm_ascend:
-    if: github.repository_owner == 'verl-project'
+    if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 17 * * *' }}
     runs-on: linux-aarch64-a3-16
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
@@ -312,7 +314,7 @@ jobs:
 
   # Test grpo qwen3-30b megatron sglang
   nightlyCI_grpo-qwen3-30b-megatron-sglang_ascend:
-    if: github.repository_owner == 'verl-project'
+    if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 17 * * *' }}
     runs-on: linux-aarch64-a3-16
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
@@ -355,9 +357,9 @@ jobs:
           ray stop --force
           bash tests/special_npu/nightly_ci_ascend/run_grpo_qwen3_30b_megatron_sglang_npu.sh
   
-  # Test grpo qwen3_5_2b fsdp2 vllm
+    # Test grpo qwen3_5_2b fsdp2 vllm
   nightlyCI_grpo_qwen3_5_2b_fsdp2_vllm_ascend:
-    if: github.repository_owner == 'verl-project'
+    if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 17 * * *' }}
     runs-on: linux-aarch64-a3-16
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
@@ -396,3 +398,154 @@ jobs:
         run: |
           ray stop --force
           bash tests/special_npu/nightly_ci_ascend/run_grpo_qwen3_5_2b_fsdp2_npu.sh
+
+  # Test quick start vllm fsdp2
+  quick_start_qwen3_0_6b_fsdp2_vllm_ascend:
+    if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 17 * * *' }}
+    runs-on: linux-aarch64-a2b3-8
+    timeout-minutes: 180 # Increase this timeout value as needed
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-9.0.0-910b-ubuntu22.04-py3.11-latest
+      options: >-
+        --shm-size 16g
+    env:
+      HF_ENDPOINT: "https://hf-mirror.com"
+      HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+    steps:
+      - name: Check npu and CANN info
+        run: |
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+          npu-smi info
+      - name: Check initial pip list from image
+        run: |
+          pip list
+      - name: Checkout verl-project/verl repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          clean: true
+      - name: Install the current repository
+        run: |
+          pip install --no-deps -e .
+      - name: Check final pip list
+        run: |
+          pip list
+      - name: Prepare weights
+        run: |
+          ln -s /root/.cache/models ~/models
+      - name: Prepare GSM8K dataset
+        run: |
+          python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
+      - name: Running quick_start_qwen3_0_6b_fsdp2_vllm_ascend
+        run: |
+          ray stop --force
+          TOTAL_TRAINING_STEPS=1 bash tests/special_npu/quick_start/run_qwen3_0_6b_fsdp2_vllm_ascend.sh
+
+  # Test quick start vllm megatron
+  quick_start_qwen3_0_6b_megatron_vllm_ascend:
+    if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 17 * * *' }}
+    runs-on: linux-aarch64-a2b3-8
+    timeout-minutes: 180 # Increase this timeout value as needed
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-9.0.0-910b-ubuntu22.04-py3.11-latest
+      options: >-
+        --shm-size 16g
+    env:
+      HF_ENDPOINT: "https://hf-mirror.com"
+      HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+    steps:
+      - name: Check npu and CANN info
+        run: |
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+          npu-smi info
+      - name: Check initial pip list from image
+        run: |
+          pip list
+      - name: Checkout verl-project/verl repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          clean: true
+      - name: Prepare weights
+        run: |
+          ln -s /root/.cache/models ~/models
+      - name: Prepare GSM8K dataset
+        run: |
+          python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
+      - name: Running quick_start_qwen3_0_6b_megatron_vllm_ascend
+        run: |
+          ray stop --force
+          TOTAL_TRAINING_STEPS=1 bash tests/special_npu/quick_start/run_qwen3_0_6b_megatron_vllm_ascend.sh
+
+  # Test quick start sglang megatron
+  quick_start_qwen3_0_6b_megatron_sglang_ascend:
+    if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 18 * * *' }}
+    runs-on: linux-aarch64-a3-8
+    timeout-minutes: 180 # Increase this timeout value as needed
+    container:
+      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:verl-sglang-8.5.0-a3-ubuntu22.04-py3.11-latest
+      options: >-
+        --shm-size 16g
+    env:
+      HF_ENDPOINT: "https://hf-mirror.com"
+      HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+    steps:
+      - name: Check npu and CANN info
+        run: |
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+          npu-smi info
+      - name: Check initial pip list from image
+        run: |
+          pip list
+      - name: Checkout verl-project/verl repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          clean: true
+      - name: Prepare weights
+        run: |
+          ln -s /root/.cache/models ~/models
+      - name: Prepare GSM8K dataset
+        run: |
+          python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
+      - name: Running quick_start_qwen3_0_6b_megatron_sglang_ascend
+        run: |
+          ray stop --force
+          TOTAL_TRAINING_STEPS=1 bash tests/special_npu/quick_start/run_qwen3_0_6b_megatron_sglang_ascend.sh
+
+  # Test quick start sglang fsdp2
+  quick_start_qwen3_0_6b_fsdp2_sglang_ascend:
+    if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 18 * * *' }}
+    runs-on: linux-aarch64-a3-8
+    timeout-minutes: 180 # Increase this timeout value as needed
+    container:
+      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:verl-sglang-8.5.0-a3-ubuntu22.04-py3.11-latest
+      options: >-
+        --shm-size 16g
+    env:
+      HF_ENDPOINT: "https://hf-mirror.com"
+      HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+    steps:
+      - name: Check npu and CANN info
+        run: |
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+          npu-smi info
+      - name: Check initial pip list from image
+        run: |
+          pip install --no-deps TransferQueue==0.1.8
+          pip list
+      - name: Checkout verl-project/verl repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          clean: true
+      - name: Prepare weights
+        run: |
+          ln -s /root/.cache/models ~/models
+      - name: Prepare GSM8K dataset
+        run: |
+          python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
+      - name: Running quick_start_qwen3_0_6b_fsdp2_sglang_ascend
+        run: |
+          ray stop --force
+          TOTAL_TRAINING_STEPS=1 bash tests/special_npu/quick_start/run_qwen3_0_6b_fsdp2_sglang_ascend.sh
