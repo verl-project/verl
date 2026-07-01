@@ -31,6 +31,20 @@ VERL_REPLAY_BUFFER_DEBUG_INTERVAL_SECONDS = int(os.getenv("VERL_REPLAY_BUFFER_DE
 # https://github.com/Ascend/TransferQueue/blob/main/tutorial/05_custom_sampler.py
 
 
+def compute_complete_uids(prompt_n: dict, session_done: dict) -> set:
+    """Return uids whose all ``n`` GRPO sessions have completed (success or failure).
+
+    Pure function (stdlib only) so session-counting readiness can be unit-tested on a CPU-only
+    machine without TransferQueue. ``prompt_n`` maps uid -> expected session count; ``session_done``
+    maps uid -> set of completed session ids.
+    """
+    complete = set()
+    for uid, n in prompt_n.items():
+        if len(session_done.get(uid, ())) >= n:
+            complete.add(uid)
+    return complete
+
+
 class ReplayBuffer:
     """ReplayBuffer is used by trainer to sample trajectories produced during rollout.
 
@@ -43,7 +57,7 @@ class ReplayBuffer:
     - index: Index of output trajectory in a session.
 
     There're two types of data associated with each key: tag and value. The tag are arbitrary metadata:
-    `{"status": "running", ...}` used to track the status of the trajectory.
+    `{"status": "success", "seq_len": ..., ...}` used to track the status of the trajectory.
 
     The value is a dictionary containing the following fields:
     - messages/datasource/reward_model/...: fields from dataset.
@@ -53,13 +67,15 @@ class ReplayBuffer:
     in storage units.
 
     ### [GRPO group sampling control]
-    Except trajectories, we also store raw prompts in TransferQueue with key `{uid}`, with `status` tag to track
-    status of GRPO group sampling.
-    - pending: the prompt is sampled from dataset but its sessions are not yet started.
-    - running: all sessions of the prompt are running.
-    - finished: all sessions of the prompt are finished without error.
-    - failure: all sessions of the prompt are finished, but at least one session failed.
-    Only prompt with status `finished` or `failure`, its trajectories can be sampled by replay buffer.
+    Readiness is **derived from per-session completion**, not a worker-owned prompt status, so
+    rollouts can be dispatched at the granularity of a single session (decoupled from any worker):
+    - Each prompt is registered with key `{uid}`, tag `{"is_prompt": True, "global_steps", "n"}`,
+      where `n` is the number of GRPO sessions the prompt expects.
+    - Each rollout writes a per-session completion marker `{uid}_sess{session_id}`, tag
+      `{"is_session": True, "session_id", "status"}` where status is `success` or `failure`.
+    A prompt becomes sampleable once all `n` of its session markers are present (success or
+    failure); its trajectories are then collected by `{uid}` prefix. Markers are written after the
+    session's trajectory data, so "all markers present" implies "all available data present".
 
     Args:
         trainer_mode (str): Trainer mode.
@@ -78,6 +94,7 @@ class ReplayBuffer:
         max_off_policy_strategy: str,
         sampler_kwargs: DictConfig,
         poll_interval: float = 2.0,
+        rollout_level_dispatch: bool = False,
     ):
         self.trainer_mode = trainer_mode
         self.trainer_config = trainer_config
@@ -86,31 +103,49 @@ class ReplayBuffer:
         self.sampler_kwargs = sampler_kwargs
         self.poll_interval = poll_interval
         self.parameter_sync_step = trainer_config.get("parameter_sync_step", 1)
+        # Opt-in: rollout-level dispatch uses session-counting readiness; default False keeps the
+        # legacy prompt-status readiness (pending/running/finished/failure buckets).
+        self.session_counting = bool(rollout_level_dispatch)
 
         assert isinstance(self.max_off_policy_threshold, int) and self.max_off_policy_threshold > 0, (
             f"Invalid max off policy threshold: {self.max_off_policy_threshold}, must be an integer greater than 0"
         )
-        assert self.max_off_policy_strategy in ["drop", "wait"], (
-            f"Invalid max off policy strategy: {self.max_off_policy_strategy}, must be one of ['drop', 'wait']"
+        assert self.max_off_policy_strategy in ["drop", "wait", "none"], (
+            f"Invalid max off policy strategy: {self.max_off_policy_strategy}, must be one of ['drop', 'wait', 'none']"
         )
 
-        # partition_id => {key: tag}
+        # partition_id => {key: tag} for trajectory (data) keys only.
         self.partitions: dict[str, dict[str, dict]] = defaultdict(dict)
+        # partition_id => {prompt_uid: global_steps}, used to prioritize older samples.
+        self.prompt_global_steps: dict[str, dict[str, int]] = defaultdict(dict)
+        # Legacy prompt-status buckets (used when session_counting=False).
         self.pending_keys: dict[str, set] = defaultdict(set)
         self.running_keys: dict[str, set] = defaultdict(set)
         self.finished_keys: dict[str, set] = defaultdict(set)
         self.failure_keys: dict[str, set] = defaultdict(set)
-        # partition_id => {prompt_key: global_steps}, used to prioritize older samples.
-        self.prompt_global_steps: dict[str, dict[str, int]] = defaultdict(dict)
+        # partition_id => {prompt_uid: n}, number of GRPO sessions the prompt expects.
+        self.prompt_n: dict[str, dict[str, int]] = defaultdict(dict)
+        # partition_id => {prompt_uid: set(session_id)}, completed sessions (success or failure).
+        self.session_done: dict[str, dict[str, set]] = defaultdict(lambda: defaultdict(set))
+        # partition_id => {prompt_uid: set(marker_key)}, per-session markers to clear on sample().
+        self.session_marker_keys: dict[str, dict[str, set]] = defaultdict(lambda: defaultdict(set))
 
     def _sync_metadata_from_transfer_queue(self):
-        """Sync the metadata from TransferQueue."""
+        """Sync the metadata from TransferQueue.
+
+        Routes prompt tags by scheme: legacy tags carry a ``status`` (-> pending/running/
+        finished/failure buckets); rollout-level tags carry ``n`` + per-session ``is_session``
+        markers (-> prompt_n / session_done). Both are populated so either readiness model works.
+        """
         self.partitions.clear()
+        self.prompt_global_steps.clear()
         self.pending_keys.clear()
         self.running_keys.clear()
         self.finished_keys.clear()
         self.failure_keys.clear()
-        self.prompt_global_steps.clear()
+        self.prompt_n.clear()
+        self.session_done.clear()
+        self.session_marker_keys.clear()
 
         data = tq.kv_list()
         if data is None:
@@ -122,32 +157,61 @@ class ReplayBuffer:
                 if tag.get("is_prompt", False):
                     # see: [GRPO group sampling control]
                     self.prompt_global_steps[partition_id][key] = tag["global_steps"]
-                    match tag["status"]:
-                        case "pending":
-                            self.pending_keys[partition_id].add(key)
-                        case "running":
-                            self.running_keys[partition_id].add(key)
-                        case "finished":
-                            self.finished_keys[partition_id].add(key)
-                        case "failure":
-                            self.failure_keys[partition_id].add(key)
-                        case _:
-                            raise ValueError(f"Unknown status: {tag['status']}")
+                    if "n" in tag:
+                        # rollout-level scheme: readiness derived from per-session markers.
+                        self.prompt_n[partition_id][key] = tag["n"]
+                    else:
+                        # legacy scheme: GRPO-group status set by the worker.
+                        match tag["status"]:
+                            case "pending":
+                                self.pending_keys[partition_id].add(key)
+                            case "running":
+                                self.running_keys[partition_id].add(key)
+                            case "finished":
+                                self.finished_keys[partition_id].add(key)
+                            case "failure":
+                                self.failure_keys[partition_id].add(key)
+                            case _:
+                                raise ValueError(f"Unknown status: {tag['status']}")
+                elif tag.get("is_session", False):
+                    # rollout-level per-session completion marker `{uid}_sess{session_id}`.
+                    uid = key.split("_")[0]
+                    self.session_done[partition_id][uid].add(tag["session_id"])
+                    self.session_marker_keys[partition_id][uid].add(key)
                 else:
                     # see: [Trajectories storage format]
                     if key not in partition:
                         partition[key] = {}
                     partition[key].update(tag)
 
+    def _complete_uids(self, partition_id: str) -> set:
+        """uids whose all ``n`` GRPO sessions have completed (ready to sample)."""
+        return compute_complete_uids(self.prompt_n[partition_id], self.session_done[partition_id])
+
     def _has_enough_samples(self, global_steps: int, partition_id: str, batch_size: int) -> bool:
-        # For wait strategy, we need to wait all trajectories that reach threshold to finish
+        # "none" applies no staleness gate: just wait for batch_size ready prompts and sample the
+        # oldest (off-policyness is corrected downstream, e.g. via importance sampling / TIS).
+        # For wait strategy, we must wait for all still-unready prompts that have reached the
+        # staleness threshold to finish before sampling.
+        if not self.session_counting:
+            if self.max_off_policy_strategy == "wait":
+                for key in self.pending_keys[partition_id] | self.running_keys[partition_id]:
+                    prompt_global_steps = self.prompt_global_steps[partition_id][key]
+                    if (
+                        global_steps - prompt_global_steps + 1
+                    ) / self.parameter_sync_step >= self.max_off_policy_threshold:
+                        return False
+            return len(self.finished_keys[partition_id]) + len(self.failure_keys[partition_id]) >= batch_size
+
         if self.max_off_policy_strategy == "wait":
-            for key in self.pending_keys[partition_id] | self.running_keys[partition_id]:
-                prompt_global_steps = self.prompt_global_steps[partition_id][key]
+            complete = self._complete_uids(partition_id)
+            for uid, prompt_global_steps in self.prompt_global_steps[partition_id].items():
+                if uid in complete:
+                    continue
                 if (global_steps - prompt_global_steps + 1) / self.parameter_sync_step >= self.max_off_policy_threshold:
                     return False
 
-        return len(self.finished_keys[partition_id]) + len(self.failure_keys[partition_id]) >= batch_size
+        return len(self._complete_uids(partition_id)) >= batch_size
 
     def _drop_max_off_policy_samples(
         self, global_steps: int, partition_id: str, batch: KVBatchMeta
@@ -207,25 +271,41 @@ class ReplayBuffer:
             self._sync_metadata_from_transfer_queue()
 
             if time.time() - last_debug_time > VERL_REPLAY_BUFFER_DEBUG_INTERVAL_SECONDS:
-                logger.info(
-                    f"pending: {len(self.pending_keys[partition_id])}, "
-                    f"running: {len(self.running_keys[partition_id])}, "
-                    f"finished: {len(self.finished_keys[partition_id])}, "
-                    f"failure: {len(self.failure_keys[partition_id])}"
-                )
+                if self.session_counting:
+                    total = len(self.prompt_global_steps[partition_id])
+                    complete = len(self._complete_uids(partition_id))
+                    logger.info(
+                        f"prompts in-flight: {total}, complete(ready): {complete}, incomplete: {total - complete}"
+                    )
+                else:
+                    logger.info(
+                        f"pending: {len(self.pending_keys[partition_id])}, "
+                        f"running: {len(self.running_keys[partition_id])}, "
+                        f"finished: {len(self.finished_keys[partition_id])}, "
+                        f"failure: {len(self.failure_keys[partition_id])}"
+                    )
                 last_debug_time = time.time()
 
+        # Select the oldest ready prompts (smallest global_steps first) to reduce staleness.
         # TODO: should we filter out samples with some of their sessions failed?
-        finished_keys = self.finished_keys[partition_id]
-        failure_keys = self.failure_keys[partition_id]
-        # Prioritize sampling the oldest prompts (smallest global_steps first) to reduce staleness.
         prompt_global_steps = self.prompt_global_steps[partition_id]
-        sampleable_keys = sorted(finished_keys.union(failure_keys), key=lambda key: prompt_global_steps.get(key, 0))
+        if self.session_counting:
+            ready = self._complete_uids(partition_id)
+        else:
+            ready = self.finished_keys[partition_id] | self.failure_keys[partition_id]
+        sampleable_keys = sorted(ready, key=lambda uid: prompt_global_steps.get(uid, 0))
         selected_prompt_uids = sampleable_keys[:batch_size]
-        tq.kv_clear(partition_id=partition_id, keys=selected_prompt_uids)
+        selected = set(selected_prompt_uids)
+
+        # Clear the prompt metadata keys (and, in session-counting mode, their per-session markers).
+        # The trajectory data keys are cleared by the trainer after the batch is consumed.
+        clear_keys = list(selected_prompt_uids)
+        if self.session_counting:
+            for uid in selected_prompt_uids:
+                clear_keys.extend(self.session_marker_keys[partition_id].get(uid, ()))
+        tq.kv_clear(partition_id=partition_id, keys=clear_keys)
 
         keys, tags = [], []
-        selected = set(selected_prompt_uids)
         for key, tag in self.partitions[partition_id].items():
             uid = key.split("_")[0]
             if uid in selected:
