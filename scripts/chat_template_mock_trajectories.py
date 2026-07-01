@@ -16,11 +16,20 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
 
 from verl.tools.function_tool import FunctionTool
-from verl.tools.schemas import OpenAIFunctionToolSchema
+from verl.tools.schemas import (
+    OpenAIFunctionParametersSchema,
+    OpenAIFunctionPropertySchema,
+    OpenAIFunctionSchema,
+    OpenAIFunctionToolSchema,
+    ToolResponse,
+)
+
+if TYPE_CHECKING:
+    from PIL.Image import Image as PILImage
 
 
 @dataclass(frozen=True)
@@ -527,3 +536,334 @@ def select_tool_agent_trajectories(names: list[str] | None = None) -> list[ToolA
     if not names:
         return list(TOOL_AGENT_TRAJECTORIES)
     return [get_tool_agent_trajectory(name) for name in names]
+
+
+# =============================================================================
+# Vision-language (VL) trajectories
+#
+# These embed real images in both the initial user prompt and inside tool
+# responses, and are consumed by the VL CT-vs-legacy comparison harness
+# (``tests/experimental/agent_loop/continuous_token/compare_vl_agentloop_ct_vs_legacy.py``).
+#
+# They are intentionally kept OUT of the text ``TRAJECTORIES`` tuple: the text
+# chat-template checker renders trajectories with a bare tokenizer and cannot
+# expand image content. Images are generated lazily in ``build_vl_trajectories``
+# so importing this module for text-only use never requires Pillow.
+#
+# VL chat templates render assistant ``content`` verbatim but drop a structured
+# ``tool_calls`` field, so a tool-call turn embeds the parser's raw tool-call
+# text as content (matching how a VL model emits tool calls at rollout time),
+# and the real tool parser can then extract it.
+# =============================================================================
+
+
+# Synthetic reasoning used to fill a thinking model's ``<think>`` block for the
+# terminating (answer-only) turn, so the block is non-empty and the generation
+# prompt aligns as a clean token prefix.
+_THINKING_FILLER = "Let me reason about this before answering."
+
+
+def _format_tool_call_text(tool_parser: str, name: str, arguments: dict[str, Any]) -> str:
+    """Render a single tool call as the raw text the model would generate for
+    the given tool-parser format."""
+    args_json = json.dumps(arguments, ensure_ascii=False)
+    if tool_parser in ("hermes", "qwen3_coder"):
+        return f'<tool_call>\n{{"name": "{name}", "arguments": {args_json}}}\n</tool_call>'
+    if tool_parser == "glm":
+        arg_pairs = "".join(
+            f"<arg_key>{key}</arg_key><arg_value>{value}</arg_value>" for key, value in arguments.items()
+        )
+        return f"<tool_call>{name}{arg_pairs}</tool_call>"
+    if tool_parser == "kimi":
+        return f"<|tool_call_begin|>{name}<|tool_call_argument_begin|>{args_json}<|tool_call_end|>"
+    raise ValueError(f"Unsupported tool parser for mock tool-call rendering: {tool_parser!r}")
+
+
+def _format_assistant_content(tool_parser: str, reasoning: str, calls: list[tuple[str, dict[str, Any]]]) -> str:
+    """Build the assistant turn's content (reasoning + raw tool-call text)."""
+    if not calls:
+        return reasoning
+    call_texts = [_format_tool_call_text(tool_parser, name, arguments) for name, arguments in calls]
+    if tool_parser == "kimi":
+        # Kimi wraps all calls in a single section.
+        body = "".join(call_texts)
+        tool_block = f"<|tool_calls_section_begin|>{body}<|tool_calls_section_end|>"
+    else:
+        tool_block = "\n".join(call_texts)
+    if reasoning:
+        return f"{reasoning}\n{tool_block}"
+    return tool_block
+
+
+def _wrap_thinking_content(reasoning: str, body: str, *, has_calls: bool) -> str:
+    """Wrap an assistant turn as a thinking model would actually generate it.
+
+    Thinking VL templates open a ``<think>`` block at the generation prompt, so a
+    faithful mock generation is ``<think>{reasoning}</think>\\n\\n{answer/tool_call}``.
+    For a tool-call turn the step's ``reasoning`` is the pre-tool thought and goes
+    inside the block; for the terminating turn ``reasoning`` is the final answer,
+    so a short synthetic thought fills the block and the answer follows it.
+    """
+    if has_calls:
+        think_text = reasoning or _THINKING_FILLER
+        return f"<think>\n{think_text}\n</think>\n\n{body}"
+    return f"<think>\n{_THINKING_FILLER}\n</think>\n\n{reasoning}"
+
+
+@dataclass
+class VLToolResponseSpec:
+    """A single tool response used both to build the mock trajectory prefix and
+    to drive the deterministic tool at runtime."""
+
+    tool_name: str
+    text: str
+    image: "PILImage | None" = None
+
+    def to_message(self) -> dict[str, Any]:
+        content: list[dict[str, Any]] = []
+        if self.image is not None:
+            content.append({"type": "image", "image": self.image})
+        content.append({"type": "text", "text": self.text})
+        return {"role": "tool", "content": content}
+
+    def to_tool_response(self) -> ToolResponse:
+        if self.image is not None:
+            return ToolResponse(text=self.text, image=[self.image])
+        return ToolResponse(text=self.text)
+
+
+@dataclass
+class VLToolStep:
+    """One assistant generation.
+
+    ``calls`` is the list of ``(tool_name, arguments)`` the assistant emits this
+    turn; when non-empty, ``responses`` holds the tool answers that get appended
+    before the next turn. ``reasoning`` is the assistant text before/around the
+    tool call (or the final answer for the terminating turn).
+
+    VL chat templates typically render assistant ``content`` verbatim but drop a
+    structured ``tool_calls`` field, so the mock assistant "generation" for a
+    tool-call turn is the parser's raw tool-call text embedded as content. This
+    matches how a VL model actually emits tool calls at rollout time and lets the
+    tool parser extract them.
+    """
+
+    reasoning: str
+    calls: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
+    responses: list[VLToolResponseSpec] = field(default_factory=list)
+
+    def assistant_message(self, tool_parser: str, is_thinking: bool = False) -> dict[str, Any]:
+        if is_thinking:
+            body = _format_assistant_content(tool_parser, "", self.calls)
+            content = _wrap_thinking_content(self.reasoning, body, has_calls=bool(self.calls))
+            return {"role": "assistant", "content": content}
+        content = _format_assistant_content(tool_parser, self.reasoning, self.calls)
+        return {"role": "assistant", "content": content}
+
+    @property
+    def appended_messages(self) -> list[dict[str, Any]]:
+        return [response.to_message() for response in self.responses]
+
+
+@dataclass
+class VLToolTrajectory:
+    name: str
+    description: str
+    raw_prompt: list[dict[str, Any]]
+    steps: list[VLToolStep]
+    tools: list[FunctionTool]
+    max_parallel_calls: int = 1
+
+    @property
+    def tool_schemas(self) -> list[dict[str, Any]]:
+        return [tool.tool_schema.model_dump(exclude_unset=True, exclude_none=True) for tool in self.tools]
+
+    @property
+    def expected_generation_turns(self) -> int:
+        return len(self.steps)
+
+    @property
+    def expected_num_turns(self) -> int:
+        tool_rounds = sum(1 for step in self.steps if step.responses)
+        return self.expected_generation_turns + tool_rounds + 1
+
+
+@dataclass
+class VLSingleTurnTrajectory:
+    name: str
+    description: str
+    raw_prompt: list[dict[str, Any]]
+    assistant_response: str
+
+    expected_generation_turns: int = 1
+    expected_num_turns: int = 2
+
+    def assistant_message(self, is_thinking: bool = False) -> dict[str, Any]:
+        if is_thinking:
+            content = _wrap_thinking_content(self.assistant_response, "", has_calls=False)
+        else:
+            content = self.assistant_response
+        return {"role": "assistant", "content": content}
+
+
+VLMockTrajectory = VLSingleTurnTrajectory | VLToolTrajectory
+
+
+def _solid_image(size: tuple[int, int], color: str) -> "PILImage":
+    from PIL import Image
+
+    return Image.new("RGB", size, color=color)
+
+
+def _make_query_tool(name: str, description: str, response: VLToolResponseSpec) -> FunctionTool:
+    """Build a deterministic function tool with a single ``query`` argument.
+
+    The tool ignores the query and always returns ``response``; the query only
+    exists so the model-rendered ``tool_calls`` carry an argument that survives
+    the chat template round-trip and the tool-parser extraction.
+    """
+
+    schema = OpenAIFunctionToolSchema(
+        type="function",
+        function=OpenAIFunctionSchema(
+            name=name,
+            description=description,
+            parameters=OpenAIFunctionParametersSchema(
+                type="object",
+                properties={
+                    "query": OpenAIFunctionPropertySchema(type="string", description="What to inspect."),
+                },
+                required=["query"],
+            ),
+        ),
+    )
+
+    def _fn(query: str = "") -> ToolResponse:
+        del query
+        return response.to_tool_response()
+
+    return FunctionTool(name=name, fn=_fn, tool_schema=schema)
+
+
+def build_vl_trajectories() -> dict[str, VLMockTrajectory]:
+    """Construct the inline VL trajectories.
+
+    Uses small solid-color images so token counts stay small and image
+    processing stays fast on CPU. Sizes are multiples of 28 to satisfy the
+    Qwen-family patch grid. Fresh images are created on each call.
+    """
+
+    prompt_image = _solid_image((84, 84), "teal")
+    tool_image_a = _solid_image((56, 56), "orange")
+    tool_image_b = _solid_image((56, 56), "purple")
+
+    single_turn = VLSingleTurnTrajectory(
+        name="vl_singleturnchat",
+        description="One user request with an image, followed by one plain assistant response.",
+        raw_prompt=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": prompt_image},
+                    {"type": "text", "text": "Describe the image in one short sentence."},
+                ],
+            }
+        ],
+        assistant_response="The image is a solid teal square.",
+    )
+
+    single_tool_response = VLToolResponseSpec(
+        tool_name="zoom_tool",
+        text="Zoomed crop attached.",
+        image=tool_image_a,
+    )
+    single_tool = VLToolTrajectory(
+        name="vl_multiturnsingletool",
+        description="Image prompt, one tool call returning an image, then a final answer.",
+        raw_prompt=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": prompt_image},
+                    {"type": "text", "text": "Use zoom_tool to inspect the image, then describe what you see."},
+                ],
+            }
+        ],
+        steps=[
+            VLToolStep(
+                reasoning="I'll zoom in to inspect the image.",
+                calls=[("zoom_tool", {"query": "center crop"})],
+                responses=[single_tool_response],
+            ),
+            VLToolStep(
+                reasoning="The zoomed crop shows an orange region over the teal background.",
+            ),
+        ],
+        tools=[
+            _make_query_tool("zoom_tool", "Return a zoomed crop of the current image.", single_tool_response),
+        ],
+        max_parallel_calls=1,
+    )
+
+    left_response = VLToolResponseSpec(tool_name="left_tool", text="Left half crop.", image=tool_image_a)
+    right_response = VLToolResponseSpec(tool_name="right_tool", text="Right half crop.", image=tool_image_b)
+    multi_tool = VLToolTrajectory(
+        name="vl_multiturnmultitool",
+        description="Image prompt, two parallel tool calls each returning an image, then a summary.",
+        raw_prompt=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": prompt_image},
+                    {"type": "text", "text": "Inspect the left and right halves with the tools, then summarize."},
+                ],
+            }
+        ],
+        steps=[
+            VLToolStep(
+                reasoning="Let me inspect both halves.",
+                calls=[
+                    ("left_tool", {"query": "left half"}),
+                    ("right_tool", {"query": "right half"}),
+                ],
+                responses=[left_response, right_response],
+            ),
+            VLToolStep(
+                reasoning="Both halves are crops of the same teal image, tinted orange and purple.",
+            ),
+        ],
+        tools=[
+            _make_query_tool("left_tool", "Return the left-half crop of the current image.", left_response),
+            _make_query_tool("right_tool", "Return the right-half crop of the current image.", right_response),
+        ],
+        max_parallel_calls=2,
+    )
+
+    return {
+        single_turn.name: single_turn,
+        single_tool.name: single_tool,
+        multi_tool.name: multi_tool,
+    }
+
+
+VL_SINGLE_TURN_TRAJECTORY_NAMES: tuple[str, ...] = ("vl_singleturnchat",)
+VL_TOOL_AGENT_TRAJECTORY_NAMES: tuple[str, ...] = ("vl_multiturnsingletool", "vl_multiturnmultitool")
+VL_TRAJECTORY_NAMES: tuple[str, ...] = VL_SINGLE_TURN_TRAJECTORY_NAMES + VL_TOOL_AGENT_TRAJECTORY_NAMES
+
+
+def get_vl_trajectory(name: str) -> VLMockTrajectory:
+    trajectories = build_vl_trajectories()
+    try:
+        return trajectories[name]
+    except KeyError as exc:
+        raise ValueError(f"Unknown VL trajectory {name!r}. Choices: {sorted(trajectories)}") from exc
+
+
+def select_vl_trajectories(names: list[str] | None = None) -> list[VLMockTrajectory]:
+    trajectories = build_vl_trajectories()
+    if not names:
+        return list(trajectories.values())
+    missing = [name for name in names if name not in trajectories]
+    if missing:
+        raise ValueError(f"Unknown VL trajectories {missing!r}. Choices: {sorted(trajectories)}")
+    return [trajectories[name] for name in names]
