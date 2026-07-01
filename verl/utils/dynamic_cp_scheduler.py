@@ -39,6 +39,7 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 MAX_SHAPE_DIMS = 8
+DCP_RESPONSE_LENGTH_KEY = "_dcp_response_lengths"
 
 
 def _dcp_profile_enabled() -> bool:
@@ -145,7 +146,7 @@ def dcp_make_buckets_equal(
     for i, (sample_id, seq_len) in enumerate(sample_seqlens):
         w = compute_estimator(seq_len)
         projected = cur_work + w
-        if cur and (projected > target * 1.1 or len(sample_seqlens) - i <= remaining_k - len(buckets)):
+        if cur and (projected > target * 1.1 or len(sample_seqlens) - i <= remaining_k):
             buckets.append(deque(cur))
             cur, cur_work = [], 0.0
             remaining_k -= 1
@@ -326,78 +327,76 @@ def next_hdp_group(
         for sample_seq_tuple in b:
             leftovers.append(sample_seq_tuple)
 
-    # Fill empty GPUs by expanding smallest groups
-    total_work_before = sum(len(mb) for mb in micro_batches)
-
-    def fill_empty_gpus(micro_batches, exec_times, sample_ids_per_gpu, group_members, group_size):
-        empty_gpus = [i for i in range(total_gpus) if not micro_batches[i]]
-        if not empty_gpus:
-            return (micro_batches, exec_times, sample_ids_per_gpu, group_members, group_size)
-
-        existing_group_sizes = set(group_size.values())
-        assert existing_group_sizes, (
-            "No existing groups found, cannot redistribute. Try increasing 'max_seqlen_per_dp_cp_rank'."
+    # Dynamic CP cannot leave a rank idle in a micro-batch. Expand existing CP
+    # groups when possible. For non-power-of-two worlds, a partial tail may make
+    # the next power-of-two expansion impossible; move tail groups back to the
+    # leftovers until the remaining groups can occupy every rank.
+    groups = []
+    for gid, members in sorted(group_members.items(), key=lambda item: item[1][0]):
+        representative = members[0]
+        assert all(micro_batches[rank] == micro_batches[representative] for rank in members)
+        assert all(sample_ids_per_gpu[rank] == sample_ids_per_gpu[representative] for rank in members)
+        groups.append(
+            {
+                "size": group_size[gid],
+                "seq_lens": micro_batches[representative][:],
+                "sample_ids": sample_ids_per_gpu[representative][:],
+            }
         )
 
-        min_group_size = min(existing_group_sizes)
-        next_power = min(min_group_size * 2, total_gpus)
+    if not groups:
+        raise AssertionError("No existing groups found, cannot fill empty DCP ranks")
+    groups.sort(key=lambda group: group["size"], reverse=True)
 
-        for gid, size in group_size.items():
-            if size == min_group_size:
-                members = group_members[gid]
-                needed_count = next_power - min_group_size
-                group_start_gpu = members[0]
-                group_end_gpu = members[-1]
-                empty_gpu = [idx for idx, work in enumerate(micro_batches) if not work][0]
-                assert not all(work for work in micro_batches[empty_gpu : empty_gpu + needed_count]), (
-                    "Empty GPUs were detected but not enough to expand."
-                )
-                work_to_push = micro_batches[group_end_gpu + 1 : empty_gpu]
-                exec_times_to_push = exec_times[group_end_gpu + 1 : empty_gpu]
-                sample_ids_to_push = sample_ids_per_gpu[group_end_gpu + 1 : empty_gpu]
+    while sum(group["size"] for group in groups) < total_gpus:
+        occupied = sum(group["size"] for group in groups)
+        empty_count = total_gpus - occupied
+        starts = []
+        cursor = 0
+        for group in groups:
+            starts.append(cursor)
+            cursor += group["size"]
 
-                new_micro_batches = [[] for _ in micro_batches]
-                new_exec_times = [0.0] * len(exec_times)
-                new_sample_ids_per_gpu = [[] for _ in sample_ids_per_gpu]
+        expanded = False
+        min_size = min(group["size"] for group in groups)
+        for idx, group in enumerate(groups):
+            if group["size"] != min_size:
+                continue
+            target_size = min(group["size"] * 2, total_gpus)
+            growth = target_size - group["size"]
+            full_world_group = target_size == total_gpus
+            if growth > empty_count or (full_world_group and len(groups) != 1):
+                continue
+            if not full_world_group and starts[idx] % target_size != 0:
+                continue
+            previous_size = groups[idx - 1]["size"] if idx > 0 else total_gpus
+            next_size = groups[idx + 1]["size"] if idx + 1 < len(groups) else 0
+            if target_size > previous_size or target_size < next_size:
+                continue
+            group["size"] = target_size
+            expanded = True
+            break
 
-                for i in range(group_start_gpu):
-                    new_micro_batches[i] = micro_batches[i]
-                    new_exec_times[i] = exec_times[i]
-                    new_sample_ids_per_gpu[i] = sample_ids_per_gpu[i]
+        if expanded:
+            continue
 
-                for i in range(group_start_gpu, group_end_gpu + needed_count + 1):
-                    new_micro_batches[i] = micro_batches[group_end_gpu]
-                    new_exec_times[i] = get_total_workload_fn(micro_batches[group_end_gpu][0], next_power)
-                    new_sample_ids_per_gpu[i] = sample_ids_per_gpu[group_end_gpu]
+        removed = groups.pop()
+        leftovers.extend(zip(removed["sample_ids"], removed["seq_lens"], strict=True))
+        if not groups:
+            raise AssertionError("Dynamic CP could not expand any group to fill all ranks")
 
-                for i, work in enumerate(work_to_push):
-                    new_micro_batches[group_end_gpu + needed_count + 1 + i] = work
-                    new_exec_times[group_end_gpu + needed_count + 1 + i] = exec_times_to_push[i]
-                    new_sample_ids_per_gpu[group_end_gpu + needed_count + 1 + i] = sample_ids_to_push[i]
+    micro_batches = []
+    exec_times = []
+    sample_ids_per_gpu = []
+    for group in groups:
+        work = sum(get_total_workload_fn(seq_len, group["size"]) for seq_len in group["seq_lens"])
+        for _ in range(group["size"]):
+            micro_batches.append(group["seq_lens"][:])
+            exec_times.append(work)
+            sample_ids_per_gpu.append(group["sample_ids"][:])
 
-                group_size[gid] = next_power
-                group_members[gid] = list(range(members[0], members[-1] + needed_count + 1))
-                for pushed_gid in group_size.keys():
-                    if pushed_gid > gid:
-                        group_members[pushed_gid] = [x + needed_count for x in group_members[pushed_gid]]
-
-                return (
-                    new_micro_batches,
-                    new_exec_times,
-                    new_sample_ids_per_gpu,
-                    group_members,
-                    group_size,
-                )
-
-    empty_gpus = any(not micro_batches[i] for i in range(total_gpus))
-    while empty_gpus:
-        micro_batches, exec_times, sample_ids_per_gpu, group_members, group_size = fill_empty_gpus(
-            micro_batches, exec_times, sample_ids_per_gpu, group_members, group_size
-        )
-        empty_gpus = any(not micro_batches[i] for i in range(total_gpus))
-
-    total_work_after = sum(len(mb) for mb in micro_batches)
-    assert total_work_after >= total_work_before, f"Samples were removed: {total_work_before} -> {total_work_after}"
+    assert len(micro_batches) == total_gpus
+    assert all(micro_batches), "Dynamic CP scheduler left an empty rank"
 
     return micro_batches, leftovers, exec_times, sample_ids_per_gpu
 
@@ -416,7 +415,18 @@ def align_sample_id_groups(sample_id_groups: list, microbatch_group_size_per_vp_
     i = len(sample_id_groups) - 1
 
     def fill_empty_by_expanding_cp(sample_id_group):
+        def assign_preserving_len(group, start, values):
+            end = start + len(values)
+            if start < 0 or end > len(group):
+                raise AssertionError(
+                    f"fill_empty_by_expanding_cp assignment out of range: start={start}, "
+                    f"len(values)={len(values)}, group_len={len(group)}"
+                )
+            for offset, value in enumerate(values):
+                group[start + offset] = value[:]
+
         def fill_empty(group):
+            group_len = len(group)
             empty_size = sum(1 for ids in group if len(ids) == 0)
             i = len(group) - 1 - empty_size
             prev_cp_size = 0
@@ -428,18 +438,20 @@ def align_sample_id_groups(sample_id_groups: list, microbatch_group_size_per_vp_
                     i -= 1
                 if cp_size > prev_cp_size and prev_cp_size != 0:
                     start_idx = i + 1 + cp_size
-                    end_idx = -empty_size + prev_cp_size if -empty_size + prev_cp_size < 0 else None
-                    group[start_idx + 2 * prev_cp_size : end_idx] = group[start_idx + prev_cp_size : -empty_size]
-                    group[start_idx + prev_cp_size : start_idx + 2 * prev_cp_size] = group[
-                        start_idx : start_idx + prev_cp_size
-                    ]
+                    middle = [ids[:] for ids in group[start_idx + prev_cp_size : group_len - empty_size]]
+                    assign_preserving_len(group, start_idx + 2 * prev_cp_size, middle)
+                    repeated = [ids[:] for ids in group[start_idx : start_idx + prev_cp_size]]
+                    assign_preserving_len(group, start_idx + prev_cp_size, repeated)
                     break
                 if cp_size <= empty_size and i == -1:
-                    end_idx = -empty_size + cp_size if -empty_size + cp_size < 0 else None
-                    group[2 * cp_size : end_idx] = group[cp_size:-empty_size]
-                    group[cp_size : 2 * cp_size] = group[0:cp_size]
+                    middle = [ids[:] for ids in group[cp_size : group_len - empty_size]]
+                    assign_preserving_len(group, 2 * cp_size, middle)
+                    repeated = [ids[:] for ids in group[0:cp_size]]
+                    assign_preserving_len(group, cp_size, repeated)
                     break
                 prev_cp_size = cp_size
+            if len(group) != group_len:
+                raise AssertionError(f"fill_empty_by_expanding_cp changed group length: {group_len} -> {len(group)}")
             return group
 
         while sample_id_group and len(sample_id_group[-1]) == 0:
@@ -986,6 +998,51 @@ def _nested_tensor_to_samples(
     return samples, seq_lens
 
 
+def _get_response_lengths(batch: TensorDict, seq_lens: torch.Tensor) -> torch.Tensor:
+    """Return the true response span length for every sample before DCP routing."""
+    num_samples = len(seq_lens)
+    prompts = batch.get("prompts", None)
+    responses = batch.get("responses", None)
+    attention_mask = batch.get("attention_mask", None)
+
+    if isinstance(responses, torch.Tensor) and responses.is_nested:
+        response_lens = responses.offsets().diff()
+    elif isinstance(prompts, torch.Tensor) and prompts.is_nested:
+        response_lens = seq_lens - prompts.offsets().diff().to(seq_lens.device)
+    elif (
+        isinstance(prompts, torch.Tensor)
+        and not prompts.is_nested
+        and isinstance(attention_mask, torch.Tensor)
+        and not attention_mask.is_nested
+    ):
+        response_lens = attention_mask[:, prompts.shape[1] :].sum(dim=-1)
+    elif (
+        isinstance(responses, torch.Tensor)
+        and not responses.is_nested
+        and isinstance(attention_mask, torch.Tensor)
+        and not attention_mask.is_nested
+    ):
+        response_lens = attention_mask[:, -responses.shape[1] :].sum(dim=-1)
+    else:
+        max_response_len = tu.get_non_tensor_data(batch, key="max_response_len", default=None)
+        if max_response_len is not None and isinstance(attention_mask, torch.Tensor) and not attention_mask.is_nested:
+            response_lens = attention_mask[:, -int(max_response_len) :].sum(dim=-1)
+        else:
+            raise ValueError(
+                "Dynamic CP loss routing requires prompts/responses or attention_mask with max_response_len "
+                "to preserve the true response span"
+            )
+
+    response_lens = response_lens.to(device=seq_lens.device, dtype=torch.int64).reshape(-1)
+    if response_lens.numel() != num_samples:
+        raise ValueError(f"DCP response length count must match batch size: {response_lens.numel()} != {num_samples}")
+    if torch.any(response_lens < 0) or torch.any(response_lens > seq_lens):
+        raise ValueError(
+            f"Invalid DCP response lengths {response_lens.tolist()} for sequence lengths {seq_lens.tolist()}"
+        )
+    return response_lens
+
+
 def _samples_to_nested_tensor_batch(
     packed_batch: dict[str, torch.Tensor],
     cu_seqlens: torch.Tensor,
@@ -1519,7 +1576,8 @@ class DynamicCPScheduler:
         mslpr = self.max_seqlen_per_dp_cp_rank
         min_cp = self.min_cp_size
 
-        gpus_fn = lambda seq_len: dcp_gpus_needed(seq_len, mslpr, min_cp)
+        def gpus_fn(seq_len):
+            return dcp_gpus_needed(seq_len, mslpr, min_cp)
 
         sample_id_groups = []
         sample_id_seqlens = sorted(sample_id_seqlens, key=lambda x: x[1], reverse=True)
@@ -1535,11 +1593,11 @@ class DynamicCPScheduler:
                 f"{self.total_dcp_gpus}. Increase max_seqlen_per_dp_cp_rank or the DPxCP group size."
             )
 
-        workload_fn = lambda seq_len, cp_size=None: dcp_get_total_workload(seq_len, mslpr, cp_size, min_cp)
-        gpus_fn = lambda seq_len: dcp_gpus_needed(seq_len, mslpr, min_cp)
-        buckets_fn = lambda sample_seqlens, compute_est: dcp_make_buckets_equal(
-            sample_seqlens, compute_est, mslpr, min_cp
-        )
+        def workload_fn(seq_len, cp_size=None):
+            return dcp_get_total_workload(seq_len, mslpr, cp_size, min_cp)
+
+        def buckets_fn(sample_seqlens, compute_est):
+            return dcp_make_buckets_equal(sample_seqlens, compute_est, mslpr, min_cp)
 
         while sample_id_seqlens:
             num_left_before = len(sample_id_seqlens)
@@ -1623,6 +1681,11 @@ class DynamicCPScheduler:
         # Step 1: Convert NestedTensor batch to per-sample format
         profile_start = _profile_now() if profile else None
         local_samples, local_seqlens = _nested_tensor_to_samples(batch, tensor_keys, scalar_keys, padded_keys)
+        if non_tensor_data.get("compute_loss", False) and "response_mask" in batch.keys():
+            response_lens = _get_response_lengths(batch, local_seqlens)
+            for sample, response_len in zip(local_samples, response_lens, strict=True):
+                sample[DCP_RESPONSE_LENGTH_KEY] = response_len.reshape(1)
+            scalar_keys.append(DCP_RESPONSE_LENGTH_KEY)
         if profile:
             profile_ms["to_samples"] = _profile_elapsed_ms(profile_start, dcp_group)
 

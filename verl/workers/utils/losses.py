@@ -36,15 +36,12 @@ def sft_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         # log_prob and loss mask are nested tensors of shape [bsz, j1]
         # for each sample, loss mask shape is [1, prompt_length + response_length]
         loss_mask = data["loss_mask"]
-        dcp_local_token_mask = model_output.get("_dcp_local_token_mask", None)
 
         log_prob_flatten = log_prob.values()
         loss_mask_flatten = loss_mask.values()
 
         # left-shift the loss mask by one token to align with log_prob
         loss_mask_flatten = torch.roll(loss_mask_flatten, shifts=-1, dims=0)
-        if dcp_local_token_mask is not None:
-            loss_mask_flatten = loss_mask_flatten * dcp_local_token_mask.values().to(dtype=loss_mask_flatten.dtype)
 
         # NOTE: loss is averaged over all tokens in the batch across all data parallel groups,
         # For FSDP backend, the loss is directly used for backward; while for Megatron backend,
@@ -63,10 +60,6 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     entropy = model_output.get("entropy", None)
     if entropy is not None:
         entropy = no_padding_2_padding(entropy, data)
-    dcp_local_response_mask = None
-    dcp_local_token_mask = model_output.get("_dcp_local_token_mask", None)
-    if dcp_local_token_mask is not None:
-        dcp_local_response_mask = no_padding_2_padding(dcp_local_token_mask.to(dtype=torch.float32), data).to(bool)
 
     # global batch info for loss aggregation
     config.global_batch_info["dp_size"] = data["dp_size"]
@@ -103,27 +96,6 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     advantages = data["advantages"]
     rollout_is_weights = data.get("rollout_is_weights", None)
 
-    # DCP path: padded tensors from routing may have different max_response_len than model output.
-    # Slice all to the model output's response length only when the truncated suffix is padding.
-    _dcp_response_len = log_prob.shape[1]
-    if old_log_prob.shape[1] != _dcp_response_len:
-        if old_log_prob.shape[1] < _dcp_response_len:
-            raise ValueError(
-                f"old_log_probs is shorter than model log_probs: {old_log_prob.shape[1]} < {_dcp_response_len}"
-            )
-        if response_mask[:, _dcp_response_len:].any():
-            raise ValueError("DCP response alignment would drop non-padding response tokens")
-        old_log_prob = old_log_prob[:, :_dcp_response_len]
-        response_mask = response_mask[:, :_dcp_response_len]
-        advantages = advantages[:, :_dcp_response_len]
-        if entropy is not None:
-            entropy = entropy[:, :_dcp_response_len]
-        if dcp_local_response_mask is not None:
-            dcp_local_response_mask = dcp_local_response_mask[:, :_dcp_response_len]
-
-    if dcp_local_response_mask is not None:
-        response_mask = response_mask & dcp_local_response_mask
-
     loss_agg_mode = config.loss_agg_mode
 
     loss_mode = config.policy_loss.get("loss_mode", "vanilla")
@@ -159,12 +131,6 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     # add kl loss
     if config.use_kl_loss:
         ref_log_prob = data["ref_log_prob"]
-        if ref_log_prob.shape[1] != _dcp_response_len:
-            if ref_log_prob.shape[1] < _dcp_response_len:
-                raise ValueError(
-                    f"ref_log_prob is shorter than model log_probs: {ref_log_prob.shape[1]} < {_dcp_response_len}"
-                )
-            ref_log_prob = ref_log_prob[:, :_dcp_response_len]
         # compute kl loss
         kld = kl_penalty(logprob=log_prob, ref_logprob=ref_log_prob, kl_penalty=config.kl_loss_type)
         kl_loss = agg_loss(
@@ -191,10 +157,6 @@ def value_loss(config: CriticConfig, model_output, data: TensorDict, dp_group=No
         value loss
     """
     vpreds = no_padding_2_padding(model_output["values"], data)  # (bsz, response_length)
-    dcp_local_response_mask = None
-    dcp_local_token_mask = model_output.get("_dcp_local_token_mask", None)
-    if dcp_local_token_mask is not None:
-        dcp_local_response_mask = no_padding_2_padding(dcp_local_token_mask.to(dtype=torch.float32), data).to(bool)
 
     # Normalize the value loss over the global mini-batch (dp_size / batch_num_tokens /
     # global_batch_size) instead of the local micro-batch, so the accumulated critic gradient is
@@ -220,8 +182,6 @@ def value_loss(config: CriticConfig, model_output, data: TensorDict, dp_group=No
     values = data["values"]
     returns = data["returns"]
     response_mask = data["response_mask"].to(bool)
-    if dcp_local_response_mask is not None:
-        response_mask = response_mask & dcp_local_response_mask
 
     vf_loss, vf_clipfrac = compute_value_loss(
         vpreds=vpreds,

@@ -66,13 +66,139 @@ from verl.utils.megatron_utils import (
 from verl.utils.model import extract_multi_modal_inputs, load_mcore_dist_weights
 from verl.utils.seqlen_balancing import restore_dynamic_batch
 from verl.workers.config import HFModelConfig, McoreEngineConfig, McoreOptimizerConfig
+from verl.workers.utils.padding import no_padding_2_padding
 
 from ..base import BaseEngine, BaseEngineCtx, EngineRegistry
-from ..utils import postprocess_batch_func, prepare_micro_batches
+from ..utils import postprocess_batch_func, prepare_dynamic_cp_micro_batches, prepare_micro_batches
 from .utils import set_random_seed
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+
+def _nested_with_values_like(nested_tensor: torch.Tensor, values: torch.Tensor) -> torch.Tensor:
+    return torch.nested.nested_tensor_from_jagged(values, offsets=nested_tensor.offsets())
+
+
+def _slice_dcp_response_field(data: TensorDict, key: str, response_len: int):
+    if key not in data.keys():
+        return
+    value = data[key]
+    if not isinstance(value, torch.Tensor) or value.is_nested or value.dim() < 2:
+        return
+    if value.shape[1] == response_len:
+        return
+    if value.shape[1] < response_len:
+        raise ValueError(f"{key} is shorter than DCP model output: {value.shape[1]} < {response_len}")
+    data[key] = value[:, :response_len]
+
+
+def _apply_dcp_local_token_mask_for_loss(model_output: dict[str, torch.Tensor], data: TensorDict) -> None:
+    """Apply DCP-local token ownership to Megatron loss inputs.
+
+    DCP is a Megatron scheduling detail, so backend-agnostic loss functions should
+    not know about ``_dcp_local_token_mask``. This helper rewrites the masks in
+    the scheduled Megatron micro-batch before calling the shared losses.
+    """
+    local_token_mask = model_output.pop("_dcp_local_token_mask", None)
+    if local_token_mask is None:
+        return
+    if not isinstance(local_token_mask, torch.Tensor) or not local_token_mask.is_nested:
+        raise ValueError("_dcp_local_token_mask must be a nested tensor")
+
+    if "loss_mask" in data.keys():
+        loss_mask = data["loss_mask"]
+        if isinstance(loss_mask, torch.Tensor) and loss_mask.is_nested:
+            if not torch.equal(loss_mask.offsets(), local_token_mask.offsets()):
+                raise ValueError("DCP local token mask offsets must match loss_mask offsets")
+            shifted_loss_mask = torch.roll(loss_mask.values(), shifts=-1, dims=0)
+            shifted_loss_mask = shifted_loss_mask * local_token_mask.values().to(dtype=shifted_loss_mask.dtype)
+            log_probs = model_output.get("log_probs", None)
+            if isinstance(log_probs, torch.Tensor) and log_probs.is_nested:
+                if torch.equal(log_probs.offsets(), local_token_mask.offsets()):
+                    data["loss_mask"] = _nested_with_values_like(
+                        loss_mask, torch.roll(shifted_loss_mask, shifts=1, dims=0)
+                    )
+                else:
+                    compact_loss_mask = shifted_loss_mask[local_token_mask.values().to(dtype=torch.bool)]
+                    if compact_loss_mask.numel() != log_probs.values().numel():
+                        raise ValueError(
+                            "DCP compact loss mask size must match compact log_probs size: "
+                            f"{compact_loss_mask.numel()} != {log_probs.values().numel()}"
+                        )
+                    data["loss_mask"] = _nested_with_values_like(
+                        log_probs, torch.roll(compact_loss_mask, shifts=1, dims=0)
+                    )
+            else:
+                data["loss_mask"] = _nested_with_values_like(loss_mask, torch.roll(shifted_loss_mask, shifts=1, dims=0))
+
+    if "response_mask" not in data.keys():
+        return
+
+    response_mask = data["response_mask"]
+    if not isinstance(response_mask, torch.Tensor) or response_mask.is_nested:
+        return
+
+    if "_dcp_response_mask_for_padding" not in data.keys():
+        data["_dcp_response_mask_for_padding"] = response_mask.clone()
+    data["response_token_counts"] = data["_dcp_response_mask_for_padding"].sum(dim=-1)
+
+    local_response_mask = no_padding_2_padding(local_token_mask.to(dtype=torch.float32), data).to(torch.bool)
+    response_len = local_response_mask.shape[1]
+
+    full_response_mask = data["_dcp_response_mask_for_padding"]
+    if full_response_mask.shape[1] > response_len and full_response_mask[:, response_len:].any():
+        raise ValueError("DCP response alignment would drop non-padding response tokens")
+
+    for key in [
+        "response_mask",
+        "old_log_probs",
+        "advantages",
+        "rollout_is_weights",
+        "ref_log_prob",
+        "values",
+        "returns",
+    ]:
+        _slice_dcp_response_field(data, key, response_len)
+
+    data["response_mask"] = data["response_mask"].to(torch.bool) & local_response_mask
+
+
+def _temperature_as_scalar_for_fused(temperature) -> tuple[bool, float | None]:
+    if temperature is None:
+        return True, 1.0
+    if isinstance(temperature, torch.Tensor):
+        if temperature.numel() == 0:
+            return True, 1.0
+        if temperature.numel() != 1:
+            return False, None
+        return True, float(temperature.item())
+    return True, float(temperature)
+
+
+def _expand_temperature_for_thd(temperature, input_ids: torch.Tensor) -> torch.Tensor:
+    if temperature is None:
+        temperature = torch.ones(input_ids.shape[0], device=input_ids.device, dtype=torch.float32)
+    elif not isinstance(temperature, torch.Tensor):
+        temperature = torch.tensor([temperature] * input_ids.shape[0], device=input_ids.device)
+
+    temperature = temperature.to(device=input_ids.device, dtype=torch.float32)
+    if temperature.numel() == 0:
+        temperature = torch.ones(input_ids.shape[0], device=input_ids.device, dtype=torch.float32)
+    elif temperature.ndim == 0:
+        temperature = temperature.expand(input_ids.shape[0])
+    elif temperature.numel() == 1:
+        temperature = temperature.reshape(1).expand(input_ids.shape[0])
+    elif temperature.ndim > 1:
+        if temperature.numel() == input_ids.shape[0] or all(dim == 1 for dim in temperature.shape[1:]):
+            temperature = temperature.reshape(input_ids.shape[0])
+        else:
+            raise ValueError(
+                "Megatron THD path expects scalar or per-sample temperature with shape [batch_size]. "
+                f"Got temperature shape {tuple(temperature.shape)} for batch size {input_ids.shape[0]}."
+            )
+    assert temperature.shape[0] == input_ids.shape[0]
+    return verl_F.expand_as_nested(temperature, input_ids)
 
 
 class MegatronEngine(BaseEngine):
@@ -673,7 +799,10 @@ class MegatronEngine(BaseEngine):
         # compute num_tokens in global batch for loss normalization
         loss_mask_data = data.get("loss_mask", None)
         if loss_mask_data is not None:
-            batch_num_tokens = loss_mask_data.sum().to(get_device_id())
+            if isinstance(loss_mask_data, torch.Tensor) and loss_mask_data.is_nested:
+                batch_num_tokens = loss_mask_data.values().sum().to(get_device_id())
+            else:
+                batch_num_tokens = loss_mask_data.sum().to(get_device_id())
         else:
             batch_num_tokens = torch.tensor(1.0, device=get_device_id())
         torch.distributed.all_reduce(
@@ -710,18 +839,8 @@ class MegatronEngine(BaseEngine):
 
         dcp_routing_info = None
         if self.engine_config.dynamic_context_parallel:
-            # Use dynamic CP scheduler: collect global seqlens, schedule, all-to-all route
-            from verl.utils.dynamic_cp_scheduler import DynamicCPScheduler
-
             dp_group = self.get_data_parallel_group()
             dcp_group = self.get_data_parallel_group(with_context_parallel=True)
-            scheduler = DynamicCPScheduler(
-                max_seqlen_per_dp_cp_rank=self.engine_config.max_seqlen_per_dp_cp_rank,
-                dp_size=dp_group.size(),
-                cp_size=mpu.get_context_parallel_world_size(),
-                min_cp_size=1,
-                microbatch_group_size_per_vp_stage=num_batches_divided_by,
-            )
             # Collect non-tensor data to propagate to micro-batches
             non_tensor_data = {}
             for key in [
@@ -735,6 +854,7 @@ class MegatronEngine(BaseEngine):
                 "dp_size",
                 "enable_routing_replay",
                 "distillation_use_topk",
+                "distillation_only",
                 "global_batch_size",
                 "mini_batch_size",
                 "compute_loss",
@@ -747,10 +867,13 @@ class MegatronEngine(BaseEngine):
             if self.model_config.mtp.enable and self.model_config.mtp.enable_train:
                 non_tensor_data["_dcp_route_attention_mask"] = True
 
-            micro_batches, dcp_routing_info = scheduler.schedule(
-                batch=data,
+            micro_batches, dcp_routing_info = prepare_dynamic_cp_micro_batches(
+                data=data,
                 dp_group=dp_group,
                 dcp_group=dcp_group,
+                max_seqlen_per_dp_cp_rank=self.engine_config.max_seqlen_per_dp_cp_rank,
+                cp_size=mpu.get_context_parallel_world_size(),
+                num_batches_divided_by=num_batches_divided_by,
                 non_tensor_data=non_tensor_data,
             )
             indices = None
@@ -1068,6 +1191,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
         attention_mask = model_inputs["attention_mask"]
         multi_modal_inputs = model_inputs["multi_modal_inputs"]
         local_cp_size = tu.get_non_tensor_data(data=batch, key="local_cp_size", default=None)
+        dcp_local_output_only = self.engine_config.dynamic_context_parallel and local_cp_size is not None
         loss_mask = model_inputs.get("loss_mask", None)
 
         unwrapped_model = unwrap_model(model)
@@ -1105,20 +1229,12 @@ class MegatronEngineWithLMHead(MegatronEngine):
                     "Fused kernels require `use_remove_padding=True` for Megatron engine. Falling back to non-fused."
                 )
                 use_fused_kernels = False
-            elif temperature is None:
-                temperature_value = 1.0
-            elif isinstance(temperature, torch.Tensor):
-                if temperature.numel() == 0:
-                    temperature_value = 1.0
-                elif temperature.numel() != 1:
+            else:
+                use_fused_kernels, temperature_value = _temperature_as_scalar_for_fused(temperature)
+                if not use_fused_kernels:
                     logger.warning_once(
                         "Fused kernels do not support per-sample temperature. Falling back to non-fused."
                     )
-                    use_fused_kernels = False
-                else:
-                    temperature_value = float(temperature.item())
-            else:
-                temperature_value = float(temperature)
 
         if use_fused_kernels:
             from verl.models.mcore import get_mcore_forward_fused_model_engine_fn
@@ -1132,37 +1248,17 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 temperature=temperature_value,
                 calculate_entropy=calculate_entropy,
                 pad_token_id=self.model_config.tokenizer.pad_token_id,
+                local_cp_size=local_cp_size,
+                return_dcp_local_token_mask=dcp_local_output_only and logits_processor_func is not None,
+                dcp_local_output_only=dcp_local_output_only,
+                dcp_compact_output_only=dcp_local_output_only and forward_only,
             )
         else:
-            if temperature is None:
-                temperature = torch.ones(input_ids.shape[0], device=input_ids.device, dtype=torch.float32)
-            elif not isinstance(temperature, torch.Tensor):
-                temperature = torch.tensor([temperature] * input_ids.shape[0], device=input_ids.device)
-
-            temperature = temperature.to(torch.float32)
-            if temperature.numel() == 0:
-                temperature = torch.ones(input_ids.shape[0], device=input_ids.device, dtype=torch.float32)
-            elif temperature.ndim == 0:
-                temperature = temperature.expand(input_ids.shape[0])
-            elif temperature.numel() == 1:
-                temperature = temperature.reshape(1).expand(input_ids.shape[0])
-            elif temperature.ndim > 1:
-                if temperature.numel() == input_ids.shape[0]:
-                    temperature = temperature.reshape(input_ids.shape[0])
-                elif all(dim == 1 for dim in temperature.shape[1:]):
-                    temperature = temperature.reshape(input_ids.shape[0])
-                else:
-                    raise ValueError(
-                        "Megatron THD path expects scalar or per-sample temperature with shape [batch_size]. "
-                        f"Got temperature shape {tuple(temperature.shape)} for batch size {input_ids.shape[0]}."
-                    )
-            assert temperature.shape[0] == input_ids.shape[0]
-            temperature = verl_F.expand_as_nested(temperature, input_ids)  # (bsz, j1)
+            temperature = _expand_temperature_for_thd(temperature, input_ids)  # (bsz, j1)
             from verl.models.mcore import get_mcore_engine_forward_fn
 
             forward_fn = get_mcore_engine_forward_fn(self.model_config.hf_config)
             data_format = "thd" if self.engine_config.use_remove_padding else "bshd"
-            dcp_local_output_only = self.engine_config.dynamic_context_parallel and local_cp_size is not None
 
             logits_processor = partial(
                 self._lm_head_logits_processor,
@@ -1197,7 +1293,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 mtp_enable_train=self.model_config.mtp.enable and self.model_config.mtp.enable_train,
                 local_cp_size=local_cp_size,
                 forced_max_seqlen=tu.get_non_tensor_data(data=batch, key="forced_max_seqlen", default=None),
-                return_dcp_local_token_mask=dcp_local_output_only and not forward_only,
+                return_dcp_local_token_mask=dcp_local_output_only and logits_processor_func is not None,
                 dcp_local_output_only=dcp_local_output_only,
                 dcp_compact_output_only=dcp_local_output_only and forward_only,
             )
@@ -1233,6 +1329,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
         model_output = self.prepare_model_outputs(output, data)
 
         if loss_function is not None:
+            _apply_dcp_local_token_mask_for_loss(model_output, data)
             # TODO(baiyan): How to support hybrid context parallel with dp_group,
             # now the dp_group is not used, so just leave it as is, but what if we need to use it?
             loss, metrics = loss_function(model_output=model_output, data=data, dp_group=self.get_data_parallel_group())
@@ -1360,7 +1457,7 @@ class MegatronEngineWithValueHead(MegatronEngineWithLMHead):
             data_format="thd" if self.engine_config.use_remove_padding else "bshd",
             forced_max_seqlen=tu.get_non_tensor_data(data=batch, key="forced_max_seqlen", default=None),
             local_cp_size=local_cp_size,
-            return_dcp_local_token_mask=dcp_local_output_only and not forward_only,
+            return_dcp_local_token_mask=dcp_local_output_only and logits_processor_func is not None,
             dcp_local_output_only=dcp_local_output_only,
             dcp_compact_output_only=dcp_local_output_only and forward_only,
         )

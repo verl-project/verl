@@ -1143,6 +1143,7 @@ def agg_loss(
     batch_num_tokens: Optional[int] = None,
     global_batch_size: Optional[int] = None,
     loss_scale_factor: Optional[int] = None,
+    sequence_token_counts: Optional[torch.Tensor] = None,
 ):
     """
     Aggregate the loss across global batch to ensure the loss is invariant to fsdp/megatron parallelism.
@@ -1160,6 +1161,7 @@ def agg_loss(
         global_batch_size: global batch size
         loss_scale_factor: scale factor for "seq-mean-token-sum-norm" mode. If None, uses loss_mask.shape[-1].
             Set this to a constant value to ensure consistent normalization throughout training.
+        sequence_token_counts: Optional full-sequence token counts used when each rank owns only a token shard.
 
     Returns:
         loss: `a scalar torch.Tensor`
@@ -1185,9 +1187,18 @@ def agg_loss(
                 loss_scale_factor = horizon
             loss /= loss_scale_factor
     elif loss_agg_mode == "seq-mean-token-mean":
-        seq_mask = torch.sum(loss_mask, dim=-1)  # per-sequence token count
-        seq_losses = torch.sum(loss_mat * loss_mask, dim=-1) / (seq_mask + 1e-8)  # token-mean
-        seq_mask = (seq_mask > 0).float()  # exclude fully masked sequences
+        local_token_counts = torch.sum(loss_mask, dim=-1)
+        if sequence_token_counts is None:
+            token_counts = local_token_counts
+        else:
+            token_counts = sequence_token_counts.to(device=loss_mat.device, dtype=loss_mat.dtype).reshape(-1)
+            if token_counts.shape != local_token_counts.shape:
+                raise ValueError(
+                    "sequence_token_counts must have one value per sequence: "
+                    f"{tuple(token_counts.shape)} != {tuple(local_token_counts.shape)}"
+                )
+        seq_losses = torch.sum(loss_mat * loss_mask, dim=-1) / (token_counts + 1e-8)  # token-mean
+        seq_mask = (token_counts > 0).float()  # exclude fully masked sequences
         if global_batch_size is None:
             if dp_size > 1:
                 raise ValueError("global_batch_size is required when dp_size > 1")
@@ -2092,6 +2103,7 @@ def compute_value_loss(
     batch_num_tokens: Optional[int] = None,
     global_batch_size: Optional[int] = None,
     loss_scale_factor: Optional[int] = None,
+    sequence_token_counts: Optional[torch.Tensor] = None,
 ):
     """
     Compute the clipped value-function loss for PPO.
@@ -2120,6 +2132,8 @@ def compute_value_loss(
             Global batch size, forwarded to `agg_loss` for the seq-mean modes. Defaults to None.
         loss_scale_factor (Optional[int], optional):
             Scale factor for the "seq-mean-token-sum-norm" mode, forwarded to `agg_loss`. Defaults to None.
+        sequence_token_counts (torch.Tensor, optional):
+            Full response-token count per sequence when the local mask contains only a DCP shard.
 
     Returns:
         vf_loss (torch.FloatTensor):
@@ -2139,6 +2153,7 @@ def compute_value_loss(
         batch_num_tokens=batch_num_tokens,
         global_batch_size=global_batch_size,
         loss_scale_factor=loss_scale_factor,
+        sequence_token_counts=sequence_token_counts,
     )
     vf_clipfrac = verl_F.masked_mean(torch.gt(vf_losses2, vf_losses1).float(), response_mask)
     return vf_loss, vf_clipfrac
