@@ -23,8 +23,9 @@ from verl.utils.fp8_utils import FP8QuantizerHelper
 def _get_config_value(config: Any, key: str, default: Any = None) -> Any:
     if config is None:
         return default
-    if isinstance(config, dict):
-        return config.get(key, default)
+    get_value = getattr(config, "get", None)
+    if callable(get_value):
+        return get_value(key, default)
     return getattr(config, key, default)
 
 

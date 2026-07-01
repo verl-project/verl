@@ -17,6 +17,14 @@ from types import SimpleNamespace
 from verl.utils.sglang.sglang_fp8_utils import SGLangFP8QuantizerHelper, build_sglang_fp8_quant_config
 
 
+class MappingLikeConfig:
+    def __init__(self, values):
+        self.values = values
+
+    def get(self, key, default=None):
+        return self.values.get(key, default)
+
+
 def test_build_sglang_fp8_quant_config_preserves_defaults(monkeypatch):
     monkeypatch.delenv("SGLANG_FP8_IGNORED_LAYERS", raising=False)
 
@@ -49,6 +57,25 @@ def test_sglang_fp8_quant_config_merges_hf_ignored_layers(monkeypatch):
     assert not helper.should_quantize_param("model.layers.0.self_attn.q_proj.weight")
     assert not helper.should_quantize_param("model.layers.1.mlp.down_proj.weight")
     assert helper.should_quantize_param("model.layers.2.mlp.down_proj.weight")
+
+
+def test_sglang_fp8_quant_config_accepts_mapping_like_config(monkeypatch):
+    monkeypatch.delenv("SGLANG_FP8_IGNORED_LAYERS", raising=False)
+    hf_config = MappingLikeConfig(
+        {
+            "quantization_config": MappingLikeConfig(
+                {
+                    "ignored_layers": ["model.layers.0.linear_attn"],
+                }
+            )
+        }
+    )
+
+    quant_config = build_sglang_fp8_quant_config(hf_config)
+    helper = SGLangFP8QuantizerHelper(quant_config)
+
+    assert quant_config["ignored_layers"] == ["model.layers.0.linear_attn"]
+    assert not helper.should_quantize_param("model.layers.0.linear_attn.in_proj_ba.weight")
 
 
 def test_sglang_fp8_quantizer_reads_sglang_env_ignored_layers(monkeypatch):
