@@ -43,21 +43,6 @@ MATH_TEST_FILE=${MATH_TEST_FILE:-$HOME/data/math/test.parquet}
 ########################### derived defaults ###########################
 n_devices_per_node=${NDEVICES_PER_NODE:-8}
 
-case "${DEVICE}" in
-    gpu)
-        ;;
-    npu)
-        export HCCL_CONNECT_TIMEOUT=2400
-        export HCCL_EXEC_TIMEOUT=2400
-        export HCCL_OP_EXPANSION_MODE=AIV
-        export CLOSE_MATMUL_K_SHIFT=1
-        ;;
-    *)
-        echo "Unsupported DEVICE=${DEVICE}. Expected 'gpu' or 'npu'." >&2
-        exit 1
-        ;;
-esac
-
 ########################### parameter arrays ###########################
 
 DATA=(

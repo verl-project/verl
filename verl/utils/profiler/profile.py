@@ -15,8 +15,7 @@
 import functools
 from typing import Callable, Optional
 
-from ..memory_utils import MemorySnapshotSampler, clear_memory_history, enable_memory_visualize
-from .config import ProfilerConfig, TorchMemoryToolConfig
+from .config import ProfilerConfig
 
 
 def mark_start_range(
@@ -84,7 +83,7 @@ class DistProfiler:
         self, rank: int, config: Optional[ProfilerConfig] = None, tool_config: Optional[object] = None, **kwargs
     ):
         # Default config
-        if not config:
+        if config is None:
             config = ProfilerConfig(ranks=[], enable=False, tool_config=None)
 
         if tool_config is None:
@@ -130,6 +129,8 @@ class DistProfiler:
 
             self._impl = _Torch(rank=rank, config=config, tool_config=tool_config)
         elif self._tool == "torch_memory":
+            from .torch_memory_profile import TorchMemoryProfiler
+
             self._impl = TorchMemoryProfiler(rank=rank, config=config, tool_config=tool_config)
         elif self._tool == "precision_debugger":
             from .precision_debugger_profile import PrecisionDebuggerProfiler as _Precision
@@ -140,23 +141,33 @@ class DistProfiler:
             self._impl = _NoOpProfiler()
 
     def check_enable(self):
+        """Return whether profiling is enabled by configuration."""
         return self._enable
 
     def check_this_rank(self):
+        """Return whether current rank should perform profiling."""
         return self._this_rank
 
     def check_this_step(self):
+        """Return whether current global step is marked for profiling."""
         return self._this_step
 
     def is_discrete_mode(self):
+        """Return whether profiler backend runs in discrete mode."""
         return self._discrete
 
     def start(self, **kwargs):
+        """Profiler switch for the Ray main flow; sets `this_step=True`.
+
+        Args:
+            **kwargs: Runtime arguments forwarded to backend `start`.
+        """
         if self.check_enable() and self.check_this_rank():
             self._this_step = True
             return getattr(self._impl, "start", lambda **_: None)(**kwargs)
 
     def stop(self):
+        """Profiler switch for the Ray main flow; sets `this_step=False`."""
         if self.check_enable() and self.check_this_rank():
             self._this_step = False
             return getattr(self._impl, "stop", lambda: None)()
@@ -170,6 +181,12 @@ class DistProfiler:
         category: Optional[str] = None,
         **kwargs_outer,
     ) -> Callable:
+        """Decorate instance methods with backend profiler annotations.
+
+        The wrapped function is executed directly if profiling is disabled,
+        not selected for current rank/step, or backend annotate fails.
+        """
+
         def decorator(func):
             @functools.wraps(func)
             def wrapper(self_instance, *args, **kwargs_inner):
@@ -205,86 +222,6 @@ class _NoOpProfiler:
 
     def stop(self):
         return
-
-
-class TorchMemoryProfiler:
-    """Profiler that dumps CUDA memory snapshots at step boundaries.
-
-    Behavior:
-    - On first construction (per process), enable memory history recording if CUDA is available
-    - On start(step=X), remember sub_dir for this step
-    - On stop(), dump a memory snapshot into config.save_path under the remembered sub_dir
-    """
-
-    _memory_history_enabled: bool = False
-
-    def __init__(
-        self, rank: int, config: Optional[ProfilerConfig], tool_config: Optional[TorchMemoryToolConfig] = None
-    ):
-        # Always respond to explicit start/stop calls for torch_memory tool,
-        # regardless of per-role enable flag, to align with global step control.
-        self.enable = True
-        if not config:
-            config = ProfilerConfig(ranks=[])
-        self.config = config
-        self.rank = rank
-        self.this_step = False
-        self.sub_dir = None
-        self.sampler = MemorySnapshotSampler()
-
-        # Get parameters from tool_config, with fallback to defaults
-        if tool_config:
-            self.trace_alloc_max_entries = tool_config.trace_alloc_max_entries
-            self.stack_depth = tool_config.stack_depth
-        else:
-            self.trace_alloc_max_entries = 100_000
-            self.stack_depth = 32
-
-        # Best-effort enable memory history once
-        if not TorchMemoryProfiler._memory_history_enabled:
-            try:
-                enable_memory_visualize(
-                    trace_alloc_max_entries=self.trace_alloc_max_entries, stack_depth=self.stack_depth
-                )
-            except Exception:
-                # silently ignore if not supported
-                pass
-            TorchMemoryProfiler._memory_history_enabled = True
-
-    def start(self, **kwargs):
-        if not self.enable:
-            return
-        if not self._should_profile_this_rank():
-            return
-        profile_step = kwargs.get("profile_step", None)
-        # Keep ranks aligned under same folder name
-        self.sub_dir = f"step{profile_step}" if profile_step is not None else None
-        self.this_step = True
-
-    def stop(self):
-        if not self.enable or not self.this_step:
-            return
-        self.this_step = False
-        if not self._should_profile_this_rank():
-            return
-        out_dir = self.config.save_path or "outputs/profile"
-        tag = "torch_memory"
-        # Dump snapshot; all ranks write into same sub_dir
-        try:
-            self.sampler.dump_memory_snapshot(out_dir=out_dir, tag=tag, sub_dir=self.sub_dir)
-        except Exception:
-            pass
-        # Clear memory history
-        if TorchMemoryProfiler._memory_history_enabled:
-            clear_memory_history(trace_alloc_max_entries=self.trace_alloc_max_entries, stack_depth=self.stack_depth)
-
-    def _should_profile_this_rank(self) -> bool:
-        if self.config.all_ranks:
-            return True
-        if self.config.ranks:
-            return self.rank in self.config.ranks
-        # default rank 0
-        return self.rank == 0
 
 
 class DistProfilerExtension:

@@ -35,6 +35,14 @@ tool_config:
     # True for each task has its own database, False for all tasks in one training step share one database.
     discrete: False
 
+    # Start collecting profiler data from this response-token index.
+    # null means collect from the first response token (full collection start).
+    profile_token_start: null
+
+    # Stop collecting profiler data at this response-token index (exclusive).
+    # null means collect until the end (full collection).
+    profile_token_end: null
+
     name: npu
 
 
@@ -57,6 +65,14 @@ tool_config:
 
     # True for each task has its own database, False for all tasks in one training step share one database.
     discrete: false
+
+    # Start collecting profiler data from this response-token index.
+    # null means collect from the first response token (full collection start).
+    profile_token_start: null
+
+    # Stop collecting profiler data at this response-token index (exclusive).
+    # null means collect until the end (full collection).
+    profile_token_end: null
 
     name: torch
 

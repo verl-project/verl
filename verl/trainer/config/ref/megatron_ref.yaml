@@ -12,7 +12,13 @@ _target_: verl.workers.config.McoreActorConfig
 
 strategy: megatron
 
+# Keep ref entropy chunking aligned with actor
+entropy_from_logits_with_chunking: ${oc.select:actor_rollout_ref.actor.entropy_from_logits_with_chunking,False}
+entropy_from_logits_chunk_size: ${oc.select:actor_rollout_ref.actor.entropy_from_logits_chunk_size,2048}
+
 megatron:
+  entropy_from_logits_with_chunking: ${oc.select:actor_rollout_ref.actor.entropy_from_logits_with_chunking,False}
+  entropy_from_logits_chunk_size: ${oc.select:actor_rollout_ref.actor.entropy_from_logits_chunk_size,2048}
   seed: ${oc.select:actor_rollout_ref.actor.megatron.seed,42}
   override_transformer_config: ${oc.select:actor_rollout_ref.actor.megatron.override_transformer_config,{}}
   use_mbridge: ${oc.select:actor_rollout_ref.actor.megatron.use_mbridge,False}

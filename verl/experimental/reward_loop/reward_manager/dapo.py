@@ -36,14 +36,14 @@ class DAPORewardManager(RewardManagerBase):
         self.reward_router_address = reward_router_address
         self.reward_model_tokenizer = reward_model_tokenizer
 
-        if self.overlong_buffer_cfg is not None:
+        if self.overlong_buffer_cfg is not None and self.overlong_buffer_cfg.enable:
             assert self.max_resp_len is not None, (
                 f"max_resp_len must be provided if {overlong_buffer_cfg=}, but got None"
             )
             assert self.max_resp_len >= self.overlong_buffer_cfg.len, (
                 "max_resp_len must be larger than overlong_buffer.len"
             )
-            assert not self.overlong_buffer_cfg.enable or self.overlong_buffer_cfg.len > 0, (
+            assert self.overlong_buffer_cfg.len > 0, (
                 "overlong_buffer.len must be positive when overlong penalty is enabled,"
                 f"but got {self.overlong_buffer_cfg.len}."
                 "To disable the overlong penalty, set overlong_buffer.enable = False"

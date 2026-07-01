@@ -241,4 +241,4 @@ python3 -m verl.trainer.main_ppo \
     "${ALGORITHM_CONFIG[@]}" \
     "${TRAINER_CONFIG[@]}" \
     "${PROF_CONFIG[@]}" \
-    "$@" | tee $LOG_DIR/$SCRIPT_NAME-$(date +%Y%m%d_%H%M).log
+    "$@" | tee $LOG_DIR/$SCRIPT_NAME.log

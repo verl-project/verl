@@ -125,7 +125,7 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
 
         self.checkpoint_manager = CheckpointEngineManager(
             config=omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine),
-            trainer=self.actor_rollout_wg,
+            actor_wg=self.actor_rollout_wg,
             replicas=self.llm_server_manager.get_replicas(),
         )
 
@@ -162,7 +162,7 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
 
             critic_cfg = TrainingWorkerConfig(
                 model_type="value_model",
-                model_config=self.orig_critic_cfg.model_config,
+                model_config=self.orig_critic_cfg.model,
                 engine_config=engine_config,
                 optimizer_config=self.orig_critic_cfg.optim,
                 checkpoint_config=self.orig_critic_cfg.checkpoint,

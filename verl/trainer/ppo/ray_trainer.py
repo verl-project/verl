@@ -52,6 +52,8 @@ from verl.trainer.ppo.reward import extract_reward
 from verl.trainer.ppo.utils import (
     Role,
     WorkerType,
+    create_rl_dataset,
+    create_rl_sampler,
     need_critic,
     need_reference_policy,
     need_reward_model,
@@ -280,9 +282,7 @@ def compute_advantage(
     return data
 
 
-@deprecated(
-    "main_ppo.py is deprecated, and wil be replaced by main_ppo_sync.py in v0.8.0, please use main_ppo_sync.py instead."
-)
+@deprecated("Legacy trainer is deprecated, and wil be removed in v0.9.0. Please use `trainer.use_v1=True` instead.")
 class RayPPOTrainer:
     """Distributed PPO trainer using Ray for scalable reinforcement learning.
 
@@ -375,9 +375,6 @@ class RayPPOTrainer:
         """
         Creates the train and validation dataloaders.
         """
-        # TODO: we have to make sure the batch size is divisible by the dp size
-        from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler
-
         if train_dataset is None:
             train_dataset = create_rl_dataset(
                 self.config.data.train_files,
@@ -964,7 +961,7 @@ class RayPPOTrainer:
             from verl.checkpoint_engine import CheckpointEngineManager
         self.checkpoint_manager = CheckpointEngineManager(
             config=checkpoint_engine_config,
-            trainer=self.actor_rollout_wg,
+            actor_wg=self.actor_rollout_wg,
             replicas=self.llm_server_manager.get_replicas(),
         )
 
@@ -1307,6 +1304,14 @@ class RayPPOTrainer:
             if is_distillation_enabled(self.config.get("distillation"))
             else False
         )
+        distillation_only = False  # distillation_only flag means we can skip policy loss and reduce mem footprint
+        if is_distillation_enabled(self.config.get("distillation")):
+            distillation_loss_cfg = self.distillation_config.distillation_loss
+            distillation_only = (
+                distillation_use_topk
+                and not distillation_loss_cfg.use_task_rewards
+                and not distillation_loss_cfg.use_policy_gradient
+            )
         ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
         ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
         ppo_epochs = self.config.actor_rollout_ref.actor.ppo_epochs
@@ -1316,6 +1321,7 @@ class RayPPOTrainer:
             batch_td,
             calculate_entropy=calculate_entropy,
             distillation_use_topk=distillation_use_topk,
+            distillation_only=distillation_only,
             global_batch_size=ppo_mini_batch_size,
             mini_batch_size=ppo_mini_batch_size,
             epochs=ppo_epochs,
@@ -1572,7 +1578,6 @@ class RayPPOTrainer:
                                 metrics.update(calculate_debug_metrics(batch))
 
                     assert "old_log_probs" in batch.batch, f'"old_log_prob" not in {batch.batch.keys()=}'
-
                     if self.use_reference_policy:
                         # compute reference log_prob
                         with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
@@ -1631,7 +1636,6 @@ class RayPPOTrainer:
                             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
                             config=self.config.algorithm,
                         )
-
                     # update critic
                     if self.use_critic:
                         with marked_timer("update_critic", timing_raw, color="pink"):
