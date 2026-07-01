@@ -356,13 +356,13 @@ jobs:
           ray stop --force
           bash tests/special_npu/nightly_ci_ascend/run_grpo_qwen3_30b_megatron_sglang_npu.sh
   
-  # Test grpo qwen3_5_2b fsdp2 vllm
+    # Test grpo qwen3_5_2b fsdp2 vllm
   nightlyCI_grpo_qwen3_5_2b_fsdp2_vllm_ascend:
     if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 17 * * *' }}
-    runs-on: linux-aarch64-a2b3-8
+    runs-on: linux-aarch64-a3-16
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-9.0.0-910b-ubuntu22.04-py3.11-latest
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-8.5.2-a3-ubuntu22.04-py3.11-qwen3-5
       options: >-
         --shm-size 16g
     env:
@@ -381,16 +381,22 @@ jobs:
         with:
           fetch-depth: 0
           clean: true
+      - name: Install the current repository
+        run: |
+          pip install --no-deps -e .
+      - name: Check final pip list
+        run: |
+          pip list
       - name: Prepare weights
         run: |
           ln -s /root/.cache/models ~/models
-      - name: Prepare GSM8K dataset
+      - name: Preprocess geo3k dataset
         run: |
-          python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
+          python examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/.cache/datasets/hiyouga/geometry3k
       - name: Running nightlyCI_grpo_qwen3_5_2b_fsdp2_vllm_ascend
         run: |
           ray stop --force
-          TOTAL_TRAINING_STEPS=1 bash tests/special_npu/quick_start/run_qwen3_0_6b_fsdp2_vllm_ascend.sh
+          bash tests/special_npu/nightly_ci_ascend/run_grpo_qwen3_5_2b_fsdp2_npu.sh
 
   # Test quick start vllm fsdp2
   quick_start_qwen3_0_6b_fsdp2_vllm_ascend:
