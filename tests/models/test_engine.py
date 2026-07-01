@@ -195,11 +195,14 @@ def test_actor_engine(strategy):
 
     data_td = data.to_tensordict()
     data_td = left_right_2_no_padding(data_td)
+    print("daikang data_td dtype:", data_td.dtype)
 
     # eval
     output = wg.infer_batch(data_td)
     output = output.get()
+    print("daikang output2 dtype:", output.dtype)
     logprobs_unpad = tu.get(output, "log_probs").cpu()
+    print("daikang logprobs_unpad dtype:", logprobs_unpad.dtype)
     logprobs = no_padding_2_padding(logprobs_unpad, data_td)
     print("logprobs dtype:", logprobs.dtype)
     print("data_td dtype:", data_td.dtype)
