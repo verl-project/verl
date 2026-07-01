@@ -285,6 +285,46 @@ def test_session_sample_clears_prompt_and_session_markers():
     assert leftover == [], leftover  # prompt key + marker cleared by sample, data by trainer
 
 
+def test_session_sample_never_empty_under_concurrent_sync():
+    """Regression for the 0-items ``_balance_batch`` crash.
+
+    The streaming feeder thread and the trainer thread share ONE buffer object and both run
+    ``_sync_metadata_from_transfer_queue`` (which does ``self.partitions.clear()`` then rebuilds).
+    Without ``_meta_lock``, ``sample`` could read ``self.partitions`` right after the feeder cleared
+    it (before the rebuild), collect zero trajectory rows, and hand an empty batch to
+    ``_balance_batch`` -> ``number of items:[0] < k_partitions`` crash. Here a background thread
+    hammers ``count_inflight``/``dead_prompt_keys`` (as the feeder loop does) while we repeatedly
+    sample a usable prompt; every returned batch must be non-empty."""
+    rb = _make_session_rb(strategy="none")
+    stop = threading.Event()
+    errors = []
+
+    def hammer():  # mirrors the feeder loop: count_inflight then dead_prompt_keys, concurrently
+        while not stop.is_set():
+            try:
+                rb.count_inflight("train")
+                rb.dead_prompt_keys("train")
+            except Exception as e:  # noqa: BLE001
+                errors.append(e)
+            time.sleep(0.001)  # yield so this doesn't monopolize the single-threaded TQ controller
+
+    t = threading.Thread(target=hammer, daemon=True)
+    t.start()
+    try:
+        for i in range(30):
+            uid = f"u{i}"  # no '_' in the id part (sample matches trajectories via key.split('_')[0])
+            _register_prompt(uid, 1, n=1)
+            _register_session(uid, 0, "success", 1)
+            batch, _ = rb.sample(global_steps=1, partition_id="train", batch_size=1)
+            assert batch.keys, f"iter {i}: sample returned an EMPTY batch under concurrent feeder sync"
+            assert {k.split("_")[0] for k in batch.keys} == {uid}, batch.keys
+            tq.kv_clear(keys=batch.keys, partition_id="train")
+    finally:
+        stop.set()
+        t.join(timeout=2)
+    assert not errors, errors
+
+
 def test_compute_complete_uids_pure():
     f = compute_complete_uids
     assert f({"a": 2, "b": 1}, {"a": {0, 1}, "b": set()}) == {"a"}

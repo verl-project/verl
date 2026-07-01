@@ -144,13 +144,17 @@ class SessionReplayBuffer(ReplayBuffer):
         Returned read-only for the streaming feeder to ``kv_clear`` (the buffer never auto-discards
         — it only serves the trainer).
         """
-        success = self.session_success[partition_id]
-        keys: list[str] = []
-        for uid in self._complete_uids(partition_id):
-            if not success.get(uid):  # complete, yet every session failed
-                keys.append(uid)
-                keys.extend(self.session_marker_keys[partition_id].get(uid, ()))
-        return keys
+        with self._meta_lock:
+            # Self-sync under the lock (rather than reusing a caller's sync) so this read is
+            # consistent even though the trainer thread's sample() may sync+clear concurrently.
+            self._sync_metadata_from_transfer_queue()
+            success = self.session_success[partition_id]
+            keys: list[str] = []
+            for uid in self._complete_uids(partition_id):
+                if not success.get(uid):  # complete, yet every session failed
+                    keys.append(uid)
+                    keys.extend(self.session_marker_keys[partition_id].get(uid, ()))
+            return keys
 
     def count_inflight(self, partition_id: str = "train") -> dict[str, int]:
         """Return the current un-consumed prompt counts, for throttling the streaming feeder.
@@ -162,10 +166,11 @@ class SessionReplayBuffer(ReplayBuffer):
         rollouter from running arbitrarily far ahead of training. (The feeder discards all-failed
         prompts each tick, so they leave this count instead of occupying the budget.)
         """
-        self._sync_metadata_from_transfer_queue()
-        total = len(self.prompt_global_steps[partition_id])
-        complete = len(self._complete_uids(partition_id))
-        return {"incomplete": total - complete, "complete": complete}
+        with self._meta_lock:
+            self._sync_metadata_from_transfer_queue()
+            total = len(self.prompt_global_steps[partition_id])
+            complete = len(self._complete_uids(partition_id))
+            return {"incomplete": total - complete, "complete": complete}
 
     def _has_enough_samples(self, global_steps: int, partition_id: str, batch_size: int) -> bool:
         # "none" applies no staleness gate: just wait for batch_size usable prompts and sample the
@@ -189,52 +194,57 @@ class SessionReplayBuffer(ReplayBuffer):
         t_start = time.time()
         n_polls = 0
         last_debug_time = t_start
-        self._sync_metadata_from_transfer_queue()
-        while not self._has_enough_samples(global_steps, partition_id, batch_size):
+        # Hold _meta_lock across "sync + check + collect" so the feeder thread's concurrent sync
+        # (count_inflight / dead_prompt_keys) never clears self.partitions between our readiness
+        # check and our row collection, which would yield an empty batch (0-items _balance_batch
+        # crash). Released while sleeping so the feeder keeps producing.
+        while True:
+            with self._meta_lock:
+                self._sync_metadata_from_transfer_queue()
+                if self._has_enough_samples(global_steps, partition_id, batch_size):
+                    t_wait = time.time() - t_start  # time blocked waiting for enough usable data
+
+                    # Sample only prompts with >=1 successful session (all-failed prompts are never
+                    # sampleable; the feeder discards + replaces them). Oldest first to cut staleness.
+                    usable = self._usable_uids(partition_id)
+                    prompt_global_steps = self.prompt_global_steps[partition_id]
+                    sampleable_keys = sorted(usable, key=lambda uid: prompt_global_steps.get(uid, 0))
+                    selected_prompt_uids = sampleable_keys[:batch_size]
+                    selected = set(selected_prompt_uids)
+
+                    # Clear the prompt metadata keys and their per-session completion markers. The
+                    # trajectory data keys are cleared by the trainer after the batch is consumed.
+                    marker_keys = []
+                    for uid in selected_prompt_uids:
+                        marker_keys.extend(self.session_marker_keys[partition_id].get(uid, ()))
+                    tq.kv_clear(partition_id=partition_id, keys=list(selected_prompt_uids) + marker_keys)
+
+                    # Collect the prompt's trajectory rows. Failed sessions wrote no data, so every
+                    # data key of a usable prompt belongs to a successful session — no filtering.
+                    keys, tags = [], []
+                    for key, tag in self.partitions[partition_id].items():
+                        uid = key.split("_")[0]
+                        if uid in selected:
+                            keys.append(key)
+                            tags.append(tag)
+
+                    batch = KVBatchMeta(partition_id=partition_id, keys=keys, tags=tags)
+                    result = self._drop_max_off_policy_samples(global_steps, partition_id, batch)
+                    if _SAMPLE_PROFILE:
+                        total = len(self.prompt_global_steps[partition_id])
+                        # wait dominating gen time => trainer is data-starved (rollout can't keep up).
+                        print(
+                            f"[SAMPLE_PROFILE] step={global_steps} wait={t_wait:.2f}s "
+                            f"collect={time.time() - t_start - t_wait:.2f}s polls={n_polls} "
+                            f"selected={len(selected)} usable={len(usable)} in_flight={total} rows={len(keys)}",
+                            flush=True,
+                        )
+                    return result
+
+                if time.time() - last_debug_time > VERL_REPLAY_BUFFER_DEBUG_INTERVAL_SECONDS:
+                    total = len(self.prompt_global_steps[partition_id])
+                    usable = len(self._usable_uids(partition_id))
+                    logger.info(f"prompts in-flight: {total}, usable(ready): {usable}, incomplete: {total - usable}")
+                    last_debug_time = time.time()
             time.sleep(self.poll_interval)
             n_polls += 1
-            self._sync_metadata_from_transfer_queue()
-
-            if time.time() - last_debug_time > VERL_REPLAY_BUFFER_DEBUG_INTERVAL_SECONDS:
-                total = len(self.prompt_global_steps[partition_id])
-                usable = len(self._usable_uids(partition_id))
-                logger.info(f"prompts in-flight: {total}, usable(ready): {usable}, incomplete: {total - usable}")
-                last_debug_time = time.time()
-        t_wait = time.time() - t_start  # time blocked waiting for enough usable rollout data
-
-        # Sample only prompts with >=1 successful session (all-failed prompts are never sampleable;
-        # the feeder discards + replaces them). Prioritize the oldest to cut staleness.
-        usable = self._usable_uids(partition_id)
-        prompt_global_steps = self.prompt_global_steps[partition_id]
-        sampleable_keys = sorted(usable, key=lambda uid: prompt_global_steps.get(uid, 0))
-        selected_prompt_uids = sampleable_keys[:batch_size]
-        selected = set(selected_prompt_uids)
-
-        # Clear the prompt metadata keys and their per-session completion markers. The trajectory
-        # data keys are cleared by the trainer after the batch is consumed (kv_clear(batch.keys)).
-        marker_keys = []
-        for uid in selected_prompt_uids:
-            marker_keys.extend(self.session_marker_keys[partition_id].get(uid, ()))
-        tq.kv_clear(partition_id=partition_id, keys=list(selected_prompt_uids) + marker_keys)
-
-        # Collect the prompt's trajectory rows. Failed sessions wrote no data, so every data key of
-        # a usable prompt belongs to a successful session — no per-row filtering needed.
-        keys, tags = [], []
-        for key, tag in self.partitions[partition_id].items():
-            uid = key.split("_")[0]
-            if uid in selected:
-                keys.append(key)
-                tags.append(tag)
-
-        batch = KVBatchMeta(partition_id=partition_id, keys=keys, tags=tags)
-        result = self._drop_max_off_policy_samples(global_steps, partition_id, batch)
-        if _SAMPLE_PROFILE:
-            total = len(self.prompt_global_steps[partition_id])
-            # wait dominating the step's gen time => trainer is data-starved (rollout can't keep up).
-            print(
-                f"[SAMPLE_PROFILE] step={global_steps} wait={t_wait:.2f}s "
-                f"collect={time.time() - t_start - t_wait:.2f}s polls={n_polls} "
-                f"selected={len(selected)} usable={len(usable)} in_flight={total} rows={len(keys)}",
-                flush=True,
-            )
-        return result

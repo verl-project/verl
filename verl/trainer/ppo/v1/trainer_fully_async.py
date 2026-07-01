@@ -142,8 +142,8 @@ class PPOTrainerFullyAsync(PPOTrainerSeparateAsync):
     def _discard_dead_prompts(self) -> int:
         """Discard prompts whose every rollout failed (no usable trajectory) so a fresh prompt can
         take their in-flight slot. No-op unless the rollout-level buffer is in use (the base buffer's
-        :meth:`dead_prompt_keys` returns ``[]``). Reuses the metadata just synced by the preceding
-        ``count_inflight`` call in the feeder loop."""
+        :meth:`dead_prompt_keys` returns ``[]``). ``dead_prompt_keys`` re-syncs the buffer metadata
+        under its lock, so it is safe to call concurrently with the trainer thread's ``sample``."""
         keys = self.replay_buffer.dead_prompt_keys("train")
         if not keys:
             return 0
@@ -205,6 +205,12 @@ class PPOTrainerFullyAsync(PPOTrainerSeparateAsync):
         super().on_train_begin()
         with self._param_version_lock:
             self._param_version = self.global_steps
+        # Prime the process-global TransferQueue client on THIS (main) thread before the feeder
+        # thread starts. tq lazily creates the client on first use; doing that first call from the
+        # background feeder thread has raced with Ray actor-context setup ("TransferQueueController
+        # has not been initialized yet"). A main-thread call guarantees the client is created in a
+        # valid context, and the feeder then just reuses the already-set global.
+        self.replay_buffer.count_inflight("train")
         self._start_feeder()
         # print (not logger.info): verl configures no logging handler in the trainer actor, so INFO
         # is swallowed. These lifecycle markers must reach stdout to be observable/asserted.
