@@ -34,6 +34,7 @@ from .model import HFModelConfig
 from .optimizer import OptimizerConfig
 
 __all__ = [
+    "CPPOConfig",
     "PolicyLossConfig",
     "RouterReplayConfig",
     "ActorConfig",
@@ -76,6 +77,31 @@ class RouterReplayConfig(BaseConfig):
 
 
 @dataclass
+class CPPOConfig(BaseConfig):
+    """Configuration for CPPO (Cumulative Prefix-divergence Policy Optimization, cppo.pdf).
+
+    The inheritance from BaseConfig provides omegaconf.DictConfig-like interface for a dataclass config.
+
+    Only consumed when ``policy_loss.loss_mode == "cppo"``. The token-level threshold delta is read
+    from ``actor.clip_ratio`` (same convention as DPPO); these fields add the position weight and the
+    cumulative prefix-budget knobs.
+
+    Args:
+        cppo_w_min (float): Weight floor of the linear position schedule w_t in [w_min, 1] (Eq. 9;
+            paper default 0.8).
+        cppo_delta_b (float): Floor delta_b_min of the per-sequence dynamic prefix budget
+            delta_b = clamp(delta_b_k * quantile(D_t, delta_b_q), delta_b, 5*delta_b) (Eq. 22).
+        cppo_delta_b_q (float): Quantile of the budget calibration; (0.9, 1.0) is the paper's P90.
+        cppo_delta_b_k (float): Scale of the budget calibration; e.g. (0.95, 0.5) uses half the 95th percentile.
+    """
+
+    cppo_w_min: float = 0.8
+    cppo_delta_b: float = 0.02
+    cppo_delta_b_q: float = 0.9
+    cppo_delta_b_k: float = 1.0
+
+
+@dataclass
 class PolicyLossConfig(BaseConfig):
     """Configuration for policy loss computation.
 
@@ -88,6 +114,7 @@ class PolicyLossConfig(BaseConfig):
         clip_cov_ub (float): Upper bound for clip-cov loss.
         kl_cov_ratio (float): Ratio of tokens to be applied KL penalty for kl-cov loss.
         ppo_kl_coef (float): KL divergence penalty coefficient.
+        cppo (CPPOConfig): Configuration for the CPPO loss (only used when loss_mode == "cppo").
         rollout_correction (RolloutCorrectionConfig): Configuration for rollout correction.
     """
 
@@ -97,6 +124,7 @@ class PolicyLossConfig(BaseConfig):
     clip_cov_ub: float = 5.0
     kl_cov_ratio: float = 0.0002
     ppo_kl_coef: float = 0.1
+    cppo: CPPOConfig = field(default_factory=CPPOConfig)
     rollout_correction: RolloutCorrectionConfig = field(default_factory=RolloutCorrectionConfig)
 
 
