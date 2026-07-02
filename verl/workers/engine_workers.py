@@ -226,14 +226,6 @@ class TrainingWorker(Worker, DistProfilerExtension):
                 final_metrics["mfu"] /= 3.0
         # model outputs
         model_output = output.pop("model_output", {})
-        print("===== model_output 打印 =====")
-        print(f"model_output 外层类型: {type(model_output)}")
-        # 遍历内部所有字段
-        for k, v in model_output.items():
-            if torch.is_tensor(v):
-                print(f"  key={k:20} | dtype={str(v.dtype):10} | device={v.device} | shape={v.shape}")
-            else:
-                print(f"  key={k:20} | 非张量 | type={type(v)} | val={v}")
         # We only return final_metrics
         final_output = tu.get_tensordict(tensor_dict=model_output, non_tensor_dict={"metrics": final_metrics})
         return final_output
@@ -428,21 +420,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
             ).cpu()
         else:
             final_output = None
-        # ========== 新增打印逻辑 start ==========
-        print("daikang 222 ====== final_output 信息 ======")
-        print(f"final_output 外层容器类型: {type(final_output)}")
 
-        if final_output is not None:
-            # 遍历 TensorDict 里所有张量，打印 key、dtype、设备
-            for k, v in final_output.items():
-                if torch.is_tensor(v):
-                    print(f"  key={k:20} | dtype={str(v.dtype):10} | device={v.device} | shape={v.shape}")
-                else:
-                    print(f"  key={k:20} | 非张量类型: {type(v)} | value={v}")
-        else:
-            print("  当前rank无输出，final_output = None")
-        print("daikang 222\n")
-        # ========== 新增打印逻辑 end ==========
         return final_output
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
