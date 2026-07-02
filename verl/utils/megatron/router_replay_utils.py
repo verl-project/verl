@@ -273,7 +273,57 @@ def merge_router_topk_indices(attention_mask, input_ids, mini_layer_topk_idx_lis
         mini_layer_topk_idx_list.append(layers_topk_idx.cpu())
 
 
-def set_router_replay_data(layers_topk_idx, attention_mask, tf_config, vp_rank=None):
+def build_r3_replay_mask(input_ids: torch.Tensor, response_mask: torch.Tensor) -> torch.Tensor:
+    """Build a full-sequence replay mask for rollout-captured routes.
+
+    Response logprobs are read from shifted model rows, but those rows attend to
+    earlier hidden states whose MoE routing also affects the result. Replay every
+    causal row that can influence response logprobs and skip only the final
+    response row, whose logits are not used by ``no_padding_2_padding``.
+    """
+    if not (isinstance(input_ids, torch.Tensor) and input_ids.is_nested):
+        raise RuntimeError("router_replay R3 requires nested input_ids produced by left_right_2_no_padding.")
+    if response_mask is None:
+        raise RuntimeError("router_replay R3 requires response_mask/loss_mask to build the replay mask.")
+    if isinstance(response_mask, torch.Tensor) and response_mask.is_nested:
+        raise RuntimeError("router_replay R3 expects strided response_mask/loss_mask, not a NestedTensor.")
+
+    total_lens = input_ids.offsets().diff()
+    response_lens = response_mask.sum(dim=-1).to(device=total_lens.device, dtype=total_lens.dtype)
+    prompt_lens = total_lens - response_lens
+    if torch.any(prompt_lens < 0):
+        raise RuntimeError(
+            f"router_replay R3: response_mask sum exceeds total token count for some samples; "
+            f"prompt_lens={prompt_lens.tolist()}."
+        )
+
+    if torch.any((response_lens > 0) & (prompt_lens <= 0)):
+        raise RuntimeError(
+            f"router_replay R3: response logprob replay needs at least one prompt token; "
+            f"prompt_lens={prompt_lens.tolist()}."
+        )
+
+    bs = total_lens.size(0)
+    values = torch.tensor([True, False], dtype=torch.bool, device=total_lens.device).repeat(bs)
+    replay_lens = torch.where(response_lens > 0, total_lens - 1, torch.zeros_like(total_lens))
+    suffix_lens = total_lens - replay_lens
+    counts = torch.stack([replay_lens, suffix_lens], dim=1).flatten()
+    mask_values = torch.repeat_interleave(values, counts)
+    if mask_values.numel() != input_ids.values().numel():
+        raise RuntimeError(
+            f"router_replay R3: built replay mask with {mask_values.numel()} rows, "
+            f"but input_ids has {input_ids.values().numel()} rows."
+        )
+    return torch.nested.nested_tensor_from_jagged(mask_values, offsets=input_ids.offsets())
+
+
+def set_router_replay_data(
+    layers_topk_idx,
+    attention_mask,
+    tf_config,
+    vp_rank=None,
+    replay_mask=None,
+):
     """
     Scatter the packed router top-k indices back to sequence-parallel ranks and update each local
     RouterReplay instance with target indices for replay mode.
@@ -288,6 +338,8 @@ def set_router_replay_data(layers_topk_idx, attention_mask, tf_config, vp_rank=N
         tf_config: Megatron/Transformer engine configuration object.
         vp_rank (Optional[int]): Virtual pipeline stage rank override. If None, the current VP rank from
             Megatron parallel state will be used.
+        replay_mask (Optional[torch.Tensor]): Optional per-token mask. Masked tokens use replayed routes;
+            unmasked tokens keep native Megatron routes.
 
     Returns:
         None: The function updates internal RouterReplay instances in-place.
@@ -296,10 +348,19 @@ def set_router_replay_data(layers_topk_idx, attention_mask, tf_config, vp_rank=N
         fp8 = tf_config.fp8
         use_fp8_padding = fp8 in ["e4m3", "hybrid"]
 
+        replay_mask_rmpad = None
         if layers_topk_idx.is_nested:
             layers_topk_idx_rmpad, _, _ = preprocess_thd_engine(
                 layers_topk_idx, pre_process=True, use_fp8_padding=use_fp8_padding
             )
+            if replay_mask is not None:
+                if not (isinstance(replay_mask, torch.Tensor) and replay_mask.is_nested):
+                    raise RuntimeError(
+                        "router_replay replay_mask must be a NestedTensor when routed_experts is nested."
+                    )
+                replay_mask_rmpad, _, _ = preprocess_thd_engine(
+                    replay_mask, pre_process=True, use_fp8_padding=use_fp8_padding
+                )
         else:
             layers_topk_idx_rmpad, _ = preprocess_packed_seqs(
                 layers_topk_idx, attention_mask, pre_process=True, use_fp8_padding=use_fp8_padding
@@ -310,6 +371,11 @@ def set_router_replay_data(layers_topk_idx, attention_mask, tf_config, vp_rank=N
         layers_topk_idx_rmpad_split = scatter_to_sequence_parallel_region(
             layers_topk_idx_rmpad.to(device_name).squeeze(dim=0)
         ).unsqueeze(dim=0)
+        replay_mask_rmpad_split = None
+        if replay_mask_rmpad is not None:
+            replay_mask_rmpad_split = scatter_to_sequence_parallel_region(
+                replay_mask_rmpad.to(device_name).squeeze(dim=0)
+            )
 
         # dynamic_bs_split, layer_num, topk -> layer_num, dynamic_bs_split, topk
         layers_topk_idx_reshape = layers_topk_idx_rmpad_split.permute(0, 2, 1, 3).squeeze(
@@ -333,7 +399,10 @@ def set_router_replay_data(layers_topk_idx, attention_mask, tf_config, vp_rank=N
                 continue
             router = router_instances_list[router_offset]
             idx = layer_idx if index_by_layer else moe_idx
-            router.set_target_indices(layers_topk_idx_reshape[idx].to(torch.int64))
+            router.set_target_indices(
+                layers_topk_idx_reshape[idx].to(torch.int64),
+                replay_mask=replay_mask_rmpad_split,
+            )
             router_offset += 1
             moe_idx += 1
 

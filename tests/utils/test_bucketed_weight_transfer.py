@@ -58,6 +58,15 @@ def _generate_weights(weight_specs, seed):
     return weights
 
 
+def test_align_offset_respects_tensor_element_size():
+    from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import _align_offset
+
+    assert _align_offset(0, 2) == 0
+    assert _align_offset(1, 2) == 2
+    assert _align_offset(3, 4) == 4
+    assert _align_offset(8, 4) == 8
+
+
 # ---------------------------------------------------------------------------
 # Process entry points (must be module-level for pickling with spawn)
 # ---------------------------------------------------------------------------

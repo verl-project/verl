@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import os
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -24,6 +25,30 @@ from verl.utils.import_utils import import_external_libs
 from verl.utils.model import get_generation_config, update_model_config
 
 __all__ = ["HFModelConfig", "MtpConfig"]
+
+
+def _resolve_custom_chat_template(template: Optional[str]) -> Optional[str]:
+    if not isinstance(template, str):
+        return template
+
+    if template.startswith("@"):
+        path = os.path.expanduser(template[1:])
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+
+    if template.startswith("env:"):
+        env_name = template.removeprefix("env:")
+        if env_name not in os.environ:
+            raise ValueError(f"Custom chat template environment variable is not set: {env_name}")
+        return os.environ[env_name]
+
+    if template.startswith("${oc.env:") and template.endswith("}"):
+        env_name = template[len("${oc.env:") : -1]
+        if env_name not in os.environ:
+            raise ValueError(f"Custom chat template environment variable is not set: {env_name}")
+        return os.environ[env_name]
+
+    return template
 
 
 @dataclass
@@ -82,6 +107,7 @@ class HFModelConfig(BaseConfig):
         "architectures",
         "local_hf_config_path",
         "local_tokenizer_path",
+        "custom_chat_template",
         "mtp",
     }
 
@@ -170,6 +196,7 @@ class HFModelConfig(BaseConfig):
         ):
             self.processor.chat_template = self.tokenizer.chat_template
 
+        self.custom_chat_template = _resolve_custom_chat_template(self.custom_chat_template)
         if self.custom_chat_template is not None:
             if self.processor is not None:
                 self.processor.chat_template = self.custom_chat_template

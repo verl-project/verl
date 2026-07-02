@@ -17,7 +17,7 @@ import os
 import pytest
 from omegaconf import OmegaConf
 
-from verl.workers.config.model import HFModelConfig
+from verl.workers.config.model import HFModelConfig, _resolve_custom_chat_template
 
 
 class TestHFModelConfigCPU:
@@ -94,3 +94,30 @@ class TestHFModelConfigCPU:
         merged_config = OmegaConf.merge(base_config, invalid_cli_config)
         with pytest.raises(TypeError):
             OmegaConf.to_object(merged_config)
+
+    def test_resolve_custom_chat_template_from_file(self, tmp_path):
+        template_path = tmp_path / "template.jinja"
+        template_path.write_text("{{ messages[0]['content'] }}", encoding="utf-8")
+
+        assert _resolve_custom_chat_template(f"@{template_path}") == "{{ messages[0]['content'] }}"
+
+    def test_resolve_custom_chat_template_from_env(self, monkeypatch):
+        monkeypatch.setenv("VERL_TEST_CHAT_TEMPLATE", "{{ bos_token }}")
+
+        assert _resolve_custom_chat_template("env:VERL_TEST_CHAT_TEMPLATE") == "{{ bos_token }}"
+        assert _resolve_custom_chat_template("${oc.env:VERL_TEST_CHAT_TEMPLATE}") == "{{ bos_token }}"
+
+    def test_custom_chat_template_is_mutable_for_omegaconf_override(self):
+        assert "custom_chat_template" in HFModelConfig._mutable_fields
+
+        cfg_from_dataclass = OmegaConf.structured(HFModelConfig)
+        cli_config = OmegaConf.create(
+            {
+                "path": self.model_path,
+                "custom_chat_template": "env:VERL_TEST_CHAT_TEMPLATE",
+            }
+        )
+
+        merged = OmegaConf.merge(cfg_from_dataclass, cli_config)
+
+        assert merged.custom_chat_template == "env:VERL_TEST_CHAT_TEMPLATE"
