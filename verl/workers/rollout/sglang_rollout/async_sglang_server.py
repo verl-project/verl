@@ -346,8 +346,16 @@ class SGLangHttpServer:
 
         # enable_weights_cpu_backup is supported in sglang>=0.5.3
         if "enable_weights_cpu_backup" in [f.name for f in dataclasses.fields(ServerArgs)]:
+            # HYBRID mode also needs CPU weight backup so that:
+            #   1. sleep() can release GPU weights to free memory for the training engine.
+            #   2. naive update_weights() can call resume(tags=["weights"]) to reload weights
+            #      from CPU before applying the latest trainer weights via IPC.
+            # Without this, sleep() releases GPU memory but update_weights() cannot restore
+            # the weight buffers, causing OOM when training tries to use the freed memory.
             enable_weights_cpu_backup = (
-                True if self.rollout_mode == RolloutMode.COLOCATED or self.model_config.lora_rank > 0 else False
+                True
+                if self.rollout_mode in (RolloutMode.COLOCATED, RolloutMode.HYBRID) or self.model_config.lora_rank > 0
+                else False
             )
             args["enable_weights_cpu_backup"] = enable_weights_cpu_backup
 
@@ -381,6 +389,23 @@ class SGLangHttpServer:
 
             args["enable_weights_cpu_backup"] = True
             args["enable_draft_weights_cpu_backup"] = True
+
+        # HYBRID mode with free_cache_engine requires enable_memory_saver=True.
+        # When free_cache_engine=True, sleep() calls release_memory_occupation() which relies on
+        # TorchMemorySaverAdapter.pause() to actually free GPU memory.  If enable_memory_saver
+        # is False (e.g. overridden via engine_kwargs), the adapter is a no-op and sleep()
+        # silently does nothing, leaving GPU weights+kvcache in place and causing OOM when the
+        # training engine tries to use the same GPU.
+        # Similarly, COLOCATED mode also needs memory saver to release/resume during weight sync.
+        if self.rollout_mode in (RolloutMode.HYBRID, RolloutMode.COLOCATED) and self.config.free_cache_engine:
+            if not args.get("enable_memory_saver", True):
+                print(
+                    f"[SGLangHttpServer] WARNING: enable_memory_saver=False detected for "
+                    f"rollout_mode={self.rollout_mode.name} with free_cache_engine=True. "
+                    f"Forcing enable_memory_saver=True — without it, sleep() cannot release "
+                    f"GPU memory and training will OOM."
+                )
+            args["enable_memory_saver"] = True
 
         # NOTE: We can't directly call SGLang's launch_server since it's not an async function.
         # https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/entrypoints/http_server.py
@@ -669,9 +694,11 @@ class SGLangHttpServer:
 
         # Re-key backend spec-decoding stats to the rollout-common names.
         if self.config.mtp is not None and self.config.mtp.enable and self.config.mtp.enable_rollout:
-            extra_fields["spec_num_draft_tokens"] = int(meta_info["spec_draft_token_num"])
-            extra_fields["spec_num_accepted_tokens"] = int(meta_info["spec_accept_token_num"])
-            extra_fields["spec_num_verify_steps"] = int(meta_info["spec_verify_ct"])
+            extra_fields["spec_num_draft_tokens"] = int(
+                meta_info.get("spec_draft_token_num", self.config.mtp.speculative_num_draft_tokens)
+            )
+            extra_fields["spec_num_accepted_tokens"] = int(meta_info.get("spec_accept_token_num", 0))
+            extra_fields["spec_num_verify_steps"] = int(meta_info.get("spec_verify_ct", 0))
 
         return TokenOutput(
             token_ids=token_ids,

@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import asyncio
+import collections
 import logging
 import os
 import time
@@ -21,7 +22,7 @@ from pprint import pformat
 import numpy as np
 import ray
 import torch
-from omegaconf import DictConfig
+from omegaconf import DictConfig, open_dict
 
 from verl.experimental.agent_loop.agent_loop import AgentLoopManager
 from verl.experimental.fully_async_policy.detach_utils import (
@@ -42,7 +43,7 @@ from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.profiler import marked_timer
 from verl.utils.skip import SkipManager
 from verl.utils.tracking import ValidationGenerationsLogger
-from verl.workers.rollout.llm_server import FullyAsyncLLMServerClient, LLMServerManager
+from verl.workers.rollout.llm_server import FullyAsyncLLMServerClient, LLMServerClient, LLMServerManager
 from verl.workers.rollout.replica import RolloutReplica
 from verl.workers.rollout.utils import update_prometheus_config
 
@@ -105,11 +106,26 @@ class FullyAsyncLLMServerManager(LLMServerManager):
         # takes the standalone branch (init_standalone).  Pass start_rank=num_hybrid
         # so that Ray actor names remain globally unique and never collide with the
         # hybrid actors created above.
+        #
+        # If standalone_gpu_memory_utilization is configured, temporarily override
+        # gpu_memory_utilization so that standalone replicas can use a higher value
+        # (e.g. 0.85) than hybrid replicas (which must share GPU with the training
+        # engine).  The original value is restored in the finally block regardless
+        # of whether the initialisation succeeds or fails.
+        standalone_gmu = self.rollout_config.get("standalone_gpu_memory_utilization", None)
+        original_gmu = self.rollout_config.get("gpu_memory_utilization", None)
         saved_worker_group = self.worker_group
         self.worker_group = None
         try:
+            if standalone_gmu is not None and original_gmu is not None:
+                with open_dict(self.rollout_config):
+                    self.rollout_config.gpu_memory_utilization = standalone_gmu
             await super()._initialize_llm_servers(start_rank=num_hybrid)
         finally:
+            # Always restore the original value to avoid affecting downstream logic.
+            if standalone_gmu is not None and original_gmu is not None:
+                with open_dict(self.rollout_config):
+                    self.rollout_config.gpu_memory_utilization = original_gmu
             self.worker_group = saved_worker_group
 
         # Update Prometheus with the final (standalone) addresses.
@@ -265,6 +281,27 @@ class FullyAsyncLLMServerManager(LLMServerManager):
         """Total active rollout servers (standalone + hybrid)."""
         return len(self.rollout_replicas) + len(self.alive_replicas)
 
+    def get_num_standalone_replicas(self) -> int:
+        """Number of standalone-only replicas (hybrid replicas excluded).
+
+        At init time ``alive_replicas`` is empty, so ``rollout_replicas``
+        contains only standalone replicas.  Once some hybrid replicas are
+        activated they are appended to ``rollout_replicas``, so subtracting
+        ``alive_replicas`` recovers the standalone-only count.
+        """
+        return self.rollout_replicas
+
+    def get_client(self, client_cls=LLMServerClient, **kwargs) -> LLMServerClient:
+        """Override to automatically inject ``only_hybrid`` into the client.
+
+        When there are no standalone replicas, hybrid replicas are the sole
+        rollout resource.  During weight-sync windows the load balancer is
+        temporarily empty, so the client should keep retrying instead of
+        raising immediately.
+        """
+        only_hybrid = len(self.rollout_replicas) == 0
+        return super().get_client(client_cls=client_cls, only_hybrid=only_hybrid, **kwargs)
+
 
 class FullyAsyncAgentLoopManager(AgentLoopManager):
     @SkipManager.annotate(role="async_rollout")
@@ -386,6 +423,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         # required_samples use ppo_mini_batch_size*require_batches as the minimum number of samples.
         self.require_batches = config.async_training.require_batches
         self.required_samples = config.actor_rollout_ref.actor.ppo_mini_batch_size * self.require_batches
+        self.concurrent_samples_per_replica: int = config.async_training.get("concurrent_samples_per_replica", 16)
         self.max_required_samples = None
         self.max_concurrent_samples = None
         # queue size
@@ -396,6 +434,17 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         self.staleness_samples = 0
         self.dropped_stale_samples = 0
         self.processed_sample_count = 0
+        # Per-step sample counter: counts fully-generated samples in the current param version.
+        # Reset to 0 at each reset_staleness() call.
+        self._step_generated_samples: int = 0
+        # Rolling history of per-step sample counts: (param_version, sample_count).
+        # Keeps the most recent _STEP_HISTORY_SIZE entries for throughput diff analysis.
+        self._STEP_HISTORY_SIZE: int = 10
+        self._step_samples_history: collections.deque = collections.deque(maxlen=self._STEP_HISTORY_SIZE)
+        # Monotonically increasing counter of completed param-sync steps.
+        # Must NOT be capped by _STEP_HISTORY_SIZE; used by get_completed_steps() to
+        # compute expected_samples in the trainer, which grows without bound.
+        self._completed_steps: int = 1
         # we start from step 1
         self.global_steps = 1
         self.idle_start_time = time.time()
@@ -438,7 +487,9 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
                 / (self.required_samples * self.config.async_training.trigger_parameter_sync_step)
             )
 
-            self.max_concurrent_samples = len(self.llm_server_manager.get_replicas()) * 16
+            self.max_concurrent_samples = (
+                self.llm_server_manager.get_active_server_count() * self.concurrent_samples_per_replica
+            )
             self.max_concurrent_samples = min(self.max_concurrent_samples, self.max_required_samples)
             self.max_queue_size = self.max_required_samples
 
@@ -485,10 +536,19 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
             timing_raw["fully_async/rollouter/version_time"] = rollout_version_time
             timing_raw["fully_async/rollouter/idle_ratio"] = idle_ratio
 
+            if self._step_generated_samples > 0:
+                self._completed_steps += 1
+                self._step_samples_history.append((self._completed_steps, self._step_generated_samples))
+            timing_raw["fully_async/rollouter/step_generated_samples"] = self._step_generated_samples
+            # Reset per-step counter for the next param version.
+            self._step_generated_samples = 0
+
             print(
                 f"[FullyAsyncRollouter][Public][reset_staleness] "
                 f"reset staleness_samples to: {self.staleness_samples} "
-                f"idle_ratio: {timing_raw['fully_async/rollouter/idle_ratio']:.4f}"
+                f"idle_ratio: {timing_raw['fully_async/rollouter/idle_ratio']:.4f} "
+                f"step_generated_samples(this_step): {timing_raw['fully_async/rollouter/step_generated_samples']} "
+                f"recent_history(last {self._STEP_HISTORY_SIZE} steps): {list(self._step_samples_history)}"
             )
             self.step_start_time = time.time()
 
@@ -839,6 +899,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
             [f"uid_{rollout_sample.sample_id}"] * len(rollout_sample.full_batch), dtype=object
         )
         ret = await self.async_rollout_manager.generate_sequences_single(rollout_sample.full_batch)
+
         rollout_sample.full_batch = ret
         # Re-set uid on output — agent loop worker returns a new DataProto without the input's non_tensor_batch
         rollout_sample.full_batch.non_tensor_batch["uid"] = np.array(
@@ -851,6 +912,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         )
         if success:
             self.total_generated_samples += 1
+            self._step_generated_samples += 1
         else:
             self.dropped_stale_samples += 1
         self.processed_sample_count += 1
@@ -1038,10 +1100,69 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         return self._hybrid_worker_group
 
     async def add_replicas(self, resource_ids: list[str]) -> int:
-        return await self.llm_server_manager.add_replicas(resource_ids)
+        n = await self.llm_server_manager.add_replicas(resource_ids)
+        if n > 0:
+            self._update_max_concurrent_samples()
+        return n
 
     async def remove_replicas(self, resource_ids: list[str]) -> int:
-        return await self.llm_server_manager.remove_replicas(resource_ids)
+        n = await self.llm_server_manager.remove_replicas(resource_ids)
+        if n > 0:
+            self._update_max_concurrent_samples()
+        return n
+
+    async def rebalance_requests(self) -> dict:
+        """Redistribute in-flight requests evenly across all active replicas.
+
+        This performs a full rebalance cycle:
+
+        1. **Clear sticky cache** — so subsequent ``acquire_server()`` calls use
+           least-loaded selection rather than sticky routing.
+        2. **Abort all replicas** — interrupt in-flight requests on all active
+           replicas (standalone + hybrid).  :class:`FullyAsyncLLMServerClient`
+           catches the abort and retries automatically.
+        3. **Resume generation** — unpause all replicas so they accept retried
+           requests, which are now routed via least-loaded selection to the
+           replicas with the fewest in-flight requests (typically the newly
+           activated hybrid replicas, which start at 0).
+
+        Returns:
+            Diagnostics dict from :meth:`GlobalRequestLoadBalancer.clear_sticky_cache`.
+        """
+        import asyncio
+
+        # Step 1: Clear sticky cache so retried requests use least-loaded routing.
+        result = await self.llm_server_manager.global_load_balancer.clear_sticky_cache.remote()
+        print(
+            f"[FullyAsyncRollouter] Rebalance step 1/3: sticky cache cleared, "
+            f"{result['cleared_entries']} entries, loads={result['server_loads']}"
+        )
+
+        # Step 2: Abort in-flight requests on all active replicas.
+        active_replicas = self.llm_server_manager.get_replicas()
+        if active_replicas:
+            await asyncio.gather(*[replica.abort_all_requests() for replica in active_replicas])
+            print(f"[FullyAsyncRollouter] Rebalance step 2/3: aborted requests on {len(active_replicas)} replicas")
+
+        # Step 3: Resume generation so retried requests can be accepted.
+        if active_replicas:
+            await asyncio.gather(*[replica.resume_generation() for replica in active_replicas])
+            print(f"[FullyAsyncRollouter] Rebalance step 3/3: resumed generation on {len(active_replicas)} replicas")
+
+        return result
+
+    def _update_max_concurrent_samples(self):
+        """Recompute max_concurrent_samples based on current active replica count."""
+        if self.max_required_samples is None:
+            return
+        new_val = len(self.llm_server_manager.get_replicas()) * self.concurrent_samples_per_replica
+        new_val = min(new_val, self.max_required_samples)
+        print(
+            f"[FullyAsyncRollouter] max_concurrent_samples updated: "
+            f"{self.max_concurrent_samples} -> {new_val} "
+            f"(active_replicas={len(self.llm_server_manager.get_replicas())})"
+        )
+        self.max_concurrent_samples = new_val
 
     def get_hybrid_replica(self, resource_id: str):
         """Return the RolloutReplica object for a registered hybrid resource."""
@@ -1061,8 +1182,12 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         return {**base_stats, **hybrid_stats}
 
     def get_num_active_replicas(self) -> int:
-        """Total active rollout replicas (standalone + hybrid)."""
+        """Total active rollout replicas (standalone + active hybrid)."""
         return self.llm_server_manager.get_active_server_count()
+
+    def get_num_standalone_replicas(self) -> int:
+        """Number of standalone-only replicas (hybrid replicas excluded)."""
+        return self.llm_server_manager.get_num_standalone_replicas()
 
     def get_hybrid_replicas_info(self) -> list[dict]:
         """Metadata for all active hybrid replicas."""
@@ -1071,3 +1196,68 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
     def get_total_produced_samples(self) -> int:
         """Total samples produced (uses base class counter)."""
         return self.total_generated_samples
+
+    def get_completed_steps(self) -> int:
+        """Number of param-sync steps completed (monotonically increasing)."""
+        return self._completed_steps
+
+    async def get_sample_collection_ratio(self) -> float:
+        """Return the fraction of required samples already collected for the current step."""
+        queue_size = await self.message_queue_client.get_queue_size()
+        ratio = queue_size / self.required_samples
+        print(
+            f"[FullyAsyncRollouter] get_sample_collection_ratio: "
+            f"queue_size={queue_size}, required_samples={self.required_samples}, ratio={ratio:.4f}",
+            flush=True,
+        )
+        return ratio
+
+    async def wait_for_enough_samples(
+        self,
+        required_count: int,
+        poll_interval: float = 1.0,
+        timeout: float | None = None,
+    ) -> int:
+        """Block until the message queue contains at least ``required_count`` samples.
+
+        Polls ``message_queue_client.get_queue_size()`` every ``poll_interval``
+        seconds and returns only when the queue size reaches or exceeds
+        ``required_count``.  If ``required_count`` is ``None``, defaults to
+        ``self.required_samples``.
+
+        The Trainer uses this to confirm that the queue truly holds enough
+        completed trajectories *before* deactivating hybrid replicas — avoiding a
+        race where the ratio-based check passes but the queue hasn't caught up yet.
+
+        Args:
+            required_count: Minimum number of samples to wait for.
+                Defaults to ``self.required_samples``.
+            poll_interval: Seconds between consecutive queue-size checks.
+            timeout: Maximum seconds to wait.  Raises ``TimeoutError`` if
+                exceeded.  ``None`` means no timeout.
+
+        Returns:
+            The final queue size observed (≥ required_count).
+
+        Raises:
+            TimeoutError: If ``timeout`` is set and the wait exceeds it.
+        """
+
+        start_time = time.time()
+        while True:
+            queue_size = await self.message_queue_client.get_queue_size()
+            if queue_size >= required_count:
+                print(
+                    f"[FullyAsyncRollouter] wait_for_enough_samples: "
+                    f"queue_size={queue_size} >= required={required_count}, done. "
+                    f"waited={time.time() - start_time:.2f}s",
+                    flush=True,
+                )
+                return queue_size
+
+            if timeout is not None and (time.time() - start_time) >= timeout:
+                raise TimeoutError(
+                    f"Timed out waiting for {required_count} samples in queue (current={queue_size}, waited={timeout}s)"
+                )
+
+            await asyncio.sleep(poll_interval)

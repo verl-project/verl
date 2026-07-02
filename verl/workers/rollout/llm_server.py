@@ -68,8 +68,8 @@ class GlobalRequestLoadBalancer:
         max_cache_size: int = DEFAULT_ROUTING_CACHE_SIZE,
         full_determinism: bool = False,
     ):
-        if not servers:
-            raise ValueError("servers must be non-empty")
+        # Allow empty initial servers: in dynamic-resource-scaling mode all
+        # replicas are hybrid and will be registered later via add_servers().
 
         self._servers: dict[str, ray.actor.ActorHandle] = dict(servers)
         self._inflight_requests: dict[str, int] = {sid: 0 for sid in servers}
@@ -83,18 +83,21 @@ class GlobalRequestLoadBalancer:
             A tuple of ``(server_id, actor_handle)`` in a single atomic call.
         """
         # Try sticky session first
+        sticky_hit = False
         if request_id in self._request_id_to_server:
             server_id = self._request_id_to_server[request_id]
             # Check if server is still in the active pool
             if server_id in self._inflight_requests:
                 self._inflight_requests[server_id] += 1
-                return server_id, self._servers[server_id]
-            # Server was removed, clear stale cache entry and re-select
-            del self._request_id_to_server[request_id]
+                sticky_hit = True
+            else:
+                # Server was removed, clear stale cache entry and re-select
+                del self._request_id_to_server[request_id]
 
-        # Select new server (least-loaded among available)
-        if not self._inflight_requests:
-            raise RuntimeError("No available servers in load balancer")
+        if not sticky_hit:
+            # Select new server (least-loaded among available)
+            if not self._inflight_requests:
+                raise RuntimeError("No available servers in load balancer")
 
         min_count = min(self._inflight_requests.values())
         candidates = [sid for sid, count in self._inflight_requests.items() if count == min_count]
@@ -142,7 +145,7 @@ class GlobalRequestLoadBalancer:
         for sid in server_ids:
             self._inflight_requests.pop(sid, None)
             self._servers.pop(sid, None)
-        logger.info(f"[GlobalLoadBalancer] removed {len(server_ids)} servers")
+        print(f"[GlobalLoadBalancer] removed {len(server_ids)} servers")
 
     def get_inflight_count(self, server_id: str) -> int:
         """Get number of in-flight requests for a server."""
@@ -151,6 +154,30 @@ class GlobalRequestLoadBalancer:
     def get_all_servers(self) -> list[str]:
         """Get list of all active server IDs."""
         return list(self._inflight_requests.keys())
+
+    def clear_sticky_cache(self) -> dict:
+        """Clear the sticky-session cache to force request redistribution.
+
+        After clearing, all subsequent ``acquire_server()`` calls will select
+        the least-loaded server (based on ``_inflight_requests``), which
+        naturally balances load across all active replicas — including newly
+        added ones with zero in-flight requests.
+
+        Returns:
+            A dict with ``cleared_entries`` (number of cache entries dropped)
+            and ``server_loads`` (current per-server inflight counts for
+            diagnostics).
+        """
+        cleared = len(self._request_id_to_server)
+        self._request_id_to_server.clear()
+        logger.info(
+            f"[GlobalLoadBalancer] Sticky cache cleared: {cleared} entries dropped. "
+            f"Server loads: {dict(self._inflight_requests)}"
+        )
+        return {
+            "cleared_entries": cleared,
+            "server_loads": dict(self._inflight_requests),
+        }
 
     def get_status(self) -> dict:
         """Return current load balancer state for debugging."""
@@ -173,6 +200,7 @@ class LLMServerClient:
         self,
         config: DictConfig,
         load_balancer_handle: ray.actor.ActorHandle = None,
+        only_hybrid: bool = False,
         **kwargs,
     ):
         """Initialize the LLMServerClient.
@@ -182,14 +210,30 @@ class LLMServerClient:
             load_balancer_handle (ray.actor.ActorHandle): shared global load balancer actor
                 that also holds the server-handle registry. Optional; subclasses that
                 manage server routing externally can pass None.
+            only_hybrid (bool): When ``True``, hybrid replicas are the *only* rollout
+                resource.  If the load balancer is temporarily empty (e.g. during
+                weight synchronisation) :meth:`_acquire_server` will keep retrying
+                every 1 second instead of raising immediately.
         """
         self.config = config
         self._load_balancer = load_balancer_handle
+        self._only_hybrid = only_hybrid
 
     async def _acquire_server(self, request_id: str) -> tuple[str, ray.actor.ActorHandle]:
         # Atomic acquire: returns (server_id, handle) in one Ray RPC.
-        server_id, handle = await self._load_balancer.acquire_server.remote(request_id=request_id)
-        return server_id, handle
+        # When only_hybrid is True, hybrid replicas are the sole rollout resource and
+        # the LB may be temporarily empty during weight sync / scaling transitions.
+        # In that case keep retrying every 3 s until a server becomes available.
+        # Otherwise raise immediately so callers see the error right away.
+        while True:
+            try:
+                server_id, handle = await self._load_balancer.acquire_server.remote(request_id=request_id)
+                return server_id, handle
+            except RuntimeError as e:
+                if "No available servers in load balancer" in str(e) and self._only_hybrid:
+                    await asyncio.sleep(1)
+                else:
+                    raise
 
     def _release_server(self, server_id: str) -> None:
         # Fire-and-forget: release is just a counter decrement, no need to await.
