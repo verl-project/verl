@@ -124,6 +124,12 @@ class AsyncTeacherLLMServerManager:
         teacher_key = self._resolve_teacher_key(routing_key)
         teacher_model_config = self.teacher_model_configs[teacher_key]
         client = self.teacher_client[teacher_key]
+        max_model_len = teacher_model_config.inference.max_model_len
+        if max_model_len is not None and len(sequence_ids) + 1 > max_model_len:
+            raise ValueError(
+                f"Teacher input ({len(sequence_ids)} tokens, +1 to score) exceeds the teacher's "
+                f"max_model_len ({max_model_len}); raise the teacher's max_model_len or shorten the input."
+            )
         teacher_output = await client.generate(
             request_id=uuid4().hex,
             prompt_ids=sequence_ids,

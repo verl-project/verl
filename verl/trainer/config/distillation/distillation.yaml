@@ -111,3 +111,18 @@ teacher_models:
 
 # Key to route examples to the appropriate teacher model in multi-teacher setups. Should correspond to a field in the data proto, e.g., task.
 teacher_key: data_source
+
+# On-Policy Self-Distillation (OPSD): the teacher conditions on the ground-truth
+# solution (privileged context) while the student sees only the problem. Point a
+# single teacher at the student checkpoint (teacher_model.model_path == student
+# path) to make it a frozen self-teacher.
+self_distillation: false
+# Non-tensor batch field holding the ground-truth solution. verl stores it nested
+# at reward_model.ground_truth; a dotted key reaches into the nested dict.
+privileged_solution_key: reward_model.ground_truth
+# Marker text wrapping the privileged solution in the teacher input.
+privileged_prefix: "\n\nReference solution:\n"
+privileged_suffix: "\n\nUsing this as a reference, derive the answer yourself. Think step by step.\n"
+# Optional: insert the solution before the last occurrence of this marker text in
+# the prompt (e.g. the assistant-turn opener) instead of appending. Empty = append.
+privileged_insert_before: ""
