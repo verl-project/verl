@@ -109,18 +109,28 @@ Follow :doc:`Rollout trace<../advance/rollout_trace>` to known more about trace 
 Agent Framework
 ---------------
 
+For the session-based Agent Framework (``verl.agent.framework``), which provides
+per-session HTTP isolation and structured reward dispatch for agentic RL, see
+:doc:`Agent Framework <../advance/agent_framework>`.
+
+The LangGraph-based agent path below is a separate recipe that uses LangChain
+abstractions on top of the same inference backend.
+
+LangGraph Agent
+~~~~~~~~~~~~~~~
+
 System Architecture
-~~~~~~~~~~~~~~~~~~~
+^^^^^^^^^^^^^^^^^^^
 
 .. image:: https://github.com/eric-haibin-lin/verl-community/blob/main/docs/langgraph_agent.png?raw=true
 
 System Components
-~~~~~~~~~~~~~~~~~
+^^^^^^^^^^^^^^^^^
 
 +--------------------------+-----------------------------------------------------------------------------------------------+
 | Component                | Role                                                                                          |
 +==========================+===============================================================================================+
-| ChatModel                | LLM object of LangChain, used to adapt to the “generate” api provided by LLMServerClient      |
+| ChatModel                | LLM object of LangChain, used to adapt to the "generate" api provided by LLMServerClient      |
 +--------------------------+-----------------------------------------------------------------------------------------------+
 | ReactAgentLoop           | Agent adaptation layer, which by default supports a naive LangGraph Agentic.                  |
 |                          | New classes can be derived to support user-defined Agents, and the run function needs to be   |
