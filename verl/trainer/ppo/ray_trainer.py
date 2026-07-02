@@ -836,10 +836,7 @@ class RayPPOTrainer:
         # pool so it joins the unified RayWorkerGroup spawn. The vLLM backend spawns its
         # own rollout replica instead.
         self._fsdp_teacher_pending = False
-        if (
-            self.use_teacher_policy
-            and self.config.distillation.get("teacher_backend", "vllm") == "fsdp"
-        ):
+        if self.use_teacher_policy and self.config.distillation.get("teacher_backend", "vllm") == "fsdp":
             teacher_training_config = self._build_fsdp_teacher_training_config()
             teacher_resource_pool = self.resource_pool_manager.get_resource_pool(Role.TeacherModel)
 
@@ -961,8 +958,7 @@ class RayPPOTrainer:
                 )
             else:
                 raise ValueError(
-                    f"Unsupported distillation.teacher_backend {teacher_backend!r}; "
-                    "expected 'vllm' or 'fsdp'."
+                    f"Unsupported distillation.teacher_backend {teacher_backend!r}; expected 'vllm' or 'fsdp'."
                 )
         else:
             self.teacher_model_manager = None
@@ -1356,9 +1352,7 @@ class RayPPOTrainer:
 
         fsdp_cfg = self.config.distillation.teacher_fsdp_config
         if fsdp_cfg is None:
-            raise ValueError(
-                "distillation.teacher_fsdp_config must be set when teacher_backend='fsdp'."
-            )
+            raise ValueError("distillation.teacher_fsdp_config must be set when teacher_backend='fsdp'.")
         engine_config = omega_conf_to_dataclass(fsdp_cfg, dataclass_type=FSDPEngineConfig)
         engine_config.forward_only = True
 

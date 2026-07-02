@@ -515,8 +515,7 @@ class AgentLoopWorker:
         # the FSDP teacher is driven by the trainer's main loop after rollout
         # (it needs the student top-K first), so agent_loop must not call it here.
         self.use_vllm_teacher = (
-            self.distillation_enabled
-            and config.distillation.get("teacher_backend", "vllm") == "vllm"
+            self.distillation_enabled and config.distillation.get("teacher_backend", "vllm") == "vllm"
         )
         if self.use_vllm_teacher:
             from verl.experimental.teacher_loop.teacher_manager import AsyncTeacherLLMServerManager

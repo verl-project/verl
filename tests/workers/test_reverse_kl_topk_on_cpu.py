@@ -174,7 +174,6 @@ def test_reverse_kl_topk_invariant_to_mass_outside_topk():
     torch.testing.assert_close(_loss(bumped), base, atol=1e-5, rtol=1e-5)
 
 
-
 def test_reverse_kl_topk_registered_and_collects_mass_metrics():
     """``loss_mode='reverse_kl_topk'`` is registered in the distillation loss registry
     and its top-level wrapper aggregates the student/teacher mass diagnostics over

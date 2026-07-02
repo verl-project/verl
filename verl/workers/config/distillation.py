@@ -293,9 +293,7 @@ class DistillationConfig(BaseConfig):
             return
 
         if self.teacher_backend not in ("vllm", "fsdp"):
-            raise ValueError(
-                f"Unsupported teacher_backend {self.teacher_backend!r}; expected one of 'vllm' or 'fsdp'."
-            )
+            raise ValueError(f"Unsupported teacher_backend {self.teacher_backend!r}; expected one of 'vllm' or 'fsdp'.")
 
         if self.teacher_backend == "fsdp":
             # FSDP teacher only supports reverse_kl_topk for now; other modes need rollout outputs.

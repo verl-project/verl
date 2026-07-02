@@ -88,9 +88,7 @@ class MultiTeacherFSDPManager:
                 f"got {self.distillation_config.teacher_backend!r}."
             )
         if self.distillation_config.teacher_fsdp_config is None:
-            raise ValueError(
-                "distillation.teacher_fsdp_config must be set when teacher_backend='fsdp'."
-            )
+            raise ValueError("distillation.teacher_fsdp_config must be set when teacher_backend='fsdp'.")
 
         # Resource pool is held for symmetry with MultiTeacherModelManager (the
         # vLLM equivalent), but the FSDP path drives spawn from the trainer.
@@ -104,8 +102,7 @@ class MultiTeacherFSDPManager:
             )
 
         self.teacher_managers: dict[str, FSDPTeacherManager] = {
-            key: FSDPTeacherManager(key=key, distillation_config=self.distillation_config)
-            for key in teacher_models
+            key: FSDPTeacherManager(key=key, distillation_config=self.distillation_config) for key in teacher_models
         }
 
     @property
@@ -129,18 +126,14 @@ class MultiTeacherFSDPManager:
                 )
             key = next(iter(self.teacher_managers))
         if key not in self.teacher_managers:
-            raise ValueError(
-                f"Teacher key {key!r} not configured; configured: {self.teacher_keys}."
-            )
+            raise ValueError(f"Teacher key {key!r} not configured; configured: {self.teacher_keys}.")
         self.teacher_managers[key].set_worker_group(worker_group)
 
     def get(self, routing_key: Optional[str] = None) -> FSDPTeacherManager:
         if len(self.teacher_managers) == 1:
             return next(iter(self.teacher_managers.values()))
         if routing_key is None:
-            raise ValueError(
-                "Routing key is required when multiple FSDP teachers are configured."
-            )
+            raise ValueError("Routing key is required when multiple FSDP teachers are configured.")
         if routing_key not in self.teacher_managers:
             raise ValueError(
                 f"No FSDP teacher configured for routing key {routing_key!r}; "
@@ -148,9 +141,7 @@ class MultiTeacherFSDPManager:
             )
         return self.teacher_managers[routing_key]
 
-    def compute_logprobs_at_ids(
-        self, data: TensorDict, routing_key: Optional[str] = None
-    ) -> Optional[TensorDict]:
+    def compute_logprobs_at_ids(self, data: TensorDict, routing_key: Optional[str] = None) -> Optional[TensorDict]:
         return self.get(routing_key).compute_logprobs_at_ids(data)
 
 

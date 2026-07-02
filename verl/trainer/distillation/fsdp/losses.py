@@ -231,12 +231,8 @@ def compute_reverse_kl_topk(
     teacher_mass = teacher_on_student_logp.exp().sum(dim=-1)
 
     # Renormalize both sides onto the student-top-K support -> proper KL(Q_K || P_K).
-    student_topk_log_probs = student_topk_log_probs - torch.logsumexp(
-        student_topk_log_probs, dim=-1, keepdim=True
-    )
-    teacher_on_student_logp = teacher_on_student_logp - torch.logsumexp(
-        teacher_on_student_logp, dim=-1, keepdim=True
-    )
+    student_topk_log_probs = student_topk_log_probs - torch.logsumexp(student_topk_log_probs, dim=-1, keepdim=True)
+    teacher_on_student_logp = teacher_on_student_logp - torch.logsumexp(teacher_on_student_logp, dim=-1, keepdim=True)
 
     loss_config: DistillationLossConfig = config.distillation_loss
     if loss_config.log_prob_min_clamp is not None:
