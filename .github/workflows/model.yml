@@ -81,75 +81,75 @@ jobs:
           faas-url: "${{ env.DYNAMIC_RUNNER_ENDPOINT }}"
           mlp-image: "${{ env.IMAGE }}"
 
-  # model_rmpad:
-  #   needs: setup
-  #   runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
-  #   timeout-minutes: 20 # Increase this timeout value as needed
-  #   env:
-  #     HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
-  #     NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
-  #     HF_ENDPOINT: "https://hf-mirror.com"
-  #     HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
-  #   steps:
-  #     - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-  #       with:
-  #         fetch-depth: 0
-  #     - name: Install the current repository and upgrade to latest transformers
-  #       run: |
-  #         pip3 install -r requirements-test.txt
-  #         pip3 install -r requirements.txt
-  #         pip3 install --no-deps -e .
-  #     - name: Check final pip list
-  #       run: |
-  #         pip3 list
-  #     - name: Running rmpad model tests on 8 L20 GPUs + flash_attn 2.5.8
-  #       run: |
-  #         pytest -s tests/models/test_transformer.py
-  #     - name: Running rmpad model tests on 8 L20 GPUs + latest flash_attn
-  #       run: |
-  #         pytest -s tests/models/test_transformer.py
-  #     - name: Running FSDP rmpad model tests on 8 L20 GPUs + latest flash_attn
-  #       run: |
-  #         STRATEGY=fsdp torchrun --nproc_per_node=8 tests/special_distributed/test_fsdp_ckpt.py
-  #     - name: Running transformers ulysses tests on 8 L20 GPUs + latest transformers
-  #       run: |
-  #         torchrun --nproc_per_node=8 -m pytest tests/models/test_transformers_ulysses.py
-  #     - name: Running transformers ulysses tests on 8 L20 GPUs + transformers 4.54.1
-  #       run: |
-  #         pip3 install transformers==4.54.1
-  #         torchrun --nproc_per_node=8 -m pytest tests/models/test_transformers_ulysses.py
-  #     - name: Run distributed test
-  #       run: |
-  #         bash tests/special_distributed/run_all.sh
-  #     - name: Clean up and recover transformers
-  #       run: |
-  #         pip3 install --upgrade "transformers==5.3.0"
+  model_rmpad:
+    needs: setup
+    runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
+    timeout-minutes: 20 # Increase this timeout value as needed
+    env:
+      HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
+      NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
+      HF_ENDPOINT: "https://hf-mirror.com"
+      HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - name: Install the current repository and upgrade to latest transformers
+        run: |
+          pip3 install -r requirements-test.txt
+          pip3 install -r requirements.txt
+          pip3 install --no-deps -e .
+      - name: Check final pip list
+        run: |
+          pip3 list
+      - name: Running rmpad model tests on 8 L20 GPUs + flash_attn 2.5.8
+        run: |
+          pytest -s tests/models/test_transformer.py
+      - name: Running rmpad model tests on 8 L20 GPUs + latest flash_attn
+        run: |
+          pytest -s tests/models/test_transformer.py
+      - name: Running FSDP rmpad model tests on 8 L20 GPUs + latest flash_attn
+        run: |
+          STRATEGY=fsdp torchrun --nproc_per_node=8 tests/special_distributed/test_fsdp_ckpt.py
+      - name: Running transformers ulysses tests on 8 L20 GPUs + latest transformers
+        run: |
+          torchrun --nproc_per_node=8 -m pytest tests/models/test_transformers_ulysses.py
+      - name: Running transformers ulysses tests on 8 L20 GPUs + transformers 4.54.1
+        run: |
+          pip3 install transformers==4.54.1
+          torchrun --nproc_per_node=8 -m pytest tests/models/test_transformers_ulysses.py
+      - name: Run distributed test
+        run: |
+          bash tests/special_distributed/run_all.sh
+      - name: Clean up and recover transformers
+        run: |
+          pip3 install --upgrade "transformers==5.3.0"
 
-  # # TODO: Move this back to model_rmpad once FSDP2 is stable.
-  # # NOTE: List as an independent job to make rerun easier.
-  # model_rmpad_fsdp2_unstable:
-  #   needs: setup
-  #   runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
-  #   timeout-minutes: 20 # Increase this timeout value as needed
-  #   env:
-  #     HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
-  #     NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
-  #     HF_ENDPOINT: "https://hf-mirror.com"
-  #     HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
-  #   steps:
-  #     - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-  #       with:
-  #         fetch-depth: 0
-  #     - name: Install the current repository and upgrade to latest transformers/flash_attn
-  #       run: |
-  #         pip3 install -r requirements-test.txt
-  #         pip3 install --no-deps -e .
-  #     - name: Check final pip list
-  #       run: |
-  #         pip3 list
-  #     - name: Running FSDP2 rmpad model tests on 8 L20 GPUs + latest flash_attn
-  #       run: |
-  #         STRATEGY=fsdp2 torchrun --nproc_per_node=8 tests/special_distributed/test_fsdp_ckpt.py
+  # TODO: Move this back to model_rmpad once FSDP2 is stable.
+  # NOTE: List as an independent job to make rerun easier.
+  model_rmpad_fsdp2_unstable:
+    needs: setup
+    runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
+    timeout-minutes: 20 # Increase this timeout value as needed
+    env:
+      HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
+      NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
+      HF_ENDPOINT: "https://hf-mirror.com"
+      HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - name: Install the current repository and upgrade to latest transformers/flash_attn
+        run: |
+          pip3 install -r requirements-test.txt
+          pip3 install --no-deps -e .
+      - name: Check final pip list
+        run: |
+          pip3 list
+      - name: Running FSDP2 rmpad model tests on 8 L20 GPUs + latest flash_attn
+        run: |
+          STRATEGY=fsdp2 torchrun --nproc_per_node=8 tests/special_distributed/test_fsdp_ckpt.py
 
   model_engine:
     needs: setup
