@@ -131,3 +131,5 @@ logs
 log
 outputs
 .history
+# build artifacts
+*.whl

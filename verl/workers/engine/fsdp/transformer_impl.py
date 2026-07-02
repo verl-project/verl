@@ -505,6 +505,16 @@ class FSDPEngine(BaseEngine):
                 num_cycles=num_cycles,
                 zero_indexed_step=zero_indexed_step,
             )
+        elif lr_scheduler_type == "linear":
+            # Linear warmup + linear decay to 0 over total_steps; reuse HF's helper so OPSD
+            # distillation runs match the reference (siyan-zhao/OPSD, HF Trainer lr_scheduler_type=linear).
+            from transformers import get_linear_schedule_with_warmup
+
+            lr_scheduler = get_linear_schedule_with_warmup(
+                optimizer=optimizer,
+                num_warmup_steps=num_warmup_steps,
+                num_training_steps=total_steps,
+            )
         else:
             raise NotImplementedError(f"LR scheduler type {lr_scheduler_type} is not supported")
         return lr_scheduler
@@ -1159,7 +1169,15 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
                 # logits_processor_func return tensors with shape (1, total_nnz/sp_size)
                 if distillation_use_topk:
-                    outputs = logits_processor_func(student_logits=logits_rmpad.unsqueeze(0), data=micro_batch)
+                    # logits_rmpad was divided in-place by temperature_rmpad above (for the policy
+                    # log-probs). Pass that factor so the distillation can undo it and build its
+                    # target from RAW logits (reference OPSD parity; see compute_forward_kl_topk).
+                    student_logits_temperature = temperature_rmpad.clamp(min=1e-8).view(1, -1, 1)
+                    outputs = logits_processor_func(
+                        student_logits=logits_rmpad.unsqueeze(0),
+                        data=micro_batch,
+                        student_logits_temperature=student_logits_temperature,
+                    )
                     cu_seqlens = input_ids.offsets()
                     for k, v in outputs.items():
                         v = v.squeeze(0)
@@ -1271,7 +1289,17 @@ class FSDPEngineWithLMHead(FSDPEngine):
                     # populated in output_args along the use_remove_padding=True
                     # path of prepare_model_inputs.
                     if distillation_use_topk:
-                        outputs = logits_processor_func(student_logits=logits_rmpad.unsqueeze(0), data=micro_batch)
+                        # logits were divided in-place by the per-sample temperature above; expand it
+                        # to per-token and pass it so the distillation undoes the scaling and builds
+                        # its target from RAW logits (reference OPSD parity).
+                        student_logits_temperature = torch.repeat_interleave(
+                            temperature.reshape(-1).clamp(min=1e-8), seq_lengths
+                        ).view(1, -1, 1)
+                        outputs = logits_processor_func(
+                            student_logits=logits_rmpad.unsqueeze(0),
+                            data=micro_batch,
+                            student_logits_temperature=student_logits_temperature,
+                        )
                         for k, v in outputs.items():
                             v = v.squeeze(0)
                             assert v.shape == (logits_rmpad.shape[0],), (

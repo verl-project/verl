@@ -1750,6 +1750,25 @@ class RayPPOTrainer:
                     )
                 )
 
+                # Distillation (OPSD) wandb parity: mirror the core training signal into a `train/`
+                # section using the reference's (HF Trainer) metric names — train/loss,
+                # train/learning_rate, train/grad_norm — so verl and siyan-zhao/OPSD runs overlay
+                # directly on the same wandb project. Aliases only: the original actor/ and
+                # actor/distillation/ keys are left untouched. The distillation loss key is
+                # actor/distillation/loss after the actor/ rename (rename_dict only prefixes keys
+                # that don't already start with the prefix), so accept either form.
+                if OmegaConf.select(self.config, "distillation.enabled", default=False):
+                    train_alias = (
+                        (("actor/distillation/loss", "distillation/loss"), "train/loss"),
+                        (("actor/lr",), "train/learning_rate"),
+                        (("actor/grad_norm",), "train/grad_norm"),
+                    )
+                    for candidate_srcs, dst in train_alias:
+                        for src in candidate_srcs:
+                            if src in metrics:
+                                metrics[dst] = metrics[src]
+                                break
+
                 # TODO: make a canonical logger that supports various backend
                 logger.log(data=metrics, step=self.global_steps)
 

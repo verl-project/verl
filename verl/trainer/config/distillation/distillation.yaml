@@ -39,6 +39,21 @@ distillation_loss:
   # Optional min clamp value for log probabilities for stability, e.g., log q - log p where p or q are very close to zero.
   log_prob_min_clamp: null
 
+  # OPSD per-vocab pointwise KL clip tau (arXiv:2601.18734). Clamps each per-vocab
+  # forward-KL contribution to <= clip_tau BEFORE the vocab sum. null == off.
+  # Distinct from loss_max_clamp (whole-position, post-sum). FSDP forward_kl_topk only.
+  clip_tau: null
+
+  # OPSD reference parity (siyan-zhao/OPSD). When false, the per-token top-k divergence is
+  # NOT floored at 0, so (with clip_tau) it may go negative and keep gradient on tokens where
+  # the student already over-covers the teacher. true == original verl behavior. FSDP forward_kl_topk only.
+  clamp_negative_to_zero: true
+
+  # Softmax temperature applied to BOTH student and teacher logits before the top-k KL, matching the
+  # reference (student_logits/T, teacher_logits/T, renormalized over top-k). null == no scaling (T=1).
+  # FSDP forward_kl_topk only.
+  loss_temperature: null
+
   # Whether to incorporate distillation loss as a reward.
   use_policy_gradient: false
 
@@ -111,3 +126,33 @@ teacher_models:
 
 # Key to route examples to the appropriate teacher model in multi-teacher setups. Should correspond to a field in the data proto, e.g., task.
 teacher_key: data_source
+
+# On-Policy Self-Distillation (OPSD, arXiv:2601.18734): teacher == the same model
+# under a privileged context [x, y*, bridge]. See docs/algo/opsd.md.
+self_distillation:
+  _target_: verl.workers.config.SelfDistillationConfig
+
+  # Route teacher logprobs through the privileged-context builder. Requires enabled=true above.
+  enabled: false
+
+  # "frozen" (default, reproduces the paper): teacher == initial checkpoint theta_0, served by the
+  # existing OPD teacher pool (set teacher_models.*.model_path to the student base). "live" is a
+  # follow-up (teacher == current weights on the rollout engine; trainer wiring not yet landed).
+  teacher_weights: frozen
+
+  # Per-sample non-tensor fields holding the privileged solution y* and the raw problem x
+  # (dotted paths traverse dicts). The teacher prompt is rebuilt from (problem, solution)
+  # via the chat template (teacher_template), matching the reference impl.
+  reference_key: reward_model.ground_truth
+  problem_key: problem
+
+  # enable_thinking passed to the teacher's chat template (Qwen3). Default True.
+  teacher_thinking: true
+
+  # teacher_template defaults to the reference impl's user message in SelfDistillationConfig
+  # (problem + reference solution + transition). Override here only if needed.
+
+  # Token budgets: solution is truncated to max_reference_length; max_bridge_length covers the
+  # template/transition text. Together they size the teacher max_model_len / prompt_length.
+  max_reference_length: 2048
+  max_bridge_length: 256

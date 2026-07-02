@@ -515,9 +515,20 @@ class AgentLoopWorker:
             from verl.experimental.teacher_loop.teacher_manager import AsyncTeacherLLMServerManager
 
             self.teacher_key: str = config.distillation.teacher_key
+            # OPSD (On-Policy Self-Distillation): teacher == the same model under a privileged
+            # context. "frozen" (default) reuses the OPD teacher pool with model_path = student
+            # base; "live" (teacher == current weights on the rollout engine) is a follow-up.
+            self_distillation = config.distillation.self_distillation
+            self.self_distillation_enabled = bool(self_distillation.enabled)
+            if self.self_distillation_enabled and self_distillation.teacher_weights == "live":
+                raise NotImplementedError(
+                    "OPSD self_distillation.teacher_weights='live' wiring is a follow-up; "
+                    "use teacher_weights='frozen' (teacher_models.*.model_path = student base)."
+                )
             self.teacher_server_manager = AsyncTeacherLLMServerManager(
                 config=config,
                 teacher_client=teacher_client,
+                tokenizer=self.tokenizer,  # required by OPSD to encode the y*+bridge context
             )
 
         # Load tools once per worker; each trajectory just reuses self.tools.
@@ -1013,12 +1024,24 @@ class AgentLoopWorker:
                 if routing_value is not None:
                     # Non-tensor batch values arrive as 0-d numpy objects / arrays; normalize to Python.
                     routing_key = routing_value.item() if hasattr(routing_value, "item") else routing_value
-            teacher_ids, teacher_logprobs = await self.teacher_server_manager.compute_teacher_logprobs_single(
-                sequence_ids=prompt_ids + response_ids,
-                multi_modal_data=output.multi_modal_data,
-                mm_processor_kwargs=output.mm_processor_kwargs,
-                routing_key=routing_key,
-            )
+            if self.self_distillation_enabled:
+                # OPSD: teacher evaluates the privileged [x, y*, bridge, ŷ] and the result is
+                # remapped onto the student [x, ŷ] layout (same shape/contract as OPD below).
+                teacher_ids, teacher_logprobs = await self.teacher_server_manager.compute_self_distill_logprobs_single(
+                    prompt_ids=prompt_ids,
+                    response_ids=response_ids,
+                    sample_kwargs=sample_kwargs or {},
+                    multi_modal_data=output.multi_modal_data,
+                    mm_processor_kwargs=output.mm_processor_kwargs,
+                    routing_key=routing_key,
+                )
+            else:
+                teacher_ids, teacher_logprobs = await self.teacher_server_manager.compute_teacher_logprobs_single(
+                    sequence_ids=prompt_ids + response_ids,
+                    multi_modal_data=output.multi_modal_data,
+                    mm_processor_kwargs=output.mm_processor_kwargs,
+                    routing_key=routing_key,
+                )
             output.extra_fields["teacher_ids"] = teacher_ids
             output.extra_fields["teacher_logprobs"] = teacher_logprobs
 

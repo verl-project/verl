@@ -22,7 +22,12 @@ from verl.utils.config import omega_conf_to_dataclass
 
 from .rollout import RolloutConfig
 
-__all__ = ["DistillationLossConfig", "DistillationTeacherModelConfig", "DistillationConfig"]
+__all__ = [
+    "DistillationLossConfig",
+    "DistillationTeacherModelConfig",
+    "SelfDistillationConfig",
+    "DistillationConfig",
+]
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -68,6 +73,27 @@ class DistillationLossConfig(BaseConfig):
     distillation_loss_coef: float = 1.0
     loss_max_clamp: Optional[float] = 10.0
     log_prob_min_clamp: Optional[float] = -10.0
+
+    # OPSD per-vocab pointwise KL clip τ (arXiv:2601.18734 §4.3.3). When set, each
+    # per-vocab divergence contribution is clamped to <= clip_tau BEFORE the vocab
+    # sum, so a few stylistic tokens cannot dominate the signal. None == off.
+    # Distinct from loss_max_clamp (whole-position, post-sum). FSDP forward_kl_topk
+    # only in cut 1; Megatron raises NotImplementedError if set.
+    clip_tau: Optional[float] = None
+
+    # OPSD reference parity (siyan-zhao/OPSD) knobs.
+    #
+    # clamp_negative_to_zero: when True (default, original verl behavior) the per-token
+    #   top-k divergence is floored at 0 (``distillation_losses.clamp_min(0.0)``). The
+    #   reference OPSD does NOT floor it: with per-vocab ``clip_tau`` the per-position sum
+    #   is allowed to go negative, which keeps gradient flowing on tokens where the student
+    #   already over-covers the teacher. Set False to reproduce the reference.
+    # loss_temperature: softmax temperature applied to BOTH student and teacher logits before
+    #   the top-k KL, matching the reference (``student_logits/T``, ``teacher_logits/T``).
+    #   None (default) == no scaling (T=1). The reference 1.7B run used 1.1. Only consumed by
+    #   ``loss_mode='forward_kl_topk'`` on the FSDP backend.
+    clamp_negative_to_zero: bool = True
+    loss_temperature: Optional[float] = None
 
     # Chunked top-K log-probs (opt-in, avoids [B, T, V] log_softmax buffer
     # at long context). Only consumed by ``loss_mode='forward_kl_topk'``.
@@ -169,19 +195,25 @@ class DistillationTeacherModelConfig(BaseConfig):
         if self.num_replicas is None:
             raise ValueError("num_replicas must be specified for distillation teacher model config.")
 
-    def validate_and_prepare_for_distillation(self, use_topk: bool, topk: Optional[int]) -> None:
-        # Prompt + Response from student are fed into teacher as context
+    def validate_and_prepare_for_distillation(
+        self, use_topk: bool, topk: Optional[int], privileged_extra: int = 0
+    ) -> None:
+        # Prompt + Response from student are fed into teacher as context.
+        # For OPSD the teacher context is the privileged [x, y*, bridge, ŷ], so reserve
+        # `privileged_extra` (= max_reference_length + max_bridge_length) extra tokens.
+        # privileged_extra=0 (plain OPD / non-OPSD) reproduces the original arithmetic.
         max_model_len = self.inference.max_model_len
         student_prompt_length = self.inference.prompt_length
         student_response_length = self.inference.response_length
-        required_context_len = student_prompt_length + student_response_length + 1
+        required_context_len = student_prompt_length + privileged_extra + student_response_length + 1
         if max_model_len is not None and required_context_len > max_model_len:
             raise ValueError(
-                "Distillation teacher inference requires room for the student prompt, the full student "
-                f"response, and one generated token, but got {student_prompt_length=}, "
-                f"{student_response_length=}, {required_context_len=}, {max_model_len=}."
+                "Distillation teacher inference requires room for the student prompt, the privileged "
+                "context (y* + bridge), the full student response, and one generated token, but got "
+                f"{student_prompt_length=}, {privileged_extra=}, {student_response_length=}, "
+                f"{required_context_len=}, {max_model_len=}."
             )
-        self.inference.prompt_length = self.inference.prompt_length + self.inference.response_length
+        self.inference.prompt_length = self.inference.prompt_length + privileged_extra + self.inference.response_length
         self.inference.response_length = 1
         self._validate_topk_logprobs(use_topk=use_topk, topk=topk)
 
@@ -216,6 +248,83 @@ class DistillationTeacherModelConfig(BaseConfig):
                 raise NotImplementedError(
                     f"DistillationTeacherModelConfig does not support inference engine {engine_name}"
                 )
+
+
+@dataclass
+class SelfDistillationConfig(BaseConfig):
+    """On-Policy Self-Distillation (OPSD, arXiv:2601.18734): teacher == the same
+    model under a privileged context [x, y*, bridge]. See docs/algo/opsd.md.
+
+    enabled (bool):
+        Route teacher logprobs through the privileged-context builder instead of
+        the plain OPD context. Requires ``distillation.enabled=True``.
+    teacher_weights (str): "frozen" | "live".
+        "frozen" (DEFAULT, reproduces the paper §4.1): teacher == the INITIAL
+            checkpoint theta_0, served by the existing OPD teacher pool. Set
+            ``distillation.teacher_models.<name>.model_path`` to the SAME base
+            checkpoint as the student init, and keep a non-empty teacher pool.
+        "live" (Algorithm-1 theory): teacher == the CURRENT student weights,
+            served by the rollout engine. Requires n_gpus_per_node=nnodes=0 plus
+            the trainer-level control flow (need_teacher_policy->False, the
+            trainer-base pool guard gated off, teacher_client=None).
+    reference_key (str):
+        Per-sample non-tensor field holding the privileged solution y*. Dotted
+        keys traverse nested dicts; the default ``reward_model.ground_truth``
+        reads ``non_tensor_batch["reward_model"]`` (a per-sample dict) and indexes
+        its ``ground_truth`` entry — the path the reward managers use.
+    problem_key (str):
+        Per-sample non-tensor field holding the raw problem text x. The teacher
+        prompt is rebuilt from (problem, solution) via the chat template (see
+        teacher_template), matching the reference impl — the privileged context is
+        a proper user turn, NOT y* appended after the student's templated prompt.
+    teacher_template (str):
+        Teacher user-message template with ``{problem}`` and ``{solution}`` fields,
+        rendered through ``tokenizer.apply_chat_template(add_generation_prompt=True,
+        enable_thinking=teacher_thinking)``. Default is the reference impl's text.
+    teacher_thinking (bool):
+        ``enable_thinking`` passed to the teacher's chat template (Qwen3). Default
+        True (the reference default; the student rolls out with thinking off).
+    max_reference_length (int):
+        Token budget for the reference solution y* inside the teacher context; the
+        solution is truncated to this many tokens. The teacher's max_model_len /
+        prompt_length sizing is extended by this + max_bridge_length so the
+        privileged [teacher_prompt, ŷ] sequence is not silently truncated.
+    max_bridge_length (int):
+        Token budget for the template/transition text (everything in the teacher
+        prompt other than the problem and the truncated solution).
+    """
+
+    enabled: bool = False
+    teacher_weights: str = "frozen"  # paper default; "live" == Algorithm-1 theory
+    reference_key: str = "reward_model.ground_truth"
+    problem_key: str = "problem"
+    # Reference impl's teacher user message (siyan-zhao/OPSD data_collator.py, non-reason_first).
+    # {problem}/{solution} are substituted; \boxed{} is emitted literally after .format().
+    teacher_template: str = (
+        "Problem: {problem}\n\n"
+        "Here is a reference solution to this problem:\n"
+        "=== Reference Solution Begin ===\n{solution}\n=== Reference Solution End ===\n"
+        "\n\nAfter reading the reference solution above, make sure you truly understand the "
+        "reasoning behind each step — do not copy or paraphrase it. Now, using your own words "
+        "and independent reasoning, derive the same final answer to the problem above. Think "
+        "step by step, explore different approaches, and don't be afraid to backtrack or "
+        "reconsider if something doesn't work out:\n"
+        "\nPlease reason step by step, and put your final answer within \\boxed{{}}."
+    )
+    teacher_thinking: bool = True
+    max_reference_length: int = 2048
+    max_bridge_length: int = 256
+
+    def __post_init__(self):
+        if self.enabled and self.teacher_weights not in ("frozen", "live"):
+            raise ValueError(
+                f"self_distillation.teacher_weights must be 'frozen' or 'live', got {self.teacher_weights!r}."
+            )
+
+    @property
+    def privileged_extra(self) -> int:
+        """Extra teacher-context tokens reserved for [y*, bridge] when OPSD is on."""
+        return (self.max_reference_length + self.max_bridge_length) if self.enabled else 0
 
 
 @dataclass
@@ -265,17 +374,37 @@ class DistillationConfig(BaseConfig):
     teacher_models: dict[str, DistillationTeacherModelConfig] = field(default_factory=dict)
     teacher_key: str = "data_source"
     distillation_loss: DistillationLossConfig = field(default_factory=DistillationLossConfig)
+    self_distillation: SelfDistillationConfig = field(default_factory=SelfDistillationConfig)
 
     def __post_init__(self):
         if not self.enabled:
             return
 
+        sd = self.self_distillation
+        if sd.enabled and sd.teacher_weights == "live":
+            # OPSD live: teacher is the rollout model itself; there is no separate
+            # teacher pool, so skip the pool-sizing resolution/sum below. The 3
+            # trainer-level sites (need_teacher_policy, the trainer-base pool guard,
+            # MultiTeacherModelManager wiring) and the rollout-engine max_logprobs /
+            # max_model_len validation are handled at trainer config-resolution time,
+            # NOT here. The rollout engine serves p_T at the current weights.
+            if self.n_gpus_per_node != 0 or self.nnodes != 0:
+                raise ValueError(
+                    "self_distillation.teacher_weights='live' uses the rollout model as the teacher; "
+                    f"the teacher pool must be empty, but got {self.n_gpus_per_node=}, {self.nnodes=}."
+                )
+            return
+
+        # Plain OPD, OR OPSD frozen (teacher == theta_0 on the OPD pool, with
+        # teacher_models[*].model_path = student base). Frozen reuses the pool path
+        # unchanged, only sizing the teacher context for the privileged sequence.
         self.teacher_models = self._resolve_teacher_models()
         teacher_world_size_sum = 0
         for teacher_model in self.teacher_models.values():
             teacher_model.validate_and_prepare_for_distillation(
                 use_topk=self.distillation_loss.loss_settings.use_topk,
                 topk=self.distillation_loss.topk,
+                privileged_extra=sd.privileged_extra,
             )
             teacher_world_size_sum += teacher_model.world_size
         total_pool_size = self.n_gpus_per_node * self.nnodes
