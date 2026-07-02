@@ -309,6 +309,35 @@ python3 -m verl.experimental.one_step_off_policy.async_main_ppo \
        > - When `trainer.n_gpus_per_node + rollout.n_gpus_per_node > physical_gpus_per_node`,
        >   the required node count is `trainer.nnodes + rollout.nnodes`
 
+### Delta Weight Sync
+
+In the disaggregated setup the trainer must broadcast its updated weights to the rollout engine after every step.
+By default this is a full-weight broadcast whose cost grows with model size. Because RL updates are highly sparse —
+under typical learning rates over 99% of BF16 weight bytes are unchanged step-over-step — you can instead broadcast
+only the parameters that changed (a *delta*), cutting the weight-sync traffic to the sparsity ratio while staying
+lossless (bit-exact; a per-flush checksum is verified on the receiver).
+
+Enable it by selecting the ``delta`` checkpoint-engine backend on any disaggregated (``hybrid_engine=False``) SGLang run:
+
+```shell
+    actor_rollout_ref.rollout.checkpoint_engine.backend=delta \
+    +actor_rollout_ref.rollout.checkpoint_engine.engine_kwargs.delta.encoding=indices
+```
+
+The trainer byte-diffs each parameter against a pinned-CPU snapshot of the previous sync and broadcasts only the
+changed ``(position, value)`` pairs over the existing NCCL collective group; the rollout worker reconstructs the full
+tensors locally and applies them through the ordinary weight-update path (no SGLang-side delta receiver is required).
+``encoding`` selects the position encoding: ``indices`` (int32 absolute positions, lowest compute) or ``deltas``
+(uint16 gap deltas, smaller on the wire).
+
+- **When to use**: disaggregated training where the trainer↔rollout link is the bottleneck (commodity network /
+  cross-node / large models). On a fast intra-node NVLink link with a small model the full broadcast is already cheap,
+  so delta mainly pays off as the model size and the network distance grow.
+- **Scope**: disaggregated (``hybrid_engine=False``) + SGLang rollout in BF16.
+
+A runnable example is ``verl/experimental/one_step_off_policy/shell/grpo_0.6b_gsm8k_fsdp2_sglang_delta_2_6.sh`` — the
+SGLang 2+6 disaggregated GRPO recipe with ``backend=delta``.
+
 ## Functional Support
 
 | Category           | Support Situation                                                                                               |
