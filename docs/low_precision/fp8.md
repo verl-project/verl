@@ -49,6 +49,44 @@ Or via command line:
 actor_rollout_ref.rollout.quantization=fp8
 ```
 
+#### Skipping layers in SGLang FP8 rollout
+
+When using SGLang FP8 rollout, you can skip FP8 weight quantization for
+selected modules. Skipped modules stay in the rollout model dtype instead
+of being converted to FP8. This is useful for layers that are not
+compatible with block-wise FP8 weight quantization, or for modules that
+you prefer to keep in higher precision.
+
+Set `SGLANG_FP8_IGNORED_LAYERS` before starting training:
+
+```bash
+SGLANG_FP8_IGNORED_LAYERS=linear_attn \
+python3 -m verl.trainer.main_ppo \
+  actor_rollout_ref.rollout.name=sglang \
+  actor_rollout_ref.rollout.quantization=fp8 \
+  ...
+```
+
+Multiple entries can be separated by commas:
+
+```bash
+SGLANG_FP8_IGNORED_LAYERS=linear_attn,visual
+```
+
+You can also use the model `quantization_config`:
+
+```json
+{
+  "quantization_config": {
+    "ignored_layers": ["re:.*linear_attn.*"]
+  }
+}
+```
+
+Plain module names, full module paths, and `re:` regex patterns are
+supported. verl applies the same ignored-layer rules when launching
+SGLang and when syncing updated actor weights into the rollout engine.
+
 ### Experiments and Outcomes
 
 #### Qwen3-8B-Base Dense Model
