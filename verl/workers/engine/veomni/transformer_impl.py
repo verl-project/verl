@@ -803,8 +803,18 @@ class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
                         "both must be provided together for fused top-K distillation."
                     )
                 # Kernel kwarg names follow veomni's chunk_topk_distill_function API.
-                teacher_topk_ids = micro_batch["teacher_ids"].values().unsqueeze(0)
-                teacher_topk_log_probs = micro_batch["teacher_logprobs"].values().unsqueeze(0)
+                teacher_ids = micro_batch["teacher_ids"]
+                teacher_logprobs = micro_batch["teacher_logprobs"]
+                if teacher_ids.is_nested:
+                    teacher_topk_ids = teacher_ids.values().unsqueeze(0)
+                    teacher_topk_log_probs = teacher_logprobs.values().unsqueeze(0)
+                else:
+                    # Tensors may already be in the rmpad [1, total_nnz, K]
+                    # layout expected by VeOmni (for example when the caller has
+                    # preprocessed the distillation batch). Avoid assuming a
+                    # NestedTensor-only representation.
+                    teacher_topk_ids = teacher_ids
+                    teacher_topk_log_probs = teacher_logprobs
                 # SP-slice along seqlen (dim=1); teacher tensors are 3D
                 # (1, total_nnz, K) so use slice_input_tensor directly —
                 # ulysses_pad_and_slice_inputs hardcodes 2D.
@@ -815,6 +825,9 @@ class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
                     teacher_topk_log_probs = slice_input_tensor(teacher_topk_log_probs, dim=1, padding=True)
                 model_inputs["teacher_topk_ids"] = teacher_topk_ids
                 model_inputs["teacher_topk_log_probs"] = teacher_topk_log_probs
+                clamp = tu.get_non_tensor_data(data=micro_batch, key="log_prob_min_clamp", default=None)
+                if clamp is not None:
+                    model_inputs["log_prob_min_clamp"] = clamp
 
         # Router replay plumbing. Two responsibilities:
         #   (1) snapshot the ulysses pad_size for this micro-batch so
