@@ -557,12 +557,6 @@ def select_tool_agent_trajectories(names: list[str] | None = None) -> list[ToolA
 # =============================================================================
 
 
-# Synthetic reasoning used to fill a thinking model's ``<think>`` block for the
-# terminating (answer-only) turn, so the block is non-empty and the generation
-# prompt aligns as a clean token prefix.
-_THINKING_FILLER = "Let me reason about this before answering."
-
-
 def _format_tool_call_text(tool_parser: str, name: str, arguments: dict[str, Any]) -> str:
     """Render a single tool call as the raw text the model would generate for
     the given tool-parser format."""
@@ -595,21 +589,6 @@ def _format_assistant_content(tool_parser: str, reasoning: str, calls: list[tupl
     return tool_block
 
 
-def _wrap_thinking_content(reasoning: str, body: str, *, has_calls: bool) -> str:
-    """Wrap an assistant turn as a thinking model would actually generate it.
-
-    Thinking VL templates open a ``<think>`` block at the generation prompt, so a
-    faithful mock generation is ``<think>{reasoning}</think>\\n\\n{answer/tool_call}``.
-    For a tool-call turn the step's ``reasoning`` is the pre-tool thought and goes
-    inside the block; for the terminating turn ``reasoning`` is the final answer,
-    so a short synthetic thought fills the block and the answer follows it.
-    """
-    if has_calls:
-        think_text = reasoning or _THINKING_FILLER
-        return f"<think>\n{think_text}\n</think>\n\n{body}"
-    return f"<think>\n{_THINKING_FILLER}\n</think>\n\n{reasoning}"
-
-
 @dataclass
 class VLToolResponseSpec:
     """A single tool response used both to build the mock trajectory prefix and
@@ -617,7 +596,7 @@ class VLToolResponseSpec:
 
     tool_name: str
     text: str
-    image: "PILImage | None" = None
+    image: PILImage | None = None
 
     def to_message(self) -> dict[str, Any]:
         content: list[dict[str, Any]] = []
@@ -652,11 +631,7 @@ class VLToolStep:
     calls: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
     responses: list[VLToolResponseSpec] = field(default_factory=list)
 
-    def assistant_message(self, tool_parser: str, is_thinking: bool = False) -> dict[str, Any]:
-        if is_thinking:
-            body = _format_assistant_content(tool_parser, "", self.calls)
-            content = _wrap_thinking_content(self.reasoning, body, has_calls=bool(self.calls))
-            return {"role": "assistant", "content": content}
+    def assistant_message(self, tool_parser: str) -> dict[str, Any]:
         content = _format_assistant_content(tool_parser, self.reasoning, self.calls)
         return {"role": "assistant", "content": content}
 
@@ -698,18 +673,14 @@ class VLSingleTurnTrajectory:
     expected_generation_turns: int = 1
     expected_num_turns: int = 2
 
-    def assistant_message(self, is_thinking: bool = False) -> dict[str, Any]:
-        if is_thinking:
-            content = _wrap_thinking_content(self.assistant_response, "", has_calls=False)
-        else:
-            content = self.assistant_response
-        return {"role": "assistant", "content": content}
+    def assistant_message(self) -> dict[str, Any]:
+        return {"role": "assistant", "content": self.assistant_response}
 
 
 VLMockTrajectory = VLSingleTurnTrajectory | VLToolTrajectory
 
 
-def _solid_image(size: tuple[int, int], color: str) -> "PILImage":
+def _solid_image(size: tuple[int, int], color: str) -> PILImage:
     from PIL import Image
 
     return Image.new("RGB", size, color=color)
