@@ -1165,7 +1165,9 @@ class FSDPEngineWithLMHead(FSDPEngine):
                     cu_seqlens = input_ids.offsets()
                     for k, v in outputs.items():
                         v = v.squeeze(0)
-                        assert v.shape == (logits_rmpad.shape[0],), (
+                        # First-dim only: v may be (total_nnz,) or (total_nnz, K) for
+                        # the top-K path (e.g. student_topk_log_probs / student_topk_ids).
+                        assert v.shape[0] == logits_rmpad.shape[0], (
                             f"logits_rmpad len: {logits_rmpad.shape[0]}, {k} shape: {v.shape}"
                         )
                         if self.use_ulysses_sp:
@@ -1276,7 +1278,9 @@ class FSDPEngineWithLMHead(FSDPEngine):
                         outputs = logits_processor_func(student_logits=logits_rmpad.unsqueeze(0), data=micro_batch)
                         for k, v in outputs.items():
                             v = v.squeeze(0)
-                            assert v.shape == (logits_rmpad.shape[0],), (
+                            # First-dim only: v may be (total_nnz,) or (total_nnz, K) for
+                            # the top-K path (e.g. student_topk_log_probs / student_topk_ids).
+                            assert v.shape[0] == logits_rmpad.shape[0], (
                                 f"logits_rmpad len: {logits_rmpad.shape[0]}, {k} shape: {v.shape}"
                             )
                             model_output[k] = torch.nested.nested_tensor_from_jagged(v, cu_seqlens)
