@@ -72,9 +72,7 @@ class ChatMLTokenizer:
                         ids.append(self._vocab.setdefault(word, len(self._vocab) + 100))
         return ids
 
-    def apply_chat_template(
-        self, messages, add_generation_prompt=False, tokenize=True, tools=None, **kwargs
-    ):
+    def apply_chat_template(self, messages, add_generation_prompt=False, tokenize=True, tools=None, **kwargs):
         text = self._template.render(messages=messages, add_generation_prompt=add_generation_prompt)
         return self.encode(text) if tokenize else text
 
