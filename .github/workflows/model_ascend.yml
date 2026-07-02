@@ -108,6 +108,7 @@ jobs:
           bash tests/special_distributed/run_all.sh
 
   # TODO: Move this back to model_rmpad once FSDP2 is stable.
+  # TODO: Move test_engine.py's check_dtype=False, when npu's vllm0.23.0 is ok, run pytest -s -x tests/models/test_engine.py::test_actor_engine[fsdp] check it
   # NOTE: List as an independent job to make rerun easier.
   model_rmpad_fsdp2_unstable_ascend:
     if: github.repository_owner == 'verl-project'
@@ -127,6 +128,8 @@ jobs:
       - name: Install the current repository
         run: |
           pip install --no-deps -e .[test]
+          pip install -r requirements-test.txt
+          pip install --upgrade "accelerate>=1.13.0"
       - name: Check final pip list
         run: |
           pip3 list
@@ -136,3 +139,7 @@ jobs:
       - name: Running FSDP2 rmpad model tests on 8 NPUs
         run: |
           STRATEGY=fsdp2 torchrun --nproc_per_node=8 tests/special_distributed/test_fsdp_ckpt.py
+      - name: Running model_engine_ascend
+        run: |
+          ray stop --force
+          pytest tests/models/test_engine.py

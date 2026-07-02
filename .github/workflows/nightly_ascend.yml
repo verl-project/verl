@@ -300,7 +300,7 @@ jobs:
       - name: Prepare weights
         run: |
           ln -s /root/.cache/models ~/models
-      - name: Preprocess geo3k dataset
+      - name: Preprocess GSM8K dataset
         run: |
           python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
       - name: Running nightlyCI_gspo-qwen3-30b-megatron-vllm_ascend
@@ -384,7 +384,7 @@ jobs:
           clean: true
       - name: Install the current repository
         run: |
-          pip install --no-deps -e .
+          pip install -r requirements-npu.txt && pip install -v -e .
       - name: Check final pip list
         run: |
           pip list
@@ -399,7 +399,7 @@ jobs:
           ray stop --force
           bash tests/special_npu/nightly_ci_ascend/run_grpo_qwen3_5_2b_fsdp2_npu.sh
 
-  # Test quick start vllm fsdp2
+# Test quick start vllm fsdp2
   quick_start_qwen3_0_6b_fsdp2_vllm_ascend:
     if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 17 * * *' }}
     runs-on: linux-aarch64-a2b3-8
@@ -549,3 +549,55 @@ jobs:
         run: |
           ray stop --force
           TOTAL_TRAINING_STEPS=1 bash tests/special_npu/quick_start/run_qwen3_0_6b_fsdp2_sglang_ascend.sh
+  
+  # Test grpo qwen3-30b veomni fsdp
+  nightlyCI_grpo-qwen3-30b-veomni-fsdp_ascend:
+    if: github.repository_owner == 'verl-project'
+    runs-on: linux-aarch64-a3-16
+    timeout-minutes: 180 # Increase this timeout value as needed
+    container:
+      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:verl-9.0.0-a3-ubuntu22.04-py3.11-latest
+      options: >-
+        --shm-size 60g
+    env:
+      HF_ENDPOINT: "https://hf-mirror.com"
+      HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi"
+      UV_INDEX_STRATEGY: unsafe-best-match
+      UV_INSECURE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
+      UV_HTTP_TIMEOUT: 120
+      UV_NO_CACHE: "1"
+      UV_SYSTEM_PYTHON: "1"
+      UV_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
+      PIP_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
+      PIP_TRUSTED_HOST: "cache-service.nginx-pypi-cache.svc.cluster.local"
+    steps:
+      - name: Check npu and CANN info
+        run: |
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+          npu-smi info
+      - name: Install uv
+        run: pip install uv
+      - name: Install the current repository
+        run: |
+          uv pip install -r requirements-npu.txt && uv pip install -v -e .
+          uv pip install veomni==0.1.11 --ignore-requires-python --no-deps --index-url https://pypi.org/simple/
+          uv pip install transformers==5.3.0
+      - name: Check initial pip list from image
+        run: |
+          uv pip list
+      - name: Checkout verl-project/verl repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          clean: true
+      - name: Prepare weights
+        run: |
+          ln -s /root/.cache/models ~/models
+      - name: Prepare GSM8K dataset
+        run: |
+          python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
+      - name: Running nightlyCI_grpo-qwen3-30b-veomni-fsdp_ascend
+        run: |
+          ray stop --force
+          bash tests/special_npu/nightly_ci_ascend/run_grpo_qwen3_30b_veomni_fsdp.sh
