@@ -29,8 +29,13 @@ try:
 except ImportError:
     warnings.warn("NPU not support router replay for now.", stacklevel=2)
     MoEAlltoAllTokenDispatcher = None
+from megatron.core.transformer import TransformerConfig
 from megatron.core.transformer.moe.router import TopKRouter
-from megatron.core.transformer.transformer_config import TransformerConfig
+
+try:
+    from megatron.core.transformer import MLATransformerConfig
+except ImportError:
+    MLATransformerConfig = None
 
 # https://github.com/THUDM/slime/blob/main/slime/utils/routing_replay.py
 
@@ -337,62 +342,59 @@ def patched_routing(self, logits: torch.Tensor, *args, **kwargs):
 def apply_router_replay_patch():
     """
     Applies the monkey patch for MoE Router Replay functionality.
-    This patch dynamically adds the 'enable_routing_replay' attribute to TransformerConfig
+    This patch dynamically adds the 'enable_routing_replay' attribute to Megatron config classes
     and modifies the TopKRouter to support recording and replaying of routing decisions.
     """
     print("Applying Router Replay Patch...")
     # Clear router instances to avoid state leakage between model initializations.
     RouterReplay.router_instances.clear()
-    # Step 1: Patch TransformerConfig to include the feature flag
+    # Step 1: Patch config classes to include the feature flag.
 
-    try:
-        sig = inspect.signature(TransformerConfig.__init__)
-        native_params = sig.parameters
-        params = list(sig.parameters.values())
-    except Exception:
-        sig = None
-        native_params = {}
-        params = []
-
-    ext_attrs = ["enable_routing_replay"]
-
-    # Update __signature__ to prevent NPU/MindSpeed wrappers from filtering out or blocking custom parameters.
-    for attr in ext_attrs:
-        if attr not in native_params:
-            if sig:
-                new_param = inspect.Parameter(attr, inspect.Parameter.KEYWORD_ONLY, default=False)
-                if params and params[-1].kind == inspect.Parameter.VAR_KEYWORD:
-                    params.insert(-1, new_param)
-                else:
-                    params.append(new_param)
-
-    if sig:
+    def patch_config_class(config_cls):
         try:
-            TransformerConfig.__init__.__signature__ = sig.replace(parameters=params)
-        except Exception as e:
-            print(f"Failed to update signature metadata: {e}")
+            sig = inspect.signature(config_cls.__init__)
+            native_params = sig.parameters
+            params = list(sig.parameters.values())
+        except Exception:
+            sig = None
+            native_params = {}
+            params = []
 
-    if not hasattr(TransformerConfig, "_verl_router_patched"):
-        # Store original __init__ method
-        original_tf_config_init = TransformerConfig.__init__
+        # Update __signature__ to prevent wrappers from filtering out or blocking custom parameters.
+        if "enable_routing_replay" not in native_params and sig:
+            new_param = inspect.Parameter("enable_routing_replay", inspect.Parameter.KEYWORD_ONLY, default=False)
+            if params and params[-1].kind == inspect.Parameter.VAR_KEYWORD:
+                params.insert(-1, new_param)
+            else:
+                params.append(new_param)
 
-        # Define new __init__ method that safely handles enable_routing_replay parameter
-        @wraps(original_tf_config_init)
-        def patched_tf_config_init(self, *args, **kwargs):
-            # Simple solution: remove the unknown parameter before calling original constructor
-            enable_routing_replay = kwargs.get("enable_routing_replay", False)
-            if "enable_routing_replay" not in native_params:
-                enable_routing_replay = kwargs.pop("enable_routing_replay", False)
+            try:
+                config_cls.__init__.__signature__ = sig.replace(parameters=params)
+            except Exception as e:
+                print(f"Failed to update signature metadata for {config_cls.__name__}: {e}")
 
-            # Call original constructor with remaining kwargs
-            original_tf_config_init(self, *args, **kwargs)
+        if "_verl_router_patched" not in config_cls.__dict__:
+            original_config_init = config_cls.__init__
 
-            # Set the instance attribute
-            self.enable_routing_replay = enable_routing_replay
+            @wraps(original_config_init)
+            def patched_config_init(self, *args, **kwargs):
+                enable_routing_replay = kwargs.get("enable_routing_replay", False)
+                if "enable_routing_replay" not in native_params:
+                    enable_routing_replay = kwargs.pop("enable_routing_replay", False)
 
-        # Apply the patch
-        TransformerConfig.__init__ = patched_tf_config_init
-        TransformerConfig._verl_router_patched = True
+                original_config_init(self, *args, **kwargs)
+                self.enable_routing_replay = enable_routing_replay
+
+            config_cls.__init__ = patched_config_init
+            config_cls._verl_router_patched = True
+
+        # config_converter filters kwargs with hasattr(cls, key), so expose a class-level default.
+        if "enable_routing_replay" not in config_cls.__dict__:
+            config_cls.enable_routing_replay = False
+
+    patch_config_class(TransformerConfig)
+    if MLATransformerConfig is not None:
+        patch_config_class(MLATransformerConfig)
 
     # Step 2: Patch TopKRouter only once to ensure idempotency.
     if hasattr(TopKRouter, "_router_replay_patched"):
