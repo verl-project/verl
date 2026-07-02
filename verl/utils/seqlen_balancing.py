@@ -14,6 +14,7 @@
 
 import copy
 import heapq
+import logging
 from itertools import chain
 
 import torch
@@ -22,6 +23,8 @@ from torch import distributed as dist
 from verl.protocol import DataProto
 from verl.utils import tensordict_utils as tu
 from verl.utils.device import get_device_name
+
+logger = logging.getLogger(__name__)
 
 
 def calculate_workload(seqlen_list: torch.Tensor) -> torch.Tensor:
@@ -392,50 +395,99 @@ def rearrange_micro_batches(
     )
 
     total_seqlen = seq_len_effective.sum().item()
-    # NOTE: num_microbatches <= batch_size, so take the min of this two.
+    # NOTE: num_microbatches <= num_groups, so take the min of this two.
     # When force_group_size > 1, we work with groups instead of individual samples
     num_groups = batch_size // force_group_size
-    num_micro_batches = min(num_groups, ceildiv(total_seqlen, max_token_len))
-    if min_num_micro_batch is not None:
-        # used to support pp
-        num_micro_batches = max(min_num_micro_batch, num_micro_batches)
-    if dist.is_initialized() and same_micro_num_in_dp and dp_group is not None:
-        num_micro_batches = torch.tensor([num_micro_batches], device=get_device_name())
-        dist.all_reduce(num_micro_batches, op=dist.ReduceOp.MAX, group=dp_group)
-        num_micro_batches = num_micro_batches.cpu().item()
-    if num_batches_divided_by is not None:
-        num_micro_batches = roundup_divisible(num_micro_batches, num_batches_divided_by)
-
-    assert num_micro_batches <= num_groups
 
     # upcast to int64 to avoid potential overflow im `calculate_workload` computation.
     seq_len_effective = seq_len_effective.long()
+    # per-sample token counts, used to check the max_token_len cap (token sum, not workload).
+    seqlen_per_sample = seq_len_effective.cpu().tolist()
 
-    # When force_group_size > 1, aggregate workloads by groups
+    # Workloads only depend on the sequence lengths, so precompute them once.
     if force_group_size > 1:
         # Calculate workload for each group (sum of workloads of samples in the group)
         workloads_per_sample = calculate_workload(seq_len_effective)
         workloads_per_sample_grouped = workloads_per_sample.view(num_groups, force_group_size)
         group_workloads = workloads_per_sample_grouped.sum(dim=1).cpu().tolist()
-
-        # Partition groups instead of individual samples
-        micro_bsz_group_idx = get_seqlen_balanced_partitions(group_workloads, num_micro_batches, equal_size=False)
-
-        # Convert group indices back to sample indices
-        micro_bsz_idx = []
-        for group_partition in micro_bsz_group_idx:
-            sample_partition = []
-            for group_idx in group_partition:
-                start_idx = group_idx * force_group_size
-                sample_partition.extend(range(start_idx, start_idx + force_group_size))
-            micro_bsz_idx.append(sample_partition)
-
         workloads = group_workloads
     else:
-        # Original logic for force_group_size == 1
         # note that seq_len_effective is a GPU tensor. We need to make it a list to avoid D2H!
         workloads = calculate_workload(seq_len_effective).cpu().tolist()
-        micro_bsz_idx = get_seqlen_balanced_partitions(workloads, num_micro_batches, equal_size=False)
+
+    def _apply_constraints(n: int) -> int:
+        if min_num_micro_batch is not None:
+            # used to support pp
+            n = max(min_num_micro_batch, n)
+        if dist.is_initialized() and same_micro_num_in_dp and dp_group is not None:
+            n_tensor = torch.tensor([n], device=get_device_name())
+            dist.all_reduce(n_tensor, op=dist.ReduceOp.MAX, group=dp_group)
+            n = int(n_tensor.cpu().item())
+        if num_batches_divided_by is not None:
+            n = roundup_divisible(n, num_batches_divided_by)
+        return n
+
+    def _reduce_flag(flag: bool, op) -> bool:
+        # Keep the re-partition decision collective so that all dp ranks run the same
+        # number of all_reduce calls (avoids deadlock when same_micro_num_in_dp is set).
+        if dist.is_initialized() and same_micro_num_in_dp and dp_group is not None:
+            flag_tensor = torch.tensor([1 if flag else 0], device=get_device_name())
+            dist.all_reduce(flag_tensor, op=op, group=dp_group)
+            return bool(flag_tensor.cpu().item())
+        return flag
+
+    def _any(flag: bool) -> bool:
+        return _reduce_flag(flag, dist.ReduceOp.MAX)
+
+    def _all(flag: bool) -> bool:
+        return _reduce_flag(flag, dist.ReduceOp.MIN)
+
+    def _make_partitions(n: int) -> list[list[int]]:
+        if force_group_size > 1:
+            # Partition groups instead of individual samples
+            micro_bsz_group_idx = get_seqlen_balanced_partitions(group_workloads, n, equal_size=False)
+            # Convert group indices back to sample indices
+            partitions = []
+            for group_partition in micro_bsz_group_idx:
+                sample_partition = []
+                for group_idx in group_partition:
+                    start_idx = group_idx * force_group_size
+                    sample_partition.extend(range(start_idx, start_idx + force_group_size))
+                partitions.append(sample_partition)
+            return partitions
+        return get_seqlen_balanced_partitions(workloads, n, equal_size=False)
+
+    def _max_partition_tokens(partitions: list[list[int]]) -> int:
+        return max(sum(seqlen_per_sample[idx] for idx in partition) for partition in partitions)
+
+    num_micro_batches = min(num_groups, ceildiv(total_seqlen, max_token_len))
+    num_micro_batches = _apply_constraints(num_micro_batches)
+    assert num_micro_batches <= num_groups
+
+    # Karmarkar-Karp balances the squared-workload sum rather than the raw token count, so a
+    # micro-batch's total tokens can still exceed max_token_len. Re-partition with one more
+    # micro-batch until the cap holds or we are physically bounded by the number of groups.
+    micro_bsz_idx = _make_partitions(num_micro_batches)
+    max_partition_tokens = _max_partition_tokens(micro_bsz_idx)
+    while _any(max_partition_tokens > max_token_len) and _all(num_micro_batches < num_groups):
+        candidate = _apply_constraints(num_micro_batches + 1)
+        # num_batches_divided_by can round the candidate beyond num_groups on some rank;
+        # only commit the increment when every rank can accommodate it.
+        if not _all(num_micro_batches < candidate <= num_groups):
+            break
+        num_micro_batches = candidate
+        micro_bsz_idx = _make_partitions(num_micro_batches)
+        max_partition_tokens = _max_partition_tokens(micro_bsz_idx)
+
+    if max_partition_tokens > max_token_len:
+        logger.warning(
+            "Could not keep every micro-batch within max_token_len=%d: the largest micro-batch has "
+            "%d tokens. This is bounded by the number of samples/groups (%d) in the batch. Consider "
+            "increasing the batch size or max_token_len_per_gpu to reduce the risk of OOM.",
+            max_token_len,
+            max_partition_tokens,
+            num_groups,
+        )
 
     if use_dynamic_bsz_balance:
         # Use the sum of squared sequence lengths to approximate attention computation workload
