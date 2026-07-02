@@ -295,10 +295,45 @@ def _is_glm_tokenizer(tokenizer) -> bool:
             "glm-4v",
             "glm-4.1v",
             "glm-4.5v",
+            "glm-4.6v",
             "glm-4.1-vl",
             "glm-4.5-vl",
+            "glm-4.6-vl",
         )
-    ) or any(marker in compact_name for marker in ("glm47", "glm5", "glm4v", "glm41v", "glm45v"))
+    ) or any(marker in compact_name for marker in ("glm47", "glm5", "glm4v", "glm41v", "glm45v", "glm46v"))
+
+
+def _warn_glm_tool_template_limitations(model_name: str) -> None:
+    """Warn about GLM vision templates that cannot faithfully render tool turns.
+
+    - GLM-4V / GLM-4.1V templates have no ``tool`` role branch at all, so any
+      ``role: "tool"`` message is silently dropped. Multi-turn tool trajectories
+      are therefore unrepresentable and any tool-based check is meaningless.
+    - GLM-4.5V handles a ``tool`` role, but its list-content branch stringifies
+      each part (``{{ tr.output if tr.output is defined else tr }}``) instead of
+      expanding images, so an image-bearing tool response leaks the live PIL
+      object ``repr`` (with a non-deterministic memory address) into the text and
+      breaks append-only. GLM-4.6V fixed this (proper ``<|image|>`` expansion).
+    """
+    name = model_name.lower()
+    compact = "".join(char for char in name if char.isalnum())
+    is_glm4v = any(m in name for m in ("glm-4v", "glm-4.1v", "glm-4.1-vl")) or any(
+        m in compact for m in ("glm4v", "glm41v")
+    )
+    is_glm45v = ("glm-4.5v" in name) or ("glm-4.5-vl" in name) or ("glm45v" in compact)
+    if is_glm4v:
+        print(
+            "WARNING: GLM-4V / GLM-4.1V chat templates have no 'tool' role branch, so tool "
+            "messages are silently dropped. Multi-turn tool trajectories (with or without images) "
+            "cannot be rendered correctly for this model; use GLM-4.6V for tool + image support."
+        )
+    elif is_glm45v:
+        print(
+            "WARNING: GLM-4.5V handles the 'tool' role but does not expand images inside tool "
+            "responses (list parts are stringified), so an image-bearing tool response leaks a "
+            "non-deterministic PIL repr and breaks append-only. Multi-turn tool trajectories with "
+            "images will fail for this model; use GLM-4.6V for tool + image support."
+        )
 
 
 def _tokenizer_eos_token_ids(tokenizer) -> set[int]:
@@ -1003,6 +1038,7 @@ def main() -> int:
     if chat_template_kwargs:
         print(f"Chat template kwargs:  {chat_template_kwargs}")
     print(f"Trajectories:          {len(TRAJECTORIES)}")
+    _warn_glm_tool_template_limitations(args.model)
     print()
 
     raw_results: list[CheckResult] = []

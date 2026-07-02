@@ -189,8 +189,22 @@ def infer_continuous_token_model_family(
     # Kimi-VL
     if any(marker in haystack for marker in ("kimi-vl", "kimi_vl")) or "kimivl" in compact:
         return ContinuousTokenModelFamily.KIMI_VL
-    # GLM-4V / GLM-4.5-VL
-    if any(marker in haystack for marker in ("glm-4v", "glm4v", "glm-4.5v", "glm-4.1v", "glm-4.5-vl", "glm-4.1-vl")):
+    # GLM vision editions (GLM-4.1V / GLM-4V / GLM-4.5V / GLM-4.6V) all share the
+    # GLM4V Continuous Token builder. Note GLM-4.1V/GLM-4V templates drop tool
+    # responses (guarded in ToolAgentLoop); GLM-4.5V/4.6V handle tools.
+    if any(
+        marker in haystack
+        for marker in (
+            "glm-4v",
+            "glm4v",
+            "glm-4.1v",
+            "glm-4.1-vl",
+            "glm-4.5v",
+            "glm-4.5-vl",
+            "glm-4.6v",
+            "glm-4.6-vl",
+        )
+    ):
         return ContinuousTokenModelFamily.GLM4V
 
     # --- Existing families ---
