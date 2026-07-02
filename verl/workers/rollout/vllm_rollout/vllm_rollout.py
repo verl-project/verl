@@ -199,6 +199,20 @@ class ServerAdapter(BaseRollout):
         if self.replica_rank == 0 and self.rollout_rank == 0:
             logger.info(f"update_weights done, time cost: {time.time() - start_time:.2f}s")
 
+    async def check_loaded_weights_equal(
+        self,
+        model_path: str,
+        trust_remote_code: bool = False,
+    ):
+        """Check vLLM worker weights against a HuggingFace checkpoint."""
+        return await self._execute_method(
+            "check_loaded_weights_equal",
+            kwargs={
+                "model_path": model_path,
+                "trust_remote_code": trust_remote_code,
+            },
+        )
+
     def _get_server_name_prefix(self) -> str:
         """Return the Ray actor name prefix matching the rollout type (e.g. 'vllm_')."""
         return f"{self.config.get('name', 'vllm')}_"
