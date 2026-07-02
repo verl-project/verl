@@ -211,7 +211,6 @@ def test_actor_engine(strategy):
     hf_logprobs = logprobs_from_logits_naive(
         hf_output.logits[:, -response_length - 1 : -1, :].float(), input_ids[:, -response_length:]
     )
-    
     hf_logprobs_mean = torch.mean(hf_logprobs * response_mask)
     mcore_logprobs_mean = torch.mean(output.batch["old_log_probs"] * response_mask)
 
