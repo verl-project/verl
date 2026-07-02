@@ -71,6 +71,11 @@ def rebuild_shared_memory(name: str, size: int, dtype=torch.uint8):
     return tensor, shm
 
 
+def _weight_to_bytes(weight: torch.Tensor) -> torch.Tensor:
+    """Return a contiguous uint8 view of a weight tensor's logical values."""
+    return weight.contiguous().view(-1).view(torch.uint8)
+
+
 class BucketedWeightSender:
     """
     Send model weights via bucketed IPC transfer over ZMQ.
@@ -148,7 +153,7 @@ class BucketedWeightSender:
                     "offset": offset,
                     "handle": None,
                 }
-                self.buffer[offset : offset + weight.nbytes].copy_(weight.view(-1).view(torch.uint8), non_blocking=True)
+                self.buffer[offset : offset + weight.nbytes].copy_(_weight_to_bytes(weight), non_blocking=True)
                 offset += weight.nbytes
 
             # send the last bucket

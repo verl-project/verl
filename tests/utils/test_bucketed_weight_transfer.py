@@ -58,6 +58,24 @@ def _generate_weights(weight_specs, seed):
     return weights
 
 
+def test_weight_to_bytes_accepts_strided_tensor():
+    from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import _weight_to_bytes
+
+    base = torch.arange(2 * 3 * 4, dtype=torch.float32).reshape(2, 3, 4)
+    weight = base[:, 0, :]
+
+    assert not weight.is_contiguous()
+    with pytest.raises(RuntimeError):
+        weight.view(-1).view(torch.uint8)
+
+    byte_view = _weight_to_bytes(weight)
+    recovered = byte_view.view(dtype=weight.dtype).view(weight.shape)
+
+    assert byte_view.dtype == torch.uint8
+    assert byte_view.numel() == weight.nbytes
+    assert torch.equal(recovered, weight)
+
+
 # ---------------------------------------------------------------------------
 # Process entry points (must be module-level for pickling with spawn)
 # ---------------------------------------------------------------------------
