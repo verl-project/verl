@@ -77,12 +77,14 @@ def initialize_turn_separator(tokenizer, **apply_chat_template_kwargs) -> list[i
     if not suffix:
         return []
     # Split off the closing token the model already emits; the remainder is the dropped separator.
-    # A processor (VLM path) exposes ``eos_token_id`` on its wrapped tokenizer rather than itself.
+    # A processor (VLM path) exposes ``eos_token_id`` on its wrapped tokenizer rather than itself,
+    # and some tokenizers (e.g. Llama 3) expose it as a list/tuple of ids rather than a single int.
     eos_id = getattr(tokenizer, "eos_token_id", None)
     if eos_id is None:
         eos_id = getattr(getattr(tokenizer, "tokenizer", None), "eos_token_id", None)
-    if eos_id is not None and eos_id in suffix:
-        last_close = len(suffix) - 1 - suffix[::-1].index(eos_id)
+    eos_ids = {eos_id} if isinstance(eos_id, int) else set(eos_id or [])
+    last_close = max((i for i, tok_id in enumerate(suffix) if tok_id in eos_ids), default=None)
+    if last_close is not None:
         return suffix[last_close + 1 :]
     return suffix[1:]
 

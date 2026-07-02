@@ -116,6 +116,47 @@ def test_no_separator_template_returns_empty():
     assert initialize_turn_separator(tok) == []
 
 
+def test_separator_with_list_valued_eos_and_multi_token_close():
+    """Guard for list-valued ``eos_token_id`` (e.g. Llama 3) with a multi-token turn close.
+
+    Each turn closes with two special tokens before the ``\\n`` separator, so the naive
+    ``suffix[1:]`` fallback would leave the second close token in the separator. Only splitting
+    after the last matching eos id recovers ``[\\n]`` -- and that split is skipped unless a
+    list-valued ``eos_token_id`` is handled, which is exactly the reviewed case.
+    """
+    end, im_end, nl = 10, 11, 12
+    specials = {"<|s|>": 9, "<|end|>": end, "<|im_end|>": im_end, "\n": nl}
+    template = Template(
+        "{% for m in messages %}<|s|>{{m['role']}}\n{{m['content']}}<|end|><|im_end|>\n{% endfor %}"
+        "{% if add_generation_prompt %}<|s|>assistant\n{% endif %}"
+    )
+
+    class MultiCloseTokenizer:
+        eos_token_id = [end, im_end]  # list rather than a single int
+
+        def __init__(self):
+            self._vocab: dict[str, int] = {}
+
+        def encode(self, text, add_special_tokens=False):
+            ids = []
+            for piece in re.split(r"(<\|s\|>|<\|end\|>|<\|im_end\|>|\n)", text):
+                if piece == "":
+                    continue
+                if piece in specials:
+                    ids.append(specials[piece])
+                else:
+                    for word in piece.split(" "):
+                        if word:
+                            ids.append(self._vocab.setdefault(word, len(self._vocab) + 100))
+            return ids
+
+        def apply_chat_template(self, messages, add_generation_prompt=False, tokenize=True, tools=None, **kwargs):
+            text = template.render(messages=messages, add_generation_prompt=add_generation_prompt)
+            return self.encode(text) if tokenize else text
+
+    assert initialize_turn_separator(MultiCloseTokenizer()) == [nl]
+
+
 def test_separator_ignores_assistant_reasoning_scaffold():
     """Regression guard for the Qwen3 ``<think>`` gotcha.
 
