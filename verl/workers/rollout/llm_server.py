@@ -254,6 +254,10 @@ class FullyAsyncLLMServerClient(LLMServerClient):
     invisible to the AgentLoop.
     """
 
+    def __init__(self, *args, **kwargs):
+        self._model_engine_manager = kwargs.pop("model_engine_manager", None)
+        super().__init__(*args, **kwargs)
+
     @rollout_trace_op
     async def generate(
         self,
@@ -282,6 +286,7 @@ class FullyAsyncLLMServerClient(LLMServerClient):
             TokenOutput: token output
         """
         prompt_ids = normalize_token_ids(prompt_ids)
+        engine_server_keys = kwargs.pop("engine_server_keys", ())
 
         limit_key = None
         if "max_tokens" in sampling_params:
@@ -299,9 +304,10 @@ class FullyAsyncLLMServerClient(LLMServerClient):
 
         while True:
             # 1. generate tokens
+            context_prompt_ids = prompt_ids + final_output.token_ids
             output = await super().generate(
                 request_id=request_id,
-                prompt_ids=prompt_ids + final_output.token_ids,
+                prompt_ids=context_prompt_ids,
                 sampling_params=sampling_params,
                 image_data=image_data,
                 video_data=video_data,
@@ -309,6 +315,10 @@ class FullyAsyncLLMServerClient(LLMServerClient):
                 mm_processor_kwargs=mm_processor_kwargs,
                 **kwargs,
             )
+
+            # Compute log probs immediately after this chunk with current model weights.
+            if len(engine_server_keys) > 0 and self._model_engine_manager is not None:
+                await self._compute_chunk_log_probs(output, context_prompt_ids, sampling_params)
 
             # 2. merge output into final_output
             final_output.token_ids.extend(output.token_ids)
@@ -327,6 +337,11 @@ class FullyAsyncLLMServerClient(LLMServerClient):
             if output.num_preempted is not None:
                 final_output.num_preempted += output.num_preempted
             final_output.stop_reason = output.stop_reason
+
+            for key in engine_server_keys:
+                if output.extra_fields.get(key) is not None:
+                    final_output.extra_fields.setdefault(key, [])
+                    final_output.extra_fields[key].extend(output.extra_fields[key])
 
             # update model weights version
             global_steps = output.extra_fields.get("global_steps", None)
@@ -356,6 +371,15 @@ class FullyAsyncLLMServerClient(LLMServerClient):
         final_output.extra_fields["min_global_steps"] = min_global_steps
         final_output.extra_fields["max_global_steps"] = max_global_steps
         return final_output
+
+    async def _compute_chunk_log_probs(
+        self, output: TokenOutput, context_prompt_ids: list[int], sampling_params: dict
+    ) -> None:
+        if len(output.token_ids) == 0:
+            return
+        temperature = sampling_params.get("temperature", 1.0)
+        results = await self._model_engine_manager.compute_log_probs(context_prompt_ids, output.token_ids, temperature)
+        output.extra_fields.update(results)
 
 
 class LLMServerManager:

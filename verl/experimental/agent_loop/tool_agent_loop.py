@@ -166,9 +166,9 @@ class ToolAgentLoop(AgentLoopBase):
             if state == AgentState.PENDING:
                 state = await self._handle_pending_state(agent_data, sampling_params)
             elif state == AgentState.GENERATING:
-                state = await self._handle_generating_state(agent_data, sampling_params)
+                state = await self._handle_generating_state(agent_data, sampling_params, **kwargs)
             elif state == AgentState.PROCESSING_TOOLS:
-                state = await self._handle_processing_tools_state(agent_data)
+                state = await self._handle_processing_tools_state(agent_data, **kwargs)
             else:
                 logger.error(f"Invalid state: {state}")
                 state = AgentState.TERMINATED
@@ -183,6 +183,9 @@ class ToolAgentLoop(AgentLoopBase):
             multi_modal_data["videos"] = agent_data.video_data
         if agent_data.audio_data is not None:
             multi_modal_data["audios"] = agent_data.audio_data
+        for key in kwargs.get("engine_server_keys", ()):
+            if agent_data.extra_fields.get(key):
+                agent_data.extra_fields[key] = agent_data.extra_fields[key][: self.response_length]
 
         output: AgentLoopOutput = AgentLoopOutput(
             prompt_ids=prompt_ids,
@@ -223,7 +226,11 @@ class ToolAgentLoop(AgentLoopBase):
         return AgentState.GENERATING
 
     async def _handle_generating_state(
-        self, agent_data: AgentData, sampling_params: dict[str, Any], ignore_termination: bool = False
+        self,
+        agent_data: AgentData,
+        sampling_params: dict[str, Any],
+        ignore_termination: bool = False,
+        **kwargs,
     ) -> AgentState:
         """Handle the generating state: generate model response and check for tool calls."""
         # Inject tool parser stop tokens so generation halts after each tool call
@@ -240,6 +247,7 @@ class ToolAgentLoop(AgentLoopBase):
                 video_data=agent_data.video_data,
                 audio_data=agent_data.audio_data,
                 mm_processor_kwargs=agent_data.mm_processor_kwargs,
+                **kwargs,
             )
         # first time to set num_preempted
         if agent_data.metrics.get("num_preempted") is None:
@@ -249,7 +257,9 @@ class ToolAgentLoop(AgentLoopBase):
             agent_data.metrics["num_preempted"] += output.num_preempted if output.num_preempted is not None else 0
 
         if not agent_data.extra_fields:
-            agent_data.extra_fields.update(output.extra_fields)
+            agent_data.extra_fields.update(
+                {k: v for k, v in output.extra_fields.items() if k not in set(kwargs.get("engine_server_keys", ()))}
+            )
         else:
             # Multi-round calls, only update the maximum max_global_steps.
             max_global_steps = output.extra_fields.get("max_global_steps", None)
@@ -278,7 +288,10 @@ class ToolAgentLoop(AgentLoopBase):
             agent_data.response_mask += [1] * len(agent_data.response_ids)
             if output.log_probs:
                 agent_data.response_logprobs += output.log_probs
-
+        for key in kwargs.get("engine_server_keys", ()):
+            if output.extra_fields.get(key):
+                agent_data.extra_fields.setdefault(key, [])
+                agent_data.extra_fields[key] += output.extra_fields[key]
         if output.routed_experts is not None:
             agent_data.routed_experts = output.routed_experts
 
@@ -304,7 +317,7 @@ class ToolAgentLoop(AgentLoopBase):
         else:
             return AgentState.TERMINATED
 
-    async def _handle_processing_tools_state(self, agent_data: AgentData) -> AgentState:
+    async def _handle_processing_tools_state(self, agent_data: AgentData, **kwargs) -> AgentState:
         """Handle the processing tools state: execute tool calls and prepare tool responses."""
         add_messages: list[dict[str, Any]] = []
         new_images_this_turn: list[Any] = []  # Local variable instead of agent_data attribute
@@ -440,6 +453,9 @@ class ToolAgentLoop(AgentLoopBase):
         agent_data.response_mask += [0] * len(response_ids)
         if agent_data.response_logprobs:
             agent_data.response_logprobs += [0.0] * len(response_ids)
+        for key in kwargs.get("engine_server_keys", ()):
+            if agent_data.extra_fields.get(key):
+                agent_data.extra_fields[key] += [0.0] * len(response_ids)
         agent_data.user_turns += 1
         return AgentState.GENERATING
 
