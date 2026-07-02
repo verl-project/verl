@@ -26,12 +26,11 @@ from typing import Any, Callable, Optional
 import torch
 import torch.distributed
 from tensordict import TensorDict
-from torch.distributed.checkpoint.state_dict import get_model_state_dict
 from torch.distributed.tensor import DTensor
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
-from torchtitan.components.optimizer import OptimizersContainer
+from torchtitan.components.optimizer import OptimizersContainer, ParamGroupConfig
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
@@ -111,12 +110,18 @@ class TorchTitanEngine(BaseEngine):
         model_spec = model_module.model_registry(torchtitan_flavor, attn_backend=self.engine_config.attn_type)
 
         optimizer = OptimizersContainer.Config(
-            name=self.optimizer_config.name,
-            lr=self.optimizer_config.lr,
-            eps=self.optimizer_config.eps,
-            beta1=self.optimizer_config.betas[0],
-            beta2=self.optimizer_config.betas[1],
-            weight_decay=self.optimizer_config.weight_decay,
+            param_groups=[
+                ParamGroupConfig(
+                    pattern=r".*",
+                    optimizer_name=self.optimizer_config.name,
+                    optimizer_kwargs={
+                        "lr": self.optimizer_config.lr,
+                        "eps": self.optimizer_config.eps,
+                        "betas": (self.optimizer_config.betas[0], self.optimizer_config.betas[1]),
+                        "weight_decay": self.optimizer_config.weight_decay,
+                    },
+                )
+            ],
         )
 
         total_steps = self.optimizer_config.total_training_steps
@@ -485,10 +490,9 @@ class TorchTitanEngine(BaseEngine):
         for module in self.module:
             load_fsdp_model_to_gpu(module)
 
-        # Collect state dicts from all model parts
         params = {}
         for module in self.module:
-            module_params = get_model_state_dict(module)
+            module_params = module.state_dict()
             params.update(module_params)
 
         if self._is_offload_param:
