@@ -26,7 +26,7 @@ import torch
 from vllm.outputs import RequestOutput
 
 from verl.plugin.platform import get_platform
-from verl.utils.device import is_npu_available
+from verl.utils.device import get_torch_device, is_npu_available
 from verl.utils.vllm import TensorLoRARequest, VLLMHijack
 from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
 from verl.utils.vllm.vllm_fp8_utils import apply_vllm_fp8_patches, is_fp8_model, load_quanted_weights
@@ -366,6 +366,20 @@ class vLLMColocateWorkerExtension:
         parallel_config = getattr(vllm_config, "parallel_config", None)
         local_rank = _resolve_vllm_weight_sync_local_rank(self.local_rank, parallel_config)
         return f"ipc:///tmp/rl-colocate-zmq-{job_id}-replica-{replica_rank}-rank-{local_rank}.sock"
+
+    def empty_cache(self):
+        """Release PyTorch-cached GPU memory in this vLLM worker process.
+
+        After ``update_weights_from_ipc`` completes, the PyTorch allocator retains
+        physical GPU pages in its internal cache.  When ``wake_up(["kv_cache"])``
+        subsequently calls ``cuMemCreate`` to allocate the KV-cache arena, those
+        cached pages are still mapped by PyTorch's CUDA allocator and cannot be
+        reused by the CUDA virtual-memory allocator, causing an OOM.
+
+        Calling this method before ``wake_up(["kv_cache"])`` releases the cached
+        pages back to the CUDA driver so the KV-cache allocation can succeed.
+        """
+        get_torch_device().empty_cache()
 
 
 class SuppressSignalInThread:
