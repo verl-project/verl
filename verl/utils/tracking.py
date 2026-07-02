@@ -185,21 +185,55 @@ class Tracking:
             if backend is None or default_backend in backend:
                 logger_instance.log(data=data, step=step)
 
+    def finish(self):
+        """Finalize the tracking backends that require explicit teardown.
+
+        Idempotent and exception-safe: this may be called explicitly at the end of
+        training and again from ``__del__`` during garbage collection; the second
+        call is a harmless no-op. A failure in one backend never propagates and
+        never prevents the other backends from finalizing, so a logger hiccup can
+        never break training. (mlflow and console are intentionally not finalized
+        here, matching the previous behavior.)
+        """
+        if getattr(self, "_finished", False):
+            return
+        self._finished = True
+        loggers = getattr(self, "logger", {})
+
+        def _safe_finish(name, fn):
+            try:
+                fn()
+            except Exception:
+                logger.warning("Failed to finish tracking backend '%s'", name, exc_info=True)
+
+        if "wandb" in loggers:
+            _safe_finish("wandb", lambda: loggers["wandb"].finish(exit_code=0))
+            # Also tear down the wandb-core service in-band, while it is still alive: this
+            # unregisters wandb's own atexit service teardown, which otherwise races the
+            # core's exit under Ray and raises BrokenPipeError at process shutdown. wandb
+            # recommends calling teardown() explicitly; its atexit hook is unreliable under
+            # multiprocessing. SystemExit is caught because teardown() calls sys.exit() when
+            # the core reports a non-zero exit code.
+            try:
+                loggers["wandb"].teardown(exit_code=0)
+            except (Exception, SystemExit):
+                logger.warning("wandb.teardown() failed", exc_info=True)
+        if "swanlab" in loggers:
+            _safe_finish("swanlab", lambda: loggers["swanlab"].finish())
+        if "vemlp_wandb" in loggers:
+            _safe_finish("vemlp_wandb", lambda: loggers["vemlp_wandb"].finish(exit_code=0))
+        if "tensorboard" in loggers:
+            _safe_finish("tensorboard", lambda: loggers["tensorboard"].finish())
+        if "clearml" in loggers:
+            _safe_finish("clearml", lambda: loggers["clearml"].finish())
+        if "trackio" in loggers:
+            _safe_finish("trackio", lambda: loggers["trackio"].finish())
+        if "file" in loggers:
+            _safe_finish("file", lambda: loggers["file"].finish())
+
     def __del__(self):
-        if "wandb" in self.logger:
-            self.logger["wandb"].finish(exit_code=0)
-        if "swanlab" in self.logger:
-            self.logger["swanlab"].finish()
-        if "vemlp_wandb" in self.logger:
-            self.logger["vemlp_wandb"].finish(exit_code=0)
-        if "tensorboard" in self.logger:
-            self.logger["tensorboard"].finish()
-        if "clearml" in self.logger:
-            self.logger["clearml"].finish()
-        if "trackio" in self.logger:
-            self.logger["trackio"].finish()
-        if "file" in self.logger:
-            self.logger["file"].finish()
+        # Fallback finalization in case finish() was not called explicitly.
+        self.finish()
 
 
 class ClearMLLogger:

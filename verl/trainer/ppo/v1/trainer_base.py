@@ -75,6 +75,7 @@ from verl.utils import hf_processor, hf_tokenizer
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.config import omega_conf_to_dataclass
+from verl.utils.dataloader import shutdown_dataloaders
 from verl.utils.dataset.rl_dataset import collate_fn
 from verl.utils.debug import marked_timer
 from verl.utils.debug.metrics import calculate_debug_metrics
@@ -323,6 +324,15 @@ class PPOTrainer(ABC):
             experiment_name=self.config.trainer.experiment_name,
         )
 
+        try:
+            self._fit()
+        finally:
+            # Graceful teardown on every exit (including exceptions), while the process
+            # is still healthy: stop DataLoader workers, then finalize tracking backends.
+            self._shutdown_dataloaders()
+            self.logger.finish()
+
+    def _fit(self):
         # perform validation before training
         if self.config.trainer.get("val_before_train", True):
             self.on_validate_begin()
@@ -989,6 +999,21 @@ class PPOTrainer(ABC):
             f.result()
         self._dump_futures.clear()
         self._dump_executor.shutdown(wait=True)
+
+    def _shutdown_dataloaders(self):
+        """Stop DataLoader worker processes before returning (avoids post-run SIGKILL).
+
+        With ``dataloader_num_workers > 0`` the live train iterator keeps worker
+        subprocesses alive; if they are not stopped here they are SIGKILLed at
+        interpreter/Ray teardown, surfacing a spurious post-success
+        ``RuntimeError: DataLoader worker (pid ...) is killed by signal: Killed``.
+        With torchdata's StatefulDataLoader, ``dataloader._iterator`` is the same
+        object stored in ``self.train_dataloader_it``, so this reaches the live
+        train workers as well as the (already-drained) validation workers.
+        """
+        shutdown_dataloaders(self.train_dataloader, self.val_dataloader)
+        # Drop the reference to the now shut-down iterator so it is not reused.
+        self.train_dataloader_it = None
 
     def _log_rollout_data(self, batch: KVBatchMeta, timing_raw: dict, rollout_data_dir: str):
         """Fetch rollout data from TransferQueue and dump sorted by uid."""
