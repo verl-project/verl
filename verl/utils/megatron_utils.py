@@ -44,6 +44,7 @@ from verl.utils import tensordict_utils as tu
 from verl.utils.device import get_device_id, get_device_name, get_torch_device
 from verl.utils.fs import local_mkdir_safe
 from verl.utils.model import normalize_model_name
+from verl.utils.seqlen_balancing import balanced_chunk_range
 from verl.utils.torch_dtypes import PrecisionType
 from verl.workers.config import HFModelConfig, McoreEngineConfig
 
@@ -1635,9 +1636,10 @@ def dynamic_cp_split_batch(
             local_dp_rank = dp_rank // local_cp_size
             local_dp_size = dp_size // local_cp_size
             indices = list(range(len(seq_len_effective)))
-            num_seq_per_local_cp = math.ceil(len(seq_len_effective) / local_dp_size)
-            start_idx = local_dp_rank * num_seq_per_local_cp
-            end_idx = min(start_idx + num_seq_per_local_cp, len(seq_len_effective))
+            # Balanced contiguous split so trailing ranks are not starved (#6786): ceil-based sizing
+            # left e.g. 9 sequences over 4 ranks as [3, 3, 3, 0]. The split stays order-preserving so
+            # the rank-order merge in dynamic_cp_merge_output is unaffected.
+            start_idx, end_idx = balanced_chunk_range(len(seq_len_effective), local_dp_size, local_dp_rank)
             selected_indices = indices[start_idx:end_idx]
             batch = tu.index_select_tensor_dict(batch, selected_indices)
 
