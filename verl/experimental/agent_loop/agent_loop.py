@@ -954,12 +954,15 @@ class AgentLoopWorker:
                 mm_processor_kwargs=output.mm_processor_kwargs,
                 routing_key=routing_key,
             )
+            teacher_sequence_length_before_realign = len(teacher_ids)
+            teacher_response_length = teacher_sequence_length_before_realign - len(scoring_prompt_ids)
             if teacher_prompt_ids is not None:
                 # teacher prompt 长度与 student prompt 不同。Prompt token 本来就全部被
                 # response_mask 屏蔽，因此只保留 teacher 在自身 prompt 条件下得到的 response
                 # 分数，再用占位前缀对齐到 student 的完整序列坐标。
                 teacher_response_ids = teacher_ids[len(scoring_prompt_ids) :]
                 teacher_response_logprobs = teacher_logprobs[len(scoring_prompt_ids) :]
+                teacher_response_length = len(teacher_response_ids)
                 if len(teacher_response_ids) != len(response_ids):
                     raise ValueError(
                         "teacher response 对齐失败: "
@@ -979,6 +982,16 @@ class AgentLoopWorker:
                 )
                 teacher_ids = torch.cat([id_prefix, teacher_response_ids], dim=0)
                 teacher_logprobs = torch.cat([logprob_prefix, teacher_response_logprobs], dim=0)
+            output.extra_fields["teacher_alignment_audit"] = {
+                "student_prompt_length": int(len(prompt_ids)),
+                "teacher_prompt_length": int(len(scoring_prompt_ids)),
+                "student_response_length": int(len(response_ids)),
+                "teacher_response_length": int(teacher_response_length),
+                "teacher_sequence_length_before_realign": int(teacher_sequence_length_before_realign),
+                "teacher_sequence_length_after_realign": int(len(teacher_ids)),
+                "teacher_prompt_replaced": bool(teacher_prompt_ids is not None),
+                "teacher_response_aligned": bool(teacher_response_length == len(response_ids)),
+            }
             output.extra_fields["teacher_ids"] = teacher_ids
             output.extra_fields["teacher_logprobs"] = teacher_logprobs
 
