@@ -93,6 +93,8 @@ def _megatron_gptmodel_postprocess(
     output_processor=None,
     output_processor_context=None,
     is_spec_decode=None,
+    padding_mask=None,
+    **kwargs,
 ):
     """Postprocesses decoder hidden states to generate logits or compute loss.
 
