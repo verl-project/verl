@@ -562,7 +562,11 @@ def _build_npu_attn_mask(original_attention_mask: torch.Tensor) -> torch.Tensor:
 
 
 def preprocess_bshd_engine(
-    input_ids: torch.Tensor, pre_process: bool = True, need_roll: bool = False, use_fp8_padding: bool = False
+    input_ids: torch.Tensor,
+    pre_process: bool = True,
+    need_roll: bool = False,
+    use_fp8_padding: bool = False,
+    forced_max_seqlen: Optional[int] = None,
 ):
     """
     Preprocess bshd sequences
@@ -570,6 +574,12 @@ def preprocess_bshd_engine(
 
     The input is a jagged nested tensor with shape [batch, seq, ...]. Any
     dense dimensions after seq are preserved in the returned padded tensor.
+
+    When ``forced_max_seqlen`` is given, it overrides the per-micro-batch
+    ``seqlens_in_batch.max()`` as the raw padding target. Callers that want to
+    align tensor shapes across micro-batches (e.g. to share a cuDNN fused-attention
+    execution plan) pass the *mini-batch* global max here; any TP/CP/FP8 alignment
+    is still applied below, so this argument should be the unaligned raw max.
     """
     cp_size = mpu.get_context_parallel_world_size()
     cp_rank = mpu.get_context_parallel_rank()
@@ -577,7 +587,7 @@ def preprocess_bshd_engine(
     batch_size = input_ids.shape[0]
     dense_shape = tuple(input_ids.shape[2:])
     seqlens_in_batch = input_ids.offsets().diff()
-    max_seqlen = seqlens_in_batch.max().item()
+    max_seqlen = forced_max_seqlen if forced_max_seqlen is not None else seqlens_in_batch.max().item()
     tp_size = mpu.get_tensor_model_parallel_world_size()
     # For CP (zigzag), sequence length must be divisible by (2 * cp_size).
     # After zigzag-CP split each rank holds s/cp_size tokens, which must also be
@@ -758,9 +768,15 @@ def build_vlm_attn_mask_thd(input_ids: torch.Tensor, pad_token_id: int = None):
     return input_ids_rmpad, attention_mask
 
 
-def build_vlm_attn_mask_bshd(input_ids: torch.Tensor, batch_size: int, pad_token_id: int = None):
+def build_vlm_attn_mask_bshd(
+    input_ids: torch.Tensor, batch_size: int, pad_token_id: int = None, forced_max_seqlen: Optional[int] = None
+):
     seqlens_in_batch = input_ids.offsets().diff()
-    max_seqlen = seqlens_in_batch.max().item()
+    # When ``forced_max_seqlen`` is given, pad to the mini-batch global max (raw, unaligned)
+    # so the VLM padded tensors share the same `s_q` as the label/loss_mask produced by
+    # preprocess_bshd_engine; otherwise logits.shape[:2] != label.shape[:2]. TP/CP alignment
+    # is still applied below.
+    max_seqlen = forced_max_seqlen if forced_max_seqlen is not None else seqlens_in_batch.max().item()
 
     # For CP (zigzag), sequence length must be divisible by (2 * cp_size).
     # After zigzag-CP split each rank holds s/cp_size tokens, which must also be
