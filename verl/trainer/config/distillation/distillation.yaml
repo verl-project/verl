@@ -13,6 +13,11 @@ defaults:
 # Whether to enable distillation.
 enabled: false
 
+# Where teacher log probabilities are computed:
+# - rollout: dedicated vLLM/SGLang teacher resource pool
+# - trainer: isomorphic teacher/student snapshots share the trainer Megatron engine
+teacher_execution: rollout
+
 # distillation loss config
 distillation_loss:
 

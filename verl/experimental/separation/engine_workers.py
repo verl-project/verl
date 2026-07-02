@@ -17,12 +17,15 @@ import logging
 import os
 from typing import Callable, Optional
 
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
-from verl.single_controller.base.decorator import Dispatch, register
+from verl.single_controller.base.decorator import Dispatch, make_nd_compute_dataproto_dispatch_fn, register
+from verl.utils import tensordict_utils as tu
+from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import (
     get_device_name,
 )
+from verl.workers.config import HFModelConfig, MtpConfig
 from verl.workers.engine_workers import ActorRolloutRefWorker, DistillationConfig
 
 logger = logging.getLogger(__file__)
@@ -42,6 +45,10 @@ class DetachActorWorker(ActorRolloutRefWorker):
     FSDP, FSDP2, VeOmni, and Megatron strategies.
     """
 
+    FUSED_TEACHER_STATE = 1
+    FUSED_OLD_STUDENT_STATE = 2
+    FUSED_CURRENT_STUDENT_STATE = 3
+
     def __init__(
         self, config: DictConfig, role: str, distillation_config: Optional[DistillationConfig] = None, **kwargs
     ):
@@ -56,6 +63,128 @@ class DetachActorWorker(ActorRolloutRefWorker):
         """
         ActorRolloutRefWorker.__init__(self, config, role, distillation_config=distillation_config, **kwargs)
         self._strategy_handlers = None
+        self._fused_teacher_enabled = bool(
+            self.distillation_enabled
+            and distillation_config is not None
+            and distillation_config.get("teacher_execution", "rollout") == "trainer"
+        )
+        self._active_model = "actor"
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def init_model(self):
+        super().init_model()
+        if self._fused_teacher_enabled:
+            self._init_fused_teacher()
+
+    def _init_fused_teacher(self):
+        if self.config.actor.strategy != "megatron":
+            raise NotImplementedError("Trainer-colocated teachers currently require actor.strategy=megatron.")
+        if self.role not in {"actor", "actor_rollout", "actor_rollout_ref"}:
+            raise ValueError(f"Trainer-colocated teacher requires an actor role, got {self.role!r}.")
+
+        distillation_config = omega_conf_to_dataclass(self.distillation_config)
+        if len(distillation_config.teacher_models) != 1:
+            raise NotImplementedError("Trainer-colocated distillation currently supports exactly one teacher.")
+        teacher_config = next(iter(distillation_config.teacher_models.values()))
+
+        teacher_model_dict = {
+            "_target_": "verl.workers.config.HFModelConfig",
+            "path": teacher_config.model_path,
+            "hf_config_path": teacher_config.model_path,
+            # Token-level OPD requires a shared token-id space. Load the
+            # student's tokenizer while loading the teacher architecture.
+            "tokenizer_path": self.config.model.get("tokenizer_path") or self.config.model.path,
+            "load_tokenizer": True,
+            "use_shm": self.config.model.get("use_shm", False),
+            "trust_remote_code": self.config.model.get("trust_remote_code", False),
+            "external_lib": self.config.model.get("external_lib", None),
+            "enable_gradient_checkpointing": False,
+            "use_remove_padding": self.config.model.get("use_remove_padding", True),
+            "mtp": OmegaConf.to_container(
+                OmegaConf.structured(MtpConfig(enable=False, enable_train=False, enable_rollout=False)),
+                resolve=True,
+            ),
+        }
+        teacher_model_config: HFModelConfig = omega_conf_to_dataclass(
+            teacher_model_dict, dataclass_type=HFModelConfig
+        )
+
+        student_model_config = self.actor.model_config
+        if student_model_config.mtp.enable:
+            raise NotImplementedError("Single-engine fused OPD currently requires actor MTP to be disabled.")
+        if student_model_config.architectures != teacher_model_config.architectures:
+            raise ValueError(
+                "Single-engine fused OPD requires identical model architectures, "
+                f"got student={student_model_config.architectures} and "
+                f"teacher={teacher_model_config.architectures}."
+            )
+
+        structural_fields = (
+            "model_type",
+            "vocab_size",
+            "hidden_size",
+            "num_hidden_layers",
+            "num_attention_heads",
+            "num_key_value_heads",
+            "intermediate_size",
+            "num_experts",
+            "num_experts_per_tok",
+        )
+        student_hf_config = getattr(student_model_config.hf_config, "text_config", student_model_config.hf_config)
+        teacher_hf_config = getattr(teacher_model_config.hf_config, "text_config", teacher_model_config.hf_config)
+        mismatches = {
+            field: (getattr(student_hf_config, field, None), getattr(teacher_hf_config, field, None))
+            for field in structural_fields
+            if getattr(student_hf_config, field, None) != getattr(teacher_hf_config, field, None)
+        }
+        if mismatches:
+            raise ValueError(f"Single-engine fused OPD requires isomorphic teacher/student models: {mismatches}")
+
+        # Build the static teacher snapshot in the initialized student module.
+        # Optimizer/main-parameter state remains untouched and resident.
+        self.actor.to(device="device", model=True, optimizer=False, grad=False)
+        self.save_model_to_cpu(self.FUSED_CURRENT_STUDENT_STATE)
+        try:
+            engine = self.actor.engine
+            if engine.vanilla_bridge:
+                engine.bridge.load_weights(engine.module, teacher_model_config.local_path)
+            else:
+                engine.bridge.load_hf_weights(engine.module, teacher_model_config.local_path)
+            self.save_model_to_cpu(self.FUSED_TEACHER_STATE)
+        finally:
+            self.restore_model_from_cpu(self.FUSED_CURRENT_STUDENT_STATE)
+            self.clear_cpu_model(self.FUSED_CURRENT_STUDENT_STATE)
+        self._active_model = "actor"
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def activate_teacher(self):
+        if not self._fused_teacher_enabled:
+            return
+        if self._active_model == "teacher":
+            return
+        self.save_model_to_cpu(self.FUSED_CURRENT_STUDENT_STATE)
+        self.restore_model_from_cpu(self.FUSED_TEACHER_STATE)
+        self._active_model = "teacher"
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def activate_actor(self):
+        if not self._fused_teacher_enabled:
+            return
+        if self._active_model == "actor":
+            return
+        self.restore_model_from_cpu(self.FUSED_CURRENT_STUDENT_STATE)
+        self.clear_cpu_model(self.FUSED_CURRENT_STUDENT_STATE)
+        self._active_model = "actor"
+
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
+    def compute_teacher_log_prob(self, data):
+        if not self._fused_teacher_enabled:
+            raise RuntimeError("Trainer-colocated teacher is not initialized.")
+        if self._active_model != "teacher":
+            raise RuntimeError(f"Teacher scoring requires active_model='teacher', got {self._active_model!r}.")
+        tu.assign_non_tensor(data, disable_auto_offload=True, calculate_entropy=False, compute_loss=False)
+        output = self.actor.infer_batch(data)
+        return output.cpu() if output is not None else None
 
     def _get_strategy_handlers(self):
         """

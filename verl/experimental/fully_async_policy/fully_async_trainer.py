@@ -35,10 +35,12 @@ from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager
 from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_reward_model
+from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, should_save_ckpt_esi
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
 from verl.utils.tracking import Tracking
+from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +89,9 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             self.distillation_config = omega_conf_to_dataclass(self.config.distillation)
         else:
             self.distillation_config = None
+        self.fused_teacher_enabled = bool(
+            self.distillation_config is not None and self.distillation_config.teacher_execution == "trainer"
+        )
 
         self.use_critic = need_critic(self.config)
         self.ray_worker_group_cls = ray_worker_group_cls
@@ -404,6 +409,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
                 break
 
         self.progress_bar.close()
+        self._activate_fused_actor()
         if self.current_param_version % self.config.trainer.test_freq != 0 or self.local_trigger_step > 1:
             weights_updated = await self._fit_update_weights()
             if weights_updated:
@@ -436,6 +442,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
 
         with marked_timer("step", self.timing_raw):
             batch = await self._fit_generate(None)
+            batch = self._fit_compute_teacher_log_prob(batch)
             batch = self._fit_compute_reward(batch)
             batch = self._fit_compute_log_prob(batch)
             batch = self._fit_compute_ref_log_prob(batch)
@@ -454,6 +461,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         if weights_updated:
             self._fit_log_aggregated_training_metrics()
         self._fit_postprocess_step()
+        self._activate_fused_teacher()
 
     async def _fit_generate(self, batch: DataProto = None) -> DataProto | None:
         metrics = self.metrics
@@ -464,6 +472,44 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
                 raise TrainingStopException("Training terminated: queue returned None")
             self._collect_metrics_from_samples(batch, metrics)
         batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
+        return batch
+
+    def _activate_fused_actor(self):
+        if self.fused_teacher_enabled:
+            self.actor_rollout_wg.activate_actor()
+
+    def _activate_fused_teacher(self):
+        if self.fused_teacher_enabled:
+            self.actor_rollout_wg.activate_teacher()
+
+    def prepare_fused_teacher(self):
+        """Place the fused node in teacher-resident state before queue consumption."""
+        self._activate_fused_teacher()
+
+    def _fit_compute_teacher_log_prob(self, batch: DataProto) -> DataProto:
+        if not self.fused_teacher_enabled:
+            return batch
+
+        timing_raw = self.timing_raw
+        try:
+            with marked_timer("teacher_log_prob", timing_raw, color="olive"):
+                batch_td = left_right_2_no_padding(batch.to_tensordict())
+                tu.assign_non_tensor(
+                    batch_td,
+                    calculate_entropy=False,
+                    compute_loss=False,
+                )
+                output = self.actor_rollout_wg.compute_teacher_log_prob(batch_td)
+                teacher_log_probs = tu.get(output, "log_probs")
+                teacher_log_probs = no_padding_2_padding(teacher_log_probs, batch_td)
+                # Preserve the existing [batch, response, K] contract with K=1.
+                batch.batch["teacher_logprobs"] = teacher_log_probs.float().unsqueeze(-1)
+                teacher_metrics = tu.get(output, "metrics")
+                if teacher_metrics and "mfu" in teacher_metrics:
+                    self.metrics["perf/mfu/teacher_infer"] = teacher_metrics["mfu"]
+        finally:
+            # Optimizer, checkpoint, and weight-sync APIs all expect student weights.
+            self._activate_fused_actor()
         return batch
 
     def _compute_old_log_prob(self, batch: DataProto):
@@ -477,15 +523,22 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         If local_trigger_step == 2, 3, ..., restore the parameters of version 1 to calculate the old_log_prob,
         then restore the parameters of the current version.
         """
+        # State 1 is the teacher in fused mode; reserve 2 for the fixed old
+        # student and 3 for a temporarily displaced current student.
+        old_student_state = 2 if self.fused_teacher_enabled else 1
+        current_student_state = 3 if self.fused_teacher_enabled else self.local_trigger_step
+
         if self.local_trigger_step == 1:
-            self.actor_rollout_wg.save_model_to_cpu(1)
+            self.actor_rollout_wg.save_model_to_cpu(old_student_state)
             old_log_prob, old_log_prob_mfu = super()._compute_old_log_prob(batch)
         else:
-            self.actor_rollout_wg.save_model_to_cpu(self.local_trigger_step)
-            self.actor_rollout_wg.restore_model_from_cpu(1)
-            old_log_prob, old_log_prob_mfu = super()._compute_old_log_prob(batch)
-            self.actor_rollout_wg.restore_model_from_cpu(self.local_trigger_step)
-            self.actor_rollout_wg.clear_cpu_model(self.local_trigger_step)
+            self.actor_rollout_wg.save_model_to_cpu(current_student_state)
+            try:
+                self.actor_rollout_wg.restore_model_from_cpu(old_student_state)
+                old_log_prob, old_log_prob_mfu = super()._compute_old_log_prob(batch)
+            finally:
+                self.actor_rollout_wg.restore_model_from_cpu(current_student_state)
+                self.actor_rollout_wg.clear_cpu_model(current_student_state)
         return old_log_prob, old_log_prob_mfu
 
     def _fit_update_local_step(self):

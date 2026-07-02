@@ -381,7 +381,13 @@ def compute_distillation_loss_reverse_kl_estimator(
     - distillation_metrics: Dictionary of metrics.
     """
     student_log_probs = no_padding_2_padding(model_output["log_probs"], data)
-    teacher_log_probs = no_padding_2_padding(data["teacher_logprobs"], data).squeeze(-1)
+    teacher_log_probs = data["teacher_logprobs"]
+    if teacher_log_probs.is_nested:
+        teacher_log_probs = no_padding_2_padding(teacher_log_probs, data)
+    # Dedicated rollout teachers provide full-sequence nested values, while
+    # trainer-colocated k1 scoring injects response-aligned padded values.
+    if teacher_log_probs.ndim == 3 and teacher_log_probs.shape[-1] == 1:
+        teacher_log_probs = teacher_log_probs.squeeze(-1)
     if data["response_mask"].is_nested:
         response_mask_bool = data["response_mask"].bool().to_padded_tensor(False)
     else:
