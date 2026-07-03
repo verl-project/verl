@@ -814,6 +814,37 @@ class FSDPEngine(BaseEngine):
         if self._is_offload_optimizer:
             offload_fsdp_optimizer(self.optimizer)
 
+    def get_per_tensor_param_shard(self, **kwargs):
+        """Like :meth:`get_per_tensor_param`, but yields each rank's *local* FSDP shard
+        instead of all-gathering the full tensor -- used by the ``delta_sharded``
+        checkpoint engine, which diffs on shards and gathers only the changes.
+
+        Yields ``(name, local_flat_shard_bf16, within_param_flat_offset, full_numel,
+        full_shape, contributes)``. Non-LoRA base path only.
+        """
+        from verl.checkpoint_engine.delta_sync.sharded import local_shard_view
+
+        if not self._uses_fsdp2_cpu_offload_policy:
+            load_fsdp_model_to_gpu(self.module)
+        params = self.module.state_dict()
+        params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
+        if self._is_offload_param:
+            offload_fsdp_model_to_cpu(self.module)
+
+        device = get_device_id()
+
+        def _gen():
+            for name, param in params.items():
+                full_shape = tuple(param.shape)
+                full_numel = int(param.numel())
+                p = param.to(device, non_blocking=True)
+                if p.is_floating_point():
+                    p = p.to(torch.bfloat16, non_blocking=True)
+                local, offset, contributes = local_shard_view(p)
+                yield name, local, offset, full_numel, full_shape, contributes
+
+        return _gen(), None
+
     def get_per_tensor_param(self, layered_summon=False, base_sync_done=False, **kwargs):
         log_gpu_memory_usage("Before load_fsdp_model_to_gpu", logger=logger)
 

@@ -34,6 +34,7 @@ from unittest.mock import patch
 
 import ray.util.collective as collective
 import torch
+import torch.distributed as dist
 import zmq
 
 with patch("importlib.metadata.distributions", return_value=[]):
@@ -41,6 +42,8 @@ with patch("importlib.metadata.distributions", return_value=[]):
 
 from .delta_sync import DeltaState, iter_delta_flushes
 from .delta_sync.encode import DeltaParam, checksum as _checksum, decode_chunk
+from .delta_sync.sharded import gather_v_to_rank0, shard_delta_indices
+from .delta_sync.wrapper import DeltaFlush
 
 from .base import CheckpointEngineRegistry
 from .nccl_checkpoint_engine import MasterMetadata, NCCLCheckpointEngine
@@ -177,3 +180,119 @@ class DeltaCheckpointEngine(NCCLCheckpointEngine):
                     cur[mask] = dt[mask]
                 self._mirror[name] = cur
                 yield name, cur
+
+
+@CheckpointEngineRegistry.register("delta_sharded")
+class DeltaShardedCheckpointEngine(DeltaCheckpointEngine):
+    """Delta over NCCL, but the diff is computed on each rank's local FSDP shard.
+
+    Instead of ``full_tensor()``-ing every parameter and diffing on rank 0 (parent), each
+    actor rank keeps a pinned-CPU snapshot of only *its* shard, byte-diffs the shard, and
+    only the changed ``(within-param position, value)`` pairs are gathered to rank 0 -- so
+    the all-gather volume drops to the sparsity ratio and rank 0 no longer holds a
+    full-model snapshot. The assembled result is bit-identical to the parent's diff, so the
+    receiver (:meth:`DeltaCheckpointEngine.receive_weights`) is reused unchanged.
+
+    ``send_weights`` here expects the SHARDED generator ``get_per_tensor_param_shard()``
+    (``(name, local_flat_shard, within_param_offset, full_numel, full_shape, contributes)``)
+    rather than the full-tensor generator.
+    """
+
+    def __init__(self, *args, encoding: str = "indices", **kwargs) -> None:
+        super().__init__(*args, encoding=encoding, **kwargs)
+        self._shard_snap: dict[str, torch.Tensor] = {}  # name -> pinned-CPU shard snapshot
+        self._shard_seeded = False
+
+    def _assemble_flush(self, per_param: list) -> DeltaFlush:
+        """Build one DeltaFlush (indices encoding) from rank 0's gathered per-param deltas.
+
+        ``per_param``: list of ``(name, dtype_str, shape, global_idx_i32, values)`` where
+        ``global_idx`` are within-parameter flat positions (== what the receiver decodes).
+        """
+        pos_pieces: list[bytes] = []
+        val_pieces: list[torch.Tensor] = []
+        params: list[DeltaParam] = []
+        pos_off = val_off = 0
+        for name, dtype_str, shape, idx_i32, val in per_param:
+            nnz = int(idx_i32.numel())
+            pos_bytes = idx_i32.to(torch.int32).cpu().numpy().tobytes()
+            params.append(
+                DeltaParam(name=name, dtype=dtype_str, shape=list(shape),
+                           pos_start=pos_off, pos_end=pos_off + len(pos_bytes), pos_width=4,
+                           val_start=val_off, val_end=val_off + nnz)
+            )
+            pos_pieces.append(pos_bytes)
+            val_pieces.append(val)
+            pos_off += len(pos_bytes)
+            val_off += nnz
+
+        merged = b"".join(pos_pieces)
+        positions_cpu = (
+            torch.frombuffer(bytearray(merged), dtype=torch.uint8) if merged
+            else torch.empty(0, dtype=torch.uint8)
+        )
+        values_gpu = torch.cat(val_pieces) if val_pieces else torch.empty(0, dtype=self.rollout_dtype, device="cuda")
+        positions_gpu = positions_cpu.to(values_gpu.device, non_blocking=True)
+        cks = _checksum(positions_gpu, values_gpu)
+        return DeltaFlush(encoding=self.encoding, params=params,
+                          positions_cpu=positions_cpu, values_gpu=values_gpu, checksum=cks)
+
+    async def send_weights(self, weights, global_steps=None):
+        # All actor ranks participate (gather-v is collective); only torch rank 0 broadcasts.
+        assert self.rank <= 0, "Trainer workers other than rank 0 should not send weights."
+        is_r0 = self.is_master
+        first = not self._shard_seeded
+        per_param: list = []
+
+        for name, local, offset, _full_numel, full_shape, contributes in weights:
+            local = local.detach().contiguous().view(-1)
+            snap = self._shard_snap.get(name)
+            if snap is None or snap.numel() != local.numel():
+                snap = torch.empty_like(local, device="cpu", pin_memory=True)
+            if contributes:
+                base = _bitflip_like(local) if first else snap.to(local.device, non_blocking=True)
+                gidx, gval = shard_delta_indices(local, base, offset)
+            else:
+                # replicated param owned by another rank; contribute nothing but keep lockstep.
+                gidx = torch.empty(0, dtype=torch.int64, device=local.device)
+                gval = torch.empty(0, dtype=local.dtype, device=local.device)
+            snap.copy_(local, non_blocking=True)  # update snapshot to current shard
+            self._shard_snap[name] = snap
+
+            aidx, aval = gather_v_to_rank0(gidx, gval)
+            if is_r0 and aidx is not None and aidx.numel() > 0:
+                per_param.append(
+                    (name, str(local.dtype).replace("torch.", ""), list(full_shape), aidx, aval)
+                )
+
+        self._shard_seeded = True
+        if not is_r0:
+            return
+
+        flush = self._assemble_flush(per_param)
+        meta = {
+            "is_full": first,
+            "encoding": self.encoding,
+            "flushes": [{
+                "params": [vars(p) for p in flush.params],
+                "pos_numel": int(flush.positions_cpu.numel()),
+                "val_numel": int(flush.values_gpu.numel()),
+                "val_dtype": str(flush.values_gpu.dtype).replace("torch.", ""),
+                "checksum": int(flush.checksum),
+            }],
+        }
+        self.socket.send_string(self.topic, flags=zmq.SNDMORE)
+        self.socket.send_pyobj(meta)
+
+        pos_u8 = flush.positions_cpu.to("cuda", non_blocking=True).contiguous().view(torch.uint8)
+        val_u8 = flush.values_gpu.contiguous().view(torch.uint8)
+        pos_cp = cp.empty(pos_u8.numel(), dtype=cp.uint8)
+        val_cp = cp.empty(val_u8.numel(), dtype=cp.uint8)
+        pos_cp[:] = cp.asarray(pos_u8)
+        val_cp[:] = cp.asarray(val_u8)
+        collective.broadcast(pos_cp, src_rank=0, group_name=self.group_name)
+        collective.broadcast(val_cp, src_rank=0, group_name=self.group_name)
+        logger.info(
+            "delta-sharded send v=%s %s params=%d nnz=%d",
+            global_steps, "FULL" if first else "delta", len(flush.params), int(flush.values_gpu.numel()),
+        )
