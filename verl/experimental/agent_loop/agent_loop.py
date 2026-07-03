@@ -565,12 +565,21 @@ class AgentLoopWorker:
         # 状态化任务可以把一次输入展开成多个独立动作序列；这里保留源行索引并统一展平。
         outputs: list[_InternalAgentLoopOutput] = []
         source_indices: list[int] = []
+        skipped_rollouts = 0
         for source_index, task_output in enumerate(task_outputs):
             task_output_list = task_output if isinstance(task_output, list) else [task_output]
             if not task_output_list:
-                raise ValueError(f"AgentLoop 输入 {source_index} 没有返回任何 trajectory")
+                skipped_rollouts += 1
+                continue
             outputs.extend(task_output_list)
             source_indices.extend([source_index] * len(task_output_list))
+
+        if not outputs:
+            return DataProto(
+                batch=TensorDict({}, batch_size=0),
+                non_tensor_batch={},
+                meta_info={"metrics": [], "skipped_rollouts": skipped_rollouts},
+            )
 
         expanded_non_tensor_batch = {
             key: np.asarray(value)[source_indices] for key, value in batch.non_tensor_batch.items()
@@ -581,6 +590,7 @@ class AgentLoopWorker:
             input_non_tensor_batch=expanded_non_tensor_batch,
             validate=batch.meta_info.get("validate", False),
         )
+        output.meta_info["skipped_rollouts"] = skipped_rollouts
         return output
 
     async def _run_agent_loop(
@@ -618,7 +628,7 @@ class AgentLoopWorker:
             output = await agent_loop.run(sampling_params, **kwargs)
             if isinstance(output, list):
                 if not output:
-                    raise ValueError(f"AgentLoop {agent_name} 返回了空 trajectory 列表")
+                    return []
                 return await asyncio.gather(
                     *[
                         self._agent_loop_postprocess(item, trajectory["validate"], **kwargs)
@@ -1200,13 +1210,23 @@ class AgentLoopManager:
                 for worker, chunk in zip(self.agent_loop_workers[:worker_count], chunkes, strict=True)
             ]
         )
-        output = DataProto.concat(outputs)
+        skipped_rollouts = sum(int(output.meta_info.pop("skipped_rollouts", 0)) for output in outputs)
+        non_empty_outputs = [output for output in outputs if len(output) > 0]
+        if non_empty_outputs:
+            output = DataProto.concat(non_empty_outputs)
+        else:
+            output = DataProto(
+                batch=TensorDict({}, batch_size=0),
+                non_tensor_batch={},
+                meta_info={"metrics": [], "skipped_rollouts": skipped_rollouts},
+            )
 
         # calculate performance metrics
         metrics = [output.meta_info.pop("metrics") for output in outputs]  # List[List[Dict[str, str]]]
         timing = self._performance_metrics(metrics, output)
 
         output.meta_info = {"timing": timing, **outputs[0].meta_info}
+        output.meta_info["skipped_rollouts"] = skipped_rollouts
         return output
 
     def _performance_metrics(self, metrics: list[list[dict[str, str]]], output: DataProto) -> dict[str, float]:
@@ -1215,6 +1235,8 @@ class AgentLoopManager:
         t_tool_calls = np.array([metric["tool_calls"] for chunk in metrics for metric in chunk])
         t_compute_score = np.array([metric["compute_score"] for chunk in metrics for metric in chunk])
         num_preempted = np.array([metric["num_preempted"] for chunk in metrics for metric in chunk])
+        if not len(t_generate_sequences):
+            return timing
         timing["agent_loop/num_preempted/min"] = num_preempted.min()
         timing["agent_loop/num_preempted/max"] = num_preempted.max()
         timing["agent_loop/num_preempted/mean"] = num_preempted.mean()
