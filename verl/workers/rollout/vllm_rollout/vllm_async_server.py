@@ -369,6 +369,19 @@ class vLLMHttpServer:
             args.update(lora_args)
 
         if self.config.enable_rollout_routing_replay:
+            # R3 (Rollout Router Replay) relies on vLLM's ``enable_return_routed_experts``
+            # path (RoutedExpertsManager / RoutedExpertsCapturer), which is only correct
+            # for hybrid-attention MoE models (e.g. Qwen3.5, whose linear + full attention
+            # layout produces >1 KV-cache group) starting from vLLM 0.22.0. Earlier
+            # releases either lack the feature or under-size the routed-experts host
+            # buffer and crash with an IndexError. Fail fast with an actionable message
+            # instead of surfacing an opaque runtime error deep inside vLLM.
+            if _VLLM_VERSION < version.parse("0.22.0"):
+                raise RuntimeError(
+                    "rollout.enable_rollout_routing_replay=True requires vLLM >= 0.22.0 "
+                    f"(installed: {vllm.__version__}). Upgrade vLLM (e.g. `pip install -U "
+                    "'vllm>=0.22.0'`) or disable enable_rollout_routing_replay."
+                )
             args.update({"enable_return_routed_experts": True})
 
         server_args = ["serve", self.model_config.local_path] + build_cli_args_from_config(args)
