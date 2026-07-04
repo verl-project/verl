@@ -602,6 +602,7 @@ class AgentLoopWorker:
         trajectory_info = await get_trajectory_info(
             batch.meta_info.get("global_steps", -1), index.tolist(), batch.meta_info.get("validate", False)
         )
+        defer_teacher_logprobs = bool(batch.meta_info.get("defer_teacher_logprobs", False))
 
         # NOTE: __do_sample__ is an internal per-sample override used by REMAX combined rollout.
         # Do not forward it to concrete agent loops, which may reject unknown kwargs.
@@ -615,7 +616,12 @@ class AgentLoopWorker:
                 apply_greedy_sampling_params(sample_sampling_params)
             tasks.append(
                 asyncio.create_task(
-                    self._run_agent_loop(sample_sampling_params, trajectory_info[i], trace=trace_this_sample, **kwargs)
+                    self._run_agent_loop(
+                        sample_sampling_params,
+                        {**trajectory_info[i], "defer_teacher_logprobs": defer_teacher_logprobs},
+                        trace=trace_this_sample,
+                        **kwargs,
+                    )
                 )
             )
         task_outputs = await asyncio.gather(*tasks)
@@ -689,11 +695,21 @@ class AgentLoopWorker:
                     return []
                 return await asyncio.gather(
                     *[
-                        self._agent_loop_postprocess(item, trajectory["validate"], **kwargs)
+                        self._agent_loop_postprocess(
+                            item,
+                            trajectory["validate"],
+                            defer_teacher_logprobs=trajectory.get("defer_teacher_logprobs", False),
+                            **kwargs,
+                        )
                         for item in output
                     ]
                 )
-            return await self._agent_loop_postprocess(output, trajectory["validate"], **kwargs)
+            return await self._agent_loop_postprocess(
+                output,
+                trajectory["validate"],
+                defer_teacher_logprobs=trajectory.get("defer_teacher_logprobs", False),
+                **kwargs,
+            )
 
     def _pad_token_ids(
         self,
@@ -718,7 +734,14 @@ class AgentLoopWorker:
                 padded["attention_mask"] = padded["attention_mask"].unsqueeze(0)
         return padded
 
-    async def _agent_loop_postprocess(self, output, validate, **kwargs) -> _InternalAgentLoopOutput:
+    async def _agent_loop_postprocess(
+        self,
+        output,
+        validate,
+        *,
+        defer_teacher_logprobs: bool = False,
+        **kwargs,
+    ) -> _InternalAgentLoopOutput:
         """Perform post-processing operations on the output of each individual agent loop."""
         output.extra_fields["raw_prompt"] = kwargs["raw_prompt"]
 
@@ -812,13 +835,14 @@ class AgentLoopWorker:
             ),
         )
         await self._compute_score([output], kwargs=kwargs)
-        await self._compute_teacher_logprobs(
-            output,
-            prompt_ids=output.prompt_ids,
-            response_ids=output.response_ids,
-            validate=validate,
-            sample_kwargs=kwargs,
-        )
+        if not defer_teacher_logprobs:
+            await self._compute_teacher_logprobs(
+                output,
+                prompt_ids=output.prompt_ids,
+                response_ids=output.response_ids,
+                validate=validate,
+                sample_kwargs=kwargs,
+            )
         teacher_ids, teacher_logprobs = (
             output.extra_fields.pop("teacher_ids", None),
             output.extra_fields.pop("teacher_logprobs", None),
