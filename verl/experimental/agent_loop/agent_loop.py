@@ -77,6 +77,64 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 DEFAULT_ROUTING_CACHE_SIZE = 10000
 
 
+def _realign_teacher_outputs_for_replaced_prompt(
+    teacher_ids: torch.Tensor,
+    teacher_logprobs: torch.Tensor,
+    *,
+    student_prompt_length: int,
+    teacher_prompt_length: int,
+    response_length: int,
+    pad_token_id: int,
+) -> tuple[torch.Tensor, torch.Tensor, int]:
+    if student_prompt_length <= 0 or teacher_prompt_length <= 0:
+        raise ValueError(
+            "teacher response 对齐要求非空 prompt: "
+            f"student_prompt_length={student_prompt_length}, teacher_prompt_length={teacher_prompt_length}"
+        )
+
+    # vLLM/teacher 返回的是 prompt_logprobs，语义是 next-token：
+    # 第 i 行不是 token[i] 自身的分数，而是“用前缀预测 token[i + 1]”的分数。
+    # 因此第一个 response token 的 teacher 分数不在 teacher_prompt_length 行，
+    # 而在 teacher_prompt_length - 1 行。末尾 dummy 行保留，用于维持 full sequence 长度。
+    teacher_tail_start = teacher_prompt_length - 1
+    teacher_tail_ids = teacher_ids[teacher_tail_start:]
+    teacher_tail_logprobs = teacher_logprobs[teacher_tail_start:]
+
+    # teacher_tail 包含 response_length 个 response token 分数，再加最后一个 dummy 行；
+    # 所以真实 response 分数行数是 len(tail) - 1。
+    teacher_response_length = max(len(teacher_tail_ids) - 1, 0)
+    if teacher_response_length != response_length:
+        raise ValueError(f"teacher response 对齐失败: {teacher_response_length} != {response_length}")
+
+    # student prompt 也必须遵守同一 next-token 坐标。
+    # 前 student_prompt_length - 1 行只对应 prompt 内部预测，不参与 response loss，
+    # 用 pad/0 占位；随后拼上 teacher_tail，使 response[0] 正好落在 student prompt 的最后一行。
+    prefix_shape = (student_prompt_length - 1, *teacher_ids.shape[1:])
+    id_prefix = torch.full(
+        prefix_shape,
+        pad_token_id,
+        dtype=teacher_ids.dtype,
+        device=teacher_ids.device,
+    )
+    logprob_prefix = torch.zeros(
+        prefix_shape,
+        dtype=teacher_logprobs.dtype,
+        device=teacher_logprobs.device,
+    )
+    realigned_ids = torch.cat([id_prefix, teacher_tail_ids], dim=0)
+    realigned_logprobs = torch.cat([logprob_prefix, teacher_tail_logprobs], dim=0)
+
+    # 对齐后长度必须重新等于 student 的完整序列长度：
+    # student prompt token 数 + student response token 数。后续 padding 层会按这个长度左/右 padding。
+    expected_length = student_prompt_length + response_length
+    if len(realigned_ids) != expected_length:
+        raise ValueError(
+            "teacher response 对齐后长度错误: "
+            f"{len(realigned_ids)} != {expected_length}"
+        )
+    return realigned_ids, realigned_logprobs, teacher_response_length
+
+
 class AgentLoopMetrics(BaseModel):
     """Agent loop performance metrics."""
 
@@ -951,6 +1009,12 @@ class AgentLoopWorker:
         # prompt。该字段必须在 worker 内消费，不能随一对多 rollout 进入 actor metadata。
         teacher_prompt_ids = output.extra_fields.pop("teacher_prompt_ids", None)
         if self.distillation_enabled and not validate:
+            worker_config = getattr(self, "config", None)
+            kl_debug_enabled = (
+                bool(OmegaConf.select(worker_config, "data.opd_kl_debug_enabled", default=False))
+                if worker_config is not None
+                else False
+            )
             routing_key = None
             if sample_kwargs is not None:
                 routing_value = sample_kwargs.get(self.teacher_key)
@@ -958,6 +1022,11 @@ class AgentLoopWorker:
                     # Non-tensor batch values arrive as 0-d numpy objects / arrays; normalize to Python.
                     routing_key = routing_value.item() if hasattr(routing_value, "item") else routing_value
             scoring_prompt_ids = teacher_prompt_ids if teacher_prompt_ids is not None else prompt_ids
+            if kl_debug_enabled:
+                # 只在 KL debug 开关打开时把 teacher prompt ids 留在 non_tensor_batch。
+                # 正常训练不携带这些大列表，避免增加 Ray 序列化成本。
+                output.extra_fields["opd_teacher_prompt_ids"] = list(scoring_prompt_ids)
+                output.extra_fields["opd_teacher_prompt_replaced"] = bool(teacher_prompt_ids is not None)
             teacher_ids, teacher_logprobs = await self.teacher_server_manager.compute_teacher_logprobs_single(
                 sequence_ids=scoring_prompt_ids + response_ids,
                 multi_modal_data=output.multi_modal_data,
@@ -969,29 +1038,17 @@ class AgentLoopWorker:
             if teacher_prompt_ids is not None:
                 # teacher prompt 长度与 student prompt 不同。Prompt token 本来就全部被
                 # response_mask 屏蔽，因此只保留 teacher 在自身 prompt 条件下得到的 response
-                # 分数，再用占位前缀对齐到 student 的完整序列坐标。
-                teacher_response_ids = teacher_ids[len(scoring_prompt_ids) :]
-                teacher_response_logprobs = teacher_logprobs[len(scoring_prompt_ids) :]
-                teacher_response_length = len(teacher_response_ids)
-                if len(teacher_response_ids) != len(response_ids):
-                    raise ValueError(
-                        "teacher response 对齐失败: "
-                        f"{len(teacher_response_ids)} != {len(response_ids)}"
+                # next-token 分数，再用占位前缀对齐到 student 的完整序列坐标。
+                teacher_ids, teacher_logprobs, teacher_response_length = (
+                    _realign_teacher_outputs_for_replaced_prompt(
+                        teacher_ids,
+                        teacher_logprobs,
+                        student_prompt_length=len(prompt_ids),
+                        teacher_prompt_length=len(scoring_prompt_ids),
+                        response_length=len(response_ids),
+                        pad_token_id=self.tokenizer.pad_token_id,
                     )
-                prefix_shape = (len(prompt_ids), *teacher_ids.shape[1:])
-                id_prefix = torch.full(
-                    prefix_shape,
-                    self.tokenizer.pad_token_id,
-                    dtype=teacher_ids.dtype,
-                    device=teacher_ids.device,
                 )
-                logprob_prefix = torch.zeros(
-                    prefix_shape,
-                    dtype=teacher_logprobs.dtype,
-                    device=teacher_logprobs.device,
-                )
-                teacher_ids = torch.cat([id_prefix, teacher_response_ids], dim=0)
-                teacher_logprobs = torch.cat([logprob_prefix, teacher_response_logprobs], dim=0)
             output.extra_fields["teacher_alignment_audit"] = {
                 "student_prompt_length": int(len(prompt_ids)),
                 "teacher_prompt_length": int(len(scoring_prompt_ids)),
