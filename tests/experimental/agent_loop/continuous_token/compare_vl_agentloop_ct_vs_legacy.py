@@ -74,8 +74,8 @@ from verl.experimental.agent_loop.single_turn_agent_loop import SingleTurnAgentL
 from verl.experimental.agent_loop.tool_agent_loop import ToolAgentLoop
 from verl.tools.function_tool import FunctionTool
 from verl.tools.schemas import ToolResponse
-from verl.utils.tokenizer.chat_template import apply_chat_template
 from verl.utils.tokenizer import build_multimodal_processor_inputs, normalize_token_ids
+from verl.utils.tokenizer.chat_template import apply_chat_template
 from verl.workers.rollout.replica import TokenOutput
 
 DEFAULT_E2E_TRAJECTORIES = ("vl_singleturnchat", "vl_multiturnsingletool", "vl_multiturnmultitool")
@@ -92,9 +92,35 @@ DEFAULT_MODELS = [
     "Qwen/Qwen3-VL-2B-Thinking",
     # MiMo VL (Qwen2.5-VL architecture).
     "XiaomiMiMo/MiMo-VL-7B-RL",
-    # GLM vision.
+    # GLM vision. GLM-4.6V is fully supported (all trajectories). GLM-4V (4.1V)
+    # and GLM-4.5V are single-turn only: their templates mishandle tool-role
+    # images, so they cannot run the tool agent loop, but the single-turn agent
+    # loop works through the same GLM46VContinuousTokenBuilder.
     "zai-org/GLM-4.1V-9B-Thinking",
+    "zai-org/GLM-4.5V",
+    "zai-org/GLM-4.6V",
 ]
+
+# Models whose chat template cannot render tool-role images through the tool
+# agent loop, so only ``vl_singleturnchat`` is exercised for them. GLM-4.1V
+# (GLM-4V) drops ``role="tool"`` messages entirely (its template has no tool-role
+# branch); GLM-4.5V handles the tool role but serializes the tool message's
+# multimodal content list as a string instead of expanding the image. In both
+# cases the ContinuousTokenBuilder cannot work around the template limitation, so
+# only single-turn prompt-image rendering is exercised for them.
+#
+# NOTE: Gemma-4 is intentionally NOT in this list. Its template renders tool
+# responses (text + image) faithfully, but *only* when the tool message follows
+# an assistant carrying a *structured* ``tool_calls`` field (forward-scan embed).
+# The CT builder satisfies this via its dummy synthetic assistant, and the
+# ground-truth builder (:func:`_prepare_tool_assistant_outputs`) mirrors it, so
+# Gemma-4 runs the full tool agent loop.
+SINGLE_TURN_ONLY_MODEL_MARKERS = ("glm-4.1v", "glm-4v", "glm-4.5v")
+
+
+def _model_supports_tool_agent_loop(model: str) -> bool:
+    lowered = model.lower()
+    return not any(marker in lowered for marker in SINGLE_TURN_ONLY_MODEL_MARKERS)
 
 
 TRAJECTORY_BY_NAME = build_vl_trajectories()
@@ -170,6 +196,11 @@ class _DeterministicServer:
 
 
 def _load_processor(model: str, *, local_files_only: bool):
+    # NOTE: Gemma-4 must be the non-unified ``gemma4`` variant (e.g.
+    # ``google/gemma-4-E4B-it``), whose ``AutoProcessor`` resolves to a real
+    # ``Gemma4Processor`` with an image processor. The ``gemma4_unified`` variant
+    # (e.g. ``gemma-4-12B-it``) needs ``Gemma4UnifiedProcessor``, which the
+    # installed transformers does not ship, so it is not supported here.
     processor = AutoProcessor.from_pretrained(
         model,
         trust_remote_code=True,
@@ -223,43 +254,6 @@ def _render_processor_ids(
     return normalize_token_ids(output["input_ids"])
 
 
-def _opens_thinking_block(processor) -> bool:
-    """True if the model's generation prompt opens an (empty) ``<think>`` block.
-
-    Thinking VL templates (e.g. Qwen3-VL-*-Thinking) append ``<think>`` at the
-    generation prompt so the model emits its reasoning, closes it with
-    ``</think>``, then answers. For a content-only assistant message these
-    templates insert an *empty* ``<think>\\n\\n</think>`` block, whose ``\\n\\n``
-    tokenizes differently from the generation-prompt ``<think>\\n``; the plain
-    assistant suffix diff then cannot align, so the mock content must carry a
-    real ``<think>...</think>`` block instead.
-    """
-    try:
-        text = apply_chat_template(
-            processor,
-            [{"role": "user", "content": "hi"}],
-            tools=None,
-            add_generation_prompt=True,
-            tokenize=False,
-        )
-    except Exception:
-        return False
-    return text.rstrip().endswith("<think>")
-
-
-def _thinking_needs_reasoning_block(processor, tokenizer) -> bool:
-    """Whether this model needs a synthesized ``<think>`` block in mock content.
-
-    GLM/Nemotron/MiniMax templates also open a think block but are already
-    reconciled by their dedicated prompt-rewrite helpers in
-    ``_render_assistant_output_ids``, so they must not be double-handled here.
-    """
-    name = _tokenizer_name(tokenizer).lower()
-    if _is_glm_tokenizer(tokenizer) or "nemotron" in name or "minimax" in name:
-        return False
-    return _opens_thinking_block(processor)
-
-
 def _render_assistant_output_ids(
     processor,
     prefix_messages: list[dict[str, Any]],
@@ -270,15 +264,15 @@ def _render_assistant_output_ids(
 ) -> list[int]:
     # Assistant turns add no images, so both renders share the prefix image set.
     images = _extract_images(prefix_messages)
-    prompt_ids = _render_processor_ids(
-        processor, prefix_messages, images, tools=tools, add_generation_prompt=True
-    )
+    prompt_ids = _render_processor_ids(processor, prefix_messages, images, tools=tools, add_generation_prompt=True)
     full_ids = _render_processor_ids(
         processor, prefix_messages + [assistant_message], images, tools=tools, add_generation_prompt=False
     )
     prompt_ids = _trim_generation_think_prefix(processor.tokenizer, prompt_ids, full_ids)
     prompt_ids = _replace_glm_generation_think_open_with_close(processor.tokenizer, prompt_ids, full_ids)
     prompt_ids = _replace_nemotron_generation_think_open_with_empty_block(processor.tokenizer, prompt_ids, full_ids)
+    prompt_ids = _replace_qwen_generation_think_open_with_empty_block(processor.tokenizer, prompt_ids, full_ids)
+    prompt_ids = _trim_gemma_generation_thought_channel(processor.tokenizer, prompt_ids, full_ids)
     if full_ids[: len(prompt_ids)] != prompt_ids:
         raise ValueError("VL assistant output token-id suffix diff failed")
     return _truncate_after_final_eos(
@@ -338,6 +332,60 @@ def _replace_nemotron_generation_think_open_with_empty_block(
     return prompt_ids
 
 
+def _replace_qwen_generation_think_open_with_empty_block(
+    tokenizer, prompt_ids: list[int], full_ids: list[int]
+) -> list[int]:
+    """Reconcile Qwen-family thinking templates on the prompt side.
+
+    Qwen3-VL-*-Thinking append ``<think>\\n`` at the generation prompt, but a
+    plain (reasoning-free) assistant message renders an *empty* block
+    ``<think>\\n\\n</think>\\n\\n``. The prompt's ``\\n`` and the block's ``\\n\\n``
+    tokenize to different ids, so the plain-assistant suffix diff cannot align.
+    Fold the empty block into the prompt (exactly like the Nemotron helper) so
+    the assistant output is extracted correctly, without injecting any synthetic
+    ``<think>`` content into the mock message.
+    """
+    if full_ids[: len(prompt_ids)] == prompt_ids:
+        return prompt_ids
+    name = _tokenizer_name(tokenizer).lower()
+    if "qwen" not in name and "mimo" not in name:
+        return prompt_ids
+    think_open_ids = tokenizer.encode("<think>\n", add_special_tokens=False)
+    think_empty_block_ids = tokenizer.encode("<think>\n\n</think>\n\n", add_special_tokens=False)
+    if not think_open_ids or not think_empty_block_ids:
+        return prompt_ids
+    if prompt_ids[-len(think_open_ids) :] != think_open_ids:
+        return prompt_ids
+    replaced_prompt_ids = prompt_ids[: -len(think_open_ids)] + think_empty_block_ids
+    if full_ids[: len(replaced_prompt_ids)] == replaced_prompt_ids:
+        return replaced_prompt_ids
+    return prompt_ids
+
+
+def _trim_gemma_generation_thought_channel(tokenizer, prompt_ids: list[int], full_ids: list[int]) -> list[int]:
+    """Reconcile Gemma-4's thought-channel generation prompt.
+
+    Gemma-4 opens a reasoning channel at the generation prompt
+    (``<|channel>thought\\n<channel|>``), but a plain (reasoning-free) assistant
+    message renders no channel at all. The opener has no counterpart in the full
+    render, so the plain-assistant suffix diff cannot align. Trim the trailing
+    opener from the prompt so the assistant output is extracted correctly.
+    """
+    if full_ids[: len(prompt_ids)] == prompt_ids:
+        return prompt_ids
+    if "gemma" not in _tokenizer_name(tokenizer).lower():
+        return prompt_ids
+    opener_ids = tokenizer.encode("<|channel>thought\n<channel|>", add_special_tokens=False)
+    if not opener_ids:
+        return prompt_ids
+    if prompt_ids[-len(opener_ids) :] != opener_ids:
+        return prompt_ids
+    trimmed_prompt_ids = prompt_ids[: -len(opener_ids)]
+    if full_ids[: len(trimmed_prompt_ids)] == trimmed_prompt_ids:
+        return trimmed_prompt_ids
+    return prompt_ids
+
+
 def _tokenizer_name(tokenizer) -> str:
     name = getattr(tokenizer, "name_or_path", None)
     if name:
@@ -367,6 +415,7 @@ def _truncate_after_final_eos(
 ) -> list[int]:
     eos_token_ids = _tokenizer_eos_token_ids(tokenizer)
     eos_token_ids.update(_kimi_assistant_end_token_ids(tokenizer))
+    eos_token_ids.update(_gemma_assistant_end_token_ids(tokenizer))
     if not token_ids:
         raise ValueError("Assistant output token-id suffix is empty")
 
@@ -410,6 +459,16 @@ def _kimi_assistant_end_token_ids(tokenizer) -> set[int]:
     return set()
 
 
+def _gemma_assistant_end_token_ids(tokenizer) -> set[int]:
+    """Gemma-4 ends an assistant turn with ``<turn|>`` (not the tokenizer eos)."""
+    if "gemma" not in _tokenizer_name(tokenizer).lower():
+        return set()
+    token_id = tokenizer.convert_tokens_to_ids("<turn|>")
+    if isinstance(token_id, int) and token_id >= 0:
+        return {token_id}
+    return set()
+
+
 def _require_single_token_id(tokenizer, token: str) -> int:
     token_id = tokenizer.convert_tokens_to_ids(token)
     if token_id is None:
@@ -436,6 +495,42 @@ def _clone(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return copy.deepcopy(messages)
 
 
+def _gemma_structured_assistant(step) -> dict[str, Any]:
+    """Assistant message that mirrors ``ToolAgentLoop._build_assistant_message``.
+
+    Gemma's template only renders the following ``role="tool"`` responses when the
+    assistant carries a *structured* ``tool_calls`` field (forward-scan embed). The
+    per-turn *output* delta is still computed from the raw-text assistant (what the
+    model emits), but the running history must use this structured form so the next
+    turn's prefix render expands the tool responses.
+    """
+    tool_calls = []
+    for index, (name, arguments) in enumerate(step.calls):
+        tool_calls.append(
+            {
+                "id": f"call_{index}",
+                "type": "function",
+                "function": {"name": name, "arguments": json.dumps(arguments)},
+            }
+        )
+    return {"role": "assistant", "content": step.reasoning, "tool_calls": tool_calls}
+
+
+def _gemma_stamped_tool_messages(step) -> list[dict[str, Any]]:
+    """Standalone ``role="tool"`` messages stamped with ``tool_call_id``/``name``.
+
+    The template resolves the tool name via ``tc.id == follow.tool_call_id`` and
+    falls back to ``follow.name``; without either it hits a ``None`` concatenation.
+    """
+    messages = []
+    for index, message in enumerate(copy.deepcopy(step.appended_messages)):
+        message["tool_call_id"] = f"call_{index}"
+        if not message.get("name") and index < len(step.responses):
+            message["name"] = step.responses[index].tool_name
+        messages.append(message)
+    return messages
+
+
 def _prepare_tool_assistant_outputs(
     processor,
     trajectory: VLToolTrajectory,
@@ -444,10 +539,13 @@ def _prepare_tool_assistant_outputs(
     tools = trajectory.tool_schemas
     canonical_messages = _clone(trajectory.raw_prompt)
     assistant_outputs: list[PreparedAssistantOutput] = []
-    is_thinking = _thinking_needs_reasoning_block(processor, processor.tokenizer)
+    # Gemma renders tool responses only via forward-scan from a structured
+    # assistant; other VL templates render assistant ``content`` verbatim and drop
+    # a ``tool_calls`` field, so keep the raw-text form for them.
+    is_gemma = "gemma" in _tokenizer_name(processor.tokenizer).lower()
 
     for turn_index, step in enumerate(trajectory.steps):
-        assistant_message = step.assistant_message(tool_parser, is_thinking=is_thinking)
+        assistant_message = step.assistant_message(tool_parser)
         assistant_ids = _render_assistant_output_ids(
             processor,
             canonical_messages,
@@ -461,8 +559,12 @@ def _prepare_tool_assistant_outputs(
                 log_probs=_assistant_logprobs(turn_index, len(assistant_ids)),
             )
         )
-        canonical_messages.append(assistant_message)
-        canonical_messages.extend(copy.deepcopy(step.appended_messages))
+        if is_gemma and step.calls:
+            canonical_messages.append(_gemma_structured_assistant(step))
+            canonical_messages.extend(_gemma_stamped_tool_messages(step))
+        else:
+            canonical_messages.append(assistant_message)
+            canonical_messages.extend(copy.deepcopy(step.appended_messages))
 
     return assistant_outputs
 
@@ -471,11 +573,10 @@ def _prepare_single_turn_assistant_output(
     processor,
     trajectory: VLSingleTurnTrajectory,
 ) -> PreparedAssistantOutput:
-    is_thinking = _thinking_needs_reasoning_block(processor, processor.tokenizer)
     assistant_ids = _render_assistant_output_ids(
         processor,
         _clone(trajectory.raw_prompt),
-        trajectory.assistant_message(is_thinking=is_thinking),
+        trajectory.assistant_message(),
         tools=None,
         has_tool_calls=False,
     )
@@ -523,6 +624,8 @@ def _infer_tool_parser(model: str, requested_tool_parser: str) -> str:
         return "kimi"
     if "glm" in compact:
         return "glm"
+    if "gemma" in normalized:
+        return "gemma4"
     # Qwen VL / MiMo VL and other VL families use the Hermes tool format.
     return "hermes"
 
@@ -575,8 +678,14 @@ def _make_single_turn_config(*, model: str, enable_ct: bool):
     )
 
 
-def _data_config():
-    return OmegaConf.create({"apply_chat_template_kwargs": {}, "mm_processor_kwargs": {}})
+def _data_config(enable_ct: bool):
+    return OmegaConf.create(
+        {
+            "apply_chat_template_kwargs": {},
+            "mm_processor_kwargs": {},
+            "continuous_token": _continuous_token_config(enable_ct),
+        }
+    )
 
 
 # =============================================================================
@@ -602,7 +711,7 @@ async def _run_tool_e2e_path(
         tokenizer=tokenizer,
         processor=processor,
         dataset_cls=_VLImageDataset,
-        data_config=DictConfigWrap(_data_config()),
+        data_config=DictConfigWrap(_data_config(use_ct)),
         tools=ToolListWrap(_make_deterministic_tools(trajectory)),
     )
     output: AgentLoopOutput = await loop.run(
@@ -634,7 +743,7 @@ async def _run_single_turn_e2e_path(
         tokenizer=tokenizer,
         processor=processor,
         dataset_cls=_VLImageDataset,
-        data_config=DictConfigWrap(_data_config()),
+        data_config=DictConfigWrap(_data_config(use_ct)),
     )
     output: AgentLoopOutput = await loop.run(
         sampling_params={"logprobs": True},
@@ -904,19 +1013,28 @@ def _print_error_details(result: dict[str, Any]) -> None:
         print(f"    error: {result.get('error_type')}: {result.get('error')}", flush=True)
 
 
+def _trajectories_for_model(model: str, trajectories):
+    if _model_supports_tool_agent_loop(model):
+        return list(trajectories)
+    # Single-turn-only models: skip tool trajectories entirely.
+    return [t for t in trajectories if isinstance(t, VLSingleTurnTrajectory)]
+
+
 def _run_all(args) -> list[dict[str, Any]]:
     results = []
     models = _select_models(args)
     trajectories = _select_trajectories(args)
-    total = len(models) * len(trajectories)
+    per_model_trajectories = {model: _trajectories_for_model(model, trajectories) for model in models}
+    total = sum(len(v) for v in per_model_trajectories.values())
     case_index = 0
 
     for model in models:
         tool_parser = _infer_tool_parser(model, args.tool_parser)
+        model_trajectories = per_model_trajectories[model]
         try:
             processor, tokenizer = _load_processor(model, local_files_only=args.local_files_only)
         except Exception as exc:
-            for trajectory in trajectories:
+            for trajectory in model_trajectories:
                 case_index += 1
                 print(f"[{case_index}/{total}] {model} :: {trajectory.name}", flush=True)
                 result = {
@@ -938,14 +1056,14 @@ def _run_all(args) -> list[dict[str, Any]]:
                 _print_error_details(result)
             continue
 
-        for trajectory in trajectories:
+        for trajectory in model_trajectories:
             case_index += 1
             print(f"[{case_index}/{total}] {model} :: {trajectory.name}", flush=True)
             result = run_one_case(processor, tokenizer, model, trajectory, tool_parser=tool_parser)
             results.append(result)
             status = result["status"]
             if status == "pass":
-                print(f"  PASS ct_vs_legacy(match=True)", flush=True)
+                print("  PASS ct_vs_legacy(match=True)", flush=True)
             elif status == "mismatch":
                 comparisons = result["comparisons"]
                 print(
@@ -976,8 +1094,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--tool-parser",
         default="auto",
-        choices=("auto", "hermes", "qwen3_coder", "glm", "kimi"),
-        help="ToolParser format used by ToolAgentLoop. Default: auto (kimi->kimi, glm->glm, else hermes).",
+        choices=("auto", "hermes", "qwen3_coder", "glm", "kimi", "gemma4"),
+        help="ToolParser format for ToolAgentLoop. auto: kimi->kimi, glm->glm, gemma->gemma4, else hermes.",
     )
     parser.add_argument(
         "--allow-download",
@@ -985,9 +1103,7 @@ def parse_args() -> argparse.Namespace:
         help="Allow AutoProcessor to download missing files instead of requiring local cache.",
     )
     parser.add_argument("--ledger", help="Write the structured per-case report JSON to this path.")
-    parser.add_argument(
-        "--mismatch-jsonl", help="Write one JSON line per non-pass case to this path (for triage)."
-    )
+    parser.add_argument("--mismatch-jsonl", help="Write one JSON line per non-pass case to this path (for triage).")
     parser.add_argument("--fail-on-mismatch", action="store_true", help="Return non-zero when any case is not pass.")
     args = parser.parse_args()
     args.local_files_only = not args.allow_download
