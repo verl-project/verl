@@ -6,7 +6,7 @@ This PR depends on https://github.com/verl-project/verl/pull/6779 (Continuous To
 
 What's added is that it now enables the **processor's** encoding of text with multimodal info. Multimodal info is **not** concatenated turn-by-turn; instead `AgentLoopWorker` postprocesses it by running the processor over the *full* message history to recover all multimodal tensors (e.g. `pixel_values`, `image_grid_thw`). The Continuous Token (CT) path only needs the processor to expand image placeholders into the correct number of pad tokens so the runtime token prefix stays bit-perfect (TITO), while the heavy pixel tensors produced by those incremental calls are discarded and rebuilt once at the end.
 
-What's unchanged is that each VL model family can still inherit its text model family's specific behavior (especially the `merge_token_id` / turn-boundary behavior of Qwen and GLM) on text. VL builders are composed via Python MRO from a `VLContinuousTokenMixin` (processor-backed rendering) plus a text-family builder (boundary handling), so e.g. `QwenVLContinuousTokenBuilder` reuses Qwen's ChatML newline reinsertion and `GLM4VContinuousTokenBuilder` reuses GLM's `<|observation|>` / `<|user|>` trim.
+What's unchanged is that each VL model family can still inherit its text model family's specific behavior (especially the `merge_token_id` / turn-boundary behavior of Qwen and GLM) on text. VL builders are composed via Python MRO from a `VLContinuousTokenMixin` (processor-backed rendering) plus a text-family builder (boundary handling), so e.g. `QwenVLContinuousTokenBuilder` reuses Qwen's ChatML newline reinsertion and `GLM46VContinuousTokenBuilder` reuses GLM's `<|observation|>` / `<|user|>` trim.
 
 ### Test
 
@@ -28,12 +28,14 @@ Results for the supported models (`tests/experimental/agent_loop/continuous_toke
 |---|---|---|---|---|---|
 | `Qwen/Qwen2.5-VL-3B-Instruct` | `QwenVLContinuousTokenBuilder` | ✅ | ⚠️ DIFFER (expected) | ✅ EQUAL | ✅ |
 | `Qwen/Qwen3-VL-2B-Instruct` | `QwenVLContinuousTokenBuilder` | ✅ | ⚠️ DIFFER (expected) | ✅ EQUAL | ✅ |
-| `zai-org/GLM-4.1V-9B-Thinking` | `GLM4VContinuousTokenBuilder` | ✅ | ⚠️ DIFFER (expected) | ✅ EQUAL | ✅ |
+| `zai-org/GLM-4.1V-9B-Thinking` | `GLM46VContinuousTokenBuilder` | ✅ | ⚠️ DIFFER (expected) | ✅ EQUAL | ✅ |
 | `XiaomiMiMo/MiMo-VL-7B-RL` | `MiMoVLContinuousTokenBuilder` | ✅ | ⚠️ DIFFER (expected) | ✅ EQUAL | ✅ |
 
 The `CT vs Legacy` **DIFFER** cases are **expected and correct**: legacy renders each turn in isolation and drops/duplicates turn-boundary tokens (Qwen/MiMo miss the `<|im_end|>\n` newline; GLM double-counts the `<|observation|>` boundary token). `CT vs Full` being **EQUAL** shows that **CT is the side that matches canonical full encoding**, and the inserted/trimmed boundary tokens carry `loss_mask=0` / `logprob=0.0`. See `tests/experimental/agent_loop/continuous_token/vl_ct_vs_legacy_comparison_result.md` for the per-token diffs.
 
 Unit tests: `tests/utils/test_continuous_token_on_cpu.py` covers builder construction, family resolution / auto-inference, VL processor gating, placeholder expansion, and merge alignment.
+
+**Known test gap (TODO):** the current mock trajectories never exercise a non-empty `reasoning_content` on assistant turns — every mocked assistant message has empty/absent reasoning. A follow-up should add a case with non-empty `reasoning_content` to verify CT rendering / boundary handling stays token-equivalent when reasoning is present.
 
 ### API and Usage Example
 
@@ -59,14 +61,15 @@ builder = create_continuous_token_builder(
     model_family="auto",           # -> QwenVLContinuousTokenBuilder for Qwen2.5-VL
     model_path="Qwen/Qwen2.5-VL-7B-Instruct",
     processor=processor,           # REQUIRED for VL families
+    mm_processor_kwargs={"min_pixels": ..., "max_pixels": ...},  # builder-level constant
 )
 
-# Turn 1: expand image placeholders through the processor.
+# Turn 1: expand image placeholders through the processor. Processor kwargs are the
+# builder-level constant captured above, not passed per render.
 prompt_ids = builder.build_initial_tokens(
     messages,
     tools=tool_schemas,
     images=images,                 # list of PIL images / refs
-    mm_processor_kwargs={"min_pixels": ..., "max_pixels": ...},
 )
 
 # Later turns: incremental merge keeps the runtime prefix bit-perfect,
@@ -87,7 +90,7 @@ High-level design: VL builders keep the `MergeResult` contract **token-only**. T
 - **`verl/utils/continuous_token.py`**
   - Added multimodal hooks to the base `ContinuousTokenBuilder`: `supports_multimodal()` (class flag, default `False`), `render_tokens_with_mm(...)` (default raises `NotImplementedError`), and extended `build_initial_tokens(...)` to accept and ignore `images`/`videos`/`audios`/`mm_processor_kwargs` for text builders.
   - Added `VLContinuousTokenMixin`: processor-backed rendering (`render_tokens_with_mm`, `_render_tokens`, `build_initial_tokens`), media extraction from OpenAI-style content blocks, and `supports_multimodal() -> True`. Rendering goes through the **processor** chat template (not the tokenizer template) because some VL processors ship a different template (e.g. MiMo-VL's tokenizer template cannot render list-of-blocks content).
-  - Added concrete VL builders composed via MRO: `VLContinuousTokenBuilder` (generic), `QwenVLContinuousTokenBuilder`, `MiMoVLContinuousTokenBuilder`, `MiniMaxVLContinuousTokenBuilder`, `Gemma4VLContinuousTokenBuilder`, `GLM4VContinuousTokenBuilder`, `KimiVLContinuousTokenBuilder`, and `DeepSeekVL2ContinuousTokenBuilder`.
+  - Added concrete VL builders composed via MRO: `VLContinuousTokenBuilder` (generic), `QwenVLContinuousTokenBuilder`, `MiMoVLContinuousTokenBuilder`, `MiniMaxVLContinuousTokenBuilder`, `Gemma4VLContinuousTokenBuilder`, `GLM46VContinuousTokenBuilder`, `KimiVLContinuousTokenBuilder`, and `DeepSeekVL2ContinuousTokenBuilder`.
 - **`verl/utils/continuous_token_wiring.py`**
   - Added VL families to `ContinuousTokenModelFamily` and the builder registry; added name-based auto-inference for VL models (matched **before** their text families).
   - Added the `_TEXT_TO_VL_FAMILY` upgrade path: a unified text+vision checkpoint whose name has no `vl` marker (generic `default`, or `gemma4`) is upgraded to its VL counterpart when a multimodal processor is supplied.
@@ -112,7 +115,7 @@ Officially supported in this PR:
 |---|---|---|---|
 | `qwen25vl` | `QwenVLContinuousTokenBuilder` | Qwen2.5-VL | Qwen ChatML `<|im_end|>\n` newline reinsertion |
 | `qwen3vl` | `QwenVLContinuousTokenBuilder` | Qwen3-VL / Qwen3-VL-MoE | Qwen ChatML `<|im_end|>\n` newline reinsertion |
-| `glm4v` | `GLM4VContinuousTokenBuilder` | GLM-4V (e.g. GLM-4.1V) | GLM `<|observation|>` / `<|user|>` trim |
+| `glm4v` | `GLM46VContinuousTokenBuilder` | GLM-4V (e.g. GLM-4.1V) | GLM `<|observation|>` / `<|user|>` trim |
 | `mimovl` | `MiMoVLContinuousTokenBuilder` | MiMo-VL (Qwen2.5-VL arch) | Qwen ChatML boundary |
 
 All other multimodal models are **not supported yet and will be supported soon.** This includes builders that already have scaffolding in the registry but are not yet validated end-to-end (`minimaxvl` / MiniMax-VL-01, `kimivl` / Kimi-VL, `gemma4vl` / Gemma4, `deepseekvl2` / DeepSeek-VL2, and the generic `vldefault`), as well as models with non-standard processors (see below).

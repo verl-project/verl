@@ -26,7 +26,7 @@ from .continuous_token import (
     DeepSeekVL2ContinuousTokenBuilder,
     Gemma4ContinuousTokenBuilder,
     Gemma4VLContinuousTokenBuilder,
-    GLM4VContinuousTokenBuilder,
+    GLM46VContinuousTokenBuilder,
     GLMContinuousTokenBuilder,
     GptOssContinuousTokenBuilder,
     KimiVLContinuousTokenBuilder,
@@ -97,7 +97,7 @@ _CONTINUOUS_TOKEN_BUILDER_REGISTRY: dict[ContinuousTokenModelFamily, type[Any]] 
     ContinuousTokenModelFamily.MINIMAX_VL: MiniMaxVLContinuousTokenBuilder,
     ContinuousTokenModelFamily.GEMMA4_VL: Gemma4VLContinuousTokenBuilder,
     ContinuousTokenModelFamily.KIMI_VL: KimiVLContinuousTokenBuilder,
-    ContinuousTokenModelFamily.GLM4V: GLM4VContinuousTokenBuilder,
+    ContinuousTokenModelFamily.GLM4V: GLM46VContinuousTokenBuilder,
     ContinuousTokenModelFamily.DEEPSEEK_VL2: DeepSeekVL2ContinuousTokenBuilder,
 }
 
@@ -189,9 +189,12 @@ def infer_continuous_token_model_family(
     # Kimi-VL
     if any(marker in haystack for marker in ("kimi-vl", "kimi_vl")) or "kimivl" in compact:
         return ContinuousTokenModelFamily.KIMI_VL
-    # GLM vision editions (GLM-4.1V / GLM-4V / GLM-4.5V / GLM-4.6V) all share the
-    # GLM4V Continuous Token builder. Note GLM-4.1V/GLM-4V templates drop tool
-    # responses (guarded in ToolAgentLoop); GLM-4.5V/4.6V handle tools.
+    # GLM vision editions (GLM-4V / GLM-4.1V / GLM-4.5V / GLM-4.6V) all share the
+    # GLM-4.6V Continuous Token builder. GLM-4.6V is fully supported (single-turn
+    # + tool agent loop). GLM-4V (4.1V) and GLM-4.5V are supported for the single
+    # turn agent loop only: their templates mishandle tool-role images, so they
+    # cannot be used with the tool agent loop, but single-turn prompt-image
+    # rendering works fine through the same builder.
     if any(
         marker in haystack
         for marker in (
@@ -258,6 +261,7 @@ def create_continuous_token_builder(
     model_path: str | None = None,
     tokenizer_name_or_path: str | None = None,
     chat_template_kwargs: dict[str, Any] | None = None,
+    mm_processor_kwargs: dict[str, Any] | None = None,
     processor: Any | None = None,
     **builder_kwargs: Any,
 ) -> Any:
@@ -293,10 +297,18 @@ def create_continuous_token_builder(
 
     if has_mm_processor:
         # --- Vision-language run ---
+        # mm_processor_kwargs is a multimodal-only concern, so (like ``processor``) it
+        # is passed only to VL builders; text builders never receive it.
         if builder_cls.supports_multimodal():
             # The name already identified a model-specific VL family.
             logger.info("Creating Continuous Token builder: family=%s class=%s", resolved_family, builder_cls)
-            return builder_cls(tokenizer, processor, chat_template_kwargs=chat_template_kwargs, **builder_kwargs)
+            return builder_cls(
+                tokenizer,
+                processor,
+                chat_template_kwargs=chat_template_kwargs,
+                mm_processor_kwargs=mm_processor_kwargs,
+                **builder_kwargs,
+            )
 
         # Inferred a text family, but a multimodal processor is present. Only the
         # unified checkpoints with no ``vl`` marker are safe to auto-upgrade.
@@ -317,7 +329,13 @@ def create_continuous_token_builder(
             resolved_family = upgraded_family
             builder_cls = get_continuous_token_builder_class(resolved_family)
             logger.info("Creating Continuous Token builder: family=%s class=%s", resolved_family, builder_cls)
-            return builder_cls(tokenizer, processor, chat_template_kwargs=chat_template_kwargs, **builder_kwargs)
+            return builder_cls(
+                tokenizer,
+                processor,
+                chat_template_kwargs=chat_template_kwargs,
+                mm_processor_kwargs=mm_processor_kwargs,
+                **builder_kwargs,
+            )
 
         raise ValueError(
             f"Model resolved to the text Continuous Token family {resolved_family!r}, but a multimodal "

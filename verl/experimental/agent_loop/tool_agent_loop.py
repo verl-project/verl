@@ -215,7 +215,6 @@ class ToolAgentLoop(AgentLoopBase):
                 images=agent_data.image_data,
                 videos=agent_data.video_data,
                 audios=agent_data.audio_data,
-                mm_processor_kwargs=agent_data.mm_processor_kwargs,
             )
         else:
             prompt_ids = await self.apply_chat_template(

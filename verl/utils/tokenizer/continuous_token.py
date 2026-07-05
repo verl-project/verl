@@ -82,6 +82,9 @@ class ContinuousTokenBuilder:
         chat_template_kwargs: dict[str, Any] | None = None,
         allowed_append_roles: list[str] | tuple[str, ...] | set[str] | None = None,
     ):
+        # Text-only base: no processor / mm_processor_kwargs. All multimodal state
+        # (processor, mm_processor_kwargs, sampling-rate defaults) lives in the VL
+        # layer so a text builder never carries multimodal parameters it cannot use.
         self.tokenizer = tokenizer
         self.chat_template_kwargs = chat_template_kwargs or {}
         if allowed_append_roles is not None:
@@ -99,7 +102,6 @@ class ContinuousTokenBuilder:
         images: list[Any] | None = None,
         videos: list[Any] | None = None,
         audios: list[Any] | None = None,
-        mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> list[int]:
         # Text-only builders ignore multimodal inputs; VL builders override this.
         return self._render_tokens(messages, add_generation_prompt=True, tools=tools)
@@ -378,19 +380,19 @@ class ContinuousTokenBuilder:
         videos: list[Any] | None = None,
         audios: list[Any] | None = None,
         add_generation_prompt: bool = True,
-        mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> list[int]:
         """Render messages with images through the processor.
 
         Unlike ``_render_tokens`` which uses only the tokenizer, this method
         invokes the full multimodal processor so image placeholders are expanded
-        into the same token IDs the rollout backend will consume.
+        into the same token IDs the rollout backend will consume. VL subclasses apply
+        their ``self.mm_processor_kwargs`` (min/max pixels, sampling rate, ...) captured
+        at construction; the text base does not implement this method.
 
         Args:
             messages: OpenAI-format message list with image content items.
             images: List of PIL images (or paths), one per image content item.
             add_generation_prompt: Whether to append the generation prompt.
-            mm_processor_kwargs: Extra kwargs for the processor (min/max pixels).
 
         Returns:
             Token IDs rendered by the multimodal processor. Pixel tensors are
@@ -828,9 +830,27 @@ class VLContinuousTokenMixin:
     GLM's observation/user trim still applies through ``_merge_non_assistant_token_ids``.
     """
 
-    def __init__(self, tokenizer: Any, processor: Any, **kwargs: Any):
+    def __init__(
+        self,
+        tokenizer: Any,
+        processor: Any,
+        *,
+        mm_processor_kwargs: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ):
         super().__init__(tokenizer, **kwargs)
         self.processor = processor
+        # Processor kwargs (e.g. max_pixels, do_pan_and_scan) that control how media
+        # expands into tokens. Constant for the builder's whole lifetime, so renders
+        # (initial prompt and incremental tool/user) stay aligned.
+        self.mm_processor_kwargs = mm_processor_kwargs or {}
+        # Fold in the processor's audio sampling rate (a static processor property) so
+        # mm_processor_kwargs is complete. Image-only processors have no
+        # feature_extractor -> no-op.
+        if "sampling_rate" not in self.mm_processor_kwargs:
+            sampling_rate = getattr(getattr(processor, "feature_extractor", None), "sampling_rate", None)
+            if sampling_rate is not None:
+                self.mm_processor_kwargs = {**self.mm_processor_kwargs, "sampling_rate": int(sampling_rate)}
 
     @classmethod
     def supports_multimodal(cls) -> bool:
@@ -891,7 +911,6 @@ class VLContinuousTokenMixin:
         videos: list[Any] | None = None,
         audios: list[Any] | None = None,
         add_generation_prompt: bool = True,
-        mm_processor_kwargs: dict[str, Any] | None = None,
         tools: list[dict[str, Any]] | None = None,
     ) -> list[int]:
         """Render messages through the processor (full render with all media)."""
@@ -912,7 +931,9 @@ class VLContinuousTokenMixin:
             **template_kwargs,
         )
 
-        proc_kwargs = dict(mm_processor_kwargs or {})
+        # Processor kwargs are the builder-level constant captured at construction,
+        # so initial-prompt and incremental (tool/user) renders stay aligned.
+        proc_kwargs = dict(self.mm_processor_kwargs or {})
         processor_output = build_multimodal_processor_inputs(
             self.processor,
             text=[text],
@@ -954,7 +975,6 @@ class VLContinuousTokenMixin:
         images: list[Any] | None = None,
         videos: list[Any] | None = None,
         audios: list[Any] | None = None,
-        mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> list[int]:
         return self.render_tokens_with_mm(
             messages,
@@ -962,7 +982,6 @@ class VLContinuousTokenMixin:
             videos=videos,
             audios=audios,
             add_generation_prompt=True,
-            mm_processor_kwargs=mm_processor_kwargs,
             tools=tools,
         )
 
@@ -1049,7 +1068,6 @@ class MiniMaxVLContinuousTokenBuilder(VLContinuousTokenMixin, MiniMaxContinuousT
         videos: list[Any] | None = None,
         audios: list[Any] | None = None,
         add_generation_prompt: bool = True,
-        mm_processor_kwargs: dict[str, Any] | None = None,
         tools: list[dict[str, Any]] | None = None,
     ) -> list[int]:
         # The processor template always appends the scaffold; strip it unless a
@@ -1060,7 +1078,6 @@ class MiniMaxVLContinuousTokenBuilder(VLContinuousTokenMixin, MiniMaxContinuousT
             videos=videos,
             audios=audios,
             add_generation_prompt=add_generation_prompt,
-            mm_processor_kwargs=mm_processor_kwargs,
             tools=tools,
         )
         scaffold = self._vl_scaffold_ids
@@ -1080,8 +1097,8 @@ class Gemma4VLContinuousTokenBuilder(VLContinuousTokenMixin, Gemma4ContinuousTok
     """
 
 
-class GLM4VContinuousTokenBuilder(VLContinuousTokenMixin, GLMContinuousTokenBuilder):
-    """GLM-4V / GLM-4.5-VL: GLM observation/user trim + VL processor logic."""
+class GLM46VContinuousTokenBuilder(VLContinuousTokenMixin, GLMContinuousTokenBuilder):
+    """GLM-4.6V: GLM observation/user trim + VL processor logic."""
 
 
 class KimiVLContinuousTokenBuilder(VLContinuousTokenMixin, ContinuousTokenBuilder):
@@ -1100,9 +1117,19 @@ class DeepSeekVL2ContinuousTokenBuilder(DeepSeekContinuousTokenBuilder):
     so we use full render + prefix diff (like the original CT approach).
     """
 
-    def __init__(self, tokenizer: Any, processor: Any, **kwargs: Any):
+    def __init__(
+        self,
+        tokenizer: Any,
+        processor: Any,
+        *,
+        mm_processor_kwargs: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ):
         super().__init__(tokenizer, **kwargs)
         self.processor = processor
+        # VL2 renders through DeepseekVLV2Processor directly and does not consume
+        # mm_processor_kwargs, but it is stored for API symmetry with other VL builders.
+        self.mm_processor_kwargs = mm_processor_kwargs or {}
 
     @classmethod
     def supports_multimodal(cls) -> bool:
@@ -1186,7 +1213,6 @@ class DeepSeekVL2ContinuousTokenBuilder(DeepSeekContinuousTokenBuilder):
         images: list[Any] | None = None,
         videos: list[Any] | None = None,
         audios: list[Any] | None = None,
-        mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> list[int]:
         if images is None:
             images = self._extract_images_from_messages(messages)

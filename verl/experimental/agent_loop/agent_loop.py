@@ -238,6 +238,7 @@ class AgentLoopBase(ABC):
                 model_path=model_config.path,
                 tokenizer_name_or_path=model_config.tokenizer_path,
                 chat_template_kwargs=self.apply_chat_template_kwargs,
+                mm_processor_kwargs=self.mm_processor_kwargs,
                 processor=self.processor,
             )
             self.enable_continuous_token = True
@@ -297,13 +298,14 @@ class AgentLoopBase(ABC):
         images: list[Image.Image] = None,
         videos: list[tuple[torch.Tensor, dict]] = None,
         audios: list[Any] = None,
-        mm_processor_kwargs: Optional[dict[str, Any]] = None,
     ) -> list[int]:
         """Build the initial prompt token ids with Continuous Token.
 
         Multimodal inputs are forwarded to the builder so that VL builders can
         render placeholder spans through the processor. Text-only builders accept
-        and ignore these arguments.
+        and ignore these arguments. ``mm_processor_kwargs`` is not threaded here:
+        it is a builder-lifetime constant captured at construction and applied by
+        the builder itself during rendering.
         """
         prompt_ids = await self.loop.run_in_executor(
             None,
@@ -313,7 +315,6 @@ class AgentLoopBase(ABC):
                 images=images,
                 videos=videos,
                 audios=audios,
-                mm_processor_kwargs=mm_processor_kwargs,
             ),
         )
 

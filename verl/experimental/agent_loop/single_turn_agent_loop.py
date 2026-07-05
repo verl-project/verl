@@ -57,7 +57,6 @@ class SingleTurnAgentLoop(AgentLoopBase):
                 images=images,
                 videos=videos,
                 audios=audios,
-                mm_processor_kwargs=mm_processor_kwargs,
             )
 
         else:
