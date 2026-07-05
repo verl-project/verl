@@ -584,23 +584,41 @@ class Gemma4ContinuousTokenBuilder(ContinuousTokenBuilder):
         # we fabricate one whose names match the real call (resolved from prior
         # assistant turns). Routing through the template — instead of a hand-built
         # string — lets VL image blocks in tool messages expand into pad tokens.
+        #
+        # Gemma's template resolves each tool response's name by matching the
+        # tool message's ``tool_call_id`` against the preceding assistant
+        # ``tool_calls[*].id`` (falling back to the tool message's own ``name``).
+        # ToolAgentLoop appends bare ``{"role": "tool", "content": ...}`` messages
+        # with neither field, so we stamp the fabricated call id and resolved name
+        # onto message copies; otherwise the template resolves the name to ``None``
+        # and raises ``can only concatenate str (not "NoneType") to str``. These
+        # fields are used only for name resolution and do not appear in the
+        # rendered tokens, so the output is unchanged.
         tool_calls = []
+        rendered_tool_messages = []
         for index, tool_message in enumerate(tool_messages):
+            call_id = _tool_call_id_or_dummy(tool_message, index)
+            resolved_name = _resolve_required_tool_name(
+                tool_message,
+                index,
+                tool_messages,
+                previous_messages,
+            )
             tool_calls.append(
                 {
-                    "id": _tool_call_id_or_dummy(tool_message, index),
+                    "id": call_id,
                     "type": "function",
                     "function": {
-                        "name": _resolve_required_tool_name(
-                            tool_message,
-                            index,
-                            tool_messages,
-                            previous_messages,
-                        ),
+                        "name": resolved_name,
                         "arguments": {},
                     },
                 }
             )
+            rendered_message = dict(tool_message)
+            rendered_message["tool_call_id"] = call_id
+            if not rendered_message.get("name"):
+                rendered_message["name"] = resolved_name
+            rendered_tool_messages.append(rendered_message)
         synthetic_assistant = {
             "role": "assistant",
             "content": "",
@@ -609,7 +627,7 @@ class Gemma4ContinuousTokenBuilder(ContinuousTokenBuilder):
         }
         return self.render_delta_token_id(
             [_SYNTHETIC_SYSTEM_MESSAGE, _SYNTHETIC_USER_MESSAGE, synthetic_assistant],
-            tool_messages,
+            rendered_tool_messages,
             tools=tools,
         )
 
