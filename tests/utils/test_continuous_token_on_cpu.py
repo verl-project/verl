@@ -21,7 +21,7 @@ from verl.utils.tokenizer.continuous_token import (
     DeepSeekContinuousTokenBuilder,
     DeepSeekVL2ContinuousTokenBuilder,
     Gemma4ContinuousTokenBuilder,
-    GLM4VContinuousTokenBuilder,
+    GLM46VContinuousTokenBuilder,
     GLMContinuousTokenBuilder,
     GptOssContinuousTokenBuilder,
     KimiVLContinuousTokenBuilder,
@@ -318,7 +318,7 @@ def test_builtin_family_surface():
         (ContinuousTokenModelFamily.QWEN3_VL, QwenVLContinuousTokenBuilder),
         (ContinuousTokenModelFamily.MIMO_VL, MiMoVLContinuousTokenBuilder),
         (ContinuousTokenModelFamily.KIMI_VL, KimiVLContinuousTokenBuilder),
-        (ContinuousTokenModelFamily.GLM4V, GLM4VContinuousTokenBuilder),
+        (ContinuousTokenModelFamily.GLM4V, GLM46VContinuousTokenBuilder),
         (ContinuousTokenModelFamily.DEEPSEEK_VL2, DeepSeekVL2ContinuousTokenBuilder),
     ],
 )
@@ -1536,7 +1536,7 @@ class TestQwenVLMergeNonAssistantTokens:
     "builder_name",
     [
         "MiMoVLContinuousTokenBuilder",
-        "GLM4VContinuousTokenBuilder",
+        "GLM46VContinuousTokenBuilder",
         "KimiVLContinuousTokenBuilder",
     ],
 )
@@ -1570,3 +1570,190 @@ def test_other_vl_builders_reject_non_prefix_processor_output(builder_name):
     runtime_ids = [151644, 1000, 1001, 1002, 151645, 151644]
     with pytest.raises(ValueError, match="suffix diff failed"):
         builder.merge_non_assistant_tokens(previous, updated, runtime_ids)
+
+
+# =============================================================================
+# Tests: chat_template_kwargs / mm_processor_kwargs are wired to the VL builder
+# at construction time AND actually take effect at render time.
+# =============================================================================
+
+
+class _ConfigurablePadProcessor(_MockQwenVLProcessor):
+    """VL processor whose per-image pad count is driven by the ``pads_per_image``
+    mm kwarg, mirroring how real ``max_pixels``/``min_pixels`` change how many
+    vision tokens an image expands into. Also records the kwargs each call
+    receives so tests can assert they were forwarded verbatim.
+    """
+
+    def __init__(self):
+        self.call_kwargs: list[dict] = []
+
+    def __call__(self, *, text=None, images=None, return_tensors=None, pads_per_image=4, **kwargs):
+        self.call_kwargs.append({"pads_per_image": pads_per_image, **kwargs})
+        rendered = text[0] if isinstance(text, list | tuple) else (text or "")
+        segments = rendered.split(self._IMAGE_PLACEHOLDER)
+        num_images = len(segments) - 1
+
+        token_ids: list[int] = []
+        for index, segment in enumerate(segments):
+            token_ids.extend(ord(char) for char in segment)
+            if index < num_images:
+                token_ids.append(151652)
+                token_ids.extend([151655] * pads_per_image)
+                token_ids.append(151653)
+
+        result = {"input_ids": [token_ids]}
+        if num_images > 0:
+            import numpy as np
+
+            result["pixel_values"] = np.zeros((num_images * 16, 3, 14, 14), dtype=np.float32)
+            result["image_grid_thw"] = np.array([[1, 4, 4]] * num_images, dtype=np.int64)
+        return result
+
+
+class _RecordingTemplateProcessor(_MockQwenVLProcessor):
+    """VL processor that records the kwargs its ``apply_chat_template`` receives."""
+
+    def __init__(self):
+        self.template_kwargs: list[dict] = []
+
+    def apply_chat_template(
+        self, messages, tokenize=False, add_generation_prompt=False, tools=None, return_dict=False, **kwargs
+    ):
+        self.template_kwargs.append(dict(kwargs))
+        return super().apply_chat_template(
+            messages,
+            tokenize=tokenize,
+            add_generation_prompt=add_generation_prompt,
+            tools=tools,
+            return_dict=return_dict,
+            **kwargs,
+        )
+
+
+def test_vl_builder_creation_forwards_chat_template_and_mm_processor_kwargs():
+    """create_continuous_token_builder must store both kwarg dicts on a VL builder."""
+    builder = create_continuous_token_builder(
+        _MockQwenVLTokenizer(),
+        model_family="qwen25vl",
+        processor=_MockQwenVLProcessor(),
+        chat_template_kwargs={"enable_thinking": False},
+        mm_processor_kwargs={"max_pixels": 12345, "min_pixels": 3136},
+    )
+
+    assert isinstance(builder, QwenVLContinuousTokenBuilder)
+    assert builder.chat_template_kwargs == {"enable_thinking": False}
+    assert builder.mm_processor_kwargs == {"max_pixels": 12345, "min_pixels": 3136}
+
+
+def test_text_builder_creation_ignores_mm_processor_kwargs():
+    """mm_processor_kwargs is multimodal-only: a text builder must not carry it."""
+    builder = create_continuous_token_builder(
+        _TemplateTokenizer(),
+        model_family="default",
+        mm_processor_kwargs={"max_pixels": 12345},
+    )
+
+    assert isinstance(builder, ContinuousTokenBuilder)
+    assert not hasattr(builder, "mm_processor_kwargs")
+
+
+def test_vl_builder_forwards_mm_processor_kwargs_to_processor_call_at_render():
+    """mm_processor_kwargs must be forwarded verbatim into the processor call."""
+    processor = _ConfigurablePadProcessor()
+    builder = QwenVLContinuousTokenBuilder(
+        _MockQwenVLTokenizer(),
+        processor,
+        mm_processor_kwargs={"pads_per_image": 3, "max_pixels": 999},
+    )
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": "x.png"},
+                {"type": "text", "text": "hi"},
+            ],
+        }
+    ]
+
+    builder.build_initial_tokens(messages, images=["x.png"])
+
+    assert processor.call_kwargs
+    assert processor.call_kwargs[-1]["pads_per_image"] == 3
+    assert processor.call_kwargs[-1]["max_pixels"] == 999
+
+
+def test_vl_builder_mm_processor_kwargs_actually_change_rendered_token_count():
+    """Different mm_processor_kwargs must produce a different number of vision pad
+    tokens, proving the kwargs genuinely take effect (not merely stored)."""
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": "x.png"},
+                {"type": "text", "text": "hi"},
+            ],
+        }
+    ]
+
+    small = QwenVLContinuousTokenBuilder(
+        _MockQwenVLTokenizer(), _ConfigurablePadProcessor(), mm_processor_kwargs={"pads_per_image": 2}
+    )
+    large = QwenVLContinuousTokenBuilder(
+        _MockQwenVLTokenizer(), _ConfigurablePadProcessor(), mm_processor_kwargs={"pads_per_image": 6}
+    )
+
+    small_ids = small.build_initial_tokens(messages, images=["x.png"])
+    large_ids = large.build_initial_tokens(messages, images=["x.png"])
+
+    assert small_ids.count(151655) == 2
+    assert large_ids.count(151655) == 6
+
+
+def test_vl_builder_forwards_chat_template_kwargs_to_processor_template():
+    """chat_template_kwargs must reach the processor's apply_chat_template (VL path),
+    not just the tokenizer path exercised by the text-only builder test."""
+    processor = _RecordingTemplateProcessor()
+    builder = QwenVLContinuousTokenBuilder(
+        _MockQwenVLTokenizer(),
+        processor,
+        chat_template_kwargs={"enable_thinking": False},
+    )
+
+    builder.build_initial_tokens([{"role": "user", "content": "question"}])
+
+    assert processor.template_kwargs
+    assert processor.template_kwargs[-1].get("enable_thinking") is False
+
+
+def test_vl_builder_folds_processor_sampling_rate_into_mm_processor_kwargs():
+    """A processor exposing feature_extractor.sampling_rate should have that value
+    folded into mm_processor_kwargs so audio renders stay aligned."""
+
+    class _AudioProcessor(_MockQwenVLProcessor):
+        feature_extractor = type("FE", (), {"sampling_rate": 16000})()
+
+    builder = QwenVLContinuousTokenBuilder(
+        _MockQwenVLTokenizer(),
+        _AudioProcessor(),
+        mm_processor_kwargs={"max_pixels": 111},
+    )
+
+    assert builder.mm_processor_kwargs["sampling_rate"] == 16000
+    assert builder.mm_processor_kwargs["max_pixels"] == 111
+
+
+def test_vl_builder_preserves_explicit_sampling_rate_over_processor_default():
+    """An explicit sampling_rate in mm_processor_kwargs must not be overwritten by
+    the processor's feature_extractor default."""
+
+    class _AudioProcessor(_MockQwenVLProcessor):
+        feature_extractor = type("FE", (), {"sampling_rate": 16000})()
+
+    builder = QwenVLContinuousTokenBuilder(
+        _MockQwenVLTokenizer(),
+        _AudioProcessor(),
+        mm_processor_kwargs={"sampling_rate": 24000},
+    )
+
+    assert builder.mm_processor_kwargs["sampling_rate"] == 24000
