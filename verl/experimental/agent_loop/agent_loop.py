@@ -62,9 +62,7 @@ from verl.utils.skip import SkipManager
 from verl.utils.tokenizer import (
     build_multimodal_processor_inputs,
     get_processor_token_id,
-    normalize_token_ids,
 )
-from verl.utils.tokenizer.chat_template import apply_chat_template, initialize_system_prompt
 from verl.utils.tokenizer.continuous_token_wiring import create_continuous_token_builder
 from verl.workers.config import (
     HFModelConfig,
@@ -225,29 +223,39 @@ class AgentLoopBase(ABC):
         self.data_config = data_config.config
         self.apply_chat_template_kwargs = self.data_config.get("apply_chat_template_kwargs", {})
         self.mm_processor_kwargs = self.data_config.get("mm_processor_kwargs", {})
-        self.continuous_token_builder = None
-        self.enable_continuous_token = False
-        continuous_token_config = self.data_config.continuous_token
-        if continuous_token_config.enable:
-            model_config = self.config.actor_rollout_ref.model
-            # The Continuous Token model family is always inferred from the model /
-            # tokenizer path; unrecognized models fall back to the default builder
-            # (or the default VL builder when a multimodal processor is present).
-            self.continuous_token_builder = create_continuous_token_builder(
-                self.tokenizer,
-                model_path=model_config.path,
-                tokenizer_name_or_path=model_config.tokenizer_path,
-                chat_template_kwargs=self.apply_chat_template_kwargs,
-                mm_processor_kwargs=self.mm_processor_kwargs,
-                processor=self.processor,
-            )
-            self.enable_continuous_token = True
-            # Continuous Token doesn't use the legacy removable system prompt.
-            self.system_prompt = None
-        else:
-            processing_class = self.processor if self.processor is not None else self.tokenizer
-            self.system_prompt = initialize_system_prompt(processing_class, **self.apply_chat_template_kwargs)
+        # Continuous Token is the only rollout tokenization path for agent loops.
+        # The model family (boundary handling) is always inferred from the model /
+        # tokenizer path; unrecognized models fall back to the default builder
+        # (or the default VL builder when a multimodal processor is present).
+        model_config = self.config.actor_rollout_ref.model
+        self.continuous_token_builder = create_continuous_token_builder(
+            self.tokenizer,
+            model_path=model_config.path,
+            tokenizer_name_or_path=model_config.tokenizer_path,
+            chat_template_kwargs=self.apply_chat_template_kwargs,
+            mm_processor_kwargs=self.mm_processor_kwargs,
+            processor=self.processor,
+        )
         self.loop = get_event_loop()
+
+    def _assert_mm_supported(self, has_multi_modal: bool) -> None:
+        """Fail loudly when multimodal inputs are present but unsupported.
+
+        Multimodal rollout requires both a Continuous Token builder that supports
+        multimodal boundaries and a non-None processor to render placeholder spans.
+        Silent fallback is not allowed; callers must invoke this before mutating any
+        rollout state so failures never leave a half-built prompt behind.
+        """
+        if not has_multi_modal:
+            return
+        if not (self.continuous_token_builder.supports_multimodal() and self.processor is not None):
+            raise ValueError(
+                "Multimodal inputs require a Continuous Token builder that supports multimodal "
+                "AND a non-None processor, but got "
+                f"supports_multimodal={self.continuous_token_builder.supports_multimodal()}, "
+                f"processor={'set' if self.processor is not None else 'None'}. "
+                "Use a VL base model (with its processor) or remove multimodal inputs."
+            )
 
     def _get_mm_processor_kwargs(self, audio_data: Optional[list[Any]] = None) -> dict[str, Any]:
         mm_processor_kwargs = dict(self.mm_processor_kwargs or {})
@@ -392,89 +400,6 @@ class AgentLoopBase(ABC):
                 prompt_length,
             )
             return prompt_ids[-prompt_length:]
-        return prompt_ids
-
-    async def apply_chat_template(
-        self,
-        messages: list[dict],
-        tools: list[dict] = None,
-        images: list[Image.Image] = None,
-        videos: list[tuple[torch.Tensor, dict]] = None,
-        audios: list[Any] = None,
-        mm_processor_kwargs: Optional[dict[str, Any]] = None,
-        remove_system_prompt: bool = False,
-    ):
-        """Apply chat template to messages with optional tools, images, and videos.
-
-        Args:
-            messages (list[dict]): Input messages.
-            tools (list[dict], optional): Tools schemas. Defaults to None.
-            images (list[Image.Image], optional): Input images. Defaults to None.
-            videos (list[tuple[torch.Tensor, dict]], optional): Input videos. Defaults to None.
-            remove_system_prompt (bool, optional): Whether to remove system prompt. Defaults to False.
-
-        Returns:
-            list[int]: Prompt token ids.
-        """
-        if self.processor is not None:
-            raw_prompt = await self.loop.run_in_executor(
-                None,
-                lambda: apply_chat_template(
-                    self.processor,
-                    messages,
-                    tools=tools,
-                    add_generation_prompt=True,
-                    tokenize=False,
-                    **self.apply_chat_template_kwargs,
-                ),
-            )
-
-            model_inputs = build_multimodal_processor_inputs(
-                self.processor,
-                text=[raw_prompt],
-                images=images,
-                videos=videos,
-                audio=audios,
-                mm_processor_kwargs=mm_processor_kwargs
-                if mm_processor_kwargs is not None
-                else self._get_mm_processor_kwargs(audios),
-            )
-            prompt_ids = normalize_token_ids(model_inputs.pop("input_ids"))
-        else:
-            tokenized_prompt = await self.loop.run_in_executor(
-                None,
-                lambda: apply_chat_template(
-                    self.tokenizer,
-                    messages,
-                    tools=tools,
-                    add_generation_prompt=True,
-                    tokenize=True,
-                    **self.apply_chat_template_kwargs,
-                ),
-            )
-            prompt_ids = normalize_token_ids(tokenized_prompt)
-
-        if remove_system_prompt:
-            prompt_ids = prompt_ids[len(self.system_prompt) :]
-
-        # Mirror the response-side ``response_ids[:response_length]`` cap on the prompt side:
-        # every prompt produced by the agent loop must fit in ``rollout.prompt_length`` so that
-        # ``_pad_token_ids`` (and downstream ``torch.cat``) can rely on uniform shapes.
-        # Multimodal prompts cannot be sliced here because placeholder tokens must remain
-        # aligned 1:1 with ``multi_modal_inputs`` features, so we fail loudly instead.
-        prompt_length = self.rollout_config.prompt_length
-        if len(prompt_ids) > prompt_length:
-            if images or videos or audios:
-                raise ValueError(
-                    f"Multimodal prompt produced {len(prompt_ids)} tokens, exceeding "
-                    f"rollout.prompt_length={prompt_length}. Truncating multimodal token "
-                    f"sequences corrupts vision/audio feature alignment, so this is treated "
-                    f"as a configuration error. Reduce the multimodal input size "
-                    f"(e.g. ``total_pixels`` / ``max_pixels`` / fps / number of frames) or "
-                    f"increase ``rollout.prompt_length``."
-                )
-            prompt_ids = self._cap_text_prompt_length(prompt_ids)
-
         return prompt_ids
 
     @abstractmethod

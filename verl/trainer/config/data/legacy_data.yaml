@@ -115,15 +115,5 @@ return_multi_modal_inputs: True
 # Additional kwargs when calling tokenizer.apply_chat_template
 apply_chat_template_kwargs: {}
 
-# Continuous Token keeps the runtime token stream across multi-turn rollout instead of reconstructing previous assistant turns from text.
-# Disabled by default for compatibility.
-continuous_token:
-
-  # Enable Continuous Token for multi-turn PPO rollout. The model family (boundary
-  # handling) is inferred automatically from the model / tokenizer path; unknown
-  # models fall back to the default builder (or the default VL builder when a
-  # multimodal processor is present).
-  enable: False
-
 # Additional kwargs passed to multimodal processors/backends.
 mm_processor_kwargs: {}
