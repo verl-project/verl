@@ -119,6 +119,6 @@ jobs:
       - name: Test vllm server abort functionality
         run: |
           pytest tests/workers/rollout/rollout_vllm/test_vllm_abort.py -v -s
-      - name: Test vllm server abort functionality
+      - name: Test bucketed weight transfer
         run: |
-          pytest tests/workers/rollout/rollout_vllm/test_vllm_abort.py -v -s
+          pytest -svvv tests/utils/test_bucketed_weight_transfer.py

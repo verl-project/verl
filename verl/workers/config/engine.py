@@ -429,6 +429,13 @@ class TorchtitanEngineConfig(EngineConfig):
         context_parallel_size (int): Context parallel size, default 1
         attn_type (str): Attention type for torchtitan's model (e.g., "sdpa", "flex", "varlen"),
             default "flex"
+        spmd_backend (str): torchtitan SPMD backend, one of "default", "full_dtensor", "spmd_types",
+            default "spmd_types"
+        activation_checkpoint (str): Activation checkpointing mode, one of "selective", "full", "none".
+            Default "selective" (torchtitan's default). Use "none" under spmd_backend="spmd_types" with
+            eager: selective/full AC recompute runs on the autograd backward
+            thread where the thread-local SPMD mesh is inactive, so spmd.assert_type raises
+            "no current mesh". Compiled runs recompute in-graph and are unaffected.
         strategy (str): Strategy to use for distributed training, default "torchtitan"
         seed (int): Random seed for reproducibility.
         full_determinism (bool): If true, enable_full_determinism is called to ensure reproducible results
@@ -456,6 +463,8 @@ class TorchtitanEngineConfig(EngineConfig):
     pipeline_parallel_size: int = 1
     context_parallel_size: int = 1
     attn_type: str = "flex"
+    spmd_backend: str = "spmd_types"
+    activation_checkpoint: str = "selective"
     max_seq_len: Optional[int] = None
     strategy: str = "torchtitan"
     seed: int = 42
@@ -463,6 +472,15 @@ class TorchtitanEngineConfig(EngineConfig):
 
     def __post_init__(self):
         super().__post_init__()
+        assert self.attn_type in ["flex", "flex_flash", "varlen"], (
+            f"attn_type {self.attn_type} not supported (sdpa is not a valid language-model backend)"
+        )
+        assert self.spmd_backend in ["default", "full_dtensor", "spmd_types"], (
+            f"spmd_backend {self.spmd_backend} not supported"
+        )
+        assert self.activation_checkpoint in ["selective", "full", "none"], (
+            f"activation_checkpoint {self.activation_checkpoint} not supported"
+        )
         assert self.strategy in ["torchtitan"], f"strategy {self.strategy} not supported"
 
 

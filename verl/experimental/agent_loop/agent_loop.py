@@ -64,7 +64,7 @@ from verl.utils.tokenizer import (
     get_processor_token_id,
     normalize_token_ids,
 )
-from verl.utils.tokenizer.chat_template import apply_chat_template, initialize_system_prompt
+from verl.utils.tokenizer.chat_template import apply_chat_template, initialize_system_prompt, initialize_turn_separator
 from verl.utils.tokenizer.continuous_token_wiring import create_continuous_token_builder
 from verl.workers.config import (
     HFModelConfig,
@@ -240,6 +240,9 @@ class AgentLoopBase(ABC):
             self.enable_continuous_token = True
             # Continuous Token doesn't use the legacy removable system prompt.
             self.system_prompt = None
+            # Continuous Token re-renders non-assistant turns from the full message list, so it does
+            # not need the incremental turn separator.
+            self.turn_separator = []
         else:
             if continuous_token_config.enable and self.processor is not None:
                 logger.warning(
@@ -247,6 +250,9 @@ class AgentLoopBase(ABC):
                 )
             processing_class = self.processor if self.processor is not None else self.tokenizer
             self.system_prompt = initialize_system_prompt(processing_class, **self.apply_chat_template_kwargs)
+            # Turn separator dropped when the model stops at the assistant close token; restored at
+            # turn boundaries in ``ToolAgentLoop._handle_processing_tools_state``.
+            self.turn_separator = initialize_turn_separator(processing_class, **self.apply_chat_template_kwargs)
         self.loop = get_event_loop()
 
     def _get_mm_processor_kwargs(self, audio_data: Optional[list[Any]] = None) -> dict[str, Any]:

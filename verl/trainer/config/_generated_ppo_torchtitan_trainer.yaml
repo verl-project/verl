@@ -42,6 +42,8 @@ actor_rollout_ref:
       pipeline_parallel_size: 1
       context_parallel_size: 1
       attn_type: flex
+      spmd_backend: spmd_types
+      activation_checkpoint: selective
       max_seq_len: null
       strategy: torchtitan
       seed: 42
@@ -178,6 +180,8 @@ actor_rollout_ref:
       pipeline_parallel_size: ${oc.select:actor_rollout_ref.actor.torchtitan.pipeline_parallel_size,1}
       context_parallel_size: ${oc.select:actor_rollout_ref.actor.torchtitan.context_parallel_size,1}
       attn_type: ${oc.select:actor_rollout_ref.actor.torchtitan.attn_type,flex}
+      spmd_backend: spmd_types
+      activation_checkpoint: selective
       max_seq_len: null
       strategy: torchtitan
       seed: ${oc.select:actor_rollout_ref.actor.torchtitan.seed,42}
@@ -506,6 +510,8 @@ critic:
     pipeline_parallel_size: 1
     context_parallel_size: 1
     attn_type: flex
+    spmd_backend: spmd_types
+    activation_checkpoint: selective
     max_seq_len: null
     strategy: torchtitan
     seed: 42
