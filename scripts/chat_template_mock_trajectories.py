@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Structured mock trajectories for CT-vs-legacy agent-loop tokenization checks."""
+"""Structured mock trajectories for the chat-template checker."""
 
 from __future__ import annotations
 
@@ -542,8 +542,7 @@ def select_tool_agent_trajectories(names: list[str] | None = None) -> list[ToolA
 # Vision-language (VL) trajectories
 #
 # These embed real images in both the initial user prompt and inside tool
-# responses, and are consumed by the VL CT-vs-legacy comparison harness
-# (``tests/experimental/agent_loop/continuous_token/compare_vl_agentloop_ct_vs_legacy.py``).
+# responses.
 #
 # They are intentionally kept OUT of the text ``TRAJECTORIES`` tuple: the text
 # chat-template checker renders trajectories with a bare tokenizer and cannot
@@ -570,6 +569,19 @@ def _format_tool_call_text(tool_parser: str, name: str, arguments: dict[str, Any
         return f"<tool_call>{name}{arg_pairs}</tool_call>"
     if tool_parser == "kimi":
         return f"<|tool_call_begin|>{name}<|tool_call_argument_begin|>{args_json}<|tool_call_end|>"
+    if tool_parser == "gemma4":
+        # Gemma-4 format: string args wrapped in <|"|>...<|"|>, other scalars bare.
+        arg_parts = []
+        for key, value in arguments.items():
+            if isinstance(value, str):
+                arg_parts.append(f'{key}:<|"|>{value}<|"|>')
+            elif isinstance(value, bool):
+                arg_parts.append(f"{key}:{str(value).lower()}")
+            elif value is None:
+                arg_parts.append(f"{key}:null")
+            else:
+                arg_parts.append(f"{key}:{value}")
+        return f"<|tool_call>call:{name}{{{','.join(arg_parts)}}}<tool_call|>"
     raise ValueError(f"Unsupported tool parser for mock tool-call rendering: {tool_parser!r}")
 
 
