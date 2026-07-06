@@ -121,7 +121,7 @@ Ascend Quickstart with SGLang Backend
 最佳实践
 --------
 
-我们提供 `最佳实践 <https://github.com/verl-project/verl/blob/main/docs/ascend_tutorial/model_support/examples/ascend_sglang_best_practices.rst>`_ 作为参考。
+我们提供 `最佳实践 <../model_support/examples/ascend_sglang_best_practices.rst>`_ 作为参考。
 
 环境变量与参数
 --------------
@@ -144,9 +144,9 @@ Ascend Quickstart with SGLang Backend
    # 使能推理 EP 时需要
    export SGLANG_DEEPEP_BF16_DISPATCH=1
 
-当前 verl 已解析推理常见参数，详见 `async_sglang_server.py <https://github.com/verl-project/verl/blob/main/verl/workers/rollout/sglang_rollout/async_sglang_server.py>`_ 中 ``ServerArgs`` 初始化传参。
+当前 verl 已解析推理常见参数，详见 `async_sglang_server.py <../../../verl/workers/rollout/sglang_rollout/async_sglang_server.py>`_ 中 ``ServerArgs`` 初始化传参。
 
-其他 `SGLang 参数 <https://github.com/sgl-project/sglang/blob/main/docs/advanced_features/server_arguments.md>`_ 均可通过 ``engine_kwargs`` 进行参数传递。
+其他 `SGLang 参数 <https://github.com/sgl-project/sglang/blob/v0.5.10/docs/advanced_features/server_arguments.md>`_ 均可通过 ``engine_kwargs`` 进行参数传递。
 
 vLLM 后端脚本转换为 SGLang
 --------------------------
