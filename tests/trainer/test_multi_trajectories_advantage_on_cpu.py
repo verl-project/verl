@@ -16,8 +16,8 @@ import pytest
 import torch
 
 from verl.protocol import DataProto
-from verl.trainer.main_ppo_sync import compute_advantage, compute_advantage_for_multi_trajectories
 from verl.trainer.ppo.core_algos import AdvantageEstimator
+from verl.trainer.ppo.v1.utils import compute_advantage, compute_advantage_for_multi_trajectories
 
 
 @pytest.fixture

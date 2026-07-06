@@ -148,7 +148,7 @@ class TeacherModelManager:
 
         self.load_balancer_handle = get_router_handle(
             servers=dict(zip(self.server_addresses, self.server_handles, strict=True)),
-            router_config=self.teacher_model_config.inference.get("router", None),
+            rollout_config=self.teacher_model_config.inference,
         )
 
 

@@ -22,12 +22,18 @@ from typing import Any, Callable
 
 import numpy as np
 import torch
+from omegaconf import DictConfig, OmegaConf
+from transformers import AutoConfig
 
 import verl.utils.torch_functional as verl_F
 from verl import DataProto
+from verl.utils.fs import copy_to_local
 from verl.utils.import_utils import deprecated
+from verl.utils.model import update_model_config
 
 logger = logging.getLogger(__name__)
+
+_NUM_LOCAL_EXPERTS_MODEL_TYPES = {"gpt_oss", "mixtral"}
 
 
 @deprecated("verl.utils.metric.reduce_metrics")
@@ -84,6 +90,322 @@ def _compute_response_info(batch: DataProto) -> dict[str, Any]:
         prompt_length=prompt_length,
         response_length=response_length,
     )
+
+
+def _get_nested_attr(obj: Any, name: str) -> Any:
+    if hasattr(obj, "get"):
+        return obj.get(name)
+    return getattr(obj, name, None)
+
+
+def get_hf_config_override_kwargs(override_config: Any) -> dict[str, Any]:
+    if isinstance(override_config, DictConfig):
+        override_config = OmegaConf.to_container(override_config, resolve=True)
+    if not override_config:
+        return {}
+    if "model_config" in override_config:
+        return override_config["model_config"]
+    return override_config
+
+
+def _get_config_value(config: Any, key: str, default: Any = None) -> Any:
+    if hasattr(config, "get"):
+        return config.get(key, default)
+    return getattr(config, key, default)
+
+
+def infer_moe_num_experts(model_config: Any) -> int | None:
+    """Infer the global number of routed experts from an in-memory config-like object."""
+    candidates = [model_config]
+    hf_config = _get_nested_attr(model_config, "hf_config")
+    text_config = _get_nested_attr(model_config, "text_config")
+    override_config = _get_nested_attr(model_config, "override_config")
+    if hf_config is not None:
+        candidates.append(hf_config)
+        hf_text_config = _get_nested_attr(hf_config, "text_config")
+        if hf_text_config is not None:
+            candidates.append(hf_text_config)
+    if text_config is not None:
+        candidates.append(text_config)
+    if override_config is not None:
+        candidates.append(override_config)
+        override_model_config = _get_nested_attr(override_config, "model_config")
+        if override_model_config is not None:
+            candidates.append(override_model_config)
+        override_text_config = _get_nested_attr(override_config, "text_config")
+        if override_text_config is not None:
+            candidates.append(override_text_config)
+
+    for candidate in candidates:
+        for attr in ("num_experts", "n_routed_experts"):
+            value = _get_nested_attr(candidate, attr)
+            if value is not None:
+                return int(value)
+        if _get_nested_attr(candidate, "model_type") in _NUM_LOCAL_EXPERTS_MODEL_TYPES:
+            value = _get_nested_attr(candidate, "num_local_experts")
+            if value is not None:
+                return int(value)
+    return None
+
+
+def infer_rollout_moe_num_experts(model_config: Any) -> int | None:
+    """Infer rollout MoE num_experts, loading the HF config only when needed."""
+    num_experts = infer_moe_num_experts(model_config)
+    if num_experts is not None:
+        return num_experts
+
+    hf_config_path = (
+        _get_config_value(model_config, "local_hf_config_path")
+        or _get_config_value(model_config, "hf_config_path")
+        or _get_config_value(model_config, "path")
+    )
+    if hf_config_path is None:
+        return None
+
+    local_hf_config_path = copy_to_local(hf_config_path, use_shm=_get_config_value(model_config, "use_shm", False))
+    hf_config = AutoConfig.from_pretrained(
+        local_hf_config_path,
+        trust_remote_code=_get_config_value(model_config, "trust_remote_code", False),
+    )
+    override_config = get_hf_config_override_kwargs(_get_config_value(model_config, "override_config", {}))
+    if override_config:
+        update_model_config(hf_config, override_config)
+    return infer_moe_num_experts(hf_config)
+
+
+def _compute_rollout_moe_load_balance_metrics_from_counts(
+    load_counts: torch.Tensor | None,
+    prefix: str = "rollout/moe",
+) -> dict[str, Any]:
+    if load_counts is None or load_counts.numel() == 0:
+        return {}
+
+    load_matrix = load_counts.float()
+    load_matrix = load_matrix / load_matrix.sum(dim=1, keepdim=True).clamp_min(1.0)
+    num_experts = load_matrix.shape[1]
+    deviation = load_matrix * num_experts - 1.0
+    max_vio = deviation.max(dim=1).values
+    min_vio = deviation.min(dim=1).values
+    avg_vio = deviation.abs().mean(dim=1)
+
+    metrics: dict[str, Any] = {}
+    for i in range(load_matrix.shape[0]):
+        metrics[f"{prefix}/max_vio/layer_{i}"] = max_vio[i].detach().item()
+        metrics[f"{prefix}/min_vio/layer_{i}"] = min_vio[i].detach().item()
+        metrics[f"{prefix}/avg_vio/layer_{i}"] = avg_vio[i].detach().item()
+    metrics[f"{prefix}/max_vio/max"] = max_vio.max().detach().item()
+    metrics[f"{prefix}/max_vio/avg"] = max_vio.mean().detach().item()
+    metrics[f"{prefix}/min_vio/max"] = min_vio.max().detach().item()
+    metrics[f"{prefix}/min_vio/avg"] = min_vio.mean().detach().item()
+    metrics[f"{prefix}/avg_vio/max"] = avg_vio.max().detach().item()
+    metrics[f"{prefix}/avg_vio/avg"] = avg_vio.mean().detach().item()
+    return metrics
+
+
+def _compute_rollout_moe_load_counts(
+    routed_experts: torch.Tensor | None,
+    response_mask: torch.Tensor | None,
+    num_experts: int | None,
+) -> torch.Tensor | None:
+    """Count routed experts in response tokens as [num_layers, num_experts]."""
+    if routed_experts is None or response_mask is None or num_experts is None or num_experts <= 0:
+        return None
+    if routed_experts.dim() != 4:
+        logger.warning("Expected routed_experts with shape [bsz, seqlen, layers, topk], got %s", routed_experts.shape)
+        return None
+    if response_mask.dim() != 2 or response_mask.shape[0] != routed_experts.shape[0]:
+        logger.warning(
+            "Response mask shape %s is incompatible with routed_experts %s", response_mask.shape, routed_experts.shape
+        )
+        return None
+
+    response_len = response_mask.shape[1]
+    if routed_experts.shape[1] < response_len:
+        logger.warning(
+            "routed_experts sequence length %s is shorter than response length %s",
+            routed_experts.shape[1],
+            response_len,
+        )
+        return None
+
+    response_routed_experts = routed_experts[:, -response_len:]
+    response_mask = response_mask.to(device=response_routed_experts.device, dtype=torch.bool)
+    selected = response_routed_experts[response_mask]
+    selected = selected.detach().to(device="cpu", dtype=torch.long)
+    if selected.numel() == 0:
+        return None
+    if selected.min() < 0 or selected.max() >= num_experts:
+        logger.warning(
+            "Skipping rollout MoE load-balance metrics because routed expert ids are outside [0, %s): min=%s max=%s",
+            num_experts,
+            selected.min().item(),
+            selected.max().item(),
+        )
+        return None
+
+    # selected: [num_response_tokens, num_layers, topk]. Count every top-k slot
+    # without materializing a large [tokens, layers, topk, experts] one-hot tensor.
+    return torch.stack(
+        [
+            torch.bincount(selected[:, layer_idx, :].flatten(), minlength=num_experts)
+            for layer_idx in range(selected.shape[1])
+        ]
+    )
+
+
+def compute_rollout_moe_load_balance_metrics(
+    routed_experts: torch.Tensor | None,
+    response_mask: torch.Tensor | None,
+    num_experts: int | None,
+    prefix: str = "rollout/moe",
+) -> dict[str, Any]:
+    """Compute rollout MoE load-balance metrics from returned routed expert ids."""
+    load_counts = _compute_rollout_moe_load_counts(
+        routed_experts=routed_experts,
+        response_mask=response_mask,
+        num_experts=num_experts,
+    )
+    return _compute_rollout_moe_load_balance_metrics_from_counts(load_counts, prefix=prefix)
+
+
+def get_metric_data_with_optional_routed_experts(
+    keys: list[str],
+    partition_id: str,
+    fields: list[str],
+    moe_lb_metrics_interval: int,
+    global_steps: int,
+    accumulator: "RolloutMoELoadBalanceMetricsAccumulator",
+    kv_batch_get: Callable[..., Any],
+):
+    if moe_lb_metrics_interval <= 0 or not accumulator.should_request_routed_experts(global_steps):
+        return kv_batch_get(keys=keys, partition_id=partition_id, select_fields=fields)
+
+    fields_with_routed_experts = [*fields, "routed_experts"]
+    try:
+        return kv_batch_get(keys=keys, partition_id=partition_id, select_fields=fields_with_routed_experts)
+    except ValueError as exc:
+        if "routed_experts" not in str(exc):
+            raise
+        accumulator.defer_routed_experts_retry(global_steps, moe_lb_metrics_interval)
+        accumulator.warn_skip_once("missing_routed_experts", f"Skipping rollout MoE load-balance metrics: {exc}")
+        return kv_batch_get(keys=keys, partition_id=partition_id, select_fields=fields)
+
+
+def compute_moe_lb_metrics(
+    metrics_batch: DataProto,
+    moe_lb_metrics_interval: int,
+    global_steps: int,
+    accumulator: "RolloutMoELoadBalanceMetricsAccumulator",
+) -> dict[str, Any]:
+    if moe_lb_metrics_interval <= 0:
+        return {}
+
+    updated_moe_lb_metrics = accumulator.update(
+        routed_experts=metrics_batch.batch.get("routed_experts", None),
+        response_mask=metrics_batch.batch.get("response_mask", None),
+    )
+    if global_steps % moe_lb_metrics_interval != 0:
+        return {}
+
+    routed_expert_assignments = accumulator.total_assignments()
+    metrics = accumulator.pop_metrics()
+    metrics["rollout/moe/routed_experts_found"] = float(routed_expert_assignments > 0)
+    metrics["rollout/moe/routed_expert_assignments"] = routed_expert_assignments
+    if not updated_moe_lb_metrics and routed_expert_assignments == 0:
+        accumulator.warn_skip_once(
+            "no_routed_expert_counts",
+            "Skipping rollout MoE load-balance metrics because no routed expert counts were found.",
+        )
+    return metrics
+
+
+class RolloutMoELoadBalanceMetricsAccumulator:
+    """Accumulate rollout MoE routed expert counts across a logging interval."""
+
+    def __init__(self, model_config: Any | None = None):
+        self.model_config = model_config
+        self.load_counts: torch.Tensor | None = None
+        self.num_experts: int | None = None
+        self.num_experts_initialized = False
+        self.routed_experts_retry_after_step = 0
+        self.warned_skip_keys: set[str] = set()
+
+    def should_request_routed_experts(self, global_steps: int) -> bool:
+        return global_steps >= self.routed_experts_retry_after_step
+
+    def defer_routed_experts_retry(self, global_steps: int, interval: int) -> None:
+        self.routed_experts_retry_after_step = global_steps + max(interval, 1)
+
+    def _infer_num_experts(self) -> int | None:
+        if self.num_experts_initialized:
+            return self.num_experts
+
+        if self.model_config is not None:
+            try:
+                self.num_experts = infer_rollout_moe_num_experts(self.model_config)
+            except Exception as exc:
+                self.warn_skip_once(
+                    "num_experts_exception", f"Failed to infer rollout MoE num_experts from model config: {exc}"
+                )
+
+        self.num_experts_initialized = True
+        if self.num_experts is None:
+            self.warn_skip_once(
+                "num_experts_missing",
+                "Skipping rollout MoE load-balance metrics because num_experts could not be inferred "
+                "from actor_rollout_ref.model or the Hugging Face config.",
+            )
+        return self.num_experts
+
+    def warn_skip_once(self, key: str, message: str) -> None:
+        if key in self.warned_skip_keys:
+            return
+        logger.warning(message)
+        self.warned_skip_keys.add(key)
+
+    def update(
+        self,
+        routed_experts: torch.Tensor | None,
+        response_mask: torch.Tensor | None,
+        num_experts: int | None = None,
+    ) -> bool:
+        if num_experts is None:
+            num_experts = self._infer_num_experts()
+        load_counts = _compute_rollout_moe_load_counts(
+            routed_experts=routed_experts,
+            response_mask=response_mask,
+            num_experts=num_experts,
+        )
+        if load_counts is None:
+            return False
+        if self.load_counts is None:
+            self.load_counts = load_counts
+        elif self.load_counts.shape == load_counts.shape:
+            self.load_counts += load_counts
+        else:
+            logger.warning(
+                "Resetting rollout MoE load-balance accumulator because count shape changed from %s to %s",
+                self.load_counts.shape,
+                load_counts.shape,
+            )
+            self.load_counts = load_counts
+        return True
+
+    def compute(self, prefix: str = "rollout/moe") -> dict[str, Any]:
+        return _compute_rollout_moe_load_balance_metrics_from_counts(self.load_counts, prefix=prefix)
+
+    def total_assignments(self) -> int:
+        if self.load_counts is None:
+            return 0
+        return int(self.load_counts.sum().item())
+
+    def reset(self) -> None:
+        self.load_counts = None
+
+    def pop_metrics(self, prefix: str = "rollout/moe") -> dict[str, Any]:
+        metrics = self.compute(prefix=prefix)
+        self.reset()
+        return metrics
 
 
 def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str, Any]:
@@ -304,7 +626,9 @@ def compute_timing_metrics(batch: DataProto, timing_raw: dict[str, float]) -> di
     return {
         **{f"timing_s/{name}": value for name, value in timing_raw.items()},
         **{
-            f"timing_per_token_ms/{name}": timing_raw[name] * 1000 / num_tokens_of_section[name]
+            f"timing_per_token_ms/{name}": (
+                timing_raw[name] * 1000 / num_tokens_of_section[name] if num_tokens_of_section[name] > 0 else 0.0
+            )
             for name in set(num_tokens_of_section.keys()) & set(timing_raw.keys())
         },
     }

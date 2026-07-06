@@ -278,6 +278,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
             total_num_iterations = data.shape[0] // mini_batch_size_per_gpu * epochs
 
             for batch_idx, mini_batch_td in enumerate(dataloader):
+                maybe_fix_3d_position_ids(mini_batch_td)
                 # add global token num
                 if "input_ids" in mini_batch_td:
                     global_token_num = mini_batch_td["input_ids"].offsets().diff().tolist()  # (total_nnz,)
@@ -438,6 +439,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     NOTE: ActorRolloutRefWorker no longer support spmd mode and run native server mode.
     """
 
+    actor_worker_cls = TrainingWorker
+    ref_worker_cls = TrainingWorker
+
     def __init__(
         self, config: DictConfig, role: str, distillation_config: Optional[DistillationConfig] = None, **kwargs
     ):
@@ -446,8 +450,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self.distillation_config = distillation_config
         self.distillation_enabled = is_distillation_enabled(distillation_config)
         self.role = role
-        self.actor: TrainingWorker = None
-        self.ref: TrainingWorker = None
+        self.actor: TrainingWorker | None = None
+        self.ref: TrainingWorker | None = None
         self.rollout: BaseRollout = None
         assert self.role in ["actor", "rollout", "ref", "actor_rollout", "actor_rollout_ref"]
         self._is_actor = self.role in ["actor", "actor_rollout", "actor_rollout_ref"]
@@ -534,7 +538,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             )
             ref_training_config.engine_config.use_remove_padding = model_config.get("use_remove_padding", False)
 
-            self.ref = TrainingWorker(config=ref_training_config)
+            self.ref = self.ref_worker_cls(config=ref_training_config)
             self.ref.reset()
             self.set_dispatch_collect(mesh_name="ref", **self.ref.get_dispatch_collect())
 
@@ -582,7 +586,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 )
             else:
                 self.loss_fn = partial(ppo_loss, config=actor_config)
-            self.actor = TrainingWorker(config=actor_training_config)
+            self.actor = self.actor_worker_cls(config=actor_training_config)
             self.actor.reset()
             self.actor.set_loss_fn(self.loss_fn)
             self.set_dispatch_collect(mesh_name="actor", **self.actor.get_dispatch_collect())

@@ -71,6 +71,24 @@ def broadcast_pyobj(
         return data
 
 
+def _compact_for_bucket(tensor: torch.Tensor) -> torch.Tensor:
+    """Return a tensor safe to retain in a weight-sync bucket without pinning extra memory.
+
+    ``get_named_tensor_buckets`` keeps every tensor alive until its bucket is flushed. A tensor
+    that is a *view* into a larger backing buffer would therefore keep that whole buffer resident
+    (and ship the whole buffer downstream), so such views must be compacted with ``clone()``.
+
+    However the weights synced here come from ``DTensor.full_tensor()`` (a fresh all-gather) and
+    already own tight, contiguous storage. Cloning those allocates a second full-size buffer and
+    transiently doubles the tensor's footprint -- which OOMs on multi-GiB fused MoE weights
+    (e.g. ``[num_experts, ...]`` ``gate_up_proj``/``qkv``) while the actor params and rollout
+    weights are both already resident. Skip the clone when the tensor already owns its storage.
+    """
+    if tensor.is_contiguous() and tensor.untyped_storage().nbytes() == tensor.numel() * tensor.element_size():
+        return tensor
+    return tensor.clone()
+
+
 async def get_named_tensor_buckets(
     iterable: Iterator[tuple[str, torch.Tensor]], bucket_bytes: int
 ) -> Iterator[list[tuple[str, torch.Tensor]]]:
@@ -101,10 +119,10 @@ async def get_named_tensor_buckets(
         if current_size + tensor_size > bucket_bytes:
             if current_bucket:
                 yield current_bucket
-            current_bucket = [(name, tensor.clone())]
+            current_bucket = [(name, _compact_for_bucket(tensor))]
             current_size = tensor_size
         else:
-            current_bucket.append((name, tensor.clone()))
+            current_bucket.append((name, _compact_for_bucket(tensor)))
             current_size += tensor_size
 
     if current_bucket:

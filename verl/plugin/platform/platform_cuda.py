@@ -41,6 +41,10 @@ class PlatformCUDA(PlatformBase):
     def is_platform_available(self, use_smi_check=False) -> bool:
         if not hasattr(torch, "cuda"):
             return False
+        # On ROCm, torch.cuda is present too; defer to PlatformROCm so that
+        # auto-detection does not pick CUDA on AMD hardware.
+        if torch.version.hip is not None:
+            return False
         if use_smi_check:
             # In CPU-only Ray actors, torch.cuda.is_available() may return False
             # even though the cluster has GPUs. Fall back to nvidia-smi check,

@@ -400,11 +400,14 @@ def apply_router_replay_patch():
 
     original_init = TopKRouter.__init__
 
+    def _router_replay_enabled(config):
+        return getattr(config, "enable_routing_replay", False) or getattr(config, "moe_enable_routing_replay", False)
+
     # Step 3: Define the new __init__ method
     def patched_init(self, *args, **kwargs):
         original_init(self, *args, **kwargs)
         self.router_replay = None
-        if getattr(self.config, "enable_routing_replay", False):
+        if _router_replay_enabled(self.config):
             self.router_replay = RouterReplay()
 
     # Step 4: Patch MoEAlltoAllTokenDispatcher.preprocess to handle router replay
@@ -420,7 +423,7 @@ def apply_router_replay_patch():
 
             # Fix num_out_tokens when router replay is enabled
             if (
-                getattr(self.config, "enable_routing_replay", False)
+                _router_replay_enabled(self.config)
                 and not self.drop_and_pad
                 and self.config.moe_expert_capacity_factor is None
                 and not (

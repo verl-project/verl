@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import copy
 import logging
 import os
@@ -299,9 +300,9 @@ class RLHFDataset(Dataset):
         """Replace multimodal placeholders in messages with structured content.
 
         This is required by processor.apply_chat_template.
-        - <image>: {"type": "image", **image}
-        - <video>: {"type": "video", **video}
-        - <audio>: {"type": "audio", **audio}
+        - <image>: {"type": "image", "image": image} or {"type": "image", **image}
+        - <video>: {"type": "video", "video": video} or {"type": "video", **video}
+        - <audio>: {"type": "audio", "audio": audio} or {"type": "audio", **audio}
 
         Args:
             example: Row dictionary from dataframe.
@@ -339,12 +340,27 @@ class RLHFDataset(Dataset):
                         if "bytes" in image:
                             image["image"] = Image.open(BytesIO(image["bytes"]))
                         content_list.append({"type": "image", **image})
+                    elif isinstance(image, str | os.PathLike):
+                        content_list.append({"type": "image", "image": os.fspath(image)})
                     else:
-                        raise TypeError(f"image must be dict or PIL.Image, unsupported image type: {type(image)}")
+                        raise TypeError(
+                            f"image must be dict, PIL.Image, or path-like, unsupported image type: {type(image)}"
+                        )
                     image_offset += 1
                 elif segment == "<video>":
                     assert video_offset < len(videos), f"video_offset {video_offset} >= len(videos) {len(videos)}"
-                    content_list.append({"type": "video", **videos[video_offset]})
+                    video = videos[video_offset]
+                    if isinstance(video, dict):
+                        content_list.append({"type": "video", **video})
+                    elif isinstance(video, str | os.PathLike):
+                        content_list.append({"type": "video", "video": os.fspath(video)})
+                    elif isinstance(video, list):
+                        video = [os.fspath(frame) if isinstance(frame, os.PathLike) else frame for frame in video]
+                        content_list.append({"type": "video", "video": video})
+                    else:
+                        raise TypeError(
+                            f"video must be dict, list, or path-like, unsupported video type: {type(video)}"
+                        )
                     video_offset += 1
                 elif segment == "<audio>":
                     assert audio_offset < len(audios), f"audio_offset {audio_offset} >= len(audios) {len(audios)}"
@@ -425,7 +441,20 @@ class RLHFDataset(Dataset):
         """
         from qwen_vl_utils import process_vision_info
 
-        images, videos = process_vision_info(messages, image_patch_size=image_patch_size, return_video_metadata=True)
+        # When called from an AgentLoop, many trajectory coroutines share one
+        # event loop. ``process_vision_info`` does synchronous PNG decode +
+        # smart_resize (CPU-heavy); running it inline blocks the loop and starves
+        # every sibling coroutine's socket I/O (manifests as connect timeouts /
+        # zero-window stalls under concurrency). Offload to a thread: PIL/numpy
+        # release the GIL during decode/resize, so the loop stays responsive and
+        # the work parallelizes across threads. This method is ``async`` and only
+        # ever awaited from an AgentLoop (which always has a running loop), so
+        # ``get_running_loop()`` is safe here.
+        loop = asyncio.get_running_loop()
+        images, videos = await loop.run_in_executor(
+            None,
+            lambda: process_vision_info(messages, image_patch_size=image_patch_size, return_video_metadata=True),
+        )
         return images, videos
 
     @classmethod

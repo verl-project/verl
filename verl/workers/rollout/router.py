@@ -15,11 +15,12 @@ import importlib
 import logging
 import os
 from typing import Any, Callable, Protocol
-from omegaconf import OmegaConf
 
 import ray
 from cachetools import LRUCache
+from omegaconf import OmegaConf
 
+from verl.workers.config import RolloutConfig
 from verl.workers.config.rollout import RouterConfig
 
 logger = logging.getLogger(__file__)
@@ -34,9 +35,7 @@ class RequestLoadBalancer(Protocol):
     All strategies must satisfy this interface via structural subtyping.
     """
 
-    def acquire_server(
-        self, request_id: str, prompt_ids: list[int] | None = None
-    ) -> tuple[str, Any]:
+    def acquire_server(self, request_id: str, prompt_ids: list[int] | None = None) -> tuple[str, Any]:
         """Acquire a server for the given request.
 
         Args:
@@ -106,17 +105,26 @@ class GlobalRequestLoadBalancer:
       multi-turn conversations route to the same server.
     - **Least-loaded Selection**: When no sticky session exists, selects the
       server with the fewest in-flight requests.
+    - **Deterministic Routing**: When ``full_determinism=True``, tie-breaking
+      among equally-loaded servers uses ``hash(request_id)`` so the same
+      request always routes to the same server across runs.
     - **Dynamic Server Management**: Supports add/remove servers at runtime
       for hybrid scaling.
     """
 
-    def __init__(self, servers: dict[str, ray.actor.ActorHandle], max_cache_size: int = DEFAULT_ROUTING_CACHE_SIZE):
+    def __init__(
+        self,
+        servers: dict[str, ray.actor.ActorHandle],
+        max_cache_size: int = DEFAULT_ROUTING_CACHE_SIZE,
+        full_determinism: bool = False,
+    ):
         if not servers:
             raise ValueError("servers must be non-empty")
 
         self._servers: dict[str, ray.actor.ActorHandle] = dict(servers)
         self._inflight_requests: dict[str, int] = {sid: 0 for sid in servers}
         self._request_id_to_server: LRUCache = LRUCache(maxsize=max_cache_size)
+        self._full_determinism = full_determinism
 
     def acquire_server(self, request_id: str, prompt_ids: list[int] | None = None) -> tuple[str, ray.actor.ActorHandle]:
         """Acquire a server for the given request (sticky + least-loaded).
@@ -138,7 +146,15 @@ class GlobalRequestLoadBalancer:
         if not self._inflight_requests:
             raise RuntimeError("No available servers in load balancer")
 
-        server_id = min(self._inflight_requests, key=self._inflight_requests.get)
+        min_count = min(self._inflight_requests.values())
+        candidates = [sid for sid, count in self._inflight_requests.items() if count == min_count]
+        if len(candidates) == 1:
+            server_id = candidates[0]
+        elif self._full_determinism:
+            # Deterministic tie-breaking: same request_id → same server across runs
+            server_id = candidates[hash(request_id) % len(candidates)]
+        else:
+            server_id = candidates[0]
         self._request_id_to_server[request_id] = server_id
         self._inflight_requests[server_id] += 1
         return server_id, self._servers[server_id]
@@ -210,10 +226,8 @@ class LoadBalancerRegistry:
     def register(cls, name: str, factory: Callable[..., Any]) -> None:
         """Register a load-balancer strategy factory function."""
         if name in cls._registry:
-            raise ValueError(
-                f"Load balancer '{name}' is already registered. "
-                f"Existing factory: {cls._registry[name]}"
-            )
+            raise ValueError(f"Load balancer '{name}' is already registered. Existing factory: {cls._registry[name]}")
+
         cls._registry[name] = factory
         logger.info("Registered load balancer strategy: %s", name)
 
@@ -221,10 +235,7 @@ class LoadBalancerRegistry:
     def get(cls, name: str) -> Callable[..., Any]:
         """Look up a registered factory by name."""
         if name not in cls._registry:
-            raise ValueError(
-                f"Unknown load balancer strategy: '{name}'. "
-                f"Available strategies: {cls.list_strategies()}"
-            )
+            raise ValueError(f"Unknown load balancer strategy: '{name}'. Available strategies: {cls.list_strategies()}")
         return cls._registry[name]
 
     @classmethod
@@ -235,33 +246,29 @@ class LoadBalancerRegistry:
 
 def _create_global_sticky_inflight(
     servers: dict[str, Any],
-    router_config: RouterConfig | None = None,
+    rollout_config: RolloutConfig,
 ):
-    """Factory for the default sticky-session + least-inflight strategy.
-    """
+    """Factory for the default sticky-session + least-inflight strategy."""
 
     return GlobalRequestLoadBalancer.remote(
         servers=servers,
         max_cache_size=DEFAULT_ROUTING_CACHE_SIZE,
+        full_determinism=getattr(rollout_config, "full_determinism", False),
     )
 
+
 def _load_router_yaml(router_config: RouterConfig) -> dict:
-    """Load a router YAML configuration file.
-    """
+    """Load a router YAML configuration file."""
     config_path = router_config.get("router_config_path", None)
     if not config_path:
-        raise ValueError(
-            "The 'plugin_extension' strategy requires 'router_config_path' "
-            "pointing to a YAML file."
-        )
+        raise ValueError("The 'plugin_extension' strategy requires 'router_config_path' pointing to a YAML file.")
 
     try:
         cfg = OmegaConf.load(config_path)
         return OmegaConf.to_container(cfg, resolve=True)
-    except FileNotFoundError:
-        raise FileNotFoundError(
-            f"Router config file not found: {config_path}"
-        )
+    except FileNotFoundError as e:
+        raise FileNotFoundError(f"Router config file not found: {config_path}") from e
+
 
 def _resolve_router_class(yaml_config: dict) -> type:
     """Validate and import a router class from YAML config.
@@ -277,19 +284,15 @@ def _resolve_router_class(yaml_config: dict) -> type:
 
     try:
         module_path, class_name = router_class.rsplit(".", 1)
-    except ValueError:
+    except ValueError as e:
         raise ValueError(
-            f"Invalid fully-qualified class name: '{router_class}'. "
-            f"Expected format: 'module_path.ClassName'"
-        )
+            f"Invalid fully-qualified class name: '{router_class}'. Expected format: 'module_path.ClassName'"
+        ) from e
 
     try:
         module = importlib.import_module(module_path)
     except ImportError as e:
-        raise ImportError(
-            f"Failed to import module '{module_path}' for '{class_name}'. "
-            f"Original error: {e}"
-        ) from e
+        raise ImportError(f"Failed to import module '{module_path}' for '{class_name}'. Original error: {e}") from e
 
     cls = getattr(module, class_name)  # AttributeError propagates if missing
 
@@ -304,7 +307,7 @@ def _resolve_router_class(yaml_config: dict) -> type:
 
 def _create_plugin_extension(
     servers: dict[str, Any],
-    router_config: RouterConfig | None = None,
+    rollout_config: RolloutConfig,
 ):
     """Factory for user-defined load balancer via external YAML configuration.
 
@@ -313,7 +316,7 @@ def _create_plugin_extension(
     and YAML kwargs.
     """
 
-    yaml_config = _load_router_yaml(router_config)
+    yaml_config = _load_router_yaml(rollout_config.router)
     cls = _resolve_router_class(yaml_config)
 
     ray_cls = cls if isinstance(cls, ray.actor.ActorClass) else ray.remote(cls)
@@ -331,12 +334,13 @@ LoadBalancerRegistry.register("global_sticky_inflight", _create_global_sticky_in
 LoadBalancerRegistry.register("plugin_extension", _create_plugin_extension)
 
 
-def get_router_handle(servers: dict[str, Any], router_config: RouterConfig = None) -> Any:
+def get_router_handle(servers: dict[str, Any], rollout_config: RolloutConfig) -> Any:
     """Create a load balancer instance from router configuration."""
+    router_config = rollout_config.get("router", None)
     if router_config is None:
         strategy = "global_sticky_inflight"
     else:
         strategy = router_config.get("router_strategy", "global_sticky_inflight")
 
     factory = LoadBalancerRegistry.get(strategy)
-    return factory(servers=servers, router_config=router_config)
+    return factory(servers=servers, rollout_config=rollout_config)

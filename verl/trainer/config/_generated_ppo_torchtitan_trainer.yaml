@@ -32,6 +32,7 @@ actor_rollout_ref:
       mixed_precision: false
       use_torch_compile: true
       entropy_from_logits_with_chunking: false
+      entropy_from_logits_chunk_size: 2048
       entropy_checkpointing: false
       data_parallel_size: 1
       data_parallel_replicate_size: 1
@@ -41,6 +42,8 @@ actor_rollout_ref:
       pipeline_parallel_size: 1
       context_parallel_size: 1
       attn_type: flex
+      spmd_backend: spmd_types
+      activation_checkpoint: selective
       max_seq_len: null
       strategy: torchtitan
       seed: 42
@@ -167,6 +170,7 @@ actor_rollout_ref:
       mixed_precision: false
       use_torch_compile: true
       entropy_from_logits_with_chunking: false
+      entropy_from_logits_chunk_size: 2048
       entropy_checkpointing: false
       data_parallel_size: ${oc.select:actor_rollout_ref.actor.torchtitan.data_parallel_size,1}
       data_parallel_replicate_size: ${oc.select:actor_rollout_ref.actor.torchtitan.data_parallel_replicate_size,1}
@@ -176,6 +180,8 @@ actor_rollout_ref:
       pipeline_parallel_size: ${oc.select:actor_rollout_ref.actor.torchtitan.pipeline_parallel_size,1}
       context_parallel_size: ${oc.select:actor_rollout_ref.actor.torchtitan.context_parallel_size,1}
       attn_type: ${oc.select:actor_rollout_ref.actor.torchtitan.attn_type,flex}
+      spmd_backend: spmd_types
+      activation_checkpoint: selective
       max_seq_len: null
       strategy: torchtitan
       seed: ${oc.select:actor_rollout_ref.actor.torchtitan.seed,42}
@@ -235,6 +241,8 @@ actor_rollout_ref:
     temperature: 1.0
     top_k: -1
     top_p: 1
+    full_determinism: false
+    seed: 42
     prompt_length: ${oc.select:data.max_prompt_length,512}
     response_length: ${oc.select:data.max_response_length,512}
     dtype: bfloat16
@@ -276,6 +284,9 @@ actor_rollout_ref:
       temperature: 0
       'n': 1
       do_sample: false
+    router:
+      router_strategy: global_sticky_inflight
+      router_config_path: null
     multi_turn:
       _target_: verl.workers.config.MultiTurnConfig
       enable: false
@@ -290,7 +301,7 @@ actor_rollout_ref:
       tokenization_sanity_check_mode: strict
       format: hermes
       num_repeat_rollouts: null
-    calculate_log_probs: false
+    calculate_log_probs: true
     agent:
       _target_: verl.workers.config.AgentLoopConfig
       num_workers: 8
@@ -315,6 +326,7 @@ actor_rollout_ref:
       max_samples_per_step_per_worker: null
     skip_tokenizer_init: true
     enable_rollout_routing_replay: false
+    moe_load_balance_metrics_interval: 0
     profiler:
       _target_: verl.utils.profiler.ProfilerConfig
       tool: ${oc.select:global_profiler.tool,null}
@@ -459,6 +471,9 @@ data:
     name: null
   return_multi_modal_inputs: true
   apply_chat_template_kwargs: {}
+  continuous_token:
+    enable: false
+    model_family: auto
   mm_processor_kwargs: {}
 critic:
   optim:
@@ -488,6 +503,7 @@ critic:
     mixed_precision: false
     use_torch_compile: true
     entropy_from_logits_with_chunking: false
+    entropy_from_logits_chunk_size: 2048
     entropy_checkpointing: false
     data_parallel_size: 1
     data_parallel_replicate_size: 1
@@ -497,6 +513,8 @@ critic:
     pipeline_parallel_size: 1
     context_parallel_size: 1
     attn_type: flex
+    spmd_backend: spmd_types
+    activation_checkpoint: selective
     max_seq_len: null
     strategy: torchtitan
     seed: 42
@@ -698,6 +716,8 @@ reward:
       load_format: auto
       layered_summon: false
       scheduling_policy: fcfs
+      full_determinism: false
+      seed: 42
       multi_stage_wake_up: false
       engine_kwargs: {}
       limit_images: null
@@ -833,6 +853,22 @@ trainer:
   max_critic_ckpt_to_keep: null
   ray_wait_register_center_timeout: 300
   device: cuda
+  use_v1: true
+  v1:
+    trainer_mode: sync
+    sync: {}
+    colocate_async:
+      num_warmup_batches: 1
+    separate_async:
+      num_warmup_batches: 4
+      parameter_sync_step: 4
+    sampler:
+      max_off_policy_threshold: 8
+      max_off_policy_strategy: drop
+      custom_sampler:
+        path: null
+        name: null
+      sampler_kwargs: {}
 global_profiler:
   _target_: verl.utils.profiler.ProfilerConfig
   tool: null

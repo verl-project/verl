@@ -19,7 +19,7 @@ import pytest
 import ray
 import yaml
 
-from verl.workers.config.rollout import RouterConfig
+from verl.workers.config.rollout import RolloutConfig, RouterConfig
 from verl.workers.rollout.router import (
     LoadBalancerRegistry,
     get_router_handle,
@@ -39,9 +39,7 @@ class _MockPluginLoadBalancer:
         self._inflight: dict[str, int] = {sid: 0 for sid in self._servers}
         self._router_kwargs = dict(router_kwargs)
 
-    def acquire_server(
-        self, request_id: str, prompt_ids: list[int] | None = None
-    ) -> tuple[str, Any]:
+    def acquire_server(self, request_id: str, prompt_ids: list[int] | None = None) -> tuple[str, Any]:
         if not prompt_ids:
             raise RuntimeError("No available prompt_ids")
         if not self._inflight:
@@ -84,12 +82,14 @@ class TestRequestLoadBalancer:
     def test_protocol_methods_present(self):
         """All six Protocol methods are callable on _MockPluginLoadBalancer."""
         for name in (
-            "acquire_server", "release_server", "add_servers",
-            "remove_servers", "get_all_servers", "get_status",
+            "acquire_server",
+            "release_server",
+            "add_servers",
+            "remove_servers",
+            "get_all_servers",
+            "get_status",
         ):
-            assert callable(getattr(_MockPluginLoadBalancer, name, None)), (
-                f"'{name}' missing or not callable"
-            )
+            assert callable(getattr(_MockPluginLoadBalancer, name, None)), f"'{name}' missing or not callable"
 
 
 class TestLoadBalancerRegistry:
@@ -143,22 +143,31 @@ def ray_session():
 
 
 class TestGetRouterHandleDefault:
-    def test_none_config_defaults_to_sticky_inflight(self, ray_session):
-        lb = get_router_handle(servers={"s0": None, "s1": None}, router_config=None)
+    def test_default_rollout_config_uses_sticky_inflight(self, ray_session):
+        """When RolloutConfig uses default router, it should create a GlobalRequestLoadBalancer."""
+        config = RolloutConfig()
+        lb = get_router_handle(servers={"s0": None, "s1": None}, rollout_config=config)
         status = ray.get(lb.get_status.remote())
         assert status["active_servers"] == 2
         assert status["total_inflight"] == 0
 
-    def test_router_config_with_explicit_strategy(self, ray_session):
-        config = RouterConfig(router_strategy="global_sticky_inflight")
-        lb = get_router_handle(servers={"a": None, "b": None}, router_config=config)
+    def test_rollout_config_with_explicit_strategy(self, ray_session):
+        config = RolloutConfig(router=RouterConfig(router_strategy="global_sticky_inflight"))
+        lb = get_router_handle(servers={"a": None, "b": None}, rollout_config=config)
         status = ray.get(lb.get_status.remote())
         assert status["active_servers"] == 2
 
     def test_unknown_strategy_raises(self, ray_session):
-        config = RouterConfig(router_strategy="unknown_strategy_xyz")
+        config = RolloutConfig(router=RouterConfig(router_strategy="unknown_strategy_xyz"))
         with pytest.raises(ValueError, match="Unknown load balancer strategy"):
-            get_router_handle(servers={"s0": None}, router_config=config)
+            get_router_handle(servers={"s0": None}, rollout_config=config)
+
+    def test_router_none_falls_back_to_sticky_inflight(self, ray_session):
+        """When RolloutConfig.router is present but strategy defaults, uses sticky_inflight."""
+        config = RolloutConfig(router=RouterConfig())
+        lb = get_router_handle(servers={"s0": None, "s1": None}, rollout_config=config)
+        status = ray.get(lb.get_status.remote())
+        assert status["active_servers"] == 2
 
 
 class TestGetRouterHandlePluginExtension:
@@ -172,86 +181,65 @@ class TestGetRouterHandlePluginExtension:
         yaml_path.write_text(yaml.dump(content))
         return str(yaml_path)
 
+    @staticmethod
+    def _make_plugin_config(**router_kwargs) -> RolloutConfig:
+        """Helper: build a RolloutConfig with a plugin_extension RouterConfig."""
+        return RolloutConfig(
+            router=RouterConfig(
+                router_strategy="plugin_extension",
+                **router_kwargs,
+            )
+        )
+
     def test_missing_router_config_path_raises(self, ray_session):
         """When router_config_path is null, plugin_extension should raise."""
-        config = RouterConfig(
-            router_strategy="plugin_extension",
-            router_config_path=None,
-        )
+        config = self._make_plugin_config(router_config_path=None)
         with pytest.raises(ValueError, match="requires 'router_config_path'"):
-            get_router_handle(servers={"s0": None}, router_config=config)
+            get_router_handle(servers={"s0": None}, rollout_config=config)
 
     def test_missing_yaml_file_raises(self, ray_session):
         """When router_config_path points to non-existent file."""
-        config = RouterConfig(
-            router_strategy="plugin_extension",
-            router_config_path="/nonexistent/path/router.yaml",
-        )
+        config = self._make_plugin_config(router_config_path="/nonexistent/path/router.yaml")
         with pytest.raises(FileNotFoundError, match="Router config file not found"):
-            get_router_handle(servers={"s0": None}, router_config=config)
+            get_router_handle(servers={"s0": None}, rollout_config=config)
 
     def test_yaml_missing_router_class_raises(self, ray_session, tmp_path):
         """YAML file exists but doesn't contain router_class."""
         yaml_path = tmp_path / "no_class.yaml"
         yaml_path.write_text(yaml.dump({"some_key": "some_value"}))
-        config = RouterConfig(
-            router_strategy="plugin_extension",
-            router_config_path=str(yaml_path),
-        )
+        config = self._make_plugin_config(router_config_path=str(yaml_path))
         with pytest.raises(ValueError, match="must contain 'router_class'"):
-            get_router_handle(servers={"s0": None}, router_config=config)
+            get_router_handle(servers={"s0": None}, rollout_config=config)
 
     def test_invalid_module_raises(self, ray_session, tmp_path):
         """YAML has router_class with non-existent module."""
-        yaml_path = self._write_router_yaml(
-            tmp_path, "nonexistent.module.ClassName"
-        )
-        config = RouterConfig(
-            router_strategy="plugin_extension",
-            router_config_path=yaml_path,
-        )
+        yaml_path = self._write_router_yaml(tmp_path, "nonexistent.module.ClassName")
+        config = self._make_plugin_config(router_config_path=yaml_path)
         with pytest.raises(ImportError, match="Failed to import module"):
-            get_router_handle(servers={"s0": None}, router_config=config)
+            get_router_handle(servers={"s0": None}, rollout_config=config)
 
     def test_acquire_least_loaded(self, ray_session, tmp_path):
-        yaml_path = self._write_router_yaml(
-            tmp_path, __name__ + "._MockPluginLoadBalancer"
-        )
-        config = RouterConfig(
-            router_strategy="plugin_extension",
-            router_config_path=yaml_path,
-        )
-        lb = get_router_handle(
-            servers={"s0": None, "s1": None, "s2": None}, router_config=config
-        )
+        yaml_path = self._write_router_yaml(tmp_path, __name__ + "._MockPluginLoadBalancer")
+        config = self._make_plugin_config(router_config_path=yaml_path)
+        lb = get_router_handle(servers={"s0": None, "s1": None, "s2": None}, rollout_config=config)
         s_a, _ = ray.get(lb.acquire_server.remote("a", prompt_ids=[1]))
         s_b, _ = ray.get(lb.acquire_server.remote("b", prompt_ids=[1]))
         s_c, _ = ray.get(lb.acquire_server.remote("c", prompt_ids=[1]))
         assert len({s_a, s_b, s_c}) == 3
 
     def test_add_remove_get_all_servers(self, ray_session, tmp_path):
-        yaml_path = self._write_router_yaml(
-            tmp_path, __name__ + "._MockPluginLoadBalancer"
-        )
-        config = RouterConfig(
-            router_strategy="plugin_extension",
-            router_config_path=yaml_path,
-        )
-        lb = get_router_handle(servers={"s0": None}, router_config=config)
+        yaml_path = self._write_router_yaml(tmp_path, __name__ + "._MockPluginLoadBalancer")
+        config = self._make_plugin_config(router_config_path=yaml_path)
+        lb = get_router_handle(servers={"s0": None}, rollout_config=config)
         ray.get(lb.add_servers.remote({"s1": None, "s2": None}))
         assert sorted(ray.get(lb.get_all_servers.remote())) == ["s0", "s1", "s2"]
         ray.get(lb.remove_servers.remote(["s0"]))
         assert ray.get(lb.get_all_servers.remote()) == ["s1", "s2"]
 
     def test_release_and_get_status(self, ray_session, tmp_path):
-        yaml_path = self._write_router_yaml(
-            tmp_path, __name__ + "._MockPluginLoadBalancer"
-        )
-        config = RouterConfig(
-            router_strategy="plugin_extension",
-            router_config_path=yaml_path,
-        )
-        lb = get_router_handle(servers={"s0": None, "s1": None}, router_config=config)
+        yaml_path = self._write_router_yaml(tmp_path, __name__ + "._MockPluginLoadBalancer")
+        config = self._make_plugin_config(router_config_path=yaml_path)
+        lb = get_router_handle(servers={"s0": None, "s1": None}, rollout_config=config)
         ray.get(lb.acquire_server.remote("a", prompt_ids=[1]))  # s0: 1
         ray.get(lb.acquire_server.remote("a", prompt_ids=[1]))  # s0: 2
         ray.get(lb.acquire_server.remote("b", prompt_ids=[1]))  # s1: 1
@@ -260,29 +248,21 @@ class TestGetRouterHandlePluginExtension:
         assert ray.get(lb.get_status.remote())["total_inflight"] == 2
 
     def test_empty_pool_raises(self, ray_session, tmp_path):
-        yaml_path = self._write_router_yaml(
-            tmp_path, __name__ + "._MockPluginLoadBalancer"
-        )
-        config = RouterConfig(
-            router_strategy="plugin_extension",
-            router_config_path=yaml_path,
-        )
-        lb = get_router_handle(servers={"s0": None}, router_config=config)
+        yaml_path = self._write_router_yaml(tmp_path, __name__ + "._MockPluginLoadBalancer")
+        config = self._make_plugin_config(router_config_path=yaml_path)
+        lb = get_router_handle(servers={"s0": None}, rollout_config=config)
         ray.get(lb.remove_servers.remote(["s0"]))
         with pytest.raises(ray.exceptions.RayTaskError, match="No available servers"):
             ray.get(lb.acquire_server.remote("req", prompt_ids=[1]))
 
     def test_plugin_forwards_kwargs_from_yaml(self, ray_session, tmp_path):
-        """Extra keys in the YAML are forwarded as kwargs to the constructor."""
+        """Extra keys in the YAML are forwarded as kwargs to the constructor.
+        The entire yaml_config dict (including router_class) is passed through."""
         fqn = __name__ + "._MockPluginLoadBalancer"
-        yaml_path = self._write_router_yaml(
-            tmp_path, fqn, extra_param="hello", another_param=42
-        )
-        config = RouterConfig(
-            router_strategy="plugin_extension",
-            router_config_path=yaml_path,
-        )
-        lb = get_router_handle(servers={"s0": None}, router_config=config)
+        yaml_path = self._write_router_yaml(tmp_path, fqn, extra_param="hello", another_param=42)
+        config = self._make_plugin_config(router_config_path=yaml_path)
+        lb = get_router_handle(servers={"s0": None}, rollout_config=config)
         kwargs = ray.get(lb.get_router_kwargs.remote())
+        assert kwargs.get("router_class") == fqn
         assert kwargs.get("extra_param") == "hello"
         assert kwargs.get("another_param") == 42

@@ -151,6 +151,25 @@ def vocab_parallel_entropy(vocab_parallel_logits: torch.Tensor) -> torch.Tensor:
     return _VocabParallelEntropy.apply(vocab_parallel_logits)
 
 
+def vocab_parallel_entropy_with_chunking(vocab_parallel_logits: torch.Tensor, chunk_size: int = 2048) -> torch.Tensor:
+    """Memory-efficient entropy calculation using chunked processing when logits are sharded in tp ranks.
+    Args:
+        vocab_parallel_logits: (batch_size, seq_len, vocab_size // tp_size) or (total_nnz, vocab_size // tp_size)
+        chunk_size: Number of sequence tokens to process at once. Defaults to 2048.
+    Returns: (batch_size, seq_len)
+    """
+
+    output_shape = list(vocab_parallel_logits.shape[:-1])
+    entropy = torch.zeros(output_shape, device=vocab_parallel_logits.device)
+
+    for i in range(0, vocab_parallel_logits.shape[1], chunk_size):
+        logits_chunk = vocab_parallel_logits[:, i : i + chunk_size, :]
+        entropy_chunk = _VocabParallelEntropy.apply(logits_chunk)
+        entropy[:, i : i + chunk_size] = entropy_chunk
+
+    return entropy
+
+
 def vocab_parallel_sum_pi_squared(vocab_parallel_logits: torch.Tensor) -> torch.Tensor:
     """Compute Σπ² (sum of squared probabilities) when logits are sharded across tp ranks.
 

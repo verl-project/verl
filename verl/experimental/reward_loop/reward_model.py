@@ -41,6 +41,21 @@ class RewardModelManager:
         """
         self.config = config
         self.resource_pool = resource_pool
+
+        # Determinism workaround: vLLM /classify (pooling path) does not honor
+        # `priority` and is not covered by VLLM_BATCH_INVARIANT, so co-batched RM
+        # forward passes break bitwise reproducibility. Force max_num_seqs=1 to
+        # serialize RM inference whenever full_determinism is enabled.
+        if self.config.rollout.full_determinism and self.config.rollout.max_num_seqs != 1:
+            logger.warning(
+                "[reward_model] full_determinism=True: forcing rollout.max_num_seqs "
+                "from %d to 1. vLLM pooling/classify does not support priority "
+                "scheduling or batch invariance; serializing RM inference is "
+                "currently the only way to keep RM scores bitwise reproducible.",
+                self.config.rollout.max_num_seqs,
+            )
+            self.config.rollout.max_num_seqs = 1
+
         self._initialize_llm_servers()
         self._initialize_router()
         assert self.config.rollout.skip_tokenizer_init is False, "Reward model should not skip tokenizer init."

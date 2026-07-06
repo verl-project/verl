@@ -140,6 +140,17 @@ class McoreOptimizerConfig(OptimizerConfig):
         lr_wsd_decay_style (str): Weight-standard-deviation decay style: "constant", "exponential", or "cosine".
         lr_wsd_decay_steps (Optional[int]): Number of steps for weight-standard-deviation decay.
         use_checkpoint_opt_param_scheduler (bool): Whether to use checkpoint optimizer parameter scheduler.
+        use_precision_aware_optimizer (bool): Enable Megatron's precision-aware optimizer so the
+            grad-accumulation buffer and Adam moments can be stored below fp32 (bf16 training only).
+            Opt-in; default False keeps the fp32 optimizer state and prior numerics. Requires
+            TransformerEngine's FusedAdam. Mirrors Megatron's ``--use-precision-aware-optimizer``.
+        main_grads_dtype (str): dtype of the main-grad / grad-accumulation buffer when the
+            precision-aware optimizer is enabled ("fp32" or "bf16"). Also drives the DDP grad-bucket
+            dtype so the two stay consistent. Mirrors Megatron's ``--main-grads-dtype``.
+        exp_avg_dtype (str): dtype of the Adam first moment (m) when the precision-aware optimizer is
+            enabled ("fp32" or "bf16"). Mirrors Megatron's ``--exp-avg-dtype``.
+        exp_avg_sq_dtype (str): dtype of the Adam second moment (v) when the precision-aware optimizer
+            is enabled ("fp32" or "bf16"). Mirrors Megatron's ``--exp-avg-sq-dtype``.
     """
 
     optimizer: str = "adam"
@@ -151,7 +162,20 @@ class McoreOptimizerConfig(OptimizerConfig):
     lr_wsd_decay_style: str = "exponential"
     lr_wsd_decay_steps: Optional[int] = None
     use_checkpoint_opt_param_scheduler: bool = False
+    use_precision_aware_optimizer: bool = False
+    main_grads_dtype: str = "fp32"
+    exp_avg_dtype: str = "fp32"
+    exp_avg_sq_dtype: str = "fp32"
     override_optimizer_config: Optional[dict] = None
+
+    def __post_init__(self):
+        allowed_dtypes = {"fp32", "float32", "32", "bf16", "bfloat16"}
+        for field_name in ("main_grads_dtype", "exp_avg_dtype", "exp_avg_sq_dtype"):
+            value = getattr(self, field_name)
+            assert str(value) in allowed_dtypes, (
+                f"`{field_name}` must be one of {sorted(allowed_dtypes)}, got {value!r}"
+            )
+        return super().__post_init__()
 
 
 @dataclass

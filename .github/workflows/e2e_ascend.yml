@@ -82,6 +82,9 @@ jobs:
       UV_HTTP_TIMEOUT: 120
       UV_NO_CACHE: "1"
       UV_SYSTEM_PYTHON: "1"
+      UV_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
+      PIP_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
+      PIP_TRUSTED_HOST: "cache-service.nginx-pypi-cache.svc.cluster.local"
     steps:
       - name: Check npu and CANN info
         run: |
@@ -100,6 +103,7 @@ jobs:
       - name: Install the current repository
         run: |
           uv pip install --no-deps -e .
+          uv pip install --no-deps TransferQueue==0.1.8
       - name: Check final pip list
         run: |
           uv pip list
@@ -147,6 +151,9 @@ jobs:
       UV_HTTP_TIMEOUT: 120
       UV_NO_CACHE: "1"
       UV_SYSTEM_PYTHON: "1"
+      UV_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
+      PIP_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
+      PIP_TRUSTED_HOST: "cache-service.nginx-pypi-cache.svc.cluster.local"
     steps:
       - name: Check npu and CANN info
         run: |
@@ -165,6 +172,7 @@ jobs:
       - name: Install the current repository
         run: |
           uv pip install --no-deps --no-build-isolation -e .
+          uv pip install --no-deps TransferQueue==0.1.8
       - name: Check final pip list
         run: |
           uv pip list
@@ -203,26 +211,18 @@ jobs:
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-9.0.0-910b-ubuntu22.04-py3.11-latest
       options: >-
-        --shm-size 16g
+        --shm-size 80g
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
-      UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi"
-      UV_INDEX_STRATEGY: unsafe-best-match
-      UV_INSECURE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
-      UV_HTTP_TIMEOUT: 120
-      UV_NO_CACHE: "1"
-      UV_SYSTEM_PYTHON: "1"
     steps:
       - name: Check npu and CANN info
         run: |
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
           npu-smi info
-      - name: Install uv
-        run: pip install uv
       - name: Check initial pip list from image
         run: |
-          uv pip list
+          pip list
       - name: Checkout verl-project/verl repo
         uses: actions/checkout@v4
         with:
@@ -230,15 +230,16 @@ jobs:
           clean: true
       - name: Install the current repository
         run: |
-          uv pip install --no-deps -e .
+          pip install --no-deps -e .
+          pip install --no-deps TransferQueue==0.1.8
       - name: Check final pip list
         run: |
-          uv pip list
+          pip list
       - name: Preprocess geo3k dataset
         run: |
           python examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/.cache/datasets/hiyouga/geometry3k
       - name: Running geo3k e2e training tests with GRPO on ASCEND NPU
         run: |
           ray stop --force
-          TOTAL_TRAINING_STEPS=1 bash tests/special_npu/run_qwen3_vl_8b_Instruct_fsdp2_npu.sh
+          SAVE_FREQ=-1 TOTAL_TRAINING_STEPS=1 bash tests/special_npu/run_qwen3_vl_8b_Instruct_fsdp2_npu.sh
           rm -rf $HOME/ckpts

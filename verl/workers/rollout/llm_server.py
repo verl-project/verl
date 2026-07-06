@@ -24,9 +24,11 @@ from typing import Any, Optional
 from uuid import uuid4
 
 import ray
+import torch
 from omegaconf import DictConfig
 
 from verl.single_controller.ray.base import RayResourcePool, RayWorkerGroup
+from verl.utils import normalize_token_ids
 from verl.utils.ray_utils import auto_await
 from verl.utils.rollout_trace import rollout_trace_op
 from verl.workers.rollout.replica import RolloutReplica, TokenOutput, get_rollout_replica_class
@@ -60,13 +62,12 @@ class LLMServerClient:
         self.config = config
         self._load_balancer = load_balancer_handle
 
-    async def _acquire_server(
-        self, request_id: str, prompt_ids: list[int]
-    ) -> tuple[str, ray.actor.ActorHandle]:
+    async def _acquire_server(self, request_id: str, prompt_ids: list[int]) -> tuple[str, ray.actor.ActorHandle]:
         # Atomic acquire: returns (server_id, handle) in one Ray RPC.
-        return await self._load_balancer.acquire_server.remote(
+        server_id, handle = await self._load_balancer.acquire_server.remote(
             request_id=request_id, prompt_ids=prompt_ids
         )
+        return server_id, handle
 
     def _release_server(self, server_id: str) -> None:
         # Fire-and-forget: release is just a counter decrement, no need to await.
@@ -103,6 +104,11 @@ class LLMServerClient:
                 multimodal_kwargs["audio_data"] = audio_data
             if mm_processor_kwargs:
                 multimodal_kwargs["mm_processor_kwargs"] = mm_processor_kwargs
+            # priority is only supported by vLLM rollout server.
+            priority = kwargs.pop("priority", 0)
+            priority_kwargs = (
+                {"priority": priority} if priority != 0 and self.config.actor_rollout_ref.rollout.name == "vllm" else {}
+            )
             output: TokenOutput = await server.generate.remote(
                 request_id=uuid4().hex,  # use new request_id for each turn
                 prompt_ids=prompt_ids,
@@ -110,11 +116,124 @@ class LLMServerClient:
                 image_data=image_data,
                 video_data=video_data,
                 **multimodal_kwargs,
+                **priority_kwargs,
                 **kwargs,
             )
+            global_steps = output.extra_fields.get("global_steps")
+            output.extra_fields.setdefault("min_global_steps", global_steps)
+            output.extra_fields.setdefault("max_global_steps", global_steps)
             return output
         finally:
             self._release_server(server_id)
+
+
+class FullyAsyncLLMServerClient(LLMServerClient):
+    """FullyLLMServerClient supports resume generation on partial rollout, making rollout interruption
+    invisible to the AgentLoop.
+    """
+
+    @rollout_trace_op
+    async def generate(
+        self,
+        request_id,
+        *,
+        prompt_ids: list[int],
+        sampling_params: dict[str, Any],
+        image_data: Optional[list[Any]] = None,
+        video_data: Optional[list[Any]] = None,
+        audio_data: Optional[list[Any]] = None,
+        mm_processor_kwargs: Optional[dict[str, Any]] = None,
+        **kwargs: Any,
+    ) -> TokenOutput:
+        """Generate tokens from prompt ids.
+
+        Args:
+            request_id (str): request id for sticky session.
+            prompt_ids (List[int]): List of prompt token ids.
+            sampling_params (Dict[str, Any]): Sampling parameters for the chat completion.
+            image_data (Optional[List[Any]]): Image data for the chat completion.
+            video_data (Optional[List[Any]]): Video data for the chat completion.
+            audio_data (Optional[List[Any]]): Audio data for the chat completion.
+            mm_processor_kwargs (Optional[Dict[str, Any]]): Multimodal processor kwargs.
+
+        Returns:
+            TokenOutput: token output
+        """
+        prompt_ids = normalize_token_ids(prompt_ids)
+
+        limit_key = None
+        if "max_tokens" in sampling_params:
+            limit_key = "max_tokens"
+        elif "max_new_tokens" in sampling_params:
+            limit_key = "max_new_tokens"
+        original_max_tokens = sampling_params.get(limit_key) if limit_key else None
+
+        final_output = TokenOutput(
+            token_ids=[],
+            log_probs=[],
+            num_preempted=0,
+        )
+        min_global_steps, max_global_steps = None, None
+
+        while True:
+            # 1. generate tokens
+            output = await super().generate(
+                request_id=request_id,
+                prompt_ids=prompt_ids + final_output.token_ids,
+                sampling_params=sampling_params,
+                image_data=image_data,
+                video_data=video_data,
+                audio_data=audio_data,
+                mm_processor_kwargs=mm_processor_kwargs,
+                **kwargs,
+            )
+
+            # 2. merge output into final_output
+            final_output.token_ids.extend(output.token_ids)
+            if output.log_probs is not None:
+                final_output.log_probs.extend(output.log_probs)
+            # On partial rollout resume the model version may differ, so keep
+            # existing routing and only append routing for newly generated tokens.
+            if output.routed_experts is not None and len(output.token_ids) > 0:
+                if final_output.routed_experts is None:
+                    final_output.routed_experts = output.routed_experts
+                else:
+                    final_output.routed_experts = torch.cat(
+                        [final_output.routed_experts, output.routed_experts[-len(output.token_ids) :]],
+                        dim=0,
+                    )
+            if output.num_preempted is not None:
+                final_output.num_preempted += output.num_preempted
+            final_output.stop_reason = output.stop_reason
+
+            # update model weights version
+            global_steps = output.extra_fields.get("global_steps", None)
+            if min_global_steps is None:
+                min_global_steps = global_steps
+            max_global_steps = global_steps
+
+            # 3. update max_new_tokens
+            if original_max_tokens is not None:
+                sampling_params[limit_key] = original_max_tokens - len(final_output.token_ids)
+                if len(final_output.token_ids) >= original_max_tokens:
+                    final_output.stop_reason = "length"
+                    break
+
+            # 4. check stop reason
+            # If partial rollout not enable, aborted samples will be dropped.
+            # For v1 trainer, should_retry is always True. Since self.config.async_training is not exist.
+            should_retry = True
+            if hasattr(self.config, "async_training") and not self.config.async_training.partial_rollout:
+                should_retry = False
+            if output.stop_reason not in ("aborted", "abort") or not should_retry:
+                break
+
+            await asyncio.sleep(1)
+
+        final_output.extra_fields["global_steps"] = global_steps
+        final_output.extra_fields["min_global_steps"] = min_global_steps
+        final_output.extra_fields["max_global_steps"] = max_global_steps
+        return final_output
 
 
 class LLMServerManager:
@@ -128,6 +247,7 @@ class LLMServerManager:
         worker_group (RayWorkerGroup): Worker group for the server replicas. If not none, init hybrid server,
             else init standalone server with a new resource pool.
         rollout_resource_pool (RayResourcePool): Resource pool for the server replicas, only needed for TensorRT-LLM.
+        start_rank (int): First ``replica_rank`` to assign.  Defaults to 0.
     """
 
     def __init__(
@@ -135,12 +255,14 @@ class LLMServerManager:
         config: DictConfig,
         worker_group: RayWorkerGroup = None,
         rollout_resource_pool: RayResourcePool = None,
+        start_rank: int = 0,
     ):
         self.config = config
         self.rollout_config = config.actor_rollout_ref.rollout
         self.model_config = config.actor_rollout_ref.model
         self.worker_group = worker_group
         self.rollout_resource_pool = rollout_resource_pool
+        self.start_rank = start_rank
 
         assert worker_group is not None or self.rollout_config.nnodes > 0, "nnodes must be > 0 in standalone mode"
 
@@ -160,16 +282,16 @@ class LLMServerManager:
         await instance._init_global_load_balancer()
         return instance
 
-    async def _initialize_llm_servers(self, start_rank: int = 0):
+    async def _initialize_llm_servers(self, start_rank: int = None):
         """Initialize the LLM server replicas.
 
         Args:
-            start_rank: First ``replica_rank`` to assign.  Defaults to 0 so that
-                existing callers are unaffected.  Subclasses (e.g.
-                ``FullyAsyncLLMServerManager``) may pass a non-zero value to avoid
-                Ray named-actor collisions when hybrid and standalone replicas
-                coexist.
+            start_rank: First ``replica_rank`` to assign.  Defaults to ``self.start_rank``
+                so standalone replicas can avoid Ray named-actor collisions with hybrid
+                replicas (which start at 0) when both coexist (e.g. separate async).
         """
+        if start_rank is None:
+            start_rank = self.start_rank
         rollout_world_size = (
             self.rollout_config.tensor_model_parallel_size
             * self.rollout_config.data_parallel_size
@@ -235,8 +357,8 @@ class LLMServerManager:
         from verl.workers.rollout.router import get_router_handle
 
         self.global_load_balancer = get_router_handle(
-            servers=dict(zip(self.server_addresses, self.server_handles, strict=True)),
-            router_config=self.rollout_config.get("router", None),
+            servers=dict(zip[tuple[str, Any]](self.server_addresses, self.server_handles, strict=True)),
+            rollout_config=self.rollout_config,
         )
 
     def get_client(self, client_cls=LLMServerClient, **kwargs) -> LLMServerClient:
