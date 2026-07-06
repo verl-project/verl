@@ -74,7 +74,7 @@ qat:
   # Whether to enable QAT
   enable: false
 
-  # Quantization mode: "w4a16" (weight-only). "w4a4" is experimental and not recommended.
+  # Quantization mode: "w4a16" (weight-only), "w4a8" (dense simulation), or "w4a4" (experimental).
   mode: "w4a16"
 
   # Quantization group size (NVFP4 requires 16)
