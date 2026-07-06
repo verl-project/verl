@@ -1,0 +1,13 @@
+# configs/collector.yaml — connection-type tuning config
+
+# HTTP polling connection parameters
+http_polling:
+    polling_interval: 5
+    http_timeout: 10
+
+# Long-connection (ZMQ subscription, etc.) parameters
+long_connection:
+    base_retry_delay: 1.0
+    max_retry_delay: 30.0
+    max_retry_attempts: 5
+    retry_backoff_factor: 2.0

@@ -1,0 +1,12 @@
+# strategies/kvc_aware_strategy.yaml
+_target_: verl.workers.rollout.llm_router.config.strategy.KVCAwareStrategyConfig
+weight: 1.0
+alpha: 0.7
+load_threshold: 0.9  # overload when load > threshold (load ∈ [0,1], bigger=more loaded)
+layer_weights:
+    gpu: 0.7
+    cpu: 0.2
+    ssd: 0.1
+collector_names:
+    - vllm_zmq
+    - vllm_metrics

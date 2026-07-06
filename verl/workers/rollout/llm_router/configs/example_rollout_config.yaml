@@ -1,0 +1,86 @@
+# Example rollout configuration with KVC-aware balancer
+#
+# To use this config, add it to your trainer config:
+#
+# actor_rollout_ref:
+#   rollout:
+#     <<: *this_file
+#
+# Or merge it into your existing rollout config.
+
+# ============================================================
+# Standard rollout config
+# ============================================================
+name: vllm
+nnodes: 1
+n_gpus_per_node: 8
+tensor_model_parallel_size: 4
+data_parallel_size: 2
+pipeline_model_parallel_size: 1
+
+# ... other vllm config (model path, dtype, etc) ...
+
+# ============================================================
+# Router configuration (NEW)
+# ============================================================
+router:
+  type: kvc_aware  # Use 'default' for GlobalRequestLoadBalancer
+
+  config:
+    # Strategy configuration - defines routing algorithm
+    strategies:
+      - _target_: verl.workers.rollout.llm_router.config.strategy.KVCAwareStrategyConfig
+
+        # Cache vs load trade-off weight: S = alpha*S_cache + (1-alpha)*S_load
+        # 0.7 = prefer cache hits, 0.3 = consider load
+        # Range: 0.0 (pure load-based) to 1.0 (pure cache-aware)
+        alpha: 0.7
+
+        # Overload threshold: sticky sessions bypass if load > this value
+        # 0.9 = only bypass when replica is 90%+ loaded
+        # Range: 0.0 to 1.0
+        load_threshold: 0.9
+
+        # Multi-tier cache hit weights (must sum to 1.0)
+        # Higher weight = more important for routing decision
+        layer_weights:
+          gpu: 0.7   # GPU cache (fastest)
+          cpu: 0.2   # CPU offload cache
+          ssd: 0.1   # SSD offload cache
+
+        # Metrics collectors to enable
+        # - vllm_polling: HTTP polling of Prometheus metrics (always available)
+        # - vllm_zmq: ZMQ event stream for KV-cache events (requires PR #6712)
+        collector_names:
+          - vllm_polling
+
+        # Strategy weight (for multi-strategy scenarios, must sum to 1.0)
+        weight: 1.0
+
+    # Sticky session configuration
+    # Max size of request_id -> replica_id LRU cache
+    # Higher = more sessions remembered, but more memory
+    sticky_max_size: 10000
+
+    # Collector configuration (optional, uses defaults if omitted)
+    collector:
+      # Polling interval for HTTP metrics collection (seconds)
+      polling_interval: 1.0
+
+      # Request timeout for HTTP metrics (seconds)
+      request_timeout: 5.0
+
+    # Cache store configuration (optional)
+    cache_store:
+      # Max entries in KV-cache hit rate store per replica
+      max_entries: 10000
+
+# ============================================================
+# Prometheus configuration (required for metrics collection)
+# ============================================================
+prometheus:
+  enable: true
+  port: 9090
+
+# Must be false for Prometheus metrics to work
+disable_log_stats: false

@@ -1,0 +1,20 @@
+defaults:
+    - strategies@strategies.kvc_aware_strategy: kvc_aware_strategy
+
+    - collector@collector
+
+    - cache_store@cache_store
+
+    - _self_
+
+router_class: verl.workers.rollout.llm_router.balancer.KVCAwareBalancer
+
+# Capacity of the request_id→replica sticky-session LRU table. A bound
+# conversation stays affinity-bound to its replica until the replica is
+# removed or the entry is evicted by LRU. Default 10000 mirrors verl's
+# DEFAULT_ROUTING_CACHE_SIZE (verl/verl/workers/rollout/llm_server.py).
+sticky_max_size: 10000
+
+strategies:
+    kvc_aware_strategy:
+        weight: 1.0

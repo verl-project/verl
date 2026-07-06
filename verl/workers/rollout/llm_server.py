@@ -167,9 +167,10 @@ class LLMServerClient:
         self.config = config
         self._load_balancer = load_balancer_handle
 
-    async def _acquire_server(self, request_id: str) -> tuple[str, ray.actor.ActorHandle]:
+    async def _acquire_server(self, request_id: str, prompt_ids: list[int] = None) -> tuple[str, ray.actor.ActorHandle]:
         # Atomic acquire: returns (server_id, handle) in one Ray RPC.
-        return await self._load_balancer.acquire_server.remote(request_id=request_id)
+        # Pass prompt_ids for KVC-aware routing
+        return await self._load_balancer.acquire_server.remote(request_id=request_id, prompt_ids=prompt_ids)
 
     def _release_server(self, server_id: str) -> None:
         # Fire-and-forget: release is just a counter decrement, no need to await.
@@ -199,7 +200,7 @@ class LLMServerClient:
         Returns:
             TokenOutput | DiffusionOutput: token or diffusion output
         """
-        server_id, server = await self._acquire_server(request_id)
+        server_id, server = await self._acquire_server(request_id, prompt_ids=prompt_ids)
         try:
             multimodal_kwargs = {}
             if audio_data is not None:
@@ -335,10 +336,50 @@ class LLMServerManager:
             update_prometheus_config(self.rollout_config.prometheus, self.server_addresses, self.rollout_config.name)
 
     async def _init_global_load_balancer(self) -> None:
-        self.global_load_balancer = GlobalRequestLoadBalancer.remote(
-            servers=dict(zip(self.server_addresses, self.server_handles, strict=True)),
-            max_cache_size=DEFAULT_ROUTING_CACHE_SIZE,
-        )
+        """Initialize the global load balancer based on configuration.
+
+        Supports two balancer types:
+        - 'kvc_aware': KV-cache-aware router with advanced metrics-based routing
+        - 'default': Simple sticky-session + least in-flight balancer (default)
+        """
+        router_config = getattr(self.rollout_config, "router", None)
+        router_type = router_config.get("type", "default") if router_config else "default"
+
+        if router_type == "kvc_aware":
+            # KVC-aware balancer for cache-aware routing
+            from verl.workers.rollout.llm_router import KVCAwareBalancer
+
+            # Load router config (Hydra DictConfig or dict)
+            if router_config and "config" in router_config:
+                balancer_config = router_config["config"]
+            else:
+                # Use default config if not provided
+                from omegaconf import OmegaConf
+                balancer_config = OmegaConf.create({
+                    "strategies": [{
+                        "_target_": "verl.workers.rollout.llm_router.config.strategy.KVCAwareStrategyConfig",
+                        "alpha": 0.5,
+                        "load_threshold": 0.8,
+                        "layer_weights": {"gpu": 0.7, "cpu": 0.2, "ssd": 0.1},
+                        "collector_names": ["vllm_polling"],
+                        "weight": 1.0,
+                    }],
+                    "sticky_max_size": DEFAULT_ROUTING_CACHE_SIZE,
+                })
+
+            # Wrap KVCAwareBalancer with ray.remote
+            self.global_load_balancer = ray.remote(KVCAwareBalancer).remote(
+                servers=dict(zip(self.server_addresses, self.server_handles, strict=True)),
+                router_config=balancer_config,
+            )
+            logger.info("Initialized KVC-aware load balancer")
+        else:
+            # Default: simple sticky-session + least in-flight balancer
+            self.global_load_balancer = GlobalRequestLoadBalancer.remote(
+                servers=dict(zip(self.server_addresses, self.server_handles, strict=True)),
+                max_cache_size=DEFAULT_ROUTING_CACHE_SIZE,
+            )
+            logger.info("Initialized default load balancer")
 
     def get_client(self, client_cls=LLMServerClient, **kwargs) -> LLMServerClient:
         """Get the LLMServerClient to request LLM server replicas.
