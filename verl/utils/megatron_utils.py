@@ -512,12 +512,8 @@ def _clear_te_fp8_weight_workspaces(model_chunk):
 
     Returns the number of cached workspace entries cleared.
     """
-    module = getattr(model_chunk, "module", model_chunk)
-    modules_fn = getattr(module, "modules", None)
-    if modules_fn is None:
-        return 0
     cleared = 0
-    for submodule in modules_fn():
+    for submodule in model_chunk.modules():
         workspaces = getattr(submodule, "_fp8_workspaces", None)
         if isinstance(workspaces, dict) and workspaces:
             cleared += len(workspaces)
