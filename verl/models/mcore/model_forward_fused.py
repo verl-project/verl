@@ -14,7 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import inspect
+import os
 from collections import OrderedDict
+from dataclasses import dataclass
 from typing import Optional
 
 import megatron.core as mcore
@@ -37,6 +40,106 @@ from verl.utils.model import CausalLMOutputForPPO
 from .util import postprocess_packed_seqs_for_dict_output, postprocess_thd_engine
 
 
+# =====================================================================================
+# Megatron `output_processor` hook path (issue #4590 / Megatron-LM PR #4686).
+#
+# Opt-in via env var VERL_FUSED_USE_OP_HOOK:
+#   "0" / unset  -> legacy path: patch_fused_forward replaces the whole GPTModel.forward
+#                   (_fused_GPTModel_forward) so that `temperature` can reach _postprocess.
+#   "1" / true   -> hook path: forward is NOT replaced. The native forward is called with
+#                   output_processor=<callback> and output_processor_context=<temperature>,
+#                   and the callback runs the fused logprob/entropy kernel at the _postprocess
+#                   boundary. This removes the need to copy the entire forward just to smuggle
+#                   `temperature` in.
+#
+# Both paths coexist and are byte-identical when the switch is off, so users who have not
+# upgraded Megatron are unaffected. The hook path requires Megatron-Core >= 0.18.0 (the release
+# that ships PR #4686's `output_processor`); a capability probe fails fast otherwise.
+# =====================================================================================
+def use_output_processor_hook() -> bool:
+    """Whether to take the output_processor hook path (default: no -> legacy monkey-patch)."""
+    return os.environ.get("VERL_FUSED_USE_OP_HOOK", "0").lower() in ("1", "true", "yes")
+
+
+def _assert_output_processor_supported() -> None:
+    """Fail fast at model-build time when the hook path is requested but the installed
+    Megatron-Core predates PR #4686 and its GPTModel.forward has no `output_processor` param."""
+    if "output_processor" not in inspect.signature(GPTModel.forward).parameters:
+        raise RuntimeError(
+            "VERL_FUSED_USE_OP_HOOK=1 requires a Megatron-Core build whose GPTModel.forward "
+            "accepts `output_processor` (added by Megatron-LM PR #4686, first released in "
+            f"megatron-core>=0.18.0), but the installed megatron.core=={mcore.__version__} does "
+            "not expose it. Either upgrade `megatron-core>=0.18.0`, or unset "
+            "VERL_FUSED_USE_OP_HOOK to use the legacy forward-patch path."
+        )
+
+
+@dataclass
+class FusedOutputProcessorContext:
+    """Carries training-loop-owned semantics that Megatron itself should not know about
+    (currently only `temperature`). Passed through GPTModel.forward(output_processor_context=...)
+    and handed to the callback by Megatron's _postprocess as context=<this object>."""
+
+    temperature: float
+
+
+def fused_output_processor(
+    *,
+    hidden_states,  # decoder output [S,B,H]; under SP this is the sequence shard, not yet gathered
+    output_layer,  # ColumnParallelLinear (may be tied)
+    output_weight,  # tied -> shared weight; NOT tied -> None (opposite of the legacy patch; see below)
+    labels,
+    context,  # keyword MUST be `context` (Megatron _postprocess forwards context=output_processor_context)
+    config,
+    **_ignored,  # loss_mask/input_ids/position_ids/packed_seq_params/runtime_gather_output/...: absorbed
+):
+    """output_processor callback: run the fused logprob/entropy kernel at the _postprocess boundary.
+
+    Mirrors the legacy _fused_GPTModel_forward tail: build CausalLMOutputForPPO -> SP gather ->
+    resolve weight -> linear_cross_entropy -> fill log_probs/entropy. The return value is passed
+    back out unchanged by Megatron."""
+    output = CausalLMOutputForPPO(
+        loss=None,
+        logits=None,
+        past_key_values=None,
+        hidden_states=hidden_states,
+        attentions=None,
+    )
+
+    # The hook fires before the output layer, so under sequence parallelism gather first.
+    if config.sequence_parallel:
+        hidden_states = gather_from_sequence_parallel_region(hidden_states)
+
+    # output_weight semantics are inverted vs the legacy patch: the hook passes None when the
+    # embedding is NOT tied (real weight lives in output_layer.weight), and the shared weight
+    # when it is tied.
+    weight = output_weight if output_weight is not None else output_layer.weight
+    assert weight is not None, "cannot resolve output weight for fused linear_cross_entropy"
+
+    temperature = context.temperature
+    logprobs, entropy = linear_cross_entropy(
+        hidden_states,
+        weight,
+        labels,
+        temperature,
+        "none",
+        parallel_state.get_tensor_model_parallel_group(),
+    )
+
+    if has_config_logger_enabled(config):
+        payload = OrderedDict(
+            {
+                "logprobs": logprobs,
+                "entropy": entropy,
+            }
+        )
+        log_config_to_disk(config, payload, prefix="input_and_logits")
+
+    output.entropy = entropy
+    output.log_probs = logprobs
+    return output
+
+
 def _get_patching_model(model: torch.nn.Module):
     model = unwrap_model(model)
     if isinstance(model, GPTModel):
@@ -50,6 +153,12 @@ def _get_patching_model(model: torch.nn.Module):
 
 
 def patch_fused_forward(model: torch.nn.Module):
+    if use_output_processor_hook():
+        # Hook path: do NOT replace forward (temperature is passed via output_processor_context
+        # at call time). Validate the capability once here so an unsupported Megatron fails fast
+        # at build time with a clear error rather than an opaque TypeError during the forward.
+        _assert_output_processor_supported()
+        return
     assert version.parse(mcore.__version__) >= version.parse("0.13.0"), (
         "Fused forward patching requires mecore >= 0.13.0"
     )
@@ -60,6 +169,9 @@ def patch_fused_forward(model: torch.nn.Module):
 
 
 def unpatch_fused_forward(model: torch.nn.Module):
+    if use_output_processor_hook():
+        # Hook path never installed forward_backup, so there is nothing to restore.
+        return
     model = _get_patching_model(model)
     if model is not None:
         model.forward = model.forward_backup
@@ -117,7 +229,19 @@ def fused_forward_model_gen(vision_model: bool = False):
             input_args["input_ids"] = input_ids
             input_args["attention_mask"] = attention_mask
 
-        output_orig: CausalLMOutputForPPO = model(**input_args)
+        if use_output_processor_hook():
+            # Hook path: call the native forward (no `temperature` param); temperature rides on
+            # output_processor_context and the callback runs the fused kernel at _postprocess.
+            # Note the keyword here is the forward param name output_processor_context= (the
+            # callback receives it as context=).
+            input_args.pop("temperature", None)
+            output_orig: CausalLMOutputForPPO = model(
+                **input_args,
+                output_processor=fused_output_processor,
+                output_processor_context=FusedOutputProcessorContext(temperature=temperature),
+            )
+        else:
+            output_orig: CausalLMOutputForPPO = model(**input_args)
 
         if post_process:
             # output_orig is in type of CausalLMOutputForPPO
@@ -181,15 +305,26 @@ def fused_forward_model_engine(vision_model: bool = False):
             labels, pre_process=True, need_roll=True, use_fp8_padding=use_fp8_padding
         )
         labels_rmpad = labels_rmpad.contiguous()
-        output_orig: CausalLMOutputForPPO = model(
+        forward_kwargs = dict(
             input_ids=input_ids_rmpad,
             attention_mask=attention_mask,
             position_ids=None,
             packed_seq_params=packed_seq_params,
             labels=labels_rmpad,
-            temperature=temperature,
             **model_kwargs,
         )
+        if use_output_processor_hook():
+            # Hook path: same swap as the classic caller -- native forward has no `temperature`
+            # param; temperature rides on output_processor_context and the callback runs the
+            # fused kernel at _postprocess. This is the single live Megatron fused path in the
+            # engine backend (patch_fused_forward is a no-op under the hook).
+            output_orig: CausalLMOutputForPPO = model(
+                **forward_kwargs,
+                output_processor=fused_output_processor,
+                output_processor_context=FusedOutputProcessorContext(temperature=temperature),
+            )
+        else:
+            output_orig: CausalLMOutputForPPO = model(temperature=temperature, **forward_kwargs)
 
         if not post_process:
             return output_orig
