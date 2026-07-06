@@ -496,6 +496,35 @@ def _can_safely_resize_storage(tensor: torch.Tensor) -> bool:
     )
 
 
+def _clear_te_fp8_weight_workspaces(model_chunk):
+    """Clear cached Transformer-Engine FP8 weight workspaces on a model chunk.
+
+    When training with an FP8 param dtype (or loading a native-FP8 checkpoint),
+    Transformer-Engine ``Linear`` / ``GroupedLinear`` layers cache quantized
+    (``Float8Tensor`` / ``Float8BlockwiseQTensor``) copies of their weights in
+    ``module._fp8_workspaces`` (keyed ``weight``, ``weight0..weightN``). These
+    caches are plain tensors, not ``nn.Parameter``s or registered buffers, so the
+    parameter/buffer offloading in :func:`offload_megatron_model_to_cpu` never
+    frees them and they stay resident on the GPU -- for large MoE checkpoints this
+    can be tens of GiB per rank that defeats the offload. Transformer-Engine lazily
+    rebuilds the workspace on the next forward, so dropping it here is safe. This is
+    a no-op for bf16/fp16 models (the attribute is absent or empty).
+
+    Returns the number of cached workspace entries cleared.
+    """
+    module = getattr(model_chunk, "module", model_chunk)
+    modules_fn = getattr(module, "modules", None)
+    if modules_fn is None:
+        return 0
+    cleared = 0
+    for submodule in modules_fn():
+        workspaces = getattr(submodule, "_fp8_workspaces", None)
+        if isinstance(workspaces, dict) and workspaces:
+            cleared += len(workspaces)
+            workspaces.clear()
+    return cleared
+
+
 @torch.no_grad()
 def offload_megatron_model_to_cpu(models):
     """
@@ -575,6 +604,10 @@ def offload_megatron_model_to_cpu(models):
                     param.grad = param.grad.to("cpu")
                     if _can_safely_resize_storage(old_grad):
                         old_grad.storage().resize_(0)
+
+        # Drop Transformer-Engine FP8 weight-workspace caches, which hold quantized
+        # copies of the weights on GPU and are not covered by the parameter offload above.
+        _clear_te_fp8_weight_workspaces(model_chunk)
 
     gc.collect()
     get_torch_device().empty_cache()
