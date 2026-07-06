@@ -1136,7 +1136,10 @@ class FSDPEngineWithLMHead(FSDPEngine):
                             model_output[field_name] = torch.nested.nested_tensor_from_jagged(v, cu_seqlens)
             else:
                 logits_rmpad = output.logits.squeeze(0)  # (total_nnz, vocab_size)
-                logits_rmpad.div_(temperature_rmpad.clamp(min=1e-8).unsqueeze(-1).to(logits_rmpad.dtype))
+                # With TP, logits are DTensors sharded on vocab dim; gather for log_softmax.
+                if isinstance(logits_rmpad, DTensor):
+                    logits_rmpad = logits_rmpad.full_tensor()
+                logits_rmpad = logits_rmpad / temperature_rmpad.clamp(min=1e-8).unsqueeze(-1).to(logits_rmpad.dtype)
 
                 log_probs = None
 
@@ -1246,7 +1249,10 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 logits = output.logits  # (bsz, response_length, vocab_size)
                 temperature = output_args["temperature"]  # (bsz,)
                 temperature = temperature.unsqueeze(-1).unsqueeze(-1)
-                logits.div_(temperature.clamp(min=1e-8).to(logits.dtype))
+                # With TP, logits are DTensors sharded on vocab dim; gather for log_softmax.
+                if isinstance(logits, DTensor):
+                    logits = logits.full_tensor()
+                logits = logits / temperature.clamp(min=1e-8).to(logits.dtype)
 
                 if calculate_entropy:
                     if not self.engine_config.entropy_checkpointing:
