@@ -18,7 +18,7 @@ vLLM NVFP4 Patches for Dynamic Weight Updates.
 Enables dynamic weight reloading for NVFP4 quantized models in vLLM.
 
 Supported schemes:
-- Dense: W4A16-FP4, W4A4-FP4
+- Dense: W4A16-FP4, W4A4-FP4, experimental W4A8 simulation
 - MoE: NVFP4-MoE
 """
 
@@ -34,6 +34,18 @@ from verl.utils.device import get_device_name
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+W4A8_SIMULATION_ENV = "VERL_W4A8_SIMULATION"
+
+
+def set_w4a8_simulation(enabled: bool) -> None:
+    """Propagate the configured W4A8 simulation mode to vLLM subprocesses."""
+    os.environ[W4A8_SIMULATION_ENV] = "1" if enabled else "0"
+
+
+def is_w4a8_simulation_enabled() -> bool:
+    """Return whether the current process is running the W4A8 simulation."""
+    return os.environ.get(W4A8_SIMULATION_ENV, "0") == "1"
 
 
 class ParamMetaDict(dict):
@@ -680,6 +692,12 @@ def _process_nvfp4_moe_flashinfer_cutlass(self, layer: torch.nn.Module, is_first
 # MoE NVFP4 Patches (entry points)
 def patched_nvfp4_moe_process_weights_after_loading(self, layer: torch.nn.Module) -> None:
     """Patched process_weights_after_loading for NVFP4 MoE layer."""
+    if is_w4a8_simulation_enabled():
+        raise NotImplementedError(
+            "W4A8 simulation currently supports dense models only. A fused MoE kernel cannot reproduce "
+            "FP8 fake quantization at both expert GEMM inputs through the existing W4A16 rollout path."
+        )
+
     from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import NvFp4MoeBackend
 
     is_first_call = _check_first_call(layer)
@@ -732,24 +750,52 @@ _PATCH_TARGETS = [
 ]
 
 _applied_patches = []
+_w4a8_apply_patch = None
+_original_w4a16_apply_weights = None
+
+
+def patched_w4a16_apply_weights_with_w4a8_simulation(self, layer, x, bias=None):
+    """Inject FP8 activation noise before the existing dense W4A16 kernel."""
+    if is_w4a8_simulation_enabled():
+        from verl.utils.qat.linear import fp8_e4m3_fake_quant
+
+        x = fp8_e4m3_fake_quant(x)
+
+    if _original_w4a16_apply_weights is None:
+        raise RuntimeError("Original vLLM W4A16 apply_weights method was not initialized")
+    return _original_w4a16_apply_weights(self, layer, x, bias)
 
 
 def apply_qat_patches():
     """Apply NVFP4 patches to support dynamic weight updates. Call before model loading."""
-    global _applied_patches
+    global _applied_patches, _original_w4a16_apply_weights, _w4a8_apply_patch
 
-    if _applied_patches:
-        logger.warning("QAT patches already applied, skipping")
-        return _applied_patches
+    if not _applied_patches:
+        logger.info("Applying NVFP4 patches for dynamic weight loading...")
 
-    logger.info("Applying NVFP4 patches for dynamic weight loading...")
+        for target, replacement in _PATCH_TARGETS:
+            p = patch(target, replacement)
+            _applied_patches.append(p)
+            p.start()
 
-    for target, replacement in _PATCH_TARGETS:
-        p = patch(target, replacement)
-        _applied_patches.append(p)
-        p.start()
+        logger.info(f"Applied {len(_applied_patches)} NVFP4 patches for dynamic weight loading")
 
-    logger.info(f"Applied {len(_applied_patches)} NVFP4 patches for dynamic weight loading")
+    if is_w4a8_simulation_enabled() and _w4a8_apply_patch is None:
+        from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_w4a16_nvfp4 import (
+            CompressedTensorsW4A16Fp4,
+        )
+
+        _original_w4a16_apply_weights = CompressedTensorsW4A16Fp4.apply_weights
+        target = (
+            "vllm.model_executor.layers.quantization.compressed_tensors.schemes."
+            "compressed_tensors_w4a16_nvfp4.CompressedTensorsW4A16Fp4.apply_weights"
+        )
+        _w4a8_apply_patch = patch(target, patched_w4a16_apply_weights_with_w4a8_simulation)
+        _w4a8_apply_patch.start()
+        logger.warning(
+            "Enabled experimental dense W4A8 simulation: activations are FP8 fake-quantized before the W4A16 kernel"
+        )
+
     return _applied_patches
 
 
@@ -825,4 +871,6 @@ __all__ = [
     "apply_qat_patches",
     "prepare_qat_for_load_weights",
     "manual_process_weights_after_loading",
+    "set_w4a8_simulation",
+    "is_w4a8_simulation_enabled",
 ]
