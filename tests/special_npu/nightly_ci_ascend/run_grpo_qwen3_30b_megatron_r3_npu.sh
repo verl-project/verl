@@ -3,6 +3,17 @@ ulimit -n 65535
 set -xeuo pipefail
 
 export RAY_DEDUP_LOGS=0
+# Necessary env
+export HCCL_CONNECT_TIMEOUT=1500
+export HCCL_HOST_SOCKET_PORT_RANGE=60000-60050
+export HCCL_NPU_SOCKET_PORT_RANGE=61000-61050
+
+export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+
+export DISABLE_L2_CACHE=1
+export TASK_QUEUE_ENABLE=1
+export HCCL_OP_EXPANSION_MODE="AIV"
 
 # Baseline
 RELEASE071_R3_ROLLOUT_PROBS_DIFF_MEAN=${RELEASE071_R3_ROLLOUT_PROBS_DIFF_MEAN:-0.008714}
@@ -62,10 +73,10 @@ train_pp=2
 train_cp=1
 
 # vLLM Configuration
-gen_tp=8
+gen_tp=4
 gen_dp=1
-gen_ep=8
-gpu_memory_utilization=0.7
+gen_ep=1
+gpu_memory_utilization=0.5
 max_model_len=$((max_prompt_length + max_response_length))
 max_num_batched_tokens=$(((max_prompt_length + max_response_length) * 1))
 
@@ -128,7 +139,6 @@ ACTOR_CONFIG=(
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1
-    ++actor_rollout_ref.actor.megatron.override_transformer_config.attention_backend=fused
 )
 
 # Reference Model Configuration
@@ -144,6 +154,7 @@ REF_CONFIG=(
     actor_rollout_ref.ref.megatron.expert_tensor_parallel_size=${train_etp}
     actor_rollout_ref.ref.megatron.param_offload=${all_offload}
     actor_rollout_ref.ref.megatron.use_dist_checkpointing=${USE_DIST_CKPT}
+    actor_rollout_ref.ref.megatron.use_mbridge=True
 )
 
 # Rollout Configuration
@@ -176,7 +187,7 @@ ROLLOUT_CONFIG=(
 
 # Trainer Configuration
 TRAINER_CONFIG=(
-    trainer.logger='["console","tensorboard"]'
+    trainer.logger='["console"]'
     trainer.project_name="${project_name}"
     trainer.experiment_name="${exp_name}"
     trainer.nnodes="${NNODES}"
