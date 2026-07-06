@@ -346,24 +346,38 @@ CONFIG = {
         # mlp_N =hidden*inter*2
         # merger_N =((o+hidden*spatial_merge_size^2) * (hidden*spatial_merge_size^2))
         # deepstack_merger_N =merger_N * 3
-        # dense_N =patch_embed_N + (attn_linear_N + mlp_N) * 27 + deepstack_merger_N + merger_N
+        # The mergers downsample by spatial_merge_size**2, so they run on
+        # merger_tokens = tokens_sum // spatial_merge_size**2 (= tokens_sum // 4), not the full
+        # tokens_sum; merger FLOPs are therefore counted separately from dense_N.
+        # dense_N =patch_embed_N + (attn_linear_N + mlp_N) * 27   (mergers pulled out)
+        # merger_total_N =deepstack_merger_N + merger_N
+        # vit_dense_flops =6 * dense_N * tokens_sum + 6 * merger_total_N * (tokens_sum // 4)
         #
         # 6*(151936*4096*2
         #   + 36*(4096*(4096+1024+1024+4096) + 4096*12288*3)
         # )*(512+1024+2048)
         # + 12*(512*512+1024*1024+2048*2048)*36*4096
         # + 6 * dense_N * (512 + 1024 + 2048)
+        # + 6 * merger_total_N * ((512 + 1024 + 2048) // 4)
         # + 12 * (512**2 + 1024**2 + 2048**2) * 27 * 16 * 72
         #
         # 6*(151936*4096*2
         #   + 36*(4096*(4096+1024+1024+4096) + 4096*12288*3)
         # )*(4096+4096+4096)
         # + 12*(4096*4096+4096*4096+4096*4096)*36*4096
-        # + 6 * dense_N * (4096 + 4096 + 2048)
+        # + 6 * dense_N * (4096 + 4096 + 4096)
+        # + 6 * merger_total_N * ((4096 + 4096 + 4096) // 4)
         # + 12 * (4096**2 + 4096**2 + 4096**2) * 27 * 16 * 72
+        #
+        # The merger-token correction shifts the ViT merger term from full tokens_sum
+        # to tokens_sum//4. merger_total_N = 4 * (4096 + 1152*4) * (1152*4) = 160432128.
+        # delta = 6 * 160432128 * (tokens_sum//4 - tokens_sum):
+        #   batch0 tokens_sum=3584: 6*160432128*(896-3584)  = -2587449360384
+        #   batch1 tokens_sum=12288: 6*160432128*(3072-12288)= -8871254949888
+        # old goldens (195379819708416, 709446422495232) + delta ->
         "expected_flops_tuple": (
-            195379819708416 / 1e12,
-            709446422495232 / 1e12,
+            192792370348032 / 1e12,
+            700575167545344 / 1e12,
         ),
     },
     "qwen3_vl_moe": {
@@ -412,24 +426,34 @@ CONFIG = {
         # mlp_N =hidden*inter*2
         # merger_N =((o+hidden*spatial_merge_size^2) * (hidden*spatial_merge_size^2))
         # deepstack_merger_N =merger_N * 3
-        # dense_N =patch_embed_N + (attn_linear_N + mlp_N) * 27 + deepstack_merger_N + merger_N
+        # The mergers downsample by spatial_merge_size**2, so they run on
+        # tokens_sum // spatial_merge_size**2 (= tokens_sum // 4) tokens, counted separately.
+        # dense_N =patch_embed_N + (attn_linear_N + mlp_N) * 27   (mergers pulled out)
+        # merger_total_N =deepstack_merger_N + merger_N
+        # vit_dense_flops =6 * dense_N * tokens_sum + 6 * merger_total_N * (tokens_sum // 4)
         #
         # 6*(151936*2048*2
         #   + 48*(2048*(128*32+128*4*2+128*32)+2048*768*8*3+2048*128)
         # )*(512+1024+2048)
         # + 12*(512*512+1024*1024+2048*2048)*48*4096
         # + 6 * dense_N * (512 + 1024 + 2048)
+        # + 6 * merger_total_N * ((512 + 1024 + 2048) // 4)
         # + 12 * (512**2 + 1024**2 + 2048**2) * 27 * 16 * 72
         #
         # 6*(151936*2048*2
         #   48*(2048*(128*32+128*4*2+128*32)+2048*768*8*3+2048*128)
         # )*(4096+4096+4096)
         # + 12*(4096*4096+4096*4096+4096*4096)*48*4096
-        # + 6 * dense_N * (4096 + 4096 + 2048)
+        # + 6 * dense_N * (4096 + 4096 + 4096)
+        # + 6 * merger_total_N * ((4096 + 4096 + 4096) // 4)
         # + 12 * (4096**2 + 4096**2 + 4096**2) * 27 * 16 * 72
+        #
+        # Merger-token correction: same ViT as qwen3_vl, so same delta
+        #   batch0: -2587449360384 ; batch1: -8871254949888
+        # old goldens (92975451340800, 367622860308480) + delta ->
         "expected_flops_tuple": (
-            92975451340800 / 1e12,
-            367622860308480 / 1e12,
+            90388001980416 / 1e12,
+            358751605358592 / 1e12,
         ),
     },
 }

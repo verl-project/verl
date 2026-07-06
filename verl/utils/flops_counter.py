@@ -131,7 +131,7 @@ def _estimate_qwen3_vl_flops(config, tokens_sum, batch_seqlens, delta_time, **ka
     num_attention_heads = config.text_config.num_attention_heads
     intermediate_size = config.text_config.intermediate_size
 
-    head_dim = hidden_size // num_attention_heads
+    head_dim = getattr(config.text_config, "head_dim", hidden_size // num_attention_heads)
     q_size = num_attention_heads * head_dim
     k_size = num_key_value_heads * head_dim
     v_size = num_key_value_heads * head_dim
@@ -246,11 +246,20 @@ def _estimate_qwen3_vit_flop(images_seqlens, config):
         deepstack_merger_N = merger_N * len(config.deepstack_visual_indexes)
     else:
         deepstack_merger_N = 0
-    # non-attn all_layer parm
-    dense_N = patch_embed_N + (mlp_N + attn_linear_N) * depth + deepstack_merger_N + merger_N
+    # The spatial merger runs after patch merging, so it processes
+    # tokens_sum / spatial_merge_size**2 tokens, not the full tokens_sum.
+    # The deepstack mergers are the same Qwen3VLVisionPatchMerger module
+    # (hidden_size = context_dim * spatial_merge_size**2, forward does
+    # x.view(-1, hidden_size)), so they also emit tokens_sum / spatial_merge_size**2
+    # tokens and share merger_tokens with the final merger.
+    merger_tokens = tokens_sum // (spatial_merge_size**2)
+    merger_total_N = merger_N + deepstack_merger_N
+
+    # non-attn all_layer parm (excludes mergers, which run on fewer tokens)
+    dense_N = patch_embed_N + (mlp_N + attn_linear_N) * depth
 
     # non-attn all_layer & all_token fwd & bwd flops
-    dense_N_flops = 6 * dense_N * tokens_sum
+    dense_N_flops = 6 * dense_N * tokens_sum + 6 * merger_total_N * merger_tokens
 
     # In Qwen3 VL, full attention is used in all vision layers.
     full_attn_layer_num = depth
