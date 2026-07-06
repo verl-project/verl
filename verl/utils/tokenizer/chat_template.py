@@ -39,6 +39,56 @@ def initialize_system_prompt(tokenizer, **apply_chat_template_kwargs) -> list[in
     return system_prompt
 
 
+def initialize_turn_separator(tokenizer, **apply_chat_template_kwargs) -> list[int]:
+    """Tokens a chat template inserts after a message's closing token, before the next turn.
+
+    Multi-turn agent rollouts build the token sequence incrementally. The model stops at the
+    assistant close token (e.g. ``<|im_end|>``) and never emits the template's trailing
+    turn-separator (e.g. ``"\\n"``, id 198 for Qwen). Rendering the following tool/user turn in
+    isolation also omits that separator, so every turn boundary silently drops it and the rollout
+    token sequence diverges from ``apply_chat_template`` of the equivalent full conversation.
+    This returns the separator so callers can restore it at turn boundaries.
+
+    Derivation: rendering the same (user) turn with empty vs non-empty content only differs in the
+    content region, so the maximal common trailing run is exactly ``[close_token, *separator]``.
+    A user turn is used deliberately -- probing with an assistant turn would inject reasoning
+    scaffolding (e.g. Qwen3's ``<think></think>``) that is not part of the separator. The model
+    emits the close token itself (it is the stop token), so the separator is everything after it.
+
+    Returns an empty list when the template has no turn separator or an unexpected structure, so
+    callers keep their previous behavior instead of crashing.
+    """
+    empty = normalize_token_ids(
+        tokenizer.apply_chat_template(
+            [{"role": "user", "content": ""}], add_generation_prompt=False, tokenize=True, **apply_chat_template_kwargs
+        )
+    )
+    filled = normalize_token_ids(
+        tokenizer.apply_chat_template(
+            [{"role": "user", "content": "x"}], add_generation_prompt=False, tokenize=True, **apply_chat_template_kwargs
+        )
+    )
+    # Maximal common trailing run == the message closing token(s) + inter-turn separator (identical
+    # regardless of content).
+    i = 0
+    while i < len(empty) and i < len(filled) and empty[-1 - i] == filled[-1 - i]:
+        i += 1
+    suffix = empty[len(empty) - i :]
+    if not suffix:
+        return []
+    # Split off the closing token the model already emits; the remainder is the dropped separator.
+    # A processor (VLM path) exposes ``eos_token_id`` on its wrapped tokenizer rather than itself,
+    # and some tokenizers (e.g. Llama 3) expose it as a list/tuple of ids rather than a single int.
+    eos_id = getattr(tokenizer, "eos_token_id", None)
+    if eos_id is None:
+        eos_id = getattr(getattr(tokenizer, "tokenizer", None), "eos_token_id", None)
+    eos_ids = {eos_id} if isinstance(eos_id, int) else set(eos_id or [])
+    last_close = max((i for i, tok_id in enumerate(suffix) if tok_id in eos_ids), default=None)
+    if last_close is not None:
+        return suffix[last_close + 1 :]
+    return suffix[1:]
+
+
 def extract_system_prompt_and_generation(tokenizer, **apply_chat_template_kwargs):
     token1 = normalize_token_ids(
         tokenizer.apply_chat_template(
