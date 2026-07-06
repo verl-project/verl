@@ -578,22 +578,6 @@ class Gemma4ContinuousTokenBuilder(ContinuousTokenBuilder):
         previous_messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
     ) -> list[int]:
-        # Render the tool block through the chat template (tokenizer for text,
-        # processor for VL) via a synthetic-prefix suffix diff. Gemma's template
-        # drops a tool message unless it is preceded by an assistant tool_call, so
-        # we fabricate one whose names match the real call (resolved from prior
-        # assistant turns). Routing through the template — instead of a hand-built
-        # string — lets VL image blocks in tool messages expand into pad tokens.
-        #
-        # Gemma's template resolves each tool response's name by matching the
-        # tool message's ``tool_call_id`` against the preceding assistant
-        # ``tool_calls[*].id`` (falling back to the tool message's own ``name``).
-        # ToolAgentLoop appends bare ``{"role": "tool", "content": ...}`` messages
-        # with neither field, so we stamp the fabricated call id and resolved name
-        # onto message copies; otherwise the template resolves the name to ``None``
-        # and raises ``can only concatenate str (not "NoneType") to str``. These
-        # fields are used only for name resolution and do not appear in the
-        # rendered tokens, so the output is unchanged.
         tool_calls = []
         rendered_tool_messages = []
         for index, tool_message in enumerate(tool_messages):
