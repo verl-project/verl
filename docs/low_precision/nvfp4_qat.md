@@ -7,7 +7,7 @@ verl supports NVFP4 Quantization-Aware Training (QAT), which applies fake quanti
 | Training Backend | Training Precision | Rollout Precision | vLLM Quant Method |
 |---|---|---|---|
 | **FSDP** | BF16 + fake quantization | NVFP4 W4A16 | `compressed-tensors` |
-| **FSDP (experimental)** | FP4 weight + FP8 activation fake quantization | W4A8 numerical simulation | `compressed-tensors` |
+| **FSDP (experimental)** | BF16 parameters + FP4 weight / FP8 activation fake quantization | W4A8 numerical simulation | `compressed-tensors` |
 | **Megatron** | BF16 + fake quantization | NVFP4 W4A16 | `modelopt` |
 
 > [!WARNING]

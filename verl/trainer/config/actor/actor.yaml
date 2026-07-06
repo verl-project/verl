@@ -284,8 +284,8 @@ router_replay:
 #   - QAT is automatically applied to actor model during training
 #   - Fused scales (QKV/GateUp) are automatically enabled for training-inference consistency
 #   - Fast quantization is used when syncing weights to vLLM rollout
-# Supported modes: "w4a16" (NVFP4 weight-only)
-# Note: "w4a4" mode is included in the code but currently has KL divergence issues and is NOT recommended for use.
+# Supported modes: "w4a16" (NVFP4 weight-only), "w4a8" (dense numerical simulation),
+# and "w4a4" (experimental; currently has KL divergence issues and is NOT recommended for use).
 # For usage examples, see: https://github.com/verl-project/verl-recipe/blob/main/qat/README.md
 qat:
 
