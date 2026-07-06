@@ -39,6 +39,7 @@ verl is fast with:
    :maxdepth: 2
    :caption: Programming guide
 
+   extend_guide
    hybrid_flow
    single_controller
 

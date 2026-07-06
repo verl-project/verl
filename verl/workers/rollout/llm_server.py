@@ -342,7 +342,12 @@ class FullyAsyncLLMServerClient(LLMServerClient):
                     break
 
             # 4. check stop reason
-            if output.stop_reason not in ("aborted", "abort"):
+            # If partial rollout not enable, aborted samples will be dropped.
+            # For v1 trainer, should_retry is always True. Since self.config.async_training is not exist.
+            should_retry = True
+            if hasattr(self.config, "async_training") and not self.config.async_training.partial_rollout:
+                should_retry = False
+            if output.stop_reason not in ("aborted", "abort") or not should_retry:
                 break
 
             await asyncio.sleep(1)

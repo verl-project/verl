@@ -684,6 +684,8 @@ class vLLMHttpServer:
             return
 
     async def start_profile(self, **kwargs):
+        if self.node_rank != 0:
+            return
         if (
             self.profiler_controller.check_enable()
             and self.profiler_controller.check_this_rank()
@@ -692,6 +694,8 @@ class vLLMHttpServer:
             await self.engine.start_profile(**kwargs)
 
     async def stop_profile(self):
+        if self.node_rank != 0:
+            return
         if (
             self.profiler_controller.check_enable()
             and self.profiler_controller.check_this_rank()

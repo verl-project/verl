@@ -120,16 +120,12 @@ class ServerAdapter(BaseRollout):
             import sglang
             from packaging import version
 
+            from verl.utils.sglang.sglang_fp8_utils import build_sglang_fp8_quant_config
+
             assert version.parse(sglang.__version__) >= version.parse("0.5.5"), (
                 "sglang>=0.5.5 is required for FP8 quantization"
             )
-            FP8_BLOCK_QUANT_KWARGS = {
-                "activation_scheme": "dynamic",
-                "fmt": "e4m3",
-                "quant_method": "fp8",
-                "weight_block_size": [128, 128],
-            }
-            fp8_block_quant_kwargs = dict(FP8_BLOCK_QUANT_KWARGS)
+            fp8_block_quant_kwargs = build_sglang_fp8_quant_config(self.model_config.hf_config)
             self.model_config.hf_config.quantization_config = fp8_block_quant_kwargs
         self._engine: AsyncHttpServerAdapter = None
 

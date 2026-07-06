@@ -218,7 +218,7 @@ def hf_processor(name_or_path, **kwargs):
                 from transformers.models.qwen3_vl import Qwen3VLModel
 
                 model_class = Qwen3VLModel
-            case "Glm4vImageProcessor":
+            case "Glm4vProcessor":
                 from transformers.models.glm4v import Glm4vModel
 
                 model_class = Glm4vModel

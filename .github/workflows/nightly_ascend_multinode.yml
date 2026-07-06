@@ -1,0 +1,389 @@
+name: nightly_ci_ascend_multinode
+
+on:
+  schedule:
+    - cron: "0 17 * * *"
+
+# Declare permissions just read content.
+permissions:
+  contents: read
+
+env:
+  SUBMITTER_URL: http://rayjob-submitter.ci-system.svc.cluster.local
+  IMAGE: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-9.0.0-a3-ubuntu22.04-py3.11-latest
+  WORKER_REPLICAS: "2"
+
+jobs:
+  ascend-rayjob-e2e:
+    if: github.repository_owner == 'verl-project'
+    name: E2E Ascend RayJob multinode PPO
+    runs-on: linux-aarch64-a3-8
+    timeout-minutes: 240
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-9.0.0-a3-ubuntu22.04-py3.11-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          clean: true
+
+      - name: Copy checkout to shared cache
+        run: |
+          rm -rf /root/.cache/cicd_test/verl
+          mkdir -p /root/.cache/cicd_test/verl
+          tar \
+            --exclude=.git \
+            --exclude=.venv \
+            --exclude=__pycache__ \
+            --exclude=.pytest_cache \
+            -cf - . | tar -xf - -C /root/.cache/cicd_test/verl
+          chmod -R 777 /root/.cache/cicd_test/verl
+          ls -l /root/.cache/cicd_test
+          ls -l /root/.cache/cicd_test/verl
+
+      - name: Prepare RayJob submit helper
+        run: |
+          cat > /root/.cache/cicd_test/submit_and_wait_rayjob.sh <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          name_suffix="$1"
+          script="$2"
+          args_json="${3:-}"
+          env_json="${4:-}"
+          template_patches_json="${5:-}"
+
+          if [[ -z "${args_json}" ]]; then
+              args_json='[]'
+          fi
+
+          if [[ -z "${env_json}" ]]; then
+              env_json='{}'
+          fi
+
+          if [[ -z "${template_patches_json}" ]]; then
+              template_patches_json='[]'
+          fi
+
+          : "${SUBMITTER_URL:?SUBMITTER_URL is required}"
+          : "${IMAGE:?IMAGE is required}"
+          : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
+          : "${GITHUB_SHA:?GITHUB_SHA is required}"
+          : "${GITHUB_REF_NAME:?GITHUB_REF_NAME is required}"
+          : "${GITHUB_RUN_ID:?GITHUB_RUN_ID is required}"
+
+          github_run_attempt="${GITHUB_RUN_ATTEMPT:-1}"
+          worker_replicas="${WORKER_REPLICAS:-2}"
+
+          echo "========== Validate local JSON inputs =========="
+          echo "args_json=${args_json}"
+          echo "env_json=${env_json}"
+          echo "template_patches_json=${template_patches_json}"
+          echo "worker_replicas=${worker_replicas}"
+
+          args_json_compact="$(printf '%s' "${args_json}" | jq -c 'if type == "array" then . else error("args must be a JSON array") end')"
+          env_json_compact="$(printf '%s' "${env_json}" | jq -c 'if type == "object" then . else error("env must be a JSON object") end')"
+          template_patches_json_compact="$(printf '%s' "${template_patches_json}" | jq -c 'if type == "array" then . else error("template_patches must be a JSON array") end')"
+
+          payload="$(jq -n \
+              --arg repository "${GITHUB_REPOSITORY}" \
+              --arg commit_sha "${GITHUB_SHA}" \
+              --arg branch "${GITHUB_REF_NAME}" \
+              --arg github_run_id "${GITHUB_RUN_ID}" \
+              --arg github_run_attempt "${github_run_attempt}" \
+              --arg image "${IMAGE}" \
+              --arg name_suffix "${name_suffix}" \
+              --arg script "${script}" \
+              --argjson args "${args_json_compact}" \
+              --argjson env "${env_json_compact}" \
+              --argjson template_patches "${template_patches_json_compact}" \
+              --arg worker_replicas "${worker_replicas}" \
+              '{repository:$repository,commit_sha:$commit_sha,branch:$branch,github_run_id:$github_run_id,github_run_attempt:$github_run_attempt,image:$image,name_suffix:$name_suffix,script:$script,args:$args,env:$env,worker_replicas:($worker_replicas | tonumber),template_patches:$template_patches}')"
+
+          echo "========== Submit RayJob payload =========="
+          echo "${payload}" | jq .
+
+          response_file="$(mktemp)"
+          http_code="$(curl -sS -o "${response_file}" -w "%{http_code}" -X POST "${SUBMITTER_URL}/api/v1/rayjobs" \
+              -H "Content-Type: application/json" \
+              -d "${payload}")"
+          response="$(cat "${response_file}")"
+          rm -f "${response_file}"
+
+          echo "========== Submitter response =========="
+          echo "http_code=${http_code}"
+          echo "${response}"
+
+          if ! printf '%s' "${response}" | jq . >/dev/null 2>&1; then
+              echo "Submitter response is not valid JSON."
+              printf '%s\n' "${response}"
+              exit 1
+          fi
+
+          echo "${response}" | jq .
+
+          if [[ "${http_code}" -lt 200 || "${http_code}" -ge 300 ]]; then
+              echo "Submitter returned non-2xx status: ${http_code}"
+              exit 1
+          fi
+
+          job_id="$(echo "${response}" | jq -r '.job_id // empty')"
+          if [[ -z "${job_id}" || "${job_id}" == "null" ]]; then
+              echo "Failed to parse job_id from submitter response."
+              exit 1
+          fi
+
+          final_status_file="/tmp/rayjob-final-status-${job_id}"
+          rm -f "${final_status_file}"
+
+          set +e
+          curl -N -sS \
+              --retry 5 \
+              --retry-delay 10 \
+              --retry-all-errors \
+              "${SUBMITTER_URL}/api/v1/rayjobs/${job_id}/watch?format=ndjson" \
+          | while IFS= read -r event; do
+              [[ -z "${event}" ]] && continue
+              if ! printf '%s' "${event}" | jq . >/dev/null 2>&1; then
+                  echo "[watch raw] ${event}"
+                  continue
+              fi
+
+              type="$(printf '%s' "${event}" | jq -r '.type // empty')"
+              case "${type}" in
+                  log)
+                      printf '%s' "${event}" | jq -r '.line // ""'
+                      ;;
+                  status)
+                      status="$(printf '%s' "${event}" | jq -r '.status // "UNKNOWN"')"
+                      message="$(printf '%s' "${event}" | jq -r '.message // ""')"
+                      rayjob_status="$(printf '%s' "${event}" | jq -r '.rayjob_status // ""')"
+                      deployment_status="$(printf '%s' "${event}" | jq -r '.job_deployment_status // ""')"
+                      echo "[rayjob status] status=${status} rayjob_status=${rayjob_status} deployment_status=${deployment_status} ${message}"
+                      ;;
+                  final)
+                      status="$(printf '%s' "${event}" | jq -r '.status // "UNKNOWN"')"
+                      message="$(printf '%s' "${event}" | jq -r '.message // ""')"
+                      echo "[rayjob final] ${status} ${message}"
+                      printf '%s' "${status}" > "${final_status_file}"
+                      ;;
+                  error)
+                      message="$(printf '%s' "${event}" | jq -r '.message // ""')"
+                      echo "[rayjob error] ${message}"
+                      ;;
+                  *)
+                      echo "${event}"
+                      ;;
+              esac
+          done
+          set -e
+
+          final_status=""
+          if [[ -f "${final_status_file}" ]]; then
+              final_status="$(cat "${final_status_file}")"
+          fi
+
+          case "${final_status}" in
+              SUCCEEDED) exit 0 ;;
+              FAILED|TIMEOUT|NOT_FOUND) exit 1 ;;
+              *) echo "Watch ended without successful final status."; exit 1 ;;
+          esac
+          EOF
+          sed -i 's/^          //' /root/.cache/cicd_test/submit_and_wait_rayjob.sh
+          chmod +x /root/.cache/cicd_test/submit_and_wait_rayjob.sh
+          cat /root/.cache/cicd_test/submit_and_wait_rayjob.sh
+
+      - name: Prepare multinode testing helper
+        run: |
+          cat > /root/.cache/cicd_test/run_multinode_testing.sh <<'EOF'
+          #!/usr/bin/env bash
+          set -euxo pipefail
+
+          CACHE_REPO=${CACHE_REPO:-/root/.cache/cicd_test/verl}
+          WORK_REPO=${WORK_REPO:-/verl}
+          EXPECTED_WORKERS=${EXPECTED_WORKERS:-2}
+
+          script_path=""
+          script_args=()
+
+          while [[ $# -gt 0 ]]; do
+              case "$1" in
+                  --script-path)
+                      script_path="${2:?--script-path requires a value}"
+                      shift 2
+                      ;;
+                  *)
+                      script_args+=("$1")
+                      shift
+                      ;;
+              esac
+          done
+
+          if [[ -z "${script_path}" ]]; then
+              echo "--script-path is required" >&2
+              exit 1
+          fi
+
+          if [[ ! -d "${CACHE_REPO}" ]]; then
+              echo "${CACHE_REPO} does not exist" >&2
+              exit 1
+          fi
+
+          copy_repo() {
+              rm -rf "${WORK_REPO}"
+              mkdir -p "${WORK_REPO}"
+              cp -a "${CACHE_REPO}/." "${WORK_REPO}/"
+          }
+
+          install_repo() {
+              if ! command -v uv >/dev/null 2>&1; then
+                  curl -LsSf https://astral.sh/uv/install.sh | sh
+                  source "$HOME/.local/bin/env"
+              fi
+
+              export PATH="$HOME/.local/bin:$PATH"
+
+              cd "${WORK_REPO}"
+              uv pip list --system
+              uv pip install --system --no-deps -e "${WORK_REPO}"
+              uv pip list --system
+          }
+
+          copy_repo
+          install_repo
+
+          python3 - <<'PY'
+          import os
+          import socket
+          import subprocess
+          import ray
+          from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+
+          CACHE_REPO = os.environ.get("CACHE_REPO", "/root/.cache/cicd_test/verl")
+          WORK_REPO = os.environ.get("WORK_REPO", "/verl")
+          EXPECTED_WORKERS = int(os.environ.get("EXPECTED_WORKERS", "2"))
+
+          def run_cmd(cmd: str) -> None:
+              print(f"\n===== RUN: {cmd} =====", flush=True)
+              subprocess.run(cmd, shell=True, executable="/bin/bash", check=True)
+
+          @ray.remote(num_cpus=1)
+          def setup_worker() -> str:
+              hostname = socket.gethostname()
+              print(f"===== Worker setup starts on {hostname} =====", flush=True)
+
+              run_cmd('cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info')
+              run_cmd("npu-smi info")
+              run_cmd(
+                  f"""
+                  rm -rf {WORK_REPO}
+                  mkdir -p {WORK_REPO}
+                  ls -l {CACHE_REPO}
+                  cp -a {CACHE_REPO}/. {WORK_REPO}/
+
+                  if ! command -v uv >/dev/null 2>&1; then
+                      curl -LsSf https://astral.sh/uv/install.sh | sh
+                      source "$HOME/.local/bin/env"
+                  fi
+
+                  export PATH="$HOME/.local/bin:$PATH"
+
+                  cd {WORK_REPO}
+                  uv pip list --system
+                  uv pip install --system --no-deps -e {WORK_REPO}
+                  uv pip list --system
+
+                  python examples/data_preprocess/gsm8k.py --local_dataset_path "$HOME/.cache/datasets/openai/gsm8k"
+                  ls -lh "$HOME/data/gsm8k"
+                  """
+              )
+
+              print(f"===== Worker setup finished on {hostname} =====", flush=True)
+              return hostname
+
+          ray.init(address="auto")
+
+          worker_nodes = []
+          for node in ray.nodes():
+              if not node.get("Alive", False):
+                  continue
+              if float(node.get("Resources", {}).get("CPU", 0)) > 0:
+                  worker_nodes.append(node)
+
+          print("===== Ray alive worker nodes =====", flush=True)
+          for node in worker_nodes:
+              print(
+                  {
+                      "NodeID": node["NodeID"],
+                      "NodeManagerAddress": node.get("NodeManagerAddress"),
+                      "Resources": node.get("Resources"),
+                  },
+                  flush=True,
+              )
+
+          if len(worker_nodes) != EXPECTED_WORKERS:
+              raise RuntimeError(f"Expected {EXPECTED_WORKERS} workers, found {len(worker_nodes)}")
+
+          refs = [
+              setup_worker.options(
+                  scheduling_strategy=NodeAffinitySchedulingStrategy(node_id=node["NodeID"], soft=False)
+              ).remote()
+              for node in worker_nodes
+          ]
+
+          print(f"===== Worker setup completed on: {ray.get(refs)} =====", flush=True)
+          PY
+
+          cd "${WORK_REPO}"
+          bash "${script_path}" "${script_args[@]}"
+          rm -rf "$HOME/ckpts"
+          EOF
+          sed -i 's/^          //' /root/.cache/cicd_test/run_multinode_testing.sh
+          chmod +x /root/.cache/cicd_test/run_multinode_testing.sh
+          cat /root/.cache/cicd_test/run_multinode_testing.sh
+
+      - name: Setup and Verify Cluster Network
+        run: |
+          echo "==== [1/2] Setting up network routing (Injecting K8s CoreDNS) ===="
+          sh -c 'cat <<EOF > /etc/resolv.conf
+          nameserver 10.247.3.10
+          search ci-system.svc.cluster.local svc.cluster.local cluster.local
+          options ndots:5
+          EOF'
+
+          cat /etc/resolv.conf
+
+          echo "==== nsswitch ===="
+          cat /etc/nsswitch.conf || true
+          grep '^hosts:' /etc/nsswitch.conf || true
+
+          echo "==== getent test ===="
+          getent hosts kubernetes.default.svc.cluster.local || true
+          getent hosts rayjob-submitter.ci-system.svc.cluster.local || true
+
+          echo "==== [2/2] Testing network connectivity via healthz ===="
+          curl -sS --fail "${SUBMITTER_URL}/healthz"
+
+      - name: Run multinode E2E RayJob
+        run: |
+          /root/.cache/cicd_test/submit_and_wait_rayjob.sh \
+            multinode-e2e \
+            /root/.cache/cicd_test/run_multinode_testing.sh \
+            '["--script-path","/verl/tests/special_npu/run_gspo_qwen3_30b_megatron_npu_multinode.sh"]' \
+            '{}' \
+            '[
+              {"op":"replace","path":"/spec/rayClusterSpec/workerGroupSpecs/0/template/spec/containers/0/resources/requests/cpu","value":"64"},
+              {"op":"replace","path":"/spec/rayClusterSpec/workerGroupSpecs/0/template/spec/containers/0/resources/requests/memory","value":"512Gi"},
+              {"op":"replace","path":"/spec/rayClusterSpec/workerGroupSpecs/0/template/spec/containers/0/resources/requests/huawei.com~1ascend-1980","value":"16"},
+              {"op":"replace","path":"/spec/rayClusterSpec/workerGroupSpecs/0/template/spec/containers/0/resources/limits/cpu","value":"64"},
+              {"op":"replace","path":"/spec/rayClusterSpec/workerGroupSpecs/0/template/spec/containers/0/resources/limits/memory","value":"512Gi"},
+              {"op":"replace","path":"/spec/rayClusterSpec/workerGroupSpecs/0/template/spec/containers/0/resources/limits/huawei.com~1ascend-1980","value":"16"},
+              {"op":"replace","path":"/spec/rayClusterSpec/workerGroupSpecs/0/template/spec/volumes/1/emptyDir/sizeLimit","value":"128Gi"}
+            ]'
+
+      - name: Cleanup RayJobs
+        if: always()
+        run: |
+          curl -sS -X DELETE \
+            "${SUBMITTER_URL}/api/v1/workflows/${GITHUB_RUN_ID}?attempt=${GITHUB_RUN_ATTEMPT:-1}"

@@ -118,8 +118,10 @@ jobs:
         run: |
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
+          pip3 install --no-deps TransferQueue==0.1.8
           pip3 install cupy-cuda13x==13.6.0
       - name: Check final pip list
+        run: |
           pip3 list
       - name: Prepare GSM8K dataset
         run: |

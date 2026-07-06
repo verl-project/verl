@@ -19,6 +19,7 @@ import ray
 from omegaconf import DictConfig
 
 from verl.checkpoint_engine import CheckpointEngineManager
+from verl.trainer.ppo.utils import need_reward_model
 from verl.trainer.ppo.v1.trainer_base import PPOTrainer, register_trainer
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
@@ -54,6 +55,12 @@ class PPOTrainerSeparateAsync(PPOTrainer):
         assert config.actor_rollout_ref.rollout.checkpoint_engine.backend != "naive", (
             "please use nccl/nixl/mooncake, etc. backend for separate async training"
         )
+        if need_reward_model(config):
+            assert config.reward.reward_model.enable_resource_pool, (
+                "Colocate reward model (reward.reward_model.enable_resource_pool=False) is not supported "
+                "in separate async mode, because the standalone rollout never pauses to free GPU memory. "
+                "Use standalone mode (reward.reward_model.enable_resource_pool=True) instead."
+            )
 
         super().__init__(config)
 

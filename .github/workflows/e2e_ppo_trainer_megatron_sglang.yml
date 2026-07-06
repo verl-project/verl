@@ -125,7 +125,9 @@ jobs:
           pip3 install git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@0a21da4 --no-deps --no-build-isolation
           pip3 install git+https://github.com/ISEEKYAN/mbridge.git@main --no-deps --no-build-isolation
           pip3 install --no-deps -e .
+          pip3 install --no-deps TransferQueue==0.1.8
       - name: Check final pip list
+        run: |
           pip3 list
       - name: Prepare GSM8K dataset
         run: |

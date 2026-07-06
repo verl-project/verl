@@ -198,7 +198,7 @@ trainer:
   device: cuda
 
   # Whether to use V1 trainer
-  use_v1: false
+  use_v1: true
 
   # V1 trainer mode configs
   v1:

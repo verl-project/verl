@@ -110,7 +110,7 @@ class HFModelConfig(BaseConfig):
     # custom chat template for the model
     custom_chat_template: Optional[str] = None
 
-    external_lib: Optional[str] = None
+    external_lib: Any = None
 
     override_config: dict = field(default_factory=dict)
 

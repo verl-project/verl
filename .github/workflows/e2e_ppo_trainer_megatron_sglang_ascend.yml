@@ -126,11 +126,9 @@ jobs:
         with:
           fetch-depth: 0
           clean: true
-      - name: Install the current repository
+      - name: Install the current repository 
         run: |
           uv pip install pytest pytest-asyncio
-          pip install git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@0a21da4 --no-deps --no-build-isolation --ignore-requires-python
-          uv pip install git+https://github.com/ISEEKYAN/mbridge.git@main --no-deps --no-build-isolation
           uv pip install --no-deps --no-build-isolation -e .
       - name: Check final pip list
         run: |
@@ -151,7 +149,79 @@ jobs:
           export VLLM_USE_V1=1
           ray start --head
           ENGINE=sglang MODE=async RESUME_MODE=auto COMMON_VPP=NULL USE_REMOVE_PADDING=True MODEL_ID=deepseek-ai/deepseek-coder-1.3b-instruct TOTAL_TRAIN_STEPS=2 bash tests/special_e2e/run_ppo_trainer_megatron.sh
+      - name: Profiling GRPO GSM8K E2E training tests with 3D parallelism on 8 NPUs with Megatron (Deepseek)
+        run: |
+          ray stop --force
+          PROFILE_ENABLE=True ENGINE=sglang ADV_ESTIMATOR=grpo USE_DYNAMIC_BSZ=False USE_REMOVE_PADDING=True MODEL_ID=deepseek-ai/deepseek-coder-1.3b-instruct bash tests/special_e2e/run_ppo_trainer_megatron.sh
+          if [ -z "$( ls -A "${HOME}/profiling" )" ]; then
+            echo "[ERROR] not found any profiling files"
+            exit 1
+          else
+            echo "[SUCCESS] profile success"
+          fi
       - name: clean up
         run: |
           rm -rf checkpoints
           rm -rf "${HOME}/profiling"
+
+  # Qwen3-0.6B: dense, tie_word_embeddings=True
+  e2e_ppo_trainer_megatron-qwen3:
+    if: github.repository_owner == 'verl-project'
+    runs-on: linux-aarch64-a3-8
+    timeout-minutes: 90 # Increase this timeout value as needed
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-sglang-8.5.0-a3-ubuntu22.04-py3.11-latest
+      options: >-
+        --shm-size 16g
+    env:
+      HF_ENDPOINT: "https://hf-mirror.com"
+      HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES: "1"
+      ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7"
+      HCCL_HOST_SOCKET_PORT_RANGE: "60000-60050"
+      HCCL_NPU_SOCKET_PORT_RANGE: "61000-61050"
+      ENGINE: sglang
+      UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi"
+      UV_INDEX_STRATEGY: unsafe-best-match
+      UV_INSECURE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
+      UV_HTTP_TIMEOUT: 120
+      UV_NO_CACHE: "1"
+      UV_SYSTEM_PYTHON: "1"
+      UV_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
+      PIP_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
+      PIP_TRUSTED_HOST: "cache-service.nginx-pypi-cache.svc.cluster.local"
+    steps:
+      - name: Check npu and CANN info
+        run: |
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+          npu-smi info
+      - name: Install uv
+        run: pip install uv
+      - name: Check initial pip list from image
+        run: |
+          uv pip list
+      - name: Checkout verl-project/verl repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          clean: true
+      - name: Install the current repository 
+        run: |
+          uv pip install pytest pytest-asyncio
+          uv pip install --no-deps --no-build-isolation -e .
+      - name: Check final pip list
+        run: |
+          uv pip list
+      - name: Prepare weights
+        run: |
+          ln -s /root/.cache/models ~/models
+      - name: Prepare GSM8K dataset
+        run: |
+          python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
+      - name: Running GSM8K E2E training tests with 3D parallelism on 8 NPUs with Megatron (Qwen3) testing learning rate scheduler
+        run: |
+          ray stop --force
+          ALL_OFFLOAD=True USE_REMOVE_PADDING=True VAL_BEFORE_TRAIN=True TEST_FREQ=1 SAVE_FREQ=1 LR_WARMUP_STEPS=1 TOTAL_TRAIN_STEPS=2 MODEL_ID=Qwen/Qwen3-0.6B bash tests/special_e2e/run_ppo_trainer_megatron.sh
+      - name: clean up
+        run: |
+          rm -rf checkpoints

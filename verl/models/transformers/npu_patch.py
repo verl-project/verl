@@ -20,15 +20,6 @@ import torch.nn.functional as F
 import torch_npu
 from torch import nn
 from transformers.activations import ACT2FN
-from transformers.models.qwen2 import modeling_qwen2
-from transformers.models.qwen2_5_vl import modeling_qwen2_5_vl
-from transformers.models.qwen3 import modeling_qwen3
-from transformers.models.qwen3_5 import modeling_qwen3_5
-from transformers.models.qwen3_5_moe import modeling_qwen3_5_moe
-from transformers.models.qwen3_moe import modeling_qwen3_moe
-from transformers.models.qwen3_next import modeling_qwen3_next
-from transformers.models.qwen3_vl import modeling_qwen3_vl
-from transformers.models.qwen3_vl_moe import modeling_qwen3_vl_moe
 from transformers.utils import logging
 
 logger = logging.get_logger(__name__)
@@ -342,50 +333,119 @@ def qwen3_5_moe_experts_forward_npu(
     return final_hidden_states.to(hidden_states.dtype)
 
 
-# Patches for Qwen2 Model
-modeling_qwen2.Qwen2RMSNorm.forward = rms_norm_forward_npu
-modeling_qwen2.Qwen2MLP.forward = silu_forward_npu
-modeling_qwen2.apply_rotary_pos_emb = apply_rotary_pos_emb_npu
+def _patch_qwen2():
+    from transformers.models.qwen2 import modeling_qwen2
 
-# Patches for Qwen2.5-VL Model
-if hasattr(modeling_qwen2_5_vl, "Qwen2RMSNorm"):
-    modeling_qwen2_5_vl.Qwen2RMSNorm.forward = rms_norm_forward_npu
-else:
-    modeling_qwen2_5_vl.Qwen2_5_VLRMSNorm.forward = rms_norm_forward_npu
-modeling_qwen2_5_vl.Qwen2_5_VLMLP.forward = silu_forward_npu
+    modeling_qwen2.Qwen2RMSNorm.forward = rms_norm_forward_npu
+    modeling_qwen2.Qwen2MLP.forward = silu_forward_npu
+    modeling_qwen2.apply_rotary_pos_emb = apply_rotary_pos_emb_npu
 
-# Patches for Qwen3 Model
-modeling_qwen3.Qwen3RMSNorm.forward = rms_norm_forward_npu
-modeling_qwen3.Qwen3MLP.forward = silu_forward_npu
-modeling_qwen3.apply_rotary_pos_emb = apply_rotary_pos_emb_npu
 
-# Patches for Qwen3 MoE Model
-modeling_qwen3_moe.Qwen3MoeRMSNorm.forward = rms_norm_forward_npu
-modeling_qwen3_moe.Qwen3MoeSparseMoeBlock.forward = qwen3_moe_sparse_moe_block_forward_npu
-modeling_qwen3_moe.apply_rotary_pos_emb = apply_rotary_pos_emb_npu
+def _patch_qwen2_5_vl():
+    from transformers.models.qwen2_5_vl import modeling_qwen2_5_vl
 
-# Patches for Qwen3 VL Model
-modeling_qwen3_vl.Qwen3VLTextRMSNorm.forward = rms_norm_forward_npu
-modeling_qwen3_vl.Qwen3VLTextMLP.forward = silu_forward_npu
+    if hasattr(modeling_qwen2_5_vl, "Qwen2RMSNorm"):
+        modeling_qwen2_5_vl.Qwen2RMSNorm.forward = rms_norm_forward_npu
+    else:
+        modeling_qwen2_5_vl.Qwen2_5_VLRMSNorm.forward = rms_norm_forward_npu
+    modeling_qwen2_5_vl.Qwen2_5_VLMLP.forward = silu_forward_npu
 
-# Patches for Qwen3-VL MoE Model
-modeling_qwen3_vl_moe.Qwen3VLMoeTextSparseMoeBlock = NPUQwen3VLMoeTextSparseMoeBlock
-modeling_qwen3_vl_moe.Qwen3VLMoeTextRMSNorm.forward = rms_norm_forward_npu
-modeling_qwen3_vl_moe.apply_rotary_pos_emb = apply_rotary_pos_emb_npu
 
-# Patches for Qwen3 Next Model
-modeling_qwen3_next.Qwen3NextSparseMoeBlock.forward = qwen3_next_sparse_moe_block_forward_npu
-modeling_qwen3_next.Qwen3NextRMSNormGated.forward = qwen3_next_rms_norm_forward_gated_npu
-modeling_qwen3_next.Qwen3NextRMSNorm.forward = qwen3_next_rms_norm_forward_npu
-modeling_qwen3_next.apply_rotary_pos_emb = qwen3_next_apply_rotary_pos_emb_npu
+def _patch_qwen3():
+    from transformers.models.qwen3 import modeling_qwen3
 
-# Patches for Qwen3.5 Model
-modeling_qwen3_5.Qwen3_5RMSNormGated.forward = qwen3_next_rms_norm_forward_gated_npu
-modeling_qwen3_5.Qwen3_5RMSNorm.forward = qwen3_next_rms_norm_forward_npu
-modeling_qwen3_5.apply_rotary_pos_emb = qwen3_next_apply_rotary_pos_emb_npu
+    modeling_qwen3.Qwen3RMSNorm.forward = rms_norm_forward_npu
+    modeling_qwen3.Qwen3MLP.forward = silu_forward_npu
+    modeling_qwen3.apply_rotary_pos_emb = apply_rotary_pos_emb_npu
 
-# Patches for Qwen3.5 MoE Model
-modeling_qwen3_5_moe.Qwen3_5MoeExperts.forward = qwen3_5_moe_experts_forward_npu
-modeling_qwen3_5_moe.Qwen3_5MoeRMSNormGated.forward = qwen3_next_rms_norm_forward_gated_npu
-modeling_qwen3_5_moe.Qwen3_5MoeRMSNorm.forward = qwen3_next_rms_norm_forward_npu
-modeling_qwen3_5_moe.apply_rotary_pos_emb = qwen3_next_apply_rotary_pos_emb_npu
+
+def _patch_qwen3_moe():
+    from transformers.models.qwen3_moe import modeling_qwen3_moe
+
+    modeling_qwen3_moe.Qwen3MoeRMSNorm.forward = rms_norm_forward_npu
+    modeling_qwen3_moe.Qwen3MoeSparseMoeBlock.forward = qwen3_moe_sparse_moe_block_forward_npu
+    modeling_qwen3_moe.apply_rotary_pos_emb = apply_rotary_pos_emb_npu
+
+
+def _patch_qwen3_vl():
+    from transformers.models.qwen3_vl import modeling_qwen3_vl
+
+    modeling_qwen3_vl.Qwen3VLTextRMSNorm.forward = rms_norm_forward_npu
+    modeling_qwen3_vl.Qwen3VLTextMLP.forward = silu_forward_npu
+
+
+def _patch_qwen3_vl_moe():
+    from transformers.models.qwen3_vl_moe import modeling_qwen3_vl_moe
+
+    modeling_qwen3_vl_moe.Qwen3VLMoeTextSparseMoeBlock = NPUQwen3VLMoeTextSparseMoeBlock
+    modeling_qwen3_vl_moe.Qwen3VLMoeTextRMSNorm.forward = rms_norm_forward_npu
+    modeling_qwen3_vl_moe.apply_rotary_pos_emb = apply_rotary_pos_emb_npu
+
+
+def _patch_qwen3_next():
+    from transformers.models.qwen3_next import modeling_qwen3_next
+
+    modeling_qwen3_next.Qwen3NextSparseMoeBlock.forward = qwen3_next_sparse_moe_block_forward_npu
+    modeling_qwen3_next.Qwen3NextRMSNormGated.forward = qwen3_next_rms_norm_forward_gated_npu
+    modeling_qwen3_next.Qwen3NextRMSNorm.forward = qwen3_next_rms_norm_forward_npu
+    modeling_qwen3_next.apply_rotary_pos_emb = qwen3_next_apply_rotary_pos_emb_npu
+
+
+def _patch_qwen3_5():
+    from transformers.models.qwen3_5 import modeling_qwen3_5
+
+    modeling_qwen3_5.Qwen3_5RMSNormGated.forward = qwen3_next_rms_norm_forward_gated_npu
+    modeling_qwen3_5.Qwen3_5RMSNorm.forward = qwen3_next_rms_norm_forward_npu
+    modeling_qwen3_5.apply_rotary_pos_emb = qwen3_next_apply_rotary_pos_emb_npu
+
+
+def _patch_qwen3_5_moe():
+    from transformers.models.qwen3_5_moe import modeling_qwen3_5_moe
+
+    modeling_qwen3_5_moe.Qwen3_5MoeExperts.forward = qwen3_5_moe_experts_forward_npu
+    modeling_qwen3_5_moe.Qwen3_5MoeRMSNormGated.forward = qwen3_next_rms_norm_forward_gated_npu
+    modeling_qwen3_5_moe.Qwen3_5MoeRMSNorm.forward = qwen3_next_rms_norm_forward_npu
+    modeling_qwen3_5_moe.apply_rotary_pos_emb = qwen3_next_apply_rotary_pos_emb_npu
+
+
+NPU_PATCHES = {
+    "qwen2": _patch_qwen2,
+    "qwen2_5_vl": _patch_qwen2_5_vl,
+    "qwen3": _patch_qwen3,
+    "qwen3_moe": _patch_qwen3_moe,
+    "qwen3_vl": _patch_qwen3_vl,
+    "qwen3_vl_moe": _patch_qwen3_vl_moe,
+    "qwen3_next": _patch_qwen3_next,
+    "qwen3_5": _patch_qwen3_5,
+    "qwen3_5_moe": _patch_qwen3_5_moe,
+}
+
+
+def apply_npu_patches():
+    """Apply NPU patches for all available models."""
+    applied_count = 0
+    failed_count = 0
+    if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:
+        is_rank_0 = True
+    else:
+        is_rank_0 = False
+
+    for model_name, patch_func in NPU_PATCHES.items():
+        try:
+            patch_func()
+            if is_rank_0:
+                logger.info(f"Applied NPU patches for {model_name}")
+            applied_count += 1
+        except ImportError:
+            if is_rank_0:
+                logger.debug(f"Skipping {model_name} patches: model not available in transformers")
+            failed_count += 1
+        except Exception as e:
+            if is_rank_0:
+                logger.warning(f"Failed to apply {model_name} patches: {e}")
+            failed_count += 1
+
+    if applied_count > 0 and is_rank_0:
+        logger.info(f"Successfully applied patches for {applied_count} model(s)")
+    if failed_count > 0 and is_rank_0:
+        logger.warning(f"Failed to apply patches for {failed_count} model(s)")

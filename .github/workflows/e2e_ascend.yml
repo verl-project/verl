@@ -117,7 +117,7 @@ jobs:
     container:
       image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:verl-9.0.0-910b-ubuntu22.04-py3.11-latest
       options: >-
-        --shm-size 16g
+        --shm-size 80g
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
@@ -139,6 +139,7 @@ jobs:
         run: |
           pip install -r requirements-npu.txt
           pip install --no-deps -e .
+          pip install --no-deps TransferQueue==0.1.8
       - name: Check final pip list
         run: |
           pip list

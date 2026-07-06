@@ -65,6 +65,7 @@ actor_rollout_ref:
       use_mbridge: true
       vanilla_mbridge: true
       use_remove_padding: true
+      pad_bshd_to_minibatch_max: true
       use_megatron_fsdp: false
       forward_only: false
       dtype: bfloat16
@@ -251,6 +252,7 @@ actor_rollout_ref:
       use_mbridge: ${oc.select:actor_rollout_ref.actor.megatron.use_mbridge,False}
       vanilla_mbridge: ${oc.select:actor_rollout_ref.actor.megatron.vanilla_mbridge,True}
       use_remove_padding: ${oc.select:actor_rollout_ref.actor.megatron.use_remove_padding,True}
+      pad_bshd_to_minibatch_max: true
       use_megatron_fsdp: false
       forward_only: true
       dtype: bfloat16
@@ -363,6 +365,7 @@ actor_rollout_ref:
       max_samples_per_step_per_worker: null
     skip_tokenizer_init: true
     enable_rollout_routing_replay: false
+    moe_load_balance_metrics_interval: 0
     profiler:
       _target_: verl.utils.profiler.ProfilerConfig
       tool: ${oc.select:global_profiler.tool,null}
@@ -572,6 +575,7 @@ critic:
     use_mbridge: true
     vanilla_mbridge: true
     use_remove_padding: true
+    pad_bshd_to_minibatch_max: true
     use_megatron_fsdp: false
     forward_only: false
     dtype: bfloat16
@@ -924,7 +928,7 @@ trainer:
   max_critic_ckpt_to_keep: null
   ray_wait_register_center_timeout: 300
   device: cuda
-  use_v1: false
+  use_v1: true
   v1:
     trainer_mode: sync
     sync: {}

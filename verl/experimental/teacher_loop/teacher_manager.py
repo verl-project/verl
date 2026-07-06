@@ -11,6 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import logging
+import os
 from typing import Any, Optional
 from uuid import uuid4
 
@@ -26,19 +28,30 @@ from verl.workers.config import (
 )
 from verl.workers.rollout.llm_server import LLMServerClient
 
+logger = logging.getLogger(__file__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
+
 
 def _get_teacher_sampling_params(
     teacher_model_config: DistillationTeacherModelConfig,
     distillation_loss_config: DistillationLossConfig,
 ) -> dict[str, Any]:
     """Get sampling parameters for teacher model when computing log probabilities for distillation."""
+    # Temperature has no effect on prompt_logprobs: the teacher performs a forward pass over
+    # existing tokens (no sampling). Always use temperature=1.0 regardless of the config value.
+    # The default distillation.yaml copies the student rollout temperature via Hydra interpolation
+    # (temperature: ${oc.select:actor_rollout_ref.rollout.temperature}), which causes a spurious
+    # crash when rollout.temperature != 1.0.
     if teacher_model_config.inference.temperature != 1.0:
-        raise NotImplementedError("vLLM does not support temperature for prompt_logprobs.")
-
+        logger.warning(
+            "Teacher inference temperature is set to %.1f, but temperature has no effect "
+            "on prompt_logprobs (forward pass only). Using temperature=1.0.",
+            teacher_model_config.inference.temperature,
+        )
     num_logprobs = distillation_loss_config.topk if distillation_loss_config.loss_settings.use_topk else 0
     return {
         "max_tokens": 1,
-        "temperature": teacher_model_config.inference.temperature,
+        "temperature": 1.0,
         "prompt_logprobs": num_logprobs,
     }
 

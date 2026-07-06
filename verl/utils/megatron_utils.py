@@ -69,7 +69,7 @@ def get_model(
         mpu.get_pipeline_model_parallel_world_size() > 1
         and mpu.get_virtual_pipeline_model_parallel_world_size() is not None
     ):
-        assert model_type != ModelType.encoder_and_decoder, (
+        assert model_type != getattr(ModelType, "encoder_and_decoder", None), (
             "Interleaved schedule not supported for model with both encoder and decoder"
         )
         model = []
@@ -89,8 +89,10 @@ def get_model(
         post_process = mpu.is_pipeline_last_stage()
         add_encoder = True
         add_decoder = True
-        assert model_type != ModelType.encoder_and_decoder, "Model type encoder_and_decoder is not supported"
-        if model_type == ModelType.encoder_and_decoder:
+        assert model_type != getattr(ModelType, "encoder_and_decoder", None), (
+            "Model type encoder_and_decoder is not supported"
+        )
+        if model_type == getattr(ModelType, "encoder_and_decoder", None):
             if mpu.get_pipeline_model_parallel_world_size() > 1:
                 assert mpu.get_pipeline_model_parallel_split_rank() is not None, (
                     "Split rank needs to be specified for model with both encoder and decoder"

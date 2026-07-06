@@ -728,8 +728,7 @@ def collect_lora_params(module: FSDP, layered_summon: bool, base_sync_done: bool
                     FSDP.summon_full_params(module, writeback=False, offload_to_cpu=True) if is_fsdp1 else nullcontext()
                 )
                 with summon_ctx:
-                    state_dict = {n: p for n, p in peft_model.named_parameters()}
-                    lora_params = get_peft_model_state_dict(peft_model, state_dict=state_dict)
+                    lora_params = get_peft_model_state_dict(peft_model)
                     lora_params = {
                         name: param.full_tensor().detach().cpu()
                         if hasattr(param, "full_tensor")
