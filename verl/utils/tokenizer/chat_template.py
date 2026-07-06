@@ -58,16 +58,38 @@ def initialize_turn_separator(tokenizer, **apply_chat_template_kwargs) -> list[i
     Returns an empty list when the template has no turn separator or an unexpected structure, so
     callers keep their previous behavior instead of crashing.
     """
-    empty = normalize_token_ids(
-        tokenizer.apply_chat_template(
-            [{"role": "user", "content": ""}], add_generation_prompt=False, tokenize=True, **apply_chat_template_kwargs
-        )
-    )
-    filled = normalize_token_ids(
-        tokenizer.apply_chat_template(
-            [{"role": "user", "content": "x"}], add_generation_prompt=False, tokenize=True, **apply_chat_template_kwargs
-        )
-    )
+    # Render two user turns that differ only in body text; the shared trailing run is the separator.
+    # A bare string ``content`` is rejected by some multimodal processors (they iterate ``content``
+    # expecting a list of typed parts), so fall back to the list-of-parts form, and return ``[]`` if
+    # neither renders. Both probes must use the same form so only the body differs.
+    empty = filled = None
+    for as_parts in (False, True):
+        if as_parts:
+            body_empty, body_filled = [{"type": "text", "text": ""}], [{"type": "text", "text": "x"}]
+        else:
+            body_empty, body_filled = "", "x"
+        try:
+            empty = normalize_token_ids(
+                tokenizer.apply_chat_template(
+                    [{"role": "user", "content": body_empty}],
+                    add_generation_prompt=False,
+                    tokenize=True,
+                    **apply_chat_template_kwargs,
+                )
+            )
+            filled = normalize_token_ids(
+                tokenizer.apply_chat_template(
+                    [{"role": "user", "content": body_filled}],
+                    add_generation_prompt=False,
+                    tokenize=True,
+                    **apply_chat_template_kwargs,
+                )
+            )
+            break
+        except Exception:
+            empty = filled = None
+    if empty is None or filled is None:
+        return []
     # Maximal common trailing run == the message closing token(s) + inter-turn separator (identical
     # regardless of content).
     i = 0

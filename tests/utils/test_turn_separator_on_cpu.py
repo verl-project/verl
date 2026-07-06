@@ -155,6 +155,39 @@ def test_separator_with_list_valued_eos_and_multi_token_close():
     assert initialize_turn_separator(MultiCloseTokenizer()) == [nl]
 
 
+class MultimodalChatMLProcessor(ChatMLTokenizer):
+    """ChatML tokenizer that rejects bare-string ``content``, like a multimodal processor.
+
+    Multimodal processors iterate ``content`` expecting a list of typed parts (``{"type": "text",
+    "text": ...}``), so a bare string is indexed as ``content["type"]`` and raises ``TypeError``.
+    This reproduces the crash the string-content probe hit on real VLM processors in CI.
+    """
+
+    def apply_chat_template(self, messages, add_generation_prompt=False, tokenize=True, tools=None, **kwargs):
+        flattened = []
+        for m in messages:
+            content = m["content"]
+            if isinstance(content, str):
+                raise TypeError("string indices must be integers, not 'str'")
+            text = "".join(part["text"] for part in content)
+            flattened.append({"role": m["role"], "content": text})
+        return super().apply_chat_template(flattened, add_generation_prompt, tokenize, tools, **kwargs)
+
+
+def test_separator_derived_when_processor_requires_list_content():
+    """Guard the multimodal path: string-content probe crashes, list-of-parts probe recovers it."""
+    proc = MultimodalChatMLProcessor()
+    # The string-content form the plain path uses really does raise on this processor.
+    try:
+        proc.apply_chat_template([{"role": "user", "content": "x"}])
+        raised = False
+    except TypeError:
+        raised = True
+    assert raised
+    # The helper falls back to list-of-parts content and still recovers the separator.
+    assert initialize_turn_separator(proc) == [_NL]
+
+
 def test_separator_ignores_assistant_reasoning_scaffold():
     """Regression guard for the Qwen3 ``<think>`` gotcha.
 
