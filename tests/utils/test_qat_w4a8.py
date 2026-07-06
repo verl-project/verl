@@ -18,6 +18,8 @@ import pytest
 
 torch = pytest.importorskip("torch")
 pytest.importorskip("triton")
+pytest.importorskip("compressed_tensors")
+pytest.importorskip("vllm")
 
 if not torch.cuda.is_available():
     pytest.skip("W4A8 fake quantization requires a CUDA GPU", allow_module_level=True)
