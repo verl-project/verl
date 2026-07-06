@@ -29,7 +29,6 @@ from verl.experimental.agent_loop.agent_loop import (
     register,
 )
 from verl.experimental.agent_loop.tool_parser import FunctionCall, ToolParser
-from verl.experimental.agent_loop.utils import build_gpt_oss_tool_response_text
 from verl.tools.function_tool import FunctionTool, normalize_function_tool_return
 from verl.tools.schemas import OpenAIFunctionCallSchema, OpenAIFunctionParsedSchema, ToolResponse
 from verl.utils.profiler import simple_timer
@@ -208,23 +207,16 @@ class ToolAgentLoop(AgentLoopBase):
     async def _handle_pending_state(self, agent_data: AgentData, sampling_params: dict[str, Any]) -> AgentState:
         """Handle the pending state: prepare the prompt and start generation."""
         schemas = getattr(agent_data, "_active_tool_schemas", self.tool_schemas)
-        if self.enable_continuous_token:
-            prompt_ids = await self.ct_build_initial_tokens(
-                agent_data.messages,
-                tools=schemas,
-                images=agent_data.image_data,
-                videos=agent_data.video_data,
-                audios=agent_data.audio_data,
-            )
-        else:
-            prompt_ids = await self.apply_chat_template(
-                agent_data.messages,
-                tools=schemas,
-                images=agent_data.image_data,
-                videos=agent_data.video_data,
-                audios=agent_data.audio_data,
-                mm_processor_kwargs=agent_data.mm_processor_kwargs,
-            )
+        # Continuous Token is the only tokenization path; multimodal prompts require a
+        # VL builder + processor, so validate before building any tokens.
+        self._assert_mm_supported(bool(agent_data.image_data or agent_data.video_data or agent_data.audio_data))
+        prompt_ids = await self.ct_build_initial_tokens(
+            agent_data.messages,
+            tools=schemas,
+            images=agent_data.image_data,
+            videos=agent_data.video_data,
+            audios=agent_data.audio_data,
+        )
         agent_data.prompt_ids = prompt_ids
         return AgentState.GENERATING
 
@@ -267,23 +259,17 @@ class ToolAgentLoop(AgentLoopBase):
 
         agent_data.assistant_turns += 1
         agent_data.response_ids = output.token_ids
-        if self.enable_continuous_token:
-            merge_result, response_mask, response_logprobs = await self.ct_merge_assistant_token(
-                agent_data.prompt_ids,
-                agent_data.response_ids,
-                agent_data.response_mask,
-                agent_data.response_logprobs if (agent_data.response_logprobs or output.log_probs) else None,
-                assistant_logprobs=output.log_probs if output.log_probs else None,
-            )
-            agent_data.prompt_ids = merge_result.token_ids
-            agent_data.response_mask = response_mask
-            if response_logprobs is not None:
-                agent_data.response_logprobs = response_logprobs
-        else:
-            agent_data.prompt_ids += agent_data.response_ids
-            agent_data.response_mask += [1] * len(agent_data.response_ids)
-            if output.log_probs:
-                agent_data.response_logprobs += output.log_probs
+        merge_result, response_mask, response_logprobs = await self.ct_merge_assistant_token(
+            agent_data.prompt_ids,
+            agent_data.response_ids,
+            agent_data.response_mask,
+            agent_data.response_logprobs if (agent_data.response_logprobs or output.log_probs) else None,
+            assistant_logprobs=output.log_probs if output.log_probs else None,
+        )
+        agent_data.prompt_ids = merge_result.token_ids
+        agent_data.response_mask = response_mask
+        if response_logprobs is not None:
+            agent_data.response_logprobs = response_logprobs
 
         if output.routed_experts is not None:
             agent_data.routed_experts = output.routed_experts
@@ -302,8 +288,7 @@ class ToolAgentLoop(AgentLoopBase):
         assistant_content, agent_data.tool_calls = await self.tool_parser.extract_tool_calls(
             agent_data.response_ids, tools
         )
-        if self.enable_continuous_token:
-            agent_data.messages.append(self._build_assistant_message(assistant_content, agent_data))
+        agent_data.messages.append(self._build_assistant_message(assistant_content, agent_data))
 
         if agent_data.tool_calls:
             return AgentState.PROCESSING_TOOLS
@@ -317,10 +302,8 @@ class ToolAgentLoop(AgentLoopBase):
         previous_messages = list(agent_data.messages)
 
         tasks = []
-        tool_call_names = []
         for tool_call in agent_data.tool_calls[: self.max_parallel_calls]:
             tasks.append(self._call_tool(tool_call, agent_data.tools_kwargs, agent_data))
-            tool_call_names.append(tool_call.name)
 
         with simple_timer("tool_calls", agent_data.metrics):
             responses = await asyncio.gather(*tasks)
@@ -380,76 +363,30 @@ class ToolAgentLoop(AgentLoopBase):
             if tool_reward is not None:
                 agent_data.tool_rewards.append(tool_reward)
 
+        # Continuous Token is the only tokenization path; tool responses that add new
+        # images require a VL builder + processor. Validate before mutating rollout state
+        # so a failure never leaves a half-built prompt behind.
+        self._assert_mm_supported(bool(new_images_this_turn))
+
         agent_data.messages.extend(add_messages)
 
-        if (
-            self.enable_continuous_token
-            and self.continuous_token_builder is not None
-            and (not new_images_this_turn or self.continuous_token_builder.supports_multimodal())
-        ):
-            schemas = getattr(agent_data, "_active_tool_schemas", self.tool_schemas)
-            merge_result, response_mask, response_logprobs = await self.ct_merge_non_assistant_msg(
-                previous_messages,
-                agent_data.messages,
-                agent_data.prompt_ids,
-                agent_data.response_mask,
-                agent_data.response_logprobs if agent_data.response_logprobs else None,
-                tools=schemas,
-            )
-            if len(response_mask) >= self.response_length:
-                return AgentState.TERMINATED
-            agent_data.prompt_ids = merge_result.token_ids
-            agent_data.response_mask = response_mask
-            if agent_data.response_logprobs:
-                agent_data.response_logprobs = response_logprobs or []
-
-            # Keep original image objects for rollout and final multimodal postprocessing.
-            if new_images_this_turn:
-                if agent_data.image_data is None:
-                    agent_data.image_data = []
-                elif not isinstance(agent_data.image_data, list):
-                    agent_data.image_data = [agent_data.image_data]
-                for img in new_images_this_turn:
-                    agent_data.image_data.append(img)
-
-            agent_data.user_turns += 1
-            return AgentState.GENERATING
-        elif self.tool_parser_name == "gpt-oss":
-            logger.info("manually format tool responses for gpt-oss")
-            tool_response_text = build_gpt_oss_tool_response_text(add_messages, tool_call_names)
-            response_ids = await self.loop.run_in_executor(
-                None, lambda: self.tokenizer.encode(tool_response_text, add_special_tokens=False)
-            )
-        elif self.tool_parser_name == "gemma4":
-            # Gemma4's chat template drops tool responses when passed without the preceding
-            # assistant tool_call message. Manually format the response tokens.
-            # Format: <|tool_response>response:func_name{value:<|"|>content<|"|>}<tool_response|>
-            parts = []
-            for msg, name in zip(add_messages, tool_call_names, strict=True):
-                content = msg.get("content", "")
-                if isinstance(content, list):
-                    content = "".join([item.get("text", "") for item in content if item.get("type") == "text"])
-                parts.append(f'<|tool_response>response:{name}{{value:<|"|>{content}<|"|>}}<tool_response|>')
-            tool_response_text = "".join(parts)
-            response_ids = await self.loop.run_in_executor(
-                None, lambda: self.tokenizer.encode(tool_response_text, add_special_tokens=False)
-            )
-        else:
-            # Note that we have to pass None to the images and videos if there are no new images / videos
-            # to stay compatible with downstream image processing logic!
-            images = new_images_this_turn if new_images_this_turn else None
-            videos = None
-            response_ids = await self.apply_chat_template(
-                add_messages,
-                images=images,
-                videos=videos,
-                remove_system_prompt=True,
-            )
-
-        if len(agent_data.response_mask) + len(response_ids) >= self.response_length:
+        schemas = getattr(agent_data, "_active_tool_schemas", self.tool_schemas)
+        merge_result, response_mask, response_logprobs = await self.ct_merge_non_assistant_msg(
+            previous_messages,
+            agent_data.messages,
+            agent_data.prompt_ids,
+            agent_data.response_mask,
+            agent_data.response_logprobs if agent_data.response_logprobs else None,
+            tools=schemas,
+        )
+        if len(response_mask) >= self.response_length:
             return AgentState.TERMINATED
-        # Update prompt_ids and response_mask
+        agent_data.prompt_ids = merge_result.token_ids
+        agent_data.response_mask = response_mask
+        if agent_data.response_logprobs:
+            agent_data.response_logprobs = response_logprobs or []
 
+        # Keep original image objects for rollout and final multimodal postprocessing.
         if new_images_this_turn:
             if agent_data.image_data is None:
                 agent_data.image_data = []
@@ -458,10 +395,6 @@ class ToolAgentLoop(AgentLoopBase):
             for img in new_images_this_turn:
                 agent_data.image_data.append(img)
 
-        agent_data.prompt_ids += response_ids
-        agent_data.response_mask += [0] * len(response_ids)
-        if agent_data.response_logprobs:
-            agent_data.response_logprobs += [0.0] * len(response_ids)
         agent_data.user_turns += 1
         return AgentState.GENERATING
 

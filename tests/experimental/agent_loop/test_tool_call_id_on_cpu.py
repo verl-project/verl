@@ -101,7 +101,7 @@ class TestToolCallIdOnCpu(unittest.IsolatedAsyncioTestCase):
         }
 
     async def test_processing_tools_state_adds_tool_call_id_to_tool_message(self) -> None:
-        captured_add_messages: list[dict[str, Any]] = []
+        captured_messages: list[dict[str, Any]] = []
 
         async def call_tool(
             tool_call: FunctionCall, tools_kwargs: dict[str, Any], agent_data: SimpleNamespace
@@ -109,24 +109,28 @@ class TestToolCallIdOnCpu(unittest.IsolatedAsyncioTestCase):
             del tool_call, tools_kwargs, agent_data
             return ToolResponse(text='{"temperature": 26.1}'), 1.0, {}
 
-        async def apply_chat_template(
-            add_messages: list[dict[str, Any]],
+        async def ct_merge_non_assistant_msg(
+            previous_messages: list[dict[str, Any]],
+            updated_messages: list[dict[str, Any]],
+            runtime_token_ids: list[int],
+            response_mask: list[int],
+            response_logprobs: Any = None,
             *,
-            images: Any = None,
-            videos: Any = None,
-            remove_system_prompt: bool = False,
-        ) -> list[int]:
-            del images, videos, remove_system_prompt
-            captured_add_messages.extend(add_messages)
-            return [41, 42]
+            tools: Any = None,
+        ):
+            del previous_messages, response_logprobs, tools
+            captured_messages.extend(updated_messages)
+            merge_result = SimpleNamespace(token_ids=list(runtime_token_ids) + [41, 42])
+            return merge_result, list(response_mask) + [0, 0], None
 
         loop = SimpleNamespace(
             max_parallel_calls=1,
             processor=None,
-            enable_continuous_token=False,
             tool_parser_name="qwen3_coder",
             response_length=128,
-            apply_chat_template=apply_chat_template,
+            tool_schemas=[],
+            _assert_mm_supported=lambda has_multi_modal: None,
+            ct_merge_non_assistant_msg=ct_merge_non_assistant_msg,
             _call_tool=call_tool,
         )
         agent_data = SimpleNamespace(
@@ -165,7 +169,7 @@ class TestToolCallIdOnCpu(unittest.IsolatedAsyncioTestCase):
             "content": '{"temperature": 26.1}',
             "tool_call_id": "call-get_weather-0",
         }
-        assert captured_add_messages == [agent_data.messages[-1]]
+        assert captured_messages[-1] == agent_data.messages[-1]
         assert agent_data.prompt_ids == [1, 2, 3, 41, 42]
         assert agent_data.response_mask == [0, 0]
         assert agent_data.tool_rewards == [1.0]

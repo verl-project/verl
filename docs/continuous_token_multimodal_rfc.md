@@ -115,7 +115,8 @@ Targeted unit tests cover:
 ## Backward Compatibility
 
 - `MergeResult` remains token-only → existing text-only constructors work unchanged
-- CT is disabled by default → no behavior change unless `continuous_token.enable = True`
+- CT is now the default and only agent-loop tokenization path (the `continuous_token.enable` switch and the legacy `apply_chat_template` fallback were removed); the builder family is auto-inferred from the model / tokenizer path
+- Multimodal inputs require a VL-capable builder **and** a processor; otherwise the agent loop raises via `_assert_mm_supported(...)` instead of silently falling back
 - VL gates are `supports_multimodal()` checks → text-only builders never enter VL code paths
 - Full multimodal tensors are still produced in the existing postprocessing path
 

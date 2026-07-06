@@ -464,8 +464,6 @@ data:
     name: null
   return_multi_modal_inputs: true
   apply_chat_template_kwargs: {}
-  continuous_token:
-    enable: false
   mm_processor_kwargs: {}
 critic:
   optim:
