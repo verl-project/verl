@@ -272,16 +272,12 @@ class SGLangHttpServer:
         quantization = self.config.get("quantization", None)
         if quantization is not None:
             if quantization == "fp8":
+                from verl.utils.sglang.sglang_fp8_utils import build_sglang_fp8_quant_config
+
                 assert version.parse(sglang.__version__) >= version.parse("0.5.5"), (
                     "sglang>=0.5.5 is required for FP8 quantization"
                 )
-                FP8_BLOCK_QUANT_KWARGS = {
-                    "activation_scheme": "dynamic",
-                    "fmt": "e4m3",
-                    "quant_method": "fp8",
-                    "weight_block_size": [128, 128],
-                }
-                fp8_block_quant_kwargs = dict(FP8_BLOCK_QUANT_KWARGS)
+                fp8_block_quant_kwargs = build_sglang_fp8_quant_config(self.model_config.hf_config)
             else:
                 raise ValueError(f"Currently only support fp8 quantization, got: {quantization}")
         infer_tp = self.config.tensor_model_parallel_size * self.config.data_parallel_size

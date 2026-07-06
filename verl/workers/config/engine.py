@@ -194,6 +194,7 @@ class McoreEngineConfig(EngineConfig):
     max_seqlen_per_dp_cp_rank: Optional[int] = None
     sequence_parallel: bool = True
     use_distributed_optimizer: bool = True
+    pad_bshd_to_minibatch_max: bool = True
     use_dist_checkpointing: bool = False
     dist_checkpointing_path: Optional[str] = None
     dist_checkpointing_prefix: str = ""

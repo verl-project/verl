@@ -102,6 +102,11 @@ vanilla_mbridge: True
 # whether to use thd format (sequence packing), if not, use bshd format, padding the input_ids to the longest sequence length
 use_remove_padding: True
 
+# BSHD path only. Pad every micro-batch of a mini-batch to the mini-batch's global max sequence length instead of
+# each micro-batch's own max. Unifies padding across micro-batches to avoid repeated cuDNN compilation. Only takes
+# effect when use_remove_padding=False (BSHD); no-op on the THD path.
+pad_bshd_to_minibatch_max: True
+
 # Whether to use Megatron-FSDP (Zero-3 sharding)
 use_megatron_fsdp: False
 

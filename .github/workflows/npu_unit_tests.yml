@@ -112,3 +112,9 @@ jobs:
       - name: Running NPU profiling unit tests
         run: |
           pytest -s -x tests/utils/test_special_mstx_profile.py
+      - name: Running NPU checkpoint_engine unit tests
+        run: |
+          pytest -s -x tests/checkpoint_engine/test_correctness_on_npu.py
+      - name: Running CPU checkpoint_engine unit tests
+        run: |
+          pytest -s -x tests/checkpoint_engine/test_global_steps_on_cpu.py
