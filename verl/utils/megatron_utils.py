@@ -603,7 +603,9 @@ def offload_megatron_model_to_cpu(models):
 
         # Drop Transformer-Engine FP8 weight-workspace caches, which hold quantized
         # copies of the weights on GPU and are not covered by the parameter offload above.
-        _clear_te_fp8_weight_workspaces(model_chunk)
+        cleared = _clear_te_fp8_weight_workspaces(model_chunk)
+        if cleared:
+            logger.debug("Cleared %d TE FP8 weight workspaces on offload", cleared)
 
     gc.collect()
     get_torch_device().empty_cache()
