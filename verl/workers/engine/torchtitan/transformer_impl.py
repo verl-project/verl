@@ -287,6 +287,11 @@ class TorchTitanEngine(BaseEngine):
         )
         self.device_mesh = self.parallel_dims.build_mesh()
 
+        # Mirror torchtitan's init_distributed (which verl bypasses): disable autograd
+        # multithreading so backward-thread activation-checkpoint recompute can access the
+        # thread-local SPMD mesh / process groups (e.g. current_spmd_mesh().get_group(...)).
+        torch.autograd.set_multithreading_enabled(False)
+
     def train_mode(self, **kwargs):
         """Return a context manager for training mode."""
         return EngineTrainModeCtx(self, **kwargs)
@@ -351,23 +356,13 @@ class TorchTitanEngine(BaseEngine):
 
         ctx = torch.no_grad() if forward_only else nullcontext()
 
-        # torchtitan's train_context activates the SPMD mesh (set_current_spmd_mesh) that
-        # spmd_types' typed collectives (spmd.assert_type) require. It must span BOTH forward
-        # and backward: under selective activation checkpointing the module forward is re-run
-        # during loss.backward(), and those recomputed assert_type calls need the mesh live.
-        # The mesh is thread-local, so the recompute must run on the thread that entered
-        # train_context. verl drives this step inside a Ray actor on a NON-main thread; with
-        # autograd multithreading enabled, torch runs backward (and the AC recompute) on a
-        # separate autograd worker thread where the thread-local mesh is inactive ->
-        # spmd.assert_type "no current mesh". set_multithreading_enabled(False) forces backward
-        # onto the calling thread so the recompute sees the mesh. Both are no-ops for the
-        # "default"/"full_dtensor" backends and when AC is disabled.
+        # train_context activates the (thread-local) SPMD mesh required by spmd_types; it must
+        # span backward too, since activation-checkpoint recompute re-runs the forward there.
         for micro_batch in micro_batches:
             with self.trainer.train_context(), ctx:
                 loss, output = self.forward_step(micro_batch, loss_function=loss_function, forward_only=forward_only)
                 if not forward_only:
-                    with torch.autograd.set_multithreading_enabled(False):
-                        loss.backward()
+                    loss.backward()
             output_lst.append(output)
 
         return postprocess_batch_func(output_lst=output_lst, indices=indices, data=data)
