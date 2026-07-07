@@ -11,6 +11,7 @@ Last updated: 06/05/2026.
    get_start/dockerfile_build_guidance
    get_start/install_guidance
    get_start/quick_start
+   get_start/install_guidance_A5
 
 .. toctree::
    :maxdepth: 1
