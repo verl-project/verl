@@ -1,28 +1,22 @@
 #!/usr/bin/env bash
-# Qwen3.5-35B-A3B MoE GRPO RL with Megatron (single node, 8 GPUs, geo3k dataset)
+# Qwen3.5-397 MoE GRPO RL with Megatron
 #
 # notes on vllm:
-#     by 20260225, the latest vllm nightly does not support qwen3.5 rollout, to use this script, you need to 
+#     by 20260225, the latest vllm nightly does not support qwen3.5 rollout, to use this script, you need to
 #         1. wait until vllm supports qwen3.5 officially, and build a verl docker with that version of vllm
 #         2. self build a verl docker image with vllm from source code with qwen3.5 support (main branch 20260225 is OK)
 #     I succeeded in running this script with the main branch of vllm on 20260225, yet there are still some minor issues
-#     the vllm qwen3.5 during initialization, need to be fixed. Also, the cuda_graph is somehow not working, need to be 
+#     the vllm qwen3.5 during initialization, need to be fixed. Also, the cuda_graph is somehow not working, need to be
 #     fixed, either by verl team with supoorts to vllm0.16, or by vllm team.
-# Requirements:
-#   - 8 GPUs (80GB each, e.g. 1x8 H100/H200)
-#   - Additional packages on top of the base image:
-#       pip install --upgrade transformers
-#       pip install flash-linear-attention
-#       pip install -U git+https://github.com/ISEEKYAN/mbridge.git
-#   - Megatron-LM==0.16.0
 #
 # Requirements on Ascend:
-#   - 8 NPUs (2*64GB each, e.g. 1x8 A3)
+#   - 16 nodes * A3 (16*8*2=256 die)
 #   - Additional packages on base image(verl-8.5.2-a3-ubuntu22.04-py3.11-qwen3-5):
 #       pip install viztracer flash-linear-attention nvidia-modelopt nvidia-ml-py nvidia-resiliency-ext megatron-energon
 #   - Megatron-LM==0.16.0
 #   - MindSpeed==0.16.0
 #   - Megatron-Bridge==de93536e
+#   - verl==0.8.0
 #
 # Qwen3.5 architecture notes:
 #   Qwen3.5 uses Gated Delta Net (GDN) linear attention which currently does
@@ -34,17 +28,25 @@
 #   Once Megatron-LM adds THD support for Qwen3.5 GDN, use_remove_padding
 #   can be set to True for better performance.
 #
-# Tested parallelism config (8 GPUs / 1 node):
-#   TP=2 PP=1 CP=1 EP=8 ETP=1 GEN_TP=8
+# Tested parallelism config (8 NPUs * 16 node A3):
+#   TP=2 PP=4 CP=1 EP=64 ETP=1 GEN_TP=16 GEN_DP=16 GEN_EP=256
 #
+# ray stop --force
+# ps -aux | grep "VLLM" | grep -v grep| awk '{print $2}' | xargs kill -9
+
+# unset PYTHONPATH
+
+source /xxx/ascend-toolkit/set_env.sh
+source /xxx/nnal/atb/set_env.sh
+export PYTHONPATH=/Megatron-Bridge/src:$PYTHONPATH
 
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export VLLM_USE_V1=1
 export VLLM_ALLREDUCE_USE_SYMM_MEM=0
-
+mkdir -p logs
 set -xeuo pipefail
 
-########################### Quick Config ###########################
+########################### Quick Config ###########################cd .
 
 # ---- user-adjustable ----
 # DEVICE is auto-detected by probing torch_npu; override only for special cases.
@@ -61,11 +63,13 @@ case "${DEVICE}" in
         ;;
     npu)
         TP=${TP:-2}
-        PP=${PP:-2}
+        PP=${PP:-4}
         CP=${CP:-1}
-        EP=${EP:-8}
+        EP=${EP:-64}
         ETP=${ETP:-1}
-        GEN_TP=${GEN_TP:-8}
+        GEN_DP=${GEN_DP:-16}
+        GEN_TP=${GEN_TP:-16}
+        GEN_EP=${GEN_EP:-256}
         n_devices_per_node=${NDEVICES_PER_NODE:-16}
         ;;
     *)
@@ -77,13 +81,14 @@ esac
 ALL_OFFLOAD=${ALL_OFFLOAD:-True}
 
 rollout_name="vllm"
-project_name='verl_grpo_qwen3_5_35b_geo3k'
-exp_name='qwen3_5_35b_megatron'
+project_name='verl_grpo_qwen3_5_397b_geo3k'
+exp_name='qwen3_5_397b_megatron'
 adv_estimator=grpo
 
-HF_MODEL_PATH=${HF_MODEL_PATH:-"Qwen3.5-35B-A3B"}
+HF_MODEL_PATH=${HF_MODEL_PATH:-"Qwen3.5-397B-A17B"}  #【修改】修改权重的实际地址
 train_path=${train_path:-$HOME/data/geo3k/train.parquet}
 test_path=${test_path:-$HOME/data/geo3k/test.parquet}
+start_time=$(date +%Y%m%d)_$(date +%H%M%S)
 # ---- end user-adjustable ----
 
 # ---- no user adjustment needed below ----
@@ -92,7 +97,7 @@ test_path=${test_path:-$HOME/data/geo3k/test.parquet}
 DATA=(
     data.train_files=${train_path}
     data.val_files=${test_path}
-    data.train_batch_size=32
+    data.train_batch_size=64
     data.max_prompt_length=1024
     data.max_response_length=2048
     data.truncation='error'
@@ -127,6 +132,7 @@ ACTOR=(
     actor_rollout_ref.actor.megatron.optimizer_offload=${ALL_OFFLOAD}
     actor_rollout_ref.actor.megatron.grad_offload=${ALL_OFFLOAD}
     actor_rollout_ref.actor.megatron.dtype=bfloat16
+    # +actor_rollout_ref.actor.megatron.override_transformer_config.context_parallel_algo=kvallgather_cp_algo
     ++actor_rollout_ref.actor.megatron.override_transformer_config.attention_backend=auto
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full
@@ -151,6 +157,11 @@ ROLLOUT=(
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=False
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=4096
     actor_rollout_ref.rollout.calculate_log_probs=True
+    actor_rollout_ref.rollout.data_parallel_size=${GEN_DP}
+    actor_rollout_ref.rollout.expert_parallel_size=${GEN_EP}
+    actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=1024
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode="FULL_DECODE_ONLY"
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_capture_sizes="[4,12,24,48,64]"
 )
 
 REF=(
@@ -172,13 +183,13 @@ ALGORITHM=(
 
 TRAINER=(
     trainer.critic_warmup=0
-    trainer.logger='["console","wandb"]'
+    trainer.logger='["console"]'
     trainer.project_name=${project_name}
     trainer.experiment_name=${exp_name}
     trainer.n_gpus_per_node=${n_devices_per_node}
-    trainer.nnodes=1
-    trainer.save_freq=20
-    trainer.val_before_train=False
+    trainer.nnodes=16
+    trainer.save_freq=-1
+    trainer.val_before_train=True
     trainer.test_freq=5
     trainer.total_epochs=15
 )
@@ -220,4 +231,4 @@ python3 -m verl.trainer.main_ppo \
     "${REF[@]}" \
     "${TRAINER[@]}" \
     "${EXTRA[@]}" \
-    "$@"
+    "$@" 2>&1 | tee logs/qwen3.5-397b_grpo_megatron-${start_time}.log
