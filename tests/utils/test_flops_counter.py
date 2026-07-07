@@ -366,6 +366,44 @@ CONFIG = {
             709446422495232 / 1e12,
         ),
     },
+    "qwen3_5": {
+        "config": {  # Qwen/Qwen3.5-9B: hybrid linear/full attention, dense MLP, MTP head
+            "model_type": "qwen3_5",
+            "text_config": {
+                "vocab_size": 248320,
+                "hidden_size": 4096,
+                "intermediate_size": 12288,
+                "num_hidden_layers": 32,
+                "num_attention_heads": 16,
+                "num_key_value_heads": 4,
+                "head_dim": 256,
+                "attn_output_gate": True,
+                "full_attention_interval": 4,
+                # 8 full-attention layers (every 4th), 24 GatedDeltaNet linear-attention layers
+                "layer_types": [
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                ]
+                * 8,
+                "linear_key_head_dim": 128,
+                "linear_value_head_dim": 128,
+                "linear_num_key_heads": 16,
+                "linear_num_value_heads": 32,
+                "linear_conv_kernel_dim": 4,
+                "mtp_num_hidden_layers": 1,
+            },
+        },
+        "batch_seqlens_tuple": ([512, 1024, 2048], [4096, 4096, 4096]),
+        # Only the 8 full-attention layers carry the O(L^2) softmax term; the 24 linear
+        # (GatedDeltaNet) layers contribute weight-only projections plus an O(L) recurrence
+        # term. NOTE: the recurrence term is an approximation (chunked delta-rule kernel
+        # detail omitted); it is < 1% of total, so it does not meaningfully move MFU. The
+        # expected values below are produced by the estimator itself, not an independent
+        # closed form, precisely because of that approximated term.
+        "expected_flops_tuple": (198399303352320 / 1e12, 686410935828480 / 1e12),
+    },
     "qwen3_vl_moe": {
         "config": {  # Qwen/Qwen3-VL-30B-A3B
             "model_type": "qwen3_vl_moe",
@@ -447,6 +485,7 @@ CONFIG = {
         "gemma3_text",
         "apertus",
         "gpt_oss",
+        "qwen3_5",
         "qwen3_vl",
         "qwen3_vl_moe",
     ],
