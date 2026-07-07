@@ -576,14 +576,17 @@ def _estimate_qwen3_5_flops(config, tokens_sum, batch_seqlens, delta_time, **kar
     attn_linear_N_full = hidden_size * (q_size + k_size + v_size + o_size)
 
     # --- linear-attention (GatedDeltaNet) layers: in_proj(qkvz) + in_proj(ba) + conv + out_proj ---
-    key_dim = text_config.linear_key_head_dim * text_config.linear_num_key_heads
-    value_dim = text_config.linear_value_head_dim * text_config.linear_num_value_heads
-    conv_kernel = text_config.linear_conv_kernel_dim
-    in_proj_qkvz_N = hidden_size * (2 * key_dim + 2 * value_dim)
-    in_proj_ba_N = hidden_size * (2 * text_config.linear_num_value_heads)
-    conv_N = (2 * key_dim + value_dim) * conv_kernel  # depthwise conv1d
-    out_proj_N = value_dim * hidden_size
-    linear_attn_N = in_proj_qkvz_N + in_proj_ba_N + conv_N + out_proj_N
+    if num_linear_layers > 0:
+        key_dim = text_config.linear_key_head_dim * text_config.linear_num_key_heads
+        value_dim = text_config.linear_value_head_dim * text_config.linear_num_value_heads
+        conv_kernel = text_config.linear_conv_kernel_dim
+        in_proj_qkvz_N = hidden_size * (2 * key_dim + 2 * value_dim)
+        in_proj_ba_N = hidden_size * (2 * text_config.linear_num_value_heads)
+        conv_N = (2 * key_dim + value_dim) * conv_kernel  # depthwise conv1d
+        out_proj_N = value_dim * hidden_size
+        linear_attn_N = in_proj_qkvz_N + in_proj_ba_N + conv_N + out_proj_N
+    else:
+        linear_attn_N = 0
 
     # --- MTP head: approximate as one extra dense decoder layer (full attn linear + MLP) ---
     mtp_layers = getattr(text_config, "mtp_num_hidden_layers", 0)
@@ -608,14 +611,17 @@ def _estimate_qwen3_5_flops(config, tokens_sum, batch_seqlens, delta_time, **kar
     # --- GatedDeltaNet recurrence core: O(L) chunked delta rule. Approximated (chunk_size
     # implementation detail omitted); scales as tokens * per-head state (k_dim * v_dim). This
     # term is non-dominant vs the linear projections above (< 1% for the 9B config). ---
-    linear_recurrence_flops = (
-        6
-        * tokens_sum
-        * text_config.linear_num_value_heads
-        * text_config.linear_key_head_dim
-        * text_config.linear_value_head_dim
-        * num_linear_layers
-    )
+    if num_linear_layers > 0:
+        linear_recurrence_flops = (
+            6
+            * tokens_sum
+            * text_config.linear_num_value_heads
+            * text_config.linear_key_head_dim
+            * text_config.linear_value_head_dim
+            * num_linear_layers
+        )
+    else:
+        linear_recurrence_flops = 0
 
     # --- ViT: only when images are actually in the batch (text-only training skips it) ---
     images_seqlens = kargs.get("images_seqlens", None)
