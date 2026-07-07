@@ -27,7 +27,7 @@ project_name=${PROJECT_NAME:-verl_grpo_qwen3_moe_r3}
 exp_name=${EXPERIMENT_NAME:-qwen3_30b_a3b_vllm_megatron_r3}
 
 # Node Info
-NNODES=${NNODES:-1}
+NNODES=${NNODES:-2}
 NPUS_PER_NODE=${NPUS_PER_NODE:-16}
 
 # Weight Load
@@ -65,18 +65,19 @@ actor_ppo_max_token_len=$(((max_prompt_length + max_response_length)))
 infer_ppo_max_token_len=$(((max_prompt_length + max_response_length)))
 optimizer_offload_fraction=1
 
+
 # Megatron Configuration
 train_tp=2
-train_ep=8
+train_ep=16
 train_etp=1
-train_pp=2
+train_pp=1
 train_cp=1
 
 # vLLM Configuration
-gen_tp=4
+gen_tp=8
 gen_dp=1
 gen_ep=1
-gpu_memory_utilization=0.5
+gpu_memory_utilization=0.7
 max_model_len=$((max_prompt_length + max_response_length))
 max_num_batched_tokens=$(((max_prompt_length + max_response_length) * 1))
 

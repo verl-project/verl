@@ -370,7 +370,7 @@ jobs:
           /root/.cache/cicd_test/submit_and_wait_rayjob.sh \
             multinode-e2e \
             /root/.cache/cicd_test/run_multinode_testing.sh \
-            '["--script-path","/verl/tests/special_npu/run_gspo_qwen3_30b_megatron_npu_multinode.sh"]' \
+            '["--script-path","/verl/tests/special_npu/nightly_ci_ascend/run_grpo_qwen3_30b_megatron_r3_npu_multinode.sh"]' \
             '{}' \
             '[
               {"op":"replace","path":"/spec/rayClusterSpec/workerGroupSpecs/0/template/spec/containers/0/resources/requests/cpu","value":"64"},

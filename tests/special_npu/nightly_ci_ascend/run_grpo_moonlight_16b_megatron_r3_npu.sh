@@ -5,11 +5,12 @@ set -xeuo pipefail
 export RAY_DEDUP_LOGS=0
 
 # Baseline
-RELEASE071_R3_ROLLOUT_PROBS_DIFF_MEAN=${RELEASE071_R3_ROLLOUT_PROBS_DIFF_MEAN:-0.003069}
+RELEASE071_R3_ROLLOUT_PROBS_DIFF_MEAN=${RELEASE071_R3_ROLLOUT_PROBS_DIFF_MEAN:-0.002764}
 
 # Log Path
 LOG_NAME=${LOG_NAME:-grpo_moonlight_16b_a3b_r3.log}
 LOG_PATH=${LOG_PATH:-${HOME}/.cache/nightly_log/${LOG_NAME}}
+
 
 # Project Configuration
 project_name=${PROJECT_NAME:-verl_grpo_moonlight_16b_a3b_r3}
