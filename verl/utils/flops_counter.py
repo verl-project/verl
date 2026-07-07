@@ -543,7 +543,7 @@ def _estimate_qwen3_5_flops(config, tokens_sum, batch_seqlens, delta_time, **kar
     # Every `full_attention_interval`-th layer is standard softmax attention (O(L^2)); the rest
     # are GatedDeltaNet linear-attention layers (O(L), no seqlen-square term). Fields live under
     # config.text_config (top level also holds vision_config), matching qwen3_next in transformers.
-    text_config = config.text_config
+    text_config = getattr(config, "text_config", config)
 
     hidden_size = text_config.hidden_size
     vocab_size = text_config.vocab_size
