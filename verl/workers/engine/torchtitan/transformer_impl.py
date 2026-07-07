@@ -287,6 +287,11 @@ class TorchTitanEngine(BaseEngine):
         )
         self.device_mesh = self.parallel_dims.build_mesh()
 
+        # Mirror torchtitan's init_distributed (which verl bypasses): disable autograd
+        # multithreading so backward-thread activation-checkpoint recompute can access the
+        # thread-local SPMD mesh / process groups (e.g. current_spmd_mesh().get_group(...)).
+        torch.autograd.set_multithreading_enabled(False)
+
     def train_mode(self, **kwargs):
         """Return a context manager for training mode."""
         return EngineTrainModeCtx(self, **kwargs)
@@ -351,8 +356,10 @@ class TorchTitanEngine(BaseEngine):
 
         ctx = torch.no_grad() if forward_only else nullcontext()
 
+        # train_context activates the (thread-local) SPMD mesh required by spmd_types; it must
+        # span backward too, since activation-checkpoint recompute re-runs the forward there.
         for micro_batch in micro_batches:
-            with ctx:
+            with self.trainer.train_context(), ctx:
                 loss, output = self.forward_step(micro_batch, loss_function=loss_function, forward_only=forward_only)
                 if not forward_only:
                     loss.backward()
@@ -379,10 +386,9 @@ class TorchTitanEngine(BaseEngine):
                 "This will be implemented in a follow-up PR."
             )
         else:
-            # Non-PP forward
+            # Non-PP forward. train_context (SPMD mesh) is set by the caller.
             assert len(model_parts) == 1
-            with self.trainer.train_context():
-                pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+            pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
 
         if isinstance(pred, DTensor):
             pred = pred.full_tensor()
