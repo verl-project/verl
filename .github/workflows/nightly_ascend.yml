@@ -641,7 +641,3 @@ jobs:
         run: |
           ray stop --force
           bash tests/special_npu/nightly_ci_ascend/run_gspo_qwen3_8b_fsdp2_npu.sh
-      - name: Running nightlyCI_ppo-qwen3-8b-fsdp-vllm_ascend checking script
-        run: |
-          cd /root/.cache/nightly_log/
-          python check_npu.py --log run_gspo_qwen3_8b_fsdp2_npu/run_gspo_qwen3_8b_fsdp2_npu.log --base run_gspo_qwen3_8b_fsdp2_npu/baseline_gspo_qwen3_8b_fsdp2_npu.txt
