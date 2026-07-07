@@ -64,6 +64,7 @@ class CriticConfig(BaseConfig):
         shuffle (bool): Shuffle training data across PPO epochs.
         cliprange_value (float): PPO value function clipping range.
         loss_agg_mode (str): Loss aggregation mode.
+        loss_scale_factor (Optional[int]): Scale factor for 'seq-mean-token-sum-norm' loss aggregation mode.
         checkpoint (Dict[str, Any]): Checkpoint configuration.
         profiler (Dict[str, Any]): Profiler configuration.
         enable (Optional[bool]): Whether to enable the critic.
@@ -93,6 +94,7 @@ class CriticConfig(BaseConfig):
     shuffle: bool = True
     cliprange_value: float = 0.5
     loss_agg_mode: str = "token-mean"
+    loss_scale_factor: Optional[int] = None
     ppo_micro_batch_size: Optional[int] = None
     engine: BaseConfig = field(default_factory=BaseConfig)
     optim: OptimizerConfig = field(default_factory=OptimizerConfig)
