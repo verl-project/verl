@@ -26,30 +26,11 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 model_id = "${MODEL_NAME}"
 cache_path = "${SAVE_PATH}"
 
-print(f"🔄 正在加载 Tokenizer...")
+print(f"🔄 正在下载/验证 Tokenizer...")
 tokenizer = AutoTokenizer.from_pretrained(model_id, cache_dir=cache_path)
 
-print(f"🔄 正在加载 Model (这可能需要一些时间)...")
-# 根据你的硬件情况，可以在此处添加 device_map="auto" 等参数
+print(f"🔄 正在下载/验证 Model 权重 (这可能需要一些时间)...")
 model = AutoModelForCausalLM.from_pretrained(model_id, cache_dir=cache_path)
 
-messages = [
-    {"role": "user", "content": "Who are you?"},
-]
-
-inputs = tokenizer.apply_chat_template(
-    messages,
-    add_generation_prompt=True,
-    tokenize=True,
-    return_dict=True,
-    return_tensors="pt",
-).to(model.device)
-
-print(f"🧠 正在生成回答...")
-outputs = model.generate(**inputs, max_new_tokens=40)
-
-print("\n" + "="*15 + " 模型输出 " + "="*15)
-# 添加了 skip_special_tokens=True 让输出结果更干净
-print(tokenizer.decode(outputs[0][inputs["input_ids"].shape[-1]:], skip_special_tokens=True))
-print("="*40 + "\n")
+print("✅ 下载完成！")
 EOF
