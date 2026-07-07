@@ -19,6 +19,7 @@ from typing import Any
 
 import numpy as np
 import torch
+from omegaconf import OmegaConf
 
 from verl import DataProto
 from verl.trainer.ppo.ray_trainer import compute_response_mask
@@ -117,12 +118,34 @@ def assemble_batch_from_rollout_samples(
         rollout_samples_batch.append(batch)
     final_batch = DataProto.concat(rollout_samples_batch)
 
+    require_rollout_log_probs = bool(
+        OmegaConf.select(config, "actor_rollout_ref.rollout.calculate_log_probs", default=False)
+        or OmegaConf.select(config, "actor_rollout_ref.actor.use_rollout_log_probs", default=False)
+    )
+    if require_rollout_log_probs:
+        if "rollout_log_probs" not in final_batch.batch:
+            raise ValueError(
+                "fully_async: rollout logprobs were requested but the assembled "
+                "trainer batch is missing rollout_log_probs"
+            )
+        if final_batch.batch["rollout_log_probs"].shape != final_batch.batch["responses"].shape:
+            raise ValueError(
+                "fully_async: rollout_log_probs shape must match responses shape "
+                f"({final_batch.batch['rollout_log_probs'].shape} != {final_batch.batch['responses'].shape})"
+            )
+
     # Calculate response_mask (if not present)
     if "response_mask" not in final_batch.batch.keys():
         final_batch.batch["response_mask"] = compute_response_mask(final_batch)
 
     if balance_batch:
         balance_batch(final_batch, metrics={})
+
+    if require_rollout_log_probs and "rollout_log_probs" not in final_batch.batch:
+        raise ValueError(
+            "fully_async: rollout logprobs were present after assembly but missing after batch balancing. "
+            f"Available batch keys: {list(final_batch.batch.keys())}"
+        )
 
     # Calculate the global valid token number
     if "attention_mask" in final_batch.batch:

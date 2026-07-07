@@ -839,6 +839,15 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
             [f"uid_{rollout_sample.sample_id}"] * len(rollout_sample.full_batch), dtype=object
         )
         ret = await self.async_rollout_manager.generate_sequences_single(rollout_sample.full_batch)
+        require_rollout_log_probs = bool(
+            getattr(self.config.actor_rollout_ref.rollout, "calculate_log_probs", False)
+            or getattr(self.config.actor_rollout_ref.actor, "use_rollout_log_probs", False)
+        )
+        if require_rollout_log_probs and "rollout_log_probs" not in ret.batch:
+            raise RuntimeError(
+                "fully_async: rollout logprobs were requested but agent-loop generation "
+                "returned no rollout_log_probs"
+            )
         rollout_sample.full_batch = ret
         # Re-set uid on output — agent loop worker returns a new DataProto without the input's non_tensor_batch
         rollout_sample.full_batch.non_tensor_batch["uid"] = np.array(

@@ -86,6 +86,8 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     fields = ["response_mask", "old_log_probs", "advantages"]
     if "rollout_is_weights" in data:
         fields.append("rollout_is_weights")
+    if "rollout_log_probs" in data:
+        fields.append("rollout_log_probs")
     if "ref_log_prob" in data:
         fields.append("ref_log_prob")
     data = data.select(*fields).to_padded_tensor()
@@ -95,6 +97,7 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     old_log_prob = data["old_log_probs"]
     advantages = data["advantages"]
     rollout_is_weights = data.get("rollout_is_weights", None)
+    rollout_log_prob = data.get("rollout_log_probs", None)
 
     loss_agg_mode = config.loss_agg_mode
 
@@ -110,6 +113,17 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         config=config,
         rollout_is_weights=rollout_is_weights,
     )
+
+    if loss_mode != "bypass_mode" and rollout_log_prob is not None:
+        if response_mask.any():
+            from verl.trainer.ppo.rollout_corr_helper import compute_rollout_corr_metrics_from_logprobs
+
+            rollout_corr_metrics = compute_rollout_corr_metrics_from_logprobs(
+                log_prob=log_prob,
+                rollout_log_prob=rollout_log_prob,
+                response_mask=response_mask,
+            )
+            pg_metrics.update(rollout_corr_metrics)
 
     # AggregationType.MEAN for pg metrics: assumes policy_loss_fn normalizes by local_bsz/local_tokens
     # Ex: in compute_policy_loss_vanilla, pg_metrics are pg_clipfrac, ppo_kl, pg_clipfrac_lower

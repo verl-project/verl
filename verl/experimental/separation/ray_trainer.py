@@ -500,6 +500,10 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
         #   Note: π_old computed once per data batch, serves as stable reference during mini-batch updates
         rollout_corr_config = self.config.algorithm.get("rollout_correction", None)
         bypass_recomputing_logprobs = rollout_corr_config and rollout_corr_config.get("bypass_mode", False)
+        require_rollout_log_probs = bool(
+            OmegaConf.select(self.config, "actor_rollout_ref.rollout.calculate_log_probs", default=False)
+            or OmegaConf.select(self.config, "actor_rollout_ref.actor.use_rollout_log_probs", default=False)
+        )
         if bypass_recomputing_logprobs:  # Use `rollout_log_probs`
             from verl.trainer.ppo.rollout_corr_helper import apply_bypass_mode
 
@@ -533,6 +537,11 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
                     else:
                         old_log_prob.batch.pop("routed_experts")
                 batch = batch.union(old_log_prob)
+                if require_rollout_log_probs and "rollout_log_probs" not in batch.batch:
+                    raise ValueError(
+                        "rollout logprobs are required but missing before rollout-vs-actor debug metrics. "
+                        f"Available batch keys: {list(batch.batch.keys())}"
+                    )
                 if "rollout_log_probs" in batch.batch.keys():
                     # TODO: we may want to add diff of probs too.
                     from verl.utils.debug.metrics import calculate_debug_metrics
