@@ -19,7 +19,7 @@ Enables dynamic weight reloading for NVFP4 quantized models in vLLM.
 
 Supported schemes:
 - Dense: W4A16-FP4, W4A4-FP4, experimental W4A8 simulation
-- MoE: NVFP4-MoE
+- MoE: NVFP4-MoE, experimental W4A8 simulation on the Marlin path
 """
 
 import logging
@@ -36,11 +36,35 @@ logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 W4A8_SIMULATION_ENV = "VERL_W4A8_SIMULATION"
+_VLLM_FORCE_MARLIN_ENV = "VLLM_TEST_FORCE_FP8_MARLIN"
+_VLLM_USE_FLASHINFER_MOE_ENV = "VLLM_USE_FLASHINFER_MOE_FP4"
+_W4A8_MOE_EXPERTS_CLASS_CACHE: dict[type, type] = {}
+_W4A8_PREVIOUS_VLLM_ENV: Optional[dict[str, Optional[str]]] = None
 
 
 def set_w4a8_simulation(enabled: bool) -> None:
     """Propagate the configured W4A8 simulation mode to vLLM subprocesses."""
+    global _W4A8_PREVIOUS_VLLM_ENV
+
     os.environ[W4A8_SIMULATION_ENV] = "1" if enabled else "0"
+    if enabled:
+        # vLLM 0.15 exposes Marlin selection for this oracle through these
+        # environment switches. Set them here so qat.mode remains the only
+        # user-facing control and worker subprocesses inherit a valid backend.
+        if _W4A8_PREVIOUS_VLLM_ENV is None:
+            _W4A8_PREVIOUS_VLLM_ENV = {
+                _VLLM_USE_FLASHINFER_MOE_ENV: os.environ.get(_VLLM_USE_FLASHINFER_MOE_ENV),
+                _VLLM_FORCE_MARLIN_ENV: os.environ.get(_VLLM_FORCE_MARLIN_ENV),
+            }
+        os.environ[_VLLM_USE_FLASHINFER_MOE_ENV] = "0"
+        os.environ[_VLLM_FORCE_MARLIN_ENV] = "1"
+    elif _W4A8_PREVIOUS_VLLM_ENV is not None:
+        for name, value in _W4A8_PREVIOUS_VLLM_ENV.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+        _W4A8_PREVIOUS_VLLM_ENV = None
 
 
 def is_w4a8_simulation_enabled() -> bool:
@@ -504,8 +528,47 @@ def _marlin_process_scales_experts(scale_hf, param_dtype, size_k, size_n, group_
     return torch.stack(result)
 
 
-def _process_nvfp4_moe_marlin(self, layer: torch.nn.Module, is_first_call: bool) -> None:
-    """Process MoE layer with MARLIN backend (W4A16)."""
+def _make_w4a8_moe_experts_cls(experts_cls: type) -> type:
+    """Wrap standard Marlin experts with FP8 Q/DQ at both expert GEMM inputs."""
+    from vllm.model_executor.layers.fused_moe.fused_marlin_moe import MarlinExperts
+
+    if getattr(experts_cls, "_verl_w4a8_simulation", False):
+        return experts_cls
+    if not isinstance(experts_cls, type) or not issubclass(experts_cls, MarlinExperts):
+        raise NotImplementedError(
+            "W4A8 fused-MoE simulation requires the standard vLLM MarlinExperts path; "
+            "other vLLM NVFP4 backends and batched expert classes are not supported."
+        )
+
+    cached_cls = _W4A8_MOE_EXPERTS_CLASS_CACHE.get(experts_cls)
+    if cached_cls is not None:
+        return cached_cls
+
+    class W4A8MarlinExperts(experts_cls):
+        _verl_w4a8_simulation = True
+
+        def apply(self, output, hidden_states, *args, **kwargs):
+            from verl.utils.qat.linear import fp8_e4m3_fake_quant
+
+            hidden_states = fp8_e4m3_fake_quant(hidden_states)
+            return super().apply(output, hidden_states, *args, **kwargs)
+
+        def activation(self, activation, output, input):
+            from verl.utils.qat.linear import fp8_e4m3_fake_quant
+
+            super().activation(activation, output, input)
+            output.copy_(fp8_e4m3_fake_quant(output))
+
+    W4A8MarlinExperts.__name__ = f"W4A8{experts_cls.__name__}"
+    W4A8MarlinExperts.__qualname__ = W4A8MarlinExperts.__name__
+    _W4A8_MOE_EXPERTS_CLASS_CACHE[experts_cls] = W4A8MarlinExperts
+    return W4A8MarlinExperts
+
+
+def _process_nvfp4_moe_marlin(
+    self, layer: torch.nn.Module, is_first_call: bool, experts_cls: Optional[type] = None
+) -> None:
+    """Process MoE layer with the Marlin W4A16 or W4A8-simulation path."""
     from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import make_nvfp4_moe_kernel
     from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
         marlin_make_workspace_new,
@@ -591,7 +654,7 @@ def _process_nvfp4_moe_marlin(self, layer: torch.nn.Module, is_first_call: bool)
         self.kernel = make_nvfp4_moe_kernel(
             moe_quant_config=self.moe_quant_config,
             moe_config=self.moe,
-            experts_cls=self.experts_cls,
+            experts_cls=self.experts_cls if experts_cls is None else experts_cls,
         )
 
 
@@ -692,13 +755,18 @@ def _process_nvfp4_moe_flashinfer_cutlass(self, layer: torch.nn.Module, is_first
 # MoE NVFP4 Patches (entry points)
 def patched_nvfp4_moe_process_weights_after_loading(self, layer: torch.nn.Module) -> None:
     """Patched process_weights_after_loading for NVFP4 MoE layer."""
-    if is_w4a8_simulation_enabled():
-        raise NotImplementedError(
-            "W4A8 simulation currently supports dense models only. A fused MoE kernel cannot reproduce "
-            "FP8 fake quantization at both expert GEMM inputs through the existing W4A16 rollout path."
-        )
-
     from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import NvFp4MoeBackend
+
+    is_marlin = self.nvfp4_backend == NvFp4MoeBackend.MARLIN
+    if is_w4a8_simulation_enabled():
+        if not is_marlin:
+            raise NotImplementedError(
+                "W4A8 fused-MoE simulation requires the vLLM NVFP4 Marlin backend; "
+                f"selected backend: {self.nvfp4_backend}."
+            )
+        experts_cls = _make_w4a8_moe_experts_cls(self.experts_cls)
+    else:
+        experts_cls = self.experts_cls
 
     is_first_call = _check_first_call(layer)
 
@@ -715,9 +783,8 @@ def patched_nvfp4_moe_process_weights_after_loading(self, layer: torch.nn.Module
             if param is not None and hasattr(param, "weight_loader"):
                 layer._weight_loaders[pname] = param.weight_loader
 
-    is_marlin = self.nvfp4_backend == NvFp4MoeBackend.MARLIN
     if is_marlin:
-        _process_nvfp4_moe_marlin(self, layer, is_first_call)
+        _process_nvfp4_moe_marlin(self, layer, is_first_call, experts_cls=experts_cls)
     else:
         _process_nvfp4_moe_flashinfer_cutlass(self, layer, is_first_call)
 
@@ -755,7 +822,7 @@ _original_w4a16_apply_weights = None
 
 
 def patched_w4a16_apply_weights_with_w4a8_simulation(self, layer, x, bias=None):
-    """Inject FP8 activation noise before the existing dense W4A16 kernel."""
+    """Inject FP8 activation Q/DQ before the existing dense W4A16 kernel."""
     if is_w4a8_simulation_enabled():
         from verl.utils.qat.linear import fp8_e4m3_fake_quant
 
@@ -793,7 +860,8 @@ def apply_qat_patches():
         _w4a8_apply_patch = patch(target, patched_w4a16_apply_weights_with_w4a8_simulation)
         _w4a8_apply_patch.start()
         logger.warning(
-            "Enabled experimental dense W4A8 simulation: activations are FP8 fake-quantized before the W4A16 kernel"
+            "Enabled experimental W4A8 simulation: dense and supported fused-MoE inputs are FP8 "
+            "fake-quantized before W4A16 Marlin kernels"
         )
 
     return _applied_patches

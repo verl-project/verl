@@ -11,7 +11,7 @@ verl supports NVFP4 Quantization-Aware Training (QAT), which applies fake quanti
 | **Megatron** | BF16 + fake quantization | NVFP4 W4A16 | `modelopt` |
 
 > [!WARNING]
-> W4A8 is currently a dense-model, FSDP-only numerical simulation. During vLLM rollout, weights use the existing NVFP4 W4A16 `compressed-tensors` path, while activations are blockwise FP8 E4M3 quantized and dequantized before the W4A16 kernel. It does not execute a native W4A8 kernel and must not be used to claim W4A8 latency, throughput, or memory improvements. Fused MoE models are rejected because the existing W4A16 path cannot reproduce FP8 quantization at both expert GEMM inputs.
+> W4A8 is an FSDP-only numerical simulation for dense models and the standard vLLM 0.15 NVFP4 MarlinExperts path. During rollout, weights use the existing NVFP4 W4A16 `compressed-tensors` kernels. Dense layer inputs are blockwise FP8 E4M3 quantized and dequantized; for fused MoE, both the gate/up input and the post-activation down-projection input receive the same Q/DQ. This does not execute a native W4A8 kernel and must not be used to claim W4A8 latency, throughput, or memory improvements. Within vLLM, non-Marlin NVFP4 backends and batched expert classes are rejected.
 
 > [!TIP]
 > For ready-to-run scripts, environment setup, and experimental results, see the [QAT recipe](https://github.com/verl-project/verl-recipe/tree/main/qat).
@@ -60,6 +60,7 @@ actor_rollout_ref:
         ignore_patterns:
           - "lm_head"
           - "embed_tokens"
+          - "re:.*mlp.gate$"
         quantization_config_path: "recipe/qat/config/nvfp4_w4a16.json"
 ```
 
@@ -98,10 +99,10 @@ actor_rollout_ref:
 | Mode | Training Backend | Model Type | Rollout Path | Status |
 |---|---|---|---|---|
 | W4A16 | FSDP, Megatron | Dense, MoE | Native NVFP4 W4A16 | Supported |
-| W4A8 simulation | FSDP | Dense | FP8 Q/DQ + W4A16 kernel | Experimental |
+| W4A8 simulation | FSDP | Dense, MoE (Marlin) | FP8 Q/DQ + W4A16 kernel | Experimental |
 | W4A4 | FSDP | Dense, MoE | NVFP4 W4A4 | Experimental |
 
-Full and FFN-only quantization strategies are available in the linked recipe. W4A16 has been verified on Qwen3-8B-Base and Qwen3-30B-A3B-Base; the W4A8 numerical baseline targets Qwen3-8B-Base.
+Full and FFN-only quantization strategies are available in the linked recipe. W4A16 has been verified on Qwen3-8B-Base and Qwen3-30B-A3B-Base; W4A8 numerical-simulation recipes cover both the dense Qwen3-8B-Base model and the MoE Qwen3-30B-A3B-Base model.
 
 ---
 
@@ -110,4 +111,5 @@ Full and FFN-only quantization strategies are available in the linked recipe. W4
 - FSDP backend has scalability limitations for very large models. For large-scale training, use the Megatron backend.
 - FSDP uses `re:` prefix regex for `ignore_patterns`, while Megatron uses `fnmatch` glob syntax. The two are not interchangeable.
 - W4A8 uses dynamic per-token FP8 E4M3 activation blocks of shape `1 x 128`; no activation scale is stored in checkpoints or sent with the packed weights.
+- W4A8 fused-MoE rollout currently requires vLLM 0.15's standard NVFP4 MarlinExperts path. Other vLLM NVFP4 backends and batched expert classes are rejected. Independent TensorRT-LLM and SGLang rollouts are outside this simulation's scope and have not been validated.
 - Native W4A8 kernels and Megatron W4A8 support are outside the scope of the current simulation.

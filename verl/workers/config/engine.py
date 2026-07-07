@@ -132,7 +132,7 @@ class QATEngineConfig(BaseConfig):
     Args:
         enable (bool): Whether to enable QAT, default False
         mode (str): Quantization mode, "w4a16", "w4a8", or "w4a4", default "w4a16".
-            W4A8 is an experimental dense-model numerical simulation.
+            W4A8 is an experimental dense and Marlin fused-MoE numerical simulation.
         group_size (int): Group size for blockwise quantization, default 16
         ignore_patterns (list[str]): Module name patterns to exclude from quantization
         activation_observer (str): Observer strategy for activation global_scale (W4A4 only)

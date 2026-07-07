@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""GPU unit tests for the experimental dense W4A8 QAT simulation."""
+"""GPU unit tests for the experimental dense and MoE W4A8 QAT simulation."""
+
+import os
 
 import pytest
 
@@ -145,11 +147,105 @@ def test_rollout_wrapper_follows_configured_simulation_mode(monkeypatch):
     assert len(received) == 2
 
 
-def test_w4a8_simulation_rejects_fused_moe(monkeypatch):
-    monkeypatch.setenv(vllm_patch.W4A8_SIMULATION_ENV, "1")
+def test_w4a8_mode_selects_marlin_for_moe_workers(monkeypatch):
+    monkeypatch.delenv(vllm_patch.W4A8_SIMULATION_ENV, raising=False)
+    monkeypatch.setenv(vllm_patch._VLLM_USE_FLASHINFER_MOE_ENV, "1")
+    monkeypatch.setenv(vllm_patch._VLLM_FORCE_MARLIN_ENV, "0")
 
-    with pytest.raises(NotImplementedError, match="supports dense models only"):
-        vllm_patch.patched_nvfp4_moe_process_weights_after_loading(None, None)
+    vllm_patch.set_w4a8_simulation(True)
+
+    assert vllm_patch.is_w4a8_simulation_enabled()
+    assert os.environ[vllm_patch._VLLM_USE_FLASHINFER_MOE_ENV] == "0"
+    assert os.environ[vllm_patch._VLLM_FORCE_MARLIN_ENV] == "1"
+
+    vllm_patch.set_w4a8_simulation(False)
+
+    assert not vllm_patch.is_w4a8_simulation_enabled()
+    assert os.environ[vllm_patch._VLLM_USE_FLASHINFER_MOE_ENV] == "1"
+    assert os.environ[vllm_patch._VLLM_FORCE_MARLIN_ENV] == "0"
+
+
+def test_w4a8_moe_wrapper_quantizes_both_expert_gemm_inputs(monkeypatch):
+    from vllm.model_executor.layers.fused_moe.fused_marlin_moe import MarlinExperts
+
+    class RecordingMarlinExperts(MarlinExperts):
+        def __init__(self):
+            self.gate_up_input = None
+
+        def apply(self, output, hidden_states, *args, **kwargs):
+            self.gate_up_input = hidden_states
+            return hidden_states
+
+        def activation(self, activation, output, input):
+            output.copy_(input * 2)
+
+    quantized_inputs = []
+
+    def fake_quant(value):
+        quantized_inputs.append(value.clone())
+        return value + 1
+
+    monkeypatch.setattr(qat_linear, "fp8_e4m3_fake_quant", fake_quant)
+    wrapped_cls = vllm_patch._make_w4a8_moe_experts_cls(RecordingMarlinExperts)
+    experts = wrapped_cls()
+
+    hidden_states = torch.zeros(2, 16, device="cuda")
+    gate_up_result = experts.apply(torch.empty_like(hidden_states), hidden_states)
+    torch.testing.assert_close(gate_up_result, hidden_states + 1)
+    torch.testing.assert_close(experts.gate_up_input, hidden_states + 1)
+
+    activation_input = torch.full((2, 16), 2.0, device="cuda")
+    down_input = torch.empty_like(activation_input)
+    experts.activation("silu", down_input, activation_input)
+    torch.testing.assert_close(down_input, activation_input * 2 + 1)
+    assert len(quantized_inputs) == 2
+
+
+def test_w4a8_moe_wrapper_factory_is_idempotent():
+    from vllm.model_executor.layers.fused_moe.fused_marlin_moe import MarlinExperts
+
+    wrapped_cls = vllm_patch._make_w4a8_moe_experts_cls(MarlinExperts)
+
+    assert vllm_patch._make_w4a8_moe_experts_cls(MarlinExperts) is wrapped_cls
+    assert vllm_patch._make_w4a8_moe_experts_cls(wrapped_cls) is wrapped_cls
+
+
+def test_w4a8_moe_rejects_non_marlin_backend(monkeypatch):
+    from types import SimpleNamespace
+
+    from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import NvFp4MoeBackend
+
+    monkeypatch.setenv(vllm_patch.W4A8_SIMULATION_ENV, "1")
+    method = SimpleNamespace(nvfp4_backend=NvFp4MoeBackend.FLASHINFER_CUTLASS)
+
+    with pytest.raises(NotImplementedError, match="requires the vLLM NVFP4 Marlin backend"):
+        vllm_patch.patched_nvfp4_moe_process_weights_after_loading(method, None)
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_w4a8_moe_process_uses_mode_specific_marlin_experts(monkeypatch, enabled):
+    from types import SimpleNamespace
+
+    from vllm.model_executor.layers.fused_moe.fused_marlin_moe import MarlinExperts
+    from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import NvFp4MoeBackend
+
+    processed = []
+    method = SimpleNamespace(nvfp4_backend=NvFp4MoeBackend.MARLIN, experts_cls=MarlinExperts)
+    layer = SimpleNamespace()
+
+    monkeypatch.setenv(vllm_patch.W4A8_SIMULATION_ENV, "1" if enabled else "0")
+    monkeypatch.setattr(vllm_patch, "_check_first_call", lambda _layer: False)
+    monkeypatch.setattr(
+        vllm_patch,
+        "_process_nvfp4_moe_marlin",
+        lambda _method, _layer, is_first_call, experts_cls=None: processed.append((is_first_call, experts_cls)),
+    )
+
+    vllm_patch.patched_nvfp4_moe_process_weights_after_loading(method, layer)
+
+    expected_cls = vllm_patch._make_w4a8_moe_experts_cls(MarlinExperts) if enabled else MarlinExperts
+    assert method.experts_cls is MarlinExperts
+    assert processed == [(False, expected_cls)]
 
 
 def test_apply_qat_patches_installs_real_vllm_w4a8_wrapper(monkeypatch):
