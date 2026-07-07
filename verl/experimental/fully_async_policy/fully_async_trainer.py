@@ -38,6 +38,7 @@ from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, should_save_ckpt_esi
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
+from verl.utils.import_utils import load_class_from_fqn
 from verl.utils.tracking import Tracking
 
 logger = logging.getLogger(__name__)
@@ -168,10 +169,29 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         """Setup checkpoint manager after rollouter is initialized"""
         replicas = await self.rollouter.get_replicas.remote()
         checkpoint_engine_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
-        self.checkpoint_manager = CheckpointEngineManager(
+        checkpoint_manager_class_fqn = self.config.actor_rollout_ref.rollout.get("checkpoint_manager_class")
+        if checkpoint_manager_class_fqn:
+            checkpoint_manager_cls = load_class_from_fqn(checkpoint_manager_class_fqn, "CheckpointEngineManager")
+        else:
+            checkpoint_manager_cls = CheckpointEngineManager
+        self.checkpoint_manager = checkpoint_manager_cls(
             config=checkpoint_engine_config, actor_wg=self.actor_wg, replicas=replicas
         )
+        self._set_checkpoint_manager_context()
         print("[FullyAsyncTrainer] Checkpoint manager initialized")
+
+    def _set_checkpoint_manager_context(self):
+        """Expose fully-async handles to custom checkpoint managers that need them."""
+        if self.checkpoint_manager is None:
+            return
+        set_async_context = getattr(self.checkpoint_manager, "set_async_context", None)
+        if callable(set_async_context):
+            set_async_context(
+                full_config=self.config,
+                trainer=self,
+                rollouter=self.rollouter,
+                message_queue_client=self.message_queue_client,
+            )
 
     async def _setup_hybrid_checkpoint_manager(self):
         """Setup hybrid checkpoint manager and perform initial sleep of hybrid replicas.
@@ -245,6 +265,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
     def set_message_queue_client(self, message_queue_client: MessageQueueClient):
         """Set message queue client"""
         self.message_queue_client = message_queue_client
+        self._set_checkpoint_manager_context()
 
     async def set_rollouter(self, rollouter):
         """Set rollouter reference and initialize all checkpoint managers."""
