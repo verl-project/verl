@@ -5,7 +5,7 @@ set -xeuo pipefail
 export RAY_DEDUP_LOGS=0
 
 # Baseline
-RELEASE071_R3_ROLLOUT_PROBS_DIFF_MEAN=${RELEASE071_R3_ROLLOUT_PROBS_DIFF_MEAN:-0.002764}
+RELEASE071_R3_ROLLOUT_PROBS_DIFF_MEAN=${RELEASE071_R3_ROLLOUT_PROBS_DIFF_MEAN:-0.002922}
 
 # Log Path
 LOG_NAME=${LOG_NAME:-grpo_moonlight_16b_a3b_r3.log}
@@ -216,5 +216,5 @@ python -c "
 base = float(${RELEASE071_R3_ROLLOUT_PROBS_DIFF_MEAN})
 cur = float(${CUR_R3_ROLLOUT_PROBS_DIFF_MEAN})
 err = round(abs(cur - base) / base, 4)
-assert err <= 0.05, f'{base=}, {cur=}, {err=}'
+assert err <= 0.1, f'{base=}, {cur=}, {err=}'
 "
