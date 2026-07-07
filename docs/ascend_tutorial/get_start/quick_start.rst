@@ -1,7 +1,7 @@
 Ascend Quickstart
 =================
 
-**Last updated:** 06/30/2026.
+**Last updated:** 07/02/2026.
 
 关键更新
 --------
@@ -15,11 +15,11 @@ Ascend Quickstart
 --------
 
 - `硬件支持 <#硬件支持>`_
-- `基础验证场景说明 <#基础验证场景说明>`_
+- `Qwen3-0.6B GSM8K GRPO Quick Start <#qwen3-06b-gsm8k-grpo-quick-start>`_
    - `权重准备 <#权重准备>`_
    - `数据准备 <#数据准备>`_
    - `运行方式 <#运行方式>`_
-- `SGLang 后端通用说明 <#sglang-后端通用说明>`_
+- `SGLang 后端使能说明 <#sglang-后端使能说明>`_
    - `vLLM 后端脚本转换为 SGLang <#vllm-后端脚本转换为-sglang>`_
 
 硬件支持
@@ -31,17 +31,19 @@ Ascend Quickstart
 
 
 
-基础验证场景说明
-------------
+Qwen3-0.6B GSM8K GRPO Quick Start
+---------------------------------
 
 本文面向 Ascend NPU 环境，提供基于 GSM8K 和 Qwen3-0.6B 的最小 GRPO 训练验证流程。
+
 文档覆盖四种常用训推后端组合，便于用户在 quickstart 阶段快速选择合适的启动脚本。
 
-运行本文脚本前，请确认已完成 verl Ascend 环境安装，并已准备好模型权重和训练数据。
+运行本文脚本前，请确认已完成 verl Ascend 环境安装。
 环境安装详见 `install_guidance <./install_guidance.rst>`_ 。
+
 四个脚本均默认使用 ``Qwen/Qwen3-0.6B`` 和 GSM8K 数据集进行基础链路验证。
 
-该场景用于检查：
+主要用于检查：
 
 - verl 入口是否可用；
 - 数据是否可读取；
@@ -89,6 +91,8 @@ gsm8k原始数据集需自行从huggingface上下载
    source /usr/local/Ascend/ascend-toolkit/set_env.sh
    source /usr/local/Ascend/nnal/atb/set_env.sh
 
+Quick Start 当前提供四种常用训推后端组合。用户可根据训练后端和 rollout 后端选择对应脚本
+
 .. list-table::
    :header-rows: 1
    :widths: 20 20 20 60
@@ -114,9 +118,9 @@ gsm8k原始数据集需自行从huggingface上下载
      - SGLang
      - bash tests/special_npu/quick_start/run_qwen3_0_6b_megatron_sglang_ascend.sh
 
+脚本内具体参数说明详见 `训练配置参数与指标说明 <https://github.com/verl-project/verl/blob/main/docs/ascend_tutorial/dev_guide/model_dev/parameter_and_metrics.md>`_
 
-
-SGLang 后端通用说明
+SGLang 后端使能说明
 -------------------------------------------
 
 当前 verl 已解析推理常见参数，详见 `async_sglang_server.py <https://github.com/verl-project/verl/blob/main/verl/workers/rollout/sglang_rollout/async_sglang_server.py>`_ 中 ``ServerArgs`` 初始化传参。

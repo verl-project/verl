@@ -53,4 +53,5 @@ python3 -m verl.trainer.main_ppo \
     trainer.val_before_train=False \
     trainer.max_actor_ckpt_to_keep=1 \
     trainer.max_critic_ckpt_to_keep=1 \
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode="FULL_DECODE_ONLY" \
     trainer.total_training_steps=15 2>&1 | tee ppo_qwen3-8b_fsdp_npu.log

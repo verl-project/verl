@@ -200,8 +200,8 @@ if is_torch_npu_available(check_device=False):
 
         patch_vllm013_rotary_emb()
         FusedMoE.weight_loader = vllm_v013_weight_loader_method_wrapper(FusedMoE.weight_loader)
-    elif _VLLM_VERSION >= version.parse("0.19.0"):
-        # Disable flash_attn in RotaryEmbedding (NPU) when VLLM >= 0.19
+    elif _VLLM_VERSION >= version.parse("0.18.0"):
+        # Disable flash_attn in RotaryEmbedding (NPU) when VLLM >= 0.18
         from vllm.model_executor.layers.fused_moe import FusedMoE
 
         patch_vllm013_rotary_emb()

@@ -646,6 +646,16 @@ class MegatronEngine(BaseEngine):
         tu.assign_non_tensor(data, batch_num_tokens=batch_num_tokens.item())
         tu.assign_non_tensor(data, dp_size=self.get_data_parallel_size())
 
+        # BSHD path only: pad every micro-batch to the mini-batch's global max seq_len so the
+        # padded `s_q` is shared -> cuDNN plan built once per shape. Raw (unaligned)
+        # max; TP/CP/FP8 alignment is applied inside preprocess_bshd_engine.
+        pad_bshd_to_minibatch_max = self.engine_config.pad_bshd_to_minibatch_max
+        global_max_seqlen = None
+        if pad_bshd_to_minibatch_max and not self.engine_config.use_remove_padding and "input_ids" in data.keys():
+            input_ids_for_max = data["input_ids"]
+            if input_ids_for_max.is_nested:
+                global_max_seqlen = int(input_ids_for_max.offsets().diff().max().item())
+
         vpp_size = mpu.get_virtual_pipeline_model_parallel_world_size()
         if vpp_size is not None and vpp_size > 1:
             num_batches_divided_by = self.tf_config.microbatch_group_size_per_vp_stage
@@ -671,6 +681,8 @@ class MegatronEngine(BaseEngine):
 
         for micro_batch in micro_batches:
             tu.assign_non_tensor(micro_batch, num_micro_batch=n_micro_batch)
+            if global_max_seqlen is not None:
+                tu.assign_non_tensor(micro_batch, forced_max_seqlen=global_max_seqlen)
 
         forward_backward_func = get_forward_backward_func()
 
@@ -1029,6 +1041,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 data_format=data_format,
                 mtp_enable_train=self.model_config.mtp.enable and self.model_config.mtp.enable_train,
                 local_cp_size=local_cp_size,
+                forced_max_seqlen=tu.get_non_tensor_data(data=batch, key="forced_max_seqlen", default=None),
             )
 
         # Router replay: record routing decisions for R2 mode
@@ -1106,6 +1119,7 @@ class MegatronEngineWithValueHead(MegatronEngineWithLMHead):
             vision_model=hasattr(self.model_config.hf_config, "vision_config"),
             pad_token_id=self.model_config.tokenizer.pad_token_id,
             data_format="thd" if self.engine_config.use_remove_padding else "bshd",
+            forced_max_seqlen=tu.get_non_tensor_data(data=batch, key="forced_max_seqlen", default=None),
         )
 
         return output, partial(postprocess_micro_batch_func, data=batch)
