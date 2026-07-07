@@ -30,7 +30,7 @@ class MetricsAggregator:
 
     def __init__(self):
         self.metric_values: dict[str, list[float]] = defaultdict(list)
-        self.sample_counts: list[int] = []
+        self.metric_weights: dict[str, list[int]] = defaultdict(list)
         self.step_count = 0
         self.aggregation_rules = self._init_aggregation_rules()
 
@@ -48,15 +48,27 @@ class MetricsAggregator:
 
     def add_step_metrics(self, metrics: dict[str, Any], sample_count: int = 0):
         """Record one iteration's metrics. Only scalar (int/float/np.number/0-d tensor) values are kept."""
-        self.sample_counts.append(sample_count)
         self.step_count += 1
         for key, value in metrics.items():
             if isinstance(value, bool):
                 continue
             if isinstance(value, int | float | np.number):
                 self.metric_values[key].append(float(value))
+                self.metric_weights[key].append(self._get_metric_weight(key, metrics, sample_count))
             elif isinstance(value, torch.Tensor) and value.numel() == 1:
                 self.metric_values[key].append(float(value.item()))
+                self.metric_weights[key].append(self._get_metric_weight(key, metrics, sample_count))
+
+    def _get_metric_weight(self, metric_name: str, metrics: dict[str, Any], sample_count: int) -> int:
+        """Return the sample weight used when reducing per-iteration average metrics."""
+        if metric_name.endswith("/off_policy/dropped_samples_staleness/mean"):
+            prefix = metric_name.rsplit("_staleness/mean", 1)[0]
+            dropped_samples = metrics.get(prefix, sample_count)
+            if isinstance(dropped_samples, torch.Tensor):
+                return int(dropped_samples.item()) if dropped_samples.numel() == 1 else sample_count
+            if isinstance(dropped_samples, int | float | np.number):
+                return int(dropped_samples)
+        return sample_count
 
     def _get_aggregation_type(self, metric_name: str) -> str:
         for agg_type, metric_list in self.aggregation_rules.items():
@@ -64,19 +76,19 @@ class MetricsAggregator:
                 return agg_type
 
         metric_lower = metric_name.lower()
+        if metric_lower.endswith("/lr") or metric_lower.endswith("_lr") or metric_lower == "lr":
+            return "last"
         if "timing_s/" in metric_lower or "timing_per_token_ms/" in metric_lower:
             return "time_sum"
-        if any(keyword in metric_lower for keyword in ["weighted_avg"]):
-            return "weighted_avg"
-        if any(keyword in metric_lower for keyword in ["mean", "avg", "average"]):
-            return "avg"
         if any(keyword in metric_lower for keyword in ["max", "maximum"]):
             return "max"
         if any(keyword in metric_lower for keyword in ["min", "minimum"]):
             return "min"
         if any(keyword in metric_lower for keyword in ["sum", "total"]):
             return "sum"
-        return "avg"
+        if any(keyword in metric_lower for keyword in ["weighted_avg", "mean", "avg", "average"]):
+            return "weighted_avg"
+        return "weighted_avg"
 
     def _aggregate_single_metric(self, metric_name: str, values: list[float]) -> float:
         if not values:
@@ -86,10 +98,11 @@ class MetricsAggregator:
         if agg_type == "last":
             return values[-1]
         if agg_type == "weighted_avg":
-            if len(values) != len(self.sample_counts) or sum(self.sample_counts) == 0:
+            weights = self.metric_weights[metric_name]
+            if len(values) != len(weights) or sum(weights) == 0:
                 return sum(values) / len(values)
-            weighted_sum = sum(v * c for v, c in zip(values, self.sample_counts, strict=False))
-            return weighted_sum / sum(self.sample_counts)
+            weighted_sum = sum(v * c for v, c in zip(values, weights, strict=False))
+            return weighted_sum / sum(weights)
         if agg_type in ("sum", "time_sum"):
             return sum(values)
         if agg_type == "max":
@@ -113,7 +126,7 @@ class MetricsAggregator:
 
     def reset(self):
         self.metric_values.clear()
-        self.sample_counts.clear()
+        self.metric_weights.clear()
         self.step_count = 0
 
 

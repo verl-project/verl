@@ -17,7 +17,7 @@
 ``separate_async`` runs ``parameter_sync_step`` local updates inside a single
 ``global_step``; ``MetricsAggregator`` reduces the per-iteration training metrics
 into one value per key before they are logged once for the step. These tests pin
-down the per-key aggregation rules (mean/sum/max/min/last/time_sum).
+down the per-key aggregation rules (weighted mean/sum/max/min/last/time_sum).
 """
 
 import math
@@ -33,20 +33,20 @@ def test_empty_aggregator_returns_empty():
     assert agg.get_aggregated_metrics() == {}
 
 
-def test_mean_metrics_are_averaged():
+def test_mean_metrics_are_weighted_by_sample_count():
     agg = MetricsAggregator()
-    agg.add_step_metrics({"actor/pg_loss/mean": 1.0})
-    agg.add_step_metrics({"actor/pg_loss/mean": 3.0})
+    agg.add_step_metrics({"actor/pg_loss/mean": 1.0}, sample_count=1)
+    agg.add_step_metrics({"actor/pg_loss/mean": 3.0}, sample_count=3)
     out = agg.get_aggregated_metrics()
-    assert out["actor/pg_loss/mean"] == pytest.approx(2.0)
+    assert out["actor/pg_loss/mean"] == pytest.approx(2.5)
 
 
-def test_default_metric_is_averaged():
-    # No aggregation keyword in the name -> defaults to average.
+def test_default_metric_is_weighted_by_sample_count():
+    # No aggregation keyword in the name -> defaults to weighted average.
     agg = MetricsAggregator()
-    agg.add_step_metrics({"actor/kl": 2.0})
-    agg.add_step_metrics({"actor/kl": 4.0})
-    assert agg.get_aggregated_metrics()["actor/kl"] == pytest.approx(3.0)
+    agg.add_step_metrics({"actor/kl": 2.0}, sample_count=1)
+    agg.add_step_metrics({"actor/kl": 4.0}, sample_count=3)
+    assert agg.get_aggregated_metrics()["actor/kl"] == pytest.approx(3.5)
 
 
 def test_max_and_min_are_reduced():
@@ -73,6 +73,26 @@ def test_dropped_samples_are_summed_across_iterations():
     agg.add_step_metrics({"training/off_policy/dropped_samples": 2})
     agg.add_step_metrics({"training/off_policy/dropped_samples": 3})
     assert agg.get_aggregated_metrics()["training/off_policy/dropped_samples"] == pytest.approx(5.0)
+
+
+def test_dropped_samples_staleness_mean_uses_dropped_count_weight():
+    # Dropped-sample staleness is averaged over dropped samples, not over kept batch size.
+    agg = MetricsAggregator()
+    agg.add_step_metrics(
+        {
+            "training/off_policy/dropped_samples": 1,
+            "training/off_policy/dropped_samples_staleness/mean": 10.0,
+        },
+        sample_count=100,
+    )
+    agg.add_step_metrics(
+        {
+            "training/off_policy/dropped_samples": 3,
+            "training/off_policy/dropped_samples_staleness/mean": 2.0,
+        },
+        sample_count=1,
+    )
+    assert agg.get_aggregated_metrics()["training/off_policy/dropped_samples_staleness/mean"] == pytest.approx(4.0)
 
 
 def test_last_metric_keeps_final_value():
@@ -114,10 +134,10 @@ def test_minmax_diff_falls_back_when_min_max_absent():
 def test_tensor_and_non_scalar_handling():
     agg = MetricsAggregator()
     # 0-d / single-element tensors are recorded; multi-element tensors are ignored.
-    agg.add_step_metrics({"actor/loss/mean": torch.tensor(2.0), "actor/vec": torch.tensor([1.0, 2.0])})
-    agg.add_step_metrics({"actor/loss/mean": torch.tensor(4.0)})
+    agg.add_step_metrics({"actor/loss/mean": torch.tensor(2.0), "actor/vec": torch.tensor([1.0, 2.0])}, sample_count=1)
+    agg.add_step_metrics({"actor/loss/mean": torch.tensor(4.0)}, sample_count=3)
     out = agg.get_aggregated_metrics()
-    assert out["actor/loss/mean"] == pytest.approx(3.0)
+    assert out["actor/loss/mean"] == pytest.approx(3.5)
     assert "actor/vec" not in out
 
 
@@ -138,11 +158,11 @@ def test_reset_clears_state():
 
 
 def test_missing_key_in_some_iterations_uses_present_values():
-    # A metric only reported on some iterations is averaged over the reported ones.
+    # A metric only reported on some iterations uses the weights from the iterations where it exists.
     agg = MetricsAggregator()
-    agg.add_step_metrics({"actor/loss/mean": 2.0})
-    agg.add_step_metrics({})  # e.g. critic_warmup step with no actor update
-    agg.add_step_metrics({"actor/loss/mean": 6.0})
+    agg.add_step_metrics({"actor/loss/mean": 2.0}, sample_count=1)
+    agg.add_step_metrics({}, sample_count=100)  # e.g. critic_warmup step with no actor update
+    agg.add_step_metrics({"actor/loss/mean": 6.0}, sample_count=3)
     out = agg.get_aggregated_metrics()
-    assert out["actor/loss/mean"] == pytest.approx(4.0)
+    assert out["actor/loss/mean"] == pytest.approx(5.0)
     assert not math.isnan(out["actor/loss/mean"])

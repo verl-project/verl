@@ -427,7 +427,8 @@ class PPOTrainer(ABC):
         for _ in range(self.parameter_sync_step):
             iter_metrics: dict = {}
             batch = self._step_once(iter_metrics, timing_raw, sample_batch_size)
-            metrics_aggregator.add_step_metrics(iter_metrics, sample_count=len(batch.keys))
+            sample_count = sum(not tag.get("is_padding", False) for tag in batch.tags)
+            metrics_aggregator.add_step_metrics(iter_metrics, sample_count=sample_count)
             combined_keys.extend(batch.keys)
             combined_tags.extend(batch.tags)
             combined_partition_id = batch.partition_id
