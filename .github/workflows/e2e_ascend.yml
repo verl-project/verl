@@ -62,6 +62,11 @@ concurrency:
 
 permissions:
   contents: read
+
+env:
+  SUBMITTER_URL: http://rayjob-submitter.ci-system.svc.cluster.local
+  IMAGE: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-9.0.0-a3-ubuntu22.04-py3.11-latest
+  WORKER_REPLICAS: "2"
  
 jobs:
   nightlyCI_grpo-moonlight-16b-megatron-vllm_ascend_r3:
