@@ -42,6 +42,7 @@ vllm推理后端支持
     #安装之前要先source cann环境： source /usr/local/Ascend/cann/set_env.sh
     git clone https://github.com/vllm-project/vllm-ascend.git
     cd vllm-ascend
+    git checkout fac8784c2572b14b1134f04d9818926b4a297f3a
     git cherry-pick 623caa3fd94233482e90d3f7f335cd88293cbfc8 
     pip install .
 
