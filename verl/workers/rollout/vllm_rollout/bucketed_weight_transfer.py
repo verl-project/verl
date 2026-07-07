@@ -41,6 +41,22 @@ class TensorMetadata(TypedDict):
     handle: tuple
 
 
+def _persistent_bucket_enabled() -> bool:
+    return os.environ.get("VERL_WEIGHT_TRANSFER_PERSISTENT_BUCKET", "1").strip().lower() in {"1", "true", "yes", "on"}
+
+
+# Process-wide caches so the CUDA-IPC transfer bucket is allocated and exported
+# ONCE per (process, zmq handle) and reused across weight syncs. Allocating and
+# IPC-exporting a fresh bucket every sync leaks ~bucket_size VRAM per sync on
+# ROCm: freeing an IPC-exported allocation is deferred until every importer
+# closes its handle, and HIP does not reliably reclaim the pages even then
+# (long-running RL jobs reproducibly OOM once the accumulated leak — exactly one
+# bucket per sync — exhausts free VRAM). The generation id travels with the handshake so
+# a receiver can never silently reuse a mapping for a reallocated bucket.
+_SENDER_BUCKET_CACHE: dict[str, tuple[torch.Tensor, tuple, int]] = {}  # zmq_handle -> (buffer, ipc_handle, gen)
+_RECEIVER_IMPORT_CACHE: dict[str, tuple[torch.Tensor, int]] = {}  # zmq_handle -> (buffer, gen)
+
+
 # copy from https://github.com/vllm-project/vllm/blob/main/examples/offline_inference/rlhf_utils.py
 def rebuild_ipc(handle: tuple[Callable, tuple], device_id: int | None = None) -> torch.Tensor:
     func, args = handle
@@ -175,9 +191,25 @@ class BucketedWeightSender:
         """build communication buffer"""
         buffer, shm = None, None
         if not self.use_shm:
-            buffer = torch.empty(self.bucket_size, dtype=torch.uint8, device=f"{get_device_name()}:{get_device_id()}")
-            handle = reduce_tensor(buffer)
-            self.socket.send_pyobj(handle)
+            if _persistent_bucket_enabled():
+                cached = _SENDER_BUCKET_CACHE.get(self.zmq_handle)
+                if cached is not None and cached[0].numel() == self.bucket_size:
+                    buffer, _handle, gen = cached
+                    self.socket.send_pyobj({"reuse_gen": gen})
+                else:
+                    buffer = torch.empty(
+                        self.bucket_size, dtype=torch.uint8, device=f"{get_device_name()}:{get_device_id()}"
+                    )
+                    handle = reduce_tensor(buffer)
+                    gen = cached[2] + 1 if cached is not None else 0
+                    _SENDER_BUCKET_CACHE[self.zmq_handle] = (buffer, handle, gen)
+                    self.socket.send_pyobj({"handle": handle, "gen": gen})
+            else:
+                buffer = torch.empty(
+                    self.bucket_size, dtype=torch.uint8, device=f"{get_device_name()}:{get_device_id()}"
+                )
+                handle = reduce_tensor(buffer)
+                self.socket.send_pyobj(handle)
         else:
             import uuid
 
@@ -204,6 +236,12 @@ class BucketedWeightSender:
                 os.remove(ipc_path)
             except OSError:
                 pass
+        if _persistent_bucket_enabled() and not self.use_shm:
+            # The bucket is owned by _SENDER_BUCKET_CACHE and stays exported for
+            # reuse; freeing it here would re-trigger the per-sync deferred-free
+            # leak this cache exists to avoid.
+            self.buffer = None
+            return
         del self.buffer
         self.buffer = None
         if self.shm is not None:
@@ -305,8 +343,22 @@ class BucketedWeightReceiver:
         comm_metadata = self.socket.recv_pyobj()
         buffer, shm = None, None
         if not self.use_shm:
-            handle = comm_metadata
-            buffer = rebuild_ipc(handle, self.device.index)
+            if isinstance(comm_metadata, dict) and ("reuse_gen" in comm_metadata or "gen" in comm_metadata):
+                if "reuse_gen" in comm_metadata:
+                    cached = _RECEIVER_IMPORT_CACHE.get(self.zmq_handle)
+                    if cached is None or cached[1] != comm_metadata["reuse_gen"]:
+                        raise RuntimeError(
+                            "persistent-bucket protocol desync: sender announced "
+                            f"reuse_gen={comm_metadata['reuse_gen']} but receiver cache is "
+                            f"{'missing' if cached is None else f'at gen {cached[1]}'} for {self.zmq_handle}"
+                        )
+                    buffer = cached[0]
+                else:
+                    buffer = rebuild_ipc(comm_metadata["handle"], self.device.index)
+                    _RECEIVER_IMPORT_CACHE[self.zmq_handle] = (buffer, comm_metadata["gen"])
+            else:
+                handle = comm_metadata
+                buffer = rebuild_ipc(handle, self.device.index)
             assert buffer.dtype == torch.uint8
         else:
             shm_name = comm_metadata["name"]
@@ -324,6 +376,12 @@ class BucketedWeightReceiver:
         # Synchronize before releasing the buffer to ensure all async ops
         # referencing it (e.g. clone, .to()) have completed.
         get_torch_device().synchronize()
+        if _persistent_bucket_enabled() and not self.use_shm:
+            # The imported mapping is owned by _RECEIVER_IMPORT_CACHE and must
+            # stay open: closing it per sync is what defers the exporter's free
+            # into the leaky HIP path this cache exists to avoid.
+            self.buffer = None
+            return
         del self.buffer
         self.buffer = None
         if self.shm is not None:
