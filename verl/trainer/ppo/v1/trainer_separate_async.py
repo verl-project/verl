@@ -44,9 +44,11 @@ class PPOTrainerSeparateAsync(PPOTrainer):
     def __init__(self, config: DictConfig):
         train_batch_size = config.data.train_batch_size
         ppo_mini_batch_size = config.actor_rollout_ref.actor.ppo_mini_batch_size
-        assert train_batch_size == ppo_mini_batch_size, (
-            f"train_batch_size must be equal to ppo_mini_batch_size in separate async training, "
-            f"but got {train_batch_size} and {ppo_mini_batch_size}"
+        parameter_sync_step = config.trainer.v1.separate_async.parameter_sync_step
+        assert train_batch_size == parameter_sync_step * ppo_mini_batch_size, (
+            f"train_batch_size must equal parameter_sync_step * ppo_mini_batch_size in separate async "
+            f"training, but got train_batch_size={train_batch_size}, "
+            f"parameter_sync_step={parameter_sync_step}, ppo_mini_batch_size={ppo_mini_batch_size}"
         )
         assert config.actor_rollout_ref.rollout.nnodes > 0, "nnodes must be > 0 in separate async training"
         assert config.actor_rollout_ref.rollout.n_gpus_per_node > 0, (
@@ -120,10 +122,9 @@ class PPOTrainerSeparateAsync(PPOTrainer):
             self.switch_to_trainer()
 
     def on_step_end(self):
-        if self.global_steps % self.config.trainer.v1.separate_async.parameter_sync_step == 0:
-            with marked_timer("update_weights", self.timing_raw, color="red"):
-                # wake up all replicas to update weights
-                self.standalone_checkpoint_manager.update_weights(self.global_steps)
+        with marked_timer("update_weights", self.timing_raw, color="red"):
+            # wake up all replicas to update weights
+            self.standalone_checkpoint_manager.update_weights(self.global_steps)
 
     def switch_to_rollout(self):
         # TODO: disable auto offload in config and offload according to the switch strategy

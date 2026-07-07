@@ -85,7 +85,6 @@ class ReplayBuffer:
         self.max_off_policy_strategy = max_off_policy_strategy
         self.sampler_kwargs = sampler_kwargs
         self.poll_interval = poll_interval
-        self.parameter_sync_step = trainer_config.get("parameter_sync_step", 1)
 
         assert isinstance(self.max_off_policy_threshold, int) and self.max_off_policy_threshold > 0, (
             f"Invalid max off policy threshold: {self.max_off_policy_threshold}, must be an integer greater than 0"
@@ -144,7 +143,7 @@ class ReplayBuffer:
         if self.max_off_policy_strategy == "wait":
             for key in self.pending_keys[partition_id] | self.running_keys[partition_id]:
                 prompt_global_steps = self.prompt_global_steps[partition_id][key]
-                if (global_steps - prompt_global_steps + 1) / self.parameter_sync_step >= self.max_off_policy_threshold:
+                if (global_steps - prompt_global_steps + 1) >= self.max_off_policy_threshold:
                     return False
 
         return len(self.finished_keys[partition_id]) + len(self.failure_keys[partition_id]) >= batch_size
@@ -159,7 +158,7 @@ class ReplayBuffer:
         dropped_keys, dropped_tags = [], []
         for key, tag in zip(batch.keys, batch.tags, strict=False):
             prompt_global_steps = tag["global_steps"]
-            if (global_steps - prompt_global_steps + 1) / self.parameter_sync_step > self.max_off_policy_threshold:
+            if (global_steps - prompt_global_steps + 1) > self.max_off_policy_threshold:
                 dropped_keys.append(key)
                 dropped_tags.append(tag)
             else:
@@ -173,7 +172,7 @@ class ReplayBuffer:
             tq.kv_clear(partition_id=batch.partition_id, keys=dropped_keys)
             logger.warning(f"Dropped {len(dropped_keys)} max off policy samples from partition {batch.partition_id}")
             dropped_global_steps = np.array([tag["global_steps"] for tag in dropped_tags])
-            trajectory_staleness = (global_steps - dropped_global_steps + 1) / self.parameter_sync_step
+            trajectory_staleness = global_steps - dropped_global_steps + 1
             prefix = "training" if partition_id == "train" else "validation"
             metrics[f"{prefix}/off_policy/dropped_samples"] = len(dropped_keys)
             metrics[f"{prefix}/off_policy/dropped_samples_staleness/mean"] = trajectory_staleness.mean()

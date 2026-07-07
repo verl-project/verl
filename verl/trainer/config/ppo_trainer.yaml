@@ -221,7 +221,7 @@ trainer:
       # Number of warmup batches to add before training loop starts
       num_warmup_batches: 4
 
-      # Frequency of parameter synchronization between trainer and rollout,
+      # Frequency of parameter synchronization between trainer and rollout
       parameter_sync_step: 4
 
     # Replay buffer sampling strategy
