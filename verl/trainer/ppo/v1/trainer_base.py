@@ -589,13 +589,17 @@ class PPOTrainer(ABC):
         self.total_training_steps = total_training_steps
         logger.info(f"Total training steps: {self.total_training_steps}")
 
+        # The LR scheduler steps once per local update, and each global step performs
+        # ``parameter_sync_step`` local updates (see ``PPOTrainer.step``). The optimizer's
+        # schedule horizon must therefore count optimizer updates.
+        optim_total_training_steps = total_training_steps * self.parameter_sync_step
         try:
             OmegaConf.set_struct(self.config, True)
             with open_dict(self.config):
                 if OmegaConf.select(self.config, "actor_rollout_ref.actor.optim"):
-                    self.config.actor_rollout_ref.actor.optim.total_training_steps = total_training_steps
+                    self.config.actor_rollout_ref.actor.optim.total_training_steps = optim_total_training_steps
                 if OmegaConf.select(self.config, "critic.optim"):
-                    self.config.critic.optim.total_training_steps = total_training_steps
+                    self.config.critic.optim.total_training_steps = optim_total_training_steps
         except Exception as e:
             logger.warning(f"Warning: Could not set total_training_steps in config. Structure missing? Error: {e}")
 
