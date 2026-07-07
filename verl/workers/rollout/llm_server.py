@@ -42,6 +42,19 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 DEFAULT_ROUTING_CACHE_SIZE = 10000
 
 
+def _routed_experts_tensor_for_merge(value: Any) -> torch.Tensor:
+    if isinstance(value, torch.Tensor):
+        tensor = value
+    else:
+        tensor = torch.as_tensor(value, dtype=torch.int64)
+    if tensor.ndim != 3:
+        raise TypeError(
+            "routed_experts must be a 3D tensor/list for fully-async merge, "
+            f"got shape={tuple(tensor.shape)}"
+        )
+    return tensor
+
+
 @ray.remote
 class GlobalRequestLoadBalancer:
     """Global sticky-session + in-flight load balancer shared by all AgentLoopWorkers.
@@ -317,11 +330,15 @@ class FullyAsyncLLMServerClient(LLMServerClient):
             # On partial rollout resume the model version may differ, so keep
             # existing routing and only append routing for newly generated tokens.
             if output.routed_experts is not None and len(output.token_ids) > 0:
+                output_routed_experts = _routed_experts_tensor_for_merge(output.routed_experts)
                 if final_output.routed_experts is None:
-                    final_output.routed_experts = output.routed_experts
+                    final_output.routed_experts = output_routed_experts
                 else:
                     final_output.routed_experts = torch.cat(
-                        [final_output.routed_experts, output.routed_experts[-len(output.token_ids) :]],
+                        [
+                            _routed_experts_tensor_for_merge(final_output.routed_experts),
+                            output_routed_experts[-len(output.token_ids) :],
+                        ],
                         dim=0,
                     )
             if output.num_preempted is not None:
@@ -333,6 +350,9 @@ class FullyAsyncLLMServerClient(LLMServerClient):
             if min_global_steps is None:
                 min_global_steps = global_steps
             max_global_steps = global_steps
+            for key, value in output.extra_fields.items():
+                if key not in {"global_steps", "min_global_steps", "max_global_steps"}:
+                    final_output.extra_fields[key] = value
 
             # 3. update max_new_tokens
             if original_max_tokens is not None:
