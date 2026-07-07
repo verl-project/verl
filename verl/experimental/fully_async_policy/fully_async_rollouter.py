@@ -40,6 +40,7 @@ from verl.trainer.ppo.utils import (
 )
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.profiler import marked_timer
+from verl.utils.ray_utils import auto_await
 from verl.utils.skip import SkipManager
 from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.rollout.llm_server import FullyAsyncLLMServerClient, LLMServerManager
@@ -60,6 +61,7 @@ class FullyAsyncLLMServerManager(LLMServerManager):
         rollout_resource_pool: RayResourcePool = None,
     ):
         super().__init__(config, worker_group, rollout_resource_pool)
+        self._model_engine_manager = None
         # Pre-registered hybrid replicas: bound at init time but still sleeping.
         # Keyed by resource_id; populated during _initialize_llm_servers().
         self.hybrid_replicas: dict[str, RolloutReplica] = {}
@@ -73,6 +75,35 @@ class FullyAsyncLLMServerManager(LLMServerManager):
         # Timing / counters
         self.last_hybrid_add_time: float = 0.0
         self.last_hybrid_remove_time: float = 0.0
+
+    @classmethod
+    @auto_await
+    async def create(cls, *args, **kwargs):
+        instance = cls(*args, **kwargs)
+        await instance._initialize_llm_servers()
+        await instance._init_global_load_balancer()
+        if getattr(instance.config, "model_engine_server", None) and instance.config.model_engine_server.get(
+            "enable", False
+        ):
+            await instance._init_model_engine_replica()
+        return instance
+
+    async def _init_model_engine_replica(self):
+        from verl.experimental.fully_async_policy.model_engine_server import ModelEngineServerManager
+
+        self._model_engine_manager = ModelEngineServerManager(full_config=self.config)
+        await self._model_engine_manager.initialize()
+
+    def get_engine_replicas_for_weight_sync(self) -> list:
+        if self._model_engine_manager is None:
+            return []
+        if self._model_engine_manager._has_old_instance:
+            return [self._model_engine_manager._old_instance]
+        return []
+
+    def get_client(self, client_cls=FullyAsyncLLMServerClient, **kwargs) -> FullyAsyncLLMServerClient:
+        kwargs.setdefault("model_engine_manager", self._model_engine_manager)
+        return super().get_client(client_cls=client_cls, **kwargs)
 
     async def _initialize_llm_servers(self, start_rank: int = 0):
         # ── Step 1: hybrid replicas first (replica_rank 0 … N_e-1) ──────────
@@ -453,7 +484,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
 
     def get_replicas(self):
         """Get rollout worker group"""
-        return self.llm_server_manager.get_replicas()
+        return self.llm_server_manager.get_replicas() + self.llm_server_manager.get_engine_replicas_for_weight_sync()
 
     def get_max_queue_size(self):
         return self.max_queue_size

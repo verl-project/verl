@@ -61,8 +61,9 @@ class _FakeServerManager:
         video_data: Optional[list[Any]] = None,
         audio_data: Optional[list[Any]] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
+        **kwargs: Any,
     ) -> tuple[list[int], list[float], bool]:
-        del request_id, sampling_params, image_data, video_data, audio_data, mm_processor_kwargs
+        del request_id, sampling_params, image_data, video_data, audio_data, mm_processor_kwargs, kwargs
         # Return a short partial generation and "not cancelled".
         response_ids = prompt_ids[-1:] + [21, 22]
         response_logprobs = [0.0] * len(response_ids)

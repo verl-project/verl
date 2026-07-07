@@ -57,6 +57,8 @@ can significantly improve training efficiency.
   synchronization, by adding `sleep() and resume()` logic, it
   saves samples from ongoing rollouts and continues using them in the next rollout, reducing the time spent waiting for
   ongoing tasks to finish during parameter synchronization.
+* **Standalone Model Engine Server**: Uses dedicated GPUs to wrap training engine parameters as a server for computing old/ref log probs, eliminating the save/restore weight cycle on the trainer side and supporting correct per-version log prob computation when staleness is enabled.
+  See [MODEL_ENGINE_SERVER.md](https://github.com/verl-project/verl/blob/main/verl/experimental/fully_async_policy/MODEL_ENGINE_SERVER.md) for details.
 
 Currently, the supported usage mode is megatron/fsdp+vllm. vllm must use the server mode based on AgentLoop.
 
