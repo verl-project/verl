@@ -97,6 +97,11 @@ class LinearCrossEntropy(torch.autograd.Function):
             should_return_fp32_grad = ctx.should_return_fp32_grad
             temperature = ctx.temperature
 
+            # Autograd can hand us strided views after downstream masking/slicing.
+            # The fused entropy backward kernels expect contiguous 1D grad buffers.
+            dlogprobs = dlogprobs.contiguous()
+            dentropy = dentropy.contiguous()
+
             d_hidden, d_weight = kernels.efficient_entropy_backward(
                 dlogprobs,
                 dentropy,
