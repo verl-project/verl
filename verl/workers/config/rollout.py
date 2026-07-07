@@ -270,8 +270,6 @@ class RolloutConfig(BaseConfig):
 
     qat: Optional[dict] = None
 
-    # Prefill-Decode disaggregated rollout config. Active when ``rollout.name``
-    # is ``sglang`` or ``vllm`` and ``disaggregation.enabled=True``.
     disaggregation: DisaggregationConfig = field(default_factory=DisaggregationConfig)
 
     def __post_init__(self):
@@ -321,9 +319,8 @@ class RolloutConfig(BaseConfig):
                     f"Current rollout {self.name=} not implemented pipeline_model_parallel_size > 1 yet."
                 )
 
-        # OmegaConf hands us either a dict, DictConfig, or already-coerced dataclass
-        # depending on call site; normalize so downstream code can treat
-        # ``self.disaggregation`` as a DisaggregationConfig uniformly.
+        # Hydra passes this as dict/DictConfig; coerce to dataclass so
+        # downstream .enabled etc. work. BaseConfig is frozen, hence object.__setattr__.
         if isinstance(self.disaggregation, dict):
             object.__setattr__(self, "disaggregation", DisaggregationConfig(**self.disaggregation))
         elif not isinstance(self.disaggregation, DisaggregationConfig):

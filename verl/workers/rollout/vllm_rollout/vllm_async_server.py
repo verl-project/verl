@@ -135,7 +135,6 @@ class vLLMHttpServer:
         # (no-op for colocated). _pd_peer_idx drives the round-robin in
         # _select_decode_peer.
         self._pd_decode_peers: list[ActorHandle] = []
-        self._pd_prefill_side_channel_host: Optional[str] = None
         self._pd_prefill_side_channel_port: Optional[int] = None
         self._pd_prefill_engine_id: Optional[str] = None
         self._pd_peer_idx: int = 0
@@ -244,24 +243,14 @@ class vLLMHttpServer:
     async def set_pd_peer(
         self,
         decode_peers: list,
-        prefill_side_channel_host: str,
         prefill_side_channel_port: int,
         prefill_engine_id: str,
     ) -> None:
-        """Record the prefill→decode wiring established by ``vLLMPDReplica``.
-
-        Only meaningful when ``self._disaggregation_role == "prefill"``; called
-        once per replica after every server's ``launch_server`` has returned.
-        The actual per-request fan-out using these peers is wired in the
-        ``generate`` override added in Phase 2 of the verl-vllm-pd-disagg
-        series.
-        """
         assert self._disaggregation_role == "prefill", (
             f"set_pd_peer must be called on the prefill server (got role={self._disaggregation_role!r})"
         )
         assert isinstance(decode_peers, list) and decode_peers, "decode_peers must be a non-empty list"
         self._pd_decode_peers = list(decode_peers)
-        self._pd_prefill_side_channel_host = prefill_side_channel_host
         self._pd_prefill_side_channel_port = prefill_side_channel_port
         self._pd_prefill_engine_id = prefill_engine_id
 

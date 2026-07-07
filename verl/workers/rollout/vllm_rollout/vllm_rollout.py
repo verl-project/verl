@@ -119,14 +119,15 @@ class ServerAdapter(BaseRollout):
         rank = int(os.environ["RANK"])
         local_world_size = int(os.environ["RAY_LOCAL_WORLD_SIZE"])
         # PD asymmetric layout inflates per-replica footprint; must match
-        # llm_server.py:_initialize_llm_servers' rollout_world_size override
-        # or trainer-to-replica mapping breaks. See SGLang PR #6117 for the
-        # equivalent change on the SGLang ServerAdapter.
+        # llm_server.py:_initialize_llm_servers or trainer-to-replica mapping breaks.
         prefill_tp = self.config.tensor_model_parallel_size
         disagg = getattr(self.config, "disaggregation", None)
-        disagg_enabled = disagg is not None and getattr(disagg, "enabled", False)
-        if disagg_enabled:
-            decode_tp = disagg.decode_tensor_model_parallel_size or prefill_tp
+        if disagg is not None and getattr(disagg, "enabled", False):
+            decode_tp = (
+                disagg.decode_tensor_model_parallel_size
+                if disagg.decode_tensor_model_parallel_size is not None
+                else prefill_tp
+            )
             per_replica = prefill_tp * disagg.prefill_replicas + decode_tp * disagg.decode_replicas
         else:
             decode_tp = prefill_tp
@@ -144,14 +145,13 @@ class ServerAdapter(BaseRollout):
         self.node_rank = self.rollout_rank // local_world_size
 
         # Map each trainer rank to its co-located vLLM server so weight-update
-        # IPC handles stay on the GPU where they were created. Mirrors SGLang
-        # PR #6117. Offset math assumes prefill_replicas == 1 (enforced by
-        # vLLMPDReplica); if that ever lifts, update both this block and
-        # vLLMPDReplica.launch_servers.
+        # IPC handles stay on the GPU where they were created. Offset math
+        # assumes prefill_replicas == 1 (enforced by vLLMPDReplica); if that
+        # ever lifts, update both this block and vLLMPDReplica.launch_servers.
         self._pd_role: Optional[str] = None
         self._pd_server_index: Optional[int] = None
         self._pd_tp_local_rank: Optional[int] = None
-        if disagg_enabled:
+        if disagg is not None and getattr(disagg, "enabled", False):
             footprint = prefill_tp + disagg.decode_replicas * decode_tp
             local = self.rollout_rank % footprint
             if local < prefill_tp:
@@ -211,10 +211,6 @@ class ServerAdapter(BaseRollout):
         # Lazy init http server adapter because http server is launched after hybrid engine.
         if self.server_handle is None:
             prefix = self._get_server_name_prefix()
-            # PD: each role's TP-rank-0 finds its own actor. Naming aligns with
-            # SGLang PR #6117 (`{prefix}server_{R}_0` for prefill,
-            # `{prefix}server_decode_{R}_{i}` for decode i). Colocated path
-            # falls back to the original `{prefix}server_{R}_{node_rank}`.
             if self._pd_role == "prefill":
                 actor_name = f"{prefix}server_{self.replica_rank}_0"
             elif self._pd_role == "decode":
@@ -292,8 +288,7 @@ class ServerAdapter(BaseRollout):
         if future is not None:
             await future
 
-        # Reset prefix cache after weight swap. Under PD, every rank that
-        # owns an engine (each role's TP-rank-0) must flush its own KV cache.
+        # reset caches after updating weights
         if self._has_server:
             await self.server_handle.clear_kv_cache.remote()
             if global_steps is not None:

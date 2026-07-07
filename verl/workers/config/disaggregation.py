@@ -24,12 +24,7 @@ _ALLOWED_MOONCAKE_PROTOCOLS = ("nvlink", "local", "rdma", "tcp")
 
 @dataclass
 class DisaggregationConfig(BaseConfig):
-    """Prefill-Decode disaggregation knobs.
-
-    Activated by setting ``rollout.name`` to ``sglang`` or ``vllm`` and
-    ``rollout.disaggregation.enabled=True``. The dispatch in
-    ``get_rollout_replica_class`` returns the PD-aware class for those
-    backends; other backends are rejected by config validation."""
+    """Prefill-Decode disaggregation knobs."""
 
     enabled: bool = False
     prefill_replicas: int = 1
@@ -38,13 +33,6 @@ class DisaggregationConfig(BaseConfig):
     transfer_backend: str = "nixl"
     bootstrap_port: Optional[int] = None
     ib_device: Optional[str] = None
-    # Mooncake transport protocol. vLLM's MooncakeConnector defaults this to
-    # ``"rdma"`` (mooncake_connector.py:737); on hosts without an RDMA NIC
-    # Mooncake silently falls back to TCP (``topology.cpp`` "No RDMA devices
-    # found" → ``tcp_transport.cpp:541`` listener). On a single-node H100/H200
-    # rack this routes same-host KV through the kernel net stack instead of
-    # NVLink. Default to ``"nvlink"`` so single-node PD uses cuMemcpy P2P.
-    # Multi-node deployments should override to ``"rdma"``.
     mooncake_protocol: str = "nvlink"
 
     def __post_init__(self) -> None:
@@ -59,7 +47,10 @@ class DisaggregationConfig(BaseConfig):
             )
         if self.bootstrap_port is not None and not (0 < self.bootstrap_port < 65536):
             raise ValueError(f"bootstrap_port out of range: {self.bootstrap_port}")
-        if self.mooncake_protocol not in _ALLOWED_MOONCAKE_PROTOCOLS:
+        if (
+            self.transfer_backend == "mooncake"
+            and self.mooncake_protocol not in _ALLOWED_MOONCAKE_PROTOCOLS
+        ):
             raise ValueError(
                 f"disaggregation.mooncake_protocol={self.mooncake_protocol!r} not in "
                 f"{_ALLOWED_MOONCAKE_PROTOCOLS}"

@@ -179,7 +179,6 @@ def _build_kv_cfg(
     *,
     role: str,
     engine_id: str = "test-eid",
-    ib_device=None,
     transfer_backend: str = "nixl",
     mooncake_protocol=None,
 ):
@@ -190,7 +189,6 @@ def _build_kv_cfg(
     return vLLMPDReplica._build_kv_transfer_config(
         role=role,
         engine_id=engine_id,
-        ib_device=ib_device,
         transfer_backend=transfer_backend,
         mooncake_protocol=mooncake_protocol,
     )
@@ -209,11 +207,6 @@ def test_build_kv_transfer_config_decode_role_maps_to_kv_consumer():
     cfg = _build_kv_cfg(role="decode", engine_id="e1")
     assert cfg["kv_role"] == "kv_consumer"
     assert cfg["engine_id"] == "e1"
-
-
-def test_build_kv_transfer_config_forwards_ib_device():
-    cfg = _build_kv_cfg(role="prefill", ib_device="mlx5_roce0")
-    assert cfg["kv_connector_extra_config"] == {"ib_device": "mlx5_roce0"}
 
 
 @pytest.mark.parametrize("role,expected_role", [("prefill", "kv_producer"), ("decode", "kv_consumer")])
@@ -241,21 +234,6 @@ def test_build_kv_transfer_config_mooncake_protocol_omitted_when_none():
     keeps its own default. Useful for the NIXL path where the field is moot."""
     cfg = _build_kv_cfg(role="prefill", transfer_backend="mooncake", mooncake_protocol=None)
     assert "kv_connector_extra_config" not in cfg
-
-
-def test_build_kv_transfer_config_mooncake_protocol_with_ib_device():
-    """Both keys must coexist in ``kv_connector_extra_config`` when supplied
-    together — earlier rev clobbered the dict by overwriting it per key."""
-    cfg = _build_kv_cfg(
-        role="prefill",
-        transfer_backend="mooncake",
-        mooncake_protocol="rdma",
-        ib_device="mlx5_roce0",
-    )
-    assert cfg["kv_connector_extra_config"] == {
-        "ib_device": "mlx5_roce0",
-        "mooncake_protocol": "rdma",
-    }
 
 
 def test_build_kv_transfer_config_mooncake_protocol_ignored_for_nixl():

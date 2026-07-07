@@ -357,33 +357,22 @@ class vLLMColocateWorkerExtension:
 
     def _get_zmq_handle(self) -> str:
         """Get ZMQ handle for communication.
-        Uses Ray job id + replica_rank + local_rank to form the handle so it
-        matches the sender side regardless of CUDA_VISIBLE_DEVICES differences,
-        avoids collisions when multiple replicas share the same node, and is
-        unique per Ray job to avoid cross-job collisions on shared hosts. The
-        job id is forwarded by the vLLMHttpServer actor as VERL_RAY_JOB_ID and
-        inherited by this vLLM worker subprocess.
 
-        PD path override: under PD disaggregation each engine is its own Ray
-        actor, so worker `local_rank` resets per actor (TP=1 → every actor's
-        only worker is local_rank=0; TP>1 → every actor has workers 0..TP-1).
-        Without remapping, all actors would bind the same
-        `rank-{0..TP-1}.sock` and update_weights_from_ipc hangs on trainer
-        ranks not paired with the bind winner. The spawner sets
-        `VERL_ZMQ_BASE_TRAINER_RANK` to the first global trainer rank covered
-        by this actor's worker slice (prefill: 0; decode-i:
-        prefill_tp + i*decode_tp); each worker binds
-        `rank-{base + local_rank}.sock`, restoring the 1:1
-        trainer-rank ↔ engine-worker mapping for any TP.
+        Uses Ray job id + replica_rank + rollout-local rank to match the sender
+        side and avoid cross-job collisions on shared hosts.
+        In PD mode, each engine actor's local ranks start at 0; the optional
+        VERL_ZMQ_BASE_TRAINER_RANK offset maps them back to trainer ranks.
         """
         replica_rank = os.environ.get("VERL_REPLICA_RANK", "0")
         job_id = os.environ.get("VERL_RAY_JOB_ID", "0")
         vllm_config = getattr(self.model_runner, "vllm_config", None)
         parallel_config = getattr(vllm_config, "parallel_config", None)
         local_rank = _resolve_vllm_weight_sync_local_rank(self.local_rank, parallel_config)
-        base = os.environ.get("VERL_ZMQ_BASE_TRAINER_RANK")
-        rank_for_zmq = int(base) + local_rank if base is not None else local_rank
-        return f"ipc:///tmp/rl-colocate-zmq-{job_id}-replica-{replica_rank}-rank-{rank_for_zmq}.sock"
+        trainer_rank_base = os.environ.get("VERL_ZMQ_BASE_TRAINER_RANK")
+        trainer_rank = (
+            int(trainer_rank_base) + local_rank if trainer_rank_base is not None else local_rank
+        )
+        return f"ipc:///tmp/rl-colocate-zmq-{job_id}-replica-{replica_rank}-rank-{trainer_rank}.sock"
 
 
 class SuppressSignalInThread:
