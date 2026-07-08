@@ -168,12 +168,21 @@ class MegatronEngine(BaseEngine):
         from verl.utils.megatron_utils import mapping_string_to_attn_backend
         from verl.utils.torch_dtypes import PrecisionType
 
+        self.is_value_model = self.model_config.model_type == "value_model"
+        self.share_embeddings_and_output_weights = self.model_config.share_embeddings_and_output_weights
+
         check_mtp_config(self.model_config, self.engine_config)
 
         self.param_dtype = PrecisionType.to_dtype(self.engine_config.dtype)
         self.dtype = PrecisionType.to_dtype(self.param_dtype)
 
         override_transformer_config = mapping_string_to_attn_backend({**self.engine_config.override_transformer_config})
+        if self.is_value_model:
+            # A value head cannot share weights with the vocabulary embedding. This must
+            # be set before either bridge creates and finalizes its Megatron config.
+            self.model_config.hf_config.tie_word_embeddings = False
+            self.share_embeddings_and_output_weights = False
+            override_transformer_config["share_embeddings_and_output_weights"] = False
         if self.engine_config.dynamic_context_parallel:
             override_transformer_config["max_seqlen_per_dp_cp_rank"] = self.engine_config.max_seqlen_per_dp_cp_rank
             # note(baiyan): we must set the transformer_config.dynamic_context_parallel to False
@@ -292,7 +301,6 @@ class MegatronEngine(BaseEngine):
         from verl.utils.megatron_utils import McoreModuleWrapperConfig, make_megatron_module
         from verl.utils.model import print_model_size
 
-        self.is_value_model = self.model_config.model_type == "value_model"
         if self.engine_config.forward_only:
             wrap_with_ddp = False
         else:
@@ -304,9 +312,6 @@ class MegatronEngine(BaseEngine):
             use_distributed_optimizer=self.engine_config.use_distributed_optimizer,
             use_megatron_fsdp=self.engine_config.use_megatron_fsdp,
         )
-        if self.is_value_model:
-            self.model_config.hf_config.tie_word_embeddings = False
-
         override_ddp_config = self._resolve_override_ddp_config()
 
         module, updated_tf_config = make_megatron_module(
@@ -457,7 +462,7 @@ class MegatronEngine(BaseEngine):
             arch=self.model_config.architectures[0],
             hf_config=self.model_config.hf_config,
             param_dtype=self.param_dtype,
-            share_embeddings_and_output_weights=self.model_config.share_embeddings_and_output_weights,
+            share_embeddings_and_output_weights=self.share_embeddings_and_output_weights,
             processing_class=self.model_config.get_processor(),
             optimizer=self.optimizer,
             optimizer_scheduler=self.lr_scheduler,
