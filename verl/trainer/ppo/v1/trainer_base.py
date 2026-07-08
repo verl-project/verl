@@ -141,6 +141,7 @@ class PPOTrainer(ABC):
             max_off_policy_threshold=sampler_config.max_off_policy_threshold,
             max_off_policy_strategy=sampler_config.max_off_policy_strategy,
             sampler_kwargs=sampler_config.sampler_kwargs,
+            rollout_level_dispatch=self.config.trainer.v1.get("rollout_level_dispatch", False),
         )
 
     def init(self):
@@ -768,9 +769,16 @@ class PPOTrainer(ABC):
             batch = tu.get_tensordict(batch_dict)
             tu.assign_non_tensor_data(batch, "global_steps", self.global_steps)
             tu.assign_non_tensor_data(batch, "validate", True)
-            # Register each prompt (GRPO group) in TransferQueue as a tag-only status marker.
-            # global_steps is required by ReplayBuffer's metadata sync / staleness ordering.
-            tags = [{"is_prompt": True, "status": "pending", "global_steps": self.global_steps}] * len(batch)
+            # Register each prompt (GRPO group) in TransferQueue as a tag-only marker. global_steps
+            # is required by ReplayBuffer's metadata sync / staleness ordering. Under rollout-level
+            # dispatch readiness is session-counting, so carry n (number of GRPO sessions) instead
+            # of the prompt-status tag.
+            if self.config.trainer.v1.get("rollout_level_dispatch", False):
+                n_sessions = int(self.config.actor_rollout_ref.rollout.val_kwargs.n)
+                prompt_tag = {"is_prompt": True, "global_steps": self.global_steps, "n": n_sessions}
+            else:
+                prompt_tag = {"is_prompt": True, "status": "pending", "global_steps": self.global_steps}
+            tags = [prompt_tag] * len(batch)
             tq.kv_batch_put(keys=list(batch["uid"]), partition_id="val", tags=tags)
             self.agent_loop_manager.generate_sequences(batch)
 
@@ -1113,8 +1121,15 @@ class PPOTrainer(ABC):
         batch = tu.get_tensordict(batch_dict)
         tu.assign_non_tensor_data(batch, "global_steps", self.global_steps)
 
-        # Register each prompt (GRPO group) in TransferQueue as a tag-only status marker
-        tags = [{"is_prompt": True, "status": "pending", "global_steps": self.global_steps}] * len(batch)
+        # Register each prompt (GRPO group) in TransferQueue as a tag-only marker. Under
+        # rollout-level dispatch readiness is session-counting, so carry n (number of GRPO
+        # sessions) instead of the prompt-status tag.
+        if self.config.trainer.v1.get("rollout_level_dispatch", False):
+            n_sessions = int(self.config.actor_rollout_ref.rollout.n)
+            prompt_tag = {"is_prompt": True, "global_steps": self.global_steps, "n": n_sessions}
+        else:
+            prompt_tag = {"is_prompt": True, "status": "pending", "global_steps": self.global_steps}
+        tags = [prompt_tag] * len(batch)
         tq.kv_batch_put(keys=list(batch["uid"]), partition_id="train", tags=tags)
 
         # add batch to agent loop manager

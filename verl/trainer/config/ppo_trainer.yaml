@@ -206,6 +206,16 @@ trainer:
     # Trainer mode: "sync", "colocate_async", "separate_async"
     trainer_mode: sync
 
+    # Opt-in rollout-level dispatch (mode-agnostic). When true, the agent-loop manager fans each
+    # prompt's n GRPO sessions out across the worker pool one at a time (decoupling a prompt from a
+    # single worker) and the replay buffer uses session-counting readiness. false = legacy
+    # prompt-pinned chunk dispatch + prompt-status readiness, byte-for-byte as before.
+    rollout_level_dispatch: false
+
+    # Per-worker cap on concurrently-executing rollouts under rollout-level dispatch (event-loop /
+    # GIL pressure knob). 0 = unbounded. Ignored when rollout_level_dispatch is false.
+    max_concurrent_rollouts_per_worker: 0
+
     # Synchronous PPO trainer
     sync: {}
 
