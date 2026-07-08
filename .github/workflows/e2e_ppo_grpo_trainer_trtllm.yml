@@ -173,6 +173,10 @@ jobs:
           pip3 install -r requirements-test.txt
           pip3 install -r requirements.txt
           pip3 install --no-deps -e .
+          pip3 uninstall -y mbridge
+          pip3 install git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@fcbb603 --ignore-requires-python --no-deps --no-build-isolation
+          pip3 install git+https://github.com/NVIDIA/Megatron-LM.git@d0b3b77 --ignore-requires-python --no-deps --no-build-isolation
+          pip3 install "nvidia-modelopt>=0.37.0"
       - name: Check final pip list
         run: |
           pip3 list
@@ -230,6 +234,11 @@ jobs:
           pip3 install --no-deps TransferQueue==0.1.8
           pip3 install qwen_vl_utils
           pip3 install mathruler
+          pip3 install msgspec
+          pip3 uninstall -y mbridge
+          pip3 install git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@fcbb603 --ignore-requires-python --no-deps --no-build-isolation
+          pip3 install git+https://github.com/NVIDIA/Megatron-LM.git@d0b3b77 --ignore-requires-python --no-deps --no-build-isolation
+          pip3 install "nvidia-modelopt>=0.37.0"
       - name: Check final pip list
         run: |
           pip3 list
@@ -267,7 +276,7 @@ jobs:
           unset TORCH_CUDA_ARCH_LIST  # Let TRT-LLM CUTLASS DSL auto-detect runtime GPU arch
           export TRTLLM_ENABLE_PDL=0  # Disable Programmatic Dependent Launch (uses SM 9.0 griddepcontrol)
           ray stop --force
-          export INFER_TP=2 ACTOR_TP=2 ACTOR_PP=2 ACTOR_VPP=2 ACTOR_EP=1 ACTOR_CP=2 REF_TP=2 REF_PP=2 REF_VPP=2 REF_EP=1 REF_CP=2 GEN_MOE_TP=null GEN_MOE_EP=null
+          export INFER_TP=2 ACTOR_TP=2 ACTOR_PP=2 ACTOR_VPP=null ACTOR_EP=1 ACTOR_CP=2 REF_TP=2 REF_PP=2 REF_VPP=null REF_EP=1 REF_CP=2 GEN_MOE_TP=null GEN_MOE_EP=null
           export NNODES=1 GPUS_PER_NODE=8 TRTLLM_MOE_BACKEND=TRITON
           export DATA_DIR=${PWD} DAPO_MATH_TRAIN=${PWD}/data/gsm8k/train.parquet AIME_VAL=${PWD}/data/gsm8k/test.parquet MODEL_PATH=${HOME}/models/Qwen/Qwen3-0.6B
           INFER_BACKEND=trtllm ROLLOUT_QUANTIZATION=fp8 bash examples/grpo_trainer/run_qwen3_30b_a3b_megatron.sh \

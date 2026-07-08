@@ -206,14 +206,19 @@ class MegatronEngine(BaseEngine):
             # Match verl implementation (need variable_seq_lengths)
             from megatron.core.transformer.enums import AttnBackend
 
+            virtual_pipeline_model_parallel_size = self.engine_config.virtual_pipeline_model_parallel_size
             provider_overrides = {
                 "tensor_model_parallel_size": self.engine_config.tensor_model_parallel_size,
                 "pipeline_model_parallel_size": self.engine_config.pipeline_model_parallel_size,
                 "expert_model_parallel_size": self.engine_config.expert_model_parallel_size,
                 "expert_tensor_parallel_size": self.engine_config.expert_tensor_parallel_size,
-                "virtual_pipeline_model_parallel_size": self.engine_config.virtual_pipeline_model_parallel_size,
+                "virtual_pipeline_model_parallel_size": virtual_pipeline_model_parallel_size,
                 "context_parallel_size": self.engine_config.context_parallel_size,
                 "sequence_parallel": self.engine_config.sequence_parallel,
+                "overlap_p2p_comm": (
+                    virtual_pipeline_model_parallel_size is not None and virtual_pipeline_model_parallel_size > 1
+                ),
+                "batch_p2p_comm": False,
                 "variable_seq_lengths": True,
                 "attention_backend": AttnBackend.flash,
                 "moe_token_dispatcher_type": "alltoall",

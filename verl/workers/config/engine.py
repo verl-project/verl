@@ -175,6 +175,7 @@ class McoreEngineConfig(EngineConfig):
         override_ddp_config (dict[str, Any]): Override configuration for DDP.
         override_transformer_config (dict[str, Any]): Override configuration for transformer.
         use_mbridge (bool): Whether to use MBridge for communication.
+        vanilla_mbridge (bool): Whether to use the deprecated legacy mbridge backend instead of Megatron-Bridge.
         use_megatron_fsdp (bool): Whether to use Megatron-FSDP (Zero-3 sharding).
         dtype (str): Mixed precision training param dtype, default "bfloat16"
     """
@@ -204,7 +205,7 @@ class McoreEngineConfig(EngineConfig):
     override_transformer_config: dict[str, Any] = field(default_factory=dict)
     override_mcore_model_config: dict[str, Any] = field(default_factory=dict)
     use_mbridge: bool = True
-    vanilla_mbridge: bool = True
+    vanilla_mbridge: bool = False
     use_megatron_fsdp: bool = False
     strategy: str = "megatron"
     qat: QATEngineConfig = field(default_factory=QATEngineConfig)
@@ -214,6 +215,13 @@ class McoreEngineConfig(EngineConfig):
         """config validation logics go here"""
         assert self.strategy == "megatron"
         assert self.dtype in ["bfloat16", "float16"], f"dtype {self.dtype} not supported"
+        if self.vanilla_mbridge:
+            warnings.warn(
+                "The legacy mbridge backend selected by `vanilla_mbridge=True` is deprecated and will be removed "
+                "in a future release. Use Megatron-Bridge by setting `vanilla_mbridge=False` or removing the option.",
+                FutureWarning,
+                stacklevel=2,
+            )
         if self.tensor_model_parallel_size == 1:
             warnings.warn("set sequence parallel to false as TP size is 1", stacklevel=2)
             self.sequence_parallel = False

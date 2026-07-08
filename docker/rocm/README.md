@@ -35,6 +35,7 @@ Other architectures (e.g. `gfx90a` for MI200/MI250) can be built by overriding
 | TransformerEngine | ROCm fork @ `386bd316` |
 | aiter | ROCm @ `45c428e54` |
 | Megatron-core | 0.16.0 |
+| Megatron-Bridge | 0.5.0 |
 
 ## What the Image Contains
 
@@ -51,8 +52,8 @@ Starting from a clean `ubuntu:22.04` base, `Dockerfile.rocm` installs:
 - vLLM
 - aiter
 
-**Also installed:** `cupy-rocm`, `mbridge`, `megatron-core`, `transformers`,
-and the verl package itself.
+**Also installed:** `cupy-rocm`, `mbridge`, `megatron-core`, `megatron-bridge`,
+`transformers`, and the verl package itself.
 
 > Because Flash Attention / TransformerEngine / vLLM / aiter are compiled from
 > source for the selected GPU architectures, the first build is slow (often
