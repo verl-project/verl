@@ -39,6 +39,7 @@ VLLM_LORA_PATH = "simon_lora_path"
 
 VLLM_ASCEND_REQUIRED_ENV_VARS = {"VLLM_ALL2ALL_BACKEND": "flashinfer_all2allv", "VLLM_ASCEND_ENABLE_NZ": "0"}
 
+
 def _resolve_vllm_weight_sync_local_rank(worker_local_rank: int, parallel_config: Any) -> int:
     worker_local_rank = int(worker_local_rank)
     if parallel_config is None:
@@ -63,6 +64,7 @@ def _resolve_vllm_weight_sync_local_rank(worker_local_rank: int, parallel_config
 
     tp_rank = worker_local_rank % tp_size
     return int(dp_local_rank) * tp_size + tp_rank
+
 
 def set_death_signal():
     """Kill the current process when the parent process exits."""
