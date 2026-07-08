@@ -858,7 +858,7 @@ trainer:
     colocate_async:
       num_warmup_batches: 1
     separate_async:
-      num_warmup_batches: 4
+      num_warmup_batches: 1
       parameter_sync_step: 4
     sampler:
       max_off_policy_threshold: 8
