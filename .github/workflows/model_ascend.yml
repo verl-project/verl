@@ -142,4 +142,4 @@ jobs:
       - name: Running model_engine_ascend
         run: |
           ray stop --force
-          pytest tests/models/test_engine.py
+          VANILLA_MBRIDGE=True pytest tests/models/test_engine.py
