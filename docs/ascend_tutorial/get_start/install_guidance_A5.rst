@@ -65,3 +65,13 @@ MindSpeed-LLM 及相关依赖的源码安装指令：
 
     # 安装 mbridge
     pip install mbridge
+
+verl 依赖安装
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. code:: bash
+
+    git clone https://github.com/verl-project/verl.git
+    cd verl
+    pip install -e .
+
