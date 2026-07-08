@@ -42,7 +42,6 @@ from sglang.srt.managers.io_struct import (
 )
 from sglang.srt.managers.tokenizer_manager import ServerStatus
 
-from verl.plugin.platform import get_platform
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import get_visible_devices_keyword
 from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
@@ -257,11 +256,9 @@ class SGLangHttpServer:
         attention_backend = engine_kwargs.pop("attention_backend", None)
         mm_attention_backend = engine_kwargs.pop("mm_attention_backend", None)
         if attention_backend is None:
-            if torch.version.hip is not None:
-                attention_backend = "aiter"
-            elif version.parse(sglang.__version__) >= version.parse("0.5.12"):
-                # FA3 CUDA-graph capture is broken on sglang>=0.5.12 (#22800);
-                # default to flashinfer (users can opt into fa4 via engine_kwargs).
+            # FA3 CUDA-graph capture is broken on sglang>=0.5.12 (#22800);
+            # default to flashinfer (users can opt into fa4 via engine_kwargs).
+            if version.parse(sglang.__version__) >= version.parse("0.5.12"):
                 attention_backend = "flashinfer"
             else:
                 attention_backend = "fa3"
@@ -272,12 +269,16 @@ class SGLangHttpServer:
         quantization = self.config.get("quantization", None)
         if quantization is not None:
             if quantization == "fp8":
-                from verl.utils.sglang.sglang_fp8_utils import build_sglang_fp8_quant_config
-
                 assert version.parse(sglang.__version__) >= version.parse("0.5.5"), (
                     "sglang>=0.5.5 is required for FP8 quantization"
                 )
-                fp8_block_quant_kwargs = build_sglang_fp8_quant_config(self.model_config.hf_config)
+                FP8_BLOCK_QUANT_KWARGS = {
+                    "activation_scheme": "dynamic",
+                    "fmt": "e4m3",
+                    "quant_method": "fp8",
+                    "weight_block_size": [128, 128],
+                }
+                fp8_block_quant_kwargs = dict(FP8_BLOCK_QUANT_KWARGS)
             else:
                 raise ValueError(f"Currently only support fp8 quantization, got: {quantization}")
         infer_tp = self.config.tensor_model_parallel_size * self.config.data_parallel_size
@@ -790,12 +791,7 @@ class SGLangReplica(RolloutReplica):
                     node_id=node_id,
                     soft=False,
                 ),
-                runtime_env={
-                    "env_vars": {
-                        **{var: "1" for var in get_platform().ray_noset_envvars()},
-                        **get_platform().rollout_env_vars(),
-                    }
-                },
+                runtime_env={"env_vars": {f"RAY_EXPERIMENTAL_NOSET_{visible_devices_keyword}": "1"}},
                 name=name,
                 max_concurrency=self.max_concurrency,
             ).remote(

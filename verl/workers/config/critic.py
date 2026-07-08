@@ -21,7 +21,6 @@ from verl.base_config import BaseConfig
 from verl.trainer.config import BaseModelConfig, CheckpointConfig
 from verl.utils.profiler import ProfilerConfig
 
-from .checkpoint import McoreCheckpointConfig, MindSpeedCheckpointConfig
 from .engine import (
     FSDPEngineConfig,
     McoreEngineConfig,
@@ -74,7 +73,7 @@ class CriticConfig(BaseConfig):
         "ppo_mini_batch_size",
         "ppo_micro_batch_size",
         "engine",
-        "model",
+        "model_config",
     }
 
     strategy: str = MISSING
@@ -165,14 +164,13 @@ class McoreCriticConfig(CriticConfig):
     Args:
         nccl_timeout (int): NCCL timeout in seconds for distributed operations.
         megatron (Dict[str, Any]): Megatron-specific parallelism settings.
-        checkpoint (McoreCheckpointConfig): Megatron-specific checkpoint config
-            that adds ``mbridge_config`` on top of the base checkpoint fields.
+        load_weight (bool): Whether to load initial weights.
     """
 
     strategy: str = "megatron"
     nccl_timeout: int = 600
     megatron: McoreEngineConfig = field(default_factory=McoreEngineConfig)
-    checkpoint: McoreCheckpointConfig = field(default_factory=McoreCheckpointConfig)
+    load_weight: bool = True
 
     def validate(self, n_gpus: int, train_batch_size: int):
         """Validate Megatron critic configuration with runtime parameters."""
@@ -289,14 +287,13 @@ class MindSpeedCriticConfig(CriticConfig):
     Args:
         nccl_timeout (int): NCCL timeout in seconds for distributed operations.
         mindspeed (Dict[str, Any]): mindspeed-specific parallelism settings.
-        checkpoint (MindSpeedCheckpointConfig): MindSpeed-specific checkpoint config
-            (inherits ``mbridge_config`` from :class:`McoreCheckpointConfig`).
+        load_weight (bool): Whether to load initial weights.
     """
 
     strategy: str = "mindspeed"
     nccl_timeout: int = 600
     mindspeed: MindSpeedEngineConfig = field(default_factory=MindSpeedEngineConfig)
-    checkpoint: MindSpeedCheckpointConfig = field(default_factory=MindSpeedCheckpointConfig)
+    load_weight: bool = True
 
     def validate(self, n_gpus: int, train_batch_size: int):
         """Validate mindspeed critic configuration with runtime parameters."""

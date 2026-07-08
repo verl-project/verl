@@ -65,11 +65,6 @@ trigger_parameter_sync_step=4
 partial_rollout=True
 use_trainer_do_validate=False
 
-SKIP_ENABLE=True
-SKIP_DUMP_DIR=${SKIP_DUMP_DIR:-${HOME}/data/rollout_dump_async}
-SKIP_STEPS='[1]'
-SKIP_ACTION=cache
-
 exp_name="$(basename "${MODEL_ID,,}")-fully-async-policy-${rollout_name}-${ACTOR_STRATEGY}-minimal"
 
 echo "Running fully_async_policy with ${ACTOR_STRATEGY} strategy"
@@ -104,7 +99,7 @@ common_params=(
     actor_rollout_ref.actor.ppo_mini_batch_size=${train_prompt_mini_bsz}
     actor_rollout_ref.actor.entropy_coeff=0
     actor_rollout_ref.actor.loss_agg_mode=${loss_agg_mode}
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.60
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.80
     actor_rollout_ref.rollout.temperature=${temperature}
     actor_rollout_ref.rollout.top_p=${top_p}
     actor_rollout_ref.rollout.top_k=${top_k}
@@ -144,10 +139,6 @@ common_params=(
     async_training.use_trainer_do_validate=${use_trainer_do_validate}
     actor_rollout_ref.rollout.checkpoint_engine.backend='nccl'
     actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=1024
-    skip.async_rollout.enable=${SKIP_ENABLE}
-    skip.async_rollout.dump_dir=${SKIP_DUMP_DIR}
-    skip.async_rollout.steps=${SKIP_STEPS}
-    skip.async_rollout.action=${SKIP_ACTION}
 )
 
     # Detect device
@@ -165,10 +156,10 @@ if [ "${ACTOR_STRATEGY}" == "fsdp2" ]; then
     if [ "${rollout_name}" = "trtllm" ]; then
         gen_tp=${GEN_TP:-${n_gpus_rollout}}
     else
-        gen_tp=2
+        gen_tp=1
     fi
     sp_size=1
-    fsdp_size=2
+    fsdp_size=1
     ref_offload=True
     actor_offload=False
 
@@ -239,3 +230,4 @@ else
 fi
 
 echo "Fully async policy E2E test completed successfully with ${ACTOR_STRATEGY} strategy"
+

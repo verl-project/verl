@@ -118,6 +118,7 @@ ROLLOUT=(
     actor_rollout_ref.rollout.enforce_eager=False
     actor_rollout_ref.rollout.enable_prefix_caching=False
     actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=6144
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.mm_processor_cache_gb=0
 )
 
 TRAINER=(

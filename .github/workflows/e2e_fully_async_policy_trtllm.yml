@@ -71,7 +71,7 @@ permissions:
   contents: read
 
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:trtllm-1.3.0rc15"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:trtllm1.3.0rc14"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
 
 jobs:
@@ -113,7 +113,6 @@ jobs:
           pip3 install pytest-asyncio
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
-          pip3 install --no-deps TransferQueue==0.1.8
       - name: Run TRT-LLM async unit tests
         run: |
           unset TORCH_CUDA_ARCH_LIST
@@ -144,12 +143,8 @@ jobs:
       - name: Install the current repository
         run: |
           pip3 install -r requirements-test.txt
-          pip3 install -r requirements.txt
           pip3 install --no-deps -e .
           pip3 install cupy-cuda12x==14.0.1
-      - name: Check final pip list
-        run: |
-          pip3 list
       - name: Prepare GSM8K dataset
         run: |
           python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k

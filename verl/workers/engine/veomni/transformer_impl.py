@@ -21,7 +21,7 @@ import torch
 import torch.distributed as dist
 from tensordict import TensorDict
 from torch.distributed.tensor import DTensor
-from veomni.arguments import MixedPrecisionConfig, OpsImplementationConfig
+from veomni.arguments import OpsImplementationConfig
 from veomni.distributed import parallel_state
 from veomni.distributed.offloading import build_activation_offloading_context
 from veomni.distributed.torch_parallelize import build_parallelize_model
@@ -179,7 +179,11 @@ class VeOmniEngine(FSDPEngine):
         Applies device, dtype, and precision configurations, including mixed precision.
         Sets up checkpoint manager and FLOPs counter.
         """
+        self._moe_monitor = None
+        self._moe_monitor_step = 0
+
         self._build_model_optimizer()
+        self._init_moe_monitor()
 
         if self.enable_routing_replay:
             # Defense in depth: the VeOmniActorConfig check is the primary
@@ -273,18 +277,13 @@ class VeOmniEngine(FSDPEngine):
             swiglu_mlp_implementation=self.engine_config.swiglu_mlp_implementation,
             rotary_pos_emb_implementation=self.engine_config.rotary_pos_emb_implementation,
             load_balancing_loss_implementation=self.engine_config.load_balancing_loss_implementation,
-            rms_norm_gated_implementation=self.engine_config.rms_norm_gated_implementation,
-            causal_conv1d_implementation=self.engine_config.causal_conv1d_implementation,
-            chunk_gated_delta_rule_implementation=self.engine_config.chunk_gated_delta_rule_implementation,
         )
-
-        veomni_mixed_precision_config = MixedPrecisionConfig(enable=self.engine_config.mixed_precision)
 
         # Load base model with specified configuration and dtype
         module = build_foundation_model(
             config_path=self._get_model_config_path(),
             weights_path=self.model_config.local_path,
-            torch_dtype="float32" if veomni_mixed_precision_config.enable else "bfloat16",
+            torch_dtype="float32" if self.engine_config.mixed_precision else "bfloat16",
             attn_implementation=self.engine_config.attn_implementation,
             ops_implementation=ops_implementation,
             init_device=self.engine_config.init_device,
@@ -298,7 +297,7 @@ class VeOmniEngine(FSDPEngine):
             init_device=self.engine_config.init_device,
             weights_path=self.model_config.local_path,
             enable_full_shard=self.engine_config.enable_full_shard,
-            mixed_precision=veomni_mixed_precision_config,
+            enable_mixed_precision=self.engine_config.mixed_precision,
             enable_gradient_checkpointing=self.model_config.enable_gradient_checkpointing,
             enable_fsdp_offload=self.engine_config.enable_fsdp_offload,
             basic_modules=list(
@@ -326,6 +325,64 @@ class VeOmniEngine(FSDPEngine):
             self.model_config.enable_gradient_checkpointing,
             self.engine_config.activation_gpu_limit,
         )
+
+    # ------------------------------------------------------------------ #
+    # MoE expert-load monitor                                            #
+    # ------------------------------------------------------------------ #
+
+    def _init_moe_monitor(self) -> None:
+        """Construct, attach hooks, and activate the MoE load-balance monitor."""
+        interval = self.engine_config.moe_load_balance_monitor_interval
+        if interval <= 0:
+            return
+        num_experts = getattr(self.module.config, "num_experts", None)
+        if num_experts is None:
+            logger.warning("moe_load_balance_monitor_interval > 0 but model has no num_experts; skipping.")
+            return
+
+        from veomni.utils.moe_monitor import MoERouterMonitor, attach_moe_router_monitor, set_active_monitor
+
+        ps = parallel_state.get_parallel_state()
+        self._moe_monitor = MoERouterMonitor(num_experts=num_experts, dp_group=ps.fsdp_group)
+        set_active_monitor(self._moe_monitor)
+        attached = attach_moe_router_monitor(self.module, self._moe_monitor)
+        if attached == 0:
+            logger.warning("MoE monitor: no recognized routers found; disabling.")
+            self._moe_monitor.disable()
+            set_active_monitor(None)
+            self._moe_monitor = None
+        else:
+            logger.info(f"MoE monitor: attached to {attached} router(s), interval={interval}.")
+
+    def _log_moe_metrics(self, outputs: Any) -> None:
+        """All-reduce counts and log MoE metrics.
+
+        Scalars and heatmap are logged directly via ``wandb.log`` on rank 0
+        to avoid verl's ``allgather_dict_into_dict`` wrapping them in lists
+        (which breaks wandb chart rendering).
+        """
+        moe_metrics = self._moe_monitor.compute_metrics(current_step=self._moe_monitor_step)
+        if not moe_metrics:
+            return
+
+        if self.rank != 0:
+            return
+
+        try:
+            import wandb
+        except ImportError:
+            return
+        if wandb.run is None:
+            return
+
+        log_dict = {}
+        for k, v in moe_metrics.items():
+            if k.endswith("expert_load_heatmap"):
+                start, end = self._moe_monitor._last_step_range
+                log_dict[k] = wandb.Image(v, caption=f"Steps {start}-{end}")
+            else:
+                log_dict[k] = v
+        wandb.log(log_dict, step=self._moe_monitor_step)
 
     def optimizer_step(self):
         """
@@ -359,6 +416,12 @@ class VeOmniEngine(FSDPEngine):
         Returns:
             Any: The output of the forward pass, which can be used for loss computation or other purposes.
         """
+        if self._moe_monitor is not None:
+            if forward_only:
+                self._moe_monitor.pause()
+            else:
+                self._moe_monitor.resume()
+
         tu.assign_non_tensor(data, sp_size=parallel_state.get_parallel_state().ulysses_size)
 
         # compute num_tokens in global batch for loss normalization
@@ -455,6 +518,11 @@ class VeOmniEngine(FSDPEngine):
                     )
 
             result = postprocess_batch_func(output_lst=output_lst, indices=indices, data=data)
+            if not forward_only and self._moe_monitor is not None:
+                self._moe_monitor_step += 1
+                interval = self.engine_config.moe_load_balance_monitor_interval
+                if interval > 0 and self._moe_monitor_step % interval == 0:
+                    self._log_moe_metrics(result)
             return result
         finally:
             if rr_active:
@@ -584,9 +652,10 @@ class VeOmniEngine(FSDPEngine):
         if self._is_offload_param:
             offload_veomni_model_to_cpu(self.module)
 
+        device = get_device_id()
         ps = parallel_state.get_parallel_state()
         model_type = getattr(self.module.config, "model_type", "default")
-        process_func = MOE_PARAM_HANDERS.get(model_type, lambda n, t, ep_rank: iter([(n, t)]))
+        process_func = MOE_PARAM_HANDERS.get(model_type, lambda n, t: iter([(n, t)]))
 
         def param_generator():
             for name, param in params.items():
@@ -596,16 +665,18 @@ class VeOmniEngine(FSDPEngine):
                 is_proj = any(p in name for p in ["down_proj", "gate_proj", "up_proj", "gate_up_proj"])
 
                 if is_expert_layer and is_proj and ps.ep_enabled:
-                    ep_rank, ep_size = ps.ep_rank, ps.ep_size
-                    buffer = torch.empty_like(unsharded_tensor)  # [num_experts/ep_size, H, I]
-                    for src_ep_rank in range(ep_size):
-                        tensor = unsharded_tensor if src_ep_rank == ep_rank else buffer
-                        torch.distributed.broadcast(tensor, group_src=src_ep_rank, group=ps.ep_group)
-                        yield from process_func(name, tensor, ep_rank=src_ep_rank)
+                    output_shape = list(unsharded_tensor.shape)
+                    output_shape[0] *= ps.extra_parallel_sizes["ep"]
+                    stacked_tensor = torch.empty(output_shape, dtype=unsharded_tensor.dtype, device=device)
 
+                    # all gather expert tensors [32, H, I] -> [128, H, I]
+                    torch.distributed.all_gather_into_tensor(stacked_tensor, unsharded_tensor, group=ps.ep_group)
+                    yield from process_func(name, stacked_tensor)
+
+                    del stacked_tensor
                 else:
                     if is_expert_layer:
-                        yield from process_func(name, unsharded_tensor, ep_rank=0)
+                        yield from process_func(name, unsharded_tensor)
                     else:
                         yield name, unsharded_tensor
 
@@ -655,8 +726,7 @@ class EngineTrainModeCtx(BaseEngineCtx):
     def __exit__(self, exc_type, exc_value, traceback):
         assert isinstance(self.engine, VeOmniEngine)
         set_ulysses_sequence_parallel_group(self.prev_sp_group)
-        if self.zero_grad_on_exit or exc_type is not None:
-            self.engine.optimizer_zero_grad()
+        self.engine.optimizer_zero_grad()
         super().__exit__(exc_type, exc_value, traceback)
 
 

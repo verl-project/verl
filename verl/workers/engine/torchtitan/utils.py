@@ -173,9 +173,7 @@ def get_attention_masks(
     attn_type: str,
 ) -> AttentionMasksType:
     match attn_type:
-        case "flex" | "flex_flash":
-            # flex_flash is FlexAttention with the FLASH kernel backend; it uses
-            # the same BlockMask as flex.
+        case "flex":
             return _get_flex_attention_masks(
                 input_batch,
                 positions,

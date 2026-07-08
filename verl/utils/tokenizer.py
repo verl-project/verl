@@ -218,16 +218,12 @@ def hf_processor(name_or_path, **kwargs):
                 from transformers.models.qwen3_vl import Qwen3VLModel
 
                 model_class = Qwen3VLModel
-            case "Glm4vProcessor":
+            case "Glm4vImageProcessor":
                 from transformers.models.glm4v import Glm4vModel
 
                 model_class = Glm4vModel
             case "MllamaProcessor":
                 pass  # MllamaProcessor and MllamaModel doesn't have get_rope_index property
-            case "Gemma4Processor":
-                # Gemma4 uses standard 1D RoPE -> no get_rope_index to bind. Disable its strict
-                # per-image-token check (which Qwen's processor lacks).
-                processor.validate_inputs = lambda *args, **kwargs: None
             case _:
                 raise ValueError(f"Unsupported processor type: {processor.__class__.__name__}")
 

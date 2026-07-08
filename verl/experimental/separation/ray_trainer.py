@@ -47,6 +47,7 @@ from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
 from verl.utils.import_utils import load_class_from_fqn
 from verl.utils.metric import reduce_metrics
+from verl.utils.rollout_skip import RolloutSkip
 
 
 class SeparateRayPPOTrainer(RayPPOTrainer):
@@ -125,7 +126,7 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
 
         self.checkpoint_manager = CheckpointEngineManager(
             config=omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine),
-            actor_wg=self.actor_rollout_wg,
+            trainer=self.actor_rollout_wg,
             replicas=self.llm_server_manager.get_replicas(),
         )
 
@@ -162,7 +163,7 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
 
             critic_cfg = TrainingWorkerConfig(
                 model_type="value_model",
-                model_config=self.orig_critic_cfg.model,
+                model_config=self.orig_critic_cfg.model_config,
                 engine_config=engine_config,
                 optimizer_config=self.orig_critic_cfg.optim,
                 checkpoint_config=self.orig_critic_cfg.checkpoint,
@@ -306,6 +307,10 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
             self.logger.log(data=val_metrics, step=self.global_steps)
             if self.config.trainer.get("val_only", False):
                 return
+
+        if self.config.actor_rollout_ref.rollout.get("skip_rollout", False):
+            rollout_skip = RolloutSkip(self.config, self.actor_rollout_wg)
+            rollout_skip.wrap_generate_sequences()
 
         # add tqdm
         self.progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")

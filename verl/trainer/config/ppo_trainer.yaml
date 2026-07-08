@@ -197,56 +197,6 @@ trainer:
   # Device to run training on (e.g., "cuda", "cpu")
   device: cuda
 
-  # Whether to use V1 trainer
-  use_v1: true
-
-  # V1 trainer mode configs
-  v1:
-
-    # Trainer mode: "sync", "colocate_async", "separate_async"
-    trainer_mode: sync
-
-    # Synchronous PPO trainer
-    sync: {}
-
-    # Asynchronous PPO trainer with colocated trainer and rollout
-    colocate_async:
-
-      # Number of warmup batches to add before training loop starts
-      num_warmup_batches: 1
-
-    # Asynchronous PPO trainer with separate trainer and rollout
-    separate_async:
-
-      # Number of warmup batches to add before training loop starts
-      num_warmup_batches: 4
-
-      # Frequency of parameter synchronization between trainer and rollout,
-      parameter_sync_step: 4
-
-    # Replay buffer sampling strategy
-    sampler:
-
-      # Maximum number of model versions that trajectory can span
-      max_off_policy_threshold: 8
-
-      # How to handle trajectory that exceeds the maximum number of model versions
-      # drop: drop the trajectory
-      # wait: dropless, wait all trajectories that reach threshold to finish
-      max_off_policy_strategy: drop
-
-      # Custom sampler config
-      custom_sampler:
-
-        # Path to the custom sampler class
-        path: null
-
-        # Name of the custom sampler class
-        name: null
-
-      # Additional kwargs for the custom sampler
-      sampler_kwargs: {}
-
 # profiler configs
 global_profiler:
 
@@ -420,42 +370,6 @@ transfer_queue:
       # Network device name for RDMA.
       # Leave empty to let Mooncake auto-select available devices.
       device_name: ""
-
-# configs for SkipManager
-skip:
-
-  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
-  _target_: verl.utils.skip.SkipManagerConfig
-
-  # configs for RolloutSkip 
-  rollout:
-
-    # Whether to enable RolloutSkip
-    enable: False
-
-    # Directory to save rollout data
-    dump_dir: "~/.verl/rollout_dump"
-
-    # Steps to skip rollout
-    steps: []
-
-    # Action to take when rollout is skipped, refer to verl.utils.skip.base_skip.SkipAction
-    action: cache
-
-  # configs for AsyncRolloutSkip (fully async policy)
-  async_rollout:
-
-    # Whether to enable AsyncRolloutSkip
-    enable: False
-
-    # Directory to save rollout data
-    dump_dir: "~/.verl/rollout_dump"
-
-    # Steps to skip rollout (rollouter global_steps from sample_id)
-    steps: []
-
-    # Action to take when rollout is skipped, refer to verl.utils.skip.base_skip.SkipAction
-    action: cache
 
 # configs related to ray
 ray_kwargs:
