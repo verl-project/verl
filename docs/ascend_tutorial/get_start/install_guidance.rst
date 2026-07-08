@@ -43,6 +43,7 @@ Atlas 900 A2 PODc
 
 Atlas 800T A3
 
+`Atlas 950DT A5 <https://github.com/verl-project/verl/blob/main/docs/ascend_tutorial/get_start/install_guidance_A5.rst>`_
 
 
 
@@ -144,7 +145,7 @@ CANN是NPU上的异构计算架构, 以下为arm平台A3安装指令，请参照
    source /usr/local/Ascend/nnal/atb/set_env.sh
    conda create -n verl-vllm-npu python=3.11 -y
    conda activate verl-vllm-npu
-   git clone --recursive https://github.com/verl-project/verl.git
+   git clone --recursive https://github.com/verl-project/verl.git -b release/v0.8.0
    bash verl/scripts/install_vllm_mcore_npu.sh
    # 如果您仅需要使用FSDP后端
    # USE_MEGATRON=0 bash scripts/install_vllm_mcore_npu.sh
@@ -210,7 +211,7 @@ CANN是NPU上的异构计算架构, 以下为arm平台A3安装指令，请参照
    source /usr/local/Ascend/nnal/atb/set_env.sh
    conda create -n verl-sgl-npu python=3.11 -y
    conda activate verl-sgl-npu
-   git clone --recursive https://github.com/verl-project/verl.git
+   git clone --recursive https://github.com/verl-project/verl.git -b release/v0.8.0
    bash verl/scripts/install_sglang_mcore_npu.sh
    # 如果您仅需要使用FSDP后端
    # USE_MEGATRON=0 bash verl/scripts/install_sglang_mcore_npu.sh

@@ -60,7 +60,7 @@ reward_model.overlong_buffer.penalty_factor=${overlong_penalty_factor}   #惩罚
 
 ## 硬件要求
 
-当前支持Atlas 800T A3 与 Atlas 900 A3 SuperPoD。完成跑完本次最佳实践需要 1 台 Atlas 900 A3 SuperPoD。关键软件版本可以参考：[Ascend Quickstart](https://github.com/verl-project/verl/blob/9d05508f/docs/ascend_tutorial/quick_start/ascend_quick_start.rst)
+当前支持Atlas 800T A3 与 Atlas 900 A3 SuperPoD。完成跑完本次最佳实践需要 1 台 Atlas 900 A3 SuperPoD。关键软件版本可以参考：[Ascend Quickstart](https://github.com/verl-project/verl/blob/65975055/docs/ascend_tutorial/quick_start/ascend_quick_start.rst)
 
 ## 安装基础环境
 
@@ -71,16 +71,16 @@ reward_model.overlong_buffer.penalty_factor=${overlong_penalty_factor}   #惩罚
 | torch         | ==2.9.0                                                    |
 | torch_npu     | ==2.9.0                                                    |
 | triton_ascend | ==3.2.1                                                    |
-| verl          | main                                                       |
+| verl          | release/v0.8.0                                             |
 | vllm          | v0.18.0                                                    |
 | vllm-ascend   | v0.18.0                                                    |
 | transformers  | 5.3.0                                                      |
 
-在本实践中, 我们通过指定 verl 的 commit id 以避免引入其他问题。注意：main 分支可能会因迭代重构导致 patch 出问题，如需稳定版本可切换至 `release/v0.8.0`。
+在本实践中, 我们通过指定 verl 的 commit id 以避免引入其他问题
 
 ```bash
 cd verl
-git checkout main
+git checkout release/v0.8.0
 # 指定相应的recipe版本
 git submodule update --init --recursive recipe
 cd recipe

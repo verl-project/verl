@@ -30,7 +30,7 @@ rm math.zip
 
 如果模型权重不是hf格式,需要先转换为hf格式,再进行评估
 
-此处参照verl原生[转换方法](verl/docs/advance/checkpoint.rst)
+此处参照verl原生[转换方法](../../../../docs/advance/checkpoint.rst)
 
 ## 4.vllm推理评测
 

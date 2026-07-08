@@ -11,6 +11,7 @@ Last updated: 06/05/2026.
    get_start/dockerfile_build_guidance
    get_start/install_guidance
    get_start/quick_start
+   get_start/install_guidance_A5
 
 .. toctree::
    :maxdepth: 1
@@ -29,7 +30,7 @@ Last updated: 06/05/2026.
    model_support/examples/ascend_vllm_best_practices
    model_support/examples/dapo_multi_model_optimization_practice
    model_support/examples/gspo_optimization_practice
-   model_support/examples/qwen3_5_megatron_npu
+   model_support/examples/qwen3_5_122b_npu
 
 .. toctree::
    :maxdepth: 1

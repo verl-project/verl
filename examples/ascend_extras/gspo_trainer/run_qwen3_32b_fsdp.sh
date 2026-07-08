@@ -100,7 +100,6 @@ ACTOR=(
     actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size=${SP_SIZE}
     actor_rollout_ref.actor.fsdp_config.param_offload=True
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True
-    actor_rollout_ref.actor.fsdp_config.reshard_after_forward=True
     actor_rollout_ref.actor.fsdp_config.forward_prefetch=True
     actor_rollout_ref.actor.entropy_checkpointing=True
     actor_rollout_ref.actor.entropy_from_logits_with_chunking=True
@@ -113,7 +112,8 @@ REF=(
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${ppo_max_token_len_per_gpu}
     actor_rollout_ref.ref.fsdp_config.ulysses_sequence_parallel_size=${SP_SIZE}
     actor_rollout_ref.ref.fsdp_config.param_offload=True
-    actor_rollout_ref.ref.fsdp_config.reshard_after_forward=True
+    actor_rollout_ref.ref.fsdp_config.forward_prefetch=True
+    actor_rollout_ref.ref.entropy_checkpointing=True
     actor_rollout_ref.ref.entropy_from_logits_with_chunking=True
 )
 
@@ -132,7 +132,7 @@ ROLLOUT=(
     actor_rollout_ref.rollout.enable_chunked_prefill=True
     actor_rollout_ref.rollout.enforce_eager=False
     actor_rollout_ref.rollout.free_cache_engine=True
-    actor_rollout_ref.rollout.cudagraph_capture_sizes="[8, 16, 32, 64, 128, 192, 256]"
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_capture_sizes="[8, 16, 32, 64, 128, 192, 256]"
     +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode="FULL_DECODE_ONLY"
     actor_rollout_ref.rollout.val_kwargs.n=1
     actor_rollout_ref.rollout.val_kwargs.do_sample=True
