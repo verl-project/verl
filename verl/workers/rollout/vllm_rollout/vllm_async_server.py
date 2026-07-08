@@ -760,9 +760,7 @@ class vLLMHttpServer:
         else:
             decode_kv_params = prefill_out.extra_fields.get("kv_transfer_params")
             if decode_kv_params is None:
-                raise RuntimeError(
-                    f"PD prefill leg returned no kv_transfer_params (request_id={request_id})"
-                )
+                raise RuntimeError(f"PD prefill leg returned no kv_transfer_params (request_id={request_id})")
 
         return await decode_peer.generate.remote(
             prompt_ids,

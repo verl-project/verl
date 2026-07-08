@@ -132,11 +132,7 @@ class ServerAdapter(BaseRollout):
         else:
             decode_tp = prefill_tp
             per_replica = prefill_tp
-        rollout_world_size = (
-            per_replica
-            * self.config.data_parallel_size
-            * self.config.pipeline_model_parallel_size
-        )
+        rollout_world_size = per_replica * self.config.data_parallel_size * self.config.pipeline_model_parallel_size
         if replica_rank == -1:
             self.replica_rank = rank // rollout_world_size
         else:
@@ -168,10 +164,14 @@ class ServerAdapter(BaseRollout):
             # a deadlock report can be traced back to the role mapping.
             self._has_server = self._pd_tp_local_rank == 0
             logger.info(
-                "vllm PD ServerAdapter: rank=%d replica=%d rollout=%d role=%s "
-                "server_idx=%s tp_local=%s has_server=%s",
-                rank, self.replica_rank, self.rollout_rank, self._pd_role,
-                self._pd_server_index, self._pd_tp_local_rank, self._has_server,
+                "vllm PD ServerAdapter: rank=%d replica=%d rollout=%d role=%s server_idx=%s tp_local=%s has_server=%s",
+                rank,
+                self.replica_rank,
+                self.rollout_rank,
+                self._pd_role,
+                self._pd_server_index,
+                self._pd_tp_local_rank,
+                self._has_server,
             )
         else:
             self._has_server = self.rollout_rank == 0

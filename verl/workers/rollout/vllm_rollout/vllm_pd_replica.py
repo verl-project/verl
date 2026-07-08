@@ -24,7 +24,7 @@ from typing import Optional
 import ray
 from ray.actor import ActorHandle
 
-from verl.utils.device import get_resource_name, is_torch_npu_available
+from verl.utils.device import get_device_name, get_resource_name, is_torch_npu_available
 from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMReplica
@@ -246,7 +246,7 @@ class vLLMPDReplica(vLLMReplica):
             "kv_connector": connector,
             "kv_role": role_to_kv_role[role],
             "engine_id": engine_id,
-            "kv_buffer_device": "cuda",
+            "kv_buffer_device": get_device_name(),
         }
         if transfer_backend == "mooncake" and mooncake_protocol:
             cfg["kv_connector_extra_config"] = {"mooncake_protocol": mooncake_protocol}

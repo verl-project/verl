@@ -369,9 +369,7 @@ class vLLMColocateWorkerExtension:
         parallel_config = getattr(vllm_config, "parallel_config", None)
         local_rank = _resolve_vllm_weight_sync_local_rank(self.local_rank, parallel_config)
         trainer_rank_base = os.environ.get("VERL_ZMQ_BASE_TRAINER_RANK")
-        trainer_rank = (
-            int(trainer_rank_base) + local_rank if trainer_rank_base is not None else local_rank
-        )
+        trainer_rank = int(trainer_rank_base) + local_rank if trainer_rank_base is not None else local_rank
         return f"ipc:///tmp/rl-colocate-zmq-{job_id}-replica-{replica_rank}-rank-{trainer_rank}.sock"
 
 

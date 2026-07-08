@@ -337,6 +337,5 @@ class RolloutConfig(BaseConfig):
 
         if self.disaggregation.enabled and self.name not in ("sglang", "vllm"):
             raise ValueError(
-                f"rollout.disaggregation.enabled=True requires rollout.name in "
-                f"('sglang', 'vllm'); got {self.name!r}."
+                f"rollout.disaggregation.enabled=True requires rollout.name in ('sglang', 'vllm'); got {self.name!r}."
             )

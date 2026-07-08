@@ -47,13 +47,9 @@ class DisaggregationConfig(BaseConfig):
             )
         if self.bootstrap_port is not None and not (0 < self.bootstrap_port < 65536):
             raise ValueError(f"bootstrap_port out of range: {self.bootstrap_port}")
-        if (
-            self.transfer_backend == "mooncake"
-            and self.mooncake_protocol not in _ALLOWED_MOONCAKE_PROTOCOLS
-        ):
+        if self.transfer_backend == "mooncake" and self.mooncake_protocol not in _ALLOWED_MOONCAKE_PROTOCOLS:
             raise ValueError(
-                f"disaggregation.mooncake_protocol={self.mooncake_protocol!r} not in "
-                f"{_ALLOWED_MOONCAKE_PROTOCOLS}"
+                f"disaggregation.mooncake_protocol={self.mooncake_protocol!r} not in {_ALLOWED_MOONCAKE_PROTOCOLS}"
             )
 
     def effective_decode_tp(self, prefill_tp: int) -> int:
