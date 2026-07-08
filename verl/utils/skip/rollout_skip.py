@@ -232,21 +232,12 @@ class RolloutTqSkip(RolloutSkip):
         return self._resolve_load_step_v1(step) != -1
 
     def meet_precondition(self, step: int, *args, **kwargs) -> bool:
-        """Phase two: whether cached data exists and should be loaded/injected.
-
-        Overrides V0's ``meet_precondition``.  V1 does not use the decorator
-        pattern, so ``func``/``*args`` are accepted but ignored.
-        """
-        return self.is_enabled() and step in self.steps and self.has_v1_cache(step)
+        """Phase two: whether cached data exists and should be loaded/injected."""
+        return self.has_v1_cache(step)
 
     def should_save(self, step: int, partition_id: str = "train") -> bool:
         """Phase one: whether the sampled batch should be saved to disk."""
-        return (
-            self.is_enabled()
-            and step in self.steps
-            and partition_id == "train"
-            and not self.has_v1_cache(step)
-        )
+        return partition_id == "train" and not self.has_v1_cache(step)
 
     def maybe_load_and_inject(self, step: int, new_prompt_uids: list[str], partition_id: str = "train") -> bool:
         """Phase two: load cached data and inject into TransferQueue if cache exists.
