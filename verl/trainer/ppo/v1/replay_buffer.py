@@ -13,6 +13,7 @@
 # limitations under the License.
 import logging
 import os
+import threading
 import time
 from collections import defaultdict
 
@@ -90,8 +91,8 @@ class ReplayBuffer:
         assert isinstance(self.max_off_policy_threshold, int) and self.max_off_policy_threshold > 0, (
             f"Invalid max off policy threshold: {self.max_off_policy_threshold}, must be an integer greater than 0"
         )
-        assert self.max_off_policy_strategy in ["drop", "wait"], (
-            f"Invalid max off policy strategy: {self.max_off_policy_strategy}, must be one of ['drop', 'wait']"
+        assert self.max_off_policy_strategy in ["drop", "wait", "none"], (
+            f"Invalid max off policy strategy: {self.max_off_policy_strategy}, must be one of ['drop', 'wait', 'none']"
         )
 
         # partition_id => {key: tag}
@@ -102,6 +103,16 @@ class ReplayBuffer:
         self.failure_keys: dict[str, set] = defaultdict(set)
         # partition_id => {prompt_key: global_steps}, used to prioritize older samples.
         self.prompt_global_steps: dict[str, dict[str, int]] = defaultdict(dict)
+
+        # Serializes "sync metadata + read it" so the streaming feeder thread (count_inflight /
+        # dead_prompt_keys) and the trainer thread (sample) never observe a half-cleared view of
+        # the metadata dicts. Without it, sample() could read self.partitions right after the
+        # feeder's _sync_metadata_from_transfer_queue() did self.partitions.clear() (before the
+        # rebuild), collect zero trajectory rows, and hand an empty batch to _balance_batch
+        # (crash: "number of items:[0] < k_partitions"). Reentrant so a locked method may call
+        # another. Only the streaming trainer runs a concurrent feeder; single-threaded callers
+        # pay only an uncontended lock.
+        self._meta_lock = threading.RLock()
 
     def _sync_metadata_from_transfer_queue(self):
         """Sync the metadata from TransferQueue."""
@@ -139,7 +150,44 @@ class ReplayBuffer:
                         partition[key] = {}
                     partition[key].update(tag)
 
+    def count_inflight(self, partition_id: str = "train") -> dict[str, int]:
+        """Return the current TransferQueue prompt counts, for throttling the streaming feeder.
+
+        - pending + running: prompts that are fed but not yet consumable.
+        - finished + failure: prompts that are ready to be sampled but not yet consumed.
+
+        The streaming feeder bounds the sum of all four (total un-consumed prompts) to keep
+        the rollouter from running arbitrarily far ahead of training.
+
+        Args:
+            partition_id (str): Partition of TransferQueue, e.g. "train" or "val".
+
+        Returns:
+            dict: Counts keyed by "pending", "running", "finished", "failure".
+        """
+        with self._meta_lock:
+            self._sync_metadata_from_transfer_queue()
+            return {
+                "pending": len(self.pending_keys[partition_id]),
+                "running": len(self.running_keys[partition_id]),
+                "finished": len(self.finished_keys[partition_id]),
+                "failure": len(self.failure_keys[partition_id]),
+            }
+
+    def dead_prompt_keys(self, partition_id: str = "train") -> list[str]:
+        """TransferQueue keys of prompts whose every rollout failed (for the feeder to discard).
+
+        No-op for this prompt-level buffer: a failed prompt's status is ``failure`` and it is
+        still sampleable (the legacy behavior collects whatever sessions succeeded), so there is
+        nothing to discard. The opt-in rollout-level :class:`SessionReplayBuffer` overrides this
+        to surface all-failed prompts (every session failed -> no usable trajectory) so the
+        streaming feeder can drop them and feed a replacement.
+        """
+        return []
+
     def _has_enough_samples(self, global_steps: int, partition_id: str, batch_size: int) -> bool:
+        # "none" applies no staleness gate: just wait for batch_size finished prompts and sample
+        # the oldest (streaming bounds staleness via the feeder budget; TIS corrects off-policyness).
         # For wait strategy, we need to wait all trajectories that reach threshold to finish
         if self.max_off_policy_strategy == "wait":
             for key in self.pending_keys[partition_id] | self.running_keys[partition_id]:
@@ -201,20 +249,31 @@ class ReplayBuffer:
             dict: Auxiliary metrics.
         """
         last_debug_time = time.time()
-        self._sync_metadata_from_transfer_queue()
-        while not self._has_enough_samples(global_steps, partition_id, batch_size):
+        # Hold _meta_lock across "sync + check + collect" so a concurrent feeder-thread sync never
+        # clears self.partitions between our readiness check and our row collection (which would
+        # yield an empty batch). The lock is released while sleeping so the feeder keeps running.
+        while True:
+            with self._meta_lock:
+                self._sync_metadata_from_transfer_queue()
+                if self._has_enough_samples(global_steps, partition_id, batch_size):
+                    return self._collect_selected(global_steps, partition_id, batch_size)
+
+                if time.time() - last_debug_time > VERL_REPLAY_BUFFER_DEBUG_INTERVAL_SECONDS:
+                    logger.info(
+                        f"pending: {len(self.pending_keys[partition_id])}, "
+                        f"running: {len(self.running_keys[partition_id])}, "
+                        f"finished: {len(self.finished_keys[partition_id])}, "
+                        f"failure: {len(self.failure_keys[partition_id])}"
+                    )
+                    last_debug_time = time.time()
             time.sleep(self.poll_interval)
-            self._sync_metadata_from_transfer_queue()
 
-            if time.time() - last_debug_time > VERL_REPLAY_BUFFER_DEBUG_INTERVAL_SECONDS:
-                logger.info(
-                    f"pending: {len(self.pending_keys[partition_id])}, "
-                    f"running: {len(self.running_keys[partition_id])}, "
-                    f"finished: {len(self.finished_keys[partition_id])}, "
-                    f"failure: {len(self.failure_keys[partition_id])}"
-                )
-                last_debug_time = time.time()
+    def _collect_selected(self, global_steps: int, partition_id: str, batch_size: int) -> tuple[KVBatchMeta, dict]:
+        """Select the oldest sampleable prompts and collect their trajectory rows.
 
+        Assumes the caller holds :attr:`_meta_lock` and has just synced, so ``self.partitions`` is
+        the freshly-rebuilt (not half-cleared) view.
+        """
         # TODO: should we filter out samples with some of their sessions failed?
         finished_keys = self.finished_keys[partition_id]
         failure_keys = self.failure_keys[partition_id]
