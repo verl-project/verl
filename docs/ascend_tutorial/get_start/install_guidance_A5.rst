@@ -12,8 +12,8 @@ torch_npu     待Q2 CANN版本正式商发后更新链接                    NPU
 triton        ``3.5.0``                                         Triton，用于编写自定义算子                                 
 triton-ascend ``3.2.2``                                         NPU Triton 适配                                            
 transformers  ``4.57.3``                                        Hugging Face 大模型库，提供模型架构与预训练权重            
-vLLM          ``0.20.2``                                  高性能 LLM 推理与服务引擎                                  
-vLLM-Ascend   ``fac8784c2572b14b1134f04d9818926b4a297f3a``         NPU vLLM 后端适配                                          
+vLLM          ``0.20.2``                                        高性能 LLM 推理与服务引擎                                  
+vLLM-Ascend   ``fac8784c2572b14b1134f04d9818926b4a297f3a``      NPU vLLM 后端适配                                          
 Megatron-LM   ``core_r0.12.0``                                  大规模分布式训练框架                                       
 MindSpeed     ``0c6c0ceaa523a96032dee1539a52032155e6404e``      Megatron-LM 在昇腾 NPU 上的适配和优化组件                  
 ============= ================================================= ===================
@@ -52,7 +52,7 @@ MindSpeed-LLM 及相关依赖的源码安装指令：
     # MindSpeed
     git clone https://gitcode.com/Ascend/MindSpeed.git
     cd MindSpeed
-    git checkout ad40a494b0688e7264081bf73d080ef7c04cfcd3
+    git checkout 0c6c0ceaa523a96032dee1539a52032155e6404e
     pip install -e MindSpeed
 
     # Megatron
