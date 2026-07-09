@@ -83,7 +83,10 @@ jobs:
           pip3 install -r requirements.txt
           pip3 install --no-deps -e .
           pip3 install cupy-cuda13x==13.6.0
-          pip3 install --force-reinstall --no-deps --no-build-isolation git+https://github.com/ISEEKYAN/mbridge.git@main
+          pip3 uninstall -y mbridge
+          pip3 install git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@e2cfe7e --ignore-requires-python --no-deps --no-build-isolation
+          pip3 install git+https://github.com/NVIDIA/Megatron-LM.git@0823c73 --ignore-requires-python --no-deps --no-build-isolation
+          pip3 install "nvidia-modelopt>=0.37.0"
       - name: Check final pip list
         run: |
           pip3 list

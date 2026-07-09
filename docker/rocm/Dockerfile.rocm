@@ -171,8 +171,9 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
 # For qwen3.5
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -U git+https://github.com/ISEEKYAN/mbridge.git@v0.15.1 && \
+    pip install --no-deps megatron-bridge==0.5.0 && \
     pip install transformers --upgrade && \
-    pip install megatron-core==0.16.0 && \
+    pip install megatron-core==0.18.0 && \
     pip install mathruler && \
     pip install qwen_vl_utils && \
     pip install flash-linear-attention
