@@ -668,6 +668,9 @@ class FSDPEngine(BaseEngine):
                         scaler.scale(loss).backward()
                     else:
                         loss.backward()
+                    # Training discards model_output (train_batch pops it); keeping it accumulates
+                    # full-length nested tensors across the mini-batch (∝ ppo_mini_batch * rollout_n) → OOM.
+                    meta_info.pop("model_output", None)
 
             output_lst.append(meta_info)
 
