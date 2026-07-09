@@ -87,6 +87,13 @@ jobs:
           pip3 install git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@e2cfe7e --ignore-requires-python --no-deps --no-build-isolation
           pip3 install git+https://github.com/NVIDIA/Megatron-LM.git@0823c73 --ignore-requires-python --no-deps --no-build-isolation
           pip3 install "nvidia-modelopt>=0.37.0"
+          INDEX="https://download.pytorch.org/whl/nightly/cu130"
+          pip3 install --pre vllm==1.0.0.dev20260620+cu130 --extra-index-url "${INDEX}"
+          pip3 install --pre --no-deps \
+            torch==2.14.0.dev20260625+cu130 \
+            torchvision==0.29.0.dev20260626+cu130 \
+            --extra-index-url "${INDEX}"
+          pip3 uninstall -y flash-attn
       - name: Check final pip list
         run: |
           pip3 list

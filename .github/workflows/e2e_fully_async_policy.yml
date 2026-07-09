@@ -103,7 +103,7 @@ jobs:
   e2e_fully_async_policy_fsdp2:
     needs: setup
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
-    timeout-minutes: 10 # Increase timeout for async training
+    timeout-minutes: 20 # Increase timeout for async training
     env:
       HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
       NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
@@ -117,7 +117,13 @@ jobs:
       - name: Install the current repository
         run: |
           pip3 install -r requirements-test.txt
-          pip3 install --no-deps torchvision==0.26.0
+          INDEX="https://download.pytorch.org/whl/nightly/cu130"
+          pip3 install --pre vllm==1.0.0.dev20260620+cu130 --extra-index-url "${INDEX}"
+          pip3 install --pre --no-deps \
+            torch==2.14.0.dev20260625+cu130 \
+            torchvision==0.29.0.dev20260626+cu130 \
+            --extra-index-url "${INDEX}"
+          pip3 uninstall -y flash-attn
           pip3 install --no-deps -e .
           pip3 install cupy-cuda13x==13.6.0
       - name: Check final pip list
@@ -135,7 +141,7 @@ jobs:
   e2e_fully_async_policy_megatron:
     needs: setup
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
-    timeout-minutes: 10 # Increase timeout for async training
+    timeout-minutes: 20 # Increase timeout for async training
     env:
       HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
       NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
@@ -150,7 +156,13 @@ jobs:
         run: |
           pip3 install -r requirements-test.txt
           pip3 install -r requirements.txt
-          pip3 install --no-deps torchvision==0.26.0
+          INDEX="https://download.pytorch.org/whl/nightly/cu130"
+          pip3 install --pre vllm==1.0.0.dev20260620+cu130 --extra-index-url "${INDEX}"
+          pip3 install --pre --no-deps \
+            torch==2.14.0.dev20260625+cu130 \
+            torchvision==0.29.0.dev20260626+cu130 \
+            --extra-index-url "${INDEX}"
+          pip3 uninstall -y flash-attn
           pip3 install --no-deps -e .
           pip3 install cupy-cuda13x==13.6.0
           pip3 uninstall -y mbridge
