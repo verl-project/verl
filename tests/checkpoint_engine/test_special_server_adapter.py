@@ -43,7 +43,8 @@ def init_config() -> DictConfig:
         )
 
     config.actor_rollout_ref.model.path = os.path.expanduser("~/models/Qwen/Qwen3-VL-2B-Instruct")
-    config.actor_rollout_ref.model.override_config.attn_implementation = "sdpa"
+    if os.environ["ROLLOUT_NAME"] == "vllm":
+        config.actor_rollout_ref.model.override_config.attn_implementation = "sdpa"
     config.actor_rollout_ref.rollout.name = os.environ["ROLLOUT_NAME"]
     config.actor_rollout_ref.rollout.max_num_seqs = 256
     config.actor_rollout_ref.rollout.response_length = 4096
