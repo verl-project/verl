@@ -75,6 +75,13 @@ policy_loss:
   # KL divergence penalty coefficient
   ppo_kl_coef: 0.1
 
+  # Lower bound of the tapered importance weight applied to negative-advantage sequences
+  # for topr loss (https://arxiv.org/abs/2503.14286); canonical TOPR uses [0, 1]
+  topr_negative_ratio_lower: 0.0
+
+  # Upper bound of the tapered importance weight applied to negative-advantage sequences for topr loss
+  topr_negative_ratio_upper: 1.0
+
 # Constant C in Dual-clip PPO; clips when advantage < 0 and ratio > C
 clip_ratio_c: 3.0
 
