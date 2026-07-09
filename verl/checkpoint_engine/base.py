@@ -321,6 +321,11 @@ class CheckpointEngineWorker(Worker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     async def update_weights(self, global_steps: int = None):
+        # Engines that push weights straight into the inference server (e.g. delta's
+        # sparse in-place apply) drive the server themselves instead of yielding tensors.
+        if hasattr(self.checkpoint_engine, "update_weights_via_server"):
+            await self.checkpoint_engine.update_weights_via_server(self.server_adapter, global_steps=global_steps)
+            return
         weights = self.checkpoint_engine.receive_weights(global_steps=global_steps)
         await self.server_adapter.update_weights(weights, global_steps=global_steps)
 

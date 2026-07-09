@@ -28,9 +28,15 @@ checkpoint engine (including the V1 ``separate_async`` trainer).
   per-parameter manifest. ``encoding`` selects the position encoding: ``indices`` (int32 absolute
   positions, lowest compute) or ``deltas`` (uint16 gap deltas, smaller on the wire).
 - **Transport**: the sparse payload is broadcast over the existing NCCL collective group in
-  bucket-sized flushes; a checksum per flush is verified on the receiver (fail loud).
-- **Apply**: the rollout worker reconstructs the full tensors locally and applies them through the
-  ordinary weight-update path — no SGLang-side delta receiver is required.
+  bucket-sized flushes (streamed: each flush is sent and freed as it is produced, so sender peak
+  memory stays ~2 buckets regardless of model size).
+- **Apply**: each rollout worker hands its local copy of the sparse payload to its colocated SGLang
+  TP worker via same-GPU ``update_weights_from_tensor`` IPC, where a verl-shipped loader —
+  registered automatically through SGLang's stock ``--custom-weight-loader`` hook, so **no SGLang
+  fork or patch is needed** — verifies the flush checksum (fail loud), densifies each parameter's
+  delta into a NaN-masked tensor, and overwrites only the changed positions *in place* on the live
+  weights. No full-model mirror is staged anywhere on the rollout side: receiver peak memory is one
+  bucket plus one decode chunk, independent of model size.
 - **Seeding**: the first sync broadcasts a full delta (every position), so a dummy-initialized rollout
   gets a correct base; subsequent syncs are sparse.
 
@@ -80,6 +86,6 @@ Planned extensions, in design order:
   megatron→HF bridge on rank 0, extending ``delta_sharded`` beyond FSDP.
 - **Quantized rollout (fp8 etc.)**: diff the quantized bytes (quantize-then-diff) so a low-precision
   rollout engine can consume deltas without a bf16 intermediate.
-- **Native in-engine apply**: hand the sparse payload straight to the inference engine's delta
-  receiver (in-place masked apply, no receiver-side reconstruction) once such an interface is
-  available upstream.
+- **Upstream SGLang delta receiver**: once SGLang ships a native distributed delta receiver, the
+  broadcast can land directly on the TP workers (dropping the same-GPU IPC forward); the current
+  custom-weight-loader apply is already in place and bit-compatible with that wire format.

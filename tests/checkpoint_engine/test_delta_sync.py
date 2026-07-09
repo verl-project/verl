@@ -181,11 +181,12 @@ def test_dtype_agnostic_diff_fp32():
 
 
 def _apply_flushes_to_mirror(mirror: dict[str, torch.Tensor], flushes) -> None:
-    """Reproduce DeltaCheckpointEngine.receive_weights' mirror-combine in-process.
+    """Reproduce SGLang's masked delta apply (``_apply_delta_payload``) in-process.
 
     Decodes each flush and overwrites only the changed (non-NaN) positions into
-    the running full-weight mirror -- exactly what the rollout worker does before
-    handing full tensors to ``server_adapter.update_weights``. No GPU / NCCL /
+    the running full-weight mirror -- exactly what SGLang's masked-copy loader
+    does to its live weights when the engine sends
+    ``update_weights_from_distributed(load_format="delta")``. No GPU / NCCL /
     SGLang needed: the transport only moves bytes, so the lossless guarantee is
     fully exercised by decode + combine.
     """

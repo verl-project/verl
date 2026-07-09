@@ -256,6 +256,16 @@ class SGLangHttpServer:
         engine_kwargs = self.config.get("engine_kwargs", {}).get("sglang", {}) or {}
         attention_backend = engine_kwargs.pop("attention_backend", None)
         mm_attention_backend = engine_kwargs.pop("mm_attention_backend", None)
+        # Delta checkpoint engines apply sparse weight updates in place through SGLang's
+        # custom-weight-loader hook; register the verl loader so the update requests'
+        # load_format resolves inside the TP workers.
+        custom_weight_loader = list(engine_kwargs.pop("custom_weight_loader", None) or [])
+        ce_backend = str((self.config.get("checkpoint_engine", None) or {}).get("backend", ""))
+        if ce_backend.startswith("delta"):
+            from verl.checkpoint_engine.delta_sync.sglang_loader import LOADER_FQN
+
+            if LOADER_FQN not in custom_weight_loader:
+                custom_weight_loader.append(LOADER_FQN)
         if attention_backend is None:
             if torch.version.hip is not None:
                 attention_backend = "aiter"
@@ -310,6 +320,7 @@ class SGLangHttpServer:
             "json_model_override_args": json.dumps({"quantization_config": fp8_block_quant_kwargs})
             if quantization == "fp8"
             else json.dumps({}),
+            "custom_weight_loader": custom_weight_loader or None,
             **engine_kwargs,
         }
 

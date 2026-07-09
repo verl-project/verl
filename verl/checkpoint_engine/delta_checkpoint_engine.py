@@ -16,11 +16,14 @@
 Puts the delta on the trainer->rollout wire: the trainer byte-diffs against a
 pinned-CPU snapshot and broadcasts only the changed ``(position, value)`` pairs
 over the same ``ray.util.collective`` NCCL group the full-weight
-:class:`NCCLCheckpointEngine` uses (actor rank0 -> rollout workers). Following
-verl's design, the rollout *worker* reconstructs full tensors from the delta and
-hands them to ``server_adapter.update_weights`` for the local push into SGLang;
-the changed-byte payload is what crosses the wire, so the disaggregated
-trainer->rollout transfer drops to the sparsity ratio.
+:class:`NCCLCheckpointEngine` uses (actor rank0 -> rollout CheckpointEngineWorkers).
+Each rollout worker then hands its local copy of the sparse payload to its
+colocated SGLang TP worker via same-GPU ``update_weights_from_tensor`` IPC, where
+the verl-shipped :mod:`.delta_sync.sglang_loader` (registered through SGLang's
+stock ``--custom-weight-loader`` hook — no SGLang fork or patch needed) decodes
+and masked-applies it *in place* onto the live weights. No full-model mirror is
+staged anywhere on the rollout side: receiver peak memory is one bucket plus one
+decode chunk, independent of model size.
 
 The first sync broadcasts a full delta (every position) so a dummy-initialized
 rollout gets a correct base; subsequent syncs are sparse.
@@ -28,20 +31,21 @@ rollout gets a correct base; subsequent syncs are sparse.
 
 from __future__ import annotations
 
+import json
 import logging
-from typing import AsyncGenerator, Generator
+from typing import Generator
 from unittest.mock import patch
 
 import ray.util.collective as collective
 import torch
-import torch.distributed as dist
 import zmq
 
 with patch("importlib.metadata.distributions", return_value=[]):
     import cupy as cp
 
 from .delta_sync import DeltaState, iter_delta_flushes
-from .delta_sync.encode import DeltaParam, checksum as _checksum, decode_chunk
+from .delta_sync.encode import DeltaParam, checksum as _checksum
+from .delta_sync.sglang_loader import LOADER_FQN
 from .delta_sync.sharded import gather_v_to_rank0, shard_delta_indices
 from .delta_sync.wrapper import DeltaFlush
 
@@ -62,11 +66,18 @@ class DeltaCheckpointEngine(NCCLCheckpointEngine):
     """NCCL delta transport. Reuses NCCLCheckpointEngine's group/zmq machinery;
     overrides send/receive to move only changed positions+values."""
 
+    # Cap on changed elements per DeltaParam entry. The receiver-side decode
+    # densifies per entry with an int64 index transient (8 B/element), so an
+    # uncapped entry (e.g. a 7B model's whole embedding on the full seed, ~545M
+    # elements) would spike several GiB at once. Oversized per-param deltas are
+    # sliced into multiple entries (the masked apply is sequential, so splitting
+    # is transparent); 64M elements bounds the transient to ~512 MiB.
+    MAX_ENTRY_ELEMS = 64 << 20
+
     def __init__(self, *args, encoding: str = "indices", **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.encoding = encoding
         self._state = DeltaState()  # trainer-side snapshot for diffing
-        self._mirror: dict[str, torch.Tensor] = {}  # rollout-side full-weight mirror
 
     def prepare(self) -> MasterMetadata | None:
         # Delta broadcasts small per-flush buffers directly, so skip the parent's
@@ -75,6 +86,70 @@ class DeltaCheckpointEngine(NCCLCheckpointEngine):
         return MasterMetadata(zmq_ip=self.ip, zmq_port=self.listen_port) if self.is_master else None
 
     # ---- trainer side ----
+    # ---- shared STREAMING wire ----
+    # Broadcast each flush the moment it is produced and free it, instead of materializing every
+    # flush up front. Peak device memory stays ~2 buckets (like NCCLCheckpointEngine's send/recv
+    # buffers) rather than the whole model -- required for large models where the first (full-seed)
+    # sync would otherwise hold the entire delta on rank 0. Wire: one zmq manifest + NCCL broadcast
+    # per flush, with an ``is_last`` flag so the receiver loops until the stream ends. Each
+    # CheckpointEngineWorker then hands its local copy of the sparse payload to its colocated
+    # SGLang TP worker (same-GPU IPC), where the verl-shipped custom weight loader applies it
+    # in place -- no full-model staging anywhere on the rollout side.
+    def _publish_flush(self, flush: DeltaFlush, first: bool, is_last: bool) -> None:
+        meta = {
+            "is_full": first,
+            "encoding": self.encoding,
+            "is_last": is_last,
+            "terminal_empty": False,
+            "pos_numel": int(flush.positions_cpu.numel()),
+            "val_numel": int(flush.values_gpu.numel()),
+            "val_dtype": str(flush.values_gpu.dtype).replace("torch.", ""),
+            "spec": {
+                "encoding": self.encoding,
+                "params": [vars(p) for p in flush.params],
+                "checksum": int(flush.checksum),
+            },
+        }
+        self.socket.send_string(self.topic, flags=zmq.SNDMORE)
+        self.socket.send_pyobj(meta)
+        pos_u8 = flush.positions_cpu.to("cuda", non_blocking=True).contiguous().view(torch.uint8)
+        val_u8 = flush.values_gpu.contiguous().view(torch.uint8)
+        pos_cp = cp.empty(pos_u8.numel(), dtype=cp.uint8)
+        val_cp = cp.empty(val_u8.numel(), dtype=cp.uint8)
+        pos_cp[:] = cp.asarray(pos_u8)
+        val_cp[:] = cp.asarray(val_u8)
+        collective.broadcast(pos_cp, src_rank=0, group_name=self.group_name)
+        collective.broadcast(val_cp, src_rank=0, group_name=self.group_name)
+
+    def _publish_terminal(self, first: bool) -> None:
+        """End-of-stream marker when zero flushes were produced (no broadcast, just a signal)."""
+        meta = {"is_full": first, "encoding": self.encoding, "is_last": True, "terminal_empty": True}
+        self.socket.send_string(self.topic, flags=zmq.SNDMORE)
+        self.socket.send_pyobj(meta)
+
+    def _stream_flushes(self, flush_iter, first: bool, global_steps, tag: str) -> None:
+        """Stream flushes with a 1-flush lookahead so the final flush carries ``is_last``; each flush
+        is freed right after it is broadcast, bounding peak memory to ~2 flushes."""
+        pending = None
+        n = 0
+        total = 0
+        for f in flush_iter:
+            if pending is not None:
+                self._publish_flush(pending, first, is_last=False)
+                n += 1
+                total += int(pending.values_gpu.numel())
+            pending = f
+        if pending is not None:
+            self._publish_flush(pending, first, is_last=True)
+            n += 1
+            total += int(pending.values_gpu.numel())
+        else:
+            self._publish_terminal(first)
+        logger.info(
+            "delta-nccl send v=%s %s flushes=%d nnz=%d (streamed)",
+            global_steps, tag, n, total,
+        )
+
     async def send_weights(
         self,
         weights: Generator[tuple[str, torch.Tensor], None, None],
@@ -95,91 +170,111 @@ class DeltaCheckpointEngine(NCCLCheckpointEngine):
         else:
             weights_iter = weights
 
-        flushes = list(
-            iter_delta_flushes(
-                weights_iter, self._state, encoding=self.encoding, bucket_bytes=self.bucket_size
-            )
+        flush_gen = iter_delta_flushes(
+            weights_iter, self._state, encoding=self.encoding, bucket_bytes=self.bucket_size
         )
-
-        # 1. publish the per-sync manifest over the zmq side-channel. The receiver
-        #    needs it to size the recv buffers and decode the position blob.
-        meta = {
-            "is_full": first,
-            "encoding": self.encoding,
-            "flushes": [
-                {
-                    "params": [vars(p) for p in f.params],
-                    "pos_numel": int(f.positions_cpu.numel()),
-                    "val_numel": int(f.values_gpu.numel()),
-                    "val_dtype": str(f.values_gpu.dtype).replace("torch.", ""),
-                    "checksum": int(f.checksum),
-                }
-                for f in flushes
-            ],
-        }
-        self.socket.send_string(self.topic, flags=zmq.SNDMORE)
-        self.socket.send_pyobj(meta)
-
-        # 2. broadcast each flush's positions then values over NCCL as raw bytes.
-        #    Master uses cupy-owned buffers (mirrors NCCLCheckpointEngine) so NCCL
-        #    can register them even under PYTORCH_CUDA_ALLOC_CONF=expandable_segments.
-        total = 0
-        for f in flushes:
-            pos_u8 = f.positions_cpu.to("cuda", non_blocking=True).contiguous().view(torch.uint8)
-            val_u8 = f.values_gpu.contiguous().view(torch.uint8)
-            pos_cp = cp.empty(pos_u8.numel(), dtype=cp.uint8)
-            val_cp = cp.empty(val_u8.numel(), dtype=cp.uint8)
-            pos_cp[:] = cp.asarray(pos_u8)
-            val_cp[:] = cp.asarray(val_u8)
-            collective.broadcast(pos_cp, src_rank=0, group_name=self.group_name)
-            collective.broadcast(val_cp, src_rank=0, group_name=self.group_name)
-            total += int(f.nnz)
-        logger.info(
-            "delta-nccl send v=%s %s flushes=%d nnz=%d",
-            global_steps, "FULL" if first else "delta", len(flushes), total,
-        )
+        self._stream_flushes(flush_gen, first, global_steps, "FULL" if first else "delta")
 
     # ---- rollout worker side ----
-    async def receive_weights(
-        self,
-        global_steps: int | None = None,
-    ) -> AsyncGenerator[tuple[str, torch.Tensor], None]:
-        assert self.rank > 0, "Rank 0 should not receive weights."
-        self.socket.recv_string()
-        meta = self.socket.recv_pyobj()
+    def receive_weights(self, global_steps: int | None = None):
+        raise RuntimeError(
+            "delta engine applies weights inside SGLang via update_weights_via_server; "
+            "it does not yield tensors to the server adapter"
+        )
 
-        for fmeta in meta["flushes"]:
-            val_dtype = getattr(torch, fmeta["val_dtype"])
+    async def update_weights_via_server(self, server_adapter, global_steps: int | None = None) -> None:
+        """Rollout-side apply loop: hand each sparse flush to the colocated SGLang worker.
+
+        Every CheckpointEngineWorker receives the broadcast payload into its own GPU buffer
+        (one bucket, freed right after dispatch) and forwards it — same-GPU CUDA IPC via
+        ``update_weights_from_tensor`` — to its SGLang TP worker, where the verl-shipped
+        ``sglang_loader.apply_delta`` (registered through ``--custom-weight-loader``)
+        decodes and masked-applies it in place. No full-model mirror is staged anywhere:
+        SGLang's own live weights are the base.
+        """
+        assert self.rank > 0, "Rank 0 should not receive weights."
+        await server_adapter._init_server_adapter()
+        engine = getattr(server_adapter, "_engine", None)
+        assert getattr(server_adapter, "_pd_role", None) is None, (
+            "delta checkpoint engine does not support PD disaggregation"
+        )
+        applied = 0
+        while True:
+            self.socket.recv_string()
+            meta = self.socket.recv_pyobj()
+            if meta.get("terminal_empty"):
+                break
+
+            val_dtype = getattr(torch, meta["val_dtype"])
             elem = torch.empty(0, dtype=val_dtype).element_size()
-            pos = torch.empty(fmeta["pos_numel"], dtype=torch.uint8, device="cuda")
-            val_u8 = torch.empty(fmeta["val_numel"] * elem, dtype=torch.uint8, device="cuda")
+            pos = torch.empty(meta["pos_numel"], dtype=torch.uint8, device="cuda")
+            val_u8 = torch.empty(meta["val_numel"] * elem, dtype=torch.uint8, device="cuda")
             collective.broadcast(pos, src_rank=0, group_name=self.group_name)
             collective.broadcast(val_u8, src_rank=0, group_name=self.group_name)
             val = val_u8.view(val_dtype)
 
-            got = _checksum(pos, val)
-            if got != fmeta["checksum"]:
-                raise RuntimeError(
-                    f"delta-nccl checksum mismatch on rank {self.rank} "
-                    f"v={global_steps}: got {got}, expected {fmeta['checksum']}"
-                )
-
-            params = [DeltaParam(**p) for p in fmeta["params"]]
-            decoded = decode_chunk(
-                meta["encoding"], pos.cpu().numpy().tobytes(), val, params
+            spec_bytes = json.dumps(meta["spec"]).encode()
+            spec_t = torch.frombuffer(bytearray(spec_bytes), dtype=torch.uint8).to("cuda")
+            await self._dispatch_flush_to_sglang(
+                server_adapter,
+                engine,
+                [("__delta_spec__", spec_t), ("__positions__", pos), ("__values__", val)],
+                flush_cache=bool(meta["is_last"]),
             )
-            for name, dt in decoded.items():
-                mask = ~torch.isnan(dt)
-                cur = self._mirror.get(name)
-                if cur is None:
-                    # first sync (full): the decode covers every position.
-                    cur = dt.clone()
-                    cur[~mask] = 0
-                else:
-                    cur = cur.to(dt.device)
-                    cur[mask] = dt[mask]
-                self._mirror[name] = cur
-                yield name, cur
+            applied += 1
+            del pos, val_u8, val, spec_t
+            if meta["is_last"]:
+                break
+
+        if engine is not None and server_adapter._is_server_tp_leader() and global_steps is not None:
+            await server_adapter.server_actor.set_global_steps.remote(global_steps)
+        logger.info("delta apply v=%s flushes=%d (in-place via sglang loader)", global_steps, applied)
+
+    @staticmethod
+    async def _dispatch_flush_to_sglang(server_adapter, engine, params_batch, flush_cache: bool) -> None:
+        """Hand one sparse flush to the colocated SGLang server via same-GPU CUDA IPC.
+
+        SPMD across the replica's CheckpointEngineWorkers: every rank serializes its local
+        GPU copy, TP0 gathers the IPC handles and posts one ``update_weights_from_tensor``
+        with ``load_format`` pointing at the verl loader. Same flow as
+        ``sglang.srt.weight_sync.utils.update_weights``, inlined so the radix cache is
+        flushed only on the stream's last flush instead of on every bucket (the request's
+        ``flush_cache`` defaults to True). Checksum is re-verified inside each SGLang
+        worker (fail loud).
+        """
+        import torch.distributed as dist
+        from sglang.srt.managers.io_struct import UpdateWeightsFromTensorReqInput
+        from sglang.srt.model_executor.model_runner import LocalSerializedTensor
+        from sglang.srt.utils import MultiprocessingSerializer
+        from sglang.srt.utils.patch_torch import monkey_patch_torch_reductions
+
+        monkey_patch_torch_reductions()
+        mesh = server_adapter.device_mesh["infer_tp"]
+        tp_size = mesh.mesh.size()[0]
+        serialized = [(name, MultiprocessingSerializer.serialize(t.detach())) for name, t in params_batch]
+
+        gathered = [None for _ in range(tp_size)] if mesh.get_local_rank() == 0 else None
+        dist.gather_object(
+            obj=serialized,
+            object_gather_list=gathered,
+            dst=mesh.mesh.tolist()[0],
+            group=mesh.get_group(),
+        )
+        if mesh.get_local_rank() != 0:
+            return
+
+        named_tensors = [
+            (group[0][0], LocalSerializedTensor(values=[part[1] for part in group]))
+            for group in zip(*gathered, strict=True)
+        ]
+        req = UpdateWeightsFromTensorReqInput(
+            serialized_named_tensors=[
+                MultiprocessingSerializer.serialize(named_tensors) for _ in range(tp_size)
+            ],
+            load_format=LOADER_FQN,
+            flush_cache=flush_cache,
+        )
+        await engine.update_weights_from_tensor(req)
 
 
 @CheckpointEngineRegistry.register("delta_sharded")
@@ -191,7 +286,8 @@ class DeltaShardedCheckpointEngine(DeltaCheckpointEngine):
     only the changed ``(within-param position, value)`` pairs are gathered to rank 0 -- so
     the all-gather volume drops to the sparsity ratio and rank 0 no longer holds a
     full-model snapshot. The assembled result is bit-identical to the parent's diff, so the
-    receiver (:meth:`DeltaCheckpointEngine.receive_weights`) is reused unchanged.
+    wire and the receiver (:meth:`DeltaCheckpointEngine.update_weights_via_server`) are
+    reused unchanged.
 
     ``send_weights`` here expects the SHARDED generator ``get_per_tensor_param_shard()``
     (``(name, local_flat_shard, within_param_offset, full_numel, full_shape, contributes)``)
@@ -239,10 +335,32 @@ class DeltaShardedCheckpointEngine(DeltaCheckpointEngine):
 
     async def send_weights(self, weights, global_steps=None):
         # All actor ranks participate (gather-v is collective); only torch rank 0 broadcasts.
+        # rank 0 accumulates the gathered per-param deltas into bucket_size-sized flushes and streams
+        # each one as soon as it fills (then frees it), so peak memory is ~2 buckets rather than the
+        # whole model -- otherwise the first (full-seed) sync would hold the entire delta on rank 0.
         assert self.rank <= 0, "Trainer workers other than rank 0 should not send weights."
         is_r0 = self.is_master
         first = not self._shard_seeded
-        per_param: list = []
+        bucket: list = []
+        bucket_bytes = 0
+        pending = None  # a DeltaFlush awaiting emission (1-flush lookahead so the last flush is is_last)
+        n_flushes = 0
+
+        def _emit(is_last):
+            nonlocal pending, n_flushes
+            if pending is not None:
+                self._publish_flush(pending, first, is_last=is_last)
+                n_flushes += 1
+                pending = None
+
+        def _seal():
+            nonlocal bucket, bucket_bytes, pending
+            if not bucket:
+                return
+            _emit(is_last=False)  # another bucket follows, so the prior one is not the last
+            pending = self._assemble_flush(bucket)
+            bucket = []
+            bucket_bytes = 0
 
         for name, local, offset, _full_numel, full_shape, contributes in weights:
             local = local.detach().contiguous().view(-1)
@@ -261,38 +379,26 @@ class DeltaShardedCheckpointEngine(DeltaCheckpointEngine):
 
             aidx, aval = gather_v_to_rank0(gidx, gval)
             if is_r0 and aidx is not None and aidx.numel() > 0:
-                per_param.append(
-                    (name, str(local.dtype).replace("torch.", ""), list(full_shape), aidx, aval)
-                )
+                # Slice oversized per-param deltas so one entry never exceeds
+                # MAX_ENTRY_ELEMS (bounds the receiver-side decode transient).
+                for s in range(0, aidx.numel(), self.MAX_ENTRY_ELEMS):
+                    e = min(s + self.MAX_ENTRY_ELEMS, aidx.numel())
+                    bucket.append(
+                        (name, str(local.dtype).replace("torch.", ""), list(full_shape), aidx[s:e], aval[s:e])
+                    )
+                    bucket_bytes += (e - s) * 8 + (e - s) * aval.element_size()
+                    if bucket_bytes >= self.bucket_size:
+                        _seal()
 
         self._shard_seeded = True
         if not is_r0:
             return
-
-        flush = self._assemble_flush(per_param)
-        meta = {
-            "is_full": first,
-            "encoding": self.encoding,
-            "flushes": [{
-                "params": [vars(p) for p in flush.params],
-                "pos_numel": int(flush.positions_cpu.numel()),
-                "val_numel": int(flush.values_gpu.numel()),
-                "val_dtype": str(flush.values_gpu.dtype).replace("torch.", ""),
-                "checksum": int(flush.checksum),
-            }],
-        }
-        self.socket.send_string(self.topic, flags=zmq.SNDMORE)
-        self.socket.send_pyobj(meta)
-
-        pos_u8 = flush.positions_cpu.to("cuda", non_blocking=True).contiguous().view(torch.uint8)
-        val_u8 = flush.values_gpu.contiguous().view(torch.uint8)
-        pos_cp = cp.empty(pos_u8.numel(), dtype=cp.uint8)
-        val_cp = cp.empty(val_u8.numel(), dtype=cp.uint8)
-        pos_cp[:] = cp.asarray(pos_u8)
-        val_cp[:] = cp.asarray(val_u8)
-        collective.broadcast(pos_cp, src_rank=0, group_name=self.group_name)
-        collective.broadcast(val_cp, src_rank=0, group_name=self.group_name)
+        _seal()  # seal the final partial bucket into `pending`
+        if pending is not None:
+            _emit(is_last=True)
+        else:
+            self._publish_terminal(first)
         logger.info(
-            "delta-sharded send v=%s %s params=%d nnz=%d",
-            global_steps, "FULL" if first else "delta", len(flush.params), int(flush.values_gpu.numel()),
+            "delta-sharded send v=%s %s flushes=%d (streamed)",
+            global_steps, "FULL" if first else "delta", n_flushes,
         )
