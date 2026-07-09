@@ -53,13 +53,15 @@ MindSpeed-LLM 及相关依赖的源码安装指令：
     git clone https://gitcode.com/Ascend/MindSpeed.git
     cd MindSpeed
     git checkout 0c6c0ceaa523a96032dee1539a52032155e6404e
-    pip install -e MindSpeed
+    pip install -e .
+    cd ..
 
     # Megatron
     git clone https://github.com/NVIDIA/Megatron-LM.git
     cd Megatron-LM
     git checkout core_r0.12.0
-    pip install -e Megatron-LM
+    pip install -e .
+    cd ..
 
     # 配置环境变量
     export PYTHONPATH=$PYTHONPATH:your path/Megatron-LM
