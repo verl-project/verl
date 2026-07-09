@@ -141,6 +141,7 @@ class PPOTrainer(ABC):
             max_off_policy_threshold=sampler_config.max_off_policy_threshold,
             max_off_policy_strategy=sampler_config.max_off_policy_strategy,
             sampler_kwargs=sampler_config.sampler_kwargs,
+            refill_fn=self._add_batch_to_generate,
         )
 
     def init(self):
@@ -417,16 +418,7 @@ class PPOTrainer(ABC):
         )
         sample_batch_size = train_batch_size // self.parameter_sync_step
 
-        # 1. stream one train batch worth of prompts into generation for this step.
-        # Prompts are fetched from the dataloader ``gen_batch_size`` at a time (see
-        # ``_add_batch_to_generate``); with the default ``gen_batch_size == train_batch_size`` this
-        # is a single fetch, reproducing the classic per-step feed.
-        # TODO(drop-refill): ``self.replay_buffer.sample`` in ``_step_once`` may drop off-policy
-        #   (and, once DAPO dynamic sampling lands, all-0/all-1) groups, which shrinks the trained
-        #   batch below ``sample_batch_size``. To keep the rollout effort per step constant, refill
-        #   the dropped count after sampling by submitting an equal number of fresh prompts, e.g.
-        #   ``self._add_batch_to_generate(num_prompts=dropped)`` (set ``gen_batch_size=1`` so any
-        #   dropped count is a valid multiple). Left unimplemented for now.
+        # regular feed: stream one train batch worth of prompts for this step
         self._add_batch_to_generate()
 
         metrics_aggregator = MetricsAggregator()
@@ -569,6 +561,16 @@ class PPOTrainer(ABC):
             is_train=False,
             max_samples=self.config.data.get("val_max_samples", -1),
         )
+
+        # Async drop refills an arbitrary number of dropped prompts, which must divide gen_batch_size
+        if (
+            self.config.data.get("gen_batch_size", None) is None
+            and self.trainer_mode != "sync"
+            and self.config.trainer.v1.sampler.max_off_policy_strategy == "drop"
+        ):
+            logger.info("data.gen_batch_size defaulted to 1 for the async 'drop' off-policy strategy.")
+            with open_dict(self.config):
+                self.config.data.gen_batch_size = 1
 
         # use gen_batch_size as the batch size for the dataloader if set, otherwise use train_batch_size
         gen_batch_size = self.config.data.get("gen_batch_size", None) or self.config.data.train_batch_size

@@ -27,6 +27,23 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 VERL_REPLAY_BUFFER_DEBUG_INTERVAL_SECONDS = int(os.getenv("VERL_REPLAY_BUFFER_DEBUG_INTERVAL_SECONDS", "60"))
 
 
+def _accumulate_drop_metrics(acc: dict, new: dict, dropped: int) -> None:
+    """Merge one poll iteration's drop metrics into ``acc`` in place."""
+    count_key = next((k for k in new if k.endswith("/dropped_samples")), None)
+    prev_total = acc.get(count_key, 0) if count_key else 0
+
+    for key, value in new.items():
+        if key.endswith("/dropped_samples"):
+            acc[key] = acc.get(key, 0) + value
+        elif key.endswith("/dropped_samples_staleness/mean"):
+            denom = prev_total + dropped
+            acc[key] = (acc.get(key, 0.0) * prev_total + value * dropped) / denom if denom else value
+        elif key.endswith("/dropped_samples_staleness/max"):
+            acc[key] = max(acc.get(key, value), value)
+        elif key.endswith("/dropped_samples_staleness/min"):
+            acc[key] = min(acc.get(key, value), value)
+
+
 # TODO: Pass custom sampler to TransferQueue:
 # https://github.com/Ascend/TransferQueue/blob/main/tutorial/05_custom_sampler.py
 
@@ -68,6 +85,8 @@ class ReplayBuffer:
         max_off_policy_strategy (str): How to handle trajectory that exceeds the maximum number of model versions.
         sampler_kwargs (dict): Additional kwargs for the custom sampler.
         poll_interval (float, optional): Poll interval in seconds. Defaults to 2.0.
+        refill_fn (callable, optional): Function to submits fresh prompts for generation to replace stale groups dropped
+            by the ``drop`` strategy (trainer-injected)
     """
 
     def __init__(
@@ -78,6 +97,7 @@ class ReplayBuffer:
         max_off_policy_strategy: str,
         sampler_kwargs: DictConfig,
         poll_interval: float = 2.0,
+        refill_fn=None,
     ):
         self.trainer_mode = trainer_mode
         self.trainer_config = trainer_config
@@ -85,6 +105,7 @@ class ReplayBuffer:
         self.max_off_policy_strategy = max_off_policy_strategy
         self.sampler_kwargs = sampler_kwargs
         self.poll_interval = poll_interval
+        self.refill_fn = refill_fn
 
         assert isinstance(self.max_off_policy_threshold, int) and self.max_off_policy_threshold > 0, (
             f"Invalid max off policy threshold: {self.max_off_policy_threshold}, must be an integer greater than 0"
@@ -148,38 +169,37 @@ class ReplayBuffer:
 
         return len(self.finished_keys[partition_id]) + len(self.failure_keys[partition_id]) >= batch_size
 
-    def _drop_max_off_policy_samples(
-        self, global_steps: int, partition_id: str, batch: KVBatchMeta
-    ) -> tuple[KVBatchMeta, dict]:
-        if not self.max_off_policy_strategy == "drop":
-            return batch, {}
+    def _drop_stale_finished(self, global_steps: int, partition_id: str) -> tuple[int, dict]:
+        """Drop terminal (finished/failure) prompts whose version span exceeds the threshold."""
+        if self.max_off_policy_strategy != "drop":
+            return 0, {}
 
-        kept_keys, kept_tags = [], []
-        dropped_keys, dropped_tags = [], []
-        for key, tag in zip(batch.keys, batch.tags, strict=False):
-            prompt_global_steps = tag["global_steps"]
-            if (global_steps - prompt_global_steps + 1) > self.max_off_policy_threshold:
-                dropped_keys.append(key)
-                dropped_tags.append(tag)
-            else:
-                kept_keys.append(key)
-                kept_tags.append(tag)
+        prompt_global_steps = self.prompt_global_steps[partition_id]
+        stale_uids = set()
+        stale_spans = []
+        for uid in self.finished_keys[partition_id] | self.failure_keys[partition_id]:
+            span = global_steps - prompt_global_steps.get(uid, global_steps) + 1
+            if span > self.max_off_policy_threshold:
+                stale_uids.add(uid)
+                stale_spans.append(span)
 
-        # Remove dropped keys from TransferQueue
-        metrics = {}
-        if len(dropped_keys) > 0:
-            # TODO: should we drop the entire GRPO group if any of its sessions exceeds the threshold?
-            tq.kv_clear(partition_id=batch.partition_id, keys=dropped_keys)
-            logger.warning(f"Dropped {len(dropped_keys)} max off policy samples from partition {batch.partition_id}")
-            dropped_global_steps = np.array([tag["global_steps"] for tag in dropped_tags])
-            trajectory_staleness = global_steps - dropped_global_steps + 1
-            prefix = "training" if partition_id == "train" else "validation"
-            metrics[f"{prefix}/off_policy/dropped_samples"] = len(dropped_keys)
-            metrics[f"{prefix}/off_policy/dropped_samples_staleness/mean"] = trajectory_staleness.mean()
-            metrics[f"{prefix}/off_policy/dropped_samples_staleness/max"] = trajectory_staleness.max()
-            metrics[f"{prefix}/off_policy/dropped_samples_staleness/min"] = trajectory_staleness.min()
+        if not stale_uids:
+            return 0, {}
 
-        return KVBatchMeta(partition_id=batch.partition_id, keys=kept_keys, tags=kept_tags), metrics
+        # Clear prompt keys and their trajectory keys "{uid}_..." (kv_clear does not cascade).
+        traj_keys = [key for key in self.partitions[partition_id] if key.split("_")[0] in stale_uids]
+        tq.kv_clear(partition_id=partition_id, keys=list(stale_uids) + traj_keys)
+        logger.warning(f"Dropped {len(stale_uids)} stale finished prompts from partition {partition_id}")
+
+        staleness = np.array(stale_spans, dtype=float)
+        prefix = "training" if partition_id == "train" else "validation"
+        metrics = {
+            f"{prefix}/off_policy/dropped_samples": len(stale_uids),
+            f"{prefix}/off_policy/dropped_samples_staleness/mean": staleness.mean(),
+            f"{prefix}/off_policy/dropped_samples_staleness/max": staleness.max(),
+            f"{prefix}/off_policy/dropped_samples_staleness/min": staleness.min(),
+        }
+        return len(stale_uids), metrics
 
     def sample(self, global_steps: int, partition_id: str, batch_size: int) -> KVBatchMeta:
         """Sample a batch of data from the replay buffer.
@@ -200,11 +220,22 @@ class ReplayBuffer:
             dict: Auxiliary metrics.
         """
         last_debug_time = time.time()
-        self._sync_metadata_from_transfer_queue()
-        while not self._has_enough_samples(global_steps, partition_id, batch_size):
-            time.sleep(self.poll_interval)
+        drop_metrics: dict = {}
+
+        while True:
             self._sync_metadata_from_transfer_queue()
 
+            dropped, metrics = self._drop_stale_finished(global_steps, partition_id)
+            if dropped > 0:
+                _accumulate_drop_metrics(drop_metrics, metrics, dropped)
+                if self.refill_fn is not None:
+                    self.refill_fn(dropped)  # fire-and-forget; for drop strategy
+                self._sync_metadata_from_transfer_queue()  # reflect the cleared keys before check
+
+            if self._has_enough_samples(global_steps, partition_id, batch_size):
+                break
+
+            time.sleep(self.poll_interval)
             if time.time() - last_debug_time > VERL_REPLAY_BUFFER_DEBUG_INTERVAL_SECONDS:
                 logger.info(
                     f"pending: {len(self.pending_keys[partition_id])}, "
@@ -232,4 +263,4 @@ class ReplayBuffer:
                 tags.append(tag)
 
         batch = KVBatchMeta(partition_id=partition_id, keys=keys, tags=tags)
-        return self._drop_max_off_policy_samples(global_steps, partition_id, batch)
+        return batch, drop_metrics
