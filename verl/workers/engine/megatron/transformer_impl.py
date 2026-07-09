@@ -644,6 +644,18 @@ class MegatronEngine(BaseEngine):
         if self._is_offload_optimizer:
             offload_megatron_optimizer(self.optimizer)
 
+    def _routed_num_tokens(self, data: TensorDict) -> torch.Tensor:
+        """Real (unpadded) tokens fed to the MoE router: attention_mask in the padded RL
+        path, else the packed input_ids count in the no-padding SFT path. Not loss_mask,
+        which counts response tokens only and would under-normalize the router loss."""
+        attention_mask = data.get("attention_mask", None)
+        if attention_mask is not None:
+            return attention_mask.sum()
+        input_ids = data["input_ids"]
+        if input_ids.is_nested:
+            return input_ids.offsets()[-1]
+        return torch.tensor(input_ids.numel(), device=input_ids.device)
+
     def forward_backward_batch(self, data: TensorDict, loss_function: Callable, forward_only=False) -> Any:
         self._distillation_use_topk_active = tu.get_non_tensor_data(data, key="distillation_use_topk", default=False)
         tu.assign_non_tensor(data, sp_size=self.engine_config.context_parallel_size)
@@ -657,11 +669,10 @@ class MegatronEngine(BaseEngine):
         tu.assign_non_tensor(data, dp_size=self.get_data_parallel_size())
 
         # Global routed-token count for the per-token-loss regime (consumed in
-        # postprocess_micro_batch_func). attention_mask is CP-replicated, so a single
+        # postprocess_micro_batch_func). Real tokens are CP-replicated, so a single
         # all-reduce over the DP group gives the global value.
         if self.tf_config is not None and self.tf_config.calculate_per_token_loss:
-            attention_mask = data["attention_mask"] if "attention_mask" in data.keys() else data["response_mask"]
-            routed_num_tokens = attention_mask.sum().to(get_device_id())
+            routed_num_tokens = self._routed_num_tokens(data).to(get_device_id())
             torch.distributed.all_reduce(
                 routed_num_tokens, op=torch.distributed.ReduceOp.SUM, group=self.get_data_parallel_group()
             )
@@ -1146,14 +1157,18 @@ class MegatronEngineWithLMHead(MegatronEngine):
                     "while gradients are divided by the real token count. Use THD "
                     "(use_remove_padding=True) or disable CP."
                 )
+            # finalize_model_grads all-reduces the returned token count over the DP*CP group
+            # and divides every gradient by it. Real tokens are CP-replicated across the CP
+            # ranks, so report the per-CP-rank share (/cp_size); otherwise that DP*CP sum
+            # over-counts by cp_size and every gradient comes out 1/cp_size too small.
+            cp_size = self.engine_config.context_parallel_size
+            local_num_tokens = (self._routed_num_tokens(data) // cp_size).to(torch.int)
             # n_i is the global routed-token count (all-reduced in forward_backward_batch);
             # scaling loss by the same value makes Sum(L_i)/Sum(n_i) recover the loss. Falls
             # back to local counts when not plumbed (single-rank / tests).
-            attention_mask = data["attention_mask"] if "attention_mask" in data.keys() else data["response_mask"]
-            local_num_tokens = attention_mask.sum().to(torch.int)
             routed_num_tokens = data["routed_num_tokens"] if "routed_num_tokens" in data.keys() else None
             if routed_num_tokens is None:
-                routed_num_tokens = local_num_tokens
+                routed_num_tokens = self._routed_num_tokens(data)
             dp_size = data["dp_size"] if "dp_size" in data.keys() else 1
             local_sum = loss * routed_num_tokens / dp_size
             return local_sum, local_num_tokens, output
