@@ -33,6 +33,8 @@ from verl.single_controller.ray.base import RayResourcePool, RayWorkerGroup
 from verl.utils import normalize_token_ids
 from verl.utils.ray_utils import auto_await
 from verl.utils.rollout_trace import rollout_trace_op
+from verl.workers.rollout.extra_prefix_cache import ExtraPrefixCacheController
+from verl.workers.rollout.extra_prefix_cache import enabled as extra_prefix_cache_enabled
 from verl.workers.rollout.replica import RolloutReplica, TokenOutput, get_rollout_replica_class
 from verl.workers.rollout.utils import update_prometheus_config
 
@@ -185,6 +187,14 @@ class LLMServerClient:
         """
         self.config = config
         self._load_balancer = load_balancer_handle
+        rollout_config = self.config.actor_rollout_ref.rollout
+        epc_config = getattr(rollout_config, "extra_prefix_cache", None)
+        model_path = getattr(self.config.actor_rollout_ref.model, "path", None)
+        self._extra_prefix_cache = (
+            ExtraPrefixCacheController(epc_config, model_path=model_path, log=logger)
+            if rollout_config.name == "vllm" and extra_prefix_cache_enabled(epc_config)
+            else None
+        )
 
     async def _acquire_server(self, request_id: str) -> tuple[str, ray.actor.ActorHandle]:
         # Atomic acquire: returns (server_id, handle) in one Ray RPC.
@@ -221,6 +231,7 @@ class LLMServerClient:
         """
         server_id, server = await self._acquire_server(request_id)
         try:
+            extra_prefix_cache_metadata = kwargs.pop("extra_prefix_cache_metadata", None)
             multimodal_kwargs = {}
             if audio_data is not None:
                 multimodal_kwargs["audio_data"] = audio_data
@@ -228,11 +239,42 @@ class LLMServerClient:
                 multimodal_kwargs["mm_processor_kwargs"] = mm_processor_kwargs
             # priority is only supported by vLLM rollout server.
             priority = kwargs.pop("priority", 0)
+            backend_request_id = kwargs.pop("backend_request_id", uuid4().hex)
+            cache_salt = kwargs.pop("cache_salt", None)
+            if self._extra_prefix_cache is not None:
+                prepared = await self._extra_prefix_cache.prepare(
+                    prompt_ids=prompt_ids,
+                    metadata=extra_prefix_cache_metadata,
+                )
+                if prepared.enabled:
+                    backend_request_id = prepared.backend_request_id or backend_request_id
+                    cache_salt = prepared.cache_salt or cache_salt
+                    if prepared.warmup_prompt_ids is not None and prepared.warmup_backend_request_id is not None:
+                        warmup_sampling_params = dict(sampling_params)
+                        warmup_sampling_params["max_tokens"] = 1
+                        warmup_sampling_params.setdefault("temperature", 0.0)
+                        warmup_priority_kwargs = (
+                            {"priority": priority}
+                            if priority != 0 and self.config.actor_rollout_ref.rollout.name == "vllm"
+                            else {}
+                        )
+                        await server.generate.remote(
+                            request_id=prepared.warmup_backend_request_id,
+                            prompt_ids=prepared.warmup_prompt_ids,
+                            sampling_params=warmup_sampling_params,
+                            image_data=image_data,
+                            video_data=video_data,
+                            **multimodal_kwargs,
+                            **warmup_priority_kwargs,
+                            cache_salt=cache_salt,
+                        )
             priority_kwargs = (
                 {"priority": priority} if priority != 0 and self.config.actor_rollout_ref.rollout.name == "vllm" else {}
             )
+            if cache_salt:
+                kwargs["cache_salt"] = cache_salt
             output: TokenOutput = await server.generate.remote(
-                request_id=uuid4().hex,  # use new request_id for each turn
+                request_id=backend_request_id,  # use new request_id for each turn unless caller tags it
                 prompt_ids=prompt_ids,
                 sampling_params=sampling_params,
                 image_data=image_data,
@@ -299,6 +341,11 @@ class FullyAsyncLLMServerClient(LLMServerClient):
 
         while True:
             # 1. generate tokens
+            turn_kwargs = dict(kwargs)
+            if "backend_request_id" in turn_kwargs and final_output.token_ids:
+                turn_kwargs["backend_request_id"] = (
+                    f"{turn_kwargs['backend_request_id']}__resume{len(final_output.token_ids)}"
+                )
             output = await super().generate(
                 request_id=request_id,
                 prompt_ids=prompt_ids + final_output.token_ids,
@@ -307,7 +354,7 @@ class FullyAsyncLLMServerClient(LLMServerClient):
                 video_data=video_data,
                 audio_data=audio_data,
                 mm_processor_kwargs=mm_processor_kwargs,
-                **kwargs,
+                **turn_kwargs,
             )
 
             # 2. merge output into final_output

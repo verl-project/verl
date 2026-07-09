@@ -147,6 +147,7 @@ class RolloutConfig(BaseConfig):
         "max_model_len",
         "load_format",
         "engine_kwargs",
+        "extra_prefix_cache",
         "prompt_length",
         "response_length",
         "expert_parallel_size",
@@ -214,6 +215,7 @@ class RolloutConfig(BaseConfig):
 
     multi_stage_wake_up: bool = False
     engine_kwargs: dict = field(default_factory=dict)
+    extra_prefix_cache: dict = field(default_factory=dict)
 
     calculate_log_probs: bool = False
 

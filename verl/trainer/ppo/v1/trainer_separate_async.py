@@ -21,6 +21,7 @@ from omegaconf import DictConfig
 from verl.checkpoint_engine import CheckpointEngineManager
 from verl.trainer.ppo.utils import need_reward_model
 from verl.trainer.ppo.v1.trainer_base import PPOTrainer, register_trainer
+from verl.trainer.ppo.v1.weight_update_hooks import maybe_run_weight_update_hooks
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
 from verl.workers.rollout.llm_server import FullyAsyncLLMServerClient, LLMServerManager
@@ -99,6 +100,7 @@ class PPOTrainerSeparateAsync(PPOTrainer):
         # update weights after loading checkpoint
         self.standalone_checkpoint_manager.update_weights(self.global_steps)
         self.checkpoint_manager.update_weights(self.global_steps)
+        maybe_run_weight_update_hooks(self.config, self.global_steps, log=logger)
 
     def on_train_begin(self):
         num_warmup_batches = self.config.trainer.v1.separate_async.num_warmup_batches
@@ -122,13 +124,16 @@ class PPOTrainerSeparateAsync(PPOTrainer):
             self.switch_to_trainer()
 
     def on_step_end(self):
-        with marked_timer("update_weights", self.timing_raw, color="red"):
-            # wake up all replicas to update weights
-            self.standalone_checkpoint_manager.update_weights(self.global_steps)
+        if self.global_steps % self.config.trainer.v1.separate_async.parameter_sync_step == 0:
+            with marked_timer("update_weights", self.timing_raw, color="red"):
+                # wake up all replicas to update weights
+                self.standalone_checkpoint_manager.update_weights(self.global_steps)
+                maybe_run_weight_update_hooks(self.config, self.global_steps, log=logger)
 
     def switch_to_rollout(self):
         # TODO: disable auto offload in config and offload according to the switch strategy
         self.checkpoint_manager.update_weights(self.global_steps)
+        maybe_run_weight_update_hooks(self.config, self.global_steps, log=logger)
         self.checkpoint_manager.resume_generation_replicas()
         self.add_replicas_to_balancer()
         self.current_mode = HybridEngineMode.ROLLOUT

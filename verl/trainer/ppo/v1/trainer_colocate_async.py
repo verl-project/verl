@@ -15,6 +15,7 @@ import logging
 import os
 
 from verl.trainer.ppo.v1.trainer_base import PPOTrainer, register_trainer
+from verl.trainer.ppo.v1.weight_update_hooks import maybe_run_weight_update_hooks
 from verl.utils.debug import marked_timer
 from verl.workers.rollout.llm_server import FullyAsyncLLMServerClient
 
@@ -36,6 +37,7 @@ class PPOTrainerColocateAsync(PPOTrainer):
     def on_init_end(self):
         # update weights after loading checkpoint
         self.checkpoint_manager.update_weights(self.global_steps)
+        maybe_run_weight_update_hooks(self.config, self.global_steps, log=logger)
 
     def on_train_begin(self):
         num_warmup_batches = self.config.trainer.v1.colocate_async.num_warmup_batches
@@ -47,6 +49,7 @@ class PPOTrainerColocateAsync(PPOTrainer):
         with marked_timer("update_weights", self.timing_raw, color="red"):
             # wake up all replicas to update weights
             self.checkpoint_manager.update_weights(self.global_steps)
+            maybe_run_weight_update_hooks(self.config, self.global_steps, log=logger)
             # resume generation
             self.checkpoint_manager.resume_generation_replicas()
 
