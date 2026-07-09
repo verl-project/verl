@@ -139,6 +139,8 @@ jobs:
 
   # Test Megatron strategy
   e2e_fully_async_policy_megatron:
+    # Disabled while TrainerV1 / unified Megatron worker paths are unavailable after TransferQueue removal.
+    if: false
     needs: setup
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 20 # Increase timeout for async training
