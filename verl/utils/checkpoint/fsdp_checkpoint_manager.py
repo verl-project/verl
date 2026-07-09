@@ -11,13 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
 
 import json
 import logging
 import os
 import warnings
 from dataclasses import asdict, dataclass
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import torch
 import torch.distributed
@@ -25,7 +26,7 @@ from accelerate import init_empty_weights
 from omegaconf import DictConfig
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import ShardedOptimStateDictConfig, ShardedStateDictConfig, StateDictType
-from transformers import GenerationConfig, PreTrainedTokenizer, ProcessorMixin
+from transformers import GenerationConfig
 from transformers.dynamic_module_utils import custom_object_save
 
 from verl.utils.device import is_cuda_available
@@ -39,6 +40,9 @@ from .checkpoint_manager import BaseCheckpointManager
 # Setup logging
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
+
+if TYPE_CHECKING:
+    from transformers import PreTrainedTokenizer, ProcessorMixin
 
 
 @dataclass

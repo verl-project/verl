@@ -11,19 +11,23 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
 
 import os
 import random
 import shutil
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
 import torch.distributed
 from omegaconf import DictConfig
-from transformers import PreTrainedTokenizer, ProcessorMixin
 
 from verl.trainer.config import CheckpointConfig
 from verl.utils.device import get_device_name, get_torch_device
+
+if TYPE_CHECKING:
+    from transformers import PreTrainedTokenizer, ProcessorMixin
 
 
 class BaseCheckpointManager:

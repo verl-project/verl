@@ -194,18 +194,17 @@ class SGLangHttpServer:
                 profiler_config = None
         self.profiler_controller = DistProfiler(self.replica_rank, config=profiler_config, tool_config=tool_config)
 
-        # For multi-node, we need dist_init_addr so nodes can coordinate NCCL init.
-        # For single-node, let SGLang handle port selection internally via nccl_port,
-        # which also avoids port conflicts.
+        # Reserve a per-server NCCL port so colocated reward/rollout replicas do not race
+        # on SGLang's internal port selection. Multi-node replicas also reuse it for dist_init_addr.
         self._master_address = None
         self._master_port = None
         self._master_sock = None
-        if self.nnodes > 1 and self.node_rank == 0:
+        if self.node_rank == 0:
             self._master_address = self._server_address
             self._master_port, self._master_sock = get_free_port(self._server_address, with_alive_sock=True)
             logger.info(
                 f"SGLangHttpServer, replica_rank: {self.replica_rank}, "
-                f"master address: {self._master_address}, port: {self._master_port}"
+                f"master/nccl address: {self._master_address}, port: {self._master_port}"
             )
 
     def get_master_address(self):
@@ -216,6 +215,11 @@ class SGLangHttpServer:
         """Get http server address and port."""
         assert self._server_port is not None, "http server is not launched, port is None"
         return self._server_address, self._server_port
+
+    def _release_master_sock(self):
+        if self._master_sock is not None:
+            self._master_sock.close()
+            self._master_sock = None
 
     async def set_pd_peer(self, decode_peers: list, bootstrap_host: str):
         assert isinstance(decode_peers, list) and decode_peers
@@ -318,8 +322,11 @@ class SGLangHttpServer:
                     "lora_target_modules": self.model_config.target_modules,
                 }
             )
-        # Only set dist_init_addr for multi-node; for single-node, let SGLang
-        # handle port selection internally via nccl_port to avoid conflicts.
+        server_arg_names = {f.name for f in dataclasses.fields(ServerArgs)}
+        if self._master_port is not None and "nccl_port" in server_arg_names:
+            args["nccl_port"] = self._master_port
+
+        # Only set dist_init_addr for multi-node; single-node still uses the reserved nccl_port above.
         if self.nnodes > 1:
             dist_init_addr = (
                 f"[{self._master_address}]:{self._master_port}"
@@ -382,6 +389,7 @@ class SGLangHttpServer:
         # https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/entrypoints/http_server.py
         sglang.srt.entrypoints.engine._set_envs_and_config = _set_envs_and_config
         os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
+        self._release_master_sock()
         server_args = ServerArgs(**args)
         # For SGLang main branch or version >= 0.5.10
         # The latest main branch of SGLang has wrapped the _launch_subprocesses function inside the Engine class

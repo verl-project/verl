@@ -60,6 +60,7 @@ def init_config() -> DictConfig:
 
     model_path = os.path.expanduser("~/models/Qwen/Qwen2.5-VL-3B-Instruct")
     config.actor_rollout_ref.model.path = model_path
+    config.actor_rollout_ref.model.override_config.attn_implementation = "sdpa"
     config.actor_rollout_ref.rollout.name = os.environ["ROLLOUT_NAME"]
     config.actor_rollout_ref.rollout.mode = "async"
     config.actor_rollout_ref.rollout.enforce_eager = True

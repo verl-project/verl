@@ -11,6 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
+
 import ctypes
 import json
 import logging
@@ -20,10 +22,9 @@ import signal
 import threading
 from collections.abc import Mapping
 from types import MethodType
-from typing import Any, Literal, Optional, get_args
+from typing import TYPE_CHECKING, Any, Literal, Optional, get_args
 
 import torch
-from vllm.outputs import RequestOutput
 
 from verl.plugin.platform import get_platform
 from verl.utils.device import is_npu_available
@@ -41,6 +42,9 @@ VLLM_LORA_NAME = "123"
 VLLM_LORA_PATH = "simon_lora_path"
 
 VLLM_ASCEND_REQUIRED_ENV_VARS = {"VLLM_ALL2ALL_BACKEND": "flashinfer_all2allv", "VLLM_ASCEND_ENABLE_NZ": "0"}
+
+if TYPE_CHECKING:
+    from vllm.outputs import RequestOutput
 
 
 def _resolve_vllm_weight_sync_local_rank(worker_local_rank: int, parallel_config: Any) -> int:

@@ -107,8 +107,7 @@ jobs:
       - name: Install the current repository
         run: |
           pip3 install -r requirements-test.txt
-          pip3 install -r requirements.txt
-          pip3 install --no-deps torchvision==0.26.0
+          pip3 install --no-deps -r requirements.txt
           pip3 install --no-deps -e .
       - name: Check final pip list
         run: |
@@ -159,7 +158,6 @@ jobs:
         run: |
           pip3 install pytest-asyncio
           pip3 install -r requirements-test.txt
-          pip3 install --no-deps torchvision==0.26.0
           pip3 install --no-deps -e .
           pip3 install cupy-cuda13x==13.6.0
       - name: Check final pip list
