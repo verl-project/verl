@@ -1,28 +1,22 @@
 #!/usr/bin/env bash
-# Qwen3.5-35B-A3B MoE GRPO RL with Megatron (single node, 8 GPUs, geo3k dataset)
+# Qwen3.5-397 MoE GRPO RL with Megatron
 #
 # notes on vllm:
-#     by 20260225, the latest vllm nightly does not support qwen3.5 rollout, to use this script, you need to 
+#     by 20260225, the latest vllm nightly does not support qwen3.5 rollout, to use this script, you need to
 #         1. wait until vllm supports qwen3.5 officially, and build a verl docker with that version of vllm
 #         2. self build a verl docker image with vllm from source code with qwen3.5 support (main branch 20260225 is OK)
 #     I succeeded in running this script with the main branch of vllm on 20260225, yet there are still some minor issues
-#     the vllm qwen3.5 during initialization, need to be fixed. Also, the cuda_graph is somehow not working, need to be 
+#     the vllm qwen3.5 during initialization, need to be fixed. Also, the cuda_graph is somehow not working, need to be
 #     fixed, either by verl team with supoorts to vllm0.16, or by vllm team.
-# Requirements:
-#   - 8 GPUs (80GB each, e.g. 1x8 H100/H200)
-#   - Additional packages on top of the base image:
-#       pip install --upgrade transformers
-#       pip install flash-linear-attention
-#       pip install -U git+https://github.com/ISEEKYAN/mbridge.git
-#   - Megatron-LM==0.16.0
 #
 # Requirements on Ascend:
-#   - 8 NPUs (2*64GB each, e.g. 1x8 A3)
+#   - 16 nodes * A3 (16*8*2=256 die)
 #   - Additional packages on base image(verl-8.5.2-a3-ubuntu22.04-py3.11-qwen3-5):
 #       pip install viztracer flash-linear-attention nvidia-modelopt nvidia-ml-py nvidia-resiliency-ext megatron-energon
 #   - Megatron-LM==0.16.0
 #   - MindSpeed==0.16.0
 #   - Megatron-Bridge==de93536e
+#   - verl==0.8.0
 #
 # Qwen3.5 architecture notes:
 #   Qwen3.5 uses Gated Delta Net (GDN) linear attention which currently does
@@ -34,38 +28,71 @@
 #   Once Megatron-LM adds THD support for Qwen3.5 GDN, use_remove_padding
 #   can be set to True for better performance.
 #
-# Tested parallelism config (8 GPUs / 1 node):
-#   TP=2 PP=1 CP=1 EP=8 ETP=1 GEN_TP=8
-#
+# Tested parallelism config (16 NPUs * 16 node A3):
+#   TP=2 PP=4 CP=1 EP=64 ETP=1 GEN_TP=16 GEN_DP=16 GEN_EP=256
 
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export VLLM_USE_V1=1
 export VLLM_ALLREDUCE_USE_SYMM_MEM=0
-
+mkdir -p logs
 set -xeuo pipefail
+unset http_proxy
+unset https_proxy
 
 ########################### Quick Config ###########################
 
 # ---- user-adjustable ----
 # DEVICE is auto-detected by probing torch_npu; override only for special cases.
 DEVICE=${DEVICE:-$(python3 -c 'import torch_npu' 2>/dev/null && echo npu || echo gpu)}
+
+case "${DEVICE}" in
+    gpu)
+        export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}
+        ;;
+    npu)
+        export CPU_AFFINITY_CONF=${CPU_AFFINITY_CONF:-1}
+        export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
+        export PYTORCH_NPU_ALLOC_CONF=${PYTORCH_NPU_ALLOC_CONF:-garbage_collection_threshold:0.8}
+        export USE_OPTIMIZED_MODEL=${USE_OPTIMIZED_MODEL:-0}
+        export HCCL_CONNECT_TIMEOUT=${HCCL_CONNECT_TIMEOUT:-5400}
+        export HCCL_BUFFSIZE=${HCCL_BUFFSIZE:-300}
+        export TASK_QUEUE_ENABLE=${TASK_QUEUE_ENABLE:-1}
+        export COMBINED_ENABLE=${COMBINED_ENABLE:-1}
+        export TOKENIZERS_PARALLELISM=${TOKENIZERS_PARALLELISM:-false}
+        export RAY_DEDUP_LOGS=${RAY_DEDUP_LOGS:-0}
+        export VLLM_ASCEND_ENABLE_NZ=${VLLM_ASCEND_ENABLE_NZ:-0}
+        ;;
+    *)
+        echo "Unsupported DEVICE=${DEVICE}. Expected 'gpu' or 'npu'." >&2
+        exit 1
+        ;;
+esac
+
+nnodes=${nnodes:-16}
+save_path=${save_path:-"Qwen/Qwen3.5-397B/verl_checkpoint"}
+save_freq=50
+
 case "${DEVICE}" in
     gpu)
         TP=${TP:-2}
-        PP=${PP:-1}
+        PP=${PP:-2}
         CP=${CP:-1}
-        EP=${EP:-8}
+        EP=${EP:-64}
         ETP=${ETP:-1}
+        GEN_DP=${GEN_DP:-16}
         GEN_TP=${GEN_TP:-8}
+        GEN_EP=${GEN_EP:-128}
         n_devices_per_node=${NDEVICES_PER_NODE:-8}
         ;;
     npu)
         TP=${TP:-2}
-        PP=${PP:-2}
+        PP=${PP:-4}
         CP=${CP:-1}
-        EP=${EP:-8}
+        EP=${EP:-64}
         ETP=${ETP:-1}
-        GEN_TP=${GEN_TP:-8}
+        GEN_DP=${GEN_DP:-16}
+        GEN_TP=${GEN_TP:-16}
+        GEN_EP=${GEN_EP:-256}
         n_devices_per_node=${NDEVICES_PER_NODE:-16}
         ;;
     *)
@@ -77,13 +104,14 @@ esac
 ALL_OFFLOAD=${ALL_OFFLOAD:-True}
 
 rollout_name="vllm"
-project_name='verl_grpo_qwen3_5_35b_geo3k'
-exp_name='qwen3_5_35b_megatron'
+project_name='verl_grpo_qwen3_5_397b_geo3k'
+exp_name='qwen3_5_397b_megatron'
 adv_estimator=grpo
 
-HF_MODEL_PATH=${HF_MODEL_PATH:-"Qwen3.5-35B-A3B"}
+HF_MODEL_PATH=${HF_MODEL_PATH:-"Qwen/Qwen3.5-397B-A17B"}
 train_path=${train_path:-$HOME/data/geo3k/train.parquet}
 test_path=${test_path:-$HOME/data/geo3k/test.parquet}
+start_time=$(date +%Y%m%d)_$(date +%H%M%S)
 # ---- end user-adjustable ----
 
 # ---- no user adjustment needed below ----
@@ -92,7 +120,7 @@ test_path=${test_path:-$HOME/data/geo3k/test.parquet}
 DATA=(
     data.train_files=${train_path}
     data.val_files=${test_path}
-    data.train_batch_size=32
+    data.train_batch_size=64
     data.max_prompt_length=1024
     data.max_response_length=2048
     data.truncation='error'
@@ -127,6 +155,7 @@ ACTOR=(
     actor_rollout_ref.actor.megatron.optimizer_offload=${ALL_OFFLOAD}
     actor_rollout_ref.actor.megatron.grad_offload=${ALL_OFFLOAD}
     actor_rollout_ref.actor.megatron.dtype=bfloat16
+    # +actor_rollout_ref.actor.megatron.override_transformer_config.context_parallel_algo=kvallgather_cp_algo
     ++actor_rollout_ref.actor.megatron.override_transformer_config.attention_backend=auto
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full
@@ -151,6 +180,11 @@ ROLLOUT=(
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=False
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=4096
     actor_rollout_ref.rollout.calculate_log_probs=True
+    actor_rollout_ref.rollout.data_parallel_size=${GEN_DP}
+    actor_rollout_ref.rollout.expert_parallel_size=${GEN_EP}
+    actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=1024
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode="FULL_DECODE_ONLY"
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_capture_sizes="[4,12,24,48,64]"
 )
 
 REF=(
@@ -172,13 +206,14 @@ ALGORITHM=(
 
 TRAINER=(
     trainer.critic_warmup=0
-    trainer.logger='["console","wandb"]'
+    trainer.logger='["console"]'
     trainer.project_name=${project_name}
     trainer.experiment_name=${exp_name}
     trainer.n_gpus_per_node=${n_devices_per_node}
-    trainer.nnodes=1
-    trainer.save_freq=20
-    trainer.val_before_train=False
+    trainer.nnodes=${nnodes}
+    trainer.save_freq=${save_freq}
+    trainer.default_local_dir=${save_path}
+    trainer.val_before_train=True
     trainer.test_freq=5
     trainer.total_epochs=15
 )
@@ -191,7 +226,6 @@ case "${DEVICE}" in
     gpu)
         ;;
     npu)
-        export CPU_AFFINITY_CONF=1
         ACTOR+=(
             actor_rollout_ref.actor.megatron.vanilla_mbridge=False
             actor_rollout_ref.actor.checkpoint.strict=False
@@ -220,4 +254,4 @@ python3 -m verl.trainer.main_ppo \
     "${REF[@]}" \
     "${TRAINER[@]}" \
     "${EXTRA[@]}" \
-    "$@"
+    "$@" 2>&1 | tee logs/qwen3.5-397b_grpo_megatron-${start_time}.log
