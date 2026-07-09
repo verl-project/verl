@@ -726,6 +726,7 @@ def test_drop_without_refill_fn_drops_without_replacing(tq_init, partition_id):
     rb = _make_rb(max_off_policy_strategy="drop", max_off_policy_threshold=2, refill_fn=None)
     consumer = SampleConsumer(rb, partition_id, batch_size=2, global_steps=5)
     try:
+        consumer.start()
         # Only the 2 fresh groups satisfy batch_size=2; the stale one is dropped, not counted.
         batch = consumer.result_or_raise()
         assert _uids_of(batch.keys) == {f.uid for f in fresh}

@@ -30,6 +30,7 @@ import torch
 import transfer_queue as tq
 from omegaconf import DictConfig, OmegaConf, open_dict
 from tensordict import TensorDict
+from tensordict.tensorclass import NonTensorData
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 from transfer_queue import KVBatchMeta
@@ -729,6 +730,59 @@ class PPOTrainer(ABC):
         else:
             logger.warning(f"Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
 
+        # 5. restore TransferQueue state (async modes) and re-issue in-flight prompts.
+        # tq.init() is called before the trainer is constructed (main_ppo.py), so the system is in a
+        # clean state here, satisfying load_checkpoint's precondition. Older TransferQueue builds
+        # without save/load_checkpoint simply skip this; in-flight prompts are then repopulated by
+        # the usual warmup in on_train_begin.
+        if self.trainer_mode != "sync" and hasattr(tq, "load_checkpoint"):
+            tq_ckpt_path = os.path.join(global_step_folder, "transfer_queue")
+            if os.path.exists(tq_ckpt_path):
+                tq.load_checkpoint(tq_ckpt_path)
+                self._reissue_inflight_prompts()
+            else:
+                logger.warning(f"Warning: No TransferQueue state found at {tq_ckpt_path}, in-flight prompts are lost")
+
+    def _reissue_inflight_prompts(self, partition_id: str = "train") -> int:
+        """Re-submit prompts that were in-flight (pending/running) when the checkpoint was taken.
+
+        After ``tq.load_checkpoint``, finished/failure trajectories are restored as-is and can be
+        sampled directly. Prompts still generating (pending/running) have no durable half-generated
+        state (tokens live only in rollout worker memory / KV cache), so they must be regenerated
+        from their original prompt data, which ``_submit_one_gen_batch`` persisted as fields.
+
+        Prompts are grouped by their original ``global_steps`` (read from the prompt tag, the source
+        of truth for staleness) so each re-issued batch carries the correct per-batch step scalar,
+        keeping off-policy staleness identical to before the checkpoint.
+        """
+        data = tq.kv_list(partition_id)
+        if not data:
+            return 0
+        items = data.get(partition_id, {})
+        # Group in-flight prompt uids by their original submission step.
+        uids_by_step: dict[int, list[str]] = defaultdict(list)
+        for key, tag in items.items():
+            if tag.get("is_prompt", False) and tag.get("status") in ("pending", "running"):
+                uids_by_step[int(tag["global_steps"])].append(key)
+        if not uids_by_step:
+            return 0
+
+        reissued = 0
+        for step, uids in uids_by_step.items():
+            # Read back the persisted prompt data and re-submit it for generation. Any half-generated
+            # trajectory keys are left behind: they are never sampled (only terminal prompts are) and
+            # get cleared with their prompt once the fresh generation completes and is trained.
+            batch = tq.kv_batch_get(keys=uids, partition_id=partition_id)
+            tu.assign_non_tensor_data(batch, "global_steps", step)
+            # Reset status to pending so a fresh generation lifecycle can run for these prompts.
+            tags = [{"is_prompt": True, "status": "pending", "global_steps": step}] * len(uids)
+            tq.kv_batch_put(keys=uids, partition_id=partition_id, tags=tags)
+            self.agent_loop_manager.generate_sequences(batch)
+            reissued += len(uids)
+
+        logger.info(f"Re-issued {reissued} in-flight prompts from checkpoint for partition {partition_id}")
+        return reissued
+
     def _save_checkpoint(self):
         """Save actor, critic, and dataloader checkpoints to local (and optionally remote) storage."""
         from verl.utils.fs import local_mkdir_safe
@@ -781,6 +835,19 @@ class PPOTrainer(ABC):
         local_mkdir_safe(local_global_step_folder)
         dataloader_local_path = os.path.join(local_global_step_folder, "data.pt")
         torch.save(self.train_dataloader.state_dict(), dataloader_local_path)
+
+        # save TransferQueue state for async modes so in-flight prompts (already fetched from the
+        # dataloader but not yet trained into this checkpoint's weights) survive a restart:
+        # finished trajectories are restored as-is, pending/running prompts are re-issued on resume.
+        # Safe here because sample() has returned and generation is paused (on_sample_end aborts +
+        # sleeps), so no concurrent kv_clear races the snapshot (see TransferQueue checkpoint docs).
+        # save_checkpoint/load_checkpoint are only available in newer TransferQueue builds; when the
+        # installed version lacks them we skip snapshotting and fall back to re-warmup on resume.
+        if self.trainer_mode != "sync" and hasattr(tq, "save_checkpoint"):
+            tq.save_checkpoint(
+                os.path.join(local_global_step_folder, "transfer_queue"),
+                metadata={"global_steps": self.global_steps},
+            )
 
         # write latest checkpointed iteration tracker for atomic resume
         actor_ckpt_cfg = self.config.actor_rollout_ref.actor.get("checkpoint", {})
@@ -1161,13 +1228,34 @@ class PPOTrainer(ABC):
         batch = tu.get_tensordict(batch_dict)
         tu.assign_non_tensor_data(batch, "global_steps", self.global_steps)
 
-        # Register each prompt (GRPO group) in TransferQueue as a tag-only status marker
+        # Register each prompt (GRPO group) in TransferQueue.
+        # In async modes the per-row prompt data is stored alongside the status tag so a checkpoint
+        # can recover in-flight (pending/running) prompts and re-issue them on resume (half-generated
+        # tokens are unrecoverable, so generation restarts from the original prompt). Sync has no
+        # in-flight prompts across checkpoints, so it stays tag-only to avoid the storage overhead.
         tags = [{"is_prompt": True, "status": "pending", "global_steps": self.global_steps}] * len(batch)
-        tq.kv_batch_put(keys=list(batch["uid"]), partition_id="train", tags=tags)
+        if self.trainer_mode != "sync":
+            tq.kv_batch_put(
+                keys=list(batch["uid"]), partition_id="train", tags=tags, fields=self._storable_prompt_fields(batch)
+            )
+        else:
+            tq.kv_batch_put(keys=list(batch["uid"]), partition_id="train", tags=tags)
 
         # add batch to agent loop manager
         self.agent_loop_manager.generate_sequences(batch)
         return len(batch)
+
+    @staticmethod
+    def _storable_prompt_fields(batch: TensorDict) -> TensorDict:
+        """Select the per-row fields of a prompt batch that TransferQueue can persist as storage.
+
+        TransferQueue slices fields by batch position, so scalar ``NonTensorData`` (e.g.
+        ``global_steps``, broadcast across the batch) cannot be stored as a field. Those scalars are
+        re-derived from the prompt tag on resume (see ``_reissue_inflight_prompts``); everything
+        needed to regenerate a prompt (``uid``, ``raw_prompt``, dataset columns, ...) is per-row.
+        """
+        per_row_keys = [key for key in batch.keys() if not isinstance(batch.get(key), NonTensorData)]
+        return batch.select(*per_row_keys)
 
     def _add_batch_to_generate(self, num_prompts: int | None = None) -> int:
         """Stream prompts from the dataloader into the AgentLoopManager.
