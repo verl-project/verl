@@ -145,7 +145,7 @@ jobs:
           ENGINE=sglang MODE=async RESUME_MODE=auto MODEL_ID=deepseek-ai/deepseek-coder-1.3b-instruct TOTAL_TRAIN_STEPS=2 bash tests/special_e2e/run_ppo_trainer_megatron.sh
       - name: Profiling GRPO GSM8K E2E training tests with 3D parallelism on 8 L20 GPUs with Megatron (Deepseek)
         run: |
-          ray stop --force
+          ray stop --force || true
           PROFILE_ENABLE=True ENGINE=sglang ADV_ESTIMATOR=grpo USE_DYNAMIC_BSZ=False MODEL_ID=deepseek-ai/deepseek-coder-1.3b-instruct bash tests/special_e2e/run_ppo_trainer_megatron.sh
           if [ -z "$( ls -A '/tmp/ray/session_latest/logs/nsight/' )" ]; then
             echo "[ERROR] not found any profiling files"

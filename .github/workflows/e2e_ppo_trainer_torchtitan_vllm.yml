@@ -153,7 +153,8 @@ jobs:
           export LD_PRELOAD="$(python3 -c 'import glob, os, sysconfig; c = glob.glob(os.path.join(sysconfig.get_paths()["purelib"], "nvidia", "cu13", "lib", "libcublas.so.13")); print(c[0] if c else "")')"
           NUM_GPUS=8 FSDP_SIZE=8 TOTAL_TRAIN_STEPS=2 \
             bash tests/special_e2e/run_ppo_trainer_torchtitan.sh \
-              actor_rollout_ref.model.use_remove_padding=False
+              actor_rollout_ref.model.use_remove_padding=False \
+              algorithm.rollout_correction.bypass_mode=True
 
   cleanup:
     runs-on: ubuntu-latest
