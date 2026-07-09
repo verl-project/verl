@@ -443,6 +443,7 @@ data:
   max_prompt_length: 512
   max_response_length: 512
   train_batch_size: 1024
+  gen_batch_size: null
   val_batch_size: null
   tool_config_path: ${oc.select:actor_rollout_ref.rollout.multi_turn.tool_config_path,
     null}

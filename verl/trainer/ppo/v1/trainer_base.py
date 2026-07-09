@@ -335,7 +335,7 @@ class PPOTrainer(ABC):
                 self._shutdown_dump_executor()
                 return
 
-        current_epoch = self.global_steps // len(self.train_dataloader)
+        current_epoch = self.global_steps // self.steps_per_epoch
         progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
 
         # we start from step 1
@@ -398,7 +398,7 @@ class PPOTrainer(ABC):
             self.logger.log(data=metrics, step=self.global_steps)
             progress_bar.update(1)
             self.global_steps += 1
-            current_epoch = (self.global_steps - 1) // len(self.train_dataloader)
+            current_epoch = (self.global_steps - 1) // self.steps_per_epoch
             if is_last_step:
                 self._shutdown_dump_executor()
                 pprint(f"Final validation metrics: {last_val_metrics}")
@@ -416,8 +416,17 @@ class PPOTrainer(ABC):
             f"parameter_sync_step ({self.parameter_sync_step})"
         )
         sample_batch_size = train_batch_size // self.parameter_sync_step
-        # TODO: use background feeder to add samples
-        # 1. add batch to generate
+
+        # 1. stream one train batch worth of prompts into generation for this step.
+        # Prompts are fetched from the dataloader ``gen_batch_size`` at a time (see
+        # ``_add_batch_to_generate``); with the default ``gen_batch_size == train_batch_size`` this
+        # is a single fetch, reproducing the classic per-step feed.
+        # TODO(drop-refill): ``self.replay_buffer.sample`` in ``_step_once`` may drop off-policy
+        #   (and, once DAPO dynamic sampling lands, all-0/all-1) groups, which shrinks the trained
+        #   batch below ``sample_batch_size``. To keep the rollout effort per step constant, refill
+        #   the dropped count after sampling by submitting an equal number of fresh prompts, e.g.
+        #   ``self._add_batch_to_generate(num_prompts=dropped)`` (set ``gen_batch_size=1`` so any
+        #   dropped count is a valid multiple). Left unimplemented for now.
         self._add_batch_to_generate()
 
         metrics_aggregator = MetricsAggregator()
@@ -561,9 +570,11 @@ class PPOTrainer(ABC):
             max_samples=self.config.data.get("val_max_samples", -1),
         )
 
+        # use gen_batch_size as the batch size for the dataloader if set, otherwise use train_batch_size
+        gen_batch_size = self.config.data.get("gen_batch_size", None) or self.config.data.train_batch_size
         self.train_dataloader = StatefulDataLoader(
             dataset=self.train_dataset,
-            batch_size=self.config.data.train_batch_size,
+            batch_size=gen_batch_size,
             num_workers=self.config.data["dataloader_num_workers"],
             drop_last=True,
             collate_fn=collate_fn,
@@ -583,8 +594,10 @@ class PPOTrainer(ABC):
             f"{len(self.train_dataset)}, val dataset size: {len(self.val_dataset)}"
         )
 
+        self.steps_per_epoch = len(self.train_dataset) // self.config.data.train_batch_size
+
         # adjust total_training_steps
-        total_training_steps = len(self.train_dataloader) * self.config.trainer.total_epochs
+        total_training_steps = self.steps_per_epoch * self.config.trainer.total_epochs
         if self.config.trainer.total_training_steps is not None:
             total_training_steps = self.config.trainer.total_training_steps
         self.total_training_steps = total_training_steps
@@ -1128,8 +1141,8 @@ class PPOTrainer(ABC):
             if self.use_critic:
                 self.critic_wg.stop_profile()
 
-    def _add_batch_to_generate(self):
-        """Sample a batch from dataloader and add to AgentLoopManager."""
+    def _submit_one_gen_batch(self) -> int:
+        """Fetch one ``gen_batch_size`` chunk from the dataloader and submit it for generation."""
         try:
             if self.train_dataloader_it is None:
                 self.train_dataloader_it = iter(self.train_dataloader)
@@ -1148,6 +1161,28 @@ class PPOTrainer(ABC):
 
         # add batch to agent loop manager
         self.agent_loop_manager.generate_sequences(batch)
+        return len(batch)
+
+    def _add_batch_to_generate(self, num_prompts: int | None = None) -> int:
+        """Stream prompts from the dataloader into the AgentLoopManager.
+
+        Args:
+            num_prompts: Total number of prompts to submit. Defaults to ``train_batch_size``.
+        """
+        train_batch_size = self.config.data.train_batch_size
+        if num_prompts is None:
+            num_prompts = train_batch_size
+        gen_batch_size = self.config.data.get("gen_batch_size", None) or train_batch_size
+        if num_prompts <= 0 or num_prompts % gen_batch_size != 0:
+            raise ValueError(
+                f"num_prompts ({num_prompts}) must be a positive multiple of gen_batch_size "
+                f"({gen_batch_size}); it is submitted in whole gen_batch_size dataloader fetches."
+            )
+
+        submitted = 0
+        while submitted < num_prompts:
+            submitted += self._submit_one_gen_batch()
+        return submitted
 
     def _compute_reward_colocate(self, batch: KVBatchMeta, metrics: dict | None = None) -> KVBatchMeta:
         """Compute the reward score with a colocated reward model."""
