@@ -562,13 +562,17 @@ class PPOTrainer(ABC):
             max_samples=self.config.data.get("val_max_samples", -1),
         )
 
-        # Async drop refills an arbitrary number of dropped prompts, which must divide gen_batch_size
-        if (
-            self.config.data.get("gen_batch_size", None) is None
-            and self.trainer_mode != "sync"
-            and self.config.trainer.v1.sampler.max_off_policy_strategy == "drop"
-        ):
-            logger.info("data.gen_batch_size defaulted to 1 for the async 'drop' off-policy strategy.")
+        # Async drop refills an arbitrary number of dropped prompts, which must divide gen_batch_size,
+        # so force gen_batch_size=1.
+        if self.trainer_mode != "sync" and self.config.trainer.v1.sampler.max_off_policy_strategy == "drop":
+            user_gen_batch_size = self.config.data.get("gen_batch_size", None)
+            if user_gen_batch_size not in (None, 1):
+                logger.warning(
+                    f"data.gen_batch_size={user_gen_batch_size} is overridden to 1: the async 'drop' "
+                    f"off-policy strategy refills an arbitrary number of prompts, which requires gen_batch_size=1."
+                )
+            elif user_gen_batch_size is None:
+                logger.info("data.gen_batch_size defaulted to 1 for the async 'drop' off-policy strategy.")
             with open_dict(self.config):
                 self.config.data.gen_batch_size = 1
 
