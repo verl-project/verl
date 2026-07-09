@@ -14,14 +14,20 @@
 import os
 from importlib.metadata import PackageNotFoundError, version
 
-from .vllm_rollout import ServerAdapter  # noqa: F401
-
 
 def get_version(pkg):
     try:
         return version(pkg)
     except PackageNotFoundError:
         return None
+
+
+def __getattr__(name):
+    if name == "ServerAdapter":
+        from .vllm_rollout import ServerAdapter
+
+        return ServerAdapter
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 vllm_package_name = "vllm"

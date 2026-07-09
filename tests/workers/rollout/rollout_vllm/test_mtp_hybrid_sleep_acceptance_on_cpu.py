@@ -19,10 +19,13 @@ import numpy as np
 import pytest
 
 pytest.importorskip("ray")
-pytest.importorskip("vllm")
 
-from verl.trainer.ppo.ray_trainer import compute_spec_decode_metrics
-from verl.workers.rollout.vllm_rollout import vllm_async_server
+
+def _importorskip_usable_vllm():
+    try:
+        from vllm import LLM  # noqa: F401
+    except Exception as exc:
+        pytest.skip(f"vLLM runtime is not importable: {exc}")
 
 
 class _FakeMtpEngine:
@@ -50,6 +53,10 @@ class _FakeMtpEngine:
 
 
 def test_mtp_hybrid_sleep_keeps_drafter_available_for_nonzero_acceptance(monkeypatch):
+    _importorskip_usable_vllm()
+    from verl.trainer.ppo.ray_trainer import compute_spec_decode_metrics
+    from verl.workers.rollout.vllm_rollout import vllm_async_server
+
     monkeypatch.setattr(vllm_async_server, "is_torch_npu_available", lambda check_device=False: False)
 
     server = object.__new__(vllm_async_server.vLLMHttpServer)
