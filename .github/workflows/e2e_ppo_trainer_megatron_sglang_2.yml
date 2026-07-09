@@ -122,6 +122,7 @@ jobs:
         run: |
           pip3 install -r requirements-test.txt
           pip3 install transformers==5.3.0
+          pip3 install --pre --no-deps torchvision==0.26.0+cu130 --extra-index-url https://download.pytorch.org/whl/nightly/cu130
           pip3 install --no-deps -e .
       - name: Check final pip list
         run: |
@@ -153,6 +154,7 @@ jobs:
           pip3 install -r requirements-test.txt
           pip3 install -r requirements.txt
           pip3 install transformers==5.3.0
+          pip3 install --pre --no-deps torchvision==0.26.0+cu130 --extra-index-url https://download.pytorch.org/whl/nightly/cu130
           pip3 install --no-deps -e .
       - name: Check final pip list
         run: |

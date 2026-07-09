@@ -27,12 +27,14 @@ and is designed to be fully replaceable by other agent frameworks such as:
 - ...
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import os
 import random
 from abc import ABC, abstractmethod
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 from uuid import uuid4
 
 import hydra
@@ -43,7 +45,6 @@ from omegaconf import DictConfig, OmegaConf
 from PIL import Image
 from pydantic import BaseModel, ConfigDict
 from tensordict import TensorDict
-from transformers import AutoProcessor, AutoTokenizer
 
 from verl.experimental.agent_loop.utils import resolve_config_path
 from verl.protocol import DataProto
@@ -71,6 +72,9 @@ from verl.workers.config import (
     RolloutConfig,
 )
 from verl.workers.rollout.llm_server import LLMServerClient
+
+if TYPE_CHECKING:
+    from transformers import AutoProcessor, AutoTokenizer
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))

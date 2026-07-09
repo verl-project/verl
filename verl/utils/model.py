@@ -33,7 +33,6 @@ from transformers import (
     AutoModelForSequenceClassification,
     AutoModelForTokenClassification,
     GenerationConfig,
-    MistralForSequenceClassification,
     PretrainedConfig,
     PreTrainedModel,
 )
@@ -442,6 +441,8 @@ def _load_hf_model(config, model_config, is_value_model):
         warnings.simplefilter("ignore")
         # TODO: to find a better way to load mistral7b-rm lm_head
         if "mistral7b-rm" in config.model.path:
+            from transformers import MistralForSequenceClassification
+
             model = MistralForSequenceClassification.from_pretrained(
                 local_model_path,
                 torch_dtype="auto",

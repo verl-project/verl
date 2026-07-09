@@ -624,7 +624,7 @@ def log_probs_from_logits_response_rmpad(input_ids, attention_mask, logits_rmpad
         logits_rmpad: [total_nnz, vocab_size]
         response_length: int
     """
-    from flash_attn.bert_padding import pad_input, unpad_input
+    from verl.utils.attention_utils import pad_input, unpad_input
 
     batch_size, seqlen = input_ids.shape
     input_ids_rmpad, indices, *_ = unpad_input(input_ids.unsqueeze(-1), attention_mask=attention_mask)
@@ -653,10 +653,7 @@ def log_probs_from_logits_all_rmpad(input_ids_rmpad, logits_rmpad, indices, batc
         seqlen: int
         response_length: int
     """
-    if get_device_name() == "cuda":
-        from flash_attn.bert_padding import pad_input
-    elif get_device_name() == "npu":
-        from verl.utils.attention_utils import pad_input
+    from verl.utils.attention_utils import pad_input
 
     input_ids_rmpad = input_ids_rmpad.transpose(0, 1)  # transpose back to [total_nnz, 1]
     input_ids_rmpad = input_ids_rmpad.squeeze(-1)
