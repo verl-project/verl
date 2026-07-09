@@ -802,7 +802,10 @@ class vLLMHttpServer:
         if self.rollout_mode == RolloutMode.HYBRID:
             await self._sleep_hybrid()
         elif self.rollout_mode == RolloutMode.COLOCATED:
-            await self.engine.sleep(level=1)
+            if self.lora_as_adapter:
+                await self._release_vllm_kv_cache_only()
+            else:
+                await self.engine.sleep(level=1)
         elif self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip sleep in standalone mode")
 
@@ -820,16 +823,26 @@ class vLLMHttpServer:
                 await self.engine.reset_encoder_cache()
 
     async def release_kv_cache(self):
-        """Release only kv_cache GPU memory, keeping model weights intact.
-        # TODO: support true release of kv_cache
-        """
+        """Release only kv_cache GPU memory, keeping model weights intact."""
         if self.node_rank != 0 or not self.config.free_cache_engine:
             return
 
+        await self._release_vllm_kv_cache_only()
+
+    async def _release_vllm_kv_cache_only(self):
+        # vLLM does not expose a tag-selective sleep API. Level 1 sleep
+        # offloads weights and discards kv_cache; waking only weights keeps
+        # the kv_cache allocation released while preserving in-place weight
+        # buffers for the following checkpoint-engine update.
+        await self.engine.sleep(level=1)
+        await self.engine.wake_up(tags=["weights"])
+
     async def resume_kv_cache(self):
         """Restore kv_cache GPU memory after a weight sync. Counterpart to release_kv_cache()."""
-        if self.node_rank != 0:
+        if self.node_rank != 0 or not self.config.free_cache_engine:
             return
+
+        await self.engine.wake_up(tags=["kv_cache"])
 
     async def start_profile(self, **kwargs):
         if self.node_rank != 0:
@@ -1130,11 +1143,14 @@ class vLLMHttpServer:
         # to be restored by actor weight sync after level 2 sleep discards them.
         # lora only update adapter weights, so set sleep level to 1
         # vllm_ascend not support sleep_level now. Enabling EP during training may lead to accuracy issues.
-        if mtp_rollout_enabled or self.lora_as_adapter or is_torch_npu_available(check_device=False):
+        if self.lora_as_adapter:
+            await self._release_vllm_kv_cache_only()
+        elif mtp_rollout_enabled or is_torch_npu_available(check_device=False):
             sleep_level = 1
+            await self.engine.sleep(level=sleep_level)
         else:
             sleep_level = 2
-        await self.engine.sleep(level=sleep_level)
+            await self.engine.sleep(level=sleep_level)
         if _VLLM_VERSION >= version.parse("0.17.0"):
             await self.engine.reset_encoder_cache()
 
@@ -1291,6 +1307,9 @@ class vLLMReplica(RolloutReplica):
         # before we touch engine.release_kv_cache()
         await self.servers[0].wait_for_requests_to_drain.remote()
         await asyncio.gather(*[server.release_kv_cache.remote() for server in self.servers])
+
+    async def resume_kv_cache(self):
+        await asyncio.gather(*[server.resume_kv_cache.remote() for server in self.servers])
 
     # -----------------------------------------------------------------------
     # Hook methods for subclass overrides
