@@ -456,14 +456,6 @@ class PPOTrainer(ABC):
             batch.extra_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
             self.on_sample_end()
 
-            # Skip: save batch to disk when no cached data exists yet (phase one)
-            skip_inst = SkipManager.skip_instances.get("rollout_tq")
-            if skip_inst and skip_inst.should_save(self.global_steps, batch.partition_id):
-                skip_inst.prepare_data(
-                    step=self.global_steps,
-                    batch=batch,
-                    global_steps=self.global_steps,
-                )
         # 2. [OPTIONAL] compute reward score with colocated reward model
         if self.reward_loop_manager.reward_loop_worker_handles is None:
             with marked_timer("reward", timing_raw, color="yellow"):
