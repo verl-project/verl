@@ -116,7 +116,7 @@ def _map_moe_params_common(name, tensor, ep_rank):
         yield new_key, tensor[i].to(get_device_id(), non_blocking=True)
 
 
-def _map_moe_params_qwen3_moe(name, tensor, ep_rank):
+def default_moe_param_handler(name, tensor, ep_rank):
     if "gate_up_proj" in name:
         gate, up = tensor.chunk(2, dim=1)
         params = {
@@ -130,8 +130,5 @@ def _map_moe_params_qwen3_moe(name, tensor, ep_rank):
         yield from _map_moe_params_common(key, value, ep_rank)
 
 
-MOE_PARAM_HANDERS = {
-    "qwen3_moe": _map_moe_params_common,
-    "deepseek_v3": _map_moe_params_common,
-    "qwen3_5_moe": _map_moe_params_qwen3_moe,
-}
+# This is used to override the default mapping of MoE parameters
+MOE_PARAM_HANDERS = {}
