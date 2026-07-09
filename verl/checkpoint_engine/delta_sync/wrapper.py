@@ -47,8 +47,9 @@ logger = logging.getLogger(__name__)
 class DeltaFlush:
     """One ready-to-dispatch flush.
 
-    * ``positions_cpu`` is a host uint8 tensor (positions are byte-packed at
-      encode time; small enough that early D2H is free).
+    * ``positions_cpu`` is a uint8 positions blob. The base encode path
+      produces it on the host; the sharded engines keep it on the GPU (the wire
+      broadcasts from the GPU, so a host round-trip would be pure overhead).
     * ``values_gpu`` stays on the GPU until the checkpoint engine broadcasts it
       over NCCL.
     * ``params`` carries the per-parameter manifest the receiver needs to

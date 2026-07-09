@@ -302,36 +302,39 @@ class DeltaShardedCheckpointEngine(DeltaCheckpointEngine):
     def _assemble_flush(self, per_param: list) -> DeltaFlush:
         """Build one DeltaFlush (indices encoding) from rank 0's gathered per-param deltas.
 
-        ``per_param``: list of ``(name, dtype_str, shape, global_idx_i32, values)`` where
+        ``per_param``: list of ``(name, dtype_str, shape, global_idx, values)`` where
         ``global_idx`` are within-parameter flat positions (== what the receiver decodes).
+
+        Positions stay on the GPU end to end (int32 pieces -> one cat -> uint8 view);
+        the wire broadcasts from the GPU anyway, and a host round-trip here
+        (``.cpu().numpy().tobytes()`` + join) dominated the whole send at scale
+        (~2.4s/sync at 7B steady state, ~83s on the full seed).
         """
-        pos_pieces: list[bytes] = []
+        idx_pieces: list[torch.Tensor] = []
         val_pieces: list[torch.Tensor] = []
         params: list[DeltaParam] = []
         pos_off = val_off = 0
-        for name, dtype_str, shape, idx_i32, val in per_param:
-            nnz = int(idx_i32.numel())
-            pos_bytes = idx_i32.to(torch.int32).cpu().numpy().tobytes()
+        for name, dtype_str, shape, idx, val in per_param:
+            nnz = int(idx.numel())
+            idx_pieces.append(idx.to(torch.int32))
+            val_pieces.append(val)
             params.append(
                 DeltaParam(name=name, dtype=dtype_str, shape=list(shape),
-                           pos_start=pos_off, pos_end=pos_off + len(pos_bytes), pos_width=4,
+                           pos_start=pos_off, pos_end=pos_off + nnz * 4, pos_width=4,
                            val_start=val_off, val_end=val_off + nnz)
             )
-            pos_pieces.append(pos_bytes)
-            val_pieces.append(val)
-            pos_off += len(pos_bytes)
+            pos_off += nnz * 4
             val_off += nnz
 
-        merged = b"".join(pos_pieces)
-        positions_cpu = (
-            torch.frombuffer(bytearray(merged), dtype=torch.uint8) if merged
-            else torch.empty(0, dtype=torch.uint8)
-        )
         values_gpu = torch.cat(val_pieces) if val_pieces else torch.empty(0, dtype=self.rollout_dtype, device="cuda")
-        positions_gpu = positions_cpu.to(values_gpu.device, non_blocking=True)
-        cks = _checksum(positions_gpu, values_gpu)
+        positions_u8 = (
+            torch.cat(idx_pieces).contiguous().view(torch.uint8)
+            if idx_pieces
+            else torch.empty(0, dtype=torch.uint8, device=values_gpu.device)
+        )
+        cks = _checksum(positions_u8, values_gpu)
         return DeltaFlush(encoding=self.encoding, params=params,
-                          positions_cpu=positions_cpu, values_gpu=values_gpu, checksum=cks)
+                          positions_cpu=positions_u8, values_gpu=values_gpu, checksum=cks)
 
     async def send_weights(self, weights, global_steps=None):
         # All actor ranks participate (gather-v is collective); only torch rank 0 broadcasts.
