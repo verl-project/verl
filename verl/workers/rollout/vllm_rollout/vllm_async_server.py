@@ -1048,6 +1048,9 @@ class vLLMHttpServer:
             qat_config = QATConfig(**qat_config_dict)
             quantization_config_dict = load_quantization_config(qat_config)
             quant_method = quantization_config_dict.get("quant_method", None)
+            from verl.utils.qat import configure_w4a8_simulation
+
+            configure_w4a8_simulation(qat_config.mode, quant_method)
 
             if quant_method == "modelopt":
                 from verl.utils.modelopt import apply_modelopt_nvfp4_patches
@@ -1055,9 +1058,8 @@ class vLLMHttpServer:
                 apply_modelopt_nvfp4_patches()
                 quantization = "modelopt"
             elif quant_method == "compressed-tensors":
-                from verl.utils.qat import apply_qat_patches, set_w4a8_simulation
+                from verl.utils.qat import apply_qat_patches
 
-                set_w4a8_simulation(qat_config.mode.lower() == "w4a8")
                 apply_qat_patches()
                 quantization = "compressed-tensors"
             else:

@@ -203,6 +203,8 @@ def fp8_e4m3_fake_quant(
     block_m, block_n = block_size
     if block_m <= 0 or block_n <= 0:
         raise ValueError(f"FP8 block dimensions must be positive, got {block_size}")
+    if x.numel() == 0:
+        return x.clone()
 
     original_shape = x.shape
     x_2d = x.reshape(-1, x.shape[-1])

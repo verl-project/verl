@@ -1,4 +1,5 @@
 # Copyright 2026 Bytedance Ltd. and/or its affiliates
+# Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -32,6 +33,23 @@ from verl.utils.qat.linear import QATLinear, QATMode, STEFP8Quant, fp8_e4m3_fake
 from verl.utils.qat.quantizer import QATQuantizer  # noqa: E402
 
 
+@pytest.fixture
+def restore_qat_patch_state():
+    """Restore process-wide vLLM patches installed by an integration test."""
+    previous_applied = list(vllm_patch._applied_patches)
+    previous_w4a8_patch = vllm_patch._w4a8_apply_patch
+    previous_original_apply = vllm_patch._original_w4a16_apply_weights
+    yield
+
+    if vllm_patch._w4a8_apply_patch is not previous_w4a8_patch and vllm_patch._w4a8_apply_patch is not None:
+        vllm_patch._w4a8_apply_patch.stop()
+    for patcher in reversed(vllm_patch._applied_patches[len(previous_applied) :]):
+        patcher.stop()
+    vllm_patch._applied_patches = previous_applied
+    vllm_patch._w4a8_apply_patch = previous_w4a8_patch
+    vllm_patch._original_w4a16_apply_weights = previous_original_apply
+
+
 def test_fp8_fake_quant_handles_noncontiguous_3d_input():
     x = torch.randn(2, 130, 3, device="cuda", dtype=torch.bfloat16).transpose(1, 2)
     assert not x.is_contiguous()
@@ -55,6 +73,16 @@ def test_fp8_fake_quant_supports_rectangular_pytorch_fallback(monkeypatch):
     assert result.shape == x.shape
     assert result.dtype == x.dtype
     assert torch.isfinite(result).all()
+
+
+def test_fp8_fake_quant_handles_empty_token_batch():
+    x = torch.empty(0, 130, device="cuda", dtype=torch.bfloat16)
+
+    result = fp8_e4m3_fake_quant(x)
+
+    assert result.shape == x.shape
+    assert result.dtype == x.dtype
+    assert result.numel() == 0
 
 
 def test_fp8_fake_quant_matches_independent_blockwise_reference():
@@ -165,6 +193,26 @@ def test_w4a8_mode_selects_marlin_for_moe_workers(monkeypatch):
     assert os.environ[vllm_patch._VLLM_FORCE_MARLIN_ENV] == "0"
 
 
+def test_w4a8_configuration_rejects_unsupported_quant_method_and_clears_state(monkeypatch):
+    monkeypatch.setenv(vllm_patch.W4A8_SIMULATION_ENV, "1")
+
+    with pytest.raises(ValueError, match="requires the compressed-tensors quantization method"):
+        vllm_patch.configure_w4a8_simulation("w4a8", "modelopt")
+
+    assert not vllm_patch.is_w4a8_simulation_enabled()
+    vllm_patch.configure_w4a8_simulation("w4a16", "compressed-tensors")
+    assert not vllm_patch.is_w4a8_simulation_enabled()
+
+
+def test_w4a8_rejects_unvalidated_vllm_version(monkeypatch):
+    import vllm
+
+    monkeypatch.setattr(vllm, "__version__", "0.16.0")
+
+    with pytest.raises(RuntimeError, match="requires vLLM 0.15.x"):
+        vllm_patch._validate_w4a8_vllm_version()
+
+
 def test_w4a8_moe_wrapper_quantizes_both_expert_gemm_inputs(monkeypatch):
     from vllm.model_executor.layers.fused_moe.fused_marlin_moe import MarlinExperts
 
@@ -223,7 +271,7 @@ def test_w4a8_moe_rejects_non_marlin_backend(monkeypatch):
 
 
 @pytest.mark.parametrize("enabled", [True, False])
-def test_w4a8_moe_process_uses_mode_specific_marlin_experts(monkeypatch, enabled):
+def test_w4a8_moe_process_persists_mode_specific_marlin_experts(monkeypatch, enabled):
     from types import SimpleNamespace
 
     from vllm.model_executor.layers.fused_moe.fused_marlin_moe import MarlinExperts
@@ -244,11 +292,11 @@ def test_w4a8_moe_process_uses_mode_specific_marlin_experts(monkeypatch, enabled
     vllm_patch.patched_nvfp4_moe_process_weights_after_loading(method, layer)
 
     expected_cls = vllm_patch._make_w4a8_moe_experts_cls(MarlinExperts) if enabled else MarlinExperts
-    assert method.experts_cls is MarlinExperts
+    assert method.experts_cls is expected_cls
     assert processed == [(False, expected_cls)]
 
 
-def test_apply_qat_patches_installs_real_vllm_w4a8_wrapper(monkeypatch):
+def test_apply_qat_patches_installs_real_vllm_w4a8_wrapper(monkeypatch, restore_qat_patch_state):
     from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_w4a16_nvfp4 import (
         CompressedTensorsW4A16Fp4,
     )

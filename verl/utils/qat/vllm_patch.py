@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 W4A8_SIMULATION_ENV = "VERL_W4A8_SIMULATION"
+_W4A8_SUPPORTED_VLLM_PREFIX = "0.15."
 _VLLM_FORCE_MARLIN_ENV = "VLLM_TEST_FORCE_FP8_MARLIN"
 _VLLM_USE_FLASHINFER_MOE_ENV = "VLLM_USE_FLASHINFER_MOE_FP4"
 _W4A8_MOE_EXPERTS_CLASS_CACHE: dict[type, type] = {}
@@ -70,6 +71,28 @@ def set_w4a8_simulation(enabled: bool) -> None:
 def is_w4a8_simulation_enabled() -> bool:
     """Return whether the current process is running the W4A8 simulation."""
     return os.environ.get(W4A8_SIMULATION_ENV, "0") == "1"
+
+
+def configure_w4a8_simulation(qat_mode: str, quant_method: Optional[str]) -> None:
+    """Enable W4A8 only for the supported compressed-tensors rollout path."""
+    set_w4a8_simulation(False)
+    if qat_mode.lower() != "w4a8":
+        return
+    if quant_method != "compressed-tensors":
+        raise ValueError(f"W4A8 simulation requires the compressed-tensors quantization method; got {quant_method!r}.")
+    set_w4a8_simulation(True)
+
+
+def _validate_w4a8_vllm_version() -> None:
+    """Fail clearly when vLLM does not provide the validated internal APIs."""
+    import vllm
+
+    version = getattr(vllm, "__version__", "unknown")
+    if not version.startswith(_W4A8_SUPPORTED_VLLM_PREFIX):
+        raise RuntimeError(
+            "W4A8 simulation currently requires vLLM 0.15.x because it patches version-specific "
+            f"Marlin APIs; found vLLM {version}."
+        )
 
 
 class ParamMetaDict(dict):
@@ -764,7 +787,12 @@ def patched_nvfp4_moe_process_weights_after_loading(self, layer: torch.nn.Module
                 "W4A8 fused-MoE simulation requires the vLLM NVFP4 Marlin backend; "
                 f"selected backend: {self.nvfp4_backend}."
             )
-        experts_cls = _make_w4a8_moe_experts_cls(self.experts_cls)
+        # vLLM may defer kernel construction to select_gemm_impl() for
+        # non-naive all-to-all paths, where it reads self.experts_cls again.
+        # Persist the wrapper so both eager and deferred construction apply
+        # activation Q/DQ at the two expert GEMM inputs.
+        self.experts_cls = _make_w4a8_moe_experts_cls(self.experts_cls)
+        experts_cls = self.experts_cls
     else:
         experts_cls = self.experts_cls
 
@@ -836,6 +864,9 @@ def patched_w4a16_apply_weights_with_w4a8_simulation(self, layer, x, bias=None):
 def apply_qat_patches():
     """Apply NVFP4 patches to support dynamic weight updates. Call before model loading."""
     global _applied_patches, _original_w4a16_apply_weights, _w4a8_apply_patch
+
+    if is_w4a8_simulation_enabled():
+        _validate_w4a8_vllm_version()
 
     if not _applied_patches:
         logger.info("Applying NVFP4 patches for dynamic weight loading...")
@@ -937,8 +968,7 @@ def manual_process_weights_after_loading(model):
 
 __all__ = [
     "apply_qat_patches",
+    "configure_w4a8_simulation",
     "prepare_qat_for_load_weights",
     "manual_process_weights_after_loading",
-    "set_w4a8_simulation",
-    "is_w4a8_simulation_enabled",
 ]
