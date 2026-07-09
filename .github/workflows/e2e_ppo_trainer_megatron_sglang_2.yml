@@ -121,6 +121,7 @@ jobs:
       - name: Install the current repository
         run: |
           pip3 install -r requirements-test.txt
+          pip3 install transformers==5.3.0
           pip3 install --no-deps -e .
       - name: Check final pip list
         run: |
@@ -151,6 +152,7 @@ jobs:
         run: |
           pip3 install -r requirements-test.txt
           pip3 install -r requirements.txt
+          pip3 install transformers==5.3.0
           pip3 install --no-deps -e .
       - name: Check final pip list
         run: |

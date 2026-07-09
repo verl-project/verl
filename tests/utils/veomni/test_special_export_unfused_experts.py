@@ -20,7 +20,7 @@ from torch.distributed.tensor import DTensor, Shard, distribute_tensor
 from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import Qwen3_5MoeTextConfig
 from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeDecoderLayer
 
-from verl.workers.engine.veomni.utils import MOE_PARAM_HANDERS
+from verl.workers.engine.veomni.utils import default_moe_param_handler
 
 
 def get_by_path(obj, path: str):
@@ -42,8 +42,6 @@ def get_per_tensor_param(model, device_mesh):
         device_mesh["ep"].size(),
         device_mesh["ep"].get_group(),
     )
-    process_func = MOE_PARAM_HANDERS["qwen3_5_moe"]
-
     for name, param in model.named_parameters():
         if not isinstance(param, DTensor):
             continue
@@ -52,7 +50,7 @@ def get_per_tensor_param(model, device_mesh):
         for src_ep_rank in range(ep_size):
             tensor = unsharded_tensor if src_ep_rank == ep_rank else buffer
             torch.distributed.broadcast(tensor, group_src=src_ep_rank, group=ep_group)
-            yield from process_func(name, tensor, ep_rank=src_ep_rank)
+            yield from default_moe_param_handler(name, tensor, ep_rank=src_ep_rank)
 
 
 def test_veomni_export_unfused_experts():

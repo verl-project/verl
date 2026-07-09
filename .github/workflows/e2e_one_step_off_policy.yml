@@ -128,7 +128,11 @@ jobs:
       - name: Running the E2E test with one_step_off_policy algorithm (FSDP2)
         run: |
           ray stop --force
-          bash tests/special_e2e/run_one_step_off_policy.sh
+          bash tests/special_e2e/run_one_step_off_policy.sh \
+            actor_rollout_ref.model.use_remove_padding=False \
+            actor_rollout_ref.model.override_config.attn_implementation=sdpa \
+            actor_rollout_ref.actor.ulysses_sequence_parallel_size=1 \
+            actor_rollout_ref.ref.ulysses_sequence_parallel_size=1
 
   # Test Megatron strategy
   e2e_one_step_off_policy_megatron:
