@@ -1092,29 +1092,6 @@ class MegatronEngineWithLMHead(MegatronEngine):
             # scale loss by num_micro_batch because megatron will scale loss
             # by n_micro_batch inside pp schedule
             scaled_loss = loss * data["num_micro_batch"]
-            if self.tf_config.calculate_per_token_loss and not forward_only:
-                # verl losses are already normalized over the global DP batch. MCore's
-                # legacy two-item loss callback still multiplies by CP, while per-token
-                # mode disables DDP's usual 1/(DP*CP) gradient pre-scaling. Compensate
-                # for that combined reduction until the callback returns MCore's
-                # three-item (loss sum, token count, metrics) contract.
-                num_moe_experts = getattr(self.tf_config, "num_moe_experts", None)
-                has_moe_aux_loss = bool(num_moe_experts) and (
-                    bool(getattr(self.tf_config, "moe_aux_loss_coeff", 0.0))
-                    or bool(getattr(self.tf_config, "moe_z_loss_coeff", None))
-                )
-                has_auxiliary_loss = (
-                    has_moe_aux_loss
-                    or bool(getattr(self.tf_config, "mtp_num_layers", None))
-                    or getattr(self.tf_config, "experimental_attention_variant_loss_scale_func", None) is not None
-                    or getattr(self.tf_config, "experimental_attention_variant", None) == "dsa"
-                )
-                # Auxiliary-loss autograd scalers bypass scaled_loss, and dynamic CP
-                # uses per-microbatch groups. Preserve their existing behavior until
-                # verl adopts the three-item callback that normalizes every gradient.
-                if not self.engine_config.dynamic_context_parallel and not has_auxiliary_loss:
-                    dp_cp_world_size = mpu.get_data_parallel_world_size(with_context_parallel=True)
-                    scaled_loss /= dp_cp_world_size
         else:
             assert forward_only, "forward_only must be True when loss_function is None"
             loss = torch.tensor(1.0, device=device)
