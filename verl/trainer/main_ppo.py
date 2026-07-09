@@ -136,27 +136,25 @@ class TaskRunner:
 
             backend_name = config.trainer.get("remote_backend")
             if backend_name:
-                # Per @zw0610: each remote backend ships its own
-                # per-backend worker (under `verl/remote_backend/workers/
-                # <name>/`) and adapter (under `verl/workers/
-                # remote_client/`). We import the adapter explicitly here
-                # so it registers with `RemoteBackendRegistry`; the
-                # registry no longer carries a lazy `MODULES` table.
-                if backend_name == "arctic":
-                    from verl.remote_backend.workers.arctic_rl import (
-                        ArcticRLActorRolloutRefWorker,
-                    )
-                    from verl.workers.remote_client import arctic_rl  # noqa: F401
+                # The adapter package is loaded during `import verl` via
+                # VERL_USE_EXTERNAL_MODULES; its side effects register
+                # both the RemoteBackend class (decorator on the adapter)
+                # and the matching ActorRollout forwarder worker class
+                # (RemoteBackendRegistry.register_worker call in the
+                # plugin's register.py). Here we only look the worker up.
+                from verl.remote_backend.base import RemoteBackendRegistry
 
-                    actor_rollout_cls = ArcticRLActorRolloutRefWorker
-                else:
+                worker_cls = RemoteBackendRegistry.get_worker(backend_name)
+                if worker_cls is None:
                     raise ValueError(
-                        f"Unknown trainer.remote_backend={backend_name!r}. "
-                        "Known: 'arctic'. Plug in a new backend by adding "
-                        "verl/workers/remote_client/<name>.py + "
-                        "verl/remote_backend/workers/<name>/worker.py and "
-                        "wiring it here."
+                        f"Remote backend {backend_name!r} did not register an "
+                        "ActorRollout forwarder worker. Ensure the adapter "
+                        "package's register.py calls "
+                        "`RemoteBackendRegistry.register_worker(name, cls)`, "
+                        "and that VERL_USE_EXTERNAL_MODULES points at it. "
+                        f"Registered backends: {RemoteBackendRegistry.list()!r}."
                     )
+                actor_rollout_cls = worker_cls
 
             lora_rank = config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
             if lora_rank <= 0:
