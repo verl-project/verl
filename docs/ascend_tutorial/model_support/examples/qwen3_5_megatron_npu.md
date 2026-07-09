@@ -1,6 +1,6 @@
 # Qwen3.5 Megatron NPU 使用指南
 
-Last updated: 07/07/2026.
+Last updated: 09/07/2026.
 
 本文用于指导在 Ascend NPU 上使用 verl + Megatron + vLLM 跑通 Qwen3.5-35B-A3B 和 Qwen3.5-122B-A10B GRPO 示例。
 
@@ -24,19 +24,21 @@ docker pull quay.io/ascend/verl:verl-9.0.0-a3-ubuntu22.04-py3.11-v0.8.0
 
 ## 模型和脚本
 
-| model | HF model | script |
-| --- | --- | --- |
-| Qwen3.5-35B-A3B | `Qwen/Qwen3.5-35B-A3B` | `examples/grpo_trainer/run_qwen3_5_35b_megatron.sh` |
+| model             | HF model | script |
+|-------------------| --- | --- |
+| Qwen3.5-35B-A3B   | `Qwen/Qwen3.5-35B-A3B` | `examples/grpo_trainer/run_qwen3_5_35b_megatron.sh` |
 | Qwen3.5-122B-A10B | `Qwen/Qwen3.5-122B-A10B` | `examples/grpo_trainer/run_qwen3_5_122b_a10b_megatron.sh` |
+| Qwen3.5-397B-A17B | `Qwen/Qwen3.5-397B-A17B` | `examples/grpo_trainer/run_qwen3_5_397b_megatron.sh` |
 
 ## 硬件和并行配置
 
 示例脚本默认使用如下 NPU 配置，可以通过同名环境变量覆盖：
 
-| model | nnodes | devices per node | TP | PP | CP | EP | ETP | GEN_TP |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Qwen3.5-35B-A3B | 1 | 16 | 2 | 2 | 1 | 8 | 1 | 8 |
-| Qwen3.5-122B-A10B | 4 | 16 | 2 | 4 | 1 | 16 | 1 | 16 |
+| model | nnodes | devices per node | TP | PP | CP | EP | ETP | GEN_DP | GEN_TP | GEN_EP |
+| --- |--------| --- | --- | --- | --- |----| --- |---|----|----|
+| Qwen3.5-35B-A3B | 1 | 16 | 2 | 2 | 1 | 8  | 1 | 1 | 8 | 1 |
+| Qwen3.5-122B-A10B | 4 | 16 | 2 | 4 | 1 | 16 | 1 | 1 | 16 | 1 |
+| Qwen3.5-397B-A17B | 16 | 16 | 2 | 4 | 1 | 64 | 1 | 16 | 16 | 256 |
 
 ## 数据和模型准备
 
@@ -51,6 +53,7 @@ hf download tyzhu/geo3k --repo-type dataset --local-dir $HOME/data/geo3k
 ```bash
 hf download Qwen/Qwen3.5-35B-A3B --local-dir /path/to/Qwen3.5-35B-A3B
 hf download Qwen/Qwen3.5-122B-A10B --local-dir /path/to/Qwen3.5-122B-A10B
+hf download Qwen/Qwen3.5-397B-A17B --local-dir /path/to/Qwen3.5-397B-A17B
 ```
 
 ## 启动训练
@@ -111,9 +114,31 @@ HF_MODEL_PATH=/path/to/Qwen3.5-122B-A10B \
 train_files=/path/to/train.parquet \
 test_files=/path/to/test.parquet \
 save_path=/path/to/checkpoints \
-n_devices_per_node=16 \
+NDEVICES_PER_NODE=16 \
 nnodes=4 \
 bash examples/grpo_trainer/run_qwen3_5_122b_a10b_megatron.sh
+```
+
+### Qwen3.5-397B-A17B
+
+```bash
+export DEVICE=npu
+export HF_MODEL_PATH=/path/to/Qwen3.5-397B-A17B
+
+bash examples/grpo_trainer/run_qwen3_5_397b_megatron.sh
+```
+
+如果需要覆盖数据、保存路径或并行配置：
+
+```bash
+DEVICE=npu \
+HF_MODEL_PATH=/path/to/Qwen3.5-397B-A17B \
+train_files=/path/to/train.parquet \
+test_files=/path/to/test.parquet \
+save_path=/path/to/checkpoints \
+NDEVICES_PER_NODE=16 \
+nnodes=16 \
+bash examples/grpo_trainer/run_qwen3_5_397b_megatron.sh
 ```
 
 ## 注意事项
