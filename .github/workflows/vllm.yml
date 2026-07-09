@@ -108,11 +108,6 @@ jobs:
         run: |
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -r requirements.txt
-          INDEX="https://download.pytorch.org/whl/nightly/cu130"
-          pip3 install --pre \
-            torch==2.14.0.dev20260625+cu130 \
-            torchvision==0.29.0.dev20260626+cu130 \
-            --extra-index-url "${INDEX}"
           pip3 install --no-deps -e .
       - name: Check final pip list
         run: |
@@ -163,11 +158,6 @@ jobs:
         run: |
           pip3 install pytest-asyncio
           pip3 install -r requirements-test.txt
-          INDEX="https://download.pytorch.org/whl/nightly/cu130"
-          pip3 install --pre \
-            torch==2.14.0.dev20260625+cu130 \
-            torchvision==0.29.0.dev20260626+cu130 \
-            --extra-index-url "${INDEX}"
           pip3 install --no-deps -e .
           pip3 install cupy-cuda13x==13.6.0
       - name: Check final pip list

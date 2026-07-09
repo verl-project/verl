@@ -117,11 +117,6 @@ jobs:
         run: |
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -r requirements.txt
-          INDEX="https://download.pytorch.org/whl/nightly/cu130"
-          pip3 install --pre \
-            torch==2.14.0.dev20260625+cu130 \
-            torchvision==0.29.0.dev20260626+cu130 \
-            --extra-index-url "${INDEX}"
           pip3 install --no-deps -e .
           pip3 install veomni==0.1.11 --ignore-requires-python --no-deps --index-url https://pypi.org/simple/
           pip3 install transformers==5.3.0

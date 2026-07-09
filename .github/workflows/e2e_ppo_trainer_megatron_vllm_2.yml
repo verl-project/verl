@@ -123,11 +123,6 @@ jobs:
         run: |
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -r requirements.txt
-          INDEX="https://download.pytorch.org/whl/nightly/cu130"
-          pip3 install --pre \
-            torch==2.14.0.dev20260625+cu130 \
-            torchvision==0.29.0.dev20260626+cu130 \
-            --extra-index-url "${INDEX}"
           pip3 install transformers==5.3.0
           pip3 install --no-deps -e .
           pip3 uninstall -y mbridge
@@ -190,11 +185,6 @@ jobs:
       - name: Install the current repository
         run: |
           pip3 install -r requirements-test.txt
-          INDEX="https://download.pytorch.org/whl/nightly/cu130"
-          pip3 install --pre \
-            torch==2.14.0.dev20260625+cu130 \
-            torchvision==0.29.0.dev20260626+cu130 \
-            --extra-index-url "${INDEX}"
           pip3 install transformers==5.3.0
           pip3 install --no-deps -e .
       - name: Check final pip list
@@ -281,11 +271,6 @@ jobs:
       - name: Install the current repository
         run: |
           pip3 install -r requirements-test.txt
-          INDEX="https://download.pytorch.org/whl/nightly/cu130"
-          pip3 install --pre \
-            torch==2.14.0.dev20260625+cu130 \
-            torchvision==0.29.0.dev20260626+cu130 \
-            --extra-index-url "${INDEX}"
           pip3 install --no-deps -e .
       - name: Check final pip list
         run: |
