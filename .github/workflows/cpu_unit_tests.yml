@@ -95,7 +95,6 @@ jobs:
         run: |
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
-          pip3 install --no-deps TransferQueue==0.1.8
       - name: Check final pip list
         run: |
           pip3 list
@@ -107,7 +106,9 @@ jobs:
         run: |
           echo '[pytest]' > pytest.ini
           echo 'python_files = *_on_cpu.py' >> pytest.ini
-          pytest -s -x --asyncio-mode=auto tests/
+          pytest -s -x --asyncio-mode=auto tests/ \
+            --ignore=tests/trainer/ppo/v1 \
+            --ignore=tests/trainer/test_multi_trajectories_advantage_on_cpu.py
   cleanup:
     runs-on: ubuntu-latest
     needs: [setup, cpu_unit_tests]

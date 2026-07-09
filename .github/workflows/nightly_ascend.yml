@@ -177,7 +177,6 @@ jobs:
       - name: Install the current repository
         run: |
           uv pip install --no-deps --no-build-isolation -e .
-          uv pip install --no-deps TransferQueue==0.1.8
       - name: Check final pip list
         run: |
           uv pip list
@@ -533,7 +532,6 @@ jobs:
           npu-smi info
       - name: Check initial pip list from image
         run: |
-          pip install --no-deps TransferQueue==0.1.8
           pip list
       - name: Checkout verl-project/verl repo
         uses: actions/checkout@v4

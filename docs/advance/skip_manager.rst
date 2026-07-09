@@ -48,9 +48,6 @@ Supported entry points today
    * - ``main_ppo.py`` (``RayPPOTrainer``)
      - ``skip.rollout``
      - **Supported**
-   * - ``main_ppo_sync.py`` (TransferQueue + ReplayBuffer)
-     - ``skip.rollout``
-     - **Not supported** (see section 3)
    * - ``fully_async_main`` (``FullyAsyncRollouter``)
      - ``skip.async_rollout``
      - **Supported**
@@ -179,20 +176,6 @@ semantics are in section 2.
   ``SkipManager.set_step(self.global_steps)`` each training step.
 - ``AgentLoopManager.generate_sequences`` is decorated with
   ``@SkipManager.annotate(role="rollout")``.
-
-**``main_ppo_sync.py`` (not supported yet)**
-
-``main_ppo_sync`` replaces the Agent Loop integration with ``AgentLoopManagerTQ``. The main reason
-rollout skip is not supported today is **logic coupling** in
-``AgentLoopManagerTQ.generate_sequences``: it not only drives sequence generation, but also marks
-samples in the ReplayBuffer and **writes generated data into TransferQueue (TQ)**. Skipping
-``generate_sequences`` would therefore skip both generation and the TQ handoff, which breaks the
-downstream training loop that consumes data from TQ.
-
-Decoupling “generate” from “enqueue to TQ” is non-trivial under the current design, so SkipManager
-adaptation for ``main_ppo_sync`` is **deferred** until the TransferQueue-based training path is
-further stabilized.
-
 
 4. Fully async quick start (``async_rollout`` role)
 ---------------------------------------------------
