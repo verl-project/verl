@@ -142,17 +142,17 @@ jobs:
       - name: Running GSM8K E2E training tests with 3D parallelism on 8 NPUs with Megatron (DeepSeek)
         run: |
           ray stop --force
-          OPTIM_MEMORY_EFFICIENT=True ENGINE=sglang COMMON_VPP=NULL USE_REMOVE_PADDING=True SAVE_FREQ=1 MODEL_ID=deepseek-ai/deepseek-coder-1.3b-instruct bash tests/special_e2e/run_ppo_trainer_megatron.sh
+          VANILLA_MBRIDGE=True OPTIM_MEMORY_EFFICIENT=True ENGINE=sglang COMMON_VPP=NULL USE_REMOVE_PADDING=True SAVE_FREQ=1 MODEL_ID=deepseek-ai/deepseek-coder-1.3b-instruct bash tests/special_e2e/run_ppo_trainer_megatron.sh
       - name: Running GSM8K E2E training tests with 3D parallelism on 8 NPUs with Megatron (DeepSeek)
         run: |
           ray stop --force
           export VLLM_USE_V1=1
           ray start --head
-          ENGINE=sglang MODE=async RESUME_MODE=auto COMMON_VPP=NULL USE_REMOVE_PADDING=True MODEL_ID=deepseek-ai/deepseek-coder-1.3b-instruct TOTAL_TRAIN_STEPS=2 bash tests/special_e2e/run_ppo_trainer_megatron.sh
+          VANILLA_MBRIDGE=True ENGINE=sglang MODE=async RESUME_MODE=auto COMMON_VPP=NULL USE_REMOVE_PADDING=True MODEL_ID=deepseek-ai/deepseek-coder-1.3b-instruct TOTAL_TRAIN_STEPS=2 bash tests/special_e2e/run_ppo_trainer_megatron.sh
       - name: Profiling GRPO GSM8K E2E training tests with 3D parallelism on 8 NPUs with Megatron (Deepseek)
         run: |
           ray stop --force
-          PROFILE_ENABLE=True ENGINE=sglang ADV_ESTIMATOR=grpo USE_DYNAMIC_BSZ=False USE_REMOVE_PADDING=True MODEL_ID=deepseek-ai/deepseek-coder-1.3b-instruct bash tests/special_e2e/run_ppo_trainer_megatron.sh
+          VANILLA_MBRIDGE=True PROFILE_ENABLE=True ENGINE=sglang ADV_ESTIMATOR=grpo USE_DYNAMIC_BSZ=False USE_REMOVE_PADDING=True MODEL_ID=deepseek-ai/deepseek-coder-1.3b-instruct bash tests/special_e2e/run_ppo_trainer_megatron.sh
           if [ -z "$( ls -A "${HOME}/profiling" )" ]; then
             echo "[ERROR] not found any profiling files"
             exit 1
@@ -221,7 +221,7 @@ jobs:
       - name: Running GSM8K E2E training tests with 3D parallelism on 8 NPUs with Megatron (Qwen3) testing learning rate scheduler
         run: |
           ray stop --force
-          ALL_OFFLOAD=True USE_REMOVE_PADDING=True VAL_BEFORE_TRAIN=True TEST_FREQ=1 SAVE_FREQ=1 LR_WARMUP_STEPS=1 TOTAL_TRAIN_STEPS=2 MODEL_ID=Qwen/Qwen3-0.6B bash tests/special_e2e/run_ppo_trainer_megatron.sh
+          VANILLA_MBRIDGE=True ALL_OFFLOAD=True USE_REMOVE_PADDING=True VAL_BEFORE_TRAIN=True TEST_FREQ=1 SAVE_FREQ=1 LR_WARMUP_STEPS=1 TOTAL_TRAIN_STEPS=2 MODEL_ID=Qwen/Qwen3-0.6B bash tests/special_e2e/run_ppo_trainer_megatron.sh
       - name: clean up
         run: |
           rm -rf checkpoints

@@ -542,6 +542,7 @@ critic:
   data_loader_seed: 42
   cliprange_value: 0.5
   loss_agg_mode: ${oc.select:actor_rollout_ref.actor.loss_agg_mode,token-mean}
+  loss_scale_factor: ${oc.select:actor_rollout_ref.actor.loss_scale_factor,null}
   checkpoint:
     _target_: verl.trainer.config.CheckpointConfig
     save_contents:
@@ -870,7 +871,7 @@ trainer:
     colocate_async:
       num_warmup_batches: 1
     separate_async:
-      num_warmup_batches: 4
+      num_warmup_batches: 1
       parameter_sync_step: 4
     sampler:
       max_off_policy_threshold: 8
@@ -934,6 +935,11 @@ transfer_queue:
 skip:
   _target_: verl.utils.skip.SkipManagerConfig
   rollout:
+    enable: false
+    dump_dir: ~/.verl/rollout_dump
+    steps: []
+    action: cache
+  rollout_tq:
     enable: false
     dump_dir: ~/.verl/rollout_dump
     steps: []

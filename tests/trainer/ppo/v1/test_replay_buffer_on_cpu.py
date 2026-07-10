@@ -31,9 +31,11 @@ partitions, but ``ReplayBuffer`` tracks keys per partition).
 
 ### Off-policy control
 
-``ReplayBuffer`` measures a trajectory's staleness (number of model versions it
-spans) as ``(global_steps - prompt_global_steps + 1) / parameter_sync_step`` and
-supports two strategies once a trajectory crosses ``max_off_policy_threshold``:
+``global_steps`` is the model weight version (one weight sync per global step, with
+``parameter_sync_step`` local updates performed inside a step), so ``ReplayBuffer``
+measures a trajectory's staleness (number of model versions it spans) directly as
+``(global_steps - prompt_global_steps + 1)`` and supports two strategies once a
+trajectory crosses ``max_off_policy_threshold``:
 
 - ``drop``: train eagerly, dropping any sampled trajectory strictly above the
   threshold (``staleness > threshold``) and reporting drop metrics.
@@ -74,18 +76,17 @@ def _make_rb(
     *,
     max_off_policy_threshold: int = 8,
     max_off_policy_strategy: str = "drop",
-    parameter_sync_step: int = 1,
     poll_interval: float = POLL_INTERVAL,
 ) -> ReplayBuffer:
     """Construct a ReplayBuffer with test-friendly defaults.
 
-    Defaults (drop strategy, threshold 8, sync step 1) make the off-policy
-    filter a no-op for the generic tests that ``sample`` at ``global_steps=0``
-    over freshly produced trajectories.
+    Defaults (drop strategy, threshold 8) make the off-policy filter a no-op for
+    the generic tests that ``sample`` at ``global_steps=0`` over freshly produced
+    trajectories.
     """
     return ReplayBuffer(
         trainer_mode="sync",
-        trainer_config={"parameter_sync_step": parameter_sync_step},
+        trainer_config={},
         max_off_policy_threshold=max_off_policy_threshold,
         max_off_policy_strategy=max_off_policy_strategy,
         sampler_kwargs={},
@@ -333,13 +334,13 @@ def test_has_enough_samples_drop_ignores_inflight():
 
 def test_has_enough_samples_wait_blocks_on_stale_inflight():
     """wait blocks while any in-flight prompt has reached the staleness threshold."""
-    rb = _make_rb(max_off_policy_strategy="wait", max_off_policy_threshold=2, parameter_sync_step=1)
+    rb = _make_rb(max_off_policy_strategy="wait", max_off_policy_threshold=2)
     pid = "p"
     rb.finished_keys[pid] |= {"a", "b"}
     rb.running_keys[pid] |= {"c"}
     rb.prompt_global_steps[pid]["c"] = 0
 
-    # staleness = (g - 0 + 1) / 1; >= 2 (threshold) exactly at g == 1.
+    # staleness = (g - 0 + 1); >= 2 (threshold) exactly at g == 1.
     assert rb._has_enough_samples(global_steps=1, partition_id=pid, batch_size=2) is False
     # g == 0 -> staleness 1 < 2 -> in-flight is fresh, terminal count suffices.
     assert rb._has_enough_samples(global_steps=0, partition_id=pid, batch_size=2) is True
@@ -579,8 +580,8 @@ def test_sample_zero_batch_size_raises_on_empty_clear(tq_init, partition_id):
 def test_drop_filters_stale_trajectories_and_reports_metrics(tq_init, partition_id):
     """drop removes sampled trajectories whose staleness strictly exceeds the
     threshold, clears them from TransferQueue, and reports drop metrics."""
-    # staleness = (global_steps - prompt_global_steps + 1) / parameter_sync_step;
-    # drop when staleness > threshold(=2). At global_steps=5, sync=1:
+    # staleness = (global_steps - prompt_global_steps + 1);
+    # drop when staleness > threshold(=2). At global_steps=5:
     #   stale    gs=0 -> 6 > 2 -> dropped
     #   boundary gs=4 -> 2 not > 2 -> kept (boundary is inclusive on the keep side)
     #   fresh    gs=5 -> 1 -> kept
@@ -589,7 +590,7 @@ def test_drop_filters_stale_trajectories_and_reports_metrics(tq_init, partition_
     fresh = PromptSpec(uid=_uid(), status="finished", sessions=1, global_steps=5)
     _produce(partition_id, [stale, boundary, fresh]).join_and_check()
 
-    rb = _make_rb(max_off_policy_strategy="drop", max_off_policy_threshold=2, parameter_sync_step=1)
+    rb = _make_rb(max_off_policy_strategy="drop", max_off_policy_threshold=2)
     try:
         batch, metrics = rb.sample(global_steps=5, partition_id=partition_id, batch_size=3)
 
@@ -615,7 +616,7 @@ def test_drop_keeps_all_within_threshold_without_metrics(tq_init, partition_id):
     specs = [PromptSpec(uid=_uid(), status="finished", sessions=1, global_steps=5) for _ in range(2)]
     _produce(partition_id, specs).join_and_check()
 
-    rb = _make_rb(max_off_policy_strategy="drop", max_off_policy_threshold=2, parameter_sync_step=1)
+    rb = _make_rb(max_off_policy_strategy="drop", max_off_policy_threshold=2)
     try:
         batch, metrics = rb.sample(global_steps=5, partition_id=partition_id, batch_size=2)
 
@@ -625,22 +626,23 @@ def test_drop_keeps_all_within_threshold_without_metrics(tq_init, partition_id):
         _clear_partition(partition_id)
 
 
-def test_drop_respects_parameter_sync_step(tq_init, partition_id):
-    """parameter_sync_step scales staleness: a larger sync step tolerates a wider
-    span of dataloader steps before a trajectory is dropped."""
-    # staleness = (10 - gs + 1) / 4; drop when > 2 (i.e. raw span > 8).
-    #   stale gs=0 -> 11/4 = 2.75 > 2 -> dropped
-    #   fresh gs=8 -> 3/4 = 0.75      -> kept
+def test_drop_uses_version_based_staleness(tq_init, partition_id):
+    """staleness is measured directly in model-version units: (global_steps -
+    prompt_global_steps + 1), since global_steps is the weight version."""
+    # threshold=8, at global_steps=10, drop when staleness > 8:
+    #   stale gs=0 -> 10 - 0 + 1 = 11 > 8 -> dropped
+    #   fresh gs=8 -> 10 - 8 + 1 = 3       -> kept
     stale = PromptSpec(uid=_uid(), status="finished", sessions=1, global_steps=0)
     fresh = PromptSpec(uid=_uid(), status="finished", sessions=1, global_steps=8)
     _produce(partition_id, [stale, fresh]).join_and_check()
 
-    rb = _make_rb(max_off_policy_strategy="drop", max_off_policy_threshold=2, parameter_sync_step=4)
+    rb = _make_rb(max_off_policy_strategy="drop", max_off_policy_threshold=8)
     try:
         batch, metrics = rb.sample(global_steps=10, partition_id=partition_id, batch_size=2)
 
         assert _uids_of(batch.keys) == {fresh.uid}
         assert metrics["validation/off_policy/dropped_samples"] == 1
+        assert metrics["validation/off_policy/dropped_samples_staleness/mean"] == 11
     finally:
         _clear_partition(partition_id)
 
@@ -653,13 +655,13 @@ def test_drop_respects_parameter_sync_step(tq_init, partition_id):
 def test_wait_blocks_until_stale_inflight_finishes(tq_init, partition_id):
     """wait holds back a full batch while a stale in-flight prompt exists, then
     proceeds (without dropping it) once it terminates."""
-    threshold, sync, g = 2, 1, 5
+    threshold, g = 2, 5
     fresh = [PromptSpec(uid=_uid(), status="finished", sessions=1, global_steps=g) for _ in range(2)]
-    # In-flight prompt: staleness (5 - 0 + 1) / 1 = 6 >= 2 -> blocks sampling.
+    # In-flight prompt: staleness (5 - 0 + 1) = 6 >= 2 -> blocks sampling.
     stale = PromptSpec(uid=_uid(), status="running", sessions=1, global_steps=0)
     _produce(partition_id, fresh + [stale]).join_and_check()
 
-    rb = _make_rb(max_off_policy_strategy="wait", max_off_policy_threshold=threshold, parameter_sync_step=sync)
+    rb = _make_rb(max_off_policy_strategy="wait", max_off_policy_threshold=threshold)
     consumer = SampleConsumer(rb, partition_id, batch_size=2, global_steps=g)
     try:
         consumer.start()
@@ -683,12 +685,12 @@ def test_wait_blocks_until_stale_inflight_finishes(tq_init, partition_id):
 def test_wait_keeps_stale_terminal_trajectories(tq_init, partition_id):
     """wait is dropless: a finished-but-very-stale group that ``drop`` would
     discard is still returned, with no drop metrics."""
-    # staleness (100 - 0 + 1) / 1 = 101, far above threshold=2; "drop" would
+    # staleness (100 - 0 + 1) = 101, far above threshold=2; "drop" would
     # remove it, "wait" keeps it. No in-flight prompts, so sampling never blocks.
     stale = PromptSpec(uid=_uid(), status="finished", sessions=1, global_steps=0)
     _produce(partition_id, [stale]).join_and_check()
 
-    rb = _make_rb(max_off_policy_strategy="wait", max_off_policy_threshold=2, parameter_sync_step=1)
+    rb = _make_rb(max_off_policy_strategy="wait", max_off_policy_threshold=2)
     try:
         batch, metrics = rb.sample(global_steps=100, partition_id=partition_id, batch_size=1)
 
@@ -701,13 +703,13 @@ def test_wait_keeps_stale_terminal_trajectories(tq_init, partition_id):
 def test_wait_does_not_block_when_inflight_is_fresh(tq_init, partition_id):
     """wait proceeds immediately when every in-flight prompt is below threshold,
     and never drops (no drop metrics)."""
-    threshold, sync, g = 4, 1, 3
+    threshold, g = 4, 3
     finished = [PromptSpec(uid=_uid(), status="finished", sessions=1, global_steps=g) for _ in range(2)]
-    # In-flight prompt staleness (3 - 3 + 1) / 1 = 1 < 4 -> does not block.
+    # In-flight prompt staleness (3 - 3 + 1) = 1 < 4 -> does not block.
     inflight = PromptSpec(uid=_uid(), status="running", sessions=1, global_steps=g)
     _produce(partition_id, finished + [inflight]).join_and_check()
 
-    rb = _make_rb(max_off_policy_strategy="wait", max_off_policy_threshold=threshold, parameter_sync_step=sync)
+    rb = _make_rb(max_off_policy_strategy="wait", max_off_policy_threshold=threshold)
     try:
         batch, metrics = rb.sample(global_steps=g, partition_id=partition_id, batch_size=2)
 

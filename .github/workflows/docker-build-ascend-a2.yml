@@ -9,8 +9,6 @@ on:
       - "docker/ascend/Dockerfile.ascend_9.0.0_a2_v0.8.0"
       - ".github/workflows/docker-build-ascend-a2.yml"
 
-  release:
-    types: [published]
   schedule:
     - cron: "0 16 * * *"
 
@@ -72,12 +70,7 @@ jobs:
       - name: Get image tag
         id: version
         run: |
-          BRANCH_NAME=$(echo "${{ github.ref }}" | sed 's/refs\/heads\///g' | sed 's/[^a-zA-Z0-9._-]/_/g')
-          if [ "${{ github.event_name }}" = "release" ]; then
-            echo "tag=${{ steps.base_image.outputs.new_image_name }}-${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
-          elif [ "$BRANCH_NAME" = "main" ]; then
-            echo "tag=${{ steps.base_image.outputs.new_image_name }}-latest" >> "$GITHUB_OUTPUT"
-          fi
+          echo "tag=latest-cann9.0.0-torch_npu2.9.0post2-910b-ubuntu22.04-py3.11-vllm" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -277,5 +270,5 @@ jobs:
           DIGESTS=$(printf "$IMAGE@sha256:%s " $(ls ${{ runner.temp }}/digests-v080 | sed 's/^v080-//'))
           echo "v0.8.0 image digests: $DIGESTS"
           docker buildx imagetools create \
-            -t "$IMAGE:verl-9.0.0-910b-ubuntu22.04-py3.11-v0.8.0" \
+            -t "$IMAGE:v0.8.0-cann9.0.0-torch2.9.0post2-910b-ubuntu22.04-py3.11-vllm" \
             $DIGESTS

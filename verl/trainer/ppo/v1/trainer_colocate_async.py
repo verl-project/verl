@@ -38,6 +38,8 @@ class PPOTrainerColocateAsync(PPOTrainer):
         self.checkpoint_manager.update_weights(self.global_steps)
 
     def on_train_begin(self):
+        if self.config.skip.rollout_tq.enable:
+            return
         num_warmup_batches = self.config.trainer.v1.colocate_async.num_warmup_batches
         for _ in range(num_warmup_batches):
             self._add_batch_to_generate()

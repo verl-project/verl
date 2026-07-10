@@ -8,6 +8,7 @@ set -xeuo pipefail
 NUM_GPUS=${NUM_GPUS:-8}
 ACTOR_STRATEGY=${ACTOR_STRATEGY:-"fsdp2"}  # fsdp2 or megatron
 ROLLOUT_NAME=${ROLLOUT_NAME:-"vllm"}       # vllm, sglang, or trtllm
+VANILLA_MBRIDGE=${VANILLA_MBRIDGE:-"False"}  # True or False
 
 # Download model if not exists
 MODEL_ID=${MODEL_ID:-Qwen/Qwen2.5-0.5B-Instruct}
@@ -224,6 +225,7 @@ elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
         actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=2 \
         actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
         actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
+        actor_rollout_ref.actor.megatron.vanilla_mbridge=${VANILLA_MBRIDGE} \
         actor_rollout_ref.actor.megatron.param_offload=${actor_offload} \
         actor_rollout_ref.actor.megatron.optimizer_offload=${actor_offload} \
         actor_rollout_ref.actor.megatron.grad_offload=${actor_offload} \

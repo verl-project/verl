@@ -26,14 +26,14 @@ from typing import Any, Callable, Optional
 import torch
 import torch.distributed
 from tensordict import TensorDict
-from torch.distributed.checkpoint.state_dict import get_model_state_dict
 from torch.distributed.tensor import DTensor
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
-from torchtitan.components.optimizer import OptimizersContainer
+from torchtitan.components.optimizer import OptimizersContainer, ParamGroupConfig
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed import utils as dist_utils
+from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.train import Trainer
@@ -111,12 +111,18 @@ class TorchTitanEngine(BaseEngine):
         model_spec = model_module.model_registry(torchtitan_flavor, attn_backend=self.engine_config.attn_type)
 
         optimizer = OptimizersContainer.Config(
-            name=self.optimizer_config.name,
-            lr=self.optimizer_config.lr,
-            eps=self.optimizer_config.eps,
-            beta1=self.optimizer_config.betas[0],
-            beta2=self.optimizer_config.betas[1],
-            weight_decay=self.optimizer_config.weight_decay,
+            param_groups=[
+                ParamGroupConfig(
+                    pattern=r".*",
+                    optimizer_name=self.optimizer_config.name,
+                    optimizer_kwargs={
+                        "lr": self.optimizer_config.lr,
+                        "eps": self.optimizer_config.eps,
+                        "betas": (self.optimizer_config.betas[0], self.optimizer_config.betas[1]),
+                        "weight_decay": self.optimizer_config.weight_decay,
+                    },
+                )
+            ],
         )
 
         total_steps = self.optimizer_config.total_training_steps
@@ -137,6 +143,7 @@ class TorchTitanEngine(BaseEngine):
             pipeline_parallel_degree=self.engine_config.pipeline_parallel_size,
             context_parallel_degree=self.engine_config.context_parallel_size,
             expert_parallel_degree=self.engine_config.expert_parallel_size,
+            spmd_backend=self.engine_config.spmd_backend,
         )
         checkpoint = CheckpointManager.Config(
             enable=True,
@@ -153,6 +160,17 @@ class TorchTitanEngine(BaseEngine):
         else:
             training = TrainingConfig(**training_kwargs)
 
+        # Activation checkpointing mode. Note: under spmd_backend="spmd_types" with
+        # eager execution (use_torch_compile=False), selective/full AC recompute runs
+        # on the autograd backward thread where the thread-local SPMD mesh is inactive,
+        # so spmd.assert_type() raises "no current mesh". Set activation_checkpoint="none"
+        # (or enable torch.compile, which recomputes in-graph) in that configuration.
+        activation_checkpoint = {
+            "selective": SelectiveAC.Config,
+            "full": FullAC.Config,
+            "none": lambda: None,
+        }[self.engine_config.activation_checkpoint]()
+
         # Construct Torchtitan's Trainer.Config
         self.config = Trainer.Config(
             model_spec=model_spec,
@@ -163,6 +181,7 @@ class TorchTitanEngine(BaseEngine):
             checkpoint=checkpoint,
             compile=compile_config,
             training=training,
+            activation_checkpoint=activation_checkpoint,
             # Use a no-op dataloader since verl has its own data loading
             dataloader=NoOpDataLoader.Config(),
             # Provide a concrete loss so Trainer.__init__ can build it;
@@ -268,6 +287,11 @@ class TorchTitanEngine(BaseEngine):
         )
         self.device_mesh = self.parallel_dims.build_mesh()
 
+        # Mirror torchtitan's init_distributed (which verl bypasses): disable autograd
+        # multithreading so backward-thread activation-checkpoint recompute can access the
+        # thread-local SPMD mesh / process groups (e.g. current_spmd_mesh().get_group(...)).
+        torch.autograd.set_multithreading_enabled(False)
+
     def train_mode(self, **kwargs):
         """Return a context manager for training mode."""
         return EngineTrainModeCtx(self, **kwargs)
@@ -332,8 +356,10 @@ class TorchTitanEngine(BaseEngine):
 
         ctx = torch.no_grad() if forward_only else nullcontext()
 
+        # train_context activates the (thread-local) SPMD mesh required by spmd_types; it must
+        # span backward too, since activation-checkpoint recompute re-runs the forward there.
         for micro_batch in micro_batches:
-            with ctx:
+            with self.trainer.train_context(), ctx:
                 loss, output = self.forward_step(micro_batch, loss_function=loss_function, forward_only=forward_only)
                 if not forward_only:
                     loss.backward()
@@ -360,10 +386,9 @@ class TorchTitanEngine(BaseEngine):
                 "This will be implemented in a follow-up PR."
             )
         else:
-            # Non-PP forward
+            # Non-PP forward. train_context (SPMD mesh) is set by the caller.
             assert len(model_parts) == 1
-            with self.trainer.train_context():
-                pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+            pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
 
         if isinstance(pred, DTensor):
             pred = pred.full_tensor()
@@ -485,10 +510,9 @@ class TorchTitanEngine(BaseEngine):
         for module in self.module:
             load_fsdp_model_to_gpu(module)
 
-        # Collect state dicts from all model parts
         params = {}
         for module in self.module:
-            module_params = get_model_state_dict(module)
+            module_params = module.state_dict()
             params.update(module_params)
 
         if self._is_offload_param:

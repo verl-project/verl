@@ -63,6 +63,10 @@ cliprange_value: 0.5
 # Loss aggregation mode: "token-mean", "seq-mean-token-sum", or "seq-mean-token-mean"
 loss_agg_mode: ${oc.select:actor_rollout_ref.actor.loss_agg_mode,token-mean}
 
+# Scale factor for "seq-mean-token-sum-norm" loss aggregation mode.
+# If null, uses response_length. Set to a constant to ensure consistent normalization.
+loss_scale_factor: ${oc.select:actor_rollout_ref.actor.loss_scale_factor,null}
+
 # checkpoint configs
 checkpoint:
 

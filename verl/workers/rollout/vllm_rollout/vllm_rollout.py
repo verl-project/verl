@@ -118,17 +118,63 @@ class ServerAdapter(BaseRollout):
 
         rank = int(os.environ["RANK"])
         local_world_size = int(os.environ["RAY_LOCAL_WORLD_SIZE"])
-        rollout_world_size = (
-            self.config.tensor_model_parallel_size
-            * self.config.data_parallel_size
-            * self.config.pipeline_model_parallel_size
-        )
+        # PD asymmetric layout inflates per-replica footprint; must match
+        # llm_server.py:_initialize_llm_servers or trainer-to-replica mapping breaks.
+        prefill_tp = self.config.tensor_model_parallel_size
+        disagg = getattr(self.config, "disaggregation", None)
+        if disagg is not None and getattr(disagg, "enabled", False):
+            decode_tp = (
+                disagg.decode_tensor_model_parallel_size
+                if disagg.decode_tensor_model_parallel_size is not None
+                else prefill_tp
+            )
+            per_replica = prefill_tp * disagg.prefill_replicas + decode_tp * disagg.decode_replicas
+        else:
+            decode_tp = prefill_tp
+            per_replica = prefill_tp
+        rollout_world_size = per_replica * self.config.data_parallel_size * self.config.pipeline_model_parallel_size
         if replica_rank == -1:
             self.replica_rank = rank // rollout_world_size
         else:
             self.replica_rank = replica_rank
         self.rollout_rank = rank % rollout_world_size
         self.node_rank = self.rollout_rank // local_world_size
+
+        # Map each trainer rank to its co-located vLLM server so weight-update
+        # IPC handles stay on the GPU where they were created. Offset math
+        # assumes prefill_replicas == 1 (enforced by vLLMPDReplica); if that
+        # ever lifts, update both this block and vLLMPDReplica.launch_servers.
+        self._pd_role: Optional[str] = None
+        self._pd_server_index: Optional[int] = None
+        self._pd_tp_local_rank: Optional[int] = None
+        if disagg is not None and getattr(disagg, "enabled", False):
+            footprint = prefill_tp + disagg.decode_replicas * decode_tp
+            local = self.rollout_rank % footprint
+            if local < prefill_tp:
+                self._pd_role = "prefill"
+                self._pd_server_index = 0
+                self._pd_tp_local_rank = local
+            else:
+                off = local - prefill_tp
+                self._pd_role = "decode"
+                self._pd_server_index = off // decode_tp
+                self._pd_tp_local_rank = off % decode_tp
+            # Each role's TP-rank-0 owns the adapter (vs colocated where every
+            # rollout_rank=0 owns it). One log line per PD rank at startup so
+            # a deadlock report can be traced back to the role mapping.
+            self._has_server = self._pd_tp_local_rank == 0
+            logger.info(
+                "vllm PD ServerAdapter: rank=%d replica=%d rollout=%d role=%s server_idx=%s tp_local=%s has_server=%s",
+                rank,
+                self.replica_rank,
+                self.rollout_rank,
+                self._pd_role,
+                self._pd_server_index,
+                self._pd_tp_local_rank,
+                self._has_server,
+            )
+        else:
+            self._has_server = self.rollout_rank == 0
 
         if config.layered_summon or (config.expert_parallel_size > 1 and not _check_vllm_version_for_sleep_level()):
             logger.warning("Setting the sleep level to 1 may cause a memory overflow.")
@@ -160,12 +206,18 @@ class ServerAdapter(BaseRollout):
 
     def _ensure_server_handle(self) -> bool:
         """Lazy-init server handle. Returns False if this rank should not proceed."""
-        if self.rollout_rank != 0:
+        if not self._has_server:
             return False
         # Lazy init http server adapter because http server is launched after hybrid engine.
         if self.server_handle is None:
             prefix = self._get_server_name_prefix()
-            self.server_handle = ray.get_actor(f"{prefix}server_{self.replica_rank}_{self.node_rank}")
+            if self._pd_role == "prefill":
+                actor_name = f"{prefix}server_{self.replica_rank}_0"
+            elif self._pd_role == "decode":
+                actor_name = f"{prefix}server_decode_{self.replica_rank}_{self._pd_server_index}"
+            else:
+                actor_name = f"{prefix}server_{self.replica_rank}_{self.node_rank}"
+            self.server_handle = ray.get_actor(actor_name)
         return True
 
     async def _execute_method(
@@ -237,7 +289,7 @@ class ServerAdapter(BaseRollout):
             await future
 
         # reset caches after updating weights
-        if self.rollout_rank == 0:
+        if self._has_server:
             await self.server_handle.clear_kv_cache.remote()
             if global_steps is not None:
                 await self.server_handle.set_global_steps.remote(global_steps)

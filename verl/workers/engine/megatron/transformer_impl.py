@@ -168,12 +168,21 @@ class MegatronEngine(BaseEngine):
         from verl.utils.megatron_utils import mapping_string_to_attn_backend
         from verl.utils.torch_dtypes import PrecisionType
 
+        self.is_value_model = self.model_config.model_type == "value_model"
+        self.share_embeddings_and_output_weights = self.model_config.share_embeddings_and_output_weights
+
         check_mtp_config(self.model_config, self.engine_config)
 
         self.param_dtype = PrecisionType.to_dtype(self.engine_config.dtype)
         self.dtype = PrecisionType.to_dtype(self.param_dtype)
 
         override_transformer_config = mapping_string_to_attn_backend({**self.engine_config.override_transformer_config})
+        if self.is_value_model:
+            # A value head cannot share weights with the vocabulary embedding. This must
+            # be set before either bridge creates and finalizes its Megatron config.
+            self.model_config.hf_config.tie_word_embeddings = False
+            self.share_embeddings_and_output_weights = False
+            override_transformer_config["share_embeddings_and_output_weights"] = False
         if self.engine_config.dynamic_context_parallel:
             override_transformer_config["max_seqlen_per_dp_cp_rank"] = self.engine_config.max_seqlen_per_dp_cp_rank
             # note(baiyan): we must set the transformer_config.dynamic_context_parallel to False
@@ -206,14 +215,19 @@ class MegatronEngine(BaseEngine):
             # Match verl implementation (need variable_seq_lengths)
             from megatron.core.transformer.enums import AttnBackend
 
+            virtual_pipeline_model_parallel_size = self.engine_config.virtual_pipeline_model_parallel_size
             provider_overrides = {
                 "tensor_model_parallel_size": self.engine_config.tensor_model_parallel_size,
                 "pipeline_model_parallel_size": self.engine_config.pipeline_model_parallel_size,
                 "expert_model_parallel_size": self.engine_config.expert_model_parallel_size,
                 "expert_tensor_parallel_size": self.engine_config.expert_tensor_parallel_size,
-                "virtual_pipeline_model_parallel_size": self.engine_config.virtual_pipeline_model_parallel_size,
+                "virtual_pipeline_model_parallel_size": virtual_pipeline_model_parallel_size,
                 "context_parallel_size": self.engine_config.context_parallel_size,
                 "sequence_parallel": self.engine_config.sequence_parallel,
+                "overlap_p2p_comm": (
+                    virtual_pipeline_model_parallel_size is not None and virtual_pipeline_model_parallel_size > 1
+                ),
+                "batch_p2p_comm": False,
                 "variable_seq_lengths": True,
                 "attention_backend": AttnBackend.flash,
                 "moe_token_dispatcher_type": "alltoall",
@@ -287,7 +301,6 @@ class MegatronEngine(BaseEngine):
         from verl.utils.megatron_utils import McoreModuleWrapperConfig, make_megatron_module
         from verl.utils.model import print_model_size
 
-        self.is_value_model = self.model_config.model_type == "value_model"
         if self.engine_config.forward_only:
             wrap_with_ddp = False
         else:
@@ -299,9 +312,6 @@ class MegatronEngine(BaseEngine):
             use_distributed_optimizer=self.engine_config.use_distributed_optimizer,
             use_megatron_fsdp=self.engine_config.use_megatron_fsdp,
         )
-        if self.is_value_model:
-            self.model_config.hf_config.tie_word_embeddings = False
-
         override_ddp_config = self._resolve_override_ddp_config()
 
         module, updated_tf_config = make_megatron_module(
@@ -452,7 +462,7 @@ class MegatronEngine(BaseEngine):
             arch=self.model_config.architectures[0],
             hf_config=self.model_config.hf_config,
             param_dtype=self.param_dtype,
-            share_embeddings_and_output_weights=self.model_config.share_embeddings_and_output_weights,
+            share_embeddings_and_output_weights=self.share_embeddings_and_output_weights,
             processing_class=self.model_config.get_processor(),
             optimizer=self.optimizer,
             optimizer_scheduler=self.lr_scheduler,
@@ -1071,6 +1081,29 @@ class MegatronEngineWithLMHead(MegatronEngine):
             # scale loss by num_micro_batch because megatron will scale loss
             # by n_micro_batch inside pp schedule
             scaled_loss = loss * data["num_micro_batch"]
+            if self.tf_config.calculate_per_token_loss and not forward_only:
+                # verl losses are already normalized over the global DP batch. MCore's
+                # legacy two-item loss callback still multiplies by CP, while per-token
+                # mode disables DDP's usual 1/(DP*CP) gradient pre-scaling. Compensate
+                # for that combined reduction until the callback returns MCore's
+                # three-item (loss sum, token count, metrics) contract.
+                num_moe_experts = getattr(self.tf_config, "num_moe_experts", None)
+                has_moe_aux_loss = bool(num_moe_experts) and (
+                    bool(getattr(self.tf_config, "moe_aux_loss_coeff", 0.0))
+                    or bool(getattr(self.tf_config, "moe_z_loss_coeff", None))
+                )
+                has_auxiliary_loss = (
+                    has_moe_aux_loss
+                    or bool(getattr(self.tf_config, "mtp_num_layers", None))
+                    or getattr(self.tf_config, "experimental_attention_variant_loss_scale_func", None) is not None
+                    or getattr(self.tf_config, "experimental_attention_variant", None) == "dsa"
+                )
+                # Auxiliary-loss autograd scalers bypass scaled_loss, and dynamic CP
+                # uses per-microbatch groups. Preserve their existing behavior until
+                # verl adopts the three-item callback that normalizes every gradient.
+                if not self.engine_config.dynamic_context_parallel and not has_auxiliary_loss:
+                    dp_cp_world_size = mpu.get_data_parallel_world_size(with_context_parallel=True)
+                    scaled_loss /= dp_cp_world_size
         else:
             assert forward_only, "forward_only must be True when loss_function is None"
             loss = torch.tensor(1.0, device=device)

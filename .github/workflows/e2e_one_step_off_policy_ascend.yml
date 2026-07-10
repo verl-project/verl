@@ -189,4 +189,4 @@ jobs:
         run: |
           ray stop --force
           export PYTHONPATH=$PYTHONPATH:/Megatron-LM
-          bash tests/special_e2e/run_one_step_off_policy.sh
+          VANILLA_MBRIDGE=True bash tests/special_e2e/run_one_step_off_policy.sh
