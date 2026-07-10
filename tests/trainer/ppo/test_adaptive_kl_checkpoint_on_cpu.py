@@ -14,6 +14,7 @@
 
 import ast
 import asyncio
+import subprocess
 import sys
 import types
 from pathlib import Path
@@ -180,9 +181,6 @@ def test_legacy_checkpoint_methods_round_trip_controller(tmp_path):
 
 
 def _load_v1_trainer_base():
-    module_names = ("transfer_queue", "verl.trainer.ppo.v1.trainer_base")
-    missing = object()
-    previous_modules = {name: sys.modules.get(name, missing) for name in module_names}
     transfer_queue = types.ModuleType("transfer_queue")
 
     class KVBatchMeta:
@@ -194,40 +192,51 @@ def _load_v1_trainer_base():
     transfer_queue.async_kv_put = lambda *args, **kwargs: None
     transfer_queue.async_kv_batch_put = lambda *args, **kwargs: None
     sys.modules.setdefault("transfer_queue", transfer_queue)
-    try:
-        from verl.trainer.ppo.v1.trainer_base import PPOTrainer
-    finally:
-        for module_name, previous_module in previous_modules.items():
-            if previous_module is missing:
-                sys.modules.pop(module_name, None)
-            else:
-                sys.modules[module_name] = previous_module
+    from verl.trainer.ppo.v1.trainer_base import PPOTrainer
 
     return PPOTrainer
 
 
 def test_v1_checkpoint_methods_round_trip_controller(tmp_path):
-    PPOTrainer = _load_v1_trainer_base()
-    trainer = _fake_trainer(tmp_path)
-    trainer.kl_ctrl_in_reward.update(current_kl=2.0, n_steps=128)
-    PPOTrainer._save_checkpoint(trainer)
-    checkpoint = tmp_path / "global_step_3"
-    assert (checkpoint / "kl_ctrl.pt").exists()
+    def relevant_modules():
+        return {
+            name: module
+            for name, module in sys.modules.items()
+            if name == "transfer_queue" or name.startswith("verl.trainer.ppo.v1")
+        }
 
-    resumed = _fake_trainer(tmp_path, checkpoint)
-    PPOTrainer._load_checkpoint(resumed)
-    assert resumed.kl_ctrl_in_reward.value == pytest.approx(trainer.kl_ctrl_in_reward.value)
+    before = relevant_modules()
+    test_file = str(Path(__file__).resolve())
+    root = str(tmp_path)
+    script = f"""
+import runpy
+from pathlib import Path
 
+namespace = runpy.run_path({test_file!r})
+PPOTrainer = namespace["_load_v1_trainer_base"]()
+root = Path({root!r})
+trainer = namespace["_fake_trainer"](root)
+trainer.kl_ctrl_in_reward.update(current_kl=2.0, n_steps=128)
+PPOTrainer._save_checkpoint(trainer)
+checkpoint = root / "global_step_3"
+assert (checkpoint / "kl_ctrl.pt").exists()
 
-def test_v1_loader_restores_module_cache(monkeypatch):
-    module_names = ("transfer_queue", "verl.trainer.ppo.v1.trainer_base")
-    for module_name in module_names:
-        monkeypatch.delitem(sys.modules, module_name, raising=False)
+resumed = namespace["_fake_trainer"](root, checkpoint)
+PPOTrainer._load_checkpoint(resumed)
+assert resumed.kl_ctrl_in_reward.value == trainer.kl_ctrl_in_reward.value
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).parents[3],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
 
-    _load_v1_trainer_base()
-
-    for module_name in module_names:
-        assert module_name not in sys.modules
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert relevant_modules() == before
 
 
 class _FakeRemoteMethod:
