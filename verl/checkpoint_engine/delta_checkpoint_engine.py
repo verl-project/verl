@@ -47,7 +47,12 @@ with patch("importlib.metadata.distributions", return_value=[]):
 from .delta_sync import DeltaState, iter_delta_flushes
 from .delta_sync.encode import DeltaParam, checksum as _checksum
 from .delta_sync.sglang_loader import LOADER_FQN
-from .delta_sync.sharded import gather_dense_to_rank0, gather_v_to_rank0, shard_delta_indices
+from .delta_sync.sharded import (
+    gather_dense_to_rank0,
+    gather_v_batched_to_rank0,
+    gather_v_to_rank0,
+    shard_delta_indices,
+)
 from .delta_sync.wrapper import DeltaFlush
 
 from .base import CheckpointEngineRegistry
@@ -408,10 +413,14 @@ class DeltaShardedCheckpointEngine(DeltaCheckpointEngine):
     rather than the full-tensor generator.
     """
 
-    def __init__(self, *args, encoding: str = "indices", **kwargs) -> None:
+    def __init__(self, *args, encoding: str = "indices", batch_gather: int = 32, **kwargs) -> None:
         super().__init__(*args, encoding=encoding, **kwargs)
         self._shard_snap: dict[str, torch.Tensor] = {}  # name -> pinned-CPU shard snapshot
         self._shard_seeded = False
+        # Gather the per-param sparse deltas in groups of this many parameters
+        # (one count-matrix all_gather + two padded gathers per group instead of
+        # three collectives per parameter). 0/1 disables grouping.
+        self.batch_gather = int(batch_gather)
 
     def _assemble_flush(self, per_param: list) -> DeltaFlush:
         """Build one DeltaFlush (indices encoding) from rank 0's gathered per-param deltas.
@@ -565,6 +574,39 @@ class DeltaShardedCheckpointEngine(DeltaCheckpointEngine):
             bucket = []
             bucket_bytes = 0
 
+        batch_k = self.batch_gather
+        group: list = []  # (name, dtype_str, full_shape, full_numel, gidx, gval)
+
+        def _consume(name, dtype_str, full_shape, full_numel, aidx, aval):
+            nonlocal total_elems, changed_elems, wire_bytes, bucket_bytes
+            total_elems += int(full_numel)
+            if aidx is None or aidx.numel() == 0:
+                return
+            changed_elems += int(aidx.numel())
+            wire_bytes += int(aidx.numel()) * (4 + aval.element_size())
+            # Slice oversized per-param deltas so one entry never exceeds
+            # MAX_ENTRY_ELEMS (bounds the receiver-side decode transient).
+            for s in range(0, aidx.numel(), self.MAX_ENTRY_ELEMS):
+                e = min(s + self.MAX_ENTRY_ELEMS, aidx.numel())
+                bucket.append((name, dtype_str, list(full_shape), aidx[s:e], aval[s:e]))
+                bucket_bytes += (e - s) * 8 + (e - s) * aval.element_size()
+                if bucket_bytes >= self.bucket_size:
+                    _seal()
+
+        def _flush_group():
+            nonlocal group
+            if not group:
+                return
+            dev = group[0][4].device
+            idx_concat = torch.cat([g[4] for g in group])
+            val_concat = torch.cat([g[5] for g in group])
+            counts = torch.tensor([int(g[4].numel()) for g in group], dtype=torch.int64, device=dev)
+            gathered = gather_v_batched_to_rank0(idx_concat, val_concat, counts)
+            if is_r0:
+                for (name, dtype_str, full_shape, full_numel, _gi, _gv), (aidx, aval) in zip(group, gathered):
+                    _consume(name, dtype_str, full_shape, full_numel, aidx, aval)
+            group = []
+
         for name, local, offset, _full_numel, full_shape, contributes in weights:
             local = local.detach().contiguous().view(-1)
             snap = self._shard_snap.get(name)
@@ -580,22 +622,16 @@ class DeltaShardedCheckpointEngine(DeltaCheckpointEngine):
             snap.copy_(local, non_blocking=True)  # update snapshot to current shard
             self._shard_snap[name] = snap
 
+            if batch_k > 1:
+                group.append((name, str(local.dtype).replace("torch.", ""), full_shape, _full_numel, gidx, gval))
+                if len(group) >= batch_k:
+                    _flush_group()
+                continue
+
             aidx, aval = gather_v_to_rank0(gidx, gval)
             if is_r0:
-                total_elems += int(_full_numel)
-            if is_r0 and aidx is not None and aidx.numel() > 0:
-                changed_elems += int(aidx.numel())
-                wire_bytes += int(aidx.numel()) * (4 + aval.element_size())
-                # Slice oversized per-param deltas so one entry never exceeds
-                # MAX_ENTRY_ELEMS (bounds the receiver-side decode transient).
-                for s in range(0, aidx.numel(), self.MAX_ENTRY_ELEMS):
-                    e = min(s + self.MAX_ENTRY_ELEMS, aidx.numel())
-                    bucket.append(
-                        (name, str(local.dtype).replace("torch.", ""), list(full_shape), aidx[s:e], aval[s:e])
-                    )
-                    bucket_bytes += (e - s) * 8 + (e - s) * aval.element_size()
-                    if bucket_bytes >= self.bucket_size:
-                        _seal()
+                _consume(name, str(local.dtype).replace("torch.", ""), full_shape, _full_numel, aidx, aval)
+        _flush_group()
 
         self._shard_seeded = True
         if os.environ.get("VERL_DELTA_DEBUG"):
