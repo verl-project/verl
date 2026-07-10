@@ -813,13 +813,19 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
 
             # Check whether the number of concurrent tasks exceeds the limit
             while len(self.active_tasks) >= self.max_concurrent_samples:
+                active_tasks = set(self.active_tasks)
+                if not active_tasks:
+                    break
+
+                # reset_staleness() needs the same lock after every weight
+                # update. Waiting for a long-running rollout while holding it
+                # serializes training behind the rollout tail.
+                done_tasks, _pending = await asyncio.wait(active_tasks, return_when=asyncio.FIRST_COMPLETED)
                 async with self.lock:
-                    if self.active_tasks:
-                        done_tasks, self.active_tasks = await asyncio.wait(
-                            self.active_tasks, return_when=asyncio.FIRST_COMPLETED
-                        )
-                        for task in done_tasks:
-                            await task
+                    for task in done_tasks:
+                        self.active_tasks.discard(task)
+                for task in done_tasks:
+                    await task
 
             # Submit single sample processing
             if self.paused:
