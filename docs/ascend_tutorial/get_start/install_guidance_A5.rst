@@ -8,7 +8,7 @@ Last updated: 07/09/2026.
 CANN          待Q2 CANN版本正式商发后更新链接                    CANN软件，帮助开发者实现在昇腾软硬件平台上开发和运行AI业务 
 Python        ``3.11``                                          python版本                                                 
 torch         ``2.10.0``                                        PyTorch 深度学习框架基础包                                 
-torch_npu     待Q2 CANN版本正式商发后更新链接                    NPU PyTorch 适配插件                                       
+torch_npu     待Q2 torch_npu版本正式商发后更新链接               NPU PyTorch 适配插件                                       
 triton        ``3.5.0``                                         Triton，用于编写自定义算子                                 
 triton-ascend ``3.2.2``                                         NPU Triton 适配                                            
 transformers  ``4.57.3``                                        Hugging Face 大模型库，提供模型架构与预训练权重            
@@ -45,7 +45,7 @@ vllm推理后端支持
 Megatron 训练后端支持
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-MindSpeed-LLM 及相关依赖的源码安装指令：
+MindSpeed和Megatron及相关依赖的源码安装指令：
 
 .. code:: bash
     
