@@ -93,6 +93,8 @@ A runnable example is ``verl/experimental/one_step_off_policy/shell/grpo_0.6b_gs
 the SGLang 2+6 disaggregated GRPO recipe with ``backend=delta``.
 
 Current scope: disaggregated (``hybrid_engine=False``) + SGLang rollout in BF16, FSDP1/FSDP2 training engines.
+Selecting a delta backend with any other rollout engine raises ``NotImplementedError`` at worker startup;
+a per-backend apply interface (vllm/trt-llm plugins) is planned.
 
 ## Roadmap
 

@@ -308,6 +308,13 @@ class CheckpointEngineWorker(Worker):
 
         self.server_adapter: BaseRollout = server_adapter
         backend = self.rollout_config.checkpoint_engine.backend
+        if backend.startswith("delta") and self.rollout_config.name != "sglang":
+            raise NotImplementedError(
+                f"checkpoint_engine.backend={backend!r} currently supports only the sglang rollout "
+                f"(got rollout.name={self.rollout_config.name!r}): the sparse apply is dispatched "
+                "through sglang's custom-weight-loader hook. Other backends need a per-backend "
+                "apply interface, planned as a follow-up."
+            )
         bucket_size = self.rollout_config.checkpoint_engine.update_weights_bucket_megabytes << 20
         engine_kwargs = self.rollout_config.checkpoint_engine.engine_kwargs.get(backend, {})
         # If custom_backend_module is set, import it so plugins can register
