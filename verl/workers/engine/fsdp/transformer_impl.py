@@ -822,18 +822,43 @@ class FSDPEngine(BaseEngine):
         Yields ``(name, local_flat_shard_bf16, within_param_flat_offset, full_numel,
         full_shape, contributes)``. Non-LoRA base path only.
         """
+        import os as _os
+
         from verl.checkpoint_engine.delta_sync.sharded import local_shard_view
 
-        if not self._uses_fsdp2_cpu_offload_policy:
+        _debug = bool(_os.environ.get("VERL_DELTA_DEBUG"))
+        # FSDP1's (SHARDED_)STATE_DICT export runs through the unshard machinery and
+        # asserts flat params are GPU-resident; FSDP2 state_dict() only collects
+        # DTensor refs and the generator below stages each shard lazily.
+        _needs_staging = fsdp_version(self.module) == 1
+        _rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        if _debug:
+            from torch.distributed.fsdp import FSDPModule as _FSDP2Module
+            from torch.distributed.fsdp import FullyShardedDataParallel as _FSDP1
+
+            n1 = sum(isinstance(m, _FSDP1) for m in self.module.modules())
+            n2 = sum(isinstance(m, _FSDP2Module) for m in self.module.modules())
+            print(
+                f"[delta-debug r{_rank}] MODULE TREE: fsdp1_wrapped={n1} fsdp2_wrapped={n2} "
+                f"root={type(self.module).__name__} staging={_needs_staging}",
+                flush=True,
+            )
+
+        if _needs_staging and not self._uses_fsdp2_cpu_offload_policy:
             load_fsdp_model_to_gpu(self.module)
         params = self.module.state_dict()
         params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
-        if self._is_offload_param:
+        if _needs_staging and self._is_offload_param:
             offload_fsdp_model_to_cpu(self.module)
 
         device = get_device_id()
 
         def _gen():
+            from torch.distributed.tensor import DTensor as _DT
+
+            n_dt = n_plain = n_contrib = 0
+            local_elems = full_elems = 0
+            logged = 0
             for name, param in params.items():
                 full_shape = tuple(param.shape)
                 full_numel = int(param.numel())
@@ -841,7 +866,31 @@ class FSDPEngine(BaseEngine):
                 if p.is_floating_point():
                     p = p.to(torch.bfloat16, non_blocking=True)
                 local, offset, contributes = local_shard_view(p)
+                if _debug:
+                    is_dt = isinstance(param, _DT)
+                    n_dt += is_dt
+                    n_plain += not is_dt
+                    n_contrib += bool(contributes)
+                    local_elems += int(local.numel())
+                    full_elems += full_numel
+                    if logged < 5:
+                        logged += 1
+                        placements = getattr(param, "placements", None)
+                        print(
+                            f"[delta-debug r{_rank}] param={name} dtensor={is_dt} placements={placements} "
+                            f"full={list(full_shape)}({full_numel}) local_shard={list(local.shape)}({local.numel()}) "
+                            f"offset={offset} contributes={contributes} src_dev={param.device}",
+                            flush=True,
+                        )
                 yield name, local, offset, full_numel, full_shape, contributes
+            if _debug:
+                ratio = local_elems / max(full_elems, 1)
+                print(
+                    f"[delta-debug r{_rank}] EXPORT SUMMARY: params={n_dt + n_plain} dtensor={n_dt} plain={n_plain} "
+                    f"contributing={n_contrib} local/full elems={local_elems}/{full_elems} (ratio={ratio:.4f} "
+                    f"-- ~1/fsdp_size means truly sharded, ~1.0 means degenerate full tensors)",
+                    flush=True,
+                )
 
         return _gen(), None
 
