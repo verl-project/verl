@@ -70,7 +70,7 @@ jobs:
       - name: Get image tag
         id: version
         run: |
-          echo "tag=latest-cann9.0.0-torch_npu2.9.0-910b-ubuntu22.04-py3.11-vllm" >> "$GITHUB_OUTPUT"
+          echo "tag=latest-cann9.0.0-torch_npu2.9.0post2-910b-ubuntu22.04-py3.11-vllm" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
