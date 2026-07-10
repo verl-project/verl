@@ -66,9 +66,11 @@ class FakeAgentLoopManager:
         self.batches.append(batch)
 
 
-def _make_trainer_stub():
-    """Bind the real ``_reissue_inflight_prompts`` to a stub exposing only what it uses."""
+def _make_trainer_stub(trainer_mode: str = "separate_async"):
+    """Bind the real ``_reissue_inflight_prompts`` to a stub exposing only what it uses
+    (``agent_loop_manager`` and ``trainer_mode``)."""
     stub = type("Stub", (), {})()
+    stub.trainer_mode = trainer_mode
     stub.agent_loop_manager = FakeAgentLoopManager()
     stub._reissue_inflight_prompts = PPOTrainer._reissue_inflight_prompts.__get__(stub)
     return stub
@@ -211,3 +213,15 @@ def test_reissue_noop_on_empty_partition(tq_init, partition_id):
     stub = _make_trainer_stub()
     assert stub._reissue_inflight_prompts(partition_id) == 0
     assert stub.agent_loop_manager.batches == []
+
+
+def test_reissue_noop_for_sync_mode(tq_init, partition_id):
+    """Sync mode never persists prompts, so re-issue is a guarded no-op even with in-flight prompts."""
+    _submit_prompt(partition_id, _uid(), "pending", global_steps=1)
+
+    stub = _make_trainer_stub(trainer_mode="sync")
+    try:
+        assert stub._reissue_inflight_prompts(partition_id) == 0
+        assert stub.agent_loop_manager.batches == []
+    finally:
+        _clear_partition(partition_id)

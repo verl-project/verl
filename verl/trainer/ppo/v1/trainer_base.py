@@ -314,6 +314,12 @@ class PPOTrainer(ABC):
         """
         self.agent_loop_manager = agent_loop_manager
 
+        # Re-issue prompts that were in-flight when a resumed checkpoint was taken. Deferred to here
+        # (rather than _load_checkpoint) because it needs agent_loop_manager. No-op on a fresh start
+        # or when the restored queue has no in-flight prompts. Runs before on_train_begin's warmup so
+        # the older re-issued prompts are submitted (and thus prioritized) ahead of fresh ones.
+        self._reissue_inflight_prompts()
+
         self.logger = Tracking(
             project_name=self.config.trainer.project_name,
             experiment_name=self.config.trainer.experiment_name,
@@ -730,16 +736,16 @@ class PPOTrainer(ABC):
         else:
             logger.warning(f"Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
 
-        # 5. restore TransferQueue state (async modes) and re-issue in-flight prompts.
-        # tq.init() is called before the trainer is constructed (main_ppo.py), so the system is in a
-        # clean state here, satisfying load_checkpoint's precondition. Older TransferQueue builds
-        # without save/load_checkpoint simply skip this; in-flight prompts are then repopulated by
-        # the usual warmup in on_train_begin.
+        # 5. restore TransferQueue state (async modes). Re-issuing the restored in-flight prompts is
+        # deferred to fit() (see _reissue_inflight_prompts) because it needs the agent_loop_manager,
+        # which is not set until fit(). tq.init() runs before the trainer is constructed
+        # (main_ppo.py), so the system is in a clean state here, satisfying load_checkpoint's
+        # precondition. Older TransferQueue builds without save/load_checkpoint simply skip this; the
+        # queue then starts empty and is repopulated by the usual warmup in on_train_begin.
         if self.trainer_mode != "sync" and hasattr(tq, "load_checkpoint"):
             tq_ckpt_path = os.path.join(global_step_folder, "transfer_queue")
             if os.path.exists(tq_ckpt_path):
                 tq.load_checkpoint(tq_ckpt_path)
-                self._reissue_inflight_prompts()
             else:
                 logger.warning(f"Warning: No TransferQueue state found at {tq_ckpt_path}, in-flight prompts are lost")
 
@@ -754,7 +760,11 @@ class PPOTrainer(ABC):
         Prompts are grouped by their original ``global_steps`` (read from the prompt tag, the source
         of truth for staleness) so each re-issued batch carries the correct per-batch step scalar,
         keeping off-policy staleness identical to before the checkpoint.
+
+        Called unconditionally from fit(); a no-op for sync mode or an empty/fresh queue.
         """
+        if self.trainer_mode == "sync":
+            return 0
         data = tq.kv_list(partition_id)
         if not data:
             return 0
