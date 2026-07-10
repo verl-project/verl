@@ -74,62 +74,6 @@ After defining MyAgentLoop, you can set the agent loop class in config:
 
 For more details, see: :doc:`Agent Loop <advance/agent_loop>`.
 
-I'm doing async training, how do I customize my own replay buffer sampling strategy?
-++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-
-In async training, the agent framework streams generated trajectories into ``TransferQueue``, and the
-trainer uses `ReplayBuffer <https://github.com/verl-project/verl/blob/main/verl/trainer/ppo/v1/replay_buffer.py>`_ to sample a batch from TransferQueue for training.
-
-While we provide a default sampling strategy, it's very common for users to want to customize it to meet their own needs.
-To do so, inherit from ``ReplayBuffer`` and implement the ``sample`` method.
-
-.. code:: python
-
-    class UserCustomReplayBuffer(ReplayBuffer):
-        def sample(self, global_steps: int, partition_id: str, batch_size: int) -> tuple[KVBatchMeta, dict]:
-            """Sample a batch of data from the replay buffer.
-
-            Args:
-                global_steps (int): Global steps of the current training.
-                partition_id (str): Partition of TransferQueue, e.g. "train" or "val".
-                batch_size (int, optional): Batch size.
-
-            Returns:
-                KVBatchMeta: A batch of data.
-                dict: Auxiliary metrics, e.g. off-policy staleness stats.
-            """
-            ...
-
-After defining UserCustomReplayBuffer, you can set the custom sampler in config:
-
-.. code:: bash
-
-    trainer.v1.sampler.custom_sampler.path = "path/to/your/sampler.py"
-    trainer.v1.sampler.custom_sampler.name = "UserCustomReplayBuffer"
-
-How do I customize sync/async trainer behavior?
-+++++++++++++++++++++++++++++++++++++++++++++++
-
-User may want to change the trainer's default behavior, for example:
-
-- over-sampling: sample more trajectories than the batch size
-- dynamic filtering: filter out samples with group responses are all correct or incorrect
-
-verl `v1 PPO trainer <https://github.com/verl-project/verl/blob/main/verl/trainer/ppo/v1/trainer_base.py>`_ 
-provides a set of hooks to customize trainer behavior:
-
-- on_init_end
-- on_train_begin
-- on_train_end
-- on_validate_begin
-- on_validate_end
-- on_step_begin
-- on_step_end
-- on_sample_begin
-- on_sample_end
-
-These hooks are also used by the ``sync``, ``colocate_async``, and ``separate_async`` trainers to change model engine, LLM server, and checkpoint engine behavior.
-
 Agent Framework Developer
 -------------------------
 
@@ -139,8 +83,7 @@ How do I replace verl's AgentLoopManager with my own agent framework?
 AgentLoopManager is a reference implementation of an agent framework and is designed to be fully replaceable by other agent frameworks. 
 You can plug in your own agent framework, the only requirement is:
 
-- implement a non-blocking ``generate_sequences`` method
-- put trajectory fields(e.g. ``prompt_ids``, ``response_ids``, ``response_mask``, ...) into ``TransferQueue`` once rollout finished
+- implement a ``generate_sequences`` method that accepts prompt batches and returns generated trajectory data compatible with the PPO trainer
 
 .. code:: python
 
@@ -164,9 +107,8 @@ You can plug in your own agent framework, the only requirement is:
             """
             ...
 
-        def generate_sequences(self, prompts: TensorDict) -> None:
-            """Add batch of prompts to agent framework for rollout without blocking. Agent framework should put trajectory
-            fields(e.g. prompt_ids, response_ids, response_mask, ...) into TransferQueue once rollout finished.
+        def generate_sequences(self, prompts: TensorDict):
+            """Generate trajectories for a batch of prompts.
 
             Args:
                 prompts (TensorDict): batch of prompts from train or validation dataset.

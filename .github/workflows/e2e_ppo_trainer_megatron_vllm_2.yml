@@ -185,7 +185,6 @@ jobs:
         run: |
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
-          pip3 install --no-deps TransferQueue==0.1.8
       - name: Check final pip list
         run: |
           pip3 list
@@ -271,7 +270,6 @@ jobs:
         run: |
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
-          pip3 install --no-deps TransferQueue==0.1.8
       - name: Check final pip list
         run: |
           pip3 list

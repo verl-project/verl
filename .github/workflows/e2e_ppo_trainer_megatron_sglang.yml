@@ -127,7 +127,6 @@ jobs:
           pip3 install git+https://github.com/NVIDIA/Megatron-LM.git@0823c73 --ignore-requires-python --no-deps --no-build-isolation
           pip3 install "nvidia-modelopt>=0.37.0"
           pip3 install --no-deps -e .
-          pip3 install --no-deps TransferQueue==0.1.8
       - name: Check final pip list
         run: |
           pip3 list

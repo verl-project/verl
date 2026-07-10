@@ -25,4 +25,3 @@ fastapi
 latex2sympy2_extended
 math_verify
 tensorboard
-TransferQueue==0.1.8

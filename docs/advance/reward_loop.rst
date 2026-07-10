@@ -151,7 +151,7 @@ Users can also customize their own ``RewardManager``, inheriting from ``RewardMa
 
 After defining it, users can specify their custom reward manager by setting ``reward.reward_manager.name=user_costomized``.
 
-When trajectories consist of multiple output sequences (currently supported only by the ``main_ppo_sync`` trainer) reward managers may consider all outputs when computing their scores.
+When trajectories consist of multiple output sequences, reward managers may consider all outputs when computing their scores.
 In that case, the ``data`` argument passed to ``run_single`` will contain all outputs in the trajectory.
 However, the default reward managers (e.g. ``naive``, ``dapo``, etc.) will only consider the last sequence by default, as they are typically designed for single-output tasks.
 The same is true in the ``UserCostomizedRewardManager`` example above, as indicated by the line ``data_item = data[-1]``.
@@ -305,4 +305,3 @@ This design allows us to expose a single unified router address to user-defined 
          self.resource_pool = resource_pool
          self._initialize_llm_servers()
          self._initialize_router()
-

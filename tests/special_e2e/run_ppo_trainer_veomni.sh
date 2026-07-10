@@ -57,6 +57,7 @@ common_params=(
     actor_rollout_ref.actor.veomni.fsdp_size="${FSDP_SIZE}" \
     actor_rollout_ref.actor.veomni.ulysses_parallel_size="${SP_SIZE}" \
     actor_rollout_ref.actor.veomni.expert_parallel_size="${EP_SIZE}" \
+    actor_rollout_ref.actor.veomni.attn_implementation=sdpa \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.ref.veomni.param_offload=True \
     actor_rollout_ref.ref.use_torch_compile=False \
