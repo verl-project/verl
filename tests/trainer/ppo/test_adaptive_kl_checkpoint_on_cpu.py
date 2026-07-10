@@ -181,6 +181,8 @@ def test_legacy_checkpoint_methods_round_trip_controller(tmp_path):
 
 
 def _load_v1_trainer_base():
+    had_transfer_queue = "transfer_queue" in sys.modules
+    had_trainer_base = "verl.trainer.ppo.v1.trainer_base" in sys.modules
     transfer_queue = types.ModuleType("transfer_queue")
 
     class KVBatchMeta:
@@ -192,7 +194,13 @@ def _load_v1_trainer_base():
     transfer_queue.async_kv_put = lambda *args, **kwargs: None
     transfer_queue.async_kv_batch_put = lambda *args, **kwargs: None
     sys.modules.setdefault("transfer_queue", transfer_queue)
-    from verl.trainer.ppo.v1.trainer_base import PPOTrainer
+    try:
+        from verl.trainer.ppo.v1.trainer_base import PPOTrainer
+    finally:
+        if not had_transfer_queue:
+            sys.modules.pop("transfer_queue", None)
+        if not had_trainer_base:
+            sys.modules.pop("verl.trainer.ppo.v1.trainer_base", None)
 
     return PPOTrainer
 
