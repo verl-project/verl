@@ -18,12 +18,19 @@ import pytest
 
 from verl.utils.tokenizer.continuous_token import (
     ContinuousTokenBuilder,
+    DeepSeekContinuousTokenBuilder,
+    DeepSeekVL2ContinuousTokenBuilder,
     Gemma4ContinuousTokenBuilder,
+    GLM46VContinuousTokenBuilder,
     GLMContinuousTokenBuilder,
     GptOssContinuousTokenBuilder,
+    KimiVLContinuousTokenBuilder,
     MergeResult,
+    MiMoContinuousTokenBuilder,
+    MiMoVLContinuousTokenBuilder,
     MiniMaxContinuousTokenBuilder,
     QwenContinuousTokenBuilder,
+    QwenVLContinuousTokenBuilder,
 )
 from verl.utils.tokenizer.continuous_token_wiring import (
     CONTINUOUS_TOKEN_BUILDER_FAMILIES,
@@ -185,6 +192,44 @@ class _Gemma4BoundaryTokenizer(_TemplateTokenizer):
             return self.tool_response_id
         return 0
 
+    def apply_chat_template(
+        self,
+        messages,
+        tokenize=True,
+        add_generation_prompt=True,
+        tools=None,
+        return_dict=False,
+        **kwargs,
+    ):
+        """Minimal Gemma-style renderer: tool messages become ``<|tool_response>`` blocks
+        whose function name is resolved positionally from the latest assistant tool_calls,
+        mirroring the real Gemma template enough to exercise the builder's tool path.
+        """
+        assistant_tool_names: list[str] = []
+        for message in messages:
+            if message.get("role") == "assistant" and message.get("tool_calls"):
+                assistant_tool_names = [
+                    tool_call.get("function", {}).get("name", "unknown") for tool_call in message["tool_calls"]
+                ]
+        rendered = ""
+        tool_index = 0
+        for message in messages:
+            role = message.get("role")
+            if role == "tool":
+                name = assistant_tool_names[tool_index] if tool_index < len(assistant_tool_names) else "unknown"
+                tool_index += 1
+                content = message.get("content", "")
+                if not isinstance(content, str):
+                    content = str(content)
+                rendered += f'<|tool_response>response:{name}{{value:<|"|>{content}<|"|>}}<tool_response|>'
+            else:
+                rendered += f"<{role}>{message.get('content', '')}\n"
+        if add_generation_prompt:
+            rendered += "<assistant>"
+        if tokenize:
+            return self.encode(rendered, add_special_tokens=False)
+        return rendered
+
 
 class _MissingSpecialTokenTokenizer(_TemplateTokenizer):
     def convert_tokens_to_ids(self, token):
@@ -226,6 +271,7 @@ def test_builtin_family_surface():
         "qwen25",
         "qwen3",
         "qwen35",
+        "mimo",
         "minimax",
         "minimaxm2",
         "minimaxm25",
@@ -234,6 +280,17 @@ def test_builtin_family_surface():
         "glm5",
         "gemma4",
         "gptoss",
+        "deepseek",
+        "vldefault",
+        "qwenvl",
+        "qwen25vl",
+        "qwen3vl",
+        "mimovl",
+        "minimaxvl",
+        "gemma4vl",
+        "kimivl",
+        "glm4v",
+        "deepseekvl2",
     )
     assert list_continuous_token_builder_families() == CONTINUOUS_TOKEN_BUILDER_FAMILIES
 
@@ -246,6 +303,7 @@ def test_builtin_family_surface():
         (ContinuousTokenModelFamily.QWEN25, QwenContinuousTokenBuilder),
         (ContinuousTokenModelFamily.QWEN3, QwenContinuousTokenBuilder),
         (ContinuousTokenModelFamily.QWEN35, QwenContinuousTokenBuilder),
+        (ContinuousTokenModelFamily.MIMO, MiMoContinuousTokenBuilder),
         (ContinuousTokenModelFamily.MINIMAX, MiniMaxContinuousTokenBuilder),
         (ContinuousTokenModelFamily.MINIMAX_M2, MiniMaxContinuousTokenBuilder),
         (ContinuousTokenModelFamily.MINIMAX_M25, MiniMaxContinuousTokenBuilder),
@@ -254,6 +312,14 @@ def test_builtin_family_surface():
         (ContinuousTokenModelFamily.GLM5, GLMContinuousTokenBuilder),
         (ContinuousTokenModelFamily.GEMMA4, Gemma4ContinuousTokenBuilder),
         (ContinuousTokenModelFamily.GPTOSS, GptOssContinuousTokenBuilder),
+        (ContinuousTokenModelFamily.DEEPSEEK, DeepSeekContinuousTokenBuilder),
+        (ContinuousTokenModelFamily.QWEN_VL, QwenVLContinuousTokenBuilder),
+        (ContinuousTokenModelFamily.QWEN25_VL, QwenVLContinuousTokenBuilder),
+        (ContinuousTokenModelFamily.QWEN3_VL, QwenVLContinuousTokenBuilder),
+        (ContinuousTokenModelFamily.MIMO_VL, MiMoVLContinuousTokenBuilder),
+        (ContinuousTokenModelFamily.KIMI_VL, KimiVLContinuousTokenBuilder),
+        (ContinuousTokenModelFamily.GLM4V, GLM46VContinuousTokenBuilder),
+        (ContinuousTokenModelFamily.DEEPSEEK_VL2, DeepSeekVL2ContinuousTokenBuilder),
     ],
 )
 def test_builtin_family_class_mapping(family, builder_cls):
@@ -274,7 +340,18 @@ def test_builtin_family_class_mapping(family, builder_cls):
         ("Qwen/Qwen3.5-35B-A3B", ContinuousTokenModelFamily.QWEN35),
         ("Qwen/Qwen2.5-7B-Instruct", ContinuousTokenModelFamily.QWEN25),
         ("Qwen/Qwen3-8B", ContinuousTokenModelFamily.QWEN3),
-        ("deepseek-ai/DeepSeek-R1", ContinuousTokenModelFamily.DEFAULT),
+        ("XiaomiMiMo/MiMo-7B-RL", ContinuousTokenModelFamily.MIMO),
+        ("XiaomiMiMo/MiMo-7B-SFT", ContinuousTokenModelFamily.MIMO),
+        ("deepseek-ai/DeepSeek-R1", ContinuousTokenModelFamily.DEEPSEEK),
+        ("deepseek-ai/DeepSeek-V3", ContinuousTokenModelFamily.DEEPSEEK),
+        # VL families
+        ("Qwen/Qwen2.5-VL-7B-Instruct", ContinuousTokenModelFamily.QWEN25_VL),
+        ("Qwen/Qwen3-VL-4B", ContinuousTokenModelFamily.QWEN3_VL),
+        ("Qwen/Qwen2-VL-72B-Instruct", ContinuousTokenModelFamily.QWEN_VL),
+        ("XiaomiMiMo/MiMo-VL-7B", ContinuousTokenModelFamily.MIMO_VL),
+        ("moonshotai/Kimi-VL-A3B-Instruct", ContinuousTokenModelFamily.KIMI_VL),
+        ("zai-org/GLM-4.5V", ContinuousTokenModelFamily.GLM4V),
+        ("deepseek-ai/deepseek-vl2-tiny", ContinuousTokenModelFamily.DEEPSEEK_VL2),
     ],
 )
 def test_auto_family_inference(model_path, expected):
@@ -883,3 +960,800 @@ def test_unknown_family_fails_during_resolution():
 def test_empty_family_fails_during_resolution(model_family):
     with pytest.raises(ValueError, match="model_family must be a non-empty string"):
         resolve_continuous_token_model_family(model_family)
+
+
+# =============================================================================
+# Multimodal (VL) continuous token builders, base-class MM hooks, and VL wiring
+# (merged from the former tests/utils/test_continuous_token_mm_on_cpu.py)
+# =============================================================================
+
+
+class TestMergeResultTokenFields:
+    """Verify MergeResult stays token-only and works with VL builders."""
+
+    def test_default_values_text_only(self):
+        result = MergeResult(token_ids=[1, 2, 3], appended_token_count=2)
+        assert result.token_ids == [1, 2, 3]
+        assert result.appended_token_count == 2
+        assert result.kind == "non_assistant"
+
+    def test_backward_compat_construction(self):
+        result = MergeResult(
+            token_ids=[10, 20, 30],
+            appended_token_count=1,
+            kind="assistant",
+            inserted_token_ids=[99],
+            removed_prefix_token_count=0,
+        )
+        assert result.token_ids == [10, 20, 30]
+        assert result.kind == "assistant"
+        assert result.inserted_token_ids == [99]
+
+    def test_frozen_immutability(self):
+        """MergeResult should remain frozen (no assignment after construction)."""
+        result = MergeResult(token_ids=[1], appended_token_count=0)
+        with pytest.raises(AttributeError):
+            result.token_ids = [2]  # type: ignore[misc]
+
+
+class TestBaseClassMMHooks:
+    """Verify base class MM hooks behave correctly (NotImplementedError / False)."""
+
+    def setup_method(self):
+        """Create a minimal mock tokenizer for base class instantiation."""
+
+        class MockTokenizer:
+            def apply_chat_template(self, *args, **kwargs):
+                return [1, 2, 3]
+
+        self.builder = ContinuousTokenBuilder(MockTokenizer())
+
+    def test_supports_multimodal_default_false(self):
+        """Base class should return False for supports_multimodal."""
+        assert ContinuousTokenBuilder.supports_multimodal() is False
+        assert self.builder.supports_multimodal() is False
+
+    def test_render_tokens_with_mm_raises(self):
+        """Base class render_tokens_with_mm should raise NotImplementedError."""
+        with pytest.raises(NotImplementedError, match="does not implement render_tokens_with_mm"):
+            self.builder.render_tokens_with_mm(
+                messages=[{"role": "user", "content": "hi"}],
+                images=["fake_image.png"],
+            )
+
+    def test_supports_multimodal_classmethod(self):
+        """supports_multimodal should be callable as classmethod without instance."""
+        assert ContinuousTokenBuilder.supports_multimodal() is False
+
+    def test_subclass_can_override_supports_multimodal(self):
+        """A VL subclass that overrides supports_multimodal should return True."""
+
+        class FakeVLBuilder(ContinuousTokenBuilder):
+            @classmethod
+            def supports_multimodal(cls) -> bool:
+                return True
+
+        assert FakeVLBuilder.supports_multimodal() is True
+
+
+class TestMultimodalMergeResultWithExistingSubclasses:
+    """Ensure existing text subclass _merge_token_ids still produce valid MergeResult."""
+
+    def test_qwen_merge_still_works(self):
+        """QwenContinuousTokenBuilder merge should produce token-only MergeResult."""
+        from verl.utils.tokenizer.continuous_token import QwenContinuousTokenBuilder
+
+        class MockQwenTokenizer:
+            def encode(self, text, add_special_tokens=False):
+                if text == "\n":
+                    return [198]
+                return [1, 2, 3]
+
+            def convert_tokens_to_ids(self, token):
+                if token == "<|im_end|>":
+                    return 151645
+                return 0
+
+        builder = QwenContinuousTokenBuilder(MockQwenTokenizer())
+        # Simulate: prefix ends with <|im_end|>, appended is [10, 20]
+        result = builder._merge_non_assistant_token_ids([100, 200, 151645], [10, 20])
+        assert result.token_ids == [100, 200, 151645, 198, 10, 20]
+        assert result.inserted_token_ids == [198]
+        assert result.appended_token_count == 2
+
+
+# =============================================================================
+# Tests for VL subclasses
+# =============================================================================
+
+
+class TestQwenVLContinuousTokenBuilder:
+    """Test QwenVL vision token handling."""
+
+    def setup_method(self):
+        from verl.utils.tokenizer.continuous_token import QwenVLContinuousTokenBuilder
+
+        class MockQwenVLTokenizer:
+            def encode(self, text, add_special_tokens=False):
+                if text == "\n":
+                    return [198]
+                return [1, 2, 3]
+
+            def convert_tokens_to_ids(self, token):
+                mapping = {
+                    "<|im_end|>": 151645,
+                    "<|vision_start|>": 151652,
+                    "<|vision_end|>": 151653,
+                    "<|image_pad|>": 151655,
+                }
+                return mapping.get(token, 0)
+
+        class MockImageProcessor:
+            merge_size = 2
+
+        class MockProcessor:
+            image_processor = MockImageProcessor()
+
+        self.tokenizer = MockQwenVLTokenizer()
+        self.processor = MockProcessor()
+        self.builder = QwenVLContinuousTokenBuilder(self.tokenizer, self.processor)
+
+    def test_supports_multimodal(self):
+        assert self.builder.supports_multimodal() is True
+
+    def test_merge_inherits_qwen_newline_patch(self):
+        """VL builder should still insert newline after im_end (from QwenBuilder)."""
+        result = self.builder._merge_non_assistant_token_ids([100, 151645], [10, 20])
+        assert result.token_ids == [100, 151645, 198, 10, 20]
+        assert result.inserted_token_ids == [198]
+
+
+class TestMiMoVLContinuousTokenBuilder:
+    """Test MiMo-VL vision token handling."""
+
+    def setup_method(self):
+        from verl.utils.tokenizer.continuous_token import MiMoVLContinuousTokenBuilder
+
+        class MockMiMoVLTokenizer:
+            def encode(self, text, add_special_tokens=False):
+                if text == "\n":
+                    return [198]
+                return [1, 2, 3]
+
+            def convert_tokens_to_ids(self, token):
+                mapping = {
+                    "<|im_end|>": 151645,
+                    "<|vision_start|>": 151652,
+                    "<|vision_end|>": 151653,
+                    "<|image_pad|>": 151655,
+                }
+                return mapping.get(token, 0)
+
+        class MockImageProcessor:
+            merge_size = 2
+
+        class MockProcessor:
+            image_processor = MockImageProcessor()
+
+        self.tokenizer = MockMiMoVLTokenizer()
+        self.processor = MockProcessor()
+        self.builder = MiMoVLContinuousTokenBuilder(self.tokenizer, self.processor)
+
+    def test_supports_multimodal(self):
+        assert self.builder.supports_multimodal() is True
+
+    def test_merge_inherits_mimo_newline_patch(self):
+        """MiMo-VL should still insert newline after im_end (from MiMoBuilder)."""
+        result = self.builder._merge_non_assistant_token_ids([100, 151645], [10, 20])
+        assert result.token_ids == [100, 151645, 198, 10, 20]
+        assert result.inserted_token_ids == [198]
+
+
+# =============================================================================
+# Tests for wiring factory with VL families
+# =============================================================================
+
+
+class TestWiringVLFactory:
+    """Test that create_continuous_token_builder handles VL families correctly."""
+
+    def test_vl_family_requires_processor(self):
+        """VL families should raise if processor not provided."""
+        from verl.utils.tokenizer.continuous_token_wiring import create_continuous_token_builder
+
+        class MockTokenizer:
+            name_or_path = "Qwen/Qwen2.5-VL-7B-Instruct"
+
+            def encode(self, text, add_special_tokens=False):
+                if text == "\n":
+                    return [198]
+                return [1, 2, 3]
+
+            def convert_tokens_to_ids(self, token):
+                mapping = {
+                    "<|im_end|>": 151645,
+                    "<|vision_start|>": 151652,
+                    "<|vision_end|>": 151653,
+                    "<|image_pad|>": 151655,
+                }
+                return mapping.get(token, 0)
+
+        with pytest.raises(ValueError, match="requires a processor"):
+            create_continuous_token_builder(
+                MockTokenizer(),
+                model_family="qwen25vl",
+            )
+
+    def test_vl_family_succeeds_with_processor(self):
+        """VL families should instantiate correctly with processor provided."""
+        from verl.utils.tokenizer.continuous_token import QwenVLContinuousTokenBuilder
+        from verl.utils.tokenizer.continuous_token_wiring import create_continuous_token_builder
+
+        class MockTokenizer:
+            name_or_path = "Qwen/Qwen2.5-VL-7B-Instruct"
+
+            def encode(self, text, add_special_tokens=False):
+                if text == "\n":
+                    return [198]
+                return [1, 2, 3]
+
+            def convert_tokens_to_ids(self, token):
+                mapping = {
+                    "<|im_end|>": 151645,
+                    "<|vision_start|>": 151652,
+                    "<|vision_end|>": 151653,
+                    "<|image_pad|>": 151655,
+                }
+                return mapping.get(token, 0)
+
+        class MockImageProcessor:
+            merge_size = 2
+
+        class MockProcessor:
+            image_processor = MockImageProcessor()
+
+        builder = create_continuous_token_builder(
+            MockTokenizer(),
+            model_family="qwen25vl",
+            processor=MockProcessor(),
+        )
+        assert isinstance(builder, QwenVLContinuousTokenBuilder)
+        assert builder.supports_multimodal() is True
+
+    def test_vl_family_inferred_from_path_with_processor(self):
+        """model_family=auto: a VL model path resolves to its VL builder."""
+        from verl.utils.tokenizer.continuous_token import QwenVLContinuousTokenBuilder
+        from verl.utils.tokenizer.continuous_token_wiring import create_continuous_token_builder
+
+        class MockTokenizer:
+            name_or_path = "Qwen/Qwen2.5-VL-7B-Instruct"
+
+            def encode(self, text, add_special_tokens=False):
+                return [198] if text == "\n" else [1, 2, 3]
+
+            def convert_tokens_to_ids(self, token):
+                return {"<|im_end|>": 151645}.get(token, 0)
+
+        class MockProcessor:
+            image_processor = type("IP", (), {"merge_size": 2})()
+
+        builder = create_continuous_token_builder(
+            MockTokenizer(),
+            model_path="Qwen/Qwen2.5-VL-7B-Instruct",
+            processor=MockProcessor(),
+        )
+        assert isinstance(builder, QwenVLContinuousTokenBuilder)
+
+    def test_unknown_model_with_processor_falls_back_to_default_vl(self, caplog):
+        """Unrecognized model + multimodal processor -> default VL builder, with a warning."""
+        from verl.utils.tokenizer.continuous_token import VLContinuousTokenBuilder
+        from verl.utils.tokenizer.continuous_token_wiring import create_continuous_token_builder
+
+        class MockTokenizer:
+            name_or_path = "acme/foobar-7b-instruct"
+
+        class MockProcessor:
+            image_processor = type("IP", (), {"merge_size": 2})()
+
+        with caplog.at_level(logging.WARNING, logger="verl.utils.tokenizer.continuous_token_wiring"):
+            builder = create_continuous_token_builder(
+                MockTokenizer(),
+                model_path="acme/foobar-7b-instruct",
+                processor=MockProcessor(),
+            )
+        assert isinstance(builder, VLContinuousTokenBuilder)
+        assert builder.supports_multimodal() is True
+        assert "default VL builder" in caplog.text
+
+    def test_gemma4_unified_with_processor_upgrades_to_vl(self):
+        """Gemma4 (unified checkpoint, no vl marker) + processor -> Gemma4 VL builder."""
+        from verl.utils.tokenizer.continuous_token import Gemma4VLContinuousTokenBuilder
+        from verl.utils.tokenizer.continuous_token_wiring import create_continuous_token_builder
+
+        class MockTokenizer:
+            name_or_path = "google/gemma-4-27b-it"
+
+            def convert_tokens_to_ids(self, token):
+                return {"<|tool_response>": 12345}.get(token, 0)
+
+        class MockProcessor:
+            image_processor = type("IP", (), {"merge_size": 2})()
+
+        builder = create_continuous_token_builder(
+            MockTokenizer(),
+            model_path="google/gemma-4-27b-it",
+            processor=MockProcessor(),
+        )
+        assert isinstance(builder, Gemma4VLContinuousTokenBuilder)
+        assert builder.supports_multimodal() is True
+
+    def test_text_specific_family_with_processor_raises(self):
+        """A recognized text-only family paired with a multimodal processor is a misconfiguration."""
+        from verl.utils.tokenizer.continuous_token_wiring import create_continuous_token_builder
+
+        class MockTokenizer:
+            name_or_path = "Qwen/Qwen3-8B"
+
+        class MockProcessor:
+            image_processor = type("IP", (), {"merge_size": 2})()
+
+        with pytest.raises(ValueError, match="multimodal processor was provided"):
+            create_continuous_token_builder(
+                MockTokenizer(),
+                model_path="Qwen/Qwen3-8B",
+                processor=MockProcessor(),
+            )
+
+
+# =============================================================================
+# Integration tests: VL builder build_initial_tokens + merge_non_assistant_tokens end-to-end
+# =============================================================================
+
+
+class _MockQwenVLProcessor:
+    """Faithful-ish mock of a Qwen2.5-VL processor's two-step render.
+
+    Mirrors how the real processor works so incremental renders stay prefix-stable:
+
+    1. ``apply_chat_template`` renders the message list to text, emitting an
+       ``<|image_pad|>`` placeholder *in place* wherever an image content block
+       appears (never at some fixed offset).
+    2. ``__call__`` tokenizes that text (each char -> its ``ord``) and expands each
+       ``<|image_pad|>`` placeholder in place into a vision span
+       (``<|vision_start|>`` + 4 ``<|image_pad|>`` pads + ``<|vision_end|>``),
+       simulating merge_size=2 on a 1x4x4 grid -> 4 pad tokens per image.
+
+    Because a newly appended turn (and its placeholder) lands at the end of the
+    text and is expanded in place, ``render(prefix)`` is always a token prefix of
+    ``render(prefix + new_turn)``.
+    """
+
+    _IMAGE_PLACEHOLDER = "<|image_pad|>"
+
+    class _ImageProcessor:
+        merge_size = 2
+
+    image_processor = _ImageProcessor()
+
+    def apply_chat_template(
+        self, messages, tokenize=False, add_generation_prompt=False, tools=None, return_dict=False, **kwargs
+    ):
+        parts: list[str] = []
+        for message in messages:
+            parts.append(f"<{message.get('role')}>")
+            content = message.get("content", "")
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "image":
+                        parts.append(self._IMAGE_PLACEHOLDER)
+                    elif isinstance(block, dict) and block.get("type") == "text":
+                        parts.append(block.get("text", ""))
+            else:
+                parts.append(str(content))
+            parts.append("\n")
+        if add_generation_prompt:
+            parts.append("<assistant>")
+        return "".join(parts)
+
+    def __call__(self, *, text=None, images=None, return_tensors=None, **kwargs):
+        rendered = text[0] if isinstance(text, list | tuple) else (text or "")
+        segments = rendered.split(self._IMAGE_PLACEHOLDER)
+        num_images = len(segments) - 1
+
+        token_ids: list[int] = []
+        for index, segment in enumerate(segments):
+            token_ids.extend(ord(char) for char in segment)
+            if index < num_images:
+                # Expand this image's placeholder in place: vision_start + 4 pads + vision_end
+                token_ids.extend([151652, 151655, 151655, 151655, 151655, 151653])
+
+        result = {"input_ids": [token_ids]}
+        if num_images > 0:
+            # pixel_values dim0 = raw patches (t*h*w = 1*4*4 = 16 per image)
+            import numpy as np
+
+            result["pixel_values"] = np.zeros((num_images * 16, 3, 14, 14), dtype=np.float32)
+            # image_grid_thw: each image is (1, 4, 4)
+            result["image_grid_thw"] = np.array([[1, 4, 4]] * num_images, dtype=np.int64)
+
+        return result
+
+
+class _MockQwenVLTokenizer:
+    """Mock tokenizer for VL integration tests."""
+
+    name_or_path = "Qwen/Qwen2.5-VL-7B-Instruct"
+
+    def encode(self, text, add_special_tokens=False):
+        if text == "\n":
+            return [198]
+        return [1000, 1001, 1002]
+
+    def convert_tokens_to_ids(self, token):
+        mapping = {
+            "<|im_end|>": 151645,
+            "<|im_start|>": 151644,
+            "<|vision_start|>": 151652,
+            "<|vision_end|>": 151653,
+            "<|image_pad|>": 151655,
+            "<|observation|>": 151333,
+            "<|user|>": 151336,
+            "<|begin_of_image|>": 151700,
+            "<|end_of_image|>": 151701,
+            "<|media_start|>": 151800,
+            "<|media_end|>": 151801,
+        }
+        return mapping.get(token, 0)
+
+    def apply_chat_template(self, messages, tokenize=True, add_generation_prompt=False, **kwargs):
+        """Simple mock chat template."""
+        tokens = [151644]  # im_start
+        for msg in messages:
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "image":
+                        tokens.extend([151652, 151655, 151653])  # vision placeholder
+                    elif isinstance(block, dict) and block.get("type") == "text":
+                        tokens.extend([1000, 1001])
+            else:
+                tokens.extend([1000, 1001, 1002])
+            tokens.append(151645)  # im_end
+        if add_generation_prompt:
+            tokens.append(151644)  # im_start for assistant
+        if not tokenize:
+            return "mock_text_render"
+        return tokens
+
+
+class TestQwenVLBuildInitialTokens:
+    """Integration test for QwenVL build_initial_tokens with images."""
+
+    def setup_method(self):
+        from verl.utils.tokenizer.continuous_token import QwenVLContinuousTokenBuilder
+
+        self.tokenizer = _MockQwenVLTokenizer()
+        self.processor = _MockQwenVLProcessor()
+        self.builder = QwenVLContinuousTokenBuilder(self.tokenizer, self.processor)
+
+    def test_build_initial_no_images(self):
+        """Without images, should use text-only path."""
+        messages = [{"role": "user", "content": "Hello"}]
+        token_ids = self.builder.build_initial_tokens(messages)
+        assert isinstance(token_ids, list)
+        assert all(isinstance(t, int) for t in token_ids)
+
+    def test_build_initial_with_images(self):
+        """With images, should use processor-expanded token IDs."""
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": "fake_image.png"},
+                    {"type": "text", "text": "What is this?"},
+                ],
+            }
+        ]
+        token_ids = self.builder.build_initial_tokens(messages, images=["fake_image.png"])
+        assert isinstance(token_ids, list)
+        assert token_ids.count(151655) == 4
+
+
+class TestQwenVLMergeNonAssistantTokens:
+    """Integration test for QwenVL merge_non_assistant_tokens with images in appended messages."""
+
+    def setup_method(self):
+        from verl.utils.tokenizer.continuous_token import QwenVLContinuousTokenBuilder
+
+        self.tokenizer = _MockQwenVLTokenizer()
+        self.processor = _MockQwenVLProcessor()
+        self.builder = QwenVLContinuousTokenBuilder(self.tokenizer, self.processor)
+
+    def test_merge_no_new_images(self):
+        """Without new images in appended messages, should use text-only merge."""
+        previous = [{"role": "user", "content": "Hi"}]
+        updated = [
+            {"role": "user", "content": "Hi"},
+            {"role": "tool", "content": "result", "tool_call_id": "1"},
+        ]
+        runtime_ids = [151644, 1000, 1001, 1002, 151645, 151644]
+        result = self.builder.merge_non_assistant_tokens(previous, updated, runtime_ids)
+        assert isinstance(result, MergeResult)
+        assert result.kind == "non_assistant"
+
+    def test_merge_with_new_images(self):
+        """With new images in appended messages, should merge processor-expanded token IDs."""
+        previous = [{"role": "user", "content": "Hi"}]
+        updated = [
+            {"role": "user", "content": "Hi"},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": "new_image.png"},
+                    {"type": "text", "text": "Look at this"},
+                ],
+            },
+        ]
+        # Simulate runtime token state
+        runtime_ids = [151644, 1000, 1001, 1002, 151645, 151644]
+        result = self.builder.merge_non_assistant_tokens(previous, updated, runtime_ids)
+        assert isinstance(result, MergeResult)
+        assert result.kind == "non_assistant"
+        assert 151655 in result.token_ids
+
+    def test_merge_with_new_images_rejects_non_prefix_processor_output(self):
+        """Incremental rendering should fail fast if the processor output is not append-only."""
+
+        class BadPrefixProcessor(_MockQwenVLProcessor):
+            def __call__(self, *, text=None, images=None, return_tensors=None, **kwargs):
+                result = super().__call__(text=text, images=images, return_tensors=return_tensors, **kwargs)
+                # Corrupt only the image-bearing (full) render so it diverges from the
+                # image-free prefix render, breaking the append-only prefix invariant.
+                if images:
+                    result["input_ids"][0][0] = 9999
+                return result
+
+        from verl.utils.tokenizer.continuous_token import QwenVLContinuousTokenBuilder
+
+        builder = QwenVLContinuousTokenBuilder(self.tokenizer, BadPrefixProcessor())
+        previous = [{"role": "user", "content": "Hi"}]
+        updated = [
+            {"role": "user", "content": "Hi"},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": "new_image.png"},
+                    {"type": "text", "text": "Look at this"},
+                ],
+            },
+        ]
+        runtime_ids = [151644, 1000, 1001, 1002, 151645, 151644]
+        with pytest.raises(ValueError, match="suffix diff failed"):
+            builder.merge_non_assistant_tokens(previous, updated, runtime_ids)
+
+
+@pytest.mark.parametrize(
+    "builder_name",
+    [
+        "MiMoVLContinuousTokenBuilder",
+        "GLM46VContinuousTokenBuilder",
+        "KimiVLContinuousTokenBuilder",
+    ],
+)
+def test_other_vl_builders_reject_non_prefix_processor_output(builder_name):
+    """All VL builders should validate the append-only prefix invariant during merge."""
+
+    class BadPrefixProcessor(_MockQwenVLProcessor):
+        def __call__(self, *, text=None, images=None, return_tensors=None, **kwargs):
+            result = super().__call__(text=text, images=images, return_tensors=return_tensors, **kwargs)
+            # Corrupt only the image-bearing (full) render so it diverges from the
+            # image-free prefix render, breaking the append-only prefix invariant.
+            if images:
+                result["input_ids"][0][0] = 9999
+            return result
+
+    import verl.utils.tokenizer.continuous_token as continuous_token
+
+    builder_cls = getattr(continuous_token, builder_name)
+    builder = builder_cls(_MockQwenVLTokenizer(), BadPrefixProcessor())
+    previous = [{"role": "user", "content": "Hi"}]
+    updated = [
+        {"role": "user", "content": "Hi"},
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": "new_image.png"},
+                {"type": "text", "text": "Look at this"},
+            ],
+        },
+    ]
+    runtime_ids = [151644, 1000, 1001, 1002, 151645, 151644]
+    with pytest.raises(ValueError, match="suffix diff failed"):
+        builder.merge_non_assistant_tokens(previous, updated, runtime_ids)
+
+
+# =============================================================================
+# Tests: chat_template_kwargs / mm_processor_kwargs are wired to the VL builder
+# at construction time AND actually take effect at render time.
+# =============================================================================
+
+
+class _ConfigurablePadProcessor(_MockQwenVLProcessor):
+    """VL processor whose per-image pad count is driven by the ``pads_per_image``
+    mm kwarg, mirroring how real ``max_pixels``/``min_pixels`` change how many
+    vision tokens an image expands into. Also records the kwargs each call
+    receives so tests can assert they were forwarded verbatim.
+    """
+
+    def __init__(self):
+        self.call_kwargs: list[dict] = []
+
+    def __call__(self, *, text=None, images=None, return_tensors=None, pads_per_image=4, **kwargs):
+        self.call_kwargs.append({"pads_per_image": pads_per_image, **kwargs})
+        rendered = text[0] if isinstance(text, list | tuple) else (text or "")
+        segments = rendered.split(self._IMAGE_PLACEHOLDER)
+        num_images = len(segments) - 1
+
+        token_ids: list[int] = []
+        for index, segment in enumerate(segments):
+            token_ids.extend(ord(char) for char in segment)
+            if index < num_images:
+                token_ids.append(151652)
+                token_ids.extend([151655] * pads_per_image)
+                token_ids.append(151653)
+
+        result = {"input_ids": [token_ids]}
+        if num_images > 0:
+            import numpy as np
+
+            result["pixel_values"] = np.zeros((num_images * 16, 3, 14, 14), dtype=np.float32)
+            result["image_grid_thw"] = np.array([[1, 4, 4]] * num_images, dtype=np.int64)
+        return result
+
+
+class _RecordingTemplateProcessor(_MockQwenVLProcessor):
+    """VL processor that records the kwargs its ``apply_chat_template`` receives."""
+
+    def __init__(self):
+        self.template_kwargs: list[dict] = []
+
+    def apply_chat_template(
+        self, messages, tokenize=False, add_generation_prompt=False, tools=None, return_dict=False, **kwargs
+    ):
+        self.template_kwargs.append(dict(kwargs))
+        return super().apply_chat_template(
+            messages,
+            tokenize=tokenize,
+            add_generation_prompt=add_generation_prompt,
+            tools=tools,
+            return_dict=return_dict,
+            **kwargs,
+        )
+
+
+def test_vl_builder_creation_forwards_chat_template_and_mm_processor_kwargs():
+    """create_continuous_token_builder must store both kwarg dicts on a VL builder."""
+    builder = create_continuous_token_builder(
+        _MockQwenVLTokenizer(),
+        model_family="qwen25vl",
+        processor=_MockQwenVLProcessor(),
+        chat_template_kwargs={"enable_thinking": False},
+        mm_processor_kwargs={"max_pixels": 12345, "min_pixels": 3136},
+    )
+
+    assert isinstance(builder, QwenVLContinuousTokenBuilder)
+    assert builder.chat_template_kwargs == {"enable_thinking": False}
+    assert builder.mm_processor_kwargs == {"max_pixels": 12345, "min_pixels": 3136}
+
+
+def test_text_builder_creation_ignores_mm_processor_kwargs():
+    """mm_processor_kwargs is multimodal-only: a text builder must not carry it."""
+    builder = create_continuous_token_builder(
+        _TemplateTokenizer(),
+        model_family="default",
+        mm_processor_kwargs={"max_pixels": 12345},
+    )
+
+    assert isinstance(builder, ContinuousTokenBuilder)
+    assert not hasattr(builder, "mm_processor_kwargs")
+
+
+def test_vl_builder_forwards_mm_processor_kwargs_to_processor_call_at_render():
+    """mm_processor_kwargs must be forwarded verbatim into the processor call."""
+    processor = _ConfigurablePadProcessor()
+    builder = QwenVLContinuousTokenBuilder(
+        _MockQwenVLTokenizer(),
+        processor,
+        mm_processor_kwargs={"pads_per_image": 3, "max_pixels": 999},
+    )
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": "x.png"},
+                {"type": "text", "text": "hi"},
+            ],
+        }
+    ]
+
+    builder.build_initial_tokens(messages, images=["x.png"])
+
+    assert processor.call_kwargs
+    assert processor.call_kwargs[-1]["pads_per_image"] == 3
+    assert processor.call_kwargs[-1]["max_pixels"] == 999
+
+
+def test_vl_builder_mm_processor_kwargs_actually_change_rendered_token_count():
+    """Different mm_processor_kwargs must produce a different number of vision pad
+    tokens, proving the kwargs genuinely take effect (not merely stored)."""
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": "x.png"},
+                {"type": "text", "text": "hi"},
+            ],
+        }
+    ]
+
+    small = QwenVLContinuousTokenBuilder(
+        _MockQwenVLTokenizer(), _ConfigurablePadProcessor(), mm_processor_kwargs={"pads_per_image": 2}
+    )
+    large = QwenVLContinuousTokenBuilder(
+        _MockQwenVLTokenizer(), _ConfigurablePadProcessor(), mm_processor_kwargs={"pads_per_image": 6}
+    )
+
+    small_ids = small.build_initial_tokens(messages, images=["x.png"])
+    large_ids = large.build_initial_tokens(messages, images=["x.png"])
+
+    assert small_ids.count(151655) == 2
+    assert large_ids.count(151655) == 6
+
+
+def test_vl_builder_forwards_chat_template_kwargs_to_processor_template():
+    """chat_template_kwargs must reach the processor's apply_chat_template (VL path),
+    not just the tokenizer path exercised by the text-only builder test."""
+    processor = _RecordingTemplateProcessor()
+    builder = QwenVLContinuousTokenBuilder(
+        _MockQwenVLTokenizer(),
+        processor,
+        chat_template_kwargs={"enable_thinking": False},
+    )
+
+    builder.build_initial_tokens([{"role": "user", "content": "question"}])
+
+    assert processor.template_kwargs
+    assert processor.template_kwargs[-1].get("enable_thinking") is False
+
+
+def test_vl_builder_folds_processor_sampling_rate_into_mm_processor_kwargs():
+    """A processor exposing feature_extractor.sampling_rate should have that value
+    folded into mm_processor_kwargs so audio renders stay aligned."""
+
+    class _AudioProcessor(_MockQwenVLProcessor):
+        feature_extractor = type("FE", (), {"sampling_rate": 16000})()
+
+    builder = QwenVLContinuousTokenBuilder(
+        _MockQwenVLTokenizer(),
+        _AudioProcessor(),
+        mm_processor_kwargs={"max_pixels": 111},
+    )
+
+    assert builder.mm_processor_kwargs["sampling_rate"] == 16000
+    assert builder.mm_processor_kwargs["max_pixels"] == 111
+
+
+def test_vl_builder_preserves_explicit_sampling_rate_over_processor_default():
+    """An explicit sampling_rate in mm_processor_kwargs must not be overwritten by
+    the processor's feature_extractor default."""
+
+    class _AudioProcessor(_MockQwenVLProcessor):
+        feature_extractor = type("FE", (), {"sampling_rate": 16000})()
+
+    builder = QwenVLContinuousTokenBuilder(
+        _MockQwenVLTokenizer(),
+        _AudioProcessor(),
+        mm_processor_kwargs={"sampling_rate": 24000},
+    )
+
+    assert builder.mm_processor_kwargs["sampling_rate"] == 24000
