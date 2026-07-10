@@ -129,3 +129,31 @@ def test_checksum_mismatch_raises():
     named_tensors[2][1].view(torch.uint8)[0] ^= 0xFF  # corrupt one value byte
     with pytest.raises(RuntimeError, match="checksum"):
         apply_delta(_FakeModel(named), named_tensors)
+
+
+def test_dense_flush_applies_full_tensors():
+    """Dense (first-sync) flushes carry values only; the loader must apply them verbatim."""
+    named = _make_named()
+    model = _FakeModel([(n, torch.zeros_like(t)) for n, t in named])  # dummy init
+
+    params, pieces, val_off = [], [], 0
+    for name, t in named:
+        flat = t.contiguous().view(-1)
+        params.append({
+            "name": name, "dtype": str(t.dtype).replace("torch.", ""), "shape": list(t.shape),
+            "pos_start": 0, "pos_end": 0, "pos_width": 4,
+            "val_start": val_off, "val_end": val_off + flat.numel(),
+        })
+        pieces.append(flat)
+        val_off += flat.numel()
+    values = torch.cat(pieces)
+
+    from verl.checkpoint_engine.delta_sync.encode import checksum
+
+    spec = {"encoding": "dense", "params": params,
+            "checksum": int(checksum(torch.empty(0, dtype=torch.uint8), values))}
+    spec_t = torch.frombuffer(bytearray(json.dumps(spec).encode()), dtype=torch.uint8)
+    apply_delta(model, [("__delta_spec__", spec_t), ("__values__", values)])
+
+    for name, expected in named:
+        assert torch.equal(model.params[name].view(torch.int16), expected.view(torch.int16)), name

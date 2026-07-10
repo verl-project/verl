@@ -83,6 +83,12 @@ class DeltaState:
             self.snapshot[name].copy_(tensor.detach(), non_blocking=False)
         self._snapshot_dirty = False
 
+    def seed_param(self, name: str, tensor: torch.Tensor) -> None:
+        """Streaming variant of :meth:`seed`: snapshot a single parameter."""
+        self._allocate(name, tensor)
+        self.snapshot[name].copy_(tensor.detach(), non_blocking=False)
+        self._snapshot_dirty = False
+
     def _allocate(self, name: str, tensor: torch.Tensor) -> None:
         if name in self.snapshot:
             return

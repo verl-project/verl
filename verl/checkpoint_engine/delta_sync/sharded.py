@@ -145,3 +145,85 @@ def gather_v_to_rank0(
     idx = torch.cat([idx_list[r][: counts[r]] for r in range(world)])
     val = torch.cat([val_list[r][: counts[r]] for r in range(world)])
     return idx, val
+
+
+def gather_dense_to_rank0(
+    local_val: torch.Tensor,
+    offset: int,
+    full_numel: int,
+    group=None,
+) -> torch.Tensor | None:
+    """Assemble a full flat parameter on rank 0 from each rank's contiguous shard.
+
+    Each rank contributes ``(offset, values)`` (empty on non-contributing ranks);
+    rank 0 places every shard at its flat offset. Only the values ride the wire --
+    no per-element indices -- so the dense first sync carries none of the sparse
+    encoding overhead and rank 0 peaks at one full parameter.
+    """
+    rank = dist.get_rank(group)
+    world = dist.get_world_size(group)
+    dev = local_val.device
+
+    n = int(local_val.numel())
+    meta = torch.tensor([n, offset], dtype=torch.long, device=dev)
+    metas = [torch.zeros(2, dtype=torch.long, device=dev) for _ in range(world)]
+    dist.all_gather(metas, meta, group=group)
+    counts = [int(m[0].item()) for m in metas]
+    offsets = [int(m[1].item()) for m in metas]
+    max_n = max(counts) if counts else 0
+    if max_n == 0:
+        return torch.empty(0, dtype=local_val.dtype, device=dev) if rank == 0 else None
+
+    val_pad = torch.zeros(max_n, dtype=local_val.dtype, device=dev)
+    val_pad[:n] = local_val
+    val_list = [torch.zeros(max_n, dtype=local_val.dtype, device=dev) for _ in range(world)] if rank == 0 else None
+    dist.gather(val_pad, val_list, dst=0, group=group)
+    if rank != 0:
+        return None
+    full = torch.empty(full_numel, dtype=local_val.dtype, device=dev)
+    for r in range(world):
+        if counts[r]:
+            full[offsets[r] : offsets[r] + counts[r]] = val_list[r][: counts[r]]
+    return full
+
+
+def gather_v_grouped_to_rank0(
+    local_idx: torch.Tensor,
+    local_val: torch.Tensor,
+    group=None,
+) -> list[tuple[torch.Tensor, torch.Tensor]] | None:
+    """Like :func:`gather_v_to_rank0`, but returns the payloads *per rank* instead of concatenated.
+
+    Returns, on rank 0, a list ``[(idx_r, val_r) for r in range(world)]`` of each rank's sparse
+    ``(local-shard-position, value)`` pairs (padding stripped); ``None`` on the other ranks. Keeping
+    the per-rank boundary lets rank 0 rebuild each rank's shard buffer and feed the *native*
+    ``_weight_merge_across_tp`` -- so no per-parameter global-position math is needed on our side.
+    """
+    rank = dist.get_rank(group)
+    world = dist.get_world_size(group)
+    dev = local_idx.device
+
+    n = int(local_idx.numel())
+    cnt = torch.tensor([n], dtype=torch.long, device=dev)
+    counts = [torch.zeros(1, dtype=torch.long, device=dev) for _ in range(world)]
+    dist.all_gather(counts, cnt, group=group)
+    counts = [int(c.item()) for c in counts]
+    max_n = max(counts) if counts else 0
+
+    if max_n == 0:
+        return [(torch.empty(0, dtype=torch.int64, device=dev),
+                 torch.empty(0, dtype=local_val.dtype, device=dev)) for _ in range(world)] if rank == 0 else None
+
+    idx_pad = torch.zeros(max_n, dtype=torch.int64, device=dev)
+    val_pad = torch.zeros(max_n, dtype=local_val.dtype, device=dev)
+    idx_pad[:n] = local_idx
+    val_pad[:n] = local_val
+
+    idx_list = [torch.zeros(max_n, dtype=torch.int64, device=dev) for _ in range(world)] if rank == 0 else None
+    val_list = [torch.zeros(max_n, dtype=local_val.dtype, device=dev) for _ in range(world)] if rank == 0 else None
+    dist.gather(idx_pad, idx_list, dst=0, group=group)
+    dist.gather(val_pad, val_list, dst=0, group=group)
+
+    if rank != 0:
+        return None
+    return [(idx_list[r][: counts[r]], val_list[r][: counts[r]]) for r in range(world)]

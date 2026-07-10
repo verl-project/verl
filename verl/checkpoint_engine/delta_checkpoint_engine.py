@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import Generator
 from unittest.mock import patch
 
@@ -46,19 +47,13 @@ with patch("importlib.metadata.distributions", return_value=[]):
 from .delta_sync import DeltaState, iter_delta_flushes
 from .delta_sync.encode import DeltaParam, checksum as _checksum
 from .delta_sync.sglang_loader import LOADER_FQN
-from .delta_sync.sharded import gather_v_to_rank0, shard_delta_indices
+from .delta_sync.sharded import gather_dense_to_rank0, gather_v_to_rank0, shard_delta_indices
 from .delta_sync.wrapper import DeltaFlush
 
 from .base import CheckpointEngineRegistry
 from .nccl_checkpoint_engine import MasterMetadata, NCCLCheckpointEngine
 
 logger = logging.getLogger(__name__)
-
-
-def _bitflip_like(t: torch.Tensor) -> torch.Tensor:
-    """A tensor whose every byte differs from ``t`` (forces a full diff)."""
-    flat = t.detach().contiguous().view(-1).view(torch.uint8)
-    return (flat ^ 0xFF).view(t.dtype).view(t.shape)
 
 
 @CheckpointEngineRegistry.register("delta")
@@ -122,6 +117,31 @@ class DeltaCheckpointEngine(NCCLCheckpointEngine):
         collective.broadcast(pos_cp, src_rank=0, group_name=self.group_name)
         collective.broadcast(val_cp, src_rank=0, group_name=self.group_name)
 
+    def _publish_dense_flush(self, params: list[DeltaParam], values: torch.Tensor, is_last: bool) -> None:
+        """Publish a dense (full-coverage, positions-free) flush -- used by the first sync."""
+        values = values.contiguous()
+        empty_pos = torch.empty(0, dtype=torch.uint8, device=values.device)
+        meta = {
+            "is_full": True,
+            "encoding": "dense",
+            "is_last": is_last,
+            "terminal_empty": False,
+            "pos_numel": 0,
+            "val_numel": int(values.numel()),
+            "val_dtype": str(values.dtype).replace("torch.", ""),
+            "spec": {
+                "encoding": "dense",
+                "params": [vars(p) for p in params],
+                "checksum": int(_checksum(empty_pos, values)),
+            },
+        }
+        self.socket.send_string(self.topic, flags=zmq.SNDMORE)
+        self.socket.send_pyobj(meta)
+        val_u8 = values.view(torch.uint8)
+        val_cp = cp.empty(val_u8.numel(), dtype=cp.uint8)
+        val_cp[:] = cp.asarray(val_u8)
+        collective.broadcast(val_cp, src_rank=0, group_name=self.group_name)
+
     def _publish_terminal(self, first: bool) -> None:
         """End-of-stream marker when zero flushes were produced (no broadcast, just a signal)."""
         meta = {"is_full": first, "encoding": self.encoding, "is_last": True, "terminal_empty": True}
@@ -173,13 +193,71 @@ class DeltaCheckpointEngine(NCCLCheckpointEngine):
                 pass
             return
 
-        first = not self._state.seeded
-        if first:
-            materialized = list(weights)
-            self._state.seed([(n, _bitflip_like(t)) for n, t in materialized])
-            weights_iter = iter(materialized)
-        else:
-            weights_iter = weights
+        if not self._state.seeded:
+            # First sync: dense, single streaming pass -- each full tensor is
+            # snapshotted and sent raw (values only, no positions), so nothing
+            # materializes the whole model and the init semantics are explicit.
+            bucket: list = []
+            bucket_bytes = 0
+            pending = None
+            n_flushes = 0
+            total_elems = 0
+            wire_bytes = 0
+
+            def _emit(is_last):
+                nonlocal pending, n_flushes, wire_bytes
+                if pending is not None:
+                    self._publish_dense_flush(pending[0], pending[1], is_last=is_last)
+                    n_flushes += 1
+                    wire_bytes += int(pending[1].nbytes)
+                    pending = None
+
+            def _seal():
+                nonlocal bucket, bucket_bytes, pending
+                if not bucket:
+                    return
+                _emit(is_last=False)
+                params = []
+                val_off = 0
+                for name, dtype_str, shape, flat in bucket:
+                    n = int(flat.numel())
+                    params.append(
+                        DeltaParam(name=name, dtype=dtype_str, shape=list(shape),
+                                   pos_start=0, pos_end=0, pos_width=4,
+                                   val_start=val_off, val_end=val_off + n)
+                    )
+                    val_off += n
+                values = torch.cat([flat for *_, flat in bucket])
+                pending = (params, values)
+                bucket = []
+                bucket_bytes = 0
+
+            for name, tensor in weights:
+                tensor = tensor.detach()
+                self._state.seed_param(name, tensor)
+                flat = tensor.contiguous().view(-1)
+                total_elems += int(flat.numel())
+                bucket.append((name, str(tensor.dtype).replace("torch.", ""), list(tensor.shape), flat))
+                bucket_bytes += int(flat.numel()) * flat.element_size()
+                if bucket_bytes >= self.bucket_size:
+                    _seal()
+            _seal()
+            if pending is not None:
+                _emit(is_last=True)
+            else:
+                self._publish_terminal(True)
+            if total_elems:
+                self._sync_metrics = {
+                    "checkpoint_engine/changed_ratio": 1.0,
+                    "checkpoint_engine/changed_elems": float(total_elems),
+                    "checkpoint_engine/payload_mbytes": wire_bytes / (1 << 20),
+                    "checkpoint_engine/flushes": float(n_flushes),
+                }
+            logger.info("delta-nccl send v=%s DENSE-SEED flushes=%d elems=%d", global_steps, n_flushes, total_elems)
+            return
+
+        first = False
+        weights_iter = weights
 
         total_elems = 0
 
@@ -233,20 +311,28 @@ class DeltaCheckpointEngine(NCCLCheckpointEngine):
             if meta.get("terminal_empty"):
                 break
 
+            dense = meta.get("encoding") == "dense"
             val_dtype = getattr(torch, meta["val_dtype"])
             elem = torch.empty(0, dtype=val_dtype).element_size()
-            pos = torch.empty(meta["pos_numel"], dtype=torch.uint8, device="cuda")
             val_u8 = torch.empty(meta["val_numel"] * elem, dtype=torch.uint8, device="cuda")
-            collective.broadcast(pos, src_rank=0, group_name=self.group_name)
-            collective.broadcast(val_u8, src_rank=0, group_name=self.group_name)
+            if dense:
+                pos = None
+                collective.broadcast(val_u8, src_rank=0, group_name=self.group_name)
+            else:
+                pos = torch.empty(meta["pos_numel"], dtype=torch.uint8, device="cuda")
+                collective.broadcast(pos, src_rank=0, group_name=self.group_name)
+                collective.broadcast(val_u8, src_rank=0, group_name=self.group_name)
             val = val_u8.view(val_dtype)
 
             spec_bytes = json.dumps(meta["spec"]).encode()
             spec_t = torch.frombuffer(bytearray(spec_bytes), dtype=torch.uint8).to("cuda")
+            named = [("__delta_spec__", spec_t), ("__values__", val)]
+            if pos is not None:
+                named.insert(1, ("__positions__", pos))
             await self._dispatch_flush_to_sglang(
                 server_adapter,
                 engine,
-                [("__delta_spec__", spec_t), ("__positions__", pos), ("__values__", val)],
+                named,
                 flush_cache=bool(meta["is_last"]),
             )
             applied += 1
@@ -364,14 +450,97 @@ class DeltaShardedCheckpointEngine(DeltaCheckpointEngine):
         return DeltaFlush(encoding=self.encoding, params=params,
                           positions_cpu=positions_u8, values_gpu=values_gpu, checksum=cks)
 
+    def _send_dense_seed(self, weights, global_steps=None):
+        """First sync: assemble and broadcast the raw weights, bucketed, positions-free.
+
+        Explicit dense semantics instead of the previous bitflip-forced full diff:
+        no per-element indices on the wire (values only), no whole-parameter
+        (idx, val) spike on rank 0 -- its peak is one assembled parameter plus a
+        bucket -- and the snapshot is populated as the stream goes.
+        """
+        is_r0 = self.is_master
+        bucket: list = []  # (name, dtype_str, full_shape, flat_full_tensor)
+        bucket_bytes = 0
+        pending = None  # (params, values) awaiting emission (1-flush lookahead for is_last)
+        n_flushes = 0
+        total_elems = 0
+        wire_bytes = 0
+
+        def _emit(is_last):
+            nonlocal pending, n_flushes, wire_bytes
+            if pending is not None:
+                self._publish_dense_flush(pending[0], pending[1], is_last=is_last)
+                n_flushes += 1
+                wire_bytes += int(pending[1].nbytes)
+                pending = None
+
+        def _seal():
+            nonlocal bucket, bucket_bytes, pending
+            if not bucket:
+                return
+            _emit(is_last=False)
+            params = []
+            val_off = 0
+            for name, dtype_str, full_shape, flat in bucket:
+                n = int(flat.numel())
+                params.append(
+                    DeltaParam(name=name, dtype=dtype_str, shape=list(full_shape),
+                               pos_start=0, pos_end=0, pos_width=4,
+                               val_start=val_off, val_end=val_off + n)
+                )
+                val_off += n
+            values = torch.cat([flat for *_, flat in bucket])
+            pending = (params, values)
+            bucket = []
+            bucket_bytes = 0
+
+        for name, local, offset, full_numel, full_shape, contributes in weights:
+            local = local.detach().contiguous().view(-1)
+            snap = self._shard_snap.get(name)
+            if snap is None or snap.numel() != local.numel():
+                snap = torch.empty_like(local, device="cpu", pin_memory=True)
+            snap.copy_(local, non_blocking=True)
+            self._shard_snap[name] = snap
+
+            shard = local if contributes else torch.empty(0, dtype=local.dtype, device=local.device)
+            full = gather_dense_to_rank0(shard, offset if contributes else 0, full_numel)
+            if is_r0:
+                total_elems += int(full_numel)
+                bucket.append((name, str(local.dtype).replace("torch.", ""), list(full_shape), full))
+                bucket_bytes += int(full.nbytes)
+                if bucket_bytes >= self.bucket_size:
+                    _seal()
+
+        self._shard_seeded = True
+        if not is_r0:
+            return
+        _seal()
+        if pending is not None:
+            _emit(is_last=True)
+        else:
+            self._publish_terminal(True)
+        if total_elems:
+            self._sync_metrics = {
+                "checkpoint_engine/changed_ratio": 1.0,
+                "checkpoint_engine/changed_elems": float(total_elems),
+                "checkpoint_engine/payload_mbytes": wire_bytes / (1 << 20),
+                "checkpoint_engine/flushes": float(n_flushes),
+            }
+        logger.info(
+            "delta-sharded send v=%s DENSE-SEED flushes=%d elems=%d",
+            global_steps, n_flushes, total_elems,
+        )
+
     async def send_weights(self, weights, global_steps=None):
         # All actor ranks participate (gather-v is collective); only torch rank 0 broadcasts.
         # rank 0 accumulates the gathered per-param deltas into bucket_size-sized flushes and streams
         # each one as soon as it fills (then frees it), so peak memory is ~2 buckets rather than the
-        # whole model -- otherwise the first (full-seed) sync would hold the entire delta on rank 0.
+        # whole model.
         assert self.rank <= 0, "Trainer workers other than rank 0 should not send weights."
+        if not self._shard_seeded:
+            return self._send_dense_seed(weights, global_steps)
         is_r0 = self.is_master
-        first = not self._shard_seeded
+        first = False  # the dense first sync is handled by _send_dense_seed
         bucket: list = []
         bucket_bytes = 0
         pending = None  # a DeltaFlush awaiting emission (1-flush lookahead so the last flush is is_last)
@@ -402,7 +571,7 @@ class DeltaShardedCheckpointEngine(DeltaCheckpointEngine):
             if snap is None or snap.numel() != local.numel():
                 snap = torch.empty_like(local, device="cpu", pin_memory=True)
             if contributes:
-                base = _bitflip_like(local) if first else snap.to(local.device, non_blocking=True)
+                base = snap.to(local.device, non_blocking=True)
                 gidx, gval = shard_delta_indices(local, base, offset)
             else:
                 # replicated param owned by another rank; contribute nothing but keep lockstep.
@@ -429,6 +598,13 @@ class DeltaShardedCheckpointEngine(DeltaCheckpointEngine):
                         _seal()
 
         self._shard_seeded = True
+        if os.environ.get("VERL_DELTA_DEBUG"):
+            pinned = sum(t.numel() * t.element_size() for t in self._shard_snap.values())
+            print(
+                f"[delta-debug] engine rank={self.rank} SNAPSHOT: {len(self._shard_snap)} pinned-CPU shard snaps, "
+                f"{pinned / (1 << 20):.1f} MiB total (expect ~model_bytes/fsdp_size per rank when truly sharded)",
+                flush=True,
+            )
         if not is_r0:
             return
         _seal()  # seal the final partial bucket into `pending`

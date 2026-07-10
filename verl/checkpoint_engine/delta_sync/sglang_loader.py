@@ -60,8 +60,10 @@ def apply_delta(model, named_tensors) -> None:
 
     tensors = dict(named_tensors)
     spec = json.loads(bytes(tensors["__delta_spec__"].cpu().numpy().tobytes()).decode())
-    positions = tensors["__positions__"]
     values = tensors["__values__"]
+    positions = tensors.get("__positions__")
+    if positions is None:  # dense flush (first sync) carries values only
+        positions = torch.empty(0, dtype=torch.uint8, device=values.device)
 
     got = _checksum(positions, values)
     if got != int(spec["checksum"]):
@@ -69,6 +71,10 @@ def apply_delta(model, named_tensors) -> None:
             f"delta checksum mismatch in sglang loader: got {got}, expected {spec['checksum']}; "
             "indicates corruption between sender encode and receiver apply"
         )
+
+    if spec["encoding"] == "dense":
+        _apply_dense(model, spec["params"], values)
+        return
 
     encoding = spec["encoding"]
     with _masked_copy():
@@ -84,6 +90,23 @@ def apply_delta(model, named_tensors) -> None:
             chunk_bytes += nbytes
         if chunk:
             model.load_weights(chunk)
+
+
+def _apply_dense(model, params: list[dict], values: torch.Tensor) -> None:
+    """Apply a dense (full-coverage) flush: plain chunked load, no masking needed."""
+    chunk: list[tuple[str, torch.Tensor]] = []
+    chunk_bytes = 0
+    for p in params:
+        dtype = getattr(torch, p["dtype"])
+        t = values[p["val_start"] : p["val_end"]].to(dtype).view(p["shape"])
+        nbytes = t.numel() * t.element_size()
+        if chunk and chunk_bytes + nbytes > CHUNK_BYTES:
+            model.load_weights(chunk)
+            chunk, chunk_bytes = [], 0
+        chunk.append((p["name"], t))
+        chunk_bytes += nbytes
+    if chunk:
+        model.load_weights(chunk)
 
 
 def _decode_one(encoding: str, positions: torch.Tensor, values: torch.Tensor, p: dict) -> torch.Tensor:
