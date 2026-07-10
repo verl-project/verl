@@ -36,13 +36,34 @@ _rocm_ray_env = {}
 if torch.version.hip is not None:
     _rocm_ray_env = {"RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO": "0"}
 
+# CUDA_DEVICE_MAX_CONNECTIONS=1 is only needed by the Megatron engine on
+# pre-Blackwell Hopper/Ampere GPUs (compute capability 8.x/9.x) to serialize
+# kernel launches for TP/CP communication overlap. Blackwell/GB200 (>=10) does
+# not need it, and Torch-FSDP2 / Megatron-FSDP must NOT set it to 1. So we set
+# it conditionally at runtime (see get_ppo_ray_runtime_env), not unconditionally.
+#
+# https://github.com/NVIDIA/Megatron-LM/blob/core_v0.18.0/skills/mcore-run-on-slurm/SKILL.md#cuda_device_max_connections
+_is_hopper_or_ampere = (_major or 0) in (8, 9)
+
+
+def _uses_megatron(config) -> bool:
+    """Return True if any trainable engine in the config uses the Megatron strategy."""
+    if config is None:
+        return False
+    from omegaconf import OmegaConf
+
+    for key in ("actor_rollout_ref.actor.strategy", "critic.strategy"):
+        if OmegaConf.select(config, key, default=None) == "megatron":
+            return True
+    return False
+
+
 PPO_RAY_RUNTIME_ENV = {
     "env_vars": {
         "TOKENIZERS_PARALLELISM": "true",
         "NCCL_DEBUG": "WARN",
         "VLLM_LOGGING_LEVEL": "WARN",
         "VLLM_ALLOW_RUNTIME_LORA_UPDATING": "true",
-        "CUDA_DEVICE_MAX_CONNECTIONS": "1",
         # TODO: disable compile cache due to cache corruption issue
         # https://github.com/vllm-project/vllm/issues/31199
         "VLLM_DISABLE_COMPILE_CACHE": "1",
@@ -57,10 +78,14 @@ PPO_RAY_RUNTIME_ENV = {
 }
 
 
-def get_ppo_ray_runtime_env():
+def get_ppo_ray_runtime_env(config=None):
     """
     A filter function to return the PPO Ray runtime environment.
     To avoid repeat of some environment variables that are already set.
+
+    Args:
+        config: Optional training config. When the engine strategy is Megatron
+            and the GPU is Hopper/Ampere, CUDA_DEVICE_MAX_CONNECTIONS=1 is set.
     """
     working_dir = (
         json.loads(os.environ.get(RAY_JOB_CONFIG_JSON_ENV_VAR, "{}")).get("runtime_env", {}).get("working_dir", None)
@@ -70,6 +95,9 @@ def get_ppo_ray_runtime_env():
         "env_vars": PPO_RAY_RUNTIME_ENV["env_vars"].copy(),
         **({"working_dir": None} if working_dir is None else {}),
     }
+    # Only Megatron on Hopper/Ampere needs CUDA_DEVICE_MAX_CONNECTIONS=1.
+    if _is_hopper_or_ampere and _uses_megatron(config):
+        runtime_env["env_vars"]["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
     for key in list(runtime_env["env_vars"].keys()):
         if os.environ.get(key) is not None:
             runtime_env["env_vars"].pop(key, None)

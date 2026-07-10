@@ -38,8 +38,8 @@ RUN pip3 install --no-cache-dir --no-deps trl==0.27.0 && \
     pip3 install --no-cache-dir nvtx matplotlib liger_kernel cachetools annotated-doc && \
     pip3 install --no-cache-dir cupy-cuda12x==14.0.1 && \
     pip install --no-cache-dir -U git+https://github.com/ISEEKYAN/mbridge.git@641a5a0 && \
-    pip install --no-deps --no-cache-dir megatron-core==0.17.0 && \
-    pip install --no-deps --no-cache-dir megatron-bridge==0.4.1 && \
+    pip install --no-deps --no-cache-dir megatron-core==0.18.0 && \
+    pip install --no-deps --no-cache-dir megatron-bridge==0.5.0 && \
     pip install --no-deps --no-cache-dir nvidia-resiliency-ext==0.6.0
 
 

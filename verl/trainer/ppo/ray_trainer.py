@@ -1304,6 +1304,14 @@ class RayPPOTrainer:
             if is_distillation_enabled(self.config.get("distillation"))
             else False
         )
+        distillation_only = False  # distillation_only flag means we can skip policy loss and reduce mem footprint
+        if is_distillation_enabled(self.config.get("distillation")):
+            distillation_loss_cfg = self.distillation_config.distillation_loss
+            distillation_only = (
+                distillation_use_topk
+                and not distillation_loss_cfg.use_task_rewards
+                and not distillation_loss_cfg.use_policy_gradient
+            )
         ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
         ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
         ppo_epochs = self.config.actor_rollout_ref.actor.ppo_epochs
@@ -1313,6 +1321,7 @@ class RayPPOTrainer:
             batch_td,
             calculate_entropy=calculate_entropy,
             distillation_use_topk=distillation_use_topk,
+            distillation_only=distillation_only,
             global_batch_size=ppo_mini_batch_size,
             mini_batch_size=ppo_mini_batch_size,
             epochs=ppo_epochs,

@@ -37,6 +37,7 @@ RUN cd sglang && \
     ARCH=$(uname -m) && wget ${PTA_URL}/${PTA_BASE_VERSION}_${ARCH}.whl && pip install ${PTA_BASE_VERSION}_${ARCH}.whl && \
     echo "[LOG INFO] Torch_npu version is: ${PTA_BASE_VERSION}_${ARCH}.whl" && \
     pip install -e python[all_npu] && \
+    pip install torch==2.8.0 torchvision==0.23.0 && \
     cd .. 
 
 # Install sgl-kernel-npu

@@ -108,6 +108,7 @@ class TestServerProfilerFunctionality(unittest.IsolatedAsyncioTestCase):
 
         # Mock self object
         mock_self = MagicMock()
+        mock_self.node_rank = 0
         mock_self.profiler_controller = mock_profiler
         mock_self.engine = mock_engine
 
@@ -118,6 +119,31 @@ class TestServerProfilerFunctionality(unittest.IsolatedAsyncioTestCase):
         # Test stop_profile
         await vLLMHttpServer.stop_profile(mock_self)
         mock_engine.stop_profile.assert_called_once()
+
+    async def test_vllm_start_stop_profile_non_master_node(self):
+        try:
+            from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer
+        except ImportError:
+            self.skipTest("vllm or dependencies not installed")
+            return
+
+        mock_profiler = MagicMock()
+        mock_profiler.check_enable.return_value = True
+        mock_profiler.check_this_rank.return_value = True
+        mock_profiler.is_discrete_mode.return_value = True
+
+        mock_engine = AsyncMock()
+
+        mock_self = MagicMock()
+        mock_self.node_rank = 1  # non-master node, should skip
+        mock_self.profiler_controller = mock_profiler
+        mock_self.engine = mock_engine
+
+        await vLLMHttpServer.start_profile(mock_self)
+        mock_engine.start_profile.assert_not_called()
+
+        await vLLMHttpServer.stop_profile(mock_self)
+        mock_engine.stop_profile.assert_not_called()
 
     async def test_sglang_start_stop_profile(self):
         try:

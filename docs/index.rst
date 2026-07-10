@@ -93,6 +93,7 @@ verl is fast with:
    workers/model_engine
    workers/engine_workers
    workers/automodel_workers
+   workers/torchtitan_workers
    workers/sglang_worker
    workers/trtllm_worker
 

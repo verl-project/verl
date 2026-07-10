@@ -43,7 +43,7 @@ Atlas 900 A2 PODc
 
 Atlas 800T A3
 
-
+`Atlas 950DT A5 <https://github.com/verl-project/verl/blob/main/docs/ascend_tutorial/get_start/install_guidance_A5.rst>`_
 
 
 框架后端支持说明

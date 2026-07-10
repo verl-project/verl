@@ -33,7 +33,7 @@ from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.megatron_checkpoint_manager import MegatronCheckpointManager
 from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.utils.debug import log_gpu_memory_usage
-from verl.utils.device import get_device_id, get_device_name
+from verl.utils.device import get_device_id, get_device_name, get_torch_device
 from verl.utils.megatron.pipeline_parallel import make_batch_generator
 from verl.utils.megatron.router_replay_patch import RouterReplay, RouterReplayAction, apply_router_replay_patch
 from verl.utils.megatron.router_replay_utils import (
@@ -168,12 +168,21 @@ class MegatronEngine(BaseEngine):
         from verl.utils.megatron_utils import mapping_string_to_attn_backend
         from verl.utils.torch_dtypes import PrecisionType
 
+        self.is_value_model = self.model_config.model_type == "value_model"
+        self.share_embeddings_and_output_weights = self.model_config.share_embeddings_and_output_weights
+
         check_mtp_config(self.model_config, self.engine_config)
 
         self.param_dtype = PrecisionType.to_dtype(self.engine_config.dtype)
         self.dtype = PrecisionType.to_dtype(self.param_dtype)
 
         override_transformer_config = mapping_string_to_attn_backend({**self.engine_config.override_transformer_config})
+        if self.is_value_model:
+            # A value head cannot share weights with the vocabulary embedding. This must
+            # be set before either bridge creates and finalizes its Megatron config.
+            self.model_config.hf_config.tie_word_embeddings = False
+            self.share_embeddings_and_output_weights = False
+            override_transformer_config["share_embeddings_and_output_weights"] = False
         if self.engine_config.dynamic_context_parallel:
             override_transformer_config["max_seqlen_per_dp_cp_rank"] = self.engine_config.max_seqlen_per_dp_cp_rank
             # note(baiyan): we must set the transformer_config.dynamic_context_parallel to False
@@ -206,14 +215,19 @@ class MegatronEngine(BaseEngine):
             # Match verl implementation (need variable_seq_lengths)
             from megatron.core.transformer.enums import AttnBackend
 
+            virtual_pipeline_model_parallel_size = self.engine_config.virtual_pipeline_model_parallel_size
             provider_overrides = {
                 "tensor_model_parallel_size": self.engine_config.tensor_model_parallel_size,
                 "pipeline_model_parallel_size": self.engine_config.pipeline_model_parallel_size,
                 "expert_model_parallel_size": self.engine_config.expert_model_parallel_size,
                 "expert_tensor_parallel_size": self.engine_config.expert_tensor_parallel_size,
-                "virtual_pipeline_model_parallel_size": self.engine_config.virtual_pipeline_model_parallel_size,
+                "virtual_pipeline_model_parallel_size": virtual_pipeline_model_parallel_size,
                 "context_parallel_size": self.engine_config.context_parallel_size,
                 "sequence_parallel": self.engine_config.sequence_parallel,
+                "overlap_p2p_comm": (
+                    virtual_pipeline_model_parallel_size is not None and virtual_pipeline_model_parallel_size > 1
+                ),
+                "batch_p2p_comm": False,
                 "variable_seq_lengths": True,
                 "attention_backend": AttnBackend.flash,
                 "moe_token_dispatcher_type": "alltoall",
@@ -287,7 +301,6 @@ class MegatronEngine(BaseEngine):
         from verl.utils.megatron_utils import McoreModuleWrapperConfig, make_megatron_module
         from verl.utils.model import print_model_size
 
-        self.is_value_model = self.model_config.model_type == "value_model"
         if self.engine_config.forward_only:
             wrap_with_ddp = False
         else:
@@ -299,9 +312,6 @@ class MegatronEngine(BaseEngine):
             use_distributed_optimizer=self.engine_config.use_distributed_optimizer,
             use_megatron_fsdp=self.engine_config.use_megatron_fsdp,
         )
-        if self.is_value_model:
-            self.model_config.hf_config.tie_word_embeddings = False
-
         override_ddp_config = self._resolve_override_ddp_config()
 
         module, updated_tf_config = make_megatron_module(
@@ -452,7 +462,7 @@ class MegatronEngine(BaseEngine):
             arch=self.model_config.architectures[0],
             hf_config=self.model_config.hf_config,
             param_dtype=self.param_dtype,
-            share_embeddings_and_output_weights=self.model_config.share_embeddings_and_output_weights,
+            share_embeddings_and_output_weights=self.share_embeddings_and_output_weights,
             processing_class=self.model_config.get_processor(),
             optimizer=self.optimizer,
             optimizer_scheduler=self.lr_scheduler,
@@ -511,6 +521,10 @@ class MegatronEngine(BaseEngine):
         Returns:
             grad_norm (float): The norm of the gradients before clipping or update.
         """
+        # forward_kl_topk leaves large fp32 vocab tensors until backward ends;
+        # free cached blocks before grad-norm all_reduce to reduce OOM on tight VRAM.
+        if getattr(self, "_distillation_use_topk_active", False):
+            get_torch_device().empty_cache()
         update_successful, grad_norm, num_zeros_in_grad = self.optimizer.step()
 
         if update_successful:
@@ -631,6 +645,7 @@ class MegatronEngine(BaseEngine):
             offload_megatron_optimizer(self.optimizer)
 
     def forward_backward_batch(self, data: TensorDict, loss_function: Callable, forward_only=False) -> Any:
+        self._distillation_use_topk_active = tu.get_non_tensor_data(data, key="distillation_use_topk", default=False)
         tu.assign_non_tensor(data, sp_size=self.engine_config.context_parallel_size)
 
         # compute num_tokens in global batch for loss normalization
@@ -640,6 +655,16 @@ class MegatronEngine(BaseEngine):
         )
         tu.assign_non_tensor(data, batch_num_tokens=batch_num_tokens.item())
         tu.assign_non_tensor(data, dp_size=self.get_data_parallel_size())
+
+        # BSHD path only: pad every micro-batch to the mini-batch's global max seq_len so the
+        # padded `s_q` is shared -> cuDNN plan built once per shape. Raw (unaligned)
+        # max; TP/CP/FP8 alignment is applied inside preprocess_bshd_engine.
+        pad_bshd_to_minibatch_max = self.engine_config.pad_bshd_to_minibatch_max
+        global_max_seqlen = None
+        if pad_bshd_to_minibatch_max and not self.engine_config.use_remove_padding and "input_ids" in data.keys():
+            input_ids_for_max = data["input_ids"]
+            if input_ids_for_max.is_nested:
+                global_max_seqlen = int(input_ids_for_max.offsets().diff().max().item())
 
         vpp_size = mpu.get_virtual_pipeline_model_parallel_world_size()
         if vpp_size is not None and vpp_size > 1:
@@ -666,6 +691,8 @@ class MegatronEngine(BaseEngine):
 
         for micro_batch in micro_batches:
             tu.assign_non_tensor(micro_batch, num_micro_batch=n_micro_batch)
+            if global_max_seqlen is not None:
+                tu.assign_non_tensor(micro_batch, forced_max_seqlen=global_max_seqlen)
 
         forward_backward_func = get_forward_backward_func()
 
@@ -841,6 +868,58 @@ class MegatronEngineWithLMHead(MegatronEngine):
     def prepare_model_outputs(self, output: dict, data: TensorDict):
         return output
 
+    def _lm_head_logits_processor(
+        self,
+        logits,
+        label,
+        temperature,
+        *,
+        calculate_sum_pi_squared: bool,
+        calculate_entropy: bool,
+        distillation_use_topk: bool,
+        distillation_only: bool,
+        logits_processor_func: Callable,
+        batch: TensorDict,
+        data_format: str,
+    ):
+        assert logits.shape[:2] == label.shape[:2]
+        # avoid non-positive temperature such as padding
+        temperature[temperature <= 0] = 1e-8
+        assert torch.all(temperature > 0).item(), f"temperature tensor must be positive. Got {temperature}"
+        logits.div_(temperature.unsqueeze(dim=-1).to(logits.dtype))
+        ret = {}
+        # sum_pi_squared is non-destructive — must run before vocab_parallel_entropy.
+        if calculate_sum_pi_squared:
+            ret["sum_pi_squared"] = vocab_parallel_sum_pi_squared(logits)
+        if calculate_entropy:
+            logits_bak = logits.clone()
+            # # disable the hint until the fused_kernel is optimized for triton>=3.3
+            # if torch.distributed.get_rank() == 0:
+            #     logger.warning_once(
+            #         "For memory-efficient computation, enable fused kernels via "
+            #         "`actor_rollout_ref.model.use_fused_kernels=True`. "
+            #         "The current `clone()` operation ensures correctness but increases memory usage."
+            #     )
+            if self.engine_config.entropy_from_logits_with_chunking:
+                entropy = vocab_parallel_entropy_with_chunking(
+                    logits,
+                    chunk_size=self.engine_config.entropy_from_logits_chunk_size,
+                )
+            else:
+                entropy = vocab_parallel_entropy(logits)
+
+            ret["entropy"] = entropy
+        else:
+            logits_bak = logits
+
+        # logits_processor_func return tensors with shape (1, total_nnz/cp_size)
+        if distillation_use_topk:
+            ret.update(logits_processor_func(student_logits=logits_bak, data=batch, data_format=data_format))
+        if not distillation_only:
+            ret["log_probs"] = vocab_parallel_log_probs_from_logits(logits_bak, label)
+
+        return ret
+
     def forward_step(
         self, batch_iter: Iterator[TensorDict], model, logits_processor_func, postprocess_micro_batch_func
     ):
@@ -862,6 +941,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
         calculate_entropy = tu.get_non_tensor_data(batch, key="calculate_entropy", default=False)
         calculate_sum_pi_squared = tu.get_non_tensor_data(batch, key="calculate_sum_pi_squared", default=False)
         distillation_use_topk = tu.get_non_tensor_data(batch, key="distillation_use_topk", default=False)
+        distillation_only = tu.get_non_tensor_data(batch, key="distillation_only", default=False)
 
         if calculate_sum_pi_squared and use_fused_kernels:
             raise NotImplementedError(
@@ -939,43 +1019,16 @@ class MegatronEngineWithLMHead(MegatronEngine):
             forward_fn = get_mcore_engine_forward_fn(self.model_config.hf_config)
             data_format = "thd" if self.engine_config.use_remove_padding else "bshd"
 
-            def logits_processor(logits, label, temperature):
-                assert logits.shape[:2] == label.shape[:2]
-                # avoid non-positive temperature such as padding
-                temperature[temperature <= 0] = 1e-8
-                assert torch.all(temperature > 0).item(), f"temperature tensor must be positive. Got {temperature}"
-                logits.div_(temperature.unsqueeze(dim=-1).to(logits.dtype))
-                ret = {}
-                # sum_pi_squared is non-destructive — must run before vocab_parallel_entropy.
-                if calculate_sum_pi_squared:
-                    ret["sum_pi_squared"] = vocab_parallel_sum_pi_squared(logits)
-                if calculate_entropy:
-                    logits_bak = logits.clone()
-                    # # disable the hint until the fused_kernel is optimized for triton>=3.3
-                    # if torch.distributed.get_rank() == 0:
-                    #     logger.warning_once(
-                    #         "For memory-efficient computation, enable fused kernels via "
-                    #         "`actor_rollout_ref.model.use_fused_kernels=True`. "
-                    #         "The current `clone()` operation ensures correctness but increases memory usage."
-                    #     )
-                    if self.engine_config.entropy_from_logits_with_chunking:
-                        entropy = vocab_parallel_entropy_with_chunking(
-                            logits,
-                            chunk_size=self.engine_config.entropy_from_logits_chunk_size,
-                        )
-                    else:
-                        entropy = vocab_parallel_entropy(logits)
-
-                    ret["entropy"] = entropy
-                else:
-                    logits_bak = logits
-
-                # logits_processor_func return tensors with shape (1, total_nnz/cp_size)
-                if distillation_use_topk:
-                    ret.update(logits_processor_func(student_logits=logits_bak, data=batch, data_format=data_format))
-                log_probs = vocab_parallel_log_probs_from_logits(logits_bak, label)
-                ret["log_probs"] = log_probs
-                return ret
+            logits_processor = partial(
+                self._lm_head_logits_processor,
+                calculate_sum_pi_squared=calculate_sum_pi_squared,
+                calculate_entropy=calculate_entropy,
+                distillation_use_topk=distillation_use_topk,
+                distillation_only=distillation_only,
+                logits_processor_func=logits_processor_func,
+                batch=batch,
+                data_format=data_format,
+            )
 
             response_attention_mask = None
             if attention_mask is not None and not loss_mask.is_nested:
@@ -998,6 +1051,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 data_format=data_format,
                 mtp_enable_train=self.model_config.mtp.enable and self.model_config.mtp.enable_train,
                 local_cp_size=local_cp_size,
+                forced_max_seqlen=tu.get_non_tensor_data(data=batch, key="forced_max_seqlen", default=None),
             )
 
         # Router replay: record routing decisions for R2 mode
@@ -1027,6 +1081,29 @@ class MegatronEngineWithLMHead(MegatronEngine):
             # scale loss by num_micro_batch because megatron will scale loss
             # by n_micro_batch inside pp schedule
             scaled_loss = loss * data["num_micro_batch"]
+            if self.tf_config.calculate_per_token_loss and not forward_only:
+                # verl losses are already normalized over the global DP batch. MCore's
+                # legacy two-item loss callback still multiplies by CP, while per-token
+                # mode disables DDP's usual 1/(DP*CP) gradient pre-scaling. Compensate
+                # for that combined reduction until the callback returns MCore's
+                # three-item (loss sum, token count, metrics) contract.
+                num_moe_experts = getattr(self.tf_config, "num_moe_experts", None)
+                has_moe_aux_loss = bool(num_moe_experts) and (
+                    bool(getattr(self.tf_config, "moe_aux_loss_coeff", 0.0))
+                    or bool(getattr(self.tf_config, "moe_z_loss_coeff", None))
+                )
+                has_auxiliary_loss = (
+                    has_moe_aux_loss
+                    or bool(getattr(self.tf_config, "mtp_num_layers", None))
+                    or getattr(self.tf_config, "experimental_attention_variant_loss_scale_func", None) is not None
+                    or getattr(self.tf_config, "experimental_attention_variant", None) == "dsa"
+                )
+                # Auxiliary-loss autograd scalers bypass scaled_loss, and dynamic CP
+                # uses per-microbatch groups. Preserve their existing behavior until
+                # verl adopts the three-item callback that normalizes every gradient.
+                if not self.engine_config.dynamic_context_parallel and not has_auxiliary_loss:
+                    dp_cp_world_size = mpu.get_data_parallel_world_size(with_context_parallel=True)
+                    scaled_loss /= dp_cp_world_size
         else:
             assert forward_only, "forward_only must be True when loss_function is None"
             loss = torch.tensor(1.0, device=device)
@@ -1075,6 +1152,7 @@ class MegatronEngineWithValueHead(MegatronEngineWithLMHead):
             vision_model=hasattr(self.model_config.hf_config, "vision_config"),
             pad_token_id=self.model_config.tokenizer.pad_token_id,
             data_format="thd" if self.engine_config.use_remove_padding else "bshd",
+            forced_max_seqlen=tu.get_non_tensor_data(data=batch, key="forced_max_seqlen", default=None),
         )
 
         return output, partial(postprocess_micro_batch_func, data=batch)

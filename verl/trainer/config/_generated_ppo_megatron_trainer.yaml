@@ -63,8 +63,9 @@ actor_rollout_ref:
         attention_backend: flash
       override_mcore_model_config: {}
       use_mbridge: true
-      vanilla_mbridge: true
+      vanilla_mbridge: false
       use_remove_padding: true
+      pad_bshd_to_minibatch_max: true
       use_megatron_fsdp: false
       forward_only: false
       dtype: bfloat16
@@ -249,8 +250,9 @@ actor_rollout_ref:
       override_transformer_config: ${oc.select:actor_rollout_ref.actor.megatron.override_transformer_config,{}}
       override_mcore_model_config: {}
       use_mbridge: ${oc.select:actor_rollout_ref.actor.megatron.use_mbridge,False}
-      vanilla_mbridge: ${oc.select:actor_rollout_ref.actor.megatron.vanilla_mbridge,True}
+      vanilla_mbridge: ${oc.select:actor_rollout_ref.actor.megatron.vanilla_mbridge,False}
       use_remove_padding: ${oc.select:actor_rollout_ref.actor.megatron.use_remove_padding,True}
+      pad_bshd_to_minibatch_max: true
       use_megatron_fsdp: false
       forward_only: true
       dtype: bfloat16
@@ -571,8 +573,9 @@ critic:
       attention_backend: flash
     override_mcore_model_config: {}
     use_mbridge: true
-    vanilla_mbridge: true
+    vanilla_mbridge: false
     use_remove_padding: true
+    pad_bshd_to_minibatch_max: true
     use_megatron_fsdp: false
     forward_only: false
     dtype: bfloat16
@@ -606,6 +609,7 @@ critic:
   data_loader_seed: ${oc.select:actor_rollout_ref.actor.data_loader_seed,null}
   cliprange_value: 0.5
   loss_agg_mode: ${oc.select:actor_rollout_ref.actor.loss_agg_mode,token-mean}
+  loss_scale_factor: ${oc.select:actor_rollout_ref.actor.loss_scale_factor,null}
   checkpoint:
     _target_: verl.workers.config.McoreCheckpointConfig
     save_contents:
@@ -932,7 +936,7 @@ trainer:
     colocate_async:
       num_warmup_batches: 1
     separate_async:
-      num_warmup_batches: 4
+      num_warmup_batches: 1
       parameter_sync_step: 4
     sampler:
       max_off_policy_threshold: 8

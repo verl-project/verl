@@ -357,15 +357,20 @@ class vLLMColocateWorkerExtension:
 
     def _get_zmq_handle(self) -> str:
         """Get ZMQ handle for communication.
+
         Uses Ray job id + replica_rank + rollout-local rank to match the sender
         side and avoid cross-job collisions on shared hosts.
+        In PD mode, each engine actor's local ranks start at 0; the optional
+        VERL_ZMQ_BASE_TRAINER_RANK offset maps them back to trainer ranks.
         """
         replica_rank = os.environ.get("VERL_REPLICA_RANK", "0")
         job_id = os.environ.get("VERL_RAY_JOB_ID", "0")
         vllm_config = getattr(self.model_runner, "vllm_config", None)
         parallel_config = getattr(vllm_config, "parallel_config", None)
         local_rank = _resolve_vllm_weight_sync_local_rank(self.local_rank, parallel_config)
-        return f"ipc:///tmp/rl-colocate-zmq-{job_id}-replica-{replica_rank}-rank-{local_rank}.sock"
+        trainer_rank_base = os.environ.get("VERL_ZMQ_BASE_TRAINER_RANK")
+        trainer_rank = int(trainer_rank_base) + local_rank if trainer_rank_base is not None else local_rank
+        return f"ipc:///tmp/rl-colocate-zmq-{job_id}-replica-{replica_rank}-rank-{trainer_rank}.sock"
 
 
 class SuppressSignalInThread:
