@@ -180,6 +180,9 @@ def test_legacy_checkpoint_methods_round_trip_controller(tmp_path):
 
 
 def _load_v1_trainer_base():
+    module_names = ("transfer_queue", "verl.trainer.ppo.v1.trainer_base")
+    missing = object()
+    previous_modules = {name: sys.modules.get(name, missing) for name in module_names}
     transfer_queue = types.ModuleType("transfer_queue")
 
     class KVBatchMeta:
@@ -191,7 +194,14 @@ def _load_v1_trainer_base():
     transfer_queue.async_kv_put = lambda *args, **kwargs: None
     transfer_queue.async_kv_batch_put = lambda *args, **kwargs: None
     sys.modules.setdefault("transfer_queue", transfer_queue)
-    from verl.trainer.ppo.v1.trainer_base import PPOTrainer
+    try:
+        from verl.trainer.ppo.v1.trainer_base import PPOTrainer
+    finally:
+        for module_name, previous_module in previous_modules.items():
+            if previous_module is missing:
+                sys.modules.pop(module_name, None)
+            else:
+                sys.modules[module_name] = previous_module
 
     return PPOTrainer
 
@@ -207,6 +217,17 @@ def test_v1_checkpoint_methods_round_trip_controller(tmp_path):
     resumed = _fake_trainer(tmp_path, checkpoint)
     PPOTrainer._load_checkpoint(resumed)
     assert resumed.kl_ctrl_in_reward.value == pytest.approx(trainer.kl_ctrl_in_reward.value)
+
+
+def test_v1_loader_restores_module_cache(monkeypatch):
+    module_names = ("transfer_queue", "verl.trainer.ppo.v1.trainer_base")
+    for module_name in module_names:
+        monkeypatch.delitem(sys.modules, module_name, raising=False)
+
+    _load_v1_trainer_base()
+
+    for module_name in module_names:
+        assert module_name not in sys.modules
 
 
 class _FakeRemoteMethod:
