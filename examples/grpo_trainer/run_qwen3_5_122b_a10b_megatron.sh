@@ -13,7 +13,7 @@
 #   - 4 nodes, 16 trainer devices per node
 #   - Additional packages on base image(quay.io/ascend/verl:verl-8.5.2-a3-ubuntu22.04-py3.11-qwen3-5):
 #       pip install viztracer flash-linear-attention nvidia-modelopt nvidia-ml-py nvidia-resiliency-ext megatron-energon
-#   - Megatron-LM==0.16.1
+#   - Megatron-LM==0.16.0
 #   - MindSpeed==0.16.0
 #   - Megatron-Bridge==de93536e
 #
@@ -98,7 +98,7 @@ case "${DEVICE}" in
         PP=${PP:-2}
         EP=${EP:-8}
         GEN_TP=${GEN_TP:-8}
-        n_devices_per_node=${n_devices_per_node:-8}
+        n_devices_per_node=${NDEVICES_PER_NODE:-8}
         rollout_gpu_memory_utilization=${rollout_gpu_memory_utilization:-0.66}
         rollout_log_prob_micro_batch_size_per_gpu=${rollout_log_prob_micro_batch_size_per_gpu:-1}
         ref_log_prob_micro_batch_size_per_gpu=${ref_log_prob_micro_batch_size_per_gpu:-1}
@@ -108,7 +108,7 @@ case "${DEVICE}" in
         PP=${PP:-4}
         EP=${EP:-16}
         GEN_TP=${GEN_TP:-16}
-        n_devices_per_node=${n_devices_per_node:-16}
+        n_devices_per_node=${NDEVICES_PER_NODE:-16}
         rollout_gpu_memory_utilization=${rollout_gpu_memory_utilization:-0.6}
         rollout_log_prob_micro_batch_size_per_gpu=${rollout_log_prob_micro_batch_size_per_gpu:-4}
         ref_log_prob_micro_batch_size_per_gpu=${ref_log_prob_micro_batch_size_per_gpu:-4}
@@ -244,6 +244,9 @@ case "${DEVICE}" in
             +actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn=True
             +actor_rollout_ref.actor.megatron.override_transformer_config.moe_token_dispatcher_type=alltoall
             +actor_rollout_ref.actor.megatron.override_transformer_config.use_naive_l2norm=True
+        )
+        ROLLOUT+=(
+            +actor_rollout_ref.rollout.engine_kwargs.vllm.mm_processor_cache_gb=0
         )
         ;;
 esac

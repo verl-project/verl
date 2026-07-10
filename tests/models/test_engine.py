@@ -114,6 +114,7 @@ def create_training_config(model_type, strategy, device_count, model):
         engine_config = McoreEngineConfig(
             forward_only=False,
             use_mbridge=True,
+            vanilla_mbridge=os.environ.get("VANILLA_MBRIDGE", "False").lower() == "true",
             tensor_model_parallel_size=tp,
             pipeline_model_parallel_size=pp,
             context_parallel_size=cp,
@@ -408,6 +409,7 @@ def _worker(rank: int, world_size: int, rendezvous_file: str, strategy: str, mod
         engine_config = McoreEngineConfig(
             forward_only=False,
             use_mbridge=True,
+            vanilla_mbridge=os.environ.get("VANILLA_MBRIDGE", "False").lower() == "true",
             tensor_model_parallel_size=2,
             pipeline_model_parallel_size=2,
             context_parallel_size=1,

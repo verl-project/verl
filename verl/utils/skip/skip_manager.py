@@ -66,8 +66,12 @@ class SkipManager:
     @classmethod
     def _should_bypass_for_validation(cls, args, kwargs) -> bool:
         prompts = cls._get_prompts_batch(args, kwargs)
+        if prompts is None and len(args) > 1:
+            return cls._should_bypass_for_validation_tensordict(args, kwargs)
         if prompts is None:
             return False
+        if hasattr(prompts, "non_tensor_data"):
+            return cls._should_bypass_for_validation_tensordict(args, kwargs)
         meta_info = getattr(prompts, "meta_info", None) or {}
         return bool(meta_info.get("validate", False))
 
@@ -119,3 +123,66 @@ class SkipManager:
             return sync_wrapper
 
         return decorator
+
+    @classmethod
+    def annotate_tq(cls, role: str, phase: str):
+        """V1 TransferQueue-based skip decorator, unified across both phases.
+
+        V1's split architecture separates "submit prompts" (``_add_batch_to_generate``)
+        from "sample trajectories" (``ReplayBuffer.sample``).  This decorator handles
+        both, selected by *phase*:
+
+        - ``phase="submit"``: decorate ``_add_batch_to_generate``.  The method must be
+          split into ``_next_train_batch`` (dataloader + uid) and ``_submit_batch_to_rollout``
+          (tag registration + generate_sequences).  The decorator always calls
+          ``_next_train_batch`` first (keeping the dataloader aligned even on cache-hit
+          steps), then checks ``meet_precondition``.  On cache-hit it injects cached data
+          into the TQ and returns; on cache-miss it calls ``_submit_batch_to_rollout``.
+
+        - ``phase="sample"``: decorate ``ReplayBuffer.sample``.  After the original
+          ``sample`` runs, if the skip instance says to save, persist the result to disk
+          (phase one / cache-miss).
+        """
+
+        def decorator(func: Callable) -> Callable:
+            @functools.wraps(func)
+            def wrapper(self, *args, **kwargs):
+                skip_instance = cls.skip_instances.get(role)
+                if skip_instance is None or not skip_instance.is_enabled():
+                    return func(self, *args, **kwargs)
+                step = cls.step
+                if step not in skip_instance.steps:
+                    return func(self, *args, **kwargs)
+
+                if phase == "submit":
+                    # Always prepare batch (keeps dataloader aligned on cache-hit steps)
+                    batch = self._next_train_batch()
+                    if skip_instance.maybe_load_and_inject(step, list(batch["uid"])):
+                        return
+                    self._submit_batch_to_rollout(batch)
+                    return
+
+                # phase == "sample": post-save after original sample runs
+                result = func(self, *args, **kwargs)
+                # ReplayBuffer.sample returns (batch, off_policy_metrics)
+                batch = result[0] if isinstance(result, tuple) else result
+                if skip_instance.should_save(step, batch.partition_id):
+                    skip_instance.prepare_data(step=step, batch=batch, global_steps=step)
+                return result
+
+            return wrapper
+
+        return decorator
+
+    @staticmethod
+    def _should_bypass_for_validation_tensordict(args, kwargs) -> bool:
+        """Check ``validate`` flag in TensorDict's non_tensor_data for V1 path."""
+        prompts = kwargs.get("prompts", None)
+        if prompts is None and len(args) > 1:
+            prompts = args[1]
+        if prompts is None:
+            return False
+        try:
+            return bool(getattr(prompts, "non_tensor_data", {}).get("validate", False))
+        except Exception:
+            return False

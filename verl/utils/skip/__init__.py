@@ -16,7 +16,14 @@ from .base_skip import BaseSkip
 from .config import SkipManagerConfig
 
 # register skip
-from .rollout_skip import AsyncRolloutSkip, RolloutSkip
+from .rollout_skip import AsyncRolloutSkip, RolloutSkip, RolloutTqSkip
 from .skip_manager import SkipManager
 
-__all__ = ["BaseSkip", "SkipManager", "SkipManagerConfig", "RolloutSkip", "AsyncRolloutSkip"]
+__all__ = [
+    "BaseSkip",
+    "SkipManager",
+    "SkipManagerConfig",
+    "RolloutSkip",
+    "RolloutTqSkip",
+    "AsyncRolloutSkip",
+]

@@ -91,8 +91,8 @@ RM_TP=${RM_TP:-$TRAIN_TP}
 RM_EP=${RM_EP:-$COMMON_EP}
 RM_ETP=${RM_ETP:-$COMMON_ETP}
 
-# install mbridge
-# pip3 install git+https://github.com/ISEEKYAN/mbridge
+# install Megatron-Bridge
+# pip3 install git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git
 USE_MBRIDGE=True
 USE_DIST_CKPT=False
 

@@ -39,6 +39,7 @@ on:
   schedule:
     - cron: "0 17 * * *"
     - cron: "0 18 * * *"
+    - cron: "0 19 * * *"
 
 # Declare permissions just read content.
 permissions:
@@ -552,7 +553,7 @@ jobs:
   
   # Test grpo qwen3-30b veomni fsdp
   nightlyCI_grpo-qwen3-30b-veomni-fsdp_ascend:
-    if: github.repository_owner == 'verl-project'
+    if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 19 * * *' }}
     runs-on: linux-aarch64-a3-16
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
@@ -601,3 +602,42 @@ jobs:
         run: |
           ray stop --force
           bash tests/special_npu/nightly_ci_ascend/run_grpo_qwen3_30b_veomni_fsdp.sh
+
+  # Test ppo qwen3-8b fsdp vllm
+  nightlyCI_gspo-qwen3-8b-fsdp2-vllm_ascend:
+    if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 19 * * *' }}
+    runs-on: linux-aarch64-a3-16
+    timeout-minutes: 180 # Increase this timeout value as needed
+    container:
+      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:verl-9.0.0-a3-ubuntu22.04-py3.11-latest
+      options: >-
+        --shm-size 16g
+    env:
+      HF_ENDPOINT: "https://hf-mirror.com"
+      HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+    steps:
+      - name: Check npu and CANN info
+        run: |
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+          npu-smi info
+      - name: Check initial pip list from image
+        run: |
+          pip list
+      - name: Checkout verl-project/verl repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          clean: true
+      - name: Check final pip list
+        run: |
+          pip list
+      - name: Prepare weights
+        run: |
+          ln -s /root/.cache/models ~/models
+      - name: Prepare GSM8K dataset
+        run: |
+          python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
+      - name: Running nightlyCI_ppo-qwen3-8b-fsdp-vllm_ascend
+        run: |
+          ray stop --force
+          bash tests/special_npu/nightly_ci_ascend/run_gspo_qwen3_8b_fsdp2_npu.sh

@@ -69,7 +69,7 @@ def get_model(
         mpu.get_pipeline_model_parallel_world_size() > 1
         and mpu.get_virtual_pipeline_model_parallel_world_size() is not None
     ):
-        assert model_type != ModelType.encoder_and_decoder, (
+        assert model_type != getattr(ModelType, "encoder_and_decoder", None), (
             "Interleaved schedule not supported for model with both encoder and decoder"
         )
         model = []
@@ -89,8 +89,10 @@ def get_model(
         post_process = mpu.is_pipeline_last_stage()
         add_encoder = True
         add_decoder = True
-        assert model_type != ModelType.encoder_and_decoder, "Model type encoder_and_decoder is not supported"
-        if model_type == ModelType.encoder_and_decoder:
+        assert model_type != getattr(ModelType, "encoder_and_decoder", None), (
+            "Model type encoder_and_decoder is not supported"
+        )
+        if model_type == getattr(ModelType, "encoder_and_decoder", None):
             if mpu.get_pipeline_model_parallel_world_size() > 1:
                 assert mpu.get_pipeline_model_parallel_split_rank() is not None, (
                     "Split rank needs to be specified for model with both encoder and decoder"
@@ -494,6 +496,31 @@ def _can_safely_resize_storage(tensor: torch.Tensor) -> bool:
     )
 
 
+def _clear_te_fp8_weight_workspaces(model_chunk):
+    """Clear cached Transformer-Engine FP8 weight workspaces on a model chunk.
+
+    When training with an FP8 param dtype (or loading a native-FP8 checkpoint),
+    Transformer-Engine ``Linear`` / ``GroupedLinear`` layers cache quantized
+    (``Float8Tensor`` / ``Float8BlockwiseQTensor``) copies of their weights in
+    ``module._fp8_workspaces`` (keyed ``weight``, ``weight0..weightN``). These
+    caches are plain tensors, not ``nn.Parameter``s or registered buffers, so the
+    parameter/buffer offloading in :func:`offload_megatron_model_to_cpu` never
+    frees them and they stay resident on the GPU -- for large MoE checkpoints this
+    can be tens of GiB per rank that defeats the offload. Transformer-Engine lazily
+    rebuilds the workspace on the next forward, so dropping it here is safe. This is
+    a no-op for bf16/fp16 models (the attribute is absent or empty).
+
+    Returns the number of cached workspace entries cleared.
+    """
+    cleared = 0
+    for submodule in model_chunk.modules():
+        workspaces = getattr(submodule, "_fp8_workspaces", None)
+        if isinstance(workspaces, dict) and workspaces:
+            cleared += len(workspaces)
+            workspaces.clear()
+    return cleared
+
+
 @torch.no_grad()
 def offload_megatron_model_to_cpu(models):
     """
@@ -573,6 +600,12 @@ def offload_megatron_model_to_cpu(models):
                     param.grad = param.grad.to("cpu")
                     if _can_safely_resize_storage(old_grad):
                         old_grad.storage().resize_(0)
+
+        # Drop Transformer-Engine FP8 weight-workspace caches, which hold quantized
+        # copies of the weights on GPU and are not covered by the parameter offload above.
+        cleared = _clear_te_fp8_weight_workspaces(model_chunk)
+        if cleared:
+            logger.debug("Cleared %d TE FP8 weight workspaces on offload", cleared)
 
     gc.collect()
     get_torch_device().empty_cache()

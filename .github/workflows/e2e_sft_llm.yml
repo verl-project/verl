@@ -108,6 +108,10 @@ jobs:
           pip3 install --no-deps -e .
           pip3 install veomni==0.1.11 --ignore-requires-python --no-deps --index-url https://pypi.org/simple/
           pip3 install transformers==5.3.0
+          pip3 uninstall -y mbridge
+          pip3 install "nvidia-modelopt>=0.37.0"
+          pip3 install git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@e2cfe7e --ignore-requires-python --no-deps --no-build-isolation
+          pip3 install git+https://github.com/NVIDIA/Megatron-LM.git@0823c73 --ignore-requires-python --no-deps --no-build-isolation
       - name: Check final pip list
         run: |
           pip3 list

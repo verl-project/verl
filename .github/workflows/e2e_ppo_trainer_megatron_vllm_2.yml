@@ -124,9 +124,10 @@ jobs:
           pip3 install -r requirements-test.txt
           pip3 install -r requirements.txt
           pip3 install --no-deps -e .
-          pip3 install git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@0a21da4 --no-deps --no-build-isolation
-          pip3 install git+https://github.com/NVIDIA/Megatron-LM.git@b2a8ec7 --no-deps --no-build-isolation
-          pip3 install "nvidia-modelopt[torch]>=0.37.0"
+          pip3 uninstall -y mbridge
+          pip3 install git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@e2cfe7e --ignore-requires-python --no-deps --no-build-isolation
+          pip3 install git+https://github.com/NVIDIA/Megatron-LM.git@0823c73 --ignore-requires-python --no-deps --no-build-isolation
+          pip3 install "nvidia-modelopt>=0.37.0"
       - name: Check final pip list
         run: |
           pip3 list

@@ -7,7 +7,7 @@ ARG TRL_VERSION=0.27.0
 ARG TRANSFORMER_ENGINE_VERSION=v2.15
 ARG FLASH_ATTENTION_VERSION=2.8.3
 ARG NSIGHT_VERSION=2025.6.1
-ARG MCORE_VERSION=core_v0.16.1
+ARG MCORE_VERSION=core_v0.18.0
 ARG VERL_VERSION=v0.7.1
 
 # =========================
@@ -75,6 +75,8 @@ RUN if [ "$(uname -m)" = "aarch64" ]; then \
     fi
 
 RUN pip install -U git+https://github.com/ISEEKYAN/mbridge.git@main
+
+RUN pip install --no-deps megatron-bridge==0.5.0
 
 RUN pip install --no-deps git+https://github.com/NVIDIA/Megatron-LM.git@${MCORE_VERSION}
 

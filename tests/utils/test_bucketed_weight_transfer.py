@@ -58,6 +58,67 @@ def _generate_weights(weight_specs, seed):
     return weights
 
 
+class _FakeSocket:
+    def __init__(self):
+        self.messages = []
+
+    def send_pyobj(self, message):
+        self.messages.append(message)
+
+    def recv(self):
+        return b""
+
+
+class _FakeTorchDevice:
+    def synchronize(self):
+        pass
+
+
+def test_sender_accepts_strided_tensor(monkeypatch):
+    from verl.workers.rollout.vllm_rollout import bucketed_weight_transfer
+
+    base = torch.arange(2 * 3 * 4, dtype=torch.float32).reshape(2, 3, 4)
+    weight = base[:, 0, :]
+    buffer = torch.empty(weight.nbytes, dtype=torch.uint8)
+    socket = _FakeSocket()
+    sender = bucketed_weight_transfer.BucketedWeightSender(
+        zmq_handle="ipc:///tmp/test-bwt-unused.sock",
+        bucket_size_mb=1,
+        use_shm=True,
+    )
+
+    assert not weight.is_contiguous()
+    with pytest.raises(RuntimeError):
+        weight.view(-1).view(torch.uint8)
+
+    monkeypatch.setattr(sender, "_init_socket", lambda: setattr(sender, "socket", socket))
+    monkeypatch.setattr(sender, "_init_buffer", lambda: setattr(sender, "buffer", buffer))
+    monkeypatch.setattr(sender, "_cleanup", lambda: None)
+    monkeypatch.setattr(bucketed_weight_transfer, "get_torch_device", lambda: _FakeTorchDevice())
+
+    asyncio.run(sender.async_send_weights(iter([("strided", weight)])))
+
+    recovered = buffer.view(dtype=weight.dtype).view(weight.shape)
+
+    assert socket.messages == [
+        {
+            "bucket_meta": {
+                "strided": {
+                    "name": "strided",
+                    "shape": weight.shape,
+                    "dtype": weight.dtype,
+                    "offset": 0,
+                    "handle": None,
+                }
+            },
+            "is_last": True,
+        }
+    ]
+    assert buffer.dtype == torch.uint8
+    assert buffer.numel() == weight.nbytes
+    assert torch.equal(recovered, weight)
+
+
 # ---------------------------------------------------------------------------
 # Process entry points (must be module-level for pickling with spawn)
 # ---------------------------------------------------------------------------
