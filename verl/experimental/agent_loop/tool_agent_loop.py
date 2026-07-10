@@ -409,13 +409,18 @@ class ToolAgentLoop(AgentLoopBase):
                 OpenAIFunctionParsedSchema(name=tool_call.name, arguments=tool_call.arguments)
             )
             if has_decode_error:
-                raise ValueError(
+                logger.warning(
                     f"Invalid tool call arguments for '{tool_call.name}': expected a JSON object string, "
-                    f"got {tool_call.arguments!r}"
+                    f"got {tool_call.arguments!r}; keeping the raw arguments in the assistant message. "
+                    f"Note: re-applying the chat template to this message may render differently from "
+                    f"the model's actual generation because the tool call arguments are in invalid format."
                 )
+                function_dict = {"name": tool_call.name, "arguments": tool_call.arguments}
+            else:
+                function_dict = function_call.model_dump()
             tool_call_message = {
                 "type": "function",
-                "function": function_call.model_dump(),
+                "function": function_dict,
             }
             if tool_call.tool_call_id is not None:
                 tool_call_message["id"] = tool_call.tool_call_id
