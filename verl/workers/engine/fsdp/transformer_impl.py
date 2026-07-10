@@ -245,8 +245,7 @@ class FSDPEngine(BaseEngine):
         # I/O in custom models (e.g. ApertusForCausalLM) that override _load_pretrained_model.
         is_fsdp2 = self.engine_config.strategy == "fsdp2"
         if is_fsdp2:
-            _coord = self.device_mesh.get_coordinate() if self.device_mesh is not None else None
-            _is_fsdp2_src = (_coord[-1] == 0) if _coord is not None else (torch.distributed.get_rank() == 0)
+            _is_fsdp2_src = torch.distributed.get_rank() == 0
 
         # For fsdp1: keep original behaviour (meta tensors when tie_word_embeddings is False)
         use_meta_tensor = not is_fsdp2 and (not self.model_config.hf_config.tie_word_embeddings)
@@ -254,10 +253,9 @@ class FSDPEngine(BaseEngine):
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
+            from accelerate import init_empty_weights
 
             if self.model_config.model_type == "language_model":
-                from accelerate import init_empty_weights
-
                 auto_class = get_hf_auto_model_class(hf_config=self.model_config.hf_config)
 
                 if is_fsdp2 and not _is_fsdp2_src:
@@ -295,13 +293,56 @@ class FSDPEngine(BaseEngine):
                 self.model_config.hf_config.classifier_dropout = 0.0
                 self.model_config.hf_config.hidden_dropout = "0"
                 self.model_config.hf_config.summary_dropout_prob = 0.0
-                with init_context():
-                    module = load_valuehead_model(
-                        local_path=self.model_config.local_path,
-                        torch_dtype=torch_dtype,
-                        model_config=self.model_config.hf_config,
-                        trust_remote_code=self.model_config.trust_remote_code,
-                    )
+
+                if is_fsdp2 and not _is_fsdp2_src:
+                    # Non-rank-0 for fsdp2: create model structure only.
+                    # Weights are broadcast from rank 0 via fsdp2_load_full_state_dict.
+                    # Receive a flag from rank 0 indicating which branch load_valuehead_model
+                    # took: 0 = AutoModelForTokenClassification, 1 = TRL AutoModelForCausalLMWithValueHead.
+                    logger.info("fsdp2 non-rank-0: creating value model structure from config (no file I/O)")
+                    use_trl = torch.tensor([0], dtype=torch.int32, device="cpu")
+                    torch.distributed.broadcast(use_trl, src=0)
+
+                    from transformers import AutoModelForTokenClassification
+
+                    if not use_trl.item():
+                        with init_empty_weights():
+                            module = AutoModelForTokenClassification.from_config(
+                                self.model_config.hf_config,
+                                trust_remote_code=self.model_config.trust_remote_code,
+                            )
+                    else:
+                        from transformers import AutoModelForCausalLM
+                        from trl import AutoModelForCausalLMWithValueHead
+
+                        from verl.utils.model import AutoModelForVision2Seq as _V2S
+                        from verl.utils.model import patch_valuehead_model
+
+                        base_cls = (
+                            _V2S
+                            if (_V2S is not None and type(self.model_config.hf_config) in _V2S._model_mapping.keys())
+                            else AutoModelForCausalLM
+                        )
+                        with init_empty_weights():
+                            ori_model = base_cls.from_config(
+                                self.model_config.hf_config,
+                                trust_remote_code=self.model_config.trust_remote_code,
+                            )
+                        module = AutoModelForCausalLMWithValueHead.from_pretrained(ori_model)
+                        patch_valuehead_model(module)
+                else:
+                    with init_context():
+                        module = load_valuehead_model(
+                            local_path=self.model_config.local_path,
+                            torch_dtype=torch_dtype,
+                            model_config=self.model_config.hf_config,
+                            trust_remote_code=self.model_config.trust_remote_code,
+                        )
+                    if is_fsdp2:
+                        # Rank 0: broadcast which branch load_valuehead_model took so that
+                        # non-rank-0 ranks can create the matching model structure.
+                        use_trl = torch.tensor([1 if hasattr(module, "v_head") else 0], dtype=torch.int32, device="cpu")
+                        torch.distributed.broadcast(use_trl, src=0)
 
             use_liger = self.model_config.use_liger
             # Apply Liger kernel; disable fused_linear_cross_entropy (conflicts with verl's forward patching)
