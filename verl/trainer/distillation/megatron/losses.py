@@ -291,7 +291,7 @@ def compute_forward_kl_topk(
     from megatron.core import parallel_state as mpu
 
     cp_size = mpu.get_context_parallel_world_size()
-    forced_max_seqlen = student_logits.shape[1] * cp_size if cp_size > 1 else None
+    forced_max_seqlen = student_logits.shape[1] * cp_size
 
     if data_format == "thd":
         teacher_topk_log_probs_cp_split, *_ = preprocess_thd_engine(teacher_topk_log_probs, pre_process=True)
