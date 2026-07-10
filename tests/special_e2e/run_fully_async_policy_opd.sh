@@ -237,7 +237,6 @@ TRAINER=(
     trainer.nnodes=1
     trainer.n_gpus_per_node=${N_GPUS_TRAINING}
     trainer.log_val_generations=10
-    +trainer.use_legacy_worker_impl=disable
     trainer.total_epochs=2
     trainer.test_freq=-1
 )

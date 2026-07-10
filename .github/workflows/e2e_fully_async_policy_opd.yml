@@ -49,7 +49,8 @@ env:
 
 jobs:
   setup:
-    if: github.repository_owner == 'verl-project'
+    # Disabled while TrainerV1 / unified Megatron worker paths are unavailable after TransferQueue removal.
+    if: false
     runs-on: ubuntu-latest
     outputs:
       runner-label: ${{ steps.create-runner.outputs.runner-label }}
@@ -65,6 +66,8 @@ jobs:
 
   # Test Multi-Teacher OPD with Megatron strategy
   e2e_fully_async_policy_opd_megatron:
+    # Disabled while TrainerV1 / unified Megatron worker paths are unavailable after TransferQueue removal.
+    if: false
     needs: setup
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 30
@@ -102,7 +105,7 @@ jobs:
   cleanup:
     runs-on: ubuntu-latest
     needs: [setup, e2e_fully_async_policy_opd_megatron]
-    if: always()
+    if: false
     steps:
       - id: destroy-runner
         uses: volcengine/vemlp-github-runner@v1

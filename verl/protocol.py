@@ -38,7 +38,6 @@ from torch.utils.data import DataLoader
 from verl.utils.device import get_device_id, get_torch_device
 from verl.utils.py_functional import list_of_dict_to_dict_of_list, union_two_dict
 from verl.utils.torch_functional import allgather_dict_tensors
-from verl.utils.transferqueue_utils import BatchMeta, KVBatchMeta
 
 __all__ = ["DataProto", "union_tensor_dict"]
 
@@ -1247,8 +1246,8 @@ class BatchData:
         assert BatchData(output_list).is_concatable()
     """
 
-    _CHUNKABLE_TYPES = (TensorDict, KVBatchMeta, BatchMeta)  # lazily extended with DataProto etc.
-    _CONCATABLE_TYPES = (TensorDict, KVBatchMeta, BatchMeta)
+    _CHUNKABLE_TYPES = (TensorDict,)  # lazily extended with DataProto etc.
+    _CONCATABLE_TYPES = (TensorDict,)
 
     def __init__(self, data):
         self._data = data
@@ -1279,12 +1278,6 @@ class BatchData:
 
             raw_chunks = chunk_tensordict(data, chunks)
             return tuple(contiguous(val).consolidate() for val in raw_chunks)
-        if isinstance(data, KVBatchMeta):
-            # early translate KVBatchMeta -> BatchMeta to prevent frequent
-            # controller communication during PUT/GET in each rank
-            from verl.utils.transferqueue_utils import kv_batch_meta2batch_meta
-
-            data = kv_batch_meta2batch_meta(data)
         # DataProto, DataProtoFuture, etc. all expose .chunk()
         return data.chunk(chunks=chunks)
 
@@ -1303,20 +1296,6 @@ class BatchData:
             from verl.utils.tensordict_utils import concat_tensordict
 
             return concat_tensordict(data)
-        if isinstance(sample, BatchMeta):
-            # handle extra_info merge manually
-            merged_extra_info = {}
-            for meta in data:
-                for k, v in meta.extra_info.items():
-                    merged_extra_info.setdefault(k, []).append(v)
-                meta.extra_info = {}
-
-            # translate BatchMeta -> KVBatchMeta
-            batch_meta = BatchMeta.concat(data)
-            batch_meta.extra_info = merged_extra_info
-            from verl.utils.transferqueue_utils import batch_meta2kv_batch_meta
-
-            return batch_meta2kv_batch_meta(batch_meta)
         # DataProto, etc. expose .concat() as classmethod / staticmethod
         return type(sample).concat(data)
 
@@ -1324,11 +1303,11 @@ class BatchData:
 
     @classmethod
     def _chunkable_types(cls):
-        return (DataProto, DataProtoFuture, TensorDict, KVBatchMeta, BatchMeta)
+        return (DataProto, DataProtoFuture, TensorDict)
 
     @classmethod
     def _concatable_types(cls):
-        return (DataProto, ray.ObjectRef, TensorDict, KVBatchMeta, BatchMeta)
+        return (DataProto, ray.ObjectRef, TensorDict)
 
 
 def all_gather_data_proto(data: DataProto, process_group):

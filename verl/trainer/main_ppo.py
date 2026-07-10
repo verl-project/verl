@@ -13,17 +13,15 @@
 # limitations under the License.
 import logging
 import os
-from pprint import pprint
 
 import hydra
 import ray
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import OmegaConf
 
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 from verl.trainer.ppo.utils import need_critic, need_reference_policy
 from verl.utils.config import validate_config
 from verl.utils.device import auto_set_device, is_cuda_available
-from verl.utils.import_utils import load_class_from_fqn
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -58,12 +56,6 @@ def run_ppo(config, task_runner_class) -> None:
         ray_init_kwargs = config.ray_kwargs.get("ray_init", {})
         runtime_env_kwargs = ray_init_kwargs.get("runtime_env", {})
 
-        if config.transfer_queue.enable:
-            # Add runtime environment variables for transfer queue
-            runtime_env_vars = runtime_env_kwargs.get("env_vars", {})
-            runtime_env_vars["TRANSFER_QUEUE_ENABLE"] = "1"
-            runtime_env_kwargs["env_vars"] = runtime_env_vars
-
         runtime_env = OmegaConf.merge(default_runtime_env, runtime_env_kwargs)
         ray_init_kwargs = OmegaConf.create({**ray_init_kwargs, "runtime_env": runtime_env})
         print(f"ray init kwargs: {ray_init_kwargs}")
@@ -95,61 +87,6 @@ def run_ppo(config, task_runner_class) -> None:
         ray.timeline(filename=timeline_json_file)
 
 
-@ray.remote
-class TaskRunnerV1:
-    """V1 TaskRunner for PPO training."""
-
-    def __init__(self):
-        self.config = None
-        self.trainer = None
-        self.agent_loop_manager = None
-
-    def init_agent_loop_manager(self):
-        """Initialize the agent loop manager to generate sequences.
-
-        NOTE: User can customize their own agent loop manager, the only requirement is:
-        1. implement `generate_sequences` method
-        2. put agent loop outputs into TransferQueue
-        """
-        from verl.trainer.ppo.v1 import AgentLoopManagerTQ
-
-        manager_class_fqn = self.config.actor_rollout_ref.rollout.get("agent", {}).get("agent_loop_manager_class")
-        if manager_class_fqn:
-            agent_loop_manager_cls = load_class_from_fqn(manager_class_fqn, "AgentLoopManager")
-        else:
-            agent_loop_manager_cls = AgentLoopManagerTQ
-
-        self.agent_loop_manager = agent_loop_manager_cls.create(
-            config=self.config,
-            llm_client=self.trainer.get_llm_client(),
-            teacher_client=self.trainer.get_teacher_client(),
-            reward_loop_worker_handles=self.trainer.get_reward_handles(),
-        )
-
-    def run(self, config: DictConfig):
-        """Run the PPO training process."""
-        import transfer_queue as tq
-
-        from verl.trainer.ppo.v1 import get_trainer_cls
-
-        trainer_cls = get_trainer_cls(config.trainer.v1.trainer_mode)
-
-        config.transfer_queue.enable = True
-        pprint(OmegaConf.to_container(config, resolve=True))
-        OmegaConf.resolve(config)
-        self.config = config
-
-        # initialize transfer queue
-        tq.init(config.transfer_queue)
-        try:
-            self.trainer = trainer_cls(config=config)
-            self.trainer.init()
-            self.init_agent_loop_manager()
-            self.trainer.fit(self.agent_loop_manager)
-        finally:
-            tq.close()
-
-
 @hydra.main(config_path="config", config_name="ppo_trainer", version_base=None)
 def main(config):
     """Main entry point for PPO training with Hydra configuration management.
@@ -167,16 +104,15 @@ def main(config):
         use_critic=need_critic(config),
     )
 
-    if config.trainer.use_v1:
-        run_ppo(config, task_runner_class=TaskRunnerV1)
-    else:
-        from verl.trainer.main_ppo_v0 import TaskRunner
-
-        logger.warning(
-            "Legacy trainer `main_ppo_v0.py` is deprecated, and wil be removed in v0.9.0."
-            "Please set `trainer.use_v1=True` in config to use V1 trainer."
+    if config.trainer.get("use_v1", False):
+        raise RuntimeError(
+            "TrainerV1 is disabled because it depends on TransferQueue. "
+            "Use RayPPOTrainer by setting trainer.use_v1=false."
         )
-        run_ppo(config, task_runner_class=TaskRunner)
+
+    from verl.trainer.main_ppo_v0 import TaskRunner
+
+    run_ppo(config, task_runner_class=TaskRunner)
 
 
 if __name__ == "__main__":

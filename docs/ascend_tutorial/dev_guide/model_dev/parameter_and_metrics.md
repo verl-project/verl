@@ -400,7 +400,6 @@ verl 通过层级化的 YAML 配置文件管理所有参数，涉及到的所有
 |--------|--------|------|
 | `actor_rollout_ref.hybrid_engine` | `true` | 是否使用混合引擎（训练推理共享权重） |
 | `actor_rollout_ref.nccl_timeout` | `600` | NCCL 通信超时（秒） |
-| `transfer_queue.enable` | `false` | 是否启用传输队列 |
 
 ---
 
