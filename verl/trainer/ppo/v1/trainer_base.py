@@ -318,6 +318,7 @@ class PPOTrainer(ABC):
         # (rather than _load_checkpoint) because it needs agent_loop_manager. No-op on a fresh start
         # or when the restored queue has no in-flight prompts. Runs before on_train_begin's warmup so
         # the older re-issued prompts are submitted (and thus prioritized) ahead of fresh ones.
+        print("[TQ-CKPT] fit(): agent_loop_manager set, calling _reissue_inflight_prompts()", flush=True)
         self._reissue_inflight_prompts()
 
         self.logger = Tracking(
@@ -698,7 +699,12 @@ class PPOTrainer(ABC):
                 working_dir = os.getcwd()
                 checkpoint_folder = os.path.join(working_dir, checkpoint_folder)
             global_step_folder = find_latest_ckpt_path(checkpoint_folder)  # None if no latest
+            print(
+                f"[TQ-CKPT] resume_mode=auto, checkpoint_folder={checkpoint_folder}, found={global_step_folder}",
+                flush=True,
+            )
             if global_step_folder is None:
+                print("[TQ-CKPT] Training from scratch (no latest ckpt found)", flush=True)
                 logger.info("Training from scratch")
                 return
         elif self.config.trainer.resume_mode == "resume_path":
@@ -713,6 +719,7 @@ class PPOTrainer(ABC):
 
         # set global step
         self.global_steps = int(global_step_folder.split("global_step_")[-1])
+        print(f"[TQ-CKPT] Resuming from {global_step_folder}, setting global step to {self.global_steps}", flush=True)
         logger.info(f"Resuming from {global_step_folder}, setting global step to {self.global_steps}")
 
         # 2. load actor checkpoint
@@ -742,11 +749,18 @@ class PPOTrainer(ABC):
         # (main_ppo.py), so the system is in a clean state here, satisfying load_checkpoint's
         # precondition. Older TransferQueue builds without save/load_checkpoint simply skip this; the
         # queue then starts empty and is repopulated by the usual warmup in on_train_begin.
+        print(
+            f"[TQ-CKPT] _load_checkpoint: trainer_mode={self.trainer_mode}, "
+            f"hasattr(tq,'load_checkpoint')={hasattr(tq, 'load_checkpoint')}, global_steps={self.global_steps}",
+            flush=True,
+        )
         if self.trainer_mode != "sync" and hasattr(tq, "load_checkpoint"):
             tq_ckpt_path = os.path.join(global_step_folder, "transfer_queue")
             if os.path.exists(tq_ckpt_path):
                 tq.load_checkpoint(tq_ckpt_path)
+                print(f"[TQ-CKPT] loaded TransferQueue state from {tq_ckpt_path}", flush=True)
             else:
+                print(f"[TQ-CKPT] NO TransferQueue state at {tq_ckpt_path}, in-flight prompts lost", flush=True)
                 logger.warning(f"Warning: No TransferQueue state found at {tq_ckpt_path}, in-flight prompts are lost")
 
     def _reissue_inflight_prompts(self, partition_id: str = "train") -> int:
@@ -764,17 +778,33 @@ class PPOTrainer(ABC):
         Called unconditionally from fit(); a no-op for sync mode or an empty/fresh queue.
         """
         if self.trainer_mode == "sync":
+            print("[TQ-CKPT] _reissue: skip (sync mode)", flush=True)
             return 0
         data = tq.kv_list(partition_id)
         if not data:
+            print(f"[TQ-CKPT] _reissue: kv_list('{partition_id}') empty -> nothing to re-issue", flush=True)
             return 0
         items = data.get(partition_id, {})
+        # Debug: how many prompts vs trajectories, and prompt-status breakdown, survived the load.
+        prompt_status: dict = defaultdict(int)
+        n_traj = 0
+        for tag in items.values():
+            if tag.get("is_prompt", False):
+                prompt_status[tag.get("status")] += 1
+            else:
+                n_traj += 1
+        print(
+            f"[TQ-CKPT] _reissue: kv_list('{partition_id}') -> {len(items)} keys "
+            f"(prompts by status={dict(prompt_status)}, trajectories={n_traj})",
+            flush=True,
+        )
         # Group in-flight prompt uids by their original submission step.
         uids_by_step: dict[int, list[str]] = defaultdict(list)
         for key, tag in items.items():
             if tag.get("is_prompt", False) and tag.get("status") in ("pending", "running"):
                 uids_by_step[int(tag["global_steps"])].append(key)
         if not uids_by_step:
+            print("[TQ-CKPT] _reissue: no pending/running prompts found -> nothing to re-issue", flush=True)
             return 0
 
         reissued = 0
@@ -790,6 +820,11 @@ class PPOTrainer(ABC):
             self.agent_loop_manager.generate_sequences(batch)
             reissued += len(uids)
 
+        print(
+            f"[TQ-CKPT] _reissue: re-issued {reissued} in-flight prompts from checkpoint "
+            f"for partition {partition_id} (by step={dict((s, len(u)) for s, u in uids_by_step.items())})",
+            flush=True,
+        )
         logger.info(f"Re-issued {reissued} in-flight prompts from checkpoint for partition {partition_id}")
         return reissued
 
