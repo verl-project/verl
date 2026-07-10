@@ -277,5 +277,5 @@ jobs:
           DIGESTS=$(printf "$IMAGE@sha256:%s " $(ls ${{ runner.temp }}/digests-v080 | sed 's/^v080-//'))
           echo "v0.8.0 image digests: $DIGESTS"
           docker buildx imagetools create \
-            -t "$IMAGE:verl-9.0.0-910b-ubuntu22.04-py3.11-v0.8.0" \
+            -t "$IMAGE:v0.8.0-cann9.0.0-torch2.9.0-910b-ubuntu22.04-py3.11-v0.8.0-vllm" \
             $DIGESTS
