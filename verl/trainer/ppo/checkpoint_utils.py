@@ -16,6 +16,7 @@
 
 import logging
 import math
+import numbers
 import os
 import tempfile
 from pathlib import Path
@@ -89,13 +90,22 @@ def load_adaptive_kl_controller_state(
         raise ValueError(f"Adaptive KL controller state must be a dict, got {type(state).__name__}")
 
     version = state.get("version", torch.tensor(0))
-    if not isinstance(version, torch.Tensor) or version.numel() != 1 or int(version.item()) not in (0, 1):
+    if not isinstance(version, torch.Tensor) or version.numel() != 1:
+        raise ValueError(f"Unsupported adaptive KL controller state version: {version!r}")
+    if version.dtype not in (torch.int8, torch.int16, torch.int32, torch.int64, torch.uint8):
+        raise ValueError(f"Unsupported adaptive KL controller state version: {version!r}")
+    version_value = int(version.item())
+    if version_value not in (0, 1):
         raise ValueError(f"Unsupported adaptive KL controller state version: {version!r}")
 
     value = state.get("value")
-    if not isinstance(value, torch.Tensor) or value.numel() != 1:
+    if isinstance(value, torch.Tensor):
+        if value.numel() != 1:
+            raise ValueError("Adaptive KL controller state value must be a scalar tensor")
+        value = value.item()
+    elif version_value != 0 or not isinstance(value, numbers.Real) or isinstance(value, bool):
         raise ValueError("Adaptive KL controller state value must be a scalar tensor")
-    value = float(value.item())
+    value = float(value)
     if not math.isfinite(value) or value < 0:
         raise ValueError(f"Adaptive KL controller state value must be finite and non-negative, got {value}")
 
