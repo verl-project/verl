@@ -823,7 +823,14 @@ class FSDPEngine(BaseEngine):
         # FSDP2 CPUOffloadPolicy owns CPU<->GPU placement; calling model.to(device) here
         # leaves the module half-moved and crashes state_dict() below (#5995). The
         # per-DTensor .to(device).full_tensor() below still produces GPU tensors.
-        if not self._uses_fsdp2_cpu_offload_policy:
+        #
+        # FSDP2 state_dict() only collects DTensor refs and the generator below already
+        # stages each shard lazily via .to(device).full_tensor(), so the whole-shard
+        # round trip is only needed for FSDP1 (state_dict unshards on-device) and LoRA
+        # (adapter merge does real weight math on the module).
+        _is_peft = hasattr(getattr(self.module, "_fsdp_wrapped_module", self.module), "peft_config")
+        _skip_staging = fsdp_version(self.module) == 2 and not _is_peft
+        if not self._uses_fsdp2_cpu_offload_policy and not _skip_staging:
             load_fsdp_model_to_gpu(self.module)
 
         log_gpu_memory_usage("After load_fsdp_model_to_gpu", logger=logger)
@@ -852,7 +859,7 @@ class FSDPEngine(BaseEngine):
         params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
 
         log_gpu_memory_usage("Before offload_fsdp_model_to_cpu", logger=logger)
-        if self._is_offload_param:
+        if self._is_offload_param and not _skip_staging:
             offload_fsdp_model_to_cpu(self.module)
         log_gpu_memory_usage("After offload_fsdp_model_to_cpu", logger=logger)
 
