@@ -663,6 +663,27 @@ class FSDPEngine(BaseEngine):
             with ctx:
                 loss, meta_info = self.forward_step(micro_batch, loss_function=loss_function, forward_only=forward_only)
 
+                # [DET] forward checkpoint: loss + log_probs sum. If this DIFFs between
+                # runs but after_forward_backward loss_sum was ok, the inputs (responses)
+                # differ; if it's ok but pre_clip local_grad DIFFs, the backward op is
+                # non-deterministic.
+                _fwd_loss_sum = loss.float().sum().item() if isinstance(loss, torch.Tensor) else 0.0
+                _mo = meta_info.get("model_output", {})
+                _logp_sum = (
+                    _mo["log_probs"].float().sum().item()
+                    if isinstance(_mo, dict) and isinstance(_mo.get("log_probs"), torch.Tensor)
+                    else 0.0
+                )
+                _fwd_line = (
+                    f"[DET] step={getattr(self, '_det_call_count', 0)} after_forward rank="
+                    f"{self.get_data_parallel_rank()} loss_sum={_fwd_loss_sum:.10e} logp_sum={_logp_sum:.10e}"
+                )
+                print(_fwd_line, flush=True)
+                _det_path = os.getenv("VERL_FILE_LOGGER_PATH", "")
+                if _det_path:
+                    with open(_det_path.replace(".jsonl", "_det.log"), "a") as _f:
+                        _f.write(_fwd_line + "\n")
+
                 if not forward_only:
                     if scaler is not None:
                         scaler.scale(loss).backward()
@@ -695,13 +716,30 @@ class FSDPEngine(BaseEngine):
         """
         assert self.optimizer_config.clip_grad is not None
 
-        # getattr fallback: some subclasses (e.g. VeOmniEngine) bypass FSDPEngine.__init__.
         scaler = getattr(self, "scaler", None)
 
-        # Unscale gradients before clip so the clip threshold is applied to true gradient
-        # magnitudes, not scaled ones. scaler.step() will skip the update if any grad is inf/nan.
         if scaler is not None:
             scaler.unscale_(self.optimizer)
+
+        _det_step = getattr(self, "_det_call_count", 0)
+        _det_rank = self.get_data_parallel_rank()
+        _det_path = os.getenv("VERL_FILE_LOGGER_PATH", "")
+        _local_grad_sum = sum(p.grad.float().sum().item() for p in self.module.parameters() if p.grad is not None)
+        # local gradient squared-norm (before any all-reduce). If this DIFFs between runs
+        # while local_grad_sum is ok, the backward pass is non-deterministic at the
+        # per-parameter level (masked by scalar summing). If it's ok but post_clip
+        # grad_norm DIFFs, the all-reduce inside clip_grad_norm_ is non-deterministic.
+        _local_grad_norm_sq = sum(
+            (p.grad.float() * p.grad.float()).sum().item() for p in self.module.parameters() if p.grad is not None
+        )
+        _pre_line = (
+            f"[DET] step={_det_step} pre_clip rank={_det_rank} "
+            f"local_grad_sum={_local_grad_sum:.10e} local_grad_norm_sq={_local_grad_norm_sq:.10e}"
+        )
+        print(_pre_line, flush=True)
+        if _det_path:
+            with open(_det_path.replace(".jsonl", "_det.log"), "a") as _f:
+                _f.write(_pre_line + "\n")
 
         if isinstance(self.module, FSDP):
             grad_norm = self.module.clip_grad_norm_(self.optimizer_config.clip_grad)
@@ -715,17 +753,28 @@ class FSDPEngine(BaseEngine):
         if isinstance(grad_norm, DTensor):
             grad_norm = grad_norm.full_tensor()
 
+        _post_line = f"[DET] step={_det_step} post_clip rank={_det_rank} grad_norm={grad_norm.item():.10e}"
+        print(_post_line, flush=True)
+        if _det_path:
+            with open(_det_path.replace(".jsonl", "_det.log"), "a") as _f:
+                _f.write(_post_line + "\n")
+
         if scaler is not None:
-            # scaler handles inf/nan skipping internally via _check_inf_per_device.
             scaler.step(self.optimizer)
             scaler.update()
         else:
-            # if grad_norm is not finite, skip the update
             if not torch.isfinite(grad_norm):
                 print(f"WARN: grad_norm is not finite: {grad_norm}")
                 self.optimizer.zero_grad()
             else:
                 self.optimizer.step()
+
+        _post_opt_sum = sum(p.data.float().sum().item() for p in self.module.parameters() if p.data is not None)
+        _post_opt_line = f"[DET] step={_det_step} post_optimizer rank={_det_rank} weight_sum={_post_opt_sum:.10e}"
+        print(_post_opt_line, flush=True)
+        if _det_path:
+            with open(_det_path.replace(".jsonl", "_det.log"), "a") as _f:
+                _f.write(_post_opt_line + "\n")
 
         if self._qat_enabled:
             from verl.utils.qat.core import invalidate_all_scales
@@ -1365,6 +1414,23 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
                     log_probs = None
                     if not distillation_only:
+                        # [DET] logits checkpoint: if this DIFFs, the model forward
+                        # produced different logits (root cause is in the forward, not
+                        # in logp computation). If logits ok but after_forward logp_sum
+                        # DIFFs, the logp computation itself is non-deterministic.
+                        _det_step = getattr(self, "_det_call_count", 0)
+                        _det_rank = self.get_data_parallel_rank()
+                        _logits_sum = logits_rmpad.float().sum().item()
+                        _logits_l2 = (logits_rmpad.float() * logits_rmpad.float()).sum().item()
+                        _lg_line = (
+                            f"[DET] step={_det_step} logits_pre_logp rank={_det_rank} "
+                            f"logits_sum={_logits_sum:.10e} logits_l2={_logits_l2:.10e}"
+                        )
+                        print(_lg_line, flush=True)
+                        _det_path = os.getenv("VERL_FILE_LOGGER_PATH", "")
+                        if _det_path:
+                            with open(_det_path.replace(".jsonl", "_det.log"), "a") as _f:
+                                _f.write(_lg_line + "\n")
                         log_probs = logprobs_from_logits(logits=logits_rmpad, labels=input_ids_rmpad_rolled)
 
                     # (bsz, j1), for each sample, length of each sample: [real_prompt_length + real_response_length]
@@ -1409,10 +1475,44 @@ class FSDPEngineWithLMHead(FSDPEngine):
             else torch.autocast(device_type=device_name, dtype=autocast_dtype)
         )
         with autocast_ctx:
+            # [DET] input checkpoint (BEFORE model forward). If this DIFFs between runs,
+            # the micro-batch composition differs (data loading / micro-batch assignment
+            # non-determinism) — NOT a forward-op issue. If input ok but raw_logits
+            # DIFFs, the model forward itself is non-deterministic.
+            _ii = model_inputs.get("input_ids")
+            _is = _ii.float().sum().item() if isinstance(_ii, torch.Tensor) else 0.0
+            _il = (_ii.float() * _ii.float()).sum().item() if isinstance(_ii, torch.Tensor) else 0.0
+            _in_line = (
+                f"[DET] step={getattr(self, '_det_call_count', 0)} input_ids rank="
+                f"{self.get_data_parallel_rank()} ids_sum={_is:.10e} ids_l2={_il:.10e}"
+            )
+            print(_in_line, flush=True)
+            _det_path = os.getenv("VERL_FILE_LOGGER_PATH", "")
+
             raw_output = self.module(
                 **model_inputs,
                 use_cache=False,
             )  # prevent model thinks we are generating
+
+            # [DET] raw logits checkpoint (model forward output, BEFORE any
+            # postprocessing / logp computation). If this DIFFs between runs, the
+            # model forward itself is non-deterministic — root cause is in the
+            # forward (matmul/attention/autocast), not in logp computation.
+            _raw_logits = getattr(raw_output, "logits", None)
+            if isinstance(_raw_logits, torch.Tensor):
+                _rls = _raw_logits.float().sum().item()
+                _rll = (_raw_logits.float() * _raw_logits.float()).sum().item()
+            else:
+                _rls = _rll = 0.0
+            _rl_line = (
+                f"[DET] step={getattr(self, '_det_call_count', 0)} raw_logits rank="
+                f"{self.get_data_parallel_rank()} logits_sum={_rls:.10e} logits_l2={_rll:.10e}"
+            )
+            print(_rl_line, flush=True)
+            if _det_path:
+                with open(_det_path.replace(".jsonl", "_det.log"), "a") as _f:
+                    _f.write(_in_line + "\n")
+                    _f.write(_rl_line + "\n")
 
             model_output = self.prepare_model_outputs(
                 output=raw_output, output_args=output_args, micro_batch=micro_batch, logits_processor_func=loss_function

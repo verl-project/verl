@@ -1365,6 +1365,33 @@ class RayPPOTrainer:
         critic_output = DataProto.from_single_dict(data={}, meta_info={"metrics": output})
         return critic_output
 
+    def _det_checkpoint(self, label: str, *tensors):
+        """Print a checksum for determinism debugging. Grep '[DET]' to compare two runs.
+
+        Also appends to a per-run file so run1/run2 checkpoints land in separate files
+        for easy diffing. Uses a /tmp path derived from the experiment name (which the
+        TaskRunner actor always knows from config) so it does NOT depend on env-var
+        propagation — Ray's stdout aggregation would otherwise mangle [DET] lines with
+        "[repeated Nx across cluster]" tags and broken newlines.
+        """
+        parts = []
+        for i, t in enumerate(tensors):
+            if t is None:
+                parts.append(f"t{i}=None")
+            elif isinstance(t, torch.Tensor):
+                parts.append(f"t{i}=sum:{t.float().sum().item():.10e},shape:{tuple(t.shape)}")
+            else:
+                parts.append(f"t{i}={t}")
+        line = f"[DET] step={self.global_steps} {label} {' '.join(parts)}"
+        print(line, flush=True)
+        exp_name = getattr(getattr(self.config, "trainer", None), "experiment_name", None) or "verl"
+        det_path = f"/tmp/verl_det_{exp_name}.log"
+        try:
+            with open(det_path, "a") as f:
+                f.write(line + "\n")
+        except OSError:
+            pass
+
     def fit(self):
         """
         The training loop of PPO.
@@ -1474,6 +1501,7 @@ class RayPPOTrainer:
                         if curr_step_profile:
                             self.llm_server_manager.start_profile()
                         combined_gen_output = self.async_rollout_manager.generate_sequences(combined_gen_batch)
+                        self._det_checkpoint("generate_sequences", combined_gen_output.batch.get("responses"))
                         self.checkpoint_manager.sleep_replicas()
                         if curr_step_profile:
                             self.llm_server_manager.stop_profile()
@@ -1511,6 +1539,7 @@ class RayPPOTrainer:
                     # but might affect the loss calculation (due to the change of mini-batching).
                     if self.config.trainer.balance_batch:
                         self._balance_batch(batch, metrics=metrics)
+                        self._det_checkpoint("after_balance_batch", batch.batch.get("responses"))
 
                     # compute global_valid tokens
                     batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
@@ -1525,6 +1554,7 @@ class RayPPOTrainer:
                         # compute reward model score
                         if self.use_rm and "rm_scores" not in batch.batch.keys():
                             batch_reward = self._compute_reward_colocate(batch)
+                            self._det_checkpoint("reward", batch_reward.batch.get("rm_scores"))
                             batch = batch.union(batch_reward)
 
                         # extract reward_tensor and reward_extra_infos_dict for training
@@ -1578,17 +1608,20 @@ class RayPPOTrainer:
                                 metrics.update(calculate_debug_metrics(batch))
 
                     assert "old_log_probs" in batch.batch, f'"old_log_prob" not in {batch.batch.keys()=}'
+                    self._det_checkpoint("old_log_probs", batch.batch.get("old_log_probs"))
                     if self.use_reference_policy:
                         # compute reference log_prob
                         with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
                             ref_log_prob = self._compute_ref_log_prob(batch)
                             batch = batch.union(ref_log_prob)
+                            self._det_checkpoint("ref_log_prob", batch.batch.get("ref_log_prob"))
 
                     # compute values
                     if self.use_critic:
                         with marked_timer("values", timing_raw, color="cyan"):
                             values = self._compute_values(batch)
                             batch = batch.union(values)
+                            self._det_checkpoint("values", batch.batch.get("values"))
 
                     with marked_timer("adv", timing_raw, color="brown"):
                         # we combine with rule-based rm
@@ -1606,6 +1639,7 @@ class RayPPOTrainer:
                             metrics.update(kl_metrics)
                         else:
                             batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
+                        self._det_checkpoint("token_level_rewards", batch.batch.get("token_level_rewards"))
 
                         # Compute rollout correction: IS weights, rejection sampling, and metrics
                         # Only runs in decoupled mode (computes once per batch using stable π_old)
@@ -1636,10 +1670,14 @@ class RayPPOTrainer:
                             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
                             config=self.config.algorithm,
                         )
+                    self._det_checkpoint("advantage", batch.batch.get("advantages"))
                     # update critic
                     if self.use_critic:
                         with marked_timer("update_critic", timing_raw, color="pink"):
                             critic_output = self._update_critic(batch)
+                        self._det_checkpoint(
+                            "update_critic", critic_output.batch.get("critic_loss") if critic_output else None
+                        )
                         critic_output_metrics = reduce_metrics(critic_output.meta_info["metrics"])
                         metrics.update(critic_output_metrics)
 
@@ -1651,6 +1689,9 @@ class RayPPOTrainer:
                         # update actor
                         with marked_timer("update_actor", timing_raw, color="red"):
                             actor_output = self._update_actor(batch)
+                        self._det_checkpoint(
+                            "update_actor", actor_output.batch.get("pg_loss") if actor_output else None
+                        )
 
                         # Check if the ESI (Elastic Server Instance)/training plan is close to expiration.
                         esi_close_to_expiration = should_save_ckpt_esi(
@@ -1677,6 +1718,7 @@ class RayPPOTrainer:
                         # update weights from trainer to rollout
                         with marked_timer("update_weights", timing_raw, color="red"):
                             self.checkpoint_manager.update_weights(self.global_steps)
+                        self._det_checkpoint("update_weights_done")
 
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
