@@ -97,15 +97,23 @@ class GlobalRequestLoadBalancer:
         if not self._inflight_requests:
             raise RuntimeError("No available servers in load balancer")
 
-        min_count = min(self._inflight_requests.values())
-        candidates = [sid for sid, count in self._inflight_requests.items() if count == min_count]
-        if len(candidates) == 1:
-            server_id = candidates[0]
-        elif self._full_determinism:
-            # Deterministic tie-breaking: same request_id → same server across runs
-            server_id = candidates[hash(request_id) % len(candidates)]
+        if self._full_determinism:
+            # Deterministic routing: ALWAYS route by hash(request_id) over the full
+            # replica pool, regardless of inflight counts. The previous logic only
+            # tie-broke among equally-loaded replicas, but "which replica is
+            # least-loaded" itself depends on async arrival timing, so it varied
+            # across runs and routed the same request to different replicas (which
+            # use different sampling seeds → different responses). Under
+            # full_determinism, reproducibility outweighs load balancing.
+            server_ids = list(self._servers)
+            server_id = server_ids[hash(request_id) % len(server_ids)]
         else:
-            server_id = candidates[0]
+            min_count = min(self._inflight_requests.values())
+            candidates = [sid for sid, count in self._inflight_requests.items() if count == min_count]
+            if len(candidates) == 1:
+                server_id = candidates[0]
+            else:
+                server_id = candidates[0]
         self._request_id_to_server[request_id] = server_id
         self._inflight_requests[server_id] += 1
         return server_id, self._servers[server_id]
@@ -257,11 +265,19 @@ class LLMServerClient:
                 multimodal_kwargs["mm_processor_kwargs"] = mm_processor_kwargs
             # priority is only supported by vLLM rollout server.
             priority = kwargs.pop("priority", 0)
-            priority_kwargs = (
-                {"priority": priority} if priority != 0 and self.config.actor_rollout_ref.rollout.name == "vllm" else {}
+            priority_kwargs = {"priority": priority} if self.config.actor_rollout_ref.rollout.name == "vllm" else {}
+            # Under full_determinism, send the deterministic request_id to vLLM too, so
+            # any vLLM-internal use of request_id (KV cache key, prefix cache, scheduling)
+            # is stable across runs. Otherwise fall back to a per-turn random uuid (needed
+            # for multi-turn agent loops to avoid sticky-session cache collisions).
+            _full_det = getattr(
+                getattr(getattr(self.config, "actor_rollout_ref", None), "rollout", None),
+                "full_determinism",
+                False,
             )
+            _vllm_rid = request_id if _full_det else uuid4().hex
             output: TokenOutput = await server.generate.remote(
-                request_id=uuid4().hex,  # use new request_id for each turn
+                request_id=_vllm_rid,  # use new request_id for each turn
                 prompt_ids=prompt_ids,
                 sampling_params=sampling_params,
                 image_data=image_data,

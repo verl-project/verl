@@ -16,6 +16,7 @@ Contain small torch utilities
 """
 
 import math
+import os
 from contextlib import contextmanager
 from typing import Optional
 
@@ -86,7 +87,15 @@ def logprobs_from_logits(logits, labels, inplace_backward=True):
     Returns:
         Tensor: Log-probabilities of the target labels, shape logits.shape[:-1].
     """
-    if FLAH_ATTN_CROSS_ENTROPY_LOSS_AVAILABLE:
+    # The flash-attn Triton cross-entropy kernel's reduction may be non-deterministic
+    # and is NOT controlled by FLASH_ATTENTION_DETERMINISTIC (that only governs the
+    # attention kernels) nor by torch.use_deterministic_algorithms (Triton custom ops
+    # don't trigger warn_only). Set VERL_DISABLE_FLASH_ATTN_CE=1 to force the pure
+    # PyTorch log_softmax+gather path for bitwise-reproducible log_probs.
+    _use_flash_ce = FLAH_ATTN_CROSS_ENTROPY_LOSS_AVAILABLE and os.environ.get(
+        "VERL_DISABLE_FLASH_ATTN_CE", "0"
+    ) != "1"
+    if _use_flash_ce:
         batch_dim = logits.shape[:-1]
         last_dim = logits.shape[-1]
         logits = logits.reshape(-1, last_dim)

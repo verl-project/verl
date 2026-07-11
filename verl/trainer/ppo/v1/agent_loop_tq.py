@@ -248,6 +248,15 @@ class AgentLoopManagerTQ(AgentLoopManager):
         Args:
             prompts (TensorDict): Input batch from train or validation dataset.
         """
+        # Inject per-sample priority (like uid) so each sample gets a globally-unique
+        # priority that flows to vLLM request scheduling. The parent class does this in
+        # its own generate_sequences, but TQ overrides it without calling super(), so we
+        # must replicate it here. TQ uses TensorDict (not DataProto), so we use
+        # NonTensorData to store the per-sample priority array.
+        if "priority" not in prompts.keys():
+            n = len(prompts)
+            prompts["priority"] = NonTensorStack(*[NonTensorData(int(i)) for i in range(n)])
+
         chunkes = prompts.chunk(len(self.agent_loop_workers))
         ray.get(
             [

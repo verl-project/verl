@@ -58,9 +58,12 @@ on:
       # Entrypoints
       - ".github/workflows/vllm.yml"
       - "tests/special_e2e/generation"
+      - "tests/experimental/reward_loop/run_determinism_e2e_with_rm.py"
       - "tests/workers/rollout"
       - "verl/trainer/main_generation.py"
       - "verl/trainer/config/generation.yaml"
+      - "verl/trainer/main_ppo.py"
+      - "verl/trainer/config/ppo_trainer.yaml"
 
 # Cancel jobs on the same ref if a new one is triggered
 concurrency:
@@ -123,7 +126,7 @@ jobs:
       - name: Prepare gsm8k dataset
         run: |
           ray stop --force
-          python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
+          python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k --local_dir ${HOME}/data/gsm8k
       - name: Test the latest vLLM Rollout async with agent loop
         run: |
           ROLLOUT_NAME=vllm pytest -svvv tests/experimental/agent_loop
@@ -141,6 +144,15 @@ jobs:
           VLLM_DETERMINISM_DENSE_MODEL_PATH=${HOME}/models/Qwen/Qwen2.5-0.5B-Instruct \
           VLLM_DETERMINISM_N_GPUS=2 \
           pytest tests/workers/rollout/rollout_vllm/test_vllm_generation_determinism.py -v -s
+      - name: Test e2e training determinism (bitwise-aligned reward curves across two PPO runs)
+        run: |
+          ray stop --force
+          python3 tests/experimental/reward_loop/run_determinism_e2e_with_rm.py \
+            --policy_model ${HOME}/models/Qwen/Qwen2.5-0.5B-Instruct \
+            --rm_model ${HOME}/models/Skywork/Skywork-Reward-V2-Llama-3.2-1B \
+            --train_files ${HOME}/data/gsm8k/train.parquet \
+            --val_files ${HOME}/data/gsm8k/test.parquet \
+            --n_gpus 2 --rm_tp 1 --rollout_tp 1 --n_steps 4
 
   vllm_checkpoint_engine:
     needs: setup
