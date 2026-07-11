@@ -47,9 +47,7 @@ class TestReinforcePPMultiTurn:
         expanded_mask = torch.tensor([[1.0, 1.0, 0.0, 0.0, 1.0, 1.0]])
         expanded_rewards = torch.tensor([[0.0, 0.0, 0.0, 0.0, 0.0, 1.0]])
 
-        _, compact_returns = compute_reinforce_plus_plus_outcome_advantage(
-            compact_rewards, compact_mask, config=config
-        )
+        _, compact_returns = compute_reinforce_plus_plus_outcome_advantage(compact_rewards, compact_mask, config=config)
         _, expanded_returns = compute_reinforce_plus_plus_outcome_advantage(
             expanded_rewards, expanded_mask, config=config
         )
@@ -111,14 +109,18 @@ class TestReinforcePPMultiTurn:
     def test_batch_dimension(self):
         """Verify correct behavior across a batch of sequences."""
         config = _config(gamma=1.0)
-        mask = torch.tensor([
-            [1.0, 0.0, 1.0, 1.0],  # observation at position 1
-            [1.0, 1.0, 1.0, 0.0],  # padding at position 3
-        ])
-        rewards = torch.tensor([
-            [0.0, 0.0, 0.0, 1.0],
-            [0.0, 0.0, 1.0, 0.0],
-        ])
+        mask = torch.tensor(
+            [
+                [1.0, 0.0, 1.0, 1.0],  # observation at position 1
+                [1.0, 1.0, 1.0, 0.0],  # padding at position 3
+            ]
+        )
+        rewards = torch.tensor(
+            [
+                [0.0, 0.0, 0.0, 1.0],
+                [0.0, 0.0, 1.0, 0.0],
+            ]
+        )
 
         _, returns = compute_reinforce_plus_plus_outcome_advantage(rewards, mask, config=config)
 
