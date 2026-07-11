@@ -83,7 +83,9 @@ from verl.utils.import_utils import load_extern_type
 from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
+from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import Tracking, ValidationGenerationsLogger
+from verl.utils.skip.skip_manager import SkipManager
 from verl.workers.config import CriticConfig, DistillationConfig
 from verl.workers.engine_workers import ActorRolloutRefWorker, TrainingWorker, TrainingWorkerConfig
 from verl.workers.rollout.llm_server import LLMServerClient, LLMServerManager
@@ -285,6 +287,7 @@ class PPOTrainer(ABC):
         # sleep all replicas to load checkpoint
         self.checkpoint_manager.sleep_replicas()
         self._load_checkpoint()
+        SkipManager.init(self.config)
 
         logger.info("all initialize finished, ready to fit")
 
@@ -340,6 +343,7 @@ class PPOTrainer(ABC):
 
         # we start from step 1
         self.global_steps += 1
+        SkipManager.set_step(self.global_steps)
         self.prev_step_profile = False
         self.curr_step_profile = (
             self.global_steps in self.config.global_profiler.steps
@@ -398,6 +402,7 @@ class PPOTrainer(ABC):
             self.logger.log(data=metrics, step=self.global_steps)
             progress_bar.update(1)
             self.global_steps += 1
+            SkipManager.set_step(self.global_steps)
             current_epoch = (self.global_steps - 1) // len(self.train_dataloader)
             if is_last_step:
                 self._shutdown_dump_executor()

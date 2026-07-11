@@ -33,6 +33,7 @@ from verl.experimental.agent_loop import (
 )
 from verl.utils.ray_utils import auto_await
 from verl.utils.tensordict_utils import list_of_dict_to_tensordict
+from verl.utils.skip import SkipManager
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -220,6 +221,7 @@ class AgentLoopManagerTQ(AgentLoopManager):
         await instance._init_agent_loop_workers()
         return instance
 
+    @SkipManager.annotate(role="rollout")
     def generate_sequences(self, prompts: TensorDict) -> None:
         """
         Dispatch input batch to agent loop workers without blocking. Workers should put agent loop outputs
