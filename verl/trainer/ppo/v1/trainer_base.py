@@ -363,6 +363,7 @@ class PPOTrainer(ABC):
                         self._save_checkpoint()
 
                 self.on_step_end()
+                metrics.update(self._consume_sync_metrics())
 
             # 4. validate
             if self.config.trainer.test_freq > 0 and (
@@ -485,6 +486,13 @@ class PPOTrainer(ABC):
     def on_step_end(self):
         """Called at the end of each training step."""
         return
+
+    def _consume_sync_metrics(self) -> dict:
+        """Weight-sync stats stashed by ``on_step_end`` (e.g. the delta engines'
+        changed ratio / wire payload), merged into this step's logged metrics."""
+        metrics = getattr(self, "_pending_sync_metrics", None) or {}
+        self._pending_sync_metrics = {}
+        return metrics
 
     def on_sample_begin(self):
         """Called at the beginning of sampling batch from replay buffer."""
