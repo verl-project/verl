@@ -19,6 +19,7 @@ import sys
 import types
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -57,11 +58,17 @@ def test_resume_matches_uninterrupted_controller(tmp_path):
     assert resumed.value == pytest.approx(uninterrupted.value)
 
 
-def test_missing_state_preserves_initial_value(tmp_path, caplog):
+def test_missing_state_preserves_initial_value_and_warns(tmp_path):
     controller = AdaptiveKLController(init_kl_coef=0.1, target_kl=1.0, horizon=10_000)
-    assert not load_adaptive_kl_controller_state(controller, tmp_path)
+
+    with patch("verl.trainer.ppo.checkpoint_utils.logger.warning") as warning:
+        assert not load_adaptive_kl_controller_state(controller, tmp_path)
+
     assert controller.value == 0.1
-    assert "No adaptive KL controller state" in caplog.text
+    warning.assert_called_once_with(
+        "No adaptive KL controller state found at %s; using initial value",
+        tmp_path / "kl_ctrl.pt",
+    )
 
 
 def test_malformed_state_fails_closed(tmp_path):
