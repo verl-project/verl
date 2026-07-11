@@ -32,7 +32,8 @@ This mode requires the P2P feature of checkpoint_engine. Please ensure you have 
 In addition, during the installation of checkpoint-engine[p2p], the transfer engine will be installed. However, This library has no prebuilt packages for Ascend devices and must be compiled from source. For detailed compilation instructions, see: [transfer-engine: ascend direct](https://github.com/kvcache-ai/Mooncake/blob/main/docs/source/design/transfer-engine/ascend_direct_transport.md)
 
 Note: Important Configuration for Ascend Devices
-If you are using CANN version >= 8.5.0 on Ascend devices, you must set the following environment variable to enable intra-node ROCE:
+1. kimi-checkpoint-engine hasn't been supported in A5.
+2. If you are using CANN version >= 8.5.0 on Ascend devices, you must set the following environment variable to enable intra-node ROCE:
 
 ```bash
 export HCCL_INTRA_ROCE_ENABLE=1
