@@ -14,7 +14,7 @@
 import logging
 import os
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 import numpy as np
 import transfer_queue as tq
@@ -169,6 +169,19 @@ class ReplayBuffer:
 
         return len(self.finished_keys[partition_id]) + len(self.failure_keys[partition_id]) >= batch_size
 
+    def _terminal_staleness_hist(self, global_steps: int, partition_id: str) -> dict[int, int]:
+        """Histogram {version_span: count} over terminal (finished/failure) prompts, for drop debugging.
+
+        A span of ``s`` means the prompt was generated ``s - 1`` versions ago; the ``drop`` strategy
+        removes spans strictly greater than ``max_off_policy_threshold``.
+        """
+        prompt_global_steps = self.prompt_global_steps[partition_id]
+        spans = [
+            global_steps - prompt_global_steps.get(uid, global_steps) + 1
+            for uid in self.finished_keys[partition_id] | self.failure_keys[partition_id]
+        ]
+        return dict(sorted(Counter(spans).items()))
+
     def _drop_stale_finished(self, global_steps: int, partition_id: str) -> tuple[int, dict]:
         """Drop terminal (finished/failure) prompts whose version span exceeds the threshold."""
         if self.max_off_policy_strategy != "drop":
@@ -189,9 +202,18 @@ class ReplayBuffer:
         # Clear prompt keys and their trajectory keys "{uid}_..." (kv_clear does not cascade).
         traj_keys = [key for key in self.partitions[partition_id] if key.split("_")[0] in stale_uids]
         tq.kv_clear(partition_id=partition_id, keys=list(stale_uids) + traj_keys)
-        logger.warning(f"Dropped {len(stale_uids)} stale finished prompts from partition {partition_id}")
 
         staleness = np.array(stale_spans, dtype=float)
+        # Per-version breakdown of what was dropped, e.g. {version: count}, so the observed staleness
+        # can be checked against the threshold (a span > threshold prompt should be here, one == is not).
+        dropped_versions = Counter(prompt_global_steps.get(uid, global_steps) for uid in stale_uids)
+        logger.info(
+            f"[drop] partition={partition_id} global_steps={global_steps} "
+            f"threshold={self.max_off_policy_threshold} dropped={len(stale_uids)} "
+            f"span(min/mean/max)={staleness.min():.0f}/{staleness.mean():.2f}/{staleness.max():.0f} "
+            f"dropped_by_submit_version={dict(sorted(dropped_versions.items()))}"
+        )
+
         prefix = "training" if partition_id == "train" else "validation"
         metrics = {
             f"{prefix}/off_policy/dropped_samples": len(stale_uids),
@@ -221,14 +243,30 @@ class ReplayBuffer:
         """
         last_debug_time = time.time()
         drop_metrics: dict = {}
+        logged_entry_snapshot = False
 
         while True:
             self._sync_metadata_from_transfer_queue()
+
+            # One-time snapshot per sample() call: buffer occupancy + how stale the terminal samples
+            # are, so drop decisions below can be correlated with the pre-drop state.
+            if not logged_entry_snapshot and self.max_off_policy_strategy == "drop":
+                logger.info(
+                    f"[drop] sample() entry partition={partition_id} global_steps={global_steps} "
+                    f"batch_size={batch_size} threshold={self.max_off_policy_threshold} "
+                    f"pending={len(self.pending_keys[partition_id])} "
+                    f"running={len(self.running_keys[partition_id])} "
+                    f"finished={len(self.finished_keys[partition_id])} "
+                    f"failure={len(self.failure_keys[partition_id])} "
+                    f"terminal_span_hist={self._terminal_staleness_hist(global_steps, partition_id)}"
+                )
+                logged_entry_snapshot = True
 
             dropped, metrics = self._drop_stale_finished(global_steps, partition_id)
             if dropped > 0:
                 _accumulate_drop_metrics(drop_metrics, metrics, dropped)
                 if self.refill_fn is not None:
+                    logger.info(f"[drop] refilling {dropped} fresh prompt(s) to replace dropped stale groups")
                     self.refill_fn(dropped)  # fire-and-forget; for drop strategy
                 self._sync_metadata_from_transfer_queue()  # reflect the cleared keys before check
 
@@ -252,6 +290,21 @@ class ReplayBuffer:
         prompt_global_steps = self.prompt_global_steps[partition_id]
         sampleable_keys = sorted(finished_keys.union(failure_keys), key=lambda key: prompt_global_steps.get(key, 0))
         selected_prompt_uids = sampleable_keys[:batch_size]
+
+        if self.max_off_policy_strategy == "drop":
+            # Confirm the returned batch is full and fresh: report the span of the prompts actually
+            # selected (all should be <= threshold) and the total dropped across this call.
+            selected_spans = [
+                global_steps - prompt_global_steps.get(uid, global_steps) + 1 for uid in selected_prompt_uids
+            ]
+            total_dropped = next((v for k, v in drop_metrics.items() if k.endswith("/dropped_samples")), 0)
+            span_summary = f"{min(selected_spans)}/{max(selected_spans)}" if selected_spans else "-/-"
+            logger.info(
+                f"[drop] sample() return partition={partition_id} global_steps={global_steps} "
+                f"selected={len(selected_prompt_uids)}/{batch_size} selected_span(min/max)={span_summary} "
+                f"total_dropped_this_call={total_dropped}"
+            )
+
         tq.kv_clear(partition_id=partition_id, keys=selected_prompt_uids)
 
         keys, tags = [], []
