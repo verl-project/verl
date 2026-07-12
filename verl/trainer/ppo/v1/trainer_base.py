@@ -101,6 +101,27 @@ def apply_greedy_sampling_params(params: dict[str, Any]) -> None:
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
+# TODO: turn on this by default
+# TransferQueue checkpoint save/load lands in >0.1.8 release.
+_TQ_LAST_VERSION_WITHOUT_CHECKPOINT = "0.1.8"
+
+
+def _tq_supports_checkpoint() -> bool:
+    """Whether the installed TransferQueue can snapshot/restore its state for checkpoint consistency."""
+    if not (hasattr(tq, "save_checkpoint") and hasattr(tq, "load_checkpoint")):
+        return False
+    version = getattr(tq, "__version__", None)
+    try:
+        from packaging.version import Version
+
+        return Version(version) > Version(_TQ_LAST_VERSION_WITHOUT_CHECKPOINT)
+    except Exception:
+
+        def _parse(v: str) -> tuple[int, ...]:
+            return tuple(int(p) for p in v.split(".") if p.isdigit())
+
+        return _parse(version) > _parse(_TQ_LAST_VERSION_WITHOUT_CHECKPOINT)
+
 
 class PPOTrainer(ABC):
     """Base class for PPO trainer.
@@ -314,10 +335,7 @@ class PPOTrainer(ABC):
         """
         self.agent_loop_manager = agent_loop_manager
 
-        # Re-issue prompts that were in-flight when a resumed checkpoint was taken. Deferred to here
-        # (rather than _load_checkpoint) because it needs agent_loop_manager. No-op on a fresh start
-        # or when the restored queue has no in-flight prompts. Runs before on_train_begin's warmup so
-        # the older re-issued prompts are submitted (and thus prioritized) ahead of fresh ones.
+        # Only for async mode with inflight transfer_queue checkpoint saved.
         self._reissue_inflight_prompts()
 
         self.logger = Tracking(
@@ -739,31 +757,29 @@ class PPOTrainer(ABC):
         # 5. restore TransferQueue state (async modes). Re-issuing the restored in-flight prompts is
         # deferred to fit() (see _reissue_inflight_prompts) because it needs the agent_loop_manager,
         # which is not set until fit(). tq.init() runs before the trainer is constructed
-        # (main_ppo.py), so the system is in a clean state here, satisfying load_checkpoint's
-        # precondition. Older TransferQueue builds without save/load_checkpoint simply skip this; the
-        # queue then starts empty and is repopulated by the usual warmup in on_train_begin.
-        if self.trainer_mode != "sync" and hasattr(tq, "load_checkpoint"):
-            tq_ckpt_path = os.path.join(global_step_folder, "transfer_queue")
-            if os.path.exists(tq_ckpt_path):
-                tq.load_checkpoint(tq_ckpt_path)
+        # (main_ppo.py), so the system is in a clean state here.
+        if self.trainer_mode != "sync":
+            if _tq_supports_checkpoint():
+                tq_ckpt_path = os.path.join(global_step_folder, "transfer_queue")
+                if os.path.exists(tq_ckpt_path):
+                    logger.info(f"Loading TransferQueue state from {tq_ckpt_path}")
+                    tq.load_checkpoint(tq_ckpt_path)
+                else:
+                    logger.warning(
+                        f"No TransferQueue state found at {tq_ckpt_path}; in-flight prompts from the "
+                        "checkpoint are lost (only fresh warmup prompts will be generated)."
+                    )
             else:
-                logger.warning(f"Warning: No TransferQueue state found at {tq_ckpt_path}, in-flight prompts are lost")
+                logger.warning(
+                    f"Installed TransferQueue ({getattr(tq, '__version__', 'unknown')}) does not "
+                    "support checkpoint save/load. In-flight prompts from before the restart are lost; "
+                    "only fresh warmup prompts are generated on resume. Upgrade TransferQueue to a "
+                    f"release newer than {_TQ_LAST_VERSION_WITHOUT_CHECKPOINT} to avoid losing samples."
+                )
 
     def _reissue_inflight_prompts(self, partition_id: str = "train") -> int:
-        """Re-submit prompts that were in-flight (pending/running) when the checkpoint was taken.
-
-        After ``tq.load_checkpoint``, finished/failure trajectories are restored as-is and can be
-        sampled directly. Prompts still generating (pending/running) have no durable half-generated
-        state (tokens live only in rollout worker memory / KV cache), so they must be regenerated
-        from their original prompt data, which ``_submit_one_gen_batch`` persisted as fields.
-
-        Prompts are grouped by their original ``global_steps`` (read from the prompt tag, the source
-        of truth for staleness) so each re-issued batch carries the correct per-batch step scalar,
-        keeping off-policy staleness identical to before the checkpoint.
-
-        Called unconditionally from fit(); a no-op for sync mode or an empty/fresh queue.
-        """
-        if self.trainer_mode == "sync":
+        """Re-submit prompts that were in-flight (pending/running) when the checkpoint was taken."""
+        if self.trainer_mode == "sync" or not _tq_supports_checkpoint():
             return 0
         data = tq.kv_list(partition_id)
         if not data:
@@ -851,9 +867,10 @@ class PPOTrainer(ABC):
         # finished trajectories are restored as-is, pending/running prompts are re-issued on resume.
         # Safe here because sample() has returned and generation is paused (on_sample_end aborts +
         # sleeps), so no concurrent kv_clear races the snapshot (see TransferQueue checkpoint docs).
-        # save_checkpoint/load_checkpoint are only available in newer TransferQueue builds; when the
-        # installed version lacks them we skip snapshotting and fall back to re-warmup on resume.
-        if self.trainer_mode != "sync" and hasattr(tq, "save_checkpoint"):
+        # Requires a TransferQueue release with checkpoint support (see _tq_supports_checkpoint); on
+        # older builds we skip snapshotting and in-flight prompts are lost on resume (warned in
+        # _load_checkpoint).
+        if self.trainer_mode != "sync" and _tq_supports_checkpoint():
             tq.save_checkpoint(
                 os.path.join(local_global_step_folder, "transfer_queue"),
                 metadata={"global_steps": self.global_steps},
