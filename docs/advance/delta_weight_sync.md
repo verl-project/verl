@@ -104,6 +104,3 @@ Planned extensions, in design order:
   megatron→HF bridge on rank 0, extending ``delta_sharded`` beyond FSDP.
 - **Quantized rollout (fp8 etc.)**: diff the quantized bytes (quantize-then-diff) so a low-precision
   rollout engine can consume deltas without a bf16 intermediate.
-- **Upstream SGLang delta receiver**: once SGLang ships a native distributed delta receiver, the
-  broadcast can land directly on the TP workers (dropping the same-GPU IPC forward); the current
-  custom-weight-loader apply is already in place and bit-compatible with that wire format.
