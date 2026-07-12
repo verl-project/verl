@@ -12,12 +12,12 @@ INFER_BACKEND=${INFER_BACKEND:-vllm}
 MODEL_PATH=${MODEL_PATH:-/mnt/hdfs/went/model/Qwen3-0.6B}
 
 # trainer (actor/ref/critic) GPU group
-NNODES=${NNODES:-2}
-NGPUS_PER_NODE=${NGPUS_PER_NODE:-8}
+NNODES=${NNODES:-1}
+NGPUS_PER_NODE=${NGPUS_PER_NODE:-4}
 
 # standalone rollout GPU group (physically separate from trainer group)
-ROLLOUT_NNODES=${ROLLOUT_NNODES:-2}
-ROLLOUT_NGPUS_PER_NODE=${ROLLOUT_NGPUS_PER_NODE:-8}
+ROLLOUT_NNODES=${ROLLOUT_NNODES:-1}
+ROLLOUT_NGPUS_PER_NODE=${ROLLOUT_NGPUS_PER_NODE:-4}
 
 # separate async requires train_batch_size == parameter_sync_step * ppo_mini_batch_size
 # (one trainer step runs parameter_sync_step inner updates of ppo_mini_batch_size each)
@@ -37,20 +37,20 @@ offload=${OFFLOAD:-True}
 
 rollout_tp=${ROLLOUT_TP:-1}
 rollout_gpu_mem_util=${ROLLOUT_GPU_MEM_UTIL:-0.7}
-rollout_n=${ROLLOUT_N:-8}
+rollout_n=${ROLLOUT_N:-4}
 
 # weight-sync backend between trainer and standalone rollout (must not be naive)
 checkpoint_engine_backend=${CHECKPOINT_ENGINE_BACKEND:-nccl}
-num_warmup_batches=${NUM_WARMUP_BATCHES:-1}
+num_warmup_batches=${NUM_WARMUP_BATCHES:-10}
 parameter_sync_step=${PARAMETER_SYNC_STEP:-4}
 
 total_epochs=${TOTAL_EPOCHS:-1}
-save_freq=${SAVE_FREQ:-2}
-test_freq=${TEST_FREQ:-10}
+save_freq=${SAVE_FREQ:--1}
+test_freq=${TEST_FREQ:--1}
 val_before_train=${VAL_BEFORE_TRAIN:-False}
 
 project_name=${PROJECT_NAME:-went_sep_async}
-experiment_name=${EXPERIMENT_NAME:-test_tq_ckpt}
+experiment_name=${EXPERIMENT_NAME:-test_tq_save}
 default_local_dir=${DEFAULT_LOCAL_DIR:-/mnt/hdfs/went/checkpoint/${project_name}/${experiment_name}}
 
 ########################### end user-adjustable ###########################
@@ -125,10 +125,11 @@ TRAINER=(
     trainer.total_epochs=${total_epochs}
     trainer.val_before_train=${val_before_train}
     trainer.use_v1=True
-    trainer.total_training_steps=5
+    trainer.total_training_steps=10
     trainer.v1.trainer_mode=separate_async
     trainer.v1.separate_async.num_warmup_batches=${num_warmup_batches}
     trainer.v1.separate_async.parameter_sync_step=${parameter_sync_step}
+    trainer.v1.sampler.max_off_policy_threshold=1
 )
 
 EXTRA=(
