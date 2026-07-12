@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from typing import Generator
 from unittest.mock import patch
 
@@ -638,13 +637,6 @@ class DeltaShardedCheckpointEngine(DeltaCheckpointEngine):
         _flush_group()
 
         self._shard_seeded = True
-        if os.environ.get("VERL_DELTA_DEBUG"):
-            pinned = sum(t.numel() * t.element_size() for t in self._shard_snap.values())
-            print(
-                f"[delta-debug] engine rank={self.rank} SNAPSHOT: {len(self._shard_snap)} pinned-CPU shard snaps, "
-                f"{pinned / (1 << 20):.1f} MiB total (expect ~model_bytes/fsdp_size per rank when truly sharded)",
-                flush=True,
-            )
         if not is_r0:
             return
         _seal()  # seal the final partial bucket into `pending`
