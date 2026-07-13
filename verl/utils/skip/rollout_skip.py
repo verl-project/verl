@@ -178,7 +178,7 @@ class RolloutTqSkip(RolloutSkip):
     ``sample`` calls.  Each mini-batch is saved to a separate inner sub-directory
     ``{step}/{inner_idx}/`` so the full step is captured; on load all inner dirs are
     merged.  For ``parameter_sync_step == 1`` (sync / colocate async) the directory
-    structure is unchanged (``{step}/tq_batch.pt``).
+    structure is (``{step}/{0}/tq_batch.pt``).
     """
 
     print_mark = "[RolloutTqSkip()] "
@@ -194,24 +194,14 @@ class RolloutTqSkip(RolloutSkip):
             )
         )
 
-    # ------------------------------------------------------------------
-    # Directory helpers (parameter_sync_step aware)
-    # ------------------------------------------------------------------
-
     def _get_v1_inner_dir(self, step: int, inner_idx: int) -> Path:
         """Return the dump directory for one mini-batch within a step."""
-        step_dir = self._get_step_dump_dir(step)
-        if self.parameter_sync_step <= 1:
-            return step_dir
-        return step_dir / str(inner_idx)
+        return self._get_step_dump_dir(step) / str(inner_idx)
 
     def _check_valid_v1_step(self, step: int) -> bool:
         """Check whether ALL inner dirs for *step* exist (complete cache)."""
-        if self.parameter_sync_step <= 1:
-            return self._check_valid_v1_step_path(self._get_step_dump_dir(step))
         return all(
-            self._check_valid_v1_step_path(self._get_v1_inner_dir(step, i))
-            for i in range(self.parameter_sync_step)
+            self._check_valid_v1_step_path(self._get_v1_inner_dir(step, i)) for i in range(self.parameter_sync_step)
         )
 
     def _find_first_missing_inner(self, step: int) -> int:
@@ -310,7 +300,7 @@ class RolloutTqSkip(RolloutSkip):
         return True
 
     def prepare_data(self, step: int, batch, global_steps: int) -> None:
-        """Phase one: read full batch from TransferQueue and save to disk.
+        """Phase one: read batch from TransferQueue and save to disk.
 
         When ``parameter_sync_step > 1``, each ``sample`` call saves its mini-batch
         to ``{step}/{inner_idx}/``.  The first missing inner index is used so that
