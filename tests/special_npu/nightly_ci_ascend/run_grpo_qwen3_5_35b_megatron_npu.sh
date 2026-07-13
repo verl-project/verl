@@ -53,6 +53,8 @@ DATA=(
     data.max_prompt_length=1024
     data.max_response_length=2048
     data.filter_overlong_prompts=True
+    data.shuffle=False
+    data.validation_shuffle=False
     data.truncation=error
 )
 
@@ -141,6 +143,7 @@ ROLLOUT=(
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=4096
     actor_rollout_ref.rollout.calculate_log_probs=True
     actor_rollout_ref.rollout.enforce_eager=False
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.mm_processor_cache_gb=0
 )
 
 ###########################
