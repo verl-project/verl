@@ -1238,12 +1238,6 @@ class PPOTrainer(ABC):
         batch_dict["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch_dict["raw_prompt"]))], dtype=object)
         return tu.get_tensordict(batch_dict)
 
-    @staticmethod
-    def _storable_prompt_fields(batch: TensorDict) -> TensorDict:
-        """Select prompt fields that TransferQueue can slice per row."""
-        per_row_keys = [key for key in batch.keys() if not isinstance(batch.get(key), NonTensorData)]
-        return batch.select(*per_row_keys)
-
     def _add_batch_to_generate(self, num_prompts: int | None = None) -> int:
         """Fetch prompts in ``gen_batch_size`` chunks and coalesce them into one submission.
 
@@ -1270,8 +1264,9 @@ class PPOTrainer(ABC):
                 keys=list(batch["uid"]),
                 partition_id="train",
                 tags=tags,
+                # Used for checkpointing of async trainers
                 # TODO: maybe let workers do it?
-                fields=self._storable_prompt_fields(batch),
+                fields=batch.select(*[key for key in batch.keys() if not isinstance(batch.get(key), NonTensorData)]),
             )
         else:
             tq.kv_batch_put(keys=list(batch["uid"]), partition_id="train", tags=tags)

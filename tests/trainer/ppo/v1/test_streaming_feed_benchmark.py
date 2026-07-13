@@ -30,6 +30,7 @@ import numpy as np  # noqa: E402
 import ray  # noqa: E402
 import transfer_queue as tq  # noqa: E402
 from omegaconf import OmegaConf  # noqa: E402
+from tensordict.tensorclass import NonTensorData  # noqa: E402
 
 from verl.trainer.ppo.v1 import trainer_base  # noqa: E402
 from verl.trainer.ppo.v1.trainer_base import PPOTrainer  # noqa: E402
@@ -148,7 +149,7 @@ def _add_batch_to_generate_fragmented(trainer: _BenchmarkTrainer, num_prompts: i
             keys=list(batch["uid"]),
             partition_id="train",
             tags=tags,
-            fields=trainer._storable_prompt_fields(batch),
+            fields=batch.select(*[key for key in batch.keys() if not isinstance(batch.get(key), NonTensorData)]),
         )
         trainer.agent_loop_manager.generate_sequences(batch)
         submitted += len(batch)
