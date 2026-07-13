@@ -197,6 +197,7 @@ class ReplayBuffer:
 
     def _drop_stale_finished(self, global_steps: int, partition_id: str) -> tuple[int, dict]:
         """Drop terminal (finished/failure) prompts whose version span exceeds the threshold."""
+        # TODO: drop strategy only takes effect after the whole group is finished, which may be too late.
         if self.max_off_policy_strategy != "drop":
             return 0, {}
 
