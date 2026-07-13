@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # GRPO | Qwen3-VL-30B-A3B (MoE) | FSDP training | GPU/NPU
+# For NPU, add the following configuration:
+# +actor_rollout_ref.rollout.engine_kwargs.vllm.mm_processor_cache_gb=0
 set -xeuo pipefail
 
 ########################### user-adjustable ###########################
