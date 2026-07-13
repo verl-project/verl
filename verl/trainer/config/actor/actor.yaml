@@ -58,6 +58,7 @@ policy_loss:
   _target_: verl.workers.config.PolicyLossConfig
 
   # Loss function mode: vanilla / clip-cov / kl-cov /gpg from https://arxiv.org/abs/2505.22617
+  # / up (UP-GRPO) from https://arxiv.org/abs/2607.06987
   loss_mode: "vanilla"
 
   # Ratio of tokens to be clipped for clip-cov loss
