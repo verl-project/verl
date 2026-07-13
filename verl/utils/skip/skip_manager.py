@@ -141,7 +141,9 @@ class SkipManager:
 
         - ``phase="sample"``: decorate ``ReplayBuffer.sample``.  After the original
           ``sample`` runs, if the skip instance says to save, persist the result to disk
-          (phase one / cache-miss).
+          (phase one / cache-miss).  When ``parameter_sync_step > 1`` (separate async),
+          ``sample`` is called multiple times per step; each call saves its mini-batch to
+          a separate inner sub-directory, and the full set is merged on load.
         """
 
         def decorator(func: Callable) -> Callable:
