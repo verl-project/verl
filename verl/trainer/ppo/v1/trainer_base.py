@@ -101,26 +101,10 @@ def apply_greedy_sampling_params(params: dict[str, Any]) -> None:
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
-# TODO: turn on this by default
-# TransferQueue checkpoint save/load lands in >0.1.8 release.
-_TQ_LAST_VERSION_WITHOUT_CHECKPOINT = "0.1.8"
-
 
 def _tq_supports_checkpoint() -> bool:
     """Whether the installed TransferQueue can snapshot/restore its state for checkpoint consistency."""
-    if not (hasattr(tq, "save_checkpoint") and hasattr(tq, "load_checkpoint")):
-        return False
-    version = getattr(tq, "__version__", None)
-    try:
-        from packaging.version import Version
-
-        return Version(version) > Version(_TQ_LAST_VERSION_WITHOUT_CHECKPOINT)
-    except Exception:
-
-        def _parse(v: str) -> tuple[int, ...]:
-            return tuple(int(p) for p in v.split(".") if p.isdigit())
-
-        return _parse(version) > _parse(_TQ_LAST_VERSION_WITHOUT_CHECKPOINT)
+    return callable(getattr(tq, "save_checkpoint", None)) and callable(getattr(tq, "load_checkpoint", None))
 
 
 class PPOTrainer(ABC):
@@ -772,8 +756,8 @@ class PPOTrainer(ABC):
                 logger.warning(
                     f"Installed TransferQueue ({getattr(tq, '__version__', 'unknown')}) does not "
                     "support checkpoint save/load. In-flight prompts from before the restart are lost; "
-                    "only fresh warmup prompts are generated on resume. Upgrade TransferQueue to a "
-                    f"release newer than {_TQ_LAST_VERSION_WITHOUT_CHECKPOINT} to avoid losing samples."
+                    "only fresh warmup prompts are generated on resume. Upgrade TransferQueue to 0.1.9 "
+                    "or newer to avoid losing samples."
                 )
 
     def _reissue_inflight_prompts(self, partition_id: str = "train") -> int:

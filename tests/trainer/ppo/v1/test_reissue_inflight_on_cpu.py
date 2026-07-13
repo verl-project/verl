@@ -46,10 +46,8 @@ from verl.trainer.ppo.v1 import trainer_base
 from verl.trainer.ppo.v1.trainer_base import PPOTrainer
 from verl.utils import tensordict_utils as tu
 
-# TODO: remove this later
-# Capture the real version gate before the autouse fixture patches it. The save/load round-trip
-# tests call tq.save_checkpoint/load_checkpoint for real, so they must skip on builds that lack the
-# APIs (e.g. TransferQueue 0.1.8) rather than force the gate open.
+# Capture the real capability guard before the autouse fixture patches it. The save/load round-trip
+# tests call the real APIs, so they must skip on builds that do not provide them.
 _REAL_TQ_SUPPORTS_CHECKPOINT = trainer_base._tq_supports_checkpoint
 requires_tq_checkpoint = pytest.mark.skipif(
     not _REAL_TQ_SUPPORTS_CHECKPOINT(),
@@ -66,12 +64,10 @@ def tq_init():
 
 @pytest.fixture(autouse=True)
 def _force_tq_checkpoint_supported(monkeypatch):
-    """Force the version gate open so the re-issue logic itself is exercised, not the gate.
+    """Force the capability guard open so the re-issue logic itself is exercised, not the guard.
 
-    The locally installed TransferQueue may predate checkpoint support (making
-    ``_tq_supports_checkpoint`` return False, which short-circuits re-issue). This only patches the
-    gate used by the trainer methods; the save/load round-trip tests instead gate on the real
-    availability via ``requires_tq_checkpoint`` (they call the actual tq APIs).
+    The locally installed TransferQueue may lack the checkpoint APIs, which short-circuits re-issue.
+    The save/load round-trip tests instead use ``requires_tq_checkpoint`` and call the actual APIs.
     """
     monkeypatch.setattr(trainer_base, "_tq_supports_checkpoint", lambda: True)
 
@@ -80,6 +76,21 @@ def _force_tq_checkpoint_supported(monkeypatch):
 def partition_id():
     """A unique partition per test to isolate TransferQueue state across tests."""
     return f"test-{uuid.uuid4().hex}"
+
+
+def test_tq_checkpoint_guard_checks_api_capabilities_only(monkeypatch):
+    """Checkpoint support depends on callable APIs, not the package version string."""
+
+    def checkpoint_api(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(tq, "__version__", "0.0.0", raising=False)
+    monkeypatch.setattr(tq, "save_checkpoint", checkpoint_api, raising=False)
+    monkeypatch.setattr(tq, "load_checkpoint", checkpoint_api, raising=False)
+    assert _REAL_TQ_SUPPORTS_CHECKPOINT() is True
+
+    monkeypatch.setattr(tq, "load_checkpoint", None)
+    assert _REAL_TQ_SUPPORTS_CHECKPOINT() is False
 
 
 def _uid() -> str:
