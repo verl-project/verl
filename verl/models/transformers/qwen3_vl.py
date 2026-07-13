@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import torch
+from torch.distributed.tensor import DTensor
 from transformers.models.qwen3_vl.modeling_qwen3_vl import (
     Qwen3VLCausalLMOutputWithPast,
     Qwen3VLForConditionalGeneration,
@@ -348,8 +349,6 @@ def forward_with_torch_backend(
     shift_labels: Optional[torch.LongTensor] = None,
     **kwargs,
 ) -> "Qwen3VLCausalLMOutputForPPO":
-    from torch.distributed.tensor import DTensor
-
     from verl.utils.experimental.torch_functional import FusedLinearForPPO
 
     outputs = self.model(input_ids, **kwargs)
@@ -369,12 +368,7 @@ def forward_with_torch_backend(
 
     vocab_weights = self.lm_head.weight
     if isinstance(vocab_weights, DTensor):
-        vocab_weights = vocab_weights.full_tensor()
-
-    if isinstance(hidden_states, DTensor):
-        hidden_states = hidden_states.full_tensor()
-
-    vocab_weights = vocab_weights.to(hidden_states.device)
+        vocab_weights = vocab_weights.full_tensor().to(hidden_states.device)
 
     fused_linear_for_ppo = FusedLinearForPPO()
     log_probs, entropy = fused_linear_for_ppo.forward(
@@ -398,8 +392,6 @@ def forward_with_triton_backend(
     shift_labels: Optional[torch.LongTensor] = None,
     **kwargs,
 ) -> "Qwen3VLCausalLMOutputForPPO":
-    from torch.distributed.tensor import DTensor
-
     from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy
 
     outputs = self.model(input_ids, **kwargs)
@@ -418,12 +410,7 @@ def forward_with_triton_backend(
 
     vocab_weights = self.lm_head.weight
     if isinstance(vocab_weights, DTensor):
-        vocab_weights = vocab_weights.full_tensor()
-
-    if isinstance(hidden_states, DTensor):
-        hidden_states = hidden_states.full_tensor()
-
-    vocab_weights = vocab_weights.to(hidden_states.device)
+        vocab_weights = vocab_weights.full_tensor().to(hidden_states.device)
 
     log_probs, entropy = linear_cross_entropy(
         hidden_states,
