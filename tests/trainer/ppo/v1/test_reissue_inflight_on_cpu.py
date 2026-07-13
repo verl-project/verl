@@ -20,11 +20,12 @@ still generating (``pending``/``running``) must be re-submitted from the prompt
 data persisted at submit time, while finished trajectories are left untouched.
 
 Because half-generated tokens are not durable, a re-issued prompt restarts
-generation from scratch; its original ``global_steps`` (the staleness anchor) is
-preserved by grouping re-issues per step.
+generation from scratch. Existing session trajectories under an in-flight prompt
+are removed, and the prompt is re-stamped with the resumed training step.
 
-The method is bound to a lightweight stub ``self`` (it only touches
-``self.agent_loop_manager``), avoiding the need to build a full trainer.
+The method is bound to a lightweight stub ``self`` exposing
+``agent_loop_manager``, ``trainer_mode``, and ``global_steps``, avoiding the need
+to build a full trainer.
 
 A second group of tests covers the ``tq.save_checkpoint``/``tq.load_checkpoint``
 round-trip that backs checkpoint consistency (matching ``_save_checkpoint``/
@@ -96,11 +97,12 @@ class FakeAgentLoopManager:
         self.batches.append(batch)
 
 
-def _make_trainer_stub(trainer_mode: str = "separate_async"):
+def _make_trainer_stub(trainer_mode: str = "separate_async", global_steps: int = 8):
     """Bind the real ``_reissue_inflight_prompts`` to a stub exposing only what it uses
-    (``agent_loop_manager`` and ``trainer_mode``)."""
+    (``agent_loop_manager``, ``trainer_mode``, and ``global_steps``)."""
     stub = type("Stub", (), {})()
     stub.trainer_mode = trainer_mode
+    stub.global_steps = global_steps
     stub.agent_loop_manager = FakeAgentLoopManager()
     stub._reissue_inflight_prompts = PPOTrainer._reissue_inflight_prompts.__get__(stub)
     return stub
@@ -154,16 +156,18 @@ def _clear_partition(partition_id: str) -> None:
 
 
 def test_reissue_resubmits_only_inflight_prompts(tq_init, partition_id):
-    """Only pending/running prompts are re-issued; finished/failure are left untouched."""
+    """In-flight groups restart cleanly; finished groups and their trajectories remain untouched."""
     pending = _uid()
     running = _uid()
     finished = _uid()
     _submit_prompt(partition_id, pending, "pending", global_steps=2)
     _submit_prompt(partition_id, running, "running", global_steps=2)
     _submit_prompt(partition_id, finished, "finished", global_steps=2)
-    _add_trajectory(partition_id, finished, session_id=0, global_steps=2)
+    pending_trajectory = _add_trajectory(partition_id, pending, session_id=0, global_steps=2)
+    running_trajectory = _add_trajectory(partition_id, running, session_id=0, global_steps=2)
+    finished_trajectory = _add_trajectory(partition_id, finished, session_id=0, global_steps=2)
 
-    stub = _make_trainer_stub()
+    stub = _make_trainer_stub(global_steps=3)
     try:
         reissued = stub._reissue_inflight_prompts(partition_id)
 
@@ -176,16 +180,22 @@ def test_reissue_resubmits_only_inflight_prompts(tq_init, partition_id):
         assert _prompt_status(partition_id, pending) == "pending"
         assert _prompt_status(partition_id, running) == "pending"
         assert _prompt_status(partition_id, finished) == "finished"
+
+        # A restarted group keeps only its prompt fields. Terminal groups are not modified.
+        remaining = tq.kv_list(partition_id=partition_id).get(partition_id, {})
+        assert pending_trajectory not in remaining
+        assert running_trajectory not in remaining
+        assert finished_trajectory in remaining
     finally:
         _clear_partition(partition_id)
 
 
-def test_reissue_preserves_prompt_data_and_global_steps(tq_init, partition_id):
-    """A re-issued batch carries back the original prompt data and its submission step."""
+def test_reissue_preserves_prompt_data_and_resets_global_steps(tq_init, partition_id):
+    """A restarted group keeps its prompt fields but uses the resumed dispatch step."""
     uid = _uid()
     _submit_prompt(partition_id, uid, "running", global_steps=7)
 
-    stub = _make_trainer_stub()
+    stub = _make_trainer_stub(global_steps=8)
     try:
         stub._reissue_inflight_prompts(partition_id)
 
@@ -193,17 +203,15 @@ def test_reissue_preserves_prompt_data_and_global_steps(tq_init, partition_id):
         batch = stub.agent_loop_manager.batches[0]
         assert list(batch["uid"]) == [uid]
         assert list(batch["raw_prompt"]) == [f"prompt-for-{uid}"]
-        # global_steps is re-stamped to the original submission step (scalar broadcast).
-        assert int(batch["global_steps"]) == 7
-        # The re-put prompt tag also carries the original step for staleness ordering.
+        assert int(batch["global_steps"]) == 8
         tag = tq.kv_list(partition_id=partition_id).get(partition_id, {})[uid]
-        assert tag["global_steps"] == 7
+        assert tag["global_steps"] == 8
     finally:
         _clear_partition(partition_id)
 
 
-def test_reissue_groups_by_global_steps(tq_init, partition_id):
-    """Prompts submitted at different steps are re-issued as separate per-step batches."""
+def test_reissue_combines_original_steps_under_resumed_step(tq_init, partition_id):
+    """All restarted groups belong to the resumed attempt, regardless of their original step."""
     step2 = [_uid(), _uid()]
     step5 = [_uid()]
     for uid in step2:
@@ -211,14 +219,15 @@ def test_reissue_groups_by_global_steps(tq_init, partition_id):
     for uid in step5:
         _submit_prompt(partition_id, uid, "running", global_steps=5)
 
-    stub = _make_trainer_stub()
+    stub = _make_trainer_stub(global_steps=6)
     try:
         reissued = stub._reissue_inflight_prompts(partition_id)
         assert reissued == 3
 
-        # One batch per distinct global_steps; each batch's step matches its prompts.
-        by_step = {int(batch["global_steps"]): set(batch["uid"]) for batch in stub.agent_loop_manager.batches}
-        assert by_step == {2: set(step2), 5: set(step5)}
+        assert len(stub.agent_loop_manager.batches) == 1
+        batch = stub.agent_loop_manager.batches[0]
+        assert int(batch["global_steps"]) == 6
+        assert set(batch["uid"]) == set(step2 + step5)
     finally:
         _clear_partition(partition_id)
 
@@ -320,14 +329,13 @@ def test_save_load_then_reissue_only_inflight(tq_init, partition_id, tmp_path):
     _clear_partition(partition_id)
     tq.load_checkpoint(ckpt_dir)
 
-    stub = _make_trainer_stub()
+    stub = _make_trainer_stub(global_steps=5)
     try:
         reissued = stub._reissue_inflight_prompts(partition_id)
         assert reissued == 1
         submitted_uids = {uid for batch in stub.agent_loop_manager.batches for uid in batch["uid"]}
         assert submitted_uids == {pending}
-        # Its restored global_steps anchor is preserved through save/load/re-issue.
-        assert int(stub.agent_loop_manager.batches[0]["global_steps"]) == 4
+        assert int(stub.agent_loop_manager.batches[0]["global_steps"]) == 5
     finally:
         _clear_partition(partition_id)
 

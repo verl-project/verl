@@ -335,9 +335,6 @@ class PPOTrainer(ABC):
         """
         self.agent_loop_manager = agent_loop_manager
 
-        # Only for async mode with inflight transfer_queue checkpoint saved.
-        self._reissue_inflight_prompts()
-
         self.logger = Tracking(
             project_name=self.config.trainer.project_name,
             experiment_name=self.config.trainer.experiment_name,
@@ -366,6 +363,8 @@ class PPOTrainer(ABC):
 
         # we start from step 1
         self.global_steps += 1
+        # Only for async mode with inflight transfer_queue checkpoint saved.
+        self._reissue_inflight_prompts()
         self.prev_step_profile = False
         self.curr_step_profile = (
             self.global_steps in self.config.global_profiler.steps
@@ -778,36 +777,45 @@ class PPOTrainer(ABC):
                 )
 
     def _reissue_inflight_prompts(self, partition_id: str = "train") -> int:
-        """Re-submit prompts that were in-flight (pending/running) when the checkpoint was taken."""
+        """Restart checkpointed pending/running prompt groups from their persisted prompt data."""
         if self.trainer_mode == "sync" or not _tq_supports_checkpoint():
             return 0
         data = tq.kv_list(partition_id)
         if not data:
             return 0
         items = data.get(partition_id, {})
-        # Group in-flight prompt uids by their original submission step.
-        uids_by_step: dict[int, list[str]] = defaultdict(list)
-        for key, tag in items.items():
-            if tag.get("is_prompt", False) and tag.get("status") in ("pending", "running"):
-                uids_by_step[int(tag["global_steps"])].append(key)
-        if not uids_by_step:
+        inflight_uids = [
+            key
+            for key, tag in items.items()
+            if tag.get("is_prompt", False) and tag.get("status") in ("pending", "running")
+        ]
+        if not inflight_uids:
             return 0
 
-        reissued = 0
-        for step, uids in uids_by_step.items():
-            # Read back the persisted prompt data and re-submit it for generation. Any half-generated
-            # trajectory keys are left behind: they are never sampled (only terminal prompts are) and
-            # get cleared with their prompt once the fresh generation completes and is trained.
-            batch = tq.kv_batch_get(keys=uids, partition_id=partition_id)
-            tu.assign_non_tensor_data(batch, "global_steps", step)
-            # Reset status to pending so a fresh generation lifecycle can run for these prompts.
-            tags = [{"is_prompt": True, "status": "pending", "global_steps": step}] * len(uids)
-            tq.kv_batch_put(keys=uids, partition_id=partition_id, tags=tags)
-            self.agent_loop_manager.generate_sequences(batch)
-            reissued += len(uids)
+        # Preserve only the prompt fields needed to restart. A running group may already contain
+        # completed session trajectories; mixing them with newly generated sessions would make the
+        # recovered group span two generation attempts.
+        batch = tq.kv_batch_get(keys=inflight_uids, partition_id=partition_id)
+        inflight_uid_set = set(inflight_uids)
+        old_trajectory_keys = [
+            key
+            for key, tag in items.items()
+            if not tag.get("is_prompt", False) and key.split("_", 1)[0] in inflight_uid_set
+        ]
+        if old_trajectory_keys:
+            tq.kv_clear(keys=old_trajectory_keys, partition_id=partition_id)
 
-        logger.info(f"Re-issued {reissued} in-flight prompts from checkpoint for partition {partition_id}")
-        return reissued
+        # Treat this as a new dispatch attempt for the resumed training step.
+        tu.assign_non_tensor_data(batch, "global_steps", self.global_steps)
+        tags = [{"is_prompt": True, "status": "pending", "global_steps": self.global_steps}] * len(inflight_uids)
+        tq.kv_batch_put(keys=inflight_uids, partition_id=partition_id, tags=tags)
+        self.agent_loop_manager.generate_sequences(batch)
+
+        logger.info(
+            f"Re-issued {len(inflight_uids)} in-flight prompts for step {self.global_steps}; "
+            f"cleared {len(old_trajectory_keys)} old trajectories from partition {partition_id}"
+        )
+        return len(inflight_uids)
 
     def _save_checkpoint(self):
         """Save actor, critic, and dataloader checkpoints to local (and optionally remote) storage."""
