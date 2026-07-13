@@ -349,6 +349,7 @@ def forward_with_torch_backend(
     **kwargs,
 ) -> "Qwen3VLCausalLMOutputForPPO":
     from torch.distributed.tensor import DTensor
+
     from verl.utils.experimental.torch_functional import FusedLinearForPPO
 
     outputs = self.model(input_ids, **kwargs)
@@ -398,6 +399,7 @@ def forward_with_triton_backend(
     **kwargs,
 ) -> "Qwen3VLCausalLMOutputForPPO":
     from torch.distributed.tensor import DTensor
+
     from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy
 
     outputs = self.model(input_ids, **kwargs)
