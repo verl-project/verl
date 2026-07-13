@@ -49,10 +49,13 @@ from verl.trainer.distillation import is_distillation_enabled
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import agg_loss
 from verl.trainer.ppo.metric_utils import (
+    RolloutMoELoadBalanceMetricsAccumulator,
     compute_data_metrics,
+    compute_moe_lb_metrics,
     compute_throughout_metrics,
     compute_timing_metrics,
     compute_variance_proxy_metrics,
+    get_metric_data_with_optional_routed_experts,
     process_validation_metrics,
 )
 from verl.trainer.ppo.padding_utils import upsample_batch_to_divisible_size
@@ -67,7 +70,7 @@ from verl.trainer.ppo.utils import (
     need_teacher_policy,
 )
 from verl.trainer.ppo.v1.replay_buffer import ReplayBuffer
-from verl.trainer.ppo.v1.utils import compute_advantage_for_multi_trajectories
+from verl.trainer.ppo.v1.utils import MetricsAggregator, compute_advantage_for_multi_trajectories
 from verl.utils import hf_processor, hf_tokenizer
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
@@ -80,6 +83,7 @@ from verl.utils.import_utils import load_extern_type
 from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
+from verl.utils.skip import SkipManager
 from verl.utils.tracking import Tracking, ValidationGenerationsLogger
 from verl.workers.config import CriticConfig, DistillationConfig
 from verl.workers.engine_workers import ActorRolloutRefWorker, TrainingWorker, TrainingWorkerConfig
@@ -116,6 +120,9 @@ class PPOTrainer(ABC):
         self.trainer_mode = self.config.trainer.v1.trainer_mode
         self.parameter_sync_step = self.config.trainer.v1.get(self.trainer_mode, {}).get("parameter_sync_step", 1)
         self.replay_buffer = self._build_replay_buffer()
+        self._rollout_moe_lb_metrics_accumulator = RolloutMoELoadBalanceMetricsAccumulator(
+            model_config=self.config.actor_rollout_ref.model
+        )
 
     def _build_replay_buffer(self) -> ReplayBuffer:
         """Instantiate the replay buffer (or a user-provided custom sampler).
@@ -175,7 +182,7 @@ class PPOTrainer(ABC):
             critic_cfg.engine.max_token_len_per_gpu = critic_cfg.ppo_infer_max_token_len_per_gpu
             worker_cfg = TrainingWorkerConfig(
                 model_type="value_model",
-                model_config=critic_cfg.model_config,
+                model_config=critic_cfg.model,
                 engine_config=critic_cfg.engine,
                 optimizer_config=critic_cfg.optim,
                 checkpoint_config=critic_cfg.checkpoint,
@@ -232,8 +239,10 @@ class PPOTrainer(ABC):
         if lora_rank <= 0:
             lora_rank = self.config.actor_rollout_ref.model.get("lora_rank", 0)
         self.ref_in_actor = lora_rank > 0 or self.config.actor_rollout_ref.model.get("lora_adapter_path") is not None
-        if self.use_reference_policy:
-            self.ref_policy_wg = all_wg[str(Role.ActorRolloutRef)]
+        if self.use_reference_policy and not self.ref_in_actor:
+            self.ref_policy_wg = all_wg[str(actor_role)]
+        if self.ref_in_actor:
+            self.ref_policy_wg = self.actor_rollout_wg
 
         # 7. initialize reward loop manager
         resource_pool = (
@@ -304,6 +313,9 @@ class PPOTrainer(ABC):
         """
         self.agent_loop_manager = agent_loop_manager
 
+        # initialize SkipManager for V1 rollout skip support
+        SkipManager.init(self.config)
+
         self.logger = Tracking(
             project_name=self.config.trainer.project_name,
             experiment_name=self.config.trainer.experiment_name,
@@ -332,6 +344,7 @@ class PPOTrainer(ABC):
 
         # we start from step 1
         self.global_steps += 1
+        SkipManager.set_step(self.global_steps)
         self.prev_step_profile = False
         self.curr_step_profile = (
             self.global_steps in self.config.global_profiler.steps
@@ -391,6 +404,7 @@ class PPOTrainer(ABC):
             self.logger.log(data=metrics, step=self.global_steps)
             progress_bar.update(1)
             self.global_steps += 1
+            SkipManager.set_step(self.global_steps)
             current_epoch = (self.global_steps - 1) // len(self.train_dataloader)
             if is_last_step:
                 self._shutdown_dump_executor()
@@ -403,53 +417,78 @@ class PPOTrainer(ABC):
         self._shutdown_dump_executor()
 
     def step(self, metrics: dict, timing_raw: dict) -> KVBatchMeta:
+        train_batch_size = self.config.data.train_batch_size
+        assert train_batch_size % self.parameter_sync_step == 0, (
+            f"train_batch_size ({train_batch_size}) must be divisible by "
+            f"parameter_sync_step ({self.parameter_sync_step})"
+        )
+        sample_batch_size = train_batch_size // self.parameter_sync_step
+        # TODO: use background feeder to add samples
         # 1. add batch to generate
         self._add_batch_to_generate()
 
-        # 2. sample batch from replay buffer
+        metrics_aggregator = MetricsAggregator()
+        combined_keys: list = []
+        combined_tags: list = []
+        combined_partition_id = "train"
+        for _ in range(self.parameter_sync_step):
+            iter_metrics: dict = {}
+            batch = self._step_once(iter_metrics, timing_raw, sample_batch_size)
+            sample_count = sum(not tag.get("is_padding", False) for tag in batch.tags)
+            metrics_aggregator.add_step_metrics(iter_metrics, sample_count=sample_count)
+            combined_keys.extend(batch.keys)
+            combined_tags.extend(batch.tags)
+            combined_partition_id = batch.partition_id
+
+        metrics.update(metrics_aggregator.get_aggregated_metrics())
+        return KVBatchMeta(partition_id=combined_partition_id, keys=combined_keys, tags=combined_tags)
+
+    def _step_once(self, metrics: dict, timing_raw: dict, sample_batch_size: int) -> KVBatchMeta:
+        """Run a single local update: sample one mini-batch and perform the full PPO pipeline once."""
+        # 1. sample batch from replay buffer
         with marked_timer("gen", timing_raw, color="red"):
             self.on_sample_begin()
             batch, off_policy_metrics = self.replay_buffer.sample(
                 global_steps=self.global_steps,
                 partition_id="train",
-                batch_size=self.config.data.train_batch_size,
+                batch_size=sample_batch_size,
             )
             metrics.update(off_policy_metrics)
             batch.extra_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
             self.on_sample_end()
 
-        # 3. [OPTIONAL] compute reward score with colocated reward model
+        # 2. [OPTIONAL] compute reward score with colocated reward model
         if self.reward_loop_manager.reward_loop_worker_handles is None:
             with marked_timer("reward", timing_raw, color="yellow"):
-                batch = self._compute_reward_colocate(batch)
+                batch = self._compute_reward_colocate(batch, metrics=metrics)
 
-        # 4. balance batch across data parallel groups
+        # 3. balance batch across data parallel groups
         batch = self._balance_batch(batch, metrics=metrics)
 
-        # 5. compute old_log_prob
+        # 4. compute old_log_prob
         with marked_timer("old_log_prob", timing_raw, color="blue"):
             batch = self._compute_old_log_prob(batch, metrics=metrics)
 
-        # 6. [OPTIONAL] compute ref_log_prob
+        # 5. [OPTIONAL] compute ref_log_prob
         if self.use_reference_policy:
             with marked_timer("ref", timing_raw, color="olive"):
                 batch = self._compute_ref_log_prob(batch, metrics=metrics)
 
-        # 7. [OPTIONAL] compute critic values
+        # 6. [OPTIONAL] compute critic values
         if self.use_critic:
             with marked_timer("values", timing_raw, color="cyan"):
                 batch = self._compute_values(batch, metrics=metrics)
 
-        # 8. compute advantage and return
+        # 7. compute advantage and return
         with marked_timer("adv", timing_raw, color="brown"):
             batch = self._compute_advantage(batch, metrics=metrics)
 
-        # 9. [OPTIONAL] update critic
+        # 8. [OPTIONAL] update critic
         if self.use_critic:
             with marked_timer("update_critic", timing_raw, color="pink"):
                 batch = self._update_critic(batch, metrics=metrics)
 
-        # 10. update actor
+        # 9. update actor
         if self.config.trainer.critic_warmup <= self.global_steps:
             with marked_timer("update_actor", timing_raw, color="red"):
                 batch = self._update_actor(batch, metrics=metrics)
@@ -565,13 +604,17 @@ class PPOTrainer(ABC):
         self.total_training_steps = total_training_steps
         logger.info(f"Total training steps: {self.total_training_steps}")
 
+        # The LR scheduler steps once per local update, and each global step performs
+        # ``parameter_sync_step`` local updates (see ``PPOTrainer.step``). The optimizer's
+        # schedule horizon must therefore count optimizer updates.
+        optim_total_training_steps = total_training_steps * self.parameter_sync_step
         try:
             OmegaConf.set_struct(self.config, True)
             with open_dict(self.config):
                 if OmegaConf.select(self.config, "actor_rollout_ref.actor.optim"):
-                    self.config.actor_rollout_ref.actor.optim.total_training_steps = total_training_steps
+                    self.config.actor_rollout_ref.actor.optim.total_training_steps = optim_total_training_steps
                 if OmegaConf.select(self.config, "critic.optim"):
-                    self.config.critic.optim.total_training_steps = total_training_steps
+                    self.config.critic.optim.total_training_steps = optim_total_training_steps
         except Exception as e:
             logger.warning(f"Warning: Could not set total_training_steps in config. Structure missing? Error: {e}")
 
@@ -1099,8 +1142,21 @@ class PPOTrainer(ABC):
             if self.use_critic:
                 self.critic_wg.stop_profile()
 
+    @SkipManager.annotate_tq(role="rollout_tq", phase="submit")
     def _add_batch_to_generate(self):
-        """Sample a batch from dataloader and add to AgentLoopManager."""
+        """Sample a batch from dataloader and add to AgentLoopManager.
+
+        When ``rollout_tq`` skip is enabled, the decorator intercepts: it calls
+        ``_next_train_batch`` first (keeping the dataloader aligned), then either
+        injects cached data (cache-hit) or delegates to ``_submit_batch_to_rollout``
+        (cache-miss).  This body only runs when skip is disabled or the current
+        step is outside ``skip.steps``.
+        """
+        batch = self._next_train_batch()
+        self._submit_batch_to_rollout(batch)
+
+    def _next_train_batch(self):
+        """Advance the dataloader and return a batch with fresh uids."""
         try:
             if self.train_dataloader_it is None:
                 self.train_dataloader_it = iter(self.train_dataloader)
@@ -1112,18 +1168,73 @@ class PPOTrainer(ABC):
         batch_dict["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch_dict["raw_prompt"]))], dtype=object)
         batch = tu.get_tensordict(batch_dict)
         tu.assign_non_tensor_data(batch, "global_steps", self.global_steps)
+        return batch
 
-        # Register each prompt (GRPO group) in TransferQueue as a tag-only status marker
+    def _submit_batch_to_rollout(self, batch):
+        """Register prompt tags in TransferQueue and dispatch to AgentLoopManager."""
         tags = [{"is_prompt": True, "status": "pending", "global_steps": self.global_steps}] * len(batch)
         tq.kv_batch_put(keys=list(batch["uid"]), partition_id="train", tags=tags)
-
-        # add batch to agent loop manager
         self.agent_loop_manager.generate_sequences(batch)
 
-    def _compute_reward_colocate(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
-        """Compute the reward with colocate reward model."""
-        # TODO: add reward model
-        raise NotImplementedError
+    def _compute_reward_colocate(self, batch: KVBatchMeta, metrics: dict | None = None) -> KVBatchMeta:
+        """Compute the reward score with a colocated reward model."""
+        assert self.reward_loop_manager is not None, "RewardLoopManager is None"
+
+        # 1. read the fields required by the reward model from TransferQueue.
+        fields = ["prompts", "responses", "raw_prompt"]
+        data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=fields)
+
+        prompt_lengths = data["prompts"].offsets().diff()
+        response_lengths = data["responses"].offsets().diff()
+        prompts = data["prompts"].to_padded_tensor(padding=self.tokenizer.pad_token_id)
+        responses = data["responses"].to_padded_tensor(padding=self.tokenizer.pad_token_id)
+
+        # 2. rebuild the attention mask aligned with the [prompts | responses] layout.
+        prompt_mask = self._lengths_to_mask(prompt_lengths, prompts.size(1))
+        response_mask = self._lengths_to_mask(response_lengths, responses.size(1))
+        attention_mask = torch.cat([prompt_mask, response_mask], dim=1)
+
+        # `raw_prompt` is a non-tensor field; depending on the TransferQueue backend it
+        # comes back as a tensordict LinkedList (a `list` subclass), a NonTensorStack or a
+        # numpy array. `list(...)` normalizes all of them to a plain list where each element
+        # is one sample's chat-message list (whereas `.tolist()` only exists on numpy/tensors).
+        raw_prompts = list(data["raw_prompt"])
+        raw_prompt_arr = np.empty(len(raw_prompts), dtype=object)
+        raw_prompt_arr[:] = raw_prompts
+
+        rm_input = DataProto(
+            batch=TensorDict(
+                {"prompts": prompts, "responses": responses, "attention_mask": attention_mask},
+                batch_size=len(batch),
+            ),
+            non_tensor_batch={"raw_prompt": raw_prompt_arr},
+        )
+
+        # 3. run the reward model (wakes/sleeps the reward model internally).
+        rm_output = self.reward_loop_manager.compute_rm_score(rm_input)
+
+        # 4. write rm_scores (and reward extra info) back to TransferQueue.
+        padded_rm_scores = rm_output.batch["rm_scores"]
+        rm_scores = torch.nested.as_nested_tensor(
+            [padded_rm_scores[i, : response_lengths[i]] for i in range(len(batch))],
+            layout=torch.jagged,
+        )
+        write_back = {"rm_scores": rm_scores}
+        for key in rm_output.meta_info.get("reward_extra_keys", []):
+            write_back[key] = rm_output.non_tensor_batch[key]
+        tq.kv_batch_put(
+            keys=batch.keys,
+            partition_id=batch.partition_id,
+            fields=tu.get_tensordict(write_back),
+        )
+
+        return batch
+
+    @staticmethod
+    def _lengths_to_mask(lengths: torch.Tensor, width: int) -> torch.Tensor:
+        """Build a right-padded mask of shape (len(lengths), width) from per-row valid lengths."""
+        positions = torch.arange(width, device=lengths.device).unsqueeze(0)
+        return (positions < lengths.unsqueeze(1)).to(torch.int64)
 
     def _get_required_batch_multiple(self, dp_size: int) -> int:
         """Return the global batch multiple required by downstream train steps(e.g. critics, actors)."""
@@ -1260,6 +1371,12 @@ class PPOTrainer(ABC):
     def _compute_values(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
         """Compute the values of the batch."""
         # 1. compute value
+        batch.extra_info.update(
+            {
+                "compute_loss": False,
+                "temperature": self.config.actor_rollout_ref.rollout.temperature,
+            }
+        )
         output = self.critic_wg.infer_batch(batch)
         # TODO: DataProtoFuture support KVBatchMeta
         ray.get(output.futures)
@@ -1344,6 +1461,7 @@ class PPOTrainer(ABC):
             "epochs": self.config.critic.ppo_epochs,
             "seed": self.config.critic.data_loader_seed,
             "dataloader_kwargs": {"shuffle": self.config.critic.shuffle},
+            "temperature": self.config.actor_rollout_ref.rollout.temperature,
         }
         batch.extra_info.update(extra_info)
 
@@ -1368,9 +1486,18 @@ class PPOTrainer(ABC):
             if is_distillation_enabled(self.config.get("distillation"))
             else False
         )
+        distillation_only = False  # distillation_only flag means we can skip policy loss and reduce mem footprint
+        if is_distillation_enabled(self.config.get("distillation")):
+            distillation_loss_cfg = self.distillation_config.distillation_loss
+            distillation_only = (
+                distillation_use_topk
+                and not distillation_loss_cfg.use_task_rewards
+                and not distillation_loss_cfg.use_policy_gradient
+            )
         extra_info = {
             "calculate_entropy": calculate_entropy,
             "distillation_use_topk": distillation_use_topk,
+            "distillation_only": distillation_only,
             "global_batch_size": ppo_mini_batch_size,
             "mini_batch_size": ppo_mini_batch_size,
             "epochs": self.config.actor_rollout_ref.actor.ppo_epochs,
@@ -1402,7 +1529,17 @@ class PPOTrainer(ABC):
             "token_level_rewards",
             "num_turns",
         ]
-        data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=fields)
+        moe_lb_metrics_interval = self.config.actor_rollout_ref.rollout.get("moe_load_balance_metrics_interval", 0)
+        data = get_metric_data_with_optional_routed_experts(
+            keys=batch.keys,
+            partition_id=batch.partition_id,
+            fields=fields,
+            moe_lb_metrics_interval=moe_lb_metrics_interval,
+            global_steps=global_steps,
+            accumulator=self._rollout_moe_lb_metrics_accumulator,
+            kv_batch_get=tq.kv_batch_get,
+        )
+
         num_turns = np.array(data.pop("num_turns").tolist())
         prompt_length = data["prompts"].offsets().diff()
         response_length = data["responses"].offsets().diff()
@@ -1435,6 +1572,14 @@ class PPOTrainer(ABC):
 
         # 2. compute metrics
         metrics.update({"training/global_step": global_steps, "training/epoch": epoch})
+        metrics.update(
+            compute_moe_lb_metrics(
+                metrics_batch=metrics_batch,
+                moe_lb_metrics_interval=moe_lb_metrics_interval,
+                global_steps=global_steps,
+                accumulator=self._rollout_moe_lb_metrics_accumulator,
+            )
+        )
         metrics.update(compute_data_metrics(batch=metrics_batch, use_critic=self.use_critic))
         metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
         n_gpus = self.resource_pool_manager.get_n_gpus()
@@ -1458,17 +1603,20 @@ class PPOTrainer(ABC):
         metrics.update(compute_spec_decode_metrics(spec_drafts, spec_accepts, spec_verifies, non_padding_mask))
 
         # 5. off-policy staleness metrics
+        #   global_steps is the model weight version (one update_weights per global_step), and
+        #   min/max_global_steps are the versions a trajectory was generated across, so all quantities
+        #   below are already in model-version units.
         #   - trajectory_spans: how many distinct model versions a single trajectory was
         #     generated across (1 == fully generated on a single version). This captures the
         #     within-trajectory policy inconsistency caused by partial rollout / continuation.
-        #   - trajectory_staleness: how many training steps the trajectory lags behind the
+        #   - trajectory_staleness: how many model versions the trajectory lags behind the
         #     *current* policy. A trajectory spans versions [min_global_steps, max_global_steps],
         #     so the lag is a range: the freshest weights used give the lower bound
         #     (global_steps - max_global_steps) and the oldest weights the worst case
         #     (global_steps - min_global_steps). We log the lower bound as the primary metric.
-        trajectory_spans = (max_global_steps - min_global_steps + 1) / self.parameter_sync_step
-        trajectory_staleness = ((global_steps - 1) - max_global_steps) / self.parameter_sync_step
-        trajectory_staleness_worst = ((global_steps - 1) - min_global_steps) / self.parameter_sync_step
+        trajectory_spans = max_global_steps - min_global_steps + 1
+        trajectory_staleness = (global_steps - 1) - max_global_steps
+        trajectory_staleness_worst = (global_steps - 1) - min_global_steps
         metrics.update(
             {
                 "training/off_policy/trajectory_spans/mean": trajectory_spans.mean(),

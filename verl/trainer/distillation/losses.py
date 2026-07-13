@@ -207,9 +207,14 @@ def distillation_ppo_loss(
     # Called as final policy loss
     distillation_loss_config = distillation_config.distillation_loss
     distill_loss, distill_metrics = distillation_loss(config, distillation_config, model_output, data)
-    policy_loss, policy_metrics = ppo_loss(config, model_output, data, dp_group)
-    if not distillation_loss_config.use_task_rewards:
+    if not distillation_loss_config.use_task_rewards and not distillation_loss_config.use_policy_gradient:
+        # no need to compute policy loss
         policy_loss = 0.0
+        policy_metrics = {}
+    else:
+        policy_loss, policy_metrics = ppo_loss(config, model_output, data, dp_group)
+        if not distillation_loss_config.use_task_rewards:
+            policy_loss = 0.0
 
     # Combine distillation with policy loss
     policy_metrics.update(distill_metrics)

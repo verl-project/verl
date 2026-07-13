@@ -175,6 +175,7 @@ class McoreEngineConfig(EngineConfig):
         override_ddp_config (dict[str, Any]): Override configuration for DDP.
         override_transformer_config (dict[str, Any]): Override configuration for transformer.
         use_mbridge (bool): Whether to use MBridge for communication.
+        vanilla_mbridge (bool): Whether to use the deprecated legacy mbridge backend instead of Megatron-Bridge.
         use_megatron_fsdp (bool): Whether to use Megatron-FSDP (Zero-3 sharding).
         dtype (str): Mixed precision training param dtype, default "bfloat16"
     """
@@ -194,6 +195,7 @@ class McoreEngineConfig(EngineConfig):
     max_seqlen_per_dp_cp_rank: Optional[int] = None
     sequence_parallel: bool = True
     use_distributed_optimizer: bool = True
+    pad_bshd_to_minibatch_max: bool = True
     use_dist_checkpointing: bool = False
     dist_checkpointing_path: Optional[str] = None
     dist_checkpointing_prefix: str = ""
@@ -203,7 +205,7 @@ class McoreEngineConfig(EngineConfig):
     override_transformer_config: dict[str, Any] = field(default_factory=dict)
     override_mcore_model_config: dict[str, Any] = field(default_factory=dict)
     use_mbridge: bool = True
-    vanilla_mbridge: bool = True
+    vanilla_mbridge: bool = False
     use_megatron_fsdp: bool = False
     strategy: str = "megatron"
     qat: QATEngineConfig = field(default_factory=QATEngineConfig)
@@ -213,6 +215,13 @@ class McoreEngineConfig(EngineConfig):
         """config validation logics go here"""
         assert self.strategy == "megatron"
         assert self.dtype in ["bfloat16", "float16"], f"dtype {self.dtype} not supported"
+        if self.vanilla_mbridge:
+            warnings.warn(
+                "The legacy mbridge backend selected by `vanilla_mbridge=True` is deprecated and will be removed "
+                "in a future release. Use Megatron-Bridge by setting `vanilla_mbridge=False` or removing the option.",
+                FutureWarning,
+                stacklevel=2,
+            )
         if self.tensor_model_parallel_size == 1:
             warnings.warn("set sequence parallel to false as TP size is 1", stacklevel=2)
             self.sequence_parallel = False
@@ -385,12 +394,6 @@ class VeOmniEngineConfig(EngineConfig):
     force_use_huggingface: bool = False
     activation_gpu_limit: float = 0.0
     basic_modules: Optional[list[str]] = field(default_factory=list)
-    # MoE expert-load monitor: when > 0, attach VeOmni's MoERouterMonitor.
-    # Scalar violation metrics flow through the engine's metrics dict (all
-    # Tracking backends); heatmap images are logged directly to wandb on
-    # rank 0. Rollout/log-prob forwards are excluded. Counts are all-reduced
-    # across DP/SP groups. Disabled (0) by default; no-op on non-MoE models.
-    moe_load_balance_monitor_interval: int = 0
 
     def __post_init__(self):
         super().__post_init__()
@@ -431,6 +434,13 @@ class TorchtitanEngineConfig(EngineConfig):
         context_parallel_size (int): Context parallel size, default 1
         attn_type (str): Attention type for torchtitan's model (e.g., "sdpa", "flex", "varlen"),
             default "flex"
+        spmd_backend (str): torchtitan SPMD backend, one of "default", "full_dtensor", "spmd_types",
+            default "spmd_types"
+        activation_checkpoint (str): Activation checkpointing mode, one of "selective", "full", "none".
+            Default "selective" (torchtitan's default). Use "none" under spmd_backend="spmd_types" with
+            eager: selective/full AC recompute runs on the autograd backward
+            thread where the thread-local SPMD mesh is inactive, so spmd.assert_type raises
+            "no current mesh". Compiled runs recompute in-graph and are unaffected.
         strategy (str): Strategy to use for distributed training, default "torchtitan"
         seed (int): Random seed for reproducibility.
         full_determinism (bool): If true, enable_full_determinism is called to ensure reproducible results
@@ -458,6 +468,8 @@ class TorchtitanEngineConfig(EngineConfig):
     pipeline_parallel_size: int = 1
     context_parallel_size: int = 1
     attn_type: str = "flex"
+    spmd_backend: str = "spmd_types"
+    activation_checkpoint: str = "selective"
     max_seq_len: Optional[int] = None
     strategy: str = "torchtitan"
     seed: int = 42
@@ -465,6 +477,15 @@ class TorchtitanEngineConfig(EngineConfig):
 
     def __post_init__(self):
         super().__post_init__()
+        assert self.attn_type in ["flex", "flex_flash", "varlen"], (
+            f"attn_type {self.attn_type} not supported (sdpa is not a valid language-model backend)"
+        )
+        assert self.spmd_backend in ["default", "full_dtensor", "spmd_types"], (
+            f"spmd_backend {self.spmd_backend} not supported"
+        )
+        assert self.activation_checkpoint in ["selective", "full", "none"], (
+            f"activation_checkpoint {self.activation_checkpoint} not supported"
+        )
         assert self.strategy in ["torchtitan"], f"strategy {self.strategy} not supported"
 
 

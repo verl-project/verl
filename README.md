@@ -48,6 +48,7 @@ verl is fast with:
 </p>
 
 ## News
+- [2026/06] [verl-SpeCo](https://github.com/verl-project/verl-SpeCo) is pre-released: a co-training framework for speculative decoding across RL training and inference, keeping draft models aligned during training and reusable for accelerated serving, built on top of verl.
 - [2026/05] [uni-agent](https://github.com/verl-project/uni-agent) is released: a unified agent framework to build, run, and train LLM agents at scale, built on top of verl.
 - [2026/05] [VeRL-Omni](https://github.com/verl-project/verl-omni) is pre-released: a unified RL stack for diffusion and omni-modal model post-training built on top of verl. Read the [blog post](https://vllm.ai/blog/2026-05-14-verl-omni) for details.
 - [2026/05] verl's zero-mismatch HuggingFace rollout [vexact](https://github.com/verl-project/vexact) is released: with batch-invariant kernels, shared model definition with FSDP, and out-of-box examples compatible with VeOmni.

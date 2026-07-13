@@ -55,17 +55,26 @@ class GlobalRequestLoadBalancer:
       multi-turn conversations route to the same server.
     - **Least-loaded Selection**: When no sticky session exists, selects the
       server with the fewest in-flight requests.
+    - **Deterministic Routing**: When ``full_determinism=True``, tie-breaking
+      among equally-loaded servers uses ``hash(request_id)`` so the same
+      request always routes to the same server across runs.
     - **Dynamic Server Management**: Supports add/remove servers at runtime
       for hybrid scaling.
     """
 
-    def __init__(self, servers: dict[str, ray.actor.ActorHandle], max_cache_size: int = DEFAULT_ROUTING_CACHE_SIZE):
+    def __init__(
+        self,
+        servers: dict[str, ray.actor.ActorHandle],
+        max_cache_size: int = DEFAULT_ROUTING_CACHE_SIZE,
+        full_determinism: bool = False,
+    ):
         if not servers:
             raise ValueError("servers must be non-empty")
 
         self._servers: dict[str, ray.actor.ActorHandle] = dict(servers)
         self._inflight_requests: dict[str, int] = {sid: 0 for sid in servers}
         self._request_id_to_server: LRUCache = LRUCache(maxsize=max_cache_size)
+        self._full_determinism = full_determinism
 
     def acquire_server(self, request_id: str) -> tuple[str, ray.actor.ActorHandle]:
         """Acquire a server for the given request (sticky + least-loaded).
@@ -87,7 +96,15 @@ class GlobalRequestLoadBalancer:
         if not self._inflight_requests:
             raise RuntimeError("No available servers in load balancer")
 
-        server_id = min(self._inflight_requests, key=self._inflight_requests.get)
+        min_count = min(self._inflight_requests.values())
+        candidates = [sid for sid, count in self._inflight_requests.items() if count == min_count]
+        if len(candidates) == 1:
+            server_id = candidates[0]
+        elif self._full_determinism:
+            # Deterministic tie-breaking: same request_id → same server across runs
+            server_id = candidates[hash(request_id) % len(candidates)]
+        else:
+            server_id = candidates[0]
         self._request_id_to_server[request_id] = server_id
         self._inflight_requests[server_id] += 1
         return server_id, self._servers[server_id]
@@ -171,7 +188,8 @@ class LLMServerClient:
 
     async def _acquire_server(self, request_id: str) -> tuple[str, ray.actor.ActorHandle]:
         # Atomic acquire: returns (server_id, handle) in one Ray RPC.
-        return await self._load_balancer.acquire_server.remote(request_id=request_id)
+        server_id, handle = await self._load_balancer.acquire_server.remote(request_id=request_id)
+        return server_id, handle
 
     def _release_server(self, server_id: str) -> None:
         # Fire-and-forget: release is just a counter decrement, no need to await.
@@ -208,6 +226,11 @@ class LLMServerClient:
                 multimodal_kwargs["audio_data"] = audio_data
             if mm_processor_kwargs:
                 multimodal_kwargs["mm_processor_kwargs"] = mm_processor_kwargs
+            # priority is only supported by vLLM rollout server.
+            priority = kwargs.pop("priority", 0)
+            priority_kwargs = (
+                {"priority": priority} if priority != 0 and self.config.actor_rollout_ref.rollout.name == "vllm" else {}
+            )
             output: TokenOutput = await server.generate.remote(
                 request_id=uuid4().hex,  # use new request_id for each turn
                 prompt_ids=prompt_ids,
@@ -215,6 +238,7 @@ class LLMServerClient:
                 image_data=image_data,
                 video_data=video_data,
                 **multimodal_kwargs,
+                **priority_kwargs,
                 **kwargs,
             )
             global_steps = output.extra_fields.get("global_steps")
@@ -241,6 +265,7 @@ class FullyAsyncLLMServerClient(LLMServerClient):
         video_data: Optional[list[Any]] = None,
         audio_data: Optional[list[Any]] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
+        **kwargs: Any,
     ) -> TokenOutput:
         """Generate tokens from prompt ids.
 
@@ -282,6 +307,7 @@ class FullyAsyncLLMServerClient(LLMServerClient):
                 video_data=video_data,
                 audio_data=audio_data,
                 mm_processor_kwargs=mm_processor_kwargs,
+                **kwargs,
             )
 
             # 2. merge output into final_output
@@ -316,7 +342,12 @@ class FullyAsyncLLMServerClient(LLMServerClient):
                     break
 
             # 4. check stop reason
-            if output.stop_reason not in ("aborted", "abort"):
+            # If partial rollout not enable, aborted samples will be dropped.
+            # For v1 trainer, should_retry is always True. Since self.config.async_training is not exist.
+            should_retry = True
+            if hasattr(self.config, "async_training") and not self.config.async_training.partial_rollout:
+                should_retry = False
+            if output.stop_reason not in ("aborted", "abort") or not should_retry:
                 break
 
             await asyncio.sleep(1)
@@ -448,6 +479,7 @@ class LLMServerManager:
         self.global_load_balancer = GlobalRequestLoadBalancer.remote(
             servers=dict(zip(self.server_addresses, self.server_handles, strict=True)),
             max_cache_size=DEFAULT_ROUTING_CACHE_SIZE,
+            full_determinism=getattr(self.rollout_config, "full_determinism", False),
         )
 
     def get_client(self, client_cls=LLMServerClient, **kwargs) -> LLMServerClient:

@@ -1,7 +1,7 @@
 Ascend Dockerfile Build Guidance
 ===================================
 
-Last updated：05/19/2026.
+Last updated：06/23/2026.
 
 
 镜像获取与公开镜像地址
@@ -9,9 +9,9 @@ Last updated：05/19/2026.
 
 昇腾在 `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_ 中托管每日构建的 A2/A3 镜像，基于 `Dockerfile <../../../docker/ascend>`_ 构建，具体说明见 ``Dockerfile构建镜像脚本清单`` 。
 
-每日构建镜像名格式：verl-{CANN版本}-{NPU设备类型}-{操作系统版本}-{python版本}-latest
+每日构建镜像名格式：latest-{CANN版本}-{torch_npu版本}[-{适用产品信息}-{操作系统}]-{Python版本}[-{推理后端}-{其他字段}]
 
-verl release版本镜像名格式：verl-{CANN版本}-{NPU设备类型}-{操作系统版本}-{python版本}-{verl release版本号}
+verl release版本镜像名格式：{verl release版本号}-{CANN版本}-{torch_npu版本}[-{适用产品信息}-{操作系统}]-{Python版本}[-{推理后端}-{其他字段}]
 
 
 
@@ -79,6 +79,8 @@ A3              8.2.RC1                vLLM            `Dockerfile.ascend_8.2.rc
 ============== ==================== ============== ============== ==============================================================
 设备类型         CANN基础镜像版本     推理后端        verl版本       参考文件                                
 ============== ==================== ============== ============== ==============================================================
+A2              9.0.0                vLLM          release/v0.8.0 `Dockerfile.ascend_9.0.0_a2_v0.8.0 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_9.0.0_a2_v0.8.0>`_     
+A3              9.0.0                vLLM          release/v0.8.0 `Dockerfile.ascend_9.0.0_a3_v0.8.0 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_9.0.0_a3_v0.8.0>`_ 
 A2              8.5.0                vLLM          release/v0.7.1 `Dockerfile.ascend_8.5.0_a2_v0.7.1 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.0_a2_v0.7.1>`_     
 A3              8.5.0                vLLM          release/v0.7.1 `Dockerfile.ascend_8.5.0_a3_v0.7.1 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.0_a3_v0.7.1>`_ 
 ============== ==================== ============== ============== ==============================================================

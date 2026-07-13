@@ -39,6 +39,7 @@ verl is fast with:
    :maxdepth: 2
    :caption: Programming guide
 
+   extend_guide
    hybrid_flow
    single_controller
 
@@ -92,6 +93,7 @@ verl is fast with:
    workers/model_engine
    workers/engine_workers
    workers/automodel_workers
+   workers/torchtitan_workers
    workers/sglang_worker
    workers/trtllm_worker
 
@@ -152,6 +154,7 @@ verl is fast with:
    data/transfer_queue.md
    advance/grafana_prometheus.md
    advance/mtp.md
+   advance/determinism.md
 
 .. toctree::
    :maxdepth: 1

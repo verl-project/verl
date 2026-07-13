@@ -59,7 +59,8 @@ SGLANG_REQUIRES = [
     "torch==2.9.1",
 ]
 TRL_REQUIRES = ["trl<=0.9.6"]
-MCORE_REQUIRES = ["mbridge"]
+# Keep the legacy mbridge dependency available during its deprecation window.
+MCORE_REQUIRES = ["megatron-bridge", "mbridge"]
 
 extras_require = {
     "test": TEST_REQUIRES,

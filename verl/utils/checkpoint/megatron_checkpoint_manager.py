@@ -1266,16 +1266,17 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             ]
         )
 
-        # ── 2. Save model weights in HF format via bridge ───────────────────
+        # ── 2. HF config / tokenizer (rank 0) ───────────────────────────────
+        if self.should_save_hf_model:
+            self._save_hf_config_and_tokenizer(local_path)
+            torch.distributed.barrier()
+
+        # ── 3. Save model weights in HF format via bridge ───────────────────
         if self.should_save_hf_model:
             hf_ckpt_path = get_hf_model_checkpoint_path(local_path)
             log_with_rank(f"Saving HF model checkpoint to {hf_ckpt_path} with bridge", rank=self.rank, logger=logger)
             self._save_model_as_hf_via_bridge(hf_ckpt_path)
             log_with_rank(f"Saved bridge checkpoint to {hf_ckpt_path}", rank=self.rank, logger=logger)
-
-        # ── 3. HF config / tokenizer (rank 0) ───────────────────────────────
-        if self.should_save_hf_model:
-            self._save_hf_config_and_tokenizer(local_path)
 
         # ── 4. Transformer config (rank 0, at checkpoint root) ──────────────
         if self.should_save_extra:

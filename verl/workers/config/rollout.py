@@ -15,7 +15,7 @@ import warnings
 from dataclasses import dataclass, field
 from typing import Optional
 
-from omegaconf import MISSING
+from omegaconf import MISSING, DictConfig, OmegaConf
 
 from verl.base_config import BaseConfig
 from verl.utils.profiler import ProfilerConfig
@@ -151,6 +151,8 @@ class RolloutConfig(BaseConfig):
         "response_length",
         "expert_parallel_size",
         "moe_tensor_parallel_size",
+        "full_determinism",
+        "max_num_seqs",
     }
 
     name: Optional[str] = MISSING
@@ -164,6 +166,13 @@ class RolloutConfig(BaseConfig):
     do_sample: bool = True
     n: int = 1
     repetition_penalty: float = 1.0
+
+    # Whether to enable full determinism for reproducibility.
+    full_determinism: bool = False
+
+    # Random seed for rollout. Used as the seed for vLLM sampling and
+    # enable_full_determinism() when full_determinism is True.
+    seed: int = 42
 
     # Early termination threshold for multi-turn rollout in sglang.
     # Abort remaining requests when (1 - over_sample_rate) * total_requests are completed.
@@ -253,6 +262,7 @@ class RolloutConfig(BaseConfig):
     quantization_config_file: Optional[str] = None
 
     enable_rollout_routing_replay: bool = False
+    moe_load_balance_metrics_interval: int = 0
 
     enable_sleep_mode: bool = True
 
@@ -314,8 +324,6 @@ class RolloutConfig(BaseConfig):
         if isinstance(self.disaggregation, dict):
             object.__setattr__(self, "disaggregation", DisaggregationConfig(**self.disaggregation))
         elif not isinstance(self.disaggregation, DisaggregationConfig):
-            from omegaconf import DictConfig, OmegaConf
-
             if not isinstance(self.disaggregation, DictConfig):
                 raise TypeError(
                     f"rollout.disaggregation must be dict, DictConfig, or DisaggregationConfig; "
@@ -327,8 +335,7 @@ class RolloutConfig(BaseConfig):
                 DisaggregationConfig(**OmegaConf.to_container(self.disaggregation, resolve=True)),
             )
 
-        if self.disaggregation.enabled and self.name != "sglang":
+        if self.disaggregation.enabled and self.name not in ("sglang", "vllm"):
             raise ValueError(
-                f"rollout.disaggregation.enabled=True is currently only supported with "
-                f"rollout.name='sglang'; got {self.name!r}. (vLLM PD is a tracked follow-up.)"
+                f"rollout.disaggregation.enabled=True requires rollout.name in ('sglang', 'vllm'); got {self.name!r}."
             )

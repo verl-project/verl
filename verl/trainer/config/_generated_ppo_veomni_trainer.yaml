@@ -57,7 +57,6 @@ actor_rollout_ref:
       force_use_huggingface: false
       activation_gpu_limit: 0.0
       basic_modules: []
-      moe_load_balance_monitor_interval: 0
       router_replay:
         _target_: verl.workers.config.EngineRouterReplayConfig
         mode: disabled
@@ -233,7 +232,6 @@ actor_rollout_ref:
       force_use_huggingface: false
       activation_gpu_limit: 0.0
       basic_modules: []
-      moe_load_balance_monitor_interval: 0
       router_replay:
         _target_: verl.workers.config.EngineRouterReplayConfig
         mode: disabled
@@ -247,6 +245,8 @@ actor_rollout_ref:
     temperature: 1.0
     top_k: -1
     top_p: 1
+    full_determinism: false
+    seed: 42
     prompt_length: ${oc.select:data.max_prompt_length,512}
     response_length: ${oc.select:data.max_response_length,512}
     dtype: bfloat16
@@ -327,6 +327,7 @@ actor_rollout_ref:
       max_samples_per_step_per_worker: null
     skip_tokenizer_init: true
     enable_rollout_routing_replay: false
+    moe_load_balance_metrics_interval: 0
     profiler:
       _target_: verl.utils.profiler.ProfilerConfig
       tool: ${oc.select:global_profiler.tool,null}
@@ -471,6 +472,9 @@ data:
     name: null
   return_multi_modal_inputs: true
   apply_chat_template_kwargs: {}
+  continuous_token:
+    enable: false
+    model_family: auto
   mm_processor_kwargs: {}
 critic:
   optim:
@@ -525,7 +529,6 @@ critic:
     force_use_huggingface: false
     activation_gpu_limit: 0.0
     basic_modules: []
-    moe_load_balance_monitor_interval: 0
     router_replay:
       _target_: verl.workers.config.EngineRouterReplayConfig
       mode: disabled
@@ -544,6 +547,7 @@ critic:
   data_loader_seed: ${oc.select:actor_rollout_ref.actor.data_loader_seed,null}
   cliprange_value: 0.5
   loss_agg_mode: ${oc.select:actor_rollout_ref.actor.loss_agg_mode,token-mean}
+  loss_scale_factor: ${oc.select:actor_rollout_ref.actor.loss_scale_factor,null}
   checkpoint:
     _target_: verl.trainer.config.CheckpointConfig
     save_contents:
@@ -724,6 +728,8 @@ reward:
       load_format: auto
       layered_summon: false
       scheduling_policy: fcfs
+      full_determinism: false
+      seed: 42
       multi_stage_wake_up: false
       engine_kwargs: {}
       limit_images: null
@@ -859,14 +865,14 @@ trainer:
   max_critic_ckpt_to_keep: null
   ray_wait_register_center_timeout: 300
   device: cuda
-  use_v1: false
+  use_v1: true
   v1:
     trainer_mode: sync
     sync: {}
     colocate_async:
       num_warmup_batches: 1
     separate_async:
-      num_warmup_batches: 4
+      num_warmup_batches: 1
       parameter_sync_step: 4
     sampler:
       max_off_policy_threshold: 8
@@ -930,6 +936,11 @@ transfer_queue:
 skip:
   _target_: verl.utils.skip.SkipManagerConfig
   rollout:
+    enable: false
+    dump_dir: ~/.verl/rollout_dump
+    steps: []
+    action: cache
+  rollout_tq:
     enable: false
     dump_dir: ~/.verl/rollout_dump
     steps: []

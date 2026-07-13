@@ -105,7 +105,7 @@ CRITIC_GRAD_OFFLOAD=${CRITIC_GRAD_OFFLOAD:-$COMMON_GRAD_OFFLOAD}
 CRITIC_OPTIMIZER_OFFLOAD=${CRITIC_OPTIMIZER_OFFLOAD:-$COMMON_OPTIMIZER_OFFLOAD}
 RM_PARAM_OFFLOAD=${RM_PARAM_OFFLOAD:-$COMMON_PARAM_OFFLOAD}
 USE_MBRIDGE=${USE_MBRIDGE:-True}
-VANILLA_MBRIDGE=${VANILLA_MBRIDGE:-True}
+VANILLA_MBRIDGE=${VANILLA_MBRIDGE:-False}
 VALUE_VANILLA_MBRIDGE=${VALUE_VANILLA_MBRIDGE:-$VANILLA_MBRIDGE}
 USE_MEGATRON_FSDP=${USE_MEGATRON_FSDP:-False}
 USE_FUSED_KERNELS=${USE_FUSED_KERNELS:-False}
@@ -305,7 +305,6 @@ elif [ -n "$device_name" ] && [ "$device_name" == "npu" ]; then
         "${common_params[@]}" \
         +actor_rollout_ref.actor.megatron.override_transformer_config.context_parallel_size=${ACTOR_CP} \
         +actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn=True \
-        ++actor_rollout_ref.ref.megatron.override_transformer_config.use_flash_attn=True \
         global_profiler.tool=npu \
         actor_rollout_ref.actor.profiler.tool_config.npu.contents=[npu,cpu,memory,shapes,module] \
         actor_rollout_ref.actor.profiler.tool_config.npu.level='level1' \
