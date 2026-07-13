@@ -13,13 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib.metadata
 import inspect
 import logging
 from dataclasses import dataclass, field
+from types import MethodType
 from unittest.mock import patch
 
 import torch
-import vllm
 from packaging import version
 
 try:
@@ -33,6 +34,10 @@ from verl.utils.kernel.fp8_kernel import scaled_fp8_blockwise
 logger = logging.getLogger(__name__)
 
 
+def _get_vllm_version():
+    return version.parse(importlib.metadata.version("vllm"))
+
+
 # Ref: https://github.com/NVIDIA-NeMo/RL/commit/bc24887c72a6e1b2699a228bc87c588546dfe6b7
 @dataclass()
 class FP8State:
@@ -44,6 +49,242 @@ class FP8State:
 
 
 fp8_state: FP8State = FP8State()
+
+
+def _is_deepseek_v4_mega_moe_module(module):
+    from vllm.models.deepseek_v4.nvidia.model import DeepseekV4MegaMoEExperts
+
+    return isinstance(module, DeepseekV4MegaMoEExperts)
+
+
+def _is_deepseek_v4_mxfp4_fused_moe_module(module):
+    from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4MoEMethod
+
+    return isinstance(module, FusedMoE) and isinstance(module.quant_method, Mxfp4MoEMethod)
+
+
+def _make_mxfp4_moe_param(shape, device, weight_loader, quant_method=None):
+    param = torch.nn.Parameter(torch.empty(shape, dtype=torch.uint8, device=device), requires_grad=False)
+    param.weight_loader = weight_loader
+    if quant_method is not None:
+        param.quant_method = quant_method
+    return param
+
+
+def _copy_param_subclass_attrs(dst_param, src_param):
+    if src_param is None:
+        return
+
+    base_param_attrs = dir(torch.nn.Parameter)
+    for attr in dir(src_param):
+        if attr in base_param_attrs or attr.startswith("__"):
+            continue
+        try:
+            setattr(dst_param, attr, getattr(src_param, attr))
+        except AttributeError:
+            pass
+
+    subclass_type = getattr(src_param, "subclass_type", type(src_param))
+    if subclass_type is not torch.nn.Parameter:
+        dst_param.subclass_type = subclass_type
+
+
+def _wrap_vllm_param(custom_param, source_param):
+    param = torch.nn.Parameter(custom_param.data, requires_grad=False)
+    _copy_param_subclass_attrs(param, source_param)
+    _copy_param_subclass_attrs(param, custom_param)
+    return param
+
+
+def _get_param_weight_loader(param):
+    return getattr(param, "weight_loader", None) or getattr(param, "_weight_loader", None)
+
+
+def _param_parallel_dim(param, public_name, private_name, default):
+    if hasattr(param, private_name):
+        return getattr(param, private_name)
+    return getattr(param, public_name, default)
+
+
+def _copy_loaded_weight(param, loaded_weight):
+    param.data.copy_(loaded_weight.to(device=param.device, dtype=param.dtype))
+
+
+def _try_load_deepseek_v4_column_weight(param, loaded_weight):
+    tp_size = int(getattr(param, "tp_size", 1))
+    tp_rank = int(getattr(param, "tp_rank", 0))
+    if tp_size <= 1:
+        return False
+
+    data = param.data
+    if loaded_weight.ndim == data.ndim + 1 and loaded_weight.shape == torch.Size((tp_size, *data.shape)):
+        _copy_loaded_weight(param, loaded_weight.select(0, tp_rank))
+        return True
+
+    if data.ndim >= 2 and loaded_weight.ndim == data.ndim - 1:
+        expected_shape = (tp_size * data.shape[0] * data.shape[1], *data.shape[2:])
+        if loaded_weight.shape == torch.Size(expected_shape):
+            global_shape = (tp_size, data.shape[0], data.shape[1], *data.shape[2:])
+            _copy_loaded_weight(param, loaded_weight.reshape(global_shape).select(0, tp_rank))
+            return True
+
+    if data.ndim == loaded_weight.ndim and data.ndim > 0:
+        expected_shape = (tp_size * data.shape[0], *data.shape[1:])
+        if loaded_weight.shape == torch.Size(expected_shape):
+            _copy_loaded_weight(param, loaded_weight.narrow(0, tp_rank * data.shape[0], data.shape[0]))
+            return True
+
+    return False
+
+
+def _try_load_deepseek_v4_merged_weight(param, loaded_weight, shard_offset, shard_size, shard_id):
+    output_dim = int(getattr(param, "output_dim", getattr(param, "_output_dim", 0)))
+    loaded_dim = loaded_weight.shape[output_dim]
+    offsets = []
+    if isinstance(shard_offset, int):
+        offsets.append(shard_offset)
+        if isinstance(shard_size, int) and shard_size > 0:
+            offsets.append(shard_offset * loaded_dim // shard_size)
+    if isinstance(shard_id, int):
+        offsets.append(shard_id * loaded_dim)
+
+    for offset in dict.fromkeys(offsets):
+        if offset < 0 or offset + loaded_dim > param.shape[output_dim]:
+            continue
+        target = param.data.narrow(output_dim, offset, loaded_dim)
+        if target.shape == loaded_weight.shape:
+            target.copy_(loaded_weight.to(device=target.device, dtype=target.dtype))
+            return True
+    return False
+
+
+def _attach_deepseek_v4_weight_loaders(param):
+    subclass_type = getattr(param, "subclass_type", None)
+    if subclass_type is None or getattr(param, "_verl_deepseek_v4_loaders", False):
+        return
+
+    original_column_loader = getattr(subclass_type, "load_column_parallel_weight", None)
+    if original_column_loader is not None:
+
+        def load_column_parallel_weight(self, *args, **kwargs):
+            loaded_weight = kwargs.get("loaded_weight", args[0] if args else None)
+            if loaded_weight is not None:
+                if self.shape == loaded_weight.shape:
+                    _copy_loaded_weight(self, loaded_weight)
+                    return
+                if _try_load_deepseek_v4_column_weight(self, loaded_weight):
+                    return
+            return original_column_loader(self, *args, **kwargs)
+
+        param.load_column_parallel_weight = MethodType(load_column_parallel_weight, param)
+
+    original_merged_loader = getattr(subclass_type, "load_merged_column_weight", None)
+    if original_merged_loader is not None:
+
+        def load_merged_column_weight(self, *args, **kwargs):
+            loaded_weight = kwargs.get("loaded_weight", args[0] if args else None)
+            shard_id = kwargs.get("loaded_shard_id", kwargs.get("shard_id", args[1] if len(args) > 1 else None))
+            shard_offset = kwargs.get("shard_offset", args[2] if len(args) > 2 else None)
+            shard_size = kwargs.get("shard_size", args[3] if len(args) > 3 else None)
+            if loaded_weight is not None and _try_load_deepseek_v4_merged_weight(
+                self, loaded_weight, shard_offset, shard_size, shard_id
+            ):
+                return
+            return original_merged_loader(self, *args, **kwargs)
+
+        param.load_merged_column_weight = MethodType(load_merged_column_weight, param)
+
+    param._verl_deepseek_v4_loaders = True
+
+
+def _prepare_deepseek_v4_linear_params_for_loading(model):
+    from vllm.model_executor.parameter import BlockQuantScaleParameter, ModelWeightParameter
+
+    for layer in model.modules():
+        if not isinstance(layer, LinearBase):
+            continue
+
+        for name, param_type in (
+            ("weight", ModelWeightParameter),
+            ("weight_scale_inv", BlockQuantScaleParameter),
+            ("weight_scale", BlockQuantScaleParameter),
+        ):
+            param = getattr(layer, name, None)
+            if not isinstance(param, torch.nn.Parameter):
+                continue
+            if not hasattr(param, "subclass_type"):
+                weight_loader = _get_param_weight_loader(param)
+                if weight_loader is None:
+                    continue
+                param = _wrap_vllm_param(
+                    param_type(
+                        data=param.data,
+                        output_dim=_param_parallel_dim(param, "output_dim", "_output_dim", 0),
+                        input_dim=_param_parallel_dim(param, "input_dim", "_input_dim", 1),
+                        weight_loader=weight_loader,
+                    ),
+                    param,
+                )
+                setattr(layer, name, param)
+
+        update_param_tp_status = getattr(layer, "update_param_tp_status", None)
+        if callable(update_param_tp_status):
+            update_param_tp_status()
+
+        for name in ("weight", "weight_scale_inv", "weight_scale"):
+            param = getattr(layer, name, None)
+            if param is not None:
+                _attach_deepseek_v4_weight_loaders(param)
+
+
+def _restore_deepseek_v4_moe_params_for_loading(model):
+    restored = False
+    for module in model.modules():
+        if _is_deepseek_v4_mega_moe_module(module):
+            num_experts = module.num_local_experts
+            intermediate_size = module.intermediate_size
+            hidden_size = module.hidden_size
+            device = module._transformed_l1_weights[0].device
+        elif _is_deepseek_v4_mxfp4_fused_moe_module(module):
+            quant_method = module.quant_method
+            num_experts = quant_method.num_experts
+            intermediate_size = quant_method.intermediate_size
+            hidden_size = quant_method.hidden_size
+            device = module.w13_weight.device
+        else:
+            continue
+
+        weight_loader = module.weight_loader
+        module.w13_weight = _make_mxfp4_moe_param(
+            (num_experts, 2 * intermediate_size, hidden_size // 2), device, weight_loader
+        )
+        module.w2_weight = _make_mxfp4_moe_param(
+            (num_experts, hidden_size, intermediate_size // 2), device, weight_loader
+        )
+        module.w13_weight_scale = _make_mxfp4_moe_param(
+            (num_experts, 2 * intermediate_size, hidden_size // 32),
+            device,
+            weight_loader,
+            quant_method="block",
+        )
+        module.w2_weight_scale = _make_mxfp4_moe_param(
+            (num_experts, hidden_size, intermediate_size // 32),
+            device,
+            weight_loader,
+            quant_method="block",
+        )
+        restored = True
+    return restored
+
+
+def _process_deepseek_v4_moe_weights_after_loading(model):
+    for module in model.modules():
+        if _is_deepseek_v4_mega_moe_module(module):
+            module._transformed_l1_weights = None
+            module._transformed_l2_weights = None
+            module.finalize_weights()
+        elif _is_deepseek_v4_mxfp4_fused_moe_module(module):
+            module.quant_method.process_weights_after_loading(module)
 
 
 def is_fp8_model(vllm_config):
@@ -103,6 +344,101 @@ def is_fp8_weight(name, model):
             ):
                 fp8_state.fp8_param_names.add(name)
     return name in fp8_state.fp8_param_names
+
+
+def _model_type(model):
+    if model is None:
+        return None
+
+    for obj in (model, getattr(model, "config", None), getattr(model, "hf_config", None)):
+        if obj is not None and getattr(obj, "model_type", None) is not None:
+            return obj.model_type
+
+    text_config = getattr(getattr(model, "config", None), "text_config", None)
+    return getattr(text_config, "model_type", None)
+
+
+def _normalize_dim(dim: int, ndim: int) -> int:
+    return dim + ndim if dim < 0 else dim
+
+
+def _map_weight_name_for_vllm(model, name: str) -> str:
+    mapper = getattr(model, "hf_to_vllm_mapper", None)
+    map_name = getattr(mapper, "_map_name", None)
+    if callable(map_name):
+        mapped = map_name(name)
+        if mapped is not None:
+            return mapped
+
+    mapped = name
+    if ".shared_experts.w2" in mapped:
+        mapped = mapped.replace(".shared_experts.w2", ".shared_experts.down_proj", 1)
+    if mapped.endswith(".scale"):
+        mapped = mapped[: -len(".scale")] + ".weight_scale_inv"
+    if mapped.startswith(("layers.", "embed.")):
+        mapped = "model." + mapped
+    elif mapped == "head.weight":
+        mapped = "lm_head.weight"
+    return mapped
+
+
+def _cache_deepseek_v4_dense_fp8_scales(model, weights):
+    if _model_type(model) != "deepseek_v4":
+        return
+
+    scale_dtype = getattr(torch, "float8_e8m0fnu", None)
+    if scale_dtype is None:
+        return
+
+    cache = getattr(model, "_verl_dense_fp8_scale_cache", None)
+    if cache is None:
+        cache = {}
+        model._verl_dense_fp8_scale_cache = cache
+
+    for name, tensor in weights:
+        if name.endswith(".scale") and ".experts." not in name and tensor.dtype == scale_dtype:
+            cache[_map_weight_name_for_vllm(model, name)] = tensor.detach().clone()
+
+
+def _copy_scale_shard(param: torch.nn.Parameter, loaded_scale: torch.Tensor) -> None:
+    target = param.data
+    loaded = loaded_scale.to(device=target.device, dtype=target.dtype)
+    if target.shape == loaded.shape:
+        target.copy_(loaded)
+        return
+
+    if target.ndim != loaded.ndim:
+        return
+
+    tp_rank = int(getattr(param, "tp_rank", 0))
+    tp_size = int(getattr(param, "tp_size", 1))
+    candidate_dims = []
+    for attr in ("input_dim", "_input_dim", "output_dim", "_output_dim"):
+        if hasattr(param, attr):
+            dim = _normalize_dim(int(getattr(param, attr)), target.ndim)
+            if dim not in candidate_dims:
+                candidate_dims.append(dim)
+
+    for dim in candidate_dims:
+        if loaded.shape[:dim] != target.shape[:dim] or loaded.shape[dim + 1 :] != target.shape[dim + 1 :]:
+            continue
+        if loaded.shape[dim] != target.shape[dim] * tp_size:
+            continue
+        start = tp_rank * target.shape[dim]
+        target.copy_(loaded.narrow(dim, start, target.shape[dim]))
+        return
+
+
+def _reload_cached_deepseek_v4_dense_fp8_scales(model):
+    cache = getattr(model, "_verl_dense_fp8_scale_cache", None)
+    if not cache:
+        return
+
+    params = dict(model.named_parameters())
+    for name, scale in cache.items():
+        param = params.get(name)
+        if param is not None:
+            _copy_scale_shard(param, scale)
 
 
 def is_mxfp8_vllm_ascend(quant_config):
@@ -167,6 +503,13 @@ def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
         Tuples of (name, tensor) for each weight and its scale
     """
 
+    if _model_type(model) == "deepseek_v4":
+        for name, weight in weights:
+            if ".experts." in name and weight.dtype in (torch.int8, torch.float8_e8m0fnu):
+                weight = weight.view(torch.uint8)
+            yield name, weight
+        return
+
     fp8_state.seen_params.clear()
     fp8_state.fp8_param_names.clear()
     is_mxfp8_npu = is_mxfp8_vllm_ascend(quant_config)
@@ -174,7 +517,8 @@ def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
         import torch_npu
     # vLLM v0.11-v0.12 renamed weight_scale_inv → weight_scale in process_weights_after_loading,
     # so load_weights expects "_scale" suffix. v0.14+ keeps weight_scale_inv, so expects "_scale_inv".
-    _use_scale_not_scale_inv = version.parse("0.11.0") <= version.parse(vllm.__version__) < version.parse("0.14.0")
+    vllm_ver = _get_vllm_version()
+    _use_scale_not_scale_inv = version.parse("0.11.0") <= vllm_ver < version.parse("0.14.0")
 
     for k, v in weights:
         if not is_fp8_weight(k, model):
@@ -213,7 +557,22 @@ def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
         del v, param_lp, param_scale
 
 
-def load_quanted_weights(weights, model_runner, is_drafter=False):
+def prepare_quanted_weights_for_loading(model_runner):
+    model = model_runner.model
+    if _model_type(model) != "deepseek_v4":
+        return False
+    _prepare_deepseek_v4_linear_params_for_loading(model)
+    return _restore_deepseek_v4_moe_params_for_loading(model)
+
+
+def process_quanted_weights_after_loading(model_runner, reload_state):
+    model = model_runner.model
+    if reload_state:
+        _process_deepseek_v4_moe_weights_after_loading(model)
+    _reload_cached_deepseek_v4_dense_fp8_scales(model)
+
+
+def load_quanted_weights(weights, model_runner, is_drafter=False, prepare_model=True, process_model=True):
     if is_drafter:
         drafter = getattr(model_runner, "drafter", None)
         model = drafter.model if drafter is not None and hasattr(drafter, "model") else None
@@ -226,15 +585,17 @@ def load_quanted_weights(weights, model_runner, is_drafter=False):
     quant_config = model_runner.vllm_config.quant_config
     vllm_dtype = model_runner.vllm_config.model_config.dtype
 
-    is_mxfp8_npu = is_mxfp8_vllm_ascend(quant_config)
+    reload_state = None
+    if prepare_model:
+        reload_state = prepare_quanted_weights_for_loading(model_runner)
 
+    is_mxfp8_npu = is_mxfp8_vllm_ascend(quant_config)
     if is_mxfp8_npu:
-        # For MXFP8 on NPU, we need to restore weights to original shapes
-        # before loading, then re-apply transformation after loading.
-        # This is because process_weights_after_loading transposes the weights,
-        # but the weight_loader expects original shapes.
+        # For MXFP8 on NPU, restore the original shapes expected by weight_loader.
         restore_mxfp8_weights_for_loading(model)
 
+    weights = list(weights)
+    _cache_deepseek_v4_dense_fp8_scales(model, weights)
     weights_quantized = quant_weights(weights, model, quant_config, dtype=vllm_dtype)
 
     # Monkey patch the param class to their subclass, as certain models
@@ -244,35 +605,22 @@ def load_quanted_weights(weights, model_runner, is_drafter=False):
             param.orig_type = param.__class__
             param.__class__ = param.subclass_type
     # Finally load the weights into vllm
-    loaded_params = model.load_weights(weights_quantized)
-    # Undo the type change above to the original type
-    for name, param in model.named_parameters():
-        if hasattr(param, "subclass_type"):
-            param.__class__ = param.orig_type
+    try:
+        loaded_params = model.load_weights(weights_quantized)
+        _reload_cached_deepseek_v4_dense_fp8_scales(model)
+    finally:
+        # Undo the type change above to the original type
+        for name, param in model.named_parameters():
+            if hasattr(param, "orig_type"):
+                param.__class__ = param.orig_type
+                del param.orig_type
 
-    if is_mxfp8_npu:
-        # Re-apply MXFP8 transformations after weight loading
-        apply_mxfp8_transformation_after_loading(model)
+    if process_model:
+        if is_mxfp8_npu:
+            apply_mxfp8_transformation_after_loading(model)
+        process_quanted_weights_after_loading(model_runner, reload_state)
 
     return loaded_params
-
-
-def _copy_param_subclass_attrs(param, source_param):
-    if source_param is None:
-        return
-
-    base_param_dir = dir(torch.nn.Parameter)
-    source_param_dir = dir(source_param)
-    custom_attributes = [attr for attr in source_param_dir if attr not in base_param_dir and not attr.startswith("__")]
-    for attr in custom_attributes:
-        try:
-            setattr(param, attr, getattr(source_param, attr))
-        except AttributeError:
-            pass
-
-    subclass_type = getattr(source_param, "subclass_type", type(source_param))
-    if subclass_type is not torch.nn.Parameter:
-        param.subclass_type = subclass_type
 
 
 def replace_parameter_preserve_subclass(layer: torch.nn.Module, param_name: str, new_data: torch.Tensor | None):
@@ -419,7 +767,7 @@ def process_weights_after_loading_for_vllm11(self, layer) -> None:
 
     del layer.weight_scale_inv
 
-    if version.parse(vllm.__version__) == version.parse("0.11.0"):
+    if _get_vllm_version() == version.parse("0.11.0"):
         maybe_post_process_fp8_weight_block(layer, self.cutlass_block_fp8_supported)
     else:
         maybe_post_process_fp8_weight_block(layer)
@@ -699,7 +1047,7 @@ def process_weights_after_loading_moe_for_vllm14(self, layer) -> None:
 
 def apply_vllm_fp8_patches():
     logger.info("Applying vllm fp8 patches for blockwise quantization")
-    vllm_ver = version.parse(vllm.__version__)
+    vllm_ver = _get_vllm_version()
     if fp8_state.vllm_patches:
         logger.debug("vLLM FP8 patches already applied")
         return

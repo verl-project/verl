@@ -320,6 +320,7 @@ def preprocess_thd_engine(
     need_roll: bool = False,
     use_fp8_padding: bool = False,
     local_cp_size: Optional[int] = None,
+    min_local_rows: Optional[int] = None,
 ) -> tuple[torch.Tensor, PackedSeqParams, Optional[torch.Tensor]]:
     """
     Preprocess packed sequences
@@ -363,6 +364,13 @@ def preprocess_thd_engine(
         pad_size_last = (total_align - cu_seqlens_padded[-1] % total_align) % total_align
         cu_seqlens_padded[-1] += pad_size_last
         seqlens_in_batch_padded[-1] += pad_size_last
+
+    if min_local_rows is not None:
+        min_total_rows = cp_size * min_local_rows
+        if cu_seqlens_padded[-1] < min_total_rows:
+            pad_size_last = min_total_rows - cu_seqlens_padded[-1]
+            cu_seqlens_padded[-1] += pad_size_last
+            seqlens_in_batch_padded[-1] += pad_size_last
 
     # ----------------------------------------------------------------------------
     # Move the index information needed in the subsequent loop to the CPU at once,

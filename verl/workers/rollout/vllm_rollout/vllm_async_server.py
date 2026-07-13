@@ -1090,6 +1090,11 @@ class vLLMHttpServer:
                 # for subprocesses patching
                 os.environ["VERL_VLLM_FP8_QUANT_ENABLED"] = "1"
 
+        model_quantization_config = getattr(self.model_config.hf_config, "quantization_config", {}) or {}
+        if quantization is None and model_quantization_config.get("quant_method") == "fp8":
+            apply_vllm_fp8_patches()
+            os.environ["VERL_VLLM_FP8_QUANT_ENABLED"] = "1"
+
         if quantization is not None and self.config.quantization_config_file is not None:
             hf_overrides["quantization_config_file"] = self.config.quantization_config_file
 
