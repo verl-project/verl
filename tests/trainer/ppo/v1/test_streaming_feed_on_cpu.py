@@ -18,7 +18,7 @@ These cover the dependency-light pieces introduced for streaming generation:
 
 - The ``num_prompts`` resolution + validation contract of
   ``PPOTrainer._add_batch_to_generate`` (default to ``train_batch_size``; require a positive
-  multiple of ``gen_batch_size``; number of dataloader fetches performed).
+  multiple of ``gen_batch_size``; fetch in small chunks and coalesce submissions).
 - The ``steps_per_epoch`` derivation used for ``total_training_steps`` / epoch tracking, which
   must be computed from the dataset size and ``train_batch_size`` (NOT ``len(dataloader)``, which
   now counts ``gen_batch_size`` fetches), and must equal the classic ``len(dataloader)`` when
@@ -52,6 +52,13 @@ def _resolve_num_prompts(num_prompts, train_batch_size, gen_batch_size):
 def _num_fetches(num_prompts, gen_batch_size):
     """How many ``gen_batch_size`` dataloader fetches ``_add_batch_to_generate`` performs."""
     return num_prompts // gen_batch_size
+
+
+def _num_submissions(num_prompts, gen_batch_size):
+    """A valid request is coalesced into one submission."""
+    if num_prompts <= 0 or num_prompts % gen_batch_size != 0:
+        raise ValueError("num_prompts must be a positive multiple of gen_batch_size")
+    return 1
 
 
 def _steps_per_epoch(dataset_size, train_batch_size):
@@ -108,6 +115,20 @@ class TestNumFetches:
         # Refilling 5 dropped groups with gen_batch_size=1 => exactly 5 fetches.
         n = _resolve_num_prompts(5, train_batch_size=64, gen_batch_size=1)
         assert _num_fetches(n, 1) == 5
+
+
+class TestCoalescedSubmission:
+    def test_gen_batch_size_one_submits_train_batch_once(self):
+        assert _num_fetches(64, 1) == 64
+        assert _num_submissions(64, gen_batch_size=1) == 1
+
+    def test_large_refill_is_submitted_once(self):
+        assert _num_fetches(626, 1) == 626
+        assert _num_submissions(626, gen_batch_size=1) == 1
+
+    def test_multiple_gen_chunks_are_submitted_once(self):
+        assert _num_fetches(96, 24) == 4
+        assert _num_submissions(96, gen_batch_size=24) == 1
 
 
 class TestStepsPerEpoch:

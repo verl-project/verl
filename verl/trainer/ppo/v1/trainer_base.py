@@ -775,7 +775,6 @@ class PPOTrainer(ABC):
         if not inflight_uids:
             return 0
 
-        # Preserve only the prompt fields needed to restart.
         batch = tq.kv_batch_get(keys=inflight_uids, partition_id=partition_id)
         inflight_uid_set = set(inflight_uids)
         old_trajectory_keys = [
@@ -1226,8 +1225,8 @@ class PPOTrainer(ABC):
             if self.use_critic:
                 self.critic_wg.stop_profile()
 
-    def _submit_one_gen_batch(self) -> int:
-        """Fetch one ``gen_batch_size`` chunk from the dataloader and submit it for generation."""
+    def _fetch_one_gen_batch(self) -> TensorDict:
+        """Fetch one ``gen_batch_size`` chunk from the dataloader."""
         try:
             if self.train_dataloader_it is None:
                 self.train_dataloader_it = iter(self.train_dataloader)
@@ -1237,40 +1236,16 @@ class PPOTrainer(ABC):
             batch_dict = next(self.train_dataloader_it)
 
         batch_dict["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch_dict["raw_prompt"]))], dtype=object)
-        batch = tu.get_tensordict(batch_dict)
-        tu.assign_non_tensor_data(batch, "global_steps", self.global_steps)
-
-        # Register each prompt (GRPO group) in TransferQueue.
-        # In async modes the per-row prompt data is stored alongside the status tag so a checkpoint
-        # can recover in-flight (pending/running) prompts and re-issue them on resume (half-generated
-        # tokens are unrecoverable, so generation restarts from the original prompt). Sync has no
-        # in-flight prompts across checkpoints, so it stays tag-only to avoid the storage overhead.
-        tags = [{"is_prompt": True, "status": "pending", "global_steps": self.global_steps}] * len(batch)
-        if self.trainer_mode != "sync":
-            tq.kv_batch_put(
-                keys=list(batch["uid"]), partition_id="train", tags=tags, fields=self._storable_prompt_fields(batch)
-            )
-        else:
-            tq.kv_batch_put(keys=list(batch["uid"]), partition_id="train", tags=tags)
-
-        # add batch to agent loop manager
-        self.agent_loop_manager.generate_sequences(batch)
-        return len(batch)
+        return tu.get_tensordict(batch_dict)
 
     @staticmethod
     def _storable_prompt_fields(batch: TensorDict) -> TensorDict:
-        """Select the per-row fields of a prompt batch that TransferQueue can persist as storage.
-
-        TransferQueue slices fields by batch position, so scalar ``NonTensorData`` (e.g.
-        ``global_steps``, broadcast across the batch) cannot be stored as a field. Those scalars are
-        re-derived from the prompt tag on resume (see ``_reissue_inflight_prompts``); everything
-        needed to regenerate a prompt (``uid``, ``raw_prompt``, dataset columns, ...) is per-row.
-        """
+        """Select prompt fields that TransferQueue can slice per row."""
         per_row_keys = [key for key in batch.keys() if not isinstance(batch.get(key), NonTensorData)]
         return batch.select(*per_row_keys)
 
     def _add_batch_to_generate(self, num_prompts: int | None = None) -> int:
-        """Stream prompts from the dataloader into the AgentLoopManager.
+        """Fetch prompts in ``gen_batch_size`` chunks and coalesce them into one submission.
 
         Args:
             num_prompts: Total number of prompts to submit. Defaults to ``train_batch_size``.
@@ -1285,10 +1260,24 @@ class PPOTrainer(ABC):
                 f"({gen_batch_size}); it is submitted in whole gen_batch_size dataloader fetches."
             )
 
-        submitted = 0
-        while submitted < num_prompts:
-            submitted += self._submit_one_gen_batch()
-        return submitted
+        chunks = [self._fetch_one_gen_batch() for _ in range(num_prompts // gen_batch_size)]
+        batch = chunks[0] if len(chunks) == 1 else tu.concat_tensordict(chunks)
+        tu.assign_non_tensor_data(batch, "global_steps", self.global_steps)
+
+        tags = [{"is_prompt": True, "status": "pending", "global_steps": self.global_steps}] * len(batch)
+        if self.trainer_mode != "sync":
+            tq.kv_batch_put(
+                keys=list(batch["uid"]),
+                partition_id="train",
+                tags=tags,
+                # TODO: maybe let workers do it?
+                fields=self._storable_prompt_fields(batch),
+            )
+        else:
+            tq.kv_batch_put(keys=list(batch["uid"]), partition_id="train", tags=tags)
+
+        self.agent_loop_manager.generate_sequences(batch)
+        return len(batch)
 
     def _compute_reward_colocate(self, batch: KVBatchMeta, metrics: dict | None = None) -> KVBatchMeta:
         """Compute the reward score with a colocated reward model."""

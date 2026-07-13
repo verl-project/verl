@@ -120,12 +120,11 @@ def _make_trainer_stub(trainer_mode: str = "separate_async", global_steps: int =
 
 
 def _submit_prompt(partition_id: str, uid: str, status: str, global_steps: int) -> None:
-    """Mirror ``_submit_one_gen_batch`` for async modes: store the per-row prompt data as fields
+    """Mirror async prompt submission: store the per-row prompt data as fields
     plus the status tag under the ``{uid}`` key (a single-row batch).
 
     ``global_steps`` is a scalar broadcast across the batch, which TransferQueue cannot store as a
-    field; the trainer excludes it (``_storable_prompt_fields``) and re-derives it from the tag, so
-    the producer here does the same.
+    field; the trainer excludes it and re-derives it from the tag on restore.
     """
     batch = tu.get_tensordict(
         {
