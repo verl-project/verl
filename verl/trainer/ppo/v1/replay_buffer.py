@@ -245,8 +245,7 @@ class ReplayBuffer:
         prompt_global_steps_snapshot: dict[str, int] = {}
 
         while True:
-            # This is the only TransferQueue metadata read in an iteration. Drop, gating, and
-            # selection below must all use this snapshot.
+            # Drop, gating, and selection below must all use this snapshot.
             self._sync_metadata_from_transfer_queue()
 
             dropped, metrics = self._drop_stale_finished(global_steps, partition_id)
@@ -254,8 +253,6 @@ class ReplayBuffer:
                 _accumulate_drop_metrics(drop_metrics, metrics, dropped)
                 if self.refill_fn is not None:
                     self.refill_fn(dropped)
-                # Drop/refill invalidated this snapshot. Re-sync at the top of the next iteration
-                # before checking whether enough fresh samples are available.
                 continue
 
             if self._has_enough_samples(global_steps, partition_id, batch_size):

@@ -427,7 +427,8 @@ class PPOTrainer(ABC):
         sample_batch_size = train_batch_size // self.parameter_sync_step
 
         # regular feed: stream one train batch worth of prompts for this step
-        self._add_batch_to_generate()
+        with marked_timer("feed", timing_raw):
+            self._add_batch_to_generate()
 
         metrics_aggregator = MetricsAggregator()
         combined_keys: list = []
@@ -738,9 +739,7 @@ class PPOTrainer(ABC):
             logger.warning(f"Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
 
         # 5. restore TransferQueue state (async modes). Re-issuing the restored in-flight prompts is
-        # deferred to fit() (see _reissue_inflight_prompts) because it needs the agent_loop_manager,
-        # which is not set until fit(). tq.init() runs before the trainer is constructed
-        # (main_ppo.py), so the system is in a clean state here.
+        # deferred to fit() to use the agent_loop_manager.
         if self.trainer_mode != "sync":
             if _tq_supports_checkpoint():
                 tq_ckpt_path = os.path.join(global_step_folder, "transfer_queue")
@@ -776,9 +775,7 @@ class PPOTrainer(ABC):
         if not inflight_uids:
             return 0
 
-        # Preserve only the prompt fields needed to restart. A running group may already contain
-        # completed session trajectories; mixing them with newly generated sessions would make the
-        # recovered group span two generation attempts.
+        # Preserve only the prompt fields needed to restart.
         batch = tq.kv_batch_get(keys=inflight_uids, partition_id=partition_id)
         inflight_uid_set = set(inflight_uids)
         old_trajectory_keys = [
@@ -857,11 +854,7 @@ class PPOTrainer(ABC):
         # save TransferQueue state for async modes so in-flight prompts (already fetched from the
         # dataloader but not yet trained into this checkpoint's weights) survive a restart:
         # finished trajectories are restored as-is, pending/running prompts are re-issued on resume.
-        # Safe here because sample() has returned and generation is paused (on_sample_end aborts +
-        # sleeps), so no concurrent kv_clear races the snapshot (see TransferQueue checkpoint docs).
-        # Requires a TransferQueue release with checkpoint support (see _tq_supports_checkpoint); on
-        # older builds we skip snapshotting and in-flight prompts are lost on resume (warned in
-        # _load_checkpoint).
+        # Requires a TransferQueue release with checkpoint support (see _tq_supports_checkpoint).
         if self.trainer_mode != "sync" and _tq_supports_checkpoint():
             tq.save_checkpoint(
                 os.path.join(local_global_step_folder, "transfer_queue"),
