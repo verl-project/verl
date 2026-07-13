@@ -408,13 +408,9 @@ def forward_with_triton_backend(
     else:
         raise RuntimeError("To use forward_with_triton_backend, either labels or input_ids must be provided.")
 
-    vocab_weights = self.lm_head.weight
-    if isinstance(vocab_weights, DTensor):
-        vocab_weights = vocab_weights.full_tensor().to(hidden_states.device)
-
     log_probs, entropy = linear_cross_entropy(
         hidden_states,
-        vocab_weights,
+        self.lm_head.weight,
         rolled_labels,
         temperature,
         "none",
