@@ -346,7 +346,7 @@ def test_sync_metadata_records_prompt_global_steps(tq_init, partition_id):
 
 
 def test_has_enough_samples_drop_ignores_inflight():
-    """drop gates purely on the terminal count, regardless of in-flight staleness."""
+    """drop ignores in-flight prompts when deciding whether enough samples are available."""
     rb = _make_rb(max_off_policy_strategy="drop", max_off_policy_threshold=2)
     pid = "p"
     rb.finished_keys[pid] |= {"a", "b"}
@@ -356,6 +356,17 @@ def test_has_enough_samples_drop_ignores_inflight():
 
     assert rb._has_enough_samples(1000, pid, batch_size=2) is True
     assert rb._has_enough_samples(1000, pid, batch_size=3) is False
+
+
+def test_has_enough_samples_drop_counts_only_fresh_terminal():
+    """Stale terminal prompts do not satisfy the drop strategy's sample-count gate."""
+    rb = _make_rb(max_off_policy_strategy="drop", max_off_policy_threshold=1)
+    pid = "p"
+    rb.finished_keys[pid] |= {"stale", "fresh"}
+    rb.prompt_global_steps[pid] = {"stale": 0, "fresh": 5}
+
+    assert rb._has_enough_samples(global_steps=5, partition_id=pid, batch_size=1) is True
+    assert rb._has_enough_samples(global_steps=5, partition_id=pid, batch_size=2) is False
 
 
 def test_has_enough_samples_wait_blocks_on_stale_inflight():
@@ -712,6 +723,41 @@ def test_drop_refills_over_multiple_iterations(tq_init, partition_id):
         assert metrics[f"{prefix}/off_policy/dropped_samples_staleness/mean"] == 4
         assert metrics[f"{prefix}/off_policy/dropped_samples_staleness/max"] == 4
         assert metrics[f"{prefix}/off_policy/dropped_samples_staleness/min"] == 4
+    finally:
+        _clear_partition(partition_id)
+
+
+def test_drop_uses_one_snapshot_per_poll_iteration(tq_init, partition_id):
+    """A stale running prompt that finishes during refill is dropped on the next snapshot.
+
+    This reproduces the production race where a second metadata sync after refill exposed newly
+    finished stale prompts to selection without running the drop pass again.
+    """
+    stale_finished = PromptSpec(uid=_uid(), status="finished", sessions=1, global_steps=0)
+    stale_running = PromptSpec(uid=_uid(), status="running", sessions=1, global_steps=0)
+    _produce(partition_id, [stale_finished, stale_running]).join_and_check()
+
+    refiller = FakeRefiller(partition_id, global_steps=5)
+
+    def finish_during_first_refill(num_prompts: int) -> int:
+        if not refiller.calls:
+            _set_prompt_status(partition_id, stale_running.uid, "finished", global_steps=0)
+        return refiller(num_prompts)
+
+    rb = _make_rb(
+        max_off_policy_strategy="drop",
+        max_off_policy_threshold=1,
+        refill_fn=finish_during_first_refill,
+    )
+    try:
+        batch, metrics = rb.sample(global_steps=5, partition_id=partition_id, batch_size=1)
+
+        sampled_uids = _uids_of(batch.keys)
+        assert len(sampled_uids) == 1
+        assert not (sampled_uids & {stale_finished.uid, stale_running.uid})
+        assert sampled_uids <= set(refiller.produced_uids)
+        assert refiller.calls == [1, 1]
+        assert metrics["validation/off_policy/dropped_samples"] == 2
     finally:
         _clear_partition(partition_id)
 
