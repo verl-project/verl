@@ -170,16 +170,6 @@ class CheckpointEngine(ABC):
         """
         raise NotImplementedError
 
-    def pop_sync_metrics(self) -> dict:
-        """Return and clear metrics describing the last completed weight sync.
-
-        Backends that track per-sync statistics (e.g. the delta engines' changed
-        ratio and wire payload size) override this. The sender worker returns it
-        from ``update_weights`` so the trainer can merge the stats into that
-        step's metrics (and thus into wandb).
-        """
-        return {}
-
     @abstractmethod
     async def send_weights(
         self,
