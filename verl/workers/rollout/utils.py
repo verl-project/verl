@@ -21,6 +21,7 @@ import uvicorn
 import yaml
 from fastapi import FastAPI
 
+from verl.utils.tokenizer import get_processor_token_id
 from verl.workers.config.rollout import PrometheusConfig
 
 logger = logging.getLogger(__file__)
@@ -111,6 +112,37 @@ def qwen2_5_vl_dedup_image_tokens(prompt_ids: list[int], processor):
         return prompt_ids[mask].tolist()
     else:
         return prompt_ids
+
+
+def get_vision_placeholder_tokens(processor) -> list[str]:
+    """Vision placeholder tokens the policy must never sample, as strings for `bad_words`.
+
+    An `<|image_pad|>` or `<|video_pad|>` token only means something when a real image or video
+    sits behind it: the k-th run of placeholders pairs with the k-th row of `image_grid_thw` /
+    `video_grid_thw`. Nothing stops the policy from sampling one anyway -- it is an ordinary entry
+    of the vocabulary -- and then that pairing silently breaks. Every downstream consumer trusts
+    it, so each one has its own way of dying: `get_rope_index` walks off the end of the grid
+    iterator, and `merge_multimodal_embeddings` scatters into a mask that no longer matches the
+    embedding count. Both take the whole training job down with them.
+
+    A tool that returns an image is unaffected: that image arrives in the next turn's prompt, not
+    in what the model generates.
+
+    Returns an empty list for text-only models, leaving sampling untouched.
+    """
+    tokenizer = getattr(processor, "tokenizer", None) if processor is not None else None
+    if tokenizer is None:
+        return []
+
+    tokens = []
+    for modality in ("image", "video"):
+        token_id = get_processor_token_id(processor, modality)
+        if token_id is None:
+            continue
+        token = tokenizer.convert_ids_to_tokens(token_id)
+        if token:
+            tokens.append(token)
+    return tokens
 
 
 def update_prometheus_config(config: PrometheusConfig, server_addresses: list[str], rollout_name: str | None = None):

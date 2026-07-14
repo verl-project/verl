@@ -44,7 +44,12 @@ from verl.utils.tokenizer import normalize_token_ids
 from verl.utils.vllm.vllm_fp8_utils import apply_vllm_fp8_patches
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
-from verl.workers.rollout.utils import get_max_position_embeddings, qwen2_5_vl_dedup_image_tokens, run_uvicorn
+from verl.workers.rollout.utils import (
+    get_max_position_embeddings,
+    get_vision_placeholder_tokens,
+    qwen2_5_vl_dedup_image_tokens,
+    run_uvicorn,
+)
 from verl.workers.rollout.vllm_rollout.utils import (
     VLLM_LORA_INT_ID,
     VLLM_LORA_NAME,
@@ -591,6 +596,12 @@ class vLLMHttpServer:
             extra_args = dict(sampling_params.pop("extra_args", None) or {})
             extra_args["kv_transfer_params"] = kv_transfer_params
             sampling_params["extra_args"] = extra_args
+
+        # A sampled <|image_pad|>/<|video_pad|> has no image behind it, and every consumer of the
+        # sequence assumes it does. setdefault, so an explicitly passed bad_words still wins.
+        vision_bad_words = get_vision_placeholder_tokens(self.model_config.processor)
+        if vision_bad_words:
+            sampling_params.setdefault("bad_words", vision_bad_words)
 
         sampling_params = SamplingParams(max_tokens=max_tokens, **sampling_params)
         prompt_ids = qwen2_5_vl_dedup_image_tokens(prompt_ids, self.model_config.processor)
