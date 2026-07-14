@@ -123,7 +123,8 @@ def no_padding_2_padding(tensor: torch.Tensor, data: TensorDict) -> torch.Tensor
             if max_response_len < 0:
                 max_response_len = response_lens.max().item()
         else:
-            assert attention_mask is not None and not attention_mask.is_nested
+            if attention_mask is None or attention_mask.is_nested:
+                raise ValueError("Dense prompts/responses require a dense attention_mask")
             prompt_lens = attention_mask[:, : prompt_ids.shape[1]].sum(dim=1)
             response_lens = attention_mask[:, prompt_ids.shape[1] :].sum(dim=1)
             max_response_len = response_ids.shape[1]
@@ -158,8 +159,12 @@ def no_padding_2_padding(tensor: torch.Tensor, data: TensorDict) -> torch.Tensor
                 # Fallback: treat all tokens as response
                 prompt_lens = torch.zeros(num_seqs, dtype=seq_lens.dtype, device=seq_lens.device)
                 response_lens = seq_lens
-            if max_response_len < 0:
-                max_response_len = response_lens.max().item()
+            # ``max_response_len`` in DCP metadata is the global loss horizon,
+            # not the routed micro-batch's dense width. Use this micro-batch's
+            # maximum response span so nested masks and reconstructed outputs
+            # are padded to the same shape; loss normalization still reads the
+            # untouched metadata value directly from ``data``.
+            max_response_len = response_lens.max().item()
         else:
             raise ValueError("no_padding_2_padding requires 'prompts'/'responses' or nested tensor input")
 
@@ -168,28 +173,12 @@ def no_padding_2_padding(tensor: torch.Tensor, data: TensorDict) -> torch.Tensor
     expected_tokens = sequence_offsets[-1].item()
     actual_tokens = values.shape[0]
     if expected_tokens != actual_tokens:
-        import logging
-
-        logger = logging.getLogger(__name__)
-        logger.warning(
-            f"Token count mismatch (DCP routing): expected={expected_tokens} actual={actual_tokens} "
-            f"n_seqs={len(sequence_lens)}. Adjusting to match actual output."
+        raise ValueError(
+            "Token count mismatch while restoring padded responses: "
+            f"expected={expected_tokens}, actual={actual_tokens}, n_seqs={len(sequence_lens)}"
         )
-        # Adjust: rebuild from actual nested tensor offsets
-        if tensor.is_nested:
-            actual_seq_lens = tensor.offsets().diff()
-            # Recompute response_lens = actual_seq_len - prompt_len
-            response_lens = actual_seq_lens - prompt_lens
-            response_lens = response_lens.clamp(min=0)
-            sequence_lens = prompt_lens + response_lens
-            sequence_offsets = actual_seq_lens.cumsum(dim=0)
-            if max_response_len < 0:
-                max_response_len = response_lens.max().item()
-        else:
-            assert expected_tokens == actual_tokens, (
-                f"Token count mismatch: expected={expected_tokens} actual={actual_tokens}"
-            )
-    assert not prompt_lens.eq(0).any(), f"seq_offset - resp_len - 1 assumes prompt_len > 0. Got {prompt_lens}"
+    if prompt_lens.eq(0).any():
+        raise ValueError(f"Response restoration requires at least one prompt token per sequence, got {prompt_lens}")
 
     response_list = []
     # Skip padding dimensions after sequence dimensions, if any.

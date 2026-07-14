@@ -62,14 +62,16 @@ def patch_fused_forward(model: torch.nn.Module):
     )
     model = _get_patching_model(model)
     if model is not None:
-        model.forward_backup = model.forward
+        if not hasattr(model, "forward_backup"):
+            model.forward_backup = model.forward
         model.forward = _fused_GPTModel_forward.__get__(model, model.__class__)
 
 
 def unpatch_fused_forward(model: torch.nn.Module):
     model = _get_patching_model(model)
-    if model is not None:
+    if model is not None and hasattr(model, "forward_backup"):
         model.forward = model.forward_backup
+        delattr(model, "forward_backup")
 
 
 def fused_forward_model_gen(vision_model: bool = False):

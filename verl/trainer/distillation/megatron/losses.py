@@ -267,7 +267,8 @@ def compute_forward_kl_topk(
     teacher_topk_ids: torch.Tensor,
     config: DistillationConfig,
     data_format: str,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    local_cp_size: int | None = None,
+) -> dict[str, torch.Tensor]:
     """Compute forward KL distillation loss using top-k log probabilities.
 
     Args:
@@ -275,6 +276,8 @@ def compute_forward_kl_topk(
         teacher_topk_log_probs: (bsz, seqlen, topk).
         teacher_topk_ids: (bsz, seqlen, topk).
         data_format: "thd" or "bshd", models not support THD format, e.g GPT-OSS, Qwen3.5
+        local_cp_size: Dynamic context-parallel size for the routed micro-batch.
+            ``None`` preserves the static context-parallel behavior.
 
     Returns:
     - distillation_losses: (bsz, seqlen/cp_size)
@@ -285,9 +288,15 @@ def compute_forward_kl_topk(
 
     # 1. split across cp groups (bsz, seqlen, topk) => (bsz, seqlen/cp_size, topk)
     if data_format == "thd":
-        teacher_topk_log_probs_cp_split, *_ = preprocess_thd_engine(teacher_topk_log_probs, pre_process=True)
-        teacher_topk_ids_cp_split, *_ = preprocess_thd_engine(teacher_topk_ids, pre_process=True)
+        teacher_topk_log_probs_cp_split, *_ = preprocess_thd_engine(
+            teacher_topk_log_probs, pre_process=True, local_cp_size=local_cp_size
+        )
+        teacher_topk_ids_cp_split, *_ = preprocess_thd_engine(
+            teacher_topk_ids, pre_process=True, local_cp_size=local_cp_size
+        )
     else:
+        if local_cp_size is not None:
+            raise NotImplementedError("Dynamic context parallel top-k distillation only supports THD data format")
         teacher_topk_log_probs_cp_split, *_ = preprocess_bshd_engine(teacher_topk_log_probs, pre_process=True)
         teacher_topk_ids_cp_split, *_ = preprocess_bshd_engine(teacher_topk_ids, pre_process=True)
     assert teacher_topk_log_probs_cp_split.shape[:2] == teacher_topk_ids_cp_split.shape[:2] == student_logits.shape[:2]
