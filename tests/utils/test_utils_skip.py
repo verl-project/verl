@@ -84,7 +84,12 @@ def _minimal_skip_cfg(
                 "project_name": "ut_proj",
                 "v1": {"trainer_mode": "sync"},
             },
-            "data": {"gen_batch_size": 4, "max_prompt_length": 8, "max_response_length": 16},
+            "data": {
+                "train_batch_size": 8,
+                "gen_batch_size": 4,
+                "max_prompt_length": 8,
+                "max_response_length": 16,
+            },
         }
     )
 
@@ -326,6 +331,14 @@ class TestAsyncRolloutSkipExtractStep:
 
 
 class TestSkipManagerInitAndAnnotate:
+    def test_init_uses_train_batch_size_when_gen_batch_size_is_null(self, tmp_path: Path):
+        cfg = _minimal_skip_cfg(str(tmp_path), enable=False)
+        cfg.data.gen_batch_size = None
+
+        SkipManager.init(cfg)
+
+        assert SkipManager.skip_instances["rollout"].gbs == cfg.data.train_batch_size
+
     def test_init_builds_rollout_and_async_instances(self, tmp_path: Path):
         cfg = _minimal_skip_cfg(str(tmp_path), steps=[1, 2], async_enable=True)
         SkipManager.init(cfg)
