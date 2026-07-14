@@ -17,7 +17,7 @@
 These cover the dependency-light pieces introduced for streaming generation:
 
 - The ``num_prompts`` resolution + validation contract of
-  ``PPOTrainer._add_batch_to_generate`` (default to ``train_batch_size``; require a positive
+  ``PPOTrainer._next_train_batch`` (default to ``train_batch_size``; require a positive
   multiple of ``gen_batch_size``; fetch in small chunks and coalesce submissions).
 - The ``steps_per_epoch`` derivation used for ``total_training_steps`` / epoch tracking, which
   must be computed from the dataset size and ``train_batch_size`` (NOT ``len(dataloader)``, which
@@ -36,7 +36,7 @@ import pytest
 
 def _resolve_num_prompts(num_prompts, train_batch_size, gen_batch_size):
     """Standalone copy of the ``num_prompts`` resolution/validation in
-    ``PPOTrainer._add_batch_to_generate``. Kept in sync with ``trainer_base.py``.
+    ``PPOTrainer._next_train_batch``. Kept in sync with ``trainer_base.py``.
     """
     if num_prompts is None:
         num_prompts = train_batch_size
@@ -50,7 +50,7 @@ def _resolve_num_prompts(num_prompts, train_batch_size, gen_batch_size):
 
 
 def _num_fetches(num_prompts, gen_batch_size):
-    """How many ``gen_batch_size`` dataloader fetches ``_add_batch_to_generate`` performs."""
+    """How many ``gen_batch_size`` dataloader fetches ``_next_train_batch`` performs."""
     return num_prompts // gen_batch_size
 
 

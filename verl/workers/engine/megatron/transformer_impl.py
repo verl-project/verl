@@ -168,12 +168,21 @@ class MegatronEngine(BaseEngine):
         from verl.utils.megatron_utils import mapping_string_to_attn_backend
         from verl.utils.torch_dtypes import PrecisionType
 
+        self.is_value_model = self.model_config.model_type == "value_model"
+        self.share_embeddings_and_output_weights = self.model_config.share_embeddings_and_output_weights
+
         check_mtp_config(self.model_config, self.engine_config)
 
         self.param_dtype = PrecisionType.to_dtype(self.engine_config.dtype)
         self.dtype = PrecisionType.to_dtype(self.param_dtype)
 
         override_transformer_config = mapping_string_to_attn_backend({**self.engine_config.override_transformer_config})
+        if self.is_value_model:
+            # A value head cannot share weights with the vocabulary embedding. This must
+            # be set before either bridge creates and finalizes its Megatron config.
+            self.model_config.hf_config.tie_word_embeddings = False
+            self.share_embeddings_and_output_weights = False
+            override_transformer_config["share_embeddings_and_output_weights"] = False
         if self.engine_config.dynamic_context_parallel:
             override_transformer_config["max_seqlen_per_dp_cp_rank"] = self.engine_config.max_seqlen_per_dp_cp_rank
             # note(baiyan): we must set the transformer_config.dynamic_context_parallel to False
@@ -206,14 +215,19 @@ class MegatronEngine(BaseEngine):
             # Match verl implementation (need variable_seq_lengths)
             from megatron.core.transformer.enums import AttnBackend
 
+            virtual_pipeline_model_parallel_size = self.engine_config.virtual_pipeline_model_parallel_size
             provider_overrides = {
                 "tensor_model_parallel_size": self.engine_config.tensor_model_parallel_size,
                 "pipeline_model_parallel_size": self.engine_config.pipeline_model_parallel_size,
                 "expert_model_parallel_size": self.engine_config.expert_model_parallel_size,
                 "expert_tensor_parallel_size": self.engine_config.expert_tensor_parallel_size,
-                "virtual_pipeline_model_parallel_size": self.engine_config.virtual_pipeline_model_parallel_size,
+                "virtual_pipeline_model_parallel_size": virtual_pipeline_model_parallel_size,
                 "context_parallel_size": self.engine_config.context_parallel_size,
                 "sequence_parallel": self.engine_config.sequence_parallel,
+                "overlap_p2p_comm": (
+                    virtual_pipeline_model_parallel_size is not None and virtual_pipeline_model_parallel_size > 1
+                ),
+                "batch_p2p_comm": False,
                 "variable_seq_lengths": True,
                 "attention_backend": AttnBackend.flash,
                 "moe_token_dispatcher_type": "alltoall",
@@ -287,7 +301,6 @@ class MegatronEngine(BaseEngine):
         from verl.utils.megatron_utils import McoreModuleWrapperConfig, make_megatron_module
         from verl.utils.model import print_model_size
 
-        self.is_value_model = self.model_config.model_type == "value_model"
         if self.engine_config.forward_only:
             wrap_with_ddp = False
         else:
@@ -299,9 +312,6 @@ class MegatronEngine(BaseEngine):
             use_distributed_optimizer=self.engine_config.use_distributed_optimizer,
             use_megatron_fsdp=self.engine_config.use_megatron_fsdp,
         )
-        if self.is_value_model:
-            self.model_config.hf_config.tie_word_embeddings = False
-
         override_ddp_config = self._resolve_override_ddp_config()
 
         module, updated_tf_config = make_megatron_module(
@@ -452,7 +462,7 @@ class MegatronEngine(BaseEngine):
             arch=self.model_config.architectures[0],
             hf_config=self.model_config.hf_config,
             param_dtype=self.param_dtype,
-            share_embeddings_and_output_weights=self.model_config.share_embeddings_and_output_weights,
+            share_embeddings_and_output_weights=self.share_embeddings_and_output_weights,
             processing_class=self.model_config.get_processor(),
             optimizer=self.optimizer,
             optimizer_scheduler=self.lr_scheduler,
@@ -634,6 +644,18 @@ class MegatronEngine(BaseEngine):
         if self._is_offload_optimizer:
             offload_megatron_optimizer(self.optimizer)
 
+    def _routed_num_tokens(self, data: TensorDict) -> torch.Tensor:
+        """Real (unpadded) tokens fed to the MoE router: attention_mask in the padded RL
+        path, else the packed input_ids count in the no-padding SFT path. Not loss_mask,
+        which counts response tokens only and would under-normalize the router loss."""
+        attention_mask = data.get("attention_mask", None)
+        if attention_mask is not None:
+            return attention_mask.sum()
+        input_ids = data["input_ids"]
+        if input_ids.is_nested:
+            return input_ids.offsets()[-1]
+        return torch.tensor(input_ids.numel(), device=input_ids.device)
+
     def forward_backward_batch(self, data: TensorDict, loss_function: Callable, forward_only=False) -> Any:
         self._distillation_use_topk_active = tu.get_non_tensor_data(data, key="distillation_use_topk", default=False)
         tu.assign_non_tensor(data, sp_size=self.engine_config.context_parallel_size)
@@ -645,6 +667,16 @@ class MegatronEngine(BaseEngine):
         )
         tu.assign_non_tensor(data, batch_num_tokens=batch_num_tokens.item())
         tu.assign_non_tensor(data, dp_size=self.get_data_parallel_size())
+
+        # Global routed-token count for the per-token-loss regime (consumed in
+        # postprocess_micro_batch_func). Real tokens are CP-replicated, so a single
+        # all-reduce over the DP group gives the global value.
+        if self.tf_config is not None and self.tf_config.calculate_per_token_loss:
+            routed_num_tokens = self._routed_num_tokens(data).to(get_device_id())
+            torch.distributed.all_reduce(
+                routed_num_tokens, op=torch.distributed.ReduceOp.SUM, group=self.get_data_parallel_group()
+            )
+            tu.assign_non_tensor(data, routed_num_tokens=routed_num_tokens.item())
 
         # BSHD path only: pad every micro-batch to the mini-batch's global max seq_len so the
         # padded `s_q` is shared -> cuDNN plan built once per shape. Raw (unaligned)
@@ -1092,6 +1124,54 @@ class MegatronEngineWithLMHead(MegatronEngine):
             "loss": loss.detach().item(),
             "metrics": metrics,
         }
+
+        # calculate_per_token_loss=True (auto-enabled by Megatron-Bridge at CP>1) puts
+        # Megatron in its per-token regime: loss_func must return (loss_sum, num_tokens,
+        # output), and finalize_model_grads divides every gradient by the accumulated
+        # total_num_tokens. That division is what cancels the MoE router's pre-multiplication
+        # of the aux/z loss by num_tokens; a 2-tuple leaves total_num_tokens=0, so the factor
+        # is never cancelled (the ~1e4 grad_norm blow-up at CP>1).
+        if self.tf_config is not None and self.tf_config.calculate_per_token_loss and loss_function is not None:
+            # seq-mean-token-mean is the one incompatible agg mode: its per-sequence 1/n_s
+            # uses CP-local shard counts that diverge from the global normalization. The
+            # other modes compose correctly across CP shards.
+            if hasattr(loss_function, "keywords") and "config" in loss_function.keywords:
+                _agg_mode = getattr(loss_function.keywords["config"], "loss_agg_mode", None)
+                if _agg_mode == "seq-mean-token-mean":
+                    raise ValueError(
+                        "loss_agg_mode='seq-mean-token-mean' is incompatible with "
+                        "calculate_per_token_loss=True (auto-enabled by Megatron-Bridge "
+                        "under CP>1). The per-sequence inner division by n_s requires "
+                        "local-shard counts that diverge from global under CP. Use one "
+                        "of: 'token-mean', 'seq-mean-token-sum', 'seq-mean-token-sum-norm'."
+                    )
+            # verl never passes a router padding_mask, so the MoE router normalizes the
+            # aux/z loss by logits.shape[0]. THD packs padding out -> that equals the real
+            # token count; BSHD leaves it at B*S (padding-inclusive), while gradients are
+            # divided by the real token count -> a padding-ratio mis-normalization.
+            if not self.engine_config.use_remove_padding:
+                raise ValueError(
+                    "calculate_per_token_loss=True requires use_remove_padding=True. "
+                    "verl does not pass a padding_mask to the MoE router, so in BSHD it "
+                    "normalizes the aux/z loss by the padding-inclusive token count (B*S) "
+                    "while gradients are divided by the real token count. Use THD "
+                    "(use_remove_padding=True) or disable CP."
+                )
+            # finalize_model_grads all-reduces the returned token count over the DP*CP group
+            # and divides every gradient by it. Real tokens are CP-replicated across the CP
+            # ranks, so report the per-CP-rank share (/cp_size); otherwise that DP*CP sum
+            # over-counts by cp_size and every gradient comes out 1/cp_size too small.
+            cp_size = self.engine_config.context_parallel_size
+            local_num_tokens = (self._routed_num_tokens(data) // cp_size).to(torch.int)
+            # n_i is the global routed-token count (all-reduced in forward_backward_batch);
+            # scaling loss by the same value makes Sum(L_i)/Sum(n_i) recover the loss. Falls
+            # back to local counts when not plumbed (single-rank / tests).
+            routed_num_tokens = data["routed_num_tokens"] if "routed_num_tokens" in data.keys() else None
+            if routed_num_tokens is None:
+                routed_num_tokens = self._routed_num_tokens(data)
+            dp_size = data["dp_size"] if "dp_size" in data.keys() else 1
+            local_sum = loss * routed_num_tokens / dp_size
+            return local_sum, local_num_tokens, output
 
         # return loss and stats
         return scaled_loss, output

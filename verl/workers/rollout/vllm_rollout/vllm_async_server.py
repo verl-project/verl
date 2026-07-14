@@ -1015,8 +1015,11 @@ class vLLMHttpServer:
         return "vllm"
 
     def _preprocess_engine_kwargs(self, engine_kwargs: dict) -> None:
-        """Mutate engine_kwargs in-place before the CLI args dict is built. No-op by default."""
-        pass
+        """Mutate engine_kwargs in-place before the CLI args dict is built."""
+        if _VLLM_VERSION < version.parse("0.22.0"):
+            # Work around multimodal processor cache desync across pause/resume.
+            # See: https://github.com/vllm-project/vllm/pull/43001/
+            engine_kwargs.setdefault("mm_processor_cache_gb", 0)
 
     def _get_override_generation_config(self) -> dict:
         """Return the override_generation_config dict."""

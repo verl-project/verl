@@ -21,6 +21,8 @@ import transfer_queue as tq
 from omegaconf import DictConfig
 from transfer_queue import KVBatchMeta
 
+from verl.utils.skip import SkipManager
+
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
@@ -219,6 +221,7 @@ class ReplayBuffer:
         }
         return len(stale_uids), metrics
 
+    @SkipManager.annotate_tq(role="rollout_tq", phase="sample")
     def sample(self, global_steps: int, partition_id: str, batch_size: int) -> KVBatchMeta:
         """Sample a batch of data from the replay buffer.
 

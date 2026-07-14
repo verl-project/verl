@@ -50,6 +50,7 @@ from ..utils import enable_full_determinism, postprocess_batch_func, prepare_mic
 from .utils import (
     MOE_PARAM_HANDERS,
     VL_TYPE2INDEX,
+    default_moe_param_handler,
     load_veomni_model_to_gpu,
     load_veomni_optimizer,
     offload_veomni_model_to_cpu,
@@ -586,7 +587,7 @@ class VeOmniEngine(FSDPEngine):
 
         ps = parallel_state.get_parallel_state()
         model_type = getattr(self.module.config, "model_type", "default")
-        process_func = MOE_PARAM_HANDERS.get(model_type, lambda n, t, ep_rank: iter([(n, t)]))
+        process_func = MOE_PARAM_HANDERS.get(model_type, default_moe_param_handler)
 
         def param_generator():
             for name, param in params.items():

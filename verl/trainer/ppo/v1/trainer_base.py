@@ -84,6 +84,7 @@ from verl.utils.import_utils import load_extern_type
 from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
+from verl.utils.skip import SkipManager
 from verl.utils.tracking import Tracking, ValidationGenerationsLogger
 from verl.workers.config import CriticConfig, DistillationConfig
 from verl.workers.engine_workers import ActorRolloutRefWorker, TrainingWorker, TrainingWorkerConfig
@@ -319,6 +320,9 @@ class PPOTrainer(ABC):
         """
         self.agent_loop_manager = agent_loop_manager
 
+        # initialize SkipManager for V1 rollout skip support
+        SkipManager.init(self.config)
+
         self.logger = Tracking(
             project_name=self.config.trainer.project_name,
             experiment_name=self.config.trainer.experiment_name,
@@ -347,7 +351,8 @@ class PPOTrainer(ABC):
 
         # we start from step 1
         self.global_steps += 1
-        # Only for async mode with inflight transfer_queue checkpoint saved.
+        # SkipManager skips warmup batches in async trainers, so it doesn't conflict with reissue.
+        SkipManager.set_step(self.global_steps)
         self._reissue_inflight_prompts()
         self.prev_step_profile = False
         self.curr_step_profile = (
@@ -407,6 +412,7 @@ class PPOTrainer(ABC):
             self.logger.log(data=metrics, step=self.global_steps)
             progress_bar.update(1)
             self.global_steps += 1
+            SkipManager.set_step(self.global_steps)
             current_epoch = (self.global_steps - 1) // self.steps_per_epoch
             if is_last_step:
                 self._shutdown_dump_executor()
@@ -1238,12 +1244,8 @@ class PPOTrainer(ABC):
         batch_dict["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch_dict["raw_prompt"]))], dtype=object)
         return tu.get_tensordict(batch_dict)
 
-    def _add_batch_to_generate(self, num_prompts: int | None = None) -> int:
-        """Fetch prompts in ``gen_batch_size`` chunks and coalesce them into one submission.
-
-        Args:
-            num_prompts: Total number of prompts to submit. Defaults to ``train_batch_size``.
-        """
+    def _next_train_batch(self, num_prompts: int | None = None) -> TensorDict:
+        """Fetch and coalesce the requested number of prompts."""
         train_batch_size = self.config.data.train_batch_size
         if num_prompts is None:
             num_prompts = train_batch_size
@@ -1257,7 +1259,10 @@ class PPOTrainer(ABC):
         chunks = [self._fetch_one_gen_batch() for _ in range(num_prompts // gen_batch_size)]
         batch = chunks[0] if len(chunks) == 1 else tu.concat_tensordict(chunks)
         tu.assign_non_tensor_data(batch, "global_steps", self.global_steps)
+        return batch
 
+    def _submit_batch_to_rollout(self, batch: TensorDict) -> int:
+        """Register prompts in TransferQueue and dispatch them for generation."""
         tags = [{"is_prompt": True, "status": "pending", "global_steps": self.global_steps}] * len(batch)
         if self.trainer_mode != "sync":
             tq.kv_batch_put(
@@ -1273,6 +1278,12 @@ class PPOTrainer(ABC):
 
         self.agent_loop_manager.generate_sequences(batch)
         return len(batch)
+
+    @SkipManager.annotate_tq(role="rollout_tq", phase="submit")
+    def _add_batch_to_generate(self, num_prompts: int | None = None) -> int:
+        """Add a coalesced prompt batch to the AgentLoopManager."""
+        batch = self._next_train_batch(num_prompts)
+        return self._submit_batch_to_rollout(batch)
 
     def _compute_reward_colocate(self, batch: KVBatchMeta, metrics: dict | None = None) -> KVBatchMeta:
         """Compute the reward score with a colocated reward model."""

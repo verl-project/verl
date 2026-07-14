@@ -79,7 +79,11 @@ def _minimal_skip_cfg(
                 },
             },
             "actor_rollout_ref": {"rollout": {"skip": {"enable": False}, "n": 2}},
-            "trainer": {"experiment_name": "ut_exp", "project_name": "ut_proj"},
+            "trainer": {
+                "experiment_name": "ut_exp",
+                "project_name": "ut_proj",
+                "v1": {"trainer_mode": "sync", "sync": {"parameter_sync_step": 1}},
+            },
             "data": {"gen_batch_size": 4, "max_prompt_length": 8, "max_response_length": 16},
         }
     )
@@ -163,6 +167,102 @@ class TestSkipRegistryAndBaseSkip:
                 RolloutSkipConfig(enable=True, action="repeat", steps=[1]),
                 OmegaConf.create({}),
             )
+
+
+class _PromptBatch:
+    def __init__(self, size: int):
+        self.uids = [f"uid-{i}" for i in range(size)]
+
+    def __getitem__(self, key: str):
+        assert key == "uid"
+        return self.uids
+
+    def __len__(self):
+        return len(self.uids)
+
+
+class _FakeTqSkip:
+    def __init__(self, cache_hit: bool):
+        self.steps = [3]
+        self.cache_hit = cache_hit
+        self.inject_calls: list[tuple[int, list[str]]] = []
+
+    def is_enabled(self):
+        return True
+
+    def maybe_load_and_inject(self, step: int, uids: list[str]):
+        self.inject_calls.append((step, uids))
+        return self.cache_hit
+
+
+class _SubmitHarness:
+    def __init__(self, default_size: int = 4):
+        self.default_size = default_size
+        self.next_calls: list[int | None] = []
+        self.submit_sizes: list[int] = []
+
+    def _next_train_batch(self, num_prompts: int | None = None):
+        self.next_calls.append(num_prompts)
+        return _PromptBatch(self.default_size if num_prompts is None else num_prompts)
+
+    def _submit_batch_to_rollout(self, batch):
+        self.submit_sizes.append(len(batch))
+        return len(batch)
+
+    @SkipManager.annotate_tq(role="rollout_tq", phase="submit")
+    def _add_batch_to_generate(self, num_prompts: int | None = None):
+        return self._submit_batch_to_rollout(self._next_train_batch(num_prompts))
+
+
+class TestSkipManagerTqSubmit:
+    @staticmethod
+    def _enable_skip(cache_hit: bool):
+        skip = _FakeTqSkip(cache_hit)
+        SkipManager.step = 3
+        SkipManager.skip_instances = {"rollout_tq": skip}
+        return skip
+
+    def test_regular_cache_hit_advances_full_batch_without_submit(self):
+        skip = self._enable_skip(cache_hit=True)
+        trainer = _SubmitHarness(default_size=4)
+
+        assert trainer._add_batch_to_generate() == 4
+        assert trainer.next_calls == [None]
+        assert trainer.submit_sizes == []
+        assert skip.inject_calls == [(3, ["uid-0", "uid-1", "uid-2", "uid-3"])]
+
+    def test_regular_cache_miss_submits_full_batch(self):
+        skip = self._enable_skip(cache_hit=False)
+        trainer = _SubmitHarness(default_size=4)
+
+        assert trainer._add_batch_to_generate() == 4
+        assert trainer.next_calls == [None]
+        assert trainer.submit_sizes == [4]
+        assert len(skip.inject_calls) == 1
+
+    def test_explicit_none_uses_regular_cache_path(self):
+        skip = self._enable_skip(cache_hit=True)
+        trainer = _SubmitHarness(default_size=4)
+
+        assert trainer._add_batch_to_generate(num_prompts=None) == 4
+        assert trainer.next_calls == [None]
+        assert trainer.submit_sizes == []
+        assert len(skip.inject_calls) == 1
+
+    @pytest.mark.parametrize("use_keyword", [False, True])
+    def test_explicit_refill_count_bypasses_cache(self, use_keyword):
+        skip = self._enable_skip(cache_hit=True)
+        trainer = _SubmitHarness(default_size=4)
+
+        if use_keyword:
+            submitted = trainer._add_batch_to_generate(num_prompts=3)
+        else:
+            submitted = trainer._add_batch_to_generate(3)
+
+        assert submitted == 3
+        assert trainer.next_calls == [3]
+        assert trainer.submit_sizes == [3]
+        assert skip.inject_calls == []
 
 
 class TestParseAsyncRolloutSampleStep:

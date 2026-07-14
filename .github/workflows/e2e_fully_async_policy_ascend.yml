@@ -188,4 +188,4 @@ jobs:
       - name: Running the E2E test with fully_async_policy algorithm (Megatron)
         run: |
           ray stop --force
-          bash tests/special_e2e/run_fully_async_policy.sh
+          VANILLA_MBRIDGE=True bash tests/special_e2e/run_fully_async_policy.sh

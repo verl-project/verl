@@ -40,6 +40,7 @@ import uuid
 import pytest
 import torch
 import transfer_queue as tq
+from omegaconf import OmegaConf
 from tensordict import TensorDict
 
 from verl.trainer.ppo.v1 import trainer_base
@@ -158,6 +159,49 @@ def _clear_partition(partition_id: str) -> None:
     keys = list(tq.kv_list(partition_id=partition_id).get(partition_id, {}).keys())
     if keys:
         tq.kv_clear(keys=keys, partition_id=partition_id)
+
+
+def test_async_submission_persists_reissuable_prompt_fields(monkeypatch):
+    stub = type("Stub", (), {})()
+    stub.trainer_mode = "separate_async"
+    stub.global_steps = 4
+    stub.agent_loop_manager = FakeAgentLoopManager()
+    stub._submit_batch_to_rollout = PPOTrainer._submit_batch_to_rollout.__get__(stub)
+    batch = tu.get_tensordict(
+        {
+            "uid": [_uid(), _uid()],
+            "raw_prompt": ["prompt-a", "prompt-b"],
+            "index": torch.tensor([0, 1]),
+        }
+    )
+    tu.assign_non_tensor_data(batch, "global_steps", stub.global_steps)
+    puts = []
+    monkeypatch.setattr(trainer_base.tq, "kv_batch_put", lambda **kwargs: puts.append(kwargs))
+
+    assert stub._submit_batch_to_rollout(batch) == 2
+    assert len(puts) == 1
+    assert set(puts[0]["fields"].keys()) == {"uid", "raw_prompt", "index"}
+    assert stub.agent_loop_manager.batches == [batch]
+
+
+def test_next_train_batch_coalesces_gen_batches():
+    stub = type("Stub", (), {})()
+    stub.config = OmegaConf.create({"data": {"train_batch_size": 4, "gen_batch_size": 2}})
+    stub.global_steps = 5
+    chunks = iter(
+        [
+            tu.get_tensordict({"uid": ["a", "b"], "raw_prompt": ["a", "b"], "index": torch.tensor([0, 1])}),
+            tu.get_tensordict({"uid": ["c", "d"], "raw_prompt": ["c", "d"], "index": torch.tensor([2, 3])}),
+        ]
+    )
+    stub._fetch_one_gen_batch = lambda: next(chunks)
+    stub._next_train_batch = PPOTrainer._next_train_batch.__get__(stub)
+
+    batch = stub._next_train_batch()
+
+    assert list(batch["uid"]) == ["a", "b", "c", "d"]
+    assert list(batch["index"]) == [0, 1, 2, 3]
+    assert int(batch["global_steps"]) == 5
 
 
 # --------------------------------------------------------------------------- #
