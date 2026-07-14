@@ -1004,6 +1004,11 @@ skip:
     dump_dir: ~/.verl/rollout_dump
     steps: []
     action: cache
+  rollout_tq:
+    enable: false
+    dump_dir: ~/.verl/rollout_dump
+    steps: []
+    action: cache
   async_rollout:
     enable: false
     dump_dir: ~/.verl/rollout_dump
