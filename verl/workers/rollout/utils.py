@@ -145,6 +145,22 @@ def get_vision_placeholder_tokens(processor) -> list[str]:
     return tokens
 
 
+def add_vision_bad_words(sampling_params: dict, processor) -> None:
+    """Ban the vision placeholder tokens for this request, in place.
+
+    Merged into whatever bad_words the caller passed rather than deferring to it: asking to ban
+    some other word is not a request to allow these. A text-only model has no placeholders to ban,
+    so sampling is left exactly as it was.
+    """
+    vision_bad_words = get_vision_placeholder_tokens(processor)
+    if not vision_bad_words:
+        return
+
+    bad_words = list(sampling_params.get("bad_words") or [])
+    bad_words += [word for word in vision_bad_words if word not in bad_words]
+    sampling_params["bad_words"] = bad_words
+
+
 def update_prometheus_config(config: PrometheusConfig, server_addresses: list[str], rollout_name: str | None = None):
     """
     Update Prometheus configuration file with server addresses and reload on first node.
