@@ -132,11 +132,12 @@ class SkipManager:
         from "sample trajectories" (``ReplayBuffer.sample``).  This decorator handles
         both, selected by *phase*:
 
-        - ``phase="submit"``: decorate ``_add_batch_to_generate``. Regular per-step
-          calls prepare a full training batch through ``_next_train_batch`` before
-          cache lookup, keeping the dataloader aligned on cache hits. Calls with an
-          explicit prompt count bypass cache injection so drop refills submit exactly
-          the requested number of fresh prompts.
+        - ``phase="submit"``: decorate ``_add_batch_to_generate``.  The method must be
+          split into ``_next_train_batch`` (dataloader + uid) and ``_submit_batch_to_rollout``
+          (tag registration + generate_sequences).  The decorator always calls
+          ``_next_train_batch`` first (keeping the dataloader aligned even on cache-hit
+          steps), then checks ``meet_precondition``.  On cache-hit it injects cached data
+          into the TQ and returns; on cache-miss it calls ``_submit_batch_to_rollout``.
 
         - ``phase="sample"``: decorate ``ReplayBuffer.sample``.  After the original
           ``sample`` runs, if the skip instance says to save, persist the result to disk
@@ -156,16 +157,12 @@ class SkipManager:
                     return func(self, *args, **kwargs)
 
                 if phase == "submit":
-                    # For now, `num_prompts` will not be used with skip_manager at the same
-                    # time. It's a guard for future features.
-                    num_prompts = args[0] if args else kwargs.get("num_prompts")
-                    if num_prompts is not None:
-                        return func(self, *args, **kwargs)
                     # Always prepare batch (keeps dataloader aligned on cache-hit steps)
                     batch = self._next_train_batch()
                     if skip_instance.maybe_load_and_inject(step, list(batch["uid"])):
-                        return len(batch)
-                    return self._submit_batch_to_rollout(batch)
+                        return
+                    self._submit_batch_to_rollout(batch)
+                    return
 
                 # phase == "sample": post-save after original sample runs
                 result = func(self, *args, **kwargs)

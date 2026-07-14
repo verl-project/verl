@@ -184,6 +184,26 @@ def test_async_submission_persists_reissuable_prompt_fields(monkeypatch):
     assert stub.agent_loop_manager.batches == [batch]
 
 
+def test_add_prompts_to_generate_uses_exact_count():
+    stub = type("Stub", (), {})()
+    batch = tu.get_tensordict(
+        {
+            "uid": [_uid(), _uid(), _uid()],
+            "raw_prompt": ["prompt-a", "prompt-b", "prompt-c"],
+            "index": torch.tensor([0, 1, 2]),
+        }
+    )
+    requested = []
+    submitted = []
+    stub._next_train_batch = lambda num_prompts: requested.append(num_prompts) or batch
+    stub._submit_batch_to_rollout = lambda value: submitted.append(value) or len(value)
+    stub._add_prompts_to_generate = PPOTrainer._add_prompts_to_generate.__get__(stub)
+
+    assert stub._add_prompts_to_generate(3) == 3
+    assert requested == [3]
+    assert submitted == [batch]
+
+
 def test_next_train_batch_coalesces_gen_batches():
     stub = type("Stub", (), {})()
     stub.config = OmegaConf.create({"data": {"train_batch_size": 4, "gen_batch_size": 2}})

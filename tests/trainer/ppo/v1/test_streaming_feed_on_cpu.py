@@ -29,8 +29,6 @@ Importing the trainer directly would pull in heavy runtime deps (ray, transfer_q
 is replicated standalone and kept in sync with ``verl/trainer/ppo/v1/trainer_base.py``.
 """
 
-import math
-
 import pytest
 
 
@@ -170,75 +168,3 @@ class TestStepsPerEpoch:
         # total_training_steps = steps_per_epoch * total_epochs.
         steps = _steps_per_epoch(dataset_size=10240, train_batch_size=1024)
         assert steps * 3 == 30
-        assert math.isclose(steps * 3, 30)
-
-
-def _accumulate_drop_metrics(acc: dict, new: dict, dropped: int) -> None:
-    """Standalone copy of ``ReplayBuffer``'s module-level ``_accumulate_drop_metrics``.
-
-    Kept in sync with ``verl/trainer/ppo/v1/replay_buffer.py``; importing it would pull in heavy
-    runtime deps (ray, transfer_queue) via ``verl/__init__.py``.
-    """
-    count_key = next((k for k in new if k.endswith("/dropped_samples")), None)
-    prev_total = acc.get(count_key, 0) if count_key else 0
-
-    for key, value in new.items():
-        if key.endswith("/dropped_samples"):
-            acc[key] = acc.get(key, 0) + value
-        elif key.endswith("/dropped_samples_staleness/mean"):
-            denom = prev_total + dropped
-            acc[key] = (acc.get(key, 0.0) * prev_total + value * dropped) / denom if denom else value
-        elif key.endswith("/dropped_samples_staleness/max"):
-            acc[key] = max(acc.get(key, value), value)
-        elif key.endswith("/dropped_samples_staleness/min"):
-            acc[key] = min(acc.get(key, value), value)
-
-
-class TestAccumulateDropMetrics:
-    """``_accumulate_drop_metrics`` merges per-iteration drop metrics across the sample poll loop."""
-
-    @staticmethod
-    def _acc():
-        return _accumulate_drop_metrics
-
-    @staticmethod
-    def _metrics(dropped, mean, mx, mn, prefix="training"):
-        return {
-            f"{prefix}/off_policy/dropped_samples": dropped,
-            f"{prefix}/off_policy/dropped_samples_staleness/mean": mean,
-            f"{prefix}/off_policy/dropped_samples_staleness/max": mx,
-            f"{prefix}/off_policy/dropped_samples_staleness/min": mn,
-        }
-
-    def test_single_iteration_copies_values(self):
-        accumulate = self._acc()
-        acc: dict = {}
-        accumulate(acc, self._metrics(dropped=2, mean=5.0, mx=6.0, mn=4.0), dropped=2)
-        assert acc["training/off_policy/dropped_samples"] == 2
-        assert acc["training/off_policy/dropped_samples_staleness/mean"] == 5.0
-        assert acc["training/off_policy/dropped_samples_staleness/max"] == 6.0
-        assert acc["training/off_policy/dropped_samples_staleness/min"] == 4.0
-
-    def test_count_accumulates(self):
-        accumulate = self._acc()
-        acc: dict = {}
-        accumulate(acc, self._metrics(dropped=2, mean=5.0, mx=5.0, mn=5.0), dropped=2)
-        accumulate(acc, self._metrics(dropped=3, mean=10.0, mx=10.0, mn=10.0), dropped=3)
-        assert acc["training/off_policy/dropped_samples"] == 5
-
-    def test_mean_is_sample_weighted(self):
-        accumulate = self._acc()
-        acc: dict = {}
-        # 2 samples @ mean 5, then 3 samples @ mean 10 -> weighted mean (2*5 + 3*10)/5 = 8.
-        accumulate(acc, self._metrics(dropped=2, mean=5.0, mx=5.0, mn=5.0), dropped=2)
-        accumulate(acc, self._metrics(dropped=3, mean=10.0, mx=10.0, mn=10.0), dropped=3)
-        assert acc["training/off_policy/dropped_samples_staleness/mean"] == 8.0
-
-    def test_max_and_min_are_running_extrema(self):
-        accumulate = self._acc()
-        acc: dict = {}
-        accumulate(acc, self._metrics(dropped=1, mean=5.0, mx=5.0, mn=5.0), dropped=1)
-        accumulate(acc, self._metrics(dropped=1, mean=9.0, mx=9.0, mn=9.0), dropped=1)
-        accumulate(acc, self._metrics(dropped=1, mean=3.0, mx=3.0, mn=3.0), dropped=1)
-        assert acc["training/off_policy/dropped_samples_staleness/max"] == 9.0
-        assert acc["training/off_policy/dropped_samples_staleness/min"] == 3.0

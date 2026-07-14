@@ -148,7 +148,7 @@ class PPOTrainer(ABC):
             max_off_policy_threshold=sampler_config.max_off_policy_threshold,
             max_off_policy_strategy=sampler_config.max_off_policy_strategy,
             sampler_kwargs=sampler_config.sampler_kwargs,
-            refill_fn=self._add_batch_to_generate,
+            refill_fn=self._add_prompts_to_generate,
         )
 
     def init(self):
@@ -760,9 +760,7 @@ class PPOTrainer(ABC):
             else:
                 logger.warning(
                     f"Installed TransferQueue ({getattr(tq, '__version__', 'unknown')}) does not "
-                    "support checkpoint save/load. In-flight prompts from before the restart are lost; "
-                    "only fresh warmup prompts are generated on resume. Upgrade TransferQueue to 0.1.9 "
-                    "or newer to avoid losing samples."
+                    "provide checkpoint save/load APIs. TransferQueue state will not be restored."
                 )
 
     def _reissue_inflight_prompts(self, partition_id: str = "train") -> int:
@@ -1269,7 +1267,7 @@ class PPOTrainer(ABC):
                 keys=list(batch["uid"]),
                 partition_id="train",
                 tags=tags,
-                # Used for checkpointing of async trainers
+                # Persist prompt data for async checkpoint recovery.
                 # TODO: maybe let workers do it?
                 fields=batch.select(*[key for key in batch.keys() if not isinstance(batch.get(key), NonTensorData)]),
             )
@@ -1279,11 +1277,15 @@ class PPOTrainer(ABC):
         self.agent_loop_manager.generate_sequences(batch)
         return len(batch)
 
-    @SkipManager.annotate_tq(role="rollout_tq", phase="submit")
-    def _add_batch_to_generate(self, num_prompts: int | None = None) -> int:
-        """Add a coalesced prompt batch to the AgentLoopManager."""
+    def _add_prompts_to_generate(self, num_prompts: int) -> int:
+        """Add an exact number of prompts to the AgentLoopManager."""
         batch = self._next_train_batch(num_prompts)
         return self._submit_batch_to_rollout(batch)
+
+    @SkipManager.annotate_tq(role="rollout_tq", phase="submit")
+    def _add_batch_to_generate(self):
+        """Add one training batch to the AgentLoopManager."""
+        self._add_prompts_to_generate(self.config.data.train_batch_size)
 
     def _compute_reward_colocate(self, batch: KVBatchMeta, metrics: dict | None = None) -> KVBatchMeta:
         """Compute the reward score with a colocated reward model."""
