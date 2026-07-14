@@ -25,7 +25,9 @@ RUN ARCH=$(uname -m) && \
     # Clone libs
     git clone https://github.com/sgl-project/sglang.git && cd sglang && git checkout v0.5.10 && cd .. && \
     git clone https://gitcode.com/Ascend/MindSpeed.git && \
-    cd MindSpeed && git checkout core_r0.16.0 && cd .. 
+    cd MindSpeed && git checkout core_r0.16.0 && cd .. && \
+    git clone --depth 1 https://github.com/NVIDIA-NeMo/Megatron-Bridge.git && \
+    cd Megatron-Bridge && git fetch --depth 1 origin de93536e9028ecf1e4dc28608dc80f336dcdfe59 && git checkout de93536e9028ecf1e4dc28608dc80f336dcdfe59 && cd ..
 
 # Install repositories with low update frequency
 RUN cd sglang && \
@@ -68,6 +70,9 @@ RUN export PIP_EXTRA_INDEX_URL=https://triton-ascend.osinfra.cn/pypi/simple/ && 
     # Clear extra files
     rm -rf /tmp/* /var/tmp/* && \
     pip cache purge
+
+# set PYTHONPATH
+ENV PYTHONPATH=/Megatron-Bridge/src:$PYTHONPATH
 
 # Show install results
 RUN pip list
