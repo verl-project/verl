@@ -1285,7 +1285,8 @@ class PPOTrainer(ABC):
     @SkipManager.annotate_tq(role="rollout_tq", phase="submit")
     def _add_batch_to_generate(self):
         """Add one training batch to the AgentLoopManager."""
-        self._add_prompts_to_generate(self.config.data.train_batch_size)
+        batch = self._next_train_batch()
+        self._submit_batch_to_rollout(batch)
 
     def _compute_reward_colocate(self, batch: KVBatchMeta, metrics: dict | None = None) -> KVBatchMeta:
         """Compute the reward score with a colocated reward model."""
