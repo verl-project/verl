@@ -82,7 +82,7 @@ def _minimal_skip_cfg(
             "trainer": {
                 "experiment_name": "ut_exp",
                 "project_name": "ut_proj",
-                "v1": {"trainer_mode": "sync", "sync": {"parameter_sync_step": 1}},
+                "v1": {"trainer_mode": "sync"},
             },
             "data": {"gen_batch_size": 4, "max_prompt_length": 8, "max_response_length": 16},
         }
