@@ -897,52 +897,6 @@ class AgentLoopWorker:
             multi_modal_inputs["images_seqlens"] = images_seqlens
         return multi_modal_inputs
 
-    @staticmethod
-    def _drop_ungrounded_vision_tokens(mm_token_type_ids, image_grid_thw, video_grid_thw) -> None:
-        """Demote vision-typed spans that have no grid behind them back to text, in place.
-
-        get_rope_index consumes one grid per contiguous run of image/video tokens. A vision token
-        the policy generated itself has no grid, and it takes the whole job down: an extra image
-        token exhausts the iterator (StopIteration), and a video token indexes a modality that was
-        never populated (TypeError: 'NoneType' object is not an iterator). Such a token carries no
-        pixels, so the only sane reading of it is text.
-
-        Counted per modality against the available grids, never by prompt-vs-response region: a
-        multi-turn image tool legitimately injects image tokens into the response, and those DO
-        have grids.
-        """
-        available = {
-            1: 0 if image_grid_thw is None else image_grid_thw.shape[0],
-            2: 0 if video_grid_thw is None else video_grid_thw.shape[0],
-        }
-        row = mm_token_type_ids[0]
-        boundary = torch.ones_like(row, dtype=torch.bool)
-        boundary[1:] = row[1:] != row[:-1]
-        run_starts = boundary.nonzero(as_tuple=True)[0]
-        run_ends = torch.cat([run_starts[1:], torch.tensor([row.numel()], device=row.device)])
-
-        seen = {1: 0, 2: 0}
-        dropped = {1: 0, 2: 0}
-        for start, end in zip(run_starts.tolist(), run_ends.tolist(), strict=True):
-            modality = int(row[start])
-            if modality == 0:
-                continue
-            seen[modality] += 1
-            if seen[modality] > available[modality]:
-                row[start:end] = 0
-                dropped[modality] += end - start
-
-        if any(dropped.values()):
-            logger.warning(
-                "Policy generated vision tokens with no image/video behind them; treating them as "
-                "text. Dropped %d image and %d video token(s); the sequence has %d image and %d "
-                "video grid(s).",
-                dropped[1],
-                dropped[2],
-                available[1],
-                available[2],
-            )
-
     def _compute_position_ids(
         self,
         input_ids,
@@ -968,13 +922,6 @@ class AgentLoopWorker:
                 mm_token_type_ids[0][input_ids[0] == image_token_id] = 1
             if video_token_id is not None:
                 mm_token_type_ids[0][input_ids[0] == video_token_id] = 2
-            # input_ids is prompt + response, so a vision token the policy sampled itself is
-            # marked here too -- with no grid behind it.
-            self._drop_ungrounded_vision_tokens(
-                mm_token_type_ids,
-                image_grid_thw=multi_modal_kwargs["image_grid_thw"],
-                video_grid_thw=multi_modal_kwargs["video_grid_thw"],
-            )
             multi_modal_kwargs["mm_token_type_ids"] = mm_token_type_ids
 
         # Model's get_rope_index has been dynamically bind to the processor.
