@@ -139,6 +139,8 @@ class CheckpointEngineConfig(BaseConfig):
     # backend is instantiated, allowing custom backends to register themselves
     # in CheckpointEngineRegistry.
     custom_backend_module: Optional[str] = None
+    # Debug option: compare initial rollout backend-loaded weights with the source HF checkpoint.
+    check_weight_sync: bool = False
 
 
 @dataclass
