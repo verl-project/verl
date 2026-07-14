@@ -114,8 +114,8 @@ def qwen2_5_vl_dedup_image_tokens(prompt_ids: list[int], processor):
         return prompt_ids
 
 
-def get_vision_placeholder_tokens(processor) -> list[str]:
-    """Vision placeholder tokens the policy must never sample, as strings for `bad_words`.
+def get_vision_placeholder_token_ids(processor) -> list[int]:
+    """Vision placeholder token ids the policy must never sample.
 
     An `<|image_pad|>` or `<|video_pad|>` token only means something when a real image or video
     sits behind it: the k-th run of placeholders pairs with the k-th row of `image_grid_thw` /
@@ -130,35 +130,12 @@ def get_vision_placeholder_tokens(processor) -> list[str]:
 
     Returns an empty list for text-only models, leaving sampling untouched.
     """
-    tokenizer = getattr(processor, "tokenizer", None) if processor is not None else None
-    if tokenizer is None:
-        return []
-
-    tokens = []
+    token_ids = []
     for modality in ("image", "video"):
         token_id = get_processor_token_id(processor, modality)
-        if token_id is None:
-            continue
-        token = tokenizer.convert_ids_to_tokens(token_id)
-        if token:
-            tokens.append(token)
-    return tokens
-
-
-def add_vision_bad_words(sampling_params: dict, processor) -> None:
-    """Ban the vision placeholder tokens for this request, in place.
-
-    Merged into whatever bad_words the caller passed rather than deferring to it: asking to ban
-    some other word is not a request to allow these. A text-only model has no placeholders to ban,
-    so sampling is left exactly as it was.
-    """
-    vision_bad_words = get_vision_placeholder_tokens(processor)
-    if not vision_bad_words:
-        return
-
-    bad_words = list(sampling_params.get("bad_words") or [])
-    bad_words += [word for word in vision_bad_words if word not in bad_words]
-    sampling_params["bad_words"] = bad_words
+        if token_id is not None:
+            token_ids.append(token_id)
+    return token_ids
 
 
 def update_prometheus_config(config: PrometheusConfig, server_addresses: list[str], rollout_name: str | None = None):

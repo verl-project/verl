@@ -120,7 +120,13 @@ def get_vllm_max_lora_rank(lora_rank: int):
 
 
 # https://github.com/vllm-project/vllm/issues/13175
-def monkey_patch_compute_logits(model, vocab_size: int):
+def monkey_patch_compute_logits(model, vocab_size: int, banned_token_ids: Optional[list[int]] = None):
+    """Mask the tokens the sampler must never pick.
+
+    Beyond the out-of-vocabulary tail, `banned_token_ids` covers tokens that live *inside* the
+    vocabulary yet are still illegal to generate: the vision placeholders, which are meaningless
+    unless a real image or video sits behind them. See `get_vision_placeholder_token_ids`.
+    """
     original_compute_logits = model.compute_logits
 
     def compute_logits(
@@ -130,6 +136,8 @@ def monkey_patch_compute_logits(model, vocab_size: int):
     ) -> torch.Tensor:
         logits = original_compute_logits(*args, **kwargs)
         logits[..., vocab_size:] = float("-inf")
+        if banned_token_ids:
+            logits[..., banned_token_ids] = float("-inf")
         return logits
 
     model.compute_logits = MethodType(compute_logits, model)
@@ -232,10 +240,10 @@ class vLLMColocateWorkerExtension:
             if draft_cfg is not None:
                 yield self._get_drafter_model(), draft_cfg
 
-    def monkey_patch_model(self, vocab_size: int):
+    def monkey_patch_model(self, vocab_size: int, banned_token_ids: Optional[list[int]] = None):
         for model in self._iter_all_models():
-            # patch compute_logits to avoid sampling OOV token
-            monkey_patch_compute_logits(model, vocab_size)
+            # patch compute_logits to avoid sampling OOV and other illegal tokens
+            monkey_patch_compute_logits(model, vocab_size, banned_token_ids)
             # patch weight loader to support MoE model
             patch_vllm_moe_model_weight_loader(model)
 
