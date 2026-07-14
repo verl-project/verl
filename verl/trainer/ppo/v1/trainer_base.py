@@ -377,7 +377,7 @@ class PPOTrainer(ABC):
 
                 self.on_step_end()
 
-            # 4. validate
+            # 3. validate
             if self.config.trainer.test_freq > 0 and (
                 is_last_step or self.global_steps % self.config.trainer.test_freq == 0
             ):
@@ -389,15 +389,15 @@ class PPOTrainer(ABC):
                         last_val_metrics = val_metrics
                 metrics.update(val_metrics)
 
-            # 5. record metrics
+            # 4. record metrics
             self._compute_metrics(batch, metrics, self.timing_raw, global_steps=self.global_steps, epoch=current_epoch)
 
-            # 6. dump rollout generations if enabled
+            # 5. dump rollout generations if enabled
             rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
             if rollout_data_dir:
                 self._log_rollout_data(batch, self.timing_raw, rollout_data_dir)
 
-            # 7. cleanup transfer queue
+            # 6. cleanup transfer queue
             tq.kv_clear(keys=batch.keys, partition_id=batch.partition_id)
 
             self.logger.log(data=metrics, step=self.global_steps)
