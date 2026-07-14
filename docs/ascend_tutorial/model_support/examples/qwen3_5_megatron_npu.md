@@ -8,7 +8,7 @@ Last updated: 09/07/2026.
 
 | software | version                                                       |
 | --- |---------------------------------------------------------------|
-| Docker image | `quay.io/ascend/verl:verl-9.0.0-a3-ubuntu22.04-py3.11-v0.8.0` |
+| Docker image | `quay.io/ascend/verl:v0.8.0-cann9.0.0-torch2.9.0post2-a3-ubuntu22.04-py3.11-vllm` |
 | verl | 0.8.0                                                         |
 | Python | 3.11                                                          |
 | CANN | 9.0.0                                                         |
@@ -19,7 +19,7 @@ Last updated: 09/07/2026.
 建议直接使用上表中的镜像：
 
 ```bash
-docker pull quay.io/ascend/verl:verl-9.0.0-a3-ubuntu22.04-py3.11-v0.8.0
+docker pull quay.io/ascend/verl:v0.8.0-cann9.0.0-torch2.9.0post2-a3-ubuntu22.04-py3.11-vllm
 ```
 
 ## 模型和脚本
