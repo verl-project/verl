@@ -651,6 +651,24 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         return output.cpu() if output is not None else None
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
+    @DistProfiler.annotate(color="cyan", role="actor_compute_student_topk")
+    @_with_routing_replay_flag(enabled=False)
+    def compute_student_topk(self, data: TensorDict) -> TensorDict:
+        """Run a no-grad student forward and emit the per-token student top-K
+        log-probs and IDs.
+
+        Used by the FSDP teacher pipeline (verl#6676): the student top-K must be
+        computed before the teacher forward, since the teacher gathers log-probs at
+        those IDs. Stamping ``compute_student_topk_only=True`` makes the actor's
+        distillation logits processor return the top-K instead of the full loss.
+        """
+        tu.assign_non_tensor(data, compute_student_topk_only=True)
+        # Forward only — never build the teacher-conditional loss tensor.
+        tu.assign_non_tensor(data, compute_loss=True)
+        output = self.actor.infer_batch(data)
+        return output.cpu() if output is not None else None
+
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @DistProfiler.annotate(color="red", role="actor_update")
     @_with_routing_replay_flag(enabled=True)
     def update_actor(self, data: TensorDict) -> TensorDict:

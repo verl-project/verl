@@ -20,6 +20,7 @@ from typing import Optional
 from verl.base_config import BaseConfig
 from verl.utils.config import omega_conf_to_dataclass
 
+from .engine import FSDPEngineConfig
 from .rollout import RolloutConfig
 
 __all__ = ["DistillationLossConfig", "DistillationTeacherModelConfig", "DistillationConfig"]
@@ -115,6 +116,11 @@ class DistillationLossConfig(BaseConfig):
                 "(use_policy_gradient=False). With policy gradient, the update uses only the sampled"
                 " token's logprob ∇logπ(a), so the top-k distributional signal (how non-sampled logits "
                 "should move) is largely unused."
+            )
+
+        if self.use_policy_gradient and self.loss_mode == "reverse_kl_topk":
+            raise ValueError(
+                "reverse_kl_topk is a supervised distillation loss and requires use_policy_gradient=False."
             )
 
         if not self.use_policy_gradient and self.loss_mode == "k1":
@@ -255,6 +261,17 @@ class DistillationConfig(BaseConfig):
     +distillation.teacher_models.teacher_model2.key=hiyouga/geometry3k
     +distillation.teacher_models.teacher_model2.model_path=Qwen/Qwen3-VL-4B-Instruct
     ```
+
+    Reverse-KL extension fields (only used when ``teacher_backend == 'fsdp'``):
+        teacher_backend (str): "vllm" (default, current behavior — teacher serves prompt_logprobs
+            via vLLM/SGLang rollout) or "fsdp" (teacher hosted as a frozen FSDP worker that
+            gathers logprobs at student-top-K IDs each train step).
+        teacher_chunk_size (int): Token-axis chunk size used by the FSDP teacher when gathering
+            log-probabilities at student-top-K IDs without materializing the full ``[B, T, V]``
+            log-softmax tensor.
+        teacher_fsdp_config (Optional[FSDPEngineConfig]): FSDP wrap / offload / dtype config
+            applied to the frozen teacher worker. Reuses the same dataclass as actor / ref so the
+            existing FSDP engine builder can construct the teacher model.
     """
 
     _mutable_fields = BaseConfig._mutable_fields | {"teacher_models", "n_gpus_per_node", "nnodes"}
@@ -266,8 +283,27 @@ class DistillationConfig(BaseConfig):
     teacher_key: str = "data_source"
     distillation_loss: DistillationLossConfig = field(default_factory=DistillationLossConfig)
 
+    # Reverse-KL extension: vLLM rollout teacher (default) or frozen FSDP worker.
+    teacher_backend: str = "vllm"
+    teacher_chunk_size: int = 1024
+    teacher_fsdp_config: Optional[FSDPEngineConfig] = None
+
     def __post_init__(self):
         if not self.enabled:
+            return
+
+        if self.teacher_backend not in ("vllm", "fsdp"):
+            raise ValueError(f"Unsupported teacher_backend {self.teacher_backend!r}; expected one of 'vllm' or 'fsdp'.")
+
+        if self.teacher_backend == "fsdp":
+            # FSDP teacher only supports reverse_kl_topk for now; other modes need rollout outputs.
+            if self.distillation_loss.loss_mode != "reverse_kl_topk":
+                raise ValueError(
+                    "teacher_backend='fsdp' currently only supports distillation_loss.loss_mode="
+                    "'reverse_kl_topk', "
+                    f"got loss_mode={self.distillation_loss.loss_mode!r}."
+                )
+            self.teacher_models = self._resolve_teacher_models(skip_inference_validation=True)
             return
 
         self.teacher_models = self._resolve_teacher_models()
@@ -286,24 +322,30 @@ class DistillationConfig(BaseConfig):
                 f"({self.n_gpus_per_node=} * {self.nnodes=} = {total_pool_size})."
             )
 
-    def _resolve_teacher_models(self) -> dict[str, DistillationTeacherModelConfig]:
+    def _resolve_teacher_models(
+        self, skip_inference_validation: bool = False
+    ) -> dict[str, DistillationTeacherModelConfig]:
         assert "teacher_model" in self.teacher_models
         if len(self.teacher_models) == 1:
             # Single teacher occupies the entire teacher resource pool.
             teacher_model = self.teacher_models["teacher_model"]
-            inference = teacher_model.inference
-            per_replica = (
-                inference.tensor_model_parallel_size
-                * inference.data_parallel_size
-                * inference.pipeline_model_parallel_size
-            )
-            pool_size = self.n_gpus_per_node * self.nnodes
-            if pool_size % per_replica != 0:
-                raise ValueError(
-                    f"Single teacher's per_replica_world_size ({per_replica}) must divide the distillation "
-                    f"resource pool size ({self.n_gpus_per_node=} * {self.nnodes=} = {pool_size})."
+            if skip_inference_validation:
+                # FSDP teacher does not consume the vLLM/SGLang inference pool sizing fields.
+                teacher_model.num_replicas = 1
+            else:
+                inference = teacher_model.inference
+                per_replica = (
+                    inference.tensor_model_parallel_size
+                    * inference.data_parallel_size
+                    * inference.pipeline_model_parallel_size
                 )
-            teacher_model.num_replicas = pool_size // per_replica
+                pool_size = self.n_gpus_per_node * self.nnodes
+                if pool_size % per_replica != 0:
+                    raise ValueError(
+                        f"Single teacher's per_replica_world_size ({per_replica}) must divide the distillation "
+                        f"resource pool size ({self.n_gpus_per_node=} * {self.nnodes=} = {pool_size})."
+                    )
+                teacher_model.num_replicas = pool_size // per_replica
             teacher_model.key = "default"
         else:
             # Multiple teachers: remove default single teacher config

@@ -517,7 +517,13 @@ class AgentLoopWorker:
 
         # Online policy distillation
         self.distillation_enabled = is_distillation_enabled(config.distillation)
-        if self.distillation_enabled:
+        # Only the vLLM teacher injects logprobs synchronously in the rollout;
+        # the FSDP teacher is driven by the trainer's main loop after rollout
+        # (it needs the student top-K first), so agent_loop must not call it here.
+        self.use_vllm_teacher = (
+            self.distillation_enabled and config.distillation.get("teacher_backend", "vllm") == "vllm"
+        )
+        if self.use_vllm_teacher:
             from verl.experimental.teacher_loop.teacher_manager import AsyncTeacherLLMServerManager
 
             self.teacher_key: str = config.distillation.teacher_key
@@ -1012,7 +1018,9 @@ class AgentLoopWorker:
         sample_kwargs: Optional[dict[str, Any]] = None,
     ) -> None:
         """Compute teacher logprobs for single sample."""
-        if self.distillation_enabled and not validate:
+        # Only the vLLM teacher produces logprobs synchronously per trajectory;
+        # the FSDP teacher is driven by the trainer's main loop after rollout.
+        if self.use_vllm_teacher and not validate:
             routing_key = None
             if sample_kwargs is not None:
                 routing_value = sample_kwargs.get(self.teacher_key)

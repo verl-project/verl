@@ -72,6 +72,27 @@ def kl_divergence(log_q: torch.Tensor, log_p: torch.Tensor) -> torch.Tensor:
     return kld.sum(dim=-1)
 
 
+def reverse_kl_divergence(log_q: torch.Tensor, log_p: torch.Tensor) -> torch.Tensor:
+    """Compute reverse KL divergence on a shared support.
+
+    Computes KL(Q || P) with the expectation taken under Q (the "student" distribution),
+    which is the mode-seeking direction discussed in
+    "Rethinking On-Policy Distillation of Large Language Models" (arXiv:2604.13016)
+    and verl issue #6676.
+
+    Args:
+        log_q: Student log-probabilities at the shared support, shape ``(..., K)``.
+        log_p: Teacher log-probabilities at the same support, shape ``(..., K)``.
+
+    Returns:
+        Token-wise KL(Q || P), shape ``(...,)`` (the trailing K axis is reduced).
+    """
+    log_q = log_q.float()
+    log_p = log_p.float()
+    q = log_q.exp()
+    return (q * (log_q - log_p)).sum(dim=-1)
+
+
 def compute_forward_kl_topk(
     student_logits: torch.Tensor,
     teacher_topk_log_probs: torch.Tensor,
@@ -147,3 +168,101 @@ def compute_forward_kl_topk(
         "overlap_count": overlap_count,
         "overlap_token_advantage": overlap_token_advantage,
     }
+
+
+def compute_reverse_kl_topk(
+    student_logits: torch.Tensor,
+    teacher_on_student_logp: torch.Tensor,
+    student_topk_ids: torch.Tensor,
+    config: DistillationConfig,
+    data_format: str,
+    teacher_topk_ids: torch.Tensor = None,
+) -> dict[str, torch.Tensor]:
+    """Compute student-top-K reverse KL distillation loss.
+
+    The support is the student's own top-K; teacher log-probabilities at those IDs
+    are precomputed by the FSDP teacher worker, so no full ``[B, T, V]`` tensor is
+    materialized here.
+
+    NOTE: student and teacher are renormalized onto the student-top-K support so the
+    loss is a proper ``KL(Q_K || P_K)`` (otherwise it could be minimized by leaking
+    mass outside the top-K). ``student_mass`` stays un-normalized as a diagnostic.
+
+    Args:
+        student_logits: ``(bsz, seqlen/sp_size, vocab_size)``.
+        teacher_on_student_logp: ``(bsz, seqlen, K)`` — teacher log-probabilities
+            gathered at ``student_topk_ids``.
+        student_topk_ids: ``(bsz, seqlen, K)`` — the student's current-step top-K IDs.
+        config: Distillation config (used for the ``log_prob_min_clamp`` guard).
+        data_format: kept for API symmetry with :func:`compute_forward_kl_topk`;
+            not consumed here.
+        teacher_topk_ids: ``(bsz, seqlen, K)`` — the teacher's own top-K IDs, used
+            only for the overlap diagnostics. Overlap metrics are skipped when ``None``.
+
+    Returns:
+        dict with ``distillation_losses`` and the ``student_mass`` / ``teacher_mass``
+        diagnostics; also ``overlap_count`` / ``overlap_token_advantage`` when
+        ``teacher_topk_ids`` is given.
+    """
+    del data_format  # unused; kept for parity with compute_forward_kl_topk's signature
+    # 1. unwrap nested layouts from the rmpad pipeline
+    if teacher_on_student_logp.is_nested:
+        teacher_on_student_logp = teacher_on_student_logp.values().unsqueeze(0)
+    if student_topk_ids.is_nested:
+        student_topk_ids = student_topk_ids.values().unsqueeze(0)
+    if teacher_topk_ids is not None and teacher_topk_ids.is_nested:
+        teacher_topk_ids = teacher_topk_ids.values().unsqueeze(0)
+
+    # 2. split across sp groups
+    if get_ulysses_sequence_parallel_world_size() > 1:
+        teacher_on_student_logp = slice_input_tensor(teacher_on_student_logp, dim=1)
+        student_topk_ids = slice_input_tensor(student_topk_ids, dim=1)
+        if teacher_topk_ids is not None:
+            teacher_topk_ids = slice_input_tensor(teacher_topk_ids, dim=1)
+    assert teacher_on_student_logp.shape[:2] == student_topk_ids.shape[:2] == student_logits.shape[:2]
+    assert teacher_on_student_logp.shape[-1] == student_topk_ids.shape[-1]
+
+    # 3. gather student log-probs at the student's own top-K ids
+    student_log_probs = F.log_softmax(student_logits, dim=-1)
+    student_topk_log_probs = torch.gather(student_log_probs, dim=-1, index=student_topk_ids)
+
+    # Raw mass on the student-top-K support: diagnostics only, not fed to the loss.
+    student_mass = student_topk_log_probs.exp().sum(dim=-1)
+    teacher_mass = teacher_on_student_logp.exp().sum(dim=-1)
+
+    # Renormalize both sides onto the student-top-K support -> proper KL(Q_K || P_K).
+    student_topk_log_probs = student_topk_log_probs - torch.logsumexp(student_topk_log_probs, dim=-1, keepdim=True)
+    teacher_on_student_logp = teacher_on_student_logp - torch.logsumexp(teacher_on_student_logp, dim=-1, keepdim=True)
+
+    loss_config: DistillationLossConfig = config.distillation_loss
+    if loss_config.log_prob_min_clamp is not None:
+        student_topk_log_probs = student_topk_log_probs.clamp_min(loss_config.log_prob_min_clamp)
+        teacher_on_student_logp = teacher_on_student_logp.clamp_min(loss_config.log_prob_min_clamp)
+
+    distillation_losses = reverse_kl_divergence(
+        log_q=student_topk_log_probs,
+        log_p=teacher_on_student_logp,
+    )
+
+    outputs = {
+        "distillation_losses": distillation_losses,
+        "student_mass": student_mass,
+        "teacher_mass": teacher_mass,
+    }
+
+    # Diagnostics for tracking student/teacher top-k overlap in OPD, following
+    # "Rethinking On-Policy Distillation of Large Language Models" (arXiv:2604.13016).
+    if teacher_topk_ids is not None:
+        # overlap_mask[..., i] = student-top-K token i is also in the teacher top-K.
+        overlap_mask = (student_topk_ids.unsqueeze(-1) == teacher_topk_ids.unsqueeze(-2)).any(dim=-1)
+        overlap_count = overlap_mask.sum(dim=-1)
+        token_rkl = student_topk_log_probs.exp() * (student_topk_log_probs - teacher_on_student_logp)
+        overlap_token_advantage_sum = (-token_rkl * overlap_mask).sum(dim=-1)
+        overlap_token_advantage = overlap_token_advantage_sum / overlap_count.clamp_min(1)
+        overlap_token_advantage = torch.where(
+            overlap_count > 0, overlap_token_advantage, torch.zeros_like(overlap_token_advantage)
+        )
+        outputs["overlap_count"] = overlap_count
+        outputs["overlap_token_advantage"] = overlap_token_advantage
+
+    return outputs

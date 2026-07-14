@@ -832,6 +832,22 @@ class RayPPOTrainer:
             )
             self.resource_pool_to_cls[resource_pool][str(Role.RefPolicy)] = ref_policy_cls
 
+        # FSDP teacher (verl#6676): register a TeacherFSDPWorker on the teacher resource
+        # pool so it joins the unified RayWorkerGroup spawn. The vLLM backend spawns its
+        # own rollout replica instead.
+        self._fsdp_teacher_pending = False
+        if self.use_teacher_policy and self.config.distillation.get("teacher_backend", "vllm") == "fsdp":
+            teacher_training_config = self._build_fsdp_teacher_training_config()
+            teacher_resource_pool = self.resource_pool_manager.get_resource_pool(Role.TeacherModel)
+
+            import ray
+
+            from verl.workers.teacher import TeacherFSDPWorker
+
+            teacher_cls = RayClassWithInitArgs(cls=ray.remote(TeacherFSDPWorker), config=teacher_training_config)
+            self.resource_pool_to_cls[teacher_resource_pool][str(Role.TeacherModel)] = teacher_cls
+            self._fsdp_teacher_pending = True
+
         # initialize WorkerGroup
         # NOTE: if you want to use a different resource pool for each role, which can support different parallel size,
         # you should not use `create_colocated_worker_cls`.
@@ -912,14 +928,38 @@ class RayPPOTrainer:
 
         # initialize teacher loop manager
         if self.use_teacher_policy:
-            from verl.experimental.teacher_loop import MultiTeacherModelManager
-
             teacher_resource_pool = self.resource_pool_manager.get_resource_pool(Role.TeacherModel)
-            self.teacher_model_manager = MultiTeacherModelManager(
-                config=self.config,
-                resource_pool=teacher_resource_pool,
-            )
             self.distillation_config: DistillationConfig = omega_conf_to_dataclass(self.config.distillation)
+            teacher_backend = self.distillation_config.teacher_backend
+            if teacher_backend == "fsdp":
+                # FSDP teacher (verl#6676): hosted as a frozen FSDP worker group rather
+                # than a vLLM rollout, because reverse-KL on the student top-K needs
+                # log-probs at arbitrary token IDs, which vLLM cannot serve. The trainer
+                # drives the teacher forward after rollout via _inject_fsdp_teacher_data.
+                from verl.experimental.teacher_loop.teacher_fsdp_manager import MultiTeacherFSDPManager
+
+                self.teacher_model_manager = MultiTeacherFSDPManager(
+                    config=self.config,
+                    resource_pool=teacher_resource_pool,
+                )
+                # Install the spawned worker group handle on the manager and bring up the model.
+                assert self._fsdp_teacher_pending and str(Role.TeacherModel) in all_wg, (
+                    f"FSDP teacher worker group not found in spawn output: {all_wg.keys()=}"
+                )
+                self.teacher_wg = all_wg[str(Role.TeacherModel)]
+                self.teacher_wg.reset()
+                self.teacher_model_manager.set_worker_group(self.teacher_wg)
+            elif teacher_backend == "vllm":
+                from verl.experimental.teacher_loop import MultiTeacherModelManager
+
+                self.teacher_model_manager = MultiTeacherModelManager(
+                    config=self.config,
+                    resource_pool=teacher_resource_pool,
+                )
+            else:
+                raise ValueError(
+                    f"Unsupported distillation.teacher_backend {teacher_backend!r}; expected 'vllm' or 'fsdp'."
+                )
         else:
             self.teacher_model_manager = None
             self.distillation_config = None
@@ -943,12 +983,16 @@ class RayPPOTrainer:
         # if enable_agent_reward_loop, we directly pass reward_loop_workers to agent loop manager
         # to stream reward computation with actor rollout
         # To stream teacher computation with actor rollout, we instead pass the full manager so that the
-        # teacher loop workers can sleep/wake together with rollout workers
+        # teacher loop workers can sleep/wake together with rollout workers. The FSDP teacher has no
+        # per-trajectory LLM client, so only the vLLM path forwards a client into the agent loop.
         reward_loop_worker_handles = self.reward_loop_manager.reward_loop_workers if enable_agent_reward_loop else None
+        teacher_client_for_agent_loop = None
+        if self.use_teacher_policy and self.distillation_config.teacher_backend == "vllm":
+            teacher_client_for_agent_loop = self.teacher_model_manager.get_client()
         self.async_rollout_manager = AgentLoopManager.create(
             config=self.config,
             llm_client=self.llm_server_manager.get_client(),
-            teacher_client=self.teacher_model_manager.get_client() if self.use_teacher_policy else None,
+            teacher_client=teacher_client_for_agent_loop,
             reward_loop_worker_handles=reward_loop_worker_handles,
         )
 
@@ -1286,6 +1330,113 @@ class RayPPOTrainer:
         old_log_prob = tu.get_tensordict(result)
         old_log_prob = DataProto.from_tensordict(old_log_prob)
         return old_log_prob, old_log_prob_mfu
+
+    def _build_fsdp_teacher_training_config(self):
+        """Construct a TrainingWorkerConfig for the FSDP-served teacher.
+
+        Reused by :meth:`init_workers` to register :class:`TeacherFSDPWorker` on the
+        teacher resource pool. ``forward_only=True`` is set here as well as in the
+        worker's ``__init__``.
+        """
+        from verl.workers.config import FSDPEngineConfig, HFModelConfig
+        from verl.workers.engine_workers import TrainingWorkerConfig
+
+        teacher_models = self.config.distillation.teacher_models
+        if len(teacher_models) != 1:
+            raise NotImplementedError(
+                "Multi-teacher FSDP backend is not yet supported; configure exactly one teacher "
+                "(teacher_models has 1 entry) when teacher_backend='fsdp'."
+            )
+        teacher_yaml = next(iter(teacher_models.values()))
+        model_config = HFModelConfig(path=teacher_yaml.model_path)
+
+        fsdp_cfg = self.config.distillation.teacher_fsdp_config
+        if fsdp_cfg is None:
+            raise ValueError("distillation.teacher_fsdp_config must be set when teacher_backend='fsdp'.")
+        engine_config = omega_conf_to_dataclass(fsdp_cfg, dataclass_type=FSDPEngineConfig)
+        engine_config.forward_only = True
+
+        return TrainingWorkerConfig(
+            model_type="language_model",
+            model_config=model_config,
+            engine_config=engine_config,
+            optimizer_config=None,
+            checkpoint_config=None,
+        )
+
+    def _inject_fsdp_teacher_data(self, batch: DataProto) -> DataProto:
+        """Phase-1 student top-K + Phase-2 teacher gather for the FSDP teacher path.
+
+        For ``teacher_backend == 'fsdp'`` (verl#6676), the trainer drives a two-stage
+        post-rollout step: (1) the actor emits per-token student top-K log-probs and IDs
+        via the ``compute_student_topk_only`` flag; (2) the frozen FSDP teacher gathers
+        ``log_softmax(teacher_logits)`` at those IDs. Both are padded to
+        ``(B, max_response_len, K)`` and unioned into ``batch`` for ``update_actor``.
+
+        No-op when ``teacher_model_manager`` is not the FSDP variant.
+        """
+        from verl.experimental.teacher_loop.teacher_fsdp_manager import MultiTeacherFSDPManager
+
+        if not isinstance(self.teacher_model_manager, MultiTeacherFSDPManager):
+            return batch
+
+        # Phase 1: actor produces student top-K (one no-grad forward).
+        batch_td = batch.to_tensordict()
+        batch_td = left_right_2_no_padding(batch_td)
+        tu.assign_non_tensor(batch_td, distillation_use_topk=True, compute_loss=True)
+        student_topk_output = self.actor_rollout_wg.compute_student_topk(batch_td)
+        student_topk_ids = tu.get(student_topk_output, "student_topk_ids")  # nested (B, T_i, K)
+
+        # Phase 2: teacher worker forward + chunked gather at the student top-K IDs.
+        teacher_input = tu.get_tensordict(
+            {
+                "input_ids": batch_td["input_ids"],
+                "position_ids": batch_td["position_ids"],
+                "topk_ids": student_topk_ids,
+            }
+        )
+        tu.assign_non_tensor(
+            teacher_input,
+            teacher_chunk_size=self.distillation_config.teacher_chunk_size,
+            # Match the student's rollout temperature so reverse-KL compares like with like.
+            temperature=self.config.actor_rollout_ref.rollout.temperature,
+        )
+        teacher_output = self.teacher_model_manager.compute_logprobs_at_ids(teacher_input)
+        # compute_logprobs_at_ids is non-blocking; materialize the future.
+        teacher_output = teacher_output.get()
+        teacher_on_student_logp = tu.get(teacher_output, "teacher_on_student_logp")  # nested (B, T_i, K)
+        teacher_topk_ids = tu.get(teacher_output, "teacher_topk_ids")  # nested (B, T_i, K)
+
+        # Phase 3: nested -> left-right padded dense (B, max_seq_len, K), unioned into
+        # batch so update_actor's left_right_2_no_padding re-nests them aligned to input_ids.
+        # NOTE: no_padding_2_padding is wrong here — it slices response-only and left-shifts.
+        indices = tu.get_non_tensor_data(data=batch_td, key="indices", default=None)
+        max_seq_len = tu.get_non_tensor_data(data=batch_td, key="max_seq_len", default=None)
+        assert indices is not None and max_seq_len is not None, (
+            "left_right_2_no_padding must run before _inject_fsdp_teacher_data Phase 3."
+        )
+        batch_size = student_topk_ids.size(0)
+
+        def _to_left_right_padded(nested: torch.Tensor) -> torch.Tensor:
+            # Scatter jagged (B, T_i, K) values back to left-right padded dense
+            # (B, max_seq_len, K); padding slots are dropped again on the next unpad.
+            values = nested.values()  # (total_nnz, K)
+            k = values.shape[-1]
+            flat = values.new_zeros((batch_size * max_seq_len, k))
+            flat[indices.to(flat.device)] = values
+            return flat.reshape(batch_size, max_seq_len, k)
+
+        student_topk_ids_padded = _to_left_right_padded(student_topk_ids)
+        teacher_on_student_logp_padded = _to_left_right_padded(teacher_on_student_logp)
+        teacher_topk_ids_padded = _to_left_right_padded(teacher_topk_ids)
+        extras = tu.get_tensordict(
+            {
+                "student_topk_ids": student_topk_ids_padded,
+                "teacher_on_student_logp": teacher_on_student_logp_padded.float(),
+                "teacher_topk_ids": teacher_topk_ids_padded,
+            }
+        )
+        return batch.union(DataProto.from_tensordict(extras))
 
     def _update_actor(self, batch: DataProto) -> DataProto:
         rollout_config = self.config.actor_rollout_ref.rollout
@@ -1649,6 +1800,9 @@ class RayPPOTrainer:
                         self.checkpoint_manager.update_weights(self.global_steps)
                     else:
                         # update actor
+                        with marked_timer("teacher_logprobs", timing_raw, color="purple"):
+                            # No-op unless distillation.teacher_backend == 'fsdp'.
+                            batch = self._inject_fsdp_teacher_data(batch)
                         with marked_timer("update_actor", timing_raw, color="red"):
                             actor_output = self._update_actor(batch)
 

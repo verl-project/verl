@@ -93,6 +93,27 @@ def left_right_2_no_padding(data: TensorDict) -> TensorDict:
         data["teacher_logprobs"] = teacher_logprobs_nested
         data["teacher_ids"] = teacher_ids_nested
 
+    # (bsz, seqlen, K) reverse-KL fields; mirror the teacher_logprobs/teacher_ids handling above
+    student_topk_ids = data.get("student_topk_ids", None)
+    teacher_on_student_logp = data.get("teacher_on_student_logp", None)
+    if student_topk_ids is not None and teacher_on_student_logp is not None:
+        student_topk_ids_rmpad = index_first_axis(student_topk_ids.unsqueeze(-1).flatten(0, 1), indices)
+        teacher_on_student_logp_rmpad = index_first_axis(teacher_on_student_logp.unsqueeze(-1).flatten(0, 1), indices)
+        data["student_topk_ids"] = torch.nested.nested_tensor_from_jagged(
+            student_topk_ids_rmpad.squeeze(-1), offsets=cu_seqlens
+        )
+        data["teacher_on_student_logp"] = torch.nested.nested_tensor_from_jagged(
+            teacher_on_student_logp_rmpad.squeeze(-1), offsets=cu_seqlens
+        )
+
+    # Teacher's own top-K IDs, carried alongside for the overlap diagnostics only.
+    teacher_topk_ids = data.get("teacher_topk_ids", None)
+    if teacher_topk_ids is not None:
+        teacher_topk_ids_rmpad = index_first_axis(teacher_topk_ids.unsqueeze(-1).flatten(0, 1), indices)
+        data["teacher_topk_ids"] = torch.nested.nested_tensor_from_jagged(
+            teacher_topk_ids_rmpad.squeeze(-1), offsets=cu_seqlens
+        )
+
     return data
 
 

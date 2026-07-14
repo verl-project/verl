@@ -111,3 +111,33 @@ teacher_models:
 
 # Key to route examples to the appropriate teacher model in multi-teacher setups. Should correspond to a field in the data proto, e.g., task.
 teacher_key: data_source
+
+# Backend hosting the teacher: "vllm" (default) or "fsdp" (frozen FSDP worker, for reverse-KL).
+teacher_backend: vllm
+
+# Token-axis chunk size for the FSDP teacher's gather-at-IDs kernel. Only used when teacher_backend == "fsdp".
+teacher_chunk_size: 1024
+
+# FSDP config for the frozen teacher worker. Only used when teacher_backend == "fsdp".
+teacher_fsdp_config:
+
+  # Required for omega_conf_to_dataclass instantiation.
+  _target_: verl.workers.config.FSDPEngineConfig
+
+  # Teacher is frozen — forward-only.
+  forward_only: true
+
+  # FSDP backend: "fsdp" (FSDP1) or "fsdp2".
+  strategy: fsdp
+
+  # Parameter dtype.
+  dtype: bfloat16
+
+  # Offload parameters to CPU.
+  param_offload: false
+
+  # FSDP shard group size; -1 = all GPUs.
+  fsdp_size: -1
+
+  # Inference batching.
+  use_dynamic_bsz: true

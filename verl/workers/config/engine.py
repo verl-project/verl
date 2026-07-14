@@ -66,6 +66,9 @@ class EngineRouterReplayConfig(BaseConfig):
     record_file: Optional[str] = None
     replay_file: Optional[str] = None
 
+    # Allow runtime overrides of mode (e.g., TeacherFSDPWorker disables router replay).
+    _mutable_fields = BaseConfig._mutable_fields | {"mode"}
+
     def __post_init__(self):
         """Validate router replay configuration."""
         valid_modes = ["disabled", "R2", "R3"]
@@ -101,11 +104,11 @@ class EngineConfig(BaseConfig):
     # whether to use dynamic bsz
     use_dynamic_bsz: bool = True
     # for training
-    max_token_len_per_gpu: int = None
-    micro_batch_size_per_gpu: int = None
+    max_token_len_per_gpu: Optional[int] = None
+    micro_batch_size_per_gpu: Optional[int] = None
     # for inference
-    infer_max_token_len_per_gpu: int = None
-    infer_micro_batch_size_per_gpu: int = None
+    infer_max_token_len_per_gpu: Optional[int] = None
+    infer_micro_batch_size_per_gpu: Optional[int] = None
     # whether use fuse lm head kernel
     use_fused_kernels: bool = False
     # TODO (this may conflict with the one in model config)

@@ -839,6 +839,16 @@ distillation:
         response_length: ${oc.select:actor_rollout_ref.rollout.response_length}
         temperature: ${oc.select:actor_rollout_ref.rollout.temperature}
   teacher_key: data_source
+  teacher_backend: vllm
+  teacher_chunk_size: 1024
+  teacher_fsdp_config:
+    _target_: verl.workers.config.FSDPEngineConfig
+    forward_only: true
+    strategy: fsdp
+    dtype: bfloat16
+    param_offload: false
+    fsdp_size: -1
+    use_dynamic_bsz: true
 trainer:
   balance_batch: true
   total_epochs: 30

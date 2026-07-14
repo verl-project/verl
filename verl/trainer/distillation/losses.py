@@ -16,10 +16,12 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 import torch
+import torch.nn.functional as F
 from tensordict import TensorDict
 
 from verl.base_config import BaseConfig
 from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
+from verl.utils import tensordict_utils as tu
 from verl.utils.metric import AggregationType, Metric
 from verl.workers.config import ActorConfig, DistillationConfig, DistillationLossConfig
 from verl.workers.utils.losses import ppo_loss
@@ -134,26 +136,67 @@ def compute_topk_loss(
     - student_mass: (bsz, seqlen/cp_size)
     - teacher_mass: (bsz, seqlen/cp_size)
     """
-    match config.strategy:
-        # VeOmni uses FSDP2 internally, so its loss computation is identical to FSDP.
-        case "fsdp" | "veomni":
-            import verl.trainer.distillation.fsdp.losses as fsdp_losses
+    # FSDP-teacher first pass: the trainer stamps ``compute_student_topk_only=True``
+    # to get the student's own top-K before the teacher forward. Short-circuit and
+    # return the student top-K log-probs and IDs, with no teacher data dependency.
+    if tu.get_non_tensor_data(data=data, key="compute_student_topk_only", default=False):
+        topk = distillation_config.distillation_loss.topk
+        if topk is None:
+            raise ValueError(
+                "distillation_loss.topk must be set when compute_student_topk_only=True; "
+                "the FSDP teacher pipeline uses it as the student-top-K width."
+            )
+        student_log_probs = F.log_softmax(student_logits, dim=-1)
+        topk_out = torch.topk(student_log_probs, k=topk, dim=-1)
+        return {
+            "student_topk_log_probs": topk_out.values,
+            "student_topk_ids": topk_out.indices.to(torch.int64),
+        }
 
-            distillation_loss_fn = fsdp_losses.compute_forward_kl_topk
-        case "megatron":
-            import verl.trainer.distillation.megatron.losses as megatron_losses
+    loss_mode = distillation_config.distillation_loss.loss_mode
 
-            distillation_loss_fn = megatron_losses.compute_forward_kl_topk
-        case _:
-            raise NotImplementedError(f"Unsupported strategy: {config.strategy=}")
+    if loss_mode == "forward_kl_topk":
+        match config.strategy:
+            # VeOmni uses FSDP2 internally, so its loss computation is identical to FSDP.
+            case "fsdp" | "veomni":
+                import verl.trainer.distillation.fsdp.losses as fsdp_losses
 
-    outputs = distillation_loss_fn(
-        student_logits=student_logits,
-        teacher_topk_log_probs=data["teacher_logprobs"],
-        teacher_topk_ids=data["teacher_ids"],
-        config=distillation_config,
-        data_format=data_format,
-    )
+                distillation_loss_fn = fsdp_losses.compute_forward_kl_topk
+            case "megatron":
+                import verl.trainer.distillation.megatron.losses as megatron_losses
+
+                distillation_loss_fn = megatron_losses.compute_forward_kl_topk
+            case _:
+                raise NotImplementedError(f"Unsupported strategy: {config.strategy=}")
+
+        outputs = distillation_loss_fn(
+            student_logits=student_logits,
+            teacher_topk_log_probs=data["teacher_logprobs"],
+            teacher_topk_ids=data["teacher_ids"],
+            config=distillation_config,
+            data_format=data_format,
+        )
+    elif loss_mode == "reverse_kl_topk":
+        match config.strategy:
+            case "fsdp" | "veomni":
+                import verl.trainer.distillation.fsdp.losses as fsdp_losses
+
+                distillation_loss_fn = fsdp_losses.compute_reverse_kl_topk
+            case _:
+                raise NotImplementedError(
+                    f"reverse_kl_topk is currently only implemented for fsdp/veomni, got {config.strategy=}"
+                )
+
+        outputs = distillation_loss_fn(
+            student_logits=student_logits,
+            teacher_on_student_logp=data["teacher_on_student_logp"],
+            student_topk_ids=data["student_topk_ids"],
+            config=distillation_config,
+            data_format=data_format,
+            teacher_topk_ids=data.get("teacher_topk_ids", None),
+        )
+    else:
+        raise NotImplementedError(f"Unsupported loss_mode for compute_topk_loss: {loss_mode!r}")
 
     expected_shape = student_logits.shape[:2]
     for k, v in outputs.items():
@@ -203,6 +246,10 @@ def distillation_ppo_loss(
     # Called as logits processor
     if student_logits is not None:
         return compute_topk_loss(config, distillation_config, data, student_logits, data_format)
+
+    # FSDP-teacher first pass: only emit student top-K, skip the policy loss.
+    if tu.get_non_tensor_data(data=data, key="compute_student_topk_only", default=False):
+        return torch.zeros((), device=model_output["log_probs"].device), {}
 
     # Called as final policy loss
     distillation_loss_config = distillation_config.distillation_loss
@@ -397,3 +444,75 @@ def compute_distillation_loss_reverse_kl_estimator(
         "distillation/abs_loss": Metric(AggregationType.MEAN, distillation_losses[response_mask_bool].abs().mean()),
     }
     return distillation_losses, metrics
+
+
+@register_distillation_loss(DistillationLossSettings(names=["reverse_kl_topk"], use_topk=True))  # type: ignore[arg-type]
+def compute_reverse_kl_topk(
+    config: ActorConfig,
+    distillation_config: DistillationConfig,
+    model_output: dict,
+    data: TensorDict,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """Top-level wrapper for student-top-K reverse KL distillation.
+
+    The token-wise reverse KL ``q * (log q - log p)`` (summed over the K axis) and
+    the per-token student / teacher mass tensors are produced inside the logits
+    processor by :func:`verl.trainer.distillation.fsdp.losses.compute_reverse_kl_topk`.
+    This wrapper only re-pads them, computes diagnostic metrics, and clamps the loss
+    against minor negative values introduced by ``log_prob_min_clamp``.
+
+    Returns:
+        - ``distillation_losses``: ``(bsz, resp_len)`` clamped to ``>= 0``.
+        - ``distillation_metrics``: dict with student/teacher mass diagnostics. The
+          ``distillation/teacher_mass`` curve is the key mode-seeking signal — it
+          should rise during training as the student concentrates on tokens the
+          teacher also assigns high probability to.
+    """
+    distillation_losses = no_padding_2_padding(model_output["distillation_losses"], data)
+    student_mass = no_padding_2_padding(model_output["student_mass"], data)
+    teacher_mass = no_padding_2_padding(model_output["teacher_mass"], data)
+    overlap_count = model_output.get("overlap_count")
+    overlap_token_advantage = model_output.get("overlap_token_advantage")
+    if overlap_count is not None and overlap_token_advantage is not None:
+        overlap_count = no_padding_2_padding(overlap_count, data)
+        overlap_token_advantage = no_padding_2_padding(overlap_token_advantage, data)
+    if data["response_mask"].is_nested:
+        response_mask_bool = data["response_mask"].bool().to_padded_tensor(False)
+    else:
+        response_mask_bool = data["response_mask"].bool()
+    assert distillation_losses.shape == student_mass.shape == teacher_mass.shape == response_mask_bool.shape
+
+    overlap_metrics = {}
+    if overlap_count is not None and overlap_token_advantage is not None:
+        assert overlap_count.shape == overlap_token_advantage.shape == response_mask_bool.shape
+        valid_overlap_count = overlap_count[response_mask_bool]
+        k = distillation_config.distillation_loss.topk
+        assert k is not None
+        # Diagnostics for tracking student/teacher top-k overlap in OPD, following
+        # "Rethinking On-Policy Distillation of Large Language Models" (arXiv:2604.13016):
+        # overlap fraction and mean reverse-KL advantage on overlapping tokens.
+        overlap_metrics["distillation/overlap_ratio"] = (valid_overlap_count.float().mean() / k).item()
+        overlap_position_mask = response_mask_bool & (overlap_count > 0)
+        if overlap_position_mask.any():
+            overlap_metrics["distillation/overlap_token_advantage"] = (
+                overlap_token_advantage[overlap_position_mask].mean().item()
+            )
+        else:
+            overlap_metrics["distillation/overlap_token_advantage"] = 0.0
+
+    student_mass_valid = student_mass[response_mask_bool]
+    teacher_mass_valid = teacher_mass[response_mask_bool]
+    distillation_metrics = {
+        "distillation/student_mass": student_mass_valid.mean().item(),
+        "distillation/student_mass_min": Metric(AggregationType.MIN, student_mass_valid.min()),
+        "distillation/student_mass_max": Metric(AggregationType.MAX, student_mass_valid.max()),
+        "distillation/teacher_mass": teacher_mass_valid.mean().item(),
+        "distillation/teacher_mass_min": Metric(AggregationType.MIN, teacher_mass_valid.min()),
+        "distillation/teacher_mass_max": Metric(AggregationType.MAX, teacher_mass_valid.max()),
+        **overlap_metrics,
+    }
+
+    # clamp small negative drift from the log_prob_min_clamp guard
+    distillation_losses = distillation_losses.clamp_min(0.0)
+
+    return distillation_losses, distillation_metrics
