@@ -25,10 +25,6 @@ import pytest
 import torch
 from omegaconf import OmegaConf
 
-from verl.trainer.ppo.checkpoint_utils import (
-    load_adaptive_kl_controller_state,
-    save_adaptive_kl_controller_state,
-)
 from verl.trainer.ppo.core_algos import AdaptiveKLController
 
 pytestmark = [
@@ -49,10 +45,10 @@ def test_resume_matches_uninterrupted_controller(tmp_path):
 
     checkpointed = AdaptiveKLController(init_kl_coef=0.1, target_kl=1.0, horizon=10_000)
     _advance(checkpointed, observations[:2])
-    save_adaptive_kl_controller_state(checkpointed, tmp_path)
+    checkpointed.save(tmp_path)
 
     resumed = AdaptiveKLController(init_kl_coef=0.1, target_kl=1.0, horizon=10_000)
-    assert load_adaptive_kl_controller_state(resumed, tmp_path)
+    assert resumed.load(tmp_path)
     _advance(resumed, observations[2:])
 
     assert resumed.value == pytest.approx(uninterrupted.value)
@@ -61,8 +57,8 @@ def test_resume_matches_uninterrupted_controller(tmp_path):
 def test_missing_state_preserves_initial_value_and_warns(tmp_path):
     controller = AdaptiveKLController(init_kl_coef=0.1, target_kl=1.0, horizon=10_000)
 
-    with patch("verl.trainer.ppo.checkpoint_utils.logger.warning") as warning:
-        assert not load_adaptive_kl_controller_state(controller, tmp_path)
+    with patch("verl.trainer.ppo.core_algos.logger.warning") as warning:
+        assert not controller.load(tmp_path)
 
     assert controller.value == 0.1
     warning.assert_called_once_with(
@@ -75,27 +71,27 @@ def test_malformed_state_fails_closed(tmp_path):
     torch.save({"version": torch.tensor(1), "value": torch.ones(2)}, tmp_path / "kl_ctrl.pt")
     controller = AdaptiveKLController(init_kl_coef=0.1, target_kl=1.0, horizon=10_000)
     with pytest.raises(ValueError, match="scalar"):
-        load_adaptive_kl_controller_state(controller, tmp_path)
+        controller.load(tmp_path)
 
 
 def test_nonfinite_state_fails_closed(tmp_path):
     torch.save({"version": torch.tensor(1), "value": torch.tensor(float("nan"))}, tmp_path / "kl_ctrl.pt")
     controller = AdaptiveKLController(init_kl_coef=0.1, target_kl=1.0, horizon=10_000)
     with pytest.raises(ValueError, match="finite"):
-        load_adaptive_kl_controller_state(controller, tmp_path)
+        controller.load(tmp_path)
 
 
 def test_non_integral_version_fails_closed(tmp_path):
     torch.save({"version": torch.tensor(1.5), "value": torch.tensor(0.2)}, tmp_path / "kl_ctrl.pt")
     controller = AdaptiveKLController(init_kl_coef=0.1, target_kl=1.0, horizon=10_000)
     with pytest.raises(ValueError, match="version"):
-        load_adaptive_kl_controller_state(controller, tmp_path)
+        controller.load(tmp_path)
 
 
 def test_legacy_float_state_remains_loadable(tmp_path):
     torch.save({"value": 0.25}, tmp_path / "kl_ctrl.pt")
     controller = AdaptiveKLController(init_kl_coef=0.1, target_kl=1.0, horizon=10_000)
-    assert load_adaptive_kl_controller_state(controller, tmp_path)
+    assert controller.load(tmp_path)
     assert controller.value == pytest.approx(0.25)
 
 
@@ -108,14 +104,18 @@ def test_legacy_float_state_remains_loadable(tmp_path):
     ],
 )
 def test_all_trainer_checkpoint_paths_persist_adaptive_kl_state(relative_path):
-    """Keep the legacy, V1, and fully-async save/load paths wired to the helper."""
+    """Keep the legacy, V1, and fully-async save/load paths wired to the controller."""
     source_path = Path(__file__).parents[3] / relative_path
     tree = ast.parse(source_path.read_text(encoding="utf-8"))
-    called_helpers = {
-        node.func.id for node in ast.walk(tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    called_controller_methods = {
+        node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "kl_ctrl"
     }
-    assert "save_adaptive_kl_controller_state" in called_helpers
-    assert "load_adaptive_kl_controller_state" in called_helpers
+    assert {"save", "load"} <= called_controller_methods
 
 
 class _FakeDataLoader:
@@ -168,6 +168,7 @@ def _fake_trainer(root, resume_path=None):
         critic_wg=_FakeWorker(),
         train_dataloader=_FakeDataLoader(),
         use_critic=False,
+        trainer_mode="sync",
         kl_ctrl_in_reward=AdaptiveKLController(init_kl_coef=0.1, target_kl=1.0, horizon=10_000),
         global_steps=3,
     )

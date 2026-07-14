@@ -40,10 +40,6 @@ from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.config import AlgoConfig
 from verl.trainer.distillation.losses import is_distillation_enabled
 from verl.trainer.ppo import core_algos
-from verl.trainer.ppo.checkpoint_utils import (
-    load_adaptive_kl_controller_state,
-    save_adaptive_kl_controller_state,
-)
 from verl.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
 from verl.trainer.ppo.metric_utils import (
     compute_data_metrics,
@@ -1036,7 +1032,9 @@ class RayPPOTrainer:
         dataloader_local_path = os.path.join(local_global_step_folder, "data.pt")
         dataloader_state_dict = self.train_dataloader.state_dict()
         torch.save(dataloader_state_dict, dataloader_local_path)
-        save_adaptive_kl_controller_state(getattr(self, "kl_ctrl_in_reward", None), local_global_step_folder)
+        kl_ctrl = getattr(self, "kl_ctrl_in_reward", None)
+        if isinstance(kl_ctrl, core_algos.AdaptiveKLController):
+            kl_ctrl.save(local_global_step_folder)
 
         # latest checkpointed iteration tracker (for atomic usage)
         if (
@@ -1121,7 +1119,9 @@ class RayPPOTrainer:
         else:
             print(f"Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
 
-        load_adaptive_kl_controller_state(getattr(self, "kl_ctrl_in_reward", None), global_step_folder)
+        kl_ctrl = getattr(self, "kl_ctrl_in_reward", None)
+        if isinstance(kl_ctrl, core_algos.AdaptiveKLController):
+            kl_ctrl.load(global_step_folder)
 
     def _start_profiling(self, do_profile: bool) -> None:
         """Start profiling for all worker groups if profiling is enabled."""

@@ -34,10 +34,6 @@ from verl.experimental.fully_async_policy.message_queue import MessageQueueClien
 from verl.experimental.separation.ray_trainer import SeparateRayPPOTrainer
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.trainer.ppo import core_algos
-from verl.trainer.ppo.checkpoint_utils import (
-    load_adaptive_kl_controller_state,
-    save_adaptive_kl_controller_state,
-)
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager
 from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_reward_model
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, should_save_ckpt_esi
@@ -974,7 +970,9 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
                 max_ckpt_to_keep=max_critic_ckpt_to_keep,
             )
         ray.get(self.rollouter.save_checkpoint.remote(local_global_step_folder))
-        save_adaptive_kl_controller_state(getattr(self, "kl_ctrl_in_reward", None), local_global_step_folder)
+        kl_ctrl = getattr(self, "kl_ctrl_in_reward", None)
+        if isinstance(kl_ctrl, core_algos.AdaptiveKLController):
+            kl_ctrl.save(local_global_step_folder)
         # latest checkpointed iteration tracker (for atomic usage)
         local_latest_checkpointed_iteration = os.path.join(
             self.config.trainer.default_local_dir, "latest_checkpointed_iteration.txt"
@@ -1033,7 +1031,9 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
                 critic_path, del_local_after_load=self.config.trainer.del_local_ckpt_after_load
             )
 
-        load_adaptive_kl_controller_state(getattr(self, "kl_ctrl_in_reward", None), global_step_folder)
+        kl_ctrl = getattr(self, "kl_ctrl_in_reward", None)
+        if isinstance(kl_ctrl, core_algos.AdaptiveKLController):
+            kl_ctrl.load(global_step_folder)
 
         return self.current_param_version
 

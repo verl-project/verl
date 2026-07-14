@@ -49,10 +49,6 @@ from verl.single_controller.ray import (
 )
 from verl.trainer.distillation import is_distillation_enabled
 from verl.trainer.ppo import core_algos
-from verl.trainer.ppo.checkpoint_utils import (
-    load_adaptive_kl_controller_state,
-    save_adaptive_kl_controller_state,
-)
 from verl.trainer.ppo.core_algos import agg_loss
 from verl.trainer.ppo.metric_utils import (
     RolloutMoELoadBalanceMetricsAccumulator,
@@ -844,7 +840,9 @@ class PPOTrainer(ABC):
         else:
             logger.warning(f"Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
 
-        load_adaptive_kl_controller_state(getattr(self, "kl_ctrl_in_reward", None), global_step_folder)
+        kl_ctrl = getattr(self, "kl_ctrl_in_reward", None)
+        if isinstance(kl_ctrl, core_algos.AdaptiveKLController):
+            kl_ctrl.load(global_step_folder)
 
         # 5. restore TransferQueue state (async modes). Re-issuing the restored in-flight prompts is
         # deferred to fit() to use the agent_loop_manager.
@@ -944,7 +942,9 @@ class PPOTrainer(ABC):
         local_mkdir_safe(local_global_step_folder)
         dataloader_local_path = os.path.join(local_global_step_folder, "data.pt")
         torch.save(self.train_dataloader.state_dict(), dataloader_local_path)
-        save_adaptive_kl_controller_state(getattr(self, "kl_ctrl_in_reward", None), local_global_step_folder)
+        kl_ctrl = getattr(self, "kl_ctrl_in_reward", None)
+        if isinstance(kl_ctrl, core_algos.AdaptiveKLController):
+            kl_ctrl.save(local_global_step_folder)
 
         # save TransferQueue state for async modes so in-flight prompts (already fetched from the
         # dataloader but not yet trained into this checkpoint's weights) survive a restart:
