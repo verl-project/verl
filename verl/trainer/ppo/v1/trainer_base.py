@@ -29,6 +29,7 @@ import ray
 import torch
 import transfer_queue as tq
 from omegaconf import DictConfig, OmegaConf, open_dict
+from packaging.version import InvalidVersion, Version
 from tensordict import TensorDict
 from tensordict.tensorclass import NonTensorData
 from torchdata.stateful_dataloader import StatefulDataLoader
@@ -105,7 +106,15 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 def _tq_supports_checkpoint() -> bool:
     """Whether the installed TransferQueue can snapshot/restore its state for checkpoint consistency."""
-    return callable(getattr(tq, "save_checkpoint", None)) and callable(getattr(tq, "load_checkpoint", None))
+    try:
+        version_supported = Version(getattr(tq, "__version__", "")) >= Version("0.1.9")
+    except InvalidVersion:
+        return False
+    return (
+        version_supported
+        and callable(getattr(tq, "save_checkpoint", None))
+        and callable(getattr(tq, "load_checkpoint", None))
+    )
 
 
 class PPOTrainer(ABC):
@@ -746,22 +755,11 @@ class PPOTrainer(ABC):
 
         # 5. restore TransferQueue state (async modes). Re-issuing the restored in-flight prompts is
         # deferred to fit() to use the agent_loop_manager.
-        if self.trainer_mode != "sync":
-            if _tq_supports_checkpoint():
-                tq_ckpt_path = os.path.join(global_step_folder, "transfer_queue")
-                if os.path.exists(tq_ckpt_path):
-                    logger.info(f"Loading TransferQueue state from {tq_ckpt_path}")
-                    tq.load_checkpoint(tq_ckpt_path)
-                else:
-                    logger.warning(
-                        f"No TransferQueue state found at {tq_ckpt_path}; in-flight prompts from the "
-                        "checkpoint are lost (only fresh warmup prompts will be generated)."
-                    )
-            else:
-                logger.warning(
-                    f"Installed TransferQueue ({getattr(tq, '__version__', 'unknown')}) does not "
-                    "provide checkpoint save/load APIs. TransferQueue state will not be restored."
-                )
+        if self.trainer_mode != "sync" and _tq_supports_checkpoint():
+            tq_ckpt_path = os.path.join(global_step_folder, "transfer_queue")
+            if os.path.exists(tq_ckpt_path):
+                logger.info(f"Loading TransferQueue state from {tq_ckpt_path}")
+                tq.load_checkpoint(tq_ckpt_path)
 
     def _reissue_inflight_prompts(self, partition_id: str = "train") -> int:
         """Restart checkpointed pending/running prompt groups from their persisted prompt data."""
