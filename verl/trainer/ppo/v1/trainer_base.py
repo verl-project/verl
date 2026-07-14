@@ -791,7 +791,7 @@ class PPOTrainer(ABC):
 
         # Treat this as a new dispatch attempt for the resumed training step.
         tu.assign_non_tensor_data(batch, "global_steps", self.global_steps)
-        tags = [{"is_prompt": True, "status": "pending", "global_steps": self.global_steps}] * len(inflight_uids)
+        tags = [{"is_prompt": True, "status": "pending", "global_steps": self.global_steps} for _ in inflight_uids]
         tq.kv_batch_put(keys=inflight_uids, partition_id=partition_id, tags=tags)
         self.agent_loop_manager.generate_sequences(batch)
 
@@ -900,7 +900,9 @@ class PPOTrainer(ABC):
             tu.assign_non_tensor_data(batch, "validate", True)
             # Register each prompt (GRPO group) in TransferQueue as a tag-only status marker.
             # global_steps is required by ReplayBuffer's metadata sync / staleness ordering.
-            tags = [{"is_prompt": True, "status": "pending", "global_steps": self.global_steps}] * len(batch)
+            tags = [
+                {"is_prompt": True, "status": "pending", "global_steps": self.global_steps} for _ in range(len(batch))
+            ]
             tq.kv_batch_put(keys=list(batch["uid"]), partition_id="val", tags=tags)
             self.agent_loop_manager.generate_sequences(batch)
 
@@ -1261,7 +1263,7 @@ class PPOTrainer(ABC):
 
     def _submit_batch_to_rollout(self, batch: TensorDict) -> int:
         """Register prompts in TransferQueue and dispatch them for generation."""
-        tags = [{"is_prompt": True, "status": "pending", "global_steps": self.global_steps}] * len(batch)
+        tags = [{"is_prompt": True, "status": "pending", "global_steps": self.global_steps} for _ in range(len(batch))]
         if self.trainer_mode != "sync":
             tq.kv_batch_put(
                 keys=list(batch["uid"]),
