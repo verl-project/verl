@@ -216,7 +216,14 @@ def get_moe_num_layers_to_build(
     return num_moe_layers
 
 
-def merge_router_topk_indices(attention_mask, input_ids, mini_layer_topk_idx_list, tf_config, vp_rank=None):
+def merge_router_topk_indices(
+    attention_mask,
+    input_ids,
+    mini_layer_topk_idx_list,
+    tf_config,
+    vp_rank=None,
+    local_cp_size: int | None = None,
+):
     """
     Merge recorded router top-k indices across sequence-parallel ranks for all router instances,
     then pack/unpack them to align with the original (batch, seq_len) layout and append the result.
@@ -231,6 +238,8 @@ def merge_router_topk_indices(attention_mask, input_ids, mini_layer_topk_idx_lis
             the current micro-batch.
         vp_rank (Optional[int]): Virtual pipeline stage rank override. If None, the current VP rank from
             Megatron parallel state will be used.
+        local_cp_size (Optional[int]): Dynamic context-parallel size for this micro-batch.
+            When set, THD unpacking gathers the recorded routes from that dynamic CP group.
 
     Returns:
         None: The function has side effects only; it appends a tensor of shape
@@ -265,10 +274,16 @@ def merge_router_topk_indices(attention_mask, input_ids, mini_layer_topk_idx_lis
                 input_ids,
                 pre_process=True,
                 use_fp8_padding=use_fp8_padding,
+                local_cp_size=local_cp_size,
                 min_local_rows=min_local_rows,
             )
             layers_topk_idx = postprocess_thd_engine(
-                layers_topk_idx, packed_seq_params, input_ids, batch_size, post_process=True
+                layers_topk_idx,
+                packed_seq_params,
+                input_ids,
+                batch_size,
+                post_process=True,
+                local_cp_size=local_cp_size,
             )
         else:
             batch_size, seq_len = attention_mask.shape[:2]
@@ -306,6 +321,7 @@ def set_router_replay_data(
     tf_config,
     vp_rank=None,
     replay_mask=None,
+    local_cp_size: int | None = None,
 ):
     """
     Scatter the packed router top-k indices back to sequence-parallel ranks and update each local
@@ -323,6 +339,8 @@ def set_router_replay_data(
             Megatron parallel state will be used.
         replay_mask (Optional[torch.Tensor]): Optional per-token mask. Masked tokens use replayed routes;
             unmasked tokens keep native Megatron routes.
+        local_cp_size (Optional[int]): Dynamic context-parallel size for this micro-batch.
+            When set, THD packing uses that dynamic CP group rather than the static CP group.
 
     Returns:
         None: The function updates internal RouterReplay instances in-place.
@@ -342,6 +360,7 @@ def set_router_replay_data(
                 layers_topk_idx,
                 pre_process=True,
                 use_fp8_padding=use_fp8_padding,
+                local_cp_size=local_cp_size,
                 min_local_rows=min_local_rows,
             )
             if replay_mask is not None:
@@ -349,6 +368,7 @@ def set_router_replay_data(
                     replay_mask,
                     pre_process=True,
                     use_fp8_padding=use_fp8_padding,
+                    local_cp_size=local_cp_size,
                     min_local_rows=min_local_rows,
                 )
         else:

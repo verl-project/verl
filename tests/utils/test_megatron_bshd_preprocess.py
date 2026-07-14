@@ -30,15 +30,15 @@ def _load_mcore_util_with_stubbed_megatron(monkeypatch, tp_size: int = 4):
     parallel_state = types.ModuleType("megatron.core.parallel_state")
     packed_seq_params = types.ModuleType("megatron.core.packed_seq_params")
 
-    parallel_state.get_context_parallel_world_size = lambda: 1
-    parallel_state.get_context_parallel_rank = lambda: 0
-    parallel_state.get_tensor_model_parallel_world_size = lambda: tp_size
-
-    class PackedSeqParams:
+    class FakePackedSeqParams:
         def __init__(self, **kwargs):
             self.__dict__.update(kwargs)
 
-    packed_seq_params.PackedSeqParams = PackedSeqParams
+    parallel_state.get_context_parallel_world_size = lambda: 1
+    parallel_state.get_context_parallel_rank = lambda: 0
+    parallel_state.get_tensor_model_parallel_world_size = lambda: tp_size
+    parallel_state.get_dynamic_data_context_parallel_groups = lambda group_size: ("dcp", group_size)
+    packed_seq_params.PackedSeqParams = FakePackedSeqParams
 
     core.parallel_state = parallel_state
     megatron.core = core
@@ -149,6 +149,23 @@ def test_preprocess_thd_engine_pads_to_minimum_rows(monkeypatch):
     torch.testing.assert_close(local_positions[0, 100:], torch.zeros(28, dtype=torch.long))
 
 
+def test_preprocess_thd_engine_pads_short_topk_sequence_dimension(monkeypatch):
+    mcore_util = _load_mcore_util_with_stubbed_megatron(monkeypatch, tp_size=1)
+    monkeypatch.setattr(torch.distributed, "get_rank", lambda group=None: 1)
+    topk = 64
+    teacher_logprobs = _nested_tensor([torch.arange(topk, dtype=torch.float32).reshape(1, topk)])
+
+    packed, packed_seq_params, position_ids = mcore_util.preprocess_thd_engine(
+        teacher_logprobs,
+        local_cp_size=2,
+    )
+
+    assert packed.shape == (1, 2, topk)
+    torch.testing.assert_close(packed, torch.zeros_like(packed))
+    torch.testing.assert_close(position_ids, torch.tensor([[1, 0]], dtype=torch.long))
+    assert packed_seq_params.local_cp_size == 2
+
+
 def test_dcp_local_thd_postprocess_matches_local_token_mask(monkeypatch):
     mcore_util = _load_mcore_util_with_stubbed_megatron(monkeypatch, tp_size=1)
     monkeypatch.setattr(torch.distributed, "get_rank", lambda group=None: 1)
@@ -199,3 +216,34 @@ def test_dcp_local_thd_postprocess_matches_local_token_mask(monkeypatch):
     torch.testing.assert_close(compact.unbind()[0], torch.tensor([10.0, 11.0, 12.0, 13.0]))
     torch.testing.assert_close(local_indices.unbind()[0], torch.tensor([2, 3, 12, 13]))
     torch.testing.assert_close(full_seq_lens.unbind()[0], torch.tensor([16]))
+
+
+def test_dcp_local_thd_metadata_exactly_covers_unaligned_sequence(monkeypatch):
+    mcore_util = _load_mcore_util_with_stubbed_megatron(monkeypatch, tp_size=1)
+    cp_rank = 0
+    monkeypatch.setattr(torch.distributed, "get_rank", lambda group=None: cp_rank)
+    input_ids = _nested_tensor([torch.arange(100, 109, dtype=torch.long)])
+    all_indices = []
+
+    for rank in range(4):
+        cp_rank = rank
+        packed, packed_seq_params, _ = mcore_util.preprocess_thd_engine(input_ids, local_cp_size=4)
+        compact = mcore_util.postprocess_thd_engine_local(
+            packed,
+            packed_seq_params,
+            input_ids,
+            batch_size=1,
+            local_cp_size=4,
+            compact=True,
+        ).unbind()[0]
+        indices = mcore_util.build_thd_local_token_indices(
+            packed_seq_params,
+            input_ids,
+            batch_size=1,
+            local_cp_size=4,
+        ).unbind()[0]
+
+        torch.testing.assert_close(compact, input_ids.unbind()[0][indices])
+        all_indices.append(indices)
+
+    torch.testing.assert_close(torch.cat(all_indices).sort().values, torch.arange(9))

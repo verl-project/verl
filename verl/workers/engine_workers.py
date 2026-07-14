@@ -50,6 +50,7 @@ from verl.workers.config import (
     MtpConfig,
     RolloutConfig,
     TrainingWorkerConfig,
+    get_mcore_parallel_topology,
 )
 from verl.workers.rollout.base import BaseRollout, get_rollout_class
 from verl.workers.utils.losses import ppo_loss
@@ -503,6 +504,28 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
         model_config: HFModelConfig = omega_conf_to_dataclass(self.config.model)
+
+        if self._is_actor and self._is_ref:
+            actor_strategy = self.config.actor.strategy
+            ref_strategy = self.config.ref.strategy
+            if actor_strategy == "megatron" and ref_strategy == "megatron":
+                actor_engine = self.config.actor.megatron
+                ref_engine = self.config.ref.megatron
+                actor_dcp = bool(actor_engine.dynamic_context_parallel)
+                ref_dcp = bool(ref_engine.dynamic_context_parallel)
+                if actor_dcp != ref_dcp:
+                    raise ValueError(
+                        "Colocated Megatron actor and reference engines must enable Dynamic CP consistently; "
+                        f"got actor={actor_dcp}, ref={ref_dcp}."
+                    )
+                if actor_dcp:
+                    actor_topology = get_mcore_parallel_topology(actor_engine)
+                    ref_topology = get_mcore_parallel_topology(ref_engine)
+                    if actor_topology != ref_topology:
+                        raise ValueError(
+                            "Colocated Megatron actor and reference engines must use the same Dynamic CP parallel "
+                            f"topology; got actor={actor_topology}, ref={ref_topology}."
+                        )
 
         # 1. build reference model
         if "ref" in self.role:

@@ -61,10 +61,35 @@ def prepare_micro_batches(
     same_micro_num_in_dp=True,
     min_num_micro_batch=None,
     use_dynamic_bsz_balance=True,
+    dynamic_context_parallel=False,
+    dcp_group=None,
+    max_seqlen_per_dp_cp_rank=None,
+    cp_size=1,
+    non_tensor_data=None,
 ):
     """
     Prepare micro batches from data.
     """
+    if dynamic_context_parallel:
+        if dp_group is None or dcp_group is None or max_seqlen_per_dp_cp_rank is None:
+            raise ValueError("Dynamic CP requires dp_group, dcp_group, and max_seqlen_per_dp_cp_rank")
+
+        from verl.utils.dynamic_cp_scheduler import DynamicCPScheduler
+
+        scheduler = DynamicCPScheduler(
+            max_seqlen_per_dp_cp_rank=max_seqlen_per_dp_cp_rank,
+            dp_size=dp_group.size(),
+            cp_size=cp_size,
+            min_cp_size=1,
+            microbatch_group_size_per_vp_stage=num_batches_divided_by,
+        )
+        return scheduler.schedule(
+            batch=data,
+            dp_group=dp_group,
+            dcp_group=dcp_group,
+            non_tensor_data=non_tensor_data,
+        )
+
     use_dynamic_bsz = tu.get_non_tensor_data(data=data, key="use_dynamic_bsz", default=True)
     sp_size = tu.get_non_tensor_data(data=data, key="sp_size", default=1)
 
@@ -93,33 +118,6 @@ def prepare_micro_batches(
         micro_batches = tu.chunk_tensordict(data, total_data_size // (micro_batch_size_per_gpu * force_group_size))
         batch_idx_list = None
     return micro_batches, batch_idx_list
-
-
-def prepare_dynamic_cp_micro_batches(
-    data: TensorDict,
-    dp_group,
-    dcp_group,
-    max_seqlen_per_dp_cp_rank: int,
-    cp_size: int,
-    num_batches_divided_by=None,
-    non_tensor_data=None,
-):
-    """Prepare micro-batches with dynamic context parallel routing."""
-    from verl.utils.dynamic_cp_scheduler import DynamicCPScheduler
-
-    scheduler = DynamicCPScheduler(
-        max_seqlen_per_dp_cp_rank=max_seqlen_per_dp_cp_rank,
-        dp_size=dp_group.size(),
-        cp_size=cp_size,
-        min_cp_size=1,
-        microbatch_group_size_per_vp_stage=num_batches_divided_by,
-    )
-    return scheduler.schedule(
-        batch=data,
-        dp_group=dp_group,
-        dcp_group=dcp_group,
-        non_tensor_data=non_tensor_data,
-    )
 
 
 def postprocess_batch_func(output_lst, indices, data: TensorDict):

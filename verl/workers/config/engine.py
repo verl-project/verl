@@ -34,6 +34,7 @@ __all__ = [
     "AutomodelEngineConfig",
     "EngineConfig",
     "EngineRouterReplayConfig",
+    "get_mcore_parallel_topology",
     "QATEngineConfig",
     "MindSpeedEngineConfig",
 ]
@@ -41,6 +42,23 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
+
+
+def get_mcore_parallel_topology(config) -> dict[str, int | None]:
+    """Return the process-group topology implied by a Megatron engine config."""
+    tensor_size = int(config.tensor_model_parallel_size)
+    expert_tensor_size = config.expert_tensor_parallel_size
+    if expert_tensor_size is None:
+        # This is Megatron-Core's initialize_model_parallel default.
+        expert_tensor_size = tensor_size
+    return {
+        "tensor": tensor_size,
+        "pipeline": int(config.pipeline_model_parallel_size),
+        "virtual_pipeline": config.virtual_pipeline_model_parallel_size,
+        "context": int(config.context_parallel_size),
+        "expert": int(config.expert_model_parallel_size),
+        "expert_tensor": int(expert_tensor_size),
+    }
 
 
 # TODO: rename to RouterReplayConfig after removing the legacy implementation
@@ -163,8 +181,8 @@ class McoreEngineConfig(EngineConfig):
         virtual_pipeline_model_parallel_size (Optional[int]): Virtual pipeline model parallel size
             for interleaved scheduling.
         context_parallel_size (int): Context parallel size for long sequences.
-        dynamic_context_parallel (bool): Whether to enable hybrid context parallelism.
-        max_seqlen_per_dp_cp_rank (Optional[int]): Maximum sequence length per DPxCP rank.
+        dynamic_context_parallel (bool): Whether to enable dynamic context parallel scheduling.
+        max_seqlen_per_dp_cp_rank (Optional[int]): Maximum packed sequence length per DPxCP rank.
         sequence_parallel (bool): Whether to enable sequence parallelism.
         use_distributed_optimizer (bool): Whether to use distributed optimizer.
         use_dist_checkpointing (bool): Whether to use distributed checkpointing.
@@ -192,7 +210,7 @@ class McoreEngineConfig(EngineConfig):
     dynamic_context_parallel: bool = False
     entropy_from_logits_with_chunking: bool = False
     entropy_from_logits_chunk_size: int = 2048
-    max_seqlen_per_dp_cp_rank: Optional[int] = None
+    max_seqlen_per_dp_cp_rank: int | None = None
     sequence_parallel: bool = True
     use_distributed_optimizer: bool = True
     pad_bshd_to_minibatch_max: bool = True
@@ -221,6 +239,14 @@ class McoreEngineConfig(EngineConfig):
                 "in a future release. Use Megatron-Bridge by setting `vanilla_mbridge=False` or removing the option.",
                 FutureWarning,
                 stacklevel=2,
+            )
+        if self.dynamic_context_parallel and (
+            not isinstance(self.max_seqlen_per_dp_cp_rank, int)
+            or isinstance(self.max_seqlen_per_dp_cp_rank, bool)
+            or self.max_seqlen_per_dp_cp_rank <= 0
+        ):
+            raise ValueError(
+                "max_seqlen_per_dp_cp_rank must be a positive integer when dynamic_context_parallel is enabled"
             )
         if self.tensor_model_parallel_size == 1:
             warnings.warn("set sequence parallel to false as TP size is 1", stacklevel=2)

@@ -1143,7 +1143,7 @@ def agg_loss(
     batch_num_tokens: Optional[int] = None,
     global_batch_size: Optional[int] = None,
     loss_scale_factor: Optional[int] = None,
-    sequence_token_counts: Optional[torch.Tensor] = None,
+    sequence_token_counts: torch.Tensor | None = None,
 ):
     """
     Aggregate the loss across global batch to ensure the loss is invariant to fsdp/megatron parallelism.
@@ -2103,7 +2103,7 @@ def compute_value_loss(
     batch_num_tokens: Optional[int] = None,
     global_batch_size: Optional[int] = None,
     loss_scale_factor: Optional[int] = None,
-    sequence_token_counts: Optional[torch.Tensor] = None,
+    sequence_token_counts: torch.Tensor | None = None,
 ):
     """
     Compute the clipped value-function loss for PPO.

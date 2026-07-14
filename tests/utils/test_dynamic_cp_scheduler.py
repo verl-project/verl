@@ -12,201 +12,318 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from collections import Counter, deque
-
+import pytest
 import torch
 from tensordict import TensorDict
 
+import verl.utils.dynamic_cp_scheduler as dcp_module
 from verl.utils.dynamic_cp_scheduler import (
     DynamicCPScheduler,
+    _build_reverse_routing_plans,
+    _classify_routed_batch_fields,
     _get_response_lengths,
-    align_sample_id_groups,
-    dcp_gpus_needed,
-    dcp_make_buckets_equal,
-    next_hdp_group,
+    _reconstruct_compact_sample,
+    _reroute_samples,
+    broadcast_dcp_metadata_to_pp,
+    reverse_route_outputs,
 )
+from verl.workers.engine.utils import prepare_micro_batches
 
 
-def _sample_replication_counts(sample_id_groups):
-    counts = Counter()
-    for group in sample_id_groups:
-        for rank_ids in group:
-            counts.update(rank_ids)
-    return counts
+def test_dcp_scheduler_delegates_grouping_to_megatron(monkeypatch):
+    calls = {}
 
+    class FakeMegatronScheduler:
+        def __init__(self, **kwargs):
+            calls["kwargs"] = kwargs
 
-def _cp_group_counts(sample_id_groups):
-    counts = Counter()
-    for group in sample_id_groups:
-        rank = 0
-        while rank < len(group):
-            rank_ids = group[rank]
-            if not rank_ids:
-                rank += 1
-                continue
-            first_id = rank_ids[0]
-            cp_size = 0
-            while rank + cp_size < len(group) and first_id in group[rank + cp_size]:
-                cp_size += 1
-            counts[cp_size] += 1
-            rank += cp_size
-    return counts
+        def get_groups_and_subsamples(self, samples):
+            calls["samples"] = samples
+            return [[[0], [1]]]
 
-
-def test_dcp_scheduler_uses_megatron_sequence_cap_for_packing():
-    sample_id_seqlens = [(idx, 2500) for idx in range(8)]
-
+    monkeypatch.setattr(dcp_module, "_get_megatron_dynamic_cp_scheduler_cls", lambda: FakeMegatronScheduler)
     scheduler = DynamicCPScheduler(
-        max_seqlen_per_dp_cp_rank=1536,
+        max_seqlen_per_dp_cp_rank=1024,
         dp_size=1,
-        cp_size=4,
+        cp_size=2,
+        microbatch_group_size_per_vp_stage=4,
     )
 
-    groups = scheduler._get_groups_and_subsamples(sample_id_seqlens)
+    groups = scheduler._get_groups_and_subsamples([(0, 900), (1, 300)])
 
-    assert dcp_gpus_needed(2500, 1536) == 2
-    assert len(groups) == 4
-    assert _sample_replication_counts(groups) == {idx: 2 for idx in range(8)}
+    assert groups == [[[0], [1]]]
+    assert calls == {
+        "kwargs": {
+            "max_seqlen_per_dp_cp_rank": 1024,
+            "cp_size": 2,
+            "dp_size": 1,
+            "min_cp_size": 1,
+            "microbatch_group_size_per_vp_stage": 4,
+        },
+        "samples": [(0, 900), (1, 300)],
+    }
 
 
-def test_dcp_scheduler_does_not_promote_short_tail_into_cp4_groups():
-    long_samples = [(idx, 4633) for idx in range(8)]
-    short_samples = [(idx, 150) for idx in range(8, 32)]
+@pytest.mark.parametrize(
+    ("kwargs", "name"),
+    [
+        ({"max_seqlen_per_dp_cp_rank": 0, "dp_size": 1}, "max_seqlen_per_dp_cp_rank"),
+        ({"max_seqlen_per_dp_cp_rank": 1024, "dp_size": 0}, "dp_size"),
+        ({"max_seqlen_per_dp_cp_rank": 1024, "dp_size": 1, "cp_size": False}, "cp_size"),
+        ({"max_seqlen_per_dp_cp_rank": 1024, "dp_size": 1, "min_cp_size": 0}, "min_cp_size"),
+    ],
+)
+def test_dcp_scheduler_rejects_non_positive_topology(kwargs, name):
+    with pytest.raises(ValueError, match=name):
+        DynamicCPScheduler(**kwargs)
 
+
+def test_dcp_scheduler_rejects_min_cp_larger_than_group():
+    with pytest.raises(ValueError, match="cannot exceed"):
+        DynamicCPScheduler(max_seqlen_per_dp_cp_rank=1024, dp_size=1, cp_size=2, min_cp_size=3)
+
+
+def test_dcp_batch_field_classification_requires_nested_input_ids():
+    batch = TensorDict({"input_ids": torch.ones(2, 4, dtype=torch.long)}, batch_size=[2])
+
+    with pytest.raises(ValueError, match="input_ids to be a NestedTensor"):
+        _classify_routed_batch_fields(batch, ["input_ids"], {"temperature"}, _FakeGroup([0], rank=0))
+
+
+def test_dcp_batch_field_classification_requires_one_scalar_per_sample():
+    batch = TensorDict(
+        {
+            "input_ids": torch.nested.as_nested_tensor([torch.arange(2), torch.arange(3)], layout=torch.jagged),
+            "temperature": torch.ones(2, 2),
+        },
+        batch_size=[2],
+    )
+
+    with pytest.raises(ValueError, match="exactly one dense value per sample"):
+        _classify_routed_batch_fields(
+            batch,
+            ["input_ids", "temperature"],
+            {"temperature"},
+            _FakeGroup([0], rank=0),
+        )
+
+
+def test_dcp_scheduler_rejects_empty_megatron_rank(monkeypatch):
+    class FakeMegatronScheduler:
+        def __init__(self, **_kwargs):
+            pass
+
+        def get_groups_and_subsamples(self, _samples):
+            return [[[0], []]]
+
+    monkeypatch.setattr(dcp_module, "_get_megatron_dynamic_cp_scheduler_cls", lambda: FakeMegatronScheduler)
+    scheduler = DynamicCPScheduler(max_seqlen_per_dp_cp_rank=1024, dp_size=1, cp_size=2)
+
+    with pytest.raises(RuntimeError, match="empty rank"):
+        scheduler._get_groups_and_subsamples([(0, 900)])
+
+
+def test_dcp_scheduler_rejects_sample_set_mismatch(monkeypatch):
+    class FakeMegatronScheduler:
+        def __init__(self, **_kwargs):
+            pass
+
+        def get_groups_and_subsamples(self, _samples):
+            return [[[0], [0]]]
+
+    monkeypatch.setattr(dcp_module, "_get_megatron_dynamic_cp_scheduler_cls", lambda: FakeMegatronScheduler)
+    scheduler = DynamicCPScheduler(max_seqlen_per_dp_cp_rank=1024, dp_size=1, cp_size=2)
+
+    with pytest.raises(RuntimeError, match="preserve the input sample set"):
+        scheduler._get_groups_and_subsamples([(0, 900), (1, 300)])
+
+
+def test_dcp_scheduler_delegates_non_power_of_two_grouping_to_megatron(monkeypatch):
+    calls = {}
+
+    class FakeMegatronScheduler:
+        def __init__(self, **kwargs):
+            calls["kwargs"] = kwargs
+
+        def get_groups_and_subsamples(self, samples):
+            calls["samples"] = samples
+            return [[[0, 1]] * 6]
+
+    monkeypatch.setattr(dcp_module, "_get_megatron_dynamic_cp_scheduler_cls", lambda: FakeMegatronScheduler)
+    scheduler = DynamicCPScheduler(max_seqlen_per_dp_cp_rank=128, dp_size=3, cp_size=2)
+
+    groups = scheduler._get_groups_and_subsamples([(0, 200), (1, 190)])
+
+    assert groups == [[[0, 1]] * 6]
+    assert calls["kwargs"]["dp_size"] == 3
+    assert calls["kwargs"]["cp_size"] == 2
+    assert calls["samples"] == [(0, 200), (1, 190)]
+
+
+def test_non_power_of_two_scheduler_preserves_vpp_alignment(monkeypatch):
+    class FakeMegatronScheduler:
+        def __init__(self, **kwargs):
+            assert kwargs["microbatch_group_size_per_vp_stage"] == 2
+
+        def get_groups_and_subsamples(self, _samples):
+            return [
+                [[0]] * 6,
+                [[1]] * 6,
+            ]
+
+    monkeypatch.setattr(
+        dcp_module,
+        "_get_megatron_dynamic_cp_scheduler_cls",
+        lambda: FakeMegatronScheduler,
+    )
     scheduler = DynamicCPScheduler(
-        max_seqlen_per_dp_cp_rank=2304,
-        dp_size=1,
+        max_seqlen_per_dp_cp_rank=256,
+        dp_size=3,
+        cp_size=2,
+        microbatch_group_size_per_vp_stage=2,
+    )
+
+    groups = scheduler._get_groups_and_subsamples([(0, 303), (1, 62)])
+
+    assert len(groups) == 2
+    assert all(rank_ids for group in groups for rank_ids in group)
+    assigned_ids = [sample_id for group in groups for rank_ids in group for sample_id in rank_ids]
+    assert assigned_ids.count(0) == assigned_ids.count(1) == 6
+
+
+def test_reverse_routing_gathers_all_dynamic_cp_shards_on_canonical_cp_rank(monkeypatch):
+    class FakeGroup:
+        def __init__(self, ranks, rank):
+            self.ranks = ranks
+            self._rank = rank
+
+        def rank(self):
+            return self._rank
+
+        def size(self):
+            return len(self.ranks)
+
+    monkeypatch.setattr(torch.distributed, "get_process_group_ranks", lambda group: group.ranks)
+    dcp_group = FakeGroup(list(range(8)), rank=0)
+    dp_group = FakeGroup([0, 4], rank=0)
+    routing_info = {
+        "sample_id_groups": [
+            [[0], [0], [1], [1], [2], [2], [3], [3]],
+        ],
+        "offsets": torch.tensor([0, 2, 4], dtype=torch.int32),
+        "global_ids_this_rank": torch.tensor([0, 1], dtype=torch.int32),
+    }
+
+    send_by_dest, recv_by_src, _my_gids, _send_ids, recv_ids = _build_reverse_routing_plans(
+        routing_info, dp_group, dcp_group
+    )
+
+    assert send_by_dest[0] == [0]
+    assert recv_by_src[:4] == [[0], [0], [1], [1]]
+    assert recv_ids == [0, 0, 1, 1]
+
+
+def test_prepare_micro_batches_uses_unified_dynamic_cp_entrypoint(monkeypatch):
+    calls = {}
+
+    class FakeGroup:
+        def size(self):
+            return 3
+
+    class FakeScheduler:
+        def __init__(self, **kwargs):
+            calls["kwargs"] = kwargs
+
+        def schedule(self, **kwargs):
+            calls["schedule"] = kwargs
+            return ["microbatch"], {"routing": True}
+
+    monkeypatch.setattr(dcp_module, "DynamicCPScheduler", FakeScheduler)
+    data = TensorDict({}, batch_size=[])
+    dp_group = FakeGroup()
+    dcp_group = FakeGroup()
+
+    result = prepare_micro_batches(
+        data,
+        dp_group=dp_group,
+        dynamic_context_parallel=True,
+        dcp_group=dcp_group,
+        max_seqlen_per_dp_cp_rank=2048,
         cp_size=4,
+        num_batches_divided_by=2,
+        non_tensor_data={"compute_loss": True},
     )
 
-    groups = scheduler._get_groups_and_subsamples(long_samples + short_samples)
-    replication_counts = _sample_replication_counts(groups)
+    assert result == (["microbatch"], {"routing": True})
+    assert calls["kwargs"] == {
+        "max_seqlen_per_dp_cp_rank": 2048,
+        "dp_size": 3,
+        "cp_size": 4,
+        "min_cp_size": 1,
+        "microbatch_group_size_per_vp_stage": 2,
+    }
+    assert calls["schedule"] == {
+        "batch": data,
+        "dp_group": dp_group,
+        "dcp_group": dcp_group,
+        "non_tensor_data": {"compute_loss": True},
+    }
 
-    assert _cp_group_counts(groups) == {1: 4, 4: 8}
-    assert {idx: replication_counts[idx] for idx in range(8)} == {idx: 4 for idx in range(8)}
-    assert {idx: replication_counts[idx] for idx in range(8, 32)} == {idx: 1 for idx in range(8, 32)}
+
+def test_reverse_route_outputs_requires_dp_group():
+    with pytest.raises(ValueError, match="data-parallel process group"):
+        reverse_route_outputs({}, {}, dp_group=None)
 
 
-def test_dcp_scheduler_accepts_explicit_larger_packing_budget():
-    sample_id_seqlens = [(idx, 2500) for idx in range(8)]
+def test_dcp_schedule_does_not_mutate_caller_metadata(monkeypatch):
+    class FakeGroup:
+        def size(self):
+            return 1
 
-    scheduler = DynamicCPScheduler(
-        max_seqlen_per_dp_cp_rank=1536,
-        max_token_len_per_rank=5000,
-        dp_size=1,
-        cp_size=4,
+        def rank(self):
+            return 0
+
+    scheduler = DynamicCPScheduler(max_seqlen_per_dp_cp_rank=1024, dp_size=1)
+    group = FakeGroup()
+    metadata = {"compute_loss": False}
+    batch = TensorDict(
+        {"input_ids": torch.nested.as_nested_tensor([torch.arange(2)], layout=torch.jagged)},
+        batch_size=[1],
+    )
+    received_metadata = {}
+
+    monkeypatch.setattr(dcp_module, "get_device_id", lambda: torch.device("cpu"))
+    monkeypatch.setattr(
+        dcp_module,
+        "_get_global_seqlens_and_ids",
+        lambda _local_seqlens, _dp_group: (
+            [(0, 2)],
+            torch.tensor([0], dtype=torch.int32),
+            torch.tensor([0, 1], dtype=torch.int32),
+        ),
+    )
+    monkeypatch.setattr(scheduler, "_get_groups_and_subsamples", lambda _samples: [[[0]]])
+    monkeypatch.setattr(
+        dcp_module,
+        "_reroute_samples",
+        lambda *_args, **_kwargs: {0: {"input_ids": torch.arange(2)}},
+    )
+    monkeypatch.setattr(
+        dcp_module,
+        "_build_micro_batches_from_samples",
+        lambda *_args, **_kwargs: ([[{"input_ids": torch.arange(2)}]], [1]),
     )
 
-    groups = scheduler._get_groups_and_subsamples(sample_id_seqlens)
+    def fake_to_tensordict(*_args, non_tensor_data, **_kwargs):
+        received_metadata.update(non_tensor_data)
+        return TensorDict({}, batch_size=[])
 
-    assert dcp_gpus_needed(2500, 1536) == 2
-    assert len(groups) == 1
-    assert _sample_replication_counts(groups) == {idx: 2 for idx in range(8)}
+    monkeypatch.setattr(dcp_module, "_samples_to_nested_tensor_batch", fake_to_tensordict)
 
+    scheduler.schedule(batch, dp_group=group, dcp_group=group, non_tensor_data=metadata)
 
-def test_dcp_scheduler_scans_past_full_packing_group():
-    buckets = [
-        deque([(0, 2500), (1, 2500)]),
-        deque([(2, 1000), (3, 1000), (4, 1000)]),
-    ]
-
-    def make_buckets_equal_fn(_sample_seqlens, _compute_estimator):
-        return [deque(bucket) for bucket in buckets]
-
-    def gpus_needed_fn(seq_len):
-        return 2 if seq_len > 1536 else 1
-
-    def get_total_workload_fn(seq_len, cp_size=None):
-        return seq_len / (cp_size or gpus_needed_fn(seq_len))
-
-    micro_batches, leftovers, _exec_times, sample_ids = next_hdp_group(
-        [(idx, seq_len) for bucket in buckets for idx, seq_len in bucket],
-        compute_estimator=get_total_workload_fn,
-        total_gpus=3,
-        gpus_needed_fn=gpus_needed_fn,
-        make_buckets_equal_fn=make_buckets_equal_fn,
-        max_seq_len_per_rank=1536,
-        get_total_workload_fn=get_total_workload_fn,
-        max_token_len_per_rank=2000,
-    )
-
-    assert micro_batches == [[2500], [2500], [1000, 1000]]
-    assert sample_ids == [[0], [0], [2, 3]]
-    assert leftovers == [(1, 2500), (4, 1000)]
-
-
-def test_dcp_make_buckets_equal_uses_remaining_bucket_count_once():
-    sample_id_seqlens = list(enumerate([400, 350, 340, 300, 250, 200, 150, 100, 50]))
-
-    buckets = dcp_make_buckets_equal(
-        sample_id_seqlens,
-        compute_estimator=lambda seq_len, cp_size=None: seq_len,
-        max_seq_len_per_rank=100,
-    )
-
-    assert [len(bucket) for bucket in buckets] == [2, 2, 4, 1]
-
-
-def test_dcp_fill_empty_gpus_sums_packed_sequence_workload():
-    def make_buckets_equal_fn(_sample_seqlens, _compute_estimator):
-        return [deque([(0, 100), (1, 200)])]
-
-    micro_batches, leftovers, exec_times, sample_ids = next_hdp_group(
-        [(0, 100), (1, 200)],
-        compute_estimator=lambda seq_len, cp_size=None: seq_len,
-        total_gpus=3,
-        gpus_needed_fn=lambda _seq_len: 2,
-        make_buckets_equal_fn=make_buckets_equal_fn,
-        max_seq_len_per_rank=1024,
-        get_total_workload_fn=lambda seq_len, cp_size: seq_len / cp_size,
-        max_token_len_per_rank=1024,
-    )
-
-    assert micro_batches == [[100, 200], [100, 200], [100, 200]]
-    assert sample_ids == [[0, 1], [0, 1], [0, 1]]
-    assert leftovers == []
-    assert exec_times == [100.0, 100.0, 100.0]
-
-
-def test_dcp_fill_empty_non_power_of_two_world_returns_tail_to_leftovers():
-    def make_buckets_equal_fn(_sample_seqlens, _compute_estimator):
-        return [deque([(0, 951), (1, 864)])]
-
-    micro_batches, leftovers, exec_times, sample_ids = next_hdp_group(
-        [(0, 951), (1, 864)],
-        compute_estimator=lambda seq_len, cp_size=None: seq_len / (cp_size or 4),
-        total_gpus=10,
-        gpus_needed_fn=lambda _seq_len: 4,
-        make_buckets_equal_fn=make_buckets_equal_fn,
-        max_seq_len_per_rank=256,
-        get_total_workload_fn=lambda seq_len, cp_size: seq_len / cp_size,
-        max_token_len_per_rank=256,
-    )
-
-    assert micro_batches == [[951]] * 10
-    assert sample_ids == [[0]] * 10
-    assert leftovers == [(1, 864)]
-    assert exec_times == [95.1] * 10
-    assert all(micro_batches)
-
-
-def test_dcp_materializes_cp_groups_in_descending_aligned_order():
-    samples = [(0, 900), (1, 250), (2, 240), (3, 880)]
-
-    micro_batches, leftovers, _exec_times, sample_ids = next_hdp_group(
-        samples,
-        compute_estimator=lambda seq_len, cp_size=None: seq_len / (cp_size or (4 if seq_len > 256 else 1)),
-        total_gpus=10,
-        gpus_needed_fn=lambda seq_len: 4 if seq_len > 256 else 1,
-        make_buckets_equal_fn=lambda _samples, _estimator: [deque(samples)],
-        max_seq_len_per_rank=256,
-        get_total_workload_fn=lambda seq_len, cp_size: seq_len / cp_size,
-        max_token_len_per_rank=256,
-    )
-
-    assert leftovers == []
-    assert micro_batches == [[900]] * 4 + [[880]] * 4 + [[250], [240]]
-    assert sample_ids == [[0]] * 4 + [[3]] * 4 + [[1], [2]]
+    assert metadata == {"compute_loss": False}
+    assert received_metadata == {"compute_loss": False, "_dcp_scheduled": True}
 
 
 def test_dcp_response_lengths_use_attention_span_not_response_mask_sum():
@@ -240,25 +357,27 @@ def test_dcp_response_lengths_use_attention_span_not_response_mask_sum():
     torch.testing.assert_close(response_lens, torch.tensor([5, 4]))
 
 
-def test_align_sample_id_groups_preserves_rank_count_when_splitting_tail():
-    groups = [
-        [[0], [0], [1], [2]],
-        [[3], [3], [4], [5]],
-        [[6], [6], [7], [8]],
-    ]
+def test_dcp_response_lengths_use_nested_mask_offsets_with_internal_zeros():
+    input_ids = torch.nested.as_nested_tensor(
+        [torch.arange(8), torch.arange(6)],
+        layout=torch.jagged,
+    )
+    response_mask = torch.nested.as_nested_tensor(
+        [torch.tensor([1, 0, 0, 1, 1]), torch.tensor([1, 0, 1, 0])],
+        layout=torch.jagged,
+    )
+    batch = TensorDict(
+        {"input_ids": input_ids, "response_mask": response_mask},
+        batch_size=[2],
+    )
 
-    aligned = align_sample_id_groups(groups, microbatch_group_size_per_vp_stage=2)
+    response_lens = _get_response_lengths(batch, input_ids.offsets().diff())
 
-    assert len(aligned) == 4
-    assert all(len(group) == 4 for group in aligned)
+    torch.testing.assert_close(response_lens, torch.tensor([5, 4]))
 
 
 def test_dcp_routing_keys_are_minimal_for_forward_only():
-    scheduler = DynamicCPScheduler(
-        max_seqlen_per_dp_cp_rank=1024,
-        dp_size=1,
-        cp_size=4,
-    )
+    scheduler = DynamicCPScheduler(max_seqlen_per_dp_cp_rank=1024, dp_size=1, cp_size=4)
     batch = {
         "input_ids": object(),
         "position_ids": object(),
@@ -276,11 +395,7 @@ def test_dcp_routing_keys_are_minimal_for_forward_only():
 
 
 def test_dcp_routing_keys_include_train_loss_and_optional_model_inputs():
-    scheduler = DynamicCPScheduler(
-        max_seqlen_per_dp_cp_rank=1024,
-        dp_size=1,
-        cp_size=4,
-    )
+    scheduler = DynamicCPScheduler(max_seqlen_per_dp_cp_rank=1024, dp_size=1, cp_size=4)
     batch = {
         "input_ids": object(),
         "position_ids": object(),
@@ -327,3 +442,401 @@ def test_dcp_routing_keys_include_train_loss_and_optional_model_inputs():
         "attention_mask",
         "temperature",
     ]
+
+
+def test_dcp_routes_distillation_tensors_without_topk_flag():
+    scheduler = DynamicCPScheduler(max_seqlen_per_dp_cp_rank=1024, dp_size=1, cp_size=2)
+    batch = {
+        "input_ids": object(),
+        "teacher_logprobs": object(),
+        "teacher_ids": object(),
+    }
+
+    assert scheduler._routing_key_order(batch, {"compute_loss": True, "distillation_use_topk": False}) == [
+        "input_ids",
+        "teacher_logprobs",
+        "teacher_ids",
+    ]
+
+
+def test_dcp_routes_loss_mask_for_forward_only_mtp_when_requested():
+    scheduler = DynamicCPScheduler(max_seqlen_per_dp_cp_rank=1024, dp_size=1, cp_size=2)
+    batch = {"input_ids": object(), "loss_mask": object()}
+
+    assert scheduler._routing_key_order(
+        batch,
+        {"compute_loss": False, "_dcp_route_loss_mask": True},
+    ) == ["input_ids", "loss_mask"]
+
+
+class _FakeGroup:
+    def __init__(self, ranks, rank):
+        self.ranks = ranks
+        self._rank = rank
+
+    def rank(self):
+        return self._rank
+
+    def size(self):
+        return len(self.ranks)
+
+
+def _copy_all_gather(outputs, input, **_kwargs):
+    for output in outputs:
+        output.copy_(input)
+
+
+def test_reroute_empty_local_rank_uses_batch_schema_dtype(monkeypatch):
+    dcp_group = _FakeGroup([0], rank=0)
+    dp_group = _FakeGroup([0], rank=0)
+    payload_dtypes = []
+
+    monkeypatch.setattr(torch.distributed, "get_process_group_ranks", lambda group: group.ranks)
+    monkeypatch.setattr(dcp_module, "get_device_id", lambda: torch.device("cpu"))
+
+    def fake_all_to_all_single(output, input, **_kwargs):
+        output.copy_(input)
+        payload_dtypes.append(input.dtype)
+
+    monkeypatch.setattr(torch.distributed, "all_to_all_single", fake_all_to_all_single)
+
+    result = _reroute_samples(
+        local_samples=[],
+        global_ids_this_rank=torch.empty(0, dtype=torch.int32),
+        sample_id_groups=[[[]]],
+        offsets=torch.tensor([0], dtype=torch.int32),
+        dp_group=dp_group,
+        dcp_group=dcp_group,
+        tensor_keys=["input_ids"],
+        scalar_keys=[],
+        key_dtypes={"input_ids": torch.int64},
+    )
+
+    assert result == {}
+    # numel metadata, shape metadata, then the empty tensor payload. The last
+    # dtype regressed to float32 before the source batch schema was propagated.
+    assert payload_dtypes == [torch.int64, torch.int64, torch.int64]
+
+
+def test_reroute_preserves_present_zero_length_tensor(monkeypatch):
+    dcp_group = _FakeGroup([0], rank=0)
+    dp_group = _FakeGroup([0], rank=0)
+    monkeypatch.setattr(torch.distributed, "get_process_group_ranks", lambda group: group.ranks)
+    monkeypatch.setattr(dcp_module, "get_device_id", lambda: torch.device("cpu"))
+    monkeypatch.setattr(torch.distributed, "all_to_all_single", lambda output, input, **_kwargs: output.copy_(input))
+
+    result = _reroute_samples(
+        local_samples=[
+            {"input_ids": torch.empty(0, dtype=torch.int64)},
+            {"input_ids": torch.tensor([1, 2], dtype=torch.int64)},
+        ],
+        global_ids_this_rank=torch.tensor([0, 1], dtype=torch.int32),
+        sample_id_groups=[[[0, 1]]],
+        offsets=torch.tensor([0, 2], dtype=torch.int32),
+        dp_group=dp_group,
+        dcp_group=dcp_group,
+        tensor_keys=["input_ids"],
+        scalar_keys=[],
+        key_dtypes={"input_ids": torch.int64},
+    )
+
+    assert result[0]["input_ids"].shape == (0,)
+    torch.testing.assert_close(result[1]["input_ids"], torch.tensor([1, 2]))
+
+
+def test_routing_schema_mismatch_is_rejected_before_all_to_all(monkeypatch):
+    dcp_group = _FakeGroup([0, 1], rank=0)
+    dp_group = _FakeGroup([0], rank=0)
+    monkeypatch.setattr(torch.distributed, "get_process_group_ranks", lambda group: group.ranks)
+    monkeypatch.setattr(dcp_module, "get_device_id", lambda: torch.device("cpu"))
+
+    def fake_all_gather(gathered, signature, *, group):
+        assert group is dcp_group
+        gathered[0].copy_(signature)
+        gathered[1].copy_(signature)
+        gathered[1][-1] += 1
+
+    monkeypatch.setattr(torch.distributed, "all_gather", fake_all_gather)
+    monkeypatch.setattr(
+        torch.distributed,
+        "all_to_all_single",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("all-to-all must not be reached")),
+    )
+
+    with pytest.raises(ValueError, match="schema differs across ranks before all-to-all"):
+        _reroute_samples(
+            local_samples=[{"input_ids": torch.tensor([1, 2])}],
+            global_ids_this_rank=torch.tensor([0], dtype=torch.int32),
+            sample_id_groups=[[[0], [0]]],
+            offsets=torch.tensor([0, 1], dtype=torch.int32),
+            dp_group=dp_group,
+            dcp_group=dcp_group,
+            tensor_keys=["input_ids"],
+            scalar_keys=[],
+            key_dtypes={"input_ids": torch.int64},
+        )
+
+
+def test_reverse_route_empty_canonical_owner_returns_empty_batch(monkeypatch):
+    dcp_group = _FakeGroup([0, 1, 2, 3], rank=2)
+    dp_group = _FakeGroup([0, 2], rank=1)
+    monkeypatch.setattr(torch.distributed, "get_process_group_ranks", lambda group: group.ranks)
+    monkeypatch.setattr(dcp_module, "get_device_id", lambda: torch.device("cpu"))
+    monkeypatch.setattr(torch.distributed, "all_gather", _copy_all_gather)
+
+    def fake_all_to_all_single(output, input, **_kwargs):
+        del input
+        output.zero_()
+
+    monkeypatch.setattr(torch.distributed, "all_to_all_single", fake_all_to_all_single)
+    scheduled_foreign_output = torch.nested.as_nested_tensor(
+        [torch.tensor([1.0, 2.0])],
+        layout=torch.jagged,
+    )
+
+    result = reverse_route_outputs(
+        {"log_probs": scheduled_foreign_output},
+        {
+            "sample_id_groups": [[[0], [0], [0], [0]]],
+            "offsets": torch.tensor([0, 1, 1], dtype=torch.int32),
+            "global_ids_this_rank": torch.empty(0, dtype=torch.int32),
+        },
+        dp_group=dp_group,
+        dcp_group=dcp_group,
+        merge_duplicate_gids=True,
+    )
+
+    assert result["log_probs"].is_nested
+    assert len(result["log_probs"].unbind()) == 0
+
+
+def test_reverse_route_preserves_present_zero_length_output(monkeypatch):
+    dcp_group = _FakeGroup([0], rank=0)
+    dp_group = _FakeGroup([0], rank=0)
+    monkeypatch.setattr(torch.distributed, "get_process_group_ranks", lambda group: group.ranks)
+    monkeypatch.setattr(dcp_module, "get_device_id", lambda: torch.device("cpu"))
+    monkeypatch.setattr(torch.distributed, "all_to_all_single", lambda output, input, **_kwargs: output.copy_(input))
+    model_output = {
+        "log_probs": torch.nested.as_nested_tensor(
+            [torch.empty(0), torch.tensor([1.0, 2.0])],
+            layout=torch.jagged,
+        )
+    }
+
+    result = reverse_route_outputs(
+        model_output,
+        {
+            "sample_id_groups": [[[0, 1]]],
+            "offsets": torch.tensor([0, 2], dtype=torch.int32),
+            "global_ids_this_rank": torch.tensor([0, 1], dtype=torch.int32),
+        },
+        dp_group=dp_group,
+        dcp_group=dcp_group,
+    )
+
+    parts = result["log_probs"].unbind()
+    assert parts[0].shape == (0,)
+    torch.testing.assert_close(parts[1], torch.tensor([1.0, 2.0]))
+
+
+def test_reconstruct_compact_sample_requires_exact_token_coverage():
+    result = _reconstruct_compact_sample(
+        7,
+        [torch.tensor([[10.0], [40.0]]), torch.tensor([[20.0], [30.0]])],
+        [torch.tensor([0, 3]), torch.tensor([1, 2])],
+        [torch.tensor([4]), torch.tensor([4])],
+    )
+
+    torch.testing.assert_close(result, torch.tensor([[10.0], [20.0], [30.0], [40.0]]))
+
+
+@pytest.mark.parametrize(
+    "indices, full_len",
+    [
+        ([torch.tensor([0]), torch.tensor([2])], 3),
+        ([torch.tensor([0, 1]), torch.tensor([1, 2])], 4),
+        ([torch.tensor([0, 1]), torch.tensor([2, 4])], 4),
+    ],
+)
+def test_reconstruct_compact_sample_rejects_missing_duplicate_or_out_of_range_indices(indices, full_len):
+    values = [torch.arange(part.numel(), dtype=torch.float32) for part in indices]
+
+    with pytest.raises(ValueError, match="must cover"):
+        _reconstruct_compact_sample(
+            3,
+            values,
+            indices,
+            [torch.tensor([full_len]) for _ in indices],
+        )
+
+
+def test_reconstruct_compact_sample_rejects_inconsistent_full_lengths():
+    with pytest.raises(ValueError, match="inconsistent full sequence lengths"):
+        _reconstruct_compact_sample(
+            3,
+            [torch.tensor([1.0]), torch.tensor([2.0])],
+            [torch.tensor([0]), torch.tensor([1])],
+            [torch.tensor([2]), torch.tensor([3])],
+        )
+
+
+def test_reverse_route_rejects_output_batch_cardinality_mismatch(monkeypatch):
+    dcp_group = _FakeGroup([0], rank=0)
+    dp_group = _FakeGroup([0], rank=0)
+    monkeypatch.setattr(torch.distributed, "get_process_group_ranks", lambda group: group.ranks)
+    monkeypatch.setattr(dcp_module, "get_device_id", lambda: torch.device("cpu"))
+    monkeypatch.setattr(
+        torch.distributed,
+        "all_to_all_single",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("all-to-all must not be reached")),
+    )
+    empty_output = torch.nested.nested_tensor_from_jagged(
+        torch.empty(0),
+        offsets=torch.tensor([0]),
+        min_seqlen=0,
+        max_seqlen=0,
+    )
+
+    with pytest.raises(ValueError, match="batch size must match the scheduled local sample count"):
+        reverse_route_outputs(
+            {"log_probs": empty_output},
+            {
+                "sample_id_groups": [[[0]]],
+                "offsets": torch.tensor([0, 1], dtype=torch.int32),
+                "global_ids_this_rank": torch.tensor([0], dtype=torch.int32),
+            },
+            dp_group=dp_group,
+            dcp_group=dcp_group,
+        )
+
+
+def test_reverse_route_rejects_scalar_tensor_before_all_to_all(monkeypatch):
+    dcp_group = _FakeGroup([0], rank=0)
+    dp_group = _FakeGroup([0], rank=0)
+    monkeypatch.setattr(torch.distributed, "get_process_group_ranks", lambda group: group.ranks)
+    monkeypatch.setattr(dcp_module, "get_device_id", lambda: torch.device("cpu"))
+    monkeypatch.setattr(
+        torch.distributed,
+        "all_to_all_single",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("all-to-all must not be reached")),
+    )
+
+    with pytest.raises(ValueError, match="must have a batch dimension"):
+        reverse_route_outputs(
+            {"loss": torch.tensor(1.0)},
+            {
+                "sample_id_groups": [[[0]]],
+                "offsets": torch.tensor([0, 1], dtype=torch.int32),
+                "global_ids_this_rank": torch.tensor([0], dtype=torch.int32),
+            },
+            dp_group=dp_group,
+            dcp_group=dcp_group,
+        )
+
+
+def test_reverse_routing_schema_mismatch_is_rejected_before_all_to_all(monkeypatch):
+    dcp_group = _FakeGroup([0, 1], rank=0)
+    dp_group = _FakeGroup([0], rank=0)
+    monkeypatch.setattr(torch.distributed, "get_process_group_ranks", lambda group: group.ranks)
+    monkeypatch.setattr(dcp_module, "get_device_id", lambda: torch.device("cpu"))
+
+    def fake_all_gather(gathered, signature, *, group):
+        assert group is dcp_group
+        gathered[0].copy_(signature)
+        gathered[1].copy_(signature)
+        gathered[1][-1] += 1
+
+    monkeypatch.setattr(torch.distributed, "all_gather", fake_all_gather)
+    monkeypatch.setattr(
+        torch.distributed,
+        "all_to_all_single",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("all-to-all must not be reached")),
+    )
+
+    with pytest.raises(ValueError, match="schema differs across ranks before all-to-all"):
+        reverse_route_outputs(
+            {"log_probs": torch.nested.as_nested_tensor([torch.tensor([1.0])], layout=torch.jagged)},
+            {
+                "sample_id_groups": [[[0], [0]]],
+                "offsets": torch.tensor([0, 1], dtype=torch.int32),
+                "global_ids_this_rank": torch.tensor([0], dtype=torch.int32),
+            },
+            dp_group=dp_group,
+            dcp_group=dcp_group,
+        )
+
+
+def test_reverse_route_keeps_full_sequence_routed_experts_with_compact_metadata(monkeypatch):
+    dcp_group = _FakeGroup([0, 1], rank=0)
+    dp_group = _FakeGroup([0], rank=0)
+    monkeypatch.setattr(torch.distributed, "get_process_group_ranks", lambda group: group.ranks)
+    monkeypatch.setattr(dcp_module, "get_device_id", lambda: torch.device("cpu"))
+    monkeypatch.setattr(torch.distributed, "all_gather", _copy_all_gather)
+
+    def fake_all_to_all_single(output, input, **_kwargs):
+        # Simulate the second CP rank returning the same replicated full-sequence
+        # router map (and matching compact metadata for the other outputs).
+        output.copy_(input.repeat(2))
+
+    monkeypatch.setattr(torch.distributed, "all_to_all_single", fake_all_to_all_single)
+
+    routed_experts = torch.arange(8, dtype=torch.int64).reshape(4, 2, 1)
+    model_output = {
+        "routed_experts": torch.nested.as_nested_tensor([routed_experts], layout=torch.jagged),
+        "_dcp_local_token_indices": torch.nested.as_nested_tensor(
+            [torch.tensor([0, 3], dtype=torch.int64)], layout=torch.jagged
+        ),
+        "_dcp_full_seq_lens": torch.nested.as_nested_tensor(
+            [torch.tensor([4], dtype=torch.int64)], layout=torch.jagged
+        ),
+    }
+    routing_info = {
+        "sample_id_groups": [[[0], [0]]],
+        "offsets": torch.tensor([0, 1], dtype=torch.int32),
+        "global_ids_this_rank": torch.tensor([0], dtype=torch.int32),
+    }
+
+    result = reverse_route_outputs(
+        model_output,
+        routing_info,
+        dp_group=dp_group,
+        dcp_group=dcp_group,
+        merge_duplicate_gids=True,
+    )
+
+    torch.testing.assert_close(result["routed_experts"].unbind()[0], routed_experts)
+
+
+def test_pp_metadata_broadcast_preserves_existing_routed_fields(monkeypatch):
+    pp_group = _FakeGroup([0, 1, 2], rank=1)
+    serialized = torch.tensor([1, 2, 3, 0, 4, 10], dtype=torch.int32)
+    monkeypatch.setattr(torch.distributed, "get_process_group_ranks", lambda group: group.ranks)
+    monkeypatch.setattr(dcp_module, "get_device_id", lambda: torch.device("cpu"))
+
+    def fake_broadcast(tensor, _src, group):
+        assert group is pp_group
+        if tensor.numel() == 1:
+            tensor.fill_(serialized.numel())
+        else:
+            tensor.copy_(serialized)
+
+    monkeypatch.setattr(torch.distributed, "broadcast", fake_broadcast)
+
+    routed_experts = torch.nested.as_nested_tensor(
+        [torch.ones(4, 2, 1, dtype=torch.int64), torch.ones(6, 2, 1, dtype=torch.int64)],
+        layout=torch.jagged,
+    )
+    existing = TensorDict(
+        {
+            "input_ids": torch.nested.as_nested_tensor([torch.ones(4), torch.ones(6)], layout=torch.jagged),
+            "routed_experts": routed_experts,
+        },
+        batch_size=[2],
+    )
+
+    result = broadcast_dcp_metadata_to_pp([existing], pp_group)
+
+    assert result[0] is existing
+    torch.testing.assert_close(result[0]["routed_experts"].values(), routed_experts.values())
+    assert result[0]["input_ids"].offsets().tolist() == [0, 4, 10]
+    assert dcp_module.tu.get_non_tensor_data(result[0], key="local_cp_size", default=None) == 2

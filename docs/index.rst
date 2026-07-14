@@ -102,6 +102,7 @@ verl is fast with:
    :caption: Performance Tuning Guide
 
    perf/dpsk.md
+   advance/dynamic_context_parallel
    perf/best_practices
    perf/perf_tuning
    perf/rollout_kv_offload.md

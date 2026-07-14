@@ -13,6 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from typing import Optional
 
 import torch
 from torch.nested._internal.nested_tensor import NestedTensor
@@ -36,6 +37,30 @@ from .util import (
     preprocess_packed_seqs,
     preprocess_thd_engine,
 )
+
+
+def _call_model_with_unfused_forward(model, **kwargs):
+    """Call the saved original forward when the engine installed the fused patch.
+
+    The patch is installed once during engine initialization, but an individual
+    batch can still require materialized logits, such as top-k distillation or a
+    per-sample temperature batch. Megatron's activation-checkpoint closures are
+    created inside this call and do not re-enter the top-level forward during
+    backward, so restoring the patched method after the call is safe.
+    """
+    unwrapped_model = unwrap_model(model)
+    patching_model = unwrapped_model
+    if not hasattr(patching_model, "forward_backup"):
+        patching_model = getattr(unwrapped_model, "language_model", None)
+    if patching_model is None or not hasattr(patching_model, "forward_backup"):
+        return model(**kwargs)
+
+    patched_forward = patching_model.forward
+    patching_model.forward = patching_model.forward_backup
+    try:
+        return model(**kwargs)
+    finally:
+        patching_model.forward = patched_forward
 
 
 def model_forward_gen(vision_model: bool = False):
@@ -108,7 +133,7 @@ def model_forward_gen(vision_model: bool = False):
                 input_args["input_ids"] = input_ids
                 input_args["attention_mask"] = attention_mask
 
-            output_orig = model(**input_args)
+            output_orig = _call_model_with_unfused_forward(model, **input_args)
 
             if post_process and logits_processor is not None:
                 args = {
@@ -150,7 +175,8 @@ def model_forward_gen(vision_model: bool = False):
                 sequence_parallel=sp,
                 pre_process=pre_process_for_bshd,
             )
-            output_orig = model(
+            output_orig = _call_model_with_unfused_forward(
+                model,
                 input_ids=new_input_ids,
                 position_ids=None if vision_model else new_position_ids,
                 attention_mask=new_attention_mask,
@@ -345,7 +371,8 @@ def gptmodel_forward_model_engine(
         if vision_model:
             input_ids_rmpad, attention_mask = build_vlm_attn_mask_thd(input_ids, pad_token_id)
 
-        output_orig = model(
+        output_orig = _call_model_with_unfused_forward(
+            model,
             input_ids=input_ids_rmpad,
             attention_mask=attention_mask,
             position_ids=position_ids_rmpad if mtp_enable_train else None,  # position_ids is only needed for MTP
@@ -419,7 +446,10 @@ def gptmodel_forward_model_engine(
                 local_cp_size=local_cp_size,
                 **postprocess_kwargs,
             )
-            if value_model and dcp_local_output_only and local_cp_size is not None:
+            # Intermediate pipeline stages must return their activation tensor to
+            # Megatron's P2P schedule.  Only the post-process stage returns a
+            # user-facing value dictionary with DCP reconstruction metadata.
+            if value_model and post_process and dcp_local_output_only and local_cp_size is not None:
                 output = {"values": output}
                 if dcp_compact_output_only:
                     output["_dcp_local_token_indices"] = build_thd_local_token_indices(
@@ -492,7 +522,8 @@ def gptmodel_forward_model_engine(
         else:
             attention_mask = attention_mask_bshd
 
-        output_orig = model(
+        output_orig = _call_model_with_unfused_forward(
+            model,
             input_ids=input_ids_bshd,
             attention_mask=attention_mask,
             position_ids=None if vision_model else position_ids_bshd,
