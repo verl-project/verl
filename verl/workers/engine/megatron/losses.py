@@ -276,8 +276,15 @@ def _dcp_value_loss(config: CriticConfig, model_output: dict, data: TensorDict):
     vpreds = no_padding_2_padding(model_output["values"], data)
     response_token_counts = data["response_token_counts"]
     dp_size = tu.get_non_tensor_data(data, key="dp_size", default=1)
-    batch_num_tokens = tu.get_non_tensor_data(data, key="batch_num_tokens", default=response_token_counts.sum())
-    global_batch_size = tu.get_non_tensor_data(data, key="global_batch_size", default=(response_token_counts > 0).sum())
+    # The generic value_loss reads both keys unconditionally (KeyError on absence).
+    # Falling back to rank-local counts would silently change the denominator per
+    # DCP shard, so missing metadata must fail loudly here as well.
+    batch_num_tokens = tu.get_non_tensor_data(data, key="batch_num_tokens", default=None)
+    global_batch_size = tu.get_non_tensor_data(data, key="global_batch_size", default=None)
+    if batch_num_tokens is None or batch_num_tokens <= 0:
+        raise ValueError("Scheduler-managed DCP value loss requires a positive global batch_num_tokens")
+    if global_batch_size is None or global_batch_size <= 0:
+        raise ValueError("Scheduler-managed DCP value loss requires a positive global_batch_size")
     loss_scale_factor = None
     if config.loss_agg_mode == "seq-mean-token-sum-norm":
         loss_scale_factor = _resolve_dcp_loss_scale_factor(config, data)

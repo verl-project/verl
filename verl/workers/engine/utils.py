@@ -14,6 +14,7 @@
 
 import os
 import random
+import warnings
 
 import numpy as np
 import torch
@@ -73,6 +74,19 @@ def prepare_micro_batches(
     if dynamic_context_parallel:
         if dp_group is None or dcp_group is None or max_seqlen_per_dp_cp_rank is None:
             raise ValueError("Dynamic CP requires dp_group, dcp_group, and max_seqlen_per_dp_cp_rank")
+
+        ignored_batch_keys = [
+            key
+            for key in ("use_dynamic_bsz", "max_token_len_per_gpu", "micro_batch_size_per_gpu", "force_group_size")
+            if tu.get_non_tensor_data(data=data, key=key, default=None) is not None
+        ]
+        if ignored_batch_keys:
+            warnings.warn(
+                "Dynamic CP delegates micro-batch packing to the Megatron-Core scheduler with "
+                "max_seqlen_per_dp_cp_rank as the only per-rank token budget; these batch settings "
+                f"have no effect: {ignored_batch_keys}",
+                stacklevel=2,
+            )
 
         from verl.utils.dynamic_cp_scheduler import DynamicCPScheduler
 

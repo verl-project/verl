@@ -35,7 +35,7 @@ from verl.trainer.distillation.losses import (
 from verl.trainer.ppo.core_algos import agg_loss, compute_value_loss
 from verl.utils import tensordict_utils as tu
 from verl.utils.metric import AggregationType, Metric
-from verl.workers.config import CriticConfig
+from verl.workers.config import ActorConfig, CriticConfig
 from verl.workers.engine.megatron.losses import (
     _prepare_dcp_loss_function,
     call_megatron_loss,
@@ -567,6 +567,43 @@ def test_megatron_topk_distillation_uses_routed_local_cp_size(monkeypatch):
     }
 
 
+def test_megatron_topk_distillation_forwards_fp8_padding_to_teacher(monkeypatch):
+    captured_fp8_flags = []
+
+    def fake_preprocess(value, *, pre_process, use_fp8_padding=False, **_kwargs):
+        assert pre_process
+        captured_fp8_flags.append(use_fp8_padding)
+        dense = value.values().reshape(1, -1, value.values().shape[-1])[:, :2]
+        return dense, SimpleNamespace(), None
+
+    def fake_vocab_parallel_kl(student_logits, teacher_logprobs, teacher_ids, _clamp):
+        output = torch.zeros(student_logits.shape[:2], dtype=student_logits.dtype)
+        return output, output, output, output, output
+
+    monkeypatch.setattr(megatron_distillation_losses, "preprocess_thd_engine", fake_preprocess)
+    monkeypatch.setattr(megatron_distillation_losses._VocabParallelKLDivergence, "apply", fake_vocab_parallel_kl)
+
+    data = TensorDict(
+        {
+            "teacher_logprobs": _nested([torch.zeros(4, 2)]),
+            "teacher_ids": _nested([torch.zeros(4, 2, dtype=torch.long)]),
+        },
+        batch_size=[1],
+    )
+    tu.assign_non_tensor_data(data, "_distillation_use_fp8_padding", True)
+
+    distillation_losses_module.compute_topk_loss(
+        config=SimpleNamespace(strategy="megatron"),
+        distillation_config=SimpleNamespace(distillation_loss=SimpleNamespace(log_prob_min_clamp=None)),
+        data=data,
+        student_logits=torch.zeros(1, 2, 4),
+        data_format="thd",
+    )
+
+    # The teacher THD stream must be padded exactly like the FP8-padded student.
+    assert captured_fp8_flags == [True, True]
+
+
 def test_megatron_topk_distillation_rejects_dynamic_cp_bshd():
     teacher_logprobs = _nested([torch.zeros(4, 2)])
     teacher_ids = _nested([torch.zeros(4, 2, dtype=torch.long)])
@@ -586,6 +623,7 @@ def test_empty_local_distillation_range_is_finite_before_dcp_reduce():
     metrics = distillation_losses_module.compute_distillation_loss_range(
         distillation_losses=torch.zeros(1, 3),
         response_mask=torch.zeros(1, 3, dtype=torch.bool),
+        dcp_scheduled=True,
     )
 
     assert metrics["distillation/loss_min"].aggregation == AggregationType.MIN
@@ -604,6 +642,7 @@ def test_empty_local_topk_distillation_metrics_are_dcp_safe():
         },
         batch_size=[1],
     )
+    tu.assign_non_tensor(data, _dcp_scheduled=True)
     model_output = {
         key: _nested([torch.zeros(3)])
         for key in [
@@ -649,6 +688,7 @@ def test_overlap_advantage_preserves_conditional_mean_and_weight():
         },
         batch_size=[1],
     )
+    tu.assign_non_tensor(data, _dcp_scheduled=True)
     model_output = {
         "distillation_losses": _nested([torch.zeros(3)]),
         "student_mass": _nested([torch.ones(3)]),
@@ -670,6 +710,40 @@ def test_overlap_advantage_preserves_conditional_mean_and_weight():
     assert overlap_ratio.dcp_weight == 2.0
     assert overlap_advantage.aggregate() == pytest.approx(-0.4)
     assert overlap_advantage.dcp_weight == 1.0
+
+
+def test_topk_distillation_metrics_keep_legacy_types_without_dcp():
+    """Without the DCP marker the generic path must keep the pre-DCP metric forms."""
+    data = TensorDict(
+        {
+            "prompts": torch.tensor([[101]]),
+            "responses": torch.tensor([[11, 12]]),
+            "attention_mask": torch.ones(1, 3, dtype=torch.bool),
+            "response_mask": torch.ones(1, 2, dtype=torch.bool),
+        },
+        batch_size=[1],
+    )
+    model_output = {
+        "distillation_losses": _nested([torch.zeros(3)]),
+        "student_mass": _nested([torch.ones(3)]),
+        "teacher_mass": _nested([torch.ones(3)]),
+        "overlap_count": _nested([torch.tensor([1.0, 0.0, 0.0])]),
+        "overlap_token_advantage": _nested([torch.tensor([-0.4, 0.0, 0.0])]),
+    }
+
+    _, metrics = distillation_losses_module.compute_forward_kl_topk(
+        config=SimpleNamespace(),
+        distillation_config=SimpleNamespace(distillation_loss=SimpleNamespace(topk=2)),
+        model_output=model_output,
+        data=data,
+    )
+
+    assert isinstance(metrics["distillation/overlap_ratio"], float)
+    assert isinstance(metrics["distillation/overlap_token_advantage"], float)
+    assert isinstance(metrics["distillation/student_mass"], float)
+    assert isinstance(metrics["distillation/teacher_mass"], float)
+    for key in ["distillation/student_mass_min", "distillation/teacher_mass_max"]:
+        assert not hasattr(metrics[key], "dcp_weight")
 
 
 @pytest.mark.parametrize(
@@ -812,8 +886,11 @@ def test_dcp_logging_metrics_aggregate_shards_by_metric_semantics(monkeypatch):
         if value.dim() == 1:
             value.mul_(4)
         else:
-            value[0] = torch.tensor([35.0, 20.0])
-            value[1] = torch.tensor([5.0, 4.0])
+            # The local buffer must contain the weight-packed rows
+            # (values * weights, weights); a reduce that ignored the weights
+            # would ship (values, weights) and slip through a hardcoded result.
+            torch.testing.assert_close(value, value.new_tensor([[8.0, 10.0], [2.0, 1.0]]))
+            value.add_(value.new_tensor([[27.0, 10.0], [3.0, 3.0]]))
 
     monkeypatch.setattr(torch.distributed, "all_gather", fake_all_gather)
     monkeypatch.setattr(torch.distributed, "all_reduce", fake_all_reduce)
@@ -1046,7 +1123,9 @@ def test_dcp_critic_shards_reconstruct_static_value_loss():
     static_data = TensorDict(
         {
             "values": torch.zeros(1, 4),
-            "returns": torch.zeros(1, 4),
+            # Non-zero returns give every response position a non-zero loss
+            # contribution, so a dropped position cannot pass unnoticed.
+            "returns": torch.full((1, 4), 0.5),
             "response_mask": torch.ones(1, 4, dtype=torch.bool),
         },
         batch_size=[1],
@@ -1054,16 +1133,19 @@ def test_dcp_critic_shards_reconstruct_static_value_loss():
     tu.assign_non_tensor(static_data, dp_size=1, batch_num_tokens=4, global_batch_size=1)
     static_loss, _ = value_loss(config, {"values": values}, static_data)
 
+    # Ownership masks index model-output (predicting) positions, which the
+    # padding helper slices as [0, 4) for this 5-token sequence. The two shards
+    # tile that window as {0, 3} and {1, 2}.
     local_masks = [
-        torch.tensor([False, True, False, False, True]),
-        torch.tensor([False, False, True, True, False]),
+        torch.tensor([True, False, False, True, False]),
+        torch.tensor([False, True, True, False, False]),
     ]
     local_losses = []
     for local_mask in local_masks:
         data = TensorDict(
             {
                 "values": torch.zeros(1, 4),
-                "returns": torch.zeros(1, 4),
+                "returns": torch.full((1, 4), 0.5),
                 "response_mask": torch.ones(1, 4, dtype=torch.bool),
             },
             batch_size=[1],
@@ -1072,6 +1154,49 @@ def test_dcp_critic_shards_reconstruct_static_value_loss():
         model_output = {"values": values, "_dcp_local_token_mask": _nested([local_mask])}
         _apply_dcp_local_token_mask_for_loss(model_output, data)
         local_loss, _ = call_megatron_loss(partial(value_loss, config=config), model_output, data)
+        local_losses.append(local_loss)
+
+    torch.testing.assert_close(sum(local_losses), static_loss)
+
+
+@pytest.mark.parametrize("loss_agg_mode", ["token-mean", "seq-mean-token-mean"])
+def test_dcp_actor_shards_reconstruct_static_ppo_loss(loss_agg_mode):
+    config = ActorConfig(
+        strategy="megatron",
+        rollout_n=1,
+        ppo_micro_batch_size_per_gpu=1,
+        loss_agg_mode=loss_agg_mode,
+    )
+    log_probs = _nested([torch.tensor([0.05, -0.10, 0.20, -0.30, 0.15])])
+
+    def _make_data():
+        return TensorDict(
+            {
+                "response_mask": torch.ones(1, 4, dtype=torch.bool),
+                "old_log_probs": torch.tensor([[0.10, -0.20, 0.05, -0.15]]),
+                "advantages": torch.tensor([[1.0, -0.5, 0.25, 2.0]]),
+            },
+            batch_size=[1],
+        )
+
+    static_data = _make_data()
+    tu.assign_non_tensor(static_data, dp_size=1, batch_num_tokens=4, global_batch_size=1)
+    static_loss, _ = ppo_loss(config, {"log_probs": log_probs}, static_data)
+
+    # Ownership masks index model-output (predicting) positions: the response
+    # span of a length-5 sequence with a 4-token response window is sliced as
+    # positions [0, 4). The two shards tile that window as {0, 3} and {1, 2}.
+    local_masks = [
+        torch.tensor([True, False, False, True, False]),
+        torch.tensor([False, True, True, False, False]),
+    ]
+    local_losses = []
+    for local_mask in local_masks:
+        data = _make_data()
+        tu.assign_non_tensor(data, dp_size=1, batch_num_tokens=4, global_batch_size=1, _dcp_scheduled=True)
+        model_output = {"log_probs": log_probs, "_dcp_local_token_mask": _nested([local_mask])}
+        _apply_dcp_local_token_mask_for_loss(model_output, data)
+        local_loss, _ = call_megatron_loss(partial(ppo_loss, config=config), model_output, data)
         local_losses.append(local_loss)
 
     torch.testing.assert_close(sum(local_losses), static_loss)
@@ -1113,6 +1238,22 @@ def test_temperature_rejects_non_positive_or_non_finite_values(temperature):
         _normalize_temperature_for_thd(temperature, input_ids)
 
 
+def test_temperature_legacy_path_clamps_non_positive_and_requires_presence():
+    input_ids = _nested([torch.arange(3), torch.arange(2)])
+
+    nested_temperature, fused_temperature = _normalize_temperature_for_thd(
+        torch.tensor([0.5, 0.0]), input_ids, strict=False
+    )
+    torch.testing.assert_close(nested_temperature.values(), torch.tensor([0.5, 0.5, 0.5, 1e-8, 1e-8]))
+    assert fused_temperature is None
+
+    with pytest.raises(ValueError, match="requires a 'temperature' entry"):
+        _normalize_temperature_for_thd(None, input_ids, strict=False)
+
+    with pytest.raises(ValueError, match="strictly positive and finite"):
+        _normalize_temperature_for_thd(float("nan"), input_ids, strict=False)
+
+
 @pytest.mark.parametrize(
     "temperature",
     [0.0, float("nan"), float("inf"), torch.tensor([0.5, 0.0]), torch.tensor([0.5, float("nan")])],
@@ -1146,10 +1287,13 @@ def test_dcp_keeps_python_and_zero_dimensional_temperature_as_metadata(temperatu
 
     scalar_temperature = _prepare_dcp_temperature(data)
 
-    if isinstance(temperature, torch.Tensor):
-        torch.testing.assert_close(scalar_temperature, temperature)
-    else:
-        assert scalar_temperature == temperature
+    # Zero-dimensional tensors are stored back as Python floats so the metadata
+    # never enters the routed schema, whose scalar fields are one value per sample.
+    assert isinstance(scalar_temperature, float)
+    assert scalar_temperature == 0.5
+    stored = tu.get_non_tensor_data(data, key="temperature", default=None)
+    assert isinstance(stored, float)
+    assert stored == 0.5
 
 
 def test_dcp_rejects_mixed_temperature_routing_classification(monkeypatch):
@@ -1224,7 +1368,7 @@ def test_fused_forward_propagates_dynamic_cp_metadata(monkeypatch):
     preprocess_local_cp_sizes = []
     postprocess_calls = []
 
-    def fake_preprocess(value, *, pre_process, need_roll=False, use_fp8_padding=False, local_cp_size=None):
+    def fake_preprocess(value, *, pre_process, need_roll=False, use_fp8_padding=False, local_cp_size=None, **_kwargs):
         preprocess_local_cp_sizes.append(local_cp_size)
         return torch.tensor([[1, 2]], dtype=value.dtype), packed_seq_params, None
 

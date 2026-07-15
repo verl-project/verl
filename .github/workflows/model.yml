@@ -49,6 +49,7 @@ on:
       - ".github/workflows/model.yml"
       - "tests/special_distributed/test_fsdp_ckpt.py"
       - "tests/special_distributed/test_tensor_dict.py"
+      - "tests/special_distributed/test_dynamic_cp_routing.py"
       - "tests/models/**"
       - "tests/special_distributed/run_all.sh"
 

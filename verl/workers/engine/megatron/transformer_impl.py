@@ -282,7 +282,9 @@ def _prepare_dcp_temperature(data: TensorDict, dcp_group=None) -> torch.Tensor |
             # sample dimension must appear in the scheduler's routed schema.
             data["temperature"] = temperature.reshape(len(data))
             return None
-        temperature = temperature.reshape(())
+        # Store the scalar as a Python float: a zero-dimensional tensor must not
+        # enter the routed schema, whose scalar fields are one value per sample.
+        temperature = replicated_scalar
         tu.assign_non_tensor_data(data, "temperature", temperature)
 
     return temperature
@@ -406,11 +408,21 @@ def _apply_dcp_local_token_mask_for_loss(model_output: dict[str, torch.Tensor], 
         data["response_mask"] = data["response_mask"].to(torch.bool) & local_response_mask
 
 
-def _normalize_temperature_for_thd(temperature, input_ids: torch.Tensor) -> tuple[torch.Tensor, float | None]:
-    """Normalize temperature once for both fused and non-fused THD forwards."""
+def _normalize_temperature_for_thd(
+    temperature, input_ids: torch.Tensor, *, strict: bool = True
+) -> tuple[torch.Tensor, float | None]:
+    """Normalize temperature once for both fused and non-fused THD forwards.
+
+    The strict mode backs the Dynamic CP path, whose temperatures were already
+    validated collectively. The non-strict mode preserves the legacy engine
+    behavior: a missing temperature is an error instead of a silent 1.0, and
+    non-positive entries (such as padding zeros) are clamped, not rejected.
+    """
     temperature = tu.unwrap_non_tensor_data(temperature)
     batch_size = input_ids.shape[0]
     if temperature is None:
+        if not strict:
+            raise ValueError("Megatron THD forward requires a 'temperature' entry in the batch")
         temperature = torch.ones(batch_size, device=input_ids.device, dtype=torch.float32)
     elif not isinstance(temperature, torch.Tensor):
         temperature = torch.full((batch_size,), float(temperature), device=input_ids.device, dtype=torch.float32)
@@ -430,8 +442,14 @@ def _normalize_temperature_for_thd(temperature, input_ids: torch.Tensor) -> tupl
             f"Got shape {tuple(temperature.shape)} for batch size {batch_size}."
         )
 
-    if not torch.isfinite(temperature).all().item() or not torch.all(temperature > 0).item():
+    if not torch.isfinite(temperature).all().item():
         raise ValueError(f"Megatron THD temperature must be strictly positive and finite, got {temperature}")
+    if not torch.all(temperature > 0).item():
+        if strict:
+            raise ValueError(f"Megatron THD temperature must be strictly positive and finite, got {temperature}")
+        # avoid non-positive temperature such as padding (legacy engine behavior)
+        temperature = temperature.clone()
+        temperature[temperature <= 0] = 1e-8
     fused_temperature = None
     if torch.equal(temperature, temperature[:1].expand_as(temperature)):
         fused_temperature = float(temperature[0].item())
@@ -595,7 +613,12 @@ class MegatronEngine(BaseEngine):
                 raise RuntimeError("Dynamic CP requires a Megatron-Core build containing NVIDIA/Megatron-LM#5154.")
             if not self.engine_config.use_remove_padding:
                 raise ValueError("dynamic_context_parallel requires use_remove_padding=True")
-            if not self.engine_config.max_seqlen_per_dp_cp_rank or self.engine_config.max_seqlen_per_dp_cp_rank < 1:
+            max_seqlen_per_rank = self.engine_config.max_seqlen_per_dp_cp_rank
+            if (
+                not isinstance(max_seqlen_per_rank, int)
+                or isinstance(max_seqlen_per_rank, bool)
+                or max_seqlen_per_rank < 1
+            ):
                 raise ValueError(
                     "max_seqlen_per_dp_cp_rank must be a positive integer when dynamic_context_parallel is enabled"
                 )
@@ -614,10 +637,11 @@ class MegatronEngine(BaseEngine):
                     f"pipeline_model_parallel_size, got {world_size} % {model_parallel_size}."
                 )
             dpcp_world_size = world_size // model_parallel_size
-            if dpcp_world_size % 2 != 0:
+            if dpcp_world_size < 2 or (dpcp_world_size & (dpcp_world_size - 1)) != 0:
                 raise ValueError(
-                    "Dynamic CP requires an even DPxCP world size with the supported Megatron-Core build, "
-                    f"got {dpcp_world_size}."
+                    "Dynamic CP requires the DPxCP world size to be a power of two: the supported "
+                    "Megatron-Core build only creates dynamic CP process groups for power-of-two sizes "
+                    f"while its scheduler assigns power-of-two CP group sizes, got {dpcp_world_size}."
                 )
 
         if mpu.is_initialized():
@@ -1576,6 +1600,14 @@ class MegatronEngineWithLMHead(MegatronEngine):
         distillation_use_topk = tu.get_non_tensor_data(batch, key="distillation_use_topk", default=False)
         distillation_only = tu.get_non_tensor_data(batch, key="distillation_only", default=False)
         dcp_local_output_only = False
+        if distillation_use_topk:
+            # compute_topk_loss preprocesses the teacher tensors outside the
+            # model forward; record the model's FP8 padding so the teacher THD
+            # stream is padded exactly like the student's.
+            tu.assign_non_tensor(
+                batch,
+                _distillation_use_fp8_padding=getattr(self.tf_config, "fp8", None) in ("e4m3", "hybrid"),
+            )
 
         if calculate_sum_pi_squared and use_fused_kernels:
             raise NotImplementedError(
@@ -1591,7 +1623,9 @@ class MegatronEngineWithLMHead(MegatronEngine):
         local_cp_size = tu.get_non_tensor_data(data=batch, key="local_cp_size", default=None)
         dcp_local_output_only = self.engine_config.dynamic_context_parallel and local_cp_size is not None
         loss_mask = model_inputs.get("loss_mask", None)
-        temperature, fused_temperature = _normalize_temperature_for_thd(temperature, input_ids)
+        temperature, fused_temperature = _normalize_temperature_for_thd(
+            temperature, input_ids, strict=self.engine_config.dynamic_context_parallel
+        )
 
         unwrapped_model = unwrap_model(model)
         if hasattr(unwrapped_model, "vp_stage"):

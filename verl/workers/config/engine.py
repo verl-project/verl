@@ -656,6 +656,17 @@ class MindSpeedEngineConfig(McoreEngineConfig):
         """config validation logics go here"""
         assert self.strategy in ["mindspeed_megatron", "mindspeed_fsdp"], f"strategy {self.strategy} not supported"
         assert self.dtype in ["bfloat16", "float16"], f"dtype {self.dtype} not supported"
+        # Mirrors McoreEngineConfig.__post_init__ (whose strategy assertion prevents
+        # calling it via super()): the documented dataclass-time DCP validation must
+        # also cover the inherited fields on the mindspeed strategies.
+        if self.dynamic_context_parallel and (
+            not isinstance(self.max_seqlen_per_dp_cp_rank, int)
+            or isinstance(self.max_seqlen_per_dp_cp_rank, bool)
+            or self.max_seqlen_per_dp_cp_rank <= 0
+        ):
+            raise ValueError(
+                "max_seqlen_per_dp_cp_rank must be a positive integer when dynamic_context_parallel is enabled"
+            )
         if self.tensor_model_parallel_size == 1:
             warnings.warn("set sequence parallel to false as TP size is 1", stacklevel=2)
             self.sequence_parallel = False

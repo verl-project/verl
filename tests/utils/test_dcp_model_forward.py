@@ -225,6 +225,7 @@ def test_topk_distillation_falls_back_from_fused_forward(monkeypatch):
         distillation_use_topk=True,
         distillation_only=True,
         pad_mode=DatasetPadMode.NO_PADDING,
+        temperature=1.0,
     )
     engine.prepare_model_inputs = lambda _batch: {
         "input_ids": input_ids,

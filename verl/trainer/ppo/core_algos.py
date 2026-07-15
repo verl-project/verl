@@ -1191,7 +1191,9 @@ def agg_loss(
         if sequence_token_counts is None:
             token_counts = local_token_counts
         else:
-            token_counts = sequence_token_counts.to(device=loss_mat.device, dtype=loss_mat.dtype).reshape(-1)
+            # float32 keeps integer token counts exact; low-precision loss dtypes
+            # (bf16/fp16) cannot represent counts above a few hundred tokens.
+            token_counts = sequence_token_counts.to(device=loss_mat.device, dtype=torch.float32).reshape(-1)
             if token_counts.shape != local_token_counts.shape:
                 raise ValueError(
                     "sequence_token_counts must have one value per sequence: "
