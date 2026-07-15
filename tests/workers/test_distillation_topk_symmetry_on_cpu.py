@@ -228,7 +228,6 @@ def test_forward_kl_topk_metric_aggregation_for_overlap_outputs():
         },
         batch_size=[1],
     )
-    tu.assign_non_tensor(data, _dcp_scheduled=True)
     model_output = {
         "distillation_losses": torch.tensor([0.1, 0.2, 0.3]),
         "student_mass": torch.tensor([0.9, 0.8, 0.7]),
@@ -245,7 +244,5 @@ def test_forward_kl_topk_metric_aggregation_for_overlap_outputs():
         data=data,
     )
 
-    assert metrics["distillation/overlap_ratio"].aggregate() == pytest.approx(0.75)
-    assert metrics["distillation/overlap_token_advantage"].aggregate() == pytest.approx(-0.3)
-    assert metrics["distillation/overlap_ratio"].dcp_weight == 2.0
-    assert metrics["distillation/overlap_token_advantage"].dcp_weight == 2.0
+    assert metrics["distillation/overlap_ratio"] == pytest.approx(0.75)
+    assert metrics["distillation/overlap_token_advantage"] == pytest.approx(-0.3)

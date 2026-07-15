@@ -20,7 +20,6 @@ from tensordict import TensorDict
 
 from verl.base_config import BaseConfig
 from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
-from verl.utils import tensordict_utils as tu
 from verl.utils.metric import AggregationType, Metric
 from verl.workers.config import ActorConfig, DistillationConfig, DistillationLossConfig
 from verl.workers.utils.losses import ppo_loss
@@ -53,13 +52,11 @@ class DistillationLossSettings(BaseConfig):
         names (str | list[str]): Name(s) to register the distillation loss function under.
         use_topk (bool): Whether the loss function uses top-k log probabilities.
         use_estimator (bool): Whether the loss function uses single-sample KL estimators.
-        dcp_compatible (bool): Whether the loss is explicitly verified to be token-decomposable under DCP.
     """
 
     names: str | list[str] = field(default_factory=list)
     use_topk: bool = False
     use_estimator: bool = False
-    dcp_compatible: bool = False
 
     _mutable_fields = {"names"}
 
@@ -110,52 +107,16 @@ def get_distillation_loss_settings(loss_name: str) -> DistillationLossSettings:
 
 
 def compute_distillation_loss_range(
-    distillation_losses: torch.Tensor, response_mask: torch.Tensor, dcp_scheduled: bool = False
+    distillation_losses: torch.Tensor, response_mask: torch.Tensor
 ) -> dict[str, Metric]:
     """Compute min and max distillation loss over valid response tokens."""
     if response_mask.is_nested:
         distillation_losses_response = distillation_losses[response_mask.bool().to_padded_tensor(False)]
     else:
         distillation_losses_response = distillation_losses[response_mask.bool()]
-    if dcp_scheduled:
-        # Empty-shard-safe: a routed DCP shard may own no response tokens.
-        return _range_metrics("distillation/loss", distillation_losses_response)
     return {
         "distillation/loss_min": Metric(AggregationType.MIN, distillation_losses_response.min()),
         "distillation/loss_max": Metric(AggregationType.MAX, distillation_losses_response.max()),
-    }
-
-
-def _mean_or_zero(values: torch.Tensor) -> torch.Tensor:
-    """Return a finite scalar for an empty local DCP token shard."""
-    if values.numel() > 0:
-        return values.float().mean()
-    return torch.zeros((), dtype=torch.float32, device=values.device)
-
-
-def _set_dcp_weight(metric: Metric, weight: int | float | torch.Tensor) -> Metric:
-    """Attach the denominator needed to combine a sharded mean metric."""
-    if isinstance(weight, torch.Tensor):
-        weight = weight.detach().item()
-    metric.dcp_weight = float(weight)  # type: ignore[attr-defined]
-    return metric
-
-
-def _mean_metric(values: torch.Tensor) -> Metric:
-    return _set_dcp_weight(Metric(AggregationType.MEAN, _mean_or_zero(values)), values.numel())
-
-
-def _range_metrics(prefix: str, values: torch.Tensor) -> dict[str, Metric]:
-    """Build DCP-reducible range metrics, including for empty local shards."""
-    if values.numel() == 0:
-        minimum = 0.0
-        maximum = 0.0
-    else:
-        minimum = values.min()
-        maximum = values.max()
-    return {
-        f"{prefix}_min": Metric(AggregationType.MIN, minimum),
-        f"{prefix}_max": Metric(AggregationType.MAX, maximum),
     }
 
 
@@ -165,7 +126,7 @@ def compute_topk_loss(
     data: TensorDict,
     student_logits: torch.Tensor,
     data_format: str,
-) -> dict[str, torch.Tensor]:
+) -> torch.Tensor:
     """Compute the topk loss in logit processor.
 
     Returns:
@@ -186,23 +147,13 @@ def compute_topk_loss(
         case _:
             raise NotImplementedError(f"Unsupported strategy: {config.strategy=}")
 
-    loss_kwargs = dict(
+    outputs = distillation_loss_fn(
         student_logits=student_logits,
         teacher_topk_log_probs=data["teacher_logprobs"],
         teacher_topk_ids=data["teacher_ids"],
         config=distillation_config,
         data_format=data_format,
     )
-    if config.strategy == "megatron":
-        # Dynamic CP routes a micro-batch to a variable-size CP group.  Teacher
-        # tensors must use that same group rather than the static CP topology.
-        loss_kwargs["local_cp_size"] = tu.get_non_tensor_data(data, key="local_cp_size", default=None)
-        # The student THD stream is padded to FP8-friendly lengths when FP8 is
-        # active; the teacher tensors must be padded identically.
-        loss_kwargs["use_fp8_padding"] = bool(
-            tu.get_non_tensor_data(data, key="_distillation_use_fp8_padding", default=False)
-        )
-    outputs = distillation_loss_fn(**loss_kwargs)
 
     expected_shape = student_logits.shape[:2]
     for k, v in outputs.items():
@@ -300,12 +251,9 @@ def distillation_loss(
     )
     response_mask = data["response_mask"]
     loss_agg_mode = config.loss_agg_mode
-    dcp_scheduled = bool(tu.get_non_tensor_data(data, key="_dcp_scheduled", default=False))
 
     distillation_metrics.update(
-        compute_distillation_loss_range(
-            distillation_losses=distillation_losses, response_mask=response_mask, dcp_scheduled=dcp_scheduled
-        )
+        compute_distillation_loss_range(distillation_losses=distillation_losses, response_mask=response_mask)
     )
     if loss_config.loss_max_clamp is not None:
         # clamping min is for k1 loss which can be negative
@@ -332,17 +280,7 @@ def distillation_loss(
             config=loss_config,
             rollout_is_weights=rollout_is_weights,
         )
-        if dcp_scheduled:
-            # The DCP metric reducer needs an explicit token weight to combine
-            # shard means. The wrapping (and its device synchronization) stays
-            # off the generic path.
-            metric_weight = response_mask.sum()
-            pg_metrics = {
-                f"distillation/{k[len('actor/') :]}": _set_dcp_weight(Metric(AggregationType.MEAN, v), metric_weight)
-                for k, v in pg_metrics.items()
-            }
-        else:
-            pg_metrics = {f"distillation/{k[len('actor/') :]}": v for k, v in pg_metrics.items()}
+        pg_metrics = {f"distillation/{k[len('actor/') :]}": v for k, v in pg_metrics.items()}
         distillation_metrics.update(pg_metrics)
     else:
         # Directly backpropagate distillation loss as a supervised loss, as in https://arxiv.org/abs/2306.13649.
@@ -358,7 +296,7 @@ def distillation_loss(
     return distillation_loss, distillation_metrics
 
 
-@register_distillation_loss(DistillationLossSettings(names=["forward_kl_topk"], use_topk=True, dcp_compatible=True))  # type: ignore[arg-type]
+@register_distillation_loss(DistillationLossSettings(names=["forward_kl_topk"], use_topk=True))  # type: ignore[arg-type]
 def compute_forward_kl_topk(
     config: ActorConfig,
     distillation_config: DistillationConfig,
@@ -386,7 +324,6 @@ def compute_forward_kl_topk(
         response_mask_bool = data["response_mask"].bool()
     assert distillation_losses.shape == student_mass.shape == teacher_mass.shape == response_mask_bool.shape
 
-    dcp_scheduled = bool(tu.get_non_tensor_data(data, key="_dcp_scheduled", default=False))
     overlap_metrics = {}
     if overlap_count is not None and overlap_token_advantage is not None:
         assert overlap_count.shape == overlap_token_advantage.shape == response_mask_bool.shape
@@ -396,43 +333,27 @@ def compute_forward_kl_topk(
         # Diagnostics for tracking teacher/student top-k overlap in OPD, following
         # "Rethinking On-Policy Distillation of Large Language Models" (arXiv:2604.13016):
         # overlap ratio and average teacher-token KL contribution on overlapped tokens.
+        overlap_metrics["distillation/overlap_ratio"] = (valid_overlap_count.float().mean() / k).item()
         overlap_position_mask = response_mask_bool & (overlap_count > 0)
-        if dcp_scheduled:
-            overlap_metrics["distillation/overlap_ratio"] = _mean_metric(valid_overlap_count.float() / k)
-            overlap_metrics["distillation/overlap_token_advantage"] = _mean_metric(
-                overlap_token_advantage[overlap_position_mask]
+        if overlap_position_mask.any():
+            overlap_metrics["distillation/overlap_token_advantage"] = (
+                overlap_token_advantage[overlap_position_mask].mean().item()
             )
         else:
-            overlap_metrics["distillation/overlap_ratio"] = (valid_overlap_count.float().mean() / k).item()
-            if overlap_position_mask.any():
-                overlap_metrics["distillation/overlap_token_advantage"] = (
-                    overlap_token_advantage[overlap_position_mask].mean().item()
-                )
-            else:
-                overlap_metrics["distillation/overlap_token_advantage"] = 0.0
+            overlap_metrics["distillation/overlap_token_advantage"] = 0.0
 
     # Log amount of mass in the top-k log probabilities for both student and teacher.
     student_mass = student_mass[response_mask_bool]
     teacher_mass = teacher_mass[response_mask_bool]
-    if dcp_scheduled:
-        # DCP shards need weighted, empty-safe metrics for the Megatron reducer.
-        distillation_metrics = {
-            "distillation/student_mass": _mean_metric(student_mass),
-            "distillation/teacher_mass": _mean_metric(teacher_mass),
-            **_range_metrics("distillation/student_mass", student_mass),
-            **_range_metrics("distillation/teacher_mass", teacher_mass),
-            **overlap_metrics,
-        }
-    else:
-        distillation_metrics = {
-            "distillation/student_mass": student_mass.mean().item(),
-            "distillation/student_mass_min": Metric(AggregationType.MIN, student_mass.min()),
-            "distillation/student_mass_max": Metric(AggregationType.MAX, student_mass.max()),
-            "distillation/teacher_mass": teacher_mass.mean().item(),
-            "distillation/teacher_mass_min": Metric(AggregationType.MIN, teacher_mass.min()),
-            "distillation/teacher_mass_max": Metric(AggregationType.MAX, teacher_mass.max()),
-            **overlap_metrics,
-        }
+    distillation_metrics = {
+        "distillation/student_mass": student_mass.mean().item(),
+        "distillation/student_mass_min": Metric(AggregationType.MIN, student_mass.min()),
+        "distillation/student_mass_max": Metric(AggregationType.MAX, student_mass.max()),
+        "distillation/teacher_mass": teacher_mass.mean().item(),
+        "distillation/teacher_mass_min": Metric(AggregationType.MIN, teacher_mass.min()),
+        "distillation/teacher_mass_max": Metric(AggregationType.MAX, teacher_mass.max()),
+        **overlap_metrics,
+    }
 
     # Due to use of top-k, student and teacher distributions don't sum to 1 -> divergences can be negative.
     distillation_losses = distillation_losses.clamp_min(0.0)
@@ -441,11 +362,7 @@ def compute_forward_kl_topk(
 
 
 @register_distillation_loss(
-    DistillationLossSettings(
-        names=["kl", "k1", "abs", "mse", "k2", "low_var_kl", "k3"],
-        use_estimator=True,
-        dcp_compatible=True,
-    )
+    DistillationLossSettings(names=["kl", "k1", "abs", "mse", "k2", "low_var_kl", "k3"], use_estimator=True)
 )  # type: ignore[arg-type]
 def compute_distillation_loss_reverse_kl_estimator(
     config: ActorConfig,
@@ -476,13 +393,7 @@ def compute_distillation_loss_reverse_kl_estimator(
         logprob=student_log_probs, ref_logprob=teacher_log_probs, kl_penalty=loss_config.loss_mode
     )
     # Since k1 can be negative, log the mean absolute loss.
-    valid_abs_loss = distillation_losses[response_mask_bool].abs()
-    if bool(tu.get_non_tensor_data(data, key="_dcp_scheduled", default=False)):
-        metrics = {
-            "distillation/abs_loss": _mean_metric(valid_abs_loss),
-        }
-    else:
-        metrics = {
-            "distillation/abs_loss": Metric(AggregationType.MEAN, valid_abs_loss.mean()),
-        }
+    metrics = {
+        "distillation/abs_loss": Metric(AggregationType.MEAN, distillation_losses[response_mask_bool].abs().mean()),
+    }
     return distillation_losses, metrics

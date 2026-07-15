@@ -34,12 +34,7 @@ from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy
 from verl.utils.megatron_utils import unwrap_model
 from verl.utils.model import CausalLMOutputForPPO
 
-from .util import (
-    build_thd_dcp_output_metadata,
-    postprocess_packed_seqs_for_dict_output,
-    postprocess_thd_engine,
-    postprocess_thd_engine_local,
-)
+from .util import postprocess_packed_seqs_for_dict_output, postprocess_thd_engine
 
 
 def _get_patching_model(model: torch.nn.Module):
@@ -60,16 +55,14 @@ def patch_fused_forward(model: torch.nn.Module):
     )
     model = _get_patching_model(model)
     if model is not None:
-        if not hasattr(model, "forward_backup"):
-            model.forward_backup = model.forward
+        model.forward_backup = model.forward
         model.forward = _fused_GPTModel_forward.__get__(model, model.__class__)
 
 
 def unpatch_fused_forward(model: torch.nn.Module):
     model = _get_patching_model(model)
-    if model is not None and hasattr(model, "forward_backup"):
+    if model is not None:
         model.forward = model.forward_backup
-        delattr(model, "forward_backup")
 
 
 def fused_forward_model_gen(vision_model: bool = False):
@@ -153,13 +146,7 @@ def fused_forward_model_engine(vision_model: bool = False):
         temperature: float,
         calculate_entropy: bool,
         pad_token_id: int,
-        local_cp_size: int | None = None,
-        compact_dcp_output: bool = False,
     ):
-        if compact_dcp_output and local_cp_size is None:
-            raise ValueError("compact_dcp_output requires local_cp_size")
-
-        is_dcp = local_cp_size is not None
         pre_process = unwrap_model(model).pre_process
         post_process = unwrap_model(model).post_process
 
@@ -174,7 +161,6 @@ def fused_forward_model_engine(vision_model: bool = False):
             input_ids,
             pre_process=pre_process,
             use_fp8_padding=use_fp8_padding,
-            local_cp_size=local_cp_size,
             min_local_rows=min_local_rows,
         )
         input_ids_rmpad = input_ids_rmpad.contiguous()
@@ -203,7 +189,6 @@ def fused_forward_model_engine(vision_model: bool = False):
             pre_process=True,
             need_roll=True,
             use_fp8_padding=use_fp8_padding,
-            local_cp_size=local_cp_size,
             min_local_rows=min_local_rows,
         )
         labels_rmpad = labels_rmpad.contiguous()
@@ -223,16 +208,8 @@ def fused_forward_model_engine(vision_model: bool = False):
         log_probs = output_orig.log_probs
         if log_probs.dim() == 1:
             log_probs = log_probs.unsqueeze(0)
-        postprocess_fn = postprocess_thd_engine_local if is_dcp else postprocess_thd_engine
-        postprocess_kwargs = {"compact": compact_dcp_output} if is_dcp else {}
-        log_probs = postprocess_fn(
-            log_probs,
-            packed_seq_params,
-            input_ids,
-            input_ids.shape[0],
-            post_process=post_process,
-            local_cp_size=local_cp_size,
-            **postprocess_kwargs,
+        log_probs = postprocess_thd_engine(
+            log_probs, packed_seq_params, input_ids, input_ids.shape[0], post_process=post_process
         )
 
         output = {"log_probs": log_probs}
@@ -241,27 +218,10 @@ def fused_forward_model_engine(vision_model: bool = False):
             entropy = output_orig.entropy
             if entropy.dim() == 1:
                 entropy = entropy.unsqueeze(0)
-            entropy = postprocess_fn(
-                entropy,
-                packed_seq_params,
-                input_ids,
-                input_ids.shape[0],
-                post_process=post_process,
-                local_cp_size=local_cp_size,
-                **postprocess_kwargs,
+            entropy = postprocess_thd_engine(
+                entropy, packed_seq_params, input_ids, input_ids.shape[0], post_process=post_process
             )
             output["entropy"] = entropy
-
-        if is_dcp:
-            output.update(
-                build_thd_dcp_output_metadata(
-                    packed_seq_params,
-                    input_ids,
-                    input_ids.shape[0],
-                    local_cp_size=local_cp_size,
-                    compact=compact_dcp_output,
-                )
-            )
 
         return output
 

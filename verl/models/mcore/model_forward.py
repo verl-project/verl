@@ -22,14 +22,12 @@ from verl.utils.megatron_utils import unwrap_model
 from verl.workers.config import MtpConfig
 
 from .util import (
-    build_thd_dcp_output_metadata,
     build_vlm_attn_mask_bshd,
     build_vlm_attn_mask_thd,
     postprocess_bshd,
     postprocess_bshd_engine,
     postprocess_packed_seqs,
     postprocess_thd_engine,
-    postprocess_thd_engine_local,
     preprocess_bshd,
     preprocess_bshd_engine,
     preprocess_packed_seqs,
@@ -276,15 +274,11 @@ def gptmodel_forward_model_engine(
     mtp_enable_train: bool = False,
     local_cp_size: Optional[int] = None,
     forced_max_seqlen: Optional[int] = None,
-    compact_dcp_output: bool = False,
+    router_padding_mask: torch.Tensor | None = None,
 ):
     """Default forward pass for GPT models with optional sequence packing."""
 
     assert data_format in ["thd", "bshd"], "data_format must be 'thd' or 'bshd'"
-    if compact_dcp_output and local_cp_size is None:
-        raise ValueError("compact_dcp_output requires local_cp_size")
-
-    is_dcp = local_cp_size is not None
     pre_process = unwrap_model(model).pre_process
     post_process = unwrap_model(model).post_process
 
@@ -346,6 +340,16 @@ def gptmodel_forward_model_engine(
         if vision_model:
             input_ids_rmpad, attention_mask = build_vlm_attn_mask_thd(input_ids, pad_token_id)
 
+        if router_padding_mask is not None:
+            if local_cp_size is None:
+                raise ValueError("router_padding_mask requires local_cp_size")
+            expected_local_tokens = int(packed_seq_params.cu_seqlens_q_padded[-1].item()) // local_cp_size
+            if router_padding_mask.dtype != torch.bool or router_padding_mask.numel() != expected_local_tokens:
+                raise ValueError(
+                    "Dynamic CP router padding mask must be boolean and match the local packed token count"
+                )
+            model_kwargs["padding_mask"] = router_padding_mask
+
         output_orig = model(
             input_ids=input_ids_rmpad,
             attention_mask=attention_mask,
@@ -354,8 +358,6 @@ def gptmodel_forward_model_engine(
             **model_kwargs,
         )
 
-        postprocess_fn = postprocess_thd_engine_local if is_dcp else postprocess_thd_engine
-        postprocess_kwargs = {"compact": compact_dcp_output} if is_dcp else {}
         if post_process and logits_processor is not None:
             args = {
                 k: preprocess_thd_engine(
@@ -368,51 +370,21 @@ def gptmodel_forward_model_engine(
                 for k, v in logits_processor_args.items()
             }
             output_dict = logits_processor(output_orig, **args)
-            output = {}
-            for k, v in output_dict.items():
-                output[k] = postprocess_fn(
-                    v,
-                    packed_seq_params,
-                    input_ids,
-                    batch_size,
-                    post_process=post_process,
-                    local_cp_size=local_cp_size,
-                    **postprocess_kwargs,
+            output = {
+                k: postprocess_thd_engine(
+                    v, packed_seq_params, input_ids, batch_size, post_process=post_process, local_cp_size=local_cp_size
                 )
-            if is_dcp:
-                output.update(
-                    build_thd_dcp_output_metadata(
-                        packed_seq_params,
-                        input_ids,
-                        batch_size,
-                        local_cp_size=local_cp_size,
-                        compact=compact_dcp_output,
-                    )
-                )
+                for k, v in output_dict.items()
+            }
         else:
-            output = postprocess_fn(
+            output = postprocess_thd_engine(
                 output_orig,
                 packed_seq_params,
                 input_ids,
                 batch_size,
                 post_process=post_process,
                 local_cp_size=local_cp_size,
-                **postprocess_kwargs,
             )
-            # Intermediate pipeline stages must return their activation tensor to
-            # Megatron's P2P schedule.  Only the post-process stage returns a
-            # user-facing value dictionary with DCP reconstruction metadata.
-            if value_model and post_process and is_dcp:
-                output = {"values": output}
-                output.update(
-                    build_thd_dcp_output_metadata(
-                        packed_seq_params,
-                        input_ids,
-                        batch_size,
-                        local_cp_size=local_cp_size,
-                        compact=compact_dcp_output,
-                    )
-                )
     else:
         """
         data_format: "thd" or "bshd", default is "thd",
@@ -497,9 +469,6 @@ def gptmodel_forward_model_engine(
         # while using nested tensor, the advanced indexing operation above will result in an error at backward, i.e.
         # ValueError: NestedTensor _nested_select_backward_default(grad_output: t, self: jt_all, dim: any, index: any)
         # so we use `squeeze` to remove the last dimension
-        if isinstance(output, dict):
-            output["values"] = output["values"].squeeze(-1)
-        else:
-            output = output.squeeze(-1)
+        output = output.squeeze(-1)
 
     return output

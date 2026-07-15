@@ -14,7 +14,6 @@
 
 import os
 import random
-import warnings
 
 import numpy as np
 import torch
@@ -62,49 +61,10 @@ def prepare_micro_batches(
     same_micro_num_in_dp=True,
     min_num_micro_batch=None,
     use_dynamic_bsz_balance=True,
-    dynamic_context_parallel=False,
-    dcp_group=None,
-    max_seqlen_per_dp_cp_rank=None,
-    cp_size=1,
-    non_tensor_data=None,
 ):
     """
     Prepare micro batches from data.
     """
-    if dynamic_context_parallel:
-        # DynamicCPScheduler validates the per-rank sequence limit below.
-        if dp_group is None or dcp_group is None:
-            raise ValueError("Dynamic CP requires dp_group and dcp_group")
-
-        ignored_batch_keys = [
-            key
-            for key in ("use_dynamic_bsz", "max_token_len_per_gpu", "micro_batch_size_per_gpu", "force_group_size")
-            if tu.get_non_tensor_data(data=data, key=key, default=None) is not None
-        ]
-        if ignored_batch_keys:
-            warnings.warn(
-                "Dynamic CP delegates micro-batch packing to the Megatron-Core scheduler with "
-                "max_seqlen_per_dp_cp_rank as the only per-rank token budget; these batch settings "
-                f"have no effect: {ignored_batch_keys}",
-                stacklevel=2,
-            )
-
-        from verl.utils.dynamic_cp_scheduler import DynamicCPScheduler
-
-        scheduler = DynamicCPScheduler(
-            max_seqlen_per_dp_cp_rank=max_seqlen_per_dp_cp_rank,
-            dp_size=dp_group.size(),
-            cp_size=cp_size,
-            min_cp_size=1,
-            microbatch_group_size_per_vp_stage=num_batches_divided_by,
-        )
-        return scheduler.schedule(
-            batch=data,
-            dp_group=dp_group,
-            dcp_group=dcp_group,
-            non_tensor_data=non_tensor_data,
-        )
-
     use_dynamic_bsz = tu.get_non_tensor_data(data=data, key="use_dynamic_bsz", default=True)
     sp_size = tu.get_non_tensor_data(data=data, key="sp_size", default=1)
 
@@ -158,11 +118,9 @@ def postprocess_batch_func(output_lst, indices, data: TensorDict):
     model_output = {}
     losses = []
     aggregated_metrics = {}
-    merge_duplicate_gids = False
 
     # model output
     for o in output_lst:
-        merge_duplicate_gids = merge_duplicate_gids or bool(o.get("_dcp_merge_duplicate_gids", False))
         if "model_output" in o:
             for key, val in o["model_output"].items():
                 if key not in model_output:
@@ -177,8 +135,8 @@ def postprocess_batch_func(output_lst, indices, data: TensorDict):
         else:
             raise NotImplementedError(f"pad_mode {pad_mode} not implemented")
 
-        # reverse with dynamic bsz (skip when indices is None, e.g. DCP scheduler path)
-        if use_dynamic_bsz and indices is not None:
+        # reverse with dynamic bsz
+        if use_dynamic_bsz:
             model_output[key] = restore_dynamic_batch(model_output[key], indices)
 
     # loss
@@ -197,7 +155,5 @@ def postprocess_batch_func(output_lst, indices, data: TensorDict):
         "loss": losses,
         "metrics": aggregated_metrics,
     }
-    if merge_duplicate_gids:
-        output["_dcp_merge_duplicate_gids"] = True
 
     return output

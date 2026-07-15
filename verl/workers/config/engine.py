@@ -34,7 +34,6 @@ __all__ = [
     "AutomodelEngineConfig",
     "EngineConfig",
     "EngineRouterReplayConfig",
-    "get_mcore_parallel_topology",
     "QATEngineConfig",
     "MindSpeedEngineConfig",
 ]
@@ -42,35 +41,6 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
-
-
-def _validate_dcp_dataclass_fields(config) -> None:
-    """Dataclass-time validation of the dynamic CP fields, shared by the Megatron strategies."""
-    if config.dynamic_context_parallel and (
-        not isinstance(config.max_seqlen_per_dp_cp_rank, int)
-        or isinstance(config.max_seqlen_per_dp_cp_rank, bool)
-        or config.max_seqlen_per_dp_cp_rank <= 0
-    ):
-        raise ValueError(
-            "max_seqlen_per_dp_cp_rank must be a positive integer when dynamic_context_parallel is enabled"
-        )
-
-
-def get_mcore_parallel_topology(config) -> dict[str, int | None]:
-    """Return the process-group topology implied by a Megatron engine config."""
-    tensor_size = int(config.tensor_model_parallel_size)
-    expert_tensor_size = config.expert_tensor_parallel_size
-    if expert_tensor_size is None:
-        # This is Megatron-Core's initialize_model_parallel default.
-        expert_tensor_size = tensor_size
-    return {
-        "tensor": tensor_size,
-        "pipeline": int(config.pipeline_model_parallel_size),
-        "virtual_pipeline": config.virtual_pipeline_model_parallel_size,
-        "context": int(config.context_parallel_size),
-        "expert": int(config.expert_model_parallel_size),
-        "expert_tensor": int(expert_tensor_size),
-    }
 
 
 # TODO: rename to RouterReplayConfig after removing the legacy implementation
@@ -194,7 +164,7 @@ class McoreEngineConfig(EngineConfig):
             for interleaved scheduling.
         context_parallel_size (int): Context parallel size for long sequences.
         dynamic_context_parallel (bool): Whether to enable dynamic context parallel scheduling.
-        max_seqlen_per_dp_cp_rank (Optional[int]): Maximum packed sequence length per DPxCP rank.
+        max_seqlen_per_dp_cp_rank (Optional[int]): Maximum sequence length per DPxCP rank.
         sequence_parallel (bool): Whether to enable sequence parallelism.
         use_distributed_optimizer (bool): Whether to use distributed optimizer.
         use_dist_checkpointing (bool): Whether to use distributed checkpointing.
@@ -222,7 +192,7 @@ class McoreEngineConfig(EngineConfig):
     dynamic_context_parallel: bool = False
     entropy_from_logits_with_chunking: bool = False
     entropy_from_logits_chunk_size: int = 2048
-    max_seqlen_per_dp_cp_rank: int | None = None
+    max_seqlen_per_dp_cp_rank: Optional[int] = None
     sequence_parallel: bool = True
     use_distributed_optimizer: bool = True
     pad_bshd_to_minibatch_max: bool = True
@@ -252,7 +222,14 @@ class McoreEngineConfig(EngineConfig):
                 FutureWarning,
                 stacklevel=2,
             )
-        _validate_dcp_dataclass_fields(self)
+        if self.dynamic_context_parallel and (
+            not isinstance(self.max_seqlen_per_dp_cp_rank, int)
+            or isinstance(self.max_seqlen_per_dp_cp_rank, bool)
+            or self.max_seqlen_per_dp_cp_rank <= 0
+        ):
+            raise ValueError(
+                "max_seqlen_per_dp_cp_rank must be a positive integer when dynamic_context_parallel is enabled"
+            )
         if self.tensor_model_parallel_size == 1:
             warnings.warn("set sequence parallel to false as TP size is 1", stacklevel=2)
             self.sequence_parallel = False
@@ -661,9 +638,6 @@ class MindSpeedEngineConfig(McoreEngineConfig):
         """config validation logics go here"""
         assert self.strategy in ["mindspeed_megatron", "mindspeed_fsdp"], f"strategy {self.strategy} not supported"
         assert self.dtype in ["bfloat16", "float16"], f"dtype {self.dtype} not supported"
-        # McoreEngineConfig.__post_init__ cannot be reached via super() because of
-        # its strategy assertion, so apply the shared DCP validation directly.
-        _validate_dcp_dataclass_fields(self)
         if self.tensor_model_parallel_size == 1:
             warnings.warn("set sequence parallel to false as TP size is 1", stacklevel=2)
             self.sequence_parallel = False
