@@ -7,10 +7,9 @@ import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import Replicate, Shard, distribute_tensor
 
-from verl.workers.engine.fsdp.sharded_delta import local_shard_view  # noqa
+from verl.workers.engine.spec import ShardSpec, derive_placement
 from verl.checkpoint_engine.delta_sync.sparse_gather import (
     gather_v_to_rank0,
-    local_shard_view,
     shard_delta_indices,
 )
 
@@ -30,7 +29,8 @@ def _run_case(shape, placements, mesh, dev, rank, si):
     dt_new = distribute_tensor(full_new, mesh, placements)
 
     # --- sharded path (real module) ---
-    loc_new, off, contributes = local_shard_view(dt_new)
+    off, contributes, _pg = derive_placement(ShardSpec.from_param(dt_new))
+    loc_new = dt_new.to_local().reshape(-1)
     loc_old, off2, _ = local_shard_view(dt_old)
     assert off == off2
     if contributes:

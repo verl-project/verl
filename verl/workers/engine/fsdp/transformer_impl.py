@@ -825,7 +825,6 @@ class FSDPEngine(BaseEngine):
         Yields ``(name, local_flat_shard_bf16, within_param_flat_offset, full_numel,
         full_shape, contributes)``. Non-LoRA base path only.
         """
-        from .sharded_delta import local_shard_view
 
         # FSDP1's (SHARDED_)STATE_DICT export runs through the unshard machinery and
         # asserts flat params are GPU-resident; FSDP2 state_dict() only collects
@@ -840,36 +839,16 @@ class FSDPEngine(BaseEngine):
 
         device = get_device_id()
 
-        from verl.checkpoint_engine.delta_sync.spec import ShardSpec
-
-        def _make_spec(name, full_shape, full_numel, offset, contributes, local):
-            def _translate(local_idx, _off=offset):
-                return local_idx + _off
-
-            def _rebuild_dense(shard_list, _name=name, _shape=full_shape):
-                # Shard(0) shards concatenate in rank order into the full flat tensor.
-                return [(_name, torch.cat(shard_list).view(_shape))]
-
-            return ShardSpec(
-                contributes=contributes,
-                shard_shape=tuple(local.shape),
-                translate=_translate,
-                hf_name=name,
-                full_shape=full_shape,
-                full_numel=full_numel,
-                dense_offset=offset,
-                rebuild_dense=_rebuild_dense,
-            )
+        from ..spec import ShardSpec
 
         def _gen():
             for name, param in params.items():
-                full_shape = tuple(param.shape)
-                full_numel = int(param.numel())
+                spec = ShardSpec.from_param(param)
                 p = param.to(device, non_blocking=True)
                 if p.is_floating_point():
                     p = p.to(torch.bfloat16, non_blocking=True)
-                local, offset, contributes = local_shard_view(p)
-                yield name, local, _make_spec(name, full_shape, full_numel, offset, contributes, local)
+                local = p.to_local() if hasattr(p, "to_local") else p
+                yield name, local.reshape(-1), spec
 
         return _gen(), None
 

@@ -168,7 +168,7 @@ class BaseEngine:
         elements), so the export never materializes full tensors on any rank.
 
         Implementations yield ``(name, local_shard, ShardSpec)`` -- the spec (see
-        :mod:`verl.checkpoint_engine.delta_sync.spec`) carries all placement knowledge
+        :mod:`verl.workers.engine.spec`) carries all placement knowledge
         (offset translation or a dense rebuild callable), so the consuming checkpoint
         engine stays trainer-agnostic.
 
