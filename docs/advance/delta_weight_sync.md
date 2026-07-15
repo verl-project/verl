@@ -11,9 +11,20 @@ are unchanged step-over-step — you can instead broadcast only the parameters t
 cutting the weight-sync traffic to the sparsity ratio while staying lossless (bit-exact; a per-flush
 checksum is verified on the receiver).
 
-When to use: disaggregated training where the trainer↔rollout link is the bottleneck (commodity network /
-cross-node / large models). On a fast intra-node NVLink link with a small model the full broadcast is
-already cheap, so delta mainly pays off as the model size and the network distance grow.
+When to use: disaggregated training with a trainer↔rollout link. Two effects stack here, and they
+pay off differently:
+
+- **Sparse wire (the "delta" part)**: only ~1–3% of parameter bytes change per step, so the
+  broadcast payload shrinks accordingly. This effect grows with model size and network distance —
+  on a fast intra-node link with a small model, a full broadcast is already cheap.
+- **Shard-local diff + sparse gather (the "sharded" part)**: no rank ever materializes full
+  tensors or a full-model snapshot, and the gather moves only changed elements. This removes the
+  full-tensor all-gather and rank-0 staging costs that the plain ``nccl`` engine pays *regardless
+  of network speed* — which is why ``delta_sharded`` beat the full broadcast at every size we
+  measured (0.5B through 72B, 1.3–3.1×), not just at the large end.
+
+In practice: prefer ``delta_sharded`` whenever the setup is disaggregated; the advantage widens
+with scale but is already measurable at sub-1B models.
 
 ## Design
 
