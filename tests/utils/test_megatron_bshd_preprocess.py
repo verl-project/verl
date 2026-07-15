@@ -30,15 +30,16 @@ def _load_mcore_util_with_stubbed_megatron(monkeypatch, tp_size: int = 4):
     parallel_state = types.ModuleType("megatron.core.parallel_state")
     packed_seq_params = types.ModuleType("megatron.core.packed_seq_params")
 
-    class FakePackedSeqParams:
-        def __init__(self, **kwargs):
-            self.__dict__.update(kwargs)
-
     parallel_state.get_context_parallel_world_size = lambda: 1
     parallel_state.get_context_parallel_rank = lambda: 0
     parallel_state.get_tensor_model_parallel_world_size = lambda: tp_size
     parallel_state.get_dynamic_data_context_parallel_groups = lambda group_size: ("dcp", group_size)
-    packed_seq_params.PackedSeqParams = FakePackedSeqParams
+
+    class PackedSeqParams:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    packed_seq_params.PackedSeqParams = PackedSeqParams
 
     core.parallel_state = parallel_state
     megatron.core = core

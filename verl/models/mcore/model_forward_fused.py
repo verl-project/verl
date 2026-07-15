@@ -35,9 +35,7 @@ from verl.utils.megatron_utils import unwrap_model
 from verl.utils.model import CausalLMOutputForPPO
 
 from .util import (
-    build_thd_full_seq_lens,
-    build_thd_local_token_indices,
-    build_thd_local_token_mask,
+    build_thd_dcp_output_metadata,
     postprocess_packed_seqs_for_dict_output,
     postprocess_thd_engine,
     postprocess_thd_engine_local,
@@ -156,10 +154,12 @@ def fused_forward_model_engine(vision_model: bool = False):
         calculate_entropy: bool,
         pad_token_id: int,
         local_cp_size: int | None = None,
-        return_dcp_local_token_mask: bool = False,
-        dcp_local_output_only: bool = False,
-        dcp_compact_output_only: bool = False,
+        compact_dcp_output: bool = False,
     ):
+        if compact_dcp_output and local_cp_size is None:
+            raise ValueError("compact_dcp_output requires local_cp_size")
+
+        is_dcp = local_cp_size is not None
         pre_process = unwrap_model(model).pre_process
         post_process = unwrap_model(model).post_process
 
@@ -223,14 +223,8 @@ def fused_forward_model_engine(vision_model: bool = False):
         log_probs = output_orig.log_probs
         if log_probs.dim() == 1:
             log_probs = log_probs.unsqueeze(0)
-        postprocess_fn = (
-            postprocess_thd_engine_local
-            if dcp_local_output_only and local_cp_size is not None
-            else postprocess_thd_engine
-        )
-        postprocess_kwargs = (
-            {"compact": dcp_compact_output_only} if postprocess_fn is postprocess_thd_engine_local else {}
-        )
+        postprocess_fn = postprocess_thd_engine_local if is_dcp else postprocess_thd_engine
+        postprocess_kwargs = {"compact": compact_dcp_output} if is_dcp else {}
         log_probs = postprocess_fn(
             log_probs,
             packed_seq_params,
@@ -258,22 +252,15 @@ def fused_forward_model_engine(vision_model: bool = False):
             )
             output["entropy"] = entropy
 
-        if dcp_compact_output_only and local_cp_size is not None:
-            output["_dcp_local_token_indices"] = build_thd_local_token_indices(
-                packed_seq_params,
-                input_ids,
-                input_ids.shape[0],
-                post_process=post_process,
-                local_cp_size=local_cp_size,
-            )
-            output["_dcp_full_seq_lens"] = build_thd_full_seq_lens(input_ids, post_process=post_process)
-        if return_dcp_local_token_mask and local_cp_size is not None:
-            output["_dcp_local_token_mask"] = build_thd_local_token_mask(
-                packed_seq_params,
-                input_ids,
-                input_ids.shape[0],
-                post_process=post_process,
-                local_cp_size=local_cp_size,
+        if is_dcp:
+            output.update(
+                build_thd_dcp_output_metadata(
+                    packed_seq_params,
+                    input_ids,
+                    input_ids.shape[0],
+                    local_cp_size=local_cp_size,
+                    compact=compact_dcp_output,
+                )
             )
 
         return output

@@ -237,9 +237,7 @@ def _shape_row_is_missing(row: torch.Tensor, numel: int) -> bool:
         if numel != 0:
             raise ValueError(f"DCP missing-value shape sentinel carried a non-empty payload ({numel} elements)")
         return True
-    # Accept the shape metadata used before the explicit sentinel was added.
-    # A real zero-element tensor necessarily has at least one dimension.
-    return ndim == 0 and numel == 0
+    return False
 
 
 def _shape_from_row(row: torch.Tensor) -> tuple[int, ...]:
@@ -249,6 +247,16 @@ def _shape_from_row(row: torch.Tensor) -> tuple[int, ...]:
     if ndim == 0:
         return ()
     return tuple(int(x.item()) for x in row[1 : 1 + ndim])
+
+
+def _elem_splits_per_rank(numels: list[int], counts_per_rank: list[int]) -> list[int]:
+    """Sum flat per-sample element counts into one all-to-all split per peer rank."""
+    splits = []
+    cursor = 0
+    for count in counts_per_rank:
+        splits.append(sum(numels[cursor : cursor + count]))
+        cursor += count
+    return splits
 
 
 def _stack_or_pad_samples(tensors: list[torch.Tensor]) -> torch.Tensor:
@@ -559,19 +567,8 @@ def _reroute_samples(
         recv_numels_list = recv_numels.tolist()
         recv_shapes = recv_shapes.reshape(-1, shape_width).cpu()
 
-        input_elem_splits = [0] * total_dcp_gpus
-        cursor = 0
-        for rank, count in enumerate(send_num_per_rank):
-            for _ in range(count):
-                input_elem_splits[rank] += send_numels_list[cursor]
-                cursor += 1
-
-        output_elem_splits = [0] * total_dcp_gpus
-        cursor = 0
-        for rank, count in enumerate(recv_counts):
-            for _ in range(count):
-                output_elem_splits[rank] += recv_numels_list[cursor]
-                cursor += 1
+        input_elem_splits = _elem_splits_per_rank(send_numels_list, send_num_per_rank)
+        output_elem_splits = _elem_splits_per_rank(recv_numels_list, recv_counts)
 
         recv_size = sum(output_elem_splits)
         recv_tensor = torch.empty(recv_size, device=dev, dtype=send_tensor.dtype)
@@ -617,9 +614,6 @@ def _build_micro_batches_from_samples(
     samples_with_id: dict[int, dict[str, torch.Tensor]],
     sample_id_groups: list[list[list[int]]],
     dcp_rank: int,
-    tensor_keys: list[str],
-    scalar_keys: list[str],
-    padded_keys: list[str] | None = None,
 ) -> tuple[list[dict[str, object]], list[int]]:
     """Build packed micro-batches from scheduled samples.
 
@@ -627,35 +621,20 @@ def _build_micro_batches_from_samples(
         samples_with_id: Mapping from global_id -> sample dict.
         sample_id_groups: Per-microbatch, per-rank sample ID assignment.
         dcp_rank: This rank's index in the DCP group.
-        tensor_keys: Variable-length tensor keys.
-        scalar_keys: Per-sample scalar keys.
 
     Returns:
         Tuple of:
             - List of packed sample dicts (one per micro-batch).
             - List of local_cp_size per micro-batch.
     """
-    num_micro_batches = len(sample_id_groups)
-    local_cp_sizes = []
-
-    for i in range(num_micro_batches):
-        my_ids = sample_id_groups[i][dcp_rank]
-        if not my_ids:
-            raise ValueError(
-                "Dynamic CP scheduler produced an empty rank assignment "
-                f"for micro-batch {i} on DCP rank {dcp_rank}: {sample_id_groups[i]}"
-            )
-        # local_cp_size = number of ranks that share the same first sample
-        first_id = my_ids[0]
-        cp_size = sum(1 for rank_ids in sample_id_groups[i] if first_id in rank_ids)
-        local_cp_sizes.append(cp_size)
-
     packed_batches = []
-    for i in range(num_micro_batches):
-        my_ids = sample_id_groups[i][dcp_rank]
-        samples = [samples_with_id[gid] for gid in my_ids]
-
-        packed_batches.append({"_samples": samples})
+    local_cp_sizes = []
+    for group in sample_id_groups:
+        my_ids = group[dcp_rank]
+        # local_cp_size = number of ranks that share the same first sample
+        cp_size = sum(1 for rank_ids in group if my_ids[0] in rank_ids)
+        local_cp_sizes.append(cp_size)
+        packed_batches.append({"_samples": [samples_with_id[gid] for gid in my_ids]})
 
     return packed_batches, local_cp_sizes
 
@@ -691,7 +670,6 @@ def _nested_tensor_to_samples(
     if not input_ids.is_nested:
         raise ValueError("Dynamic CP requires input_ids to be a NestedTensor")
     seq_lens = input_ids.offsets().diff()
-    seq_lens_list = seq_lens.tolist()  # single device-to-host copy for the loop below
     num_samples = len(seq_lens)
 
     # Unbind NestedTensors
@@ -725,8 +703,6 @@ def _nested_tensor_to_samples(
                 val = batch[key]
                 if isinstance(val, torch.Tensor) and val.dim() >= 1 and val.shape[0] == num_samples:
                     sample[key] = val[i]
-        # Store seq_len as metadata for routing
-        sample["_seq_len"] = int(seq_lens_list[i])
         samples.append(sample)
 
     return samples, seq_lens
@@ -898,7 +874,10 @@ def _build_reverse_routing_plans(routing_info: dict, dp_group, dcp_group):
     send_ids_flat = [gid for dest in range(total) for gid in send_by_dest[dest]]
     recv_ids_flat = [gid for src in range(total) for gid in recv_by_src[src]]
 
-    return send_by_dest, recv_by_src, my_output_gids, send_ids_flat, recv_ids_flat
+    # The canonical rank that collects this rank's original samples.
+    output_rank = _infer_same_cp_dcp_rank(dp_group.rank(), 0, dp_size, cp_size, dp_rank_to_dcp_rank)
+
+    return send_by_dest, recv_by_src, my_output_gids, send_ids_flat, recv_ids_flat, output_rank
 
 
 def _build_reverse_routing_schema(
@@ -1067,8 +1046,8 @@ def reverse_route_outputs(
     total_dcp_gpus = dcp_group.size()
     dev = get_device_id()
 
-    send_by_dest, recv_by_src, my_output_gids, send_ids_flat, recv_ids_flat = _build_reverse_routing_plans(
-        routing_info, dp_group, dcp_group
+    send_by_dest, recv_by_src, my_output_gids, send_ids_flat, recv_ids_flat, output_rank = (
+        _build_reverse_routing_plans(routing_info, dp_group, dcp_group)
     )
 
     routing_schema, schema_errors, compact_route = _build_reverse_routing_schema(
@@ -1083,13 +1062,6 @@ def reverse_route_outputs(
     send_counts = [len(send_by_dest[d]) for d in range(total_dcp_gpus)]
     recv_counts = [len(recv_by_src[d]) for d in range(total_dcp_gpus)]
 
-    output_rank = _infer_same_cp_dcp_rank(
-        dp_group.rank(),
-        0,
-        dp_group.size(),
-        dcp_group.size() // dp_group.size(),
-        _group_rank_indices(dp_group, dcp_group),
-    )
     original_gids_sorted = (
         sorted(int(g) for g in routing_info["global_ids_this_rank"]) if dcp_group.rank() == output_rank else []
     )
@@ -1143,19 +1115,8 @@ def reverse_route_outputs(
         recv_numels_list = recv_numels.tolist()
         recv_shapes = recv_shapes.reshape(-1, shape_width).cpu()
 
-        send_elem_splits = [0] * total_dcp_gpus
-        cursor = 0
-        for rank, count in enumerate(send_counts):
-            for _ in range(count):
-                send_elem_splits[rank] += send_numel_values[cursor]
-                cursor += 1
-
-        recv_elem_splits = [0] * total_dcp_gpus
-        cursor = 0
-        for rank, count in enumerate(recv_counts):
-            for _ in range(count):
-                recv_elem_splits[rank] += recv_numels_list[cursor]
-                cursor += 1
+        send_elem_splits = _elem_splits_per_rank(send_numel_values, send_counts)
+        recv_elem_splits = _elem_splits_per_rank(recv_numels_list, recv_counts)
 
         recv_tensor = torch.empty(sum(recv_elem_splits), device=dev, dtype=send_tensor.dtype)
 
@@ -1459,24 +1420,15 @@ class DynamicCPScheduler:
         """Return tensor keys that should be routed for this batch."""
         compute_loss = bool(non_tensor_data.get("compute_loss", False))
         route_router_replay = bool(non_tensor_data.get("enable_routing_replay", False))
-        route_loss_mask = bool(non_tensor_data.get("_dcp_route_loss_mask", False))
-        route_position_ids = bool(non_tensor_data.get("_dcp_route_position_ids", False))
-        route_attention_mask = bool(non_tensor_data.get("_dcp_route_attention_mask", False))
 
         keys = list(self.FORWARD_KEYS)
         if compute_loss:
             keys.extend(self.TRAIN_LOSS_KEYS)
-        elif route_loss_mask:
-            keys.append("loss_mask")
         if route_router_replay:
             keys.extend(self.ROUTER_REPLAY_KEYS)
         # Both top-k distillation and the full-logprob estimators consume these
         # fields. Presence in the batch is the authoritative routing signal.
         keys.extend(self.DISTILLATION_KEYS)
-        if route_position_ids:
-            keys.append("position_ids")
-        if route_attention_mask:
-            keys.append("attention_mask")
         keys.extend(self.SCALAR_KEYS)
 
         return _unique_keys([key for key in keys if key in batch.keys()])
@@ -1646,21 +1598,6 @@ class DynamicCPScheduler:
         if profile:
             profile_ms["schedule_groups"] = _profile_elapsed_ms(profile_start, dcp_group)
 
-        # Validate: all samples are assigned
-        profile_start = _profile_now() if profile else None
-        assigned = set()
-        for group in sample_id_groups:
-            for rank_ids in group:
-                assigned.update(rank_ids)
-        expected = {sample_id for sample_id, _ in global_id_seqlens}
-        if assigned != expected:
-            raise RuntimeError(
-                "Dynamic CP scheduling did not preserve all samples: "
-                f"expected={sorted(expected)}, assigned={sorted(assigned)}"
-            )
-        if profile:
-            profile_ms["validate_assignment"] = _profile_elapsed_ms(profile_start, dcp_group)
-
         # Step 4: Reroute samples via all-to-all
         profile_start = _profile_now() if profile else None
         samples_this_rank = _reroute_samples(
@@ -1678,10 +1615,6 @@ class DynamicCPScheduler:
         if profile:
             profile_ms["reroute_samples"] = _profile_elapsed_ms(profile_start, dcp_group)
 
-        # Add _seq_len to received samples
-        for gid, sample in samples_this_rank.items():
-            sample["_seq_len"] = global_id_seqlens[gid][1]
-
         # Step 5: Build packed micro-batches
         profile_start = _profile_now() if profile else None
         dcp_rank = dcp_group.rank()
@@ -1689,9 +1622,6 @@ class DynamicCPScheduler:
             samples_this_rank,
             sample_id_groups,
             dcp_rank,
-            tensor_keys,
-            scalar_keys,
-            padded_keys,
         )
         if profile:
             profile_ms["build_micro_batches"] = _profile_elapsed_ms(profile_start, dcp_group)
@@ -1717,7 +1647,6 @@ class DynamicCPScheduler:
 
         # Build routing info for reverse_route_outputs()
         routing_info = {
-            "global_id_seqlens": global_id_seqlens,
             "global_ids_this_rank": global_ids_this_rank,
             "sample_id_groups": sample_id_groups,
             "offsets": offsets,

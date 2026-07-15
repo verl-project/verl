@@ -72,8 +72,9 @@ def prepare_micro_batches(
     Prepare micro batches from data.
     """
     if dynamic_context_parallel:
-        if dp_group is None or dcp_group is None or max_seqlen_per_dp_cp_rank is None:
-            raise ValueError("Dynamic CP requires dp_group, dcp_group, and max_seqlen_per_dp_cp_rank")
+        # DynamicCPScheduler validates the per-rank sequence limit below.
+        if dp_group is None or dcp_group is None:
+            raise ValueError("Dynamic CP requires dp_group and dcp_group")
 
         ignored_batch_keys = [
             key

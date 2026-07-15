@@ -1187,17 +1187,16 @@ def agg_loss(
                 loss_scale_factor = horizon
             loss /= loss_scale_factor
     elif loss_agg_mode == "seq-mean-token-mean":
-        local_token_counts = torch.sum(loss_mask, dim=-1)
         if sequence_token_counts is None:
-            token_counts = local_token_counts
+            token_counts = torch.sum(loss_mask, dim=-1)
         else:
             # float32 keeps integer token counts exact; low-precision loss dtypes
             # (bf16/fp16) cannot represent counts above a few hundred tokens.
             token_counts = sequence_token_counts.to(device=loss_mat.device, dtype=torch.float32).reshape(-1)
-            if token_counts.shape != local_token_counts.shape:
+            if token_counts.shape != loss_mask.shape[:-1]:
                 raise ValueError(
                     "sequence_token_counts must have one value per sequence: "
-                    f"{tuple(token_counts.shape)} != {tuple(local_token_counts.shape)}"
+                    f"{tuple(token_counts.shape)} != {tuple(loss_mask.shape[:-1])}"
                 )
         seq_losses = torch.sum(loss_mat * loss_mask, dim=-1) / (token_counts + 1e-8)  # token-mean
         seq_mask = (token_counts > 0).float()  # exclude fully masked sequences

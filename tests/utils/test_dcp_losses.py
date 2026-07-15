@@ -1105,7 +1105,6 @@ def test_dcp_per_token_callback_uses_exact_local_token_count(monkeypatch):
         forward_only=False,
         loss_function=lambda **_kwargs: None,
         local_cp_size=4,
-        dcp_local_output_only=True,
     )
 
     torch.testing.assert_close(loss_sum, parameter * 21)
@@ -1363,7 +1362,8 @@ def test_dcp_multimodal_rejection_is_propagated_from_peer_rank(monkeypatch):
         _validate_dcp_multi_modal_inputs(data, dcp_group=dcp_group)
 
 
-def test_fused_forward_propagates_dynamic_cp_metadata(monkeypatch):
+@pytest.mark.parametrize("compact_dcp_output", [False, True])
+def test_fused_forward_derives_dynamic_cp_output_metadata(monkeypatch, compact_dcp_output):
     packed_seq_params = SimpleNamespace()
     preprocess_local_cp_sizes = []
     postprocess_calls = []
@@ -1387,21 +1387,16 @@ def test_fused_forward_propagates_dynamic_cp_metadata(monkeypatch):
 
     monkeypatch.setattr(fused_forward_module, "preprocess_thd_engine", fake_preprocess)
     monkeypatch.setattr(fused_forward_module, "postprocess_thd_engine_local", fake_local_postprocess)
-    monkeypatch.setattr(
-        fused_forward_module,
-        "build_thd_local_token_indices",
-        lambda *_args, **_kwargs: _nested([torch.tensor([0, 1])]),
-    )
-    monkeypatch.setattr(
-        fused_forward_module,
-        "build_thd_full_seq_lens",
-        lambda *_args, **_kwargs: _nested([torch.tensor([2])]),
-    )
-    monkeypatch.setattr(
-        fused_forward_module,
-        "build_thd_local_token_mask",
-        lambda *_args, **_kwargs: _nested([torch.tensor([True, True])]),
-    )
+
+    def fake_output_metadata(*_args, compact, **_kwargs):
+        if compact:
+            return {
+                "_dcp_local_token_indices": _nested([torch.tensor([0, 1])]),
+                "_dcp_full_seq_lens": _nested([torch.tensor([2])]),
+            }
+        return {"_dcp_local_token_mask": _nested([torch.tensor([True, True])])}
+
+    monkeypatch.setattr(fused_forward_module, "build_thd_dcp_output_metadata", fake_output_metadata)
 
     class FakeModel:
         pre_process = True
@@ -1424,17 +1419,14 @@ def test_fused_forward_propagates_dynamic_cp_metadata(monkeypatch):
         calculate_entropy=True,
         pad_token_id=0,
         local_cp_size=2,
-        return_dcp_local_token_mask=True,
-        dcp_local_output_only=True,
-        dcp_compact_output_only=True,
+        compact_dcp_output=compact_dcp_output,
     )
 
     assert preprocess_local_cp_sizes == [2, 2]
-    assert postprocess_calls == [(2, True), (2, True)]
-    assert set(output) == {
-        "log_probs",
-        "entropy",
-        "_dcp_local_token_indices",
-        "_dcp_full_seq_lens",
-        "_dcp_local_token_mask",
-    }
+    assert postprocess_calls == [(2, compact_dcp_output), (2, compact_dcp_output)]
+    expected_keys = {"log_probs", "entropy"}
+    if compact_dcp_output:
+        expected_keys.update({"_dcp_local_token_indices", "_dcp_full_seq_lens"})
+    else:
+        expected_keys.add("_dcp_local_token_mask")
+    assert set(output) == expected_keys

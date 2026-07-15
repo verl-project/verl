@@ -16,18 +16,13 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from tensordict import TensorDict
 
-import verl.models.mcore as mcore_module
 import verl.models.mcore.model_forward as model_forward_module
 import verl.models.mcore.model_forward_fused as fused_forward_module
 import verl.workers.engine.megatron.transformer_impl as transformer_module
-from verl.utils import tensordict_utils as tu
-from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.workers.config.engine import McoreEngineConfig, get_mcore_parallel_topology
 from verl.workers.engine.megatron.transformer_impl import (
     MegatronEngine,
-    MegatronEngineWithLMHead,
     _resolve_dcp_transformer_overrides,
     _validate_dcp_model_features,
 )
@@ -43,6 +38,15 @@ class _IntermediateValueStage:
 
     def __call__(self, **_kwargs):
         return self.activation
+
+
+class _FinalLanguageStage:
+    pre_process = True
+    post_process = True
+    config = SimpleNamespace(fp8=None)
+
+    def __call__(self, **_kwargs):
+        return torch.tensor([[1.0, 2.0]])
 
 
 def test_dcp_value_intermediate_pipeline_stage_returns_activation_tensor(monkeypatch):
@@ -67,13 +71,79 @@ def test_dcp_value_intermediate_pipeline_stage_returns_activation_tensor(monkeyp
         multi_modal_inputs={},
         value_model=True,
         local_cp_size=2,
-        dcp_local_output_only=True,
-        dcp_compact_output_only=True,
-        return_dcp_local_token_mask=True,
+        compact_dcp_output=True,
     )
 
     assert isinstance(output, torch.Tensor)
     assert output is activation
+
+
+@pytest.mark.parametrize("compact_dcp_output", [False, True])
+def test_dcp_forward_derives_local_output_metadata(monkeypatch, compact_dcp_output):
+    input_ids = torch.nested.nested_tensor([torch.arange(2)], layout=torch.jagged)
+    packed_seq_params = object()
+    postprocess_calls = []
+
+    monkeypatch.setattr(
+        model_forward_module,
+        "preprocess_thd_engine",
+        lambda _value, **_kwargs: (torch.tensor([[1, 2]]), packed_seq_params, None),
+    )
+
+    def fake_local_postprocess(output, *_args, local_cp_size, compact, **_kwargs):
+        postprocess_calls.append((local_cp_size, compact))
+        return torch.nested.nested_tensor([output.reshape(-1)], layout=torch.jagged)
+
+    monkeypatch.setattr(model_forward_module, "postprocess_thd_engine_local", fake_local_postprocess)
+    monkeypatch.setattr(
+        model_forward_module,
+        "postprocess_thd_engine",
+        lambda *_args, **_kwargs: pytest.fail("DCP must use rank-local postprocessing"),
+    )
+
+    def fake_output_metadata(*_args, compact, **_kwargs):
+        if compact:
+            return {
+                "_dcp_local_token_indices": torch.nested.nested_tensor(
+                    [torch.tensor([0, 1])], layout=torch.jagged
+                ),
+                "_dcp_full_seq_lens": torch.nested.nested_tensor([torch.tensor([2])], layout=torch.jagged),
+            }
+        return {
+            "_dcp_local_token_mask": torch.nested.nested_tensor(
+                [torch.tensor([True, True])], layout=torch.jagged
+            )
+        }
+
+    monkeypatch.setattr(model_forward_module, "build_thd_dcp_output_metadata", fake_output_metadata)
+
+    output = model_forward_module.gptmodel_forward_model_engine(
+        model=_FinalLanguageStage(),
+        input_ids=input_ids,
+        multi_modal_inputs={},
+        logits_processor=lambda model_output, **_kwargs: {"log_probs": model_output},
+        logits_processor_args={},
+        local_cp_size=2,
+        compact_dcp_output=compact_dcp_output,
+    )
+
+    assert postprocess_calls == [(2, compact_dcp_output)]
+    expected_keys = {"log_probs"}
+    if compact_dcp_output:
+        expected_keys.update({"_dcp_local_token_indices", "_dcp_full_seq_lens"})
+    else:
+        expected_keys.add("_dcp_local_token_mask")
+    assert set(output) == expected_keys
+
+
+def test_compact_dcp_output_requires_local_cp_size():
+    with pytest.raises(ValueError, match="compact_dcp_output requires local_cp_size"):
+        model_forward_module.gptmodel_forward_model_engine(
+            model=None,
+            input_ids=None,
+            multi_modal_inputs={},
+            compact_dcp_output=True,
+        )
 
 
 @pytest.mark.parametrize("max_seqlen", [None, 0, -1, 1.5, True])
@@ -204,86 +274,6 @@ def test_dcp_allows_disabled_moe_z_loss(moe_z_loss_coeff):
     )
 
     _validate_dcp_model_features(model_config, engine_config)
-
-
-def test_topk_distillation_falls_back_from_fused_forward(monkeypatch):
-    engine = object.__new__(MegatronEngineWithLMHead)
-    engine.engine_config = SimpleNamespace(dynamic_context_parallel=False, use_remove_padding=True)
-    engine.model_config = SimpleNamespace(
-        hf_config=object(),
-        tokenizer=SimpleNamespace(pad_token_id=0),
-        mtp=SimpleNamespace(enable=False, enable_train=False),
-    )
-    engine.tf_config = SimpleNamespace()
-    input_ids = torch.nested.nested_tensor([torch.arange(4)], layout=torch.jagged)
-    batch = TensorDict({"input_ids": input_ids}, batch_size=[1])
-    tu.assign_non_tensor(
-        batch,
-        use_fused_kernels=True,
-        calculate_entropy=False,
-        calculate_sum_pi_squared=False,
-        distillation_use_topk=True,
-        distillation_only=True,
-        pad_mode=DatasetPadMode.NO_PADDING,
-        temperature=1.0,
-    )
-    engine.prepare_model_inputs = lambda _batch: {
-        "input_ids": input_ids,
-        "attention_mask": None,
-        "multi_modal_inputs": {},
-        "loss_mask": None,
-    }
-
-    marker = {"distillation_losses": object()}
-    fallback_called = False
-
-    def fake_forward_fn(*_args, **_kwargs):
-        nonlocal fallback_called
-        fallback_called = True
-        return marker
-
-    monkeypatch.setattr(transformer_module, "get_device_id", lambda: "cpu")
-    monkeypatch.setattr(transformer_module, "unwrap_model", lambda model: model)
-    monkeypatch.setattr(transformer_module.RouterReplayHelper, "is_replay_backward_action", lambda *_args: False)
-    monkeypatch.setattr(transformer_module.RouterReplayHelper, "is_replay_forward_action", lambda *_args: False)
-    monkeypatch.setattr(transformer_module.RouterReplayHelper, "is_r2_record_action", lambda *_args: False)
-    monkeypatch.setattr(mcore_module, "get_mcore_engine_forward_fn", lambda _config: fake_forward_fn)
-    monkeypatch.setattr(
-        mcore_module,
-        "get_mcore_forward_fused_model_engine_fn",
-        lambda _config: pytest.fail("top-k distillation must not use the fused forward"),
-    )
-
-    output, _postprocess = engine.forward_step(
-        iter([batch]),
-        SimpleNamespace(),
-        logits_processor_func=object(),
-        postprocess_micro_batch_func=lambda *_args, **_kwargs: None,
-        forward_only=True,
-    )
-
-    assert fallback_called
-    assert output is marker
-
-
-def test_non_fused_wrapper_bypasses_installed_fused_forward():
-    class PatchedModel(torch.nn.Module):
-        def forward(self, value):
-            return value + 1
-
-    model = PatchedModel()
-    model.forward_backup = model.forward
-
-    def fused_forward(_self, **_kwargs):
-        raise AssertionError("the installed fused forward must be bypassed")
-
-    model.forward = fused_forward.__get__(model, PatchedModel)
-    installed_fused_forward = model.forward
-
-    output = model_forward_module._call_model_with_unfused_forward(model, value=torch.tensor(2))
-
-    torch.testing.assert_close(output, torch.tensor(3))
-    assert model.forward == installed_fused_forward
 
 
 def test_fused_forward_patch_unpatch_repatch_refreshes_backup(monkeypatch):

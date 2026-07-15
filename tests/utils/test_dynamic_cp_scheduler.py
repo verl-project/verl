@@ -214,7 +214,7 @@ def test_reverse_routing_gathers_all_dynamic_cp_shards_on_canonical_cp_rank(monk
         "global_ids_this_rank": torch.tensor([0, 1], dtype=torch.int32),
     }
 
-    send_by_dest, recv_by_src, _my_gids, _send_ids, recv_ids = _build_reverse_routing_plans(
+    send_by_dest, recv_by_src, _my_gids, _send_ids, recv_ids, _output_rank = _build_reverse_routing_plans(
         routing_info, dp_group, dcp_group
     )
 
@@ -394,7 +394,7 @@ def test_dcp_routing_keys_are_minimal_for_forward_only():
     assert scheduler._routing_key_order(batch, {"compute_loss": False}) == ["input_ids", "temperature"]
 
 
-def test_dcp_routing_keys_include_train_loss_and_optional_model_inputs():
+def test_dcp_routing_keys_include_train_loss_and_router_replay_inputs():
     scheduler = DynamicCPScheduler(max_seqlen_per_dp_cp_rank=1024, dp_size=1, cp_size=4)
     batch = {
         "input_ids": object(),
@@ -421,8 +421,6 @@ def test_dcp_routing_keys_include_train_loss_and_optional_model_inputs():
         {
             "compute_loss": True,
             "enable_routing_replay": True,
-            "distillation_use_topk": True,
-            "_dcp_route_attention_mask": True,
         },
     )
 
@@ -439,7 +437,6 @@ def test_dcp_routing_keys_include_train_loss_and_optional_model_inputs():
         "routed_experts",
         "teacher_logprobs",
         "teacher_ids",
-        "attention_mask",
         "temperature",
     ]
 
@@ -457,16 +454,6 @@ def test_dcp_routes_distillation_tensors_without_topk_flag():
         "teacher_logprobs",
         "teacher_ids",
     ]
-
-
-def test_dcp_routes_loss_mask_for_forward_only_mtp_when_requested():
-    scheduler = DynamicCPScheduler(max_seqlen_per_dp_cp_rank=1024, dp_size=1, cp_size=2)
-    batch = {"input_ids": object(), "loss_mask": object()}
-
-    assert scheduler._routing_key_order(
-        batch,
-        {"compute_loss": False, "_dcp_route_loss_mask": True},
-    ) == ["input_ids", "loss_mask"]
 
 
 class _FakeGroup:

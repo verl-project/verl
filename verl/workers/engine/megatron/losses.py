@@ -327,7 +327,9 @@ def call_megatron_loss(
         return loss_function(model_output=model_output, data=data, dp_group=dp_group)
 
     validate_dcp_policy_loss(loss_function)
-    validate_dcp_loss_normalization(loss_function, data)
+    # The seq-mean-token-sum-norm horizon is validated batch-wide on every PP
+    # stage in forward_backward_batch and re-resolved by each DCP loss branch,
+    # so no per-micro-batch re-validation is needed here.
     base_loss_function = _unwrap_partial(loss_function)
     config = _get_loss_config(loss_function)
     if base_loss_function is sft_loss:

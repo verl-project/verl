@@ -22,9 +22,7 @@ from verl.utils.megatron_utils import unwrap_model
 from verl.workers.config import MtpConfig
 
 from .util import (
-    build_thd_full_seq_lens,
-    build_thd_local_token_indices,
-    build_thd_local_token_mask,
+    build_thd_dcp_output_metadata,
     build_vlm_attn_mask_bshd,
     build_vlm_attn_mask_thd,
     postprocess_bshd,
@@ -37,30 +35,6 @@ from .util import (
     preprocess_packed_seqs,
     preprocess_thd_engine,
 )
-
-
-def _call_model_with_unfused_forward(model, **kwargs):
-    """Call the saved original forward when the engine installed the fused patch.
-
-    The patch is installed once during engine initialization, but an individual
-    batch can still require materialized logits, such as top-k distillation or a
-    per-sample temperature batch. Megatron's activation-checkpoint closures are
-    created inside this call and do not re-enter the top-level forward during
-    backward, so restoring the patched method after the call is safe.
-    """
-    unwrapped_model = unwrap_model(model)
-    patching_model = unwrapped_model
-    if not hasattr(patching_model, "forward_backup"):
-        patching_model = getattr(unwrapped_model, "language_model", None)
-    if patching_model is None or not hasattr(patching_model, "forward_backup"):
-        return model(**kwargs)
-
-    patched_forward = patching_model.forward
-    patching_model.forward = patching_model.forward_backup
-    try:
-        return model(**kwargs)
-    finally:
-        patching_model.forward = patched_forward
 
 
 def model_forward_gen(vision_model: bool = False):
@@ -133,7 +107,7 @@ def model_forward_gen(vision_model: bool = False):
                 input_args["input_ids"] = input_ids
                 input_args["attention_mask"] = attention_mask
 
-            output_orig = _call_model_with_unfused_forward(model, **input_args)
+            output_orig = model(**input_args)
 
             if post_process and logits_processor is not None:
                 args = {
@@ -175,8 +149,7 @@ def model_forward_gen(vision_model: bool = False):
                 sequence_parallel=sp,
                 pre_process=pre_process_for_bshd,
             )
-            output_orig = _call_model_with_unfused_forward(
-                model,
+            output_orig = model(
                 input_ids=new_input_ids,
                 position_ids=None if vision_model else new_position_ids,
                 attention_mask=new_attention_mask,
@@ -303,13 +276,15 @@ def gptmodel_forward_model_engine(
     mtp_enable_train: bool = False,
     local_cp_size: Optional[int] = None,
     forced_max_seqlen: Optional[int] = None,
-    return_dcp_local_token_mask: bool = False,
-    dcp_local_output_only: bool = False,
-    dcp_compact_output_only: bool = False,
+    compact_dcp_output: bool = False,
 ):
     """Default forward pass for GPT models with optional sequence packing."""
 
     assert data_format in ["thd", "bshd"], "data_format must be 'thd' or 'bshd'"
+    if compact_dcp_output and local_cp_size is None:
+        raise ValueError("compact_dcp_output requires local_cp_size")
+
+    is_dcp = local_cp_size is not None
     pre_process = unwrap_model(model).pre_process
     post_process = unwrap_model(model).post_process
 
@@ -371,8 +346,7 @@ def gptmodel_forward_model_engine(
         if vision_model:
             input_ids_rmpad, attention_mask = build_vlm_attn_mask_thd(input_ids, pad_token_id)
 
-        output_orig = _call_model_with_unfused_forward(
-            model,
+        output_orig = model(
             input_ids=input_ids_rmpad,
             attention_mask=attention_mask,
             position_ids=position_ids_rmpad if mtp_enable_train else None,  # position_ids is only needed for MTP
@@ -380,6 +354,8 @@ def gptmodel_forward_model_engine(
             **model_kwargs,
         )
 
+        postprocess_fn = postprocess_thd_engine_local if is_dcp else postprocess_thd_engine
+        postprocess_kwargs = {"compact": compact_dcp_output} if is_dcp else {}
         if post_process and logits_processor is not None:
             args = {
                 k: preprocess_thd_engine(
@@ -392,16 +368,8 @@ def gptmodel_forward_model_engine(
                 for k, v in logits_processor_args.items()
             }
             output_dict = logits_processor(output_orig, **args)
-            postprocess_fn = (
-                postprocess_thd_engine_local
-                if dcp_local_output_only and local_cp_size is not None
-                else postprocess_thd_engine
-            )
             output = {}
             for k, v in output_dict.items():
-                postprocess_kwargs = {}
-                if postprocess_fn is postprocess_thd_engine_local:
-                    postprocess_kwargs["compact"] = dcp_compact_output_only
                 output[k] = postprocess_fn(
                     v,
                     packed_seq_params,
@@ -411,32 +379,17 @@ def gptmodel_forward_model_engine(
                     local_cp_size=local_cp_size,
                     **postprocess_kwargs,
                 )
-            if dcp_compact_output_only and local_cp_size is not None:
-                output["_dcp_local_token_indices"] = build_thd_local_token_indices(
-                    packed_seq_params,
-                    input_ids,
-                    batch_size,
-                    post_process=post_process,
-                    local_cp_size=local_cp_size,
-                )
-                output["_dcp_full_seq_lens"] = build_thd_full_seq_lens(input_ids, post_process=post_process)
-            if return_dcp_local_token_mask and local_cp_size is not None:
-                output["_dcp_local_token_mask"] = build_thd_local_token_mask(
-                    packed_seq_params,
-                    input_ids,
-                    batch_size,
-                    post_process=post_process,
-                    local_cp_size=local_cp_size,
+            if is_dcp:
+                output.update(
+                    build_thd_dcp_output_metadata(
+                        packed_seq_params,
+                        input_ids,
+                        batch_size,
+                        local_cp_size=local_cp_size,
+                        compact=compact_dcp_output,
+                    )
                 )
         else:
-            postprocess_fn = (
-                postprocess_thd_engine_local
-                if dcp_local_output_only and local_cp_size is not None
-                else postprocess_thd_engine
-            )
-            postprocess_kwargs = {}
-            if postprocess_fn is postprocess_thd_engine_local:
-                postprocess_kwargs["compact"] = dcp_compact_output_only
             output = postprocess_fn(
                 output_orig,
                 packed_seq_params,
@@ -449,25 +402,17 @@ def gptmodel_forward_model_engine(
             # Intermediate pipeline stages must return their activation tensor to
             # Megatron's P2P schedule.  Only the post-process stage returns a
             # user-facing value dictionary with DCP reconstruction metadata.
-            if value_model and post_process and dcp_local_output_only and local_cp_size is not None:
+            if value_model and post_process and is_dcp:
                 output = {"values": output}
-                if dcp_compact_output_only:
-                    output["_dcp_local_token_indices"] = build_thd_local_token_indices(
+                output.update(
+                    build_thd_dcp_output_metadata(
                         packed_seq_params,
                         input_ids,
                         batch_size,
-                        post_process=post_process,
                         local_cp_size=local_cp_size,
+                        compact=compact_dcp_output,
                     )
-                    output["_dcp_full_seq_lens"] = build_thd_full_seq_lens(input_ids, post_process=post_process)
-                if return_dcp_local_token_mask:
-                    output["_dcp_local_token_mask"] = build_thd_local_token_mask(
-                        packed_seq_params,
-                        input_ids,
-                        batch_size,
-                        post_process=post_process,
-                        local_cp_size=local_cp_size,
-                    )
+                )
     else:
         """
         data_format: "thd" or "bshd", default is "thd",
@@ -522,8 +467,7 @@ def gptmodel_forward_model_engine(
         else:
             attention_mask = attention_mask_bshd
 
-        output_orig = _call_model_with_unfused_forward(
-            model,
+        output_orig = model(
             input_ids=input_ids_bshd,
             attention_mask=attention_mask,
             position_ids=None if vision_model else position_ids_bshd,

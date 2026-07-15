@@ -613,15 +613,7 @@ class MegatronEngine(BaseEngine):
                 raise RuntimeError("Dynamic CP requires a Megatron-Core build containing NVIDIA/Megatron-LM#5154.")
             if not self.engine_config.use_remove_padding:
                 raise ValueError("dynamic_context_parallel requires use_remove_padding=True")
-            max_seqlen_per_rank = self.engine_config.max_seqlen_per_dp_cp_rank
-            if (
-                not isinstance(max_seqlen_per_rank, int)
-                or isinstance(max_seqlen_per_rank, bool)
-                or max_seqlen_per_rank < 1
-            ):
-                raise ValueError(
-                    "max_seqlen_per_dp_cp_rank must be a positive integer when dynamic_context_parallel is enabled"
-                )
+            # Dataclass construction validates the immutable per-rank sequence limit.
             from verl.utils.dynamic_cp_scheduler import _get_megatron_dynamic_cp_scheduler_cls
 
             _get_megatron_dynamic_cp_scheduler_cls()
@@ -1599,7 +1591,6 @@ class MegatronEngineWithLMHead(MegatronEngine):
         calculate_sum_pi_squared = tu.get_non_tensor_data(batch, key="calculate_sum_pi_squared", default=False)
         distillation_use_topk = tu.get_non_tensor_data(batch, key="distillation_use_topk", default=False)
         distillation_only = tu.get_non_tensor_data(batch, key="distillation_only", default=False)
-        dcp_local_output_only = False
         if distillation_use_topk:
             # compute_topk_loss preprocesses the teacher tensors outside the
             # model forward; record the model's FP8 padding so the teacher THD
@@ -1621,7 +1612,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
         attention_mask = model_inputs["attention_mask"]
         multi_modal_inputs = model_inputs["multi_modal_inputs"]
         local_cp_size = tu.get_non_tensor_data(data=batch, key="local_cp_size", default=None)
-        dcp_local_output_only = self.engine_config.dynamic_context_parallel and local_cp_size is not None
+        is_dcp_micro_batch = self.engine_config.dynamic_context_parallel and local_cp_size is not None
         loss_mask = model_inputs.get("loss_mask", None)
         temperature, fused_temperature = _normalize_temperature_for_thd(
             temperature, input_ids, strict=self.engine_config.dynamic_context_parallel
@@ -1663,11 +1654,6 @@ class MegatronEngineWithLMHead(MegatronEngine):
                     "Fused kernels require `use_remove_padding=True` for Megatron engine. Falling back to non-fused."
                 )
                 use_fused_kernels = False
-            elif distillation_use_topk:
-                logger.warning_once(
-                    "Top-k distillation requires the Megatron logits processor; using the non-fused forward path."
-                )
-                use_fused_kernels = False
             elif fused_temperature is None:
                 logger.warning_once("Fused kernels require one temperature for the whole batch; using non-fused.")
                 use_fused_kernels = False
@@ -1685,9 +1671,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 calculate_entropy=calculate_entropy,
                 pad_token_id=self.model_config.tokenizer.pad_token_id,
                 local_cp_size=local_cp_size,
-                return_dcp_local_token_mask=dcp_local_output_only and logits_processor_func is not None,
-                dcp_local_output_only=dcp_local_output_only,
-                dcp_compact_output_only=dcp_local_output_only and forward_only and logits_processor_func is None,
+                compact_dcp_output=is_dcp_micro_batch and forward_only and logits_processor_func is None,
             )
         else:
             from verl.models.mcore import get_mcore_engine_forward_fn
@@ -1728,9 +1712,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 mtp_enable_train=self.model_config.mtp.enable and self.model_config.mtp.enable_train,
                 local_cp_size=local_cp_size,
                 forced_max_seqlen=tu.get_non_tensor_data(data=batch, key="forced_max_seqlen", default=None),
-                return_dcp_local_token_mask=dcp_local_output_only and logits_processor_func is not None,
-                dcp_local_output_only=dcp_local_output_only,
-                dcp_compact_output_only=dcp_local_output_only and forward_only and logits_processor_func is None,
+                compact_dcp_output=is_dcp_micro_batch and forward_only and logits_processor_func is None,
             )
         # Router replay: record routing decisions for R2 mode
         if RouterReplayHelper.is_r2_record_action(self.tf_config, vp_rank):
@@ -1753,7 +1735,6 @@ class MegatronEngineWithLMHead(MegatronEngine):
             postprocess_micro_batch_func,
             data=batch,
             local_cp_size=local_cp_size,
-            dcp_local_output_only=dcp_local_output_only,
         )
 
     def postprocess_micro_batch_func(
@@ -1763,7 +1744,6 @@ class MegatronEngineWithLMHead(MegatronEngine):
         forward_only: bool,
         loss_function,
         local_cp_size=None,
-        dcp_local_output_only: bool = False,
     ):
         # For memory efficiency
         # We move calculation of entropy to compute_log_probs, forward_only == True
@@ -1803,7 +1783,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
             output["_dcp_metric_weight"] = metric_weight.detach().item()
         if forward_only or not _dcp_scheduled:
             output["model_output"] = model_output
-        if forward_only and _dcp_scheduled and dcp_local_output_only:
+        if forward_only and _dcp_scheduled:
             output["_dcp_merge_duplicate_gids"] = True
 
         # calculate_per_token_loss=True puts Megatron in its per-token regime: loss_func
@@ -1881,7 +1861,7 @@ class MegatronEngineWithValueHead(MegatronEngineWithLMHead):
         input_ids = model_inputs["input_ids"]
         multi_modal_inputs = model_inputs["multi_modal_inputs"]
         local_cp_size = tu.get_non_tensor_data(data=batch, key="local_cp_size", default=None)
-        dcp_local_output_only = self.engine_config.dynamic_context_parallel and local_cp_size is not None
+        is_dcp_micro_batch = self.engine_config.dynamic_context_parallel and local_cp_size is not None
 
         from verl.models.mcore import get_mcore_engine_forward_fn
 
@@ -1897,16 +1877,13 @@ class MegatronEngineWithValueHead(MegatronEngineWithLMHead):
             data_format="thd" if self.engine_config.use_remove_padding else "bshd",
             forced_max_seqlen=tu.get_non_tensor_data(data=batch, key="forced_max_seqlen", default=None),
             local_cp_size=local_cp_size,
-            return_dcp_local_token_mask=dcp_local_output_only and logits_processor_func is not None,
-            dcp_local_output_only=dcp_local_output_only,
-            dcp_compact_output_only=dcp_local_output_only and forward_only and logits_processor_func is None,
+            compact_dcp_output=is_dcp_micro_batch and forward_only and logits_processor_func is None,
         )
 
         return output, partial(
             postprocess_micro_batch_func,
             data=batch,
             local_cp_size=local_cp_size,
-            dcp_local_output_only=dcp_local_output_only,
         )
 
     def prepare_model_outputs(self, output: dict | torch.Tensor, data: TensorDict):
