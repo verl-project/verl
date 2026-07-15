@@ -71,8 +71,9 @@ Last updated: 07/13/2026.
 ~~~~~~~~~~~~~~~~~~~~
 
 .. code:: yaml
-        global_profiler:
-         steps: null # disable profile
+
+   global_profiler:
+     steps: null # disable profile
 
 端到端采集
 ~~~~~~~~~~~~~~~~~~~~~
@@ -124,7 +125,7 @@ Last updated: 07/13/2026.
          # ref follow actor settings
 
 快速开始
-----
+--------
 
 禁用采集
 ~~~~~~~~~~~~~~~~~~~~
@@ -224,9 +225,9 @@ Last updated: 07/13/2026.
 
 1. Rollout 阶段：序列生成 (Generate Sequence) 是一个自回归过程，涉及成千上万次 Decoder 模型的前向计算。
 2. Training 阶段：为了控制显存峰值，verl 通常采用 Micro-Batch 策略，将庞大的数据流切分为多个微批次进行计算。
-   
-  - compute_log_prob (Actor/Ref)：涉及多轮纯前向传播。
-  - update_policy (Actor/Critic)：涉及多轮前向与反向传播。
+
+   - compute_log_prob (Actor/Ref)：涉及多轮纯前向传播。
+   - update_policy (Actor/Critic)：涉及多轮前向与反向传播。
 
 这种特性会导致全量 Profiling 产生海量且重复的算子记录。如下图所示：
 
@@ -490,4 +491,3 @@ FSDP 后端允许在 Micro-Batch 级别进行精细控制，可在 FSDP 引擎 f
 Megatron 后端的 Micro-Batch 调度由 Megatron 的流水并行
 ``forward_backward_func`` 内部管理，暂不支持通过简单的代码插桩进行
 Micro-Batch 级别的精细化采集。建议使用全局 profiler 配置进行采集。
-

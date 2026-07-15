@@ -6,7 +6,7 @@ Last updated: 07/13/2026.
 This is a tutorial for data collection using the GRPO or DAPO algorithm based on the FSDP or MindSpeed (Megatron) backend on Ascend devices.
 
 Configuration
-----
+-------------
 
 Use two levels of profile settings to control data collection
 
@@ -14,7 +14,7 @@ Use two levels of profile settings to control data collection
 - Role profile control: Use parameters in each role to control various parameters.
 
 Global Collection Control
-~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Use parameters in ppo_trainer.yaml to control the collection steps and mode:
 
@@ -69,14 +69,15 @@ Use parameters in each role's ``profiler.tool_config.npu`` to control specific c
 -  profile_token_end: Effective only for the rollout role; defines the stop response-token index (exclusive) for rollout decoding collection. It is applied only when valid (0-based, ``profile_token_end > profile_token_start``, and the window is within response length).
 
 Examples
-----
+--------
 
 Disabling Collection
 ~~~~~~~~~~~~~~~~~~~~
 
 .. code:: yaml
-        global_profiler:
-         steps: null # disable profile
+
+   global_profiler:
+     steps: null # disable profile
 
 End-to-End Collection
 ~~~~~~~~~~~~~~~~~~~~~
@@ -97,7 +98,7 @@ End-to-End Collection
                      contents: [npu, cpu]  # Control collection list, default cpu, npu; can configure memory, shapes, module, etc.
 
 Separation of Training and Inference Phases
-~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. code:: yaml
 
@@ -128,7 +129,7 @@ Separation of Training and Inference Phases
          # ref follow actor settings
 
 Quick Start
-----
+-----------
 
 Disabling Collection
 ~~~~~~~~~~~~~~~~~~~~
@@ -156,7 +157,7 @@ End-to-End Collection
 
 
 Lightweight Collection of Inference Data
-~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. code:: bash
 
@@ -218,19 +219,19 @@ If the analysis parameter is set to False, offline parsing is required after dat
 
 
 Advanced Guide: Fine-grained Collection
---------------------
+---------------------------------------
 
 Background and Challenges
-~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Although the configuration-based collection method mentioned above is convenient, it faces challenges in training scenarios with **Long Context** or **Large Global Batch Size**.
 Within a complete training step (Step), model computation exhibits high-frequency and repetitive characteristics:
 
 1. Rollout phase: Sequence generation (Generate Sequence) is an autoregressive process involving thousands of forward computations of the Decoder model.
 2. Training phase: To control peak memory usage, verl typically adopts a Micro-Batch strategy, dividing large data streams into multiple micro-batches for computation.
-   
-  - compute_log_prob (Actor/Ref): Involves multiple rounds of pure forward propagation.
-  - update_policy (Actor/Critic): Involves multiple rounds of forward and backward propagation.
+
+   - compute_log_prob (Actor/Ref): Involves multiple rounds of pure forward propagation.
+   - update_policy (Actor/Critic): Involves multiple rounds of forward and backward propagation.
 
 This characteristic leads to massive and repetitive operator records from full profiling. As shown in the image below:
 
@@ -249,7 +250,7 @@ To solve the above problems, we can adopt a **Critical Path Sampling** strategy:
     2. When using code instrumentation for collection, be sure to **disable global collection** (``global_profiler: steps: null``) in ``ppo_trainer.yaml`` or ``ppo_megatron_trainer.yaml`` to avoid Profiler conflicts.
 
 1. Add Script to Control Collection Granularity
-~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. code:: bash
 
@@ -265,7 +266,7 @@ To solve the above problems, we can adopt a **Critical Path Sampling** strategy:
     export ROLLOUT_PROFILE_PATH="./outputs/rollout_profile"
 
 2. Fine-grained Collection in Rollout Phase
-~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 For vLLM or SGLang inference engines, we can control the ``schedule`` parameter to collect model forward propagation performance data for specific tokens.
 
