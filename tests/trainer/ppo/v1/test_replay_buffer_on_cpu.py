@@ -904,6 +904,30 @@ def test_init_rejects_dapo_without_refill_fn():
         _make_rb(filter_groups_metric="acc", refill_fn=None)
 
 
+def test_validation_never_drops_terminal_groups(tq_init):
+    partition_id = "val"
+    _clear_partition(partition_id)
+    stale_dapo = PromptSpec(uid=_uid(), status="finished", sessions=2, global_steps=0, rewards=[1.0, 1.0])
+    stale_failure = PromptSpec(uid=_uid(), status="failure", global_steps=0)
+    _produce(partition_id, [stale_dapo, stale_failure]).join_and_check()
+
+    refiller = FakeRefiller(partition_id, global_steps=5, sessions=2, rewards=[0.0, 1.0])
+    rb = _make_rb(
+        trainer_mode="colocate_async",
+        max_off_policy_strategy="drop",
+        max_off_policy_threshold=1,
+        refill_fn=refiller,
+        filter_groups_metric="acc",
+    )
+    try:
+        batch, metrics = rb.sample(global_steps=5, partition_id=partition_id, batch_size=2)
+        assert _uids_of(batch.keys) == {stale_dapo.uid, stale_failure.uid}
+        assert refiller.calls == []
+        assert metrics == {}
+    finally:
+        _clear_partition(partition_id)
+
+
 def test_sync_does_not_drop_stale_groups(tq_init, partition_id):
     stale = PromptSpec(uid=_uid(), status="finished", global_steps=0)
     fresh = PromptSpec(uid=_uid(), status="finished", global_steps=5)

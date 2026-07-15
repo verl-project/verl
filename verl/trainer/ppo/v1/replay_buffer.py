@@ -87,19 +87,22 @@ class ReplayBuffer:
     Only prompts with status `finished` or `failure` enter terminal-group handling.
 
     ### [Terminal-group handling matrix]
-    ``drop`` means off-policy staleness dropping; ``DAPO`` means filtering groups whose configured reward
-    metric is identical across all trajectories. The matrix applies to the training partition:
+    ``drop`` means off-policy staleness dropping, which is only for async trainers.
+    ``DAPO`` means filtering groups whose configured reward metric is identical across all trajectories,
+             for async reward-computation path.
+    ``failure`` is the group status described above.
+    The matrix applies to the training partition, in which ``k`` is the number of prompts to drop.
+    Validation samples all terminal groups as-is and never drops or refills them.
 
-    | trainer mode | drop | DAPO | failure |
-    | --- | --- | --- | --- |
-    | sync | Keep; no refill. | Drop ``k``; submit ``2k``; wait; trim surplus. | Keep/sample; no refill. |
-    | async | Drop ``k``; refill ``k``. | Drop ``k``; refill ``k``. | Drop ``k``; refill ``k``. |
+    |   trainer mode   |   drop   |               DAPO               |  failure |
+    | ---------------- | -------- | -------------------------------- | -------- |
+    |       sync       |   NO-OP  |     Drop ``k``; refill ``2k``    |   NO-OP  |
+    |      async       |        All the same: Drop ``k``; refill ``k``.         |
 
-    DAPO filtering requires its metric to be available before a prompt becomes ``finished``. This is the
-    async reward-computation path used by rule-based rewards (or a reward model with its own resource pool),
-    regardless of whether the trainer itself is sync or async. A colocated reward model computes rewards only
-    after ``sample`` returns and therefore cannot use this filtering path.
-    ``algorithm.filter_groups.max_num_gen_batches`` is not enforced by this v1 path.
+    In sync mode, DAPO is opt-in and trades generation time for training stability; refilling ``2k``
+    balances retry rounds against over-generation. Failure groups retain the standard sync behavior and remain
+    sampleable, avoiding refill-induced tail latency by default.
+    In async mode, ``warmup_batches`` absorbs refill latency, so all three paths refill exactly ``k`` prompts.
 
     Args:
         trainer_mode (str): Trainer mode.
@@ -139,9 +142,6 @@ class ReplayBuffer:
         assert self.max_off_policy_strategy in ["drop", "wait"], (
             f"Invalid max off policy strategy: {self.max_off_policy_strategy}, must be one of ['drop', 'wait']"
         )
-        if self.filter_groups_metric is not None and self.refill_fn is None:
-            raise ValueError("DAPO group filtering requires refill_fn")
-
         # partition_id => {key: tag}
         self.partitions: dict[str, dict[str, dict]] = defaultdict(dict)
         self.pending_keys: dict[str, set] = defaultdict(set)
@@ -194,20 +194,19 @@ class ReplayBuffer:
     def _sync_dapo_enabled(self, partition_id: str) -> bool:
         return self.trainer_mode == "sync" and partition_id != "val" and self.filter_groups_metric is not None
 
-    def _traj_keys_of(self, partition_id: str, uids: set[str]) -> list[str]:
-        """Trajectory keys "{uid}_..." belonging to the given prompt uids (kv_clear does not cascade)."""
-        return [key for key in self.partitions[partition_id] if key.split("_")[0] in uids]
-
     def _clear_groups(self, partition_id: str, uids: set[str]) -> None:
         """Remove the given prompt groups (prompt keys + their trajectory keys) from TransferQueue."""
-        tq.kv_clear(partition_id=partition_id, keys=list(uids) + self._traj_keys_of(partition_id, uids))
+        tq.kv_clear(
+            partition_id=partition_id,
+            keys=list(uids) + [key for key in self.partitions[partition_id] if key.split("_")[0] in uids],
+        )
 
     def _stale_terminal_keys(self, global_steps: int, partition_id: str) -> set[str]:
         """Stale terminal prompts dropped only by async trainers using the ``drop`` strategy."""
         if partition_id == "val" or self.trainer_mode == "sync" or self.max_off_policy_strategy != "drop":
             return set()
         prompt_global_steps = self.prompt_global_steps[partition_id]
-        terminal_keys = self.finished_keys[partition_id] | self.failure_keys[partition_id]
+        terminal_keys = self.finished_keys[partition_id]
         return {
             uid
             for uid in terminal_keys
@@ -360,8 +359,6 @@ class ReplayBuffer:
             # Drop, gating, and selection below must all use this snapshot.
             self._sync_metadata_from_transfer_queue()
 
-            # Sync DAPO is round-based: do not inspect/select a partial 2k refill, otherwise early
-            # completions recreate the long-tail problem that over-generation is intended to avoid.
             if self._sync_dapo_enabled(partition_id) and (
                 self.pending_keys[partition_id] or self.running_keys[partition_id]
             ):
@@ -375,8 +372,8 @@ class ReplayBuffer:
             if dropped_uids:
                 _accumulate_drop_metrics(drop_metrics, metrics, stale_count)
 
-                # Async has a buffer and replaces every rejected group exactly. Sync only rejects DAPO
-                # groups and deliberately over-generates 2x to avoid a new generation tail.
+                # Only sync dapo refills double of the dropped samples to balance between the retry
+                # times and batch size.
                 refill_count = len(dropped_uids) if self.trainer_mode != "sync" else 2 * dapo_count
                 if refill_count > 0 and self.refill_fn is not None:
                     self.refill_fn(refill_count)
