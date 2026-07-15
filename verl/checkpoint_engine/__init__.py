@@ -66,9 +66,8 @@ except ImportError:
     MooncakeCheckpointEngine = None
 
 try:
-    from .delta_checkpoint_engine import DeltaCheckpointEngine, DeltaShardedCheckpointEngine
+    from .delta_checkpoint_engine import DeltaShardedCheckpointEngine
 
-    __all__ += ["DeltaCheckpointEngine", "DeltaShardedCheckpointEngine"]
+    __all__ += ["DeltaShardedCheckpointEngine"]
 except ImportError:
-    DeltaCheckpointEngine = None
     DeltaShardedCheckpointEngine = None
