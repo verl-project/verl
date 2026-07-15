@@ -839,7 +839,6 @@ class FSDPEngine(BaseEngine):
         merge_lora = self.model_config.lora.get("merge", False)
 
         peft_model = getattr(self.module, "_fsdp_wrapped_module", self.module)
-        per_tensor_param = None
         if hasattr(peft_model, "peft_config"):  # LoRA
             if not merge_lora:
                 peft_config = peft_model.peft_config.get("default", None)
@@ -855,32 +854,31 @@ class FSDPEngine(BaseEngine):
                 # restores the un-merged base weights on exit, so tensors must be
                 # materialized while the context is still open (inside the generator).
                 # Materializing after exit silently sends base weights without adapters.
-                per_tensor_param = self._merged_lora_per_tensor_param()
+                return self._merged_lora_per_tensor_param(), None
         else:
             params = self.module.state_dict()
 
-        if per_tensor_param is None:
-            params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
+        params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
 
-            log_gpu_memory_usage("Before offload_fsdp_model_to_cpu", logger=logger)
-            if self._is_offload_param and not _skip_staging:
-                offload_fsdp_model_to_cpu(self.module)
-            log_gpu_memory_usage("After offload_fsdp_model_to_cpu", logger=logger)
+        log_gpu_memory_usage("Before offload_fsdp_model_to_cpu", logger=logger)
+        if self._is_offload_param and not _skip_staging:
+            offload_fsdp_model_to_cpu(self.module)
+        log_gpu_memory_usage("After offload_fsdp_model_to_cpu", logger=logger)
 
-            if peft_config is not None and base_sync_done:
-                per_tensor_param = params.items()
-            else:
-                device = get_device_id()  # used when fsdp2 set cpu_offload_policy
-                # TODO: cast fp32 to bf16 to reduce weight sync overhead, need more fine-grained control, e.g MoE gate
-                per_tensor_param = (
-                    (
-                        name,
-                        param.to(device, non_blocking=True).full_tensor().to(torch.bfloat16, non_blocking=True)
-                        if isinstance(param, DTensor)
-                        else param,
-                    )
-                    for name, param in params.items()
+        if peft_config is not None and base_sync_done:
+            per_tensor_param = params.items()
+        else:
+            device = get_device_id()  # used when fsdp2 set cpu_offload_policy
+            # TODO: cast fp32 to bf16 to reduce weight sync overhead, need more fine-grained control, e.g MoE gate
+            per_tensor_param = (
+                (
+                    name,
+                    param.to(device, non_blocking=True).full_tensor().to(torch.bfloat16, non_blocking=True)
+                    if isinstance(param, DTensor)
+                    else param,
                 )
+                for name, param in params.items()
+            )
 
         if self._qat_enabled:
             from verl.utils.qat.quantizer import QATQuantizer
