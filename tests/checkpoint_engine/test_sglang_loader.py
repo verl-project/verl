@@ -28,7 +28,7 @@ import pytest
 import torch
 
 from verl.checkpoint_engine.delta_sync import DeltaState, iter_delta_flushes
-from verl.checkpoint_engine.delta_sync.sglang_loader import apply_delta
+from verl.workers.rollout.sglang_rollout.delta_loader import apply_delta
 
 
 class _FakeModel:

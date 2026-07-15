@@ -401,7 +401,7 @@ class ServerAdapter(BaseRollout):
         from sglang.srt.utils import MultiprocessingSerializer
         from sglang.srt.utils.patch_torch import monkey_patch_torch_reductions
 
-        from verl.checkpoint_engine.delta_sync.sglang_loader import LOADER_FQN
+        from verl.workers.rollout.sglang_rollout.delta_loader import LOADER_FQN
 
         monkey_patch_torch_reductions()
         mesh = self.device_mesh["infer_tp"]

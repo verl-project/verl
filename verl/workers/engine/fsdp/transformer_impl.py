@@ -825,7 +825,7 @@ class FSDPEngine(BaseEngine):
         Yields ``(name, local_flat_shard_bf16, within_param_flat_offset, full_numel,
         full_shape, contributes)``. Non-LoRA base path only.
         """
-        from verl.checkpoint_engine.delta_sync.sharded import local_shard_view
+        from .sharded_delta import local_shard_view
 
         # FSDP1's (SHARDED_)STATE_DICT export runs through the unshard machinery and
         # asserts flat params are GPU-resident; FSDP2 state_dict() only collects

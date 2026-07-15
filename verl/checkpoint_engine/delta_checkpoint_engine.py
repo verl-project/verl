@@ -19,7 +19,7 @@ over the same ``ray.util.collective`` NCCL group the full-weight
 :class:`NCCLCheckpointEngine` uses (actor rank0 -> rollout CheckpointEngineWorkers).
 Each rollout worker then hands its local copy of the sparse payload to its
 colocated SGLang TP worker via same-GPU ``update_weights_from_tensor`` IPC, where
-the verl-shipped :mod:`.delta_sync.sglang_loader` (registered through SGLang's
+the verl-shipped :mod:`verl.workers.rollout.sglang_rollout.delta_loader` (registered through SGLang's
 stock ``--custom-weight-loader`` hook — no SGLang fork or patch needed) decodes
 and masked-applies it *in place* onto the live weights. No full-model mirror is
 staged anywhere on the rollout side: receiver peak memory is one bucket plus one
@@ -45,7 +45,7 @@ with patch("importlib.metadata.distributions", return_value=[]):
 
 from .delta_sync import DeltaState, iter_delta_flushes
 from .delta_sync.encode import DeltaParam, checksum as _checksum
-from .delta_sync.sharded import (
+from verl.workers.engine.fsdp.sharded_delta import (
     gather_dense_to_rank0,
     gather_v_batched_to_rank0,
     gather_v_to_rank0,
@@ -295,7 +295,7 @@ class DeltaCheckpointEngine(NCCLCheckpointEngine):
         received into this worker's own GPU buffer -- one flush resident at a
         time, freed as soon as the consumer drops it. The sglang server adapter
         forwards each flush over same-GPU CUDA IPC to the verl-shipped
-        ``sglang_loader.apply_delta`` (registered through the custom-weight-loader
+        ``delta_loader.apply_delta`` (registered through the custom-weight-loader
         hook), which decodes and masked-applies it against SGLang's live weights;
         no full-model mirror is staged anywhere.
         """

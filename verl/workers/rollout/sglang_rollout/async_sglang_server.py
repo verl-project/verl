@@ -262,7 +262,7 @@ class SGLangHttpServer:
         custom_weight_loader = list(engine_kwargs.pop("custom_weight_loader", None) or [])
         ce_backend = str((self.config.get("checkpoint_engine", None) or {}).get("backend", ""))
         if ce_backend.startswith("delta"):
-            from verl.checkpoint_engine.delta_sync.sglang_loader import LOADER_FQN
+            from verl.workers.rollout.sglang_rollout.delta_loader import LOADER_FQN
 
             if LOADER_FQN not in custom_weight_loader:
                 custom_weight_loader.append(LOADER_FQN)

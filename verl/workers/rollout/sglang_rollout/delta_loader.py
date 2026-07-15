@@ -35,7 +35,7 @@ Wire contract (what the delta checkpoint engine sends per flush):
 
 Register at server launch (verl config)::
 
-    +actor_rollout_ref.rollout.engine_kwargs.sglang.custom_weight_loader='["verl.checkpoint_engine.delta_sync.sglang_loader.apply_delta"]'
+    +actor_rollout_ref.rollout.engine_kwargs.sglang.custom_weight_loader='["verl.workers.rollout.sglang_rollout.delta_loader.apply_delta"]'
 """
 
 from __future__ import annotations
@@ -51,12 +51,12 @@ import torch
 CHUNK_BYTES = 512 << 20
 
 # Import path callers pass as both --custom-weight-loader and load_format.
-LOADER_FQN = "verl.checkpoint_engine.delta_sync.sglang_loader.apply_delta"
+LOADER_FQN = "verl.workers.rollout.sglang_rollout.delta_loader.apply_delta"
 
 
 def apply_delta(model, named_tensors) -> None:
     """Decode one sparse delta flush and masked-apply it onto ``model`` in place."""
-    from .encode import checksum as _checksum
+    from verl.checkpoint_engine.delta_sync.encode import checksum as _checksum
 
     tensors = dict(named_tensors)
     spec = json.loads(bytes(tensors["__delta_spec__"].cpu().numpy().tobytes()).decode())

@@ -24,7 +24,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from verl.checkpoint_engine.delta_sync.sharded import local_shard_view, shard_delta_indices
+from verl.workers.engine.fsdp.sharded_delta import local_shard_view, shard_delta_indices
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
