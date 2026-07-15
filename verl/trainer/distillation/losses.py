@@ -117,18 +117,12 @@ def compute_distillation_loss_range(
         distillation_losses_response = distillation_losses[response_mask.bool().to_padded_tensor(False)]
     else:
         distillation_losses_response = distillation_losses[response_mask.bool()]
-    if dcp_scheduled and distillation_losses_response.numel() == 0:
-        # A routed DCP shard may own no response tokens. The Megatron DCP metric
-        # reducer uses the zero token weight to substitute the MIN/MAX reduction
-        # identities, so any finite placeholder works here.
-        loss_min = 0.0
-        loss_max = 0.0
-    else:
-        loss_min = distillation_losses_response.min()
-        loss_max = distillation_losses_response.max()
+    if dcp_scheduled:
+        # Empty-shard-safe: a routed DCP shard may own no response tokens.
+        return _range_metrics("distillation/loss", distillation_losses_response)
     return {
-        "distillation/loss_min": Metric(AggregationType.MIN, loss_min),
-        "distillation/loss_max": Metric(AggregationType.MAX, loss_max),
+        "distillation/loss_min": Metric(AggregationType.MIN, distillation_losses_response.min()),
+        "distillation/loss_max": Metric(AggregationType.MAX, distillation_losses_response.max()),
     }
 
 

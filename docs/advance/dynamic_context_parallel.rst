@@ -94,9 +94,9 @@ Behavior and limitations
   metadata, local loss masks, compact output reconstruction, and loss/metric
   aggregation around the upstream assignment.
 * Fused Megatron forward kernels are supported when the micro-batch has one
-  uniform temperature. Different per-sample temperatures automatically use
-  the non-fused forward path. Top-k distillation also uses the non-fused path
-  because it requires materialized logits.
+  uniform temperature. Configure ``use_fused_kernels=False`` for different
+  per-sample temperatures or top-k distillation, which requires materialized
+  logits.
 * Exact response spans are routed separately from ``response_mask`` so internal
   zeroes from tool calls or rollout rejection do not truncate later tokens.
 * Multimodal batches are not supported yet.
