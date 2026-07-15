@@ -64,3 +64,10 @@ try:
     __all__ += ["MooncakeCheckpointEngine"]
 except ImportError:
     MooncakeCheckpointEngine = None
+
+try:
+    from .delta_checkpoint_engine import DeltaCheckpointEngine
+
+    __all__ += ["DeltaCheckpointEngine"]
+except ImportError:
+    DeltaCheckpointEngine = None
