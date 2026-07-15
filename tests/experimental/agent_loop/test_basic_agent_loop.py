@@ -225,6 +225,7 @@ def test_tool_agent(init_config):
     init_config.actor_rollout_ref.rollout.n = n
     init_config.actor_rollout_ref.rollout.multi_turn.tool_config_path = tool_config_path
     init_config.actor_rollout_ref.rollout.multi_turn.max_parallel_calls = 2
+    init_config.actor_rollout_ref.rollout.seed = 0
     init_config.actor_rollout_ref.rollout.calculate_log_probs = True
     agent_loop_manager = init_agent_loop_manager(init_config)
 
