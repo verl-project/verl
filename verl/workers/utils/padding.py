@@ -109,76 +109,27 @@ def no_padding_2_padding(tensor: torch.Tensor, data: TensorDict) -> torch.Tensor
         tensor: sliced response tensor of shape [bsz, max_response_len, *]
     """
     values = tensor.values() if tensor.is_nested else tensor
+    prompt_ids = data["prompts"]
+    response_ids = data["responses"]
+
     max_response_len = tu.get_non_tensor_data(data=data, key="max_response_len", default=-1)
 
-    has_prompts = "prompts" in data.keys() and "responses" in data.keys()
-    if has_prompts:
-        prompt_ids = data["prompts"]
-        response_ids = data["responses"]
-        attention_mask = data.get("attention_mask", None)
-
-        if prompt_ids.is_nested:
-            prompt_lens = prompt_ids.offsets().diff()
-            response_lens = response_ids.offsets().diff()
-            if max_response_len < 0:
-                max_response_len = response_lens.max().item()
-        else:
-            if attention_mask is None or attention_mask.is_nested:
-                raise ValueError("Dense prompts/responses require a dense attention_mask")
-            prompt_lens = attention_mask[:, : prompt_ids.shape[1]].sum(dim=1)
-            response_lens = attention_mask[:, prompt_ids.shape[1] :].sum(dim=1)
-            max_response_len = response_ids.shape[1]
-    else:
-        # DCP path: no prompts/responses after scheduler routing. Prefer
-        # the routed response span because response_mask may contain internal
-        # zeros for tool output or rollout rejection.
-        if tensor.is_nested:
-            seq_lens = tensor.offsets().diff()
-            num_seqs = len(seq_lens)
-            response_lens = data.get("_dcp_response_lengths", None)
-            response_mask = data.get("_dcp_response_mask_for_padding", None)
-            if response_mask is None:
-                response_mask = data.get("response_mask", None)
-            loss_mask = data.get("loss_mask", None)
-            length_mask = response_mask if response_mask is not None else loss_mask
-            if response_lens is not None:
-                response_lens = response_lens.to(seq_lens.dtype).to(seq_lens.device)
-                if response_lens.numel() != num_seqs:
-                    raise ValueError(
-                        f"DCP response length count must match nested batch size: {response_lens.numel()} != {num_seqs}"
-                    )
-                prompt_lens = seq_lens - response_lens
-            elif length_mask is not None and length_mask.is_nested:
-                response_lens = length_mask.offsets().diff().to(seq_lens.dtype).to(seq_lens.device)
-                prompt_lens = seq_lens - response_lens
-            elif length_mask is not None:
-                # response_mask is padded (num_seqs, max_response_len): sum to get response_lens
-                response_lens = length_mask.sum(dim=-1).to(seq_lens.dtype).to(seq_lens.device)
-                prompt_lens = seq_lens - response_lens
-            else:
-                # Fallback: treat all tokens as response
-                prompt_lens = torch.zeros(num_seqs, dtype=seq_lens.dtype, device=seq_lens.device)
-                response_lens = seq_lens
-            # ``max_response_len`` in DCP metadata is the global loss horizon,
-            # not the routed micro-batch's dense width. Use this micro-batch's
-            # maximum response span so nested masks and reconstructed outputs
-            # are padded to the same shape; loss normalization still reads the
-            # untouched metadata value directly from ``data``.
+    if prompt_ids.is_nested:
+        prompt_lens = prompt_ids.offsets().diff()
+        response_lens = response_ids.offsets().diff()
+        if max_response_len < 0:
             max_response_len = response_lens.max().item()
-        else:
-            raise ValueError("no_padding_2_padding requires 'prompts'/'responses' or nested tensor input")
+    else:
+        attention_mask = data["attention_mask"]
+        assert not attention_mask.is_nested
+        prompt_lens = attention_mask[:, : prompt_ids.shape[1]].sum(dim=1)
+        response_lens = attention_mask[:, prompt_ids.shape[1] :].sum(dim=1)
+        max_response_len = response_ids.shape[1]
 
     sequence_lens = prompt_lens + response_lens
     sequence_offsets = sequence_lens.cumsum(dim=0)
-    expected_tokens = sequence_offsets[-1].item()
-    actual_tokens = values.shape[0]
-    if expected_tokens != actual_tokens:
-        raise ValueError(
-            "Token count mismatch while restoring padded responses: "
-            f"expected={expected_tokens}, actual={actual_tokens}, n_seqs={len(sequence_lens)}"
-        )
-    if prompt_lens.eq(0).any():
-        raise ValueError(f"Response restoration requires at least one prompt token per sequence, got {prompt_lens}")
+    assert sequence_offsets[-1].item() == values.shape[0]
+    assert not prompt_lens.eq(0).any(), f"seq_offset - resp_len - 1 assumes prompt_len > 0. Got {prompt_lens}"
 
     response_list = []
     # Skip padding dimensions after sequence dimensions, if any.

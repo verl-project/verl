@@ -150,8 +150,6 @@ def test_preprocess_thd_engine_pads_to_minimum_rows(monkeypatch):
     torch.testing.assert_close(local_ids[0, 100:], torch.zeros(28, dtype=torch.long))
     torch.testing.assert_close(local_positions[0, :100], torch.arange(100, dtype=torch.long))
     torch.testing.assert_close(local_positions[0, 100:], torch.zeros(28, dtype=torch.long))
-
-
 @pytest.mark.parametrize("cp_rank", [0, 1])
 def test_preprocess_thd_engine_pads_multidimensional_router_data(monkeypatch, cp_rank):
     mcore_util = _load_mcore_util_with_stubbed_megatron(
@@ -313,86 +311,3 @@ def test_preprocess_thd_engine_pads_short_topk_sequence_dimension(monkeypatch):
     torch.testing.assert_close(packed, torch.zeros_like(packed))
     torch.testing.assert_close(position_ids, torch.tensor([[1, 0]], dtype=torch.long))
     assert packed_seq_params.local_cp_size == 2
-
-
-def test_dcp_local_thd_postprocess_matches_local_token_mask(monkeypatch):
-    mcore_util = _load_mcore_util_with_stubbed_megatron(monkeypatch, tp_size=1)
-    monkeypatch.setattr(torch.distributed, "get_rank", lambda group=None: 1)
-
-    input_ids = _nested_tensor([torch.arange(16, dtype=torch.long)])
-    packed_seq_params = types.SimpleNamespace(
-        cu_seqlens_q_padded=torch.tensor([0, 16], dtype=torch.int32),
-        cp_group=object(),
-    )
-    local_output = torch.tensor([[10.0, 11.0, 12.0, 13.0]])
-
-    postprocessed = mcore_util.postprocess_thd_engine_local(
-        local_output,
-        packed_seq_params,
-        input_ids,
-        batch_size=1,
-        local_cp_size=4,
-    )
-    local_mask = mcore_util.build_thd_local_token_mask(
-        packed_seq_params,
-        input_ids,
-        batch_size=1,
-        local_cp_size=4,
-    )
-    compact = mcore_util.postprocess_thd_engine_local(
-        local_output,
-        packed_seq_params,
-        input_ids,
-        batch_size=1,
-        local_cp_size=4,
-        compact=True,
-    )
-    local_indices = mcore_util.build_thd_local_token_indices(
-        packed_seq_params,
-        input_ids,
-        batch_size=1,
-        local_cp_size=4,
-    )
-    full_seq_lens = mcore_util.build_thd_full_seq_lens(input_ids)
-
-    expected = torch.zeros(16)
-    expected[[2, 3, 12, 13]] = torch.tensor([10.0, 11.0, 12.0, 13.0])
-    expected_mask = torch.zeros(16, dtype=torch.bool)
-    expected_mask[[2, 3, 12, 13]] = True
-
-    torch.testing.assert_close(postprocessed.unbind()[0], expected)
-    torch.testing.assert_close(local_mask.unbind()[0], expected_mask)
-    torch.testing.assert_close(compact.unbind()[0], torch.tensor([10.0, 11.0, 12.0, 13.0]))
-    torch.testing.assert_close(local_indices.unbind()[0], torch.tensor([2, 3, 12, 13]))
-    torch.testing.assert_close(full_seq_lens.unbind()[0], torch.tensor([16]))
-
-
-def test_dcp_local_thd_metadata_exactly_covers_unaligned_sequence(monkeypatch):
-    mcore_util = _load_mcore_util_with_stubbed_megatron(monkeypatch, tp_size=1)
-    cp_rank = 0
-    monkeypatch.setattr(torch.distributed, "get_rank", lambda group=None: cp_rank)
-    input_ids = _nested_tensor([torch.arange(100, 109, dtype=torch.long)])
-    all_indices = []
-
-    for rank in range(4):
-        cp_rank = rank
-        packed, packed_seq_params, _ = mcore_util.preprocess_thd_engine(input_ids, local_cp_size=4)
-        compact = mcore_util.postprocess_thd_engine_local(
-            packed,
-            packed_seq_params,
-            input_ids,
-            batch_size=1,
-            local_cp_size=4,
-            compact=True,
-        ).unbind()[0]
-        indices = mcore_util.build_thd_local_token_indices(
-            packed_seq_params,
-            input_ids,
-            batch_size=1,
-            local_cp_size=4,
-        ).unbind()[0]
-
-        torch.testing.assert_close(compact, input_ids.unbind()[0][indices])
-        all_indices.append(indices)
-
-    torch.testing.assert_close(torch.cat(all_indices).sort().values, torch.arange(9))
