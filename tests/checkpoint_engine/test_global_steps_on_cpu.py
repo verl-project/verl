@@ -51,7 +51,7 @@ class _FakeServerAdapter:
         self.global_steps = None
         self.weights = None
 
-    async def update_weights(self, weights, global_steps=None):
+    async def update_weights(self, weights, global_steps=None, **kwargs):
         self.global_steps = global_steps
         self.weights = [item async for item in weights]
 
