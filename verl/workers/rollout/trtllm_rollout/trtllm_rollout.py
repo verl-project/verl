@@ -448,13 +448,20 @@ class ServerAdapter(BaseRollout):
         await asyncio.to_thread(dist.barrier, group=group)
 
     async def update_weights(
-        self, weights: AsyncGenerator[tuple[str, torch.Tensor], None], global_steps: int = None, **kwargs
+        self,
+        weights: AsyncGenerator[tuple[str, torch.Tensor], None],
+        global_steps: int = None,
+        wire_format: str = "named_tensors",
+        **kwargs,
     ):
         """Update the weights of the rollout model.
 
         Args:
             weights: A generator that yields the name of the weight tensor and the tensor itself.
         """
+        assert wire_format == "named_tensors", (
+            f"TensorRT-LLM rollout only consumes full named tensors; got wire_format={wire_format!r}"
+        )
         if self.is_leader_rank:
             await self._init_server_adapter()
 

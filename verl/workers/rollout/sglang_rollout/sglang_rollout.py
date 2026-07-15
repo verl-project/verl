@@ -289,7 +289,11 @@ class ServerAdapter(BaseRollout):
             await self._engine.release_memory_occupation(tags=tags)
 
     async def update_weights(
-        self, weights: Generator[tuple[str, torch.Tensor], None, None], global_steps: int = None, **kwargs
+        self,
+        weights: Generator[tuple[str, torch.Tensor], None, None],
+        global_steps: int = None,
+        wire_format: str = "named_tensors",
+        **kwargs,
     ):
         """
         Update model weights using tensor buckets, similar to THUDM/slime's implementation.
@@ -309,7 +313,7 @@ class ServerAdapter(BaseRollout):
         # per-flush sparse payloads, applied in place through the verl custom
         # weight loader. Hybrid replicas pass full (name, tensor) pairs with no
         # wire_format kwarg and take the bucketed path below.
-        if kwargs.get("wire_format") == "delta_flush":
+        if wire_format == "delta_flush":
             await self._update_weights_delta(weights, global_steps=global_steps)
             return
 
