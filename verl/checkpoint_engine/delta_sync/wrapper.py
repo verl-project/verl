@@ -30,7 +30,7 @@ from dataclasses import dataclass
 
 import torch
 
-from .encode import DeltaParam
+from .encode import DeltaEncodingName, DeltaParam
 
 logger = logging.getLogger(__name__)
 
