@@ -67,11 +67,21 @@ def _prodshape(shape) -> int:
     return n
 
 
-class DeltaCheckpointEngine(NCCLCheckpointEngine):
-    """Shared wire base for the sharded delta engines (not itself a registered backend).
+@CheckpointEngineRegistry.register("delta_sharded")
+class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
+    """Sparse delta weight sync over NCCL, diffed on each rank's local shard.
 
-    NCCL delta transport. Reuses NCCLCheckpointEngine's group/zmq machinery;
-    overrides send/receive to move only changed positions+values."""
+    Reuses NCCLCheckpointEngine's group/zmq machinery but moves only changed
+    positions+values: each actor rank keeps a pinned-CPU snapshot of only *its*
+    shard, byte-diffs the shard, and only the changed ``(position, value)`` pairs
+    are gathered to rank 0 and streamed to the rollout side -- no rank ever holds
+    a full-model snapshot.
+
+    ``send_weights`` consumes the SHARDED generator ``get_per_tensor_param_shard()``:
+    ``(name, local_shard, ShardSpec)`` per local parameter (see
+    :mod:`verl.workers.engine.spec`). All layout knowledge lives in the
+    spec, so this one engine serves any trainer backend that can describe its shards.
+    """
 
     # Cap on changed elements per DeltaParam entry. The receiver-side decode
     # densifies per entry with an int64 index transient (8 B/element), so an
@@ -82,10 +92,6 @@ class DeltaCheckpointEngine(NCCLCheckpointEngine):
     MAX_ENTRY_ELEMS = 64 << 20
 
     wire_format = "delta_flush"
-
-    def __init__(self, *args, encoding: str = "indices", **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self.encoding = encoding
 
     def prepare(self) -> MasterMetadata | None:
         # Delta broadcasts small per-flush buffers directly, so skip the parent's
@@ -210,27 +216,9 @@ class DeltaCheckpointEngine(NCCLCheckpointEngine):
                 break
         logger.info("delta recv v=%s flushes=%d (yielded to server adapter)", global_steps, applied)
 
-
-@CheckpointEngineRegistry.register("delta_sharded")
-class DeltaShardedCheckpointEngine(DeltaCheckpointEngine):
-    """Delta over NCCL, but the diff is computed on each rank's local FSDP shard.
-
-    Instead of ``full_tensor()``-ing every parameter and diffing on rank 0 (parent), each
-    actor rank keeps a pinned-CPU snapshot of only *its* shard, byte-diffs the shard, and
-    only the changed ``(within-param position, value)`` pairs are gathered to rank 0 -- so
-    the all-gather volume drops to the sparsity ratio and rank 0 no longer holds a
-    full-model snapshot. The assembled result is bit-identical to the parent's diff, so the
-    wire and the receiver (:meth:`DeltaCheckpointEngine.receive_weights`) are
-    reused unchanged.
-
-    ``send_weights`` consumes the SHARDED generator ``get_per_tensor_param_shard()``:
-    ``(name, local_shard, ShardSpec)`` per local parameter (see
-    :mod:`verl.workers.engine.spec`). All layout knowledge lives in the
-    spec, so this one engine serves any trainer backend that can describe its shards.
-    """
-
     def __init__(self, *args, encoding: str = "indices", batch_gather: int = 32, **kwargs) -> None:
-        super().__init__(*args, encoding=encoding, **kwargs)
+        super().__init__(*args, **kwargs)
+        self.encoding = encoding
         self._shard_snap: dict[str, torch.Tensor] = {}  # name -> pinned-CPU shard snapshot
         self._shard_seeded = False
         self._placements: dict[str, tuple] = {}  # name -> (flat_offset, contributes, group)
