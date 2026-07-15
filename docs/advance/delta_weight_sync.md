@@ -28,16 +28,22 @@ with scale but is already measurable at sub-1B models.
 
 ## Design
 
-The delta backends plug into the standard checkpoint-engine flow (``CheckpointEngineManager`` →
+The ``delta_sharded`` backend plugs into the standard checkpoint-engine flow (``CheckpointEngineManager`` →
 ``CheckpointEngineWorker``), so they work with any trainer that drives weight sync through the
 checkpoint engine (including the V1 ``separate_async`` trainer).
 
-- **Diff**: the trainer byte-diffs each parameter against a pinned-CPU snapshot of the previous sync.
-  The comparison is bit-exact (integer view inequality), so the reconstruction is lossless by
-  construction — no thresholds, no drift.
-- **Encoding**: changed elements are shipped as a shared ``(positions, values)`` payload plus a
-  per-parameter manifest. ``encoding`` selects the position encoding: ``indices`` (int32 absolute
-  positions, lowest compute) or ``deltas`` (uint16 gap deltas, smaller on the wire).
+- **Export contract**: the trainer's ``get_per_tensor_param_shard()`` yields
+  ``(name, local_shard, ShardSpec)`` per local parameter — the spec (see
+  :mod:`verl.workers.engine.spec`) describes the shard's placement declaratively (DeviceMesh +
+  Placements), and the engine derives the flat offset, gather group, and contributing rank itself.
+  All layout knowledge stays on the trainer side; the engine is trainer-agnostic.
+- **Diff**: each rank byte-diffs **its own shard** against a pinned-CPU snapshot of that shard from
+  the previous sync (no rank holds a full-model snapshot). The comparison is bit-exact (integer
+  view inequality), so the reconstruction is lossless by construction — no thresholds, no drift.
+- **Sparse gather + encoding**: only the changed ``(position, value)`` pairs are gathered to rank 0
+  (batched, variable-length), translated to full-tensor coordinates, and packed as a shared
+  ``(positions, values)`` payload plus a per-parameter manifest (``indices`` encoding: int32
+  absolute positions).
 - **Transport**: the sparse payload is broadcast over the existing NCCL collective group in
   bucket-sized flushes (streamed: each flush is sent and freed as it is produced, so sender peak
   memory stays ~2 buckets regardless of model size).
@@ -124,7 +130,8 @@ a per-backend apply interface (vllm/trt-llm plugins) is planned.
 
 Planned extensions, in design order:
 
-- **Megatron sharded delta**: diff each rank's mcore shard locally and reuse the native
-  megatron→HF bridge on rank 0, extending ``delta_sharded`` beyond FSDP.
+- **Megatron-core trainers**: the same ``delta_sharded`` backend via a Megatron
+  ``get_per_tensor_param_shard`` export whose spec carries the native mcore→HF conversion as a
+  pure-permutation ``to_hf`` closure (implemented and validated in a stacked follow-up PR).
 - **Quantized rollout (fp8 etc.)**: diff the quantized bytes (quantize-then-diff) so a low-precision
   rollout engine can consume deltas without a bf16 intermediate.
