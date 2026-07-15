@@ -11,7 +11,7 @@
 #
 # Requirements on Ascend:
 #   - 4 nodes, 16 trainer devices per node
-#   - Additional packages on base image(quay.io/ascend/verl:verl-8.5.2-a3-ubuntu22.04-py3.11-qwen3-5):
+#   - Additional packages on base image(quay.io/ascend/verl:v0.8.0-cann9.0.0-torch2.9.0post2-a3-ubuntu22.04-py3.11-vllm):
 #       pip install viztracer flash-linear-attention nvidia-modelopt nvidia-ml-py nvidia-resiliency-ext megatron-energon
 #   - Megatron-LM==0.16.0
 #   - MindSpeed==0.16.0

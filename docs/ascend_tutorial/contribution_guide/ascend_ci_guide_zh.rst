@@ -120,7 +120,7 @@ NPU 相关的工作流主要包括：
        timeout-minutes: 60          # 任务超时阈值（分钟）
        container:
          #运行镜像 该示例为vllm的镜像
-         image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:verl-9.0.0-910b-ubuntu22.04-py3.11-latest
+         image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-cann9.0.0-torch_npu2.9.0post2-910b-ubuntu22.04-py3.11-vllm
          options: >-
            --shm-size 16g  # 共享内存配置
        env:
