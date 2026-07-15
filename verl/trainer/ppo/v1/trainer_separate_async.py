@@ -137,8 +137,7 @@ class PPOTrainerSeparateAsync(PPOTrainer):
         """
         trainer_gpus = self.resource_pool_manager.get_n_gpus()
         rollout_gpus = (
-            self.config.actor_rollout_ref.rollout.n_gpus_per_node
-            * self.config.actor_rollout_ref.rollout.nnodes
+            self.config.actor_rollout_ref.rollout.n_gpus_per_node * self.config.actor_rollout_ref.rollout.nnodes
         )
         return trainer_gpus + rollout_gpus
 
