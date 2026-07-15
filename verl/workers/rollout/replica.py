@@ -349,12 +349,6 @@ def _load_trtllm():
     return TRTLLMReplica
 
 
-def _load_arctic():
-    from verl.workers.rollout.remote_rollout.arctic_rollout.arctic_rollout import ArcticReplica
-
-    return ArcticReplica
-
-
 # TODO(@zw0610): lazy-init each option for `RolloutReplicaRegistry`. For most
 # cases there will be only 1 rollout backend used, but importing all of them
 # eagerly could surface dependency conflicts (e.g. pulling in vLLM + SGLang +
@@ -365,7 +359,8 @@ def _load_arctic():
 RolloutReplicaRegistry.register("vllm", _load_vllm)
 RolloutReplicaRegistry.register("sglang", _load_sglang)
 RolloutReplicaRegistry.register("trtllm", _load_trtllm)
-RolloutReplicaRegistry.register("arctic", _load_arctic)
+# Out-of-tree rollout backends (e.g. "arctic") register themselves via the
+# VERL_USE_EXTERNAL_MODULES hook; see arctic_platform/integrations/verl.
 
 
 # Original function for backward compatibility

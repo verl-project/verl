@@ -13,14 +13,14 @@
 # limitations under the License.
 """`RemoteBackend` ABC + `RemoteBackendRegistry`.
 
-The ABC is intentionally minimal — it only enforces the *lifecycle*
-contract that verl's trainer side needs to know about. Compute/update
-op signatures (``compute_log_prob``, ``update_actor``, ``generate``)
-intentionally live on the concrete per-backend adapter and its
-matching per-backend worker, not on the ABC, so different backends can
-shape those calls however suits them (one backend for training and
-another for sampling, different payload schemas, etc.) without growing
-this base class.
+The ABC is intentionally minimal -- it only enforces the *lifecycle*
+contract that verl's trainer side needs to know about. Compute/update op
+signatures (``compute_log_prob``, ``update_actor``, ``generate``)
+intentionally live on the concrete per-backend adapter and its matching
+per-backend worker, not on the ABC, so different backends can shape
+those calls however suits them (one backend for training and another
+for sampling, different payload schemas, etc.) without growing this
+base class.
 
 What the ABC owns (what verl drives):
 
@@ -30,11 +30,34 @@ What the ABC owns (what verl drives):
   (called from ``ONE_TO_ALL`` worker hooks).
 * Parallelism contract: ``requires_single_forwarder`` (read by
   :class:`verl.remote_backend.trainer.RemoteBackendTrainer` to decide
-  whether to assert ``n_gpus_per_node × nnodes == 1``).
+  whether to assert ``n_gpus_per_node * nnodes == 1``).
 
 What the ABC does NOT own: payload schemas, wire formats, loss-function
-plumbing, compute/update method signatures — those live entirely on the
-concrete backend + its per-backend worker.
+plumbing, compute/update method signatures -- those live entirely on
+the concrete backend + its per-backend worker.
+
+Registration model
+------------------
+
+Backends live in their own packages -- verl core carries none -- and
+are wired in via the ``VERL_USE_EXTERNAL_MODULES`` hook. Users set::
+
+    VERL_USE_EXTERNAL_MODULES=my_pkg.integrations.verl.register
+
+That module's top level:
+
+1. Imports the adapter module, which at class-definition time is
+   decorated with ``@RemoteBackendRegistry.register("<name>")`` and thus
+   inserts itself into the class registry as a side effect.
+2. Calls :meth:`RemoteBackendRegistry.register_worker` with the
+   backend's ActorRollout(Ref) forwarder worker class. The trainer
+   ``main_ppo`` reads this back via
+   :meth:`RemoteBackendRegistry.get_worker` to select
+   ``actor_rollout_cls`` at bootstrap time, without hard-coding a
+   per-backend if-branch.
+3. Registers the rollout replica class with
+   :class:`verl.workers.rollout.replica.RolloutReplicaRegistry` (which
+   uses its own lazy-loader signature for vLLM/SGLang/... parity).
 """
 
 from __future__ import annotations
@@ -124,7 +147,7 @@ class RemoteBackend(abc.ABC):
     @abc.abstractmethod
     def requires_single_forwarder(self) -> bool:
         """Whether ``RemoteBackendTrainer`` should assert
-        ``n_gpus_per_node × nnodes == 1`` and a single rollout replica.
+        ``n_gpus_per_node * nnodes == 1`` and a single rollout replica.
 
         With more than one forwarder worker, ``ONE_TO_ALL`` calls
         (``save_checkpoint``, ``update_weights``, ``to``, ``set_loss_fn``)
@@ -139,28 +162,40 @@ class RemoteBackend(abc.ABC):
 
 
 class RemoteBackendRegistry:
-    """Process-wide registry of name → :class:`RemoteBackend` class.
+    """Process-wide registry of name -> (:class:`RemoteBackend` class,
+    ActorRollout forwarder worker class).
 
-    Registration is explicit and happens when the user (or their entry
-    script) imports the adapter module they want to use::
+    Backend classes register themselves via the
+    ``@RemoteBackendRegistry.register(name)`` decorator at class
+    definition time. Forwarder worker classes are registered
+    imperatively by the same plugin's entry-point module, via
+    :meth:`register_worker`; that keeps the decorator on the backend
+    class simple, and lets the worker module retain its own eager
+    imports without having to know about registry mechanics.
 
-        # in main_ppo.py, conditioned on `trainer.remote_backend == "arctic"`:
-        from verl.workers.remote_client import arctic_rl  # noqa: F401
-
-        # arctic_rl decorates its class with
-        # @RemoteBackendRegistry.register("arctic"), so by import time the
-        # name is available to `get()` / `create()`.
-
-    There is intentionally no eager `MODULES` table that pre-imports
-    every known adapter — that would force the process to take on the
+    There is intentionally no eager MODULES table that pre-imports every
+    known adapter -- that would force the process to take on the
     transitive deps (vLLM, arctic-training, tinker, ...) of every
     backend even when only one is in use.
     """
 
     _backends: dict[str, type[RemoteBackend]] = {}
+    _worker_loaders: dict[str, Callable[[], type]] = {}
+    _resolved_workers: dict[str, type] = {}
+
+    # -- Backend class registry -------------------------------------------
 
     @classmethod
     def register(cls, name: str) -> Callable[[type[RemoteBackend]], type[RemoteBackend]]:
+        """Decorator: register the decorated class as backend ``name``.
+
+        Duplicate registrations of the same name with the identical class
+        object are a no-op (so a re-import of the plugin module during
+        test teardown / hot-reload doesn't blow up); different classes
+        under the same name raise, so the collision surfaces at import
+        time.
+        """
+
         def _decorator(backend_cls: type[RemoteBackend]) -> type[RemoteBackend]:
             existing = cls._backends.get(name)
             if existing is not None and existing is not backend_cls:
@@ -178,9 +213,9 @@ class RemoteBackendRegistry:
         if name not in cls._backends:
             raise KeyError(
                 f"Unknown remote backend '{name}'. Registered: "
-                f"{sorted(cls._backends)}. Import the adapter module "
-                "(e.g. `from verl.workers.remote_client import arctic_rl`) "
-                "before calling `get()`."
+                f"{sorted(cls._backends)}. Wire the adapter package in via "
+                "VERL_USE_EXTERNAL_MODULES=<pkg>.integrations.verl.register "
+                "before starting verl."
             )
         return cls._backends[name]
 
@@ -191,3 +226,46 @@ class RemoteBackendRegistry:
     @classmethod
     def list(cls) -> list[str]:
         return sorted(cls._backends)
+
+    # -- ActorRollout forwarder worker registry ---------------------------
+
+    @classmethod
+    def register_worker(cls, name: str, loader: Callable[[], type]) -> None:
+        """Register a lazy loader for the ActorRollout forwarder worker
+        class matching backend ``name``.
+
+        ``loader`` is a zero-arg callable returning the concrete worker
+        class; it is invoked once on the driver at first
+        :meth:`get_worker` and its result cached. Keeps this symmetric
+        with :class:`verl.workers.rollout.replica.RolloutReplicaRegistry`
+        (also lazy-loader) so an adapter plugin's ``register.py`` never
+        forces an import of vLLM / DeepSpeed / tensordict just to wire a
+        name into the registry.
+
+        Duplicate registrations of the same name with the same loader
+        object are a no-op; different loaders raise, so the collision
+        surfaces at import time.
+        """
+        existing = cls._worker_loaders.get(name)
+        if existing is not None and existing is not loader:
+            raise ValueError(
+                f"Remote backend '{name}' worker loader already registered to "
+                f"{existing!r}; cannot re-register to {loader!r}."
+            )
+        cls._worker_loaders[name] = loader
+
+    @classmethod
+    def get_worker(cls, name: str) -> type | None:
+        """Return the ActorRollout forwarder worker class for ``name``,
+        or ``None`` if the backend didn't register one (in which case
+        ``main_ppo`` falls back to verl's stock ``ActorRolloutRefWorker``
+        -- only correct for backends whose payload/loss shape matches
+        the stock worker).
+        """
+        if name in cls._resolved_workers:
+            return cls._resolved_workers[name]
+        loader = cls._worker_loaders.get(name)
+        if loader is None:
+            return None
+        cls._resolved_workers[name] = loader()
+        return cls._resolved_workers[name]

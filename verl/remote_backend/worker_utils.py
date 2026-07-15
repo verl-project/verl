@@ -12,12 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Backend-agnostic tensor + metric helpers shared across per-backend
-forwarder workers under :mod:`verl.remote_backend.workers`.
+forwarder workers.
 
-Lifted here (out of any per-backend module) so each backend's worker
-can reuse them without re-implementing nested-jagged reconstruction or
-metric normalization, and without importing one another's Worker
-classes or single-controller dispatch decorators.
+Per-backend forwarder workers ship in adapter packages (verl core carries
+none). Any such worker can pull generic nested-jagged reconstruction /
+metric normalization from this module without importing another
+backend's Worker class or its single-controller dispatch decorators.
 
 Each per-backend worker keeps its own payload-encoding decisions on
 its adapter's compute/update methods (the ABC intentionally doesn't
