@@ -60,8 +60,9 @@ def test_set_router_replay_data_uses_dynamic_cp_size(monkeypatch):
     calls = {}
 
     class FakeRouter:
-        def set_target_indices(self, indices):
+        def set_target_indices(self, indices, replay_mask=None):
             calls["target"] = indices
+            calls["replay_mask"] = replay_mask
 
     def fake_preprocess(_layers_topk_idx, **kwargs):
         calls["preprocess"] = kwargs

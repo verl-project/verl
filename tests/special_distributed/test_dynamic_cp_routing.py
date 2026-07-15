@@ -28,6 +28,12 @@ def _nested(parts: list[torch.Tensor]) -> torch.Tensor:
 
 
 def main() -> None:
+    if not torch.cuda.is_available():
+        # Dynamic CP is only qualified on CUDA/NCCL. run_all.sh is shared with
+        # the Ascend NPU workflow, so skip instead of failing there.
+        print("Skipping the Dynamic CP routing regression: CUDA is unavailable")
+        return
+
     local_rank = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(local_rank)
     dist.init_process_group(backend="nccl")

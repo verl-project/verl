@@ -110,6 +110,12 @@ def _get_global_seqlens_and_ids(
 ) -> tuple[list[tuple[int, int]], torch.Tensor, torch.Tensor]:
     """Gather sequence lengths from all DP ranks and assign global IDs.
 
+    Mirrors the private Megatron-Core helper of the same name in
+    data_schedule_utils.py (int32 lengths, zero padding, dp-rank-major
+    concatenation) so the imported scheduler sees the exact global ID
+    protocol it was built for; it is not imported directly because it is
+    private there and returns a different tuple.
+
     Args:
         local_seqlens: 1D int tensor of sequence lengths on this rank.
         dp_group: Data parallel process group.
@@ -265,7 +271,24 @@ def _stack_or_pad_samples(tensors: list[torch.Tensor]) -> torch.Tensor:
     return output
 
 
-def _validate_routing_schema(schema: list[tuple[str, str, str]], dcp_group) -> None:
+def _collective_raise(dcp_group, local_error: str | None) -> None:
+    """Raise on every rank when any rank rejected its local data.
+
+    Data-dependent validation must fail collectively: a single rank raising
+    before the scheduling collectives strands its peers in all_gather or
+    all-to-all until the distributed timeout.
+    """
+    if dcp_group is None or dcp_group.size() <= 1:
+        if local_error is not None:
+            raise ValueError(local_error)
+        return
+    flag = torch.tensor([1.0 if local_error is not None else 0.0], dtype=torch.float32, device=get_device_id())
+    torch.distributed.all_reduce(flag, op=torch.distributed.ReduceOp.MAX, group=dcp_group)
+    if flag.item() > 0:
+        raise ValueError(local_error or "A peer DCP rank rejected its local batch during scheduling")
+
+
+def _validate_routing_schema(schema: list[tuple[str, ...]], dcp_group) -> None:
     """Collectively validate the ordered routing schema before all-to-all.
 
     Every rank must enter the per-key all-to-all loop with the same keys in the
@@ -305,49 +328,56 @@ def _classify_routed_batch_fields(
     if not isinstance(input_ids, torch.Tensor):
         input_state = "missing_or_non_tensor"
         input_dtype = "-"
+        input_ndim = "-"
         errors.append("Dynamic CP requires tensor input_ids")
     elif not input_ids.is_nested:
         input_state = "dense"
         input_dtype = str(input_ids.dtype)
+        input_ndim = str(input_ids.dim())
         errors.append("Dynamic CP requires input_ids to be a NestedTensor")
     else:
         input_state = "nested"
         input_dtype = str(input_ids.dtype)
+        input_ndim = str(input_ids.dim())
         if input_ids.offsets().numel() - 1 != len(batch):
             input_state = "nested_invalid_batch"
             errors.append("Dynamic CP input_ids nested batch size does not match the TensorDict batch size")
-    schema.append(("__dcp_required_input_ids__", input_state, input_dtype))
+    schema.append(("__dcp_required_input_ids__", input_state, input_dtype, input_ndim))
 
+    # The number of dimensions is part of the collective schema: ranks whose
+    # same-named field disagrees in rank would otherwise only fail on the peers
+    # that mix both layouts in one packed micro-batch, stranding the rest.
     for key in ordered_keys:
         val = batch[key]
         if not isinstance(val, torch.Tensor):
             if key in scalar_key_names:
-                schema.append((key, "replicated_metadata", type(val).__qualname__))
+                schema.append((key, "replicated_metadata", type(val).__qualname__, "-"))
                 continue
-            schema.append((key, "invalid_non_tensor", type(val).__qualname__))
+            schema.append((key, "invalid_non_tensor", type(val).__qualname__, "-"))
             errors.append(f"DCP routed field {key!r} must be a tensor")
             continue
 
         dtype_name = str(val.dtype)
+        ndim_name = str(val.dim())
         if key in scalar_key_names:
             if val.is_nested or val.dim() == 0 or val.shape[0] != len(batch) or val.numel() != len(batch):
-                schema.append((key, "invalid_scalar_batch", dtype_name))
+                schema.append((key, "invalid_scalar_batch", dtype_name, ndim_name))
                 errors.append(f"DCP scalar field {key!r} must contain exactly one dense value per sample")
             else:
-                schema.append((key, "scalar", dtype_name))
+                schema.append((key, "scalar", dtype_name, ndim_name))
                 scalar_keys.append(key)
         elif val.is_nested:
             if val.offsets().numel() - 1 != len(batch):
-                schema.append((key, "invalid_nested_batch", dtype_name))
+                schema.append((key, "invalid_nested_batch", dtype_name, ndim_name))
                 errors.append(f"DCP nested field {key!r} batch size does not match input_ids")
             else:
-                schema.append((key, "nested", dtype_name))
+                schema.append((key, "nested", dtype_name, ndim_name))
                 tensor_keys.append(key)
         elif val.dim() < 1 or val.shape[0] != len(batch):
-            schema.append((key, "invalid_padded_batch", dtype_name))
+            schema.append((key, "invalid_padded_batch", dtype_name, ndim_name))
             errors.append(f"DCP dense field {key!r} must have the TensorDict batch size in dimension 0")
         else:
-            schema.append((key, "padded", dtype_name))
+            schema.append((key, "padded", dtype_name, ndim_name))
             padded_keys.append(key)
 
     _validate_routing_schema(schema, dcp_group)
@@ -499,12 +529,12 @@ def _reroute_samples(
         send_tensor = torch.cat(parts, dim=0) if parts else torch.empty(0, device=dev, dtype=dtype)
         send_numels = torch.tensor(numels, dtype=torch.int64, device=dev)
         send_shapes = torch.tensor(shapes, dtype=torch.int64, device=dev).reshape(-1)
-        return send_tensor, send_numels, send_shapes
+        return send_tensor, send_numels, send_shapes, numels
 
     shape_width = MAX_SHAPE_DIMS + 1
     for key in all_keys:
         key_start = _profile_now() if profile else None
-        send_tensor, send_numels, send_shapes = _pack_key_payload(key)
+        send_tensor, send_numels, send_shapes, send_numels_list = _pack_key_payload(key)
 
         recv_numels = torch.empty(sum(recv_counts), dtype=torch.int64, device=dev)
         torch.distributed.all_to_all_single(
@@ -523,20 +553,24 @@ def _reroute_samples(
             input_split_sizes=[count * shape_width for count in send_num_per_rank],
             group=dcp_group,
         )
-        recv_shapes = recv_shapes.reshape(-1, shape_width)
+        # One device-to-host copy per key: the split/unpack loops below read
+        # these values element-wise, which would otherwise synchronize once per
+        # sample. The send-side numels never need a GPU round-trip at all.
+        recv_numels_list = recv_numels.tolist()
+        recv_shapes = recv_shapes.reshape(-1, shape_width).cpu()
 
         input_elem_splits = [0] * total_dcp_gpus
         cursor = 0
         for rank, count in enumerate(send_num_per_rank):
             for _ in range(count):
-                input_elem_splits[rank] += int(send_numels[cursor].item())
+                input_elem_splits[rank] += send_numels_list[cursor]
                 cursor += 1
 
         output_elem_splits = [0] * total_dcp_gpus
         cursor = 0
         for rank, count in enumerate(recv_counts):
             for _ in range(count):
-                output_elem_splits[rank] += int(recv_numels[cursor].item())
+                output_elem_splits[rank] += recv_numels_list[cursor]
                 cursor += 1
 
         recv_size = sum(output_elem_splits)
@@ -552,7 +586,7 @@ def _reroute_samples(
 
         cursor = 0
         for i, _gid in enumerate(recv_ids_sorted):
-            numel = int(recv_numels[i].item())
+            numel = recv_numels_list[i]
             shape_row = recv_shapes[i]
             if _shape_row_is_missing(shape_row, numel):
                 recv_samples[i].pop(key, None)
@@ -657,6 +691,7 @@ def _nested_tensor_to_samples(
     if not input_ids.is_nested:
         raise ValueError("Dynamic CP requires input_ids to be a NestedTensor")
     seq_lens = input_ids.offsets().diff()
+    seq_lens_list = seq_lens.tolist()  # single device-to-host copy for the loop below
     num_samples = len(seq_lens)
 
     # Unbind NestedTensors
@@ -691,7 +726,7 @@ def _nested_tensor_to_samples(
                 if isinstance(val, torch.Tensor) and val.dim() >= 1 and val.shape[0] == num_samples:
                     sample[key] = val[i]
         # Store seq_len as metadata for routing
-        sample["_seq_len"] = int(seq_lens[i].item())
+        sample["_seq_len"] = int(seq_lens_list[i])
         samples.append(sample)
 
     return samples, seq_lens
@@ -1103,20 +1138,23 @@ def reverse_route_outputs(
             input_split_sizes=[count * shape_width for count in send_counts],
             group=dcp_group,
         )
-        recv_shapes = recv_shapes.reshape(-1, shape_width)
+        # One device-to-host copy per key instead of one synchronization per
+        # sample; the send-side numels are already Python ints.
+        recv_numels_list = recv_numels.tolist()
+        recv_shapes = recv_shapes.reshape(-1, shape_width).cpu()
 
         send_elem_splits = [0] * total_dcp_gpus
         cursor = 0
         for rank, count in enumerate(send_counts):
             for _ in range(count):
-                send_elem_splits[rank] += int(send_numels[cursor].item())
+                send_elem_splits[rank] += send_numel_values[cursor]
                 cursor += 1
 
         recv_elem_splits = [0] * total_dcp_gpus
         cursor = 0
         for rank, count in enumerate(recv_counts):
             for _ in range(count):
-                recv_elem_splits[rank] += int(recv_numels[cursor].item())
+                recv_elem_splits[rank] += recv_numels_list[cursor]
                 cursor += 1
 
         recv_tensor = torch.empty(sum(recv_elem_splits), device=dev, dtype=send_tensor.dtype)
@@ -1132,7 +1170,7 @@ def reverse_route_outputs(
         gid_to_result: dict[int, list[torch.Tensor]] = {}
         cursor = 0
         for i, gid in enumerate(recv_ids_flat):
-            n = int(recv_numels[i].item())
+            n = recv_numels_list[i]
             shape_row = recv_shapes[i]
             if _shape_row_is_missing(shape_row, n):
                 continue
@@ -1265,7 +1303,9 @@ def broadcast_dcp_metadata_to_pp(
     but do not receive full batch data. This broadcasts the metadata from the
     first PP stage (rank 0 in pp_group).
 
-    Reference: megatron-lm broadcast_to_pp_group() in data_schedule_utils.py.
+    Reference: the equivalent Megatron-Core PP metadata broadcast lives inline in
+    data_schedule.py get_batch_on_this_rank_for_sequence_packing(), built on
+    data_schedule_utils.broadcast_tensor().
 
     Args:
         micro_batches: List of TensorDict micro-batches (populated on first/last PP).
@@ -1451,6 +1491,27 @@ class DynamicCPScheduler:
             sample_id_groups: Per-microbatch, per-rank assignment of sample IDs.
                 sample_id_groups[mb_idx][rank] = [global_id, ...]
         """
+        if not sample_id_seqlens:
+            raise ValueError("Dynamic CP received no samples to schedule across the DP group")
+        zero_length_ids = [sample_id for sample_id, seq_len in sample_id_seqlens if seq_len <= 0]
+        if zero_length_ids:
+            raise ValueError(
+                "Dynamic CP cannot schedule zero-length sequences (Megatron-Core requires positive "
+                f"sequence lengths): global sample ids {zero_length_ids[:8]}. Filter empty samples upstream."
+            )
+        max_sample_id, max_seq_len = max(sample_id_seqlens, key=lambda id_len: id_len[1])
+        required_chunks = -(-max_seq_len // self.max_seqlen_per_dp_cp_rank)
+        required_cp = 1
+        while required_cp < required_chunks:
+            required_cp *= 2
+        if required_cp > self.total_dcp_gpus:
+            raise ValueError(
+                f"Sequence with global id {max_sample_id} has {max_seq_len} tokens and needs a CP group of "
+                f"{required_cp} ranks (power-of-two ceil of {max_seq_len} / max_seqlen_per_dp_cp_rank="
+                f"{self.max_seqlen_per_dp_cp_rank}), but the DPxCP group only has {self.total_dcp_gpus} ranks. "
+                "Increase max_seqlen_per_dp_cp_rank or cap the rollout sequence length."
+            )
+
         scheduler_cls = _get_megatron_dynamic_cp_scheduler_cls()
         scheduler = scheduler_cls(
             max_seqlen_per_dp_cp_rank=self.max_seqlen_per_dp_cp_rank,
@@ -1461,11 +1522,30 @@ class DynamicCPScheduler:
         )
         sample_id_groups = scheduler.get_groups_and_subsamples(sample_id_seqlens)
 
+        bad_group_lengths = {
+            mb_idx: len(group) for mb_idx, group in enumerate(sample_id_groups) if len(group) != self.total_dcp_gpus
+        }
+        if bad_group_lengths:
+            raise RuntimeError(
+                "Megatron-Core Dynamic CP returned micro-batches whose rank-assignment length does not match "
+                f"the DPxCP group size {self.total_dcp_gpus}: {{micro_batch: length}}={bad_group_lengths}."
+            )
         if any(not rank_ids for group in sample_id_groups for rank_ids in group):
             raise RuntimeError(
                 "Megatron-Core Dynamic CP returned an empty rank. Use a build containing "
                 "NVIDIA/Megatron-LM#5154 (merge commit d2e7ec5b)."
             )
+        for mb_idx, group in enumerate(sample_id_groups):
+            for rank_ids in group:
+                # Same membership rule as _build_micro_batches_from_samples: the CP group of a rank
+                # is the set of ranks whose assignment shares its first sample.
+                cp_group_size = sum(1 for other_ids in group if rank_ids[0] in other_ids)
+                if cp_group_size != self.total_dcp_gpus and (cp_group_size & (cp_group_size - 1)) != 0:
+                    raise RuntimeError(
+                        f"Megatron-Core Dynamic CP produced a CP group of {cp_group_size} ranks in micro-batch "
+                        f"{mb_idx}; only power-of-two sizes or the full DPxCP group ({self.total_dcp_gpus}) have "
+                        f"process groups: {group}"
+                    )
 
         expected_ids = {sample_id for sample_id, _ in sample_id_seqlens}
         assigned_ids = {sample_id for group in sample_id_groups for rank_ids in group for sample_id in rank_ids}
@@ -1535,7 +1615,17 @@ class DynamicCPScheduler:
             if isinstance(batch.get(key, None), torch.Tensor)
         }
         if non_tensor_data.get("compute_loss", False) and "response_mask" in batch.keys():
-            response_lens = _get_response_lengths(batch, local_seqlens)
+            # Response spans depend on local data (and on non-routed keys such as
+            # prompts/responses), so their validation must reject collectively.
+            # Catch broadly: rank-local shape errors raise RuntimeError and bad
+            # metadata raises TypeError, and any escape strands the peers.
+            response_lens = None
+            local_error = None
+            try:
+                response_lens = _get_response_lengths(batch, local_seqlens)
+            except Exception as exc:
+                local_error = f"{type(exc).__name__}: {exc}"
+            _collective_raise(dcp_group, local_error)
             for sample, response_len in zip(local_samples, response_lens, strict=True):
                 sample[DCP_RESPONSE_LENGTH_KEY] = response_len.reshape(1)
             scalar_keys.append(DCP_RESPONSE_LENGTH_KEY)

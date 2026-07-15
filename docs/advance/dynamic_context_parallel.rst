@@ -29,9 +29,17 @@ It supports text-only language-model batches. Batches containing
 tensors.
 
 The DCP process group spans the static DP and CP dimensions. Its total size
-(``DP * CP``) must be even. This is a runtime topology constraint because DP is
-not known when the engine dataclass is constructed. For example, CP1 is valid
-with an even DP size, while an odd DP size combined with CP1 is rejected.
+(``DP * CP``) must be a power of two: the supported Megatron-Core build only
+creates dynamic CP process groups for power-of-two sizes, and its scheduler
+assigns power-of-two CP group sizes. This is a runtime topology constraint
+because DP is not known when the engine dataclass is constructed. For example,
+CP1 is valid when the DP size is a power of two, while ``DP=6`` with CP1 is
+rejected.
+
+A single sequence must fit the full DPxCP group. With a power-of-two topology
+this means sequences longer than ``max_seqlen_per_dp_cp_rank * DP * CP`` are
+rejected at scheduling time with a configuration error that names the
+offending sample.
 
 Configuration
 -------------
@@ -73,10 +81,10 @@ With a 4,096-token per-rank limit, representative minimum CP sizes are:
    * - 8,193-16,384
      - CP4
 
-Megatron-Core's scheduler may expand a group to use otherwise idle ranks,
-including a full DPxCP group for supported even, non-power-of-two layouts.
-Every scheduled micro-batch must use all ranks; verl validates this invariant
-before routing data.
+Megatron-Core's scheduler may expand a group to use otherwise idle ranks, up
+to the full DPxCP group. Every scheduled micro-batch must use all ranks and
+every CP group size must have a matching process group; verl validates these
+invariants before routing data.
 
 Behavior and limitations
 ------------------------
