@@ -13,50 +13,60 @@
 # limitations under the License.
 """CPU unit tests for the checkpoint-engine first-init timeout guardrail (#6967).
 
-These exercise the timeout mechanism only (no NCCL/GPU): the guardrail must turn
-a hung first rendezvous into a fast, clear error, must not interfere with a
-normal init, and must faithfully surface an init error.
+These exercise ``wait_for_group_init`` -- the controller-side bound that
+``CheckpointEngineManager.build_process_group()`` wraps around its
+``ray.get`` of the workers' ``init_process_group`` futures. ``ray.get`` is
+mocked so the tests run on CPU with no Ray cluster: a hung init must become a
+fast, clear ``CheckpointEngineInitError``; a normal init must pass through; a
+real init error must propagate unchanged; and the env var must set the bound.
 """
 
-import time
+from unittest.mock import patch
 
 import pytest
+import ray
 
 from verl.checkpoint_engine._group_init import (
     CheckpointEngineInitError,
-    run_group_init_with_timeout,
+    wait_for_group_init,
 )
 
 
-def test_completes_within_timeout():
-    calls = []
-    run_group_init_with_timeout(lambda: calls.append(1), group_name="g", timeout_s=5.0)
-    assert calls == [1]
+def test_returns_results_when_init_completes():
+    with patch("verl.checkpoint_engine._group_init.ray.get", return_value=["ok0", "ok1"]) as mock_get:
+        assert wait_for_group_init(["ref0", "ref1"], timeout_s=5.0) == ["ok0", "ok1"]
+        mock_get.assert_called_once()
 
 
-def test_raises_fast_on_timeout_instead_of_hanging():
-    # The #6967 symptom: init blocks far longer than the bound. The guardrail
-    # must raise promptly (~timeout), not wait for the (here 10s) hang to end.
-    start = time.monotonic()
-    with pytest.raises(CheckpointEngineInitError):
-        run_group_init_with_timeout(lambda: time.sleep(10.0), group_name="g", timeout_s=0.3)
-    assert time.monotonic() - start < 3.0
+def test_raises_clear_error_on_timeout():
+    with patch(
+        "verl.checkpoint_engine._group_init.ray.get",
+        side_effect=ray.exceptions.GetTimeoutError("timed out"),
+    ):
+        with pytest.raises(CheckpointEngineInitError, match="#6967"):
+            wait_for_group_init(["ref"], timeout_s=0.1)
 
 
-def test_reraises_init_error():
-    def boom():
-        raise ValueError("nccl boom")
-
-    with pytest.raises(ValueError, match="nccl boom"):
-        run_group_init_with_timeout(boom, group_name="g", timeout_s=5.0)
+def test_reraises_non_timeout_errors():
+    with patch(
+        "verl.checkpoint_engine._group_init.ray.get",
+        side_effect=RuntimeError("nccl boom"),
+    ):
+        with pytest.raises(RuntimeError, match="nccl boom"):
+            wait_for_group_init(["ref"], timeout_s=5.0)
 
 
 def test_env_var_sets_default_timeout(monkeypatch):
-    monkeypatch.setenv("VERL_CKPT_ENGINE_INIT_TIMEOUT_S", "0.2")
-    start = time.monotonic()
-    with pytest.raises(CheckpointEngineInitError):
-        run_group_init_with_timeout(lambda: time.sleep(10.0), group_name="g")
-    assert time.monotonic() - start < 3.0
+    monkeypatch.setenv("VERL_CKPT_ENGINE_INIT_TIMEOUT_S", "12.5")
+    captured = {}
+
+    def fake_get(refs, timeout=None):
+        captured["timeout"] = timeout
+        return []
+
+    with patch("verl.checkpoint_engine._group_init.ray.get", side_effect=fake_get):
+        wait_for_group_init(["ref"])
+    assert captured["timeout"] == 12.5
 
 
 if __name__ == "__main__":

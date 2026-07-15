@@ -11,30 +11,35 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Bounded first-rendezvous init for the NCCL checkpoint engine.
+"""Bounded controller-side wait for checkpoint-engine process-group init.
 
-The first ``ray.util.collective`` rendezvous (``init_collective_group`` +
-``barrier``) can hang indefinitely on some environments -- a timing race in the
+The first ``ray.util.collective`` rendezvous during checkpoint-engine weight
+sync can hang indefinitely on some environments -- a timing race in the
 Ray/NCCL layer reported in verl issue #6967. When it hangs, both ranks sit at
-0% util with no traceback and the whole job is stuck forever.
+0% util with no traceback and the whole job is stuck forever; only the first
+sync is affected (the group is reused afterward).
 
-This wraps that first init in a bounded timeout so a stalled rendezvous fails
-fast with a clear, actionable error instead of hanging silently. A stalled
-NCCL/collective call cannot be safely interrupted, so we deliberately do NOT
-retry in place: we surface the error and let the launcher tear the job down.
+``CheckpointEngineManager.build_process_group()`` dispatches every worker's
+``init_process_group`` concurrently and blocks on ``ray.get(...)``. We bound
+that controller-side wait so a hung first sync fails fast with a clear,
+actionable error instead of hanging forever. A stalled NCCL/collective call in
+a worker cannot be safely interrupted, so we deliberately do not retry: we
+surface the error and let the launcher tear the job down (Ray reclaims the
+actors and GPUs when the driver exits).
 """
 
 import logging
 import os
-import threading
-from typing import Callable
+from typing import Any
+
+import ray
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 # Generous default: long enough never to trip a slow-but-healthy first sync
-# (large models can take seconds to tens of seconds), short enough to abort a
-# genuine hang instead of waiting forever. Override via env if needed.
+# (large models can take tens of seconds), short enough to abort a genuine hang
+# instead of waiting forever. Override via env if needed.
 INIT_TIMEOUT_ENV = "VERL_CKPT_ENGINE_INIT_TIMEOUT_S"
 DEFAULT_INIT_TIMEOUT_S = 600.0
 
@@ -43,49 +48,30 @@ class CheckpointEngineInitError(RuntimeError):
     """Raised when checkpoint-engine process-group init exceeds its timeout."""
 
 
-def run_group_init_with_timeout(
-    init_fn: Callable[[], None],
-    *,
-    group_name: str,
-    timeout_s: float | None = None,
-) -> None:
-    """Run the blocking group registration + first barrier under a timeout.
+def wait_for_group_init(refs: list, *, timeout_s: float | None = None) -> Any:
+    """``ray.get`` the process-group-init object refs under a bounded timeout.
 
     Args:
-        init_fn: Zero-arg callable performing ``init_collective_group`` and the
-            first ``barrier`` (and any per-rank setup between them).
-        group_name: Collective group name, used only for error messages.
+        refs: Ray object refs returned by dispatching ``init_process_group`` to
+            the actor and rollout worker groups.
         timeout_s: Seconds to wait. Defaults to the ``VERL_CKPT_ENGINE_INIT_TIMEOUT_S``
             env var, else ``DEFAULT_INIT_TIMEOUT_S``.
 
+    Returns:
+        The ``ray.get`` results.
+
     Raises:
-        CheckpointEngineInitError: If ``init_fn`` does not finish within the timeout.
-        BaseException: Re-raises whatever ``init_fn`` itself raised.
+        CheckpointEngineInitError: If the init does not complete within the timeout.
     """
     if timeout_s is None:
         timeout_s = float(os.environ.get(INIT_TIMEOUT_ENV, DEFAULT_INIT_TIMEOUT_S))
 
-    done = threading.Event()
-    error: dict[str, BaseException] = {}
-
-    def _target() -> None:
-        try:
-            init_fn()
-        except BaseException as e:  # surfaced to the caller via `error`
-            error["exc"] = e
-        finally:
-            done.set()
-
-    worker = threading.Thread(target=_target, name=f"ckpt-group-init-{group_name}", daemon=True)
-    worker.start()
-    if not done.wait(timeout_s):
-        # The worker thread is still blocked in NCCL/collective and cannot be
-        # safely interrupted; we abort the caller and let the launcher tear down.
+    try:
+        return ray.get(refs, timeout=timeout_s)
+    except ray.exceptions.GetTimeoutError as e:
         raise CheckpointEngineInitError(
-            f"checkpoint-engine NCCL group {group_name!r} init did not complete "
-            f"within {timeout_s:.0f}s; the first weight sync appears hung "
-            f"(verl issue #6967). Aborting instead of hanging indefinitely. If "
-            f"this was a slow-but-healthy init, raise {INIT_TIMEOUT_ENV}."
-        )
-    if "exc" in error:
-        raise error["exc"]
+            f"checkpoint-engine process-group init did not complete within "
+            f"{timeout_s:.0f}s; the first weight sync appears hung (verl issue "
+            f"#6967). Aborting instead of hanging indefinitely. If this was a "
+            f"slow-but-healthy init, raise {INIT_TIMEOUT_ENV}."
+        ) from e
