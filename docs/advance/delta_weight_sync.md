@@ -42,21 +42,11 @@ checkpoint engine (including the V1 ``separate_async`` trainer).
   go — so a dummy-initialized rollout gets a correct base without any sparse-encoding overhead.
   Subsequent syncs are sparse.
 
-## Backends
-
-### ``delta``
-
-Diffs on rank 0 after the ordinary full-tensor gather; rank 0 holds a full-model pinned-CPU snapshot.
-
-```shell
-    actor_rollout_ref.rollout.checkpoint_engine.backend=delta \
-    +actor_rollout_ref.rollout.checkpoint_engine.engine_kwargs.delta.encoding=indices
-```
+## Backend
 
 ### ``delta_sharded`` (sharded snapshot)
 
-The ``delta`` backend above still ``full_tensor()``-gathers every parameter to rank 0 before diffing.
-The ``delta_sharded`` backend pushes the diff *below* the all-gather: each actor rank pins a snapshot of
+``delta_sharded`` pushes the diff *below* the all-gather: each actor rank pins a snapshot of
 only **its** FSDP shard, byte-diffs the shard locally, and gathers just the changed ``(position, value)``
 pairs to rank 0 (via the engine's ``get_per_tensor_param_shard()`` export). So the gather volume drops
 from the full parameter to the sparsity ratio (~1–3%), and no rank needs a full-model snapshot — the
@@ -67,7 +57,7 @@ memory and the gather traffic both shard with the world size.
     +actor_rollout_ref.rollout.checkpoint_engine.engine_kwargs.delta_sharded.encoding=indices
 ```
 
-The assembled delta is **bit-identical** to what ``delta`` produces, so the wire format, the per-flush
+The assembled delta is **bit-identical** to full-gather-then-diff, so the wire format, the per-flush
 checksum, and the rollout-side receiver are all unchanged. Each rank computes its shard's absolute
 position in the full flattened parameter purely locally (from the DTensor spec, no extra collective).
 
@@ -90,7 +80,7 @@ Other shard dimensions than ``Shard(0)`` are not supported and raise.
 ## Usage
 
 A runnable example is ``verl/experimental/one_step_off_policy/shell/grpo_0.6b_gsm8k_fsdp2_sglang_delta_2_6.sh`` —
-the SGLang 2+6 disaggregated GRPO recipe with ``backend=delta``.
+the SGLang 2+6 disaggregated GRPO recipe with ``backend=delta_sharded``.
 
 Current scope: disaggregated (``hybrid_engine=False``) + SGLang rollout in BF16, FSDP1/FSDP2 training engines.
 Selecting a delta backend with any other rollout engine raises ``NotImplementedError`` at worker startup;

@@ -13,36 +13,21 @@
 # limitations under the License.
 """Delta weight sync primitives for the checkpoint engine.
 
-This package contains the framework-agnostic core of "send only the elements
-that changed" weight sync: the pinned-CPU snapshot, bytewise diff, encode, and
-bucket logic. :class:`~verl.checkpoint_engine.delta_checkpoint_engine.DeltaCheckpointEngine`
-consumes these flushes and broadcasts them over NCCL; the rollout worker decodes
-them back into full tensors locally.
+This package holds the framework-agnostic wire schema of "send only the
+elements that changed" weight sync: the per-flush parameter spec
+(:class:`DeltaParam` / :class:`DeltaFlush`) and the payload checksum. The
+sharded engines assemble these flushes from backend-provided shard exports and
+broadcast them over NCCL; the rollout backend decodes them in place.
 
 Design follows THUDM/slime's delta-sync implementation
 (``slime/backends/megatron_utils/update_weight/update_weight_from_distributed_delta.py``).
 """
 
-from .delta_state import DeltaState, ParamDiff
-from .encode import (
-    DeltaBucket,
-    DeltaEncodingName,
-    EncodedChunk,
-    bytewise_diff_mask,
-    checksum,
-    encode_chunk,
-)
-from .wrapper import DeltaFlush, iter_delta_flushes
+from .encode import DeltaParam, checksum
+from .wrapper import DeltaFlush
 
 __all__ = [
-    "DeltaBucket",
-    "DeltaEncodingName",
     "DeltaFlush",
-    "DeltaState",
-    "EncodedChunk",
-    "ParamDiff",
-    "bytewise_diff_mask",
+    "DeltaParam",
     "checksum",
-    "encode_chunk",
-    "iter_delta_flushes",
 ]
