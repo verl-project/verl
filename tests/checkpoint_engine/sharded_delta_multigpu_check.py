@@ -1,4 +1,4 @@
-"""Validate verl.workers.engine.fsdp.sharded_delta against the full-gather diff.
+"""Validate verl.checkpoint_engine.delta_sync.sparse_gather against the full-gather diff.
 
 torchrun --nproc_per_node=4 tests/checkpoint_engine/sharded_delta_multigpu_check.py
 """
@@ -7,7 +7,8 @@ import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import Replicate, Shard, distribute_tensor
 
-from verl.workers.engine.fsdp.sharded_delta import (
+from verl.workers.engine.fsdp.sharded_delta import local_shard_view  # noqa
+from verl.checkpoint_engine.delta_sync.sparse_gather import (
     gather_v_to_rank0,
     local_shard_view,
     shard_delta_indices,

@@ -44,7 +44,7 @@ with patch("importlib.metadata.distributions", return_value=[]):
     import cupy as cp
 
 from .delta_sync.encode import DeltaParam, checksum as _checksum
-from verl.workers.engine.fsdp.sharded_delta import (
+from .delta_sync.sparse_gather import (
     gather_dense_to_rank0,
     gather_v_batched_to_rank0,
     gather_v_to_rank0,
