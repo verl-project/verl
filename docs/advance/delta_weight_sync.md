@@ -23,8 +23,9 @@ pay off differently:
   of network speed* — which is why ``delta_sharded`` beat the full broadcast at every size we
   measured (0.5B through 72B, 1.3–3.1×), not just at the large end.
 
-In practice: prefer ``delta_sharded`` whenever the setup is disaggregated; the advantage widens
-with scale but is already measurable at sub-1B models.
+This is why ``delta_sharded`` is the only delta backend we ship: an earlier full-gather variant
+(diff on a rank-0 full-model snapshot) was consistently slower than ``delta_sharded`` at every
+size we measured, so it was dropped in favor of the sharded design.
 
 ## Design
 
