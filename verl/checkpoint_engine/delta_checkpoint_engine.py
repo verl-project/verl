@@ -214,9 +214,10 @@ class DeltaShardedCheckpointEngine(DeltaCheckpointEngine):
     wire and the receiver (:meth:`DeltaCheckpointEngine.receive_weights`) are
     reused unchanged.
 
-    ``send_weights`` here expects the SHARDED generator ``get_per_tensor_param_shard()``
-    (``(name, local_flat_shard, within_param_offset, full_numel, full_shape, contributes)``)
-    rather than the full-tensor generator.
+    ``send_weights`` consumes the SHARDED generator ``get_per_tensor_param_shard()``:
+    ``(name, local_shard, ShardSpec)`` per local parameter (see
+    :mod:`verl.checkpoint_engine.delta_sync.spec`). All layout knowledge lives in the
+    spec, so this one engine serves any trainer backend that can describe its shards.
     """
 
     def __init__(self, *args, encoding: str = "indices", batch_gather: int = 32, **kwargs) -> None:
@@ -309,7 +310,16 @@ class DeltaShardedCheckpointEngine(DeltaCheckpointEngine):
             bucket = []
             bucket_bytes = 0
 
-        for name, local, offset, full_numel, full_shape, contributes in weights:
+        def _bucket_dense(hf_name, tensor):
+            nonlocal total_elems, bucket_bytes
+            flat = tensor.reshape(-1)
+            total_elems += int(flat.numel())
+            bucket.append((hf_name, str(flat.dtype).replace("torch.", ""), list(tensor.shape), flat))
+            bucket_bytes += int(flat.nbytes)
+            if bucket_bytes >= self.bucket_size:
+                _seal()
+
+        for name, local, spec in weights:
             local = local.detach().contiguous().view(-1)
             snap = self._shard_snap.get(name)
             if snap is None or snap.numel() != local.numel():
@@ -317,14 +327,19 @@ class DeltaShardedCheckpointEngine(DeltaCheckpointEngine):
             snap.copy_(local, non_blocking=True)
             self._shard_snap[name] = snap
 
-            shard = local if contributes else torch.empty(0, dtype=local.dtype, device=local.device)
-            full = gather_dense_to_rank0(shard, offset if contributes else 0, full_numel)
-            if is_r0:
-                total_elems += int(full_numel)
-                bucket.append((name, str(local.dtype).replace("torch.", ""), list(full_shape), full))
-                bucket_bytes += int(full.nbytes)
-                if bucket_bytes >= self.bucket_size:
-                    _seal()
+            shard = local if spec.contributes else torch.empty(0, dtype=local.dtype, device=local.device)
+            if spec.translate is not None:
+                # closed-form profile: place each shard at its flat offset
+                full = gather_dense_to_rank0(shard, spec.dense_offset if spec.contributes else 0, spec.full_numel)
+                if is_r0:
+                    _bucket_dense(spec.hf_name, full.view(spec.full_shape))
+            else:
+                # rebuild profile: hand the group's dense shards to the trainer's converter
+                shards = gather_shards_to_rank0(shard, group=spec.gather_group)
+                if is_r0 and shards is not None:
+                    shards = [sh.view(spec.shard_shape) for sh in shards]
+                    for hf_name, hf_tensor in spec.rebuild_dense(shards):
+                        _bucket_dense(hf_name, hf_tensor)
 
         self._shard_seeded = True
         if not is_r0:
@@ -414,31 +429,77 @@ class DeltaShardedCheckpointEngine(DeltaCheckpointEngine):
                     _consume(name, dtype_str, full_shape, full_numel, aidx, aval)
             group = []
 
-        for name, local, offset, _full_numel, full_shape, contributes in weights:
+        nan_group: list = []  # rebuild-profile params batched per gather_group
+
+        def _flush_nan_group():
+            nonlocal nan_group, total_elems
+            if not nan_group:
+                return
+            pg = nan_group[0][2].gather_group
+            dev = nan_group[0][3].device
+            idx_concat = torch.cat([g[3] for g in nan_group])
+            val_concat = torch.cat([g[4] for g in nan_group])
+            counts = torch.tensor([int(g[3].numel()) for g in nan_group], dtype=torch.int64, device=dev)
+            gathered = gather_v_batched_to_rank0(idx_concat, val_concat, counts, group=pg, grouped=True)
+            if is_r0 and gathered is not None:
+                for (name, local_dtype, spec, _gi, _gv), per_rank in zip(nan_group, gathered):
+                    shard_list = []
+                    for gi, gv in per_rank:
+                        buf = torch.full(spec.shard_shape, float("nan"), dtype=local_dtype, device=dev)
+                        buf.view(-1)[gi] = gv
+                        shard_list.append(buf)
+                    for hf_name, hf_tensor in spec.rebuild_dense(shard_list):
+                        fl = hf_tensor.reshape(-1)
+                        total_elems += int(fl.numel())
+                        pos = (~torch.isnan(fl)).nonzero(as_tuple=False).view(-1)
+                        if pos.numel():
+                            # total_elems is added inside _consume too; compensate
+                            total_elems -= int(fl.numel())
+                            _consume(hf_name, str(fl.dtype).replace("torch.", ""),
+                                     tuple(hf_tensor.shape), int(fl.numel()), pos, fl[pos])
+            nan_group = []
+
+        for name, local, spec in weights:
             local = local.detach().contiguous().view(-1)
             snap = self._shard_snap.get(name)
             if snap is None or snap.numel() != local.numel():
                 snap = torch.empty_like(local, device="cpu", pin_memory=True)
-            if contributes:
+            if spec.contributes:
                 base = snap.to(local.device, non_blocking=True)
-                gidx, gval = shard_delta_indices(local, base, offset)
+                lidx, lval = shard_delta_indices(local, base, 0)  # shard-local coordinates
             else:
                 # replicated param owned by another rank; contribute nothing but keep lockstep.
-                gidx = torch.empty(0, dtype=torch.int64, device=local.device)
-                gval = torch.empty(0, dtype=local.dtype, device=local.device)
+                lidx = torch.empty(0, dtype=torch.int64, device=local.device)
+                lval = torch.empty(0, dtype=local.dtype, device=local.device)
             snap.copy_(local, non_blocking=True)  # update snapshot to current shard
             self._shard_snap[name] = snap
 
+            if spec.translate is None:
+                # rebuild profile: boundary-preserving gather within the spec's group,
+                # NaN-sentinel rebuild through the trainer's converter on rank 0.
+                if nan_group and nan_group[0][2].gather_group is not spec.gather_group:
+                    _flush_nan_group()
+                nan_group.append((name, local.dtype, spec, lidx, lval))
+                if len(nan_group) >= max(batch_k, 1):
+                    _flush_nan_group()
+                continue
+
+            # closed-form profile: translate rank-locally, gather without boundaries.
+            gidx = spec.translate(lidx) if lidx.numel() else lidx
+            gval = lval
             if batch_k > 1:
-                group.append((name, str(local.dtype).replace("torch.", ""), full_shape, _full_numel, gidx, gval))
+                group.append((spec.hf_name, str(local.dtype).replace("torch.", ""),
+                              spec.full_shape, spec.full_numel, gidx, gval))
                 if len(group) >= batch_k:
                     _flush_group()
                 continue
 
             aidx, aval = gather_v_to_rank0(gidx, gval)
             if is_r0:
-                _consume(name, str(local.dtype).replace("torch.", ""), full_shape, _full_numel, aidx, aval)
+                _consume(spec.hf_name, str(local.dtype).replace("torch.", ""),
+                         spec.full_shape, spec.full_numel, aidx, aval)
         _flush_group()
+        _flush_nan_group()
 
         self._shard_seeded = True
         if not is_r0:

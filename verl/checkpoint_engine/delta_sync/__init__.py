@@ -24,10 +24,12 @@ Design follows THUDM/slime's delta-sync implementation
 """
 
 from .encode import DeltaParam, checksum
+from .spec import ShardSpec
 from .wrapper import DeltaFlush
 
 __all__ = [
     "DeltaFlush",
     "DeltaParam",
+    "ShardSpec",
     "checksum",
 ]

@@ -167,9 +167,10 @@ class BaseEngine:
         backends, which byte-diff each rank's shard locally and only gather the changed
         elements), so the export never materializes full tensors on any rank.
 
-        The per-item schema is engine-specific: implementations yield the local shard
-        plus enough placement metadata for the consumer to map shard-local positions
-        back to the full parameter (see the FSDP engine implementation).
+        Implementations yield ``(name, local_shard, ShardSpec)`` -- the spec (see
+        :mod:`verl.checkpoint_engine.delta_sync.spec`) carries all placement knowledge
+        (offset translation or a dense rebuild callable), so the consuming checkpoint
+        engine stays trainer-agnostic.
 
         Returns:
             Generator: A generator that yields per-parameter local shards with placement metadata.

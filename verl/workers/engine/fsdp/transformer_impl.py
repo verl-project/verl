@@ -840,6 +840,27 @@ class FSDPEngine(BaseEngine):
 
         device = get_device_id()
 
+        from verl.checkpoint_engine.delta_sync.spec import ShardSpec
+
+        def _make_spec(name, full_shape, full_numel, offset, contributes, local):
+            def _translate(local_idx, _off=offset):
+                return local_idx + _off
+
+            def _rebuild_dense(shard_list, _name=name, _shape=full_shape):
+                # Shard(0) shards concatenate in rank order into the full flat tensor.
+                return [(_name, torch.cat(shard_list).view(_shape))]
+
+            return ShardSpec(
+                contributes=contributes,
+                shard_shape=tuple(local.shape),
+                translate=_translate,
+                hf_name=name,
+                full_shape=full_shape,
+                full_numel=full_numel,
+                dense_offset=offset,
+                rebuild_dense=_rebuild_dense,
+            )
+
         def _gen():
             for name, param in params.items():
                 full_shape = tuple(param.shape)
@@ -848,7 +869,7 @@ class FSDPEngine(BaseEngine):
                 if p.is_floating_point():
                     p = p.to(torch.bfloat16, non_blocking=True)
                 local, offset, contributes = local_shard_view(p)
-                yield name, local, offset, full_numel, full_shape, contributes
+                yield name, local, _make_spec(name, full_shape, full_numel, offset, contributes, local)
 
         return _gen(), None
 

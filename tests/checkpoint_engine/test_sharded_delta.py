@@ -15,7 +15,7 @@
 
 The full sharded path (DTensor shards + gather-v across ranks vs the full-gather diff) is
 validated bit-identically in a multi-GPU check; see
-``tests/checkpoint_engine/sharded_delta_multigpu_check.py`` (run with torchrun). These
+``tests/special_distributed/test_sharded_delta_gather.py`` (run with torchrun). These
 tests cover the process-local pieces that CI can run without a process group.
 """
 
@@ -64,3 +64,36 @@ def test_local_shard_view_plain_tensor():
     assert torch.equal(local, t.reshape(-1))
     # outside a process group, rank 0 is assumed -> contributes
     assert contributes is True
+
+
+def test_fsdp_shardspec_profiles():
+    """The FSDP export's spec must satisfy both contract profiles coherently:
+    translate(idx) == idx + flat_offset, and rebuild_dense == rank-order concat."""
+    from verl.checkpoint_engine.delta_sync.spec import ShardSpec
+
+    full = torch.arange(24, dtype=torch.float32).view(6, 4)
+    shards = list(full.chunk(3, dim=0))  # 3 "ranks", Shard(0)
+    offsets = [0, 8, 16]
+
+    specs = []
+    for r, sh in enumerate(shards):
+        off = offsets[r]
+        specs.append(ShardSpec(
+            contributes=True, shard_shape=tuple(sh.shape),
+            translate=lambda idx, _o=off: idx + _o,
+            hf_name="w", full_shape=(6, 4), full_numel=24, dense_offset=off,
+            rebuild_dense=lambda sl: [("w", torch.cat([x.reshape(-1) for x in sl]).view(6, 4))],
+        ))
+
+    # translate: local idx 0..n maps onto the flat full tensor
+    for r, (sh, spec) in enumerate(zip(shards, specs)):
+        idx = torch.arange(sh.numel())
+        assert torch.equal(full.reshape(-1)[spec.translate(idx)], sh.reshape(-1))
+
+    # rebuild_dense: pure permutation, NaN positions preserved
+    nan_shards = [torch.full_like(sh.reshape(-1), float("nan")) for sh in shards]
+    nan_shards[1][3] = 42.0
+    (_, rebuilt), = specs[0].rebuild_dense(nan_shards)
+    fl = rebuilt.reshape(-1)
+    pos = (~torch.isnan(fl)).nonzero(as_tuple=False).view(-1)
+    assert pos.tolist() == [offsets[1] + 3] and fl[pos[0]] == 42.0

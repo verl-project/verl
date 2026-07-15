@@ -104,7 +104,8 @@ def gather_v_batched_to_rank0(
     val_concat: torch.Tensor,
     counts: torch.Tensor,
     group=None,
-) -> list[tuple[torch.Tensor, torch.Tensor]] | None:
+    grouped: bool = False,
+) -> list | None:
     """Batched :func:`gather_v_to_rank0`: one collective round for K parameters.
 
     Each rank passes its K per-parameter deltas concatenated (``idx_concat``,
@@ -116,6 +117,7 @@ def gather_v_batched_to_rank0(
     """
     rank = dist.get_rank(group)
     world = dist.get_world_size(group)
+    dst = dist.get_global_rank(group, 0) if group is not None else 0
     dev = idx_concat.device
     k = int(counts.numel())
 
@@ -129,6 +131,8 @@ def gather_v_batched_to_rank0(
             return None
         empty_i = torch.empty(0, dtype=torch.int64, device=dev)
         empty_v = torch.empty(0, dtype=val_concat.dtype, device=dev)
+        if grouped:
+            return [[(empty_i, empty_v) for _ in range(world)] for _ in range(k)]
         return [(empty_i, empty_v) for _ in range(k)]
 
     idx_pad = torch.zeros(max_n, dtype=torch.int64, device=dev)
@@ -139,8 +143,8 @@ def gather_v_batched_to_rank0(
 
     idx_list = [torch.zeros(max_n, dtype=torch.int64, device=dev) for _ in range(world)] if rank == 0 else None
     val_list = [torch.zeros(max_n, dtype=val_concat.dtype, device=dev) for _ in range(world)] if rank == 0 else None
-    dist.gather(idx_pad, idx_list, dst=0, group=group)
-    dist.gather(val_pad, val_list, dst=0, group=group)
+    dist.gather(idx_pad, idx_list, dst=dst, group=group)
+    dist.gather(val_pad, val_list, dst=dst, group=group)
     if rank != 0:
         return None
 
@@ -151,6 +155,13 @@ def gather_v_batched_to_rank0(
             offs[r][i + 1] = offs[r][i] + counts_cpu[r][i]
     out = []
     for i in range(k):
+        if grouped:
+            # keep the per-rank boundary: [(idx_r, val_r) for every rank in the group]
+            out.append([
+                (idx_list[r][offs[r][i] : offs[r][i + 1]], val_list[r][offs[r][i] : offs[r][i + 1]])
+                for r in range(world)
+            ])
+            continue
         idx_pieces = [idx_list[r][offs[r][i] : offs[r][i + 1]] for r in range(world) if counts_cpu[r][i]]
         val_pieces = [val_list[r][offs[r][i] : offs[r][i + 1]] for r in range(world) if counts_cpu[r][i]]
         if idx_pieces:
@@ -242,3 +253,33 @@ def gather_v_grouped_to_rank0(
     if rank != 0:
         return None
     return [(idx_list[r][: counts[r]], val_list[r][: counts[r]]) for r in range(world)]
+
+
+def gather_shards_to_rank0(local_val: torch.Tensor, group=None) -> list[torch.Tensor] | None:
+    """Gather each rank's dense flat shard to the group's rank 0, per-rank boundaries kept.
+
+    Returns ``[shard_r for r in range(group world)]`` on the group's rank 0 (None
+    elsewhere). Used by the rebuild-profile dense first sync, where rank 0 hands the
+    shard list to ``ShardSpec.rebuild_dense``.
+    """
+    rank = dist.get_rank(group)
+    world = dist.get_world_size(group)
+    dst = dist.get_global_rank(group, 0) if group is not None else 0
+    dev = local_val.device
+
+    n = int(local_val.numel())
+    cnt = torch.tensor([n], dtype=torch.long, device=dev)
+    counts = [torch.zeros(1, dtype=torch.long, device=dev) for _ in range(world)]
+    dist.all_gather(counts, cnt, group=group)
+    counts = torch.cat(counts).cpu().tolist()
+    max_n = max(counts) if counts else 0
+    if max_n == 0:
+        return [torch.empty(0, dtype=local_val.dtype, device=dev) for _ in range(world)] if rank == 0 else None
+
+    val_pad = torch.zeros(max_n, dtype=local_val.dtype, device=dev)
+    val_pad[:n] = local_val
+    val_list = [torch.zeros(max_n, dtype=local_val.dtype, device=dev) for _ in range(world)] if rank == 0 else None
+    dist.gather(val_pad, val_list, dst=dst, group=group)
+    if rank != 0:
+        return None
+    return [val_list[r][: counts[r]] for r in range(world)]

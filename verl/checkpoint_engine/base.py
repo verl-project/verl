@@ -303,7 +303,7 @@ class CheckpointEngineWorker(Worker):
 
         self.server_adapter: BaseRollout = server_adapter
         backend = self.rollout_config.checkpoint_engine.backend
-        if backend.startswith("delta") and self.rollout_config.name != "sglang":
+        if backend == "delta_sharded" and self.rollout_config.name != "sglang":
             raise NotImplementedError(
                 f"checkpoint_engine.backend={backend!r} currently supports only the sglang rollout "
                 f"(got rollout.name={self.rollout_config.name!r}): the sparse apply is dispatched "

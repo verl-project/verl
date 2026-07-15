@@ -1,6 +1,6 @@
 """Validate verl.checkpoint_engine.delta_sync.sparse_gather against the full-gather diff.
 
-torchrun --nproc_per_node=4 tests/checkpoint_engine/sharded_delta_multigpu_check.py
+torchrun --nproc_per_node=4 tests/special_distributed/test_sharded_delta_gather.py
 """
 import torch
 import torch.distributed as dist
