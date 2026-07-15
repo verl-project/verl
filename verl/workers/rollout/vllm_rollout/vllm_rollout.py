@@ -57,17 +57,27 @@ def _check_vllm_version_for_sleep_level():
         return False
     return vs.parse(current_version) >= vs.parse(minver)
 
+_MOE_EXPAND_ARCHITECTURE_WHITELIST = frozenset({
+    "Qwen3MoeForCausalLM",
+})
 
-def _should_expand_vllm_moe_params() -> bool:
+def _should_expand_vllm_moe_params(architectures: Optional[list[str]] = None) -> bool:
     current_version = get_version("vllm")
     if not current_version:
         return False
 
     try:
-        return vs.parse(current_version) <= vs.parse("0.24.0")
+        version_ok = vs.parse(current_version) <= vs.parse("0.24.0")
     except vs.InvalidVersion:
         return False
 
+    if not version_ok:
+        return False
+
+    if architectures is None or len(architectures) == 0:
+        return False
+
+    return architectures[0] in _MOE_EXPAND_ARCHITECTURE_WHITELIST
 
 async def _iter_vllm_compatible_moe_params(weights):
     """Expand Transformers 5 packed MoE expert tensors to vLLM checkpoint keys.
@@ -227,7 +237,7 @@ class ServerAdapter(BaseRollout):
             bucket_size_mb=bucket_size_mb,
             use_shm=self.use_shm,
         )
-        if _should_expand_vllm_moe_params() and not (
+        if _should_expand_vllm_moe_params(self.model_config.architectures) and not (
             kwargs.get("peft_config") is not None and kwargs.get("base_sync_done", False)
         ):
             weights = _iter_vllm_compatible_moe_params(weights)
