@@ -236,12 +236,28 @@ class MegatronEngine(BaseEngine):
             }
             for key, value in override_transformer_config.items():
                 provider_overrides[key] = value
+            # Drop override keys the installed Megatron provider does not support.
+            # Some DeepSeek-V4 example overrides (e.g. ``apply_dsa_kernel_fusion``)
+            # target newer CUDA Megatron builds; on ROCm the provider lacks those
+            # attributes and ``apply_overrides_and_finalize`` would raise
+            # AttributeError. Warn loudly so genuine typos are still noticed.
+            unsupported_keys = [key for key in provider_overrides if not hasattr(provider, key)]
+            if unsupported_keys:
+                logger.warning(
+                    "Dropping override_transformer_config keys not supported by %s: %s",
+                    type(provider).__name__,
+                    ", ".join(sorted(unsupported_keys)),
+                )
+                for key in unsupported_keys:
+                    provider_overrides.pop(key)
             if (
                 self.model_config.hf_config.model_type == "deepseek_v4"
                 and not self.model_config.mtp.enable
                 and getattr(provider, "mtp_num_layers", 0)
             ):
-                provider_overrides["mtp_num_layers"] = 0
+                # None (not 0) fully disables MTP; recent Megatron-Core rejects
+                # mtp_num_layers != None alongside enable_hyper_connections (DSv4).
+                provider_overrides["mtp_num_layers"] = None
                 csa_compress_ratios = getattr(provider, "csa_compress_ratios", None)
                 if csa_compress_ratios is not None:
                     provider_overrides["csa_compress_ratios"] = csa_compress_ratios[: provider.num_layers]
@@ -1013,6 +1029,8 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 self.tf_config,
                 vp_rank,
                 replay_mask=replay_mask,
+                use_remove_padding=self.engine_config.use_remove_padding,
+                forced_max_seqlen=tu.get_non_tensor_data(data=batch, key="forced_max_seqlen", default=None),
             )
 
         if pad_mode == DatasetPadMode.NO_PADDING:

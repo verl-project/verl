@@ -13,11 +13,63 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 from types import MethodType
 
 import torch
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.linear import LinearBase
+
+logger = logging.getLogger(__name__)
+
+# MXFP4 (E2M1 element, E8M0 block scale) quantization constants.
+_MXFP4_E2M1_MAX = 6.0
+_MXFP4_E8M0_BIAS = 127
+_MXFP4_E8M0_MIN = 1
+_MXFP4_E8M0_MAX = 254
+# Upper bin edges of the |value| -> E2M1 magnitude code mapping.
+_MXFP4_E2M1_THRESHOLDS = (0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0)
+_MXFP4_BLOCK_SIZE = 32
+
+# Some vLLM builds (e.g. certain ROCm builds, or the ``RoutedExperts`` refactor
+# on the DeepSeek-V4 AMD path) export ``FusedMoE`` as ``None`` / a factory
+# function rather than a class, which would make ``isinstance(module, FusedMoE)``
+# raise ``TypeError``. Fall back to a sentinel type nothing is an instance of so
+# those checks safely evaluate to ``False``. In that architecture the expert
+# weights / ``quant_method`` live on a nested ``RoutedExperts`` submodule, so we
+# recognise it too. ``vllm_fp8_utils`` imports ``FusedMoE`` / ``_RoutedExperts`` /
+# ``_is_fused_moe_expert_module`` from here (this module has no reverse
+# dependency on it, so there is no circular import).
+if not isinstance(FusedMoE, type):
+
+    class _UnavailableFusedMoE:
+        pass
+
+    FusedMoE = _UnavailableFusedMoE
+
+try:
+    from vllm.model_executor.layers.fused_moe.routed_experts import (
+        RoutedExperts as _RoutedExperts,
+    )
+except Exception:  # pragma: no cover - older vLLM without RoutedExperts
+    _RoutedExperts = None
+
+if not isinstance(_RoutedExperts, type):
+    _RoutedExperts = None
+
+
+def _is_fused_moe_expert_module(module):
+    """Whether ``module`` is a vLLM fused-MoE expert container.
+
+    Handles both the legacy ``FusedMoE`` class and the newer ``RoutedExperts``
+    submodule that owns the expert weights / ``quant_method`` after vLLM turned
+    ``FusedMoE`` into a factory function (e.g. the DeepSeek-V4 AMD path).
+    """
+    if isinstance(module, FusedMoE):
+        return True
+    if _RoutedExperts is not None and isinstance(module, _RoutedExperts):
+        return True
+    return False
 
 
 def is_deepseek_v4_model(model):
@@ -32,23 +84,93 @@ def is_deepseek_v4_model(model):
     return getattr(text_config, "model_type", None) == "deepseek_v4"
 
 
+def _mxfp4_scale_to_e8m0(scale):
+    scale = scale.to(torch.float32)
+    safe_scale = torch.where(scale > 0, scale, torch.ones_like(scale))
+    scale_exp = torch.ceil(torch.log2(safe_scale)).to(torch.int32) + _MXFP4_E8M0_BIAS
+    return scale_exp.clamp(_MXFP4_E8M0_MIN, _MXFP4_E8M0_MAX).to(torch.uint8)
+
+
+def quantize_mxfp4_weight(weight, dtype=torch.bfloat16):
+    """Blockwise-quantize a bf16/fp16 weight to packed MXFP4.
+
+    Returns ``(quant_weight, quant_scale)`` where ``quant_weight`` packs two 4-bit
+    E2M1 codes per uint8 (halving the last dim) and ``quant_scale`` holds one
+    E8M0 exponent (uint8) per 32-element block along the last dim.
+    """
+    target_dtype = dtype if dtype in (torch.bfloat16, torch.float16) else torch.bfloat16
+    weight = weight.to(target_dtype).contiguous()
+    *prefix_shape, hidden_dim = weight.shape
+    if hidden_dim % _MXFP4_BLOCK_SIZE != 0:
+        raise ValueError(f"MXFP4 weight hidden dimension must be divisible by 32, got shape={tuple(weight.shape)}")
+
+    num_blocks = hidden_dim // _MXFP4_BLOCK_SIZE
+    blocks = weight.reshape(-1, num_blocks, _MXFP4_BLOCK_SIZE).to(torch.float32)
+
+    amax = blocks.abs().amax(dim=-1)
+    quant_scale = _mxfp4_scale_to_e8m0(amax / _MXFP4_E2M1_MAX)
+    scale = torch.exp2((quant_scale.to(torch.float32) - _MXFP4_E8M0_BIAS).unsqueeze(-1))
+
+    scaled = (blocks / scale).clamp(-_MXFP4_E2M1_MAX, _MXFP4_E2M1_MAX)
+    thresholds = torch.tensor(_MXFP4_E2M1_THRESHOLDS, dtype=torch.float32, device=weight.device)
+    magnitude = torch.bucketize(scaled.abs(), thresholds).to(torch.uint8)
+    sign = torch.where(scaled < 0, torch.full_like(magnitude, 8), torch.zeros_like(magnitude))
+    codes = magnitude | sign
+
+    quant_weight = codes[..., 0::2] | (codes[..., 1::2] * 16)
+    quant_weight = quant_weight.view(*prefix_shape, hidden_dim // 2)
+    quant_scale = quant_scale.view(*prefix_shape, num_blocks)
+    return quant_weight, quant_scale
+
+
+def _is_routed_expert_weight_name(name):
+    # Routed experts are named ``...experts.<id>.w{1,2,3}.weight``; shared
+    # experts (``...shared_experts...``) stay FP8 and must be left untouched.
+    return ".experts." in name and ".shared_experts." not in name and name.endswith(".weight")
+
+
 def iter_deepseek_v4_weights(weights):
+    """Prepare DeepSeek-V4 weights coming from the trainer for vLLM loading.
+
+    Routed-expert weights are MXFP4 in the vLLM model. When the trainer exports
+    them already quantized (int8 / e8m0) we only need a dtype view; when they
+    arrive as bf16/fp16 (e.g. the ROCm Megatron path, which does not quantize
+    experts on export) we must quantize them to packed MXFP4 on the fly, or the
+    unpacked hidden dim (e.g. 4096) will not fit the packed vLLM slot (2048).
+    """
     for name, weight in weights:
         if ".experts." in name and weight.dtype in (torch.int8, torch.float8_e8m0fnu):
-            weight = weight.view(torch.uint8)
+            yield name, weight.view(torch.uint8)
+            continue
+
+        if _is_routed_expert_weight_name(name) and weight.dtype in (torch.bfloat16, torch.float16):
+            quant_weight, quant_scale = quantize_mxfp4_weight(weight)
+            # vLLM's DeepSeek-V4 weights mapper turns ``.w{1,2,3}.scale`` into the
+            # matching ``.w{1,2,3}.weight_scale`` MXFP4 scale param.
+            scale_name = name[: -len(".weight")] + ".scale"
+            yield name, quant_weight
+            yield scale_name, quant_scale
+            continue
+
         yield name, weight
 
 
 def _is_mega_moe_module(module):
-    from vllm.models.deepseek_v4.nvidia.model import DeepseekV4MegaMoEExperts
+    # The NVIDIA mega-MoE class lives under a CUDA-only import path that does not
+    # exist on other backends (e.g. ROCm), so fall back to a name-based check
+    # when the import is unavailable.
+    try:
+        from vllm.models.deepseek_v4.nvidia.model import DeepseekV4MegaMoEExperts
 
-    return isinstance(module, DeepseekV4MegaMoEExperts)
+        return isinstance(module, DeepseekV4MegaMoEExperts)
+    except Exception:  # pragma: no cover - non-CUDA backends without the NVIDIA module
+        return type(module).__name__ == "DeepseekV4MegaMoEExperts"
 
 
 def _is_mxfp4_fused_moe_module(module):
     from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4MoEMethod
 
-    return isinstance(module, FusedMoE) and isinstance(module.quant_method, Mxfp4MoEMethod)
+    return _is_fused_moe_expert_module(module) and isinstance(getattr(module, "quant_method", None), Mxfp4MoEMethod)
 
 
 def _make_mxfp4_moe_param(shape, device, weight_loader, quant_method=None):

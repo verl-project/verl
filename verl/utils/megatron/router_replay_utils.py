@@ -38,6 +38,7 @@ from megatron.core.transformer.transformer_layer import get_transformer_layer_of
 from verl.models.mcore.util import (
     postprocess_packed_seqs,
     postprocess_thd_engine,
+    preprocess_bshd_engine,
     preprocess_packed_seqs,
     preprocess_thd_engine,
 )
@@ -306,6 +307,8 @@ def set_router_replay_data(
     tf_config,
     vp_rank=None,
     replay_mask=None,
+    use_remove_padding=True,
+    forced_max_seqlen=None,
 ):
     """
     Scatter the packed router top-k indices back to sequence-parallel ranks and update each local
@@ -323,6 +326,12 @@ def set_router_replay_data(
             Megatron parallel state will be used.
         replay_mask (Optional[torch.Tensor]): Optional per-token mask. Masked tokens use replayed routes;
             unmasked tokens keep native Megatron routes.
+        use_remove_padding (bool): True -> thd (packed) layout; False -> bshd (padded) layout. Must match
+            the forward: models that forbid packed sequences (e.g. DeepSeek-V4 Compressed Sparse
+            Attention) run the bshd forward with use_remove_padding=False, and the replay data must be
+            packed the same way so it aligns with the router's `scores`.
+        forced_max_seqlen (Optional[int]): bshd-only; MUST equal the value used by the forward
+            (batch["forced_max_seqlen"]) so token counts line up with the router's `scores`.
 
     Returns:
         None: The function updates internal RouterReplay instances in-place.
@@ -336,36 +345,69 @@ def set_router_replay_data(
             else None
         )
 
-        replay_mask_rmpad = None
-        if layers_topk_idx.is_nested:
-            layers_topk_idx_rmpad, _, _ = preprocess_thd_engine(
-                layers_topk_idx,
-                pre_process=True,
-                use_fp8_padding=use_fp8_padding,
-                min_local_rows=min_local_rows,
-            )
-            if replay_mask is not None:
-                replay_mask_rmpad, _, _ = preprocess_thd_engine(
-                    replay_mask,
+        replay_mask_rmpad_split = None
+        if use_remove_padding:
+            # ---- THD (packed / remove-padding) path ----
+            replay_mask_rmpad = None
+            if layers_topk_idx.is_nested:
+                layers_topk_idx_rmpad, _, _ = preprocess_thd_engine(
+                    layers_topk_idx,
                     pre_process=True,
                     use_fp8_padding=use_fp8_padding,
                     min_local_rows=min_local_rows,
                 )
-        else:
-            layers_topk_idx_rmpad, _ = preprocess_packed_seqs(
-                layers_topk_idx, attention_mask, pre_process=True, use_fp8_padding=use_fp8_padding
-            )
-        layers_topk_idx_rmpad = layers_topk_idx_rmpad.contiguous()  # 1, dynamic_bs_all, layer_num, topk
+                if replay_mask is not None:
+                    replay_mask_rmpad, _, _ = preprocess_thd_engine(
+                        replay_mask,
+                        pre_process=True,
+                        use_fp8_padding=use_fp8_padding,
+                        min_local_rows=min_local_rows,
+                    )
+            else:
+                layers_topk_idx_rmpad, _ = preprocess_packed_seqs(
+                    layers_topk_idx, attention_mask, pre_process=True, use_fp8_padding=use_fp8_padding
+                )
+            layers_topk_idx_rmpad = layers_topk_idx_rmpad.contiguous()  # 1, dynamic_bs_all, layer_num, topk
 
-        # 1, dynamic_bs_split, layer_num, topk
-        layers_topk_idx_rmpad_split = scatter_to_sequence_parallel_region(
-            layers_topk_idx_rmpad.to(device_name).squeeze(dim=0)
-        ).unsqueeze(dim=0)
-        replay_mask_rmpad_split = None
-        if replay_mask_rmpad is not None:
-            replay_mask_rmpad_split = scatter_to_sequence_parallel_region(
-                replay_mask_rmpad.to(device_name).squeeze(dim=0)
-            )
+            # 1, dynamic_bs_split, layer_num, topk
+            layers_topk_idx_rmpad_split = scatter_to_sequence_parallel_region(
+                layers_topk_idx_rmpad.to(device_name).squeeze(dim=0)
+            ).unsqueeze(dim=0)
+            if replay_mask_rmpad is not None:
+                replay_mask_rmpad_split = scatter_to_sequence_parallel_region(
+                    replay_mask_rmpad.to(device_name).squeeze(dim=0)
+                )
+        else:
+            # ---- BSHD (padded) path ----
+            # The bshd forward pads every sequence to `forced_max_seqlen` (preprocess_bshd_engine),
+            # GPTModel transposes bshd [b, s, h] -> sbhd [s, b, h], sequence-parallel-scatters along
+            # the sequence dim, and the MoE router flattens sequence-major via `logits.view(-1, E)`
+            # (patched_routing). Reproduce that layout EXACTLY so target_indices / replay_mask align
+            # elementwise with `scores` in get_replay_topk.
+            layers_topk_idx_bshd = preprocess_bshd_engine(
+                layers_topk_idx,
+                pre_process=True,
+                use_fp8_padding=use_fp8_padding,
+                forced_max_seqlen=forced_max_seqlen,
+            )[0]  # [b, s, layer_num, topk]
+
+            # bshd [b, s, ...] -> sbhd [s, b, ...] -> SP-scatter (dim 0) -> [s/tp, b, ...]
+            sbhd = layers_topk_idx_bshd.to(device_name).transpose(0, 1).contiguous()
+            sbhd_split = scatter_to_sequence_parallel_region(sbhd)  # [s/tp, b, layer_num, topk]
+            s_local, bsz = sbhd_split.shape[0], sbhd_split.shape[1]
+            # sequence-major flatten -> [(s/tp)*b, layer_num, topk], matching logits.view(-1)
+            layers_topk_idx_rmpad_split = sbhd_split.reshape(s_local * bsz, *sbhd_split.shape[2:]).unsqueeze(dim=0)
+
+            if replay_mask is not None:
+                replay_mask_bshd = preprocess_bshd_engine(
+                    replay_mask,
+                    pre_process=True,
+                    use_fp8_padding=use_fp8_padding,
+                    forced_max_seqlen=forced_max_seqlen,
+                )[0]  # [b, s]
+                mask_sbhd = replay_mask_bshd.to(device_name).transpose(0, 1).contiguous()  # [s, b]
+                mask_split = scatter_to_sequence_parallel_region(mask_sbhd)  # [s/tp, b]
+                replay_mask_rmpad_split = mask_split.reshape(-1)  # [token], sequence-major
 
         # dynamic_bs_split, layer_num, topk -> layer_num, dynamic_bs_split, topk
         layers_topk_idx_reshape = layers_topk_idx_rmpad_split.permute(0, 2, 1, 3).squeeze(
